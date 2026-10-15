@@ -74,6 +74,9 @@ struct CharacterSaveAck {
     updated: i64,
     removed: [Vec<u32>; 4],
     money: (i64, i64),
+    /// The captured clone's `labor_power_unsaved` when `save_character` ran (flushed into
+    /// `accounts.labor` by it).
+    labor: i32,
 }
 
 pub(crate) struct FinancialSaveReceipt {
@@ -122,6 +125,9 @@ pub(crate) async fn write_financial_snapshot(
             character.skills.removed.clone(),
             character.quests.removed.clone(),
         ];
+        // Captured before the save: `save_character` flushes this delta into `accounts.labor`
+        // and clears it on the clone.
+        let labor = character.labor_power_unsaved;
         if let Err(error) = save_character(tx, &mut character, Utc::now().timestamp()).await {
             tracing::error!(
                 "Failed to save character {} - {}: {error}",
@@ -135,6 +141,7 @@ pub(crate) async fn write_financial_snapshot(
             updated: character.updated,
             removed,
             money: (character.money, character.money2),
+            labor,
         });
     }
     systems += save_stage(server, tx, SaveStage::AfterCharacters).await?;
@@ -159,8 +166,12 @@ pub(crate) fn commit_financial_snapshot(server: &GameServer, receipt: FinancialS
         live.removed_blocked.retain(|id| !blocked.contains(id));
         live.skills.removed.retain(|id| !skills.contains(id));
         live.quests.removed.retain(|id| !quests.contains(id));
+        // The saved snapshot flushed `ack.labor` into `accounts.labor`; whatever the live
+        // character spent since the capture stays pending for the next save.
+        live.labor_power_unsaved -= ack.labor;
+        let labor_pending = live.labor_power_unsaved != 0;
         drop(live);
-        if unchanged_money {
+        if unchanged_money && !labor_pending {
             let mut departing = server
                 .save
                 .departing
@@ -205,6 +216,22 @@ impl SaveManager {
             .cloned()
     }
 
+    /// Every departing player of `account_id` (a sibling character loading must flush their
+    /// pending labor first). The departing map lock is released before any player data lock.
+    pub(crate) fn pending_departures_of_account(&self, account_id: u32) -> Vec<PlayerRef> {
+        let candidates: Vec<PlayerRef> = self
+            .departing
+            .lock()
+            .expect("departure saves poisoned")
+            .values()
+            .cloned()
+            .collect();
+        candidates
+            .into_iter()
+            .filter(|p| p.data().account_id == account_id)
+            .collect()
+    }
+
     pub(crate) fn remember_departing(&self, player: &PlayerRef) {
         self.departing
             .lock()
@@ -239,6 +266,30 @@ impl SaveManager {
                 player.character_id
             );
             return false;
+        }
+        true
+    }
+
+    /// Caller owns `transaction_lock`. Saves every departing player of `account_id` that still
+    /// holds unflushed labor (`labor_power_unsaved != 0`), because `accounts.labor` is
+    /// account-level and a sibling character loading must not read it stale. Returns `false`
+    /// when a save fails or leaves labor pending.
+    pub(crate) async fn flush_account_labor_locked(
+        &self,
+        server: &GameServer,
+        account_id: u32,
+    ) -> bool {
+        for departing in self.pending_departures_of_account(account_id) {
+            // Read the pending delta into a local: no data lock is held across the await below.
+            let pending = departing.data().labor_power_unsaved != 0;
+            if !pending {
+                continue;
+            }
+            if !self.save_departing_locked(server, &departing).await
+                || departing.data().labor_power_unsaved != 0
+            {
+                return false;
+            }
         }
         true
     }

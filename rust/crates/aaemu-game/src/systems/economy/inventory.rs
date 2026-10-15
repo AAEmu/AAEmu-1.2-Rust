@@ -1401,7 +1401,7 @@ pub fn change_labor(
             h.add_exp(server, player, xp_to_add, true);
         }
     }
-    player.data().labor_power += change;
+    player.data().change_labor_power(change);
     out.send(
         player,
         SCCharacterLaborPowerChangedPacket {

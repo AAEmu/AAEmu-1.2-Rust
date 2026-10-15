@@ -290,6 +290,17 @@ pub async fn select_character(
             ));
         }
     }
+    // A sibling character's departure may still hold unflushed labor (`accounts.labor` is
+    // account-level): save it too, or the character being selected would load a stale labor.
+    if !server
+        .save
+        .flush_account_labor_locked(server, conn.account_id())
+        .await
+    {
+        return Err(crate::GameError::Protocol(
+            "Previous character save is pending".into(),
+        ));
+    }
     // Character selection may follow a logout that committed after the lobby list loaded.
     // Read its current wallet/core row inside the same save transaction ordering barrier.
     let Some((mut c, _)) =

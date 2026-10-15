@@ -216,6 +216,27 @@ pub async fn update_labor(pool: &MySqlPool, account_id: u32, labor: i16) {
     }
 }
 
+/// Offline labor: atomically adds `add` to `accounts.labor` while the row is below `max`
+/// (`LEAST` clamps the result, the `labor < max` guard makes an at-cap row a no-op). Returns the
+/// affected rows; errors are returned, not swallowed.
+pub async fn add_labor_capped(
+    pool: &MySqlPool,
+    account_id: u32,
+    add: i32,
+    max: i16,
+) -> Result<u64> {
+    let res = sqlx::query(
+        "UPDATE accounts SET labor = LEAST(?, labor + ?) WHERE account_id = ? AND labor < ?",
+    )
+    .bind(max)
+    .bind(add)
+    .bind(account_id)
+    .bind(max)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
 /// `AccountManager.UpdateTickTimes`: the column of the last set flag (labor, credits, loyalty
 /// in that order of precedence); no flag writes the column `error` (fails and logs, as C#).
 pub async fn update_tick_times(

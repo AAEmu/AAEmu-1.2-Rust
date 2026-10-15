@@ -23,20 +23,15 @@ pub async fn add(server: &GameServer, conn: &GameConnection) {
     }
     let now = Utc::now().naive_utc();
     let last_login = update_login_time(server, account_id, now).await;
-    let details = get_account_details(server, account_id).await;
+    // Creates the `accounts` row if this is the account's first login.
+    get_account_details(server, account_id).await;
     let today = now.date().and_hms_opt(0, 0, 0).expect("midnight");
     if last_login.is_none_or(|l| l < today) {
         // Logged in for a new day
         super::timed_rewards::do_daily_account_login(server, account_id).await;
     }
-    super::timed_rewards::add_offline_labor(
-        server,
-        account_id,
-        &conn.payment,
-        last_login,
-        details.labor,
-    )
-    .await;
+    super::timed_rewards::add_offline_labor(server, account_id, &conn.payment, last_login, conn.id)
+        .await;
 }
 
 /// `AccountManager.Initialize`: `RemoveDeadConnections` on the tick manager every 30 s.
@@ -121,6 +116,20 @@ pub async fn update_labor(server: &GameServer, account_id: u32, labor: i16) {
     let lock = server.accounts.lock_of(account_id);
     let _g = lock.lock().await;
     db::update_labor(&server.db, account_id, labor).await;
+}
+
+/// Offline labor: atomically adds `add` to the account's labor, clamped to `max`, under the
+/// account lock. Returns `true` when the row was updated.
+pub async fn add_labor_capped(server: &GameServer, account_id: u32, add: i32, max: i16) -> bool {
+    let lock = server.accounts.lock_of(account_id);
+    let _g = lock.lock().await;
+    match db::add_labor_capped(&server.db, account_id, add, max).await {
+        Ok(affected) => affected > 0,
+        Err(e) => {
+            tracing::error!("AddLaborCapped for account {account_id}: {e}");
+            false
+        }
+    }
 }
 
 /// Which tick time [`update_tick_times`] writes (C# passes three flags; the last set wins).

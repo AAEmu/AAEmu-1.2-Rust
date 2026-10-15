@@ -901,6 +901,14 @@ NPC after `DoDie` cleared them (`OnDamageReceived` runs after `ReduceCurrentHp`)
 * systems::vehicles: a missing unit formula evaluates to 0 (C# NullReferenceException); index
   errors of `NextPoint` / `ShipyardSteps[-1]` are logged and end the call (C# exceptions).
 
+* systems::services / skills / economy (RPA-02): the C# `LaborPower` setter wrote
+  `accounts.labor` on every change; Rust records the change in `Character.labor_power_unsaved`
+  and `save_character` adds it to `accounts.labor` in the save transaction (save acks subtract
+  only the captured delta). Online regeneration adds to the cached balance instead of
+  rewriting the account row from the database value. Offline labor is one atomic capped update.
+  The tick resolves the character under the save transaction lock (serialized with
+  `select_character`'s load and world registration). Before an offline write, it flushes a
+  departing sibling's pending labor (`SaveManager::flush_account_labor_locked`).
 * systems::services: the WebApi 500 page shows the Rust error chain instead of a .NET stack
   trace, and System.Text.Json / NotSupportedException messages are close paraphrases. Character
   `CreatedAt` of characters created in the running session is written without the `Z` of a
