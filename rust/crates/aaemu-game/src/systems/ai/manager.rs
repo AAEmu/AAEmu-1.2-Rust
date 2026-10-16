@@ -41,8 +41,9 @@ use super::framework::{AiCtx, AiKind, NpcAi};
 /// home position / path, `NpcSpawnerNpc.Spawn`) is never starved by the region selection.
 const INITIALIZING_TICKS: u64 = 20;
 /// One NPC's tick longer than this is logged with the NPC, its AI kind and behavior, so a stalled
-/// batch can be traced to its cause (a lazy cell load, a path search, ...).
-const SLOW_NPC_TICK: Duration = Duration::from_millis(50);
+/// batch can be traced to its cause (a path search, a stuck lock, ...). Set above the 52-77 ms a
+/// normal first navmesh cell load costs, so that expected lazy load does not warn.
+const SLOW_NPC_TICK: Duration = Duration::from_millis(250);
 
 /// Ticks between the dormant-handle maintenance sweeps (stale owners / NPCs deleted without the
 /// `npc_deleted` hook). The sweep is the C# "visit every AI" behaviour at 1/50 the cost.
