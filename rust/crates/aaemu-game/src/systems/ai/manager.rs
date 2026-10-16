@@ -40,6 +40,9 @@ use super::framework::{AiCtx, AiKind, NpcAi};
 /// Ticks a newly added AI stays a candidate so its initialization (queued `GoToSpawn` /
 /// home position / path, `NpcSpawnerNpc.Spawn`) is never starved by the region selection.
 const INITIALIZING_TICKS: u64 = 20;
+/// One NPC's tick longer than this is logged with the NPC, its AI kind and behavior, so a stalled
+/// batch can be traced to its cause (a lazy cell load, a path search, ...).
+const SLOW_NPC_TICK: Duration = Duration::from_millis(50);
 
 /// Ticks between the dormant-handle maintenance sweeps (stale owners / NPCs deleted without the
 /// `npc_deleted` hook). The sweep is the C# "visit every AI" behaviour at 1/50 the cost.
@@ -545,8 +548,19 @@ fn tick_handle(
                     diag.ticked += 1;
                     #[cfg(test)]
                     lock(&manager.tick_order).push(h.ordinal);
+                    let npc_started = Instant::now();
                     if catch_unwind(AssertUnwindSafe(|| ctx.tick(delta_ms, activity))).is_err() {
                         tracing::error!("AI tick of npc {id} panicked");
+                    }
+                    let npc_took = npc_started.elapsed();
+                    if npc_took > SLOW_NPC_TICK {
+                        tracing::warn!(
+                            "AI tick of npc {id} (template {}, {:?}, behavior {:?}) took {}ms",
+                            ctx.npc.data().unit.template_id,
+                            ctx.ai.kind,
+                            ctx.ai.current_behavior(),
+                            npc_took.as_millis()
+                        );
                     }
                 }
             }

@@ -61,6 +61,31 @@ pub trait TerrainHeights: Send + Sync {
 /// A loaded bai set shared by a zone or a path block.
 pub type BaiRef = Arc<BaseBaiLoader>;
 
+/// Logs how long a lazy cell load took when it is dropped (`min_ms` = quiet below that); one
+/// shared shape for the navmesh, heightmap and collision cell loads that happen on first contact
+/// inside the AI tick (a slow one stalls the whole sequential pass).
+pub struct LoadTimer<'a> {
+    pub what: &'static str,
+    pub world: &'a str,
+    pub cell: (i32, i32),
+    pub started: std::time::Instant,
+    pub min_ms: u128,
+}
+
+impl Drop for LoadTimer<'_> {
+    fn drop(&mut self) {
+        let ms = self.started.elapsed().as_millis();
+        if ms >= self.min_ms {
+            tracing::info!(
+                "lazy cell load: {} {:?} of {} took {ms} ms",
+                self.what,
+                self.cell,
+                self.world
+            );
+        }
+    }
+}
+
 /// `AiGeoDataManager` + the bai data of its `WorldTemplate`.
 pub struct AiGeoData {
     pub template_id: u32,
@@ -194,6 +219,15 @@ impl AiGeoData {
             if !self.enabled {
                 return grid;
             }
+            // Lazy first-contact load on whichever thread asks first (usually the AI tick):
+            // logged once per cell so a stall can be matched to its cause.
+            let _log_load = LoadTimer {
+                what: "navmesh (bai) cell",
+                world: &self.world_name,
+                cell: (cell_x, cell_y),
+                started: std::time::Instant::now(),
+                min_ms: 0,
+            };
             let zones = self.zone_bai();
             if !zones.is_empty() {
                 let zone_key = self.cell_zone_keys[idx];
