@@ -8,7 +8,9 @@ use crate::models::item_task::{ItemFx, ItemFxList};
 use crate::server::GameServer;
 use crate::systems::economy::hooks::QuestItemHooks;
 use crate::systems::economy::inventory::ItemTxn;
-use crate::test_support::{spawn_player, test_character, test_server, TestClient};
+use crate::test_support::{
+    finishes_in_time, spawn_player, test_character, test_server, TestClient,
+};
 use crate::world::PlayerRef;
 
 struct ObservePersistence {
@@ -166,4 +168,85 @@ async fn persistence_flush_preserves_release_and_orphan_order() {
     assert_eq!(server.items.removed_items(), vec![first, second]);
     super::flush_persistence(&server, &mut fx);
     assert_eq!(server.items.removed_items(), vec![first, second]);
+}
+
+/// The real `AddExp` ends in `quests::events::on_level_up`, a quest operation that takes the
+/// economy ops lock. This stub keeps that behavior (the real hook needs the experience tables)
+/// and records that the lock was free by then.
+struct LevelUpProgression;
+
+impl crate::systems::economy::hooks::ProgressionHooks for LevelUpProgression {
+    fn add_exp(&self, server: &GameServer, player: &PlayerRef, exp: i32, add_ability_exp: bool) {
+        assert!(!crate::systems::economy::System::ops_held_on_this_thread());
+        player.send(crate::systems::skills::packets::SCExpChangedPacket {
+            obj_id: player.obj_id,
+            exp,
+            should_add_ability_exp: add_ability_exp,
+        });
+        crate::systems::quests::events::on_level_up(server, player);
+    }
+}
+
+/// `Character.ChangeLabor` inside an `ItemTxn` (doodad placement, mail money, specialty sale):
+/// the labor experience must run after the ops lock is released, not re-take it, and the
+/// packets keep the C# order: item operation packets, `SCExpChanged`, then the labor packet.
+#[tokio::test]
+async fn change_labor_in_a_transaction_defers_the_experience_until_the_lock_is_released() {
+    use crate::opcodes::sc;
+    let server = Arc::new(test_server());
+    server.set_self();
+    let mut client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Laborer", 100.0, 100.0),
+        0x100,
+    );
+    server
+        .systems
+        .economy
+        .hooks
+        .progression
+        .install(Arc::new(LevelUpProgression));
+    player.data().labor_power = 50;
+    client.drain_ops();
+    let (s, p) = (server.clone(), player.clone());
+    finishes_in_time("change_labor in a transaction", move || {
+        let mut txn = ItemTxn::begin(&s);
+        crate::systems::economy::inventory::send_error_message_to(&mut txn.out(), &p, 1);
+        crate::systems::economy::inventory::change_labor(&mut txn.out(), &s, &p, -5, 0);
+        drop(txn);
+    });
+    assert_eq!(
+        client.drain_ops(),
+        vec![
+            sc::SCErrorMsgPacket,
+            sc::SCExpChangedPacket,
+            sc::SCCharacterLaborPowerChangedPacket
+        ]
+    );
+    assert_eq!(player.data().labor_power, 45);
+}
+
+/// `with_quests` takes the non-reentrant ops lock itself: called with it already held on this
+/// thread it must refuse (error log, `None`) instead of hanging the server.
+#[tokio::test]
+async fn with_quests_refuses_while_the_ops_lock_is_held_on_this_thread() {
+    let server = Arc::new(test_server());
+    server.set_self();
+    let client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Quester", 100.0, 100.0),
+        0x100,
+    );
+    let (s, p) = (server.clone(), player.clone());
+    let ran = finishes_in_time("with_quests under the ops lock", move || {
+        let _ops = s.systems.economy.ops_lock();
+        crate::systems::quests::events::with_quests(&s, &p, None, |_| ())
+    });
+    assert!(ran.is_none());
+    // Without the lock held it runs as before.
+    assert!(crate::systems::quests::events::with_quests(&server, &player, None, |_| ()).is_some());
 }

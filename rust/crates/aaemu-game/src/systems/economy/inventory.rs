@@ -1405,8 +1405,20 @@ pub fn change_labor(
             .get_formula_by_kind(crate::data::formulas::FormulaKind::ExpByLaborPower)
             .map_or(0.0, |f| f.evaluate(&params));
         let xp_to_add = (xp * f64::from(exp_multiplier)) as i32;
-        if let Some(h) = server.systems.economy.hooks.progression.get() {
-            h.add_exp(server, player, xp_to_add, true);
+        match &mut *out {
+            // Inside an `ItemTxn` (the ops lock is held): `AddExp` ends in quest events, which
+            // take the non-reentrant ops lock themselves. Queue it behind the item tasks;
+            // `fx::flush` applies it after the lock is released, before the labor packet below.
+            Out::Queue(fx) => fx.push(crate::models::item_task::ItemFx::Exp {
+                owner: player.character_id,
+                exp: xp_to_add,
+                add_ability_exp: true,
+            }),
+            Out::Direct => {
+                if let Some(h) = server.systems.economy.hooks.progression.get() {
+                    h.add_exp(server, player, xp_to_add, true);
+                }
+            }
         }
     }
     player.data().change_labor_power(change);

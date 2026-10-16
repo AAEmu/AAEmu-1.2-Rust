@@ -192,3 +192,50 @@ async fn unrelated_item_and_remote_or_nonfinite_client_positions_are_rejected() 
     assert!(Inv::of(&player).item_by_id(other_id).is_some());
     assert_eq!(player.data().labor_power, 20);
 }
+
+/// What the real `skills::progress::add_exp` does with a positive labor experience gain: it
+/// ends in `quests::events::on_level_up`, a quest operation that takes the economy ops lock.
+/// (The real hook needs the experience tables; this stub keeps the same lock behavior.)
+struct LevelUpProgression;
+
+impl crate::systems::economy::hooks::ProgressionHooks for LevelUpProgression {
+    fn add_exp(&self, server: &GameServer, player: &PlayerRef, _exp: i32, _add_ability: bool) {
+        crate::systems::quests::events::on_level_up(server, player);
+    }
+}
+
+/// `ItemTxn` holds the economy ops lock while `change_labor` runs; the labor experience
+/// (`add_exp` -> quest `on_level_up` -> `with_quests` -> ops lock) used to re-take that
+/// non-reentrant lock on the same thread and hang the server (labor-costing doodad placement).
+#[tokio::test]
+async fn labor_costing_placement_does_not_deadlock_on_the_ops_lock() {
+    let (server, player, id) = fixture();
+    server
+        .systems
+        .economy
+        .hooks
+        .progression
+        .install(Arc::new(LevelUpProgression));
+    let server = Arc::new(server);
+    let s = server.clone();
+    let p = player.clone();
+    let doodad = finishes_in_time("labor-costing doodad placement", move || {
+        create_player_doodad_with_labor(
+            &s,
+            &p,
+            4000,
+            (101.0, 100.0, 50.0),
+            0.0,
+            1.0,
+            id,
+            0,
+            0,
+            0,
+            true,
+            5,
+        )
+    });
+    assert!(doodad.is_some());
+    assert_eq!(player.data().labor_power, 15);
+    assert_eq!(Inv::of(&player).item_by_id(id).unwrap().count, 1);
+}

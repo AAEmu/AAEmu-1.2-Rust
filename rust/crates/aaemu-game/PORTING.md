@@ -1332,6 +1332,14 @@ servers (see `rust/LIVE-TESTING.md`). Fixed porting bugs are in the git history 
 * `CSMoveUnitPacket` for an object the world no longer holds (a mount the server just
   despawned: summon toggle, dungeon entry, death) logs `Invalid target` at debug, not warn: the
   client keeps sending a few moves after the despawn.
+* `Character.ChangeLabor` inside an item operation (`ItemTxn`: labor-costing doodad placement, auction
+  mail money, trade-pack sale) queues its `AddExp` as `ItemFx::Exp` instead of calling it inline. In the C#
+  `AddExp` runs inline (exp packet, level broadcast, `DoOnLevelUpEvents`, in that order) before the labor
+  change and its packet; in Rust `AddExp` ends in a quest operation that takes the economy ops lock, which
+  the transaction already holds on that thread (not re-entrant: the live server froze on 2026-10-16). The
+  effect now runs in `fx::flush` after the lock is released, still before the labor packet, and after the
+  item task packets queued earlier (the C# sends those inline first too). `quests::events::with_quests`
+  logs an error and returns `None` when the thread already holds the ops lock instead of hanging.
 
 Parity status of the scripted scenarios: `login`, `lobby` and `full` (fresh character) produce
 the same S->C traffic as the C# servers after id / time normalisation (0 findings); a second
