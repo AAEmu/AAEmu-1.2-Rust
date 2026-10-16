@@ -1178,6 +1178,19 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   those replacements ("replacement chain rejected") and the doodad waited for its Final to
   respawn the base template.
 
+* systems::npcs (2026-10-16): `DoodadFuncTod` takes its `curTime >= Tod` catch-up on every
+  entry, which ignores that the clock wraps; the 20 day/night board templates (West Gate
+  4345-4352, Blue Salt 6175 / 6213 and their variants: day board Tod 20:00, variant Tod 02:00 or
+  06:00, each respawning into the other through `DoodadFuncRatioRespawn`) therefore swapped back
+  and forth synchronously for the whole game evening (20:00-24:00, about 40 real minutes every
+  4 hours), tripping the replacement-chain guard about 880 times a minute and churning doodads
+  and packets until the base template's Final respawned it. A doodad created by a
+  `DoodadFuncRatioRespawn` replacement (`DoodadSpawner::spawn` with `RespawnDoodadTemplateId`
+  set) now skips the Tod catch-up during its entry phase (`suppress_tod_catch_up`, cleared by
+  `InitDoodad`): it was created at this time of day, so its Tod refers to the next occurrence,
+  which the time-of-day watcher fires on crossing. The C# has no such suppression (its chain
+  recursed). Boards respawned by their own Final, and every other spawn, keep the catch-up.
+
 * systems::ai (2026-10-15): the optional compact patch
   `SQL/patches/compact/2026-10-14-fix-npc-ai-param-syntax.sql` repairs malformed Lua syntax
   in `npc_ai_params` 443, 835 and 1975 only when the original bytes match. It preserves authored
@@ -1186,6 +1199,15 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   offline to the server's compact copy, then restart; runtime loaders remain read-only. AI tick
   diagnostics now report plan, tick and maintenance time with active-work counts. Parallel tick
   time is elapsed batch time, including dispatch and await overhead, rather than summed job time.
+
+* systems::ai (2026-10-16): retail NPC route files are not shipped (`Data/Path` has 13 files, while
+  `ai_commands` references 280 distinct FollowPath names such as `public_mate2`, `public_garden3`
+  and `tuto_move`). As in the C# (`Simulation.GoToPath`: warn and return, the NPC stays put and
+  keeps `IsInPatrol`), `Simulation` stops without moving, but the "Stop moving... no recorded
+  path file" warning is now logged once per file name (`System::first_missing_path`) and at debug
+  afterwards, since a repeating skill such as the tutorial NPC's `tuto_move` fired it every 30 s.
+  The `Impossible to parse npc_ai_params` warning now names the compact patch that repairs rows
+  443, 835 and 1975.
 
 * systems::npcs (2026-10-15): `DoodadFuncClout` with `UseOriginSource` takes the first doodad
   within 4 m of the caster as the area trigger's owner, and the C# scheduled the
@@ -1244,6 +1266,12 @@ The 1.2 C# never answered `CSRankCharacterPacket` (empty, log-only) and has no `
 - **Events.** The arena board scores at the end of an instant game (`instant_game::record_rankings`, once per game): win/lose/draw/invalid points are `game_rule_sets.rank_*_point` (only rule set 28, the gladiator duel in zone group 77: win 4, lose 1). Because `EndGame` leaves both corps `LOSE` when the timer runs out (mirrored C# bug), a timed-out duel scores both players as losers. The two fishing boards score each trophy fish a player lands (`fishing::record_catch`, from `DoodadFuncConvertFish` and the equipped-fish conversion) in the player's zone group; they only count inside the board's authored window, which ended in 2014, so on the shipped data no catch scores. The racing board is never recorded.
 - **Period close.** A once-a-minute task (first tick at start-up) mails every closed, unpaid period: place -> `rank_scope_links` band -> `rank_rewards` item (count and grade as authored) as a `SYS_EXPRESS` letter (offline winners included), then `SCRankRewardMailPacket` to online winners. The period is marked paid before the letters are built, inside the economy operation gate; a crash between the letters and the next save can therefore lose (never duplicate) the mark. `rank_rewards.weeks` (how long the reward lasts) and appellation rewards (none authored) are not applied.
 - **Not sent.** `SCRankAlarmPacket` (0x205): only the fishing contest authors alarms (`start_time_alarm` -5 / `end_time_alarm` 0 and message strings), that board ended in 2014 and the packet's `kind` / `rank_alarm_kind` values are unresolved, so no trigger is invented.
+
+### Startup warnings (Rust only)
+
+- **`FamilyIdManager` and family 0.** `characters.family` is 0 for a character without a family. The C# `FamilyIdManager` passes `Exclude = []`, so every start logged "Object ID 0 in DB is less than 1". `IdManagerSpec` now carries the C# `_exclude` list (checked before the first-id warning, as in `IdManager.Initialize`) and `FAMILY_ID` excludes 0. Every other manager keeps an empty list and still warns about ids below its first id.
+- **Orphan tower defense waves.** The shipped `compact.sqlite3` has `tower_def_progs` rows for `tower_def_id` 9, 22 and 33 with no `tower_defs` parent (20 waves). The C# `return`s at the first one; the Rust loader skips them (see the instances section) and now logs one info summary with the count and the distinct parent ids; the per-row line is `debug`.
+- **Client sources not found.** `Configurations/ClientData.json` lists four default sources and array settings merge by index (as in Microsoft.Extensions.Configuration), so a `Config.Local.json` with two sources leaves the last two defaults in place. `ClientFileManager::from_sources` logs a source that does not exist at `info` while at least one source is valid, and at `warn` for each (plus the existing error) when none is. `add_source` itself only logs not-found at `debug`.
 
 ## Live testing (phase 5): fixes and deliberate deviations
 

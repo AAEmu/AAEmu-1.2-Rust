@@ -175,6 +175,13 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
             false
         }
         FuncTemplate::Tod(f) => {
+            // Deviation from the C#: a `DoodadFuncRatioRespawn` replacement was created at this
+            // time of day, so its Tod refers to the next occurrence, which the time-of-day watcher
+            // fires on crossing. The `curTime >= Tod` catch-up would send day/night board pairs
+            // (Tod 20:00 / 06:00) straight back and forth for the whole evening.
+            if ctx.doodad.data().phase.suppress_tod_catch_up {
+                return false;
+            }
             let cur_time = server.time.get_time();
             if cur_time >= f.tod_as_hours {
                 tracing::trace!(

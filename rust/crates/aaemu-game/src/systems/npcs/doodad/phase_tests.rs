@@ -603,6 +603,127 @@ async fn ratio_respawn_chance_cycle_ends_when_the_roll_fails() {
     assert_eq!(spawner.ratio_respawn_chain_depth(), 0);
 }
 
+fn tod_func(id: u32, tod: u32, next_phase: i32) -> FuncTemplate {
+    FuncTemplate::Tod(DoodadFuncTod {
+        id,
+        tod,
+        next_phase,
+        tod_as_hours: crate::systems::npcs::doodad::data::tod_as_hours(id, tod),
+    })
+}
+
+/// The West Gate board shape (4345 / 4349): a day board that swaps to its night variant at 20:00
+/// and the variant back at 06:00, both through a certain `DoodadFuncRatioRespawn`.
+fn day_night_pair() -> Builder {
+    Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2)])
+        .template(TEMPLATE + 1, &[(20, 1), (21, 2)])
+        .phase_func(10, tod_func(1, 2000, 11))
+        .phase_func(11, ratio_respawn(2, 10_000, TEMPLATE + 1))
+        .phase_func(20, tod_func(3, 600, 21))
+        .phase_func(21, ratio_respawn(4, 10_000, TEMPLATE))
+}
+
+#[tokio::test]
+async fn ratio_respawn_day_night_pair_settles_on_the_variant_at_night() {
+    let f = fx(day_night_pair());
+    f.server.time.set(22.0);
+    f.server
+        .systems
+        .npcs
+        .doodads
+        .set_forced_phase_ratio(Some(0));
+    let spawner = new_spawner(TEMPLATE, 520);
+    let first = spawner.spawn(&f.server, 0).expect("spawns the day board");
+    let last = spawner.last().expect("the replacement is tracked");
+    // 22:00 >= 20:00 catches the day board up to its respawn phase; the variant, created at
+    // this time of day, must not take its own 06:00 catch-up and swap straight back.
+    assert!(first.data().phase.deleted);
+    assert_eq!(last.data().template_id, TEMPLATE + 1);
+    assert_eq!(group(&last), 20);
+    assert!(!last.data().phase.deleted);
+    assert_eq!(spawner.ratio_respawn_peak_depth(), 1);
+    assert_eq!(spawner.ratio_respawn_chain_depth(), 0);
+    assert_eq!(f.world.all_doodads().len(), 1);
+    assert!(!last.data().phase.suppress_tod_catch_up);
+    assert_eq!(last.data().phase.tod_triggers, vec![(6.0, 21)]);
+}
+
+#[tokio::test]
+async fn ratio_respawn_variant_returns_to_the_day_board_when_the_clock_crosses_its_tod() {
+    let f = fx(day_night_pair());
+    f.server.time.set(22.0);
+    f.server
+        .systems
+        .npcs
+        .doodads
+        .set_forced_phase_ratio(Some(0));
+    let spawner = new_spawner(TEMPLATE, 521);
+    spawner.spawn(&f.server, 0).expect("spawns the day board");
+    let variant = spawner.last().expect("the variant is tracked");
+    assert_eq!(variant.data().template_id, TEMPLATE + 1);
+
+    f.server.time.set(6.01);
+    manager::on_time_of_day_change(&f.server, 6.01, 5.99);
+    f.advance(0);
+    let day = spawner.last().expect("the day board is tracked");
+    assert!(variant.data().phase.deleted);
+    assert_eq!(day.data().template_id, TEMPLATE);
+    assert_eq!(group(&day), 10);
+    assert!(!day.data().phase.deleted);
+    assert_eq!(spawner.ratio_respawn_peak_depth(), 1);
+    assert_eq!(spawner.ratio_respawn_chain_depth(), 0);
+    assert_eq!(f.world.all_doodads().len(), 1);
+}
+
+#[tokio::test]
+async fn ratio_respawn_tod_fan_out_picks_one_variant_or_keeps_the_board() {
+    // The 6175 shape: the board fans out at 20% per variant after its 20:00 Tod; the variants
+    // return at 02:00 with a certain respawn.
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2)])
+        .template(TEMPLATE + 1, &[(20, 1), (21, 2)])
+        .template(TEMPLATE + 2, &[(30, 1), (31, 2)])
+        .phase_func(10, tod_func(1, 2000, 11))
+        .phase_func(11, ratio_respawn(2, 2_000, TEMPLATE + 1))
+        .phase_func(11, ratio_respawn(3, 2_000, TEMPLATE + 2))
+        .phase_func(20, tod_func(4, 200, 21))
+        .phase_func(21, ratio_respawn(5, 10_000, TEMPLATE))
+        .phase_func(30, tod_func(6, 200, 31))
+        .phase_func(31, ratio_respawn(7, 10_000, TEMPLATE));
+    let f = fx(b);
+    f.server.time.set(21.0);
+    // One roll per phase func: the board's Tod, then the two respawns (first misses, second
+    // hits -> TEMPLATE + 2), then the variant's Tod.
+    f.server
+        .systems
+        .npcs
+        .doodads
+        .queue_phase_ratios(&[0, 9000, 100, 0]);
+    let hit = new_spawner(TEMPLATE, 522);
+    hit.spawn(&f.server, 0).expect("spawns the board");
+    let variant = hit.last().expect("the variant is tracked");
+    assert_eq!(variant.data().template_id, TEMPLATE + 2);
+    assert_eq!(group(&variant), 30);
+    assert_eq!(hit.ratio_respawn_peak_depth(), 1);
+    assert_eq!(hit.ratio_respawn_chain_depth(), 0);
+
+    // Both rolls miss: the board stays in its respawning phase, with no replacement and no
+    // rejected chain.
+    f.server
+        .systems
+        .npcs
+        .doodads
+        .queue_phase_ratios(&[0, 9000, 9000]);
+    let miss = new_spawner(TEMPLATE, 523);
+    let board = miss.spawn(&f.server, 0).expect("spawns the board");
+    assert_eq!(board.data().template_id, TEMPLATE);
+    assert_eq!(group(&board), 11);
+    assert!(!board.data().phase.deleted);
+    assert_eq!(miss.ratio_respawn_peak_depth(), 0);
+    assert_eq!(f.world.all_doodads().len(), 2);
+}
+
 #[tokio::test]
 async fn ratio_respawn_deep_acyclic_chain_stops_at_the_depth_limit() {
     let mut b = Builder::default();
@@ -1048,4 +1169,45 @@ async fn real_compact_db_weather_marker_2768_chain_transitions() {
     assert!(!last.data().phase.deleted);
     assert_eq!(f.world.all_doodads().len(), 1);
     assert_eq!(spawner.ratio_respawn_chain_depth(), 0);
+}
+
+/// The 20 real day/night board templates (West Gate 4345-4352, Blue Salt 6175 / 6213 and their
+/// variants) swapped back and forth for the whole evening because every replacement took its own
+/// `curTime >= Tod` catch-up; each must settle on its night variant at 22:00.
+#[tokio::test]
+#[ignore]
+async fn real_compact_db_day_night_boards_settle_on_the_variant_at_night() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let data = DoodadData::load_from(&conn).unwrap();
+    let f = fx(Builder { data });
+    f.server.time.set(22.0);
+    // The first respawn func of each board hits.
+    f.server
+        .systems
+        .npcs
+        .doodads
+        .set_forced_phase_ratio(Some(0));
+    // (spawner id, board template, expected variant, variant start group)
+    let cases = [
+        (530, 4345, 4349, 10679),
+        (531, 4346, 4350, 10691),
+        (532, 6175, 6182, 16358),
+        (533, 6213, 6214, 16450),
+    ];
+    for (id, board, variant, start_group) in cases {
+        let spawner = new_spawner(board, id);
+        spawner.spawn(&f.server, 0).expect("spawns the board");
+        let last = spawner.last().expect("the replacement is tracked");
+        assert_eq!(last.data().template_id, variant, "board {board}");
+        assert_eq!(group(&last), start_group, "board {board}");
+        assert!(!last.data().phase.deleted);
+        assert_eq!(spawner.ratio_respawn_peak_depth(), 1, "board {board}");
+        assert_eq!(spawner.ratio_respawn_chain_depth(), 0, "board {board}");
+    }
+    assert_eq!(f.world.all_doodads().len(), cases.len());
 }
