@@ -456,8 +456,11 @@ pub trait ItemSkillHooks: Send + Sync {
         server.game_data.items.config.durability_decrement_chance
     }
 
-    /// `SCItemTaskSuccessPacket(ItemUnlock, ...)` after an item-cast plot.
-    fn unlock_item(&self, _server: &GameServer, _player: &PlayerRef, _item_id: u64) {}
+    /// `SCItemTaskSuccessPacket(ItemUnlock, ...)` after an item-cast plot. Returns whether the
+    /// packet was sent; `false` when the source item no longer exists (the plot used it up).
+    fn unlock_item(&self, _server: &GameServer, _player: &PlayerRef, _item_id: u64) -> bool {
+        false
+    }
 
     /// `UpdateGearBonuses` buff part (`ApplyEquipEffects`, weapon wield / armor grade / item set
     /// buffs) for any unit with equipment (the unit-modifier part is done by the skills

@@ -1567,3 +1567,82 @@ fn real_compact_db_item_effect_tables() {
     // (((30/3)^5) * (1/50000) + 150000 + 5000) * 0.5
     assert_eq!(formula.evaluate(&params) as i32, 77_501);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Item-cast plot end (`Plot.RunAsync`): ItemUnlock of the source item
+// ---------------------------------------------------------------------------------------------
+
+/// An item-cast plot (the stone-throwing plot 349 of skill 11268) of Alice with `source_id` as
+/// the cast item, already run through its tree.
+fn item_plot_state(w: &World, source_id: u64) -> Arc<crate::systems::skills::plots::PlotState> {
+    use crate::systems::skills::data::SkillTemplate;
+    use crate::systems::skills::geometry::Target;
+    use crate::systems::skills::plots::PlotState;
+    use crate::systems::skills::skill::CastCtx;
+    use crate::systems::skills::state::SkillRun;
+    use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+    use crate::world::WorldObject;
+
+    let skill = SkillRun::new(
+        Arc::new(SkillTemplate {
+            id: 11268,
+            ..SkillTemplate::default()
+        }),
+        1,
+    );
+    PlotState::new(
+        skill,
+        CastCtx {
+            caster: WorldObject::from(&w.pa),
+            caster_caster: SkillCaster::Item {
+                obj_id: w.pa.obj_id,
+                item_id: source_id,
+                item_template_id: STACK,
+                type1: 0,
+                type2: 0,
+            },
+            target: Target::Obj(WorldObject::from(&w.pb)),
+            target_caster: SkillCastTarget::Unit(w.pb.obj_id),
+            skill_object: SkillObject::None,
+        },
+    )
+}
+
+#[tokio::test]
+async fn item_plot_end_unlocks_the_source_item() {
+    let mut w = world();
+    super::bridges::install(&w.server);
+    let source_id = give(&w, &w.pa, slot_type::INVENTORY, STACK, 2, 0);
+    w.a.drain();
+    let state = item_plot_state(&w, source_id);
+    crate::systems::skills::plots::finish_item_plot(&w.server, 349, &state);
+    let i = item(&w, source_id).unwrap();
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            tasks(task_type::ITEM_UNLOCK, vec![ItemTask::update(&i)])
+        )]
+    );
+}
+
+/// The last stone of a stack is consumed by the plot's effects, so the source item is gone when
+/// the plot ends: no `ItemUnlock` (nothing left to unlock) and no panic.
+#[tokio::test]
+async fn item_plot_end_skips_unlock_of_a_consumed_source_item() {
+    let mut w = world();
+    super::bridges::install(&w.server);
+    let source_id = give(&w, &w.pa, slot_type::INVENTORY, STACK, 1, 0);
+    let state = item_plot_state(&w, source_id);
+    w.server
+        .systems
+        .skills
+        .ext
+        .items()
+        .consume_item_by_id(&w.server, &w.pa, source_id, 1);
+    assert!(item(&w, source_id).is_none());
+    assert!(w.server.items.item_by_id(source_id).is_none());
+    w.a.drain();
+    crate::systems::skills::plots::finish_item_plot(&w.server, 349, &state);
+    assert!(w.a.drain().is_empty());
+}

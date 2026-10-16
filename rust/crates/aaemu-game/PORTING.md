@@ -632,6 +632,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   the per-packet `Debug` / `Trace` lines dominated the send path with many players in view
   (`RUST_LOG=info,aaemu_game::net=trace` restores the packet log); the log files are written by
   a background thread.
+* systems::skills (item-cast plot end): `Plot.RunAsync` holds the `SkillSourceItem` object resolved
+  when the cast started and sends `ItemUnlock` for it even when the plot consumed it. Here the
+  item is looked up again at the plot end (`plots::finish_item_plot`,
+  `ItemSkillHooks::unlock_item`); a source item that is gone (the last stone of a stack of the
+  stone-throwing plot 349, skill 11268, a `use_skill_as_reagent` item the effects consume) has
+  nothing left to unlock, so the packet is skipped with a `debug!` (plot / skill / item id)
+  instead of the former `ERROR` ("SkillSourceItem ... no longer exists").
 * net (game connections): sending never blocks and C# had no limit; here a client with more than
   16 MiB queued, or one that accepts no data for 20 s, is disconnected (`net::outbox`,
   `net::listener`). Broadcasts encode a packet once for all recipients.
