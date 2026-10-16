@@ -392,7 +392,7 @@ fn skip_task_item(s: &mut PacketStream) -> anyhow::Result<(u32, u64)> {
 
 /// The id of the item stack of `template_id` that an `SCItemTaskSuccessPacket` among `packets`
 /// added (`ItemAdd`) or grew (`ItemCountUpdate`); the last one wins.
-fn stack_id(packets: &[Packet], template_id: u32) -> Option<u64> {
+pub(super) fn stack_id(packets: &[Packet], template_id: u32) -> Option<u64> {
     let mut found = None;
     for p in packets
         .iter()

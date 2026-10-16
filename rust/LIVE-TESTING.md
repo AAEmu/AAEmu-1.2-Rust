@@ -226,6 +226,17 @@ is the one of the game server's `Connections`). Fields (`quest_item_quest`, `que
 from the level spawn fails the `game.doodad.level_spawn` step. The scenario then interacts with a
 `/spawn doodad 4252` copy, so the cast is still checked, and removes that copy afterwards.
 
+`stonethrow` and `ghost` (GM account, same prerequisites as `questitem`) check two log-noise fixes:
+`stonethrow` casts the stone-throwing skill 11268 from items 4056 / 24210 and asserts that the cast
+of a stack of 2 ends with an `ItemUnlock` (item task type 95) while the cast with the last stone
+sends none (server log: `plot 349 (skill 11268): source item <id> was consumed, no ItemUnlock
+sent` at debug level, no `SkillSourceItem ... no longer exists` error); `ghost` teleports to the
+ghost of spawner 3380 (template 3483 near 15149, 14959, 137), kills it (`/kill`), deletes the
+corpse (`/despawn npc <objId>`) and watches 130 s for exactly one respawn (server log: no
+`not found in SpawnedNpcs` warning). Run the game with
+`RUST_LOG=info,aaemu_game::systems::skills::plots=debug,aaemu_game::systems::npcs=debug` to see the
+debug lines.
+
 The combat step selects its NPC through `CSChangeTargetPacket` and faces it in movement
 packets so auto attacks and angle restrictions use the intended target. It matches skill responses to the player's object and skill IDs and reads
 the 1.2 `SkillResult` extra field before optional integer data. Missing combat NPCs and
