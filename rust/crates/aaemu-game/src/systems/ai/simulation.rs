@@ -407,7 +407,9 @@ fn start_path(
             // emulator, so the NPC just stays put (as in the C#); report each name once.
             if server.systems.ai.first_missing_path(&file) {
                 tracing::warn!(
-                    "Stop moving... no recorded path file Data/Path/{file}.path for                      MoveFileName={file} (retail route data is not shipped); the NPC stays put                      (reported once per file name)"
+                    "Stop moving... no recorded path file Data/Path/{file}.path for MoveFileName={file} \
+                     (retail route data is not shipped); the NPC stays put (reported once per file \
+                     name)"
                 );
             } else {
                 tracing::debug!("Stop moving... path data for MoveFileName={file} is missing");
