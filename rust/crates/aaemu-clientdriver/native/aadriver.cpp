@@ -36,6 +36,7 @@
 #include "pakio.h"
 #include "virtualpak.h"
 #include "startup.h"
+#include "ext.h"
 #ifndef AADRIVER_PLAYER
 #include "visuals.h"
 #include "input.h"
@@ -87,10 +88,15 @@ static char      g_logPath[MAX_PATH];
 static bool g_fastStart;
 static bool g_fastApplied;
 static bool g_fastCVarApplied;
+static void logf(const char* fmt, ...);
 static std::string g_auctionUiScript;
 static bool g_auctionUiApplied;
 static bool g_auctionUiFailed;
 static ULONGLONG g_auctionUiNextCheck;
+static const char kDriverVersion[] = "aadriver 1.1 ext1";  // reported to the server in ext.hello
+static const char* g_extBundle;
+static size_t g_extBundleSize;
+static void extLog(const char* line) { logf("%s", line); }
 #ifndef AADRIVER_PLAYER
 static CRITICAL_SECTION g_lock;
 static bool g_hideOnStart;
@@ -296,6 +302,10 @@ static void __fastcall HookUpdate(void* self, void* /*edx*/) {
             }
         }
     }
+    // Client extension layer (native/ext.cpp): receive queue delivery, natives and embedded Lua
+    // in the UI state, handshake tick. Independent of the auction UI repair above.
+    if (!g_unloading && GetCurrentThreadId() == g_mainTid && self == scriptSystemFor('U'))
+        ext::tick(*(lua_State**)((BYTE*)self + OFF_SS_LuaState));
 #ifndef AADRIVER_PLAYER
     if (!g_unloading && GetCurrentThreadId() == g_mainTid) {
         // Profile/UI scripts can reset audio during Update. The process session
@@ -384,6 +394,13 @@ static bool installHook() {
     DWORD scriptSize = resource ? SizeofResource(g_self, resource) : 0;
     if (!script || !scriptSize) { logf("auction UI script resource missing"); return false; }
     g_auctionUiScript.assign(script, scriptSize);
+    {
+        HRSRC er = FindResourceW(g_self, MAKEINTRESOURCEW(300), MAKEINTRESOURCEW(10));
+        HGLOBAL el = er ? LoadResource(g_self, er) : NULL;
+        g_extBundle = el ? static_cast<const char*>(LockResource(el)) : NULL;
+        g_extBundleSize = er ? SizeofResource(g_self, er) : 0;
+        if (!g_extBundle || !g_extBundleSize) logf("extension Lua bundle resource missing - extension layer inactive");
+    }
     g_vtbl = (void**)(g_css + RVA_vtbl);
     p_loadbuffer = (luaL_loadbuffer_t)(g_css + RVA_luaL_loadbuffer);
     p_pcall      = (lua_pcall_t)(g_css + RVA_lua_pcall);
@@ -400,6 +417,10 @@ static bool installHook() {
     if (!setSlot(&g_vtbl[SLOT_Update], (void*)&HookUpdate)) { logf("VirtualProtect failed (%lu)", GetLastError()); return false; }
     InterlockedExchange(&g_hooked, 1);
     logf("hooked CScriptSystem::Update (vtable %p, CryScriptSystem.dll at %p)", g_vtbl, g_css);
+    if (g_extBundle && g_extBundleSize) {
+        ext::Host host = { extLog, g_css, kDriverVersion, g_extBundle, g_extBundleSize };
+        ext::init(host);
+    }
     return true;
 }
 
@@ -438,7 +459,7 @@ static std::string pingInfo() {
                 env ? *(void**)(env + OFF_gEnv_SSThird) : NULL, g_hooked, g_mainTid);
     return std::string(buf) + visuals::info() + startup::info() + virtualpak::info() +
         " fast=" + (g_fastApplied ? "1" : "0") + " silent=" + (g_silent ? "1" : "0") +
-        " auction_ui=" + (g_auctionUiApplied ? "1" : "0");
+        " auction_ui=" + (g_auctionUiApplied ? "1" : "0") + ext::info();
 }
 
 static std::string submit(char op, char target, const std::string& code, DWORD timeoutMs) {
@@ -465,6 +486,7 @@ static std::string submit(char op, char target, const std::string& code, DWORD t
 static DWORD WINAPI unloadThread(LPVOID) {
     submit('I', 0, "release", 30000);
     InterlockedExchange(&g_unloading, 1);
+    ext::remove();
     removeHook();
     visuals::remove();
     pakio::remove();

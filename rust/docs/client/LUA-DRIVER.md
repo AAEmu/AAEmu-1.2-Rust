@@ -853,3 +853,32 @@ valid profile package, and received Windows sharing error 32; the installed
 manifest SHA stayed unchanged. Closing that client permits normal verified update
 application. Root-relative SHA filenames and receipt bounds reject arbitrary file
 paths. Receipts protect integrity/base identity, not publisher authenticity.
+
+## 13. Client extensions (server <-> client channel)
+
+Both driver builds (diagnostic and player) also carry the AAEmu **client extension layer**
+(`native/ext.{h,cpp}`, embedded Lua in `native/ext/`). Protocol, wire format and the
+server side are specified in [`CLIENT-EXTENSIONS.md`](CLIENT-EXTENSIONS.md); this section only lists
+what the driver adds.
+
+* Needs `x2game.dll` 1.2 r208022 (PE stamp `0x543CB835`, size `0x01CB0A00`, plus byte signatures
+  at the used addresses). On any other build the layer logs and disables itself; the rest of the
+  driver is unaffected. The UI state is only touched once the build is verified.
+* Natives in the **UI** script state (re-installed whenever that state is rebuilt, checked every
+  250 ms like the auction UI): `AAEmuExt.Send(channel, payload_json)` -> `true` or `nil, err`,
+  `AAEmuExt.Info()` -> `{ proto, driver, sc_opcode, hooked, send }`, `AAEmuExt.Log(text)`
+  (writes to `aadriver.log`). Embedded Lua (`ext/manifest.txt`: `core.lua` first, then feature
+  modules such as `ext_debug.lua`) provides `AAEmuExt.On/Emit/Module/Ready`, a JSON codec
+  (`AAEmuExt.Json`) and the `ext.hello` / `ext.welcome` handshake.
+* `ext.hello` is sent from `AAEmuExt_Tick` (called ~every 500 ms from the `CScriptSystem::Update`
+  hook) once the player is in the world: `X2Unit:UnitName('player')` is non-empty, the lobby stage
+  (`X2LoginCharacter:GetCurrentStage()`) is `0`, and the extension has a receive slot. It is re-sent
+  when the player unit changes or after leaving the world, and retried (max 5, every ~10 s) until
+  `ext.welcome` arrives.
+* The receive handler claims the first free server-to-client opcode (`0x1F2`, `0x1D5`, ...) and
+  runs on the network thread; it only queues bytes. Delivery to Lua happens on the main thread.
+  The ping reply (`P`) gains an ` ext=gate:..,send:..,recv:..,op:0x..,...` status block.
+* Adding a feature: one `.lua` file in `native/ext/` plus one line in `ext/manifest.txt`
+  (`build.bat` bundles them into the DLL resource). Lua tests: `ext/core_tests.lua`
+  (`lua core_tests.lua`, or `python -I ext/run_lua_tests.py` with the `lupa` package); native tests:
+  `native/ext-test.cpp` (run by `build.bat`).

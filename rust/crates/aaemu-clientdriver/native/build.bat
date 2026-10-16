@@ -15,10 +15,15 @@ if not defined AADRIVER_OUT set "AADRIVER_OUT=%~dp0out"
 if not exist "%AADRIVER_OUT%" mkdir "%AADRIVER_OUT%"
 rc /nologo /I "%~dp0." /fo "%AADRIVER_OUT%\auction_ui.res" "%~dp0auction_ui.rc"
 if errorlevel 1 ( echo [!] auction UI resource build failed & exit /b 1 )
+rem Embedded Lua of the client extension layer: bundle the manifest's files, then compile them as a resource.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0ext\bundle.ps1" -Out "%AADRIVER_OUT%\ext_bundle.lua"
+if errorlevel 1 ( echo [!] extension Lua bundle failed & exit /b 1 )
+rc /nologo /I "%AADRIVER_OUT%" /I "%~dp0." /fo "%AADRIVER_OUT%\ext.res" "%~dp0ext.rc"
+if errorlevel 1 ( echo [!] extension resource build failed & exit /b 1 )
 if "%AADRIVER_PLAYER%"=="1" (
-  cl /nologo /O2 /MT /EHsc /W4 /DAADRIVER_PLAYER /LD "%~dp0aadriver.cpp" "%~dp0pakio.cpp" "%~dp0startup.cpp" "%~dp0virtualpak.cpp" "%AADRIVER_OUT%\auction_ui.res" /Fo"%AADRIVER_OUT%\\" /Fe"%AADRIVER_OUT%\aadriver.dll" /link /NOLOGO kernel32.lib shell32.lib
+  cl /nologo /O2 /MT /EHsc /W4 /DAADRIVER_PLAYER /LD "%~dp0aadriver.cpp" "%~dp0pakio.cpp" "%~dp0startup.cpp" "%~dp0virtualpak.cpp" "%~dp0ext.cpp" "%AADRIVER_OUT%\auction_ui.res" "%AADRIVER_OUT%\ext.res" /Fo"%AADRIVER_OUT%\\" /Fe"%AADRIVER_OUT%\aadriver.dll" /link /NOLOGO kernel32.lib shell32.lib
 ) else (
-  cl /nologo /O2 /MT /EHsc /W4 /LD "%~dp0aadriver.cpp" "%~dp0visuals.cpp" "%~dp0pakio.cpp" "%~dp0startup.cpp" "%~dp0input.cpp" "%~dp0audio.cpp" "%~dp0virtualpak.cpp" "%AADRIVER_OUT%\auction_ui.res" /Fo"%AADRIVER_OUT%\\" /Fe"%AADRIVER_OUT%\aadriver.dll" /link /NOLOGO user32.lib kernel32.lib d3d11.lib dxgi.lib gdiplus.lib ole32.lib shell32.lib
+  cl /nologo /O2 /MT /EHsc /W4 /LD "%~dp0aadriver.cpp" "%~dp0visuals.cpp" "%~dp0pakio.cpp" "%~dp0startup.cpp" "%~dp0input.cpp" "%~dp0audio.cpp" "%~dp0virtualpak.cpp" "%~dp0ext.cpp" "%AADRIVER_OUT%\auction_ui.res" "%AADRIVER_OUT%\ext.res" /Fo"%AADRIVER_OUT%\\" /Fe"%AADRIVER_OUT%\aadriver.dll" /link /NOLOGO user32.lib kernel32.lib d3d11.lib dxgi.lib gdiplus.lib ole32.lib shell32.lib
 )
 if errorlevel 1 ( echo [!] driver build failed & exit /b 1 )
 cl /nologo /O2 /MT /EHsc /W4 "%~dp0startup-test.cpp" /Fo"%AADRIVER_OUT%\\" /Fe"%AADRIVER_OUT%\startup-test.exe" /link /NOLOGO kernel32.lib
@@ -38,6 +43,10 @@ cl /nologo /O2 /MT /EHsc /W4 "%~dp0virtualpak-test.cpp" /Fo"%AADRIVER_OUT%\\" /F
 if errorlevel 1 ( echo [!] virtual pak tests build failed & exit /b 1 )
 "%AADRIVER_OUT%\virtualpak-test.exe"
 if not "%errorlevel%"=="0" ( echo [!] virtual pak tests failed & exit /b 1 )
+cl /nologo /O2 /MT /EHsc /W4 "%~dp0ext-test.cpp" /Fo"%AADRIVER_OUT%\\" /Fe"%AADRIVER_OUT%\ext-test.exe" /link /NOLOGO kernel32.lib
+if errorlevel 1 ( echo [!] extension tests build failed & exit /b 1 )
+"%AADRIVER_OUT%\ext-test.exe"
+if not "%errorlevel%"=="0" ( echo [!] extension tests failed & exit /b 1 )
 cl /nologo /O2 /MT /W3 "%~dp0aainject.cpp" /Fo"%AADRIVER_OUT%\\" /Fe"%AADRIVER_OUT%\aainject.exe" /link /NOLOGO kernel32.lib
 if errorlevel 1 ( echo [!] injector build failed & exit /b 1 )
 echo [ok] %AADRIVER_OUT%\aadriver.dll

@@ -1,0 +1,2 @@
+#include <windows.h>
+300 RCDATA "ext_bundle.lua"

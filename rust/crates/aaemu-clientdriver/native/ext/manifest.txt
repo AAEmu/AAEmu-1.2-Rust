@@ -1,0 +1,4 @@
+# Embedded Lua bundle manifest. One file name (relative to this folder) per line, loaded in order
+# into the UI script state. core.lua must stay first. Adding a feature = one .lua file + one line.
+core.lua
+ext_debug.lua
