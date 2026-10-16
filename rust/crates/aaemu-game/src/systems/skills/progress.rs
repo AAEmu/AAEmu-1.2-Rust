@@ -288,8 +288,7 @@ pub fn change_labor_locked(
             .map_or(0.0, |f| f.evaluate(&params));
         gain = add_exp_locked(server, c, (xp * f64::from(exp_mul)) as i32, true);
     }
-    c.labor_power = c.labor_power.wrapping_add(change);
-    c.labor_power_modified = chrono::Utc::now().timestamp();
+    c.change_labor_power(change);
     Some((
         SCCharacterLaborPowerChangedPacket {
             amount: i32::from(change),

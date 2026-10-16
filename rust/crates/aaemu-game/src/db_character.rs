@@ -917,6 +917,18 @@ pub async fn save_character(
     .execute(&mut **tx)
     .await?;
 
+    // Labor is account-level (`accounts.labor`): flush the delta applied to the cached
+    // `labor_power` since the last save in this transaction, so play-spent labor is persisted
+    // and never double-counted (the online regeneration tick only changes the cache).
+    if c.labor_power_unsaved != 0 {
+        sqlx::query("UPDATE accounts SET labor = labor + ? WHERE account_id = ?")
+            .bind(c.labor_power_unsaved)
+            .bind(c.account_id)
+            .execute(&mut **tx)
+            .await?;
+        c.labor_power_unsaved = 0;
+    }
+
     for (k, v) in &c.options {
         sqlx::query("REPLACE INTO `options` (`key`,`value`,`owner`) VALUES (?,?,?)")
             .bind(k)
@@ -1480,5 +1492,276 @@ mod tests {
         assert_eq!(state.completed_at(1), Some(earned));
         assert!(state.progress(1).expect("row").reward_delivered());
         pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
+    async fn private_mysql_spent_labor_survives_reload() {
+        use crate::systems::quests::bridges::GameQuestHooks;
+        use crate::systems::quests::hooks::QuestHooks;
+        use crate::systems::social::achievement_persistence::temporary_shadow_definition;
+
+        let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+            return;
+        };
+        let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+        assert_eq!(
+            options.get_port(),
+            3317,
+            "only private MySQL3317 is allowed"
+        );
+        let pool = MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("private MySQL");
+        // Shadow the live names with connection-local copies of their actual schemas, including
+        // the `accounts` row the reload reads labor from. Temporary tables cannot carry foreign
+        // keys, so the copied `FOREIGN KEY` constraints are dropped.
+        for table in [
+            "characters",
+            "character_active_buffs",
+            "character_records",
+            "character_achievements",
+            "accounts",
+        ] {
+            let (_, definition): (String, String) =
+                sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert!(definition.starts_with("CREATE TABLE "));
+            sqlx::query(&temporary_shadow_definition(&definition))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO `accounts` (`account_id`, `labor`) VALUES (1, 1000)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let server = crate::test_support::test_server();
+        let mut character = Character::new(1, 1, UnitCustomModelParams::default());
+        character.unit.name = "SpentLaborFixture".into();
+        character.created = Utc::now().timestamp();
+        character.labor_power = 1000;
+        // Spend 100 labor in play (skills path) and 5 more through the quest bridge
+        // (`GameQuestHooks::change_labor` with no connection, like a quest script spend).
+        assert!(crate::systems::skills::progress::change_labor_locked(
+            &server,
+            &mut character,
+            -100,
+            0
+        )
+        .is_some());
+        GameQuestHooks.change_labor(&server, None, &mut character, -5, 0);
+        assert_eq!(character.labor_power, 895);
+
+        let mut transaction = pool.begin().await.unwrap();
+        save_character(&mut transaction, &mut character, Utc::now().timestamp())
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        let reloaded = crate::db::get_account_details(&pool, &server.config, 1).await;
+        assert_eq!(
+            reloaded.labor, 895,
+            "labor spent in play must survive the reload"
+        );
+
+        // Second save with a spend racing the capture: the snapshot flushes only the captured
+        // delta, and `commit_financial_snapshot` subtracts it from the live character so a later
+        // spend stays pending (the save itself runs on the captured clone).
+        character.change_labor_power(-7);
+        let ack_labor = character.labor_power_unsaved;
+        let mut captured = character.clone();
+        let mut transaction = pool.begin().await.unwrap();
+        save_character(&mut transaction, &mut captured, Utc::now().timestamp())
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        // The live character spends 7 more between the capture and the save ack.
+        character.change_labor_power(-7);
+        character.labor_power_unsaved -= ack_labor;
+        assert_eq!(captured.labor_power_unsaved, 0);
+        assert_eq!(character.labor_power, 881);
+        assert_eq!(character.labor_power_unsaved, -7);
+        assert_eq!(
+            accounts_labor(&pool).await,
+            888,
+            "the captured save flushed only the captured delta"
+        );
+        assert_eq!(
+            accounts_labor(&pool).await + i64::from(character.labor_power_unsaved),
+            i64::from(character.labor_power),
+            "saved labor + pending delta must match the live cache"
+        );
+
+        // Offline path (`do_add_labor` without a live character): `add_labor_capped` adds below
+        // the cap, clamps the result to it, then makes an at-cap row a no-op.
+        assert_eq!(
+            crate::db::add_labor_capped(&pool, 1, 10, 2000)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(accounts_labor(&pool).await, 898);
+        assert_eq!(
+            crate::db::add_labor_capped(&pool, 1, 1500, 2000)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(accounts_labor(&pool).await, 2000);
+        assert_eq!(
+            crate::db::add_labor_capped(&pool, 1, 10, 2000)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(accounts_labor(&pool).await, 2000);
+        pool.close().await;
+    }
+
+    /// The real labor save path (`SaveManager` snapshot capture/write/commit and the departing
+    /// save) against one online character: a rolled-back snapshot must not move the wallet, a
+    /// committed retry must flush only the captured delta while a spend races it, and the
+    /// departure must flush what is left.
+    #[tokio::test]
+    #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
+    async fn private_mysql_labor_snapshot_rollback_retry_inflight_and_departure() {
+        use crate::managers::save::{
+            capture_financial_snapshot, commit_financial_snapshot, write_financial_snapshot,
+        };
+        use crate::systems::social::achievement_persistence::temporary_shadow_definition;
+        use crate::test_support::{spawn_player, test_character, test_server, TestClient};
+        use std::sync::Arc;
+
+        let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+            return;
+        };
+        let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+        assert_eq!(
+            options.get_port(),
+            3317,
+            "only private MySQL3317 is allowed"
+        );
+        assert!(matches!(options.get_host(), "127.0.0.1" | "localhost"));
+        let pool = MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("private MySQL");
+        // Every table the financial snapshot path touches, connection-local: the mail test's
+        // financial list plus the account wallet and the two achievement tables `save_character`
+        // rewrites. Temporary tables cannot carry foreign keys, so those constraints are dropped.
+        for table in [
+            "housings",
+            "dominions",
+            "dominion_siege_participants",
+            "mails",
+            "items",
+            "item_containers",
+            "auction_house",
+            "characters",
+            "options",
+            "abilities",
+            "actabilities",
+            "appellations",
+            "character_active_buffs",
+            "portal_book_coords",
+            "portal_visited_district",
+            "friends",
+            "blocked",
+            "skills",
+            "quests",
+            "completed_quests",
+            "accounts",
+            "character_records",
+            "character_achievements",
+        ] {
+            let (_, definition): (String, String) =
+                sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert!(definition.starts_with("CREATE TABLE "));
+            sqlx::query(&temporary_shadow_definition(&definition))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO `accounts` (`account_id`, `labor`) VALUES (1, 1000)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut server = test_server();
+        server.db = pool.clone();
+        let server = Arc::new(server);
+        server.set_self();
+        let client = TestClient::new(&server, 1, 1);
+        let mut c = test_character(1, "SnapshotLaborer", 500.0, 500.0);
+        c.account_id = 1;
+        c.labor_power = 1000;
+        c.is_online = true;
+        let p = spawn_player(&server, &client, c, 0x101);
+        assert_eq!(accounts_labor(&pool).await, 1000);
+
+        // 1. A rolled-back snapshot: the wallet write is undone and the live cache keeps its
+        //    pending spend.
+        crate::systems::skills::progress::change_labor(&server, &p, -100, 0);
+        assert_eq!(p.data().labor_power, 900);
+        let snapshot = capture_financial_snapshot(&server);
+        let mut transaction = pool.begin().await.unwrap();
+        write_financial_snapshot(&server, &mut transaction, snapshot)
+            .await
+            .unwrap();
+        transaction.rollback().await.unwrap();
+        assert_eq!(accounts_labor(&pool).await, 1000);
+        assert_eq!(p.data().labor_power_unsaved, -100);
+
+        // 2. The retry commits the captured -100 while the player spends 7 more in flight: the
+        //    ack flushes only the captured delta and leaves the later spend pending.
+        let snapshot = capture_financial_snapshot(&server);
+        crate::systems::skills::progress::change_labor(&server, &p, -7, 0);
+        let mut transaction = pool.begin().await.unwrap();
+        let receipt = write_financial_snapshot(&server, &mut transaction, snapshot)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        commit_financial_snapshot(&server, receipt);
+        assert_eq!(accounts_labor(&pool).await, 900);
+        assert_eq!(p.data().labor_power, 893);
+        assert_eq!(p.data().labor_power_unsaved, -7);
+
+        // 3. The departure (`GameConnection.SaveAndRemoveFromWorld`): the pending -7 reaches the
+        //    wallet, the cache is clean and the departing entry is dropped.
+        server.save.remember_departing(&p);
+        if server
+            .world
+            .character_by_obj_id(p.obj_id)
+            .is_some_and(|live| Arc::ptr_eq(&live, &p))
+        {
+            server.world.try_remove_character(p.obj_id);
+        }
+        let _transaction = server.save.transaction_lock().await;
+        assert!(server.save.save_departing_locked(&server, &p).await);
+        assert_eq!(accounts_labor(&pool).await, 893);
+        assert_eq!(p.data().labor_power_unsaved, 0);
+        assert!(server.save.pending_departure(p.character_id).is_none());
+
+        // 4. What the next character load (`Character.Load` -> account details) reads.
+        let reloaded = crate::db::get_account_details(&pool, &server.config, 1).await;
+        assert_eq!(reloaded.labor, 893);
+        pool.close().await;
+    }
+
+    async fn accounts_labor(pool: &MySqlPool) -> i64 {
+        sqlx::query_scalar("SELECT CAST(labor AS SIGNED) FROM `accounts` WHERE `account_id` = 1")
+            .fetch_one(pool)
+            .await
+            .unwrap()
     }
 }
