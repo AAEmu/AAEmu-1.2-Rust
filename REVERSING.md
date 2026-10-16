@@ -109,6 +109,7 @@ client folders — they stay read-only; outputs go to `D:\aa-re\`.
 | `rust/PORT-AUDIT.md` (+ `rust/tools/port_audit/`) | Every former C# file mapped to its Rust counterpart |
 | `rust/CLIENT-DB-GAP-AUDIT.md` | Server vs. 1.2 client + databases gap audit (packets, unused tables, hardcoded values, quests, Ghidra unpack evidence); supersedes `rust/CLIENT-FEATURE-GAPS.md` |
 | `FEATURE-GAP-TASKS.md` | The prioritized task list (P0–P3) implementing those gaps, with per-task oracles |
+| `rust/docs/client/BACKPORTING.md` | **Backporting 10.x content into 1.2**: data closure/merge rules, asset compatibility, patching `game_pak`, the loose client DB and UI, distribution; worked example `rust/docs/client/backports/HOUSING.md` |
 
 ### On disk (`D:\aa-re\`, plus the 10.x folder)
 
@@ -121,6 +122,7 @@ client folders — they stay read-only; outputs go to `D:\aa-re\`.
 | `D:\aa-re\cryphysics\` | `x64_10x\` and `x86_12\` (decompile, RTTI, vtables, funcs, strings), `compare\func_match.csv` (1,122 matched functions 1.2↔10.x), `unpack_x86\` (how the 1.2 DLL was unpacked), `harness\` (first oracle prototype) |
 | `D:\aa-re\client12\` | 1.2 client PE info + strings for every main DLL (`*.pe.txt`, `*.strings.txt`), IDA work for the Lua driver (`ida\`), driver scratch, **`x2game_unpacked.dll`** (reconstructed unpacked client DLL — the binary behind Ghidra project `aa12u`) + `rebuild_unpacked.py` |
 | `D:\aa-re\regrade\db-auth\runtime\` | Runtime memory dumps from the live 1.2 client (`dump_runtime_modules.py` + `runtime_evidence.json`): decrypted `x2game`/`xlcommon`/`archeage` section `.bin`s — the source material of the unpack above |
+| `D:\aa-re\house-backport-20261015\` | Housing backport audit: DB closure/schema-diff/collision scripts (`data\closure.py`), asset closure + compat checks (`assets\house_deps.py`, `pak_tail_patch.py`), extracted 10.x rebuild UI and 1.2 housing `.alb` (`ui\`); `dwarf-backport-20261014\` holds the extracted 10.x `compact-10.sqlite3` and both pak listings |
 | `D:\aaemu-target\phys-bvtree\cgf_corpus\` | 1,500 real game models with physics blobs (used by the physics tests via `AAEMU_PHYS_CGF_DIR`) |
 
 ## Porting a zone feature into the 1.2 stack
