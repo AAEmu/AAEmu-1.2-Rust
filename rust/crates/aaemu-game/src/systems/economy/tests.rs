@@ -433,6 +433,36 @@ async fn equip_into_empty_slot_binds_and_broadcasts() {
 }
 
 #[tokio::test]
+async fn equip_into_wrong_slot_is_rejected() {
+    let mut w = world();
+    let pa = w.pa.clone();
+    // Chest armor (slot type 3 -> equipment slot CHEST only) on bag slot 3.
+    let id = give(&w, &pa, slot_type::INVENTORY, ARMOR, 1, 3);
+    let worn = give(&w, &pa, slot_type::EQUIPMENT, ARMOR, 1, equip_slot::CHEST);
+    let bag_before = item_at(&pa, 2, 3).unwrap();
+    let worn_before = item_at(&pa, 1, equip_slot::CHEST as u8).unwrap();
+    w.a.drain();
+
+    // Bag item -> equipment slot 20 (hair), as seen on the live server.
+    let s = move_body(id, 0, 2, 3, 1, equip_slot::HAIR as u8);
+    run::<CSSwapItemsPacket>(&mut w, 0, s.as_bytes());
+    // Swap with the worn item, but aimed at the hair slot.
+    let s = move_body(id, worn, 2, 3, 1, equip_slot::HAIR as u8);
+    run::<CSSwapItemsPacket>(&mut w, 0, s.as_bytes());
+
+    let frames = w.a.drain();
+    assert_eq!(frames.len(), 2);
+    assert!(frames.iter().all(|f| f.0 == sc::SCErrorMsgPacket));
+    assert_eq!(item_at(&pa, 2, 3).unwrap(), bag_before);
+    assert_eq!(
+        item_at(&pa, 1, equip_slot::CHEST as u8).unwrap(),
+        worn_before
+    );
+    assert!(item_at(&pa, 1, equip_slot::HAIR as u8).is_none());
+    assert!(w.b.drain().is_empty());
+}
+
+#[tokio::test]
 async fn destroy_partial_and_full() {
     let mut w = world();
     let pa = w.pa.clone();
