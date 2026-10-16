@@ -341,10 +341,12 @@ impl ClientSource {
                     blank || wild_card.as_ref().is_some_and(|re| re.is_match(name))
                 };
                 if include_sub_directories {
-                    pak.file_names()
-                        .filter(|name| name.to_lowercase().starts_with(&root_dir))
-                        .filter(|name| matches(&name.to_lowercase()))
-                        .map(str::to_string)
+                    // `names_with_prefix` is the prefix filter over a sorted lower-case index
+                    // (same names, same table order, no pass over the whole pak).
+                    pak.names_with_prefix(&root_dir)
+                        .into_iter()
+                        .filter(|(_, lower)| matches(lower))
+                        .map(|(name, _)| name.to_string())
                         .collect()
                 } else {
                     // NOTE: C# quirk mirrored: here the regex (built from the lower-cased pattern)

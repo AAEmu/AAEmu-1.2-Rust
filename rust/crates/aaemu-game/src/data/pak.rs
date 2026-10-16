@@ -98,6 +98,10 @@ pub struct Pak {
     files: Vec<PakFileInfo>,
     /// `pakFiles` keys -> index into `files`.
     index: HashMap<String, usize>,
+    /// `(lower-cased name, index into files)` sorted by the lower-cased name: the prefix scan of
+    /// [`Pak::names_with_prefix`] (a recursive `GetFilesInDirectory` would otherwise lower-case
+    /// every one of the ~218 000 names of the 1.2 pak per call).
+    lower_index: Vec<(String, u32)>,
     /// `extraFiles`.
     extra_files: Vec<PakFileInfo>,
 }
@@ -287,10 +291,43 @@ impl Pak {
             add_file_offset: 0,
             files: Vec::with_capacity(file_count as usize),
             index: HashMap::with_capacity(file_count as usize),
+            lower_index: Vec::new(),
             extra_files: Vec::with_capacity(extra_file_count as usize),
         };
         pak.read_file_table(&mut fat)?;
+        pak.build_lower_index();
         Ok(pak)
+    }
+
+    /// Builds [`Pak::lower_index`] from `files`.
+    fn build_lower_index(&mut self) {
+        let mut v: Vec<(String, u32)> = self
+            .files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.name.to_lowercase(), i as u32))
+            .collect();
+        v.sort_unstable();
+        self.lower_index = v;
+    }
+
+    /// The files whose lower-cased name starts with `prefix_lower` (already lower-cased), as
+    /// `(name, lower-cased name)` in file table order: the same list as filtering
+    /// [`Pak::file_names`] with `name.to_lowercase().starts_with(prefix_lower)`, found by a range
+    /// scan of the sorted lower-case index instead of a pass over every name.
+    pub fn names_with_prefix(&self, prefix_lower: &str) -> Vec<(&str, &str)> {
+        let start = self
+            .lower_index
+            .partition_point(|(l, _)| l.as_str() < prefix_lower);
+        let mut hits: Vec<(u32, &str)> = self.lower_index[start..]
+            .iter()
+            .take_while(|(l, _)| l.starts_with(prefix_lower))
+            .map(|(l, i)| (*i, l.as_str()))
+            .collect();
+        hits.sort_unstable_by_key(|(i, _)| *i);
+        hits.into_iter()
+            .map(|(i, l)| (self.files[i as usize].name.as_str(), l))
+            .collect()
     }
 
     /// `AAPakFileHeader.ReadFileTable`: decrypts every 0x150-byte entry on its own (fresh zero
@@ -677,6 +714,57 @@ mod tests {
         assert_eq!(pak.extra_files()[0].deleted_index_number, 0);
         assert_eq!(pak.add_file_offset(), 0x600);
         assert_eq!(pak.first_file_info_offset(), 0x600);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// `names_with_prefix` must equal the linear `name.to_lowercase().starts_with(prefix)` scan
+    /// it replaces: same names, same (file table) order, any case, a prefix that ends mid-name.
+    #[test]
+    fn names_with_prefix_matches_the_linear_scan() {
+        let names = [
+            "game/worlds/main_world/paths/036_056/NetMission0.bai",
+            "Game/Worlds/Main_World/Paths/036_056/VertsMission0.bai",
+            "game/worlds/main_world/paths/036_057/netmission0.bai",
+            "game/worlds/main_world/world.xml",
+            "game/worlds/main_world2/paths/036_056/netmission0.bai",
+            "game/worlds/arche_mall_world/world.xml",
+            "GAME/WORLDS/MAIN_WORLD/PATHS/037_056/NETMISSION1.BAI",
+            "game/Ünï/Ärger.txt",
+            "game/b.txt",
+            "readme.txt",
+            "a",
+        ];
+        let files: Vec<(&str, &[u8])> = names.iter().map(|n| (*n, &b"x"[..])).collect();
+        let path = write_temp(&build_pak(PakFileType::TypeA, &files, 1));
+        let pak = Pak::open(&path).unwrap();
+        for prefix in [
+            "game/worlds/main_world/paths/036_056",
+            "game/worlds/main_world",
+            "game/worlds/main_world/",
+            "game/worlds/main",
+            "game/",
+            "game/ü",
+            "game/b",
+            "",
+            "nothing/here",
+            "readme.txt",
+            "readme.txt2",
+        ] {
+            let linear: Vec<&str> = pak
+                .file_names()
+                .filter(|n| n.to_lowercase().starts_with(prefix))
+                .collect();
+            let indexed = pak.names_with_prefix(prefix);
+            assert_eq!(
+                indexed.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+                linear,
+                "prefix {prefix:?}"
+            );
+            assert!(
+                indexed.iter().all(|(n, l)| n.to_lowercase() == *l),
+                "prefix {prefix:?}"
+            );
+        }
         std::fs::remove_file(&path).ok();
     }
 
