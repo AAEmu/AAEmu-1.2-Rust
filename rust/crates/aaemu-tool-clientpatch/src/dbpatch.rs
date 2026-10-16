@@ -51,7 +51,8 @@ pub fn apply_patch(
     sql: &str,
     dry_run: bool,
 ) -> Result<PatchOutcome> {
-    let hash = sha256_hex(sql.as_bytes());
+    // Hash LF-normalized text so a CRLF checkout (git autocrlf) does not look like a changed patch.
+    let hash = sha256_hex(sql.replace("\r\n", "\n").as_bytes());
     let recorded: Option<String> = conn
         .query_row(
             &format!("SELECT sha256 FROM {PATCH_TABLE} WHERE name = ?1"),
@@ -194,6 +195,18 @@ mod tests {
             sha256_hex(b"INSERT INTO things VALUES (2,'two'),(3,'three');")
         );
         assert!(!at.is_empty());
+    }
+
+    #[test]
+    fn crlf_checkout_of_an_applied_patch_is_not_a_change() {
+        let tmp = TempDir::new("db_crlf");
+        let db = temp_db(tmp.path());
+        let sql = tmp.path().join("p.sql");
+        std::fs::write(&sql, "-- note\nINSERT INTO things VALUES (2,'two');\n").unwrap();
+        apply_files(&db, std::slice::from_ref(&sql), false).unwrap();
+        std::fs::write(&sql, "-- note\r\nINSERT INTO things VALUES (2,'two');\r\n").unwrap();
+        apply_files(&db, std::slice::from_ref(&sql), false).unwrap();
+        assert_eq!(count(&db), 2);
     }
 
     #[test]

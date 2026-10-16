@@ -5,3 +5,6 @@
 # Shell scripts must keep LF endings (Docker / Linux / Git Bash), batch files CRLF
 *.sh text eol=lf
 *.bat text eol=crlf
+
+# Backport bundles: SQL patches are recorded by hash; keep them byte-stable across platforms
+rust/backports/** text eol=lf
