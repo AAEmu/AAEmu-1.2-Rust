@@ -212,6 +212,56 @@ async fn ordinary_item_moves_reject_foreign_global_items() {
 }
 
 #[tokio::test]
+async fn moves_naming_a_consumed_or_unknown_item_are_rejected() {
+    let mut w = world();
+    let kept = give(&w, &w.pa.clone(), slot_type::INVENTORY, STACK, 5, 1);
+    let consumed = give(&w, &w.pa.clone(), slot_type::INVENTORY, STACK, 5, 2);
+    let removed = Inv::of(&w.pa).bag().lock().unwrap().remove_item(consumed);
+    assert!(removed.is_some());
+    let before = (
+        item_at(&w.pa, slot_type::INVENTORY, 1).unwrap(),
+        item_at(&w.pa, slot_type::INVENTORY, 2),
+    );
+    w.a.drain();
+
+    // Source id no longer held, source id never existed, and target id no longer held.
+    let requests = [
+        move_body(
+            consumed,
+            0,
+            slot_type::INVENTORY,
+            2,
+            slot_type::INVENTORY,
+            4,
+        ),
+        move_body(
+            16_777_663,
+            0,
+            slot_type::INVENTORY,
+            2,
+            slot_type::INVENTORY,
+            4,
+        ),
+        move_body(
+            kept,
+            consumed,
+            slot_type::INVENTORY,
+            1,
+            slot_type::INVENTORY,
+            2,
+        ),
+    ];
+    for body in requests {
+        run::<CSSwapItemsPacket>(&mut w, 0, body.as_bytes());
+        assert_eq!(w.a.drain_ops(), vec![sc::SCErrorMsgPacket]);
+        assert_eq!(item_at(&w.pa, slot_type::INVENTORY, 1).unwrap(), before.0);
+        assert_eq!(item_at(&w.pa, slot_type::INVENTORY, 2), before.1);
+        assert!(item_at(&w.pa, slot_type::INVENTORY, 4).is_none());
+    }
+    assert!(w.b.drain().is_empty());
+}
+
+#[tokio::test]
 async fn coffer_moves_require_opening_permission_and_nearby_doodad() {
     use crate::models::doodad::{Doodad, DoodadCofferState};
     use crate::models::house::housing_permission;

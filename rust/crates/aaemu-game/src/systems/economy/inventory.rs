@@ -490,6 +490,71 @@ enum SwapAction {
     DoEquipInEmptySlot,
 }
 
+/// The client request of a `SplitOrMoveItem` call, for diagnostics.
+#[derive(Debug, Clone, Copy)]
+struct MoveRequest {
+    task: u8,
+    from_item_id: u64,
+    from_type: u8,
+    from_slot: u8,
+    to_item_id: u64,
+    to_type: u8,
+    to_slot: u8,
+    count: i32,
+}
+
+/// The "phantom item" message: the original C# text first (so log greps still match), then the
+/// branch, the character and the whole request. `known_elsewhere` is `None` when the
+/// server-wide lookup was not possible.
+fn phantom_item_message(
+    branch: &str,
+    missing_id: u64,
+    owner_id: u32,
+    owner_name: &str,
+    req: &MoveRequest,
+    known_elsewhere: Option<bool>,
+) -> String {
+    let known = match known_elsewhere {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "n/a",
+    };
+    format!(
+        "SplitOrMoveItem - ItemId {missing_id} no longer exists, possibly a phantom item ({branch}): character {owner_id} ({owner_name}), task {}, from item {} {}:{}, to item {} {}:{}, count {}, known elsewhere on server: {known}.",
+        req.task,
+        req.from_item_id,
+        req.from_type,
+        req.from_slot,
+        req.to_item_id,
+        req.to_type,
+        req.to_slot,
+        req.count
+    )
+}
+
+/// Logs a request that names an item the player no longer holds. This is normally client
+/// staleness (the item was consumed, merged or moved before the request arrived), so it is a
+/// warning; the C# logged it with `Logger.Error`. `lookup_server` enables the server-wide
+/// `ItemManager::item_by_id` lookup, which locks every container (not allowed while holding one).
+fn log_phantom_item(
+    server: &GameServer,
+    inv: &Inv,
+    branch: &str,
+    missing_id: u64,
+    req: &MoveRequest,
+    lookup_server: bool,
+) {
+    let name = server
+        .names
+        .get_character_name(inv.character_id)
+        .unwrap_or_default();
+    let known = lookup_server.then(|| server.items.item_by_id(missing_id).is_some());
+    tracing::warn!(
+        "{}",
+        phantom_item_message(branch, missing_id, inv.character_id, &name, req, known)
+    );
+}
+
 /// `Inventory.SplitOrMoveItem(taskType, fromItemId, fromType, fromSlot, toItemId, toType,
 /// toSlot, count)`.
 #[allow(clippy::too_many_arguments)]
@@ -525,9 +590,17 @@ pub fn split_or_move_item(
         return false;
     }
     if from_holder.is_none() && from_item_id != 0 {
-        tracing::error!(
-            "SplitOrMoveItem - ItemId {from_item_id} no longer exists, possibly a phantom item."
-        );
+        let req = MoveRequest {
+            task,
+            from_item_id,
+            from_type,
+            from_slot,
+            to_item_id,
+            to_type,
+            to_slot,
+            count,
+        };
+        log_phantom_item(txn.server, inv, "from-holder", from_item_id, &req, true);
         return false;
     }
     let to_holder = holder(to_item_id);
@@ -540,9 +613,17 @@ pub fn split_or_move_item(
         return false;
     }
     if to_holder.is_none() && to_item_id != 0 {
-        tracing::error!(
-            "SplitOrMoveItem - ItemId {to_item_id} no longer exists, possibly a phantom item."
-        );
+        let req = MoveRequest {
+            task,
+            from_item_id,
+            from_type,
+            from_slot,
+            to_item_id,
+            to_type,
+            to_slot,
+            count,
+        };
+        log_phantom_item(txn.server, inv, "to-holder", to_item_id, &req, true);
         return false;
     }
     let src = from_holder.or_else(|| inv.get(from_type));
@@ -611,9 +692,18 @@ pub fn split_or_move_item_ex(
         let dref = d.as_deref().unwrap_or(&s);
         let from_item = find_in(&s, d.as_deref(), from_item_id).cloned();
         if from_item.is_none() && from_item_id != 0 {
-            tracing::error!(
-                "SplitOrMoveItem - ItemId {from_item_id} no longer exists, possibly a phantom item."
-            );
+            let req = MoveRequest {
+                task,
+                from_item_id,
+                from_type,
+                from_slot,
+                to_item_id,
+                to_type,
+                to_slot,
+                count,
+            };
+            // The container locks are held here, so the server-wide lookup is skipped.
+            log_phantom_item(txn.server, inv, "ex-decide", from_item_id, &req, false);
             return false;
         }
         let mut action = SwapAction::DoNothing;
@@ -1466,3 +1556,41 @@ pub const BACKPACK_SLOT_TYPE: u32 = EQUIPMENT_ITEM_SLOT_TYPE_BACKPACK;
 #[cfg(test)]
 #[path = "backpack_acquire_tests.rs"]
 mod backpack_acquire_tests;
+
+#[cfg(test)]
+mod phantom_message_tests {
+    use super::*;
+
+    #[test]
+    fn phantom_message_names_branch_owner_and_request() {
+        let req = MoveRequest {
+            task: task_type::SWAP_ITEMS,
+            from_item_id: 16_777_663,
+            from_type: slot_type::INVENTORY,
+            from_slot: 5,
+            to_item_id: 0,
+            to_type: slot_type::EQUIPMENT,
+            to_slot: 17,
+            count: 3,
+        };
+        let msg = phantom_item_message("from-holder", 16_777_663, 6, "Debil", &req, Some(false));
+        // The original C# text stays greppable.
+        assert!(msg.starts_with(
+            "SplitOrMoveItem - ItemId 16777663 no longer exists, possibly a phantom item"
+        ));
+        assert!(msg.contains("(from-holder)"));
+        assert!(msg.contains("character 6 (Debil)"));
+        assert!(msg.contains(&format!("task {}", task_type::SWAP_ITEMS)));
+        assert!(msg.contains(&format!("from item 16777663 {}:5", slot_type::INVENTORY)));
+        assert!(msg.contains(&format!("to item 0 {}:17", slot_type::EQUIPMENT)));
+        assert!(msg.contains("count 3"));
+        assert!(msg.contains("known elsewhere on server: no"));
+        assert!(!msg.contains('\n'));
+        assert!(phantom_item_message("ex-decide", 1, 6, "", &req, None)
+            .contains("known elsewhere on server: n/a"));
+        assert!(
+            phantom_item_message("to-holder", 1, 6, "", &req, Some(true))
+                .contains("known elsewhere on server: yes")
+        );
+    }
+}

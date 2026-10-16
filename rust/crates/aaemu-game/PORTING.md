@@ -755,6 +755,8 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   item; an item in a third container is treated as a phantom item). Where the C# throws
   (`KeyNotFoundException`, `NullReferenceException`, `AcquireDefaultItem` failure), the port logs
   and aborts the operation; `Wipe` drops an item `CanDestroy` refuses instead of looping forever.
+  The "no longer exists, possibly a phantom item" case (client request naming an item the player no longer holds) is
+  looked up in the player's containers only and logged at `warn` with the full request, not at the C#'s `Logger.Error`.
 * systems::economy: trade items are kept by id (an item no longer in the giver's containers or put
   up twice is an error); a missing trade partner is ignored instead of half-applying the change.
   Leave-world and hard disconnect cancel the departing actor's trade and prune its invitations
