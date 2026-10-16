@@ -700,6 +700,7 @@ pub(crate) fn run_npc_component(
     };
     let kind = component.npc_ai_id;
     let path = component.ai_path_name.clone();
+    let npc_template_id = component.npc_id;
     let commands = server
         .game_data
         .systems
@@ -717,7 +718,15 @@ pub(crate) fn run_npc_component(
             if ctx.load_ai_path_points(&path, false) {
                 ctx.go_to_follow_path();
             } else {
-                tracing::error!("Quest NPC path unavailable: {path}");
+                // Retail quest routes are not shipped (the C# never used `AiPathName`), so the
+                // NPC just does not start the path; report each name once.
+                if ctx.server.systems.ai.first_missing_path(&path) {
+                    tracing::warn!("Quest NPC path unavailable: {path} for npc template {npc_template_id}, no recorded route file Data/Path/{path}.path (retail route data is not shipped); the NPC does not start the path (reported once per file name)");
+                } else {
+                    tracing::debug!(
+                        "Quest NPC path unavailable: {path} for npc template {npc_template_id}"
+                    );
+                }
             }
         }
         npc_ai::GO_AWAY => ctx.go_to_despawn(),

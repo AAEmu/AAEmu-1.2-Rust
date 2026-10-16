@@ -1208,6 +1208,8 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   keeps `IsInPatrol`), `Simulation` stops without moving, but the "Stop moving... no recorded
   path file" warning is now logged once per file name (`System::first_missing_path`) and at debug
   afterwards, since a repeating skill such as the tutorial NPC's `tuto_move` fired it every 30 s.
+  Quest-component follow paths (`QuestComponentTemplate.AiPathName`, unused by the C#) are
+  reported the same way, once per name, instead of an error on every run.
   The `Impossible to parse npc_ai_params` warning now names the compact patch that repairs rows
   443, 835 and 1975.
 
