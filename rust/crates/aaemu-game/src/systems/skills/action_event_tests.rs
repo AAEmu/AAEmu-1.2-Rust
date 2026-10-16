@@ -142,7 +142,7 @@ async fn delayed_disturbance_does_not_interrupt_a_removed_or_recycled_target() {
         let (server, _client, player, npc) = fixture(GameData::empty());
         let owner = WorldObject::from(&npc);
         let skill = SkillRun::new(Arc::new(super::tests::skill_template(1)), 1);
-        skill.state().tl_id = server.systems.skills.tl_ids.next_id();
+        skill.state().tl_id = server.systems.skills.tl_ids.next_id(0, 0);
         npc.data().unit.skill_state.skill_task = Some(super::state::SkillTaskSlot {
             kind: super::state::SkillTaskKind::Cast,
             skill: skill.clone(),
@@ -1069,7 +1069,7 @@ async fn disturb_casting_cancels_direct_casts_and_honors_zero_probability() {
     let (server, _client, player, npc) = fixture(GameData::empty());
     let owner = WorldObject::from(&npc);
     let skill = SkillRun::new(Arc::new(super::tests::skill_template(1)), 1);
-    skill.state().tl_id = server.systems.skills.tl_ids.next_id();
+    skill.state().tl_id = server.systems.skills.tl_ids.next_id(0, 0);
     npc.data().unit.skill_state.skill_task = Some(super::state::SkillTaskSlot {
         kind: super::state::SkillTaskKind::Cast,
         skill: skill.clone(),

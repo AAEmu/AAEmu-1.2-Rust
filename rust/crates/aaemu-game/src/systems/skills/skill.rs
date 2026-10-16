@@ -559,7 +559,11 @@ pub fn use_skill(
             crate::systems::vehicles::mates::unmount_riding_character(server, p, true);
         }
     }
-    let tl = server.systems.skills.tl_ids.next_id();
+    let tl = server
+        .systems
+        .skills
+        .tl_ids
+        .next_id(caster.obj_id(), template.id);
     skill.state().tl_id = tl;
     tracing::debug!(
         "Created SkillTlId {tl} for Skill {}, Caster {} with target {}",
@@ -1829,7 +1833,9 @@ pub fn stop_skill(server: &GameServer, skill: &SkillRef, caster: &WorldObject) {
     {
         a.cancel.cancel();
     }
-    let tl = skill.tl_id();
+    // Take-and-clear atomically (as `end_skill` does): a concurrent plot end or skill end then
+    // releases 0, a no-op, instead of releasing the same id twice.
+    let tl = skill.take_tl_id();
     broadcast(server, caster, &SCSkillEndedPacket { tl }, true);
     broadcast(
         server,
@@ -1841,7 +1847,6 @@ pub fn stop_skill(server: &GameServer, skill: &SkillRef, caster: &WorldObject) {
         true,
     );
     server.systems.skills.tl_ids.release(tl);
-    skill.state().tl_id = 0;
 }
 
 /// `Skill.ConsumeMana(caster)`.

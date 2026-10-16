@@ -408,7 +408,7 @@ async fn channel_without_ticks_applies_once_and_cancellation_has_one_end_notific
         }),
         1,
     );
-    skill.state().tl_id = server.systems.skills.tl_ids.next_id();
+    skill.state().tl_id = server.systems.skills.tl_ids.next_id(0, 0);
     skill.state().initial_target = npc.obj_id;
     let ctx = CastCtx {
         caster: WorldObject::from(&player),

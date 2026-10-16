@@ -388,8 +388,9 @@ fn do_plot_end(server: &GameServer, state: &Arc<PlotState>) {
             caster.with_unit(|u| u.unit_mut().cooldowns.remove_cooldown(id));
         }
     }
-    server.systems.skills.tl_ids.release(tl);
-    skill.state().tl_id = 0;
+    // Release only what this call took: a concurrent `end_skill` (interrupt) takes the id the
+    // same way, so whichever comes second releases 0.
+    server.systems.skills.tl_ids.release(skill.take_tl_id());
     skill.invoke_callback();
     caster.with_unit(|u| {
         let s = &mut u.unit_mut().skill_state;
@@ -1139,5 +1140,100 @@ fn apply_plot_effect(
             skill_object: &state.ctx.skill_object,
         };
         effects::apply(server, kind, template, &args, None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::GameData;
+    use crate::systems::skills::cast_validation_tests::fixture;
+    use crate::systems::skills::state::SkillRun;
+    use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+
+    fn plot_state(
+        server: &GameServer,
+        caster: &WorldObject,
+        target: &WorldObject,
+    ) -> (Arc<PlotState>, SkillRef) {
+        let skill = SkillRun::new(Arc::new(super::super::tests::skill_template(1)), 1);
+        skill.state().tl_id = server
+            .systems
+            .skills
+            .tl_ids
+            .next_id(caster.obj_id(), skill.template.id);
+        let ctx = CastCtx {
+            caster: caster.clone(),
+            caster_caster: SkillCaster::Unit(caster.obj_id()),
+            target: Target::Obj(target.clone()),
+            target_caster: SkillCastTarget::Unit(target.obj_id()),
+            skill_object: SkillObject::None,
+        };
+        (PlotState::new(skill.clone(), ctx), skill)
+    }
+
+    /// `end_skill` takes the id first: the plot end that follows releases nothing.
+    #[tokio::test]
+    async fn plot_end_after_end_skill_releases_nothing() {
+        let (server, _client, player, npc) = fixture(GameData::empty());
+        let (caster, target) = (WorldObject::from(&npc), WorldObject::from(&player));
+        let (state, skill) = plot_state(&server, &caster, &target);
+        let tl = skill.tl_id();
+        assert!(server.systems.skills.tl_ids.is_assigned(tl));
+        super::super::skill::end_skill(&server, &skill, &caster);
+        assert!(!server.systems.skills.tl_ids.is_assigned(tl));
+        do_plot_end(&server, &state);
+        assert_eq!(skill.tl_id(), 0);
+        assert_eq!(server.systems.skills.tl_ids.unused_releases(), 0);
+    }
+
+    /// The plot end takes the id first: `end_skill` then returns without releasing.
+    #[tokio::test]
+    async fn end_skill_after_plot_end_releases_nothing() {
+        let (server, _client, player, npc) = fixture(GameData::empty());
+        let (caster, target) = (WorldObject::from(&npc), WorldObject::from(&player));
+        let (state, skill) = plot_state(&server, &caster, &target);
+        let tl = skill.tl_id();
+        do_plot_end(&server, &state);
+        assert!(!server.systems.skills.tl_ids.is_assigned(tl));
+        super::super::skill::end_skill(&server, &skill, &caster);
+        assert_eq!(server.systems.skills.tl_ids.unused_releases(), 0);
+    }
+
+    /// `stop_skill` takes the id too: a later plot end or skill end releases nothing.
+    #[tokio::test]
+    async fn stop_skill_takes_the_id_once() {
+        let (server, _client, player, npc) = fixture(GameData::empty());
+        let (caster, target) = (WorldObject::from(&npc), WorldObject::from(&player));
+        let (state, skill) = plot_state(&server, &caster, &target);
+        super::super::skill::stop_skill(&server, &skill, &caster);
+        assert_eq!(skill.tl_id(), 0);
+        do_plot_end(&server, &state);
+        super::super::skill::end_skill(&server, &skill, &caster);
+        assert_eq!(server.systems.skills.tl_ids.unused_releases(), 0);
+    }
+
+    /// Plot end and skill end racing on one skill (an interrupt against a plot that finishes)
+    /// release its id exactly once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn racing_plot_end_and_end_skill_release_once() {
+        let (server, _client, player, npc) = fixture(GameData::empty());
+        let (caster, target) = (WorldObject::from(&npc), WorldObject::from(&player));
+        for _ in 0..300 {
+            let (state, skill) = plot_state(&server, &caster, &target);
+            let barrier = std::sync::Barrier::new(2);
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    barrier.wait();
+                    do_plot_end(&server, &state);
+                });
+                s.spawn(|| {
+                    barrier.wait();
+                    super::super::skill::end_skill(&server, &skill, &caster);
+                });
+            });
+            assert_eq!(skill.tl_id(), 0);
+        }
+        assert_eq!(server.systems.skills.tl_ids.unused_releases(), 0);
     }
 }
