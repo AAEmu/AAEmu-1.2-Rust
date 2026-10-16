@@ -365,3 +365,139 @@ fn real_nav_pak_12_old_sector_versions_parse() {
     }
     assert!(by.get(&("net", 54)).is_some_and(|e| e.0 > 0));
 }
+
+fn pak_geo() -> Option<AiGeoData> {
+    let pak = std::env::var("AAEMU_GAME_PAK").ok()?;
+    let app = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("app");
+    let files = Arc::new(ClientFileManager::from_sources(&[pak], &app));
+    let worlds = WorldTemplates::load(&files, &app).expect("world templates");
+    let main = worlds
+        .get_world_template_by_name("main_world")
+        .expect("main_world");
+    let bai: Arc<dyn BaiFiles + Send + Sync> = Arc::new(ClientBaiFiles(files.clone()));
+    Some(AiGeoData::new(
+        main,
+        true,
+        bai,
+        Arc::new(UsedAreaNames::default()),
+        None,
+    ))
+}
+
+fn len2d(p: &[Vec3]) -> f32 {
+    p.windows(2)
+        .map(|w| ((w[1].x - w[0].x).powi(2) + (w[1].y - w[0].y).powi(2)).sqrt())
+        .sum()
+}
+
+/// What `Npc.FindPath` sends: the smooth route, else the C# node route reduced by `ReducePath`.
+fn npc_route(g: &AiGeoData, a: Vec3, b: Vec3) -> Vec<Vec3> {
+    let mut pn = PathNode::default();
+    if let Some(s) = pn
+        .find_smooth_path(g, a, b, DEFAULT_AGENT_RADIUS)
+        .expect("smooth path")
+    {
+        return s.points;
+    }
+    legacy_route(g, a, b)
+}
+
+/// The C# pipeline: A* node positions, the end points replaced by the actors, `ReducePath`.
+fn legacy_route(g: &AiGeoData, a: Vec3, b: Vec3) -> Vec<Vec3> {
+    let mut pn = PathNode::default();
+    let mut res = pn.find_path(g, a, b).expect("find path");
+    if let Some(f) = res.first_mut() {
+        *f = a;
+    }
+    if res.len() > 1 {
+        *res.last_mut().unwrap() = b;
+    }
+    if res.last() != Some(&b) {
+        res.push(b);
+    }
+    g.reduce_path(&res, 10).expect("reduce").into()
+}
+
+/// The harpy report (Solzreed Peninsula): a 12.5 m gap used to be routed 100 m east and back
+/// because the greedy search took node heights at face value.
+#[test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+fn real_nav_pak_chase_routes_do_not_detour() {
+    let Some(g) = pak_geo() else { return };
+    // (start, goal): case A (4/10 steps), case B (2/9), case C (2/2) of the report
+    let cases = [
+        (
+            Vec3::new(14987.004, 14063.533, 145.42401),
+            Vec3::new(14984.287, 14075.668, 137.0428),
+        ),
+        (
+            Vec3::new(15025.753, 14067.261, 150.975),
+            Vec3::new(14987.668, 14074.25, 138.06),
+        ),
+        (
+            Vec3::new(14977.554, 14078.733, 141.42),
+            Vec3::new(14980.535, 14085.406, 134.955),
+        ),
+    ];
+    for (i, (a, b)) in cases.into_iter().enumerate() {
+        let straight = len2d(&[a, b]);
+        let route = npc_route(&g, a, b);
+        let total = len2d(&route);
+        println!("case {i}: straight {straight:.1} m, route {total:.1} m: {route:?}");
+        assert_eq!(route.first(), Some(&a));
+        assert_eq!(route.last(), Some(&b));
+        assert!(total < straight * 1.3 + 0.01, "case {i}: {route:?}");
+        if i == 0 {
+            assert!(route.len() <= 3 && total < 20.0, "case A: {route:?}");
+        }
+        // the C# node route is bounded too (the search itself is a real A*)
+        let old = legacy_route(&g, a, b);
+        println!("case {i}: node route {:.1} m", len2d(&old));
+        assert!(len2d(&old) < 4.0 * straight + 30.0, "case {i}: {old:?}");
+    }
+}
+
+/// Random chases of 3 to 40 m around the harpy hill: route length against the straight line.
+#[test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+fn real_nav_pak_random_chase_routes_stay_short() {
+    let Some(g) = pak_geo() else { return };
+    let mut seed = 0x2545_f491_u32;
+    let mut rnd = move || {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (seed >> 8) as f32 / (1u32 << 24) as f32
+    };
+    let (mut worst_new, mut worst_old) = (0f32, 0f32);
+    let (mut sum_new, mut sum_old, mut n) = (0f32, 0f32, 0);
+    for _ in 0..20 {
+        let (x, y) = (
+            14987.0 + (rnd() - 0.5) * 120.0,
+            14063.0 + (rnd() - 0.5) * 120.0,
+        );
+        let (ang, dist) = (rnd() * std::f32::consts::TAU, 3.0 + rnd() * 37.0);
+        let (gx, gy) = (x + ang.cos() * dist, y + ang.sin() * dist);
+        let a = Vec3::new(x, y, g.get_height(Vec3::new(x, y, 0.0)));
+        let b = Vec3::new(gx, gy, g.get_height(Vec3::new(gx, gy, 0.0)));
+        let straight = len2d(&[a, b]);
+        let (new, old) = (npc_route(&g, a, b), legacy_route(&g, a, b));
+        let (rn, ro) = (len2d(&new) / straight, len2d(&old) / straight);
+        println!(
+            "({x:.1},{y:.1}) -> ({gx:.1},{gy:.1}) straight {straight:.1}: route {:.1} m (x{rn:.2}, {} pts), node route {:.1} m (x{ro:.2}, {} pts)",
+            len2d(&new),
+            new.len(),
+            len2d(&old),
+            old.len()
+        );
+        worst_new = worst_new.max(rn);
+        worst_old = worst_old.max(ro);
+        sum_new += rn;
+        sum_old += ro;
+        n += 1;
+    }
+    println!(
+        "{n} pairs: route max x{worst_new:.2} mean x{:.2}; node route max x{worst_old:.2} mean x{:.2}",
+        sum_new / n as f32,
+        sum_old / n as f32
+    );
+    assert!(worst_new <= 1.5, "worst route x{worst_new}");
+}

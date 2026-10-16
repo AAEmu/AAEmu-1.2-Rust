@@ -554,8 +554,27 @@ Reference: the 10.0.2.13 `cryaisystem_dedicate.dll` (image base 0x31000000), not
   only through blocked links
   (raw-file BFS agrees); the old "routes" were presumably the C# position-based neighbour lookup jumping
   between unconnected nodes and the iteration cut-off.
-* Kept on purpose: the A* step cost `G` is the distance from the link's source to the goal
-  (C# quirk, `sub_navmesh.md` §5.11), the linear open-set scan and the iteration limit;
+* **A* cost** (`astar.rs`; replaces the C# quirk `sub_navmesh.md` §5.11): `G` is the accumulated
+  2D route length (node position to the middle of the shared edge to the next node), `H` the 2D
+  distance from the node to the goal node (admissible), the open set is a binary heap with
+  re-opening on a cheaper `G`, and the iteration limit is `ceil(2D distance * 20) + 500`. The C#
+  used `G` = distance from the link's source node to the goal, 3D, i.e. a greedy search on node
+  heights. Node z values of huge navmesh triangles are unreliable (a centroid can sit 100 m
+  below the ground its triangle covers), which sent chasing NPCs on ~100 m detours around a
+  12 m gap (Solzreed Peninsula harpies: triangles 7349 and 7263 fanned around one apex, the
+  3-hop corridor through two z~11 centroids lost against an eastern chain at the goal's z).
+* **Smooth routes** (`funnel.rs`, `PathNode::find_smooth_path`, used by `npc_find_path`): a
+  straight segment that only crosses linked, passable triangles (a triangle walk over the
+  shared edges) and no forbidden area is the route without a search; otherwise the A* corridor
+  is pulled tight with the funnel algorithm through the shared edges (corners moved
+  `DEFAULT_AGENT_RADIUS` inward), rejected when a leg crosses a forbidden area. The way points
+  are the NPC, the corners and the target (as the native direct path does, actor positions
+  instead of graph centroids); corner heights come from the raw heightmap, else are
+  interpolated, since the triangle plane and node z are unreliable on large triangles. When the
+  navmesh cannot give such a route (waypoint nodes, unknown edges, iteration limit, forbidden
+  area) `npc_find_path` keeps the C# pipeline: node positions, `ReducePath`. The `AStar`
+  command and `Ai.FindPath` hook still use that pipeline (on the new search).
+* Kept on purpose: the iteration limit (larger), the 2 m Douglas-Peucker of `FindPath`,
   `FindClosestToTheCurrent`, `ReducePath`, `CheckImpossibleWalk` are unchanged. Not done: link
   exposure costs, node flags, nav modifiers in the search, physics walkability
   (`CheckWalkability` 0x3100B214), the engine's 3x3 streaming window.
