@@ -181,6 +181,9 @@ pub struct Character {
     /// `InitializeLaborCache(accountDetails.Labor, accountDetails.LastUpdated)`.
     pub labor_power: i16,
     pub labor_power_modified: UnixTime,
+    /// Labor change applied to [`Self::labor_power`] but not yet added to `accounts.labor`;
+    /// flushed by `db_character::save_character` (never marshalled).
+    pub labor_power_unsaved: i32,
     pub slots: Vec<ActionSlot>,
     /// `_options` (UI data).
     pub options: BTreeMap<u16, String>,
@@ -321,6 +324,7 @@ impl Character {
             offline_guilty_region: 0,
             labor_power: 0,
             labor_power_modified: 0,
+            labor_power_unsaved: 0,
             slots: vec![ActionSlot::default(); MAX_ACTION_SLOTS],
             options: BTreeMap::new(),
             inventory: Inventory::standalone(id, 0, 0),
@@ -367,6 +371,15 @@ impl Character {
     /// `RaceGender` (`16 * Gender + Race`).
     pub fn race_gender(&self) -> u8 {
         16u8.wrapping_mul(self.gender).wrapping_add(self.race)
+    }
+
+    /// `Character.ChangeLabor` labor part: applies `change` to the cached `labor_power` and
+    /// remembers it as not yet added to `accounts.labor` (the accounts row is flushed by
+    /// `db_character::save_character` in the character's save transaction).
+    pub fn change_labor_power(&mut self, change: i16) {
+        self.labor_power = self.labor_power.wrapping_add(change);
+        self.labor_power_unsaved += i32::from(change);
+        self.labor_power_modified = chrono::Utc::now().timestamp();
     }
 
     /// `SetAction(slot, type, id)` (C# indexes the array: out of range throws).

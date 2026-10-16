@@ -678,7 +678,7 @@ impl EconomyForSkills {
             }
         }
         // Use labor and recover exp (not ChangeLabor: no labor exp)
-        player.data().labor_power -= needed as i16;
+        player.data().change_labor_power(-(needed as i16));
         player.send(
             crate::systems::skills::progress::SCCharacterLaborPowerChangedPacket {
                 amount: -needed,
