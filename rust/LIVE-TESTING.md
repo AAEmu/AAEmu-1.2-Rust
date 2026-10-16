@@ -4,6 +4,11 @@ How to run the Rust login + game servers against a real MySQL, the real 1.2 game
 headless client bot, how to compare their traffic with the C# servers (parity), how to load-test
 them, and how to start the real 1.2 client against them (`aaemu-launcher`).
 
+> Agents on the shared dev machine: don't set this up by hand. `Scripts/lane.sh new` +
+> `Scripts/live-stack.sh` give each session its own worktree, target dir, ports, databases and
+> runtime dir ([`AGENT-QUICKSTART.md`](../AGENT-QUICKSTART.md)). This page documents the setup
+> underneath, for other machines and for debugging.
+
 Everything below uses the layout of the reference run (Windows, Git Bash). Paths are examples:
 
 | What | Where (example) |

@@ -13,6 +13,53 @@ Guidance for coding agents working in this repository.
 - The push URLs of `origin` and `upstream` are disabled in the local git config (`no_push`). Do not
   re-enable them.
 
+## Sessions work in lanes (mandatory, every session)
+
+Several agent sessions run on this machine at once. Each one works in its own **lane** — a git
+worktree + branch, its own cargo target dir, live-stack runtime dir, MySQL databases and port
+block — created and removed by [`Scripts/lane.sh`](Scripts/lane.sh). Lanes never share files, build
+locks, ports or processes, so sessions cannot collide.
+
+```sh
+Scripts/lane.sh gc                          # first: report leftovers of finished sessions
+Scripts/lane.sh new <name> --type fix       # D:/aaemu-wt/<name> on fix/<name>, from rust-rewrite
+cd D:/aaemu-wt/<name>                       # edit, build, test and run servers ONLY here
+#   ...focused checks while working, commit (Conventional Commits)...
+Scripts/lane.sh sync                        # merge the latest rust-rewrite into the lane
+Scripts/lane.sh check                       # cargo xtask ci, once, in the lane's warm target dir
+Scripts/lane.sh land                        # merge into rust-rewrite, then delete the whole lane
+```
+
+- **Never work in the integration checkout** (`C:\Users\messe\Documents\GitHub\AAEmu-rust-1.2`,
+  branch `rust-rewrite`): no edits, builds, tests or servers there. It only receives `lane.sh land`
+  merges, which refuse a dirty checkout.
+- **One lane = one worktree = one target dir.** Never point two worktrees at the same target dir:
+  identical artifact names make cargo's mtime fingerprints miss edits and tests silently run the
+  other worktree's code. Parallel implementation workers each get their own lane; sequential
+  workers may take turns in the session's lane.
+- **Focused checks while working**: `cargo clippy -p <crate> --all-targets -- -D warnings` and
+  `cargo test -p <crate> <filter>`. Do not run `cargo xtask ci` per edit or per worker. The full CI
+  runs once per lane in `lane.sh check`; `land` refuses a HEAD that was not checked or does not
+  contain the current `rust-rewrite`, so the merged tree is exactly the tested tree and
+  `rust-rewrite` needs no re-run.
+- **Cleanup is part of done — the bloat is real** (target dirs reach 10–90 GB each and D: is
+  nearly full). Work is not finished until `lane.sh land` or `lane.sh done` has run and
+  `Scripts/lane.sh list` no longer shows the lane:
+  - landed → `land` already removed it; abandoned → `lane.sh done --force`;
+  - branch must survive (pushed for review) → `lane.sh done --keep-branch` (deletes everything else);
+  - anything else you created outside a lane (scratch dirs, extra databases, dumps, copied
+    binaries) is deleted before you report the task complete.
+  Start each session with `Scripts/lane.sh gc` and include its candidates in your first report;
+  `gc --apply` deletes only unreferenced, idle, day-old leftovers. Never delete another lane or a
+  directory a running process uses.
+- **Live stack per lane**: run from inside the lane, `Scripts/live-stack.sh` uses the lane's ports
+  (`<prefix>xxx`, see `lane.sh info`), runtime dir `D:/aaemu-live-<name>` and databases; `stop`
+  stops only that stack. Never kill `aaemu-*.exe` / `archeage.exe` by image name
+  (`taskkill /IM`) and never shut down the shared MySQL: other sessions' stacks run beside yours.
+- Lane builds use `jobs = 4` and line-tables-only debug info (written by `lane.sh new` into the
+  untracked `rust/.cargo/config.toml`). Memory, not CPU, is the limit with three sessions; stop
+  stacks and clients you no longer need.
+
 ## Workflow: Claude orchestrates and reviews, Sonnet subagents run the tasks
 
 - The orchestrating Claude session (Opus) scopes, coordinates and verifies the work. It hands
@@ -28,34 +75,32 @@ Guidance for coding agents working in this repository.
 - Run **one small task per worker at a time**; launch as many workers in parallel as the work's
   independence and the machine allow (~7 GB free RAM, C: nearly full, limited space on D:).
   Give each worker one independently reviewable objective.
-- Give parallel workers non-overlapping file ownership. Each implementation worker gets its **own
-  git worktree on D:** — `git worktree add D:/aaemu-wt/<name> -b <type>/<name> rust-rewrite`, plus
-  an untracked `rust/.cargo/config.toml` copied from an existing worktree with its **own**
-  `target-dir = "D:/aaemu-target/<name>"` (delete it when the worktree is merged). Do not share one
-  target dir between worktrees: they build identically named artifacts, cargo's mtime fingerprints
-  then miss edits and tests silently run another worktree's code. D: has room for only a few
-  target dirs (~10 GB each), so limit concurrent implementation workers accordingly.
-  Never edit files another session has uncommitted changes in. The orchestrator merges the branches
-  back into `rust-rewrite` and removes the worktrees afterwards.
+- Give parallel workers non-overlapping file ownership. Each parallel implementation worker gets
+  its **own lane** (`Scripts/lane.sh new <task>`, see above) and works only in it. D: has room for
+  only a few target dirs, so limit concurrent implementation workers accordingly. Never edit files
+  another session has uncommitted changes in. The orchestrator reviews each worker's lane, runs
+  `lane.sh sync` / `check` / `land` (which merges into `rust-rewrite` and removes the lane), and
+  confirms with `lane.sh list` that nothing is left behind.
 - Continue a worker with `SendMessage` for sequential small tasks in the same subject (it keeps its
   context); start a fresh worker with a concise handoff when the subject changes. Keep follow-ups and
   reports brief: changes or findings, commands run with results, citations, commit SHA, open issues.
 - Workers do only their assigned task: no sub-agents, no choosing further tasks, no pushing; research
   workers stay read-only. Implementation workers commit to their own branch (Conventional Commits).
-- **Verify in game when possible.** After integration, a single worker (the live stack is one
-  instance, see [`AGENT-QUICKSTART.md`](AGENT-QUICKSTART.md)) rebuilds and starts it and reproduces
+- **Verify in game when possible.** Before landing, a single worker builds and starts the lane's
+  own live stack (see [`AGENT-QUICKSTART.md`](AGENT-QUICKSTART.md)) and reproduces
   the scenario with headless clients (`aaemu-testclient`, [`rust/LIVE-TESTING.md`](rust/LIVE-TESTING.md)),
   checking the server logs for the original error/warning and for regressions. If a scenario can't be
   driven headlessly, say so and rely on the flow tests.
 - The orchestrator independently reviews each diff, checks scope and correctness, and runs focused
-  validation before accepting it. After the batch is integrated, run `cargo xtask ci` (or fmt + clippy
-  + test); it must pass before the change is called complete.
+  validation before accepting it. `lane.sh check` (`cargo xtask ci` in the lane) must pass before
+  `lane.sh land`; the change is complete only once it has landed and the lane is gone.
 - Bug reports from testers come from the shared server on NICK-SERVER; its log paths
   (`C:\Users\nick server\...`) are not readable from this machine without the owner's SSH login.
 
 > **Starting the servers or the real client?** Read [`AGENT-QUICKSTART.md`](AGENT-QUICKSTART.md)
-> first: `Scripts/live-stack.sh build|sync|start|client|status|shot|stop`, machine paths, ports and
-> the rules that bite (C: is full, MySQL 3306 is off-limits, client folders are read-only).
+> first: lanes, `Scripts/live-stack.sh build|sync|start|client|status|shot|stop`, machine paths,
+> ports and the rules that bite (D: is nearly full, MySQL 3306 is off-limits, client folders are
+> read-only, other sessions' stacks run beside yours).
 > **Porting zone features / using the 10.x client as reference?** Read [`REVERSING.md`](REVERSING.md):
 > where both clients and the zone binaries are, IDA databases, decompiles and RE notes, and the workflow.
 
@@ -382,6 +427,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo xtask ci            # fmt --check + clippy -D warnings + test, exactly as CI
 ```
 
+On this machine run these inside your lane (see "Sessions work in lanes"): focused `-p <crate>`
+checks while working, the full `cargo xtask ci` once through `Scripts/lane.sh check`.
+
 - Toolchain: stable Rust via rustup.
 - Filter example: `cargo test -p aaemu-game unit_state` (substring of the test path).
 - Unit tests live in `#[cfg(test)]` modules / `*_tests.rs` next to the code; integration tests in each crate's `tests/`.
@@ -439,7 +487,8 @@ When asked to modify, fix, or improve code, **do not invent conventions**. Inspe
 3. **Wire-up** — new game packet: struct + `register` in the subsystem; new state/startup work: `systems::X::System` / `start`; new login handler: packet + handler.
 4. **SQL** — if schema changes, add `SQL/updates/…` **and** update base `SQL/aaemu_*.sql`.
 5. **Test** — add or extend tests when changing behavior; reuse existing patterns.
-6. **Verify** — `cargo xtask ci` (or fmt + clippy + test) must pass before claiming done.
+6. **Verify** — `cargo xtask ci` must pass before claiming done (`Scripts/lane.sh check` runs it
+   in the lane), then `lane.sh land` merges it and removes the lane.
 7. **Document** — update `Docs/wiki/` only when user-facing setup, config, or behavior changes; follow `Documentation-Maintenance.md`. Record deviations from the C# behavior in `PORTING.md`. Do not add unsolicited markdown elsewhere.
 
 **Avoid:** drive-by refactors, new frameworks or crates without need, reformatting unrelated files, renaming domain terms away from wiki vocabulary, and broad style “cleanup” outside the requested change.
