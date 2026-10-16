@@ -2,7 +2,10 @@
 -- Spec: rust/docs/client/CLIENT-EXTENSIONS.md, rust/docs/client/backports/HOUSING.md (10.x flow:
 -- maintain window -> "Rebuild" -> rebuild_housing.lua window). Server messages:
 --   emit house.rebuild.info {house?}            -> house.rebuild.info {ok, house, template, name, options = {
---        {rebuilding, target, name, skill, labor, materials = {{item, count, have}}, tax, can, reason}}, error?}
+--        {rebuilding, target, name, skill, skill_name?, labor, materials = {{item, count, have}}, tax, can, reason,
+--         reason_message}}, blocked?, blocked_message?, error?}
+--   The UI shows `skill_name` (the 1.2 client knows no text for the rebuild skills; no name = no skill
+--   line, never the id) and `reason_message` (else the local L.reasons[code] table, else L.cannot).
 --   emit house.rebuild.preview {house, rebuilding} / house.rebuild.preview_end {house}
 --                                               -> house.rebuild.preview {ok, active, error?}
 --   emit house.rebuild.start {house, rebuilding} -> house.rebuild.result {ok, house, target, error?, message?}
@@ -68,6 +71,22 @@ H.L = {
   success       = 'The house was rebuilt into %s.',
   successShort  = 'The house was rebuilt.',
   cannot        = 'This rebuild is not possible right now.',
+  -- fallback texts for the server's reason / error codes (the server normally sends the message)
+  reasons = {
+    no_house         = 'No house found.',
+    not_owner        = 'Only the owner can rebuild this house.',
+    not_finished     = 'The house must be finished first.',
+    for_sale         = 'A house that is for sale cannot be rebuilt.',
+    tax_due          = 'Pay the house tax first.',
+    in_siege         = 'The house cannot be rebuilt during a siege.',
+    not_rebuildable  = 'This house cannot be rebuilt.',
+    unknown_rebuilding = 'This rebuilding is not available for this house.',
+    no_target        = 'The target building is not available.',
+    too_far          = 'You are too far from the house.',
+    labor            = 'Not enough labor power.',
+    materials        = 'Not enough materials.',
+    not_available    = 'This server does not support rebuilding houses.',
+  },
   gold          = 'g',
   silver        = 's',
   copper        = 'c',
@@ -121,11 +140,20 @@ local function idString(v)
   return tostring(v)
 end
 
+-- Human text for a reason / error code: the server's message, else the local table, else nil.
+local function codeText(code, message)
+  if type(message) == 'string' and message ~= '' then return message end
+  if type(code) == 'string' and code ~= '' and type(L.reasons) == 'table' then return L.reasons[code] end
+  return nil
+end
+
 local function errorText(msg)
   if type(msg) ~= 'table' then return L.unknownError:format('?') end
-  if type(msg.message) == 'string' and msg.message ~= '' then return msg.message end
   local code = msg.error
+  if type(msg.message) == 'string' and msg.message ~= '' then return msg.message end
   if code == 'no_house' or code == 'house_not_found' then return L.noHouse end
+  local known = codeText(code, nil)
+  if known then return known end
   if type(code) == 'string' and code ~= '' then return L.unknownError:format(code) end
   return L.unknownError:format('?')
 end
@@ -616,7 +644,8 @@ render = function()
     local opt = selected()
     if opt then
       setText(ui.target, (type(opt.name) == 'string' and opt.name) or (type(opt.target) == 'string' and opt.target) or '')
-      if opt.skill ~= nil and opt.skill ~= '' then setText(ui.skill, L.skill:format(tostring(opt.skill))) else setText(ui.skill, '') end
+      -- only a localized name; the bare skill id means nothing to the player (the client lacks its text)
+      if type(opt.skill_name) == 'string' and opt.skill_name ~= '' then setText(ui.skill, L.skill:format(opt.skill_name)) else setText(ui.skill, '') end
       if opt.labor ~= nil then setText(ui.labor, L.labor:format(tostring(opt.labor))) else setText(ui.labor, '') end
       if opt.tax ~= nil then setText(ui.tax, L.tax:format(H.FormatMoney(opt.tax))) else setText(ui.tax, '') end
       setText(ui.matTitle, L.materials)
@@ -663,7 +692,7 @@ render = function()
     if S.status then
       text, kind = S.status.text, S.status.kind
     elseif opt and opt.can == false then
-      text, kind = (type(opt.reason) == 'string' and opt.reason ~= '') and opt.reason or L.cannot, 'warn'
+      text, kind = codeText(opt.reason, opt.reason_message) or L.cannot, 'warn'
     end
     setRich(ui.status, text, kind == 'error' and 'bad' or kind == 'warn' and 'warn' or 'text')
 

@@ -395,6 +395,12 @@ static void installHandler(BYTE* x2, unsigned op) {
     InterlockedExchangePointer((volatile PVOID*)scSlot(x2, op), &g_hdlObj);
     InterlockedExchange(&g_recvOk, 1);
 }
+// Driver unload / extension disabled: the handler stays in its slot but only consumes and drops
+// frames (recvImpl with g_active == 0). Restoring the slot to NULL would make a later ext frame hit
+// the client's "Packet Error" path (an unknown opcode); the module is retained, so the code stays valid.
+static void quiesceHandler() { InterlockedExchange(&g_active, 0); }
+// Test helper (unused by the driver itself): really release the slot.
+#pragma warning(suppress : 4505)
 static void restoreHandler(BYTE* x2) {
     InterlockedExchange(&g_active, 0);
     if (g_recvOk && x2) {
@@ -728,7 +734,7 @@ void tick(lua_State* ui) {
     if (!g_inited || g_disabled) return;
     __try { tickImpl(ui); }
     __except (EXCEPTION_EXECUTE_HANDLER) {
-        if (++g_faults >= 5) { g_disabled = true; restoreHandler(g_x2); xlog("ext: repeated native faults - extension disabled"); }
+        if (++g_faults >= 5) { g_disabled = true; quiesceHandler(); xlog("ext: repeated native faults - extension disabled"); }
         else xlog("ext: native fault in tick (%d)", g_faults);
     }
 }
@@ -736,7 +742,7 @@ void tick(lua_State* ui) {
 void remove() {
     g_disabled = true;
     InterlockedExchange(&g_sendOk, 0);
-    restoreHandler(g_x2);
+    quiesceHandler();
     queueClear();
 }
 

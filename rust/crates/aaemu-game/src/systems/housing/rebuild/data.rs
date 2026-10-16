@@ -46,6 +46,9 @@ pub struct RebuildData {
     packs: HashMap<u32, Vec<u32>>,
     /// Housing template id -> `housing_rebuilding_pack_id`.
     house_packs: HashMap<u32, u32>,
+    /// Localized `skills.name` of the skills the rebuildings use (the client has no text for
+    /// skills it does not know).
+    skill_names: HashMap<u32, String>,
 }
 
 fn table_exists(conn: &Connection, table: &str) -> bool {
@@ -166,19 +169,30 @@ impl RebuildData {
         Ok(d)
     }
 
-    /// `localized_texts` of `housing_rebuildings.name` / `change_point_desc` (optional).
+    /// `localized_texts` of `housing_rebuildings.name` / `change_point_desc` and of the
+    /// `skills.name` the rebuildings use (optional).
     fn load_localized(&mut self, conn: &Connection, language: &str) {
         if self.rebuildings.is_empty() || !table_exists(conn, "localized_texts") {
             return;
         }
         let col = language.replace('"', "");
         let sql = format!(
-            "SELECT tbl_column_name, idx, \"{col}\" AS txt FROM localized_texts \
-             WHERE tbl_name = 'housing_rebuildings'"
+            "SELECT tbl_name, tbl_column_name, idx, \"{col}\" AS txt FROM localized_texts \
+             WHERE tbl_name = 'housing_rebuildings' \
+                OR (tbl_name = 'skills' AND tbl_column_name = 'name')"
         );
+        let skills: std::collections::HashSet<u32> =
+            self.rebuildings.values().map(|b| b.skill_id).collect();
         let res = for_each_row(conn, &sql, [], |r| {
             let text = r.string_or("txt", "")?;
             if text.is_empty() {
+                return Ok(());
+            }
+            if r.string("tbl_name")? == "skills" {
+                let idx = r.u32("idx")?;
+                if skills.contains(&idx) {
+                    self.skill_names.insert(idx, text);
+                }
                 return Ok(());
             }
             if let Some(b) = self.rebuildings.get_mut(&r.u32("idx")?) {
@@ -206,6 +220,16 @@ impl RebuildData {
 
     pub fn rebuilding(&self, id: u32) -> Option<&Rebuilding> {
         self.rebuildings.get(&id)
+    }
+
+    /// The localized name of a rebuilding skill (empty when the data has none).
+    pub fn skill_name(&self, skill_id: u32) -> &str {
+        self.skill_names.get(&skill_id).map_or("", String::as_str)
+    }
+
+    /// Sets a skill name translation (tests / synthetic data).
+    pub fn set_skill_name(&mut self, skill_id: u32, name: &str) {
+        self.skill_names.insert(skill_id, name.to_string());
     }
 
     /// `housings.housing_rebuilding_pack_id` of a template.

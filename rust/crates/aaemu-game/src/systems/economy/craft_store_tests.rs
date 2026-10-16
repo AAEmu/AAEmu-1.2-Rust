@@ -1428,6 +1428,7 @@ fn real_compact_db_craft_and_store_tables() {
     assert_eq!(store.specialty_bundle_items.len(), 3311);
     assert_eq!(store.specialty_bundle_items_mapped.len(), 231);
     assert_eq!(store.specialty_npcs.len(), 37);
+    // Pinned to the vanilla 1.2 compact.sqlite3: a database patched with an additive backport bundle (rust/backports/*) changes this count.
     assert_eq!(store.taxations.len(), 11);
     assert_eq!(store.taxations.values().filter(|t| t.show).count(), 10);
     assert_eq!(store.expand_expert_limits.len(), 14);

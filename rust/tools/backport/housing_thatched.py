@@ -375,13 +375,41 @@ def englishish(s):
     return bool(s) and sum(ord(c) < 128 for c in s) >= 0.9 * len(s)
 
 
+SMALL_WORDS = {'a', 'an', 'and', 'as', 'at', 'by', 'for', 'from', 'in', 'of', 'on', 'or', 'the', 'to', 'with'}
+
+
+def title_case(s):
+    """Title-case machine-translated English: capitalise the first letter of every word (also after
+    a hyphen) except small words inside the phrase; letters already upper-case are left alone, so
+    "Lode Farm" and "NPC" are stable and the function is idempotent."""
+    out = []
+    first = True
+    for tok in re.split(r'(\s+)', s):
+        if not tok or tok.isspace():
+            out.append(tok)
+            continue
+        parts = tok.split('-')
+        for i, part in enumerate(parts):
+            m = re.match(r"^([^A-Za-z]*)([a-z])(.*)$", part)
+            if m and (first and i == 0 or part.lower() not in SMALL_WORDS):
+                part = m.group(1) + m.group(2).upper() + m.group(3)
+            parts[i] = part
+        out.append('-'.join(parts))
+        first = False
+    return ''.join(out)
+
+
 def add_localized(plan, skip=('localized_texts',)):
     """10.x texts of every planned row whose (tbl, column, idx) 1.2 lacks.
 
     10.x ships most new texts only in zh_cn (as English).  The 1.2 client reads its own language
     column, so en_us is seeded from an English-looking zh_cn text, and ko from the entity's own
-    (Korean) `name` column, when those are empty."""
+    (Korean) `name` column, when those are empty.
+
+    Seeded `name` texts are recorded in `plan.seeded` as written (machine casing: applied bundle
+    SQL is immutable); `case_fix_sql` turns them into the numbered fix patch."""
     d10 = plan.d10
+    seeded = plan.__dict__.setdefault('seeded', collections.OrderedDict())
     c12 = set(plan.cols12('localized_texts'))
     lang = [c for c in LANG_COLS if c in c12 and c in bflib.columns(d10, 'localized_texts')]
     n = 0
@@ -397,6 +425,8 @@ def add_localized(plan, skip=('localized_texts',)):
                 zh = d.get('zh_cn')
                 if not en and zh and englishish(zh):
                     d['en_us'] = zh
+                    if r['tbl_column_name'] == 'name':
+                        seeded[(t, r['tbl_column_name'], r['idx'])] = zh
                 if not d.get('ko') and r['tbl_column_name'] == 'name':
                     own = plan.rows[t].get((r['idx'],), {}).get('name')
                     if own:
@@ -404,6 +434,26 @@ def add_localized(plan, skip=('localized_texts',)):
                 if plan.add_row('localized_texts', d):
                     n += 1
     return n
+
+
+def case_fix_sql(head, *plans):
+    """The numbered fix patch for machine-cased en_us names seeded by `add_localized`: one guarded
+    UPDATE per text whose title-cased form differs.  The `en_us = <seeded text>` guard means it only
+    touches what the earlier patches inserted (never a real 1.2 text) and makes it re-runnable.
+    Applies to client and server databases alike (rows a database lacks simply do not match)."""
+    seeded = collections.OrderedDict()
+    for plan in plans:
+        seeded.update(getattr(plan, 'seeded', {}))
+    out = [head.rstrip('\n'), '-- Fix: title-case the machine-English names seeded into localized_texts.en_us by 001/002.', '']
+    n = 0
+    for (t, col, idx), old in sorted(seeded.items()):
+        new = title_case(old)
+        if new == old:
+            continue
+        n += 1
+        out.append('UPDATE localized_texts SET en_us = %s WHERE tbl_name = %s AND tbl_column_name = %s AND idx = %d AND en_us = %s;'
+                   % (bflib.lit(new), bflib.lit(t), bflib.lit(col), idx, bflib.lit(old)))
+    return '\n'.join(out) + '\n', n
 
 
 # ---- assets ----------------------------------------------------------------------------------------
@@ -495,6 +545,10 @@ def main():
                      % (w.pack_of[h], h))
     open(os.path.join(out, 'sql', '002_housing_rebuild_server.sql'), 'w', encoding='utf-8', newline='\n').write('\n'.join(s) + '\n')
 
+    # Applied patches are immutable (name + sha256): fixes of 001/002 content are NEW numbered files.
+    sql3, nfix = case_fix_sql(head + '-- Shared patch: client and server compact.sqlite3.\n', plan, splan)
+    open(os.path.join(out, 'sql', '003_localized_name_case.sql'), 'w', encoding='utf-8', newline='\n').write(sql3)
+
     new_assets = sorted(k for k, v in status.items() if v == 'new')
     differs = sorted(k for k, v in status.items() if v == 'differs')
     with open(os.path.join(out, 'assets.txt'), 'w', encoding='utf-8', newline='\n') as f:
@@ -510,7 +564,8 @@ def main():
     bundle = collections.OrderedDict([
         ('name', a.name), ('version', a.version),
         ('description', 'Thatched Farmhouse family (housings %s): tier-2 farms with bound doodads, rebuild data, assets.' % ','.join(map(str, housings))),
-        ('sql', ['sql/001_housing_thatched.sql', collections.OrderedDict([('file', 'sql/002_housing_rebuild_server.sql'), ('targets', ['server'])])]),
+        ('sql', ['sql/001_housing_thatched.sql', collections.OrderedDict([('file', 'sql/002_housing_rebuild_server.sql'), ('targets', ['server'])]),
+                 'sql/003_localized_name_case.sql']),
         ('assets', collections.OrderedDict([('donor_files', 'assets.txt'), ('prefab_subsets', 'prefab_subsets.tsv')])),
     ])
     with open(os.path.join(out, 'bundle.json'), 'w', encoding='utf-8', newline='\n') as f:
@@ -521,6 +576,7 @@ def main():
     print('== shared patch rows: %d, localized: %d' % (sum(plan.counts().values()), nloc))
     for t, n in plan.counts().items():
         print('  %-28s %6d  (kept from 1.2: %d)' % (t, n, plan.kept[t]))
+    print('== name case fixes (003): %d' % nfix)
     print('== server patch rows: %d, localized: %d' % (sum(splan.counts().values()), sloc))
     for t, n in splan.counts().items():
         print('  %-28s %6d' % (t, n))

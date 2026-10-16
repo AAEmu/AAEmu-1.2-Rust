@@ -100,6 +100,10 @@ fn rebuild_data() -> GameData {
             },
         ],
     );
+    h.rebuild
+        .set_skill_name(28829, "Extend Building Performance");
+    h.set_house_name(DESIGN, "Design House");
+    h.set_house_name(TIER2, "Tier Two Farm");
     data.items.templates.insert(
         MAT_A,
         crate::data::items::ItemTemplate {
@@ -212,7 +216,11 @@ fn present_tables_are_parsed_in_pack_order() {
          INSERT INTO localized_texts VALUES
             (1, 'housing_rebuilding', 'name', 3, '', 'wrong table'),
             (2, 'housing_rebuildings', 'name', 3, '', 'Wilderness Farm'),
-            (3, 'housing_rebuildings', 'name', 4, '', '');",
+            (3, 'housing_rebuildings', 'name', 4, '', ''),
+            (4, 'skills', 'name', 28829, '', 'Extend Building Performance'),
+            (5, 'skills', 'name', 28828, '', ''),
+            (6, 'skills', 'name', 1, '', 'Unrelated skill'),
+            (7, 'skills', 'desc', 28829, '', 'not a name');",
     )
     .unwrap();
     let d = RebuildData::load(&c, "en_us").unwrap();
@@ -245,6 +253,10 @@ fn present_tables_are_parsed_in_pack_order() {
     assert_eq!(r5.materials.len(), 2);
     // An empty translation keeps the original name.
     assert_eq!(d.rebuilding(4).unwrap().name, "ko four");
+    // Skill names are loaded for the skills the rebuildings use, and only `name` texts.
+    assert_eq!(d.skill_name(28829), "Extend Building Performance");
+    assert_eq!(d.skill_name(28828), "");
+    assert_eq!(d.skill_name(1), "");
     assert!(d.option_for(171, 33).is_none());
     assert!(d.option_for(171, 5).is_some());
 }
@@ -575,6 +587,7 @@ async fn view_lists_options_with_inventory_counts_and_reasons() {
     let tier2 = &view.options[0];
     assert_eq!((tier2.rebuilding, tier2.target), (REBUILD_TIER2, TIER2));
     assert_eq!(tier2.name, "Upgrade");
+    assert_eq!(tier2.skill_name, "Extend Building Performance");
     assert_eq!(tier2.tax, 250_000);
     assert!(!tier2.can);
     assert_eq!(tier2.reason, Some(RebuildError::Materials));
@@ -588,6 +601,7 @@ async fn view_lists_options_with_inventory_counts_and_reasons() {
     );
     let farm = &view.options[1];
     assert_eq!(farm.name, "Farm"); // no rebuilding name: the target's name
+    assert_eq!(farm.skill_name, ""); // unknown skill text: the UI shows no skill line
     assert_eq!(farm.reason, Some(RebuildError::Labor));
     assert_eq!(view.options[2].reason, Some(RebuildError::NoTarget));
     fx.pa.data().labor_power = 50;
@@ -639,13 +653,16 @@ async fn preview_shows_a_phantom_only_to_the_requester_and_restores_the_house() 
     );
     assert_eq!(house_state_ids(&a_frames), 1);
     let state = body_of(&a_frames, sc::SCHouseStatePacket);
-    let mut s = PacketStream::from_bytes(state);
+    let mut s = PacketStream::from_bytes(state.clone());
     let _tl = s.read_u16().unwrap();
     let db_id = s.read_u32().unwrap();
     let phantom_obj = s.read_bc().unwrap();
     let template = s.read_u32().unwrap();
     assert_eq!(db_id, house.data().id);
     assert_eq!(template, TIER2);
+    // The nameplate carries the target template's name, not the old one.
+    let contains = |name: &str| state.windows(name.len()).any(|w| w == name.as_bytes());
+    assert!(contains("Tier Two Farm") && !contains("Design House"));
     assert_ne!(phantom_obj, house.obj_id);
     // The phantom never entered the world: no other object table entry, nobody else sees it.
     assert_eq!(world.object_count(), objects_before);
@@ -672,6 +689,18 @@ async fn preview_shows_a_phantom_only_to_the_requester_and_restores_the_house() 
     let next = fx.server.ids.object.get_next_id().unwrap();
     fx.server.ids.object.release_id(next);
     assert!(!preview::end(&fx.server, conn_id, "ended"), "no second end");
+}
+
+#[test]
+fn a_retargeted_house_keeps_a_custom_name_and_follows_a_default_one() {
+    let data = rebuild_data();
+    let h = &data.systems.housing;
+    let name = |current: &str| rops::retargeted_name(h, DESIGN, current, TIER2);
+    assert_eq!(name("").as_deref(), Some("Tier Two Farm"));
+    assert_eq!(name("Design House").as_deref(), Some("Tier Two Farm"));
+    assert_eq!(name("My Home"), None);
+    // A target without a localized name changes nothing.
+    assert_eq!(rops::retargeted_name(h, DESIGN, "", FARM), None);
 }
 
 #[tokio::test]
@@ -832,6 +861,11 @@ async fn channels_info_start_and_preview_round_trip() {
         assert_eq!(options[0]["rebuilding"], json!(REBUILD_TIER2));
         assert_eq!(options[0]["target"], json!(TIER2));
         assert_eq!(options[0]["skill"], json!(28829));
+        assert_eq!(
+            options[0]["skill_name"],
+            json!("Extend Building Performance")
+        );
+        assert_eq!(options[1]["skill_name"], json!(""));
         assert_eq!(options[0]["can"], json!(true));
         assert_eq!(options[0]["reason"], json!(""));
         assert_eq!(
@@ -840,7 +874,34 @@ async fn channels_info_start_and_preview_round_trip() {
         );
         assert_eq!(options[2]["can"], json!(false));
         assert_eq!(options[2]["reason"], json!("no_target"));
+        assert_eq!(
+            options[2]["reason_message"],
+            json!(RebuildError::NoTarget.message())
+        );
+        assert_eq!(options[0]["reason_message"], json!(""));
+        assert!(v.get("blocked").is_none());
     }
+    // Missing materials and a house-level block come with human-readable messages.
+    fx.eco.item_counts.lock().unwrap().insert(MAT_A, 1);
+    let out = ext_call(&mut fx, "house.rebuild.info", json!({})).await;
+    assert_eq!(out[0].1["options"][0]["reason"], json!("materials"));
+    assert_eq!(
+        out[0].1["options"][0]["reason_message"],
+        json!("Not enough materials.")
+    );
+    fx.eco.item_counts.lock().unwrap().insert(MAT_A, 12);
+    house.data().sell_price = 1;
+    let out = ext_call(&mut fx, "house.rebuild.info", json!({})).await;
+    assert_eq!(out[0].1["blocked"], json!("for_sale"));
+    assert_eq!(
+        out[0].1["blocked_message"],
+        json!(RebuildError::ForSale.message())
+    );
+    assert_eq!(
+        out[0].1["options"][0]["reason_message"],
+        json!(RebuildError::ForSale.message())
+    );
+    house.data().sell_price = 0;
     // Errors.
     let out = ext_call(&mut fx, "house.rebuild.info", json!({ "house": "99999" })).await;
     assert_eq!(out[0].1["ok"], json!(false));

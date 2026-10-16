@@ -3,7 +3,7 @@
 //! | channel | direction | payload |
 //! |---|---|---|
 //! | `house.rebuild.info` | C->S | `{ house? }` (db id as string or number; omitted = the nearest own house within 30 m) |
-//! | `house.rebuild.info` | S->C | `{ ok, house, template, name, tax, blocked?, options: [{ rebuilding, target, name, skill, labor, materials: [{ item, name, count, have }], tax, can, reason }] }` |
+//! | `house.rebuild.info` | S->C | `{ ok, house, template, name, tax, blocked?, blocked_message?, options: [{ rebuilding, target, name, skill, skill_name, labor, materials: [{ item, name, count, have }], tax, can, reason, reason_message }] }` (`skill_name` is empty when the data has no text; `reason`/`reason_message` are empty when `can`) |
 //! | `house.rebuild.preview` | C->S | `{ house?, rebuilding }` |
 //! | `house.rebuild.preview_end` | C->S | `{ house? }` |
 //! | `house.rebuild.preview` | S->C | `{ ok, active, error?, message?, reason? }` |
@@ -110,6 +110,7 @@ pub fn info_json(view: &HouseView) -> Value {
                 "target": o.target,
                 "name": o.name,
                 "skill": o.skill,
+                "skill_name": o.skill_name,
                 "labor": o.labor,
                 "materials": o.materials.iter().map(|m| json!({
                     "item": m.item, "name": m.name, "count": m.count, "have": m.have,
@@ -117,6 +118,7 @@ pub fn info_json(view: &HouseView) -> Value {
                 "tax": o.tax,
                 "can": o.can,
                 "reason": o.reason.map_or("", RebuildError::code),
+                "reason_message": o.reason.map_or("", RebuildError::message),
             })
         })
         .collect();
@@ -130,6 +132,7 @@ pub fn info_json(view: &HouseView) -> Value {
     });
     if let Some(blocked) = view.blocked {
         v["blocked"] = json!(blocked.code());
+        v["blocked_message"] = json!(blocked.message());
     }
     v
 }

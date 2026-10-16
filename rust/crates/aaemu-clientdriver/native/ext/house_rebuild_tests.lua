@@ -147,10 +147,11 @@ local function info(extra)
   local msg = {
     ok = true, house = '123456789012', template = 171, name = 'Thatched Farmhouse',
     options = {
-      { rebuilding = 3, target = 432, name = 'Wilderness Farm', skill = 'Extend building performance', labor = 0, tax = '250000',
-        can = true, reason = '',
+      { rebuilding = 3, target = 432, name = 'Wilderness Farm', skill = 28829, skill_name = 'Extend Building Performance', labor = 0, tax = '250000',
+        can = true, reason = '', reason_message = '',
         materials = { { item = 8329, count = 15, have = 15 }, { item = 34983, count = 6, have = 2 }, { item = 37893, count = 30, have = 0, name = 'Rough Plank' } } },
-      { rebuilding = 4, target = 433, name = 'Prairie Farm', labor = 5, tax = 250000, can = false, reason = 'You need 2 more Cedar Lumber.',
+      { rebuilding = 4, target = 433, name = 'Prairie Farm', skill = 28828, labor = 5, tax = 250000, can = false, reason = 'materials',
+        reason_message = 'You need 2 more Cedar Lumber.',
         materials = { { item = 8329, count = 15, have = 3 } } },
       { rebuilding = 5, target = 434, name = 'Lode Farm', tax = 1234567, can = true, materials = {} },
     },
@@ -217,7 +218,20 @@ H.Select(2)
 eq(H.state.sel, 2, 'second option selected')
 check(not H.ui.btnRebuild._enabled, 'rebuild disabled when cannot')
 eq(text(H.ui.status._text), 'You need 2 more Cedar Lumber.', 'reason shown'); eq(H.ui.tax._text, 'Tax: 25g', 'numeric tax')
-eq(H.ui.skill._text, '', 'missing skill cleared')
+eq(H.ui.skill._text, '', 'a skill without a localized name shows no skill line (never the id)')
+H.Select(1)
+eq(H.ui.skill._text, 'Skill: Extend Building Performance', 'localized skill name shown')
+receive('house.rebuild.info', info({ options = {
+  { rebuilding = 6, target = 435, name = 'Coded Farm', can = false, reason = 'labor', materials = {} },
+  { rebuilding = 7, target = 436, name = 'Odd Farm', can = false, reason = 'brand_new_code', materials = {} },
+} }))
+H.Select(1)
+eq(text(H.ui.status._text), 'Not enough labor power.', 'no reason_message: the local table text, never the bare code')
+H.Select(2)
+eq(text(H.ui.status._text), 'This rebuild is not possible right now.', 'unknown reason code falls back to the generic text')
+check(not text(H.ui.status._text):find('brand_new_code'), 'unknown code is never shown')
+receive('house.rebuild.info', info())
+H.Select(2)
 H.Select(3)
 eq(H.ui.tax._text, 'Tax: 123g 45s 67c', 'tax with silver and copper'); eq(H.ui.matName[1]._text, 'No materials needed.', 'empty material list message')
 eq(text(H.ui.status._text), '', 'cannot-less option has no reason')
@@ -287,7 +301,9 @@ eq(text(H.ui.status._text), '', 'status cleared by the next action')
 
 -- error without message uses the code; unknown error object does not throw
 receive('house.rebuild.result', { ok = false, error = 'not_owner' })
-check(text(H.ui.status._text):find('not_owner'), 'error code shown when there is no message')
+eq(text(H.ui.status._text), 'Only the owner can rebuild this house.', 'known error code without a message uses the local text')
+receive('house.rebuild.result', { ok = false, error = 'future_error' })
+check(text(H.ui.status._text):find('future_error'), 'an unknown error code is still reported')
 drain(); receive('house.rebuild.info', info())
 
 -- successful rebuild closes everything

@@ -5,7 +5,7 @@ use crate::systems::social::achievement::char_record_kind;
 use crate::systems::social::achievement_hooks::{AchievementInput, RecordMatch};
 use crate::world::{HouseRef, PlayerRef};
 
-use super::super::data::HousingTemplate;
+use super::super::data::{HousingData, HousingTemplate};
 use super::super::dominion::fort;
 use super::super::manager::{self, now, set_permission, tax_due_date, template_of, world_of};
 use super::super::ops::my_house_packet;
@@ -59,7 +59,7 @@ impl RebuildError {
         }
     }
 
-    /// A short English message.
+    /// A short English message (also the per-option `reason_message` shown by the client UI).
     pub fn message(self) -> &'static str {
         match self {
             Self::NoHouse => "No house found.",
@@ -95,6 +95,9 @@ pub struct OptionView {
     pub target: u32,
     pub name: String,
     pub skill: u32,
+    /// The localized skill name (empty when the data has none: the client does not know the
+    /// skill, so the UI shows nothing instead of a bare id).
+    pub skill_name: String,
     pub labor: i32,
     pub materials: Vec<MaterialView>,
     /// The target template's weekly tax.
@@ -208,6 +211,20 @@ fn option_name(rebuilding_name: &str, target: &HousingTemplate) -> String {
     }
 }
 
+/// The name a house gets when its template changes from `old_template` to `target`: the target's
+/// localized default name when the house still carries a default (or no) name, else `None`.
+pub fn retargeted_name(
+    data: &HousingData,
+    old_template: u32,
+    current: &str,
+    target: u32,
+) -> Option<String> {
+    if !current.is_empty() && current != data.localized_house_name(old_template) {
+        return None;
+    }
+    Some(data.localized_house_name(target)).filter(|n| !n.is_empty())
+}
+
 /// The rebuild options of `house` for its owner. `Err` when `player` does not own the house.
 pub fn view(
     server: &GameServer,
@@ -260,6 +277,7 @@ pub fn view(
                 target: b.housing_id,
                 name: target.map_or_else(|| b.name.clone(), |t| option_name(&b.name, t)),
                 skill: b.skill_id,
+                skill_name: data.rebuild.skill_name(b.skill_id).to_string(),
                 labor: b.labor_power,
                 materials,
                 tax: target.map_or(0, |t| t.tax_or_zero() as i32),
@@ -403,7 +421,7 @@ fn swap_template(server: &GameServer, house: &HouseRef, target: &HousingTemplate
     }
     {
         let mut h = house.data();
-        let old_default_name = data.localized_house_name(h.unit.template_id);
+        let name = retargeted_name(data, h.unit.template_id, &h.unit.name, target.id);
         h.unit.template_id = target.id;
         // Not -1 and not a step: the CurrentStep setter below must see a change.
         h.current_step = -2;
@@ -415,11 +433,8 @@ fn swap_template(server: &GameServer, house: &HouseRef, target: &HousingTemplate
         h.unit.max_hp = target.hp;
         h.unit.hp = target.hp;
         h.unit.model_id = target.main_model_id;
-        if h.unit.name.is_empty() || h.unit.name == old_default_name {
-            let name = data.localized_house_name(target.id);
-            if !name.is_empty() {
-                h.unit.name = name;
-            }
+        if let Some(name) = name {
+            h.unit.name = name;
         }
         let permission = h.permission;
         set_permission(&mut h, Some(target), permission);

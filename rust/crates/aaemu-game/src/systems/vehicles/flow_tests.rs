@@ -2258,6 +2258,7 @@ fn real_compact_db_vehicle_tables() {
             .sum::<usize>(),
         85
     );
+    // Pinned to the vanilla 1.2 compact.sqlite3: a database patched with an additive backport bundle (rust/backports/*) changes this count.
     assert_eq!(d.taxations.len(), 11);
     // Bindings land on their templates.
     let bindings: usize = d

@@ -28,12 +28,25 @@ into a staging directory.
   housings, models and prefabs, build steps, bound doodads with their func/phase closure, design
   items, skills and effects, localized texts, rebuild packs, assets. Writes
   `001_*.sql` (shared: client and server DB), `002_*_server.sql` (server only: rebuild tables,
-  `housings.housing_rebuilding_pack_id`), `assets.txt`, `prefab_subsets.tsv`, `bundle.json`.
+  `housings.housing_rebuilding_pack_id`), `003_localized_name_case.sql` (shared fix, see below),
+  `assets.txt`, `prefab_subsets.tsv`, `bundle.json`.
   Prints a report: rows per table, dropped rows with reasons, unresolved references, asset
   classification.
 * `housing_bindings.py` - bound-doodad positions for `app/Data/housing_bindings*.json` from the
   `$driver`, `$cannonN`, `$heal_pointN`, `$name_plate01` helper nodes of the house CGFs
   (`--check` validates the method against the existing 1.2 entry of housing 171: within 2 cm).
+
+## Applied patches are immutable
+
+`aaemu-clientpatch db apply` records each patch by name and sha256 and refuses a changed file under
+a name it already applied. So a bundle SQL file is never edited once it was applied anywhere: a
+fix is a **new, higher-numbered file** listed after it in `bundle.json`, and the generator keeps
+emitting the old files byte for byte (regenerating is deterministic) plus the fix.
+
+Example: 10.x ships most new texts only as machine English in `zh_cn`, which 001/002 seed into
+`localized_texts.en_us` verbatim (`wilderness farm`). `003_localized_name_case.sql` title-cases those
+`name` texts with one guarded `UPDATE ... WHERE en_us = '<seeded text>'` per row (it never touches a
+real 1.2 text and is harmless where a row is absent, e.g. the server-only texts on a client DB).
 
 ## Merge rules the generators follow
 

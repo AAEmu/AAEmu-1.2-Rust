@@ -14,7 +14,8 @@
 //!
 //! Known limit: while a preview is active, a region change that makes the world re-send the real
 //! house to the client shows it on top of the phantom until the preview ends (<= 2 minutes).
-//! The phantom does not carry the target's bound doodads.
+//! The phantom does not carry the target's bound doodads. It carries the target's default name
+//! (a custom house name is kept).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -139,6 +140,12 @@ pub fn start(
     };
     let phantom = {
         let mut h = house.data().clone();
+        // The nameplate shows the target's name unless the owner named the house.
+        if let Some(name) =
+            super::ops::retargeted_name(data, h.unit.template_id, &h.unit.name, target.id)
+        {
+            h.unit.name = name;
+        }
         h.unit.template_id = target.id;
         h.unit.model_id = target.main_model_id;
         h.unit.max_hp = target.hp;

@@ -26,7 +26,8 @@ void init(const Host& host);
 // embedded Lua when the UI state was rebuilt, delivers queued messages and drives the Lua tick.
 void tick(lua_State* ui);
 
-// Restore the client's tables (diagnostic build 'X' unload).
+// Driver 'X' unload: stop sending and delivering. The receive handler stays in the client's table
+// as an inert one that consumes and drops ext frames (a NULL slot would raise "Packet Error").
 void remove();
 
 // One-line status for the driver ping.

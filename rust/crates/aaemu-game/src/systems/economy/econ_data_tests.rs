@@ -1032,6 +1032,7 @@ fn real_compact_db_items_and_loot() {
         d.armor_grade_buffs.values().map(|m| m.len()).sum::<usize>(),
         d.item_sets.len(),
     );
+    // Pinned to the vanilla 1.2 compact.sqlite3: a database patched with an additive backport bundle (rust/backports/*) changes this count.
     assert_eq!(d.templates.len(), 27036);
     assert_eq!(d.template_order.len(), 27036);
     assert_eq!(

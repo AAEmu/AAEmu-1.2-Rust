@@ -276,6 +276,32 @@ static void testReceiveThroughDispatcher() {
     resetState();
 }
 
+// Unload ('X'): the slot keeps an inert handler that swallows ext frames instead of a NULL slot
+// (an unknown opcode makes the client log "Packet Error").
+static void testUnloadLeavesInertHandler() {
+    resetState();
+    BYTE* img = makeImage(true, true);
+    g_x2 = img; g_gate = 1;
+    installHandler(img, 0x1F2);
+    g_sendOk = 1;
+    { FakeStream f = makeStream(true, encodeBodyBytes("a.b", "{}")); CHECK(dispatch(img, &f, 0x1F2) == 1 && queueSize() == 1); }
+    queueClear();
+
+    remove();
+    CHECK(g_disabled && !g_sendOk && !g_active && queueSize() == 0);
+    CHECK(*scSlot(img, 0x1F2) == (void*)&g_hdlObj && *scFlag(img, 0x1F2) == 1);  // still claimed, never NULL
+    g_dropped = 0;
+    for (int i = 0; i < 3; ++i) {
+        FakeStream f = makeStream(true, encodeBodyBytes("house.rebuild.info", "{\"ok\":true}"));
+        CHECK(dispatch(img, &f, 0x1F2) == 1 && f.pos == f.bytes.size());  // handled, body consumed
+    }
+    CHECK(queueSize() == 0 && g_dropped == 3);  // dropped, not queued
+    g_disabled = false;
+    restoreHandler(img);
+    VirtualFree(img, 0, MEM_RELEASE);
+    resetState();
+}
+
 // Stand-in for NetClient::Send: serializes like the client does (header, then body), thiscall, ret 4.
 static std::string g_wire;
 static void* g_sendThis;
@@ -351,6 +377,7 @@ int main() {
     puts("bundle");              testBundle();
     puts("x2game gate/slot");    testGate();
     puts("dispatcher receive");  testReceiveThroughDispatcher();
+    puts("unload");              testUnloadLeavesInertHandler();
     puts("send");                testSend();
     puts("fault containment");   testFaultContainment();
     if (g_failures) { fprintf(stderr, "%d ext test check(s) failed\n", g_failures); return 1; }

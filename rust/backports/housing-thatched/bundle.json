@@ -9,7 +9,8 @@
       "targets": [
         "server"
       ]
-    }
+    },
+    "sql/003_localized_name_case.sql"
   ],
   "assets": {
     "donor_files": "assets.txt",
