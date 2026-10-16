@@ -1,6 +1,7 @@
 //! `StreamNetwork` packet table + `StreamProtocolHandler.OnReceive` dispatch (after
 //! reassembly, which [`aaemu_commons::net::FrameCodec`] does).
 
+use aaemu_commons::net::hex_dump;
 use aaemu_commons::PacketStream;
 
 use crate::error::Result;
@@ -27,7 +28,7 @@ macro_rules! stream_packets {
                     let packet = match $ty::read(&mut body) {
                         Ok(p) => p,
                         Err(e) => {
-                            tracing::error!("StreamPacket: C->S {} failed to read: {e}", $ty::NAME);
+                            tracing::warn!("StreamPacket: C->S {} failed to read: {e}", $ty::NAME);
                             return Some(Err(e));
                         }
                     };
@@ -62,7 +63,10 @@ stream_packets!(
 
 /// Decodes and dispatches one frame payload (`[u16 opcode][body]`) for `conn`. An error means
 /// the connection must be shut down (the C# `OnReceive` catch-all). Unknown opcodes are logged
-/// with a hex dump and ignored (`HandleUnknownPacket`).
+/// with a capped hex dump and ignored (`HandleUnknownPacket`). **Deviation:** on a connection
+/// that has not completed `CTJoin` they instead log at `warn` and close the connection; the
+/// stream port is public and only a joined client has any business sending anything else
+/// (internet scanners probe it).
 pub async fn handle_frame(
     server: &GameServer,
     conn: &mut StreamConnection,
@@ -70,13 +74,24 @@ pub async fn handle_frame(
 ) -> Result<()> {
     let (opcode, body) = decode_frame(payload);
     if !REGISTERED.iter().any(|&(op, _)| op == opcode) {
-        let dump: String = body.unread().iter().map(|b| format!("{b:02x} ")).collect();
-        tracing::error!(
-            "Unknown packet 0x{:02x} from {}:\n{}",
-            opcode,
-            conn.ip,
-            dump
-        );
+        let dump = hex_dump(body.unread());
+        if conn.is_joined() {
+            tracing::warn!(
+                "Unknown packet 0x{:02x} from {}:\n{}",
+                opcode,
+                conn.ip,
+                dump
+            );
+        } else {
+            tracing::warn!(
+                "Unknown packet 0x{:02x} before CTJoin from {} (session {}), closing: {}",
+                opcode,
+                conn.ip,
+                conn.id,
+                dump
+            );
+            conn.shutdown();
+        }
         return Ok(());
     }
     dispatch(server, conn, opcode, body).await.unwrap_or(Ok(()))

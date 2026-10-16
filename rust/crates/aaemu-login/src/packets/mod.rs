@@ -68,7 +68,7 @@ pub fn split_opcode(payload: Vec<u8>) -> Result<(u16, PacketStream), PacketError
 
 /// Space-separated hex dump of the unread part of a stream (for unknown packet logging).
 pub fn dump_unread(s: &PacketStream) -> String {
-    s.unread().iter().map(|b| format!("{b:02x} ")).collect()
+    aaemu_commons::net::hex_dump(s.unread())
 }
 
 #[cfg(test)]

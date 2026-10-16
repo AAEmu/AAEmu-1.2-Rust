@@ -121,6 +121,12 @@ impl StreamConnection {
         (conn, handle)
     }
 
+    /// Whether a `CTJoin` has been accepted on this connection (it is linked to a game
+    /// connection).
+    pub fn is_joined(&self) -> bool {
+        self.game_connection_id.is_some()
+    }
+
     /// `GetNextRequestId(doodads)`: ids start at 0.
     pub fn next_request_id(&mut self, doodads: Vec<StreamDoodad>) -> i32 {
         self.request_id = self.request_id.wrapping_add(1);

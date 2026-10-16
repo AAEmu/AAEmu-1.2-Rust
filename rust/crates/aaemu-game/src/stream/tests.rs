@@ -605,7 +605,8 @@ async fn join_with_token_from_enter_world() {
 async fn unknown_and_truncated_packets() {
     let server = test_server();
     let mut s = stream_client(&server, 900);
-    // 0x00b is not registered in 1.2: logged and ignored.
+    // 0x00b is not registered in 1.2: logged and ignored (before a join it also closes the
+    // connection, see `unknown_packet_before_join_closes_the_connection`).
     s.recv(&server, &frame(0x00b, &[1, 2])).await.unwrap();
     // Payload shorter than an opcode: opcode 0 (unknown).
     s.recv(&server, &[0x07]).await.unwrap();
@@ -616,6 +617,64 @@ async fn unknown_and_truncated_packets() {
         .recv(&server, &frame(ct::CT_JOIN, &[1, 2, 3]))
         .await
         .is_err());
+}
+
+#[tokio::test]
+async fn unknown_packet_before_join_closes_the_connection() {
+    let server = test_server();
+    let mut s = stream_client(&server, 900);
+    assert!(!s.conn.is_joined());
+    // A scanner-style probe: unknown opcode with a body far larger than the log dump cap.
+    s.recv(&server, &frame(0x00b, &[0xAB; 4000])).await.unwrap();
+    assert!(s.conn.is_closing());
+    assert!(s.drain().is_empty());
+
+    // Frames shorter than an opcode (opcode 0) are unknown too.
+    let mut s = stream_client(&server, 901);
+    s.recv(&server, &[]).await.unwrap();
+    assert!(s.conn.is_closing());
+
+    // A failed join (bad token) does not make the connection trusted.
+    let mut s = stream_client(&server, 902);
+    s.recv(
+        &server,
+        &frame(ct::CT_JOIN, &hex("E8 03 00 00  63 00 00 00")),
+    )
+    .await
+    .unwrap();
+    assert_eq!(s.drain(), vec![hex("01 00 01")]);
+    assert!(!s.conn.is_joined());
+    s.recv(&server, &frame(0x00b, &[1])).await.unwrap();
+    assert!(s.conn.is_closing());
+}
+
+#[tokio::test]
+async fn unknown_packet_after_join_is_ignored() {
+    let server = test_server();
+    let _g = game_connection(&server, 77);
+    server.streams.add_token(1000, 77);
+    let mut s = stream_client(&server, 900);
+    s.recv(
+        &server,
+        &frame(ct::CT_JOIN, &hex("E8 03 00 00  4D 00 00 00")),
+    )
+    .await
+    .unwrap();
+    assert_eq!(s.drain(), vec![hex("01 00 00")]);
+    assert!(s.conn.is_joined());
+
+    // C# HandleUnknownPacket: logged and ignored, the connection keeps working.
+    s.recv(&server, &frame(0x00b, &[0xAB; 4000])).await.unwrap();
+    s.recv(&server, &[0x07]).await.unwrap();
+    assert!(!s.conn.is_closing());
+    assert!(s.drain().is_empty());
+    s.recv(
+        &server,
+        &frame(ct::CT_JOIN, &hex("E8 03 00 00  63 00 00 00")),
+    )
+    .await
+    .unwrap();
+    assert_eq!(s.drain(), vec![hex("01 00 01")]);
 }
 
 #[tokio::test]
@@ -1081,7 +1140,7 @@ async fn socket_round_trip() {
     let task = tokio::spawn(super::listener::serve_listener(server.clone(), listener));
 
     let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
-    // Unknown packet, then CTJoin split across two writes (reassembly).
+    // CTJoin split across two writes (reassembly).
     let join = |cookie: u32| {
         bytes(|s| {
             s.write_u16(10)
@@ -1091,9 +1150,7 @@ async fn socket_round_trip() {
         })
     };
     let good = join(77);
-    let mut first = hex("03 00  0B 00  FF");
-    first.extend_from_slice(&good[..5]);
-    sock.write_all(&first).await.unwrap();
+    sock.write_all(&good[..5]).await.unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
     sock.write_all(&good[5..]).await.unwrap();
 
@@ -1104,6 +1161,9 @@ async fn socket_round_trip() {
         .unwrap();
     assert_eq!(buf, [0x03, 0x00, 0x01, 0x00, 0x00]);
     assert_eq!(server.streams.connections.len(), 1);
+
+    // An unknown packet after the join is ignored (C# HandleUnknownPacket).
+    sock.write_all(&hex("03 00  0B 00  FF")).await.unwrap();
 
     // Bad token -> 1, connection kept.
     sock.write_all(&join(99)).await.unwrap();
@@ -1128,5 +1188,56 @@ async fn socket_round_trip() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(server.streams.connections.is_empty());
+    task.abort();
+}
+
+#[tokio::test]
+async fn socket_unknown_packet_before_join_closes() {
+    let server = Arc::new(test_server());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(super::listener::serve_listener(server.clone(), listener));
+
+    let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
+    sock.write_all(&hex("03 00  0B 00  FF")).await.unwrap();
+    let mut rest = Vec::new();
+    let n = tokio::time::timeout(Duration::from_secs(5), sock.read_to_end(&mut rest))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(n, 0);
+    for _ in 0..50 {
+        if server.streams.connections.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(server.streams.connections.is_empty());
+    task.abort();
+}
+
+#[tokio::test]
+async fn socket_closes_connections_that_never_join() {
+    let server = Arc::new(test_server());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(super::listener::serve_listener_with(
+        server.clone(),
+        listener,
+        Duration::from_millis(100),
+    ));
+
+    // A silent peer, and one stuck in the middle of a frame.
+    let mut idle = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut partial = tokio::net::TcpStream::connect(addr).await.unwrap();
+    partial.write_all(&hex("2F 00  02 00")).await.unwrap();
+    for sock in [&mut idle, &mut partial] {
+        let mut rest = Vec::new();
+        let n = tokio::time::timeout(Duration::from_secs(5), sock.read_to_end(&mut rest))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(n, 0);
+    }
     task.abort();
 }

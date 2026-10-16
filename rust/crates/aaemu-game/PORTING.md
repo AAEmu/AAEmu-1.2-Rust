@@ -635,6 +635,14 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * net (game connections): sending never blocks and C# had no limit; here a client with more than
   16 MiB queued, or one that accepts no data for 20 s, is disconnected (`net::outbox`,
   `net::listener`). Broadcasts encode a packet once for all recipients.
+* stream (`:1250`, public): a stream connection that has not completed `CTJoin` and sends an
+  unknown opcode (or a frame shorter than an opcode) is closed, logged at `warn`; C#
+  `HandleUnknownPacket` logged at error and kept the connection. A connection that does not join
+  within 30 s of connecting (`stream::listener::JOIN_TIMEOUT`, also covers a stuck partial frame)
+  is closed. Joined connections keep the C# behaviour (log and ignore). Unknown-packet dumps
+  (stream, game, login, login<->game link) are capped to 64 bytes plus the total length
+  (`aaemu_commons::net::hex_dump`) so a peer cannot flood the log; a malformed stream packet body
+  logs at `warn`, and an unjoined connection's read failure no longer logs at `error`.
 * systems::skills (character creation): the chosen ability's first starting spell occupies
   hotbar slot 1. The shared action originally assigned there moves to the starter's free slot,
   retaining the other authored utility and supply shortcuts. Further starting spells skip

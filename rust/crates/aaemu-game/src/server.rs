@@ -183,12 +183,7 @@ impl GameServer {
                 let known = opcodes::name_of(names, raw.opcode)
                     .map(|n| format!(" ({n}: not ported yet)"))
                     .unwrap_or_default();
-                let dump: String = raw
-                    .body
-                    .unread()
-                    .iter()
-                    .map(|b| format!("{b:02x} "))
-                    .collect();
+                let dump = aaemu_commons::net::hex_dump(raw.body.unread());
                 tracing::error!(
                     "Unknown packet 0x{:02x}({}){} from {}:\n{}",
                     raw.opcode,
