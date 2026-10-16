@@ -1508,6 +1508,16 @@ fn subscribe_triggers(server: &GameServer, owner: &WorldObject, b: &Buff) {
     if templates.is_empty() {
         return;
     }
+    // `BuffTrigger.Execute` only warns and returns when the owner is not a Unit (a doodad hit by
+    // an area skill), so such a trigger can never run: do not subscribe it.
+    if !owner.is_unit() {
+        tracing::trace!(
+            "Buff {} on non-unit owner {}: triggers not subscribed",
+            b.template.id,
+            owner.obj_id()
+        );
+        return;
+    }
     let mut subs = server
         .systems
         .skills
@@ -1638,7 +1648,11 @@ fn execute_trigger(
     amount: i32,
 ) {
     if !owner.is_unit() {
-        tracing::warn!("Owner is not a Unit");
+        tracing::warn!(
+            "Owner is not a Unit (buff {}, owner obj {})",
+            b.template.id,
+            owner.obj_id()
+        );
         return;
     }
     let data = &server.game_data.systems.skills;
