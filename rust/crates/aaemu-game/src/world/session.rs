@@ -811,14 +811,15 @@ pub async fn move_unit(server: &GameServer, conn: &mut GameConnection, obj_id: u
                 let t = target.transform();
                 (t.x, t.y, t.z)
             };
-            // A 1.2 gcFlags=1 actor sends its primary position in the supporting
-            // object's frame and the auxiliary position in world coordinates. If
-            // the parent has disappeared, use the world backup rather than placing
-            // the character's small deck offset at the world origin.
+            // An actor standing on an object sends its primary position in the
+            // supporting object's frame and the auxiliary position in world
+            // coordinates, whatever the object kind (gcFlags 1 unit, 2 gimmick,
+            // 4 doodad). If that object is unknown or has disappeared, use the
+            // world backup rather than placing the character's small offset at
+            // the world origin (under the sea).
             let missing_parent = target.transform().parent_obj_id == 0
                 && u.actor_flags
-                    .contains(MoveTypeActorFlags::STANDING_ON_OBJECT)
-                && u.gc_flags & 1 != 0;
+                    .contains(MoveTypeActorFlags::STANDING_ON_OBJECT);
             let (x, y, z, rx, ry, rz) = if missing_parent {
                 (
                     u.x2,

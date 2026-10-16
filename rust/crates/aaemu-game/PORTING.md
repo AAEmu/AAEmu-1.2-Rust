@@ -360,9 +360,13 @@ checks both placements, settled draft and driven motion at two headings.
 The server's ship transform now uses the same visual quaternion as its movement packet. This
 fixes the mirrored C# yaw-in-pitch bug for attached passengers and parts without changing the
 wire order; a placement test compares the transform and quantized packet quaternion.
-Standing-on-object movement preserves the current parent for `GcId == 1`. Captured 1.2
-`gcFlags=1` packets carry a primary local position and an auxiliary world position; a late
-packet whose supporting object has disappeared uses the world backup. A packet-flow test
+Standing-on-object movement preserves the current parent for `GcId == 1`. Every packet with
+actor flag 0x20 carries a primary position local to the supporting object and an auxiliary world
+position; `gcFlags` only selects the id space of `GcId` (1 unit, 2 gimmick, 4 doodad — 10.x
+`x2game-dev_dedicate` writer/readers, matching captured 1.2 ship and seat-doodad packets). A
+packet whose supporting object is unknown or has disappeared uses the world backup for any
+`gcFlags`; only the unit case did before, so standing on an unresolved doodad placed the
+character at the world origin, under the sea (false `SCUnderWaterPacket` on dry land). A packet-flow test
 checks a rotated ship, the current-parent sentinel, walking off with a stale header flag and
 the missing-parent backup. This fixes false origin jumps when leaving a ship.
 Seated slave passengers ignore late unit walking updates until the ordinary discard clears

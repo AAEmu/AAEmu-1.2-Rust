@@ -174,3 +174,78 @@ async fn actor_standing_without_header_rejects_missing_self_and_unattached_senti
         close(position.y, 1001.0);
     }
 }
+
+/// A move standing on a doodad, as the 1.2 client sends it: `gcFlags=4`, `gcPartId=0`, the
+/// primary position in the doodad's frame and the auxiliary one in world coordinates (captured
+/// sitting on a ship seat doodad: primary `(0.19, 0.002, 0.565)`, auxiliary `(15502.2, 15515.1,
+/// 102.1)`).
+fn doodad_frame_packet(gc_id: u32) -> CSMoveUnitPacket {
+    let mut movement = MoveType::new(MoveKind::Unit(UnitMove {
+        x: 0.19,
+        y: 0.002,
+        z: 0.565,
+        rotation_z: 32,
+        actor_flags: MoveTypeActorFlags::STANDING_ON_OBJECT,
+        gc_flags: 4,
+        gc_id,
+        x2: 1002.0,
+        y2: 1001.0,
+        z2: 102.0,
+        rotation_z2: 64,
+        ..Default::default()
+    }));
+    movement.flags = MoveTypeFlags::STANDING_ON_OBJECT;
+    serialized(CSMoveUnitPacket {
+        obj_id: PA,
+        move_type: movement,
+    })
+}
+
+#[tokio::test]
+async fn doodad_frame_move_without_its_doodad_uses_the_world_position() {
+    // The supporting doodad is unknown here (never spawned, or already removed): the small
+    // doodad-frame offset is not a world position. Using it put the character at the world
+    // origin, below the sea, and sent `SCUnderWaterPacket` on dry land.
+    let (server, mut client, player, _boat) = fixture();
+    let world = server.world.world(0).unwrap();
+    let me = WorldObject::from(&player);
+    doodad_frame_packet(0x999)
+        .handle(&server, &mut client.conn)
+        .await
+        .unwrap();
+    assert!(!player.data().unit.is_under_water);
+    let t = me.transform();
+    assert_eq!((t.parent_obj_id, t.x, t.y), (0, 1002.0, 1001.0));
+    close(t.z, 102.0);
+    let position = world.world_pos_rot(&me);
+    close(position.z, 102.0);
+}
+
+#[tokio::test]
+async fn removed_supporting_doodad_does_not_put_the_character_under_water() {
+    let (server, mut client, player, _boat) = fixture();
+    let world = server.world.world(0).unwrap();
+    let me = WorldObject::from(&player);
+    let mut seat = crate::models::doodad::Doodad::new(777);
+    seat.transform.set_xyz(1001.8, 1001.0, 101.435);
+    let seat = Entity::new(0x400, seat);
+    world.spawn(&seat, &server.view_ctx());
+    doodad_frame_packet(seat.obj_id)
+        .handle(&server, &mut client.conn)
+        .await
+        .unwrap();
+    assert_eq!(me.transform().parent_obj_id, seat.obj_id);
+    close(world.world_pos_rot(&me).z, 102.0);
+    assert!(!player.data().unit.is_under_water);
+
+    // The doodad goes away (used, despawned) while the client still reports standing on it.
+    world.remove_object(seat.obj_id);
+    doodad_frame_packet(seat.obj_id)
+        .handle(&server, &mut client.conn)
+        .await
+        .unwrap();
+    let t = me.transform();
+    assert_eq!((t.parent_obj_id, t.x, t.y), (0, 1002.0, 1001.0));
+    close(world.world_pos_rot(&me).z, 102.0);
+    assert!(!player.data().unit.is_under_water);
+}

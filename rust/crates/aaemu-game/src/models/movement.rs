@@ -383,12 +383,13 @@ pub struct UnitMove {
     pub actor_flags: MoveTypeActorFlags,
     /// `actor.fallVel`, present when `actor_flags & 0x80`.
     pub fall_vel: u16,
-    /// `actor.gcFlags`, present when `actor_flags & 0x20`.
+    /// `actor.gcFlags`, present when `actor_flags & 0x20`: the id space of `gc_id`
+    /// (lowest set bit wins: 1 unit, 2 gimmick, 4 doodad).
     pub gc_flags: u8,
     /// `actor.gcPartId`, present when `actor_flags & 0x20`.
     pub gc_part_id: u16,
     /// Auxiliary gc frame (`ix`/`iy`/`iz`), present when `actor_flags & 0x20`.
-    /// With `gc_flags & 1`, this is the world position; the primary position is relative.
+    /// This is the world position; the primary position is relative to the supporting object.
     pub x2: f32,
     pub y2: f32,
     pub z2: f32,

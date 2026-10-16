@@ -25,9 +25,10 @@ pub fn on_unit_moved(
     };
     let sys = &server.systems.ai.collision;
     let obj_id = unit.obj_id();
-    // A gcFlags=1 deck update carries primary coordinates in the supporting
-    // object's frame. Session already applied that local transform: compose it
-    // here instead of placing the physics proxy near the world origin.
+    // A standing-on-object update (any gcFlags kind) carries primary coordinates
+    // in the supporting object's frame. Session already applied that local
+    // transform: compose it here instead of placing the physics proxy near the
+    // world origin.
     let parented = unit.transform().parent_obj_id != 0;
     let (x, y, z) = if parented {
         let pos = world.world_pos_rot(unit);
@@ -35,7 +36,6 @@ pub fn on_unit_moved(
     } else if u
         .actor_flags
         .contains(MoveTypeActorFlags::STANDING_ON_OBJECT)
-        && u.gc_flags & 1 != 0
     {
         // A late frame after the supporting object vanished still has a world
         // backup; its primary deck offset is no longer a world position.
