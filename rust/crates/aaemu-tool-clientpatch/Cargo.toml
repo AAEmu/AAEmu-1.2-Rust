@@ -1,0 +1,30 @@
+[package]
+name = "aaemu-tool-clientpatch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Backport bundle pipeline: patch game_pak files and compact.sqlite3 (pak add/restore, SQL patch applier, bundle build/apply)"
+
+[lib]
+name = "aaemu_clientpatch"
+path = "src/lib.rs"
+
+[[bin]]
+name = "aaemu-clientpatch"
+path = "src/main.rs"
+
+[dependencies]
+aaemu-commons.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+sha2.workspace = true
+hex.workspace = true
+roxmltree.workspace = true
+md-5 = "0.10"
+
+[dev-dependencies]
+chrono.workspace = true

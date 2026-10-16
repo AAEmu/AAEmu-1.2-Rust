@@ -1,0 +1,18 @@
+{
+  "name": "housing-thatched",
+  "version": "1",
+  "description": "Thatched Farmhouse family (housings 171,330,402,403,404,417,418,419,432,433,434): tier-2 farms with bound doodads, rebuild data, assets.",
+  "sql": [
+    "sql/001_housing_thatched.sql",
+    {
+      "file": "sql/002_housing_rebuild_server.sql",
+      "targets": [
+        "server"
+      ]
+    }
+  ],
+  "assets": {
+    "donor_files": "assets.txt",
+    "prefab_subsets": "prefab_subsets.tsv"
+  }
+}
