@@ -501,3 +501,44 @@ fn real_nav_pak_random_chase_routes_stay_short() {
     );
     assert!(worst_new <= 1.5, "worst route x{worst_new}");
 }
+
+/// Wall time of the lazy navmesh cell loads the AI tick runs on first contact with a cell:
+/// the three `files_in_directory` scans per path folder and the whole `cell_bai` load.
+/// Run with `--release` for production-like numbers:
+/// `AAEMU_GAME_PAK=D:\AA1.2\game_pak cargo test -p aaemu-game --release real_nav_pak_cell_load_timing -- --ignored --nocapture`
+#[test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+fn real_nav_pak_cell_load_timing() {
+    let Ok(pak) = std::env::var("AAEMU_GAME_PAK") else {
+        return;
+    };
+    let app = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("app");
+    let files = Arc::new(ClientFileManager::from_sources(&[pak], &app));
+    let worlds = WorldTemplates::load(&files, &app).expect("world templates");
+    let main = worlds
+        .get_world_template_by_name("main_world")
+        .expect("main_world");
+    let t = std::time::Instant::now();
+    for _ in 0..10 {
+        let n = files
+            .files_in_directory(
+                "game/worlds/main_world/paths/036_056",
+                "netmission*.bai",
+                true,
+            )
+            .len();
+        assert!(n > 0);
+    }
+    println!(
+        "files_in_directory (one folder, one pattern): {:?} per call",
+        t.elapsed() / 10
+    );
+    let bai: Arc<dyn BaiFiles + Send + Sync> = Arc::new(ClientBaiFiles(files.clone()));
+    let g = AiGeoData::new(main, true, bai, Arc::new(UsedAreaNames::default()), None);
+    for cell in [(9, 14), (10, 14), (9, 15), (12, 13), (20, 20)] {
+        let t = std::time::Instant::now();
+        g.cell_bai(cell.0, cell.1).expect("cell");
+        println!("cell_bai{cell:?}: {:?}", t.elapsed());
+    }
+    println!("graph: {:?}", g.graph().stats);
+}

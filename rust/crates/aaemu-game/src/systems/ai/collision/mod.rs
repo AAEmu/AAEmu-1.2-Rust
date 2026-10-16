@@ -273,6 +273,13 @@ pub fn load_cell(server: &GameServer, pw: &PhysWorld, cell: (i32, i32)) {
         pw.wait_loaded(cell);
         return;
     }
+    let _log_load = crate::systems::ai::geodata::manager::LoadTimer {
+        what: "collision cell",
+        world: &pw.world_name,
+        cell,
+        started: std::time::Instant::now(),
+        min_ms: 50,
+    };
     let level = server.config.physics.geometry;
     let content = if level == GeometryLevel::Terrain {
         world::CellContent {

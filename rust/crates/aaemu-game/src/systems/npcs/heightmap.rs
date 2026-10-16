@@ -566,6 +566,13 @@ impl WorldHeightmap {
         if let Some(h) = slot.loaded.get() {
             return Ok(h.as_deref());
         }
+        let _log_load = crate::systems::ai::geodata::manager::LoadTimer {
+            what: "heightmap cell",
+            world: &self.name,
+            cell: (cell_x, cell_y),
+            started: std::time::Instant::now(),
+            min_ms: 50,
+        };
         match load_cell_height_map(
             files,
             &self.name,

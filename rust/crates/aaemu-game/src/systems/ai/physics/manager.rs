@@ -502,23 +502,33 @@ impl WorldPhysics {
                 previous: Duration::ZERO,
                 period: target,
             };
+            // The previous iteration's `run_world_tick` time: a slow period is either that work
+            // overrunning or the sleep overshooting (scheduler), which the warning tells apart.
+            let mut last_work = Duration::ZERO;
             loop {
                 let wait = clock.wait(origin.elapsed());
+                let slept_from = Instant::now();
                 if !wait.is_zero() {
                     std::thread::sleep(wait);
                 }
+                let slept = slept_from.elapsed();
                 let total = clock.advance(origin.elapsed());
                 if total > target.as_millis() as i64 * 2 {
                     tracing::warn!(
-                        "Physics thread is running slow at {} / {} ms",
+                        "Physics thread is running slow at {} / {} ms (previous tick work {} ms, slept {} ms for a {} ms wait)",
                         total,
-                        target.as_millis()
+                        target.as_millis(),
+                        last_work.as_millis(),
+                        slept.as_millis(),
+                        wait.as_millis()
                     );
                 }
                 let (Some(server), Some(wp)) = (server.upgrade(), me.upgrade()) else {
                     return;
                 };
+                let work_started = Instant::now();
                 super::run_world_tick(&server, &wp, total);
+                last_work = work_started.elapsed();
             }
         });
         if let Err(e) = spawned {
