@@ -2459,6 +2459,91 @@ async fn select_hook_loads_rows_and_sends() {
     super::on_leave_world(&server, 1);
 }
 
+/// Waits for the 1 ms `QuestManagerRunQueueTask` (and anything it spawned) to run.
+async fn let_queue_run() {
+    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+}
+
+#[tokio::test]
+async fn select_evaluations_wait_for_notify_in_game_completed() {
+    let (server, _rec) = server_with(main_quest);
+    // The quest system must be able to schedule `QuestManagerRunQueueTask` (set by `start`).
+    let server = Arc::new(server);
+    let _ = server.systems.quests.server.set(Arc::downgrade(&server));
+    let mut client = TestClient::new(&server, 1, 1001);
+    let mut c = character();
+    let mut r = row();
+    r.time_ms = 0;
+    c.quests.active = vec![r];
+    let player = spawn_player(&server, &client, c, 0x100);
+    client.conn.active_char = Some(player.clone());
+    client.drain();
+
+    // CSSelectCharacter -> Quests.Load requests the evaluation of the progress quest.
+    super::on_character_selected(&server, &player);
+    assert_eq!(server.systems.quests.deferred_count(), 1);
+    let_queue_run().await;
+    // Nothing reaches the client before it is in the world.
+    assert_eq!(server.systems.quests.deferred_count(), 1);
+    assert!(
+        !client
+            .drain_ops()
+            .contains(&sc::SCQuestContextUpdatedPacket),
+        "SCQuestContextUpdated sent before CSNotifyInGameCompleted"
+    );
+    // A second request for the same quest does not duplicate the parked entry.
+    server
+        .systems
+        .quests
+        .enqueue_evaluation(&player, server.systems.quests.queued_handles(1)[0]);
+    assert_eq!(server.systems.quests.deferred_count(), 1);
+
+    // CSNotifyInGameCompleted releases it.
+    crate::world::session::notify_in_game_completed(&server, &mut client.conn);
+    assert_eq!(server.systems.quests.deferred_count(), 0);
+    let_queue_run().await;
+    assert_eq!(server.systems.quests.queued_count(), 0);
+    assert!(
+        client
+            .drain_ops()
+            .contains(&sc::SCQuestContextUpdatedPacket),
+        "the deferred evaluation must run after CSNotifyInGameCompleted"
+    );
+
+    // A later NotifyInGameCompleted (world switch) neither re-parks nor loses evaluations.
+    let h = server.systems.quests.queued_handles(1);
+    assert!(h.is_empty());
+    let h = events::with_quests(&server, &player, None, |ctx| ctx.new_quest(100, 1)).unwrap();
+    server.systems.quests.enqueue_evaluation(&player, h);
+    assert_eq!(server.systems.quests.deferred_count(), 0);
+    crate::world::session::notify_in_game_completed(&server, &mut client.conn);
+    let_queue_run().await;
+    assert_eq!(server.systems.quests.queued_count(), 0);
+    super::on_leave_world(&server, 1);
+}
+
+#[tokio::test]
+async fn leaving_before_in_game_drops_deferred_evaluations() {
+    let (server, _rec) = server_with(main_quest);
+    let mut client = TestClient::new(&server, 1, 1001);
+    let mut c = character();
+    let mut r = row();
+    r.time_ms = 0;
+    c.quests.active = vec![r];
+    let player = spawn_player(&server, &client, c, 0x100);
+    client.drain();
+    super::on_character_selected(&server, &player);
+    assert_eq!(server.systems.quests.deferred_count(), 1);
+    super::on_leave_world(&server, 1);
+    assert_eq!(server.systems.quests.queued_count(), 0);
+    // A completion that arrives afterwards has nothing to run.
+    super::on_in_game_completed(&server, 1);
+    let_queue_run().await;
+    assert!(!client
+        .drain_ops()
+        .contains(&sc::SCQuestContextUpdatedPacket));
+}
+
 // ----- real compact.sqlite3 -----
 
 fn real_db() -> Option<rusqlite::Connection> {
