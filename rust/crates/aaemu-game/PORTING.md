@@ -1397,6 +1397,10 @@ and in NPC wandering / buff remaining times.
   the moved source item and passes `fromSlot` as the previous slot of the target item's leave
   event; `CSWithdrawMoneyPacket` reports `ItemTaskType.DepositMoney`; `ExpandSlot` never sends its
   `MoneyChange` task.
+* systems::economy: the two "is not welcome in this container" rejections of `SplitOrMoveItemEx`
+  (an item the target / source container refuses, e.g. armor sent to a wrong equipment slot) are
+  logged at `warn` (C#: `Error`) and include the whole request (from / to type, slot, item ids,
+  owner). The client is the source of the request and `CanAccept` already warns with the cause.
 * systems::economy: `BindType.HasFlag(...)` on the plain `ItemBindType` enum is a bit test
   (`BindOnUnpack` matches 4..7, `BindOnEquip` matches 3 and 7); mirrored.
 * systems::economy: `CSBuyItems` refuses only when money, honor *and* vocation are all short;

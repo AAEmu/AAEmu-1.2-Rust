@@ -630,20 +630,23 @@ pub fn split_or_move_item_ex(
         // Check if containers can accept the items
         if let Some(f) = &from_item {
             if !dref.can_accept(f, data.template(f.template_id), i32::from(to_slot)) {
-                tracing::error!(
-                    "SplitOrMoveItem - fromItemId {from_item_id} is not welcome in this container {} ({}).",
+                // C# logged this at Error; a client-driven rejection is a warning here.
+                tracing::warn!(
+                    "SplitOrMoveItem - fromItemId {from_item_id} is not welcome in this container {} ({}). Request: from {from_type}:{from_slot} => toItemId {to_item_id} {to_type}:{to_slot}, owner {}.",
                     dref.slot_type,
-                    dref.container_id
+                    dref.container_id,
+                    inv.character_id
                 );
                 return false;
             }
         }
         if let Some(t) = &target_item {
             if !s.can_accept(t, data.template(t.template_id), i32::from(from_slot)) {
-                tracing::error!(
-                    "SplitOrMoveItem - toItemId {to_item_id} is not welcome in this container {} ({}).",
+                tracing::warn!(
+                    "SplitOrMoveItem - toItemId {to_item_id} is not welcome in this container {} ({}). Request: fromItemId {from_item_id} {from_type}:{from_slot} => {to_type}:{to_slot}, owner {}.",
                     s.slot_type,
-                    s.container_id
+                    s.container_id,
+                    inv.character_id
                 );
                 return false;
             }
