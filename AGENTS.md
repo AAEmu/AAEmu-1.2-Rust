@@ -26,12 +26,15 @@ Guidance for coding agents working in this repository.
   lightweight orientation, coordination, diff/evidence review and the checks needed to verify a
   worker for itself.
 - Run **one small task per worker at a time**; launch as many workers in parallel as the work's
-  independence and the machine allow (~7 GB free RAM, C: nearly full; builds serialize on the shared
-  target dir). Give each worker one independently reviewable objective.
+  independence and the machine allow (~7 GB free RAM, C: nearly full, limited space on D:).
+  Give each worker one independently reviewable objective.
 - Give parallel workers non-overlapping file ownership. Each implementation worker gets its **own
   git worktree on D:** — `git worktree add D:/aaemu-wt/<name> -b <type>/<name> rust-rewrite`, plus
-  an untracked `rust/.cargo/config.toml` copied from an existing worktree with
-  `target-dir = "D:/aaemu-target/fanout"` (shared by all workers so cargo's lock serializes builds).
+  an untracked `rust/.cargo/config.toml` copied from an existing worktree with its **own**
+  `target-dir = "D:/aaemu-target/<name>"` (delete it when the worktree is merged). Do not share one
+  target dir between worktrees: they build identically named artifacts, cargo's mtime fingerprints
+  then miss edits and tests silently run another worktree's code. D: has room for only a few
+  target dirs (~10 GB each), so limit concurrent implementation workers accordingly.
   Never edit files another session has uncommitted changes in. The orchestrator merges the branches
   back into `rust-rewrite` and removes the worktrees afterwards.
 - Continue a worker with `SendMessage` for sequential small tasks in the same subject (it keeps its
