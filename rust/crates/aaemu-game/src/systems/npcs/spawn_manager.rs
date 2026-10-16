@@ -1820,16 +1820,24 @@ impl SpawnManager {
                     }
                 }
             }
+            // A stale corpse handle must not release the id (or drop the spawner link) of the
+            // live NPC that reused it.
+            let superseded = e
+                .obj
+                .as_npc()
+                .is_some_and(|n| super::npc::spawner::npc_superseded(server, n));
             // DoodadSpawner owns its ID release and may retain it for a pending respawn.
-            if !matches!(
-                (&e.link, &e.obj),
-                (SpawnerLink::Doodad(_), WorldObject::Doodad(_))
-            ) && !self
-                .respawns
-                .lock()
-                .expect("poisoned")
-                .get(&e.obj.obj_id())
-                .is_some_and(|r| matches!(r.link, SpawnerLink::Npc(_)) && r.obj.same(&e.obj))
+            if !superseded
+                && !matches!(
+                    (&e.link, &e.obj),
+                    (SpawnerLink::Doodad(_), WorldObject::Doodad(_))
+                )
+                && !self
+                    .respawns
+                    .lock()
+                    .expect("poisoned")
+                    .get(&e.obj.obj_id())
+                    .is_some_and(|r| matches!(r.link, SpawnerLink::Npc(_)) && r.obj.same(&e.obj))
             {
                 server.ids.object.release_id(e.obj.obj_id());
                 forget_object(server, e.obj.obj_id());
