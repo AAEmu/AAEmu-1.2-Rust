@@ -98,6 +98,8 @@ pub struct System {
     pub collision: collision::CollisionSystem,
     /// `Data/Path` (set at start).
     paths_folder: Mutex<Option<PathBuf>>,
+    /// Route file names already reported as missing (see [`System::first_missing_path`]).
+    missing_paths: Mutex<std::collections::HashSet<String>>,
 }
 
 impl System {
@@ -122,6 +124,15 @@ impl System {
     pub fn set_paths_folder(&self, folder: PathBuf) {
         self.paths.set_folder(&folder);
         *self.paths_folder.lock().expect("paths folder poisoned") = Some(folder);
+    }
+
+    /// True the first time route file `name` is reported missing, false afterwards, so the
+    /// warning is logged once per file name instead of on every trigger.
+    pub fn first_missing_path(&self, name: &str) -> bool {
+        self.missing_paths
+            .lock()
+            .expect("missing paths poisoned")
+            .insert(name.to_string())
     }
 
     /// `Data/Path`.

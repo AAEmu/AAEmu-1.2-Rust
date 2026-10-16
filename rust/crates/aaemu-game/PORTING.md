@@ -1187,6 +1187,15 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   diagnostics now report plan, tick and maintenance time with active-work counts. Parallel tick
   time is elapsed batch time, including dispatch and await overhead, rather than summed job time.
 
+* systems::ai (2026-10-16): retail NPC route files are not shipped (`Data/Path` has 13 files, while
+  `ai_commands` references 280 distinct FollowPath names such as `public_mate2`, `public_garden3`
+  and `tuto_move`). As in the C# (`Simulation.GoToPath`: warn and return, the NPC stays put and
+  keeps `IsInPatrol`), `Simulation` stops without moving, but the "Stop moving... no recorded
+  path file" warning is now logged once per file name (`System::first_missing_path`) and at debug
+  afterwards, since a repeating skill such as the tutorial NPC's `tuto_move` fired it every 30 s.
+  The `Impossible to parse npc_ai_params` warning now names the compact patch that repairs rows
+  443, 835 and 1975.
+
 * systems::npcs (2026-10-15): `DoodadFuncClout` with `UseOriginSource` takes the first doodad
   within 4 m of the caster as the area trigger's owner, and the C# scheduled the
   `DoodadFuncCloutTask` on that owner, so it changed that doodad's phase to the clout's
