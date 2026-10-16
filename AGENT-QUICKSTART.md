@@ -7,26 +7,46 @@ Both clients, the 10.x zone reference binaries, IDA databases and all reverse-en
 
 ## TL;DR
 
+Every session works in its own lane (rules: [`AGENTS.md`](AGENTS.md) → "Sessions work in lanes"):
+
+```bash
+Scripts/lane.sh gc                  # leftovers of old sessions (dry run; --apply deletes them)
+Scripts/lane.sh new <name> --type fix   # worktree D:/aaemu-wt/<name>, target D:/aaemu-target/<name>,
+                                    # runtime D:/aaemu-live-<name>, DBs lane_<name>_*, ports <prefix>xxx
+cd D:/aaemu-wt/<name>               # everything below runs from here
+Scripts/lane.sh info                # this lane's paths and ports
+Scripts/lane.sh sync && Scripts/lane.sh check   # latest rust-rewrite merged in + cargo xtask ci
+Scripts/lane.sh land                # merge into rust-rewrite and delete the whole lane
+Scripts/lane.sh list                # what lanes exist (yours must be gone when you are done)
+```
+
+The live stack, from inside the lane (it picks up the lane's ports, dirs and databases):
+
 ```bash
 Scripts/live-stack.sh build    # `live` profile build of all binaries (~12 min cold, ~2.5 min after an edit)
-Scripts/live-stack.sh sync     # copy rust/crates/*/app configs + data into the runtime dirs
-Scripts/live-stack.sh start    # private MySQL + login + game; returns when the game registered (~1 min)
-Scripts/live-stack.sh client   # starts the real 1.2 client, already logged in (ticket handoff)
+Scripts/live-stack.sh sync     # copy rust/crates/*/app configs + data (+ shared compact.sqlite3) into the runtime dirs
+Scripts/live-stack.sh start    # copies the binaries to <runtime>/bin, creates the lane DBs on first start,
+                               # starts login + game; returns when the game registered (~1 min)
+Scripts/live-stack.sh client   # starts the real 1.2 client against this lane, already logged in
 Scripts/live-stack.sh status   # what is up + last log lines
-Scripts/live-stack.sh shot     # screenshot -> D:/aaemu-live/shots/now.png (open it to see the client)
-Scripts/live-stack.sh stop     # client, both servers, private MySQL
+Scripts/live-stack.sh shot     # screenshot -> <runtime>/shots/now.png (open it to see the client)
+Scripts/live-stack.sh stop     # this lane's client + servers only (MySQL stays up for everyone)
 ```
 
 After a schema change or when the databases are in a bad state: `stop`, then `db-reset`, then
-`start` (this wipes the throwaway test accounts and characters).
+`start` (this wipes the lane's throwaway test accounts and characters). Without a lane (the
+integration checkout) the same commands drive the old shared stack in `D:\aaemu-live` on 21xxx;
+sessions do not use it.
 
 ## Where things are (this machine)
 
 | What | Path |
 |---|---|
-| Repo (Rust only, branch `rust-rewrite`) | `C:\Users\messe\Documents\GitHub\AAEmu-rust-1.2` — pushed to the user's fork `https://github.com/NickMesser/AAEmu` (remote `fork`). Never push to `origin`/`upstream` (AAEmu/AAEmu). |
-| Cargo build output | `D:\aaemu-target\main` (set in the untracked `rust/.cargo/config.toml`) |
-| Runtime dirs, logs, MySQL data | `D:\aaemu-live\{rs-login,rs-game,logs,mysql,shots}` |
+| Integration checkout (branch `rust-rewrite`, receives `lane.sh land` only) | `C:\Users\messe\Documents\GitHub\AAEmu-rust-1.2` — pushed to the user's fork `https://github.com/NickMesser/AAEmu` (remote `fork`). Never push to `origin`/`upstream` (AAEmu/AAEmu). |
+| Lane worktrees / registry | `D:\aaemu-wt\<name>` / `D:\aaemu-lanes\<name>.env` |
+| Cargo build output | `D:\aaemu-target\<lane>` (lane's untracked `rust/.cargo/config.toml`; the integration checkout uses `D:\aaemu-target\main`) |
+| Lane runtime dirs (configs, binaries, logs, shots) | `D:\aaemu-live-<lane>\{rs-login,rs-game,bin,logs,shots}` |
+| Shared MySQL data (private instance) | `D:\aaemu-live\mysql` |
 | Secrets (DB password, test account password) | `D:\aaemu-live\cfg\` and the runtime `Config.Local.json` files — never print or commit them |
 | 1.2 client (read-only) | `D:\AA1.2` (`bin32\archeage.exe`, `game_pak`) |
 | Server game DB | `rust/crates/aaemu-game/app/Data/compact.sqlite3` (git-ignored; source archive: `C:\Users\messe\Documents\MEGA downloads\ArcheAge_Server_Compact_r208088_v1.2.4.13_update_2026-01-23.7z`) |
@@ -37,9 +57,10 @@ After a schema change or when the databases are in a bad state: `stop`, then `db
 
 | Service | Address |
 |---|---|
-| Private MySQL | `127.0.0.1:3317` (root without password, loopback only) |
-| Login (client) / internal | `127.0.0.1:21237` / `21234` |
-| Game / stream / web API | `127.0.0.1:21239` / `21250` / `21280` |
+| Private MySQL (shared by all lanes) | `127.0.0.1:3317` (root without password, loopback only) |
+| Lane stack: login (client) / internal | `127.0.0.1:<p>237` / `<p>234`, `<p>` = the lane's prefix 24–39 (`lane.sh info`) |
+| Lane stack: game / stream / web API | `127.0.0.1:<p>239` / `<p>250` / `<p>280` |
+| Old shared stack (integration checkout, not for sessions) | `21xxx`; `22xxx`/`23xxx` are taken by older ad-hoc stacks |
 
 ## The real client
 
@@ -57,16 +78,22 @@ After a schema change or when the databases are in a bad state: `stop`, then `db
 
 ## Rules that bite
 
-- **C: is nearly full.** Build output, logs and data go on D: (`target-dir` in the untracked
-  `rust/.cargo/config.toml`, which also sets `jobs = 2` and the `rust-lld` linker); delete
-  per-agent target dirs when done. The live stack runs the `live` profile (opt-level 1,
-  incremental) from `D:\aaemu-target\main\live`; `AAEMU_PROFILE=release` switches the script back.
+- **D: is nearly full and target dirs are huge** (10–90 GB each). Everything a session creates
+  lives in its lane and goes away with `lane.sh land` / `lane.sh done`; never leave a target dir,
+  runtime dir, database or dump behind. The lane's untracked `rust/.cargo/config.toml` sets its
+  own `target-dir`, `jobs = 4`, the `rust-lld` linker and line-tables-only debug info. The live
+  stack runs the `live` profile (opt-level 1, incremental); `AAEMU_PROFILE=release` switches it.
+- **Other sessions' stacks and clients run on the same machine.** Only stop your own
+  (`live-stack.sh stop`, `lane.sh done`); never `taskkill /IM aaemu-game.exe` / `archeage.exe`
+  and never shut down the shared MySQL (`stop --mysql` exists for the machine owner only).
+- **A fresh worktree has no `compact.sqlite3`** (git-ignored). `live-stack.sh sync` copies the shared
+  one from `D:\aaemu-live\rs-game\Data\`; real-data tests can point `AAEMU_COMPACT_DB` at it.
 - **The user's MySQL on port 3306 is off-limits.** Only use the private instance on 3317.
 - **`D:\AA1.2` and the 10.x folder are read-only.** The 10.x `dedicatedserver.exe` writes its log
   into the user's real `Documents\ArcheAge` — don't run it casually.
 - **Don't type passwords into any app UI**; use the launcher's ticket (`--password-file`).
 - Long `cargo test` runs: use `--release` for `aaemu-physics`; real-data tests are `#[ignore]`d and
-  need `AAEMU_COMPACT_DB=rust/crates/aaemu-game/app/Data/compact.sqlite3` (`-- --ignored`).
+  need `AAEMU_COMPACT_DB=D:/aaemu-live/rs-game/Data/compact.sqlite3` (`-- --ignored`).
 - CryPhysics oracle tests need `AAEMU_PHYS_ORACLE` (the real DLL harness, see
   `rust/crates/aaemu-physics/README.md`); without it they replay checked-in goldens.
 
