@@ -2,6 +2,17 @@
 
 Guidance for coding agents working in this repository.
 
+## Git remotes: push only to the fork
+
+- **Never push to `origin` or `upstream`** (both are `https://github.com/AAEmu/AAEmu.git`, the
+  upstream project). This covers every branch and tag, including branch deletions.
+- **Only ever push to `fork`** (`https://github.com/NickMesser/AAEmu.git`):
+  `git push -u fork <branch>`. Open pull requests from the fork.
+- This overrides `CONTRIBUTING.md`, which assumes your fork is called `origin`; in this checkout it
+  is not.
+- The push URLs of `origin` and `upstream` are disabled in the local git config (`no_push`). Do not
+  re-enable them.
+
 ## Workflow: Codex orchestrates and reviews, OpenCode runs the tasks
 
 - For work in this repository, Codex scopes, coordinates, and verifies the work, and uses the **OpenCode CLI** with the human's **OpenCode Go subscription** as the runner for almost all tasks — research and inspection, implementation, and routine command/validation execution: provider `opencode-go` (the Go subscription, not the paid standalone `opencode` provider), model `deepseek-v4.1-flash`, variant `max` (**DeepSeek V4.1 Flash, MAX reasoning**).
