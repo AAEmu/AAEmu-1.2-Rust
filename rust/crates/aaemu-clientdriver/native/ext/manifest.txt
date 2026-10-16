@@ -2,3 +2,4 @@
 # into the UI script state. core.lua must stay first. Adding a feature = one .lua file + one line.
 core.lua
 ext_debug.lua
+house_rebuild.lua
