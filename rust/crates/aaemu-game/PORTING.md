@@ -1253,6 +1253,15 @@ servers (see `rust/LIVE-TESTING.md`). Fixed porting bugs are in the git history 
   same (lowest free) connection id to the next client. C# then throws in `AddAccount` and stops
   answering the login server (every later enter-world is denied, the world shows as inactive).
   Rust replaces the stale entry and answers.
+* Quest evaluations requested while a character is selected but not yet in game are parked
+  until its `CSNotifyInGameCompletedPacket` (`systems::quests::on_in_game_completed`). The C#
+  `QuestManager.EnqueueEvaluation` ran `QuestManagerRunQueueTask` 1 ms after `Quests.Load`, so
+  `RunCurrentStep` sent `SCQuestContextUpdatedPacket` before `CSSpawnCharacterPacket`; the 1.2
+  client crashes (access violation) on that packet when the quest's component carries
+  `ai_command_set_id` / `play_cinema_before_bubble` (quest 63, component 8101). The same
+  updates now arrive right after the character is in the world. Entries of a character that
+  leaves first are dropped (`on_leave_world`); characters already in the world (world switches)
+  are unaffected. Quest timers expiring before the spawn are not deferred.
 
 Parity status of the scripted scenarios: `login`, `lobby` and `full` (fresh character) produce
 the same S->C traffic as the C# servers after id / time normalisation (0 findings); a second

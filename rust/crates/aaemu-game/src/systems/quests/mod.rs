@@ -35,7 +35,7 @@ mod schedule_tests;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::net::packet::LEVEL_PLAIN;
@@ -82,6 +82,11 @@ pub struct System {
     server: OnceLock<Weak<GameServer>>,
     /// `QuestManager.EvaluationQueue` (player, quest).
     queue: Mutex<VecDeque<(Weak<Player>, u32, QuestHandle)>>,
+    /// Characters that were selected but have not sent `CSNotifyInGameCompletedPacket` yet
+    /// (deviation, see `PORTING.md`): their evaluations wait in `deferred`.
+    entering: Mutex<HashSet<u32>>,
+    /// Evaluations requested for a character in `entering`; moved to `queue` once it is in game.
+    deferred: Mutex<VecDeque<(Weak<Player>, u32, QuestHandle)>>,
     /// Serializes `DoQueuedEvaluations`.
     draining: Mutex<()>,
     /// `QuestManager.QuestTimeoutTask` (character id -> quest timers, dictionary order).
@@ -170,13 +175,32 @@ impl System {
 
     /// `EnqueueEvaluation(quest)`: schedules `QuestManagerRunQueueTask` (1 ms) when the
     /// queue was empty.
+    ///
+    /// Deviation: for a character that was selected but has not completed entering the
+    /// world, the entry is parked (see [`System::begin_entering`]) instead; the client crashes
+    /// on an `SCQuestContextUpdatedPacket` that arrives before its world exists.
     pub fn enqueue_evaluation(&self, player: &PlayerRef, h: QuestHandle) {
+        {
+            let entering = self.entering.lock().expect("entering poisoned");
+            if entering.contains(&player.character_id) {
+                let mut d = self.deferred.lock().expect("deferred poisoned");
+                let id = player.character_id;
+                if !d.iter().any(|(_, c, x)| *c == id && *x == h) {
+                    d.push_back((Arc::downgrade(player), id, h));
+                }
+                return;
+            }
+        }
+        self.push_evaluation(Arc::downgrade(player), player.character_id, h);
+    }
+
+    /// The queue push of `EnqueueEvaluation` (and the task start when the queue was empty).
+    fn push_evaluation(&self, player: Weak<Player>, id: u32, h: QuestHandle) {
         let need_new_task = {
             let mut q = self.queue.lock().expect("queue poisoned");
             let need = q.is_empty();
-            let id = player.character_id;
             if !q.iter().any(|(_, c, x)| *c == id && *x == h) {
-                q.push_back((Arc::downgrade(player), id, h));
+                q.push_back((player, id, h));
             }
             need
         };
@@ -195,20 +219,74 @@ impl System {
         }
     }
 
-    /// The quests of one character waiting in the evaluation queue.
+    /// The quests of one character waiting in the evaluation queue (deferred ones included).
     pub fn queued_handles(&self, character_id: u32) -> Vec<QuestHandle> {
-        self.queue
+        let mut v: Vec<QuestHandle> = self
+            .queue
             .lock()
             .expect("queue poisoned")
             .iter()
             .filter(|(_, c, _)| *c == character_id)
             .map(|(_, _, h)| *h)
-            .collect()
+            .collect();
+        v.extend(
+            self.deferred
+                .lock()
+                .expect("deferred poisoned")
+                .iter()
+                .filter(|(_, c, _)| *c == character_id)
+                .map(|(_, _, h)| *h),
+        );
+        v
     }
 
-    /// Number of queued evaluations.
+    /// Number of queued evaluations (deferred ones included).
     pub fn queued_count(&self) -> usize {
-        self.queue.lock().expect("queue poisoned").len()
+        self.queue.lock().expect("queue poisoned").len() + self.deferred_count()
+    }
+
+    /// Number of evaluations parked until their character is in game.
+    pub fn deferred_count(&self) -> usize {
+        self.deferred.lock().expect("deferred poisoned").len()
+    }
+
+    /// `CSSelectCharacterPacket`: from now on evaluations of this character are parked until
+    /// [`System::finish_entering`] (its `CSNotifyInGameCompletedPacket`).
+    pub fn begin_entering(&self, character_id: u32) {
+        self.entering
+            .lock()
+            .expect("entering poisoned")
+            .insert(character_id);
+    }
+
+    /// `CSNotifyInGameCompletedPacket`: the character is in the world; its parked
+    /// evaluations join the queue (a no-op for a character that was not entering, e.g. a
+    /// world switch).
+    pub fn finish_entering(&self, character_id: u32) {
+        let parked: Vec<_> = {
+            let mut entering = self.entering.lock().expect("entering poisoned");
+            if !entering.remove(&character_id) {
+                return;
+            }
+            let mut d = self.deferred.lock().expect("deferred poisoned");
+            let (mine, rest): (VecDeque<_>, VecDeque<_>) =
+                d.drain(..).partition(|(_, c, _)| *c == character_id);
+            *d = rest;
+            mine.into()
+        };
+        for (weak, id, h) in parked {
+            self.push_evaluation(weak, id, h);
+        }
+    }
+
+    /// The character left before it was in game: nothing parked may leak.
+    fn forget_entering(&self, character_id: u32) {
+        let mut entering = self.entering.lock().expect("entering poisoned");
+        entering.remove(&character_id);
+        self.deferred
+            .lock()
+            .expect("deferred poisoned")
+            .retain(|(_, c, _)| *c != character_id);
     }
 
     /// `DoQueuedEvaluations`: runs `RunCurrentStep` for every queued quest (evaluations
@@ -353,7 +431,11 @@ pub fn daily_reset(server: &GameServer) {
 /// `CSSelectCharacterPacket` -> `Character.Load()`: `Quests.Load` (live quests from the
 /// loaded rows) + `Quests.CheckDailyResetAtLogin()`. Call after the `Player` exists and before
 /// `Quests.Send` (`SCQuestsPacket` uses the re-derived rows).
+///
+/// Deviation: the evaluations `Quests.Load` requests are parked until
+/// [`on_in_game_completed`] (C# ran them 1 ms after the load, before the client spawned).
 pub fn on_character_selected(server: &GameServer, player: &PlayerRef) {
+    server.systems.quests.begin_entering(player.character_id);
     events::with_quests(server, player, None, |ctx| {
         if !ctx.st.loaded {
             ctx.load_from_rows();
@@ -365,6 +447,13 @@ pub fn on_character_selected(server: &GameServer, player: &PlayerRef) {
 /// `EnterWorldManager.LeaveWorldTask`: `questManager.RemoveQuestTimer(activeChar.Id, 0)`.
 pub fn on_leave_world(server: &GameServer, character_id: u32) {
     server.systems.quests.remove_quest_timer(character_id, 0);
+    server.systems.quests.forget_entering(character_id);
+}
+
+/// `CSNotifyInGameCompletedPacket` (`WorldManager.OnPlayerJoin`): releases the evaluations
+/// parked since [`on_character_selected`].
+pub fn on_in_game_completed(server: &GameServer, character_id: u32) {
+    server.systems.quests.finish_entering(character_id);
 }
 
 /// Registers this subsystem's C->S packets.

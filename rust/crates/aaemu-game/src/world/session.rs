@@ -715,6 +715,8 @@ pub fn notify_in_game_completed(server: &GameServer, conn: &mut GameConnection) 
     });
     // Family stuff
     crate::systems::social::session::on_player_join(server, &p);
+    // Quest evaluations parked since the select (the client can handle them now).
+    crate::systems::quests::on_in_game_completed(server, p.character_id);
     let c = p.data();
     tracing::info!(
         "NotifyInGameCompleted SubZoneId {}, {} ({})",
