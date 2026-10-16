@@ -438,24 +438,7 @@ pub fn set_current_step(server: &GameServer, house: &HouseRef, value: i32, loadi
             }
         }
     } else {
-        let attached = manager.take_attached(house);
-        let world = world_of(server, house);
-        for d in attached {
-            let persistent = d.data().is_persistent;
-            if persistent {
-                server.ids.object.release_id(d.obj_id);
-                if let Some(w) = &world {
-                    crate::systems::npcs::doodad::manager::delete(server, w, &d);
-                }
-            } else {
-                server.ids.object.release_id(d.obj_id);
-                // Deviation: the C# leaves the (never spawned / hidden) doodad object behind.
-                if let Some(w) = &world {
-                    w.detach_child(&WorldObject::from(&d));
-                    w.remove_object(d.obj_id);
-                }
-            }
-        }
+        remove_bound_doodads(server, house);
     }
     {
         let mut base = 0;
@@ -474,6 +457,31 @@ pub fn set_current_step(server: &GameServer, house: &HouseRef, value: i32, loadi
     }
     crate::systems::ai::collision::objects::sync_house(server, house);
     super::dominion::fort::refresh_for_house(server, house);
+}
+
+/// Removes every bound doodad (`AttachedDoodads`) of the house: persistent ones are deleted
+/// (DB row included), the others detached and dropped; their object ids are released. This is
+/// the unfinished-step branch of the `CurrentStep` setter, also used by the rebuild to drop the
+/// old template's bindings.
+pub fn remove_bound_doodads(server: &GameServer, house: &HouseRef) {
+    let attached = server.systems.housing.manager.take_attached(house);
+    let world = world_of(server, house);
+    for d in attached {
+        let persistent = d.data().is_persistent;
+        if persistent {
+            server.ids.object.release_id(d.obj_id);
+            if let Some(w) = &world {
+                crate::systems::npcs::doodad::manager::delete(server, w, &d);
+            }
+        } else {
+            server.ids.object.release_id(d.obj_id);
+            // Deviation: the C# leaves the (never spawned / hidden) doodad object behind.
+            if let Some(w) = &world {
+                w.detach_child(&WorldObject::from(&d));
+                w.remove_object(d.obj_id);
+            }
+        }
+    }
 }
 
 /// One `HousingBindingDoodad` of a finished house: `DoodadManager.Create(ParentWorld, 0,

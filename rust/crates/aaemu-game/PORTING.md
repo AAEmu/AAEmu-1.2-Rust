@@ -247,6 +247,8 @@ Cross-subsystem calls: wired in phase 3b (see "Phase 3b wiring": trial court doo
 | `SpawnManager.Load` / `SpawnPersistentDoodads` housing parts, `LoadAccount` / `CSListCharacter` / `CSSelectCharacter` / `Character.Load` / `DeleteCharacterAssets` housing parts | `npcs/spawn_manager.rs`, `packets/c2g.rs`, `world/session.rs`, `db_character.rs` (one call each) | done | `LoadPlayerHousing` + `SpawnAll` before the persistent doodads, house parenting + bound doodads, `ReconcileBoundDoodads` (`UsePersistentHouseDoodads`). |
 | Placement validation | `systems/housing/placement.rs`, `systems/npcs/subzone.rs` | done | Original 1.2 housing XML `value1` tags resolve `housing_areas`/groups/categories; finite world positions, garden overlap, account eligibility, and nonrenewable beginner plots are checked server-side. World-scoped land checks also guard planting and housing crafting benches. Model-specific slope/height/footprint checks remain client-side. |
 
+| Housing rebuild ("upgrade", AAEmu-only backport of the 10.x feature) | `systems/housing/rebuild/` | done (untested on a live client) | Optional `housing_rebuilding*` tables + `housings.housing_rebuilding_pack_id` (absent in vanilla 1.2 data: empty set, never a load error). `rebuild()` swaps the template **in place** on the same `House` (id, object id, owner, position, permissions, dates, furniture stay), pays materials atomically (`HousingEconomyHooks::pay_house_rebuild`) and labor, replaces the bound doodads, opens the target's first build step (the owner finishes it through `craft_building`), hides/shows the house for everyone around and sends `SCMyHouse`. Triggers: `house.rebuild.*` extension channels (`systems::ext`, feature `house.rebuild`; the per-client 3D preview is a phantom `House` that only the requester sees), the player chat command `/rebuild [id]` and the GM subcommand `/house rebuild <housing id>` (free, no checks except forts). |
+
 Economy hooks (`server.systems.housing.hooks`): installed by `economy::bridges::EconomyForHousing`. Housing API for others: `housing::{house_by_id, house_at_location, allowed_to_interact(_by_id), pay_weekly_tax (MailManager tax payment), act_ability_bonus_at (CharacterCraft), update_owned_housing_faction, demolish_by_player}`.
 
 ### systems::quests
@@ -1140,6 +1142,14 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   target is an NPC. The Rust port checked strict membership, which rejected every Detection Orb
   cast with result 93 ("Invalid target"). It now follows the zone server. Missing authored `tuto_move`,
   `public_farm*` and `public_mate*` paths also remain data gaps.
+
+### Client extension channel and housing rebuild (Rust only)
+
+`systems::ext` (`rust/docs/client/CLIENT-EXTENSIONS.md`) is not a port of any C# code: two level-1 packets, `CSAAEmuExtPacket` (0x0C0) and `SCAAEmuExtPacket` (negotiated opcode, default 0x1F2), carry `(channel, JSON)` pairs for the injected `aadriver.dll`. The opcodes are constants of the module, not entries of the generated `opcodes.rs` tables (the C# registry-parity test exempts 0x0C0). The `ext.hello` state lives in the connection's `ConnectionHandle` (shared with its `GameConnection`), so it dies with the connection. A malformed inbound body never closes the connection (logged and dropped). Housing rebuild notes:
+
+- **Redraw.** A template change has no in-place packet; the house is hidden (viewers drop it and its children) and shown again (`spawn_house`), which also re-runs the collision sync, the fort refresh and `update_tax_info`. Whether the 1.2 client redraws a house that way, instead of needing a relog, is untested on a live client.
+- **Gate.** Owner only; refused while the house is for sale, unfinished, its tax is due or overdue, a siege runs in its zone group, or when it (or the target) is a fort / lodestone / castle template. No mail or `HOUSING_REBUILD` mail type is sent (the 1.2 client has no text for it); the `REBUILD_HOUSING` achievement record is reported.
+- **Preview.** The phantom has the target template in its finished state but not the target's bound doodads; while it is shown, a region change that makes the world re-send the real house shows it on top until the preview ends (<= 2 min, 60 m, any rebuild of the house, another preview, disconnect).
 
 ### Ranking boards (Rust only)
 

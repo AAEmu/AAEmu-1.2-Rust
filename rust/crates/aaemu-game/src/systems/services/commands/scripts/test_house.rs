@@ -1,7 +1,7 @@
 //! `Scripts/Commands/TestHouse.cs`.
 
 use super::prelude::*;
-use crate::systems::housing::{manager as housing, ops as housing_ops};
+use crate::systems::housing::{manager as housing, ops as housing_ops, rebuild};
 use crate::world::HouseRef;
 
 const DAY: i64 = 24 * 3600;
@@ -204,6 +204,26 @@ impl TestHouse {
                     }
                 }
             }
+            "rebuild" => {
+                // AAEmu-only: swap the house to any housing template in place, free of charge
+                // (live testing of the backported rebuild without materials).
+                let Some(target) = args.get(1).and_then(|a| try_parse::<u32>(a)) else {
+                    CommandManager::send_error_text(self, out, "Usage: rebuild <housing id>");
+                    return Ok(());
+                };
+                match rebuild::force_rebuild(server, house, target) {
+                    Ok(()) => CommandManager::send_normal_text(
+                        self,
+                        out,
+                        &format!("Rebuilt {name} into housing template {target}"),
+                    ),
+                    Err(e) => CommandManager::send_error_text(
+                        self,
+                        out,
+                        &format!("Failed to rebuild {name}: {}", e.message()),
+                    ),
+                }
+            }
             "forcedemo" => {
                 housing_ops::demolish(server, None, house, false, true);
                 CommandManager::send_normal_text(
@@ -259,6 +279,8 @@ impl Command for TestHouse {
             "|cFFFFFFFFsettaxdue|r -> Sets the house's taxdue date to now.\n",
             "|cFFFFFFFFsettaxduesoon|r -> Sets the house's taxdue date to 20 seconds from now.\n",
             "|cFFFFFFFFsetdemosoon|r -> Sets the house's demolition date to 20 seconds from now.\n",
+            "|cFFFFFFFFrebuild <housing id>|r -> Swaps the house to another housing template in place (no materials, no checks except forts), like a finished rebuild.
+",
             "|cFFFFFFFFforcedemo|r -> Forcefully demolishes a house right now, but returns all furniture regardless if it is normally returned or not.\n",
         )
         .into()

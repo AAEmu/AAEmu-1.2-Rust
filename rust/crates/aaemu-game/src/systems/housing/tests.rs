@@ -33,6 +33,10 @@ const BOUND_DOODAD: u32 = 4001;
 const CHAIR_DOODAD: u32 = 5000;
 const CHAIR_ITEM: u32 = 8000;
 
+// The rebuild flow tests share this fixture (a child module sees the private items).
+#[path = "rebuild/tests.rs"]
+mod rebuild_tests;
+
 /// Records every hook call; return values are configurable.
 #[derive(Default)]
 struct Eco {
@@ -384,7 +388,11 @@ struct Fx {
 }
 
 fn fixture(tax_item: bool) -> Fx {
-    let server = test_server_with(housing_data(tax_item));
+    fixture_with(housing_data(tax_item))
+}
+
+fn fixture_with(data: GameData) -> Fx {
+    let server = test_server_with(data);
     let eco = Arc::new(Eco {
         money_ok: true,
         ..Default::default()

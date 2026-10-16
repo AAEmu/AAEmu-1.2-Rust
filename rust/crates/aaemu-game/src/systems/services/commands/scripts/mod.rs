@@ -68,6 +68,7 @@ pub mod object_rotation;
 pub mod online;
 pub mod ping_position;
 pub mod quest_cmd;
+pub mod rebuild_house;
 pub mod reload_auction;
 pub mod reload_configs;
 pub mod reset_skill_cooldowns;
@@ -441,6 +442,10 @@ pub fn all_commands(env: &ScriptEnv) -> Vec<(&'static [&'static str], Arc<dyn Co
         ),
         (&["joinsiege"], Arc::new(dominion::JoinSiege::new(env))),
         (&["leavesiege"], Arc::new(dominion::LeaveSiege::new(env))),
+        (
+            &["rebuild"],
+            Arc::new(rebuild_house::RebuildHouse::new(env)),
+        ),
         // TestHouse.cs
         (
             &["house", "test_house", "testhouse"],

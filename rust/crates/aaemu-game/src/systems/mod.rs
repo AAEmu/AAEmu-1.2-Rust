@@ -14,6 +14,7 @@
 //! | [`vehicles`] | MateManager, SlaveManager, ShipyardManager, TransferManager (mounts, vehicles, ships, carriages) |
 //! | [`services`] | WebApi, Discord bot, Tick / Task managers, timed rewards, accounts, music, radar, sus, commands infrastructure, misc managers |
 //! | [`ai`] | AIManager, NPC AI (behaviors, params, paths), geodata / navmesh, physics |
+//! | [`ext`] | AAEmu client extension channel (`aadriver.dll` messages; AAEmu-only, not a C# subsystem) |
 //!
 //! Every subsystem module exposes the same five hooks (see `CONTRIBUTING-PORT.md`):
 //!
@@ -29,6 +30,7 @@
 
 pub mod ai;
 pub mod economy;
+pub mod ext;
 pub mod housing;
 pub mod instances;
 pub mod npcs;
@@ -112,6 +114,7 @@ pub struct Systems {
     pub vehicles: vehicles::System,
     pub services: services::System,
     pub ai: ai::System,
+    pub ext: ext::System,
     /// Behaviour hooks shared code calls into (installed by the owning subsystem at start).
     pub hooks: Hooks,
 }
@@ -128,6 +131,7 @@ pub fn register_packets(reg: &mut PacketRegistry) {
     vehicles::register(reg);
     services::register(reg);
     ai::register(reg);
+    ext::register(reg);
 }
 
 /// Starts every subsystem after the phase-1/2 managers are up (`ManagerOrchestrator` order:
@@ -167,6 +171,8 @@ pub async fn start_all(server: &Arc<GameServer>) -> anyhow::Result<()> {
     services::System::start(server).await?;
     tracing::debug!("Starting subsystem ai");
     ai::System::start(server).await?;
+    tracing::debug!("Starting subsystem ext");
+    ext::System::start(server).await?;
     Ok(())
 }
 

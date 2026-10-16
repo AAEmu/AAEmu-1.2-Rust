@@ -431,6 +431,8 @@ pub struct HousingData {
     item_names: HashMap<u32, String>,
     /// Number of binding templates loaded from the json files.
     pub binding_count: usize,
+    /// The 10.x rebuild tables (empty in vanilla 1.2 data).
+    pub rebuild: super::rebuild::RebuildData,
 }
 
 impl HousingData {
@@ -637,6 +639,8 @@ impl HousingData {
             });
             Ok(())
         })?;
+
+        d.rebuild = super::rebuild::RebuildData::load(conn, language)?;
 
         // PostLoad: localized names and taxations.
         d.load_localized(conn, language);

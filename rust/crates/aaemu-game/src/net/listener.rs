@@ -147,6 +147,7 @@ pub async fn on_disconnect(server: &Arc<GameServer>, conn: &mut GameConnection) 
     crate::world::session::on_disconnect(server, conn).await;
     server.streams.remove_token(conn.id);
     server.connections.remove(conn.id);
+    crate::systems::ext::on_disconnect(server, conn.id);
     // AccountManager.UpdateLoginTime(AccountId, UtcNow), fire and forget. Deviation: C# also runs
     // it for connections that never entered (AccountId 0), which inserts an `accounts` row with
     // id 0 via GetAccountDetailsInternal; that is skipped here.

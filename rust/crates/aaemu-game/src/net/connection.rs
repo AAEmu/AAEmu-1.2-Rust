@@ -6,7 +6,7 @@
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -17,6 +17,7 @@ use crate::models::character::Character;
 use crate::models::item::UnixTime;
 use crate::net::outbox::{outbox, Outbox, Push, MAX_QUEUED_BYTES};
 use crate::net::packet::{encode, ServerPacket, INVALID_OPCODE};
+use crate::systems::ext::ExtState;
 
 /// `GameState`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -88,6 +89,9 @@ pub struct ConnectionHandle {
     account_id: Arc<AtomicU32>,
     /// `LastPing` as unix milliseconds (`i64::MIN` = `DateTime.MinValue`, never pinged).
     last_ping_ms: Arc<AtomicI64>,
+    /// What the client announced in `ext.hello` (`systems::ext`); shared with the
+    /// [`GameConnection`], so it is gone with the connection.
+    ext: Arc<RwLock<Option<ExtState>>>,
     tx: mpsc::UnboundedSender<ConnCommand>,
     writer: Outbox,
 }
@@ -103,9 +107,19 @@ impl ConnectionHandle {
             ip,
             account_id: Arc::new(AtomicU32::new(account_id)),
             last_ping_ms: Arc::new(AtomicI64::new(i64::MIN)),
+            ext: Arc::default(),
             tx,
             writer,
         }
+    }
+
+    /// The client extension state (`None` until `ext.hello`).
+    pub fn ext_state(&self) -> Option<ExtState> {
+        self.ext.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn set_ext_state(&self, state: Option<ExtState>) {
+        *self.ext.write().unwrap_or_else(|e| e.into_inner()) = state;
     }
 
     pub fn account_id(&self) -> u32 {
@@ -251,6 +265,7 @@ pub struct GameConnection {
     pub ip: SocketAddr,
     account_id: Arc<AtomicU32>,
     last_ping_ms: Arc<AtomicI64>,
+    ext: Arc<RwLock<Option<ExtState>>>,
     pub state: GameState,
     pub payment: AccountPayment,
     /// `Characters.Values` in insertion (load) order.
@@ -288,11 +303,13 @@ impl GameConnection {
     ) -> (Self, ConnectionHandle) {
         let account_id = Arc::new(AtomicU32::new(0));
         let last_ping_ms = Arc::new(AtomicI64::new(i64::MIN));
+        let ext = Arc::new(RwLock::new(None));
         let handle = ConnectionHandle {
             id,
             ip,
             account_id: account_id.clone(),
             last_ping_ms: last_ping_ms.clone(),
+            ext: ext.clone(),
             tx: commands.clone(),
             writer: writer.clone(),
         };
@@ -301,6 +318,7 @@ impl GameConnection {
             ip,
             account_id,
             last_ping_ms,
+            ext,
             state: GameState::Lobby,
             payment: AccountPayment::default(),
             characters: Vec::new(),
@@ -358,6 +376,7 @@ impl GameConnection {
             ip: self.ip,
             account_id: self.account_id.clone(),
             last_ping_ms: self.last_ping_ms.clone(),
+            ext: self.ext.clone(),
             tx: self.commands.clone(),
             writer: self.writer.clone(),
         }

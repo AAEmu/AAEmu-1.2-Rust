@@ -18,6 +18,7 @@
 //! | [`packets`] | C->S / S->C housing packets |
 //! | [`db`] | the `housings` table |
 //! | [`hooks`] | items / money / mail services from the economy subsystem |
+//! | [`rebuild`] | the backported 10.x house rebuild ("upgrade"): data, in-place swap, preview, `house.rebuild.*` extension channels |
 
 pub mod config;
 pub mod data;
@@ -28,6 +29,7 @@ pub mod manager;
 pub mod ops;
 pub mod packets;
 pub mod placement;
+pub mod rebuild;
 
 #[cfg(test)]
 mod access_tests;
@@ -63,6 +65,8 @@ pub struct System {
     pub headquarters: dominion::headquarters::Headquarters,
     /// Items / money / mail (installed by the economy subsystem).
     pub hooks: hooks::HousingHookSlot,
+    /// The per-connection 3D rebuild previews.
+    pub rebuild_previews: rebuild::preview::Previews,
 }
 
 impl System {
@@ -80,6 +84,7 @@ impl System {
         manager::resume_dead_houses(server);
         dominion::runtime::start_tick(server);
         manager::start_tax_task(server);
+        rebuild::preview::start_task(server);
         Ok(())
     }
 

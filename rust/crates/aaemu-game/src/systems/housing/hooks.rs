@@ -215,6 +215,33 @@ pub trait HousingEconomyHooks: Send + Sync {
         false
     }
 
+    /// Pays the materials of a house rebuild, all or nothing: `(item template, count)` pairs
+    /// from the player's bag. Implementations should do the check and the consumption in one
+    /// economy operation; the default composes the two primitives above.
+    fn pay_house_rebuild(
+        &self,
+        server: &GameServer,
+        player: &PlayerRef,
+        materials: &[(u32, i32)],
+    ) -> bool {
+        let mut need = std::collections::BTreeMap::<u32, i32>::new();
+        for &(item, count) in materials {
+            if count > 0 {
+                *need.entry(item).or_default() += count;
+            }
+        }
+        if need
+            .iter()
+            .any(|(&item, &count)| self.inventory_item_count(server, player, item) < count)
+        {
+            return false;
+        }
+        for (&item, &count) in &need {
+            self.bag_consume_item(server, player, item_task::HOUSE_BUILDING, item, count, None);
+        }
+        true
+    }
+
     /// `Character.SubtractMoney(SlotType.Inventory, amount, task)` (false = not enough money).
     fn subtract_money(
         &self,

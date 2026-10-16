@@ -667,6 +667,26 @@ async fn production_listing_preserves_insufficient_certificates_and_consumes_com
 }
 
 #[tokio::test]
+async fn production_rebuild_payment_is_all_or_nothing() {
+    let fx = fixture(false);
+    production_economy(&fx);
+    let cert = manager::APPRAISAL_CERTIFICATE;
+    let inv = crate::systems::economy::inventory::Inv::of(&fx.owner);
+    let count = || inv.items_count_in(slot_type::INVENTORY, cert, -1);
+    let hooks = fx.server.systems.housing.hooks.get();
+    give(&fx, cert, 4);
+    // Duplicate entries add up; 4 < 2 + 3 pays and consumes nothing.
+    assert!(!hooks.pay_house_rebuild(&fx.server, &fx.owner, &[(cert, 2), (cert, 3)]));
+    assert_eq!(count(), 4);
+    give(&fx, cert, 1);
+    assert!(hooks.pay_house_rebuild(&fx.server, &fx.owner, &[(cert, 2), (cert, 3)]));
+    assert_eq!(count(), 0);
+    // Nothing to pay is always fine.
+    assert!(hooks.pay_house_rebuild(&fx.server, &fx.owner, &[]));
+    assert!(hooks.pay_house_rebuild(&fx.server, &fx.owner, &[(cert, 0)]));
+}
+
+#[tokio::test]
 async fn production_unique_decoration_moves_to_system_then_returns_same_item() {
     let fx = fixture(false);
     production_economy(&fx);

@@ -2654,6 +2654,40 @@ impl crate::systems::housing::hooks::HousingEconomyHooks for EconomyForHousing {
         ) == count
     }
 
+    fn pay_house_rebuild(
+        &self,
+        server: &GameServer,
+        player: &PlayerRef,
+        materials: &[(u32, i32)],
+    ) -> bool {
+        use crate::systems::housing::hooks::item_task;
+        let mut need = std::collections::BTreeMap::<u32, i32>::new();
+        for &(item, count) in materials {
+            if count > 0 {
+                *need.entry(item).or_default() += count;
+            }
+        }
+        // One economy operation: the bag cannot change between the check and the consumption.
+        let mut txn = ItemTxn::begin(server);
+        let bag = Inv::of(player).bag();
+        let mut bag = lock(&bag);
+        if need
+            .iter()
+            .any(|(&item, &count)| bag.items_by_template(item, -1).1 < count)
+        {
+            return false;
+        }
+        for (&item, &count) in &need {
+            if bag.consume_item(item_task::HOUSE_BUILDING, item, count, None, &mut txn.env) != count
+            {
+                tracing::error!(
+                    "house rebuild: consumed fewer than {count} of item {item} after the check"
+                );
+            }
+        }
+        true
+    }
+
     fn pay_house_construction(
         &self,
         server: &GameServer,
