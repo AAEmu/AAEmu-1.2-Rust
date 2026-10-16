@@ -113,6 +113,11 @@ impl SkillRun {
         self.state().tl_id
     }
 
+    /// Takes and clears the timeline id under one lock (`0` when already taken).
+    pub fn take_tl_id(&self) -> u16 {
+        std::mem::take(&mut self.state().tl_id)
+    }
+
     pub fn cancelled(&self) -> bool {
         self.state().cancelled
     }
