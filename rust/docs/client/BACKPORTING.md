@@ -6,8 +6,9 @@ patched client data reaches players. Machine paths and the RE tool chain are in
 [`REVERSING.md`](../../../REVERSING.md); the first worked example is the housing backport in
 [`backports/HOUSING.md`](backports/HOUSING.md).
 
-> Status: written from a static audit (2026-10-15). Steps marked **unverified** have not yet
-> been exercised against a live 1.2 client. Update this file as each one is proven.
+> Status (2026-10-16): the pipeline below was exercised end to end with the housing backport on
+> a real 1.2 client (patched pak + loose DB, server data, extension UI, 3D preview, rebuild).
+> Steps still marked **unverified** have not been exercised yet. Record new findings here.
 
 ## 1. The five layers of a backport
 
@@ -90,53 +91,81 @@ Find the owning subsystem (`AGENTS.md` → "Where to change X"), check what its 
 (loaders `SELECT *` and look columns up by name: extra columns are fine, a missing one is a
 startup error, duplicate ids are fatal) and which packets announce the changed objects.
 
-## 3. Patching game data
+## 3. Backport bundles
 
-The server DB and the client's loose DB are the same file today and must stay in lockstep:
-the client renders from its own copy (models, prefabs, build steps, items, skills), the server
-simulates from its copy, and a row only one side knows causes desyncs or crashes.
+Every backport is a **bundle**: committed text in `rust/backports/<name>/` plus a generator in
+`rust/tools/backport/`, applied by `aaemu-clientpatch` (`rust/crates/aaemu-tool-clientpatch`).
+No client asset is ever committed; assets are extracted from a donor 10.x `game_pak` at build time.
 
-- **One merge, two outputs.** Write the merge as a checked-in, idempotent SQL patch
-  (`SQL/patches/compact/<yyyy-mm-dd>_<feature>.sql`), applied to both the server
-  `compact.sqlite3` and the client's loose `game\db\compact.sqlite3`. `INSERT` only new rows;
-  `ALTER TABLE … ADD COLUMN` / `CREATE TABLE` for 10.x structures the server needs (the 1.2
-  client ignores unknown tables/columns it never queries — **unverified per table**, test it).
-- Nothing applies `SQL/patches/compact/` automatically today (no consumer in Rust, scripts or
-  Docker); applying it is manual `sqlite3 compact.sqlite3 < patch.sql`. A small `xtask`
-  applier that records applied patches would make this repeatable — build it with the first
-  backport that needs it.
-- **Client DB location**: the client reads the **loose** `game\db\compact.sqlite3`, not the
-  encrypted copy inside `game_pak` (startup pak-read trace: no read touched the pak's DB
-  extent). Whether it falls back to the pak copy if the loose file is missing is **unverified**.
-- Server-only JSON (`app/Data/housing_bindings*.json`, spawns, …) may also need entries.
+```
+rust/backports/<name>/
+  bundle.json          name, version, description, ordered sql list (optionally per target), assets
+  assets.txt           donor pak paths to extract (only files that are new or must differ)
+  prefab_subsets.tsv   generated subset prefab libraries (new files; 1.2 libraries stay untouched)
+  sql/NNN_*.sql        ordered patches; "targets": ["server"] for server-only tables
+  server/*.json        server-only data fragments (e.g. housing_bindings), copied next to app/Data
+```
 
-## 4. Patching client assets (`game_pak`)
+```powershell
+# 1. (re)generate the bundle from the 10.x data (deterministic; see rust/tools/backport/README.md)
+c:\python312\python.exe -I rust\tools\backport\housing_thatched.py --db10 <10.x compact> --db12 <1.2 loose compact> `
+    --pak10 <10.x game_pak> --pak12 <1.2 game_pak> --tool <aaemu-clientpatch.exe> --out rust\backports\housing-thatched
+# 2. stage the assets from the donor pak
+aaemu-clientpatch bundle build rust\backports\housing-thatched --donor-pak <10.x game_pak> --out <staging>
+# 3. apply (client closed, server stopped): the server compact, and a client copy (pak + loose DB)
+aaemu-clientpatch bundle apply rust\backports\housing-thatched --staging <staging> --server-db <compact.sqlite3>
+aaemu-clientpatch bundle apply rust\backports\housing-thatched --staging <staging> --client <client root>
+#    rollback of the pak: aaemu-clientpatch pak restore <client root>\game_pak
+```
+
+Rules:
+
+- **One merge, two outputs.** The server compact and the client's loose DB must stay in lockstep:
+  the client renders from its copy (models, prefabs, build steps, items, icons, texts), the server
+  simulates from its copy. Shared rows go to both; tables only the server reads (e.g.
+  `housing_rebuilding*`) are marked `"targets": ["server"]`.
+- **Additive only** (merge rules in `rust/tools/backport/README.md`): never overwrite a 1.2 row;
+  translate 10.x columns to the 1.2 schema; fresh ids for unstable keys, matched on natural keys.
+- **Applied patches are immutable.** `db apply` records each patch by name and SHA-256 in
+  `aaemu_applied_patches` and refuses a changed file under the same name. Fixes are new numbered
+  files (`003_...`), like `SQL/updates/`.
+- **Client DB = the loose `game\db\compact.sqlite3`** (verified: backported item names and icons
+  appear in the client after patching only the loose DB). The encrypted copy inside `game_pak` is
+  not read. Whether the client falls back to it when the loose file is missing is unverified.
+- Server-only JSON fragments go next to the server's `app/Data` files under a distinct name
+  (the housing loader merges every `housing_bindings*.json`).
+
+## 4. Patching client assets (`game_pak`) and distributing
 
 The 1.2 client mounts one `game_pak` and has no loose-file override or extra-pak mechanism for
-`game/` assets, so new files must go **inside** the pak.
+`game/` assets, so new files go **inside** the pak.
 
-1. **Work on a copy.** `D:\AA1.2` is read-only. Make a client copy on D: (`bin32`, `game`,
-   `game_pak` ≈ 25 GB; check free space first).
-2. **Write the files into the copied pak.** The Rust `aapak`
-   (`rust/crates/aaemu-commons/src/aapak/`) is a full port of the C# AAPak writer
-   (`add_file_from_file`, `replace_file`, `delete_file`, `save_header`). Gaps: no CLI uses it,
-   names are not lower-cased on add, and the in-place update is not atomic. A
-   `pak add/replace` subcommand (e.g. in `aaemu-pak` or `xtask`) is the missing tool.
-   Until then the Python prototype
-   `D:\aa-re\house-backport-20261015\assets\pak_tail_patch.py --apply-to` appends new files plus
-   a new file table and footer (**unverified** against the live client). Append rather than
-   rewrite: it keeps all existing chunks byte-identical, which keeps update packages small.
-3. **Distribute** with the existing lossless pipeline ([`Docs/wiki/Client.md`](../../../Docs/wiki/Client.md)
-   → "Lossless compressed client packs"):
+1. **Work on a copy.** `D:\AA1.2` is read-only. Make a client copy on D: (about 25 GB).
+2. **`aaemu-clientpatch pak add`** (used by `bundle apply`) appends the new files and writes a new
+   file table + footer at the end; existing data is never moved, so all original chunks stay
+   byte-identical and update packages stay small. It saves `<pak>.aaemu-restore` first;
+   `pak restore` truncates back exactly. Re-adding identical files is a no-op. **Verified**: the
+   1.2 client loads the appended file table, the new CGF/MTL/DDS files and the generated subset
+   prefab libraries (the backported Lode Farm renders correctly).
+3. **Do not overwrite shared 1.2 files** with their 10.x version (e.g. `housing_big.xml` changes
+   existing prefabs); reference new side-by-side files instead.
+4. **Distribute** with the existing lossless pipeline ([`Docs/wiki/Client.md`](../../../Docs/wiki/Client.md)
+   -> "Lossless compressed client packs"):
    ```powershell
    aaemu-pak diff D:\Patched\game_pak D:\ArcheAgeCompressed\game.aacm D:\UpdatePackage
    aaemu-pak apply D:\ArcheAgeCompressed\game.aacm D:\UpdatePackage
    ```
    The receipt binds base and new manifest hashes; `Scripts/build-client-distribution.ps1`
-   builds the player ZIP. The client DB is a loose file and ships next to it (a full copy, or a
-   patch applied by the same SQL as the server).
+   builds the player ZIP. The loose client DB ships next to it (patched with the same bundle).
+   Not yet exercised end to end for a backport: **unverified**.
 
 ## 5. Patching UI
+
+**Preferred: an extension module** (`native/ext/<feature>.lua`, embedded in the driver, see
+[`CLIENT-EXTENSIONS.md`](CLIENT-EXTENSIONS.md)). It needs no pak change, is re-applied whenever
+the client rebuilds its UI state, can hook stock windows by wrapping their global functions
+(the rebuild button wraps the maintain window's `UpdateMyHouseDefaultInfo`), and talks to the
+server over its own channels. The notes below apply only when UI must be packed into the pak.
 
 - 1.2 UI is Lua 5.1 bytecode in `.alb` files; the engine's Lua numbers are **32-bit floats**,
   so stock `luac` output does not load. `lua_use_binary` maps `scripts/X.lua` →
@@ -155,24 +184,33 @@ The 1.2 client mounts one `game_pak` and has no loose-file override or extra-pak
 
 ## 6. Validation ladder
 
-1. Static: closure has no unresolved externals; schema patch applies to a copy of both DBs;
-   server starts with the patched compact (`cargo xtask dev` / `live-stack.sh`).
-2. Server tests: data-loader test for the new rows, flow tests for the feature
-   (`test_support`, subsystem `tests.rs`).
-3. Client data: patched copy boots to the world; place/spawn the new object with a GM command;
-   screenshot (`live-stack.sh shot`). Watch for missing-shader/texture fallbacks and crashes.
-4. UI: driver-injected Lua first, then the packed module.
-5. Distribution: `aaemu-pak diff` → `apply` on a clean compressed install → boot.
+1. Static: the generator report has no unresolved externals you did not decide to cut; the bundle
+   applies to copies of both DBs; `db check` / `PRAGMA integrity_check`; the server starts with
+   the patched compact and logs the new data (e.g. `Loaded 6 housing rebuildings in 4 packs`).
+2. Server tests: loader tests (feature tables missing -> empty, present -> parsed) and flow tests
+   (`test_support`, subsystem `tests.rs`). Real-data tests pinned to vanilla counts change on a
+   patched DB; run them against the vanilla compact.
+3. Client data on a **test client copy** against an **isolated test stack** (own runtime dir,
+   ports and MySQL; never the shared stack): boot, enter the world, create the object with a GM
+   command (`/house spawn <housing id>` creates a finished house of any template in front of you)
+   and screenshot it. Watch for missing-shader/texture fallbacks and crashes.
+4. Driving the client: `aaemu-launcher --hidden --multi-client --driver-dll ...` renders
+   off-screen; `aaemu-clientdriver lua --pid N -t ui "<code>"` runs Lua (GM commands:
+   `X2Chat:SendChatMessage(CHAT_SAY,'/cmd ...','')`), `aaemu-clientdriver screenshot --pid N`
+   saves the back buffer, and the MCP tools `client_entities` (positions of named entities),
+   `client_pointer` (clicks, in screenshot pixels) and `client_input` (keys) cover the rest.
+5. UI: prototype in the live client through the driver, then embed (extension module) or pack.
+6. Distribution: `aaemu-pak diff` -> `apply` on a clean compressed install -> boot.
 
 Record every new finding (verified or disproven) back into this file.
 
-## 7. Tooling still to build
+## 7. Tooling status
 
-| Tool | Purpose |
+| Tool | State |
 |---|---|
-| `pak add/replace/delete` CLI over `aapak` | Write new/changed files into a copied original-format pak (lower-case names, atomic temp-file + rename) |
-| `compact` patch applier (`xtask`) | Apply `SQL/patches/compact/*.sql` to server + client DBs, record applied patches |
-| Generalised closure tool | `closure.py` with pluggable roots (houses, races, items, quests) checked into `rust/tools/` |
-| Asset closure + compat report | `house_deps.py` + checks generalised and checked into `rust/tools/` |
-| `.alb` compiler | Lua 5.1 with 32-bit float numbers, if plain source in `.alb` turns out not to load |
-| Client extension layer | `aadriver` natives + extension packet + server `ext` module, see [`CLIENT-EXTENSIONS.md`](CLIENT-EXTENSIONS.md) |
+| `aaemu-clientpatch` (`pak list/extract/add/restore`, `db apply/check`, `bundle build/apply`) | done |
+| Bundle generator for houses (`rust/tools/backport/housing_thatched.py --housings ...`) | done; generalise the roots for other content (races, items, quests) |
+| Client extension layer (driver natives + extension packet + server `systems::ext`) | done, see [`CLIENT-EXTENSIONS.md`](CLIENT-EXTENSIONS.md) |
+| `/house spawn` GM command | done |
+| Checked-in isolated test stack (path- and port-parameterised `live-stack`) | todo: `Scripts/live-stack.sh` matches processes by name machine-wide, so it cannot run next to another stack |
+| `.alb` compiler (Lua 5.1, 32-bit float numbers) | only if a backport needs packed UI instead of an extension module |

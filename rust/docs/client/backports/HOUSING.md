@@ -2,8 +2,31 @@
 
 First feature run through the process in [`../BACKPORTING.md`](../BACKPORTING.md). Audit date
 2026-10-15. Evidence, extracted files and scripts: `D:\aa-re\house-backport-20261015\`
-(`data\`, `assets\`, `ui\`; each has a `FINDINGS.md`). Nothing below has been tried on a live
-client yet.
+(`data\`, `assets\`, `ui\`; each has a `FINDINGS.md`).
+
+## Status (2026-10-16)
+
+Implemented on branch `feat/client-ext` and verified live on a real 1.2 client (test client copy,
+isolated test stack):
+
+| Piece | Where | Live result |
+|---|---|---|
+| Data + assets bundle | `rust/backports/housing-thatched/` (generator `rust/tools/backport/housing_thatched.py`) | 71 files appended to `game_pak`; client loads them; backported items show names and icons |
+| Rebuild data + in-place swap | `systems/housing/rebuild/` | `Loaded 6 housing rebuildings in 4 packs`; house 13 rebuilt 171 -> 434, materials consumed, redrawn without relog, persisted |
+| 3D preview | `systems/housing/rebuild/preview.rs` | the Lode Farm phantom replaces the Thatched Farmhouse in the requester's view; restored on end |
+| Rebuild window | `aaemu-clientdriver/native/ext/house_rebuild.lua` | Rebuild button in the stock maintain window; list, materials have/need, confirm, result |
+| Transport | client extension layer ([`../CLIENT-EXTENSIONS.md`](../CLIENT-EXTENSIONS.md)) | handshake + all `house.rebuild.*` channels |
+| Fallbacks / tools | `/rebuild`, `/house rebuild <id>`, `/house spawn <id>` | `/house spawn` + `/build` used for the test |
+
+Remaining gaps:
+
+- The tier-2 farm plots cannot be planted: their item-changer doodad funcs (55) are a 10.x func
+  type 1.2 does not have and were dropped; about 34 effects needing buffs 11424-11429 / 17300 were
+  dropped too; the farms' daily jar quests (7057-7060, 7071-7072) are not included.
+- The preview phantom has no bound doodads (doors, nameplate) of the target template.
+- Two referenced effects are missing in 1.2 (`housing_watermill_water`, `housing.farm_floor`);
+  no visible error so far.
+- Player distribution of a bundle (`aaemu-pak diff` of the patched pak + loose DB) not exercised.
 
 ## What 10.x has that 1.2 lacks
 
@@ -108,19 +131,19 @@ by our server** and its **UI must be a new 1.2 Lua module**.
    `rebuild_housing.lua` logic ports with layout changes only. The 3D look-ahead preview is a
    later native hook. Clients without the extension keep the `/rebuild` path.
 
-## Tasks (in order)
+## Tasks
 
-| # | Task | Proves |
+| # | Task | State |
 |---|---|---|
-| 0 | Tooling from `BACKPORTING.md` §7: pak add/replace CLI, compact patch applier | repeatable patching |
-| 1 | Data patch for the thatched family → server + client copy; server boots | data merge rules |
-| 2 | Assets into a copied pak; GM-place design 404 (Lode Farm) directly and screenshot | asset compatibility end to end (cheapest proof, no upgrade code) |
-| 3 | Server rebuild op + rebuild data loader + GM command + tests | in-place template swap and client redraw |
-| 4 | Player `/rebuild` with validation, materials, labor, mail/achievement | gameplay |
-| 5 | 1.2 Lua rebuild window | UI delivery route |
-| 6 | `aaemu-pak diff` update package + loose DB on a clean compressed install | player distribution |
-| 7 | Client extension layer (natives, extension packet, version handshake) and the 10.x-style rebuild natives/window on top of it | real data flow, closer 10.x port |
-| 8 | All houses, in batches by housing group | scale |
+| 0 | Tooling: `aaemu-clientpatch` (pak add/restore, db apply, bundles) | done |
+| 1 | Data patch for the thatched family -> server + client copy | done |
+| 2 | Assets into a copied pak, spawn and screenshot | done |
+| 3 | Server rebuild op + rebuild data loader + GM command + tests | done |
+| 4 | Player `/rebuild` with validation, materials, labor, achievement | done |
+| 5 | Client extension layer + rebuild window + server-driven 3D preview | done |
+| 6 | `aaemu-pak diff` update package + loose DB on a clean compressed install | todo |
+| 7 | Farm plots (item-changer funcs), jar quests, phantom bound doodads | todo |
+| 8 | All houses, in batches by housing group (`housing_thatched.py --housings ...`) | todo |
 
 ## Scale of "all houses"
 
@@ -134,10 +157,13 @@ quests/skills or cut them.
 
 ## Open questions
 
-- Does the 1.2 client accept a tool-written (appended) pak file table?
-- Does it compile the unseen shader permutations, and what happens with the two missing effects?
-- Does it ignore unknown tables/columns in its loose DB (expected: it only runs its own queries)?
-- Does it fall back to the pak's encrypted DB when the loose one is missing?
-- Does a hide/show cycle redraw a house whose template changed, or is a relog needed?
-- Does plain-source Lua in an `.alb` load, or is a 32-bit-float `luac` needed?
-- Should 10.x `zh_cn` texts (machine English) seed missing `en_us` names?
+Answered live: the client accepts the appended pak file table; it reads the loose DB (and
+tolerates the extra rows/columns the patch adds); a hide/show cycle redraws a house whose
+template changed (no relog); the Lode Farm's materials render with the 1.2 shaders.
+
+Still open:
+
+- Does the client fall back to the pak's encrypted DB when the loose one is missing?
+- Do all 87 shader permutations unseen in 1.2 compile (the thatched family needed only 3)?
+- 10.x `zh_cn` texts (machine English) seed missing `en_us` names; they need a casing/wording
+  pass (fixes go into new numbered bundle SQL files).

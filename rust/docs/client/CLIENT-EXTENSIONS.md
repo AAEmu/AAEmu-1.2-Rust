@@ -5,6 +5,10 @@ A small, versioned channel between our server and the 1.2 client, carried by the
 content, AAEmu-only tools) add **their own messages, Lua natives and UI** without touching the
 client's files. The first user is the housing rebuild ([`backports/HOUSING.md`](backports/HOUSING.md)).
 
+> Status (2026-10-16): implemented and verified live on the 1.2 client: `ext.hello` arrives
+> byte-exact, the server's `ext.welcome` reaches Lua through the claimed SC slot (`0x1F2`), and
+> the housing rebuild runs entirely over this channel.
+
 Clients without the driver keep working: the server only uses the channel after the client
 announced it (`ext.hello`), and every feature must keep a vanilla fallback or simply be absent.
 
@@ -108,20 +112,42 @@ world. Feature modules are separate embedded files, loaded after `core.lua` in m
 
 ## 5. Server layer (`systems::ext`)
 
-- Registers `CSAAEmuExtPacket` (level 1, `0x0C0`) and encodes `SCAAEmuExtPacket` with the
-  connection's negotiated opcode.
-- Per-connection `ExtState { proto, driver, sc_opcode, features }`, set by `ext.hello`.
-- A channel registry filled by subsystems during startup:
-  `ext.on("house.rebuild.info", handler)` where the handler gets the server, the connection
-  and the decoded `serde_json::Value` (or a typed struct).
-- `ext::send(conn, channel, &impl Serialize)`: no-op (debug log) when the connection has no ext state.
-- Unknown channel → `ext.error { "error": "unknown_channel" }`; bad JSON → `ext.error { "error": "bad_payload" }`.
+- `CSAAEmuExtPacket` (level 1, `0x0C0`) is registered by `ext::register`; `SCAAEmuExtPacket` is
+  encoded with the connection's negotiated opcode. The opcodes are constants in
+  `systems/ext/mod.rs`, not in the generated 1.2 tables of `opcodes.rs`.
+- Per-connection `ExtState { proto, driver, sc_opcode, features }` lives in the
+  `ConnectionHandle` (shared with `GameConnection`, dies with the connection), set by `ext.hello`.
+- `ExtRegistry` is built once in `ext::System::default()`, one `register_ext` line per feature
+  subsystem. A feature registers its name, its channels and an optional disconnect hook:
+
+  ```rust
+  // systems/housing/rebuild/channels.rs
+  pub fn register_ext(reg: &mut ExtRegistry) {
+      reg.feature("house.rebuild");
+      reg.on_typed("house.rebuild.info", info);        // fn(&Arc<GameServer>, &GameConnection, InfoRequest)
+      reg.on_typed("house.rebuild.start", start);
+      reg.on_disconnect(preview::on_disconnect);
+  }
+  ```
+
+  `on(channel, closure)` gets the raw `serde_json::Value`; `on_typed::<T>` deserializes first
+  (bad payload -> `ext.error`).
+- Sending: `ext::reply(conn, channel, &payload)`, `ext::send(&handle, …)`,
+  `ext::send_player(&player, …)`; all are no-ops (debug log) for connections without ext state.
+  `ext::has_feature(&handle, "house.rebuild")` gates feature code.
+- Unknown channel -> `ext.error { "error": "unknown_channel" }`; bad JSON -> `bad_payload`.
 
 ## 6. Adding a feature
 
-1. Pick a channel prefix `<feature>.` and a feature name; document the messages in the feature's doc.
-2. Server: handlers in the owning subsystem, registered with `ext`; tests with the flow-test client.
-3. Client: a module in `native/ext/<feature>.lua` (add it to the manifest/resource list); UI built
-   with 1.2 widgets; test it live through the driver REPL before embedding.
-4. Keep a vanilla fallback (GM/slash command) or make the feature server-optional.
-5. Bump the driver version; never change an existing message's meaning.
+1. Pick a feature name and a channel prefix `<feature>.`; document the messages in the
+   feature's doc (request/response fields, error codes).
+2. Server: a `channels.rs` in the owning subsystem with `register_ext`, plus one line in
+   `ext::System::default()`. Keep handlers thin; put the logic in the subsystem's ops so the
+   vanilla fallback (GM/slash command) shares it. Tests with the flow-test client.
+3. Client: `native/ext/<feature>.lua` calling `AAEmuExt.Module{ name, features = {"<feature>"}, init }`,
+   `AAEmuExt.On(...)`/`AAEmuExt.Emit(...)`; add one line to `native/ext/manifest.txt`; tests in
+   `native/ext/<feature>_tests.lua` (run by `run_lua_tests.py`). Prototype in the live client with
+   `aaemu-clientdriver lua` before embedding. Build: `Scripts/build-client-pak.ps1`.
+4. Gate the UI on `AAEmuExt.Ready()` and `AAEmuExt.HasFeature("<feature>")` so an old server
+   simply shows nothing.
+5. Bump the driver version for releases; never change an existing message's meaning.
