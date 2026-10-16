@@ -495,7 +495,7 @@ pub fn return_(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         trp
     };
     if let Some(t) = &trp {
-        p.data().disabled_set_position = true;
+        p.data().set_disabled_set_position(true);
         p.send(SCLoadInstancePacket {
             instance_id: DEFAULT_INSTANCE_ID,
             zone_id: t.zone_id,
@@ -513,7 +513,7 @@ pub fn return_(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
             PositionAndRotation::new(t.x, t.y, t.z, 0.0, 0.0, deg_to_rad(t.yaw)),
         );
     } else if let Some(m) = npcs.main_world_position(server, p) {
-        p.data().disabled_set_position = true;
+        p.data().set_disabled_set_position(true);
         p.send(SCLoadInstancePacket {
             instance_id: m.instance_id,
             zone_id: m.zone_id,
@@ -551,7 +551,7 @@ pub fn return_(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         );
         return;
     };
-    p.data().disabled_set_position = true;
+    p.data().set_disabled_set_position(true);
     p.send(SCTeleportUnitPacket {
         reason: TELEPORT_REASON_MOVE_TO_LOCATION,
         error_message: 0,

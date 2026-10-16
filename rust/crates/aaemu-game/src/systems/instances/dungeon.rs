@@ -483,7 +483,7 @@ fn move_character(
         send_error(p, err::NO_SERVER_INSTANCE_RESOURCE, 0);
         return;
     };
-    p.data().disabled_set_position = true;
+    p.data().set_disabled_set_position(true);
     worlds::apply_world_spawn_position(server, p, &sp, world.id);
     p.send(SCLoadInstancePacket {
         instance_id: world.id,

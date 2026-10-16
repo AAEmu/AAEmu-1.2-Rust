@@ -207,7 +207,12 @@ pub struct Character {
     pub is_online: bool,
     /// `FinishedLoading` (`SetPlayerMoved`).
     pub finished_loading: bool,
+    /// `GameObject.DisabledSetPosition`; write it through [`Character::set_disabled_set_position`].
     pub disabled_set_position: bool,
+    /// Bumped by every `set_disabled_set_position(true)`: the C# setter's
+    /// `SusManager.ResetAnalyze*DeltaMovement` side effect, as a counter the movement analysis
+    /// compares against its baseline.
+    pub teleport_seq: u32,
     pub breath: u32,
     /// `SubZoneId` (last `CSNotifySubZonePacket`, for the Memory Tome recall points).
     pub sub_zone_id: u32,
@@ -256,6 +261,15 @@ pub fn new_guid() -> [u8; 16] {
 }
 
 impl Character {
+    /// `GameObject.DisabledSetPosition` setter: setting it to `true` (a teleport / instance
+    /// move) invalidates the speed-analysis baseline (`ResetAnalyzePlayerDeltaMovement`).
+    pub fn set_disabled_set_position(&mut self, value: bool) {
+        self.disabled_set_position = value;
+        if value {
+            self.teleport_seq = self.teleport_seq.wrapping_add(1);
+        }
+    }
+
     /// `new Character(modelParams)` with an empty, unregistered inventory.
     pub fn new(id: u32, account_id: u32, model_params: UnitCustomModelParams) -> Self {
         Self {
@@ -345,6 +359,7 @@ impl Character {
             is_online: false,
             finished_loading: false,
             disabled_set_position: false,
+            teleport_seq: 0,
             breath: 60_000,
             sub_zone_id: 0,
             // ---- phase 3 / skills ----

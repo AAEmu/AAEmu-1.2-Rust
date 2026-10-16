@@ -1316,6 +1316,22 @@ servers (see `rust/LIVE-TESTING.md`). Fixed porting bugs are in the git history 
   leaves first are dropped (`on_leave_world`); characters already in the world (world switches)
   are unaffected. Quest timers expiring before the spawn are not deferred.
 
+* `SusManager` speed analysis: baselines carry their time, instance and a teleport counter
+  (`Character::teleport_seq`, bumped by `Character::set_disabled_set_position(true)`, the C#
+  `GameObject.DisabledSetPosition` setter that called `ResetAnalyzePlayerDeltaMovement`). The
+  speed is taken over the real time since the baseline (at least the nominal 5 s), and a
+  baseline older than 10 s, from another instance or another teleport counter is re-seeded
+  instead of judged. The C# kept baselines fresh differently: `FinalizeTransform` propagated to
+  the child transforms of a mount / slave (riders), and the setter reset them on teleports;
+  the Rust move handler only finalizes the packet's target, so riders and teleported players
+  were reported as 40 to 3000 m/s runs (and re-summoned mates, whose database id outlives the
+  spawn, as pets). The riding / slave-bound / `disabled_set_position` early returns of the move
+  handler, mate spawn / delete and leaving the world reset the baseline explicitly
+  (`CharacterMates.CreateNewMate` reset it too). Thresholds (25 / 27.5 m/s) are unchanged.
+* `CSMoveUnitPacket` for an object the world no longer holds (a mount the server just
+  despawned: summon toggle, dungeon entry, death) logs `Invalid target` at debug, not warn: the
+  client keeps sending a few moves after the despawn.
+
 Parity status of the scripted scenarios: `login`, `lobby` and `full` (fresh character) produce
 the same S->C traffic as the C# servers after id / time normalisation (0 findings); a second
 `full` round with the existing character only differs in the saved position precision above

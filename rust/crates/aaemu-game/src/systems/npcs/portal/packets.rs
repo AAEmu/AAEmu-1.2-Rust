@@ -212,7 +212,7 @@ impl ClientPacket for CSTeleportEndedPacket {
             let Some(me) = conn.active_char.clone() else {
                 return Ok(());
             };
-            me.data().disabled_set_position = false;
+            me.data().set_disabled_set_position(false);
             tracing::warn!("TeleportEnded, X: {}, Y: {}, Z: {}", self.x, self.y, self.z);
             super::resend_visible_objects_to_character(server, &me);
             Ok(())

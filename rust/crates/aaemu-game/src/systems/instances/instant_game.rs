@@ -494,7 +494,7 @@ fn move_character_to_world(
     y: f32,
     z: f32,
 ) {
-    p.data().disabled_set_position = true;
+    p.data().set_disabled_set_position(true);
     if p.data().main_world_position.is_none() {
         let t = worlds::clone_detached(server, p);
         p.data().main_world_position = Some(t);
@@ -864,7 +864,7 @@ pub fn leave_instant_game(server: &GameServer, game: &Arc<InstantGame>, p: &Play
         .events
         .characters
         .unsubscribe(p, CharEvent::Kill, game.uid);
-    p.data().disabled_set_position = true;
+    p.data().set_disabled_set_position(true);
     if p.data().main_world_position.is_none() {
         tracing::warn!(
             "Character {} ({}) does not have MainWorldPosition when leaving instant game!",
