@@ -341,7 +341,7 @@ pub fn return_to_main_world(server: &GameServer, p: &PlayerRef) -> Option<Transf
     detach(server, p);
     {
         let mut c = p.data();
-        c.disabled_set_position = true;
+        c.set_disabled_set_position(true);
         c.unit.transform = Transform {
             instance_id: DEFAULT_INSTANCE_ID,
             world_id: mwp.world_id,
@@ -382,6 +382,6 @@ pub fn instance_loaded(server: &GameServer, p: &PlayerRef) {
     crate::systems::dispatch_buff_events(server, &WorldObject::from(p));
     p.send(packet);
     p.send(SCDetailedTimeOfDayPacket { time: 12.0 });
-    p.data().disabled_set_position = false;
+    p.data().set_disabled_set_position(false);
     tracing::debug!("InstanceLoaded.");
 }

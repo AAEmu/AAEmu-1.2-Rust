@@ -530,7 +530,7 @@ impl SubCommand for CrimeCourtSubCommand {
                     .force_dismount(server, &target);
                 {
                     let mut c = target.data();
-                    c.disabled_set_position = true;
+                    c.set_disabled_set_position(true);
                     if !c.unit.buffs.check_buff(buff::FORCIBLY_AWAITING_TRIAL) {
                         crime::add_own_buff(
                             server,

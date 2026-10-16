@@ -750,6 +750,12 @@ pub async fn move_unit(server: &GameServer, conn: &mut GameConnection, obj_id: u
     {
         let c = me.data();
         if c.disabled_set_position {
+            // No movement is analysed meanwhile: the speed baseline would go stale.
+            server
+                .systems
+                .services
+                .sus
+                .reset_analyze_player_delta_movement(c.id);
             return;
         }
     }
@@ -763,7 +769,9 @@ pub async fn move_unit(server: &GameServer, conn: &mut GameConnection, obj_id: u
         world.object(obj_id)
     };
     let Some(target) = target else {
-        tracing::warn!("Invalid target {obj_id} from {}", me.data().unit.name);
+        // Benign: the client keeps sending a few moves for an object (typically its mount) the
+        // server just despawned (summon toggle, dungeon entry, death).
+        tracing::debug!("Invalid target {obj_id} from {}", me.data().unit.name);
         return;
     };
     match &mt.kind {
@@ -794,6 +802,14 @@ pub async fn move_unit(server: &GameServer, conn: &mut GameConnection, obj_id: u
                 if crate::systems::vehicles::movement::player_riding(server, &me, player)
                     || crate::systems::vehicles::movement::player_bound_to_slave(&world, player)
                 {
+                    // The C# finalized the rider's child transform with the mount / slave, which
+                    // kept its speed baseline fresh; reseed it on the next own movement instead.
+                    let id = player.data().id;
+                    server
+                        .systems
+                        .services
+                        .sus
+                        .reset_analyze_player_delta_movement(id);
                     return;
                 }
                 // SetPlayerMoved: MOTD on the first movement after loading.
@@ -1115,7 +1131,7 @@ pub async fn leave_world_task(
     if let Some(p) = &active {
         {
             let mut c = p.data();
-            c.disabled_set_position = true;
+            c.set_disabled_set_position(true);
         }
         set_online(server, p, false);
         p.data().leave_time = Utc::now().timestamp();

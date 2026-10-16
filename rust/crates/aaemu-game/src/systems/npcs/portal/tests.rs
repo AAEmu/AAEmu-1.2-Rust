@@ -269,7 +269,7 @@ async fn loaded_slave_portal_rejection_preserves_movement_state_and_vehicle() {
     client.drain();
     let before_transform = player.data().unit.transform;
     for was_disabled in [false, true] {
-        player.data().disabled_set_position = was_disabled;
+        player.data().set_disabled_set_position(was_disabled);
         request_portal(&server, &mut client, portal.obj_id, true).await;
         assert_eq!(
             client.drain(),
@@ -285,7 +285,7 @@ async fn loaded_slave_portal_rejection_preserves_movement_state_and_vehicle() {
         assert_eq!(slave.data().attached_doodads, vec![cargo.obj_id]);
     }
     // Rejection does not prevent a later legitimate same-instance portal request.
-    player.data().disabled_set_position = false;
+    player.data().set_disabled_set_position(false);
     {
         let mut npc = portal.data();
         let destination = &mut npc.portal.as_mut().unwrap().teleport_position;

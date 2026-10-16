@@ -355,6 +355,147 @@ async fn mount_and_dismount_flow() {
     assert!(server.world.world(0).unwrap().mate(mate.obj_id).is_none());
 }
 
+/// The movement speed baseline must not survive a ride, a teleport or a mate respawn (they were
+/// reported as 40 to 3000 m/s runs / pets).
+#[tokio::test]
+async fn riding_teleports_and_mate_respawns_reseed_the_speed_baseline() {
+    use crate::models::movement::UnitMove;
+    use crate::systems::services::sus::SampleCtx;
+
+    let server = server_with(data());
+    let mut a = TestClient::new(&server, 1, 1);
+    let (pa, item_id) = player_with_item(&server, &a, 1, PA, (100.0, 100.0), MATE_ITEM);
+    a.conn.active_char = Some(pa.clone());
+    a.drain();
+    let sus = &server.systems.services.sus;
+    let far = [5000.0, 100.0, 100.0];
+    let farther = [10000.0, 100.0, 100.0];
+    let walking = MoveType::new(MoveKind::Unit(UnitMove {
+        x: 150.0,
+        y: 100.0,
+        z: 100.0,
+        vel_x: 10,
+        ..Default::default()
+    }));
+
+    // A mate spawn / despawn drops the mount baseline (its database id outlives its spawns).
+    mates::spawn_mount(&server, &pa, item_id);
+    let mate = server
+        .systems
+        .vehicles
+        .mates
+        .get(0)
+        .get_active_mates(1)
+        .pop()
+        .expect("active mate");
+    let (mate_id, tl) = {
+        let d = mate.data();
+        (d.id, u32::from(d.unit.tl_id))
+    };
+    sus.analyze_mount_delta_movement(mate_id, [100.0, 100.0, 100.0], false, 5.0);
+    mates::despawn_mate(&server, &pa, tl);
+    assert_eq!(
+        sus.analyze_mount_delta_movement(mate_id, far, false, 5.0),
+        None
+    );
+    sus.reset_analyze_mount_delta_movement(mate_id);
+    sus.analyze_mount_delta_movement(mate_id, [100.0, 100.0, 100.0], false, 5.0);
+    mates::spawn_mount(&server, &pa, item_id);
+    assert_eq!(
+        sus.analyze_mount_delta_movement(mate_id, far, false, 5.0),
+        None
+    );
+    let mate = server
+        .systems
+        .vehicles
+        .mates
+        .get(0)
+        .get_active_mates(1)
+        .pop()
+        .expect("respawned mate");
+    let tl = u32::from(mate.data().unit.tl_id);
+
+    // Riding: the player's own moves are ignored, which reseeds its baseline.
+    sus.analyze_player_delta_movement(1, [100.0, 100.0, 100.0], false, false, 5.0);
+    mates::mount_mate(&server, &pa, tl, attach_point::DRIVER, 1);
+    assert!(pa.data().is_riding);
+    crate::world::session::move_unit(&server, &mut a.conn, PA, walking.clone()).await;
+    assert_eq!(
+        sus.analyze_player_delta_movement(1, far, false, false, 5.0),
+        None,
+        "the dismounted player is judged from the first sample, not the pre-ride position"
+    );
+    // ... and the check is live afterwards.
+    assert!(sus
+        .analyze_player_delta_movement(1, farther, false, false, 5.0)
+        .is_some());
+    mates::unmount_mate(&server, &pa, tl, attach_point::DRIVER, 4);
+
+    // Teleport (`set_disabled_set_position(true)`): moves are dropped while it is set and the
+    // baseline is invalid once it is cleared.
+    let ctx = |ms: i64| {
+        let c = pa.data();
+        SampleCtx {
+            now_ms: ms,
+            instance_id: c.unit.transform.instance_id,
+            teleport_seq: c.teleport_seq,
+        }
+    };
+    sus.reset_analyze_player_delta_movement(1);
+    sus.analyze_player_delta_movement_at(1, [100.0, 100.0, 100.0], false, false, 5.0, ctx(0));
+    pa.data().set_disabled_set_position(true);
+    crate::world::session::move_unit(&server, &mut a.conn, PA, walking.clone()).await;
+    assert_eq!(
+        pa.data().unit.transform.x,
+        100.0,
+        "moves are dropped meanwhile"
+    );
+    pa.data().set_disabled_set_position(false);
+    assert_eq!(
+        sus.analyze_player_delta_movement_at(1, far, false, false, 5.0, ctx(5_000)),
+        None
+    );
+    assert!(sus
+        .analyze_player_delta_movement_at(1, farther, false, false, 5.0, ctx(10_000))
+        .is_some());
+}
+
+/// A client keeps moving a mount the server just despawned for a moment: the move is dropped
+/// without a warning and without touching anything.
+#[tokio::test]
+async fn a_move_for_a_despawned_mate_is_dropped_quietly() {
+    use crate::models::movement::UnitMove;
+
+    let (_guard, logs) = capture_logs();
+    let server = server_with(data());
+    let mut a = TestClient::new(&server, 1, 1);
+    let (pa, item_id) = player_with_item(&server, &a, 1, PA, (100.0, 100.0), MATE_ITEM);
+    a.conn.active_char = Some(pa.clone());
+    mates::spawn_mount(&server, &pa, item_id);
+    let mate = server
+        .systems
+        .vehicles
+        .mates
+        .get(0)
+        .get_active_mates(1)
+        .pop()
+        .expect("active mate");
+    let (mate_obj, tl) = (mate.obj_id, u32::from(mate.data().unit.tl_id));
+    mates::despawn_mate(&server, &pa, tl);
+    a.drain();
+    let walking = MoveType::new(MoveKind::Unit(UnitMove {
+        x: 150.0,
+        y: 100.0,
+        z: 100.0,
+        vel_x: 10,
+        ..Default::default()
+    }));
+    crate::world::session::move_unit(&server, &mut a.conn, mate_obj, walking).await;
+    assert!(a.drain().is_empty());
+    assert_eq!(pa.data().unit.transform.x, 100.0);
+    assert!(!logs.text().contains("Invalid target"), "{}", logs.text());
+}
+
 #[tokio::test]
 async fn mate_summon_sends_attribute_pools_preserves_injured_saves_and_refuses_dead_ones() {
     use crate::net::registry::ClientPacket;
