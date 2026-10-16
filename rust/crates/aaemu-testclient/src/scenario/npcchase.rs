@@ -716,6 +716,10 @@ struct Report {
     /// Seconds after the player stood still when the NPC was first within the attack range
     /// (horizontal), `null` when never.
     reached_range_secs: Option<f32>,
+    /// The NPC's own track from the moment the player stood still to the first time it was in
+    /// range: `[walked metres, straight metres, ratio]` (flyers send no path lines, so this is
+    /// what they are judged by); `null` when it never got in range.
+    track_ratio: Option<[f32; 3]>,
     /// Seconds after the player stood still when the NPC was first seen casting a skill.
     attacked_secs: Option<f32>,
     min_dist_to_player: f32,
@@ -769,6 +773,7 @@ impl Report {
             max_path_ratio: 0.0,
             paths: Vec::new(),
             reached_range_secs: None,
+            track_ratio: None,
             attacked_secs: None,
             min_dist_to_player: 0.0,
             min_dist_to_player_2d: 0.0,
@@ -798,7 +803,7 @@ impl Report {
 
     fn pretty_line(&self) -> String {
         format!(
-            "{}: npc {} paths {} (standing {}, repaths {}), max ratio {:.2}, in range {}, \
+            "{}: npc {} paths {} (standing {}, repaths {}), max ratio {:.2}, track {:?}, in range {}, \
              attacked {}, dist to player min {:.1} max {:.1} final {:.1}, max from start {:.1}, \
              returned {}, z {:?}, {} movement samples",
             self.case,
@@ -807,6 +812,7 @@ impl Report {
             self.paths_standing,
             self.repaths,
             self.max_path_ratio,
+            self.track_ratio,
             self.reached_range_secs
                 .map_or("never".to_string(), |t| format!("after {t:.1}s")),
             self.attacked_secs
@@ -904,14 +910,46 @@ fn analyze(
             .find(|s| s.t > stand_start && dist2d(pos(s), player) <= limits.attack_range)
             .map(|s| round1(s.t - stand_start))
     };
+    let track_ratio = samples
+        .iter()
+        .rposition(|s| s.t <= stand_start)
+        .or(Some(0))
+        .filter(|_| !samples.is_empty())
+        .and_then(|from| {
+            let to = samples
+                .iter()
+                .position(|s| s.t > stand_start && dist2d(pos(s), player) <= limits.attack_range)?;
+            let pts: Vec<P3> = samples[from..=to.max(from)].iter().map(pos).collect();
+            let walked = polyline_length(&pts);
+            let straight = dist3(pts[0], *pts.last()?);
+            let ratio = if straight < 0.5 {
+                1.0
+            } else {
+                walked / straight
+            };
+            Some([
+                round1(walked),
+                round1(straight),
+                (ratio * 100.0).round() / 100.0,
+            ])
+        });
     let attacked = attacks
         .iter()
         .find(|(t, c)| *t >= stand_start && *c == npc_obj)
         .map(|(t, _)| round1(t - stand_start));
 
     let mut failures = Vec::new();
-    if mine.is_empty() {
+    // Flyers chase in a straight line without computing a path: arriving counts as engaged.
+    if mine.is_empty() && reached.is_none() && attacked.is_none() {
         failures.push("the NPC never computed an attack path (no 'Aggro from' line)".into());
+    }
+    if let Some([walked, straight, ratio]) = track_ratio {
+        if straight < SHORT_CHASE && ratio > limits.max_ratio {
+            failures.push(format!(
+                "the NPC walked {walked:.1} m for a {straight:.1} m chase (ratio {ratio:.2} > {:.2})",
+                limits.max_ratio
+            ));
+        }
     }
     for p in &paths {
         if p.straight < SHORT_CHASE && p.ratio > limits.max_ratio {
@@ -968,13 +1006,14 @@ fn analyze(
         npc_start: [npc_start.0, npc_start.1, npc_start.2],
         provocation: provoked.into(),
         stand_secs: round1(end - stand_start),
-        engaged: !mine.is_empty(),
+        engaged: !mine.is_empty() || reached.is_some() || attacked.is_some(),
         paths_total: paths.len(),
         paths_standing: standing.len(),
         repaths,
         max_path_ratio: max_ratio,
         paths,
         reached_range_secs: reached,
+        track_ratio,
         attacked_secs: attacked,
         min_dist_to_player: if min_d == f32::MAX {
             0.0
@@ -1084,6 +1123,35 @@ mod tests {
         assert!(rep.failures.is_empty(), "{:?}", rep.failures);
         assert_eq!(rep.reached_range_secs, Some(2.0));
         assert_eq!(rep.repaths, 0);
+    }
+
+    #[test]
+    fn a_flyer_without_path_lines_is_judged_by_its_track() {
+        // Straight in: no path lines, in range after 2 s.
+        let rep = run(
+            &[],
+            &[sample(-1.0, 12.0), sample(1.0, 8.0), sample(2.0, 4.0)],
+            &[],
+        );
+        assert!(rep.failures.is_empty(), "{:?}", rep.failures);
+        assert!(rep.engaged);
+        assert_eq!(rep.track_ratio.map(|t| t[2]), Some(1.0));
+        // The same flyer taking a 40 m detour out and back fails on its track.
+        let rep = run(
+            &[],
+            &[
+                sample(-1.0, 12.0),
+                sample(0.5, 32.0),
+                sample(1.5, 12.0),
+                sample(2.0, 4.0),
+            ],
+            &[],
+        );
+        assert!(
+            rep.failures.iter().any(|f| f.contains("walked")),
+            "{:?}",
+            rep.failures
+        );
     }
 
     #[test]
