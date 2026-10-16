@@ -939,17 +939,17 @@ impl ItemSkillHooks for EconomyForSkills {
         );
     }
 
-    fn unlock_item(&self, server: &GameServer, player: &PlayerRef, item_id: u64) {
-        // SCItemTaskSuccessPacket(ItemUnlock, ItemUpdate(skillItem.SkillSourceItem))
-        match server.items.item_by_id(item_id) {
-            Some(item) => player.send(task_packet(
-                task_type::ITEM_UNLOCK,
-                vec![ItemTask::update(&item)],
-            )),
-            None => tracing::error!(
-                "Plot: SkillSourceItem {item_id} no longer exists (NullReferenceException)"
-            ),
-        }
+    fn unlock_item(&self, server: &GameServer, player: &PlayerRef, item_id: u64) -> bool {
+        // SCItemTaskSuccessPacket(ItemUnlock, ItemUpdate(skillItem.SkillSourceItem)). The C#
+        // keeps the item object of the cast; here a source item the plot consumed is gone.
+        let Some(item) = server.items.item_by_id(item_id) else {
+            return false;
+        };
+        player.send(task_packet(
+            task_type::ITEM_UNLOCK,
+            vec![ItemTask::update(&item)],
+        ));
+        true
     }
 
     fn apply_gear_buffs(
