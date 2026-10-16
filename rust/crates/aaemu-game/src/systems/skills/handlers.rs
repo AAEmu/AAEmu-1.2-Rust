@@ -267,7 +267,9 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, p: CSStartSki
         result = r;
         value = v;
     } else {
-        tracing::warn!("StartSkill: Id {skill_id}, undefined use type");
+        // Doodad / quest-interaction skills are neither learned nor item skills: the normal
+        // path for them (a missing template is reported by `template_skill`).
+        tracing::debug!("StartSkill: Id {skill_id}, undefined use type");
         let Some(skill) = template_skill(server, skill_id) else {
             return;
         };
@@ -383,12 +385,22 @@ fn stop_casting(server: &GameServer, conn: &mut GameConnection, p: CSStopCasting
     let task = player.data().unit.skill_state.skill_task.clone();
     let Some(task) = task else {
         if !plot_cancel {
-            tracing::warn!(
-                "Stop requested, but no skill active? Tl: {}, Pid: {}, objId: {}",
-                p.tl_id,
-                p.plot_tl_id,
-                p.obj_id
-            );
+            if p.tl_id == 0 && p.plot_tl_id != 0 {
+                // The client repeats a cancel for a plot that has already ended (a burst of
+                // ~30 per plot); the C# warned for each of them.
+                tracing::debug!(
+                    "Stop requested for an ended plot. Pid: {}, objId: {}",
+                    p.plot_tl_id,
+                    p.obj_id
+                );
+            } else {
+                tracing::warn!(
+                    "Stop requested, but no skill active? Tl: {}, Pid: {}, objId: {}",
+                    p.tl_id,
+                    p.plot_tl_id,
+                    p.obj_id
+                );
+            }
         }
         return;
     };

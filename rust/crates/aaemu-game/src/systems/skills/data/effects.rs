@@ -530,14 +530,17 @@ pub fn load_effect_tables(
     use EffectKind as K;
     use EffectTemplate as T;
 
+    let mut missing_buff_effects: Vec<(u32, u32)> = Vec::new();
     for_each_row(conn, "SELECT * FROM buff_effects", [], |r| {
         let buff_id = r.u32("buff_id")?;
         if !buff_exists(buff_id) {
-            tracing::warn!(
-                effect_id = r.u32("id")?,
+            let effect_id = r.u32("id")?;
+            tracing::debug!(
+                effect_id,
                 buff_id,
                 "BuffEffect references a missing buff template"
             );
+            missing_buff_effects.push((effect_id, buff_id));
         }
         add(
             K::BuffEffect,
@@ -550,6 +553,17 @@ pub fn load_effect_tables(
             }),
         )
     })?;
+    if !missing_buff_effects.is_empty() {
+        let mut buff_ids: Vec<u32> = missing_buff_effects.iter().map(|(_, b)| *b).collect();
+        buff_ids.sort_unstable();
+        buff_ids.dedup();
+        tracing::warn!(
+            effects = missing_buff_effects.len(),
+            buffs = buff_ids.len(),
+            sample = ?&missing_buff_effects[..missing_buff_effects.len().min(5)],
+            "BuffEffect rows reference buff templates absent from the static data (effect_id, buff_id)"
+        );
+    }
     if conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='play_log_effects')",
         [],

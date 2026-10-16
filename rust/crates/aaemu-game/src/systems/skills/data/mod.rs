@@ -206,6 +206,29 @@ impl Data {
             Ok(())
         })?;
         effects::load_effect_tables(conn, &|id| buffs.contains_key(&id), &mut d.effects)?;
+        // Buffs whose SkillControllerId has no `skill_controllers` row (a gap of the 1.2 data;
+        // `BuffTemplate.Start` skips the controller for them).
+        {
+            let controllers = d.effects.get(&EffectKind::SkillController);
+            let mut absent: Vec<(u32, u32)> = buffs
+                .values()
+                .filter(|b| b.skill_controller_id > 0)
+                .filter(|b| !controllers.is_some_and(|c| c.contains_key(&b.skill_controller_id)))
+                .map(|b| (b.id, b.skill_controller_id))
+                .collect();
+            if !absent.is_empty() {
+                absent.sort_unstable();
+                let mut ids: Vec<u32> = absent.iter().map(|(_, sc)| *sc).collect();
+                ids.sort_unstable();
+                ids.dedup();
+                tracing::warn!(
+                    buffs = absent.len(),
+                    controllers = ids.len(),
+                    sample = ?&absent[..absent.len().min(5)],
+                    "buffs reference skill controllers absent from the static data; their controller is skipped"
+                );
+            }
+        }
         d.effect_types = effects::load_effect_types(conn)?;
         // skill_effects
         {

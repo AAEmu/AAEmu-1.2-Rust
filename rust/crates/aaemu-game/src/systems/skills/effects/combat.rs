@@ -748,7 +748,7 @@ pub fn buff_effect(server: &GameServer, e: &BuffEffect, args: &EffectArgs<'_>) {
         return;
     };
     let Some(buff_id) = e.buff_id else {
-        tracing::error!(
+        tracing::warn!(
             "BuffEffect {} has no buff template (NullReferenceException)",
             e.id
         );
