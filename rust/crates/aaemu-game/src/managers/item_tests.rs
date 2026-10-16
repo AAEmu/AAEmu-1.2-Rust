@@ -494,6 +494,7 @@ fn release_id_valid_id_removes_from_items() {
         last_id: 0xFFFF_FFFF,
         obj_tables: &[],
         distinct: false,
+        exclude: &[],
     });
     item_ids.initialize_with(&[3000]);
     let manager = create_item_manager();
