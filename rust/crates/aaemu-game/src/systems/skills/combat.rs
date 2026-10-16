@@ -946,13 +946,13 @@ pub fn add_unit_aggro(
     if buffs::check_buff_tag(server, owner, tags::NO_FIGHT)
         || buffs::check_buff_tag(server, owner, tags::RETURNING)
     {
-        clear_aggro_of_unit(server, owner, unit);
+        clear_aggro_of_unit_quiet(server, owner, unit);
         return false;
     }
     if buffs::check_buff_tag(server, unit, tags::NO_FIGHT)
         || buffs::check_buff_tag(server, unit, tags::RETURNING)
     {
-        clear_aggro_of_unit(server, owner, unit);
+        clear_aggro_of_unit_quiet(server, owner, unit);
         return false;
     }
     if kind == AggroKind::Damage {
@@ -1054,6 +1054,23 @@ pub fn add_unit_aggro(
 
 /// `Unit.ClearAggroOfUnit(unit)` on `owner`.
 pub fn clear_aggro_of_unit(server: &GameServer, owner: &WorldObject, unit: &WorldObject) {
+    clear_aggro_of_unit_inner(server, owner, unit, true);
+}
+
+/// `ClearAggroOfUnit` for callers that legitimately reach it for a unit that is not in the
+/// owner's table (the `AddUnitAggro` NoFight / Returning guards, the death fan-out of
+/// `clear_incoming_aggro`): the C# logged "Failed to remove ..." for these as well, here the
+/// absent entry is only a debug line.
+fn clear_aggro_of_unit_quiet(server: &GameServer, owner: &WorldObject, unit: &WorldObject) {
+    clear_aggro_of_unit_inner(server, owner, unit, false);
+}
+
+fn clear_aggro_of_unit_inner(
+    server: &GameServer,
+    owner: &WorldObject,
+    unit: &WorldObject,
+    warn_if_absent: bool,
+) {
     if let Some(tp) = unit.as_player() {
         tp.data()
             .skill_char
@@ -1091,9 +1108,14 @@ pub fn clear_aggro_of_unit(server: &GameServer, owner: &WorldObject, unit: &Worl
         {
             set.remove(&owner.obj_id());
         }
-    } else {
+    } else if warn_if_absent {
         tracing::warn!(
             "Failed to remove unit[{unit_id}] aggro from NPC[{}]",
+            owner.obj_id()
+        );
+    } else {
+        tracing::debug!(
+            "Unit[{unit_id}] was not in the aggro table of NPC[{}]",
             owner.obj_id()
         );
     }
@@ -1206,7 +1228,40 @@ pub(crate) fn clear_incoming_aggro(server: &GameServer, victim: &WorldObject) {
         .unwrap_or_default();
     for h in holders {
         if let Some(holder) = server.world.object(h) {
-            clear_aggro_of_unit(server, &holder, victim);
+            clear_aggro_of_unit_quiet(server, &holder, victim);
+        }
+    }
+}
+
+/// Empties `owner`'s aggro table and unregisters it from the `aggro_watch` reverse index of
+/// every unit that was in it, so a later death of such a unit does not fan out to an owner
+/// that no longer holds it. (Characters' lists and the NPC combat state are the caller's.)
+pub fn drop_aggro_table(server: &GameServer, owner: &WorldObject) {
+    let ids: Vec<u32> = owner
+        .with_unit(|u| {
+            let t = &mut u.unit_mut().skill_state.aggro_table;
+            let ids = t.keys().copied().collect();
+            t.clear();
+            ids
+        })
+        .unwrap_or_default();
+    unwatch_aggro(server, owner.obj_id(), &ids);
+}
+
+/// Removes `owner_id` from the `aggro_watch` sets of `abusers`.
+pub(crate) fn unwatch_aggro(server: &GameServer, owner_id: u32, abusers: &[u32]) {
+    let mut watch = server
+        .systems
+        .skills
+        .aggro_watch
+        .lock()
+        .expect("aggro watch poisoned");
+    for id in abusers {
+        if let Some(set) = watch.get_mut(id) {
+            set.remove(&owner_id);
+            if set.is_empty() {
+                watch.remove(id);
+            }
         }
     }
 }

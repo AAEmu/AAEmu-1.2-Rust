@@ -1203,13 +1203,30 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   (for example, an item consumed before its first save). SQL errors and transaction handling are
   unchanged, and deletion IDs are acknowledged only after commit.
 
+* systems::skills log noise (2026-10-16): `CSStopCasting` with `tl == 0` and a plot tl for a plot
+  that already ended (the client repeats it ~30 times per plot) is logged at debug instead of
+  the C# warning; no acknowledgement packet is sent (client behaviour unverified; possible
+  follow-up: answer with SCPlotCastingStopped/SCPlotChannelingStopped as for a mismatched
+  plot). "Failed to remove unit aggro" is still a warning for direct callers, but the
+  `AddUnitAggro` NoFight/Returning guards and the death fan-out of `clear_incoming_aggro`
+  (which the C# also logged) go to debug. `aggro_watch` (Rust-only reverse index of the C#
+  `OnHealed`/`OnDeath` subscriptions) is now unregistered when an NPC's whole table is dropped
+  (`combat::drop_aggro_table`, NPC death and `ClearAllAggroTargetsAndCheckCombatState`), so
+  stale holders no longer receive the victim's death fan-out.
+
 * Static-data gaps (2026-10-15): buffs 2149, 1142 and 1933 reference absent skill controllers
   3554, 1806 and 7749 in the available 1.2 compact copies. Their controller behavior remains
   unsupported pending authentic definitions; no replacement parameters are invented. The supplied
   BuffEffect warnings also reference 33 absent buff templates, ten referenced by skill rows.
-  Restoring them requires an authentic 1.2 dataset. Skill 14602
+  Restoring them requires an authentic 1.2 dataset. Counts (compact.sqlite3): 338 buffs
+  reference 113 absent skill controllers (also 6121 for buff 4341, 2883 for buff 1643) and 35
+  BuffEffect rows reference 30 absent buffs (16 of them used by skill effects). The C# warned on
+  every buff start; the Rust port warns once per (buff, controller) pair (repeats at debug) plus
+  one startup summary for each gap, with per-row detail at debug. Skill 14602
   already exists and uses the inherited fallback cast path for Memory Tome interactions; its
-  "undefined use type" diagnostic does not mean the skill template is absent. Quest skill 16881
+  "undefined use type" diagnostic does not mean the skill template is absent: it is the normal
+  path for doodad / quest-interaction skills (14907, 14599, 16520..16620, 19015 ... are
+  unlearned, mostly target-type-8 skills) and is logged at debug here (the C# warned). Quest skill 16881
   (Detection Orb, quest 2394) references NPC group 200, whose members 7976/7977 have no available
   NPC templates. Its unique `unit_reqs` kind-34 `value2 = 1` is a negation: the 10.x zone server
   (`sub_39770380`) passes a TargetNpcGroup requirement when the target NPC is in the existing

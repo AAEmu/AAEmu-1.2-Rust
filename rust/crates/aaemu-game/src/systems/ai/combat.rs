@@ -88,6 +88,7 @@ pub fn clear_all_aggro_targets_and_check_combat_state(server: &GameServer, npc_o
             ids
         })
         .unwrap_or_default();
+    skills_combat::unwatch_aggro(server, npc_obj.obj_id(), &ids);
     let players: Vec<_> = ids
         .iter()
         .filter_map(|id| server.world.character_by_obj_id(*id))
