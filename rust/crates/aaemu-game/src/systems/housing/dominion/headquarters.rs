@@ -489,7 +489,7 @@ pub(super) fn teleport_effect_inner(server: &GameServer, args: &EffectArgs<'_>) 
     }
     // Same-instance portal semantics: the client acknowledges through the existing teleport
     // load/movement path, which updates server position/visibility and clears this flag.
-    player.data().disabled_set_position = true;
+    player.data().set_disabled_set_position(true);
     player.send(SCTeleportUnitPacket {
         reason,
         error_message: 0,

@@ -43,7 +43,7 @@ impl Command for Nudge {
         let character = ctx.player()?;
         let obj = WorldObject::from(&character);
         // DisabledSetPosition first: FinalizeTransform then skips AddVisibleObject.
-        character.data().disabled_set_position = true;
+        character.data().set_disabled_set_position(true);
         // Transform.Local.AddDistanceToFront(distance, false)
         obj.with_transform(|t| {
             let (sin, cos) = t.rot_z.sin_cos();

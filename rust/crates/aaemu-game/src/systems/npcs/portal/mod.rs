@@ -836,7 +836,7 @@ pub fn use_portal_with_preference(
         if !crate::systems::vehicles::on_instance_change(server, player) {
             return;
         }
-        player.data().disabled_set_position = true;
+        player.data().set_disabled_set_position(true);
         player.send(SCLoadInstancePacket {
             instance_id: teleport.world_id,
             zone_id: teleport.zone_id,
@@ -855,7 +855,7 @@ pub fn use_portal_with_preference(
             ..teleport
         };
     } else {
-        player.data().disabled_set_position = true;
+        player.data().set_disabled_set_position(true);
     }
     player.send(SCTeleportUnitPacket {
         reason: packets::teleport_reason::PORTAL,

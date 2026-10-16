@@ -288,7 +288,7 @@ pub fn after_death(server: &GameServer, npc: &NpcRef, _killer: Option<&WorldObje
             .filter_map(|id| server.world.character_by_obj_id(id))
             .collect()
     };
-    npc.data().unit.skill_state.aggro_table.clear();
+    crate::systems::skills::combat::drop_aggro_table(server, &me);
     for p in &aggro_players {
         let po = WorldObject::from(p);
         crate::systems::skills::combat::clear_aggro_of_unit(server, &me, &po);

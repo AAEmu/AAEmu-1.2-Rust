@@ -474,6 +474,9 @@ pub fn on_leave_world(server: &GameServer, player: &PlayerRef) {
     };
     mates::remove_and_despawn_all_active_owned_mates(server, instance, id);
     slaves::remove_and_despawn_all_active_owned_slaves(server, player, false);
+    let sus = &server.systems.services.sus;
+    sus.reset_analyze_player_delta_movement(id);
+    sus.forget_object(player.obj_id);
 }
 
 /// `GameConnection.OnDisconnect` part: `RemoveAndDespawnActiveOwnedMatesSlaves()` (owned mates
@@ -484,6 +487,9 @@ pub fn on_disconnect(server: &GameServer, player: &PlayerRef) {
         (c.unit.transform.instance_id, c.id)
     };
     mates::remove_and_despawn_all_active_owned_mates(server, instance, id);
+    let sus = &server.systems.services.sus;
+    sus.reset_analyze_player_delta_movement(id);
+    sus.forget_object(player.obj_id);
     force_dismount_and_despawn(server, player, 1000 * 60 * 10);
 }
 

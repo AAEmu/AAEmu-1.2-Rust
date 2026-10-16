@@ -1178,6 +1178,19 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   those replacements ("replacement chain rejected") and the doodad waited for its Final to
   respawn the base template.
 
+* systems::npcs (2026-10-16): `DoodadFuncTod` takes its `curTime >= Tod` catch-up on every
+  entry, which ignores that the clock wraps; the 20 day/night board templates (West Gate
+  4345-4352, Blue Salt 6175 / 6213 and their variants: day board Tod 20:00, variant Tod 02:00 or
+  06:00, each respawning into the other through `DoodadFuncRatioRespawn`) therefore swapped back
+  and forth synchronously for the whole game evening (20:00-24:00, about 40 real minutes every
+  4 hours), tripping the replacement-chain guard about 880 times a minute and churning doodads
+  and packets until the base template's Final respawned it. A doodad created by a
+  `DoodadFuncRatioRespawn` replacement (`DoodadSpawner::spawn` with `RespawnDoodadTemplateId`
+  set) now skips the Tod catch-up during its entry phase (`suppress_tod_catch_up`, cleared by
+  `InitDoodad`): it was created at this time of day, so its Tod refers to the next occurrence,
+  which the time-of-day watcher fires on crossing. The C# has no such suppression (its chain
+  recursed). Boards respawned by their own Final, and every other spawn, keep the catch-up.
+
 * systems::ai (2026-10-15): the optional compact patch
   `SQL/patches/compact/2026-10-14-fix-npc-ai-param-syntax.sql` repairs malformed Lua syntax
   in `npc_ai_params` 443, 835 and 1975 only when the original bytes match. It preserves authored
@@ -1186,6 +1199,15 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   offline to the server's compact copy, then restart; runtime loaders remain read-only. AI tick
   diagnostics now report plan, tick and maintenance time with active-work counts. Parallel tick
   time is elapsed batch time, including dispatch and await overhead, rather than summed job time.
+
+* systems::ai (2026-10-16): retail NPC route files are not shipped (`Data/Path` has 13 files, while
+  `ai_commands` references 280 distinct FollowPath names such as `public_mate2`, `public_garden3`
+  and `tuto_move`). As in the C# (`Simulation.GoToPath`: warn and return, the NPC stays put and
+  keeps `IsInPatrol`), `Simulation` stops without moving, but the "Stop moving... no recorded
+  path file" warning is now logged once per file name (`System::first_missing_path`) and at debug
+  afterwards, since a repeating skill such as the tutorial NPC's `tuto_move` fired it every 30 s.
+  The `Impossible to parse npc_ai_params` warning now names the compact patch that repairs rows
+  443, 835 and 1975.
 
 * systems::npcs (2026-10-15): `DoodadFuncClout` with `UseOriginSource` takes the first doodad
   within 4 m of the caster as the area trigger's owner, and the C# scheduled the
@@ -1203,13 +1225,30 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   (for example, an item consumed before its first save). SQL errors and transaction handling are
   unchanged, and deletion IDs are acknowledged only after commit.
 
+* systems::skills log noise (2026-10-16): `CSStopCasting` with `tl == 0` and a plot tl for a plot
+  that already ended (the client repeats it ~30 times per plot) is logged at debug instead of
+  the C# warning; no acknowledgement packet is sent (client behaviour unverified; possible
+  follow-up: answer with SCPlotCastingStopped/SCPlotChannelingStopped as for a mismatched
+  plot). "Failed to remove unit aggro" is still a warning for direct callers, but the
+  `AddUnitAggro` NoFight/Returning guards and the death fan-out of `clear_incoming_aggro`
+  (which the C# also logged) go to debug. `aggro_watch` (Rust-only reverse index of the C#
+  `OnHealed`/`OnDeath` subscriptions) is now unregistered when an NPC's whole table is dropped
+  (`combat::drop_aggro_table`, NPC death and `ClearAllAggroTargetsAndCheckCombatState`), so
+  stale holders no longer receive the victim's death fan-out.
+
 * Static-data gaps (2026-10-15): buffs 2149, 1142 and 1933 reference absent skill controllers
   3554, 1806 and 7749 in the available 1.2 compact copies. Their controller behavior remains
   unsupported pending authentic definitions; no replacement parameters are invented. The supplied
   BuffEffect warnings also reference 33 absent buff templates, ten referenced by skill rows.
-  Restoring them requires an authentic 1.2 dataset. Skill 14602
+  Restoring them requires an authentic 1.2 dataset. Counts (compact.sqlite3): 338 buffs
+  reference 113 absent skill controllers (also 6121 for buff 4341, 2883 for buff 1643) and 35
+  BuffEffect rows reference 30 absent buffs (16 of them used by skill effects). The C# warned on
+  every buff start; the Rust port warns once per (buff, controller) pair (repeats at debug) plus
+  one startup summary for each gap, with per-row detail at debug. Skill 14602
   already exists and uses the inherited fallback cast path for Memory Tome interactions; its
-  "undefined use type" diagnostic does not mean the skill template is absent. Quest skill 16881
+  "undefined use type" diagnostic does not mean the skill template is absent: it is the normal
+  path for doodad / quest-interaction skills (14907, 14599, 16520..16620, 19015 ... are
+  unlearned, mostly target-type-8 skills) and is logged at debug here (the C# warned). Quest skill 16881
   (Detection Orb, quest 2394) references NPC group 200, whose members 7976/7977 have no available
   NPC templates. Its unique `unit_reqs` kind-34 `value2 = 1` is a negation: the 10.x zone server
   (`sub_39770380`) passes a TargetNpcGroup requirement when the target NPC is in the existing
@@ -1227,6 +1266,12 @@ The 1.2 C# never answered `CSRankCharacterPacket` (empty, log-only) and has no `
 - **Events.** The arena board scores at the end of an instant game (`instant_game::record_rankings`, once per game): win/lose/draw/invalid points are `game_rule_sets.rank_*_point` (only rule set 28, the gladiator duel in zone group 77: win 4, lose 1). Because `EndGame` leaves both corps `LOSE` when the timer runs out (mirrored C# bug), a timed-out duel scores both players as losers. The two fishing boards score each trophy fish a player lands (`fishing::record_catch`, from `DoodadFuncConvertFish` and the equipped-fish conversion) in the player's zone group; they only count inside the board's authored window, which ended in 2014, so on the shipped data no catch scores. The racing board is never recorded.
 - **Period close.** A once-a-minute task (first tick at start-up) mails every closed, unpaid period: place -> `rank_scope_links` band -> `rank_rewards` item (count and grade as authored) as a `SYS_EXPRESS` letter (offline winners included), then `SCRankRewardMailPacket` to online winners. The period is marked paid before the letters are built, inside the economy operation gate; a crash between the letters and the next save can therefore lose (never duplicate) the mark. `rank_rewards.weeks` (how long the reward lasts) and appellation rewards (none authored) are not applied.
 - **Not sent.** `SCRankAlarmPacket` (0x205): only the fishing contest authors alarms (`start_time_alarm` -5 / `end_time_alarm` 0 and message strings), that board ended in 2014 and the packet's `kind` / `rank_alarm_kind` values are unresolved, so no trigger is invented.
+
+### Startup warnings (Rust only)
+
+- **`FamilyIdManager` and family 0.** `characters.family` is 0 for a character without a family. The C# `FamilyIdManager` passes `Exclude = []`, so every start logged "Object ID 0 in DB is less than 1". `IdManagerSpec` now carries the C# `_exclude` list (checked before the first-id warning, as in `IdManager.Initialize`) and `FAMILY_ID` excludes 0. Every other manager keeps an empty list and still warns about ids below its first id.
+- **Orphan tower defense waves.** The shipped `compact.sqlite3` has `tower_def_progs` rows for `tower_def_id` 9, 22 and 33 with no `tower_defs` parent (20 waves). The C# `return`s at the first one; the Rust loader skips them (see the instances section) and now logs one info summary with the count and the distinct parent ids; the per-row line is `debug`.
+- **Client sources not found.** `Configurations/ClientData.json` lists four default sources and array settings merge by index (as in Microsoft.Extensions.Configuration), so a `Config.Local.json` with two sources leaves the last two defaults in place. `ClientFileManager::from_sources` logs a source that does not exist at `info` while at least one source is valid, and at `warn` for each (plus the existing error) when none is. `add_source` itself only logs not-found at `debug`.
 
 ## Live testing (phase 5): fixes and deliberate deviations
 
@@ -1270,6 +1315,22 @@ servers (see `rust/LIVE-TESTING.md`). Fixed porting bugs are in the git history 
   updates now arrive right after the character is in the world. Entries of a character that
   leaves first are dropped (`on_leave_world`); characters already in the world (world switches)
   are unaffected. Quest timers expiring before the spawn are not deferred.
+
+* `SusManager` speed analysis: baselines carry their time, instance and a teleport counter
+  (`Character::teleport_seq`, bumped by `Character::set_disabled_set_position(true)`, the C#
+  `GameObject.DisabledSetPosition` setter that called `ResetAnalyzePlayerDeltaMovement`). The
+  speed is taken over the real time since the baseline (at least the nominal 5 s), and a
+  baseline older than 10 s, from another instance or another teleport counter is re-seeded
+  instead of judged. The C# kept baselines fresh differently: `FinalizeTransform` propagated to
+  the child transforms of a mount / slave (riders), and the setter reset them on teleports;
+  the Rust move handler only finalizes the packet's target, so riders and teleported players
+  were reported as 40 to 3000 m/s runs (and re-summoned mates, whose database id outlives the
+  spawn, as pets). The riding / slave-bound / `disabled_set_position` early returns of the move
+  handler, mate spawn / delete and leaving the world reset the baseline explicitly
+  (`CharacterMates.CreateNewMate` reset it too). Thresholds (25 / 27.5 m/s) are unchanged.
+* `CSMoveUnitPacket` for an object the world no longer holds (a mount the server just
+  despawned: summon toggle, dungeon entry, death) logs `Invalid target` at debug, not warn: the
+  client keeps sending a few moves after the despawn.
 
 Parity status of the scripted scenarios: `login`, `lobby` and `full` (fresh character) produce
 the same S->C traffic as the C# servers after id / time normalisation (0 findings); a second

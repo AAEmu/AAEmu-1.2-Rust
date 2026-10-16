@@ -122,6 +122,9 @@ pub struct System {
     pub mana_regen: Mutex<HashMap<u32, regen::ManaRegenEntry>>,
     /// `Helper.CheckInterval` state ((obj id, call site) -> next allowed time).
     pub intervals: Mutex<HashMap<(u32, u8), i64>>,
+    /// `(buff id, skill controller id)` pairs already reported as missing from the static data
+    /// (`BuffTemplate.Start` warns once per pair, repeats go to debug).
+    pub(crate) missing_sc_warned: Mutex<HashSet<(u32, u32)>>,
     config: RwLock<SkillsConfig>,
 }
 

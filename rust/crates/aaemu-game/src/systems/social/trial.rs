@@ -632,7 +632,7 @@ fn teleport(server: &GameServer, p: &PlayerRef, pos: SpawnPosition, reason: u8, 
             ang_z: destination.rot_z,
         });
     }
-    p.data().disabled_set_position = true;
+    p.data().set_disabled_set_position(true);
     p.send(SCTeleportUnitPacket {
         reason,
         error_message: 0,
@@ -978,7 +978,7 @@ fn result_is_guilty(
                 t.defendant_name
             ),
         }
-        c.disabled_set_position = true;
+        c.set_disabled_set_position(true);
     }
     fx.push(Effect::ForceDismount(defendant.clone()));
     teleport(server, defendant, jail.pos, teleport_reason::JAIL, fx);
@@ -2275,7 +2275,7 @@ fn cleanup_jury_member(
             fmt_vec3(cur3)
         );
         fx.push(Effect::ForceDismount(m.clone()));
-        m.data().disabled_set_position = true;
+        m.data().set_disabled_set_position(true);
         tracing::debug!(
             "Returning jury member {name} to their old position {}",
             fmt_vec3(pos)

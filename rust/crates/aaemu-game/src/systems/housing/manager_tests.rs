@@ -931,6 +931,7 @@ async fn failed_house_creation_releases_allocated_tl_id() {
         last_id: capacity + 1,
         obj_tables: &[],
         distinct: false,
+        exclude: &[],
     });
     object.initialize_with(&(1..=capacity).collect::<Vec<_>>());
     server.ids = std::sync::Arc::new(IdManagers {

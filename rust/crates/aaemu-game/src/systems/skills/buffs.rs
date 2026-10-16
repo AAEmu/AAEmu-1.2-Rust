@@ -937,11 +937,28 @@ fn start_skill_controller(
             .skills
             .skill_controller(template.skill_controller_id)
         else {
-            tracing::warn!(
-                "BuffTemplate.Start: buff {} SC template not found for sc_id={}",
-                template.id,
-                template.skill_controller_id
-            );
+            // The 1.2 data lacks many controllers (see PORTING.md); the C# warned on every
+            // start, here only the first start of each (buff, controller) pair is a warning.
+            let first = server
+                .systems
+                .skills
+                .missing_sc_warned
+                .lock()
+                .expect("missing sc set poisoned")
+                .insert((template.id, template.skill_controller_id));
+            if first {
+                tracing::warn!(
+                    "BuffTemplate.Start: buff {} SC template not found for sc_id={}",
+                    template.id,
+                    template.skill_controller_id
+                );
+            } else {
+                tracing::debug!(
+                    "BuffTemplate.Start: buff {} SC template not found for sc_id={}",
+                    template.id,
+                    template.skill_controller_id
+                );
+            }
             return;
         };
         // Bubbletrap-style buffs set Gliding but leave GlidingLiftHeight = 0: lift 5 m.

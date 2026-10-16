@@ -348,6 +348,10 @@ pub struct DoodadPhaseState {
     /// `DoodadFuncFinal.After` of the first `Final { After > 0 }` phase func of the current
     /// phase (`TimeLeft` cache: `final_phase_end_ms = PhaseTime + After`).
     pub final_after_ms: Option<i32>,
+    /// Set on a `DoodadFuncRatioRespawn` replacement until its entry phase has run: its
+    /// `DoodadFuncTod` funcs must not take the `curTime >= Tod` catch-up (see
+    /// `phase_funcs::use_phase_func`).
+    pub suppress_tod_catch_up: bool,
 }
 
 impl Doodad {

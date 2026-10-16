@@ -514,6 +514,14 @@ fn add_active_mate_and_spawn(
         despawn_mate(server, owner, tl);
         return;
     }
+    // `CharacterMates.CreateNewMate`: `ResetAnalyzeMountDeltaMovement(mount.Id)` (the mate's
+    // database id outlives its spawns).
+    let mate_id = mate.data().id;
+    server
+        .systems
+        .services
+        .sus
+        .reset_analyze_mount_delta_movement(mate_id);
     owner.send(SCItemTaskSuccessPacket {
         action: item_task_type::UPDATE_SUMMON_MATE_ITEM,
         tasks: item_update.into_iter().collect(),
@@ -555,6 +563,13 @@ fn delete_mate(server: &GameServer, mate: &MateRef) {
         (d.unit.tl_id, a)
     };
     stop_update_xp(mate);
+    let mate_id = mate.data().id;
+    server
+        .systems
+        .services
+        .sus
+        .reset_analyze_mount_delta_movement(mate_id);
+    server.systems.services.sus.forget_object(mate.obj_id);
     if let Some(world) = server.world.world_of(&WorldObject::from(mate)) {
         world.delete(mate);
     }

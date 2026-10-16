@@ -23,14 +23,41 @@ pub const PLAYER_CHECK_SPEED: f64 = 25.0;
 pub const MOUNT_CHECK_SPEED: f64 = 27.5;
 /// Seconds a report suppresses further reports.
 const SKIP_TIME_AFTER_REPORT: f32 = 15.0;
+/// A baseline older than this (s) saw no continuous movement samples (riding, a loading
+/// screen, a teleport, standing still): the sample re-seeds it instead of being judged. While a
+/// character moves the analysis runs every ~5 s.
+const MAX_BASELINE_AGE: f32 = 10.0;
+
+/// What a position sample is judged against: when and where (instance / teleport counter) the
+/// baseline was recorded. `Default` (all zero) disables the staleness checks and keeps the
+/// C# fixed-interval behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SampleCtx {
+    /// Unix ms of the sample.
+    pub now_ms: i64,
+    /// World instance the object was in.
+    pub instance_id: u32,
+    /// `Character::teleport_seq` (0 for mates).
+    pub teleport_seq: u32,
+}
+
+/// The stored baseline of one analysed object.
+#[derive(Debug, Clone, Copy)]
+struct Baseline {
+    pos: [f32; 3],
+    skip_time: f32,
+    ctx: SampleCtx,
+}
+
+type Baselines = Mutex<HashMap<u32, Baseline>>;
 
 /// `SusManager`.
 #[derive(Debug, Default)]
 pub struct SusManager {
-    /// `LastPlayerPositions` (player id -> (pos, skipTime)).
-    last_player_positions: Mutex<HashMap<u32, ([f32; 3], f32)>>,
-    /// `LastPetPositions` (mate id -> (pos, skipTime)).
-    last_pet_positions: Mutex<HashMap<u32, ([f32; 3], f32)>>,
+    /// `LastPlayerPositions` (player id -> pos, skipTime and when / where it was taken).
+    last_player_positions: Baselines,
+    /// `LastPetPositions` (mate id -> pos, skipTime and when / where it was taken).
+    last_pet_positions: Baselines,
     /// `Transform._lastFinalizeTime` (unix ms) / `_skipCheckTime` (s) per object.
     finalize_checks: Mutex<HashMap<u32, (i64, f32)>>,
 }
@@ -106,11 +133,24 @@ impl SusManager {
                 [t.x, t.y, t.z]
             }
         };
-        let (id, name, disabled, owner_obj_id) = {
+        let (id, name, disabled, owner_obj_id, instance_id) = {
             let m = pet.data();
-            (m.id, m.unit.name.clone(), false, m.owner_obj_id)
+            (
+                m.id,
+                m.unit.name.clone(),
+                false,
+                m.owner_obj_id,
+                m.unit.transform.instance_id,
+            )
         };
-        if let Some(speed) = self.analyze_mount_delta_movement(id, pos, disabled, delta_time) {
+        let ctx = SampleCtx {
+            now_ms: crate::world::now_ms(),
+            instance_id,
+            teleport_seq: 0,
+        };
+        if let Some(speed) =
+            self.analyze_mount_delta_movement_at(id, pos, disabled, delta_time, ctx)
+        {
             let owner = server.world.character_by_obj_id(owner_obj_id);
             let owner_name = owner.as_ref().map(|o| o.data().unit.name.clone());
             let text = Self::mount_report(&name, owner_name.as_deref(), speed);
@@ -197,30 +237,59 @@ impl SusManager {
 
     /// The speed check of `AnalyzePlayerDeltaMovement` / `AnalyzeMountDeltaMovement`: records
     /// the position and returns the observed flat speed when it exceeds `max_speed`.
+    ///
+    /// Deviation from the C#: the speed is taken over the real time since the baseline (never
+    /// less than `delta_time`), and a stale baseline (older than [`MAX_BASELINE_AGE`], another
+    /// instance, another teleport counter) re-seeds instead of being judged. The C# kept
+    /// baselines fresh through child-transform finalizes and the `DisabledSetPosition` setter;
+    /// without them a ride or a teleport read as a 40 to 3000 m/s run.
     fn analyze(
-        positions: &Mutex<HashMap<u32, ([f32; 3], f32)>>,
+        positions: &Baselines,
         id: u32,
         pos: [f32; 3],
         can_check: bool,
         max_speed: f64,
         delta_time: f32,
+        ctx: SampleCtx,
     ) -> Option<f64> {
         let mut map = positions.lock().expect("sus poisoned");
-        let Some(&(last_pos, mut skip_time)) = map.get(&id) else {
-            map.insert(id, (pos, 0.0));
+        let fresh = Baseline {
+            pos,
+            skip_time: 0.0,
+            ctx,
+        };
+        let Some(&last) = map.get(&id) else {
+            map.insert(id, fresh);
             return None;
         };
-        let (dx, dy) = (pos[0] - last_pos[0], pos[1] - last_pos[1]);
+        let elapsed = (ctx.now_ms - last.ctx.now_ms) as f32 / 1000.0;
+        let stale = ctx.instance_id != last.ctx.instance_id
+            || ctx.teleport_seq != last.ctx.teleport_seq
+            || !(0.0..=MAX_BASELINE_AGE).contains(&elapsed);
+        if stale {
+            map.insert(id, fresh);
+            return None;
+        }
+        let interval = elapsed.max(delta_time);
+        let mut skip_time = last.skip_time;
+        let (dx, dy) = (pos[0] - last.pos[0], pos[1] - last.pos[1]);
         let mut flagged = None;
         if can_check && (dx != 0.0 || dy != 0.0) && skip_time <= 0.0 {
-            let observed = f64::from((dx * dx + dy * dy).sqrt() / delta_time);
+            let observed = f64::from((dx * dx + dy * dy).sqrt() / interval);
             if observed > max_speed {
                 skip_time = SKIP_TIME_AFTER_REPORT;
                 flagged = Some(observed);
             }
         }
-        skip_time -= delta_time;
-        map.insert(id, (pos, skip_time));
+        skip_time -= interval;
+        map.insert(
+            id,
+            Baseline {
+                pos,
+                skip_time,
+                ctx,
+            },
+        );
         flagged
     }
 
@@ -234,6 +303,27 @@ impl SusManager {
         disabled_set_position: bool,
         delta_time: f32,
     ) -> Option<f64> {
+        self.analyze_player_delta_movement_at(
+            player_id,
+            world_pos,
+            is_riding,
+            disabled_set_position,
+            delta_time,
+            SampleCtx::default(),
+        )
+    }
+
+    /// [`Self::analyze_player_delta_movement`] with the sample's time / instance / teleport
+    /// counter (the staleness checks).
+    pub fn analyze_player_delta_movement_at(
+        &self,
+        player_id: u32,
+        world_pos: [f32; 3],
+        is_riding: bool,
+        disabled_set_position: bool,
+        delta_time: f32,
+        ctx: SampleCtx,
+    ) -> Option<f64> {
         Self::analyze(
             &self.last_player_positions,
             player_id,
@@ -241,6 +331,7 @@ impl SusManager {
             !is_riding && !disabled_set_position,
             PLAYER_CHECK_SPEED,
             delta_time,
+            ctx,
         )
     }
 
@@ -253,12 +344,21 @@ impl SusManager {
         delta_time: f32,
     ) {
         let pos = world_position(server, player);
-        let (id, name, disabled) = {
+        let (id, name, disabled, ctx) = {
             let c = player.data();
-            (c.id, c.unit.name.clone(), c.disabled_set_position)
+            (
+                c.id,
+                c.unit.name.clone(),
+                c.disabled_set_position,
+                SampleCtx {
+                    now_ms: crate::world::now_ms(),
+                    instance_id: c.unit.transform.instance_id,
+                    teleport_seq: c.teleport_seq,
+                },
+            )
         };
         if let Some(speed) =
-            self.analyze_player_delta_movement(id, pos, is_riding, disabled, delta_time)
+            self.analyze_player_delta_movement_at(id, pos, is_riding, disabled, delta_time, ctx)
         {
             self.log_activity_player(
                 server,
@@ -288,6 +388,24 @@ impl SusManager {
         disabled_set_position: bool,
         delta_time: f32,
     ) -> Option<f64> {
+        self.analyze_mount_delta_movement_at(
+            pet_id,
+            world_pos,
+            disabled_set_position,
+            delta_time,
+            SampleCtx::default(),
+        )
+    }
+
+    /// [`Self::analyze_mount_delta_movement`] with the sample's time / instance.
+    pub fn analyze_mount_delta_movement_at(
+        &self,
+        pet_id: u32,
+        world_pos: [f32; 3],
+        disabled_set_position: bool,
+        delta_time: f32,
+        ctx: SampleCtx,
+    ) -> Option<f64> {
         Self::analyze(
             &self.last_pet_positions,
             pet_id,
@@ -295,6 +413,7 @@ impl SusManager {
             !disabled_set_position,
             MOUNT_CHECK_SPEED,
             delta_time,
+            ctx,
         )
     }
 
@@ -386,6 +505,65 @@ mod tests {
         assert_eq!(
             SusManager::mount_report("Horse", None, 32.6),
             "Pet Horse from  seems to be moving a bit fast 32.6 m/s (max 27.5)"
+        );
+    }
+
+    fn at(now_ms: i64, instance_id: u32, teleport_seq: u32) -> SampleCtx {
+        SampleCtx {
+            now_ms,
+            instance_id,
+            teleport_seq,
+        }
+    }
+
+    #[test]
+    fn a_stale_baseline_reseeds_instead_of_reporting() {
+        let s = SusManager::default();
+        let check =
+            |pos: [f32; 3], ctx| s.analyze_player_delta_movement_at(1, pos, false, false, 5.0, ctx);
+        assert_eq!(check([0.0; 3], at(0, 0, 0)), None);
+        // 300 m after 30 s of no samples (riding, a loading screen, standing still): reseed.
+        assert_eq!(check([300.0, 0.0, 0.0], at(30_000, 0, 0)), None);
+        // The baseline is fresh again: 300 m in 5 s is reported.
+        assert!(check([600.0, 0.0, 0.0], at(35_000, 0, 0)).is_some());
+    }
+
+    #[test]
+    fn an_instance_change_or_teleport_reseeds_instead_of_reporting() {
+        let s = SusManager::default();
+        let check =
+            |pos: [f32; 3], ctx| s.analyze_player_delta_movement_at(1, pos, false, false, 5.0, ctx);
+        assert_eq!(check([0.0; 3], at(0, 0, 0)), None);
+        // Dungeon entry: another instance, 15 km away.
+        assert_eq!(check([15_000.0, 0.0, 0.0], at(5_000, 100, 0)), None);
+        // A teleport inside the instance (`set_disabled_set_position(true)` bumped the counter).
+        assert_eq!(check([15_040.0, 0.0, 0.0], at(10_000, 100, 0)), None);
+        assert_eq!(check([16_000.0, 0.0, 0.0], at(15_000, 100, 1)), None);
+        // Without a teleport the same jump is a real report.
+        assert!(check([17_000.0, 0.0, 0.0], at(20_000, 100, 1)).is_some());
+    }
+
+    #[test]
+    fn the_speed_is_taken_over_the_real_interval_but_real_speeding_is_still_reported() {
+        let s = SusManager::default();
+        let check =
+            |pos: [f32; 3], ctx| s.analyze_player_delta_movement_at(1, pos, false, false, 5.0, ctx);
+        assert_eq!(check([0.0; 3], at(0, 0, 0)), None);
+        // 200 m in 8 s = 25 m/s is not above the limit (it would be 40 m/s over a fixed 5 s).
+        assert_eq!(check([200.0, 0.0, 0.0], at(8_000, 0, 0)), None);
+        // 150 m in 5 s = 30 m/s.
+        let speed = check([350.0, 0.0, 0.0], at(13_000, 0, 0)).expect("reported");
+        assert!((speed - 30.0).abs() < 1e-6, "{speed}");
+    }
+
+    #[test]
+    fn a_reset_after_riding_or_a_mate_respawn_drops_the_baseline() {
+        let s = SusManager::default();
+        s.analyze_mount_delta_movement(7, [0.0; 3], false, 5.0);
+        s.reset_analyze_mount_delta_movement(7);
+        assert_eq!(
+            s.analyze_mount_delta_movement(7, [5_000.0, 0.0, 0.0], false, 5.0),
+            None
         );
     }
 }

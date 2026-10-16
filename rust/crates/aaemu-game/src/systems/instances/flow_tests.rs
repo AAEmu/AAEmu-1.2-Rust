@@ -1098,6 +1098,8 @@ async fn party_dungeon_create_enter_script_leave_kick_and_cleanup() {
     assert_eq!(a.instance(), 100);
     assert_eq!(a.p.data().unit.transform.zone_id, DUNGEON_ZONE);
     assert!(a.p.data().disabled_set_position);
+    // The C# setter reset the speed analysis here; the counter invalidates its baseline.
+    assert!(a.p.data().teleport_seq > 0);
     assert!(worlds::has_character(&dworld, 1));
     let ev = &server.systems.instances.events.characters;
     assert_eq!(ev.count(&a.p, CharEvent::DungeonLeave), 1);

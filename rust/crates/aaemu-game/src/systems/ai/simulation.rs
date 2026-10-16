@@ -403,7 +403,17 @@ fn start_path(
         let file = s.move_file_name.clone();
         s.path = s.get_paths(&file);
         if s.path.is_empty() {
-            tracing::warn!("Stop moving... path data for MoveFileName={file} is missing!");
+            // The retail route files (`public_*`, `tuto_move`, ...) were never shipped with the
+            // emulator, so the NPC just stays put (as in the C#); report each name once.
+            if server.systems.ai.first_missing_path(&file) {
+                tracing::warn!(
+                    "Stop moving... no recorded path file Data/Path/{file}.path for MoveFileName={file} \
+                     (retail route data is not shipped); the NPC stays put (reported once per file \
+                     name)"
+                );
+            } else {
+                tracing::debug!("Stop moving... path data for MoveFileName={file} is missing");
+            }
             return;
         }
         let path = s.path.clone();
@@ -654,6 +664,16 @@ mod tests {
         );
         assert_eq!(extract_value("None|1|2|3|", 2), Ok(2.0));
         assert!(extract_value("|a|", 1).is_err());
+    }
+
+    #[test]
+    fn missing_path_is_reported_once_per_file_name() {
+        let ai = crate::systems::ai::System::default();
+        assert!(ai.first_missing_path("public_mate2"));
+        assert!(!ai.first_missing_path("public_mate2"));
+        assert!(ai.first_missing_path("tuto_move"));
+        assert!(!ai.first_missing_path("tuto_move"));
+        assert!(!ai.first_missing_path("public_mate2"));
     }
 
     #[test]
