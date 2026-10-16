@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::data::GameData;
+use crate::models::doodad::Doodad;
 use crate::models::npc::Npc;
 use crate::server::GameServer;
 use crate::systems::skills::data::effects::{BuffEffect, DispelEffect, RestoreManaEffect};
@@ -339,4 +340,82 @@ fn real_compact_fish_catch_dispel_and_escape_timeout_chain() {
         [], |r| Ok((r.get(0)?, r.get(1)?)),
     ).unwrap();
     assert_eq!(escape, (13072, "t".to_owned()));
+}
+
+const STARTED_BUFF: u32 = 61_100;
+
+/// A buff with a `Started` trigger that applies `TIMEOUT_MARKER` to its owner.
+fn started_trigger_server() -> (Arc<GameServer>, WorldObject) {
+    let mut data = GameData::empty();
+    let skills = &mut data.systems.skills;
+    for id in [STARTED_BUFF, TIMEOUT_MARKER] {
+        skills.add_buff(BuffTemplate {
+            id,
+            kind: 1,
+            duration: 10_000,
+            ..BuffTemplate::default()
+        });
+    }
+    skills.add_effect(
+        EffectKind::BuffEffect,
+        EffectTemplate::Buff(BuffEffect {
+            id: 7,
+            buff_id: Some(TIMEOUT_MARKER),
+            chance: 100,
+            stack: 1,
+            ab_level: 0,
+        }),
+        0,
+    );
+    skills.buff_triggers.insert(
+        STARTED_BUFF,
+        vec![BuffTriggerTemplate {
+            id: 7,
+            kind: BuffEventTriggerKind::Started as u16,
+            effect_on_source: false,
+            effect: (EffectKind::BuffEffect, 7),
+            use_damage_amount: false,
+            use_original_source: false,
+            target_buff_tag_id: 0,
+            target_no_buff_tag_id: 0,
+            synergy: false,
+        }],
+    );
+    let server = Arc::new(test_server_with(data));
+    server.set_self();
+    crate::systems::skills::bind(&server);
+    let npc = Entity::new(0x300, Npc::new(13072));
+    let caster = WorldObject::from(&npc);
+    server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&caster, &server.view_ctx());
+    (server, caster)
+}
+
+#[tokio::test]
+async fn doodad_owned_buff_does_not_subscribe_its_triggers() {
+    let (server, caster) = started_trigger_server();
+    let doodad = Entity::new(0x301, Doodad::new(6507));
+    let owner = WorldObject::from(&doodad);
+    server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&owner, &server.view_ctx());
+    super::add_buff_by_id(&server, &owner, STARTED_BUFF, &caster, 0);
+    assert!(doodad.data().buffs.check_buff(STARTED_BUFF));
+    assert!(server.systems.skills.triggers.lock().unwrap().is_empty());
+    assert!(!doodad.data().buffs.check_buff(TIMEOUT_MARKER));
+}
+
+#[tokio::test]
+async fn npc_owned_buff_still_subscribes_and_fires_its_triggers() {
+    let (server, caster) = started_trigger_server();
+    super::add_buff_by_id(&server, &caster, STARTED_BUFF, &caster, 0);
+    let npc = caster.as_npc().unwrap();
+    assert!(npc.data().unit.buffs.check_buff(STARTED_BUFF));
+    assert_eq!(server.systems.skills.triggers.lock().unwrap().len(), 1);
+    assert!(npc.data().unit.buffs.check_buff(TIMEOUT_MARKER));
 }

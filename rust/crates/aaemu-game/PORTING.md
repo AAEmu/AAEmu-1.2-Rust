@@ -1256,6 +1256,7 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   target is an NPC. The Rust port checked strict membership, which rejected every Detection Orb
   cast with result 93 ("Invalid target"). It now follows the zone server. Missing authored `tuto_move`,
   `public_farm*` and `public_mate*` paths also remain data gaps.
+* `BuffTrigger.Execute` / `TimeoutBuffTrigger.Execute` logged "Owner is not a Unit" and returned for every trigger of a buff owned by a doodad (hostile area skills such as 16486 hit factionless doodads, so e.g. the shrink buffs start on them). The trigger can never run for a doodad, so `subscribe_triggers` now skips non-unit owners (trace log) instead of subscribing a trigger that only warns; the `execute_trigger` guard stays as a safety net and names the buff and owner. Behaviour is otherwise unchanged.
 
 ### Ranking boards (Rust only)
 
