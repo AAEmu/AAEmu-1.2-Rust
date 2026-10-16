@@ -492,6 +492,20 @@ blobs, 1.0 GB heap of which about 600 MB are the heightmap cells, 8 s; 1.0 µs p
   `cryaisystem_dedicate` direct route `0x31062728`, `COPStick::RegeneratePath` `0x310F18E8`
   and target-movement regeneration in `COPStick::Execute` `0x310F24D8`. These are adaptations
   of the existing 1.2 chase and wire format, not a complete native goal-pipe implementation.
+* **Combat chase follow-up (2026-10-16)**: (1) flyers (`ActorModel.MovementId == 2`) and
+  underwater creatures never plan or follow a navmesh route: the graph is a walking surface,
+  its ground-level, detouring waypoints dragged them off the straight 3D line to the victim
+  (`behaviors::find_path` / `moves_freely`; any leftover `found_path` is dropped). (2) Replan
+  hysteresis: a route is replanned when the victim has moved more than
+  max(2 m, 20 % of the NPC-to-victim distance) from the route end and at least 500 ms have
+  passed since the last plan, immediately for a new victim, and when a successfully planned
+  route is exhausted while the victim is still out of range (same 500 ms limit). The 0.5 m
+  model-size threshold replanned on position wobble and flipped the route around obstacles.
+  (3) `found_path`, the cached end point and the plan bookkeeping (`NpcAi.chase_path`) are
+  cleared on entering any combat behavior, `ReturnState` or `Dead` and by `SetTarget(null)`,
+  so a re-aggro against a victim standing in the same spot plans from the NPC's new position.
+  Each replan logs at `debug` with its reason (`new target` / `target moved` /
+  `path exhausted`).
 
 Reference: the 10.0.2.13 `cryaisystem_dedicate.dll` (image base 0x31000000), notes in
 `D:\aa-re\zone\agent_geom\sub_navmesh.md` (§2 formats, §5 gaps) and

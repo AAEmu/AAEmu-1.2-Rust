@@ -24,7 +24,7 @@ use crate::systems::skills::{buffs, combat as skills_combat};
 use crate::world::{now_ms, WorldObject};
 
 use super::combat::{self, add_unit_aggro, can_attack, clear_aggro_of_unit, set_in_battle};
-use super::framework::{AiCtx, ArcherPhase, BehaviorKind, NpcIntervalSite};
+use super::framework::{AiCtx, ArcherPhase, BehaviorKind, ChasePath, NpcIntervalSite};
 use super::npc::{self, MoveAi};
 use super::params::{AiParamType, AiParams, AiParamsKind, AiSkill, AiSkillList, SkillList};
 use super::path_handler::{AiPathPoint, AiPathPointAction, PathStep};
@@ -38,6 +38,21 @@ use BehaviorKind as B;
 
 /// `behavior.Enter()`.
 pub fn enter(c: &mut AiCtx<'_>, k: BehaviorKind) {
+    // A chase route never survives a state change into or out of combat: its start and end
+    // belong to the previous fight (the victim may stand in the very same spot again).
+    if matches!(
+        k,
+        B::AlmightyAttack
+            | B::ArcherAttack
+            | B::Attack
+            | B::BigMonsterAttack
+            | B::FlytrapAttack
+            | B::WildBoarAttack
+            | B::Dead
+            | B::ReturnState
+    ) {
+        reset_chase_path(c);
+    }
     match k {
         B::Alert => alert_enter(c, k),
         B::AlmightyAttack => almighty_attack_enter(c, k),
@@ -279,6 +294,9 @@ fn base_move_speed(c: &AiCtx<'_>) -> f32 {
 pub fn set_target(c: &mut AiCtx<'_>, other: Option<&WorldObject>) {
     npc::set_target(c.server, &c.npc, other);
     c.ai.already_targeted = other.is_some();
+    if other.is_none() {
+        reset_chase_path(c);
+    }
 }
 
 /// `Ai.Owner.CurrentTarget` (as a world object).
@@ -738,7 +756,7 @@ fn update_target(c: &mut AiCtx<'_>) -> bool {
             if npc::unit_is_visible(c.server, &c.obj, &abuser) && !npc::is_dead(&abuser) {
                 let current_aggro = c.npc.data().current_aggro_target;
                 if current_aggro != abuser.obj_id() && !c.ai.already_targeted {
-                    find_path(c, &abuser);
+                    find_path(c, &abuser, "new target");
                 }
                 npc::set_current_aggro_target(&c.npc, Some(&abuser));
                 set_target(c, Some(&abuser));
@@ -795,9 +813,95 @@ fn sorted_abusers(c: &AiCtx<'_>) -> Vec<Option<WorldObject>> {
         .collect()
 }
 
-/// `Npc.FindPath(abuser)` (geodata A*).
-fn find_path(c: &mut AiCtx<'_>, abuser: &WorldObject) {
+/// Drops the chase route and its bookkeeping, so the next chase step plans from scratch.
+fn reset_chase_path(c: &mut AiCtx<'_>) {
+    c.ai.path_node.found_path.clear();
+    c.ai.path_node.end_point_pos = Vec3::default();
+    c.ai.chase_path = None;
+}
+
+/// Flying and swimming NPCs (`ActorModel.MovementId == 2` / `bUnderwaterCreature`) move in
+/// 3D. The A* graph is a walking-surface navmesh, so following its (ground level, detouring)
+/// waypoints only drags them off the straight line to the victim.
+fn moves_freely(c: &AiCtx<'_>) -> bool {
+    let n = c.npc.data();
+    n.can_fly
+        || c.server
+            .game_data
+            .systems
+            .ai
+            .ai
+            .actor_model(n.unit.model_id)
+            .is_some_and(|m| m.underwater_creature)
+}
+
+/// `Npc.FindPath(abuser)` (geodata A*); `reason` is only logged. Free movers
+/// ([`moves_freely`]) never get a route (deviation from the C# code, see `PORTING.md`).
+fn find_path(c: &mut AiCtx<'_>, abuser: &WorldObject, reason: &str) {
+    if moves_freely(c) {
+        reset_chase_path(c);
+        return;
+    }
     super::geodata::npc_find_path(c, abuser);
+    let had_route = !c.ai.path_node.found_path.is_empty();
+    c.ai.chase_path = Some(ChasePath {
+        target: abuser.obj_id(),
+        at_ms: now_ms(),
+        had_route,
+    });
+    tracing::debug!(
+        npc = c.npc.obj_id,
+        target = abuser.obj_id(),
+        reason,
+        steps = c.ai.path_node.found_path.len(),
+        "chase path planned"
+    );
+}
+
+/// The victim has to move this far (m) from the route's end before the route is planned
+/// again; the lower bound of [`REPATH_MOVE_FRACTION`] of the distance to the victim. A
+/// player's reported position wobbles by a few tenths of a metre while standing or fighting,
+/// and every replan starts at the NPC's new position, so replanning at the 0.5 m model-size
+/// threshold flipped the route around navmesh obstacles on every other tick.
+const REPATH_MIN_MOVE: f32 = 2.0;
+/// Fraction of the NPC-to-victim distance the victim may move before a replan: a far chaser
+/// does not need a fresh route for a small sidestep, a near one is limited by the minimum.
+const REPATH_MOVE_FRACTION: f32 = 0.2;
+/// Minimum time between two plans for the same victim (ms); the AI ticks every 100 ms.
+const REPATH_MIN_INTERVAL_MS: i64 = 500;
+
+/// Why the chase route must be planned again, or `None` to keep following it.
+fn repath_reason(
+    c: &AiCtx<'_>,
+    target_id: u32,
+    my_pos: Vec3,
+    target_pos: Vec3,
+    now: i64,
+) -> Option<&'static str> {
+    let end = c.ai.path_node.end_point_pos;
+    let moved = calculate_distance(end, target_pos, true)
+        > REPATH_MIN_MOVE.max(REPATH_MOVE_FRACTION * calculate_distance(my_pos, target_pos, true));
+    let Some(last) = c.ai.chase_path else {
+        // No bookkeeping: reset (zero end point) or a route set outside the chase loop.
+        return if end == Vec3::default() {
+            Some("new target")
+        } else {
+            moved.then_some("target moved")
+        };
+    };
+    if last.target != target_id {
+        return Some("new target");
+    }
+    if now - last.at_ms < REPATH_MIN_INTERVAL_MS {
+        return None;
+    }
+    if moved {
+        Some("target moved")
+    } else if last.had_route && c.ai.path_node.found_path.is_empty() {
+        Some("path exhausted")
+    } else {
+        None
+    }
 }
 
 /// `BaseCombatBehavior.CheckPipeName()`.
@@ -866,15 +970,19 @@ fn move_in_range(c: &mut AiCtx<'_>, k: BehaviorKind, target: Option<&WorldObject
         npc::stop_movement(c.server, &c.npc);
         return;
     }
-    if geo_data_mode(c) {
+    if geo_data_mode(c) && moves_freely(c) {
+        // Flyers and swimmers chase in a straight 3D line; drop any route left over.
+        if c.ai.chase_path.is_some() || !c.ai.path_node.found_path.is_empty() {
+            reset_chase_path(c);
+        }
+    } else if geo_data_mode(c) {
         // COPStick::Execute (10.x cryaisystem_dedicate 0x310F24D8) retains its route
         // until the target moves beyond the regeneration distance. The C# test was
         // reversed: a stationary target restarted the route at its first node every tick.
-        let end = c.ai.path_node.end_point_pos;
-        let repath_distance = npc::model_size(c.server, &c.obj).max(0.5);
-        if calculate_distance(end, target_pos, true) > repath_distance {
+        let target_id = target.obj_id();
+        if let Some(reason) = repath_reason(c, target_id, owner_pos(c), target_pos, now_ms()) {
             let started = std::time::Instant::now();
-            find_path(c, target);
+            find_path(c, target, reason);
             if started.elapsed() >= std::time::Duration::from_millis(1) {
                 tracing::warn!(
                     "FindPath took {:?} for Ai.Owner.ObjId:{}",
@@ -884,23 +992,13 @@ fn move_in_range(c: &mut AiCtx<'_>, k: BehaviorKind, target: Option<&WorldObject
             }
             c.ai.path_node.end_point_pos = target_pos;
         }
-        // Navigation heights can differ from the collision floor. Grounded actors
-        // reach waypoints in XY; attack range applies to the victim, not path corners.
-        let include_z = {
-            let n = c.npc.data();
-            n.can_fly
-                || c.server
-                    .game_data
-                    .systems
-                    .ai
-                    .ai
-                    .actor_model(n.unit.model_id)
-                    .is_some_and(|m| m.underwater_creature)
-        };
+        // Navigation heights can differ from the collision floor, and a walking NPC follows
+        // the ground, so waypoints are reached in XY; attack range applies to the victim,
+        // not path corners.
         let pos = owner_pos(c);
         const WAYPOINT_TOLERANCE: f32 = 0.25;
         while let Some(next) = c.ai.path_node.found_path.front().copied() {
-            if calculate_distance(pos, next, include_z) > WAYPOINT_TOLERANCE {
+            if calculate_distance(pos, next, false) > WAYPOINT_TOLERANCE {
                 npc_move_towards(c, next, speed as f32, move_flags, WAYPOINT_TOLERANCE);
                 return;
             }
@@ -2270,7 +2368,7 @@ fn flytrap_update_target(c: &mut AiCtx<'_>) -> bool {
             set_target(c, Some(&abuser));
             update_aggro_help(c, &abuser, 200.0);
             if geo_data_mode(c) {
-                find_path(c, &abuser);
+                find_path(c, &abuser, "new target");
             }
             return true;
         }

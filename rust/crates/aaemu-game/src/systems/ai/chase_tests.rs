@@ -294,3 +294,121 @@ async fn flying_npc_large_step_reaches_the_destination_without_overshoot() {
         );
     }
 }
+
+fn ctx<'a>(server: &'a crate::server::GameServer, npc: &NpcRef, ai: &'a mut NpcAi) -> AiCtx<'a> {
+    AiCtx {
+        server,
+        npc: npc.clone(),
+        obj: WorldObject::from(npc),
+        ai,
+    }
+}
+
+#[tokio::test]
+async fn flyer_ignores_navmesh_waypoints_and_chases_in_a_straight_line() {
+    let (server, npc, target) = fixture();
+    npc.data().can_fly = true;
+    let mut ai = NpcAi::new(AiKind::HoldPosition, &npc);
+    let mut c = ctx(&server, &npc, &mut ai);
+    // A ground route with a long detour (and a lookup marker) left over from before.
+    let marker = Vec3::new(1.0, 2.0, 3.0);
+    c.ai.path_node.start_point_pos = marker;
+    c.ai.path_node.end_point_pos = Vec3::new(120.0, 100.0, 100.0);
+    c.ai.path_node.found_path = [
+        Vec3::new(100.0, 160.0, 100.0),
+        Vec3::new(120.0, 160.0, 100.0),
+        Vec3::new(120.0, 100.0, 100.0),
+    ]
+    .into();
+    let mut last_x = 100.0;
+    for _ in 0..60 {
+        tick(&mut c, &target);
+        let pos = npc.data().unit.transform;
+        assert!(pos.x > last_x, "no progress at {pos:?}");
+        assert_eq!(pos.y, 100.0, "followed a detour waypoint: {pos:?}");
+        assert_eq!(pos.z, 100.0, "{pos:?}");
+        last_x = pos.x;
+    }
+    assert!(c.ai.path_node.found_path.is_empty());
+    assert!(c.ai.chase_path.is_none());
+    assert_eq!(c.ai.path_node.start_point_pos, marker, "A* must not run");
+    // The explicit path request of the behaviors is a no-op as well.
+    super::find_path(&mut c, &target, "new target");
+    assert_eq!(c.ai.path_node.start_point_pos, marker);
+    assert!(c.ai.path_node.found_path.is_empty());
+}
+
+#[tokio::test]
+async fn target_jitter_does_not_replan_the_route() {
+    let (server, npc, target) = fixture();
+    let mut ai = NpcAi::new(AiKind::HoldPosition, &npc);
+    let mut c = ctx(&server, &npc, &mut ai);
+    let mut starts = std::collections::BTreeSet::new();
+    for i in 0..100 {
+        let dy = if i % 2 == 0 { 0.6 } else { -0.6 };
+        target.with_transform(|t| t.set_xyz(125.0, 100.0 + dy, 100.0));
+        tick(&mut c, &target);
+        let s = c.ai.path_node.start_point_pos;
+        starts.insert(s.x.to_bits());
+    }
+    // Only the first tick planned (the NPC creeps 0.1 m per tick, so every plan would have a
+    // distinct start point).
+    assert_eq!(starts.len(), 1, "replanned on jitter: {starts:?}");
+    assert!(npc.data().unit.transform.x > 105.0);
+}
+
+#[tokio::test]
+async fn fast_moving_target_replans_at_most_once_per_interval() {
+    let (server, npc, target) = fixture();
+    let mut ai = NpcAi::new(AiKind::HoldPosition, &npc);
+    let mut c = ctx(&server, &npc, &mut ai);
+    let started = std::time::Instant::now();
+    let mut starts = std::collections::BTreeSet::new();
+    for i in 0..100 {
+        let dy = if i % 2 == 0 { 5.0 } else { -5.0 };
+        target.with_transform(|t| t.set_xyz(125.0, 100.0 + dy, 100.0));
+        tick(&mut c, &target);
+        starts.insert(c.ai.path_node.start_point_pos.x.to_bits());
+    }
+    let allowed = 1 + started.elapsed().as_millis() / 500;
+    assert!(
+        (starts.len() as u128) <= allowed + 1,
+        "{} plans in {:?}",
+        starts.len(),
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn re_aggro_after_a_return_plans_from_the_new_position() {
+    let (server, npc, target) = fixture();
+    let mut ai = NpcAi::new(AiKind::HoldPosition, &npc);
+    let mut c = ctx(&server, &npc, &mut ai);
+    super::enter(&mut c, BehaviorKind::Attack);
+    super::set_target(&mut c, Some(&target));
+    for _ in 0..5 {
+        tick(&mut c, &target);
+    }
+    assert_eq!(
+        c.ai.path_node.start_point_pos,
+        Vec3::new(100.0, 100.0, 100.0)
+    );
+    assert!(c.ai.chase_path.is_some());
+
+    // Leash: the fight ends and the NPC is back at another spot; the victim has not moved.
+    super::set_target(&mut c, None);
+    assert!(c.ai.chase_path.is_none());
+    assert!(c.ai.path_node.found_path.is_empty());
+    assert_eq!(c.ai.path_node.end_point_pos, Vec3::default());
+    WorldObject::from(&npc).with_transform(|t| t.set_xyz(100.0, 110.0, 100.0));
+
+    super::enter(&mut c, BehaviorKind::Attack);
+    super::set_target(&mut c, Some(&target));
+    tick(&mut c, &target);
+    assert_eq!(
+        c.ai.path_node.start_point_pos,
+        Vec3::new(100.0, 110.0, 100.0),
+        "route not planned from the new position"
+    );
+    assert_eq!(c.ai.path_node.end_point_pos, Vec3::new(120.0, 100.0, 100.0));
+}
