@@ -8,6 +8,7 @@
 
 pub mod astar;
 pub mod bai;
+pub mod funnel;
 pub mod graph;
 pub mod manager;
 #[cfg(test)]
@@ -23,6 +24,7 @@ use crate::systems::skills::controllers::Vec3;
 use crate::world::WorldObject;
 
 use self::bai::{BaiFiles, UsedAreaNames};
+use self::graph::DEFAULT_AGENT_RADIUS;
 use self::manager::{AiGeoData, GeoError, TerrainHeights};
 use super::framework::AiCtx;
 
@@ -148,8 +150,13 @@ pub fn geo_data_height(server: &GameServer, obj: &WorldObject, pos: Vec3) -> f32
     }
 }
 
-/// `Npc.FindPath(abuser)`: an A* route from the NPC to the abuser, reduced, as `FoundPath`; a
-/// chased player gets the debug chat lines the C# sends.
+/// `Npc.FindPath(abuser)`: a route from the NPC to the abuser as `FoundPath`; a chased player
+/// gets the debug chat lines the C# sends.
+///
+/// The route is the navmesh corridor pulled tight with the funnel algorithm (or the straight
+/// line when it crosses only linked triangles), see [`PathNode::find_smooth_path`]. When the
+/// navmesh cannot give one (waypoint zones, edges unknown, forbidden areas in the way) the C#
+/// pipeline remains: the A* node positions, `ReducePath`.
 pub fn npc_find_path(c: &mut AiCtx<'_>, abuser: &WorldObject) {
     let me = super::npc::world_pos(c.server, &c.obj);
     let target = super::npc::world_pos(c.server, abuser);
@@ -161,15 +168,67 @@ pub fn npc_find_path(c: &mut AiCtx<'_>, abuser: &WorldObject) {
         return;
     };
     let (start, end) = (c.ai.path_node.start_point_pos, c.ai.path_node.end_point_pos);
-    let result = c.ai.path_node.find_path(&geo, start, end);
-    // The search resolves the destination to a graph node. Chase regeneration must
-    // compare with the victim's actual position, not that triangle's centroid.
-    c.ai.path_node.end_point_pos = target;
-    let mut res_list = match result {
-        Ok(r) => r,
+    let smooth = match c
+        .ai
+        .path_node
+        .find_smooth_path(&geo, start, end, DEFAULT_AGENT_RADIUS)
+    {
+        Ok(s) => s,
         Err(e) => {
             tracing::error!("FindPath for npc {}: {}", c.npc.obj_id, e.0);
             return;
+        }
+    };
+    let raw_steps = match smooth {
+        Some(s) => {
+            c.ai.path_node.found_path = s.points.into();
+            s.corridor_len
+        }
+        None => {
+            let Some(raw) = fallback_path(c, &geo, start, end, me, target) else {
+                return;
+            };
+            raw
+        }
+    };
+    // Chase regeneration compares with the victim's actual position, not a node's centroid.
+    c.ai.path_node.end_point_pos = target;
+    if let Some(p) = abuser.as_player() {
+        crate::world::session::send_message(
+            p,
+            -2,
+            &format!(
+                "Aggro from {}, getting attack path in {}/{} steps",
+                c.npc.obj_id,
+                c.ai.path_node.found_path.len(),
+                raw_steps
+            ),
+        );
+        for v in &c.ai.path_node.found_path {
+            crate::world::session::send_message(
+                p,
+                -2,
+                &format!("Path step -> <{}, {}, {}>", v.x, v.y, v.z),
+            );
+        }
+    }
+}
+
+/// The C# route: the A* node positions with the NPC and the target as end points, reduced by
+/// `ReducePath`. Returns the number of raw steps; `None` after logging an exception.
+fn fallback_path(
+    c: &mut AiCtx<'_>,
+    geo: &AiGeoData,
+    start: Vec3,
+    end: Vec3,
+    me: Vec3,
+    target: Vec3,
+) -> Option<usize> {
+    let mut res_list = match c.ai.path_node.find_path(geo, start, end) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("FindPath for npc {}: {}", c.npc.obj_id, e.0);
+            return None;
         }
     };
     // The enclosing nodes select topology, not mandatory detours through the start
@@ -183,34 +242,15 @@ pub fn npc_find_path(c: &mut AiCtx<'_>, abuser: &WorldObject) {
     if res_list.last() != Some(&target) {
         res_list.push(target);
     }
-    let reduced = match geo.reduce_path(&res_list, 10) {
-        Ok(r) => r,
+    match geo.reduce_path(&res_list, 10) {
+        Ok(r) => c.ai.path_node.found_path = r,
         Err(GeoError) => {
             tracing::error!(
                 "ReducePath for npc {}: NullReferenceException (no bai at the start node)",
                 c.npc.obj_id
             );
-            return;
-        }
-    };
-    c.ai.path_node.found_path = reduced;
-    if let Some(p) = abuser.as_player() {
-        crate::world::session::send_message(
-            p,
-            -2,
-            &format!(
-                "Aggro from {}, getting attack path in {}/{} steps",
-                c.npc.obj_id,
-                c.ai.path_node.found_path.len(),
-                res_list.len()
-            ),
-        );
-        for v in &c.ai.path_node.found_path {
-            crate::world::session::send_message(
-                p,
-                -2,
-                &format!("Path step -> <{}, {}, {}>", v.x, v.y, v.z),
-            );
+            return None;
         }
     }
+    Some(res_list.len())
 }

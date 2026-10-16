@@ -384,6 +384,25 @@ impl NavGraph {
         Some((l0 * z[0] + l1 * z[1] + l2 * z[2]) as f32)
     }
 
+    /// The corners (graph vertex indices) of the edge shared by two linked triangle nodes: the
+    /// two vertices both triangles have, else the link's own edge corners (link bytes +40 / +41)
+    /// of the source triangle. `None` when either node is not a triangle or the edge is
+    /// unusable.
+    pub fn portal(&self, from: u32, to: u32) -> Option<(u32, u32)> {
+        let a = self.nodes.get(from as usize)?.triangle?;
+        let b = self.nodes.get(to as usize)?.triangle?;
+        let shared: Vec<u32> = a.iter().copied().filter(|v| b.contains(v)).collect();
+        if shared.len() == 2 {
+            return Some((shared[0], shared[1]));
+        }
+        let link = self.nodes[from as usize]
+            .links
+            .iter()
+            .find(|l| l.target == to)?;
+        let (i, j) = (usize::from(link.edge.0), usize::from(link.edge.1));
+        (i < 3 && j < 3 && i != j && a[i] != a[j]).then(|| (a[i], a[j]))
+    }
+
     /// `GetEnclosing(pos)`: the triangle node containing the XY point and the height of its
     /// plane there; with several (overlapping layers / border overlap) the one whose height is
     /// closest to `pos.z` wins (the first read on ties).
