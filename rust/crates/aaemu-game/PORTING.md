@@ -1012,6 +1012,16 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   each pending slot's individual respawn deadline are preserved. Focused tests in
   `spawner_population_tests.rs` cover the limits, deadlines and direct-delete reconciliation.
 
+* systems::npcs (2026-10-16): a corpse / queued despawn timer that fires after its NPC was
+  already deleted directly (and so reconciled out of `SpawnedNpcs`, see above) is an idempotent
+  no-op: `NpcSpawner::despawn` logs the missing entry at debug instead of the C# warning
+  `NPC ... not found in SpawnedNpcs` when the object has already left the world; the warning stays
+  for an NPC that is still a live world object but missing from its list. A stale handle whose
+  object id was released and reused by another NPC (GM `despawn` of a corpse with pending
+  timers) is skipped entirely, and `check_respawns_tick` no longer releases the id / spawner link
+  of the NPC that reused it (the C# `Despawn` and its caller act on the id regardless).
+  Tests in `spawner_population_tests.rs`.
+
 * systems::npcs (2026-10-14): the active-region spawner tick is a bounded activation pass
   instead of the per-second sweep that updated every spawner whose authored player radius was
   entered. Ordinary spawners are indexed per instance and authored 64 m region and queried
