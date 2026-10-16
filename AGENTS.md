@@ -13,25 +13,42 @@ Guidance for coding agents working in this repository.
 - The push URLs of `origin` and `upstream` are disabled in the local git config (`no_push`). Do not
   re-enable them.
 
-## Workflow: Codex orchestrates and reviews, OpenCode runs the tasks
+## Workflow: Claude orchestrates and reviews, Sonnet subagents run the tasks
 
-- For work in this repository, Codex scopes, coordinates, and verifies the work, and uses the **OpenCode CLI** with the human's **OpenCode Go subscription** as the runner for almost all tasks — research and inspection, implementation, and routine command/validation execution: provider `opencode-go` (the Go subscription, not the paid standalone `opencode` provider), model `deepseek-v4.1-flash`, variant `max` (**DeepSeek V4.1 Flash, MAX reasoning**).
-- Make research prompts actionable: state the concrete question and scope, the relevant source files/data, read-only constraints, the `file:line` citations required in the findings, known uncertainty and verification gaps, and the expected concise findings or next bounded objective. Codex reviews the evidence before delegating the implementation that depends on it. Codex may keep lightweight orientation, orchestration, independent diff/evidence review, and the checks needed to verify the runner for itself; it does not need to delegate every trivial tool call.
-- Run **one small task per worker at a time**. Codex may launch as many **OpenCode workers in parallel** as useful for independent work; there is no user-imposed worker limit. Give each worker one independently reviewable objective with the relevant files, repository constraints, and acceptance checks. Scale concurrency to task independence, machine resources, and Codex's ability to review and validate the results.
-- Give parallel workers non-overlapping file ownership. Serialize tasks that edit the same files or depend on each other's changes, or use isolated worktrees and integrate them under Codex's supervision. Codex owns task assignment, coordination, and integration.
-- **Reuse the same OpenCode session (`--session <id>`) for sequential small tasks within one subject** to preserve context and improve cache reuse. Assign only one task per worker at a time and validate it before giving that worker the next task. Start a fresh session with a concise handoff when the subject changes or the accumulated context/corrections become lengthy. Do not accumulate unrelated tasks in one chat.
-- Keep follow-up prompts and worker completion summaries brief. Send the validation outcome and the next bounded objective; reuse already inspected context and read only the relevant sections. Worker summaries should report the actual changes or findings, commands run, citations, and unresolved issues without repeating code or the full task checklist.
-- The OpenCode worker performs only its assigned task and does not spawn additional agents or choose further tasks; research workers remain read-only, report findings, and never silently make changes. These orchestration rules apply to Codex; the worker should execute directly rather than recursively delegate.
-- Codex independently reviews each diff or research result, checks scope and correctness, and runs focused validation before completing the work or assigning that worker its next task. Run required workspace checks after the related batch is integrated and its workers have finished editing, and repeat them when new changes or failures justify it. Required repository checks must pass before claiming the overall coding change is complete.
-- Verify the actual OpenCode assistant message/session records show providerID `opencode-go`, modelID `deepseek-v4.1-flash`, and variant `max`; do not silently substitute another provider, model, or variant.
-
-On this Windows machine, `opencode` is installed on PATH (`C:\Users\messe\AppData\Roaming\npm\opencode.ps1`; from PowerShell use `opencode.cmd`). Invoke it from the repository with `opencode run --dir <repository> --model opencode-go/deepseek-v4.1-flash --variant max --format json --auto`, supplying the bounded research or implementation task on stdin — verified PowerShell form:
-
-```powershell
-Get-Content -Raw <task.txt> | opencode run --dir <repository> --model opencode-go/deepseek-v4.1-flash --variant max --format json --auto
-```
-
-For the next related task in the same subject, add `--session <id>` and keep the same working directory. If the provider returns privacy/global region or subscription errors, report them without changing account privacy or credentials.
+- The orchestrating Claude session (Opus) scopes, coordinates and verifies the work. It hands
+  almost all tasks — research and inspection, implementation, routine command/validation runs and
+  live verification — to **Claude Sonnet subagents** (the `Agent` tool with `model: sonnet`). Do not
+  use OpenCode/DeepSeek workers.
+- Make prompts actionable: the concrete question or objective, the relevant files/data with
+  `file:line` pointers, constraints (read-only for research), the citations required in the report,
+  known uncertainty, the acceptance checks, and the expected concise report. The orchestrator reviews
+  research results before delegating the implementation that depends on them. It may keep
+  lightweight orientation, coordination, diff/evidence review and the checks needed to verify a
+  worker for itself.
+- Run **one small task per worker at a time**; launch as many workers in parallel as the work's
+  independence and the machine allow (~7 GB free RAM, C: nearly full; builds serialize on the shared
+  target dir). Give each worker one independently reviewable objective.
+- Give parallel workers non-overlapping file ownership. Each implementation worker gets its **own
+  git worktree on D:** — `git worktree add D:/aaemu-wt/<name> -b <type>/<name> rust-rewrite`, plus
+  an untracked `rust/.cargo/config.toml` copied from an existing worktree with
+  `target-dir = "D:/aaemu-target/fanout"` (shared by all workers so cargo's lock serializes builds).
+  Never edit files another session has uncommitted changes in. The orchestrator merges the branches
+  back into `rust-rewrite` and removes the worktrees afterwards.
+- Continue a worker with `SendMessage` for sequential small tasks in the same subject (it keeps its
+  context); start a fresh worker with a concise handoff when the subject changes. Keep follow-ups and
+  reports brief: changes or findings, commands run with results, citations, commit SHA, open issues.
+- Workers do only their assigned task: no sub-agents, no choosing further tasks, no pushing; research
+  workers stay read-only. Implementation workers commit to their own branch (Conventional Commits).
+- **Verify in game when possible.** After integration, a single worker (the live stack is one
+  instance, see [`AGENT-QUICKSTART.md`](AGENT-QUICKSTART.md)) rebuilds and starts it and reproduces
+  the scenario with headless clients (`aaemu-testclient`, [`rust/LIVE-TESTING.md`](rust/LIVE-TESTING.md)),
+  checking the server logs for the original error/warning and for regressions. If a scenario can't be
+  driven headlessly, say so and rely on the flow tests.
+- The orchestrator independently reviews each diff, checks scope and correctness, and runs focused
+  validation before accepting it. After the batch is integrated, run `cargo xtask ci` (or fmt + clippy
+  + test); it must pass before the change is called complete.
+- Bug reports from testers come from the shared server on NICK-SERVER; its log paths
+  (`C:\Users\nick server\...`) are not readable from this machine without the owner's SSH login.
 
 > **Starting the servers or the real client?** Read [`AGENT-QUICKSTART.md`](AGENT-QUICKSTART.md)
 > first: `Scripts/live-stack.sh build|sync|start|client|status|shot|stop`, machine paths, ports and
