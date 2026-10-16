@@ -492,6 +492,20 @@ blobs, 1.0 GB heap of which about 600 MB are the heightmap cells, 8 s; 1.0 µs p
   `cryaisystem_dedicate` direct route `0x31062728`, `COPStick::RegeneratePath` `0x310F18E8`
   and target-movement regeneration in `COPStick::Execute` `0x310F24D8`. These are adaptations
   of the existing 1.2 chase and wire format, not a complete native goal-pipe implementation.
+* **Combat chase follow-up (2026-10-16)**: (1) flyers (`ActorModel.MovementId == 2`) and
+  underwater creatures never plan or follow a navmesh route: the graph is a walking surface,
+  its ground-level, detouring waypoints dragged them off the straight 3D line to the victim
+  (`behaviors::find_path` / `moves_freely`; any leftover `found_path` is dropped). (2) Replan
+  hysteresis: a route is replanned when the victim has moved more than
+  max(2 m, 20 % of the NPC-to-victim distance) from the route end and at least 500 ms have
+  passed since the last plan, immediately for a new victim, and when a successfully planned
+  route is exhausted while the victim is still out of range (same 500 ms limit). The 0.5 m
+  model-size threshold replanned on position wobble and flipped the route around obstacles.
+  (3) `found_path`, the cached end point and the plan bookkeeping (`NpcAi.chase_path`) are
+  cleared on entering any combat behavior, `ReturnState` or `Dead` and by `SetTarget(null)`,
+  so a re-aggro against a victim standing in the same spot plans from the NPC's new position.
+  Each replan logs at `debug` with its reason (`new target` / `target moved` /
+  `path exhausted`).
 
 Reference: the 10.0.2.13 `cryaisystem_dedicate.dll` (image base 0x31000000), notes in
 `D:\aa-re\zone\agent_geom\sub_navmesh.md` (§2 formats, §5 gaps) and
@@ -554,8 +568,27 @@ Reference: the 10.0.2.13 `cryaisystem_dedicate.dll` (image base 0x31000000), not
   only through blocked links
   (raw-file BFS agrees); the old "routes" were presumably the C# position-based neighbour lookup jumping
   between unconnected nodes and the iteration cut-off.
-* Kept on purpose: the A* step cost `G` is the distance from the link's source to the goal
-  (C# quirk, `sub_navmesh.md` §5.11), the linear open-set scan and the iteration limit;
+* **A* cost** (`astar.rs`; replaces the C# quirk `sub_navmesh.md` §5.11): `G` is the accumulated
+  2D route length (node position to the middle of the shared edge to the next node), `H` the 2D
+  distance from the node to the goal node (admissible), the open set is a binary heap with
+  re-opening on a cheaper `G`, and the iteration limit is `ceil(2D distance * 20) + 500`. The C#
+  used `G` = distance from the link's source node to the goal, 3D, i.e. a greedy search on node
+  heights. Node z values of huge navmesh triangles are unreliable (a centroid can sit 100 m
+  below the ground its triangle covers), which sent chasing NPCs on ~100 m detours around a
+  12 m gap (Solzreed Peninsula harpies: triangles 7349 and 7263 fanned around one apex, the
+  3-hop corridor through two z~11 centroids lost against an eastern chain at the goal's z).
+* **Smooth routes** (`funnel.rs`, `PathNode::find_smooth_path`, used by `npc_find_path`): a
+  straight segment that only crosses linked, passable triangles (a triangle walk over the
+  shared edges) and no forbidden area is the route without a search; otherwise the A* corridor
+  is pulled tight with the funnel algorithm through the shared edges (corners moved
+  `DEFAULT_AGENT_RADIUS` inward), rejected when a leg crosses a forbidden area. The way points
+  are the NPC, the corners and the target (as the native direct path does, actor positions
+  instead of graph centroids); corner heights come from the raw heightmap, else are
+  interpolated, since the triangle plane and node z are unreliable on large triangles. When the
+  navmesh cannot give such a route (waypoint nodes, unknown edges, iteration limit, forbidden
+  area) `npc_find_path` keeps the C# pipeline: node positions, `ReducePath`. The `AStar`
+  command and `Ai.FindPath` hook still use that pipeline (on the new search).
+* Kept on purpose: the iteration limit (larger), the 2 m Douglas-Peucker of `FindPath`,
   `FindClosestToTheCurrent`, `ReducePath`, `CheckImpossibleWalk` are unchanged. Not done: link
   exposure costs, node flags, nav modifiers in the search, physics walkability
   (`CheckWalkability` 0x3100B214), the engine's 3x3 streaming window.
@@ -632,6 +665,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   the per-packet `Debug` / `Trace` lines dominated the send path with many players in view
   (`RUST_LOG=info,aaemu_game::net=trace` restores the packet log); the log files are written by
   a background thread.
+* systems::skills (item-cast plot end): `Plot.RunAsync` holds the `SkillSourceItem` object resolved
+  when the cast started and sends `ItemUnlock` for it even when the plot consumed it. Here the
+  item is looked up again at the plot end (`plots::finish_item_plot`,
+  `ItemSkillHooks::unlock_item`); a source item that is gone (the last stone of a stack of the
+  stone-throwing plot 349, skill 11268, a `use_skill_as_reagent` item the effects consume) has
+  nothing left to unlock, so the packet is skipped with a `debug!` (plot / skill / item id)
+  instead of the former `ERROR` ("SkillSourceItem ... no longer exists").
 * net (game connections): sending never blocks and C# had no limit; here a client with more than
   16 MiB queued, or one that accepts no data for 20 s, is disconnected (`net::outbox`,
   `net::listener`). Broadcasts encode a packet once for all recipients.
@@ -1004,6 +1044,16 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   reserved respawn slot and the population credit as one step. Authored corpse lifetimes and
   each pending slot's individual respawn deadline are preserved. Focused tests in
   `spawner_population_tests.rs` cover the limits, deadlines and direct-delete reconciliation.
+
+* systems::npcs (2026-10-16): a corpse / queued despawn timer that fires after its NPC was
+  already deleted directly (and so reconciled out of `SpawnedNpcs`, see above) is an idempotent
+  no-op: `NpcSpawner::despawn` logs the missing entry at debug instead of the C# warning
+  `NPC ... not found in SpawnedNpcs` when the object has already left the world; the warning stays
+  for an NPC that is still a live world object but missing from its list. A stale handle whose
+  object id was released and reused by another NPC (GM `despawn` of a corpse with pending
+  timers) is skipped entirely, and `check_respawns_tick` no longer releases the id / spawner link
+  of the NPC that reused it (the C# `Despawn` and its caller act on the id regardless).
+  Tests in `spawner_population_tests.rs`.
 
 * systems::npcs (2026-10-14): the active-region spawner tick is a bounded activation pass
   instead of the per-second sweep that updated every spawner whose authored player radius was

@@ -976,6 +976,17 @@ impl NpcSpawner {
     /// `Despawn(npc)`: removes the NPC from `SpawnedNpcs` and deletes it.
     pub fn despawn(&self, server: &GameServer, npc: &NpcRef) {
         let _lock = server.systems.npcs.spawns.spawn_lock();
+        if npc_superseded(server, npc) {
+            // Stale handle (e.g. a corpse timer that outlived a `despawn` GM command): its
+            // object id belongs to another live NPC now, whose spawner link, membership entry
+            // and world object are not this handle's to remove or delete.
+            tracing::debug!(
+                "Skipped despawn of stale NPC {}: its object id is reused by another NPC.",
+                npc.obj_id
+            );
+            self.st().is_despawn_scheduled = false;
+            return;
+        }
         self.remove_npc_from_spawned_list(server, npc);
         // npc.UnregisterNpcEvents(): `Npc.Delete` drops the AI with its registrations.
         spawn_manager::delete_object(server, &WorldObject::from(npc), self.parent_world());
@@ -992,10 +1003,21 @@ impl NpcSpawner {
         };
         let id = spawner.spawner_id;
         if !self.remove_spawned_npc_exact(id, npc) {
-            tracing::warn!(
-                "NPC {} not found in SpawnedNpcs for SpawnerId={id}.",
-                npc.obj_id
-            );
+            if server.world.object(npc.obj_id).is_none() {
+                // Deviation from the C# (which never removes on a direct `Npc.Delete`): the
+                // object left the world before this despawn (a corpse deleted by a script / GM
+                // command while its corpse timer was pending), and `reconcile_deleted_npc`
+                // already dropped its entry. Nothing is inconsistent.
+                tracing::debug!(
+                    "NPC {} already removed from SpawnedNpcs for SpawnerId={id}.",
+                    npc.obj_id
+                );
+            } else {
+                tracing::warn!(
+                    "NPC {} not found in SpawnedNpcs for SpawnerId={id}.",
+                    npc.obj_id
+                );
+            }
         }
     }
 
@@ -1661,6 +1683,15 @@ impl NpcSpawner {
         // The first-NPC anchor of `_playerCountCache` can change with every add.
         self.invalidate_membership_caches();
     }
+}
+
+/// Whether `npc`'s object id now belongs to a different live object (the handle is stale: the id
+/// was released and reused). Mirrors the identity guard of `npc::manager::delete`.
+pub(crate) fn npc_superseded(server: &GameServer, npc: &NpcRef) -> bool {
+    server
+        .world
+        .object(npc.obj_id)
+        .is_some_and(|o| !o.as_npc().is_some_and(|n| Arc::ptr_eq(n, npc)))
 }
 
 /// `IsWithinDespawnTime(npc)` on the NPC's spawner template: outside its time window.

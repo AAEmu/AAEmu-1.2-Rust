@@ -147,17 +147,47 @@ pub fn run_plot(server: &GameServer, plot_id: u32, ctx: CastCtx, skill: SkillRef
     };
     handle.spawn(async move {
         execute_tree(&srv, plot_id, &state).await;
-        if let (super::types::SkillCaster::Item { item_id, .. }, Some(p)) =
-            (state.ctx.caster_caster, state.ctx.caster.as_player())
-        {
-            if item_id != 0 {
-                if !state.cancellation_requested() {
-                    srv.systems.skills.ext.quests().item_use(&srv, p, item_id);
-                }
-                srv.systems.skills.ext.items().unlock_item(&srv, p, item_id);
-            }
-        }
+        finish_item_plot(&srv, plot_id, &state);
     });
+}
+
+/// The item part of `Plot.RunAsync` after the tree has run: for an item-cast plot of a
+/// character, `Character.ItemUse` (unless cancelled) and the `ItemUnlock` of the source item.
+///
+/// The C# holds the `SkillSourceItem` reference resolved when the cast started and sends the
+/// unlock for it even when the item is gone by now. Here the item is looked up again, and a
+/// source item the plot itself used up (a stackable `use_skill_as_reagent` item, e.g. the
+/// stones of the stone-throwing plot, is consumed by the effects while the plot runs) no longer
+/// exists: nothing is left to unlock then, so the unlock is skipped.
+pub(crate) fn finish_item_plot(server: &GameServer, plot_id: u32, state: &Arc<PlotState>) {
+    let (super::types::SkillCaster::Item { item_id, .. }, Some(p)) =
+        (state.ctx.caster_caster, state.ctx.caster.as_player())
+    else {
+        return;
+    };
+    if item_id == 0 {
+        return;
+    }
+    if !state.cancellation_requested() {
+        server
+            .systems
+            .skills
+            .ext
+            .quests()
+            .item_use(server, p, item_id);
+    }
+    if !server
+        .systems
+        .skills
+        .ext
+        .items()
+        .unlock_item(server, p, item_id)
+    {
+        tracing::debug!(
+            "plot {plot_id} (skill {}): source item {item_id} was consumed, no ItemUnlock sent",
+            state.skill.template.id
+        );
+    }
 }
 
 type QueueItem = (usize, i64, PlotTargetInfo);

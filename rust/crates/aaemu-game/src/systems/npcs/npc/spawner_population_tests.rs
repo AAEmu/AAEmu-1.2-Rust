@@ -1120,3 +1120,171 @@ async fn direct_delete_serializes_with_the_spawn_lock() {
     assert!(world.npc(npc.obj_id).is_none());
     assert_eq!(spawner.spawned_npcs().values().flatten().count(), 0);
 }
+
+/// Captures the formatted log lines of the current thread (WARN and above are the interesting
+/// ones: the despawn paths must stay quiet for reconciled state).
+#[derive(Clone, Default)]
+struct LogCapture(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogCapture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+    type Writer = LogCapture;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+impl LogCapture {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+fn capture_warnings() -> (LogCapture, tracing::subscriber::DefaultGuard) {
+    let capture = LogCapture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .with_writer(capture.clone())
+        .finish();
+    (capture, tracing::subscriber::set_default(subscriber))
+}
+
+/// The "NPC n not found in SpawnedNpcs for SpawnerId=s" sequence: a dead NPC queues its respawn
+/// and corpse timers, the corpse is then deleted directly (script / GM command / skill effect),
+/// which already reconciles its membership entry, and the corpse timer finally fires
+/// `despawn` for an entry that is legitimately gone.
+#[tokio::test]
+async fn corpse_timer_after_direct_delete_is_a_quiet_idempotent_despawn() {
+    let server = server();
+    let world = server.world.world(0).unwrap();
+    let manager = server.systems.npcs.spawns.get_or_create(&world);
+    let spawner = make_spawner(template(170, vec![member(1700, 170, 500)]), 500, 1);
+    let (log, _guard) = capture_warnings();
+
+    spawner.update(&server);
+    let npc = spawner.spawned_npcs().values().next().unwrap()[0].clone();
+    {
+        let mut d = npc.data();
+        d.unit.hp = 0;
+        d.dead_time_ms = crate::world::now_ms();
+    }
+    spawn_manager::on_npc_died(&server, &npc);
+    assert_eq!(manager.pending_despawns().len(), 1);
+    crate::systems::npcs::npc::manager::delete(&server, &world, &npc);
+    assert_eq!(spawner.spawned_npcs().values().flatten().count(), 0);
+
+    // Respawn then corpse deadline both pass.
+    spawn_manager::advance_test_clock(Duration::from_secs(11));
+    manager.check_respawns_tick(&server);
+    spawn_manager::advance_test_clock(Duration::from_secs(10));
+    manager.check_respawns_tick(&server);
+    assert!(manager.pending_despawns().is_empty());
+    assert!(manager.pending_respawns().is_empty());
+    assert!(
+        !log.text().contains("not found in SpawnedNpcs"),
+        "an already reconciled corpse is not an inconsistency: {}",
+        log.text()
+    );
+
+    // Despawning the same handle again stays harmless (no double delete, no counter drift).
+    spawner.despawn(&server, &npc);
+    assert_eq!(spawner.spawned_npcs().values().flatten().count(), 0);
+
+    // The slot is free again and the replacement spawns exactly once.
+    spawner.update(&server);
+    assert_eq!(spawner.current_spawn_count(), 1);
+    assert_eq!(world.all_npcs().len(), 1);
+    let replacement = spawner.spawned_npcs().values().next().unwrap()[0].clone();
+    assert!(!Arc::ptr_eq(&replacement, &npc));
+    assert!(world.npc(replacement.obj_id).is_some());
+}
+
+/// A genuinely inconsistent state (the NPC is still a live world object but missing from its
+/// spawner's `SpawnedNpcs`) keeps the warning.
+#[tokio::test]
+async fn live_npc_missing_from_spawned_list_still_warns() {
+    let server = server();
+    let spawner = make_spawner(template(171, vec![member(1710, 171, 500)]), 500, 1);
+    let (log, _guard) = capture_warnings();
+
+    spawner.update(&server);
+    let npc = spawner.spawned_npcs().values().next().unwrap()[0].clone();
+    spawner.clear_spawned_npcs();
+    spawner.despawn(&server, &npc);
+    assert!(
+        log.text().contains("not found in SpawnedNpcs"),
+        "inconsistent live state must stay visible: {}",
+        log.text()
+    );
+}
+
+/// A GM `despawn` releases the corpse's id and deletes it while its corpse timer is pending;
+/// another NPC reuses the id. The stale timer must neither touch the new NPC (membership, world
+/// object, spawner link) nor release its object id.
+#[tokio::test]
+async fn stale_corpse_timer_leaves_the_npc_that_reused_the_id_untouched() {
+    let server = server();
+    let world = server.world.world(0).unwrap();
+    let manager = server.systems.npcs.spawns.get_or_create(&world);
+    let spawner = make_spawner(template(172, vec![member(1720, 172, 500)]), 500, 1);
+    let other = make_spawner(template(173, vec![member(1730, 173, 501)]), 501, 1);
+    let (log, _guard) = capture_warnings();
+
+    spawner.update(&server);
+    let corpse = spawner.spawned_npcs().values().next().unwrap()[0].clone();
+    {
+        let mut d = corpse.data();
+        d.unit.hp = 0;
+        d.dead_time_ms = crate::world::now_ms();
+    }
+    spawn_manager::on_npc_died(&server, &corpse);
+    assert_eq!(manager.pending_despawns().len(), 1);
+
+    // `Despawn.cs`: ReleaseId(obj.ObjId); obj.Delete();
+    server.ids.object.release_id(corpse.obj_id);
+    spawn_manager::delete_object(&server, &crate::world::WorldObject::from(&corpse), None);
+    other.do_spawn(&server);
+    let reuser = other.spawned_npcs().values().next().unwrap()[0].clone();
+    assert_eq!(reuser.obj_id, corpse.obj_id, "the id was reused");
+
+    spawn_manager::advance_test_clock(Duration::from_secs(11));
+    manager.check_respawns_tick(&server);
+    spawn_manager::advance_test_clock(Duration::from_secs(10));
+    manager.check_respawns_tick(&server);
+    assert!(manager.pending_despawns().is_empty());
+
+    assert!(
+        world
+            .npc(reuser.obj_id)
+            .is_some_and(|n| Arc::ptr_eq(&n, &reuser)),
+        "the reusing NPC stays in the world"
+    );
+    assert_eq!(other.current_spawn_count(), 1, "and in its membership");
+    assert!(
+        server
+            .systems
+            .npcs
+            .spawns
+            .npc_spawner_of(reuser.obj_id)
+            .is_some_and(|s| Arc::ptr_eq(&s, &other)),
+        "and keeps its spawner link"
+    );
+    let probe = server.ids.object.get_next_id().unwrap();
+    assert_ne!(probe, reuser.obj_id, "its object id is not released");
+    server.ids.object.release_id(probe);
+    assert!(
+        !log.text().contains("not found in SpawnedNpcs"),
+        "{}",
+        log.text()
+    );
+}
