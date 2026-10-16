@@ -350,6 +350,74 @@ pub fn build(server: &GameServer, player: &PlayerRef, account_id: u32, p: &CSCre
     }
 }
 
+/// AAEmu-only (GM testing of backported houses): spawn a finished house of any housing template
+/// owned by `player` at the given position, without a design item, payment or placement checks.
+pub fn gm_spawn(
+    server: &GameServer,
+    player: &PlayerRef,
+    template_id: u32,
+    x: f32,
+    y: f32,
+    z: f32,
+    z_rot: f32,
+) -> Result<HouseRef, String> {
+    let _operation = server
+        .systems
+        .housing
+        .operation_lock
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (char_id, account_id, faction_id, _) = player_ids(player);
+    let template = server
+        .game_data
+        .systems
+        .housing
+        .template(template_id)
+        .ok_or_else(|| format!("unknown housing template {template_id}"))?;
+    let world = server
+        .world
+        .world_of(&WorldObject::from(player))
+        .ok_or("player without world")?;
+    let house_id = server
+        .ids
+        .housing
+        .get_next_id()
+        .map_err(|_| "no free house id".to_string())?;
+    let Some(house) = manager::create(server, template_id, faction_id, &world, 0, 0) else {
+        server.ids.housing.release_id(house_id);
+        return Err(format!("could not create housing template {template_id}"));
+    };
+    let place_date = now();
+    {
+        let mut h = house.data();
+        h.id = house_id;
+        h.unit.transform.set_xyz(x, y, z);
+        h.unit.transform.rot_z = z_rot;
+        h.unit.owner_id = char_id;
+        h.co_owner_id = char_id;
+        h.account_id = account_id;
+        set_permission(&mut h, Some(template), housing_permission::PRIVATE);
+        h.allow_recover = true;
+        h.place_date = place_date;
+        h.protection_end_date = place_date
+            + (i64::from(server.config.world.days_for_tax_payment)
+                + manager::TAX_PAYMENT_GRACE_DAYS)
+                * DAY;
+        h.is_dirty = true;
+    }
+    manager::set_current_step(server, &house, -1, false);
+    manager::refresh_expedition(server, &house);
+    if !server.systems.housing.manager.insert(&house) {
+        manager::discard_created_house(server, &house);
+        server.ids.housing.release_id(house_id);
+        return Err("house id / tl already in use".into());
+    }
+    player.send(my_house_packet(server, &house));
+    manager::spawn_house(server, &house);
+    update_tax_info(server, &house);
+    Ok(house)
+}
+
 // ---------------------------------------------------------------------------------------------
 // permission / name / recover
 // ---------------------------------------------------------------------------------------------

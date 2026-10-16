@@ -255,6 +255,34 @@ impl Command for TestHouse {
         }
         let server = ctx.server()?;
         let player = ctx.player()?;
+        if args[0].eq_ignore_ascii_case("spawn") {
+            // AAEmu-only: a finished house of any template, 15 m in front of the player.
+            let Some(template) = args.get(1).and_then(|a| try_parse::<u32>(a)) else {
+                CommandManager::send_error_text(self, out, "Usage: spawn <housing id>");
+                return Ok(());
+            };
+            let (x, y, z, rot) = {
+                let c = player.data();
+                let t = &c.unit.transform;
+                (t.x, t.y, t.z, t.rot_z)
+            };
+            let (dx, dy) = (-rot.sin() * 15.0, rot.cos() * 15.0);
+            match housing_ops::gm_spawn(server, &player, template, x + dx, y + dy, z, rot) {
+                Ok(house) => {
+                    let (id, name) = {
+                        let h = house.data();
+                        (h.id, h.unit.name.clone())
+                    };
+                    CommandManager::send_normal_text(
+                        self,
+                        out,
+                        &format!("Spawned house {id} ({name}, template {template})"),
+                    );
+                }
+                Err(e) => CommandManager::send_error_text(self, out, &format!("Spawn failed: {e}")),
+            }
+            return Ok(());
+        }
         let Some(house) = target_house(server, &player) else {
             CommandManager::send_error_text(self, out, "No building selected");
             return Ok(());
@@ -280,6 +308,8 @@ impl Command for TestHouse {
             "|cFFFFFFFFsettaxduesoon|r -> Sets the house's taxdue date to 20 seconds from now.\n",
             "|cFFFFFFFFsetdemosoon|r -> Sets the house's demolition date to 20 seconds from now.\n",
             "|cFFFFFFFFrebuild <housing id>|r -> Swaps the house to another housing template in place (no materials, no checks except forts), like a finished rebuild.
+",
+            "|cFFFFFFFFspawn <housing id>|r -> Spawns a finished house of that template owned by you, 15 m ahead (no checks).
 ",
             "|cFFFFFFFFforcedemo|r -> Forcefully demolishes a house right now, but returns all furniture regardless if it is normally returned or not.\n",
         )
