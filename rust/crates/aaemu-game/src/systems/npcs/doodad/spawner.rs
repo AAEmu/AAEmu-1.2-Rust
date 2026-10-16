@@ -615,15 +615,16 @@ impl DoodadSpawner {
         if obj_id != 0 {
             return None;
         }
-        let new_unit_id = {
+        let (new_unit_id, ratio_replacement) = {
             let mut st = self.st();
-            let id = if st.respawn_doodad_template_id > 0 {
+            let replacement = st.respawn_doodad_template_id > 0;
+            let id = if replacement {
                 st.respawn_doodad_template_id
             } else {
                 self.unit_id
             };
             st.respawn_doodad_template_id = 0; // reset it after 1 spawn
-            id
+            (id, replacement)
         };
         let world = self.parent_world().and_then(|id| server.world.world(id));
         let Some(world) = world else {
@@ -636,6 +637,10 @@ impl DoodadSpawner {
             return None;
         };
         self.setup_doodad(server, &doodad, world.id);
+        if ratio_replacement {
+            // Cleared by `phase::init_doodad` once the entry phase has run.
+            doodad.data().phase.suppress_tod_catch_up = true;
+        }
         self.st().last = Some(doodad.clone());
         self.do_spawn(server); // schedule check and spawn
         Some(doodad)
