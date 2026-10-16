@@ -14,7 +14,7 @@ isolated test stack):
 | Data + assets bundle | `rust/backports/housing-thatched/` (generator `rust/tools/backport/housing_thatched.py`) | 71 files appended to `game_pak`; client loads them; backported items show names and icons |
 | Rebuild data + in-place swap | `systems/housing/rebuild/` | `Loaded 6 housing rebuildings in 4 packs`; house 13 rebuilt 171 -> 434, materials consumed, redrawn without relog, persisted |
 | 3D preview | `systems/housing/rebuild/preview.rs` | the Lode Farm phantom replaces the Thatched Farmhouse in the requester's view; restored on end |
-| Rebuild window | `aaemu-clientdriver/native/ext/house_rebuild.lua` | Rebuild button in the stock maintain window; list, materials have/need, confirm, result |
+| Rebuild window | `aaemu-clientdriver/native/ext/house_rebuild.lua` | opened through the module entry point (`AAEmuHouseRebuild_Open`, as `/rebuild` does); list, materials have/need, confirm, result |
 | Transport | client extension layer ([`../CLIENT-EXTENSIONS.md`](../CLIENT-EXTENSIONS.md)) | handshake + all `house.rebuild.*` channels |
 | Fallbacks / tools | `/rebuild`, `/house rebuild <id>`, `/house spawn <id>` | `/house spawn` + `/build` used for the test |
 
@@ -27,6 +27,12 @@ Remaining gaps:
 - Two referenced effects are missing in 1.2 (`housing_watermill_water`, `housing.farm_floor`);
   no visible error so far.
 - Player distribution of a bundle (`aaemu-pak diff` of the patched pak + loose DB) not exercised.
+- The Rebuild button in the stock maintain window has not been seen live: the server never opens
+  that window. Right-clicking a house sends `CSStartInteractionPacket` with the house's object id,
+  and the handler (as in C#) only answers NPCs and mates, so `HOUSE_INTERACTION_START` never
+  fires. How the 1.2 server starts a house interaction still needs reversing.
+- The rebuild window does not refresh its material counts when the inventory changes; it shows
+  the counts of its last `house.rebuild.info` reply until it is reopened.
 
 ## What 10.x has that 1.2 lacks
 
