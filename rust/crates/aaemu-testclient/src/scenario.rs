@@ -16,6 +16,7 @@ use crate::record::Recorder;
 use crate::stream::StreamClient;
 
 mod doodad;
+mod fixes;
 mod questitem;
 
 /// Which scenario to run.
@@ -52,6 +53,14 @@ pub enum Kind {
     /// doodad's fake use skill on it, logging the packets (see `scenario/doodad.rs`).
     #[serde(rename = "doodad")]
     Doodad,
+    /// Stone throwing (skill 11268) from a stackable item: the `ItemUnlock` is sent while the
+    /// stack survives and skipped for the last stone (see `scenario/fixes.rs`). GM account.
+    #[serde(rename = "stonethrow")]
+    StoneThrow,
+    /// Kill the ghost of spawner 3380, delete its corpse with a GM command, watch the respawn
+    /// (see `scenario/fixes.rs`). GM account.
+    #[serde(rename = "ghost")]
+    Ghost,
 }
 
 impl std::str::FromStr for Kind {
@@ -67,6 +76,8 @@ impl std::str::FromStr for Kind {
             "mate-revive" => Self::MateRevive,
             "questitem" => Self::QuestItem,
             "doodad" => Self::Doodad,
+            "stonethrow" => Self::StoneThrow,
+            "ghost" => Self::Ghost,
             _ => bail!(
                 "unknown scenario '{s}' (login, lobby, full, combat, npc-return, mate-revive, questitem, doodad, \n                 load)"
             ),
@@ -516,6 +527,16 @@ async fn run_inner(kind: Kind, cfg: &BotConfig, r: &mut Runner<'_>) -> anyhow::R
     }
     if kind == Kind::Doodad {
         doodad::run(&mut game, cfg, r).await?;
+        drop(stream);
+        return Ok(());
+    }
+    if kind == Kind::StoneThrow {
+        fixes::stonethrow(&mut game, r).await?;
+        drop(stream);
+        return Ok(());
+    }
+    if kind == Kind::Ghost {
+        fixes::ghost(&mut game, r).await?;
         drop(stream);
         return Ok(());
     }

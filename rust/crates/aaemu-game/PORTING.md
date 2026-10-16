@@ -665,6 +665,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   the per-packet `Debug` / `Trace` lines dominated the send path with many players in view
   (`RUST_LOG=info,aaemu_game::net=trace` restores the packet log); the log files are written by
   a background thread.
+* systems::skills (item-cast plot end): `Plot.RunAsync` holds the `SkillSourceItem` object resolved
+  when the cast started and sends `ItemUnlock` for it even when the plot consumed it. Here the
+  item is looked up again at the plot end (`plots::finish_item_plot`,
+  `ItemSkillHooks::unlock_item`); a source item that is gone (the last stone of a stack of the
+  stone-throwing plot 349, skill 11268, a `use_skill_as_reagent` item the effects consume) has
+  nothing left to unlock, so the packet is skipped with a `debug!` (plot / skill / item id)
+  instead of the former `ERROR` ("SkillSourceItem ... no longer exists").
 * net (game connections): sending never blocks and C# had no limit; here a client with more than
   16 MiB queued, or one that accepts no data for 20 s, is disconnected (`net::outbox`,
   `net::listener`). Broadcasts encode a packet once for all recipients.
@@ -1037,6 +1044,16 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   reserved respawn slot and the population credit as one step. Authored corpse lifetimes and
   each pending slot's individual respawn deadline are preserved. Focused tests in
   `spawner_population_tests.rs` cover the limits, deadlines and direct-delete reconciliation.
+
+* systems::npcs (2026-10-16): a corpse / queued despawn timer that fires after its NPC was
+  already deleted directly (and so reconciled out of `SpawnedNpcs`, see above) is an idempotent
+  no-op: `NpcSpawner::despawn` logs the missing entry at debug instead of the C# warning
+  `NPC ... not found in SpawnedNpcs` when the object has already left the world; the warning stays
+  for an NPC that is still a live world object but missing from its list. A stale handle whose
+  object id was released and reused by another NPC (GM `despawn` of a corpse with pending
+  timers) is skipped entirely, and `check_respawns_tick` no longer releases the id / spawner link
+  of the NPC that reused it (the C# `Despawn` and its caller act on the id regardless).
+  Tests in `spawner_population_tests.rs`.
 
 * systems::npcs (2026-10-14): the active-region spawner tick is a bounded activation pass
   instead of the per-second sweep that updated every spawner whose authored player radius was
