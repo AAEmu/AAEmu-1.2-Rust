@@ -1178,6 +1178,19 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   those replacements ("replacement chain rejected") and the doodad waited for its Final to
   respawn the base template.
 
+* systems::npcs (2026-10-16): `DoodadFuncTod` takes its `curTime >= Tod` catch-up on every
+  entry, which ignores that the clock wraps; the 20 day/night board templates (West Gate
+  4345-4352, Blue Salt 6175 / 6213 and their variants: day board Tod 20:00, variant Tod 02:00 or
+  06:00, each respawning into the other through `DoodadFuncRatioRespawn`) therefore swapped back
+  and forth synchronously for the whole game evening (20:00-24:00, about 40 real minutes every
+  4 hours), tripping the replacement-chain guard about 880 times a minute and churning doodads
+  and packets until the base template's Final respawned it. A doodad created by a
+  `DoodadFuncRatioRespawn` replacement (`DoodadSpawner::spawn` with `RespawnDoodadTemplateId`
+  set) now skips the Tod catch-up during its entry phase (`suppress_tod_catch_up`, cleared by
+  `InitDoodad`): it was created at this time of day, so its Tod refers to the next occurrence,
+  which the time-of-day watcher fires on crossing. The C# has no such suppression (its chain
+  recursed). Boards respawned by their own Final, and every other spawn, keep the catch-up.
+
 * systems::ai (2026-10-15): the optional compact patch
   `SQL/patches/compact/2026-10-14-fix-npc-ai-param-syntax.sql` repairs malformed Lua syntax
   in `npc_ai_params` 443, 835 and 1975 only when the original bytes match. It preserves authored

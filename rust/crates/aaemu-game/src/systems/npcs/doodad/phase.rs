@@ -605,6 +605,8 @@ pub fn init_doodad(ctx: &DoodadCtx<'_>) {
     let unit = ctx.world.unit(owner_obj_id);
     let fg = ctx.doodad.data().func_group_id;
     do_change_phase(ctx, unit.as_ref(), fg as i32);
+    // A ratio-respawn replacement's Tod catch-up suppression only covers its entry phase.
+    ctx.doodad.data().phase.suppress_tod_catch_up = false;
 }
 
 #[cfg(test)]
