@@ -549,6 +549,61 @@ async fn ratio_respawn_finite_chain_reaches_the_last_template() {
 }
 
 #[tokio::test]
+async fn ratio_respawn_repeat_through_a_chance_hop_runs_until_the_depth_limit() {
+    // A self-respawn with a chance below 1 is not an unconditional cycle: the C# lets it recurse
+    // and the roll ends it. With every roll passing, only the depth limit stops it.
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1)])
+        .phase_func(10, ratio_respawn(1, 5_000, TEMPLATE));
+    let f = fx(b);
+    f.server
+        .systems
+        .npcs
+        .doodads
+        .set_forced_phase_ratio(Some(0));
+    let spawner = new_spawner(TEMPLATE, 506);
+    let first = spawner.spawn(&f.server, 0).expect("spawns the template");
+    let last = spawner.last().expect("the replacement is tracked");
+    assert!(!Arc::ptr_eq(&first, &last));
+    assert!(first.data().phase.deleted);
+    assert_eq!(spawner.ratio_respawn_peak_depth(), 8);
+    assert_eq!(last.data().template_id, TEMPLATE);
+    assert!(!last.data().phase.deleted);
+    assert_eq!(f.world.all_doodads().len(), 1);
+    assert_eq!(spawner.ratio_respawn_chain_depth(), 0);
+}
+
+#[tokio::test]
+async fn ratio_respawn_chance_cycle_ends_when_the_roll_fails() {
+    // The 2768 shape: the initial phase reaches the respawning phase by chance, and the
+    // respawning phase respawns the same template at 20%, otherwise into another template.
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (20, 2)])
+        .template(TEMPLATE + 1, &[(30, 1)])
+        .phase_func(10, ratio(1, 500, 20))
+        .phase_func(20, ratio_respawn(2, 2_000, TEMPLATE))
+        .phase_func(20, ratio_respawn(3, 2_000, TEMPLATE + 1));
+    let f = fx(b);
+    // Per phase func: 10:RatioChange hits -> 20; 20:self-respawn hits -> new TEMPLATE, its 10 hits
+    // -> 20 again (the repeated source); self-respawn misses, the second hits -> TEMPLATE + 1.
+    f.server
+        .systems
+        .npcs
+        .doodads
+        .queue_phase_ratios(&[100, 100, 100, 9000, 100]);
+    let spawner = new_spawner(TEMPLATE, 507);
+    let first = spawner.spawn(&f.server, 0).expect("spawns the template");
+    let last = spawner.last().expect("the replacement is tracked");
+    assert!(first.data().phase.deleted);
+    assert_eq!(spawner.ratio_respawn_peak_depth(), 2);
+    assert_eq!(last.data().template_id, TEMPLATE + 1);
+    assert_eq!(last.data().func_group_id, 30);
+    assert!(!last.data().phase.deleted);
+    assert_eq!(f.world.all_doodads().len(), 1);
+    assert_eq!(spawner.ratio_respawn_chain_depth(), 0);
+}
+
+#[tokio::test]
 async fn ratio_respawn_deep_acyclic_chain_stops_at_the_depth_limit() {
     let mut b = Builder::default();
     for i in 0..10u32 {
@@ -957,4 +1012,40 @@ async fn real_compact_db_template_2336() {
     f.advance(30_000);
     assert_eq!(group(&d), 4651);
     assert_eq!(f.phase_packets(), vec![4651]);
+}
+
+/// Weather marker 2768 (func group 7055 respawns into 2768 / 3085 / 3086 / 3225 / 3226 at 20% each
+/// via DoodadFuncRatioRespawn): the initial phase 7026 can reach 7055 synchronously through its
+/// RatioChange funcs, so the replacement 2768 re-enters the same (template, group) source. That
+/// legitimate chance cycle used to be rejected ("replacement chain rejected"), leaving the
+/// replacement stuck in 7055 until its Final respawned the base template.
+#[tokio::test]
+#[ignore]
+async fn real_compact_db_weather_marker_2768_chain_transitions() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let data = DoodadData::load_from(&conn).unwrap();
+    let f = fx(Builder { data });
+    // One roll per phase func, in actual_func_id order. The first 2768: 7026 (RatioChange 186 @7000
+    // and 187 @2500 miss, 188 @500 hits) -> 7055, where 383 (self-respawn @2000) hits. The
+    // replacement 2768 does the same, then its 7055 misses 383 / 384 / 385 and hits 387 (-> 3225),
+    // which the guard used to reject as a repeated (2768, 7055) source.
+    f.server.systems.npcs.doodads.queue_phase_ratios(&[
+        8000, 8000, 100, 100, // first 2768: 7026 -> 7055, 383 -> 2768
+        8000, 8000, 100, 9000, 9000, 9000, 100, // replacement: 7026 -> 7055, 387 -> 3225
+    ]);
+    let spawner = new_spawner(2768, 508);
+    let first = spawner.spawn(&f.server, 0).expect("spawns template 2768");
+    let last = spawner.last().expect("the replacement is tracked");
+    assert!(first.data().phase.deleted);
+    assert_eq!(spawner.ratio_respawn_peak_depth(), 2);
+    assert_eq!(last.data().template_id, 3225);
+    assert_eq!(group(&last), 7357); // the cloud's start phase
+    assert!(!last.data().phase.deleted);
+    assert_eq!(f.world.all_doodads().len(), 1);
+    assert_eq!(spawner.ratio_respawn_chain_depth(), 0);
 }

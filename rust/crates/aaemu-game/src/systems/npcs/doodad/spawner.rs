@@ -217,9 +217,13 @@ struct State {
     not_found_in_scheduler: bool,
     cron_jobs: std::collections::HashSet<(bool, String)>,
     /// The active synchronous `DoodadFuncRatioRespawn` chain: the source
-    /// `(template_id, func_group_id)` pairs in call order. Empty outside a replacement chain;
-    /// the entries are owned by their guards, so `reset_for_spawn` leaves this alone.
-    ratio_respawn_chain: Vec<(u32, u32)>,
+    /// `(template_id, func_group_id, certain)` entries in call order (`certain` = the hop's
+    /// ratio always passes its roll). Empty outside a replacement chain; the entries are owned
+    /// by their guards, so `reset_for_spawn` leaves this alone.
+    ratio_respawn_chain: Vec<(u32, u32, bool)>,
+    /// The deepest `ratio_respawn_chain` seen (tests).
+    #[cfg(test)]
+    ratio_respawn_peak: usize,
 }
 
 /// `DoodadSpawner`.
@@ -243,6 +247,10 @@ pub struct DoodadSpawner {
 /// or a runaway acyclic definition.
 const MAX_RATIO_RESPAWN_CHAIN_DEPTH: usize = 8;
 
+/// The `PhaseRatio` roll is `Random.Shared.Next(0, 10000)`, so a `DoodadFuncRatioRespawn` (or
+/// `DoodadFuncRatioChange`) with a ratio of at least this value always passes.
+const CERTAIN_RATIO: i32 = 9999;
+
 /// A `DoodadFuncRatioRespawn` replacement rejected by the active-chain guard
 /// ([`DoodadSpawner::enter_ratio_respawn`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -262,7 +270,7 @@ pub struct RatioRespawnReject {
 #[derive(Debug)]
 pub struct RatioRespawnGuard {
     spawner: Arc<DoodadSpawner>,
-    entry: (u32, u32),
+    entry: (u32, u32, bool),
 }
 
 impl Drop for RatioRespawnGuard {
@@ -423,6 +431,8 @@ impl DoodadSpawner {
                 not_found_in_scheduler: false,
                 cron_jobs: Default::default(),
                 ratio_respawn_chain: Vec::new(),
+                #[cfg(test)]
+                ratio_respawn_peak: 0,
             }),
         }
     }
@@ -459,18 +469,27 @@ impl DoodadSpawner {
 
     /// Reserve a `DoodadFuncRatioRespawn` entry in this spawner's active replacement chain,
     /// before the source doodad is despawned. The replacement runs `DoPhaseFuncs` synchronously
-    /// inside `spawn`, so a repeated source `(template_id, func_group_id)` (a cyclic definition)
-    /// or a chain past `MAX_RATIO_RESPAWN_CHAIN_DEPTH` is rejected; the returned guard removes
+    /// inside `spawn`, so a chain past `MAX_RATIO_RESPAWN_CHAIN_DEPTH` is rejected, and so is a
+    /// repeated source `(template_id, func_group_id)` when every hop since its first occurrence
+    /// (this one included, `ratio` >= `CERTAIN_RATIO`) always passes its roll: that is an
+    /// unconditional cycle. A repeat through a hop with a chance below 1 (the weather marker 2768
+    /// respawns into itself at 20% and can reach the same phase again from its initial phase) ends
+    /// by chance, as in the C#, with the depth limit as the backstop. The returned guard removes
     /// the entry when the replacement (or its failure) has run, including on panic.
     pub fn enter_ratio_respawn(
         self: &Arc<Self>,
         template_id: u32,
         func_group_id: u32,
+        ratio: i32,
     ) -> Result<RatioRespawnGuard, RatioRespawnReject> {
-        let entry = (template_id, func_group_id);
+        let entry = (template_id, func_group_id, ratio >= CERTAIN_RATIO);
         let mut st = self.st();
         let depth = st.ratio_respawn_chain.len();
-        let repeated = st.ratio_respawn_chain.contains(&entry);
+        let repeated = st
+            .ratio_respawn_chain
+            .iter()
+            .position(|e| e.0 == template_id && e.1 == func_group_id)
+            .is_some_and(|first| entry.2 && st.ratio_respawn_chain[first..].iter().all(|e| e.2));
         if repeated || depth >= MAX_RATIO_RESPAWN_CHAIN_DEPTH {
             return Err(RatioRespawnReject {
                 repeated,
@@ -479,11 +498,21 @@ impl DoodadSpawner {
             });
         }
         st.ratio_respawn_chain.push(entry);
+        #[cfg(test)]
+        {
+            st.ratio_respawn_peak = st.ratio_respawn_peak.max(st.ratio_respawn_chain.len());
+        }
         drop(st);
         Ok(RatioRespawnGuard {
             spawner: self.clone(),
             entry,
         })
+    }
+
+    /// The deepest `DoodadFuncRatioRespawn` chain seen (tests).
+    #[cfg(test)]
+    pub(crate) fn ratio_respawn_peak_depth(&self) -> usize {
+        self.st().ratio_respawn_peak
     }
 
     /// The active `DoodadFuncRatioRespawn` chain depth (tests).

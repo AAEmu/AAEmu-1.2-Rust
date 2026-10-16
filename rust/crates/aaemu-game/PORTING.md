@@ -1101,9 +1101,16 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   without bound until the stack overflowed; the 1.2 compact data has five template pairs whose
   phase functions respawn into each other at ratio 10000 (e.g. 4345/g10678/f520 ->
   4349/g10680/f521 -> 4345), and the C# per-doodad `ListGroupId` recursion guard resets with the
-  replacement. Each spawner now tracks its active synchronous replacement chain: a repeated
-  source `(template, func group)` or a chain deeper than 8 entries is rejected with a warning,
-  the current doodad stays in its phase, and finite A -> B -> C chains are unchanged.
+  replacement. Each spawner now tracks its active synchronous replacement chain: a chain deeper
+  than 8 entries, or a repeated source `(template, func group)` whose hops since its first
+  occurrence all always pass their roll (ratio >= 9999, an unconditional cycle), is rejected with
+  a warning, the current doodad stays in its phase, and finite A -> B -> C chains are unchanged.
+  A repeat through a hop with a chance below 1 is allowed (bounded by the depth limit only), as
+  in the C#: the weather marker 2768 (func group 7055 respawns into 2768 / 3085 / 3086 / 3225 /
+  3226 at 20% each) reaches 7055 again synchronously from its initial phase 7026 through its
+  RatioChange funcs (about 7% of spawns) and ends by chance; the first guard version rejected
+  those replacements ("replacement chain rejected") and the doodad waited for its Final to
+  respawn the base template.
 
 * systems::ai (2026-10-15): the optional compact patch
   `SQL/patches/compact/2026-10-14-fix-npc-ai-param-syntax.sql` repairs malformed Lua syntax

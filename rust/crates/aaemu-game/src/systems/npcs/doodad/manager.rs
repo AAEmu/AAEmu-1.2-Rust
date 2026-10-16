@@ -12,7 +12,7 @@
 //! * `Delete()` also cancels the doodad's `FuncTask` (C# only `DoodadSpawner.Despawn` does), so
 //!   no timer keeps firing for a deleted doodad.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
 
 use super::packets::{
@@ -51,6 +51,8 @@ pub struct DoodadManager {
     climates: RwLock<HashMap<u32, Vec<i32>>>,
     /// Test override of the `PhaseRatio` roll.
     forced_phase_ratio: Mutex<Option<i32>>,
+    /// Test rolls consumed one per `PhaseRatio` roll before `forced_phase_ratio` applies.
+    phase_ratio_queue: Mutex<VecDeque<i32>>,
 }
 
 impl Default for DoodadManager {
@@ -61,6 +63,7 @@ impl Default for DoodadManager {
             growth_rate: Mutex::new(1.0),
             climates: RwLock::new(HashMap::new()),
             forced_phase_ratio: Mutex::new(None),
+            phase_ratio_queue: Mutex::new(VecDeque::new()),
         }
     }
 }
@@ -97,7 +100,23 @@ impl DoodadManager {
 
     /// The forced `PhaseRatio` roll (tests), `None` = `Random.Shared.Next(0, 10000)`.
     pub fn forced_phase_ratio(&self) -> Option<i32> {
+        if let Some(v) = self
+            .phase_ratio_queue
+            .lock()
+            .expect("doodads poisoned")
+            .pop_front()
+        {
+            return Some(v);
+        }
         *self.forced_phase_ratio.lock().expect("doodads poisoned")
+    }
+
+    /// Queues exact `PhaseRatio` rolls (tests); they are used first, in order, one per roll.
+    pub fn queue_phase_ratios(&self, rolls: &[i32]) {
+        self.phase_ratio_queue
+            .lock()
+            .expect("doodads poisoned")
+            .extend(rolls.iter().copied());
     }
 
     pub fn set_forced_phase_ratio(&self, v: Option<i32>) {

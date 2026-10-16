@@ -218,10 +218,12 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
                     (d.template_id, d.func_group_id)
                 };
                 // The replacement re-enters its phase funcs synchronously inside `spawn`; the
-                // guard rejects a source/group already active in this spawner's chain (or an
-                // over-deep chain) before the current doodad is despawned. It is dropped when
-                // the nested call has finished, also on early return or unwind.
-                let _chain = match spawner.enter_ratio_respawn(template_id, func_group_id) {
+                // guard rejects an unconditional cycle through a source/group already active in
+                // this spawner's chain (or an over-deep chain) before the current doodad is
+                // despawned. It is dropped when the nested call has finished, also on early
+                // return or unwind.
+                let _chain = match spawner.enter_ratio_respawn(template_id, func_group_id, f.ratio)
+                {
                     Ok(guard) => guard,
                     Err(reject) => {
                         tracing::warn!(
