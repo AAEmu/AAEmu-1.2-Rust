@@ -16,6 +16,7 @@ use crate::record::Recorder;
 use crate::stream::StreamClient;
 
 mod doodad;
+mod npcchase;
 mod questitem;
 
 /// Which scenario to run.
@@ -52,6 +53,11 @@ pub enum Kind {
     /// doodad's fake use skill on it, logging the packets (see `scenario/doodad.rs`).
     #[serde(rename = "doodad")]
     Doodad,
+    /// NPC chase on slopes: GM teleport next to a hostile NPC (Browntail Harpies on the
+    /// Solzreed hillside, a Giant Rabbit), provoke it, stand still and judge its attack paths
+    /// and movement (see `scenario/npcchase.rs`).
+    #[serde(rename = "npc-chase")]
+    NpcChase,
 }
 
 impl std::str::FromStr for Kind {
@@ -67,6 +73,7 @@ impl std::str::FromStr for Kind {
             "mate-revive" => Self::MateRevive,
             "questitem" => Self::QuestItem,
             "doodad" => Self::Doodad,
+            "npc-chase" => Self::NpcChase,
             _ => bail!(
                 "unknown scenario '{s}' (login, lobby, full, combat, npc-return, mate-revive, questitem, doodad, \n                 load)"
             ),
@@ -157,6 +164,38 @@ pub struct BotConfig {
     /// `questitem`: casts tried (rejected ones included) before the step fails.
     #[serde(default = "default_quest_item_max_attempts")]
     pub quest_item_max_attempts: u32,
+    /// `npc-chase`: cases to run, comma separated: `all` (harpy-hill, harpy-hill-floor, harpy-hill-top,
+    /// harpy-uphill, rabbit-slope) or `custom` (`npc_chase_npc` + `npc_chase_pos`).
+    #[serde(default = "default_npc_chase_case")]
+    pub npc_chase_case: String,
+    /// `npc-chase`: NPC template of the `custom` case.
+    #[serde(default)]
+    pub npc_chase_npc: u32,
+    /// `npc-chase`: player spot of the `custom` case; NPCs of the template within 10 m of it
+    /// are provoked.
+    #[serde(default)]
+    pub npc_chase_pos: Option<[f32; 3]>,
+    /// `npc-chase`: seconds the player stands still while the NPC is observed.
+    #[serde(default = "default_npc_chase_stand_secs")]
+    pub npc_chase_stand_secs: u64,
+    /// `npc-chase`: seconds after standing still within which the NPC must be in range.
+    #[serde(default = "default_npc_chase_reach_secs")]
+    pub npc_chase_reach_secs: f32,
+    /// `npc-chase`: horizontal metres that count as the NPC's attack range.
+    #[serde(default = "default_npc_chase_attack_range")]
+    pub npc_chase_attack_range: f32,
+    /// `npc-chase`: re-paths allowed while the player stands still.
+    #[serde(default = "default_npc_chase_max_repaths")]
+    pub npc_chase_max_repaths: u32,
+    /// `npc-chase`: highest accepted path length / straight distance for chases under 40 m.
+    #[serde(default = "default_npc_chase_max_ratio")]
+    pub npc_chase_max_ratio: f32,
+    /// `npc-chase`: `auto` (hit the NPC when natural aggro does not happen) or `none`.
+    #[serde(default = "default_npc_chase_provoke")]
+    pub npc_chase_provoke: String,
+    /// `npc-chase`: file the JSON summary is written to (it is always printed).
+    #[serde(default)]
+    pub npc_chase_json: Option<String>,
 }
 
 /// The client packet that asks a stablehand to revive the dead mate. The real protocol is still
@@ -249,6 +288,27 @@ fn default_quest_item_pos() -> [f32; 3] {
 }
 fn default_quest_item_max_attempts() -> u32 {
     12
+}
+fn default_npc_chase_case() -> String {
+    "all".into()
+}
+fn default_npc_chase_stand_secs() -> u64 {
+    15
+}
+fn default_npc_chase_reach_secs() -> f32 {
+    8.0
+}
+fn default_npc_chase_attack_range() -> f32 {
+    5.0
+}
+fn default_npc_chase_max_repaths() -> u32 {
+    3
+}
+fn default_npc_chase_max_ratio() -> f32 {
+    1.5
+}
+fn default_npc_chase_provoke() -> String {
+    "auto".into()
 }
 
 /// Result of one scenario step.
@@ -516,6 +576,11 @@ async fn run_inner(kind: Kind, cfg: &BotConfig, r: &mut Runner<'_>) -> anyhow::R
     }
     if kind == Kind::Doodad {
         doodad::run(&mut game, cfg, r).await?;
+        drop(stream);
+        return Ok(());
+    }
+    if kind == Kind::NpcChase {
+        npcchase::run(&mut game, cfg, r).await?;
         drop(stream);
         return Ok(());
     }

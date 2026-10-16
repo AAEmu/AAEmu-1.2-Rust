@@ -2,10 +2,13 @@
 //!
 //! ```text
 //! aaemu-testclient run    [--config F] [--login H:P] [--user U] [--password P] [--character C]
-//!                         [--scenario login|lobby|full|combat|npc-return|mate-revive|questitem|doodad|load]
+//!                         [--scenario login|lobby|full|combat|npc-return|mate-revive|questitem|doodad|npc-chase|load]
 //!                         [--out capture.jsonl]
 //!                         [--npc-return-distance M] [--npc-return-away-secs S]
 //!                         [--revive-method repair|skill|none]   (mate-revive; GM account needed)
+//!                         [--case all|harpy-hill|harpy-hill-floor|harpy-hill-top|harpy-uphill|rabbit-slope|custom]
+//!                         [--npc TEMPLATE] [--pos X,Y,Z] [--stand-secs S] [--json F]
+//!                         [--provoke auto|none]                 (npc-chase; GM account needed)
 //! aaemu-testclient parity [--config F] --a H:P --b H:P [--a-label cs] [--b-label rs]
 //!                         [--user U] [--scenario full] [--masks masks.json] [--out-dir D]
 //!                         [--rounds N]
@@ -84,6 +87,32 @@ fn bot_config(args: &Args) -> anyhow::Result<BotConfig> {
     }
     if let Some(x) = args.get("npc-return-away-secs") {
         obj.insert("npc_return_away_secs".into(), x.parse::<u64>()?.into());
+    }
+    if let Some(x) = args.get("case") {
+        obj.insert("npc_chase_case".into(), x.into());
+    }
+    if let Some(x) = args.get("npc") {
+        obj.insert("npc_chase_npc".into(), x.parse::<u64>()?.into());
+    }
+    if let Some(x) = args.get("pos") {
+        let p: Vec<f64> = x
+            .split(',')
+            .map(|v| v.trim().parse::<f64>())
+            .collect::<Result<_, _>>()
+            .context("--pos wants X,Y,Z")?;
+        if p.len() != 3 {
+            bail!("--pos wants X,Y,Z");
+        }
+        obj.insert("npc_chase_pos".into(), serde_json::json!(p));
+    }
+    if let Some(x) = args.get("stand-secs") {
+        obj.insert("npc_chase_stand_secs".into(), x.parse::<u64>()?.into());
+    }
+    if let Some(x) = args.get("provoke") {
+        obj.insert("npc_chase_provoke".into(), x.into());
+    }
+    if let Some(x) = args.get("json") {
+        obj.insert("npc_chase_json".into(), x.into());
     }
     if let Some(x) = args.get("revive-method") {
         obj.insert(

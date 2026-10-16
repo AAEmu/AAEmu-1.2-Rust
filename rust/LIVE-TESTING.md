@@ -226,6 +226,30 @@ is the one of the game server's `Connections`). Fields (`quest_item_quest`, `que
 from the level spawn fails the `game.doodad.level_spawn` step. The scenario then interacts with a
 `/spawn doodad 4252` copy, so the cast is still checked, and removes that copy afterwards.
 
+`npc-chase` (same login and GM prerequisites as `questitem`) measures how a hostile NPC chases a
+player standing still on a slope. It targets the tester report of Browntail Harpies (template
+14667) on the Solzreed hillside around 14987, 14063 (z ~140) taking ~100 m detours for a 12 m
+chase. Cases (`--case`, comma list, default `all`): `harpy-hill` (the captured geometry with its
+exact Z 137.04, 3.8 m below the navmesh floor: the player 12 m away and 8 m downhill of the harpy
+spawn 14991, 14062), `harpy-hill-floor` (same spot on the floor), `harpy-hill-top`,
+`harpy-uphill` (player above the harpy) and `rabbit-slope` (Giant Rabbit 3491, a ground mob on a
+hillside at 14529, 14423); `--case custom --npc TEMPLATE --pos X,Y,Z` stands at any spot next
+to NPCs of a template. Per case the bot `/move`s to the spot, snaps its Z to the navmesh height
+(`/height`), enables `/godmode true`, waits 4 s for natural aggro and otherwise provokes the NPC
+(a skill cast from the spot, then a hit next to the NPC and a `/move` back), and stands still for
+`--stand-secs` (15). It records the server's debug chat lines from `npc_find_path`
+(`Aggro from <obj>, getting attack path in N/M steps`, `Path step -> <x, y, z>`) and the NPC's
+`SCOneUnitMovementPacket`s, prints one summary line per case and a JSON summary (`--json FILE`
+also writes it): paths with length, straight distance and ratio, re-path count, the NPC's
+closest/farthest distance to the player and from its start, time until it is within its attack
+range (or seen casting), whether it ended back at its start (leash/return) and its thinned
+track. The step fails when a path of a chase shorter than 40 m has a length ratio above 1.5
+(`npc_chase_max_ratio`), the NPC is not within `npc_chase_attack_range` (5 m, horizontal) or
+casting within `npc_chase_reach_secs` (8 s) of the player standing still, more than
+`npc_chase_max_repaths` (3) paths follow the first one, or it never computed a path. Inner
+packets of `CompressedGamePackets` (combat) are not decoded, so attacks inside them do not
+count; the distance check does not depend on them.
+
 The combat step selects its NPC through `CSChangeTargetPacket` and faces it in movement
 packets so auto attacks and angle restrictions use the intended target. It matches skill responses to the player's object and skill IDs and reads
 the 1.2 `SkillResult` extra field before optional integer data. Missing combat NPCs and
