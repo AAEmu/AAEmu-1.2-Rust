@@ -831,10 +831,13 @@ impl TowerDefData {
         }
 
         let mut progs = Vec::new();
+        // Waves whose `tower_defs` parent is absent from the compact data, by parent id.
+        let mut orphans: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
         for_each_row(conn, "SELECT * FROM tower_def_progs ORDER BY id", [], |r| {
             let tower_def_id = r.u32("tower_def_id")?;
             if !d.tower_defs.contains_key(&tower_def_id) {
-                tracing::warn!(tower_def_id, "Skipping orphan tower defense wave");
+                tracing::debug!(tower_def_id, "Skipping orphan tower defense wave");
+                *orphans.entry(tower_def_id).or_insert(0) += 1;
                 return Ok(());
             }
             progs.push(TowerDefProg {
@@ -896,6 +899,14 @@ impl TowerDefData {
                 Ok(())
             },
         )?;
+        if !orphans.is_empty() {
+            // Genuine gap in the shipped data (the C# stopped reading at the first orphan).
+            tracing::info!(
+                "Skipped {} tower defense waves whose tower def is not in the game data (tower_def_id {:?})",
+                orphans.values().sum::<u32>(),
+                orphans.keys().collect::<Vec<_>>()
+            );
+        }
         tracing::info!(
             "Loaded {} tower defs, {} tower def progs",
             d.tower_defs.len(),
