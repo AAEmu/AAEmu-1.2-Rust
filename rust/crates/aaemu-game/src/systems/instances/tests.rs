@@ -725,3 +725,29 @@ fn real_instances_data() {
     assert_eq!(d.zone_order.zone_keys_in_group(45), vec![236]);
     assert_eq!(d.zone_order.zone_keys_in_group(31), vec![198]);
 }
+
+#[test]
+fn tower_def_orphan_waves_are_skipped_without_truncating_later_rows() {
+    let c = Connection::open_in_memory().unwrap();
+    c.execute_batch(
+        "CREATE TABLE tower_defs (id INT, tod REAL, first_wave_after REAL, target_npc_spawner_id INT, kill_npc_id INT, kill_npc_count INT, force_end_time REAL, tod_day_interval INT);
+         CREATE TABLE tower_def_progs (id INT, tower_def_id INT, cond_to_next_time REAL, cond_comp_by_and NUM);
+         CREATE TABLE tower_def_prog_spawn_targets (id INT, tower_def_prog_id INT, spawn_target_id INT, spawn_target_type TEXT, despawn_on_next_step NUM);
+         CREATE TABLE tower_def_prog_kill_targets (id INT, tower_def_prog_id INT, kill_target_id INT, kill_target_type TEXT, kill_count INT);
+         INSERT INTO tower_defs VALUES (1, 0.0, 1.0, 10, NULL, NULL, 2.0, 0);
+         INSERT INTO tower_def_progs VALUES (1, 1, 5.0, 1);
+         INSERT INTO tower_def_progs VALUES (2, 9, 5.0, 1);
+         INSERT INTO tower_def_progs VALUES (3, 9, 5.0, 1);
+         INSERT INTO tower_def_progs VALUES (4, 1, 5.0, 1);
+         INSERT INTO tower_def_prog_spawn_targets VALUES (1, 2, 7, 'NpcSpawner', 1);
+         INSERT INTO tower_def_prog_spawn_targets VALUES (2, 4, 8, 'NpcSpawner', 1);",
+    )
+    .unwrap();
+    let d = TowerDefData::load(&c).unwrap();
+    assert_eq!(d.tower_defs[&1].progs, vec![1, 4]);
+    assert_eq!(d.progs.len(), 2);
+    assert!(!d.progs.contains_key(&2) && !d.progs.contains_key(&3));
+    // The target of the orphan wave is dropped; the one after it is still loaded.
+    assert_eq!(d.progs[&4].spawn_targets.len(), 1);
+    assert_eq!(d.progs[&4].spawn_targets[0].spawn_target_id, 8);
+}

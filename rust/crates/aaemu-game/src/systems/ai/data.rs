@@ -159,7 +159,11 @@ impl AiData {
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    tracing::warn!("Impossible to parse npc_ai_params {id}\n{e}");
+                    tracing::warn!(
+                        "Impossible to parse npc_ai_params {id}\n{e}\n(rows 443, 835 and 1975 of the \
+                         1.2 data are repaired by \
+                         SQL/patches/compact/2026-10-14-fix-npc-ai-param-syntax.sql)"
+                    );
                     self.params_failed.push(id);
                 }
             }

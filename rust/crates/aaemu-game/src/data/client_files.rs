@@ -390,9 +390,20 @@ impl ClientFileManager {
     /// resolving relative paths against `app_path`.
     pub fn from_sources(sources: &[String], app_path: &Path) -> Self {
         let mut manager = Self::new();
+        let mut skipped = Vec::new();
         for source in sources {
             if !manager.add_source(source, app_path) {
+                skipped.push(source.as_str());
+            }
+        }
+        // Rust deviation: the default `Configurations/ClientData.json` lists Docker and repo
+        // paths, and a `Config.Local.json` array only overwrites those entries by index, so
+        // leftovers that do not exist are normal while any source is usable.
+        for source in skipped {
+            if manager.sources.is_empty() {
                 warn!("{source} is not a valid source for client data");
+            } else {
+                info!("Client source skipped (not found or invalid): {source}");
             }
         }
         if manager.sources.is_empty() {
@@ -444,7 +455,7 @@ impl ClientFileManager {
             };
         }
 
-        warn!("Client Source not found {path_name}");
+        debug!("Client Source not found {path_name}");
         false
     }
 
@@ -558,6 +569,25 @@ mod tests {
             std::env::temp_dir().join("x").join("z")
         );
         assert_eq!(full_path("./ClientData", &base), base.join("ClientData"));
+    }
+
+    #[test]
+    fn missing_sources_are_skipped_while_one_is_valid() {
+        let root = temp_path("cfm_skip");
+        write(&root.join("ClientData"), "game/a.xml", "a");
+        let fm = ClientFileManager::from_sources(
+            &[
+                "missing_a".to_string(),
+                "ClientData".to_string(),
+                "../missing_b/game_pak".to_string(),
+            ],
+            &root,
+        );
+        assert_eq!(fm.sources().len(), 1);
+        assert!(fm.file_exists("game/a.xml"));
+
+        let none = ClientFileManager::from_sources(&["missing_a".to_string()], &root);
+        assert!(none.sources().is_empty());
     }
 
     #[test]
