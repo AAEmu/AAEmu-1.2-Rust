@@ -538,6 +538,14 @@ pub enum ItemFx {
         template_id: u32,
         count: i32,
     },
+    /// `Owner?.AddExp(exp, addAbilityExp)` raised by `ChangeLabor` inside an item operation.
+    /// Applied by `fx::flush`, once the operation lock is released: the experience gain raises
+    /// quest events, which take that lock.
+    Exp {
+        owner: u32,
+        exp: i32,
+        add_ability_exp: bool,
+    },
     /// `EquipmentContainer.OnEnterContainer` (`SCUnitEquipmentsChanged` to the neighbours of
     /// the parent unit + `UpdateGearBonuses(item, null)`). `mate_id` > 0 for mate gear.
     EquipEnter {

@@ -340,6 +340,15 @@ pub fn with_quests<R>(
         tracing::error!("with_quests: nested quest operation for character {character_id}");
         return None;
     }
+    if crate::systems::economy::System::ops_held_on_this_thread() {
+        // The ops lock below is not re-entrant: waiting for it here would hang this thread
+        // forever and, with it, every other economy operation. Callers raise quest events
+        // after the `ItemTxn` is released (queue the event in the `ItemFx` list).
+        tracing::error!(
+            "with_quests: the economy ops lock is held on this thread (character {character_id})"
+        );
+        return None;
+    }
     let env = env.unwrap_or_else(|| capture_env(server, player));
     // Quest rewards and the saved quest row must share the item/wallet snapshot boundary.
     let economy = server.systems.economy.ops_lock();
