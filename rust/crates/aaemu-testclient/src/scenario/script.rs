@@ -80,6 +80,27 @@ fn show(packets: &[Packet]) {
     }
 }
 
+/// Reads packets for `secs` and prints only the quest ones.
+async fn show_quiet(game: &mut GameClient, secs: f32) -> anyhow::Result<()> {
+    let ms = (secs * 1000.0) as u64;
+    let got = game
+        .drain(Duration::from_millis(ms), Duration::from_millis(ms))
+        .await?;
+    for p in got.iter().filter(|p| p.name().contains("Quest")) {
+        if let Some((q, st)) = quest_state(p) {
+            println!(
+                "    {} quest {q} status {} objectives {:?}",
+                p.name(),
+                st.status,
+                st.objectives
+            );
+        } else {
+            println!("    {}", p.name());
+        }
+    }
+    Ok(())
+}
+
 fn nearest(game: &GameClient, tpl: u32) -> Option<UnitInfo> {
     let me = game.state.self_pos;
     game.state
@@ -98,12 +119,17 @@ fn num<T: std::str::FromStr>(parts: &[&str], i: usize) -> anyhow::Result<T> {
         .map_err(|_| anyhow::anyhow!("bad number '{}'", parts[i]))
 }
 
-pub(super) async fn run(game: &mut GameClient, r: &mut Runner<'_>) -> anyhow::Result<()> {
+pub(super) async fn run(
+    game: &mut GameClient,
+    cfg: &super::BotConfig,
+    r: &mut Runner<'_>,
+) -> anyhow::Result<()> {
     let path = std::env::var("AAEMU_SCRIPT").context("set AAEMU_SCRIPT to the script file")?;
     let text = std::fs::read_to_string(&path).with_context(|| format!("reading {path}"))?;
     let s = r.begin("game.script");
     let mut items: HashMap<u32, u64> = HashMap::new();
     let mut clock = 40_000u32;
+    let mut mate: Option<(u32, u16)> = None;
     for (n, raw) in text.lines().enumerate() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -331,6 +357,65 @@ pub(super) async fn run(game: &mut GameClient, r: &mut Runner<'_>) -> anyhow::Re
                     }
                 }
                 show(&got);
+            }
+            "walk" => {
+                // Steps of 4 m every 800 ms (5 m/s).
+                let to: (f32, f32, f32) = (num(&parts, 0)?, num(&parts, 1)?, num(&parts, 2)?);
+                let mut at = game.state.self_pos;
+                while dist(at, to) > 0.5 {
+                    let d = dist(at, to);
+                    let k = (4.0 / d).min(1.0);
+                    at = (
+                        at.0 + (to.0 - at.0) * k,
+                        at.1 + (to.1 - at.1) * k,
+                        at.2 + (to.2 - at.2) * k,
+                    );
+                    clock += 800;
+                    game.move_to(at, clock).await?;
+                    show_quiet(game, 0.8).await?;
+                }
+                println!("    walked to {:?}", game.state.self_pos);
+            }
+            "mate" => {
+                let reply = gm_command(
+                    game,
+                    &format!("item add self {} 1", cfg.mate_item_template),
+                )
+                .await?;
+                let item = stack_id(&reply, cfg.mate_item_template)
+                    .context("mate item was not added")?;
+                let view = super::summon_mate(game, cfg, item, None).await?;
+                mate = Some((view.obj_id, view.tl_id));
+                println!("    mate obj {} tl {} hp {}", view.obj_id, view.tl_id, view.hp);
+            }
+            "mount" => {
+                let (_, tl) = mate.context("no mate: run `mate` first")?;
+                let mut b = aaemu_commons::PacketStream::new();
+                b.write_u16(tl).write_u8(1).write_u8(0);
+                game.send_cs(aaemu_game::opcodes::cs::CSMountMatePacket, b.as_bytes())
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(1000), Duration::from_secs(4))
+                    .await?;
+                show(&got);
+            }
+            "mwalk" => {
+                let (obj, _) = mate.context("no mate: run `mate` first")?;
+                let to: (f32, f32, f32) = (num(&parts, 0)?, num(&parts, 1)?, num(&parts, 2)?);
+                let mut at = game.state.units.get(&obj).map_or(game.state.self_pos, |u| u.pos);
+                while dist(at, to) > 0.5 {
+                    let d = dist(at, to);
+                    let k = (4.0 / d).min(1.0);
+                    at = (
+                        at.0 + (to.0 - at.0) * k,
+                        at.1 + (to.1 - at.1) * k,
+                        at.2 + (to.2 - at.2) * k,
+                    );
+                    clock += 800;
+                    game.move_obj_to(obj, at, clock).await?;
+                    show_quiet(game, 0.8).await?;
+                }
+                println!("    mate walked to {at:?}");
             }
             other => bail!("unknown script command '{other}' at line {}", n + 1),
         }

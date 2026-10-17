@@ -558,7 +558,7 @@ async fn run_inner(kind: Kind, cfg: &BotConfig, r: &mut Runner<'_>) -> anyhow::R
         return Ok(());
     }
     if kind == Kind::Script {
-        script::run(&mut game, r).await?;
+        script::run(&mut game, cfg, r).await?;
         drop(stream);
         return Ok(());
     }
