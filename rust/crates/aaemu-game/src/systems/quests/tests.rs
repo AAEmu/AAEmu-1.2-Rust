@@ -3443,3 +3443,60 @@ async fn aggro_quest_started_by_engaging_the_npc_counts_its_kill() {
     server.systems.quests.run_queued_evaluations(&server);
     assert_eq!(player.data().quests.active[0].objectives[0], 3);
 }
+
+#[tokio::test]
+async fn sphere_trigger_uses_the_world_position_of_an_attached_player() {
+    let (server, _rec) = server_with(|d| {
+        single_act_quest(
+            d,
+            20,
+            1,
+            ActKind::ObjSphere {
+                sphere_id: 0,
+                npc_id: 0,
+                highlight_doodad_id: 0,
+                highlight_doodad_phase: -1,
+                use_alias: false,
+                alias_id: 0,
+            },
+        );
+    });
+    server.systems.quests.spheres.load(
+        &server.game_data.systems.quests,
+        &[super::data::RawSignSphere {
+            zone_id: 1,
+            quest_id: 20,
+            component_id: 202,
+            local: [125.0, 120.0, 100.0],
+            radius: 3.0,
+        }],
+        "main_world",
+        |_| (0, 0),
+    );
+    let client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(&server, &client, character(), 0x100);
+    // A mounted rider / ship passenger: the transform is relative to the parent (the
+    // vehicle), the sphere is in world coordinates.
+    let world = server.world.world(0).unwrap();
+    let mut ship = crate::models::npc::Npc::new(700);
+    ship.unit.transform.set_xyz(120.0, 120.0, 100.0);
+    let ship = Entity::new(0x300, ship);
+    world.spawn(&ship, &server.view_ctx());
+    {
+        let mut c = player.data();
+        c.unit.transform.parent_obj_id = ship.obj_id;
+        c.unit.transform.set_xyz(5.0, 0.0, 0.0);
+    }
+    let pos = events::world_position(&server, &WorldObject::from(player.clone()));
+    assert!(
+        (pos.0 - 125.0).abs() < 0.01 && (pos.1 - 120.0).abs() < 0.01,
+        "{pos:?}"
+    );
+    assert_eq!(events::capture_env(&server, &player).position, pos);
+
+    events::add_quest(&server, &player, 20, false);
+    server.systems.quests.run_queued_evaluations(&server);
+    assert_eq!(player.data().quests.active[0].objectives[0], 0);
+    server.systems.quests.spheres.tick(&server);
+    assert_eq!(player.data().quests.active[0].objectives[0], 1);
+}
