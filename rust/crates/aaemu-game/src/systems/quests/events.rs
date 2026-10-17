@@ -516,6 +516,47 @@ fn dispatch_logged(ctx: &mut Ctx<'_>, ev: &QuestEvent) {
     }
 }
 
+/// One WARN for a turn-in the server dropped before any quest act saw it (a bug report of
+/// "cannot turn in" otherwise leaves no trace in the log).
+fn warn_report_refused(player: &PlayerRef, quest_id: u32, reason: &str) {
+    let (name, id) = {
+        let c = player.data();
+        (c.unit.name.clone(), c.id)
+    };
+    tracing::warn!("Report refused, {name} ({id}), Quest {quest_id}: {reason}");
+}
+
+/// Logs why a turn-in at `kind` (`NPC` / `doodad`) template `target_id` cannot reach a report
+/// act: the quest is not active, or it has no report act of that kind at all (a mismatching
+/// target and unfinished objectives are logged by the act itself). The event is dispatched
+/// regardless; it is a no-op in both cases.
+fn log_unreachable_report(ctx: &mut Ctx<'_>, quest_id: u32, kind: &str, target_id: u32) {
+    if ctx.st.active_handle(quest_id).is_none() {
+        ctx.log_refusal(
+            "Report",
+            quest_id,
+            &format!("{kind} {target_id}: the quest is not active"),
+        );
+        return;
+    }
+    let class = if kind == "NPC" {
+        "QuestActConReportNpc"
+    } else {
+        "QuestActConReportDoodad"
+    };
+    if !ctx
+        .data
+        .acts_of_type(class)
+        .any(|(_, a)| a.quest_id == quest_id)
+    {
+        ctx.log_refusal(
+            "Report",
+            quest_id,
+            &format!("{kind} {target_id}: the quest has no {kind} report act"),
+        );
+    }
+}
+
 // ----- QuestManagerEvents -----
 
 /// `DoReportEvents(owner, questContextId, npcObjId, doodadObjId, selected)`
@@ -533,10 +574,16 @@ pub fn on_report(
     if npc_obj_id > 0 {
         // Turning in at a NPC?
         let Some(npc) = world.as_ref().and_then(|w| w.npc(npc_obj_id)) else {
+            warn_report_refused(
+                player,
+                quest_id,
+                &format!("NPC object {npc_obj_id} is not in the character's world"),
+            );
             return;
         };
         let npc_id = npc.data().unit.template_id;
         run_or_queue(server, player, move |ctx| {
+            log_unreachable_report(ctx, quest_id, "NPC", npc_id);
             dispatch_logged(
                 ctx,
                 &QuestEvent::ReportNpc {
@@ -549,10 +596,16 @@ pub fn on_report(
     } else if doodad_obj_id > 0 {
         // Turning in at a Doodad?
         let Some(doodad) = world.as_ref().and_then(|w| w.doodad(doodad_obj_id)) else {
+            warn_report_refused(
+                player,
+                quest_id,
+                &format!("doodad object {doodad_obj_id} is not in the character's world"),
+            );
             return;
         };
         let doodad_id = doodad.data().template_id;
         run_or_queue(server, player, move |ctx| {
+            log_unreachable_report(ctx, quest_id, "doodad", doodad_id);
             dispatch_logged(
                 ctx,
                 &QuestEvent::ReportDoodad {
@@ -566,6 +619,7 @@ pub fn on_report(
         // Object-free reporting must not skip objectives or an NPC/doodad report act.
         run_or_queue(server, player, move |ctx| {
             let Some(h) = ctx.st.active_handle(quest_id) else {
+                ctx.log_refusal("Report", quest_id, "no target: the quest is not active");
                 return;
             };
             let step = ctx.st.quest(h).map(|q| q.step);
@@ -576,6 +630,11 @@ pub fn on_report(
                 return;
             }
             if step != Some(super::model::kind::READY) {
+                ctx.log_refusal(
+                    "Report",
+                    quest_id,
+                    &format!("no target: the quest is at step {step:?}, not ready"),
+                );
                 return;
             }
             let automatic_report = ctx.data.template(quest_id).is_some_and(|t| {
@@ -591,6 +650,11 @@ pub fn on_report(
                     })
             });
             if !automatic_report {
+                ctx.log_refusal(
+                    "Report",
+                    quest_id,
+                    "no target: the ready step needs a report to an NPC or doodad",
+                );
                 return;
             }
             if let Some(q) = ctx.st.quest_mut(h) {

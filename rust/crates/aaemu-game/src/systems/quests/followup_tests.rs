@@ -298,3 +298,119 @@ async fn leaving_the_world_drops_the_sphere_triggers_of_the_character() {
     server.systems.quests.spheres.tick(&server);
     assert!(server.systems.quests.spheres.triggers().is_empty());
 }
+
+// ----- report refusals are logged -----
+
+struct Messages(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+struct Visit(String);
+
+impl tracing::field::Visit for Visit {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.0 = format!("{value:?}");
+        }
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Messages {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        let mut v = Visit(String::new());
+        event.record(&mut v);
+        self.0
+            .lock()
+            .unwrap()
+            .push(format!("{} {}", event.metadata().level(), v.0));
+    }
+}
+
+/// Runs `f` and returns the WARN lines it logged.
+fn warnings(f: impl FnOnce()) -> Vec<String> {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::Layer;
+    let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry()
+        .with(Messages(lines.clone()).with_filter(tracing_subscriber::filter::LevelFilter::WARN));
+    tracing::subscriber::with_default(subscriber, f);
+    let out = lines.lock().unwrap().clone();
+    out
+}
+
+fn spawn_npc(server: &crate::server::GameServer, template: u32, obj_id: u32) -> u32 {
+    let mut npc = crate::models::npc::Npc::new(template);
+    npc.unit.transform.set_xyz(101.0, 100.0, 100.0);
+    let e = crate::world::Entity::new(obj_id, npc);
+    server.world.world(0).unwrap().spawn(&e, &server.view_ctx());
+    obj_id
+}
+
+#[tokio::test]
+async fn refused_reports_leave_a_warning() {
+    let (server, _rec) = server_with(|d| {
+        d.add_template(quest(40));
+        d.add_component(component(401, 40, kind::START));
+        d.add_act(401, 401, 401, 0, ActKind::ConAutoComplete);
+        d.add_component(component(402, 40, kind::PROGRESS));
+        d.add_act(
+            402,
+            402,
+            402,
+            3,
+            ActKind::ObjMonsterHunt {
+                npc_id: 600,
+                use_alias: false,
+                alias_id: 0,
+                highlight_doodad_id: 0,
+                highlight_doodad_phase: -1,
+            },
+        );
+        d.add_component(component(403, 40, kind::READY));
+        d.add_act(
+            403,
+            403,
+            403,
+            0,
+            ActKind::ConReportNpc {
+                npc_id: 500,
+                use_alias: false,
+                alias_id: 0,
+            },
+        );
+    });
+    let client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(&server, &client, character(), 0x100);
+    events::add_quest(&server, &player, 40, false);
+    server.systems.quests.run_queued_evaluations(&server);
+    assert!(events::has_quest(&player, 40));
+    let right = spawn_npc(&server, 500, 0x201);
+    let wrong = spawn_npc(&server, 501, 0x202);
+
+    // The NPC object does not exist.
+    let w = warnings(|| events::on_report(&server, &player, 40, 0x999, 0, 0));
+    assert!(
+        w.iter()
+            .any(|l| l.contains("Quest 40") && l.contains("2457")),
+        "{w:?}"
+    );
+    // Another NPC than the quest's report NPC.
+    let w = warnings(|| events::on_report(&server, &player, 40, wrong, 0, 0));
+    assert!(
+        w.iter()
+            .any(|l| l.contains("Quest 40") && l.contains("501") && l.contains("500")),
+        "{w:?}"
+    );
+    // The right NPC, objectives not complete.
+    let w = warnings(|| events::on_report(&server, &player, 40, right, 0, 0));
+    assert!(
+        w.iter()
+            .any(|l| l.contains("Quest 40") && l.contains("objectives are not complete")),
+        "{w:?}"
+    );
+    // A quest the character does not have.
+    let w = warnings(|| events::on_report(&server, &player, 41, right, 0, 0));
+    assert!(
+        w.iter()
+            .any(|l| l.contains("Quest 41") && l.contains("not active")),
+        "{w:?}"
+    );
+}
