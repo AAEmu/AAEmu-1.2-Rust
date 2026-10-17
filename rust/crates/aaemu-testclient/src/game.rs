@@ -832,6 +832,26 @@ impl GameClient {
         self.send_cs(cs::CSStartSkillPacket, s.as_bytes()).await
     }
 
+    /// `CSCreateDoodadPacket` (0x0e6): plant / place doodad `id` from the bag item `item_id`.
+    pub async fn create_doodad(
+        &mut self,
+        id: u32,
+        pos: (f32, f32, f32),
+        z_rot: f32,
+        scale: f32,
+        item_id: u64,
+    ) -> anyhow::Result<()> {
+        let mut s = PacketStream::new();
+        s.write_u32(id)
+            .write_i64(aaemu_commons::helpers::convert_coord_to_long(pos.0))
+            .write_i64(aaemu_commons::helpers::convert_coord_to_long(pos.1))
+            .write_f32(pos.2)
+            .write_f32(z_rot)
+            .write_f32(scale)
+            .write_u64(item_id);
+        self.send_cs(cs::CSCreateDoodadPacket, s.as_bytes()).await
+    }
+
     /// `CSStartSkillPacket`: unit caster (us) on a doodad target (`SkillCastDoodadTarget`), what
     /// the client sends for a doodad interaction skill.
     pub async fn start_doodad_skill(
