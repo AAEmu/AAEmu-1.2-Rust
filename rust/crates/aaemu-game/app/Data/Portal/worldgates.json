@@ -265,5 +265,412 @@
         "Z": 149,
         "Yaw": 90,
         "SubZoneId": 578
-	}
+	},
+
+    //----------------- Generated from the 10.x return_point.xml by aaemu-aipaths return-points -----------------
+    // Run the tool again to regenerate this section; do not edit it by hand.
+    // Position = zone origin cell * 1024 + the zone-local ReturnPoint_<name> position;
+    // SubZoneId is only the dictionary key of the gate (the gate Id, see the tool).
+    // Left out with --skip (not on the 1.2 terrain or navmesh): 399 400 533 627 681
+    {
+        "Id": 6, // 마리아노플
+        "Name": "mari_square",
+        "ZoneId": 183,
+        "X": 11135.2,
+        "Y": 12124.7,
+        "Z": 143.0,
+        "Yaw": 20.0,
+        "SubZoneId": 6
+    },
+    {
+        "Id": 7, // 로이스터 야영지
+        "Name": "gp_bd_roystercamp",
+        "ZoneId": 140,
+        "X": 12865.5,
+        "Y": 14419.6,
+        "Z": 141.8,
+        "Yaw": 0.0,
+        "SubZoneId": 7
+    },
+    {
+        "Id": 17, // 초승달 왕좌
+        "Name": "Crescent_Throne",
+        "ZoneId": 178,
+        "X": 15323.6,
+        "Y": 13877.7,
+        "Z": 154.3,
+        "Yaw": 59.0,
+        "SubZoneId": 17
+    },
+    {
+        "Id": 30, // 리아니아 근처
+        "Name": "Liania",
+        "ZoneId": 148,
+        "X": 14538.5,
+        "Y": 11113.2,
+        "Z": 111.4,
+        "Yaw": -170.0,
+        "SubZoneId": 30
+    },
+    {
+        "Id": 31, // 이니스섬으로 포탈이동
+        "Name": "QuestYnis",
+        "ZoneId": 180,
+        "X": 16657.5,
+        "Y": 14928.3,
+        "Z": 101.2,
+        "Yaw": 0.0,
+        "SubZoneId": 31
+    },
+    {
+        "Id": 32, // 아탈란시아, 지금 만나러 갑니다
+        "Name": "mainQ_garangdol",
+        "ZoneId": 185,
+        "X": 12194.4,
+        "Y": 13283.9,
+        "Z": 167.3,
+        "Yaw": 0.0,
+        "SubZoneId": 32
+    },
+    {
+        "Id": 39, // 천주머니를 주울 장소
+        "Name": "sunrise_q762",
+        "ZoneId": 141,
+        "X": 16812.7,
+        "Y": 7596.3,
+        "Z": 128.2,
+        "Yaw": 0.0,
+        "SubZoneId": 39
+    },
+    {
+        "Id": 41, // 수련의탑하층부
+        "Name": "mari_skilldown",
+        "ZoneId": 183,
+        "X": 11283.1,
+        "Y": 12047.9,
+        "Z": 144.1,
+        "Yaw": 0.0,
+        "SubZoneId": 41
+    },
+    {
+        "Id": 42, // 수련의탑상층부
+        "Name": "mari_skillup",
+        "ZoneId": 183,
+        "X": 11286.4,
+        "Y": 12038.7,
+        "Z": 282.6,
+        "Yaw": -108.0,
+        "SubZoneId": 42
+    },
+    {
+        "Id": 60, // 새변신
+        "Name": "birdtransform",
+        "ZoneId": 178,
+        "X": 15279.0,
+        "Y": 14023.0,
+        "Z": 144.0,
+        "Yaw": 0.0,
+        "SubZoneId": 60
+    },
+    {
+        "Id": 61, // 릴리엇 구릉지 제재소
+        "Name": "lilyuthill_lumbermill",
+        "ZoneId": 195,
+        "X": 13031.9,
+        "Y": 15170.0,
+        "Z": 233.7,
+        "Yaw": 0.0,
+        "SubZoneId": 61
+    },
+    {
+        "Id": 63, // 나라야나 소풍나온 곳
+        "Name": "tiger_q1106",
+        "ZoneId": 158,
+        "X": 21349.3,
+        "Y": 8806.5,
+        "Z": 447.3,
+        "Yaw": 0.0,
+        "SubZoneId": 63
+    },
+    {
+        "Id": 66, // 호랑이 눈
+        "Name": "tiger_eye",
+        "ZoneId": 158,
+        "X": 21763.6,
+        "Y": 8617.5,
+        "Z": 517.9,
+        "Yaw": 0.0,
+        "SubZoneId": 66
+    },
+    {
+        "Id": 80, // 포탈 : 하얀 숲 자작나무 마을
+        "Name": "portal_birchvill",
+        "ZoneId": 143,
+        "X": 9705.9,
+        "Y": 12660.1,
+        "Z": 162.5,
+        "Yaw": 0.0,
+        "SubZoneId": 80
+    },
+    {
+        "Id": 81, // 포탈 : 가랑돌 평원 모래먼지 마을
+        "Name": "portal_sandwindvill",
+        "ZoneId": 185,
+        "X": 12229.8,
+        "Y": 13293.5,
+        "Z": 161.6,
+        "Yaw": -45.0,
+        "SubZoneId": 81
+    },
+    {
+        "Id": 82, // 가랑돌 평원 침묵의 거상 입구
+        "Name": "garangdol_silententer",
+        "ZoneId": 140,
+        "X": 11654.0,
+        "Y": 13799.0,
+        "Z": 167.0,
+        "Yaw": 0.0,
+        "SubZoneId": 82
+    },
+    {
+        "Id": 85, // 포탈 : 하얀 숲 수호자의 부락
+        "Name": "portal_whiteguard",
+        "ZoneId": 244,
+        "X": 10620.8,
+        "Y": 13220.4,
+        "Z": 235.5,
+        "Yaw": -132.0,
+        "SubZoneId": 85
+    },
+    {
+        "Id": 99, // 미망인의 여울목
+        "Name": "widowrapids",
+        "ZoneId": 244,
+        "X": 10245.2,
+        "Y": 12586.9,
+        "Z": 159.0,
+        "Yaw": -90.0,
+        "SubZoneId": 99
+    },
+    {
+        "Id": 191, // 비파 항구 무덤
+        "Name": "gv_sing_city",
+        "ZoneId": 160,
+        "X": 21252.9,
+        "Y": 10570.8,
+        "Z": 122.0,
+        "Yaw": 58.0,
+        "SubZoneId": 191
+    },
+    {
+        "Id": 229, // 포탈 : 탄생의 절벽 퀘스트 포탈1
+        "Name": "portal_falc_borncliff",
+        "ZoneId": 184,
+        "X": 24241.4,
+        "Y": 9745.5,
+        "Z": 639.8,
+        "Yaw": 174.0,
+        "SubZoneId": 229
+    },
+    {
+        "Id": 231, // 포탈 : 탄생의 절벽 퀘스트 포탈2
+        "Name": "portal_falc_borncliff2",
+        "ZoneId": 184,
+        "X": 24223.5,
+        "Y": 9815.4,
+        "Z": 615.9,
+        "Yaw": -100.0,
+        "SubZoneId": 231
+    },
+    {
+        "Id": 232, // 포탈 : 탄생의 절벽 퀘스트 포탈3
+        "Name": "portal_falc_borncliff3",
+        "ZoneId": 184,
+        "X": 24192.7,
+        "Y": 9739.6,
+        "Z": 607.7,
+        "Yaw": -80.0,
+        "SubZoneId": 232
+    },
+    {
+        "Id": 266, // 자유도/보물상자 포탈
+        "Name": "treasure_box",
+        "ZoneId": 283,
+        "X": 20965.2,
+        "Y": 18775.0,
+        "Z": 133.0,
+        "Yaw": 0.0,
+        "SubZoneId": 266
+    },
+    {
+        "Id": 304, // 포탈: 장미장원 은신처
+        "Name": "portal_yn_elisabeth",
+        "ZoneId": 259,
+        "X": 21971.9,
+        "Y": 13080.1,
+        "Z": 282.5,
+        "Yaw": 21.0,
+        "SubZoneId": 304
+    },
+    {
+        "Id": 306, // 포탈 : 피묻은 손 탑 위
+        "Name": "portal_yn_towerup",
+        "ZoneId": 139,
+        "X": 19727.5,
+        "Y": 11758.9,
+        "Z": 175.9,
+        "Yaw": -1.0,
+        "SubZoneId": 306
+    },
+    {
+        "Id": 307, // 포탈 : 피묻은 손 탑 아래
+        "Name": "portal_yn_towerdn",
+        "ZoneId": 139,
+        "X": 19719.8,
+        "Y": 11765.0,
+        "Z": 126.4,
+        "Yaw": 89.0,
+        "SubZoneId": 307
+    },
+    {
+        "Id": 316, // 포탈 : 하디르의 농장 위 언덕
+        "Name": "portal_yn_hadir",
+        "ZoneId": 139,
+        "X": 20412.2,
+        "Y": 12762.5,
+        "Z": 146.6,
+        "Yaw": 29.0,
+        "SubZoneId": 316
+    },
+    {
+        "Id": 320, // 무덤 : 인던_불탄성무기고
+        "Name": "grave_instance_armory",
+        "ZoneId": 257,
+        "X": 15682.3,
+        "Y": 12586.8,
+        "Z": 166.9,
+        "Yaw": -96.0,
+        "SubZoneId": 320
+    },
+    {
+        "Id": 353, // 포탈 :탄생의 절벽 퀘스트 포탈4
+        "Name": "portal_falc_borncliff_4",
+        "ZoneId": 184,
+        "X": 24195.9,
+        "Y": 9681.7,
+        "Z": 550.5,
+        "Yaw": 165.0,
+        "SubZoneId": 353
+    },
+    {
+        "Id": 408, // 포탈 : 탄생의 절벽 퀘스트 포탈 6
+        "Name": "portal_falc_borncliff_6",
+        "ZoneId": 184,
+        "X": 24375.9,
+        "Y": 9303.8,
+        "Z": 557.6,
+        "Yaw": -115.0,
+        "SubZoneId": 408
+    },
+    {
+        "Id": 411, // 누이안 시마이
+        "Name": "nuianending_1",
+        "ZoneId": 149,
+        "X": 12514.0,
+        "Y": 12100.9,
+        "Z": 100.7,
+        "Yaw": 0.0,
+        "SubZoneId": 411
+    },
+    {
+        "Id": 557, // 심연의 입구
+        "Name": "o_abyss",
+        "ZoneId": 276,
+        "X": 22349.8,
+        "Y": 24938.4,
+        "Z": 189.2,
+        "Yaw": -24.0,
+        "SubZoneId": 557
+    },
+    {
+        "Id": 560, // 태양의 들녘
+        "Name": "landofsunlight_return",
+        "ZoneId": 275,
+        "X": 22113.6,
+        "Y": 26416.8,
+        "Z": 163.2,
+        "Yaw": -141.0,
+        "SubZoneId": 560
+    },
+    {
+        "Id": 674, // 포탈 : 탄생의 절벽 퀘스트 포탈7
+        "Name": "portal_falc_borncliff_7",
+        "ZoneId": 184,
+        "X": 24380.1,
+        "Y": 9292.4,
+        "Z": 556.5,
+        "Yaw": 0.0,
+        "SubZoneId": 674
+    },
+    {
+        "Id": 682, // 이슬 평원 1번 출구
+        "Name": "dew_plains_out_1",
+        "ZoneId": 307,
+        "X": 23738.3,
+        "Y": 27923.3,
+        "Z": 158.2,
+        "Yaw": 127.0,
+        "SubZoneId": 682
+    },
+    {
+        "Id": 683, // 이슬 평원 2번 출구
+        "Name": "dew_plains_out_2",
+        "ZoneId": 307,
+        "X": 23783.4,
+        "Y": 27523.8,
+        "Z": 170.0,
+        "Yaw": 60.0,
+        "SubZoneId": 683
+    },
+    {
+        "Id": 684, // 이슬 평원 3번 출구
+        "Name": "dew_plains_out_3",
+        "ZoneId": 307,
+        "X": 23458.1,
+        "Y": 27346.6,
+        "Z": 164.4,
+        "Yaw": 13.0,
+        "SubZoneId": 684
+    },
+    {
+        "Id": 685, // 이슬 평원 4번 출구
+        "Name": "dew_plains_out_4",
+        "ZoneId": 307,
+        "X": 23096.5,
+        "Y": 27478.7,
+        "Z": 172.3,
+        "Yaw": -55.0,
+        "SubZoneId": 685
+    },
+    {
+        "Id": 686, // 이슬 평원 5번 출구
+        "Name": "dew_plains_out_5",
+        "ZoneId": 307,
+        "X": 23086.2,
+        "Y": 27817.0,
+        "Z": 150.3,
+        "Yaw": -119.0,
+        "SubZoneId": 686
+    },
+    {
+        "Id": 687, // 이슬 평원 6번 출구
+        "Name": "dew_plains_out_6",
+        "ZoneId": 307,
+        "X": 23413.8,
+        "Y": 28104.0,
+        "Z": 163.2,
+        "Yaw": 172.0,
+        "SubZoneId": 687
+    }
+    //----------------- end of the generated worldgates -----------------
 ]
