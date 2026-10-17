@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde_json::{Map, Value};
 
+use super::natural;
 use crate::data::world_templates::WorldSpawnPosition;
 use crate::server::GameServer;
 use crate::systems::npcs::json;
@@ -615,7 +616,7 @@ impl DoodadSpawner {
         if obj_id != 0 {
             return None;
         }
-        let (new_unit_id, ratio_replacement) = {
+        let (mut new_unit_id, ratio_replacement) = {
             let mut st = self.st();
             let replacement = st.respawn_doodad_template_id > 0;
             let id = if replacement {
@@ -631,6 +632,18 @@ impl DoodadSpawner {
             tracing::error!("Can't spawn doodad {new_unit_id} from spawn {}", self.id);
             return None;
         };
+        // A saved growth state of this spawn entry (first spawn after a restart only).
+        let key = natural::spawn_key(
+            self.unit_id,
+            self.position.x,
+            self.position.y,
+            self.position.z,
+        );
+        let (natural_owned, restored) =
+            natural::take_restore(server, world.id, &key, self.id, !ratio_replacement);
+        if let Some(row) = &restored {
+            new_unit_id = row.template_id;
+        }
         let Some(doodad) = backend::doodad_create(server, &world, obj_id, new_unit_id, None, true)
         else {
             tracing::warn!("Doodad Temaplte {new_unit_id}, used in Spawn() does not exist in db");
@@ -641,6 +654,7 @@ impl DoodadSpawner {
             // Cleared by `phase::init_doodad` once the entry phase has run.
             doodad.data().phase.suppress_tod_catch_up = true;
         }
+        natural::attach(server, &doodad, world.id, &key, natural_owned, restored);
         self.st().last = Some(doodad.clone());
         self.do_spawn(server); // schedule check and spawn
         Some(doodad)

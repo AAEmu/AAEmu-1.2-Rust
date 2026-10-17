@@ -1211,3 +1211,213 @@ async fn real_compact_db_day_night_boards_settle_on_the_variant_at_night() {
     }
     assert_eq!(f.world.all_doodads().len(), cases.len());
 }
+
+// ---- growth state of world-spawned doodads (`natural`) ----
+
+mod natural_flow {
+    use super::*;
+    use crate::systems::npcs::doodad::natural::{self, StateRow};
+
+    const LONG: i32 = 600_000; // 10 min
+    const A: u32 = TEMPLATE;
+    const B: u32 = TEMPLATE + 1;
+    const STATIC: u32 = TEMPLATE + 2;
+
+    /// Template `A` (group 10 -> 11 after 10 min), `B` (group 20 grows 10 min into 21) and the
+    /// static `STATIC` (only a short timer).
+    fn builder() -> Builder {
+        Builder::default()
+            .template(A, &[(10, 1), (11, 2)])
+            .template(B, &[(20, 1), (21, 2)])
+            .template(STATIC, &[(30, 1)])
+            .phase_func(10, timer(1, LONG, 11))
+            .phase_func(
+                20,
+                FuncTemplate::Growth(DoodadFuncGrowth {
+                    id: 2,
+                    delay: LONG,
+                    start_scale: 500,
+                    end_scale: 1000,
+                    next_phase: 21,
+                }),
+            )
+            .phase_func(30, timer(3, 1000, 30))
+    }
+
+    fn key_of(template: u32) -> String {
+        natural::spawn_key(template, 120.0, 130.0, 100.0)
+    }
+
+    fn row(spawn_template: u32, template: u32, group: u32, phase_age_ms: i64) -> StateRow {
+        StateRow {
+            world_id: 0,
+            spawn_key: key_of(spawn_template),
+            template_id: template,
+            func_group_id: group,
+            plant_time: 1_700_000_000,
+            growth_time_ms: 0,
+            phase_time_ms: now_ms() - phase_age_ms,
+            data: 7,
+            interaction_counts: "{}".into(),
+            updated: 0,
+        }
+    }
+
+    fn store(f: &Fx) -> &natural::NaturalStates {
+        &f.server.systems.npcs.doodads.persistence.natural
+    }
+
+    fn saves(f: &Fx) -> Vec<((u32, String), StateRow)> {
+        store(f)
+            .pending_for_test()
+            .into_iter()
+            .filter_map(|(k, r)| r.map(|r| (k, r)))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn saved_phase_resumes_the_remaining_delay() {
+        let f = fx(builder());
+        store(&f).enable_for_test(vec![row(A, A, 10, 200_000)]);
+        let d = new_spawner(A, 501).spawn(&f.server, 0).expect("spawns");
+        assert_eq!(group(&d), 10);
+        assert_eq!(d.data().plant_time, 1_700_000_000);
+        assert_eq!(d.data().data, 7);
+        assert_eq!(d.data().natural_key, Some((0, key_of(A))));
+        // 10 min delay, 200 s into it.
+        let delays = f.server.systems.npcs.doodads.tasks.pending_delays();
+        assert_eq!(delays.len(), 1);
+        assert!(
+            (399_000..=400_500).contains(&delays[0]),
+            "remaining {delays:?}"
+        );
+        f.advance(delays[0]);
+        assert_eq!(group(&d), 11);
+        // The phase change is queued for saving under the spawn key.
+        let saved = saves(&f);
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].0, (0, key_of(A)));
+        assert_eq!(saved[0].1.func_group_id, 11);
+        assert_eq!(saved[0].1.template_id, A);
+    }
+
+    #[tokio::test]
+    async fn expired_phase_fires_promptly() {
+        let f = fx(builder());
+        store(&f).enable_for_test(vec![row(A, A, 10, 700_000)]);
+        let d = new_spawner(A, 501).spawn(&f.server, 0).expect("spawns");
+        assert_eq!(
+            f.server.systems.npcs.doodads.tasks.pending_delays(),
+            vec![1]
+        );
+        f.advance(1);
+        assert_eq!(group(&d), 11);
+    }
+
+    #[tokio::test]
+    async fn replacement_template_is_restored() {
+        let f = fx(builder());
+        store(&f).enable_for_test(vec![row(A, B, 20, 100_000)]);
+        let d = new_spawner(A, 501).spawn(&f.server, 0).expect("spawns");
+        assert_eq!(d.data().template_id, B);
+        assert_eq!(group(&d), 20);
+        // Growth, 100 s elapsed.
+        let delays = f.server.systems.npcs.doodads.tasks.pending_delays();
+        assert!(
+            (499_000..=500_500).contains(&delays[0]),
+            "remaining {delays:?}"
+        );
+        // The key stays the spawn entry's, not the replacement's.
+        assert_eq!(d.data().natural_key, Some((0, key_of(A))));
+    }
+
+    #[tokio::test]
+    async fn invalid_rows_are_ignored_and_dropped() {
+        let f = fx(builder());
+        store(&f).enable_for_test(vec![
+            row(A, 999, 10, 0),         // unknown template
+            row(B, B, 10, 0),           // group of another template
+            row(STATIC, STATIC, 30, 0), // untimed template
+        ]);
+        for (template, id) in [(A, 501), (B, 502), (STATIC, 503)] {
+            let d = new_spawner(template, id)
+                .spawn(&f.server, 0)
+                .expect("spawns");
+            // Fresh Start phase, nothing restored.
+            assert!(d.data().plant_time > 1_700_000_000);
+            assert_eq!(d.data().data, 0);
+        }
+        // The untimed entry's stale row is dropped; the timed ones are overwritten by the fresh
+        // doodads' own state.
+        let mut pending = store(&f).pending_for_test();
+        pending.sort_by_key(|(k, _)| k.1.clone());
+        assert_eq!(pending.len(), 3);
+        for (key, r) in pending {
+            match r {
+                None => assert_eq!(key.1, key_of(STATIC)),
+                Some(r) => assert!(r.func_group_id == 10 || r.func_group_id == 20, "{r:?}"),
+            }
+        }
+        assert_eq!(store(&f).finish_initial_spawn(&f.server, 0, "test"), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn static_templates_are_not_tracked() {
+        let f = fx(builder());
+        store(&f).enable_for_test(vec![]);
+        let d = new_spawner(STATIC, 501).spawn(&f.server, 0).unwrap();
+        assert_eq!(d.data().natural_key, None);
+        f.advance(1000);
+        assert!(store(&f).pending_for_test().is_empty());
+    }
+
+    #[tokio::test]
+    async fn removing_the_doodad_drops_its_row_and_a_respawn_starts_fresh() {
+        let f = fx(builder());
+        store(&f).enable_for_test(vec![row(A, A, 11, 0)]);
+        let spawner = new_spawner(A, 501);
+        let d = spawner.spawn(&f.server, 0).expect("spawns");
+        assert_eq!(group(&d), 11);
+        spawner.despawn(&f.server, &d);
+        assert_eq!(store(&f).pending_for_test(), vec![((0, key_of(A)), None)]);
+        // The next spawn of the entry does not reuse any state.
+        let fresh = spawner.spawn(&f.server, 0).expect("respawns");
+        assert_eq!(group(&fresh), 10);
+        assert_eq!(fresh.data().data, 0);
+        assert_eq!(fresh.data().natural_key, Some((0, key_of(A))));
+    }
+
+    #[tokio::test]
+    async fn a_second_entry_with_the_same_key_is_not_tracked() {
+        let f = fx(builder());
+        store(&f).enable_for_test(vec![]);
+        let first = new_spawner(A, 501).spawn(&f.server, 0).unwrap();
+        let second = new_spawner(A, 502).spawn(&f.server, 0).unwrap();
+        assert!(first.data().natural_key.is_some());
+        assert_eq!(second.data().natural_key, None);
+    }
+
+    #[tokio::test]
+    async fn another_world_neither_tracks_nor_discards_the_rows() {
+        let f = fx(builder());
+        store(&f).enable_for_test(vec![row(A, A, 11, 0)]);
+        assert!(store(&f).enabled_for(0) && !store(&f).enabled_for(1));
+        // The initial spawn of a second world finishes first: it must keep the main world's rows.
+        assert_eq!(
+            store(&f).finish_initial_spawn(&f.server, 1, "other"),
+            (0, 0)
+        );
+        assert!(store(&f).pending_for_test().is_empty());
+        let d = new_spawner(A, 501).spawn(&f.server, 0).expect("spawns");
+        assert_eq!(group(&d), 11);
+        assert_eq!(store(&f).finish_initial_spawn(&f.server, 0, "main"), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn tracking_is_off_until_the_rows_are_loaded() {
+        let f = fx(builder());
+        let d = new_spawner(A, 501).spawn(&f.server, 0).unwrap();
+        assert_eq!(d.data().natural_key, None);
+        assert!(store(&f).pending_for_test().is_empty());
+    }
+}
