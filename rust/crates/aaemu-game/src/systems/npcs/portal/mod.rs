@@ -894,3 +894,5 @@ pub fn resend_visible_objects_to_character(server: &GameServer, player: &PlayerR
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod worldgates_tests;
