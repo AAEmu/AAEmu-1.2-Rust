@@ -213905,5 +213905,1815 @@
             "Y": 9363.847,
             "Z": 564.9305
         }
+    },
+    {
+        "UnitId": 837,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 11838.935,
+            "Y": 14047.28,
+            "Z": 184.909,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 2269,
+        "Title": "spawn-import: clip exact-1.2",
+        "Position": {
+            "X": 5917.601,
+            "Y": 13022.9,
+            "Z": 1124.67,
+            "Yaw": 33
+        }
+    },
+    {
+        "UnitId": 2269,
+        "Title": "spawn-import: clip exact-1.2",
+        "Position": {
+            "X": 5831.522,
+            "Y": 13034.16,
+            "Z": 1125.42,
+            "Yaw": -89
+        }
+    },
+    {
+        "UnitId": 2269,
+        "Title": "spawn-import: clip exact-1.2",
+        "Position": {
+            "X": 5850.26,
+            "Y": 13047.89,
+            "Z": 1125.03,
+            "Yaw": -89
+        }
+    },
+    {
+        "UnitId": 2269,
+        "Title": "spawn-import: clip exact-1.2",
+        "Position": {
+            "X": 5889.533,
+            "Y": 13009.5,
+            "Z": 1125.44,
+            "Yaw": -89
+        }
+    },
+    {
+        "UnitId": 2269,
+        "Title": "spawn-import: clip exact-1.2",
+        "Position": {
+            "X": 5841.657,
+            "Y": 13029.91,
+            "Z": 1125.67,
+            "Yaw": -89
+        }
+    },
+    {
+        "UnitId": 2269,
+        "Title": "spawn-import: clip exact-1.2",
+        "Position": {
+            "X": 5802.24,
+            "Y": 13025.25,
+            "Z": 1124.94,
+            "Yaw": -89
+        }
+    },
+    {
+        "UnitId": 2269,
+        "Title": "spawn-import: clip exact-1.2",
+        "Position": {
+            "X": 5849.403,
+            "Y": 13067.15,
+            "Z": 1125.93,
+            "Yaw": -89
+        }
+    },
+    {
+        "UnitId": 2269,
+        "Title": "spawn-import: clip exact-1.2",
+        "Position": {
+            "X": 5863.511,
+            "Y": 13038.87,
+            "Z": 1125.52,
+            "Yaw": -89
+        }
+    },
+    {
+        "UnitId": 2270,
+        "Title": "spawn-import: clip exact-1.2",
+        "Position": {
+            "X": 5796.242,
+            "Y": 13030.52,
+            "Z": 1125.32,
+            "Yaw": -89
+        }
+    },
+    {
+        "UnitId": 2270,
+        "Title": "spawn-import: clip exact-1.2",
+        "Position": {
+            "X": 5856.255,
+            "Y": 13028.74,
+            "Z": 1124.9,
+            "Yaw": -89
+        }
+    },
+    {
+        "UnitId": 2271,
+        "Title": "spawn-import: clip exact-1.2",
+        "Position": {
+            "X": 5817.666,
+            "Y": 13034.97,
+            "Z": 1125.29,
+            "Yaw": -89
+        }
+    },
+    {
+        "UnitId": 2271,
+        "Title": "spawn-import: clip exact-1.2",
+        "Position": {
+            "X": 5867.219,
+            "Y": 13015.35,
+            "Z": 1125.23,
+            "Yaw": -89
+        }
+    },
+    {
+        "UnitId": 2381,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 14973.56,
+            "Y": 12725.36,
+            "Z": 111.736,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 2381,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 14998.47,
+            "Y": 12745.98,
+            "Z": 112.283,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 2381,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 15012.27,
+            "Y": 12734.88,
+            "Z": 113.049,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 3490,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 14748.38,
+            "Y": 13538.525,
+            "Z": 100.861,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 3490,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 14787.86,
+            "Y": 13616.589,
+            "Z": 101.486,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4573,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7351.61,
+            "Y": 13775,
+            "Z": 1172.31,
+            "Yaw": 146
+        }
+    },
+    {
+        "UnitId": 4574,
+        "Title": "spawn-import: clip exact-1.2",
+        "Position": {
+            "X": 5847.037,
+            "Y": 13086.96,
+            "Z": 1126.82,
+            "Yaw": 178
+        }
+    },
+    {
+        "UnitId": 4574,
+        "Title": "spawn-import: clip exact-1.2/area",
+        "Position": {
+            "X": 6019.071,
+            "Y": 12766.081,
+            "Z": 1126.555,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4574,
+        "Title": "spawn-import: clip exact-1.2",
+        "Position": {
+            "X": 5852.889,
+            "Y": 13084.89,
+            "Z": 1126.5,
+            "Yaw": 171
+        }
+    },
+    {
+        "UnitId": 4577,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7528.39,
+            "Y": 13746.3,
+            "Z": 1188.85,
+            "Yaw": -63
+        }
+    },
+    {
+        "UnitId": 4577,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7521.76,
+            "Y": 13739.77,
+            "Z": 1188.43,
+            "Yaw": 6
+        }
+    },
+    {
+        "UnitId": 4578,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7486.46,
+            "Y": 13730.26,
+            "Z": 1188.09,
+            "Yaw": -12
+        }
+    },
+    {
+        "UnitId": 4594,
+        "Title": "spawn-import: neighbor exact-1.2",
+        "Position": {
+            "X": 6050.856,
+            "Y": 13111.4,
+            "Z": 1084.48,
+            "Yaw": -133
+        }
+    },
+    {
+        "UnitId": 4595,
+        "Title": "spawn-import: clip exact-1.2",
+        "Position": {
+            "X": 6046.876,
+            "Y": 13108.92,
+            "Z": 1084.79,
+            "Yaw": -124
+        }
+    },
+    {
+        "UnitId": 4596,
+        "Title": "spawn-import: clip 10x-verified/area",
+        "Position": {
+            "X": 6184.405,
+            "Y": 12740.631,
+            "Z": 1039.556,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4596,
+        "Title": "spawn-import: clip 10x-verified/area",
+        "Position": {
+            "X": 6173.351,
+            "Y": 12678.225,
+            "Z": 1041.933,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4597,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7320.09,
+            "Y": 13746.63,
+            "Z": 1169.88,
+            "Yaw": -106
+        }
+    },
+    {
+        "UnitId": 4598,
+        "Title": "spawn-import: clip inferred-from-sphere",
+        "Position": {
+            "X": 6253.39,
+            "Y": 13061.54,
+            "Z": 1146.58,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4601,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7348.28,
+            "Y": 13693.55,
+            "Z": 1163.11,
+            "Yaw": 76
+        }
+    },
+    {
+        "UnitId": 4602,
+        "Title": "spawn-import: clip exact-1.2",
+        "Position": {
+            "X": 6172.44,
+            "Y": 13002.57,
+            "Z": 1086.33,
+            "Yaw": 97
+        }
+    },
+    {
+        "UnitId": 4603,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7354.58,
+            "Y": 13748.4,
+            "Z": 1170.38,
+            "Yaw": 66.997
+        }
+    },
+    {
+        "UnitId": 4606,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7359.87,
+            "Y": 13765.17,
+            "Z": 1171.48,
+            "Yaw": 137
+        }
+    },
+    {
+        "UnitId": 4607,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7355.15,
+            "Y": 13770.67,
+            "Z": 1171.78,
+            "Yaw": 127
+        }
+    },
+    {
+        "UnitId": 4608,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7314.93,
+            "Y": 13695.96,
+            "Z": 1161.92,
+            "Yaw": -96
+        }
+    },
+    {
+        "UnitId": 4609,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7283.41,
+            "Y": 13541.15,
+            "Z": 1152.29,
+            "Yaw": -22
+        }
+    },
+    {
+        "UnitId": 4609,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7338.46,
+            "Y": 13565.13,
+            "Z": 1155.85,
+            "Yaw": -87
+        }
+    },
+    {
+        "UnitId": 4610,
+        "Title": "spawn-import: terrain moved-zone/exact-1.2",
+        "Position": {
+            "X": 6554.434,
+            "Y": 13377.26,
+            "Z": 968.219,
+            "Yaw": 57
+        }
+    },
+    {
+        "UnitId": 4613,
+        "Title": "spawn-import: terrain exact-1.2",
+        "Position": {
+            "X": 6533.13,
+            "Y": 12884.89,
+            "Z": 982.333,
+            "Yaw": 7
+        }
+    },
+    {
+        "UnitId": 4614,
+        "Title": "spawn-import: terrain exact-1.2",
+        "Position": {
+            "X": 6530.08,
+            "Y": 12883.07,
+            "Z": 982.367,
+            "Yaw": 30
+        }
+    },
+    {
+        "UnitId": 4617,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7115.809,
+            "Y": 13340.15,
+            "Z": 1067.65,
+            "Yaw": -49
+        }
+    },
+    {
+        "UnitId": 4618,
+        "Title": "spawn-import: terrain moved-zone/exact-1.2",
+        "Position": {
+            "X": 6530.445,
+            "Y": 13391.9,
+            "Z": 968.356,
+            "Yaw": -96
+        }
+    },
+    {
+        "UnitId": 4619,
+        "Title": "spawn-import: terrain moved-zone/exact-1.2",
+        "Position": {
+            "X": 6549.659,
+            "Y": 13411.61,
+            "Z": 969.618,
+            "Yaw": -172
+        }
+    },
+    {
+        "UnitId": 4621,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7149.81,
+            "Y": 13378.32,
+            "Z": 1063.82,
+            "Yaw": 93
+        }
+    },
+    {
+        "UnitId": 4621,
+        "Title": "spawn-import: clip moved-zone/exact-1.2/area",
+        "Position": {
+            "X": 7187.768,
+            "Y": 13422.26,
+            "Z": 1049.077,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4621,
+        "Title": "spawn-import: clip moved-zone/exact-1.2/area",
+        "Position": {
+            "X": 7087.45,
+            "Y": 13398.067,
+            "Z": 1036.743,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4621,
+        "Title": "spawn-import: clip moved-zone/exact-1.2/area",
+        "Position": {
+            "X": 7138.091,
+            "Y": 13304.534,
+            "Z": 1027.967,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4621,
+        "Title": "spawn-import: clip moved-zone/10x-verified/area",
+        "Position": {
+            "X": 6994.819,
+            "Y": 13399.856,
+            "Z": 1023.714,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4623,
+        "Title": "spawn-import: terrain moved-zone/exact-1.2",
+        "Position": {
+            "X": 6501.917,
+            "Y": 13284.875,
+            "Z": 947.279,
+            "Yaw": -132
+        }
+    },
+    {
+        "UnitId": 4624,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 6952.259,
+            "Y": 13168.267,
+            "Z": 1031.83,
+            "Yaw": 26
+        }
+    },
+    {
+        "UnitId": 4625,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7144.66,
+            "Y": 13390.98,
+            "Z": 1063.23,
+            "Yaw": -23
+        }
+    },
+    {
+        "UnitId": 4625,
+        "Title": "spawn-import: clip moved-zone/exact-1.2/area",
+        "Position": {
+            "X": 7187.768,
+            "Y": 13422.26,
+            "Z": 1049.077,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4625,
+        "Title": "spawn-import: clip moved-zone/exact-1.2/area",
+        "Position": {
+            "X": 7087.45,
+            "Y": 13398.067,
+            "Z": 1036.743,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4625,
+        "Title": "spawn-import: clip moved-zone/exact-1.2/area",
+        "Position": {
+            "X": 7138.091,
+            "Y": 13304.534,
+            "Z": 1027.967,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4626,
+        "Title": "spawn-import: clip 10x-verified/area",
+        "Position": {
+            "X": 6019.071,
+            "Y": 12766.081,
+            "Z": 1126.555,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4628,
+        "Title": "spawn-import: terrain moved-zone/exact-1.2",
+        "Position": {
+            "X": 6878.06,
+            "Y": 13390.8,
+            "Z": 1011.45,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4628,
+        "Title": "spawn-import: terrain moved-zone/exact-1.2",
+        "Position": {
+            "X": 6825.911,
+            "Y": 13395.88,
+            "Z": 1014.81,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4628,
+        "Title": "spawn-import: terrain moved-zone/exact-1.2",
+        "Position": {
+            "X": 6768.364,
+            "Y": 13287.179,
+            "Z": 986.603,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4628,
+        "Title": "spawn-import: terrain moved-zone/exact-1.2",
+        "Position": {
+            "X": 6757.041,
+            "Y": 13314.4,
+            "Z": 983.008,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4628,
+        "Title": "spawn-import: terrain moved-zone/exact-1.2",
+        "Position": {
+            "X": 6764.273,
+            "Y": 13260.956,
+            "Z": 987.777,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4628,
+        "Title": "spawn-import: terrain moved-zone/exact-1.2",
+        "Position": {
+            "X": 6796.059,
+            "Y": 13323.21,
+            "Z": 998.318,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4628,
+        "Title": "spawn-import: terrain moved-zone/exact-1.2",
+        "Position": {
+            "X": 6808.023,
+            "Y": 13355.73,
+            "Z": 1005.45,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4628,
+        "Title": "spawn-import: terrain moved-zone/exact-1.2",
+        "Position": {
+            "X": 6838.657,
+            "Y": 13361.26,
+            "Z": 1008.2,
+            "Yaw": -14
+        }
+    },
+    {
+        "UnitId": 4628,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 6886.866,
+            "Y": 13297.62,
+            "Z": 1033.39,
+            "Yaw": -68
+        }
+    },
+    {
+        "UnitId": 4629,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 6949.166,
+            "Y": 13167.251,
+            "Z": 1031.84,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4631,
+        "Title": "spawn-import: terrain exact-1.2/area",
+        "Position": {
+            "X": 6567.826,
+            "Y": 12833.391,
+            "Z": 981.094,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4632,
+        "Title": "spawn-import: terrain exact-1.2/area",
+        "Position": {
+            "X": 6567.826,
+            "Y": 12833.391,
+            "Z": 981.094,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4633,
+        "Title": "spawn-import: terrain exact-1.2/area",
+        "Position": {
+            "X": 6567.826,
+            "Y": 12833.391,
+            "Z": 981.094,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4635,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 7920.714,
+            "Y": 13436.37,
+            "Z": 817.74,
+            "Yaw": -8.438
+        }
+    },
+    {
+        "UnitId": 4636,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7315.87,
+            "Y": 13689.01,
+            "Z": 1161.92,
+            "Yaw": -75
+        }
+    },
+    {
+        "UnitId": 4727,
+        "Title": "spawn-import: clip exact-1.2/area",
+        "Position": {
+            "X": 6019.071,
+            "Y": 12766.081,
+            "Z": 1126.555,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4728,
+        "Title": "spawn-import: clip inferred-from-sphere",
+        "Position": {
+            "X": 6019.234,
+            "Y": 12759.6,
+            "Z": 1124.45,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4729,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 6907.704,
+            "Y": 13185.001,
+            "Z": 1033.31,
+            "Yaw": -47
+        }
+    },
+    {
+        "UnitId": 4729,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 6936.556,
+            "Y": 13176.721,
+            "Z": 1030.95,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4729,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 6906.469,
+            "Y": 13206.457,
+            "Z": 1032.27,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4729,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 6936.728,
+            "Y": 13202.351,
+            "Z": 1031.35,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4729,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 6951.232,
+            "Y": 13193.332,
+            "Z": 1030.69,
+            "Yaw": 157
+        }
+    },
+    {
+        "UnitId": 4729,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 6929.656,
+            "Y": 13154.761,
+            "Z": 1031.53,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4729,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 6940.823,
+            "Y": 13188.077,
+            "Z": 1030.88,
+            "Yaw": 97
+        }
+    },
+    {
+        "UnitId": 4729,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 6916.859,
+            "Y": 13184.216,
+            "Z": 1031.26,
+            "Yaw": 29
+        }
+    },
+    {
+        "UnitId": 4729,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 6920.413,
+            "Y": 13173.878,
+            "Z": 1031.22,
+            "Yaw": -78
+        }
+    },
+    {
+        "UnitId": 4730,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7137.528,
+            "Y": 13367.59,
+            "Z": 1063.87,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4730,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7189.34,
+            "Y": 13297.65,
+            "Z": 1029.89,
+            "Yaw": 76
+        }
+    },
+    {
+        "UnitId": 4730,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7154.16,
+            "Y": 13280.734,
+            "Z": 1027.98,
+            "Yaw": -17
+        }
+    },
+    {
+        "UnitId": 4730,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7229.15,
+            "Y": 13402.45,
+            "Z": 1047.37,
+            "Yaw": 83
+        }
+    },
+    {
+        "UnitId": 4730,
+        "Title": "spawn-import: clip moved-zone/exact-1.2/area",
+        "Position": {
+            "X": 7187.768,
+            "Y": 13422.26,
+            "Z": 1049.077,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4730,
+        "Title": "spawn-import: clip moved-zone/exact-1.2/area",
+        "Position": {
+            "X": 7087.45,
+            "Y": 13398.067,
+            "Z": 1036.743,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4730,
+        "Title": "spawn-import: clip moved-zone/exact-1.2/area",
+        "Position": {
+            "X": 7138.091,
+            "Y": 13304.534,
+            "Z": 1027.967,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4730,
+        "Title": "spawn-import: clip moved-zone/10x-verified/area",
+        "Position": {
+            "X": 6994.819,
+            "Y": 13399.856,
+            "Z": 1023.714,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4731,
+        "Title": "spawn-import: clip inferred-from-sphere",
+        "Position": {
+            "X": 6253.39,
+            "Y": 13061.54,
+            "Z": 1146.58,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4751,
+        "Title": "spawn-import: terrain exact-1.2",
+        "Position": {
+            "X": 7503.06,
+            "Y": 12634.82,
+            "Z": 718.922,
+            "Yaw": 11
+        }
+    },
+    {
+        "UnitId": 4757,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7221.11,
+            "Y": 13633.21,
+            "Z": 1133.57,
+            "Yaw": 60
+        }
+    },
+    {
+        "UnitId": 4795,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 6892,
+            "Y": 13280,
+            "Z": 1026.52,
+            "Yaw": 104
+        }
+    },
+    {
+        "UnitId": 4833,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 20261.296,
+            "Y": 6050.465,
+            "Z": 207.7,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4833,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 20259.655,
+            "Y": 5989.499,
+            "Z": 206.121,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4833,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 20171.226,
+            "Y": 5979.84,
+            "Z": 203.65,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4833,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 20078.531,
+            "Y": 5958.728,
+            "Z": 210.792,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4833,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 20264.208,
+            "Y": 5879.698,
+            "Z": 216.21,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4833,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 20305.525,
+            "Y": 5926.459,
+            "Z": 208.143,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4833,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 20422.985,
+            "Y": 5936.055,
+            "Z": 206.76,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4833,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 20366.388,
+            "Y": 5880.884,
+            "Z": 217.162,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4834,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 20261.296,
+            "Y": 6050.465,
+            "Z": 207.7,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4834,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 20259.655,
+            "Y": 5989.499,
+            "Z": 206.121,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4834,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 20171.226,
+            "Y": 5979.84,
+            "Z": 203.65,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4834,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 20078.531,
+            "Y": 5958.728,
+            "Z": 210.792,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4834,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 20264.208,
+            "Y": 5879.698,
+            "Z": 216.21,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4834,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 20305.525,
+            "Y": 5926.459,
+            "Z": 208.143,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4834,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 20422.985,
+            "Y": 5936.055,
+            "Z": 206.76,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4834,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 20366.388,
+            "Y": 5880.884,
+            "Z": 217.162,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4835,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 20309.408,
+            "Y": 5936.21,
+            "Z": 206.856,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4835,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 20216.146,
+            "Y": 5998.71,
+            "Z": 206.889,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4835,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 20367.72,
+            "Y": 5882.91,
+            "Z": 215.51,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4835,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 20394.723,
+            "Y": 5854.74,
+            "Z": 218.974,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4835,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 20197.293,
+            "Y": 5881.8,
+            "Z": 215.526,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4835,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 20253.031,
+            "Y": 5982.64,
+            "Z": 210.047,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4835,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 20310.299,
+            "Y": 5875.58,
+            "Z": 218.757,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4835,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 20427.426,
+            "Y": 5896.9,
+            "Z": 213.995,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4835,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 20329.084,
+            "Y": 5814.74,
+            "Z": 223.258,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4835,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 20176.85,
+            "Y": 5972.91,
+            "Z": 203.941,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4835,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 20439.352,
+            "Y": 5988.63,
+            "Z": 206.174,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4835,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 20254.512,
+            "Y": 5818.19,
+            "Z": 228.307,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4835,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 20419.734,
+            "Y": 5941.61,
+            "Z": 208.197,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4835,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 20258.479,
+            "Y": 6046.32,
+            "Z": 208.505,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4835,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 20371.008,
+            "Y": 5927.01,
+            "Z": 207.242,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4835,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 20311.13,
+            "Y": 5842.71,
+            "Z": 225.048,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4835,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 20294.223,
+            "Y": 5793.5,
+            "Z": 231.684,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 4843,
+        "Title": "spawn-import: terrain moved-zone/exact-1.2",
+        "Position": {
+            "X": 20205.804,
+            "Y": 6138.38,
+            "Z": 205.061,
+            "Yaw": -128
+        }
+    },
+    {
+        "UnitId": 5499,
+        "Title": "spawn-import: terrain exact-1.2",
+        "Position": {
+            "X": 14271.81,
+            "Y": 11316.62,
+            "Z": 182.358,
+            "Yaw": -35
+        }
+    },
+    {
+        "UnitId": 5809,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 8276.95,
+            "Y": 13542.46,
+            "Z": 657.441,
+            "Yaw": 11.25
+        }
+    },
+    {
+        "UnitId": 5811,
+        "Title": "spawn-import: terrain exact-1.2",
+        "Position": {
+            "X": 7654.87,
+            "Y": 12588.51,
+            "Z": 681.568,
+            "Yaw": -18
+        }
+    },
+    {
+        "UnitId": 5824,
+        "Title": "spawn-import: terrain exact-1.2",
+        "Position": {
+            "X": 7776.6,
+            "Y": 12458.82,
+            "Z": 669.674,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7387,
+        "Title": "spawn-import: neighbor moved-zone/exact-1.2",
+        "Position": {
+            "X": 6870,
+            "Y": 13264,
+            "Z": 1027,
+            "Yaw": 111
+        }
+    },
+    {
+        "UnitId": 7388,
+        "Title": "spawn-import: terrain moved-zone/exact-1.2",
+        "Position": {
+            "X": 6547.429,
+            "Y": 13363.44,
+            "Z": 967.567,
+            "Yaw": -23
+        }
+    },
+    {
+        "UnitId": 7393,
+        "Title": "spawn-import: clip exact-1.2",
+        "Position": {
+            "X": 6253.92,
+            "Y": 13062.58,
+            "Z": 1146.58,
+            "Yaw": 71
+        }
+    },
+    {
+        "UnitId": 7462,
+        "Title": "spawn-import: clip exact-1.2",
+        "Position": {
+            "X": 6157.21,
+            "Y": 13056.78,
+            "Z": 1095.52,
+            "Yaw": 158
+        }
+    },
+    {
+        "UnitId": 7476,
+        "Title": "spawn-import: clip exact-1.2",
+        "Position": {
+            "X": 5975.664,
+            "Y": 12782.65,
+            "Z": 1137.68,
+            "Yaw": -54
+        }
+    },
+    {
+        "UnitId": 7476,
+        "Title": "spawn-import: clip exact-1.2",
+        "Position": {
+            "X": 5946.185,
+            "Y": 12709.36,
+            "Z": 1161.64,
+            "Yaw": -50
+        }
+    },
+    {
+        "UnitId": 7476,
+        "Title": "spawn-import: clip exact-1.2",
+        "Position": {
+            "X": 5971.613,
+            "Y": 12802.45,
+            "Z": 1132.39,
+            "Yaw": -81.857
+        }
+    },
+    {
+        "UnitId": 7501,
+        "Title": "spawn-import: clip exact-1.2",
+        "Position": {
+            "X": 6194.78,
+            "Y": 13070.13,
+            "Z": 1103.76,
+            "Yaw": 66
+        }
+    },
+    {
+        "UnitId": 7501,
+        "Title": "spawn-import: clip exact-1.2",
+        "Position": {
+            "X": 6196.98,
+            "Y": 13080.48,
+            "Z": 1103.57,
+            "Yaw": 103
+        }
+    },
+    {
+        "UnitId": 7687,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7058.124,
+            "Y": 13587.82,
+            "Z": 1136.74,
+            "Yaw": 13
+        }
+    },
+    {
+        "UnitId": 7688,
+        "Title": "spawn-import: terrain exact-1.2",
+        "Position": {
+            "X": 13834.8,
+            "Y": 10887,
+            "Z": 165.771,
+            "Yaw": -114
+        }
+    },
+    {
+        "UnitId": 9418,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 10972.168,
+            "Y": 9898.128,
+            "Z": 101.111,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 9420,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 10972.168,
+            "Y": 9898.128,
+            "Z": 101.111,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 13673,
+        "Title": "spawn-import: terrain exact-1.2",
+        "Position": {
+            "X": 9357.43,
+            "Y": 10361.94,
+            "Z": 188.148,
+            "Yaw": -90
+        }
+    },
+    {
+        "UnitId": 13792,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 20938.69,
+            "Y": 13152.75,
+            "Z": 114.424,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 13792,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 20553.79,
+            "Y": 13148.69,
+            "Z": 124.299,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 13792,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 19608.6,
+            "Y": 28284.348,
+            "Z": 295.301,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 13792,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 15179.34,
+            "Y": 23044.41,
+            "Z": 106.267,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 13792,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 11158.565,
+            "Y": 12069.353,
+            "Z": 145.815,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 13873,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7311.72,
+            "Y": 13558.26,
+            "Z": 1152.77,
+            "Yaw": 180
+        }
+    },
+    {
+        "UnitId": 13873,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7328.12,
+            "Y": 13542.65,
+            "Z": 1158.13,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 13873,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7363.64,
+            "Y": 13559.68,
+            "Z": 1159.18,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 13873,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7351.92,
+            "Y": 13590.24,
+            "Z": 1162.32,
+            "Yaw": 161
+        }
+    },
+    {
+        "UnitId": 13873,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7326.12,
+            "Y": 13583.04,
+            "Z": 1159.08,
+            "Yaw": -160
+        }
+    },
+    {
+        "UnitId": 13873,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7347.83,
+            "Y": 13536.16,
+            "Z": 1156.52,
+            "Yaw": 98
+        }
+    },
+    {
+        "UnitId": 13873,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7286.53,
+            "Y": 13517.69,
+            "Z": 1153.51,
+            "Yaw": 180
+        }
+    },
+    {
+        "UnitId": 13873,
+        "Title": "spawn-import: clip moved-zone/exact-1.2",
+        "Position": {
+            "X": 7312.1,
+            "Y": 13514.71,
+            "Z": 1156.2,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 13874,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 8482.888,
+            "Y": 13235.44,
+            "Z": 675.496,
+            "Yaw": -151.875
+        }
+    },
+    {
+        "UnitId": 13875,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 8457.122,
+            "Y": 13467.5,
+            "Z": 696.916,
+            "Yaw": 168.75
+        }
+    },
+    {
+        "UnitId": 13876,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 8158.662,
+            "Y": 13318.57,
+            "Z": 706.25,
+            "Yaw": -157.5
+        }
+    },
+    {
+        "UnitId": 13915,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 8034.194,
+            "Y": 13545.42,
+            "Z": 821.865,
+            "Yaw": -163.125
+        }
+    },
+    {
+        "UnitId": 14080,
+        "Title": "spawn-import: terrain moved-zone/exact-1.2",
+        "Position": {
+            "X": 17621.69,
+            "Y": 27551.42,
+            "Z": 121.062,
+            "Yaw": -170
+        }
+    },
+    {
+        "UnitId": 14080,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 17634.258,
+            "Y": 27481.99,
+            "Z": 119.803,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 14080,
+        "Title": "spawn-import: terrain moved-zone/exact-1.2",
+        "Position": {
+            "X": 17687.48,
+            "Y": 27601.88,
+            "Z": 128.445,
+            "Yaw": -170
+        }
+    },
+    {
+        "UnitId": 14080,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 17883.249,
+            "Y": 27391.153,
+            "Z": 119.851,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 14080,
+        "Title": "spawn-import: terrain moved-zone/exact-1.2",
+        "Position": {
+            "X": 17918.77,
+            "Y": 27360.95,
+            "Z": 120.689,
+            "Yaw": -170
+        }
+    },
+    {
+        "UnitId": 14080,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 17851.419,
+            "Y": 27551.617,
+            "Z": 119.816,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 14080,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 18050.986,
+            "Y": 27461.926,
+            "Z": 119.724,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 14080,
+        "Title": "spawn-import: terrain moved-zone/exact-1.2",
+        "Position": {
+            "X": 17625.56,
+            "Y": 27418.5,
+            "Z": 121.687,
+            "Yaw": -170
+        }
+    },
+    {
+        "UnitId": 14080,
+        "Title": "spawn-import: terrain moved-zone/exact-1.2",
+        "Position": {
+            "X": 17829.72,
+            "Y": 27581.43,
+            "Z": 121.232,
+            "Yaw": -170
+        }
+    },
+    {
+        "UnitId": 14101,
+        "Title": "spawn-import: terrain git-3.0+",
+        "Position": {
+            "X": 8275.786,
+            "Y": 13546.21,
+            "Z": 658.575,
+            "Yaw": 87.188
+        }
+    },
+    {
+        "UnitId": 14154,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 17634.258,
+            "Y": 27481.99,
+            "Z": 119.803,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 14154,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 17883.249,
+            "Y": 27391.153,
+            "Z": 119.851,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 14154,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 17851.419,
+            "Y": 27551.617,
+            "Z": 119.816,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 14154,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 18050.986,
+            "Y": 27461.926,
+            "Z": 119.724,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 14162,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 18029.92,
+            "Y": 27213.786,
+            "Z": 129.83,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 14163,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 18029.92,
+            "Y": 27213.786,
+            "Z": 129.83,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 14200,
+        "Title": "spawn-import: terrain moved-zone/10x-verified/area",
+        "Position": {
+            "X": 17159.883,
+            "Y": 27298.47,
+            "Z": 105.986,
+            "Yaw": 0
+        }
     }
 ]
