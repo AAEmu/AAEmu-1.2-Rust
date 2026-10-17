@@ -13,7 +13,7 @@ use super::data::{QuestData, RawSignSphere};
 use super::model::sphere_trigger;
 use super::templates::ActKind;
 use crate::server::GameServer;
-use crate::world::PlayerRef;
+use crate::world::{PlayerRef, WorldObject};
 
 /// `SphereQuest` (one `quest_sign_sphere.g` area, world coordinates).
 #[derive(Debug, Clone, PartialEq)]
@@ -364,11 +364,7 @@ impl SphereQuestManager {
                 }
             }
             for p in players {
-                let pos = {
-                    let c = p.data();
-                    let t = &c.unit.transform;
-                    (t.x, t.y, t.z)
-                };
+                let pos = super::events::world_position(server, &WorldObject::from(p.clone()));
                 let last = self
                     .last_positions
                     .lock()

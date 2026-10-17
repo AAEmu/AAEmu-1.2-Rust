@@ -242,9 +242,8 @@ fn take_pending(character_id: u32) -> Vec<PendingOp> {
 /// when an active quest has a distance act, position, time of day).
 pub fn capture_env(server: &GameServer, player: &PlayerRef) -> QuestEnv {
     let data = &server.game_data.systems.quests;
-    let (target_id, position, needs_npcs) = {
+    let (target_id, needs_npcs) = {
         let c = player.data();
-        let t = &c.unit.transform;
         let needs = c.quest_state.quests.values().any(|q| {
             data.template(q.template_id).is_some_and(|t| {
                 t.components.iter().any(|cid| {
@@ -258,10 +257,10 @@ pub fn capture_env(server: &GameServer, player: &PlayerRef) -> QuestEnv {
                 })
             })
         });
-        (c.unit.current_target, (t.x, t.y, t.z), needs)
+        (c.unit.current_target, needs)
     };
     let mut env = QuestEnv {
-        position,
+        position: world_position(server, &WorldObject::from(player.clone())),
         time_of_day: server.time.get_time(),
         ..QuestEnv::default()
     };
@@ -283,11 +282,25 @@ pub fn nearby_npcs(server: &GameServer, player: &PlayerRef) -> Vec<(u32, f32, f3
     let npcs = world.around(&me, |o| o.as_npc().cloned());
     npcs.iter()
         .map(|n| {
-            let d = n.data();
-            let t = &d.unit.transform;
-            (d.unit.template_id, t.x, t.y, t.z)
+            let template_id = n.data().unit.template_id;
+            let (x, y, z) = world_position(server, &WorldObject::from(n.clone()));
+            (template_id, x, y, z)
         })
         .collect()
+}
+
+/// `Transform.World.Position` of an object: the local position, composed with the parent chain
+/// when the object is attached (a mounted rider or a ship passenger has a parent-relative
+/// transform). Must be called without holding the object's data lock.
+pub fn world_position(server: &GameServer, o: &WorldObject) -> (f32, f32, f32) {
+    let t = o.transform();
+    if t.parent_obj_id != 0 {
+        if let Some(w) = server.world.world_of(o) {
+            let p = w.world_pos_rot(o);
+            return (p.x, p.y, p.z);
+        }
+    }
+    (t.x, t.y, t.z)
 }
 
 /// A [`UnitSnapshot`] of a world object.
@@ -295,6 +308,7 @@ pub fn snapshot(server: &GameServer, o: &WorldObject) -> UnitSnapshot {
     let mut s = UnitSnapshot {
         obj_id: o.obj_id(),
         is_unit: o.is_unit(),
+        position: world_position(server, o),
         ..UnitSnapshot::default()
     };
     if let Some(d) = o.as_doodad() {
@@ -314,7 +328,6 @@ pub fn snapshot(server: &GameServer, o: &WorldObject) -> UnitSnapshot {
         s.faction_id = b.faction_id;
         s.buff_ids = b.buffs.effects.iter().map(|e| e.template.id).collect();
         s.zone_key = b.transform.zone_id;
-        s.position = (b.transform.x, b.transform.y, b.transform.z);
     });
     s.mother_faction_id = server
         .game_data
@@ -736,6 +749,16 @@ pub fn on_npc_killed(server: &GameServer, player: &PlayerRef, npc: &NpcRef) {
 
 /// `DoOnAggroEvents(owner, npc)` (`Unit.OnAggro` of a player against an NPC).
 pub fn on_aggro(server: &GameServer, player: &PlayerRef, npc: &NpcRef) {
+    // Runs on every damage hit: skip the quest operation (character lock, state take, queue)
+    // unless an active quest act subscribes to `Aggro`. A taken-out state (`loaded` false: we
+    // are nested in an operation of this character) is not trusted and falls through.
+    {
+        let c = player.data();
+        let st = &c.quest_state;
+        if st.loaded && !st.subs.iter().any(|s| s.event == EventKind::Aggro) {
+            return;
+        }
+    }
     let npc_id = npc.data().unit.template_id;
     run_or_queue(server, player, move |ctx| {
         dispatch_logged(ctx, &QuestEvent::Aggro { npc_id });
