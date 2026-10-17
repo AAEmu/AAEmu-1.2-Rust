@@ -538,6 +538,36 @@ fn do_die_base(
     }
 }
 
+/// The quest `OnZoneKill` of a player killed by another player's hand (the
+/// `QuestActObjZoneKill` PvP quests, `count_player_kill > 0`). The C# only raised it for NPC
+/// deaths (`DoOnMonsterHuntEvents`), so those quests could not progress. Only the killer gets
+/// the direct event; `team_share` acts hand it on to the killer's team.
+fn raise_pvp_zone_kill(
+    server: &GameServer,
+    killer: &PlayerRef,
+    victim: &WorldObject,
+    zone_group_id: u32,
+) {
+    use crate::systems::quests::events::{kill_unit, with_quests, QuestEvent};
+    let event = QuestEvent::ZoneKill {
+        zone_group_id,
+        killer: kill_unit(server, &WorldObject::from(killer.clone()), None),
+        victim: kill_unit(server, victim, None),
+    };
+    let raised = with_quests(server, killer, None, |ctx| {
+        if let Err(e) = ctx.dispatch(&event) {
+            tracing::error!("Quest event ZoneKill threw: {}", e.0);
+        }
+    });
+    if raised.is_none() {
+        tracing::warn!(
+            "PvP zone kill of {} not credited to {}: a quest operation is in progress",
+            victim.obj_id(),
+            killer.obj_id
+        );
+    }
+}
+
 /// `Character.DoDie` after `base.DoDie` (and the durability loss): PvP kill bookkeeping
 /// (`HostileFactionKills`, `AwardPvpHonor`, the `DiedInPvp` / `DiedInPvpWarZone` flags,
 /// `SCUnitPvPPointsChangedPacket`s, the War-zone honor loss of the victim) or crime evidence
@@ -589,6 +619,7 @@ fn character_death_tail(
                     c.died_in_pvp_war_zone = true;
                 }
             }
+            raise_pvp_zone_kill(server, enemy, victim, victim_zone_group.unwrap_or(0));
             // DEAD_BY_PVP (value1: the zone group the victim died in, 0 = any zone).
             crate::systems::report_achievement(
                 server,

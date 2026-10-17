@@ -57,6 +57,8 @@ const ZONE_KILL_QUEST: u32 = 300;
 /// `ObjMonsterGroupHunt` of `VILLAGER_GROUP`.
 const GROUP_HUNT_QUEST: u32 = 400;
 const VILLAGER_GROUP: u32 = 7;
+/// `ObjZoneKill` of two player kills in the conflict zone group, `team_share` / `is_party`.
+const PVP_ZONE_KILL_QUEST: u32 = 500;
 
 /// `WorldInteractionType.Use`.
 const WI_USE: i32 = 19;
@@ -237,6 +239,28 @@ fn game_data() -> GameData {
             highlight_doodad_id: 0,
             highlight_doodad_phase: -1,
         },
+    );
+    single_act_quest_count(
+        q,
+        PVP_ZONE_KILL_QUEST,
+        ActKind::ObjZoneKill {
+            count_player_kill: 2,
+            count_npc: 0,
+            zone_id: u32::from(CONFLICT_GROUP),
+            team_share: true,
+            use_alias: false,
+            alias_id: 0,
+            lvl_min: 1,
+            lvl_max: 55,
+            is_party: true,
+            lvl_min_npc: 0,
+            lvl_max_npc: 0,
+            pc_faction_id: 0,
+            pc_faction_exclusive: false,
+            npc_faction_id: 0,
+            npc_faction_exclusive: false,
+        },
+        2,
     );
     q.group_npcs.add(VILLAGER_GROUP, VILLAGER);
     q.finish();
@@ -993,6 +1017,76 @@ async fn solo_pvp_kill_in_a_conflict_zone_awards_honor() {
         .client
         .drain_ops()
         .contains(&sc::SCGamePointChangedPacket));
+}
+
+#[tokio::test]
+async fn pvp_kill_advances_the_player_zone_kill_quest_of_the_killer_and_the_party() {
+    use crate::data::world_data::conflict_type;
+    use crate::systems::skills::types::KillReason;
+    let server = conflict_server(conflict_type::CONFLICT, [0; 5]);
+    let victim = pc(&server, 1, "Victim", 100.0);
+    let killer = enemy_pc(&server, 2, "Killer", 102.0);
+    let mate = enemy_pc(&server, 3, "Mate", 104.0);
+    let bystander = enemy_pc(&server, 4, "Bystander", 106.0);
+    form_party(&server, &killer.p, &mate.p);
+    for p in [&killer.p, &mate.p, &bystander.p] {
+        accept(&server, p, PVP_ZONE_KILL_QUEST);
+    }
+    let die = |victim: &Pc, killer: &Pc| {
+        crate::systems::skills::combat::do_die(
+            &server,
+            &WorldObject::from(&victim.p),
+            Some(&WorldObject::from(&killer.p)),
+            KillReason::Damage,
+        );
+    };
+
+    die(&victim, &killer);
+    assert_eq!(
+        quest_row(&server, &killer.p, PVP_ZONE_KILL_QUEST),
+        Some((kind::PROGRESS, 1))
+    );
+    // team_share: the killer's party member is credited once, a non-party player is not.
+    assert_eq!(
+        quest_row(&server, &mate.p, PVP_ZONE_KILL_QUEST),
+        Some((kind::PROGRESS, 1))
+    );
+    assert_eq!(
+        quest_row(&server, &bystander.p, PVP_ZONE_KILL_QUEST),
+        Some((kind::PROGRESS, 0))
+    );
+
+    // The party mate's own kill counts for both.
+    let victim2 = enemy_pc(&server, 5, "Victim2", 108.0);
+    die(&victim2, &mate);
+    assert_eq!(
+        quest_row(&server, &killer.p, PVP_ZONE_KILL_QUEST),
+        Some((kind::READY, 2))
+    );
+    assert_eq!(
+        quest_row(&server, &mate.p, PVP_ZONE_KILL_QUEST),
+        Some((kind::READY, 2))
+    );
+}
+
+#[tokio::test]
+async fn friendly_fire_kill_does_not_advance_the_player_zone_kill_quest() {
+    use crate::data::world_data::conflict_type;
+    use crate::systems::skills::types::KillReason;
+    let server = conflict_server(conflict_type::CONFLICT, [0; 5]);
+    let killer = pc(&server, 1, "Killer", 100.0);
+    let victim = pc(&server, 2, "Victim", 102.0);
+    accept(&server, &killer.p, PVP_ZONE_KILL_QUEST);
+    crate::systems::skills::combat::do_die(
+        &server,
+        &WorldObject::from(&victim.p),
+        Some(&WorldObject::from(&killer.p)),
+        KillReason::Damage,
+    );
+    assert_eq!(
+        quest_row(&server, &killer.p, PVP_ZONE_KILL_QUEST),
+        Some((kind::PROGRESS, 0))
+    );
 }
 
 #[tokio::test]
