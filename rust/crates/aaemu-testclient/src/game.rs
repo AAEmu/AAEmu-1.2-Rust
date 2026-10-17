@@ -778,14 +778,42 @@ impl GameClient {
             .await
     }
 
+    /// `CSMoveUnitPacket` for another object of ours (the mate we ride), without touching
+    /// our own tracked position.
+    pub async fn move_obj_to(
+        &mut self,
+        obj_id: u32,
+        pos: (f32, f32, f32),
+        time: u32,
+    ) -> anyhow::Result<()> {
+        let own = self.state.self_pos;
+        self.move_obj_inner(obj_id, pos, time, 0).await?;
+        self.state.self_pos = own;
+        if let Some(u) = self.state.units.get_mut(&obj_id) {
+            u.pos = pos;
+        }
+        Ok(())
+    }
+
     async fn move_to_with_direction(
         &mut self,
         pos: (f32, f32, f32),
         time: u32,
         direction: i8,
     ) -> anyhow::Result<()> {
+        let obj = self.state.self_obj;
+        self.move_obj_inner(obj, pos, time, direction).await
+    }
+
+    async fn move_obj_inner(
+        &mut self,
+        obj_id: u32,
+        pos: (f32, f32, f32),
+        time: u32,
+        direction: i8,
+    ) -> anyhow::Result<()> {
         let mut s = PacketStream::new();
-        s.write_bc(self.state.self_obj)
+        s.write_bc(obj_id)
             .write_u8(1) // MoveTypeEnum.Unit
             .write_u32(time)
             .write_u8(0x02) // Moving
