@@ -3,9 +3,14 @@
 //! The 10.x `game_pak` keeps the designers' AI paths in
 //! `game/worlds/<world>/level_design/zone/<zone key>/editor/npc.xml`. The route names the 1.2
 //! database asks for (`quest_components.ai_path_name`, `ai_commands` FollowPath) are looked up
-//! there and written as `|x|y|z|` files in world coordinates. See `README.md`.
+//! there and written as `|x|y|z|` files in world coordinates. The `return-points` mode writes
+//! the `worldgates.json` entries of the `Return` special effects from the 10.x
+//! `return_point.xml` files. See `README.md`.
 
 mod convert;
+#[cfg(test)]
+mod returnpoint_tests;
+mod returnpoints;
 #[cfg(test)]
 mod tests;
 
@@ -299,7 +304,12 @@ fn run(opts: &Options) -> Result<()> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let result = parse_args(&args).and_then(|o| run(&o));
+    let result = match args.first().map(String::as_str) {
+        Some("return-points") => {
+            returnpoints::parse_args(&args[1..]).and_then(|o| returnpoints::run(&o))
+        }
+        _ => parse_args(&args).and_then(|o| run(&o)),
+    };
     if let Err(e) = result {
         eprintln!("error: {e:#}");
         std::process::exit(1);

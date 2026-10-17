@@ -150,6 +150,7 @@ dependencies = [
  "anyhow",
  "roxmltree",
  "rusqlite",
+ "serde_json",
 ]
 
 [[package]]
