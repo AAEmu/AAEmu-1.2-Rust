@@ -457,7 +457,7 @@ fn known_completed_quests_by_category(
             if body[(bit / 8) as usize] & (1 << (bit % 8)) == 0 {
                 continue;
             }
-            let quest_id = u32::from(block.id) * 64 + bit;
+            let quest_id = block.id * 64 + bit;
             if let Some(template) = quests.template(quest_id) {
                 *totals.entry(template.category_id).or_insert(0) += 1;
             }

@@ -825,6 +825,37 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   reporting, per-quest NPC/doodad reporting, doodad reward selection/finalization, and OR
   requirement evaluation. Timed saved deadlines, aggro credit, CheckSphere, and authored
   content gaps remain tracked in `Docs/wiki/Quest-Audit.md`.
+* systems::quests (engine fixes, quest-audit 2026-10-17):
+  - `TryCompleteQuestAsLetItDone` (C# only set `Step = Reward`): the quest also gets the
+    `Completed` status, and a quest without a Reward step is finished at once (C# hung there:
+    quest 5134 and the data stubs). With a Ready step but no Reward step the early completion
+    turns the quest in at the Ready step (report acts satisfied, so its copper / items are paid);
+    with neither step it completes directly. No level based exp / copper is added for a quest
+    without a Reward step: the C# only added it while running the Reward step's components, and
+    the 328 level>0 quests without a Reward component are equipment upgrade stages, instance
+    staging quests and `reserve` stubs whose reward is the item or nothing.
+  - `DropQuest` runs the act cleanup (`QuestCleanup`, consuming cleanup-only items) for every
+    quest that reached its Reward step or `Completed` status, so early-completed quests no
+    longer keep their cleanup items (the C# ran it for every drop; the Rust port restricted
+    it to completions, which the early-completion path never matched).
+  - Selective rewards: the client sends a 1-based index (`quest_context_task` Lua:
+    `GetSelectiveItemIndex()` must be >= 1 when `GetQuestContextRewardSelectiveItemAllCount` is
+    > 0, and is passed unchanged to `TryCompleteQuestContext`), matching the 1-based
+    `ThisSelectiveIndex`. Quests that reach their Reward step without a valid choice (no report
+    act: auto-complete / journal reports send 0) now get the first selective item instead of none.
+  - A saved quest with status Ready on its Progress step is legal for LetItDone and score
+    quests (the status shows "ready to turn in", the step is left by a report). On any other
+    quest the status is stale: `load_from_rows` resets it to Progress and the load evaluation
+    promotes the quest to Ready when the objectives are complete.
+  - A score quest whose Progress step has no objective acts (5641: score 100, no acts) counts
+    its score as reached (C#: stuck forever). A `COMPLETE_QUEST_CONTEXT` requirement that names
+    the component's own quest (6596) is dropped at load (C#: never acceptable).
+  - `CompletedQuest.id` is 32 bits (the C# `ushort` wrapped for quest ids >= 4194304 and marked
+    nonexistent quest 3805700 instead of the event quests 8000001-8000004). The column is
+    `int unsigned`, stored rows are unchanged. `SCCompletedQuests` has a 16 bit block id, so
+    such blocks are not sent (the client cannot show them); a warning names the first one.
+  - Refused quest requests (`AddQuest`, `TryCompleteQuestAsLetItDone`) are logged at WARN with
+    character, quest and reason; the same refusal repeated within a minute goes to DEBUG.
 * systems::social: saves of guilds / families run inline in the handler (C# synchronous); a
   failed guild save keeps the removed-member ids for the next attempt. `ExpeditionConfig`
   defaults to the shipped `Expedition.json` (C# throws without the section). Player names /
