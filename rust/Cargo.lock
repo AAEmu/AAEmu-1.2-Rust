@@ -143,6 +143,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aaemu-tool-aipaths"
+version = "0.1.0"
+dependencies = [
+ "aaemu-commons",
+ "anyhow",
+ "roxmltree",
+ "rusqlite",
+]
+
+[[package]]
 name = "aaemu-tool-updatesfortransform"
 version = "0.1.0"
 dependencies = [

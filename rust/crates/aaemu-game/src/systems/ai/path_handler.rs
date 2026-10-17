@@ -1,5 +1,9 @@
 //! `Models/Game/AI/v2/Controls/**` (`AiPathHandler`, `AiPathPoint`, `AiPathPointAction`) and
 //! `Core/Managers/AiPathsManager` (`Data/Path/*.path`, cached by file name).
+//!
+//! Deviation from the C#: a route name that is used in several zones (`public_farm`,
+//! `tuto_move`, ...) is shipped as `<name>@<zone key>.path` variants instead of one file; see
+//! [`AiPathsManager::resolve_path_file`].
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -207,6 +211,31 @@ fn parse_coord(text: &str) -> f32 {
 pub struct AiPathsManager {
     folder: Mutex<Option<PathBuf>>,
     cache: Mutex<HashMap<String, Arc<Vec<AiPathPoint>>>>,
+    /// Route name to its `<name>@<zone key>` file stems (lowest zone key first), read from the
+    /// folder on first use.
+    variants: Mutex<Option<HashMap<String, Vec<String>>>>,
+}
+
+/// Horizontal distance from `p` to the nearest segment (or point) of a route.
+fn distance_to_route(p: Vec3, route: &[AiPathPoint]) -> f32 {
+    let seg = |a: Vec3, b: Vec3| {
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let len2 = dx * dx + dy * dy;
+        let t = if len2 == 0.0 {
+            0.0
+        } else {
+            (((p.x - a.x) * dx + (p.y - a.y) * dy) / len2).clamp(0.0, 1.0)
+        };
+        (p.x - a.x - t * dx).hypot(p.y - a.y - t * dy)
+    };
+    match route {
+        [] => f32::INFINITY,
+        [a] => seg(a.position, a.position),
+        _ => route
+            .windows(2)
+            .map(|w| seg(w[0].position, w[1].position))
+            .fold(f32::INFINITY, f32::min),
+    }
 }
 
 /// One `.path` file (`File.ReadAllLines` + the per-line parse).
@@ -235,6 +264,101 @@ impl AiPathsManager {
     /// Sets `Data/Path` (the C# `Path.Combine("Data", "Path")` relative to the working dir).
     pub fn set_folder(&self, folder: impl AsRef<Path>) {
         *self.folder.lock().expect("paths poisoned") = Some(folder.as_ref().to_path_buf());
+        *self.variants.lock().expect("paths poisoned") = None;
+    }
+
+    /// The `<name>@<zone key>.path` stems of route `name`, lowest zone key first.
+    fn variants_of(&self, name: &str) -> Vec<String> {
+        let mut guard = self.variants.lock().expect("paths poisoned");
+        if guard.is_none() {
+            let mut map: HashMap<String, Vec<(u32, String)>> = HashMap::new();
+            let folder = self.folder.lock().expect("paths poisoned").clone();
+            if let Some(entries) = folder.and_then(|f| std::fs::read_dir(f).ok()) {
+                for e in entries.filter_map(Result::ok) {
+                    let p = e.path();
+                    let is_path = p
+                        .extension()
+                        .is_some_and(|x| x.eq_ignore_ascii_case("path"));
+                    let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
+                        continue;
+                    };
+                    if let (true, Some((base, zone))) = (is_path, stem.rsplit_once('@')) {
+                        let zone = zone.parse::<u32>().unwrap_or(u32::MAX);
+                        map.entry(base.to_string())
+                            .or_default()
+                            .push((zone, stem.to_string()));
+                    }
+                }
+            }
+            *guard = Some(
+                map.into_iter()
+                    .map(|(base, mut v)| {
+                        v.sort();
+                        (base, v.into_iter().map(|(_, stem)| stem).collect())
+                    })
+                    .collect(),
+            );
+        }
+        guard
+            .as_ref()
+            .and_then(|m| m.get(name))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The file stem that serves route `name` for an NPC at `near`: `<name>` itself when that
+    /// route exists, otherwise the `<name>@<zone key>` variant whose route passes closest to
+    /// the NPC (horizontally; ties go to the lowest zone key). With several variants and no
+    /// position there is no answer.
+    pub fn resolve_stem(&self, name: &str, near: Option<Vec3>) -> Option<String> {
+        let plain_cached = self
+            .cache
+            .lock()
+            .expect("paths poisoned")
+            .contains_key(name);
+        if plain_cached {
+            return Some(name.to_string());
+        }
+        let folder = self.folder.lock().expect("paths poisoned").clone();
+        if folder.is_some_and(|f| f.join(format!("{name}.path")).is_file()) {
+            return Some(name.to_string());
+        }
+        let variants = self.variants_of(name);
+        match (variants.as_slice(), near) {
+            ([], _) => None,
+            ([only], _) => Some(only.clone()),
+            (_, None) => None,
+            (all, Some(p)) => {
+                let mut best: Option<(f32, &String)> = None;
+                for stem in all {
+                    let d = distance_to_route(p, &self.load_ai_path_points(stem));
+                    if best.is_none_or(|(bd, _)| d < bd) {
+                        best = Some((d, stem));
+                    }
+                }
+                best.map(|(_, stem)| stem.clone())
+            }
+        }
+    }
+
+    /// The route file for `name` (see [`Self::resolve_stem`]).
+    pub fn resolve_path_file(&self, name: &str, near: Option<Vec3>) -> Option<PathBuf> {
+        let stem = self.resolve_stem(name, near)?;
+        let folder = self.folder.lock().expect("paths poisoned").clone()?;
+        Some(folder.join(format!("{stem}.path")))
+    }
+
+    /// `LoadAiPathPoints(aiPathFileName)` for an NPC at `near`: the points of the file that
+    /// [`Self::resolve_stem`] picks, or nothing.
+    pub fn load_ai_path_points_near(
+        &self,
+        name: &str,
+        near: Option<Vec3>,
+    ) -> Arc<Vec<AiPathPoint>> {
+        match self.resolve_stem(name, near) {
+            Some(stem) => self.load_ai_path_points(&stem),
+            None => Arc::new(Vec::new()),
+        }
     }
 
     /// `LoadAiPathPoints(aiPathFileName)`: the cached points, or the file's (cached when the
@@ -299,6 +423,7 @@ impl AiPathsManager {
     /// `ClearCache()`.
     pub fn clear_cache(&self) {
         self.cache.lock().expect("paths poisoned").clear();
+        *self.variants.lock().expect("paths poisoned") = None;
     }
 }
 
@@ -358,5 +483,87 @@ mod tests {
         let s = h.run_current_path(Vec3::new(20.0, 0.0, 0.0), 1.0);
         assert_eq!(s, PathStep::Idle(false));
         assert!(!h.has_path_movement_data());
+    }
+
+    fn route(points: &[(f32, f32)]) -> Vec<AiPathPoint> {
+        points
+            .iter()
+            .map(|(x, y)| AiPathPoint {
+                position: Vec3::new(*x, *y, 0.0),
+                action: AiPathPointAction::None,
+                param: String::new(),
+            })
+            .collect()
+    }
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let p = std::env::temp_dir().join(format!("aaemu_paths_{tag}_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(&p).unwrap();
+            Self(p)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn plain_file_wins_over_variants() {
+        let dir = TempDir::new("plain");
+        std::fs::write(dir.0.join("walk.path"), "|1|2|3|\n|4|5|6|\n").unwrap();
+        std::fs::write(dir.0.join("walk@7.path"), "|100|100|0|\n|101|100|0|\n").unwrap();
+        let m = AiPathsManager::default();
+        m.set_folder(&dir.0);
+        let points = m.load_ai_path_points_near("walk", Some(Vec3::new(100.0, 100.0, 0.0)));
+        assert_eq!(points[0].position, Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(
+            m.resolve_path_file("walk", None),
+            Some(dir.0.join("walk.path"))
+        );
+    }
+
+    #[test]
+    fn variants_resolve_to_the_route_nearest_the_npc() {
+        let dir = TempDir::new("variants");
+        std::fs::write(
+            dir.0.join("farm@156.path"),
+            "|5000|5000|0|\n|5010|5000|0|\n",
+        )
+        .unwrap();
+        std::fs::write(dir.0.join("farm@142.path"), "|100|100|0|\n|140|100|0|\n").unwrap();
+        std::fs::write(dir.0.join("solo@9.path"), "|1|1|0|\n|2|1|0|\n").unwrap();
+        let m = AiPathsManager::default();
+        m.set_folder(&dir.0);
+        // Nearest segment, not just the nearest point: 120,104 is beside the middle of farm@142.
+        let near = Some(Vec3::new(120.0, 104.0, 9.0));
+        assert_eq!(m.resolve_stem("farm", near).as_deref(), Some("farm@142"));
+        let far = Some(Vec3::new(5004.0, 4990.0, 0.0));
+        assert_eq!(m.resolve_stem("farm", far).as_deref(), Some("farm@156"));
+        assert_eq!(
+            m.load_ai_path_points_near("farm", far)[0].position,
+            Vec3::new(5000.0, 5000.0, 0.0)
+        );
+        // Several variants and no position: no guess. A single variant needs no position.
+        assert_eq!(m.resolve_stem("farm", None), None);
+        assert_eq!(m.resolve_stem("solo", None).as_deref(), Some("solo@9"));
+        assert_eq!(m.resolve_stem("nothing", near), None);
+        assert!(m.load_ai_path_points_near("nothing", near).is_empty());
+    }
+
+    #[test]
+    fn inserted_routes_resolve_without_a_folder() {
+        let m = AiPathsManager::default();
+        m.insert("test_path", route(&[(0.0, 0.0), (1.0, 0.0)]));
+        assert_eq!(
+            m.resolve_stem("test_path", None).as_deref(),
+            Some("test_path")
+        );
+        assert_eq!(m.resolve_path_file("test_path", None), None);
     }
 }

@@ -1,0 +1,16 @@
+[package]
+name = "aaemu-tool-aipaths"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Generates Data/Path/*.path AI route files from the 10.x client's editor npc.xml data"
+
+[[bin]]
+name = "aaemu-aipaths"
+path = "src/main.rs"
+
+[dependencies]
+aaemu-commons.workspace = true
+anyhow.workspace = true
+roxmltree.workspace = true
+rusqlite.workspace = true

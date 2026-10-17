@@ -663,7 +663,14 @@ impl<'a> AiCtx<'a> {
 
     /// `LoadAiPathPoints(aiPathFileName, addToQueueOnly)`.
     pub fn load_ai_path_points(&mut self, name: &str, add_to_queue_only: bool) -> bool {
-        let points = self.server.systems.ai.paths.load_ai_path_points(name);
+        // Routes shared by several zones are picked by the NPC's position (see `AiPathsManager`).
+        let near = Some(super::npc::world_pos(self.server, &self.obj));
+        let points = self
+            .server
+            .systems
+            .ai
+            .paths
+            .load_ai_path_points_near(name, near);
         if points.is_empty() {
             return false;
         }

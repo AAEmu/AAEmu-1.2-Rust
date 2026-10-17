@@ -158,7 +158,7 @@ Each subsystem records its status here, in its own section only (see `CONTRIBUTI
 | Area (C#) | Rust | Status | Notes |
 |---|---|---|---|
 | `SkillManager` (+ `Sqlite*` effect / buff / plot loaders), `PlotManager`, `FormulaManager` remainder, `AnimationManager`, `AreaTriggers` shapes, `ModelManager` radii, `UnitRequirementsManager`, `TagsManager` (skills / buffs) | `systems/skills/data/` | done | Every skill / buff / effect / plot / tag / modifier / trigger / reagent / product / linear func / tolerance / anim / aoe shape table, incl. all 30+ effect types. Gated real-DB test `skills_real_compact_db` checks row counts. |
-| `Models/Game/Skills/{Skill,SkillCaster,SkillCastTarget,SkillObject,CastAction,SkillController*}`, `Core/Packets/{C2G,G2C}` skill / buff packets | `systems/skills/{types,packets,skill,handlers}.rs` | done | Byte-exact wire types (tested), `Skill.Use` / `Cast` / `Channeling` / `Apply` / `EndSkill` / `Stop`, GCD + cooldowns, mana, labor / vocation, reagents via `ItemSkillHooks`, auto attack loop, `CompressedGamePackets`. |
+| `Models/Game/Skills/{Skill,SkillCaster,SkillCastTarget,SkillObject,CastAction,SkillController*}`, `Core/Packets/{C2G,G2C}` skill / buff packets | `systems/skills/{types,packets,skill,handlers}.rs` | done | Byte-exact wire types (tested), `Skill.Use` / `Cast` / `Channeling` / `Apply` / `EndSkill` / `Stop`, GCD + cooldowns, mana, labor / vocation, reagents via `ItemSkillHooks`, auto attack loop, `CompressedGamePackets`. Data gap: 6 `quest_components.skill_id` values (20315, 11212, 17708, 13737, 11981, 13590) have no `skills` row. The C# `Unit.UseSkill` threw a NullReferenceException there; Rust skips the cast (the quest continues) and `unit_use_skill` warns once per skill id (`missing_skill_warned`), repeats go to debug. |
 | `Models/Game/Skills/Plots/*` | `systems/skills/plots.rs` | done | Plot tree execution (async), conditions 1..17, target info updates (area / random unit / random area), channeling finish, `SCPlotEvent` / `SCPlotEnded`. Deviation: the timeline-id release in plot end, `end_skill` and `stop_skill` is take-and-clear under the skill state lock (`SkillRun::take_tl_id`); C# did an unsynchronised `ReleaseId(TlId); TlId = 0`, so an interrupted plot skill could release the same id twice. The `Tried to release unused Id` warning names the last owner (caster obj id, skill id), like C# `AssignedUnit`. |
 | `Models/Game/Units/Buffs` behaviour, `Skills/Buff`, `Skills/Effects/{Buff,Damage,Heal,Dispel,RestoreMana,ManaBurn,Aggro,FlyingStateChange,SkillController,...}`, `CombatBuffs`, `BuffTriggers` | `systems/skills/{buffs,effects/*}.rs` | done | Start / dispel / tick tasks, tolerance, stack rules, charges, `TriggerRemoveOn`, tag removal, absorption, triggers, area ticks. Explicit dispel emits Dispelled without Timeout; natural expiry retains Timeout. This corrects the mirrored C# removal path, which invoked the FISH escape trigger when catch plot 792 dispelled FISH before lethal damage. Queued CREATED handling and existing removal packet order are retained. Refreshing permanent non-ticking buffs invalidates old timers without treating GetTimeLeft=-1 as expiry; finite expiration and permanent tick cadence remain scheduled. This corrects the mirrored C# refresh timer path. Special effects routed through `ExtHooks::route_special` where they belong to another subsystem. |
 | `Units/Unit` combat (`ReduceCurrentHp`, `DoDie`, aggro / tagging, `SetInBattle`, criminal / force attack, invisibility, `DoFallDamage`), `BaseUnit.CanAttack` / relations, regen, `UpdateGearBonuses`, all `Character` stat getters | `systems/skills/{combat,relation,stats,regen}.rs` | done | MaxHp / MaxMp etc. with buffs, passives and gear (`GearStats` hook). NPC death side effects through `NpcSkillHooks`. |
@@ -329,7 +329,7 @@ Cross-subsystem: mates are despawned on dungeon entry and `PlayerCanEnter` check
 | `NpcAi` framework, `AiUtils.GetAiByType`, all `AiCharacters/**`, every `Behavior` (incl. Archer / BigMonster / Flytrap / WildBoar / AlmightyAttack / Talk / FollowPath / Return / Dead / Despawning / Spawning / Hold / Idle / Roaming / Alert / RunCommandSet / DoNothing) | `systems/ai/{framework,behaviors}.rs` | done | State machine, GoTo overrides, transitions, check intervals, skill queue / selection, aggression / alert / help, return, follow path, greetings (`SCNpcChatMessage` + `SCPlaySound`). |
 | `AIManager` (100 ms tick, `AddAi`, region activity) | `systems/ai/manager.rs` | done | Per-AI mutex + queued calls; activity-based candidate selection and bounded `World.AiWorkerThreads` chunk batches (see deviations). |
 | AI members of `Npc` / `Unit` (`MoveTowards`, `LookTowards`, `StopMovement`, `SetTarget`, `CurrentAggroTarget`, `CurrentGameStance`, `BaseMoveSpeed`, `OnDamageReceived`, `CheckIfEmptyAggroToReturn`, `ClearAllAggro`, `FindPath`), `NpcEvents` | `systems/ai/{npc,combat,skills,npc_events}.rs` | done | `SCOneUnitMovementPacket` movement, aggro tables through the skills API. |
-| `AiPathsManager` (`Data/Path`), `AiPathHandler`, `Units/Route/Simulation` | `systems/ai/{path_handler,simulation}.rs` | done | Every `Data/Path/*.path` file loads (test). |
+| `AiPathsManager` (`Data/Path`), `AiPathHandler`, `Units/Route/Simulation` | `systems/ai/{path_handler,simulation}.rs` | done | Every `Data/Path/*.path` file loads (test). Routes are generated from the 10.x client, see the 2026-10-16 note. |
 | `AiGeoDataManager`, CryEngine `.bai` readers (net / areas / verts missions), A* `PathNode`, `GetHeight`, `ReducePath` | `systems/ai/geodata/` | done | `GeoDataMode` only. Engine-faithful readers and a merged cross-sector graph (see "geodata deviations" below). 1.2 pak: 9 447 net (2 299 of them v54) + 9 447 verts (2 299 v1) + 3 265 areas files parse with 0 trailing bytes; 279 path areas files below v21 are rejected by version like the engine (they do not fit the v21 layout either), the 7 399 `hidemission` files are not read. The areas reader matched the C# reader on every dumped file (differential harness; path areas < v21 now excluded on purpose). Gated tests: `real_ai_*`, `real_nav_*` (`AAEMU_GAME_PAK`, `AAEMU_BAI_SAMPLES=D:\aa-re\zone\agent_geom\data`). |
 | `Gimmick.MoveTowards`, flytrap gimmick | `systems/ai/gimmick.rs` | done | |
 | Hooks for npcs / skills (create AI by `ai_file_id`, spawn / engage / death / delete / faction, NPC control effect, spyglass), AStar GM commands | `systems/ai/hooks.rs` | done | `AiHooks` in `server.systems.hooks.ai`; the npcs `NpcSkills` calls the AI parts of `NpcSkillHooks` directly (no decorator); `AiAStarHooks` installed into the services `ASTAR_HOOKS`. |
@@ -1180,6 +1180,30 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   those replacements ("replacement chain rejected") and the doodad waited for its Final to
   respawn the base template.
 
+* systems::npcs (2026-10-16): world-spawned ("natural") doodads keep their growth state across
+  server restarts. The C# (and the first Rust port) recreated every doodad of
+  `doodad_spawns*.json` in its Start phase with the full growth timer on each start, so with
+  restarts more frequent than the longest growth chain (about 9 400 of the 42 670 main_world
+  spawns need more than 24 h, the longest about 103 h) trees, ore, wild crops and cotton never
+  matured. Deviation: doodads whose template waits at least 5 minutes in some phase (`Timer` with
+  a next phase, `Growth`, `Final` with `After`; about 10 900 main_world spawns, 143 templates;
+  shorter chains restart in seconds and static props have nothing to keep) are stored in the new
+  table `doodad_spawn_states`, keyed by `(world id, spawn key)` where the key is the spawn
+  entry's authored template id + position at 0.1 m (not the doodad's current template, which a
+  `DoodadFuncRatioRespawn` swaps, and not the JSON `Id`, present on 7 entries only). The row holds
+  the current template, func group, plant / growth / phase time, `Data` and the interaction
+  counters. Writes are coalesced per key and flushed in batches every 5 s, by the periodic and
+  shutdown save (`doodad::save`); the row is deleted when the doodad is deleted (harvest, Final,
+  despawn), so a respawn starts fresh as before. At startup (`SpawnManager::load`, main world
+  only) all rows are read once; `DoodadSpawner::spawn` restores the first doodad of an entry with
+  the player-doodad load mechanism (`FuncGroupId` setter, then `OverridePhaseTime = PhaseTime`),
+  so the phase timer resumes with its remaining delay and an expired phase fires promptly.
+  Downtime counts as growth time. Rows whose template or func group no longer exist or whose
+  template is no longer timed are dropped with one summary warning; two spawn entries sharing a
+  key are only tracked for the first. Tracking stays off if the table cannot be read. Limitation
+  (as for player doodads): a phase that has both a `Timer`/`Growth` and a `Final` with `After`
+  lets only the first consume the saved phase time.
+
 * systems::npcs (2026-10-16): `DoodadFuncTod` takes its `curTime >= Tod` catch-up on every
   entry, which ignores that the clock wraps; the 20 day/night board templates (West Gate
   4345-4352, Blue Salt 6175 / 6213 and their variants: day board Tod 20:00, variant Tod 02:00 or
@@ -1212,6 +1236,23 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   reported the same way, once per name, instead of an error on every run.
   The `Impossible to parse npc_ai_params` warning now names the compact patch that repairs rows
   443, 835 and 1975.
+
+* systems::ai (2026-10-16): route data is now generated from the 10.x client. The designers' AI
+  paths are the `<aiPath>` entities of `game/worlds/<world>/level_design/zone/<key>/editor/npc.xml`
+  in the 10.x `game_pak`; `aaemu-aipaths` (`crates/aaemu-tool-aipaths`, see its README) writes the
+  ones the compact database asks for (`quest_components.ai_path_name`, FollowPath `ai_commands`)
+  as `Data/Path/<name>.path` in world coordinates (zone origin cell from the 1.2 `world.xml`, plus
+  the entity position, plus the scaled and `Rotate`d local points; the direction of `Rotate` was
+  settled against the 1.2 terrain, `real_ai_generated_paths_follow_the_terrain`). It never
+  overwrites a file that exists, so the hand recorded routes stay. Deviation: a name used by
+  several zones (`public_farm*`, `public_mate*`, `tuto_move`) is written as `<name>@<zone key>.path`
+  variants and `AiPathsManager::resolve_path_file` picks the variant whose route passes closest to
+  the NPC, for both `AiCtx::load_ai_path_points` and `Simulation` (whose per-NPC route cache is
+  keyed by the file stem). Not generated: names the 10.x data lacks (`public_garden*`,
+  `caravan_maha_*`, `sunrise_745_*`, ...), spawner-attached paths (`AIPath_<zone>_<npc>_<n>`, whose
+  points are relative to their spawner) and zones whose origin differs between 1.2 and 10.x (none
+  of the asked-for names is in one). `Rec._Speed`, `Rec._PathType` and `Closed` are not encoded:
+  every asked-for path has `Closed=0` and the route plays once.
 
 * systems::npcs (2026-10-15): `DoodadFuncClout` with `UseOriginSource` takes the first doodad
   within 4 m of the caster as the area trigger's owner, and the C# scheduled the

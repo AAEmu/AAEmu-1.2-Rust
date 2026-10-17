@@ -245,7 +245,7 @@ the git history). All code lives in the Cargo workspace in `rust/`:
 | `aaemu-launcher` | Starts the 1.2 client with a login ticket (replaces the public AAEmu Launcher) |
 | `aaemu-clientdriver` | Lua driver for the real client (injected DLL + CLI), see `rust/docs/client/LUA-DRIVER.md` |
 | `aaemu-testclient` | Headless 1.2 client bot for live tests, parity checks and load tests |
-| `aaemu-tool-worldconverter`, `aaemu-tool-updatesfortransform` | Offline tools |
+| `aaemu-tool-worldconverter`, `aaemu-tool-updatesfortransform`, `aaemu-tool-aipaths` | Offline tools (`aaemu-aipaths` generates `Data/Path` routes from the 10.x client) |
 | `xtask` | `cargo xtask ci`, `dev` and `publish` |
 
 What this means for contributors:

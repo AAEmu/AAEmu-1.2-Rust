@@ -9,6 +9,7 @@ pub mod funcs;
 pub mod interactions;
 pub mod logic;
 pub mod manager;
+pub mod natural;
 pub mod packets;
 pub mod phase;
 pub mod phase_funcs;
@@ -50,6 +51,14 @@ pub async fn save(
 ) -> crate::Result<usize> {
     if stage == SaveStage::BeforeItems {
         server.systems.npcs.doodads.persistence.flush().await?;
+        server
+            .systems
+            .npcs
+            .doodads
+            .persistence
+            .natural
+            .flush(&server.db)
+            .await;
     }
     Ok(0)
 }
