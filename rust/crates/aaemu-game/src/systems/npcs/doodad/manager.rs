@@ -381,7 +381,10 @@ fn create_player_doodad_with_labor(
         (c.id, c.unit.name.clone(), c.unit.transform.zone_id)
     };
     tracing::warn!("{char_name} is placing a doodad {id} at position {x} {y} {z}");
-    let world = server.world.world_of(&pobj)?;
+    let Some(world) = server.world.world_of(&pobj) else {
+        tracing::warn!("{char_name}: doodad {id} not placed: character is in no world");
+        return None;
+    };
     let economy = server.systems.npcs.hooks.economy.get();
 
     let target_house = if ignore_houses {
@@ -398,7 +401,12 @@ fn create_player_doodad_with_labor(
     }
 
     // C#: Create returns null for an unknown template (NullReferenceException).
-    let doodad = create(server, &world, 0, id, Some(&pobj), true)?;
+    let Some(doodad) = create(server, &world, 0, id, Some(&pobj), true) else {
+        tracing::warn!(
+            "{char_name}: doodad {id} not placed: unknown doodad template or create failed"
+        );
+        return None;
+    };
     {
         let mut d = doodad.data();
         // Persist only after the placement item has been successfully consumed.
@@ -478,6 +486,10 @@ fn create_player_doodad_with_labor(
             return None;
         };
         if !items.contains(&preferred.template_id) {
+            tracing::warn!(
+                "{char_name}: doodad {id} not placed: source item {item_id} (template {}) is not a seed of this doodad (valid item templates {items:?})",
+                preferred.template_id
+            );
             delete(server, &world, &doodad);
             server.ids.object.release_id(doodad.obj_id);
             return None;
@@ -497,6 +509,9 @@ fn create_player_doodad_with_labor(
     if let Some(h) = &economy {
         if item_id > 0 && !h.try_consume_doodad_source_item(server, player, id, item_id, labor_cost)
         {
+            tracing::warn!(
+                "{char_name}: doodad {id} not placed: could not consume source item {item_id} (labor cost {labor_cost})"
+            );
             delete(server, &world, &doodad);
             server.ids.object.release_id(doodad.obj_id);
             return None;
@@ -555,9 +570,16 @@ pub fn handle_create_doodad(server: &GameServer, player: &PlayerRef, p: &CSCreat
         h.item_ids_from_doodad(server, p.id)
             .contains(&item.template_id)
     }) {
+        tracing::warn!(
+            "CreateDoodad, item {} (template {}) cannot place doodad {}",
+            p.item_id,
+            item.template_id,
+            p.id
+        );
         return;
     }
     let Some(template) = server.game_data.systems.npcs.doodad.template(p.id) else {
+        tracing::warn!("CreateDoodad, unknown doodad template {}", p.id);
         return;
     };
     let player_pos = world.world_pos_rot(&WorldObject::from(player));
@@ -570,10 +592,20 @@ pub fn handle_create_doodad(server: &GameServer, player: &PlayerRef, p: &CSCreat
     let distance_squared =
         (p.x - player_pos.x).powi(2) + (p.y - player_pos.y).powi(2) + (p.z - player_pos.z).powi(2);
     if distance_squared > range * range {
+        tracing::warn!(
+            "CreateDoodad, doodad {} is {:.1} m away, range {range}",
+            p.id,
+            distance_squared.sqrt()
+        );
         return;
     }
     let target_zone = world.template.zone_id_at(p.x, p.y);
     if template.restrict_zone_id != 0 && template.restrict_zone_id != target_zone {
+        tracing::warn!(
+            "CreateDoodad, doodad {} is restricted to zone {}, target zone is {target_zone}",
+            p.id,
+            template.restrict_zone_id
+        );
         return;
     }
     // Get cost from related skill
@@ -616,6 +648,7 @@ pub fn handle_create_doodad(server: &GameServer, player: &PlayerRef, p: &CSCreat
         return;
     }
     let Ok(labor_cost) = i16::try_from(labor_cost) else {
+        tracing::warn!("CreateDoodad, labor cost {labor_cost} out of range");
         return;
     };
     create_player_doodad_with_labor(
