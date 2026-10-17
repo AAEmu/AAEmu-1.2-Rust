@@ -1297,6 +1297,19 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   of the asked-for names is in one). `Rec._Speed`, `Rec._PathType` and `Closed` are not encoded:
   every asked-for path has `Closed=0` and the route plays once.
 
+* systems::ai (2026-10-17): `Simulation` no longer indexes a route with another file's length.
+  The C# `ReadPath` returns early for an already cached file name without refreshing `MovePath`
+  (the raw lines of the last file read), while `OnMove` / `GoToPath` took the end of the route and
+  the first target from `MovePath` and the points from `Path`. After route A -> route B -> cached
+  A the two disagreed and `Path[MoveStepIndex]` threw in the C# (a swallowed exception in the task
+  there); in the Rust port it panicked in the scheduled move task, poisoned the NPC's simulation
+  lock and every later AI tick of that NPC panicked on `simulation poisoned` until a restart
+  (`index out of bounds: the len is 5 but the index is 5`). Deviation: all length, emptiness and
+  target checks use `Path` (the parsed points of the selected route) via `Simulation::advance`, an
+  index outside it (also a one-point route turning back) logs a warning with the NPC and file name
+  and stops the move, and `lock_sim` recovers a poisoned simulation lock (clears the poison)
+  instead of panicking. The back and forth semantics are unchanged.
+
 * systems::npcs (2026-10-16): `Data/Portal/worldgates.json` has generated entries. The `Return`
   special effect (type 25) with a non-zero `value1` teleports to the world gate of that
   `return_points.id`, but the file only held 26 hand recorded gates, so quest skills such as
