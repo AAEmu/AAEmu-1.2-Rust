@@ -30,7 +30,9 @@ use crate::systems::skills::data::effects::EffectTemplate;
 use crate::systems::skills::data::EffectKind;
 use crate::systems::skills::handlers::{start_skill, CSStartSkillPacket};
 use crate::systems::skills::tests::{damage_effect, skill_effect, skill_template};
-use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+use crate::systems::skills::types::{
+    BuffEventTriggerKind, SkillCastTarget, SkillCaster, SkillObject,
+};
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
 use crate::world::{Entity, NpcRef, PlayerRef, WorldObject};
 
@@ -42,6 +44,14 @@ const KILL_SKILL: u32 = 10_002;
 const USE_SKILL: u32 = 10_003;
 /// 50 damage with `CheckCrime`.
 const CRIME_SKILL: u32 = 10_004;
+
+/// A channel of 80 ms whose target buff (`CHANNEL_BUFF`, 5 s) outlasts the channel, like
+/// 'Extract Earth Crystal' (skill 18449: 4 s channel, buff 3896 with 6 s).
+const CHANNEL_SKILL: u32 = 10_005;
+/// Applies `NET_BUFF` (40 ms) to the target, like 'Capture Crayfish' (skill 14698, buff 1963).
+const NET_SKILL: u32 = 10_006;
+const CHANNEL_BUFF: u32 = 62_001;
+const NET_BUFF: u32 = 62_002;
 
 /// NPC template of `npc_game_data` (level 10, KillExp 140).
 const VILLAGER: u32 = 200;
@@ -169,6 +179,62 @@ fn game_data() -> GameData {
         t.effects.push(skill_effect(effect_type, kind, actual));
         s.add_skill(t);
     }
+
+    // Quest-item grants through a buff's Timeout trigger (special effect 27, GainItem).
+    s.add_effect(
+        EffectKind::SpecialEffect,
+        EffectTemplate::Special(crate::systems::skills::data::effects::SpecialEffect {
+            id: 7_100,
+            special_effect_type_id: 27,
+            value1: QUEST_ITEM as i32,
+            value2: 0,
+            value3: 0,
+            value4: 0,
+        }),
+        0,
+    );
+    s.add_effect(
+        EffectKind::BuffEffect,
+        EffectTemplate::Buff(crate::systems::skills::data::effects::BuffEffect {
+            id: 8_100,
+            buff_id: Some(NET_BUFF),
+            chance: 100,
+            stack: 1,
+            ab_level: 0,
+        }),
+        0,
+    );
+    for (buff_id, duration) in [(CHANNEL_BUFF, 5_000), (NET_BUFF, 40)] {
+        s.add_buff(crate::systems::skills::data::BuffTemplate {
+            id: buff_id,
+            kind: 2,
+            duration,
+            stack_rule: 1,
+            ..Default::default()
+        });
+        s.buff_triggers.insert(
+            buff_id,
+            vec![crate::systems::skills::data::BuffTriggerTemplate {
+                id: buff_id,
+                kind: BuffEventTriggerKind::Timeout as u16,
+                effect_on_source: true,
+                effect: (EffectKind::SpecialEffect, 7_100),
+                use_damage_amount: false,
+                use_original_source: true,
+                target_buff_tag_id: 0,
+                target_no_buff_tag_id: 0,
+                synergy: false,
+            }],
+        );
+    }
+    let mut channel = skill_template(CHANNEL_SKILL);
+    channel.channeling_time = 80;
+    channel.channeling_target_buff_id = CHANNEL_BUFF;
+    s.add_skill(channel);
+    let mut net = skill_template(NET_SKILL);
+    net.effects
+        .push(skill_effect(8_100, EffectKind::BuffEffect, 8_100));
+    s.add_skill(net);
 
     let d = &mut gd.systems.npcs.doodad;
     for id in [DOODAD_TEMPLATE, SMALL_BLOODSTAIN, SMALL_BLOODSTAIN + 1] {
@@ -869,6 +935,80 @@ async fn item_skill_hooks_use_the_economy_inventory() {
     assert!(items
         .weapon_holdable(&server, &WorldObject::from(&a.p), 15)
         .is_none());
+}
+
+/// Waits up to `ms` for `done`.
+async fn wait_until(ms: u64, mut done: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(ms);
+    while !done() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test]
+async fn buff_timeout_trigger_grants_the_quest_item_when_the_buff_expires() {
+    // 'Capture Crayfish': the skill applies a short buff whose Timeout trigger grants the item.
+    let server = server_with(false);
+    let mut a = pc(&server, 1, "Fisher", 100.0);
+    let npc = villager(&server, 0x200, 1_000);
+    let items = server.systems.skills.ext.items();
+    cast(
+        &server,
+        &mut a,
+        NET_SKILL,
+        SkillCastTarget::Unit(npc.obj_id),
+    );
+    assert_eq!(items.item_count(&server, &a.p, QUEST_ITEM), 0);
+    wait_until(1_000, || items.item_count(&server, &a.p, QUEST_ITEM) > 0).await;
+    assert_eq!(items.item_count(&server, &a.p, QUEST_ITEM), 1);
+}
+
+#[tokio::test]
+async fn completed_channel_with_a_target_buff_grants_the_timeout_trigger_item() {
+    // 'Extract Earth Crystal': the channel ends (80 ms) long before the target buff would
+    // expire (5 s); finishing the channel removes the buff, which grants the item.
+    let server = server_with(false);
+    let mut a = pc(&server, 1, "Miner", 100.0);
+    let npc = villager(&server, 0x200, 1_000);
+    let items = server.systems.skills.ext.items();
+    cast(
+        &server,
+        &mut a,
+        CHANNEL_SKILL,
+        SkillCastTarget::Unit(npc.obj_id),
+    );
+    assert!(npc.data().unit.buffs.check_buff(CHANNEL_BUFF));
+    assert_eq!(items.item_count(&server, &a.p, QUEST_ITEM), 0);
+    wait_until(1_000, || !npc.data().unit.buffs.check_buff(CHANNEL_BUFF)).await;
+    assert!(!npc.data().unit.buffs.check_buff(CHANNEL_BUFF));
+    assert_eq!(items.item_count(&server, &a.p, QUEST_ITEM), 1);
+}
+
+#[tokio::test]
+async fn cancelled_channel_does_not_grant_the_timeout_trigger_item() {
+    let server = server_with(false);
+    let mut a = pc(&server, 1, "Miner", 100.0);
+    let npc = villager(&server, 0x200, 1_000);
+    let items = server.systems.skills.ext.items();
+    cast(
+        &server,
+        &mut a,
+        CHANNEL_SKILL,
+        SkillCastTarget::Unit(npc.obj_id),
+    );
+    assert!(npc.data().unit.buffs.check_buff(CHANNEL_BUFF));
+    let skill =
+        a.p.data()
+            .unit
+            .skill_state
+            .skill_task
+            .as_ref()
+            .map(|t| t.skill.clone())
+            .expect("channel running");
+    crate::systems::skills::skill::stop(&server, &skill, &WorldObject::from(&a.p), 0);
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(!npc.data().unit.buffs.check_buff(CHANNEL_BUFF));
+    assert_eq!(items.item_count(&server, &a.p, QUEST_ITEM), 0);
 }
 
 #[tokio::test]
