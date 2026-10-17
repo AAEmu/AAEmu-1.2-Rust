@@ -359,13 +359,16 @@ impl Marshal for BlockedInfo {
 /// constructor (`Body` null = empty).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CompletedQuest {
-    pub id: u16,
+    /// Block id (`questId / 64`). The C# `ushort` wrapped for quest ids >= 4194304 (the event
+    /// quests 8000001-8000004) and marked another, nonexistent quest; the column is 32 bits
+    /// wide, so the full block id is kept. The client wire (`SCCompletedQuests`) is 16 bits.
+    pub id: u32,
     pub body: Vec<u8>,
 }
 
 impl CompletedQuest {
     /// `new CompletedQuest(id)`: `Body = new BitArray(64)` (8 zero bytes).
-    pub fn new(id: u16) -> Self {
+    pub fn new(id: u32) -> Self {
         Self {
             id,
             body: vec![0; 8],

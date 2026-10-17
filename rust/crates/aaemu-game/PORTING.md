@@ -676,6 +676,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   stone-throwing plot 349, skill 11268, a `use_skill_as_reagent` item the effects consume) has
   nothing left to unlock, so the packet is skipped with a `debug!` (plot / skill / item id)
   instead of the former `ERROR` ("SkillSourceItem ... no longer exists").
+  `Character.ItemUse(item)` of the plot end takes the template id captured at cast start
+  (`QuestSkillHooks::item_use_template`) instead of looking the item up by id, so the quest
+  item-use event still fires for a consumed source item (quests 1315, 3541), as in the C#.
 * net (game connections): sending never blocks and C# had no limit; here a client with more than
   16 MiB queued, or one that accepts no data for 20 s, is disconnected (`net::outbox`,
   `net::listener`). Broadcasts encode a packet once for all recipients.
@@ -822,6 +825,37 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   reporting, per-quest NPC/doodad reporting, doodad reward selection/finalization, and OR
   requirement evaluation. Timed saved deadlines, aggro credit, CheckSphere, and authored
   content gaps remain tracked in `Docs/wiki/Quest-Audit.md`.
+* systems::quests (engine fixes, quest-audit 2026-10-17):
+  - `TryCompleteQuestAsLetItDone` (C# only set `Step = Reward`): the quest also gets the
+    `Completed` status, and a quest without a Reward step is finished at once (C# hung there:
+    quest 5134 and the data stubs). With a Ready step but no Reward step the early completion
+    turns the quest in at the Ready step (report acts satisfied, so its copper / items are paid);
+    with neither step it completes directly. No level based exp / copper is added for a quest
+    without a Reward step: the C# only added it while running the Reward step's components, and
+    the 328 level>0 quests without a Reward component are equipment upgrade stages, instance
+    staging quests and `reserve` stubs whose reward is the item or nothing.
+  - `DropQuest` runs the act cleanup (`QuestCleanup`, consuming cleanup-only items) for every
+    quest that reached its Reward step or `Completed` status, so early-completed quests no
+    longer keep their cleanup items (the C# ran it for every drop; the Rust port restricted
+    it to completions, which the early-completion path never matched).
+  - Selective rewards: the client sends a 1-based index (`quest_context_task` Lua:
+    `GetSelectiveItemIndex()` must be >= 1 when `GetQuestContextRewardSelectiveItemAllCount` is
+    > 0, and is passed unchanged to `TryCompleteQuestContext`), matching the 1-based
+    `ThisSelectiveIndex`. Quests that reach their Reward step without a valid choice (no report
+    act: auto-complete / journal reports send 0) now get the first selective item instead of none.
+  - A saved quest with status Ready on its Progress step is legal for LetItDone and score
+    quests (the status shows "ready to turn in", the step is left by a report). On any other
+    quest the status is stale: `load_from_rows` resets it to Progress and the load evaluation
+    promotes the quest to Ready when the objectives are complete.
+  - A score quest whose Progress step has no objective acts (5641: score 100, no acts) counts
+    its score as reached (C#: stuck forever). A `COMPLETE_QUEST_CONTEXT` requirement that names
+    the component's own quest (6596) is dropped at load (C#: never acceptable).
+  - `CompletedQuest.id` is 32 bits (the C# `ushort` wrapped for quest ids >= 4194304 and marked
+    nonexistent quest 3805700 instead of the event quests 8000001-8000004). The column is
+    `int unsigned`, stored rows are unchanged. `SCCompletedQuests` has a 16 bit block id, so
+    such blocks are not sent (the client cannot show them); a warning names the first one.
+  - Refused quest requests (`AddQuest`, `TryCompleteQuestAsLetItDone`) are logged at WARN with
+    character, quest and reason; the same refusal repeated within a minute goes to DEBUG.
 * systems::social: saves of guilds / families run inline in the handler (C# synchronous); a
   failed guild save keeps the removed-member ids for the next attempt. `ExpeditionConfig`
   defaults to the shipped `Expedition.json` (C# throws without the section). Player names /
@@ -1326,6 +1360,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   cast with result 93 ("Invalid target"). It now follows the zone server. Missing authored `tuto_move`,
   `public_farm*` and `public_mate*` paths also remain data gaps.
 * `BuffTrigger.Execute` / `TimeoutBuffTrigger.Execute` logged "Owner is not a Unit" and returned for every trigger of a buff owned by a doodad (hostile area skills such as 16486 hit factionless doodads, so e.g. the shrink buffs start on them). The trigger can never run for a doodad, so `subscribe_triggers` now skips non-unit owners (trace log) instead of subscribing a trigger that only warns; the `execute_trigger` guard stays as a safety net and names the buff and owner. Behaviour is otherwise unchanged.
+* systems::economy (quest item events, 2026-10-17): the C# raised no `OnConsumedItem` for a partial
+  `CSDestroyItem` (only the full destroy, through `RemoveItem`) and none for the giving side of a
+  trade (`AddOrMoveExistingItem` only notified the destination container's owner). `ItemGather`
+  objectives therefore kept counting items that had left the character. Here the partial destroy
+  (`item_handlers::CSDestroyItemPacket`) pushes `ItemFx::Consumed` for the destroyed units and
+  `ItemContainer::add_or_move_inner` pushes it for the source owner when the item moves between two
+  characters' bags (trade), so the objective is recounted when items leave.
 
 ### Ranking boards (Rust only)
 

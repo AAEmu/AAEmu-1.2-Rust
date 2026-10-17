@@ -1588,7 +1588,9 @@ impl<'a> Run<'a> {
                 }
             }
         }
-        if t.level > 0 {
+        // The level based exp / copper is added while the Reward step's components run: a quest
+        // without a Reward step is not paid it (as in the C#).
+        if t.level > 0 && t.first_component(&d.components, kind::REWARD).is_some() {
             if let Some(s) = d.supplies(t.level) {
                 exp |= s.exp > 0;
                 copper |= s.copper > 0;

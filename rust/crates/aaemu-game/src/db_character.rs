@@ -572,7 +572,7 @@ pub async fn load_character_details(server: &GameServer, c: &mut Character) -> R
             .await?
     {
         c.quests.completed.push(CompletedQuest {
-            id: int(&r, "id")? as u16,
+            id: int(&r, "id")? as u32,
             body: r.try_get("data")?,
         });
     }
