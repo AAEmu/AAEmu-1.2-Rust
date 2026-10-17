@@ -177,3 +177,124 @@ async fn a_panicking_quest_operation_leaves_the_character_usable() {
         1
     );
 }
+
+/// Quest 30 starts by entering sphere 5 (a 50 m sign sphere around the test character).
+fn sphere_starter_quest(d: &mut super::data::QuestData) {
+    d.add_template(quest(30));
+    d.add_component(component(301, 30, kind::START));
+    d.add_act(301, 301, 301, 0, ActKind::ConAcceptSphere { sphere_id: 5 });
+    d.add_component(component(302, 30, kind::PROGRESS));
+    d.add_act(
+        302,
+        302,
+        302,
+        1,
+        ActKind::ObjMonsterHunt {
+            npc_id: 600,
+            use_alias: false,
+            alias_id: 0,
+            highlight_doodad_id: 0,
+            highlight_doodad_phase: -1,
+        },
+    );
+    d.sphere_quests.insert(
+        1,
+        super::data::DbSphereQuest {
+            id: 1,
+            quest_id: 30,
+            quest_trigger_id: 0,
+        },
+    );
+    d.sphere_quest_order.push(1);
+    d.spheres.insert(
+        5,
+        super::data::DbSphere {
+            id: 5,
+            sphere_detail_id: 1,
+            sphere_detail_type: "SphereQuest".into(),
+            ..super::data::DbSphere::default()
+        },
+    );
+    d.sphere_order.push(5);
+}
+
+#[tokio::test]
+async fn relogin_inside_a_sphere_fires_the_enter_event_again() {
+    let (server, _rec) = server_with(sphere_starter_quest);
+    server.systems.quests.spheres.load(
+        &server.game_data.systems.quests,
+        &[super::data::RawSignSphere {
+            zone_id: 1,
+            quest_id: 30,
+            component_id: 301,
+            local: [100.0, 100.0, 100.0],
+            radius: 50.0,
+        }],
+        "main_world",
+        |_| (0, 0),
+    );
+    let client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(&server, &client, character(), 0x100);
+
+    // Entering the sphere starts the quest.
+    server.systems.quests.spheres.tick(&server);
+    assert!(events::has_quest(&player, 30));
+
+    // Still inside: dropping the quest does not restart it by itself ...
+    events::drop_quest(&server, &player, 30, false);
+    assert!(!events::has_quest(&player, 30));
+    server.systems.quests.spheres.tick(&server);
+    assert!(!events::has_quest(&player, 30));
+
+    // ... but logging out forgets the last position, so the next login inside the sphere
+    // is an enter again.
+    super::on_leave_world(&server, player.character_id);
+    server.systems.quests.spheres.tick(&server);
+    assert!(events::has_quest(&player, 30));
+}
+
+#[tokio::test]
+async fn leaving_the_world_drops_the_sphere_triggers_of_the_character() {
+    let (server, _rec) = server_with(|d| {
+        d.add_template(quest(20));
+        d.add_component(component(201, 20, kind::START));
+        d.add_act(201, 201, 201, 0, ActKind::ConAutoComplete);
+        d.add_component(component(202, 20, kind::PROGRESS));
+        d.add_act(
+            202,
+            202,
+            202,
+            1,
+            ActKind::ObjSphere {
+                sphere_id: 0,
+                npc_id: 0,
+                highlight_doodad_id: 0,
+                highlight_doodad_phase: -1,
+                use_alias: false,
+                alias_id: 0,
+            },
+        );
+    });
+    server.systems.quests.spheres.load(
+        &server.game_data.systems.quests,
+        &[super::data::RawSignSphere {
+            zone_id: 1,
+            quest_id: 20,
+            component_id: 202,
+            local: [100.0, 100.0, 100.0],
+            radius: 50.0,
+        }],
+        "main_world",
+        |_| (0, 0),
+    );
+    let client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(&server, &client, character(), 0x100);
+    events::add_quest(&server, &player, 20, false);
+    server.systems.quests.run_queued_evaluations(&server);
+    server.systems.quests.spheres.tick(&server);
+    assert_eq!(server.systems.quests.spheres.triggers().len(), 1);
+
+    super::on_leave_world(&server, player.character_id);
+    server.systems.quests.spheres.tick(&server);
+    assert!(server.systems.quests.spheres.triggers().is_empty());
+}

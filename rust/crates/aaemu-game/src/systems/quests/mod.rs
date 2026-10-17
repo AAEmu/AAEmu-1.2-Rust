@@ -452,6 +452,7 @@ pub fn on_character_selected(server: &GameServer, player: &PlayerRef) {
 pub fn on_leave_world(server: &GameServer, character_id: u32) {
     server.systems.quests.remove_quest_timer(character_id, 0);
     server.systems.quests.forget_entering(character_id);
+    server.systems.quests.spheres.forget_character(character_id);
 }
 
 /// `CSNotifyInGameCompletedPacket` (`WorldManager.OnPlayerJoin`): releases the evaluations
