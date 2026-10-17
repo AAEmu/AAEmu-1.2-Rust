@@ -142,6 +142,41 @@ pub fn before_death(server: &GameServer, npc: &NpcRef, killer: Option<&WorldObje
     }
 
     let killer_player = killer.and_then(|k| k.as_player().cloned());
+
+    // Tag Share contributors: quest progress (not XP / loot) for every damage contributor and
+    // their party / raid mates in range, on top of the eligible players (or the killer when
+    // nobody is eligible).
+    let mut tag_share_extra: Vec<PlayerRef> = Vec::new();
+    if server.config.world.tag_share_enabled {
+        let mut credited: Vec<u32> = eligible.iter().map(|p| p.obj_id).collect();
+        if eligible.is_empty() {
+            if let Some(ck) = &killer_player {
+                credited.push(ck.obj_id);
+            }
+        }
+        for contributor in all_contributors(server, &me, &dealers) {
+            if !credited.contains(&contributor.obj_id) {
+                credited.push(contributor.obj_id);
+                tag_share_extra.push(contributor);
+            }
+        }
+    }
+
+    // Everyone who gets a direct kill event below. Marked before the first event is raised so a
+    // team-shared ObjZoneKill of one of them cannot count the kill a second time for another.
+    {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let direct = eligible
+            .iter()
+            .chain(killer_player.iter().filter(|_| eligible.is_empty()))
+            .chain(tag_share_extra.iter());
+        for p in direct {
+            p.data()
+                .skill_char
+                .note_direct_kill_credit(npc.obj_id, now_ms);
+        }
+    }
+
     if eligible.is_empty() {
         if let Some(ck) = &killer_player {
             if let Some(q) = &quests {
@@ -178,25 +213,12 @@ pub fn before_death(server: &GameServer, npc: &NpcRef, killer: Option<&WorldObje
         }
     }
 
-    // Tag Share: quest progress (not XP / loot) for every damage contributor and their
-    // party / raid mates in range, after both branches above.
-    if server.config.world.tag_share_enabled {
-        let mut credited: Vec<u32> = eligible.iter().map(|p| p.obj_id).collect();
-        if eligible.is_empty() {
-            if let Some(ck) = &killer_player {
-                credited.push(ck.obj_id);
-            }
+    // Tag Share: quest progress for the contributors after both branches above.
+    for contributor in &tag_share_extra {
+        if let Some(q) = &quests {
+            q.on_npc_killed(server, contributor, npc);
         }
-        for contributor in all_contributors(server, &me, &dealers) {
-            if credited.contains(&contributor.obj_id) {
-                continue;
-            }
-            credited.push(contributor.obj_id);
-            if let Some(q) = &quests {
-                q.on_npc_killed(server, &contributor, npc);
-            }
-            report_kill(server, &contributor, npc);
-        }
+        report_kill(server, contributor, npc);
     }
 }
 

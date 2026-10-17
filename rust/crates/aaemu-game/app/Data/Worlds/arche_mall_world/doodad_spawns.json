@@ -17934,5 +17934,15 @@
     },
     "funcGroupId": 19948,
     "Scale": 1.0
+  },
+  {
+    "UnitId": 7205,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 3731.658,
+      "Y": 4502.257,
+      "Z": 145.083,
+      "Yaw": 35
+    }
   }
 ]

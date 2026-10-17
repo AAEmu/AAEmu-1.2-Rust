@@ -388480,5 +388480,585 @@
       "Z": 165.1119,
       "Yaw": 135.0
     }
+  },
+  {
+    "UnitId": 1361,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 6362.59,
+      "Y": 13293.46,
+      "Z": 933.3,
+      "Yaw": 0
+    }
+  },
+  {
+    "UnitId": 1361,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 6366.643,
+      "Y": 13301.56,
+      "Z": 935.979,
+      "Yaw": 0
+    }
+  },
+  {
+    "UnitId": 1361,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 6386.627,
+      "Y": 13277.583,
+      "Z": 935.294,
+      "Yaw": 0
+    }
+  },
+  {
+    "UnitId": 1361,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 6390.324,
+      "Y": 13285.808,
+      "Z": 938.444,
+      "Yaw": 0
+    }
+  },
+  {
+    "UnitId": 1361,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 6393.257,
+      "Y": 13286.603,
+      "Z": 938.795,
+      "Yaw": 30
+    }
+  },
+  {
+    "UnitId": 1361,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 6408.314,
+      "Y": 13263.577,
+      "Z": 940.787,
+      "Yaw": 165
+    }
+  },
+  {
+    "UnitId": 1361,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 6408.939,
+      "Y": 13260.124,
+      "Z": 940.456,
+      "Yaw": 61
+    }
+  },
+  {
+    "UnitId": 1361,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 6412.248,
+      "Y": 13271.271,
+      "Z": 942.516,
+      "Yaw": -65
+    }
+  },
+  {
+    "UnitId": 1361,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 6427.589,
+      "Y": 13247.073,
+      "Z": 937.257,
+      "Yaw": -123
+    }
+  },
+  {
+    "UnitId": 1361,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 6431.269,
+      "Y": 13247.846,
+      "Z": 937.78,
+      "Yaw": 138
+    }
+  },
+  {
+    "UnitId": 1361,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 6435.569,
+      "Y": 13259.075,
+      "Z": 940.856,
+      "Yaw": -142
+    }
+  },
+  {
+    "UnitId": 1361,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 6436.575,
+      "Y": 13255.206,
+      "Z": 939.936,
+      "Yaw": -53
+    }
+  },
+  {
+    "UnitId": 1361,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 6454.536,
+      "Y": 13232.563,
+      "Z": 933.541,
+      "Yaw": 146
+    }
+  },
+  {
+    "UnitId": 1361,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 6458.857,
+      "Y": 13240.269,
+      "Z": 936.913,
+      "Yaw": -20
+    }
+  },
+  {
+    "UnitId": 1375,
+    "Title": "spawn-import: clip 10x-verified",
+    "Position": {
+      "X": 6960.346,
+      "Y": 13185.095,
+      "Z": 1028.7,
+      "Yaw": 0
+    }
+  },
+  {
+    "UnitId": 1375,
+    "Title": "spawn-import: clip 10x-verified",
+    "Position": {
+      "X": 6963.051,
+      "Y": 13179.073,
+      "Z": 1028.62,
+      "Yaw": 0
+    }
+  },
+  {
+    "UnitId": 1375,
+    "Title": "spawn-import: clip 10x-verified",
+    "Position": {
+      "X": 6964.276,
+      "Y": 13191.874,
+      "Z": 1029.42,
+      "Yaw": 0
+    }
+  },
+  {
+    "UnitId": 1375,
+    "Title": "spawn-import: clip 10x-verified",
+    "Position": {
+      "X": 6967.224,
+      "Y": 13187.418,
+      "Z": 1029.05,
+      "Yaw": 0
+    }
+  },
+  {
+    "UnitId": 1375,
+    "Title": "spawn-import: clip 10x-verified",
+    "Position": {
+      "X": 6967.237,
+      "Y": 13182.091,
+      "Z": 1027.91,
+      "Yaw": 0
+    }
+  },
+  {
+    "UnitId": 1375,
+    "Title": "spawn-import: clip 10x-verified",
+    "Position": {
+      "X": 6968.402,
+      "Y": 13176.525,
+      "Z": 1028.19,
+      "Yaw": 0
+    }
+  },
+  {
+    "UnitId": 1375,
+    "Title": "spawn-import: clip 10x-verified",
+    "Position": {
+      "X": 6973.423,
+      "Y": 13179.169,
+      "Z": 1027.3,
+      "Yaw": 0
+    }
+  },
+  {
+    "UnitId": 1531,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 6998.215,
+      "Y": 12687.401,
+      "Z": 784.666,
+      "Yaw": 24
+    }
+  },
+  {
+    "UnitId": 2422,
+    "Title": "spawn-import: neighbor 10x-verified",
+    "Position": {
+      "X": 6484.544,
+      "Y": 12377.207,
+      "Z": 720.53,
+      "Yaw": 0
+    }
+  },
+  {
+    "UnitId": 2422,
+    "Title": "spawn-import: neighbor 10x-verified",
+    "Position": {
+      "X": 6491.048,
+      "Y": 12371.51,
+      "Z": 720.882,
+      "Yaw": 0
+    }
+  },
+  {
+    "UnitId": 2422,
+    "Title": "spawn-import: neighbor 10x-verified",
+    "Position": {
+      "X": 6493.345,
+      "Y": 12375.353,
+      "Z": 720.513,
+      "Yaw": 0
+    }
+  },
+  {
+    "UnitId": 2519,
+    "Title": "spawn-import: terrain git-3.0+",
+    "Position": {
+      "X": 6950.9,
+      "Y": 13360.16,
+      "Z": 1015.89,
+      "Yaw": -118.001
+    }
+  },
+  {
+    "UnitId": 3283,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 11167.946,
+      "Y": 11989.171,
+      "Z": 145.677,
+      "Yaw": 171
+    }
+  },
+  {
+    "UnitId": 3283,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 15423.3,
+      "Y": 11567.166,
+      "Z": 107.836,
+      "Yaw": 180
+    }
+  },
+  {
+    "UnitId": 3283,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 16756.724,
+      "Y": 9006.455,
+      "Z": 120.49,
+      "Yaw": 48
+    }
+  },
+  {
+    "UnitId": 3283,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 20904.968,
+      "Y": 13153.778,
+      "Z": 114.373,
+      "Yaw": -130
+    }
+  },
+  {
+    "UnitId": 5405,
+    "Title": "spawn-import: terrain git-3.0+",
+    "Position": {
+      "X": 18730.78,
+      "Y": 8478.544,
+      "Z": 199.585,
+      "Yaw": 34.999
+    }
+  },
+  {
+    "UnitId": 5849,
+    "Title": "spawn-import: terrain git-3.0+",
+    "Position": {
+      "X": 14604.27,
+      "Y": 15040.64,
+      "Z": 106.534,
+      "Yaw": -25
+    }
+  },
+  {
+    "UnitId": 5849,
+    "Title": "spawn-import: terrain git-3.0+",
+    "Position": {
+      "X": 14810.84,
+      "Y": 15009.97,
+      "Z": 119.318,
+      "Yaw": 10.001
+    }
+  },
+  {
+    "UnitId": 5849,
+    "Title": "spawn-import: terrain git-3.0+",
+    "Position": {
+      "X": 15158.79,
+      "Y": 15195.33,
+      "Z": 117.958,
+      "Yaw": 31.001
+    }
+  },
+  {
+    "UnitId": 5898,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 26387.46,
+      "Y": 6620.766,
+      "Z": 385.82,
+      "Yaw": -90
+    }
+  },
+  {
+    "UnitId": 6928,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 15195.604,
+      "Y": 22399.889,
+      "Z": 63.164,
+      "Yaw": 70
+    }
+  },
+  {
+    "UnitId": 6929,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 15384.307,
+      "Y": 22098.297,
+      "Z": 19.923,
+      "Yaw": 0
+    }
+  },
+  {
+    "UnitId": 6930,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 16198.206,
+      "Y": 23498.477,
+      "Z": 31.723,
+      "Yaw": 0
+    }
+  },
+  {
+    "UnitId": 6937,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 20914.295,
+      "Y": 25754.932,
+      "Z": 26.873,
+      "Yaw": 58
+    }
+  },
+  {
+    "UnitId": 6938,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 21051.1,
+      "Y": 25911.313,
+      "Z": 86.441,
+      "Yaw": -46
+    }
+  },
+  {
+    "UnitId": 6939,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 20948.556,
+      "Y": 26146.755,
+      "Z": 89.301,
+      "Yaw": 83
+    }
+  },
+  {
+    "UnitId": 7205,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 12696.654,
+      "Y": 16156.382,
+      "Z": 335.021,
+      "Yaw": -5
+    }
+  },
+  {
+    "UnitId": 7205,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 21771.446,
+      "Y": 8092.56,
+      "Z": 404.121,
+      "Yaw": 20
+    }
+  },
+  {
+    "UnitId": 7261,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 21738.908,
+      "Y": 23742.814,
+      "Z": 144.863,
+      "Yaw": -175
+    }
+  },
+  {
+    "UnitId": 7281,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 20098.652,
+      "Y": 24583.792,
+      "Z": 154.496,
+      "Yaw": 10
+    }
+  },
+  {
+    "UnitId": 7282,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 21130.441,
+      "Y": 24745.568,
+      "Z": 253.731,
+      "Yaw": 40
+    }
+  },
+  {
+    "UnitId": 7283,
+    "Title": "spawn-import: terrain 10x-verified",
+    "Position": {
+      "X": 20142.733,
+      "Y": 24779.4,
+      "Z": 188.916,
+      "Yaw": 158
+    }
+  },
+  {
+    "UnitId": 7694,
+    "Title": "spawn-import: terrain git-3.0+",
+    "Position": {
+      "X": 19394.1,
+      "Y": 27115.81,
+      "Z": 132.685,
+      "Yaw": -30.001
+    }
+  },
+  {
+    "UnitId": 7694,
+    "Title": "spawn-import: terrain git-3.0+",
+    "Position": {
+      "X": 19395.82,
+      "Y": 26971.39,
+      "Z": 132.567,
+      "Yaw": 50
+    }
+  },
+  {
+    "UnitId": 7694,
+    "Title": "spawn-import: terrain git-3.0+",
+    "Position": {
+      "X": 19506.96,
+      "Y": 27020.15,
+      "Z": 132.683,
+      "Yaw": 137
+    }
+  },
+  {
+    "UnitId": 8019,
+    "Title": "spawn-import: terrain git-3.0+",
+    "Position": {
+      "X": 11485.8,
+      "Y": 14676.48,
+      "Z": 139.212,
+      "Yaw": 128.002
+    }
+  },
+  {
+    "UnitId": 8020,
+    "Title": "spawn-import: terrain git-3.0+",
+    "Position": {
+      "X": 24362.2,
+      "Y": 8285.734,
+      "Z": 570.357,
+      "Yaw": -130
+    }
+  },
+  {
+    "UnitId": 8021,
+    "Title": "spawn-import: terrain git-3.0+",
+    "Position": {
+      "X": 24717.93,
+      "Y": 8382.04,
+      "Z": 636.885,
+      "Yaw": -61.999
+    }
+  },
+  {
+    "UnitId": 8042,
+    "Title": "spawn-import: terrain git-3.0+",
+    "Position": {
+      "X": 24355,
+      "Y": 9156.678,
+      "Z": 563.979,
+      "Yaw": -143.003
+    }
+  },
+  {
+    "UnitId": 8055,
+    "Title": "spawn-import: terrain git-3.0+",
+    "Position": {
+      "X": 14974.69,
+      "Y": 14732.7,
+      "Z": 144.746,
+      "Yaw": 93.999
+    }
+  },
+  {
+    "UnitId": 8235,
+    "Title": "spawn-import: terrain git-3.0+",
+    "Position": {
+      "X": 19394.1,
+      "Y": 27115.82,
+      "Z": 132.679,
+      "Yaw": -30.001
+    }
+  },
+  {
+    "UnitId": 8235,
+    "Title": "spawn-import: terrain git-3.0+",
+    "Position": {
+      "X": 19395.82,
+      "Y": 26971.4,
+      "Z": 132.565,
+      "Yaw": 50
+    }
+  },
+  {
+    "UnitId": 8235,
+    "Title": "spawn-import: terrain git-3.0+",
+    "Position": {
+      "X": 19506.95,
+      "Y": 27020.15,
+      "Z": 132.657,
+      "Yaw": 137
+    }
   }
 ]

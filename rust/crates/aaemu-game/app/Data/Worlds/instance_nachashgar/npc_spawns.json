@@ -1314,5 +1314,25 @@
       "Pitch": 0.0,
       "Yaw": 90.0
     }
+  },
+  {
+    "UnitId": 12976,
+    "Title": "spawn-import: neighbor exact-1.2",
+    "Position": {
+      "X": 914.365,
+      "Y": 857.423,
+      "Z": 132.264,
+      "Yaw": 90
+    }
+  },
+  {
+    "UnitId": 14413,
+    "Title": "spawn-import: neighbor exact-1.2",
+    "Position": {
+      "X": 336.712,
+      "Y": 373.168,
+      "Z": 151.699,
+      "Yaw": -45
+    }
   }
 ]

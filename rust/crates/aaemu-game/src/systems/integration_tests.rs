@@ -30,7 +30,9 @@ use crate::systems::skills::data::effects::EffectTemplate;
 use crate::systems::skills::data::EffectKind;
 use crate::systems::skills::handlers::{start_skill, CSStartSkillPacket};
 use crate::systems::skills::tests::{damage_effect, skill_effect, skill_template};
-use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+use crate::systems::skills::types::{
+    BuffEventTriggerKind, SkillCastTarget, SkillCaster, SkillObject,
+};
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
 use crate::world::{Entity, NpcRef, PlayerRef, WorldObject};
 
@@ -43,6 +45,14 @@ const USE_SKILL: u32 = 10_003;
 /// 50 damage with `CheckCrime`.
 const CRIME_SKILL: u32 = 10_004;
 
+/// A channel of 80 ms whose target buff (`CHANNEL_BUFF`, 5 s) outlasts the channel, like
+/// 'Extract Earth Crystal' (skill 18449: 4 s channel, buff 3896 with 6 s).
+const CHANNEL_SKILL: u32 = 10_005;
+/// Applies `NET_BUFF` (40 ms) to the target, like 'Capture Crayfish' (skill 14698, buff 1963).
+const NET_SKILL: u32 = 10_006;
+const CHANNEL_BUFF: u32 = 62_001;
+const NET_BUFF: u32 = 62_002;
+
 /// NPC template of `npc_game_data` (level 10, KillExp 140).
 const VILLAGER: u32 = 200;
 const VILLAGER_KILL_EXP: i32 = 140;
@@ -52,6 +62,13 @@ const SMALL_BLOODSTAIN: u32 = 877;
 
 const HUNT_QUEST: u32 = 100;
 const INTERACTION_QUEST: u32 = 200;
+/// `ObjZoneKill` with `team_share` / `is_party`, five villager kills.
+const ZONE_KILL_QUEST: u32 = 300;
+/// `ObjMonsterGroupHunt` of `VILLAGER_GROUP`.
+const GROUP_HUNT_QUEST: u32 = 400;
+const VILLAGER_GROUP: u32 = 7;
+/// `ObjZoneKill` of two player kills in the conflict zone group, `team_share` / `is_party`.
+const PVP_ZONE_KILL_QUEST: u32 = 500;
 
 /// `WorldInteractionType.Use`.
 const WI_USE: i32 = 19;
@@ -60,6 +77,16 @@ const QUEST_ITEM: u32 = 5_000;
 
 /// Quest `qid`: Start (auto) -> Progress (`act`, count 1) -> Ready (report to NPC 1).
 fn single_act_quest(d: &mut crate::systems::quests::data::QuestData, qid: u32, act: ActKind) {
+    single_act_quest_count(d, qid, act, 1);
+}
+
+/// [`single_act_quest`] with `count` objectives.
+fn single_act_quest_count(
+    d: &mut crate::systems::quests::data::QuestData,
+    qid: u32,
+    act: ActKind,
+    count: i32,
+) {
     d.add_template(QuestTemplate {
         id: qid,
         detail_id: crate::systems::quests::model::detail::NORMAL,
@@ -81,7 +108,7 @@ fn single_act_quest(d: &mut crate::systems::quests::data::QuestData, qid: u32, a
         ActKind::ConAutoComplete,
     );
     d.add_component(component(qid * 10 + 2, kind::PROGRESS));
-    d.add_act(qid * 10 + 2, qid * 10 + 2, qid * 10 + 2, 1, act);
+    d.add_act(qid * 10 + 2, qid * 10 + 2, qid * 10 + 2, count, act);
     d.add_component(component(qid * 10 + 3, kind::READY));
     d.add_act(
         qid * 10 + 3,
@@ -153,6 +180,62 @@ fn game_data() -> GameData {
         s.add_skill(t);
     }
 
+    // Quest-item grants through a buff's Timeout trigger (special effect 27, GainItem).
+    s.add_effect(
+        EffectKind::SpecialEffect,
+        EffectTemplate::Special(crate::systems::skills::data::effects::SpecialEffect {
+            id: 7_100,
+            special_effect_type_id: 27,
+            value1: QUEST_ITEM as i32,
+            value2: 0,
+            value3: 0,
+            value4: 0,
+        }),
+        0,
+    );
+    s.add_effect(
+        EffectKind::BuffEffect,
+        EffectTemplate::Buff(crate::systems::skills::data::effects::BuffEffect {
+            id: 8_100,
+            buff_id: Some(NET_BUFF),
+            chance: 100,
+            stack: 1,
+            ab_level: 0,
+        }),
+        0,
+    );
+    for (buff_id, duration) in [(CHANNEL_BUFF, 5_000), (NET_BUFF, 40)] {
+        s.add_buff(crate::systems::skills::data::BuffTemplate {
+            id: buff_id,
+            kind: 2,
+            duration,
+            stack_rule: 1,
+            ..Default::default()
+        });
+        s.buff_triggers.insert(
+            buff_id,
+            vec![crate::systems::skills::data::BuffTriggerTemplate {
+                id: buff_id,
+                kind: BuffEventTriggerKind::Timeout as u16,
+                effect_on_source: true,
+                effect: (EffectKind::SpecialEffect, 7_100),
+                use_damage_amount: false,
+                use_original_source: true,
+                target_buff_tag_id: 0,
+                target_no_buff_tag_id: 0,
+                synergy: false,
+            }],
+        );
+    }
+    let mut channel = skill_template(CHANNEL_SKILL);
+    channel.channeling_time = 80;
+    channel.channeling_target_buff_id = CHANNEL_BUFF;
+    s.add_skill(channel);
+    let mut net = skill_template(NET_SKILL);
+    net.effects
+        .push(skill_effect(8_100, EffectKind::BuffEffect, 8_100));
+    s.add_skill(net);
+
     let d = &mut gd.systems.npcs.doodad;
     for id in [DOODAD_TEMPLATE, SMALL_BLOODSTAIN, SMALL_BLOODSTAIN + 1] {
         d.templates.insert(
@@ -190,6 +273,62 @@ fn game_data() -> GameData {
             phase: 0,
         },
     );
+    single_act_quest_count(
+        q,
+        ZONE_KILL_QUEST,
+        ActKind::ObjZoneKill {
+            count_player_kill: 0,
+            count_npc: 5,
+            zone_id: 0,
+            team_share: true,
+            use_alias: false,
+            alias_id: 0,
+            lvl_min: 1,
+            lvl_max: 55,
+            is_party: true,
+            lvl_min_npc: 0,
+            lvl_max_npc: 0,
+            pc_faction_id: 0,
+            pc_faction_exclusive: false,
+            npc_faction_id: 0,
+            npc_faction_exclusive: false,
+        },
+        5,
+    );
+    single_act_quest(
+        q,
+        GROUP_HUNT_QUEST,
+        ActKind::ObjMonsterGroupHunt {
+            quest_monster_group_id: VILLAGER_GROUP,
+            use_alias: false,
+            alias_id: 0,
+            highlight_doodad_id: 0,
+            highlight_doodad_phase: -1,
+        },
+    );
+    single_act_quest_count(
+        q,
+        PVP_ZONE_KILL_QUEST,
+        ActKind::ObjZoneKill {
+            count_player_kill: 2,
+            count_npc: 0,
+            zone_id: u32::from(CONFLICT_GROUP),
+            team_share: true,
+            use_alias: false,
+            alias_id: 0,
+            lvl_min: 1,
+            lvl_max: 55,
+            is_party: true,
+            lvl_min_npc: 0,
+            lvl_max_npc: 0,
+            pc_faction_id: 0,
+            pc_faction_exclusive: false,
+            npc_faction_id: 0,
+            npc_faction_exclusive: false,
+        },
+        2,
+    );
+    q.group_npcs.add(VILLAGER_GROUP, VILLAGER);
     q.finish();
     gd.items.templates.insert(
         QUEST_ITEM,
@@ -449,6 +588,230 @@ async fn party_member_kill_of_a_party_tagged_npc_shares_exp_and_quest_credit() {
 }
 
 #[tokio::test]
+async fn party_zone_kill_counts_once_per_member_in_and_out_of_range() {
+    // Three party members hold a team-shared ObjZoneKill quest. A and B are within looting
+    // range of the villager (both get a direct kill event), C is a party member 500 away (no
+    // direct event; the shared kill reaches C). Every member must count the kill exactly once,
+    // however many eligible members share it.
+    let server = server_with(false);
+    let mut a = pc(&server, 1, "Lead", 100.0);
+    let mut b = pc(&server, 2, "Mate", 102.0);
+    let c = pc(&server, 3, "Far", 600.0);
+    let team_id = form_party(&server, &a.p, &b.p);
+    server
+        .systems
+        .social
+        .teams
+        .ask_to_join(&server, &a.p, "", 0, true, Some(&c.p));
+    server.systems.social.teams.reply_to_join_team(
+        &server,
+        &c.p,
+        0,
+        true,
+        a.p.character_id,
+        false,
+        "",
+        false,
+    );
+    assert!(server
+        .systems
+        .social
+        .teams
+        .active_team(team_id)
+        .expect("party")
+        .is_member(c.p.character_id));
+    for p in [&a.p, &b.p, &c.p] {
+        accept(&server, p, ZONE_KILL_QUEST);
+    }
+    let npc = villager(&server, 0x200, 1_000);
+    cast(
+        &server,
+        &mut a,
+        HIT_SKILL,
+        SkillCastTarget::Unit(npc.obj_id),
+    );
+    assert_eq!(npc.data().unit.skill_state.tagging.tag_team, team_id);
+    cast(
+        &server,
+        &mut b,
+        KILL_SKILL,
+        SkillCastTarget::Unit(npc.obj_id),
+    );
+    assert!(npc.data().unit.is_dead());
+
+    for (name, p) in [("A", &a.p), ("B", &b.p), ("C", &c.p)] {
+        assert_eq!(
+            quest_row(&server, p, ZONE_KILL_QUEST),
+            Some((kind::PROGRESS, 1)),
+            "member {name}"
+        );
+    }
+
+    // A second villager killed by A alone: one more for everybody.
+    let npc2 = villager(&server, 0x201, 1_000);
+    cast(
+        &server,
+        &mut a,
+        KILL_SKILL,
+        SkillCastTarget::Unit(npc2.obj_id),
+    );
+    assert!(npc2.data().unit.is_dead());
+    for (name, p) in [("A", &a.p), ("B", &b.p), ("C", &c.p)] {
+        assert_eq!(
+            quest_row(&server, p, ZONE_KILL_QUEST),
+            Some((kind::PROGRESS, 2)),
+            "member {name} after the second kill"
+        );
+    }
+}
+
+/// Both hunt quests of a player: (individual hunt, group hunt) quest rows.
+fn hunt_rows(server: &GameServer, p: &PlayerRef) -> [Option<(u8, i32)>; 2] {
+    [
+        quest_row(server, p, HUNT_QUEST),
+        quest_row(server, p, GROUP_HUNT_QUEST),
+    ]
+}
+
+#[tokio::test]
+async fn hunt_quests_credit_the_party_in_range_and_not_other_attackers() {
+    const CREDITED: Option<(u8, i32)> = Some((kind::READY, 1));
+    const NOT_CREDITED: Option<(u8, i32)> = Some((kind::PROGRESS, 0));
+    for tag_share in [false, true] {
+        // A and B (party, in range) and D (party, 500 away) against X (no party).
+        let server = server_with(tag_share);
+        let mut a = pc(&server, 1, "Lead", 100.0);
+        let mut b = pc(&server, 2, "Mate", 102.0);
+        let d = pc(&server, 4, "Far", 600.0);
+        let mut x = pc(&server, 3, "Other", 104.0);
+        let team_id = form_party(&server, &a.p, &b.p);
+        let teams = &server.systems.social.teams;
+        teams.ask_to_join(&server, &a.p, "", 0, true, Some(&d.p));
+        teams.reply_to_join_team(&server, &d.p, 0, true, a.p.character_id, false, "", false);
+        assert!(teams
+            .active_team(team_id)
+            .expect("party")
+            .is_member(d.p.character_id));
+        for p in [&a.p, &b.p, &d.p, &x.p] {
+            for quest in [HUNT_QUEST, GROUP_HUNT_QUEST] {
+                accept(&server, p, quest);
+            }
+        }
+        let npc = villager(&server, 0x200, 1_000);
+
+        // The party (A: more than half of the max hp) tags; X hits too; B kills.
+        cast(
+            &server,
+            &mut a,
+            HIT_SKILL,
+            SkillCastTarget::Unit(npc.obj_id),
+        );
+        assert_eq!(npc.data().unit.skill_state.tagging.tag_team, team_id);
+        npc.data().unit.hp = 1_000;
+        cast(
+            &server,
+            &mut x,
+            HIT_SKILL,
+            SkillCastTarget::Unit(npc.obj_id),
+        );
+        cast(
+            &server,
+            &mut b,
+            KILL_SKILL,
+            SkillCastTarget::Unit(npc.obj_id),
+        );
+        assert!(npc.data().unit.is_dead());
+
+        let case = format!("TagShare {tag_share}");
+        for (name, p) in [("A", &a.p), ("B", &b.p)] {
+            assert_eq!(hunt_rows(&server, p), [CREDITED; 2], "{name}, {case}");
+        }
+        assert_eq!(
+            hunt_rows(&server, &d.p),
+            [NOT_CREDITED; 2],
+            "party member out of range, {case}"
+        );
+        let other = if tag_share { CREDITED } else { NOT_CREDITED };
+        assert_eq!(
+            hunt_rows(&server, &x.p),
+            [other; 2],
+            "non-party attacker, {case}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn hunt_quests_credit_the_first_hitter_without_tag_share() {
+    const CREDITED: Option<(u8, i32)> = Some((kind::READY, 1));
+    const NOT_CREDITED: Option<(u8, i32)> = Some((kind::PROGRESS, 0));
+    for tag_share in [false, true] {
+        let server = server_with(tag_share);
+        let mut x = pc(&server, 1, "First", 100.0);
+        let mut y = pc(&server, 2, "Second", 102.0);
+        for p in [&x.p, &y.p] {
+            for quest in [HUNT_QUEST, GROUP_HUNT_QUEST] {
+                accept(&server, p, quest);
+            }
+        }
+        // Nobody deals more than half of the max hp: the first hitter keeps the tag.
+        let npc = villager(&server, 0x200, 2_000);
+        cast(
+            &server,
+            &mut x,
+            HIT_SKILL,
+            SkillCastTarget::Unit(npc.obj_id),
+        );
+        cast(
+            &server,
+            &mut y,
+            HIT_SKILL,
+            SkillCastTarget::Unit(npc.obj_id),
+        );
+        assert_eq!(npc.data().unit.skill_state.tagging.tagger, x.p.obj_id);
+        // Y lands the killing blow.
+        cast(
+            &server,
+            &mut y,
+            KILL_SKILL,
+            SkillCastTarget::Unit(npc.obj_id),
+        );
+        assert!(npc.data().unit.is_dead());
+
+        let case = format!("TagShare {tag_share}");
+        assert_eq!(
+            hunt_rows(&server, &x.p),
+            [CREDITED; 2],
+            "first hitter, {case}"
+        );
+        let second = if tag_share { CREDITED } else { NOT_CREDITED };
+        assert_eq!(
+            hunt_rows(&server, &y.p),
+            [second; 2],
+            "second attacker, {case}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn solo_kill_credits_the_killer_for_the_group_hunt() {
+    let server = server_with(false);
+    let mut a = pc(&server, 1, "Hunter", 100.0);
+    accept(&server, &a.p, GROUP_HUNT_QUEST);
+    let npc = villager(&server, 0x200, 1_000);
+    cast(
+        &server,
+        &mut a,
+        KILL_SKILL,
+        SkillCastTarget::Unit(npc.obj_id),
+    );
+    assert!(npc.data().unit.is_dead());
+    assert_eq!(
+        quest_row(&server, &a.p, GROUP_HUNT_QUEST),
+        Some((kind::READY, 1))
+    );
+}
+
+#[tokio::test]
 async fn tag_share_gives_quest_credit_to_a_solo_contributor() {
     for tag_share in [false, true] {
         let server = server_with(tag_share);
@@ -572,6 +935,80 @@ async fn item_skill_hooks_use_the_economy_inventory() {
     assert!(items
         .weapon_holdable(&server, &WorldObject::from(&a.p), 15)
         .is_none());
+}
+
+/// Waits up to `ms` for `done`.
+async fn wait_until(ms: u64, mut done: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(ms);
+    while !done() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test]
+async fn buff_timeout_trigger_grants_the_quest_item_when_the_buff_expires() {
+    // 'Capture Crayfish': the skill applies a short buff whose Timeout trigger grants the item.
+    let server = server_with(false);
+    let mut a = pc(&server, 1, "Fisher", 100.0);
+    let npc = villager(&server, 0x200, 1_000);
+    let items = server.systems.skills.ext.items();
+    cast(
+        &server,
+        &mut a,
+        NET_SKILL,
+        SkillCastTarget::Unit(npc.obj_id),
+    );
+    assert_eq!(items.item_count(&server, &a.p, QUEST_ITEM), 0);
+    wait_until(1_000, || items.item_count(&server, &a.p, QUEST_ITEM) > 0).await;
+    assert_eq!(items.item_count(&server, &a.p, QUEST_ITEM), 1);
+}
+
+#[tokio::test]
+async fn completed_channel_with_a_target_buff_grants_the_timeout_trigger_item() {
+    // 'Extract Earth Crystal': the channel ends (80 ms) long before the target buff would
+    // expire (5 s); finishing the channel removes the buff, which grants the item.
+    let server = server_with(false);
+    let mut a = pc(&server, 1, "Miner", 100.0);
+    let npc = villager(&server, 0x200, 1_000);
+    let items = server.systems.skills.ext.items();
+    cast(
+        &server,
+        &mut a,
+        CHANNEL_SKILL,
+        SkillCastTarget::Unit(npc.obj_id),
+    );
+    assert!(npc.data().unit.buffs.check_buff(CHANNEL_BUFF));
+    assert_eq!(items.item_count(&server, &a.p, QUEST_ITEM), 0);
+    wait_until(1_000, || !npc.data().unit.buffs.check_buff(CHANNEL_BUFF)).await;
+    assert!(!npc.data().unit.buffs.check_buff(CHANNEL_BUFF));
+    assert_eq!(items.item_count(&server, &a.p, QUEST_ITEM), 1);
+}
+
+#[tokio::test]
+async fn cancelled_channel_does_not_grant_the_timeout_trigger_item() {
+    let server = server_with(false);
+    let mut a = pc(&server, 1, "Miner", 100.0);
+    let npc = villager(&server, 0x200, 1_000);
+    let items = server.systems.skills.ext.items();
+    cast(
+        &server,
+        &mut a,
+        CHANNEL_SKILL,
+        SkillCastTarget::Unit(npc.obj_id),
+    );
+    assert!(npc.data().unit.buffs.check_buff(CHANNEL_BUFF));
+    let skill =
+        a.p.data()
+            .unit
+            .skill_state
+            .skill_task
+            .as_ref()
+            .map(|t| t.skill.clone())
+            .expect("channel running");
+    crate::systems::skills::skill::stop(&server, &skill, &WorldObject::from(&a.p), 0);
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(!npc.data().unit.buffs.check_buff(CHANNEL_BUFF));
+    assert_eq!(items.item_count(&server, &a.p, QUEST_ITEM), 0);
 }
 
 #[tokio::test]
@@ -720,6 +1157,76 @@ async fn solo_pvp_kill_in_a_conflict_zone_awards_honor() {
         .client
         .drain_ops()
         .contains(&sc::SCGamePointChangedPacket));
+}
+
+#[tokio::test]
+async fn pvp_kill_advances_the_player_zone_kill_quest_of_the_killer_and_the_party() {
+    use crate::data::world_data::conflict_type;
+    use crate::systems::skills::types::KillReason;
+    let server = conflict_server(conflict_type::CONFLICT, [0; 5]);
+    let victim = pc(&server, 1, "Victim", 100.0);
+    let killer = enemy_pc(&server, 2, "Killer", 102.0);
+    let mate = enemy_pc(&server, 3, "Mate", 104.0);
+    let bystander = enemy_pc(&server, 4, "Bystander", 106.0);
+    form_party(&server, &killer.p, &mate.p);
+    for p in [&killer.p, &mate.p, &bystander.p] {
+        accept(&server, p, PVP_ZONE_KILL_QUEST);
+    }
+    let die = |victim: &Pc, killer: &Pc| {
+        crate::systems::skills::combat::do_die(
+            &server,
+            &WorldObject::from(&victim.p),
+            Some(&WorldObject::from(&killer.p)),
+            KillReason::Damage,
+        );
+    };
+
+    die(&victim, &killer);
+    assert_eq!(
+        quest_row(&server, &killer.p, PVP_ZONE_KILL_QUEST),
+        Some((kind::PROGRESS, 1))
+    );
+    // team_share: the killer's party member is credited once, a non-party player is not.
+    assert_eq!(
+        quest_row(&server, &mate.p, PVP_ZONE_KILL_QUEST),
+        Some((kind::PROGRESS, 1))
+    );
+    assert_eq!(
+        quest_row(&server, &bystander.p, PVP_ZONE_KILL_QUEST),
+        Some((kind::PROGRESS, 0))
+    );
+
+    // The party mate's own kill counts for both.
+    let victim2 = enemy_pc(&server, 5, "Victim2", 108.0);
+    die(&victim2, &mate);
+    assert_eq!(
+        quest_row(&server, &killer.p, PVP_ZONE_KILL_QUEST),
+        Some((kind::READY, 2))
+    );
+    assert_eq!(
+        quest_row(&server, &mate.p, PVP_ZONE_KILL_QUEST),
+        Some((kind::READY, 2))
+    );
+}
+
+#[tokio::test]
+async fn friendly_fire_kill_does_not_advance_the_player_zone_kill_quest() {
+    use crate::data::world_data::conflict_type;
+    use crate::systems::skills::types::KillReason;
+    let server = conflict_server(conflict_type::CONFLICT, [0; 5]);
+    let killer = pc(&server, 1, "Killer", 100.0);
+    let victim = pc(&server, 2, "Victim", 102.0);
+    accept(&server, &killer.p, PVP_ZONE_KILL_QUEST);
+    crate::systems::skills::combat::do_die(
+        &server,
+        &WorldObject::from(&victim.p),
+        Some(&WorldObject::from(&killer.p)),
+        KillReason::Damage,
+    );
+    assert_eq!(
+        quest_row(&server, &killer.p, PVP_ZONE_KILL_QUEST),
+        Some((kind::PROGRESS, 0))
+    );
 }
 
 #[tokio::test]
