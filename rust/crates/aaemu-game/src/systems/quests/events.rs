@@ -749,6 +749,16 @@ pub fn on_npc_killed(server: &GameServer, player: &PlayerRef, npc: &NpcRef) {
 
 /// `DoOnAggroEvents(owner, npc)` (`Unit.OnAggro` of a player against an NPC).
 pub fn on_aggro(server: &GameServer, player: &PlayerRef, npc: &NpcRef) {
+    // Runs on every damage hit: skip the quest operation (character lock, state take, queue)
+    // unless an active quest act subscribes to `Aggro`. A taken-out state (`loaded` false: we
+    // are nested in an operation of this character) is not trusted and falls through.
+    {
+        let c = player.data();
+        let st = &c.quest_state;
+        if st.loaded && !st.subs.iter().any(|s| s.event == EventKind::Aggro) {
+            return;
+        }
+    }
     let npc_id = npc.data().unit.template_id;
     run_or_queue(server, player, move |ctx| {
         dispatch_logged(ctx, &QuestEvent::Aggro { npc_id });
