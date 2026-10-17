@@ -569,6 +569,42 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// The number of `QuestActSupplySelectiveItem` acts of the quest (`ThisSelectiveIndex` of
+    /// the last one: the indices are 1-based, which is also what the 1.2 client sends).
+    pub fn selective_reward_count(&self, template_id: u32) -> i32 {
+        let data = self.data;
+        data.template(template_id).map_or(0, |t| {
+            t.components
+                .iter()
+                .filter_map(|c| data.component(*c))
+                .flat_map(|c| c.acts.iter())
+                .filter(|&&a| matches!(data.acts[a].kind, ActKind::SupplySelectiveItem { .. }))
+                .count() as i32
+        })
+    }
+
+    /// A quest that reaches its Reward step without a valid choice (no report act carried one:
+    /// auto-completing and journal-reported quests send 0) gets the first selective item
+    /// instead of none. The client UI sends a 1-based index and refuses to send 0 when the
+    /// quest has selective items.
+    fn default_selective_reward(&mut self, h: QuestHandle) {
+        let template_id = self.template_id_of(h);
+        let count = self.selective_reward_count(template_id);
+        if count <= 0 {
+            return;
+        }
+        let who = format!("{} ({})", self.c.unit.name, self.c.id);
+        if let Some(q) = self.quest_mut(h) {
+            if q.selected_reward_index < 1 || q.selected_reward_index > count {
+                tracing::debug!(
+                    "Quest {template_id}, {who}: selective reward {} is not in 1..={count}, giving the first",
+                    q.selected_reward_index
+                );
+                q.selected_reward_index = 1;
+            }
+        }
+    }
+
     /// `Step` setter (`SetStep`).
     pub fn set_step(&mut self, h: QuestHandle, value: u8) {
         let Some(q) = self.quest(h) else {
@@ -580,6 +616,9 @@ impl<'a> Ctx<'a> {
         // Finalize old Step (if any)
         if let Some(old) = q.step_index(q.step) {
             self.finalize_step(h, old);
+        }
+        if value == kind::REWARD {
+            self.default_selective_reward(h);
         }
         let template_id = {
             let Some(q) = self.quest_mut(h) else {
