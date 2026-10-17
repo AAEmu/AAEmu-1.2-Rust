@@ -290,6 +290,8 @@ struct Sim {
     zone_key_by_group: HashMap<u32, u32>,
     zone_key_by_id: HashMap<u32, u32>,
     faction_by_mother: HashMap<u32, u32>,
+    /// `npcs.engage_combat_give_quest_id` -> npc template (quests started by engaging the npc).
+    engage_npc_by_quest: HashMap<u32, u32>,
     next_obj: Cell<u32>,
     next_char: Cell<u32>,
 }
@@ -332,6 +334,21 @@ impl Sim {
         for f in &gd.factions.factions {
             faction_by_mother.entry(f.mother_id).or_insert(f.id);
         }
+        let mut engage_npc_by_quest = HashMap::new();
+        let mut stmt = conn
+            .prepare(
+                "SELECT engage_combat_give_quest_id, id FROM npcs                  WHERE engage_combat_give_quest_id > 0 ORDER BY id DESC",
+            )
+            .expect("engage-combat npcs");
+        for row in stmt
+            .query_map([], |r| {
+                Ok((r.get::<_, i64>(0)? as u32, r.get::<_, i64>(1)? as u32))
+            })
+            .expect("engage-combat npcs")
+        {
+            let (quest, npc) = row.expect("engage-combat row");
+            engage_npc_by_quest.insert(quest, npc);
+        }
         let server = test_server_with(gd);
         let hooks = Arc::new(SimHooks::default());
         server.systems.quests.hooks.install(hooks.clone());
@@ -343,6 +360,7 @@ impl Sim {
             zone_key_by_group,
             zone_key_by_id,
             faction_by_mother,
+            engage_npc_by_quest,
             next_obj: Cell::new(0x2000_0000),
             next_char: Cell::new(200_000),
         }
@@ -675,6 +693,17 @@ impl<'a> Run<'a> {
         if v.is_empty() {
             v.push(("no starter act (add_quest)".into(), Starter::Auto));
         }
+        // A quest only reachable through a component / auto start is, in the live game, given
+        // by engaging its npc (`NpcTemplate.EngageCombatGiveQuestId` -> `AddQuestFromNpc`),
+        // which makes the npc the acceptor (`QuestActObjAggro` needs that).
+        if v.iter()
+            .all(|(_, s)| matches!(s, Starter::Auto | Starter::Component))
+        {
+            if let Some(&npc) = self.sim.engage_npc_by_quest.get(&self.qid) {
+                let s = Starter::Npc(npc);
+                v.insert(0, (format!("engage-combat npc({npc})"), s));
+            }
+        }
         // Gameplay acceptors first, the acceptor-less ones (auto / component) last.
         v.sort_by_key(|(_, s)| matches!(s, Starter::Auto | Starter::Component));
         v
@@ -922,7 +951,7 @@ impl<'a> Run<'a> {
                     return Delivered::DataGap(format!("no zone with group id {zone_id}"));
                 };
                 if *count_npc > 0 {
-                    if lvl_min_npc > lvl_max_npc {
+                    if *lvl_max_npc > 0 && lvl_min_npc > lvl_max_npc {
                         return Delivered::DataGap(format!(
                             "ObjZoneKill npc level range {lvl_min_npc}..{lvl_max_npc} is empty"
                         ));
@@ -932,11 +961,6 @@ impl<'a> Run<'a> {
                         (f, false) => f,
                         (f, true) => f + 1,
                     };
-                    if *lvl_max_npc < 1 {
-                        self.out.data_gaps.insert(format!(
-                            "QuestActObjZoneKill: npc level range {lvl_min_npc}..{lvl_max_npc} excludes every real npc (level >= 1)"
-                        ));
-                    }
                     let npc = self.npc(
                         900_001,
                         (*lvl_min_npc).clamp(1, 255) as u8,
@@ -952,7 +976,7 @@ impl<'a> Run<'a> {
                 if *count_player_kill > 0 {
                     // Player kills have no production event source (only `on_npc_killed`
                     // raises `ZoneKill`); the act logic is exercised directly.
-                    if lvl_min > lvl_max {
+                    if *lvl_max > 0 && lvl_min > lvl_max {
                         return Delivered::DataGap(format!(
                             "ObjZoneKill pc level range {lvl_min}..{lvl_max} is empty"
                         ));

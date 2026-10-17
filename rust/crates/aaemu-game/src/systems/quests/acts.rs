@@ -13,6 +13,14 @@ use super::state::{ActPath, EventKind, QuestHandle};
 use super::templates::ActKind;
 use crate::models::container::slot_type;
 
+/// `QuestActObjZoneKill` level window. A bound of 0 is "unset" (most NPC-kill acts of the
+/// 1.2 data carry `lv_min_npc`/`lv_max_npc` = 0/0 and must accept every victim); the C# compared
+/// against the raw 0..0 range and rejected every real victim.
+pub(super) fn level_in_range(level: u8, min: i32, max: i32) -> bool {
+    let level = i32::from(level);
+    (min <= 0 || level >= min) && (max <= 0 || level <= max)
+}
+
 impl Ctx<'_> {
     fn act_at(&self, h: QuestHandle, p: ActPath) -> Option<usize> {
         self.st
@@ -1030,9 +1038,7 @@ impl Ctx<'_> {
                             valid = true;
                         }
                     }
-                    if i32::from(victim.level) < *lvl_min_npc
-                        || i32::from(victim.level) > *lvl_max_npc
-                    {
+                    if !level_in_range(victim.level, *lvl_min_npc, *lvl_max_npc) {
                         valid = false;
                     }
                 }
@@ -1046,13 +1052,16 @@ impl Ctx<'_> {
                             valid = true;
                         }
                     }
-                    if i32::from(victim.level) < *lvl_min || i32::from(victim.level) > *lvl_max {
+                    if !level_in_range(victim.level, *lvl_min, *lvl_max) {
                         valid = false;
                     }
                 }
                 if valid {
                     self.add_objective(h, a, 1)?;
-                    if *team_share {
+                    // Only the original killer shares with the team: the shared event reaches the
+                    // members with the killer unchanged, so they must not share it again
+                    // (the C# `OnZoneKill` re-delegated without bound).
+                    if *team_share && killer.character_id == Some(self.c.id) {
                         self.deferred
                             .push(Deferred::TeamEvent { event: ev.clone() });
                     }
