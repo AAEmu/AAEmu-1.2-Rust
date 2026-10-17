@@ -1115,10 +1115,24 @@ impl Ctx<'_> {
                     selected,
                 },
             ) => {
-                if *quest_id != quest_template || npc_id != n {
+                if *quest_id != quest_template {
+                    return Ok(());
+                }
+                if npc_id != n {
+                    self.log_refusal(
+                        "Report",
+                        quest_template,
+                        &format!("NPC {n} is not the report NPC {npc_id}"),
+                    );
                     return Ok(());
                 }
                 if !self.report_ready(h, quest_template) {
+                    let status = self.objective_status(h);
+                    self.log_refusal(
+                        "Report",
+                        quest_template,
+                        &format!("NPC {n}: the objectives are not complete ({status:?})"),
+                    );
                     return Ok(());
                 }
                 if let Some(q) = self.st.quest_mut(h) {
@@ -1138,10 +1152,24 @@ impl Ctx<'_> {
                     selected,
                 },
             ) => {
-                if *quest_id != quest_template || d != doodad_id {
+                if *quest_id != quest_template {
+                    return Ok(());
+                }
+                if d != doodad_id {
+                    self.log_refusal(
+                        "Report",
+                        quest_template,
+                        &format!("doodad {d} is not the report doodad {doodad_id}"),
+                    );
                     return Ok(());
                 }
                 if !self.report_ready(h, quest_template) {
+                    let status = self.objective_status(h);
+                    self.log_refusal(
+                        "Report",
+                        quest_template,
+                        &format!("doodad {d}: the objectives are not complete ({status:?})"),
+                    );
                     return Ok(());
                 }
                 if let Some(q) = self.st.quest_mut(h) {

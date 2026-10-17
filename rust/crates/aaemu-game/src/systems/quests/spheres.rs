@@ -280,6 +280,19 @@ impl SphereQuestManager {
         t.remove_queue.extend(ids);
     }
 
+    /// Drops everything the sphere manager keeps for a character that leaves the world: its
+    /// triggers and its last starter-sphere position. Kept across a logout they made a
+    /// re-login inside a sphere look like "was already inside" and never fired the enter
+    /// event. (Deviation: the C# kept both until the character was removed from the trigger
+    /// list by a quest change.)
+    pub fn forget_character(&self, character_id: u32) {
+        self.remove_triggers(character_id, 0);
+        self.last_positions
+            .lock()
+            .expect("positions poisoned")
+            .remove(&character_id);
+    }
+
     /// `GetSphereQuestTriggers()` (live list).
     pub fn triggers(&self) -> Vec<SphereQuestTrigger> {
         self.triggers
@@ -401,10 +414,11 @@ impl SphereQuestManager {
                 current_positions.insert(p.character_id, pos);
             }
         }
-        self.last_positions
-            .lock()
-            .expect("positions poisoned")
-            .extend(current_positions);
+        let mut last = self.last_positions.lock().expect("positions poisoned");
+        last.extend(current_positions);
+        // A character that left the world between `forget_character` and its removal from the
+        // regions may have been recorded again by this very tick.
+        last.retain(|id, _| server.world.character_by_id(*id).is_some());
     }
 }
 
