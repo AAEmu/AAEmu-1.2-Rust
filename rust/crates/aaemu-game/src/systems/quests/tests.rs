@@ -3232,3 +3232,214 @@ async fn escort_failure_only_follows_the_guarded_npc_death() {
             .is_empty());
     });
 }
+
+fn zone_kill_act(
+    count_player_kill: i32,
+    count_npc: i32,
+    team_share: bool,
+    levels: (i32, i32, i32, i32),
+) -> ActKind {
+    ActKind::ObjZoneKill {
+        count_player_kill,
+        count_npc,
+        zone_id: 0,
+        team_share,
+        use_alias: false,
+        alias_id: 0,
+        lvl_min: levels.0,
+        lvl_max: levels.1,
+        is_party: team_share,
+        lvl_min_npc: levels.2,
+        lvl_max_npc: levels.3,
+        pc_faction_id: 0,
+        pc_faction_exclusive: false,
+        npc_faction_id: 0,
+        npc_faction_exclusive: false,
+    }
+}
+
+#[test]
+fn zone_kill_level_bounds_of_zero_are_unset() {
+    assert!(super::acts::level_in_range(60, 0, 0));
+    assert!(super::acts::level_in_range(1, 0, 0));
+    assert!(super::acts::level_in_range(60, 10, 0));
+    assert!(!super::acts::level_in_range(9, 10, 0));
+    assert!(super::acts::level_in_range(5, 0, 5));
+    assert!(!super::acts::level_in_range(6, 0, 5));
+    assert!(super::acts::level_in_range(7, 5, 10));
+    assert!(!super::acts::level_in_range(11, 5, 10));
+}
+
+#[tokio::test]
+async fn zone_kill_with_unset_level_range_accepts_any_victim() {
+    let (server, _rec) = server_with(|d| {
+        // The 1.2 data shape: lv_min/lv_max set (the questor), lv_min_npc/lv_max_npc = 0/0.
+        single_act_quest(d, 14, 1, zone_kill_act(0, 1, false, (1, 50, 0, 0)));
+        // Only a lower NPC bound.
+        single_act_quest(d, 15, 1, zone_kill_act(0, 1, false, (1, 50, 10, 0)));
+        // Player kills with an unset window.
+        single_act_quest(d, 16, 1, zone_kill_act(1, 0, false, (0, 0, 0, 0)));
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        let me = super::engine::KillUnitInfo {
+            obj_id: 1,
+            character_id: Some(1),
+            ..Default::default()
+        };
+        let npc = |level| super::engine::KillUnitInfo {
+            obj_id: 50,
+            npc_template_id: Some(600),
+            level,
+            ..Default::default()
+        };
+        let pc = |level| super::engine::KillUnitInfo {
+            obj_id: 51,
+            character_id: Some(9),
+            level,
+            ..Default::default()
+        };
+        let kill = |ctx: &mut Ctx<'_>, victim| {
+            ctx.dispatch(&QuestEvent::ZoneKill {
+                zone_group_id: 1,
+                killer: me.clone(),
+                victim,
+            })
+            .unwrap();
+        };
+        let (a, b, p) = (start(ctx, 14), start(ctx, 15), start(ctx, 16));
+        // A level-1 victim is below the lower bound of 15 but passes the 0/0 quest.
+        kill(ctx, npc(9));
+        assert_eq!(ctx.st.quest(a).unwrap().objectives[0], 1, "0/0 npc range");
+        assert_eq!(ctx.st.quest(b).unwrap().objectives[0], 0, "below min 10");
+        assert_eq!(ctx.st.quest(p).unwrap().objectives[0], 0, "not a player");
+        kill(ctx, npc(60));
+        assert_eq!(ctx.st.quest(b).unwrap().objectives[0], 1, "no upper bound");
+        kill(ctx, pc(70));
+        assert_eq!(ctx.st.quest(p).unwrap().objectives[0], 1, "0/0 pc range");
+    });
+}
+
+#[tokio::test]
+async fn zone_kill_team_share_is_not_reshared_by_the_receiver() {
+    let (server, _rec) = server_with(|d| {
+        single_act_quest(d, 17, 5, zone_kill_act(0, 5, true, (1, 50, 0, 0)));
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        let h = start(ctx, 17);
+        let victim = super::engine::KillUnitInfo {
+            obj_id: 50,
+            npc_template_id: Some(600),
+            level: 20,
+            ..Default::default()
+        };
+        let own = |id| super::engine::KillUnitInfo {
+            obj_id: id,
+            character_id: Some(id),
+            ..Default::default()
+        };
+        // Own kill: shared with the team.
+        ctx.dispatch(&QuestEvent::ZoneKill {
+            zone_group_id: 1,
+            killer: own(1),
+            victim: victim.clone(),
+        })
+        .unwrap();
+        assert!(matches!(
+            ctx.deferred.last(),
+            Some(super::engine::Deferred::TeamEvent { .. })
+        ));
+        ctx.deferred.clear();
+        // A team mate's kill arrives: it counts, but is not shared again.
+        ctx.dispatch(&QuestEvent::ZoneKill {
+            zone_group_id: 1,
+            killer: own(2),
+            victim,
+        })
+        .unwrap();
+        assert!(ctx.deferred.is_empty());
+        assert_eq!(ctx.st.quest(h).unwrap().objectives[0], 2);
+    });
+}
+
+#[tokio::test]
+async fn zone_kill_team_share_credits_each_member_once() {
+    let (server, rec) = server_with(|d| {
+        single_act_quest(d, 17, 5, zone_kill_act(0, 5, true, (1, 50, 0, 0)));
+    });
+    let a_client = TestClient::new(&server, 1, 1001);
+    let b_client = TestClient::new(&server, 2, 1002);
+    let a = spawn_player(&server, &a_client, character(), 0x100);
+    let b = spawn_player(
+        &server,
+        &b_client,
+        test_character(2, "Mate", 100.0, 100.0),
+        0x101,
+    );
+    *rec.team.lock().unwrap() = vec![a.clone(), b.clone()];
+    events::add_quest(&server, &a, 17, false);
+    events::add_quest(&server, &b, 17, false);
+    server.systems.quests.run_queued_evaluations(&server);
+
+    let world = server.world.world(0).unwrap();
+    let mut wolf = crate::models::npc::Npc::new(600);
+    wolf.unit.transform.set_xyz(110.0, 110.0, 100.0);
+    wolf.unit.level = 20;
+    let wolf = Entity::new(0x201, wolf);
+    world.spawn(&wolf, &server.view_ctx());
+
+    // Before the guard the shared event bounced between the members without end.
+    events::on_npc_killed(&server, &a, &wolf);
+    server.systems.quests.run_queued_evaluations(&server);
+    assert_eq!(a.data().quests.active[0].objectives[0], 1);
+    assert_eq!(b.data().quests.active[0].objectives[0], 1);
+}
+
+#[tokio::test]
+async fn aggro_quest_started_by_engaging_the_npc_counts_its_kill() {
+    // The 30 `QuestActObjAggro` quests of the 1.2 data start through
+    // `NpcTemplate.EngageCombatGiveQuestId` (`AddQuestFromNpc`), so the acceptor is the NPC.
+    let (server, _rec) = server_with(|d| {
+        single_act_quest(
+            d,
+            18,
+            3,
+            ActKind::ObjAggro {
+                range: 0,
+                rank1: 10,
+                rank1_ratio: 100,
+                rank1_item: true,
+                rank2: 50,
+                rank2_ratio: 50,
+                rank2_item: false,
+                rank3: 100,
+                rank3_ratio: 10,
+                rank3_item: false,
+                use_alias: false,
+                alias_id: 0,
+            },
+        );
+    });
+    let client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(&server, &client, character(), 0x100);
+    let world = server.world.world(0).unwrap();
+    let mut boss = crate::models::npc::Npc::new(600);
+    boss.unit.transform.set_xyz(110.0, 110.0, 100.0);
+    let boss = Entity::new(0x201, boss);
+    world.spawn(&boss, &server.view_ctx());
+    let mut other = crate::models::npc::Npc::new(601);
+    other.unit.transform.set_xyz(111.0, 110.0, 100.0);
+    let other = Entity::new(0x202, other);
+    world.spawn(&other, &server.view_ctx());
+
+    events::add_quest_from_npc(&server, &player, 18, boss.obj_id);
+    server.systems.quests.run_queued_evaluations(&server);
+    assert_eq!(player.data().quests.active[0].acceptor_id, 600);
+    events::on_npc_killed(&server, &player, &other);
+    server.systems.quests.run_queued_evaluations(&server);
+    assert_eq!(player.data().quests.active[0].objectives[0], 0);
+    events::on_npc_killed(&server, &player, &boss);
+    server.systems.quests.run_queued_evaluations(&server);
+    assert_eq!(player.data().quests.active[0].objectives[0], 3);
+}
