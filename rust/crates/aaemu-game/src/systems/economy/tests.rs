@@ -159,6 +159,33 @@ pub fn give(w: &World, p: &PlayerRef, st: u8, template: u32, count: i32, slot: i
     id
 }
 
+/// Records the quest item events (`owner character id, template, signed count`).
+#[derive(Default)]
+pub struct ItemEventLog(pub std::sync::Mutex<Vec<(u32, u32, i32)>>);
+
+impl crate::systems::economy::hooks::QuestItemHooks for ItemEventLog {
+    fn on_items_acquired(&self, _: &GameServer, p: &PlayerRef, template_id: u32, count: i32) {
+        self.0
+            .lock()
+            .unwrap()
+            .push((p.character_id, template_id, count));
+    }
+
+    fn on_items_consumed(&self, _: &GameServer, p: &PlayerRef, template_id: u32, count: i32) {
+        self.0
+            .lock()
+            .unwrap()
+            .push((p.character_id, template_id, -count));
+    }
+}
+
+/// Installs an [`ItemEventLog`] as the economy's quest item hooks.
+pub fn log_item_events(w: &World) -> Arc<ItemEventLog> {
+    let log = Arc::new(ItemEventLog::default());
+    w.server.systems.economy.hooks.quests.install(log.clone());
+    log
+}
+
 pub fn item_at(p: &PlayerRef, st: u8, slot: u8) -> Option<Item> {
     Inv::of(p).item_at(st, slot)
 }
@@ -545,6 +572,25 @@ async fn destroy_partial_and_full() {
     s.write_u64(id).write_u8(2).write_u8(0).write_i32(2);
     run::<CSDestroyItemPacket>(&mut w, 0, s.as_bytes());
     assert!(w.a.drain().is_empty());
+}
+
+/// A partial `CSDestroyItem` raises `OnConsumedItem` for the destroyed units (deviation from
+/// C#), so `ItemGather` objectives drop with them; a full destroy raises it once for the stack.
+#[tokio::test]
+async fn destroy_raises_consumed_events() {
+    let mut w = world();
+    let pa = w.pa.clone();
+    let log = log_item_events(&w);
+    let id = give(&w, &pa, slot_type::INVENTORY, STACK, 10, 0);
+    let mut s = PacketStream::new();
+    s.write_u64(id).write_u8(2).write_u8(0).write_i32(3);
+    run::<CSDestroyItemPacket>(&mut w, 0, s.as_bytes());
+    assert_eq!(*log.0.lock().unwrap(), vec![(1, STACK, -3)]);
+
+    let mut s = PacketStream::new();
+    s.write_u64(id).write_u8(2).write_u8(0).write_i32(7);
+    run::<CSDestroyItemPacket>(&mut w, 0, s.as_bytes());
+    assert_eq!(*log.0.lock().unwrap(), vec![(1, STACK, -3), (1, STACK, -7)]);
 }
 
 #[tokio::test]

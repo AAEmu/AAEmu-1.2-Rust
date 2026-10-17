@@ -694,6 +694,11 @@ pub trait QuestSkillHooks: Send + Sync {
     /// `Character.ItemUse(itemId)` (quest item-use objectives).
     fn item_use(&self, _server: &GameServer, _player: &PlayerRef, _item_id: u64) {}
 
+    /// `Character.ItemUse(Item item)`: the quest item-use event for a template, without looking
+    /// the item up (a plot may have consumed the last unit of its source item by the time it
+    /// ends).
+    fn item_use_template(&self, _server: &GameServer, _player: &PlayerRef, _template_id: u32) {}
+
     /// `QuestManager.DoOnAggroEvents(player, npc)`.
     fn on_aggro(&self, _server: &GameServer, _player: &PlayerRef, _npc: &NpcRef) {}
 

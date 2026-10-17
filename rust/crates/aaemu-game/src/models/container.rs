@@ -568,10 +568,20 @@ impl ItemContainer {
         }
 
         let mut source_owner = 0;
+        // The source container when it belongs to another character's bags (a trade giver).
+        let mut giving_owner = 0;
         if let Some(s) = src {
             // `sourceContainer.Items.Remove(item)` already happened in the caller.
             s.update_free_slot_count();
             source_owner = s.owner_id;
+            if s.owner_id != self.owner_id
+                && matches!(
+                    s.slot_type,
+                    slot_type::INVENTORY | slot_type::BANK | slot_type::EQUIPMENT
+                )
+            {
+                giving_owner = s.owner_id;
+            }
             if s.slot_type != slot_type::MAIL {
                 source_tasks.push(ItemTask::ItemRemoveSlot {
                     item_id,
@@ -624,6 +634,16 @@ impl ItemContainer {
         } else if item_slot_type_now != slot_type::MAIL && self.slot_type == slot_type::MAIL {
             fx.push(ItemFx::Consumed {
                 owner: self.owner_id,
+                template_id,
+                count: final_count,
+            });
+        }
+        // Deviation from C#: the giving side of a trade (an item that leaves one character's
+        // bags for another's) gets its `OnConsumedItem` too, so its `ItemGather` objectives drop
+        // with the items (the C# raised only the receiver's `OnAcquiredItem`).
+        if giving_owner != 0 && self.slot_type != slot_type::MAIL {
+            fx.push(ItemFx::Consumed {
+                owner: giving_owner,
                 template_id,
                 count: final_count,
             });
