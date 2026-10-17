@@ -283,3 +283,24 @@ fn real_data_generates_the_demanded_routes() {
     );
     assert!(names.len() > 250, "only {} files", names.len());
 }
+
+#[test]
+fn demand_includes_follow_path_npc_control_effects() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE quest_components (ai_path_name TEXT);
+         CREATE TABLE ai_commands (cmd_id INTEGER, param2 TEXT);
+         CREATE TABLE npc_control_effects (category_id INTEGER, param_string TEXT);
+         INSERT INTO quest_components VALUES ('Quest_Route'), (NULL);
+         INSERT INTO ai_commands VALUES (2, 'cmd_route'), (3, 'ignored');
+         INSERT INTO npc_control_effects VALUES
+           (2, 'Q2423_FM_Tige'), (2, ' '), (2, ''), (2, '17'), (1, 'other_category');",
+    )
+    .unwrap();
+    let got = demand_from(&conn).unwrap();
+    assert_eq!(
+        got.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["cmd_route", "q2423_fm_tige", "quest_route"]
+    );
+    assert!(got["q2423_fm_tige"].contains("Q2423_FM_Tige"));
+}
