@@ -885,6 +885,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   blocks; the client accepts any valid deflate stream.
 * systems::skills: the radar scans of `SkillTargetingUtil` are not ported.
 * systems::skills: `SpecialEffect` repeats are scheduled tasks instead of `Thread.Sleep` loops.
+* systems::skills (cuboid AoE): `AreaShape.ComputeCuboid` tested the triangles (v0,v1,v2) and
+  (v1,v2,v3) of a rectangle whose vertices run around it, so the two overlapped and the wedge at
+  the v3-v0 edge was never hit. `geometry::point_in_cuboid` splits along the v0-v2 diagonal.
 * systems::skills (2026-10-12 audit): OR requirements now require one success and use the resolved
   packet target, including doodads. Equipped-item and NPC-group requirements check their actual
   membership; crime-point limits and overnight time windows are enforced. Source/target life,
