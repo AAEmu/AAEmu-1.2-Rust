@@ -1893,7 +1893,22 @@ pub fn unit_use_skill(
     target: &WorldObject,
 ) -> u8 {
     let Some(t) = server.game_data.systems.skills.skill(skill_id).cloned() else {
-        tracing::error!("UseSkill: skill {skill_id} has no template (NullReferenceException)");
+        // Retail data has quest components pointing at skills without a `skills` row (see
+        // PORTING.md); warn once per id, repeats go to debug.
+        let first = server
+            .systems
+            .skills
+            .missing_skill_warned
+            .lock()
+            .expect("missing skill set poisoned")
+            .insert(skill_id);
+        let caster = unit.obj_id();
+        let target = target.obj_id();
+        if first {
+            tracing::warn!("UseSkill: skill {skill_id} has no template (dangling retail reference), skipped; caster {caster} target {target}");
+        } else {
+            tracing::debug!("UseSkill: skill {skill_id} has no template (dangling retail reference), skipped; caster {caster} target {target}");
+        }
         return skill_result::INVALID_SKILL;
     };
     let skill = SkillRun::new(t, 1);

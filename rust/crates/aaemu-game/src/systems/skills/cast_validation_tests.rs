@@ -918,3 +918,19 @@ async fn a_new_cast_obeys_and_cleans_up_the_active_channel_policy() {
         }
     }
 }
+
+#[tokio::test]
+async fn use_skill_without_template_warns_once_per_skill_id() {
+    let (server, _client, player, npc) = fixture(GameData::empty());
+    let caster = WorldObject::from(&player);
+    let target = WorldObject::from(&npc);
+    for _ in 0..2 {
+        assert_eq!(
+            super::skill::unit_use_skill(&server, &caster, 20315, &target),
+            skill_result::INVALID_SKILL
+        );
+    }
+    let warned = server.systems.skills.missing_skill_warned.lock().unwrap();
+    assert_eq!(warned.len(), 1);
+    assert!(warned.contains(&20315));
+}
