@@ -672,6 +672,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   stone-throwing plot 349, skill 11268, a `use_skill_as_reagent` item the effects consume) has
   nothing left to unlock, so the packet is skipped with a `debug!` (plot / skill / item id)
   instead of the former `ERROR` ("SkillSourceItem ... no longer exists").
+  `Character.ItemUse(item)` of the plot end takes the template id captured at cast start
+  (`QuestSkillHooks::item_use_template`) instead of looking the item up by id, so the quest
+  item-use event still fires for a consumed source item (quests 1315, 3541), as in the C#.
 * net (game connections): sending never blocks and C# had no limit; here a client with more than
   16 MiB queued, or one that accepts no data for 20 s, is disconnected (`net::outbox`,
   `net::listener`). Broadcasts encode a packet once for all recipients.
