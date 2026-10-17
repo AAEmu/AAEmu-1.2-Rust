@@ -1656,6 +1656,33 @@ impl<'a> Ctx<'a> {
         true
     }
 
+    /// Starts every quest whose Start component holds a `QuestActConAcceptItemGain` for
+    /// `item_id` once the bag holds the required count. Deviation: the C# server never did this
+    /// (`Inventory.cs` has the `OnItemGather` call commented out), which left the quests that
+    /// hang on it (the 4881-4888 letters, 5450, 6160, ...) unstartable.
+    pub fn start_quests_from_item_gain(&mut self, item_id: u32) {
+        let data = self.data;
+        let Some(quests) = data.item_gain_starters.get(&item_id) else {
+            return;
+        };
+        for &quest_id in quests {
+            if self.has_quest(quest_id) {
+                continue;
+            }
+            if self.has_quest_completed(quest_id)
+                && !data.template(quest_id).is_some_and(|t| t.repeatable)
+            {
+                continue;
+            }
+            // Probe the starter first: most gains do not reach the required count yet, which
+            // must not be logged as refusals.
+            if !self.starter_accepts(quest_id, super::model::acceptor::ITEM, item_id) {
+                continue;
+            }
+            self.add_quest(quest_id, false, super::model::acceptor::ITEM, item_id);
+        }
+    }
+
     /// `DropQuest(questId, update, forcibly)`.
     pub fn drop_quest(&mut self, quest_id: u32, update: bool, forcibly: bool) {
         let Some(h) = self.st.active_handle(quest_id) else {
