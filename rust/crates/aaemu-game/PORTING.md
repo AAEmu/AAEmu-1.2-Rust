@@ -1322,6 +1322,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   cast with result 93 ("Invalid target"). It now follows the zone server. Missing authored `tuto_move`,
   `public_farm*` and `public_mate*` paths also remain data gaps.
 * `BuffTrigger.Execute` / `TimeoutBuffTrigger.Execute` logged "Owner is not a Unit" and returned for every trigger of a buff owned by a doodad (hostile area skills such as 16486 hit factionless doodads, so e.g. the shrink buffs start on them). The trigger can never run for a doodad, so `subscribe_triggers` now skips non-unit owners (trace log) instead of subscribing a trigger that only warns; the `execute_trigger` guard stays as a safety net and names the buff and owner. Behaviour is otherwise unchanged.
+* systems::economy (quest item events, 2026-10-17): the C# raised no `OnConsumedItem` for a partial
+  `CSDestroyItem` (only the full destroy, through `RemoveItem`) and none for the giving side of a
+  trade (`AddOrMoveExistingItem` only notified the destination container's owner). `ItemGather`
+  objectives therefore kept counting items that had left the character. Here the partial destroy
+  (`item_handlers::CSDestroyItemPacket`) pushes `ItemFx::Consumed` for the destroyed units and
+  `ItemContainer::add_or_move_inner` pushes it for the source owner when the item moves between two
+  characters' bags (trade), so the objective is recounted when items leave.
 
 ### Ranking boards (Rust only)
 

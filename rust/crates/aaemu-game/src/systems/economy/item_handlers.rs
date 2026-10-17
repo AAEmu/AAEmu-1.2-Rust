@@ -10,7 +10,7 @@ use chrono::Utc;
 use crate::error::Result;
 use crate::models::container::slot_type;
 use crate::models::item::ITEM_FLAG_SOUL_BOUND;
-use crate::models::item_task::{task_type, ItemTask};
+use crate::models::item_task::{task_type, ItemFx, ItemTask};
 use crate::net::connection::GameConnection;
 use crate::net::packet::LEVEL_PLAIN;
 use crate::net::registry::PacketRegistry;
@@ -234,6 +234,13 @@ impl CSDestroyItemPacket {
                 i.dirty = true;
                 let task = ItemTask::count_update(i, -count);
                 let snapshot = i.clone();
+                // Deviation from C#: a partial destroy raises `OnConsumedItem` as well, so an
+                // `ItemGather` objective drops with the destroyed units.
+                txn.env.fx.push(ItemFx::Consumed {
+                    owner: c.owner_id,
+                    template_id: snapshot.template_id,
+                    count,
+                });
                 drop(c);
                 p.send(SCItemTaskSuccessPacket {
                     action: task_type::DESTROY,
