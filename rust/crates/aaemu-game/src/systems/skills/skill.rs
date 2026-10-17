@@ -886,7 +886,14 @@ pub fn start_channeling(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         if skill2.template.channeling_tick <= 0 {
             apply_effects(&srv, &skill2, &ctx2);
         }
-        end_channeling(&srv, &skill2, &ctx2.caster, doodad, &ctx2.caster_caster);
+        end_channeling(
+            &srv,
+            &skill2,
+            &ctx2.caster,
+            doodad,
+            &ctx2.caster_caster,
+            true,
+        );
     });
 }
 
@@ -954,13 +961,15 @@ fn schedule_channel_tick(
     });
 }
 
-/// `Skill.EndChanneling(caster, channelDoodad, casterCaster)`.
+/// `Skill.EndChanneling(caster, channelDoodad, casterCaster)`. `completed`: the channel ran to
+/// its end (not stopped or cancelled), so the channeling target buff times out.
 pub fn end_channeling(
     server: &GameServer,
     skill: &SkillRef,
     caster: &WorldObject,
     channel_doodad: u32,
     caster_caster: &SkillCaster,
+    completed: bool,
 ) {
     if !caster.is_unit() {
         return;
@@ -993,7 +1002,13 @@ pub fn end_channeling(
                 .object(id)
                 .filter(|target| target.core() as *const _ as usize == identity)
         }) {
-            buffs::remove_effect_by_skill(server, &target, t.channeling_target_buff_id, t.id)
+            if completed {
+                // The channel ran to its end: the target buff ends with it, which is its
+                // Timeout (quest items such as the Earth Crystal are granted by that trigger).
+                buffs::finish_effect_by_skill(server, &target, t.channeling_target_buff_id, t.id);
+            } else {
+                buffs::remove_effect_by_skill(server, &target, t.channeling_target_buff_id, t.id)
+            }
         }
     }
     if channel_doodad != 0 {
@@ -1816,6 +1831,7 @@ pub fn stop(server: &GameServer, skill: &SkillRef, caster: &WorldObject, channel
             caster,
             channel_doodad,
             &SkillCaster::Unit(caster.obj_id()),
+            false,
         );
     } else {
         end_skill(server, skill, caster);

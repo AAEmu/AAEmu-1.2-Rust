@@ -1405,6 +1405,31 @@ pub fn remove_effect_by_skill(
     crate::systems::dispatch_buff_events(server, owner);
 }
 
+/// The end of a buff that is removed because the skill that applied it ran its course (a
+/// completed channel): `Buffs.RemoveEffect(templateId, skillId)` as in the C#, whose
+/// `SetInUse(false)` -> `StopEffectTask` always raised `OnTimeout`. The Rust removal
+/// ([`remove_effect_by_skill`]) deliberately skips the Timeout triggers of explicit removals
+/// (dispels, cancelled channels), so this fires them for each matching effect first.
+pub fn finish_effect_by_skill(
+    server: &GameServer,
+    owner: &WorldObject,
+    template_id: u32,
+    skill_id: u32,
+) {
+    let indices: Vec<u32> = owner.with_base_unit(|b| {
+        b.buffs()
+            .effects
+            .iter()
+            .filter(|e| e.template.id == template_id && e.skill_id == skill_id)
+            .map(|e| e.index)
+            .collect()
+    });
+    for index in indices {
+        fire_buff_trigger(server, owner, index, BuffEventTriggerKind::Timeout);
+    }
+    remove_effect_by_skill(server, owner, template_id, skill_id);
+}
+
 /// `Buffs.TriggerRemoveOn(on, value)`.
 pub fn trigger_remove_on(server: &GameServer, owner: &WorldObject, on: BuffRemoveOn, value: u32) {
     let data = &server.game_data.systems.skills;

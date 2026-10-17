@@ -1057,6 +1057,20 @@ impl Ctx<'_> {
                     }
                 }
                 if valid {
+                    // A team-shared kill (the killer is another character) counts once per
+                    // victim and act, and not at all when `Npc.DoDie` already handed this
+                    // character the kill directly (Rust only: the C# counted both, and once
+                    // per eligible member's share).
+                    if killer.character_id != Some(self.c.id)
+                        && !self.c.skill_char.claim_shared_kill_credit(
+                            victim.obj_id,
+                            h,
+                            a,
+                            chrono::Utc::now().timestamp_millis(),
+                        )
+                    {
+                        return Ok(());
+                    }
                     self.add_objective(h, a, 1)?;
                     // Only the original killer shares with the team: the shared event reaches the
                     // members with the killer unchanged, so they must not share it again
