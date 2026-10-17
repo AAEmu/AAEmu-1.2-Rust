@@ -443,3 +443,101 @@ fn real_ai_ship_barriers_from_bai() {
     zones.ensure_cell(&env, (10, 10), g.cell_bai(10, 10));
     assert_eq!(zones.barriers.len(), n);
 }
+
+/// The route files recorded by hand (everything else in `Data/Path` is generated from the 10.x
+/// client by `aaemu-aipaths`).
+const HAND_RECORDED_PATHS: [&str; 13] = [
+    "aipath_145_ruhasin_131",
+    "aipath_ben_day",
+    "bridge",
+    "bridge2",
+    "falcorth_farkrag",
+    "nuiforestkeeperarthur",
+    "q1136_1_rain",
+    "q1136_2_rain",
+    "q3476_lute_sing",
+    "razlomppzden1",
+    "razlomppzden2",
+    "razlomppzden3",
+    "windscour_bull_elephant_1",
+];
+
+/// The generated main_world routes follow the terrain (the designers placed their points on
+/// the ground), which also settles the direction of the `Rotate` quaternion of the 10.x
+/// `npc.xml`: a wrongly turned path leaves the ground on slopes.
+/// `AAEMU_GAME_PAK=<1.2 game_pak> [AAEMU_PATH_DIR=<folder>] cargo test -p aaemu-game
+/// real_ai_generated_paths -- --ignored --nocapture`.
+#[test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+fn real_ai_generated_paths_follow_the_terrain() {
+    use crate::systems::npcs::heightmap::{HeightmapConfig, HeightmapWorlds};
+    let Some(files) = pak_files() else { return };
+    let worlds = WorldTemplates::load(&files, &app_path()).expect("world templates");
+    let main = worlds
+        .get_world_template_by_name("main_world")
+        .expect("main_world");
+    let maps = HeightmapWorlds::new(
+        files.clone(),
+        &worlds,
+        HeightmapConfig {
+            heightmaps_enable: true,
+            geo_data_mode: false,
+            pre_load_terrain: false,
+        },
+    );
+    let terrain = maps.template(main.id).expect("main_world heightmap");
+    let folder = std::env::var("AAEMU_PATH_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| app_path().join("Data").join("Path"));
+    let mut names: Vec<_> = std::fs::read_dir(&folder)
+        .expect("path folder")
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "path"))
+        .collect();
+    names.sort();
+    let mut checked = 0usize;
+    let mut worst: Vec<(f32, f32, String)> = Vec::new();
+    for p in names {
+        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+        if HAND_RECORDED_PATHS.contains(&stem.to_lowercase().as_str()) {
+            continue;
+        }
+        let points = super::path_handler::parse_path_file(&std::fs::read_to_string(&p).unwrap());
+        let first = points.first().expect("route has points").position;
+        // Instance routes (origin 0,0) lie outside every main_world zone.
+        if worlds.get_zone_id(Some(main), first.x, first.y) == 0 {
+            continue;
+        }
+        let residuals: Vec<f32> = points
+            .iter()
+            .map(|pt| {
+                let ground = terrain
+                    .get_height(&files, pt.position.x, pt.position.y)
+                    .unwrap_or(0.0);
+                (pt.position.z - ground).abs()
+            })
+            .collect();
+        let mean = residuals.iter().sum::<f32>() / residuals.len() as f32;
+        let max = residuals.iter().copied().fold(0.0, f32::max);
+        println!(
+            "{stem}: {} points, mean {mean:.2}, max {max:.2}",
+            points.len()
+        );
+        checked += 1;
+        worst.push((mean, max, stem.to_string()));
+    }
+    worst.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let on_ground = worst.iter().filter(|w| w.0 < 1.0).count();
+    println!(
+        "{checked} main_world routes, {on_ground} within 1 m of the ground on average; routes 6 m or more off (flying, indoor or raised): {:?}",
+        worst.iter().filter(|w| w.0 >= 6.0).collect::<Vec<_>>()
+    );
+    assert!(checked > 100, "only {checked} main_world routes checked");
+    // Measured on the committed files: 188 of 215 routes have a mean residual below 1 m, the
+    // median is 0.16 m, and a wrong `Rotate` direction raised the turned routes to about 0.5 m.
+    assert!(
+        on_ground * 100 >= checked * 80,
+        "only {on_ground} of {checked} routes follow the ground"
+    );
+}
