@@ -158,23 +158,32 @@ pub fn run_plot(server: &GameServer, plot_id: u32, ctx: CastCtx, skill: SkillRef
 /// unlock for it even when the item is gone by now. Here the item is looked up again, and a
 /// source item the plot itself used up (a stackable `use_skill_as_reagent` item, e.g. the
 /// stones of the stone-throwing plot, is consumed by the effects while the plot runs) no longer
-/// exists: nothing is left to unlock then, so the unlock is skipped.
+/// exists: nothing is left to unlock then, so the unlock is skipped. `Character.ItemUse(item)`
+/// does not need the item: the quest event uses the template id captured when the cast started
+/// (`SkillCaster::Item::item_template_id`), so it still fires for a consumed source item (quests
+/// 1315 and 3541 use the source item as their own reagent).
 pub(crate) fn finish_item_plot(server: &GameServer, plot_id: u32, state: &Arc<PlotState>) {
-    let (super::types::SkillCaster::Item { item_id, .. }, Some(p)) =
-        (state.ctx.caster_caster, state.ctx.caster.as_player())
+    let (
+        super::types::SkillCaster::Item {
+            item_id,
+            item_template_id,
+            ..
+        },
+        Some(p),
+    ) = (state.ctx.caster_caster, state.ctx.caster.as_player())
     else {
         return;
     };
     if item_id == 0 {
         return;
     }
-    if !state.cancellation_requested() {
+    if !state.cancellation_requested() && item_template_id > 0 {
         server
             .systems
             .skills
             .ext
             .quests()
-            .item_use(server, p, item_id);
+            .item_use_template(server, p, item_template_id);
     }
     if !server
         .systems

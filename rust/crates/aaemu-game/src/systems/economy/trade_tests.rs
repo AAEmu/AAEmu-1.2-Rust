@@ -9,7 +9,7 @@ use crate::net::packet::{encode, PacketDef};
 use crate::net::registry::ClientPacket;
 use crate::opcodes::sc;
 use crate::systems::economy::inventory::Inv;
-use crate::systems::economy::tests::{give, item_at, run, world, World, STACK};
+use crate::systems::economy::tests::{give, item_at, log_item_events, run, world, World, STACK};
 use crate::systems::economy::trade::*;
 
 fn body_of<P: Marshal>(p: &P) -> Vec<u8> {
@@ -499,6 +499,25 @@ async fn full_trade_items_and_money() {
     );
     assert!(w.server.systems.economy.trade.trades().is_empty());
     assert_eq!(item.id, id);
+}
+
+/// The giving side of a trade gets a Consumed event (deviation from C#: only the receiver's
+/// Acquired was raised), so its `ItemGather` objective drops with the traded items.
+#[tokio::test]
+async fn trade_raises_consumed_for_the_giver_and_acquired_for_the_receiver() {
+    let mut w = world();
+    let log = log_item_events(&w);
+    let id = give(&w, &w.pa.clone(), slot_type::INVENTORY, STACK, 5, 3);
+    start(&mut w);
+    putup_item(&mut w, 0, 2, 3, 5);
+    lock(&mut w, 0, true);
+    lock(&mut w, 1, true);
+    ok(&mut w, 0);
+    ok(&mut w, 1);
+    assert!(Inv::of(&w.pb).item_by_id(id).is_some());
+    let mut events = log.0.lock().unwrap().clone();
+    events.sort_unstable();
+    assert_eq!(events, vec![(1, STACK, -5), (2, STACK, 5)]);
 }
 
 #[tokio::test]

@@ -1646,3 +1646,50 @@ async fn item_plot_end_skips_unlock_of_a_consumed_source_item() {
     crate::systems::skills::plots::finish_item_plot(&w.server, 349, &state);
     assert!(w.a.drain().is_empty());
 }
+
+/// Records the template ids of `Character.ItemUse` quest events.
+#[derive(Default)]
+struct ItemUseLog(std::sync::Mutex<Vec<u32>>);
+
+impl crate::systems::skills::ext::QuestSkillHooks for ItemUseLog {
+    fn item_use(&self, _: &crate::server::GameServer, _: &crate::world::PlayerRef, _: u64) {
+        panic!("the plot end must not look the used item up by id");
+    }
+
+    fn item_use_template(
+        &self,
+        _: &crate::server::GameServer,
+        _: &crate::world::PlayerRef,
+        template_id: u32,
+    ) {
+        self.0.lock().unwrap().push(template_id);
+    }
+}
+
+/// The plot end raises the quest item-use event from the template id captured at cast start, so
+/// it still fires when the plot consumed the last unit of its source item (quests 1315 / 3541
+/// use the source item as their own reagent), and not when the plot was cancelled.
+#[tokio::test]
+async fn item_plot_end_raises_item_use_for_a_consumed_source_item() {
+    let mut w = world();
+    super::bridges::install(&w.server);
+    let log = Arc::new(ItemUseLog::default());
+    w.server.systems.skills.ext.quests.install(log.clone());
+    let source_id = give(&w, &w.pa, slot_type::INVENTORY, STACK, 1, 0);
+    let state = item_plot_state(&w, source_id);
+    w.server
+        .systems
+        .skills
+        .ext
+        .items()
+        .consume_item_by_id(&w.server, &w.pa, source_id, 1);
+    assert!(item(&w, source_id).is_none());
+    w.a.drain();
+
+    crate::systems::skills::plots::finish_item_plot(&w.server, 349, &state);
+    assert_eq!(*log.0.lock().unwrap(), vec![STACK]);
+
+    state.request_cancellation();
+    crate::systems::skills::plots::finish_item_plot(&w.server, 349, &state);
+    assert_eq!(*log.0.lock().unwrap(), vec![STACK]);
+}

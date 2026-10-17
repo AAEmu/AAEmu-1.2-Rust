@@ -676,6 +676,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   stone-throwing plot 349, skill 11268, a `use_skill_as_reagent` item the effects consume) has
   nothing left to unlock, so the packet is skipped with a `debug!` (plot / skill / item id)
   instead of the former `ERROR` ("SkillSourceItem ... no longer exists").
+  `Character.ItemUse(item)` of the plot end takes the template id captured at cast start
+  (`QuestSkillHooks::item_use_template`) instead of looking the item up by id, so the quest
+  item-use event still fires for a consumed source item (quests 1315, 3541), as in the C#.
 * net (game connections): sending never blocks and C# had no limit; here a client with more than
   16 MiB queued, or one that accepts no data for 20 s, is disconnected (`net::outbox`,
   `net::listener`). Broadcasts encode a packet once for all recipients.
@@ -1357,6 +1360,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   cast with result 93 ("Invalid target"). It now follows the zone server. Missing authored `tuto_move`,
   `public_farm*` and `public_mate*` paths also remain data gaps.
 * `BuffTrigger.Execute` / `TimeoutBuffTrigger.Execute` logged "Owner is not a Unit" and returned for every trigger of a buff owned by a doodad (hostile area skills such as 16486 hit factionless doodads, so e.g. the shrink buffs start on them). The trigger can never run for a doodad, so `subscribe_triggers` now skips non-unit owners (trace log) instead of subscribing a trigger that only warns; the `execute_trigger` guard stays as a safety net and names the buff and owner. Behaviour is otherwise unchanged.
+* systems::economy (quest item events, 2026-10-17): the C# raised no `OnConsumedItem` for a partial
+  `CSDestroyItem` (only the full destroy, through `RemoveItem`) and none for the giving side of a
+  trade (`AddOrMoveExistingItem` only notified the destination container's owner). `ItemGather`
+  objectives therefore kept counting items that had left the character. Here the partial destroy
+  (`item_handlers::CSDestroyItemPacket`) pushes `ItemFx::Consumed` for the destroyed units and
+  `ItemContainer::add_or_move_inner` pushes it for the source owner when the item moves between two
+  characters' bags (trade), so the objective is recounted when items leave.
 
 ### Ranking boards (Rust only)
 
