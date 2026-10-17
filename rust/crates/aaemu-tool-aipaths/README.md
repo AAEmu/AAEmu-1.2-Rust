@@ -42,7 +42,11 @@ the database or the 1.2 client. The 10.x `game_pak` keeps them in
 
 ```sh
 cd rust
-cargo run --release -p aaemu-tool-aipaths -- return-points   --pak10 "<10.x>/game_pak" --pak12 "<1.2>/game_pak"   --compact crates/aaemu-game/app/Data/compact.sqlite3   --worldgates crates/aaemu-game/app/Data/Portal/worldgates.json [--update]
+cargo run --release -p aaemu-tool-aipaths -- return-points \
+  --pak10 "<10.x>/game_pak" --pak12 "<1.2>/game_pak" \
+  --compact crates/aaemu-game/app/Data/compact.sqlite3 \
+  --worldgates crates/aaemu-game/app/Data/Portal/worldgates.json \
+  [--skip <id,id,...>] [--update]
 ```
 
 * A gate is generated for every `return_points` row that a `Return` effect uses, that is not in
@@ -60,6 +64,9 @@ cargo run --release -p aaemu-tool-aipaths -- return-points   --pak10 "<10.x>/gam
   line ends.
 * stderr lists the ids that were left out and why (no main_world point in the 10.x data, zone
   differs, several positions) and the hand curated gates more than 5 m from the 10.x point.
+* `--skip` leaves ids out on purpose; the ids are recorded in the section's header comment. The
+  committed file was generated with `--skip 399,400,533,627,681`, the gates the ground check
+  rejects (not on the 1.2 terrain or navmesh).
 * Instance worlds (`instance_*`) are not read: their zones need per-world origins.
 
 The ground check of the committed gates is

@@ -20,7 +20,7 @@ use crate::convert::{Vec3, CELL_SIZE};
 
 pub const USAGE: &str = "Usage: aaemu-aipaths return-points --pak10 <10.x game_pak> \
 --pak12 <1.2 game_pak> --compact <compact.sqlite3> --worldgates <Data/Portal/worldgates.json> \
-[--update]";
+[--skip <id,id,...>] [--update]";
 
 /// First line of the generated section of `worldgates.json`.
 pub const BEGIN_MARKER: &str = "//----------------- Generated from the 10.x return_point.xml \
@@ -257,6 +257,8 @@ pub struct PlanInput<'a> {
     pub db_zones: &'a HashMap<u32, String>,
     /// The hand curated gates (never changed, their ids and sub zones are taken).
     pub existing: &'a [GateRow],
+    /// Ids left out on purpose (`--skip`).
+    pub skip: &'a BTreeSet<u32>,
 }
 
 /// The gates to generate (sorted by id) and the report.
@@ -276,6 +278,10 @@ pub fn plan(input: &PlanInput<'_>) -> (Vec<Gate>, Report) {
     for d in input.demand {
         if have_ids.contains(&d.id) {
             report.skip("already in worldgates.json", d.id);
+            continue;
+        }
+        if input.skip.contains(&d.id) {
+            report.skip("left out with --skip", d.id);
             continue;
         }
         let Some(found) = input.points.get(&d.editor_name.to_lowercase()) else {
@@ -376,7 +382,7 @@ fn num(v: f64) -> String {
 
 /// The generated section of `worldgates.json`: marker, one commented entry per gate, end marker.
 /// Four space indentation like the hand written entries; `eol` ends every line.
-pub fn format_section(gates: &[Gate], eol: &str) -> String {
+pub fn format_section(gates: &[Gate], skip: &BTreeSet<u32>, eol: &str) -> String {
     let mut out = String::new();
     let mut line = |s: String| {
         out.push_str(&s);
@@ -394,6 +400,13 @@ pub fn format_section(gates: &[Gate], eol: &str) -> String {
         "    // SubZoneId is only the dictionary key of the gate (the gate Id, see the tool)."
             .to_string(),
     );
+    if !skip.is_empty() {
+        let ids: Vec<String> = skip.iter().map(u32::to_string).collect();
+        line(format!(
+            "    // Left out with --skip (not on the 1.2 terrain or navmesh): {}",
+            ids.join(" ")
+        ));
+    }
     for (i, g) in gates.iter().enumerate() {
         let comma = if i + 1 == gates.len() { "" } else { "," };
         line("    {".to_string());
@@ -521,13 +534,13 @@ pub fn hand_curated(text: &str) -> Result<Vec<GateRow>> {
 
 /// `text` with its generated section replaced by `gates` (appended before the closing `]` when
 /// there is none; removed when `gates` is empty).
-pub fn splice(text: &str, gates: &[Gate]) -> Result<String> {
+pub fn splice(text: &str, gates: &[Gate], skip: &BTreeSet<u32>) -> Result<String> {
     let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let (head, tail) = split_file(text)?;
     if gates.is_empty() {
         return Ok(format!("{head}{eol}]{tail}"));
     }
-    let section = format_section(gates, eol);
+    let section = format_section(gates, skip, eol);
     Ok(format!("{head},{eol}{eol}{section}]{tail}"))
 }
 
@@ -563,12 +576,14 @@ pub struct Options {
     pub pak12: PathBuf,
     pub compact: PathBuf,
     pub worldgates: PathBuf,
+    pub skip: BTreeSet<u32>,
     pub update: bool,
 }
 
 pub fn parse_args(args: &[String]) -> Result<Options> {
     let (mut pak10, mut pak12, mut compact, mut worldgates) = (None, None, None, None);
     let mut update = false;
+    let mut skip = BTreeSet::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut value = |name: &str| -> Result<PathBuf> {
@@ -581,6 +596,15 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
             "--pak12" => pak12 = Some(value("--pak12")?),
             "--compact" => compact = Some(value("--compact")?),
             "--worldgates" => worldgates = Some(value("--worldgates")?),
+            "--skip" => {
+                for id in value("--skip")?.to_string_lossy().split(',') {
+                    skip.insert(
+                        id.trim()
+                            .parse::<u32>()
+                            .with_context(|| format!("--skip: bad id {id:?}"))?,
+                    );
+                }
+            }
             "--update" => update = true,
             other => bail!("unknown argument {other}\n{USAGE}"),
         }
@@ -590,6 +614,7 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
         pak12: pak12.with_context(|| USAGE)?,
         compact: compact.with_context(|| USAGE)?,
         worldgates: worldgates.with_context(|| USAGE)?,
+        skip,
         update,
     })
 }
@@ -643,6 +668,7 @@ pub fn run(opts: &Options) -> Result<()> {
         zones10: &zones10,
         db_zones: &db_zones,
         existing: &existing,
+        skip: &opts.skip,
     });
     eprintln!("generated gates: {}", gates.len());
     for (reason, ids) in &report.skipped {
@@ -658,12 +684,12 @@ pub fn run(opts: &Options) -> Result<()> {
     }
 
     if opts.update {
-        let new = splice(&text, &gates)?;
+        let new = splice(&text, &gates, &opts.skip)?;
         fs::write(&opts.worldgates, new)
             .with_context(|| format!("write {}", opts.worldgates.display()))?;
         eprintln!("updated {}", opts.worldgates.display());
     } else {
-        print!("{}", format_section(&gates, "\n"));
+        print!("{}", format_section(&gates, &opts.skip, "\n"));
     }
     Ok(())
 }

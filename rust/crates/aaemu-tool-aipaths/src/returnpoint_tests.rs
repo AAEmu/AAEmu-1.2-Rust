@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::returnpoints::*;
 
@@ -100,6 +100,7 @@ fn run_plan(f: &Fixture, demand: &[Demand], existing: &[GateRow]) -> (Vec<Gate>,
         zones10: &f.zones10,
         db_zones: &f.db_zones,
         existing,
+        skip: &BTreeSet::new(),
     })
 }
 
@@ -228,6 +229,10 @@ fn gate(id: u32) -> Gate {
     }
 }
 
+fn none() -> BTreeSet<u32> {
+    BTreeSet::new()
+}
+
 fn ids(text: &str) -> Vec<u32> {
     parse_gates(text).unwrap().iter().map(|g| g.id).collect()
 }
@@ -245,13 +250,13 @@ fn comments_are_stripped_outside_strings_only() {
 
 #[test]
 fn section_is_commented_and_valid_json_with_the_file() {
-    let text = format_section(&[gate(5), gate(6)], "\n");
+    let text = format_section(&[gate(5), gate(6)], &BTreeSet::new(), "\n");
     assert!(text.starts_with("    //----"));
     assert!(text.contains("\"Y\": 0.0,"));
     assert!(text.contains("\"Yaw\": -90.0,"));
     assert!(text.contains("    },\n    {"));
     assert!(text.trim_end().ends_with(END_MARKER));
-    let spliced = splice(FILE, &[gate(5), gate(6)]).unwrap();
+    let spliced = splice(FILE, &[gate(5), gate(6)], &none()).unwrap();
     assert_eq!(ids(&spliced), [1, 5, 6]);
     assert!(spliced.contains(BEGIN_MARKER));
     // The file keeps its line endings and its end.
@@ -261,19 +266,53 @@ fn section_is_commented_and_valid_json_with_the_file() {
 
 #[test]
 fn splice_is_idempotent_and_replaces_the_old_section() {
-    let once = splice(FILE, &[gate(5), gate(6)]).unwrap();
-    assert_eq!(splice(&once, &[gate(5), gate(6)]).unwrap(), once);
-    let replaced = splice(&once, &[gate(7)]).unwrap();
+    let once = splice(FILE, &[gate(5), gate(6)], &none()).unwrap();
+    assert_eq!(splice(&once, &[gate(5), gate(6)], &none()).unwrap(), once);
+    let replaced = splice(&once, &[gate(7)], &none()).unwrap();
     assert_eq!(ids(&replaced), [1, 7]);
     // Only the hand curated gate counts as existing, whatever the section holds.
     let hand: Vec<u32> = hand_curated(&once).unwrap().iter().map(|g| g.id).collect();
     assert_eq!(hand, [1]);
     // No gates: the section disappears and the original text comes back.
-    assert_eq!(splice(&once, &[]).unwrap(), FILE);
+    assert_eq!(splice(&once, &[], &none()).unwrap(), FILE);
 }
 
 #[test]
 fn unknown_arguments_are_rejected() {
     let args: Vec<String> = ["--pak10", "a", "--bogus"].map(String::from).to_vec();
     assert!(parse_args(&args).is_err());
+}
+
+#[test]
+fn skipped_ids_are_left_out_and_recorded_in_the_section() {
+    let f = fixture();
+    let skip = BTreeSet::from([30]);
+    let (gates, report) = plan(&PlanInput {
+        demand: &[demand(30, "Liania"), demand(9, "other")],
+        points: &f.points,
+        zones12: &f.zones12,
+        zones10: &f.zones10,
+        db_zones: &f.db_zones,
+        existing: &[],
+        skip: &skip,
+    });
+    assert_eq!(gates.iter().map(|g| g.id).collect::<Vec<_>>(), [9]);
+    assert_eq!(report.skipped["left out with --skip"], BTreeSet::from([30]));
+    let section = format_section(&gates, &skip, "\n");
+    assert!(section.contains("--skip (not on the 1.2 terrain or navmesh): 30"));
+    let args: Vec<String> = [
+        "--pak10",
+        "a",
+        "--pak12",
+        "b",
+        "--compact",
+        "c",
+        "--worldgates",
+        "d",
+        "--skip",
+        "5, 7",
+    ]
+    .map(String::from)
+    .to_vec();
+    assert_eq!(parse_args(&args).unwrap().skip, BTreeSet::from([5, 7]));
 }
