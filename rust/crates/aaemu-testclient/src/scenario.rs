@@ -19,6 +19,7 @@ mod doodad;
 mod fixes;
 mod plant;
 mod questitem;
+mod script;
 
 /// Which scenario to run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +67,10 @@ pub enum Kind {
     /// (see `scenario/fixes.rs`). GM account.
     #[serde(rename = "ghost")]
     Ghost,
+    /// Ad-hoc live checks driven by the command file `$AAEMU_SCRIPT` (see `scenario/script.rs`).
+    /// GM account.
+    #[serde(rename = "script")]
+    Script,
 }
 
 impl std::str::FromStr for Kind {
@@ -84,6 +89,7 @@ impl std::str::FromStr for Kind {
             "plant" => Self::Plant,
             "stonethrow" => Self::StoneThrow,
             "ghost" => Self::Ghost,
+            "script" => Self::Script,
             _ => bail!(
                 "unknown scenario '{s}' (login, lobby, full, combat, npc-return, mate-revive, questitem, doodad, \n                 load)"
             ),
@@ -548,6 +554,11 @@ async fn run_inner(kind: Kind, cfg: &BotConfig, r: &mut Runner<'_>) -> anyhow::R
     }
     if kind == Kind::Ghost {
         fixes::ghost(&mut game, r).await?;
+        drop(stream);
+        return Ok(());
+    }
+    if kind == Kind::Script {
+        script::run(&mut game, r).await?;
         drop(stream);
         return Ok(());
     }

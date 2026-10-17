@@ -343,7 +343,7 @@ pub(super) struct QuestState {
     pub(super) objectives: [i32; 5],
 }
 
-fn quest_state(p: &Packet) -> Option<(u32, QuestState)> {
+pub(super) fn quest_state(p: &Packet) -> Option<(u32, QuestState)> {
     if !p.is_sc(sc::SCQuestContextStartedPacket) && !p.is_sc(sc::SCQuestContextUpdatedPacket) {
         return None;
     }
