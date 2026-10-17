@@ -2291,8 +2291,13 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
         let bag = inv.bag();
         let mut bag = lock(&bag);
         let Some(item) = bag.get_item_by_id(item_id).cloned() else {
+            tracing::warn!(
+                "doodad {doodad_template_id}: source item {item_id} is not in the bag of character {}",
+                player.character_id
+            );
             return false;
         };
+        let labor_power = player.data().labor_power;
         if item.count < 1
             || labor_cost < 0
             || !server
@@ -2300,8 +2305,13 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
                 .items
                 .item_ids_from_doodad(doodad_template_id)
                 .contains(&item.template_id)
-            || player.data().labor_power < labor_cost
+            || labor_power < labor_cost
         {
+            tracing::warn!(
+                "doodad {doodad_template_id}: source item {item_id} (template {}, count {}) rejected: labor cost {labor_cost}, labor power {labor_power}",
+                item.template_id,
+                item.count
+            );
             return false;
         }
         let preserve = server
@@ -2311,10 +2321,18 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
             .is_some_and(|t| t.max_count == 1);
         if preserve {
             if item.count != 1 {
+                tracing::warn!(
+                    "doodad {doodad_template_id}: unique source item {item_id} has count {}",
+                    item.count
+                );
                 return false;
             }
             drop(bag);
             let Some(system) = inv.get(slot_type::SYSTEM) else {
+                tracing::warn!(
+                    "doodad {doodad_template_id}: character {} has no system container",
+                    player.character_id
+                );
                 return false;
             };
             if !super::mail::add_or_move_existing_item(
@@ -2324,6 +2342,9 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
                 item_id,
                 -1,
             ) {
+                tracing::warn!(
+                    "doodad {doodad_template_id}: could not move source item {item_id} to the system container"
+                );
                 return false;
             }
         } else {
@@ -2335,6 +2356,10 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
                 &mut txn.env,
             ) != 1
             {
+                tracing::warn!(
+                    "doodad {doodad_template_id}: could not consume source item {item_id} (template {})",
+                    item.template_id
+                );
                 return false;
             }
             drop(bag);
