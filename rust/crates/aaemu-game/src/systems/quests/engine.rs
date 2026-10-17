@@ -994,9 +994,16 @@ impl<'a> Ctx<'a> {
         res
     }
 
+    /// The quest reached its Reward step or `Completed` status (as opposed to being dropped by
+    /// the player / a GM / a failed state).
+    fn is_completing(&self, h: QuestHandle) -> bool {
+        self.quest(h)
+            .is_some_and(|q| q.status == status::COMPLETED || q.step == kind::REWARD)
+    }
+
     /// `Quest.Drop(update)`.
     pub fn quest_drop(&mut self, h: QuestHandle, update: bool) {
-        let completing = self.quest(h).is_some_and(|q| q.status == status::COMPLETED);
+        let completing = self.is_completing(h);
         self.set_status(h, status::DROPPED);
         self.set_step(h, kind::DROP);
         let data = self.data;
@@ -1600,7 +1607,9 @@ impl<'a> Ctx<'a> {
         if let Some(q) = self.quest_mut(h) {
             q.skip_update = true;
         }
-        if self.quest(h).is_some_and(|q| q.status == status::COMPLETED) {
+        // Cleanup runs for a quest that is being completed, however it got to the Reward step
+        // (the early completion of a LetItDone quest does not set the status on every path).
+        if self.is_completing(h) {
             self.quest_cleanup(h);
         }
         self.quest_drop(h, update);
@@ -1660,19 +1669,85 @@ impl<'a> Ctx<'a> {
     /// `TryCompleteQuestAsLetItDone(questId, selectedReward)`.
     pub fn try_complete_quest_as_let_it_done(&mut self, quest_id: u32, selected: i32) {
         let Some(h) = self.st.active_handle(quest_id) else {
+            self.log_refusal(
+                "TryCompleteQuestAsLetItDone",
+                quest_id,
+                "the quest is not active",
+            );
             return;
         };
         let let_it_done = self.data.template(quest_id).is_some_and(|t| t.let_it_done);
         if !let_it_done {
+            self.log_refusal(
+                "TryCompleteQuestAsLetItDone",
+                quest_id,
+                "the quest cannot be completed early (not LetItDone)",
+            );
             return;
         }
-        if self.objective_status(h) < ObjectiveStatus::CanEarlyComplete {
+        let objective = self.objective_status(h);
+        if objective < ObjectiveStatus::CanEarlyComplete {
+            let objectives = self.quest(h).map(|q| q.objectives);
+            self.log_refusal(
+                "TryCompleteQuestAsLetItDone",
+                quest_id,
+                &format!("objectives not far enough ({objective:?}, objectives {objectives:?})"),
+            );
             return;
         }
         if let Some(q) = self.quest_mut(h) {
             q.selected_reward_index = selected;
         }
-        self.set_step(h, kind::REWARD);
+        let (has_reward, has_ready) = self.quest(h).map_or((false, false), |q| {
+            (
+                q.step_index(kind::REWARD).is_some(),
+                q.step_index(kind::READY).is_some(),
+            )
+        });
+        if has_reward {
+            // Go to the Reward step: its components complete the quest on the next evaluation.
+            self.set_step(h, kind::REWARD);
+            self.set_status(h, status::COMPLETED);
+        } else if has_ready {
+            // No Reward step: the Ready step holds whatever the quest hands out. Turn it in
+            // there; with the report acts satisfied the step runs on to the quest completion.
+            self.set_step(h, kind::READY);
+            self.set_status(h, status::READY);
+            self.override_report_acts(h, kind::READY);
+            self.run_current_step(h);
+            if self.quest(h).is_some_and(|q| q.step == kind::READY) {
+                tracing::warn!(
+                    "TryCompleteQuestAsLetItDone, {who}, Quest {quest_id}: has no Reward step and its Ready step did not complete, left at Ready"
+                );
+            }
+        } else {
+            // Neither a Ready nor a Reward step: complete right away.
+            self.set_step(h, kind::REWARD);
+            self.set_status(h, status::COMPLETED);
+            self.go_to_next_step(h);
+        }
+    }
+
+    /// Marks the report acts (`ConReportNpc` / `ConReportDoodad` / `ConReportJournal`) of a step
+    /// as satisfied (the player is turning the quest in).
+    fn override_report_acts(&mut self, h: QuestHandle, step_kind: u8) {
+        let data = self.data;
+        let Some(si) = self.quest(h).and_then(|q| q.step_index(step_kind)) else {
+            return;
+        };
+        for p in self.step_paths(h, si) {
+            let Some(a) = self.act_ref(h, p) else {
+                continue;
+            };
+            if matches!(
+                data.acts[a].kind,
+                ActKind::ConReportNpc { .. }
+                    | ActKind::ConReportDoodad { .. }
+                    | ActKind::ConReportJournal
+            ) {
+                self.set_act_override(h, p, true);
+            }
+        }
     }
 
     /// `ResetQuests(questDetail, sendIfChanged)`.
