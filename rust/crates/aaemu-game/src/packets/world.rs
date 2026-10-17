@@ -141,9 +141,16 @@ packet_def!(
 );
 impl Marshal for SCCompletedQuestsPacket {
     fn write(&self, s: &mut PacketStream) {
-        s.write_i32(self.quests.len() as i32);
-        for q in &self.quests {
-            s.write_u16(q.id).write_raw(&q.body8());
+        // The wire block id is 16 bits: blocks of quest ids >= 4194304 cannot be represented
+        // (the client has no flag for them) and are left out.
+        let blocks: Vec<&CompletedQuest> = self
+            .quests
+            .iter()
+            .filter(|q| q.id <= u32::from(u16::MAX))
+            .collect();
+        s.write_i32(blocks.len() as i32);
+        for q in blocks {
+            s.write_u16(q.id as u16).write_raw(&q.body8());
         }
     }
 }

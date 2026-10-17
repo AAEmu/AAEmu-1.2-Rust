@@ -1500,6 +1500,16 @@ impl<'a> Ctx<'a> {
 
     /// `SetCompletedQuestFlag`: returns the changed block.
     pub fn set_completed_quest_flag(&mut self, quest_id: u32, completed: bool) -> CompletedQuest {
+        if quest_id >= WIRE_QUEST_ID_LIMIT {
+            static LOGGED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!(
+                    "Quest {quest_id} is above {WIRE_QUEST_ID_LIMIT}: its completed flag is kept (block {}), but the client's 16 bit completed block ids cannot show it",
+                    quest_id / 64
+                );
+            }
+        }
         set_completed_quest_flag(&mut self.c.quests.completed, quest_id, completed)
     }
 
@@ -1810,7 +1820,7 @@ impl<'a> Ctx<'a> {
         for bi in 0..self.c.quests.completed.len() {
             let block_id = self.c.quests.completed[bi].id;
             for idx in 0..64u32 {
-                let quest_id = u32::from(block_id) * 64 + idx;
+                let quest_id = block_id * 64 + idx;
                 let Some(t) = data.template(quest_id) else {
                     continue;
                 };
@@ -1827,7 +1837,7 @@ impl<'a> Ctx<'a> {
                             self.send(SCQuestContextResetPacket {
                                 quest_id,
                                 body,
-                                component_id: u32::from(block_id),
+                                component_id: block_id,
                             });
                         }
                     }
@@ -2133,7 +2143,7 @@ pub(crate) fn bit_set(body: &mut Vec<u8>, idx: usize, v: bool) {
 
 /// `HasQuestCompleted(questId)`.
 pub fn has_quest_completed(blocks: &[CompletedQuest], quest_id: u32) -> bool {
-    let block_id = (quest_id / 64) as u16;
+    let block_id = quest_id / 64;
     blocks
         .iter()
         .find(|b| b.id == block_id)
@@ -2146,7 +2156,7 @@ pub fn set_completed_quest_flag(
     quest_id: u32,
     completed: bool,
 ) -> CompletedQuest {
-    let block_id = (quest_id / 64) as u16;
+    let block_id = quest_id / 64;
     let idx = (quest_id % 64) as usize;
     let i = match blocks.iter().position(|b| b.id == block_id) {
         Some(i) => i,
