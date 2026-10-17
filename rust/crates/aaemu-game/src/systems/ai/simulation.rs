@@ -118,16 +118,26 @@ impl Simulation {
         result
     }
 
-    /// `ReadPath()`: `Err` = the exception message (the caller stops the route).
-    fn read_path(&mut self, npc_name: &str) -> Result<(), String> {
-        if self.paths.contains_key(&self.move_file_name) {
-            return Ok(());
+    /// `ReadPath()`: `Err` = the exception message (the caller stops the route). `resolved` is
+    /// the file `AiPathsManager::resolve_path_file` picked for the NPC (a `<name>@<zone>`
+    /// variant for routes shared by several zones); without it `MoveFileName.path` is read.
+    /// Returns the key of the route in `paths`: the file stem, so that two files never share a
+    /// cache entry.
+    fn read_path(&mut self, npc_name: &str, resolved: Option<PathBuf>) -> Result<String, String> {
+        let key = resolved
+            .as_ref()
+            .and_then(|f| f.file_stem())
+            .and_then(|s| s.to_str())
+            .map_or_else(|| self.move_file_name.clone(), str::to_string);
+        if self.paths.contains_key(&key) {
+            return Ok(key);
         }
         self.move_path.clear();
-        let file = self
-            .folder
-            .as_ref()
-            .map(|f| f.join(format!("{}.path", self.move_file_name)));
+        let file = resolved.or_else(|| {
+            self.folder
+                .as_ref()
+                .map(|f| f.join(format!("{}.path", self.move_file_name)))
+        });
         match file.as_ref().map(std::fs::read) {
             Some(Ok(bytes)) => {
                 let text = String::from_utf8_lossy(&bytes);
@@ -148,10 +158,8 @@ impl Simulation {
                 extract_value(s, 3)?,
             ));
         }
-        self.paths
-            .entry(self.move_file_name.clone())
-            .or_insert(route);
-        Ok(())
+        self.paths.entry(key.clone()).or_insert(route);
+        Ok(key)
     }
 
     fn get_paths(&self, name: &str) -> Vec<Vec3> {
@@ -386,11 +394,26 @@ fn start_path(
     first_delay: f64,
 ) {
     let name = npc.data().unit.name.clone();
-    let read = sim.lock().expect("simulation poisoned").read_path(&name);
-    if let Err(e) = read {
-        tracing::warn!("Error in read MovePath: {e}");
-        stop_move(server, sim, npc);
-    }
+    let pos = npc::world_pos(server, &WorldObject::from(npc));
+    let file = sim
+        .lock()
+        .expect("simulation poisoned")
+        .move_file_name
+        .clone();
+    // Routes shared by several zones are `<name>@<zone key>.path` files: pick by the NPC's position.
+    let resolved = server.systems.ai.paths.resolve_path_file(&file, Some(pos));
+    let read = sim
+        .lock()
+        .expect("simulation poisoned")
+        .read_path(&name, resolved);
+    let key = match read {
+        Ok(key) => key,
+        Err(e) => {
+            tracing::warn!("Error in read MovePath: {e}");
+            stop_move(server, sim, npc);
+            file.clone()
+        }
+    };
     {
         let mut s = sim.lock().expect("simulation poisoned");
         s.skill_id = skill_id;
@@ -400,17 +423,13 @@ fn start_path(
     let pos = npc::world_pos(server, &WorldObject::from(npc));
     let target = {
         let mut s = sim.lock().expect("simulation poisoned");
-        let file = s.move_file_name.clone();
-        s.path = s.get_paths(&file);
+        s.path = s.get_paths(&key);
         if s.path.is_empty() {
-            // The retail route files (`public_*`, `tuto_move`, ...) were never shipped with the
-            // emulator, so the NPC just stays put (as in the C#); report each name once.
+            // Only part of the retail route data is shipped (generated from the 10.x client, see
+            // `Data/Path`), so for the others the NPC just stays put (as in the C#); report each
+            // name once.
             if server.systems.ai.first_missing_path(&file) {
-                tracing::warn!(
-                    "Stop moving... no recorded path file Data/Path/{file}.path for MoveFileName={file} \
-                     (retail route data is not shipped); the NPC stays put (reported once per file \
-                     name)"
-                );
+                tracing::warn!("Stop moving... no route file Data/Path/{file}.path (or {file}@<zone>.path variant) for MoveFileName={file}; the NPC stays put (reported once per file name)");
             } else {
                 tracing::debug!("Stop moving... path data for MoveFileName={file} is missing");
             }
@@ -691,5 +710,28 @@ mod tests {
             "zero distance is skipped"
         );
         assert_eq!(s.get_min_check_point(Vec3::new(0.0, 0.0, 0.0), &[]), -1);
+    }
+
+    #[test]
+    fn routes_are_cached_by_the_resolved_file() {
+        let dir = std::env::temp_dir().join(format!("aaemu_sim_paths_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("farm@1.path"), "|10|20|30|\n|11|20|30|\n").unwrap();
+        std::fs::write(dir.join("farm@2.path"), "|500|600|30|\n|501|600|30|\n").unwrap();
+        let mut s = Simulation::new(Some(dir.clone()));
+        s.move_file_name = "farm".to_string();
+        let a = s.read_path("npc", Some(dir.join("farm@2.path"))).unwrap();
+        assert_eq!(a, "farm@2");
+        assert_eq!(s.get_paths(&a)[0], Vec3::new(500.0, 600.0, 30.0));
+        // Another variant of the same MoveFileName does not reuse the cached route.
+        let b = s.read_path("npc", Some(dir.join("farm@1.path"))).unwrap();
+        assert_eq!(b, "farm@1");
+        assert_eq!(s.get_paths(&b)[0], Vec3::new(10.0, 20.0, 30.0));
+        assert_eq!(s.get_paths(&a)[0], Vec3::new(500.0, 600.0, 30.0));
+        // Without a resolved file the plain MoveFileName is used (missing: an empty route).
+        assert_eq!(s.read_path("npc", None).unwrap(), "farm");
+        assert!(s.get_paths("farm").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
