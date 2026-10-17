@@ -717,20 +717,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("aaemu_sim_paths_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("farm@1.path"),
-            "|10|20|30|
-|11|20|30|
-",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("farm@2.path"),
-            "|500|600|30|
-|501|600|30|
-",
-        )
-        .unwrap();
+        std::fs::write(dir.join("farm@1.path"), "|10|20|30|\n|11|20|30|\n").unwrap();
+        std::fs::write(dir.join("farm@2.path"), "|500|600|30|\n|501|600|30|\n").unwrap();
         let mut s = Simulation::new(Some(dir.clone()));
         s.move_file_name = "farm".to_string();
         let a = s.read_path("npc", Some(dir.join("farm@2.path"))).unwrap();
