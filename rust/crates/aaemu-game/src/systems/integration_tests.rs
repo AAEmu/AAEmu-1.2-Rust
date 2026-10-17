@@ -575,6 +575,152 @@ async fn party_zone_kill_counts_once_per_member_in_and_out_of_range() {
     }
 }
 
+/// Both hunt quests of a player: (individual hunt, group hunt) quest rows.
+fn hunt_rows(server: &GameServer, p: &PlayerRef) -> [Option<(u8, i32)>; 2] {
+    [
+        quest_row(server, p, HUNT_QUEST),
+        quest_row(server, p, GROUP_HUNT_QUEST),
+    ]
+}
+
+#[tokio::test]
+async fn hunt_quests_credit_the_party_in_range_and_not_other_attackers() {
+    const CREDITED: Option<(u8, i32)> = Some((kind::READY, 1));
+    const NOT_CREDITED: Option<(u8, i32)> = Some((kind::PROGRESS, 0));
+    for tag_share in [false, true] {
+        // A and B (party, in range) and D (party, 500 away) against X (no party).
+        let server = server_with(tag_share);
+        let mut a = pc(&server, 1, "Lead", 100.0);
+        let mut b = pc(&server, 2, "Mate", 102.0);
+        let d = pc(&server, 4, "Far", 600.0);
+        let mut x = pc(&server, 3, "Other", 104.0);
+        let team_id = form_party(&server, &a.p, &b.p);
+        let teams = &server.systems.social.teams;
+        teams.ask_to_join(&server, &a.p, "", 0, true, Some(&d.p));
+        teams.reply_to_join_team(&server, &d.p, 0, true, a.p.character_id, false, "", false);
+        assert!(teams
+            .active_team(team_id)
+            .expect("party")
+            .is_member(d.p.character_id));
+        for p in [&a.p, &b.p, &d.p, &x.p] {
+            for quest in [HUNT_QUEST, GROUP_HUNT_QUEST] {
+                accept(&server, p, quest);
+            }
+        }
+        let npc = villager(&server, 0x200, 1_000);
+
+        // The party (A: more than half of the max hp) tags; X hits too; B kills.
+        cast(
+            &server,
+            &mut a,
+            HIT_SKILL,
+            SkillCastTarget::Unit(npc.obj_id),
+        );
+        assert_eq!(npc.data().unit.skill_state.tagging.tag_team, team_id);
+        npc.data().unit.hp = 1_000;
+        cast(
+            &server,
+            &mut x,
+            HIT_SKILL,
+            SkillCastTarget::Unit(npc.obj_id),
+        );
+        cast(
+            &server,
+            &mut b,
+            KILL_SKILL,
+            SkillCastTarget::Unit(npc.obj_id),
+        );
+        assert!(npc.data().unit.is_dead());
+
+        let case = format!("TagShare {tag_share}");
+        for (name, p) in [("A", &a.p), ("B", &b.p)] {
+            assert_eq!(hunt_rows(&server, p), [CREDITED; 2], "{name}, {case}");
+        }
+        assert_eq!(
+            hunt_rows(&server, &d.p),
+            [NOT_CREDITED; 2],
+            "party member out of range, {case}"
+        );
+        let other = if tag_share { CREDITED } else { NOT_CREDITED };
+        assert_eq!(
+            hunt_rows(&server, &x.p),
+            [other; 2],
+            "non-party attacker, {case}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn hunt_quests_credit_the_first_hitter_without_tag_share() {
+    const CREDITED: Option<(u8, i32)> = Some((kind::READY, 1));
+    const NOT_CREDITED: Option<(u8, i32)> = Some((kind::PROGRESS, 0));
+    for tag_share in [false, true] {
+        let server = server_with(tag_share);
+        let mut x = pc(&server, 1, "First", 100.0);
+        let mut y = pc(&server, 2, "Second", 102.0);
+        for p in [&x.p, &y.p] {
+            for quest in [HUNT_QUEST, GROUP_HUNT_QUEST] {
+                accept(&server, p, quest);
+            }
+        }
+        // Nobody deals more than half of the max hp: the first hitter keeps the tag.
+        let npc = villager(&server, 0x200, 2_000);
+        cast(
+            &server,
+            &mut x,
+            HIT_SKILL,
+            SkillCastTarget::Unit(npc.obj_id),
+        );
+        cast(
+            &server,
+            &mut y,
+            HIT_SKILL,
+            SkillCastTarget::Unit(npc.obj_id),
+        );
+        assert_eq!(npc.data().unit.skill_state.tagging.tagger, x.p.obj_id);
+        // Y lands the killing blow.
+        cast(
+            &server,
+            &mut y,
+            KILL_SKILL,
+            SkillCastTarget::Unit(npc.obj_id),
+        );
+        assert!(npc.data().unit.is_dead());
+
+        let case = format!("TagShare {tag_share}");
+        assert_eq!(
+            hunt_rows(&server, &x.p),
+            [CREDITED; 2],
+            "first hitter, {case}"
+        );
+        let second = if tag_share { CREDITED } else { NOT_CREDITED };
+        assert_eq!(
+            hunt_rows(&server, &y.p),
+            [second; 2],
+            "second attacker, {case}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn solo_kill_credits_the_killer_for_the_group_hunt() {
+    let server = server_with(false);
+    let mut a = pc(&server, 1, "Hunter", 100.0);
+    accept(&server, &a.p, GROUP_HUNT_QUEST);
+    let npc = villager(&server, 0x200, 1_000);
+    cast(
+        &server,
+        &mut a,
+        KILL_SKILL,
+        SkillCastTarget::Unit(npc.obj_id),
+    );
+    assert!(npc.data().unit.is_dead());
+    assert_eq!(
+        quest_row(&server, &a.p, GROUP_HUNT_QUEST),
+        Some((kind::READY, 1))
+    );
+}
+
 #[tokio::test]
 async fn tag_share_gives_quest_credit_to_a_solo_contributor() {
     for tag_share in [false, true] {
