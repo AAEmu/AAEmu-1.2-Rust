@@ -28,6 +28,8 @@ enum Write {
 #[derive(Debug, Default)]
 pub struct Persistence {
     sender: Mutex<Option<mpsc::UnboundedSender<Write>>>,
+    /// Growth state of world-spawned doodads (`doodad_spawn_states`).
+    pub natural: super::natural::NaturalStates,
 }
 
 impl Persistence {
@@ -236,6 +238,7 @@ pub async fn write_row(conn: &mut MySqlConnection, r: &DoodadRow) -> sqlx::Resul
 
 /// `Doodad.Save()` (fire and forget).
 pub fn save(server: &GameServer, doodad: &DoodadRef) {
+    super::natural::save(server, doodad);
     let persistence = &server.systems.npcs.doodads.persistence;
     let mut slot = persistence
         .sender

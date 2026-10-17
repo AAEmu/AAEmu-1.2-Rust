@@ -1180,6 +1180,30 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   those replacements ("replacement chain rejected") and the doodad waited for its Final to
   respawn the base template.
 
+* systems::npcs (2026-10-16): world-spawned ("natural") doodads keep their growth state across
+  server restarts. The C# (and the first Rust port) recreated every doodad of
+  `doodad_spawns*.json` in its Start phase with the full growth timer on each start, so with
+  restarts more frequent than the longest growth chain (about 9 400 of the 42 670 main_world
+  spawns need more than 24 h, the longest about 103 h) trees, ore, wild crops and cotton never
+  matured. Deviation: doodads whose template waits at least 5 minutes in some phase (`Timer` with
+  a next phase, `Growth`, `Final` with `After`; about 10 900 main_world spawns, 143 templates;
+  shorter chains restart in seconds and static props have nothing to keep) are stored in the new
+  table `doodad_spawn_states`, keyed by `(world id, spawn key)` where the key is the spawn
+  entry's authored template id + position at 0.1 m (not the doodad's current template, which a
+  `DoodadFuncRatioRespawn` swaps, and not the JSON `Id`, present on 7 entries only). The row holds
+  the current template, func group, plant / growth / phase time, `Data` and the interaction
+  counters. Writes are coalesced per key and flushed in batches every 5 s, by the periodic and
+  shutdown save (`doodad::save`); the row is deleted when the doodad is deleted (harvest, Final,
+  despawn), so a respawn starts fresh as before. At startup (`SpawnManager::load`, main world
+  only) all rows are read once; `DoodadSpawner::spawn` restores the first doodad of an entry with
+  the player-doodad load mechanism (`FuncGroupId` setter, then `OverridePhaseTime = PhaseTime`),
+  so the phase timer resumes with its remaining delay and an expired phase fires promptly.
+  Downtime counts as growth time. Rows whose template or func group no longer exist or whose
+  template is no longer timed are dropped with one summary warning; two spawn entries sharing a
+  key are only tracked for the first. Tracking stays off if the table cannot be read. Limitation
+  (as for player doodads): a phase that has both a `Timer`/`Growth` and a `Final` with `After`
+  lets only the first consume the saved phase time.
+
 * systems::npcs (2026-10-16): `DoodadFuncTod` takes its `curTime >= Tod` catch-up on every
   entry, which ignores that the clock wraps; the 20 day/night board templates (West Gate
   4345-4352, Blue Salt 6175 / 6213 and their variants: day board Tod 20:00, variant Tod 02:00 or

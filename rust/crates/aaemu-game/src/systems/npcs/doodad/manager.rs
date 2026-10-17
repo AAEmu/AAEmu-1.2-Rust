@@ -240,6 +240,7 @@ pub fn delete(server: &GameServer, world: &Arc<WorldInstance>, doodad: &DoodadRe
         d.phase.deleted = true;
         d.phase.func_task = 0; // deviation: cancel the FuncTask (see the module docs)
     }
+    super::natural::forget(server, doodad); // drop the saved growth state of a world doodad
     super::logic::clear_links(&DoodadCtx::new(server, world.clone(), doodad.clone()));
     world.delete(doodad);
     area_trigger::remove_doodad_area_triggers(server, doodad.obj_id);

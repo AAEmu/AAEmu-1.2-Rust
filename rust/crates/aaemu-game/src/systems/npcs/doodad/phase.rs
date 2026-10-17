@@ -102,7 +102,7 @@ pub fn set_func_group_id(server: &GameServer, doodad: &DoodadRef, value: u32) {
         d.func_group_id = value;
         d.phase.interaction_counts.clear();
         d.phase_time_ms = now_ms(); // Save PhaseTime at start of new phase (group)
-        let persistent = d.is_persistent;
+        let persistent = d.is_persistent || d.natural_key.is_some();
         refresh_phase_caches(&server.game_data.systems.npcs.doodad, &mut d);
         persistent
     };
@@ -119,7 +119,7 @@ pub fn set_data(server: &GameServer, doodad: &DoodadRef, value: i32) {
             return;
         }
         d.data = value;
-        d.is_persistent
+        d.is_persistent || d.natural_key.is_some()
     };
     if save {
         db::save(server, doodad);

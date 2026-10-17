@@ -925,6 +925,18 @@ impl SpawnManager {
                     .await?;
             }
             tracing::info!("{spawned} doodads loaded in {}.", self.world.template.name);
+            // Saved growth state of the world-spawned doodads, consumed by the initial spawn.
+            let natural = &server.systems.npcs.doodads.persistence.natural;
+            match natural.load(&server.db, self.world.id).await {
+                Ok(n) => tracing::info!(
+                    "Loaded {n} natural doodad growth states for {}",
+                    self.world.template.name
+                ),
+                Err(e) => tracing::warn!(
+                    "Natural doodad growth states of {} are not persisted: {e}",
+                    self.world.template.name
+                ),
+            }
         }
 
         self.start_respawn_tick(server);
@@ -1529,6 +1541,13 @@ impl SpawnManager {
             self.world.template.name,
             start.elapsed()
         );
+        server
+            .systems
+            .npcs
+            .doodads
+            .persistence
+            .natural
+            .finish_initial_spawn(server, self.world.id, &self.world.template.name);
         // You have to wait for all the doodads to spawn before trying to initialize the fish
         // schools (FishSchoolManager.Load(World)).
         crate::systems::npcs::fish_school::load_world(server, &self.world);
