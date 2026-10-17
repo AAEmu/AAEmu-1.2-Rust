@@ -2,7 +2,7 @@
 //!
 //! The 10.x `game_pak` keeps the designers' AI paths in
 //! `game/worlds/<world>/level_design/zone/<zone key>/editor/npc.xml`. The route names the 1.2
-//! database asks for (`quest_components.ai_path_name`, `ai_commands` FollowPath) are looked up
+//! database asks for (`quest_components.ai_path_name`, `ai_commands` FollowPath, `npc_control_effects` FollowPath) are looked up
 //! there and written as `|x|y|z|` files in world coordinates. The `return-points` mode writes
 //! the `worldgates.json` entries of the `Return` special effects from the 10.x
 //! `return_point.xml` files. See `README.md`.
@@ -87,10 +87,14 @@ fn parse_args(args: &[String]) -> Result<Options> {
 
 /// The route names the database asks for: lower-case name to the spellings in use.
 pub fn load_demand(compact: &Path) -> Result<BTreeMap<String, BTreeSet<String>>> {
-    use rusqlite::types::Value;
     let conn =
         rusqlite::Connection::open_with_flags(compact, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .with_context(|| format!("open {}", compact.display()))?;
+    demand_from(&conn)
+}
+
+fn demand_from(conn: &rusqlite::Connection) -> Result<BTreeMap<String, BTreeSet<String>>> {
+    use rusqlite::types::Value;
     let mut names: BTreeSet<String> = BTreeSet::new();
     let mut stmt =
         conn.prepare("SELECT ai_path_name FROM quest_components WHERE ai_path_name IS NOT NULL")?;
@@ -101,6 +105,14 @@ pub fn load_demand(compact: &Path) -> Result<BTreeMap<String, BTreeSet<String>>>
     }
     // cmd_id 2 = FollowPath; param2 is the route name (a number for the other commands).
     let mut stmt = conn.prepare("SELECT param2 FROM ai_commands WHERE cmd_id = 2")?;
+    for row in stmt.query_map([], |r| r.get::<_, Value>(0))? {
+        if let Value::Text(t) = row? {
+            names.insert(t.trim().to_string());
+        }
+    }
+    // category_id 2 = FollowPath; param_string is the route name (NpcControllEffect).
+    let mut stmt =
+        conn.prepare("SELECT param_string FROM npc_control_effects WHERE category_id = 2")?;
     for row in stmt.query_map([], |r| r.get::<_, Value>(0))? {
         if let Value::Text(t) = row? {
             names.insert(t.trim().to_string());
