@@ -1218,31 +1218,42 @@ impl<'a> Ctx<'a> {
 
         // Override result for score quests
         if this_step == kind::PROGRESS && t.score > 0 {
-            let mut score = 0i32;
-            if let Some(q) = self.quest(h) {
-                for c in q.steps[si].components.iter().filter(|c| c.is_active) {
-                    for a in &c.acts {
-                        let at = &data.acts[a.template];
-                        // `questAct.GetObjective(Parent)` (index 0xFF would throw)
-                        let o = q
-                            .objectives
-                            .get(usize::from(at.objective_index))
-                            .copied()
-                            .unwrap_or(0);
-                        score = score.wrapping_add(o.wrapping_mul(at.count));
+            if !self.contains_objectives(h, si) {
+                // Deviation: the C# compared the (always 0) score with `Template.Score` and
+                // kept such a quest in Progress forever (quest 5641 has a score of 100 and no
+                // acts). Without any score-bearing act the requirement counts as met.
+                tracing::debug!(
+                    "Quest {}: score {} but the Progress step has no objective acts, treating the score as reached",
+                    t.id,
+                    t.score
+                );
+            } else {
+                let mut score = 0i32;
+                if let Some(q) = self.quest(h) {
+                    for c in q.steps[si].components.iter().filter(|c| c.is_active) {
+                        for a in &c.acts {
+                            let at = &data.acts[a.template];
+                            // `questAct.GetObjective(Parent)` (index 0xFF would throw)
+                            let o = q
+                                .objectives
+                                .get(usize::from(at.objective_index))
+                                .copied()
+                                .unwrap_or(0);
+                            score = score.wrapping_add(o.wrapping_mul(at.count));
+                        }
                     }
                 }
+                res = score >= t.score;
+                let os = self.objective_status(h);
+                self.set_status(
+                    h,
+                    if os >= ObjectiveStatus::QuestComplete {
+                        status::READY
+                    } else {
+                        status::PROGRESS
+                    },
+                );
             }
-            res = score >= t.score;
-            let os = self.objective_status(h);
-            self.set_status(
-                h,
-                if os >= ObjectiveStatus::QuestComplete {
-                    status::READY
-                } else {
-                    status::PROGRESS
-                },
-            );
         } else if this_step == kind::PROGRESS && t.let_it_done {
             let os = self.objective_status(h);
             res = os >= ObjectiveStatus::Overachieved;
@@ -1570,9 +1581,7 @@ impl<'a> Ctx<'a> {
                     quest_id,
                     &format!("unit requirements of the start component {} not met", c.id),
                 );
-                if !forcibly {
-                    return false;
-                }
+                return false;
             }
         }
         if self.has_quest_completed(quest_id) {
@@ -1706,7 +1715,13 @@ impl<'a> Ctx<'a> {
     }
 
     /// `TryCompleteQuestAsLetItDone(questId, selectedReward)`.
+    ///
+    /// Deviation: the C# sets `Step = Reward` and leaves the rest to the evaluation of the Reward
+    /// components, so a quest without a Reward step never completed, and the quest status was
+    /// never `Completed` (the completion cleanup was skipped). Here the status becomes
+    /// `Completed` with the step, and a quest without a Reward step is finished at once.
     pub fn try_complete_quest_as_let_it_done(&mut self, quest_id: u32, selected: i32) {
+        let who = format!("{} ({})", self.c.unit.name, self.c.id);
         let Some(h) = self.st.active_handle(quest_id) else {
             self.log_refusal(
                 "TryCompleteQuestAsLetItDone",
