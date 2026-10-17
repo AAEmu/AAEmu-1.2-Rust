@@ -52,6 +52,11 @@ const SMALL_BLOODSTAIN: u32 = 877;
 
 const HUNT_QUEST: u32 = 100;
 const INTERACTION_QUEST: u32 = 200;
+/// `ObjZoneKill` with `team_share` / `is_party`, five villager kills.
+const ZONE_KILL_QUEST: u32 = 300;
+/// `ObjMonsterGroupHunt` of `VILLAGER_GROUP`.
+const GROUP_HUNT_QUEST: u32 = 400;
+const VILLAGER_GROUP: u32 = 7;
 
 /// `WorldInteractionType.Use`.
 const WI_USE: i32 = 19;
@@ -60,6 +65,16 @@ const QUEST_ITEM: u32 = 5_000;
 
 /// Quest `qid`: Start (auto) -> Progress (`act`, count 1) -> Ready (report to NPC 1).
 fn single_act_quest(d: &mut crate::systems::quests::data::QuestData, qid: u32, act: ActKind) {
+    single_act_quest_count(d, qid, act, 1);
+}
+
+/// [`single_act_quest`] with `count` objectives.
+fn single_act_quest_count(
+    d: &mut crate::systems::quests::data::QuestData,
+    qid: u32,
+    act: ActKind,
+    count: i32,
+) {
     d.add_template(QuestTemplate {
         id: qid,
         detail_id: crate::systems::quests::model::detail::NORMAL,
@@ -81,7 +96,7 @@ fn single_act_quest(d: &mut crate::systems::quests::data::QuestData, qid: u32, a
         ActKind::ConAutoComplete,
     );
     d.add_component(component(qid * 10 + 2, kind::PROGRESS));
-    d.add_act(qid * 10 + 2, qid * 10 + 2, qid * 10 + 2, 1, act);
+    d.add_act(qid * 10 + 2, qid * 10 + 2, qid * 10 + 2, count, act);
     d.add_component(component(qid * 10 + 3, kind::READY));
     d.add_act(
         qid * 10 + 3,
@@ -190,6 +205,40 @@ fn game_data() -> GameData {
             phase: 0,
         },
     );
+    single_act_quest_count(
+        q,
+        ZONE_KILL_QUEST,
+        ActKind::ObjZoneKill {
+            count_player_kill: 0,
+            count_npc: 5,
+            zone_id: 0,
+            team_share: true,
+            use_alias: false,
+            alias_id: 0,
+            lvl_min: 1,
+            lvl_max: 55,
+            is_party: true,
+            lvl_min_npc: 0,
+            lvl_max_npc: 0,
+            pc_faction_id: 0,
+            pc_faction_exclusive: false,
+            npc_faction_id: 0,
+            npc_faction_exclusive: false,
+        },
+        5,
+    );
+    single_act_quest(
+        q,
+        GROUP_HUNT_QUEST,
+        ActKind::ObjMonsterGroupHunt {
+            quest_monster_group_id: VILLAGER_GROUP,
+            use_alias: false,
+            alias_id: 0,
+            highlight_doodad_id: 0,
+            highlight_doodad_phase: -1,
+        },
+    );
+    q.group_npcs.add(VILLAGER_GROUP, VILLAGER);
     q.finish();
     gd.items.templates.insert(
         QUEST_ITEM,
@@ -446,6 +495,84 @@ async fn party_member_kill_of_a_party_tagged_npc_shares_exp_and_quest_credit() {
     assert_eq!(quest_row(&server, &b.p, HUNT_QUEST), Some((kind::READY, 1)));
     assert!(a.client.drain_ops().contains(&sc::SCExpChangedPacket));
     assert!(b.client.drain_ops().contains(&sc::SCExpChangedPacket));
+}
+
+#[tokio::test]
+async fn party_zone_kill_counts_once_per_member_in_and_out_of_range() {
+    // Three party members hold a team-shared ObjZoneKill quest. A and B are within looting
+    // range of the villager (both get a direct kill event), C is a party member 500 away (no
+    // direct event; the shared kill reaches C). Every member must count the kill exactly once,
+    // however many eligible members share it.
+    let server = server_with(false);
+    let mut a = pc(&server, 1, "Lead", 100.0);
+    let mut b = pc(&server, 2, "Mate", 102.0);
+    let c = pc(&server, 3, "Far", 600.0);
+    let team_id = form_party(&server, &a.p, &b.p);
+    server
+        .systems
+        .social
+        .teams
+        .ask_to_join(&server, &a.p, "", 0, true, Some(&c.p));
+    server.systems.social.teams.reply_to_join_team(
+        &server,
+        &c.p,
+        0,
+        true,
+        a.p.character_id,
+        false,
+        "",
+        false,
+    );
+    assert!(server
+        .systems
+        .social
+        .teams
+        .active_team(team_id)
+        .expect("party")
+        .is_member(c.p.character_id));
+    for p in [&a.p, &b.p, &c.p] {
+        accept(&server, p, ZONE_KILL_QUEST);
+    }
+    let npc = villager(&server, 0x200, 1_000);
+    cast(
+        &server,
+        &mut a,
+        HIT_SKILL,
+        SkillCastTarget::Unit(npc.obj_id),
+    );
+    assert_eq!(npc.data().unit.skill_state.tagging.tag_team, team_id);
+    cast(
+        &server,
+        &mut b,
+        KILL_SKILL,
+        SkillCastTarget::Unit(npc.obj_id),
+    );
+    assert!(npc.data().unit.is_dead());
+
+    for (name, p) in [("A", &a.p), ("B", &b.p), ("C", &c.p)] {
+        assert_eq!(
+            quest_row(&server, p, ZONE_KILL_QUEST),
+            Some((kind::PROGRESS, 1)),
+            "member {name}"
+        );
+    }
+
+    // A second villager killed by A alone: one more for everybody.
+    let npc2 = villager(&server, 0x201, 1_000);
+    cast(
+        &server,
+        &mut a,
+        KILL_SKILL,
+        SkillCastTarget::Unit(npc2.obj_id),
+    );
+    assert!(npc2.data().unit.is_dead());
+    for (name, p) in [("A", &a.p), ("B", &b.p), ("C", &c.p)] {
+        assert_eq!(
+            quest_row(&server, p, ZONE_KILL_QUEST),
+            Some((kind::PROGRESS, 2)),
+            "member {name} after the second kill"
+        );
+    }
 }
 
 #[tokio::test]
