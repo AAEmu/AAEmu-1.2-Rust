@@ -673,7 +673,7 @@ impl<'a> Run<'a> {
                     ActKind::ConAcceptDoodad { doodad_id } => Starter::Doodad(doodad_id),
                     ActKind::ConAcceptItem { item_id, .. } => Starter::Item(item_id, 1),
                     ActKind::ConAcceptItemGain { item_id } => {
-                        Starter::Item(item_id, at.count.max(1))
+                        Starter::ItemGain(item_id, at.count.max(1))
                     }
                     ActKind::ConAcceptItemEquip { item_id } => Starter::ItemEquip(item_id),
                     ActKind::ConAcceptSphere { sphere_id } => Starter::Sphere(sphere_id),
@@ -729,6 +729,12 @@ impl<'a> Run<'a> {
                     ));
                 }
                 events::add_quest_from_item(server, &p, qid, item);
+            }
+            Starter::ItemGain(item, count) => {
+                // The item-gain path: the bag receives the items, the inventory raises the
+                // acquired event, which starts the quest (no `add_quest_from_item`).
+                give_item(&mut p.data(), item, count);
+                events::on_items_acquired(server, &p, item, count);
             }
             Starter::ItemEquip(item) => {
                 give_item_to(
@@ -1634,6 +1640,7 @@ enum Starter {
     Npc(u32),
     Doodad(u32),
     Item(u32, i32),
+    ItemGain(u32, i32),
     ItemEquip(u32),
     Sphere(u32),
     Skill(u32),
@@ -1652,7 +1659,7 @@ impl Starter {
             | Starter::Sphere(v)
             | Starter::Skill(v)
             | Starter::Buff(v) => v.to_string(),
-            Starter::Item(v, n) => format!("{v}x{n}"),
+            Starter::Item(v, n) | Starter::ItemGain(v, n) => format!("{v}x{n}"),
             Starter::Level(v) => v.to_string(),
             Starter::Auto | Starter::Component => String::new(),
         }

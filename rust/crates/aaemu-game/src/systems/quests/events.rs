@@ -595,6 +595,9 @@ pub fn on_items_consumed(server: &GameServer, player: &PlayerRef, template_id: u
 /// `DoItemsAcquiredEvents(owner, templateId, count)` (`Inventory` item add / remove).
 pub fn on_items_acquired(server: &GameServer, player: &PlayerRef, template_id: u32, count: i32) {
     run_or_queue(server, player, move |ctx| {
+        if count > 0 {
+            ctx.start_quests_from_item_gain(template_id);
+        }
         dispatch_logged(
             ctx,
             &QuestEvent::ItemGather {

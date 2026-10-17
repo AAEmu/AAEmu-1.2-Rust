@@ -27,6 +27,8 @@ pub mod templates;
 pub mod unit_reqs;
 
 #[cfg(test)]
+mod followup_tests;
+#[cfg(test)]
 mod lifecycle_sim_tests;
 #[cfg(test)]
 mod manager_tests;
