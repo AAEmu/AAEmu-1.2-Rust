@@ -269,8 +269,19 @@ pub fn get_common_farm_doodads(server: &GameServer, player: &PlayerRef) -> Commo
 pub fn can_place(server: &GameServer, player: &PlayerRef, farm_kind: u8, doodad_id: u32) -> bool {
     let d = data(server);
     let all_planted = get_common_farm_doodads(server, player);
+    let (char_name, char_id) = {
+        let c = player.data();
+        (c.unit.name.clone(), c.id)
+    };
     if let Some(list) = all_planted.get(&farm_kind) {
-        if list.len() as u32 >= d.farm_group_max_count(farm_kind) {
+        let max = d.farm_group_max_count(farm_kind);
+        if list.len() as u32 >= max {
+            tracing::warn!(
+                "CanPlace refused, character {} ({}), Invalid FarmGroupKind {farm_kind}: count {}/{max}",
+                char_name,
+                char_id,
+                list.len()
+            );
             player.send(SCErrorMsgPacket::new(
                 error_message::COMMON_FARM_COUNT_OVER,
                 0,
@@ -282,6 +293,11 @@ pub fn can_place(server: &GameServer, player: &PlayerRef, farm_kind: u8, doodad_
     if d.allowed_doodads(farm_kind).contains(&doodad_id) {
         return true;
     }
+    tracing::warn!(
+        "CanPlace refused, character {} ({}), Invalid FarmGroupKind {farm_kind}: doodad {doodad_id} not allowed in farm kind {farm_kind}",
+        char_name,
+        char_id
+    );
     player.send(SCErrorMsgPacket::new(
         error_message::COMMON_FARM_NOT_ALLOWED_TYPE,
         0,

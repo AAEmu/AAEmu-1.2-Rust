@@ -5,6 +5,11 @@ use crate::systems::npcs::doodad::templates::DoodadTemplate;
 use crate::test_support::*;
 
 fn fixture() -> (GameServer, PlayerRef, u64) {
+    let (server, player, item_id, _client) = fixture_with_client();
+    (server, player, item_id)
+}
+
+fn fixture_with_client() -> (GameServer, PlayerRef, u64, TestClient) {
     let mut data = GameData::empty();
     for id in [1000, 1001, 2000] {
         data.items.templates.insert(id, ItemTemplate::plain(id, 20));
@@ -42,7 +47,7 @@ fn fixture() -> (GameServer, PlayerRef, u64) {
         .unwrap()
         .add_new_item(item, 0, &server.game_data.items)
         .unwrap();
-    (server, player, item_id)
+    (server, player, item_id, client)
 }
 
 #[tokio::test]
@@ -191,6 +196,44 @@ async fn unrelated_item_and_remote_or_nonfinite_client_positions_are_rejected() 
     assert_eq!(Inv::of(&player).item_by_id(id).unwrap().count, 2);
     assert!(Inv::of(&player).item_by_id(other_id).is_some());
     assert_eq!(player.data().labor_power, 20);
+}
+
+#[tokio::test]
+async fn placement_range_is_a_horizontal_sanity_bound() {
+    let (server, player, id, mut client) = fixture_with_client();
+    let place = |x: f32, y: f32, z: f32| {
+        handle_create_doodad(
+            &server,
+            &player,
+            &CSCreateDoodadPacket {
+                id: 4000,
+                x,
+                y,
+                z,
+                z_rot: 0.0,
+                scale: 1.0,
+                item_id: id,
+            },
+        );
+    };
+    client.drain();
+    // 15 m away horizontally, 60 m above: the client sends such placements; accepted (the
+    // source item is consumed).
+    place(115.0, 100.0, 60.0);
+    assert_eq!(Inv::of(&player).item_by_id(id).unwrap().count, 1);
+    client.drain();
+    // 40 m away: refused with "too far away" and nothing consumed.
+    place(140.0, 100.0, 50.0);
+    assert_eq!(Inv::of(&player).item_by_id(id).unwrap().count, 1);
+    let (_, body) = client
+        .drain()
+        .into_iter()
+        .find(|(op, _)| *op == crate::opcodes::sc::SCErrorMsgPacket)
+        .expect("too far error");
+    assert_eq!(
+        i16::from_le_bytes([body[0], body[1]]),
+        error_message::TOO_FAR_AWAY
+    );
 }
 
 /// What the real `skills::progress::add_exp` does with a positive labor experience gain: it
