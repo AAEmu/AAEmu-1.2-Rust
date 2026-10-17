@@ -533,6 +533,14 @@ fn create_player_doodad_with_labor(
     Some(doodad)
 }
 
+/// Anti-cheat sanity bound (metres, horizontal) of a client doodad placement from the server's
+/// position of the player. Rust only: the C# `CSCreateDoodadPacket` has no range check. The planting
+/// skills (10953 sapling / animal, 25536 seeds) have `max_range` 2, but the 1.2 client does not
+/// enforce it (live placements arrive 10.5 m and 15.6 m away), the server position of a walking
+/// player lags the client, and the vertical term adds terrain error, so this only rejects
+/// placements that are clearly out of reach.
+const PLACE_RANGE_SANITY: f32 = 30.0;
+
 /// `CSCreateDoodadPacket.Read` body.
 pub fn handle_create_doodad(server: &GameServer, player: &PlayerRef, p: &CSCreateDoodadPacket) {
     tracing::warn!(
@@ -588,15 +596,17 @@ pub fn handle_create_doodad(server: &GameServer, player: &PlayerRef, p: &CSCreat
         .systems
         .skills
         .skill(item.use_skill_id)
-        .map_or(10.0, |skill| skill.max_range.max(10) as f32);
-    let distance_squared =
-        (p.x - player_pos.x).powi(2) + (p.y - player_pos.y).powi(2) + (p.z - player_pos.z).powi(2);
+        .map_or(PLACE_RANGE_SANITY, |skill| {
+            (skill.max_range as f32).max(PLACE_RANGE_SANITY)
+        });
+    let distance_squared = (p.x - player_pos.x).powi(2) + (p.y - player_pos.y).powi(2);
     if distance_squared > range * range {
         tracing::warn!(
             "CreateDoodad, doodad {} is {:.1} m away, range {range}",
             p.id,
             distance_squared.sqrt()
         );
+        player.send(error_msg(error_message::TOO_FAR_AWAY));
         return;
     }
     let target_zone = world.template.zone_id_at(p.x, p.y);

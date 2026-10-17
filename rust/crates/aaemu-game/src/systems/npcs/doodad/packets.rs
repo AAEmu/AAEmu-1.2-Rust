@@ -26,6 +26,7 @@ pub mod error_message {
     pub const NO_PERM: i16 = 2;
     pub const NO_INTERACTION_AVAILABLE: i16 = 3;
     pub const LABOR_POWER_NEEDED: i16 = 9;
+    pub const TOO_FAR_AWAY: i16 = 154;
     pub const INTERACTION_PERMISSION_DENY: i16 = 232;
     pub const FAMILY_NOT_EXIST: i16 = 376;
     pub const ONLY_EXPEDITION_MEMBER: i16 = 808;
