@@ -263,6 +263,15 @@ impl ClientPacket for CSCompleteQuestContextPacket {
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             if let Some(p) = active(conn) {
+                tracing::info!(
+                    "CompleteQuestContext, {} ({}), Quest {}, NpcObjId {}, DoodadObjId {}, Selected {}",
+                    p.data().unit.name,
+                    p.character_id,
+                    self.quest_context_id,
+                    self.npc_obj_id,
+                    self.doodad_obj_id,
+                    self.selected
+                );
                 events::on_report(
                     server,
                     &p,
@@ -429,6 +438,14 @@ impl ClientPacket for CSTryQuestCompleteAsLetItDonePacket {
             // Check if player is actually targeting the NPC
             let target = p.data().unit.current_target;
             if self.obj_id > 0 && target != 0 && target != self.obj_id {
+                tracing::warn!(
+                    "TryQuestCompleteAsLetItDone refused, {} ({}), Quest {}: the target {} is not the NPC {} the client reported to",
+                    p.data().unit.name,
+                    p.character_id,
+                    self.id,
+                    target,
+                    self.obj_id
+                );
                 return Ok(());
             }
             let (id, selected) = (self.id, self.selected);

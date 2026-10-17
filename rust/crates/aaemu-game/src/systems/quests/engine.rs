@@ -141,6 +141,12 @@ pub struct Ctx<'a> {
     pub sent: Vec<(u16, Vec<u8>)>,
 }
 
+/// Quest ids from here on have a completed block id above `u16::MAX` (`SCCompletedQuests`).
+const WIRE_QUEST_ID_LIMIT: u32 = (u16::MAX as u32 + 1) * 64;
+
+/// Minimum time between two WARN lines for the same refusal of the same quest.
+const REFUSAL_REPEAT_MS: i64 = 60_000;
+
 /// `C# Math.Round(double)` (banker's rounding).
 fn round_even(v: f64) -> f64 {
     v.round_ties_even()
@@ -175,6 +181,35 @@ impl<'a> Ctx<'a> {
 
     pub fn owner_id(&self) -> u32 {
         self.c.id
+    }
+
+    /// A quest request the server refused, logged at WARN with the character, the quest and
+    /// the reason (bug reports depend on it). A refusal repeated within [`REFUSAL_REPEAT_MS`]
+    /// (an automatic trigger such as a level up or a sphere entry) goes to DEBUG.
+    pub fn log_refusal(&mut self, what: &str, quest_id: u32, reason: &str) {
+        let key = (quest_id, format!("{what}: {reason}"));
+        if self.st.refusal_log.len() > 1024 {
+            self.st.refusal_log.clear();
+        }
+        let repeated = self
+            .st
+            .refusal_log
+            .get(&key)
+            .is_some_and(|&t| self.now_ms.saturating_sub(t) < REFUSAL_REPEAT_MS);
+        if repeated {
+            tracing::debug!(
+                "{what} refused, {} ({}), Quest {quest_id}: {reason}",
+                self.c.unit.name,
+                self.c.id
+            );
+        } else {
+            tracing::warn!(
+                "{what} refused, {} ({}), Quest {quest_id}: {reason}",
+                self.c.unit.name,
+                self.c.id
+            );
+            self.st.refusal_log.insert(key, self.now_ms);
+        }
     }
 
     fn quest(&self, h: QuestHandle) -> Option<&Quest> {
@@ -1427,10 +1462,10 @@ impl<'a> Ctx<'a> {
                         .hooks
                         .can_replace_glider_in_backpack_slot(self.server, self.c)
                 {
-                    tracing::trace!(
-                        "User {} ({}) cannot accept Quest {template_id}, backpack supply item {item_id} cannot be equipped",
-                        self.c.unit.name,
-                        self.c.id
+                    self.log_refusal(
+                        "AddQuest",
+                        template_id,
+                        &format!("backpack supply item {item_id} cannot be equipped"),
                     );
                     self.send_error(error_msg::BACKPACK_OCCUPIED);
                     return false;
@@ -1453,7 +1488,7 @@ impl<'a> Ctx<'a> {
                 tracing::info!("[GM] quest {quest_id}, added!");
                 self.drop_quest(quest_id, true, false);
             } else {
-                tracing::info!("Duplicate quest {quest_id}, not added!");
+                self.log_refusal("AddQuest", quest_id, "the quest is already active");
                 return false;
             }
         }
@@ -1471,10 +1506,10 @@ impl<'a> Ctx<'a> {
                 crate::systems::npcs::spawn_manager::unix_now(),
             )
         {
-            tracing::trace!(
-                "User {} ({}) cannot start new Quest {quest_id}, its game schedule window is not in progress",
-                self.c.unit.name,
-                self.c.id
+            self.log_refusal(
+                "AddQuest",
+                quest_id,
+                "its game schedule window is not in progress",
             );
             return false;
         }
@@ -1483,12 +1518,11 @@ impl<'a> Ctx<'a> {
         }
         // Check if start step components are active
         for c in template.components_of(&data.components, kind::START) {
-            if !self.can_component_run(c.id) {
-                tracing::trace!(
-                    "User {} ({}) does not meet requirements to start new Quest {quest_id}, ComponentId {}",
-                    self.c.unit.name,
-                    self.c.id,
-                    c.id
+            if !self.can_component_run(c.id) && !forcibly {
+                self.log_refusal(
+                    "AddQuest",
+                    quest_id,
+                    &format!("unit requirements of the start component {} not met", c.id),
                 );
                 if !forcibly {
                     return false;
@@ -1500,10 +1534,7 @@ impl<'a> Ctx<'a> {
                 tracing::info!("[GM] quest {quest_id}, added!");
                 self.set_completed_quest_flag(quest_id, false);
             } else if !template.repeatable {
-                tracing::warn!(
-                    "Quest {quest_id} already completed for {}, not added!",
-                    self.c.unit.name
-                );
+                self.log_refusal("AddQuest", quest_id, "already completed and not repeatable");
                 self.send_error(error_msg::QUEST_DAILY_LIMIT);
                 return false;
             }
@@ -1536,6 +1567,13 @@ impl<'a> Ctx<'a> {
 
         // Actually start the quest by setting step to Start and send the quest start packets
         if !self.start_quest(h) {
+            self.log_refusal(
+                "AddQuest",
+                quest_id,
+                &format!(
+                    "the start step does not accept acceptor type {acceptor_type} id {acceptor_id}"
+                ),
+            );
             self.finalize_quest_acts(h);
             self.st.quests.remove(&h);
             self.server.ids.quest.release_id(id);

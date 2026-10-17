@@ -283,6 +283,9 @@ pub struct QuestState {
     pub loaded: bool,
     /// Evaluations requested by an operation without a player handle (data-level tests).
     pub local_queue: Vec<QuestHandle>,
+    /// When a refusal (quest id, reason) was last logged at WARN (unix ms), so a refusal
+    /// repeated by an automatic trigger (level up, sphere entry) does not flood the log.
+    pub refusal_log: HashMap<(u32, String), i64>,
 }
 
 impl QuestState {
