@@ -144,7 +144,8 @@ pub(super) async fn run(
                 show(&reply);
             }
             "tp" => {
-                let (x, y, z): (f32, f32, f32) = (num(&parts, 0)?, num(&parts, 1)?, num(&parts, 2)?);
+                let (x, y, z): (f32, f32, f32) =
+                    (num(&parts, 0)?, num(&parts, 1)?, num(&parts, 2)?);
                 game.state.last_teleport = None;
                 game.chat(0, &format!("/move {x} {y} {z}")).await?;
                 game.wait_for("SCTeleportUnitPacket", |p| {
@@ -247,7 +248,10 @@ pub(super) async fn run(
                 } else {
                     let selected: i32 = parts.get(2).and_then(|x| x.parse().ok()).unwrap_or(0);
                     let mut b = aaemu_commons::PacketStream::new();
-                    b.write_u32(quest).write_bc(obj).write_bc(0).write_i32(selected);
+                    b.write_u32(quest)
+                        .write_bc(obj)
+                        .write_bc(0)
+                        .write_i32(selected);
                     game.send_cs(
                         aaemu_game::opcodes::cs::CSCompleteQuestContextPacket,
                         b.as_bytes(),
@@ -305,7 +309,8 @@ pub(super) async fn run(
                     .cloned()
                     .with_context(|| format!("doodad {tpl} not in sight"))?;
                 clock += 1500;
-                game.move_to((d.pos.0 + 1.0, d.pos.1, d.pos.2), clock).await?;
+                game.move_to((d.pos.0 + 1.0, d.pos.1, d.pos.2), clock)
+                    .await?;
                 game.start_doodad_skill(skill, d.obj_id).await?;
                 let got = game
                     .drain(Duration::from_millis(1500), Duration::from_secs(8))
@@ -332,8 +337,8 @@ pub(super) async fn run(
                     Some("self") | None => game.state.self_obj,
                     Some(t) => {
                         let tpl: u32 = t.parse()?;
-                        let npc =
-                            nearest(game, tpl).with_context(|| format!("NPC {tpl} not in sight"))?;
+                        let npc = nearest(game, tpl)
+                            .with_context(|| format!("NPC {tpl} not in sight"))?;
                         clock += 1500;
                         game.move_to((npc.pos.0 + 1.0, npc.pos.1, npc.pos.2), clock)
                             .await?;
@@ -377,16 +382,17 @@ pub(super) async fn run(
                 println!("    walked to {:?}", game.state.self_pos);
             }
             "mate" => {
-                let reply = gm_command(
-                    game,
-                    &format!("item add self {} 1", cfg.mate_item_template),
-                )
-                .await?;
-                let item = stack_id(&reply, cfg.mate_item_template)
-                    .context("mate item was not added")?;
+                let reply =
+                    gm_command(game, &format!("item add self {} 1", cfg.mate_item_template))
+                        .await?;
+                let item =
+                    stack_id(&reply, cfg.mate_item_template).context("mate item was not added")?;
                 let view = super::summon_mate(game, cfg, item, None).await?;
                 mate = Some((view.obj_id, view.tl_id));
-                println!("    mate obj {} tl {} hp {}", view.obj_id, view.tl_id, view.hp);
+                println!(
+                    "    mate obj {} tl {} hp {}",
+                    view.obj_id, view.tl_id, view.hp
+                );
             }
             "mount" => {
                 let (_, tl) = mate.context("no mate: run `mate` first")?;
@@ -402,7 +408,11 @@ pub(super) async fn run(
             "mwalk" => {
                 let (obj, _) = mate.context("no mate: run `mate` first")?;
                 let to: (f32, f32, f32) = (num(&parts, 0)?, num(&parts, 1)?, num(&parts, 2)?);
-                let mut at = game.state.units.get(&obj).map_or(game.state.self_pos, |u| u.pos);
+                let mut at = game
+                    .state
+                    .units
+                    .get(&obj)
+                    .map_or(game.state.self_pos, |u| u.pos);
                 while dist(at, to) > 0.5 {
                     let d = dist(at, to);
                     let k = (4.0 / d).min(1.0);
