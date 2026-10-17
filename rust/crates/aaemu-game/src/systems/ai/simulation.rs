@@ -8,13 +8,14 @@
 //! ported caller.
 //!
 //! C# behaviour mirrored: every `RepeatMove` schedules its own 100 ms task and nothing cancels
-//! them (a stopped route still walks to its current point); `ReadPath` returns early for an
-//! already cached file name without refreshing `MovePath`; `GetMinCheckPoint` never picks the
-//! last point.
+//! them (a stopped route still walks to its current point); `GetMinCheckPoint` never picks the
+//! last point. Deviation: the C# `ReadPath` returns early for an already cached file name without
+//! refreshing `MovePath`, so `OnMove` indexed the cached route with the length of another file's
+//! lines and threw; here every length check and lookup uses the selected route (`Path`).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use crate::models::movement::{MoveKind, MoveType, MoveTypeActorFlags, MoveTypeFlags, UnitMove};
@@ -66,6 +67,17 @@ pub struct Simulation {
 
 /// The shared handle the move tasks keep.
 pub type SimRef = Arc<Mutex<Simulation>>;
+
+/// Locks a simulation, recovering from poisoning: a panic in one move task (a bad route) must not
+/// make every later tick of that NPC panic on the poisoned lock (`simulation poisoned`) until the
+/// server restarts. The state is plain data, so continuing with it is safe.
+pub fn lock_sim(sim: &Mutex<Simulation>) -> MutexGuard<'_, Simulation> {
+    sim.lock().unwrap_or_else(|poisoned| {
+        tracing::warn!("Simulation lock was poisoned by an earlier panic; recovering");
+        sim.clear_poison();
+        poisoned.into_inner()
+    })
+}
 
 /// `Simulation.ExtractValue(sData, nIndex)` (`Convert.ToSingle` with the invariant culture).
 pub fn extract_value(data: &str, index: usize) -> Result<f32, String> {
@@ -188,7 +200,7 @@ pub fn character_simulation(server: &GameServer, player: &crate::world::PlayerRe
 /// [`stop_record`].
 pub fn start_record(server: &GameServer, sim: &SimRef, ch: &crate::world::PlayerRef) {
     {
-        let mut s = sim.lock().expect("simulation poisoned");
+        let mut s = lock_sim(sim);
         if s.save_path_enabled {
             return;
         }
@@ -205,7 +217,7 @@ pub fn start_record(server: &GameServer, sim: &SimRef, ch: &crate::world::Player
 
 /// `RepeatTo(ch, time, sim)`: a `Record` task in `time` ms while recording.
 fn repeat_to(server: &GameServer, sim: &SimRef, ch: &crate::world::PlayerRef, time_ms: u64) {
-    if !sim.lock().expect("simulation poisoned").save_path_enabled {
+    if !lock_sim(sim).save_path_enabled {
         return;
     }
     let sim = sim.clone();
@@ -225,7 +237,7 @@ fn record(server: &GameServer, sim: &SimRef, ch: &crate::world::PlayerRef) {
     };
     let line = format!("|{}|{}|{}|", f(p.x), f(p.y), f(p.z)).replace(',', ".");
     {
-        let mut s = sim.lock().expect("simulation poisoned");
+        let mut s = lock_sim(sim);
         s.record_path.push(line);
         s.points_count += 1;
     }
@@ -237,7 +249,7 @@ fn record(server: &GameServer, sim: &SimRef, ch: &crate::world::PlayerRef) {
 /// like the C#).
 pub fn stop_record(sim: &SimRef) -> Result<(), String> {
     let (file, lines) = {
-        let s = sim.lock().expect("simulation poisoned");
+        let s = lock_sim(sim);
         let folder = s
             .folder
             .clone()
@@ -261,7 +273,7 @@ pub fn stop_record(sim: &SimRef) -> Result<(), String> {
         }
         _ => e.to_string(),
     })?;
-    sim.lock().expect("simulation poisoned").save_path_enabled = false;
+    lock_sim(sim).save_path_enabled = false;
     Ok(())
 }
 
@@ -269,19 +281,19 @@ pub fn stop_record(sim: &SimRef) -> Result<(), String> {
 pub fn stop_move(server: &GameServer, sim: &SimRef, npc: &NpcRef) {
     npc::stop_movement(server, npc);
     let (remove, timeout, pending) = {
-        let mut s = sim.lock().expect("simulation poisoned");
+        let mut s = lock_sim(sim);
         s.move_to_path_enabled = false;
         (s.remove, s.timeout, s.delete_task_pending)
     };
     npc.data().unit.is_in_patrol = false;
     if remove {
         if timeout > 0 {
-            sim.lock().expect("simulation poisoned").delete_task_pending = true;
+            lock_sim(sim).delete_task_pending = true;
             schedule(server, Duration::from_millis(u64::from(timeout) * 1000), {
                 let sim = sim.clone();
                 let npc = npc.clone();
                 move |server| {
-                    sim.lock().expect("simulation poisoned").delete_task_pending = false;
+                    lock_sim(&sim).delete_task_pending = false;
                     despawn_with_respawn(server, &npc);
                 }
             });
@@ -359,7 +371,7 @@ pub fn go_to_path(
     timeout: u32,
 ) {
     let enabled = {
-        let mut s = sim.lock().expect("simulation poisoned");
+        let mut s = lock_sim(sim);
         s.move_to_path_enabled = !s.move_to_path_enabled;
         s.move_to_forward = to_forward;
         s.move_to_path_enabled
@@ -381,7 +393,7 @@ pub fn go_to_path2(
     skill_id: u32,
     timeout: u32,
 ) {
-    sim.lock().expect("simulation poisoned").move_to_forward = to_forward;
+    lock_sim(sim).move_to_forward = to_forward;
     start_path(server, sim, npc, skill_id, timeout, f64::from(timeout));
 }
 
@@ -395,17 +407,10 @@ fn start_path(
 ) {
     let name = npc.data().unit.name.clone();
     let pos = npc::world_pos(server, &WorldObject::from(npc));
-    let file = sim
-        .lock()
-        .expect("simulation poisoned")
-        .move_file_name
-        .clone();
+    let file = lock_sim(sim).move_file_name.clone();
     // Routes shared by several zones are `<name>@<zone key>.path` files: pick by the NPC's position.
     let resolved = server.systems.ai.paths.resolve_path_file(&file, Some(pos));
-    let read = sim
-        .lock()
-        .expect("simulation poisoned")
-        .read_path(&name, resolved);
+    let read = lock_sim(sim).read_path(&name, resolved);
     let key = match read {
         Ok(key) => key,
         Err(e) => {
@@ -415,14 +420,14 @@ fn start_path(
         }
     };
     {
-        let mut s = sim.lock().expect("simulation poisoned");
+        let mut s = lock_sim(sim);
         s.skill_id = skill_id;
         s.timeout = timeout;
     }
     posture_off(server, npc);
     let pos = npc::world_pos(server, &WorldObject::from(npc));
     let target = {
-        let mut s = sim.lock().expect("simulation poisoned");
+        let mut s = lock_sim(sim);
         s.path = s.get_paths(&key);
         if s.path.is_empty() {
             // Only part of the retail route data is shipped (generated from the 10.x client, see
@@ -437,17 +442,9 @@ fn start_path(
         }
         let path = s.path.clone();
         let i = s.get_min_check_point(pos, &path);
-        if i < 0 {
-            None
-        } else {
+        if let Some(t) = usize::try_from(i).ok().and_then(|i| path.get(i)).copied() {
             s.move_to_path_enabled = true;
             s.move_step_index = i;
-            let line = s.move_path.get(i as usize).cloned().unwrap_or_default();
-            let t = Vec3::new(
-                extract_value(&line, 1).unwrap_or(0.0),
-                extract_value(&line, 2).unwrap_or(0.0),
-                extract_value(&line, 3).unwrap_or(0.0),
-            );
             s.target_position = t;
             if (s.old_pos.x - t.x).abs() > TOLERANCE
                 && (s.old_pos.y - t.y).abs() > TOLERANCE
@@ -456,6 +453,8 @@ fn start_path(
                 s.old_pos = t;
             }
             Some(t)
+        } else {
+            None
         }
     };
     match target {
@@ -537,7 +536,7 @@ pub fn move_to(server: &GameServer, sim: &SimRef, npc: &NpcRef, target: Vec3) {
         t.rot_z = yaw;
     });
     let (rx, ry, rz) = roll_pitch_yaw_sbytes_movement(0.0, 0.0, yaw);
-    let running = sim.lock().expect("simulation poisoned").running_mode;
+    let running = lock_sim(sim).running_mode;
     let um = UnitMove {
         x: new.x,
         y: new.y,
@@ -569,67 +568,100 @@ pub fn move_to(server: &GameServer, sim: &SimRef, npc: &NpcRef, target: Vec3) {
     repeat_move(server, sim, npc, target, 100.0);
 }
 
+/// What `OnMove` does after reaching (or not yet reaching) a checkpoint.
+#[derive(Debug, PartialEq)]
+enum Next {
+    Repeat(Vec3, f64),
+    Stop,
+    Cycle(Vec3),
+    Second,
+}
+
+impl Simulation {
+    /// The checkpoint part of `Simulation.OnMove`: moves `move_step_index` along `path` (back and
+    /// forth) and says what to do next. `Err` = the index is outside the selected route (the C#
+    /// throws there); the caller stops the move. Only `path`, the parsed points of the route
+    /// actually selected, is consulted for lengths and targets.
+    fn advance(&mut self, pos: Vec3) -> Result<Next, String> {
+        let out_of_range =
+            |idx: i64, len: usize| format!("path index {idx} out of range (route length {len})");
+        let len = self.path.len();
+        let idx = self.move_step_index.max(0) as usize;
+        let Some(t) = self.path.get(idx).copied() else {
+            return Err(out_of_range(i64::from(self.move_step_index), len));
+        };
+        self.target_position = t;
+        if calculate_distance(pos, t, true) > 3.0 {
+            return Ok(Next::Repeat(t, 100.0));
+        }
+        if self.move_to_forward {
+            if idx + 1 >= len {
+                // turn back
+                let back = idx.saturating_sub(1);
+                let t = self.path[back];
+                self.move_to_forward = false;
+                self.move_step_index = back as i32;
+                self.target_position = t;
+                Ok(if self.cycle {
+                    Next::Cycle(t)
+                } else if !self.move_file_name2.is_empty() {
+                    Next::Second
+                } else {
+                    Next::Stop
+                })
+            } else {
+                let t = self.path[idx + 1];
+                self.move_step_index = (idx + 1) as i32;
+                self.target_position = t;
+                Ok(Next::Repeat(t, 100.0))
+            }
+        } else if idx > 0 {
+            let t = self.path[idx - 1];
+            self.move_step_index = (idx - 1) as i32;
+            self.target_position = t;
+            Ok(Next::Repeat(t, 100.0))
+        } else {
+            // turn back; a one-point route has no second point to go to
+            let Some(t) = self.path.get(1).copied() else {
+                return Err(out_of_range(1, len));
+            };
+            self.move_to_forward = true;
+            self.move_step_index = 1;
+            self.target_position = t;
+            Ok(if self.cycle {
+                Next::Cycle(t)
+            } else {
+                Next::Stop
+            })
+        }
+    }
+}
+
 /// `Simulation.OnMove(npc)`: next checkpoint (back and forth along the path).
 pub fn on_move(server: &GameServer, sim: &SimRef, npc: &NpcRef) {
     let (enabled, empty) = {
-        let s = sim.lock().expect("simulation poisoned");
-        (s.move_to_path_enabled, s.move_path.is_empty())
+        let s = lock_sim(sim);
+        (s.move_to_path_enabled, s.path.is_empty())
     };
     if !enabled || empty {
         stop_move(server, sim, npc);
         return;
     }
     let pos = npc::world_pos(server, &WorldObject::from(npc));
-    enum Next {
-        Repeat(Vec3, f64),
-        Stop,
-        Cycle(Vec3),
-        Second,
-    }
     let next = {
-        let mut s = sim.lock().expect("simulation poisoned");
-        let idx = s.move_step_index.max(0) as usize;
-        let Some(t) = s.path.get(idx).copied() else {
-            // Path[MoveStepIndex] out of range throws in C#
-            tracing::error!("Simulation: path index {idx} out of range");
-            return;
-        };
-        s.target_position = t;
-        if calculate_distance(pos, t, true) > 3.0 {
-            Next::Repeat(t, 100.0)
-        } else if s.move_to_forward {
-            if s.move_step_index == s.move_path.len() as i32 - 1 {
-                s.move_to_forward = false; // turn back
-                s.move_step_index -= 1;
-                let t = s.path[s.move_step_index.max(0) as usize];
-                s.target_position = t;
-                if s.cycle {
-                    Next::Cycle(t)
-                } else if !s.move_file_name2.is_empty() {
-                    Next::Second
-                } else {
-                    Next::Stop
-                }
-            } else {
-                s.move_step_index += 1;
-                let t = s.path[s.move_step_index as usize];
-                s.target_position = t;
-                Next::Repeat(t, 100.0)
-            }
-        } else if s.move_step_index > 0 {
-            s.move_step_index -= 1;
-            let t = s.path[s.move_step_index as usize];
-            s.target_position = t;
-            Next::Repeat(t, 100.0)
-        } else {
-            s.move_to_forward = true; // turn back
-            s.move_step_index += 1;
-            let t = s.path[s.move_step_index as usize];
-            s.target_position = t;
-            if s.cycle {
-                Next::Cycle(t)
-            } else {
-                Next::Stop
+        let mut s = lock_sim(sim);
+        match s.advance(pos) {
+            Ok(next) => next,
+            Err(e) => {
+                tracing::warn!(
+                    "Simulation: npc {} route {:?}: {e} (step index {}); stopping the move",
+                    npc.obj_id,
+                    s.move_file_name,
+                    s.move_step_index
+                );
+                drop(s);
+                stop_move(server, sim, npc);
+                return;
             }
         }
     };
@@ -641,7 +673,7 @@ pub fn on_move(server: &GameServer, sim: &SimRef, npc: &NpcRef) {
             pause_move(server, npc);
             let mut time = 100.0;
             let (skill_id, timeout) = {
-                let s = sim.lock().expect("simulation poisoned");
+                let s = lock_sim(sim);
                 (s.skill_id, s.timeout)
             };
             if skill_id > 0 {
@@ -654,14 +686,14 @@ pub fn on_move(server: &GameServer, sim: &SimRef, npc: &NpcRef) {
                         time = f64::from(t.casting_time + t.cooldown_time);
                     }
                 }
-                sim.lock().expect("simulation poisoned").skill_id = 0;
+                lock_sim(sim).skill_id = 0;
             }
             repeat_move(server, sim, npc, t, time);
         }
         Next::Second => {
             pause_move(server, npc);
             let time = {
-                let mut s = sim.lock().expect("simulation poisoned");
+                let mut s = lock_sim(sim);
                 s.move_file_name = s.move_file_name2.clone(); // the way back
                 s.timeout.wrapping_mul(1000)
             };
@@ -733,5 +765,128 @@ mod tests {
         assert_eq!(s.read_path("npc", None).unwrap(), "farm");
         assert!(s.get_paths("farm").is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Selects `key` as the route like `start_path` does and walks it with `advance`, standing on
+    /// each checkpoint, until the move stops. Returns the visited step indexes.
+    fn walk(s: &mut Simulation, key: &str, start: i32) -> Vec<i32> {
+        s.path = s.get_paths(key);
+        s.move_step_index = start;
+        s.move_to_forward = true;
+        let mut visited = vec![start];
+        for _ in 0..100 {
+            let here = s.path[s.move_step_index as usize];
+            match s.advance(here).expect("route index must stay in range") {
+                Next::Repeat(..) => visited.push(s.move_step_index),
+                Next::Stop => return visited,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        panic!("route never ended: {visited:?}");
+    }
+
+    #[test]
+    fn cached_route_is_walked_by_its_own_length() {
+        // A (5 points) -> B (3 points) -> cached A: `move_path` holds B's 3 lines while `path` is A's
+        // 5 points. The end of the route must come from `path`, not from the stale line count.
+        let dir = std::env::temp_dir().join(format!("aaemu_sim_stale_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = |x: i32| {
+            format!(
+                "|{x}|0|0|
+"
+            )
+        };
+        std::fs::write(
+            dir.join("a.path"),
+            (0..5).map(|i| line(i * 10)).collect::<String>(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("b.path"),
+            (0..3).map(|i| line(i * 10)).collect::<String>(),
+        )
+        .unwrap();
+        let mut s = Simulation::new(Some(dir.clone()));
+        s.move_file_name = "a".to_string();
+        let a = s.read_path("npc", None).unwrap();
+        s.move_file_name = "b".to_string();
+        let b = s.read_path("npc", None).unwrap();
+        s.move_file_name = "a".to_string();
+        let a2 = s.read_path("npc", None).unwrap();
+        assert_eq!((a.as_str(), b.as_str(), a2.as_str()), ("a", "b", "a"));
+        assert_eq!(
+            s.move_path.len(),
+            3,
+            "the stale lines of the last file read"
+        );
+        assert_eq!(walk(&mut s, "a", 0), vec![0, 1, 2, 3, 4]);
+        // the crashing direction: B cached while the last file read was the longer A, so
+        // `move_path` (5 lines) is longer than B's 3 points (the old code indexed `path[3]`)
+        s.move_file_name = "a".to_string();
+        s.paths.remove("a");
+        s.read_path("npc", None).unwrap();
+        s.move_file_name = "b".to_string();
+        s.read_path("npc", None).unwrap();
+        assert_eq!(s.move_path.len(), 5);
+        assert_eq!(walk(&mut s, "b", 0), vec![0, 1, 2]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn advance_turns_back_and_stops_on_a_short_route() {
+        let mut s = Simulation::new(None);
+        s.path = vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)];
+        s.move_to_forward = true;
+        s.move_step_index = 1;
+        let here = s.path[1];
+        assert_eq!(s.advance(here), Ok(Next::Stop));
+        assert!(!s.move_to_forward);
+        assert_eq!(s.move_step_index, 0);
+        // back at the start: turn forward again (non-cyclic: stop)
+        let here = s.path[0];
+        assert_eq!(s.advance(here), Ok(Next::Stop));
+        assert!(s.move_to_forward);
+        assert_eq!(s.move_step_index, 1);
+    }
+
+    #[test]
+    fn one_point_route_stops_instead_of_panicking() {
+        let mut s = Simulation::new(None);
+        s.path = vec![Vec3::new(5.0, 5.0, 0.0)];
+        s.move_to_forward = true;
+        s.move_step_index = 0;
+        let here = s.path[0];
+        // forward at the only point: turn back, nowhere to go
+        assert_eq!(s.advance(here), Ok(Next::Stop));
+        // facing backward at index 0 needs a second point
+        assert!(s.advance(here).is_err());
+    }
+
+    #[test]
+    fn out_of_range_index_is_an_error_not_a_panic() {
+        let mut s = Simulation::new(None);
+        s.path = vec![Vec3::new(0.0, 0.0, 0.0); 3];
+        s.move_step_index = 5;
+        assert!(s.advance(Vec3::new(0.0, 0.0, 0.0)).is_err());
+        s.path.clear();
+        s.move_step_index = 0;
+        assert!(s.advance(Vec3::new(0.0, 0.0, 0.0)).is_err());
+    }
+
+    #[test]
+    fn poisoned_simulation_lock_is_recovered() {
+        let sim: SimRef = Arc::new(Mutex::new(Simulation::new(None)));
+        let c = sim.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = c.lock().unwrap();
+            panic!("poison the simulation");
+        })
+        .join();
+        assert!(sim.is_poisoned());
+        lock_sim(&sim).move_step_index = 7;
+        assert_eq!(lock_sim(&sim).move_step_index, 7);
+        assert!(!sim.is_poisoned());
     }
 }
