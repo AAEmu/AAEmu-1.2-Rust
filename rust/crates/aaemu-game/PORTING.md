@@ -1831,6 +1831,14 @@ record targeted tests, MySQL rollback/reload and the real 1.2 client evidence,
 including GM fixture setup and remaining authored content/review limitations.
 See Docs/wiki/Quest-Audit.md and Docs/wiki/Mail-Audit.md.
 
+### Spawn data import (October 17, 2026)
+
+| Area | Rust / data | Status | Notes |
+| --- | --- | --- | --- |
+| Quest NPCs / doodads missing from every `*_spawns.json` | `app/Data/Worlds/{main_world,instance_library,instance_prologue,instance_nachashgar,instance_burntcastle_armory,arche_mall_world}`, `rust/tools/spawn_import/` | data | Positions from the 10.x pak (per-zone `npc_spawners.g`, per-cell `doodad.g`), the 1.2 `npc_spawner_npcs` rows and the git history of upstream spawn JSON. A position is imported only when it sits on the 1.2 heightmap (`|dz| <= 5 m`, ignored test `dump_terrain_heights`), next to an existing spawn of the same world (`<= 40 m`, `|dz| <= 8 m`: interiors, caves, bridges) or on clipped ground (heights are `u16 / 64`, so ground above 1024 m reads 1024) of a zone/frame verified by its other candidates. Editor-tier positions win over git-only ones. Imported: main_world 181 NPC / 58 doodad entries, instance_library 131 doodads, instance_prologue 8, instance_nachashgar 2, instance_burntcastle_armory 1, arche_mall_world 3 NPC / 1 doodad. Entries carry a `Title` naming the basis (the loader ignores it). |
+| Zones whose origin differs between the 1.2 and 10.x `world.xml` (190, 192, 193, 200, 227, 251, 266, 281, 286, 287) | same | data | The content sits at the 10.x position (zone origin x 1024 + local): the 1.2 origin never fits the 1.2 heightmap (0 of 154 editor candidates with unclipped terrain), the 10.x frame does (many points within 0.1 m). Z values above the 1024 m ceiling cannot be verified. Candidates whose terrain differs by tens of metres (10.x-only zones such as 157, parts of 190/281) were rejected. |
+| `NpcSpawner.SelectSpawnerId` for NORMAL multi-member spawners | `systems/npcs/npc/spawner.rs` (`select_spawner_id`) | matches the C# | Not changed. A JSON entry clones every game-data spawner that has its unit as a member and (memberwise clone) shares one `NpcSpawnerIds` list, so with more than one spawner only an AUTOCREATED unscheduled one or a scheduled one is ever selected: a unit that has no JSON entry of its own and is only a sibling of a NORMAL group spawner (Vicious/Silent Treant 3105/3106, Goblin Fighter 527, ...) never spawns. The 13 audit findings of this kind are all `ConAcceptNpcKill` starters, which `starter_accepts` evaluates as an OR over the component's acts, and in every one of the 7 quests other listed NPCs spawn, so no quest is blocked; the data would need real positions for these units (the 10.x editor has no placement of those group spawners). |
+
 ## Achievement producers (live wiring)
 
 The achievement subsystem has no 1.2 C# manager; the behaviour follows `rust/docs/achievement-hook-audit.txt`
