@@ -184,10 +184,42 @@ impl QuestData {
         })?;
         d.update_quest_component_acts();
         d.unit_reqs = UnitReqsData::load(conn)?;
+        d.drop_self_referencing_requirements();
         d.load_spheres(conn)?;
         d.sign_spheres = load_sign_spheres(files, "main_world")?;
         tracing::info!("Loaded {} quests", d.templates.len());
         Ok(d)
+    }
+
+    /// Deviation: a quest component whose unit requirements demand the completion of its own
+    /// quest can never run (quest 6596 asks for itself on its Start component, so it was never
+    /// acceptable). Such a `COMPLETE_QUEST_CONTEXT` requirement is dropped.
+    pub fn drop_self_referencing_requirements(&mut self) {
+        use super::unit_reqs::req_kind::COMPLETE_QUEST_CONTEXT;
+        let components = &self.components;
+        let Some(by_component) = self.unit_reqs.by_owner.get_mut("QuestComponent") else {
+            return;
+        };
+        let mut removed = Vec::new();
+        for (component_id, reqs) in by_component.iter_mut() {
+            let Some(quest_id) = components.get(component_id).map(|c| c.quest_id) else {
+                continue;
+            };
+            reqs.retain(|r| {
+                let own = r.kind == COMPLETE_QUEST_CONTEXT && r.value1 == quest_id;
+                if own {
+                    removed.push((r.id, quest_id, *component_id));
+                }
+                !own
+            });
+        }
+        by_component.retain(|_, reqs| !reqs.is_empty());
+        for (req_id, quest_id, component_id) in removed {
+            self.unit_reqs.by_id.remove(&req_id);
+            tracing::debug!(
+                "Quest {quest_id}: ignoring requirement {req_id} of component {component_id}, it demands the quest itself completed"
+            );
+        }
     }
 
     fn load_item_starters(&mut self, conn: &Connection) -> Result<(), GameDataError> {

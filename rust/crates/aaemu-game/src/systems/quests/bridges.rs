@@ -88,6 +88,10 @@ impl QuestSkillHooks for QuestsForSkills {
         item_use(server, player, item_id);
     }
 
+    fn item_use_template(&self, server: &GameServer, player: &PlayerRef, template_id: u32) {
+        super::events::on_item_use(server, player, template_id);
+    }
+
     fn on_aggro(&self, server: &GameServer, player: &PlayerRef, npc: &NpcRef) {
         super::events::on_aggro(server, player, npc);
     }

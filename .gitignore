@@ -20,3 +20,5 @@ publish/
 /ghidra-work/
 # Server logs and crash reports (Logs/ under each server's application directory)
 /rust/crates/aaemu-*/app/Logs/
+
+__pycache__/

@@ -6270,5 +6270,35 @@
       "Yaw": 0.0
     },
     "Scale": 1.0
+  },
+  {
+    "UnitId": 13160,
+    "Title": "spawn-import: neighbor exact-1.2",
+    "Position": {
+      "X": 3957.512,
+      "Y": 4540.83,
+      "Z": 105.439,
+      "Yaw": 29
+    }
+  },
+  {
+    "UnitId": 14325,
+    "Title": "spawn-import: neighbor exact-1.2",
+    "Position": {
+      "X": 4097.85,
+      "Y": 4421.99,
+      "Z": 100.225,
+      "Yaw": 173
+    }
+  },
+  {
+    "UnitId": 14325,
+    "Title": "spawn-import: neighbor exact-1.2",
+    "Position": {
+      "X": 4130.39,
+      "Y": 4333.72,
+      "Z": 100.539,
+      "Yaw": -92
+    }
   }
 ]

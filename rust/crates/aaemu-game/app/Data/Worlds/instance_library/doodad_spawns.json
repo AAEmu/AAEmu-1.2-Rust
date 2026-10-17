@@ -6327,5 +6327,1315 @@
       "Z": 256.5,
       "Yaw": 90
     }
-  }
+  },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 113.184,
+            "Y": 970.091,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 113.59,
+            "Y": 712.555,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 113.684,
+            "Y": 201.028,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 113.92,
+            "Y": 456.18,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 141.964,
+            "Y": 456.906,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 142.551,
+            "Y": 710.616,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 183.055,
+            "Y": 369.739,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 184.039,
+            "Y": 397.474,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 196.91,
+            "Y": 783.683,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 200.094,
+            "Y": 754.605,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 200.151,
+            "Y": 497.573,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 200.484,
+            "Y": 881.638,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 202.236,
+            "Y": 527.112,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 202.808,
+            "Y": 910.491,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 241.534,
+            "Y": 713.023,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 241.574,
+            "Y": 440.106,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 242.118,
+            "Y": 201.16,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 243.056,
+            "Y": 950.149,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 270.097,
+            "Y": 950.352,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 270.425,
+            "Y": 199.855,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 270.47,
+            "Y": 438.228,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 271.177,
+            "Y": 711.988,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 320.166,
+            "Y": 628.44,
+            "Z": 134.684,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 325.66,
+            "Y": 124.56,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 328.063,
+            "Y": 241.684,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 328.106,
+            "Y": 270.45,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 369.727,
+            "Y": 200.581,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 369.975,
+            "Y": 951.437,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 370.308,
+            "Y": 694.756,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 370.957,
+            "Y": 438.347,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 398.36,
+            "Y": 199.979,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 398.417,
+            "Y": 691.64,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 398.544,
+            "Y": 438.156,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 398.595,
+            "Y": 949.058,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 434.656,
+            "Y": 368.953,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 437.582,
+            "Y": 525.466,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 438.062,
+            "Y": 497.873,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 439.199,
+            "Y": 397.709,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 456.332,
+            "Y": 753.982,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 456.503,
+            "Y": 882.035,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 457.609,
+            "Y": 782.543,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 458.977,
+            "Y": 909.743,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 496.631,
+            "Y": 967.857,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 497.225,
+            "Y": 200.288,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 497.846,
+            "Y": 694.263,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 498.833,
+            "Y": 438.883,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 525.229,
+            "Y": 437.439,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 525.834,
+            "Y": 199.499,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 525.859,
+            "Y": 694.169,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 526.499,
+            "Y": 967.943,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 565.726,
+            "Y": 113.354,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 583.864,
+            "Y": 241.971,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 584.108,
+            "Y": 1010.02,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 584.731,
+            "Y": 270.097,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 584.758,
+            "Y": 657.088,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 624.777,
+            "Y": 461.097,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 624.893,
+            "Y": 202.76,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 625.074,
+            "Y": 968.732,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 627.152,
+            "Y": 694.342,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 653.709,
+            "Y": 455.607,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 654.039,
+            "Y": 692.698,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 654.39,
+            "Y": 968.116,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 654.45,
+            "Y": 200.159,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 693.651,
+            "Y": 753.287,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 694.436,
+            "Y": 497.713,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 696.089,
+            "Y": 525.254,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 704.263,
+            "Y": 786.513,
+            "Z": 134.684,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 711.306,
+            "Y": 881.615,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 715.031,
+            "Y": 910.496,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 715.942,
+            "Y": 367.763,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 753.702,
+            "Y": 200.596,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 754.192,
+            "Y": 951.257,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 754.725,
+            "Y": 454.463,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 779.563,
+            "Y": 948.889,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 781.512,
+            "Y": 712.425,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 781.657,
+            "Y": 455.373,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 782.083,
+            "Y": 199.462,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 822.654,
+            "Y": 113.402,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 823.816,
+            "Y": 241.882,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 824.22,
+            "Y": 270.457,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 838.683,
+            "Y": 635.449,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 840.18,
+            "Y": 1009.76,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 847.09,
+            "Y": 656.385,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 881.173,
+            "Y": 201.148,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 881.55,
+            "Y": 694.159,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 881.715,
+            "Y": 969.651,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 883.106,
+            "Y": 440.504,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 909.928,
+            "Y": 693.535,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 909.99,
+            "Y": 200.773,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 910.96,
+            "Y": 439.765,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 910.964,
+            "Y": 967.704,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 949.684,
+            "Y": 881.93,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 950.291,
+            "Y": 497.845,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 950.455,
+            "Y": 370.454,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 951.688,
+            "Y": 525.782,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 952.174,
+            "Y": 910.776,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 967.991,
+            "Y": 625.69,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 969.964,
+            "Y": 784.572,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 971.394,
+            "Y": 654.564,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 1008.76,
+            "Y": 842.029,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 1009.33,
+            "Y": 327.977,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 1010.42,
+            "Y": 584.576,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 317.077,
+            "Y": 1024.001,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 587.256,
+            "Y": 1038.281,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 842.908,
+            "Y": 1038.475,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 1037.719,
+            "Y": 584.692,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7581,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 1038.407,
+            "Y": 326.706,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7582,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 139.517,
+            "Y": 969.332,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7582,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 139.9,
+            "Y": 201.948,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7582,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 200.841,
+            "Y": 128.095,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7582,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 960.417,
+            "Y": 127.73,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7582,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 1009.87,
+            "Y": 203.786,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7582,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 1023.63,
+            "Y": 969.085,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7582,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 200.577,
+            "Y": 1024.598,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7582,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 971.906,
+            "Y": 1038.447,
+            "Z": 133.297,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7582,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 127.747,
+            "Y": 2239.757,
+            "Z": 128.9,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7582,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 127.804,
+            "Y": 3007.863,
+            "Z": 128.9,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7582,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 192.269,
+            "Y": 3071.79,
+            "Z": 128.9,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7582,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 192.322,
+            "Y": 2175.755,
+            "Z": 128.9,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7582,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 960.033,
+            "Y": 2175.96,
+            "Z": 128.9,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7582,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 960.117,
+            "Y": 3071.86,
+            "Z": 128.9,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7582,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 1023.78,
+            "Y": 2239.751,
+            "Z": 128.9,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7582,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 1023.84,
+            "Y": 3007.987,
+            "Z": 128.9,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7582,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 128,
+            "Y": 4288,
+            "Z": 257,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7582,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 128,
+            "Y": 5056,
+            "Z": 257,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7582,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 192,
+            "Y": 4224,
+            "Z": 257,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7582,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 960,
+            "Y": 4224,
+            "Z": 257,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7582,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 192,
+            "Y": 5120,
+            "Z": 257,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7582,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 960,
+            "Y": 5120,
+            "Z": 257,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7582,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 1024,
+            "Y": 5056,
+            "Z": 257,
+            "Yaw": 0
+        }
+    },
+    {
+        "UnitId": 7582,
+        "Title": "spawn-import: neighbor 10x-verified",
+        "Position": {
+            "X": 1024,
+            "Y": 4288,
+            "Z": 257,
+            "Yaw": 0
+        }
+    }
 ]

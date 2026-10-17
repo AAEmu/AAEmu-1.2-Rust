@@ -141,6 +141,12 @@ pub struct Ctx<'a> {
     pub sent: Vec<(u16, Vec<u8>)>,
 }
 
+/// Quest ids from here on have a completed block id above `u16::MAX` (`SCCompletedQuests`).
+const WIRE_QUEST_ID_LIMIT: u32 = (u16::MAX as u32 + 1) * 64;
+
+/// Minimum time between two WARN lines for the same refusal of the same quest.
+const REFUSAL_REPEAT_MS: i64 = 60_000;
+
 /// `C# Math.Round(double)` (banker's rounding).
 fn round_even(v: f64) -> f64 {
     v.round_ties_even()
@@ -175,6 +181,35 @@ impl<'a> Ctx<'a> {
 
     pub fn owner_id(&self) -> u32 {
         self.c.id
+    }
+
+    /// A quest request the server refused, logged at WARN with the character, the quest and
+    /// the reason (bug reports depend on it). A refusal repeated within [`REFUSAL_REPEAT_MS`]
+    /// (an automatic trigger such as a level up or a sphere entry) goes to DEBUG.
+    pub fn log_refusal(&mut self, what: &str, quest_id: u32, reason: &str) {
+        let key = (quest_id, format!("{what}: {reason}"));
+        if self.st.refusal_log.len() > 1024 {
+            self.st.refusal_log.clear();
+        }
+        let repeated = self
+            .st
+            .refusal_log
+            .get(&key)
+            .is_some_and(|&t| self.now_ms.saturating_sub(t) < REFUSAL_REPEAT_MS);
+        if repeated {
+            tracing::debug!(
+                "{what} refused, {} ({}), Quest {quest_id}: {reason}",
+                self.c.unit.name,
+                self.c.id
+            );
+        } else {
+            tracing::warn!(
+                "{what} refused, {} ({}), Quest {quest_id}: {reason}",
+                self.c.unit.name,
+                self.c.id
+            );
+            self.st.refusal_log.insert(key, self.now_ms);
+        }
     }
 
     fn quest(&self, h: QuestHandle) -> Option<&Quest> {
@@ -534,6 +569,42 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// The number of `QuestActSupplySelectiveItem` acts of the quest (`ThisSelectiveIndex` of
+    /// the last one: the indices are 1-based, which is also what the 1.2 client sends).
+    pub fn selective_reward_count(&self, template_id: u32) -> i32 {
+        let data = self.data;
+        data.template(template_id).map_or(0, |t| {
+            t.components
+                .iter()
+                .filter_map(|c| data.component(*c))
+                .flat_map(|c| c.acts.iter())
+                .filter(|&&a| matches!(data.acts[a].kind, ActKind::SupplySelectiveItem { .. }))
+                .count() as i32
+        })
+    }
+
+    /// A quest that reaches its Reward step without a valid choice (no report act carried one:
+    /// auto-completing and journal-reported quests send 0) gets the first selective item
+    /// instead of none. The client UI sends a 1-based index and refuses to send 0 when the
+    /// quest has selective items.
+    fn default_selective_reward(&mut self, h: QuestHandle) {
+        let template_id = self.template_id_of(h);
+        let count = self.selective_reward_count(template_id);
+        if count <= 0 {
+            return;
+        }
+        let who = format!("{} ({})", self.c.unit.name, self.c.id);
+        if let Some(q) = self.quest_mut(h) {
+            if q.selected_reward_index < 1 || q.selected_reward_index > count {
+                tracing::debug!(
+                    "Quest {template_id}, {who}: selective reward {} is not in 1..={count}, giving the first",
+                    q.selected_reward_index
+                );
+                q.selected_reward_index = 1;
+            }
+        }
+    }
+
     /// `Step` setter (`SetStep`).
     pub fn set_step(&mut self, h: QuestHandle, value: u8) {
         let Some(q) = self.quest(h) else {
@@ -545,6 +616,9 @@ impl<'a> Ctx<'a> {
         // Finalize old Step (if any)
         if let Some(old) = q.step_index(q.step) {
             self.finalize_step(h, old);
+        }
+        if value == kind::REWARD {
+            self.default_selective_reward(h);
         }
         let template_id = {
             let Some(q) = self.quest_mut(h) else {
@@ -959,9 +1033,16 @@ impl<'a> Ctx<'a> {
         res
     }
 
+    /// The quest reached its Reward step or `Completed` status (as opposed to being dropped by
+    /// the player / a GM / a failed state).
+    fn is_completing(&self, h: QuestHandle) -> bool {
+        self.quest(h)
+            .is_some_and(|q| q.status == status::COMPLETED || q.step == kind::REWARD)
+    }
+
     /// `Quest.Drop(update)`.
     pub fn quest_drop(&mut self, h: QuestHandle, update: bool) {
-        let completing = self.quest(h).is_some_and(|q| q.status == status::COMPLETED);
+        let completing = self.is_completing(h);
         self.set_status(h, status::DROPPED);
         self.set_step(h, kind::DROP);
         let data = self.data;
@@ -1137,31 +1218,42 @@ impl<'a> Ctx<'a> {
 
         // Override result for score quests
         if this_step == kind::PROGRESS && t.score > 0 {
-            let mut score = 0i32;
-            if let Some(q) = self.quest(h) {
-                for c in q.steps[si].components.iter().filter(|c| c.is_active) {
-                    for a in &c.acts {
-                        let at = &data.acts[a.template];
-                        // `questAct.GetObjective(Parent)` (index 0xFF would throw)
-                        let o = q
-                            .objectives
-                            .get(usize::from(at.objective_index))
-                            .copied()
-                            .unwrap_or(0);
-                        score = score.wrapping_add(o.wrapping_mul(at.count));
+            if !self.contains_objectives(h, si) {
+                // Deviation: the C# compared the (always 0) score with `Template.Score` and
+                // kept such a quest in Progress forever (quest 5641 has a score of 100 and no
+                // acts). Without any score-bearing act the requirement counts as met.
+                tracing::debug!(
+                    "Quest {}: score {} but the Progress step has no objective acts, treating the score as reached",
+                    t.id,
+                    t.score
+                );
+            } else {
+                let mut score = 0i32;
+                if let Some(q) = self.quest(h) {
+                    for c in q.steps[si].components.iter().filter(|c| c.is_active) {
+                        for a in &c.acts {
+                            let at = &data.acts[a.template];
+                            // `questAct.GetObjective(Parent)` (index 0xFF would throw)
+                            let o = q
+                                .objectives
+                                .get(usize::from(at.objective_index))
+                                .copied()
+                                .unwrap_or(0);
+                            score = score.wrapping_add(o.wrapping_mul(at.count));
+                        }
                     }
                 }
+                res = score >= t.score;
+                let os = self.objective_status(h);
+                self.set_status(
+                    h,
+                    if os >= ObjectiveStatus::QuestComplete {
+                        status::READY
+                    } else {
+                        status::PROGRESS
+                    },
+                );
             }
-            res = score >= t.score;
-            let os = self.objective_status(h);
-            self.set_status(
-                h,
-                if os >= ObjectiveStatus::QuestComplete {
-                    status::READY
-                } else {
-                    status::PROGRESS
-                },
-            );
         } else if this_step == kind::PROGRESS && t.let_it_done {
             let os = self.objective_status(h);
             res = os >= ObjectiveStatus::Overachieved;
@@ -1408,6 +1500,16 @@ impl<'a> Ctx<'a> {
 
     /// `SetCompletedQuestFlag`: returns the changed block.
     pub fn set_completed_quest_flag(&mut self, quest_id: u32, completed: bool) -> CompletedQuest {
+        if quest_id >= WIRE_QUEST_ID_LIMIT {
+            static LOGGED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!(
+                    "Quest {quest_id} is above {WIRE_QUEST_ID_LIMIT}: its completed flag is kept (block {}), but the client's 16 bit completed block ids cannot show it",
+                    quest_id / 64
+                );
+            }
+        }
         set_completed_quest_flag(&mut self.c.quests.completed, quest_id, completed)
     }
 
@@ -1427,10 +1529,10 @@ impl<'a> Ctx<'a> {
                         .hooks
                         .can_replace_glider_in_backpack_slot(self.server, self.c)
                 {
-                    tracing::trace!(
-                        "User {} ({}) cannot accept Quest {template_id}, backpack supply item {item_id} cannot be equipped",
-                        self.c.unit.name,
-                        self.c.id
+                    self.log_refusal(
+                        "AddQuest",
+                        template_id,
+                        &format!("backpack supply item {item_id} cannot be equipped"),
                     );
                     self.send_error(error_msg::BACKPACK_OCCUPIED);
                     return false;
@@ -1453,7 +1555,7 @@ impl<'a> Ctx<'a> {
                 tracing::info!("[GM] quest {quest_id}, added!");
                 self.drop_quest(quest_id, true, false);
             } else {
-                tracing::info!("Duplicate quest {quest_id}, not added!");
+                self.log_refusal("AddQuest", quest_id, "the quest is already active");
                 return false;
             }
         }
@@ -1471,10 +1573,10 @@ impl<'a> Ctx<'a> {
                 crate::systems::npcs::spawn_manager::unix_now(),
             )
         {
-            tracing::trace!(
-                "User {} ({}) cannot start new Quest {quest_id}, its game schedule window is not in progress",
-                self.c.unit.name,
-                self.c.id
+            self.log_refusal(
+                "AddQuest",
+                quest_id,
+                "its game schedule window is not in progress",
             );
             return false;
         }
@@ -1483,16 +1585,13 @@ impl<'a> Ctx<'a> {
         }
         // Check if start step components are active
         for c in template.components_of(&data.components, kind::START) {
-            if !self.can_component_run(c.id) {
-                tracing::trace!(
-                    "User {} ({}) does not meet requirements to start new Quest {quest_id}, ComponentId {}",
-                    self.c.unit.name,
-                    self.c.id,
-                    c.id
+            if !self.can_component_run(c.id) && !forcibly {
+                self.log_refusal(
+                    "AddQuest",
+                    quest_id,
+                    &format!("unit requirements of the start component {} not met", c.id),
                 );
-                if !forcibly {
-                    return false;
-                }
+                return false;
             }
         }
         if self.has_quest_completed(quest_id) {
@@ -1500,10 +1599,7 @@ impl<'a> Ctx<'a> {
                 tracing::info!("[GM] quest {quest_id}, added!");
                 self.set_completed_quest_flag(quest_id, false);
             } else if !template.repeatable {
-                tracing::warn!(
-                    "Quest {quest_id} already completed for {}, not added!",
-                    self.c.unit.name
-                );
+                self.log_refusal("AddQuest", quest_id, "already completed and not repeatable");
                 self.send_error(error_msg::QUEST_DAILY_LIMIT);
                 return false;
             }
@@ -1536,6 +1632,13 @@ impl<'a> Ctx<'a> {
 
         // Actually start the quest by setting step to Start and send the quest start packets
         if !self.start_quest(h) {
+            self.log_refusal(
+                "AddQuest",
+                quest_id,
+                &format!(
+                    "the start step does not accept acceptor type {acceptor_type} id {acceptor_id}"
+                ),
+            );
             self.finalize_quest_acts(h);
             self.st.quests.remove(&h);
             self.server.ids.quest.release_id(id);
@@ -1562,7 +1665,9 @@ impl<'a> Ctx<'a> {
         if let Some(q) = self.quest_mut(h) {
             q.skip_update = true;
         }
-        if self.quest(h).is_some_and(|q| q.status == status::COMPLETED) {
+        // Cleanup runs for a quest that is being completed, however it got to the Reward step
+        // (the early completion of a LetItDone quest does not set the status on every path).
+        if self.is_completing(h) {
             self.quest_cleanup(h);
         }
         self.quest_drop(h, update);
@@ -1620,21 +1725,93 @@ impl<'a> Ctx<'a> {
     }
 
     /// `TryCompleteQuestAsLetItDone(questId, selectedReward)`.
+    ///
+    /// Deviation: the C# sets `Step = Reward` and leaves the rest to the evaluation of the Reward
+    /// components, so a quest without a Reward step never completed, and the quest status was
+    /// never `Completed` (the completion cleanup was skipped). Here the status becomes
+    /// `Completed` with the step, and a quest without a Reward step is finished at once.
     pub fn try_complete_quest_as_let_it_done(&mut self, quest_id: u32, selected: i32) {
+        let who = format!("{} ({})", self.c.unit.name, self.c.id);
         let Some(h) = self.st.active_handle(quest_id) else {
+            self.log_refusal(
+                "TryCompleteQuestAsLetItDone",
+                quest_id,
+                "the quest is not active",
+            );
             return;
         };
         let let_it_done = self.data.template(quest_id).is_some_and(|t| t.let_it_done);
         if !let_it_done {
+            self.log_refusal(
+                "TryCompleteQuestAsLetItDone",
+                quest_id,
+                "the quest cannot be completed early (not LetItDone)",
+            );
             return;
         }
-        if self.objective_status(h) < ObjectiveStatus::CanEarlyComplete {
+        let objective = self.objective_status(h);
+        if objective < ObjectiveStatus::CanEarlyComplete {
+            let objectives = self.quest(h).map(|q| q.objectives);
+            self.log_refusal(
+                "TryCompleteQuestAsLetItDone",
+                quest_id,
+                &format!("objectives not far enough ({objective:?}, objectives {objectives:?})"),
+            );
             return;
         }
         if let Some(q) = self.quest_mut(h) {
             q.selected_reward_index = selected;
         }
-        self.set_step(h, kind::REWARD);
+        let (has_reward, has_ready) = self.quest(h).map_or((false, false), |q| {
+            (
+                q.step_index(kind::REWARD).is_some(),
+                q.step_index(kind::READY).is_some(),
+            )
+        });
+        if has_reward {
+            // Go to the Reward step: its components complete the quest on the next evaluation.
+            self.set_step(h, kind::REWARD);
+            self.set_status(h, status::COMPLETED);
+        } else if has_ready {
+            // No Reward step: the Ready step holds whatever the quest hands out. Turn it in
+            // there; with the report acts satisfied the step runs on to the quest completion.
+            self.set_step(h, kind::READY);
+            self.set_status(h, status::READY);
+            self.override_report_acts(h, kind::READY);
+            self.run_current_step(h);
+            if self.quest(h).is_some_and(|q| q.step == kind::READY) {
+                tracing::warn!(
+                    "TryCompleteQuestAsLetItDone, {who}, Quest {quest_id}: has no Reward step and its Ready step did not complete, left at Ready"
+                );
+            }
+        } else {
+            // Neither a Ready nor a Reward step: complete right away.
+            self.set_step(h, kind::REWARD);
+            self.set_status(h, status::COMPLETED);
+            self.go_to_next_step(h);
+        }
+    }
+
+    /// Marks the report acts (`ConReportNpc` / `ConReportDoodad` / `ConReportJournal`) of a step
+    /// as satisfied (the player is turning the quest in).
+    fn override_report_acts(&mut self, h: QuestHandle, step_kind: u8) {
+        let data = self.data;
+        let Some(si) = self.quest(h).and_then(|q| q.step_index(step_kind)) else {
+            return;
+        };
+        for p in self.step_paths(h, si) {
+            let Some(a) = self.act_ref(h, p) else {
+                continue;
+            };
+            if matches!(
+                data.acts[a].kind,
+                ActKind::ConReportNpc { .. }
+                    | ActKind::ConReportDoodad { .. }
+                    | ActKind::ConReportJournal
+            ) {
+                self.set_act_override(h, p, true);
+            }
+        }
     }
 
     /// `ResetQuests(questDetail, sendIfChanged)`.
@@ -1643,7 +1820,7 @@ impl<'a> Ctx<'a> {
         for bi in 0..self.c.quests.completed.len() {
             let block_id = self.c.quests.completed[bi].id;
             for idx in 0..64u32 {
-                let quest_id = u32::from(block_id) * 64 + idx;
+                let quest_id = block_id * 64 + idx;
                 let Some(t) = data.template(quest_id) else {
                     continue;
                 };
@@ -1660,7 +1837,7 @@ impl<'a> Ctx<'a> {
                             self.send(SCQuestContextResetPacket {
                                 quest_id,
                                 body,
-                                component_id: u32::from(block_id),
+                                component_id: block_id,
                             });
                         }
                     }
@@ -1728,6 +1905,7 @@ impl<'a> Ctx<'a> {
                 q.acceptor_id = row.acceptor_id;
                 q.status = row.status;
             }
+            self.heal_loaded_status(h);
             // Timers in earlier components must also resume at a saved Progress step.
             if matches!(row.step, kind::START | kind::SUPPLY | kind::PROGRESS) {
                 for path in self.all_paths(h) {
@@ -1761,6 +1939,34 @@ impl<'a> Ctx<'a> {
             self.request_evaluation(h);
         }
         self.st.loaded = true;
+    }
+
+    /// A saved quest whose status says `Ready` while it still sits on its Progress step is only
+    /// legal for `LetItDone` and score quests (their Progress step is left by a report, the
+    /// status shows "ready to turn in"). On any other quest the status is stale, so it is reset
+    /// to `Progress`; the evaluation requested by the load then moves the quest on to its Ready
+    /// step when the objectives are complete.
+    fn heal_loaded_status(&mut self, h: QuestHandle) {
+        let Some(q) = self.quest(h) else {
+            return;
+        };
+        if q.step != kind::PROGRESS || q.status != status::READY {
+            return;
+        }
+        let template_id = q.template_id;
+        let early = self
+            .data
+            .template(template_id)
+            .is_some_and(|t| t.let_it_done || t.score > 0);
+        if early {
+            return;
+        }
+        tracing::warn!(
+            "Quest {template_id} of {} ({}) was saved with status Ready on its Progress step, re-evaluating",
+            self.c.unit.name,
+            self.c.id
+        );
+        self.set_status(h, status::PROGRESS);
     }
 
     /// `OnQuestItemManuallyDestroyed(item)` (item template id + its `LootQuestId`).
@@ -1937,7 +2143,7 @@ pub(crate) fn bit_set(body: &mut Vec<u8>, idx: usize, v: bool) {
 
 /// `HasQuestCompleted(questId)`.
 pub fn has_quest_completed(blocks: &[CompletedQuest], quest_id: u32) -> bool {
-    let block_id = (quest_id / 64) as u16;
+    let block_id = quest_id / 64;
     blocks
         .iter()
         .find(|b| b.id == block_id)
@@ -1950,7 +2156,7 @@ pub fn set_completed_quest_flag(
     quest_id: u32,
     completed: bool,
 ) -> CompletedQuest {
-    let block_id = (quest_id / 64) as u16;
+    let block_id = quest_id / 64;
     let idx = (quest_id % 64) as usize;
     let i = match blocks.iter().position(|b| b.id == block_id) {
         Some(i) => i,
