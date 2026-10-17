@@ -757,3 +757,22 @@ CREATE TABLE IF NOT EXISTS `rank_period_payouts` (
   `paid_at`      bigint NOT NULL COMMENT 'Unix seconds UTC the rewards were mailed',
   PRIMARY KEY (`rank_id`, `period_start`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Ranking periods whose rewards were already mailed';
+
+-- Growth state of world-spawned doodads (`systems::npcs::doodad::natural`): restored at server
+-- start so trees, ore and crops keep growing across restarts. `spawn_key` identifies the spawn
+-- entry (authored template id + position), `template_id` is the template at save time. The row is
+-- deleted when the doodad is harvested or despawned. `plant_time` is Unix seconds UTC;
+-- `growth_time` / `phase_time` are Unix milliseconds UTC.
+CREATE TABLE IF NOT EXISTS `doodad_spawn_states` (
+  `world_id`           int unsigned NOT NULL COMMENT 'World instance id of the spawn entry',
+  `spawn_key`          varchar(64) NOT NULL COMMENT 'Authored template id and position (0.1 m) of the spawn entry',
+  `template_id`        int unsigned NOT NULL COMMENT 'Doodad template at save time',
+  `func_group_id`      int unsigned NOT NULL COMMENT 'Current phase',
+  `plant_time`         bigint NOT NULL COMMENT 'Unix seconds UTC',
+  `growth_time`        bigint NOT NULL DEFAULT 0 COMMENT 'Unix milliseconds UTC',
+  `phase_time`         bigint NOT NULL DEFAULT 0 COMMENT 'Unix milliseconds UTC, start of the current phase',
+  `data`               int NOT NULL DEFAULT 0,
+  `interaction_counts` text NULL COMMENT 'JSON object: completed interactions of the current phase',
+  `updated`            bigint NOT NULL DEFAULT 0 COMMENT 'Unix seconds UTC of the snapshot',
+  PRIMARY KEY (`world_id`, `spawn_key`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Growth state of world-spawned doodads, restored at server start';

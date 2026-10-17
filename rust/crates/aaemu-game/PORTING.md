@@ -158,7 +158,7 @@ Each subsystem records its status here, in its own section only (see `CONTRIBUTI
 | Area (C#) | Rust | Status | Notes |
 |---|---|---|---|
 | `SkillManager` (+ `Sqlite*` effect / buff / plot loaders), `PlotManager`, `FormulaManager` remainder, `AnimationManager`, `AreaTriggers` shapes, `ModelManager` radii, `UnitRequirementsManager`, `TagsManager` (skills / buffs) | `systems/skills/data/` | done | Every skill / buff / effect / plot / tag / modifier / trigger / reagent / product / linear func / tolerance / anim / aoe shape table, incl. all 30+ effect types. Gated real-DB test `skills_real_compact_db` checks row counts. |
-| `Models/Game/Skills/{Skill,SkillCaster,SkillCastTarget,SkillObject,CastAction,SkillController*}`, `Core/Packets/{C2G,G2C}` skill / buff packets | `systems/skills/{types,packets,skill,handlers}.rs` | done | Byte-exact wire types (tested), `Skill.Use` / `Cast` / `Channeling` / `Apply` / `EndSkill` / `Stop`, GCD + cooldowns, mana, labor / vocation, reagents via `ItemSkillHooks`, auto attack loop, `CompressedGamePackets`. |
+| `Models/Game/Skills/{Skill,SkillCaster,SkillCastTarget,SkillObject,CastAction,SkillController*}`, `Core/Packets/{C2G,G2C}` skill / buff packets | `systems/skills/{types,packets,skill,handlers}.rs` | done | Byte-exact wire types (tested), `Skill.Use` / `Cast` / `Channeling` / `Apply` / `EndSkill` / `Stop`, GCD + cooldowns, mana, labor / vocation, reagents via `ItemSkillHooks`, auto attack loop, `CompressedGamePackets`. Data gap: 6 `quest_components.skill_id` values (20315, 11212, 17708, 13737, 11981, 13590) have no `skills` row. The C# `Unit.UseSkill` threw a NullReferenceException there; Rust skips the cast (the quest continues) and `unit_use_skill` warns once per skill id (`missing_skill_warned`), repeats go to debug. |
 | `Models/Game/Skills/Plots/*` | `systems/skills/plots.rs` | done | Plot tree execution (async), conditions 1..17, target info updates (area / random unit / random area), channeling finish, `SCPlotEvent` / `SCPlotEnded`. Deviation: the timeline-id release in plot end, `end_skill` and `stop_skill` is take-and-clear under the skill state lock (`SkillRun::take_tl_id`); C# did an unsynchronised `ReleaseId(TlId); TlId = 0`, so an interrupted plot skill could release the same id twice. The `Tried to release unused Id` warning names the last owner (caster obj id, skill id), like C# `AssignedUnit`. |
 | `Models/Game/Units/Buffs` behaviour, `Skills/Buff`, `Skills/Effects/{Buff,Damage,Heal,Dispel,RestoreMana,ManaBurn,Aggro,FlyingStateChange,SkillController,...}`, `CombatBuffs`, `BuffTriggers` | `systems/skills/{buffs,effects/*}.rs` | done | Start / dispel / tick tasks, tolerance, stack rules, charges, `TriggerRemoveOn`, tag removal, absorption, triggers, area ticks. Explicit dispel emits Dispelled without Timeout; natural expiry retains Timeout. This corrects the mirrored C# removal path, which invoked the FISH escape trigger when catch plot 792 dispelled FISH before lethal damage. Queued CREATED handling and existing removal packet order are retained. Refreshing permanent non-ticking buffs invalidates old timers without treating GetTimeLeft=-1 as expiry; finite expiration and permanent tick cadence remain scheduled. This corrects the mirrored C# refresh timer path. Special effects routed through `ExtHooks::route_special` where they belong to another subsystem. |
 | `Units/Unit` combat (`ReduceCurrentHp`, `DoDie`, aggro / tagging, `SetInBattle`, criminal / force attack, invisibility, `DoFallDamage`), `BaseUnit.CanAttack` / relations, regen, `UpdateGearBonuses`, all `Character` stat getters | `systems/skills/{combat,relation,stats,regen}.rs` | done | MaxHp / MaxMp etc. with buffs, passives and gear (`GearStats` hook). NPC death side effects through `NpcSkillHooks`. |
@@ -1179,6 +1179,30 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   RatioChange funcs (about 7% of spawns) and ends by chance; the first guard version rejected
   those replacements ("replacement chain rejected") and the doodad waited for its Final to
   respawn the base template.
+
+* systems::npcs (2026-10-16): world-spawned ("natural") doodads keep their growth state across
+  server restarts. The C# (and the first Rust port) recreated every doodad of
+  `doodad_spawns*.json` in its Start phase with the full growth timer on each start, so with
+  restarts more frequent than the longest growth chain (about 9 400 of the 42 670 main_world
+  spawns need more than 24 h, the longest about 103 h) trees, ore, wild crops and cotton never
+  matured. Deviation: doodads whose template waits at least 5 minutes in some phase (`Timer` with
+  a next phase, `Growth`, `Final` with `After`; about 10 900 main_world spawns, 143 templates;
+  shorter chains restart in seconds and static props have nothing to keep) are stored in the new
+  table `doodad_spawn_states`, keyed by `(world id, spawn key)` where the key is the spawn
+  entry's authored template id + position at 0.1 m (not the doodad's current template, which a
+  `DoodadFuncRatioRespawn` swaps, and not the JSON `Id`, present on 7 entries only). The row holds
+  the current template, func group, plant / growth / phase time, `Data` and the interaction
+  counters. Writes are coalesced per key and flushed in batches every 5 s, by the periodic and
+  shutdown save (`doodad::save`); the row is deleted when the doodad is deleted (harvest, Final,
+  despawn), so a respawn starts fresh as before. At startup (`SpawnManager::load`, main world
+  only) all rows are read once; `DoodadSpawner::spawn` restores the first doodad of an entry with
+  the player-doodad load mechanism (`FuncGroupId` setter, then `OverridePhaseTime = PhaseTime`),
+  so the phase timer resumes with its remaining delay and an expired phase fires promptly.
+  Downtime counts as growth time. Rows whose template or func group no longer exist or whose
+  template is no longer timed are dropped with one summary warning; two spawn entries sharing a
+  key are only tracked for the first. Tracking stays off if the table cannot be read. Limitation
+  (as for player doodads): a phase that has both a `Timer`/`Growth` and a `Final` with `After`
+  lets only the first consume the saved phase time.
 
 * systems::npcs (2026-10-16): `DoodadFuncTod` takes its `curTime >= Tod` catch-up on every
   entry, which ignores that the clock wraps; the 20 day/night board templates (West Gate
