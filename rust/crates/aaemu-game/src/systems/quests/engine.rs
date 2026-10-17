@@ -1880,6 +1880,7 @@ impl<'a> Ctx<'a> {
                 q.acceptor_id = row.acceptor_id;
                 q.status = row.status;
             }
+            self.heal_loaded_status(h);
             // Timers in earlier components must also resume at a saved Progress step.
             if matches!(row.step, kind::START | kind::SUPPLY | kind::PROGRESS) {
                 for path in self.all_paths(h) {
@@ -1913,6 +1914,34 @@ impl<'a> Ctx<'a> {
             self.request_evaluation(h);
         }
         self.st.loaded = true;
+    }
+
+    /// A saved quest whose status says `Ready` while it still sits on its Progress step is only
+    /// legal for `LetItDone` and score quests (their Progress step is left by a report, the
+    /// status shows "ready to turn in"). On any other quest the status is stale, so it is reset
+    /// to `Progress`; the evaluation requested by the load then moves the quest on to its Ready
+    /// step when the objectives are complete.
+    fn heal_loaded_status(&mut self, h: QuestHandle) {
+        let Some(q) = self.quest(h) else {
+            return;
+        };
+        if q.step != kind::PROGRESS || q.status != status::READY {
+            return;
+        }
+        let template_id = q.template_id;
+        let early = self
+            .data
+            .template(template_id)
+            .is_some_and(|t| t.let_it_done || t.score > 0);
+        if early {
+            return;
+        }
+        tracing::warn!(
+            "Quest {template_id} of {} ({}) was saved with status Ready on its Progress step, re-evaluating",
+            self.c.unit.name,
+            self.c.id
+        );
+        self.set_status(h, status::PROGRESS);
     }
 
     /// `OnQuestItemManuallyDestroyed(item)` (item template id + its `LootQuestId`).
