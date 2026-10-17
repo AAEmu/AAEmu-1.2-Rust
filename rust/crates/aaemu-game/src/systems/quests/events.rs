@@ -368,44 +368,54 @@ pub fn with_quests<R>(
     ACTIVE.with(|a| a.borrow_mut().push((character_id, Vec::new())));
     let system = &server.systems.quests;
     let hooks = system.hooks();
-    let (r, deferred, buffs_changed) = {
+    // A panic in the operation or in a queued one is caught here, so that the quest state
+    // taken out of the character below is put back and the ACTIVE entry is removed before the
+    // panic resumes: otherwise every later event of the character on this thread would be
+    // queued forever and its quests lost. Catching it while `guard` is held also keeps the
+    // character mutex from being poisoned.
+    let outcome = {
         let mut guard = player.data();
         let mut st = std::mem::take(&mut guard.quest_state);
         let c: &mut Character = &mut guard;
-        let mut ctx = Ctx {
-            server,
-            data: &server.game_data.systems.quests,
-            hooks,
-            player: Some(player.clone()),
-            c,
-            st: &mut st,
-            env,
-            now_ms: chrono::Utc::now().timestamp_millis(),
-            deferred: Vec::new(),
-            buffs_changed: false,
-            sent: Vec::new(),
-        };
-        if !ctx.st.loaded {
-            ctx.load_from_rows();
-        }
-        let r = f(&mut ctx);
-        loop {
-            let pending = take_pending(character_id);
-            if pending.is_empty() {
-                break;
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut ctx = Ctx {
+                server,
+                data: &server.game_data.systems.quests,
+                hooks,
+                player: Some(player.clone()),
+                c,
+                st: &mut st,
+                env,
+                now_ms: chrono::Utc::now().timestamp_millis(),
+                deferred: Vec::new(),
+                buffs_changed: false,
+                sent: Vec::new(),
+            };
+            if !ctx.st.loaded {
+                ctx.load_from_rows();
             }
-            for op in pending {
-                op(&mut ctx);
+            let r = f(&mut ctx);
+            loop {
+                let pending = take_pending(character_id);
+                if pending.is_empty() {
+                    break;
+                }
+                for op in pending {
+                    op(&mut ctx);
+                }
             }
+            let keep = system.queued_handles(character_id);
+            ctx.st.collect_garbage(&keep);
+            ctx.sync_rows();
+            let deferred = std::mem::take(&mut ctx.deferred);
+            let buffs_changed = ctx.buffs_changed;
+            (r, deferred, buffs_changed)
+        }));
+        if run.is_err() {
+            guard.quests.active = st.rows();
         }
-        let keep = system.queued_handles(character_id);
-        ctx.st.collect_garbage(&keep);
-        ctx.sync_rows();
-        let deferred = std::mem::take(&mut ctx.deferred);
-        let buffs_changed = ctx.buffs_changed;
-        drop(ctx);
         guard.quest_state = st;
-        (r, deferred, buffs_changed)
+        run
     };
     ACTIVE.with(|a| {
         let mut a = a.borrow_mut();
@@ -414,6 +424,10 @@ pub fn with_quests<R>(
         }
     });
     drop(economy);
+    let (r, deferred, buffs_changed) = match outcome {
+        Ok(done) => done,
+        Err(payload) => std::panic::resume_unwind(payload),
+    };
     crate::systems::flush_achievements(server);
     if buffs_changed {
         crate::systems::dispatch_buff_events(server, &WorldObject::from(player.clone()));
@@ -424,7 +438,7 @@ pub fn with_quests<R>(
 }
 
 /// Runs `op` as a quest operation, or queues it when nested in one of the same character.
-fn run_or_queue(
+pub(super) fn run_or_queue(
     server: &GameServer,
     player: &PlayerRef,
     op: impl FnOnce(&mut Ctx<'_>) + Send + 'static,

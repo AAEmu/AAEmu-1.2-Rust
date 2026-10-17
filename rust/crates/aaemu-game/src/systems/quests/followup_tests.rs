@@ -136,3 +136,44 @@ async fn item_gain_ignores_completed_quests_and_unrelated_items() {
     events::on_items_acquired(&server, &player, 3711, 1);
     assert!(!events::has_quest(&player, 7));
 }
+
+#[tokio::test]
+async fn a_panicking_quest_operation_leaves_the_character_usable() {
+    let (server, _rec) = server_with(|d| item_gain_quest(d, 7, 3711, 1));
+    let client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(&server, &client, character(), 0x100);
+
+    // An already active quest, so the lost quest state would be visible.
+    give_item(&mut player.data(), 3711, 1);
+    events::on_items_acquired(&server, &player, 3711, 1);
+    assert!(events::has_quest(&player, 7));
+
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        events::with_quests(&server, &player, None, |_| panic!("boom"));
+    }));
+    assert!(panicked.is_err());
+    // A queued operation that panics is covered the same way.
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        events::with_quests(&server, &player, None, |_| {
+            events::run_or_queue(&server, &player, |_| panic!("queued boom"));
+        });
+    }));
+    assert!(panicked.is_err());
+
+    // The quest state is back and the character is not stuck in the active list.
+    assert!(events::has_quest(&player, 7));
+    assert!(
+        events::with_quests(&server, &player, None, |ctx| ctx.has_quest(7)).unwrap(),
+        "with_quests runs again instead of queueing forever"
+    );
+    assert_eq!(
+        player
+            .data()
+            .quests
+            .active
+            .iter()
+            .filter(|q| q.template_id == 7)
+            .count(),
+        1
+    );
+}
