@@ -1254,6 +1254,26 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   of the asked-for names is in one). `Rec._Speed`, `Rec._PathType` and `Closed` are not encoded:
   every asked-for path has `Closed=0` and the route plays once.
 
+* systems::npcs (2026-10-16): `Data/Portal/worldgates.json` has generated entries. The `Return`
+  special effect (type 25) with a non-zero `value1` teleports to the world gate of that
+  `return_points.id`, but the file only held 26 hand recorded gates, so quest skills such as
+  "The Crazy Son" (quest 532: skill 13507, buff 1494, buff trigger -> `Return` 30, "near Liania")
+  logged `Cannot find return WorldGate`. The retail positions are the `ReturnPoint_<editor_name>`
+  spheres of `game/worlds/main_world/level_design/zone/<key>/editor/return_point.xml` in the 10.x
+  `game_pak`; `aaemu-aipaths return-points` (see the crate README) appends 40 gates in a marked
+  section of the file (world X/Y = zone origin cell * 1024 + the zone-local position, Z as is,
+  Yaw from the `Rotate` quaternion, zone key and name checked against the 1.2 `world.xml` and
+  the compact `zones`). The method reproduces the hand recorded gates 402-405, 513, 514, 614 and
+  389 within 1-4 m. `SubZoneId` is the gate id (only the dictionary key, never looked up by
+  sub zone). `real_worldgates_follow_the_terrain` checks every generated Z against the 1.2
+  heightmap, or a navmesh node within 20 m (the upper floors of gates 42, 304 and 306); gates
+  399, 400, 533, 627 and 681 failed both and are left out (`--skip`). Still missing: 100 of the
+  166 distinct `Return` ids. 79 have no point in the 10.x main_world files (instance worlds such
+  as Nachashgar, the libraries and Howling Abyss, which need their own world origins, plus 54, 68,
+  69, 73, ...), 16 have no `return_points` row at all (19, 20, 40, ...) and 5 were skipped. The
+  warning stays and prints the entry to add. Ten hand recorded gates are more than 5 m from their
+  10.x point (221, 372, 617, 619, 628, 672, 673, 354, 652, and 48 by 6 m); they are untouched.
+
 * systems::npcs (2026-10-15): `DoodadFuncClout` with `UseOriginSource` takes the first doodad
   within 4 m of the caster as the area trigger's owner, and the C# scheduled the
   `DoodadFuncCloutTask` on that owner, so it changed that doodad's phase to the clout's
