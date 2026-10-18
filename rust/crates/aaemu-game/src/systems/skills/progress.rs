@@ -441,6 +441,16 @@ pub fn learn_skill(server: &GameServer, p: &PlayerRef, skill_id: u32) {
     if t.ability_id > 0 && !actives.contains(&t.ability_id) {
         return;
     }
+    let ab = {
+        let c = p.data();
+        crate::db_character::ab_level(server, &c, t.ability_id)
+    };
+    // The 1.2 client offers a skill only from its ability level on, so retail learns nothing
+    // below it (and never the hidden ability_level 99 rows such as 10385); the C# had no check,
+    // computed a wrapped byte and then failed every save (1264, see PORTING.md).
+    if t.ability_level > ab {
+        return;
+    }
     let (level, used) = {
         let c = p.data();
         (c.unit.level, c.skills.used_skill_points(skills, 0))
@@ -459,16 +469,10 @@ pub fn learn_skill(server: &GameServer, p: &PlayerRef, skill_id: u32) {
     let skill = match existing {
         Some(s) => s,
         None => {
-            let ab = {
-                let c = p.data();
-                crate::db_character::ab_level(server, &c, t.ability_id)
+            let s = Skill {
+                id: t.id,
+                level: t.level_for(ab),
             };
-            let level = if t.level_step > 0 {
-                ((ab - t.ability_level) / t.level_step + 1) as u8
-            } else {
-                1
-            };
-            let s = Skill { id: t.id, level };
             p.data().skills.skills.push(s);
             s
         }
@@ -689,7 +693,46 @@ mod tests {
     use crate::data::character_templates::ExpertLimit;
     use crate::data::GameData;
     use crate::models::char_data::Actability;
-    use crate::test_support::{test_character, test_server_with};
+    use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
+
+    #[tokio::test]
+    async fn learn_skill_refuses_a_skill_above_the_ability_level() {
+        // The sweep path: `/level 55` then `CSLearnSkillPacket` for the retired ability_level 99
+        // rows (10385, 11854, ...). The client never offers them, so retail never learns them;
+        // the port used to learn them at a wrapped level 243, which blocked the character save
+        // (MySQL 1264).
+        let mut data = GameData::empty();
+        data.skills.add_skill(crate::data::skills::SkillTemplate {
+            id: 10385,
+            ability_id: 0,
+            ability_level: 99,
+            level_step: 3,
+            skill_points: 1,
+            ..Default::default()
+        });
+        data.skills.add_skill(crate::data::skills::SkillTemplate {
+            id: 5,
+            ability_id: 0,
+            ability_level: 5,
+            level_step: 3,
+            skill_points: 0,
+            ..Default::default()
+        });
+        let server = test_server_with(data);
+        let mut client = TestClient::new(&server, 1, 1);
+        let mut character = test_character(1, "Learner", 100.0, 100.0);
+        character.unit.level = 10; // GetAbLevel(General) = 10: below 99, above 5
+        let player = spawn_player(&server, &client, character, 0x100);
+        client.drain(); // spawn traffic
+
+        learn_skill(&server, &player, 10385);
+        assert!(player.data().skills.skills.is_empty());
+        assert!(client.drain().is_empty());
+
+        learn_skill(&server, &player, 5);
+        assert_eq!(player.data().skills.skills, [Skill { id: 5, level: 2 }]);
+        assert!(client.drain_ops().contains(&sc::SCSkillLearnedPacket));
+    }
 
     #[tokio::test]
     async fn labor_actability_uses_zero_based_tiers_and_reports_actual_capped_gain() {

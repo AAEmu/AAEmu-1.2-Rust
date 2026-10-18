@@ -12,6 +12,20 @@ use super::sqlite::for_each_row;
 /// `AbilityType.None`.
 pub const ABILITY_NONE: u8 = 11;
 
+/// `Skill(template, owner)` level: `(abLevel - AbilityLevel) / LevelStep + 1`.
+///
+/// The result saturates to `1..=127` instead of wrapping. `skills.level` is a signed `TINYINT`
+/// and the ability-level 99 skills of the 1.2 data (the retired / login-stage rows, e.g. 10385)
+/// are above the level cap 55: the raw formula goes negative and `as u8` turned it into 243,
+/// which made every character save fail with MySQL `1264 Out of range value for column 'level'`.
+pub fn skill_level(ability_level: i32, level_step: i32, ab_level: i32) -> u8 {
+    if level_step > 0 {
+        ((ab_level - ability_level) / level_step + 1).clamp(1, i32::from(i8::MAX)) as u8
+    } else {
+        1
+    }
+}
+
 /// `SkillTemplate` (subset).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SkillTemplate {
@@ -23,6 +37,13 @@ pub struct SkillTemplate {
     pub skill_points: i32,
     pub auto_learn: bool,
     pub need_learn: bool,
+}
+
+impl SkillTemplate {
+    /// The `Skill.Level` a new `Skill(template, owner)` gets (see [`skill_level`]).
+    pub fn level_for(&self, ab_level: i32) -> u8 {
+        skill_level(self.ability_level, self.level_step, ab_level)
+    }
 }
 
 /// `DefaultSkill`.
