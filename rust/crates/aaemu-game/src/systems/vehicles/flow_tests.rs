@@ -2445,6 +2445,13 @@ fn real_compact_db_vehicle_tables() {
         .attach_points_for_slave(128)
         .expect("clipper attach points");
     assert!(clipper.iter().any(|(p, _)| *p == attach_point::DRIVER));
+    // Timber Coupe (slaves 116 / 119): hood, repair point and both trade pack storages
+    let coupe = d
+        .attach_points_for_slave(d.slave_templates[&116].model_id)
+        .expect("timber coupe attach points");
+    for point in [21, 36, 60, 61] {
+        assert!(coupe.iter().any(|(p, _)| *p == point), "point {point}");
+    }
 }
 
 /// A server whose main_world covers the real map (31 x 31 cells), with the real vehicle data.
