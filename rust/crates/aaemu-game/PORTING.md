@@ -1753,7 +1753,9 @@ Additional world-side fixes from the same audit:
   `X2Chat` bindings. Explicit native leave parameters remain unverified; disconnect cleanup
   is covered separately.
 * Mate pool and regeneration formulas now receive the complete attribute parameter set plus
-  mate kind. Real 1.2 level-five horse formulas produce 1,012 maximum HP and 335 maximum MP;
+  mate kind. Slave melee, ranged and spell increments, armor and magic resistance also receive
+  level and all six attributes, matching the C# getters (level-50 melee increment: 5,400).
+  Real 1.2 level-five horse formulas produce 1,012 maximum HP and 335 maximum MP;
   the old incomplete parameter map failed and produced zero maximum pools. Summoning clamps
   saved pools to the computed maximum and preserves injured and exhausted saves. Mate
   skill requests require ownership or an actual server-managed passenger/parent relation
