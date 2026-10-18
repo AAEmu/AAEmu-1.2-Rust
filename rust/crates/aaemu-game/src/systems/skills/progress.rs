@@ -702,6 +702,7 @@ mod tests {
         // the port used to learn them at a wrapped level 243, which blocked the character save
         // (MySQL 1264).
         let mut data = GameData::empty();
+        data.experience = crate::test_support::test_experience(10);
         data.skills.add_skill(crate::data::skills::SkillTemplate {
             id: 10385,
             ability_id: 0,

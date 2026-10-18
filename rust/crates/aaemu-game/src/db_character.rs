@@ -1769,6 +1769,7 @@ mod tests {
         // A stored attribute-less ability_level 99 row (as a pre-fix server could write) is not
         // re-learned at load either: the C# recomputed a wrapped level and kept failing to save.
         let mut data = crate::data::GameData::empty();
+        data.experience = crate::test_support::test_experience(55);
         data.skills.add_skill(crate::data::skills::SkillTemplate {
             id: 10385,
             ability_id: 0,
