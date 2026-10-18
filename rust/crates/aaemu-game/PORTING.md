@@ -663,6 +663,14 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 
 ## Known deviations from the C#
 
+* systems::services / systems::vehicles (mount speed analysis): `SusManager` samples the
+  driver's (or owner's) `teleport_seq` and `disabled_set_position` for mates, and successful
+  ride / unride operations reset the mate baseline. C# `SusManager` / `CharacterMates` did
+  not invalidate that baseline for rider teleports or seat changes. This prevents a short
+  teleport from being audited as mount speeding without changing either speed threshold.
+  Speed reports also include object id, baseline / current positions, elapsed ms and instance
+  id, captured by the analysis before advancing its baseline.
+
 * Logging (`aaemu_commons::logging`, login and game): `Logs/` lives under the application
   directory instead of the executable's directory, so servers built into one target directory no
   longer share (and delete) each other's files. NLog's `deleteOldFileOnStartup` became "move the

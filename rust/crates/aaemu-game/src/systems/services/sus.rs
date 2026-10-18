@@ -37,7 +37,7 @@ pub struct SampleCtx {
     pub now_ms: i64,
     /// World instance the object was in.
     pub instance_id: u32,
-    /// `Character::teleport_seq` (0 for mates).
+    /// `Character::teleport_seq` (the driver / owner counter for mates).
     pub teleport_seq: u32,
 }
 
@@ -47,6 +47,25 @@ struct Baseline {
     pos: [f32; 3],
     skip_time: f32,
     ctx: SampleCtx,
+}
+
+/// Evidence captured before the baseline is advanced.
+#[derive(Debug)]
+pub(crate) struct MovementReport {
+    pub(crate) speed: f64,
+    baseline: [f32; 3],
+    current: [f32; 3],
+    elapsed_ms: i64,
+    instance_id: u32,
+}
+
+impl MovementReport {
+    fn details(&self, obj_id: u32) -> String {
+        format!(
+            "obj_id={obj_id}, baseline={:?}, current={:?}, elapsed_ms={}, instance_id={}",
+            self.baseline, self.current, self.elapsed_ms, self.instance_id
+        )
+    }
 }
 
 type Baselines = Mutex<HashMap<u32, Baseline>>;
@@ -122,6 +141,33 @@ impl SusManager {
         pet: &crate::world::MateRef,
         delta_time: f32,
     ) {
+        if let Some(report) =
+            self.analyze_mount_sample(server, pet, delta_time, crate::world::now_ms())
+        {
+            let (name, owner_obj_id) = {
+                let m = pet.data();
+                (m.unit.name.clone(), m.owner_obj_id)
+            };
+            let owner = server.world.character_by_obj_id(owner_obj_id);
+            let owner_name = owner.as_ref().map(|o| o.data().unit.name.clone());
+            let text = format!(
+                "{}; {}",
+                Self::mount_report(&name, owner_name.as_deref(), report.speed),
+                report.details(pet.obj_id)
+            );
+            self.log_activity_player(server, CATEGORY_CHEATING, owner.as_ref(), &text)
+                .await;
+        }
+    }
+
+    /// Samples the mount and its controlling character without holding two object locks.
+    pub(crate) fn analyze_mount_sample(
+        &self,
+        server: &GameServer,
+        pet: &crate::world::MateRef,
+        delta_time: f32,
+        now_ms: i64,
+    ) -> Option<MovementReport> {
         let obj = WorldObject::from(pet);
         let pos = match server.world.world_of(&obj) {
             Some(w) => {
@@ -133,30 +179,37 @@ impl SusManager {
                 [t.x, t.y, t.z]
             }
         };
-        let (id, name, disabled, owner_obj_id, instance_id) = {
+        let (id, owner_obj_id, driver_obj_id, instance_id) = {
             let m = pet.data();
             (
                 m.id,
-                m.unit.name.clone(),
-                false,
                 m.owner_obj_id,
+                m.passenger(crate::systems::vehicles::data::attach_point::DRIVER)
+                    .map_or(0, |seat| seat.obj_id),
                 m.unit.transform.instance_id,
             )
         };
-        let ctx = SampleCtx {
-            now_ms: crate::world::now_ms(),
-            instance_id,
-            teleport_seq: 0,
-        };
-        if let Some(speed) =
-            self.analyze_mount_delta_movement_at(id, pos, disabled, delta_time, ctx)
-        {
-            let owner = server.world.character_by_obj_id(owner_obj_id);
-            let owner_name = owner.as_ref().map(|o| o.data().unit.name.clone());
-            let text = Self::mount_report(&name, owner_name.as_deref(), speed);
-            self.log_activity_player(server, CATEGORY_CHEATING, owner.as_ref(), &text)
-                .await;
-        }
+        let controller = server
+            .world
+            .character_by_obj_id(driver_obj_id)
+            .or_else(|| server.world.character_by_obj_id(owner_obj_id));
+        let (disabled, teleport_seq) = controller.map_or((false, 0), |p| {
+            let c = p.data();
+            (c.disabled_set_position, c.teleport_seq)
+        });
+        Self::analyze(
+            &self.last_pet_positions,
+            id,
+            pos,
+            !disabled,
+            MOUNT_CHECK_SPEED,
+            delta_time,
+            SampleCtx {
+                now_ms,
+                instance_id,
+                teleport_seq,
+            },
+        )
     }
 
     /// `LogActivity(category, accountId, playerId, zoneGroup, position, description)`.
@@ -251,7 +304,7 @@ impl SusManager {
         max_speed: f64,
         delta_time: f32,
         ctx: SampleCtx,
-    ) -> Option<f64> {
+    ) -> Option<MovementReport> {
         let mut map = positions.lock().expect("sus poisoned");
         let fresh = Baseline {
             pos,
@@ -278,7 +331,13 @@ impl SusManager {
             let observed = f64::from((dx * dx + dy * dy).sqrt() / interval);
             if observed > max_speed {
                 skip_time = SKIP_TIME_AFTER_REPORT;
-                flagged = Some(observed);
+                flagged = Some(MovementReport {
+                    speed: observed,
+                    baseline: last.pos,
+                    current: pos,
+                    elapsed_ms: ctx.now_ms - last.ctx.now_ms,
+                    instance_id: ctx.instance_id,
+                });
             }
         }
         skip_time -= interval;
@@ -333,6 +392,7 @@ impl SusManager {
             delta_time,
             ctx,
         )
+        .map(|report| report.speed)
     }
 
     /// `AnalyzePlayerDeltaMovement` including the `audit_char_sus` entry.
@@ -357,15 +417,22 @@ impl SusManager {
                 },
             )
         };
-        if let Some(speed) =
-            self.analyze_player_delta_movement_at(id, pos, is_riding, disabled, delta_time, ctx)
-        {
+        if let Some(report) = Self::analyze(
+            &self.last_player_positions,
+            id,
+            pos,
+            !is_riding && !disabled,
+            PLAYER_CHECK_SPEED,
+            delta_time,
+            ctx,
+        ) {
             self.log_activity_player(
                 server,
                 CATEGORY_CHEATING,
                 Some(player),
                 &format!(
-                    "Player {name} seems to be moving a bit fast {speed:.1} m/s (max {PLAYER_CHECK_SPEED:.1})"
+                    "Player {name} seems to be moving a bit fast {:.1} m/s (max {PLAYER_CHECK_SPEED:.1}); {}",
+                    report.speed, report.details(player.obj_id)
                 ),
             )
             .await;
@@ -415,6 +482,7 @@ impl SusManager {
             delta_time,
             ctx,
         )
+        .map(|report| report.speed)
     }
 
     /// The report text of a mount (`Pet {name} from {owner} seems to be moving ...`).
@@ -465,6 +533,34 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn movement_report_keeps_the_baseline_used_for_the_check() {
+        let positions = Baselines::default();
+        SusManager::analyze(
+            &positions,
+            7,
+            [100.0, 103.0, 50.0],
+            true,
+            MOUNT_CHECK_SPEED,
+            5.0,
+            at(1_000, 42, 0),
+        );
+        let report = SusManager::analyze(
+            &positions,
+            7,
+            [1100.0, 103.0, 60.0],
+            true,
+            MOUNT_CHECK_SPEED,
+            5.0,
+            at(6_000, 42, 0),
+        )
+        .expect("speeding");
+        assert_eq!(
+            format!("{}; {}", SusManager::mount_report("Horse", Some("Rider"), report.speed), report.details(123)),
+            "Pet Horse from Rider seems to be moving a bit fast 200.0 m/s (max 27.5); obj_id=123, baseline=[100.0, 103.0, 50.0], current=[1100.0, 103.0, 60.0], elapsed_ms=5000, instance_id=42"
+        );
+    }
 
     #[test]
     fn speed_analysis() {

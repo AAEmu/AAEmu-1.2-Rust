@@ -460,6 +460,72 @@ async fn riding_teleports_and_mate_respawns_reseed_the_speed_baseline() {
         .is_some());
 }
 
+/// Sample the actual rider state within the mount baseline's 10 s window.
+#[tokio::test]
+async fn mount_sus_uses_rider_teleports_and_resets_on_seat_changes() {
+    let server = server_with(data());
+    let a = TestClient::new(&server, 1, 1);
+    let (pa, item_id) = player_with_item(&server, &a, 1, PA, (100.0, 100.0), MATE_ITEM);
+    mates::spawn_mount(&server, &pa, item_id);
+    let mate = server
+        .systems
+        .vehicles
+        .mates
+        .get(0)
+        .get_active_mates(1)
+        .pop()
+        .expect("active mate");
+    let tl = u32::from(mate.data().unit.tl_id);
+    let sus = &server.systems.services.sus;
+    let sample = |ms| sus.analyze_mount_sample(&server, &mate, 5.0, ms);
+    let move_to = |x| mate.data().unit.transform.set_xyz(x, 100.0, 100.0);
+    assert!(sample(0).is_none());
+    mates::mount_mate(&server, &pa, tl, attach_point::DRIVER, 1);
+    move_to(5_000.0);
+    assert!(sample(1_000).is_none(), "ride drops the baseline");
+    pa.data().set_disabled_set_position(true);
+    pa.data().set_disabled_set_position(false);
+    move_to(15_000.0);
+    assert!(
+        sample(2_000).is_none(),
+        "completed rider teleport reseeds the mount"
+    );
+    pa.data().set_disabled_set_position(true);
+    move_to(20_000.0);
+    assert!(
+        sample(3_000).is_none(),
+        "disabled position suppresses checks"
+    );
+    pa.data().set_disabled_set_position(false);
+    move_to(20_050.0);
+    assert!(sample(4_000).is_none(), "ordinary movement at destination");
+    move_to(21_050.0);
+    assert_eq!(
+        sample(9_000)
+            .expect("excessive movement still reported")
+            .speed,
+        200.0
+    );
+    mates::unmount_mate(&server, &pa, tl, attach_point::DRIVER, 4);
+    move_to(30_000.0);
+    assert!(sample(10_000).is_none(), "unride drops the baseline");
+    pa.data().set_disabled_set_position(true);
+    pa.data().set_disabled_set_position(false);
+    move_to(35_000.0);
+    assert!(
+        sample(11_000).is_none(),
+        "owner fallback reseeds the baseline"
+    );
+    mates::mount_mate(&server, &pa, tl, attach_point::DRIVER, 1);
+    move_to(40_000.0);
+    assert!(sample(12_000).is_none(), "remount drops the baseline");
+    move_to(41_000.0);
+    assert!(
+        sample(17_000).is_some(),
+        "remount does not exempt later speeding"
+    );
+}
+
 /// A client keeps moving a mount the server just despawned for a moment: the move is dropped
 /// without a warning and without touching anything.
 #[tokio::test]

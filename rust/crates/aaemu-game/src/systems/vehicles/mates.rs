@@ -358,6 +358,12 @@ pub fn mount_mate(server: &GameServer, character: &PlayerRef, tl_id: u32, point:
                     c.is_riding = true;
                     c.attached_point = point;
                 }
+                let mate_id = mate.data().id;
+                server
+                    .systems
+                    .services
+                    .sus
+                    .reset_analyze_mount_delta_movement(mate_id);
                 character.core().set_visible(true);
             }
         }
@@ -431,24 +437,31 @@ fn unmount_mate_by(
         return;
     };
     stop_update_xp(&mate);
-    let target = {
+    let target_id = {
         let mut d = mate.data();
         match d.passenger_mut(point) {
             Some(seat) if seat.obj_id != 0 => {
                 let id = seat.obj_id;
                 seat.obj_id = 0;
                 seat.reason = reason;
-                server.world.character_by_obj_id(id)
+                Some(id)
             }
             _ => None,
         }
     };
+    let target = target_id.and_then(|id| server.world.character_by_obj_id(id));
     let Some(target) = target else {
         tracing::debug!(
             "UnMountMate. No valid seat entry, mountTlId: {tl_id}, characterObjId: 0, attachPoint: {point}, reason: {reason}"
         );
         return;
     };
+    let mate_id = mate.data().id;
+    server
+        .systems
+        .services
+        .sus
+        .reset_analyze_mount_delta_movement(mate_id);
     let mate_obj = WorldObject::from(&mate);
     let t = WorldObject::from(&target);
     let mate_world = world_of(server, &mate_obj);
