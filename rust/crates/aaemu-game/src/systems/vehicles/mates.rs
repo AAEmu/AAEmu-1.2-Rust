@@ -771,6 +771,33 @@ pub(crate) fn update_owned_item<R>(
     server.items.update_item(item_id, f)
 }
 
+/// Copies the mate row's xp / level into a `SummonMate` item (`DetailLevel` is what the client
+/// and `QuestActObjMateLevel` see) and returns the refreshed item.
+fn sync_summon_item(
+    server: &GameServer,
+    owner: &PlayerRef,
+    mut item: crate::models::item::Item,
+    db: &MateDb,
+) -> crate::models::item::Item {
+    if item.class != ItemClass::SummonMate {
+        return item;
+    }
+    let level = db.level.min(u16::from(u8::MAX)) as u8;
+    if item.details.mate_exp == db.xp && item.details.mate_level == level {
+        return item;
+    }
+    item.details.mate_exp = db.xp;
+    item.details.mate_level = level;
+    item.dirty = true;
+    let exp = item.details.mate_exp;
+    update_owned_item(server, Some(owner), item.id, |i| {
+        i.details.mate_exp = exp;
+        i.details.mate_level = level;
+        i.dirty = true;
+    });
+    item
+}
+
 /// `owner.Mates.SpawnMount(skillItem)`.
 pub fn spawn_mount(server: &GameServer, owner: &PlayerRef, skill_item_id: u64) {
     let owner_id = owner.data().id;
@@ -837,6 +864,10 @@ pub fn spawn_mount(server: &GameServer, owner: &PlayerRef, skill_item_id: u64) {
         );
         return;
     };
+    // A new mate gets its level from the npc template (`CreateNewMate`), so the summon item's
+    // `DetailLevel` stayed at 0; the client and `QuestActObjMateLevel` read the item. Keep it in
+    // sync with the mate row that is actually used for the spawn.
+    let item = sync_summon_item(server, owner, item, &db);
     let (owner_faction, owner_world) = {
         let c = owner.data();
         (c.unit.faction_id, c.unit.transform)
@@ -944,6 +975,7 @@ pub fn spawn_mount(server: &GameServer, owner: &PlayerRef, skill_item_id: u64) {
     }
     let update = Some(super::packets::item_update(&item));
     add_active_mate_and_spawn(server, owner, &mate, update);
+    crate::systems::quests::events::on_mate_spawned(server, owner);
     let hp = mate.data().unit.hp;
     crate::systems::skills::combat::post_update_current_hp(
         server,

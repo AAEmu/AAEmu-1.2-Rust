@@ -240,6 +240,57 @@ fn capture_logs() -> (tracing::subscriber::DefaultGuard, LogBuffer) {
 }
 
 #[tokio::test]
+async fn spawning_a_mate_syncs_the_summon_items_level_from_the_mate_row() {
+    let server = server_with(data());
+    let mut a = TestClient::new(&server, 1, 1);
+    let (pa, item_id) = player_with_item(&server, &a, 1, PA, (100.0, 100.0), MATE_ITEM);
+    a.drain();
+    // A mate row (the spawn source of truth) above the item's fresh `DetailLevel` of 0.
+    let now = chrono::Utc::now().naive_utc();
+    server.systems.vehicles.mates.character(1, |cm| {
+        cm.mates.push(mates::MateDb {
+            id: 77,
+            item_id,
+            name: "Horse".into(),
+            xp: 1234,
+            level: 50,
+            mileage: 0,
+            hp: 100,
+            mp: 100,
+            owner: 1,
+            updated_at: now,
+            created_at: now,
+        });
+    });
+
+    mates::spawn_mount(&server, &pa, item_id);
+
+    let bag = pa
+        .data()
+        .inventory
+        .get(slot_type::INVENTORY)
+        .cloned()
+        .unwrap();
+    let item = bag
+        .lock()
+        .unwrap()
+        .get_item_by_id(item_id)
+        .cloned()
+        .expect("summon item");
+    assert_eq!(item.details.mate_level, 50);
+    assert_eq!(item.details.mate_exp, 1234);
+    let mate = server
+        .systems
+        .vehicles
+        .mates
+        .get(0)
+        .get_active_mates(1)
+        .pop()
+        .expect("active mate");
+    assert_eq!(mate.data().unit.level, 50);
+}
+
+#[tokio::test]
 async fn mount_and_dismount_flow() {
     let server = server_with(data());
     let mut a = TestClient::new(&server, 1, 1);

@@ -21,7 +21,7 @@ use crate::data::items::{ItemData, ItemTemplate};
 use crate::data::GameData;
 use crate::models::char_data::{ActiveQuest, CompletedQuest};
 use crate::models::character::Character;
-use crate::models::item::Item;
+use crate::models::item::{Item, ItemClass};
 use crate::net::packet::{encode, ServerPacket};
 use crate::opcodes::sc;
 use crate::server::GameServer;
@@ -163,6 +163,33 @@ fn give_item(c: &mut Character, template_id: u32, count: i32) {
     item.slot = g.get_unused_slot(-1);
     g.items.push(item);
     g.update_free_slot_count();
+}
+
+/// A `SummonMate` item at `level` (the template's class has to be forced here: the hand-built
+/// item data has no `item_summon_mates` rows).
+fn give_summon_mate(c: &mut Character, template_id: u32, level: u8) {
+    let t = ItemTemplate::plain(template_id, 1000);
+    let id = NEXT_ITEM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut item = Item::create(id, &t, 1, 0, 1, &ItemData::default(), 0);
+    item.class = ItemClass::SummonMate;
+    item.details.mate_level = level;
+    let bag = c.inventory.bag().clone();
+    let mut g = bag.lock().unwrap();
+    item.slot = g.get_unused_slot(-1);
+    g.items.push(item);
+    g.update_free_slot_count();
+}
+
+fn set_summon_mate_level(c: &mut Character, template_id: u32, level: u8) {
+    let bag = c.inventory.bag().clone();
+    let mut g = bag.lock().unwrap();
+    for item in g
+        .items
+        .iter_mut()
+        .filter(|i| i.template_id == template_id && i.class == ItemClass::SummonMate)
+    {
+        item.details.mate_level = level;
+    }
 }
 
 fn take_items(c: &mut Character, template_id: u32, count: i32) -> i32 {
@@ -1168,6 +1195,41 @@ async fn objective_acts_progress_on_their_events() {
         assert_eq!(ctx.st.currently_playing_cinema_id, 0);
         drain(ctx);
         assert_eq!(step_of(ctx, cinema), kind::READY);
+    });
+}
+
+#[tokio::test]
+async fn mate_level_objective_reads_the_summon_item_level_on_mate_events() {
+    let (server, _rec) = server_with(|d| {
+        single_act_quest(
+            d,
+            20,
+            0,
+            ActKind::ObjMateLevel {
+                item_id: 14878,
+                level: 50,
+                cleanup: false,
+                use_alias: false,
+                alias_id: 0,
+            },
+        );
+    });
+    let mut c = character();
+    give_summon_mate(&mut c, 14878, 49);
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        let h = start(ctx, 20);
+        ctx.dispatch(&QuestEvent::MateLevelUp).unwrap();
+        drain(ctx);
+        assert_eq!(ctx.st.quest(h).unwrap().objectives[0], 0);
+        assert_eq!(step_of(ctx, h), kind::PROGRESS);
+
+        // The item level is what the act reads (the mate row's level is copied into it on
+        // summon), so reaching 50 completes the objective on the mate event.
+        set_summon_mate_level(ctx.c, 14878, 50);
+        ctx.dispatch(&QuestEvent::MateLevelUp).unwrap();
+        drain(ctx);
+        assert_eq!(ctx.st.quest(h).unwrap().objectives[0], 1);
+        assert_eq!(step_of(ctx, h), kind::READY);
     });
 }
 

@@ -938,6 +938,15 @@ pub fn on_mate_level_up(server: &GameServer, player: &PlayerRef) {
     });
 }
 
+/// Re-checks the mate objectives after a mate is spawned: `QuestActObjMateLevel` reads the
+/// summon item's level (refreshed by `Mates.SpawnMount`), and the C# only re-checked it on a
+/// level-up, so summoning a mate at the required level never completed the objective.
+pub fn on_mate_spawned(server: &GameServer, player: &PlayerRef) {
+    run_or_queue(server, player, |ctx| {
+        dispatch_logged(ctx, &QuestEvent::MateLevelUp);
+    });
+}
+
 /// `killerUnit.Events.OnKill(sender, args)` for a player killer (the quest subscribers:
 /// `QuestActObjAggro`). The C# raises it twice per kill: `Unit.ReduceCurrentHp` with
 /// `Target = attacker` (sic) and `Unit.DoDie` with `Killer` / `Victim`; pass the same.
