@@ -96,13 +96,10 @@ fn simple_packets_are_byte_exact() {
         }),
         e.into_bytes()
     );
-    assert_eq!(
-        body(&SCCancelInstantGamePacket::clear_queue()),
-        vec![0, 0, 1, 0]
-    );
+    assert_eq!(body(&SCCancelInstantGamePacket::clear_queue()), vec![0, 0]);
     assert_eq!(
         body(&SCCancelInstantGamePacket::with_error(336)),
-        vec![80, 1, 0, 0]
+        vec![80, 1]
     );
     assert_eq!(
         SCCancelInstantGamePacket::clear_queue().opcode(),

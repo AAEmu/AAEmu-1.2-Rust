@@ -462,12 +462,10 @@ impl SCCancelInstantGamePacket {
 }
 impl Marshal for SCCancelInstantGamePacket {
     fn write(&self, s: &mut PacketStream) {
-        // The 1.2 native struct holds one dword at +0xc and its handler ignores the value
-        // (FUN_3936d260 reads globals only), so the body is padded to the full dword: a
-        // u16+u8 reader sees error+branch, a dword reader sees the same low bytes.
-        s.write_u16(self.error_message_id)
-            .write_u8(self.from_homeland)
-            .write_u8(0);
+        // 1.2 native serializer 397c3bf0 (x2game_unpacked.dll) transfers only the signed i16
+        // "ErrorMessage" (stream slot +0x50); its handler (3936d260) ignores the value. The
+        // branch byte of the later-client layout is not on the 1.2 wire (PORTING.md).
+        s.write_u16(self.error_message_id);
     }
 }
 
