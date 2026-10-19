@@ -29,6 +29,7 @@ use crate::net::connection::{ConnCommand, GameConnection, GameState};
 use crate::packets::proxy::ChangeStatePacket;
 use crate::packets::world::*;
 use crate::server::GameServer;
+use crate::systems::skills::packets::SCCooldownsPacket;
 use crate::world::{broadcast, unit_state, Player, PlayerRef, WorldInstance, WorldObject};
 
 /// `LeaveWorldTargetType`.
@@ -516,6 +517,12 @@ pub fn select_loaded(
             state: conflict.current_state,
             end_time: conflict.next_state_time,
         });
+    }
+    // Running skill cooldowns (the client appends them to its cooldown manager; an empty list
+    // would change nothing, so it is not sent).
+    let cooldowns = SCCooldownsPacket::from_cooldowns(&snapshot.unit.cooldowns, now_ms());
+    if !cooldowns.is_empty() {
+        conn.send(&cooldowns);
     }
     // FactionManager.SendFactions / SendRelations
     if data.factions.factions.is_empty() {
