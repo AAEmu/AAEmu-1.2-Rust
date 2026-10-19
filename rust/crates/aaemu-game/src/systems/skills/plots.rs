@@ -128,7 +128,9 @@ impl PlotTargetInfo {
     }
 }
 
-/// `Plot.RunAsync`: starts the plot tree of `plot_id` on its own task.
+/// `Plot.RunAsync`: starts the plot tree of `plot_id` on its own task. A plot that cannot run
+/// (runtime refusal, no scheduler) is ended through [`do_plot_end`], which releases its timeline
+/// id instead of leaking it (the C# only had the tree path).
 pub fn run_plot(server: &GameServer, plot_id: u32, ctx: CastCtx, skill: SkillRef) {
     let state = PlotState::new(skill.clone(), ctx);
     let caster = state.ctx.caster.clone();
@@ -136,13 +138,17 @@ pub fn run_plot(server: &GameServer, plot_id: u32, ctx: CastCtx, skill: SkillRef
     skill.state().active_plot = Some(state.clone());
     if !crate::systems::housing::dominion::runtime::begin_plot(server, &state) {
         state.request_cancellation();
+        do_plot_end(server, &state);
         return;
     }
     let Some(srv) = server.systems.skills.server() else {
         tracing::debug!("skills: no bound server, plot {plot_id} not run");
+        do_plot_end(server, &state);
         return;
     };
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        tracing::debug!("skills: no Tokio runtime, plot {plot_id} not run");
+        do_plot_end(server, &state);
         return;
     };
     handle.spawn(async move {
