@@ -1198,9 +1198,7 @@ pub async fn leave_world_task(
             // frames are flushed first). Deviation from the C#, which kept the connection and
             // the account registered until the client closed the socket or the dead-connection
             // sweep (30-60 s) did, so a prompt relog was refused ("enter world denied, reason 1").
-            server
-                .accounts
-                .remove_if_owned(conn.account_id(), conn.id);
+            server.accounts.remove_if_owned(conn.account_id(), conn.id);
             conn.shutdown();
         }
     }

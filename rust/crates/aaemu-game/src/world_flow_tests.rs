@@ -645,7 +645,12 @@ async fn quit_game_frees_the_account_for_an_immediate_relog() {
     let server = std::sync::Arc::new(test_server());
     server.set_self();
     let mut a = TestClient::new(&server, 1, 7);
-    let p = spawn_player(&server, &a, test_character(1, "Quitter", 1000.0, 1000.0), 0x100);
+    let p = spawn_player(
+        &server,
+        &a,
+        test_character(1, "Quitter", 1000.0, 1000.0),
+        0x100,
+    );
     a.conn.active_char = Some(p.clone());
     assert!(server.accounts.try_add(7, a.conn.id));
     assert!(server.accounts.contains(7));
