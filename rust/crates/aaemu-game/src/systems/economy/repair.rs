@@ -441,8 +441,33 @@ impl CSRepairAllEquipmentsPacket {
 }
 sync_client_packet!(CSRepairAllEquipmentsPacket);
 
+/// `CSChangeAutoUseAAPointPacket` (0x133): the client's "use AA points automatically" toggle
+/// (one bool, per Bevy RE notes). It sets the persisted `auto_use_aapoint` character flag, which
+/// `SCCharacterState` reports; the flag is not consulted by repairs or expansions yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CSChangeAutoUseAAPointPacket {
+    pub auto_use_aa_point: bool,
+}
+
+impl CSChangeAutoUseAAPointPacket {
+    fn read_body(s: &mut PacketStream) -> Result<Self> {
+        Ok(Self {
+            auto_use_aa_point: s.read_bool()?,
+        })
+    }
+
+    fn run(self, _server: &GameServer, conn: &mut GameConnection) {
+        let Some(player) = active(conn) else { return };
+        tracing::debug!("ChangeAutoUseAAPoint: {}", self.auto_use_aa_point);
+        // TODO: answer with an item task `ChangeAutoUseAaPoint` if the client expects one.
+        player.data().auto_use_aa_point = self.auto_use_aa_point;
+    }
+}
+sync_client_packet!(CSChangeAutoUseAAPointPacket);
+
 /// Registers the repair packets.
 pub fn register(reg: &mut PacketRegistry) {
     reg.register::<CSRepairSingleEquipmentPacket>(LEVEL_PLAIN, cs::CSRepairSingleEquipmentPacket);
     reg.register::<CSRepairAllEquipmentsPacket>(LEVEL_PLAIN, cs::CSRepairAllEquipmentsPacket);
+    reg.register::<CSChangeAutoUseAAPointPacket>(LEVEL_PLAIN, cs::CSChangeAutoUseAAPointPacket);
 }

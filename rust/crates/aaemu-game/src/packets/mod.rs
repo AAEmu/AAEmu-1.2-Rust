@@ -71,7 +71,7 @@ mod tests {
             .iter()
             .filter(|(opcode, _)| *opcode != 0xfff)
             .collect();
-        assert_eq!(supported.len(), 245);
+        assert_eq!(supported.len(), 249);
         for (opcode, name) in supported {
             assert!(
                 registry
@@ -135,10 +135,12 @@ mod tests {
             // registering it is harmless.
             // `CSTakeScheduleItemPacket` is a 1.2 client packet the C# never registered
             // (`systems::npcs::schedule_item_packets`, opcode read off the client).
-            // `CSRankSnapshotPacket` (0x130) is not named by the 1.2 opcode tables and the C#
-            // never handled it; the real client sends it.
-            let rust_only =
-                opcode == crate::opcodes::cs::CSTakeScheduleItemPacket || opcode == 0x130;
+            // `CSRankSnapshotPacket` (0x130), `CSRequestSetBountyMoneyPacket` (0x11f),
+            // `CSSendBountyUpdatePacket` (0x120) and `CSChangeAutoUseAAPointPacket` (0x133) are not
+            // named by the C# 1.2 opcode tables and the C#
+            // never handled them; the real client sends them (client CS table, PORTING.md).
+            let rust_only = opcode == crate::opcodes::cs::CSTakeScheduleItemPacket
+                || matches!(opcode, 0x11f | 0x120 | 0x130 | 0x133);
             if !expected.contains_key(&(level, opcode)) && opcode != 0xfff && !rust_only {
                 missing.push(format!(
                     "0x{opcode:03x}({level}) {} not registered in C#",

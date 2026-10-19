@@ -143,7 +143,8 @@ pub struct BountyDescription {
 
 impl BountyDescription {
     /// One entry of `SCBountyListPacket.Write` (`ConvertLongX` for both x and y; guilty is
-    /// written before notGuilty although the client reads notGuilty first — as in C#).
+    /// written after notGuilty: the 1.2 client row reader 397bebf0 reads notGuilty first; the C# order
+    /// was swapped).
     pub fn write(&self, s: &mut PacketStream) {
         s.write_u32(self.player_id)
             .write_str(&self.player_name)
@@ -160,8 +161,8 @@ impl BountyDescription {
             .write_i32(self.arrest_count)
             .write_i32(self.accept_guilty_count)
             .write_i32(self.accept_trial_count)
-            .write_i32(self.guilty_count)
             .write_i32(self.not_guilty_count)
+            .write_i32(self.guilty_count)
             .write_i32(self.seconds);
     }
 }

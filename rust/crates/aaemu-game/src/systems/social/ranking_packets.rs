@@ -255,7 +255,8 @@ sc_packet!(
 
 /// `CSRankSnapshotPacket`: the client asks for the board it has open.
 ///
-/// The 1.2 opcode tables do not name this opcode (`opcodes::cs` jumps 0x12f → 0x131), so the
+/// The C# offset tables did not name this opcode (it is now `opcodes::cs::CSRankSnapshotPacket`,
+/// taken from the 1.2 client's own table), so the
 /// number is declared here with its evidence:
 ///
 /// * the client's request writer is `0x397c79f0` (class vtable `0x399a12b8`), which serializes a
@@ -264,7 +265,7 @@ sc_packet!(
 /// * the send site is the `X2Rank.RequestRankSnapshots` binding `0x39075070`, which fills the u32
 ///   with the selected board key and sends it under opcode `0x130`;
 /// * live capture of the real client confirms the body is exactly `01 00 00 00` for board 1.
-pub const CS_RANK_SNAPSHOT_PACKET_OPCODE: u16 = 0x130;
+pub const CS_RANK_SNAPSHOT_PACKET_OPCODE: u16 = crate::opcodes::cs::CSRankSnapshotPacket;
 
 /// The body of [`CS_RANK_SNAPSHOT_PACKET_OPCODE`]: one board id, nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
