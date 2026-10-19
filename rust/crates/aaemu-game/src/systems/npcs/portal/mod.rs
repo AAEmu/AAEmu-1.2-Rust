@@ -488,28 +488,57 @@ pub fn change_private_portal_name(
     true
 }
 
+/// `CSDeletePortal.portalType` of a district (return point) entry; anything else is private.
+pub const PORTAL_TYPE_DISTRICT: u8 = 1;
+
 /// `PortalManager.DeletePortal(owner, type, id)` (`CSDeletePortalPacket`): removes the book
-/// entry (`RemoveFromBookPortal`). As in C#, no packet is sent and the district portal list is
-/// not rebuilt (it still holds the removed district until the next load).
+/// entry (`RemoveFromBookPortal`) and confirms with `SCPortalDeletedPacket(type, id)` (the
+/// 1.2 client's `OnPortalDeleted` -> `DELETE_PORTAL`).
+///
+/// Beyond C# (which sent nothing and kept the stale district list): the district list is
+/// rebuilt, every district entry that went away with the visited sub zone is reported (a
+/// sub zone can hold several recall points), and the bound recall point cannot be deleted
+/// (the UI's `cantRemovePlace`).
 pub fn delete_portal(server: &GameServer, owner: &PlayerRef, portal_type: u8, id: u32) {
-    let is_private = portal_type != 1;
-    let (character_id, removed) = {
+    let is_private = portal_type != PORTAL_TYPE_DISTRICT;
+    let (character_id, removed, deleted_ids) = {
         let mut c = owner.data();
         let Some(portal) = portal_info(&c.portals, id).cloned() else {
             return;
         };
-        let removed = if is_private {
+        if is_private {
             let before = c.portals.private_portals.len();
             c.portals.private_portals.retain(|p| p.id != portal.id);
-            (c.portals.private_portals.len() != before).then_some((true, portal.id))
+            let removed = (c.portals.private_portals.len() != before).then_some((true, portal.id));
+            let deleted = if removed.is_some() {
+                vec![portal.id]
+            } else {
+                Vec::new()
+            };
+            (c.id, removed, deleted)
         } else {
+            let bound = district_return_point(server, c.return_district_id, c.unit.faction_id);
+            if bound != 0 && bound == portal.id {
+                tracing::debug!("DeletePortal: {} is the bound recall point", portal.id);
+                return;
+            }
             let before = c.portals.visited_districts.len();
             c.portals
                 .visited_districts
                 .retain(|v| v.sub_zone != portal.sub_zone_id);
-            (c.portals.visited_districts.len() != before).then_some((false, portal.sub_zone_id))
-        };
-        (c.id, removed)
+            if c.portals.visited_districts.len() == before {
+                return;
+            }
+            let old: Vec<u32> = c.portals.district_portals.iter().map(|p| p.id).collect();
+            c.portals
+                .populate_district_portals(&server.game_data.portals);
+            let kept: Vec<u32> = c.portals.district_portals.iter().map(|p| p.id).collect();
+            let mut deleted: Vec<u32> = old.into_iter().filter(|i| !kept.contains(i)).collect();
+            if !deleted.contains(&portal.id) {
+                deleted.insert(0, portal.id);
+            }
+            (c.id, Some((false, portal.sub_zone_id)), deleted)
+        }
     };
     if let Some((private, key)) = removed {
         server.systems.npcs.portals.record(character_id, |p| {
@@ -518,6 +547,12 @@ pub fn delete_portal(server: &GameServer, owner: &PlayerRef, portal_type: u8, id
             } else {
                 p.visited_districts.push(key);
             }
+        });
+    }
+    for portal_id in deleted_ids {
+        owner.send(packets::SCPortalDeletedPacket {
+            portal_type,
+            portal_id: portal_id as i32,
         });
     }
 }
@@ -830,12 +865,26 @@ pub fn use_portal_with_preference(
         return;
     }
     let current_instance = player.data().unit.transform.instance_id;
-    if teleport.instance_id != current_instance {
-        // The loaded-slave check (SlaveEquipmentLoadedItem) and
-        // `RemoveAndDespawnAllActiveOwnedMates/Slaves` (vehicles subsystem).
-        if !crate::systems::vehicles::on_instance_change(server, player) {
-            return;
-        }
+    let crosses_instance = teleport.instance_id != current_instance;
+    // The loaded-slave check (SlaveEquipmentLoadedItem) and
+    // `RemoveAndDespawnAllActiveOwnedMates/Slaves` (vehicles subsystem).
+    if crosses_instance && !crate::systems::vehicles::on_instance_change(server, player) {
+        return;
+    }
+    // `SCUnitPortalUsedPacket(portal.ObjId)`: the gate's "someone went through" effect. The
+    // 1.2 client's `OnUnitPortalUsed` looks the id up in its unit table and plays the effect at
+    // that unit, so it is the portal NPC (as the 10.0.2.13 server sends it), not the
+    // traveller. Sent to everyone around the gate (the traveller included) rather than only
+    // to the traveller, so bystanders see it too; only once the use is accepted.
+    crate::world::broadcast(
+        &world,
+        &npc,
+        &packets::SCUnitPortalUsedPacket {
+            unit_id: npc.obj_id,
+        },
+        false,
+    );
+    if crosses_instance {
         player.data().set_disabled_set_position(true);
         player.send(SCLoadInstancePacket {
             instance_id: teleport.world_id,
@@ -890,6 +939,224 @@ pub fn resend_visible_objects_to_character(server: &GameServer, player: &PlayerR
             .collect();
         player.send(SCDoodadsCreatedPacket { bodies });
     }
+}
+
+// ------------------------------------------------------------------------------------------
+// OpenPortalEffect range, navi doodads, NPC teleporters
+// ------------------------------------------------------------------------------------------
+
+/// Slack on `open_portal_effects.distance` (3 m) for the gate point the client sends: the
+/// item tooltip promises "5 meters away", and a point on a slope is further away in 3D.
+pub const OPEN_PORTAL_RANGE_SLACK: f32 = 2.0;
+
+/// `OpenPortalEffect`'s position check: the gate point must be within `distance` (+ slack) of
+/// the caster, in 3D. (C# only refused points beyond `pos + distance` on +x / +y, so any point
+/// behind or beside the caster passed, however far away.)
+pub fn open_portal_point_in_range(
+    caster: (f32, f32, f32),
+    point: (f32, f32, f32),
+    distance: f32,
+) -> bool {
+    distance_3d(caster, point) <= distance + OPEN_PORTAL_RANGE_SLACK
+}
+
+fn distance_3d(a: (f32, f32, f32), b: (f32, f32, f32)) -> f32 {
+    let (dx, dy, dz) = (a.0 - b.0, a.1 - b.1, a.2 - b.2);
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+/// How close a character must be to use a navi doodad in place (`CSNaviOpenPortal`).
+pub const NAVI_USE_RANGE: f32 = 5.0;
+/// How close a character must be to an NPC teleporter (`CSUseTeleport`).
+pub const TELEPORTER_RANGE: f32 = 10.0;
+
+/// The doodad `obj_id` in the player's world and the func of its **current** phase of
+/// `func_type` that is not driven by a skill (`func_skill_id = 0`: funcs with a skill are used
+/// with `CSStartSkill` at the doodad, whose effects do the work).
+fn navi_func(
+    server: &GameServer,
+    player: &PlayerRef,
+    obj_id: u32,
+    func_type: &str,
+) -> Option<(
+    std::sync::Arc<crate::world::WorldInstance>,
+    crate::world::DoodadRef,
+    crate::systems::npcs::doodad::templates::DoodadFunc,
+)> {
+    let world = server
+        .world
+        .world(player.data().unit.transform.instance_id)?;
+    let doodad = world.doodad(obj_id)?;
+    let phase = doodad.data().func_group_id;
+    let func = server
+        .game_data
+        .systems
+        .npcs
+        .doodad
+        .funcs_for_group(phase)
+        .iter()
+        .find(|f| f.func_type == func_type && f.skill_id == 0)
+        .cloned()?;
+    Some((world, doodad, func))
+}
+
+/// Runs `func` of the doodad's current phase for `player` and enters the next phase
+/// (`DoFunc` + the phase change of `Doodad.Use`).
+fn run_navi_func(
+    server: &GameServer,
+    doodad: &crate::world::DoodadRef,
+    player: &PlayerRef,
+    func: &crate::systems::npcs::doodad::templates::DoodadFunc,
+) {
+    use crate::systems::npcs::doodad::{phase, runtime::DoodadCtx};
+    let Some(ctx) = DoodadCtx::of(server, doodad) else {
+        return;
+    };
+    let caster = WorldObject::from(player);
+    let current = doodad.data().func_group_id;
+    phase::do_func(&ctx, Some(&caster), 0, Some(func));
+    let next = doodad.data().func_group_id;
+    if next != current {
+        phase::do_change_phase(&ctx, Some(&caster), next as i32);
+    }
+}
+
+/// `CSNaviTeleportPacket(objId)`: teleport to a navi doodad (`DoodadFuncNaviTeleport`).
+///
+/// The `doodad_func_navi_teleports` rows carry only an id, so the destination is the navi
+/// doodad itself: a navi sign marks its own position on the map (`DoodadFuncNaviMarkPosToMap`
+/// of 1034 is (0, 0, 0) = "here") and the teleport takes the player there. The answer is
+/// `SCNaviTeleportPacket(x, y, z)` (the 1.2 client's `OnNaviTeleport` runs the same local
+/// teleport as `SCTeleportUnit`, yaw 0, and answers `CSTeleportEnded`). Same world only; funcs
+/// with a skill (3347 "White Dress Portrait", skill 15193 = `Return` worldgate 304) are used
+/// with `CSStartSkill`, not with this packet.
+pub fn navi_teleport(server: &GameServer, player: &PlayerRef, obj_id: u32) {
+    let Some((world, doodad, func)) = navi_func(server, player, obj_id, "DoodadFuncNaviTeleport")
+    else {
+        tracing::debug!("NaviTeleport: {obj_id} is no navi teleport doodad");
+        player.send(SCErrorMsgPacket::new(
+            crate::systems::economy::error_message::NO_INTERACTION_AVAILABLE,
+            0,
+            true,
+        ));
+        return;
+    };
+    let pos = world.world_pos_rot(&WorldObject::from(&doodad));
+    run_navi_func(server, &doodad, player, &func);
+    player.data().set_disabled_set_position(true);
+    player.send(packets::SCNaviTeleportPacket {
+        x: pos.x,
+        y: pos.y,
+        z: pos.z,
+    });
+}
+
+/// `CSNaviOpenPortalPacket(objId)`: "open" a navi gate (`DoodadFuncNaviOpenPortal`, doodad 1219
+/// "Guide Gate"). The func rows carry no destination either; in the data the func only leads to
+/// the gate's opening phase (1219: phase 2046 = timer + open animation), so that is what this
+/// does: the character must stand at the gate, the func runs and the doodad enters its next
+/// phase (`SCDoodadPhaseChanged` to everyone around).
+pub fn navi_open_portal(server: &GameServer, player: &PlayerRef, obj_id: u32) {
+    let Some((world, doodad, func)) = navi_func(server, player, obj_id, "DoodadFuncNaviOpenPortal")
+    else {
+        tracing::debug!("NaviOpenPortal: {obj_id} is no navi portal doodad");
+        player.send(SCErrorMsgPacket::new(
+            crate::systems::economy::error_message::NO_INTERACTION_AVAILABLE,
+            0,
+            true,
+        ));
+        return;
+    };
+    let at = world.world_pos_rot(&WorldObject::from(&doodad));
+    if distance_3d(player_world_position(server, player), (at.x, at.y, at.z)) > NAVI_USE_RANGE {
+        player.send(SCErrorMsgPacket::new(
+            crate::systems::economy::error_message::TOO_FAR_AWAY,
+            0,
+            true,
+        ));
+        return;
+    }
+    run_navi_func(server, &doodad, player, &func);
+}
+
+/// `CSUseTeleportPacket(returnPointId, moneyAmount, npcUnitId)`: an NPC teleporter
+/// (`npcs.teleporter`) sends the character to a return point for a fare. No 1.2 NPC has
+/// `teleporter = 't'` and there is no fare table, so the fare is the amount the client shows
+/// and sends (refused when negative or not affordable). The destination is the recall point
+/// `returnPointId` (`recalls.json`); main world only.
+pub fn use_teleport(
+    server: &GameServer,
+    player: &PlayerRef,
+    return_point_id: u32,
+    money_amount: i32,
+    npc_obj_id: u32,
+) {
+    use crate::systems::economy::error_message as err;
+    let instance_id = player.data().unit.transform.instance_id;
+    let Some(world) = server.world.world(instance_id) else {
+        return;
+    };
+    let Some(npc) = world.npc(npc_obj_id) else {
+        return;
+    };
+    let template_id = npc.data().unit.template_id;
+    let is_teleporter = server
+        .game_data
+        .systems
+        .npcs
+        .npc
+        .template(template_id)
+        .is_some_and(|t| t.teleporter);
+    if !is_teleporter {
+        tracing::warn!("UseTeleport: npc {npc_obj_id} ({template_id}) is no teleporter");
+        return;
+    }
+    let npc_pos = world.world_pos_rot(&WorldObject::from(&npc));
+    if distance_3d(
+        player_world_position(server, player),
+        (npc_pos.x, npc_pos.y, npc_pos.z),
+    ) > TELEPORTER_RANGE
+    {
+        player.send(SCErrorMsgPacket::new(err::TOO_FAR_AWAY, 0, true));
+        return;
+    }
+    let Some(dest) = recall_by_id(server, return_point_id).cloned() else {
+        tracing::warn!("UseTeleport: return point {return_point_id} not found");
+        player.send(SCErrorMsgPacket::new(
+            err::NO_INTERACTION_AVAILABLE,
+            0,
+            true,
+        ));
+        return;
+    };
+    if instance_id != crate::models::character::DEFAULT_INSTANCE_ID {
+        player.send(SCErrorMsgPacket::new(
+            err::NO_INTERACTION_AVAILABLE,
+            0,
+            true,
+        ));
+        return;
+    }
+    if money_amount < 0 {
+        return;
+    }
+    if money_amount > 0 {
+        let paid = server.systems.npcs.hooks.economy.get().is_some_and(|eco| {
+            eco.change_money(server, player, -i64::from(money_amount), ITEM_TASK_TELEPORT)
+        });
+        if !paid {
+            return; // NotEnoughMoney is sent by ChangeMoney
+        }
+    }
+    player.data().set_disabled_set_position(true);
+    player.send(SCTeleportUnitPacket {
+        reason: crate::systems::skills::packets_special::TELEPORT_REASON_MOVE_TO_LOCATION,
+        error_message: 0,
+        x: dest.x,
+        y: dest.y,
+        z: dest.z,
+        z2: deg_to_rad(dest.z_rot),
+    });
 }
 
 #[cfg(test)]
