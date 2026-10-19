@@ -1,7 +1,6 @@
 //! `Scripts/Commands/SetFaction.cs`.
 
 use super::prelude::*;
-use crate::systems::instances::instant_game;
 
 /// `SetFaction`.
 pub struct SetFaction;
@@ -71,7 +70,8 @@ impl Command for SetFaction {
         }
 
         // C#: the caller's faction is changed, not the selected target's.
-        instant_game::set_character_faction(server, &character, faction as u32);
+        // A GM change is persistent (unlike the duel / battlefield factions).
+        crate::systems::social::faction::set_faction_persistent(server, &character, faction as u32);
         CommandManager::send_normal_text(
             self,
             out,
@@ -180,5 +180,34 @@ mod tests {
         let (_, out) = harness::run(&server, &gm.p, "setfaction 200").await;
         assert_eq!(out, ["[setfaction] Faction set to: 200 (200)"]);
         assert_eq!(gm.p.data().unit.faction_id, 200);
+        // A GM change is persistent: saved as is, not temporary.
+        assert!(!gm.p.data().unit.faction_temporary);
+        assert_eq!(crate::db_character::persisted_faction(&gm.p.data()), 200);
+    }
+
+    /// `/setfaction` during a temporary (duel / battlefield) faction replaces it for good.
+    #[tokio::test]
+    async fn setfaction_is_persistent_even_over_a_temporary_faction() {
+        let mut data = GameData::empty();
+        for (id, name) in [(101, "Nuian"), (115, "Monster"), (160, "Blue")] {
+            data.factions.add(SystemFaction {
+                id,
+                name: name.into(),
+                ..SystemFaction::default()
+            });
+        }
+        let server = harness::server_with(data);
+        let gm = harness::pc(&server, 1, "Gm", 100.0, 100.0);
+        gm.p.data().unit.faction_id = 101;
+        let npc = spawn_npc(&server, 0x500, 10, 105.0, 100.0, 1_000);
+        gm.p.data().unit.current_target = npc.obj_id;
+        crate::systems::social::faction::set_temporary_faction(&server, &gm.p, 160);
+        assert!(gm.p.data().unit.faction_temporary);
+        assert_eq!(crate::db_character::persisted_faction(&gm.p.data()), 101);
+        let (_, out) = harness::run(&server, &gm.p, "setfaction 115").await;
+        assert_eq!(out, ["[setfaction] Faction set to: Monstrosity (115)"]);
+        assert!(!gm.p.data().unit.faction_temporary);
+        assert_eq!(gm.p.data().unit.faction_id, 115);
+        assert_eq!(crate::db_character::persisted_faction(&gm.p.data()), 115);
     }
 }

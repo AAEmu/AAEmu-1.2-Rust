@@ -614,6 +614,46 @@ async fn disconnect_during_a_duel_restores_the_origin_faction() {
     assert!(!f.pb.data().unit.faction_temporary);
 }
 
+/// A participant leaving mid-duel ends the duel for both sides: the opponent gets the
+/// surrender `SCDuelEndedPacket`, is restored to its faction and the duel is unregistered.
+#[tokio::test]
+async fn disconnect_mid_duel_ends_the_duel_for_the_opponent() {
+    for challenger_leaves in [true, false] {
+        let mut f = Fixture::new(true);
+        f.start().await;
+        assert_eq!(f.pb.data().unit.faction_id, FACTION_BLUE_TEAM);
+        if challenger_leaves {
+            crate::world::session::on_disconnect(&f.server, &mut f.a.conn).await;
+            assert_eq!(
+                find(&f.b.drain(), sc::SCDuelEndedPacket),
+                vec![ended(2, 1, 0x101, 0x100, duel_det_type::SURRENDER)]
+            );
+        } else {
+            crate::world::session::on_disconnect(&f.server, &mut f.b.conn).await;
+            assert_eq!(
+                find(&f.a.drain(), sc::SCDuelEndedPacket),
+                vec![ended(1, 2, 0x100, 0x101, duel_det_type::SURRENDER)]
+            );
+        }
+        for p in [&f.pa, &f.pb] {
+            assert_eq!(p.data().unit.faction_id, 101);
+            assert!(!p.data().unit.faction_temporary);
+            assert!(!p.data().unit.is_in_duel);
+        }
+        assert!(f.duels().is_empty());
+    }
+}
+
+/// A pending (unanswered) challenge is dropped when a participant leaves.
+#[tokio::test]
+async fn disconnect_with_a_pending_challenge_drops_it() {
+    let mut f = Fixture::new(true);
+    f.challenge().await;
+    assert!(!f.duels().is_empty());
+    crate::world::session::on_disconnect(&f.server, &mut f.b.conn).await;
+    assert!(f.duels().is_empty());
+}
+
 /// A duel inside a battlefield: the duel end returns to the corps faction, not to the origin
 /// faction, and the battlefield leave then restores the origin.
 #[tokio::test]

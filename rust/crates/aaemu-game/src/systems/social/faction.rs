@@ -177,6 +177,51 @@ pub async fn set_faction(server: &GameServer, p: &PlayerRef, faction_id: u32) {
     }
 }
 
+/// `Character.SetFaction` for a synchronous caller (the GM `/setfaction`): a **persistent**
+/// change (saved to `characters.faction_id`, ends any temporary faction) with the character
+/// side effects of [`set_faction`] - owned houses, guild kick (spawned, it needs the
+/// connection-less expedition path) and party removal.
+pub fn set_faction_persistent(server: &GameServer, p: &PlayerRef, faction_id: u32) {
+    if p.data().unit.faction_id == faction_id && !p.data().unit.faction_temporary {
+        return;
+    }
+    let obj = crate::world::WorldObject::from(p);
+    crate::systems::skills::combat::set_faction_with_temp(server, &obj, faction_id, false);
+    crate::systems::dispatch_buff_events(server, &obj);
+    let (expedition, in_party) = {
+        let c = p.data();
+        (c.unit.expedition_id, c.in_party)
+    };
+    server
+        .systems
+        .social
+        .hooks
+        .get()
+        .update_owned_housing_faction(server, p.character_id, faction_id);
+    if expedition != 0 {
+        let mother = server
+            .expeditions
+            .get(expedition)
+            .map(|e| e.faction.mother_id);
+        if mother.is_some_and(|m| m != faction_id) {
+            if let Some(s) = server.self_arc() {
+                let p = p.clone();
+                tokio::spawn(async move {
+                    crate::systems::social::expedition::kick(&s, &p, p.character_id).await;
+                });
+            }
+        }
+    }
+    if in_party {
+        server.systems.social.teams.member_remove_from_team(
+            server,
+            p,
+            p,
+            crate::systems::social::team::risky_action::KICK,
+        );
+    }
+}
+
 /// A temporary faction change (duel Red / Blue team, battlefield corps) that is **not**
 /// persisted and has none of `Character.SetFaction`'s side effects: no housing faction update,
 /// no expedition / guild kick and no party removal. The broadcast carries `temp = true`; the

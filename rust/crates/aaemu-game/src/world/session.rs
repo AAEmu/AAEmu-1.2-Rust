@@ -1269,6 +1269,12 @@ pub async fn save_and_remove_from_world(server: &GameServer, active: Option<&Pla
     };
     // A duel / battlefield faction is temporary: restore it before the departure save so the
     // character is never persisted with its Red / Blue team or corps faction (RPA-09).
+    server
+        .systems
+        .social
+        .duels
+        .on_participant_leave(server, p)
+        .await;
     crate::systems::social::faction::restore_temporary_faction(server, p);
     server.save.remember_departing(p);
     crate::systems::npcs::schedule_item_session::on_leave(server, p);

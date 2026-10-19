@@ -507,6 +507,37 @@ impl DuelManager {
         self.duel_remove(&duel);
     }
 
+    /// A participant leaves the world (disconnect, logout to the lobby). Not in the C# (the
+    /// opponent stayed in the Red / Blue faction with the duel registered until the end
+    /// timer): a started duel ends for both sides as a surrender of the leaver (the same
+    /// `SCDuelEndedPacket` as running away from the flag), restoring both factions; a pending
+    /// request is simply dropped.
+    pub async fn on_participant_leave(&self, server: &GameServer, leaver: &PlayerRef) {
+        let id = leaver.character_id;
+        let Some(duel) = self.get(id) else {
+            return;
+        };
+        let (a, b) = (duel.challenger.character_id, duel.challenged.character_id);
+        if !duel.state().started {
+            self.duel_clean_up(a);
+            return;
+        }
+        let winner = if id == a { b } else { a };
+        self.duel_stop(server, winner, duel_det_type::SURRENDER, id)
+            .await;
+        // `duel_stop` aborts when a saved faction is missing: never leave the duel registered.
+        if self.get(a).is_some() {
+            let (dist, res) = {
+                let mut st = duel.state();
+                (st.distance_check_task.take(), st.result_check_task.take())
+            };
+            for t in [dist, res].into_iter().flatten() {
+                t.cancel();
+            }
+            self.duel_clean_up(a);
+        }
+    }
+
     /// `DuelStop(id, det, loseId)`: the result packets, flag removal, faction restore.
     pub async fn duel_stop(&self, server: &GameServer, id: u32, det: u8, lose_id: u32) {
         tracing::warn!("DuelStop: Duel ended");
