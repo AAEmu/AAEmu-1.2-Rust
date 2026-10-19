@@ -708,14 +708,14 @@ async fn full_quest_lifecycle_on_data() {
         })
         .unwrap();
         drain(ctx);
-        // Reward: acts (exp, copper -> pool, item -> pool), then base level supplies
+        // Reward: acts (exp, copper -> pool, item -> pool); the Reward step's own exp / copper
+        // acts replace the level based supplies (PORTING.md), so only act rewards are paid.
         assert_eq!(
             rec.take(),
             vec![
                 "exp 300 true",
                 "item 38 9000 1 1",
-                "exp 980 true",
-                "money 202",
+                "money 50",
                 // DropQuest after the reward: QuestCleanup (cleanup) and QuestDropped
                 // (destroy_when_drop) both consume the supply item
                 "consume 39 7000 1"
@@ -735,6 +735,67 @@ async fn full_quest_lifecycle_on_data() {
             id: 1,
             body: vec![0, 0, 0, 0, 0x10, 0, 0, 0]
         }]
+    );
+}
+
+#[tokio::test]
+async fn reward_supply_acts_replace_level_supplies() {
+    let (server, rec) = server_with(|d| {
+        d.supplies.insert(
+            10,
+            QuestSupplies {
+                id: 10,
+                level: 10,
+                exp: 980,
+                copper: 152,
+            },
+        );
+        // Start (auto) -> Reward, no other steps: the quest completes on add.
+        for id in [110u32, 111, 112, 113] {
+            d.add_template(QuestTemplate {
+                level: 10,
+                ..quest(id)
+            });
+            d.add_component(component(id * 10 + 1, id, kind::START));
+            d.add_act(
+                id * 10 + 1,
+                id * 10 + 1,
+                id * 10 + 1,
+                0,
+                ActKind::ConAutoComplete,
+            );
+            d.add_component(component(id * 10 + 2, id, kind::REWARD));
+        }
+        // 110: both acts; 111: neither; 112: exp only; 113: copper only.
+        d.add_act(1102, 1102, 1102, 0, ActKind::SupplyExp { exp: 300 });
+        d.add_act(1102, 1103, 1103, 0, ActKind::SupplyCopper { amount: 50 });
+        d.add_act(1122, 1122, 1122, 0, ActKind::SupplyExp { exp: 300 });
+        d.add_act(1132, 1132, 1132, 0, ActKind::SupplyCopper { amount: 50 });
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        for id in [110u32, 111, 112, 113] {
+            assert!(ctx.add_quest(id, false, 0, 0), "quest {id} accepted");
+            drain(ctx);
+            assert!(!ctx.has_quest(id), "quest {id} completed");
+        }
+    });
+    assert_eq!(
+        rec.take(),
+        vec![
+            // 110: the exp / copper acts replace both level supplies.
+            "exp 300 true",
+            "money 50",
+            // 111: no supply act -> the level based supply (exp and copper).
+            "exp 980 true",
+            "money 152",
+            // 112: exp act replaces only the exp supply, copper still comes from the level.
+            "exp 300 true",
+            "money 152",
+            // 113: copper act replaces only the copper supply, exp still comes from the level.
+            "exp 980 true",
+            "money 50",
+        ]
     );
 }
 
@@ -2256,14 +2317,13 @@ async fn npc_quest_flow_through_packets_and_events() {
     };
     complete.handle(&server, &mut client.conn).await.unwrap();
     server.systems.quests.run_queued_evaluations(&server);
-    // Rewards hooks invoked
+    // Rewards hooks invoked (the Reward step's exp / copper acts replace the level supplies)
     assert_eq!(
         rec.take(),
         vec![
             "exp 300 true",
             "item 38 9000 1 1",
-            "exp 980 true",
-            "money 202",
+            "money 50",
             "consume 39 7000 1"
         ]
     );
@@ -2279,8 +2339,9 @@ async fn npc_quest_flow_through_packets_and_events() {
     assert!(c.quests.active.is_empty());
     assert_eq!(c.quests.removed, vec![100]);
     assert!(super::engine::has_quest_completed(&c.quests.completed, 100));
-    assert_eq!(c.experience, 1280);
-    assert_eq!(c.money, 202);
+    // Only the Reward acts: 300 exp and 50 copper, no level supplies on top.
+    assert_eq!(c.experience, 300);
+    assert_eq!(c.money, 50);
     assert_eq!(server.systems.quests.queued_count(), 0);
 }
 
@@ -2780,6 +2841,61 @@ async fn real_compact_db_quest_tables() {
         });
     }
     eprintln!("quests with a Start step: {started}");
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_compact_db_reward_acts_replace_level_supplies() {
+    let Some(conn) = real_db() else {
+        return;
+    };
+    let d = real_data(&conn);
+    // The two oracle examples: an act XP that differs from the level supply.
+    for (quest_id, act_exp, supply_exp) in [(2785u32, 8400, 3224), (1213, 110, 420)] {
+        let t = d.template(quest_id).expect("quest template");
+        let supply = d.supplies(t.level).expect("level supply");
+        assert_eq!(supply.exp, supply_exp, "quest {quest_id} supply exp");
+        let acts: i32 = t
+            .components_of(&d.components, kind::REWARD)
+            .iter()
+            .flat_map(|c| c.acts.iter())
+            .map(|&a| match d.acts[a].kind {
+                ActKind::SupplyExp { exp } => exp,
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(acts, act_exp, "quest {quest_id} Reward SupplyExp");
+    }
+
+    let mut gd = GameData::empty();
+    gd.systems.quests = d;
+    let server = test_server_with(gd);
+    let rec = Arc::new(Rec::default());
+    server.systems.quests.hooks.install(rec.clone());
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        for (quest_id, act_exp, supply_exp, supply_copper) in
+            [(2785u32, 8400, 3224, 1786), (1213, 110, 420, 33)]
+        {
+            let h = ctx.new_quest(quest_id, 1);
+            ctx.set_step(h, kind::REWARD);
+            rec.take();
+            ctx.run_current_step(h);
+            let calls = rec.take();
+            assert!(
+                calls.contains(&format!("exp {act_exp} true")),
+                "quest {quest_id}: act XP missing in {calls:?}"
+            );
+            assert!(
+                !calls.contains(&format!("exp {supply_exp} true")),
+                "quest {quest_id}: level supply XP must not be added on top: {calls:?}"
+            );
+            assert!(
+                calls.contains(&format!("money {supply_copper}")),
+                "quest {quest_id}: level supply copper missing in {calls:?}"
+            );
+        }
+    });
 }
 
 // ----- AAEmu.IntegrationTests/Models/Game/Quests/QuestTests.cs -----

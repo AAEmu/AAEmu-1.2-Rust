@@ -964,6 +964,27 @@ impl<'a> Ctx<'a> {
             .template(template_id)
             .map_or((0, false), |t| (t.level, t.let_it_done));
         let step = self.quest(h).map_or(0, |q| q.step);
+        // Retail 1.2 replaces the level based supply with the Reward component's own
+        // `QuestActSupplyExp` / `QuestActSupplyCopper` act instead of adding both (the client's
+        // `X2Quest.GetQuestContextRewardExp` scans the Reward component and falls back to
+        // `quest_supplies` only when the act is absent; see PORTING.md).
+        let (reward_exp_act, reward_copper_act) = data
+            .template(template_id)
+            .map(|t| {
+                let mut exp = false;
+                let mut copper = false;
+                for c in t.components_of(&data.components, kind::REWARD) {
+                    for &a in &c.acts {
+                        match &data.acts[a].kind {
+                            ActKind::SupplyExp { .. } => exp = true,
+                            ActKind::SupplyCopper { .. } => copper = true,
+                            _ => {}
+                        }
+                    }
+                }
+                (exp, copper)
+            })
+            .unwrap_or((false, false));
         if add_base && level > 0 && step == kind::REWARD {
             if let Some(lb) = data.supplies(level).copied() {
                 let ratio = if let_it_done {
@@ -979,8 +1000,12 @@ impl<'a> Ctx<'a> {
                 };
                 if let Some(q) = self.quest_mut(h) {
                     q.reward_ratio = f64::from(ratio);
-                    q.reward_exp = q.reward_exp.wrapping_add(lb.exp);
-                    q.reward_coins = q.reward_coins.wrapping_add(lb.copper);
+                    if !reward_exp_act {
+                        q.reward_exp = q.reward_exp.wrapping_add(lb.exp);
+                    }
+                    if !reward_copper_act {
+                        q.reward_coins = q.reward_coins.wrapping_add(lb.copper);
+                    }
                 }
             }
         }
