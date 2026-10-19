@@ -1048,6 +1048,15 @@ pub fn on_kill(
         0,
         killer_corps,
     )
+    // Rule set 24 (battlefield 10) authors only the generic "kill unit" row (event 201 = 5).
+    .or_else(|| {
+        GameScoreRule::resolve(
+            &game.score_rules,
+            game_score_event::KILL_UNIT,
+            0,
+            killer_corps,
+        )
+    })
     .unwrap_or_else(|| {
         tracing::warn!(
             "[InstantGame] rule set {} has no game_score_rules row for event 200; the kill awards no score",

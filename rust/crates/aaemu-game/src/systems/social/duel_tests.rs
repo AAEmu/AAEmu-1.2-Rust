@@ -614,6 +614,32 @@ async fn disconnect_during_a_duel_restores_the_origin_faction() {
     assert!(!f.pb.data().unit.faction_temporary);
 }
 
+/// A duel inside a battlefield: the duel end returns to the corps faction, not to the origin
+/// faction, and the battlefield leave then restores the origin.
+#[tokio::test]
+async fn duel_inside_a_temporary_faction_returns_to_it() {
+    let mut f = Fixture::new(true);
+    {
+        let mut c = f.pa.data();
+        c.unit.faction_id = 160;
+        c.unit.origin_faction_id = 101;
+        c.unit.faction_temporary = true;
+    }
+    f.challenge().await;
+    f.b.drain();
+    f.answer(0).await;
+    assert_eq!(f.pa.data().unit.faction_id, FACTION_RED_TEAM);
+    assert_eq!(f.pa.data().unit.origin_faction_id, 101);
+    f.duels()
+        .duel_stop(&f.server, 1, duel_det_type::DRAW, 2)
+        .await;
+    assert_eq!(f.pa.data().unit.faction_id, 160);
+    assert!(f.pa.data().unit.faction_temporary);
+    crate::systems::social::faction::restore_temporary_faction(&f.server, &f.pa);
+    assert_eq!(f.pa.data().unit.faction_id, 101);
+    assert!(!f.pa.data().unit.faction_temporary);
+}
+
 #[tokio::test]
 async fn real_timers_start_and_end_the_duel() {
     let mut f = Fixture::with_delays(true, Duration::from_millis(20), Duration::from_millis(20));

@@ -217,6 +217,30 @@ pub fn restore_temporary_faction(server: &GameServer, p: &PlayerRef) {
     crate::systems::dispatch_buff_events(server, &obj);
 }
 
+/// Ends one temporary change that was started from `saved` (the faction the player had when it
+/// began). When `saved` is the origin faction this is `restore_temporary_faction`; when it is
+/// itself temporary (a duel inside a battlefield) the player returns to it and stays temporary
+/// until the outer change ends. A no-op when no temporary change is active any more (the
+/// battlefield was left or the player disconnected during the duel).
+pub fn restore_temporary_faction_to(server: &GameServer, p: &PlayerRef, saved: u32) {
+    let (temporary, origin, current) = {
+        let c = p.data();
+        (
+            c.unit.faction_temporary,
+            c.unit.origin_faction_id,
+            c.unit.faction_id,
+        )
+    };
+    if !temporary {
+        return;
+    }
+    if saved == origin || saved == 0 {
+        restore_temporary_faction(server, p);
+    } else if saved != current {
+        set_temporary_faction(server, p, saved);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

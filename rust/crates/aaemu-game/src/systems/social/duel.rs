@@ -401,10 +401,10 @@ impl DuelManager {
     /// `RestoreFaction(owner)`. `false` = no saved faction (the C# throws
     /// `KeyNotFoundException`, which aborts `DuelStop`).
     async fn restore_faction(&self, server: &GameServer, owner: &PlayerRef) -> bool {
-        let Some(_saved) = self.saved_faction(owner.character_id) else {
+        let Some(saved) = self.saved_faction(owner.character_id) else {
             return false;
         };
-        faction::restore_temporary_faction(server, owner);
+        faction::restore_temporary_faction_to(server, owner, saved);
         self.st().save_factions.remove(&owner.character_id);
         true
     }
