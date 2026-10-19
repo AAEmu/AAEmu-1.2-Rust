@@ -375,8 +375,9 @@ async fn split_merge_and_move_in_bag() {
     let src = item_at(&w.pa, 2, 0).unwrap();
     let new = item_at(&w.pa, 2, 1).unwrap();
     assert_eq!((src.count, new.count), (6, 4));
-    // The split item keeps owner 0 (C#: only fromItem / target get their owner re-assigned).
-    assert_eq!(new.owner_id, 0);
+    // The split item belongs to the bag it was created in (C# left it at owner 0, and the
+    // item could be lost on relogin).
+    assert_eq!(new.owner_id, 1);
     let frames = w.a.drain();
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].0, sc::SCItemTaskSuccessPacket);
@@ -438,6 +439,116 @@ async fn split_merge_and_move_in_bag() {
     let frames = w.a.drain();
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].0, sc::SCErrorMsgPacket);
+}
+
+#[tokio::test]
+async fn cross_owner_moves_assign_the_holding_container_owner() {
+    let w = world();
+    let alice = w.pa.clone();
+    let bob = w.pb.clone();
+    let alice_bag = Inv::of(&alice).bag();
+    let bob_bag = Inv::of(&bob).bag();
+    let id = give(&w, &alice, slot_type::INVENTORY, STACK, 10, 0);
+    {
+        let mut txn = ItemTxn::begin(&w.server);
+        assert!(inventory::split_or_move_item_ex(
+            &mut txn,
+            &Inv::of(&alice),
+            task_type::SWAP_ITEMS,
+            Some(alice_bag.clone()),
+            Some(bob_bag.clone()),
+            id,
+            slot_type::INVENTORY,
+            0,
+            0,
+            slot_type::INVENTORY,
+            0,
+            0,
+        ));
+    }
+    let moved = item_at(&bob, slot_type::INVENTORY, 0).unwrap();
+    assert_eq!(moved.owner_id, 2);
+    assert!(item_at(&alice, slot_type::INVENTORY, 0).is_none());
+
+    // A split from Bob's bag into Alice's bag creates Alice's item.
+    {
+        let mut txn = ItemTxn::begin(&w.server);
+        assert!(inventory::split_or_move_item_ex(
+            &mut txn,
+            &Inv::of(&bob),
+            task_type::SPLIT,
+            Some(bob_bag.clone()),
+            Some(alice_bag.clone()),
+            id,
+            slot_type::INVENTORY,
+            0,
+            0,
+            slot_type::INVENTORY,
+            0,
+            4,
+        ));
+    }
+    assert_eq!(item_at(&bob, slot_type::INVENTORY, 0).unwrap().owner_id, 2);
+    let split = item_at(&alice, slot_type::INVENTORY, 0).unwrap();
+    assert_eq!((split.count, split.owner_id), (4, 1));
+
+    // A swap between two owners' bags gives each item its new holder.
+    let alice_item = give(&w, &alice, slot_type::INVENTORY, STACK, 3, 1);
+    let bob_item = give(&w, &bob, slot_type::INVENTORY, SINGLE, 1, 1);
+    {
+        let mut txn = ItemTxn::begin(&w.server);
+        assert!(inventory::split_or_move_item_ex(
+            &mut txn,
+            &Inv::of(&alice),
+            task_type::SWAP_ITEMS,
+            Some(alice_bag),
+            Some(bob_bag),
+            alice_item,
+            slot_type::INVENTORY,
+            1,
+            bob_item,
+            slot_type::INVENTORY,
+            1,
+            0,
+        ));
+    }
+    let in_bob = item_at(&bob, slot_type::INVENTORY, 1).unwrap();
+    let in_alice = item_at(&alice, slot_type::INVENTORY, 1).unwrap();
+    assert_eq!((in_bob.id, in_bob.owner_id), (alice_item, 2));
+    assert_eq!((in_alice.id, in_alice.owner_id), (bob_item, 1));
+}
+
+#[tokio::test]
+async fn swapping_equipment_reports_the_equipment_slot_as_previous() {
+    let mut w = world();
+    let pa = w.pa.clone();
+    let bag_armor = give(&w, &pa, slot_type::INVENTORY, ARMOR, 1, 3);
+    let worn = give(&w, &pa, slot_type::EQUIPMENT, ARMOR, 1, equip_slot::CHEST);
+    w.a.drain();
+    w.b.drain();
+
+    let s = move_body(bag_armor, worn, 2, 3, 1, equip_slot::CHEST as u8);
+    run::<CSSwapItemsPacket>(&mut w, 0, s.as_bytes());
+    assert_eq!(
+        item_at(&pa, 1, equip_slot::CHEST as u8).unwrap().id,
+        bag_armor
+    );
+    assert_eq!(item_at(&pa, 2, 3).unwrap().id, worn);
+
+    // Both equipment events name the chest slot: the worn item entered it and the old item
+    // left it (the C# passed the source bag slot as its previous slot).
+    let slots: Vec<u8> =
+        w.b.drain()
+            .into_iter()
+            .filter(|(op, _)| *op == sc::SCUnitEquipmentsChangedPacket)
+            .map(|(_, body)| {
+                let mut r = PacketStream::from_bytes(body);
+                r.read_bc().unwrap();
+                assert_eq!(r.read_u8().unwrap(), 1);
+                r.read_u8().unwrap()
+            })
+            .collect();
+    assert_eq!(slots, vec![equip_slot::CHEST as u8; 2]);
 }
 
 #[tokio::test]

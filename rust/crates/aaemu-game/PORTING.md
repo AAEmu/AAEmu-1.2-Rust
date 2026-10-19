@@ -1539,9 +1539,7 @@ and in NPC wandering / buff remaining times.
   removes it from the source without releasing it (the DB row stays); it is kept as a loose item.
   The mail branch of the acquire / consume events reads `item.SlotType` after it was overwritten,
   so moving an item into a mail container raises no quest event.
-* systems::economy: `SplitOrMoveItemEx` gives the split item owner 0, assigns the *source* owner to
-  the moved source item and passes `fromSlot` as the previous slot of the target item's leave
-  event; `CSWithdrawMoneyPacket` reports `ItemTaskType.DepositMoney`; `ExpandSlot` never sends its
+* systems::economy: `CSWithdrawMoneyPacket` reports `ItemTaskType.DepositMoney`; `ExpandSlot` never sends its
   `MoneyChange` task.
 * systems::economy: the two "is not welcome in this container" rejections of `SplitOrMoveItemEx`
   (an item the target / source container refuses, e.g. armor sent to a wrong equipment slot) are
@@ -1558,6 +1556,12 @@ and in NPC wandering / buff remaining times.
 * systems::economy: auction — the "ExpireDate" sort still uses PostDate and a buyout
   sends no SCAuctionBidPacket. Original cancellation-copy and missing balance checks
   are corrected in the quest/mail audit below.
+* systems::economy: `SplitOrMoveItemEx` gives every item the owner of the container that holds it
+  after the operation (a split item belongs to the target container, and a moved / swapped item
+  to its new holder; the C# assigned the *source* owner to the moved source item and the
+  *target* owner wherever the target ended up) and the target item's leave event names its
+  previous target slot (`toSlot`; the C# passed `fromSlot`). The split item used to keep owner 0
+  and could be lost on relogin (upstream issue #412).
 * systems::economy: mail — opening a mailbox re-sends a "got mail" per unread received
   mail; FinalizeForBidFail still uses AucOffFail; receiver lookup is case-sensitive.
   The old return failure and sender unread-count bug are corrected below.
