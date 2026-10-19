@@ -68,3 +68,57 @@ async fn initialize_schedules_tick() {
         "the shipyard tick ran after the start delay"
     );
 }
+
+#[tokio::test]
+async fn shipyard_radius_counts_in_skill_distance() {
+    use crate::models::doodad::Doodad;
+    use crate::models::transform::PositionAndRotation;
+    use crate::systems::skills::geometry::{self, PosUnit, Target};
+
+    let mut d = GameData::empty();
+    d.systems.vehicles.shipyard_templates.insert(
+        3,
+        ShipyardTemplate {
+            id: 3,
+            build_radius: 30,
+            ..ShipyardTemplate::default()
+        },
+    );
+    let server = test_server_with(d);
+    let mut sy = Shipyard::new(ShipyardData {
+        id: 1,
+        template_id: 3,
+        obj_id: 0x00F0_0100,
+        ..ShipyardData::default()
+    });
+    sy.unit.transform.x = 100.0;
+    sy.unit.transform.y = 100.0;
+    let shipyard = WorldObject::from(&Entity::new(0x00F0_0100, sy));
+    assert_eq!(shipyard_radius(&server, &shipyard), Some(30.0));
+
+    let doodad = WorldObject::from(&Entity::new(0x00F0_0101, Doodad::new(1)));
+    assert_eq!(shipyard_radius(&server, &doodad), None);
+
+    let caster_at = |y: f32| {
+        Target::Pos(PosUnit {
+            instance_id: 0,
+            zone_id: 0,
+            pos: PositionAndRotation {
+                x: 100.0,
+                y,
+                ..PositionAndRotation::default()
+            },
+        })
+    };
+    let target = Target::Obj(shipyard);
+    // 50 m from the center: 20 m from the footprint edge.
+    assert_eq!(
+        geometry::distance_to(&server, &caster_at(150.0), &target, true),
+        20.0
+    );
+    // Inside the footprint the distance clamps at 0.
+    assert_eq!(
+        geometry::distance_to(&server, &caster_at(110.0), &target, true),
+        0.0
+    );
+}
