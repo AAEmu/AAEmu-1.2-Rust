@@ -254,6 +254,25 @@ fn sc_craft_failed_bytes() {
         .write_u32(0x1234)
         .write_u32(0x1234);
     assert_eq!(bytes(&p), want.into_bytes());
+
+    // The client reads at most 20 entries: larger counts are capped, negative ones are empty.
+    let capped = bytes(&SCCraftFailedPacket {
+        id: 7,
+        craft_id: 0x1234,
+        count: 99,
+    });
+    let mut want = PacketStream::new();
+    want.write_u32(7).write_i32(20);
+    for _ in 0..20 {
+        want.write_u32(0x1234);
+    }
+    assert_eq!(capped, want.into_bytes());
+    let negative = bytes(&SCCraftFailedPacket {
+        id: 7,
+        craft_id: 0x1234,
+        count: -3,
+    });
+    assert_eq!(negative, [7u32.to_le_bytes(), 0u32.to_le_bytes()].concat());
 }
 
 #[test]
