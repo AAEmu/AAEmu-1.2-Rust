@@ -17,6 +17,7 @@ use crate::stream::StreamClient;
 
 mod doodad;
 mod fixes;
+mod portal;
 mod questitem;
 
 /// Which scenario to run.
@@ -61,6 +62,10 @@ pub enum Kind {
     /// (see `scenario/fixes.rs`). GM account.
     #[serde(rename = "ghost")]
     Ghost,
+    /// Portal book delete (`SCPortalDeleted`) and the Memory Tome recall-point binding (skill
+    /// 14602 cast at doodad 841, see `scenario/portal.rs`). GM account.
+    #[serde(rename = "portal")]
+    Portal,
 }
 
 impl std::str::FromStr for Kind {
@@ -78,6 +83,7 @@ impl std::str::FromStr for Kind {
             "doodad" => Self::Doodad,
             "stonethrow" => Self::StoneThrow,
             "ghost" => Self::Ghost,
+            "portal" => Self::Portal,
             _ => bail!(
                 "unknown scenario '{s}' (login, lobby, full, combat, npc-return, mate-revive, questitem, doodad, \n                 load)"
             ),
@@ -537,6 +543,11 @@ async fn run_inner(kind: Kind, cfg: &BotConfig, r: &mut Runner<'_>) -> anyhow::R
     }
     if kind == Kind::Ghost {
         fixes::ghost(&mut game, r).await?;
+        drop(stream);
+        return Ok(());
+    }
+    if kind == Kind::Portal {
+        portal::run(&mut game, cfg, r).await?;
         drop(stream);
         return Ok(());
     }
