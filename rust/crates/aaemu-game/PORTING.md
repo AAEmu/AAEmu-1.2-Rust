@@ -1541,6 +1541,9 @@ and in NPC wandering / buff remaining times.
   owner). The client is the source of the request and `CanAccept` already warns with the cause.
 * systems::economy: `BindType.HasFlag(...)` on the plain `ItemBindType` enum is a bit test
   (`BindOnUnpack` matches 4..7, `BindOnEquip` matches 3 and 7); mirrored.
+* systems::economy: taking loot releases the item id it allocates for the grant checks once
+  `AcquireDefaultItem` created its own item (the C# leaked one id per non-coin, non-trade-pack
+  loot grant).
 * systems::economy: `AddOrMoveExistingItem` releases a stack that is merged into another
   container's stack (the C# removed it from the source without releasing it and kept it as a
   loose item, so its row stayed and a mail attachment merged into a bag stack was saved as an
@@ -1550,8 +1553,8 @@ and in NPC wandering / buff remaining times.
 * systems::economy: `CSBuyItems` refuses only when money, honor *and* vocation are all short;
   `ExpandExpert` adds the vocation cost; craft / backpack / weapon booleans read as numbers are
   false for `'t'` texts; `Specialty.VendorExist` reads the `id` column.
-* systems::economy: loot dice pick the lowest positive roll; looting allocates a new item id that
-  is never released; `ItemProc` `ignoreRoll` never procs; `HDps` uses the magic DPS grade value;
+* systems::economy: loot dice pick the lowest positive roll; `ItemProc` `ignoreRoll` never
+  procs; `HDps` uses the magic DPS grade value;
   fish conversion only uses the first pack.
 * systems::economy: auction — the "ExpireDate" sort still uses PostDate and a buyout
   sends no SCAuctionBidPacket. Original cancellation-copy and missing balance checks

@@ -1097,8 +1097,9 @@ fn try_distribute(
             return false;
         }
     } else {
-        // C#: a new item id is allocated for the loot entry and, on success, never released
-        // (AcquireDefaultItem creates its own items) — mirrored id leak.
+        // The C# allocated a new item id for the loot entry and never released it on success
+        // (`AcquireDefaultItem` creates its own items). Allocate it for the malformed-request
+        // checks, then release it once the grant succeeded.
         let new_id = match server.ids.item.get_next_id() {
             Ok(id) => id,
             Err(e) => {
@@ -1132,6 +1133,8 @@ fn try_distribute(
             failed(ctx, g, pid, error_message::BAG_FULL, idx, template_id);
             return false;
         }
+        // The grant built its own item: the pre-allocated id was never used.
+        server.ids.item.release_id(new_id);
     }
     ctx.send(
         pid,

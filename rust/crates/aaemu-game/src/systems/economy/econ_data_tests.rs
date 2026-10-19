@@ -363,6 +363,33 @@ async fn open_bag_without_loot_all_sends_bag_data_and_single_take_works() {
 }
 
 #[tokio::test]
+async fn taking_loot_releases_the_unused_allocated_item_id() {
+    let mut w = world_with(data());
+    let npc = spawn_npc(&mut w);
+    let mut rng = ScriptedRng::new(&[0, 0, 0, 3, 50, 1], &[]);
+    LootManager::generate_loot_with(
+        &w.server,
+        &WorldObject::from(&npc),
+        Some(&WorldObject::from(&w.pa)),
+        &mut rng,
+    );
+    w.a.drain();
+    // Peek at (and return) the next item id, so the loot's allocation is observable.
+    let next = w.server.ids.item.get_next_id().unwrap();
+    w.server.ids.item.release_id(next);
+
+    // The stack (index 1) goes through the acquire path that allocates an id.
+    assert!(LootManager::try_take_loot(
+        &w.server, &w.pa, NPC_OBJ, 1, false
+    ));
+    let taken = item_at(&w.pa, slot_type::INVENTORY, 0).unwrap();
+    assert_eq!(taken.template_id, super::tests::STACK);
+    // The grant created its own id; the pre-allocated one must be free again.
+    assert_eq!(w.server.ids.item.get_next_id().unwrap(), next);
+    assert_eq!(taken.id, u64::from(next) + 1);
+}
+
+#[tokio::test]
 async fn full_bag_fails_and_restores_the_entry() {
     let mut w = world_with(data());
     let npc = spawn_npc(&mut w);
