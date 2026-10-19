@@ -341,6 +341,22 @@ impl ItemManager {
         lock(&self.containers).push(c);
     }
 
+    /// One row of `LoadUserItems`: places `item` in `container` and reports whether the loaded
+    /// stack was merged into an existing stack (`(merged, result)`). A merged row no longer has
+    /// a container, so its `items` row must be queued for deletion.
+    pub fn add_loaded_item(
+        &self,
+        container: &mut ItemContainer,
+        item: Item,
+        slot: i32,
+        data: &ItemData,
+    ) -> (bool, std::result::Result<bool, Item>) {
+        let merged = container
+            .place(&item, slot, data)
+            .is_some_and(|(_, can_add_to_same_slot)| can_add_to_same_slot);
+        (merged, container.add_new_item(item, slot, data))
+    }
+
     /// `LoadUserItems`.
     pub async fn load_user_items(
         &self,
@@ -348,6 +364,7 @@ impl ItemManager {
         data: &ItemData,
         world_id: u8,
         container_ids: &IdManager,
+        item_ids: &IdManager,
     ) -> Result<()> {
         tracing::info!("Loading user items ...");
         let rows = sqlx::query(
@@ -399,13 +416,22 @@ impl ItemManager {
                 Some(c) => {
                     let slot = item.slot;
                     let item_id = item.id;
-                    let res = c
-                        .lock()
-                        .expect("container poisoned")
-                        .add_new_item(item, slot, data);
+                    let (merged, res) = {
+                        let mut g = c.lock().expect("container poisoned");
+                        self.add_loaded_item(&mut g, item, slot, data)
+                    };
                     match res {
+                        Ok(_) if merged => {
+                            // The row was merged into an existing stack: the units live on
+                            // there, so delete the loaded row instead of keeping it (it used
+                            // to be reloaded and stacked again on every start).
+                            tracing::debug!(
+                                "Loaded item {item_id} was merged into an existing stack; queueing its row for deletion"
+                            );
+                            self.release_id(item_id, item_ids);
+                        }
                         Ok(true) => {
-                            // `item.IsDirty = false` (a stacked item no longer exists on its own).
+                            // `item.IsDirty = false` (placed as its own item).
                             let mut g = c.lock().expect("container poisoned");
                             if let Some(i) = g.items.iter_mut().find(|i| i.id == item_id) {
                                 i.dirty = false;
@@ -437,9 +463,18 @@ impl ItemManager {
                             0,
                             container_ids,
                         );
+                        let item_id = item.id;
                         let mut g = c.lock().expect("container poisoned");
                         let id = g.container_id;
-                        match g.add_new_item(item, this_slot, data) {
+                        let (merged, res) = self.add_loaded_item(&mut g, item, this_slot, data);
+                        match res {
+                            Ok(_) if merged => {
+                                drop(g);
+                                tracing::debug!(
+                                    "Loaded item {item_id} was merged into an existing stack; queueing its row for deletion"
+                                );
+                                self.release_id(item_id, item_ids);
+                            }
                             Ok(_) => {
                                 if let Some(i) = g.items.first_mut() {
                                     i.slot = this_slot;

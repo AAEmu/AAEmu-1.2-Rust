@@ -1523,8 +1523,6 @@ and in NPC wandering / buff remaining times.
 * `CharacterManager.Load`: `character_supplies` creates `_abilityItems` entries that
   `character_equip_packs` then `Add`s again (throws for an ability with both).
 * `FriendMananger.Load` keys all friends by `id` although the table key is `(id, owner)`.
-* `ItemManager.LoadUserItems`: a stacked item (merged into an existing stack while loading) keeps
-  its own DB row, which is loaded again next time.
 * `SCUnitStatePacket.Write` adds buffs 8000011 / 8000012 to the character ("Wrong place"), and an
   exception inside any `Write` (e.g. no `VisualOptions.Stp`) truncates the packet, because
   `PacketStream.Write(PacketMarshaler)` swallows it. Both reproduced.
@@ -1556,6 +1554,10 @@ and in NPC wandering / buff remaining times.
 * systems::economy: auction — the "ExpireDate" sort still uses PostDate and a buyout
   sends no SCAuctionBidPacket. Original cancellation-copy and missing balance checks
   are corrected in the quest/mail audit below.
+* systems::economy: `ItemManager.LoadUserItems` deletes the row of a loaded stack that was merged
+  into an existing stack (the C# kept it, so the same units were loaded and merged again on every
+  start; related to upstream issue #1189, "sold items reappear after relogin"). The id is freed
+  and the row is removed by the next save.
 * systems::economy: `SplitOrMoveItemEx` gives every item the owner of the container that holds it
   after the operation (a split item belongs to the target container, and a moved / swapped item
   to its new holder; the C# assigned the *source* owner to the moved source item and the
