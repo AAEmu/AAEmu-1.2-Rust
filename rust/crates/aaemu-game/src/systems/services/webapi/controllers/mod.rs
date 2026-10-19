@@ -74,8 +74,25 @@ fn get_status(ctx: &ControllerCtx) -> anyhow::Result<HttpResponse> {
     let player_count = server.world.all_characters().len();
     let uptime = format_timespan(i64::from(game_service::up_time()));
     let jobs = server.systems.services.tasks.get_queue_count();
+    // The skill timeline id pool (upstream issue #753): `in use` returns to 0 when every
+    // cast released its id; a growing `leaked` count is the metric for the leak class.
+    let tl = server.systems.skills.tl_ids.stats();
+    let tl_leaked = server
+        .systems
+        .skills
+        .tl_ids
+        .leaked_over(crate::systems::skills::tasks::LEAK_AGE_MS);
     Ok(ok_html(&format!(
-        "Server uptime: {uptime}<br/>Players online: {player_count}<br/>Number of TaskManager Jobs: {jobs}<br/>"
+        "Server uptime: {uptime}<br/>Players online: {player_count}<br/>Number of TaskManager Jobs: {jobs}<br/>\
+         SkillTlIds in use: {} / {} (peak {}, gets {}, releases {}, unused {}, exhaustions {}, replaced {}, leaked(>10min) {tl_leaked})<br/>",
+        tl.in_use,
+        tl.capacity,
+        tl.peak_in_use,
+        tl.total_gets,
+        tl.total_releases,
+        tl.unused_releases,
+        tl.exhaustions,
+        tl.replaced,
     )))
 }
 
