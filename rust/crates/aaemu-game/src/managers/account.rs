@@ -34,6 +34,14 @@ impl AccountManager {
         self.accounts.remove(&account_id);
     }
 
+    /// `Remove(id)` that only drops the entry registered by `connection_id`. Deviation from the
+    /// C# (which removes by account id): a lingering old connection that closes after the
+    /// account already logged in again on a new connection must not unregister the new one.
+    pub fn remove_if_owned(&self, account_id: u32, connection_id: u32) {
+        self.accounts
+            .remove_if(&account_id, |_, conn| *conn == connection_id);
+    }
+
     pub fn contains(&self, account_id: u32) -> bool {
         self.accounts.contains_key(&account_id)
     }

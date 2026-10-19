@@ -143,7 +143,7 @@ async fn write_frames(
 /// `GameProtocolHandler.OnDisconnect` + `GameConnection.OnDisconnect`.
 pub async fn on_disconnect(server: &Arc<GameServer>, conn: &mut GameConnection) {
     let account_id = conn.account_id();
-    server.accounts.remove(account_id);
+    server.accounts.remove_if_owned(account_id, conn.id);
     crate::world::session::on_disconnect(server, conn).await;
     server.streams.remove_token(conn.id);
     server.connections.remove(conn.id);
