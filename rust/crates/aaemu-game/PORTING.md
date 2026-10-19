@@ -1865,6 +1865,14 @@ the C# `GameNetwork`. Deviations of the audit ports:
 * The zone conflict state lives in `systems::social::conflicts` (copied from the loaded data at
   start); `NextStateTime` is kept in milliseconds for the timers and sent in seconds.
 * `ZoneStateChangeTask` is a tokio task holding a weak server reference.
+* RPA-10 (zone conflict kill counter): a PvP kill registers with the zone conflict in every
+  state (`skills::combat::award_pvp_honor` calls `conflicts.add_zone_kill` before the honor
+  branch). The 1.2 C# only called it from the Conflict / War honor branch, where
+  `ZoneConflict.AddZoneKill` returns early, so the `conflict_zones.num_kills_0..4` thresholds
+  of zone groups 14-27 (70 / 100 / 140 / 190 / 250) were unreachable and the zone stayed in
+  Tension after its first Peace -> Tension step. Honor stays Conflict-only / War-only as in
+  1.2. Regression: `skills::tests::pvp_kill_advances_a_conflict_zone_that_returned_to_tension`
+  walks Conflict -> War -> Peace -> Tension and then kills once at 70 accumulated kills.
 * `SusManager.finalize_check` keeps the `_skipCheckTime` / `_lastFinalizeTime` of an object by obj
   id; the analysis itself (database log) runs on a task.
 * systems::services (commands): `CrimeCmd` keeps `CommandNames = ["doodad"]` (help / call prefix

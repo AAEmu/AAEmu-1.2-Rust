@@ -796,8 +796,13 @@ pub fn collect_assists(
 }
 
 /// `AwardPvpHonor(killer, victimZone, conflictData, zoneState)`: Conflict 10 solo (6 killer +
-/// 4 each assist), War 20 solo (16 killer + 4 each assist), nothing in other states; the kill
-/// also counts for the zone conflict.
+/// 4 each assist), War 20 solo (16 killer + 4 each assist), no honor in other states. The kill
+/// is registered with the zone conflict **in every state**: `conflict_zones.num_kills_0..4`
+/// (70/100/140/190/250 for zone groups 14-27) escalate Tension -> Danger -> Dispute -> Unrest ->
+/// Crisis -> Conflict, so the counter must see the kills after the timer chain returns to
+/// Tension. The 1.2 C# (and the previous port) called `AddZoneKill` only from the honor branch,
+/// i.e. in Conflict / War, where `ZoneConflict.AddZoneKill` ignores it; the zone then stayed in
+/// Tension forever after its first Peace.
 fn award_pvp_honor(
     server: &GameServer,
     victim: &PlayerRef,
@@ -807,13 +812,7 @@ fn award_pvp_honor(
     zone_state: u8,
 ) {
     use crate::data::world_data::conflict_type;
-    let (solo, killer_share, assist_share) = match zone_state {
-        conflict_type::CONFLICT => (10, 6, 4),
-        conflict_type::WAR => (20, 16, 4),
-        // No honor outside Conflict/War zones
-        _ => return,
-    };
-    // Register zone kill (drives zone state escalation)
+    // Register zone kill (drives zone state escalation) in Tension..Crisis too.
     if let Some(c) = conflict {
         server
             .systems
@@ -821,6 +820,12 @@ fn award_pvp_honor(
             .conflicts
             .add_zone_kill(server, c.zone_group_id);
     }
+    let (solo, killer_share, assist_share) = match zone_state {
+        conflict_type::CONFLICT => (10, 6, 4),
+        conflict_type::WAR => (20, 16, 4),
+        // No honor outside Conflict/War zones
+        _ => return,
+    };
     let rate = server.config.get().world.pvp_honor_rate;
     let assist_ids = collect_assists(server, victim, killer, now_ms());
     // Resolve to online assistants before choosing the kill path (offline assists fall back
