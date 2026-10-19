@@ -483,8 +483,7 @@ pub fn sort_articles(
     match kind {
         sort_kind::BID_PRICE => by(&mut articles, order, |l| l.bid_money),
         sort_kind::DIRECT_PRICE => by(&mut articles, order, |l| l.direct_money),
-        // C# sorts "ExpireDate" by PostDate.
-        sort_kind::EXPIRE_DATE => by(&mut articles, order, |l| l.post_date),
+        sort_kind::EXPIRE_DATE => by(&mut articles, order, |l| l.end_time),
         sort_kind::ITEM_LEVEL => by(&mut articles, order, level),
         _ => {}
     }
@@ -813,6 +812,17 @@ impl AuctionManager {
                 );
             }
             self.remove_auction_lot_sold(server, &lot, &player_name, lot.direct_money);
+            player.send(SCAuctionBidPacket {
+                bid: AuctionBid {
+                    lot_id: lot.id,
+                    world_id,
+                    bidder_id: player_id,
+                    bidder_name: player_name,
+                    money: lot.direct_money,
+                },
+                is_buyout: true,
+                item_id: lot.item_template_id(),
+            });
         } else if bid.money > lot.bid_money {
             // Bid
             if !lot.bidder_name.is_empty() && lot.bidder_id != 0 {

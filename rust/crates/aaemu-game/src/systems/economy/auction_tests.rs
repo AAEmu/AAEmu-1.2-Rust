@@ -154,6 +154,27 @@ fn bid_body(lot_id: u64, money: i32) -> Vec<u8> {
     s.into_bytes()
 }
 
+/// `SCAuctionBidPacket` body: bid(lot, world, bidder, name, money), isBuyout, itemId.
+fn bid_packet_body(
+    lot_id: u64,
+    world_id: u8,
+    bidder_id: u32,
+    name: &str,
+    money: i32,
+    is_buyout: bool,
+    item_id: u32,
+) -> Vec<u8> {
+    let mut s = PacketStream::new();
+    s.write_u64(lot_id)
+        .write_u8(world_id)
+        .write_u32(bidder_id)
+        .write_str(name)
+        .write_i32(money)
+        .write_bool(is_buyout)
+        .write_u32(item_id);
+    s.into_bytes()
+}
+
 fn cancel_body(lot_id: u64) -> Vec<u8> {
     let mut s = PacketStream::new();
     s.write_bc(0x200).write_bc(0x200);
@@ -616,6 +637,37 @@ async fn search_pages_hold_nine_lots() {
 }
 
 #[tokio::test]
+async fn expire_date_sort_uses_end_time_not_post_date() {
+    let (mut w, _log) = auction_world();
+    let (_, mut first) = post(&mut w, SWORD, 0, 100, 0);
+    let (_, mut second) = post(&mut w, POTION, 1, 100, 0);
+    // The first lot was posted first but expires last: a PostDate sort would keep this order.
+    first.post_date = Utc.timestamp_opt(1_000, 0).unwrap();
+    first.end_time = Utc.timestamp_opt(9_000, 0).unwrap();
+    second.post_date = Utc.timestamp_opt(2_000, 0).unwrap();
+    second.end_time = Utc.timestamp_opt(8_000, 0).unwrap();
+    let ah = &w.server.systems.economy.auction;
+    ah.set_lot(first.clone());
+    ah.set_lot(second.clone());
+    w.a.drain();
+    w.b.drain();
+    let s = AuctionSearch {
+        sort_kind: sort_kind::EXPIRE_DATE,
+        sort_order: sort_order::ASC,
+        ..Default::default()
+    };
+    run::<CSAuctionSearchPacket>(&mut w, 1, &search_body(&s));
+    let frames = w.b.drain();
+    let mut want = PacketStream::new();
+    want.write_i32(0).write_i32(2);
+    want.write_raw(&lot_bytes(&second))
+        .write_raw(&lot_bytes(&first));
+    want.write_i16(0);
+    let b = &frames[0].1;
+    assert_eq!(&b[..b.len() - 8], want.as_bytes());
+}
+
+#[tokio::test]
 async fn bid_outbid_buyout_moves_money_and_mails() {
     let (mut w, log) = auction_world();
     let (item_id, lot) = post(&mut w, SWORD, 0, 1000, 1);
@@ -690,10 +742,18 @@ async fn bid_outbid_buyout_moves_money_and_mails() {
     run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 5000));
     assert_eq!(money(&w.pb), 100_000 - 500 - 600 - 1000);
     let frames = w.b.drain();
-    assert_eq!(frames.len(), 1);
+    assert_eq!(frames.len(), 2);
     assert_eq!(
         frames[0].1,
         task_body(task_type::DEPOSIT_MONEY, vec![ItemTask::MoneyChange(-1000)])
+    );
+    // The buyer gets the buyout confirmation (the C# sent none).
+    assert_eq!(
+        frames[1],
+        (
+            sc::SCAuctionBidPacket,
+            bid_packet_body(lot.id, 0, 2, "Bob", 1000, true, SWORD)
+        )
     );
     let item = w.server.items.item_by_id(item_id).unwrap();
     assert_eq!(
@@ -755,7 +815,16 @@ async fn buyout_without_previous_bid_and_no_buyout_price() {
     assert!(log.take().is_empty());
 
     let (_, lot) = post(&mut w, POTION, 1, 300, 0);
+    w.b.drain();
     run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 300));
+    let frames = w.b.drain();
+    assert_eq!(
+        frames.last().unwrap(),
+        &(
+            sc::SCAuctionBidPacket,
+            bid_packet_body(lot.id, 0, 2, "Bob", 300, true, POTION)
+        )
+    );
     let mails = log.take();
     assert_eq!(mails.len(), 2);
     assert!(matches!(
