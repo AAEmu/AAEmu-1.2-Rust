@@ -106,7 +106,8 @@ impl House {
             .write_u32(self.id)
             .write_bc(obj_id)
             .write_u32(self.unit.template_id)
-            .write_pisc(&[i64::from(self.unit.model_id), 0])
+            // One fixed i32 (native reader slot +0x4c at 39897460), not a PISC pair.
+            .write_u32(self.unit.model_id)
             .write_u32(self.co_owner_id)
             .write_u32(self.unit.owner_id)
             .write_str(owner_name)
@@ -167,7 +168,7 @@ mod tests {
             .write_u32(0x0A0B0C0D)
             .write_bc(0x010203)
             .write_u32(300)
-            .write_pisc(&[0x10, 0])
+            .write_u32(0x10)
             .write_u32(6)
             .write_u32(5)
             .write_str("Own")
@@ -191,6 +192,6 @@ mod tests {
         let mut s2 = PacketStream::new();
         h.write(0x010203, &pos, "Own", "", &mut s2);
         assert_eq!(s2.len(), s.len());
-        assert_eq!(s2.as_bytes()[34..42], [0; 8]);
+        assert_eq!(s2.as_bytes()[35..43], [0; 8]);
     }
 }
