@@ -22,7 +22,7 @@ use aaemu_commons::{Marshal, PacketStream};
 use crate::error::Result;
 use crate::models::container::slot_type;
 use crate::models::item::Item;
-use crate::models::item_task::{task_type, ItemTask};
+use crate::models::item_task::{task_type, ItemFx, ItemTask};
 use crate::net::connection::GameConnection;
 use crate::net::packet::LEVEL_PLAIN;
 use crate::net::registry::PacketRegistry;
@@ -48,8 +48,9 @@ pub struct TradeTemplate {
     pub lock_target: bool,
     pub ok_owner: bool,
     pub ok_target: bool,
-    pub owner_items: Vec<u64>,
-    pub target_items: Vec<u64>,
+    /// `(item id, put-up amount)`: only this amount changes hands (a larger stack is split).
+    pub owner_items: Vec<(u64, i32)>,
+    pub target_items: Vec<(u64, i32)>,
     pub owner_money_putup: i32,
     pub target_money_putup: i32,
 }
@@ -153,6 +154,7 @@ fn cancel_locked(
         return;
     };
     let t = trades.remove(idx);
+    server.ids.trade.release_id(t.id);
     send_canceled(server, &t, obj_id, reason);
 }
 
@@ -300,8 +302,8 @@ pub fn on_player_departed(server: &GameServer, player: &PlayerRef) {
     }
 }
 
-/// `TradeManager.AddItem(character, slotType, slot, amount)`. The amount is only checked (the
-/// whole item changes hands when the trade is made, as in C#).
+/// `TradeManager.AddItem(character, slotType, slot, amount)`. Only `amount` units are traded:
+/// a larger stack is split when the trade is made (the C# moved the whole item).
 pub fn add_item(server: &GameServer, character: &PlayerRef, st: u8, slot: u8, amount: i32) {
     let mut trades = manager(server).lock();
     let trade_id = get_trade_id(&trades, character.obj_id);
@@ -312,7 +314,7 @@ pub fn add_item(server: &GameServer, character: &PlayerRef, st: u8, slot: u8, am
     }
     // C#: `item.Count` throws on an empty slot.
     let Some(item) = item else { return };
-    if item.count < amount {
+    if amount <= 0 || item.count < amount {
         cancel_locked(server, &mut trades, character.obj_id, 0, trade_id); // TODO (C#) - Reason
         return;
     }
@@ -328,21 +330,25 @@ pub fn add_item(server: &GameServer, character: &PlayerRef, st: u8, slot: u8, am
             name_of(&owner),
             owner.obj_id
         );
-        t.owner_items.push(item.id);
+        t.owner_items.push((item.id, amount));
         owner.send(SCTradeItemPutupPacket {
             slot_type: st,
             slot,
             amount,
         });
-        target.send(SCOtherTradeItemPutupPacket { item: item.clone() });
+        target.send(SCOtherTradeItemPutupPacket {
+            item: shown_putup(&item, amount),
+        });
     } else {
         tracing::info!(
             "Trade Id:{trade_id} {}({}) added item ({st}-{slot}) Amount: {amount}.",
             name_of(&target),
             target.obj_id
         );
-        t.target_items.push(item.id);
-        owner.send(SCOtherTradeItemPutupPacket { item: item.clone() });
+        t.target_items.push((item.id, amount));
+        owner.send(SCOtherTradeItemPutupPacket {
+            item: shown_putup(&item, amount),
+        });
         target.send(SCTradeItemPutupPacket {
             slot_type: st,
             slot,
@@ -358,7 +364,8 @@ pub fn add_money(server: &GameServer, character: &PlayerRef, money_amount: i32) 
     let mut trades = manager(server).lock();
     let trade_id = get_trade_id(&trades, character.obj_id);
     let money = character.data().money;
-    if trade_id == 0 || money < i64::from(money_amount) {
+    // A negative amount would be stored and then skipped when the trade is made; reject it.
+    if trade_id == 0 || money_amount < 0 || money < i64::from(money_amount) {
         cancel_locked(server, &mut trades, character.obj_id, 0, trade_id); // TODO (C#) - Reason
         return;
     }
@@ -391,11 +398,18 @@ pub fn add_money(server: &GameServer, character: &PlayerRef, money_amount: i32) 
     unlock_trade(t, &owner, &target);
 }
 
+/// The item snapshot the peer sees for a put-up: only the offered units.
+fn shown_putup(item: &Item, amount: i32) -> Item {
+    let mut shown = item.clone();
+    shown.count = amount;
+    shown
+}
+
 /// `List.Remove(item)` / `Clear()` of `RemoveItem`.
-fn take_down(list: &mut Vec<u64>, item_id: u64) {
+fn take_down(list: &mut Vec<(u64, i32)>, item_id: u64) {
     if list.len() <= 1 {
         list.clear();
-    } else if let Some(i) = list.iter().position(|&x| x == item_id) {
+    } else if let Some(i) = list.iter().position(|&(id, _)| id == item_id) {
         list.remove(i);
     }
 }
@@ -513,8 +527,8 @@ pub fn ok_trade(server: &GameServer, character: &PlayerRef) {
         return;
     };
     let is_owner = t.owner_obj_id == character.obj_id;
-    // Check if both locked (the C# only requires one of them)
-    if !t.lock_owner && !t.lock_target {
+    // Both sides must have locked before either can confirm.
+    if !(t.lock_owner && t.lock_target) {
         return;
     }
     let Some((owner, target)) = partners(server, t) else {
@@ -565,6 +579,7 @@ pub fn ok_trade(server: &GameServer, character: &PlayerRef) {
         return;
     };
     let t = trades.remove(idx);
+    server.ids.trade.release_id(t.id);
     drop(trades);
     finish_trade(server, &owner, &target, t);
 }
@@ -578,9 +593,21 @@ pub fn finish_trade(
     trade: TradeTemplate,
 ) {
     let trade_id = trade.id;
-    // Validate Money (custom client protection)
+    let owner_put = i64::from(trade.owner_money_putup);
+    let target_put = i64::from(trade.target_money_putup);
+    // Negative put-ups were accepted and then silently skipped at the finish; reject them.
+    if owner_put < 0 || target_put < 0 {
+        send_canceled(server, &trade, owner.obj_id, 0); // Reason?
+        tracing::error!(
+            "Trade Id:{trade_id} has a negative money put-up ({} / {}), possible exploit or modified client!",
+            trade.owner_money_putup,
+            trade.target_money_putup
+        );
+        return;
+    }
+    // Validate Money (custom client protection) and apply the transfers with overflow checks.
     let owner_money = owner.data().money;
-    if i64::from(trade.owner_money_putup) > owner_money {
+    if owner_put > owner_money {
         send_canceled(server, &trade, owner.obj_id, 0); // Reason?
         let c = owner.data();
         tracing::error!(
@@ -593,7 +620,7 @@ pub fn finish_trade(
         return;
     }
     let target_money = target.data().money;
-    if i64::from(trade.target_money_putup) > target_money {
+    if target_put > target_money {
         send_canceled(server, &trade, target.obj_id, 0); // Reason?
         let c = target.data();
         tracing::error!(
@@ -605,43 +632,57 @@ pub fn finish_trade(
         );
         return;
     }
+    let Some(owner_after) = owner_money
+        .checked_sub(owner_put)
+        .and_then(|money| money.checked_add(target_put))
+    else {
+        send_canceled(server, &trade, owner.obj_id, 0);
+        tracing::error!("Trade Id:{trade_id} money overflow, possible exploit or modified client!");
+        return;
+    };
+    let Some(target_after) = target_money
+        .checked_sub(target_put)
+        .and_then(|money| money.checked_add(owner_put))
+    else {
+        send_canceled(server, &trade, target.obj_id, 0);
+        tracing::error!("Trade Id:{trade_id} money overflow, possible exploit or modified client!");
+        return;
+    };
 
     let mut has_errors = 0;
     let mut tasks_owner = Vec::new();
     let mut tasks_target = Vec::new();
     let mut txn = ItemTxn::begin(server);
 
+    owner.data().money = owner_after;
+    target.data().money = target_after;
     // Handle Money from Owner
     if trade.owner_money_putup > 0 {
-        owner.data().money -= i64::from(trade.owner_money_putup);
         tasks_owner.push(ItemTask::MoneyChange(-trade.owner_money_putup));
-        target.data().money += i64::from(trade.owner_money_putup);
         tasks_target.push(ItemTask::MoneyChange(trade.owner_money_putup));
     }
     // Handle Money from Target
     if trade.target_money_putup > 0 {
-        owner.data().money += i64::from(trade.target_money_putup);
         tasks_owner.push(ItemTask::MoneyChange(trade.target_money_putup));
-        target.data().money -= i64::from(trade.target_money_putup);
         tasks_target.push(ItemTask::MoneyChange(-trade.target_money_putup));
     }
 
     // Handle Items from Owner
-    for &item_id in &trade.owner_items {
-        match move_to_bag(&mut txn, owner, target, item_id) {
-            Some(item) => {
-                tasks_owner.push(ItemTask::remove(&item));
-                tasks_target.push(ItemTask::add(&item));
+    for &(item_id, amount) in &trade.owner_items {
+        match move_amount_to_bag(&mut txn, owner, target, item_id, amount) {
+            Some((removed, added)) => {
+                tasks_owner.push(removed);
+                tasks_target.push(added);
             }
             None => has_errors += 1,
         }
     }
     // Handle Items from Target
-    for &item_id in &trade.target_items {
-        match move_to_bag(&mut txn, target, owner, item_id) {
-            Some(item) => {
-                tasks_target.push(ItemTask::remove(&item));
-                tasks_owner.push(ItemTask::add(&item));
+    for &(item_id, amount) in &trade.target_items {
+        match move_amount_to_bag(&mut txn, target, owner, item_id, amount) {
+            Some((removed, added)) => {
+                tasks_target.push(removed);
+                tasks_owner.push(added);
             }
             None => has_errors += 1,
         }
@@ -687,33 +728,65 @@ pub fn finish_trade(
     }
 }
 
-/// `to.Inventory.Bag.AddOrMoveExistingItem(ItemTaskType.Invalid, item)` for an item of `from`.
-/// Returns the item after the move (the C# builds both `ItemRemove` and `ItemAdd` from the moved
-/// object, so the removal names the slot in the receiver's bag — mirrored). An item that is no
-/// longer in one of `from`'s containers counts as an error (the C# would add the orphaned
-/// object to the bag).
-fn move_to_bag(
+/// Moves `amount` units of `item_id` from `from` into `to`'s bag, splitting a larger stack
+/// (the C# moved the whole item). Returns the giver's removal task and the receiver's add task
+/// for `SCTradeMade`; the removal names the slot the item had in the giver's container. An item
+/// that is gone or shorter than its put-up counts as an error.
+fn move_amount_to_bag(
     txn: &mut ItemTxn<'_>,
     from: &PlayerRef,
     to: &PlayerRef,
     item_id: u64,
-) -> Option<Item> {
+    amount: i32,
+) -> Option<(ItemTask, ItemTask)> {
+    if amount <= 0 {
+        return None;
+    }
     let src = Inv::of(from).holder_of_any(item_id)?;
     let bag = Inv::of(to).bag();
     let data = txn.data();
     let (mut s, b) = lock_pair(&src, &bag);
     let mut b = b?; // different players never share a container
-    if !b.move_item_from(
-        &mut s,
-        task_type::INVALID,
-        item_id,
-        -1,
-        data,
-        &mut txn.env.fx,
-    ) {
+    let source = s.get_item_by_id(item_id)?.clone();
+    if source.count < amount {
         return None;
     }
-    b.get_item_by_id(item_id).cloned()
+    if amount < source.count {
+        let split = txn.env.create(source.template_id, amount, source.grade)?;
+        let split_id = split.id;
+        if let Some(item) = s.get_item_by_id_mut(item_id) {
+            item.count -= amount;
+            item.dirty = true;
+        }
+        match b.add_item(task_type::INVALID, split, -1, data, &mut txn.env.fx) {
+            Ok(true) => {
+                // Preferred slot -1 never merges: the new stack sits in a free slot.
+                let added = ItemTask::add(b.get_item_by_id(split_id)?);
+                Some((ItemTask::count_update(&source, -amount), added))
+            }
+            _ => {
+                if let Some(item) = s.get_item_by_id_mut(item_id) {
+                    item.count += amount;
+                    item.dirty = true;
+                }
+                txn.env.fx.push(ItemFx::ReleaseId(split_id));
+                None
+            }
+        }
+    } else {
+        if !b.move_item_from(
+            &mut s,
+            task_type::INVALID,
+            item_id,
+            -1,
+            data,
+            &mut txn.env.fx,
+        ) {
+            return None;
+        }
+        let added = ItemTask::add(b.get_item_by_id(item_id)?);
+        Some((ItemTask::remove(&source), added))
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
