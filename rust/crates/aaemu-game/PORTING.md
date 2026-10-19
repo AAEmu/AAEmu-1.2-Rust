@@ -1932,3 +1932,41 @@ The achievement subsystem has no 1.2 C# manager; the behaviour follows `rust/doc
 * **GET_ITEM_TYPE (k29), KILL_SLAVE (k26), MY_DISHONORABLE_POINT (k49), siege results (k57-60)** stay
   unwired (see the audit for why). `SCAchievementResetedPacket` (0x1ff) has no 1.2 trigger and is
   deliberately never sent.
+
+## Bevy protocol audit (October 19, 2026)
+
+The Bevy 1.2 client (`AABevy1.2`) is the main client; its reverse-engineering notes
+(`docs/aa-net.md`, digest M1..M23) found layout suspects between our encoders and the original
+1.2 client's readers. Oracle used here: the original reader in the unpacked 1.2 client
+(`x2game_unpacked.dll`, Ghidra, addresses below), decompiled again for each fix marked
+*verified*; the rest are marked *per Bevy RE notes*.
+
+| # | Fix | Oracle |
+|---|---|---|
+| M1 | `SCHouseState` / `SCMyHouse` model is one fixed `i32` (was PISC pair, shifting every later field) | verified: `39897460` reads it with stream slot `+0x4c`, the same slot as `allstep`/`curstep`/`skillCount` |
+| M2 | `SCCancelInstantGame` carries only the `i16` error (the branch byte and padding are gone; `clear_queue` and `with_error` are indistinguishable on the 1.2 wire, the handler ignores the value anyway) | verified: serializer `397c3bf0` transfers one `i16` (slot `+0x50`) |
+| M3 | The empty faction lists use their real opcodes: `SCFactionList` `0x008` (was `0x007` = `SCTrionConfig`) and `SCFactionRelationList` `0x009` (was `0x008` = `SCFactionList`, which also carried a stray byte) | opcode table; relation body `[bool][u8 count]` kept from the non-empty packet. The C# hard-coded the wrong ids |
+| M4 | `SCResponseUIData` trailer is the UTF-8 byte count + 1 (was UTF-16 units + 1; truncated non-ASCII data) | per Bevy RE notes (`391e57e0` -> `memcpy` / `xlcommon::Data::Load`) |
+| M5 | The slave item detail (tag 2) is always 29 bytes: `RepairStartTime` is an i64 (0 when unset, the same bytes as before) plus four i32 zeros (was i32 + five i32 when unset, i64 + five i32 = 33 bytes when set, which desynced batched item packets). The split of the 24 trailing bytes is inferred | width verified: `3961edf0` tag 2 = `0x1e - 1` = 29 bytes; field split per Bevy RE notes |
+| M6 | `SCMateEquipmentChanged` now carries a real success flag; the rejected-move packet writes `false` (the C# always wrote `true`) | verified: `OnMateEquipmentChanged` `391db200` passes the flag at `+0x330` to `394e1c10`, which copies the item into the bag cache only when it is set; entry/record readers `397d12a0`/`397d1340` match our layout |
+| M7 | `CSSpawnSlave` reads container + slot only when the item id is nonzero (37/39-byte bodies; was always 41). The handler still only logs | per Bevy RE notes (client writer) |
+| M8 | `SCCraftFailed` never writes more than 20 entries (count clamped to 0..=20). Still unsent | per Bevy RE notes (`391e0840` -> `394d2370` clamp) |
+| M9 | A missing trial reporter name is written as an empty string (the C# omitted the length) | per Bevy RE notes (string always has its `u16` length) |
+| M10 | Bounty rows write `notGuilty` before `guilty` | verified: row reader `397bebf0` reads `notGuilty` (`+0xc8`) then `guilty` (`+0xcc`) |
+| M14 | `SCUnitState` of a character sets flag bit3 (`0x0008`) while force attack is on, so late observers see Bloodlust | verified: `397c9480` stores bit3 of the `u16` flags in the unit's force-attack byte |
+| M15 | `SCCooldowns` has a full writer (`i32` count + `[id, total, remaining]` u32 triples, skills then tags, 150 per list) and is sent after `SCCharacterState` when the character has running skill cooldowns. The server keeps only the end time of a skill cooldown and no tags, so `total` equals `remaining` | verified: `397b64d0` -> `397b2350`; entries are appended, an empty list is no reset. Cooldowns are not persisted, so a freshly loaded character normally has none |
+| CS | The client CS table entries missing from `opcodes::cs` were added: `0x11f CSRequestSetBountyMoney`, `0x120 CSSendBountyUpdate`, `0x130 CSRankSnapshot` (already handled through a local const, now the table entry), `0x133 CSChangeAutoUseAAPoint` | the Bevy `opcodes.rs` (client table); 0x130 additionally by the RE notes in `ranking_packets.rs`. `0x11f`/`0x120` are logged no-ops (the bounty ledger is not wired to the wallet, TODO); `0x133` sets `Character.auto_use_aa_point` |
+
+Doc-only items:
+
+- **M11** scheduled rewards: the client keeps at most 16 rows (verified: `397b0190` clamps the
+  count to `0x10`, row `3961f100` = `u32,u8,i32,i64`). We still write up to
+  `MAX_ITEMS_IN_PACKET` (32); the extra rows are ignored in a plain frame, and the packet is never
+  batched, so it is left unchanged.
+- **M12** list caps (family > 8, achievements > 50, radar > 10, battlefield members > 50, expedition
+  chunks of 20): per Bevy RE notes; our senders already chunk at those sizes. Not re-verified.
+- **M17** (f32 vs f64 arithmetic of pet revive/repair cost), **M18** (ranking period: UTC half-open vs
+  local inclusive), **M19** (`SCUnitMovements` unsent), **M20** (party leave/kick log-only; the
+  client uses `CSAskRiskyTeamAction`), **M21** (new factions get `political_system 1`, native
+  rename needs 0), **M23** (actability downgrade clamp): per Bevy RE notes, not re-verified and not
+  changed; each needs a reproduction against the real client before a fix.
