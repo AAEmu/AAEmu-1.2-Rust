@@ -12,7 +12,10 @@ use crate::systems::skills::packets::CompressedGamePackets;
 use crate::systems::skills::packets_special::{SCCharacterResurrectedPacket, SCTeleportUnitPacket};
 use crate::world::{Player, PlayerRef, WorldObject};
 
-use super::data::{Battlefield, GameRuleSet, Point};
+use super::data::{
+    game_score_event, BattleFieldBuff, Battlefield, GameRuleEvent, GameRuleSet, GameScoreRule,
+    Point,
+};
 use super::events::{CharEvent, Handler};
 use super::packets::{
     SCAppliedToInstantGamePacket, SCCancelInstantGamePacket, SCInstantGameAddPointPacket,
@@ -218,6 +221,12 @@ pub struct InstantGame {
     pub world_id: u32,
     /// `_zoneInstanceId`.
     pub zone_instance_id: ZoneInstanceId,
+    /// The rule set's `game_score_rules` rows (kill / assist score).
+    pub score_rules: Vec<GameScoreRule>,
+    /// The rule set's `game_rule_events` rows (loaded; no 1.2 server consumer defines them).
+    pub rule_events: Vec<GameRuleEvent>,
+    /// The battlefield's `battle_field_buffs` rows (granted at match start).
+    pub battlefield_buffs: Vec<BattleFieldBuff>,
     st: Mutex<GameState>,
     /// The timed `EndGame` task (`_endGameTokenSource`).
     end_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -331,6 +340,8 @@ pub fn create_game(server: &GameServer, battlefield: &Battlefield) -> Option<Arc
         let w = world.clone();
         tokio::spawn(async move { worlds::load_spawns(&s, &w).await });
     }
+    let battlefields = &server.game_data.systems.instances.battlefields;
+    let rule_set_id = rule_set.id;
     let game = Arc::new(InstantGame {
         uid: server.systems.instances.next_uid(),
         battlefield: battlefield.clone(),
@@ -340,6 +351,9 @@ pub fn create_game(server: &GameServer, battlefield: &Battlefield) -> Option<Arc
             zone_id: battlefield.zone_key,
             instance_id: world.id,
         },
+        score_rules: battlefields.score_rules(rule_set_id).to_vec(),
+        rule_events: battlefields.rule_events(rule_set_id).to_vec(),
+        battlefield_buffs: battlefields.battlefield_buffs(battlefield.id).to_vec(),
         st: Mutex::new(GameState {
             corps: vec![
                 (rule_set.corps1_faction_id, Vec::new()),
@@ -610,7 +624,7 @@ pub fn start_game(server: &GameServer, game: &Arc<InstantGame>) {
                 .map(|(p, _)| p.clone())
                 .collect();
             for p in players {
-                reset_player(&s, &p);
+                reset_player(&s, &g, &p);
             }
         });
     }
@@ -625,8 +639,9 @@ pub fn start_game(server: &GameServer, game: &Arc<InstantGame>) {
     *game.end_task.lock().expect("end task poisoned") = Some(handle);
 }
 
-/// Full HP / MP (broadcast), `Buffs.RemoveAllEffects()`, `ResetAllSkillCooldowns(false)`.
-fn reset_player(server: &GameServer, p: &PlayerRef) {
+/// Full HP / MP (broadcast), `Buffs.RemoveAllEffects()`, the battlefield's authored buffs,
+/// `ResetAllSkillCooldowns(false)`.
+pub(crate) fn reset_player(server: &GameServer, game: &InstantGame, p: &PlayerRef) {
     let (hp, mp) = {
         let mut c = p.data();
         c.unit.hp = c.unit.max_hp;
@@ -646,7 +661,48 @@ fn reset_player(server: &GameServer, p: &PlayerRef) {
     );
     crate::systems::skills::buffs::remove_all_effects(server, &obj);
     crate::systems::dispatch_buff_events(server, &obj);
+    apply_battlefield_buffs(server, game, p);
     reset_all_skill_cooldowns(server, p, false);
+}
+
+/// Grants the battlefield's `battle_field_buffs` rows at match start (after the reset, which
+/// removes every buff). The row's `value` is the buff's initial charge (the 3.0 successor
+/// `battle_field_honor_buffs.basic_value` carries the same figures).
+fn apply_battlefield_buffs(server: &GameServer, game: &InstantGame, p: &PlayerRef) {
+    if game.battlefield_buffs.is_empty() {
+        return;
+    }
+    let obj = WorldObject::from(p);
+    for row in &game.battlefield_buffs {
+        crate::systems::skills::buffs::add_buff_by_id_with_charge(
+            server,
+            &obj,
+            row.buff_id,
+            &obj,
+            0,
+            row.value,
+        );
+    }
+}
+
+/// Removes the buffs this battlefield granted (leave / disconnect), so they are never saved
+/// with the character (`save_rule_id` of buffs 7006-7062 is 1 and their duration is 0).
+fn remove_battlefield_buffs(server: &GameServer, game: &InstantGame, p: &PlayerRef) {
+    if game.battlefield_buffs.is_empty() {
+        return;
+    }
+    let obj = WorldObject::from(p);
+    for row in &game.battlefield_buffs {
+        crate::systems::skills::buffs::remove_buff(server, &obj, row.buff_id);
+    }
+}
+
+/// A disconnect while in an instant game: drop the battlefield buffs. The faction is restored
+/// by the departure save (`world::session::save_and_remove_from_world`).
+pub fn on_disconnect(server: &GameServer, p: &PlayerRef) {
+    if let Some(game) = server.systems.instances.instant_games.current(p) {
+        remove_battlefield_buffs(server, &game, p);
+    }
 }
 
 /// `Character.ResetAllSkillCooldowns(triggerGcd)`: one `SCSkillCooldownResetPacket` per skill
@@ -846,6 +902,7 @@ pub fn leave_current_game(server: &GameServer, p: &PlayerRef) {
 
 /// `LeaveInstantGame(character)`.
 pub fn leave_instant_game(server: &GameServer, game: &Arc<InstantGame>, p: &PlayerRef) {
+    remove_battlefield_buffs(server, game, p);
     remove_player(server, game, p);
     let origin = p.data().unit.origin_faction_id;
     if origin == 0 {
@@ -982,11 +1039,61 @@ pub fn on_kill(
         skill_id: 0,
         enabled: true,
     });
-    // TODO (C#): Get score from events
-    if add_score(server, game, killer_corps, ki, 30) {
+    // The final-hitter kill score comes from the rule set's `game_score_rules` row (1.2:
+    // rule set 28 = 30 per kill, id 93; rule sets 8/17/22/26/27 = 3 per kill, ids 26/53/68/
+    // 73/76). A rule set without that row awards nothing (C#: a hard-coded 30).
+    let kill_score = GameScoreRule::resolve(
+        &game.score_rules,
+        game_score_event::KILL_ENEMY_UNIT_FINAL_HITTER,
+        0,
+        killer_corps,
+    )
+    .unwrap_or_else(|| {
+        tracing::warn!(
+            "[InstantGame] rule set {} has no game_score_rules row for event 200; the kill awards no score",
+            game.rule_set.id
+        );
+        0
+    });
+    if add_score(server, game, killer_corps, ki, kill_score) {
         // C#: `EndGame().Start()` throws InvalidOperationException after starting the end of
         // the game, so the rest of OnKill (the respawn) does not run.
         return;
+    }
+    // Assists: the 1.2 assist rows (202/203/204) all award 2 points in rule sets 8/17/22/26/27
+    // and the data does not distinguish healer / dealer assists here, so one 204 row is paid
+    // per assist; rule set 28 (Gladiator) authors no assist row.
+    if let Some(assist_score) = GameScoreRule::resolve(
+        &game.score_rules,
+        game_score_event::KILL_ENEMY_UNIT_ASSIST_DEALER1,
+        0,
+        killer_corps,
+    ) {
+        let mut seen = Vec::new();
+        for id in crate::systems::skills::combat::collect_assists(server, &victim, killer, now_ms())
+        {
+            if id == killer.character_id || seen.contains(&id) {
+                continue;
+            }
+            seen.push(id);
+            let Some(assist) = server.world.character_by_id(id) else {
+                continue;
+            };
+            let scorer = {
+                let mut st = game.st();
+                let Some(ai) = st.member_index(&assist) else {
+                    continue;
+                };
+                if st.corps_of(&assist) != Some(killer_corps) {
+                    continue;
+                }
+                st.members[ai].assists = st.members[ai].assists.wrapping_add(1);
+                ai
+            };
+            if add_score(server, game, killer_corps, scorer, assist_score) {
+                return;
+            }
+        }
     }
     let victim_spawn = game.spawn_of(victim_corps);
     let killer_spawn = game.spawn_of(if victim_corps == corps::CORPS1 {

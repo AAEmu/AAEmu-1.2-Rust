@@ -142,6 +142,9 @@ pub fn fire_disconnect(server: &GameServer, p: &PlayerRef) {
             dungeon::on_disconnect(server, &d, p);
         }
     }
+    // Instant games are keyed by `CurrentInstantGame`, not by a CharacterEvents subscription
+    // (the C# had no disconnect handler there either): drop the battlefield buffs only.
+    instant_game::on_disconnect(server, p);
 }
 
 /// `character.Events.OnTeamJoin(sender, { Team, Player })` (`TeamManager.CreateNewTeam` /

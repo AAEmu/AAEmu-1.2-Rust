@@ -410,11 +410,24 @@ pub fn add_buff_by_id(
     caster: &WorldObject,
     forced_duration: i32,
 ) {
+    add_buff_by_id_with_charge(server, owner, buff_id, caster, forced_duration, 0);
+}
+
+/// `Buffs.AddBuff(buffId, ...)` with an explicit initial charge (the `battle_field_buffs.value`
+/// column). A charge of 0 keeps the template's `init_min_charge` / `init_max_charge` roll.
+pub fn add_buff_by_id_with_charge(
+    server: &GameServer,
+    owner: &WorldObject,
+    buff_id: u32,
+    caster: &WorldObject,
+    forced_duration: i32,
+    charge: i32,
+) {
     let Some(t) = server.game_data.systems.skills.buff(buff_id).cloned() else {
         tracing::error!("AddBuff: unknown buff {buff_id}");
         return;
     };
-    let b = new_buff(
+    let mut b = new_buff(
         server,
         &t,
         Some(caster),
@@ -422,6 +435,7 @@ pub fn add_buff_by_id(
         None,
         now_ms(),
     );
+    b.charge = charge;
     add_buff(server, owner, b, 0, forced_duration);
 }
 
