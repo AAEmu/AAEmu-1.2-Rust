@@ -8,9 +8,8 @@ use std::collections::HashMap;
 use crate::data::world_data::{factions, FactionData};
 use crate::data::GameDataError;
 use crate::server::GameServer;
-use crate::systems::social::packets::faction::SCUnitFactionChangedPacket;
 use crate::systems::DataLoadCtx;
-use crate::world::{broadcast, PlayerRef};
+use crate::world::PlayerRef;
 
 /// `RelationState`.
 pub mod relation_state {
@@ -139,54 +138,21 @@ pub fn player_relation(server: &GameServer, me: &PlayerRef, other: &PlayerRef) -
 /// kicks the character from a guild of another mother faction (`ExpeditionManager.Kick` with
 /// its own connection) and from its party.
 pub async fn set_faction(server: &GameServer, p: &PlayerRef, faction_id: u32) {
-    let (old, name, inst, exp) = {
+    let (old, exp) = {
         let c = p.data();
-        (
-            c.unit.faction_id,
-            c.unit.name.clone(),
-            c.unit.transform.instance_id,
-            c.unit.expedition_id,
-        )
+        (c.unit.faction_id, c.unit.expedition_id)
     };
     // Character.SetFaction: `if (Faction.Id == factionId) return;`
     if old == faction_id {
         return;
     }
-    // Unit.SetFaction
     {
-        let now = crate::systems::social::util::now_ms();
         let mut c = p.data();
-        c.unit.origin_faction_id = old;
         c.origin_faction_name = c.faction_name.clone();
-        tracing::info!(
-            "SetFaction: npc={}:{}, factionId={faction_id}",
-            c.unit.template_id,
-            p.obj_id
-        );
-        c.unit.faction_id = faction_id;
-        if faction_id == factions::PIRATE {
-            if !c.unit.buffs.check_buff(BUFF_CONTEMPTUOUS) {
-                crate::db_character::add_buff_by_id(server, &mut c, BUFF_CONTEMPTUOUS, now);
-            }
-        } else {
-            c.unit.buffs.remove_buff(BUFF_CONTEMPTUOUS);
-        }
     }
-    if let Some(w) = server.world.world(inst) {
-        broadcast(
-            &w,
-            p,
-            &SCUnitFactionChangedPacket {
-                obj_id: p.obj_id,
-                unit_name: name,
-                id: old,
-                id2: faction_id,
-                temp: false,
-            },
-            true,
-        );
-    }
-    crate::systems::dispatch_buff_events(server, &crate::world::WorldObject::from(p));
+    let obj = crate::world::WorldObject::from(p);
+    crate::systems::skills::combat::set_faction_with_temp(server, &obj, faction_id, false);
+    crate::systems::dispatch_buff_events(server, &obj);
     // Character.SetFaction: houses, guild, party.
     server
         .systems
@@ -209,6 +175,46 @@ pub async fn set_faction(server: &GameServer, p: &PlayerRef, faction_id: u32) {
             crate::systems::social::team::risky_action::KICK,
         );
     }
+}
+
+/// A temporary faction change (duel Red / Blue team, battlefield corps) that is **not**
+/// persisted and has none of `Character.SetFaction`'s side effects: no housing faction update,
+/// no expedition / guild kick and no party removal. The broadcast carries `temp = true`; the
+/// first origin faction survives nested temporary changes.
+///
+/// Deviation from the 1.2 C# (RPA-09): the C# reused `Character.SetFaction`, so a duel or
+/// battlefield changed the saved `characters.faction_id`, updated houses and could expel a
+/// guild member whose guild mother faction differed.
+pub fn set_temporary_faction(server: &GameServer, p: &PlayerRef, faction_id: u32) {
+    if p.data().unit.faction_id == faction_id {
+        return;
+    }
+    let obj = crate::world::WorldObject::from(p);
+    crate::systems::skills::combat::set_faction_with_temp(server, &obj, faction_id, true);
+    crate::systems::dispatch_buff_events(server, &obj);
+}
+
+/// Restores the faction of an active temporary change (`set_temporary_faction`). A no-op when
+/// no temporary change is active (already restored on end / disconnect / leave).
+pub fn restore_temporary_faction(server: &GameServer, p: &PlayerRef) {
+    let origin = {
+        let c = p.data();
+        if !c.unit.faction_temporary {
+            return;
+        }
+        c.unit.origin_faction_id
+    };
+    if origin == 0 {
+        tracing::error!(
+            "RestoreFaction: {} ({}) has a temporary faction without an origin",
+            p.data().unit.name,
+            p.character_id
+        );
+        return;
+    }
+    let obj = crate::world::WorldObject::from(p);
+    crate::systems::skills::combat::set_faction_with_temp(server, &obj, origin, false);
+    crate::systems::dispatch_buff_events(server, &obj);
 }
 
 #[cfg(test)]

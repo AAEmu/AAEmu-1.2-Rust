@@ -1918,6 +1918,13 @@ async fn battlefield_entered_requires_actual_instance_and_subscribes_kills_once(
             .count(&p.p, CharEvent::Kill),
         1
     );
+    // RPA-09: the corps faction is temporary and restored when the player leaves.
+    assert_eq!(p.p.data().unit.faction_id, 160);
+    assert!(p.p.data().unit.faction_temporary);
+    assert_eq!(p.p.data().unit.origin_faction_id, original_faction);
+    instant_game::leave_current_game(&server, &p.p);
+    assert_eq!(p.p.data().unit.faction_id, original_faction);
+    assert!(!p.p.data().unit.faction_temporary);
 }
 
 /// Two players matched, joined and entered on battlefield 7; the game has started.

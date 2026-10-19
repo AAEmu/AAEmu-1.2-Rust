@@ -476,6 +476,144 @@ async fn unknown_challenged_character_is_ignored() {
     assert!(f.a.drain().is_empty());
 }
 
+/// RPA-09: the Red / Blue team factions are temporary. They carry `temp = true`, do not touch
+/// the guild (a guild of another mother faction used to expel its own member) or the party, and
+/// the origin faction is restored when the duel ends.
+#[tokio::test]
+async fn temporary_team_factions_keep_guild_and_restore() {
+    use crate::data::world_data::SystemFaction;
+    use crate::systems::social::expedition::{Expedition, ExpeditionMember, ExpeditionRolePolicy};
+    use crate::systems::social::packets::body;
+    use crate::systems::social::packets::faction::SCUnitFactionChangedPacket;
+
+    let mut f = Fixture::new(true);
+    // Nuia guild: RedTeam (159) is not its mother faction, so the old SetFaction path would
+    // expel both members through their officer roles.
+    let member = |id: u32, name: &str, role: u8| ExpeditionMember {
+        expedition_id: 77,
+        character_id: id,
+        in_party: false,
+        is_online: true,
+        last_world_leave_time: 0,
+        name: name.into(),
+        level: 10,
+        zone_id: 0,
+        id3: 0,
+        abilities: [0; 3],
+        role,
+        position: (0.0, 0.0, 0.0),
+        memo: String::new(),
+        transfer_requested_time: 0,
+    };
+    let policy = |role: u8| ExpeditionRolePolicy {
+        expedition_id: 77,
+        role,
+        name: format!("role {role}"),
+        dominion_declare: false,
+        invite: true,
+        expel: true,
+        promote: true,
+        dismiss: true,
+        chat: true,
+        manager_chat: false,
+        siege_master: false,
+        join_siege: false,
+    };
+    f.server.expeditions.add(Expedition {
+        faction: SystemFaction {
+            id: 77,
+            mother_id: 148,
+            name: "Knights".into(),
+            owner_id: 1,
+            owner_name: "Alice".into(),
+            ..SystemFaction::default()
+        },
+        members: vec![member(1, "Alice", 255), member(2, "Bob", 2)],
+        policies: vec![policy(255), policy(2)],
+        removed_members: Vec::new(),
+        is_disbanded: false,
+    });
+    f.pa.data().unit.expedition_id = 77;
+    f.pb.data().unit.expedition_id = 77;
+
+    f.challenge().await;
+    f.b.drain();
+    f.answer(0).await;
+    let fa = f.a.drain();
+    assert!(find(&fa, sc::SCUnitFactionChangedPacket).contains(&body(
+        &SCUnitFactionChangedPacket {
+            obj_id: 0x100,
+            unit_name: "Alice".into(),
+            id: 101,
+            id2: FACTION_RED_TEAM,
+            temp: true,
+        }
+    )));
+    assert!(
+        find(&f.b.drain(), sc::SCUnitFactionChangedPacket).contains(&body(
+            &SCUnitFactionChangedPacket {
+                obj_id: 0x101,
+                unit_name: "Bob".into(),
+                id: 101,
+                id2: FACTION_BLUE_TEAM,
+                temp: true,
+            }
+        ))
+    );
+    // The guild and its roles are untouched.
+    let e = f.server.expeditions.get(77).expect("guild");
+    assert_eq!(e.member_ids(), vec![1, 2]);
+    assert_eq!(e.member(2).unwrap().role, 2);
+    assert!(e.removed_members.is_empty());
+    assert_eq!(f.pa.data().unit.expedition_id, 77);
+    assert_eq!(f.pb.data().unit.expedition_id, 77);
+    assert!(f.pa.data().unit.faction_temporary && f.pb.data().unit.faction_temporary);
+
+    // Duel end restores both factions and clears the temporary marker.
+    f.duels()
+        .duel_stop(&f.server, 1, duel_det_type::DRAW, 2)
+        .await;
+    for p in [&f.pa, &f.pb] {
+        assert_eq!(p.data().unit.faction_id, 101);
+        assert!(!p.data().unit.faction_temporary);
+    }
+    assert_eq!(
+        f.server.expeditions.get(77).unwrap().member_ids(),
+        vec![1, 2]
+    );
+    assert!(f
+        .server
+        .expeditions
+        .get(77)
+        .unwrap()
+        .removed_members
+        .is_empty());
+}
+
+/// RPA-09: a disconnect during the duel restores the faction before the departure save, so a
+/// relog / crash recovery never sees the Red / Blue team faction.
+#[tokio::test]
+async fn disconnect_during_a_duel_restores_the_origin_faction() {
+    let mut f = Fixture::new(true);
+    f.challenge().await;
+    f.b.drain();
+    f.answer(0).await;
+    f.a.drain();
+    f.b.drain();
+    assert_eq!(f.pa.data().unit.faction_id, FACTION_RED_TEAM);
+
+    crate::world::session::on_disconnect(&f.server, &mut f.a.conn).await;
+    assert_eq!(f.pa.data().unit.faction_id, 101);
+    assert!(!f.pa.data().unit.faction_temporary);
+    // The save path also restores, so a clean logout (leave world) behaves the same.
+    f.pb.data().unit.faction_id = FACTION_BLUE_TEAM;
+    f.pb.data().unit.faction_temporary = true;
+    f.pb.data().unit.origin_faction_id = 101;
+    crate::world::session::save_and_remove_from_world(&f.server, Some(&f.pb)).await;
+    assert_eq!(f.pb.data().unit.faction_id, 101);
+    assert!(!f.pb.data().unit.faction_temporary);
+}
+
 #[tokio::test]
 async fn real_timers_start_and_end_the_duel() {
     let mut f = Fixture::with_delays(true, Duration::from_millis(20), Duration::from_millis(20));

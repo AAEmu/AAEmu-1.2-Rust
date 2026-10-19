@@ -857,7 +857,7 @@ pub fn leave_instant_game(server: &GameServer, game: &Arc<InstantGame>, p: &Play
         );
         return;
     }
-    set_character_faction(server, p, origin);
+    crate::systems::social::faction::restore_temporary_faction(server, p);
     server
         .systems
         .instances
@@ -876,53 +876,16 @@ pub fn leave_instant_game(server: &GameServer, game: &Arc<InstantGame>, p: &Play
     let _ = worlds::return_to_main_world(server, p);
 }
 
-/// `Character.SetFaction(factionId)`: `Unit.SetFaction` plus the character part (housing,
-/// expedition and party).
+/// The corps faction of an instant game is a **temporary** faction change.
 ///
-/// Note (C#): entering a battlefield sets the corps faction, so a guild member whose guild's
-/// mother faction differs is kicked from the guild (`ExpeditionManager.Kick(connection, id)`,
-/// subject to their role's expel right) and from their party; mirrored by default. The
-/// `Dungeons.KickOnBattlefieldFactionChange` switch (`false`) keeps both memberships.
+/// Deviation from the 1.2 C# (RPA-09): the C# called `Character.SetFaction`, so entering a
+/// battlefield changed the saved faction, rewrote the owned houses' faction and could expel a
+/// guild member whose guild mother faction differs (and drop them from their party; the
+/// `Dungeons.KickOnBattlefieldFactionChange` switch only gated the kick). The corps faction is
+/// now never persisted and leaves houses, guild membership and party membership untouched; it
+/// is restored on leave and on disconnect (`social::faction::restore_temporary_faction`).
 pub fn set_character_faction(server: &GameServer, p: &PlayerRef, faction_id: u32) {
-    if p.data().unit.faction_id == faction_id {
-        return;
-    }
-    let kick = server.config.dungeons.kick_on_battlefield_faction_change;
-    let obj = WorldObject::from(p);
-    crate::systems::skills::combat::set_faction(server, &obj, faction_id);
-    crate::systems::dispatch_buff_events(server, &obj);
-    let (id, faction, expedition, in_party) = {
-        let c = p.data();
-        (c.id, c.unit.faction_id, c.unit.expedition_id, c.in_party)
-    };
-    server
-        .systems
-        .social
-        .hooks
-        .get()
-        .update_owned_housing_faction(server, id, faction);
-    if kick && expedition != 0 {
-        let mother = server
-            .expeditions
-            .get(expedition)
-            .map(|e| e.faction.mother_id);
-        if mother.is_some_and(|m| m != faction_id) {
-            if let Some(s) = server.self_arc() {
-                let p = p.clone();
-                tokio::spawn(async move {
-                    crate::systems::social::expedition::kick(&s, &p, p.character_id).await;
-                });
-            }
-        }
-    }
-    if kick && in_party {
-        server.systems.social.teams.member_remove_from_team(
-            server,
-            p,
-            p,
-            crate::systems::social::team::risky_action::KICK,
-        );
-    }
+    crate::systems::social::faction::set_temporary_faction(server, p, faction_id);
 }
 
 /// `OnKill(sender, args)` (instant game kill scoring; `killer` is the subscribed player).

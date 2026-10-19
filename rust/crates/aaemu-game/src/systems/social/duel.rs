@@ -390,21 +390,21 @@ impl DuelManager {
         duel.state().start_task = Some(timer);
     }
 
-    /// `SetFaction(owner, factionId)`: remembers the current faction, then
-    /// `Character.SetFaction`.
+    /// `SetFaction(owner, factionId)`: remembers the current faction, then sets the temporary
+    /// team faction (no expedition / party / housing side effects, never saved).
     async fn set_faction(&self, server: &GameServer, owner: &PlayerRef, faction_id: u32) {
         let current = owner.data().unit.faction_id;
         self.st().save_factions.insert(owner.character_id, current);
-        faction::set_faction(server, owner, faction_id).await;
+        faction::set_temporary_faction(server, owner, faction_id);
     }
 
     /// `RestoreFaction(owner)`. `false` = no saved faction (the C# throws
     /// `KeyNotFoundException`, which aborts `DuelStop`).
     async fn restore_faction(&self, server: &GameServer, owner: &PlayerRef) -> bool {
-        let Some(saved) = self.saved_faction(owner.character_id) else {
+        let Some(_saved) = self.saved_faction(owner.character_id) else {
             return false;
         };
-        faction::set_faction(server, owner, saved).await;
+        faction::restore_temporary_faction(server, owner);
         self.st().save_factions.remove(&owner.character_id);
         true
     }

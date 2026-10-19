@@ -1267,6 +1267,9 @@ pub async fn save_and_remove_from_world(server: &GameServer, active: Option<&Pla
     let Some(p) = active else {
         return;
     };
+    // A duel / battlefield faction is temporary: restore it before the departure save so the
+    // character is never persisted with its Red / Blue team or corps faction (RPA-09).
+    crate::systems::social::faction::restore_temporary_faction(server, p);
     server.save.remember_departing(p);
     crate::systems::npcs::schedule_item_session::on_leave(server, p);
     let _transaction = server.save.transaction_lock().await;

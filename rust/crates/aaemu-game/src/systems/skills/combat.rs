@@ -1352,18 +1352,31 @@ pub fn set_invisible(server: &GameServer, unit: &WorldObject, value: bool) {
 /// `Unit.SetFaction(factionId)` (the `Character` override returns early for the same faction
 /// and kicks from foreign guilds / parties: social subsystem).
 pub fn set_faction(server: &GameServer, unit: &WorldObject, faction_id: u32) {
+    set_faction_with_temp(server, unit, faction_id, false);
+}
+
+/// `Unit.SetFaction(factionId)` with the `SCUnitFactionChangedPacket.temp` flag: a temporary
+/// change (duel Red / Blue team, battlefield corps) keeps the *first* origin faction until it
+/// is restored and is never persisted by `db_character::save_character`.
+pub fn set_faction_with_temp(server: &GameServer, unit: &WorldObject, faction_id: u32, temp: bool) {
     let Some((old, name)) = unit.with_unit(|u| {
-        let u = u.unit_mut();
-        let old = u.faction_id;
-        u.origin_faction_id = old;
-        (old, u.name.clone())
+        let u = u.unit();
+        (u.faction_id, u.name.clone())
     }) else {
         return;
     };
     if old == faction_id {
         tracing::info!("SetFaction: faction has already been established factionId={faction_id}");
     } else {
-        unit.with_unit(|u| u.unit_mut().faction_id = faction_id);
+        unit.with_unit(|u| {
+            let u = u.unit_mut();
+            // Nested temporary changes (a duel inside a battlefield) keep the true origin.
+            if !u.faction_temporary || !temp {
+                u.origin_faction_id = old;
+            }
+            u.faction_id = faction_id;
+            u.faction_temporary = temp;
+        });
         broadcast(
             server,
             unit,
@@ -1372,7 +1385,7 @@ pub fn set_faction(server: &GameServer, unit: &WorldObject, faction_id: u32) {
                 unit_name: name,
                 id: old,
                 id2: faction_id,
-                temp: false,
+                temp,
             },
             true,
         );
