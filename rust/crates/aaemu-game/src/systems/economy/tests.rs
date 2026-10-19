@@ -793,11 +793,12 @@ async fn deposit_and_withdraw_money() {
     let m2 = w.pa.data().money2;
     assert_eq!((m, m2), (350, 150));
     let f = w.a.drain();
-    // The withdraw keeps the default task type DepositMoney (C#).
+    // Withdraw reports its own task type (`ItemTaskType.WithdrawMoney`; the C# kept the
+    // default DepositMoney).
     assert_eq!(
         f[0].1,
         task_body(
-            task_type::DEPOSIT_MONEY,
+            task_type::WITHDRAW_MONEY,
             vec![ItemTask::MoneyChangeBank(-50), ItemTask::MoneyChange(50)]
         )
     );
@@ -910,8 +911,14 @@ async fn expand_bag_and_bank() {
     assert_eq!(w.pa.data().num_inventory_slots, 60);
     assert_eq!(Inv::of(&w.pa).bag().lock().unwrap().container_size(), 60);
     let f = w.a.drain();
-    assert_eq!(f[0].0, sc::SCInvenExpandedPacket);
-    assert_eq!(f[0].1, vec![2, 60]);
+    // The price is reported with the expand (the C# deducted it without sending the task).
+    assert_eq!(f.len(), 2);
+    assert_eq!(
+        f[0].1,
+        task_body(task_type::EXPAND_BAG, vec![ItemTask::MoneyChange(-100)])
+    );
+    assert_eq!(f[1].0, sc::SCInvenExpandedPacket);
+    assert_eq!(f[1].1, vec![2, 60]);
 
     // Bank needs 2 x STACK in the bag
     let mut s = PacketStream::new();

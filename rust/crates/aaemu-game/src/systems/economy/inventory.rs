@@ -1389,8 +1389,18 @@ pub fn expand_slot(txn: &mut ItemTxn<'_>, player: &PlayerRef, inv: &Inv, st: u8)
         return;
     }
     if expand.price != 0 {
-        // `tasks.Add(new MoneyChange(-expand.Price))` is never sent in C#.
+        // `tasks.Add(new MoneyChange(-expand.Price))` was collected but never sent in C#; the
+        // client needs the change to update its displayed money.
         player.data().money -= i64::from(expand.price);
+        txn.env.fx.tasks(
+            player.character_id,
+            if is_bank {
+                task_type::EXPAND_BANK
+            } else {
+                task_type::EXPAND_BAG
+            },
+            vec![ItemTask::MoneyChange(-expand.price)],
+        );
     }
     if expand.item_id != 0 && expand.item_count != 0 {
         inv.bag().lock().expect("container poisoned").consume_item(
