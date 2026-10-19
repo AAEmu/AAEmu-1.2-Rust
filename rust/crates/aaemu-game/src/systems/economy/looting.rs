@@ -922,13 +922,13 @@ fn finish_rolling(ctx: &mut Ctx<'_, '_>, g: &mut Guard<'_>, idx: u16) {
             },
         );
     }
-    // Find the "highest" rolled value (C#: OrderBy ascending + FirstOrDefault = the LOWEST
-    // positive roll, or 0)
+    // Find the highest rolled value (the C# sorted ascending and took the first positive roll,
+    // i.e. the LOWEST; a dice bid is won by the highest roll).
     let highest = rolls
         .iter()
         .map(|(_, r)| *r)
         .filter(|r| *r > 0)
-        .min()
+        .max()
         .unwrap_or(0);
     // Find highest roller(s) (stable OrderBy)
     let mut highest_entries: Vec<(u32, i8)> = rolls

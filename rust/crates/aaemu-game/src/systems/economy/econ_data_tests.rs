@@ -490,6 +490,40 @@ async fn bind_on_pickup_loot_is_rolled_by_the_team() {
 }
 
 #[tokio::test]
+async fn loot_dice_highest_roll_wins() {
+    let mut w = world_with(data());
+    let npc = spawn_npc(&mut w);
+    let lm = &w.server.systems.economy.loot;
+    lm.hooks
+        .teams
+        .install(Arc::new(TeamOf(vec![w.pa.clone(), w.pb.clone()])));
+    lm.hooks.npcs.install(Arc::new(Tagged));
+    let mut rng = ScriptedRng::new(&[0, 0, 0, 3, 50, 1], &[]);
+    LootManager::generate_loot_with(&w.server, &WorldObject::from(&npc), None, &mut rng);
+    w.a.drain();
+    w.b.drain();
+    // Starting the roll on the BoP item opens it for both members.
+    assert!(!LootManager::try_take_loot(
+        &w.server, &w.pa, NPC_OBJ, 3, false
+    ));
+    w.a.drain();
+    w.b.drain();
+    // Alice rolls 20, Bob rolls 80.
+    let mut rng = ScriptedRng::new(&[20], &[]);
+    LootManager::do_player_roll(&w.server, &w.pa, NPC_OBJ, 3, true, &mut rng);
+    let mut rng = ScriptedRng::new(&[80], &[]);
+    LootManager::do_player_roll(&w.server, &w.pb, NPC_OBJ, 3, true, &mut rng);
+    // The highest roll wins: Bob, not the lowest roller (C# took the first ascending roll).
+    assert_eq!(
+        item_at(&w.pb, slot_type::INVENTORY, 0)
+            .expect("Bob won the roll")
+            .template_id,
+        BOP
+    );
+    assert!(item_at(&w.pa, slot_type::INVENTORY, 0).is_none());
+}
+
+#[tokio::test]
 async fn make_loot_public_finishes_pending_rolls() {
     let mut w = world_with(data());
     let npc = spawn_npc(&mut w);
