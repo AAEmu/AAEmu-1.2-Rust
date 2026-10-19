@@ -564,7 +564,6 @@ impl ItemContainer {
                 }
                 self.on_enter_container(&entered, fx);
             }
-            item = entered;
         }
 
         let mut source_owner = 0;
@@ -590,10 +589,10 @@ impl ItemContainer {
                 });
             }
             if can_add_to_same_slot {
-                // The merged item object is gone from every container but stays in the C#
-                // `_allItems` (its DB row is never deleted); `ItemManager` keeps it as a loose
-                // item for the same effect.
-                fx.push(ItemFx::Orphaned(Box::new(item.clone())));
+                // The merged stack lives on as the count added to the target stack. Release it
+                // like `SplitOrMoveItemEx`'s merge does: it stays in no container, so its DB
+                // row must be deleted (the C# kept it in `_allItems` and saved an orphan row).
+                fx.push(ItemFx::ReleaseId(item_id));
             }
         }
 
@@ -611,12 +610,8 @@ impl ItemContainer {
         self.apply_bind_rules_task(task, data, fx);
 
         // Only trigger when moving between containers except for this being move to Mail.
-        // `item.SlotType` is read after it was overwritten (unless the item was merged).
-        let item_slot_type_now = if can_add_to_same_slot {
-            source_slot_type
-        } else {
-            self.slot_type
-        };
+        // Use the slot type captured before the move: the C# read `item.SlotType` after it had
+        // been overwritten, so moving an item into a mail container raised no quest event.
         let same_container = src_slot_type.is_some() && !from_other;
         if !same_container && self.slot_type != slot_type::MAIL {
             fx.push(ItemFx::Acquired {
@@ -624,14 +619,14 @@ impl ItemContainer {
                 template_id,
                 count: final_count,
             });
-        } else if item_slot_type_now == slot_type::MAIL && self.slot_type != slot_type::MAIL {
+        } else if source_slot_type == slot_type::MAIL && self.slot_type != slot_type::MAIL {
             // Got attachment from Mail
             fx.push(ItemFx::Acquired {
                 owner: self.owner_id,
                 template_id,
                 count: final_count,
             });
-        } else if item_slot_type_now != slot_type::MAIL && self.slot_type == slot_type::MAIL {
+        } else if source_slot_type != slot_type::MAIL && self.slot_type == slot_type::MAIL {
             fx.push(ItemFx::Consumed {
                 owner: self.owner_id,
                 template_id,

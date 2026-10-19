@@ -1533,10 +1533,6 @@ and in NPC wandering / buff remaining times.
 * `systems::npcs`: the "spawn all" schedule check is inverted; `DoRandomSpawn` leaks an obj id and spawns twice; a doodad despawn may release its obj id twice; gimmick spawn rotations are not converted from degrees; scheduled doodad spawns stack cron tasks; the player-in-radius check scans every player; NPCs are not despawned when players leave.
 * `systems::npcs`: dated game schedules compare `StartTime` / `EndTime` (usually 0) instead of the start / end hours (a one-day event counts as ended at 00:00); the cron builder tests the captured day of week instead of its parameter, and undated schedules produce day / month 0 (rejected by the cron parser); `VendorExist` reads the `id` column; deleting a portal sends no packet; `NotifySubZone` re-sends the portal book once per recall portal of the sub zone; the exit portal's yaw is the book rotation in degrees.
 * `systems::npcs`: corrected coin double credit and failed trade-pack acquisition; `BuyFish` uses the checked economy sale. Phase operations reserve live object identity, honor interaction counts, enter functions on time-of-day changes, and cancel superseded timers. Saves/deletes use a FIFO writer drained by the save lifecycle; partial interaction counts use the doodad-interactions SQL update. Scheduled spawns recreate deleted doodads, deduplicate cron callbacks, and retain original world identity. Logic links/families route matching true/false pulses with per-object state and cycle guards; client-created wires require ownership and reach. Immediate gates are supported; delay descriptors 2/3 need reference behavior. `SpawnGimmick` creates the authored object with offsets/faction/kinematic motion; `SpawnMgmt` requires explicit authored `SpawnGroupId` membership. Prefab flow graphs are client-owned. `CheckGrowth` still runs funcs with `nextPhase = 0`; child metadata templates (e.g. `DoodadFuncBuyFishItem`) remain in the phase dictionary.
-* systems::economy: `AddOrMoveExistingItem` merging an item from another container into a stack
-  removes it from the source without releasing it (the DB row stays); it is kept as a loose item.
-  The mail branch of the acquire / consume events reads `item.SlotType` after it was overwritten,
-  so moving an item into a mail container raises no quest event.
 * systems::economy: `CSWithdrawMoneyPacket` reports `ItemTaskType.DepositMoney`; `ExpandSlot` never sends its
   `MoneyChange` task.
 * systems::economy: the two "is not welcome in this container" rejections of `SplitOrMoveItemEx`
@@ -1545,6 +1541,12 @@ and in NPC wandering / buff remaining times.
   owner). The client is the source of the request and `CanAccept` already warns with the cause.
 * systems::economy: `BindType.HasFlag(...)` on the plain `ItemBindType` enum is a bit test
   (`BindOnUnpack` matches 4..7, `BindOnEquip` matches 3 and 7); mirrored.
+* systems::economy: `AddOrMoveExistingItem` releases a stack that is merged into another
+  container's stack (the C# removed it from the source without releasing it and kept it as a
+  loose item, so its row stayed and a mail attachment merged into a bag stack was saved as an
+  orphan `slot_type Mail` row; the same fix as the fork's C# `47a3a9e77`). The mail acquired /
+  consumed event uses the slot type captured before the move (the C# read the overwritten
+  `item.SlotType`, so moving an item into a mail container raised no quest event).
 * systems::economy: `CSBuyItems` refuses only when money, honor *and* vocation are all short;
   `ExpandExpert` adds the vocation cost; craft / backpack / weapon booleans read as numbers are
   false for `'t'` texts; `Specialty.VendorExist` reads the `id` column.

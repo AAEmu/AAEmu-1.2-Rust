@@ -7,9 +7,9 @@ use aaemu_commons::{Marshal, PacketStream};
 
 use crate::data::items::{bind_type, EquipTemplate, ItemTemplate, TemplateKind};
 use crate::data::GameData;
-use crate::models::container::{equip_slot, slot_type};
+use crate::models::container::{equip_slot, slot_type, ContainerKind, ItemContainer};
 use crate::models::item::{Item, ItemClass, ITEM_FLAG_SOUL_BOUND};
-use crate::models::item_task::{task_type, ItemTask};
+use crate::models::item_task::{task_type, ItemFx, ItemFxList, ItemTask};
 use crate::net::registry::ClientPacket;
 use crate::opcodes::sc;
 use crate::server::GameServer;
@@ -439,6 +439,64 @@ async fn split_merge_and_move_in_bag() {
     let frames = w.a.drain();
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].0, sc::SCErrorMsgPacket);
+}
+
+#[test]
+fn merging_from_another_container_releases_the_stack() {
+    let game = test_data();
+    let data = &game.items;
+    let mut source = ItemContainer::new(ContainerKind::Item, 1, slot_type::INVENTORY, 100);
+    source.set_container_size(2);
+    let item = Item::create(3000, data.template(STACK).unwrap(), 5, 0, 1, data, 0);
+    assert!(source.add_new_item(item, 0, data).is_ok());
+
+    let mut target = ItemContainer::new(ContainerKind::Item, 1, slot_type::INVENTORY, 101);
+    target.set_container_size(2);
+    let first = Item::create(3001, data.template(STACK).unwrap(), 10, 0, 1, data, 0);
+    assert!(target.add_new_item(first, 0, data).is_ok());
+
+    let mut fx = ItemFxList::default();
+    assert!(target.move_item_from(&mut source, task_type::MAIL, 3000, 0, data, &mut fx));
+    assert_eq!(target.get_item_by_slot(0).unwrap().count, 15);
+    assert!(source.items.is_empty());
+    // The merged stack left every container: release its id / delete its row instead of
+    // keeping a loose item copy.
+    assert!(fx
+        .0
+        .iter()
+        .any(|e| matches!(e, ItemFx::ReleaseId(id) if *id == 3000)));
+    assert!(!fx.0.iter().any(|e| matches!(e, ItemFx::Orphaned(_))));
+}
+
+#[test]
+fn moving_an_item_into_mail_raises_the_consumed_event() {
+    let game = test_data();
+    let data = &game.items;
+    let mut bag = ItemContainer::new(ContainerKind::Item, 1, slot_type::INVENTORY, 100);
+    bag.set_container_size(2);
+    let item = Item::create(3000, data.template(STACK).unwrap(), 5, 0, 1, data, 0);
+    assert!(bag.add_new_item(item, 0, data).is_ok());
+
+    let mut mail = ItemContainer::new(ContainerKind::Item, 1, slot_type::MAIL, 101);
+    mail.set_container_size(10);
+    let mut fx = ItemFxList::default();
+    assert!(mail.move_item_from(&mut bag, task_type::MAIL, 3000, -1, data, &mut fx));
+    // Moving a bag item into the mail container consumes it (the C# read the overwritten
+    // slot type and raised no event).
+    assert_eq!(
+        fx.0.iter()
+            .filter(|e| matches!(
+                e,
+                ItemFx::Consumed {
+                    owner: 1,
+                    template_id: STACK,
+                    count: 5
+                }
+            ))
+            .count(),
+        1
+    );
+    assert!(!fx.0.iter().any(|e| matches!(e, ItemFx::Acquired { .. })));
 }
 
 #[tokio::test]
