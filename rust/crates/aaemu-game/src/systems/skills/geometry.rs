@@ -135,7 +135,8 @@ pub fn raw_distance(a: &PositionAndRotation, b: &PositionAndRotation, include_z:
     }
 }
 
-/// Edge-to-edge distance uses both scaled actor radii (or the housing radius).
+/// Edge-to-edge distance uses both scaled actor radii (or the housing radius). Shipyard prefab
+/// models have no actor radius, so the shipyard build radius stands in for the footprint.
 pub fn distance_to(server: &GameServer, from: &Target, to: &Target, include_z: bool) -> f32 {
     let a = world_pos(server, from);
     let b = world_pos(server, to);
@@ -146,6 +147,9 @@ pub fn distance_to(server: &GameServer, from: &Target, to: &Target, include_z: b
     if let Target::Obj(o) = to {
         if let Some(r) = crate::systems::housing::house_radius(server, o) {
             // Subtract house radius (GardenRadius * Scale)
+            d -= r;
+        } else if let Some(r) = crate::systems::vehicles::shipyards::shipyard_radius(server, o) {
+            // Subtract shipyard build radius (BuildRadius * Scale)
             d -= r;
         } else {
             d -= model_size(server, to);
