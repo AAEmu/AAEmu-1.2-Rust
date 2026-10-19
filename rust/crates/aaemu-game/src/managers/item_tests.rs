@@ -154,7 +154,8 @@ fn add_loaded_item_reports_a_merged_stack_and_queues_its_row() {
     assert!(manager.item_by_id(3001).is_none());
 
     // A stack that does not fit the target reports `merged = false`.
-    let (merged, res) = manager.add_loaded_item(&mut bag, create_test_item(3002, 100, 15), -1, &data);
+    let (merged, res) =
+        manager.add_loaded_item(&mut bag, create_test_item(3002, 100, 15), -1, &data);
     assert!(!merged);
     assert_eq!(res, Ok(true));
     assert_eq!(bag.get_item_by_slot(1).unwrap().id, 3002);
