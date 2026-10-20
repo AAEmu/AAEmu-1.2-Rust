@@ -12,6 +12,7 @@ use crate::models::movement::{
 use crate::models::transform::PositionAndRotation;
 use crate::packets::world::SCOneUnitMovementPacket;
 use crate::server::GameServer;
+use crate::systems::skills::ground_snap_rules as ground_snap;
 use crate::world::{now_ms, NpcRef, PlayerRef, WorldObject};
 
 use super::super::super::broadcast;
@@ -21,6 +22,7 @@ use super::super::super::packets_special::{
     TELEPORT_REASON_MOVE_TO_LOCATION,
 };
 use super::super::{rand_int, EffectArgs};
+use super::log_values;
 
 const TWO_PI: f32 = std::f32::consts::PI * 2.0;
 
@@ -360,6 +362,55 @@ pub fn knock_back(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
 
     if let Some(npc) = target.as_npc() {
         move_npc(server, npc, end, None, true);
+    }
+}
+
+/// `MoveToGround` (special type 73): lands a unit on the terrain floor, at the selected position
+/// when the target is a position unit and at the caster's own XY otherwise.
+///
+/// Ported from the C# `MoveToGround` / `GroundSnapRules` of commit `c78b3a659`; the snap policy
+/// (0.4 m clearance, water surface over the seabed, the 3 m near band, the 8 m / 12 m lift / drop
+/// caps) is [`ground_snap`]. A row with no reachable ground sample (heightmaps off, missing cell)
+/// moves nothing. The 1.2 row 9639 is `[0, 0, 0, 0]`, and `value1` names no unit on the reachable
+/// 10.x rows either, so no value is applied.
+pub fn move_to_ground(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
+    log_values(args, "MoveToGround", v);
+    let Some(caster) = &args.caster else {
+        return;
+    };
+    let current = world_pos(server, &Target::Obj(caster.clone()));
+    // The raw Z is the selected position's own height when the cast carries one, so the lift /
+    // drop caps measure the gap at the destination; a position without a height (0) falls back
+    // to the caster's Z rather than dropping the unit to sea level.
+    let (x, y, raw_z) = match &args.target {
+        Target::Pos(p) if p.pos.z > 0.0 => (p.pos.x, p.pos.y, p.pos.z),
+        Target::Pos(p) => (p.pos.x, p.pos.y, current.z),
+        Target::Obj(_) => (current.x, current.y, current.z),
+    };
+    let instance_id = caster.transform().instance_id;
+    let ground =
+        crate::systems::ai::collision::ground_height_or(server, instance_id, x, y, raw_z, || {
+            crate::systems::ai::collision::terrain_height_or(server, instance_id, x, y, || 0.0)
+        });
+    let over_water = crate::systems::ai::collision::is_water(server, instance_id, x, y, raw_z);
+    let water_surface =
+        crate::systems::ai::collision::water_level(server, instance_id, x, y, raw_z).unwrap_or(0.0);
+    let Some(z) = ground_snap::try_get_floor_z(raw_z, ground, over_water, water_surface) else {
+        return;
+    };
+    if let Some(p) = caster.as_player() {
+        // As `Blink`: only `SCBlinkUnitPacket`; the client moves itself and its movement report
+        // carries the new position back to the server.
+        p.send(SCBlinkUnitPacket {
+            obj_id: caster.obj_id(),
+            distance: 0.0,
+            degree: 0.0,
+            x,
+            y,
+            z,
+        });
+    } else if let Some(npc) = caster.as_npc() {
+        move_npc(server, npc, (x, y, z), Some((0.0, 0.0)), false);
     }
 }
 

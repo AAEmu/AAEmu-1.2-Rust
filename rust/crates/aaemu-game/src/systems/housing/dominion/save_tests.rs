@@ -101,6 +101,77 @@ async fn departing_character_remains_in_financial_snapshot_after_world_removal()
 }
 
 #[tokio::test]
+#[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; connection-local authority tables only"]
+async fn dominion_peace_window_round_trips_through_its_row() {
+    let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+        return;
+    };
+    let options = MySqlConnectOptions::from_str(&url).unwrap();
+    assert_eq!(
+        options.get_port(),
+        3317,
+        "Only private MySQL3317 is allowed"
+    );
+    let pool = MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    for table in ["dominions", "dominion_siege_participants"] {
+        let (_, ddl): (String, String) = sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query(&ddl.replacen("CREATE TABLE", "CREATE TEMPORARY TABLE", 1))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    for (column, ddl) in [
+        ("non_pvp_start_at", "bigint NOT NULL DEFAULT 0"),
+        (
+            "non_pvp_duration_min",
+            "smallint unsigned NOT NULL DEFAULT 0",
+        ),
+    ] {
+        if sqlx::query(&format!("SHOW COLUMNS FROM dominions LIKE '{column}'"))
+            .fetch_optional(&pool)
+            .await
+            .unwrap()
+            .is_none()
+        {
+            sqlx::query(&format!(
+                "ALTER TABLE dominions ADD COLUMN `{column}` {ddl}"
+            ))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    }
+    let f = fixture();
+    let now = manager::now();
+    f.server
+        .systems
+        .housing
+        .dominions
+        .start_non_pvp(25, 10, 120, now)
+        .unwrap();
+    let batch = f.server.systems.housing.dominions.prepare_save();
+    let mut tx = pool.begin().await.unwrap();
+    super::db::write_batch(&mut tx, &batch).await.unwrap();
+    tx.commit().await.unwrap();
+    let loaded = super::db::load_rows(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|state| state.zone_group_id == 25)
+        .unwrap();
+    assert_eq!(loaded.non_pvp_start_at, now);
+    assert_eq!(loaded.non_pvp_duration_min, 120);
+    pool.close().await;
+}
+
+#[tokio::test]
 #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; connection-local financial tables only"]
 async fn private_mysql_property_payment_and_collection_cannot_straddle_financial_snapshot() {
     let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
