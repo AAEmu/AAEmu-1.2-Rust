@@ -91,10 +91,16 @@ pub fn new_skill_for(
     SkillRun::new(template, level)
 }
 
+/// Mana per `mana_level_md` point at the caster's ability level (unit formulas 12 / 13, the
+/// client's skill-tooltip `manaCost` term).
+pub fn mana_level_scale(server: &GameServer, caster: &WorldObject, ability_id: u8) -> f64 {
+    (f64::from(ab_level(server, caster, ability_id) - 1) * 1.6 + 8.0) * 3.0 / 3.65
+}
+
 /// `Skill.ManaCost(caster)`.
 pub fn mana_cost(server: &GameServer, skill: &SkillRun, caster: &WorldObject) -> i32 {
     let t = &skill.template;
-    let base = (f64::from(ab_level(server, caster, t.ability_id) - 1) * 1.6 + 8.0) * 3.0 / 3.65;
+    let base = mana_level_scale(server, caster, t.ability_id);
     let cost2 = base * f64::from(t.mana_level_md) + f64::from(t.mana_cost);
     let tags = server.game_data.systems.skills.skill_tags(t.id).to_vec();
     caster

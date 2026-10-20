@@ -12,7 +12,9 @@ use super::super::super::combat as unit_combat;
 use super::super::super::packets::SCSkillCooldownResetPacket;
 use super::super::super::packets_special::SCNotifyResurrectionPacket;
 use super::super::super::progress;
-use super::super::super::skill::{apply_skill_modifiers, start_auto_skill, use_skill};
+use super::super::super::skill::{
+    apply_skill_modifiers, mana_level_scale, start_auto_skill, use_skill,
+};
 use super::super::super::state::SkillRun;
 use super::super::super::stats::{stat, StatKind};
 use super::super::super::types::{BuffRemoveOn, SkillCastTarget};
@@ -206,7 +208,16 @@ pub fn skill_use(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
     });
 }
 
-/// `ManaCost`: `value1 + value2 / 6.35` (skill modifiers applied) is taken from the character.
+/// Mana of a plot `ManaCost` effect: `value1 + value2 / 100 * scale`. In the 1.2 data `value1`
+/// equals the skill's `mana_cost` and `value2` its `mana_level_md` in percent (59 of the 68
+/// plot-only skills with the effect), so the effect charges what the skill tooltip shows
+/// (`mana_cost + mana_level_md * scale`, client formulas 12/13) instead of the C# guess
+/// `value2 / 6.35`.
+fn plot_mana_cost(value1: i32, value2: i32, scale: f64) -> f64 {
+    f64::from(value1) + f64::from(value2) / 100.0 * scale
+}
+
+/// `ManaCost`: [`plot_mana_cost`] (skill modifiers applied) is taken from the character.
 pub fn mana_cost(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
     log_values(args, "ManaCost", v);
     let Some(caster) = args.caster.as_ref() else {
@@ -224,7 +235,11 @@ pub fn mana_cost(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         skill,
         caster,
         SkillAttribute::ManaCost,
-        f64::from(v[0]) + f64::from(v[1]) / 6.35,
+        plot_mana_cost(
+            v[0],
+            v[1],
+            mana_level_scale(server, caster, skill.template.ability_id),
+        ),
     );
     unit_combat::reduce_current_mp(server, caster, mana as i32);
     let mut c = p.data();
@@ -469,5 +484,20 @@ pub fn consume_labor_power(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 
             (-t.consume_labor_power) as i16,
             t.actability_group_id,
         );
+    }
+}
+
+#[cfg(test)]
+mod mana_cost_tests {
+    use super::plot_mana_cost;
+
+    #[test]
+    fn plot_effect_matches_the_skill_tooltip_formula() {
+        // skill 11854 (md 1.55, effect 0/155) at ability level 55: scale (54 * 1.6 + 8) * 3 / 3.65
+        let scale = (54.0 * 1.6 + 8.0) * 3.0 / 3.65;
+        let tooltip = scale * 1.55;
+        assert!((plot_mana_cost(0, 155, scale) - tooltip).abs() < 1e-9);
+        // skill 18132 (mana_cost 30, md 0): fixed cost only
+        assert_eq!(plot_mana_cost(30, 0, scale), 30.0);
     }
 }
