@@ -240,6 +240,182 @@ async fn mate_skill_packet_requires_real_passenger_attachment_and_keeps_unlisted
     assert_eq!((data.unit.hp, data.unit.mp), (650, 75));
 }
 
+/// `CSStartSkillPacket` with the given caster type, self-targeted on `target_obj`.
+fn cast_packet_as(
+    caster_type: u8,
+    caster_obj: u32,
+    target_obj: u32,
+) -> super::handlers::CSStartSkillPacket {
+    let mut body = PacketStream::new();
+    body.write_u32(20001)
+        .write_u8(caster_type)
+        .write_bc(caster_obj);
+    if caster_type == super::types::caster_type::MOUNT {
+        body.write_u32(77);
+    }
+    body.write_u8(0).write_bc(target_obj).write_u8(0);
+    let mut body = PacketStream::from_bytes(body.into_bytes());
+    super::handlers::CSStartSkillPacket::read(&mut body).unwrap()
+}
+
+macro_rules! hp_mp {
+    ($e:expr) => {{
+        let d = $e.data();
+        (d.unit.hp, d.unit.mp)
+    }};
+}
+
+fn started_results(client: &mut TestClient) -> usize {
+    client
+        .drain_ops()
+        .into_iter()
+        .filter(|op| *op == crate::opcodes::sc::SCSkillStartedPacket)
+        .count()
+}
+
+#[tokio::test]
+async fn slave_skill_packet_requires_owner_or_attached_character() {
+    let server = Arc::new(test_server_with(mate_cast_data()));
+    super::bind(&server);
+    let mut stranger = TestClient::new(&server, 1, 1);
+    let owner_client = TestClient::new(&server, 2, 2);
+    let a = spawn_player(
+        &server,
+        &stranger,
+        test_character(1, "Stranger", 100.0, 100.0),
+        0x100,
+    );
+    let b = spawn_player(
+        &server,
+        &owner_client,
+        test_character(2, "Owner", 102.0, 100.0),
+        0x101,
+    );
+    stranger.conn.active_char = Some(a.clone());
+    let mut data = Slave::new(0x300, 1);
+    data.summoner_id = 2;
+    data.summoner_obj_id = b.obj_id;
+    data.unit.hp = 500;
+    data.unit.mp = 100;
+    data.unit.transform.set_xyz(103.0, 100.0, 100.0);
+    let slave = Entity::new(0x300, data);
+    server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&slave, &server.view_ctx());
+    stranger.drain();
+    // A foreign slave is refused: no cost, no effect, and the client is told.
+    cast_packet_as(super::types::caster_type::MOUNT, slave.obj_id, slave.obj_id)
+        .handle(&server, &mut stranger.conn)
+        .await
+        .unwrap();
+    assert_eq!(hp_mp!(slave), (500, 100));
+    assert_eq!(started_results(&mut stranger), 1);
+    // Attached to it (driver / gunner seat): allowed.
+    slave.data().attached_characters.push((1, a.obj_id));
+    cast_packet_as(super::types::caster_type::MOUNT, slave.obj_id, slave.obj_id)
+        .handle(&server, &mut stranger.conn)
+        .await
+        .unwrap();
+    assert_eq!(hp_mp!(slave).1, 75);
+    // Its owner is allowed without sitting on it.
+    slave.data().attached_characters.clear();
+    let mut owner = TestClient::new(&server, 2, 2);
+    owner.conn.active_char = Some(b);
+    cast_packet_as(super::types::caster_type::MOUNT, slave.obj_id, slave.obj_id)
+        .handle(&server, &mut owner.conn)
+        .await
+        .unwrap();
+    assert_eq!(hp_mp!(slave).1, 50);
+}
+
+#[tokio::test]
+async fn mount_caster_packet_cannot_name_other_players_or_npcs() {
+    use crate::models::npc::Npc;
+    let server = Arc::new(test_server_with(mate_cast_data()));
+    super::bind(&server);
+    let mut client = TestClient::new(&server, 1, 1);
+    let other_client = TestClient::new(&server, 2, 2);
+    let a = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Attacker", 100.0, 100.0),
+        0x100,
+    );
+    let b = spawn_player(
+        &server,
+        &other_client,
+        test_character(2, "Victim", 102.0, 100.0),
+        0x101,
+    );
+    client.conn.active_char = Some(a);
+    b.data().unit.hp = 500;
+    b.data().unit.mp = 100;
+    let mut n = Npc::new(1);
+    n.unit.hp = 500;
+    n.unit.mp = 100;
+    n.unit.transform.set_xyz(103.0, 100.0, 100.0);
+    let npc = Entity::new(0x201, n);
+    server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&npc, &server.view_ctx());
+    cast_packet_as(super::types::caster_type::MOUNT, b.obj_id, b.obj_id)
+        .handle(&server, &mut client.conn)
+        .await
+        .unwrap();
+    cast_packet_as(super::types::caster_type::MOUNT, npc.obj_id, npc.obj_id)
+        .handle(&server, &mut client.conn)
+        .await
+        .unwrap();
+    assert_eq!(hp_mp!(b), (500, 100));
+    assert_eq!(hp_mp!(npc), (500, 100));
+}
+
+#[tokio::test]
+async fn fallback_cast_needs_a_player_source_for_the_skill() {
+    let mut data = mate_cast_data();
+    let mut npc_only = super::tests::skill_template(20002);
+    npc_only.target_type = 0;
+    npc_only.damage_type_id = 0;
+    npc_only.effects.push(super::tests::skill_effect(
+        900001,
+        super::data::EffectKind::HealEffect,
+        1,
+    ));
+    data.systems.skills.add_skill(npc_only);
+    // 20001 is handed to players by the static data, 20002 is not.
+    data.skills.add_client_sourced_skill(20001);
+    let server = Arc::new(test_server_with(data));
+    super::bind(&server);
+    let mut client = TestClient::new(&server, 1, 1);
+    let a = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Caster", 100.0, 100.0),
+        0x100,
+    );
+    client.conn.active_char = Some(a.clone());
+    {
+        let mut c = a.data();
+        c.unit.hp = 500;
+        c.unit.max_hp = 1000;
+        c.unit.mp = 100;
+    }
+    let packet = |skill: u32| {
+        let mut p = cast_packet_as(super::types::caster_type::UNIT, a.obj_id, a.obj_id);
+        p.skill_id = skill;
+        p
+    };
+    super::handlers::start_skill(&server, &mut client.conn, packet(20002));
+    assert_eq!(a.data().unit.hp, 500);
+    assert_eq!(started_results(&mut client), 1);
+    super::handlers::start_skill(&server, &mut client.conn, packet(20001));
+    assert_eq!(a.data().unit.hp, 650);
+}
+
 #[tokio::test]
 async fn remove_buff_packet_preserves_foreign_slave_buff_and_removes_owned_slave_buff() {
     let mut data = GameData::empty();

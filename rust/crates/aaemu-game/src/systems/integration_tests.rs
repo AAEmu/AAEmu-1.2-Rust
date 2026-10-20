@@ -334,6 +334,7 @@ fn game_data() -> GameData {
         QUEST_ITEM,
         crate::data::items::ItemTemplate::plain(QUEST_ITEM, 10),
     );
+    crate::test_support::open_client_skills(&mut gd);
     gd
 }
 

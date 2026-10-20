@@ -3,7 +3,7 @@
 //! derived `_startAbilitySkills` / `_commonSkills` lists. Effects, plots, modifiers, tags and
 //! combat buffs are later phases.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rusqlite::Connection;
 
@@ -164,9 +164,51 @@ pub struct SkillData {
     pub start_ability_skills: HashMap<u8, Vec<u32>>,
     /// `_commonSkills`.
     pub common_skills: Vec<u32>,
+    /// Skills with a legitimate client-driven source (see [`CLIENT_SKILL_SOURCES`]).
+    client_sourced: HashSet<u32>,
 }
 
+/// `(table, column)` pairs of the static data that name skills a client may cast without owning
+/// them through an ability: doodad interactions, crafts, NPC interactions, slash commands,
+/// buff-granted skills, quest-driven skills, item use skills and the housing / shipyard build
+/// steps. Mount skills and mount-attached (rider) skills are left out on purpose: they only run
+/// through the `Mount` caster path. NPC AI skills (`np_skills`) are not listed either.
+pub const CLIENT_SKILL_SOURCES: &[(&str, &str)] = &[
+    ("doodad_funcs", "func_skill_id"),
+    ("doodad_func_uses", "skill_id"),
+    ("doodad_func_fake_uses", "skill_id"),
+    ("doodad_func_fake_uses", "fake_skill_id"),
+    ("doodad_func_conditional_uses", "skill_id"),
+    ("doodad_func_conditional_uses", "fake_skill_id"),
+    ("doodad_func_renew_items", "skill_id"),
+    ("doodad_func_evidence_item_loots", "skill_id"),
+    ("doodad_func_skill_hits", "skill_id"),
+    ("sphere_doodad_interacts", "skill_id"),
+    ("crafts", "skill_id"),
+    ("npc_interactions", "skill_id"),
+    ("slash_commands", "skill_id"),
+    ("buff_skills", "skill_id"),
+    ("quest_act_con_accept_skills", "skill_id"),
+    ("quest_act_supply_skills", "skill_id"),
+    ("quest_components", "skill_id"),
+    ("quest_act_check_timers", "skill_id"),
+    ("items", "use_skill_id"),
+    ("item_grade_skills", "skill_id"),
+    ("housing_build_steps", "skill_id"),
+    ("shipyard_steps", "skill_id"),
+];
+
 impl SkillData {
+    /// Whether `id` is named by a client-driven source ([`CLIENT_SKILL_SOURCES`]).
+    pub fn is_client_sourced_skill(&self, id: u32) -> bool {
+        self.client_sourced.contains(&id)
+    }
+
+    /// Marks `id` as client-sourced (tests and fixtures).
+    pub fn add_client_sourced_skill(&mut self, id: u32) {
+        self.client_sourced.insert(id);
+    }
+
     pub fn skill(&self, id: u32) -> Option<&SkillTemplate> {
         self.skill_index.get(&id).map(|&i| &self.skills[i])
     }
@@ -305,6 +347,22 @@ impl SkillData {
             d.buffs.insert(t.id, t);
             Ok(())
         })?;
+        for (table, column) in CLIENT_SKILL_SOURCES {
+            // A source table missing from an older compact database only narrows the set.
+            let sql = format!("SELECT {column} FROM {table} WHERE {column} > 0");
+            let loaded = conn.prepare(&sql).and_then(|mut stmt| {
+                let ids = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+                for id in ids {
+                    if let Ok(id) = u32::try_from(id?) {
+                        d.client_sourced.insert(id);
+                    }
+                }
+                Ok(())
+            });
+            if let Err(e) = loaded {
+                tracing::warn!("client skill source {table}.{column} not loaded: {e}");
+            }
+        }
         d.finish();
         Ok(d)
     }

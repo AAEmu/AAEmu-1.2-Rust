@@ -48,6 +48,14 @@ pub fn test_server_with(mut data: GameData) -> GameServer {
     GameServer::new(config, db, data)
 }
 
+/// Marks every skill template of `data` as handed to players by the static data, so the
+/// fixtures that cast doodad / quest style skills reach the client cast fallback.
+pub fn open_client_skills(data: &mut GameData) {
+    for id in data.systems.skills.skill_ids() {
+        data.skills.add_client_sourced_skill(id);
+    }
+}
+
 /// [`test_server_with`] with empty game data.
 pub fn test_server() -> GameServer {
     test_server_with(GameData::empty())
