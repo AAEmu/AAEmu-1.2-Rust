@@ -1314,21 +1314,6 @@ pub async fn on_disconnect(server: &GameServer, conn: &mut GameConnection) {
     let Some(p) = conn.active_char.clone() else {
         return;
     };
-    // A connection keeps its `active_char` after a leave (quit / character select). That
-    // character was already saved and removed from the world: running the departure again would
-    // write a stale copy over a character that logged in again on a newer connection.
-    if !server
-        .world
-        .character_by_obj_id(p.obj_id)
-        .is_some_and(|live| Arc::ptr_eq(&live, &p))
-    {
-        tracing::debug!(
-            "Disconnect of session {}: character {} already left the world",
-            conn.id,
-            p.character_id
-        );
-        return;
-    }
     crate::systems::housing::dominion::runtime::abort_character(server, p.character_id);
     crate::systems::housing::dominion::participants::clear_player(server, &p);
     crate::systems::economy::on_disconnect(server, &p);
@@ -1345,6 +1330,23 @@ pub async fn on_disconnect(server: &GameServer, conn: &mut GameConnection) {
     // disconnect.
     crate::systems::vehicles::on_disconnect(server, &p);
     crate::systems::npcs::doodad::coffer::close_coffers_opened_by(server, &p);
+    // A connection keeps its `active_char` after a leave (quit / character select). That
+    // character was already saved and removed from the world by `leave_world_task`: running the
+    // departure again would write a stale copy over a character that logged in again on a newer
+    // connection. Only the departure save is skipped; the cleanups above are not part of the
+    // leave path and stay as before.
+    let live = server
+        .world
+        .character_by_obj_id(p.obj_id)
+        .is_some_and(|live| Arc::ptr_eq(&live, &p));
+    if !live {
+        tracing::debug!(
+            "Disconnect of session {}: character {} already left the world, no second save",
+            conn.id,
+            p.character_id
+        );
+        return;
+    }
     save_and_remove_from_world(server, Some(&p)).await;
 }
 
