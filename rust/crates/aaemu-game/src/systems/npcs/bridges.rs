@@ -23,6 +23,7 @@ use crate::systems::skills::stats::StatKind;
 use crate::systems::skills::types::{BuffRemoveOn, SkillObject};
 use crate::world::{NpcRef, PlayerRef, WorldInstance, WorldObject};
 
+use super::doodad::interactions::world_interaction_type as wi;
 use super::doodad::manager as doodads;
 
 /// `BaseUnitType.Npc`.
@@ -484,16 +485,25 @@ fn interaction_effect(
         Target::Obj(o) => Some(o.clone()),
         Target::Pos(_) => None,
     };
-    if let (Some(skill), Some(t)) = (args.source.skill(), &target) {
-        super::doodad::interactions::execute_interaction(
-            server,
-            wi_type,
-            caster,
-            Some(t),
-            skill.template.id,
-            doodad_id,
-            None,
-        );
+    if let Some(skill) = args.source.skill() {
+        match &target {
+            Some(t) => {
+                super::doodad::interactions::execute_interaction(
+                    server,
+                    wi_type,
+                    caster,
+                    Some(t),
+                    skill.template.id,
+                    doodad_id,
+                    None,
+                );
+            }
+            None => {
+                if let (wi::SUMMON_DOODAD, Target::Pos(p)) = (wi_type, &args.target) {
+                    super::doodad::interactions::summon_doodad_at(server, caster, p, doodad_id);
+                }
+            }
+        }
     }
     let Some(character) = caster.as_player() else {
         return;
@@ -1239,5 +1249,84 @@ mod spawn_fish_tests {
         // no weight: the first entry
         let zero = [npc(1, 0.0), npc(2, 0.0)];
         assert_eq!(select_weighted_fish(&zero, 0.7).member_id, 1);
+    }
+}
+
+#[cfg(test)]
+mod summon_doodad_position_tests {
+    use std::sync::Arc;
+
+    use super::interaction_effect;
+    use crate::data::GameData;
+    use crate::models::transform::PositionAndRotation;
+    use crate::systems::npcs::doodad::templates::DoodadTemplate;
+    use crate::systems::skills::effects::{EffectArgs, EffectSource};
+    use crate::systems::skills::geometry::{PosUnit, Target};
+    use crate::systems::skills::state::SkillRun;
+    use crate::systems::skills::types::{CastAction, SkillCastTarget, SkillCaster, SkillObject};
+    use crate::test_support::*;
+    use crate::world::WorldObject;
+
+    #[tokio::test]
+    async fn position_target_spawns_the_summoned_doodad_at_that_position() {
+        let mut data = GameData::empty();
+        data.systems.npcs.doodad.templates.insert(
+            5017,
+            DoodadTemplate {
+                id: 5017,
+                ..Default::default()
+            },
+        );
+        let server = test_server_with(data);
+        let client = TestClient::new(&server, 1, 1001);
+        let player = spawn_player(
+            &server,
+            &client,
+            test_character(1, "Caster", 100.0, 100.0),
+            server.ids.object.get_next_id().unwrap(),
+        );
+        let pos = PosUnit {
+            instance_id: 0,
+            zone_id: 7,
+            pos: PositionAndRotation::new(112.0, 120.0, 30.0, 0.0, 0.0, 1.5),
+        };
+        let skill = SkillRun::new(
+            Arc::new(crate::systems::skills::tests::skill_template(18222)),
+            1,
+        );
+        let args = EffectArgs {
+            caster: Some(WorldObject::from(&player)),
+            caster_caster: SkillCaster::Unit(player.obj_id),
+            target: Target::Pos(pos),
+            target_caster: SkillCastTarget::Position {
+                obj_id: 0,
+                x: 112.0,
+                y: 120.0,
+                z: 30.0,
+                rot: 1.5,
+                obj_id1: 0,
+                obj_id2: 0,
+            },
+            cast: CastAction::Skill {
+                skill_id: 18222,
+                tl_id: 0,
+            },
+            source: EffectSource::from_skill(skill),
+            skill_object: &SkillObject::None,
+        };
+        interaction_effect(&server, 31, 5017, &args);
+        let doodad = server
+            .world
+            .world(0)
+            .expect("instance 0")
+            .all_doodads()
+            .into_iter()
+            .find(|d| d.data().template_id == 5017)
+            .expect("the summoned doodad was spawned");
+        let t = doodad.data().transform;
+        assert_eq!((t.x, t.y, t.z), (112.0, 120.0, 30.0));
+        assert_eq!(t.rot_z, 1.5);
+        assert_eq!((t.instance_id, t.zone_id), (0, TEST_ZONE));
+        assert_eq!(t.parent_obj_id, 0);
     }
 }
