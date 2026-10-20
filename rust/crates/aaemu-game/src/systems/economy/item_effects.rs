@@ -731,7 +731,9 @@ pub fn item_socketing(
         gems.fill(0);
         result = 1;
     }
-    // GemIds is a plain array: the C# does not mark the item dirty.
+    // GemIds is a plain array, so no C# property setter marked the item dirty; without this the
+    // next `ItemManager.Save` skips the socketing (RPA-16).
+    equip.dirty = true;
     let after = equip.clone();
     drop(g);
     txn.out().send(
@@ -772,7 +774,9 @@ pub fn magical_enchant(
     if !equip.is_equip() {
         return;
     }
-    equip.details.rune_id = skill_item.item_template_id; // not a dirty-marking property
+    equip.details.rune_id = skill_item.item_template_id;
+    // A plain details field: mark the item so the next save writes the lunastone (RPA-16).
+    equip.dirty = true;
     let after = equip.clone();
     drop(g);
     txn.out().send(
@@ -829,6 +833,8 @@ pub fn item_cap_scale(
     let magical = rng.next_i32(scale.scale_min, scale.scale_max) as u16;
     equip.details.temper_physical = physical;
     equip.details.temper_magical = magical;
+    // Tempering must survive the next save (RPA-16).
+    equip.dirty = true;
     let after = equip.clone();
     drop(g);
     // The temper item is consumed as a skill reagent.
@@ -874,6 +880,8 @@ pub fn item_cap_scale_reset(
     }
     equip.details.temper_physical = 0;
     equip.details.temper_magical = 0;
+    // A temper reset is a persisted equipment change too (RPA-16).
+    equip.dirty = true;
     let after = equip.clone();
     drop(g);
     txn.out().send(

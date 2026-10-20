@@ -44,6 +44,14 @@ pub(crate) struct ItemSaveBatch {
     items: Vec<(Option<ContainerRef>, u64, Item)>,
 }
 
+#[cfg(test)]
+impl ItemSaveBatch {
+    /// The item rows this snapshot selects for the next save (test assertion helper).
+    pub(crate) fn item_ids(&self) -> Vec<u64> {
+        self.items.iter().map(|(_, _, item)| item.id).collect()
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct ContainerSaveRow {
     container_id: u64,
