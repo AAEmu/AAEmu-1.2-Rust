@@ -182,6 +182,35 @@ pub fn add_distance_to_front_between(
     )
 }
 
+/// The position after moving `travel` of `target_dist` from `cur` towards `end`. The final step
+/// (`travel >= target_dist`) lands exactly on `end`: `add_distance_to_front_between` would
+/// otherwise return it only up to float rounding, which at large map coordinates (f32 ulp is
+/// ~0.002 m beyond 16384) can overshoot it.
+fn next_step_position(travel: f32, target_dist: f32, cur: Vec3, end: Vec3) -> Vec3 {
+    if travel >= target_dist {
+        end
+    } else {
+        add_distance_to_front_between(travel, target_dist, cur, end)
+    }
+}
+
+/// The heading of a movement step. `new` lies on the segment `cur -> end`, so the heading of the
+/// step is the same as `heading(new, end)` -- except when `new` is (within float noise) `end`:
+/// there `atan2` of a near-zero vector is arbitrary and flipped the unit backwards on the final
+/// tick. The noise is relative to the coordinates (f32 ulp grows with them), so the tolerance
+/// scales with their magnitude instead of being a fixed distance.
+fn step_heading(cur: Vec3, new: Vec3, end: Vec3) -> (f32, i16, i16) {
+    let magnitude = [new.x, new.y, end.x, end.y]
+        .iter()
+        .fold(1.0_f32, |m, v| m.max(v.abs()));
+    let tolerance = (magnitude * f32::EPSILON * 4.0).max(1e-3);
+    if calculate_distance(new, end, false) <= tolerance {
+        heading(cur, end)
+    } else {
+        heading(new, end)
+    }
+}
+
 /// `float.DegToRad()`.
 fn deg_to_rad_f32(v: f32) -> f32 {
     std::f32::consts::PI / 180.0 * v
@@ -1412,7 +1441,7 @@ impl SkillController {
         actor_flags: u8,
         flags: MoveTypeFlags,
     ) {
-        let mut new = add_distance_to_front_between(travel, target_dist, cur, end);
+        let mut new = next_step_position(travel, target_dist, cur, end);
         self.owner
             .with_transform(|t| t.set_xyz(new.x, new.y, new.z));
         // GeoData.GetHeight snap: |newZ - groundZ| < 1 m (wandering: ground > 0 and < 3 m).
@@ -1426,13 +1455,7 @@ impl SkillController {
         if snap {
             new.z = upd_z;
         }
-        // On the final step `new` coincides with `end` up to float noise, which makes the
-        // heading arbitrary (atan2 of ~0, sometimes facing backwards); keep the step heading.
-        let (yaw, vel_x, vel_y) = if calculate_distance(new, end, false) < 1e-3 {
-            heading(cur, end)
-        } else {
-            heading(new, end)
-        };
+        let (yaw, vel_x, vel_y) = step_heading(cur, new, end);
         self.owner.with_transform(|t| {
             t.set_xyz(new.x, new.y, new.z);
             t.rot_x = 0.0;
@@ -1866,6 +1889,37 @@ mod tests {
         assert_eq!((vx, vy), (0, 4000));
         assert!(yaw.abs() < 1e-6);
         assert_eq!(roll_pitch_yaw_sbytes_movement(0.0, 0.0, 0.0), (0, 0, 0));
+    }
+
+    #[test]
+    fn final_step_lands_on_end_and_keeps_heading_at_large_coordinates() {
+        // x ~ 20000: the f32 ulp is ~0.002 m, bigger than the old fixed 1e-3 m tolerance.
+        let cur = Vec3::new(20003.0, 100.0, 5.0);
+        let end = Vec3::new(20000.0, 100.0, 5.0);
+        let (face_end, vx_end, _) = heading(cur, end);
+        // The final step lands exactly on the end point.
+        assert_eq!(next_step_position(3.0, 3.0, cur, end), end);
+        assert_eq!(next_step_position(4.0, 3.0, cur, end), end);
+        // One ulp past the end (what the ratio interpolation can produce) would face backwards
+        // with `heading(new, end)`; the step heading stays pointing at the end.
+        let over = Vec3::new(f32::from_bits(end.x.to_bits() - 1), 100.0, 5.0);
+        assert!(over.x < end.x);
+        let flipped = heading(over, end);
+        assert_ne!(flipped.1, vx_end, "the old check flips here");
+        assert!(calculate_distance(over, end, false) > 1e-3 || over.x == end.x);
+        let (yaw, vx, vy) = step_heading(cur, over, end);
+        assert!(close(yaw, face_end) && vx == vx_end && vy == 0);
+        let under = Vec3::new(f32::from_bits(end.x.to_bits() + 1), 100.0, 5.0);
+        let (yaw, vx, _) = step_heading(cur, under, end);
+        assert!(close(yaw, face_end) && vx == vx_end);
+        // A genuinely distant step is unaffected.
+        let mid = Vec3::new(20001.5, 100.0, 5.0);
+        assert_eq!(step_heading(cur, mid, end), heading(mid, end));
+        // Non-final steps interpolate as before.
+        assert_eq!(
+            next_step_position(1.5, 3.0, cur, end),
+            add_distance_to_front_between(1.5, 3.0, cur, end)
+        );
     }
 
     #[test]

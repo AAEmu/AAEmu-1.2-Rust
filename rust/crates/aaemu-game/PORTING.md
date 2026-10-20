@@ -1939,5 +1939,8 @@ The achievement subsystem has no 1.2 C# manager; the behaviour follows `rust/doc
 `end` up to float rounding, so `atan2` of a near-zero vector picked an arbitrary direction (pi or
 0, depending on the tick's `dt`): the unit could flip to face backwards on the final tick and the
 last movement packet carried that yaw (seen as a Linux-only failure of
-`dash_moves_npc_and_broadcasts_movement`). Within 1e-3 of the end point the heading of the step
-itself (`heading(cur, end)`) is used. The C# original has the same degenerate `atan2`.
+`dash_moves_npc_and_broadcasts_movement`). The final step (`travel >= target_dist`) now lands
+exactly on the end point, and when the new position is within float noise of it (a tolerance of
+4 ulp of the coordinate magnitude, at least 1e-3 m: the f32 ulp is ~0.002 m beyond 16384, so a
+fixed 1e-3 m was not enough on large maps) the heading of the step itself (`heading(cur, end)`)
+is used. The C# original has the same degenerate `atan2`.
