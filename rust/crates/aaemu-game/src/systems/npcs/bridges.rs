@@ -227,6 +227,12 @@ impl NpcSkillHooks for NpcSkills {
                 interaction_effect(server, values[0], values[1].max(0) as u32, args);
                 true
             }
+            // `DestroyAndSpawnSlave` (72): row 8224 is the only row, on skill 19165 ("destroy
+            // the isolated ship and make a new one appear", slave template 125's mount skill).
+            72 => {
+                crate::systems::vehicles::slaves::destroy_and_spawn(server, args);
+                true
+            }
             _ => false,
         }
     }
