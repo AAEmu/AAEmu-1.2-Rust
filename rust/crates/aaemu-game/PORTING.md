@@ -480,7 +480,10 @@ the x2game / cry3dengine decompiles (addresses below). Config `Physics` (`Config
   C# buoyancy force and the shore / ship–ship / doodad / barrier / steep-terrain depenetration.
   Hull damage comes from the ZWUnitCollision aggregation: closing speeds ≤ 2 m/s are ignored (the C#
   dealt 1 % on any overlap); the pair maximum per 500 ms (clamped to 10 m/s) gives the C#'s
-  speed-scaled percentage (nose-cone rule kept). The 1.2 data has neither the expression constants
+  speed-scaled percentage (nose-cone rule kept). Deviation: each pair also has the C# 1.5 s damage
+  cooldown (`HULL_COLLISION_DAMAGE_COOLDOWN_SEC`) and a terrain / static pair only damages on a
+  new impact (no impact in the previous 500 ms window), so grinding or bouncing contacts no longer
+  chip up to 20 % of max HP per second. The 1.2 data has neither the expression constants
   (12 / 13 / 21) nor the `physics_collision_*_damage_mul` columns. The keel width (0.2 m) and the
   default tube offset (half beam, the zone's `bbox.x / 2`) are inferred / taken literally. Prefab
   buoy brushes take precedence over that fallback, as in the engine.
