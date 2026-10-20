@@ -213,8 +213,8 @@ async fn two_players_see_each_other_move_talk_and_leave() {
         sc::SCCompletedQuestsPacket,
         sc::SCActabilityPacket,
         sc::SCCountUnreadMailPacket,
-        0x007, // new SCFactionListPacket() (hard-coded type id in C#)
-        0x008, // new SCFactionRelationListPacket()
+        sc::SCFactionListPacket,         // new SCFactionListPacket()
+        sc::SCFactionRelationListPacket, // new SCFactionRelationListPacket()
         sc::SCExpeditionRolePolicyListPacket,
         sc::SCResponseUIDataPacket,
         sc::SCResponseUIDataPacket,

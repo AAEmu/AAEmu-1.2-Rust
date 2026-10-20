@@ -385,12 +385,13 @@ impl Marshal for SCFactionListPacket {
     }
 }
 
-/// `new SCFactionListPacket()` (no factions). Note (C#): this constructor uses the hard-coded
-/// type id `0x007`, which in the 1.2 table is `SCTrionConfigPacket`.
+/// `new SCFactionListPacket()` (no factions). The C# constructor used the hard-coded type id
+/// `0x007` (`SCTrionConfigPacket` in the 1.2 table); the real opcode `0x008` is used here
+/// (PORTING.md, Bevy protocol audit M3).
 #[derive(Debug, Clone, Default)]
 pub struct SCFactionListEmptyPacket;
 impl crate::net::packet::PacketDef for SCFactionListEmptyPacket {
-    const OPCODE: u16 = 0x007;
+    const OPCODE: u16 = sc::SCFactionListPacket;
     const LEVEL: u8 = LEVEL_PLAIN;
     const NAME: &'static str = "SCFactionListPacket";
 }
@@ -430,12 +431,12 @@ impl Marshal for SCFactionRelationListPacket {
     }
 }
 
-/// `new SCFactionRelationListPacket()`. Note (C#): hard-coded type id `0x008`, which in the
-/// 1.2 table is `SCFactionListPacket`.
+/// `new SCFactionRelationListPacket()`. The C# constructor used the hard-coded type id `0x008`
+/// (`SCFactionListPacket` in the 1.2 table); the real opcode `0x009` is used here.
 #[derive(Debug, Clone, Default)]
 pub struct SCFactionRelationListEmptyPacket;
 impl crate::net::packet::PacketDef for SCFactionRelationListEmptyPacket {
-    const OPCODE: u16 = 0x008;
+    const OPCODE: u16 = sc::SCFactionRelationListPacket;
     const LEVEL: u8 = LEVEL_PLAIN;
     const NAME: &'static str = "SCFactionRelationListPacket";
 }
@@ -522,8 +523,9 @@ impl Marshal for SCResponseUIDataPacket {
         s.write_u32(self.character_id)
             .write_u16(self.ui_data_type)
             .write_str(&self.ui_data)
-            // `uiData.Length + 1` (UTF-16 code units).
-            .write_i32(self.ui_data.encode_utf16().count() as i32 + 1);
+            // Byte count + 1: the native consumers (391e57e0 -> memcpy / Data::Load) use the i32
+            // as a byte count, so UTF-16 units would truncate non-ASCII text (identical for ASCII).
+            .write_i32(self.ui_data.len() as i32 + 1);
     }
 }
 
@@ -959,11 +961,29 @@ mod tests {
     }
 
     #[test]
-    fn empty_faction_lists_use_the_csharp_hardcoded_ids() {
+    fn empty_faction_lists_use_their_own_opcodes() {
         let e = encode(&SCFactionListEmptyPacket);
-        assert_eq!(e, vec![0xDD, 1, 0, 0, 0x07, 0x00, 0]);
+        assert_eq!(e, vec![0xDD, 1, 0, 0, 0x08, 0x00, 0]);
         let e = encode(&SCFactionRelationListEmptyPacket);
-        assert_eq!(e, vec![0xDD, 1, 0, 0, 0x08, 0x00, 0, 0]);
+        assert_eq!(e, vec![0xDD, 1, 0, 0, 0x09, 0x00, 0, 0]);
+    }
+
+    /// The trailer is a byte count (+1): the client's consumers `memcpy` that many bytes, so
+    /// counting UTF-16 units would truncate non-ASCII data.
+    #[test]
+    fn response_ui_data_trailer_counts_bytes() {
+        let p = SCResponseUIDataPacket {
+            character_id: 7,
+            ui_data_type: 2,
+            ui_data: "ab\u{3b1}".into(), // 2 + 2 UTF-8 bytes
+        };
+        let mut want = vec![0xDD, 1, 0, 0, 0xCA, 0x01];
+        want.extend(7u32.to_le_bytes());
+        want.extend(2u16.to_le_bytes());
+        want.extend(4u16.to_le_bytes());
+        want.extend("ab\u{3b1}".as_bytes());
+        want.extend(5i32.to_le_bytes());
+        assert_eq!(encode(&p), want);
     }
 
     #[test]

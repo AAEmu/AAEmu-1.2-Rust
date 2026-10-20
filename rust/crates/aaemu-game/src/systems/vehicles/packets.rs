@@ -361,10 +361,13 @@ cs_packet!(
         let z = s.read_f32()?;
         let z_rot = s.read_f32()?;
         let item_id = s.read_u64()?;
-        s.read_u8()?;
-        let slot_type = s.read_u8()?;
-        s.read_u8()?;
-        let slot = s.read_u8()?;
+        // Container + slot are on the wire only for a nonzero item id (the client's 37/39-byte
+        // bodies); the old reader always consumed four location bytes (41-byte body).
+        let (slot_type, slot) = if item_id != 0 {
+            (s.read_u8()?, s.read_u8()?)
+        } else {
+            (0, 0)
+        };
         let hide_spawn_effect = s.read_bool()?;
         Ok(Self { slave_id, x, y, z, z_rot, item_id, slot_type, slot, hide_spawn_effect })
     }
@@ -684,5 +687,35 @@ mod tests {
         let mut s = PacketStream::from_bytes(body);
         let p = CSUnhangPacket::read(&mut s).unwrap();
         assert_eq!((p.unit_obj_id, p.reason), (0x0A, 2));
+    }
+
+    /// The client sends container + slot only for a nonzero item id (37 / 39-byte bodies).
+    #[test]
+    fn spawn_slave_item_location_is_conditional() {
+        let mut head = 68u32.to_le_bytes().to_vec();
+        head.extend(helpers::convert_coord_to_long(100.0).to_le_bytes());
+        head.extend(helpers::convert_coord_to_long(200.0).to_le_bytes());
+        head.extend(3.5f32.to_le_bytes());
+        head.extend(0.5f32.to_le_bytes());
+
+        let mut body = head.clone();
+        body.extend(0u64.to_le_bytes());
+        body.push(1);
+        assert_eq!(body.len(), 37);
+        let mut s = PacketStream::from_bytes(body);
+        let p = CSSpawnSlavePacket::read(&mut s).unwrap();
+        assert_eq!((p.slave_id, p.item_id, p.slot_type, p.slot), (68, 0, 0, 0));
+        assert!(p.hide_spawn_effect);
+        assert_eq!(s.remaining(), 0);
+
+        let mut body = head;
+        body.extend(0x0102030405060708u64.to_le_bytes());
+        body.extend([2, 9, 0]);
+        assert_eq!(body.len(), 39);
+        let mut s = PacketStream::from_bytes(body);
+        let p = CSSpawnSlavePacket::read(&mut s).unwrap();
+        assert_eq!((p.item_id, p.slot_type, p.slot), (0x0102030405060708, 2, 9));
+        assert!(!p.hide_spawn_effect);
+        assert_eq!(s.remaining(), 0);
     }
 }

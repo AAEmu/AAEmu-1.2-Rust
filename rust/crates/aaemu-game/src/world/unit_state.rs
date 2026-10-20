@@ -25,6 +25,9 @@ use crate::packets::world::{
     SCCharacterStatePacket, SCCreateCharacterResponsePacket, SCUnitStatePacket,
 };
 
+/// `SCUnitState` character flags bit3: force attack (Bloodlust); the client reads it at
+/// 397c9480 into the unit's force-attack byte (+0x3bbc).
+const FLAG_FORCE_ATTACK: u16 = 0x0008;
 /// `BaseUnitType.Character`.
 const BASE_UNIT_TYPE_CHARACTER: u8 = 0;
 /// `AttachPointKind.System`.
@@ -171,7 +174,13 @@ fn write_unit_state(c: &mut Character, data: &GameData, now_ms: i64, s: &mut Pac
         i64::from(c.honor_gained_in_combat),
         i64::from(c.hostile_faction_kills),
     ]);
-    s.write_u16(0); // flags (Invisible / IdleStatus are never set in this phase)
+    // flags: bit3 = force attack (read by the client at 397c9480 into unit+3bbc, so late observers
+    // see Bloodlust); Invisible / IdleStatus are never set in this phase.
+    s.write_u16(if c.unit.force_attack {
+        FLAG_FORCE_ATTACK
+    } else {
+        0
+    });
 
     let actives = c.active_abilities();
     for a in &c.abilities.abilities {
@@ -718,6 +727,14 @@ mod tests {
         let piscs = 5 + 5 + 3 + 2;
         let abilities = 10 * 5 + 1 + 3;
         assert_eq!(p.body.len(), head + mid + piscs + abilities);
+        // Flags (the u16 closing the piscs): bit3 carries the force-attack toggle.
+        let flags_at = head + mid + piscs - 2;
+        assert_eq!(p.body[flags_at..flags_at + 2], [0, 0]);
+        c.unit.force_attack = true;
+        let p_fa = unit_state(&mut c, &data, 0);
+        assert_eq!(p_fa.body[flags_at..flags_at + 2], [8, 0]);
+        assert_eq!(p_fa.body.len(), p.body.len());
+        c.unit.force_attack = false;
         // With visual options: the forced buff templates are missing -> truncated before NetBuff.
         c.visual_options = Some(VisualOptions {
             flag: 1,

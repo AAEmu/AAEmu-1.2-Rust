@@ -586,12 +586,13 @@ impl Item {
                 s.write_u8(d.slave_type)
                     .write_bc(d.slave_db_id)
                     .write_u8(d.slave_is_destroyed);
-                if d.slave_repair_start_time == 0 {
-                    s.write_i32(0); // RepairStartTime == MinValue
-                } else {
-                    s.write_i64(d.slave_repair_start_time); // Write(DateTime)
-                }
-                for _ in 0..5 {
+                // The client's fixed payload is 29 bytes (item detail reader 3961edf0, tag 2:
+                // 0x1e - 1). The C# wrote `RepairStartTime` as i32 0 when unset (MinValue) and as
+                // an i64 when set (33 bytes, which desynced batched item packets). It is now an
+                // i64 (0 when unset, identical bytes) followed by four i32 zeros. The exact split
+                // of the 24 trailing bytes is inferred (per Bevy RE notes); the width is verified.
+                s.write_i64(d.slave_repair_start_time);
+                for _ in 0..4 {
                     s.write_i32(0);
                 }
             }

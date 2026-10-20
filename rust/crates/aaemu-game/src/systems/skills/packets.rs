@@ -392,9 +392,56 @@ impl Marshal for SCUnitDeathPacket {
     }
 }
 
-/// `SCCooldownsPacket` (always empty in the C#).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct SCCooldownsPacket;
+/// One `SCCooldownsPacket` entry (client record reader `397b2350`, per Bevy RE notes): the id
+/// and two u32 millisecond values, in this wire order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CooldownEntry {
+    pub id: u32,
+    pub total_ms: u32,
+    pub remaining_ms: u32,
+}
+
+/// `SCCooldownsPacket`: the unit's running skill / tag cooldowns (`i32` count + entries each).
+/// The C# only ever sent it empty. The client's record reader (`397b64d0` -> `397b2350`)
+/// appends to its cooldown manager (an empty packet is not a reset) and holds 150 entries per
+/// list, so the writer never emits more. The server tracks no tag cooldowns, and keeps only the
+/// end time of a skill cooldown, so `total` is reported as the remaining time.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SCCooldownsPacket {
+    pub skills: Vec<CooldownEntry>,
+    pub tags: Vec<CooldownEntry>,
+}
+impl SCCooldownsPacket {
+    /// Entry cap per list of the client's record.
+    pub const MAX_ENTRIES: usize = 150;
+
+    /// The still-running cooldowns of `cooldowns` at `now_ms`, ordered by skill id.
+    pub fn from_cooldowns(cooldowns: &crate::models::unit::UnitCooldowns, now_ms: i64) -> Self {
+        let mut skills: Vec<CooldownEntry> = cooldowns
+            .cooldowns
+            .iter()
+            .filter(|(_, &end)| end > now_ms)
+            .map(|(&id, &end)| {
+                let remaining = (end - now_ms).min(i64::from(u32::MAX)) as u32;
+                CooldownEntry {
+                    id,
+                    total_ms: remaining,
+                    remaining_ms: remaining,
+                }
+            })
+            .collect();
+        skills.sort_by_key(|e| e.id);
+        skills.truncate(Self::MAX_ENTRIES);
+        Self {
+            skills,
+            tags: Vec::new(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.skills.is_empty() && self.tags.is_empty()
+    }
+}
 packet_def!(
     SCCooldownsPacket,
     level = LEVEL_PLAIN,
@@ -402,7 +449,15 @@ packet_def!(
 );
 impl Marshal for SCCooldownsPacket {
     fn write(&self, s: &mut PacketStream) {
-        s.write_i32(0).write_i32(0); // skillCount, tagCount
+        for list in [&self.skills, &self.tags] {
+            let list = &list[..list.len().min(Self::MAX_ENTRIES)];
+            s.write_i32(list.len() as i32);
+            for e in list {
+                s.write_u32(e.id)
+                    .write_u32(e.total_ms)
+                    .write_u32(e.remaining_ms);
+            }
+        }
     }
 }
 
@@ -1238,7 +1293,66 @@ mod tests {
             .len(),
             3 + 4 + 3 + 12 + 1
         );
-        assert_eq!(body(&SCCooldownsPacket), vec![0; 8]);
+        assert_eq!(body(&SCCooldownsPacket::default()), vec![0; 8]);
+        // Native record: i32 skillCount, (id, total, remaining) u32 triples, i32 tagCount, triples.
+        let cd = SCCooldownsPacket {
+            skills: vec![
+                CooldownEntry {
+                    id: 7,
+                    total_ms: 3000,
+                    remaining_ms: 1500,
+                },
+                CooldownEntry {
+                    id: 9,
+                    total_ms: 10,
+                    remaining_ms: 10,
+                },
+            ],
+            tags: vec![CooldownEntry {
+                id: 2,
+                total_ms: 5,
+                remaining_ms: 4,
+            }],
+        };
+        let mut want = PacketStream::new();
+        want.write_i32(2)
+            .write_u32(7)
+            .write_u32(3000)
+            .write_u32(1500)
+            .write_u32(9)
+            .write_u32(10)
+            .write_u32(10)
+            .write_i32(1)
+            .write_u32(2)
+            .write_u32(5)
+            .write_u32(4);
+        assert_eq!(body(&cd), want.into_bytes());
+        // Built from a unit's cooldown map: only running entries, by id; the 150 entry cap holds.
+        let mut cds = crate::models::unit::UnitCooldowns::default();
+        cds.cooldowns.insert(30, 1_000 + 2_500);
+        cds.cooldowns.insert(10, 1_000 + 400);
+        cds.cooldowns.insert(20, 900); // already over
+        let built = SCCooldownsPacket::from_cooldowns(&cds, 1_000);
+        assert_eq!(
+            built
+                .skills
+                .iter()
+                .map(|e| (e.id, e.remaining_ms))
+                .collect::<Vec<_>>(),
+            vec![(10, 400), (30, 2_500)]
+        );
+        let many = SCCooldownsPacket {
+            skills: vec![
+                CooldownEntry {
+                    id: 1,
+                    total_ms: 1,
+                    remaining_ms: 1
+                };
+                200
+            ],
+            tags: Vec::new(),
+        };
+        assert_eq!(body(&many).len(), 4 + 150 * 12 + 4);
         assert_eq!(
             body(&SCCombatFirstHitPacket {
                 victim: 1,

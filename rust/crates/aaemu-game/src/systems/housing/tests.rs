@@ -1197,7 +1197,7 @@ async fn lobby_and_select_packets() {
         .write_u32(h.id)
         .write_bc(house.obj_id)
         .write_u32(DESIGN)
-        .write_pisc(&[700, 0])
+        .write_u32(700)
         .write_u32(1)
         .write_u32(1)
         .write_str("Alpha")

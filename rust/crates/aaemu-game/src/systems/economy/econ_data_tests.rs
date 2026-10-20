@@ -765,6 +765,16 @@ async fn repair_all_respects_total_available_money() {
 }
 
 #[tokio::test]
+async fn change_auto_use_aa_point_sets_the_character_flag() {
+    let mut w = world_with(data());
+    assert!(!w.pa.data().auto_use_aa_point);
+    run::<repair::CSChangeAutoUseAAPointPacket>(&mut w, 0, &[1]);
+    assert!(w.pa.data().auto_use_aa_point);
+    run::<repair::CSChangeAutoUseAAPointPacket>(&mut w, 0, &[0]);
+    assert!(!w.pa.data().auto_use_aa_point);
+}
+
+#[tokio::test]
 async fn durability_loss_and_death() {
     let w = world_with(data());
     let id = give(

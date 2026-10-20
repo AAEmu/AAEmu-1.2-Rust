@@ -149,8 +149,9 @@ pub struct ItemAndLocation {
 }
 
 /// `SCMateEquipmentChangedPacket(itemOnPet, itemInBag, mateTlId, characterId, passengerId, bts,
-/// success)`. `num` is always 1 and the trailing success byte is always `true` (the C# ignores
-/// the `success` argument).
+/// success)`. `num` is always 1. The C# ignored `success` and always wrote `true`; the client
+/// (OnMateEquipmentChanged 394e1c10) applies the item copy only when it is set, so a rejected
+/// move now writes `false` (Bevy protocol audit M6).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SCMateEquipmentChangedPacket {
     pub item_on_pet: ItemAndLocation,
@@ -159,6 +160,7 @@ pub struct SCMateEquipmentChangedPacket {
     pub character_id: u32,
     pub passenger_id: u32,
     pub bts: bool,
+    pub success: bool,
 }
 packet_def!(
     SCMateEquipmentChangedPacket,
@@ -178,7 +180,7 @@ impl Marshal for SCMateEquipmentChangedPacket {
             .write_u8(self.item_on_pet.slot)
             .write_u8(self.item_in_bag.slot_type)
             .write_u8(self.item_in_bag.slot)
-            .write_bool(true); // success
+            .write_bool(self.success);
     }
 }
 
@@ -346,12 +348,20 @@ mod tests {
             character_id: 9,
             passenger_id: 0,
             bts: false,
+            success: true,
         };
         let mut want = vec![9, 0, 0, 0, 0x0b, 0x0a, 0, 0, 0, 0, 0, 1];
         want.extend(item_bytes(&i));
         want.extend([0, 0, 0, 0]); // null item: int 0
         want.extend([2, 7, 252, 3, 1]);
         assert_eq!(body(&p), want);
+        // A rejected move clears the trailing success flag (the client then skips the item copy).
+        let rejected = SCMateEquipmentChangedPacket {
+            success: false,
+            ..p
+        };
+        *want.last_mut().unwrap() = 0;
+        assert_eq!(body(&rejected), want);
 
         let p = SCSlaveEquipmentChangedPacket {
             item_on_slave: ItemAndLocation::default(),
