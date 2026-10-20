@@ -326,6 +326,7 @@ pub fn execute(server: &GameServer, kind: i32, args: &EffectArgs<'_>, values: [i
         47 => movement::teleport_to_unit(s, a, v),
         49 => items::item_conversion(s, a, v),
         50 => misc::declare_dominion(s, a, v),
+        51 => misc::mate_make_get_up(s, a, v),
         52 => combat::stop_mana_regen(s, a, v),
         53 => misc::attach_to(s, a, v),
         54 => combat::add_breath(s, a, v),

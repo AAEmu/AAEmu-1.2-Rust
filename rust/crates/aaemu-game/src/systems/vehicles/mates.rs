@@ -1073,6 +1073,77 @@ fn record_mate_death(
     true
 }
 
+/// Revives a downed summoned mate (special 51 `MateMakeGetUp`).
+///
+/// Data evidence: skill 13719 `일으켜세우기` "revives an injured summoned mate", self-target,
+/// friendly; the former C# body only logged. The same values as the stablehand revive are used
+/// ([`MATE_FULL_POOL`] in the `mates` row, the summon item's `mate_dead` flag cleared with a
+/// `RepairPets` item task and `SCUnitPointsPacket` to the observers); the live mate is brought
+/// back at its current pools. Returns `false` when the mate is not dead.
+pub fn revive_mate(server: &GameServer, mate: &MateRef) -> bool {
+    let (item_id, owner_obj, level, exp, hp) = {
+        let d = mate.data();
+        (
+            d.item_id,
+            d.owner_obj_id,
+            d.unit.level,
+            d.experience,
+            d.unit.hp,
+        )
+    };
+    if hp > 0 {
+        return false;
+    }
+    let owner = server.world.character_by_obj_id(owner_obj);
+    let owner_id = owner.as_ref().map_or(0, |o| o.data().id);
+    let now = chrono::Utc::now().naive_utc();
+    if owner_id != 0 {
+        server.systems.vehicles.mates.character(owner_id, |cm| {
+            if let Some(db) = cm.get_mut(item_id) {
+                db.hp = MATE_FULL_POOL;
+                db.mp = MATE_FULL_POOL;
+                db.updated_at = now;
+            }
+        });
+    }
+    let task = update_owned_item(server, owner.as_ref(), item_id, |i| {
+        if i.class != ItemClass::SummonMate || i.details.mate_dead == 0 {
+            return None;
+        }
+        i.details.mate_dead = 0;
+        i.dirty = true;
+        Some(super::packets::item_update(i))
+    })
+    .flatten();
+    let (hp, mp) = {
+        let mut d = mate.data();
+        d.unit.hp = d.unit.max_hp.max(1);
+        d.unit.mp = d.unit.max_mp.max(0);
+        (d.unit.hp, d.unit.mp)
+    };
+    if let (Some(owner), Some(task)) = (&owner, task) {
+        owner.send(SCItemTaskSuccessPacket {
+            action: crate::models::item_task::task_type::REPAIR_PETS,
+            tasks: vec![task],
+            force_remove: Vec::new(),
+        });
+    }
+    tracing::debug!(
+        "MateMakeGetUp: mate {item_id} of {owner_id} revived (level {level}, exp {exp})"
+    );
+    broadcast(
+        server,
+        &WorldObject::from(mate),
+        &SCUnitPointsPacket {
+            obj_id: mate.obj_id,
+            hp,
+            mp,
+        },
+        false,
+    );
+    true
+}
+
 /// The death of a mate (`Unit.DoDie` event point, see `vehicles::on_death_event`): the summon
 /// item is flagged dead and the owner is told ([`record_mate_death`] + `MATE_DEAD`). The corpse
 /// stays in the world until the owner dismisses it.

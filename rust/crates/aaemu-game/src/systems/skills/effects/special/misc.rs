@@ -1,4 +1,4 @@
-﻿//! Special effect actions on progression, points, portals, doodads, mates / slaves, crime and
+//! Special effect actions on progression, points, portals, doodads, mates / slaves, crime and
 //! account UI: `AddExp`, `AddLaborPower`, `GiveLivingPoint`, `GiveHonorPoint`,
 //! `GiveCrimePoint`, `EnterBeautyshop`, `ExitArchemall`, `GiveAppellation`, `SavePortal`,
 //! `SpawnDoodad`, `RemoveDoodad`, `SpawnPet`, `SpawnSlave`, `AttachTo`, `EscapeMySlave`,
@@ -138,6 +138,34 @@ pub fn enter_beautyshop(_server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]
     }
 }
 
+/// `MateMakeGetUp` (special 51): revives a downed summoned mate.
+///
+/// Data evidence: skill 13719 `일으켜세우기` "revives an injured summoned mate", self-target,
+/// friendly; the former C# body only logged. The mate is the target if it is one, else the
+/// caster, else the caster player's active mate.
+pub fn mate_make_get_up(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
+    log_values(args, "MateMakeGetUp", v);
+    let mate = args
+        .target
+        .as_obj()
+        .and_then(WorldObject::as_mate)
+        .or_else(|| args.caster.as_ref().and_then(WorldObject::as_mate))
+        .cloned()
+        .or_else(|| {
+            args.caster
+                .as_ref()
+                .and_then(WorldObject::as_player)
+                .and_then(|p| crate::systems::vehicles::mates::first_active_mate(server, p))
+        });
+    let Some(mate) = mate else {
+        return;
+    };
+    if mate.data().unit.hp > 0 {
+        return;
+    }
+    crate::systems::vehicles::mates::revive_mate(server, &mate);
+}
+
 /// `ExitArchemall`: `IndunManager.RequestLeaveInstance(character)`.
 pub fn exit_archemall(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
     log_values(args, "ExitArchemall", v);
@@ -161,7 +189,7 @@ pub fn give_appellation(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4])
 
 /// `GenderTransfer` (special 107).
 ///
-/// Data evidence: skill 23469 `ì„±ë³„ ì „í™˜í•˜ê¸°` is cast by the beauty-salon NPC interaction
+/// Data evidence: skill 23469 `성별 전환하기` is cast by the beauty-salon NPC interaction
 /// (`target_type` any unit, `target_selection` Target); the former C# class only logged.
 pub fn gender_transfer(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
     log_values(args, "GenderTransfer", v);
