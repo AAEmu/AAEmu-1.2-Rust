@@ -182,7 +182,12 @@ pub async fn set_faction(server: &GameServer, p: &PlayerRef, faction_id: u32) {
 /// side effects of [`set_faction`] - owned houses, guild kick (spawned, it needs the
 /// connection-less expedition path) and party removal.
 pub fn set_faction_persistent(server: &GameServer, p: &PlayerRef, faction_id: u32) {
-    if p.data().unit.faction_id == faction_id && !p.data().unit.faction_temporary {
+    // One short lock: a second `p.data()` in the same expression would self-deadlock.
+    let (current, temporary) = {
+        let c = p.data();
+        (c.unit.faction_id, c.unit.faction_temporary)
+    };
+    if current == faction_id && !temporary {
         return;
     }
     let obj = crate::world::WorldObject::from(p);

@@ -1372,6 +1372,11 @@ pub fn set_faction_with_temp(server: &GameServer, unit: &WorldObject, faction_id
     };
     if old == faction_id {
         tracing::info!("SetFaction: faction has already been established factionId={faction_id}");
+        if !temp {
+            // A persistent change to the faction a temporary change already shows makes that
+            // faction permanent (it is then saved and no longer restored).
+            unit.with_unit(|u| u.unit_mut().faction_temporary = false);
+        }
     } else {
         unit.with_unit(|u| {
             let u = u.unit_mut();

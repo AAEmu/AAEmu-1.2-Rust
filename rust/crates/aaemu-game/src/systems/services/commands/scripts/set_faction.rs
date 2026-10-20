@@ -210,4 +210,48 @@ mod tests {
         assert_eq!(gm.p.data().unit.faction_id, 115);
         assert_eq!(crate::db_character::persisted_faction(&gm.p.data()), 115);
     }
+
+    fn two_faction_server() -> std::sync::Arc<crate::server::GameServer> {
+        let mut data = GameData::empty();
+        for (id, name) in [(101, "Nuian"), (160, "Blue")] {
+            data.factions.add(SystemFaction {
+                id,
+                name: name.into(),
+                ..SystemFaction::default()
+            });
+        }
+        harness::server_with(data)
+    }
+
+    /// `/setfaction` to the faction the character already has must return (it once locked the
+    /// character twice in one expression and deadlocked).
+    #[tokio::test]
+    async fn setfaction_to_the_current_faction_does_not_deadlock() {
+        let server = two_faction_server();
+        let gm = harness::pc(&server, 1, "Gm", 100.0, 100.0);
+        gm.p.data().unit.faction_id = 101;
+        let p = gm.p.clone();
+        let call = tokio::task::spawn_blocking(move || {
+            crate::systems::social::faction::set_faction_persistent(&server, &p, 101);
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), call)
+            .await
+            .expect("set_faction_persistent deadlocked on an unchanged faction")
+            .unwrap();
+        assert_eq!(gm.p.data().unit.faction_id, 101);
+    }
+
+    /// `/setfaction` to the faction a temporary change currently shows makes it permanent.
+    #[tokio::test]
+    async fn setfaction_to_the_temporary_faction_makes_it_persistent() {
+        let server = two_faction_server();
+        let gm = harness::pc(&server, 1, "Gm", 100.0, 100.0);
+        gm.p.data().unit.faction_id = 101;
+        crate::systems::social::faction::set_temporary_faction(&server, &gm.p, 160);
+        assert!(gm.p.data().unit.faction_temporary);
+        crate::systems::social::faction::set_faction_persistent(&server, &gm.p, 160);
+        assert_eq!(gm.p.data().unit.faction_id, 160);
+        assert!(!gm.p.data().unit.faction_temporary);
+        assert_eq!(crate::db_character::persisted_faction(&gm.p.data()), 160);
+    }
 }
