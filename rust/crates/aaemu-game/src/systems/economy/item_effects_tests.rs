@@ -839,6 +839,34 @@ async fn gain_item_effect() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// GainItemWithPosImprint (data-derived body of a C# stub)
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn gain_item_with_pos_imprint_adds_the_guide_item() {
+    let mut w = world();
+    gain_item_with_pos_imprint(&w.server, &w.pa, [STACK as i32, 0, 0, 0]);
+    let i = item_at(&w.pa, slot_type::INVENTORY, 0).unwrap();
+    assert_eq!((i.template_id, i.count), (STACK, 1));
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            tasks(
+                task_type::SKILL_EFFECT_GAIN_ITEM_WITH_POS,
+                vec![ItemTask::add(&i)]
+            )
+        )]
+    );
+    // Row 405's template 5054 is missing in the 1.2 data; a non-positive id is invalid too.
+    // Neither panics nor adds an item.
+    gain_item_with_pos_imprint(&w.server, &w.pa, [999_999, 0, 0, 0]);
+    gain_item_with_pos_imprint(&w.server, &w.pa, [0, 0, 0, 0]);
+    assert!(w.a.drain().is_empty());
+    assert_eq!(Inv::of(&w.pa).bag().lock().unwrap().items.len(), 1);
+}
+
+// ---------------------------------------------------------------------------------------------
 // UCC
 // ---------------------------------------------------------------------------------------------
 

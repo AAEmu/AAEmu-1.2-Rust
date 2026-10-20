@@ -11,7 +11,6 @@
 //! * `Random.Shared` -> a [`LootRng`] (`SharedRandom` in production, `ScriptedRng` in tests).
 //!
 //! Functions that return [`Outcome`] tell the caller whether the C# set `skill.Cancelled`.
-//! The C# stubs (`// TODO ...` + a debug log) are mirrored by [`stub_effect`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1059,6 +1058,50 @@ pub fn gain_item(server: &GameServer, player: &PlayerRef, values: [i32; 4]) {
     }
 }
 
+/// `GainItemWithPosImprint.Execute` (special 32). The C# body is a `// TODO` stub; the data
+/// gives the behaviour: `special_effects` 405 (`value1` 5054, template not in 1.2 data), 546
+/// (8120 Guide Map), 547 (8122 Guide Gate) and 548 (8124 Guide Compass) each create `value1` x1
+/// for the player caster with `ItemTaskType.SkillEffectGainItemWithPos`. The tools that grant
+/// them (5053 / 8119 / 8121 / 8123, skills 11402 / 11635 / 11637 / 11638) are consumed as skill
+/// reagents. The position imprint has no 1.2 item detail type, so the item is created without
+/// one (see `PORTING.md`).
+pub fn gain_item_with_pos_imprint(server: &GameServer, player: &PlayerRef, values: [i32; 4]) {
+    let [value1, value2, value3, value4] = values;
+    tracing::debug!(
+        "Special effects: GainItemWithPosImprint value1 {value1}, value2 {value2}, value3 {value3}, value4 {value4}"
+    );
+    if value1 <= 0 {
+        tracing::warn!(
+            "Special effects: GainItemWithPosImprint ignored invalid item template id {value1}"
+        );
+        return;
+    }
+    let item_id = value1 as u32;
+    let mut txn = ItemTxn::begin(server);
+    if txn.data().template(item_id).is_none() {
+        tracing::warn!(
+            "Special effects: GainItemWithPosImprint ignored unknown item template {item_id}"
+        );
+        return;
+    }
+    let inv = Inv::of(player);
+    let acquired = inventory::try_add_new_item(
+        &mut txn,
+        &inv,
+        task_type::SKILL_EFFECT_GAIN_ITEM_WITH_POS,
+        item_id,
+        1,
+        0,
+        0,
+    );
+    if !acquired {
+        tracing::warn!(
+            "Special effects: GainItemWithPosImprint failed to give item {item_id} to character {}",
+            player.character_id
+        );
+    }
+}
+
 /// `GainItemWithEmblemImprint.Execute`: `UccManager.CreateStamp(target, sourceItem)` where
 /// the source is the casting item (`ItemManager.GetItemByItemId`) and `target` must be a
 /// character.
@@ -1678,38 +1721,4 @@ pub fn repair_slave_item(server: &GameServer, effect_id: u32, item_target: Optio
         target_player.data().unit.name,
         after.id
     );
-}
-
-// ---------------------------------------------------------------------------------------------
-// C# stubs
-// ---------------------------------------------------------------------------------------------
-
-/// The item special effects that are `// TODO ...` stubs in the C# (they only log).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StubItemEffect {
-    ExpToItem,
-    GainGachaLootPackItem,
-    GainItemWithPosImprint,
-    ItemEvolving,
-    ItemEvolvingReRoll,
-    ItemGradeEnchanting,
-    ItemRefurbishment,
-    ItemSmelting,
-    PhysicalEnchantArmor,
-    PhysicalEnchantWeapon,
-    RechargeItemBuff,
-    RechargeItemRndAttrUnitModifier,
-    RechargeItemSkill,
-    RepairAuthorityInBag,
-    RevertItemLook,
-}
-
-/// The `Execute` of a [`StubItemEffect`]: `if (caster is Character) Logger.Debug(...)`.
-pub fn stub_effect(effect: StubItemEffect, caster_is_character: bool, values: [i32; 4]) {
-    if caster_is_character {
-        let [value1, value2, value3, value4] = values;
-        tracing::debug!(
-            "Special effects: {effect:?} value1 {value1}, value2 {value2}, value3 {value3}, value4 {value4}"
-        );
-    }
 }
