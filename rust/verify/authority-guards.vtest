@@ -1,0 +1,79 @@
+# Authority guards (commit "validate loot range, resurrection offers, tutorial ids and UI data"):
+#
+#   looter    GM: with quest 251 active a Solzreed boar (3475) drops item 4058 every time. A kill
+#             at melee range is looted normally; the same loot taken from ~20 m is refused
+#             (systems/economy/looting.rs LOOT_TAKE_RANGE, SCLootItemFailed + WARN) and still
+#             lootable once the player is back at the corpse.
+#   watcher   expects the loot WARN in the game log
+#   caster    GM: kills the victim and resurrects it with a Resurrection Scroll (item 18456,
+#             skill 15066)
+#   victim    GM at level 15 (no free resurrection offer): an in-place resurrect request without
+#             an offer is refused (WARN, systems/skills/resurrect.rs); after the scroll cast
+#             (SCNotifyResurrection from the scroll) it works once; a second death needs a fresh offer, while
+#             the resurrection at the resurrection point always works
+#
+# The tutorial (CSSaveTutorial) and UI data (CSSaveUIData) guards are covered by unit tests in
+# systems/quests/tests.rs and systems/services/character_packets.rs.
+
+suite authority-guards
+bot looter gm
+bot watcher
+bot caster gm
+bot victim gm
+
+[looter]
+gm quest add 251
+pump 1
+gm spawn npc 3475
+pump 1
+cast 2 3475
+kill 3475
+lootexpect took
+gm spawn npc 3475
+pump 1
+cast 2 3475
+kill 3475
+tp 15598 15382 127
+sync lootfar 2
+pump 1
+lootexpect failed
+tp 15578 15382 127
+lootexpect took
+
+[watcher]
+sync lootfar 2
+expectlog "TryTakeLoot refused.*max 5 m" 30
+
+[caster]
+waitpeer 120 ${victim}
+sync ready 2
+pkill ${victim}
+sync dead 2
+sync armed 2
+expectlog "ResurrectCharacter in place refused.*(?i)${victim}" 30
+item 18456 1
+icast 15066 18456 player:${victim}
+sync revived 2
+pkill ${victim}
+sync dead2 2
+sync armed2 2
+expectlog "ResurrectCharacter in place refused.*(?i)${victim}" 30
+
+[victim]
+waitpeer 120 ${caster}
+gm level 15
+sync ready 2
+sync dead 2
+pump 1
+sync armed 2
+pump 1
+rezexpect inplace refused
+expectpkt SCNotifyResurrectionPacket 30
+rezexpect inplace ok
+sync revived 2
+sync dead2 2
+pump 1
+sync armed2 2
+pump 1
+rezexpect inplace refused
+rezexpect temple ok

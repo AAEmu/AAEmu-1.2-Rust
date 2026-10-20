@@ -17,7 +17,7 @@
 //! cast <skill> <npc template>        CSStartSkill on the nearest NPC
 //! dcast <skill> <doodad template>    doodad-target CSStartSkill
 //! item <template> <count>            `/item add self` and remember the stack id
-//! icast <skill> <item template> <npc template|self>
+//! icast <skill> <item template> <npc template|self|peer|player:NAME>
 //!                                    cast from the remembered item stack
 //! sync <token> [count]              suite barrier: wait until `count` bots (default: all) are here
 //! expectpkt <PacketName> [secs]     fail unless the packet arrives within `secs` (default 5)
@@ -25,6 +25,10 @@
 //! expectlog <regex> [secs]          fail unless a new game-log line matches (AAEMU_VERIFY_GAME_LOG)
 //! expectdb "<sql>" <value> [secs]   fail unless the SQL's value equals `value`
 //!                                   (AAEMU_VERIFY_MYSQL; re-checked for `secs` when given)
+//! rezexpect inplace|temple ok|refused  CSResurrectCharacter, then fail unless SCCharacterResurrected
+//!                                    for our own unit did (ok) / did not (refused) arrive
+//! lootexpect took|failed [npc obj]  like `loot`, then fail unless SCLootItemTook (took) / SCLootItemFailed
+//!                                    (failed) was among the replies
 //! ```
 //!
 //! Every failed expectation prints a `FAIL` line and makes the run exit non-zero.
@@ -32,7 +36,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use aaemu_game::opcodes::sc;
+use aaemu_game::opcodes::{cs, sc};
 use anyhow::{bail, Context};
 
 use super::questitem::{chat_text, gm_command, quest_state, stack_id};
@@ -125,6 +129,19 @@ fn num<T: std::str::FromStr>(parts: &[&str], i: usize) -> anyhow::Result<T> {
         .with_context(|| format!("missing argument {i}"))?
         .parse()
         .map_err(|_| anyhow::anyhow!("bad number '{}'", parts[i]))
+}
+
+/// The other player to target: `name`, else the first other player in sight.
+fn peer(game: &GameClient, name: Option<&str>) -> anyhow::Result<UnitInfo> {
+    let me = game.state.self_obj;
+    game.state
+        .units
+        .values()
+        .filter(|u| u.unit_type == 0 && u.obj_id != me)
+        .filter(|u| name.is_none_or(|n| u.name.eq_ignore_ascii_case(n)))
+        .min_by_key(|u| u.obj_id)
+        .cloned()
+        .context("no other player in sight (run `pump` after both bots logged in)")
 }
 
 /// Splits an argument line, keeping double-quoted spans together (`expectdb "<sql>" <value>`,
@@ -299,6 +316,7 @@ async fn run_lines(
     let s = r.begin("game.script");
     let mut items: HashMap<u32, u64> = HashMap::new();
     let mut clock = 40_000u32;
+    let mut last_npc = 0u32;
     let mut mate: Option<(u32, u16)> = None;
     for (n, raw) in text.lines().enumerate() {
         let line = raw.trim();
@@ -451,6 +469,7 @@ async fn run_lines(
                     .await?;
                 let got = gm_command(game, "kill").await?;
                 println!("    killed obj {} (tpl {tpl})", npc.obj_id);
+                last_npc = npc.obj_id;
                 show(&got);
             }
             "cast" => {
@@ -462,6 +481,7 @@ async fn run_lines(
                     .await?;
                 game.change_target(npc.obj_id).await?;
                 game.start_skill(skill, npc.obj_id).await?;
+                last_npc = npc.obj_id;
                 let got = game
                     .drain(Duration::from_millis(1500), Duration::from_secs(8))
                     .await?;
@@ -506,6 +526,14 @@ async fn run_lines(
                     .with_context(|| format!("item {item_tpl} not added with `item`"))?;
                 let target = match parts.get(2).copied() {
                     Some("self") | None => game.state.self_obj,
+                    Some(t) if t == "peer" || t.starts_with("player:") => {
+                        let other = peer(game, t.strip_prefix("player:"))?;
+                        clock += 1500;
+                        game.move_to((other.pos.0 + 1.0, other.pos.1, other.pos.2), clock)
+                            .await?;
+                        game.change_target(other.obj_id).await?;
+                        other.obj_id
+                    }
                     Some(t) => {
                         let tpl: u32 = t.parse()?;
                         let npc = nearest(game, tpl)
@@ -668,6 +696,66 @@ async fn run_lines(
                 );
                 let secs: u64 = args.get(2).and_then(|x| x.parse().ok()).unwrap_or(0);
                 expect_db(&args[0], &args[1], secs)?;
+            }
+            "rezexpect" => {
+                let in_place = match parts.first().copied() {
+                    Some("inplace") => true,
+                    Some("temple") => false,
+                    _ => bail!("rezexpect inplace|temple ok|refused"),
+                };
+                let want_ok = match parts.get(1).copied() {
+                    Some("ok") => true,
+                    Some("refused") => false,
+                    _ => bail!("rezexpect inplace|temple ok|refused"),
+                };
+                game.send_cs(cs::CSResurrectCharacterPacket, &[u8::from(in_place)])
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(1500), Duration::from_secs(5))
+                    .await?;
+                show(&got);
+                let me = game.state.self_obj;
+                let revived = got.iter().any(|p| {
+                    p.is_sc(sc::SCCharacterResurrectedPacket)
+                        && p.stream().read_bc().is_ok_and(|id| id == me)
+                });
+                if revived != want_ok {
+                    bail!("FAIL rezexpect: resurrected={revived}, expected {want_ok}");
+                }
+                println!("    rezexpect ok (resurrected={revived})");
+            }
+            "lootexpect" => {
+                let want_took = match parts.first().copied() {
+                    Some("took") => true,
+                    Some("failed") => false,
+                    _ => bail!("lootexpect took|failed [npc obj]"),
+                };
+                let obj: u32 = parts
+                    .get(1)
+                    .and_then(|x| x.parse().ok())
+                    .unwrap_or(last_npc);
+                if obj == 0 {
+                    bail!("no NPC to loot: run `kill`/`cast` first or pass the object id");
+                }
+                let mut b = aaemu_commons::PacketStream::new();
+                b.write_bc(obj).write_bc(0).write_bool(true);
+                game.send_cs(cs::CSLootOpenBagPacket, b.as_bytes()).await?;
+                let got = game
+                    .drain(Duration::from_millis(1000), Duration::from_secs(4))
+                    .await?;
+                show(&got);
+                let took = got.iter().any(|p| p.is_sc(sc::SCLootItemTookPacket));
+                let failed = got.iter().any(|p| p.is_sc(sc::SCLootItemFailedPacket));
+                if want_took && !took {
+                    bail!("FAIL lootexpect took: no SCLootItemTook (failed: {failed})");
+                }
+                if !want_took && (took || !failed) {
+                    bail!("FAIL lootexpect failed: SCLootItemFailed expected (took: {took}, failed: {failed})");
+                }
+                println!(
+                    "    lootexpect {} ok",
+                    if want_took { "took" } else { "failed" }
+                );
             }
             other => bail!("unknown script command '{other}' at line {}", n + 1),
         }

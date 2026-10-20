@@ -92,6 +92,8 @@ verification commands are:
 | `expectlog <regex> [secs]` | Fail unless a matching line is written to the game log after the command starts (default 5) |
 | `expectdb "<sql>" <value> [secs]` | Run the SQL against the lane game database and fail unless its value equals `value` (default: one check; with `secs`, re-check until the deadline) |
 | `sync <token> [count]` | Suite barrier: wait until `count` bots reached the same token (default: every bot) |
+| `lootexpect took\|failed [npc obj]` | Loot the last killed NPC and fail unless `SCLootItemTook` (took) / `SCLootItemFailed` (failed) arrives |
+| `rezexpect inplace\|temple ok\|refused` | Send `CSResurrectCharacter` and fail unless `SCCharacterResurrected` for the bot's own unit does (ok) / does not (refused) arrive |
 
 A failed expectation prints a `FAIL` line like
 
@@ -119,6 +121,7 @@ The seed suites:
 | --- | --- |
 | `emote-spoof` | `CSExpressEmotionPacket` for another object is ignored (`systems/services/express_text.rs`), while the sender's own emote is announced |
 | `guild-guards` | A guild-invitation reply without a pending invite is refused (`systems/social/expedition.rs`); a normal invite + accept joins |
+| `authority-guards` | A loot take from 5+ m is refused while a melee-range take works (`systems/economy/looting.rs`); an in-place resurrection without an offer is refused, with a scroll offer (item 18456) it works once, and the resurrection point always works (`systems/skills/resurrect.rs`) |
 
 ## Reports
 
