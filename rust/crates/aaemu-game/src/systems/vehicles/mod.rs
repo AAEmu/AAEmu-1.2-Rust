@@ -30,6 +30,7 @@ pub mod movement;
 pub mod packets;
 pub mod ship_physics;
 pub mod shipyards;
+pub mod shipyards_db;
 pub mod slaves;
 pub mod stats;
 pub mod transfers;
@@ -110,6 +111,10 @@ impl System {
         install_hooks(server);
         tracing::info!("TransferTickTask: Started");
         tracing::info!("Initialising Shipyard Manager...");
+        match shipyards_db::load_all(server).await {
+            Ok(n) => tracing::info!("Restored {n} shipyards"),
+            Err(e) => tracing::error!("Shipyards not restored: {e}"),
+        }
         tracing::warn!("ShipyardUpdateInfoTick: Started");
         spawn_ticker(
             server,
@@ -150,7 +155,8 @@ impl System {
                 tracing::error!("{e}");
             }
         }
-        slaves::save_all(server, tx).await
+        let shipyards = shipyards_db::save_all(server, tx).await?;
+        Ok(slaves::save_all(server, tx).await? + shipyards)
     }
 }
 

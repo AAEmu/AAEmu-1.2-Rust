@@ -26,6 +26,8 @@ mod item_task {
 pub struct ShipyardManager {
     shipyards: Mutex<Vec<(u32, ShipyardRef)>>,
     removed: Mutex<Vec<u32>>,
+    /// Ids of removed shipyards whose `shipyards` row is not deleted yet (the next save retries).
+    pending_delete: Mutex<Vec<u32>>,
 }
 
 impl ShipyardManager {
@@ -37,6 +39,34 @@ impl ShipyardManager {
             .iter()
             .map(|(_, s)| s.clone())
             .collect()
+    }
+
+    /// Takes the ids whose rows still have to be deleted. An id that belongs to a live shipyard
+    /// again (ids are released at removal and may be reused before the next save) is dropped:
+    /// the row is the new shipyard's.
+    pub(super) fn take_pending_delete(&self) -> Vec<u32> {
+        let live = self.shipyards.lock().expect("shipyards poisoned");
+        let mut pending = self.pending_delete.lock().expect("shipyards poisoned");
+        let mut ids = std::mem::take(&mut *pending);
+        ids.retain(|id| !live.iter().any(|(l, _)| l == id));
+        ids
+    }
+
+    /// Queues the row of `ship_id` for deletion at the next save.
+    pub(super) fn queue_delete(&self, ship_id: u32) {
+        self.pending_delete
+            .lock()
+            .expect("shipyards poisoned")
+            .push(ship_id);
+    }
+
+    /// The ids whose rows are waiting for deletion (tests).
+    #[cfg(test)]
+    pub(super) fn pending_delete(&self) -> Vec<u32> {
+        self.pending_delete
+            .lock()
+            .expect("shipyards poisoned")
+            .clone()
     }
 
     /// `_removedShipyards`.
@@ -105,12 +135,42 @@ pub fn create(
         hp: step_tpl.max_hp * 100,
         step,
     };
+    let sy = build_shipyard(
+        server,
+        &template,
+        data,
+        &step_tpl,
+        (instance, zone),
+        (owner_rot.rot_x, owner_rot.rot_y),
+    );
+    let shipyard = Entity::new(obj_id, sy);
+
+    // we will make checks for the availability of money and items to create a shipyard
+    if !remove_required_items(server, owner, &template) {
+        error(owner, error::NOT_ENOUGH_ITEM);
+        return None;
+    }
+    spawn_shipyard(server, ship_id, &shipyard);
+    Some(shipyard)
+}
+
+/// The `Shipyard` of `create`: transform, owner faction / name, the current step's model and the
+/// pools. Shared with the restore at server start (`shipyards_db`).
+pub(super) fn build_shipyard(
+    server: &GameServer,
+    template: &super::data::ShipyardTemplate,
+    data: ShipyardData,
+    step_tpl: &super::data::ShipyardStep,
+    (instance, zone): (u32, u32),
+    (rot_x, rot_y): (f32, f32),
+) -> Shipyard {
+    let (x, y, z, z_rot) = (data.x, data.y, data.z, data.z_rot);
+    let owner_faction = data.kind3;
+    let owner_name = data.owner_name.clone();
     let mut sy = Shipyard::new(data);
     sy.unit.transform.instance_id = instance;
     sy.unit.transform.zone_id = zone;
-    sy.unit
-        .transform
-        .set_position(x, y, z, owner_rot.rot_x, owner_rot.rot_y, z_rot);
+    sy.unit.transform.set_position(x, y, z, rot_x, rot_y, z_rot);
     sy.unit.faction_id = owner_faction;
     sy.unit.level = 30;
     sy.unit.name = owner_name;
@@ -119,13 +179,11 @@ pub fn create(
     sy.all_action = template.all_actions();
     stats::refresh_pools(server, VehicleKind::Shipyard, &mut sy.unit);
     sy.unit.hp = sy.unit.max_hp;
-    let shipyard = Entity::new(obj_id, sy);
+    sy
+}
 
-    // we will make checks for the availability of money and items to create a shipyard
-    if !remove_required_items(server, owner, &template) {
-        error(owner, error::NOT_ENOUGH_ITEM);
-        return None;
-    }
+/// Registers the shipyard in the manager and spawns it into its world instance.
+pub(super) fn spawn_shipyard(server: &GameServer, ship_id: u32, shipyard: &ShipyardRef) {
     server
         .systems
         .vehicles
@@ -134,11 +192,11 @@ pub fn create(
         .lock()
         .expect("shipyards poisoned")
         .push((ship_id, shipyard.clone()));
+    let instance = shipyard.data().unit.transform.instance_id;
     if let Some(world) = server.world.world(instance) {
-        let changes = world.spawn(&shipyard, &server.view_ctx());
+        let changes = world.spawn(shipyard, &server.view_ctx());
         crate::world::session::handle_zone_changes(server, changes);
     }
-    Some(shipyard)
 }
 
 /// `RemoveRequiredItems(shipyard)`.
@@ -231,6 +289,8 @@ pub fn remove_shipyard(server: &GameServer, shipyard: &ShipyardRef) {
         .lock()
         .expect("shipyards poisoned")
         .retain(|(id, _)| *id != ship_id);
+    m.queue_delete(ship_id);
+    super::shipyards_db::delete_now(server, ship_id);
     server.ids.shipyard.release_id(ship_id);
     server.ids.object.release_id(shipyard.obj_id);
     if let Some(world) = server.world.world_of(&WorldObject::from(shipyard)) {
@@ -273,7 +333,7 @@ pub fn shipyard_radius(server: &GameServer, obj: &WorldObject) -> Option<f32> {
 }
 
 /// `CurrentStep` setter (`ModelId`, `BaseAction`).
-fn set_current_step(server: &GameServer, s: &mut Shipyard, step: i32) {
+pub(super) fn set_current_step(server: &GameServer, s: &mut Shipyard, step: i32) {
     s.current_step = step;
     s.is_dirty = true;
     let Some(t) = server
@@ -495,7 +555,7 @@ pub fn shipyard_tick(server: &GameServer) {
     }
 }
 
-fn update_shipyard_info(server: &GameServer, shipyard: &ShipyardRef) {
+pub(super) fn update_shipyard_info(server: &GameServer, shipyard: &ShipyardRef) {
     let spawned = shipyard.data().data.spawned;
     let now = chrono::Utc::now().timestamp();
     let is_decaying = now >= spawned + 3 * 24 * 3600;

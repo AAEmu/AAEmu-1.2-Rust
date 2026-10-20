@@ -2103,6 +2103,136 @@ async fn shipyard_build_steps_progress() {
     assert!(server.world.world(0).unwrap().shipyard(sy.obj_id).is_none());
 }
 
+#[tokio::test]
+async fn shipyard_row_round_trips_and_removal_queues_delete() {
+    use crate::systems::vehicles::shipyards_db;
+    let mut d = GameData::empty();
+    d.formulas = pool_formulas();
+    let step = |s: i32, model: u32, n: i32| {
+        (
+            s,
+            ShipyardStep {
+                id: s as u32 + 1,
+                shipyard_id: 3,
+                step: s,
+                model_id: model,
+                skill_id: 9000 + s as u32,
+                num_actions: n,
+                max_hp: 10,
+            },
+        )
+    };
+    d.systems.vehicles.shipyard_templates.insert(
+        3,
+        ShipyardTemplate {
+            id: 3,
+            main_model_id: 500,
+            item_id: 7001,
+            origin_item_id: 7000,
+            taxation_id: 2,
+            steps: vec![step(0, 501, 2), step(1, 502, 3)],
+            ..ShipyardTemplate::default()
+        },
+    );
+    d.systems.vehicles.taxations.insert(2, 1000);
+    let server = server_with(d);
+    let hooks = Arc::new(ShipItems::default());
+    server.systems.skills.ext.items.install(hooks.clone());
+    let a = TestClient::new(&server, 1, 1);
+    let pa = spawn_player(&server, &a, test_character(1, "Owner", 100.0, 100.0), PA);
+    pa.data().money = 5000;
+
+    let sy = shipyards::create(&server, &pa, 3, 120.0, 130.0, 100.0, 0.5, 0, 0).expect("shipyard");
+    // Two actions finish step 0, one more is the first action of step 1.
+    for _ in 0..3 {
+        shipyards::add_build_action(&server, &sy);
+        shipyards::sync_build_state(&server, &sy);
+    }
+    sy.data().unit.hp -= 5;
+    assert!(sy.data().is_dirty);
+    let row = shipyards_db::snapshot(&sy);
+    assert_eq!((row.current_step, row.num_action), (1, 1));
+    assert_eq!((row.owner_id, row.owner_name.as_str()), (1, "Owner"));
+
+    // The shipyard is gone (restart) and its row is queued for deletion.
+    let ship_id = row.id;
+    shipyards::remove_shipyard(&server, &sy);
+    assert_eq!(
+        server.systems.vehicles.shipyards.pending_delete(),
+        vec![ship_id]
+    );
+    assert!(server.systems.vehicles.shipyards.all().is_empty());
+    let (money, consumed) = (pa.data().money, hooks.consumed.lock().unwrap().clone());
+
+    assert_eq!(
+        shipyards_db::restore_all(&server, std::slice::from_ref(&row)),
+        1
+    );
+    let all = server.systems.vehicles.shipyards.all();
+    assert_eq!(all.len(), 1);
+    let restored = &all[0];
+    assert_ne!(restored.obj_id, 0);
+    assert!(server
+        .world
+        .world(0)
+        .unwrap()
+        .shipyard(restored.obj_id)
+        .is_some());
+    {
+        let s = restored.data();
+        assert_eq!(s.data.id, u64::from(ship_id));
+        assert_eq!(s.data.obj_id, restored.obj_id);
+        assert_eq!(
+            (s.data.x, s.data.y, s.data.z, s.data.z_rot),
+            (120.0, 130.0, 100.0, 0.5)
+        );
+        assert_eq!((s.current_step, s.num_action, s.base_action), (1, 1, 2));
+        assert_eq!(s.all_action, 5);
+        assert_eq!(s.unit.model_id, 502, "the model of the restored step");
+        assert_eq!((s.data.kind2, s.data.owner_name.as_str()), (1, "Owner"));
+        assert_eq!(s.data.spawned, row.spawned);
+        assert!(!s.is_dirty);
+    }
+    assert_eq!(
+        shipyards_db::snapshot(restored),
+        row,
+        "row -> shipyard -> row"
+    );
+    // Loading consumes no money or items.
+    assert_eq!(pa.data().money, money);
+    assert_eq!(*hooks.consumed.lock().unwrap(), consumed);
+    // The restored shipyard continues to build.
+    shipyards::add_build_action(&server, restored);
+    assert_eq!(restored.data().num_action, 2);
+
+    // The id is live again: the queued delete of the old row must not hit the new shipyard.
+    assert!(server
+        .systems
+        .vehicles
+        .shipyards
+        .pending_delete()
+        .contains(&ship_id));
+    assert!(server
+        .systems
+        .vehicles
+        .shipyards
+        .take_pending_delete()
+        .is_empty());
+
+    // A finished shipyard (`current_step == -1`) is not restored; its row is deleted.
+    let done = shipyards_db::ShipyardRow {
+        id: 99,
+        current_step: -1,
+        ..row
+    };
+    assert_eq!(shipyards_db::restore_all(&server, &[done]), 0);
+    assert_eq!(server.systems.vehicles.shipyards.all().len(), 1);
+    assert_eq!(
+        server.systems.vehicles.shipyards.take_pending_delete(),
+        vec![99]
+    );
+}
+
 fn effect_args<'a>(
     caster: &WorldObject,
     target: crate::systems::skills::geometry::Target,
