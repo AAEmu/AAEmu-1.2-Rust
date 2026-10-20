@@ -1607,6 +1607,14 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     let mut consumed_items: Vec<(u64, i32)> = Vec::new();
     let mut consumed_templates: Vec<(u32, i32)> = Vec::new();
     if let Some(last) = last_applied {
+        // Deviation: C# looked at the last applied effect only. Skills with mixed flags (a
+        // consuming GainItem followed by an Interaction effect) never consumed the item, so the
+        // last applied effect that carries `consume_source_item` / `consume_item_id` wins.
+        let applied = || to_apply.iter().map(|(_, e)| *e);
+        let source_effect = applied().rev().find(|e| e.consume_source_item);
+        let template_effect = applied()
+            .rev()
+            .find(|e| e.consume_item_id != 0 && e.consume_item_count > 0);
         if let (
             SkillCaster::Item {
                 item_id,
@@ -1616,17 +1624,19 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             Some(_),
         ) = (ctx.caster_caster, &player)
         {
-            if last.consume_source_item || items.use_skill_as_reagent(server, item_template_id) {
+            if let Some(e) = source_effect {
+                consumed_items.push((item_id, e.consume_item_count));
+            } else if items.use_skill_as_reagent(server, item_template_id) {
                 consumed_items.push((item_id, last.consume_item_count));
             }
         }
         if let Some(p) = &player {
-            if last.consume_item_id != 0 && last.consume_item_count > 0 {
+            if let Some(e) = template_effect {
                 // source item consumption, or enough of the item in the bag / equipment
-                if last.consume_source_item
-                    || items.item_count(server, p, last.consume_item_id) >= last.consume_item_count
+                if e.consume_source_item
+                    || items.item_count(server, p, e.consume_item_id) >= e.consume_item_count
                 {
-                    consumed_templates.push((last.consume_item_id, last.consume_item_count));
+                    consumed_templates.push((e.consume_item_id, e.consume_item_count));
                 }
             }
         }

@@ -2283,6 +2283,25 @@ exactly on the end point, and when the new position is within float noise of it 
 fixed 1e-3 m was not enough on large maps) the heading of the step itself (`heading(cur, end)`)
 is used. The C# original has the same degenerate `atan2`.
 
+## Quest `ObjMateLevel` cleanup consumes on completion (2026-10-20)
+
+C# `QuestActObjMateLevel.CalculateObjective` deleted the `SummonMate` item (when `cleanup` is set)
+the moment the level check passed. `quests::events::on_mate_spawned` now dispatches `MateLevelUp`
+on every mate spawn, so summoning a level-50 mate while another objective of the step was open
+(quest 5430, Stormdarter plus the essence gather) destroyed the pet item and the next evaluation
+reset the objective. The Rust objective only reads state; `act_quest_cleanup` consumes one item of
+`item_id` when the quest completes, preferring the item whose mate level satisfies the act.
+
+## Skill source-item consumption over all applied effects (2026-10-20)
+
+C# `Skill.cs` read `consume_source_item`, `consume_item_id` and `consume_item_count` from
+`lastAppliedEffect` only. 13 skills in `compact.sqlite3` put the consuming effect first and an
+Interaction / Spawn / NpcSpawner / Buff effect last (sealed mount items, skill 22465 for
+"Lightningstruck Swift Tempest"), so the item was never consumed while GainItem kept granting
+the mate. The Rust port consumes the source item once, using the last applied effect that carries
+`consume_source_item`, and the template item once, using the last applied effect with a
+`consume_item_id`; `use_skill_as_reagent` still uses the last applied effect's count.
+
 ## Trade item integrity and craft materials (2026-10-20)
 
 - `trade::add_item` (C# `TradeManager.AddItem` only checked `item.Count >= amount`) now also

@@ -991,6 +991,10 @@ async fn recharge_item_buff_cancels_on_a_non_rechargeable_target() {
 // ---------------------------------------------------------------------------------------------
 
 fn ucc_world() -> World {
+    ucc_world_with(true)
+}
+
+fn ucc_world_with(as_reagent: bool) -> World {
     use crate::systems::skills::data::{EffectKind, EffectTemplate};
     let mut d = data();
     // Authentic 1.2 Crest Ink / Crest Bleach are use-skill reagents. Their effect rows
@@ -998,7 +1002,7 @@ fn ucc_world() -> World {
     for (item_id, skill_id) in [(17662, 14433), (19780, 16046)] {
         let mut item = ItemTemplate::plain(item_id, 10);
         item.use_skill_id = skill_id;
-        item.use_skill_as_reagent = true;
+        item.use_skill_as_reagent = as_reagent;
         d.items.templates.insert(item_id, item);
     }
     d.systems.skills.add_effect(
@@ -1041,6 +1045,18 @@ fn cast_ucc(
     target_id: u64,
     target_player: &PlayerRef,
 ) -> crate::systems::skills::state::SkillRef {
+    cast_ucc_flags(w, cleanup, source, target_id, target_player, &[false])
+}
+
+/// One effect per entry of `consume_flags` (its `consume_source_item`), in order.
+fn cast_ucc_flags(
+    w: &World,
+    cleanup: bool,
+    source: SkillItem,
+    target_id: u64,
+    target_player: &PlayerRef,
+    consume_flags: &[bool],
+) -> crate::systems::skills::state::SkillRef {
     use crate::systems::skills::data::{EffectKind, SkillEffect, SkillTemplate};
     use crate::systems::skills::geometry::Target;
     use crate::systems::skills::skill::{apply_effects, CastCtx};
@@ -1053,36 +1069,39 @@ fn cast_ucc(
     } else {
         (14433, EffectKind::ImprintUccEffect, 5)
     };
-    let effect = SkillEffect {
-        effect_id,
-        template: Some((kind, effect_id)),
-        weight: 0,
-        start_level: 1,
-        end_level: 99,
-        friendly: true,
-        non_friendly: true,
-        target_buff_tag_id: 0,
-        target_no_buff_tag_id: 0,
-        source_buff_tag_id: 0,
-        source_no_buff_tag_id: 0,
-        chance: 100,
-        front: true,
-        back: true,
-        target_npc_tag_id: 0,
-        application_method: 1,
-        consume_source_item: false,
-        consume_item_id: 0,
-        consume_item_count: 1,
-        always_hit: false,
-        item_set_id: 0,
-        interaction_success_hit: false,
-    };
+    let effects: Vec<SkillEffect> = consume_flags
+        .iter()
+        .map(|&consume| SkillEffect {
+            effect_id,
+            template: Some((kind, effect_id)),
+            weight: 0,
+            start_level: 1,
+            end_level: 99,
+            friendly: true,
+            non_friendly: true,
+            target_buff_tag_id: 0,
+            target_no_buff_tag_id: 0,
+            source_buff_tag_id: 0,
+            source_no_buff_tag_id: 0,
+            chance: 100,
+            front: true,
+            back: true,
+            target_npc_tag_id: 0,
+            application_method: 1,
+            consume_source_item: consume,
+            consume_item_id: 0,
+            consume_item_count: 1,
+            always_hit: false,
+            item_set_id: 0,
+            interaction_success_hit: false,
+        })
+        .collect();
     let skill = SkillRun::new(
         Arc::new(SkillTemplate {
             id: skill_id,
             target_type: 9,
             target_selection: 2,
-            effects: vec![effect],
+            effects,
             ..SkillTemplate::default()
         }),
         1,
@@ -1152,6 +1171,40 @@ async fn ucc_owned_dispatch_consumes_one_source_after_imprint_or_cleanup() {
         assert!(ops.contains(&sc::SCItemTaskSuccessPacket));
         assert!(w.b.drain().is_empty());
     }
+}
+
+#[tokio::test]
+async fn source_item_is_consumed_once_when_only_a_non_last_effect_consumes_it() {
+    // First effect consumes the source item, the last one does not (mixed flags, e.g. skill
+    // 22465): the item must still be debited, exactly once.
+    let w = ucc_world_with(false);
+    let source_id = give(
+        &w,
+        &w.pa,
+        slot_type::INVENTORY,
+        ucc_source_template(false),
+        3,
+        0,
+    );
+    let target_id = give(&w, &w.pa, slot_type::INVENTORY, ARMOR, 1, 1);
+    {
+        let bag = Inv::of(&w.pa).bag();
+        let mut bag = bag.lock().unwrap();
+        bag.get_item_by_id_mut(source_id).unwrap().set_ucc(0xABCD);
+    }
+    let skill = cast_ucc_flags(
+        &w,
+        false,
+        SkillItem {
+            item_id: source_id,
+            item_template_id: ucc_source_template(false),
+        },
+        target_id,
+        &w.pa,
+        &[true, false],
+    );
+    assert!(!skill.cancelled());
+    assert_eq!(item(&w, source_id).unwrap().count, 2);
 }
 
 #[tokio::test]
