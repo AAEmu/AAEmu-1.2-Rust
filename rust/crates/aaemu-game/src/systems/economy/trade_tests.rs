@@ -897,7 +897,18 @@ async fn soul_bound_putup_cancels_the_trade() {
         .flags |= ITEM_FLAG_SOUL_BOUND;
     start(&mut w);
     putup_item(&mut w, 0, 2, 0, 1);
-    assert_eq!(w.a.drain(), vec![canceled(0, true)]);
+    let mut err = PacketStream::new();
+    err.write_i16(super::error_message::TRADE_SOUL_BOUND_ITEM)
+        .write_i16(super::error_message::TRADE_SOUL_BOUND_ITEM)
+        .write_u32(0)
+        .write_bool(true);
+    assert_eq!(
+        w.a.drain(),
+        vec![
+            (sc::SCErrorMsgPacket, err.into_bytes()),
+            canceled(0, true)
+        ]
+    );
     assert_eq!(w.b.drain(), vec![canceled(0, false)]);
     assert!(w.server.systems.economy.trade.trades().is_empty());
 }

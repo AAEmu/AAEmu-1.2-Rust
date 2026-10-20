@@ -326,6 +326,12 @@ pub fn add_item(server: &GameServer, character: &PlayerRef, st: u8, slot: u8, am
             "Trade Id:{trade_id} {} put up a bound item or a non-bag slot ({st}-{slot}), refused.",
             name_of(character)
         );
+        if item.flags & crate::models::item::ITEM_FLAG_SOUL_BOUND != 0 {
+            crate::systems::social::util::send_error(
+                character,
+                super::error_message::TRADE_SOUL_BOUND_ITEM,
+            );
+        }
         cancel_locked(server, &mut trades, character.obj_id, 0, trade_id);
         return;
     }
