@@ -786,18 +786,23 @@ pub fn invite(server: &GameServer, inviter: &PlayerRef, invited_name: &str) {
     if expedition_of(server, &invited).is_some() {
         return;
     }
-    server
-        .expeditions
-        .invitations
-        .lock()
-        .expect("expedition invitations poisoned")
-        .insert(
+    {
+        let mut invitations = server
+            .expeditions
+            .invitations
+            .lock()
+            .expect("expedition invitations poisoned");
+        // Drop the invitations nobody answered in time so the map cannot grow without bound.
+        let now = util::now_ms();
+        invitations.retain(|_, p| p.time_ms + INVITATION_TIMEOUT_MS >= now);
+        invitations.insert(
             invited.character_id,
             PendingInvite {
                 expedition_id: e.id(),
-                time_ms: util::now_ms(),
+                time_ms: now,
             },
         );
+    }
     let inviter_name = inviter.data().unit.name.clone();
     invited.send(SCExpeditionInvitationPacket {
         invitor_id: inviter.character_id,
