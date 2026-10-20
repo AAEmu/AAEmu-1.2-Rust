@@ -887,7 +887,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * systems::skills: `SpecialEffect` repeats are scheduled tasks instead of `Thread.Sleep` loops.
 * systems::skills (cuboid AoE): `AreaShape.ComputeCuboid` tested the triangles (v0,v1,v2) and
   (v1,v2,v3) of a rectangle whose vertices run around it, so the two overlapped and the wedge at
-  the v3-v0 edge was never hit. `geometry::point_in_cuboid` splits along the v0-v2 diagonal.
+  the v3-v0 edge was never hit, and the strict `< 0` sign test dropped points exactly on a diagonal.
+  Skill AoEs (`geometry::around_shape`) and doodad area triggers (`area_trigger::AreaShape::
+  compute_cuboid`) now share `utils::math::point_in_cuboid`, which rotates the point into the
+  shape's frame and checks `|along length| <= value1 && |along width| <= value2` (edges included),
+  so both agree on the same `aoe_shapes` row (the doodad side used to mirror the bug).
 * systems::skills (2026-10-12 audit): OR requirements now require one success and use the resolved
   packet target, including doodads. Equipped-item and NPC-group requirements check their actual
   membership; crime-point limits and overnight time windows are enforced. Source/target life,

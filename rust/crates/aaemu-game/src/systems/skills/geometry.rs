@@ -8,6 +8,7 @@ use std::sync::Arc;
 use crate::data::world_templates::REGION_SIZE;
 use crate::models::transform::PositionAndRotation;
 use crate::server::GameServer;
+use crate::utils::math::point_in_cuboid;
 use crate::world::{WorldInstance, WorldObject};
 
 use super::data::misc::{area_shape_type, AreaShape};
@@ -268,43 +269,6 @@ pub fn around_radius(
     out
 }
 
-/// `MathUtil.GetCuboidVertices(length, width, x, y, rotationZ)` (radians).
-fn cuboid_vertices(length: f32, width: f32, x: f32, y: f32, rot_z: f32) -> [(f32, f32); 4] {
-    let rad_front = rot_z - std::f32::consts::PI / 2.0;
-    let rad_right = rot_z;
-    let (cf, sf) = (rad_front.cos(), rad_front.sin());
-    let (cr, sr) = (rad_right.cos(), rad_right.sin());
-    let p = |w: f32, l: f32| {
-        let a = (w * cf + x, w * sf + y);
-        (l * cr + a.0, l * sr + a.1)
-    };
-    [
-        p(width, length),
-        p(width, -length),
-        p(-width, -length),
-        p(-width, length),
-    ]
-}
-
-fn sign(p1: (f32, f32), p2: (f32, f32), p3: (f32, f32)) -> f32 {
-    (p1.0 - p3.0) * (p2.1 - p3.1) - (p2.0 - p3.0) * (p1.1 - p3.1)
-}
-
-/// `MathUtil.PointInTriangle`.
-fn point_in_triangle(pt: (f32, f32), v1: (f32, f32), v2: (f32, f32), v3: (f32, f32)) -> bool {
-    let b1 = sign(pt, v1, v2) < 0.0;
-    let b2 = sign(pt, v2, v3) < 0.0;
-    let b3 = sign(pt, v3, v1) < 0.0;
-    b1 == b2 && b2 == b3
-}
-
-/// `AreaShape.ComputeCuboid` point test over the rectangle from [`cuboid_vertices`]. The vertices
-/// run around the rectangle, so it splits along the v0-v2 diagonal; the C# tested (v0,v1,v2) and
-/// (v1,v2,v3), which overlap and miss the wedge at the v3-v0 edge.
-fn point_in_cuboid(pt: (f32, f32), v: &[(f32, f32); 4]) -> bool {
-    point_in_triangle(pt, v[0], v[1], v[2]) || point_in_triangle(pt, v[0], v[2], v[3])
-}
-
 /// `WorldManager.GetAroundByShape<T>(obj, shape)` (`None` for an unknown shape type, the C#
 /// returns null).
 pub fn around_shape(
@@ -338,12 +302,11 @@ pub fn around_shape(
             if res.is_empty() {
                 return Some(res);
             }
-            let v = cuboid_vertices(shape.value1, shape.value2, o.x, o.y, o.rot_z);
             Some(
                 res.into_iter()
                     .filter(|t| {
                         let p = world.world_pos_rot(t);
-                        point_in_cuboid((p.x, p.y), &v)
+                        point_in_cuboid((p.x, p.y), shape.value1, shape.value2, o.x, o.y, o.rot_z)
                     })
                     .collect(),
             )
@@ -400,28 +363,34 @@ mod tests {
     }
 
     #[test]
-    fn cuboid_contains_center() {
-        let v = cuboid_vertices(2.0, 3.0, 10.0, 10.0, 0.0);
-        let c = (
-            (v[0].0 + v[1].0 + v[2].0) / 3.0,
-            (v[0].1 + v[1].1 + v[2].1) / 3.0,
-        );
-        assert!(point_in_triangle(c, v[0], v[1], v[2]));
-        assert!(
-            !point_in_triangle((20.0, 20.0), v[0], v[1], v[2])
-                && !point_in_triangle((20.0, 20.0), v[1], v[2], v[3])
-        );
-    }
-
-    #[test]
-    fn cuboid_covers_every_quadrant_including_the_v3_v0_edge() {
+    fn cuboid_covers_every_quadrant_the_diagonals_and_the_corners() {
         // rotation 0: length runs along X, width along Y; rectangle x 8..12, y 7..13.
-        let v = cuboid_vertices(2.0, 3.0, 10.0, 10.0, 0.0);
-        for (dx, dy) in [(1.5, 0.0), (-1.5, 0.0), (0.0, 2.5), (0.0, -2.5), (1.9, 2.9)] {
-            assert!(point_in_cuboid((10.0 + dx, 10.0 + dy), &v), "({dx}, {dy})");
+        let inside =
+            |dx: f32, dy: f32| point_in_cuboid((10.0 + dx, 10.0 + dy), 2.0, 3.0, 10.0, 10.0, 0.0);
+        for (dx, dy) in [
+            (0.0, 0.0),
+            (1.5, 0.0),
+            (-1.5, 0.0),
+            (0.0, 2.5),
+            (0.0, -2.5),
+            (1.9, 2.9),
+            // exactly on the (v0, v2) and (v1, v3) diagonals
+            (1.0, 1.5),
+            (-1.0, -1.5),
+            (1.0, -1.5),
+            (-1.0, 1.5),
+            // corners and edge midpoints
+            (2.0, 3.0),
+            (-2.0, -3.0),
+            (2.0, -3.0),
+            (-2.0, 3.0),
+            (2.0, 0.0),
+            (0.0, -3.0),
+        ] {
+            assert!(inside(dx, dy), "({dx}, {dy})");
         }
-        for (dx, dy) in [(2.5, 0.0), (0.0, 3.5), (-2.5, -3.5)] {
-            assert!(!point_in_cuboid((10.0 + dx, 10.0 + dy), &v), "({dx}, {dy})");
+        for (dx, dy) in [(2.5, 0.0), (0.0, 3.5), (-2.5, -3.5), (2.01, 3.01)] {
+            assert!(!inside(dx, dy), "({dx}, {dy})");
         }
     }
 

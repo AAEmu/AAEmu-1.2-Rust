@@ -339,6 +339,33 @@ pub fn point_in_triangle(
     b1 == b2 && b2 == b3
 }
 
+/// Whether `point` lies in the rectangle of [`get_cuboid_vertices`] (`length` along the right
+/// axis `rotation_z`, `width` along the front axis `rotation_z - PI / 2`, centred on `(x, y)`),
+/// edges included.
+///
+/// `AreaShape.ComputeCuboid` in the C# tested the triangles (v0,v1,v2) and (v1,v2,v3) of the
+/// vertex ring: they share the v1-v2 side instead of splitting the rectangle on a diagonal, so
+/// the wedge at the v3-v0 edge was never inside, and the strict `< 0` sign test dropped points
+/// exactly on a diagonal. This rotates the point into the shape's frame instead (exact, no
+/// triangles); the skill AoE (`systems::skills::geometry`) and the doodad area triggers
+/// (`systems::npcs::area_trigger`) share it so both agree on the same `aoe_shapes` row.
+pub fn point_in_cuboid(
+    point: (f32, f32),
+    length: f32,
+    width: f32,
+    x: f32,
+    y: f32,
+    rotation_z: f32,
+) -> bool {
+    let (sin, cos) = f64::from(rotation_z).sin_cos();
+    let dx = f64::from(point.0) - f64::from(x);
+    let dy = f64::from(point.1) - f64::from(y);
+    // right axis (cos, sin); front axis (cos(rot - PI/2), sin(rot - PI/2)) = (sin, -cos)
+    let along_length = dx * cos + dy * sin;
+    let along_width = dx * sin - dy * cos;
+    along_length.abs() <= f64::from(length.abs()) && along_width.abs() <= f64::from(width.abs())
+}
+
 /// `ConvertRadianToDirection(radian)`.
 pub fn convert_radian_to_direction(radian: f64) -> i8 {
     convert_degree_to_sbyte_direction(rad_to_deg(radian))
@@ -456,6 +483,66 @@ mod tests {
         ] {
             assert!((rad_to_deg_f32(rad) - deg).abs() < 0.005);
             assert!((deg_to_rad_f32(deg) - rad).abs() < 0.005);
+        }
+    }
+
+    #[test]
+    fn point_in_cuboid_covers_the_whole_rectangle() {
+        // 2 x 3 box (length 2 along +X, width 3 along Y) centred on (10, 10): x 8..12, y 7..13.
+        let inside = |p: (f32, f32)| point_in_cuboid(p, 2.0, 3.0, 10.0, 10.0, 0.0);
+        // centre, every side, every corner, both diagonals
+        for p in [
+            (10.0, 10.0),
+            (12.0, 10.0),
+            (8.0, 10.0),
+            (10.0, 13.0),
+            (10.0, 7.0),
+            (12.0, 13.0),
+            (12.0, 7.0),
+            (8.0, 13.0),
+            (8.0, 7.0),
+            (11.0, 11.5),
+            (9.0, 8.5),
+            (11.0, 8.5),
+            (9.0, 11.5),
+        ] {
+            assert!(inside(p), "{p:?}");
+        }
+        for p in [
+            (12.01, 10.0),
+            (7.99, 10.0),
+            (10.0, 13.01),
+            (10.0, 6.99),
+            (12.1, 13.1),
+        ] {
+            assert!(!inside(p), "{p:?}");
+        }
+        // The points the old triangles missed: the v3-v0 edge wedge (x 10..12, y 11.5..13 side)
+        // and the exact (v0, v2) diagonal.
+        let v = get_cuboid_vertices(2.0, 3.0, 10.0, 10.0, 0.0);
+        let on_diagonal = ((v[0].0 + v[2].0) / 2.0, (v[0].1 + v[2].1) / 2.0);
+        assert!(inside(on_diagonal));
+        let v3_v0_mid = ((v[3].0 + v[0].0) / 2.0, (v[3].1 + v[0].1) / 2.0);
+        assert!(inside(v3_v0_mid));
+        // Every vertex is inside, for rotated shapes too.
+        for rot in [0.3_f32, 1.0, 2.5, -1.2, std::f32::consts::FRAC_PI_2] {
+            let v = get_cuboid_vertices(4.0, 1.5, -7.0, 3.0, rot);
+            for c in v {
+                // vertices are f32-rounded: nudge inwards
+                let n = (c.0 + (-7.0 - c.0) * 1e-4, c.1 + (3.0 - c.1) * 1e-4);
+                assert!(point_in_cuboid(n, 4.0, 1.5, -7.0, 3.0, rot), "rot {rot}");
+            }
+            assert!(point_in_cuboid((-7.0, 3.0), 4.0, 1.5, -7.0, 3.0, rot));
+            let beyond = (-7.0 + 4.2 * rot.cos(), 3.0 + 4.2 * rot.sin());
+            assert!(
+                !point_in_cuboid(beyond, 4.0, 1.5, -7.0, 3.0, rot),
+                "rot {rot}"
+            );
+            let side = (-7.0 + 1.6 * rot.sin(), 3.0 - 1.6 * rot.cos());
+            assert!(
+                !point_in_cuboid(side, 4.0, 1.5, -7.0, 3.0, rot),
+                "rot {rot}"
+            );
         }
     }
 
