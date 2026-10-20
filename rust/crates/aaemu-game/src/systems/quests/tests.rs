@@ -116,8 +116,18 @@ impl QuestHooks for Rec {
         task: u8,
         template_id: u32,
         count: i32,
-        _: Option<u64>,
+        preferred: Option<u64>,
     ) -> i32 {
+        if let Some(id) = preferred {
+            let bag = c.inventory.bag().clone();
+            let mut g = bag.lock().unwrap();
+            if let Some(pos) = g.items.iter().position(|i| i.id == id) {
+                g.items.remove(pos);
+                drop(g);
+                self.push(format!("consume {task} {template_id} {count}"));
+                return 1;
+            }
+        }
         let removed = take_items(c, template_id, count);
         self.push(format!("consume {task} {template_id} {count}"));
         removed
@@ -1291,6 +1301,61 @@ async fn mate_level_objective_reads_the_summon_item_level_on_mate_events() {
         drain(ctx);
         assert_eq!(ctx.st.quest(h).unwrap().objectives[0], 1);
         assert_eq!(step_of(ctx, h), kind::READY);
+    });
+}
+
+#[tokio::test]
+async fn mate_level_cleanup_keeps_item_until_completion_and_removes_the_satisfying_one() {
+    let (server, rec) = server_with(|d| {
+        single_act_quest(
+            d,
+            21,
+            0,
+            ActKind::ObjMateLevel {
+                item_id: 14878,
+                level: 50,
+                cleanup: true,
+                use_alias: false,
+                alias_id: 0,
+            },
+        );
+    });
+    let mut c = character();
+    give_summon_mate(&mut c, 14878, 50);
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        let h = start(ctx, 21);
+        for _ in 0..3 {
+            ctx.dispatch(&QuestEvent::MateLevelUp).unwrap();
+            drain(ctx);
+            assert_eq!(ctx.st.quest(h).unwrap().objectives[0], 1);
+        }
+        assert!(rec.take().is_empty());
+        let count = |c: &Character| {
+            let bag = c.inventory.bag().clone();
+            let g = bag.lock().unwrap();
+            g.items.iter().filter(|i| i.template_id == 14878).count()
+        };
+        assert_eq!(count(ctx.c), 1);
+    });
+
+    // Completion removes exactly the level-satisfying item, not a lower-level copy.
+    let mut c = character();
+    give_summon_mate(&mut c, 14878, 10);
+    give_summon_mate(&mut c, 14878, 50);
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        let h = start(ctx, 21);
+        ctx.st.quest_mut(h).unwrap().status = super::model::status::COMPLETED;
+        ctx.drop_quest(21, false, false);
+        assert_eq!(rec.take(), vec!["consume 39 14878 1"]);
+        let bag = ctx.c.inventory.bag().clone();
+        let g = bag.lock().unwrap();
+        let left: Vec<u8> = g
+            .items
+            .iter()
+            .filter(|i| i.template_id == 14878)
+            .map(|i| i.details.mate_level)
+            .collect();
+        assert_eq!(left, vec![10]);
     });
 }
 

@@ -2251,3 +2251,12 @@ exactly on the end point, and when the new position is within float noise of it 
 4 ulp of the coordinate magnitude, at least 1e-3 m: the f32 ulp is ~0.002 m beyond 16384, so a
 fixed 1e-3 m was not enough on large maps) the heading of the step itself (`heading(cur, end)`)
 is used. The C# original has the same degenerate `atan2`.
+
+## Quest `ObjMateLevel` cleanup consumes on completion (2026-10-20)
+
+C# `QuestActObjMateLevel.CalculateObjective` deleted the `SummonMate` item (when `cleanup` is set)
+the moment the level check passed. `quests::events::on_mate_spawned` now dispatches `MateLevelUp`
+on every mate spawn, so summoning a level-50 mate while another objective of the step was open
+(quest 5430, Stormdarter plus the essence gather) destroyed the pet item and the next evaluation
+reset the objective. The Rust objective only reads state; `act_quest_cleanup` consumes one item of
+`item_id` when the quest completes, preferring the item whose mate level satisfies the act.

@@ -445,14 +445,14 @@ impl Ctx<'_> {
     }
 
     /// `QuestActObjMateLevel.CalculateObjective`.
+    ///
+    /// Deviation: the C# consumed the summon item here as soon as the level check passed when
+    /// `cleanup` was set. Every mate spawn now dispatches `MateLevelUp`, so that deleted the pet
+    /// item while the other objectives of the step were still open (and the next evaluation then
+    /// reset the objective). The objective only reads state; the item is consumed by
+    /// `act_quest_cleanup` when the quest completes.
     fn mate_level_objective(&mut self, h: QuestHandle, a: usize) -> u8 {
-        let ActKind::ObjMateLevel {
-            item_id,
-            level,
-            cleanup,
-            ..
-        } = self.data.acts[a].kind
-        else {
+        let ActKind::ObjMateLevel { item_id, level, .. } = self.data.acts[a].kind else {
             return 0;
         };
         let mut items = Vec::new();
@@ -468,7 +468,6 @@ impl Ctx<'_> {
             return 0;
         }
         let hooks = self.hooks.clone();
-        let player = self.player.clone();
         for item in items {
             let Some(detail_level) = hooks.summon_mate_level(self.server, &item) else {
                 continue;
@@ -476,24 +475,6 @@ impl Ctx<'_> {
             if detail_level >= level {
                 let r = self.set_objective(h, a, 1);
                 self.log_throw(r, "QuestActObjMateLevel");
-                if cleanup {
-                    // Delete the mate if objective met
-                    let removed = hooks.consume_item(
-                        self.server,
-                        player.as_ref(),
-                        self.c,
-                        item_task::QUEST_REMOVE_SUPPLIES,
-                        item.template_id,
-                        1,
-                        Some(item.id),
-                    );
-                    if removed < 1 {
-                        tracing::warn!(
-                            "QuestActObjMateLevel.CalculateObjective: failed to remove SummonMate item {}",
-                            item.id
-                        );
-                    }
-                }
                 return detail_level;
             }
         }
@@ -715,6 +696,50 @@ impl Ctx<'_> {
             } if *cleanup => {
                 let n = self.cleanup_count(h, a);
                 self.consume_item_group(*item_group_id, n);
+            }
+            ActKind::ObjMateLevel {
+                item_id,
+                level,
+                cleanup,
+                ..
+            } if *cleanup => {
+                // Deviation (see `mate_level_objective`): consumed on completion, preferring the
+                // item whose mate level satisfies the act.
+                let mut preferred = None;
+                for st in [slot_type::INVENTORY, slot_type::EQUIPMENT, slot_type::BANK] {
+                    let Some(cont) = self.c.inventory.get(st) else {
+                        continue;
+                    };
+                    let g = cont.lock().expect("container poisoned");
+                    preferred = g
+                        .items
+                        .iter()
+                        .filter(|i| i.template_id == *item_id)
+                        .find(|i| {
+                            hooks
+                                .summon_mate_level(self.server, i)
+                                .is_some_and(|l| l >= *level)
+                        })
+                        .map(|i| i.id);
+                    if preferred.is_some() {
+                        break;
+                    }
+                }
+                let removed = hooks.consume_item(
+                    self.server,
+                    player.as_ref(),
+                    self.c,
+                    item_task::QUEST_REMOVE_SUPPLIES,
+                    *item_id,
+                    1,
+                    preferred,
+                );
+                if removed < 1 {
+                    tracing::warn!(
+                        "QuestActObjMateLevel.QuestCleanup: failed to remove SummonMate item {}",
+                        item_id
+                    );
+                }
             }
             ActKind::SupplyItem {
                 item_id, cleanup, ..
