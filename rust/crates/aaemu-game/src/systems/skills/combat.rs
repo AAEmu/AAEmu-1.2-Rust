@@ -249,6 +249,14 @@ pub fn do_die(
     killer: Option<&WorldObject>,
     kill_reason: KillReason,
 ) {
+    // `DespawnOnCreatorDeath`: the dying unit's skill summons go with it (systems::npcs). This
+    // runs before the Slave / house override returns below so every death path handles them.
+    server
+        .systems
+        .skills
+        .ext
+        .npcs()
+        .on_unit_died(server, victim);
     if crate::systems::housing::dominion::runtime::handle_tower_death(server, victim) {
         return;
     }

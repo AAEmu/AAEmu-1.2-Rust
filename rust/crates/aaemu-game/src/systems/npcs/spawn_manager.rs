@@ -31,7 +31,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
 use std::thread::ThreadId;
 use std::time::Duration;
 
@@ -41,6 +41,7 @@ use tokio::time::Instant;
 use crate::config::WorldConfig;
 use crate::data::world_templates::REGION_SIZE;
 use crate::models::doodad::doodad_owner_type;
+use crate::models::npc::Npc;
 use crate::server::GameServer;
 use crate::systems::npcs::doodad::spawner::{
     parse_list, DoodadSpawner, DoodadSpawnerDef, NpcSpawnerDef, SimpleSpawnerDef,
@@ -51,7 +52,7 @@ use crate::systems::npcs::npc::spawner::{
     npc_is_resident, NpcSpawner, NpcSpawnerInit, NpcSpawnerShared,
 };
 use crate::systems::npcs::npc::spawner_data::{NpcSpawnerNpc, NpcSpawnerTemplate};
-use crate::world::{DoodadRef, NpcRef, ObjectKind, WorldInstance, WorldObject};
+use crate::world::{DoodadRef, Entity, NpcRef, ObjectKind, WorldInstance, WorldObject};
 
 /// `s_fakeSpawnerId` start value.
 pub const FIRST_FAKE_SPAWNER_ID: u32 = 9_000_001;
@@ -274,6 +275,10 @@ pub struct SpawnManagers {
     spawn_lock: ReentrantLock,
     /// `npc.Spawner`.
     npc_spawner_of: DashMap<u32, Arc<NpcSpawner>>,
+    /// `SpawnEffect` / `NpcSpawnerSpawnEffect` `DespawnOnCreatorDeath` summons: creator obj id
+    /// -> the NPCs spawned by its effects. Weak handles: the world object registry owns the
+    /// NPCs, so a despawned summon simply stops upgrading.
+    creator_summons: Mutex<HashMap<u32, Vec<Weak<Entity<Npc>>>>>,
     /// `doodad.Spawner`.
     doodad_spawner_of: DashMap<u32, Arc<DoodadSpawner>>,
     /// `GameObject.Respawn` (absent = `DateTime.MinValue`).
@@ -309,6 +314,7 @@ impl Default for SpawnManagers {
             managers: DashMap::new(),
             spawn_lock: ReentrantLock::default(),
             npc_spawner_of: DashMap::new(),
+            creator_summons: Mutex::new(HashMap::new()),
             doodad_spawner_of: DashMap::new(),
             respawn_fields: DashMap::new(),
             despawn_fields: DashMap::new(),
@@ -369,6 +375,35 @@ impl SpawnManagers {
         self.npc_spawner_of.insert(obj_id, spawner);
     }
 
+    /// Records an NPC spawned by a `SpawnEffect` / `NpcSpawnerSpawnEffect` with
+    /// `DespawnOnCreatorDeath` under the caster's obj id (`0` = no creator, ignored so a
+    /// creator-less effect can never despawn on an unrelated unit death). A summon cannot be
+    /// its own creator.
+    pub fn add_creator_summon(&self, creator_obj_id: u32, npc: &NpcRef) {
+        if creator_obj_id == 0 || creator_obj_id == npc.obj_id {
+            return;
+        }
+        let mut map = self
+            .creator_summons
+            .lock()
+            .expect("creator summons poisoned");
+        let list = map.entry(creator_obj_id).or_default();
+        // Expired entries (the summon despawned first) must not accumulate.
+        list.retain(|w| w.strong_count() > 0);
+        list.push(Arc::downgrade(npc));
+    }
+
+    /// Takes the still-live summons registered to `creator_obj_id` (the entry is consumed: a
+    /// dying creator is handled once).
+    pub fn take_creator_summons(&self, creator_obj_id: u32) -> Vec<NpcRef> {
+        self.creator_summons
+            .lock()
+            .expect("creator summons poisoned")
+            .remove(&creator_obj_id)
+            .map(|list| list.into_iter().filter_map(|w| w.upgrade()).collect())
+            .unwrap_or_default()
+    }
+
     /// `doodad.Spawner`.
     pub fn doodad_spawner_of(&self, obj_id: u32) -> Option<Arc<DoodadSpawner>> {
         self.doodad_spawner_of.get(&obj_id).map(|s| s.clone())
@@ -394,9 +429,14 @@ impl SpawnManagers {
         self.despawn_fields.insert(obj_id, at);
     }
 
-    /// Drops the spawner links and `Respawn` / `Despawn` fields of a released object id.
+    /// Drops the spawner links, the creator-summon registrations and the `Respawn` / `Despawn`
+    /// fields of a released object id.
     pub fn forget_object(&self, obj_id: u32) {
         self.npc_spawner_of.remove(&obj_id);
+        self.creator_summons
+            .lock()
+            .expect("creator summons poisoned")
+            .remove(&obj_id);
         self.doodad_spawner_of.remove(&obj_id);
         self.respawn_fields.remove(&obj_id);
         self.despawn_fields.remove(&obj_id);
@@ -2834,5 +2874,57 @@ pub async fn start(server: &Arc<GameServer>) -> anyhow::Result<()> {
 pub fn on_npc_died(server: &GameServer, npc: &NpcRef) {
     if let Some(s) = server.systems.npcs.spawns.npc_spawner_of(npc.obj_id) {
         s.do_despawn(server, npc);
+    }
+}
+
+/// `SpawnEffect` / `NpcSpawnerSpawnEffect` `DespawnOnCreatorDeath`: the summons registered to a
+/// dying unit are despawned with it. Called from the unit death path
+/// (`skills::combat::do_die`); the caller must not hold any object lock. The 1.2 C# only loaded
+/// the flag (see `PORTING.md`); creator logout / non-death despawn leaves the summons alive, as
+/// there.
+pub fn despawn_creator_summons(server: &GameServer, creator: &WorldObject) {
+    let summons = server
+        .systems
+        .npcs
+        .spawns
+        .take_creator_summons(creator.obj_id());
+    for npc in summons {
+        let obj = WorldObject::from(&npc);
+        // A stale entry: the object id now belongs to another live NPC (its summon entry was
+        // registered by a creator whose id was reused).
+        if !server
+            .world
+            .object(npc.obj_id)
+            .and_then(|o| o.as_npc().cloned())
+            .is_some_and(|current| Arc::ptr_eq(&current, &npc))
+        {
+            continue;
+        }
+        let spawner = server.systems.npcs.spawns.npc_spawner_of(npc.obj_id);
+        if let Some(manager) = manager_of(
+            server,
+            &obj,
+            spawner.as_ref().and_then(|s| s.parent_world()),
+        ) {
+            manager.cancel_npc_timers(&npc);
+        }
+        match spawner {
+            Some(s) => s.despawn(server, &npc),
+            None => {
+                tracing::warn!(
+                    "DespawnOnCreatorDeath: summon {} has no spawner",
+                    npc.obj_id
+                );
+                delete_object(server, &obj, None);
+            }
+        }
+        // `NpcSpawner.Despawn` leaves the id to the caller (the despawn tick releases it).
+        server.ids.object.release_id(npc.obj_id);
+        forget_object(server, npc.obj_id);
+        tracing::debug!(
+            "DespawnOnCreatorDeath: deleted summon {} with its creator {}",
+            npc.obj_id,
+            creator.obj_id()
+        );
     }
 }
