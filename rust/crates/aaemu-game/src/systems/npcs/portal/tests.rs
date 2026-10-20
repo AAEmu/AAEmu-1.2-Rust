@@ -50,6 +50,12 @@ fn data() -> GameData {
             faction_id: 102,
             return_point_id: 87,
         },
+        DistrictReturnPoint {
+            id: 3,
+            district_id: 11,
+            faction_id: 101,
+            return_point_id: 6,
+        },
     ];
     d.zones.zones.insert(
         TEST_ZONE,
@@ -179,12 +185,23 @@ async fn safe_portal_mode_uses_character_owner_and_preserves_public_sharing() {
         z: 70.0,
         z2: std::f32::consts::FRAC_PI_2,
     });
+    let used = (
+        sc::SCUnitPortalUsedPacket,
+        body(&SCUnitPortalUsedPacket {
+            unit_id: portal.obj_id,
+        }),
+    );
     request_portal(&server, &mut owner_client, portal.obj_id, true).await;
     assert_eq!(
         owner_client.drain(),
-        vec![(sc::SCTeleportUnitPacket, expected_teleport.clone())]
+        vec![
+            used.clone(),
+            (sc::SCTeleportUnitPacket, expected_teleport.clone())
+        ]
     );
     assert!(owner.data().disabled_set_position);
+    // The bystander sees the gate being used (SCUnitPortalUsed carries the portal NPC).
+    assert_eq!(peer_client.drain(), vec![used.clone()]);
     let peer_before = peer.data().clone();
     request_portal(&server, &mut peer_client, portal.obj_id, true).await;
     assert_eq!(
@@ -208,8 +225,9 @@ async fn safe_portal_mode_uses_character_owner_and_preserves_public_sharing() {
     request_portal(&server, &mut peer_client, portal.obj_id, false).await;
     assert_eq!(
         peer_client.drain(),
-        vec![(sc::SCTeleportUnitPacket, expected_teleport)]
+        vec![used.clone(), (sc::SCTeleportUnitPacket, expected_teleport)]
     );
+    assert_eq!(owner_client.drain(), vec![used]);
     assert!(peer.data().disabled_set_position);
     let mut unauthenticated = TestClient::new(&server, 9, 1009);
     request_portal(&server, &mut unauthenticated, portal.obj_id, false).await;
@@ -293,7 +311,10 @@ async fn loaded_slave_portal_rejection_preserves_movement_state_and_vehicle() {
         destination.world_id = 0;
     }
     request_portal(&server, &mut client, portal.obj_id, true).await;
-    assert_eq!(client.drain_ops(), vec![sc::SCTeleportUnitPacket]);
+    assert_eq!(
+        client.drain_ops(),
+        vec![sc::SCUnitPortalUsedPacket, sc::SCTeleportUnitPacket]
+    );
     assert!(player.data().disabled_set_position);
     assert!(world.slave(slave.obj_id).is_some());
 }
@@ -320,10 +341,19 @@ async fn use_portal_teleports_and_teleport_ended_resends_objects() {
     .await
     .unwrap();
     let frames = client.drain();
-    assert_eq!(frames.len(), 1);
-    assert_eq!(frames[0].0, sc::SCTeleportUnitPacket);
+    assert_eq!(frames.len(), 2);
     assert_eq!(
-        frames[0].1,
+        frames[0],
+        (
+            sc::SCUnitPortalUsedPacket,
+            body(&SCUnitPortalUsedPacket {
+                unit_id: portal.obj_id
+            })
+        )
+    );
+    assert_eq!(frames[1].0, sc::SCTeleportUnitPacket);
+    assert_eq!(
+        frames[1].1,
         body(&SCTeleportUnitPacket {
             reason: 0,
             error_message: 0,
@@ -428,7 +458,11 @@ async fn use_portal_into_other_instance_loads_it() {
     let ops = client.drain_ops();
     assert_eq!(
         ops,
-        vec![sc::SCLoadInstancePacket, sc::SCTeleportUnitPacket]
+        vec![
+            sc::SCUnitPortalUsedPacket,
+            sc::SCLoadInstancePacket,
+            sc::SCTeleportUnitPacket
+        ]
     );
     let t = me.data().unit.transform;
     // `Transform = TeleportPosition.Clone(); InstanceId = TeleportPosition.WorldId`.
@@ -577,7 +611,7 @@ async fn portal_book_delete_and_notify_sub_zone() {
     notify_sub_zone(&server, &me, 78);
     assert!(client.drain().is_empty());
 
-    // CSDeletePortal: private (type != 1) and district (type 1); no packet.
+    // CSDeletePortal: private (type != 1) and district (type 1), confirmed by SCPortalDeleted.
     CSDeletePortalPacket {
         portal_type: 2,
         portal_id: 4097,
@@ -593,15 +627,32 @@ async fn portal_book_delete_and_notify_sub_zone() {
     .handle(&server, &mut client.conn)
     .await
     .unwrap();
+    let deleted = |portal_type: u8, portal_id: i32| {
+        (
+            sc::SCPortalDeletedPacket,
+            body(&SCPortalDeletedPacket {
+                portal_type,
+                portal_id,
+            }),
+        )
+    };
+    assert_eq!(client.drain(), vec![deleted(2, 4097)]);
+    // The bound recall point (district 11 -> return point 6 for faction 101) stays.
+    me.data().return_district_id = 11;
+    delete_portal(&server, &me, 1, 6);
+    assert!(client.drain().is_empty());
+    assert_eq!(me.data().portals.visited_districts.len(), 1);
+    me.data().return_district_id = 9;
+    // A district entry removes its visited sub zone: both recalls of sub zone 77 go.
     delete_portal(&server, &me, 1, 5);
     delete_portal(&server, &me, 2, 999);
-    assert!(client.drain().is_empty());
+    delete_portal(&server, &me, 2, 4097);
+    assert_eq!(client.drain(), vec![deleted(1, 5), deleted(1, 6)]);
     {
         let c = me.data();
         assert!(c.portals.private_portals.is_empty());
         assert!(c.portals.visited_districts.is_empty());
-        // Mirrored: the district list is not rebuilt.
-        assert_eq!(c.portals.district_portals.len(), 2);
+        assert!(c.portals.district_portals.is_empty());
     }
     assert_eq!(
         server.systems.npcs.portals.pending_removals(1),
@@ -710,4 +761,298 @@ fn real_compact_db_portal_tables() {
         t.open_portal_inland_reagents.len(),
         t.open_portal_outland_reagents.len()
     );
+}
+
+// ------------------------------------------------------------------------------------------
+// OpenPortalEffect range, navi doodads, NPC teleporters
+// ------------------------------------------------------------------------------------------
+
+#[test]
+fn open_portal_point_must_be_near_the_caster() {
+    let me = (100.0, 100.0, 50.0);
+    // In front (the client's 2.5 m), at the data's 3 m and at the tooltip's 5 m: accepted.
+    assert!(open_portal_point_in_range(me, (102.5, 100.0, 50.0), 3.0));
+    assert!(open_portal_point_in_range(me, (100.0, 97.0, 50.0), 3.0));
+    assert!(open_portal_point_in_range(me, (96.0, 97.0, 50.0), 3.0));
+    // Behind / beside and far away (C# let these through): refused.
+    assert!(!open_portal_point_in_range(me, (0.0, 0.0, 50.0), 3.0));
+    assert!(!open_portal_point_in_range(me, (100.0, 90.0, 50.0), 3.0));
+    // Same x/y but far above or below: refused.
+    assert!(!open_portal_point_in_range(me, (100.0, 100.0, 80.0), 3.0));
+}
+
+/// Doodad data of a navi gate (template 1219: `NaviOpenPortal` in phase 1878 -> 2046), a navi
+/// sign (1034: `NaviTeleport` in 1351, no next phase) and a portrait whose `NaviTeleport` has a
+/// skill (3347: 7851 -> 8135, skill 15193), as in the 1.2 data.
+fn navi_data() -> GameData {
+    use crate::systems::npcs::doodad::templates::*;
+    let mut gd = data();
+    let d = &mut gd.systems.npcs.doodad;
+    for (template, groups) in [
+        (1219u32, vec![1878u32, 2046]),
+        (1034, vec![1351]),
+        (3347, vec![7851, 8135]),
+    ] {
+        let mut t = DoodadTemplate {
+            id: template,
+            ..DoodadTemplate::default()
+        };
+        for (i, gid) in groups.into_iter().enumerate() {
+            let g = DoodadFuncGroups {
+                id: gid,
+                almighty: template,
+                group_kind_id: if i == 0 { 1 } else { 2 },
+                ..DoodadFuncGroups::default()
+            };
+            t.func_groups.push(g.clone());
+            d.all_func_groups_index.insert(gid, d.all_func_groups.len());
+            d.all_func_groups.push(g);
+        }
+        d.template_order.push(template);
+        d.templates.insert(template, t);
+    }
+    for (key, group, func_type, func_id, next_phase, skill_id) in [
+        (
+            1774u32,
+            1878u32,
+            "DoodadFuncNaviOpenPortal",
+            3u32,
+            2046i32,
+            0u32,
+        ),
+        (1400, 1351, "DoodadFuncNaviTeleport", 1, 0, 0),
+        (7385, 7851, "DoodadFuncNaviTeleport", 2, 8135, 15193),
+    ] {
+        let t = if func_type == "DoodadFuncNaviOpenPortal" {
+            FuncTemplate::NaviOpenPortal(DoodadFuncNaviOpenPortal { id: func_id })
+        } else {
+            FuncTemplate::NaviTeleport(DoodadFuncNaviTeleport { id: func_id })
+        };
+        d.func_templates
+            .entry(t.func_type())
+            .or_default()
+            .insert(func_id, t);
+        let f = DoodadFunc {
+            group_id: group,
+            func_id,
+            func_key: key,
+            func_type: func_type.into(),
+            next_phase,
+            skill_id,
+            ..DoodadFunc::default()
+        };
+        d.funcs_by_id.insert(key, f.clone());
+        d.funcs_by_groups.entry(group).or_default().push(f);
+    }
+    gd
+}
+
+fn spawn_navi(
+    server: &GameServer,
+    obj_id: u32,
+    template: u32,
+    at: (f32, f32, f32),
+) -> crate::world::DoodadRef {
+    use crate::systems::npcs::doodad::manager;
+    let world = server.world.world(0).unwrap();
+    let d = manager::create(server, &world, obj_id, template, None, true).unwrap();
+    d.data().transform.set_xyz(at.0, at.1, at.2);
+    manager::spawn(server, &world, &d);
+    manager::init_doodad(server, &world, &d);
+    d
+}
+
+async fn send_bc(server: &GameServer, client: &mut TestClient, opcode: u16, obj_id: u32) {
+    let mut b = aaemu_commons::PacketStream::new();
+    b.write_bc(obj_id);
+    server
+        .handle_frame(&mut client.conn, &encode_raw(1, opcode, b.as_bytes()))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn navi_teleport_moves_to_the_sign_and_navi_open_portal_opens_the_gate() {
+    let server = test_server_with(navi_data());
+    server.systems.npcs.doodads.tasks.set_manual(true);
+    let mut client = TestClient::new(&server, 1, 1);
+    let me = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Alice", 100.0, 100.0),
+        0x10,
+    );
+    client.conn.active_char = Some(me.clone());
+    let sign = spawn_navi(&server, 0x600, 1034, (140.0, 150.0, 60.0));
+    let gate = spawn_navi(&server, 0x601, 1219, (103.0, 100.0, 100.0));
+    let portrait = spawn_navi(&server, 0x602, 3347, (101.0, 101.0, 100.0));
+    assert_eq!(gate.data().func_group_id, 1878);
+    client.drain();
+
+    // CSNaviTeleport at the sign: SCNaviTeleport to the sign's position, movement held until
+    // CSTeleportEnded.
+    send_bc(&server, &mut client, cs::CSNaviTeleportPacket, sign.obj_id).await;
+    assert_eq!(
+        client.drain(),
+        vec![(
+            sc::SCNaviTeleportPacket,
+            body(&SCNaviTeleportPacket {
+                x: 140.0,
+                y: 150.0,
+                z: 60.0
+            })
+        )]
+    );
+    assert!(me.data().disabled_set_position);
+    assert_eq!(sign.data().func_group_id, 1351); // no next phase
+    me.data().set_disabled_set_position(false);
+
+    // Not a navi teleport (the gate), a skill-driven one (the portrait) or unknown: refused.
+    for obj_id in [gate.obj_id, portrait.obj_id, 0xABCDEF] {
+        navi_teleport(&server, &me, obj_id);
+        assert_eq!(client.drain_ops(), vec![sc::SCErrorMsgPacket]);
+    }
+    assert!(!me.data().disabled_set_position);
+    assert_eq!(portrait.data().func_group_id, 7851);
+
+    // CSNaviOpenPortal: too far from the gate, then at it -> the opening phase 2046.
+    me.data().unit.transform.set_xyz(200.0, 200.0, 100.0);
+    navi_open_portal(&server, &me, gate.obj_id);
+    assert_eq!(client.drain_ops(), vec![sc::SCErrorMsgPacket]);
+    assert_eq!(gate.data().func_group_id, 1878);
+    me.data().unit.transform.set_xyz(100.0, 100.0, 100.0);
+    send_bc(
+        &server,
+        &mut client,
+        cs::CSNaviOpenPortalPacket,
+        gate.obj_id,
+    )
+    .await;
+    assert_eq!(gate.data().func_group_id, 2046);
+    assert!(client.drain_ops().contains(&sc::SCDoodadPhaseChangedPacket));
+    // The opened gate has no NaviOpenPortal func any more; the sign never had one.
+    navi_open_portal(&server, &me, gate.obj_id);
+    assert_eq!(client.drain_ops(), vec![sc::SCErrorMsgPacket]);
+    navi_open_portal(&server, &me, sign.obj_id);
+    assert_eq!(client.drain_ops(), vec![sc::SCErrorMsgPacket]);
+}
+
+#[tokio::test]
+async fn skill_driven_navi_teleport_func_enters_its_next_phase() {
+    use crate::systems::npcs::doodad::{phase, runtime::DoodadCtx};
+    let server = test_server_with(navi_data());
+    server.systems.npcs.doodads.tasks.set_manual(true);
+    let client = TestClient::new(&server, 1, 1);
+    let me = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Alice", 100.0, 100.0),
+        0x10,
+    );
+    let portrait = spawn_navi(&server, 0x602, 3347, (101.0, 101.0, 100.0));
+    // InteractionEffect(Use) of skill 15193 -> doodad.Use(caster, 15193).
+    let ctx = DoodadCtx::of(&server, &portrait).unwrap();
+    phase::use_doodad(&ctx, Some(&WorldObject::from(&me)), 15193, 0);
+    assert_eq!(portrait.data().func_group_id, 8135);
+}
+
+/// An NPC of `template_id` at `at`.
+fn plain_npc(server: &GameServer, template_id: u32, at: (f32, f32)) -> NpcRef {
+    let mut npc = Npc::new(template_id);
+    npc.unit.transform.set_xyz(at.0, at.1, 100.0);
+    npc.unit.transform.zone_id = TEST_ZONE;
+    npc.unit.hp = 1;
+    let npc = Entity::new(server.ids.object.get_next_id().unwrap(), npc);
+    server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&npc, &server.view_ctx());
+    npc
+}
+
+#[tokio::test]
+async fn use_teleport_pays_the_fare_and_teleports_to_the_return_point() {
+    struct Wallet;
+    impl crate::systems::npcs::hooks::EconomyBridge for Wallet {
+        fn change_money(&self, _s: &GameServer, p: &PlayerRef, amount: i64, _task: u8) -> bool {
+            let mut c = p.data();
+            if c.money + amount < 0 {
+                return false;
+            }
+            c.money += amount;
+            true
+        }
+    }
+    let mut gd = data();
+    for (id, teleporter) in [(900u32, true), (901, false)] {
+        gd.systems.npcs.npc.templates.insert(
+            id,
+            NpcTemplate {
+                id,
+                teleporter,
+                ..NpcTemplate::default()
+            },
+        );
+    }
+    let server = test_server_with(gd);
+    server
+        .systems
+        .npcs
+        .hooks
+        .economy
+        .install(std::sync::Arc::new(Wallet));
+    let mut client = TestClient::new(&server, 1, 1);
+    let mut c = test_character(1, "Alice", 100.0, 100.0);
+    c.money = 500;
+    let me = spawn_player(&server, &client, c, 0x10);
+    client.conn.active_char = Some(me.clone());
+    let teleporter = plain_npc(&server, 900, (103.0, 100.0));
+    let plain = plain_npc(&server, 901, (101.0, 100.0));
+    client.drain();
+
+    // Not a teleporter, unknown return point, too expensive, negative fare: nothing happens.
+    use_teleport(&server, &me, 5, 100, plain.obj_id);
+    assert!(client.drain().is_empty());
+    use_teleport(&server, &me, 7, 100, teleporter.obj_id);
+    assert_eq!(client.drain_ops(), vec![sc::SCErrorMsgPacket]);
+    use_teleport(&server, &me, 5, 1000, teleporter.obj_id);
+    use_teleport(&server, &me, 5, -1, teleporter.obj_id);
+    assert!(client.drain().is_empty());
+    assert_eq!(me.data().money, 500);
+    assert!(!me.data().disabled_set_position);
+
+    // CSUseTeleport(5, 120, npc): recall 5 is at (300, 400, 50), yaw 90 degrees.
+    let mut b = aaemu_commons::PacketStream::new();
+    b.write_u32(5).write_i32(120).write_bc(teleporter.obj_id);
+    server
+        .handle_frame(
+            &mut client.conn,
+            &encode_raw(1, cs::CSUseTeleportPacket, b.as_bytes()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        client.drain(),
+        vec![(
+            sc::SCTeleportUnitPacket,
+            body(&SCTeleportUnitPacket {
+                reason: 14,
+                error_message: 0,
+                x: 300.0,
+                y: 400.0,
+                z: 50.0,
+                z2: std::f32::consts::FRAC_PI_2,
+            })
+        )]
+    );
+    assert_eq!(me.data().money, 380);
+    assert!(me.data().disabled_set_position);
+
+    // Too far from the teleporter.
+    me.data().set_disabled_set_position(false);
+    me.data().unit.transform.set_xyz(200.0, 200.0, 100.0);
+    use_teleport(&server, &me, 5, 0, teleporter.obj_id);
+    assert_eq!(client.drain_ops(), vec![sc::SCErrorMsgPacket]);
+    assert!(!me.data().disabled_set_position);
 }

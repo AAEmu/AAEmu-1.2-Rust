@@ -231,6 +231,12 @@ is the one of the game server's `Connections`). Fields (`quest_item_quest`, `que
 from the level spawn fails the `game.doodad.level_spawn` step. The scenario then interacts with a
 `/spawn doodad 4252` copy, so the cast is still checked, and removes that copy afterwards.
 
+`portal` (GM account, same prerequisites as `questitem`) records a book entry with `/add_portal`, deletes it
+with `CSDeletePortal` and requires `SCPortalDeleted`, then teleports next to the Harpa Training Ground Memory Tome
+(doodad 841), casts its binding skill 14602 with a doodad target and requires `SCCharacterReturnDistricts` with the
+bound return point 1, then opens a gate (Teleport Book 4045, skill 11216) once 20 m away (must be refused) and once
+2.5 m ahead, and requires `SCUnitPortalUsed` with the gate NPC before the `SCTeleportUnit` of `CSUsePortal`.
+
 `plant` (GM account) places crops, trees and baby animals with `CSCreateDoodadPacket` (daffodil 2274, potato
 2259, turmeric 2756, wolfdog 4867, elk 4891, growth fruit 4594, fir sapling 367) from seeds added with
 `/item add self`, about 2 m from the bot, and prints per placement whether the doodad was announced

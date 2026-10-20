@@ -947,7 +947,13 @@ fn open_portal_effect(server: &GameServer, distance: f32, args: &EffectArgs<'_>)
         Some(w) => w.world_pos_rot(&me),
         None => owner.data().unit.transform.local(),
     };
-    if x > pos.x + distance || y > pos.y + distance {
+    if !super::portal::open_portal_point_in_range((pos.x, pos.y, pos.z), (x, y, z), distance) {
+        tracing::debug!(
+            "OpenPortalEffect: gate point ({x}, {y}, {z}) too far from ({}, {}, {})",
+            pos.x,
+            pos.y,
+            pos.z
+        );
         return;
     }
     let effect = super::portal::PortalEffectObject { kind, id, x, y, z };
