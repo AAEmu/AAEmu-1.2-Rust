@@ -643,11 +643,17 @@ pub fn learn_skill(server: &GameServer, c: &mut Character, skill_id: u32) {
     if t.skill_points > points {
         return;
     }
+    // A stored skill whose ability level the character never reached (the ability_level 99
+    // rows, e.g. a row a pre-fix server could write) is not re-learned; the C# recomputed a
+    // wrapped byte here and failed every save (1264, see PORTING.md).
+    let ab = ab_level(server, c, t.ability_id);
+    if t.ability_level > ab {
+        return;
+    }
     if c.skills.skills.iter().any(|s| s.id == skill_id) {
         return; // C# re-sends SCSkillLearnedPacket (no connection here)
     }
-    let ab_level = ab_level(server, c, t.ability_id);
-    c.skills.add_skill_template(data, skill_id, ab_level);
+    c.skills.add_skill_template(data, skill_id, ab);
 }
 
 /// `GetAbLevel(type)`: `General` = `Level`, otherwise the level for the ability's exp.
@@ -1755,6 +1761,98 @@ mod tests {
         // 4. What the next character load (`Character.Load` -> account details) reads.
         let reloaded = crate::db::get_account_details(&pool, &server.config, 1).await;
         assert_eq!(reloaded.labor, 893);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn learn_skill_load_refuses_a_skill_above_the_ability_level() {
+        // A stored attribute-less ability_level 99 row (as a pre-fix server could write) is not
+        // re-learned at load either: the C# recomputed a wrapped level and kept failing to save.
+        let mut data = crate::data::GameData::empty();
+        data.experience = crate::test_support::test_experience(55);
+        data.skills.add_skill(crate::data::skills::SkillTemplate {
+            id: 10385,
+            ability_id: 0,
+            ability_level: 99,
+            level_step: 3,
+            skill_points: 1,
+            ..Default::default()
+        });
+        let server = crate::test_support::test_server_with(data);
+        let mut c = crate::test_support::test_character(1, "Stored", 100.0, 100.0);
+        c.unit.level = 55;
+        learn_skill(&server, &mut c, 10385);
+        assert!(c.skills.skills.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
+    async fn private_mysql_retired_skill_level_is_savable() {
+        use crate::systems::social::achievement_persistence::temporary_shadow_definition;
+
+        let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+            return;
+        };
+        let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+        assert_eq!(
+            options.get_port(),
+            3317,
+            "only private MySQL3317 is allowed"
+        );
+        let pool = MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("private MySQL");
+        // Shadow every table `save_character` writes with connection-local copies of their
+        // actual schemas, so no live row is touched.
+        for table in [
+            "characters",
+            "character_active_buffs",
+            "character_records",
+            "character_achievements",
+            "friends",
+            "blocked",
+            "skills",
+            "quests",
+        ] {
+            let (_, definition): (String, String) =
+                sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert!(definition.starts_with("CREATE TABLE "));
+            sqlx::query(&temporary_shadow_definition(&definition))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        // Skill 10385: ability_level 99, level_step 3, ability level 55 (the cap). The old
+        // formula stored level 243, MySQL rejects it (1264) and the whole save rolled back.
+        let mut data = crate::data::GameData::empty();
+        data.skills.add_skill(crate::data::skills::SkillTemplate {
+            id: 10385,
+            ability_id: 0,
+            ability_level: 99,
+            level_step: 3,
+            skill_points: 1,
+            ..Default::default()
+        });
+        let mut character = Character::new(1, 1, UnitCustomModelParams::default());
+        character.unit.name = "RetiredSkill".into();
+        character.created = Utc::now().timestamp();
+        character.skills.add_skill_template(&data.skills, 10385, 55);
+        assert_eq!(character.skills.skills[0].level, 1);
+
+        assert!(save_directly_to_database(&pool, &mut character).await);
+        let (id, level): (i64, i64) = sqlx::query_as(
+            "SELECT CAST(id AS SIGNED), CAST(`level` AS SIGNED) FROM `skills` WHERE `owner` = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((id, level), (10385, 1));
         pool.close().await;
     }
 

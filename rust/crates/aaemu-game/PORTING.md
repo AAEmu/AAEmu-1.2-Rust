@@ -1356,6 +1356,36 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   (for example, an item consumed before its first save). SQL errors and transaction handling are
   unchanged, and deletion IDs are acknowledged only after commit.
 
+* systems::skills (2026-10-19): `CharacterSkills.AddSkill` refuses a skill whose `ability_level`
+  the character's ability has not reached, and `Skill.Level` saturates to `1..=127` instead of
+  wrapping (C#: `(byte)((abLevel - AbilityLevel) / LevelStep + 1)`). The 1.2 data has 24 retired /
+  login-stage rows with `ability_level` 99 (e.g. 10385, 11854; `show = f`) above the level cap 55;
+  the C# expression goes negative and the byte cast wraps it (243), which MySQL rejects when
+  saving `skills.level` (signed TINYINT, `1264 Out of range value for column 'level'`), so every
+  character save of the account failed and the Rust departure retry then refused the next login
+  with "Previous character save is pending" until restart. The 1.2 client only offers a skill from
+  its ability level on (and never a `show = f` row), so retail never learns those; the check drops
+  them without a packet, like the other silent refusals of `AddSkill`. The C# (and its upstream
+  master) has no such check and fails the same way.
+
+* systems::skills timeline ids (2026-10-19, upstream issue #753): the C# `SkillTlIdManager`
+  slowly ran out of its ~65k ids (`0x000A..=0xFFFE`) because several `Skill` / `PlotTree` paths
+  returned without `ReleaseId` (the item-reagent rejection inside `Skill.Cast` and the plot
+  entry failures among them); once full, `GetNextId` logged `Fatal` and returned 0 forever, so
+  every later skill was sent with timeline id 0. The Rust port returns the id on every path: the
+  item-reagent rejection (`stop`), `cast()` on a cancelled skill, plots refused by the dominion
+  runtime or without a tree (`do_plot_end`), and cast / channel / delayed-effect tasks whose
+  scheduler is gone (finished inline). A reused `SkillRun` that still holds an id (auto attack
+  overlapping a delayed apply) has the old id recovered and counted (`replaced`). Exhaustion
+  never blocks or panics: it logs a throttled `warn` with the holders' ages and hands out 0 (the
+  cast continues without a timeline), and the manager exposes in-use / peak / gets / releases /
+  unused / exhaustions / replaced / leaked-over-10-min counters (`TlIdStats`), shown on the Web
+  API `/status` page and in the every-500-gets debug line. Covered by
+  `skills/tasks.rs` unit tests and `skills/tl_id_flow_tests.rs` (a 250-iteration sweep of instant,
+  interrupted, completed and channelled casts, plus failed validation, item-reagent rejection,
+  refused / treeless plots, a replaced reuse and an exhausted pool; every case asserts the pool
+  returns to baseline).
+
 * systems::skills log noise (2026-10-16): `CSStopCasting` with `tl == 0` and a plot tl for a plot
   that already ended (the client repeats it ~30 times per plot) is logged at debug instead of
   the C# warning; no acknowledgement packet is sent (client behaviour unverified; possible

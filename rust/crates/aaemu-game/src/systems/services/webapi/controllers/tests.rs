@@ -46,9 +46,10 @@ async fn status_world_and_expeditions() {
     assert_eq!(r.status, 200);
     assert_eq!(r.content_type(), Some("text/html"));
     assert!(r.body.starts_with("Server uptime: "));
-    assert!(r
-        .body
-        .ends_with("<br/>Players online: 1<br/>Number of TaskManager Jobs: 0<br/>"));
+    assert!(r.body.ends_with(
+        "<br/>Players online: 1<br/>Number of TaskManager Jobs: 0<br/>\
+         SkillTlIds in use: 0 / 65525 (peak 0, gets 0, releases 0, unused 0, exhaustions 0, replaced 0, leaked(>10min) 0)<br/>"
+    ));
 
     let r = get(&api, "/api/world/logged-characters").await;
     assert_eq!(r.content_type(), Some("application/json"));

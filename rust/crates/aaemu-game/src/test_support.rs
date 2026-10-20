@@ -53,6 +53,23 @@ pub fn test_server() -> GameServer {
     test_server_with(GameData::empty())
 }
 
+/// An `ExperienceTable` for levels `1..=up_to` (strictly increasing total / mate exp,
+/// `skill_points = level`): tests that learn skills need `GetSkillPointsForLevel` /
+/// `GetAbLevel` to answer.
+pub fn test_experience(up_to: u8) -> crate::data::ExperienceTable {
+    crate::data::ExperienceTable::from_templates(
+        (1..=up_to)
+            .map(|level| crate::data::LevelTemplate {
+                level,
+                total_exp: i32::from(level) * 1_000,
+                total_mate_exp: i32::from(level) * 1_000,
+                skill_points: i32::from(level),
+            })
+            .collect(),
+    )
+    .expect("test experience table")
+}
+
 /// A connection whose outgoing frames can be inspected.
 pub struct TestClient {
     pub conn: GameConnection,

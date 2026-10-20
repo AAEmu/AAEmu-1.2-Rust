@@ -96,13 +96,10 @@ impl SkillRun {
         })
     }
 
-    /// `Skill(template, owner)` level: `(abLevel - AbilityLevel) / LevelStep + 1`.
+    /// `Skill(template, owner)` level: `(abLevel - AbilityLevel) / LevelStep + 1`, saturated to
+    /// the savable range (see `data::skills::skill_level`).
     pub fn level_for(template: &SkillTemplate, ab_level: i32) -> u8 {
-        if template.level_step > 0 {
-            ((ab_level - template.ability_level) / template.level_step + 1) as u8
-        } else {
-            1
-        }
+        crate::data::skills::skill_level(template.ability_level, template.level_step, ab_level)
     }
 
     pub fn state(&self) -> MutexGuard<'_, SkillRunState> {
