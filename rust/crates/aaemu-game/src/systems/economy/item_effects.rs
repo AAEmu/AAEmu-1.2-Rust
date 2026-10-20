@@ -1102,6 +1102,87 @@ pub fn gain_item_with_pos_imprint(server: &GameServer, player: &PlayerRef, value
     }
 }
 
+/// `ExpToItem.Execute` (special 96). The C# body is a `// TODO` stub; 1.2 data row 12462 has
+/// `value1 = 10000` (experience spent) and `value2 = 28329` ("Timeglass Bottle"), cast from the
+/// consumed tool item 28328 ("Empty Timeglass Bottle", skill 22580). The experience is deducted
+/// directly (not through `AddExp`, which recomputes the level and could level the character
+/// down) and reported with `SCExpChangedPacket`. `Outcome::Cancelled` leaves the reagent
+/// unconsumed when the character lacks the experience or the bag cannot hold the product.
+pub fn exp_to_item(server: &GameServer, player: &PlayerRef, values: [i32; 4]) -> Outcome {
+    let [value1, value2, value3, value4] = values;
+    tracing::debug!(
+        "Special effects: ExpToItem value1 {value1}, value2 {value2}, value3 {value3}, value4 {value4}"
+    );
+    if value1 <= 0 || value2 <= 0 {
+        tracing::warn!("Special effects: ExpToItem ignored invalid values {value1} / {value2}");
+        return Outcome::Cancelled;
+    }
+    let item_id = value2 as u32;
+    if server.game_data.items.template(item_id).is_none() {
+        tracing::warn!("Special effects: ExpToItem ignored unknown item template {item_id}");
+        return Outcome::Cancelled;
+    }
+    let inv = Inv::of(player);
+    // Check the room before the experience is spent; otherwise the product would be lost.
+    if !bag_can_accept_item(&server.game_data.items, &inv, item_id, 1) {
+        let mut txn = ItemTxn::begin(server);
+        send_error_message_to(&mut txn.out(), player, error_message::BAG_FULL);
+        return Outcome::Cancelled;
+    }
+    let exp_cost = value1;
+    if player.data().experience < exp_cost {
+        return Outcome::Cancelled;
+    }
+    player.data().experience -= exp_cost;
+    player.send(crate::systems::skills::packets::SCExpChangedPacket {
+        obj_id: player.obj_id,
+        exp: -exp_cost,
+        should_add_ability_exp: false,
+    });
+    let mut txn = ItemTxn::begin(server);
+    let acquired = inventory::try_add_new_item(
+        &mut txn,
+        &inv,
+        task_type::SKILL_EFFECT_EXP_TO_ITEM,
+        item_id,
+        1,
+        0,
+        0,
+    );
+    if !acquired {
+        tracing::warn!(
+            "Special effects: ExpToItem failed to give item {item_id} to character {}",
+            player.character_id
+        );
+    }
+    Outcome::Done
+}
+
+/// Whether the bag can take `count` units of `template_id` (`AcquireDefaultItemEx`'s free-space
+/// calculation: partial stacks plus free slots).
+fn bag_can_accept_item(
+    data: &crate::data::items::ItemData,
+    inv: &Inv,
+    template_id: u32,
+    count: i32,
+) -> bool {
+    let Some(template) = data.template(template_id) else {
+        return false;
+    };
+    if count <= 0 {
+        return true;
+    }
+    let max = template.max_count;
+    if max <= 0 {
+        return false;
+    }
+    let bag = inv.bag();
+    let guard = bag.lock().expect("container poisoned");
+    let (stacks, units) = guard.items_by_template(template_id, -1);
+    let free = stacks.len() as i32 * max - units + guard.free_slot_count() * max;
+    count <= free
+}
+
 /// `GainItemWithEmblemImprint.Execute`: `UccManager.CreateStamp(target, sourceItem)` where
 /// the source is the casting item (`ItemManager.GetItemByItemId`) and `target` must be a
 /// character.

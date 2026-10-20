@@ -510,6 +510,7 @@ impl EconomyForSkills {
             pub const ITEM_CONVERSION: i32 = 49;
             pub const FISHING_LOOT: i32 = 79;
             pub const GRADE_ENCHANT: i32 = 92;
+            pub const EXP_TO_ITEM: i32 = 96;
             pub const CLEANUP_LOOK_CONVERT: i32 = 103;
             pub const ITEM_SOCKETING: i32 = 106;
             pub const ITEM_CAP_SCALE_RESET: i32 = 111;
@@ -570,6 +571,15 @@ impl EconomyForSkills {
                         tl,
                         &mut rng,
                     );
+                }
+            }
+            special::EXP_TO_ITEM => {
+                let out = match player_caster(args) {
+                    Some(p) => item_effects::exp_to_item(server, p, v),
+                    None => Outcome::Cancelled,
+                };
+                if out == Outcome::Cancelled {
+                    cancel_skill(args);
                 }
             }
             special::CLEANUP_LOOK_CONVERT => {

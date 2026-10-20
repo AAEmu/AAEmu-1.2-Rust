@@ -30,6 +30,7 @@ use crate::systems::economy::items_data::{ItemConversionProduct, ItemConversionR
 use crate::systems::economy::loot::ScriptedRng;
 use crate::systems::economy::mate_equipment::*;
 use crate::systems::economy::tests::{give, item_at, test_data, World, STACK};
+use crate::systems::skills::packets::SCExpChangedPacket;
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
 use crate::world::{Entity, PlayerRef};
 
@@ -40,6 +41,7 @@ const GEM: u32 = 5200;
 const POWDER: u32 = 5300;
 const SLAVE_ITEM: u32 = 5400;
 const BACKPACK: u32 = 5500;
+const TIMEGLASS: u32 = 5600;
 const TL: u16 = 0x77;
 
 /// Clears the new-item dirty flag so an effect's own marking is what the save selection sees.
@@ -105,6 +107,7 @@ fn data() -> GameData {
         (GEM, 10),
         (POWDER, 10),
         (ITEM_DAWN_STONE, 10),
+        (TIMEGLASS, 10),
     ] {
         d.items.templates.insert(id, ItemTemplate::plain(id, max));
     }
@@ -839,7 +842,7 @@ async fn gain_item_effect() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// GainItemWithPosImprint (data-derived body of a C# stub)
+// GainItemWithPosImprint / ExpToItem (data-derived bodies of C# stubs)
 // ---------------------------------------------------------------------------------------------
 
 #[tokio::test]
@@ -864,6 +867,49 @@ async fn gain_item_with_pos_imprint_adds_the_guide_item() {
     gain_item_with_pos_imprint(&w.server, &w.pa, [0, 0, 0, 0]);
     assert!(w.a.drain().is_empty());
     assert_eq!(Inv::of(&w.pa).bag().lock().unwrap().items.len(), 1);
+}
+
+#[tokio::test]
+async fn exp_to_item_spends_experience_and_creates_the_item() {
+    let mut w = world();
+    w.pa.data().experience = 25_000;
+    assert_eq!(
+        exp_to_item(&w.server, &w.pa, [10_000, TIMEGLASS as i32, 0, 0]),
+        Outcome::Done
+    );
+    assert_eq!(w.pa.data().experience, 15_000);
+    let i = item_at(&w.pa, slot_type::INVENTORY, 0).unwrap();
+    assert_eq!((i.template_id, i.count), (TIMEGLASS, 1));
+    assert_eq!(
+        w.a.drain(),
+        vec![
+            (
+                sc::SCExpChangedPacket,
+                body(&SCExpChangedPacket {
+                    obj_id: w.pa.obj_id,
+                    exp: -10_000,
+                    should_add_ability_exp: false,
+                })
+            ),
+            (
+                sc::SCItemTaskSuccessPacket,
+                tasks(task_type::SKILL_EFFECT_EXP_TO_ITEM, vec![ItemTask::add(&i)])
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn exp_to_item_cancels_without_enough_experience() {
+    let mut w = world();
+    w.pa.data().experience = 5_000;
+    assert_eq!(
+        exp_to_item(&w.server, &w.pa, [10_000, TIMEGLASS as i32, 0, 0]),
+        Outcome::Cancelled
+    );
+    assert_eq!(w.pa.data().experience, 5_000);
+    assert!(item_at(&w.pa, slot_type::INVENTORY, 0).is_none());
+    assert!(w.a.drain().is_empty());
 }
 
 // ---------------------------------------------------------------------------------------------
