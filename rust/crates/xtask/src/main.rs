@@ -534,6 +534,8 @@ fn sc_ratchet() -> Result<()> {
         cmd.arg(&script).arg("--check");
         match cmd.status() {
             Ok(status) if status.success() => return Ok(()),
+            // Windows' App Execution Alias stub for a missing python exits with 9009.
+            Ok(status) if cfg!(windows) && status.code() == Some(9009) => continue,
             Ok(status) => bail!("{cmd:?} failed ({status})"),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => return Err(e).with_context(|| format!("failed to start {cmd:?}")),

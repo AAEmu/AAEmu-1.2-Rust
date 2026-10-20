@@ -298,6 +298,13 @@ fn point_in_triangle(pt: (f32, f32), v1: (f32, f32), v2: (f32, f32), v3: (f32, f
     b1 == b2 && b2 == b3
 }
 
+/// `AreaShape.ComputeCuboid` point test over the rectangle from [`cuboid_vertices`]. The vertices
+/// run around the rectangle, so it splits along the v0-v2 diagonal; the C# tested (v0,v1,v2) and
+/// (v1,v2,v3), which overlap and miss the wedge at the v3-v0 edge.
+fn point_in_cuboid(pt: (f32, f32), v: &[(f32, f32); 4]) -> bool {
+    point_in_triangle(pt, v[0], v[1], v[2]) || point_in_triangle(pt, v[0], v[2], v[3])
+}
+
 /// `WorldManager.GetAroundByShape<T>(obj, shape)` (`None` for an unknown shape type, the C#
 /// returns null).
 pub fn around_shape(
@@ -336,8 +343,7 @@ pub fn around_shape(
                 res.into_iter()
                     .filter(|t| {
                         let p = world.world_pos_rot(t);
-                        point_in_triangle((p.x, p.y), v[0], v[1], v[2])
-                            || point_in_triangle((p.x, p.y), v[1], v[2], v[3])
+                        point_in_cuboid((p.x, p.y), &v)
                     })
                     .collect(),
             )
@@ -405,6 +411,18 @@ mod tests {
             !point_in_triangle((20.0, 20.0), v[0], v[1], v[2])
                 && !point_in_triangle((20.0, 20.0), v[1], v[2], v[3])
         );
+    }
+
+    #[test]
+    fn cuboid_covers_every_quadrant_including_the_v3_v0_edge() {
+        // rotation 0: length runs along X, width along Y; rectangle x 8..12, y 7..13.
+        let v = cuboid_vertices(2.0, 3.0, 10.0, 10.0, 0.0);
+        for (dx, dy) in [(1.5, 0.0), (-1.5, 0.0), (0.0, 2.5), (0.0, -2.5), (1.9, 2.9)] {
+            assert!(point_in_cuboid((10.0 + dx, 10.0 + dy), &v), "({dx}, {dy})");
+        }
+        for (dx, dy) in [(2.5, 0.0), (0.0, 3.5), (-2.5, -3.5)] {
+            assert!(!point_in_cuboid((10.0 + dx, 10.0 + dy), &v), "({dx}, {dy})");
+        }
     }
 
     #[test]
