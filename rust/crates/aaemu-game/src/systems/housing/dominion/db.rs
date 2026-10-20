@@ -161,6 +161,8 @@ pub async fn load_rows(pool: &MySqlPool) -> anyhow::Result<Vec<DominionState>> {
             last_paid_at: row.try_get("last_paid_at")?,
             last_tax_rate_changed_at: row.try_get("last_tax_rate_changed_at")?,
             last_national_tax_rate_changed_at: row.try_get("last_national_tax_rate_changed_at")?,
+            non_pvp_start_at: row.try_get("non_pvp_start_at")?,
+            non_pvp_duration_min: row.try_get("non_pvp_duration_min")?,
             treasury: Treasury {
                 cur_house_tax_money: row.try_get("cur_house_tax_money")?,
                 cur_hunt_tax_money: row.try_get("cur_hunt_tax_money")?,
@@ -264,7 +266,8 @@ async fn write_row(tx: &mut Transaction<'_, MySql>, state: &DominionState) -> sq
          cur_house_tax_money,cur_hunt_tax_money,peace_tax_money,cur_house_tax_aa_point,peace_tax_aa_point,\
          tower_destroyed,tower_hp,last_siege_id,siege_id,attacker_expedition_id,defender_expedition_id,\
          siege_ownership_generation,siege_status,siege_outcome,siege_scheduled_at,siege_starts_at,\
-         siege_ends_at,siege_ended_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+         siege_ends_at,siege_ended_at,non_pvp_start_at,non_pvp_duration_min) \
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
     )
     .bind(state.zone_group_id).bind(state.tower.house_id).bind(state.tower.instance_id)
     .bind(state.tower.guard_tower_setting_id).bind(state.owner_expedition_id)
@@ -279,6 +282,7 @@ async fn write_row(tx: &mut Transaction<'_, MySql>, state: &DominionState) -> sq
     .bind(siege.map_or(0, |s| s.status as u8)).bind(siege.map_or(0, |s| s.outcome as u8))
     .bind(siege.map_or(0, |s| s.scheduled_at)).bind(siege.map_or(0, |s| s.starts_at))
     .bind(siege.map_or(0, |s| s.ends_at)).bind(siege.map_or(0, |s| s.ended_at))
+    .bind(state.non_pvp_start_at).bind(state.non_pvp_duration_min)
     .execute(&mut **tx).await?;
     Ok(())
 }
