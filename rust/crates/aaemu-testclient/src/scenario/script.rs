@@ -38,7 +38,8 @@
 //! rezexpect inplace|temple ok|refused  CSResurrectCharacter, then fail unless SCCharacterResurrected
 //!                                    for our own unit did (ok) / did not (refused) arrive
 //! lootexpect took|failed [npc obj]  like `loot`, then fail unless SCLootItemTook (took) / SCLootItemFailed
-//!                                    (failed) was among the replies
+//!                                    (failed) was among the replies; `took` first walks to 2 m of
+//!                                    the corpse, as the real client does
 //! ```
 //!
 //! Every failed expectation prints a `FAIL` line and makes the run exit non-zero.
@@ -53,6 +54,9 @@ use super::questitem::{chat_text, gm_command, quest_state, stack_id};
 use super::{pump, skill_response_result, Runner};
 use crate::game::{parse_item_task, GameClient, Packet, UnitInfo};
 use crate::social::{self, SocialEvent};
+
+/// How close `lootexpect took` walks to a corpse first (retail enables looting at 3 m or less).
+const LOOT_APPROACH_RANGE: f32 = 2.0;
 
 fn dist(a: (f32, f32, f32), b: (f32, f32, f32)) -> f32 {
     ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) + (a.2 - b.2).powi(2)).sqrt()
@@ -785,6 +789,21 @@ async fn run_lines(
                     .unwrap_or(last_npc);
                 if obj == 0 {
                     bail!("no NPC to loot: run `kill`/`cast` first or pass the object id");
+                }
+                // The real client walks to the corpse before it loots (retail enables looting
+                // at 3 m or less): `took` steps to 2 m of it first, `failed` loots from here.
+                if want_took {
+                    let corpse = game.state.units.get(&obj).map(|u| u.pos);
+                    let me = game.state.self_pos;
+                    if let Some(c) = corpse.filter(|&c| dist(me, c) > LOOT_APPROACH_RANGE) {
+                        let d = dist(me, c);
+                        let k = LOOT_APPROACH_RANGE / d;
+                        let at = (c.0 + (me.0 - c.0) * k, c.1 + (me.1 - c.1) * k, c.2);
+                        clock += 1000;
+                        game.move_to(at, clock).await?;
+                        pump(game, 1).await?;
+                        println!("    walked to the corpse ({d:.1} m -> {LOOT_APPROACH_RANGE} m)");
+                    }
                 }
                 let mut b = aaemu_commons::PacketStream::new();
                 b.write_bc(obj).write_bc(0).write_bool(true);
