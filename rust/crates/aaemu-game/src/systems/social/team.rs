@@ -1050,7 +1050,16 @@ impl TeamManager {
             team.looting_rule.roll_for_bind_on_pickup = rule.roll_for_bind_on_pickup;
         }
         if flags & 0x04 != 0 {
-            team.looting_rule.loot_master = rule.loot_master;
+            // Deviation from C#: the loot master must be a member of the team.
+            if rule.loot_master == 0 || team.is_member(rule.loot_master) {
+                team.looting_rule.loot_master = rule.loot_master;
+            } else {
+                tracing::warn!(
+                    "ChangeLootingRule: {} named non-member {} as loot master of team {team_id}",
+                    owner.character_id,
+                    rule.loot_master
+                );
+            }
         }
         if flags & 0x02 != 0 {
             team.looting_rule.minimum_grade = rule.minimum_grade;

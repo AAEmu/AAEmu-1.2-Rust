@@ -218,14 +218,14 @@ connected by `systems::economy::wiring`).
 | `Models/Game/Items/Actions/*` (every `ItemTask`, `ItemAction`, `ItemTaskType`), `SCItemTaskSuccessPacket`, `SCSyncItemLifespanPacket`, `SCUnitEquipmentsChangedPacket`, `SCInvenExpandedPacket`, `SCGamePointChangedPacket`, `SCCharacterLaborPowerChangedPacket` | `models/item_task.rs`, `systems/economy/item_packets.rs` | done | Tasks snapshot the item when created (the C# encodes on `SendPacket`). |
 | `ItemContainer`, `EquipmentContainer`, `MateEquipmentContainer`, `CofferContainer` | `models/container.rs` | done | `AddOrMoveExistingItem` (new / moved / same container), `RemoveItem`, `ConsumeItem`, `AcquireDefaultItem(Ex)` (timers, charges, crafter), `SpaceLeftForItem`, `ApplyBindRules`, `Wipe`, `ReNumberSlots`, coffer `CanAccept`, `OnEnter/LeaveContainer` events. |
 | `Inventory` (SplitOrMoveItem(Ex), 2H weapon handling, backpacks, ExpandSlot, coffers, ConsumeItem, counts), `Character` money / game points / labor / `ItemUse` / `SendErrorMessage`, `ErrorMessageType` | `systems/economy/inventory.rs`, `error_message.rs` | done | `ChangeLabor`'s `AddExp` is a hook (`ProgressionHooks`). |
-| Core item C2G (`CSSwapItems`, `CSSplitBagItem`, `CSDestroyItem`, `CSExpandSlots`, `CSDeposit/WithdrawMoney`, `CSSplit/SwapCofferItem(s)`, `CSItem(Un)Secure`, `CSEquipments(Un)Secure`, `CSThisTimeUnpackItem`) | `systems/economy/item_handlers.rs` | done | |
+| Core item C2G (`CSSwapItems`, `CSSplitBagItem`, `CSDestroyItem`, `CSExpandSlots`, `CSDeposit/WithdrawMoney`, `CSSplit/SwapCofferItem(s)`, `CSItem(Un)Secure`, `CSEquipments(Un)Secure`, `CSThisTimeUnpackItem`) | `systems/economy/item_handlers.rs` | done | Deposit / withdraw require a positive amount and a banker NPC (the `banker` template flag) within 5 m of the current interaction object (the C# did neither). |
 | `ItemManager` (all templates / tables, user items, `Create`, timers, `UnwrapItem`, auction search helpers, loot convert fish), `ItemGameData`, `ItemConversionGameData`, `FishDetailsGameData`, item model stats (durability, repair cost, attributes, DPS, armor), procs | `data/items.rs`, `managers/item.rs`, `models/item.rs`, `systems/economy/{items_data,item_timers}.rs` | done | `ItemManager` lists are leaf locks (snapshot before locking containers). |
 | `LootGameData`, `Models/Game/Items/Loots/**`, `LootingContainer`, loot packets | `systems/economy/{loot_data,loot,looting,loot_packets}.rs` | done | NPC death / despawn / team rules through `LootNpcHooks`, `LootTeamHooks`, `LootQuestHooks`. |
 | Repair (`Character.DoRepair`, `CSRepairSingleEquipment`, `CSRepairAllEquipments`), durability loss | `systems/economy/repair.rs` | done | Combat calls `on_damage_taken` / `on_death`. |
 | `CraftManager`, `Models/Game/Crafts`, `CharacterCraft`, `CraftTask`, `CSExecuteCraft`, `SCCraftFailed` | `systems/economy/{craft,craft_data}.rs` | done | Cast through `CraftHooks::start_craft_cast`; skills call `craft::end_craft`. |
-| Stores (`CSBuyItems`, `CSSellItems`, buy-back, `CSListSoldItem`, `CSBuyPriestBuff`, `CSBuyCoinItem`, `CSSellBackpackGoods`), `SpecialtyManager`, `TaxationsManager`, `ExpandExpert`, item look conversion | `systems/economy/{store,store_data,specialty}.rs` | done | Merchant packs / NPC flags through `NpcEconomyHooks`. Checkout validates currency, checked totals and each balance, then stages complete goods / buy-back delivery before committing payment. Vocation charges the configured price displayed by the 1.2 shop, without earnings bonuses. Rejected checkout preserves items and balances. Doodad catalog authorization remains separate. |
+| Stores (`CSBuyItems`, `CSSellItems`, buy-back, `CSListSoldItem`, `CSBuyPriestBuff`, `CSBuyCoinItem`, `CSSellBackpackGoods`), `SpecialtyManager`, `TaxationsManager`, `ExpandExpert`, item look conversion | `systems/economy/{store,store_data,specialty}.rs` | done | Merchant packs / NPC flags through `NpcEconomyHooks`. Checkout validates currency, checked totals and each balance, then stages complete goods / buy-back delivery before committing payment. Vocation charges the configured price displayed by the 1.2 shop, without earnings bonuses. Rejected checkout preserves items and balances. Purchases need an NPC merchant pack or a doodad `DoodadFuncStoreUi` pack and filter the goods by it; selling needs a merchant within 3 m, lists each item once and pays only for items moved to buy-back. |
 | `MailManager`, `Models/Game/Mails/**`, `CharacterMails`, mail packets | `systems/economy/{mail,mail_character,mail_kinds,mail_packets,mail_data}.rs` | done | Saved in `SaveStage::BeforeItems`; housing tax through `MailHousingHooks`. |
-| `AuctionManager`, `Models/Game/Auction/**`, auction packets | `systems/economy/{auction,auction_data,auction_packets}.rs` | done | Saved in `SaveStage::AfterItems`; results mailed through `wiring`. |
+| `AuctionManager`, `Models/Game/Auction/**`, auction packets | `systems/economy/{auction,auction_data,auction_packets}.rs` | done | Saved in `SaveStage::AfterItems`; results mailed through `wiring`. Requests require an auctioneer NPC (the `auctioneer` template flag) named by the packet or the current interaction object within 5 m (the C# ignored the ids). |
 | `TradeManager`, trade packets | `systems/economy/trade.rs` | done | |
 | `CashShopManager`, `Models/Game/CashShop/**`, ICS / premium packets | `systems/economy/cash_shop.rs` | done | Gifts by `CommercialMail` (`wiring`); account credits SQL behind `CashShopDb`. |
 | Item skill-effect bodies (grade enchant, socketing, conversion, cap scale, UCC imprint, ...), mate / slave equipment packets | `systems/economy/item_effects*.rs` | done | Called by the skills subsystem's effects. UCC imprint / cleanup require owned source and target items; client UCC casts require the actual source item's configured use skill, preserving the unrelated legacy bound-item portal exception. Dyeing checks the loaded `dyeable_items` allowlist. Invalid UCC / dye effects cancel deferred reagent consumption. |
@@ -711,6 +711,14 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * systems::skills (`NotifyQuest` 70 / `DeclareIndependence` 71): left log-only. `NotifyQuest`
   already fires from `plots::finish_item_plot` (a second event would double-count the quest
   objective); `DeclareIndependence` has no faction ownership runtime in 1.2.
+* systems::npcs (`DespawnOnCreatorDeath`): the 1.2 C# loaded `despawn_on_creator_death` for
+  `SpawnEffect` and `NpcSpawnerSpawnEffect` but never read it, so summoned NPCs outlived their
+  creator. Rust registers every effect-spawned NPC under the caster's obj id and despawns those
+  summons from `Unit.DoDie` of the creator (player or NPC). A creator that logs out or is
+  despawned without dying still leaves its summons, as in the 1.2 C# (the later 10.x C# only
+  forwards the flag to the native Zone: `WorldIntegration.cs` `PublishNpcSpawn` /
+  `WZNpcSpawnerEventPacket`).
+
 * systems::services / systems::vehicles (mount speed analysis): `SusManager` samples the
   driver's (or owner's) `teleport_seq` and `disabled_set_position` for mates, and successful
   ride / unride operations reset the mate baseline. C# `SusManager` / `CharacterMates` did
@@ -834,6 +842,16 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * systems::economy: auction lots are enumerated in id order (`ConcurrentDictionary` order in C#),
   search / cheapest lot skip lots whose item or template is missing; mails are kept in a map that
   reproduces the C# `Dictionary` enumeration order; mail dates are whole unix seconds.
+* systems::economy (money guards, 2026-10-20): `CSDepositMoney` / `CSWithdrawMoney` refuse
+  non-positive amounts and require a banker NPC (`banker` template flag) within 5 m of the current
+  interaction object; `CSBuyItems` accepts goods only from the interacting NPC's merchant pack or
+  the doodad's `DoodadFuncStoreUi` pack (the C# validated only the NPC pack and sold any template
+  through a doodad); `CSSellItems` requires a merchant within 3 m, lists each item once and pays
+  only for items actually moved to buy-back (the C# paid repeated entries and failed moves, with
+  wrapping arithmetic); auction requests require an auctioneer NPC (`auctioneer` template flag)
+  named by the packet ids or the current interaction object within 5 m (the C# ignored both ids
+  and the `AuctionManager` only null-checked). The 5 m bank / auction range matches the other NPC
+  service interactions (`repair.rs`, `mates.rs`); retail's own range is unverified.
 * systems::economy: `CSSetCraftingPayPacket`, `CSChangeItemLookPacket`, `CSSpecialtyRecordLoadPacket`,
   `CSBuySpecialtyItemPacket`, `CSReturnMailPacket` have no 1.2 opcode (0xfff): decoders exist, the
   1.2 client never sends them. The specialty / trade-pack mail delay use the C# defaults (no
@@ -1555,6 +1573,19 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `PostDate`) and a buyout sends `SCAuctionBidPacket` with `isBuyout = true`, the lot's
   `direct_money` and the buyer's identity (the C# buyout branch sent nothing although the 1.2
   packet carries the flag). Seller / item mail delivery is unchanged.
+* systems::economy (auction settlement, 2026-10-20): the C# ignored `MailForAuction.Send()`
+  (`RemoveAuctionLotSold` / `RemoveAuctionLotFail` / `CancelAuctionLot` removed the lot anyway),
+  so a mail that was not stored lost the seller's money or the buyer's item. Here a settlement
+  removes the lot only after every one of its mails was delivered; otherwise the lot (or, for an
+  outbid refund in the bidding path, just the refund) stays queued in `AuctionManager::pending`
+  and `update_auction_house` retries the still-missing mails on its next tick, remembering which
+  ones are already out so nothing is delivered twice. The queue is in memory: a restart inside
+  the retry window loses a pending outbid refund, and a pending sale that has not reached its
+  `end_time` reverts to the lot's saved bidder fields. A restart while a lot is partially settled
+  re-settles the whole lot, so a mail that was already sent (e.g. the seller's payment) can be
+  sent again. A settlement whose mail is refused `MAX_SETTLEMENT_RETRIES` (720, one hour of 5 s
+  ticks) times, e.g. for a deleted receiver, is logged at error level and dropped, and its lot
+  is then removed.
 
 ### Ranking boards (Rust only)
 
@@ -2270,3 +2301,72 @@ Interaction / Spawn / NpcSpawner / Buff effect last (sealed mount items, skill 2
 the mate. The Rust port consumes the source item once, using the last applied effect that carries
 `consume_source_item`, and the template item once, using the last applied effect with a
 `consume_item_id`; `use_skill_as_reagent` still uses the last applied effect's count.
+
+## Trade item integrity and craft materials (2026-10-20)
+
+- `trade::add_item` (C# `TradeManager.AddItem` only checked `item.Count >= amount`) now also
+  cancels the trade for a soul-bound item or an item outside the bag (the flag check matches mail
+  and auction), and `preflight_items` refuses an offered item that left the bag or became bound
+  after the put-up. Repeated put-ups of one stack stay allowed up to its count, as upstream decided.
+- Craft materials: the C# counted `Inventory.GetItemsCount` (bag + equipment + bank) but consumed
+  from `Bag` only and ignored the result, so a craft with materials in the bank produced the
+  product for free. The port counts the bag only (start and again in `hand_out_products`, before
+  any product is handed out) and refuses with `NOT_ENOUGH_REQUIRED_ITEM` otherwise. Labor is
+  still charged by `Skill.EndSkill` as before.
+
+## Guild invitation and rank guards, loot master membership (2026-10-20)
+
+Deviations from the 1.2 C# `ExpeditionManager` / `TeamManager`, which trusted every client id
+(found by a code audit; reproduced in flow tests, no retail oracle for the missing checks):
+
+- `ReplyInvite` joined any guild whose id the client sent. `Invite` now records a pending
+  invitation per invited character (guild id, 60 s expiry like party invitations); the reply must
+  match it, is consumed by any answer, and a character already in a guild cannot join another.
+- `Kick` and `ChangeMemberRole` only checked the caller's policy flag (and `role > new_role`). Both
+  now also require the caller's role to be strictly higher than the target's current role, so the
+  leader (255) can neither be expelled nor demoted, and equals cannot act on each other.
+- `ChangeLootingRule` accepted any character id as loot master. It must now be 0 or a member of the
+  team; otherwise only that field is ignored (logged). Over-head markers are unchanged: their
+  target is any unit or object, not a team member.
+
+## Client skill cast authority (2026-10-20)
+
+`CSStartSkillPacket` trusted its caster, its target distance and its skill id more than the C#
+original ever checked (the C# had no checks here at all). Deviations, each reproduced live with
+two bots before the fix (a foreign `Mount` caster, an NPC-only skill and a far doodad all ran):
+
+- **Mount caster.** `SkillCaster::Mount { obj_id }` may name the player itself, a mate the player
+  may use (`may_use_mate`), or a slave the player summoned (`summoner_obj_id` / `summoner_id`),
+  is attached to (`attached_characters`, or `parent_obj_id`), or that is mounted on a slave the
+  player summoned (cannon on a ship). Any other object (NPC, doodad, another player, a foreign
+  slave) is refused with a warning and `SCSkillStarted` carrying `NO_PERM`.
+- **Range of doodad and slave targets.** The C# skipped the `TooFarRange` check for every Doodad
+  or Slave target (its own TODO asks for a bounding-box check). The Rust now allows
+  `max_range` plus a flat allowance (15 m for doodads, 40 m for slaves) on top of the existing
+  model-radius subtraction: no model radius is loaded for doodads and the ship `obb_*` columns
+  are zero in the 1.2 data, so a constant stands in for the missing bounding boxes. Raise the
+  allowances if a very large doodad or ship turns out to be unusable from its edge.
+- **"Undefined use type" fallback.** The C# ran any skill id with a template here (boss, NPC and
+  GM skills included). It now requires the id to be named by a player-facing source of the static
+  data (`SkillData::is_client_sourced_skill`, `CLIENT_SKILL_SOURCES`): doodad funcs / uses / fake
+  uses / conditional uses / skill hits, sphere doodad interacts, crafts, NPC interactions, slash
+  commands, buff skills, quest accept / supply / component / timer skills, item use skills and the
+  housing / shipyard build steps. Mount skills, mount-attached (rider) skills and NPC AI skills
+  (`np_skills`) are deliberately absent. Possible over-blocking: a skill the 1.2 client casts that
+  none of these tables names (the retail rule is not confirmed); such a cast is refused with a
+  warning naming the skill id, so it is easy to add the table.
+
+## Ship repair timer and destroyed-vehicle HP (2026-10-20)
+
+Deviations from the 1.2 C# `Slave.DoDie` / `SlaveManager.Create` (the check already existed, but
+the death never started its timer):
+
+- `Slave.MarkSummoningItemAsDestroyed` wrote `RepairStartTime = DateTime.MinValue`, so the
+  `RepairStartTime.AddMinutes(10) - UtcNow` check in `Create` was always negative and a destroyed
+  vehicle could be summoned again immediately. The death now stores the destruction time in the
+  `SummonSlave` item, which starts the intended 10 minute wait; a successful summon after it
+  clears the timer (the destroyed flag stays until `RepairSlaveEffect` clears it, as in C#).
+- The C# reset of a loaded 0-HP vehicle to `MaxHp` ("can't summon with 0 HP") is kept, but only
+  when the item has no pending repair time. With the timer above, a destroyed vehicle therefore
+  comes back at full HP only after its repair wait, not when it is still on cooldown. (As the
+  mirrored `SummonSlave.ReadDetails` bug above notes, the timer itself is still lost on restart.)

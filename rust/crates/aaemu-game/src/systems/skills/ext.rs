@@ -118,6 +118,11 @@ pub trait NpcSkillHooks: Send + Sync {
     /// `Ai.GoToDead`).
     fn npc_after_death(&self, _server: &GameServer, _npc: &NpcRef, _killer: Option<&WorldObject>) {}
 
+    /// A unit died (`Unit.DoDie`): its `SpawnEffect` / `NpcSpawnerSpawnEffect`
+    /// `DespawnOnCreatorDeath` summons go with it. Called before the NPC / player death halves
+    /// and without any object lock.
+    fn on_unit_died(&self, _server: &GameServer, _unit: &WorldObject) {}
+
     /// `Npc.Spawner.RespawnTime` (death packet `resurrectWaitTime`).
     fn npc_respawn_time(&self, _server: &GameServer, _npc: &NpcRef) -> i32 {
         0

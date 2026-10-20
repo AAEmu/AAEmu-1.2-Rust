@@ -316,7 +316,7 @@ pub fn craft(server: &GameServer, player: &PlayerRef, craft_id: u32, count: i32,
         || craft
             .craft_materials
             .iter()
-            .all(|m| inv.items_count(m.item_id, -1) >= m.amount);
+            .all(|m| inv.items_count_in(slot_type::INVENTORY, m.item_id, -1) >= m.amount);
     if !has_materials {
         // TODO not verified
         error2(
@@ -608,6 +608,33 @@ fn hand_out_products(server: &GameServer, player: &PlayerRef, inv: &Inv, craft: 
     let items = &server.game_data.items;
     let mut txn = ItemTxn::begin(server);
     let bag = inv.bag();
+
+    // The materials are consumed from the bag only (the C# counted bank and equipment too and
+    // then crafted without consuming them): check again before anything is handed out.
+    let materials_ok = craft.craft_materials.iter().all(|m| {
+        let have = bag
+            .lock()
+            .expect("container poisoned")
+            .items_by_template(m.item_id, -1)
+            .1;
+        have >= m.amount
+    });
+    if !materials_ok {
+        tracing::warn!(
+            "{} crafted {} without the materials in the bag, craft refused.",
+            player.data().unit.name,
+            craft.id
+        );
+        error2(
+            &mut Out::Direct,
+            player,
+            error_message::CRAFT_CANT_ACT_ANY_MORE,
+            error_message::NOT_ENOUGH_REQUIRED_ITEM,
+            0,
+            false,
+        );
+        return false;
+    }
 
     // "Improper" Heuristic Grade inheritance to be used for 1.2 only, due to unset flags in
     // compact. Search for the first equipment material in the craft

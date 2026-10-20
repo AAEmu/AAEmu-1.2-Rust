@@ -7,6 +7,11 @@ use super::geometry::{world_pos, Target};
 use super::state::SkillRun;
 use super::unit_reqs::skill_result_for_key;
 
+/// Extra range for a doodad target, covering the distance from its origin to its edge.
+const DOODAD_RANGE_ALLOWANCE: f64 = 15.0;
+/// Extra range for a slave target (large ships are centred far from their hull edge).
+const SLAVE_RANGE_ALLOWANCE: f64 = 40.0;
+
 fn fail(key: &str) -> Result<(), (u8, u32)> {
     Err((skill_result_for_key(key), 0))
 }
@@ -195,10 +200,18 @@ pub(super) fn check(
     if distance < min_range {
         return fail("skill_too_close_range");
     }
-    let doodad_or_slave = target
-        .as_obj()
-        .is_some_and(|o| o.as_doodad().is_some() || o.as_slave().is_some());
-    if distance > max_range && !doodad_or_slave {
+    // Doodads have no model radius and a ship's origin is far from its hull, so these targets
+    // get an allowance on top of the skill's range (C# exempted them entirely).
+    let extent = target.as_obj().map_or(0.0, |o| {
+        if o.as_doodad().is_some() {
+            DOODAD_RANGE_ALLOWANCE
+        } else if o.as_slave().is_some() {
+            SLAVE_RANGE_ALLOWANCE
+        } else {
+            0.0
+        }
+    });
+    if distance > max_range + extent {
         return fail("skill_too_far_range");
     }
     if template.check_obstacle && !target.as_obj().is_some_and(|o| o.same(caster)) {

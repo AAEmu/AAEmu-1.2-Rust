@@ -2,6 +2,7 @@
 //! buyout / cancel / expiry flows through the real handlers (no MySQL).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use aaemu_commons::{Marshal, PacketStream};
@@ -16,7 +17,9 @@ use crate::server::GameServer;
 use crate::systems::economy::auction::*;
 use crate::systems::economy::auction_packets::*;
 use crate::systems::economy::inventory::Inv;
-use crate::systems::economy::tests::{give, run, task_body, test_data, World};
+use crate::systems::economy::tests::{
+    give, run, spawn_service_npc, task_body, test_data, World, AUCTIONEER_TEMPLATE,
+};
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
 use crate::world::PlayerRef;
 
@@ -37,6 +40,37 @@ impl MailLog {
     fn take(&self) -> Vec<AuctionMail> {
         std::mem::take(&mut *self.0.lock().unwrap())
     }
+}
+
+/// A mail hook that records every attempt and can refuse deliveries: nothing is delivered
+/// unless `accept` is set, and `fail_buyer` fails `SaleBuyer` even then.
+#[derive(Default)]
+struct FlakyMailLog {
+    attempts: Mutex<Vec<AuctionMail>>,
+    delivered: Mutex<Vec<AuctionMail>>,
+    accept: AtomicBool,
+    fail_buyer: AtomicBool,
+}
+
+impl AuctionMailHooks for FlakyMailLog {
+    fn send_auction_mail(&self, _server: &GameServer, mail: AuctionMail) -> bool {
+        self.attempts.lock().unwrap().push(mail.clone());
+        let fail = !self.accept.load(Ordering::SeqCst)
+            || (self.fail_buyer.load(Ordering::SeqCst)
+                && matches!(mail, AuctionMail::SaleBuyer { .. }));
+        if fail {
+            return false;
+        }
+        self.delivered.lock().unwrap().push(mail);
+        true
+    }
+}
+
+fn flaky_world() -> (World, Arc<FlakyMailLog>) {
+    let (w, _) = auction_world();
+    let log = Arc::new(FlakyMailLog::default());
+    w.server.systems.economy.auction.mail.install(log.clone());
+    (w, log)
 }
 
 fn auction_world() -> (World, Arc<MailLog>) {
@@ -86,16 +120,16 @@ fn auction_world() -> (World, Arc<MailLog>) {
     b.drain();
     let log = Arc::new(MailLog::default());
     server.systems.economy.auction.mail.install(log.clone());
-    (
-        World {
-            server,
-            a,
-            pa,
-            b,
-            pb,
-        },
-        log,
-    )
+    let mut w = World {
+        server,
+        a,
+        pa,
+        b,
+        pb,
+    };
+    // The packet bodies name the auctioneer NPC 0x200.
+    spawn_service_npc(&mut w, 0x200, AUCTIONEER_TEMPLATE, 102.0);
+    (w, log)
 }
 
 fn money(p: &PlayerRef) -> i64 {
@@ -710,7 +744,7 @@ async fn bid_outbid_buyout_moves_money_and_mails() {
 
     // My bid list.
     let mut s = PacketStream::new();
-    s.write_bc(0).write_bc(0).write_i32(0);
+    s.write_bc(0x200).write_bc(0x200).write_i32(0);
     run::<CSAuctionMyBidListPacket>(&mut w, 1, s.as_bytes());
     let frames = w.b.drain();
     let mut want = PacketStream::new();
@@ -952,6 +986,189 @@ async fn expiry_returns_unsold_and_delivers_won_lots() {
     assert!(w.a.drain().is_empty());
 }
 
+/// A failed sale mail must not drop the lot (the seller's money / buyer's item would be lost):
+/// it stays listed and the next auction tick retries the mails exactly once.
+#[tokio::test]
+async fn failed_sale_mail_keeps_the_lot_and_settles_once_on_retry() {
+    let (mut w, log) = flaky_world();
+    let (item_id, lot) = post(&mut w, SWORD, 0, 1000, 1);
+    run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 1000));
+    // The buyout itself happened: the money is gone and the buyer was confirmed.
+    assert_eq!(money(&w.pb), 100_000 - 1000);
+    let ah = &w.server.systems.economy.auction;
+    assert!(ah.lot(lot.id).is_some());
+    assert!(log.delivered.lock().unwrap().is_empty());
+    w.b.drain();
+
+    // Still failing: the tick keeps the lot and sends nothing twice.
+    ah.update_auction_house(&w.server, Utc::now());
+    assert!(ah.lot(lot.id).is_some());
+    assert!(log.delivered.lock().unwrap().is_empty());
+
+    // A later success delivers the missing mails and removes the lot.
+    log.accept.store(true, Ordering::SeqCst);
+    ah.update_auction_house(&w.server, Utc::now());
+    assert!(ah.lot(lot.id).is_none());
+    assert_eq!(ah.deleted_ids(), vec![lot.id]);
+    let delivered = log.delivered.lock().unwrap().clone();
+    assert_eq!(delivered.len(), 2);
+    assert!(matches!(delivered[0], AuctionMail::SaleSeller { .. }));
+    assert!(matches!(
+        &delivered[1],
+        AuctionMail::SaleBuyer { item, buyer_id: 2, .. } if item.id == item_id
+    ));
+    // Settled once: further ticks deliver nothing.
+    ah.update_auction_house(&w.server, Utc::now());
+    assert_eq!(log.delivered.lock().unwrap().len(), 2);
+    assert_eq!(ah.deleted_ids(), vec![lot.id]);
+}
+
+/// A mail that can never be delivered (e.g. a deleted receiver) must not keep the lot alive
+/// forever: after `MAX_SETTLEMENT_RETRIES` failed ticks the settlement is dropped and the lot
+/// removed.
+#[tokio::test]
+async fn undeliverable_settlement_is_given_up_after_bounded_retries() {
+    let (mut w, log) = flaky_world();
+    let (_item_id, lot) = post(&mut w, SWORD, 0, 1000, 1);
+    run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 1000));
+    let ah = &w.server.systems.economy.auction;
+    assert!(ah.lot(lot.id).is_some());
+
+    for _ in 0..MAX_SETTLEMENT_RETRIES - 1 {
+        ah.update_auction_house(&w.server, Utc::now());
+        assert!(ah.lot(lot.id).is_some(), "still retrying");
+    }
+    ah.update_auction_house(&w.server, Utc::now());
+    assert!(ah.lot(lot.id).is_none(), "the lot is removed when given up");
+    assert_eq!(ah.deleted_ids(), vec![lot.id]);
+    assert!(log.delivered.lock().unwrap().is_empty());
+
+    // Nothing is retried afterwards.
+    let attempts = log.attempts.lock().unwrap().len();
+    ah.update_auction_house(&w.server, Utc::now());
+    assert_eq!(log.attempts.lock().unwrap().len(), attempts);
+}
+
+/// A settlement that already delivered the seller's mail must only retry the buyer's.
+#[tokio::test]
+async fn sale_retry_sends_only_the_mail_that_failed() {
+    let (mut w, log) = flaky_world();
+    log.accept.store(true, Ordering::SeqCst);
+    log.fail_buyer.store(true, Ordering::SeqCst);
+    let (item_id, lot) = post(&mut w, SWORD, 0, 1000, 1);
+    run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 1000));
+    let ah = &w.server.systems.economy.auction;
+    assert!(ah.lot(lot.id).is_some());
+    {
+        let delivered = log.delivered.lock().unwrap();
+        assert_eq!(delivered.len(), 1);
+        assert!(matches!(delivered[0], AuctionMail::SaleSeller { .. }));
+    }
+
+    log.fail_buyer.store(false, Ordering::SeqCst);
+    ah.update_auction_house(&w.server, Utc::now());
+    assert!(ah.lot(lot.id).is_none());
+    let delivered = log.delivered.lock().unwrap().clone();
+    assert_eq!(delivered.len(), 2);
+    assert!(matches!(
+        &delivered[1],
+        AuctionMail::SaleBuyer { item, .. } if item.id == item_id
+    ));
+    assert_eq!(
+        delivered
+            .iter()
+            .filter(|m| matches!(m, AuctionMail::SaleSeller { .. }))
+            .count(),
+        1,
+        "the seller's mail must not be delivered twice"
+    );
+}
+
+/// The unsold ("failed auction") return mail is retried the same way.
+#[tokio::test]
+async fn failed_expiry_mail_keeps_the_lot_until_delivered() {
+    let (mut w, log) = flaky_world();
+    let (item_id, lot) = post(&mut w, SWORD, 0, 1000, 0);
+    let ah = &w.server.systems.economy.auction;
+    let later = lot.end_time + Duration::seconds(1);
+    ah.update_auction_house(&w.server, later);
+    assert!(ah.lot(lot.id).is_some());
+    assert!(log.delivered.lock().unwrap().is_empty());
+
+    log.accept.store(true, Ordering::SeqCst);
+    ah.update_auction_house(&w.server, later);
+    assert!(ah.lot(lot.id).is_none());
+    let delivered = log.delivered.lock().unwrap().clone();
+    assert_eq!(delivered.len(), 1);
+    assert!(matches!(
+        &delivered[0],
+        AuctionMail::Fail { item, seller_id: 1, .. } if item.id == item_id
+    ));
+    ah.update_auction_house(&w.server, later);
+    assert_eq!(log.delivered.lock().unwrap().len(), 1);
+    assert_eq!(log.attempts.lock().unwrap().len(), 2);
+}
+
+/// A cancel whose refund mail fails keeps the lot; retrying settles it without a second mail.
+#[tokio::test]
+async fn failed_cancel_mail_keeps_the_lot_until_delivered() {
+    let (mut w, log) = flaky_world();
+    let (item_id, lot) = post(&mut w, SWORD, 0, 1000, 1);
+    w.a.drain();
+    run::<CSCancelAuctionPacket>(&mut w, 0, &cancel_body(lot.id));
+    assert!(w.server.systems.economy.auction.lot(lot.id).is_some());
+    assert!(
+        w.a.drain().is_empty(),
+        "no confirmation before the mail is out"
+    );
+    // Cancelling again while the refund is queued does nothing.
+    run::<CSCancelAuctionPacket>(&mut w, 0, &cancel_body(lot.id));
+    let ah = &w.server.systems.economy.auction;
+    assert!(ah.lot(lot.id).is_some());
+    assert_eq!(log.attempts.lock().unwrap().len(), 1);
+
+    log.accept.store(true, Ordering::SeqCst);
+    ah.update_auction_house(&w.server, Utc::now());
+    assert!(ah.lot(lot.id).is_none());
+    let delivered = log.delivered.lock().unwrap().clone();
+    assert_eq!(delivered.len(), 1);
+    assert!(matches!(
+        &delivered[0],
+        AuctionMail::Cancel { item, .. } if item.id == item_id
+    ));
+    ah.update_auction_house(&w.server, Utc::now());
+    assert_eq!(log.delivered.lock().unwrap().len(), 1);
+}
+
+/// An outbid refund that fails is retried on the next tick; the lot keeps its new bidder.
+#[tokio::test]
+async fn failed_outbid_refund_is_retried() {
+    let (mut w, log) = flaky_world();
+    log.accept.store(true, Ordering::SeqCst);
+    let (_, lot) = post(&mut w, SWORD, 0, 1000, 1);
+    run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 500));
+    log.accept.store(false, Ordering::SeqCst);
+    run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 600));
+    let ah = &w.server.systems.economy.auction;
+    assert_eq!(ah.lot(lot.id).unwrap().bid_money, 600);
+    assert!(log.delivered.lock().unwrap().is_empty());
+
+    log.accept.store(true, Ordering::SeqCst);
+    ah.update_auction_house(&w.server, Utc::now());
+    let delivered = log.delivered.lock().unwrap().clone();
+    assert_eq!(delivered.len(), 1);
+    assert!(matches!(
+        &delivered[0],
+        AuctionMail::BidFail {
+            previous_buyer_id: 2,
+            previous_bid: 500,
+            ..
+        }
+    ));
+    ah.update_auction_house(&w.server, Utc::now());
+    assert_eq!(log.delivered.lock().unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn lowest_price_reports_cheapest_buyout() {
     let (mut w, _log) = auction_world();
@@ -959,7 +1176,10 @@ async fn lowest_price_reports_cheapest_buyout() {
     post(&mut w, POTION, 1, 200, 0);
     post(&mut w, SWORD, 2, 100, 0);
     let mut s = PacketStream::new();
-    s.write_bc(0).write_bc(0).write_u32(POTION).write_u8(3);
+    s.write_bc(0x200)
+        .write_bc(0x200)
+        .write_u32(POTION)
+        .write_u8(3);
     run::<CSAuctionLowestPricePacket>(&mut w, 1, s.as_bytes());
     let frames = w.b.drain();
     assert_eq!(frames[0].0, sc::SCAuctionLowestPricePacket);
@@ -968,7 +1188,7 @@ async fn lowest_price_reports_cheapest_buyout() {
     assert_eq!(frames[0].1, want.into_bytes());
 
     let mut s = PacketStream::new();
-    s.write_bc(0).write_bc(0).write_u32(999).write_u8(0);
+    s.write_bc(0x200).write_bc(0x200).write_u32(999).write_u8(0);
     run::<CSAuctionLowestPricePacket>(&mut w, 1, s.as_bytes());
     let mut want = PacketStream::new();
     want.write_u32(999).write_u8(0).write_i32(0);
@@ -979,7 +1199,7 @@ async fn lowest_price_reports_cheapest_buyout() {
 async fn empty_bid_list_sends_page_zero() {
     let (mut w, _log) = auction_world();
     let mut s = PacketStream::new();
-    s.write_bc(0).write_bc(0).write_i32(4);
+    s.write_bc(0x200).write_bc(0x200).write_i32(4);
     run::<CSAuctionMyBidListPacket>(&mut w, 1, s.as_bytes());
     let frames = w.b.drain();
     let b = &frames[0].1;
@@ -1164,4 +1384,34 @@ async fn outbid_refund_mail_can_be_taken_all_and_deleted() {
         )
     });
     assert_eq!(ran, (100_000, false), "refund paid back, mail deleted");
+}
+
+#[tokio::test]
+async fn auction_requires_an_auctioneer_in_range() {
+    let (mut w, _log) = auction_world();
+    let pa = w.pa.clone();
+    let item_id = give(&w, &pa, slot_type::INVENTORY, POTION, 1, 0);
+    // Wrong NPC id (no such NPC): refused with the auctioneer-too-far error.
+    let mut s = PacketStream::new();
+    s.write_bc(0x999)
+        .write_bc(0x999)
+        .write_u64(item_id)
+        .write_i32(0)
+        .write_i32(1000)
+        .write_u8(1);
+    w.a.drain();
+    run::<CSAuctionPostPacket>(&mut w, 0, s.as_bytes());
+    assert!(w.server.systems.economy.auction.all_lots().is_empty());
+    let f = w.a.drain();
+    assert_eq!(f.len(), 1);
+    assert_eq!(f[0].0, sc::SCErrorMsgPacket);
+    // The real auctioneer works; moved out of range it does not.
+    run::<CSAuctionPostPacket>(&mut w, 0, &post_body(item_id, 0, 1000, 1));
+    assert_eq!(w.server.systems.economy.auction.all_lots().len(), 1);
+    pa.data().unit.transform.set_xyz(200.0, 100.0, 100.0);
+    w.a.drain();
+    run::<CSAuctionSearchPacket>(&mut w, 0, &search_body(&AuctionSearch::default()));
+    let f = w.a.drain();
+    assert_eq!(f.len(), 1);
+    assert_eq!(f[0].0, sc::SCErrorMsgPacket);
 }

@@ -198,6 +198,34 @@ pub fn world_distance(world: &WorldInstance, a: &WorldObject, b: &WorldObject) -
     distance_2d(pa.x, pa.y, pb.x, pb.y)
 }
 
+/// Interaction range of NPC shops (`CSBuyItemsPacket`, `CSSellItemsPacket`): "3m should be
+/// enough for NPC shops" (C#).
+pub const SHOP_RANGE: f32 = 3.0;
+
+/// Range within which the bank / auction services accept requests. Retail's value is unknown
+/// (the C# never checked); this matches the other NPC service interactions
+/// (`repair::repair_in_containers`, `mates::revive_pet_items`: 5 m).
+pub const SERVICE_RANGE: f32 = 5.0;
+
+/// Whether `player` stands within `range` of the NPC `npc_obj_id` and `pred` accepts the NPC's
+/// shop flags (e.g. `|i| i.banker`). Unknown NPCs / templates are rejected.
+pub fn near_service_npc(
+    server: &GameServer,
+    player: &PlayerRef,
+    npc_obj_id: u32,
+    range: f32,
+    pred: impl Fn(&super::hooks::NpcShopInfo) -> bool,
+) -> bool {
+    let Some(world) = parent_world(server, player) else {
+        return false;
+    };
+    let Some(npc) = world.npc(npc_obj_id) else {
+        return false;
+    };
+    pred(&shop_info(server, &npc))
+        && world_distance(&world, &WorldObject::from(player), &WorldObject::from(&npc)) <= range
+}
+
 /// `npc.Template.Merchant` / `MerchantPackId` through the NPC hooks (unknown = not a merchant).
 fn shop_info(server: &GameServer, npc: &NpcRef) -> super::hooks::NpcShopInfo {
     server
@@ -208,6 +236,23 @@ fn shop_info(server: &GameServer, npc: &NpcRef) -> super::hooks::NpcShopInfo {
         .get()
         .and_then(|h| h.shop_info(server, npc))
         .unwrap_or_default()
+}
+
+/// The merchant pack of the doodad's `DoodadFuncStoreUi` func in its current phase (`None` = the
+/// doodad is not a shop). The C# `CSBuyItemsPacket` left this value unused (TODO).
+fn doodad_shop_pack(server: &GameServer, doodad: &DoodadRef) -> Option<u32> {
+    let data = &server.game_data.systems.npcs.doodad;
+    let group = doodad.data().func_group_id;
+    data.funcs_for_group(group).iter().find_map(|f| {
+        match data.func_template(f.func_id, &f.func_type) {
+            Some(crate::systems::npcs::doodad::templates::FuncTemplate::StoreUi(t))
+                if t.merchant_pack_id != 0 =>
+            {
+                Some(t.merchant_pack_id)
+            }
+            _ => None,
+        }
+    })
 }
 
 /// `(int)(item.Template.Refund * GetGradeTemplate(item.Grade).RefundMultiplier / 100f) *
@@ -294,7 +339,7 @@ impl CSBuyItemsPacket {
             self.buy_back.len()
         );
 
-        // If a NPC was provided, check if it's valid
+        // If a NPC was provided, check if it's valid. Its catalog wins over a doodad's (C#).
         let mut pack_id = None;
         if self.npc_obj_id != 0 {
             let Some(n) = &npc else { return };
@@ -302,26 +347,44 @@ impl CSBuyItemsPacket {
             if !info.merchant || info.merchant_pack_id == 0 {
                 return;
             }
+            pack_id = Some(info.merchant_pack_id);
         }
         if let Some(n) = &npc {
             let dist = world_distance(&world, &WorldObject::from(&p), &WorldObject::from(n));
-            if dist > 3.0 {
+            if dist > SHOP_RANGE {
                 // 3m should be enough for NPC shops
                 inventory::send_error_message(&p, error_message::TOO_FAR_AWAY, 0, true);
                 return;
             }
-            pack_id = Some(shop_info(server, n).merchant_pack_id);
         }
 
-        // If a Doodad was provided, check if we're near it
+        // If a Doodad was provided, check if we're near it and whether it is a shop. The C#
+        // only checked the distance and sold any template (TODO "validate doodad shop").
         if self.doodad_obj_id != 0 {
             let Some(d) = &doodad else { return };
             let dist = world_distance(&world, &WorldObject::from(&p), &WorldObject::from(d));
-            if dist > 3.0 {
+            if dist > SHOP_RANGE {
                 // 3m should be enough for these
                 inventory::send_error_message(&p, error_message::TOO_FAR_AWAY, 0, true);
                 return;
             }
+            if pack_id.is_none() {
+                pack_id = doodad_shop_pack(server, d);
+            }
+        }
+
+        // Only goods of the interacting shop's catalog can be bought. Without one (no NPC, no
+        // `DoodadFuncStoreUi` doodad) every template would be buyable, so refuse the purchase
+        // (buy-back needs no catalog and stays allowed).
+        if !self.buy.is_empty() && pack_id.is_none() {
+            tracing::warn!(
+                "{}: rejected BuyItems of {} item(s) without a merchant catalog (npc {}, doodad {})",
+                p.data().unit.name,
+                self.buy.len(),
+                self.npc_obj_id,
+                self.doodad_obj_id
+            );
+            return;
         }
 
         let npc_hooks = server.systems.economy.hooks.npcs.get();
@@ -340,16 +403,13 @@ impl CSBuyItemsPacket {
             {
                 return;
             }
-            if self.npc_obj_id != 0 {
-                let sells = match (pack_id, &npc_hooks) {
-                    (Some(pack), Some(h)) => h.merchant_sells(server, pack, e.item_id),
-                    _ => false,
-                };
-                if !sells {
-                    continue;
-                }
+            let sells = match (pack_id, &npc_hooks) {
+                (Some(pack), Some(h)) => h.merchant_sells(server, pack, e.item_id),
+                _ => false,
+            };
+            if !sells {
+                continue;
             }
-            // Doodad catalog policy remains the existing separate limitation.
             let Some(template) = server.game_data.items.template(e.item_id) else {
                 return;
             };
@@ -581,14 +641,27 @@ impl CSSellItemsPacket {
         if !shop_info(server, &npc).merchant {
             return;
         }
+        if world_distance(&world, &WorldObject::from(&p), &WorldObject::from(&npc)) > SHOP_RANGE {
+            inventory::send_error_message(&p, error_message::TOO_FAR_AWAY, 0, true);
+            return;
+        }
         let inv = Inv::of(&p);
-        let mut items = Vec::new();
+        let mut items: Vec<Item> = Vec::new();
         for e in &self.items {
             let item = match e.slot_type {
                 slot_type::EQUIPMENT | slot_type::INVENTORY => inv.item_at(e.slot_type, e.slot),
                 _ => None,
             };
             if let Some(item) = item.filter(|i| i.id == e.item_id) {
+                // The same item listed twice would be paid twice.
+                if items.iter().any(|i| i.id == item.id) {
+                    tracing::warn!(
+                        "{}: duplicate item {} in CSSellItems ignored",
+                        p.data().unit.name,
+                        item.id
+                    );
+                    continue;
+                }
                 items.push(item);
             }
         }
@@ -597,11 +670,35 @@ impl CSSellItemsPacket {
         let containers = [inv.equipment(), inv.bag()];
         let mut txn = ItemTxn::begin(server);
         let data = txn.data();
-        let mut money = 0i32;
+        // Refunds before anything moves: an item with no valid refund is skipped (the C# paid
+        // `wrapping` math on missing data), and a payout overflow refuses the whole sale
+        // instead of moving the remaining items without paying them.
+        let mut total = 0i32;
+        let mut sales: Vec<(&Item, i32)> = Vec::new();
         for item in &items {
             if !data.template(item.template_id).is_some_and(|t| t.sellable) {
                 continue;
             }
+            let Some(value) = checked_shop_refund(server, item) else {
+                tracing::warn!(
+                    "CSSellItemsPacket: invalid refund for item {} ({})",
+                    item.id,
+                    item.template_id
+                );
+                continue;
+            };
+            let Some(sum) = total.checked_add(value) else {
+                tracing::warn!(
+                    "CSSellItemsPacket: payout overflow for {}",
+                    p.data().unit.name
+                );
+                return;
+            };
+            total = sum;
+            sales.push((item, value));
+        }
+        let mut money = 0i32;
+        for (item, value) in sales {
             // The container that holds the item now (a slot listed twice: the buy-back).
             let holder = containers
                 .iter()
@@ -642,6 +739,8 @@ impl CSSellItemsPacket {
                     item.template_id,
                     p.data().unit.name
                 );
+                // Nothing was sold: no payout (the C# paid regardless).
+                continue;
             } else {
                 // BuyBack is a non-persisted (SlotType.None) container. Without this the
                 // item's existing persisted row would be reloaded and duplicated on relogin
@@ -649,11 +748,7 @@ impl CSSellItemsPacket {
                 // persisted container and re-saves it.
                 server.items.mark_for_db_deletion(item.id);
             }
-            let Some(v) = refund_value(server, item) else {
-                tracing::error!("CSSellItemsPacket: no refund data for item {}", item.id);
-                return;
-            };
-            money = money.wrapping_add(v);
+            money += value;
         }
 
         let mut out = txn.out();
