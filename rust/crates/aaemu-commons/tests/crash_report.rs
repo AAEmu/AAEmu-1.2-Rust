@@ -24,6 +24,7 @@ fn run_child(test: &str, dir: &Path) -> String {
     std::fs::read_to_string(dir.join("Crash.log")).expect("Crash.log written")
 }
 
+#[cfg(all(windows, target_arch = "x86_64"))]
 #[inline(never)]
 fn recurse(n: u64) -> u64 {
     if n == u64::MAX {

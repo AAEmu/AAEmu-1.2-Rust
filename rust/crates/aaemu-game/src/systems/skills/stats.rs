@@ -93,6 +93,7 @@ pub enum StatKind {
     IncomingMeleeDamageMul,
     IncomingRangedDamageMul,
     IncomingSpellDamageMul,
+    IncomingSiegeDamageMul,
     AggroMul,
     IncomingAggroMul,
     LungCapacity,
@@ -164,6 +165,7 @@ impl StatKind {
             U::IncomingMeleeDamageMul => S::IncomingMeleeDamageMul,
             U::IncomingRangedDamageMul => S::IncomingRangedDamageMul,
             U::IncomingSpellDamageMul => S::IncomingSpellDamageMul,
+            U::IncomingSiegeDamageMul => S::IncomingSiegeDamageMul,
             U::AggroMul => S::AggroMul,
             U::IncomingAggroMul => S::IncomingAggroMul,
             U::LungCapacity => S::LungCapacity,
@@ -171,7 +173,10 @@ impl StatKind {
         })
     }
 
-    /// Whether the C# getter is an `int` (the others are `float`).
+    /// Whether the C# getter is an `int` (the others are `float`). The regen kinds return the
+    /// client's (float) stat values now - `health_regen`/`mana_regen` include the fractional
+    /// persistent regen and `/5`-scaled persistent values are fractional whenever the raw
+    /// modifier is not a multiple of five - so the GM command must print them as floats.
     pub fn is_int(self) -> bool {
         use StatKind as S;
         matches!(
@@ -184,10 +189,6 @@ impl StatKind {
                 | S::Fai
                 | S::MaxHp
                 | S::MaxMp
-                | S::HpRegen
-                | S::MpRegen
-                | S::PersistentHpRegen
-                | S::PersistentMpRegen
                 | S::Dps
                 | S::DpsInc
                 | S::OffhandDps
@@ -208,6 +209,14 @@ impl StatKind {
                 | S::LungCapacity
         )
     }
+}
+
+/// The client `health_regen` / `mana_regen`: the truncated base getter plus the (fractional)
+/// persistent regen. The oracle data (levels 1-55, with and without the persistent-regen buffs
+/// `Warmth of the Campfire` 5872 and `Dragon's Energy` 4698) shows the client value is
+/// `trunc(base) + persistent`, e.g. base 46.6 + persistent 1.4 gives 47.4, not `trunc(48.0)`.
+pub fn composed_regen(base: f64, persistent: f64) -> f64 {
+    f64::from(base as i32) + persistent
 }
 
 /// The base `Unit` getter values (no override).
@@ -236,7 +245,8 @@ pub fn base_unit_stat(u: &UnitBase, kind: StatKind, now: i64) -> f64 {
         | S::IncomingDamageMul
         | S::IncomingMeleeDamageMul
         | S::IncomingRangedDamageMul
-        | S::IncomingSpellDamageMul => 1.0,
+        | S::IncomingSpellDamageMul
+        | S::IncomingSiegeDamageMul => 1.0,
         S::AggroMul => u.calculate_with_bonuses(100.0, UnitAttribute::AggroMul, now) as f32 as f64,
         S::IncomingAggroMul => {
             u.calculate_with_bonuses(100.0, UnitAttribute::IncomingAggroMul, now) as f32 as f64
@@ -397,15 +407,21 @@ impl<'a> CharStats<'a> {
             }
             S::HpRegen => {
                 let pa = self.all_params();
-                f64::from(self.cwb(self.formula(F::HealthRegen, &pa), A::HealthRegen) as i32)
-            }
-            S::PersistentHpRegen => {
-                let pa = self.all_params();
-                let res = self.cwb(
+                let base = self.cwb(self.formula(F::HealthRegen, &pa), A::HealthRegen);
+                let persistent = self.cwb(
                     self.formula(F::PersistentHealthRegen, &pa),
                     A::PersistentHealthRegen,
                 ) / 5.0;
-                f64::from(res as i32)
+                composed_regen(base, persistent)
+            }
+            S::PersistentHpRegen => {
+                let pa = self.all_params();
+                // The client keeps the fractional value (`raw / 5`, e.g. 1.4); only the
+                // composed `health_regen` truncates the base part.
+                self.cwb(
+                    self.formula(F::PersistentHealthRegen, &pa),
+                    A::PersistentHealthRegen,
+                ) / 5.0
             }
             S::MaxMp => {
                 let pa = self.all_params();
@@ -413,13 +429,25 @@ impl<'a> CharStats<'a> {
             }
             S::MpRegen => {
                 let pa = self.all_params();
-                let res = self.formula(F::ManaRegen, &pa) + spi / 10.0;
-                f64::from(self.cwb(res, A::ManaRegen) as i32)
+                // No `+ spi / 10` here: every oracle data point (levels 1-55, with and without
+                // persistent-regen buffs) shows the client's `mana_regen` equals the mana-regen
+                // formula without it (the C# inherited the term, the client does not).
+                let base = self.cwb(self.formula(F::ManaRegen, &pa), A::ManaRegen);
+                let persistent = self.cwb(
+                    self.formula(F::PersistentManaRegen, &pa),
+                    A::PersistentManaRegen,
+                ) / 5.0;
+                composed_regen(base, persistent)
             }
             S::PersistentMpRegen => {
                 let pa = self.all_params();
-                let res = self.formula(F::PersistentManaRegen, &pa) / 5.0;
-                f64::from(self.cwb(res, A::PersistentManaRegen) as i32)
+                // Like `PersistentHpRegen`: the full (bonus-inclusive) value divided by 5. The
+                // old code divided before applying the bonuses, so a +5 modifier read as 5
+                // instead of the client's 1 (oracle: client 1 / server 5 at levels 1-55).
+                self.cwb(
+                    self.formula(F::PersistentManaRegen, &pa),
+                    A::PersistentManaRegen,
+                ) / 5.0
             }
             S::IncomingDamageMul => {
                 (1.0 + self.cwb(0.0, A::IncomingDamageMul) / 1000.0) as f32 as f64
@@ -441,6 +469,16 @@ impl<'a> CharStats<'a> {
             S::IncomingSpellDamageMul => {
                 let res = self.cwb(
                     self.cwb(0.0, A::IncomingSpellDamageMul),
+                    A::IncomingDamageMul,
+                );
+                (1.0 + res / 1000.0) as f32 as f64
+            }
+            S::IncomingSiegeDamageMul => {
+                // The 1.2 data uses the attribute (unit_modifiers rows on 9 buffs, e.g. 8232
+                // +20000), the client computes `incoming_siege_damage_mul`; the port had no
+                // getter (the GM command reported NotFound before).
+                let res = self.cwb(
+                    self.cwb(0.0, A::IncomingSiegeDamageMul),
                     A::IncomingDamageMul,
                 );
                 (1.0 + res / 1000.0) as f32 as f64
@@ -1014,5 +1052,193 @@ mod vehicle_gear_tests {
         // Other kinds are ignored.
         let npc = Entity::new(0x700, crate::models::npc::Npc::new(1));
         update_vehicle_gear_bonuses(&server, &WorldObject::from(&npc), None, None);
+    }
+}
+
+#[cfg(test)]
+mod regen_tests {
+    //! The `health_regen`/`mana_regen`/persistent composition, against the oracle data recorded
+    //! on 2026-10-18 (`D:/aaemu-live/shots/oracle-stats-L*.json`). The first test is pure; the
+    //! second loads the real compact database (`AAEMU_COMPACT_DB`, `--ignored`).
+    use super::*;
+
+    /// The composed client values from the live oracle run.
+    #[test]
+    fn composed_regen_matches_the_client_data_points() {
+        // (base formula, persistent value, client value)
+        for (base, persistent, client) in [
+            (52.0, 0.0, 52.0),  // level 1 without the hidden Civilian buff
+            (52.0, 1.0, 53.0),  // level 1 (client 53, server was 52)
+            (55.6, 1.0, 56.0),  // level 10 (client 56, round() would give 57)
+            (71.6, 1.0, 72.0),  // level 50 (client 72)
+            (81.6, 13.0, 94.0), // level 55 + Warmth of the Campfire 5872
+            (46.6, 1.4, 47.4),  // level 55 mana + Dragon's Energy 4698 (client 47.4000015)
+        ] {
+            let value = composed_regen(base, persistent);
+            assert!(
+                (value - client).abs() < 1e-6,
+                "base {base} persistent {persistent}: {value} != {client}"
+            );
+        }
+    }
+
+    #[test]
+    fn regen_getters_are_floats_for_the_gm_command() {
+        assert!(!StatKind::HpRegen.is_int());
+        assert!(!StatKind::MpRegen.is_int());
+        assert!(!StatKind::PersistentHpRegen.is_int());
+        assert!(!StatKind::PersistentMpRegen.is_int());
+        assert!(StatKind::MaxHp.is_int());
+        assert!(StatKind::Str.is_int());
+    }
+
+    /// The `UnitAttribute` mapping of the new siege getter.
+    #[test]
+    fn siege_attribute_has_a_getter() {
+        assert_eq!(
+            StatKind::from_unit_attribute(UnitAttribute::IncomingSiegeDamageMul),
+            Some(StatKind::IncomingSiegeDamageMul)
+        );
+    }
+
+    /// Real formulas: the oracle numbers for levels 1/55 with and without the persistent-regen
+    /// buffs, evaluated through the actual `CharStats::get`.
+    ///
+    /// `AAEMU_COMPACT_DB=rust/crates/aaemu-game/app/Data/compact.sqlite3 cargo test -p aaemu-game
+    /// regen_tests -- --ignored`
+    #[tokio::test]
+    #[ignore = "needs AAEMU_COMPACT_DB"]
+    async fn real_formula_regen_values_match_the_oracle() {
+        use crate::models::unit::{Bonus, BonusTemplate, UnitModifierType};
+        use crate::server::GameServer;
+        use crate::test_support::test_server_with;
+        use std::sync::Arc;
+
+        let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+            return;
+        };
+        let conn = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let mut data = crate::data::GameData::empty();
+        data.formulas = crate::data::formulas::FormulaManager::load(&conn).unwrap();
+        let server: Arc<GameServer> = Arc::new(test_server_with(data));
+
+        // The hidden Civilian buff (8298) applies +5 persistent HP/MP to every character; the
+        // oracle's L1..55 baseline numbers include it.
+        let civilian = |index: u32, unit: &mut crate::models::unit::UnitBase| {
+            for attribute in [
+                UnitAttribute::PersistentHealthRegen,
+                UnitAttribute::PersistentManaRegen,
+            ] {
+                unit.bonuses.add_bonus(
+                    index,
+                    Bonus {
+                        template: BonusTemplate {
+                            attribute,
+                            modifier_type: UnitModifierType::Value,
+                            value: 5,
+                            linear_level_bonus: 0,
+                        },
+                        value: 5,
+                    },
+                );
+            }
+        };
+        let persistent_buff =
+            |index: u32, hp: i32, mp: i32, unit: &mut crate::models::unit::UnitBase| {
+                for (attribute, value) in [
+                    (UnitAttribute::PersistentHealthRegen, hp),
+                    (UnitAttribute::PersistentManaRegen, mp),
+                ] {
+                    unit.bonuses.add_bonus(
+                        index,
+                        Bonus {
+                            template: BonusTemplate {
+                                attribute,
+                                modifier_type: UnitModifierType::Value,
+                                value,
+                                linear_level_bonus: 0,
+                            },
+                            value,
+                        },
+                    );
+                }
+            };
+        let get = |level: u8, kinds: &[StatKind]| -> Vec<f64> {
+            let mut c = crate::models::character::Character::new(1, 1, Default::default());
+            c.unit.level = level;
+            let inputs = CharInputs::default();
+            let mut cs = CharStats::new(&server, &c, inputs, crate::world::now_ms());
+            kinds.iter().map(|k| cs.get(*k)).collect()
+        };
+
+        let kinds = [
+            StatKind::HpRegen,
+            StatKind::MpRegen,
+            StatKind::PersistentHpRegen,
+            StatKind::PersistentMpRegen,
+        ];
+        assert_eq!(get(1, &kinds), vec![52.0, 17.0, 0.0, 0.0]);
+
+        // With the hidden Civilian buff the client shows 53 / 18 / 1 / 1.
+        let with_civilian = |level: u8| -> Vec<f64> {
+            let mut c = crate::models::character::Character::new(1, 1, Default::default());
+            c.unit.level = level;
+            civilian(2, &mut c.unit);
+            let inputs = CharInputs::default();
+            let mut cs = CharStats::new(&server, &c, inputs, crate::world::now_ms());
+            kinds.iter().map(|k| cs.get(*k)).collect()
+        };
+        assert_eq!(with_civilian(1), vec![53.0, 18.0, 1.0, 1.0]);
+        assert_eq!(with_civilian(55), vec![82.0, 47.0, 1.0, 1.0]);
+
+        // Level 55 + Warmth of the Campfire (5872: +60 HP, +45 MP): client 94 / 56 / 13 / 10.
+        let mut c = crate::models::character::Character::new(1, 1, Default::default());
+        c.unit.level = 55;
+        civilian(2, &mut c.unit);
+        persistent_buff(3, 60, 45, &mut c.unit);
+        let mut cs = CharStats::new(&server, &c, CharInputs::default(), crate::world::now_ms());
+        assert_eq!(
+            kinds.iter().map(|k| cs.get(*k)).collect::<Vec<_>>(),
+            vec![94.0, 56.0, 13.0, 10.0]
+        );
+
+        // Level 55 + Dragon's Energy (4698: +5 HP, +2 MP): client 83 / 47.4 / 2 / 1.4.
+        let mut c = crate::models::character::Character::new(1, 1, Default::default());
+        c.unit.level = 55;
+        civilian(2, &mut c.unit);
+        persistent_buff(3, 5, 2, &mut c.unit);
+        let mut cs = CharStats::new(&server, &c, CharInputs::default(), crate::world::now_ms());
+        let values = kinds.iter().map(|k| cs.get(*k)).collect::<Vec<_>>();
+        for (value, expected) in values.iter().zip([83.0, 47.4, 2.0, 1.4]) {
+            assert!(
+                (value - expected).abs() < 1e-9,
+                "{values:?} != [{expected}]"
+            );
+        }
+
+        // IncomingSiegeDamageMul: the getter exists now (1.0 without bonuses); a +100 value
+        // bonus is +10% (server units are thousandths).
+        assert_eq!(get(55, &[StatKind::IncomingSiegeDamageMul]), vec![1.0]);
+        let mut c = crate::models::character::Character::new(1, 1, Default::default());
+        c.unit.level = 55;
+        c.unit.bonuses.add_bonus(
+            2,
+            Bonus {
+                template: BonusTemplate {
+                    attribute: UnitAttribute::IncomingSiegeDamageMul,
+                    modifier_type: UnitModifierType::Value,
+                    value: 100,
+                    linear_level_bonus: 0,
+                },
+                value: 100,
+            },
+        );
+        let mut cs = CharStats::new(&server, &c, CharInputs::default(), crate::world::now_ms());
+        // The getter stores through f32 (`as f32 as f64`), so 1.1 keeps float32 noise.
+        assert!((cs.get(StatKind::IncomingSiegeDamageMul) - 1.1).abs() < 1e-6);
     }
 }

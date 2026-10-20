@@ -91,10 +91,35 @@ pub fn new_skill_for(
     SkillRun::new(template, level)
 }
 
+/// Mana per `mana_level_md` point at the caster's ability level: the character `unit_formulas`
+/// rows `LevelDps` (kind 12, `(ab_level * 1.6 + 8) * 3`) and `LevelMana` (kind 13,
+/// `level_dps / 3.65`) of `compact.sqlite3`, evaluated through the precompiled formula
+/// expressions (no parsing per cast). 0 when the data has no such formulas.
+///
+/// Deviation: the C# `Skill.ManaCost` hardcodes `((abLevel - 1) * 1.6 + 8) * 3 / 3.65`; the
+/// data formulas have no `- 1` (and `CharStats` evaluates `LevelDps` with `ab_level = level`
+/// too), so the data wins (see PORTING.md).
+pub fn mana_level_scale(server: &GameServer, caster: &WorldObject, ability_id: u8) -> f64 {
+    use crate::data::formulas::{FormulaOwnerType, UnitFormulaKind};
+    let formulas = &server.game_data.formulas;
+    let (Some(dps), Some(mana)) = (
+        formulas.get_unit_formula(FormulaOwnerType::Character, UnitFormulaKind::LevelDps),
+        formulas.get_unit_formula(FormulaOwnerType::Character, UnitFormulaKind::LevelMana),
+    ) else {
+        return 0.0;
+    };
+    let level_dps = dps.formula.evaluate(&std::collections::HashMap::from([(
+        "ab_level",
+        f64::from(ab_level(server, caster, ability_id)),
+    )]));
+    mana.formula
+        .evaluate(&std::collections::HashMap::from([("level_dps", level_dps)]))
+}
+
 /// `Skill.ManaCost(caster)`.
 pub fn mana_cost(server: &GameServer, skill: &SkillRun, caster: &WorldObject) -> i32 {
     let t = &skill.template;
-    let base = (f64::from(ab_level(server, caster, t.ability_id) - 1) * 1.6 + 8.0) * 3.0 / 3.65;
+    let base = mana_level_scale(server, caster, t.ability_id);
     let cost2 = base * f64::from(t.mana_level_md) + f64::from(t.mana_cost);
     let tags = server.game_data.systems.skills.skill_tags(t.id).to_vec();
     caster
@@ -564,7 +589,12 @@ pub fn use_skill(
         .skills
         .tl_ids
         .next_id(caster.obj_id(), template.id);
-    skill.state().tl_id = tl;
+    // A reused `SkillRun` (auto attack) can still hold an id when its previous use never ended
+    // (a leak path). Recover it so the pool does not run out; the counter makes it visible.
+    let previous = std::mem::replace(&mut skill.state().tl_id, tl);
+    if previous != 0 {
+        server.systems.skills.tl_ids.release_replaced(previous);
+    }
     tracing::debug!(
         "Created SkillTlId {tl} for Skill {}, Caster {} with target {}",
         template.id,
@@ -619,13 +649,22 @@ pub fn use_skill(
             })
         });
         let skill2 = skill.clone();
-        super::tasks::schedule(server, i64::from(cast_time), move |srv| {
-            // CastTask.Execute
-            if cancel.is_cancelled() || skill2.cancelled() {
+        let ctx2 = ctx.clone();
+        let scheduled = super::tasks::schedule(server, i64::from(cast_time), move |srv| {
+            // CastTask.Execute. A cancelled token means `stop` ran: it took the task slot and
+            // released the timeline id. A skill flagged `cancelled` by something else (a cancel
+            // effect, a failed requirement) still holds its id: `cast` ends it, exactly once
+            // (`end_skill` takes the id), instead of this closure dropping it.
+            if cancel.is_cancelled() {
                 return;
             }
             cast(&srv, &skill2, &ctx);
         });
+        if !scheduled {
+            // No scheduler (server shutting down): finish the cast right away instead of
+            // leaving the task slot - and the timeline id - set forever.
+            cast(server, skill, &ctx2);
+        }
     } else {
         cast(server, skill, &ctx);
     }
@@ -694,6 +733,18 @@ pub fn cast(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         return;
     }
     if skill.cancelled() {
+        // A cancellation path that did not run `stop` (the id would otherwise be lost). The
+        // task slot of a timed cast is cleared here too (`stop` clears it on its own path).
+        caster.with_unit(|u| {
+            let slot = &mut u.unit_mut().skill_state.skill_task;
+            if slot
+                .as_ref()
+                .is_some_and(|task| Arc::ptr_eq(&task.skill, skill))
+            {
+                *slot = None;
+            }
+        });
+        end_skill(server, skill, caster);
         return;
     }
     // Source, target and resources may change while the cast timer is running.
@@ -774,11 +825,14 @@ pub fn cast(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                     tracing::warn!(
                         "SkillItem does not exists {item_id} (templateId: {item_template_id})"
                     );
+                    // The C# returned here and lost the timeline id (issue #753); stop instead.
+                    stop(server, skill, caster, 0);
                     return;
                 }
                 Some((tid, _)) => {
                     if items.item_count(server, p, tid) < 1 {
                         tracing::warn!("SkillItem, player does not own enough of {item_id}");
+                        stop(server, skill, caster, 0);
                         return;
                     }
                 }
@@ -875,7 +929,7 @@ pub fn start_channeling(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     }
     let skill2 = skill.clone();
     let ctx2 = ctx.clone();
-    super::tasks::schedule(server, i64::from(t.channeling_time), move |srv| {
+    let scheduled = super::tasks::schedule(server, i64::from(t.channeling_time), move |srv| {
         if cancel.is_cancelled() {
             return;
         }
@@ -895,6 +949,11 @@ pub fn start_channeling(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             true,
         );
     });
+    if !scheduled {
+        // No scheduler: close the channel now instead of leaving the task slot (and the
+        // timeline id) set forever.
+        stop(server, skill, caster, doodad);
+    }
 }
 
 fn schedule_channel_tick(
@@ -1093,9 +1152,14 @@ pub fn schedule_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         let skill2 = skill.clone();
         let ctx2 = ctx.clone();
         let timeline = fired.tl;
-        super::tasks::schedule(server, i64::from(total_delay), move |srv| {
+        let scheduled = super::tasks::schedule(server, i64::from(total_delay), move |srv| {
             // ApplySkillTask
-            if skill2.tl_id() != timeline || skill2.cancelled() {
+            if skill2.tl_id() != timeline {
+                // A newer use of the same SkillRun took the timeline; it recovered this id.
+                return;
+            }
+            if skill2.cancelled() {
+                end_skill(&srv, &skill2, &ctx2.caster);
                 return;
             }
             if !ctx2.has_live_handles(&srv) {
@@ -1106,6 +1170,13 @@ pub fn schedule_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             apply_effects(&srv, &skill2, &ctx2);
             end_skill(&srv, &skill2, &ctx2.caster);
         });
+        if !scheduled {
+            // No scheduler: apply now and close the timeline instead of leaking it.
+            if ctx.has_live_handles(server) {
+                apply_effects(server, skill, ctx);
+            }
+            end_skill(server, skill, caster);
+        }
     } else {
         apply_effects(server, skill, ctx);
         end_skill(server, skill, caster);
@@ -1725,11 +1796,13 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
 
 /// `Skill.EndSkill(caster)`.
 pub fn end_skill(server: &GameServer, skill: &SkillRef, caster: &WorldObject) {
-    if !caster.is_unit() {
-        return;
-    }
     let tl = std::mem::take(&mut skill.state().tl_id);
     if tl == 0 {
+        return;
+    }
+    if !caster.is_unit() {
+        // Not a unit any more: release the id without the unit-side effects.
+        server.systems.skills.tl_ids.release(tl);
         return;
     }
     let t = &skill.template;
@@ -1994,7 +2067,12 @@ pub fn start_auto_skill(server: &GameServer, caster: &WorldObject, skill: &Skill
     let delay = attack_delay(server, &skill.template, caster, true, 1000.0) as i64;
     let obj_id = p.obj_id;
     let skill = skill.clone();
-    schedule_auto_attack(server, obj_id, skill, cancel, delay);
+    if !schedule_auto_attack(server, obj_id, skill, cancel, delay) {
+        // No scheduler: clear the slot so the stale auto-attack state does not stay behind.
+        let mut c = p.data();
+        c.unit.is_auto_attack = false;
+        c.unit.skill_state.auto_attack = None;
+    }
 }
 
 fn schedule_auto_attack(
@@ -2003,7 +2081,7 @@ fn schedule_auto_attack(
     skill: SkillRef,
     cancel: CancelToken,
     delay: i64,
-) {
+) -> bool {
     super::tasks::schedule(server, delay, move |srv| {
         if cancel.is_cancelled() {
             return;
@@ -2015,7 +2093,7 @@ fn schedule_auto_attack(
         if let Some(next) = next {
             schedule_auto_attack(&srv, obj_id, skill, cancel, next);
         }
-    });
+    })
 }
 
 /// `UseAutoAttackSkillTask.Execute`: `Some(next delay)` while it keeps running.
