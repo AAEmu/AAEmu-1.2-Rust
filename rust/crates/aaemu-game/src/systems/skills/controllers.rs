@@ -1426,7 +1426,13 @@ impl SkillController {
         if snap {
             new.z = upd_z;
         }
-        let (yaw, vel_x, vel_y) = heading(new, end);
+        // On the final step `new` coincides with `end` up to float noise, which makes the
+        // heading arbitrary (atan2 of ~0, sometimes facing backwards); keep the step heading.
+        let (yaw, vel_x, vel_y) = if calculate_distance(new, end, false) < 1e-3 {
+            heading(cur, end)
+        } else {
+            heading(new, end)
+        };
         self.owner.with_transform(|t| {
             t.set_xyz(new.x, new.y, new.z);
             t.rot_x = 0.0;

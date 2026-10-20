@@ -1932,3 +1932,12 @@ The achievement subsystem has no 1.2 C# manager; the behaviour follows `rust/doc
 * **GET_ITEM_TYPE (k29), KILL_SLAVE (k26), MY_DISHONORABLE_POINT (k49), siege results (k57-60)** stay
   unwired (see the audit for why). `SCAchievementResetedPacket` (0x1ff) has no 1.2 trigger and is
   deliberately never sent.
+
+## Dash heading at the end point (2026-10-20)
+
+`SkillController::step` turned the unit toward `heading(new, end)`. On the last step `new` equals
+`end` up to float rounding, so `atan2` of a near-zero vector picked an arbitrary direction (pi or
+0, depending on the tick's `dt`): the unit could flip to face backwards on the final tick and the
+last movement packet carried that yaw (seen as a Linux-only failure of
+`dash_moves_npc_and_broadcasts_movement`). Within 1e-3 of the end point the heading of the step
+itself (`heading(cur, end)`) is used. The C# original has the same degenerate `atan2`.
