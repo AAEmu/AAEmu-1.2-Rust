@@ -860,6 +860,23 @@ impl GameClient {
         self.send_cs(cs::CSStartSkillPacket, s.as_bytes()).await
     }
 
+    /// `CSSwapAbilityPacket` (replace ability `old` with `new` in the character's slots).
+    pub async fn swap_ability(&mut self, old: u8, new: u8) -> anyhow::Result<()> {
+        let mut s = PacketStream::new();
+        s.write_bc(self.state.self_obj)
+            .write_u8(old)
+            .write_u8(new)
+            .write_bool(false); // auap
+        self.send_cs(cs::CSSwapAbilityPacket, s.as_bytes()).await
+    }
+
+    /// `CSLearnSkillPacket`.
+    pub async fn learn_skill(&mut self, skill_id: u32) -> anyhow::Result<()> {
+        let mut s = PacketStream::new();
+        s.write_u32(skill_id);
+        self.send_cs(cs::CSLearnSkillPacket, s.as_bytes()).await
+    }
+
     /// `CSCreateDoodadPacket` (0x0e6): plant / place doodad `id` from the bag item `item_id`.
     pub async fn create_doodad(
         &mut self,

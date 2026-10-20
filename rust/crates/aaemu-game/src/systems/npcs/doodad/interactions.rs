@@ -14,6 +14,7 @@ use crate::opcodes::sc;
 use crate::packets::packet_def;
 use crate::server::GameServer;
 use crate::systems::npcs::public_farm;
+use crate::systems::skills::geometry::PosUnit;
 use crate::world::{now_ms, DoodadRef, WorldObject};
 use aaemu_commons::{Marshal, PacketStream};
 
@@ -424,17 +425,44 @@ fn summon_doodad(
     let Some(world) = server.world.world_of(caster) else {
         return;
     };
-    let Some(doodad) = manager::create(server, &world, 0, doodad_id, Some(caster), true) else {
-        return;
-    };
     // `target.Transform.CloneDetached(doodad)` (null target: NullReferenceException).
     let Some(target) = target else {
+        return;
+    };
+    let Some(doodad) = manager::create(server, &world, 0, doodad_id, Some(caster), true) else {
         return;
     };
     let mut t = target.transform();
     let p = world.world_pos_rot(target);
     t.parent_obj_id = 0;
     t.set_position(p.x, p.y, p.z, p.rot_x, p.rot_y, p.rot_z);
+    doodad.data().transform = t;
+    phase::init_doodad(&DoodadCtx::new(server, world.clone(), doodad.clone()));
+    manager::spawn(server, &world, &doodad);
+}
+
+/// `SummonDoodad.Execute` for a position target: the C# skill code passes a fake `BaseUnit`
+/// carrying the cast position's transform, which is cloned onto the doodad.
+pub fn summon_doodad_at(server: &GameServer, caster: &WorldObject, pos: &PosUnit, doodad_id: u32) {
+    let Some(world) = server.world.world_of(caster) else {
+        return;
+    };
+    let Some(doodad) = manager::create(server, &world, 0, doodad_id, Some(caster), true) else {
+        return;
+    };
+    // `target.Transform.CloneDetached(doodad)`: zone / instance of the position, no parent.
+    let mut t = doodad.data().transform;
+    t.instance_id = pos.instance_id;
+    t.zone_id = pos.zone_id;
+    t.parent_obj_id = 0;
+    t.set_position(
+        pos.pos.x,
+        pos.pos.y,
+        pos.pos.z,
+        pos.pos.rot_x,
+        pos.pos.rot_y,
+        pos.pos.rot_z,
+    );
     doodad.data().transform = t;
     phase::init_doodad(&DoodadCtx::new(server, world.clone(), doodad.clone()));
     manager::spawn(server, &world, &doodad);

@@ -1108,9 +1108,14 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   the C# used `OwnerObjId`, leaving deleted mates listed and potentially removing another
   character's list when the ids collided. Repeated stale-mate deletion still avoids releasing
   its obj / tl ids a second time.
-* systems::vehicles: `ShipyardIdManager` uses no MySQL table. Shipyards are runtime-only and
-  have no persistence writer; the inherited `shipyards` query only failed and used an empty
-  id set. Persisting shipyards remains separate work.
+* systems::vehicles: deviation from C#, which kept shipyards runtime-only (a restart lost every
+  drydock and its build progress). They persist in the `shipyards` table
+  (`systems/vehicles/shipyards_db.rs`): `System::save` (periodic and shutdown save) rewrites every
+  live shipyard, `remove_shipyard` deletes the row at once and queues the delete for the next save
+  as well, and `System::start` restores the rows with a fresh obj id (build step, actions, hp,
+  position, owner, `spawned`; nothing is consumed) and runs the protection / decay update once.
+  `ShipyardIdManager` now reserves the ids of the `shipyards` table. Decay keeps running from the
+  stored `spawned` time, i.e. server downtime counts towards the 3 day tax protection.
 * systems::vehicles: DB failures of the saved-slave lookups behave like "no saved slave"; the
   slave / mate saves outside `DoSave` are fire-and-forget tasks.
 * systems::vehicles: a missing unit formula evaluates to 0 (C# NullReferenceException); index
