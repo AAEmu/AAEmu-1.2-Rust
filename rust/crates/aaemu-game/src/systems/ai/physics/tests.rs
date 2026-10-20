@@ -526,7 +526,67 @@ fn unit_collisions_keep_the_pair_maximum_for_500_ms() {
     // within 500 ms of the flush nothing is reported
     u.record(Some(1), Some(2), 8.0, p, 700);
     assert!(u.flush(&ships, 800).is_empty());
-    assert_eq!(u.flush(&ships, 1100).len(), 2);
+    // still inside the 1.5 s pair cooldown: nothing; afterwards the pair damages again
+    assert!(u.flush(&ships, 1100).is_empty());
+    u.record(Some(1), Some(2), 8.0, p, 2200);
+    assert_eq!(u.flush(&ships, 2200).len(), 2);
+}
+
+fn two_ships() -> [PhysShip; 2] {
+    [
+        PhysShip::new(
+            spec(1, 0.0, 0.0, 99.0, 0.0),
+            model(),
+            ShipGameView::default(),
+        ),
+        PhysShip::new(
+            spec(2, 0.0, 14.0, 99.0, 0.0),
+            model(),
+            ShipGameView::default(),
+        ),
+    ]
+}
+
+#[test]
+fn unit_collisions_rate_limit_repeated_ship_pair_damage() {
+    use super::cry::UnitCollisions;
+    let ships = two_ships();
+    let p = aaemu_physics::math::Vec3::ZERO;
+    let mut u = UnitCollisions::default();
+    let mut hits = 0;
+    for step in 1..=10 {
+        let now = step * 500;
+        u.record(Some(1), Some(2), 6.0, p, now);
+        if !u.flush(&ships, now).is_empty() {
+            hits += 1;
+        }
+    }
+    // 5 s of contact every window: damage at 500, 2000, 3500, 5000 ms
+    assert_eq!(hits, 4);
+}
+
+#[test]
+fn unit_collisions_independent_ship_pairs_and_terrain_grind() {
+    use super::cry::UnitCollisions;
+    let ships = two_ships();
+    let p = aaemu_physics::math::Vec3::ZERO;
+    let mut u = UnitCollisions::default();
+    // terrain grind: only the first window damages, even after the cooldown elapsed
+    let mut terrain_hits = 0;
+    for step in 1..=10 {
+        let now = step * 500;
+        u.record(Some(1), None, 8.0, p, now);
+        terrain_hits += u.flush(&ships, now).len();
+    }
+    assert_eq!(terrain_hits, 1);
+    // separated for a window, cooldown long elapsed: a fresh impact damages again
+    assert!(u.flush(&ships, 5500).is_empty());
+    u.record(Some(1), None, 8.0, p, 6000);
+    assert_eq!(u.flush(&ships, 6000).len(), 1);
+    // the terrain pair of ship 1 does not hold back ship 2's terrain pair nor the ship pair
+    u.record(Some(2), None, 8.0, p, 6500);
+    u.record(Some(1), Some(2), 8.0, p, 6500);
+    assert_eq!(u.flush(&ships, 6500).len(), 3);
 }
 
 #[test]
