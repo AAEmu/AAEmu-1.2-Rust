@@ -1403,7 +1403,16 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   the slot the item had in the giver's container (the C# moved the whole item and built the
   removal from the moved object, i.e. the receiver's slot). Negative money put-ups are rejected
   (the C# stored them unsent and skipped them at finish), money transfers use checked `i64`
-  arithmetic, and trade ids are released on cancel / departure / finish. Live oracle: two
+  arithmetic, and trade ids are released on cancel / departure / finish. `FinishTrade` first
+  checks every offered item (still held by the giver with at least the offered amount, several
+  put-ups of one stack added up; receiver bag has a free slot the item is accepted in) under the
+  item operation lock and cancels the whole trade for both sides when any check fails; money then
+  moves as deltas under one guard per character (the C# applied money first and counted failed
+  item moves in `hasErrors`, leaving a one-sided trade). Taking an item down removes only that
+  item's put-up (the C# cleared the whole list when it held at most one entry), the peer's
+  `SCOtherTradeItemTookdown` shows the offered amount like the put-up (the C# sent the whole
+  item, as it also put up the whole item), and `CSTradeLock(false)` resets both OK flags like
+  `UnlockTrade` (the C# kept them). Live oracle: two
   `aaemu-testclient` bots (lock one side only -> no trade; negative money -> rejected; 5-unit
   stack, 2 put up -> only 2 move, 3 stay).
 * systems::economy (shop currency checks, 2026-10-19): `CSBuyItems` refuses when *any* required

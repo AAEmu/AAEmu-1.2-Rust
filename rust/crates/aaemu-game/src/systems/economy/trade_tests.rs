@@ -409,7 +409,9 @@ async fn full_trade_items_and_money() {
     w.a.drain();
     w.b.drain();
     run::<CSTakedownTradeItemPacket>(&mut w, 1, &[2, 0]);
-    let bob_item = item_at(&pb, 2, 0).unwrap();
+    // The peer sees the same offered amount (1 of 2) as in the put-up.
+    let mut bob_item = item_at(&pb, 2, 0).unwrap();
+    bob_item.count = 1;
     assert_eq!(
         w.a.drain(),
         vec![(sc::SCOtherTradeItemTookdownPacket, body_of(&bob_item))]
@@ -741,4 +743,142 @@ async fn money_spent_after_putup_cancels() {
     );
     assert_eq!(pa.data().money, 50);
     assert_eq!(w.pb.data().money, 0);
+}
+
+/// Money, bag and stack state that must be unchanged after an aborted trade.
+fn assert_untouched(w: &World, id: u64, count: i32, money: (i64, i64)) {
+    assert_eq!(Inv::of(&w.pa).item_by_id(id).unwrap().count, count);
+    assert!(Inv::of(&w.pb).item_by_id(id).is_none());
+    assert_eq!(Inv::of(&w.pb).bag().lock().unwrap().items.len(), 0);
+    assert_eq!((w.pa.data().money, w.pb.data().money), money);
+}
+
+#[tokio::test]
+async fn item_shrunk_after_lock_aborts_the_trade_without_paying() {
+    let mut w = world();
+    w.pa.data().money = 100;
+    w.pb.data().money = 500;
+    let id = give(&w, &w.pa.clone(), slot_type::INVENTORY, STACK, 4, 0);
+    start(&mut w);
+    putup_item(&mut w, 0, 2, 0, 4);
+    putup_money(&mut w, 1, 300);
+    lock(&mut w, 0, true);
+    lock(&mut w, 1, true);
+    ok(&mut w, 0);
+    // Alice gets rid of part of the stack after both locked.
+    Inv::of(&w.pa)
+        .bag()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(id)
+        .unwrap()
+        .count = 2;
+    w.a.drain();
+    w.b.drain();
+    ok(&mut w, 1);
+    let fa = w.a.drain();
+    let fb = w.b.drain();
+    // Nobody got a SCTradeMade; the trade is canceled for both.
+    assert_eq!(fa.len(), 2);
+    assert_eq!(fa[1], canceled(0, true));
+    assert_eq!(fb[1], canceled(0, false));
+    assert!(w.server.systems.economy.trade.trades().is_empty());
+    assert_untouched(&w, id, 2, (100, 500));
+}
+
+#[tokio::test]
+async fn item_gone_after_lock_aborts_the_trade_without_paying() {
+    let mut w = world();
+    w.pa.data().money = 100;
+    w.pb.data().money = 500;
+    let id = give(&w, &w.pa.clone(), slot_type::INVENTORY, STACK, 4, 0);
+    start(&mut w);
+    putup_item(&mut w, 0, 2, 0, 1);
+    putup_money(&mut w, 1, 300);
+    lock(&mut w, 0, true);
+    lock(&mut w, 1, true);
+    ok(&mut w, 0);
+    {
+        let bag = Inv::of(&w.pa).bag();
+        let mut bag = bag.lock().unwrap();
+        bag.items.retain(|i| i.id != id);
+        bag.update_free_slot_count();
+    }
+    w.a.drain();
+    w.b.drain();
+    ok(&mut w, 1);
+    assert!(w
+        .a
+        .drain()
+        .iter()
+        .all(|(op, _)| *op != sc::SCTradeMadePacket));
+    assert!(w.server.systems.economy.trade.trades().is_empty());
+    assert_eq!((w.pa.data().money, w.pb.data().money), (100, 500));
+    assert_eq!(Inv::of(&w.pb).bag().lock().unwrap().items.len(), 0);
+}
+
+#[tokio::test]
+async fn repeated_putups_of_one_stack_cannot_exceed_it() {
+    let mut w = world();
+    w.pb.data().money = 500;
+    let id = give(&w, &w.pa.clone(), slot_type::INVENTORY, STACK, 4, 0);
+    start(&mut w);
+    putup_item(&mut w, 0, 2, 0, 3);
+    putup_item(&mut w, 0, 2, 0, 3); // 6 of 4
+    putup_money(&mut w, 1, 300);
+    lock(&mut w, 0, true);
+    lock(&mut w, 1, true);
+    ok(&mut w, 0);
+    ok(&mut w, 1);
+    assert!(w.server.systems.economy.trade.trades().is_empty());
+    assert_untouched(&w, id, 4, (0, 500));
+}
+
+#[tokio::test]
+async fn takedown_removes_only_the_requested_item() {
+    let mut w = world();
+    let a = give(&w, &w.pa.clone(), slot_type::INVENTORY, STACK, 2, 0);
+    let b = give(&w, &w.pa.clone(), slot_type::INVENTORY, STACK, 3, 1);
+    start(&mut w);
+    putup_item(&mut w, 0, 2, 0, 2);
+    // Taking down an item that was never offered leaves the offer alone.
+    run::<CSTakedownTradeItemPacket>(&mut w, 0, &[2, 1]);
+    assert_eq!(
+        w.server.systems.economy.trade.trades()[0].owner_items,
+        vec![(a, 2)]
+    );
+    putup_item(&mut w, 0, 2, 1, 3);
+    run::<CSTakedownTradeItemPacket>(&mut w, 0, &[2, 0]);
+    assert_eq!(
+        w.server.systems.economy.trade.trades()[0].owner_items,
+        vec![(b, 3)]
+    );
+    run::<CSTakedownTradeItemPacket>(&mut w, 0, &[2, 1]);
+    assert!(w.server.systems.economy.trade.trades()[0]
+        .owner_items
+        .is_empty());
+}
+
+#[tokio::test]
+async fn unlocking_undoes_both_confirmations() {
+    let mut w = world();
+    start(&mut w);
+    lock(&mut w, 0, true);
+    lock(&mut w, 1, true);
+    ok(&mut w, 0);
+    assert!(w.server.systems.economy.trade.trades()[0].ok_owner);
+    lock(&mut w, 1, false);
+    let t = w.server.systems.economy.trade.trades()[0].clone();
+    assert!(!t.lock_owner && !t.lock_target && !t.ok_owner && !t.ok_target);
+    // Locking again does not bring Alice's old confirmation back: Bob's OK alone finishes nothing.
+    lock(&mut w, 0, true);
+    lock(&mut w, 1, true);
+    w.a.drain();
+    w.b.drain();
+    ok(&mut w, 1);
+    assert_eq!(w.server.systems.economy.trade.trades().len(), 1);
+    assert_eq!(
+        w.a.drain(),
+        vec![pair(sc::SCTradeOkUpdatePacket, false, true)]
+    );
 }

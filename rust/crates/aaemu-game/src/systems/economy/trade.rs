@@ -405,13 +405,12 @@ fn shown_putup(item: &Item, amount: i32) -> Item {
     shown
 }
 
-/// `List.Remove(item)` / `Clear()` of `RemoveItem`.
-fn take_down(list: &mut Vec<(u64, i32)>, item_id: u64) {
-    if list.len() <= 1 {
-        list.clear();
-    } else if let Some(i) = list.iter().position(|&(id, _)| id == item_id) {
-        list.remove(i);
-    }
+/// `List.Remove(item)` of `RemoveItem`: takes the first put-up of `item_id` out of the offer and
+/// returns the offered amount. The C# cleared the whole list when it held at most one entry
+/// (whatever item was taken down); only the requested item leaves the offer here.
+fn take_down(list: &mut Vec<(u64, i32)>, item_id: u64) -> Option<i32> {
+    let i = list.iter().position(|&(id, _)| id == item_id)?;
+    Some(list.remove(i).1)
 }
 
 /// `TradeManager.RemoveItem(character, slotType, slot)`.
@@ -435,20 +434,26 @@ pub fn remove_item(server: &GameServer, character: &PlayerRef, st: u8, slot: u8)
             name_of(&owner),
             owner.obj_id
         );
-        take_down(&mut t.owner_items, item.id);
+        let shown = shown_putup(
+            &item,
+            take_down(&mut t.owner_items, item.id).unwrap_or(item.count),
+        );
         owner.send(SCTradeItemTookdownPacket {
             slot_type: st,
             slot,
         });
-        target.send(SCOtherTradeItemTookdownPacket { item: item.clone() });
+        target.send(SCOtherTradeItemTookdownPacket { item: shown });
     } else {
         tracing::info!(
             "Trade Id:{trade_id} {}({}) tookdown item ({st}-{slot}).",
             name_of(&target),
             target.obj_id
         );
-        take_down(&mut t.target_items, item.id);
-        owner.send(SCOtherTradeItemTookdownPacket { item: item.clone() });
+        let shown = shown_putup(
+            &item,
+            take_down(&mut t.target_items, item.id).unwrap_or(item.count),
+        );
+        owner.send(SCOtherTradeItemTookdownPacket { item: shown });
         target.send(SCTradeItemTookdownPacket {
             slot_type: st,
             slot,
@@ -483,6 +488,10 @@ pub fn lock_trade(server: &GameServer, character: &PlayerRef, lock: bool) {
     if !lock {
         t.lock_owner = false;
         t.lock_target = false;
+        // Unlocking undoes both confirmations (like `UnlockTrade`); a stale OK would otherwise
+        // let the next lock of both sides finish a trade nobody re-confirmed.
+        t.ok_owner = false;
+        t.ok_target = false;
         tracing::info!(
             "Trade Id:{trade_id} {}({}) - {}({}) unlocked trade.",
             name_of(&owner),
@@ -632,30 +641,65 @@ pub fn finish_trade(
         );
         return;
     }
-    let Some(owner_after) = owner_money
+    // Money after the transfer, checked before anything is changed.
+    if owner_money
         .checked_sub(owner_put)
         .and_then(|money| money.checked_add(target_put))
-    else {
+        .is_none()
+    {
         send_canceled(server, &trade, owner.obj_id, 0);
         tracing::error!("Trade Id:{trade_id} money overflow, possible exploit or modified client!");
         return;
-    };
-    let Some(target_after) = target_money
+    }
+    if target_money
         .checked_sub(target_put)
         .and_then(|money| money.checked_add(owner_put))
-    else {
+        .is_none()
+    {
         send_canceled(server, &trade, target.obj_id, 0);
         tracing::error!("Trade Id:{trade_id} money overflow, possible exploit or modified client!");
         return;
-    };
+    }
+
+    // The item operation lock keeps the item containers still from the preflight until the
+    // items are moved.
+    let mut txn = ItemTxn::begin(server);
+    // Preflight every offered item before anything is changed: it must still exist in the
+    // giver's containers with (at least) the offered amount and the receiver must have room
+    // for it. A stack that shrank or moved after the lock would otherwise leave a trade where
+    // one side paid and got nothing back.
+    for (giver, receiver, items) in [
+        (owner, target, &trade.owner_items),
+        (target, owner, &trade.target_items),
+    ] {
+        if let Err(why) = preflight_items(&txn, giver, receiver, items) {
+            send_canceled(server, &trade, giver.obj_id, 0);
+            tracing::error!(
+                "Trade Id:{trade_id} aborted, {} ({}): {why}, possible exploit or modified client!",
+                name_of(giver),
+                giver.character_id
+            );
+            return;
+        }
+    }
 
     let mut has_errors = 0;
     let mut tasks_owner = Vec::new();
     let mut tasks_target = Vec::new();
-    let mut txn = ItemTxn::begin(server);
 
-    owner.data().money = owner_after;
-    target.data().money = target_after;
+    // Money moves as deltas, each under a single character guard (no absolute write from an
+    // earlier read).
+    if !apply_money_delta(owner, target_put - owner_put) {
+        send_canceled(server, &trade, owner.obj_id, 0);
+        tracing::error!("Trade Id:{trade_id} money changed during the trade, aborted!");
+        return;
+    }
+    if !apply_money_delta(target, owner_put - target_put) {
+        apply_money_delta(owner, owner_put - target_put);
+        send_canceled(server, &trade, target.obj_id, 0);
+        tracing::error!("Trade Id:{trade_id} money changed during the trade, aborted!");
+        return;
+    }
     // Handle Money from Owner
     if trade.owner_money_putup > 0 {
         tasks_owner.push(ItemTask::MoneyChange(-trade.owner_money_putup));
@@ -726,6 +770,75 @@ pub fn finish_trade(
             "{has_errors}item(s) could not be trade for tradeId: {trade_id} between {on} ({oi}) and {tn} ({ti}), possible exploit or modified client!"
         );
     }
+}
+
+/// Adds `delta` to the character's money under one guard; `false` (nothing changed) when the
+/// result would be negative or overflow.
+fn apply_money_delta(player: &PlayerRef, delta: i64) -> bool {
+    let mut c = player.data();
+    match c.money.checked_add(delta) {
+        Some(money) if money >= 0 => {
+            c.money = money;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Checks that all of `items` (item id, offered amount) can be moved from `giver` into
+/// `receiver`'s bag: every item is still held by the giver with at least the offered amount
+/// (several put-ups of one item add up) and the receiver's bag accepts each put-up in a free slot.
+fn preflight_items(
+    txn: &ItemTxn<'_>,
+    giver: &PlayerRef,
+    receiver: &PlayerRef,
+    items: &[(u64, i32)],
+) -> Result<(), String> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let giver_inv = Inv::of(giver);
+    let mut totals: HashMap<u64, i64> = HashMap::new();
+    let mut offered = Vec::with_capacity(items.len());
+    for &(item_id, amount) in items {
+        if amount <= 0 {
+            return Err(format!("item {item_id} is offered with amount {amount}"));
+        }
+        let item = giver_inv
+            .holder_of_any(item_id)
+            .and_then(|c| {
+                c.lock()
+                    .expect("container poisoned")
+                    .get_item_by_id(item_id)
+                    .cloned()
+            })
+            .ok_or_else(|| format!("item {item_id} is no longer in the owner's containers"))?;
+        let total = totals.entry(item_id).or_insert(0);
+        *total += i64::from(amount);
+        if *total > i64::from(item.count) {
+            return Err(format!(
+                "item {item_id} has {} left but {total} are offered",
+                item.count
+            ));
+        }
+        offered.push(shown_putup(&item, amount));
+    }
+    let receiver_inv = Inv::of(receiver);
+    let bag = receiver_inv.bag();
+    let bag = bag.lock().expect("container poisoned");
+    if i64::from(bag.free_slot_count()) < offered.len() as i64 {
+        return Err("the receiver's bag has too few free slots".to_string());
+    }
+    // Put-ups are placed with preferred slot -1 and never merge: each takes a free slot.
+    for item in &offered {
+        if bag.place(item, -1, txn.data()).is_none() {
+            return Err(format!(
+                "the receiver's bag does not accept item {}",
+                item.id
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Moves `amount` units of `item_id` from `from` into `to`'s bag, splitting a larger stack
