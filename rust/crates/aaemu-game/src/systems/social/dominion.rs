@@ -268,7 +268,8 @@ pub fn snapshot(server: &GameServer, state: &DominionState, now: i64) -> Option<
             radius_siege: i16::try_from(setting.radius_siege).ok()?,
         },
         siege_timers: timers,
-        non_pvp_start: epoch,
+        non_pvp_start: DateTime::from_timestamp(state.non_pvp_start_at, 0)?,
+        non_pvp_duration: state.non_pvp_duration_min,
         ..Default::default()
     })
 }
@@ -353,7 +354,11 @@ pub fn send_snapshots(server: &GameServer, player: &PlayerRef) {
     }
 }
 
-fn is_expedition_leader(server: &GameServer, player: &PlayerRef, expedition: u32) -> bool {
+pub(crate) fn is_expedition_leader(
+    server: &GameServer,
+    player: &PlayerRef,
+    expedition: u32,
+) -> bool {
     expedition != 0
         && player.data().unit.expedition_id == expedition
         && server
@@ -1196,6 +1201,40 @@ mod authority_tests {
         );
         state.tower.instance_id = 99;
         assert!(snapshot(&f.server, &state, 200).is_none());
+    }
+
+    #[tokio::test]
+    async fn peace_starts_the_authored_minutes_and_a_second_cast_is_refused() {
+        let mut f = fixture();
+        owned(&f);
+        let object = SkillObject::None;
+        let args = args(&f, &object);
+        let before = Utc::now().timestamp();
+        crate::systems::housing::dominion::peace::start_effect(&f.server, &args, 120);
+        let state = f.server.systems.housing.dominions.get(ZONE).unwrap();
+        assert_eq!(state.non_pvp_duration_min, 120);
+        assert!((before..=before + 5).contains(&state.non_pvp_start_at));
+        let data = snapshot(&f.server, &state, state.non_pvp_start_at + 1).unwrap();
+        assert_eq!(data.non_pvp_start.timestamp(), state.non_pvp_start_at);
+        assert_eq!(data.non_pvp_duration, 120);
+        assert!(f
+            .client
+            .drain_ops()
+            .contains(&crate::opcodes::sc::SCDominionDataPacket));
+
+        crate::systems::housing::dominion::peace::start_effect(&f.server, &args, 120);
+        assert_eq!(f.server.systems.housing.dominions.get(ZONE).unwrap(), state);
+        let errors: Vec<i16> = f
+            .client
+            .drain()
+            .into_iter()
+            .filter(|(op, _)| *op == crate::opcodes::sc::SCErrorMsgPacket)
+            .map(|(_, body)| i16::from_le_bytes([body[0], body[1]]))
+            .collect();
+        assert_eq!(
+            errors,
+            vec![crate::systems::economy::error_message::ALREADY_IN_NON_PVP_DURATION]
+        );
     }
 
     #[tokio::test]

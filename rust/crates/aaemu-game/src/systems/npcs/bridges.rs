@@ -211,6 +211,32 @@ impl NpcSkillHooks for NpcSkills {
         }
     }
 
+    /// `Interaction` (10): the 1.2 `special_effects` rows carry a `WorldInteractionType`
+    /// in `value1` (row 11030: 19 `Use`, 36: 10 `DigTerrain`, 215: 29 `SummonBeanstalk`)
+    /// and an optional doodad argument in `value2` (row 215: 149). The authored interaction
+    /// classes are the same ones `InteractionEffect` runs, so this is its special-effect twin.
+    fn apply_special_effect(
+        &self,
+        server: &GameServer,
+        special_type: i32,
+        args: &EffectArgs<'_>,
+        values: [i32; 4],
+    ) -> bool {
+        match special_type {
+            10 => {
+                interaction_effect(server, values[0], values[1].max(0) as u32, args);
+                true
+            }
+            // `DestroyAndSpawnSlave` (72): row 8224 is the only row, on skill 19165 ("destroy
+            // the isolated ship and make a new one appear", slave template 125's mount skill).
+            72 => {
+                crate::systems::vehicles::slaves::destroy_and_spawn(server, args);
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn apply_effect(
         &self,
         server: &GameServer,

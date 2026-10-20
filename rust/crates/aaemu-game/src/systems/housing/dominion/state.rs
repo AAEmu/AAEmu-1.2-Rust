@@ -131,6 +131,10 @@ pub struct DominionState {
     pub last_paid_at: i64,
     pub last_tax_rate_changed_at: i64,
     pub last_national_tax_rate_changed_at: i64,
+    /// Start of the current peace declaration (Unix seconds; 0 = none).
+    pub non_pvp_start_at: i64,
+    /// Authored peace duration in minutes (special effect 110 `value1`).
+    pub non_pvp_duration_min: u16,
     pub treasury: Treasury,
     /// Only authoritative tower death during an active siege enables engraving.
     pub tower_destroyed: bool,
@@ -155,6 +159,8 @@ impl DominionState {
             last_paid_at: 0,
             last_tax_rate_changed_at: 0,
             last_national_tax_rate_changed_at: 0,
+            non_pvp_start_at: 0,
+            non_pvp_duration_min: 0,
             treasury: Treasury::default(),
             tower_destroyed: false,
             tower_hp: None,
@@ -179,6 +185,7 @@ impl DominionState {
             self.last_paid_at,
             self.last_tax_rate_changed_at,
             self.last_national_tax_rate_changed_at,
+            self.non_pvp_start_at,
         ]
         .iter()
         .any(|t| *t < 0)
@@ -283,6 +290,8 @@ pub enum DominionError {
     InvalidTreasury,
     #[error("territory tax rate cannot change before its one-hour cooldown expires")]
     TaxRateChangeLater,
+    #[error("the territory is already in its non-PvP peace duration")]
+    NonPvpActive,
     #[error("property tax quote no longer matches the territory owner or rate")]
     StaleTaxQuote,
     #[error("timestamp or generation overflow")]
@@ -1133,6 +1142,42 @@ impl DominionManager {
         let revision = next_revision(&inner)?;
         state.tax_rate = tax_rate;
         state.last_tax_rate_changed_at = now_seconds;
+        replace(&mut inner, state.clone(), revision);
+        Ok(state)
+    }
+
+    /// Starts the territory's non-PvP peace window. `duration_min` is the authored special
+    /// effect `value1` (skill 23992: 120 minutes). The skill system owns the 4-hour reuse
+    /// cooldown and the reagent consumption.
+    pub fn start_non_pvp(
+        &self,
+        zone_group_id: u32,
+        owner_expedition_id: u32,
+        duration_min: u16,
+        now_seconds: i64,
+    ) -> Result<DominionState, DominionError> {
+        if duration_min == 0 || now_seconds < 0 {
+            return Err(DominionError::InvalidSchedule);
+        }
+        let mut inner = self.lock();
+        let mut state = inner
+            .states
+            .get(&zone_group_id)
+            .ok_or(DominionError::Missing)?
+            .state
+            .clone();
+        if owner_expedition_id == 0 || state.owner_expedition_id != owner_expedition_id {
+            return Err(DominionError::WrongOwner);
+        }
+        let end = state
+            .non_pvp_start_at
+            .saturating_add(i64::from(state.non_pvp_duration_min).saturating_mul(60));
+        if state.non_pvp_start_at > 0 && now_seconds < end {
+            return Err(DominionError::NonPvpActive);
+        }
+        let revision = next_revision(&inner)?;
+        state.non_pvp_start_at = now_seconds;
+        state.non_pvp_duration_min = duration_min;
         replace(&mut inner, state.clone(), revision);
         Ok(state)
     }

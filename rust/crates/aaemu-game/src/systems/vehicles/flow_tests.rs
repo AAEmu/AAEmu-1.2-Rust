@@ -2273,6 +2273,98 @@ async fn spawn_effect_creates_an_ownerless_test_slave() {
 }
 
 #[tokio::test]
+async fn destroy_and_spawn_slave_replaces_a_spawner_slave_and_destroys_an_orphan() {
+    use crate::systems::skills::geometry::Target;
+    use crate::systems::skills::types::SkillCastTarget;
+
+    let server = server_with(slave_data());
+    let mut a = TestClient::new(&server, 1, 1);
+    let pa = spawn_player(&server, &a, test_character(1, "P1", 100.0, 100.0), PA);
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    a.drain();
+
+    // A spawner-owned slave at its authored transform.
+    let spawner = Arc::new(slaves::SlaveSpawner::new(
+        0,
+        SimpleSpawnerDef {
+            base: SpawnerBase {
+                id: 55,
+                unit_id: SLAVE_TEMPLATE,
+                position: WorldSpawnPosition {
+                    world_id: 0,
+                    zone_id: TEST_ZONE,
+                    x: 120.0,
+                    y: 130.0,
+                    z: 100.0,
+                    ..WorldSpawnPosition::default()
+                },
+                ..SpawnerBase::default()
+            },
+            count: 1,
+        },
+    ));
+    server
+        .systems
+        .vehicles
+        .slave_spawners
+        .insert(spawner.clone());
+    let old_obj_id = spawner.spawn(&server).expect("spawner slave");
+    let old = world.slave(old_obj_id).expect("old slave");
+    let old_tl = old.data().unit.tl_id;
+    old.data().unit.hp = 7;
+    let me = WorldObject::from(&pa);
+    let so = Default::default();
+    let args = effect_args(
+        &me,
+        Target::Obj(WorldObject::from(&old)),
+        SkillCastTarget::Unit(old_obj_id),
+        &so,
+    );
+    slaves::destroy_and_spawn(&server, &args);
+
+    let slaves_after = slaves::all_slaves(&world);
+    assert_eq!(slaves_after.len(), 1);
+    let new = &slaves_after[0];
+    {
+        let d = new.data();
+        assert_eq!(d.spawner_id, 55);
+        assert_ne!(d.unit.tl_id, old_tl, "a new spawn, not the destroyed one");
+        assert_ne!(d.unit.hp, 7);
+        assert_eq!(
+            (d.unit.transform.x, d.unit.transform.y, d.unit.transform.z),
+            (120.0, 130.0, 100.0)
+        );
+    }
+
+    // No spawner: the slave is destroyed and nothing replaces it.
+    let mut transform = crate::models::transform::Transform::default();
+    transform.set_position(150.0, 150.0, 100.0, 0.0, 0.0, 0.0);
+    let orphan = slaves::create_core(
+        &server,
+        &world,
+        None,
+        None,
+        SLAVE_TEMPLATE,
+        None,
+        true,
+        Some(transform),
+        None,
+    )
+    .expect("ownerless slave");
+    let orphan_id = orphan.obj_id;
+    let args = effect_args(
+        &me,
+        Target::Obj(WorldObject::from(&orphan)),
+        SkillCastTarget::Unit(orphan_id),
+        &so,
+    );
+    slaves::destroy_and_spawn(&server, &args);
+    assert!(world.slave(orphan_id).is_none());
+    assert_eq!(slaves::all_slaves(&world).len(), 1);
+}
+
+#[tokio::test]
 async fn kill_exp_death_despawn_and_force_dismount() {
     let server = server_with(data());
     let mut a = TestClient::new(&server, 1, 1);
