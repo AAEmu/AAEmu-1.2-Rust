@@ -1596,7 +1596,8 @@ and in NPC wandering / buff remaining times.
   loose item, so its row stayed and a mail attachment merged into a bag stack was saved as an
   orphan `slot_type Mail` row; the same fix as the fork's C# `47a3a9e77`). The mail acquired /
   consumed event uses the slot type captured before the move (the C# read the overwritten
-  `item.SlotType`, so moving an item into a mail container raised no quest event).
+  `item.SlotType`, so moving an item into a mail container raised no quest event). A new item created straight into
+  a mail container (no source container) raises no consumed event.
 * systems::economy: `ExpandExpert` adds the vocation cost; craft / backpack / weapon booleans read as numbers are
   false for `'t'` texts; `Specialty.VendorExist` reads the `id` column.
 * systems::economy: `ItemProc` `ignoreRoll` never procs; `HDps` uses the magic DPS grade value;

@@ -499,6 +499,26 @@ fn moving_an_item_into_mail_raises_the_consumed_event() {
     assert!(!fx.0.iter().any(|e| matches!(e, ItemFx::Acquired { .. })));
 }
 
+#[test]
+fn creating_a_new_item_in_mail_raises_no_consumed_event() {
+    let game = test_data();
+    let data = &game.items;
+    let mut mail = ItemContainer::new(ContainerKind::Item, 1, slot_type::MAIL, 101);
+    mail.set_container_size(10);
+    let item = Item::create(3000, data.template(STACK).unwrap(), 5, 0, 1, data, 0);
+    let mut fx = ItemFxList::default();
+    // A new item (achievement reward, schedule item, housing mail) was never in a bag, so
+    // nothing is consumed: an ItemGather objective must not go negative.
+    assert!(mail
+        .add_item(task_type::MAIL, item, -1, data, &mut fx)
+        .is_ok());
+    assert_eq!(mail.items.len(), 1);
+    assert!(!fx
+        .0
+        .iter()
+        .any(|e| matches!(e, ItemFx::Consumed { .. } | ItemFx::Acquired { .. })));
+}
+
 #[tokio::test]
 async fn cross_owner_moves_assign_the_holding_container_owner() {
     let w = world();

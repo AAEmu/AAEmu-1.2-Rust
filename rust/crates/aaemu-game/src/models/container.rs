@@ -626,7 +626,13 @@ impl ItemContainer {
                 template_id,
                 count: final_count,
             });
-        } else if source_slot_type != slot_type::MAIL && self.slot_type == slot_type::MAIL {
+        } else if src_slot_type.is_some()
+            && source_slot_type != slot_type::MAIL
+            && self.slot_type == slot_type::MAIL
+        {
+            // Only an item that left a container is consumed from its owner's point of view; a
+            // new item created straight into a mail container (achievement / schedule / housing
+            // mail) was never counted for anybody.
             fx.push(ItemFx::Consumed {
                 owner: self.owner_id,
                 template_id,
