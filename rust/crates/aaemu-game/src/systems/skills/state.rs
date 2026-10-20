@@ -96,13 +96,11 @@ impl SkillRun {
         })
     }
 
-    /// `Skill(template, owner)` level: `(abLevel - AbilityLevel) / LevelStep + 1`.
+    /// `Skill(template, owner)` level: `(abLevel - AbilityLevel) / LevelStep + 1` as the C#
+    /// byte (see `data::skills::skill_level`; NPC skill levels are unchanged, only the stored
+    /// character skills are saturated).
     pub fn level_for(template: &SkillTemplate, ab_level: i32) -> u8 {
-        if template.level_step > 0 {
-            ((ab_level - template.ability_level) / template.level_step + 1) as u8
-        } else {
-            1
-        }
+        crate::data::skills::skill_level(template.ability_level, template.level_step, ab_level)
     }
 
     pub fn state(&self) -> MutexGuard<'_, SkillRunState> {

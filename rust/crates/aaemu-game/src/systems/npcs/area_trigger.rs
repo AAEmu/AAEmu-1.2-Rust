@@ -24,6 +24,7 @@ use crate::data::world_templates::REGION_SIZE;
 use crate::net::registry::PacketRegistry;
 use crate::server::GameServer;
 use crate::systems::DataLoadCtx;
+use crate::utils::math::point_in_cuboid;
 use crate::world::{DoodadRef, WorldInstance, WorldObject};
 
 /// `SkillTargetRelation`.
@@ -62,51 +63,12 @@ pub struct AreaShape {
     pub value3: f32,
 }
 
-/// `MathUtil.GetCuboidVertices(length, width, x, y, rotationZ)` (float).
-pub fn get_cuboid_vertices(
-    length: f32,
-    width: f32,
-    x: f32,
-    y: f32,
-    rotation_z: f32,
-) -> [(f32, f32); 4] {
-    let rad_front = rotation_z - std::f32::consts::PI / 2.0;
-    let rad_right = rotation_z;
-    let (cos_front, sin_front) = (rad_front.cos(), rad_front.sin());
-    let (cos_right, sin_right) = (rad_right.cos(), rad_right.sin());
-    let p1 = (width * cos_front + x, width * sin_front + y);
-    let p1 = (length * cos_right + p1.0, length * sin_right + p1.1);
-    let p2 = (width * cos_front + x, width * sin_front + y);
-    let p2 = (-length * cos_right + p2.0, -length * sin_right + p2.1);
-    let p3 = (-width * cos_front + x, -width * sin_front + y);
-    let p3 = (-length * cos_right + p3.0, -length * sin_right + p3.1);
-    let p4 = (-width * cos_front + x, -width * sin_front + y);
-    let p4 = (length * cos_right + p4.0, length * sin_right + p4.1);
-    [p1, p2, p3, p4]
-}
-
-fn sign(p1: (f32, f32), p2: (f32, f32), p3: (f32, f32)) -> f32 {
-    (p1.0 - p3.0) * (p2.1 - p3.1) - (p2.0 - p3.0) * (p1.1 - p3.1)
-}
-
-/// `MathUtil.PointInTriangle`.
-pub fn point_in_triangle(
-    point: (f32, f32),
-    v1: (f32, f32),
-    v2: (f32, f32),
-    v3: (f32, f32),
-) -> bool {
-    let b1 = sign(point, v1, v2) < 0.0;
-    let b2 = sign(point, v2, v3) < 0.0;
-    let b3 = sign(point, v3, v1) < 0.0;
-    b1 == b2 && b2 == b3
-}
-
 impl AreaShape {
     /// `AreaShape.ComputeCuboid(origin, toCheck)` with the origin's world position / yaw and
-    /// each candidate's world position. Note (C#): the rectangle is tested as the triangles
-    /// (v0,v1,v2) and (v1,v2,v3), which overlap instead of splitting it on a diagonal, so a
-    /// corner region next to v3 / v0 is never inside (mirrored).
+    /// each candidate's world position. Deviation: the C# tested the triangles (v0,v1,v2) and
+    /// (v1,v2,v3), which overlap and miss the wedge at the v3-v0 edge (and points exactly on a
+    /// diagonal); the whole rectangle is covered here, through the same
+    /// [`crate::utils::math::point_in_cuboid`] as the skill AoE.
     pub fn compute_cuboid<T: Clone>(
         &self,
         origin: (f32, f32, f32),
@@ -122,12 +84,16 @@ impl AreaShape {
         if list.is_empty() {
             return list;
         }
-        let v = get_cuboid_vertices(self.value1, self.value2, origin.0, origin.1, origin_rot_z);
         list.into_iter()
             .filter(|(_, p)| {
-                let tri1 = point_in_triangle((p[0], p[1]), v[0], v[1], v[2]);
-                let tri2 = point_in_triangle((p[0], p[1]), v[1], v[2], v[3]);
-                tri1 || tri2
+                point_in_cuboid(
+                    (p[0], p[1]),
+                    self.value1,
+                    self.value2,
+                    origin.0,
+                    origin.1,
+                    origin_rot_z,
+                )
             })
             .collect()
     }
@@ -651,6 +617,7 @@ mod tests {
     use crate::models::doodad::Doodad;
     use crate::models::npc::Npc;
     use crate::test_support::test_server;
+    use crate::utils::math::get_cuboid_vertices;
     use crate::world::object::Entity;
     use crate::world::NpcRef;
 
@@ -683,9 +650,10 @@ mod tests {
             .into_iter()
             .map(|(i, _)| i)
             .collect();
-        // C# bug: the triangles (v0,v1,v2) and (v1,v2,v3) share the side v1-v2 instead of a
-        // diagonal, so the corner around v3 / v0 (point 1) is not covered.
-        assert_eq!(inside, vec![4, 5]);
+        // The whole 4 x 2 rectangle is covered (the C# triangles missed the corner around
+        // v3 / v0, i.e. point 1): points 1, 4 and 5 are inside; 2 is past the length, 3 above
+        // the z range.
+        assert_eq!(inside, vec![1, 4, 5]);
     }
 
     fn spawn_npc(server: &GameServer, world: &WorldInstance, x: f32, y: f32) -> NpcRef {

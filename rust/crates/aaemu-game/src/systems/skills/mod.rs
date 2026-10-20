@@ -66,6 +66,8 @@ mod sc_unit_impulse_packet_tests;
 mod skill_tests;
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(test)]
+mod tl_id_flow_tests;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};

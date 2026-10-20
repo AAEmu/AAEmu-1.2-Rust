@@ -702,6 +702,10 @@ fn synthetic_job(seed: u64, nq: [usize; 4]) -> Job {
 }
 
 #[test]
+#[cfg_attr(
+    not(windows),
+    ignore = "bit-exact against the Windows DLL; glibc's libm rounds the last bit differently"
+)]
 fn synthetic_meshes_match_the_dll() {
     let job = synthetic_job(0x51F1_C0DE_0001, [60, 50, 25, 220]);
     let path = job.write("synth");

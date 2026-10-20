@@ -240,11 +240,7 @@ impl CharacterSkills {
         let Some(t) = data.skill(skill_id) else {
             return;
         };
-        let level = if t.level_step > 0 {
-            ((ab_level - t.ability_level) / t.level_step + 1) as u8
-        } else {
-            1
-        };
+        let level = t.level_for(ab_level);
         if self.skills.iter().any(|s| s.id == skill_id) {
             // Dictionary.Add throws on duplicates.
             tracing::error!("AddSkill: skill {skill_id} already learned");
@@ -583,6 +579,47 @@ mod tests {
         let mut back = [ActionSlot::default(); MAX_ACTION_SLOTS];
         read_action_slots(&mut back, s.as_bytes());
         assert_eq!(back, slots);
+    }
+
+    #[test]
+    fn add_skill_template_saturates_a_level_below_the_ability_requirement() {
+        // Skill 10385 (the 1.2 data's retired rows): ability_level 99, level_step 3. The level
+        // cap is 55, so the C# formula yields (55 - 99) / 3 + 1 = -13; `as u8` wrote 243, which
+        // the signed TINYINT `skills.level` rejects (1264) and every character save failed.
+        let mut data = SkillData::default();
+        data.add_skill(crate::data::skills::SkillTemplate {
+            id: 10385,
+            ability_id: 1,
+            ability_level: 99,
+            level_step: 3,
+            skill_points: 1,
+            ..Default::default()
+        });
+        let mut skills = CharacterSkills::default();
+        skills.add_skill_template(&data, 10385, 55);
+        assert_eq!(
+            skills.skills,
+            [Skill {
+                id: 10385,
+                level: 1
+            }]
+        );
+        assert!(skills.skills[0].level <= i8::MAX as u8);
+    }
+
+    #[test]
+    fn add_skill_template_keeps_a_reached_level() {
+        let mut data = SkillData::default();
+        data.add_skill(crate::data::skills::SkillTemplate {
+            id: 5,
+            ability_id: 1,
+            ability_level: 10,
+            level_step: 5,
+            ..Default::default()
+        });
+        let mut skills = CharacterSkills::default();
+        skills.add_skill_template(&data, 5, 55);
+        assert_eq!(skills.skills, [Skill { id: 5, level: 10 }]);
     }
 
     #[test]

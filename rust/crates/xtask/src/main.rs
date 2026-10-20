@@ -526,7 +526,9 @@ fn ci() -> Result<()> {
 
 /// The S->C packet coverage ratchet (`rust/tools/opcode_coverage/sc_usage.py --check`): the lists
 /// of opcodes without a Rust type and of packets never sent may only shrink. Needs only python and
-/// the checked-in sources; skipped with a notice when no python interpreter is installed.
+/// the checked-in sources. A missing python interpreter is an error (the check must not pass
+/// silently); set `XTASK_SKIP_RATCHET=1` to skip it explicitly with a warning (refused when `CI`
+/// is set).
 fn sc_ratchet() -> Result<()> {
     let script = workspace_dir().join("tools/opcode_coverage/sc_usage.py");
     for python in ["python3", "python"] {
@@ -534,18 +536,46 @@ fn sc_ratchet() -> Result<()> {
         cmd.arg(&script).arg("--check");
         match cmd.status() {
             Ok(status) if status.success() => return Ok(()),
+            // Windows' App Execution Alias stub for a missing python exits with 9009.
+            Ok(status) if cfg!(windows) && status.code() == Some(9009) => continue,
             Ok(status) => bail!("{cmd:?} failed ({status})"),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => return Err(e).with_context(|| format!("failed to start {cmd:?}")),
         }
     }
-    eprintln!("warning: python not found; skipping the S->C coverage ratchet");
-    Ok(())
+    skip_missing_python(
+        std::env::var_os("XTASK_SKIP_RATCHET").is_some_and(|v| v == "1"),
+        std::env::var_os("CI").is_some(),
+    )
+}
+
+/// No python interpreter was found: fail, unless the skip was requested explicitly and this is
+/// not a CI run.
+fn skip_missing_python(skip_requested: bool, in_ci: bool) -> Result<()> {
+    if skip_requested && !in_ci {
+        eprintln!(
+            "warning: python not found; skipping the S->C coverage ratchet (XTASK_SKIP_RATCHET=1)"
+        );
+        return Ok(());
+    }
+    bail!(concat!(
+        "python (python3 or python) not found: the S->C coverage ratchet ",
+        "(tools/opcode_coverage/sc_usage.py --check) cannot run. Install python, or set ",
+        "XTASK_SKIP_RATCHET=1 to skip it explicitly (not allowed when CI is set)"
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_python_fails_unless_skipped_explicitly_outside_ci() {
+        assert!(skip_missing_python(false, false).is_err());
+        assert!(skip_missing_python(false, true).is_err());
+        assert!(skip_missing_python(true, true).is_err());
+        assert!(skip_missing_python(true, false).is_ok());
+    }
 
     #[test]
     fn package_ids() {
