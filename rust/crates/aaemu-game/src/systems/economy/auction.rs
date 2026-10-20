@@ -420,8 +420,9 @@ fn report_auction(server: &GameServer, character_id: u32, kind_id: u32) {
 /// `server.systems.economy.auction.mail`. Called at the C# `Send()` point, with no container /
 /// character lock held and outside any `ItemTxn` (the implementation may start its own), but
 /// while the auction operation lock is held: it must not call back into [`AuctionManager`].
-/// The return value is `Send()`'s (ignored by the auction code, as in C#). Without a hook the
-/// mail is dropped with a warning.
+/// The return value is `Send()`'s: a `false` keeps the lot (or the refund) and the settlement is
+/// retried on the next auction tick (deviation from the C#, which ignored it). Without a hook
+/// the mail is not delivered.
 pub trait AuctionMailHooks: Send + Sync {
     fn send_auction_mail(&self, server: &GameServer, mail: AuctionMail) -> bool;
 }
@@ -436,6 +437,8 @@ pub struct AuctionManager {
     deleted: Mutex<Vec<u64>>,
     deletion_versions: Mutex<BTreeMap<u64, Arc<()>>>,
     pending_save: Mutex<Option<AuctionSaveBatch>>,
+    /// Result mails that could not be delivered; retried by `update_auction_house`.
+    pending: Mutex<Vec<PendingSettlement>>,
     /// `MailForAuction` delivery (mail port).
     pub mail: HookSlot<dyn AuctionMailHooks>,
     /// Auction operation lock (taken before any `ItemTxn`).
@@ -446,6 +449,24 @@ pub struct AuctionManager {
 pub(crate) struct AuctionSaveBatch {
     deleted: Vec<(u64, Arc<()>)>,
     dirty: Vec<AuctionLot>,
+}
+
+/// A settlement whose mails are not all out yet. The lot stays in `lots` until every mail of a
+/// lot-removing settlement (`sold` / `fail` / `cancel`) has been delivered; refund-only entries
+/// (`remove_lot == false`) let the lot continue while the outbid money is retried.
+#[derive(Debug, Clone)]
+struct PendingSettlement {
+    lot: AuctionLot,
+    remove_lot: bool,
+    /// Buyer of a completed sale (the achievement credit runs once, when the mails are out).
+    buyer_id: Option<u32>,
+    mails: Vec<PendingAuctionMail>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingAuctionMail {
+    mail: AuctionMail,
+    sent: bool,
 }
 
 /// `lot.DirectMoney * .01 * ((int)duration + 1)`, capped at `MaxListingFee`.
@@ -549,14 +570,112 @@ impl AuctionManager {
         lots.remove(&id);
     }
 
-    /// `mail.Send()` (never inside an `ItemTxn`).
-    fn send_mail(&self, server: &GameServer, mail: AuctionMail) {
+    /// `mail.Send()` (never inside an `ItemTxn`). `false` = the mail was not stored.
+    fn deliver_mail(&self, server: &GameServer, mail: &AuctionMail) -> bool {
         match self.mail.get() {
-            Some(h) => {
-                h.send_auction_mail(server, mail);
+            Some(h) => h.send_auction_mail(server, mail.clone()),
+            None => {
+                tracing::warn!("Auction mail not delivered (no mail hook): {mail:?}");
+                false
             }
-            None => tracing::warn!("Auction mail not delivered (no mail hook): {mail:?}"),
         }
+    }
+
+    /// Whether `lot_id` has a lot-removing settlement whose mails are not all out yet.
+    fn is_settling(&self, lot_id: u64) -> bool {
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|p| p.remove_lot && p.lot.id == lot_id)
+    }
+
+    /// Sends the mails of `settlement` that are not out yet; `true` when all were delivered.
+    fn deliver_settlement(&self, server: &GameServer, settlement: &mut PendingSettlement) -> bool {
+        for pending in settlement.mails.iter_mut().filter(|m| !m.sent) {
+            if !self.deliver_mail(server, &pending.mail) {
+                return false;
+            }
+            pending.sent = true;
+        }
+        true
+    }
+
+    /// Finishes a settlement whose mails are out: the lot can be removed (once).
+    fn complete_settlement(&self, server: &GameServer, settlement: &PendingSettlement) {
+        if !settlement.remove_lot {
+            return;
+        }
+        if let Some(buyer_id) = settlement.buyer_id {
+            self.report_sale(server, &settlement.lot, buyer_id);
+        }
+        self.remove_auction_lot(server, settlement.lot.id);
+    }
+
+    /// `AUCTION_SOLD` / `AUCTION_BUY`: only a party that is online is credited.
+    fn report_sale(&self, server: &GameServer, lot: &AuctionLot, buyer_id: u32) {
+        if !lot.client_name.is_empty() {
+            report_auction(server, lot.client_id, char_record_kind::AUCTION_SOLD);
+        }
+        report_auction(server, buyer_id, char_record_kind::AUCTION_BUY);
+    }
+
+    /// Sends the settlement now; when a mail fails the lot (or refund) stays pending for the
+    /// next `update_auction_house`. Returns whether it completed.
+    fn queue_settlement(&self, server: &GameServer, mut settlement: PendingSettlement) -> bool {
+        let lot_id = settlement.lot.id;
+        if self.deliver_settlement(server, &mut settlement) {
+            self.complete_settlement(server, &settlement);
+            return true;
+        }
+        tracing::warn!(
+            "Auction lot {lot_id}: settlement mail not delivered, keeping it and retrying"
+        );
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(settlement);
+        false
+    }
+
+    /// Delivers an outbid refund; keeps it for the next tick when the mail cannot be sent.
+    /// The lot itself keeps running with its new bidder.
+    fn queue_refund(&self, server: &GameServer, lot: &AuctionLot, mail: AuctionMail) {
+        let duplicate = self
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|p| p.mails.iter().any(|m| !m.sent && m.mail == mail));
+        if duplicate {
+            return;
+        }
+        self.queue_settlement(
+            server,
+            PendingSettlement {
+                lot: lot.clone(),
+                remove_lot: false,
+                buyer_id: None,
+                mails: vec![PendingAuctionMail { mail, sent: false }],
+            },
+        );
+    }
+
+    /// Retries the settlements whose mails failed (`AuctionHouseTask`).
+    fn retry_pending_settlements(&self, server: &GameServer) {
+        let queued = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
+        let mut failed = Vec::new();
+        for mut settlement in queued {
+            if self.deliver_settlement(server, &mut settlement) {
+                self.complete_settlement(server, &settlement);
+            } else {
+                failed.push(settlement);
+            }
+        }
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(failed);
     }
 
     /// Serialises the auction operations (outermost lock; mails are sent while it is held).
@@ -629,52 +748,55 @@ impl AuctionManager {
         buyer: &str,
         sold_amount: i32,
     ) {
-        if !self.lots().contains_key(&lot.id) {
+        if !self.lots().contains_key(&lot.id) || self.is_settling(lot.id) {
             return;
         }
-        if let Some(new_item) = lot
+        let Some(new_item) = lot
             .item
             .as_ref()
             .and_then(|i| server.items.item_by_id(i.id))
-        {
-            let money_after_fee = f64::from(sold_amount) * 0.9;
-            let recalculated_fee = listing_fee(lot.direct_money, lot.duration);
-            if !lot.client_name.is_empty() {
-                self.send_mail(
-                    server,
-                    AuctionMail::SaleSeller {
-                        item: new_item.clone(),
-                        seller_id: lot.client_id,
-                        buyout_price: sold_amount,
-                        listing_fee: recalculated_fee as i32,
-                        seller_share: money_after_fee as i32,
-                        trade_tax_fee: (f64::from(sold_amount) - money_after_fee) as i32,
-                    },
-                );
-            }
-            let buyer_id = server.names.get_character_id(buyer);
-            self.send_mail(
-                server,
-                AuctionMail::SaleBuyer {
-                    item: new_item,
-                    seller_id: lot.client_id,
-                    buyout_price: sold_amount,
-                    listing_fee: recalculated_fee as i32,
-                    buyer_id,
-                },
-            );
-            // AUCTION_SOLD / AUCTION_BUY: only a party that is online is credited.
-            if !lot.client_name.is_empty() {
-                report_auction(server, lot.client_id, char_record_kind::AUCTION_SOLD);
-            }
-            report_auction(server, buyer_id, char_record_kind::AUCTION_BUY);
+        else {
+            self.remove_auction_lot(server, lot.id);
+            return;
+        };
+        let money_after_fee = f64::from(sold_amount) * 0.9;
+        let recalculated_fee = listing_fee(lot.direct_money, lot.duration);
+        let mut mails = Vec::new();
+        if !lot.client_name.is_empty() {
+            mails.push(AuctionMail::SaleSeller {
+                item: new_item.clone(),
+                seller_id: lot.client_id,
+                buyout_price: sold_amount,
+                listing_fee: recalculated_fee as i32,
+                seller_share: money_after_fee as i32,
+                trade_tax_fee: (f64::from(sold_amount) - money_after_fee) as i32,
+            });
         }
-        self.remove_auction_lot(server, lot.id);
+        let buyer_id = server.names.get_character_id(buyer);
+        mails.push(AuctionMail::SaleBuyer {
+            item: new_item,
+            seller_id: lot.client_id,
+            buyout_price: sold_amount,
+            listing_fee: recalculated_fee as i32,
+            buyer_id,
+        });
+        self.queue_settlement(
+            server,
+            PendingSettlement {
+                lot: lot.clone(),
+                remove_lot: true,
+                buyer_id: Some(buyer_id),
+                mails: mails
+                    .into_iter()
+                    .map(|mail| PendingAuctionMail { mail, sent: false })
+                    .collect(),
+            },
+        );
     }
 
     /// `RemoveAuctionLotFail(itemToRemove)`.
     fn remove_auction_lot_fail(&self, server: &GameServer, lot: &AuctionLot) {
-        if !self.lots().contains_key(&lot.id) {
+        if !self.lots().contains_key(&lot.id) || self.is_settling(lot.id) {
             return;
         }
         if !lot.bidder_name.is_empty() {
@@ -683,25 +805,36 @@ impl AuctionManager {
             return;
         }
         // Item did not sell by end of the timer.
-        if let Some(new_item) = lot
+        let Some(new_item) = lot
             .item
             .as_ref()
             .and_then(|i| server.items.item_by_id(i.id))
-        {
-            let recalculated_fee = listing_fee(lot.direct_money, lot.duration);
-            if !lot.client_name.is_empty() {
-                self.send_mail(
-                    server,
-                    AuctionMail::Fail {
+        else {
+            self.remove_auction_lot(server, lot.id);
+            return;
+        };
+        if lot.client_name.is_empty() {
+            self.remove_auction_lot(server, lot.id);
+            return;
+        }
+        let recalculated_fee = listing_fee(lot.direct_money, lot.duration);
+        self.queue_settlement(
+            server,
+            PendingSettlement {
+                lot: lot.clone(),
+                remove_lot: true,
+                buyer_id: None,
+                mails: vec![PendingAuctionMail {
+                    mail: AuctionMail::Fail {
                         item: new_item,
                         seller_id: lot.client_id,
                         buyout_price: lot.direct_money,
                         listing_fee: recalculated_fee as i32,
                     },
-                );
-            }
-        }
-        self.remove_auction_lot(server, lot.id);
+                    sent: false,
+                }],
+            },
+        );
     }
 
     /// `CancelAuctionLot(player, auctionId)`: only the seller may cancel a lot without bids.
@@ -720,23 +853,40 @@ impl AuctionManager {
             tracing::warn!("AuctionLot with ID {auction_id} has already been bid on.");
             return;
         }
+        if self.is_settling(lot.id) {
+            // An earlier cancel's refund mail is still queued for the next tick.
+            return;
+        }
         let created = lot
             .item
             .as_ref()
             .and_then(|i| server.items.item_by_id(i.id));
         if let Some(new_item) = created {
             let recalculated_fee = listing_fee(lot.direct_money, lot.duration);
-            self.send_mail(
+            let completed = self.queue_settlement(
                 server,
-                AuctionMail::Cancel {
-                    item: new_item,
-                    seller_id: lot.client_id,
-                    buyout_price: lot.direct_money,
-                    listing_fee: recalculated_fee as i32,
+                PendingSettlement {
+                    lot: lot.clone(),
+                    remove_lot: true,
+                    buyer_id: None,
+                    mails: vec![PendingAuctionMail {
+                        mail: AuctionMail::Cancel {
+                            item: new_item,
+                            seller_id: lot.client_id,
+                            buyout_price: lot.direct_money,
+                            listing_fee: recalculated_fee as i32,
+                        },
+                        sent: false,
+                    }],
                 },
             );
+            if !completed {
+                // The lot stays listed; the next tick retries the refund mail.
+                return;
+            }
+        } else {
+            self.remove_auction_lot(server, lot.id);
         }
-        self.remove_auction_lot(server, lot.id);
         player.send(SCAuctionCanceledPacket {
             lot: lot.with_live_item(server),
         });
@@ -756,6 +906,10 @@ impl AuctionManager {
             tracing::warn!("AuctionLot with ID {lot_id} not found in the list.");
             return;
         };
+        if self.is_settling(lot_id) {
+            tracing::warn!("AuctionLot with ID {lot_id} is awaiting its settlement mails.");
+            return;
+        }
         let (player_id, player_name, world_id) = {
             let c = player.data();
             (c.id, c.unit.name.clone(), c.unit.transform.world_id as u8)
@@ -799,8 +953,9 @@ impl AuctionManager {
             // Buy now
             if lot.bidder_id != 0 {
                 // send mail to person who bid if item was bought at full price.
-                self.send_mail(
+                self.queue_refund(
                     server,
+                    &lot,
                     AuctionMail::BidFail {
                         item_template_id: lot.item_template_id(),
                         seller_id: lot.client_id,
@@ -828,8 +983,9 @@ impl AuctionManager {
             if !lot.bidder_name.is_empty() && lot.bidder_id != 0 {
                 // Send mail to old bidder.
                 let recalculated_fee = listing_fee(lot.direct_money, lot.duration);
-                self.send_mail(
+                self.queue_refund(
                     server,
+                    &lot,
                     AuctionMail::BidFail {
                         item_template_id: lot.item_template_id(),
                         seller_id: lot.client_id,
@@ -974,6 +1130,7 @@ impl AuctionManager {
     pub fn update_auction_house(&self, server: &GameServer, now: DateTime<Utc>) {
         tracing::trace!("Updating Auction House!");
         let _op = self.op();
+        self.retry_pending_settlements(server);
         let expired: Vec<AuctionLot> = self
             .lots()
             .values()
@@ -981,6 +1138,9 @@ impl AuctionManager {
             .cloned()
             .collect();
         for lot in &expired {
+            if self.is_settling(lot.id) {
+                continue;
+            }
             if lot.bidder_id != 0 {
                 self.remove_auction_lot_sold(server, lot, &lot.bidder_name, lot.bid_money);
             } else {
@@ -1190,6 +1350,10 @@ impl AuctionManager {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         *self.pending_save.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         match self.try_load(server).await {
             Ok(()) => true,
             Err(e) => {
