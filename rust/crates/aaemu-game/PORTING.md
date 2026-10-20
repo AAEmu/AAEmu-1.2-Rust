@@ -1009,6 +1009,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   do not become recurring: the shipped October 16-30 2013 Halloween window stays expired.
   Regression tests: `npc/spawner_schedule_tests.rs`.
 * `systems::npcs`: doodad func timers are tokio tasks (cancel = generation bump); `DoodadManager.Create`'s `Task.Run(InitDoodad)` is a spawned task; `TimeManager.OnTimeOfDayChange` runs from a 10 s poller. `GetNpcSpawner` template rewrites do not propagate to already loaded spawners; the "first" concurrent-dictionary entry is the lowest key; spawn files are processed in sorted name order (C# `Directory.GetFiles` order is unspecified). Portal book deletions are written at the next periodic save. Debug messages check only the character's access level. Coffer slot counting stops at 255 (C# loops forever). Where the C# would throw on a null / failed cast the Rust code returns quietly. Sticky parents are not modelled.
+* systems::npcs / systems::services (GM `/despawn npc`, from PR #3): an NPC that still has a
+  queued respawn or corpse timer keeps its object id until the spawn manager's timers are done
+  with it (the C# released the id at once). The respawn still happens and the spawner's
+  `_scheduledCount` credit stays backed by it; releasing early let a new object reuse the id
+  while the timers were keyed by it. NPCs without timers are released immediately as before.
 * systems::housing: dates are stored with second precision (unix seconds); `DateTime.MinValue`
   rows load as 0, so a manually inserted house with both dates at MinValue gets 1970-01-15 as
   protection end (C#: 0001-01-15; both are "expired"). `Connection.Houses` is not snapshotted:

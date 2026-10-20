@@ -13,7 +13,22 @@ impl Despawn {
 }
 
 /// `ObjectIdManager.Instance.ReleaseId(obj.ObjId); obj.Delete();`
-fn release_and_delete(server: &GameServer, obj: &WorldObject) {
+pub(crate) fn release_and_delete(server: &GameServer, obj: &WorldObject) {
+    if let WorldObject::Npc(npc) = obj {
+        // Deviation: an NPC that still has a queued respawn / corpse timer (a dead spawner NPC)
+        // keeps its object id until the spawn manager's timers are done with it. Releasing it
+        // here would let a new object reuse the id while the timers (and the spawner's
+        // `_scheduledCount` credit behind the respawn) are keyed by it; the respawn then still
+        // happens and the count stays backed. Serialized with the timer tick.
+        let _serial = server.systems.npcs.spawns.spawn_lock();
+        let timers_own_id = spawn_manager::manager_of(server, obj, None)
+            .is_some_and(|m| m.has_pending_timers(npc.obj_id));
+        spawn_manager::delete_object(server, obj, None);
+        if !timers_own_id {
+            server.ids.object.release_id(npc.obj_id);
+        }
+        return;
+    }
     server.ids.object.release_id(obj.obj_id());
     spawn_manager::delete_object(server, obj, None);
 }
@@ -176,6 +191,87 @@ impl Command for Despawn {
 mod tests {
     use super::super::harness;
     use super::super::util::objects_test_support as ts;
+
+    /// From PR #3: an NPC removed by the GM command leaves no loot behind for the next NPC that
+    /// gets its object id (the loot container is dropped when the id is released).
+    #[tokio::test]
+    async fn despawn_npc_retires_loot_before_object_id_reuse() {
+        use crate::systems::economy::looting::LootManager;
+        use crate::world::WorldObject;
+        use std::sync::Arc;
+
+        for by_radius in [false, true] {
+            let server = ts::server();
+            let gm = harness::pc(&server, 1, "Gm", 100.0, 100.0);
+            let world = server.world.world(0).unwrap();
+            let npc = ts::spawn_npc(&server, ts::NPC, 110.0, 100.0);
+            LootManager::generate_loot(
+                &server,
+                &WorldObject::from(&npc),
+                Some(&WorldObject::from(&gm.p)),
+            );
+            let old_loot = server.systems.economy.loot.get(npc.obj_id).unwrap();
+            assert!(old_loot.lock().unwrap().already_generated);
+            LootManager::open_bag(&server, &gm.p, npc.obj_id, false);
+            let command = if by_radius {
+                format!("despawn npc {} 20", ts::NPC)
+            } else {
+                format!("despawn npc {}", npc.obj_id)
+            };
+            let (handled, _) = harness::run(&server, &gm.p, &command).await;
+            assert!(handled);
+            assert!(world.npc(npc.obj_id).is_none());
+            assert!(server.systems.economy.loot.get(npc.obj_id).is_none());
+            let replacement = ts::spawn_npc(&server, ts::NPC, 110.0, 100.0);
+            assert_eq!(replacement.obj_id, npc.obj_id);
+            LootManager::generate_loot(
+                &server,
+                &WorldObject::from(&replacement),
+                Some(&WorldObject::from(&gm.p)),
+            );
+            let new_loot = server.systems.economy.loot.get(replacement.obj_id).unwrap();
+            assert!(!Arc::ptr_eq(&old_loot, &new_loot));
+            assert!(new_loot.lock().unwrap().opened_by.is_empty());
+        }
+    }
+
+    /// An NPC with a queued corpse / respawn timer keeps its object id until the spawn manager
+    /// is done with it, so the timers cannot hit a new object that reused the id.
+    #[tokio::test]
+    async fn despawn_npc_with_pending_timers_keeps_its_object_id_until_they_run() {
+        use crate::systems::npcs::spawn_manager;
+        use crate::world::WorldObject;
+        use std::time::Duration;
+
+        let server = ts::server();
+        let gm = harness::pc(&server, 1, "Gm", 100.0, 100.0);
+        let world = server.world.world(0).unwrap();
+        let manager = server.systems.npcs.spawns.get_or_create(&world);
+        let npc = ts::spawn_npc(&server, ts::NPC, 110.0, 100.0);
+        manager.add_despawn(
+            &server,
+            WorldObject::from(&npc),
+            Some(spawn_manager::add_secs(spawn_manager::now(), 5.0)),
+        );
+        let (handled, _) =
+            harness::run(&server, &gm.p, &format!("despawn npc {}", npc.obj_id)).await;
+        assert!(handled);
+        assert!(world.npc(npc.obj_id).is_none());
+        assert_eq!(manager.pending_despawns().len(), 1);
+        // The id is still reserved: a new object does not get it.
+        let other = ts::spawn_npc(&server, ts::NPC, 110.0, 100.0);
+        assert_ne!(other.obj_id, npc.obj_id);
+        // The timer runs against the missing object, then releases the id.
+        spawn_manager::advance_test_clock(Duration::from_secs(6));
+        manager.check_respawns_tick(&server);
+        assert!(manager.pending_despawns().is_empty());
+        assert!(
+            world.npc(other.obj_id).is_some(),
+            "the other NPC is untouched"
+        );
+        let again = ts::spawn_npc(&server, ts::NPC, 110.0, 100.0);
+        assert_eq!(again.obj_id, npc.obj_id);
+    }
 
     #[tokio::test]
     async fn despawn_by_id_and_radius() {

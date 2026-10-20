@@ -291,6 +291,58 @@ async fn staggered_deaths_keep_each_authored_respawn_deadline() {
     assert_eq!(spawner.scheduled_count(), 0);
 }
 
+/// From PR #3: a GM `/despawn` of a dead spawner NPC (corpse + queued respawn) must keep the
+/// spawner's `_scheduledCount` backed by its respawn timer and keep the id reserved for it;
+/// the respawn still refills the population and nothing is left over afterwards.
+#[tokio::test]
+async fn gm_despawn_of_a_dead_spawner_npc_keeps_its_respawn_and_count() {
+    use crate::systems::services::commands::scripts::despawn::release_and_delete;
+    use crate::world::WorldObject;
+    let server = server();
+    let world = server.world.world(0).unwrap();
+    let manager = server.systems.npcs.spawns.get_or_create(&world);
+    let mut t = template(31, vec![member(310, 31, 500)]);
+    t.min_population = 2;
+    t.max_population = 2;
+    let spawner = make_spawner(t, 500, 1);
+    let client = TestClient::new(&server, 1, 1);
+    let _player = spawn_player(&server, &client, test_character(1, "P", 100.0, 100.0), 5000);
+    spawner.update(&server);
+    assert_eq!(spawner.current_spawn_count(), 2);
+
+    let victim = spawner.spawned_npcs().values().next().unwrap()[0].clone();
+    {
+        let mut d = victim.data();
+        d.unit.hp = 0;
+        d.dead_time_ms = crate::world::now_ms();
+    }
+    spawn_manager::on_npc_died(&server, &victim);
+    assert_eq!(spawner.scheduled_count(), 1);
+    assert_eq!(manager.pending_respawns().len(), 1);
+
+    release_and_delete(&server, &WorldObject::from(&victim));
+    assert!(world.npc(victim.obj_id).is_none());
+    assert_eq!(spawner.current_spawn_count(), 1);
+    assert_eq!(
+        spawner.scheduled_count(),
+        1,
+        "the respawn still backs the credit"
+    );
+    assert_eq!(manager.pending_respawns().len(), 1);
+    // The id is reserved for the timers: a new object cannot take it.
+    let probe = server.ids.object.get_next_id().unwrap();
+    assert_ne!(probe, victim.obj_id);
+    server.ids.object.release_id(probe);
+
+    spawn_manager::advance_test_clock(Duration::from_secs(600));
+    manager.check_respawns_tick(&server);
+    assert!(manager.pending_respawns().is_empty());
+    assert!(manager.pending_despawns().is_empty());
+    spawner.update(&server);
+    assert_eq!(spawner.current_spawn_count(), 2);
+    assert_eq!(spawner.scheduled_count(), 0);
+}
+
 #[tokio::test]
 async fn corpses_are_excluded_and_pending_respawns_are_honored() {
     let server = server();
