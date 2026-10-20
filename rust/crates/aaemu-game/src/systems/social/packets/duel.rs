@@ -83,13 +83,13 @@ cs_packet!(
     read |s| { Ok(Self { challenger_id: s.read_u32()?, error_message: s.read_i16()? }) }
     handle |self, server, conn| {
         tracing::warn!("StartDuel, Id: {}, ErrorMessage: {}", self.challenger_id, self.error_message);
+        // `DuelAccepted(Connection.ActiveChar, ..)` throws `ArgumentNullException` without a
+        // character (caught by the network layer); the cancel needs the caller too (10.x).
+        let p = super::active_char!(conn);
         if self.error_message != 0 {
-            server.systems.social.duels.duel_cancel(server, self.challenger_id, self.error_message);
+            server.systems.social.duels.duel_cancel(server, &p, self.challenger_id, self.error_message);
             return Ok(());
         }
-        // `DuelAccepted(Connection.ActiveChar, ..)` throws `ArgumentNullException` without a
-        // character (caught by the network layer).
-        let p = super::active_char!(conn);
         server.systems.social.duels.duel_accepted(server, &p, self.challenger_id).await;
         Ok(())
     }
