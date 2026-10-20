@@ -43,6 +43,11 @@ pub const DISTANCE_FOR_SURRENDER: f32 = 75.0;
 pub const DUEL_DURATION: Duration = Duration::from_secs(5 * 60);
 /// `DuelStartTask` delay (3 s).
 pub const DUEL_START_DELAY: Duration = Duration::from_secs(3);
+/// Unanswered challenge timeout. UNSOURCED: neither `compact.sqlite3` (no duel table; the only
+/// duel rows are `skill_reqs` 78 / `tags` 566 text) nor the 1.2-era C# (which never released an
+/// ignored challenge) carries a value. 30 s is the figure recalled from the 10.x `DuelManager`,
+/// whose source is not in this tree, so treat it as a tunable guess.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// `SCAreaChatBubblePacket` type of the duel start.
 pub const DUEL_AREA_BUBBLE_TYPE: u32 = 543;
 
@@ -123,6 +128,8 @@ pub struct DuelState {
     /// `SocialHooks::spawn_doodad`): the challenger's position at the acceptance.
     pub fallback_center: (f32, f32, f32),
     pub start_task: Option<DuelTimer>,
+    /// Releases an unanswered challenge ([`REQUEST_TIMEOUT`]).
+    pub request_timeout_task: Option<DuelTimer>,
     pub end_timer_task: Option<DuelTimer>,
     pub distance_check_task: Option<DuelTimer>,
     pub result_check_task: Option<DuelTimer>,
@@ -130,6 +137,10 @@ pub struct DuelState {
     pub started: bool,
     /// `DuelAllowed` (only ever set to false).
     pub allowed: bool,
+    /// The pending challenge was resolved without a start (refused, expired, dropped or its
+    /// challenger died). With `started` it makes the pending -> started / released transition
+    /// single-owner: whoever flips one of the two flags under the state lock owns the follow-up.
+    pub released: bool,
 }
 
 /// `Duel`.
@@ -151,6 +162,19 @@ impl Duel {
             challenged,
             state: Mutex::new(DuelState::default()),
         }
+    }
+
+    /// Claims the release of a *pending* challenge: `true` for exactly one caller, and only while
+    /// the duel has neither started nor been released. The caller then owns the clean-up, so a
+    /// refuse, the request timeout and an accept racing each other cannot interleave
+    /// (a started duel is never cleaned up by a stale refuse / expiry).
+    fn claim_release(&self) -> bool {
+        let mut st = self.state();
+        if st.started || st.released {
+            return false;
+        }
+        st.released = true;
+        true
     }
 
     /// The duel's mutable members (leaf lock).
@@ -203,6 +227,8 @@ struct State {
 pub struct DuelDelays {
     /// `DuelStartTask` (3 s).
     pub start: Duration,
+    /// Unanswered challenge timeout ([`REQUEST_TIMEOUT`]).
+    pub request: Duration,
     /// `Delay` of the distance / HP check tasks (1 s).
     pub check: Duration,
     /// `DuelEndTimerTask` (`DuelDurationTime`, 5 min).
@@ -213,6 +239,7 @@ impl Default for DuelDelays {
     fn default() -> Self {
         Self {
             start: DUEL_START_DELAY,
+            request: REQUEST_TIMEOUT,
             check: CHECK_DELAY,
             duration: DUEL_DURATION,
         }
@@ -282,17 +309,6 @@ impl DuelManager {
         self.st().duels.is_empty()
     }
 
-    /// `DuelAdd`: each participant is keyed only when it has no duel yet.
-    fn duel_add(&self, duel: &DuelRef) {
-        let mut st = self.st();
-        st.duels
-            .entry(duel.challenger.character_id)
-            .or_insert_with(|| duel.clone());
-        st.duels
-            .entry(duel.challenged.character_id)
-            .or_insert_with(|| duel.clone());
-    }
-
     /// `DuelRemove`: removes both participants' keys (whatever duel they point to).
     fn duel_remove(&self, duel: &DuelRef) {
         let mut st = self.st();
@@ -300,19 +316,60 @@ impl DuelManager {
         st.duels.remove(&duel.challenged.character_id);
     }
 
-    /// `DuelRequest(challenger, challengedId)`. The C# does not check that the challenged
-    /// character is online (NullReferenceException); here that is logged and ignored.
+    /// `DuelRequest(challenger, challengedId)` with the validation of the 10.x `DuelManager`
+    /// (`DuelManager.cs:96-136`): self -> `bad_duel_self`, unknown / offline target ->
+    /// `bad_duel_target`, challenger already registered -> `already_in_duel`, target already
+    /// registered (a duel or a pending challenge) -> `other_already_in_duel`. Deviations (no
+    /// oracle): a dead target is `bad_duel_target`; neither C# has a distance / location rule, so
+    /// `duel_bad_location`, `duel_other_busy` and `target_too_far` are never sent. The 1.2 C#
+    /// threw a NullReferenceException for an unknown target and checked nothing else; an
+    /// unanswered challenge expires after [`REQUEST_TIMEOUT`] as in 10.x.
     pub fn duel_request(&self, server: &GameServer, challenger: &PlayerRef, challenged_id: u32) {
-        let Some(challenged) = server.world.character_by_id(challenged_id) else {
+        if challenged_id == challenger.character_id {
+            send_error(challenger, util::error::BAD_DUEL_SELF);
+            return;
+        }
+        let challenged = server
+            .world
+            .character_by_id(challenged_id)
+            .filter(|c| !c.data().unit.is_dead());
+        let Some(challenged) = challenged else {
             tracing::warn!(
-                "DuelRequest: challenger={}:{}, challenged={challenged_id} not found",
+                "DuelRequest: challenger={}:{}, challenged={challenged_id} not found or dead",
                 challenger.character_id,
                 challenger.obj_id
             );
+            send_error(challenger, util::error::BAD_DUEL_TARGET);
             return;
         };
         let duel = Arc::new(Duel::new(challenger.clone(), challenged.clone()));
-        self.duel_add(&duel);
+        {
+            // One critical section: check and register, so two challenges cannot both pass.
+            let mut st = self.st();
+            let error = if st.duels.contains_key(&challenger.character_id) {
+                Some(util::error::ALREADY_IN_DUEL)
+            } else if st.duels.contains_key(&challenged.character_id) {
+                Some(util::error::OTHER_ALREADY_IN_DUEL)
+            } else {
+                None
+            };
+            if let Some(e) = error {
+                drop(st);
+                send_error(challenger, e);
+                return;
+            }
+            st.duels.insert(challenger.character_id, duel.clone());
+            st.duels.insert(challenged.character_id, duel.clone());
+        }
+        let challenger_id = challenger.character_id;
+        let task_duel = duel.clone();
+        let timer = schedule(server, self.delays().request, move |srv| async move {
+            srv.systems
+                .social
+                .duels
+                .request_expired(&task_duel, challenger_id);
+        });
+        duel.state().request_timeout_task = Some(timer);
         challenged.send(SCDuelChallengedPacket {
             challenger_id: challenger.character_id,
         });
@@ -325,6 +382,19 @@ impl DuelManager {
         );
     }
 
+    /// 10.x `DuelRequestExpired`: releases both sides of a challenge nobody answered (a started
+    /// duel is left alone) and tells the challenger it was rejected.
+    pub fn request_expired(&self, duel: &DuelRef, challenger_id: u32) {
+        // Decide and take ownership of the clean-up in one state transition: an accept that won
+        // the race makes this a no-op.
+        if !duel.claim_release() {
+            return;
+        }
+        tracing::info!("DuelRequestExpired: challenger={challenger_id} went unanswered");
+        send_error(&duel.challenger, util::error::TARGET_REJECTED_DUEL);
+        self.duel_clean_up(challenger_id);
+    }
+
     /// `DuelAccepted(challenged, challengerId)`: spawns the combat flag between both
     /// characters, switches them to the Red / Blue team factions and schedules the start.
     pub async fn duel_accepted(
@@ -335,8 +405,29 @@ impl DuelManager {
     ) {
         let Some(duel) = self.get(challenger_id) else {
             tracing::warn!("DuelAccepted: Id = {challenger_id} not found in duels[]");
+            send_error(challenged, util::error::BAD_DUEL_TARGET);
             return;
         };
+        // 10.x `DuelAccepted`: only the challenged character may accept (the id comes from the
+        // client).
+        if duel.challenged.character_id != challenged.character_id {
+            tracing::warn!(
+                "DuelAccepted: {} tried to accept the duel {challenger_id} -> {}, which is not theirs",
+                challenged.character_id,
+                duel.challenged.character_id
+            );
+            send_error(challenged, util::error::BAD_DUEL_TARGET);
+            return;
+        }
+        // A challenger who died after asking cannot duel: release the challenge instead.
+        if duel.challenger.data().unit.is_dead() {
+            if duel.claim_release() {
+                tracing::warn!("DuelAccepted: challenger {challenger_id} is dead");
+                send_error(challenged, util::error::BAD_DUEL_TARGET);
+                self.duel_clean_up(challenger_id);
+            }
+            return;
+        }
         {
             let mut st = duel.state();
             if st.started {
@@ -346,7 +437,19 @@ impl DuelManager {
                 );
                 return;
             }
+            if st.released {
+                drop(st);
+                tracing::warn!(
+                    "DuelAccepted: Duel with challengerId = {challenger_id} was already released"
+                );
+                send_error(challenged, util::error::BAD_DUEL_TARGET);
+                return;
+            }
             st.started = true;
+        }
+        let request_timeout = duel.state().request_timeout_task.take();
+        if let Some(t) = request_timeout {
+            t.cancel();
         }
         duel.challenger.data().unit.is_in_duel = true;
         duel.challenged.data().unit.is_in_duel = true;
@@ -383,6 +486,10 @@ impl DuelManager {
         self.set_faction(server, &duel.challenged, FACTION_BLUE_TEAM)
             .await;
 
+        // Deviation from the 1.2-era C# (which sent it with SCDuelStarted): the countdown starts
+        // at the acceptance and SCDuelStarted follows `DUEL_START_DELAY` later, as in the 10.x
+        // `DuelManager.DuelAccepted` (the client runs a fixed 3000 ms countdown).
+        duel.send_both(SCDuelStartCountdownPacket {});
         let start_id = duel.challenger.character_id;
         let timer = schedule(server, self.delays().start, move |srv| async move {
             srv.systems.social.duels.duel_start(&srv, start_id);
@@ -390,12 +497,12 @@ impl DuelManager {
         duel.state().start_task = Some(timer);
     }
 
-    /// `SetFaction(owner, factionId)`: remembers the current faction, then
-    /// `Character.SetFaction`.
+    /// `SetFaction(owner, factionId)`: remembers the current faction, then sets the temporary
+    /// team faction (no expedition / party / housing side effects, never saved).
     async fn set_faction(&self, server: &GameServer, owner: &PlayerRef, faction_id: u32) {
         let current = owner.data().unit.faction_id;
         self.st().save_factions.insert(owner.character_id, current);
-        faction::set_faction(server, owner, faction_id).await;
+        faction::set_temporary_faction(server, owner, faction_id);
     }
 
     /// `RestoreFaction(owner)`. `false` = no saved faction (the C# throws
@@ -404,7 +511,7 @@ impl DuelManager {
         let Some(saved) = self.saved_faction(owner.character_id) else {
             return false;
         };
-        faction::set_faction(server, owner, saved).await;
+        faction::restore_temporary_faction_to(server, owner, saved);
         self.st().save_factions.remove(&owner.character_id);
         true
     }
@@ -430,7 +537,6 @@ impl DuelManager {
             unit_obj_id: a,
             bubble_type: DUEL_AREA_BUBBLE_TYPE,
         });
-        duel.send_both(SCDuelStartCountdownPacket {});
         duel.send_both(SCDuelStatePacket {
             challenger_obj_id: a,
             flag_obj_id,
@@ -469,12 +575,36 @@ impl DuelManager {
         let _ = self.duel_result_check(server, challenger_id);
     }
 
-    /// `DuelCancel(challengerId, errorMessage)`.
-    pub fn duel_cancel(&self, _server: &GameServer, challenger_id: u32, error_message: i16) {
+    /// `DuelCancel(challengerId, errorMessage)` for a refusal / withdrawal of a *pending*
+    /// challenge by one of its two participants. Deviation: a refuse that arrives for a started
+    /// duel (or from a character that is no participant) is ignored. The 1.2 C# and 10.x run
+    /// `DuelCleanUp` there, which leaves the flag, the Red / Blue factions and the client's duel
+    /// state behind; 10.x's participant check (`DuelManager.DuelCancel`) is kept.
+    pub fn duel_cancel(
+        &self,
+        _server: &GameServer,
+        caller: &PlayerRef,
+        challenger_id: u32,
+        error_message: i16,
+    ) {
         let Some(duel) = self.get(challenger_id) else {
             tracing::warn!("DuelCancel: Id={challenger_id} not found in duels[]");
             return;
         };
+        let cid = caller.character_id;
+        if duel.challenger.character_id != cid && duel.challenged.character_id != cid {
+            tracing::warn!(
+                "DuelCancel: {cid} tried to cancel the duel {challenger_id} -> {}, which they are not part of",
+                duel.challenged.character_id
+            );
+            return;
+        }
+        if !duel.claim_release() {
+            tracing::warn!(
+                "DuelCancel: Duel with challengerId={challenger_id} already started or released, ignoring error={error_message}"
+            );
+            return;
+        }
         duel.state().allowed = false;
         if error_message != 0 {
             send_error(&duel.challenger, error_message);
@@ -485,8 +615,8 @@ impl DuelManager {
         self.duel_clean_up(challenger_id);
     }
 
-    /// `DuelCleanUp(id)`: clears `IsInDuel`, cancels the start / end tasks (not the check
-    /// tasks, as in C#) and removes the duel.
+    /// `DuelCleanUp(id)`: clears `IsInDuel`, cancels the request timeout and the start / end tasks (not
+    /// the check tasks, as in C#) and removes the duel.
     pub fn duel_clean_up(&self, id: u32) {
         let Some(duel) = self.get(id) else {
             tracing::warn!("CleanUpDuel: Id={id} not found in duels[]");
@@ -494,17 +624,55 @@ impl DuelManager {
         };
         duel.challenger.data().unit.is_in_duel = false;
         duel.challenged.data().unit.is_in_duel = false;
-        let (start, end) = {
+        let tasks = {
             let mut st = duel.state();
-            (st.start_task.take(), st.end_timer_task.take())
+            [
+                st.request_timeout_task.take(),
+                st.start_task.take(),
+                st.end_timer_task.take(),
+            ]
         };
-        if let Some(t) = start {
-            t.cancel();
-        }
-        if let Some(t) = end {
+        for t in tasks.into_iter().flatten() {
             t.cancel();
         }
         self.duel_remove(&duel);
+    }
+
+    /// A participant leaves the world (disconnect, logout to the lobby). Not in the C# (the
+    /// opponent stayed in the Red / Blue faction with the duel registered until the end
+    /// timer, which then decided by remaining HP): a started duel ends right away as a **draw** for
+    /// both sides, restoring both factions. It is deliberately not a win for the opponent, so a
+    /// disconnect cannot be used to farm `WIN_DUEL`; a pending request is simply dropped.
+    pub async fn on_participant_leave(&self, server: &GameServer, leaver: &PlayerRef) {
+        let id = leaver.character_id;
+        let Some(duel) = self.get(id) else {
+            return;
+        };
+        let (a, b) = (duel.challenger.character_id, duel.challenged.character_id);
+        let started = {
+            let mut st = duel.state();
+            if !st.started {
+                st.released = true;
+            }
+            st.started
+        };
+        if !started {
+            self.duel_clean_up(a);
+            return;
+        }
+        self.duel_stop(server, a, duel_det_type::DRAW, if id == a { b } else { a })
+            .await;
+        // `duel_stop` aborts when a saved faction is missing: never leave the duel registered.
+        if self.get(a).is_some() {
+            let (dist, res) = {
+                let mut st = duel.state();
+                (st.distance_check_task.take(), st.result_check_task.take())
+            };
+            for t in [dist, res].into_iter().flatten() {
+                t.cancel();
+            }
+            self.duel_clean_up(a);
+        }
     }
 
     /// `DuelStop(id, det, loseId)`: the result packets, flag removal, faction restore.

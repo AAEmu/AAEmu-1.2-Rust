@@ -342,6 +342,15 @@ impl SaveManager {
             .collect()
     }
 
+    /// Test hook: pretend the departure save was acknowledged.
+    #[cfg(test)]
+    pub(crate) fn forget_departing(&self, character_id: u32) {
+        self.departing
+            .lock()
+            .expect("departure saves poisoned")
+            .remove(&character_id);
+    }
+
     pub(crate) fn remember_departing(&self, player: &PlayerRef) {
         self.departing
             .lock()

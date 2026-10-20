@@ -820,6 +820,17 @@ pub fn apply_active_buffs(
     }
 }
 
+/// The `faction_id` a character save writes: the active temporary faction (duel Red / Blue
+/// team, battlefield corps) is never persisted; its origin faction is written instead. A crash
+/// during a duel / battlefield therefore reloads the original faction (RPA-09).
+pub fn persisted_faction(c: &Character) -> u32 {
+    if c.unit.faction_temporary && c.unit.origin_faction_id != 0 {
+        c.unit.origin_faction_id
+    } else {
+        c.unit.faction_id
+    }
+}
+
 /// `Character.Save(connection, transaction)`. `now` becomes `Updated`. Errors are returned so
 /// `SaveDirectlyToDatabase` can roll back.
 pub async fn save_character(
@@ -882,7 +893,7 @@ pub async fn save_character(
     .bind(pos.rot_z) // `roll` <- @yaw
     .bind(pos.rot_y)
     .bind(pos.rot_x) // `yaw` <- @roll
-    .bind(c.unit.faction_id)
+    .bind(persisted_faction(c))
     .bind(&c.faction_name)
     .bind(c.unit.expedition_id)
     .bind(c.family)
@@ -1297,6 +1308,25 @@ mod tests {
     use super::*;
     use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
     use std::str::FromStr;
+
+    #[test]
+    fn a_temporary_faction_is_never_persisted() {
+        let mut c = Character::new(1, 1, UnitCustomModelParams::default());
+        c.unit.faction_id = 101;
+        assert_eq!(persisted_faction(&c), 101);
+        // A duel / battlefield change: faction 160, origin 101.
+        c.unit.faction_id = 160;
+        c.unit.origin_faction_id = 101;
+        c.unit.faction_temporary = true;
+        assert_eq!(persisted_faction(&c), 101);
+        // Restored: the live faction is the saved one again.
+        c.unit.faction_id = 101;
+        c.unit.faction_temporary = false;
+        assert_eq!(persisted_faction(&c), 101);
+        // A permanent change is saved as-is.
+        c.unit.faction_id = 161;
+        assert_eq!(persisted_faction(&c), 161);
+    }
 
     #[tokio::test]
     #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]

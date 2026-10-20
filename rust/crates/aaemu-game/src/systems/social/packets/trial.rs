@@ -136,8 +136,8 @@ pub struct CrimeRecordEntry {
     /// `victim?.Name ?? string.Empty`.
     pub victim_name: String,
     pub reporter: u32,
-    /// `NameManager.GetCharacterName(reporter)`; `None` (a null string) makes the C#
-    /// `Write(string)` throw inside its own try/catch, so nothing (not even the length) is written.
+    /// `NameManager.GetCharacterName(reporter)`; `None` is written as an empty string (the C#
+    /// threw and omitted the length, which the 1.2 client cannot parse).
     pub reporter_name: Option<String>,
     /// `victim?.Faction?.Id ?? 0`.
     pub victim_faction: u32,
@@ -158,9 +158,9 @@ impl CrimeRecordEntry {
             .write_u32(self.victim)
             .write_str(&self.victim_name)
             .write_u32(self.reporter);
-        if let Some(n) = &self.reporter_name {
-            s.write_str(n);
-        }
+        // The 1.2 client's string always carries its u16 length: an unknown reporter is an empty
+        // string, not an omitted field (the C# threw here and dropped the entry; PORTING.md).
+        s.write_str(self.reporter_name.as_deref().unwrap_or(""));
         s.write_u32(self.victim_faction)
             .write_u32(self.victim_expedition)
             .write_u8(self.crime_kind)
@@ -610,6 +610,36 @@ cs_packet!(
     }
 );
 
+cs_packet!(
+    /// `CSRequestSetBountyMoneyPacket` (0x11f; client serializer `397b13a0`, per Bevy RE notes):
+    /// the client asks whether it may put a bounty on `name`. Not answered yet: the bounty
+    /// ledger (`bounty_runtime.rs`) is not wired to the wallet or the board.
+    // TODO: answer with `SCSetBountyPermittedPacket` once placement is wired to the wallet.
+    CSRequestSetBountyMoneyPacket { name: String }
+    read |s| { Ok(Self { name: s.read_string()? }) }
+    handle |self, server, conn| {
+        tracing::warn!("RequestSetBountyMoney (not implemented), Name: {}", self.name);
+        Ok(())
+    }
+);
+
+cs_packet!(
+    /// `CSSendBountyUpdatePacket` (0x120; client serializer `397bc6b0`, per Bevy RE notes): place
+    /// (`kind`) a bounty of `money` on `name`. The client's money field is a signed 32-bit value.
+    /// Not applied yet, see [`CSRequestSetBountyMoneyPacket`].
+    // TODO: debit the wallet, record the pledge in the bounty ledger and answer with
+    // `SCSetBountyDonePacket`.
+    CSSendBountyUpdatePacket { kind: u32, name: String, money: i32 }
+    read |s| { Ok(Self { kind: s.read_u32()?, name: s.read_string()?, money: s.read_i32()? }) }
+    handle |self, server, conn| {
+        tracing::warn!(
+            "SendBountyUpdate (not implemented), Kind: {}, Name: {}, Money: {}",
+            self.kind, self.name, self.money
+        );
+        Ok(())
+    }
+);
+
 /// Registers the crime / trial / bounty C->S packets.
 pub fn register(reg: &mut PacketRegistry) {
     reg.register::<CSReplyImprisonOrTrialPacket>(LEVEL_PLAIN, cs::CSReplyImprisonOrTrialPacket);
@@ -627,6 +657,8 @@ pub fn register(reg: &mut PacketRegistry) {
         cs::CSRequestJuryWaitingNumberPacket,
     );
     reg.register::<CSNaviOpenBountyPacket>(LEVEL_PLAIN, cs::CSNaviOpenBountyPacket);
+    reg.register::<CSRequestSetBountyMoneyPacket>(LEVEL_PLAIN, cs::CSRequestSetBountyMoneyPacket);
+    reg.register::<CSSendBountyUpdatePacket>(LEVEL_PLAIN, cs::CSSendBountyUpdatePacket);
 }
 
 #[cfg(test)]
@@ -912,8 +944,8 @@ mod tests {
                 .write_i32(2)
                 .write_i32(3)
                 .write_i32(4)
-                .write_i32(5) // guilty before notGuilty, as in C#
-                .write_i32(6)
+                .write_i32(6) // notGuilty first: native row reader 397bebf0
+                .write_i32(5) // then guilty
                 .write_i32(99);
         });
         let p = SCBountyListPacket {
@@ -1157,9 +1189,8 @@ mod tests {
                 .write_u32(e.victim)
                 .write_str(&e.victim_name)
                 .write_u32(e.reporter);
-            if reporter {
-                s.write_str("Rep");
-            }
+            // A missing reporter name is an empty string on the wire (never an omitted length).
+            s.write_str(if reporter { "Rep" } else { "" });
             s.write_u32(e.victim_faction)
                 .write_u32(e.victim_expedition)
                 .write_u8(e.crime_kind)
@@ -1190,7 +1221,7 @@ mod tests {
         expected.extend(entry_bytes(&e, true, ""));
         assert_eq!(body(&p), expected);
 
-        // A missing reporter name (null string) writes nothing at all; long messages are cut to
+        // A missing reporter name writes an empty string (u16 length 0); long messages are cut to
         // 200 UTF-16 units.
         let long = "x".repeat(250);
         let e2 = CrimeRecordEntry {
@@ -1315,6 +1346,29 @@ mod tests {
                 s.write_bc(0x123);
             }),
             CSNaviOpenBountyPacket { obj_id: 0x123 }
+        );
+    }
+
+    /// The bounty requests the 1.2 client sends (0x11f / 0x120; blob(name) = u16 length + bytes).
+    #[test]
+    fn c2s_bounty_requests_decode() {
+        assert_eq!(
+            decode::<CSRequestSetBountyMoneyPacket>(|s| {
+                s.write_str("Wanted");
+            }),
+            CSRequestSetBountyMoneyPacket {
+                name: "Wanted".into()
+            }
+        );
+        assert_eq!(
+            decode::<CSSendBountyUpdatePacket>(|s| {
+                s.write_u32(1).write_str("Wanted").write_i32(-5000);
+            }),
+            CSSendBountyUpdatePacket {
+                kind: 1,
+                name: "Wanted".into(),
+                money: -5000
+            }
         );
     }
 }

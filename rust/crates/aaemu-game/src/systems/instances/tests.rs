@@ -96,13 +96,10 @@ fn simple_packets_are_byte_exact() {
         }),
         e.into_bytes()
     );
-    assert_eq!(
-        body(&SCCancelInstantGamePacket::clear_queue()),
-        vec![0, 0, 1, 0]
-    );
+    assert_eq!(body(&SCCancelInstantGamePacket::clear_queue()), vec![0, 0]);
     assert_eq!(
         body(&SCCancelInstantGamePacket::with_error(336)),
-        vec![80, 1, 0, 0]
+        vec![80, 1]
     );
     assert_eq!(
         SCCancelInstantGamePacket::clear_queue().opcode(),
@@ -519,10 +516,16 @@ fn battlefield_data_loads_with_json_quirks() {
     c.execute_batch(
         "CREATE TABLE battle_fields (id INT, name TEXT, zone_key INT);
          CREATE TABLE game_rule_sets (id INT, corps_size INT, corps1_id INT, corps2_id INT, time_opening INT, time_ending INT, time_playing INT, victory_score INT, battle_field_id INT);
+         CREATE TABLE game_score_rules (id INT, rule_set_id INT, rule_set_corps INT, event_id INT, event_value INT, event_score INT);
+         CREATE TABLE game_rule_events (id INT, rule_set_id INT, condition_id INT, kind_id INT, param1 INT, param2 INT);
+         CREATE TABLE battle_field_buffs (id INT, battle_field_id INT, buff_id INT, value INT);
          INSERT INTO battle_fields VALUES (7, 'camp', 198), (11, 'arena', 302), (1, 'qa', 198);
          INSERT INTO game_rule_sets VALUES (17, 2, 159, 160, 4, 1, 15, 0, 1);
          INSERT INTO game_rule_sets VALUES (26, 2, 159, 160, 4, 1, 15, 0, 1);
-         INSERT INTO game_rule_sets VALUES (28, 1, 159, 160, 2, 1, 10, 60, 11);",
+         INSERT INTO game_rule_sets VALUES (28, 1, 159, 160, 2, 1, 10, 60, 11);
+         INSERT INTO game_score_rules VALUES (93, 28, -1, 200, 0, 30);
+         INSERT INTO game_rule_events VALUES (24, 28, 9, 3, 0, 0);
+         INSERT INTO battle_field_buffs VALUES (27, 11, 8246, 1);",
     )
     .unwrap();
     let json = r#"[
@@ -539,6 +542,27 @@ fn battlefield_data_loads_with_json_quirks() {
     assert_eq!(s.corps1_spawn.unwrap().y, 606.0);
     assert_eq!(s.corps2_spawn.unwrap().rotation_z, -5);
     assert_eq!(arena.rule_set.unwrap().id, 28);
+    // The scoring / rule-event / buff tables are attached to their rule set / battlefield.
+    assert_eq!(
+        GameScoreRule::resolve(
+            d.score_rules(28),
+            game_score_event::KILL_ENEMY_UNIT_FINAL_HITTER,
+            0,
+            0
+        ),
+        Some(30)
+    );
+    assert_eq!(d.rule_events(28).len(), 1);
+    assert_eq!(
+        (
+            d.rule_events(28)[0].condition_id,
+            d.rule_events(28)[0].kind_id
+        ),
+        (9, 3)
+    );
+    assert_eq!(d.battlefield_buffs(11).len(), 1);
+    assert_eq!(d.battlefield_buffs(11)[0].buff_id, 8246);
+    assert_eq!(d.battlefield_buffs(11)[0].value, 1);
     // The last rule set row of a battlefield wins.
     assert_eq!(d.battlefield(1).unwrap().rule_set.unwrap().id, 26);
     // The unknown battlefield 99 is skipped; entries after it still apply (deviation).
@@ -564,6 +588,9 @@ fn battlefield_rule_set_loads_kill_conditions() {
     c.execute_batch(
         "CREATE TABLE battle_fields (id INT, name TEXT, zone_key INT);
          CREATE TABLE game_rule_sets (id INT, corps_size INT, corps1_id INT, corps2_id INT, time_opening INT, time_ending INT, time_playing INT, victory_score INT, battle_field_id INT, victory_kill_count INT, killstreak0_id INT, killstreak9_id INT, killstreak23_id INT, level_min INT, victory_kill_corps1_head INT, victory_kill_corps2_head INT, bonus_winner INT, bonus_loser INT, bonus_no_death INT, bonus_top_enemy_pc_kill INT, bonus_top_enemy_non_pc_kill INT, rank_invalid_point INT, rank_win_point INT, rank_lose_point INT, rank_draw_point INT, time_unearned_win INT);
+         CREATE TABLE game_score_rules (id INT, rule_set_id INT, rule_set_corps INT, event_id INT, event_value INT, event_score INT);
+         CREATE TABLE game_rule_events (id INT, rule_set_id INT, condition_id INT, kind_id INT, param1 INT, param2 INT);
+         CREATE TABLE battle_field_buffs (id INT, battle_field_id INT, buff_id INT, value INT);
          INSERT INTO battle_fields VALUES (6, 'camp1v1', 198);
          INSERT INTO game_rule_sets VALUES (8, 1, 159, 160, 1, 1, 15, 5000, 6, 50, 22331, 22527, 0, 45, 13353, 13352, 50, 10, 7, 10, 3, 0, 4, 1, 2, 60);",
     )
@@ -720,6 +747,33 @@ fn real_instances_data() {
     let camp = d.battlefields.battlefield(7).unwrap();
     assert_eq!(camp.rule_set.unwrap().corps_size, 5);
     assert_eq!(camp.spawns.unwrap().corps2_spawn.unwrap().x, 1229.0);
+    // game_score_rules: the Gladiator kill row (id 93: event 200, value 0, 30 points) and the
+    // Drill Camp rows (event 200 -> 3, assist events 202-204 -> 2).
+    let score = |rule_set, event, corps| {
+        GameScoreRule::resolve(d.battlefields.score_rules(rule_set), event, 0, corps)
+    };
+    assert_eq!(
+        score(28, game_score_event::KILL_ENEMY_UNIT_FINAL_HITTER, 0),
+        Some(30)
+    );
+    assert_eq!(
+        score(8, game_score_event::KILL_ENEMY_UNIT_FINAL_HITTER, 1),
+        Some(3)
+    );
+    assert_eq!(
+        score(8, game_score_event::KILL_ENEMY_UNIT_ASSIST_DEALER1, 0),
+        Some(2)
+    );
+    // game_rule_events: rule set 28 has its four authored rows.
+    assert_eq!(d.battlefields.rule_events(28).len(), 4);
+    // battle_field_buffs: battlefield 11 (Gladiator) and 7 (Drill Camp).
+    assert_eq!(d.battlefields.battlefield_buffs(11).len(), 3);
+    let camp_buffs = d.battlefields.battlefield_buffs(7);
+    assert_eq!(camp_buffs.len(), 8);
+    assert!(camp_buffs.iter().any(|b| (b.buff_id, b.value) == (7007, 2)));
+    assert!(camp_buffs
+        .iter()
+        .any(|b| (b.buff_id, b.value) == (6266, 100)));
     assert!(!d.tower_defs.tower_defs.is_empty());
     assert!(d.tower_defs.tower_defs[&12].target_npc_spawn_id == 13638);
     assert_eq!(d.zone_order.zone_keys_in_group(45), vec![236]);

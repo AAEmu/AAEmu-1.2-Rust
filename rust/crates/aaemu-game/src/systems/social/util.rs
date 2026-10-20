@@ -22,7 +22,11 @@ pub mod error {
     pub const TRIALS_ALREADY_CLOSED: i16 = 478;
     pub const TRIALS_JURY_FULL: i16 = 479;
     pub const CHAT_NOT_RAID_OWNER: i16 = 496;
+    pub const BAD_DUEL_TARGET: i16 = 504;
+    pub const ALREADY_IN_DUEL: i16 = 505;
+    pub const OTHER_ALREADY_IN_DUEL: i16 = 506;
     pub const TARGET_REJECTED_DUEL: i16 = 507;
+    pub const BAD_DUEL_SELF: i16 = 513;
     pub const CANNOT_JOIN_TRIAL_FROM_INSTANT_ZONE: i16 = 544;
     pub const TRIALS_CANNOT_JOIN_AFTER_START: i16 = 549;
     pub const EXPEDITION_ALREADY_MEMBER: i16 = 761;

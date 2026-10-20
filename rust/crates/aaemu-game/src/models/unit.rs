@@ -704,7 +704,10 @@ pub struct UnitBase {
     // ---- phase 3 / economy: add this subsystem's per-unit fields below ----
 
     // ---- phase 3 / social: add this subsystem's per-unit fields below ----
-
+    /// The current faction is temporary (duel Red / Blue team or a battlefield corps): it is
+    /// never written to `characters.faction_id`, does not touch houses / expeditions / parties
+    /// and is restored by `social::faction::restore_temporary_faction`.
+    pub faction_temporary: bool,
     // ---- phase 3 / quests: add this subsystem's per-unit fields below ----
 }
 
@@ -765,7 +768,7 @@ impl Default for UnitBase {
             // ---- phase 3 / economy ----
 
             // ---- phase 3 / social ----
-
+            faction_temporary: false,
             // ---- phase 3 / quests ----
         }
     }

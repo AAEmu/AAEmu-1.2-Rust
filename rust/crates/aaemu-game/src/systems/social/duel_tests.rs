@@ -65,6 +65,7 @@ impl Fixture {
         server.set_self();
         server.systems.social.duels.set_delays(DuelDelays {
             start,
+            request: Duration::from_secs(3600),
             check,
             duration: Duration::from_secs(3600),
         });
@@ -160,6 +161,14 @@ fn ended(challenger_id: u32, challenged_id: u32, a_obj: u32, b_obj: u32, det: u8
     s.into_bytes()
 }
 
+/// The error ids of the `SCErrorMsgPacket` frames.
+fn err_ids(frames: &[(u16, Vec<u8>)]) -> Vec<i16> {
+    find(frames, sc::SCErrorMsgPacket)
+        .iter()
+        .map(|b| i16::from_le_bytes([b[0], b[1]]))
+        .collect()
+}
+
 fn ops(frames: &[(u16, Vec<u8>)]) -> Vec<u16> {
     frames.iter().map(|f| f.0).collect()
 }
@@ -210,7 +219,15 @@ async fn challenge_accept_start_and_hp_win() {
         .doodad(flag.obj_id)
         .is_some());
     assert_eq!(find(&fa, sc::SCUnitFactionChangedPacket).len(), 2);
-    assert_eq!(find(&f.b.drain(), sc::SCUnitFactionChangedPacket).len(), 2);
+    // The countdown starts at the acceptance (10.x order), before the start task fires.
+    assert_eq!(
+        find(&fa, sc::SCDuelStartCountdownPacket),
+        vec![Vec::<u8>::new()]
+    );
+    let fb = f.b.drain();
+    assert_eq!(find(&fb, sc::SCUnitFactionChangedPacket).len(), 2);
+    assert_eq!(find(&fb, sc::SCDuelStartCountdownPacket).len(), 1);
+    assert!(find(&fa, sc::SCDuelStartedPacket).is_empty());
 
     // A second acceptance is ignored.
     f.answer(0).await;
@@ -227,7 +244,6 @@ async fn challenge_accept_start_and_hp_win() {
         vec![
             SCDuelStartedPacket,
             SCAreaChatBubblePacket,
-            SCDuelStartCountdownPacket,
             SCDuelStatePacket,
             SCDuelStatePacket,
             SCDoodadPhaseChangedPacket,
@@ -236,19 +252,18 @@ async fn challenge_accept_start_and_hp_win() {
         ]
     );
     let mut expected_b = ops(&fa);
-    expected_b.remove(5);
+    expected_b.remove(4);
     assert_eq!(ops(&fb), expected_b);
     let fo = flag.obj_id;
     assert_eq!(fa[0].1, vec![0, 1, 0, 1, 1, 0]);
     assert_eq!(fa[1].1, vec![1, 0, 1, 0, 0x1F, 2, 0, 0]);
-    assert!(fa[2].1.is_empty());
     let state = |obj: u32, flag: u32| {
         let mut s = PacketStream::new();
         s.write_bc(obj).write_bc(flag);
         s.into_bytes()
     };
-    assert_eq!(fa[3].1, state(0x100, fo));
-    assert_eq!(fa[4].1, state(0x101, fo));
+    assert_eq!(fa[2].1, state(0x100, fo));
+    assert_eq!(fa[3].1, state(0x101, fo));
     let mut phase = PacketStream::new();
     phase
         .write_bc(fo)
@@ -256,9 +271,9 @@ async fn challenge_accept_start_and_hp_win() {
         .write_u32(0)
         .write_i32(-1)
         .write_u32(0);
-    assert_eq!(fa[5].1, phase.into_bytes());
-    assert_eq!(fa[6].1, vec![0, 1, 0]);
-    assert_eq!(fa[7].1, vec![1, 1, 0]);
+    assert_eq!(fa[4].1, phase.into_bytes());
+    assert_eq!(fa[5].1, vec![0, 1, 0]);
+    assert_eq!(fa[6].1, vec![1, 1, 0]);
     {
         let d = f.duels().get(1).unwrap();
         let st = d.state();
@@ -473,7 +488,212 @@ async fn unknown_challenged_character_is_ignored() {
         .await
         .unwrap();
     assert!(f.duels().is_empty());
-    assert!(f.a.drain().is_empty());
+    // The challenger is told the target is invalid (10.x `BadDuelTarget`).
+    assert_eq!(err_ids(&f.a.drain()), vec![util::error::BAD_DUEL_TARGET]);
+}
+
+/// RPA-09: the Red / Blue team factions are temporary. They carry `temp = true`, do not touch
+/// the guild (a guild of another mother faction used to expel its own member) or the party, and
+/// the origin faction is restored when the duel ends.
+#[tokio::test]
+async fn temporary_team_factions_keep_guild_and_restore() {
+    use crate::data::world_data::SystemFaction;
+    use crate::systems::social::expedition::{Expedition, ExpeditionMember, ExpeditionRolePolicy};
+    use crate::systems::social::packets::body;
+    use crate::systems::social::packets::faction::SCUnitFactionChangedPacket;
+
+    let mut f = Fixture::new(true);
+    // Nuia guild: RedTeam (159) is not its mother faction, so the old SetFaction path would
+    // expel both members through their officer roles.
+    let member = |id: u32, name: &str, role: u8| ExpeditionMember {
+        expedition_id: 77,
+        character_id: id,
+        in_party: false,
+        is_online: true,
+        last_world_leave_time: 0,
+        name: name.into(),
+        level: 10,
+        zone_id: 0,
+        id3: 0,
+        abilities: [0; 3],
+        role,
+        position: (0.0, 0.0, 0.0),
+        memo: String::new(),
+        transfer_requested_time: 0,
+    };
+    let policy = |role: u8| ExpeditionRolePolicy {
+        expedition_id: 77,
+        role,
+        name: format!("role {role}"),
+        dominion_declare: false,
+        invite: true,
+        expel: true,
+        promote: true,
+        dismiss: true,
+        chat: true,
+        manager_chat: false,
+        siege_master: false,
+        join_siege: false,
+    };
+    f.server.expeditions.add(Expedition {
+        faction: SystemFaction {
+            id: 77,
+            mother_id: 148,
+            name: "Knights".into(),
+            owner_id: 1,
+            owner_name: "Alice".into(),
+            ..SystemFaction::default()
+        },
+        members: vec![member(1, "Alice", 255), member(2, "Bob", 2)],
+        policies: vec![policy(255), policy(2)],
+        removed_members: Vec::new(),
+        is_disbanded: false,
+    });
+    f.pa.data().unit.expedition_id = 77;
+    f.pb.data().unit.expedition_id = 77;
+
+    f.challenge().await;
+    f.b.drain();
+    f.answer(0).await;
+    let fa = f.a.drain();
+    assert!(find(&fa, sc::SCUnitFactionChangedPacket).contains(&body(
+        &SCUnitFactionChangedPacket {
+            obj_id: 0x100,
+            unit_name: "Alice".into(),
+            id: 101,
+            id2: FACTION_RED_TEAM,
+            temp: true,
+        }
+    )));
+    assert!(
+        find(&f.b.drain(), sc::SCUnitFactionChangedPacket).contains(&body(
+            &SCUnitFactionChangedPacket {
+                obj_id: 0x101,
+                unit_name: "Bob".into(),
+                id: 101,
+                id2: FACTION_BLUE_TEAM,
+                temp: true,
+            }
+        ))
+    );
+    // The guild and its roles are untouched.
+    let e = f.server.expeditions.get(77).expect("guild");
+    assert_eq!(e.member_ids(), vec![1, 2]);
+    assert_eq!(e.member(2).unwrap().role, 2);
+    assert!(e.removed_members.is_empty());
+    assert_eq!(f.pa.data().unit.expedition_id, 77);
+    assert_eq!(f.pb.data().unit.expedition_id, 77);
+    assert!(f.pa.data().unit.faction_temporary && f.pb.data().unit.faction_temporary);
+
+    // Duel end restores both factions and clears the temporary marker.
+    f.duels()
+        .duel_stop(&f.server, 1, duel_det_type::DRAW, 2)
+        .await;
+    for p in [&f.pa, &f.pb] {
+        assert_eq!(p.data().unit.faction_id, 101);
+        assert!(!p.data().unit.faction_temporary);
+    }
+    assert_eq!(
+        f.server.expeditions.get(77).unwrap().member_ids(),
+        vec![1, 2]
+    );
+    assert!(f
+        .server
+        .expeditions
+        .get(77)
+        .unwrap()
+        .removed_members
+        .is_empty());
+}
+
+/// RPA-09: a disconnect during the duel restores the faction before the departure save, so a
+/// relog / crash recovery never sees the Red / Blue team faction.
+#[tokio::test]
+async fn disconnect_during_a_duel_restores_the_origin_faction() {
+    let mut f = Fixture::new(true);
+    f.challenge().await;
+    f.b.drain();
+    f.answer(0).await;
+    f.a.drain();
+    f.b.drain();
+    assert_eq!(f.pa.data().unit.faction_id, FACTION_RED_TEAM);
+
+    crate::world::session::on_disconnect(&f.server, &mut f.a.conn).await;
+    assert_eq!(f.pa.data().unit.faction_id, 101);
+    assert!(!f.pa.data().unit.faction_temporary);
+    // The save path also restores, so a clean logout (leave world) behaves the same.
+    f.pb.data().unit.faction_id = FACTION_BLUE_TEAM;
+    f.pb.data().unit.faction_temporary = true;
+    f.pb.data().unit.origin_faction_id = 101;
+    crate::world::session::save_and_remove_from_world(&f.server, Some(&f.pb)).await;
+    assert_eq!(f.pb.data().unit.faction_id, 101);
+    assert!(!f.pb.data().unit.faction_temporary);
+}
+
+/// A participant leaving mid-duel ends the duel for both sides: the opponent gets the
+/// draw `SCDuelEndedPacket` (the leaver does not lose, the opponent does not win), is restored to its faction and the duel is unregistered.
+#[tokio::test]
+async fn disconnect_mid_duel_ends_the_duel_for_the_opponent() {
+    for challenger_leaves in [true, false] {
+        let mut f = Fixture::new(true);
+        f.start().await;
+        assert_eq!(f.pb.data().unit.faction_id, FACTION_BLUE_TEAM);
+        if challenger_leaves {
+            crate::world::session::on_disconnect(&f.server, &mut f.a.conn).await;
+            assert_eq!(
+                find(&f.b.drain(), sc::SCDuelEndedPacket),
+                vec![ended(1, 2, 0x100, 0x101, duel_det_type::DRAW)]
+            );
+        } else {
+            crate::world::session::on_disconnect(&f.server, &mut f.b.conn).await;
+            assert_eq!(
+                find(&f.a.drain(), sc::SCDuelEndedPacket),
+                vec![ended(2, 1, 0x101, 0x100, duel_det_type::DRAW)]
+            );
+        }
+        for p in [&f.pa, &f.pb] {
+            assert_eq!(p.data().unit.faction_id, 101);
+            assert!(!p.data().unit.faction_temporary);
+            assert!(!p.data().unit.is_in_duel);
+        }
+        assert!(f.duels().is_empty());
+    }
+}
+
+/// A pending (unanswered) challenge is dropped when a participant leaves.
+#[tokio::test]
+async fn disconnect_with_a_pending_challenge_drops_it() {
+    let mut f = Fixture::new(true);
+    f.challenge().await;
+    assert!(!f.duels().is_empty());
+    crate::world::session::on_disconnect(&f.server, &mut f.b.conn).await;
+    assert!(f.duels().is_empty());
+}
+
+/// A duel inside a battlefield: the duel end returns to the corps faction, not to the origin
+/// faction, and the battlefield leave then restores the origin.
+#[tokio::test]
+async fn duel_inside_a_temporary_faction_returns_to_it() {
+    let mut f = Fixture::new(true);
+    {
+        let mut c = f.pa.data();
+        c.unit.faction_id = 160;
+        c.unit.origin_faction_id = 101;
+        c.unit.faction_temporary = true;
+    }
+    f.challenge().await;
+    f.b.drain();
+    f.answer(0).await;
+    assert_eq!(f.pa.data().unit.faction_id, FACTION_RED_TEAM);
+    assert_eq!(f.pa.data().unit.origin_faction_id, 101);
+    f.duels()
+        .duel_stop(&f.server, 1, duel_det_type::DRAW, 2)
+        .await;
+    assert_eq!(f.pa.data().unit.faction_id, 160);
+    assert!(f.pa.data().unit.faction_temporary);
+    crate::systems::social::faction::restore_temporary_faction(&f.server, &f.pa);
+    assert_eq!(f.pa.data().unit.faction_id, 101);
+    assert!(!f.pa.data().unit.faction_temporary);
 }
 
 #[tokio::test]
@@ -497,4 +717,258 @@ async fn real_timers_start_and_end_the_duel() {
     }
     assert!(f.duels().is_empty());
     assert_eq!(f.pa.data().unit.faction_id, 101);
+}
+
+/// Fix 1: SCDuelStartCountdown at the acceptance, SCDuelStarted `start` later (real timers).
+#[tokio::test]
+async fn countdown_comes_first_and_started_follows_after_the_delay() {
+    let mut f = Fixture::with_delays(true, Duration::from_millis(150), Duration::from_secs(3600));
+    f.challenge().await;
+    f.b.drain();
+    f.answer(0).await;
+    let fa = f.a.drain();
+    assert_eq!(find(&fa, sc::SCDuelStartCountdownPacket).len(), 1);
+    assert!(find(&fa, sc::SCDuelStartedPacket).is_empty());
+    let t0 = std::time::Instant::now();
+    let fa = wait_for(&mut f.a, sc::SCDuelStartedPacket).await;
+    assert!(t0.elapsed() >= Duration::from_millis(100));
+    // The countdown is not repeated by the start.
+    assert!(find(&fa, sc::SCDuelStartCountdownPacket).is_empty());
+}
+
+/// Fix 2: a refuse that arrives after the duel started is ignored (no half state); the duel
+/// then ends normally and restores factions and flag.
+#[tokio::test]
+async fn refuse_after_start_is_ignored() {
+    let mut f = Fixture::new(true);
+    f.start().await;
+    let flag = f.duel().state().flag.clone().unwrap();
+    for (who, error) in [(1, 507i16), (2, 507), (2, 0x20)] {
+        let mut s = PacketStream::new();
+        s.write_u32(1).write_i16(error);
+        let conn = if who == 1 {
+            &mut f.a.conn
+        } else {
+            &mut f.b.conn
+        };
+        f.server
+            .handle_frame(conn, &encode_raw(1, cs::CSStartDuelPacket, s.as_bytes()))
+            .await
+            .unwrap();
+    }
+    assert!(f.a.drain().is_empty() && f.b.drain().is_empty());
+    assert!(f.duels().duel_of(1).unwrap().started);
+    assert_eq!(f.pa.data().unit.faction_id, FACTION_RED_TEAM);
+    assert_eq!(f.pb.data().unit.faction_id, FACTION_BLUE_TEAM);
+    assert!(f.pa.data().unit.is_in_duel);
+    assert!(f
+        .server
+        .world
+        .world(0)
+        .unwrap()
+        .doodad(flag.obj_id)
+        .is_some());
+    // The normal end path still works and cleans everything up.
+    f.duels()
+        .duel_stop(&f.server, 1, duel_det_type::DRAW, 2)
+        .await;
+    assert_eq!(f.pa.data().unit.faction_id, 101);
+    assert_eq!(f.pb.data().unit.faction_id, 101);
+    assert!(f
+        .server
+        .world
+        .world(0)
+        .unwrap()
+        .doodad(flag.obj_id)
+        .is_none());
+    assert!(f.duels().is_empty());
+}
+
+/// A third party can neither refuse nor accept somebody else's pending challenge.
+#[tokio::test]
+async fn third_party_cannot_answer_a_pending_challenge() {
+    let mut f = Fixture::new(true);
+    f.challenge().await;
+    f.b.drain();
+    // Alice (the challenger) accepting her own challenge is refused with bad_duel_target.
+    let mut s = PacketStream::new();
+    s.write_u32(1).write_i16(0);
+    f.server
+        .handle_frame(
+            &mut f.a.conn,
+            &encode_raw(1, cs::CSStartDuelPacket, s.as_bytes()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(err_ids(&f.a.drain()), vec![util::error::BAD_DUEL_TARGET]);
+    assert!(!f.duels().duel_of(1).unwrap().started);
+    // Accepting an unknown challenge reports bad_duel_target as well.
+    let mut s = PacketStream::new();
+    s.write_u32(77).write_i16(0);
+    f.server
+        .handle_frame(
+            &mut f.b.conn,
+            &encode_raw(1, cs::CSStartDuelPacket, s.as_bytes()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(err_ids(&f.b.drain()), vec![util::error::BAD_DUEL_TARGET]);
+}
+
+/// Fix 3: challenge validation.
+#[tokio::test]
+async fn challenge_validation_errors() {
+    let mut f = Fixture::new(true);
+    let challenge = |id: u32| encode_raw(1, cs::CSChallengeDuelPacket, &id.to_le_bytes());
+
+    // Self.
+    f.server
+        .handle_frame(&mut f.a.conn, &challenge(1))
+        .await
+        .unwrap();
+    assert_eq!(err_ids(&f.a.drain()), vec![util::error::BAD_DUEL_SELF]);
+    assert!(f.duels().is_empty());
+
+    // Not online.
+    f.server
+        .handle_frame(&mut f.a.conn, &challenge(99))
+        .await
+        .unwrap();
+    assert_eq!(err_ids(&f.a.drain()), vec![util::error::BAD_DUEL_TARGET]);
+
+    // Dead target.
+    f.pb.data().unit.hp = 0;
+    f.server
+        .handle_frame(&mut f.a.conn, &challenge(2))
+        .await
+        .unwrap();
+    assert_eq!(err_ids(&f.a.drain()), vec![util::error::BAD_DUEL_TARGET]);
+    assert!(f.b.drain().is_empty() && f.duels().is_empty());
+    f.pb.data().unit.hp = 1000;
+
+    // A valid challenge, then a second one: the challenger is "already in a duel" ...
+    f.challenge().await;
+    assert_eq!(f.b.drain().len(), 1);
+    f.server
+        .handle_frame(&mut f.a.conn, &challenge(2))
+        .await
+        .unwrap();
+    assert_eq!(err_ids(&f.a.drain()), vec![util::error::ALREADY_IN_DUEL]);
+    // ... the target (busy with the pending challenge) is "other already in duel" for a third
+    // character.
+    let mut c = TestClient::new(&f.server, 3, 3);
+    let pc = spawn_player(
+        &f.server,
+        &c,
+        test_character(3, "Carol", 1020.0, 1000.0),
+        0x102,
+    );
+    pc.data().unit.hp = 1000;
+    c.conn.active_char = Some(pc.clone());
+    c.drain();
+    f.server
+        .handle_frame(&mut c.conn, &challenge(2))
+        .await
+        .unwrap();
+    assert_eq!(
+        err_ids(&c.drain()),
+        vec![util::error::OTHER_ALREADY_IN_DUEL]
+    );
+    // The first challenge is untouched and still answerable.
+    assert!(find(&f.b.drain(), sc::SCDuelChallengedPacket).is_empty());
+    assert!(f.duels().is_in_duel_with(1, 2) && f.duels().len() == 2);
+    f.answer(0).await;
+    assert!(f.duels().duel_of(1).unwrap().started);
+}
+
+/// An unanswered challenge expires and releases both players (10.x `DuelRequestExpired`).
+#[tokio::test]
+async fn unanswered_challenge_expires() {
+    let mut f = Fixture::new(true);
+    f.server.systems.social.duels.set_delays(DuelDelays {
+        request: Duration::from_millis(50),
+        ..f.duels().delays()
+    });
+    f.challenge().await;
+    f.b.drain();
+    let fa = wait_for(&mut f.a, sc::SCErrorMsgPacket).await;
+    assert_eq!(err_ids(&fa), vec![util::error::TARGET_REJECTED_DUEL]);
+    assert!(f.duels().is_empty());
+    // Both can challenge again.
+    f.challenge().await;
+    assert!(f.duels().is_in_duel_with(1, 2));
+}
+
+/// A request timeout (or a refuse) that fires after the accept won must not tear the running
+/// duel down: the pending -> started transition is single-owner.
+#[tokio::test]
+async fn stale_request_timeout_after_accept_keeps_the_duel() {
+    let mut f = Fixture::new(true);
+    f.challenge().await;
+    let duel = f.duel();
+    f.answer(0).await;
+    f.a.drain();
+    f.b.drain();
+    // The expiry task raced the accept and runs afterwards.
+    f.duels().request_expired(&duel, 1);
+    assert!(f.duels().duel_of(1).unwrap().started);
+    assert!(f.pa.data().unit.is_in_duel && f.pb.data().unit.is_in_duel);
+    assert_eq!(f.pa.data().unit.faction_id, FACTION_RED_TEAM);
+    assert_eq!(f.pb.data().unit.faction_id, FACTION_BLUE_TEAM);
+    assert!(err_ids(&f.a.drain()).is_empty());
+    // It ends and cleans up through the normal path.
+    f.duels()
+        .duel_stop(&f.server, 1, duel_det_type::DRAW, 2)
+        .await;
+    assert_eq!(f.pa.data().unit.faction_id, 101);
+    assert_eq!(f.pb.data().unit.faction_id, 101);
+    assert!(f.duels().is_empty());
+}
+
+/// The reverse order: the expiry won, so a late accept finds a released challenge and neither
+/// starts a duel nor leaves flags / factions behind.
+#[tokio::test]
+async fn accept_after_the_request_expired_is_refused() {
+    let mut f = Fixture::new(true);
+    f.challenge().await;
+    let duel = f.duel();
+    f.duels().request_expired(&duel, 1);
+    assert!(f.duels().is_empty());
+    f.a.drain();
+    f.b.drain();
+    f.answer(0).await;
+    assert!(f.duels().is_empty());
+    assert_eq!(f.pa.data().unit.faction_id, 101);
+    assert!(!f.pa.data().unit.is_in_duel);
+    // A held reference to the released duel is refused as well.
+    f.duels().duel_accepted(&f.server, &f.pb, 1).await;
+    assert!(!duel.state().started);
+    assert!(!f.pb.data().unit.is_in_duel);
+}
+
+/// A refuse after the expiry released the challenge does not clean up twice.
+#[tokio::test]
+async fn refuse_after_the_request_expired_is_ignored() {
+    let mut f = Fixture::new(true);
+    f.challenge().await;
+    let duel = f.duel();
+    f.duels().request_expired(&duel, 1);
+    f.a.drain();
+    f.duels().duel_cancel(&f.server, &f.pb, 1, 507);
+    assert!(err_ids(&f.a.drain()).is_empty());
+}
+
+/// A challenger who died after asking cannot be dueled: the accept releases the challenge.
+#[tokio::test]
+async fn accept_with_a_dead_challenger_is_refused() {
+    let mut f = Fixture::new(true);
+    f.challenge().await;
+    f.b.drain();
+    f.pa.data().unit.hp = 0;
+    f.answer(0).await;
+    assert_eq!(err_ids(&f.b.drain()), vec![util::error::BAD_DUEL_TARGET]);
+    assert!(f.duels().is_empty());
+    assert_eq!(f.pa.data().unit.faction_id, 101);
+    assert_eq!(f.pb.data().unit.faction_id, 101);
+    assert!(!f.pa.data().unit.is_in_duel && !f.pb.data().unit.is_in_duel);
 }

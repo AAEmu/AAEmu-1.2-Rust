@@ -937,6 +937,10 @@ pub struct SCCraftFailedPacket {
     pub craft_id: u32,
     pub count: i32,
 }
+impl SCCraftFailedPacket {
+    /// Entry cap of the 1.2 client's reader.
+    pub const MAX_ENTRIES: i32 = 20;
+}
 packet_def!(
     SCCraftFailedPacket,
     level = LEVEL_PLAIN,
@@ -944,8 +948,11 @@ packet_def!(
 );
 impl Marshal for SCCraftFailedPacket {
     fn write(&self, s: &mut PacketStream) {
-        s.write_u32(self.id).write_i32(self.count);
-        for _ in 0..self.count.max(0) {
+        // The 1.2 client reads at most 20 entries (OnCraftFailed 391e0840 -> 394d2370 clamps the
+        // loop to twenty; Bevy RE notes), so the count never exceeds the entries written.
+        let count = self.count.clamp(0, Self::MAX_ENTRIES);
+        s.write_u32(self.id).write_i32(count);
+        for _ in 0..count {
             s.write_u32(self.craft_id);
         }
     }

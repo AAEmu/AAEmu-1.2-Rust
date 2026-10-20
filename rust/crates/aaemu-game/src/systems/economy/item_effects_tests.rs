@@ -1465,6 +1465,7 @@ async fn mate_equipment_equip_unequip_and_refusal() {
                     character_id: 1,
                     passenger_id: 0,
                     bts: false,
+                    success: true,
                 })
             ),
         ]
@@ -1507,6 +1508,7 @@ async fn mate_equipment_equip_unequip_and_refusal() {
                     character_id: 1,
                     passenger_id: 0,
                     bts: false,
+                    success: true,
                 })
             ),
         ]
@@ -1542,6 +1544,7 @@ async fn mate_equipment_equip_unequip_and_refusal() {
                 character_id: 1,
                 passenger_id: 0,
                 bts: false,
+                success: false, // rejected move
             })
         )]
     );

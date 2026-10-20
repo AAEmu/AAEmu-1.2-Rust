@@ -122,6 +122,7 @@ pub fn insert_mate_equipment_packets(
                     character_id: owner,
                     passenger_id: 0,
                     bts: false,
+                    success: true,
                 },
             );
         }
@@ -369,6 +370,7 @@ pub fn change_mate_equipment(
                     character_id: p.owning_player_id,
                     passenger_id: p.passenger_player_id,
                     bts: p.bts,
+                    success: false, // rejected move: the client must not apply the item copy
                 },
             );
         }

@@ -29,6 +29,7 @@ use crate::net::connection::{ConnCommand, GameConnection, GameState};
 use crate::packets::proxy::ChangeStatePacket;
 use crate::packets::world::*;
 use crate::server::GameServer;
+use crate::systems::skills::packets::SCCooldownsPacket;
 use crate::world::{broadcast, unit_state, Player, PlayerRef, WorldInstance, WorldObject};
 
 /// `LeaveWorldTargetType`.
@@ -516,6 +517,12 @@ pub fn select_loaded(
             state: conflict.current_state,
             end_time: conflict.next_state_time,
         });
+    }
+    // Running skill cooldowns (the client appends them to its cooldown manager; an empty list
+    // would change nothing, so it is not sent).
+    let cooldowns = SCCooldownsPacket::from_cooldowns(&snapshot.unit.cooldowns, now_ms());
+    if !cooldowns.is_empty() {
+        conn.send(&cooldowns);
     }
     // FactionManager.SendFactions / SendRelations
     if data.factions.factions.is_empty() {
@@ -1193,6 +1200,14 @@ pub async fn leave_world_task(
         }
         conn.send(&SCLeaveWorldGrantedPacket { target });
         conn.send(&ChangeStatePacket { state: 0 });
+        if target == leave_target::QUIT_GAME {
+            // The player quit: free the account at once and close the connection (the queued
+            // frames are flushed first). Deviation from the C#, which kept the connection and
+            // the account registered until the client closed the socket or the dead-connection
+            // sweep (30-60 s) did, so a prompt relog was refused ("enter world denied, reason 1").
+            server.accounts.remove_if_owned(conn.account_id(), conn.id);
+            conn.shutdown();
+        }
     }
 }
 
@@ -1267,6 +1282,15 @@ pub async fn save_and_remove_from_world(server: &GameServer, active: Option<&Pla
     let Some(p) = active else {
         return;
     };
+    // A duel / battlefield faction is temporary: restore it before the departure save so the
+    // character is never persisted with its Red / Blue team or corps faction (RPA-09).
+    server
+        .systems
+        .social
+        .duels
+        .on_participant_leave(server, p)
+        .await;
+    crate::systems::social::faction::restore_temporary_faction(server, p);
     server.save.remember_departing(p);
     crate::systems::npcs::schedule_item_session::on_leave(server, p);
     let _transaction = server.save.transaction_lock().await;
@@ -1306,6 +1330,23 @@ pub async fn on_disconnect(server: &GameServer, conn: &mut GameConnection) {
     // disconnect.
     crate::systems::vehicles::on_disconnect(server, &p);
     crate::systems::npcs::doodad::coffer::close_coffers_opened_by(server, &p);
+    // A connection keeps its `active_char` after a leave (quit / character select). That
+    // character was already saved and removed from the world by `leave_world_task`: running the
+    // departure again would write a stale copy over a character that logged in again on a newer
+    // connection. Only the departure save is skipped; the cleanups above are not part of the
+    // leave path and stay as before.
+    let live = server
+        .world
+        .character_by_obj_id(p.obj_id)
+        .is_some_and(|live| Arc::ptr_eq(&live, &p));
+    if !live {
+        tracing::debug!(
+            "Disconnect of session {}: character {} already left the world, no second save",
+            conn.id,
+            p.character_id
+        );
+        return;
+    }
     save_and_remove_from_world(server, Some(&p)).await;
 }
 

@@ -2183,8 +2183,9 @@ async fn repair_slave_effect_and_repair_cooldown() {
     assert_eq!(task[0], 74);
     let item = mates::owned_item(&server, &pa, item_id).unwrap();
     assert!(item.details.slave_repair_start_time > 0);
-    // The detail block now carries the repair time (8 bytes instead of 4).
-    assert_eq!(item.detail_type_and_details().len(), 1 + 33);
+    // The slave detail block is always 29 bytes (the 1.2 client reader takes a fixed 29 for
+    // detail tag 2), with the repair time inside it.
+    assert_eq!(item.detail_type_and_details().len(), 1 + 29);
     // Summoning during the 10 minute repair: SlaveSpawnErrorNeedRepairTime (540) with the
     // seconds left in the error's type field.
     assert!(slaves::create_core(

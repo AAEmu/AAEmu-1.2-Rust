@@ -1103,3 +1103,100 @@ async fn moving_removes_remove_on_move_buffs() {
     super::on_moved(&server, &player, (pos.0 - 1.0, pos.1, pos.2), 0);
     assert!(!player.data().unit.buffs.check_buff(BUFF_ID + 2));
 }
+
+/// RPA-10: `conflict_zones.num_kills_*` are only reachable when a PvP kill registers with the
+/// zone conflict in Tension. The 1.2 C# called `AddZoneKill` only from the Conflict / War honor
+/// branch, where `ZoneConflict.AddZoneKill` ignores it, so a zone stayed in Tension after its
+/// first Peace -> Conflict -> War -> Peace cycle. The timer chain is walked here with the
+/// shipped 5 / 80 / 120 minute durations and the real thresholds of zone group 14
+/// (`num_kills_0..4` = 70 / 100 / 140 / 190 / 250).
+#[tokio::test]
+async fn pvp_kill_advances_a_conflict_zone_that_returned_to_tension() {
+    use crate::data::world_data::{conflict_type, Zone, ZoneConflict};
+
+    let mut data = GameData::empty();
+    let zone_key = 777;
+    data.zones.zones.insert(
+        zone_key,
+        Zone {
+            id: 1,
+            name: "Conflict".into(),
+            zone_key,
+            group_id: 14,
+            closed: false,
+            faction_id: 0,
+            zone_climate_id: 0,
+        },
+    );
+    let server = Arc::new(test_server_with(data));
+    server.set_self();
+
+    let now = 1_000_000_000_000i64;
+    let zone = ZoneConflict {
+        zone_group_id: 14,
+        num_kills: [70, 100, 140, 190, 250],
+        conflict_min: 5,
+        war_min: 80,
+        peace_min: 120,
+        current_state: conflict_type::CONFLICT,
+        next_state_time: now / 1000 + 5 * 60,
+        ..ZoneConflict::default()
+    };
+    let conflicts = &server.systems.social.conflicts;
+    conflicts.init(&[zone], now);
+    let war_at = now + 5 * 60_000;
+    let peace_at = war_at + 80 * 60_000;
+    let tension_at = peace_at + 120 * 60_000;
+    assert_eq!(
+        conflicts.check_timer_at(14, war_at).unwrap().state,
+        conflict_type::WAR
+    );
+    assert_eq!(
+        conflicts.check_timer_at(14, peace_at).unwrap().state,
+        conflict_type::PEACE
+    );
+    assert_eq!(
+        conflicts.check_timer_at(14, tension_at).unwrap().state,
+        conflict_type::TENSION
+    );
+    // 70 kills are at the Tension threshold, not above it.
+    assert!(conflicts.add_zone_kill_at(14, 70, now).is_none());
+    assert_eq!(conflicts.get(14).unwrap().kill_count, 70);
+    assert_eq!(
+        conflicts.get(14).unwrap().current_state,
+        conflict_type::TENSION
+    );
+
+    let mut a = TestClient::new(&server, 1, 1);
+    let mut b = TestClient::new(&server, 2, 2);
+    let killer = spawn_player(
+        &server,
+        &a,
+        test_character(1, "Killer", 100.0, 100.0),
+        0x100,
+    );
+    let victim = spawn_player(
+        &server,
+        &b,
+        test_character(2, "Victim", 110.0, 100.0),
+        0x101,
+    );
+    a.conn.active_char = Some(killer.clone());
+    b.conn.active_char = Some(victim.clone());
+    victim.data().unit.transform.zone_id = zone_key;
+    victim.data().unit.hp = 0;
+
+    super::combat::do_die(
+        &server,
+        &WorldObject::from(&victim),
+        Some(&WorldObject::from(&killer)),
+        super::types::KillReason::Damage,
+    );
+
+    // The kill now registers in Tension: 71 > num_kills_0 -> Danger.
+    let c = conflicts.get(14).unwrap();
+    assert_eq!(c.current_state, conflict_type::DANGER);
+    assert_eq!(c.kill_count, 71);
+    // No honor outside Conflict / War (the C#/1.2 rule is unchanged).
+    assert_eq!(killer.data().honor_gained_in_combat, 0);
+}

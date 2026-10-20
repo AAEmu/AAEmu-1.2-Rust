@@ -352,3 +352,25 @@ fn template_id_can_be_max_u_int32() {
     item.template_id = u32::MAX;
     assert_eq!(item.template_id, u32::MAX);
 }
+
+// ---- Detail payload widths (client reader 3961edf0) ----
+
+#[test]
+fn summon_slave_detail_is_always_29_bytes() {
+    let mut item = Item::new(WORLD_ID);
+    item.class = ItemClass::SummonSlave;
+    item.details.slave_type = 2;
+    item.details.slave_db_id = 0x0102;
+    let mut unset = aaemu_commons::PacketStream::new();
+    item.write_details_to(&mut unset);
+    assert_eq!(unset.len(), 29);
+    // Type, bc db id, destroyed flag, then 24 zero bytes while no repair is running.
+    assert_eq!(unset.as_bytes()[..5], [2, 2, 1, 0, 0]);
+    assert!(unset.as_bytes()[5..].iter().all(|&b| b == 0));
+
+    item.details.slave_repair_start_time = 0x1122_3344;
+    let mut running = aaemu_commons::PacketStream::new();
+    item.write_details_to(&mut running);
+    assert_eq!(running.len(), 29);
+    assert_eq!(running.as_bytes()[5..13], 0x1122_3344i64.to_le_bytes());
+}
