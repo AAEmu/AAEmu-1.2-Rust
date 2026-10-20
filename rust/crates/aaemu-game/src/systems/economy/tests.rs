@@ -881,27 +881,34 @@ async fn bank_refuses_non_positive_amounts_and_missing_banker() {
     body.write_i32(50).write_i32(0);
     let fifty = body.into_bytes();
 
+    // At a banker, non-positive amounts are refused (no packet, no change).
+    spawn_service_npc(&mut w, 0x300, BANKER_TEMPLATE, 101.0);
+    w.pa.data().unit.current_interaction_object = 0x300;
+    for body in [&neg, &zero] {
+        run::<CSDepositMoneyPacket>(&mut w, 0, body);
+        {
+            let c = w.pa.data();
+            assert_eq!((c.money, c.money2), (500, 100));
+        }
+        run::<CSWithdrawMoneyPacket>(&mut w, 0, body);
+        {
+            let c = w.pa.data();
+            assert_eq!((c.money, c.money2), (500, 100));
+        }
+    }
+    assert!(w.a.drain().is_empty());
+
     // No interaction at all: even a sane amount is refused (error to the client).
+    w.pa.data().unit.current_interaction_object = 0;
     run::<CSDepositMoneyPacket>(&mut w, 0, &fifty);
     run::<CSWithdrawMoneyPacket>(&mut w, 0, &fifty);
     {
         let c = w.pa.data();
         assert_eq!((c.money, c.money2), (500, 100));
     }
-    assert_eq!(w.a.drain().len(), 2);
-
-    // At a banker, non-positive amounts are refused silently (no packet, no change).
-    spawn_service_npc(&mut w, 0x300, BANKER_TEMPLATE, 101.0);
-    w.pa.data().unit.current_interaction_object = 0x300;
-    for body in [&neg, &zero] {
-        run::<CSDepositMoneyPacket>(&mut w, 0, body);
-        run::<CSWithdrawMoneyPacket>(&mut w, 0, body);
-    }
-    {
-        let c = w.pa.data();
-        assert_eq!((c.money, c.money2), (500, 100));
-    }
-    assert!(w.a.drain().is_empty());
+    let f = w.a.drain();
+    assert_eq!(f.len(), 2);
+    assert!(f.iter().all(|(op, _)| *op == sc::SCErrorMsgPacket));
 
     // Out of range of the banker: refused.
     spawn_service_npc(&mut w, 0x301, BANKER_TEMPLATE, 150.0);
