@@ -13,9 +13,13 @@ use crate::net::registry::PacketRegistry;
 use crate::opcodes::{cs, sc};
 use crate::packets::packet_def;
 use crate::server::GameServer;
+use crate::world::PlayerRef;
 
 use super::auction::{AuctionBid, AuctionLot, AuctionSearch, ClientAuctionLot};
+use super::error_message;
+use super::inventory;
 use super::item_handlers::{active, sync_client_packet};
+use super::store::{near_service_npc, SERVICE_RANGE};
 
 pub fn register(reg: &mut PacketRegistry) {
     reg.register::<CSAuctionPostPacket>(LEVEL_PLAIN, cs::CSAuctionPostPacket);
@@ -29,6 +33,24 @@ pub fn register(reg: &mut PacketRegistry) {
 // ---------------------------------------------------------------------------------------------
 // C->S
 // ---------------------------------------------------------------------------------------------
+
+/// The auction house is only reachable at an auctioneer NPC: one of the packet's ids (or the
+/// NPC the player is interacting with) must be an NPC with the auctioneer flag within
+/// [`SERVICE_RANGE`]. The C# ignored both ids.
+fn at_auctioneer(server: &GameServer, p: &PlayerRef, id: u32, id2: u32) -> bool {
+    let interaction = p.data().unit.current_interaction_object;
+    let ok = [id, id2, interaction]
+        .into_iter()
+        .any(|npc| near_service_npc(server, p, npc, SERVICE_RANGE, |i| i.auctioneer));
+    if !ok {
+        tracing::warn!(
+            "{}: rejected auction request: no auctioneer NPC in range (ids {id}/{id2})",
+            p.data().unit.name
+        );
+        inventory::send_error_message(p, error_message::AUC_AUCTIONEER_TOO_FAR_AWAY, 0, true);
+    }
+    ok
+}
 
 /// `CSAuctionPostPacket`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +86,9 @@ impl CSAuctionPostPacket {
             self.duration
         );
         let Some(p) = active(conn) else { return };
+        if !at_auctioneer(server, &p, self.auctioneer_id, self.auctioneer_id2) {
+            return;
+        }
         server.systems.economy.auction.post_lot_on_auction(
             server,
             &p,
@@ -101,6 +126,9 @@ impl CSAuctionSearchPacket {
             self.search.keyword
         );
         let Some(p) = active(conn) else { return };
+        if !at_auctioneer(server, &p, self.auctioneer_id, self.auctioneer_id2) {
+            return;
+        }
         server
             .systems
             .economy
@@ -143,6 +171,9 @@ impl CSBidAuctionPacket {
             tracing::warn!("Invalid arguments passed to BidOnAuctionLot.");
             return;
         };
+        if !at_auctioneer(server, &p, self.auctioneer_id, self.auctioneer_id2) {
+            return;
+        }
         server
             .systems
             .economy
@@ -178,6 +209,9 @@ impl CSCancelAuctionPacket {
             self.lot.id
         );
         let Some(p) = active(conn) else { return };
+        if !at_auctioneer(server, &p, self.auctioneer_id, self.auctioneer_id2) {
+            return;
+        }
         server
             .systems
             .economy
@@ -212,6 +246,9 @@ impl CSAuctionMyBidListPacket {
             self.page
         );
         let Some(p) = active(conn) else { return };
+        if !at_auctioneer(server, &p, self.auctioneer_id, self.auctioneer_id2) {
+            return;
+        }
         server
             .systems
             .economy
@@ -249,6 +286,9 @@ impl CSAuctionLowestPricePacket {
             self.item_grade
         );
         let Some(p) = active(conn) else { return };
+        if !at_auctioneer(server, &p, self.auctioneer_id, self.auctioneer_id2) {
+            return;
+        }
         server.systems.economy.auction.cheapest_auction_lot(
             &p,
             self.item_template_id,

@@ -8,6 +8,7 @@ use aaemu_commons::{Marshal, PacketStream};
 use crate::data::items::{backpack_type, EquipTemplate, ItemTemplate, TemplateKind};
 use crate::data::GameData;
 use crate::models::container::{equip_slot, slot_type};
+use crate::models::doodad::Doodad;
 use crate::models::item::Item;
 use crate::models::item_task::{task_type, ItemTask};
 use crate::models::npc::Npc;
@@ -30,8 +31,9 @@ use crate::systems::economy::store_data::{
     ExpandExpertLimit, ItemLookConvert, SpecialtyBundleItem, SpecialtyNpc,
 };
 use crate::systems::economy::tests::{give, item_at, run, task_body, test_data, World, STACK};
+use crate::systems::npcs::doodad::templates::{DoodadFunc, DoodadFuncStoreUi, FuncTemplate};
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
-use crate::world::{Entity, NpcRef, PlayerRef};
+use crate::world::{DoodadRef, Entity, NpcRef, PlayerRef};
 
 const PRODUCT: u32 = 5000; // max 10
 const PACK: u32 = 6000; // trade pack (backpack, auto-equip)
@@ -235,6 +237,72 @@ fn spawn_npc(w: &mut World, obj_id: u32, template: u32, x: f32) -> NpcRef {
     w.a.drain();
     w.b.drain();
     n
+}
+
+fn spawn_doodad(w: &mut World, obj_id: u32, template: u32, group: u32, x: f32) -> DoodadRef {
+    let mut d = Doodad::new(template);
+    d.func_group_id = group;
+    d.transform.set_xyz(x, 100.0, 100.0);
+    let d = Entity::new(obj_id, d);
+    let world = w.server.world.world(0).unwrap();
+    world.spawn(&d, &w.server.view_ctx());
+    w.a.drain();
+    w.b.drain();
+    d
+}
+
+/// `DoodadFuncStoreUi` of group 42 with pack `pack_id` (the `Shops` hook sells `STACK` in 7).
+fn with_doodad_shop(pack_id: u32) -> GameData {
+    let mut d = data();
+    let group = 42;
+    d.systems.npcs.doodad.funcs_by_groups.insert(
+        group,
+        vec![DoodadFunc {
+            group_id: group,
+            func_id: 1,
+            func_key: 1,
+            func_type: "DoodadFuncStoreUi".into(),
+            next_phase: -1,
+            sound_id: 0,
+            skill_id: 0,
+            perm_id: 0,
+            count: 0,
+        }],
+    );
+    d.systems
+        .npcs
+        .doodad
+        .func_templates
+        .entry("DoodadFuncStoreUi")
+        .or_default()
+        .insert(
+            1,
+            FuncTemplate::StoreUi(DoodadFuncStoreUi {
+                id: 1,
+                merchant_pack_id: pack_id,
+            }),
+        );
+    d
+}
+
+fn doodad_buy_body(doodad: u32, buy: &[(u32, i32, u8)], buy_back: &[i32]) -> Vec<u8> {
+    let mut s = PacketStream::new();
+    s.write_bc(0)
+        .write_bc(doodad)
+        .write_u32(0)
+        .write_u8(buy.len() as u8)
+        .write_u8(buy_back.len() as u8);
+    for (id, count, currency) in buy {
+        s.write_u32(*id)
+            .write_u8(0)
+            .write_i32(*count)
+            .write_u8(*currency);
+    }
+    for i in buy_back {
+        s.write_i32(*i);
+    }
+    s.write_bool(false);
+    s.into_bytes()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1470,4 +1538,114 @@ fn real_compact_db_craft_and_store_tables() {
         craft.skills.len(),
         store.specialty_packs.len()
     );
+}
+
+fn sell_body(npc: u32, entries: &[(u8, u8, u64)]) -> Vec<u8> {
+    let mut s = PacketStream::new();
+    s.write_bc(npc).write_bc(0).write_u8(entries.len() as u8);
+    for (st, slot, id) in entries {
+        s.write_u8(*st).write_u8(*slot).write_u64(*id).write_u32(0);
+    }
+    s.into_bytes()
+}
+
+#[tokio::test]
+async fn sell_pays_a_repeated_entry_only_once() {
+    let mut w = world();
+    w.server.systems.economy.hooks.npcs.install(Arc::new(Shops));
+    spawn_npc(&mut w, MERCHANT_NPC, 1234, 101.0);
+    let pa = w.pa.clone();
+    pa.data().money = 0;
+    let id = give(&w, &pa, slot_type::INVENTORY, STACK, 5, 0);
+    // The same slot listed 20 times: 5 units x refund 5 are paid once (25).
+    let entries = vec![(slot_type::INVENTORY, 0u8, id); 20];
+    run::<CSSellItemsPacket>(&mut w, 0, &sell_body(MERCHANT_NPC, &entries));
+    assert!(item_at(&pa, 2, 0).is_none());
+    assert_eq!(pa.data().money, 25);
+}
+
+#[tokio::test]
+async fn sell_is_refused_far_from_the_merchant() {
+    let mut w = world();
+    w.server.systems.economy.hooks.npcs.install(Arc::new(Shops));
+    spawn_npc(&mut w, MERCHANT_NPC, 1234, 120.0);
+    let pa = w.pa.clone();
+    pa.data().money = 0;
+    let id = give(&w, &pa, slot_type::INVENTORY, STACK, 5, 0);
+    w.a.drain();
+    run::<CSSellItemsPacket>(
+        &mut w,
+        0,
+        &sell_body(MERCHANT_NPC, &[(slot_type::INVENTORY, 0, id)]),
+    );
+    assert!(item_at(&pa, 2, 0).is_some());
+    assert_eq!(pa.data().money, 0);
+    assert_eq!(
+        w.a.drain(),
+        vec![(sc::SCErrorMsgPacket, err_bytes(154, 154, 0, true))]
+    );
+}
+
+#[tokio::test]
+async fn buy_without_a_merchant_npc_is_refused() {
+    let mut w = world();
+    w.server.systems.economy.hooks.npcs.install(Arc::new(Shops));
+    let pa = w.pa.clone();
+    pa.data().money = 1000;
+    // npc 0 + doodad 0 used to skip the merchant filter: any template, here a free-for-all.
+    run::<CSBuyItemsPacket>(&mut w, 0, &buy_body(0, &[(STACK, 3, 0)], &[]));
+    assert!(item_at(&pa, 2, 0).is_none());
+    assert_eq!(pa.data().money, 1000);
+    assert!(w.a.drain().is_empty());
+}
+
+#[tokio::test]
+async fn sell_pays_nothing_when_the_item_cannot_move_to_buyback() {
+    let mut w = world();
+    w.server.systems.economy.hooks.npcs.install(Arc::new(Shops));
+    spawn_npc(&mut w, MERCHANT_NPC, 1234, 101.0);
+    let pa = w.pa.clone();
+    pa.data().money = 0;
+    let id = give(&w, &pa, slot_type::INVENTORY, STACK, 5, 0);
+    let buyback = w.server.systems.economy.store.buyback(pa.character_id);
+    buyback.lock().unwrap().set_container_size(0);
+    run::<CSSellItemsPacket>(
+        &mut w,
+        0,
+        &sell_body(MERCHANT_NPC, &[(slot_type::INVENTORY, 0, id)]),
+    );
+    assert!(item_at(&pa, 2, 0).is_some());
+    assert_eq!(pa.data().money, 0);
+}
+
+#[tokio::test]
+async fn buy_at_a_doodad_shop_uses_its_catalog() {
+    let mut w = world_with_data(with_doodad_shop(7));
+    w.server.systems.economy.hooks.npcs.install(Arc::new(Shops));
+    spawn_doodad(&mut w, 0x600, 1234, 42, 101.0);
+    let pa = w.pa.clone();
+    pa.data().money = 1000;
+    // Pack 7 sells STACK; PRODUCT is not in it and is skipped even though it used to be
+    // purchasable through the unvalidated doodad path.
+    run::<CSBuyItemsPacket>(
+        &mut w,
+        0,
+        &doodad_buy_body(0x600, &[(STACK, 2, 0), (PRODUCT, 1, 0)], &[]),
+    );
+    assert_eq!(item_at(&pa, 2, 0).unwrap().template_id, STACK);
+    assert_eq!(item_at(&pa, 2, 0).unwrap().count, 2);
+    assert!(item_at(&pa, 2, 1).is_none());
+    assert_eq!(pa.data().money, 980);
+}
+
+#[tokio::test]
+async fn buy_at_a_doodad_without_a_store_func_is_refused() {
+    let mut w = world();
+    w.server.systems.economy.hooks.npcs.install(Arc::new(Shops));
+    spawn_doodad(&mut w, 0x601, 1234, 0, 101.0);
+    let pa = w.pa.clone();
+    pa.data().money = 1000;
+    run::<CSBuyItemsPacket>(&mut w, 0, &doodad_buy_body(0x601, &[(STACK, 2, 0)], &[]));
+    assert!(item_at(&pa, 2, 0).is_none());
+    assert_eq!(pa.data().money, 1000);
 }
