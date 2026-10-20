@@ -1539,6 +1539,15 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `PostDate`) and a buyout sends `SCAuctionBidPacket` with `isBuyout = true`, the lot's
   `direct_money` and the buyer's identity (the C# buyout branch sent nothing although the 1.2
   packet carries the flag). Seller / item mail delivery is unchanged.
+* systems::economy (auction settlement, 2026-10-20): the C# ignored `MailForAuction.Send()`
+  (`RemoveAuctionLotSold` / `RemoveAuctionLotFail` / `CancelAuctionLot` removed the lot anyway),
+  so a mail that was not stored lost the seller's money or the buyer's item. Here a settlement
+  removes the lot only after every one of its mails was delivered; otherwise the lot (or, for an
+  outbid refund in the bidding path, just the refund) stays queued in `AuctionManager::pending`
+  and `update_auction_house` retries the still-missing mails on its next tick, remembering which
+  ones are already out so nothing is delivered twice. The queue is in memory: a restart inside
+  the retry window loses a pending outbid refund, and a pending sale that has not reached its
+  `end_time` reverts to the lot's saved bidder fields.
 
 ### Ranking boards (Rust only)
 
