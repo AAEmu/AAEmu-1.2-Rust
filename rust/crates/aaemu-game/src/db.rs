@@ -204,6 +204,37 @@ pub enum AccountPointColumn {
     Loyalty,
 }
 
+/// `accounts.extra_character_slots` (0 when the account row does not exist).
+pub async fn extra_character_slots(pool: &MySqlPool, account_id: u32) -> u8 {
+    let slots: Option<i64> = sqlx::query_scalar(
+        "SELECT CAST(extra_character_slots AS SIGNED) FROM accounts WHERE account_id = ?",
+    )
+    .bind(account_id)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or_else(|e| {
+        tracing::error!("extra_character_slots({account_id}): {e}");
+        None
+    });
+    slots.unwrap_or(0).clamp(0, i64::from(u8::MAX)) as u8
+}
+
+/// Adds one `accounts.extra_character_slots` (saturating at 255) and returns the new count.
+pub async fn add_extra_character_slot(pool: &MySqlPool, account_id: u32) -> Option<u8> {
+    if let Err(e) = sqlx::query(
+        "INSERT INTO accounts (account_id, extra_character_slots) VALUES (?, 1) \
+         ON DUPLICATE KEY UPDATE extra_character_slots = LEAST(255, extra_character_slots + 1)",
+    )
+    .bind(account_id)
+    .execute(pool)
+    .await
+    {
+        tracing::error!("add_extra_character_slot({account_id}): {e}");
+        return None;
+    }
+    Some(extra_character_slots(pool, account_id).await)
+}
+
 /// `AccountManager.UpdateLabor`.
 pub async fn update_labor(pool: &MySqlPool, account_id: u32, labor: i16) {
     if let Err(e) = sqlx::query("UPDATE accounts SET labor = ? WHERE account_id = ?")

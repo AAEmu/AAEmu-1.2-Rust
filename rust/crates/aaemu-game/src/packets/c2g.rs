@@ -173,7 +173,8 @@ impl ClientPacket for CSListCharacterPacket {
         conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            conn.send(&SCGetSlotCountPacket { sc: 0 });
+            let extra_slots = crate::db::extra_character_slots(&server.db, conn.account_id()).await;
+            conn.send(&SCGetSlotCountPacket { sc: extra_slots });
             send_account_info(conn);
             load_account(server, conn).await?;
             let characters = std::mem::take(&mut conn.characters);

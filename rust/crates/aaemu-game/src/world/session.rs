@@ -317,6 +317,8 @@ pub async fn select_character(
     // Force player into main_world when coming from character select
     c.unit.transform.instance_id = DEFAULT_INSTANCE_ID;
     load_character_details(server, &mut c).await?;
+    // Account-wide attributes (`account_attributes`, economy): loaded once per character select.
+    crate::systems::economy::account_attributes::load(server, c.account_id).await;
     // Character.Load(): Mates.Load (vehicles subsystem)
     crate::systems::vehicles::load_character(server, c.id).await;
     let offline_friend_ids: Vec<u32> = c

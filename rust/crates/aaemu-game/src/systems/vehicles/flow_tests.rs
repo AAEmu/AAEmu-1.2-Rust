@@ -929,6 +929,32 @@ async fn a_killed_mate_flags_its_item_once_and_cannot_be_summoned_until_revived(
 }
 
 #[tokio::test]
+async fn mate_make_get_up_revives_the_summoned_corpse() {
+    let mut t = dead_mate();
+    t.client.drain();
+    assert_eq!(t.mate.data().unit.hp, 0);
+
+    assert!(mates::revive_mate(&t.server, &t.mate));
+    let frames = t.client.drain();
+    assert_eq!(task_actions(&frames), vec![REPAIR_PETS_TASK]);
+    assert!(ops(&frames).contains(&sc::SCUnitPointsPacket));
+    assert_eq!(t.item().details.mate_dead, 0);
+    let row = t.row();
+    assert_eq!(
+        (row.hp, row.mp),
+        (mates::MATE_FULL_POOL, mates::MATE_FULL_POOL)
+    );
+    {
+        let d = t.mate.data();
+        assert_eq!((d.unit.hp, d.unit.mp), (d.unit.max_hp, d.unit.max_mp));
+    }
+
+    // A living mate is left alone (no packets, no battle-pet task).
+    assert!(!mates::revive_mate(&t.server, &t.mate));
+    assert!(t.client.drain().is_empty());
+}
+
+#[tokio::test]
 async fn a_stabler_revives_dead_mates_for_the_client_price() {
     let mut t = dead_mate();
     t.dismiss();

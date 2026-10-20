@@ -507,6 +507,7 @@ impl EconomyForSkills {
             pub const GAIN_ITEM: i32 = 27;
             pub const GAIN_ITEM_WITH_POS_IMPRINT: i32 = 32;
             pub const GAIN_ITEM_WITH_EMBLEM_IMPRINT: i32 = 45;
+            pub const ADD_CHARACTER_SLOT: i32 = 91;
             pub const ITEM_CONVERSION: i32 = 49;
             pub const FISHING_LOOT: i32 = 79;
             pub const GRADE_ENCHANT: i32 = 92;
@@ -516,6 +517,7 @@ impl EconomyForSkills {
             pub const ITEM_SOCKETING: i32 = 106;
             pub const ITEM_CAP_SCALE_RESET: i32 = 111;
             pub const ITEM_CAP_SCALE: i32 = 112;
+            pub const AUCTION_POST_AUTHORITY: i32 = 117;
         }
         let caster_item = skill_item(&args.caster_caster);
         let target_item = item_target(&args.target_caster).map(|(id, _)| id);
@@ -552,6 +554,11 @@ impl EconomyForSkills {
             special::FISHING_LOOT => {
                 if let (Some(p), Some(t)) = (player_caster(args), args.target.as_obj()) {
                     item_effects::fishing_loot(server, p, t, v, &mut rng);
+                }
+            }
+            special::ADD_CHARACTER_SLOT => {
+                if let Some(p) = player_caster(args) {
+                    super::character_slots::apply(server, p);
                 }
             }
             special::GRADE_ENCHANT => {
@@ -632,6 +639,26 @@ impl EconomyForSkills {
                         skill_id,
                         v,
                         &mut rng,
+                    );
+                }
+            }
+            special::AUCTION_POST_AUTHORITY => {
+                if let Some(p) = player_caster(args) {
+                    let (account_id, world_id) = {
+                        let c = p.data();
+                        (c.account_id, c.unit.transform.world_id)
+                    };
+                    super::account_attributes::apply_effect(
+                        server,
+                        account_id,
+                        world_id,
+                        super::account_attributes::AccountAttributeGrant {
+                            kind_id: super::account_attributes::KIND_AUCTION_POST_AUTHORITY,
+                            bind_world: false,
+                            is_add: true,
+                            count: 0,
+                            time: 0,
+                        },
                     );
                 }
             }
@@ -1095,8 +1122,25 @@ impl ItemSkillHooks for EconomyForSkills {
                 tracing::trace!("TrainCraftEffect");
                 true
             }
-            (EffectKind::AccountAttributeEffect, _) => {
-                tracing::trace!("AccountAttributeEffect");
+            (EffectKind::AccountAttributeEffect, EffectTemplate::AccountAttribute(e)) => {
+                if let Some(p) = player_caster(args) {
+                    let (account_id, world_id) = {
+                        let c = p.data();
+                        (c.account_id, c.unit.transform.world_id)
+                    };
+                    super::account_attributes::apply_effect(
+                        server,
+                        account_id,
+                        world_id,
+                        super::account_attributes::AccountAttributeGrant {
+                            kind_id: e.kind_id.min(i32::MAX as u32) as i32,
+                            bind_world: e.bind_world,
+                            is_add: e.is_add,
+                            count: e.count.min(i32::MAX as u32) as i32,
+                            time: e.time.min(i32::MAX as u32) as i32,
+                        },
+                    );
+                }
                 true
             }
             _ => false,
