@@ -185,10 +185,15 @@ pub struct LootEntry {
 }
 
 impl LootEntry {
+    /// Whether the dice was offered to `id` and the player has not rolled or passed yet.
+    fn can_roll(&self, id: u32) -> bool {
+        self.player_rolls.iter().any(|(p, r)| *p == id && *r == 0)
+    }
+
+    /// Records the roll (or pass, -1) of a player for whom [`Self::can_roll`] holds.
     fn set_roll(&mut self, id: u32, roll: i8) {
-        match self.player_rolls.iter_mut().find(|(p, _)| *p == id) {
-            Some(r) => r.1 = roll,
-            None => self.player_rolls.push((id, roll)),
+        if let Some(r) = self.player_rolls.iter_mut().find(|(p, _)| *p == id) {
+            r.1 = roll;
         }
     }
 }
@@ -694,6 +699,16 @@ impl LootManager {
         let Some(entry) = g.items.get_mut(&item_index) else {
             return;
         };
+        // Only a player the dice was offered to (the eligible players of this loot, see
+        // `try_take_loot_locked`) may roll, and only once. The C# stored any roll of anybody,
+        // again and again; with the highest roll winning that would be exploitable.
+        if !entry.can_roll(player.character_id) {
+            tracing::debug!(
+                "DoPlayerRoll: {} is not rolling for loot item {item_index} or already rolled",
+                player.character_id
+            );
+            return;
+        }
         let roll = if roll_request {
             ctx.rng.next_i32(1, 100) as i8
         } else {
@@ -922,8 +937,9 @@ fn finish_rolling(ctx: &mut Ctx<'_, '_>, g: &mut Guard<'_>, idx: u16) {
             },
         );
     }
-    // Find the highest rolled value (the C# sorted ascending and took the first positive roll,
-    // i.e. the LOWEST; a dice bid is won by the highest roll).
+    // Find the highest rolled value. Deviation: the C# took the lowest positive roll as the
+    // threshold and then picked a random winner among all positive rollers (so the value did
+    // not matter); a dice bid is won by the highest roll (see PORTING.md).
     let highest = rolls
         .iter()
         .map(|(_, r)| *r)

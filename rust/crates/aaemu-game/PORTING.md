@@ -1575,8 +1575,11 @@ and in NPC wandering / buff remaining times.
   owner). The client is the source of the request and `CanAccept` already warns with the cause.
 * systems::economy: `BindType.HasFlag(...)` on the plain `ItemBindType` enum is a bit test
   (`BindOnUnpack` matches 4..7, `BindOnEquip` matches 3 and 7); mirrored.
-* systems::economy: loot dice are won by the highest roll (the C# sorted the rolled values
-  ascending and took the first positive one, so the lowest bidder won). The 1.2 client presents
+* systems::economy: loot dice are won by the highest roll. The C# `FinishRolling` took the lowest
+  positive roll as the threshold and then picked a random winner among all rollers `>=` that
+  threshold, i.e. uniformly among every positive roller whatever the values. Only players the
+  dice was offered to (the loot's eligible players) may roll, and only once; a repeated or
+  outsider roll is ignored (the C# overwrote the roll). The 1.2 client presents
   the roll as an item bid and only reports values: `ui_texts` 4305 `loot_dice_roll` = "Roll"
   (입찰), 4318 `loot_dice_title` = "Item Bid" (아이템 입찰), 2412 `msg_dice_value` = "$1 rolled a
   $2 on the dice. (1-$3)"; its `loot_dice.alb` bytecode only calls `X2Loot.DoDiceAction` /
