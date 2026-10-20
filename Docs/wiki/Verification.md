@@ -95,6 +95,12 @@ verification commands are:
 | `lootexpect took\|failed [npc obj]` | Loot the last killed NPC and fail unless `SCLootItemTook` (took) / `SCLootItemFailed` (failed) arrives |
 | `rezexpect inplace\|temple ok\|refused` | Send `CSResurrectCharacter` and fail unless `SCCharacterResurrected` for the bot's own unit does (ok) / does not (refused) arrive |
 
+Useful companions: `waitpeer [secs] [name]` waits until another player is in sight, `await
+<Event> [secs]` waits for a party / guild event (`TeamJoined`, `GuildInvite`, ...), `rawcs
+<opcode> <body hex>` sends an arbitrary client packet (`SELF` and `PEER` in the body stand for
+the bot's own and the first other player's object id), and `greply <faction id> <0|1>` answers
+a guild invitation without waiting for one.
+
 A failed expectation prints a `FAIL` line like
 
 ```text

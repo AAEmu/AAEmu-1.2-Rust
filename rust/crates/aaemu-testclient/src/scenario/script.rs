@@ -19,6 +19,16 @@
 //! item <template> <count>            `/item add self` and remember the stack id
 //! icast <skill> <item template> <npc template|self|peer|player:NAME>
 //!                                    cast from the remembered item stack
+//! waitpeer [secs] [name]             read packets until another player is in sight (60 s default)
+//! rawcs <opcode hex> [<body hex>]    send any client packet (`SELF` / `PEER` in the body hex)
+//! pkill [name]                       `/kill` with the peer targeted (GM)
+//! await <Event> [secs]               wait (60 s default) for a party/guild event and consume it
+//! partyinvite <name>                 CSInviteToTeam (party) by character name
+//! partyaccept                        wait for SCAskToJoinTeam and accept it
+//! gcreate <name>                     CSCreateExpedition
+//! ginvite [name]                     CSInviteToExpedition to the peer
+//! gaccept                            wait for the guild invitation and join
+//! greply <faction id> <0|1>          CSReplyExpeditionInvitation without waiting for an invite
 //! sync <token> [count]              suite barrier: wait until `count` bots (default: all) are here
 //! expectpkt <PacketName> [secs]     fail unless the packet arrives within `secs` (default 5)
 //! expectnopkt <PacketName> [secs]   fail if the packet arrives within `secs` (default 5)
@@ -33,7 +43,7 @@
 //!
 //! Every failed expectation prints a `FAIL` line and makes the run exit non-zero.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use aaemu_game::opcodes::{cs, sc};
@@ -42,6 +52,7 @@ use anyhow::{bail, Context};
 use super::questitem::{chat_text, gm_command, quest_state, stack_id};
 use super::{pump, skill_response_result, Runner};
 use crate::game::{parse_item_task, GameClient, Packet, UnitInfo};
+use crate::social::{self, SocialEvent};
 
 fn dist(a: (f32, f32, f32), b: (f32, f32, f32)) -> f32 {
     ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) + (a.2 - b.2).powi(2)).sqrt()
@@ -142,6 +153,43 @@ fn peer(game: &GameClient, name: Option<&str>) -> anyhow::Result<UnitInfo> {
         .min_by_key(|u| u.obj_id)
         .cloned()
         .context("no other player in sight (run `pump` after both bots logged in)")
+}
+
+/// Variant name of a social event (`TeamJoined { .. }` -> `TeamJoined`).
+fn event_kind(e: &SocialEvent) -> String {
+    let d = format!("{e:?}");
+    d.split([' ', '{', '(']).next().unwrap_or("").to_string()
+}
+
+/// Waits for the first not yet consumed social event named `kind` (case-insensitive),
+/// reading packets for at most `secs`.
+async fn await_event(
+    game: &mut GameClient,
+    consumed: &mut HashSet<usize>,
+    kind: &str,
+    secs: u64,
+) -> anyhow::Result<SocialEvent> {
+    let want = kind.to_ascii_lowercase();
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        let found = game
+            .state
+            .social
+            .iter()
+            .enumerate()
+            .find(|(i, e)| !consumed.contains(i) && event_kind(e).to_ascii_lowercase() == want)
+            .map(|(i, e)| (i, e.clone()));
+        if let Some((i, e)) = found {
+            consumed.insert(i);
+            return Ok(e);
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            bail!("timed out ({secs} s) waiting for social event '{kind}'");
+        }
+        game.recv_within(left.min(Duration::from_millis(500)))
+            .await?;
+    }
 }
 
 /// Splits an argument line, keeping double-quoted spans together (`expectdb "<sql>" <value>`,
@@ -317,6 +365,7 @@ async fn run_lines(
     let mut items: HashMap<u32, u64> = HashMap::new();
     let mut clock = 40_000u32;
     let mut last_npc = 0u32;
+    let mut consumed: HashSet<usize> = HashSet::new();
     let mut mate: Option<(u32, u16)> = None;
     for (n, raw) in text.lines().enumerate() {
         let line = raw.trim();
@@ -756,6 +805,131 @@ async fn run_lines(
                     "    lootexpect {} ok",
                     if want_took { "took" } else { "failed" }
                 );
+            }
+            "waitpeer" => {
+                let secs: u64 = parts.first().and_then(|x| x.parse().ok()).unwrap_or(60);
+                let deadline = Instant::now() + Duration::from_secs(secs);
+                loop {
+                    if let Ok(p) = peer(game, parts.get(1).copied()) {
+                        println!("    peer '{}' char {} obj {}", p.name, p.id, p.obj_id);
+                        break;
+                    }
+                    if Instant::now() >= deadline {
+                        bail!("no other player in sight after {secs} s");
+                    }
+                    game.recv_within(Duration::from_millis(500)).await?;
+                }
+            }
+            "await" => {
+                let kind = parts.first().context("await needs an event name")?;
+                let secs: u64 = parts.get(1).and_then(|x| x.parse().ok()).unwrap_or(60);
+                let e = await_event(game, &mut consumed, kind, secs).await?;
+                println!("    awaited: {e:?}");
+            }
+            "pkill" => {
+                let target = peer(game, parts.first().copied())?;
+                clock += 1500;
+                game.move_to((target.pos.0 + 1.0, target.pos.1, target.pos.2), clock)
+                    .await?;
+                game.change_target(target.obj_id).await?;
+                game.drain(Duration::from_millis(300), Duration::from_secs(1))
+                    .await?;
+                let got = gm_command(game, "kill").await?;
+                show(&got);
+            }
+            "rawcs" => {
+                let opcode = u16::from_str_radix(parts.first().context("opcode")?, 16)?;
+                // `SELF` / `PEER` stand for our own / the first other player's object id in
+                // the packet's `bc` encoding.
+                let bc = |id: u32| {
+                    format!(
+                        "{:02x}{:02x}{:02x}",
+                        id & 0xff,
+                        (id >> 8) & 0xff,
+                        (id >> 16) & 0xff
+                    )
+                };
+                let raw = parts.get(1).copied().unwrap_or("");
+                let peer_bc = if raw.contains("PEER") {
+                    bc(peer(game, None)
+                        .context("PEER needs another player in sight")?
+                        .obj_id)
+                } else {
+                    String::new()
+                };
+                let hex = raw
+                    .replace("SELF", &bc(game.state.self_obj))
+                    .replace("PEER", &peer_bc);
+                let body: Vec<u8> = (0..hex.len() / 2)
+                    .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16))
+                    .collect::<Result<_, _>>()?;
+                game.send_cs(opcode, &body).await?;
+                let got = game
+                    .drain(Duration::from_millis(1200), Duration::from_secs(6))
+                    .await?;
+                show(&got);
+            }
+            "partyinvite" => {
+                let target = parts.first().context("name")?;
+                let (op, body) = social::invite_to_team(0, true, target);
+                game.send_cs(op, &body).await?;
+                let got = game
+                    .drain(Duration::from_millis(1500), Duration::from_secs(6))
+                    .await?;
+                show(&got);
+            }
+            "partyaccept" => {
+                let SocialEvent::TeamAsk {
+                    team_id,
+                    sender_id,
+                    is_party,
+                    ..
+                } = await_event(game, &mut consumed, "TeamAsk", 60).await?
+                else {
+                    bail!("not a team invitation");
+                };
+                let (op, body) =
+                    social::reply_to_join_team(team_id, is_party, sender_id, false, &cfg.character);
+                game.send_cs(op, &body).await?;
+                let got = game
+                    .drain(Duration::from_millis(1500), Duration::from_secs(6))
+                    .await?;
+                show(&got);
+            }
+            "gcreate" => {
+                let (op, body) = social::create_expedition(rest.trim());
+                game.send_cs(op, &body).await?;
+                game.drain(Duration::from_millis(800), Duration::from_secs(4))
+                    .await?;
+            }
+            "ginvite" => {
+                let target = peer(game, parts.first().copied())?;
+                let (op, body) = social::invite_to_expedition(&target.name);
+                game.send_cs(op, &body).await?;
+                game.drain(Duration::from_millis(800), Duration::from_secs(3))
+                    .await?;
+            }
+            "gaccept" => {
+                let SocialEvent::GuildInvite { faction_id, .. } =
+                    await_event(game, &mut consumed, "GuildInvite", 60).await?
+                else {
+                    bail!("not a guild invitation");
+                };
+                let (op, body) = social::reply_expedition_invitation(faction_id, true);
+                game.send_cs(op, &body).await?;
+                game.drain(Duration::from_millis(800), Duration::from_secs(3))
+                    .await?;
+            }
+            "greply" => {
+                // Answer a guild invitation that was never received (id is the faction id).
+                let id: u32 = num(&parts, 0)?;
+                let join = num::<u8>(&parts, 1)? != 0;
+                let (op, body) = social::reply_expedition_invitation(id, join);
+                game.send_cs(op, &body).await?;
+                let got = game
+                    .drain(Duration::from_millis(800), Duration::from_secs(3))
+                    .await?;
+                show(&got);
             }
             other => bail!("unknown script command '{other}' at line {}", n + 1),
         }

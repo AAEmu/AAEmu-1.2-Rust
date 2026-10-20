@@ -8,5 +8,6 @@ pub mod load;
 pub mod login;
 pub mod record;
 pub mod scenario;
+mod social;
 pub mod stream;
 pub mod verify;
