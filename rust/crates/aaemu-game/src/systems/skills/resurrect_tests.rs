@@ -65,3 +65,13 @@ async fn in_place_resurrection_consumes_the_pending_offer() {
         .unwrap();
     assert_eq!(player.data().unit.hp, 0);
 }
+
+#[tokio::test]
+async fn a_new_death_clears_a_stale_offer_above_the_free_resurrection_level() {
+    let server = test_server();
+    let (_client, player) = dead_player(&server);
+    offer_resurrection(&player);
+    player.data().unit.level = 20;
+    super::combat::character_death_losses(&server, &player);
+    assert!(!player.data().skill_char.resurrect_offer);
+}

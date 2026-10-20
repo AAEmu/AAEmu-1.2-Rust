@@ -396,7 +396,7 @@ pub fn compute_death_wait_time(p: &PlayerRef, now: i64) {
 /// the main world, `LastExpLoss` (`GetExpLoss(level, ExpLossRateAtDeath)` capped to the exp of
 /// the current level, 80 % of it recoverable; a free resurrection offer below
 /// `MinimumExpLossLevel`). Returns `(LastExpLoss, LastDurabilityLoss)`.
-fn character_death_losses(server: &GameServer, p: &PlayerRef) -> (i32, u8) {
+pub(super) fn character_death_losses(server: &GameServer, p: &PlayerRef) -> (i32, u8) {
     let world = &server.config.get().world;
     let exp_table = &server.game_data.experience;
     let (level, experience, instance_id) = {
@@ -411,6 +411,9 @@ fn character_death_losses(server: &GameServer, p: &PlayerRef) -> (i32, u8) {
     };
     let mut lost_exp = 0;
     let mut recoverable = p.data().recoverable_exp;
+    // An offer left over from an earlier death (a GM revive does not consume it) must not carry
+    // over: only this death's free resurrection or a new Resurrection effect grants one.
+    p.data().skill_char.resurrect_offer = false;
     if level < exp_table.max_player_level()
         && instance_id == crate::models::character::DEFAULT_INSTANCE_ID
     {
