@@ -318,6 +318,17 @@ pub fn add_item(server: &GameServer, character: &PlayerRef, st: u8, slot: u8, am
         cancel_locked(server, &mut trades, character.obj_id, 0, trade_id); // TODO (C#) - Reason
         return;
     }
+    // Only unbound bag items may be put up (as for mail and auction).
+    if item.slot_type != slot_type::INVENTORY
+        || item.flags & crate::models::item::ITEM_FLAG_SOUL_BOUND != 0
+    {
+        tracing::warn!(
+            "Trade Id:{trade_id} {} put up a bound item or a non-bag slot ({st}-{slot}), refused.",
+            name_of(character)
+        );
+        cancel_locked(server, &mut trades, character.obj_id, 0, trade_id);
+        return;
+    }
     let Some(t) = trade_mut(&mut trades, trade_id) else {
         return;
     };
@@ -813,6 +824,11 @@ fn preflight_items(
                     .cloned()
             })
             .ok_or_else(|| format!("item {item_id} is no longer in the owner's containers"))?;
+        if item.slot_type != slot_type::INVENTORY
+            || item.flags & crate::models::item::ITEM_FLAG_SOUL_BOUND != 0
+        {
+            return Err(format!("item {item_id} left the bag or became bound"));
+        }
         let total = totals.entry(item_id).or_insert(0);
         *total += i64::from(amount);
         if *total > i64::from(item.count) {
