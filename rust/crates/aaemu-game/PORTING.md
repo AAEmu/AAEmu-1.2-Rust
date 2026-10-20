@@ -218,6 +218,7 @@ connected by `systems::economy::wiring`).
 | `TradeManager`, trade packets | `systems/economy/trade.rs` | done | |
 | `CashShopManager`, `Models/Game/CashShop/**`, ICS / premium packets | `systems/economy/cash_shop.rs` | done | Gifts by `CommercialMail` (`wiring`); account credits SQL behind `CashShopDb`. |
 | Item skill-effect bodies (grade enchant, socketing, conversion, cap scale, UCC imprint, ...), mate / slave equipment packets | `systems/economy/item_effects*.rs` | done | Called by the skills subsystem's effects. UCC imprint / cleanup require owned source and target items; client UCC casts require the actual source item's configured use skill, preserving the unrelated legacy bound-item portal exception. Dyeing checks the loaded `dyeable_items` allowlist. Invalid UCC / dye effects cancel deferred reagent consumption. |
+| Item skill-effect stubs given data-derived bodies (`GainItemWithPosImprint` 32, `RechargeItemBuff` 95, `ExpToItem` 96) | `systems/economy/item_effects.rs` | done (data-derived) | The C# `Execute` bodies were `// TODO` stubs, so the behaviour comes from `special_effects` 405 / 546 / 547 / 548 (32: create `value1` x1 with `SkillEffectGainItemWithPos`), 12446 / 17017 (95) and 12462 (96: `value1` XP -> `value2` x1 with `SkillEffectExpToItem`) plus the tool skills that cast them. `GainItemWithPosImprint` stores no position imprint: the 1.2 item details have no such field. `ExpToItem` subtracts the experience directly instead of through `AddExp` (which recomputes the level and could level the character down), sends `SCExpChangedPacket(-value1)`, checks bag room before spending the XP, and cancels so the reagent is kept. `RechargeItemBuff` takes the cast's item target, resets `charge_start_time` (and `charge_count` when the template has one) and re-applies the equipped item's gear buff through `apply_gear_buffs` with the item both removed and added, so the recharge buff is not stacked; the 1 s item timers read the new charge window on their next tick, so nothing is re-scheduled. |
 
 ### systems::social
 
@@ -479,7 +480,10 @@ the x2game / cry3dengine decompiles (addresses below). Config `Physics` (`Config
   C# buoyancy force and the shore / ship–ship / doodad / barrier / steep-terrain depenetration.
   Hull damage comes from the ZWUnitCollision aggregation: closing speeds ≤ 2 m/s are ignored (the C#
   dealt 1 % on any overlap); the pair maximum per 500 ms (clamped to 10 m/s) gives the C#'s
-  speed-scaled percentage (nose-cone rule kept). The 1.2 data has neither the expression constants
+  speed-scaled percentage (nose-cone rule kept). Deviation: each pair also has the C# 1.5 s damage
+  cooldown (`HULL_COLLISION_DAMAGE_COOLDOWN_SEC`) and a terrain / static pair only damages on a
+  new impact (no impact in the previous 500 ms window), so grinding or bouncing contacts no longer
+  chip up to 20 % of max HP per second. The 1.2 data has neither the expression constants
   (12 / 13 / 21) nor the `physics_collision_*_damage_mul` columns. The keel width (0.2 m) and the
   default tube offset (half beam, the zone's `bbox.x / 2`) are inferred / taken literally. Prefab
   buoy brushes take precedence over that fallback, as in the engine.
