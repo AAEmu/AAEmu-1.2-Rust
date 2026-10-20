@@ -99,6 +99,15 @@ pub fn use_func(
         F::Quest(f) => skills::quest(f, ctx, caster, skill_id),
         // --- world ---
         F::Binding(f) => world::binding(f, ctx, caster),
+        // Navi gate / sign (1219, 1034, 3347): the action itself is the packet handler's
+        // (`portal::navi_open_portal` / `navi_teleport`) or the skill's (3347: `Return`);
+        // the func only leads to its next phase (1219 -> 2046 opening timer + animation,
+        // 3347 -> 8135 timer). C# only logged, so the doodad never changed phase. Rows without
+        // a next phase (1034) stay where they are.
+        F::NaviOpenPortal(_) | F::NaviTeleport(_) => {
+            tracing::trace!("{} next phase {next_phase}", t.func_type());
+            set_to_next_phase(ctx, next_phase > 0);
+        }
         F::Attachment(f) => world::attachment(f, ctx, caster),
         F::EnterInstance(f) => world::enter_instance(f, ctx, caster),
         F::EnterSysInstance(f) => world::enter_sys_instance(f, ctx, caster),
@@ -189,9 +198,7 @@ pub fn use_func(
         | F::NaviNaming(_)
         | F::NaviOpenBounty(_)
         | F::NaviOpenMailbox(_)
-        | F::NaviOpenPortal(_)
         | F::NaviRemove(_)
-        | F::NaviTeleport(_)
         | F::OpenPaper(_)
         | F::OreMine(_)
         | F::ParentInfo(_)

@@ -90,7 +90,7 @@ impl ClientPacket for CSDeletePortalPacket {
     }
 }
 
-/// `CSNaviOpenPortalPacket` (logged only, as in C#).
+/// `CSNaviOpenPortalPacket` (0x0e8): [`super::navi_open_portal`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CSNaviOpenPortalPacket {
     pub obj_id: u32,
@@ -107,17 +107,20 @@ impl ClientPacket for CSNaviOpenPortalPacket {
 
     fn handle<'a>(
         self,
-        _server: &'a GameServer,
-        _conn: &'a mut GameConnection,
+        server: &'a GameServer,
+        conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            tracing::warn!("NaviOpenPortal, ObjId: {}", self.obj_id);
+            tracing::debug!("NaviOpenPortal, ObjId: {}", self.obj_id);
+            if let Some(me) = conn.active_char.clone() {
+                super::navi_open_portal(server, &me, self.obj_id);
+            }
             Ok(())
         })
     }
 }
 
-/// `CSNaviTeleportPacket` (logged only, as in C#).
+/// `CSNaviTeleportPacket` (0x0e7): [`super::navi_teleport`] -> `SCNaviTeleportPacket`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CSNaviTeleportPacket {
     pub obj_id: u32,
@@ -134,17 +137,20 @@ impl ClientPacket for CSNaviTeleportPacket {
 
     fn handle<'a>(
         self,
-        _server: &'a GameServer,
-        _conn: &'a mut GameConnection,
+        server: &'a GameServer,
+        conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            tracing::warn!("NaviTeleport, ObjId: {}", self.obj_id);
+            tracing::debug!("NaviTeleport, ObjId: {}", self.obj_id);
+            if let Some(me) = conn.active_char.clone() {
+                super::navi_teleport(server, &me, self.obj_id);
+            }
             Ok(())
         })
     }
 }
 
-/// `CSUseTeleportPacket` (logged only, as in C#).
+/// `CSUseTeleportPacket` (0x0b3, NPC teleporter): [`super::use_teleport`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CSUseTeleportPacket {
     pub return_point_id: u32,
@@ -165,16 +171,25 @@ impl ClientPacket for CSUseTeleportPacket {
 
     fn handle<'a>(
         self,
-        _server: &'a GameServer,
-        _conn: &'a mut GameConnection,
+        server: &'a GameServer,
+        conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            tracing::warn!(
+            tracing::debug!(
                 "CSUseTeleport, ReturnPointId: {}, MoneyAmount: {}, NpcUnitId: {}",
                 self.return_point_id,
                 self.money_amount,
                 self.npc_unit_id
             );
+            if let Some(me) = conn.active_char.clone() {
+                super::use_teleport(
+                    server,
+                    &me,
+                    self.return_point_id,
+                    self.money_amount,
+                    self.npc_unit_id,
+                );
+            }
             Ok(())
         })
     }
