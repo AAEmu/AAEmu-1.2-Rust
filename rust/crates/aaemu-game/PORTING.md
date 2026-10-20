@@ -2066,9 +2066,6 @@ player skill 11988) and their meaning is not understood, so they are ignored. Th
 skill's description mentions is a separate effect of the same skill and is not part of this
 action.
 
-Data note: the 1.2 `compact.sqlite3` has row 763, but its `skill_effects` link points at skill
-10492 (폭탄 설치), not 11988, so the 1.2 data does not yet exercise the effect from Absorb Effect.
-
 ### `MoveToGround` special effect (type 73)
 
 Lands a unit on the terrain floor. The destination XY is the target position when the effect was
@@ -2085,9 +2082,9 @@ an NPC goes through `move_npc`. `value1` is not applied (0 on the reachable rows
 
 Deviation: the C# used the caster's XY even for the position-target rows and returned
 `OnFloor(rawZ)` (raw + clearance) on an over-lift; the selected position is used here, and the raw
-Z is kept on an over-lift, which is what the C# log line says that branch does. Data: 10.x effect
-9639 `[0, 0, 0, 0]` on the "self move" plot event of skill 18103; in the 1.2 `compact.sqlite3`
-the same row is reached from skill 14126 instead.
+Z is kept on an over-lift, which is what the C# log line says that branch does. Data: 1.2 row
+9639 `[0, 0, 0, 0]` is reached only through `plot_effects` 8677 (plot event 5431 "self move" of
+skill 18103).
 
 ### `ExplodeBuff` special effect (type 46)
 
@@ -2103,10 +2100,9 @@ carries the hit to the client (the C# only reduced the HP). No eligible effect m
 The row may hang off a buff Timeout trigger (buff 449), where `args.source.skill()` is `None`;
 nothing in the effect reads the skill.
 
-Data as cited by the 10.x port: 5009 / 9531 `[1000, 20, 20, 0]` on 내부 충격 16410 / 20650, 6411
-`[2000, 50, 50, 0]` on the Timeout trigger of buff 449. The 1.2 `compact.sqlite3` has the same
-three rows, but no `skill_effects` / `buff_triggers` row references 5009, 9531 or 6411, so the 1.2
-data does not reach them yet.
+Data (1.2, joined through `effects.actual_type = 'SpecialEffect'`): 5009 / 9531
+`[1000, 20, 20, 0]` on 내부 충격 16410 / 20650 (effects 15588 / 27256), 6411 `[2000, 50, 50, 0]` on
+the Timeout trigger 2194 of buff 449 (effect 20330).
 
 ### Plot `ManaCost` special effect (type 39)
 

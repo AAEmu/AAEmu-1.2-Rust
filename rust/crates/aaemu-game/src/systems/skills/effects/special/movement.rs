@@ -379,24 +379,21 @@ pub fn move_to_ground(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         return;
     };
     let current = world_pos(server, &Target::Obj(caster.clone()));
-    let (x, y) = match &args.target {
-        Target::Pos(p) => (p.pos.x, p.pos.y),
-        Target::Obj(_) => (current.x, current.y),
+    // The raw Z is the selected position's own height, so the lift / drop caps measure the gap at
+    // the destination, not the caster's height elsewhere.
+    let (x, y, raw_z) = match &args.target {
+        Target::Pos(p) => (p.pos.x, p.pos.y, p.pos.z),
+        Target::Obj(_) => (current.x, current.y, current.z),
     };
     let instance_id = caster.transform().instance_id;
-    let ground = crate::systems::ai::collision::ground_height_or(
-        server,
-        instance_id,
-        x,
-        y,
-        current.z,
-        || crate::systems::ai::collision::terrain_height_or(server, instance_id, x, y, || 0.0),
-    );
-    let over_water = crate::systems::ai::collision::is_water(server, instance_id, x, y, current.z);
+    let ground =
+        crate::systems::ai::collision::ground_height_or(server, instance_id, x, y, raw_z, || {
+            crate::systems::ai::collision::terrain_height_or(server, instance_id, x, y, || 0.0)
+        });
+    let over_water = crate::systems::ai::collision::is_water(server, instance_id, x, y, raw_z);
     let water_surface =
-        crate::systems::ai::collision::water_level(server, instance_id, x, y, current.z)
-            .unwrap_or(0.0);
-    let Some(z) = ground_snap::try_get_floor_z(current.z, ground, over_water, water_surface) else {
+        crate::systems::ai::collision::water_level(server, instance_id, x, y, raw_z).unwrap_or(0.0);
+    let Some(z) = ground_snap::try_get_floor_z(raw_z, ground, over_water, water_surface) else {
         return;
     };
     if let Some(p) = caster.as_player() {
