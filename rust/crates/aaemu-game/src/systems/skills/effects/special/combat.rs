@@ -208,11 +208,14 @@ pub fn skill_use(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
     });
 }
 
-/// Mana of a plot `ManaCost` effect: `value1 + value2 / 100 * scale`. In the 1.2 data `value1`
-/// equals the skill's `mana_cost` and `value2` its `mana_level_md` in percent (59 of the 68
-/// plot-only skills with the effect), so the effect charges what the skill tooltip shows
-/// (`mana_cost + mana_level_md * scale`, client formulas 12/13) instead of the C# guess
-/// `value2 / 6.35`.
+/// Mana of a plot `ManaCost` effect: `value1 + value2 / 100 * scale`, `scale` being
+/// [`mana_level_scale`] (the `LevelMana` data formula). Checked against `compact.sqlite3`
+/// (84 distinct (skill, effect values) rows of `SpecialEffect` type 39 reached through the
+/// skills' plots): 62 have `value1 == skills.mana_cost` and `value2 / 100 == skills.mana_level_md`,
+/// so the effect charges what the skill tooltip shows (`mana_cost + mana_level_md * scale`)
+/// instead of the C# guess `value2 / 6.35`. The 22 others are plot effects whose skill row has
+/// `mana_level_md` 0 or 1 (`value2` 1, 100-600): they charge an amount of their own, which this
+/// formula takes at face value (`value2` percent of the scale).
 fn plot_mana_cost(value1: i32, value2: i32, scale: f64) -> f64 {
     f64::from(value1) + f64::from(value2) / 100.0 * scale
 }
@@ -493,8 +496,9 @@ mod mana_cost_tests {
 
     #[test]
     fn plot_effect_matches_the_skill_tooltip_formula() {
-        // skill 11854 (md 1.55, effect 0/155) at ability level 55: scale (54 * 1.6 + 8) * 3 / 3.65
-        let scale = (54.0 * 1.6 + 8.0) * 3.0 / 3.65;
+        // skill 11854 (md 1.55, effect 0/155) at ability level 55: LevelMana data formula,
+        // (ab_level * 1.6 + 8) * 3 / 3.65
+        let scale = (55.0 * 1.6 + 8.0) * 3.0 / 3.65;
         let tooltip = scale * 1.55;
         assert!((plot_mana_cost(0, 155, scale) - tooltip).abs() < 1e-9);
         // skill 18132 (mana_cost 30, md 0): fixed cost only

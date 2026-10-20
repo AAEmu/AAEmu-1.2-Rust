@@ -91,10 +91,29 @@ pub fn new_skill_for(
     SkillRun::new(template, level)
 }
 
-/// Mana per `mana_level_md` point at the caster's ability level (unit formulas 12 / 13, the
-/// client's skill-tooltip `manaCost` term).
+/// Mana per `mana_level_md` point at the caster's ability level: the character `unit_formulas`
+/// rows `LevelDps` (kind 12, `(ab_level * 1.6 + 8) * 3`) and `LevelMana` (kind 13,
+/// `level_dps / 3.65`) of `compact.sqlite3`, evaluated through the precompiled formula
+/// expressions (no parsing per cast). 0 when the data has no such formulas.
+///
+/// Deviation: the C# `Skill.ManaCost` hardcodes `((abLevel - 1) * 1.6 + 8) * 3 / 3.65`; the
+/// data formulas have no `- 1` (and `CharStats` evaluates `LevelDps` with `ab_level = level`
+/// too), so the data wins (see PORTING.md).
 pub fn mana_level_scale(server: &GameServer, caster: &WorldObject, ability_id: u8) -> f64 {
-    (f64::from(ab_level(server, caster, ability_id) - 1) * 1.6 + 8.0) * 3.0 / 3.65
+    use crate::data::formulas::{FormulaOwnerType, UnitFormulaKind};
+    let formulas = &server.game_data.formulas;
+    let (Some(dps), Some(mana)) = (
+        formulas.get_unit_formula(FormulaOwnerType::Character, UnitFormulaKind::LevelDps),
+        formulas.get_unit_formula(FormulaOwnerType::Character, UnitFormulaKind::LevelMana),
+    ) else {
+        return 0.0;
+    };
+    let level_dps = dps.formula.evaluate(&std::collections::HashMap::from([(
+        "ab_level",
+        f64::from(ab_level(server, caster, ability_id)),
+    )]));
+    mana.formula
+        .evaluate(&std::collections::HashMap::from([("level_dps", level_dps)]))
 }
 
 /// `Skill.ManaCost(caster)`.
