@@ -1533,8 +1533,10 @@ and in NPC wandering / buff remaining times.
 * `systems::npcs`: the "spawn all" schedule check is inverted; `DoRandomSpawn` leaks an obj id and spawns twice; a doodad despawn may release its obj id twice; gimmick spawn rotations are not converted from degrees; scheduled doodad spawns stack cron tasks; the player-in-radius check scans every player; NPCs are not despawned when players leave.
 * `systems::npcs`: dated game schedules compare `StartTime` / `EndTime` (usually 0) instead of the start / end hours (a one-day event counts as ended at 00:00); the cron builder tests the captured day of week instead of its parameter, and undated schedules produce day / month 0 (rejected by the cron parser); `VendorExist` reads the `id` column; deleting a portal sends no packet; `NotifySubZone` re-sends the portal book once per recall portal of the sub zone; the exit portal's yaw is the book rotation in degrees.
 * `systems::npcs`: corrected coin double credit and failed trade-pack acquisition; `BuyFish` uses the checked economy sale. Phase operations reserve live object identity, honor interaction counts, enter functions on time-of-day changes, and cancel superseded timers. Saves/deletes use a FIFO writer drained by the save lifecycle; partial interaction counts use the doodad-interactions SQL update. Scheduled spawns recreate deleted doodads, deduplicate cron callbacks, and retain original world identity. Logic links/families route matching true/false pulses with per-object state and cycle guards; client-created wires require ownership and reach. Immediate gates are supported; delay descriptors 2/3 need reference behavior. `SpawnGimmick` creates the authored object with offsets/faction/kinematic motion; `SpawnMgmt` requires explicit authored `SpawnGroupId` membership. Prefab flow graphs are client-owned. `CheckGrowth` still runs funcs with `nextPhase = 0`; child metadata templates (e.g. `DoodadFuncBuyFishItem`) remain in the phase dictionary.
-* systems::economy: `CSWithdrawMoneyPacket` reports `ItemTaskType.DepositMoney`; `ExpandSlot` never sends its
-  `MoneyChange` task.
+* systems::economy: `CSWithdrawMoneyPacket` reports `ItemTaskType.WithdrawMoney` (84; the C#
+  handler called `ChangeMoney` without a task type, so it defaulted to `DepositMoney`) and
+  `ExpandSlot` sends its `MoneyChange(-price)` task with the expansion (the C# collected the task
+  into a list it never sent, in both the economy and the services copies).
 * systems::economy: the two "is not welcome in this container" rejections of `SplitOrMoveItemEx`
   (an item the target / source container refuses, e.g. armor sent to a wrong equipment slot) are
   logged at `warn` (C#: `Error`) and include the whole request (from / to type, slot, item ids,
@@ -1680,8 +1682,8 @@ and in NPC wandering / buff remaining times.
   clamped value carries over to the next recipient); `AuctionController.SearchAuctionItems`
   throws on lots without bidder when filtering by `BidderName`; `CommandController` passes the
   raw regex group (query string included) as the command name.
-* systems::services: `Inventory.ExpandSlot` deducts the price without sending the `MoneyChange` item
-  task; `CharacterActability.ExpandExpert` adds the vocation cost (`ChangeGamePoints(Vocation,
+* systems::services: `CharacterActability.ExpandExpert` adds the vocation cost
+  (`ChangeGamePoints(Vocation,
   +LifePoint)`) instead of paying it; `CSBroadcastVisualOptionPacket` keeps the members the new
   flag does not mention.
 * systems::services: `CSExpressEmotionPacket` passes the animation id as the emotion id to
