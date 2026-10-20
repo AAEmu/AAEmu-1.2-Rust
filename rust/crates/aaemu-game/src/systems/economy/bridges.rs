@@ -514,6 +514,7 @@ impl EconomyForSkills {
             pub const ITEM_SOCKETING: i32 = 106;
             pub const ITEM_CAP_SCALE_RESET: i32 = 111;
             pub const ITEM_CAP_SCALE: i32 = 112;
+            pub const AUCTION_POST_AUTHORITY: i32 = 117;
         }
         let caster_item = skill_item(&args.caster_caster);
         let target_item = item_target(&args.target_caster).map(|(id, _)| id);
@@ -612,6 +613,26 @@ impl EconomyForSkills {
                         skill_id,
                         v,
                         &mut rng,
+                    );
+                }
+            }
+            special::AUCTION_POST_AUTHORITY => {
+                if let Some(p) = player_caster(args) {
+                    let (account_id, world_id) = {
+                        let c = p.data();
+                        (c.account_id, c.unit.transform.world_id)
+                    };
+                    super::account_attributes::apply_effect(
+                        server,
+                        account_id,
+                        world_id,
+                        super::account_attributes::AccountAttributeGrant {
+                            kind_id: super::account_attributes::KIND_AUCTION_POST_AUTHORITY,
+                            bind_world: false,
+                            is_add: true,
+                            count: 0,
+                            time: 0,
+                        },
                     );
                 }
             }
@@ -1075,8 +1096,25 @@ impl ItemSkillHooks for EconomyForSkills {
                 tracing::trace!("TrainCraftEffect");
                 true
             }
-            (EffectKind::AccountAttributeEffect, _) => {
-                tracing::trace!("AccountAttributeEffect");
+            (EffectKind::AccountAttributeEffect, EffectTemplate::AccountAttribute(e)) => {
+                if let Some(p) = player_caster(args) {
+                    let (account_id, world_id) = {
+                        let c = p.data();
+                        (c.account_id, c.unit.transform.world_id)
+                    };
+                    super::account_attributes::apply_effect(
+                        server,
+                        account_id,
+                        world_id,
+                        super::account_attributes::AccountAttributeGrant {
+                            kind_id: e.kind_id.min(i32::MAX as u32) as i32,
+                            bind_world: e.bind_world,
+                            is_add: e.is_add,
+                            count: e.count.min(i32::MAX as u32) as i32,
+                            time: e.time.min(i32::MAX as u32) as i32,
+                        },
+                    );
+                }
                 true
             }
             _ => false,

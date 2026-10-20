@@ -41,6 +41,16 @@ FOR EACH ROW
    SET NEW.last_updated = UTC_TIMESTAMP();
 
 
+CREATE TABLE IF NOT EXISTS `account_attributes` (
+  `account_id` INT UNSIGNED NOT NULL,
+  `kind_id` INT NOT NULL,
+  `world_id` INT NOT NULL DEFAULT 0,
+  `count` INT NOT NULL DEFAULT 0,
+  `end_time` DATETIME NULL DEFAULT NULL COMMENT 'UTC; NULL = permanent',
+  PRIMARY KEY (`account_id`, `kind_id`, `world_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Account-wide attributes (auction post authority, ...)';
+
+
 CREATE TABLE IF NOT EXISTS `actabilities` (
   `id` int unsigned NOT NULL,
   `point` int unsigned NOT NULL DEFAULT '0',
