@@ -334,8 +334,10 @@ pub fn execute(server: &GameServer, kind: i32, args: &EffectArgs<'_>, values: [i
         59 => combat::cancel_stealth(s, a, v),
         60 => misc::spawn_slave(s, a, v),
         61 => unit_actions::cancel_ongoing_buff(s, a, v),
+        64 => items::get_siege_ticket(s, a, v),
         66 => combat::auto_attack(s, a, v),
         68 => items::apply_reagents(s, a, v),
+        69 => misc::sextant_pos(s, a, v),
         74 => movement::escape(s, a, v),
         75 => misc::report_bot(s, a, v),
         79 => items::fishing_loot(s, a, v),
@@ -367,6 +369,7 @@ pub fn execute(server: &GameServer, kind: i32, args: &EffectArgs<'_>, values: [i
         118 => items::give_cash_point(s, a, v),
         // `Detach` (the C# body only logs; the unmount is commented out).
         55 => log_values(a, "Detach", v),
+        // NotifyQuest (70) already fires in plots::finish_item_plot; DeclareIndependence (71) has no faction ownership runtime, so both stay log-only.
         // Every other class only logs (`if (caster is Character) Logger.Debug(...)`).
         _ => match special_type_name(kind) {
             Some("Unk9") | None => {
