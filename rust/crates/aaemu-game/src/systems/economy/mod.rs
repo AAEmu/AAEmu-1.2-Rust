@@ -23,6 +23,7 @@ pub mod bridges;
 pub mod cash_shop;
 #[cfg(test)]
 mod cash_shop_tests;
+pub mod character_slots;
 pub mod craft;
 pub mod craft_data;
 #[cfg(test)]

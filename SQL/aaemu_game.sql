@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS `accounts` (
   `last_loyalty_tick` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `divine_clock_time` INT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Time that has been passed already',
   `divine_clock_taken` INT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Number of clicks taken today',
+  `extra_character_slots` TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Purchased character slots beyond the base account slots',
   PRIMARY KEY (`account_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='Account specific values not related to login';
 

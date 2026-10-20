@@ -346,6 +346,10 @@ mod tests {
             hex("DD 01 00 00 E2 01 00")
         );
         assert_eq!(
+            encode(&SCGetSlotCountPacket { sc: 2 }),
+            hex("DD 01 00 00 E2 01 02")
+        );
+        assert_eq!(
             encode(&SCAccountInfoPacket {
                 pay_method: 1,
                 pay_location: 1,

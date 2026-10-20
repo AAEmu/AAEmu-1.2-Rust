@@ -506,6 +506,7 @@ impl EconomyForSkills {
         mod special {
             pub const GAIN_ITEM: i32 = 27;
             pub const GAIN_ITEM_WITH_EMBLEM_IMPRINT: i32 = 45;
+            pub const ADD_CHARACTER_SLOT: i32 = 91;
             pub const ITEM_CONVERSION: i32 = 49;
             pub const FISHING_LOOT: i32 = 79;
             pub const GRADE_ENCHANT: i32 = 92;
@@ -544,6 +545,11 @@ impl EconomyForSkills {
             special::FISHING_LOOT => {
                 if let (Some(p), Some(t)) = (player_caster(args), args.target.as_obj()) {
                     item_effects::fishing_loot(server, p, t, v, &mut rng);
+                }
+            }
+            special::ADD_CHARACTER_SLOT => {
+                if let Some(p) = player_caster(args) {
+                    super::character_slots::apply(server, p);
                 }
             }
             special::GRADE_ENCHANT => {
