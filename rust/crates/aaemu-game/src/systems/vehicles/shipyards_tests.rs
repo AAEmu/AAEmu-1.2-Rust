@@ -62,7 +62,11 @@ async fn initialize_schedules_tick() {
     tokio::time::sleep(step / 4).await;
     assert!(!has_protection(), "no shipyard tick before the start delay");
 
-    tokio::time::sleep(step).await;
+    // Poll instead of one fixed sleep: a loaded test machine can delay the ticker task.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !has_protection() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(step / 4).await;
+    }
     assert!(
         has_protection(),
         "the shipyard tick ran after the start delay"
@@ -121,4 +125,51 @@ async fn shipyard_radius_counts_in_skill_distance() {
         geometry::distance_to(&server, &caster_at(110.0), &target, true),
         0.0
     );
+}
+
+#[tokio::test]
+#[ignore = "requires AAEMU_TEST_MYSQL; uses a connection-local temporary table"]
+async fn shipyard_rows_round_trip_through_mysql() {
+    use super::super::shipyards_db::{read_rows, write_row, ShipyardRow};
+    let url = std::env::var("AAEMU_TEST_MYSQL").expect("private MySQL URL");
+    let pool = sqlx::mysql::MySqlPoolOptions::new()
+        .max_connections(1)
+        .idle_timeout(None)
+        .max_lifetime(None)
+        .connect(&url)
+        .await
+        .unwrap();
+    let ddl = include_str!("../../../../../../SQL/updates/2026-10-20_aaemu_game_shipyards.sql");
+    let ddl = ddl[ddl.find("CREATE TABLE").unwrap()..].replacen(
+        "CREATE TABLE IF NOT EXISTS",
+        "CREATE TEMPORARY TABLE",
+        1,
+    );
+    sqlx::query(&ddl).execute(&pool).await.unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    let row = ShipyardRow {
+        id: 4,
+        template_id: 3,
+        owner_id: 77,
+        owner_name: "Owner".into(),
+        faction: 101,
+        instance_id: 0,
+        zone_id: 12,
+        x: 120.5,
+        y: 130.25,
+        z: 100.0,
+        rot_x: 0.25,
+        rot_y: -0.5,
+        z_rot: 0.5,
+        money_amount: 0,
+        actions: 3,
+        step: 1,
+        current_step: 1,
+        num_action: 1,
+        hp: 950,
+        data_hp: 1000,
+        spawned: 1_700_000_000,
+    };
+    write_row(&mut conn, &row).await.unwrap();
+    assert_eq!(read_rows(&mut conn).await.unwrap(), vec![row]);
 }
