@@ -1232,3 +1232,265 @@ async fn no_fight_guard_in_add_unit_aggro_does_not_warn_for_absent_entries() {
     assert!(logs.contains("was not in the aggro table"), "{logs}");
     assert!(npc.data().unit.skill_state.aggro_table.contains_key(&0x999));
 }
+
+#[tokio::test]
+async fn explode_buff_burns_beneficial_effects_and_pays_per_effect_damage() {
+    let mut data = GameData::empty();
+    for id in 1..=3 {
+        data.systems.skills.add_buff(buff(id));
+    }
+    // A debuff, a system effect and a passive: none of them is something an enemy can burn.
+    data.systems
+        .skills
+        .add_buff(BuffTemplate { kind: 2, ..buff(4) });
+    data.systems.skills.add_buff(BuffTemplate {
+        system: true,
+        ..buff(5)
+    });
+    data.systems.skills.add_buff(buff(6));
+    let (server, _client, player, npc) = fixture(data);
+    let caster = WorldObject::from(&player);
+    let target = WorldObject::from(&npc);
+    npc.data().unit.hp = 5000;
+    npc.data().unit.max_hp = 5000;
+    for id in 1..=6 {
+        super::buffs::add_buff_by_id(&server, &target, id, &target, 0);
+    }
+    target.with_base_unit(|unit| {
+        unit.buffs_mut()
+            .effects
+            .iter_mut()
+            .find(|b| b.template.id == 6)
+            .unwrap()
+            .passive = true;
+    });
+    execute(&server, 46, &args(&caster, &target), [1000, 20, 20, 0]);
+    // Three beneficial effects burned, 1000 damage each.
+    assert_eq!(npc.data().unit.hp, 2000);
+    for id in [1, 2, 3] {
+        assert!(
+            !target.with_base_unit(|u| u.buffs().check_buff(id)),
+            "buff {id} should be burned"
+        );
+    }
+    for id in [4, 5, 6] {
+        assert!(
+            target.with_base_unit(|u| u.buffs().check_buff(id)),
+            "buff {id} should be kept"
+        );
+    }
+}
+
+#[tokio::test]
+async fn explode_buff_without_beneficial_effects_does_nothing() {
+    let mut data = GameData::empty();
+    data.systems
+        .skills
+        .add_buff(BuffTemplate { kind: 2, ..buff(1) });
+    let (server, _client, player, npc) = fixture(data);
+    let caster = WorldObject::from(&player);
+    let target = WorldObject::from(&npc);
+    super::buffs::add_buff_by_id(&server, &target, 1, &target, 0);
+    execute(&server, 46, &args(&caster, &target), [1000, 20, 20, 0]);
+    assert_eq!(npc.data().unit.hp, 1000);
+    assert!(target.with_base_unit(|u| u.buffs().check_buff(1)));
+}
+
+#[tokio::test]
+async fn explode_buff_respects_the_burn_cap_lowest_slot_first() {
+    let mut data = GameData::empty();
+    for id in 1..=3 {
+        data.systems.skills.add_buff(buff(id));
+    }
+    let (server, _client, player, npc) = fixture(data);
+    let caster = WorldObject::from(&player);
+    let target = WorldObject::from(&npc);
+    npc.data().unit.hp = 5000;
+    npc.data().unit.max_hp = 5000;
+    for id in 1..=3 {
+        super::buffs::add_buff_by_id(&server, &target, id, &target, 0);
+    }
+    execute(&server, 46, &args(&caster, &target), [100, 2, 2, 0]);
+    assert_eq!(npc.data().unit.hp, 4800);
+    for id in [1, 2] {
+        assert!(!target.with_base_unit(|u| u.buffs().check_buff(id)));
+    }
+    assert!(target.with_base_unit(|u| u.buffs().check_buff(3)));
+}
+
+#[tokio::test]
+async fn move_to_ground_lands_a_position_target_on_the_floor() {
+    use std::collections::HashMap;
+
+    use aaemu_commons::PacketStream;
+
+    use crate::models::transform::PositionAndRotation;
+    use crate::systems::ai::collision::terrain::tests::Plane;
+
+    use super::geometry::PosUnit;
+
+    let (server, mut client, player, _npc) = fixture(GameData::empty());
+    server
+        .systems
+        .ai
+        .collision
+        .test_files
+        .set(Arc::new(HashMap::new()))
+        .unwrap();
+    server
+        .systems
+        .ai
+        .collision
+        .test_terrain
+        .set(Arc::new(Plane {
+            a: 100.0,
+            b: 0.0,
+            c: 0.0,
+            n: 1024,
+        }))
+        .unwrap_or_else(|_| panic!("terrain"));
+    // 0.5 m above the 100 m plane: inside the near band, so the landing is ground + clearance.
+    player.data().unit.transform.set_xyz(100.0, 100.0, 100.5);
+    let owner = WorldObject::from(&player);
+    let mut effect_args = args(&owner, &owner);
+    effect_args.target = Target::Pos(PosUnit {
+        instance_id: 0,
+        zone_id: 100,
+        pos: PositionAndRotation::new(130.0, 140.0, 0.0, 0.0, 0.0, 0.0),
+    });
+    execute(&server, 73, &effect_args, [0; 4]);
+    let body = client
+        .drain()
+        .into_iter()
+        .find(|(op, _)| *op == crate::opcodes::sc::SCBlinkUnitPacket)
+        .expect("blink packet")
+        .1;
+    let mut s = PacketStream::from_bytes(body);
+    assert_eq!(s.read_bc().unwrap(), player.obj_id);
+    assert_eq!(s.read_f32().unwrap(), 0.0);
+    assert_eq!(s.read_f32().unwrap(), 0.0);
+    let x = super::types::convert_long_back(s.read_i64().unwrap());
+    let y = super::types::convert_long_back(s.read_i64().unwrap());
+    let z = s.read_f32().unwrap();
+    // The selected position (not the caster's own XY) with the 0.4 m floor clearance.
+    assert!((x - 130.0).abs() < 0.01, "x {x}");
+    assert!((y - 140.0).abs() < 0.01, "y {y}");
+    assert!((z - 100.4).abs() < 0.01, "z {z}");
+}
+
+#[tokio::test]
+async fn move_to_ground_measures_the_caps_at_the_selected_positions_height() {
+    use std::collections::HashMap;
+
+    use aaemu_commons::PacketStream;
+
+    use crate::models::transform::PositionAndRotation;
+    use crate::systems::ai::collision::terrain::tests::Plane;
+
+    use super::geometry::PosUnit;
+
+    let (server, mut client, player, _npc) = fixture(GameData::empty());
+    server
+        .systems
+        .ai
+        .collision
+        .test_files
+        .set(Arc::new(HashMap::new()))
+        .unwrap();
+    server
+        .systems
+        .ai
+        .collision
+        .test_terrain
+        .set(Arc::new(Plane {
+            a: 100.0,
+            b: 0.0,
+            c: 0.0,
+            n: 1024,
+        }))
+        .unwrap_or_else(|_| panic!("terrain"));
+    // The caster stands 30 m above the plane (beyond the 12 m drop cap), but the selected
+    // position is 0.8 m above it: the caps are measured at the destination, so it lands.
+    player.data().unit.transform.set_xyz(100.0, 100.0, 130.0);
+    let owner = WorldObject::from(&player);
+    let mut effect_args = args(&owner, &owner);
+    effect_args.target = Target::Pos(PosUnit {
+        instance_id: 0,
+        zone_id: 100,
+        pos: PositionAndRotation::new(130.0, 140.0, 100.8, 0.0, 0.0, 0.0),
+    });
+    execute(&server, 73, &effect_args, [0; 4]);
+    let body = client
+        .drain()
+        .into_iter()
+        .find(|(op, _)| *op == crate::opcodes::sc::SCBlinkUnitPacket)
+        .expect("blink packet")
+        .1;
+    let mut s = PacketStream::from_bytes(body);
+    assert_eq!(s.read_bc().unwrap(), player.obj_id);
+    s.read_f32().unwrap();
+    s.read_f32().unwrap();
+    s.read_i64().unwrap();
+    s.read_i64().unwrap();
+    let z = s.read_f32().unwrap();
+    assert!((z - 100.4).abs() < 0.01, "z {z}");
+}
+
+#[tokio::test]
+async fn redeem_buff_removes_one_beneficial_effect_and_restores_mana() {
+    let mut data = GameData::empty();
+    data.systems.skills.add_buff(buff(1));
+    data.systems
+        .skills
+        .add_buff(BuffTemplate { kind: 2, ..buff(2) });
+    let (server, _client, _player, npc) = fixture(data);
+    let owner = WorldObject::from(&npc);
+    {
+        let mut n = npc.data();
+        n.unit.mp = 100;
+        n.unit.max_mp = 1000;
+    }
+    for id in [1, 2] {
+        super::buffs::add_buff_by_id(&server, &owner, id, &owner, 0);
+    }
+    execute(&server, 44, &args(&owner, &owner), [400, 10, 15, 0]);
+    assert_eq!(npc.data().unit.mp, 500);
+    assert!(!owner.with_base_unit(|u| u.buffs().check_buff(1)));
+    assert!(owner.with_base_unit(|u| u.buffs().check_buff(2)));
+}
+
+#[tokio::test]
+async fn redeem_buff_mana_is_capped_at_the_maximum() {
+    let mut data = GameData::empty();
+    data.systems.skills.add_buff(buff(1));
+    let (server, _client, _player, npc) = fixture(data);
+    let owner = WorldObject::from(&npc);
+    {
+        let mut n = npc.data();
+        n.unit.mp = 900;
+        n.unit.max_mp = 1000;
+    }
+    super::buffs::add_buff_by_id(&server, &owner, 1, &owner, 0);
+    execute(&server, 44, &args(&owner, &owner), [400, 10, 15, 0]);
+    assert_eq!(npc.data().unit.mp, 1000);
+    assert!(!owner.with_base_unit(|u| u.buffs().check_buff(1)));
+}
+
+#[tokio::test]
+async fn redeem_buff_without_a_beneficial_effect_does_nothing() {
+    let mut data = GameData::empty();
+    data.systems
+        .skills
+        .add_buff(BuffTemplate { kind: 2, ..buff(1) });
+    let (server, _client, _player, npc) = fixture(data);
+    let owner = WorldObject::from(&npc);
+    {
+        let mut n = npc.data();
+        n.unit.mp = 100;
+        n.unit.max_mp = 1000;
+    }
+    super::buffs::add_buff_by_id(&server, &owner, 1, &owner, 0);
+    execute(&server, 44, &args(&owner, &owner), [400, 10, 15, 0]);
+    assert_eq!(npc.data().unit.mp, 100);
+    assert!(owner.with_base_unit(|u| u.buffs().check_buff(1)));
+}

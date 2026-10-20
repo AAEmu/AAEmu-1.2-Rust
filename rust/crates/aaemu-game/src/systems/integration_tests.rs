@@ -28,10 +28,13 @@ use crate::systems::quests::model::kind;
 use crate::systems::quests::templates::{ActKind, QuestComponentTemplate, QuestTemplate};
 use crate::systems::skills::data::effects::EffectTemplate;
 use crate::systems::skills::data::EffectKind;
+use crate::systems::skills::effects::{EffectArgs, EffectSource};
+use crate::systems::skills::geometry::Target;
 use crate::systems::skills::handlers::{start_skill, CSStartSkillPacket};
+use crate::systems::skills::state::SkillRun;
 use crate::systems::skills::tests::{damage_effect, skill_effect, skill_template};
 use crate::systems::skills::types::{
-    BuffEventTriggerKind, SkillCastTarget, SkillCaster, SkillObject,
+    BuffEventTriggerKind, CastAction, SkillCastTarget, SkillCaster, SkillObject,
 };
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
 use crate::world::{Entity, NpcRef, PlayerRef, WorldObject};
@@ -472,6 +475,53 @@ async fn interaction_skill_on_a_doodad_advances_the_interaction_quest() {
     );
 
     // InteractionEffect (npcs) -> QuestManager.DoDoodadInteractionEvents (quests).
+    assert_eq!(
+        quest_row(&server, &a.p, INTERACTION_QUEST),
+        Some((kind::READY, 1))
+    );
+    assert!(a
+        .client
+        .drain_ops()
+        .contains(&sc::SCQuestContextUpdatedPacket));
+}
+
+#[tokio::test]
+async fn special_interaction_effect_on_a_doodad_advances_the_interaction_quest() {
+    let server = server_with(false);
+    let mut a = pc(&server, 1, "User", 100.0);
+    accept(&server, &a.p, INTERACTION_QUEST);
+    let doodad = Entity::new(0x301, Doodad::new(DOODAD_TEMPLATE));
+    doodad.data().transform.set_xyz(102.0, 100.0, 100.0);
+    let world = server.world.world(0).expect("world");
+    world.spawn(&doodad, &server.view_ctx());
+    a.client.drain();
+
+    // Special effect 10 (`Interaction`), `value1` = WorldInteractionType.Use (19), like
+    // `special_effects` row 11030 of the 1.2 data.
+    let skill = SkillRun::new(
+        server
+            .game_data
+            .systems
+            .skills
+            .skill(USE_SKILL)
+            .expect("use skill")
+            .clone(),
+        1,
+    );
+    let args = EffectArgs {
+        caster: Some(WorldObject::from(&a.p)),
+        caster_caster: SkillCaster::Unit(a.p.obj_id),
+        target: Target::Obj(WorldObject::from(&doodad)),
+        target_caster: SkillCastTarget::Doodad(doodad.obj_id),
+        cast: CastAction::Skill {
+            skill_id: USE_SKILL,
+            tl_id: 1,
+        },
+        source: EffectSource::from_skill(skill),
+        skill_object: &SkillObject::None,
+    };
+    crate::systems::skills::effects::special::execute(&server, 10, &args, [WI_USE, 0, 0, 0]);
+
     assert_eq!(
         quest_row(&server, &a.p, INTERACTION_QUEST),
         Some((kind::READY, 1))

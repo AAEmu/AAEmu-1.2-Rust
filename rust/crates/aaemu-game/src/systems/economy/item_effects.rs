@@ -11,7 +11,6 @@
 //! * `Random.Shared` -> a [`LootRng`] (`SharedRandom` in production, `ScriptedRng` in tests).
 //!
 //! Functions that return [`Outcome`] tell the caller whether the C# set `skill.Cancelled`.
-//! The C# stubs (`// TODO ...` + a debug log) are mirrored by [`stub_effect`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -891,6 +890,80 @@ pub fn item_cap_scale_reset(
     system_message(&mut txn, player, "Tempering reset".to_string());
 }
 
+/// `RechargeItemBuff.Execute` (special 95). The C# body is a `// TODO` stub; 1.2 data rows
+/// 12446 / 17017 (all values 0) are cast by the consumed tool item 28242 (skill 22560 "Cleaner
+/// and Clearer", target type 9 = Item), so the item comes from the cast's item target. The
+/// target must be an equip item whose template carries `recharge_buff_id` (with
+/// `charge_lifetime` minutes and/or `charge_count`); the effect starts a new charge window and
+/// re-applies the recharge buff when the item is equipped. The item timers read the charge
+/// fields every tick, so no timer is re-scheduled.
+pub fn recharge_item_buff(
+    server: &GameServer,
+    player: &PlayerRef,
+    target_item_id: Option<u64>,
+    values: [i32; 4],
+) -> Outcome {
+    let [value1, value2, value3, value4] = values;
+    tracing::debug!(
+        "Special effects: RechargeItemBuff value1 {value1}, value2 {value2}, value3 {value3}, value4 {value4}"
+    );
+    let Some(target_id) = target_item_id else {
+        return Outcome::Cancelled;
+    };
+    let inv = Inv::of(player);
+    let Some(holder) = inv.holder_of(target_id) else {
+        return Outcome::Cancelled;
+    };
+    let now = chrono::Utc::now().timestamp();
+    let (after, equipped) = {
+        let mut g = lock(&holder);
+        let Some(item) = g.get_item_by_id_mut(target_id) else {
+            return Outcome::Cancelled;
+        };
+        if !item.is_equip() {
+            tracing::debug!("RechargeItemBuff: item {target_id} is not an EquipItem");
+            return Outcome::Cancelled;
+        }
+        let Some(equip) = server
+            .game_data
+            .items
+            .template(item.template_id)
+            .and_then(|t| t.equip())
+        else {
+            return Outcome::Cancelled;
+        };
+        if equip.recharge_buff_id == 0 {
+            return Outcome::Cancelled;
+        }
+        item.charge_start_time = now;
+        if equip.charge_count > 0 {
+            item.charge_count = equip.charge_count;
+        }
+        // The new window must survive the next save.
+        item.dirty = true;
+        let equipped = item.slot_type == slot_type::EQUIPMENT;
+        (item.clone(), equipped)
+    };
+    {
+        let mut txn = ItemTxn::begin(server);
+        txn.out().send(
+            player,
+            task_packet(task_type::RECHARGE_BUFF, vec![ItemTask::update(&after)]),
+        );
+    }
+    if equipped {
+        // Refresh the gear buff without stacking a second copy: the removed item drops the old
+        // recharge buff, the added one re-adds it from the new charge window.
+        server.systems.skills.ext.items().apply_gear_buffs(
+            server,
+            &WorldObject::from(player),
+            Some(&after),
+            Some(&after),
+        );
+    }
+    Outcome::Done
+}
+
 /// `CleanupLookConvert.Execute` (removes an item's look image, consumes one powder).
 pub fn cleanup_look_convert(
     server: &GameServer,
@@ -1057,6 +1130,131 @@ pub fn gain_item(server: &GameServer, player: &PlayerRef, values: [i32; 4]) {
             player.character_id
         );
     }
+}
+
+/// `GainItemWithPosImprint.Execute` (special 32). The C# body is a `// TODO` stub; the data
+/// gives the behaviour: `special_effects` 405 (`value1` 5054, template not in 1.2 data), 546
+/// (8120 Guide Map), 547 (8122 Guide Gate) and 548 (8124 Guide Compass) each create `value1` x1
+/// for the player caster with `ItemTaskType.SkillEffectGainItemWithPos`. The tools that grant
+/// them (5053 / 8119 / 8121 / 8123, skills 11402 / 11635 / 11637 / 11638) are consumed as skill
+/// reagents. The position imprint has no 1.2 item detail type, so the item is created without
+/// one (see `PORTING.md`).
+pub fn gain_item_with_pos_imprint(server: &GameServer, player: &PlayerRef, values: [i32; 4]) {
+    let [value1, value2, value3, value4] = values;
+    tracing::debug!(
+        "Special effects: GainItemWithPosImprint value1 {value1}, value2 {value2}, value3 {value3}, value4 {value4}"
+    );
+    if value1 <= 0 {
+        tracing::warn!(
+            "Special effects: GainItemWithPosImprint ignored invalid item template id {value1}"
+        );
+        return;
+    }
+    let item_id = value1 as u32;
+    let mut txn = ItemTxn::begin(server);
+    if txn.data().template(item_id).is_none() {
+        tracing::warn!(
+            "Special effects: GainItemWithPosImprint ignored unknown item template {item_id}"
+        );
+        return;
+    }
+    let inv = Inv::of(player);
+    let acquired = inventory::try_add_new_item(
+        &mut txn,
+        &inv,
+        task_type::SKILL_EFFECT_GAIN_ITEM_WITH_POS,
+        item_id,
+        1,
+        0,
+        0,
+    );
+    if !acquired {
+        tracing::warn!(
+            "Special effects: GainItemWithPosImprint failed to give item {item_id} to character {}",
+            player.character_id
+        );
+    }
+}
+
+/// `ExpToItem.Execute` (special 96). The C# body is a `// TODO` stub; 1.2 data row 12462 has
+/// `value1 = 10000` (experience spent) and `value2 = 28329` ("Timeglass Bottle"), cast from the
+/// consumed tool item 28328 ("Empty Timeglass Bottle", skill 22580). The experience is deducted
+/// directly (not through `AddExp`, which recomputes the level and could level the character
+/// down) and reported with `SCExpChangedPacket`. `Outcome::Cancelled` leaves the reagent
+/// unconsumed when the character lacks the experience or the bag cannot hold the product.
+pub fn exp_to_item(server: &GameServer, player: &PlayerRef, values: [i32; 4]) -> Outcome {
+    let [value1, value2, value3, value4] = values;
+    tracing::debug!(
+        "Special effects: ExpToItem value1 {value1}, value2 {value2}, value3 {value3}, value4 {value4}"
+    );
+    if value1 <= 0 || value2 <= 0 {
+        tracing::warn!("Special effects: ExpToItem ignored invalid values {value1} / {value2}");
+        return Outcome::Cancelled;
+    }
+    let item_id = value2 as u32;
+    if server.game_data.items.template(item_id).is_none() {
+        tracing::warn!("Special effects: ExpToItem ignored unknown item template {item_id}");
+        return Outcome::Cancelled;
+    }
+    let inv = Inv::of(player);
+    // Check the room before the experience is spent; otherwise the product would be lost.
+    if !bag_can_accept_item(&server.game_data.items, &inv, item_id, 1) {
+        let mut txn = ItemTxn::begin(server);
+        send_error_message_to(&mut txn.out(), player, error_message::BAG_FULL);
+        return Outcome::Cancelled;
+    }
+    let exp_cost = value1;
+    if player.data().experience < exp_cost {
+        return Outcome::Cancelled;
+    }
+    player.data().experience -= exp_cost;
+    player.send(crate::systems::skills::packets::SCExpChangedPacket {
+        obj_id: player.obj_id,
+        exp: -exp_cost,
+        should_add_ability_exp: false,
+    });
+    let mut txn = ItemTxn::begin(server);
+    let acquired = inventory::try_add_new_item(
+        &mut txn,
+        &inv,
+        task_type::SKILL_EFFECT_EXP_TO_ITEM,
+        item_id,
+        1,
+        0,
+        0,
+    );
+    if !acquired {
+        tracing::warn!(
+            "Special effects: ExpToItem failed to give item {item_id} to character {}",
+            player.character_id
+        );
+    }
+    Outcome::Done
+}
+
+/// Whether the bag can take `count` units of `template_id` (`AcquireDefaultItemEx`'s free-space
+/// calculation: partial stacks plus free slots).
+fn bag_can_accept_item(
+    data: &crate::data::items::ItemData,
+    inv: &Inv,
+    template_id: u32,
+    count: i32,
+) -> bool {
+    let Some(template) = data.template(template_id) else {
+        return false;
+    };
+    if count <= 0 {
+        return true;
+    }
+    let max = template.max_count;
+    if max <= 0 {
+        return false;
+    }
+    let bag = inv.bag();
+    let guard = bag.lock().expect("container poisoned");
+    let (stacks, units) = guard.items_by_template(template_id, -1);
+    let free = stacks.len() as i32 * max - units + guard.free_slot_count() * max;
+    count <= free
 }
 
 /// `GainItemWithEmblemImprint.Execute`: `UccManager.CreateStamp(target, sourceItem)` where
@@ -1678,38 +1876,4 @@ pub fn repair_slave_item(server: &GameServer, effect_id: u32, item_target: Optio
         target_player.data().unit.name,
         after.id
     );
-}
-
-// ---------------------------------------------------------------------------------------------
-// C# stubs
-// ---------------------------------------------------------------------------------------------
-
-/// The item special effects that are `// TODO ...` stubs in the C# (they only log).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StubItemEffect {
-    ExpToItem,
-    GainGachaLootPackItem,
-    GainItemWithPosImprint,
-    ItemEvolving,
-    ItemEvolvingReRoll,
-    ItemGradeEnchanting,
-    ItemRefurbishment,
-    ItemSmelting,
-    PhysicalEnchantArmor,
-    PhysicalEnchantWeapon,
-    RechargeItemBuff,
-    RechargeItemRndAttrUnitModifier,
-    RechargeItemSkill,
-    RepairAuthorityInBag,
-    RevertItemLook,
-}
-
-/// The `Execute` of a [`StubItemEffect`]: `if (caster is Character) Logger.Debug(...)`.
-pub fn stub_effect(effect: StubItemEffect, caster_is_character: bool, values: [i32; 4]) {
-    if caster_is_character {
-        let [value1, value2, value3, value4] = values;
-        tracing::debug!(
-            "Special effects: {effect:?} value1 {value1}, value2 {value2}, value3 {value3}, value4 {value4}"
-        );
-    }
 }
