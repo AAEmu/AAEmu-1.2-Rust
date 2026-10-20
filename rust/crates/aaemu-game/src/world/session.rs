@@ -1193,6 +1193,14 @@ pub async fn leave_world_task(
         }
         conn.send(&SCLeaveWorldGrantedPacket { target });
         conn.send(&ChangeStatePacket { state: 0 });
+        if target == leave_target::QUIT_GAME {
+            // The player quit: free the account at once and close the connection (the queued
+            // frames are flushed first). Deviation from the C#, which kept the connection and
+            // the account registered until the client closed the socket or the dead-connection
+            // sweep (30-60 s) did, so a prompt relog was refused ("enter world denied, reason 1").
+            server.accounts.remove_if_owned(conn.account_id(), conn.id);
+            conn.shutdown();
+        }
     }
 }
 
@@ -1267,6 +1275,15 @@ pub async fn save_and_remove_from_world(server: &GameServer, active: Option<&Pla
     let Some(p) = active else {
         return;
     };
+    // A duel / battlefield faction is temporary: restore it before the departure save so the
+    // character is never persisted with its Red / Blue team or corps faction (RPA-09).
+    server
+        .systems
+        .social
+        .duels
+        .on_participant_leave(server, p)
+        .await;
+    crate::systems::social::faction::restore_temporary_faction(server, p);
     server.save.remember_departing(p);
     crate::systems::npcs::schedule_item_session::on_leave(server, p);
     let _transaction = server.save.transaction_lock().await;

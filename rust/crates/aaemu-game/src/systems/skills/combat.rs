@@ -796,8 +796,13 @@ pub fn collect_assists(
 }
 
 /// `AwardPvpHonor(killer, victimZone, conflictData, zoneState)`: Conflict 10 solo (6 killer +
-/// 4 each assist), War 20 solo (16 killer + 4 each assist), nothing in other states; the kill
-/// also counts for the zone conflict.
+/// 4 each assist), War 20 solo (16 killer + 4 each assist), no honor in other states. The kill
+/// is registered with the zone conflict **in every state**: `conflict_zones.num_kills_0..4`
+/// (70/100/140/190/250 for zone groups 14-27) escalate Tension -> Danger -> Dispute -> Unrest ->
+/// Crisis -> Conflict, so the counter must see the kills after the timer chain returns to
+/// Tension. The 1.2 C# (and the previous port) called `AddZoneKill` only from the honor branch,
+/// i.e. in Conflict / War, where `ZoneConflict.AddZoneKill` ignores it; the zone then stayed in
+/// Tension forever after its first Peace.
 fn award_pvp_honor(
     server: &GameServer,
     victim: &PlayerRef,
@@ -807,13 +812,7 @@ fn award_pvp_honor(
     zone_state: u8,
 ) {
     use crate::data::world_data::conflict_type;
-    let (solo, killer_share, assist_share) = match zone_state {
-        conflict_type::CONFLICT => (10, 6, 4),
-        conflict_type::WAR => (20, 16, 4),
-        // No honor outside Conflict/War zones
-        _ => return,
-    };
-    // Register zone kill (drives zone state escalation)
+    // Register zone kill (drives zone state escalation) in Tension..Crisis too.
     if let Some(c) = conflict {
         server
             .systems
@@ -821,6 +820,12 @@ fn award_pvp_honor(
             .conflicts
             .add_zone_kill(server, c.zone_group_id);
     }
+    let (solo, killer_share, assist_share) = match zone_state {
+        conflict_type::CONFLICT => (10, 6, 4),
+        conflict_type::WAR => (20, 16, 4),
+        // No honor outside Conflict/War zones
+        _ => return,
+    };
     let rate = server.config.get().world.pvp_honor_rate;
     let assist_ids = collect_assists(server, victim, killer, now_ms());
     // Resolve to online assistants before choosing the kill path (offline assists fall back
@@ -1352,18 +1357,31 @@ pub fn set_invisible(server: &GameServer, unit: &WorldObject, value: bool) {
 /// `Unit.SetFaction(factionId)` (the `Character` override returns early for the same faction
 /// and kicks from foreign guilds / parties: social subsystem).
 pub fn set_faction(server: &GameServer, unit: &WorldObject, faction_id: u32) {
+    set_faction_with_temp(server, unit, faction_id, false);
+}
+
+/// `Unit.SetFaction(factionId)` with the `SCUnitFactionChangedPacket.temp` flag: a temporary
+/// change (duel Red / Blue team, battlefield corps) keeps the *first* origin faction until it
+/// is restored and is never persisted by `db_character::save_character`.
+pub fn set_faction_with_temp(server: &GameServer, unit: &WorldObject, faction_id: u32, temp: bool) {
     let Some((old, name)) = unit.with_unit(|u| {
-        let u = u.unit_mut();
-        let old = u.faction_id;
-        u.origin_faction_id = old;
-        (old, u.name.clone())
+        let u = u.unit();
+        (u.faction_id, u.name.clone())
     }) else {
         return;
     };
     if old == faction_id {
         tracing::info!("SetFaction: faction has already been established factionId={faction_id}");
     } else {
-        unit.with_unit(|u| u.unit_mut().faction_id = faction_id);
+        unit.with_unit(|u| {
+            let u = u.unit_mut();
+            // Nested temporary changes (a duel inside a battlefield) keep the true origin.
+            if !u.faction_temporary || !temp {
+                u.origin_faction_id = old;
+            }
+            u.faction_id = faction_id;
+            u.faction_temporary = temp;
+        });
         broadcast(
             server,
             unit,
@@ -1372,7 +1390,7 @@ pub fn set_faction(server: &GameServer, unit: &WorldObject, faction_id: u32) {
                 unit_name: name,
                 id: old,
                 id2: faction_id,
-                temp: false,
+                temp,
             },
             true,
         );

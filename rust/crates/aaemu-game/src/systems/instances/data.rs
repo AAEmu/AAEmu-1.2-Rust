@@ -484,6 +484,86 @@ pub struct BattlefieldSpawns {
     pub corps2_spawn: Option<Point>,
 }
 
+/// `game_score_rules` event ids (`enum_game_score_events`; named from the 10.x content enum,
+/// whose 200-204 rows match the 1.2 table).
+pub mod game_score_event {
+    pub const COMPLETE_QUEST: i32 = 1;
+    pub const KILL_SLAVE_KIND: i32 = 100;
+    pub const KILL_HOUSE_CATEGORY: i32 = 101;
+    /// The final hit on an enemy player (every shipped 1.2 battlefield rule set scores it).
+    pub const KILL_ENEMY_UNIT_FINAL_HITTER: i32 = 200;
+    pub const KILL_UNIT: i32 = 201;
+    pub const KILL_ENEMY_UNIT_ASSIST_HEALER1: i32 = 202;
+    pub const KILL_ENEMY_UNIT_ASSIST_HEALER2: i32 = 203;
+    pub const KILL_ENEMY_UNIT_ASSIST_DEALER1: i32 = 204;
+}
+
+/// `game_score_rules.rule_set_corps` value meaning "applies to every side" (`-1`; rule set 2
+/// of the 1.2 data instead authors corps `0` / `1` rows).
+pub const SCORE_RULE_ANY_CORPS: i32 = -1;
+
+/// One `game_score_rules` row: the points one scoring event awards inside a rule set. The 1.2
+/// table has no `event_tag_id` / `available_target_*` columns (only the 10.x content adds
+/// them); those default to 0 here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GameScoreRule {
+    pub rule_set_corps: i32,
+    pub event_id: i32,
+    pub event_value: i32,
+    pub event_score: i32,
+    pub event_tag_id: u32,
+}
+
+impl GameScoreRule {
+    /// Resolves `event_id` / `event_value` for `corps` (`InstantGameScoreRules.TryGetScore`): a
+    /// row bound to the scoring corps wins over the side-agnostic `-1` row. Rows with a buff tag
+    /// condition (10.x content only) never match here because the 1.2 data carries no tags.
+    pub fn resolve(
+        rules: &[GameScoreRule],
+        event_id: i32,
+        event_value: i32,
+        corps: u8,
+    ) -> Option<i32> {
+        let mut any = None;
+        for rule in rules {
+            if rule.event_id != event_id
+                || rule.event_value != event_value
+                || rule.event_tag_id != 0
+            {
+                continue;
+            }
+            if rule.rule_set_corps == i32::from(corps) {
+                return Some(rule.event_score);
+            }
+            if rule.rule_set_corps == SCORE_RULE_ANY_CORPS {
+                any = Some(rule.event_score);
+            }
+        }
+        any
+    }
+}
+
+/// One `game_rule_events` row (loaded by the 1.2/10.x client and the 10.x zone; no server-side
+/// consumer defines its condition / kind semantics in either the 1.2 C# or the 10.x zone).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GameRuleEvent {
+    pub id: u32,
+    pub condition_id: i32,
+    pub kind_id: i32,
+    pub param1: i32,
+    pub param2: i32,
+}
+
+/// One `battle_field_buffs` row: the buff granted to the players of a battlefield and its
+/// authored value (the 3.0 successor `battle_field_honor_buffs.basic_value` carries the same
+/// figures for the same buff ids: 7006 = 1, 7007 = 2, 7061 = 3, 7062 = 4, 8246 / 8247 = 1).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BattleFieldBuff {
+    pub id: u32,
+    pub buff_id: u32,
+    pub value: i32,
+}
+
 /// `GameRuleSet`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GameRuleSet {
@@ -558,6 +638,12 @@ pub struct Battlefield {
 #[derive(Debug, Clone, Default)]
 pub struct BattlefieldData {
     pub battlefields: HashMap<u32, Battlefield>,
+    /// `game_score_rules` rows by rule set id (insertion order).
+    pub score_rules: HashMap<u32, Vec<GameScoreRule>>,
+    /// `game_rule_events` rows by rule set id.
+    pub rule_events: HashMap<u32, Vec<GameRuleEvent>>,
+    /// `battle_field_buffs` rows by battlefield id.
+    pub battlefield_buffs: HashMap<u32, Vec<BattleFieldBuff>>,
 }
 
 /// A `game_rule_sets.rank_*_point` column: `0` when the table has no such column or the value is
@@ -574,6 +660,27 @@ impl BattlefieldData {
     /// `GetBattlefield(id)`.
     pub fn battlefield(&self, id: u32) -> Option<&Battlefield> {
         self.battlefields.get(&id)
+    }
+
+    /// The `game_score_rules` rows of a rule set.
+    pub fn score_rules(&self, rule_set_id: u32) -> &[GameScoreRule] {
+        self.score_rules
+            .get(&rule_set_id)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// The `game_rule_events` rows of a rule set.
+    pub fn rule_events(&self, rule_set_id: u32) -> &[GameRuleEvent] {
+        self.rule_events
+            .get(&rule_set_id)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// The `battle_field_buffs` rows of a battlefield.
+    pub fn battlefield_buffs(&self, battlefield_id: u32) -> &[BattleFieldBuff] {
+        self.battlefield_buffs
+            .get(&battlefield_id)
+            .map_or(&[], Vec::as_slice)
     }
 
     /// `BattlefieldGameData.Load` (`battle_fields`, `game_rule_sets` and
@@ -677,6 +784,66 @@ impl BattlefieldData {
             }
             Ok(())
         })?;
+
+        // `game_score_rules`: the per-event points of each rule set (the 1.2 table has no
+        // event_tag_id / available_target_* columns).
+        for_each_row(conn, "SELECT * FROM game_score_rules", [], |r| {
+            let rule_set_id = r.u32("rule_set_id")?;
+            let rule = GameScoreRule {
+                rule_set_corps: r.i32("rule_set_corps")?,
+                event_id: r.i32("event_id")?,
+                event_value: r.i32("event_value")?,
+                event_score: r.i32("event_score")?,
+                event_tag_id: if r.has("event_tag_id") {
+                    r.u32_or("event_tag_id", 0)?
+                } else {
+                    0
+                },
+            };
+            d.score_rules.entry(rule_set_id).or_default().push(rule);
+            Ok(())
+        })?;
+        // `game_rule_events`: condition rows per rule set.
+        for_each_row(conn, "SELECT * FROM game_rule_events", [], |r| {
+            let rule_set_id = r.u32("rule_set_id")?;
+            d.rule_events
+                .entry(rule_set_id)
+                .or_default()
+                .push(GameRuleEvent {
+                    id: r.u32("id")?,
+                    condition_id: r.i32("condition_id")?,
+                    kind_id: r.i32("kind_id")?,
+                    param1: r.i32("param1")?,
+                    param2: r.i32("param2")?,
+                });
+            Ok(())
+        })?;
+        // `battle_field_buffs`: the buffs granted to the players of a battlefield. Unknown
+        // battlefields are skipped like stale `battlefields.json` entries.
+        for_each_row(conn, "SELECT * FROM battle_field_buffs", [], |r| {
+            let battlefield_id = r.u32("battle_field_id")?;
+            if !d.battlefields.contains_key(&battlefield_id) {
+                tracing::debug!(
+                    "battle_field_buffs: no battlefield {battlefield_id} for its buff row"
+                );
+                return Ok(());
+            }
+            d.battlefield_buffs
+                .entry(battlefield_id)
+                .or_default()
+                .push(BattleFieldBuff {
+                    id: r.u32("id")?,
+                    buff_id: r.u32("buff_id")?,
+                    value: r.i32("value")?,
+                });
+            Ok(())
+        })?;
+        tracing::info!(
+            "Loaded {} game score rules, {} game rule events, {} battlefield buffs",
+            d.score_rules.values().map(Vec::len).sum::<usize>(),
+            d.rule_events.values().map(Vec::len).sum::<usize>(),
+            d.battlefield_buffs.values().map(Vec::len).sum::<usize>()
+        );
 
         let contents = battlefields_json.unwrap_or_default();
         if contents.trim().is_empty() {

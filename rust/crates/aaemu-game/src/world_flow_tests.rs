@@ -635,3 +635,32 @@ async fn time_of_day_subscription() {
     s.time.tick();
     assert!(a.drain().is_empty());
 }
+
+/// Quitting the game frees the account at once and closes the connection, so an immediate relog
+/// is not refused with "already connected" (enter world denied, reason 1). A stale connection
+/// that closes later must not unregister the new login of the same account.
+#[tokio::test]
+async fn quit_game_frees_the_account_for_an_immediate_relog() {
+    use crate::test_support::{spawn_player, test_character, test_server, TestClient};
+    let server = std::sync::Arc::new(test_server());
+    server.set_self();
+    let mut a = TestClient::new(&server, 1, 7);
+    let p = spawn_player(
+        &server,
+        &a,
+        test_character(1, "Quitter", 1000.0, 1000.0),
+        0x100,
+    );
+    a.conn.active_char = Some(p.clone());
+    assert!(server.accounts.try_add(7, a.conn.id));
+    assert!(server.accounts.contains(7));
+
+    session::leave_world_task(&server, Some(&mut a.conn), 0, Some(p)).await;
+    assert!(a.conn.is_closing());
+    assert!(!server.accounts.contains(7));
+
+    // The player logs in again on a new connection; the old socket closes afterwards.
+    assert!(server.accounts.try_add(7, 99));
+    crate::net::listener::on_disconnect(&server, &mut a.conn).await;
+    assert!(server.accounts.contains(7));
+}

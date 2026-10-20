@@ -1387,22 +1387,53 @@ fn camp_server_with(
     victory_kill_count: u32,
     tweak: impl FnOnce(&mut GameRuleSet),
 ) -> Arc<GameServer> {
-    camp_server_build(corps_size, victory_score, victory_kill_count, false, tweak)
+    camp_server_build(
+        corps_size,
+        victory_score,
+        victory_kill_count,
+        30,
+        2,
+        false,
+        tweak,
+    )
+}
+
+/// A Drill Camp server whose `game_score_rules` author `kill_score` / `assist_score` (the
+/// shipped rule sets 8/17/22/26/27 author 3 / 2; rule set 28 authors 30 for kills).
+fn camp_server_with_score(
+    corps_size: u32,
+    victory_score: i32,
+    kill_score: i32,
+    assist_score: i32,
+    tweak: impl FnOnce(&mut GameRuleSet),
+) -> Arc<GameServer> {
+    camp_server_build(
+        corps_size,
+        victory_score,
+        0,
+        kill_score,
+        assist_score,
+        false,
+        tweak,
+    )
 }
 
 /// [`camp_server`] in the arena ranking board's zone group (77) with the gladiator duel's
 /// authored points (win 4, lose 1).
 fn camp_server_ranked(corps_size: u32, victory_score: i32) -> Arc<GameServer> {
-    camp_server_build(corps_size, victory_score, 0, true, |r| {
+    camp_server_build(corps_size, victory_score, 0, 30, 2, true, |r| {
         r.rank_win_point = 4;
         r.rank_lose_point = 1;
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn camp_server_build(
     corps_size: u32,
     victory_score: i32,
     victory_kill_count: u32,
+    kill_score: i32,
+    assist_score: i32,
     ranked: bool,
     tweak: impl FnOnce(&mut GameRuleSet),
 ) -> Arc<GameServer> {
@@ -1441,6 +1472,49 @@ fn camp_server_build(
         ..GameRuleSet::default()
     };
     tweak(&mut rule_set);
+    // One battlefield buff for the grant / removal flow (the real 1.2 row is battlefield 11 /
+    // buff 8246, value 1; the template is synthetic here).
+    data.systems
+        .skills
+        .add_buff(crate::systems::skills::data::BuffTemplate {
+            id: 8246,
+            duration: 0,
+            ..Default::default()
+        });
+    data.systems
+        .instances
+        .battlefields
+        .battlefield_buffs
+        .insert(
+            7,
+            vec![BattleFieldBuff {
+                id: 27,
+                buff_id: 8246,
+                value: 1,
+            }],
+        );
+    // The synthetic rule set scores 30 per kill (the Gladiator row) so the flow tests can
+    // reach the 60-point victory threshold; the shipped Drill Camp rows are checked by the
+    // data tests.
+    data.systems.instances.battlefields.score_rules.insert(
+        rule_set.id,
+        vec![
+            GameScoreRule {
+                rule_set_corps: SCORE_RULE_ANY_CORPS,
+                event_id: game_score_event::KILL_ENEMY_UNIT_FINAL_HITTER,
+                event_value: 0,
+                event_score: kill_score,
+                event_tag_id: 0,
+            },
+            GameScoreRule {
+                rule_set_corps: SCORE_RULE_ANY_CORPS,
+                event_id: game_score_event::KILL_ENEMY_UNIT_ASSIST_DEALER1,
+                event_value: 0,
+                event_score: assist_score,
+                event_tag_id: 0,
+            },
+        ],
+    );
     data.systems.instances.battlefields.battlefields = HashMap::from([(
         7,
         Battlefield {
@@ -1918,6 +1992,13 @@ async fn battlefield_entered_requires_actual_instance_and_subscribes_kills_once(
             .count(&p.p, CharEvent::Kill),
         1
     );
+    // RPA-09: the corps faction is temporary and restored when the player leaves.
+    assert_eq!(p.p.data().unit.faction_id, 160);
+    assert!(p.p.data().unit.faction_temporary);
+    assert_eq!(p.p.data().unit.origin_faction_id, original_faction);
+    instant_game::leave_current_game(&server, &p.p);
+    assert_eq!(p.p.data().unit.faction_id, original_faction);
+    assert!(!p.p.data().unit.faction_temporary);
 }
 
 /// Two players matched, joined and entered on battlefield 7; the game has started.
@@ -1941,6 +2022,80 @@ async fn started_1v1(server: &Arc<GameServer>) -> (Pc, Pc, Arc<instant_game::Ins
     a.frames();
     b.frames();
     (a, b, game)
+}
+
+/// `battle_field_buffs` are granted at match start (after the reset that removes every buff)
+/// with the row's `value` as the buff charge, and removed again when the player leaves.
+#[tokio::test]
+async fn battlefield_buffs_are_granted_at_start_and_removed_on_leave() {
+    let server = camp_server(1, 60);
+    let (mut a, _b, game) = started_1v1(&server).await;
+    assert!(!a.p.data().unit.buffs.check_buff(8246));
+    instant_game::reset_player(&server, &game, &a.p);
+    let buff =
+        a.p.data()
+            .unit
+            .buffs
+            .effect_from_buff_id(8246)
+            .cloned()
+            .expect("battlefield buff");
+    assert_eq!(buff.charge, 1);
+    a.frames();
+    instant_game::leave_current_game(&server, &a.p);
+    assert!(!a.p.data().unit.buffs.check_buff(8246));
+}
+
+/// The kill / assist points come from the rule set's `game_score_rules` rows (event 200 for
+/// the final hitter, 204 for an assist; the 1.2 Drill Camp rows are 3 / 2), not from the old
+/// hard-coded 30.
+#[tokio::test]
+async fn battlefield_kill_and_assist_scores_come_from_game_score_rules() {
+    let server = camp_server_with_score(2, 100, 3, 2, |r| {
+        r.id = 8;
+    });
+    let mut a = Pc::new(&server, 5, "Killer", 100.0, 100.0);
+    let mut b = Pc::new(&server, 6, "Victim", 120.0, 100.0);
+    let mut c = Pc::new(&server, 7, "Helper", 130.0, 100.0);
+    for pc in [&a, &b, &c] {
+        instant_game::apply_to_battlefield(&server, 7, corps::ANY, &pc.p);
+    }
+    instant_game::battlefield_tick(&server);
+    let game = server.systems.instances.instant_games.games()[0].clone();
+    assert_eq!(game.rule_set.id, 8);
+    let mut join = vec![1];
+    join.extend_from_slice(&1u64.to_le_bytes());
+    let entered = 1u64.to_le_bytes();
+    for pc in [&mut a, &mut b, &mut c] {
+        pc.frame(&server, cs::CSJoinInstantGamePacket, &join).await;
+        pc.frame(&server, cs::CSEnteredInstantGameWorldPacket, &entered)
+            .await;
+        pc.frames();
+    }
+    assert_eq!(game.st().members.len(), 3);
+    instant_game::start_game(&server, &game);
+    for pc in [&mut a, &mut b, &mut c] {
+        pc.frames();
+    }
+
+    // Helper damaged the victim recently: the kill pays the killer 3 and the helper 2.
+    crate::systems::skills::combat::record_pvp_damage_from(&b.p, c.p.character_id);
+    events::on_do_die(
+        &server,
+        &WorldObject::from(&b.p),
+        Some(&WorldObject::from(&a.p)),
+    );
+    let st = game.st();
+    let index = |p: &PlayerRef| {
+        st.members
+            .iter()
+            .position(|m| Arc::ptr_eq(&m.player, p))
+            .unwrap()
+    };
+    assert_eq!(st.members[index(&a.p)].score, 3);
+    assert_eq!(st.members[index(&b.p)].score, 0);
+    assert_eq!(st.members[index(&c.p)].score, 2);
+    assert_eq!(st.members[index(&a.p)].kills, 1);
+    assert_eq!(st.members[index(&c.p)].assists, 1);
 }
 
 fn end_reason(frames: &[(u16, Vec<u8>)]) -> Option<u8> {
