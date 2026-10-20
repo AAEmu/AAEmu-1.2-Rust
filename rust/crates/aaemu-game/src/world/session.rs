@@ -1157,6 +1157,13 @@ pub async fn leave_world_task(
         server.chat.leave_all_channels(p);
         // Handle Family
         crate::systems::social::session::on_leave_world_family(server, p);
+        // A pending guild invitation does not outlive the invited character's session.
+        server
+            .expeditions
+            .invitations
+            .lock()
+            .expect("expedition invitations poisoned")
+            .remove(&p.character_id);
         let (exp, id) = {
             let c = p.data();
             (c.unit.expedition_id, c.id)

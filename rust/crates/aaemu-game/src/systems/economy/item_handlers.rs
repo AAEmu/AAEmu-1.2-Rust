@@ -292,6 +292,29 @@ impl CSExpandSlotsPacket {
 }
 sync_client_packet!(CSExpandSlotsPacket);
 
+/// Bank guard shared by deposit / withdraw: the amount must be positive (a negative amount
+/// would move money the wrong way) and the player must be interacting with a banker NPC in
+/// range (the C# checked neither).
+fn bank_request_allowed(server: &GameServer, p: &PlayerRef, what: &str, amount: i32) -> bool {
+    if amount <= 0 {
+        tracing::warn!(
+            "{}: rejected {what} with non-positive amount {amount}",
+            p.data().unit.name
+        );
+        return false;
+    }
+    let npc = p.data().unit.current_interaction_object;
+    if !super::store::near_service_npc(server, p, npc, super::store::SERVICE_RANGE, |i| i.banker) {
+        tracing::warn!(
+            "{}: rejected {what}: no banker NPC in range (interaction object {npc})",
+            p.data().unit.name
+        );
+        inventory::send_error_message(p, error_message::TOO_FAR_AWAY, 0, true);
+        return false;
+    }
+    true
+}
+
 /// `CSDepositMoneyPacket`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSDepositMoneyPacket {
@@ -307,8 +330,11 @@ impl CSDepositMoneyPacket {
         })
     }
 
-    fn run(self, _server: &GameServer, conn: &mut GameConnection) {
+    fn run(self, server: &GameServer, conn: &mut GameConnection) {
         let Some(p) = active(conn) else { return };
+        if !bank_request_allowed(server, &p, "DepositMoney", self.amount) {
+            return;
+        }
         inventory::change_money(
             &mut inventory::Out::Direct,
             &p,
@@ -336,8 +362,11 @@ impl CSWithdrawMoneyPacket {
         })
     }
 
-    fn run(self, _server: &GameServer, conn: &mut GameConnection) {
+    fn run(self, server: &GameServer, conn: &mut GameConnection) {
         let Some(p) = active(conn) else { return };
+        if !bank_request_allowed(server, &p, "WithdrawMoney", self.amount) {
+            return;
+        }
         inventory::change_money(
             &mut inventory::Out::Direct,
             &p,

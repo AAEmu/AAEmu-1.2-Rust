@@ -602,6 +602,11 @@ impl Data {
         !self.skills.is_empty()
     }
 
+    /// The ids of all skill templates (tests / synthetic data).
+    pub fn skill_ids(&self) -> Vec<u32> {
+        self.skills.keys().copied().collect()
+    }
+
     /// Adds a skill template (tests / synthetic data).
     pub fn add_skill(&mut self, t: SkillTemplate) {
         self.skills.insert(t.id, Arc::new(t));

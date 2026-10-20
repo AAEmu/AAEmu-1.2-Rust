@@ -121,6 +121,8 @@ struct State {
 pub struct SpawnEffectParams {
     pub use_summoner_faction: bool,
     pub use_summoner_aggro_target: bool,
+    /// `DespawnOnCreatorDeath`: the spawned NPC is removed when the caster dies.
+    pub despawn_on_creator_death: bool,
     /// `LifeTime` (seconds; > 0 schedules `NpcSpawnerDoDespawnTask`).
     pub life_time: f32,
 }
@@ -1659,6 +1661,15 @@ impl NpcSpawner {
             }
             if effect.life_time > 0.0 {
                 schedule_npc_do_despawn(server, npc, effect.life_time);
+            }
+            if effect.despawn_on_creator_death {
+                if let Some(caster) = caster {
+                    server
+                        .systems
+                        .npcs
+                        .spawns
+                        .add_creator_summon(caster.obj_id(), npc);
+                }
             }
         }
         if n.is_empty() {

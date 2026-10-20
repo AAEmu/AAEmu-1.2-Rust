@@ -427,6 +427,15 @@ pub(super) async fn run(
                 }
                 println!("    mate walked to {at:?}");
             }
+            "loaded" => {
+                // The real client's answer to SCLoadInstancePacket, then the world settles.
+                game.send_cs(aaemu_game::opcodes::cs::CSInstanceLoadedPacket, &[])
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(1500), Duration::from_secs(6))
+                    .await?;
+                show(&got);
+            }
             other => bail!("unknown script command '{other}' at line {}", n + 1),
         }
     }

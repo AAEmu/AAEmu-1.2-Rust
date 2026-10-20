@@ -156,6 +156,43 @@ async fn out_of_range_plot_is_rejected_before_starting_a_plot_or_gcd() {
 }
 
 #[tokio::test]
+async fn doodad_and_slave_targets_only_get_a_bounded_range_allowance() {
+    use crate::models::slave::Slave;
+    let (server, _client, player, _npc) = fixture(GameData::empty());
+    let world = server.world.world(0).unwrap();
+    let skill = SkillRun::new(Arc::new(super::tests::skill_template(1)), 1); // max range 30
+    let caster = WorldObject::from(&player);
+    let check = |target: &WorldObject| {
+        super::validation::check(&server, &skill, &caster, &Target::Obj(target.clone()))
+    };
+    let too_far = Err((skill_result::TOO_FAR_RANGE, 0));
+    for (y, ok) in [(40.0, true), (200.0, false)] {
+        let mut d = crate::models::doodad::Doodad::new(1);
+        d.transform.set_xyz(100.0, 100.0 + y, 100.0);
+        let doodad = Entity::new(0x300, d);
+        world.spawn(&doodad, &server.view_ctx());
+        let result = check(&WorldObject::from(&doodad));
+        assert_eq!(result.is_ok(), ok, "doodad {y} m away: {result:?}");
+        if !ok {
+            assert_eq!(result, too_far);
+        }
+        world.remove_object(0x300);
+    }
+    for (y, ok) in [(60.0, true), (200.0, false)] {
+        let mut s = Slave::new(0x301, 1);
+        s.unit.transform.set_xyz(100.0, 100.0 + y, 100.0);
+        let slave = Entity::new(0x301, s);
+        world.spawn(&slave, &server.view_ctx());
+        let result = check(&WorldObject::from(&slave));
+        assert_eq!(result.is_ok(), ok, "slave {y} m away: {result:?}");
+        if !ok {
+            assert_eq!(result, too_far);
+        }
+        world.remove_object(0x301);
+    }
+}
+
+#[tokio::test]
 async fn guaranteed_hit_is_per_effect_and_does_not_change_the_cast_miss_cache() {
     let mut data = GameData::empty();
     data.systems.skills.add_effect(
