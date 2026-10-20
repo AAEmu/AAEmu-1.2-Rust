@@ -252,6 +252,26 @@ pub fn on_death(server: &GameServer, shipyard: &ShipyardRef) {
     remove_shipyard(server, shipyard);
 }
 
+/// `BaseUnit.GetDistanceTo`: the shipyard part (`BuildRadius * Scale` instead of the model
+/// radius). Shipyard models are prefab models without an actor radius, so the build radius
+/// stands in for the footprint; without it the 4 m build skills only reach the center point of
+/// a 25 m drydock. `None` for other objects.
+pub fn shipyard_radius(server: &GameServer, obj: &WorldObject) -> Option<f32> {
+    let shipyard = obj.as_shipyard()?;
+    let (template_id, scale) = {
+        let s = shipyard.data();
+        (s.data.template_id, s.unit.scale)
+    };
+    let r = server
+        .game_data
+        .systems
+        .vehicles
+        .shipyard_templates
+        .get(&template_id)
+        .map_or(0.0, |t| t.build_radius as f32);
+    Some(r * scale)
+}
+
 /// `CurrentStep` setter (`ModelId`, `BaseAction`).
 fn set_current_step(server: &GameServer, s: &mut Shipyard, step: i32) {
     s.current_step = step;

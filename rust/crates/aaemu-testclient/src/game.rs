@@ -778,14 +778,42 @@ impl GameClient {
             .await
     }
 
+    /// `CSMoveUnitPacket` for another object of ours (the mate we ride), without touching
+    /// our own tracked position.
+    pub async fn move_obj_to(
+        &mut self,
+        obj_id: u32,
+        pos: (f32, f32, f32),
+        time: u32,
+    ) -> anyhow::Result<()> {
+        let own = self.state.self_pos;
+        self.move_obj_inner(obj_id, pos, time, 0).await?;
+        self.state.self_pos = own;
+        if let Some(u) = self.state.units.get_mut(&obj_id) {
+            u.pos = pos;
+        }
+        Ok(())
+    }
+
     async fn move_to_with_direction(
         &mut self,
         pos: (f32, f32, f32),
         time: u32,
         direction: i8,
     ) -> anyhow::Result<()> {
+        let obj = self.state.self_obj;
+        self.move_obj_inner(obj, pos, time, direction).await
+    }
+
+    async fn move_obj_inner(
+        &mut self,
+        obj_id: u32,
+        pos: (f32, f32, f32),
+        time: u32,
+        direction: i8,
+    ) -> anyhow::Result<()> {
         let mut s = PacketStream::new();
-        s.write_bc(self.state.self_obj)
+        s.write_bc(obj_id)
             .write_u8(1) // MoveTypeEnum.Unit
             .write_u32(time)
             .write_u8(0x02) // Moving
@@ -830,6 +858,26 @@ impl GameClient {
             .write_bc(target_obj)
             .write_u8(0); // flag: no skill object
         self.send_cs(cs::CSStartSkillPacket, s.as_bytes()).await
+    }
+
+    /// `CSCreateDoodadPacket` (0x0e6): plant / place doodad `id` from the bag item `item_id`.
+    pub async fn create_doodad(
+        &mut self,
+        id: u32,
+        pos: (f32, f32, f32),
+        z_rot: f32,
+        scale: f32,
+        item_id: u64,
+    ) -> anyhow::Result<()> {
+        let mut s = PacketStream::new();
+        s.write_u32(id)
+            .write_i64(aaemu_commons::helpers::convert_coord_to_long(pos.0))
+            .write_i64(aaemu_commons::helpers::convert_coord_to_long(pos.1))
+            .write_f32(pos.2)
+            .write_f32(z_rot)
+            .write_f32(scale)
+            .write_u64(item_id);
+        self.send_cs(cs::CSCreateDoodadPacket, s.as_bytes()).await
     }
 
     /// `CSStartSkillPacket`: unit caster (us) on a doodad target (`SkillCastDoodadTarget`), what

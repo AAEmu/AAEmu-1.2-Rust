@@ -5,6 +5,11 @@ use crate::systems::npcs::doodad::templates::DoodadTemplate;
 use crate::test_support::*;
 
 fn fixture() -> (GameServer, PlayerRef, u64) {
+    let (server, player, item_id, _client) = fixture_with_client();
+    (server, player, item_id)
+}
+
+fn fixture_with_client() -> (GameServer, PlayerRef, u64, TestClient) {
     let mut data = GameData::empty();
     for id in [1000, 1001, 2000] {
         data.items.templates.insert(id, ItemTemplate::plain(id, 20));
@@ -42,7 +47,7 @@ fn fixture() -> (GameServer, PlayerRef, u64) {
         .unwrap()
         .add_new_item(item, 0, &server.game_data.items)
         .unwrap();
-    (server, player, item_id)
+    (server, player, item_id, client)
 }
 
 #[tokio::test]
@@ -191,4 +196,89 @@ async fn unrelated_item_and_remote_or_nonfinite_client_positions_are_rejected() 
     assert_eq!(Inv::of(&player).item_by_id(id).unwrap().count, 2);
     assert!(Inv::of(&player).item_by_id(other_id).is_some());
     assert_eq!(player.data().labor_power, 20);
+}
+
+#[tokio::test]
+async fn placement_range_is_a_horizontal_sanity_bound() {
+    let (server, player, id, mut client) = fixture_with_client();
+    let place = |x: f32, y: f32, z: f32| {
+        handle_create_doodad(
+            &server,
+            &player,
+            &CSCreateDoodadPacket {
+                id: 4000,
+                x,
+                y,
+                z,
+                z_rot: 0.0,
+                scale: 1.0,
+                item_id: id,
+            },
+        );
+    };
+    client.drain();
+    // 15 m away horizontally, 60 m above: the client sends such placements; accepted (the
+    // source item is consumed).
+    place(115.0, 100.0, 60.0);
+    assert_eq!(Inv::of(&player).item_by_id(id).unwrap().count, 1);
+    client.drain();
+    // 40 m away: refused with "too far away" and nothing consumed.
+    place(140.0, 100.0, 50.0);
+    assert_eq!(Inv::of(&player).item_by_id(id).unwrap().count, 1);
+    let (_, body) = client
+        .drain()
+        .into_iter()
+        .find(|(op, _)| *op == crate::opcodes::sc::SCErrorMsgPacket)
+        .expect("too far error");
+    assert_eq!(
+        i16::from_le_bytes([body[0], body[1]]),
+        error_message::TOO_FAR_AWAY
+    );
+}
+
+/// What the real `skills::progress::add_exp` does with a positive labor experience gain: it
+/// ends in `quests::events::on_level_up`, a quest operation that takes the economy ops lock.
+/// (The real hook needs the experience tables; this stub keeps the same lock behavior.)
+struct LevelUpProgression;
+
+impl crate::systems::economy::hooks::ProgressionHooks for LevelUpProgression {
+    fn add_exp(&self, server: &GameServer, player: &PlayerRef, _exp: i32, _add_ability: bool) {
+        crate::systems::quests::events::on_level_up(server, player);
+    }
+}
+
+/// `ItemTxn` holds the economy ops lock while `change_labor` runs; the labor experience
+/// (`add_exp` -> quest `on_level_up` -> `with_quests` -> ops lock) used to re-take that
+/// non-reentrant lock on the same thread and hang the server (labor-costing doodad placement).
+#[tokio::test]
+async fn labor_costing_placement_does_not_deadlock_on_the_ops_lock() {
+    let (server, player, id) = fixture();
+    server
+        .systems
+        .economy
+        .hooks
+        .progression
+        .install(Arc::new(LevelUpProgression));
+    let server = Arc::new(server);
+    let s = server.clone();
+    let p = player.clone();
+    let doodad = finishes_in_time("labor-costing doodad placement", move || {
+        create_player_doodad_with_labor(
+            &s,
+            &p,
+            4000,
+            (101.0, 100.0, 50.0),
+            0.0,
+            1.0,
+            id,
+            0,
+            0,
+            0,
+            true,
+            5,
+        )
+    });
+    assert!(doodad.is_some());
+    assert_eq!(player.data().labor_power, 15);
+    assert_eq!(Inv::of(&player).item_by_id(id).unwrap().count, 1);
 }

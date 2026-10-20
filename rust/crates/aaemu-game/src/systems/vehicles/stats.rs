@@ -108,7 +108,7 @@ impl Eval<'_> {
         self.base_attr(UnitFormulaKind::Fai, UnitAttribute::Fai)
     }
 
-    /// `level` + `str`..`fai` (transfers, shipyards, the mate combat getters).
+    /// `level` + `str`..`fai` (pool getters and mate / slave combat getters).
     fn full_params(&self) -> HashMap<&'static str, f64> {
         HashMap::from([
             ("level", self.level()),
@@ -225,11 +225,7 @@ impl Eval<'_> {
             S::MDpsInc if combat => self.inc(K::SpellDpsInc, A::SpellDpsInc),
             S::RangedDpsInc if slave => self.inc(K::RangedDpsInc, A::RangedDpsInc),
             S::Armor if combat => {
-                let p = if mate {
-                    self.full_params()
-                } else {
-                    HashMap::from([("level", self.level())])
-                };
+                let p = self.full_params();
                 f64::from(int_bonuses(
                     self.u,
                     self.formula(K::Armor, &p) as i32,
@@ -237,11 +233,7 @@ impl Eval<'_> {
                 ))
             }
             S::MagicResistance if combat => {
-                let p = if mate {
-                    self.full_params()
-                } else {
-                    HashMap::from([("level", self.level())])
-                };
+                let p = self.full_params();
                 f64::from(int_bonuses(
                     self.u,
                     self.formula(K::MagicResist, &p) as i32,
@@ -259,11 +251,7 @@ impl Eval<'_> {
     }
 
     fn inc(&self, kind: UnitFormulaKind, attr: UnitAttribute) -> f64 {
-        let p = if matches!(self.kind, VehicleKind::Mate { .. }) {
-            self.full_params()
-        } else {
-            HashMap::from([("level", self.level())])
-        };
+        let p = self.full_params();
         f64::from(float_bonuses(self.u, self.formula(kind, &p), attr) as i32)
     }
 
@@ -467,6 +455,61 @@ pub(crate) mod tests {
         // MaxHp uses the mate_kind variable (7) then CalculateWithBonuses (+10%); the regen
         // getters pass the raw MateKindId (3).
         assert_eq!(v, vec![77.0, 3.0, 10.0]);
+    }
+
+    #[tokio::test]
+    async fn slave_melee_increment_includes_strength() {
+        let mut data = crate::data::GameData::empty();
+        data.formulas = formulas(
+            &[(129, "10+(level-1)*2", 22, 2), (123, "str*50", 21, 2)],
+            &[],
+        );
+        let server = crate::test_support::test_server_with(data);
+        let unit = UnitBase {
+            level: 50,
+            ..Default::default()
+        };
+        assert_eq!(
+            stats_of(&server, VehicleKind::Slave, &unit, &[StatKind::DpsInc]),
+            vec![5400.0]
+        );
+    }
+
+    #[tokio::test]
+    async fn slave_combat_formulas_include_attributes() {
+        let mut data = crate::data::GameData::empty();
+        data.formulas = formulas(
+            &[
+                (1, "level * 2", 23, 2),
+                (2, "level * 3", 24, 2),
+                (3, "level * 4", 25, 2),
+                (4, "level * 5", 26, 2),
+                (5, "dex * 10", 28, 2),
+                (6, "int * 20", 29, 2),
+                (7, "sta * 30", 18, 2),
+                (8, "spi * 40", 19, 2),
+            ],
+            &[],
+        );
+        let server = crate::test_support::test_server_with(data);
+        let unit = UnitBase {
+            level: 50,
+            ..Default::default()
+        };
+        assert_eq!(
+            stats_of(
+                &server,
+                VehicleKind::Slave,
+                &unit,
+                &[
+                    StatKind::RangedDpsInc,
+                    StatKind::MDpsInc,
+                    StatKind::Armor,
+                    StatKind::MagicResistance,
+                ]
+            ),
+            vec![1000.0, 4000.0, 4500.0, 10000.0]
+        );
     }
 
     #[tokio::test]

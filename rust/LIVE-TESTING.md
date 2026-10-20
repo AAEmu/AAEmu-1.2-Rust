@@ -237,6 +237,15 @@ with `CSDeletePortal` and requires `SCPortalDeleted`, then teleports next to the
 bound return point 1, then opens a gate (Teleport Book 4045, skill 11216) once 20 m away (must be refused) and once
 2.5 m ahead, and requires `SCUnitPortalUsed` with the gate NPC before the `SCTeleportUnit` of `CSUsePortal`.
 
+`plant` (GM account) places crops, trees and baby animals with `CSCreateDoodadPacket` (daffodil 2274, potato
+2259, turmeric 2756, wolfdog 4867, elk 4891, growth fruit 4594, fir sapling 367) from seeds added with
+`/item add self`, about 2 m from the bot, and prints per placement whether the doodad was announced
+(`spawned`) and the item tasks / `SCErrorMsg` codes that came back. `AAEMU_PLANT_POS="x y z"` teleports first
+(a house plot, a public farm such as the stable at 14889 14250 116.5), `AAEMU_PLANT_COUNT=N` repeats each
+placement N times. The server log shows `CreateDoodad, ...` / `<name> is placing a doodad ...` and, when a
+placement is dropped, a `CreateDoodad, ...` / `... not placed: ...` warning with the reason; the rows land in
+the `doodads` table. Seeds cost 1 labor each outside houses and public farms, the bot has little labor.
+
 `stonethrow` and `ghost` (GM account, same prerequisites as `questitem`) check two log-noise fixes:
 `stonethrow` casts the stone-throwing skill 11268 from items 4056 / 24210 and asserts that the cast
 of a stack of 2 ends with an `ItemUnlock` (item task type 95) while the cast with the last stone

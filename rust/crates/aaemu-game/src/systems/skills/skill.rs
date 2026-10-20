@@ -559,7 +559,11 @@ pub fn use_skill(
             crate::systems::vehicles::mates::unmount_riding_character(server, p, true);
         }
     }
-    let tl = server.systems.skills.tl_ids.next_id();
+    let tl = server
+        .systems
+        .skills
+        .tl_ids
+        .next_id(caster.obj_id(), template.id);
     skill.state().tl_id = tl;
     tracing::debug!(
         "Created SkillTlId {tl} for Skill {}, Caster {} with target {}",
@@ -882,7 +886,14 @@ pub fn start_channeling(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         if skill2.template.channeling_tick <= 0 {
             apply_effects(&srv, &skill2, &ctx2);
         }
-        end_channeling(&srv, &skill2, &ctx2.caster, doodad, &ctx2.caster_caster);
+        end_channeling(
+            &srv,
+            &skill2,
+            &ctx2.caster,
+            doodad,
+            &ctx2.caster_caster,
+            true,
+        );
     });
 }
 
@@ -950,13 +961,15 @@ fn schedule_channel_tick(
     });
 }
 
-/// `Skill.EndChanneling(caster, channelDoodad, casterCaster)`.
+/// `Skill.EndChanneling(caster, channelDoodad, casterCaster)`. `completed`: the channel ran to
+/// its end (not stopped or cancelled), so the channeling target buff times out.
 pub fn end_channeling(
     server: &GameServer,
     skill: &SkillRef,
     caster: &WorldObject,
     channel_doodad: u32,
     caster_caster: &SkillCaster,
+    completed: bool,
 ) {
     if !caster.is_unit() {
         return;
@@ -989,7 +1002,13 @@ pub fn end_channeling(
                 .object(id)
                 .filter(|target| target.core() as *const _ as usize == identity)
         }) {
-            buffs::remove_effect_by_skill(server, &target, t.channeling_target_buff_id, t.id)
+            if completed {
+                // The channel ran to its end: the target buff ends with it, which is its
+                // Timeout (quest items such as the Earth Crystal are granted by that trigger).
+                buffs::finish_effect_by_skill(server, &target, t.channeling_target_buff_id, t.id);
+            } else {
+                buffs::remove_effect_by_skill(server, &target, t.channeling_target_buff_id, t.id)
+            }
         }
     }
     if channel_doodad != 0 {
@@ -1812,6 +1831,7 @@ pub fn stop(server: &GameServer, skill: &SkillRef, caster: &WorldObject, channel
             caster,
             channel_doodad,
             &SkillCaster::Unit(caster.obj_id()),
+            false,
         );
     } else {
         end_skill(server, skill, caster);
@@ -1829,7 +1849,9 @@ pub fn stop_skill(server: &GameServer, skill: &SkillRef, caster: &WorldObject) {
     {
         a.cancel.cancel();
     }
-    let tl = skill.tl_id();
+    // Take-and-clear atomically (as `end_skill` does): a concurrent plot end or skill end then
+    // releases 0, a no-op, instead of releasing the same id twice.
+    let tl = skill.take_tl_id();
     broadcast(server, caster, &SCSkillEndedPacket { tl }, true);
     broadcast(
         server,
@@ -1841,7 +1863,6 @@ pub fn stop_skill(server: &GameServer, skill: &SkillRef, caster: &WorldObject) {
         true,
     );
     server.systems.skills.tl_ids.release(tl);
-    skill.state().tl_id = 0;
 }
 
 /// `Skill.ConsumeMana(caster)`.
@@ -1888,7 +1909,22 @@ pub fn unit_use_skill(
     target: &WorldObject,
 ) -> u8 {
     let Some(t) = server.game_data.systems.skills.skill(skill_id).cloned() else {
-        tracing::error!("UseSkill: skill {skill_id} has no template (NullReferenceException)");
+        // Retail data has quest components pointing at skills without a `skills` row (see
+        // PORTING.md); warn once per id, repeats go to debug.
+        let first = server
+            .systems
+            .skills
+            .missing_skill_warned
+            .lock()
+            .expect("missing skill set poisoned")
+            .insert(skill_id);
+        let caster = unit.obj_id();
+        let target = target.obj_id();
+        if first {
+            tracing::warn!("UseSkill: skill {skill_id} has no template (dangling retail reference), skipped; caster {caster} target {target}");
+        } else {
+            tracing::debug!("UseSkill: skill {skill_id} has no template (dangling retail reference), skipped; caster {caster} target {target}");
+        }
         return skill_result::INVALID_SKILL;
     };
     let skill = SkillRun::new(t, 1);

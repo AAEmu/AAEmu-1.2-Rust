@@ -408,7 +408,7 @@ async fn channel_without_ticks_applies_once_and_cancellation_has_one_end_notific
         }),
         1,
     );
-    skill.state().tl_id = server.systems.skills.tl_ids.next_id();
+    skill.state().tl_id = server.systems.skills.tl_ids.next_id(0, 0);
     skill.state().initial_target = npc.obj_id;
     let ctx = CastCtx {
         caster: WorldObject::from(&player),
@@ -917,4 +917,20 @@ async fn a_new_cast_obeys_and_cleans_up_the_active_channel_policy() {
             assert!(player.data().unit.skill_state.skill_task.is_some());
         }
     }
+}
+
+#[tokio::test]
+async fn use_skill_without_template_warns_once_per_skill_id() {
+    let (server, _client, player, npc) = fixture(GameData::empty());
+    let caster = WorldObject::from(&player);
+    let target = WorldObject::from(&npc);
+    for _ in 0..2 {
+        assert_eq!(
+            super::skill::unit_use_skill(&server, &caster, 20315, &target),
+            skill_result::INVALID_SKILL
+        );
+    }
+    let warned = server.systems.skills.missing_skill_warned.lock().unwrap();
+    assert_eq!(warned.len(), 1);
+    assert!(warned.contains(&20315));
 }

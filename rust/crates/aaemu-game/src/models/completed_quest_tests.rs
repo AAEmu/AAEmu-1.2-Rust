@@ -26,7 +26,7 @@ fn parameterized_constructor_should_initialize_properties() {
 
 #[test]
 fn parameterized_constructor_should_accept_various_ids() {
-    for id in [0, 1, 100, u16::MAX] {
+    for id in [0, 1, 100, u32::from(u16::MAX), 125_000] {
         assert_eq!(CompletedQuest::new(id).id, id);
     }
 }

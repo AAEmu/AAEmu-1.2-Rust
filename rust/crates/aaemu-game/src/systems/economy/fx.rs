@@ -105,6 +105,15 @@ pub fn flush(server: &GameServer, fx: ItemFxList) {
                     h.on_items_consumed(server, &p, template_id, count);
                 }
             }
+            ItemFx::Exp {
+                owner: o,
+                exp,
+                add_ability_exp,
+            } => {
+                if let (Some(p), Some(h)) = (owner(o), hooks.progression.get()) {
+                    h.add_exp(server, &p, exp, add_ability_exp);
+                }
+            }
             ItemFx::EquipEnter {
                 owner: o,
                 mate_id,

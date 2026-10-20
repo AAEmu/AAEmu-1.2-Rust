@@ -37,6 +37,10 @@ use super::item_effects::{self, Outcome, SkillItem};
 use super::item_packets::SCItemTaskSuccessPacket;
 use super::loot::SharedRandom;
 
+/// Locks a container. In a function that owns an [`ItemTxn`], never leave the guard as a
+/// temporary of the tail expression: it would be dropped after the transaction, whose drop runs
+/// the quest hooks that lock the same container again (self-deadlock). Bind the result to a local
+/// first (`let result = lock(..).consume_item(.., &mut txn.env); result`).
 fn lock(c: &ContainerRef) -> std::sync::MutexGuard<'_, ItemContainer> {
     c.lock().expect("container poisoned")
 }
@@ -1107,14 +1111,15 @@ impl ItemSkillHooks for EconomyForSkills {
         amount: i32,
     ) -> bool {
         let mut txn = ItemTxn::begin(server);
-        lock(&Inv::of(player).bag()).acquire_default_item(
+        let result = lock(&Inv::of(player).bag()).acquire_default_item(
             task_type,
             template_id,
             amount,
             -1,
             0,
             &mut txn.env,
-        )
+        );
+        result
     }
 
     fn consume_bag_item(
@@ -1126,13 +1131,14 @@ impl ItemSkillHooks for EconomyForSkills {
         amount: i32,
     ) -> i32 {
         let mut txn = ItemTxn::begin(server);
-        lock(&Inv::of(player).bag()).consume_item(
+        let result = lock(&Inv::of(player).bag()).consume_item(
             task_type,
             template_id,
             amount,
             None,
             &mut txn.env,
-        )
+        );
+        result
     }
 
     fn ucc_create_stamp(&self, server: &GameServer, player: &PlayerRef, source_item_id: u64) {
@@ -1461,13 +1467,14 @@ impl crate::systems::services::music::SheetMusicInventory for EconomySheetMusic<
 
     fn consume_source(&self, player: &PlayerRef, item_id: u64, template_id: u32) -> i32 {
         let mut txn = ItemTxn::begin(self.server);
-        lock(&Inv::of(player).bag()).consume_item(
+        let result = lock(&Inv::of(player).bag()).consume_item(
             task_type::SAVE_MUSIC_NOTES,
             template_id,
             1,
             Some(item_id),
             &mut txn.env,
-        )
+        );
+        result
     }
 }
 
@@ -1488,7 +1495,9 @@ impl crate::systems::services::item_ops::CharacterItemOps for EconomyForServices
         count: i32,
     ) -> i32 {
         let mut txn = ItemTxn::begin(server);
-        lock(&Inv::of(player).bag()).consume_item(task, template_id, count, None, &mut txn.env)
+        let result =
+            lock(&Inv::of(player).bag()).consume_item(task, template_id, count, None, &mut txn.env);
+        result
     }
 
     fn replace_hair(&self, server: &GameServer, player: &PlayerRef, hair_model: u32) -> bool {
@@ -1892,13 +1901,14 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
         preferred_item_id: u64,
     ) -> i32 {
         let mut txn = ItemTxn::begin(server);
-        lock(&Inv::of(player).equipment()).consume_item(
+        let result = lock(&Inv::of(player).equipment()).consume_item(
             task,
             template_id,
             count,
             (preferred_item_id != 0).then_some(preferred_item_id),
             &mut txn.env,
-        )
+        );
+        result
     }
 
     fn is_auto_equip_trade_pack(&self, server: &GameServer, template_id: u32) -> bool {
@@ -1997,9 +2007,10 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
         item_id: u64,
     ) -> bool {
         let mut txn = ItemTxn::begin(server);
-        lock(&Inv::of(player).equipment())
+        let result = lock(&Inv::of(player).equipment())
             .remove_item_task(task, item_id, true, &mut txn.env)
-            .is_some()
+            .is_some();
+        result
     }
 
     fn bag_space_left_for_item(
@@ -2025,7 +2036,9 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
         count: i32,
     ) -> i32 {
         let mut txn = ItemTxn::begin(server);
-        lock(&Inv::of(player).bag()).consume_item(task, template_id, count, None, &mut txn.env)
+        let result =
+            lock(&Inv::of(player).bag()).consume_item(task, template_id, count, None, &mut txn.env);
+        result
     }
 
     fn try_equip_new_backpack(
@@ -2291,8 +2304,13 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
         let bag = inv.bag();
         let mut bag = lock(&bag);
         let Some(item) = bag.get_item_by_id(item_id).cloned() else {
+            tracing::warn!(
+                "doodad {doodad_template_id}: source item {item_id} is not in the bag of character {}",
+                player.character_id
+            );
             return false;
         };
+        let labor_power = player.data().labor_power;
         if item.count < 1
             || labor_cost < 0
             || !server
@@ -2300,8 +2318,13 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
                 .items
                 .item_ids_from_doodad(doodad_template_id)
                 .contains(&item.template_id)
-            || player.data().labor_power < labor_cost
+            || labor_power < labor_cost
         {
+            tracing::warn!(
+                "doodad {doodad_template_id}: source item {item_id} (template {}, count {}) rejected: labor cost {labor_cost}, labor power {labor_power}",
+                item.template_id,
+                item.count
+            );
             return false;
         }
         let preserve = server
@@ -2311,10 +2334,18 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
             .is_some_and(|t| t.max_count == 1);
         if preserve {
             if item.count != 1 {
+                tracing::warn!(
+                    "doodad {doodad_template_id}: unique source item {item_id} has count {}",
+                    item.count
+                );
                 return false;
             }
             drop(bag);
             let Some(system) = inv.get(slot_type::SYSTEM) else {
+                tracing::warn!(
+                    "doodad {doodad_template_id}: character {} has no system container",
+                    player.character_id
+                );
                 return false;
             };
             if !super::mail::add_or_move_existing_item(
@@ -2324,6 +2355,9 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
                 item_id,
                 -1,
             ) {
+                tracing::warn!(
+                    "doodad {doodad_template_id}: could not move source item {item_id} to the system container"
+                );
                 return false;
             }
         } else {
@@ -2335,6 +2369,10 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
                 &mut txn.env,
             ) != 1
             {
+                tracing::warn!(
+                    "doodad {doodad_template_id}: could not consume source item {item_id} (template {})",
+                    item.template_id
+                );
                 return false;
             }
             drop(bag);
@@ -2808,13 +2846,14 @@ impl crate::systems::housing::hooks::HousingEconomyHooks for EconomyForHousing {
         preferred_item_id: Option<u64>,
     ) -> i32 {
         let mut txn = ItemTxn::begin(server);
-        lock(&Inv::of(player).bag()).consume_item(
+        let result = lock(&Inv::of(player).bag()).consume_item(
             task,
             template_id,
             count,
             preferred_item_id,
             &mut txn.env,
-        )
+        );
+        result
     }
 
     fn subtract_money(

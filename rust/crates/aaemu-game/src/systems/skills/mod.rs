@@ -125,6 +125,9 @@ pub struct System {
     /// `(buff id, skill controller id)` pairs already reported as missing from the static data
     /// (`BuffTemplate.Start` warns once per pair, repeats go to debug).
     pub(crate) missing_sc_warned: Mutex<HashSet<(u32, u32)>>,
+    /// Skill ids `Unit.UseSkill` already reported as missing from the static data (the C# threw a
+    /// NullReferenceException on every call, here only the first call per id is a warning).
+    pub(crate) missing_skill_warned: Mutex<HashSet<u32>>,
     config: RwLock<SkillsConfig>,
 }
 

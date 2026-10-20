@@ -275,7 +275,7 @@ pub fn npc_control_effect(
             target.data().unit.is_in_patrol = true;
             if let Some(sim) = sim {
                 {
-                    let mut s = sim.lock().expect("simulation poisoned");
+                    let mut s = simulation::lock_sim(&sim);
                     s.running_mode = false;
                     s.move_to_path_enabled = false;
                     s.move_file_name = e.param_string.clone();
@@ -335,7 +335,7 @@ pub fn npc_control_effect(
                 target.data().unit.is_in_patrol = true;
                 if let Some(sim) = sim {
                     {
-                        let mut s = sim.lock().expect("simulation poisoned");
+                        let mut s = simulation::lock_sim(&sim);
                         s.running_mode = false;
                         s.cycle = false;
                         s.move_to_path_enabled = false;

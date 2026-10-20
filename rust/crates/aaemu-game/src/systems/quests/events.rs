@@ -242,9 +242,8 @@ fn take_pending(character_id: u32) -> Vec<PendingOp> {
 /// when an active quest has a distance act, position, time of day).
 pub fn capture_env(server: &GameServer, player: &PlayerRef) -> QuestEnv {
     let data = &server.game_data.systems.quests;
-    let (target_id, position, needs_npcs) = {
+    let (target_id, needs_npcs) = {
         let c = player.data();
-        let t = &c.unit.transform;
         let needs = c.quest_state.quests.values().any(|q| {
             data.template(q.template_id).is_some_and(|t| {
                 t.components.iter().any(|cid| {
@@ -258,10 +257,10 @@ pub fn capture_env(server: &GameServer, player: &PlayerRef) -> QuestEnv {
                 })
             })
         });
-        (c.unit.current_target, (t.x, t.y, t.z), needs)
+        (c.unit.current_target, needs)
     };
     let mut env = QuestEnv {
-        position,
+        position: world_position(server, &WorldObject::from(player.clone())),
         time_of_day: server.time.get_time(),
         ..QuestEnv::default()
     };
@@ -283,11 +282,25 @@ pub fn nearby_npcs(server: &GameServer, player: &PlayerRef) -> Vec<(u32, f32, f3
     let npcs = world.around(&me, |o| o.as_npc().cloned());
     npcs.iter()
         .map(|n| {
-            let d = n.data();
-            let t = &d.unit.transform;
-            (d.unit.template_id, t.x, t.y, t.z)
+            let template_id = n.data().unit.template_id;
+            let (x, y, z) = world_position(server, &WorldObject::from(n.clone()));
+            (template_id, x, y, z)
         })
         .collect()
+}
+
+/// `Transform.World.Position` of an object: the local position, composed with the parent chain
+/// when the object is attached (a mounted rider or a ship passenger has a parent-relative
+/// transform). Must be called without holding the object's data lock.
+pub fn world_position(server: &GameServer, o: &WorldObject) -> (f32, f32, f32) {
+    let t = o.transform();
+    if t.parent_obj_id != 0 {
+        if let Some(w) = server.world.world_of(o) {
+            let p = w.world_pos_rot(o);
+            return (p.x, p.y, p.z);
+        }
+    }
+    (t.x, t.y, t.z)
 }
 
 /// A [`UnitSnapshot`] of a world object.
@@ -295,6 +308,7 @@ pub fn snapshot(server: &GameServer, o: &WorldObject) -> UnitSnapshot {
     let mut s = UnitSnapshot {
         obj_id: o.obj_id(),
         is_unit: o.is_unit(),
+        position: world_position(server, o),
         ..UnitSnapshot::default()
     };
     if let Some(d) = o.as_doodad() {
@@ -314,7 +328,6 @@ pub fn snapshot(server: &GameServer, o: &WorldObject) -> UnitSnapshot {
         s.faction_id = b.faction_id;
         s.buff_ids = b.buffs.effects.iter().map(|e| e.template.id).collect();
         s.zone_key = b.transform.zone_id;
-        s.position = (b.transform.x, b.transform.y, b.transform.z);
     });
     s.mother_faction_id = server
         .game_data
@@ -340,50 +353,69 @@ pub fn with_quests<R>(
         tracing::error!("with_quests: nested quest operation for character {character_id}");
         return None;
     }
+    if crate::systems::economy::System::ops_held_on_this_thread() {
+        // The ops lock below is not re-entrant: waiting for it here would hang this thread
+        // forever and, with it, every other economy operation. Callers raise quest events
+        // after the `ItemTxn` is released (queue the event in the `ItemFx` list).
+        tracing::error!(
+            "with_quests: the economy ops lock is held on this thread (character {character_id})"
+        );
+        return None;
+    }
     let env = env.unwrap_or_else(|| capture_env(server, player));
     // Quest rewards and the saved quest row must share the item/wallet snapshot boundary.
     let economy = server.systems.economy.ops_lock();
     ACTIVE.with(|a| a.borrow_mut().push((character_id, Vec::new())));
     let system = &server.systems.quests;
     let hooks = system.hooks();
-    let (r, deferred, buffs_changed) = {
+    // A panic in the operation or in a queued one is caught here, so that the quest state
+    // taken out of the character below is put back and the ACTIVE entry is removed before the
+    // panic resumes: otherwise every later event of the character on this thread would be
+    // queued forever and its quests lost. Catching it while `guard` is held also keeps the
+    // character mutex from being poisoned.
+    let outcome = {
         let mut guard = player.data();
         let mut st = std::mem::take(&mut guard.quest_state);
         let c: &mut Character = &mut guard;
-        let mut ctx = Ctx {
-            server,
-            data: &server.game_data.systems.quests,
-            hooks,
-            player: Some(player.clone()),
-            c,
-            st: &mut st,
-            env,
-            now_ms: chrono::Utc::now().timestamp_millis(),
-            deferred: Vec::new(),
-            buffs_changed: false,
-            sent: Vec::new(),
-        };
-        if !ctx.st.loaded {
-            ctx.load_from_rows();
-        }
-        let r = f(&mut ctx);
-        loop {
-            let pending = take_pending(character_id);
-            if pending.is_empty() {
-                break;
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut ctx = Ctx {
+                server,
+                data: &server.game_data.systems.quests,
+                hooks,
+                player: Some(player.clone()),
+                c,
+                st: &mut st,
+                env,
+                now_ms: chrono::Utc::now().timestamp_millis(),
+                deferred: Vec::new(),
+                buffs_changed: false,
+                sent: Vec::new(),
+            };
+            if !ctx.st.loaded {
+                ctx.load_from_rows();
             }
-            for op in pending {
-                op(&mut ctx);
+            let r = f(&mut ctx);
+            loop {
+                let pending = take_pending(character_id);
+                if pending.is_empty() {
+                    break;
+                }
+                for op in pending {
+                    op(&mut ctx);
+                }
             }
+            let keep = system.queued_handles(character_id);
+            ctx.st.collect_garbage(&keep);
+            ctx.sync_rows();
+            let deferred = std::mem::take(&mut ctx.deferred);
+            let buffs_changed = ctx.buffs_changed;
+            (r, deferred, buffs_changed)
+        }));
+        if run.is_err() {
+            guard.quests.active = st.rows();
         }
-        let keep = system.queued_handles(character_id);
-        ctx.st.collect_garbage(&keep);
-        ctx.sync_rows();
-        let deferred = std::mem::take(&mut ctx.deferred);
-        let buffs_changed = ctx.buffs_changed;
-        drop(ctx);
         guard.quest_state = st;
-        (r, deferred, buffs_changed)
+        run
     };
     ACTIVE.with(|a| {
         let mut a = a.borrow_mut();
@@ -392,6 +424,10 @@ pub fn with_quests<R>(
         }
     });
     drop(economy);
+    let (r, deferred, buffs_changed) = match outcome {
+        Ok(done) => done,
+        Err(payload) => std::panic::resume_unwind(payload),
+    };
     crate::systems::flush_achievements(server);
     if buffs_changed {
         crate::systems::dispatch_buff_events(server, &WorldObject::from(player.clone()));
@@ -402,7 +438,7 @@ pub fn with_quests<R>(
 }
 
 /// Runs `op` as a quest operation, or queues it when nested in one of the same character.
-fn run_or_queue(
+pub(super) fn run_or_queue(
     server: &GameServer,
     player: &PlayerRef,
     op: impl FnOnce(&mut Ctx<'_>) + Send + 'static,
@@ -480,6 +516,47 @@ fn dispatch_logged(ctx: &mut Ctx<'_>, ev: &QuestEvent) {
     }
 }
 
+/// One WARN for a turn-in the server dropped before any quest act saw it (a bug report of
+/// "cannot turn in" otherwise leaves no trace in the log).
+fn warn_report_refused(player: &PlayerRef, quest_id: u32, reason: &str) {
+    let (name, id) = {
+        let c = player.data();
+        (c.unit.name.clone(), c.id)
+    };
+    tracing::warn!("Report refused, {name} ({id}), Quest {quest_id}: {reason}");
+}
+
+/// Logs why a turn-in at `kind` (`NPC` / `doodad`) template `target_id` cannot reach a report
+/// act: the quest is not active, or it has no report act of that kind at all (a mismatching
+/// target and unfinished objectives are logged by the act itself). The event is dispatched
+/// regardless; it is a no-op in both cases.
+fn log_unreachable_report(ctx: &mut Ctx<'_>, quest_id: u32, kind: &str, target_id: u32) {
+    if ctx.st.active_handle(quest_id).is_none() {
+        ctx.log_refusal(
+            "Report",
+            quest_id,
+            &format!("{kind} {target_id}: the quest is not active"),
+        );
+        return;
+    }
+    let class = if kind == "NPC" {
+        "QuestActConReportNpc"
+    } else {
+        "QuestActConReportDoodad"
+    };
+    if !ctx
+        .data
+        .acts_of_type(class)
+        .any(|(_, a)| a.quest_id == quest_id)
+    {
+        ctx.log_refusal(
+            "Report",
+            quest_id,
+            &format!("{kind} {target_id}: the quest has no {kind} report act"),
+        );
+    }
+}
+
 // ----- QuestManagerEvents -----
 
 /// `DoReportEvents(owner, questContextId, npcObjId, doodadObjId, selected)`
@@ -497,10 +574,16 @@ pub fn on_report(
     if npc_obj_id > 0 {
         // Turning in at a NPC?
         let Some(npc) = world.as_ref().and_then(|w| w.npc(npc_obj_id)) else {
+            warn_report_refused(
+                player,
+                quest_id,
+                &format!("NPC object {npc_obj_id} is not in the character's world"),
+            );
             return;
         };
         let npc_id = npc.data().unit.template_id;
         run_or_queue(server, player, move |ctx| {
+            log_unreachable_report(ctx, quest_id, "NPC", npc_id);
             dispatch_logged(
                 ctx,
                 &QuestEvent::ReportNpc {
@@ -513,10 +596,16 @@ pub fn on_report(
     } else if doodad_obj_id > 0 {
         // Turning in at a Doodad?
         let Some(doodad) = world.as_ref().and_then(|w| w.doodad(doodad_obj_id)) else {
+            warn_report_refused(
+                player,
+                quest_id,
+                &format!("doodad object {doodad_obj_id} is not in the character's world"),
+            );
             return;
         };
         let doodad_id = doodad.data().template_id;
         run_or_queue(server, player, move |ctx| {
+            log_unreachable_report(ctx, quest_id, "doodad", doodad_id);
             dispatch_logged(
                 ctx,
                 &QuestEvent::ReportDoodad {
@@ -530,6 +619,7 @@ pub fn on_report(
         // Object-free reporting must not skip objectives or an NPC/doodad report act.
         run_or_queue(server, player, move |ctx| {
             let Some(h) = ctx.st.active_handle(quest_id) else {
+                ctx.log_refusal("Report", quest_id, "no target: the quest is not active");
                 return;
             };
             let step = ctx.st.quest(h).map(|q| q.step);
@@ -540,6 +630,11 @@ pub fn on_report(
                 return;
             }
             if step != Some(super::model::kind::READY) {
+                ctx.log_refusal(
+                    "Report",
+                    quest_id,
+                    &format!("no target: the quest is at step {step:?}, not ready"),
+                );
                 return;
             }
             let automatic_report = ctx.data.template(quest_id).is_some_and(|t| {
@@ -555,6 +650,11 @@ pub fn on_report(
                     })
             });
             if !automatic_report {
+                ctx.log_refusal(
+                    "Report",
+                    quest_id,
+                    "no target: the ready step needs a report to an NPC or doodad",
+                );
                 return;
             }
             if let Some(q) = ctx.st.quest_mut(h) {
@@ -573,6 +673,9 @@ pub fn on_items_consumed(server: &GameServer, player: &PlayerRef, template_id: u
 /// `DoItemsAcquiredEvents(owner, templateId, count)` (`Inventory` item add / remove).
 pub fn on_items_acquired(server: &GameServer, player: &PlayerRef, template_id: u32, count: i32) {
     run_or_queue(server, player, move |ctx| {
+        if count > 0 {
+            ctx.start_quests_from_item_gain(template_id);
+        }
         dispatch_logged(
             ctx,
             &QuestEvent::ItemGather {
@@ -727,6 +830,16 @@ pub fn on_npc_killed(server: &GameServer, player: &PlayerRef, npc: &NpcRef) {
 
 /// `DoOnAggroEvents(owner, npc)` (`Unit.OnAggro` of a player against an NPC).
 pub fn on_aggro(server: &GameServer, player: &PlayerRef, npc: &NpcRef) {
+    // Runs on every damage hit: skip the quest operation (character lock, state take, queue)
+    // unless an active quest act subscribes to `Aggro`. A taken-out state (`loaded` false: we
+    // are nested in an operation of this character) is not trusted and falls through.
+    {
+        let c = player.data();
+        let st = &c.quest_state;
+        if st.loaded && !st.subs.iter().any(|s| s.event == EventKind::Aggro) {
+            return;
+        }
+    }
     let npc_id = npc.data().unit.template_id;
     run_or_queue(server, player, move |ctx| {
         dispatch_logged(ctx, &QuestEvent::Aggro { npc_id });
@@ -820,6 +933,15 @@ pub fn on_item_use(server: &GameServer, player: &PlayerRef, item_template_id: u3
 
 /// `owner.Events.OnMateLevelUp` (`Mate.AddExp` level up).
 pub fn on_mate_level_up(server: &GameServer, player: &PlayerRef) {
+    run_or_queue(server, player, |ctx| {
+        dispatch_logged(ctx, &QuestEvent::MateLevelUp);
+    });
+}
+
+/// Re-checks the mate objectives after a mate is spawned: `QuestActObjMateLevel` reads the
+/// summon item's level (refreshed by `Mates.SpawnMount`), and the C# only re-checked it on a
+/// level-up, so summoning a mate at the required level never completed the objective.
+pub fn on_mate_spawned(server: &GameServer, player: &PlayerRef) {
     run_or_queue(server, player, |ctx| {
         dispatch_logged(ctx, &QuestEvent::MateLevelUp);
     });

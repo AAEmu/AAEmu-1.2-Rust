@@ -169,7 +169,22 @@ pub fn expand_slot(server: &GameServer, p: &PlayerRef, slot: u8) {
             .as_ref()
             .is_some_and(|o| o.check_items(server, p, expand.item_id, expand.item_count))
     {
-        tracing::warn!("Item or Count not fount.");
+        let (char_id, name) = {
+            let c = p.data();
+            (
+                c.id,
+                server.names.get_character_name(c.id).unwrap_or_default(),
+            )
+        };
+        let held = ops
+            .as_ref()
+            .map_or(0, |o| o.items_count(server, p, expand.item_id));
+        tracing::warn!(
+            "Item or Count not fount (ExpandSlot, services): character {char_id} ({name}), slot type {slot} ({}), step {step}, required item template {} x{}, held in inventory {held}.",
+            if is_bank { "bank" } else { "bag" },
+            expand.item_id,
+            expand.item_count
+        );
         return;
     }
     if expand.price != 0 {

@@ -403,5 +403,15 @@
       "Z": 20.5,
       "Yaw": -123.8
     }
+  },
+  {
+    "UnitId": 8962,
+    "Title": "spawn-import: terrain exact-1.2",
+    "Position": {
+      "X": 199.941,
+      "Y": 312.159,
+      "Z": 20.52,
+      "Yaw": -90
+    }
   }
 ]

@@ -145,6 +145,9 @@ pub struct QuestData {
     pub group_npcs: OrderedGroups,
     /// Explicit quest-starter bindings (`item_accept_quests`), item template -> quest.
     pub starter_quests: HashMap<u32, u32>,
+    /// Item template -> quests with a `QuestActConAcceptItemGain` on their Start component
+    /// (ascending quest ids). Deviation: the C# server never started these (see PORTING.md).
+    pub item_gain_starters: HashMap<u32, Vec<u32>>,
     /// `UnitRequirementsGameData`.
     pub unit_reqs: UnitReqsData,
     /// `SphereGameData._spheres`.
@@ -172,6 +175,7 @@ impl QuestData {
         d.load_base_acts(conn)?;
         d.load_detail_acts(conn)?;
         d.load_item_starters(conn)?;
+        d.build_item_gain_starters();
         for_each_row(conn, "SELECT * FROM quest_item_group_items", [], |r| {
             d.group_items
                 .add(r.u32("quest_item_group_id")?, r.u32("item_id")?);
@@ -184,10 +188,61 @@ impl QuestData {
         })?;
         d.update_quest_component_acts();
         d.unit_reqs = UnitReqsData::load(conn)?;
+        d.drop_self_referencing_requirements();
         d.load_spheres(conn)?;
         d.sign_spheres = load_sign_spheres(files, "main_world")?;
         tracing::info!("Loaded {} quests", d.templates.len());
         Ok(d)
+    }
+
+    /// Deviation: a quest component whose unit requirements demand the completion of its own
+    /// quest can never run (quest 6596 asks for itself on its Start component, so it was never
+    /// acceptable). Such a `COMPLETE_QUEST_CONTEXT` requirement is dropped.
+    pub fn drop_self_referencing_requirements(&mut self) {
+        use super::unit_reqs::req_kind::COMPLETE_QUEST_CONTEXT;
+        let components = &self.components;
+        let Some(by_component) = self.unit_reqs.by_owner.get_mut("QuestComponent") else {
+            return;
+        };
+        let mut removed = Vec::new();
+        for (component_id, reqs) in by_component.iter_mut() {
+            let Some(quest_id) = components.get(component_id).map(|c| c.quest_id) else {
+                continue;
+            };
+            reqs.retain(|r| {
+                let own = r.kind == COMPLETE_QUEST_CONTEXT && r.value1 == quest_id;
+                if own {
+                    removed.push((r.id, quest_id, *component_id));
+                }
+                !own
+            });
+        }
+        by_component.retain(|_, reqs| !reqs.is_empty());
+        for (req_id, quest_id, component_id) in removed {
+            self.unit_reqs.by_id.remove(&req_id);
+            tracing::debug!(
+                "Quest {quest_id}: ignoring requirement {req_id} of component {component_id}, it demands the quest itself completed"
+            );
+        }
+    }
+
+    /// Indexes the quests started by gaining an item (`QuestActConAcceptItemGain` on a Start
+    /// component), see [`QuestData::item_gain_starters`].
+    pub fn build_item_gain_starters(&mut self) {
+        let mut index: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (_, act) in self.acts_of_type("QuestActConAcceptItemGain") {
+            if act.component_kind != kind::START {
+                continue;
+            }
+            if let ActKind::ConAcceptItemGain { item_id } = act.kind {
+                index.entry(item_id).or_default().push(act.quest_id);
+            }
+        }
+        for quests in index.values_mut() {
+            quests.sort_unstable();
+            quests.dedup();
+        }
+        self.item_gain_starters = index;
     }
 
     fn load_item_starters(&mut self, conn: &Connection) -> Result<(), GameDataError> {
@@ -1463,6 +1518,7 @@ impl QuestData {
     /// `UpdateQuestComponentActs` (call after adding everything).
     pub fn finish(&mut self) {
         self.update_quest_component_acts();
+        self.build_item_gain_starters();
     }
 
     // ----- QuestManager getters -----

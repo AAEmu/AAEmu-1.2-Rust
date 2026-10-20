@@ -88,6 +88,10 @@ impl QuestSkillHooks for QuestsForSkills {
         item_use(server, player, item_id);
     }
 
+    fn item_use_template(&self, server: &GameServer, player: &PlayerRef, template_id: u32) {
+        super::events::on_item_use(server, player, template_id);
+    }
+
     fn on_aggro(&self, server: &GameServer, player: &PlayerRef, npc: &NpcRef) {
         super::events::on_aggro(server, player, npc);
     }
@@ -700,6 +704,7 @@ pub(crate) fn run_npc_component(
     };
     let kind = component.npc_ai_id;
     let path = component.ai_path_name.clone();
+    let npc_template_id = component.npc_id;
     let commands = server
         .game_data
         .systems
@@ -717,7 +722,16 @@ pub(crate) fn run_npc_component(
             if ctx.load_ai_path_points(&path, false) {
                 ctx.go_to_follow_path();
             } else {
-                tracing::error!("Quest NPC path unavailable: {path}");
+                // Only part of the retail quest routes is shipped (generated from the 10.x client
+                // into `Data/Path`; the C# never used `AiPathName`), so for the others the NPC
+                // just does not start the path; report each name once.
+                if ctx.server.systems.ai.first_missing_path(&path) {
+                    tracing::warn!("Quest NPC path unavailable: {path} for npc template {npc_template_id}, no route file Data/Path/{path}.path (or {path}@<zone>.path variant); the NPC does not start the path (reported once per file name)");
+                } else {
+                    tracing::debug!(
+                        "Quest NPC path unavailable: {path} for npc template {npc_template_id}"
+                    );
+                }
             }
         }
         npc_ai::GO_AWAY => ctx.go_to_despawn(),

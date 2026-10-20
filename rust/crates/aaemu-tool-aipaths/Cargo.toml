@@ -1,0 +1,17 @@
+[package]
+name = "aaemu-tool-aipaths"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Generates Data/Path/*.path AI routes and Data/Portal/worldgates.json entries from the 10.x client's editor data"
+
+[[bin]]
+name = "aaemu-aipaths"
+path = "src/main.rs"
+
+[dependencies]
+aaemu-commons.workspace = true
+anyhow.workspace = true
+roxmltree.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true

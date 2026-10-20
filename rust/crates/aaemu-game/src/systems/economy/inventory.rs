@@ -490,6 +490,146 @@ enum SwapAction {
     DoEquipInEmptySlot,
 }
 
+/// The client request of a `SplitOrMoveItem` call, for diagnostics.
+#[derive(Debug, Clone, Copy)]
+struct MoveRequest {
+    task: u8,
+    from_item_id: u64,
+    from_type: u8,
+    from_slot: u8,
+    to_item_id: u64,
+    to_type: u8,
+    to_slot: u8,
+    count: i32,
+}
+
+/// The "phantom item" message: the original C# text first (so log greps still match), then the
+/// branch, the character and the whole request. `known_elsewhere` is `None` when the
+/// server-wide lookup was not possible.
+fn phantom_item_message(
+    branch: &str,
+    missing_id: u64,
+    owner_id: u32,
+    owner_name: &str,
+    req: &MoveRequest,
+    known_elsewhere: Option<bool>,
+) -> String {
+    let known = match known_elsewhere {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "n/a",
+    };
+    format!(
+        "SplitOrMoveItem - ItemId {missing_id} no longer exists, possibly a phantom item ({branch}): character {owner_id} ({owner_name}), task {}, from item {} {}:{}, to item {} {}:{}, count {}, known elsewhere on server: {known}.",
+        req.task,
+        req.from_item_id,
+        req.from_type,
+        req.from_slot,
+        req.to_item_id,
+        req.to_type,
+        req.to_slot,
+        req.count
+    )
+}
+
+/// Logs a request that names an item the player no longer holds. This is normally client
+/// staleness (the item was consumed, merged or moved before the request arrived), so it is a
+/// warning; the C# logged it with `Logger.Error`. `lookup_server` enables the server-wide
+/// `ItemManager::item_by_id` lookup, which locks every container (not allowed while holding one).
+fn log_phantom_item(
+    server: &GameServer,
+    inv: &Inv,
+    branch: &str,
+    missing_id: u64,
+    req: &MoveRequest,
+    lookup_server: bool,
+) {
+    let name = server
+        .names
+        .get_character_name(inv.character_id)
+        .unwrap_or_default();
+    let known = lookup_server.then(|| server.items.item_by_id(missing_id).is_some());
+    tracing::warn!(
+        "{}",
+        phantom_item_message(branch, missing_id, inv.character_id, &name, req, known)
+    );
+}
+
+/// What a rejected `SplitOrMoveItemEx` knows about the two items and the source container, for
+/// diagnostics.
+#[derive(Debug, Clone, Copy)]
+struct MoveFacts<'a> {
+    /// Count after the "no count provided" default was applied.
+    effective_count: i32,
+    from_item: Option<&'a Item>,
+    target_item: Option<&'a Item>,
+    /// The source template's `max_count` (0 = unknown template).
+    max_count: i32,
+    /// Source container id and slot type.
+    src_container: (u64, u8),
+}
+
+fn describe_item(label: &str, item: Option<&Item>) -> String {
+    match item {
+        Some(i) => format!(
+            "{label} template {} count {} at {}:{}",
+            i.template_id, i.count, i.slot_type, i.slot
+        ),
+        None => format!("{label} none"),
+    }
+}
+
+/// The rejection message of a `SplitOrMoveItem` validation: the original C# text first (so log
+/// greps still match), then the reason details, the character, the whole request and the item
+/// facts.
+fn move_rejection_message(
+    prefix: &str,
+    detail: &str,
+    owner_id: u32,
+    owner_name: &str,
+    req: &MoveRequest,
+    facts: &MoveFacts<'_>,
+) -> String {
+    format!(
+        "{prefix} ({detail}): character {owner_id} ({owner_name}), task {}, from item {} {}:{}, to item {} {}:{}, requested count {}, effective count {}, source container {} (slot type {}), {}, {}, source max_count {}.",
+        req.task,
+        req.from_item_id,
+        req.from_type,
+        req.from_slot,
+        req.to_item_id,
+        req.to_type,
+        req.to_slot,
+        req.count,
+        facts.effective_count,
+        facts.src_container.0,
+        facts.src_container.1,
+        describe_item("source item", facts.from_item),
+        describe_item("target item", facts.target_item),
+        facts.max_count
+    )
+}
+
+/// Logs a client request that `SplitOrMoveItemEx` rejected. These are client-request
+/// validations (normally a stale client view), so they are warnings; the C# logged them with
+/// `Logger.Error`.
+fn log_move_rejection(
+    server: &GameServer,
+    inv: &Inv,
+    prefix: &str,
+    detail: &str,
+    req: &MoveRequest,
+    facts: &MoveFacts<'_>,
+) {
+    let name = server
+        .names
+        .get_character_name(inv.character_id)
+        .unwrap_or_default();
+    tracing::warn!(
+        "{}",
+        move_rejection_message(prefix, detail, inv.character_id, &name, req, facts)
+    );
+}
+
 /// `Inventory.SplitOrMoveItem(taskType, fromItemId, fromType, fromSlot, toItemId, toType,
 /// toSlot, count)`.
 #[allow(clippy::too_many_arguments)]
@@ -525,9 +665,17 @@ pub fn split_or_move_item(
         return false;
     }
     if from_holder.is_none() && from_item_id != 0 {
-        tracing::error!(
-            "SplitOrMoveItem - ItemId {from_item_id} no longer exists, possibly a phantom item."
-        );
+        let req = MoveRequest {
+            task,
+            from_item_id,
+            from_type,
+            from_slot,
+            to_item_id,
+            to_type,
+            to_slot,
+            count,
+        };
+        log_phantom_item(txn.server, inv, "from-holder", from_item_id, &req, true);
         return false;
     }
     let to_holder = holder(to_item_id);
@@ -540,9 +688,17 @@ pub fn split_or_move_item(
         return false;
     }
     if to_holder.is_none() && to_item_id != 0 {
-        tracing::error!(
-            "SplitOrMoveItem - ItemId {to_item_id} no longer exists, possibly a phantom item."
-        );
+        let req = MoveRequest {
+            task,
+            from_item_id,
+            from_type,
+            from_slot,
+            to_item_id,
+            to_type,
+            to_slot,
+            count,
+        };
+        log_phantom_item(txn.server, inv, "to-holder", to_item_id, &req, true);
         return false;
     }
     let src = from_holder.or_else(|| inv.get(from_type));
@@ -601,19 +757,32 @@ pub fn split_or_move_item_ex(
     let data = txn.data();
     let (Some(src), Some(dst)) = (src, dst) else {
         // C#: NullReferenceException on the missing container.
-        tracing::error!("SplitOrMoveItem - missing source or target container");
+        tracing::error!(
+            "SplitOrMoveItem - missing source or target container: character {}, task {task}, from item {from_item_id} {from_type}:{from_slot}, to item {to_item_id} {to_type}:{to_slot}, count {count}.",
+            inv.character_id
+        );
         return false;
     };
 
     // ---- Decide (read-only, under both container locks) ----
+    let requested_count = count;
     let (action, from_item, target_item, src_type, dst_type) = {
         let (s, d) = lock_pair(&src, &dst);
         let dref = d.as_deref().unwrap_or(&s);
         let from_item = find_in(&s, d.as_deref(), from_item_id).cloned();
         if from_item.is_none() && from_item_id != 0 {
-            tracing::error!(
-                "SplitOrMoveItem - ItemId {from_item_id} no longer exists, possibly a phantom item."
-            );
+            let req = MoveRequest {
+                task,
+                from_item_id,
+                from_type,
+                from_slot,
+                to_item_id,
+                to_type,
+                to_slot,
+                count,
+            };
+            // The container locks are held here, so the server-wide lookup is skipped.
+            log_phantom_item(txn.server, inv, "ex-decide", from_item_id, &req, false);
             return false;
         }
         let mut action = SwapAction::DoNothing;
@@ -630,20 +799,23 @@ pub fn split_or_move_item_ex(
         // Check if containers can accept the items
         if let Some(f) = &from_item {
             if !dref.can_accept(f, data.template(f.template_id), i32::from(to_slot)) {
-                tracing::error!(
-                    "SplitOrMoveItem - fromItemId {from_item_id} is not welcome in this container {} ({}).",
+                // C# logged this at Error; a client-driven rejection is a warning here.
+                tracing::warn!(
+                    "SplitOrMoveItem - fromItemId {from_item_id} is not welcome in this container {} ({}). Request: from {from_type}:{from_slot} => toItemId {to_item_id} {to_type}:{to_slot}, owner {}.",
                     dref.slot_type,
-                    dref.container_id
+                    dref.container_id,
+                    inv.character_id
                 );
                 return false;
             }
         }
         if let Some(t) = &target_item {
             if !s.can_accept(t, data.template(t.template_id), i32::from(from_slot)) {
-                tracing::error!(
-                    "SplitOrMoveItem - toItemId {to_item_id} is not welcome in this container {} ({}).",
+                tracing::warn!(
+                    "SplitOrMoveItem - toItemId {to_item_id} is not welcome in this container {} ({}). Request: fromItemId {from_item_id} {from_type}:{from_slot} => {to_type}:{to_slot}, owner {}.",
                     s.slot_type,
-                    s.container_id
+                    s.container_id,
+                    inv.character_id
                 );
                 return false;
             }
@@ -665,33 +837,107 @@ pub fn split_or_move_item_ex(
             action = SwapAction::DoEquipInEmptySlot;
         }
         let equip_empty = action == SwapAction::DoEquipInEmptySlot;
+        // The request as the client sent it (`count` may have been defaulted above).
+        let req = MoveRequest {
+            task,
+            from_item_id,
+            from_type,
+            from_slot,
+            to_item_id,
+            to_type,
+            to_slot,
+            count: requested_count,
+        };
+        let facts = MoveFacts {
+            effective_count: count,
+            from_item: from_item.as_ref(),
+            target_item: target_item.as_ref(),
+            max_count: from_item
+                .as_ref()
+                .and_then(|f| data.template(f.template_id))
+                .map_or(0, |t| t.max_count),
+            src_container: (s.container_id, s.slot_type),
+        };
         if !equip_empty && from_item.is_none() {
-            tracing::error!("SplitOrMoveItem didn't provide a source itemId");
+            log_move_rejection(
+                txn.server,
+                inv,
+                "SplitOrMoveItem didn't provide a source itemId",
+                "no source item and not an empty-slot equip",
+                &req,
+                &facts,
+            );
             return false;
         }
         if !equip_empty && s.slot_type != from_type {
-            tracing::error!(
-                "SplitOrMoveItem Source Item Container did not match what the client asked"
+            log_move_rejection(
+                txn.server,
+                inv,
+                "SplitOrMoveItem Source Item Container did not match what the client asked",
+                &format!(
+                    "client from_type {from_type} but the source item is in container {} of slot type {}",
+                    s.container_id, s.slot_type
+                ),
+                &req,
+                &facts,
             );
             return false;
         }
         if !equip_empty && from_item.as_ref().map(|f| f.slot) != Some(i32::from(from_slot)) {
-            tracing::error!("SplitOrMoveItem Source Item slot did not match what the client asked");
+            log_move_rejection(
+                txn.server,
+                inv,
+                "SplitOrMoveItem Source Item slot did not match what the client asked",
+                &format!(
+                    "client from_slot {from_slot} but the source item is at slot {:?}",
+                    from_item.as_ref().map(|f| f.slot)
+                ),
+                &req,
+                &facts,
+            );
             return false;
         }
         if !equip_empty && from_item.as_ref().is_some_and(|f| count > f.count) {
-            tracing::error!(
-                "SplitOrMoveItem Source Item has less item count than is requested to be moved"
+            log_move_rejection(
+                txn.server,
+                inv,
+                "SplitOrMoveItem Source Item has less item count than is requested to be moved",
+                &format!(
+                    "requested {count} but the source stack holds {}",
+                    from_item.as_ref().map_or(0, |f| f.count)
+                ),
+                &req,
+                &facts,
             );
             return false;
         }
         if let Some(t) = &target_item {
             if t.slot_type != to_type {
-                tracing::error!("SplitOrMoveItem Target Item Type does not match");
+                log_move_rejection(
+                    txn.server,
+                    inv,
+                    "SplitOrMoveItem Target Item Type does not match",
+                    &format!(
+                        "client to_type {to_type} but the target item has slot type {}",
+                        t.slot_type
+                    ),
+                    &req,
+                    &facts,
+                );
                 return false;
             }
             if t.slot != i32::from(to_slot) {
-                tracing::error!("SplitOrMoveItem Target Item Slot does not match");
+                log_move_rejection(
+                    txn.server,
+                    inv,
+                    "SplitOrMoveItem Target Item Slot does not match",
+                    &format!(
+                        "client to_slot {to_slot} but the target item is at slot {}",
+                        t.slot
+                    ),
+                    &req,
+                    &facts,
+                );
                 return false;
             }
             if let Some(f) = &from_item {
@@ -701,8 +947,20 @@ pub fn split_or_move_item_ex(
                     && t.count + count > max
                     && max > 1
                 {
-                    tracing::error!(
-                        "SplitOrMoveItem Target Item stack does not have enough room to take source"
+                    log_move_rejection(
+                        txn.server,
+                        inv,
+                        "SplitOrMoveItem Target Item stack does not have enough room to take source",
+                        &format!(
+                            "target count {} + moved count {count} = {} exceeds template {} max_count {max}; source template {} target template {}",
+                            t.count,
+                            t.count + count,
+                            t.template_id,
+                            f.template_id,
+                            t.template_id
+                        ),
+                        &req,
+                        &facts,
                     );
                     return false;
                 }
@@ -1110,7 +1368,20 @@ pub fn expand_slot(txn: &mut ItemTxn<'_>, player: &PlayerRef, inv: &Inv, st: u8)
         && expand.item_count != 0
         && !inv.check_items(slot_type::INVENTORY, expand.item_id, expand.item_count)
     {
-        tracing::warn!("Item or Count not fount.");
+        let (char_id, name) = {
+            let c = player.data();
+            (
+                c.id,
+                server.names.get_character_name(c.id).unwrap_or_default(),
+            )
+        };
+        tracing::warn!(
+            "Item or Count not fount (ExpandSlot, economy): character {char_id} ({name}), slot type {st} ({}), step {step}, required item template {} x{}, held in inventory {}.",
+            if is_bank { "bank" } else { "bag" },
+            expand.item_id,
+            expand.item_count,
+            inv.items_count_in(slot_type::INVENTORY, expand.item_id, -1)
+        );
         return;
     }
     if expand.price != 0 {
@@ -1402,8 +1673,20 @@ pub fn change_labor(
             .get_formula_by_kind(crate::data::formulas::FormulaKind::ExpByLaborPower)
             .map_or(0.0, |f| f.evaluate(&params));
         let xp_to_add = (xp * f64::from(exp_multiplier)) as i32;
-        if let Some(h) = server.systems.economy.hooks.progression.get() {
-            h.add_exp(server, player, xp_to_add, true);
+        match &mut *out {
+            // Inside an `ItemTxn` (the ops lock is held): `AddExp` ends in quest events, which
+            // take the non-reentrant ops lock themselves. Queue it behind the item tasks;
+            // `fx::flush` applies it after the lock is released, before the labor packet below.
+            Out::Queue(fx) => fx.push(crate::models::item_task::ItemFx::Exp {
+                owner: player.character_id,
+                exp: xp_to_add,
+                add_ability_exp: true,
+            }),
+            Out::Direct => {
+                if let Some(h) = server.systems.economy.hooks.progression.get() {
+                    h.add_exp(server, player, xp_to_add, true);
+                }
+            }
         }
     }
     player.data().change_labor_power(change);
@@ -1451,3 +1734,104 @@ pub const BACKPACK_SLOT_TYPE: u32 = EQUIPMENT_ITEM_SLOT_TYPE_BACKPACK;
 #[cfg(test)]
 #[path = "backpack_acquire_tests.rs"]
 mod backpack_acquire_tests;
+
+#[cfg(test)]
+mod phantom_message_tests {
+    use super::*;
+
+    #[test]
+    fn phantom_message_names_branch_owner_and_request() {
+        let req = MoveRequest {
+            task: task_type::SWAP_ITEMS,
+            from_item_id: 16_777_663,
+            from_type: slot_type::INVENTORY,
+            from_slot: 5,
+            to_item_id: 0,
+            to_type: slot_type::EQUIPMENT,
+            to_slot: 17,
+            count: 3,
+        };
+        let msg = phantom_item_message("from-holder", 16_777_663, 6, "Debil", &req, Some(false));
+        // The original C# text stays greppable.
+        assert!(msg.starts_with(
+            "SplitOrMoveItem - ItemId 16777663 no longer exists, possibly a phantom item"
+        ));
+        assert!(msg.contains("(from-holder)"));
+        assert!(msg.contains("character 6 (Debil)"));
+        assert!(msg.contains(&format!("task {}", task_type::SWAP_ITEMS)));
+        assert!(msg.contains(&format!("from item 16777663 {}:5", slot_type::INVENTORY)));
+        assert!(msg.contains(&format!("to item 0 {}:17", slot_type::EQUIPMENT)));
+        assert!(msg.contains("count 3"));
+        assert!(msg.contains("known elsewhere on server: no"));
+        assert!(!msg.contains('\n'));
+        assert!(phantom_item_message("ex-decide", 1, 6, "", &req, None)
+            .contains("known elsewhere on server: n/a"));
+        assert!(
+            phantom_item_message("to-holder", 1, 6, "", &req, Some(true))
+                .contains("known elsewhere on server: yes")
+        );
+    }
+
+    #[test]
+    fn move_rejection_message_names_request_and_item_facts() {
+        let req = MoveRequest {
+            task: task_type::SWAP_ITEMS,
+            from_item_id: 100,
+            from_type: slot_type::INVENTORY,
+            from_slot: 5,
+            to_item_id: 200,
+            to_type: slot_type::INVENTORY,
+            to_slot: 6,
+            count: 0,
+        };
+        let from = Item {
+            id: 100,
+            template_id: 8001,
+            slot: 5,
+            count: 7,
+            slot_type: slot_type::INVENTORY,
+            ..Item::new(0)
+        };
+        let target = Item {
+            id: 200,
+            template_id: 8001,
+            slot: 6,
+            count: 90,
+            slot_type: slot_type::INVENTORY,
+            ..Item::new(0)
+        };
+        let facts = MoveFacts {
+            effective_count: 7,
+            from_item: Some(&from),
+            target_item: Some(&target),
+            max_count: 100,
+            src_container: (42, slot_type::INVENTORY),
+        };
+        let msg = move_rejection_message(
+            "SplitOrMoveItem Target Item stack does not have enough room to take source",
+            "detail",
+            6,
+            "Debil",
+            &req,
+            &facts,
+        );
+        assert!(msg.starts_with(
+            "SplitOrMoveItem Target Item stack does not have enough room to take source (detail):"
+        ));
+        assert!(msg.contains("character 6 (Debil)"));
+        assert!(msg.contains("from item 100"));
+        assert!(msg.contains("to item 200"));
+        assert!(msg.contains("requested count 0, effective count 7"));
+        assert!(msg.contains("source container 42"));
+        assert!(msg.contains("source item template 8001 count 7"));
+        assert!(msg.contains("target item template 8001 count 90"));
+        assert!(msg.contains("source max_count 100"));
+        assert!(!msg.contains('\n'));
+        let none = MoveFacts {
+            from_item: None,
+            target_item: None,
+            ..facts
+        };
+        assert!(move_rejection_message("p", "d", 1, "", &req, &none).contains("source item none"));
+    }
+}

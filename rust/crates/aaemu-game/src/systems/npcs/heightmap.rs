@@ -1296,6 +1296,62 @@ mod real_data_tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("app")
     }
 
+    /// `AAEMU_GAME_PAK=D:\AA1.2\game_pak AAEMU_HEIGHT_QUERY=q.json AAEMU_HEIGHT_OUT=h.json cargo
+    /// test -p aaemu-game dump_terrain_heights -- --ignored`: terrain height and zone id for the
+    /// points `[{"id", "world", "x", "y"}]` of the query file (`rust/tools/spawn_import`).
+    #[test]
+    #[ignore = "needs AAEMU_GAME_PAK, AAEMU_HEIGHT_QUERY and AAEMU_HEIGHT_OUT"]
+    fn dump_terrain_heights() {
+        let (Ok(pak), Ok(query), Ok(out)) = (
+            std::env::var("AAEMU_GAME_PAK"),
+            std::env::var("AAEMU_HEIGHT_QUERY"),
+            std::env::var("AAEMU_HEIGHT_OUT"),
+        ) else {
+            return;
+        };
+        let app = app_path();
+        let files = Arc::new(ClientFileManager::from_sources(&[pak], &app));
+        let worlds = WorldTemplates::load(&files, &app).expect("world templates");
+        let h = HeightmapWorlds::new(
+            files.clone(),
+            &worlds,
+            HeightmapConfig {
+                heightmaps_enable: true,
+                ..Default::default()
+            },
+        );
+        let doc = json::parse(&std::fs::read_to_string(query).unwrap()).unwrap();
+        let mut rows = Vec::new();
+        for q in json::array(&doc).unwrap() {
+            let o = q.as_object().unwrap();
+            let id = json::prop(o, "id").and_then(|v| v.as_str()).unwrap();
+            let world = json::prop(o, "world").and_then(|v| v.as_str()).unwrap();
+            let x = json::f32_or(o, "x", 0.0).unwrap();
+            let y = json::f32_or(o, "y", 0.0).unwrap();
+            let Some(template) = worlds.get_world_template_by_name(world) else {
+                rows.push(format!(r#"{{"id":"{id}","error":"no world template"}}"#));
+                continue;
+            };
+            let zone = worlds.get_zone_id(Some(template), x, y);
+            let Some(t) = h.template(template.id) else {
+                rows.push(format!(
+                    r#"{{"id":"{id}","zone":{zone},"error":"no heightmap"}}"#
+                ));
+                continue;
+            };
+            let (cx, cy) = (x as i32 / CELL_SIZE, y as i32 / CELL_SIZE);
+            let loaded =
+                t.verify_cell_loaded(&files, cx, cy).is_ok() && t.cell_has_height_map(cx, cy);
+            match t.get_height(&files, x, y) {
+                Ok(z) if loaded => rows.push(format!(r#"{{"id":"{id}","zone":{zone},"h":{z}}}"#)),
+                _ => rows.push(format!(
+                    r#"{{"id":"{id}","zone":{zone},"error":"no cell"}}"#
+                )),
+            }
+        }
+        std::fs::write(out, format!("[{}]", rows.join(","))).unwrap();
+    }
+
     #[test]
     #[ignore = "needs AAEMU_GAME_PAK"]
     fn real_heightmaps() {

@@ -13,6 +13,14 @@ use super::state::{ActPath, EventKind, QuestHandle};
 use super::templates::ActKind;
 use crate::models::container::slot_type;
 
+/// `QuestActObjZoneKill` level window. A bound of 0 is "unset" (most NPC-kill acts of the
+/// 1.2 data carry `lv_min_npc`/`lv_max_npc` = 0/0 and must accept every victim); the C# compared
+/// against the raw 0..0 range and rejected every real victim.
+pub(super) fn level_in_range(level: u8, min: i32, max: i32) -> bool {
+    let level = i32::from(level);
+    (min <= 0 || level >= min) && (max <= 0 || level <= max)
+}
+
 impl Ctx<'_> {
     fn act_at(&self, h: QuestHandle, p: ActPath) -> Option<usize> {
         self.st
@@ -1030,9 +1038,7 @@ impl Ctx<'_> {
                             valid = true;
                         }
                     }
-                    if i32::from(victim.level) < *lvl_min_npc
-                        || i32::from(victim.level) > *lvl_max_npc
-                    {
+                    if !level_in_range(victim.level, *lvl_min_npc, *lvl_max_npc) {
                         valid = false;
                     }
                 }
@@ -1046,13 +1052,30 @@ impl Ctx<'_> {
                             valid = true;
                         }
                     }
-                    if i32::from(victim.level) < *lvl_min || i32::from(victim.level) > *lvl_max {
+                    if !level_in_range(victim.level, *lvl_min, *lvl_max) {
                         valid = false;
                     }
                 }
                 if valid {
+                    // A team-shared kill (the killer is another character) counts once per
+                    // victim and act, and not at all when `Npc.DoDie` already handed this
+                    // character the kill directly (Rust only: the C# counted both, and once
+                    // per eligible member's share).
+                    if killer.character_id != Some(self.c.id)
+                        && !self.c.skill_char.claim_shared_kill_credit(
+                            victim.obj_id,
+                            h,
+                            a,
+                            chrono::Utc::now().timestamp_millis(),
+                        )
+                    {
+                        return Ok(());
+                    }
                     self.add_objective(h, a, 1)?;
-                    if *team_share {
+                    // Only the original killer shares with the team: the shared event reaches the
+                    // members with the killer unchanged, so they must not share it again
+                    // (the C# `OnZoneKill` re-delegated without bound).
+                    if *team_share && killer.character_id == Some(self.c.id) {
                         self.deferred
                             .push(Deferred::TeamEvent { event: ev.clone() });
                     }
@@ -1092,10 +1115,24 @@ impl Ctx<'_> {
                     selected,
                 },
             ) => {
-                if *quest_id != quest_template || npc_id != n {
+                if *quest_id != quest_template {
+                    return Ok(());
+                }
+                if npc_id != n {
+                    self.log_refusal(
+                        "Report",
+                        quest_template,
+                        &format!("NPC {n} is not the report NPC {npc_id}"),
+                    );
                     return Ok(());
                 }
                 if !self.report_ready(h, quest_template) {
+                    let status = self.objective_status(h);
+                    self.log_refusal(
+                        "Report",
+                        quest_template,
+                        &format!("NPC {n}: the objectives are not complete ({status:?})"),
+                    );
                     return Ok(());
                 }
                 if let Some(q) = self.st.quest_mut(h) {
@@ -1115,10 +1152,24 @@ impl Ctx<'_> {
                     selected,
                 },
             ) => {
-                if *quest_id != quest_template || d != doodad_id {
+                if *quest_id != quest_template {
+                    return Ok(());
+                }
+                if d != doodad_id {
+                    self.log_refusal(
+                        "Report",
+                        quest_template,
+                        &format!("doodad {d} is not the report doodad {doodad_id}"),
+                    );
                     return Ok(());
                 }
                 if !self.report_ready(h, quest_template) {
+                    let status = self.objective_status(h);
+                    self.log_refusal(
+                        "Report",
+                        quest_template,
+                        &format!("doodad {d}: the objectives are not complete ({status:?})"),
+                    );
                     return Ok(());
                 }
                 if let Some(q) = self.st.quest_mut(h) {

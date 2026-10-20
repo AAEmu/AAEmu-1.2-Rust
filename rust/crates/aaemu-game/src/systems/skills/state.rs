@@ -113,6 +113,11 @@ impl SkillRun {
         self.state().tl_id
     }
 
+    /// Takes and clears the timeline id under one lock (`0` when already taken).
+    pub fn take_tl_id(&self) -> u16 {
+        std::mem::take(&mut self.state().tl_id)
+    }
+
     pub fn cancelled(&self) -> bool {
         self.state().cancelled
     }
@@ -309,6 +314,55 @@ pub struct CharacterSkillState {
     /// escalating respawn timer.
     pub consecutive_death_count: usize,
     pub last_death_time_ms: i64,
+    /// Rust only: `(victim obj id, unix ms)` of the kills the NPC death handed this character
+    /// directly (`Npc.DoDie` -> `DoOnMonsterHuntEvents`). A team-shared `QuestActObjZoneKill`
+    /// for such a victim is ignored: the direct event already counts it.
+    pub direct_kill_credits: Vec<(u32, i64)>,
+    /// Rust only: `(victim obj id, quest handle, act, unix ms)` of the team-shared zone kills
+    /// this character already counted, so the share of every eligible member counts once.
+    pub shared_kill_credits: Vec<(u32, u64, usize, i64)>,
+}
+
+/// How long [`CharacterSkillState`] remembers a kill for the quest kill credit (object ids are
+/// reused, so the memory must not outlive the victim by much).
+const KILL_CREDIT_MEMORY_MS: i64 = 30_000;
+
+impl CharacterSkillState {
+    /// Remembers that the death of `victim` hands this character a direct quest kill event.
+    pub fn note_direct_kill_credit(&mut self, victim: u32, now_ms: i64) {
+        self.direct_kill_credits
+            .retain(|&(v, t)| v != victim && now_ms - t < KILL_CREDIT_MEMORY_MS);
+        self.direct_kill_credits.push((victim, now_ms));
+    }
+
+    /// Claims a team-shared zone kill of `victim` for one act: false when the character
+    /// already has a direct event for the victim or counted the share before.
+    pub fn claim_shared_kill_credit(
+        &mut self,
+        victim: u32,
+        quest: u64,
+        act: usize,
+        now_ms: i64,
+    ) -> bool {
+        if self
+            .direct_kill_credits
+            .iter()
+            .any(|&(v, t)| v == victim && now_ms - t < KILL_CREDIT_MEMORY_MS)
+        {
+            return false;
+        }
+        self.shared_kill_credits
+            .retain(|&(.., t)| now_ms - t < KILL_CREDIT_MEMORY_MS);
+        if self
+            .shared_kill_credits
+            .iter()
+            .any(|&(v, q, a, _)| (v, q, a) == (victim, quest, act))
+        {
+            return false;
+        }
+        self.shared_kill_credits.push((victim, quest, act, now_ms));
+        true
+    }
 }
 
 impl Default for CharacterSkillState {
@@ -329,6 +383,8 @@ impl Default for CharacterSkillState {
             pvp_heal_history: Vec::new(),
             consecutive_death_count: 0,
             last_death_time_ms: 0,
+            direct_kill_credits: Vec::new(),
+            shared_kill_credits: Vec::new(),
         }
     }
 }

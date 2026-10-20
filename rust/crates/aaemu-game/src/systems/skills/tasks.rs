@@ -44,9 +44,12 @@ pub struct TlIdManager {
 #[derive(Debug)]
 struct TlIdInner {
     assigned: Vec<bool>,
+    /// `AssignedUnit`: (caster obj id, skill id) that last took each id.
+    owners: Vec<(u32, u32)>,
     next: u16,
     total_gets: u64,
     total_releases: u64,
+    unused_releases: u64,
 }
 
 const FIRST_ID: u16 = 0x000A;
@@ -57,17 +60,20 @@ impl Default for TlIdManager {
         Self {
             inner: Mutex::new(TlIdInner {
                 assigned: vec![false; u16::MAX as usize],
+                owners: vec![(0, 0); u16::MAX as usize],
                 next: FIRST_ID,
                 total_gets: 0,
                 total_releases: 0,
+                unused_releases: 0,
             }),
         }
     }
 }
 
 impl TlIdManager {
-    /// `GetNextId(referenceUnit)` (0 when exhausted, with a fatal log).
-    pub fn next_id(&self) -> u16 {
+    /// `GetNextId(referenceUnit)` (0 when exhausted, with a fatal log). `owner` (the caster obj
+    /// id) and `skill_id` are remembered for the unused-release warning.
+    pub fn next_id(&self, owner: u32, skill_id: u32) -> u16 {
         let mut s = self.inner.lock().expect("tl ids poisoned");
         s.total_gets += 1;
         let mut res = 0u16;
@@ -75,6 +81,7 @@ impl TlIdManager {
             let id = s.next;
             if !s.assigned[id as usize] {
                 s.assigned[id as usize] = true;
+                s.owners[id as usize] = (owner, skill_id);
                 res = id;
             }
             s.next = s.next.wrapping_add(1);
@@ -103,9 +110,18 @@ impl TlIdManager {
         let mut s = self.inner.lock().expect("tl ids poisoned");
         s.total_releases += 1;
         if !s.assigned[tl as usize] {
-            tracing::warn!("Tried to release unused Id {tl}");
+            s.unused_releases += 1;
+            let (owner, skill_id) = s.owners[tl as usize];
+            tracing::warn!(
+                "Tried to release unused Id {tl}, last owner obj id {owner}, skill id {skill_id}"
+            );
         }
         s.assigned[tl as usize] = false;
+    }
+
+    /// Releases of an id that was not assigned (the warning's count).
+    pub fn unused_releases(&self) -> u64 {
+        self.inner.lock().expect("tl ids poisoned").unused_releases
     }
 
     pub fn is_assigned(&self, tl: u16) -> bool {
@@ -120,11 +136,11 @@ mod tests {
     #[test]
     fn tl_ids_round_robin() {
         let m = TlIdManager::default();
-        assert_eq!(m.next_id(), 0x0A);
-        assert_eq!(m.next_id(), 0x0B);
+        assert_eq!(m.next_id(1, 2), 0x0A);
+        assert_eq!(m.next_id(1, 2), 0x0B);
         m.release(0x0A);
         assert!(!m.is_assigned(0x0A));
         // continues after the last handed out id, not at the released one
-        assert_eq!(m.next_id(), 0x0C);
+        assert_eq!(m.next_id(1, 2), 0x0C);
     }
 }

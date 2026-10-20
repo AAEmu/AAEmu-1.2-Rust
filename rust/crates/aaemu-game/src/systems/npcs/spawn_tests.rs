@@ -2903,3 +2903,46 @@ async fn real_data_mistfiend_cave_activation_and_respawn() {
     assert!(world.npc(replacement.obj_id).is_some());
     drop(_p);
 }
+
+/// The shipped 1.2 Ronbann Mine NPCs (east and west sub-zones of Lilyut Hills) must sit on the
+/// mine floor with the rest of the mine content: the 1.2 doodads (ore veins, bomb crates,
+/// ladders, lanterns) and both `Respawn: ... Ronbann Mine` portals are at Z ~280-310, and the
+/// 10.x editor places the same spawner ids there. A height regression left most of them 100-190 m
+/// above the floor (and the recent quest-NPC imports on it), which made the mines look empty.
+#[test]
+fn real_data_ronbann_mine_npcs_are_on_the_mine_floor() {
+    use crate::systems::npcs::json;
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("app/Data/Worlds/main_world/npc_spawns.json");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let doc = json::parse(&text).expect("npc_spawns.json");
+    let mut checked = 0;
+    for entry in json::array(&doc).expect("spawn array") {
+        let Some(o) = entry.as_object() else { continue };
+        // Hypnotized Miner, Mining Supervisor (east) and Dahuta Cult Priestess (west); the
+        // quest NPCs of the same caves (Wizard Eridel, Lord Colin's Henchman) are checked too.
+        let uid = json::u32_or(o, "UnitId", 0).unwrap_or(0);
+        if !matches!(uid, 1880 | 1881 | 1903 | 6991 | 6973) {
+            continue;
+        }
+        let Some(p) = json::prop(o, "Position").and_then(|p| p.as_object()) else {
+            continue;
+        };
+        let x = json::f32_or(p, "X", 0.0).unwrap_or(0.0);
+        let y = json::f32_or(p, "Y", 0.0).unwrap_or(0.0);
+        let z = json::f32_or(p, "Z", 0.0).unwrap_or(0.0);
+        let east = (13000.0..=13450.0).contains(&x) && (16250.0..=16460.0).contains(&y);
+        let west = (11700.0..=12100.0).contains(&x) && (16280.0..=16480.0).contains(&y);
+        if !east && !west {
+            continue;
+        }
+        assert!(
+            (280.0..=310.0).contains(&z),
+            "Ronbann Mine NPC {uid} at ({x}, {y}) has Z {z}; the mine floor is Z ~280-310"
+        );
+        checked += 1;
+    }
+    assert!(checked >= 30, "Ronbann Mine placements found: {checked}");
+}

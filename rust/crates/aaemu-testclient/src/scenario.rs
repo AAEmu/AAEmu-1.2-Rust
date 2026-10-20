@@ -17,8 +17,10 @@ use crate::stream::StreamClient;
 
 mod doodad;
 mod fixes;
+mod plant;
 mod portal;
 mod questitem;
+mod script;
 
 /// Which scenario to run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +56,10 @@ pub enum Kind {
     /// doodad's fake use skill on it, logging the packets (see `scenario/doodad.rs`).
     #[serde(rename = "doodad")]
     Doodad,
+    /// Plant crops / trees and place animals with `CSCreateDoodadPacket` after GM item setup
+    /// (see `scenario/plant.rs`). GM account.
+    #[serde(rename = "plant")]
+    Plant,
     /// Stone throwing (skill 11268) from a stackable item: the `ItemUnlock` is sent while the
     /// stack survives and skipped for the last stone (see `scenario/fixes.rs`). GM account.
     #[serde(rename = "stonethrow")]
@@ -66,6 +72,10 @@ pub enum Kind {
     /// 14602 cast at doodad 841, see `scenario/portal.rs`). GM account.
     #[serde(rename = "portal")]
     Portal,
+    /// Ad-hoc live checks driven by the command file `$AAEMU_SCRIPT` (see `scenario/script.rs`).
+    /// GM account.
+    #[serde(rename = "script")]
+    Script,
 }
 
 impl std::str::FromStr for Kind {
@@ -81,9 +91,11 @@ impl std::str::FromStr for Kind {
             "mate-revive" => Self::MateRevive,
             "questitem" => Self::QuestItem,
             "doodad" => Self::Doodad,
+            "plant" => Self::Plant,
             "stonethrow" => Self::StoneThrow,
             "ghost" => Self::Ghost,
             "portal" => Self::Portal,
+            "script" => Self::Script,
             _ => bail!(
                 "unknown scenario '{s}' (login, lobby, full, combat, npc-return, mate-revive, questitem, doodad, \n                 load)"
             ),
@@ -536,6 +548,11 @@ async fn run_inner(kind: Kind, cfg: &BotConfig, r: &mut Runner<'_>) -> anyhow::R
         drop(stream);
         return Ok(());
     }
+    if kind == Kind::Plant {
+        plant::run(&mut game, r).await?;
+        drop(stream);
+        return Ok(());
+    }
     if kind == Kind::StoneThrow {
         fixes::stonethrow(&mut game, r).await?;
         drop(stream);
@@ -548,6 +565,11 @@ async fn run_inner(kind: Kind, cfg: &BotConfig, r: &mut Runner<'_>) -> anyhow::R
     }
     if kind == Kind::Portal {
         portal::run(&mut game, cfg, r).await?;
+        drop(stream);
+        return Ok(());
+    }
+    if kind == Kind::Script {
+        script::run(&mut game, cfg, r).await?;
         drop(stream);
         return Ok(());
     }

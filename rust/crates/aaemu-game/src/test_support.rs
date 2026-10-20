@@ -139,3 +139,20 @@ pub fn spawn_player(
     world.spawn(&p, &server.view_ctx());
     p
 }
+
+/// Runs `f` on its own thread (inside the current Tokio runtime's context) and panics when it
+/// does not finish in 10 s: a regression of a lock cycle must fail a test instead of hanging
+/// the whole test run. The stuck thread is leaked.
+pub fn finishes_in_time<R: Send + 'static>(
+    what: &str,
+    f: impl FnOnce() -> R + Send + 'static,
+) -> R {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = tokio::runtime::Handle::current();
+    std::thread::spawn(move || {
+        let _guard = handle.enter();
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(Duration::from_secs(10))
+        .unwrap_or_else(|_| panic!("{what} did not finish: deadlocked"))
+}

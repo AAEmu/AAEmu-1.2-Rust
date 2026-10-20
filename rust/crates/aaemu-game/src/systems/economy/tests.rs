@@ -159,6 +159,33 @@ pub fn give(w: &World, p: &PlayerRef, st: u8, template: u32, count: i32, slot: i
     id
 }
 
+/// Records the quest item events (`owner character id, template, signed count`).
+#[derive(Default)]
+pub struct ItemEventLog(pub std::sync::Mutex<Vec<(u32, u32, i32)>>);
+
+impl crate::systems::economy::hooks::QuestItemHooks for ItemEventLog {
+    fn on_items_acquired(&self, _: &GameServer, p: &PlayerRef, template_id: u32, count: i32) {
+        self.0
+            .lock()
+            .unwrap()
+            .push((p.character_id, template_id, count));
+    }
+
+    fn on_items_consumed(&self, _: &GameServer, p: &PlayerRef, template_id: u32, count: i32) {
+        self.0
+            .lock()
+            .unwrap()
+            .push((p.character_id, template_id, -count));
+    }
+}
+
+/// Installs an [`ItemEventLog`] as the economy's quest item hooks.
+pub fn log_item_events(w: &World) -> Arc<ItemEventLog> {
+    let log = Arc::new(ItemEventLog::default());
+    w.server.systems.economy.hooks.quests.install(log.clone());
+    log
+}
+
 pub fn item_at(p: &PlayerRef, st: u8, slot: u8) -> Option<Item> {
     Inv::of(p).item_at(st, slot)
 }
@@ -208,6 +235,56 @@ async fn ordinary_item_moves_reject_foreign_global_items() {
     assert_eq!(item_at(&w.pb, slot_type::INVENTORY, 3).unwrap(), before);
     assert!(item_at(&w.pa, slot_type::INVENTORY, 0).is_none());
     assert_eq!(w.a.drain_ops(), vec![sc::SCErrorMsgPacket]);
+    assert!(w.b.drain().is_empty());
+}
+
+#[tokio::test]
+async fn moves_naming_a_consumed_or_unknown_item_are_rejected() {
+    let mut w = world();
+    let kept = give(&w, &w.pa.clone(), slot_type::INVENTORY, STACK, 5, 1);
+    let consumed = give(&w, &w.pa.clone(), slot_type::INVENTORY, STACK, 5, 2);
+    let removed = Inv::of(&w.pa).bag().lock().unwrap().remove_item(consumed);
+    assert!(removed.is_some());
+    let before = (
+        item_at(&w.pa, slot_type::INVENTORY, 1).unwrap(),
+        item_at(&w.pa, slot_type::INVENTORY, 2),
+    );
+    w.a.drain();
+
+    // Source id no longer held, source id never existed, and target id no longer held.
+    let requests = [
+        move_body(
+            consumed,
+            0,
+            slot_type::INVENTORY,
+            2,
+            slot_type::INVENTORY,
+            4,
+        ),
+        move_body(
+            16_777_663,
+            0,
+            slot_type::INVENTORY,
+            2,
+            slot_type::INVENTORY,
+            4,
+        ),
+        move_body(
+            kept,
+            consumed,
+            slot_type::INVENTORY,
+            1,
+            slot_type::INVENTORY,
+            2,
+        ),
+    ];
+    for body in requests {
+        run::<CSSwapItemsPacket>(&mut w, 0, body.as_bytes());
+        assert_eq!(w.a.drain_ops(), vec![sc::SCErrorMsgPacket]);
+        assert_eq!(item_at(&w.pa, slot_type::INVENTORY, 1).unwrap(), before.0);
+        assert_eq!(item_at(&w.pa, slot_type::INVENTORY, 2), before.1);
+        assert!(item_at(&w.pa, slot_type::INVENTORY, 4).is_none());
+    }
     assert!(w.b.drain().is_empty());
 }
 
@@ -433,6 +510,36 @@ async fn equip_into_empty_slot_binds_and_broadcasts() {
 }
 
 #[tokio::test]
+async fn equip_into_wrong_slot_is_rejected() {
+    let mut w = world();
+    let pa = w.pa.clone();
+    // Chest armor (slot type 3 -> equipment slot CHEST only) on bag slot 3.
+    let id = give(&w, &pa, slot_type::INVENTORY, ARMOR, 1, 3);
+    let worn = give(&w, &pa, slot_type::EQUIPMENT, ARMOR, 1, equip_slot::CHEST);
+    let bag_before = item_at(&pa, 2, 3).unwrap();
+    let worn_before = item_at(&pa, 1, equip_slot::CHEST as u8).unwrap();
+    w.a.drain();
+
+    // Bag item -> equipment slot 20 (hair), as seen on the live server.
+    let s = move_body(id, 0, 2, 3, 1, equip_slot::HAIR as u8);
+    run::<CSSwapItemsPacket>(&mut w, 0, s.as_bytes());
+    // Swap with the worn item, but aimed at the hair slot.
+    let s = move_body(id, worn, 2, 3, 1, equip_slot::HAIR as u8);
+    run::<CSSwapItemsPacket>(&mut w, 0, s.as_bytes());
+
+    let frames = w.a.drain();
+    assert_eq!(frames.len(), 2);
+    assert!(frames.iter().all(|f| f.0 == sc::SCErrorMsgPacket));
+    assert_eq!(item_at(&pa, 2, 3).unwrap(), bag_before);
+    assert_eq!(
+        item_at(&pa, 1, equip_slot::CHEST as u8).unwrap(),
+        worn_before
+    );
+    assert!(item_at(&pa, 1, equip_slot::HAIR as u8).is_none());
+    assert!(w.b.drain().is_empty());
+}
+
+#[tokio::test]
 async fn destroy_partial_and_full() {
     let mut w = world();
     let pa = w.pa.clone();
@@ -465,6 +572,25 @@ async fn destroy_partial_and_full() {
     s.write_u64(id).write_u8(2).write_u8(0).write_i32(2);
     run::<CSDestroyItemPacket>(&mut w, 0, s.as_bytes());
     assert!(w.a.drain().is_empty());
+}
+
+/// A partial `CSDestroyItem` raises `OnConsumedItem` for the destroyed units (deviation from
+/// C#), so `ItemGather` objectives drop with them; a full destroy raises it once for the stack.
+#[tokio::test]
+async fn destroy_raises_consumed_events() {
+    let mut w = world();
+    let pa = w.pa.clone();
+    let log = log_item_events(&w);
+    let id = give(&w, &pa, slot_type::INVENTORY, STACK, 10, 0);
+    let mut s = PacketStream::new();
+    s.write_u64(id).write_u8(2).write_u8(0).write_i32(3);
+    run::<CSDestroyItemPacket>(&mut w, 0, s.as_bytes());
+    assert_eq!(*log.0.lock().unwrap(), vec![(1, STACK, -3)]);
+
+    let mut s = PacketStream::new();
+    s.write_u64(id).write_u8(2).write_u8(0).write_i32(7);
+    run::<CSDestroyItemPacket>(&mut w, 0, s.as_bytes());
+    assert_eq!(*log.0.lock().unwrap(), vec![(1, STACK, -3), (1, STACK, -7)]);
 }
 
 #[tokio::test]
