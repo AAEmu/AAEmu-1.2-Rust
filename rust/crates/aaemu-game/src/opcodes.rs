@@ -244,6 +244,10 @@ pub mod cs {
     pub const CSICSGoodsListPacket: u16 = 0x11c;
     pub const CSICSBuyGoodPacket: u16 = 0x11d;
     pub const CSICSMoneyRequestPacket: u16 = 0x11e;
+    // Added from the 1.2 client's own CS table (opcodes missing from the C# offsets; evidence in
+    // PORTING.md, "Bevy protocol audit"): bounty requests and the auto-use-AA-point toggle.
+    pub const CSRequestSetBountyMoneyPacket: u16 = 0x11f;
+    pub const CSSendBountyUpdatePacket: u16 = 0x120;
     pub const CSSendUserMusicPacket: u16 = 0x121;
     pub const CSSaveUserMusicNotesPacket: u16 = 0x122;
     pub const CSRequestMusicNotesPacket: u16 = 0x123;
@@ -253,8 +257,10 @@ pub mod cs {
     pub const CSEnterBeautySalonPacket: u16 = 0x12e;
     pub const CSRankCharacterPacket: u16 = 0x12f;
     pub const CSRequestSecondPasswordKeyTablesPacket: u16 = 0x125;
+    pub const CSRankSnapshotPacket: u16 = 0x130;
     pub const CSRequestSpecialtyCurrentPacket: u16 = 0x131;
     pub const CSIdleStatusPacket: u16 = 0x132;
+    pub const CSChangeAutoUseAAPointPacket: u16 = 0x133;
     pub const CSThisTimeUnpackItemPacket: u16 = 0x134;
     pub const CSPremiumServiceBuyPacket: u16 = 0x135;
     pub const CSPremiumServiceListPacket: u16 = 0x136;
@@ -506,6 +512,8 @@ pub mod cs {
         (0x11c, "CSICSGoodsListPacket"),
         (0x11d, "CSICSBuyGoodPacket"),
         (0x11e, "CSICSMoneyRequestPacket"),
+        (0x11f, "CSRequestSetBountyMoneyPacket"),
+        (0x120, "CSSendBountyUpdatePacket"),
         (0x121, "CSSendUserMusicPacket"),
         (0x122, "CSSaveUserMusicNotesPacket"),
         (0x123, "CSRequestMusicNotesPacket"),
@@ -515,8 +523,10 @@ pub mod cs {
         (0x12e, "CSEnterBeautySalonPacket"),
         (0x12f, "CSRankCharacterPacket"),
         (0x125, "CSRequestSecondPasswordKeyTablesPacket"),
+        (0x130, "CSRankSnapshotPacket"),
         (0x131, "CSRequestSpecialtyCurrentPacket"),
         (0x132, "CSIdleStatusPacket"),
+        (0x133, "CSChangeAutoUseAAPointPacket"),
         (0x134, "CSThisTimeUnpackItemPacket"),
         (0x135, "CSPremiumServiceBuyPacket"),
         (0x136, "CSPremiumServiceListPacket"),
