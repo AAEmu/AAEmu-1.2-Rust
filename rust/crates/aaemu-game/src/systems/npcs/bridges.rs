@@ -123,6 +123,10 @@ impl NpcSkillHooks for NpcSkills {
         super::npc::death::after_death(server, npc, killer);
     }
 
+    fn on_unit_died(&self, server: &GameServer, unit: &WorldObject) {
+        super::spawn_manager::despawn_creator_summons(server, unit);
+    }
+
     fn npc_damage_received(
         &self,
         server: &GameServer,
@@ -573,6 +577,7 @@ fn spawn_effect(
     let params = super::npc::spawner::SpawnEffectParams {
         use_summoner_faction: e.use_summoner_faction,
         use_summoner_aggro_target: e.use_summoner_aggro_target,
+        despawn_on_creator_death: e.despawn_on_creator_death,
         life_time: e.life_time,
     };
     spawner.do_spawn_effect(server, spawner.id, &params, Some(caster), Some(&target));
@@ -825,6 +830,15 @@ fn npc_spawner_spawn_effect(
         }
         if e.life_time > 0.0 {
             super::npc::spawner::schedule_npc_do_despawn(server, &npc, e.life_time);
+        }
+        if e.despawn_on_creator_death {
+            for n in &spawned {
+                server
+                    .systems
+                    .npcs
+                    .spawns
+                    .add_creator_summon(caster.obj_id(), n);
+            }
         }
     }
 }

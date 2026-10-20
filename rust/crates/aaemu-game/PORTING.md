@@ -665,6 +665,14 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 
 ## Known deviations from the C#
 
+* systems::npcs (`DespawnOnCreatorDeath`): the 1.2 C# loaded `despawn_on_creator_death` for
+  `SpawnEffect` and `NpcSpawnerSpawnEffect` but never read it, so summoned NPCs outlived their
+  creator. Rust registers every effect-spawned NPC under the caster's obj id and despawns those
+  summons from `Unit.DoDie` of the creator (player or NPC). A creator that logs out or is
+  despawned without dying still leaves its summons, as in the 1.2 C# (the later 10.x C# only
+  forwards the flag to the native Zone: `WorldIntegration.cs` `PublishNpcSpawn` /
+  `WZNpcSpawnerEventPacket`).
+
 * systems::services / systems::vehicles (mount speed analysis): `SusManager` samples the
   driver's (or owner's) `teleport_seq` and `disabled_set_position` for mates, and successful
   ride / unride operations reset the mate baseline. C# `SusManager` / `CharacterMates` did
