@@ -615,7 +615,7 @@ async fn disconnect_during_a_duel_restores_the_origin_faction() {
 }
 
 /// A participant leaving mid-duel ends the duel for both sides: the opponent gets the
-/// surrender `SCDuelEndedPacket`, is restored to its faction and the duel is unregistered.
+/// draw `SCDuelEndedPacket` (the leaver does not lose, the opponent does not win), is restored to its faction and the duel is unregistered.
 #[tokio::test]
 async fn disconnect_mid_duel_ends_the_duel_for_the_opponent() {
     for challenger_leaves in [true, false] {
@@ -626,13 +626,13 @@ async fn disconnect_mid_duel_ends_the_duel_for_the_opponent() {
             crate::world::session::on_disconnect(&f.server, &mut f.a.conn).await;
             assert_eq!(
                 find(&f.b.drain(), sc::SCDuelEndedPacket),
-                vec![ended(2, 1, 0x101, 0x100, duel_det_type::SURRENDER)]
+                vec![ended(1, 2, 0x100, 0x101, duel_det_type::DRAW)]
             );
         } else {
             crate::world::session::on_disconnect(&f.server, &mut f.b.conn).await;
             assert_eq!(
                 find(&f.a.drain(), sc::SCDuelEndedPacket),
-                vec![ended(1, 2, 0x100, 0x101, duel_det_type::SURRENDER)]
+                vec![ended(2, 1, 0x101, 0x100, duel_det_type::DRAW)]
             );
         }
         for p in [&f.pa, &f.pb] {

@@ -10,6 +10,7 @@ use crate::server::GameServer;
 use crate::systems::npcs::portal::packets::SCLoadInstancePacket;
 use crate::systems::skills::packets::CompressedGamePackets;
 use crate::systems::skills::packets_special::{SCCharacterResurrectedPacket, SCTeleportUnitPacket};
+use crate::systems::skills::types::SkillCaster;
 use crate::world::{Player, PlayerRef, WorldObject};
 
 use super::data::{
@@ -674,14 +675,23 @@ fn apply_battlefield_buffs(server: &GameServer, game: &InstantGame, p: &PlayerRe
     }
     let obj = WorldObject::from(p);
     for row in &game.battlefield_buffs {
-        crate::systems::skills::buffs::add_buff_by_id_with_charge(
+        let Some(template) = server.game_data.systems.skills.buff(row.buff_id).cloned() else {
+            tracing::error!("AddBuff: unknown buff {}", row.buff_id);
+            continue;
+        };
+        let mut buff = crate::systems::skills::buffs::new_buff(
             server,
-            &obj,
-            row.buff_id,
-            &obj,
-            0,
-            row.value,
+            &template,
+            Some(&obj),
+            &SkillCaster::Unit(obj.obj_id()),
+            None,
+            now_ms(),
         );
+        buff.charge = row.value;
+        // Granted for the match only: the autosave and a logout to the character select must
+        // never persist it (buffs 6266 / 8000007 have save rule 1 and a duration).
+        buff.session_only = true;
+        crate::systems::skills::buffs::add_buff(server, &obj, buff, 0, 0);
     }
 }
 

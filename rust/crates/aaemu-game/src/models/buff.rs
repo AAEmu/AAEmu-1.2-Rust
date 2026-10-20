@@ -64,6 +64,9 @@ pub struct Buff {
     pub task_gen: u64,
     /// `replace` argument of the pending `Exit` (passed on to `Dispel`).
     pub exit_replace: bool,
+    /// Never persisted with the character (battlefield buffs, which are granted for one match
+    /// and removed on leave): `should_persist` is false whatever the template's save rule.
+    pub session_only: bool,
 }
 
 /// `EffectState`.
@@ -102,6 +105,7 @@ impl Buff {
             skill_caster_bytes: Vec::new(),
             task_gen: 0,
             exit_replace: false,
+            session_only: false,
         }
     }
 
@@ -149,6 +153,7 @@ impl Buff {
     /// `Buffs.ShouldPersistBuff`.
     pub fn should_persist(&self, now_ms: i64) -> bool {
         if self.template.save_rule_id == save_rule::DONT_SAVE
+            || self.session_only
             || self.passive
             || self.duration <= 0
             || self.time_left(now_ms) <= 0.0
@@ -395,6 +400,7 @@ impl Buffs {
                 e.caster_obj_id = buff.caster_obj_id;
                 e.skill_caster = buff.skill_caster;
                 e.skill_caster_bytes = buff.skill_caster_bytes;
+                e.session_only |= buff.session_only;
                 e.start_time_ms = now_ms;
                 e.duration = if e.template.stack_rule == stack_rule::EXTEND {
                     buff.duration.wrapping_add(remaining as i32)
@@ -460,6 +466,27 @@ mod tests {
             buff.template.id = 999;
             assert!(!buff.should_persist(10_999));
         }
+    }
+
+    /// Battlefield buffs (save rule 1 with a duration) are never saved with the character.
+    #[test]
+    fn session_only_buffs_are_never_persisted() {
+        let mut template = BuffTemplate::simple(6266, BuffKind::Good);
+        template.save_rule_id = save_rule::NORMAL;
+        template.stack_rule = stack_rule::REFRESH;
+        template.duration = 600_000;
+        let mut buff = Buff::new(template, SkillCaster::default(), None, 1_000);
+        buff.duration = 600_000;
+        assert!(buff.should_persist(2_000));
+        buff.session_only = true;
+        assert!(!buff.should_persist(2_000));
+        // A refresh over a session-only effect keeps it session-only.
+        let mut buffs = Buffs::default();
+        buffs.add_buff(buff.clone(), 0, 0, 1_000);
+        let mut again = buff;
+        again.session_only = false;
+        buffs.add_buff(again, 0, 0, 1_500);
+        assert!(buffs.effects.iter().all(|b| b.session_only));
     }
 
     #[test]

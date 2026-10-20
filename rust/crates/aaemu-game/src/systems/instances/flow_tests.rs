@@ -2040,6 +2040,8 @@ async fn battlefield_buffs_are_granted_at_start_and_removed_on_leave() {
             .cloned()
             .expect("battlefield buff");
     assert_eq!(buff.charge, 1);
+    // Never saved with the character (autosave / logout to the character select).
+    assert!(buff.session_only);
     a.frames();
     instant_game::leave_current_game(&server, &a.p);
     assert!(!a.p.data().unit.buffs.check_buff(8246));

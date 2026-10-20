@@ -509,9 +509,9 @@ impl DuelManager {
 
     /// A participant leaves the world (disconnect, logout to the lobby). Not in the C# (the
     /// opponent stayed in the Red / Blue faction with the duel registered until the end
-    /// timer): a started duel ends for both sides as a surrender of the leaver (the same
-    /// `SCDuelEndedPacket` as running away from the flag), restoring both factions; a pending
-    /// request is simply dropped.
+    /// timer, which then decided by remaining HP): a started duel ends right away as a **draw** for
+    /// both sides, restoring both factions. It is deliberately not a win for the opponent, so a
+    /// disconnect cannot be used to farm `WIN_DUEL`; a pending request is simply dropped.
     pub async fn on_participant_leave(&self, server: &GameServer, leaver: &PlayerRef) {
         let id = leaver.character_id;
         let Some(duel) = self.get(id) else {
@@ -522,8 +522,7 @@ impl DuelManager {
             self.duel_clean_up(a);
             return;
         }
-        let winner = if id == a { b } else { a };
-        self.duel_stop(server, winner, duel_det_type::SURRENDER, id)
+        self.duel_stop(server, a, duel_det_type::DRAW, if id == a { b } else { a })
             .await;
         // `duel_stop` aborts when a saved faction is missing: never leave the duel registered.
         if self.get(a).is_some() {

@@ -1307,6 +1307,21 @@ pub async fn on_disconnect(server: &GameServer, conn: &mut GameConnection) {
     let Some(p) = conn.active_char.clone() else {
         return;
     };
+    // A connection keeps its `active_char` after a leave (quit / character select). That
+    // character was already saved and removed from the world: running the departure again would
+    // write a stale copy over a character that logged in again on a newer connection.
+    if !server
+        .world
+        .character_by_obj_id(p.obj_id)
+        .is_some_and(|live| Arc::ptr_eq(&live, &p))
+    {
+        tracing::debug!(
+            "Disconnect of session {}: character {} already left the world",
+            conn.id,
+            p.character_id
+        );
+        return;
+    }
     crate::systems::housing::dominion::runtime::abort_character(server, p.character_id);
     crate::systems::housing::dominion::participants::clear_player(server, &p);
     crate::systems::economy::on_disconnect(server, &p);
