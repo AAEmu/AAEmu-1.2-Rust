@@ -211,6 +211,26 @@ impl NpcSkillHooks for NpcSkills {
         }
     }
 
+    /// `Interaction` (10): the 1.2 `special_effects` rows carry a `WorldInteractionType`
+    /// in `value1` (row 11030: 19 `Use`, 36: 10 `DigTerrain`, 215: 29 `SummonBeanstalk`)
+    /// and an optional doodad argument in `value2` (row 215: 149). The authored interaction
+    /// classes are the same ones `InteractionEffect` runs, so this is its special-effect twin.
+    fn apply_special_effect(
+        &self,
+        server: &GameServer,
+        special_type: i32,
+        args: &EffectArgs<'_>,
+        values: [i32; 4],
+    ) -> bool {
+        match special_type {
+            10 => {
+                interaction_effect(server, values[0], values[1].max(0) as u32, args);
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn apply_effect(
         &self,
         server: &GameServer,
