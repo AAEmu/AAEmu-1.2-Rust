@@ -2889,6 +2889,12 @@ pub fn despawn_creator_summons(server: &GameServer, creator: &WorldObject) {
         .spawns
         .take_creator_summons(creator.obj_id());
     for npc in summons {
+        // A summon that is already dead keeps its corpse for the corpse timer (as the despawn
+        // tick does); only live summons follow their creator.
+        let dead = npc.data().dead_time_ms > 0;
+        if dead {
+            continue;
+        }
         let obj = WorldObject::from(&npc);
         // A stale entry: the object id now belongs to another live NPC (its summon entry was
         // registered by a creator whose id was reused).

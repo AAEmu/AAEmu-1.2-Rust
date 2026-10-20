@@ -764,6 +764,73 @@ async fn npc_spawner_spawn_effect_despawn_on_creator_death_removes_the_summon() 
 }
 
 #[tokio::test]
+async fn npc_spawner_spawn_effect_despawn_on_creator_death_keeps_the_corpse_of_a_dead_summon() {
+    use crate::systems::npcs::bridges::NpcSkills;
+    use crate::systems::skills::data::effects::NpcSpawnerSpawnEffect;
+    use crate::systems::skills::data::{EffectKind, EffectTemplate};
+    use crate::systems::skills::effects::{EffectArgs, EffectSource};
+    use crate::systems::skills::ext::NpcSkillHooks;
+    use crate::systems::skills::geometry::Target;
+    use crate::systems::skills::types::{
+        CastAction, KillReason, SkillCastTarget, SkillCaster, SkillObject,
+    };
+
+    let server = server();
+    let m = manager(&server);
+    let mut def = npc_def(600, 20.0, 20.0);
+    def.npc_spawner_ids = vec![20];
+    assert_eq!(m.add_npc_spawner(&server, def), Ok(0));
+    let client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Caster", 20.0, 20.0),
+        5000,
+    );
+    let caster = WorldObject::from(player.clone());
+    crate::systems::npcs::install_hooks(&server);
+    let effect = NpcSpawnerSpawnEffect {
+        id: 1,
+        spawner_id: 20,
+        life_time: 0.0,
+        despawn_on_creator_death: true,
+        use_summoner_aggro_target: false,
+        activation_state: false,
+    };
+    let template = EffectTemplate::NpcSpawnerSpawn(effect);
+    let args = EffectArgs {
+        caster: Some(caster.clone()),
+        caster_caster: SkillCaster::Unit(player.obj_id),
+        target: Target::Obj(caster.clone()),
+        target_caster: SkillCastTarget::Unit(player.obj_id),
+        cast: CastAction::Skill {
+            skill_id: 1,
+            tl_id: 0,
+        },
+        source: EffectSource::default(),
+        skill_object: &SkillObject::None,
+    };
+    assert!(NpcSkills.apply_effect(&server, EffectKind::NpcSpawnerSpawnEffect, &template, &args,));
+    let spawner = m.get_npc_spawner(20).remove(0);
+    let summon = spawner.spawned_npcs().values().next().unwrap()[0].clone();
+    let world = server.world.world(0).unwrap();
+    assert!(world.object(summon.obj_id).is_some());
+    summon.data().dead_time_ms = 1;
+
+    crate::systems::skills::combat::do_die(
+        &server,
+        &caster,
+        Some(&WorldObject::from(&summon)),
+        KillReason::Damage,
+    );
+
+    assert!(
+        world.object(summon.obj_id).is_some(),
+        "a dead summon keeps its corpse for the corpse timer"
+    );
+}
+
+#[tokio::test]
 async fn npc_spawner_spawn_effect_without_despawn_on_creator_death_keeps_the_summon() {
     use crate::systems::npcs::bridges::NpcSkills;
     use crate::systems::skills::data::effects::NpcSpawnerSpawnEffect;
