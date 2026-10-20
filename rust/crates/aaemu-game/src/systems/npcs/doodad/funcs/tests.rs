@@ -721,6 +721,33 @@ async fn interaction_classes() {
 }
 
 #[tokio::test]
+async fn summon_doodad_without_target_does_not_consume_an_object_id() {
+    let mut data = GameData::empty();
+    data.systems.npcs.doodad.templates.insert(
+        5017,
+        DoodadTemplate {
+            id: 5017,
+            ..Default::default()
+        },
+    );
+    let fx = fixture_with(Rec::default(), data);
+    let before = fx.server.ids.object.get_next_id().unwrap();
+    fx.server.ids.object.release_id(before);
+    assert!(execute_interaction(
+        &fx.server,
+        wi::SUMMON_DOODAD,
+        &fx.caster(),
+        None,
+        18222,
+        5017,
+        None
+    ));
+    let after = fx.server.ids.object.get_next_id().unwrap();
+    assert_eq!(after, before);
+    fx.server.ids.object.release_id(after);
+}
+
+#[tokio::test]
 async fn cutdown_broadcasts_cutdowning() {
     let mut fx = fixture(Rec::default());
     let target = WorldObject::from(&fx.doodad);
