@@ -1092,6 +1092,10 @@ pub fn split_or_move_item_ex(
                         ni.slot_type = to_type;
                         ni.slot = i32::from(to_slot);
                         let target = d.as_deref_mut().unwrap_or(&mut s);
+                        // The split item belongs to the container it is created in (C# never
+                        // assigned `ni.OwnerId`, so it stayed 0 and could be lost on relog).
+                        ni.owner_id = u64::from(target.owner_id);
+                        ni.dirty = true;
                         item_tasks.push(ItemTask::add(&ni));
                         target.items.push(ni);
                         target.update_free_slot_count();
@@ -1208,20 +1212,20 @@ pub fn split_or_move_item_ex(
             }
         }
 
-        // Force-assign item owners for safety (the C# gives fromItem the *source* owner and the
-        // target item the *target* owner, wherever they ended up).
+        // Force-assign item owners for safety: an item belongs to the container that holds it
+        // after the move (the C# assigned the *source* owner to the moved source item and the
+        // *target* owner to the target item wherever they ended up).
         let s_owner = s.owner_id;
         let d_owner = d.as_deref().map_or(s_owner, |d| d.owner_id);
         let mut from_after = None;
         let mut target_after = None;
         if let Some(f) = &from_item {
-            let holder = if s.get_item_by_id(f.id).is_some() {
-                Some(&mut *s)
-            } else {
-                d.as_deref_mut()
-            };
-            if let Some(i) = holder.and_then(|h| h.get_item_by_id_mut(f.id)) {
+            if let Some(i) = s.get_item_by_id_mut(f.id) {
                 i.owner_id = u64::from(s_owner);
+                i.dirty = true;
+                from_after = Some(i.clone());
+            } else if let Some(i) = d.as_deref_mut().and_then(|h| h.get_item_by_id_mut(f.id)) {
+                i.owner_id = u64::from(d_owner);
                 i.dirty = true;
                 from_after = Some(i.clone());
             } else {
@@ -1230,12 +1234,11 @@ pub fn split_or_move_item_ex(
             }
         }
         if let Some(t) = &target_item {
-            let holder = if s.get_item_by_id(t.id).is_some() {
-                Some(&mut *s)
-            } else {
-                d.as_deref_mut()
-            };
-            if let Some(i) = holder.and_then(|h| h.get_item_by_id_mut(t.id)) {
+            if let Some(i) = s.get_item_by_id_mut(t.id) {
+                i.owner_id = u64::from(s_owner);
+                i.dirty = true;
+                target_after = Some(i.clone());
+            } else if let Some(i) = d.as_deref_mut().and_then(|h| h.get_item_by_id_mut(t.id)) {
                 i.owner_id = u64::from(d_owner);
                 i.dirty = true;
                 target_after = Some(i.clone());
@@ -1259,8 +1262,9 @@ pub fn split_or_move_item_ex(
                 dd.notify_enter(f, &mut txn.env.fx);
             }
             if let Some(t) = &target_after {
-                // C# passes fromSlot as the previous slot here too.
-                dd.notify_leave(t, from_slot, &mut txn.env.fx);
+                // The target item left its old slot in the target container (`fromSlot` is the
+                // slot it moved to in the source container, not its previous slot).
+                dd.notify_leave(t, to_slot, &mut txn.env.fx);
                 s.notify_enter(t, &mut txn.env.fx);
             }
         }
@@ -1385,8 +1389,18 @@ pub fn expand_slot(txn: &mut ItemTxn<'_>, player: &PlayerRef, inv: &Inv, st: u8)
         return;
     }
     if expand.price != 0 {
-        // `tasks.Add(new MoneyChange(-expand.Price))` is never sent in C#.
+        // `tasks.Add(new MoneyChange(-expand.Price))` was collected but never sent in C#; the
+        // client needs the change to update its displayed money.
         player.data().money -= i64::from(expand.price);
+        txn.env.fx.tasks(
+            player.character_id,
+            if is_bank {
+                task_type::EXPAND_BANK
+            } else {
+                task_type::EXPAND_BAG
+            },
+            vec![ItemTask::MoneyChange(-expand.price)],
+        );
     }
     if expand.item_id != 0 && expand.item_count != 0 {
         inv.bag().lock().expect("container poisoned").consume_item(

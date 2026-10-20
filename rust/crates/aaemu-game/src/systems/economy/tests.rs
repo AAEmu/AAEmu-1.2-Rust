@@ -7,9 +7,9 @@ use aaemu_commons::{Marshal, PacketStream};
 
 use crate::data::items::{bind_type, EquipTemplate, ItemTemplate, TemplateKind};
 use crate::data::GameData;
-use crate::models::container::{equip_slot, slot_type};
+use crate::models::container::{equip_slot, slot_type, ContainerKind, ItemContainer};
 use crate::models::item::{Item, ItemClass, ITEM_FLAG_SOUL_BOUND};
-use crate::models::item_task::{task_type, ItemTask};
+use crate::models::item_task::{task_type, ItemFx, ItemFxList, ItemTask};
 use crate::net::registry::ClientPacket;
 use crate::opcodes::sc;
 use crate::server::GameServer;
@@ -375,8 +375,9 @@ async fn split_merge_and_move_in_bag() {
     let src = item_at(&w.pa, 2, 0).unwrap();
     let new = item_at(&w.pa, 2, 1).unwrap();
     assert_eq!((src.count, new.count), (6, 4));
-    // The split item keeps owner 0 (C#: only fromItem / target get their owner re-assigned).
-    assert_eq!(new.owner_id, 0);
+    // The split item belongs to the bag it was created in (C# left it at owner 0, and the
+    // item could be lost on relogin).
+    assert_eq!(new.owner_id, 1);
     let frames = w.a.drain();
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].0, sc::SCItemTaskSuccessPacket);
@@ -438,6 +439,174 @@ async fn split_merge_and_move_in_bag() {
     let frames = w.a.drain();
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].0, sc::SCErrorMsgPacket);
+}
+
+#[test]
+fn merging_from_another_container_releases_the_stack() {
+    let game = test_data();
+    let data = &game.items;
+    let mut source = ItemContainer::new(ContainerKind::Item, 1, slot_type::INVENTORY, 100);
+    source.set_container_size(2);
+    let item = Item::create(3000, data.template(STACK).unwrap(), 5, 0, 1, data, 0);
+    assert!(source.add_new_item(item, 0, data).is_ok());
+
+    let mut target = ItemContainer::new(ContainerKind::Item, 1, slot_type::INVENTORY, 101);
+    target.set_container_size(2);
+    let first = Item::create(3001, data.template(STACK).unwrap(), 10, 0, 1, data, 0);
+    assert!(target.add_new_item(first, 0, data).is_ok());
+
+    let mut fx = ItemFxList::default();
+    assert!(target.move_item_from(&mut source, task_type::MAIL, 3000, 0, data, &mut fx));
+    assert_eq!(target.get_item_by_slot(0).unwrap().count, 15);
+    assert!(source.items.is_empty());
+    // The merged stack left every container: release its id / delete its row instead of
+    // keeping a loose item copy.
+    assert!(fx
+        .0
+        .iter()
+        .any(|e| matches!(e, ItemFx::ReleaseId(id) if *id == 3000)));
+    assert!(!fx.0.iter().any(|e| matches!(e, ItemFx::Orphaned(_))));
+}
+
+#[test]
+fn moving_an_item_into_mail_raises_the_consumed_event() {
+    let game = test_data();
+    let data = &game.items;
+    let mut bag = ItemContainer::new(ContainerKind::Item, 1, slot_type::INVENTORY, 100);
+    bag.set_container_size(2);
+    let item = Item::create(3000, data.template(STACK).unwrap(), 5, 0, 1, data, 0);
+    assert!(bag.add_new_item(item, 0, data).is_ok());
+
+    let mut mail = ItemContainer::new(ContainerKind::Item, 1, slot_type::MAIL, 101);
+    mail.set_container_size(10);
+    let mut fx = ItemFxList::default();
+    assert!(mail.move_item_from(&mut bag, task_type::MAIL, 3000, -1, data, &mut fx));
+    // Moving a bag item into the mail container consumes it (the C# read the overwritten
+    // slot type and raised no event).
+    assert_eq!(
+        fx.0.iter()
+            .filter(|e| matches!(
+                e,
+                ItemFx::Consumed {
+                    owner: 1,
+                    template_id: STACK,
+                    count: 5
+                }
+            ))
+            .count(),
+        1
+    );
+    assert!(!fx.0.iter().any(|e| matches!(e, ItemFx::Acquired { .. })));
+}
+
+#[tokio::test]
+async fn cross_owner_moves_assign_the_holding_container_owner() {
+    let w = world();
+    let alice = w.pa.clone();
+    let bob = w.pb.clone();
+    let alice_bag = Inv::of(&alice).bag();
+    let bob_bag = Inv::of(&bob).bag();
+    let id = give(&w, &alice, slot_type::INVENTORY, STACK, 10, 0);
+    {
+        let mut txn = ItemTxn::begin(&w.server);
+        assert!(inventory::split_or_move_item_ex(
+            &mut txn,
+            &Inv::of(&alice),
+            task_type::SWAP_ITEMS,
+            Some(alice_bag.clone()),
+            Some(bob_bag.clone()),
+            id,
+            slot_type::INVENTORY,
+            0,
+            0,
+            slot_type::INVENTORY,
+            0,
+            0,
+        ));
+    }
+    let moved = item_at(&bob, slot_type::INVENTORY, 0).unwrap();
+    assert_eq!(moved.owner_id, 2);
+    assert!(item_at(&alice, slot_type::INVENTORY, 0).is_none());
+
+    // A split from Bob's bag into Alice's bag creates Alice's item.
+    {
+        let mut txn = ItemTxn::begin(&w.server);
+        assert!(inventory::split_or_move_item_ex(
+            &mut txn,
+            &Inv::of(&bob),
+            task_type::SPLIT,
+            Some(bob_bag.clone()),
+            Some(alice_bag.clone()),
+            id,
+            slot_type::INVENTORY,
+            0,
+            0,
+            slot_type::INVENTORY,
+            0,
+            4,
+        ));
+    }
+    assert_eq!(item_at(&bob, slot_type::INVENTORY, 0).unwrap().owner_id, 2);
+    let split = item_at(&alice, slot_type::INVENTORY, 0).unwrap();
+    assert_eq!((split.count, split.owner_id), (4, 1));
+
+    // A swap between two owners' bags gives each item its new holder.
+    let alice_item = give(&w, &alice, slot_type::INVENTORY, STACK, 3, 1);
+    let bob_item = give(&w, &bob, slot_type::INVENTORY, SINGLE, 1, 1);
+    {
+        let mut txn = ItemTxn::begin(&w.server);
+        assert!(inventory::split_or_move_item_ex(
+            &mut txn,
+            &Inv::of(&alice),
+            task_type::SWAP_ITEMS,
+            Some(alice_bag),
+            Some(bob_bag),
+            alice_item,
+            slot_type::INVENTORY,
+            1,
+            bob_item,
+            slot_type::INVENTORY,
+            1,
+            0,
+        ));
+    }
+    let in_bob = item_at(&bob, slot_type::INVENTORY, 1).unwrap();
+    let in_alice = item_at(&alice, slot_type::INVENTORY, 1).unwrap();
+    assert_eq!((in_bob.id, in_bob.owner_id), (alice_item, 2));
+    assert_eq!((in_alice.id, in_alice.owner_id), (bob_item, 1));
+}
+
+#[tokio::test]
+async fn swapping_equipment_reports_the_equipment_slot_as_previous() {
+    let mut w = world();
+    let pa = w.pa.clone();
+    let bag_armor = give(&w, &pa, slot_type::INVENTORY, ARMOR, 1, 3);
+    let worn = give(&w, &pa, slot_type::EQUIPMENT, ARMOR, 1, equip_slot::CHEST);
+    w.a.drain();
+    w.b.drain();
+
+    let s = move_body(bag_armor, worn, 2, 3, 1, equip_slot::CHEST as u8);
+    run::<CSSwapItemsPacket>(&mut w, 0, s.as_bytes());
+    assert_eq!(
+        item_at(&pa, 1, equip_slot::CHEST as u8).unwrap().id,
+        bag_armor
+    );
+    assert_eq!(item_at(&pa, 2, 3).unwrap().id, worn);
+
+    // Both equipment events name the chest slot: the worn item entered it and the old item
+    // left it (the C# passed the source bag slot as its previous slot).
+    let slots: Vec<u8> =
+        w.b.drain()
+            .into_iter()
+            .filter(|(op, _)| *op == sc::SCUnitEquipmentsChangedPacket)
+            .map(|(_, body)| {
+                let mut r = PacketStream::from_bytes(body);
+                r.read_bc().unwrap();
+                assert_eq!(r.read_u8().unwrap(), 1);
+                r.read_u8().unwrap()
+            })
+            .collect();
+    assert_eq!(slots, vec![equip_slot::CHEST as u8; 2]);
 }
 
 #[tokio::test]
@@ -624,11 +793,12 @@ async fn deposit_and_withdraw_money() {
     let m2 = w.pa.data().money2;
     assert_eq!((m, m2), (350, 150));
     let f = w.a.drain();
-    // The withdraw keeps the default task type DepositMoney (C#).
+    // Withdraw reports its own task type (`ItemTaskType.WithdrawMoney`; the C# kept the
+    // default DepositMoney).
     assert_eq!(
         f[0].1,
         task_body(
-            task_type::DEPOSIT_MONEY,
+            task_type::WITHDRAW_MONEY,
             vec![ItemTask::MoneyChangeBank(-50), ItemTask::MoneyChange(50)]
         )
     );
@@ -741,8 +911,14 @@ async fn expand_bag_and_bank() {
     assert_eq!(w.pa.data().num_inventory_slots, 60);
     assert_eq!(Inv::of(&w.pa).bag().lock().unwrap().container_size(), 60);
     let f = w.a.drain();
-    assert_eq!(f[0].0, sc::SCInvenExpandedPacket);
-    assert_eq!(f[0].1, vec![2, 60]);
+    // The price is reported with the expand (the C# deducted it without sending the task).
+    assert_eq!(f.len(), 2);
+    assert_eq!(
+        f[0].1,
+        task_body(task_type::EXPAND_BAG, vec![ItemTask::MoneyChange(-100)])
+    );
+    assert_eq!(f[1].0, sc::SCInvenExpandedPacket);
+    assert_eq!(f[1].1, vec![2, 60]);
 
     // Bank needs 2 x STACK in the bag
     let mut s = PacketStream::new();

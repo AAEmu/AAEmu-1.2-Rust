@@ -1026,7 +1026,9 @@ async fn take_stacks_bag_full_and_single_item() {
         (1, vec![s2])
     );
     assert_eq!(m.header.status, mail_status::READ);
-    // The merged stack object is kept as a loose item (C# `_allItems`).
+    // The merged attachment is released: no loose copy, its row is queued for deletion.
+    assert!(w.server.items.item_by_id(s1).is_none());
+    assert!(w.server.items.removed_items().contains(&s1));
     // Now the single item: bag full.
     run::<CSTakeAllAttachmentItemPacket>(&mut w, 1, &id.to_le_bytes());
     let f = w.b.drain();
@@ -2340,6 +2342,7 @@ async fn private_mysql_quest_mail_auction_rollback_retry_and_reconnect() {
             &restarted.game_data.items,
             1,
             &restarted.ids.container,
+            &restarted.ids.item,
         )
         .await
         .unwrap();
