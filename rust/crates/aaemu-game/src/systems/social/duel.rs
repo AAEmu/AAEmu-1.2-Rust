@@ -43,8 +43,10 @@ pub const DISTANCE_FOR_SURRENDER: f32 = 75.0;
 pub const DUEL_DURATION: Duration = Duration::from_secs(5 * 60);
 /// `DuelStartTask` delay (3 s).
 pub const DUEL_START_DELAY: Duration = Duration::from_secs(3);
-/// Unanswered challenge timeout (10.x `DuelManager.RequestTimeout`, 30 s; the 1.2-era C# never
-/// released an ignored challenge).
+/// Unanswered challenge timeout. UNSOURCED: neither `compact.sqlite3` (no duel table; the only
+/// duel rows are `skill_reqs` 78 / `tags` 566 text) nor the 1.2-era C# (which never released an
+/// ignored challenge) carries a value. 30 s is the figure recalled from the 10.x `DuelManager`,
+/// whose source is not in this tree, so treat it as a tunable guess.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// `SCAreaChatBubblePacket` type of the duel start.
 pub const DUEL_AREA_BUBBLE_TYPE: u32 = 543;
@@ -135,6 +137,10 @@ pub struct DuelState {
     pub started: bool,
     /// `DuelAllowed` (only ever set to false).
     pub allowed: bool,
+    /// The pending challenge was resolved without a start (refused, expired, dropped or its
+    /// challenger died). With `started` it makes the pending -> started / released transition
+    /// single-owner: whoever flips one of the two flags under the state lock owns the follow-up.
+    pub released: bool,
 }
 
 /// `Duel`.
@@ -156,6 +162,19 @@ impl Duel {
             challenged,
             state: Mutex::new(DuelState::default()),
         }
+    }
+
+    /// Claims the release of a *pending* challenge: `true` for exactly one caller, and only while
+    /// the duel has neither started nor been released. The caller then owns the clean-up, so a
+    /// refuse, the request timeout and an accept racing each other cannot interleave
+    /// (a started duel is never cleaned up by a stale refuse / expiry).
+    fn claim_release(&self) -> bool {
+        let mut st = self.state();
+        if st.started || st.released {
+            return false;
+        }
+        st.released = true;
+        true
     }
 
     /// The duel's mutable members (leaf lock).
@@ -366,13 +385,9 @@ impl DuelManager {
     /// 10.x `DuelRequestExpired`: releases both sides of a challenge nobody answered (a started
     /// duel is left alone) and tells the challenger it was rejected.
     pub fn request_expired(&self, duel: &DuelRef, challenger_id: u32) {
-        if duel.state().started {
-            return;
-        }
-        let same = self
-            .get(challenger_id)
-            .is_some_and(|d| Arc::ptr_eq(&d, duel));
-        if !same {
+        // Decide and take ownership of the clean-up in one state transition: an accept that won
+        // the race makes this a no-op.
+        if !duel.claim_release() {
             return;
         }
         tracing::info!("DuelRequestExpired: challenger={challenger_id} went unanswered");
@@ -404,6 +419,15 @@ impl DuelManager {
             send_error(challenged, util::error::BAD_DUEL_TARGET);
             return;
         }
+        // A challenger who died after asking cannot duel: release the challenge instead.
+        if duel.challenger.data().unit.is_dead() {
+            if duel.claim_release() {
+                tracing::warn!("DuelAccepted: challenger {challenger_id} is dead");
+                send_error(challenged, util::error::BAD_DUEL_TARGET);
+                self.duel_clean_up(challenger_id);
+            }
+            return;
+        }
         {
             let mut st = duel.state();
             if st.started {
@@ -411,6 +435,14 @@ impl DuelManager {
                 tracing::warn!(
                     "DuelAccepted: Duel with challengerId = {challenger_id} is already started"
                 );
+                return;
+            }
+            if st.released {
+                drop(st);
+                tracing::warn!(
+                    "DuelAccepted: Duel with challengerId = {challenger_id} was already released"
+                );
+                send_error(challenged, util::error::BAD_DUEL_TARGET);
                 return;
             }
             st.started = true;
@@ -567,9 +599,9 @@ impl DuelManager {
             );
             return;
         }
-        if duel.state().started {
+        if !duel.claim_release() {
             tracing::warn!(
-                "DuelCancel: Duel with challengerId={challenger_id} already started, ignoring error={error_message}"
+                "DuelCancel: Duel with challengerId={challenger_id} already started or released, ignoring error={error_message}"
             );
             return;
         }
@@ -617,7 +649,14 @@ impl DuelManager {
             return;
         };
         let (a, b) = (duel.challenger.character_id, duel.challenged.character_id);
-        if !duel.state().started {
+        let started = {
+            let mut st = duel.state();
+            if !st.started {
+                st.released = true;
+            }
+            st.started
+        };
+        if !started {
             self.duel_clean_up(a);
             return;
         }

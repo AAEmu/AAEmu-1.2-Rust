@@ -898,3 +898,77 @@ async fn unanswered_challenge_expires() {
     f.challenge().await;
     assert!(f.duels().is_in_duel_with(1, 2));
 }
+
+/// A request timeout (or a refuse) that fires after the accept won must not tear the running
+/// duel down: the pending -> started transition is single-owner.
+#[tokio::test]
+async fn stale_request_timeout_after_accept_keeps_the_duel() {
+    let mut f = Fixture::new(true);
+    f.challenge().await;
+    let duel = f.duel();
+    f.answer(0).await;
+    f.a.drain();
+    f.b.drain();
+    // The expiry task raced the accept and runs afterwards.
+    f.duels().request_expired(&duel, 1);
+    assert!(f.duels().duel_of(1).unwrap().started);
+    assert!(f.pa.data().unit.is_in_duel && f.pb.data().unit.is_in_duel);
+    assert_eq!(f.pa.data().unit.faction_id, FACTION_RED_TEAM);
+    assert_eq!(f.pb.data().unit.faction_id, FACTION_BLUE_TEAM);
+    assert!(err_ids(&f.a.drain()).is_empty());
+    // It ends and cleans up through the normal path.
+    f.duels()
+        .duel_stop(&f.server, 1, duel_det_type::DRAW, 2)
+        .await;
+    assert_eq!(f.pa.data().unit.faction_id, 101);
+    assert_eq!(f.pb.data().unit.faction_id, 101);
+    assert!(f.duels().is_empty());
+}
+
+/// The reverse order: the expiry won, so a late accept finds a released challenge and neither
+/// starts a duel nor leaves flags / factions behind.
+#[tokio::test]
+async fn accept_after_the_request_expired_is_refused() {
+    let mut f = Fixture::new(true);
+    f.challenge().await;
+    let duel = f.duel();
+    f.duels().request_expired(&duel, 1);
+    assert!(f.duels().is_empty());
+    f.a.drain();
+    f.b.drain();
+    f.answer(0).await;
+    assert!(f.duels().is_empty());
+    assert_eq!(f.pa.data().unit.faction_id, 101);
+    assert!(!f.pa.data().unit.is_in_duel);
+    // A held reference to the released duel is refused as well.
+    f.duels().duel_accepted(&f.server, &f.pb, 1).await;
+    assert!(!duel.state().started);
+    assert!(!f.pb.data().unit.is_in_duel);
+}
+
+/// A refuse after the expiry released the challenge does not clean up twice.
+#[tokio::test]
+async fn refuse_after_the_request_expired_is_ignored() {
+    let mut f = Fixture::new(true);
+    f.challenge().await;
+    let duel = f.duel();
+    f.duels().request_expired(&duel, 1);
+    f.a.drain();
+    f.duels().duel_cancel(&f.server, &f.pb, 1, 507);
+    assert!(err_ids(&f.a.drain()).is_empty());
+}
+
+/// A challenger who died after asking cannot be dueled: the accept releases the challenge.
+#[tokio::test]
+async fn accept_with_a_dead_challenger_is_refused() {
+    let mut f = Fixture::new(true);
+    f.challenge().await;
+    f.b.drain();
+    f.pa.data().unit.hp = 0;
+    f.answer(0).await;
+    assert_eq!(err_ids(&f.b.drain()), vec![util::error::BAD_DUEL_TARGET]);
+    assert!(f.duels().is_empty());
+    assert_eq!(f.pa.data().unit.faction_id, 101);
+    assert_eq!(f.pb.data().unit.faction_id, 101);
+    assert!(!f.pa.data().unit.is_in_duel && !f.pb.data().unit.is_in_duel);
+}
