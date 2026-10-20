@@ -849,7 +849,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   scans the Reward component for act type 0x18 / 0x19 and falls back to `quest_supplies`
   only when the act is absent, and the Oct–Dec 2014 archeagedatabase.net export shows
   exactly the act value on 103 quests and the level supply on 897 others (quest 2785
-  level 35: 8,400, not 8,400 + 3,224; quest 1213: 110, not 110 + 420). Open suspect: the
+  level 35: 8,400, not 8,400 + 3,224; quest 1213: 110, not 110 + 420). In `compact.sqlite3`
+  917 of the 1,569 quests with such an act give exp 0 and copper 0 through it, 376 of them in
+  `quest_categories` 79 ("탐험", exploration; all 402 quests of the category are level 50, and
+  377 carry the acts): the act is what makes them pay nothing, and the C# sum would hand each of
+  them the full level-50 `quest_supplies` exp / copper on top. Open suspect: the
   client decompile also scales the level supply by `quest_contexts.degree` (x0.5..x1.5),
   but the 2014 site shows unscaled values for all 221 non-degree-3 quests; degree scaling
   is not implemented until that conflict is resolved.

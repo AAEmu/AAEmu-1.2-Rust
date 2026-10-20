@@ -967,7 +967,9 @@ impl<'a> Ctx<'a> {
         // Retail 1.2 replaces the level based supply with the Reward component's own
         // `QuestActSupplyExp` / `QuestActSupplyCopper` act instead of adding both (the client's
         // `X2Quest.GetQuestContextRewardExp` scans the Reward component and falls back to
-        // `quest_supplies` only when the act is absent; see PORTING.md).
+        // `quest_supplies` only when the act is absent; see PORTING.md). Data point: 376
+        // category 79 (exploration, level 50) quests carry a Reward act with exp 0 / copper 0
+        // and would otherwise be paid the full level supply.
         let (reward_exp_act, reward_copper_act) = data
             .template(template_id)
             .map(|t| {
