@@ -2316,3 +2316,18 @@ two bots before the fix (a foreign `Mount` caster, an NPC-only skill and a far d
   (`np_skills`) are deliberately absent. Possible over-blocking: a skill the 1.2 client casts that
   none of these tables names (the retail rule is not confirmed); such a cast is refused with a
   warning naming the skill id, so it is easy to add the table.
+
+## Ship repair timer and destroyed-vehicle HP (2026-10-20)
+
+Deviations from the 1.2 C# `Slave.DoDie` / `SlaveManager.Create` (the check already existed, but
+the death never started its timer):
+
+- `Slave.MarkSummoningItemAsDestroyed` wrote `RepairStartTime = DateTime.MinValue`, so the
+  `RepairStartTime.AddMinutes(10) - UtcNow` check in `Create` was always negative and a destroyed
+  vehicle could be summoned again immediately. The death now stores the destruction time in the
+  `SummonSlave` item, which starts the intended 10 minute wait; a successful summon after it
+  clears the timer (the destroyed flag stays until `RepairSlaveEffect` clears it, as in C#).
+- The C# reset of a loaded 0-HP vehicle to `MaxHp` ("can't summon with 0 HP") is kept, but only
+  when the item has no pending repair time. With the timer above, a destroyed vehicle therefore
+  comes back at full HP only after its repair wait, not when it is still on cooldown. (As the
+  mirrored `SummonSlave.ReadDetails` bug above notes, the timer itself is still lost on restart.)
