@@ -665,6 +665,37 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 
 ## Known deviations from the C#
 
+* systems::skills / systems::npcs (`Interaction` special effect 10): the former C# class was a
+  TODO stub. The 1.2 `special_effects` rows put a `WorldInteractionType` in `value1` (row 11030:
+  19 `Use`, 36: 10 `DigTerrain`, 215: 29 `SummonBeanstalk`) and an optional doodad id in
+  `value2`. The effect now runs the same authored interaction classes as `InteractionEffect`
+  through `npcs::bridges::interaction_effect`; values without a 1.2 class (10, 14, 29) log
+  "unknown world interaction" exactly like the template path.
+* systems::skills (`GetSiegeTicket` special effect 64): row 5583 (values 0) is the only row,
+  on skill 16975. It grants one `defense_ticket_id` from the `siege_zones` row of the caster's
+  zone group (zone id -> `zones.group_id`). Holding that zone's `offense_ticket_id` sends
+  `SIEGE_ONLY_DEFENSE_OR_OFFENSE_TICKET_AT_ONCE` (463) and grants nothing; a caster zone
+  without a siege row logs and grants nothing.
+* systems::housing / systems::social (`StartDominionNonPvpDuration` special effect 110): row
+  14465 carries `value1` 120 (minutes) on skill 23992 "Dominion peace". The start and the
+  authored duration are persisted on `dominions` (`non_pvp_start_at`, `non_pvp_duration_min`;
+  update `2026-10-20_aaemu_game_dominion_non_pvp.sql`) and sent in `SCDominionData`. The
+  handler requires the live owned territory at the caster and its current expedition leader;
+  a second cast while the window is active sends `ALREADY_IN_NON_PVP_DURATION` (759). The
+  skill's 4-hour reuse cooldown and five reagent crystals remain the skill system's job.
+* systems::vehicles (`DestroyAndSpawnSlave` special effect 72): row 8224 (values 0) is the only
+  row, on skill 19165, carried by slave template 125's mount skill. A spawner-backed slave is
+  removed through its `SlaveSpawner` (`Despawn` broadcasts the removal and releases the slot)
+  and the spawner creates the replacement at its authored transform; a slave without a
+  spawner is destroyed and logged, with nothing respawned.
+* systems::skills (`SextantPos` special effect 69): row 7181 (values 0) is the only row, on
+  skill 18416 "measure my current position" (item 24795 Sextant). The caster receives a system
+  chat message with the world position. No authored system-message coordinate format exists in
+  the 1.2 `ui_texts` / `localized_texts` data (only the treasure-map item descriptions), so the
+  current text is the placeholder `X: {x}, Y: {y}` and needs in-game verification.
+* systems::skills (`NotifyQuest` 70 / `DeclareIndependence` 71): left log-only. `NotifyQuest`
+  already fires from `plots::finish_item_plot` (a second event would double-count the quest
+  objective); `DeclareIndependence` has no faction ownership runtime in 1.2.
 * systems::services / systems::vehicles (mount speed analysis): `SusManager` samples the
   driver's (or owner's) `teleport_seq` and `disabled_set_position` for mates, and successful
   ride / unride operations reset the mate baseline. C# `SusManager` / `CharacterMates` did
