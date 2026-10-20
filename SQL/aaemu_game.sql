@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS `accounts` (
   `last_loyalty_tick` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `divine_clock_time` INT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Time that has been passed already',
   `divine_clock_taken` INT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Number of clicks taken today',
+  `extra_character_slots` TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Purchased character slots beyond the base account slots',
   PRIMARY KEY (`account_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='Account specific values not related to login';
 
@@ -38,6 +39,16 @@ CREATE TABLE IF NOT EXISTS `accounts` (
 CREATE TRIGGER IF NOT EXISTS update_timestamps BEFORE UPDATE ON accounts
 FOR EACH ROW
    SET NEW.last_updated = UTC_TIMESTAMP();
+
+
+CREATE TABLE IF NOT EXISTS `account_attributes` (
+  `account_id` INT UNSIGNED NOT NULL,
+  `kind_id` INT NOT NULL,
+  `world_id` INT NOT NULL DEFAULT 0,
+  `count` INT NOT NULL DEFAULT 0,
+  `end_time` DATETIME NULL DEFAULT NULL COMMENT 'UTC; NULL = permanent',
+  PRIMARY KEY (`account_id`, `kind_id`, `world_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Account-wide attributes (auction post authority, ...)';
 
 
 CREATE TABLE IF NOT EXISTS `actabilities` (

@@ -14,6 +14,7 @@
 //! * [`hooks`] — what the economy needs from other subsystems (quests, gear bonuses, NPC shop
 //!   flags, slaves / mates); installed into `server.systems.economy.hooks` by their owners.
 
+pub mod account_attributes;
 pub mod auction;
 pub mod auction_data;
 pub mod auction_packets;
@@ -23,6 +24,7 @@ pub mod bridges;
 pub mod cash_shop;
 #[cfg(test)]
 mod cash_shop_tests;
+pub mod character_slots;
 pub mod craft;
 pub mod craft_data;
 #[cfg(test)]
@@ -86,6 +88,8 @@ pub struct System {
     ops: Mutex<()>,
     /// `Inventory.PreviousBackPackItemId` by character id (glider re-equip after a trade pack).
     previous_backpack: Mutex<HashMap<u32, u64>>,
+    /// Account-wide attributes (`account_attributes`, auction posting authority, ...).
+    pub account_attributes: account_attributes::AccountAttributes,
     /// `AuctionManager`.
     pub auction: auction::AuctionManager,
     /// `TradeManager`.
