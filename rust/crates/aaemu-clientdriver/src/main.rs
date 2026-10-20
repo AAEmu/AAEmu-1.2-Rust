@@ -14,16 +14,23 @@
 //! finds `aadriver.dll` next to the executable, under `--dll`, or at `$AADRIVER_DLL`.
 //! See `docs/client/LUA-DRIVER.md`.
 
+#[cfg(windows)]
 use std::io::{BufRead, Write};
+#[cfg(windows)]
 use std::path::PathBuf;
+#[cfg(windows)]
 use std::time::Duration;
 
+#[cfg(windows)]
 use aaemu_clientdriver::{Reply, Request, Target};
-use anyhow::{bail, Context};
+use anyhow::bail;
+#[cfg(windows)]
+use anyhow::Context;
 
 #[cfg(windows)]
 use aaemu_clientdriver::win::{find_clients, inject, is_driver_loaded, Driver};
 
+#[cfg(windows)]
 struct Args {
     cmd: String,
     pid: Option<u32>,
@@ -32,6 +39,7 @@ struct Args {
     rest: Vec<String>,
 }
 
+#[cfg(windows)]
 fn parse() -> anyhow::Result<Args> {
     let mut a = Args {
         cmd: String::new(),
@@ -61,6 +69,7 @@ fn parse() -> anyhow::Result<Args> {
 }
 
 /// The Lua / exec code: the positional args joined, or stdin when it is `-` or empty.
+#[cfg(windows)]
 fn code(a: &Args) -> anyhow::Result<String> {
     use std::io::Read;
     if a.rest.is_empty() || a.rest == ["-"] {
@@ -111,6 +120,7 @@ fn driver_dll(a: &Args) -> anyhow::Result<PathBuf> {
     bail!("aadriver.dll not found next to the exe; pass --dll PATH or set AADRIVER_DLL")
 }
 
+#[cfg(windows)]
 fn print_reply(r: Reply) -> anyhow::Result<()> {
     match r {
         Reply::Ok(s) => {
