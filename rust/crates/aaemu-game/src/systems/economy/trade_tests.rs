@@ -904,10 +904,7 @@ async fn soul_bound_putup_cancels_the_trade() {
         .write_bool(true);
     assert_eq!(
         w.a.drain(),
-        vec![
-            (sc::SCErrorMsgPacket, err.into_bytes()),
-            canceled(0, true)
-        ]
+        vec![(sc::SCErrorMsgPacket, err.into_bytes()), canceled(0, true)]
     );
     assert_eq!(w.b.drain(), vec![canceled(0, false)]);
     assert!(w.server.systems.economy.trade.trades().is_empty());

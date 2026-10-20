@@ -1565,7 +1565,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   and `update_auction_house` retries the still-missing mails on its next tick, remembering which
   ones are already out so nothing is delivered twice. The queue is in memory: a restart inside
   the retry window loses a pending outbid refund, and a pending sale that has not reached its
-  `end_time` reverts to the lot's saved bidder fields.
+  `end_time` reverts to the lot's saved bidder fields. A restart while a lot is partially settled
+  re-settles the whole lot, so a mail that was already sent (e.g. the seller's payment) can be
+  sent again. A settlement whose mail is refused `MAX_SETTLEMENT_RETRIES` (720, one hour of 5 s
+  ticks) times, e.g. for a deleted receiver, is logged at error level and dropped, and its lot
+  is then removed.
 
 ### Ranking boards (Rust only)
 

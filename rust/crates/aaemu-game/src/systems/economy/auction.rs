@@ -451,6 +451,10 @@ pub(crate) struct AuctionSaveBatch {
     dirty: Vec<AuctionLot>,
 }
 
+/// Retries (one per auction tick, every 5 s) before a settlement whose mail can never be delivered
+/// (e.g. the receiver character was deleted) is given up: one hour.
+pub(crate) const MAX_SETTLEMENT_RETRIES: u32 = 720;
+
 /// A settlement whose mails are not all out yet. The lot stays in `lots` until every mail of a
 /// lot-removing settlement (`sold` / `fail` / `cancel`) has been delivered; refund-only entries
 /// (`remove_lot == false`) let the lot continue while the outbid money is retried.
@@ -461,6 +465,8 @@ struct PendingSettlement {
     /// Buyer of a completed sale (the achievement credit runs once, when the mails are out).
     buyer_id: Option<u32>,
     mails: Vec<PendingAuctionMail>,
+    /// Failed retries by `update_auction_house` so far (bounded by `MAX_SETTLEMENT_RETRIES`).
+    retries: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -656,9 +662,31 @@ impl AuctionManager {
                 lot: lot.clone(),
                 remove_lot: false,
                 buyer_id: None,
+                retries: 0,
                 mails: vec![PendingAuctionMail { mail, sent: false }],
             },
         );
+    }
+
+    /// Gives up a settlement whose mail was refused `MAX_SETTLEMENT_RETRIES` times: the unsent
+    /// mails are lost, but a lot-removing settlement no longer keeps its lot alive forever.
+    fn abandon_settlement(&self, server: &GameServer, settlement: &PendingSettlement) {
+        let unsent: Vec<&AuctionMail> = settlement
+            .mails
+            .iter()
+            .filter(|m| !m.sent)
+            .map(|m| &m.mail)
+            .collect();
+        tracing::error!(
+            "Auction lot {}: giving up the settlement after {} failed mail retries (seller {},              remove lot {}); undelivered mails dropped: {unsent:?}",
+            settlement.lot.id,
+            settlement.retries,
+            settlement.lot.client_id,
+            settlement.remove_lot
+        );
+        if settlement.remove_lot {
+            self.remove_auction_lot(server, settlement.lot.id);
+        }
     }
 
     /// Retries the settlements whose mails failed (`AuctionHouseTask`).
@@ -669,7 +697,12 @@ impl AuctionManager {
             if self.deliver_settlement(server, &mut settlement) {
                 self.complete_settlement(server, &settlement);
             } else {
-                failed.push(settlement);
+                settlement.retries += 1;
+                if settlement.retries >= MAX_SETTLEMENT_RETRIES {
+                    self.abandon_settlement(server, &settlement);
+                } else {
+                    failed.push(settlement);
+                }
             }
         }
         self.pending
@@ -786,6 +819,7 @@ impl AuctionManager {
                 lot: lot.clone(),
                 remove_lot: true,
                 buyer_id: Some(buyer_id),
+                retries: 0,
                 mails: mails
                     .into_iter()
                     .map(|mail| PendingAuctionMail { mail, sent: false })
@@ -824,6 +858,7 @@ impl AuctionManager {
                 lot: lot.clone(),
                 remove_lot: true,
                 buyer_id: None,
+                retries: 0,
                 mails: vec![PendingAuctionMail {
                     mail: AuctionMail::Fail {
                         item: new_item,
@@ -869,6 +904,7 @@ impl AuctionManager {
                     lot: lot.clone(),
                     remove_lot: true,
                     buyer_id: None,
+                    retries: 0,
                     mails: vec![PendingAuctionMail {
                         mail: AuctionMail::Cancel {
                             item: new_item,

@@ -1023,6 +1023,32 @@ async fn failed_sale_mail_keeps_the_lot_and_settles_once_on_retry() {
     assert_eq!(ah.deleted_ids(), vec![lot.id]);
 }
 
+/// A mail that can never be delivered (e.g. a deleted receiver) must not keep the lot alive
+/// forever: after `MAX_SETTLEMENT_RETRIES` failed ticks the settlement is dropped and the lot
+/// removed.
+#[tokio::test]
+async fn undeliverable_settlement_is_given_up_after_bounded_retries() {
+    let (mut w, log) = flaky_world();
+    let (_item_id, lot) = post(&mut w, SWORD, 0, 1000, 1);
+    run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 1000));
+    let ah = &w.server.systems.economy.auction;
+    assert!(ah.lot(lot.id).is_some());
+
+    for _ in 0..MAX_SETTLEMENT_RETRIES - 1 {
+        ah.update_auction_house(&w.server, Utc::now());
+        assert!(ah.lot(lot.id).is_some(), "still retrying");
+    }
+    ah.update_auction_house(&w.server, Utc::now());
+    assert!(ah.lot(lot.id).is_none(), "the lot is removed when given up");
+    assert_eq!(ah.deleted_ids(), vec![lot.id]);
+    assert!(log.delivered.lock().unwrap().is_empty());
+
+    // Nothing is retried afterwards.
+    let attempts = log.attempts.lock().unwrap().len();
+    ah.update_auction_house(&w.server, Utc::now());
+    assert_eq!(log.attempts.lock().unwrap().len(), attempts);
+}
+
 /// A settlement that already delivered the seller's mail must only retry the buyer's.
 #[tokio::test]
 async fn sale_retry_sends_only_the_mail_that_failed() {
