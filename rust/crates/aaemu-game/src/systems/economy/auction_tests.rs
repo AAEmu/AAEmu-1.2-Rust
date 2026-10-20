@@ -16,7 +16,9 @@ use crate::server::GameServer;
 use crate::systems::economy::auction::*;
 use crate::systems::economy::auction_packets::*;
 use crate::systems::economy::inventory::Inv;
-use crate::systems::economy::tests::{give, run, task_body, test_data, World};
+use crate::systems::economy::tests::{
+    give, run, spawn_service_npc, task_body, test_data, World, AUCTIONEER_TEMPLATE,
+};
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
 use crate::world::PlayerRef;
 
@@ -86,16 +88,16 @@ fn auction_world() -> (World, Arc<MailLog>) {
     b.drain();
     let log = Arc::new(MailLog::default());
     server.systems.economy.auction.mail.install(log.clone());
-    (
-        World {
-            server,
-            a,
-            pa,
-            b,
-            pb,
-        },
-        log,
-    )
+    let mut w = World {
+        server,
+        a,
+        pa,
+        b,
+        pb,
+    };
+    // The packet bodies name the auctioneer NPC 0x200.
+    spawn_service_npc(&mut w, 0x200, AUCTIONEER_TEMPLATE, 102.0);
+    (w, log)
 }
 
 fn money(p: &PlayerRef) -> i64 {
@@ -710,7 +712,7 @@ async fn bid_outbid_buyout_moves_money_and_mails() {
 
     // My bid list.
     let mut s = PacketStream::new();
-    s.write_bc(0).write_bc(0).write_i32(0);
+    s.write_bc(0x200).write_bc(0x200).write_i32(0);
     run::<CSAuctionMyBidListPacket>(&mut w, 1, s.as_bytes());
     let frames = w.b.drain();
     let mut want = PacketStream::new();
@@ -959,7 +961,10 @@ async fn lowest_price_reports_cheapest_buyout() {
     post(&mut w, POTION, 1, 200, 0);
     post(&mut w, SWORD, 2, 100, 0);
     let mut s = PacketStream::new();
-    s.write_bc(0).write_bc(0).write_u32(POTION).write_u8(3);
+    s.write_bc(0x200)
+        .write_bc(0x200)
+        .write_u32(POTION)
+        .write_u8(3);
     run::<CSAuctionLowestPricePacket>(&mut w, 1, s.as_bytes());
     let frames = w.b.drain();
     assert_eq!(frames[0].0, sc::SCAuctionLowestPricePacket);
@@ -968,7 +973,7 @@ async fn lowest_price_reports_cheapest_buyout() {
     assert_eq!(frames[0].1, want.into_bytes());
 
     let mut s = PacketStream::new();
-    s.write_bc(0).write_bc(0).write_u32(999).write_u8(0);
+    s.write_bc(0x200).write_bc(0x200).write_u32(999).write_u8(0);
     run::<CSAuctionLowestPricePacket>(&mut w, 1, s.as_bytes());
     let mut want = PacketStream::new();
     want.write_u32(999).write_u8(0).write_i32(0);
@@ -979,7 +984,7 @@ async fn lowest_price_reports_cheapest_buyout() {
 async fn empty_bid_list_sends_page_zero() {
     let (mut w, _log) = auction_world();
     let mut s = PacketStream::new();
-    s.write_bc(0).write_bc(0).write_i32(4);
+    s.write_bc(0x200).write_bc(0x200).write_i32(4);
     run::<CSAuctionMyBidListPacket>(&mut w, 1, s.as_bytes());
     let frames = w.b.drain();
     let b = &frames[0].1;
@@ -1164,4 +1169,34 @@ async fn outbid_refund_mail_can_be_taken_all_and_deleted() {
         )
     });
     assert_eq!(ran, (100_000, false), "refund paid back, mail deleted");
+}
+
+#[tokio::test]
+async fn auction_requires_an_auctioneer_in_range() {
+    let (mut w, _log) = auction_world();
+    let pa = w.pa.clone();
+    let item_id = give(&w, &pa, slot_type::INVENTORY, POTION, 1, 0);
+    // Wrong NPC id (no such NPC): refused with the auctioneer-too-far error.
+    let mut s = PacketStream::new();
+    s.write_bc(0x999)
+        .write_bc(0x999)
+        .write_u64(item_id)
+        .write_i32(0)
+        .write_i32(1000)
+        .write_u8(1);
+    w.a.drain();
+    run::<CSAuctionPostPacket>(&mut w, 0, s.as_bytes());
+    assert!(w.server.systems.economy.auction.all_lots().is_empty());
+    let f = w.a.drain();
+    assert_eq!(f.len(), 1);
+    assert_eq!(f[0].0, sc::SCErrorMsgPacket);
+    // The real auctioneer works; moved out of range it does not.
+    run::<CSAuctionPostPacket>(&mut w, 0, &post_body(item_id, 0, 1000, 1));
+    assert_eq!(w.server.systems.economy.auction.all_lots().len(), 1);
+    pa.data().unit.transform.set_xyz(200.0, 100.0, 100.0);
+    w.a.drain();
+    run::<CSAuctionSearchPacket>(&mut w, 0, &search_body(&AuctionSearch::default()));
+    let f = w.a.drain();
+    assert_eq!(f.len(), 1);
+    assert_eq!(f[0].0, sc::SCErrorMsgPacket);
 }

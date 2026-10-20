@@ -134,6 +134,46 @@ pub fn world() -> World {
     }
 }
 
+/// NPC templates of the bank / auction service tests.
+pub const BANKER_TEMPLATE: u32 = 7001;
+pub const AUCTIONEER_TEMPLATE: u32 = 7002;
+
+struct ServiceNpcs;
+impl crate::systems::economy::hooks::NpcEconomyHooks for ServiceNpcs {
+    fn shop_info(
+        &self,
+        _server: &GameServer,
+        npc: &crate::world::NpcRef,
+    ) -> Option<crate::systems::economy::hooks::NpcShopInfo> {
+        let t = npc.data().unit.template_id;
+        Some(crate::systems::economy::hooks::NpcShopInfo {
+            banker: t == BANKER_TEMPLATE,
+            auctioneer: t == AUCTIONEER_TEMPLATE,
+            ..Default::default()
+        })
+    }
+}
+
+/// Installs the service-NPC hooks and spawns an NPC of `template` at `x` (players stand at 100).
+pub fn spawn_service_npc(w: &mut World, obj_id: u32, template: u32, x: f32) {
+    w.server
+        .systems
+        .economy
+        .hooks
+        .npcs
+        .install(Arc::new(ServiceNpcs));
+    let mut n = crate::models::npc::Npc::new(template);
+    n.unit.transform.set_xyz(x, 100.0, 100.0);
+    let n = crate::world::Entity::new(obj_id, n);
+    w.server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&n, &w.server.view_ctx());
+    w.a.drain();
+    w.b.drain();
+}
+
 /// Puts a new item of `template` x `count` into `st` at `slot` (no packets).
 pub fn give(w: &World, p: &PlayerRef, st: u8, template: u32, count: i32, slot: i32) -> u64 {
     let inv = Inv::of(p);
@@ -785,6 +825,8 @@ async fn destroy_raises_consumed_events() {
 #[tokio::test]
 async fn deposit_and_withdraw_money() {
     let mut w = world();
+    spawn_service_npc(&mut w, 0x300, BANKER_TEMPLATE, 101.0);
+    w.pa.data().unit.current_interaction_object = 0x300;
     w.pa.data().money = 500;
     let mut s = PacketStream::new();
     s.write_i32(200).write_i32(0);
@@ -822,6 +864,53 @@ async fn deposit_and_withdraw_money() {
             vec![ItemTask::MoneyChangeBank(-50), ItemTask::MoneyChange(50)]
         )
     );
+}
+
+#[tokio::test]
+async fn bank_refuses_non_positive_amounts_and_missing_banker() {
+    let mut w = world();
+    w.pa.data().money = 500;
+    w.pa.data().money2 = 100;
+    let mut body = PacketStream::new();
+    body.write_i32(-1000).write_i32(0);
+    let neg = body.into_bytes();
+    let mut body = PacketStream::new();
+    body.write_i32(0).write_i32(0);
+    let zero = body.into_bytes();
+    let mut body = PacketStream::new();
+    body.write_i32(50).write_i32(0);
+    let fifty = body.into_bytes();
+
+    // No interaction at all: even a sane amount is refused (error to the client).
+    run::<CSDepositMoneyPacket>(&mut w, 0, &fifty);
+    run::<CSWithdrawMoneyPacket>(&mut w, 0, &fifty);
+    {
+        let c = w.pa.data();
+        assert_eq!((c.money, c.money2), (500, 100));
+    }
+    assert_eq!(w.a.drain().len(), 2);
+
+    // At a banker, non-positive amounts are refused silently (no packet, no change).
+    spawn_service_npc(&mut w, 0x300, BANKER_TEMPLATE, 101.0);
+    w.pa.data().unit.current_interaction_object = 0x300;
+    for body in [&neg, &zero] {
+        run::<CSDepositMoneyPacket>(&mut w, 0, body);
+        run::<CSWithdrawMoneyPacket>(&mut w, 0, body);
+    }
+    {
+        let c = w.pa.data();
+        assert_eq!((c.money, c.money2), (500, 100));
+    }
+    assert!(w.a.drain().is_empty());
+
+    // Out of range of the banker: refused.
+    spawn_service_npc(&mut w, 0x301, BANKER_TEMPLATE, 150.0);
+    w.pa.data().unit.current_interaction_object = 0x301;
+    run::<CSDepositMoneyPacket>(&mut w, 0, &fifty);
+    {
+        let c = w.pa.data();
+        assert_eq!((c.money, c.money2), (500, 100));
+    }
 }
 
 #[tokio::test]
