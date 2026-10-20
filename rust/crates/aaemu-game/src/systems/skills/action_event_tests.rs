@@ -1379,6 +1379,64 @@ async fn move_to_ground_lands_a_position_target_on_the_floor() {
 }
 
 #[tokio::test]
+async fn move_to_ground_measures_the_caps_at_the_selected_positions_height() {
+    use std::collections::HashMap;
+
+    use aaemu_commons::PacketStream;
+
+    use crate::models::transform::PositionAndRotation;
+    use crate::systems::ai::collision::terrain::tests::Plane;
+
+    use super::geometry::PosUnit;
+
+    let (server, mut client, player, _npc) = fixture(GameData::empty());
+    server
+        .systems
+        .ai
+        .collision
+        .test_files
+        .set(Arc::new(HashMap::new()))
+        .unwrap();
+    server
+        .systems
+        .ai
+        .collision
+        .test_terrain
+        .set(Arc::new(Plane {
+            a: 100.0,
+            b: 0.0,
+            c: 0.0,
+            n: 1024,
+        }))
+        .unwrap_or_else(|_| panic!("terrain"));
+    // The caster stands 30 m above the plane (beyond the 12 m drop cap), but the selected
+    // position is 0.8 m above it: the caps are measured at the destination, so it lands.
+    player.data().unit.transform.set_xyz(100.0, 100.0, 130.0);
+    let owner = WorldObject::from(&player);
+    let mut effect_args = args(&owner, &owner);
+    effect_args.target = Target::Pos(PosUnit {
+        instance_id: 0,
+        zone_id: 100,
+        pos: PositionAndRotation::new(130.0, 140.0, 100.8, 0.0, 0.0, 0.0),
+    });
+    execute(&server, 73, &effect_args, [0; 4]);
+    let body = client
+        .drain()
+        .into_iter()
+        .find(|(op, _)| *op == crate::opcodes::sc::SCBlinkUnitPacket)
+        .expect("blink packet")
+        .1;
+    let mut s = PacketStream::from_bytes(body);
+    assert_eq!(s.read_bc().unwrap(), player.obj_id);
+    s.read_f32().unwrap();
+    s.read_f32().unwrap();
+    s.read_i64().unwrap();
+    s.read_i64().unwrap();
+    let z = s.read_f32().unwrap();
+    assert!((z - 100.4).abs() < 0.01, "z {z}");
+}
+
+#[tokio::test]
 async fn redeem_buff_removes_one_beneficial_effect_and_restores_mana() {
     let mut data = GameData::empty();
     data.systems.skills.add_buff(buff(1));

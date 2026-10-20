@@ -379,10 +379,12 @@ pub fn move_to_ground(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         return;
     };
     let current = world_pos(server, &Target::Obj(caster.clone()));
-    // The raw Z is the selected position's own height, so the lift / drop caps measure the gap at
-    // the destination, not the caster's height elsewhere.
+    // The raw Z is the selected position's own height when the cast carries one, so the lift /
+    // drop caps measure the gap at the destination; a position without a height (0) falls back
+    // to the caster's Z rather than dropping the unit to sea level.
     let (x, y, raw_z) = match &args.target {
-        Target::Pos(p) => (p.pos.x, p.pos.y, p.pos.z),
+        Target::Pos(p) if p.pos.z > 0.0 => (p.pos.x, p.pos.y, p.pos.z),
+        Target::Pos(p) => (p.pos.x, p.pos.y, current.z),
         Target::Obj(_) => (current.x, current.y, current.z),
     };
     let instance_id = caster.transform().instance_id;
