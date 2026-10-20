@@ -334,6 +334,7 @@ pub fn execute(server: &GameServer, kind: i32, args: &EffectArgs<'_>, values: [i
         59 => combat::cancel_stealth(s, a, v),
         60 => misc::spawn_slave(s, a, v),
         61 => unit_actions::cancel_ongoing_buff(s, a, v),
+        64 => items::get_siege_ticket(s, a, v),
         66 => combat::auto_attack(s, a, v),
         68 => items::apply_reagents(s, a, v),
         74 => movement::escape(s, a, v),
