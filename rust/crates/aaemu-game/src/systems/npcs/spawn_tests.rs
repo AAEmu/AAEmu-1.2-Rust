@@ -2904,11 +2904,15 @@ async fn real_data_mistfiend_cave_activation_and_respawn() {
     drop(_p);
 }
 
-/// The shipped 1.2 Ronbann Mine NPCs (east and west sub-zones of Lilyut Hills) must sit on the
-/// mine floor with the rest of the mine content: the 1.2 doodads (ore veins, bomb crates,
-/// ladders, lanterns) and both `Respawn: ... Ronbann Mine` portals are at Z ~280-310, and the
-/// 10.x editor places the same spawner ids there. A height regression left most of them 100-190 m
-/// above the floor (and the recent quest-NPC imports on it), which made the mines look empty.
+/// The shipped 1.2 Ronbann Mine NPCs (east and west sub-zones of Lilyut Hills) and the middle
+/// cave section between them must sit on their floor with the rest of the content: the 1.2
+/// doodads (ore veins, bomb crates, ladders, lanterns), both `Respawn: ... Ronbann Mine` portals
+/// and the middle cave's quest sign / Duke's secret safe place the floor at Z ~280-310 (east and
+/// west) and Z ~336-372 (middle), and the 10.x editor places the same spawner ids there. A height
+/// regression left most of them 100-190 m above the floor (and the recent quest-NPC imports on it),
+/// which made the mines look empty; the middle section (cave spiders, their Spider Lord, the
+/// blood-drinking warrior and Lord Colin's henchman Louie at the secret safe) was missed by the
+/// first fix because its X is outside the east/west sub-zone boxes.
 #[test]
 fn real_data_ronbann_mine_npcs_are_on_the_mine_floor() {
     use crate::systems::npcs::json;
@@ -2919,12 +2923,18 @@ fn real_data_ronbann_mine_npcs_are_on_the_mine_floor() {
     };
     let doc = json::parse(&text).expect("npc_spawns.json");
     let mut checked = 0;
+    let mut middle = 0;
     for entry in json::array(&doc).expect("spawn array") {
         let Some(o) = entry.as_object() else { continue };
-        // Hypnotized Miner, Mining Supervisor (east) and Dahuta Cult Priestess (west); the
-        // quest NPCs of the same caves (Wizard Eridel, Lord Colin's Henchman) are checked too.
+        // Hypnotized Miner, Mining Supervisor (east) and Dahuta Cult Priestess (west); the cave
+        // spiders and their guards of the middle cave section (Spider Lord, blood-drinking
+        // warrior, Lord Colin's Henchman Louie at the secret safe); and the quest NPCs of the
+        // same caves (Wizard Eridel, Lord Colin's Henchman).
         let uid = json::u32_or(o, "UnitId", 0).unwrap_or(0);
-        if !matches!(uid, 1880 | 1881 | 1903 | 6991 | 6973) {
+        if !matches!(
+            uid,
+            1880 | 1881 | 1903 | 1900 | 5922 | 5927 | 6991 | 6973 | 7005
+        ) {
             continue;
         }
         let Some(p) = json::prop(o, "Position").and_then(|p| p.as_object()) else {
@@ -2935,14 +2945,26 @@ fn real_data_ronbann_mine_npcs_are_on_the_mine_floor() {
         let z = json::f32_or(p, "Z", 0.0).unwrap_or(0.0);
         let east = (13000.0..=13450.0).contains(&x) && (16250.0..=16460.0).contains(&y);
         let west = (11700.0..=12100.0).contains(&x) && (16280.0..=16480.0).contains(&y);
-        if !east && !west {
+        let central = (12650.0..=12950.0).contains(&x) && (16280.0..=16420.0).contains(&y);
+        if east || west {
+            assert!(
+                (280.0..=310.0).contains(&z),
+                "Ronbann Mine NPC {uid} at ({x}, {y}) has Z {z}; the mine floor is Z ~280-310"
+            );
+        } else if central {
+            assert!(
+                (330.0..=375.0).contains(&z),
+                "Ronbann Mine NPC {uid} at ({x}, {y}) has Z {z}; the middle cave floor is Z ~336-372"
+            );
+            middle += 1;
+        } else {
             continue;
         }
-        assert!(
-            (280.0..=310.0).contains(&z),
-            "Ronbann Mine NPC {uid} at ({x}, {y}) has Z {z}; the mine floor is Z ~280-310"
-        );
         checked += 1;
     }
     assert!(checked >= 30, "Ronbann Mine placements found: {checked}");
+    assert!(
+        middle >= 12,
+        "Ronbann middle-cave placements found: {middle}"
+    );
 }
