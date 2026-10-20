@@ -107,7 +107,8 @@ impl ClientPacket for CSExpressEmotionPacket {
                 return Ok(());
             };
             if self.character_obj_id != p.obj_id {
-                tracing::warn!(
+                // debug: a modified client can send this every frame.
+                tracing::debug!(
                     "ExpressEmotion for object {} sent by {} (object {}); ignored",
                     self.character_obj_id,
                     p.data().unit.name,
@@ -142,6 +143,8 @@ impl ClientPacket for CSExpressEmotionPacket {
                 self.npc_obj_id,
             );
             // NPC_EMOTION: the raw emotion id (value2) expressed at the npc template (value1).
+            // The npc must exist in the player's own world; there is no sourced distance limit
+            // for emotes at an npc, so proximity is not checked.
             let npc_template = server
                 .world
                 .world_of(&me)
