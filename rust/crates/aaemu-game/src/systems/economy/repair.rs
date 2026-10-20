@@ -443,7 +443,8 @@ sync_client_packet!(CSRepairAllEquipmentsPacket);
 
 /// `CSChangeAutoUseAAPointPacket` (0x133): the client's "use AA points automatically" toggle
 /// (one bool, per Bevy RE notes). It sets the persisted `auto_use_aapoint` character flag, which
-/// `SCCharacterState` reports; the flag is not consulted by repairs or expansions yet.
+/// `SCCharacterState` reports and is confirmed to the client with an item task; the flag is not
+/// consulted by repairs or expansions yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CSChangeAutoUseAAPointPacket {
     pub auto_use_aa_point: bool,
@@ -459,8 +460,18 @@ impl CSChangeAutoUseAAPointPacket {
     fn run(self, _server: &GameServer, conn: &mut GameConnection) {
         let Some(player) = active(conn) else { return };
         tracing::debug!("ChangeAutoUseAAPoint: {}", self.auto_use_aa_point);
-        // TODO: answer with an item task `ChangeAutoUseAaPoint` if the client expects one.
         player.data().auto_use_aa_point = self.auto_use_aa_point;
+        // Confirm the toggle with `ItemTaskType.ChangeAutoUseAaPoint` (110) carrying the
+        // `ChangeAutoUseAAPoint` item task (action 18, one byte); the client's toggle waits for
+        // it. The 1.2 C# had the task class but no handler for 0x133, so this reply is inferred
+        // from the task class (PORTING.md).
+        player.send(SCItemTaskSuccessPacket {
+            action: task_type::CHANGE_AUTO_USE_AA_POINT,
+            tasks: vec![ItemTask::ChangeAutoUseAaPoint(u8::from(
+                self.auto_use_aa_point,
+            ))],
+            force_remove: Vec::new(),
+        });
     }
 }
 sync_client_packet!(CSChangeAutoUseAAPointPacket);

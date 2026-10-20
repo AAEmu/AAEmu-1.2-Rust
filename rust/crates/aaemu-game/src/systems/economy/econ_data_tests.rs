@@ -768,10 +768,27 @@ async fn repair_all_respects_total_available_money() {
 async fn change_auto_use_aa_point_sets_the_character_flag() {
     let mut w = world_with(data());
     assert!(!w.pa.data().auto_use_aa_point);
+    w.a.drain();
     run::<repair::CSChangeAutoUseAAPointPacket>(&mut w, 0, &[1]);
     assert!(w.pa.data().auto_use_aa_point);
+    // The toggle is confirmed with ItemTaskType 110 + the one-byte ChangeAutoUseAaPoint task:
+    // action, task count, task action 18, flag, forceRemove count, trailing u32.
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            vec![110, 1, 18, 1, 0, 0, 0, 0, 0]
+        )]
+    );
     run::<repair::CSChangeAutoUseAAPointPacket>(&mut w, 0, &[0]);
     assert!(!w.pa.data().auto_use_aa_point);
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            vec![110, 1, 18, 0, 0, 0, 0, 0, 0]
+        )]
+    );
 }
 
 #[tokio::test]

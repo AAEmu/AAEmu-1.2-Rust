@@ -25,8 +25,9 @@ use crate::packets::world::{
     SCCharacterStatePacket, SCCreateCharacterResponsePacket, SCUnitStatePacket,
 };
 
-/// `SCUnitState` character flags bit3: force attack (Bloodlust); the client reads it at
-/// 397c9480 into the unit's force-attack byte (+0x3bbc).
+/// `SCUnitState` character flags bit3: force attack (Bloodlust). 1.2 client chain: `397c9480`
+/// reads the flag, hands it to `398a1f90`, which stores it in the unit's force-attack byte
+/// (unit+0x3bbc).
 const FLAG_FORCE_ATTACK: u16 = 0x0008;
 /// `BaseUnitType.Character`.
 const BASE_UNIT_TYPE_CHARACTER: u8 = 0;
@@ -174,8 +175,8 @@ fn write_unit_state(c: &mut Character, data: &GameData, now_ms: i64, s: &mut Pac
         i64::from(c.honor_gained_in_combat),
         i64::from(c.hostile_faction_kills),
     ]);
-    // flags: bit3 = force attack (read by the client at 397c9480 into unit+3bbc, so late observers
-    // see Bloodlust); Invisible / IdleStatus are never set in this phase.
+    // flags: bit3 = force attack (client chain 397c9480 -> 398a1f90 -> unit+0x3bbc, so late
+    // observers see Bloodlust); Invisible / IdleStatus are never set in this phase.
     s.write_u16(if c.unit.force_attack {
         FLAG_FORCE_ATTACK
     } else {

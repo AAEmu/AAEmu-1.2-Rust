@@ -431,6 +431,8 @@ impl Marshal for SCAppliedToInstantGamePacket {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SCCancelInstantGamePacket {
     pub error_message_id: u16,
+    /// Branch byte of the later-client layout. Not on the 1.2 wire (`write` sends only the
+    /// error); kept so callers state which branch they mean.
     pub from_homeland: u8,
 }
 packet_def!(
