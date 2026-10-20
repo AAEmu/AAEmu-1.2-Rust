@@ -27,3 +27,5 @@ serde_json.workspace = true
 sha2.workspace = true
 hex.workspace = true
 miniz_oxide.workspace = true
+# `expectlog` patterns in verify suites.
+regex.workspace = true

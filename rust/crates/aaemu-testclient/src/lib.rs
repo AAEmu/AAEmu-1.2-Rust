@@ -9,3 +9,4 @@ pub mod login;
 pub mod record;
 pub mod scenario;
 pub mod stream;
+pub mod verify;
