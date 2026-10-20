@@ -181,3 +181,45 @@ async fn level_with_zero_ability_level_calculates_correctly() {
     let skill = new_skill_for(&server, template, Some(&stub_owner(10)));
     assert_eq!(skill.level, 6); // (10 - 0) / 2 + 1
 }
+
+/// `Skill.ManaCost`: the scale comes from the character `LevelDps` / `LevelMana` unit formulas
+/// of the data (no hardcoded `- 1` as in the C#).
+#[tokio::test]
+async fn mana_level_scale_evaluates_the_data_formulas() {
+    use crate::data::formulas::FormulaManager;
+    let c = rusqlite::Connection::open_in_memory().unwrap();
+    c.execute_batch(
+        "CREATE TABLE unit_formulas (id INTEGER, formula TEXT, kind_id INTEGER, owner_type_id INTEGER);
+         CREATE TABLE unit_formula_variables (id INTEGER, unit_formula_id INTEGER, variable_kind_id INTEGER, key INTEGER, value REAL);
+         CREATE TABLE wearable_formulas (id INTEGER, kind_id INTEGER, formula TEXT);
+         CREATE TABLE formulas (id INTEGER, formula TEXT);
+         INSERT INTO unit_formulas VALUES
+          (12, '(ab_level * 1.6 + 8) * 3', 12, 0),
+          (13, 'level_dps / 3.65', 13, 0);",
+    )
+    .unwrap();
+    let mut data = GameData::empty();
+    data.formulas = FormulaManager::load(&c).unwrap();
+    let server = test_server_with(data);
+    let mut n = Npc::new(1);
+    n.unit.level = 55;
+    let npc = WorldObject::from(&Entity::new(0x200, n));
+    let scale = super::skill::mana_level_scale(&server, &npc, FIGHT);
+    assert!(
+        (scale - (55.0 * 1.6 + 8.0) * 3.0 / 3.65).abs() < 1e-9,
+        "{scale}"
+    );
+    let template = Arc::new(SkillTemplate {
+        mana_cost: 30,
+        mana_level_md: 1.5,
+        ability_id: FIGHT,
+        ..SkillTemplate::default()
+    });
+    let skill = SkillRun::new(template, 1);
+    let cost = super::skill::mana_cost(&server, &skill, &npc);
+    assert_eq!(cost, (30.0 + 1.5 * scale) as i32);
+
+    // Without the formulas (no data) the scale is 0: only the fixed cost remains.
+    let bare = test_server_with(GameData::empty());
+    assert_eq!(super::skill::mana_level_scale(&bare, &npc, FIGHT), 0.0);
+}

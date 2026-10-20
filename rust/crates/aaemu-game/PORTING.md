@@ -885,6 +885,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   blocks; the client accepts any valid deflate stream.
 * systems::skills: the radar scans of `SkillTargetingUtil` are not ported.
 * systems::skills: `SpecialEffect` repeats are scheduled tasks instead of `Thread.Sleep` loops.
+* systems::skills (cuboid AoE): `AreaShape.ComputeCuboid` tested the triangles (v0,v1,v2) and
+  (v1,v2,v3) of a rectangle whose vertices run around it, so the two overlapped and the wedge at
+  the v3-v0 edge was never hit, and the strict `< 0` sign test dropped points exactly on a diagonal.
+  Skill AoEs (`geometry::around_shape`) and doodad area triggers (`area_trigger::AreaShape::
+  compute_cuboid`) now share `utils::math::point_in_cuboid`, which rotates the point into the
+  shape's frame and checks `|along length| <= value1 && |along width| <= value2` (edges included),
+  so both agree on the same `aoe_shapes` row (the doodad side used to mirror the bug).
 * systems::skills (2026-10-12 audit): OR requirements now require one success and use the resolved
   packet target, including doodads. Equipped-item and NPC-group requirements check their actual
   membership; crime-point limits and overnight time windows are enforced. Source/target life,
@@ -1358,6 +1365,41 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   (for example, an item consumed before its first save). SQL errors and transaction handling are
   unchanged, and deletion IDs are acknowledged only after commit.
 
+* systems::skills (2026-10-19): `CharacterSkills.AddSkill` refuses a skill whose `ability_level`
+  the character's ability has not reached, and the *stored* character skill level saturates to
+  `1..=127` instead of wrapping (`stored_skill_level`; runtime `SkillRun` levels, NPC skills
+  included, keep the C# byte result unchanged. C#: `(byte)((abLevel - AbilityLevel) / LevelStep + 1)`). The 1.2 data has 24 retired /
+  login-stage rows with `ability_level` 99 (e.g. 10385, 11854; `show = f`) above the level cap 55;
+  the C# expression goes negative and the byte cast wraps it (243), which MySQL rejects when
+  saving `skills.level` (signed TINYINT, `1264 Out of range value for column 'level'`), so every
+  character save of the account failed and the Rust departure retry then refused the next login
+  with "Previous character save is pending" until restart. The 1.2 client only offers a skill from
+  its ability level on (and never a `show = f` row), so retail never learns those; the check drops
+  them without a packet, like the other silent refusals of `AddSkill`. The C# (and its upstream
+  master) has no such check and fails the same way.
+
+* systems::skills timeline ids (2026-10-19, upstream issue #753): the C# `SkillTlIdManager`
+  slowly ran out of its ~65k ids (`0x000A..=0xFFFE`) because several `Skill` / `PlotTree` paths
+  returned without `ReleaseId` (the item-reagent rejection inside `Skill.Cast` and the plot
+  entry failures among them); once full, `GetNextId` logged `Fatal` and returned 0 forever, so
+  every later skill was sent with timeline id 0. The Rust port returns the id on every path: the
+  item-reagent rejection (`stop`), `cast()` on a cancelled skill, plots refused by the dominion
+  runtime or without a tree (`do_plot_end`), and cast / channel / delayed-effect tasks whose
+  scheduler is gone (finished inline). A reused `SkillRun` that still holds an id (auto attack
+  overlapping a delayed apply) has the old id recovered and counted (`replaced`). Exhaustion
+  never blocks or panics: it logs a throttled `warn` with the holders' ages and hands out 0 (the
+  cast continues without a timeline), and the manager exposes in-use / peak / gets / releases /
+  unused / exhaustions / replaced / leaked-over-10-min counters (`TlIdStats`), shown on the Web
+  API `/status` page and in the every-500-gets debug line. Covered by
+  `skills/tasks.rs` unit tests and `skills/tl_id_flow_tests.rs` (a 250-iteration sweep of instant,
+  interrupted, completed and channelled casts, plus failed validation, item-reagent rejection,
+  refused / treeless plots, a replaced reuse and an exhausted pool; every case asserts the pool
+  returns to baseline).
+  A timed cast flagged `cancelled` by something other than `stop` (a cancel effect) is ended by
+  `cast()` from its CastTask (which also clears the task slot), exactly once: `end_skill` takes
+  the id, so the `stop` path (token cancelled, task returns early) cannot double-release. Stored
+  skills dropped at load because their ability level is not reached are logged (`warn`).
+
 * systems::skills log noise (2026-10-16): `CSStopCasting` with `tl == 0` and a plot tl for a plot
   that already ended (the client repeats it ~30 times per plot) is logged at debug instead of
   the C# warning; no acknowledgement packet is sent (client behaviour unverified; possible
@@ -1447,6 +1489,16 @@ servers (see `rust/LIVE-TESTING.md`). Fixed porting bugs are in the git history 
   same (lowest free) connection id to the next client. C# then throws in `AddAccount` and stops
   answering the login server (every later enter-world is denied, the world shows as inactive).
   Rust replaces the stale entry and answers.
+* Regen stats follow the retail client (the real client's stat oracle, 2026-10-18:
+  levels 1-55 plus the persistent-regen buffs 5872 / 4698). `HealthRegen` / `ManaRegen` are
+  `trunc(base formula + bonuses) + Persistent(raw) / 5` (client 47.4000015 at L55 with buff
+  4698). The C# `+ Spi / 10` in `ManaRegen` is removed: the client never has it (pre-fix server
+  47 vs client 37 at L50, 23 / 21 at L10, 62 / 47 at L55). `PersistentManaRegen` divides the
+  bonus-inclusive value by 5 like `PersistentHpRegen` (pre-fix a +5 modifier read 5 instead of
+  1); both keep their fraction, and `/getattribute` prints the four regen kinds as floats. The
+  out-of-battle `RegenTick` (`regen.rs:141`) adds the composed value truncated; the in-battle /
+  post-cast branches are unchanged. Added the missing `IncomingSiegeDamageMul` getter
+  (attribute used by 9 buff `unit_modifiers` rows).
 * Quest evaluations requested while a character is selected but not yet in game are parked
   until its `CSNotifyInGameCompletedPacket` (`systems::quests::on_in_game_completed`). The C#
   `QuestManager.EnqueueEvaluation` ran `QuestManagerRunQueueTask` 1 ms after `Quests.Load`, so
@@ -1920,6 +1972,10 @@ See Docs/wiki/Quest-Audit.md and Docs/wiki/Mail-Audit.md.
 | Zones whose origin differs between the 1.2 and 10.x `world.xml` (190, 192, 193, 200, 227, 251, 266, 281, 286, 287) | same | data | The content sits at the 10.x position (zone origin x 1024 + local): the 1.2 origin never fits the 1.2 heightmap (0 of 154 editor candidates with unclipped terrain), the 10.x frame does (many points within 0.1 m). Z values above the 1024 m ceiling cannot be verified. Candidates whose terrain differs by tens of metres (10.x-only zones such as 157, parts of 190/281) were rejected. |
 | `NpcSpawner.SelectSpawnerId` for NORMAL multi-member spawners | `systems/npcs/npc/spawner.rs` (`select_spawner_id`) | matches the C# | Not changed. A JSON entry clones every game-data spawner that has its unit as a member and (memberwise clone) shares one `NpcSpawnerIds` list, so with more than one spawner only an AUTOCREATED unscheduled one or a scheduled one is ever selected: a unit that has no JSON entry of its own and is only a sibling of a NORMAL group spawner (Vicious/Silent Treant 3105/3106, Goblin Fighter 527, ...) never spawns. The 13 audit findings of this kind are all `ConAcceptNpcKill` starters, which `starter_accepts` evaluates as an OR over the component's acts, and in every one of the 7 quests other listed NPCs spawn, so no quest is blocked; the data would need real positions for these units (the 10.x editor has no placement of those group spawners). |
 
+### Plot `ManaCost` special effect (type 39)
+
+The C# charged `value1 + value2 / 6.35` (with a TODO: "value2 is based on skill level somehow"). The 1.2 data shows `value1` = the skill's `mana_cost` and `value2` = `mana_level_md * 100` for 59 of the 68 plot-only skills that carry the effect (e.g. 11854: md 1.55, effect 0/155; 18132: mana_cost 30, effect 30/0). The 1.2 client shows the cost in the skill tooltip as `mana_cost + mana_level_md * f(ability level)` (Ghidra `aa12u`, x2game `FUN_3941e750` -> `manaCost` of `FUN_394ace10`, via the unit formulas 12 and 13: `(ab_level * 1.6 + 8) * 3 / 3.65`), and the cast pre-check (`validation.rs`) already requires exactly that amount. The effect therefore now charges `value1 + value2 / 100 * scale` with the same scale as `skill::mana_cost`; at ability level 55 skill 11854 costs 120 instead of 24. The scale is no longer hardcoded: `skill::mana_level_scale` evaluates the character `unit_formulas` rows of `compact.sqlite3` (kind 12 `LevelDps` = `(ab_level * 1.6 + 8) * 3`, id 12; kind 13 `LevelMana` = `level_dps / 3.65`, id 13) through the precompiled formula expressions. The C# `Skill.ManaCost` (`Skill.cs` ~line 1561) hardcodes `((abLevel - 1) * 1.6 + 8) * 3 / 3.65`; the data and the client decompile cited above have no `- 1` (and `CharStats` evaluates `LevelDps` with `ab_level = level` as well), so the data formula is used for both `ManaCost` paths: every skill's mana cost rises by `1.6 * 3 / 3.65 * mana_level_md` (about 1.3 * md mana). The divisor `value2 / 100` was re-checked against the data: of 84 distinct (skill, `ManaCost` effect values) rows reached through the skills' plots, 62 have `value1 == mana_cost` and `value2 / 100 == mana_level_md`; the other 22 have `mana_level_md` 0 or 1 with `value2` 1 or 100-600, i.e. an effect-only charge that the same formula takes at face value. Deviation from the C#: the charge side is inferred from the tooltip/data (no retail charge capture); the 9 plot-only skills whose effect differs from the skill row follow the same rule.
+
 ## Achievement producers (live wiring)
 
 The achievement subsystem has no 1.2 C# manager; the behaviour follows `rust/docs/achievement-hook-audit.txt`
@@ -2000,3 +2056,15 @@ Doc-only items:
   client uses `CSAskRiskyTeamAction`), **M21** (new factions get `political_system 1`, native
   rename needs 0), **M23** (actability downgrade clamp): per Bevy RE notes, not re-verified and not
   changed; each needs a reproduction against the real client before a fix.
+
+## Dash heading at the end point (2026-10-20)
+
+`SkillController::step` turned the unit toward `heading(new, end)`. On the last step `new` equals
+`end` up to float rounding, so `atan2` of a near-zero vector picked an arbitrary direction (pi or
+0, depending on the tick's `dt`): the unit could flip to face backwards on the final tick and the
+last movement packet carried that yaw (seen as a Linux-only failure of
+`dash_moves_npc_and_broadcasts_movement`). The final step (`travel >= target_dist`) now lands
+exactly on the end point, and when the new position is within float noise of it (a tolerance of
+4 ulp of the coordinate magnitude, at least 1e-3 m: the f32 ulp is ~0.002 m beyond 16384, so a
+fixed 1e-3 m was not enough on large maps) the heading of the step itself (`heading(cur, end)`)
+is used. The C# original has the same degenerate `atan2`.

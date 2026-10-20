@@ -1,6 +1,8 @@
 //! Verified 1.2 UI actions and bounded entity telemetry for reproducible real-client tests.
 use super::tool;
+#[cfg(any(windows, test))]
 use crate::Target;
+#[cfg(any(windows, test))]
 use anyhow::{bail, Context};
 use serde_json::{json, Value};
 
@@ -23,6 +25,7 @@ pub fn tools(pid: Value) -> Vec<Value> {
     ]
 }
 
+#[cfg(any(windows, test))]
 pub fn is_tool(name: &str) -> bool {
     matches!(
         name,
@@ -41,6 +44,7 @@ pub fn is_tool(name: &str) -> bool {
 }
 
 // Lua 5.1 decimal byte escapes also handle newlines and avoid Lua/JSON escape differences.
+#[cfg(any(windows, test))]
 fn quote(s: &str) -> String {
     let mut out = String::from("\"");
     for b in s.bytes() {
@@ -50,6 +54,7 @@ fn quote(s: &str) -> String {
     out
 }
 
+#[cfg(any(windows, test))]
 const JSON: &str = r#"
 local function encode(v,depth)
  if depth>6 then return 'null' end
@@ -63,8 +68,10 @@ local function encode(v,depth)
   table.sort(out) return '{'..table.concat(out,',')..'}' end return 'null'
 end
 "#;
+#[cfg(any(windows, test))]
 const WORLD: &str = "assert(X2:IsEnteredWorld() and X2Unit:UnitName('player'), 'a character must be in the world') ";
 
+#[cfg(any(windows, test))]
 const LOOT: &str = r#"
 local result={count=X2Loot:GetNumLootItems() or 0,items={}}
 for i=1,math.min(result.count,32) do
@@ -82,6 +89,7 @@ end
 // before a target exists; do not turn missing native health into zero.
 // Stock GetUnitId/UnitDistance each take one token; preserve opaque IDs and
 // unavailable distance. The Lua consumers do not specify distance geometry.
+#[cfg(any(windows, test))]
 const UNIT_STATE: &str = r#"
 local name=X2Unit:UnitName(unit)
 local result={unit=unit,present=name~=nil}
@@ -220,6 +228,7 @@ pub fn pointer_command(args: &Value) -> anyhow::Result<String> {
     Ok(format!("mouse_{action} {x} {y}"))
 }
 
+#[cfg(any(windows, test))]
 pub fn request(name: &str, args: &Value) -> anyhow::Result<(Target, String)> {
     let (target, body) = match name {
         "client_action" => (Target::Ui,format!("{WORLD}local action={} assert(X2Hotkey:IsValidActionName(action),'unknown client action') X2Hotkey:ExcuteActionHandler(action) local result={{action=action,submitted=true}}",quote(args["action"].as_str().context("missing action")?))),
