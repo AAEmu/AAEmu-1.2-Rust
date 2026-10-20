@@ -570,7 +570,8 @@ async fn menu_and_pages() {
     assert_eq!(f[7].1[0], 1);
     assert_eq!(f[8].1[0], 0);
     assert_eq!(f[15].1[0], 1);
-    // Page 2: the remaining 2; page 0 behaves like page 1
+    // Page 2: the remaining 2. Page 0 (never sent by the 1.2 client page control, which starts at
+    // 1 and clamps to 1..maxPage) clamps to page 1 like the C# `Skip` of a negative count.
     let mut b = PacketStream::new();
     b.write_u8(2).write_u8(1).write_u16(2);
     run::<CSICSGoodsListPacket>(w, 0, b.as_bytes());
@@ -946,6 +947,37 @@ async fn buy_with_coins_stock_and_level() {
         s.w.a.drain()[0].1,
         error_body(error_message::NOT_ENOUGH_COIN)
     );
+}
+
+#[tokio::test]
+async fn buy_above_max_level_sends_high_level_error() {
+    let mut s = shop();
+    let st = shop_state();
+    let pa = s.w.pa.clone();
+    pa.data().unit.level = 50;
+    s.w.server
+        .systems
+        .economy
+        .cash_shop
+        .state()
+        .shop_items
+        .get_mut(&100)
+        .unwrap()
+        .level_max = 40;
+    s.db.accounts.lock().unwrap().insert(1001, (100, 0));
+    execute_buy(&s.w.server, 1, &pa, &pa, &cart(&st, &[(100, 0)])).await;
+    assert_eq!(
+        s.w.a.drain(),
+        vec![
+            (
+                sc::SCErrorMsgPacket,
+                error_body(error_message::LEVEL_HIGH_TO_USE)
+            ),
+            (sc::SCICSBuyResultPacket, result_body(false, "Alice", 0)),
+        ]
+    );
+    assert_eq!(s.db.accounts.lock().unwrap()[&1001], (100, 0));
+    assert!(s.mail.0.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
