@@ -42,6 +42,7 @@ const POWDER: u32 = 5300;
 const SLAVE_ITEM: u32 = 5400;
 const BACKPACK: u32 = 5500;
 const TIMEGLASS: u32 = 5600;
+const RECHARGEABLE: u32 = 5700;
 const TL: u16 = 0x77;
 
 /// Clears the new-item dirty flag so an effect's own marking is what the save selection sees.
@@ -111,6 +112,23 @@ fn data() -> GameData {
     ] {
         d.items.templates.insert(id, ItemTemplate::plain(id, max));
     }
+    // A rechargeable equip (the 1.2 "costume wash" mechanic: recharge_buff_id + charge window).
+    let mut rechargeable = ItemTemplate::new(
+        RECHARGEABLE,
+        TemplateKind::Armor(EquipTemplate {
+            slot_type_id: 3,
+            coverage: 10,
+            durability_ratio: 1.0,
+            durability_multiplier: 100,
+            charge_lifetime: 60,
+            charge_count: 3,
+            recharge_buff_id: 7777,
+            ..EquipTemplate::default()
+        }),
+    );
+    rechargeable.max_count = 1;
+    rechargeable.level = 10;
+    d.items.templates.insert(RECHARGEABLE, rechargeable);
     d.items.templates.insert(
         ITEM_CREST_STAMP,
         ItemTemplate {
@@ -842,7 +860,7 @@ async fn gain_item_effect() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// GainItemWithPosImprint / ExpToItem (data-derived bodies of C# stubs)
+// GainItemWithPosImprint / ExpToItem / RechargeItemBuff (data-derived bodies of C# stubs)
 // ---------------------------------------------------------------------------------------------
 
 #[tokio::test]
@@ -910,6 +928,62 @@ async fn exp_to_item_cancels_without_enough_experience() {
     assert_eq!(w.pa.data().experience, 5_000);
     assert!(item_at(&w.pa, slot_type::INVENTORY, 0).is_none());
     assert!(w.a.drain().is_empty());
+}
+
+#[tokio::test]
+async fn recharge_item_buff_starts_a_new_charge_window() {
+    let mut w = world();
+    let id = give(&w, &w.pa, slot_type::INVENTORY, RECHARGEABLE, 1, 0);
+    {
+        let c = Inv::of(&w.pa).bag();
+        let mut g = c.lock().unwrap();
+        let it = g.get_item_by_id_mut(id).unwrap();
+        it.charge_start_time = 1000;
+        it.charge_count = 0;
+        it.dirty = false;
+    }
+    w.a.drain();
+    let now = chrono::Utc::now().timestamp();
+    assert_eq!(
+        recharge_item_buff(&w.server, &w.pa, Some(id), [0; 4]),
+        Outcome::Done
+    );
+    let after = item(&w, id).unwrap();
+    assert!(
+        after.charge_start_time >= now && after.charge_start_time <= chrono::Utc::now().timestamp(),
+        "the charge window must start now"
+    );
+    assert_eq!(after.charge_count, 3, "charge_count resets to the template");
+    assert!(after.dirty, "the new charge window must be saved");
+    assert!(selected_for_save(&w, id));
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            tasks(task_type::RECHARGE_BUFF, vec![ItemTask::update(&after)])
+        )]
+    );
+}
+
+#[tokio::test]
+async fn recharge_item_buff_cancels_on_a_non_rechargeable_target() {
+    let mut w = world();
+    let armor = give(&w, &w.pa, slot_type::INVENTORY, ARMOR, 1, 0);
+    let before = item(&w, armor).unwrap();
+    assert_eq!(
+        recharge_item_buff(&w.server, &w.pa, Some(armor), [0; 4]),
+        Outcome::Cancelled
+    );
+    assert_eq!(item(&w, armor).unwrap(), before);
+    assert!(w.a.drain().is_empty());
+    assert_eq!(
+        recharge_item_buff(&w.server, &w.pa, None, [0; 4]),
+        Outcome::Cancelled
+    );
+    assert_eq!(
+        recharge_item_buff(&w.server, &w.pa, Some(12345), [0; 4]),
+        Outcome::Cancelled
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

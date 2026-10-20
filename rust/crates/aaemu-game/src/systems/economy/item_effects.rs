@@ -890,6 +890,80 @@ pub fn item_cap_scale_reset(
     system_message(&mut txn, player, "Tempering reset".to_string());
 }
 
+/// `RechargeItemBuff.Execute` (special 95). The C# body is a `// TODO` stub; 1.2 data rows
+/// 12446 / 17017 (all values 0) are cast by the consumed tool item 28242 (skill 22560 "Cleaner
+/// and Clearer", target type 9 = Item), so the item comes from the cast's item target. The
+/// target must be an equip item whose template carries `recharge_buff_id` (with
+/// `charge_lifetime` minutes and/or `charge_count`); the effect starts a new charge window and
+/// re-applies the recharge buff when the item is equipped. The item timers read the charge
+/// fields every tick, so no timer is re-scheduled.
+pub fn recharge_item_buff(
+    server: &GameServer,
+    player: &PlayerRef,
+    target_item_id: Option<u64>,
+    values: [i32; 4],
+) -> Outcome {
+    let [value1, value2, value3, value4] = values;
+    tracing::debug!(
+        "Special effects: RechargeItemBuff value1 {value1}, value2 {value2}, value3 {value3}, value4 {value4}"
+    );
+    let Some(target_id) = target_item_id else {
+        return Outcome::Cancelled;
+    };
+    let inv = Inv::of(player);
+    let Some(holder) = inv.holder_of(target_id) else {
+        return Outcome::Cancelled;
+    };
+    let now = chrono::Utc::now().timestamp();
+    let (after, equipped) = {
+        let mut g = lock(&holder);
+        let Some(item) = g.get_item_by_id_mut(target_id) else {
+            return Outcome::Cancelled;
+        };
+        if !item.is_equip() {
+            tracing::debug!("RechargeItemBuff: item {target_id} is not an EquipItem");
+            return Outcome::Cancelled;
+        }
+        let Some(equip) = server
+            .game_data
+            .items
+            .template(item.template_id)
+            .and_then(|t| t.equip())
+        else {
+            return Outcome::Cancelled;
+        };
+        if equip.recharge_buff_id == 0 {
+            return Outcome::Cancelled;
+        }
+        item.charge_start_time = now;
+        if equip.charge_count > 0 {
+            item.charge_count = equip.charge_count;
+        }
+        // The new window must survive the next save.
+        item.dirty = true;
+        let equipped = item.slot_type == slot_type::EQUIPMENT;
+        (item.clone(), equipped)
+    };
+    {
+        let mut txn = ItemTxn::begin(server);
+        txn.out().send(
+            player,
+            task_packet(task_type::RECHARGE_BUFF, vec![ItemTask::update(&after)]),
+        );
+    }
+    if equipped {
+        // Refresh the gear buff without stacking a second copy: the removed item drops the old
+        // recharge buff, the added one re-adds it from the new charge window.
+        server.systems.skills.ext.items().apply_gear_buffs(
+            server,
+            &WorldObject::from(player),
+            Some(&after),
+            Some(&after),
+        );
+    }
+    Outcome::Done
+}
+
 /// `CleanupLookConvert.Execute` (removes an item's look image, consumes one powder).
 pub fn cleanup_look_convert(
     server: &GameServer,
