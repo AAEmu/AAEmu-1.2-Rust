@@ -46,6 +46,11 @@ use super::loot_packets::{
 
 /// `LootingContainer.MaxLootingRange`.
 pub const MAX_LOOTING_RANGE: f32 = 200.0;
+/// Range within which a player may take items from a loot bag. The C# used
+/// [`MAX_LOOTING_RANGE`] only for loot *eligibility* at generation and never checked the take;
+/// 5 m matches the other NPC service interactions (`systems::economy::store::SERVICE_RANGE`,
+/// `systems::npcs::portal::NAVI_USE_RANGE`).
+pub const LOOT_TAKE_RANGE: f32 = 5.0;
 /// `LootingContainer.MakeLootPublicTime` (seconds).
 pub const MAKE_LOOT_PUBLIC_TIME: f64 = 180.0;
 /// `LootingContainer.LootDespawnExtensionTime` (seconds).
@@ -789,6 +794,21 @@ fn try_take_loot_locked(
         entry.item.template_id,
         entry.item.grade,
     );
+    // A dead corpse / loot doodad must be close: the C# had no take check at all.
+    if let Some(owner) = ctx.server().world.object(g.owner_obj_id) {
+        let dist = distance(ctx.server(), &WorldObject::from(player), &owner);
+        if dist > LOOT_TAKE_RANGE {
+            tracing::warn!(
+                "TryTakeLoot refused, {} ({}): loot owner {} is {:.1} m away (max {LOOT_TAKE_RANGE} m)",
+                player.data().unit.name,
+                pid,
+                g.owner_obj_id,
+                dist
+            );
+            failed(ctx, g, pid, error_message::TOO_FAR_AWAY, idx, template_id);
+            return false;
+        }
+    }
     let rolls_in_progress = entry.player_rolls.len() > 1;
     // Check if it's already claimed by somebody else
     if highest > 0 && highest != pid {

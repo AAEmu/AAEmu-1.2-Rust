@@ -125,9 +125,23 @@ fn respawn_portal(server: &GameServer, p: &PlayerRef) -> Portal {
     faction_portal.unwrap_or_else(|| crate::systems::npcs::portal::closest_return_portal(server, p))
 }
 
+/// Grants a pending in-place resurrection offer: `SCNotifyResurrectionPacket` of the
+/// `Resurrection` special effect or the free resurrection below `minimum_exp_loss_level`.
+pub fn offer_resurrection(p: &PlayerRef) {
+    p.data().skill_char.resurrect_offer = true;
+}
+
 /// `CSResurrectCharacterPacket.Read` for the active character.
 pub fn resurrect_character(server: &GameServer, p: &PlayerRef, in_place: bool) {
     if p.data().unit.hp > 0 {
+        return;
+    }
+    if in_place && !p.data().skill_char.resurrect_offer {
+        tracing::warn!(
+            "ResurrectCharacter in place refused, {} ({}): no pending resurrection offer",
+            p.data().unit.name,
+            p.character_id
+        );
         return;
     }
     let portal = if in_place {
@@ -139,6 +153,8 @@ pub fn resurrect_character(server: &GameServer, p: &PlayerRef, in_place: bool) {
     let hp = {
         let mut c = p.data();
         let (max_hp, max_mp) = (c.unit.max_hp, c.unit.max_mp);
+        // Any resurrection consumes the offer, including the temple choice.
+        c.skill_char.resurrect_offer = false;
         if in_place {
             let hp_pct = c.skill_char.resurrect_hp_percent as f32 / 100.0;
             let mp_pct = c.skill_char.resurrect_mp_percent as f32 / 100.0;

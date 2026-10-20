@@ -671,6 +671,7 @@ async fn unbound_ordinary_and_in_place_resurrection_preserve_the_existing_fallba
     {
         let mut c = f.defender.data();
         c.unit.hp = 0;
+        c.skill_char.resurrect_offer = true;
         c.skill_char.resurrect_hp_percent = 60;
         c.skill_char.resurrect_mp_percent = 80;
     }

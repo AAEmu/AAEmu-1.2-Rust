@@ -852,6 +852,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   named by the packet ids or the current interaction object within 5 m (the C# ignored both ids
   and the `AuctionManager` only null-checked). The 5 m bank / auction range matches the other NPC
   service interactions (`repair.rs`, `mates.rs`); retail's own range is unverified.
+* systems::economy (loot range, 2026-10-20): `CSLootItemPacket` (and loot-all from the bag)
+  requires the player within 5 m of the loot owner. The C# defined
+  `LootingContainer.MaxLootingRange` (200 m) only for loot *eligibility* at generation and never
+  checked the take; 5 m matches the other NPC service interactions (`store::SERVICE_RANGE`,
+  `portal::NAVI_USE_RANGE`). Refusals answer `SCLootItemFailedPacket(TooFarAway)`.
 * systems::economy: `CSSetCraftingPayPacket`, `CSChangeItemLookPacket`, `CSSpecialtyRecordLoadPacket`,
   `CSBuySpecialtyItemPacket`, `CSReturnMailPacket` have no 1.2 opcode (0xfff): decoders exist, the
   1.2 client never sends them. The specialty / trade-pack mail delay use the C# defaults (no
@@ -862,6 +867,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   return online character profiles through the existing 1.2 outbound formats (the C# inbound
   handlers only logged). Offline, absent and unauthenticated requests receive no reply; offline
   lookup and failure-response semantics remain unresolved.
+* systems::services (UI data caps, 2026-10-20): `CSSaveUIDataPacket` accepts only keys `0..=16` and
+  values of at most 16 KiB. Values observed from the real 1.2 client are 280, 4 708 (key bindings)
+  and 313 bytes; 16 KiB is 3.5x the largest and stays below the 64 KiB `options.value` TEXT
+  column. Unknown keys and oversized values are dropped with a warning (the C# stored any
+  `ushort` key and any length in memory).
 * systems::social: family title and steward requests require targets in the caller's own family.
   Authorized packet changes call the existing family snapshot save immediately; the C# handlers
   only changed memory. Team risky actions require membership and known actions, with owner
@@ -901,6 +911,10 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   switch): they abort the event invocation list / sphere tick. Out-of-range objective reads
   that would throw in RunAct / score sums read 0 (no 1.2 quest triggers them).
 * systems::quests: the daily reset runs at 00:00 UTC (C# cron in server local time).
+* systems::quests (SaveTutorial, 2026-10-20): `CSSaveTutorialPacket` accepts only real tutorial
+  entries (`quest_contexts.category_id = 45`, 101 rows in the 1.2 data, kept in
+  `QuestData::tutorial_ids`) and at most 256 of them. The C# stored any id as a completed quest,
+  so a modified client could grow the completed-quest block set without bound.
 * systems::quests (reward exp / copper pool, 1.2 oracle): the Reward component's own
   `QuestActSupplyExp` / `QuestActSupplyCopper` act **replaces** the level-based
   `quest_supplies` value instead of being added on top of it (`engine.rs`
@@ -1025,6 +1039,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   Anchor/Flowgraph still need authoritative behavior or protocol evidence. Passing covered tests does not certify every data-defined skill.
 * systems::skills: the labor margin requirement uses `GetMaxLabor(Payment.PremiumState)`; every
   connection has the default C# `AccountPayment` (premium until 2030), so the cap is 5000.
+* systems::skills (in-place resurrection, 2026-10-20): `CSResurrectCharacterPacket(in_place =
+  true)` requires a pending `SCNotifyResurrectionPacket` offer (`skill_char.resurrect_offer`, set
+  by the `Resurrection` special effect and the free resurrection below
+  `minimum_exp_loss_level`). The C# never checked, so any dead client could revive itself in
+  place without an offer.
 * systems::skills: `Character.DoDie` is complete (exp / durability loss, escalating respawn timer,
   PvP honor / assists / kill counts, War-zone honor loss, `DropTradePackToFloor`). The PvP
   damage / heal histories are lists of (character id, unix ms) in `skill_char`.

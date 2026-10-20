@@ -429,6 +429,7 @@ fn character_death_losses(server: &GameServer, p: &PlayerRef) -> (i32, u8) {
             p.send(super::packets_special::SCNotifyResurrectionPacket {
                 caster: SkillCaster::Unit(p.obj_id),
             });
+            p.data().skill_char.resurrect_offer = true;
         }
     }
     if lost_exp > 0 || recoverable > 0 {

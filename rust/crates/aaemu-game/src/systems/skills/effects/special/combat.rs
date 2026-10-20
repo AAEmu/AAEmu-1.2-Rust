@@ -133,6 +133,7 @@ pub fn resurrection(_server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         caster: args.caster_caster,
     });
     let mut c = p.data();
+    c.skill_char.resurrect_offer = true;
     c.skill_char.resurrect_hp_percent = v[1] as u32;
     c.skill_char.resurrect_mp_percent = v[2] as u32;
 }

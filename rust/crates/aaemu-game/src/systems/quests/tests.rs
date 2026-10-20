@@ -23,6 +23,7 @@ use crate::models::char_data::{ActiveQuest, CompletedQuest};
 use crate::models::character::Character;
 use crate::models::item::{Item, ItemClass};
 use crate::net::packet::{encode, ServerPacket};
+use crate::net::registry::ClientPacket;
 use crate::opcodes::sc;
 use crate::server::GameServer;
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
@@ -4113,4 +4114,73 @@ async fn sphere_trigger_uses_the_world_position_of_an_attached_player() {
     assert_eq!(player.data().quests.active[0].objectives[0], 0);
     server.systems.quests.spheres.tick(&server);
     assert_eq!(player.data().quests.active[0].objectives[0], 1);
+}
+
+#[tokio::test]
+async fn save_tutorial_ignores_ids_that_are_not_tutorial_entries() {
+    let (server, _rec) = server_with(|_| {});
+    let mut client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(&server, &client, test_character(1, "Al", 10.0, 10.0), 0x100);
+    client.conn.active_char = Some(player.clone());
+    client.drain();
+    CSSaveTutorialPacket { id: 0xFFFF_FFFF }
+        .handle(&server, &mut client.conn)
+        .await
+        .unwrap();
+    assert!(
+        player.data().quests.completed.is_empty(),
+        "an arbitrary id was stored as a completed tutorial"
+    );
+    assert!(client.drain_ops().is_empty());
+}
+
+#[tokio::test]
+async fn save_tutorial_accepts_a_real_tutorial_entry() {
+    let (server, _rec) = server_with(|d| {
+        d.tutorial_ids.insert(2584);
+    });
+    let mut client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(&server, &client, test_character(1, "Al", 10.0, 10.0), 0x100);
+    client.conn.active_char = Some(player.clone());
+    client.drain();
+    CSSaveTutorialPacket { id: 2584 }
+        .handle(&server, &mut client.conn)
+        .await
+        .unwrap();
+    assert!(super::engine::has_quest_completed(
+        &player.data().quests.completed,
+        2584
+    ));
+    assert_eq!(client.drain_ops(), vec![sc::SCTutorialSavedPacket]);
+}
+
+#[tokio::test]
+async fn save_tutorial_caps_the_tutorial_entries() {
+    let cap = super::packets::MAX_TUTORIAL_ENTRIES as u32;
+    let first = 10_000;
+    let (server, _rec) = server_with(|d| {
+        for id in first..first + cap + 4 {
+            d.tutorial_ids.insert(id);
+        }
+    });
+    let mut client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(&server, &client, test_character(1, "Al", 10.0, 10.0), 0x100);
+    client.conn.active_char = Some(player.clone());
+    client.drain();
+    {
+        let mut c = player.data();
+        for id in first..first + cap {
+            super::engine::set_completed_quest_flag(&mut c.quests.completed, id, true);
+        }
+    }
+    let next = first + cap;
+    CSSaveTutorialPacket { id: next }
+        .handle(&server, &mut client.conn)
+        .await
+        .unwrap();
+    assert!(
+        !super::engine::has_quest_completed(&player.data().quests.completed, next),
+        "the tutorial cap did not stop the completed-quest set from growing"
+    );
+    assert!(client.drain_ops().is_empty());
 }

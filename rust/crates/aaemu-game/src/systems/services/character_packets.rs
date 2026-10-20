@@ -672,6 +672,14 @@ impl ClientPacket for CSRequestUIDataPacket {
     }
 }
 
+/// Highest UI data type accepted. The 1.2 client uses 1 (options), 2 (key bindings) and 5
+/// (quest / roadmap data); 16 leaves room without making the `options` map unbounded.
+pub const MAX_UI_DATA_TYPE: u16 = 16;
+/// Largest UI data value accepted. The values observed from the real 1.2 client are 280,
+/// 4 708 (key bindings) and 313 bytes; 16 KiB is 3.5x the largest and stays below the 64 KiB
+/// `options.value` TEXT column.
+pub const MAX_UI_DATA_LEN: usize = 16 * 1024;
+
 /// `CSSaveUIDataPacket` -> `ActiveChar.SetOption(type, data)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSSaveUIDataPacket {
@@ -698,6 +706,16 @@ impl ClientPacket for CSSaveUIDataPacket {
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             if let Some(p) = &conn.active_char {
+                if self.ui_data_type > MAX_UI_DATA_TYPE || self.data.len() > MAX_UI_DATA_LEN {
+                    tracing::warn!(
+                        "SaveUIData refused, {} ({}): key {}, {} bytes (max key {MAX_UI_DATA_TYPE}, {MAX_UI_DATA_LEN} bytes)",
+                        p.data().unit.name,
+                        p.character_id,
+                        self.ui_data_type,
+                        self.data.len()
+                    );
+                    return Ok(());
+                }
                 p.data().options.insert(self.ui_data_type, self.data);
             }
             Ok(())
@@ -1040,5 +1058,49 @@ mod tests {
         // Appellations: unknown id keeps the current one and still broadcasts.
         change_appellation(&server, &pa, 42);
         assert_eq!(b.drain_ops(), vec![sc::SCAppellationChangedPacket]);
+    }
+
+    #[tokio::test]
+    async fn ui_data_save_refuses_unknown_keys_and_oversized_values() {
+        let server = test_server();
+        let mut a = TestClient::new(&server, 1, 1001);
+        let pa = spawn_player(&server, &a, test_character(1, "Al", 10.0, 10.0), 0x100);
+        a.conn.active_char = Some(pa.clone());
+        a.drain();
+        // A real client payload (key bindings, the largest observed live value) is accepted.
+        CSSaveUIDataPacket {
+            ui_data_type: 2,
+            id: 1,
+            data: "x".repeat(4_708),
+        }
+        .handle(&server, &mut a.conn)
+        .await
+        .unwrap();
+        assert_eq!(pa.data().get_option(2).len(), 4_708);
+        CSSaveUIDataPacket {
+            ui_data_type: 17,
+            id: 1,
+            data: "x".into(),
+        }
+        .handle(&server, &mut a.conn)
+        .await
+        .unwrap();
+        assert!(
+            pa.data().get_option(17).is_empty(),
+            "an unknown UI data key was stored"
+        );
+        CSSaveUIDataPacket {
+            ui_data_type: 1,
+            id: 1,
+            data: "x".repeat(100_000),
+        }
+        .handle(&server, &mut a.conn)
+        .await
+        .unwrap();
+        assert!(
+            pa.data().get_option(1).len() <= 16 * 1024,
+            "an oversized UI data value was stored"
+        );
+        assert!(a.drain_ops().is_empty());
     }
 }

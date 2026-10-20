@@ -63,6 +63,8 @@ mod leap_skill_controller_tests;
 #[cfg(test)]
 mod mana_regen_manager_tests;
 #[cfg(test)]
+mod resurrect_tests;
+#[cfg(test)]
 mod sc_unit_impulse_packet_tests;
 #[cfg(test)]
 mod skill_tests;
