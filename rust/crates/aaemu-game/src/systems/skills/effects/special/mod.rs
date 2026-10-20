@@ -358,6 +358,7 @@ pub fn execute(server: &GameServer, kind: i32, args: &EffectArgs<'_>, values: [i
         104 => unit_actions::aggro_copy(s, a, v),
         105 => unit_actions::aggro_reset(s, a, v),
         106 => items::item_socketing(s, a, v),
+        107 => misc::gender_transfer(s, a, v),
         108 => items::skinize(s, a, v),
         109 => unit_actions::npc_despawn(s, a, v),
         111 => items::item_cap_scale_reset(s, a, v),

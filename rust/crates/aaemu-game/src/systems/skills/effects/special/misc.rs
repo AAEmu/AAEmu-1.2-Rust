@@ -1,4 +1,4 @@
-//! Special effect actions on progression, points, portals, doodads, mates / slaves, crime and
+﻿//! Special effect actions on progression, points, portals, doodads, mates / slaves, crime and
 //! account UI: `AddExp`, `AddLaborPower`, `GiveLivingPoint`, `GiveHonorPoint`,
 //! `GiveCrimePoint`, `EnterBeautyshop`, `ExitArchemall`, `GiveAppellation`, `SavePortal`,
 //! `SpawnDoodad`, `RemoveDoodad`, `SpawnPet`, `SpawnSlave`, `AttachTo`, `EscapeMySlave`,
@@ -10,9 +10,13 @@ use std::collections::HashMap;
 
 use crate::data::formulas::FormulaKind;
 use crate::managers::chat::chat_type;
+use crate::models::container::equip_slot;
 use crate::models::transform::PositionAndRotation;
 use crate::packets::world::SCErrorMsgPacket;
 use crate::server::GameServer;
+use crate::systems::economy::error_message;
+use crate::systems::economy::inventory::{send_error_message_to, Out};
+use crate::systems::services::beauty_salon::SCCharacterGenderAndModelModifiedPacket;
 use crate::world::WorldObject;
 
 use super::super::super::broadcast;
@@ -153,6 +157,91 @@ pub fn give_appellation(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4])
             .social()
             .give_appellation(server, p, v[0] as u32);
     }
+}
+
+/// `GenderTransfer` (special 107).
+///
+/// Data evidence: skill 23469 `ì„±ë³„ ì „í™˜í•˜ê¸°` is cast by the beauty-salon NPC interaction
+/// (`target_type` any unit, `target_selection` Target); the former C# class only logged.
+pub fn gender_transfer(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
+    log_values(args, "GenderTransfer", v);
+    let target = args
+        .target
+        .as_obj()
+        .and_then(WorldObject::as_player)
+        .or_else(|| args.caster.as_ref().and_then(WorldObject::as_player));
+    let Some(player) = target else {
+        return;
+    };
+    transfer_gender(server, player);
+}
+
+/// Flips a character's gender (`3 - gender`: 1 male <-> 2 female), refuses gender-locked
+/// equipment of the target gender and announces the new model.
+///
+/// `Character.Save` already persists `gender` and the model id is rebuilt from the race/gender
+/// template on load, so the change reaches the database with the next character save.
+pub(crate) fn transfer_gender(server: &GameServer, player: &crate::world::PlayerRef) -> bool {
+    let (race, old_gender, equipment, char_id) = {
+        let c = player.data();
+        (c.race, c.gender, c.inventory.equipment().clone(), c.id)
+    };
+    if old_gender != 1 && old_gender != 2 {
+        tracing::warn!(
+            "Special effects: GenderTransfer character {char_id} has invalid gender {old_gender}"
+        );
+        return false;
+    }
+    let new_gender = 3 - old_gender;
+    let mut hair_template_id = 0;
+    {
+        // Copy what the check needs, then release the container lock before touching the
+        // character (locking rule: at most one object data lock at a time).
+        let eq = equipment.lock().expect("container poisoned");
+        if let Some(item) = eq.get_item_by_slot(equip_slot::HAIR) {
+            hair_template_id = item.template_id;
+        }
+        let blocked = eq.items.iter().any(|item| {
+            server
+                .game_data
+                .items
+                .template(item.template_id)
+                .is_some_and(|t| t.char_gender != 0 && t.char_gender != new_gender)
+        });
+        if blocked {
+            let mut out = Out::Direct;
+            send_error_message_to(
+                &mut out,
+                player,
+                error_message::GENDER_TRANSFER_AS_GENDER_EQUIPMENT,
+            );
+            return false;
+        }
+    }
+    let Some(template) = server
+        .game_data
+        .characters
+        .template(race, new_gender)
+        .cloned()
+    else {
+        tracing::warn!(
+            "Special effects: GenderTransfer has no character template for race {race} gender {new_gender}"
+        );
+        return false;
+    };
+    let packet = {
+        let mut c = player.data();
+        c.gender = new_gender;
+        c.unit.model_id = template.model_id;
+        SCCharacterGenderAndModelModifiedPacket {
+            character_id: c.id,
+            hair_template_id,
+            model_params: c.unit.model_params.clone(),
+        }
+    };
+    let me = WorldObject::from(player);
+    broadcast(server, &me, &packet, true);
+    true
 }
 
 /// `SavePortal`: a new private portal at the character's position (`SkillObjectSavePortalInfo`
@@ -449,4 +538,131 @@ pub fn report_bot_expired(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4
 /// `Character.SendMessage(message)` (`ChatType.System`).
 pub(crate) fn send_system_message(p: &crate::world::PlayerRef, message: &str) {
     crate::world::session::send_message(p, chat_type::SYSTEM, message);
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::data::character_templates::CharacterTemplate;
+    use crate::data::items::{EquipTemplate, GradeTemplate, ItemTemplate, TemplateKind};
+    use crate::data::GameData;
+    use crate::opcodes::sc;
+    use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
+    use crate::world::PlayerRef;
+
+    use super::transfer_gender;
+
+    const LOCKED_CHEST: u32 = 70;
+
+    fn key(race: u8, gender: u8) -> u8 {
+        16 * gender + race
+    }
+
+    fn data() -> GameData {
+        let mut d = GameData::empty();
+        d.characters.templates.insert(
+            key(1, 1),
+            CharacterTemplate {
+                race: 1,
+                gender: 1,
+                model_id: 100,
+                ..CharacterTemplate::default()
+            },
+        );
+        d.characters.templates.insert(
+            key(1, 2),
+            CharacterTemplate {
+                race: 1,
+                gender: 2,
+                model_id: 200,
+                ..CharacterTemplate::default()
+            },
+        );
+        d.items.grades.insert(
+            0,
+            GradeTemplate {
+                grade: 0,
+                grade_order: 0,
+                durability: 1.0,
+            },
+        );
+        d.items.config.durability_const = 1.0;
+        d.items.templates.insert(
+            LOCKED_CHEST,
+            ItemTemplate {
+                char_gender: 1,
+                kind: TemplateKind::Armor(EquipTemplate {
+                    slot_type_id: 3,
+                    coverage: 10,
+                    durability_ratio: 1.0,
+                    durability_multiplier: 100,
+                    ..EquipTemplate::default()
+                }),
+                ..ItemTemplate::plain(LOCKED_CHEST, 1)
+            },
+        );
+        d
+    }
+
+    fn equip(server: &crate::server::GameServer, player: &PlayerRef, template: u32, slot: i32) {
+        let item = server
+            .items
+            .create(
+                template,
+                1,
+                0,
+                1,
+                &server.game_data.items,
+                &server.ids.item,
+                0,
+            )
+            .expect("item");
+        let eq = player.data().inventory.equipment().clone();
+        assert!(eq
+            .lock()
+            .unwrap()
+            .add_new_item(item, slot, &server.game_data.items)
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn gender_transfer_flips_gender_model_and_broadcasts() {
+        let server = test_server_with(data());
+        let mut a = TestClient::new(&server, 1, 1001);
+        let mut b = TestClient::new(&server, 2, 1002);
+        let pa = spawn_player(&server, &a, test_character(1, "Actor", 100.0, 100.0), 0x100);
+        let _pb = spawn_player(&server, &b, test_character(2, "Seer", 101.0, 100.0), 0x101);
+        a.drain();
+        b.drain();
+
+        assert!(transfer_gender(&server, &pa));
+        assert_eq!(pa.data().gender, 2);
+        assert_eq!(pa.data().unit.model_id, 200);
+        for frames in [a.drain(), b.drain()] {
+            assert!(
+                frames
+                    .iter()
+                    .any(|(op, _)| *op == sc::SCCharacterGenderAndModelModifiedPacket),
+                "gender packet not received: {frames:x?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gender_transfer_is_blocked_by_gender_locked_equipment() {
+        let server = test_server_with(data());
+        let mut a = TestClient::new(&server, 1, 1001);
+        let pa = spawn_player(&server, &a, test_character(1, "Actor", 100.0, 100.0), 0x100);
+        equip(&server, &pa, LOCKED_CHEST, 2);
+        a.drain();
+
+        assert!(!transfer_gender(&server, &pa));
+        assert_eq!(pa.data().gender, 1);
+        let frames = a.drain();
+        assert_eq!(frames.len(), 1, "{frames:x?}");
+        assert_eq!(frames[0].0, sc::SCErrorMsgPacket);
+        assert_eq!(
+            i16::from_le_bytes([frames[0].1[0], frames[0].1[1]]),
+            crate::systems::economy::error_message::GENDER_TRANSFER_AS_GENDER_EQUIPMENT
+        );
+    }
 }
