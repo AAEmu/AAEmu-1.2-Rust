@@ -5,7 +5,8 @@
 //! `Expedition.Save` persistence. (Moved here from `managers::expedition`, which re-exports
 //! this module.)
 
-use std::sync::RwLock;
+use std::collections::HashMap;
+use std::sync::{Mutex, RwLock};
 
 use aaemu_commons::{Marshal, PacketStream};
 use sqlx::mysql::MySqlPool;
@@ -188,6 +189,19 @@ pub struct MemberRefresh {
 pub struct ExpeditionManager {
     /// `_expeditions.Values` in insertion order.
     expeditions: RwLock<Vec<Expedition>>,
+    /// Pending guild invitations by invited character id. Deviation from the C# manager, which
+    /// kept none and let any client join any guild (see PORTING.md).
+    pub(crate) invitations: Mutex<HashMap<u32, PendingInvite>>,
+}
+
+/// How long a guild invitation can be answered (same as the party / raid invitations).
+const INVITATION_TIMEOUT_MS: i64 = 60_000;
+
+/// An unanswered `SCExpeditionInvitationPacket`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PendingInvite {
+    expedition_id: u32,
+    pub(crate) time_ms: i64,
 }
 
 impl ExpeditionManager {
@@ -772,6 +786,18 @@ pub fn invite(server: &GameServer, inviter: &PlayerRef, invited_name: &str) {
     if expedition_of(server, &invited).is_some() {
         return;
     }
+    server
+        .expeditions
+        .invitations
+        .lock()
+        .expect("expedition invitations poisoned")
+        .insert(
+            invited.character_id,
+            PendingInvite {
+                expedition_id: e.id(),
+                time_ms: util::now_ms(),
+            },
+        );
     let inviter_name = inviter.data().unit.name.clone();
     invited.send(SCExpeditionInvitationPacket {
         invitor_id: inviter.character_id,
@@ -789,7 +815,28 @@ pub async fn reply_invite(
     _id2: u32,
     reply: bool,
 ) {
+    // The invitation is consumed by any answer.
+    let pending = server
+        .expeditions
+        .invitations
+        .lock()
+        .expect("expedition invitations poisoned")
+        .remove(&invited.character_id);
     if !reply {
+        return;
+    }
+    // Deviation from C#: only an unexpired invitation to this very guild can be accepted, and
+    // only by a character that is not in a guild yet.
+    let valid = pending.is_some_and(|p| {
+        p.expedition_id == id1 && p.time_ms + INVITATION_TIMEOUT_MS >= util::now_ms()
+    });
+    if !valid || invited.data().unit.expedition_id != 0 {
+        tracing::warn!(
+            "ReplyExpeditionInvitation: rejected character {} for expedition {id1} (pending {:?}, in expedition {})",
+            invited.character_id,
+            pending.map(|p| p.expedition_id),
+            invited.data().unit.expedition_id
+        );
         return;
     }
     if !server.expeditions.exists(id1) {
@@ -927,6 +974,16 @@ pub async fn kick(server: &GameServer, kicker: &PlayerRef, kicked_id: u32) {
     let Some(kicked) = e.member(kicked_id).cloned() else {
         return;
     };
+    // Deviation from C#: only a strictly higher rank can expel (so the leader never can be).
+    if me.role <= kicked.role {
+        tracing::warn!(
+            "Kick: member {} (role {}) tried to expel {kicked_id} (role {}) of expedition {id}",
+            kicker.character_id,
+            me.role,
+            kicked.role
+        );
+        return;
+    }
     remove_member(server, id, kicked_id);
     let kicked_char = server.world.character_by_id(kicked_id);
     let packet = SCUnitExpeditionChangedPacket {
@@ -970,6 +1027,15 @@ pub async fn change_member_role(server: &GameServer, p: &PlayerRef, new_role: u8
             tracing::error!("Expedition {id} has no policy for role {}", changer.role);
             return;
         }
+    }
+    // Deviation from C#: the target must currently rank below the caller.
+    if e.member(changed_id).is_some_and(|t| t.role >= changer.role) {
+        tracing::warn!(
+            "ChangeMemberRole: member {} (role {}) tried to change {changed_id} of expedition {id}",
+            p.character_id,
+            changer.role
+        );
+        return;
     }
     let changed = server.expeditions.with_mut(id, |e| {
         let members = e.member_ids();
