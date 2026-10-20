@@ -1036,7 +1036,7 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   The tick resolves the character under the save transaction lock (serialized with
   `select_character`'s load and world registration). Before an offline write, it flushes a
   departing sibling's pending labor (`SaveManager::flush_account_labor_locked`).
-* systems::economy (RPA-16): socketing (success, failed roll and DawnStone), lunastone, temper
+* systems::economy (item persistence, 2026-10): socketing (success, failed roll and DawnStone), lunastone, temper
   and temper reset write plain `ItemDetails` fields; the C# setter-less fields did not mark
   `IsDirty`, so `ItemManager.Save` skipped them. Rust marks `Item.dirty` in those paths and the
   regressions assert the next prepared save snapshot contains the item.
