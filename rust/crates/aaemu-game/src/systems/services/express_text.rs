@@ -106,6 +106,15 @@ impl ClientPacket for CSExpressEmotionPacket {
             let Some(p) = conn.active_char.clone() else {
                 return Ok(());
             };
+            if self.character_obj_id != p.obj_id {
+                tracing::warn!(
+                    "ExpressEmotion for object {} sent by {} (object {}); ignored",
+                    self.character_obj_id,
+                    p.data().unit.name,
+                    p.obj_id
+                );
+                return Ok(());
+            }
             let me = WorldObject::from(&p);
             if let Some(world) = server.world.world_of(&me) {
                 broadcast(
@@ -133,26 +142,24 @@ impl ClientPacket for CSExpressEmotionPacket {
                 self.npc_obj_id,
             );
             // NPC_EMOTION: the raw emotion id (value2) expressed at the npc template (value1).
-            if p.obj_id == self.character_obj_id {
-                let npc_template = server
-                    .world
-                    .world_of(&me)
-                    .and_then(|w| w.npc(self.npc_obj_id))
-                    .map(|npc| npc.data().unit.template_id);
-                if let Some(value1) = npc_template {
-                    crate::systems::report_achievement(
-                        server,
-                        &p,
-                        AchievementInput::Increment {
-                            kind_id: char_record_kind::NPC_EMOTION,
-                            amount: 1,
-                            matcher: RecordMatch::Value1And2 {
-                                value1,
-                                value2: self.emotion_id,
-                            },
+            let npc_template = server
+                .world
+                .world_of(&me)
+                .and_then(|w| w.npc(self.npc_obj_id))
+                .map(|npc| npc.data().unit.template_id);
+            if let Some(value1) = npc_template {
+                crate::systems::report_achievement(
+                    server,
+                    &p,
+                    AchievementInput::Increment {
+                        kind_id: char_record_kind::NPC_EMOTION,
+                        amount: 1,
+                        matcher: RecordMatch::Value1And2 {
+                            value1,
+                            value2: self.emotion_id,
                         },
-                    );
-                }
+                    },
+                );
             }
             Ok(())
         })
@@ -192,5 +199,45 @@ mod tests {
                 .to_vec(),
             s.into_bytes()
         );
+    }
+
+    #[tokio::test]
+    async fn emote_for_another_object_id_is_ignored() {
+        use crate::test_support::{spawn_player, test_character, test_server, TestClient};
+        let server = test_server();
+        let mut a = TestClient::new(&server, 1, 1001);
+        let mut b = TestClient::new(&server, 2, 1002);
+        let pa = spawn_player(&server, &a, test_character(1, "Alpha", 100.0, 100.0), 0x100);
+        let _pb = spawn_player(&server, &b, test_character(2, "Beta", 105.0, 100.0), 0x101);
+        a.conn.active_char = Some(pa);
+        a.drain();
+        b.drain();
+
+        // Legitimate: own object id is broadcast to the other player.
+        let ok = CSExpressEmotionPacket {
+            character_obj_id: 0x100,
+            npc_obj_id: 0,
+            emotion_id: 5,
+        };
+        ok.handle(&server, &mut a.conn).await.unwrap();
+        let expected = crate::net::packet::encode(&SCEmotionExpressedPacket {
+            obj_id: 0x100,
+            obj_id2: 0,
+            emotion_id: 5,
+        })[6..]
+            .to_vec();
+        assert_eq!(b.drain(), vec![(sc::SCEmotionExpressedPacket, expected)]);
+
+        // The broadcast included the sender.
+        a.drain();
+
+        // Spoofed: another unit's object id is dropped; nobody receives anything.
+        let spoof = CSExpressEmotionPacket {
+            character_obj_id: 0x101,
+            ..ok
+        };
+        spoof.handle(&server, &mut a.conn).await.unwrap();
+        assert!(b.drain().is_empty());
+        assert!(a.drain().is_empty());
     }
 }
