@@ -43,6 +43,7 @@ pub mod item_task {
 mod error {
     pub const BAG_FULL: i16 = 25;
     pub const BAG_INVALID_ITEM: i16 = 181;
+    pub const SIEGE_ONLY_DEFENSE_OR_OFFENSE_TICKET_AT_ONCE: i16 = 463;
 }
 
 /// `EquipmentItemSlot.Musical`.
@@ -140,6 +141,60 @@ pub fn gain_item(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
     if !acquired {
         tracing::warn!(
             "Special effects: GainItem failed to give item {item_id} x{item_count} to character {}",
+            p.character_id
+        );
+    }
+}
+
+/// `GetSiegeTicket` (`special_effects` row 5583, the only row of type 64; skill 16975
+/// "request castle-defence reinforcements" is its only carrier): grants one defence ticket of
+/// the caster's current siege zone. A character may not hold the defence and offence tickets of
+/// the same zone at once.
+pub fn get_siege_ticket(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
+    log_values(args, "GetSiegeTicket", v);
+    let Some(p) = player_caster(args) else {
+        return;
+    };
+    let Some(caster) = &args.caster else {
+        return;
+    };
+    let zone_id = caster.transform().zone_id;
+    let Some(zone) = server.game_data.zones.zone_by_key(zone_id) else {
+        tracing::warn!("Special effects: GetSiegeTicket has no zone {zone_id}");
+        return;
+    };
+    let group = zone.group_id;
+    let Some(siege) = server
+        .game_data
+        .systems
+        .housing
+        .castles
+        .siege_zones
+        .get(&group)
+    else {
+        tracing::warn!("Special effects: GetSiegeTicket has no siege zone for group {group}");
+        return;
+    };
+    let (defense_ticket_id, offense_ticket_id) = (siege.defense_ticket_id, siege.offense_ticket_id);
+    if defense_ticket_id == 0 {
+        tracing::warn!("Special effects: GetSiegeTicket zone group {group} has no defence ticket");
+        return;
+    }
+    let items = server.systems.skills.ext.items();
+    if offense_ticket_id != 0 && items.item_count(server, p, offense_ticket_id) > 0 {
+        send_error(p, error::SIEGE_ONLY_DEFENSE_OR_OFFENSE_TICKET_AT_ONCE);
+        return;
+    }
+    if !items.try_add_new_item(
+        server,
+        p,
+        item_task::SKILL_EFFECT_GAIN_ITEM,
+        defense_ticket_id,
+        1,
+        0,
+    ) {
+        tracing::warn!(
+            "Special effects: GetSiegeTicket failed to give item {defense_ticket_id} to character {}",
             p.character_id
         );
     }
@@ -754,7 +809,118 @@ pub fn give_cash_point(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) 
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+    use crate::data::world_data::Zone;
+    use crate::systems::housing::data::SiegeZone;
+    use crate::systems::skills::effects::EffectSource;
+    use crate::systems::skills::ext::ItemSkillHooks;
+    use crate::test_support::{
+        spawn_player, test_character, test_server_with, TestClient, TEST_ZONE,
+    };
+
+    const DEFENSE_TICKET: u32 = 700;
+    const OFFENSE_TICKET: u32 = 701;
+    const SIEGE_ZONE_GROUP: u32 = 33;
+
+    #[derive(Default)]
+    struct FakeItems {
+        held: Mutex<Vec<u32>>,
+        added: Mutex<Vec<(u8, u32, i32)>>,
+    }
+
+    impl ItemSkillHooks for FakeItems {
+        fn item_count(&self, _server: &GameServer, _player: &PlayerRef, template_id: u32) -> i32 {
+            i32::from(self.held.lock().unwrap().contains(&template_id))
+        }
+
+        fn try_add_new_item(
+            &self,
+            _server: &GameServer,
+            _player: &PlayerRef,
+            task_type: u8,
+            template_id: u32,
+            count: i32,
+            _grade: u8,
+        ) -> bool {
+            self.added
+                .lock()
+                .unwrap()
+                .push((task_type, template_id, count));
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn get_siege_ticket_grants_the_defense_ticket_and_refuses_with_an_offense_ticket() {
+        let mut data = crate::data::GameData::empty();
+        data.zones.zones.insert(
+            TEST_ZONE,
+            Zone {
+                id: 1,
+                zone_key: TEST_ZONE,
+                group_id: SIEGE_ZONE_GROUP,
+                ..Default::default()
+            },
+        );
+        data.systems.housing.castles.siege_zones.insert(
+            SIEGE_ZONE_GROUP,
+            SiegeZone {
+                id: 4,
+                zone_group_id: SIEGE_ZONE_GROUP,
+                defense_ticket_id: DEFENSE_TICKET,
+                offense_ticket_id: OFFENSE_TICKET,
+                ..Default::default()
+            },
+        );
+        let server = test_server_with(data);
+        let mut client = TestClient::new(&server, 1, 1);
+        let p = spawn_player(
+            &server,
+            &client,
+            test_character(1, "Caster", 100.0, 100.0),
+            0x100,
+        );
+        let items = Arc::new(FakeItems::default());
+        server.systems.skills.ext.items.install(items.clone());
+        let args = EffectArgs {
+            caster: Some(WorldObject::from(&p)),
+            caster_caster: SkillCaster::Unit(p.obj_id),
+            target: crate::systems::skills::geometry::Target::Obj(WorldObject::from(&p)),
+            target_caster: SkillCastTarget::Unit(p.obj_id),
+            cast: CastAction::Skill {
+                skill_id: 16_975,
+                tl_id: 1,
+            },
+            source: EffectSource::default(),
+            skill_object: &SkillObject::None,
+        };
+
+        super::super::execute(&server, 64, &args, [0; 4]);
+        assert_eq!(
+            *items.added.lock().unwrap(),
+            vec![(super::item_task::SKILL_EFFECT_GAIN_ITEM, DEFENSE_TICKET, 1)]
+        );
+        assert!(!client
+            .drain_ops()
+            .contains(&crate::opcodes::sc::SCErrorMsgPacket));
+
+        items.added.lock().unwrap().clear();
+        items.held.lock().unwrap().push(OFFENSE_TICKET);
+        super::super::execute(&server, 64, &args, [0; 4]);
+        assert!(items.added.lock().unwrap().is_empty());
+        let errors: Vec<i16> = client
+            .drain()
+            .into_iter()
+            .filter(|(op, _)| *op == crate::opcodes::sc::SCErrorMsgPacket)
+            .map(|(_, body)| i16::from_le_bytes([body[0], body[1]]))
+            .collect();
+        assert_eq!(
+            errors,
+            vec![crate::systems::economy::error_message::SIEGE_ONLY_DEFENSE_OR_OFFENSE_TICKET_AT_ONCE]
+        );
+    }
 
     #[test]
     fn skill_item_and_item_target_extraction() {

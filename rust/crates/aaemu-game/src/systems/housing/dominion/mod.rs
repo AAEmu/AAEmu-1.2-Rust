@@ -6,6 +6,7 @@ pub mod db;
 pub mod fort;
 pub mod headquarters;
 pub mod participants;
+pub mod peace;
 pub mod rights;
 pub mod runtime;
 pub mod state;

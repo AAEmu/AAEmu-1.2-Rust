@@ -145,12 +145,13 @@ impl SocialSkillHooks for SocialForSkills {
         server: &GameServer,
         special_type: i32,
         args: &EffectArgs<'_>,
-        _values: [i32; 4],
+        values: [i32; 4],
     ) -> bool {
         match special_type {
             50 => super::dominion::declare_effect(server, args),
             65 => crate::systems::housing::dominion::headquarters::teleport_effect(server, args),
             85 => crate::systems::housing::dominion::runtime::complete_effect(server, args),
+            110 => crate::systems::housing::dominion::peace::start_effect(server, args, values[0]),
             _ => return false,
         }
         true

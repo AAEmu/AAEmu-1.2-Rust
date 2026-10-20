@@ -713,6 +713,8 @@ CREATE TABLE IF NOT EXISTS `dominions` (
   `siege_starts_at` bigint NOT NULL DEFAULT 0,
   `siege_ends_at` bigint NOT NULL DEFAULT 0,
   `siege_ended_at` bigint NOT NULL DEFAULT 0,
+  `non_pvp_start_at` bigint NOT NULL DEFAULT 0,
+  `non_pvp_duration_min` smallint unsigned NOT NULL DEFAULT 0,
   PRIMARY KEY (`zone_group_id`),
   UNIQUE KEY `dominions_tower` (`tower_house_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

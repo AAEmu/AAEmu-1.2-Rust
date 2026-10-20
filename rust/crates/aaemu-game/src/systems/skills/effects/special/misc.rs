@@ -563,6 +563,22 @@ pub fn report_bot_expired(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4
     }
 }
 
+/// `SextantPos` (special effect 69; row 7181 is the only row, on skill 18416 "measure my
+/// current position", used by item 24795 Sextant). The 1.2 data has no authored system-message
+/// coordinate format (only the treasure-map item descriptions), so this is a placeholder
+/// format to verify in game.
+pub fn sextant_pos(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
+    log_values(args, "SextantPos", v);
+    let Some(caster) = &args.caster else {
+        return;
+    };
+    let Some(player) = caster.as_player() else {
+        return;
+    };
+    let pos = world_pos(server, &Target::Obj(caster.clone()));
+    send_system_message(player, &format!("X: {:.0}, Y: {:.0}", pos.x, pos.y));
+}
+
 /// `Character.SendMessage(message)` (`ChatType.System`).
 pub(crate) fn send_system_message(p: &crate::world::PlayerRef, message: &str) {
     crate::world::session::send_message(p, chat_type::SYSTEM, message);
@@ -570,14 +586,16 @@ pub(crate) fn send_system_message(p: &crate::world::PlayerRef, message: &str) {
 
 #[cfg(test)]
 mod tests {
+    use super::transfer_gender;
+    use super::*;
     use crate::data::character_templates::CharacterTemplate;
     use crate::data::items::{EquipTemplate, GradeTemplate, ItemTemplate, TemplateKind};
     use crate::data::GameData;
     use crate::opcodes::sc;
+    use crate::systems::skills::effects::EffectSource;
+    use crate::systems::skills::types::{CastAction, SkillCaster};
     use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
     use crate::world::PlayerRef;
-
-    use super::transfer_gender;
 
     const LOCKED_CHEST: u32 = 70;
 
@@ -692,5 +710,37 @@ mod tests {
             i16::from_le_bytes([frames[0].1[0], frames[0].1[1]]),
             crate::systems::economy::error_message::GENDER_TRANSFER_AS_GENDER_EQUIPMENT
         );
+    }
+
+    #[tokio::test]
+    async fn sextant_pos_sends_the_caster_position_as_one_system_message() {
+        let server = test_server_with(GameData::empty());
+        let mut client = TestClient::new(&server, 1, 1);
+        let p = spawn_player(
+            &server,
+            &client,
+            test_character(1, "Caster", 123.0, 456.0),
+            0x100,
+        );
+        client.drain();
+        let args = EffectArgs {
+            caster: Some(WorldObject::from(&p)),
+            caster_caster: SkillCaster::Unit(p.obj_id),
+            target: Target::Obj(WorldObject::from(&p)),
+            target_caster: SkillCastTarget::Unit(p.obj_id),
+            cast: CastAction::Skill {
+                skill_id: 18_416,
+                tl_id: 1,
+            },
+            source: EffectSource::default(),
+            skill_object: &SkillObject::None,
+        };
+        super::super::execute(&server, 69, &args, [0; 4]);
+        let frames = client.drain();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].0, crate::opcodes::sc::SCChatMessagePacket);
+        let text = String::from_utf8_lossy(&frames[0].1);
+        assert!(text.contains("X: 123"), "{text}");
+        assert!(text.contains("Y: 456"), "{text}");
     }
 }

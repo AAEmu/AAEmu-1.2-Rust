@@ -21,6 +21,7 @@ use crate::packets::world_objects::SCUnitAttachedPacket;
 use crate::server::GameServer;
 use crate::systems::npcs::doodad::spawner::SimpleSpawnerDef;
 use crate::systems::npcs::spawn_manager;
+use crate::systems::skills::effects::EffectArgs;
 use crate::systems::skills::packets::SCUnitDeathPacket;
 use crate::systems::skills::types::{
     BuffEventTriggerKind, BuffRemoveOn, KillReason, SkillCastTarget, SkillCaster,
@@ -617,6 +618,53 @@ pub fn delete(
         );
     }
     let _ = template_id;
+}
+
+/// `DestroyAndSpawnSlave` (special effect 72; row 8224 is the only row, on skill 19165 "destroy
+/// the isolated ship and make a new one appear", carried by slave template 125's mount skill).
+/// A spawner-backed slave is removed through its spawner and the spawner creates the
+/// replacement at the authored transform. A slave without a spawner stays destroyed.
+pub fn destroy_and_spawn(server: &GameServer, args: &EffectArgs<'_>) {
+    let Some(slave) = args
+        .target
+        .as_obj()
+        .and_then(WorldObject::as_slave)
+        .cloned()
+    else {
+        tracing::warn!("Special effects: DestroyAndSpawnSlave target is not a slave");
+        return;
+    };
+    let (spawner_id, instance_id, template_id) = {
+        let d = slave.data();
+        (
+            d.spawner_id,
+            d.unit.transform.instance_id,
+            d.unit.template_id,
+        )
+    };
+    let Some(world) = server.world.world(instance_id) else {
+        return;
+    };
+    if spawner_id != 0 {
+        if let Some(spawner) = server.systems.vehicles.slave_spawners.get(spawner_id) {
+            let old_obj_id = slave.obj_id;
+            spawner.despawn(server, &slave);
+            match spawner.spawn(server) {
+                Some(new_obj_id) => tracing::debug!(
+                    "Special effects: DestroyAndSpawnSlave replaced slave {old_obj_id} with {new_obj_id} from spawner {spawner_id}"
+                ),
+                None => tracing::warn!(
+                    "Special effects: DestroyAndSpawnSlave spawner {spawner_id} could not respawn template {template_id}"
+                ),
+            }
+            return;
+        }
+    }
+    tracing::warn!(
+        "Special effects: DestroyAndSpawnSlave slave {} has no spawner; leaving it destroyed",
+        slave.obj_id
+    );
+    world.delete(&slave);
 }
 
 /// `RemoveActiveSlave(character, slaveTlId, forceDelete)`.

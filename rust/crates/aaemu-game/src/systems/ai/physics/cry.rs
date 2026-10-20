@@ -35,7 +35,7 @@
 //! (z up). Positions / velocities swap y and z; orientations use the C# mapping
 //! `(x, z, y, w)` (`PhysicsManager.SyncTransformWithRigidBody`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use aaemu_physics::entities::base::add_geometry;
@@ -556,7 +556,14 @@ pub struct UnitCollisions {
     /// `(unit a, unit b)` with 0 = terrain / static.
     pairs: HashMap<(u32, u32), PairImpact>,
     last_flush_ms: i64,
+    /// Pairs that reported an impact in the previous flush window (continuing contact).
+    prev_contact: HashSet<(u32, u32)>,
+    /// When each pair last produced damage (per-pair cooldown).
+    last_damage_ms: HashMap<(u32, u32), i64>,
 }
+
+/// Per-pair damage cooldown (the C# `ShipShipInteraction` 1.5 s), in milliseconds.
+const DAMAGE_COOLDOWN_MS: i64 = (pair::HULL_COLLISION_DAMAGE_COOLDOWN_SEC * 1000.0) as i64;
 
 impl UnitCollisions {
     /// One contact (`sub_390AF3C0`): dropped at or below the minimum speed.
@@ -583,11 +590,25 @@ impl UnitCollisions {
             return Vec::new();
         }
         self.last_flush_ms = now_ms;
+        self.last_damage_ms
+            .retain(|_, t| now_ms - *t < DAMAGE_COOLDOWN_MS);
+        let prev_contact = std::mem::take(&mut self.prev_contact);
         let mut out = Vec::new();
         let find = |id: u32| ships.iter().find(|s| s.spec.obj_id == id);
         for ((a, b), p) in self.pairs.drain() {
+            self.prev_contact.insert((a, b));
+            // deviation: a pair on cooldown deals no further damage
+            if self.last_damage_ms.contains_key(&(a, b)) {
+                continue;
+            }
+            // deviation: terrain / static damage only for a new impact, not a sustained grind
+            if (a == 0 || b == 0) && prev_contact.contains(&(a, b)) {
+                continue;
+            }
+            self.last_damage_ms.insert((a, b), now_ms);
             let impact = p.impact.min(pair::HULL_DAMAGE_SPEED_INTERP_MAX_MPS);
             let scaled = speed_scaled_hull_damage_percent(impact);
+            tracing::debug!(a, b, speed = impact, pct = scaled, "ship collision damage");
             match (find(a), find(b)) {
                 (Some(sa), Some(sb)) => {
                     let (ax, az) = sa.mass_box_center_xz();
