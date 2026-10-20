@@ -1820,3 +1820,196 @@ async fn invite_area_skips_party_members_and_hostiles() {
     assert!(far.ops().is_empty());
     let _ = a.ops();
 }
+
+/// Guild invitations must be pending and unexpired, a member cannot join a second guild, and
+/// expel / role changes need a strictly higher rank than the target (deviations from C#).
+#[tokio::test]
+async fn guild_invite_and_rank_guards() {
+    use crate::data::world_data::SystemFaction;
+    use crate::systems::social::expedition::{self, Expedition};
+
+    let server = test_server();
+    let mut leader = pc(&server, 1, "Lead", 100.0, 100.0);
+    let mut cmdr = pc(&server, 2, "Cmdr", 101.0, 100.0);
+    let mut cmdr2 = pc(&server, 3, "Cmdr2", 102.0, 100.0);
+    let mut off = pc(&server, 4, "Off", 103.0, 100.0);
+    let mut out = pc(&server, 9, "Out", 104.0, 100.0);
+    let mut other = pc(&server, 10, "Other", 105.0, 100.0);
+    for p in [
+        &mut leader,
+        &mut cmdr,
+        &mut cmdr2,
+        &mut off,
+        &mut out,
+        &mut other,
+    ] {
+        p.c.drain();
+    }
+    let build = |id: u32, name: &str, members: Vec<(&Pc, u8)>| {
+        let members = members
+            .into_iter()
+            .map(|(m, role)| {
+                m.p.data().unit.expedition_id = id;
+                let mut x = expedition::member_from_character(&server, id, &m.p, false);
+                x.role = role;
+                x
+            })
+            .collect();
+        let mut policies = expedition::default_policies(&server, id);
+        for p in policies.iter_mut().filter(|p| p.role == 3) {
+            p.promote = true;
+        }
+        server.expeditions.add(Expedition {
+            faction: SystemFaction {
+                id,
+                name: name.into(),
+                owner_id: 1,
+                owner_name: "Lead".into(),
+                mother_id: 148,
+                ..Default::default()
+            },
+            members,
+            policies,
+            removed_members: Vec::new(),
+            is_disbanded: false,
+        });
+    };
+    build(
+        77,
+        "Knights",
+        vec![(&leader, 255), (&cmdr, 3), (&cmdr2, 3), (&off, 2)],
+    );
+    build(88, "Rivals", vec![(&other, 255)]);
+    let reply = |id: u32| {
+        let mut s = PacketStream::new();
+        s.write_u32(id).write_u32(1).write_bool(true);
+        s
+    };
+
+    // No invitation at all: the reply joins nothing.
+    out.send(&server, cs::CSReplyExpeditionInvitationPacket, reply(77))
+        .await;
+    assert_eq!(out.p.data().unit.expedition_id, 0);
+    assert_eq!(server.expeditions.get(77).unwrap().members.len(), 4);
+
+    // Invited to 77 but answering for 88: refused, and the invitation is consumed.
+    let mut s = PacketStream::new();
+    s.write_str("Out");
+    leader
+        .send(&server, cs::CSInviteToExpeditionPacket, s.clone())
+        .await;
+    out.send(&server, cs::CSReplyExpeditionInvitationPacket, reply(88))
+        .await;
+    assert_eq!(out.p.data().unit.expedition_id, 0);
+    out.send(&server, cs::CSReplyExpeditionInvitationPacket, reply(77))
+        .await;
+    assert_eq!(out.p.data().unit.expedition_id, 0);
+
+    // A member of another guild cannot be pulled in with a stale / forged reply.
+    other
+        .send(&server, cs::CSReplyExpeditionInvitationPacket, reply(77))
+        .await;
+    assert_eq!(other.p.data().unit.expedition_id, 88);
+    assert_eq!(server.expeditions.get(88).unwrap().members.len(), 1);
+
+    // An expired invitation is refused.
+    leader
+        .send(&server, cs::CSInviteToExpeditionPacket, s.clone())
+        .await;
+    server
+        .expeditions
+        .invitations
+        .lock()
+        .unwrap()
+        .get_mut(&9)
+        .unwrap()
+        .time_ms -= 61_000;
+    out.send(&server, cs::CSReplyExpeditionInvitationPacket, reply(77))
+        .await;
+    assert_eq!(out.p.data().unit.expedition_id, 0);
+
+    // A legitimate invitation still works.
+    leader
+        .send(&server, cs::CSInviteToExpeditionPacket, s)
+        .await;
+    out.send(&server, cs::CSReplyExpeditionInvitationPacket, reply(77))
+        .await;
+    assert_eq!(out.p.data().unit.expedition_id, 77);
+    assert_eq!(server.expeditions.get(77).unwrap().members.len(), 5);
+
+    // Kick: the leader and an equal rank are protected, a lower rank is not.
+    let kick = |id: u32| {
+        let mut s = PacketStream::new();
+        s.write_u32(id);
+        s
+    };
+    cmdr.send(&server, cs::CSKickFromExpeditionPacket, kick(1))
+        .await;
+    cmdr.send(&server, cs::CSKickFromExpeditionPacket, kick(3))
+        .await;
+    assert_eq!(server.expeditions.get(77).unwrap().members.len(), 5);
+    assert_eq!(leader.p.data().unit.expedition_id, 77);
+    cmdr.send(&server, cs::CSKickFromExpeditionPacket, kick(4))
+        .await;
+    assert_eq!(off.p.data().unit.expedition_id, 0);
+    assert_eq!(server.expeditions.get(77).unwrap().members.len(), 4);
+
+    // Role changes: not on the leader or an equal rank; a lower rank is fine.
+    let role = |new_role: u8, id: u32| {
+        let mut s = PacketStream::new();
+        s.write_u8(new_role).write_u32(id);
+        s
+    };
+    cmdr.send(&server, cs::CSChangeExpeditionMemberRolePacket, role(0, 1))
+        .await;
+    cmdr.send(&server, cs::CSChangeExpeditionMemberRolePacket, role(0, 3))
+        .await;
+    let e = server.expeditions.get(77).unwrap();
+    assert_eq!(
+        (e.member(1).unwrap().role, e.member(3).unwrap().role),
+        (255, 3)
+    );
+    cmdr.send(&server, cs::CSChangeExpeditionMemberRolePacket, role(1, 9))
+        .await;
+    assert_eq!(
+        server.expeditions.get(77).unwrap().member(9).unwrap().role,
+        1
+    );
+}
+
+/// The loot master of a team must be a member of it.
+#[tokio::test]
+async fn loot_master_must_be_a_team_member() {
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    let mut c = pc(&server, 3, "Cy", 120.0, 100.0);
+    settle(&mut [&mut a, &mut b, &mut c]);
+    let team_id = form_party(&server, &mut a, &mut b).await;
+    let rule = |master: u32| {
+        let mut s = PacketStream::new();
+        s.write_u32(team_id)
+            .write_u8(2)
+            .write_u8(4)
+            .write_u32(master)
+            .write_bool(false)
+            .write_u8(0x05);
+        s
+    };
+    a.send(&server, cs::CSChangeLootingRulePacket, rule(3))
+        .await;
+    let master = || {
+        server
+            .systems
+            .social
+            .teams
+            .active_team(team_id)
+            .unwrap()
+            .looting_rule
+            .loot_master
+    };
+    assert_eq!(master(), 0);
+    a.send(&server, cs::CSChangeLootingRulePacket, rule(2))
+        .await;
+    assert_eq!(master(), 2);
+}
