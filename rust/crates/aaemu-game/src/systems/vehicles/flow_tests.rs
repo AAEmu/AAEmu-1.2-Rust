@@ -1767,7 +1767,29 @@ async fn slave_death_marks_the_summon_item_destroyed() {
     assert_eq!(tasks.last().unwrap()[0], 59);
     let item = mates::owned_item(&server, &pa, item_id).unwrap();
     assert_eq!(item.details.slave_is_destroyed, 1);
+    let now = chrono::Utc::now().timestamp();
+    // The death starts the 10 minute repair time (the C# left it at DateTime.MinValue, so a
+    // destroyed vehicle could be summoned again immediately).
+    assert!(item.details.slave_repair_start_time > 0);
+    assert!(item.details.slave_repair_start_time <= now);
     // A destroyed vehicle cannot be summoned again before it is repaired.
+    assert!(slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        SLAVE_TEMPLATE,
+        Some(item.clone()),
+        false,
+        None,
+        None,
+    )
+    .is_none());
+    let f = a.drain();
+    let e = body(&f, sc::SCErrorMsgPacket);
+    assert_eq!(&e[..2], &540i16.to_le_bytes());
+    let left = u32::from_le_bytes(e[4..8].try_into().unwrap());
+    assert!((597..=600).contains(&left), "{left}");
     let sm = server.systems.npcs.spawns.get(0).unwrap();
     assert!(sm
         .pending_despawns()
@@ -1776,6 +1798,26 @@ async fn slave_death_marks_the_summon_item_destroyed() {
     crate::systems::npcs::spawn_manager::advance_test_clock(Duration::from_secs(21));
     sm.check_respawns_tick(&server);
     a.drain();
+    // The despawn does not shorten the repair time.
+    let item = mates::owned_item(&server, &pa, item_id).unwrap();
+    assert!(slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        SLAVE_TEMPLATE,
+        Some(item),
+        false,
+        None,
+        None,
+    )
+    .is_none());
+    a.drain();
+    // After the repair time has passed, the same vehicle can be summoned again; the successful
+    // summon clears the repair time (the destroyed flag stays until a repair effect clears it).
+    mates::update_owned_item(&server, Some(&pa), item_id, |i| {
+        i.details.slave_repair_start_time = chrono::Utc::now().timestamp() - 600;
+    });
     let item = mates::owned_item(&server, &pa, item_id).unwrap();
     assert!(slaves::create_core(
         &server,
@@ -1789,6 +1831,59 @@ async fn slave_death_marks_the_summon_item_destroyed() {
         None,
     )
     .is_some());
+    let item = mates::owned_item(&server, &pa, item_id).unwrap();
+    assert_eq!(item.details.slave_repair_start_time, 0);
+    assert_eq!(item.details.slave_is_destroyed, 1);
+}
+
+#[tokio::test]
+async fn a_zero_hp_slave_load_needs_the_repair_time_before_it_returns_at_full_hp() {
+    let server = server_with(slave_data());
+    let mut a = TestClient::new(&server, 1, 1);
+    let (pa, item_id) = player_with_item(&server, &a, 1, PA, (100.0, 100.0), SLAVE_ITEM);
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    a.drain();
+    // A destroyed vehicle saved at 0 HP (the row a save tick writes after the death).
+    mates::update_owned_item(&server, Some(&pa), item_id, |i| {
+        i.details.slave_is_destroyed = 1;
+        i.details.slave_repair_start_time = chrono::Utc::now().timestamp();
+    });
+    let saved = slaves::SavedSlave {
+        id: 77,
+        name: "Ship".into(),
+        hp: 0,
+        mp: 0,
+    };
+    let spawn = |saved: slaves::SavedSlave| {
+        let item = mates::owned_item(&server, &pa, item_id).unwrap();
+        slaves::create_core(
+            &server,
+            &world,
+            Some(&pa),
+            None,
+            SLAVE_TEMPLATE,
+            Some(item),
+            false,
+            None,
+            Some(saved),
+        )
+    };
+    // Before the repair time: no summon and no free full-HP ship.
+    assert!(spawn(saved.clone()).is_none());
+    let f = a.drain();
+    let e = body(&f, sc::SCErrorMsgPacket);
+    assert_eq!(&e[..2], &540i16.to_le_bytes());
+    assert!(server.world.world(0).unwrap().all_slaves().is_empty());
+    // After it: the C# 0-HP rule brings the repaired vehicle back at full HP.
+    mates::update_owned_item(&server, Some(&pa), item_id, |i| {
+        i.details.slave_repair_start_time = chrono::Utc::now().timestamp() - 600;
+    });
+    let slave = spawn(saved).expect("summon after the repair time");
+    let d = slave.data();
+    assert!(d.unit.hp > 0 && d.unit.hp == d.unit.max_hp);
+    let item = mates::owned_item(&server, &pa, item_id).unwrap();
+    assert_eq!(item.details.slave_repair_start_time, 0);
 }
 
 fn transfer_data() -> GameData {

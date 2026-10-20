@@ -2149,3 +2149,18 @@ exactly on the end point, and when the new position is within float noise of it 
 4 ulp of the coordinate magnitude, at least 1e-3 m: the f32 ulp is ~0.002 m beyond 16384, so a
 fixed 1e-3 m was not enough on large maps) the heading of the step itself (`heading(cur, end)`)
 is used. The C# original has the same degenerate `atan2`.
+
+## Ship repair timer and destroyed-vehicle HP (2026-10-20)
+
+Deviations from the 1.2 C# `Slave.DoDie` / `SlaveManager.Create` (the check already existed, but
+the death never started its timer):
+
+- `Slave.MarkSummoningItemAsDestroyed` wrote `RepairStartTime = DateTime.MinValue`, so the
+  `RepairStartTime.AddMinutes(10) - UtcNow` check in `Create` was always negative and a destroyed
+  vehicle could be summoned again immediately. The death now stores the destruction time in the
+  `SummonSlave` item, which starts the intended 10 minute wait; a successful summon after it
+  clears the timer (the destroyed flag stays until `RepairSlaveEffect` clears it, as in C#).
+- The C# reset of a loaded 0-HP vehicle to `MaxHp` ("can't summon with 0 HP") is kept, but only
+  when the item has no pending repair time. With the timer above, a destroyed vehicle therefore
+  comes back at full HP only after its repair wait, not when it is still on cooldown. (As the
+  mirrored `SummonSlave.ReadDetails` bug above notes, the timer itself is still lost on restart.)

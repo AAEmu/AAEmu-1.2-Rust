@@ -1068,6 +1068,21 @@ pub(crate) fn create_core(
     )
 }
 
+/// The `SlaveSpawnErrorNeedRepairTime` seconds left on a destroyed vehicle: the C#
+/// `(RepairStartTime.AddMinutes(10) - UtcNow)` check of the `SummonSlave` item, and only while
+/// the repair time is still in the future. A non-destroyed item is never pending.
+fn repair_seconds_left(item: &Item, now: i64) -> Option<i64> {
+    if item.class != ItemClass::SummonSlave {
+        return None;
+    }
+    let d = &item.details;
+    if d.slave_is_destroyed == 0 && d.slave_repair_start_time == 0 {
+        return None;
+    }
+    let left = d.slave_repair_start_time + 600 - now;
+    (left > 0).then_some(left)
+}
+
 /// The first half of `Create`: template, position, summon item checks, `SCSlaveCreatedPacket`,
 /// the slave itself (bonuses, HP / MP, initial items) and `Spawn()`. `saved` is the
 /// `load_saved_slave` row (owner + item only).
@@ -1240,11 +1255,8 @@ pub(crate) fn create_spawn(
             let res = super::mates::update_owned_item(server, Some(o), it.id, |i| {
                 i.details.slave_type = 0x02;
                 i.details.slave_db_id = db_id;
-                if i.details.slave_is_destroyed > 0 || i.details.slave_repair_start_time > 0 {
-                    let left = (i.details.slave_repair_start_time + 600 - now) as f64;
-                    if left > 0.0 {
-                        return Err(left);
-                    }
+                if let Some(left) = repair_seconds_left(i, now) {
+                    return Err(left as f64);
                 }
                 // SummonLocation (not part of the 1.2 detail bytes); RepairStartTime = MinValue
                 i.details.slave_repair_start_time = 0;
@@ -1364,7 +1376,12 @@ pub(crate) fn create_spawn(
         let mut d = slave.data();
         d.unit.hp = d.unit.hp.min(d.unit.max_hp);
         d.unit.mp = d.unit.mp.min(d.unit.max_mp);
-        if d.unit.hp <= 0 {
+        // C#: "Reset HP on 'dead' vehicles (can't summon with 0 HP)". Only once the repair time
+        // has passed: a destroyed vehicle must not come back at full HP for free.
+        let repair_pending = item
+            .as_ref()
+            .is_some_and(|i| repair_seconds_left(i, chrono::Utc::now().timestamp()).is_some());
+        if d.unit.hp <= 0 && !repair_pending {
             d.unit.hp = d.unit.max_hp;
         }
         d.unit.transform = spawn_pos;
@@ -2015,7 +2032,9 @@ fn mark_summoning_item_as_destroyed(server: &GameServer, slave: &SlaveRef) {
             return None;
         }
         i.details.slave_is_destroyed = 1;
-        i.details.slave_repair_start_time = 0;
+        // The C# wrote DateTime.MinValue here, which made the 10 minute repair check of
+        // `Create` pass immediately (a destroyed vehicle could be re-summoned at once).
+        i.details.slave_repair_start_time = chrono::Utc::now().timestamp();
         i.dirty = true;
         Some(super::packets::item_update(i))
     })
