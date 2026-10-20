@@ -1377,3 +1377,62 @@ async fn move_to_ground_lands_a_position_target_on_the_floor() {
     assert!((y - 140.0).abs() < 0.01, "y {y}");
     assert!((z - 100.4).abs() < 0.01, "z {z}");
 }
+
+#[tokio::test]
+async fn redeem_buff_removes_one_beneficial_effect_and_restores_mana() {
+    let mut data = GameData::empty();
+    data.systems.skills.add_buff(buff(1));
+    data.systems
+        .skills
+        .add_buff(BuffTemplate { kind: 2, ..buff(2) });
+    let (server, _client, _player, npc) = fixture(data);
+    let owner = WorldObject::from(&npc);
+    {
+        let mut n = npc.data();
+        n.unit.mp = 100;
+        n.unit.max_mp = 1000;
+    }
+    for id in [1, 2] {
+        super::buffs::add_buff_by_id(&server, &owner, id, &owner, 0);
+    }
+    execute(&server, 44, &args(&owner, &owner), [400, 10, 15, 0]);
+    assert_eq!(npc.data().unit.mp, 500);
+    assert!(!owner.with_base_unit(|u| u.buffs().check_buff(1)));
+    assert!(owner.with_base_unit(|u| u.buffs().check_buff(2)));
+}
+
+#[tokio::test]
+async fn redeem_buff_mana_is_capped_at_the_maximum() {
+    let mut data = GameData::empty();
+    data.systems.skills.add_buff(buff(1));
+    let (server, _client, _player, npc) = fixture(data);
+    let owner = WorldObject::from(&npc);
+    {
+        let mut n = npc.data();
+        n.unit.mp = 900;
+        n.unit.max_mp = 1000;
+    }
+    super::buffs::add_buff_by_id(&server, &owner, 1, &owner, 0);
+    execute(&server, 44, &args(&owner, &owner), [400, 10, 15, 0]);
+    assert_eq!(npc.data().unit.mp, 1000);
+    assert!(!owner.with_base_unit(|u| u.buffs().check_buff(1)));
+}
+
+#[tokio::test]
+async fn redeem_buff_without_a_beneficial_effect_does_nothing() {
+    let mut data = GameData::empty();
+    data.systems
+        .skills
+        .add_buff(BuffTemplate { kind: 2, ..buff(1) });
+    let (server, _client, _player, npc) = fixture(data);
+    let owner = WorldObject::from(&npc);
+    {
+        let mut n = npc.data();
+        n.unit.mp = 100;
+        n.unit.max_mp = 1000;
+    }
+    super::buffs::add_buff_by_id(&server, &owner, 1, &owner, 0);
+    execute(&server, 44, &args(&owner, &owner), [400, 10, 15, 0]);
+    assert_eq!(npc.data().unit.mp, 100);
+    assert!(owner.with_base_unit(|u| u.buffs().check_buff(1)));
+}

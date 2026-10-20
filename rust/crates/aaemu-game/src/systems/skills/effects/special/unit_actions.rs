@@ -5,10 +5,12 @@ use rand::seq::SliceRandom;
 use crate::server::GameServer;
 use crate::world::{now_ms, WorldObject};
 
+use super::super::super::data::effects::RestoreManaEffect;
 use super::super::super::explode_buff_rules as explode_buff;
+use super::super::super::geometry::Target;
 use super::super::super::packets::SCUnitDamagedPacket;
 use super::super::super::state::AggroKind;
-use super::super::super::types::{KillReason, SkillCaster};
+use super::super::super::types::{KillReason, SkillCastTarget, SkillCaster};
 use super::super::super::{buffs, combat};
 use super::{log_values, EffectArgs};
 
@@ -174,6 +176,50 @@ pub fn explode_buff(server: &GameServer, args: &EffectArgs<'_>, values: [i32; 4]
         0,
     );
     super::super::super::broadcast(server, &target, &p, true);
+}
+
+/// `RedeemBuff` (special type 44): removes one of the caster's own beneficial effects to restore
+/// `value1` mana.
+///
+/// Row 763 `[4000, 10, 15, 0]` of 효과 흡수 (Absorb Effect); the 의기 charge the same skill grants
+/// is a separate effect and is not touched here. `value2` / `value3` read 10 / 15 on the only
+/// shipped row and their meaning is not understood, so they are ignored (see `PORTING.md`). The
+/// mana comes back through the fixed-value `RestoreManaEffect` path, so the heal and points
+/// notifications match a real mana restore. No beneficial effect means nothing is removed and no
+/// mana is restored.
+pub fn redeem_buff(server: &GameServer, args: &EffectArgs<'_>, values: [i32; 4]) {
+    log_values(args, "RedeemBuff", values);
+    let Some(caster) = &args.caster else {
+        return;
+    };
+    if values[0] <= 0 {
+        return;
+    }
+    let Some(index) = explode_buff::select_buffs(&beneficial_candidates(server, caster), 1)
+        .first()
+        .map(|candidate| candidate.index)
+    else {
+        return;
+    };
+    buffs::exit(server, caster, index, false);
+    let mut heal_args = args.clone();
+    heal_args.target = Target::Obj(caster.clone());
+    heal_args.target_caster = SkillCastTarget::Unit(caster.obj_id());
+    super::super::combat::restore_mana(
+        server,
+        &RestoreManaEffect {
+            id: 0,
+            use_fixed_value: true,
+            fixed_min: values[0],
+            fixed_max: values[0],
+            use_level_value: false,
+            level_md: 0.0,
+            level_va_start: 0,
+            level_va_end: 0,
+            percent: false,
+        },
+        &heal_args,
+    );
 }
 
 /// WZAggroCopy (native 0x39364EF0 / 0x39321A10) replaces the target table
