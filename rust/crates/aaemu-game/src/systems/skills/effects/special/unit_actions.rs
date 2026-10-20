@@ -3,12 +3,14 @@
 use rand::seq::SliceRandom;
 
 use crate::server::GameServer;
-use crate::world::now_ms;
+use crate::world::{now_ms, WorldObject};
 
+use super::super::super::explode_buff_rules as explode_buff;
+use super::super::super::packets::SCUnitDamagedPacket;
 use super::super::super::state::AggroKind;
-use super::super::super::types::SkillCaster;
+use super::super::super::types::{KillReason, SkillCaster};
 use super::super::super::{buffs, combat};
-use super::super::EffectArgs;
+use super::{log_values, EffectArgs};
 
 /// The native WZFakeDeath handler removes incoming aggro without killing the
 /// unit or awarding kill credit. Its packet contains only the target unit ID.
@@ -95,6 +97,83 @@ pub fn buff_steal(server: &GameServer, args: &EffectArgs<'_>, values: [i32; 4]) 
             buffs::exit(server, target, original.index, false);
         }
     }
+}
+
+/// The owner's effects as the burn decision sees them. The full template lookup is what classifies
+/// a buff as beneficial (`kind`) and as system; the instance's own `passive` flag is the C#
+/// `Buff.Passive` and `is_ended` its `IsEnded`.
+fn beneficial_candidates(
+    server: &GameServer,
+    owner: &WorldObject,
+) -> Vec<explode_buff::BurnCandidate> {
+    let data = &server.game_data.systems.skills;
+    owner.with_base_unit(|unit| {
+        unit.buffs()
+            .effects
+            .iter()
+            .map(|buff| explode_buff::BurnCandidate {
+                index: buff.index,
+                kind: data
+                    .buff(buff.template.id)
+                    .map_or(0, |template| template.kind),
+                passive: buff.passive,
+                system: data
+                    .buff(buff.template.id)
+                    .is_some_and(|template| template.system),
+                ended: buff.is_ended(),
+            })
+            .collect()
+    })
+}
+
+/// `ExplodeBuff` (special type 46): burns the target's beneficial effects away, `value1` damage
+/// for each one and up to `max(value2, value3)` of them.
+///
+/// Ported from the C# `ExplodeBuff` / `ExplodeBuffRules` of commit `c78b3a659`. The shipped 10.x
+/// rows are 5009 / 9531 `[1000, 20, 20, 0]` on 내부 충격 16410 / 20650 ("burns the enemy's
+/// beneficial effects, dealing damage; no damage to a target without beneficial effects") and
+/// 6411 `[2000, 50, 50, 0]` on the Timeout trigger of buff 449, where `args.source.skill()` is
+/// `None`; nothing here needs the skill.
+pub fn explode_buff(server: &GameServer, args: &EffectArgs<'_>, values: [i32; 4]) {
+    log_values(args, "ExplodeBuff", values);
+    let Some(caster) = &args.caster else {
+        return;
+    };
+    let Some(target) = args
+        .target
+        .as_obj()
+        .filter(|target| target.is_unit())
+        .cloned()
+    else {
+        return;
+    };
+    if values[0] <= 0 {
+        return;
+    }
+    let max_buffs = explode_buff::max_buffs_to_burn(values[1], values[2]);
+    if max_buffs == 0 {
+        return;
+    }
+    let chosen = explode_buff::select_buffs(&beneficial_candidates(server, &target), max_buffs);
+    let damage = explode_buff::damage_for(chosen.len(), values[0]);
+    if damage <= 0 {
+        return;
+    }
+    for candidate in chosen {
+        buffs::exit(server, &target, candidate.index, false);
+    }
+    combat::reduce_current_hp(server, &target, Some(caster), damage, KillReason::Damage);
+    // The C# only reduced the HP; the 1.2 client shows the damage number from this packet. The
+    // burn has no damage type of its own, so the hit type stays the packet's `Invalid` default.
+    let p = SCUnitDamagedPacket::new(
+        args.cast,
+        args.caster_caster,
+        caster.obj_id(),
+        target.obj_id(),
+        damage,
+        0,
+    );
+    super::super::super::broadcast(server, &target, &p, true);
 }
 
 /// WZAggroCopy (native 0x39364EF0 / 0x39321A10) replaces the target table

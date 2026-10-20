@@ -1232,3 +1232,88 @@ async fn no_fight_guard_in_add_unit_aggro_does_not_warn_for_absent_entries() {
     assert!(logs.contains("was not in the aggro table"), "{logs}");
     assert!(npc.data().unit.skill_state.aggro_table.contains_key(&0x999));
 }
+
+#[tokio::test]
+async fn explode_buff_burns_beneficial_effects_and_pays_per_effect_damage() {
+    let mut data = GameData::empty();
+    for id in 1..=3 {
+        data.systems.skills.add_buff(buff(id));
+    }
+    // A debuff, a system effect and a passive: none of them is something an enemy can burn.
+    data.systems
+        .skills
+        .add_buff(BuffTemplate { kind: 2, ..buff(4) });
+    data.systems.skills.add_buff(BuffTemplate {
+        system: true,
+        ..buff(5)
+    });
+    data.systems.skills.add_buff(buff(6));
+    let (server, _client, player, npc) = fixture(data);
+    let caster = WorldObject::from(&player);
+    let target = WorldObject::from(&npc);
+    npc.data().unit.hp = 5000;
+    npc.data().unit.max_hp = 5000;
+    for id in 1..=6 {
+        super::buffs::add_buff_by_id(&server, &target, id, &target, 0);
+    }
+    target.with_base_unit(|unit| {
+        unit.buffs_mut()
+            .effects
+            .iter_mut()
+            .find(|b| b.template.id == 6)
+            .unwrap()
+            .passive = true;
+    });
+    execute(&server, 46, &args(&caster, &target), [1000, 20, 20, 0]);
+    // Three beneficial effects burned, 1000 damage each.
+    assert_eq!(npc.data().unit.hp, 2000);
+    for id in [1, 2, 3] {
+        assert!(
+            !target.with_base_unit(|u| u.buffs().check_buff(id)),
+            "buff {id} should be burned"
+        );
+    }
+    for id in [4, 5, 6] {
+        assert!(
+            target.with_base_unit(|u| u.buffs().check_buff(id)),
+            "buff {id} should be kept"
+        );
+    }
+}
+
+#[tokio::test]
+async fn explode_buff_without_beneficial_effects_does_nothing() {
+    let mut data = GameData::empty();
+    data.systems
+        .skills
+        .add_buff(BuffTemplate { kind: 2, ..buff(1) });
+    let (server, _client, player, npc) = fixture(data);
+    let caster = WorldObject::from(&player);
+    let target = WorldObject::from(&npc);
+    super::buffs::add_buff_by_id(&server, &target, 1, &target, 0);
+    execute(&server, 46, &args(&caster, &target), [1000, 20, 20, 0]);
+    assert_eq!(npc.data().unit.hp, 1000);
+    assert!(target.with_base_unit(|u| u.buffs().check_buff(1)));
+}
+
+#[tokio::test]
+async fn explode_buff_respects_the_burn_cap_lowest_slot_first() {
+    let mut data = GameData::empty();
+    for id in 1..=3 {
+        data.systems.skills.add_buff(buff(id));
+    }
+    let (server, _client, player, npc) = fixture(data);
+    let caster = WorldObject::from(&player);
+    let target = WorldObject::from(&npc);
+    npc.data().unit.hp = 5000;
+    npc.data().unit.max_hp = 5000;
+    for id in 1..=3 {
+        super::buffs::add_buff_by_id(&server, &target, id, &target, 0);
+    }
+    execute(&server, 46, &args(&caster, &target), [100, 2, 2, 0]);
+    assert_eq!(npc.data().unit.hp, 4800);
+    for id in [1, 2] {
+        assert!(!target.with_base_unit(|u| u.buffs().check_buff(id)));
+    }
+    assert!(target.with_base_unit(|u| u.buffs().check_buff(3)));
+}

@@ -25,6 +25,7 @@ pub mod combat;
 pub mod controllers;
 pub mod data;
 pub mod effects;
+pub(crate) mod explode_buff_rules;
 pub mod ext;
 pub mod geometry;
 pub mod handlers;

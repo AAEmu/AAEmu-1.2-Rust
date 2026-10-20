@@ -323,6 +323,7 @@ pub fn execute(server: &GameServer, kind: i32, args: &EffectArgs<'_>, values: [i
         41 => combat::global_cooldown(s, a, v),
         43 => combat::reset_cooldown(s, a, v),
         45 => items::gain_item_with_emblem_imprint(s, a, v),
+        46 => unit_actions::explode_buff(s, a, v),
         47 => movement::teleport_to_unit(s, a, v),
         49 => items::item_conversion(s, a, v),
         50 => misc::declare_dominion(s, a, v),
@@ -367,6 +368,9 @@ pub fn execute(server: &GameServer, kind: i32, args: &EffectArgs<'_>, values: [i
         118 => items::give_cash_point(s, a, v),
         // `Detach` (the C# body only logs; the unmount is commented out).
         55 => log_values(a, "Detach", v),
+        // `CombatDice` (67) is a marker for the plot combat-dice condition (`plots.rs`,
+        // condition 9) and `Combo` (48) is the client-driven combo chain (`value1` next skill,
+        // `value2` window in ms): neither needs a server action, so both only log.
         // Every other class only logs (`if (caster is Character) Logger.Debug(...)`).
         _ => match special_type_name(kind) {
             Some("Unk9") | None => {
