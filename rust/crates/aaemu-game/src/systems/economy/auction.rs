@@ -678,7 +678,7 @@ impl AuctionManager {
             .map(|m| &m.mail)
             .collect();
         tracing::error!(
-            "Auction lot {}: giving up the settlement after {} failed mail retries (seller {},              remove lot {}); undelivered mails dropped: {unsent:?}",
+            "Auction lot {}: giving up the settlement after {} failed mail retries (seller {}, remove lot {}); undelivered mails dropped: {unsent:?}",
             settlement.lot.id,
             settlement.retries,
             settlement.lot.client_id,
