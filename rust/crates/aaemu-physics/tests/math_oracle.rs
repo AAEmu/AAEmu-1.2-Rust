@@ -229,7 +229,9 @@ fn other_crt_functions_known_divergence() {
             .iter()
             .filter(|(i, o)| func(f64::from_bits(i[0])).to_bits() != o[0])
             .count();
-        lim(name, bad, 30);
+        // These call the host libm (`f64::cos` etc.), so the rate depends on the platform:
+        // measured on Windows/UCRT within 30, glibc differs more (cos: 35 on ubuntu-latest).
+        lim(name, bad, if cfg!(windows) { 30 } else { 60 });
     }
     let t = load("atan2", 1000, 8);
     let bad = t
