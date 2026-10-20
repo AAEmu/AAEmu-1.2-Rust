@@ -231,6 +231,12 @@ is the one of the game server's `Connections`). Fields (`quest_item_quest`, `que
 from the level spawn fails the `game.doodad.level_spawn` step. The scenario then interacts with a
 `/spawn doodad 4252` copy, so the cast is still checked, and removes that copy afterwards.
 
+`portal` (GM account, same prerequisites as `questitem`) records a book entry with `/add_portal`, deletes it
+with `CSDeletePortal` and requires `SCPortalDeleted`, then teleports next to the Harpa Training Ground Memory Tome
+(doodad 841), casts its binding skill 14602 with a doodad target and requires `SCCharacterReturnDistricts` with the
+bound return point 1, then opens a gate (Teleport Book 4045, skill 11216) once 20 m away (must be refused) and once
+2.5 m ahead, and requires `SCUnitPortalUsed` with the gate NPC before the `SCTeleportUnit` of `CSUsePortal`.
+
 `stonethrow` and `ghost` (GM account, same prerequisites as `questitem`) check two log-noise fixes:
 `stonethrow` casts the stone-throwing skill 11268 from items 4056 / 24210 and asserts that the cast
 of a stack of 2 ends with an `ItemUnlock` (item task type 95) while the cast with the last stone

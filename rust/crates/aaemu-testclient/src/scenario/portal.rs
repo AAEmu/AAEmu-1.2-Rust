@@ -9,7 +9,13 @@
 //!    trailing `returnDistrictId` is return point 1 (district 15 for the Nuian factions), and
 //!    the tome enters its timer phase (`SCDoodadPhaseChanged`).
 //!
-//! GM account (`/add_portal`, `/move`), like `doodad`.
+//! 3. Back at the spawn spot's twin: with a Teleport Book (4045) and Hereafter Stones (4052)
+//!    from `/item add`, a gate to a recorded spot is opened (skill 11216, `PortalInfo` skill
+//!    object) once with a point 20 m away (the server must refuse it: no gate, no stone used)
+//!    and once 2.5 m ahead; going through it (`CSUsePortal`) must bring `SCUnitPortalUsed` with
+//!    the gate NPC's objId before the `SCTeleportUnit`.
+//!
+//! GM account (`/add_portal`, `/move`, `/item add`), like `doodad`.
 
 use std::time::{Duration, Instant};
 
@@ -17,7 +23,7 @@ use aaemu_commons::PacketStream;
 use aaemu_game::opcodes::{cs, sc};
 use anyhow::{bail, ensure, Context};
 
-use super::questitem::{chat_text, gm_command};
+use super::questitem::{chat_text, gm_command, stack_id};
 use super::{skill_response_result, BotConfig, Runner, QUIET};
 use crate::game::{GameClient, Packet};
 
@@ -31,6 +37,13 @@ const POS: [f32; 3] = [10345.0, 16035.5, 358.0];
 const RETURN_POINT: u32 = 1;
 /// How long the cast (3 s) and its aftermath are observed.
 const CAST_WINDOW: Duration = Duration::from_secs(8);
+/// Teleport Book (use skill 11216) and Hereafter Stone (inland reagent).
+const BOOK: u32 = 4045;
+const STONE: u32 = 4052;
+/// Skill 11216 "Opening Worldgate" (10 s cast).
+const OPEN_SKILL: u32 = 11216;
+/// The entrance gate NPC.
+const GATE_NPC: u32 = 3891;
 
 pub(super) async fn run(
     game: &mut GameClient,
@@ -71,6 +84,17 @@ pub(super) async fn run(
         deleted.body
     );
     r.end(s, format!("entry {id} deleted, SCPortalDeleted(2, {id})"));
+
+    // A spot to open gates to later: here, at the spawn.
+    game.chat(0, "/add_portal TcHome").await?;
+    let added = game
+        .wait_for("SCCharacterPortalsPacket", |p| {
+            p.is_sc(sc::SCCharacterPortalsPacket)
+        })
+        .await?;
+    let home = *portal_ids(&added)?
+        .last()
+        .context("SCCharacterPortals without an entry")?;
 
     // ---- Memory Tome ----
     let s = r.begin("game.portal.tome");
@@ -153,6 +177,74 @@ pub(super) async fn run(
         ),
     );
 
+    // ---- gate ----
+    let s = r.begin("game.portal.gate");
+    let reply = gm_command(game, &format!("item add self {BOOK} 1")).await?;
+    let book = stack_id(&reply, BOOK).context("no Teleport Book from /item add")?;
+    let reply = gm_command(game, &format!("item add self {STONE} 3")).await?;
+    stack_id(&reply, STONE).context("no Hereafter Stone from /item add")?;
+    let me = game.state.self_pos;
+    // Too far (20 m): the effect must refuse the point.
+    let far = (me.0 + 20.0, me.1 - 5.0, me.2);
+    let gates_before = gate_ids(game);
+    game.send_cs(
+        cs::CSStartSkillPacket,
+        &open_portal(game.state.self_obj, book, home, far),
+    )
+    .await?;
+    // 10 s cast + the 10 s cooldown (it starts when the skill fires).
+    game.drain(Duration::from_secs(22), Duration::from_secs(22))
+        .await?;
+    let far_gate = gate_ids(game)
+        .into_iter()
+        .any(|g| !gates_before.contains(&g));
+    ensure!(!far_gate, "a gate opened 20 m away from the caster");
+    // 2.5 m ahead: the gate opens.
+    let near = (me.0 + 2.5, me.1, me.2);
+    game.send_cs(
+        cs::CSStartSkillPacket,
+        &open_portal(game.state.self_obj, book, home, near),
+    )
+    .await?;
+    let started = Instant::now();
+    let mut gate = None;
+    while started.elapsed() < Duration::from_secs(16) && gate.is_none() {
+        game.recv_within(Duration::from_millis(250)).await?;
+        gate = gate_ids(game)
+            .into_iter()
+            .find(|g| !gates_before.contains(g));
+    }
+    let gate = gate.context("no gate NPC 3891 appeared after the 2.5 m cast")?;
+    let mut body = PacketStream::new();
+    body.write_bc(gate).write_bool(false);
+    game.send_cs(cs::CSUsePortalPacket, body.as_bytes()).await?;
+    let mut used = None;
+    let mut teleported = false;
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(5) && !teleported {
+        let Some(p) = game.recv_within(Duration::from_millis(250)).await? else {
+            continue;
+        };
+        if p.is_sc(sc::SCUnitPortalUsedPacket) {
+            used = p.stream().read_bc().ok();
+        }
+        if p.is_sc(sc::SCTeleportUnitPacket) {
+            teleported = true;
+        }
+    }
+    ensure!(teleported, "no SCTeleportUnit after CSUsePortal");
+    ensure!(
+        used == Some(gate),
+        "SCUnitPortalUsed carried {used:?}, expected the gate {gate}"
+    );
+    let at = game.state.self_pos;
+    game.teleport_ended(at).await?;
+    game.drain(QUIET, Duration::from_secs(3)).await?;
+    r.end(
+        s,
+        format!("far point refused; gate {gate} opened, used: SCUnitPortalUsed({gate}), teleported to {at:?}"),
+    );
+
     // ---- leave ----
     let s = r.begin("game.leave");
     game.leave_world(0).await?;
@@ -162,6 +254,39 @@ pub(super) async fn run(
         .ok();
     r.end(s, "left");
     Ok(())
+}
+
+/// Entrance gates (NPC 3891) the bot can see.
+fn gate_ids(game: &GameClient) -> Vec<u32> {
+    game.state
+        .units
+        .values()
+        .filter(|u| u.unit_type == 1 && u.id == GATE_NPC)
+        .map(|u| u.obj_id)
+        .collect()
+}
+
+/// `CSStartSkill(11216)` cast from the Teleport Book at ourselves with the `PortalInfo` skill
+/// object (`u8 kind, i32 id, long x, long y, f32 z`) of a private book entry, as the client does.
+fn open_portal(self_obj: u32, book: u64, portal_id: u32, at: (f32, f32, f32)) -> Vec<u8> {
+    use aaemu_commons::helpers::convert_coord_to_long;
+    let mut s = PacketStream::new();
+    s.write_u32(OPEN_SKILL)
+        .write_u8(2) // SkillCasterType.Item
+        .write_bc(self_obj)
+        .write_u64(book)
+        .write_u32(BOOK)
+        .write_u8(0)
+        .write_u32(0)
+        .write_u8(0) // SkillCastUnitTarget
+        .write_bc(self_obj)
+        .write_u8(1) // SkillObjectPortalInfo
+        .write_u8(2) // private entry
+        .write_i32(portal_id as i32)
+        .write_i64(convert_coord_to_long(at.0))
+        .write_i64(convert_coord_to_long(at.1))
+        .write_f32(at.2);
+    s.into_bytes()
 }
 
 fn dist(a: (f32, f32, f32), b: (f32, f32, f32)) -> f32 {
