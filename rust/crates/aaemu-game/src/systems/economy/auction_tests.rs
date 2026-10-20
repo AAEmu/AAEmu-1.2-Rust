@@ -154,6 +154,27 @@ fn bid_body(lot_id: u64, money: i32) -> Vec<u8> {
     s.into_bytes()
 }
 
+/// `SCAuctionBidPacket` body: bid(lot, world, bidder, name, money), isBuyout, itemId.
+fn bid_packet_body(
+    lot_id: u64,
+    world_id: u8,
+    bidder_id: u32,
+    name: &str,
+    money: i32,
+    is_buyout: bool,
+    item_id: u32,
+) -> Vec<u8> {
+    let mut s = PacketStream::new();
+    s.write_u64(lot_id)
+        .write_u8(world_id)
+        .write_u32(bidder_id)
+        .write_str(name)
+        .write_i32(money)
+        .write_bool(is_buyout)
+        .write_u32(item_id);
+    s.into_bytes()
+}
+
 fn cancel_body(lot_id: u64) -> Vec<u8> {
     let mut s = PacketStream::new();
     s.write_bc(0x200).write_bc(0x200);
@@ -616,6 +637,37 @@ async fn search_pages_hold_nine_lots() {
 }
 
 #[tokio::test]
+async fn expire_date_sort_uses_end_time_not_post_date() {
+    let (mut w, _log) = auction_world();
+    let (_, mut first) = post(&mut w, SWORD, 0, 100, 0);
+    let (_, mut second) = post(&mut w, POTION, 1, 100, 0);
+    // The first lot was posted first but expires last: a PostDate sort would keep this order.
+    first.post_date = Utc.timestamp_opt(1_000, 0).unwrap();
+    first.end_time = Utc.timestamp_opt(9_000, 0).unwrap();
+    second.post_date = Utc.timestamp_opt(2_000, 0).unwrap();
+    second.end_time = Utc.timestamp_opt(8_000, 0).unwrap();
+    let ah = &w.server.systems.economy.auction;
+    ah.set_lot(first.clone());
+    ah.set_lot(second.clone());
+    w.a.drain();
+    w.b.drain();
+    let s = AuctionSearch {
+        sort_kind: sort_kind::EXPIRE_DATE,
+        sort_order: sort_order::ASC,
+        ..Default::default()
+    };
+    run::<CSAuctionSearchPacket>(&mut w, 1, &search_body(&s));
+    let frames = w.b.drain();
+    let mut want = PacketStream::new();
+    want.write_i32(0).write_i32(2);
+    want.write_raw(&lot_bytes(&second))
+        .write_raw(&lot_bytes(&first));
+    want.write_i16(0);
+    let b = &frames[0].1;
+    assert_eq!(&b[..b.len() - 8], want.as_bytes());
+}
+
+#[tokio::test]
 async fn bid_outbid_buyout_moves_money_and_mails() {
     let (mut w, log) = auction_world();
     let (item_id, lot) = post(&mut w, SWORD, 0, 1000, 1);
@@ -690,10 +742,18 @@ async fn bid_outbid_buyout_moves_money_and_mails() {
     run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 5000));
     assert_eq!(money(&w.pb), 100_000 - 500 - 600 - 1000);
     let frames = w.b.drain();
-    assert_eq!(frames.len(), 1);
+    assert_eq!(frames.len(), 2);
     assert_eq!(
         frames[0].1,
         task_body(task_type::DEPOSIT_MONEY, vec![ItemTask::MoneyChange(-1000)])
+    );
+    // The buyer gets the buyout confirmation (the C# sent none).
+    assert_eq!(
+        frames[1],
+        (
+            sc::SCAuctionBidPacket,
+            bid_packet_body(lot.id, 0, 2, "Bob", 1000, true, SWORD)
+        )
     );
     let item = w.server.items.item_by_id(item_id).unwrap();
     assert_eq!(
@@ -755,7 +815,16 @@ async fn buyout_without_previous_bid_and_no_buyout_price() {
     assert!(log.take().is_empty());
 
     let (_, lot) = post(&mut w, POTION, 1, 300, 0);
+    w.b.drain();
     run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 300));
+    let frames = w.b.drain();
+    assert_eq!(
+        frames.last().unwrap(),
+        &(
+            sc::SCAuctionBidPacket,
+            bid_packet_body(lot.id, 0, 2, "Bob", 300, true, POTION)
+        )
+    );
     let mails = log.take();
     assert_eq!(mails.len(), 2);
     assert!(matches!(
@@ -989,4 +1058,110 @@ async fn buyout_delivers_item_and_payment_by_mail() {
         &alice[0].id.to_le_bytes(),
     );
     assert_eq!(money(&w.pa), before + 900);
+}
+
+/// Post -> cancel (refund mail) -> take-all-and-delete on the cancel mail, through the real mail
+/// wiring. The Bevy client hit a server wedge here; the whole flow must finish.
+#[tokio::test]
+async fn cancel_refund_mail_can_be_taken_all_and_deleted() {
+    let (mut w, _log) = auction_world();
+    crate::systems::economy::wiring::install(&w.server);
+    let ran = crate::test_support::finishes_in_time("cancel refund take-all", move || {
+        let (_item_id, lot) = post(&mut w, SWORD, 0, 1000, 1);
+        run::<CSCancelAuctionPacket>(&mut w, 0, &cancel_body(lot.id));
+        let mails = mails_to(&w.server, 1);
+        assert_eq!(mails.len(), 1, "the refund mail");
+        let mail = mails[0].clone();
+        w.a.drain();
+        run::<crate::systems::economy::mail_packets::CSTakeAllAttachmentItemPacket>(
+            &mut w,
+            0,
+            &mail.id.to_le_bytes(),
+        );
+        w.a.drain();
+        // The player can still act afterwards: a second operation takes the ops lock again.
+        let _ = w.server.systems.economy.ops_lock();
+        mails_to(&w.server, 1).len()
+    });
+    assert_eq!(ran, 0, "take-all deleted the refund mail");
+}
+
+/// The seller's sale proceeds and the buyer's item, each taken with take-all (which deletes the
+/// mail), through the real mail wiring: money, labor and delete must not wedge the server.
+#[tokio::test]
+async fn sale_and_win_mails_can_be_taken_all_and_deleted() {
+    let (mut w, _log) = auction_world();
+    crate::systems::economy::wiring::install(&w.server);
+    let ran = crate::test_support::finishes_in_time("sale take-all", move || {
+        let (_item_id, lot) = post(&mut w, SWORD, 0, 1000, 1);
+        run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 1000));
+        w.pa.data().labor_power = 10;
+        for (which, receiver) in [(1u8, 2u32), (0u8, 1u32)] {
+            let mail = mails_to(&w.server, receiver).remove(0);
+            run::<crate::systems::economy::mail_packets::CSTakeAllAttachmentItemPacket>(
+                &mut w,
+                which,
+                &mail.id.to_le_bytes(),
+            );
+            assert!(mails_to(&w.server, receiver).is_empty());
+        }
+        let _ = w.server.systems.economy.ops_lock();
+        w.pa.data().money
+    });
+    // 20 listing fee for a 1 h lot, 90 % of the 1000 price received.
+    assert_eq!(ran, 100_000 - 20 + 900);
+}
+
+/// The outbid refund (`AucOffFail` money mail) taken with take-all-and-delete: the exact
+/// sequence the Bevy client's live auction test hung on (bid, buyout by someone else, claim the
+/// refund).
+#[tokio::test]
+async fn outbid_refund_mail_can_be_taken_all_and_deleted() {
+    use crate::net::registry::ClientPacket;
+    let (w, _log) = auction_world();
+    crate::systems::economy::wiring::install(&w.server);
+    let ran = crate::test_support::finishes_in_time("outbid refund take-all", move || {
+        let mut w = w;
+        let mut c = TestClient::new(&w.server, 3, 1003);
+        let pc = spawn_player(
+            &w.server,
+            &c,
+            test_character(3, "Carol", 102.0, 100.0),
+            0x102,
+        );
+        c.conn.active_char = Some(pc.clone());
+        for (_, container) in Inv::of(&pc).containers {
+            w.server.items.add_container(container);
+        }
+        w.server.names.add_character(3, "Carol", 1003);
+        pc.data().money = 100_000;
+        c.drain();
+
+        let (_item_id, lot) = post(&mut w, SWORD, 0, 100, 1);
+        // Bob bids below the buyout, Carol buys it out: Bob's bid comes back by mail.
+        run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 10));
+        assert_eq!(money(&w.pb), 100_000 - 10);
+        let mut s = PacketStream::from_bytes(bid_body(lot.id, 100));
+        let bid = CSBidAuctionPacket::read(&mut s).unwrap();
+        futures::executor::block_on(bid.handle(&w.server, &mut c.conn)).unwrap();
+        assert!(w.server.systems.economy.auction.lot(lot.id).is_none());
+
+        let refund = mails_to(&w.server, 2)
+            .into_iter()
+            .find(|m| m.body.copper_coins == 10)
+            .expect("Bob's refund mail");
+        w.b.drain();
+        run::<crate::systems::economy::mail_packets::CSTakeAllAttachmentItemPacket>(
+            &mut w,
+            1,
+            &refund.id.to_le_bytes(),
+        );
+        w.b.drain();
+        let _ = w.server.systems.economy.ops_lock();
+        (
+            money(&w.pb),
+            mails_to(&w.server, 2).iter().any(|m| m.id == refund.id),
+        )
+    });
+    assert_eq!(ran, (100_000, false), "refund paid back, mail deleted");
 }

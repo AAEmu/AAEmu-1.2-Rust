@@ -1396,6 +1396,32 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `ItemContainer::add_or_move_inner` pushes it for the source owner when the item moves between two
   characters' bags (trade), so the objective is recounted when items leave.
 
+* systems::economy (trade safety, 2026-10-19): a trade is made only when both sides locked and
+  both confirmed (`OkTrade` previously accepted a confirmation with one side locked). Only the
+  put-up amount changes hands: a larger stack is split at finish, the receiver's
+  `SCOtherTradeItemPutupPacket` shows the offered amount, and the giver's `SCTradeMade` task names
+  the slot the item had in the giver's container (the C# moved the whole item and built the
+  removal from the moved object, i.e. the receiver's slot). Negative money put-ups are rejected
+  (the C# stored them unsent and skipped them at finish), money transfers use checked `i64`
+  arithmetic, and trade ids are released on cancel / departure / finish. Live oracle: two
+  `aaemu-testclient` bots (lock one side only -> no trade; negative money -> rejected; 5-unit
+  stack, 2 put up -> only 2 move, 3 stay).
+* systems::economy (shop currency checks, 2026-10-19): `CSBuyItems` refuses when *any* required
+  currency (money, honor or vocation) is short; the C# checked `money > have && honor > have &&
+  vocation > have`. Checked totals and per-currency `checked_sub` already reject overflow.
+  Covered by `craft_store_tests::shop_checkout_rejects_money_only_and_mixed_currency_shortages`.
+* systems::economy (cash shop, 2026-10-19): loyalty is charged the displayed
+  `DiscountPrice > 0 ? DiscountPrice : Price` (already so since the port, test
+  `checkout_charges_displayed_discount_for_coins_and_loyalty`; the C# debited `Price`); above `level_max` the buyer gets `LEVEL_HIGH_TO_USE` (1.2 `ui_texts`
+  4157, "level too high to use") instead of `INGAME_SHOP_BUY_LOW_LEVEL` (4708, generic "(level)");
+  page 0 still shows page 1 on purpose: the 1.2 `x2ui/baselib/page.alb` page control starts at
+  `currentPage = 1` and clamps previous/next to `1..maxPage`, so the client never sends page 0,
+  and the C# `Skip(itemsPerPage * (page - 1))` clamps the invalid value to the first page.
+* systems::economy (auction, 2026-10-19): the "ExpireDate" sort uses `end_time` (the C# sorted by
+  `PostDate`) and a buyout sends `SCAuctionBidPacket` with `isBuyout = true`, the lot's
+  `direct_money` and the buyer's identity (the C# buyout branch sent nothing although the 1.2
+  packet carries the flag). Seller / item mail delivery is unchanged.
+
 ### Ranking boards (Rust only)
 
 The 1.2 C# never answered `CSRankCharacterPacket` (empty, log-only) and has no `CSRankSnapshotPacket` (0x130, unnamed in the opcode tables, `ranking_packets.rs`). The Rust server answers both from a global store (`systems::social::ranking_manager`, `server.systems.social.ranking`):
@@ -1549,23 +1575,23 @@ and in NPC wandering / buff remaining times.
   owner). The client is the source of the request and `CanAccept` already warns with the cause.
 * systems::economy: `BindType.HasFlag(...)` on the plain `ItemBindType` enum is a bit test
   (`BindOnUnpack` matches 4..7, `BindOnEquip` matches 3 and 7); mirrored.
-* systems::economy: `CSBuyItems` refuses only when money, honor *and* vocation are all short;
-  `ExpandExpert` adds the vocation cost; craft / backpack / weapon booleans read as numbers are
+* systems::economy: loot dice are won by the highest roll (the C# sorted the rolled values
+  ascending and took the first positive one, so the lowest bidder won). The 1.2 client presents
+  the roll as an item bid and only reports values: `ui_texts` 4305 `loot_dice_roll` = "Roll"
+  (입찰), 4318 `loot_dice_title` = "Item Bid" (아이템 입찰), 2412 `msg_dice_value` = "$1 rolled a
+  $2 on the dice. (1-$3)"; its `loot_dice.alb` bytecode only calls `X2Loot.DoDiceAction` /
+  `RequestNextDiceItem`, so the winner is the server's decision and a bid over 1-100 is won by
+  the highest value.
+* systems::economy: `ExpandExpert` adds the vocation cost; craft / backpack / weapon booleans read as numbers are
   false for `'t'` texts; `Specialty.VendorExist` reads the `id` column.
-* systems::economy: loot dice pick the lowest positive roll; looting allocates a new item id that
+* systems::economy: looting allocates a new item id that
   is never released; `ItemProc` `ignoreRoll` never procs; `HDps` uses the magic DPS grade value;
   fish conversion only uses the first pack.
-* systems::economy: auction — the "ExpireDate" sort still uses PostDate and a buyout
-  sends no SCAuctionBidPacket. Original cancellation-copy and missing balance checks
+* systems::economy: auction — original cancellation-copy and missing balance checks
   are corrected in the quest/mail audit below.
 * systems::economy: mail — opening a mailbox re-sends a "got mail" per unread received
   mail; FinalizeForBidFail still uses AucOffFail; receiver lookup is case-sensitive.
   The old return failure and sender unread-count bug are corrected below.
-* systems::economy: trade — `OkTrade` proceeds when only one side locked, the put-up amount is only
-  checked (the whole item changes hands), negative money put-ups are accepted, trade ids are never
-  released, the owner's `ItemRemove` in `SCTradeMade` names the receiver's slot.
-* systems::economy: cash shop — loyalty is charged at the undiscounted price, the max-level check
-  sends the low-level error, page 0 behaves like page 1.
 * `systems::instances`: `RegisterIndunEvents` runs in the `Dungeon` constructor and again in the loader, so every indun event handler is subscribed twice; a dungeon kill raises `OnUnitKilled` (and the victim's `OnDeath`) in `PostUpdateCurrentHp` and again in `DoDie` — NPC-killed action chains run four times; `IndunEventDoodadSpawneds.UnSubscribe` adds the handler (`+=`); `AreaClearTick` stops at the first cleared room (`return`); a new dungeon verifies the requirements twice (the entry item is consumed twice) and the creator gets `SCProcessingInstancePacket` twice; `Transform.CloneDetached(character)` / `MainWorldPosition.Clone()` fire `OnZoneChange(0, zone)` (the instance zone chat is never left); `ApplyWorldSpawnPosition` stores the spawn rotation in degrees; leaving an instance sends the (radian) return rotation through `DegToRad` again and `SCLoadInstancePacket` names `MainWorldPosition.WorldId`; `DestroyDungeon` removes the players from the instance without moving them out; `InstantGame.RemovePlayer` looks the corps lists up by 0 / 1 instead of the faction ids (never cleaned); `AddScore` always sends `Corps1` / `score2 = 0`; the kill packet's victim count is the victim corps' kills; entering a battlefield sets the corps faction, so `Character.SetFaction` kicks guild members of another mother faction from their guild and party; offline queue applicants are never pruned (`CharObj` is never null); `RemoveGame` leaves the game in the queue list; battlefields.json loops stop (`return`) at the first orphan row.
 * systems::housing: abandoned-house removal buff 2250 now applies its original effect
   1876 through the normal damage path. C# rejected the house attacking itself, so the

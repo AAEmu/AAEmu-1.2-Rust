@@ -1090,11 +1090,11 @@ pub async fn execute_buy(
             );
             return;
         }
-        // Check Maximum Level (likely not the correct error, as in C#)
+        // Check Maximum Level (the shop has no dedicated text; "level too high to use" fits).
         if shop_item.level_max > 0 && buyer_level > shop_item.level_max {
             fail(
                 buyer,
-                error_message::INGAME_SHOP_BUY_LOW_LEVEL,
+                error_message::LEVEL_HIGH_TO_USE,
                 buy_mode,
                 &target_name,
             );
