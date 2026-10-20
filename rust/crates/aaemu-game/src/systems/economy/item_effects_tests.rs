@@ -42,6 +42,17 @@ const SLAVE_ITEM: u32 = 5400;
 const BACKPACK: u32 = 5500;
 const TL: u16 = 0x77;
 
+/// Clears the new-item dirty flag so an effect's own marking is what the save selection sees.
+fn mark_clean(w: &World, id: u64) {
+    let c = Inv::of(&w.pa).bag();
+    c.lock().unwrap().get_item_by_id_mut(id).unwrap().dirty = false;
+}
+
+/// The item is selected by the next `ItemManager.Save` snapshot.
+fn selected_for_save(w: &World, id: u64) -> bool {
+    w.server.items.prepare_save().item_ids().contains(&id)
+}
+
 fn formulas() -> FormulaManager {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     conn.execute_batch(
@@ -514,10 +525,16 @@ async fn socketing_success_failure_and_dawnstone() {
         item_template_id: GEM,
     });
     // 1st socket: chance 10000
+    mark_clean(&w, id);
     let mut rng = ScriptedRng::new(&[9999], &[]);
     item_socketing(&w.server, &w.pa, gem_caster, Some(id), [0; 4], TL, &mut rng);
     let after = item(&w, id).unwrap();
     assert_eq!(after.details.gem_ids, [GEM, 0, 0, 0, 0, 0, 0]);
+    assert!(after.dirty, "socketing must dirty the item");
+    assert!(
+        selected_for_save(&w, id),
+        "the next save must include the socketed item"
+    );
     assert_eq!(
         w.a.drain(),
         vec![
@@ -540,10 +557,16 @@ async fn socketing_success_failure_and_dawnstone() {
     assert_eq!(w.b.drain_ops(), vec![sc::SCSkillEndedPacket]);
 
     // 2nd socket: chance 0 -> every gem is lost
+    mark_clean(&w, id);
     let mut rng = ScriptedRng::new(&[0], &[]);
     item_socketing(&w.server, &w.pa, gem_caster, Some(id), [0; 4], TL, &mut rng);
     let after = item(&w, id).unwrap();
     assert_eq!(after.details.gem_ids, [0; 7]);
+    assert!(
+        after.dirty,
+        "a failed socket removes gems and must dirty the item"
+    );
+    assert!(selected_for_save(&w, id));
     let f = w.a.drain();
     assert_eq!(
         f[1].1,
@@ -570,6 +593,7 @@ async fn socketing_success_failure_and_dawnstone() {
         item_id: dawn,
         item_template_id: ITEM_DAWN_STONE,
     });
+    mark_clean(&w, id);
     item_socketing(
         &w.server,
         &w.pa,
@@ -581,6 +605,8 @@ async fn socketing_success_failure_and_dawnstone() {
     );
     assert!(rng.int_calls.is_empty());
     assert_eq!(item(&w, id).unwrap().details.gem_ids, [0; 7]);
+    assert!(item(&w, id).unwrap().dirty, "DawnStone must dirty the item");
+    assert!(selected_for_save(&w, id));
     let f = w.a.drain();
     assert_eq!(
         f[1].1,
@@ -601,9 +627,15 @@ async fn lunastone_cap_scale_and_reset() {
         item_id: 1,
         item_template_id: GEM,
     });
+    mark_clean(&w, id);
     magical_enchant(&w.server, &w.pa, caster, Some(id));
     let after = item(&w, id).unwrap();
     assert_eq!(after.details.rune_id, GEM);
+    assert!(after.dirty, "a lunastone must dirty the item");
+    assert!(
+        selected_for_save(&w, id),
+        "the next save must include the lunastone"
+    );
     assert_eq!(
         w.a.drain(),
         vec![
@@ -623,12 +655,18 @@ async fn lunastone_cap_scale_and_reset() {
     );
 
     let mut rng = ScriptedRng::new(&[55, 77], &[]);
+    mark_clean(&w, id);
     item_cap_scale(&w.server, &w.pa, caster, Some(id), 900, [0; 4], &mut rng);
     assert_eq!(rng.int_calls, vec![(0, 100), (0, 100)]);
     let after = item(&w, id).unwrap();
     assert_eq!(
         (after.details.temper_physical, after.details.temper_magical),
         (55, 77)
+    );
+    assert!(after.dirty, "tempering must dirty the item");
+    assert!(
+        selected_for_save(&w, id),
+        "the next save must include the tempered item"
     );
     let msg = |m: &str| SCChatMessagePacket {
         chat_type: chat_type::SYSTEM,
@@ -653,9 +691,12 @@ async fn lunastone_cap_scale_and_reset() {
         ]
     );
 
+    mark_clean(&w, id);
     item_cap_scale_reset(&w.server, &w.pa, caster, Some(id), [0; 4]);
     let after = item(&w, id).unwrap();
     assert_eq!(after.details.temper_physical, 0);
+    assert!(after.dirty, "a temper reset must dirty the item");
+    assert!(selected_for_save(&w, id));
     assert_eq!(
         w.a.drain(),
         vec![

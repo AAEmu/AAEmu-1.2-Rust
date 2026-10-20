@@ -1724,6 +1724,21 @@ impl SpawnManager {
         v.into_iter().map(|e| (e.obj.obj_id(), e.at)).collect()
     }
 
+    /// Whether `obj_id` waits for a queued respawn or despawn in this instance. While it does,
+    /// the timers own the object id: they release it once both are done (see
+    /// [`Self::check_respawns_tick`]), so nobody else may release it earlier.
+    pub fn has_pending_timers(&self, obj_id: u32) -> bool {
+        self.respawns
+            .lock()
+            .expect("poisoned")
+            .contains_key(&obj_id)
+            || self
+                .despawns
+                .lock()
+                .expect("poisoned")
+                .contains_key(&obj_id)
+    }
+
     /// Whether `obj_id` already waits for a queued corpse / immediate despawn in this instance.
     pub fn has_pending_despawn(&self, obj_id: u32) -> bool {
         self.despawns

@@ -363,6 +363,33 @@ async fn open_bag_without_loot_all_sends_bag_data_and_single_take_works() {
 }
 
 #[tokio::test]
+async fn taking_loot_releases_the_unused_allocated_item_id() {
+    let mut w = world_with(data());
+    let npc = spawn_npc(&mut w);
+    let mut rng = ScriptedRng::new(&[0, 0, 0, 3, 50, 1], &[]);
+    LootManager::generate_loot_with(
+        &w.server,
+        &WorldObject::from(&npc),
+        Some(&WorldObject::from(&w.pa)),
+        &mut rng,
+    );
+    w.a.drain();
+    // Peek at (and return) the next item id, so the loot's allocation is observable.
+    let next = w.server.ids.item.get_next_id().unwrap();
+    w.server.ids.item.release_id(next);
+
+    // The stack (index 1) goes through the acquire path that allocates an id.
+    assert!(LootManager::try_take_loot(
+        &w.server, &w.pa, NPC_OBJ, 1, false
+    ));
+    let taken = item_at(&w.pa, slot_type::INVENTORY, 0).unwrap();
+    assert_eq!(taken.template_id, super::tests::STACK);
+    // The grant created its own id; the pre-allocated one must be free again.
+    assert_eq!(w.server.ids.item.get_next_id().unwrap(), next);
+    assert_eq!(taken.id, u64::from(next) + 1);
+}
+
+#[tokio::test]
 async fn full_bag_fails_and_restores_the_entry() {
     let mut w = world_with(data());
     let npc = spawn_npc(&mut w);
@@ -487,6 +514,120 @@ async fn bind_on_pickup_loot_is_rolled_by_the_team() {
     assert!(LootManager::try_take_loot(
         &w.server, &w.pb, NPC_OBJ, 1, false
     ));
+}
+
+#[tokio::test]
+async fn loot_dice_highest_roll_wins() {
+    let mut w = world_with(data());
+    let npc = spawn_npc(&mut w);
+    let lm = &w.server.systems.economy.loot;
+    lm.hooks
+        .teams
+        .install(Arc::new(TeamOf(vec![w.pa.clone(), w.pb.clone()])));
+    lm.hooks.npcs.install(Arc::new(Tagged));
+    let mut rng = ScriptedRng::new(&[0, 0, 0, 3, 50, 1], &[]);
+    LootManager::generate_loot_with(&w.server, &WorldObject::from(&npc), None, &mut rng);
+    w.a.drain();
+    w.b.drain();
+    // Starting the roll on the BoP item opens it for both members.
+    assert!(!LootManager::try_take_loot(
+        &w.server, &w.pa, NPC_OBJ, 3, false
+    ));
+    w.a.drain();
+    w.b.drain();
+    // Alice rolls 20, Bob rolls 80.
+    let mut rng = ScriptedRng::new(&[20], &[]);
+    LootManager::do_player_roll(&w.server, &w.pa, NPC_OBJ, 3, true, &mut rng);
+    let mut rng = ScriptedRng::new(&[80], &[]);
+    LootManager::do_player_roll(&w.server, &w.pb, NPC_OBJ, 3, true, &mut rng);
+    // The highest roll wins: Bob, not the lowest roller (C# took the first ascending roll).
+    assert_eq!(
+        item_at(&w.pb, slot_type::INVENTORY, 0)
+            .expect("Bob won the roll")
+            .template_id,
+        BOP
+    );
+    assert!(item_at(&w.pa, slot_type::INVENTORY, 0).is_none());
+}
+
+#[tokio::test]
+async fn loot_dice_roll_counts_once_per_player() {
+    let mut w = world_with(data());
+    let npc = spawn_npc(&mut w);
+    let lm = &w.server.systems.economy.loot;
+    lm.hooks
+        .teams
+        .install(Arc::new(TeamOf(vec![w.pa.clone(), w.pb.clone()])));
+    lm.hooks.npcs.install(Arc::new(Tagged));
+    let mut rng = ScriptedRng::new(&[0, 0, 0, 3, 50, 1], &[]);
+    LootManager::generate_loot_with(&w.server, &WorldObject::from(&npc), None, &mut rng);
+    assert!(!LootManager::try_take_loot(
+        &w.server, &w.pa, NPC_OBJ, 3, false
+    ));
+    w.a.drain();
+    w.b.drain();
+    // Alice rolls 20 and then tries again for a better value: the second request is ignored
+    // (no dice value is consumed, nothing is sent) and Bob's 80 still wins.
+    let mut rng = ScriptedRng::new(&[20], &[]);
+    LootManager::do_player_roll(&w.server, &w.pa, NPC_OBJ, 3, true, &mut rng);
+    w.a.drain();
+    w.b.drain();
+    let mut rng = ScriptedRng::new(&[99], &[]);
+    LootManager::do_player_roll(&w.server, &w.pa, NPC_OBJ, 3, true, &mut rng);
+    assert!(w.a.drain_ops().is_empty());
+    assert!(w.b.drain_ops().is_empty());
+    {
+        let c = lm.container(NPC_OBJ);
+        let g = c.lock().unwrap();
+        assert_eq!(g.items[&3].player_rolls, vec![(1, 20), (2, 0)]);
+    }
+    let mut rng = ScriptedRng::new(&[80], &[]);
+    LootManager::do_player_roll(&w.server, &w.pb, NPC_OBJ, 3, true, &mut rng);
+    assert_eq!(
+        item_at(&w.pb, slot_type::INVENTORY, 0)
+            .expect("Bob won the roll")
+            .template_id,
+        BOP
+    );
+    assert!(item_at(&w.pa, slot_type::INVENTORY, 0).is_none());
+}
+
+#[tokio::test]
+async fn loot_dice_roll_ignores_players_outside_the_roll_pool() {
+    let mut w = world_with(data());
+    let npc = spawn_npc(&mut w);
+    let lm = &w.server.systems.economy.loot;
+    let mut rng = ScriptedRng::new(&[0, 0, 0, 3, 50, 1], &[]);
+    LootManager::generate_loot_with(&w.server, &WorldObject::from(&npc), None, &mut rng);
+    w.a.drain();
+    w.b.drain();
+    // No dice was started for the item: nobody may roll on it.
+    let mut rng = ScriptedRng::new(&[99], &[]);
+    LootManager::do_player_roll(&w.server, &w.pb, NPC_OBJ, 3, true, &mut rng);
+    {
+        let c = lm.container(NPC_OBJ);
+        let g = c.lock().unwrap();
+        assert!(g.items[&3].player_rolls.is_empty());
+        assert_eq!(g.items[&3].highest_roller, 0);
+    }
+    assert!(w.a.drain_ops().is_empty());
+    assert!(w.b.drain_ops().is_empty());
+    // A running roll pool (Alice and a third member): Bob was not offered the dice, so his roll
+    // is dropped and does not decide the item.
+    {
+        let c = lm.container(NPC_OBJ);
+        let mut g = c.lock().unwrap();
+        g.items.get_mut(&3).unwrap().player_rolls = vec![(1, 0), (77, 0)];
+    }
+    let mut rng = ScriptedRng::new(&[99], &[]);
+    LootManager::do_player_roll(&w.server, &w.pb, NPC_OBJ, 3, true, &mut rng);
+    assert!(w.a.drain_ops().is_empty());
+    assert!(w.b.drain_ops().is_empty());
+    let c = lm.container(NPC_OBJ);
+    let g = c.lock().unwrap();
+    assert_eq!(g.items[&3].player_rolls, vec![(1, 0), (77, 0)]);
+    assert_eq!(g.items[&3].highest_roller, 0);
+    assert!(item_at(&w.pb, slot_type::INVENTORY, 0).is_none());
 }
 
 #[tokio::test]

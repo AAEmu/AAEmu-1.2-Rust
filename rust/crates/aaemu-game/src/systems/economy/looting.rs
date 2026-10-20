@@ -185,10 +185,15 @@ pub struct LootEntry {
 }
 
 impl LootEntry {
+    /// Whether the dice was offered to `id` and the player has not rolled or passed yet.
+    fn can_roll(&self, id: u32) -> bool {
+        self.player_rolls.iter().any(|(p, r)| *p == id && *r == 0)
+    }
+
+    /// Records the roll (or pass, -1) of a player for whom [`Self::can_roll`] holds.
     fn set_roll(&mut self, id: u32, roll: i8) {
-        match self.player_rolls.iter_mut().find(|(p, _)| *p == id) {
-            Some(r) => r.1 = roll,
-            None => self.player_rolls.push((id, roll)),
+        if let Some(r) = self.player_rolls.iter_mut().find(|(p, _)| *p == id) {
+            r.1 = roll;
         }
     }
 }
@@ -694,6 +699,16 @@ impl LootManager {
         let Some(entry) = g.items.get_mut(&item_index) else {
             return;
         };
+        // Only a player the dice was offered to (the eligible players of this loot, see
+        // `try_take_loot_locked`) may roll, and only once. The C# stored any roll of anybody,
+        // again and again; with the highest roll winning that would be exploitable.
+        if !entry.can_roll(player.character_id) {
+            tracing::debug!(
+                "DoPlayerRoll: {} is not rolling for loot item {item_index} or already rolled",
+                player.character_id
+            );
+            return;
+        }
         let roll = if roll_request {
             ctx.rng.next_i32(1, 100) as i8
         } else {
@@ -922,13 +937,14 @@ fn finish_rolling(ctx: &mut Ctx<'_, '_>, g: &mut Guard<'_>, idx: u16) {
             },
         );
     }
-    // Find the "highest" rolled value (C#: OrderBy ascending + FirstOrDefault = the LOWEST
-    // positive roll, or 0)
+    // Find the highest rolled value. Deviation: the C# took the lowest positive roll as the
+    // threshold and then picked a random winner among all positive rollers (so the value did
+    // not matter); a dice bid is won by the highest roll (see PORTING.md).
     let highest = rolls
         .iter()
         .map(|(_, r)| *r)
         .filter(|r| *r > 0)
-        .min()
+        .max()
         .unwrap_or(0);
     // Find highest roller(s) (stable OrderBy)
     let mut highest_entries: Vec<(u32, i8)> = rolls
@@ -1097,8 +1113,9 @@ fn try_distribute(
             return false;
         }
     } else {
-        // C#: a new item id is allocated for the loot entry and, on success, never released
-        // (AcquireDefaultItem creates its own items) — mirrored id leak.
+        // The C# allocated a new item id for the loot entry and never released it on success
+        // (`AcquireDefaultItem` creates its own items). Allocate it for the malformed-request
+        // checks, then release it once the grant succeeded.
         let new_id = match server.ids.item.get_next_id() {
             Ok(id) => id,
             Err(e) => {
@@ -1132,6 +1149,8 @@ fn try_distribute(
             failed(ctx, g, pid, error_message::BAG_FULL, idx, template_id);
             return false;
         }
+        // The grant built its own item: the pre-allocated id was never used.
+        server.ids.item.release_id(new_id);
     }
     ctx.send(
         pid,

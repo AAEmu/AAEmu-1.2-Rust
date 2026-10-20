@@ -321,7 +321,7 @@ impl CSDepositMoneyPacket {
 }
 sync_client_packet!(CSDepositMoneyPacket);
 
-/// `CSWithdrawMoneyPacket` (the C# keeps the default `ItemTaskType.DepositMoney`).
+/// `CSWithdrawMoneyPacket`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSWithdrawMoneyPacket {
     pub amount: i32,
@@ -344,7 +344,7 @@ impl CSWithdrawMoneyPacket {
             slot_type::BANK,
             slot_type::INVENTORY,
             self.amount,
-            task_type::DEPOSIT_MONEY,
+            task_type::WITHDRAW_MONEY,
         );
     }
 }

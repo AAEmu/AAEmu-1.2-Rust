@@ -188,8 +188,22 @@ pub fn expand_slot(server: &GameServer, p: &PlayerRef, slot: u8) {
         return;
     }
     if expand.price != 0 {
-        // The C# builds a `MoneyChange` task but never sends it.
+        // The C# built a `MoneyChange` task but never sent it; the client needs the change to
+        // update its displayed money.
         p.data().money -= i64::from(expand.price);
+        p.send(
+            crate::systems::economy::item_packets::SCItemTaskSuccessPacket {
+                action: if is_bank {
+                    item_task::EXPAND_BANK
+                } else {
+                    item_task::EXPAND_BAG
+                },
+                tasks: vec![crate::models::item_task::ItemTask::MoneyChange(
+                    -expand.price,
+                )],
+                force_remove: Vec::new(),
+            },
+        );
     }
     if expand.item_id != 0 && expand.item_count != 0 {
         if let Some(o) = &ops {
@@ -526,7 +540,10 @@ mod tests {
         expand_slot(&server, &p, slot_type::INVENTORY);
         assert_eq!(p.data().num_inventory_slots, 60);
         assert_eq!(p.data().money, 40);
-        assert_eq!(client.drain_ops(), vec![sc::SCInvenExpandedPacket]);
+        assert_eq!(
+            client.drain_ops(),
+            vec![sc::SCItemTaskSuccessPacket, sc::SCInvenExpandedPacket]
+        );
     }
 
     #[test]

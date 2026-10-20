@@ -197,6 +197,7 @@ async fn run() -> anyhow::Result<()> {
             &server.game_data.items,
             server.config.id,
             &server.ids.container,
+            &server.ids.item,
         )
         .await
         .context("ItemManager.LoadUserItems")?;

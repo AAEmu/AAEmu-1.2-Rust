@@ -14,7 +14,7 @@ use crate::data::items::{
 };
 use crate::managers::id::{IdManager, IdManagerSpec, ITEM_ID};
 use crate::managers::item::ItemManager;
-use crate::models::container::slot_type;
+use crate::models::container::{slot_type, ContainerKind, ItemContainer};
 use crate::models::item::Item;
 use crate::models::unit::{BonusTemplate, UnitAttribute, UnitModifierType};
 
@@ -123,6 +123,42 @@ fn get_item_by_item_id_item_does_not_exist_returns_null() {
 fn get_item_by_item_id_zero_id_returns_null() {
     let manager = create_item_manager();
     assert!(manager.item_by_id(0).is_none());
+}
+
+// ---- AddLoadedItem Tests ----
+
+/// `LoadUserItems`' placement reports a loaded stack that was merged into an existing stack
+/// (its row must be deleted instead of being reloaded and merged again on the next start).
+#[test]
+fn add_loaded_item_reports_a_merged_stack_and_queues_its_row() {
+    let manager = create_item_manager();
+    let data = data_with_templates(vec![ItemTemplate::plain(100, 20)]);
+    let mut bag = ItemContainer::new(ContainerKind::Item, 7, slot_type::INVENTORY, 500);
+    bag.set_container_size(2);
+    assert!(matches!(
+        bag.add_new_item(create_test_item(3000, 100, 5), 0, &data),
+        Ok(true)
+    ));
+
+    let (merged, res) = manager.add_loaded_item(&mut bag, create_test_item(3001, 100, 3), 0, &data);
+    assert!(merged);
+    assert_eq!(res, Ok(true));
+    assert_eq!(bag.get_item_by_slot(0).unwrap().count, 8);
+    assert!(bag.get_item_by_id(3001).is_none());
+
+    // The load path releases the merged row (delete from `items` + free the id).
+    let item_ids = IdManager::new(ITEM_ID);
+    item_ids.initialize_with(&[3000, 3001]);
+    manager.release_id(3001, &item_ids);
+    assert!(manager.removed_items().contains(&3001));
+    assert!(manager.item_by_id(3001).is_none());
+
+    // A stack that does not fit the target reports `merged = false`.
+    let (merged, res) =
+        manager.add_loaded_item(&mut bag, create_test_item(3002, 100, 15), -1, &data);
+    assert!(!merged);
+    assert_eq!(res, Ok(true));
+    assert_eq!(bag.get_item_by_slot(1).unwrap().id, 3002);
 }
 
 #[test]
@@ -631,4 +667,93 @@ fn add_item_max_count_item_adds_successfully() {
 fn get_all_items_large_collection_returns_all_items() {
     let data = data_with_templates((1..=1000).map(|i| named(i, &format!("Item {i}"))).collect());
     assert_eq!(data.all_templates().count(), 1000);
+}
+
+// ---- LoadUserItems (private MySQL) ----
+
+/// Requires the private MySQL on 3317 (`AAEMU_TEST_MYSQL`); the item tables are connection-local
+/// temporary copies, so no persisted data is touched. Two rows for one stack slot: the second
+/// merges into the first, and its row must be queued for deletion instead of being reloaded and
+/// stacked again on the next start.
+#[tokio::test]
+#[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; connection-local item tables only"]
+async fn private_mysql_load_user_items_deletes_a_merged_stack_row() {
+    use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+    use std::str::FromStr;
+
+    let url = std::env::var("AAEMU_TEST_MYSQL").expect("AAEMU_TEST_MYSQL");
+    let options = MySqlConnectOptions::from_str(&url).unwrap();
+    assert_eq!(
+        options.get_port(),
+        3317,
+        "Only private MySQL3317 is allowed"
+    );
+    assert!(matches!(options.get_host(), "127.0.0.1" | "localhost"));
+    let pool = MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    for table in ["items", "item_containers"] {
+        let (_, ddl): (String, String) = sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query(&ddl.replacen("CREATE TABLE", "CREATE TEMPORARY TABLE", 1))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO item_containers (container_id,container_type,slot_type,container_size,owner_id,mate_id) \
+         VALUES (65537,'ItemContainer',2,50,7,0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    for (id, count) in [(0x0100_0001u64, 5i32), (0x0100_0002u64, 3i32)] {
+        sqlx::query(
+            "INSERT INTO items (`id`,`type`,`template_id`,`container_id`,`slot_type`,`slot`,`count`,`details`,\
+             `lifespan_mins`,`made_unit_id`,`unsecure_time`,`unpack_time`,`owner`,`created_at`,`grade`,`flags`,`ucc`) \
+             VALUES (?, 'AAEmu.Game.Models.Game.Items.Item', 1000, 65537, 2, 0, ?, NULL, 0, 0, \
+             '0001-01-01 00:00:00', '0001-01-01 00:00:00', 7, '0001-01-01 00:00:00', 0, 0, 0)",
+        )
+        .bind(id)
+        .bind(count)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let manager = create_item_manager();
+    let data = data_with_templates(vec![ItemTemplate::plain(1000, 20)]);
+    let container_ids = IdManager::new(crate::managers::id::CONTAINER_ID);
+    let item_ids = IdManager::new(ITEM_ID);
+    item_ids.initialize_with(&[0x0100_0001, 0x0100_0002]);
+    manager
+        .load_user_items(&pool, &data, 1, &container_ids, &item_ids)
+        .await
+        .unwrap();
+
+    let bag = manager.container_by_id(65537).expect("container");
+    let stack = bag.lock().unwrap().get_item_by_slot(0).cloned().unwrap();
+    assert_eq!(stack.count, 8);
+    assert!(manager.item_by_id(0x0100_0002).is_none());
+    assert!(manager.removed_items().contains(&0x0100_0002));
+
+    // The next save deletes the merged row and persists the merged count.
+    let mut tx = pool.begin().await.unwrap();
+    manager.save(&mut tx).await.unwrap();
+    tx.commit().await.unwrap();
+    manager.commit_save();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let persisted: i32 = sqlx::query_scalar("SELECT `count` FROM items WHERE `id` = 16777217")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(persisted, 8);
 }
