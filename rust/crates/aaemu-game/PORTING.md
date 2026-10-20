@@ -2289,3 +2289,30 @@ Deviations from the 1.2 C# `ExpeditionManager` / `TeamManager`, which trusted ev
 - `ChangeLootingRule` accepted any character id as loot master. It must now be 0 or a member of the
   team; otherwise only that field is ignored (logged). Over-head markers are unchanged: their
   target is any unit or object, not a team member.
+
+## Client skill cast authority (2026-10-20)
+
+`CSStartSkillPacket` trusted its caster, its target distance and its skill id more than the C#
+original ever checked (the C# had no checks here at all). Deviations, each reproduced live with
+two bots before the fix (a foreign `Mount` caster, an NPC-only skill and a far doodad all ran):
+
+- **Mount caster.** `SkillCaster::Mount { obj_id }` may name the player itself, a mate the player
+  may use (`may_use_mate`), or a slave the player summoned (`summoner_obj_id` / `summoner_id`),
+  is attached to (`attached_characters`, or `parent_obj_id`), or that is mounted on a slave the
+  player summoned (cannon on a ship). Any other object (NPC, doodad, another player, a foreign
+  slave) is refused with a warning and `SCSkillStarted` carrying `NO_PERM`.
+- **Range of doodad and slave targets.** The C# skipped the `TooFarRange` check for every Doodad
+  or Slave target (its own TODO asks for a bounding-box check). The Rust now allows
+  `max_range` plus a flat allowance (15 m for doodads, 40 m for slaves) on top of the existing
+  model-radius subtraction: no model radius is loaded for doodads and the ship `obb_*` columns
+  are zero in the 1.2 data, so a constant stands in for the missing bounding boxes. Raise the
+  allowances if a very large doodad or ship turns out to be unusable from its edge.
+- **"Undefined use type" fallback.** The C# ran any skill id with a template here (boss, NPC and
+  GM skills included). It now requires the id to be named by a player-facing source of the static
+  data (`SkillData::is_client_sourced_skill`, `CLIENT_SKILL_SOURCES`): doodad funcs / uses / fake
+  uses / conditional uses / skill hits, sphere doodad interacts, crafts, NPC interactions, slash
+  commands, buff skills, quest accept / supply / component / timer skills, item use skills and the
+  housing / shipyard build steps. Mount skills, mount-attached (rider) skills and NPC AI skills
+  (`np_skills`) are deliberately absent. Possible over-blocking: a skill the 1.2 client casts that
+  none of these tables names (the retail rule is not confirmed); such a cast is refused with a
+  warning naming the skill id, so it is easy to add the table.

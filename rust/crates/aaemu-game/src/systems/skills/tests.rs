@@ -124,6 +124,12 @@ pub(crate) fn skill_template(id: u32) -> SkillTemplate {
 }
 
 /// Game data with a 600-damage skill, a heal / mana skill, a plot skill and a stat buff.
+/// `test_server_with` where every fixture skill counts as handed to players by the static data.
+fn open_server(mut data: GameData) -> crate::GameServer {
+    open_client_skills(&mut data);
+    test_server_with(data)
+}
+
 fn data() -> GameData {
     let mut data = GameData::empty();
     let s = &mut data.systems.skills;
@@ -261,7 +267,7 @@ fn fixture() -> Fixture {
 }
 
 fn fixture_with(data: GameData) -> Fixture {
-    let server = Arc::new(test_server_with(data));
+    let server = Arc::new(open_server(data));
     super::bind(&server);
     let mut client = TestClient::new(&server, 1, 1);
     let mut c = test_character(1, "Caster", 100.0, 100.0);
@@ -768,7 +774,7 @@ async fn timed_buff_expires_by_itself() {
         duration: 50,
         ..BuffTemplate::default()
     });
-    let server = Arc::new(test_server_with(data));
+    let server = Arc::new(open_server(data));
     super::bind(&server);
     let mut n = Npc::new(1);
     n.unit.hp = 10;
@@ -873,7 +879,7 @@ fn rules_data() -> GameData {
 }
 
 fn rules_fixture() -> Fixture {
-    let server = Arc::new(test_server_with(rules_data()));
+    let server = Arc::new(open_server(rules_data()));
     super::bind(&server);
     let mut client = TestClient::new(&server, 1, 1);
     let mut c = test_character(1, "Caster", 100.0, 100.0);
@@ -1077,7 +1083,7 @@ async fn moving_removes_remove_on_move_buffs() {
         remove_on_move: true,
         ..BuffTemplate::default()
     });
-    let server = Arc::new(test_server_with(data));
+    let server = Arc::new(open_server(data));
     super::bind(&server);
     let client = TestClient::new(&server, 1, 1);
     let mut c = test_character(1, "Mover", 100.0, 100.0);
@@ -1128,7 +1134,7 @@ async fn pvp_kill_advances_a_conflict_zone_that_returned_to_tension() {
             zone_climate_id: 0,
         },
     );
-    let server = Arc::new(test_server_with(data));
+    let server = Arc::new(open_server(data));
     server.set_self();
 
     let now = 1_000_000_000_000i64;

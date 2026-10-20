@@ -112,10 +112,16 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, p: CSStartSki
         else {
             return;
         };
-        if caster
-            .as_mate()
-            .is_some_and(|mate| !super::mount_authority::may_use_mate(&player, mate))
-        {
+        if !super::mount_authority::may_cast_as(server, &player, &caster) {
+            // Mount / slave skills are cast as the player, a mate the player may use, or a
+            // slave the player owns or is attached to; anything else is a forged packet.
+            tracing::warn!(
+                character = %player.data().unit.name,
+                skill_id,
+                caster = p.caster.obj_id(),
+                "Client cast as an object it does not own or ride refused"
+            );
+            send_cast_refused(&player, skill_id, p.caster, target, p.skill_object);
             return;
         }
         // StormShipLogic.TryBlockMountOrSlaveSkill (vehicles + ai storm buff)
@@ -268,11 +274,23 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, p: CSStartSki
         value = v;
     } else {
         // Doodad / quest-interaction skills are neither learned nor item skills: the normal
-        // path for them (a missing template is reported by `template_skill`).
+        // path for them (a missing template is reported by `template_skill`). Only skills the
+        // static data hands to players (doodad interactions, crafts, NPC interactions, slash
+        // commands, buff-granted and quest skills, ...) are accepted: NPC / boss / GM skills
+        // are never a client cast.
         tracing::debug!("StartSkill: Id {skill_id}, undefined use type");
         let Some(skill) = template_skill(server, skill_id) else {
             return;
         };
+        if !data.skills.is_client_sourced_skill(skill_id) {
+            tracing::warn!(
+                character = %player.data().unit.name,
+                skill_id,
+                "Client cast of a skill that has no player source refused"
+            );
+            send_cast_refused(&player, skill_id, p.caster, target, p.skill_object);
+            return;
+        }
         let (r, v) = skill::use_skill(
             server,
             &skill,
@@ -291,6 +309,20 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, p: CSStartSki
         pkt.set_skill_result(result).set_result_uint(value);
         player.send(pkt);
     }
+}
+
+/// Answers a refused client cast with the started-skill packet carrying `NO_PERM`.
+fn send_cast_refused(
+    player: &crate::world::PlayerRef,
+    skill_id: u32,
+    caster: SkillCaster,
+    target: SkillCastTarget,
+    object: SkillObject,
+) {
+    let mut pkt = SCSkillStartedPacket::new(skill_id, 0, caster, target, object);
+    pkt.set_skill_result(skill_result::NO_PERM)
+        .set_result_uint(0);
+    player.send(pkt);
 }
 
 #[cfg(test)]
