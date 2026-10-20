@@ -2389,3 +2389,13 @@ the death never started its timer):
   when the item has no pending repair time. With the timer above, a destroyed vehicle therefore
   comes back at full HP only after its repair wait, not when it is still on cooldown. (As the
   mirrored `SummonSlave.ReadDetails` bug above notes, the timer itself is still lost on restart.)
+
+
+## Loot take range (2026-10-21)
+
+C# `TryTakeLootLocked` never checked the distance to the corpse (`MaxLootingRange`, 200 m, only
+bounds loot eligibility at generation). The Rust port refuses a take with `TooFarAway` beyond
+`LOOT_TAKE_RANGE` (5 m), measured like `GetDistanceTo` (minus the model radii). Evidence: the
+retail 3.5 client enables looting at 3.0 m or less on the target frame's distance and walks the
+player to the corpse first (the 10.x client decompile has a matching 3 m check, squared 9.0); the
+2 m above it are slack for movement and latency.
