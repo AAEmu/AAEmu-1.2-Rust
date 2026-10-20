@@ -197,6 +197,14 @@ pub async fn read_rows(conn: &mut sqlx::MySqlConnection) -> sqlx::Result<Vec<Shi
 pub fn restore_all(server: &GameServer, rows: &[ShipyardRow]) -> usize {
     let mut n = 0;
     for row in rows {
+        if row.current_step == -1 {
+            // All steps built: the ship item was granted before the ceremony removal.
+            tracing::info!("Shipyard {} is finished, deleting its row", row.id);
+            server.systems.vehicles.shipyards.queue_delete(row.id);
+            delete_now(server, row.id);
+            server.ids.shipyard.release_id(row.id);
+            continue;
+        }
         if server.world.world(row.instance_id).is_none() {
             tracing::warn!(
                 "Shipyard {} not restored: world instance {} missing",
@@ -237,6 +245,15 @@ pub async fn save_all(
     tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
 ) -> crate::Result<usize> {
     let m = &server.systems.vehicles.shipyards;
+    for id in m.take_pending_delete() {
+        if let Err(e) = sqlx::query("DELETE FROM shipyards WHERE `id` = ?")
+            .bind(id)
+            .execute(&mut **tx)
+            .await
+        {
+            tracing::error!("Shipyard.Delete {id}: {e}");
+        }
+    }
     let mut n = 0;
     for shipyard in m.all() {
         let row = snapshot(&shipyard);
@@ -246,15 +263,6 @@ pub async fn save_all(
                 n += 1;
             }
             Err(e) => tracing::error!("Shipyard.Save {}: {e}", row.id),
-        }
-    }
-    for id in m.take_pending_delete() {
-        if let Err(e) = sqlx::query("DELETE FROM shipyards WHERE `id` = ?")
-            .bind(id)
-            .execute(&mut **tx)
-            .await
-        {
-            tracing::error!("Shipyard.Delete {id}: {e}");
         }
     }
     Ok(n)

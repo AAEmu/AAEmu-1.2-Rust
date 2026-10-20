@@ -2204,6 +2204,33 @@ async fn shipyard_row_round_trips_and_removal_queues_delete() {
     // The restored shipyard continues to build.
     shipyards::add_build_action(&server, restored);
     assert_eq!(restored.data().num_action, 2);
+
+    // The id is live again: the queued delete of the old row must not hit the new shipyard.
+    assert!(server
+        .systems
+        .vehicles
+        .shipyards
+        .pending_delete()
+        .contains(&ship_id));
+    assert!(server
+        .systems
+        .vehicles
+        .shipyards
+        .take_pending_delete()
+        .is_empty());
+
+    // A finished shipyard (`current_step == -1`) is not restored; its row is deleted.
+    let done = shipyards_db::ShipyardRow {
+        id: 99,
+        current_step: -1,
+        ..row
+    };
+    assert_eq!(shipyards_db::restore_all(&server, &[done]), 0);
+    assert_eq!(server.systems.vehicles.shipyards.all().len(), 1);
+    assert_eq!(
+        server.systems.vehicles.shipyards.take_pending_delete(),
+        vec![99]
+    );
 }
 
 fn effect_args<'a>(

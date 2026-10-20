@@ -41,9 +41,23 @@ impl ShipyardManager {
             .collect()
     }
 
-    /// Takes the ids whose rows still have to be deleted.
+    /// Takes the ids whose rows still have to be deleted. An id that belongs to a live shipyard
+    /// again (ids are released at removal and may be reused before the next save) is dropped:
+    /// the row is the new shipyard's.
     pub(super) fn take_pending_delete(&self) -> Vec<u32> {
-        std::mem::take(&mut *self.pending_delete.lock().expect("shipyards poisoned"))
+        let live = self.shipyards.lock().expect("shipyards poisoned");
+        let mut pending = self.pending_delete.lock().expect("shipyards poisoned");
+        let mut ids = std::mem::take(&mut *pending);
+        ids.retain(|id| !live.iter().any(|(l, _)| l == id));
+        ids
+    }
+
+    /// Queues the row of `ship_id` for deletion at the next save.
+    pub(super) fn queue_delete(&self, ship_id: u32) {
+        self.pending_delete
+            .lock()
+            .expect("shipyards poisoned")
+            .push(ship_id);
     }
 
     /// The ids whose rows are waiting for deletion (tests).
@@ -275,10 +289,7 @@ pub fn remove_shipyard(server: &GameServer, shipyard: &ShipyardRef) {
         .lock()
         .expect("shipyards poisoned")
         .retain(|(id, _)| *id != ship_id);
-    m.pending_delete
-        .lock()
-        .expect("shipyards poisoned")
-        .push(ship_id);
+    m.queue_delete(ship_id);
     super::shipyards_db::delete_now(server, ship_id);
     server.ids.shipyard.release_id(ship_id);
     server.ids.object.release_id(shipyard.obj_id);
