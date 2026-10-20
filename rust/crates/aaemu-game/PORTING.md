@@ -2262,3 +2262,15 @@ exactly on the end point, and when the new position is within float noise of it 
 4 ulp of the coordinate magnitude, at least 1e-3 m: the f32 ulp is ~0.002 m beyond 16384, so a
 fixed 1e-3 m was not enough on large maps) the heading of the step itself (`heading(cur, end)`)
 is used. The C# original has the same degenerate `atan2`.
+
+## Trade item integrity and craft materials (2026-10-20)
+
+- `trade::add_item` (C# `TradeManager.AddItem` only checked `item.Count >= amount`) now also
+  cancels the trade for a soul-bound item or an item outside the bag (the flag check matches mail
+  and auction), and `preflight_items` refuses an offered item that left the bag or became bound
+  after the put-up. Repeated put-ups of one stack stay allowed up to its count, as upstream decided.
+- Craft materials: the C# counted `Inventory.GetItemsCount` (bag + equipment + bank) but consumed
+  from `Bag` only and ignored the result, so a craft with materials in the bank produced the
+  product for free. The port counts the bag only (start and again in `hand_out_products`, before
+  any product is handed out) and refuses with `NOT_ENOUGH_REQUIRED_ITEM` otherwise. Labor is
+  still charged by `Skill.EndSkill` as before.

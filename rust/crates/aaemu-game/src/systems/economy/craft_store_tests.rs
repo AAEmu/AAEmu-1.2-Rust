@@ -1649,3 +1649,41 @@ async fn buy_at_a_doodad_without_a_store_func_is_refused() {
     assert!(item_at(&pa, 2, 0).is_none());
     assert_eq!(pa.data().money, 1000);
 }
+
+#[tokio::test]
+async fn craft_counts_and_consumes_bag_materials_only() {
+    let mut w = world();
+    let rec = install_craft_hooks(&w);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+    // Materials only in the bank do not count: refused at the start.
+    give(&w, &pa, slot_type::BANK, STACK, 6, 0);
+    execute_craft(&mut w, CRAFT, 1);
+    assert!(rec.casts.lock().unwrap().is_empty());
+    assert_eq!(
+        w.a.drain(),
+        vec![(sc::SCErrorMsgPacket, err_bytes(148, 722, 0, false))]
+    );
+
+    // Materials taken out of the bag during the cast: no product, bank untouched.
+    let bag_id = give(&w, &pa, slot_type::INVENTORY, STACK, 6, 0);
+    execute_craft(&mut w, CRAFT, 1);
+    assert_eq!(rec.casts.lock().unwrap().len(), 1);
+    {
+        let inv = Inv::of(&pa);
+        let bag = inv.bag();
+        let mut bag = bag.lock().unwrap();
+        bag.get_item_by_id_mut(bag_id).unwrap().count = 0;
+    }
+    w.a.drain();
+    craft::end_craft(&w.server, &pa);
+    assert_eq!(
+        w.a.drain(),
+        vec![(sc::SCErrorMsgPacket, err_bytes(148, 722, 0, false))]
+    );
+    assert_eq!(
+        Inv::of(&pa).items_count_in(slot_type::INVENTORY, PRODUCT, -1),
+        0
+    );
+    assert_eq!(Inv::of(&pa).items_count_in(slot_type::BANK, STACK, -1), 6);
+}

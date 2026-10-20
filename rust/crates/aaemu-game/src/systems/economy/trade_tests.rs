@@ -882,3 +882,55 @@ async fn unlocking_undoes_both_confirmations() {
         vec![pair(sc::SCTradeOkUpdatePacket, false, true)]
     );
 }
+
+#[tokio::test]
+async fn soul_bound_putup_cancels_the_trade() {
+    use crate::models::item::ITEM_FLAG_SOUL_BOUND;
+    let mut w = world();
+    let id = give(&w, &w.pa.clone(), slot_type::INVENTORY, STACK, 2, 0);
+    Inv::of(&w.pa)
+        .bag()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(id)
+        .unwrap()
+        .flags |= ITEM_FLAG_SOUL_BOUND;
+    start(&mut w);
+    putup_item(&mut w, 0, 2, 0, 1);
+    assert_eq!(w.a.drain(), vec![canceled(0, true)]);
+    assert_eq!(w.b.drain(), vec![canceled(0, false)]);
+    assert!(w.server.systems.economy.trade.trades().is_empty());
+}
+
+#[tokio::test]
+async fn item_bound_after_lock_aborts_the_trade_without_paying() {
+    use crate::models::item::ITEM_FLAG_SOUL_BOUND;
+    let mut w = world();
+    w.pa.data().money = 100;
+    w.pb.data().money = 500;
+    let id = give(&w, &w.pa.clone(), slot_type::INVENTORY, STACK, 4, 0);
+    start(&mut w);
+    putup_item(&mut w, 0, 2, 0, 2);
+    putup_money(&mut w, 1, 300);
+    lock(&mut w, 0, true);
+    lock(&mut w, 1, true);
+    ok(&mut w, 0);
+    // The offered stack becomes bound after both locked.
+    Inv::of(&w.pa)
+        .bag()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(id)
+        .unwrap()
+        .flags |= ITEM_FLAG_SOUL_BOUND;
+    w.a.drain();
+    w.b.drain();
+    ok(&mut w, 1);
+    assert!(w
+        .a
+        .drain()
+        .iter()
+        .all(|(op, _)| *op != sc::SCTradeMadePacket));
+    assert!(w.server.systems.economy.trade.trades().is_empty());
+    assert_untouched(&w, id, 4, (100, 500));
+}
