@@ -648,6 +648,14 @@ pub fn learn_skill(server: &GameServer, c: &mut Character, skill_id: u32) {
     // wrapped byte here and failed every save (1264, see PORTING.md).
     let ab = ab_level(server, c, t.ability_id);
     if t.ability_level > ab {
+        tracing::warn!(
+            "Character {} ({}): dropped stored skill {skill_id} on load, it needs ability level \
+             {} (ability {}) and the character has {ab}",
+            c.unit.name,
+            c.id,
+            t.ability_level,
+            t.ability_id
+        );
         return;
     }
     if c.skills.skills.iter().any(|s| s.id == skill_id) {

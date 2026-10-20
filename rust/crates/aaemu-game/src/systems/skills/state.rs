@@ -96,8 +96,9 @@ impl SkillRun {
         })
     }
 
-    /// `Skill(template, owner)` level: `(abLevel - AbilityLevel) / LevelStep + 1`, saturated to
-    /// the savable range (see `data::skills::skill_level`).
+    /// `Skill(template, owner)` level: `(abLevel - AbilityLevel) / LevelStep + 1` as the C#
+    /// byte (see `data::skills::skill_level`; NPC skill levels are unchanged, only the stored
+    /// character skills are saturated).
     pub fn level_for(template: &SkillTemplate, ab_level: i32) -> u8 {
         crate::data::skills::skill_level(template.ability_level, template.level_step, ab_level)
     }

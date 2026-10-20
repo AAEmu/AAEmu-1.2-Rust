@@ -626,8 +626,11 @@ pub fn use_skill(
         let skill2 = skill.clone();
         let ctx2 = ctx.clone();
         let scheduled = super::tasks::schedule(server, i64::from(cast_time), move |srv| {
-            // CastTask.Execute
-            if cancel.is_cancelled() || skill2.cancelled() {
+            // CastTask.Execute. A cancelled token means `stop` ran: it took the task slot and
+            // released the timeline id. A skill flagged `cancelled` by something else (a cancel
+            // effect, a failed requirement) still holds its id: `cast` ends it, exactly once
+            // (`end_skill` takes the id), instead of this closure dropping it.
+            if cancel.is_cancelled() {
                 return;
             }
             cast(&srv, &skill2, &ctx);
@@ -705,7 +708,17 @@ pub fn cast(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         return;
     }
     if skill.cancelled() {
-        // A cancellation path that did not run `stop` (the id would otherwise be lost).
+        // A cancellation path that did not run `stop` (the id would otherwise be lost). The
+        // task slot of a timed cast is cleared here too (`stop` clears it on its own path).
+        caster.with_unit(|u| {
+            let slot = &mut u.unit_mut().skill_state.skill_task;
+            if slot
+                .as_ref()
+                .is_some_and(|task| Arc::ptr_eq(&task.skill, skill))
+            {
+                *slot = None;
+            }
+        });
         end_skill(server, skill, caster);
         return;
     }

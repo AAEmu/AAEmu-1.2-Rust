@@ -221,15 +221,22 @@ impl TlIdManager {
         }
         if res == 0 {
             s.exhaustions += 1;
-            let status = s.status_line();
+            // The diagnostics scan all ids under the global lock, so they are only built when
+            // the throttled warning is actually logged; the other failures cost two counters.
             if s.exhaustions == 1 || s.exhaustions.is_multiple_of(100) {
                 tracing::warn!(
-                    "No more TlIds left to use: {status} (caster obj {owner}, skill {skill_id}); \
+                    "No more TlIds left to use: {} (caster obj {owner}, skill {skill_id}); \
                      holders: {}",
+                    s.status_line(),
                     s.oldest_holders()
                 );
             } else {
-                tracing::debug!("No more TlIds left to use: {status}");
+                tracing::debug!(
+                    "No more TlIds left to use: in use {}, exhaustions {} (caster obj {owner}, \
+                     skill {skill_id})",
+                    s.in_use,
+                    s.exhaustions
+                );
             }
         } else if s.total_gets.is_multiple_of(500) {
             // The C# printed `ReportStatus()` every 500 gets (debug).

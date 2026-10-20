@@ -12,13 +12,25 @@ use super::sqlite::for_each_row;
 /// `AbilityType.None`.
 pub const ABILITY_NONE: u8 = 11;
 
-/// `Skill(template, owner)` level: `(abLevel - AbilityLevel) / LevelStep + 1`.
-///
-/// The result saturates to `1..=127` instead of wrapping. `skills.level` is a signed `TINYINT`
-/// and the ability-level 99 skills of the 1.2 data (the retired / login-stage rows, e.g. 10385)
-/// are above the level cap 55: the raw formula goes negative and `as u8` turned it into 243,
-/// which made every character save fail with MySQL `1264 Out of range value for column 'level'`.
+/// `Skill(template, owner)` level: `(abLevel - AbilityLevel) / LevelStep + 1`, truncated to a
+/// byte like the C# cast (`(byte)`). This is the level of a runtime `SkillRun`, NPCs included:
+/// their skill levels are deliberately unchanged (an NPC below a skill's `ability_level` still
+/// wraps, exactly as in the C#).
 pub fn skill_level(ability_level: i32, level_step: i32, ab_level: i32) -> u8 {
+    if level_step > 0 {
+        ((ab_level - ability_level) / level_step + 1) as u8
+    } else {
+        1
+    }
+}
+
+/// [`skill_level`] saturated to `1..=127`, for the level a *character* stores and saves.
+///
+/// `skills.level` is a signed `TINYINT` and the ability-level 99 skills of the 1.2 data (the
+/// retired / login-stage rows, e.g. 10385) are above the level cap 55: the raw formula goes
+/// negative and `as u8` turned it into 243, which made every character save fail with MySQL
+/// `1264 Out of range value for column 'level'`.
+pub fn stored_skill_level(ability_level: i32, level_step: i32, ab_level: i32) -> u8 {
     if level_step > 0 {
         ((ab_level - ability_level) / level_step + 1).clamp(1, i32::from(i8::MAX)) as u8
     } else {
@@ -40,9 +52,9 @@ pub struct SkillTemplate {
 }
 
 impl SkillTemplate {
-    /// The `Skill.Level` a new `Skill(template, owner)` gets (see [`skill_level`]).
+    /// The level of a skill a character learns and saves (see [`stored_skill_level`]).
     pub fn level_for(&self, ab_level: i32) -> u8 {
-        skill_level(self.ability_level, self.level_step, ab_level)
+        stored_skill_level(self.ability_level, self.level_step, ab_level)
     }
 }
 
@@ -295,5 +307,24 @@ impl SkillData {
         })?;
         d.finish();
         Ok(d)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_skill_level_keeps_the_csharp_byte_and_stored_level_saturates() {
+        // NPC / runtime skills: the C# `(byte)` result, unchanged (255 for -1).
+        assert_eq!(skill_level(10, 3, 10 - 6), 255);
+        assert_eq!(skill_level(1, 3, 55), 19);
+        assert_eq!(skill_level(5, 0, 1), 1);
+        // Stored character skills (the retired ability_level 99 rows) saturate to a savable level.
+        assert_eq!(stored_skill_level(99, 3, 55), 1);
+        assert_eq!(stored_skill_level(10, 3, 10 - 6), 1);
+        assert_eq!(stored_skill_level(1, 3, 55), 19);
+        assert_eq!(stored_skill_level(1, 1, 1000), 127);
+        assert_eq!(stored_skill_level(5, 0, 1), 1);
     }
 }

@@ -281,3 +281,36 @@ async fn an_exhausted_pool_does_not_block_or_panic() {
     assert_eq!(mgr.in_use(), 0);
     assert_eq!(mgr.stats().unused_releases, 0);
 }
+
+#[tokio::test]
+async fn a_timed_cast_flagged_cancelled_without_stop_releases_its_timeline_once() {
+    // Something other than `stop` (a cancel effect, `cancelled = true`) flags the skill while
+    // its CastTask is pending: the task must still end the skill and return the id - once.
+    let mut data = GameData::empty();
+    data.systems.skills.add_effect(
+        EffectKind::DamageEffect,
+        EffectTemplate::Damage(Box::new(super::tests::damage_effect(1, 10))),
+        1,
+    );
+    let (server, _client, player, npc) = fixture(data);
+    let me = WorldObject::from(&player);
+    let mgr = &server.systems.skills.tl_ids;
+    let skill = SkillRun::new(
+        Arc::new(SkillTemplate {
+            casting_time: 30,
+            effects: vec![super::tests::skill_effect(1, EffectKind::DamageEffect, 1)],
+            ..super::tests::skill_template(2000)
+        }),
+        1,
+    );
+    assert_eq!(cast_skill(&server, &skill, &me, npc.obj_id).0, 0);
+    assert_ne!(skill.tl_id(), 0);
+    skill.state().cancelled = true;
+    wait_released(&skill).await;
+    wait_pool_empty(mgr).await;
+    assert_eq!(mgr.stats().unused_releases, 0, "released more than once");
+    assert!(
+        player.data().unit.skill_state.skill_task.is_none(),
+        "the task slot was left set"
+    );
+}

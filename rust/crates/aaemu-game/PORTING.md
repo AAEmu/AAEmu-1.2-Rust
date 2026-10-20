@@ -1357,8 +1357,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   unchanged, and deletion IDs are acknowledged only after commit.
 
 * systems::skills (2026-10-19): `CharacterSkills.AddSkill` refuses a skill whose `ability_level`
-  the character's ability has not reached, and `Skill.Level` saturates to `1..=127` instead of
-  wrapping (C#: `(byte)((abLevel - AbilityLevel) / LevelStep + 1)`). The 1.2 data has 24 retired /
+  the character's ability has not reached, and the *stored* character skill level saturates to
+  `1..=127` instead of wrapping (`stored_skill_level`; runtime `SkillRun` levels, NPC skills
+  included, keep the C# byte result unchanged. C#: `(byte)((abLevel - AbilityLevel) / LevelStep + 1)`). The 1.2 data has 24 retired /
   login-stage rows with `ability_level` 99 (e.g. 10385, 11854; `show = f`) above the level cap 55;
   the C# expression goes negative and the byte cast wraps it (243), which MySQL rejects when
   saving `skills.level` (signed TINYINT, `1264 Out of range value for column 'level'`), so every
@@ -1385,6 +1386,10 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   interrupted, completed and channelled casts, plus failed validation, item-reagent rejection,
   refused / treeless plots, a replaced reuse and an exhausted pool; every case asserts the pool
   returns to baseline).
+  A timed cast flagged `cancelled` by something other than `stop` (a cancel effect) is ended by
+  `cast()` from its CastTask (which also clears the task slot), exactly once: `end_skill` takes
+  the id, so the `stop` path (token cancelled, task returns early) cannot double-release. Stored
+  skills dropped at load because their ability level is not reached are logged (`warn`).
 
 * systems::skills log noise (2026-10-16): `CSStopCasting` with `tl == 0` and a plot tl for a plot
   that already ended (the client repeats it ~30 times per plot) is logged at debug instead of
