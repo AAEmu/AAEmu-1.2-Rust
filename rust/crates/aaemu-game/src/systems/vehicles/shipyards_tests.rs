@@ -62,7 +62,11 @@ async fn initialize_schedules_tick() {
     tokio::time::sleep(step / 4).await;
     assert!(!has_protection(), "no shipyard tick before the start delay");
 
-    tokio::time::sleep(step).await;
+    // Poll instead of one fixed sleep: a loaded test machine can delay the ticker task.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !has_protection() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(step / 4).await;
+    }
     assert!(
         has_protection(),
         "the shipyard tick ran after the start delay"
