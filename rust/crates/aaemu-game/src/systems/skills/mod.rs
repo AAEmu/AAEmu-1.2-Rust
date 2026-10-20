@@ -28,6 +28,7 @@ pub mod effects;
 pub(crate) mod explode_buff_rules;
 pub mod ext;
 pub mod geometry;
+pub(crate) mod ground_snap_rules;
 pub mod handlers;
 mod mount_authority;
 pub mod packets;

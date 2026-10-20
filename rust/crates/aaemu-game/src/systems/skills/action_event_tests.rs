@@ -1317,3 +1317,63 @@ async fn explode_buff_respects_the_burn_cap_lowest_slot_first() {
     }
     assert!(target.with_base_unit(|u| u.buffs().check_buff(3)));
 }
+
+#[tokio::test]
+async fn move_to_ground_lands_a_position_target_on_the_floor() {
+    use std::collections::HashMap;
+
+    use aaemu_commons::PacketStream;
+
+    use crate::models::transform::PositionAndRotation;
+    use crate::systems::ai::collision::terrain::tests::Plane;
+
+    use super::geometry::PosUnit;
+
+    let (server, mut client, player, _npc) = fixture(GameData::empty());
+    server
+        .systems
+        .ai
+        .collision
+        .test_files
+        .set(Arc::new(HashMap::new()))
+        .unwrap();
+    server
+        .systems
+        .ai
+        .collision
+        .test_terrain
+        .set(Arc::new(Plane {
+            a: 100.0,
+            b: 0.0,
+            c: 0.0,
+            n: 1024,
+        }))
+        .unwrap_or_else(|_| panic!("terrain"));
+    // 0.5 m above the 100 m plane: inside the near band, so the landing is ground + clearance.
+    player.data().unit.transform.set_xyz(100.0, 100.0, 100.5);
+    let owner = WorldObject::from(&player);
+    let mut effect_args = args(&owner, &owner);
+    effect_args.target = Target::Pos(PosUnit {
+        instance_id: 0,
+        zone_id: 100,
+        pos: PositionAndRotation::new(130.0, 140.0, 0.0, 0.0, 0.0, 0.0),
+    });
+    execute(&server, 73, &effect_args, [0; 4]);
+    let body = client
+        .drain()
+        .into_iter()
+        .find(|(op, _)| *op == crate::opcodes::sc::SCBlinkUnitPacket)
+        .expect("blink packet")
+        .1;
+    let mut s = PacketStream::from_bytes(body);
+    assert_eq!(s.read_bc().unwrap(), player.obj_id);
+    assert_eq!(s.read_f32().unwrap(), 0.0);
+    assert_eq!(s.read_f32().unwrap(), 0.0);
+    let x = super::types::convert_long_back(s.read_i64().unwrap());
+    let y = super::types::convert_long_back(s.read_i64().unwrap());
+    let z = s.read_f32().unwrap();
+    // The selected position (not the caster's own XY) with the 0.4 m floor clearance.
+    assert!((x - 130.0).abs() < 0.01, "x {x}");
+    assert!((y - 140.0).abs() < 0.01, "y {y}");
+    assert!((z - 100.4).abs() < 0.01, "z {z}");
+}

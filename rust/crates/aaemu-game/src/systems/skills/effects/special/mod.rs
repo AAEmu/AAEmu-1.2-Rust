@@ -337,6 +337,7 @@ pub fn execute(server: &GameServer, kind: i32, args: &EffectArgs<'_>, values: [i
         61 => unit_actions::cancel_ongoing_buff(s, a, v),
         66 => combat::auto_attack(s, a, v),
         68 => items::apply_reagents(s, a, v),
+        73 => movement::move_to_ground(s, a, v),
         74 => movement::escape(s, a, v),
         75 => misc::report_bot(s, a, v),
         79 => items::fishing_loot(s, a, v),
