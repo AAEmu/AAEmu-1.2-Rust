@@ -54,7 +54,9 @@ impl Args {
                 i += 1;
                 String::new()
             } else {
-                let v = argv.get(i + 1).with_context(|| format!("--{k} needs a value"))?;
+                let v = argv
+                    .get(i + 1)
+                    .with_context(|| format!("--{k} needs a value"))?;
                 i += 2;
                 v.clone()
             };
