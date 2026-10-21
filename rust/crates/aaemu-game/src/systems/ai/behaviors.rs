@@ -27,7 +27,7 @@ use super::combat::{self, add_unit_aggro, can_attack, clear_aggro_of_unit, set_i
 use super::framework::{AiCtx, ArcherPhase, BehaviorKind, ChasePath, NpcIntervalSite};
 use super::npc::{self, MoveAi};
 use super::params::{AiParamType, AiParams, AiParamsKind, AiSkill, AiSkillList, SkillList};
-use super::path_handler::{AiPathPoint, AiPathPointAction, PathStep};
+use super::path_handler::{AiPathPoint, AiPathPointAction, PathStep, TARGET_STALL_TIMEOUT_MS};
 use super::skills::{self as ai_skills, SkillUseConditionKind};
 
 use BehaviorKind as B;
@@ -1376,6 +1376,11 @@ fn follow_path_enter(c: &mut AiCtx<'_>, k: BehaviorKind) {
     // MoveToPathEnabled back to false and runs StopMove (StopMovement + IsInPatrol = false).
     npc::stop_movement(c.server, &c.npc);
     c.npc.data().unit.is_in_patrol = false;
+    // A target carried over from an interrupted run gets a fresh stall window.
+    let pos = owner_pos(c);
+    let include_z = c.npc.data().can_fly;
+    c.ai.path_handler
+        .reset_target_progress(pos, include_z, now_ms());
     c.st(k).enter = true;
 }
 
@@ -1406,6 +1411,7 @@ fn follow_path_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
     }
     if !run_current_path(c, delta_ms) {
         c.go_to_idle();
+        return;
     }
     let h = &c.ai.path_handler;
     let t = h.target_position;
@@ -1414,6 +1420,9 @@ fn follow_path_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
         && t.z == 0.0
         && h.ai_path_points.is_empty()
         && h.ai_path_points_remaining.is_empty()
+        // A sentinel just sent us back to RunCommandSet (the C# then overrode that with
+        // `GoToIdle`, stranding the rest of the command set).
+        && c.ai.current_behavior() == Some(k)
     {
         c.go_to_idle();
     }
@@ -1423,7 +1432,13 @@ fn follow_path_tick(c: &mut AiCtx<'_>, k: BehaviorKind, delta_ms: i64) {
 fn run_current_path(c: &mut AiCtx<'_>, delta_ms: i64) -> bool {
     let pos = owner_pos(c);
     let scale = template_scalars(c).scale;
-    match c.ai.path_handler.run_current_path(pos, scale) {
+    // Ground walkers follow the terrain; only flying NPCs move along the authored Z.
+    let include_z = c.npc.data().can_fly;
+    match c
+        .ai
+        .path_handler
+        .run_current_path_at(pos, scale, include_z, now_ms())
+    {
         PathStep::ReturnToCommandSet => {
             c.go_to_run_command_set();
             true
@@ -1436,12 +1451,30 @@ fn run_current_path(c: &mut AiCtx<'_>, delta_ms: i64) -> bool {
         } => {
             let mut move_speed = npc::real_movement_speed(&c.obj, f64::from(speed));
             move_speed *= delta_seconds(delta_ms);
-            npc_move_towards(c, target, move_speed as f32, actor_flags, 1.0);
+            // Stop within the same radius that counts as an arrival (`Template.Scale`, at least
+            // the movement default 1 m); a smaller tolerance kept the NPC short of the point.
+            npc_move_towards(c, target, move_speed as f32, actor_flags, scale.max(1.0));
             // Move the idle "home" location along with the path
             c.ai.idle_position = owner_pos(c);
             result
         }
         PathStep::Idle(r) => r,
+        PathStep::Stalled {
+            target,
+            path,
+            result,
+        } => {
+            tracing::warn!(
+                "NPC {}: follow path '{}' target ({}, {}, {}) made no progress for {} ms, skipping it",
+                c.npc.obj_id,
+                if path.is_empty() { "?" } else { &path },
+                target.x,
+                target.y,
+                target.z,
+                TARGET_STALL_TIMEOUT_MS
+            );
+            result
+        }
         PathStep::Unsupported(msg) => {
             tracing::error!("{msg} (NotSupportedException)");
             true
@@ -1800,7 +1833,15 @@ fn tick_current_ai_command(c: &mut AiCtx<'_>, delta_ms: i64) {
             );
         }
         Cmd::FollowPath => {
-            let name = c.ai.ai_file_name.clone();
+            // The command names its own route. The C# loaded `AiFileName` (the *previous*
+            // command's name) before assigning `Param2`, so the first FollowPath of a set
+            // loaded nothing, every later one loaded the previous route and the last route
+            // was never loaded at all.
+            let name = if cmd.param2.trim().is_empty() {
+                c.ai.ai_file_name.clone()
+            } else {
+                cmd.param2.clone()
+            };
             c.load_ai_path_points(&name, cmd.param1 == 1);
             if cmd.param1 == 1 {
                 c.enqueue_path_point(AiPathPoint {

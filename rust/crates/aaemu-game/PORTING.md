@@ -2446,3 +2446,42 @@ bounds loot eligibility at generation). The Rust port refuses a take with `TooFa
 retail 3.5 client enables looting at 3.0 m or less on the target frame's distance and walks the
 player to the corpse first (the 10.x client decompile has a matching 3 m check, squared 9.0); the
 2 m above it are slack for movement and latency.
+
+## Follow-path commands and ground-following arrival (2026-10-21)
+
+Public Farm Manager 11545 (`ai_file_id=15`, hold position) fires command set 146 every 3 minutes:
+`FollowPath public_farm`, `UseSkill 18324`, `Timeout 2`, `FollowPath public_farm2`, ...
+`public_farm@182.path` starts 0.4 m from the spawner and its second point is authored 1.4 m above
+the terrain the walker follows. The NPC stayed in `FollowPathBehavior` with "0 points (1 remaining
+in queue)" and emitted a movement packet every 100 ms without advancing (the client animates
+running in place). Three mirrored C# bugs and one missing safeguard:
+
+* `RunCommandSetBehavior.TickCurrentAiCommand` called `Ai.LoadAiPathPoints(Ai.AiFileName, ...)`
+  before assigning `AiFileName = Param2`: the first FollowPath of a set loaded nothing (the NPC
+  went straight back to Idle with the other commands still queued), each later FollowPath loaded
+  the *previous* route and the last route was never loaded. Rust now loads the command's own
+  `Param2` (empty `Param2` still falls back to `AiFileName`).
+* `AiPathHandler.RunCurrentPath` measured arrival in 3D against `Template.Scale`. A ground walker
+  has its step Z replaced by the reference height, so a point authored above the terrain is
+  never reached; `Npc.MoveTowards` then keeps emitting sub-metre steps forever. Rust walkers now
+  arrive on horizontal distance (flyers keep the 3D check) and the radius is at least the 1 m
+  movement tolerance, so a template scale below 1 m (which could never arrive in the C#) works
+  too. `FollowPathBehavior` passes that same radius as the `MoveTowards` tolerance.
+* `FollowPathBehavior.Tick` ran `GoToIdle()` when the path lists were empty *after*
+  `RunCurrentPath` had already sent the NPC to `RunCommandSet` (the `ReturnToCommandSet`
+  sentinel): the rest of the command set was stranded. Rust only idles while still in FollowPath.
+* Not in the C#: a target that makes no progress for 5 s (`TARGET_STALL_TIMEOUT_MS`) is dropped
+  with one WARN naming the NPC and the route file, and the route continues with the next point,
+  so a blocked or unreachable point cannot produce endless in-place movement.
+* `NpcControlEffect` `RunCommandSet` (`systems::ai::hooks`) enqueued the AI commands *and*, for the
+  command set's first route, started `Simulation.GoToPath` as well. For an NPC with an AI two
+  movers then worked on the same NPC: the simulation stepped it (100 ms) towards its own
+  checkpoint while `FollowPathBehavior` stepped it towards the command's route point, undoing
+  each other's steps (the NPC wobbled 0.1 m for ~40 s, e.g. the Public Farm Manager, command set
+  146, never got past x 10494.7 of a 10497.3 route, and the 5 s stall skip fired). Rust only
+  starts the simulation for an NPC without an AI; the AI runs the FollowPath / UseSkill / Timeout
+  commands itself. Test: `flow_tests::run_command_set_effect_does_not_start_the_simulation_mover_for_an_ai_npc`.
+
+`flow_tests::follow_path_command_set_walks_every_route_point` runs the real command-set shape
+over three routes with an elevated point and checks every point is targeted in order, the set
+finishes and the NPC settles in HoldPosition without further movement.

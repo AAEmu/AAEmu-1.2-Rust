@@ -392,6 +392,15 @@ pub fn move_towards(
         );
         Vec3::new(new.x, new.y, target_z)
     };
+    tracing::trace!(
+        "move_step npc {} from {:?} to {:?} (requested {:?}, dist {}, step {})",
+        npc.obj_id,
+        pos,
+        new,
+        other,
+        target_dist,
+        travel_dist
+    );
     // Keep the travelled heading when a step lands exactly on a waypoint. Computing
     // new -> other there yields atan2(0, 0), turning every arrival eastward.
     let angle = calculate_angle_from(pos, other);
