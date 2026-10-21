@@ -55,6 +55,8 @@ mod buff_tests;
 #[cfg(test)]
 mod cast_validation_tests;
 #[cfg(test)]
+mod death_once_tests;
+#[cfg(test)]
 mod effect_task_manager_tests;
 #[cfg(test)]
 mod handler_permission_tests;
@@ -62,6 +64,8 @@ mod handler_permission_tests;
 mod leap_skill_controller_tests;
 #[cfg(test)]
 mod mana_regen_manager_tests;
+#[cfg(test)]
+mod resurrect_tests;
 #[cfg(test)]
 mod sc_unit_impulse_packet_tests;
 #[cfg(test)]

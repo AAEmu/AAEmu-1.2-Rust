@@ -33,6 +33,11 @@ pub enum AddAccountResult {
 pub struct EnterWorldManager {
     /// `_accounts`: login-server connection id (the client's cookie / token) -> account id.
     accounts: Mutex<HashMap<u32, u32>>,
+    /// character id -> game connection id. The session that is entering or playing the character;
+    /// taken before the select's MySQL load and kept until the departure save has finished, so a
+    /// second connection can neither enter the same character twice nor load its row while the
+    /// previous session is still saving it.
+    characters: Mutex<HashMap<u32, u32>>,
 }
 
 impl EnterWorldManager {
@@ -66,6 +71,67 @@ impl EnterWorldManager {
             Some(expected) => LoginDecision::AccountMismatch { expected },
             None => LoginDecision::InvalidToken,
         }
+    }
+
+    /// Atomically reserves `character_id` for `connection_id`. `Err(owner)` means another
+    /// connection is entering or playing the character; `Ok(false)` that this connection already
+    /// owns it, `Ok(true)` that the reservation was just taken.
+    pub fn reserve_character(&self, character_id: u32, connection_id: u32) -> Result<bool, u32> {
+        let mut characters = self
+            .characters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match characters.entry(character_id) {
+            std::collections::hash_map::Entry::Occupied(entry) if *entry.get() == connection_id => {
+                Ok(false)
+            }
+            std::collections::hash_map::Entry::Occupied(entry) => Err(*entry.get()),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(connection_id);
+                Ok(true)
+            }
+        }
+    }
+
+    /// Drops the reservation of `character_id` when `connection_id` still owns it (the departure
+    /// save has finished, or the entry was abandoned).
+    pub fn release_character(&self, character_id: u32, connection_id: u32) {
+        let mut characters = self
+            .characters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if characters.get(&character_id) == Some(&connection_id) {
+            characters.remove(&character_id);
+        }
+    }
+
+    /// Drops every reservation owned by a finished connection and returns the character ids.
+    /// Panic-safe: a poisoned lock still releases, so a failed disconnect cleanup cannot leave a
+    /// character reserved for ever.
+    pub fn release_connection(&self, connection_id: u32) -> Vec<u32> {
+        let mut characters = self
+            .characters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut released = Vec::new();
+        characters.retain(|character_id, owner| {
+            if *owner == connection_id {
+                released.push(*character_id);
+                false
+            } else {
+                true
+            }
+        });
+        released
+    }
+
+    /// The connection currently entering or playing `character_id`.
+    pub fn character_owner(&self, character_id: u32) -> Option<u32> {
+        self.characters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&character_id)
+            .copied()
     }
 }
 
@@ -102,5 +168,53 @@ mod tests {
         // Consumed: a second connection with the same token is refused.
         assert_eq!(m.login(10, 111), LoginDecision::InvalidToken);
         assert_eq!(m.login(10, 0), LoginDecision::InvalidToken);
+    }
+
+    #[test]
+    fn character_reservation_is_atomic_across_connections() {
+        let m = EnterWorldManager::default();
+        assert_eq!(m.reserve_character(50, 1), Ok(true));
+        // A second connection cannot enter the same character.
+        assert_eq!(m.reserve_character(50, 2), Err(1));
+        assert_eq!(m.character_owner(50), Some(1));
+        // The owner may reserve again (select, then enter_world); nothing new was taken.
+        assert_eq!(m.reserve_character(50, 1), Ok(false));
+        // Only the owner can release it.
+        m.release_character(50, 2);
+        assert_eq!(m.character_owner(50), Some(1));
+        m.release_character(50, 1);
+        assert_eq!(m.character_owner(50), None);
+        // Now the second connection gets it.
+        assert_eq!(m.reserve_character(50, 2), Ok(true));
+    }
+
+    #[test]
+    fn release_connection_drops_only_its_own_characters() {
+        let m = EnterWorldManager::default();
+        assert_eq!(m.reserve_character(50, 1), Ok(true));
+        assert_eq!(m.reserve_character(51, 1), Ok(true));
+        assert_eq!(m.reserve_character(52, 2), Ok(true));
+        // Connection id 0 is not a live client session: only the dying connection's entries go.
+        assert_eq!(m.reserve_character(53, 0), Ok(true));
+        let mut released = m.release_connection(1);
+        released.sort_unstable();
+        assert_eq!(released, vec![50, 51]);
+        assert_eq!(m.character_owner(52), Some(2));
+        assert_eq!(m.character_owner(53), Some(0));
+        // Idempotent.
+        assert!(m.release_connection(1).is_empty());
+    }
+
+    #[test]
+    fn a_poisoned_reservation_lock_still_releases() {
+        let m = EnterWorldManager::default();
+        assert_eq!(m.reserve_character(50, 1), Ok(true));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = m.characters.lock().expect("lock");
+            panic!("lock holder panicked");
+        }));
+        // The poisoned mutex must not keep the character reserved after a failed cleanup.
+        assert_eq!(m.release_connection(1), vec![50]);
+        assert_eq!(m.character_owner(50), None);
     }
 }

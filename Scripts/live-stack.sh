@@ -164,11 +164,17 @@ cmd_start() {
       > "$LIVE/logs/rs-game.log" 2>&1 &)
   fi
   echo "waiting for the game server (data + physics load takes ~1 min)..."
+  local misses=0
   for _ in $(seq 1 180); do
     if grep -q "Successfully registered on LoginServer" "$LIVE/logs/rs-game.log" 2>/dev/null; then
       echo "stack ready: login $LOGIN, game registered"; return
     fi
-    running aaemu-game.exe || { echo "game server exited; tail $LIVE/logs/rs-game.log" >&2; exit 1; }
+    # The process probe is flaky right after the start (the process path is not readable yet):
+    # only call the server dead after several misses in a row.
+    if running aaemu-game.exe; then misses=0; else
+      misses=$((misses + 1))
+      [ "$misses" -lt 5 ] || { echo "game server exited; tail $LIVE/logs/rs-game.log" >&2; exit 1; }
+    fi
     sleep 2
   done
   echo "timed out waiting for registration; check $LIVE/logs/rs-game.log" >&2; exit 1

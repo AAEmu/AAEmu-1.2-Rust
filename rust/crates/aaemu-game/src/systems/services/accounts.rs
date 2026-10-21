@@ -15,11 +15,12 @@ use crate::server::GameServer;
 pub const DEAD_CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// `AccountManager.Add(connection)`: registers the account, updates `last_login`, grants the
-/// daily login reward on a new (UTC) day and the offline labor.
-pub async fn add(server: &GameServer, conn: &GameConnection) {
+/// daily login reward on a new (UTC) day and the offline labor. Returns `false` when the account
+/// is already registered (the C# `Add` then returns early); the caller refuses the world entry.
+pub async fn add(server: &GameServer, conn: &GameConnection) -> bool {
     let account_id = conn.account_id();
     if !server.accounts.try_add(account_id, conn.id) {
-        return;
+        return false;
     }
     let now = Utc::now().naive_utc();
     let last_login = update_login_time(server, account_id, now).await;
@@ -32,6 +33,7 @@ pub async fn add(server: &GameServer, conn: &GameConnection) {
     }
     super::timed_rewards::add_offline_labor(server, account_id, &conn.payment, last_login, conn.id)
         .await;
+    true
 }
 
 /// `AccountManager.Initialize`: `RemoveDeadConnections` on the tick manager every 30 s.

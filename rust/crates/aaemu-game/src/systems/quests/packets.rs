@@ -482,6 +482,11 @@ impl ClientPacket for CSRestartMainQuestPacket {
     }
 }
 
+/// At most this many tutorial entries may be marked completed through `CSSaveTutorialPacket`.
+/// The 1.2 data ships 101 (`quest_contexts.category_id = 45`), so this bounds a modified
+/// client's growth of the completed-quest set.
+pub(crate) const MAX_TUTORIAL_ENTRIES: usize = 256;
+
 /// `CSSaveTutorialPacket`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSSaveTutorialPacket {
@@ -497,7 +502,7 @@ impl ClientPacket for CSSaveTutorialPacket {
 
     fn handle<'a>(
         self,
-        _server: &'a GameServer,
+        server: &'a GameServer,
         conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
@@ -505,8 +510,37 @@ impl ClientPacket for CSSaveTutorialPacket {
             let Some(p) = active(conn) else {
                 return Ok(());
             };
+            if !server.game_data.systems.quests.is_tutorial(self.id) {
+                tracing::warn!(
+                    "SaveTutorial refused, {} ({}): {} is not a tutorial entry",
+                    p.data().unit.name,
+                    p.character_id,
+                    self.id
+                );
+                return Ok(());
+            }
             let block = {
                 let mut c = p.data();
+                let already = super::engine::has_quest_completed(&c.quests.completed, self.id);
+                if !already {
+                    let completed = server
+                        .game_data
+                        .systems
+                        .quests
+                        .tutorial_ids
+                        .iter()
+                        .filter(|id| super::engine::has_quest_completed(&c.quests.completed, **id))
+                        .count();
+                    if completed >= MAX_TUTORIAL_ENTRIES {
+                        drop(c);
+                        tracing::warn!(
+                            "SaveTutorial refused, {} ({}): {MAX_TUTORIAL_ENTRIES} tutorial entries are already completed",
+                            p.data().unit.name,
+                            p.character_id
+                        );
+                        return Ok(());
+                    }
+                }
                 super::engine::set_completed_quest_flag(&mut c.quests.completed, self.id, true)
             };
             conn.send(&SCTutorialSavedPacket {

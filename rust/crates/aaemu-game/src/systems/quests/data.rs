@@ -3,7 +3,7 @@
 //! `SphereGameData` (`spheres`, `sphere_quests`) and the `quest_sign_sphere.g` client files of
 //! `SphereQuestManager.LoadQuestSpheres`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rusqlite::Connection;
 
@@ -14,7 +14,8 @@ use crate::data::client_files::ClientFileManager;
 use crate::data::sqlite::{for_each_row, SqlRow};
 use crate::data::GameDataError;
 
-/// `QuestCategoryTutorial` (quests of this category are not loaded).
+/// `QuestCategoryTutorial` (templates of this category are not loaded, but their ids are kept
+/// in [`QuestData::tutorial_ids`] for `CSSaveTutorialPacket`).
 pub const QUEST_CATEGORY_TUTORIAL: u32 = 45;
 
 /// A `Dictionary<uint, List<uint>>` that keeps the C# insertion order (`_groupItems`,
@@ -125,6 +126,9 @@ pub struct QuestData {
     pub templates: HashMap<u32, QuestTemplate>,
     /// `_questTemplates` keys in insertion order (`ORDER BY id`).
     pub template_order: Vec<u32>,
+    /// `quest_contexts` ids of `QUEST_CATEGORY_TUTORIAL` (skipped as quest templates, but
+    /// `CSSaveTutorialPacket` may only mark real tutorial entries completed).
+    pub tutorial_ids: HashSet<u32>,
     /// `_supplies` (by level).
     pub supplies: HashMap<u8, QuestSupplies>,
     /// `_componentTemplates`.
@@ -313,7 +317,7 @@ impl QuestData {
                 grade_id: r.u32_or("grade_id", 0)?,
                 components: Vec::new(),
             };
-            // Skip "loading" tutorial quests
+            // Skip "loading" tutorial quests (but remember their ids for `CSSaveTutorial`)
             if t.category_id != QUEST_CATEGORY_TUTORIAL {
                 let id = t.id;
                 if self.templates.insert(id, t).is_some() {
@@ -321,6 +325,8 @@ impl QuestData {
                 } else {
                     self.template_order.push(id);
                 }
+            } else {
+                self.tutorial_ids.insert(t.id);
             }
             Ok(())
         })?;
@@ -1526,6 +1532,11 @@ impl QuestData {
     /// `GetTemplate(id)`.
     pub fn template(&self, id: u32) -> Option<&QuestTemplate> {
         self.templates.get(&id)
+    }
+
+    /// Whether `id` is a real tutorial entry (`quest_contexts.category_id` 45).
+    pub fn is_tutorial(&self, id: u32) -> bool {
+        self.tutorial_ids.contains(&id)
     }
 
     /// `GetComponent(componentId)`.
