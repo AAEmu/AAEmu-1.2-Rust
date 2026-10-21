@@ -2437,6 +2437,23 @@ the death never started its timer):
   comes back at full HP only after its repair wait, not when it is still on cooldown. (As the
   mirrored `SummonSlave.ReadDetails` bug above notes, the timer itself is still lost on restart.)
 
+## Global cooldown enforcement and plot-only skill cooldowns (2026-10-21)
+
+Deviations from the C# `Skill.Use` (`Skill.cs` 135-153 + `Helper.CheckInterval`):
+
+- The C# refused a GCD / last-use violation only when `CheckInterval` also failed, and that
+  returns true (and records) whenever no attempt was made in the last 150 ms. So the first press
+  during any GCD, and every press 150 ms after the previous one, got through (a bow skill with a
+  700 ms GCD fired 4-5 times a second). `use_skill` now answers `SkillResult.CooldownTime`
+  outright while more than `GCD_GRACE_MS` (150 ms, network jitter) of the GCD or of the
+  last-use delay is left; `ignore_global_cooldown` skills and GCD-bypassing calls are unchanged.
+  The `intervals` map is gone. The skill's own cooldown check (`UnitCooldowns::check_cooldown`,
+  250 ms tolerance) is unchanged.
+- Plot-only skills return before `Cast`, which is where the C# sets the GCD, and only got their
+  own cooldown at `DoPlotEnd`, so they could be recast while the plot ran. The GCD and the skill's
+  cooldown are now started when the plot starts (`DoPlotEnd`'s `AddCooldown` keeps the earlier
+  entry). Not done: refusing a recast with `skill_on_casting` while `active_plot` runs, since
+  plots chain follow-up skills through the same caster state.
 
 ## Loot take range (2026-10-21)
 
