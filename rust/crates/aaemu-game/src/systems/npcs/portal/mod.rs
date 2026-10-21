@@ -809,6 +809,23 @@ pub fn use_portal(server: &GameServer, player: &PlayerRef, obj_id: u32) {
     use_portal_with_preference(server, player, obj_id, false);
 }
 
+/// `World.PortalUseRange`: how close a character must be to use a portal gate NPC or a navi
+/// doodad. Negative values are clamped to 0.
+fn portal_use_range(server: &GameServer) -> f32 {
+    server.config.world.portal_use_range.max(0.0)
+}
+
+/// `BaseUnit.GetDistanceTo(obj)` (2D, minus the model radii), like the loot and NPC service
+/// checks measure it.
+fn distance_to(server: &GameServer, player: &PlayerRef, obj: &WorldObject) -> f32 {
+    crate::systems::skills::geometry::distance_to(
+        server,
+        &crate::systems::skills::geometry::Target::Obj(WorldObject::from(player)),
+        &crate::systems::skills::geometry::Target::Obj(obj.clone()),
+        false,
+    )
+}
+
 /// The 1.2 Safe Portal Mode flag restricts only that request to its creator's portal.
 /// Shared mode retains the normal ability to use another player's summoned portal.
 pub fn use_portal_with_preference(
@@ -837,6 +854,20 @@ pub fn use_portal_with_preference(
     };
     if only_my_portal && owner_id != player.character_id {
         player.send(SCErrorMsgPacket::new(error_message::NOT_MY_PORTAL, 0, true));
+        return;
+    }
+    let range = portal_use_range(server);
+    let distance = distance_to(server, player, &WorldObject::from(&npc));
+    if distance > range {
+        tracing::warn!(
+            "UsePortal refused: {} is {distance:.1} m from portal {obj_id} (use range {range} m)",
+            player.data().unit.name
+        );
+        player.send(SCErrorMsgPacket::new(
+            crate::systems::economy::error_message::TOO_FAR_AWAY,
+            0,
+            true,
+        ));
         return;
     }
     let overburdened =
@@ -1029,7 +1060,8 @@ fn run_navi_func(
 /// `SCNaviTeleportPacket(x, y, z)` (the 1.2 client's `OnNaviTeleport` runs the same local
 /// teleport as `SCTeleportUnit`, yaw 0, and answers `CSTeleportEnded`). Same world only; funcs
 /// with a skill (3347 "White Dress Portrait", skill 15193 = `Return` worldgate 304) are used
-/// with `CSStartSkill`, not with this packet.
+/// with `CSStartSkill`, not with this packet. The character must stand within
+/// `World.PortalUseRange` of the sign, measured like `GetDistanceTo`.
 pub fn navi_teleport(server: &GameServer, player: &PlayerRef, obj_id: u32) {
     let Some((world, doodad, func)) = navi_func(server, player, obj_id, "DoodadFuncNaviTeleport")
     else {
@@ -1041,6 +1073,20 @@ pub fn navi_teleport(server: &GameServer, player: &PlayerRef, obj_id: u32) {
         ));
         return;
     };
+    let range = portal_use_range(server);
+    let distance = distance_to(server, player, &WorldObject::from(&doodad));
+    if distance > range {
+        tracing::warn!(
+            "NaviTeleport refused: {} is {distance:.1} m from navi doodad {obj_id} (use range {range} m)",
+            player.data().unit.name
+        );
+        player.send(SCErrorMsgPacket::new(
+            crate::systems::economy::error_message::TOO_FAR_AWAY,
+            0,
+            true,
+        ));
+        return;
+    }
     let pos = world.world_pos_rot(&WorldObject::from(&doodad));
     run_navi_func(server, &doodad, player, &func);
     player.data().set_disabled_set_position(true);
@@ -1069,6 +1115,10 @@ pub fn navi_open_portal(server: &GameServer, player: &PlayerRef, obj_id: u32) {
     };
     let at = world.world_pos_rot(&WorldObject::from(&doodad));
     if distance_3d(player_world_position(server, player), (at.x, at.y, at.z)) > NAVI_USE_RANGE {
+        tracing::warn!(
+            "NaviOpenPortal refused: {} is too far from navi doodad {obj_id} (use range {NAVI_USE_RANGE} m)",
+            player.data().unit.name
+        );
         player.send(SCErrorMsgPacket::new(
             crate::systems::economy::error_message::TOO_FAR_AWAY,
             0,

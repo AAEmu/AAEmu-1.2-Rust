@@ -2308,6 +2308,20 @@ Doc-only items:
   rename needs 0), **M23** (actability downgrade clamp): per Bevy RE notes, not re-verified and not
   changed; each needs a reproduction against the real client before a fix.
 
+## Portal use range (2026-10-21)
+
+* `CSUsePortal` needs the character within `World.PortalUseRange` (default 5 m) of the gate NPC
+  and `CSNaviTeleport` within the same range of the navi doodad, measured like `GetDistanceTo`
+  (2D, minus the model radii). The C# `PortalManager.UsePortal` and the `CSNaviTeleport` handler
+  checked nothing. The default covers the gate placement (`open_portal_effects.distance` = 3 m;
+  the 1.2 `ui_texts` 1291 tooltip says 5 m) and matches `portal::NAVI_USE_RANGE`; the 1.2
+  client's only interaction-range CVar, `max_interaction_doodad_distance`, defaults to 2.1 m for
+  doodads (Ghidra `proj-aa12u`, `FUN_390f7b40`), so 5 m is the server's slack for movement and
+  latency. Refusals answer `SCErrorMsg(TooFarAway, 154)` and log one WARN with the character and
+  distance.
+* `CSUseTeleport` still charges the fare the client sends: every 1.2 `npcs.teleporter` row is
+  false and no fare column or table exists, so there is nothing to compute the amount from.
+
 ## Dash heading at the end point (2026-10-20)
 
 `SkillController::step` turned the unit toward `heading(new, end)`. On the last step `new` equals

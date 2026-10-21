@@ -338,6 +338,10 @@ pub struct WorldConfig {
     pub pvp_durability_loss_rate: f32,
     #[serde(rename = "minimumexplosslevel", deserialize_with = "lenient")]
     pub minimum_exp_loss_level: i32,
+    /// `PortalUseRange`: how close (metres, 2D, minus the model radii) a character must be to a
+    /// portal gate NPC or navi doodad to use it (`CSUsePortal`, `CSNaviTeleport`).
+    #[serde(rename = "portaluserange", deserialize_with = "lenient")]
+    pub portal_use_range: f32,
     /// `NpcPrewarmRegionMargin`: how many extra regions beyond the current player visibility
     /// neighborhoods are prewarmed as players move, so nearby NPCs are already prepared before
     /// a player reaches them. Server-side prewarming only; client-side NPC visibility is still
@@ -395,6 +399,9 @@ impl Default for WorldConfig {
             pve_durability_loss_rate: 1.0,
             pvp_durability_loss_rate: 1.0,
             minimum_exp_loss_level: 10,
+            // The data's `open_portal_effects.distance` is 3 m and the 1.2 tooltip places the
+            // gate 5 m away; 5 m also matches `portal::NAVI_USE_RANGE` and the NPC services.
+            portal_use_range: 5.0,
             npc_prewarm_region_margin: 1,
             npc_spawn_tick_ms: 250,
             npc_spawns_per_tick: 64,
@@ -1145,6 +1152,7 @@ mod tests {
         assert_eq!(cfg.world.wind_model, WindModelType::Official);
         assert_eq!(cfg.world.exp_loss_rate_at_death, 0.05);
         assert_eq!(cfg.world.minimum_exp_loss_level, 10);
+        assert_eq!(cfg.world.portal_use_range, 5.0);
         // Dungeons.json
         assert_eq!(cfg.dungeons.auto_team_disband_kick_time, 15);
         assert_eq!(
