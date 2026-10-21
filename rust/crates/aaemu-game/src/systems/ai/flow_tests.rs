@@ -1613,3 +1613,45 @@ async fn guard_kill_while_the_mob_ai_is_busy_keeps_the_mob_dead() {
         .contains_key(&MOB_OBJ));
     assert_ne!(behavior(&server, NPC_OBJ), Some(B::Attack));
 }
+
+/// `NpcControlEffect` `RunCommandSet` on an NPC with an AI: the queued `FollowPath` command
+/// walks the route, so the legacy `Simulation.GoToPath` mover must not run beside it (two
+/// movers kept pulling the NPC to different points and stalled it part-way along its route).
+#[tokio::test]
+async fn run_command_set_effect_does_not_start_the_simulation_mover_for_an_ai_npc() {
+    use super::params::{AiCommandCategory, AiCommands};
+    let mut game_data = data();
+    game_data.systems.ai.ai.commands.insert(
+        900,
+        vec![AiCommands {
+            id: 1,
+            cmd_set_id: 900,
+            cmd_id: AiCommandCategory::FollowPath,
+            param1: 1,
+            param2: "public_farm".to_string(),
+        }],
+    );
+    let server = server_with_data(game_data);
+    let npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        NPC_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    let sim = Arc::new(std::sync::Mutex::new(super::simulation::Simulation::new(
+        None,
+    )));
+    server.systems.ai.simulations.insert(NPC_OBJ, sim.clone());
+    let effect = crate::systems::skills::data::effects::NpcControlEffect {
+        id: 1,
+        category_id: 5,
+        param_string: String::new(),
+        param_int: 900,
+    };
+    super::hooks::npc_control_effect(&server, &effect, &npc);
+    assert!(sim.lock().unwrap().move_file_name.is_empty());
+    assert!(!sim.lock().unwrap().move_to_path_enabled);
+    assert!(!npc.data().unit.is_in_patrol);
+}
