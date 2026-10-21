@@ -1852,7 +1852,10 @@ fn tick_current_ai_command(c: &mut AiCtx<'_>, delta_ms: i64) {
             }
             c.go_to_follow_path();
             if cmd.param1 == 1 {
-                c.ai.ai_file_name = cmd.param2.clone();
+                // An empty Param2 walked the current route (see above): keep its name.
+                if !cmd.param2.trim().is_empty() {
+                    c.ai.ai_file_name = cmd.param2.clone();
+                }
             } else {
                 c.ai.ai_file_name2 = cmd.param2.clone();
             }
