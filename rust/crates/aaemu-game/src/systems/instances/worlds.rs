@@ -4,10 +4,13 @@
 //! `Transform.ApplyWorldSpawnPosition`, `CSInstanceLoadedPacket`).
 //!
 //! Moving a player between instances works as in C#: the transform gets the new instance id and
-//! the client is told with `SCLoadInstancePacket`; the region switch happens on the next
-//! `AddVisibleObject` of the player (its first movement after `CSInstanceLoadedPacket`), where
-//! `world::session::move_unit` leaves the old instance's region grid first
-//! (`WorldManager::leave_other_instance`, the cross-world branch of the C# region change).
+//! the client is told with `SCLoadInstancePacket`. Because that packet empties the client's world,
+//! the character is re-filed in the arrival instance when the client signals `CSInstanceLoadedPacket`
+//! ([`instance_loaded`]): the old instance's region grid is left first
+//! (`WorldManager::leave_other_instance`, the cross-world branch of the C# region change) and the
+//! character is added to the arrival instance's visibility grid, which sends the units / doodads
+//! / players in view and shows the character to them without waiting for a movement packet. The
+//! later moves find the character already filed and only update its region.
 
 use std::sync::{Arc, Mutex};
 
@@ -373,6 +376,14 @@ pub fn return_to_main_world(server: &GameServer, p: &PlayerRef) -> Option<Transf
 
 /// `CSInstanceLoadedPacket.Read`: `SCUnitStatePacket(ActiveChar)`, `SCDetailedTimeOfDayPacket(12)`
 /// and `DisabledSetPosition = false`.
+///
+/// A zone load empties the client's world, so the character has to be re-filed in the instance
+/// it was moved to now: leave the old instance's region grid (the stale units / doodads there are
+/// removed from the client) and `AddVisibleObject` in the arrival instance, which sends the units,
+/// doodads and players in view and shows the character to them without waiting for a movement
+/// packet. This mirrors the later C# fix (`ef0d41982`, `Transform.FinalizeTransform()` in
+/// `CSInstanceLoadedPacket`); unlike that fix's `ResendVisibleObjectsToCharacter` repaint, an
+/// arrival that is already filed in the target region sends nothing, so nothing is duplicated.
 pub fn instance_loaded(server: &GameServer, p: &PlayerRef) {
     let packet = {
         let mut c = p.data();
@@ -383,5 +394,13 @@ pub fn instance_loaded(server: &GameServer, p: &PlayerRef) {
     p.send(packet);
     p.send(SCDetailedTimeOfDayPacket { time: 12.0 });
     p.data().set_disabled_set_position(false);
+    let instance_id = p.data().unit.transform.instance_id;
+    if let Some(world) = server.world.world(instance_id) {
+        // The C# `FinalizeTransform()` after `DisabledSetPosition = false`.
+        let obj = WorldObject::from(p);
+        server.world.leave_other_instance(&obj, world.id);
+        let changes = world.add_visible_object(&obj, &server.view_ctx());
+        session::handle_zone_changes(server, changes);
+    }
     tracing::debug!("InstanceLoaded.");
 }
