@@ -2455,7 +2455,6 @@ Deviations from the C# `Skill.Use` (`Skill.cs` 135-153 + `Helper.CheckInterval`)
   entry). Not done: refusing a recast with `skill_on_casting` while `active_plot` runs, since
   plots chain follow-up skills through the same caster state.
 
-
 ## Loot take range (2026-10-21)
 
 C# `TryTakeLootLocked` never checked the distance to the corpse (`MaxLootingRange`, 200 m, only
