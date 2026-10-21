@@ -314,7 +314,7 @@ async fn expect_log(game: &mut GameClient, pattern: &str, secs: u64) -> anyhow::
 
 /// `expectdb "<sql>" <expected> [secs]`: the SQL's single value must equal `expected`
 /// (re-checked every 250 ms when `secs` is given).
-fn expect_db(sql: &str, expected: &str, secs: u64) -> anyhow::Result<()> {
+async fn expect_db(sql: &str, expected: &str, secs: u64) -> anyhow::Result<()> {
     let spec = std::env::var("AAEMU_VERIFY_MYSQL")
         .context("set AAEMU_VERIFY_MYSQL to 'mysql.exe <args...> <database>'")?;
     let mut parts = split_quoted(&spec)?;
@@ -322,10 +322,11 @@ fn expect_db(sql: &str, expected: &str, secs: u64) -> anyhow::Result<()> {
     let exe = parts.remove(0);
     let deadline = Instant::now() + Duration::from_secs(secs);
     loop {
-        let out = std::process::Command::new(&exe)
-            .args(&parts)
-            .args(["-N", "-B", "-e", sql])
-            .output()
+        // mysql.exe blocks: run it off the async runtime so the bot's connection keeps going.
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.args(&parts).args(["-N", "-B", "-e", sql]);
+        let out = tokio::task::spawn_blocking(move || cmd.output())
+            .await?
             .with_context(|| format!("running {exe}"))?;
         if !out.status.success() {
             bail!(
@@ -341,7 +342,7 @@ fn expect_db(sql: &str, expected: &str, secs: u64) -> anyhow::Result<()> {
         if Instant::now() >= deadline {
             bail!("expected {expected:?} from {sql:?}; got {got:?}");
         }
-        std::thread::sleep(Duration::from_millis(250));
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -748,7 +749,7 @@ async fn run_lines(
                     "expectdb \"<sql>\" <expected> [secs] (one argument line)"
                 );
                 let secs: u64 = args.get(2).and_then(|x| x.parse().ok()).unwrap_or(0);
-                expect_db(&args[0], &args[1], secs)?;
+                expect_db(&args[0], &args[1], secs).await?;
             }
             "rezexpect" => {
                 let in_place = match parts.first().copied() {
@@ -879,6 +880,10 @@ async fn run_lines(
                 let hex = raw
                     .replace("SELF", &bc(game.state.self_obj))
                     .replace("PEER", &peer_bc);
+                anyhow::ensure!(
+                    hex.len() % 2 == 0 && hex.is_ascii(),
+                    "rawcs body hex must be an even number of hex digits"
+                );
                 let body: Vec<u8> = (0..hex.len() / 2)
                     .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16))
                     .collect::<Result<_, _>>()?;

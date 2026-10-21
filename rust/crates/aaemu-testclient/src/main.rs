@@ -38,6 +38,7 @@ struct Args {
 
 impl Args {
     fn parse() -> anyhow::Result<Self> {
+        const SWITCHES: &[&str] = &["list-bots"];
         let mut it = std::env::args().skip(1);
         let cmd = it.next().unwrap_or_else(|| "help".into());
         let argv: Vec<String> = it.collect();
@@ -48,13 +49,14 @@ impl Args {
             let Some(k) = a.strip_prefix("--") else {
                 bail!("unexpected argument '{a}'");
             };
-            // A flag followed by another flag (or the end) is a boolean switch (`--list-bots`).
-            let v = if i + 1 < argv.len() && !argv[i + 1].starts_with("--") {
-                i += 2;
-                argv[i - 1].clone()
-            } else {
+            // Boolean switches take no value; every other flag needs one.
+            let v = if SWITCHES.contains(&k) {
                 i += 1;
                 String::new()
+            } else {
+                let v = argv.get(i + 1).with_context(|| format!("--{k} needs a value"))?;
+                i += 2;
+                v.clone()
             };
             flags.insert(k.to_string(), v);
         }
