@@ -154,21 +154,30 @@ pub fn apply_skill_modifiers(
         .unwrap_or(value)
 }
 
-/// `Helper.CheckInterval(caller, interval)` for the two call sites of `Skill.Use`.
-fn check_interval(server: &GameServer, obj_id: u32, site: u8, interval_ms: i64) -> bool {
-    let now = now_ms();
-    let mut m = server
-        .systems
-        .skills
-        .intervals
-        .lock()
-        .expect("intervals poisoned");
-    let next = m.get(&(obj_id, site)).copied().unwrap_or(now);
-    if next > now {
-        return false;
+/// Network grace of the global-cooldown and per-use throttle checks in [`use_skill`]: a request
+/// that arrives with at most this much of the cooldown left is still accepted, so client/server
+/// clock jitter does not refuse a legitimate press. Same idea as the 250 ms tolerance of
+/// `UnitCooldowns::check_cooldown`, but tighter so an over-eager client cannot press early.
+const GCD_GRACE_MS: i64 = 150;
+
+/// Sets the caster's global cooldown from the skill template (`default_gcd` / `custom_gcd`
+/// scaled by the caster's `GlobalCooldownMul`). Skipped when the skill bypasses the GCD.
+fn start_global_cooldown(server: &GameServer, skill: &SkillRef, caster: &WorldObject, now: i64) {
+    if skill.state().bypass_gcd {
+        return;
     }
-    m.insert((obj_id, site), now + interval_ms);
-    true
+    let t = &skill.template;
+    let mut gcd = t.custom_gcd;
+    if t.default_gcd {
+        gcd = if caster.as_npc().is_some() {
+            1500
+        } else {
+            1000
+        };
+    }
+    let mul = stat(server, caster, StatKind::GlobalCooldownMul) as f32;
+    let ms = (gcd as f32 * (mul / 100.0)) as i64;
+    caster.with_unit(|u| u.unit_mut().global_cooldown_ms = now + ms);
 }
 
 fn lookup_base_unit(server: &GameServer, caster: &WorldObject, obj_id: u32) -> Option<WorldObject> {
@@ -513,13 +522,13 @@ pub fn use_skill(
         let (last_used, gcd) = caster
             .with_unit(|u| (u.unit().skill_last_used_ms, u.unit().global_cooldown_ms))
             .unwrap_or((0, 0));
-        if last_used + delay > now && !check_interval(server, caster.obj_id(), 0, delay) {
+        // Deviation from C# (`Skill.Use` + `Helper.CheckInterval`): the C# only refused a second
+        // attempt inside the 150 ms interval, so the first press during any GCD got through.
+        // Refuse outright while more than the network grace of the cooldown is left.
+        if last_used + delay - now > GCD_GRACE_MS {
             return (skill_result::COOLDOWN_TIME, 0);
         }
-        if gcd >= now
-            && !template.ignore_global_cooldown
-            && !check_interval(server, caster.obj_id(), 1, delay)
-        {
+        if !template.ignore_global_cooldown && gcd - now > GCD_GRACE_MS {
             return (skill_result::COOLDOWN_TIME, 0);
         }
     }
@@ -611,6 +620,15 @@ pub fn use_skill(
     if let Some(plot_id) = template.plot_id {
         super::plots::run_plot(server, plot_id, ctx.clone(), skill.clone());
         if template.plot_only {
+            // `cast` never runs for a plot-only skill: start the GCD and the skill's own
+            // cooldown now, so it cannot be recast while the plot runs (`do_plot_end` adds the
+            // cooldown too, but `add_cooldown` keeps this earlier entry).
+            start_global_cooldown(server, skill, caster, now);
+            caster.with_unit(|u| {
+                u.unit_mut()
+                    .cooldowns
+                    .add_cooldown(template.id, template.cooldown_time as u32, now)
+            });
             return (skill_result::SUCCESS, 0);
         }
     }
@@ -767,19 +785,7 @@ pub fn cast(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     }
     let t = &skill.template;
     let now = now_ms();
-    if !skill.state().bypass_gcd {
-        let mut gcd = t.custom_gcd;
-        if t.default_gcd {
-            gcd = if caster.as_npc().is_some() {
-                1500
-            } else {
-                1000
-            };
-        }
-        let mul = stat(server, caster, StatKind::GlobalCooldownMul) as f32;
-        let ms = (gcd as f32 * (mul / 100.0)) as i64;
-        caster.with_unit(|u| u.unit_mut().global_cooldown_ms = now + ms);
-    }
+    start_global_cooldown(server, skill, caster, now);
     if caster.as_npc().is_some() && t.skill_controller_id != 0 {
         if let Some(sc) = server
             .game_data
