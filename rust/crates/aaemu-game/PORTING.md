@@ -818,6 +818,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * systems::economy: item operations are serialised by the economy operation lock (`ItemTxn`) and
   their packets / quest events are flushed after the container locks are released, in the C#
   order; character packets sent during an operation go through the same queue (`Out`).
+* systems::economy (account attributes): the C# `AccountAttributeManager.Apply` saved synchronously;
+  the Rust applies the effect to the cache and persists in a background task (skill effects are
+  synchronous), serialised per account by the account lock. Each save takes the cache snapshot
+  while holding the lock, so overlapping effects (saved buffs re-applied on login, bot add) cannot
+  interleave their DELETE / INSERT or commit an older snapshot last.
 * systems::economy: `CSRepairPetItemsPacket` repairs owned mate equipment containers at the
   current nearby blacksmith (the native 10.x button at `0x399093D0` supplies its NPC id).
   Repair bills cannot exceed available money; repairing destroyed equipped gear restores its

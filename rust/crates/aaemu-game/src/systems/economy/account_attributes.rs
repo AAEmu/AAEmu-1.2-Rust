@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use sqlx::Row;
+use sqlx::{MySqlPool, Row};
 
 use crate::server::GameServer;
 
@@ -149,37 +149,65 @@ pub async fn load(server: &GameServer, account_id: u32) {
     }
 }
 
-/// Persists the cached rows of `account_id`, replacing the account's table rows.
+/// Persists the cached rows of `account_id`, replacing the account's table rows. Saves of one
+/// account are serialised by the account lock; the snapshot is taken under it so the last save
+/// always writes the newest cache.
 pub async fn persist(server: &GameServer, account_id: u32) {
-    let attributes = server.systems.economy.account_attributes.get(account_id);
-    let result: Result<(), sqlx::Error> = async {
-        let mut tx = server.db.begin().await?;
-        sqlx::query("DELETE FROM account_attributes WHERE account_id = ?")
-            .bind(account_id)
-            .execute(&mut *tx)
-            .await?;
-        for a in &attributes {
-            sqlx::query(
-                "INSERT INTO account_attributes (account_id, kind_id, world_id, count, end_time) \
-                 VALUES (?, ?, ?, ?, ?)",
-            )
-            .bind(account_id)
-            .bind(a.kind_id)
-            .bind(a.world_id)
-            .bind(a.count)
-            .bind(
-                a.end_time
-                    .and_then(|t| chrono::DateTime::from_timestamp(t, 0).map(|d| d.naive_utc())),
-            )
-            .execute(&mut *tx)
-            .await?;
-        }
-        tx.commit().await
-    }
+    let attributes = &server.systems.economy.account_attributes;
+    let lock = server.accounts.lock_of(account_id);
+    let result = persist_locked(attributes, &lock, account_id, |rows| async move {
+        write_rows(&server.db, account_id, &rows).await
+    })
     .await;
     if let Err(e) = result {
         tracing::error!("account_attributes persist({account_id}): {e}");
     }
+}
+
+/// Runs `write` with the newest snapshot of `account_id` while holding its account lock, so
+/// overlapping saves cannot interleave their DELETE / INSERT and the last one stores the latest
+/// cache.
+async fn persist_locked<F, Fut>(
+    attributes: &AccountAttributes,
+    lock: &tokio::sync::Mutex<()>,
+    account_id: u32,
+    write: F,
+) -> Result<(), sqlx::Error>
+where
+    F: FnOnce(Vec<AccountAttribute>) -> Fut,
+    Fut: std::future::Future<Output = Result<(), sqlx::Error>>,
+{
+    let _guard = lock.lock().await;
+    write(attributes.get(account_id)).await
+}
+
+async fn write_rows(
+    db: &MySqlPool,
+    account_id: u32,
+    attributes: &[AccountAttribute],
+) -> Result<(), sqlx::Error> {
+    let mut tx = db.begin().await?;
+    sqlx::query("DELETE FROM account_attributes WHERE account_id = ?")
+        .bind(account_id)
+        .execute(&mut *tx)
+        .await?;
+    for a in attributes {
+        sqlx::query(
+            "INSERT INTO account_attributes (account_id, kind_id, world_id, count, end_time) \
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(account_id)
+        .bind(a.kind_id)
+        .bind(a.world_id)
+        .bind(a.count)
+        .bind(
+            a.end_time
+                .and_then(|t| chrono::DateTime::from_timestamp(t, 0).map(|d| d.naive_utc())),
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await
 }
 
 async fn rows(server: &GameServer, account_id: u32) -> Result<Vec<AccountAttribute>, sqlx::Error> {
@@ -302,5 +330,103 @@ mod tests {
         prune_expired(&mut rows, now);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind_id, 2);
+    }
+
+    async fn record_write(
+        writing: &std::sync::atomic::AtomicUsize,
+        max_writing: &std::sync::atomic::AtomicUsize,
+        writes: &Mutex<Vec<Vec<AccountAttribute>>>,
+        rows: Vec<AccountAttribute>,
+    ) {
+        use std::sync::atomic::Ordering;
+        let now = writing.fetch_add(1, Ordering::SeqCst) + 1;
+        max_writing.fetch_max(now, Ordering::SeqCst);
+        writes.lock().unwrap_or_else(|e| e.into_inner()).push(rows);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        writing.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn saves_of_one_account_are_serialised_and_write_the_latest_cache() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let attributes = Arc::new(AccountAttributes::default());
+        attributes.upsert(7, attr(KIND_AUCTION_POST_AUTHORITY, 0, None));
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let writes = Arc::new(Mutex::new(Vec::<Vec<AccountAttribute>>::new()));
+        let writing = Arc::new(AtomicUsize::new(0));
+        let max_writing = Arc::new(AtomicUsize::new(0));
+        let first_snapshot = Arc::new(tokio::sync::Notify::new());
+        let release_first = Arc::new(tokio::sync::Notify::new());
+
+        let first = tokio::spawn({
+            let attributes = attributes.clone();
+            let lock = lock.clone();
+            let writes = writes.clone();
+            let writing = writing.clone();
+            let max_writing = max_writing.clone();
+            let first_snapshot = first_snapshot.clone();
+            let release_first = release_first.clone();
+            async move {
+                persist_locked(&attributes, &lock, 7, |rows| {
+                    let writes = writes.clone();
+                    let writing = writing.clone();
+                    let max_writing = max_writing.clone();
+                    let first_snapshot = first_snapshot.clone();
+                    let release_first = release_first.clone();
+                    async move {
+                        first_snapshot.notify_one();
+                        release_first.notified().await;
+                        record_write(&writing, &max_writing, &writes, rows).await;
+                        Ok(())
+                    }
+                })
+                .await
+                .unwrap();
+            }
+        });
+
+        first_snapshot.notified().await;
+        attributes.upsert(7, attr(2, 0, None));
+        let second = tokio::spawn({
+            let attributes = attributes.clone();
+            let lock = lock.clone();
+            let writes = writes.clone();
+            let writing = writing.clone();
+            let max_writing = max_writing.clone();
+            async move {
+                persist_locked(&attributes, &lock, 7, |rows| async move {
+                    record_write(&writing, &max_writing, &writes, rows).await;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        release_first.notify_one();
+        first.await.unwrap();
+        second.await.unwrap();
+
+        let writes = writes.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(max_writing.load(Ordering::SeqCst), 1, "saves overlapped");
+        assert_eq!(writes.len(), 2);
+        assert_eq!(
+            writes[0],
+            vec![attr(KIND_AUCTION_POST_AUTHORITY, 0, None)],
+            "the first save saw the cache before the second change"
+        );
+        assert_eq!(
+            writes[1],
+            vec![attr(KIND_AUCTION_POST_AUTHORITY, 0, None), attr(2, 0, None)],
+            "the second save must see the newest cache"
+        );
+        assert_eq!(
+            *writes.last().unwrap(),
+            attributes.get(7),
+            "the last save must store the newest cache"
+        );
     }
 }
