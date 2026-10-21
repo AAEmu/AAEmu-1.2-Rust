@@ -2394,6 +2394,8 @@ running in place). Three mirrored C# bugs and one missing safeguard:
   `RunCurrentPath` had already sent the NPC to `RunCommandSet` (the `ReturnToCommandSet`
   sentinel): the rest of the command set was stranded. Rust only idles while still in FollowPath.
 * Not in the C#: a target that makes no progress for 5 s (`TARGET_STALL_TIMEOUT_MS`) is dropped
+  with one WARN naming the NPC and the route file, and the route continues with the next point,
+  so a blocked or unreachable point cannot produce endless in-place movement.
 * `NpcControlEffect` `RunCommandSet` (`systems::ai::hooks`) enqueued the AI commands *and*, for the
   command set's first route, started `Simulation.GoToPath` as well. For an NPC with an AI two
   movers then worked on the same NPC: the simulation stepped it (100 ms) towards its own
@@ -2402,8 +2404,6 @@ running in place). Three mirrored C# bugs and one missing safeguard:
   146, never got past x 10494.7 of a 10497.3 route, and the 5 s stall skip fired). Rust only
   starts the simulation for an NPC without an AI; the AI runs the FollowPath / UseSkill / Timeout
   commands itself. Test: `flow_tests::run_command_set_effect_does_not_start_the_simulation_mover_for_an_ai_npc`.
-  with one WARN naming the NPC and the route file, and the route continues with the next point,
-  so a blocked or unreachable point cannot produce endless in-place movement.
 
 `flow_tests::follow_path_command_set_walks_every_route_point` runs the real command-set shape
 over three routes with an elevated point and checks every point is targeted in order, the set
