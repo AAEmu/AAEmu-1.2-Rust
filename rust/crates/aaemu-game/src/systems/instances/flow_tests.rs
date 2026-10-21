@@ -1006,6 +1006,111 @@ fn use_exit_func(server: &GameServer, p: &PlayerRef) {
     );
 }
 
+/// `CSInstanceLoaded` after `SCLoadInstance` re-files the character in the arrival instance's
+/// region grid: the units / doodads in view are sent and the character is shown to the players
+/// there without a movement packet, the old instance's objects are removed, and nothing is sent
+/// twice on a repeated load or the next move.
+#[tokio::test]
+async fn instance_return_refiles_character_and_sends_main_world_objects_without_movement() {
+    let server = dungeon_server();
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    let mut observer = Pc::new(&server, 2, "Observer", 110.0, 100.0);
+    a.frames();
+    observer.frames();
+
+    // main_world fixtures around A's return point (100, 100, 100).
+    let main = server.world.world(0).unwrap();
+    let ctx = server.view_ctx();
+    let mut main_npc = Npc::new(500);
+    main_npc.unit.transform.set_xyz(105.0, 100.0, 100.0);
+    let main_npc = Entity::new(0x6001, main_npc);
+    main.spawn(&main_npc, &ctx);
+    let mut main_doodad = Doodad::new(600);
+    main_doodad.transform.set_xyz(106.0, 100.0, 100.0);
+    let main_doodad = Entity::new(0x6002, main_doodad);
+    main.spawn(&main_doodad, &ctx);
+    a.frames();
+    observer.frames();
+
+    // Enter the dungeon (instance 100), which has an NPC of its own.
+    use_enter_func(&server, &a.p, DUNGEON_ZONE);
+    let d = server
+        .systems
+        .instances
+        .dungeon_of_world(100)
+        .expect("dungeon");
+    let instance_world = server.world.world(100).unwrap();
+    let mut instance_npc = Npc::new(501);
+    instance_npc.unit.transform.set_xyz(200.0, 200.0, 20.0);
+    let instance_npc = Entity::new(0x6003, instance_npc);
+    instance_world.spawn(&instance_npc, &ctx);
+    await_loader(&d).await;
+    a.frames();
+
+    // CSInstanceLoaded files A into the dungeon immediately (no move).
+    a.frame(&server, cs::CSInstanceLoadedPacket, &[]).await;
+    let entered = a.frames();
+    assert!(entered
+        .iter()
+        .any(|(op, b)| *op == sc::SCUnitStatePacket && bc(b) == 0x6003));
+    // The observer in main_world loses A when it leaves main_world's region grid.
+    assert!(removed_ids(&observer.frames()).contains(&a.p.obj_id));
+
+    // Leave through the exit: back to the main_world return point.
+    use_exit_func(&server, &a.p);
+    let load = a.frames();
+    assert!(load.iter().any(|(op, _)| *op == sc::SCLoadInstancePacket));
+    assert_eq!(a.instance(), 0);
+
+    // The client cleared its world on SCLoadInstance: CSInstanceLoaded must repopulate it
+    // without any movement.
+    a.frame(&server, cs::CSInstanceLoadedPacket, &[]).await;
+    let f = a.frames();
+    let npc_states = f
+        .iter()
+        .filter(|(op, b)| *op == sc::SCUnitStatePacket && bc(b) == 0x6001)
+        .count();
+    assert_eq!(npc_states, 1, "main_world NPC sent once: {f:?}");
+    let doodad_creates = f
+        .iter()
+        .filter(|(op, b)| {
+            *op == sc::SCDoodadsCreatedPacket && b.first() == Some(&1) && bc(&b[1..]) == 0x6002
+        })
+        .count();
+    assert_eq!(doodad_creates, 1, "main_world doodad sent once: {f:?}");
+    // The stale instance objects are removed from the returning client.
+    assert!(removed_ids(&f).contains(&0x6003));
+    // The observer in main_world sees the player appear again.
+    let seen = observer
+        .frames()
+        .iter()
+        .filter(|(op, b)| *op == sc::SCUnitStatePacket && bc(b) == a.p.obj_id)
+        .count();
+    assert_eq!(seen, 1, "observer sees the returning player once");
+
+    // A repeated load (and the next move) must not spawn anything twice.
+    a.frame(&server, cs::CSInstanceLoadedPacket, &[]).await;
+    let again = a.frames();
+    assert!(!again
+        .iter()
+        .any(|(op, b)| *op == sc::SCUnitStatePacket && bc(b) == 0x6001));
+    assert!(!again
+        .iter()
+        .any(|(op, _)| *op == sc::SCDoodadsCreatedPacket));
+    assert!(!observer
+        .frames()
+        .iter()
+        .any(|(op, b)| *op == sc::SCUnitStatePacket && bc(b) == a.p.obj_id));
+    a.move_to(&server, 100.0, 100.0, 100.0).await;
+    let moved = a.frames();
+    assert!(!moved
+        .iter()
+        .any(|(op, b)| *op == sc::SCUnitStatePacket && bc(b) == 0x6001));
+    assert!(!moved
+        .iter()
+        .any(|(op, _)| *op == sc::SCDoodadsCreatedPacket));
+}
+
 #[tokio::test]
 async fn party_dungeon_create_enter_script_leave_kick_and_cleanup() {
     let server = dungeon_server();
@@ -1105,15 +1210,12 @@ async fn party_dungeon_create_enter_script_leave_kick_and_cleanup() {
     assert_eq!(ev.count(&a.p, CharEvent::DungeonLeave), 1);
     assert_eq!(ev.count(&a.p, CharEvent::TeamLeave), 1);
 
-    // ---- CSInstanceLoaded, then the first move switches the region grid.
+    // ---- CSInstanceLoaded re-files A into the instance; the first move finds it filed.
     a.frame(&server, cs::CSInstanceLoadedPacket, &[]).await;
-    assert_eq!(
-        a.ops(),
-        vec![sc::SCUnitStatePacket, sc::SCDetailedTimeOfDayPacket]
-    );
-    assert!(!a.p.data().disabled_set_position);
-    a.move_to(&server, 200.0, 200.0, 20.0).await;
     let f = a.frames();
+    assert_eq!(f.first().map(|(op, _)| *op), Some(sc::SCUnitStatePacket));
+    assert!(f.iter().any(|(op, _)| *op == sc::SCDetailedTimeOfDayPacket));
+    assert!(!a.p.data().disabled_set_position);
     let gone = removed_ids(&f);
     assert!(gone.contains(&b.p.obj_id) && gone.contains(&c.p.obj_id));
     assert!(f.iter().any(|(op, _)| *op == sc::SCDoodadsCreatedPacket));
@@ -1123,6 +1225,12 @@ async fn party_dungeon_create_enter_script_leave_kick_and_cleanup() {
     assert!(removed_ids(&c.frames()).contains(&a.p.obj_id));
     assert!(removed_ids(&b.frames()).contains(&a.p.obj_id));
     assert_eq!(WorldObject::from(&a.p).region().map(|r| r.0), Some(100));
+    a.move_to(&server, 200.0, 200.0, 20.0).await;
+    let f = a.frames();
+    assert!(!f
+        .iter()
+        .any(|(op, b)| *op == sc::SCUnitStatePacket && bc(b) == 0x7001));
+    assert!(!f.iter().any(|(op, _)| *op == sc::SCDoodadsCreatedPacket));
 
     // AreaClearTick: A is in room 6.
     dungeon::area_clear_tick(&server, &d);
