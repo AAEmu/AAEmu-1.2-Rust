@@ -1199,6 +1199,18 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `server.ids.object` in tests that spawn many objects.
 * systems::services: the Discord bot runs in the background (the C# `StartAsync` never returns
   when a token is set, blocking the host start).
+* systems::skills (once-only death transition, 2026-10-21): the C# `ReduceCurrentHp` checked
+  `Hp <= 0`, applied the damage and called `DoDie` without a lock, so two concurrent lethal
+  hits (a skill hit and a DoT tick, fall / drowning damage, `GM /kill`, PvP, an NPC death) could
+  both run the death path: two `SCUnitDeathPacket`s, double exp / durability loss, two loot
+  generations, double quest kill credit and two respawn timers. Rust adds the Rust-only
+  `UnitBase::death_processed` claim, checked and set atomically under the unit's data lock
+  (`skills::combat::try_claim_death`); `ReduceCurrentHp` re-checks HP under the same lock that
+  applies the damage, `PostUpdateCurrentHp` claims before its kill events, and a direct `DoDie`
+  on an already-claimed life is refused with a WARN. The claim is cleared when a living unit is
+  damaged again or HP is restored (resurrection, repair, load), so a repaired tower or a
+  resurrected character still dies once per life. Tests:
+  `systems::skills::death_once_tests` (two racing hits on a player / an NPC, looped).
 * systems::ai: calls into an NPC's AI from outside its tick (skills, aggro, npcs hooks) are queued and run right after the current AI step instead of re-entering it (`manager::post`); the AI tick runs on a blocking thread every ~100 ms; behaviour instances are kept per AI and accessed by kind. `UpdateAggroHelp` reaching a helper NPC without an AI logs and continues (the C# throws a `NullReferenceException` that cuts the whole behaviour tick short). `Npc.OnDamageReceived` on an AI-less NPC does nothing (C# NRE).
 * systems::ai: deletion marks an AI removed without waiting for its state mutex; the current holder detaches its owner and discards queued callbacks. This permits an NPC skill to delete its own caster and avoids the spawn-lock / AI-lock inversion during despawn. The global tick skips an AI whose state mutex is busy and retries on the next tick, so one external AI call cannot freeze movement and combat for every NPC.
 * systems::ai physics: Jitter's narrow phase (`MprEpa`) and contact solver are replaced by a box-vs-heightmap-triangle SAT with one contact per triangle and sequential impulses (Jitter's default friction / bias); the integration itself is exact. One physics world per instance is created with the first ship (C# starts a thread per instance at boot). Add / remove / helm / driver changes go through the pending queue (next tick); hull damage, movement packets and transform writes are applied after the tick; readers use per-tick snapshots. Water is kept per world template and a cell's `object.dat` is ingested when the physics or a water query sees the cell loaded. A height lookup error counts as height 0 (the C# exception skips the rest of that ship's tick). A ship whose game object is gone is skipped. Ship–ship harpoon tow resolves an explicit hook basis among the ships simulated this tick.
