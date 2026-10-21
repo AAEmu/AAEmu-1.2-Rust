@@ -91,17 +91,34 @@ pub fn reduce_current_hp(
     if hp <= 0 {
         return;
     }
-    let old_hp = hp;
     for index in buffs::absorption_effects(server, target) {
         value = buffs::consume_charge(server, target, index, value);
     }
-    let (new_hp, mp) = target
-        .with_unit(|u| {
-            let u = u.unit_mut();
-            u.hp = (u.hp - value).max(0);
-            (u.hp, u.mp)
-        })
-        .unwrap_or((0, 0));
+    // Re-check and apply the damage under the same data lock: a concurrent lethal hit may
+    // already have transitioned the unit since the early read above. The loser of such a
+    // race does nothing at all (no points packet, no death side effects).
+    let Some((old_hp, new_hp, mp, was_alive)) = target.with_unit(|u| {
+        let u = u.unit_mut();
+        if u.hp <= 0 {
+            return (0, 0, 0, false);
+        }
+        // A living unit starts a new life. A claim left over from an earlier life whose
+        // HP was restored outside `post_update_current_hp` (repair / load paths) must not
+        // swallow this death.
+        u.death_processed = false;
+        let old_hp = u.hp;
+        u.hp = (old_hp - value).max(0);
+        (old_hp, u.hp, u.mp, true)
+    }) else {
+        return;
+    };
+    if !was_alive {
+        tracing::debug!(
+            "damage on {} ignored: the unit is already dead",
+            target.obj_id()
+        );
+        return;
+    }
     broadcast(
         server,
         target,
@@ -161,8 +178,14 @@ pub fn post_update_current_hp(
     kill_reason: KillReason,
 ) {
     let Some((triggers, max_hp, hp)) = target.with_unit(|u| {
-        let u = u.unit();
-        (u.hp_trigger_points_percent.clone(), u.max_hp, u.hp)
+        let u = u.unit_mut();
+        let hp = u.hp;
+        if hp > 0 {
+            // HP is back (resurrection, repair, character load): the next death is a new
+            // transition. Covers callers that set HP directly and only report it here.
+            u.death_processed = false;
+        }
+        (u.hp_trigger_points_percent.clone(), u.max_hp, hp)
     }) else {
         return;
     };
@@ -202,6 +225,15 @@ pub fn post_update_current_hp(
     if hp > 0 {
         return;
     }
+    // The alive -> dead transition is claimed exactly once per life: two lethal hits that
+    // raced past the HP checks above must not both run the kill events or `DoDie`.
+    if !try_claim_death(target) {
+        tracing::debug!(
+            "death of {} ignored: already handled for this life",
+            target.obj_id()
+        );
+        return;
+    }
     // attackerUnit.Events.OnKill(attackerUnit, { Target = attackerUnit }) (sic, C#); the
     // dungeon `OnUnitKilled` world event is the instances subsystem's.
     if let Some(ap) = attacker.and_then(WorldObject::as_player) {
@@ -212,7 +244,31 @@ pub fn post_update_current_hp(
         // (systems::instances).
         crate::systems::instances::events::on_kill_in_reduce_hp(server, target);
     }
-    do_die(server, target, attacker, kill_reason);
+    do_die_after_claim(server, target, attacker, kill_reason);
+}
+
+/// Atomically claims the alive -> dead transition of `target` for the current life.
+///
+/// The object's data lock serializes every caller that can kill (skill damage, DoTs / regen,
+/// fall damage, GM commands, PvP, NPC deaths): exactly one caller gets `true` and runs
+/// [`do_die_after_claim`], every later lethal hit of the same life gets `false` and does
+/// nothing. The flag is cleared when HP is restored or a living unit is damaged again, so an
+/// object (a repaired tower, a resurrected character) can die once per life.
+///
+/// Rust-only: the C# `ReduceCurrentHp` checked `Hp <= 0`, applied the damage and called
+/// `DoDie` without a lock, so two concurrent lethal hits could both run the death path.
+pub fn try_claim_death(target: &WorldObject) -> bool {
+    target
+        .with_unit(|u| {
+            let u = u.unit_mut();
+            if u.death_processed {
+                false
+            } else {
+                u.death_processed = true;
+                true
+            }
+        })
+        .unwrap_or(false)
 }
 
 /// `ReduceCurrentMp(unit, value)`.
@@ -243,7 +299,28 @@ pub fn reduce_current_mp(server: &GameServer, target: &WorldObject, value: i32) 
 }
 
 /// `Unit.DoDie(killer, killReason)` with the `Npc` override around it.
+///
+/// The death is claimed first: a direct / scripted `DoDie` on a unit whose death already ran
+/// for this life is refused (the C# ran the whole path again).
 pub fn do_die(
+    server: &GameServer,
+    victim: &WorldObject,
+    killer: Option<&WorldObject>,
+    kill_reason: KillReason,
+) {
+    if !try_claim_death(victim) {
+        let name = victim.with_base_unit(|b| b.name().to_string());
+        tracing::warn!(
+            "DoDie refused for {name} ({}): death already handled for this life",
+            victim.obj_id()
+        );
+        return;
+    }
+    do_die_after_claim(server, victim, killer, kill_reason);
+}
+
+/// `Unit.DoDie` body of the caller that owns the death claim (see [`try_claim_death`]).
+fn do_die_after_claim(
     server: &GameServer,
     victim: &WorldObject,
     killer: Option<&WorldObject>,
