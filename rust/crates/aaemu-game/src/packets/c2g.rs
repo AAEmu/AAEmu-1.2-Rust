@@ -87,7 +87,20 @@ pub async fn enter_world_login(
     conn.set_account_id(account_id);
     conn.state = GameState::Lobby;
 
-    account_manager_add(server, conn).await;
+    // `AccountManager.Add` refuses an account that is already registered (C# `Add` returns
+    // early). `EnterWorldManager.AddAccount` normally catches this when the login server asks
+    // (`GLPlayerEnter` result 1 -> `ACEnterWorldDenied`), but two cookies can be granted for one
+    // account before either client connects. The loser must not get a world entry: it would skip
+    // the account registration and let the same characters be played twice.
+    if !account_manager_add(server, conn).await {
+        let owner = server.accounts.connection_of(account_id).unwrap_or(0);
+        tracing::warn!(
+            "Enter world refused: account {account_id} is already connected on session {owner} (session {}); the existing session keeps the account",
+            conn.id
+        );
+        conn.shutdown();
+        return Ok(());
+    }
     if !server.streams.add_token(account_id, conn.id) {
         // StreamManager.AddToken: Dictionary.Add throws for a connection that already entered.
         return Err(GameError::Protocol(format!(
@@ -109,8 +122,9 @@ pub async fn enter_world_login(
 }
 
 /// `AccountManager.Add(connection)` (timed rewards included: `systems::services::accounts`).
-async fn account_manager_add(server: &GameServer, conn: &GameConnection) {
-    crate::systems::services::accounts::add(server, conn).await;
+/// `false` = the account is already registered on another connection.
+async fn account_manager_add(server: &GameServer, conn: &GameConnection) -> bool {
+    crate::systems::services::accounts::add(server, conn).await
 }
 
 /// Sends `SCAccountInfoPacket` built from `Connection.Payment`.

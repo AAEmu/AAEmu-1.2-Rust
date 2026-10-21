@@ -304,6 +304,10 @@ pub struct CharacterSkillState {
     /// `ResurrectHpPercent` / `ResurrectMpPercent` (set by the `Resurrection` special effect).
     pub resurrect_hp_percent: u32,
     pub resurrect_mp_percent: u32,
+    /// Rust only: a pending in-place resurrection offer (`SCNotifyResurrectionPacket` from the
+    /// `Resurrection` special effect or the free resurrection below
+    /// `minimum_exp_loss_level`). `CSResurrectCharacterPacket(in_place = true)` consumes it.
+    pub resurrect_offer: bool,
     /// `_pvpDamageHistory` (character id -> last damage, unix ms). Cleared on death.
     pub pvp_damage_history: Vec<(u32, i64)>,
     /// `_pvpHealHistory` (character id -> last heal, unix ms). Kept on death.
@@ -377,6 +381,7 @@ impl Default for CharacterSkillState {
             // `ResurrectHpPercent { get; set; } = 1`
             resurrect_hp_percent: 1,
             resurrect_mp_percent: 1,
+            resurrect_offer: false,
             pvp_damage_history: Vec::new(),
             pvp_heal_history: Vec::new(),
             consecutive_death_count: 0,

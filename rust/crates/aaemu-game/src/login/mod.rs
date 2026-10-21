@@ -143,6 +143,15 @@ pub(crate) async fn handle(server: &Arc<GameServer>, payload: &[u8]) -> bool {
                 server.accounts.contains(account_id),
             ) {
                 AddAccountResult::Reply(result) => {
+                    if result != 0 {
+                        // C# `AddAccount`: `GLPlayerEnter(..., 1)` when the account is already
+                        // connected; the login server answers the client's pending enter-world
+                        // request with `ACEnterWorldDenied(1)`.
+                        tracing::warn!(
+                            "LGPlayerEnter refused: account {account_id} is already connected (session {}); replying {result}",
+                            server.accounts.connection_of(account_id).unwrap_or(0)
+                        );
+                    }
                     server.login.send(&GLPlayerEnterPacket {
                         connection_id,
                         gs_id: server.config.id,

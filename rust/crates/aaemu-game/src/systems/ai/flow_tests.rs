@@ -22,6 +22,7 @@ use crate::world::{Entity, NpcRef, PlayerRef, WorldObject};
 use super::data::{ActorModel, GameStance};
 use super::framework::{AiKind, BehaviorKind as B};
 use super::manager::{post, tick_all};
+use super::params::{AiCommandCategory, AiCommands};
 use super::path_handler::{AiPathPoint, AiPathPointAction};
 
 const PLAYER_OBJ: u32 = 0x100;
@@ -681,6 +682,162 @@ async fn follow_path_moves_along_the_points() {
     // path done (loop disabled): back to Idle / default
     tick_until(&server, 100, 110, 6, || false).await;
     assert_ne!(behavior(&server, NPC_OBJ), Some(B::FollowPath));
+}
+
+fn path_point(x: f32, y: f32, z: f32) -> AiPathPoint {
+    AiPathPoint {
+        position: Vec3::new(x, y, z),
+        action: AiPathPointAction::None,
+        param: String::new(),
+    }
+}
+
+fn ai_command(cmd_id: AiCommandCategory, param1: u32, param2: &str) -> AiCommands {
+    AiCommands {
+        id: 0,
+        cmd_set_id: 0,
+        cmd_id,
+        param1,
+        param2: param2.to_string(),
+    }
+}
+
+/// Retail command set 146 (`public_farm*`): the first FollowPath loads the route named by its
+/// own `param2` (the C# loaded the *previous* name, so the first command did nothing and the
+/// last route never loaded), every route point is visited in order even when its authored Z is
+/// above the ground the walker follows, the sentinel returns to the command set (the C# then
+/// overrode `GoToRunCommandSet` with `GoToIdle`), and the NPC settles back into HoldPosition
+/// without an endless in-place micro-step at an unreachable elevated point.
+#[tokio::test]
+async fn follow_path_command_set_walks_every_route_point() {
+    let server = server();
+    let client = TestClient::new(&server, 1, 1);
+    let c = test_character(1, "Watcher", 110.0, 100.0);
+    let _player = spawn_player(&server, &client, c, PLAYER_OBJ);
+    let npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        PASSIVE_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    let farm = vec![
+        path_point(101.6, 100.2, 100.0),
+        path_point(102.0, 100.5, 101.4),
+        path_point(104.0, 101.0, 100.0),
+    ];
+    let farm2 = vec![
+        path_point(104.5, 101.2, 100.0),
+        path_point(105.5, 102.0, 100.0),
+    ];
+    let farm3 = vec![
+        path_point(104.0, 101.0, 100.0),
+        path_point(101.0, 100.0, 100.0),
+    ];
+    server.systems.ai.paths.insert("test_farm", farm.clone());
+    server.systems.ai.paths.insert("test_farm2", farm2.clone());
+    server.systems.ai.paths.insert("test_farm3", farm3.clone());
+    // has_simulation, like NpcSpawnerNpc.Spawn (no spawner-attached route)
+    super::hooks::spawned(&server, &npc, "");
+    let settled = tick_until(&server, 100, 5, 60, || {
+        behavior(&server, NPC_OBJ) == Some(B::HoldPosition)
+    })
+    .await;
+    assert!(settled, "{:?}", behavior(&server, NPC_OBJ));
+
+    // The real `ai_commands` rows of set 146 (UseSkill 0 = no template, so it is a no-op).
+    post(&server, NPC_OBJ, |c| {
+        c.enqueue_ai_commands(
+            &[
+                ai_command(AiCommandCategory::FollowPath, 1, "test_farm"),
+                ai_command(AiCommandCategory::UseSkill, 0, ""),
+                ai_command(AiCommandCategory::Timeout, 2, ""),
+                ai_command(AiCommandCategory::FollowPath, 1, "test_farm2"),
+                ai_command(AiCommandCategory::UseSkill, 0, ""),
+                ai_command(AiCommandCategory::Timeout, 2, ""),
+                ai_command(AiCommandCategory::FollowPath, 1, "test_farm3"),
+            ],
+            false,
+        );
+    });
+
+    let expected: Vec<Vec3> = farm
+        .iter()
+        .chain(farm2.iter())
+        .chain(farm3.iter())
+        .map(|p| p.position)
+        .collect();
+    let mut seen: Vec<Vec3> = Vec::new();
+    let mut last_target = Vec3::default();
+    let mut same_target_ticks = 0;
+    let mut max_same_target_ticks = 0;
+    let mut finished = false;
+    for _ in 0..300 {
+        tick_all(&server, 100);
+        let (target, current, queued) = server
+            .systems
+            .ai
+            .ais
+            .inspect(NPC_OBJ, |a| {
+                (
+                    a.path_handler.target_position,
+                    a.current_command.is_some(),
+                    a.commands_queue.len(),
+                )
+            })
+            .expect("npc ai");
+        if target == last_target {
+            if !is_zero_vec3(target) {
+                same_target_ticks += 1;
+                max_same_target_ticks = max_same_target_ticks.max(same_target_ticks);
+            }
+        } else {
+            if !is_zero_vec3(target) {
+                seen.push(target);
+            }
+            last_target = target;
+            same_target_ticks = 0;
+        }
+        if !current && queued == 0 && behavior(&server, NPC_OBJ) == Some(B::HoldPosition) {
+            finished = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert!(
+        finished,
+        "command set did not finish: behavior {:?}, seen {:?}",
+        behavior(&server, NPC_OBJ),
+        seen
+    );
+    assert_eq!(
+        seen, expected,
+        "every route point must be targeted in order"
+    );
+    assert!(
+        max_same_target_ticks < 40,
+        "a target was chased for {max_same_target_ticks} ticks (in-place micro-steps)"
+    );
+    let end = npc_pos(&npc);
+    assert!(
+        (end.x - 101.0).abs() < 1.1 && (end.y - 100.0).abs() < 1.1,
+        "did not walk the last route: {end:?}"
+    );
+    // Settled: no more movement at all.
+    let rest = npc_pos(&npc);
+    for _ in 0..20 {
+        tick_all(&server, 100);
+    }
+    let after = npc_pos(&npc);
+    assert!(
+        (after.x - rest.x).abs() < 1e-4 && (after.y - rest.y).abs() < 1e-4,
+        "still moving in HoldPosition: {rest:?} -> {after:?}"
+    );
+}
+
+fn is_zero_vec3(v: Vec3) -> bool {
+    v.x == 0.0 && v.y == 0.0 && v.z == 0.0
 }
 
 #[tokio::test]
@@ -1455,4 +1612,46 @@ async fn guard_kill_while_the_mob_ai_is_busy_keeps_the_mob_dead() {
         .aggro_table
         .contains_key(&MOB_OBJ));
     assert_ne!(behavior(&server, NPC_OBJ), Some(B::Attack));
+}
+
+/// `NpcControlEffect` `RunCommandSet` on an NPC with an AI: the queued `FollowPath` command
+/// walks the route, so the legacy `Simulation.GoToPath` mover must not run beside it (two
+/// movers kept pulling the NPC to different points and stalled it part-way along its route).
+#[tokio::test]
+async fn run_command_set_effect_does_not_start_the_simulation_mover_for_an_ai_npc() {
+    use super::params::{AiCommandCategory, AiCommands};
+    let mut game_data = data();
+    game_data.systems.ai.ai.commands.insert(
+        900,
+        vec![AiCommands {
+            id: 1,
+            cmd_set_id: 900,
+            cmd_id: AiCommandCategory::FollowPath,
+            param1: 1,
+            param2: "public_farm".to_string(),
+        }],
+    );
+    let server = server_with_data(game_data);
+    let npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        NPC_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    let sim = Arc::new(std::sync::Mutex::new(super::simulation::Simulation::new(
+        None,
+    )));
+    server.systems.ai.simulations.insert(NPC_OBJ, sim.clone());
+    let effect = crate::systems::skills::data::effects::NpcControlEffect {
+        id: 1,
+        category_id: 5,
+        param_string: String::new(),
+        param_int: 900,
+    };
+    super::hooks::npc_control_effect(&server, &effect, &npc);
+    assert!(sim.lock().unwrap().move_file_name.is_empty());
+    assert!(!sim.lock().unwrap().move_to_path_enabled);
+    assert!(!npc.data().unit.is_in_patrol);
 }

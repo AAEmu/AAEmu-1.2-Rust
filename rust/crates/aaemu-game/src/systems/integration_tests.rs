@@ -1443,6 +1443,7 @@ async fn temple_resurrection_applies_the_death_debuffs() {
         let mut x = e.p.data();
         x.unit.hp = 0;
         x.died_in_pvp = true;
+        x.skill_char.resurrect_offer = true;
         x.skill_char.resurrect_hp_percent = 50;
         x.skill_char.resurrect_mp_percent = 20;
     }

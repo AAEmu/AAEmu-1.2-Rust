@@ -328,7 +328,11 @@ pub fn npc_control_effect(
                     }
                 }
             }
-            if !file.is_empty() {
+            // An NPC with an AI walks the queued FollowPath / UseSkill / Timeout commands itself
+            // (`FollowPathBehavior`). The C# also started `Simulation.GoToPath` for the same
+            // route, so two movers dragged the NPC to different points every tick and it never
+            // got past the first few metres (PORTING.md).
+            if !file.is_empty() && !super::manager::has_ai(server, target.obj_id) {
                 if target.data().unit.is_in_patrol {
                     return;
                 }

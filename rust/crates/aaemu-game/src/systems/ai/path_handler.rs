@@ -64,6 +64,11 @@ pub struct AiPathPoint {
     pub param: String,
 }
 
+/// How long a target may make no progress before it is dropped. Straight-line steps always
+/// reduce the distance to a reachable target; a blocked/exiled one (a target above the ground
+/// the walker follows, a body pushed away every tick, ...) would otherwise be chased forever.
+pub const TARGET_STALL_TIMEOUT_MS: i64 = 5_000;
+
 /// `AiPathHandler`.
 #[derive(Debug, Clone)]
 pub struct AiPathHandler {
@@ -79,6 +84,12 @@ pub struct AiPathHandler {
     pub ai_path_actor_flags: u8,
     /// Currently targeted position for path movement (`Vector3.Zero` = none).
     pub target_position: Vec3,
+    /// Route file stem of the loaded points (diagnostics, e.g. the stall warning).
+    pub path_name: String,
+    /// Closest distance to [`Self::target_position`] seen since it was set.
+    target_best_distance: f32,
+    /// When the target last got closer (`now_ms`).
+    target_progress_time: i64,
 }
 
 impl Default for AiPathHandler {
@@ -90,6 +101,9 @@ impl Default for AiPathHandler {
             ai_path_speed: 1.0,
             ai_path_actor_flags: 4,
             target_position: Vec3::default(),
+            path_name: String::new(),
+            target_best_distance: f32::INFINITY,
+            target_progress_time: 0,
         }
     }
 }
@@ -109,6 +123,13 @@ pub enum PathStep {
     },
     /// Nothing to move; the bool is the return value (`HasUnhandledPathMovementData()`).
     Idle(bool),
+    /// The current target made no progress for [`TARGET_STALL_TIMEOUT_MS`] and was dropped;
+    /// the caller logs it and moves on. The bool is `HasUnhandledPathMovementData()`.
+    Stalled {
+        target: Vec3,
+        path: String,
+        result: bool,
+    },
     /// `throw new NotSupportedException(...)` for an action that cannot be handled.
     Unsupported(String),
 }
@@ -120,8 +141,24 @@ fn is_zero(v: Vec3) -> bool {
 impl AiPathHandler {
     /// The bookkeeping half of `RunCurrentPath(delta)`: refills / dequeues and tells the caller
     /// what to do. `owner_pos` = `Owner.Owner.Transform.World.Position`, `template_scale` =
-    /// `Owner.Owner.Template.Scale`.
-    pub fn run_current_path(&mut self, owner_pos: Vec3, template_scale: f32) -> PathStep {
+    /// `Owner.Owner.Template.Scale`, `include_z` = the owner moves in 3D (`CanFly`).
+    pub fn run_current_path(
+        &mut self,
+        owner_pos: Vec3,
+        template_scale: f32,
+        include_z: bool,
+    ) -> PathStep {
+        self.run_current_path_at(owner_pos, template_scale, include_z, crate::world::now_ms())
+    }
+
+    /// [`Self::run_current_path`] with the clock injected (unit tests).
+    pub fn run_current_path_at(
+        &mut self,
+        owner_pos: Vec3,
+        template_scale: f32,
+        include_z: bool,
+        now_ms: i64,
+    ) -> PathStep {
         // Queue empty? refill!
         if self.ai_path_points_remaining.is_empty()
             && !self.ai_path_points.is_empty()
@@ -131,11 +168,34 @@ impl AiPathHandler {
             self.ai_path_points_remaining
                 .extend(self.ai_path_points.iter().cloned());
         }
-        // Are we there yet?
-        if !is_zero(self.target_position)
-            && calculate_distance(self.target_position, owner_pos, true) < template_scale
-        {
-            self.target_position = Vec3::default();
+        // Are we there yet? Ground walkers follow the terrain, so the authored Z of a path
+        // point is not where their feet end up: only the horizontal distance says whether they
+        // reached it. The C# used the 3D distance and chased points above the ground forever
+        // (every tick emitted a tiny in-place step). The radius is at least the 1 m movement
+        // tolerance of `Npc.MoveTowards`, so a target the movement stopped in front of still
+        // counts as reached (a template scale below 1 m never did in the C#).
+        let radius = template_scale.max(1.0);
+        if !is_zero(self.target_position) {
+            let distance = calculate_distance(self.target_position, owner_pos, include_z);
+            if distance <= radius {
+                self.target_position = Vec3::default();
+                self.target_best_distance = f32::INFINITY;
+            } else if distance < self.target_best_distance - 1e-3 {
+                // Progress; the stall fallback below must not fire while moving.
+                self.target_best_distance = distance;
+                self.target_progress_time = now_ms;
+            } else if now_ms - self.target_progress_time >= TARGET_STALL_TIMEOUT_MS {
+                // Blocked or unreachable: drop it so the route can continue. The caller logs
+                // the skipped point (this type has no NPC id).
+                let target = self.target_position;
+                self.target_position = Vec3::default();
+                self.target_best_distance = f32::INFINITY;
+                return PathStep::Stalled {
+                    target,
+                    path: self.path_name.clone(),
+                    result: self.has_unhandled_path_movement_data(),
+                };
+            }
         }
         // No current target? Set it!
         if is_zero(self.target_position) {
@@ -164,6 +224,9 @@ impl AiPathHandler {
                 // Set next move point if it's not zero
                 if !is_zero(next.position) {
                     self.target_position = next.position;
+                    self.target_best_distance =
+                        calculate_distance(next.position, owner_pos, include_z);
+                    self.target_progress_time = now_ms;
                 }
             }
         }
@@ -176,6 +239,16 @@ impl AiPathHandler {
             };
         }
         PathStep::Idle(self.has_unhandled_path_movement_data())
+    }
+
+    /// Restart the stall clock for the current target. Re-entering FollowPath after an
+    /// interruption (combat, alert) must not count the interruption as "no progress".
+    pub fn reset_target_progress(&mut self, owner_pos: Vec3, include_z: bool, now_ms: i64) {
+        if is_zero(self.target_position) {
+            return;
+        }
+        self.target_best_distance = calculate_distance(self.target_position, owner_pos, include_z);
+        self.target_progress_time = now_ms;
     }
 
     /// `HasUnhandledPathMovementData()`.
@@ -465,7 +538,7 @@ mod tests {
             ..AiPathHandler::default()
         };
         // first call refills the queue and targets the first point
-        let s = h.run_current_path(Vec3::new(0.0, 0.0, 0.0), 1.0);
+        let s = h.run_current_path(Vec3::new(0.0, 0.0, 0.0), 1.0, false);
         assert_eq!(
             s,
             PathStep::Move {
@@ -477,12 +550,131 @@ mod tests {
         );
         assert!(!h.ai_path_looping);
         // reaching the point (closer than Template.Scale) moves on
-        let s = h.run_current_path(Vec3::new(9.5, 0.0, 0.0), 1.0);
+        let s = h.run_current_path(Vec3::new(9.5, 0.0, 0.0), 1.0, false);
         assert!(matches!(s, PathStep::Move { target, .. } if target == Vec3::new(20.0, 0.0, 0.0)));
         // last point reached: nothing left, no loop
-        let s = h.run_current_path(Vec3::new(20.0, 0.0, 0.0), 1.0);
+        let s = h.run_current_path(Vec3::new(20.0, 0.0, 0.0), 1.0, false);
         assert_eq!(s, PathStep::Idle(false));
         assert!(!h.has_path_movement_data());
+    }
+
+    fn two_points(z: f32) -> AiPathHandler {
+        AiPathHandler {
+            ai_path_points: vec![
+                AiPathPoint {
+                    position: Vec3::new(10.0, 0.0, z),
+                    action: AiPathPointAction::None,
+                    param: String::new(),
+                },
+                AiPathPoint {
+                    position: Vec3::new(20.0, 0.0, 0.0),
+                    action: AiPathPointAction::DisableLoop,
+                    param: String::new(),
+                },
+            ],
+            path_name: "public_farm".into(),
+            ..AiPathHandler::default()
+        }
+    }
+
+    #[test]
+    fn a_ground_walker_arrives_at_a_point_authored_above_the_ground() {
+        // The route's Z can be above the terrain the walker follows (public_farm's second point
+        // is 1.4 m high). The 3D distance there never drops below 1.4 m, so the C# never
+        // arrived and emitted an in-place step every tick.
+        let mut h = two_points(1.4);
+        let s = h.run_current_path_at(Vec3::new(0.0, 0.0, 0.0), 1.0, false, 0);
+        assert!(matches!(s, PathStep::Move { target, .. } if target == Vec3::new(10.0, 0.0, 1.4)));
+        // Horizontally on the point, 1.4 m below it: reached (3D distance would be 1.4 m).
+        let s = h.run_current_path_at(Vec3::new(10.0, 0.0, 0.0), 1.0, false, 100);
+        assert!(matches!(s, PathStep::Move { target, .. } if target == Vec3::new(20.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn a_flying_npc_still_has_to_reach_the_authored_height() {
+        let mut h = two_points(1.4);
+        let s = h.run_current_path_at(Vec3::new(0.0, 0.0, 0.0), 1.0, true, 0);
+        assert!(matches!(s, PathStep::Move { target, .. } if target == Vec3::new(10.0, 0.0, 1.4)));
+        // Below the point at the same XY: not reached in 3D.
+        let s = h.run_current_path_at(Vec3::new(10.0, 0.0, 0.0), 1.0, true, 100);
+        assert!(matches!(s, PathStep::Move { target, .. } if target == Vec3::new(10.0, 0.0, 1.4)));
+        let s = h.run_current_path_at(Vec3::new(10.0, 0.0, 1.4), 1.0, true, 200);
+        assert!(matches!(s, PathStep::Move { target, .. } if target == Vec3::new(20.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn the_arrival_radius_covers_the_movement_tolerance() {
+        // `Npc.MoveTowards` stops within 1 m, so a smaller Template.Scale still has to count
+        // that stop as an arrival (otherwise the NPC stays there forever).
+        let mut h = two_points(0.0);
+        h.run_current_path_at(Vec3::new(0.0, 0.0, 0.0), 0.1, false, 0);
+        let s = h.run_current_path_at(Vec3::new(9.4, 0.0, 0.0), 0.1, false, 100);
+        assert!(matches!(s, PathStep::Move { target, .. } if target == Vec3::new(20.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn a_target_without_progress_is_skipped_after_the_timeout() {
+        let mut h = two_points(0.0);
+        let s = h.run_current_path_at(Vec3::new(0.0, 0.0, 0.0), 1.0, false, 0);
+        assert!(matches!(s, PathStep::Move { target, .. } if target == Vec3::new(10.0, 0.0, 0.0)));
+        // Still in front of it just before the timeout.
+        let s = h.run_current_path_at(
+            Vec3::new(0.0, 0.0, 0.0),
+            1.0,
+            false,
+            TARGET_STALL_TIMEOUT_MS - 1,
+        );
+        assert!(matches!(s, PathStep::Move { .. }));
+        // No progress for the whole timeout: dropped, exactly one `Stalled` report.
+        let s = h.run_current_path_at(
+            Vec3::new(0.0, 0.0, 0.0),
+            1.0,
+            false,
+            TARGET_STALL_TIMEOUT_MS,
+        );
+        assert_eq!(
+            s,
+            PathStep::Stalled {
+                target: Vec3::new(10.0, 0.0, 0.0),
+                path: "public_farm".into(),
+                result: true,
+            }
+        );
+        // The next call moves on to the next point instead of re-targeting the skipped one.
+        let s = h.run_current_path_at(Vec3::new(0.0, 0.0, 0.0), 1.0, false, 5_100);
+        assert!(matches!(s, PathStep::Move { target, .. } if target == Vec3::new(20.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn re_entering_follow_path_restarts_the_stall_clock() {
+        let mut h = two_points(0.0);
+        h.run_current_path_at(Vec3::new(0.0, 0.0, 0.0), 1.0, false, 0);
+        // A combat interruption lasts longer than the timeout; resuming restarts the clock.
+        h.reset_target_progress(Vec3::new(0.0, 0.0, 0.0), false, TARGET_STALL_TIMEOUT_MS + 1);
+        let s = h.run_current_path_at(
+            Vec3::new(0.0, 0.0, 0.0),
+            1.0,
+            false,
+            TARGET_STALL_TIMEOUT_MS + 2_000,
+        );
+        assert!(matches!(s, PathStep::Move { .. }));
+    }
+
+    #[test]
+    fn slow_steady_progress_is_never_skipped() {
+        let mut h = two_points(0.0);
+        h.run_current_path_at(Vec3::new(0.0, 0.0, 0.0), 1.0, false, 0);
+        // 0.05 m per 100 ms (0.5 m/s): ~15 s to the point, far beyond the stall timeout.
+        for i in 1..=150 {
+            let x = i as f32 * 0.05;
+            let s = h.run_current_path_at(Vec3::new(x, 0.0, 0.0), 1.0, false, i * 100);
+            assert!(
+                matches!(s, PathStep::Move { .. }),
+                "skipped while progressing at step {i}"
+            );
+        }
+        let s = h.run_current_path_at(Vec3::new(10.0, 0.0, 0.0), 1.0, false, 15_200);
+        assert!(matches!(s, PathStep::Move { target, .. } if target == Vec3::new(20.0, 0.0, 0.0)));
     }
 
     fn route(points: &[(f32, f32)]) -> Vec<AiPathPoint> {

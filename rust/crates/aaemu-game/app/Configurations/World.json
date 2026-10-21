@@ -5,6 +5,7 @@
         "AutoSaveInterval": 5.0,
         "ExpLossRateAtDeath": 0.05,
         "MinimumExpLossLevel": 10,
+        "PortalUseRange": 5.0,
         "PvEDurabilityLossRate": 1.0,
         "PvPDurabilityLossRate": 1.0,
         "ExpRate": 1.0,

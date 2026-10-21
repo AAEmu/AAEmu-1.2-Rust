@@ -363,6 +363,46 @@ async fn open_bag_without_loot_all_sends_bag_data_and_single_take_works() {
 }
 
 #[tokio::test]
+async fn taking_loot_from_far_away_is_refused() {
+    let mut w = world_with(data());
+    let npc = spawn_npc(&mut w);
+    let mut rng = ScriptedRng::new(&[0, 0, 0, 3, 50, 1], &[]);
+    LootManager::generate_loot_with(
+        &w.server,
+        &WorldObject::from(&npc),
+        Some(&WorldObject::from(&w.pa)),
+        &mut rng,
+    );
+    w.a.drain();
+    // Alice walks 20 m away from the corpse (the take range is 5 m).
+    w.pa.data().unit.transform.set_xyz(122.0, 100.0, 100.0);
+    let mut s = PacketStream::new();
+    s.write_u16(1)
+        .write_u16(1)
+        .write_bc(NPC_OBJ)
+        .write_u16(0)
+        .write_u16(0);
+    run::<CSLootItemPacket>(&mut w, 0, s.as_bytes());
+    let refused = SCLootItemFailedPacket {
+        error_message: super::error_message::TOO_FAR_AWAY,
+        loot_owner_type: 1,
+        loot_owner_obj_id: NPC_OBJ,
+        item_index: 1,
+        item_template_id: super::tests::STACK,
+    };
+    assert_eq!(
+        w.a.drain(),
+        vec![(sc::SCLootItemFailedPacket, body(&refused))],
+        "the out-of-range take must be refused with TOO_FAR_AWAY"
+    );
+    assert_eq!(
+        w.server.systems.economy.loot.item_count(NPC_OBJ),
+        3,
+        "the out-of-range take must leave the loot in the corpse"
+    );
+}
+
+#[tokio::test]
 async fn taking_loot_releases_the_unused_allocated_item_id() {
     let mut w = world_with(data());
     let npc = spawn_npc(&mut w);

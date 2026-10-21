@@ -699,6 +699,11 @@ pub struct UnitBase {
     // ---- phase 3 / skills: add this subsystem's per-unit fields below ----
     /// Skill / combat runtime state (`SkillTask`, `ActivePlotState`, `AggroTable`, ...).
     pub skill_state: crate::systems::skills::state::UnitSkillState,
+    /// Rust-only: the alive -> dead transition of the current life was claimed and
+    /// `Unit.DoDie` ran. Checked and set atomically under the object's data lock by
+    /// `skills::combat::try_claim_death`; cleared when a living unit takes damage or HP is
+    /// restored, so the next death of the same object is handled again.
+    pub death_processed: bool,
     // ---- phase 3 / npcs: add this subsystem's per-unit fields below ----
 
     // ---- phase 3 / economy: add this subsystem's per-unit fields below ----
@@ -763,6 +768,7 @@ impl Default for UnitBase {
             trigger_counts: HashMap::new(),
             // ---- phase 3 / skills ----
             skill_state: Default::default(),
+            death_processed: false,
             // ---- phase 3 / npcs ----
 
             // ---- phase 3 / economy ----
