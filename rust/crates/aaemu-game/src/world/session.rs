@@ -270,7 +270,7 @@ pub struct SelectDbData {
 
 /// Releases the character reservation taken by the caller unless the character actually entered
 /// the world. A reservation that another path (or an earlier entry of the same connection)
-/// already owned is left alone: [`EnterWorldManager::reserve_character`] reports that with
+/// already owned is left alone: `EnterWorldManager::reserve_character` reports that with
 /// `Ok(false)`.
 struct CharacterReservation<'a> {
     server: &'a GameServer,

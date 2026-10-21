@@ -204,3 +204,119 @@ async fn select_character_refuses_a_reserved_character_before_loading() {
     );
     assert!(b.conn.active_char.is_none());
 }
+
+/// The departure save commits before the reservation is released, and the re-entry reads the
+/// saved row: the money the leaving session had is what the next session loads.
+///
+/// Private MySQL 3317 only (`AAEMU_TEST_MYSQL`); every table the save/load path touches is
+/// shadowed by a connection-local temporary copy, so no persistent row changes.
+#[tokio::test]
+#[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
+async fn private_mysql_reentry_loads_the_state_the_departure_save_committed() {
+    use std::str::FromStr;
+
+    use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+
+    use crate::systems::social::achievement_persistence::temporary_shadow_definition;
+
+    let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+        return;
+    };
+    let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+    assert_eq!(
+        options.get_port(),
+        3317,
+        "only private MySQL3317 is allowed"
+    );
+    assert!(matches!(options.get_host(), "127.0.0.1" | "localhost"));
+    let pool = MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .expect("private MySQL");
+    for table in [
+        "housings",
+        "dominions",
+        "dominion_siege_participants",
+        "mails",
+        "items",
+        "item_containers",
+        "auction_house",
+        "characters",
+        "options",
+        "abilities",
+        "actabilities",
+        "appellations",
+        "character_active_buffs",
+        "portal_book_coords",
+        "portal_visited_district",
+        "friends",
+        "blocked",
+        "skills",
+        "quests",
+        "completed_quests",
+        "accounts",
+        "character_records",
+        "character_achievements",
+    ] {
+        let (_, definition): (String, String) =
+            sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(definition.starts_with("CREATE TABLE "));
+        sqlx::query(&temporary_shadow_definition(&definition))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO `accounts` (`account_id`, `labor`) VALUES (1, 1000)")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut data = crate::data::GameData::empty();
+    data.experience = crate::test_support::test_experience(55);
+    let mut server = crate::test_support::test_server_with(data);
+    server.db = pool.clone();
+    let client = TestClient::new(&server, 1, 1);
+    let mut character = test_character(1, "Reloader", 100.0, 100.0);
+    character.account_id = 1;
+    character.money = 1234;
+    character.is_online = true;
+    let player = spawn_player(&server, &client, character, 0x101);
+    assert_eq!(server.enter_world.reserve_character(1, 1), Ok(true));
+
+    session::leave_world_task(
+        &server,
+        None,
+        session::leave_target::CHARACTER_SELECT,
+        Some(player),
+    )
+    .await;
+    assert!(
+        server.save.pending_departure(1).is_none(),
+        "the departure save committed"
+    );
+    assert_eq!(server.enter_world.character_owner(1), None);
+
+    // The re-entry loads the row the departure save wrote.
+    let (loaded, _) = crate::db_character::load_character(&server, 1, 1)
+        .await
+        .expect("load")
+        .expect("the character row");
+    assert_eq!(loaded.money, 1234);
+    assert_eq!(loaded.unit.name, "Reloader");
+    assert_eq!(server.enter_world.reserve_character(1, 2), Ok(true));
+    let mut other = TestClient::new(&server, 2, 1);
+    session::select_loaded(&server, &mut other.conn, loaded, SelectDbData::default())
+        .expect("re-entry");
+    let reentered = other
+        .conn
+        .active_char
+        .clone()
+        .expect("re-entered character");
+    assert_eq!(reentered.data().money, 1234);
+    assert_eq!(server.enter_world.character_owner(1), Some(2));
+    pool.close().await;
+}
