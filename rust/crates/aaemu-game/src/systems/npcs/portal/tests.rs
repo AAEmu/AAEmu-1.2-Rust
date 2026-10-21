@@ -405,6 +405,54 @@ async fn use_portal_teleports_and_teleport_ended_resends_objects() {
 }
 
 #[tokio::test]
+async fn use_portal_needs_the_character_within_the_use_range() {
+    let server = test_server_with(data());
+    let mut client = TestClient::new(&server, 1, 1);
+    let me = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Alice", 100.0, 100.0),
+        0x10,
+    );
+    client.conn.active_char = Some(me.clone());
+    let portal = portal_npc(&server, (200.0, 200.0));
+    client.drain();
+    let too_far = (
+        sc::SCErrorMsgPacket,
+        body(&SCErrorMsgPacket::new(
+            crate::systems::economy::error_message::TOO_FAR_AWAY,
+            0,
+            true,
+        )),
+    );
+
+    request_portal(&server, &mut client, portal.obj_id, false).await;
+    assert_eq!(client.drain(), vec![too_far.clone()]);
+    assert!(!me.data().disabled_set_position);
+    let (x, y) = {
+        let c = me.data();
+        (c.unit.transform.x, c.unit.transform.y)
+    };
+    assert_eq!((x, y), (100.0, 100.0));
+
+    // A narrower configured range refuses a spot the default accepts.
+    server.config.update(|c| c.world.portal_use_range = 1.0);
+    me.data().unit.transform.set_xyz(198.0, 199.0, 100.0);
+    request_portal(&server, &mut client, portal.obj_id, false).await;
+    assert_eq!(client.drain(), vec![too_far]);
+    assert!(!me.data().disabled_set_position);
+
+    // Inside the range: the gate tells the bystanders and teleports the character.
+    server.config.update(|c| c.world.portal_use_range = 5.0);
+    request_portal(&server, &mut client, portal.obj_id, false).await;
+    assert_eq!(
+        client.drain_ops(),
+        vec![sc::SCUnitPortalUsedPacket, sc::SCTeleportUnitPacket]
+    );
+    assert!(me.data().disabled_set_position);
+}
+
+#[tokio::test]
 async fn use_portal_overburdened_is_refused() {
     struct Burdened;
     impl crate::systems::npcs::hooks::SkillsBridge for Burdened {
@@ -889,8 +937,26 @@ async fn navi_teleport_moves_to_the_sign_and_navi_open_portal_opens_the_gate() {
     assert_eq!(gate.data().func_group_id, 1878);
     client.drain();
 
+    // CSNaviTeleport from far away: refused with TOO_FAR_AWAY, the func does not run and
+    // movement stays free.
+    send_bc(&server, &mut client, cs::CSNaviTeleportPacket, sign.obj_id).await;
+    assert_eq!(
+        client.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            body(&SCErrorMsgPacket::new(
+                crate::systems::economy::error_message::TOO_FAR_AWAY,
+                0,
+                true
+            ))
+        )]
+    );
+    assert!(!me.data().disabled_set_position);
+    assert_eq!(sign.data().func_group_id, 1351);
+
     // CSNaviTeleport at the sign: SCNaviTeleport to the sign's position, movement held until
     // CSTeleportEnded.
+    me.data().unit.transform.set_xyz(139.0, 149.0, 100.0);
     send_bc(&server, &mut client, cs::CSNaviTeleportPacket, sign.obj_id).await;
     assert_eq!(
         client.drain(),
