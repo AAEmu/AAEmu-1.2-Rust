@@ -322,6 +322,20 @@ pub async fn select_character(
         return Ok(());
     };
     let character_name = conn.characters[idx].unit.name.clone();
+    // A second select while this session's character is still in the world (a double click on
+    // "enter") must not reload state from MySQL over the live character, nor strand it.
+    if conn.active_char.as_ref().is_some_and(|p| {
+        server
+            .world
+            .character_by_obj_id(p.obj_id)
+            .is_some_and(|live| Arc::ptr_eq(&live, p))
+    }) {
+        tracing::warn!(
+            "Character select for '{character_name}' ({character_id}) ignored: session {} already has a character in the world",
+            conn.id
+        );
+        return Ok(());
+    }
     // Reserve the character before any MySQL access. The owner keeps it until its departure save
     // has finished, so a second connection of the account can neither enter the character twice
     // nor load its row while the previous session is still saving it (stale load).
@@ -1460,6 +1474,8 @@ pub fn force_release_connection(server: &GameServer, connection_id: u32) {
         // Drop the server-wide entry first: if the grid removal below panics on a poisoned
         // instance lock, the character must still not be lookable up by id / obj id.
         server.world.try_remove_character(p.obj_id);
+        // Keep it in the departure set: the next periodic save (or a select of it) saves it.
+        server.save.remember_departing(&p);
         if let Some((instance_id, _, _)) = p.region() {
             if let Some(world) = server.world.world(instance_id) {
                 world.delete(&p);
