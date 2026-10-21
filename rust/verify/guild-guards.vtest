@@ -1,0 +1,49 @@
+# Guild invitation guard (systems/social/expedition.rs):
+# a guild-invitation reply without a pending invitation must be refused (WARN in the game log)
+# and leave the membership untouched; a normal invite + accept must join.
+#
+# The suite creates a two-member guild: Scripts/verify.sh lowers Expedition.Create to
+# Cost 0 / Level 1 / PartyMemberCount 2 in the lane's runtime config only and clears the
+# bot accounts' persisted guild rows before the run.
+#
+# Bots:
+#   leader    GM: party with the partner, creates the guild, expects the rejection log
+#   partner   party member: becomes a founding member when the leader creates the guild
+#   joiner    invited by the leader after creation, accepts and checks it joined
+#   outsider  answers a guild invitation it never received, checks it did not join
+
+suite guild-guards
+bot leader gm
+bot partner
+bot joiner
+bot outsider
+
+[leader]
+waitpeer 120 ${partner}
+partyinvite ${partner}
+await TeamJoined 30
+gcreate Verification Guild
+expectdb "SELECT COUNT(*) FROM expedition_members WHERE name = '${partner}'" 1 20
+ginvite ${joiner}
+expectdb "SELECT COUNT(*) FROM expedition_members WHERE name = '${joiner}'" 1 20
+sync log-ready 2
+expectlog "ReplyExpeditionInvitation: rejected" 30
+expectdb "SELECT COUNT(*) FROM expedition_members WHERE name = '${partner}'" 1
+
+[partner]
+waitpeer 120 ${leader}
+partyaccept
+expectdb "SELECT COUNT(*) FROM expedition_members WHERE name = '${partner}'" 1 20
+
+[joiner]
+waitpeer 120 ${leader}
+gaccept
+expectdb "SELECT COUNT(*) FROM expedition_members WHERE name = '${joiner}'" 1 20
+
+[outsider]
+waitpeer 120 ${leader}
+expectdb "SELECT COUNT(*) FROM expedition_members WHERE name = '${outsider}'" 0
+sync log-ready 2
+pump 2
+greply 424242 1
+expectdb "SELECT COUNT(*) FROM expedition_members WHERE name = '${outsider}'" 0

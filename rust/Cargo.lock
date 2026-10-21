@@ -133,6 +133,7 @@ dependencies = [
  "futures",
  "hex",
  "miniz_oxide",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

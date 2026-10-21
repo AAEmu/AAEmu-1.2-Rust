@@ -1,0 +1,32 @@
+# Emote spoof guard (systems/services/express_text.rs):
+# only the sender's own object id may be announced with SCEmotionExpressedPacket. An emote
+# sent for another object must be ignored and leave a debug line in the game log.
+#
+# Bots:
+#   sender    sends the emote with its own obj id, then with the watcher's obj id
+#   watcher   expects the first announcement and no packet for the spoofed one
+#   logwatch  starts the log expectation first, then sees the "ignored" line from the spoof
+#
+# Run with Scripts/verify.sh (it sets the express_text debug log filter and the env vars).
+
+suite emote-spoof
+bot sender
+bot watcher
+bot logwatch
+
+[sender]
+waitpeer 120 ${watcher}
+pump 2
+rawcs 0ad SELF00000001000000
+pump 1
+rawcs 0ad PEER00000001000000
+pump 1
+
+[watcher]
+waitpeer 120 ${sender}
+expectpkt SCEmotionExpressedPacket 15
+expectnopkt SCEmotionExpressedPacket 6
+
+[logwatch]
+waitpeer 120 ${sender}
+expectlog "ExpressEmotion for object .* ignored" 20

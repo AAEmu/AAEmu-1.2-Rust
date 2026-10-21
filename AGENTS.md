@@ -436,6 +436,8 @@ checks while working, the full `cargo xtask ci` once through `Scripts/lane.sh ch
 - Game flow tests run whole packet flows without MySQL (`test_support::test_server()`, `TestClient`); see `object_flow_tests.rs`, `world_flow_tests.rs`.
 - Tests needing real data are `#[ignore]`d and gated by env vars: `AAEMU_COMPACT_DB=rust/crates/aaemu-game/app/Data/compact.sqlite3 cargo test -p aaemu-game -- --ignored`; MySQL tests by `AAEMU_TEST_MYSQL`. CI does not run them — run them locally when touching that code.
 - Live end-to-end tests against running servers: `aaemu-testclient`, see [`rust/LIVE-TESTING.md`](rust/LIVE-TESTING.md).
+- Live verification suites (optional): `Scripts/verify.sh` and `rust/verify/*.vtest`, see
+  [`Docs/wiki/Verification.md`](Docs/wiki/Verification.md).
 
 ---
 

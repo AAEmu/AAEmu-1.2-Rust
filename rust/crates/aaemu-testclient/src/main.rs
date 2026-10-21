@@ -12,6 +12,8 @@
 //! aaemu-testclient diff   --a capA.jsonl --b capB.jsonl [--masks masks.json]
 //! aaemu-testclient load   [--config F] [--login H:P] --bots N [--prefix load] [--ramp-ms 20]
 //!                         [--scenario load]
+//! aaemu-testclient verify --suite file.vtest [--login H:P] [--password P] [--list-bots]
+//!                         Run one live verification suite (see Docs/wiki/Verification.md).
 //! ```
 //!
 //! Settings come from `--config` (JSON, see `testclient.example.json`), then the flags. Keep
@@ -25,6 +27,7 @@ use aaemu_testclient::diff::{self, DiffConfig};
 use aaemu_testclient::load;
 use aaemu_testclient::record::{self, Recorder};
 use aaemu_testclient::scenario::{self, BotConfig, Kind, Outcome};
+use aaemu_testclient::verify;
 use anyhow::{bail, Context};
 use tracing_subscriber::EnvFilter;
 
@@ -37,18 +40,31 @@ impl Args {
     fn parse() -> anyhow::Result<Self> {
         let mut it = std::env::args().skip(1);
         let cmd = it.next().unwrap_or_else(|| "help".into());
+        let argv: Vec<String> = it.collect();
         let mut flags = HashMap::new();
-        while let Some(a) = it.next() {
+        let mut i = 0;
+        while i < argv.len() {
+            let a = &argv[i];
             let Some(k) = a.strip_prefix("--") else {
                 bail!("unexpected argument '{a}'");
             };
-            let v = it.next().with_context(|| format!("--{k} needs a value"))?;
+            // A flag followed by another flag (or the end) is a boolean switch (`--list-bots`).
+            let v = if i + 1 < argv.len() && !argv[i + 1].starts_with("--") {
+                i += 2;
+                argv[i - 1].clone()
+            } else {
+                i += 1;
+                String::new()
+            };
             flags.insert(k.to_string(), v);
         }
         Ok(Self { cmd, flags })
     }
     fn get(&self, k: &str) -> Option<&str> {
         self.flags.get(k).map(String::as_str)
+    }
+    fn has(&self, k: &str) -> bool {
+        self.flags.contains_key(k)
     }
 }
 
@@ -241,8 +257,27 @@ async fn main() -> anyhow::Result<()> {
                 std::process::exit(2);
             }
         }
+        "verify" => {
+            let suite = PathBuf::from(args.get("suite").context("--suite <file.vtest>")?);
+            if args.has("list-bots") {
+                verify::print_bots(&suite)?;
+                return Ok(());
+            }
+            let login = args.get("login").unwrap_or("127.0.0.1:1237");
+            let password = args
+                .get("password")
+                .map(str::to_string)
+                .or_else(|| std::env::var("AAEMU_VERIFY_PASSWORD").ok())
+                .unwrap_or_else(|| "testpass".into());
+            let report = verify::run(&suite, login, &password).await?;
+            if !report.passed {
+                std::process::exit(1);
+            }
+        }
         _ => {
-            println!("usage: aaemu-testclient run|parity|diff|load [--flags]; see the crate docs");
+            println!(
+                "usage: aaemu-testclient run|parity|diff|load|verify [--flags]; see the crate docs"
+            );
         }
     }
     Ok(())

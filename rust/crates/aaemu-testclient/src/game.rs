@@ -285,6 +285,9 @@ pub struct GameState {
     /// `SCErrorMsgPacket`s and `SCItemTaskSuccessPacket`s in arrival order; scenarios remember
     /// `events.len()` before an action and inspect what was appended.
     pub events: Vec<GameEvent>,
+    /// Party / guild notifications in arrival order ([`crate::social`]), so `await` also sees
+    /// packets an earlier `drain` already read.
+    pub social: Vec<crate::social::SocialEvent>,
     /// Position of the last `SCTeleportUnitPacket` (a GM `/move` only tells the client to go
     /// there; the server adopts the position from the client's next movement packet).
     pub last_teleport: Option<(f32, f32, f32)>,
@@ -294,6 +297,9 @@ pub struct GameState {
 impl GameState {
     /// Updates the state from a packet.
     pub fn observe(&mut self, p: &Packet) -> anyhow::Result<()> {
+        if let Some(ev) = crate::social::decode(p) {
+            self.social.push(ev);
+        }
         let mut s = p.stream();
         let st = self;
         if p.is(LEVEL_PROXY, pp::ChangeStatePacket) {
