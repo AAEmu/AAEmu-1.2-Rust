@@ -268,6 +268,42 @@ pub struct SelectDbData {
     pub saved_buffs: Vec<SavedBuffRow>,
 }
 
+/// Releases the character reservation taken by the caller unless the character actually entered
+/// the world. A reservation that another path (or an earlier entry of the same connection)
+/// already owned is left alone: `EnterWorldManager::reserve_character` reports that with
+/// `Ok(false)`.
+struct CharacterReservation<'a> {
+    server: &'a GameServer,
+    character_id: u32,
+    connection_id: u32,
+    armed: bool,
+}
+
+impl<'a> CharacterReservation<'a> {
+    fn new(server: &'a GameServer, character_id: u32, connection_id: u32, taken: bool) -> Self {
+        Self {
+            server,
+            character_id,
+            connection_id,
+            armed: taken,
+        }
+    }
+
+    fn keep(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CharacterReservation<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.server
+                .enter_world
+                .release_character(self.character_id, self.connection_id);
+        }
+    }
+}
+
 /// `CSSelectCharacterPacket.Read`: the MySQL part, then [`select_loaded`].
 pub async fn select_character(
     server: &GameServer,
@@ -285,6 +321,22 @@ pub async fn select_character(
         );
         return Ok(());
     };
+    let character_name = conn.characters[idx].unit.name.clone();
+    // Reserve the character before any MySQL access. The owner keeps it until its departure save
+    // has finished, so a second connection of the account can neither enter the character twice
+    // nor load its row while the previous session is still saving it (stale load).
+    let taken = match server.enter_world.reserve_character(character_id, conn.id) {
+        Ok(taken) => taken,
+        Err(owner) => {
+            tracing::warn!(
+                "Character select refused for '{character_name}' ({character_id}): the character is already in the world on session {owner}"
+            );
+            return Err(crate::GameError::Protocol(format!(
+                "character {character_id} is already in the world (session {owner})"
+            )));
+        }
+    };
+    let mut reservation = CharacterReservation::new(server, character_id, conn.id, taken);
     let _transaction = server.save.transaction_lock().await;
     if let Some(departing) = server.save.pending_departure(character_id) {
         if !server.save.save_departing_locked(server, &departing).await
@@ -338,7 +390,9 @@ pub async fn select_character(
         offline_blocked: offline_blocked_infos(&server.db, &offline_blocked_ids).await?,
         saved_buffs: fetch_active_buffs(server, c.id).await,
     };
-    select_loaded(server, conn, c, db)
+    select_loaded(server, conn, c, db)?;
+    reservation.keep();
+    Ok(())
 }
 
 /// The rest of `CSSelectCharacterPacket.Read` once `Character.Load()` is done (no MySQL access).
@@ -367,8 +421,22 @@ pub fn select_loaded(
     // Character.Load: Mails.GetCurrentMailList (runs before the character is in the world).
     crate::systems::economy::mail::get_current_mail_list_for(server, c.id);
     let player = Player::new(c, conn.handle());
+    // C# `WorldManager.TryAddCharacter`; unlike the C# the result is checked: an occupied world
+    // entry means the character is already active, and continuing would give two live copies
+    // (with two saves racing over the same row). Refuse instead and let the caller close the
+    // connection; the caller's reservation guard releases the reservation.
+    if !server.world.try_add_character(&player) {
+        tracing::warn!(
+            "Enter world refused for '{}' (character {}): the world entry is already registered",
+            player.data().unit.name,
+            player.character_id
+        );
+        return Err(crate::GameError::Protocol(format!(
+            "character {} already has a world entry",
+            player.character_id
+        )));
+    }
     conn.active_char = Some(player.clone());
-    server.world.try_add_character(&player);
     crate::systems::quests::on_character_selected(server, &player);
     // Mates of every instance despawned, pending vehicle despawn task aborted.
     crate::systems::vehicles::on_character_selected(server, &player);
@@ -1197,6 +1265,13 @@ pub async fn leave_world_task(
         server.world.try_remove_character(p.obj_id);
     }
     save_and_remove_from_world(server, active.as_ref()).await;
+    if let Some(p) = &active {
+        // The departure save has finished (or failed into the pending-departure retry in
+        // `select_character`): the character may be entered by a new session now.
+        server
+            .enter_world
+            .release_character(p.character_id, p.conn.id);
+    }
     if let Some(conn) = conn {
         conn.state = GameState::Lobby;
         conn.leave_task = None;
@@ -1321,6 +1396,9 @@ pub async fn save_and_remove_from_world(server: &GameServer, active: Option<&Pla
 /// The `ActiveChar` part of `GameConnection.OnDisconnect`.
 pub async fn on_disconnect(server: &GameServer, conn: &mut GameConnection) {
     let Some(p) = conn.active_char.clone() else {
+        // A select may have reserved a character that never entered (failed load / refused
+        // select): the connection must not keep it reserved.
+        server.enter_world.release_connection(conn.id);
         return;
     };
     crate::systems::housing::dominion::runtime::abort_character(server, p.character_id);
@@ -1354,9 +1432,44 @@ pub async fn on_disconnect(server: &GameServer, conn: &mut GameConnection) {
             conn.id,
             p.character_id
         );
+        server.enter_world.release_connection(conn.id);
         return;
     }
     save_and_remove_from_world(server, Some(&p)).await;
+    // The departure save has finished: a new session may enter the character now.
+    server.enter_world.release_connection(conn.id);
+}
+
+/// Best-effort, synchronous cleanup of a connection that ended (the listener's unwind guard uses
+/// it after a panic in [`on_disconnect`]): releases every reservation of the connection **first**
+/// and then removes the connection's character from the world, so neither a reserved character
+/// nor a ghost world entry survives a failed cleanup. Every step is idempotent with the normal
+/// path; a poisoned lock inside the world part only aborts the world removal (the caller wraps
+/// this call in `catch_unwind`, the reservation is already gone).
+pub fn force_release_connection(server: &GameServer, connection_id: u32) {
+    let released = server.enter_world.release_connection(connection_id);
+    for character_id in released {
+        tracing::warn!(
+            "Session {connection_id}: force-released the reservation of character {character_id} after the disconnect cleanup failed"
+        );
+    }
+    for p in server.world.all_characters() {
+        if p.conn.id != connection_id {
+            continue;
+        }
+        // Drop the server-wide entry first: if the grid removal below panics on a poisoned
+        // instance lock, the character must still not be lookable up by id / obj id.
+        server.world.try_remove_character(p.obj_id);
+        if let Some((instance_id, _, _)) = p.region() {
+            if let Some(world) = server.world.world(instance_id) {
+                world.delete(&p);
+            }
+        }
+        tracing::warn!(
+            "Session {connection_id}: force-removed character {} from the world after the disconnect cleanup failed",
+            p.character_id
+        );
+    }
 }
 
 impl Player {

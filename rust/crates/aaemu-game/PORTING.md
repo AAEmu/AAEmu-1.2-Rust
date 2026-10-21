@@ -768,6 +768,21 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * `LGPlayerEnter` for an already registered connection id: C# `Dictionary.Add` throws inside the
   login handler, which has no catch (the exception escapes into the network client, the world is
   shown inactive afterwards). Rust replaces the stale entry and replies 0 (see "Live testing").
+* World entry and disconnect (`EnterWorldManager`, `GameConnection`, `net::listener`): the C#
+  ignored `WorldManager.TryAddCharacter`'s result and removed the account
+  (`AccountManager.Remove`) *before* the departure save. Rust refuses an occupied world entry and
+  keeps a per-character reservation from the select (before the MySQL load) until the departure
+  save has finished; the account is freed only after that save, so a reconnect cannot load the
+  row while the previous session is still writing it. A duplicate account is still refused with
+  the C# result (`AddAccount` -> `GLPlayerEnter` result 1 -> login `ACEnterWorldDenied(reason 1)`,
+  the "enter world denied, reason 1" kick), now also atomically at `X2EnterWorld` because two
+  cookies can be granted before either client registers the account; that race closes the
+  losing connection like the invalid-token path and logs the account and session. The
+  per-character reservation and the disconnect unwind guard are Rust-only. The listener cleanup
+  runs under the guard: a panic in `on_disconnect` still releases the reservation, removes the
+  character from the world and frees the account. Every refusal logs one `WARN` with the
+  character name and the reason (`world/session.rs`, `managers/enter_world.rs`,
+  `packets/c2g.rs`, `net/listener.rs`).
 * systems::skills / systems::ai (dead NPC returned and healed): the `DamageEffect` tail
   (`SCAiAggroPacket`, `AddUnitAggro`, `Npc.OnDamageReceived`) is skipped when the hit killed the
   NPC, and `CheckIfEmptyAggroToReturn` never sends a dead NPC to `ReturnState`. In the C# order the
