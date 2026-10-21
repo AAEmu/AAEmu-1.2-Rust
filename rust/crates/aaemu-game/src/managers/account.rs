@@ -46,6 +46,11 @@ impl AccountManager {
         self.accounts.contains_key(&account_id)
     }
 
+    /// The connection currently registered for `account_id` (`None` when it is free).
+    pub fn connection_of(&self, account_id: u32) -> Option<u32> {
+        self.accounts.get(&account_id).map(|entry| *entry)
+    }
+
     pub fn count(&self) -> usize {
         self.accounts.len()
     }

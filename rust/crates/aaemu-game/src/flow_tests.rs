@@ -559,6 +559,78 @@ async fn dispatch_edge_cases() {
 }
 
 #[tokio::test]
+async fn a_second_cookie_for_a_connected_account_is_refused() {
+    let server = Arc::new(test_server());
+    // Two cookies can be granted before either client reaches the game server: the login server
+    // only learns the account is connected from `GLPlayerEnter`, answered when the client sends
+    // X2EnterWorld. The second `AccountManager.Add` must not be swallowed.
+    server.enter_world.add_account(1000, 11, false);
+    server.enter_world.add_account(1000, 12, false);
+    let mut a = client(&server, 1);
+    server
+        .handle_frame(
+            &mut a.conn,
+            &c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(1000, 11)),
+        )
+        .await
+        .unwrap();
+    assert!(!a.conn.is_closing());
+    assert_eq!(server.accounts.connection_of(1000), Some(1));
+    assert!(!a.drain().is_empty());
+
+    let mut b = client(&server, 2);
+    server
+        .handle_frame(
+            &mut b.conn,
+            &c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(1000, 12)),
+        )
+        .await
+        .unwrap();
+    // Refused like any other invalid world entry: no X2EnterWorldResponse, connection closed.
+    assert!(b.conn.is_closing());
+    assert!(b.drain().is_empty());
+    assert_eq!(
+        server.accounts.connection_of(1000),
+        Some(1),
+        "the existing session keeps the account"
+    );
+    assert_eq!(server.streams.account_for(2), None);
+}
+
+#[tokio::test]
+async fn a_hard_disconnect_keeps_the_account_reserved_until_the_save_finishes() {
+    use crate::test_support::{spawn_player, test_character, TestClient};
+
+    let server = Arc::new(crate::test_support::test_server());
+    server.set_self();
+    let mut client = TestClient::new(&server, 1, 7);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Saver", 100.0, 100.0),
+        0x100,
+    );
+    client.conn.active_char = Some(player);
+    assert!(server.accounts.try_add(7, 1));
+    assert!(server.enter_world.reserve_character(1, 1).is_ok());
+
+    // Hold the save transaction: the disconnect waits for it and the account must stay
+    // registered meanwhile, so a reconnect cannot load the character before this save commits.
+    let transaction = server.save.transaction_lock().await;
+    let disconnect = crate::net::listener::on_disconnect(&server, &mut client.conn);
+    futures::pin_mut!(disconnect);
+    assert!(futures::poll!(disconnect.as_mut()).is_pending());
+    assert!(server.accounts.contains(7));
+    assert_eq!(server.enter_world.character_owner(1), Some(1));
+    drop(transaction);
+    disconnect.await;
+
+    assert!(!server.accounts.contains(7));
+    assert_eq!(server.enter_world.character_owner(1), None);
+    assert!(server.world.character_by_id(1).is_none());
+}
+
+#[tokio::test]
 async fn tcp_session_roundtrip() {
     use aaemu_commons::net::FrameCodec;
     use futures::{SinkExt, StreamExt};

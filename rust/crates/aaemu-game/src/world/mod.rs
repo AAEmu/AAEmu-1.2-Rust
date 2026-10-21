@@ -10,6 +10,8 @@ pub mod object;
 #[cfg(test)]
 mod player_activity_tests;
 pub mod session;
+#[cfg(test)]
+mod session_tests;
 pub mod unit_state;
 #[cfg(test)]
 mod unit_state_tests;
