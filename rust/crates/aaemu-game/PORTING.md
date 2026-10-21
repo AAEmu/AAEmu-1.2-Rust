@@ -2370,3 +2370,33 @@ the death never started its timer):
   when the item has no pending repair time. With the timer above, a destroyed vehicle therefore
   comes back at full HP only after its repair wait, not when it is still on cooldown. (As the
   mirrored `SummonSlave.ReadDetails` bug above notes, the timer itself is still lost on restart.)
+## Follow-path commands and ground-following arrival (2026-10-21)
+
+Public Farm Manager 11545 (`ai_file_id=15`, hold position) fires command set 146 every 3 minutes:
+`FollowPath public_farm`, `UseSkill 18324`, `Timeout 2`, `FollowPath public_farm2`, ...
+`public_farm@182.path` starts 0.4 m from the spawner and its second point is authored 1.4 m above
+the terrain the walker follows. The NPC stayed in `FollowPathBehavior` with "0 points (1 remaining
+in queue)" and emitted a movement packet every 100 ms without advancing (the client animates
+running in place). Three mirrored C# bugs and one missing safeguard:
+
+* `RunCommandSetBehavior.TickCurrentAiCommand` called `Ai.LoadAiPathPoints(Ai.AiFileName, ...)`
+  before assigning `AiFileName = Param2`: the first FollowPath of a set loaded nothing (the NPC
+  went straight back to Idle with the other commands still queued), each later FollowPath loaded
+  the *previous* route and the last route was never loaded. Rust now loads the command's own
+  `Param2` (empty `Param2` still falls back to `AiFileName`).
+* `AiPathHandler.RunCurrentPath` measured arrival in 3D against `Template.Scale`. A ground walker
+  has its step Z replaced by the reference height, so a point authored above the terrain is
+  never reached; `Npc.MoveTowards` then keeps emitting sub-metre steps forever. Rust walkers now
+  arrive on horizontal distance (flyers keep the 3D check) and the radius is at least the 1 m
+  movement tolerance, so a template scale below 1 m (which could never arrive in the C#) works
+  too. `FollowPathBehavior` passes that same radius as the `MoveTowards` tolerance.
+* `FollowPathBehavior.Tick` ran `GoToIdle()` when the path lists were empty *after*
+  `RunCurrentPath` had already sent the NPC to `RunCommandSet` (the `ReturnToCommandSet`
+  sentinel): the rest of the command set was stranded. Rust only idles while still in FollowPath.
+* Not in the C#: a target that makes no progress for 5 s (`TARGET_STALL_TIMEOUT_MS`) is dropped
+  with one WARN naming the NPC and the route file, and the route continues with the next point,
+  so a blocked or unreachable point cannot produce endless in-place movement.
+
+`flow_tests::follow_path_command_set_walks_every_route_point` runs the real command-set shape
+over three routes with an elevated point and checks every point is targeted in order, the set
+finishes and the NPC settles in HoldPosition without further movement.

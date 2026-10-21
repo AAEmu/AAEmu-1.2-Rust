@@ -665,16 +665,16 @@ impl<'a> AiCtx<'a> {
     pub fn load_ai_path_points(&mut self, name: &str, add_to_queue_only: bool) -> bool {
         // Routes shared by several zones are picked by the NPC's position (see `AiPathsManager`).
         let near = Some(super::npc::world_pos(self.server, &self.obj));
-        let points = self
-            .server
-            .systems
-            .ai
-            .paths
-            .load_ai_path_points_near(name, near);
+        let stem = self.server.systems.ai.paths.resolve_stem(name, near);
+        let points = match &stem {
+            Some(stem) => self.server.systems.ai.paths.load_ai_path_points(stem),
+            None => Arc::new(Vec::new()),
+        };
         if points.is_empty() {
             return false;
         }
         let h = &mut self.ai.path_handler;
+        h.path_name = stem.unwrap_or_else(|| name.to_string());
         if !add_to_queue_only {
             h.ai_path_points.clear();
             // Set to true to trigger initial loading, need to enable it again in the .path file
