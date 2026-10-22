@@ -265,6 +265,7 @@ pub mod error {
     pub const SLAVE_SPAWN_ITEM_LOCKED: i16 = 101;
     pub const NOT_READY: i16 = 206;
     pub const SLAVE_SPAWN_ERROR_NEED_REPAIR_TIME: i16 = 540;
+    pub const SLAVE_SPAWN_ERROR_INVALID_AREA: i16 = 583;
     pub const SLAVE_EQUIPMENT_LOADED_ITEM: i16 = 801;
 }
 

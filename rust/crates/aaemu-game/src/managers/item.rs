@@ -106,6 +106,20 @@ impl ItemManager {
         })
     }
 
+    /// `FindItemContainerFor(characterId, slotType, mateId)`: the existing persistent container,
+    /// without creating one (`EquipSlave` uses the slave DB id as `mateId`).
+    pub fn find_container_for_character(
+        &self,
+        character_id: u32,
+        slot: u8,
+        mate_id: u32,
+    ) -> Option<ContainerRef> {
+        self.all_containers().into_iter().find(|c| {
+            let g = c.lock().expect("container poisoned");
+            g.owner_id == character_id && g.slot_type == slot && g.mate_id == mate_id
+        })
+    }
+
     /// `GetItemContainerForCharacter(characterId, slotType, parentUnit, mateId)`: the first
     /// persistent container matching owner/slot/mate, or a new one (new container id unless the
     /// slot type is `None`, persistent unless `None`). Never call it while holding a container
@@ -126,7 +140,7 @@ impl ItemManager {
             }
         }
         let kind = match slot {
-            slot_type::EQUIPMENT => ContainerKind::Equipment,
+            slot_type::EQUIPMENT | slot_type::EQUIPMENT_SLAVE => ContainerKind::Equipment,
             slot_type::EQUIPMENT_MATE => ContainerKind::MateEquipment,
             _ => ContainerKind::Item,
         };

@@ -61,6 +61,8 @@ pub enum ItemClass {
     SummonMate,
     SummonSlave,
     TreasureMap,
+    /// Ship / vehicle part (`item_impl` 28, `ItemDetailType.SlaveEquipment`).
+    SlaveEquipment,
 }
 
 impl ItemClass {
@@ -83,6 +85,7 @@ impl ItemClass {
             "SummonMate" => Self::SummonMate,
             "SummonSlave" => Self::SummonSlave,
             "TreasureMap" => Self::TreasureMap,
+            "SlaveEquipment" => Self::SlaveEquipment,
             _ => return None,
         })
     }
@@ -104,6 +107,7 @@ impl ItemClass {
             Self::SummonMate => "AAEmu.Game.Models.Game.Items.SummonMate",
             Self::SummonSlave => "AAEmu.Game.Models.Game.Items.SummonSlave",
             Self::TreasureMap => "AAEmu.Game.Models.Game.Items.TreasureMap",
+            Self::SlaveEquipment => "AAEmu.Game.Models.Game.Items.SlaveEquipment",
         }
     }
 
@@ -125,6 +129,7 @@ impl ItemClass {
             Self::SummonMate => detail_type::MATE,
             Self::SummonSlave => detail_type::SLAVE,
             Self::TreasureMap => detail_type::TREASURE,
+            Self::SlaveEquipment => detail_type::SLAVE_EQUIPMENT,
             _ => detail_type::INVALID,
         }
     }
@@ -139,8 +144,26 @@ impl ItemClass {
             Self::SummonMate => 6,
             Self::SummonSlave => 29,
             Self::TreasureMap => 24,
+            Self::SlaveEquipment => 12,
             _ => 0,
         }
+    }
+}
+
+/// Detail body length of a raw `ItemDetailType` byte (the bytes after the type byte), as read
+/// by the 1.2 client's item detail reader `3961edf0` (the C# `ReadDetails` tables minus one).
+pub fn detail_body_len(detail_type: u8) -> usize {
+    match detail_type {
+        detail_type::EQUIPMENT => 55,
+        detail_type::SLAVE => 29,
+        detail_type::MATE => 6,
+        detail_type::UCC => 9,
+        detail_type::TREASURE | detail_type::LOCATION => 24,
+        detail_type::BIG_FISH | detail_type::DECORATION => 16,
+        detail_type::MUSIC_SHEET => 8,
+        detail_type::GLIDER => 4,
+        detail_type::SLAVE_EQUIPMENT => 12,
+        _ => 0,
     }
 }
 
@@ -170,6 +193,9 @@ pub struct ItemDetails {
     /// `SummonSlave.RepairStartTime` (unix seconds, 0 = `DateTime.MinValue`). Never restored
     /// from the DB (the C# `ReadDetails` always falls back to `MinValue`).
     pub slave_repair_start_time: UnixTime,
+    /// `ItemDetailType.SlaveEquipment` body (opaque 12 bytes; the 1.2 C# base `Item` keeps it
+    /// as a raw blob).
+    pub slave_equipment: [u8; 12],
     // TreasureMap
     pub map_position_x: i64,
     pub map_position_y: i64,
@@ -259,6 +285,15 @@ impl Item {
             );
             class
         });
+        // Ship parts keep the base `Item` type string in the C# database but always use the
+        // `SlaveEquipment` detail (12 opaque bytes).
+        let class = if template
+            .is_some_and(|t| t.impl_id == crate::data::items::item_impl::SLAVE_EQUIPMENT)
+        {
+            ItemClass::SlaveEquipment
+        } else {
+            class
+        };
         let mut item = Item {
             class,
             id: row.id,
@@ -534,6 +569,10 @@ impl Item {
                     d.map_position_x = s.read_i64()?;
                     d.map_position_y = s.read_i64()?;
                 }
+                ItemClass::SlaveEquipment => {
+                    let bytes = s.read_bytes(12)?;
+                    d.slave_equipment.copy_from_slice(&bytes);
+                }
                 _ => {}
             }
             Ok(())
@@ -600,6 +639,9 @@ impl Item {
                 s.write_i64(0)
                     .write_i64(d.map_position_x)
                     .write_i64(d.map_position_y);
+            }
+            ItemClass::SlaveEquipment => {
+                s.write_raw(&d.slave_equipment);
             }
             // Base Item.WriteDetails with DetailType Invalid writes nothing.
             _ => {}

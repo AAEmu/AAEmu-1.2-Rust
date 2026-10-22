@@ -2502,3 +2502,44 @@ running in place). Four mirrored C# bugs and one missing safeguard:
 `flow_tests::follow_path_command_set_walks_every_route_point` runs the real command-set shape
 over three routes with an elevated point and checks every point is targeted in order, the set
 finishes and the NPC settles in HoldPosition without further movement.
+
+## Slave summon placement and equipment (2026-10-22)
+
+- **SummonPos placement.** The 1.2 C# `SpawnSlave` special effect ignored `targetObj` and
+  always called `SlaveManager.Create(owner, skillData)`; the Rust port now follows the 10.x
+  `Skill.GetInitialTarget` / placement path. A `SummonPos` cast resolves the client-chosen spot
+  (world coordinates / yaw, including the `ObjId1` basis transform), validation sees that spot
+  (range, angle, obstacle, `target_only_water`) and the spawn uses it instead of the owner's
+  in-front offset. The spot is rejected (with `ErrorMessageType.SlaveSpawnErrorInvalidArea`,
+  583) and the 1.2 C# in-front placement is used when it is farther than
+  `slaves.spawn_valid_area_range` / the skill's `MaxRange` (the smaller nonzero limit; the boat
+  summon 15802 has `MaxRange` 0), when a ship spot is not on water, when a land-vehicle spot is
+  in water, or when a 0.5 m sphere just above the surface overlaps collision (`mask::SOLID`).
+  Skill 15802 also needs the 10.x `unboundedPlacement` rule: a position target with
+  `MaxRange <= 0` is not rejected as `TooFarRange`.
+- **`CSChangeSlaveEquipmentPacket`.** The 1.2 C# read only the header and logged it ("coming
+  soon"), so the implementation follows the 10.x packet logic (`e113e88b6`) adapted to the 1.2
+  client writer: `characterId u32`, `slaveTl u16`, `dbSlaveId u32`, `bts bool`, **one** item
+  pair and the four location bytes (`397d12a0`; the 10.x `num` and per-entry `expireTime` do not
+  exist in 1.2). Equip / unequip / re-slot move the item between the owner's bag and the slave's
+  persistent `EquipmentSlave` container (`SlotType 0xF2`, `ContainerKind::Equipment`,
+  `item_containers.mate_id` = slave DB id); the pre-move server snapshots are echoed in
+  `SCSlaveEquipmentChangedPacket(success)`, and the changed slots are broadcast as
+  `SCUnitEquipmentsChanged`, followed by `SCUnitPoints` when a part carries MaxHealth. Item
+  tasks go through the economy's `SplitOrMoveItemEx` (`ItemTaskType.Invalid`, as in C#), and the
+  slave model mirror is refreshed before `UpdateGearBonuses` / pool refresh.
+- **Ship parts.** Items with `item_impl = 28` (`ItemImplEnum.SlaveEquipment`) are now
+  `ItemClass::SlaveEquipment` with `ItemDetailType.SlaveEquipment` (12 opaque detail bytes);
+  `read_wire_item` consumes detail bytes by detail type (gear 55, ship parts 12, ...) instead of
+  always reading an `EquipItem`. Bind-on-equip applies in `EquipmentSlave` too. A player-owned
+  slave gets its starter pack only once (10.x `isNewEquipment`), and the persistent container
+  is reused on the next summon / restart; NPC / spawner slaves keep the 1.2 in-memory pack.
+- **Deviation from 1.2:** slave equipment persistence and the `0xF2` container do not exist in
+  the 1.2 C# at all; they are the 10.x design, recorded here because the 1.2 data already ships
+  `slave_initial_items`, `slave_equip_slots` and `item_slave_equipments`. The server additionally
+  rejects a non-slave-part item (impl 28) on equip; 10.x trusted the client for that.
+- **No equipment→skill link:** the 1.2 C# never connected equipped parts to cannon / vehicle
+  skills; slave mount skills still come from `slave_mount_skills` and child cannons from
+  `slave_bindings`. The 10.x `SpawnOrReplaceEquipmentVisual` / `item_slave_equipments` visual
+  spawning is not ported (no 1.2 C# reference), so equipping changes stats and the equipment
+  container but does not spawn replacement part doodads.

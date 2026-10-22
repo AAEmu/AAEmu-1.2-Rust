@@ -1,9 +1,10 @@
 //! Pet / vehicle gear: `CSChangeMateEquipmentPacket` (moves between the bag and a mate's
 //! `MateEquipmentContainer`), the `MateEquipmentContainer.OnEnter/LeaveContainer` packets
 //! (`SCMateEquipmentChangedPacket`), the base `EquipmentContainer` events of a mate (the default
-//! [`SummonItemHooks::on_mate_equipment_changed`]), the slave gear / slave repair packets that
-//! only log in the 1.2 C# (`CSChangeSlaveEquipmentPacket`, `CSRepairSlaveItemsPacket`), and the
-//! stablehand mate revive packet (`CSRepairPetItemsPacket`, handled in `vehicles::mates`).
+//! [`SummonItemHooks::on_mate_equipment_changed`]), the slave repair packet that only logs in
+//! the 1.2 C# (`CSRepairSlaveItemsPacket`), and the stablehand mate revive packet
+//! (`CSRepairPetItemsPacket`, handled in `vehicles::mates`). The slave equipment move packet
+//! lives in `vehicles::packets` with the other slave packets.
 
 use std::sync::Arc;
 
@@ -26,22 +27,32 @@ use super::item_effect_packets::{ItemAndLocation, SCMateEquipmentChangedPacket};
 use super::item_handlers::{active, sync_client_packet};
 use super::item_packets::SCUnitEquipmentsChangedPacket;
 
-/// `EquipItem.DetailBytesLength`.
-const EQUIP_DETAIL_BYTES: usize = 55;
+/// A raw wire item (`Item.Read` / `Item.Write`): the fields the container code needs. The detail
+/// body is consumed according to its `ItemDetailType` (ship parts carry 12 bytes, gear 55).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WireItem {
+    pub template_id: u32,
+    pub id: u64,
+    pub grade: u8,
+    pub flags: u8,
+    pub count: i32,
+    pub detail_type: u8,
+}
 
-/// `new EquipItem().Read(stream)`: skips one wire item, returns its template id.
-pub fn read_wire_equip_item(s: &mut PacketStream) -> Result<u32> {
+/// `new Item().Read(stream)`.
+pub fn read_wire_item(s: &mut PacketStream) -> Result<WireItem> {
     let template_id = s.read_u32()?;
     if template_id == 0 {
-        return Ok(0);
+        return Ok(WireItem::default());
     }
-    s.read_u64()?; // Id
-    s.read_u8()?; // Grade
-    s.read_u8()?; // ItemFlags
-    s.read_i32()?; // Count
-    s.read_u8()?; // detailType
-    if s.remaining() >= EQUIP_DETAIL_BYTES {
-        s.read_bytes(EQUIP_DETAIL_BYTES)?; // ReadDetails
+    let id = s.read_u64()?;
+    let grade = s.read_u8()?;
+    let flags = s.read_u8()?;
+    let count = s.read_i32()?;
+    let detail_type = s.read_u8()?;
+    let detail_len = crate::models::item::detail_body_len(detail_type);
+    if detail_len > 0 && s.remaining() >= detail_len {
+        s.read_bytes(detail_len)?;
     }
     s.read_i64()?; // CreateTime
     s.read_i32()?; // LifespanMins
@@ -49,7 +60,19 @@ pub fn read_wire_equip_item(s: &mut PacketStream) -> Result<u32> {
     s.read_u8()?; // WorldId
     s.read_i64()?; // UnsecureTime
     s.read_i64()?; // UnpackTime
-    Ok(template_id)
+    Ok(WireItem {
+        template_id,
+        id,
+        grade,
+        flags,
+        count,
+        detail_type,
+    })
+}
+
+/// `new EquipItem().Read(stream)`: skips one wire item, returns its template id.
+pub fn read_wire_equip_item(s: &mut PacketStream) -> Result<u32> {
+    Ok(read_wire_item(s)?.template_id)
 }
 
 /// Adds the `MateEquipmentContainer.OnEnterContainer` / `OnLeaveContainer` packets after the
@@ -377,41 +400,6 @@ pub fn change_mate_equipment(
     }
 }
 
-/// `CSChangeSlaveEquipmentPacket` (only logs in 1.2: "coming soon").
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CSChangeSlaveEquipmentPacket {
-    pub id: u32,
-    pub tl: u16,
-    pub db_slave_id: u32,
-    pub bts: bool,
-}
-
-impl CSChangeSlaveEquipmentPacket {
-    fn read_body(s: &mut PacketStream) -> Result<Self> {
-        let id = s.read_u32()?;
-        let tl = s.read_u16()?;
-        let db_slave_id = s.read_u32()?;
-        let bts = s.read_bool()?;
-        Ok(Self {
-            id,
-            tl,
-            db_slave_id,
-            bts,
-        })
-    }
-
-    fn run(self, _server: &GameServer, _conn: &mut GameConnection) {
-        tracing::debug!(
-            "ChangeSlaveEquipment, Id: {}, Tl: {}, DbSlaveId: {}, Bts: {}",
-            self.id,
-            self.tl,
-            self.db_slave_id,
-            self.bts
-        );
-    }
-}
-sync_client_packet!(CSChangeSlaveEquipmentPacket);
-
 /// `CSRepairPetItemsPacket`: the stablehand revive of dead mates (not an equipment repair).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CSRepairPetItemsPacket {
@@ -455,7 +443,6 @@ sync_client_packet!(CSRepairSlaveItemsPacket);
 
 pub fn register(reg: &mut PacketRegistry) {
     reg.register::<CSChangeMateEquipmentPacket>(LEVEL_PLAIN, cs::CSChangeMateEquipmentPacket);
-    reg.register::<CSChangeSlaveEquipmentPacket>(LEVEL_PLAIN, cs::CSChangeSlaveEquipmentPacket);
     reg.register::<CSRepairPetItemsPacket>(LEVEL_PLAIN, cs::CSRepairPetItemsPacket);
     reg.register::<CSRepairSlaveItemsPacket>(LEVEL_PLAIN, cs::CSRepairSlaveItemsPacket);
 }

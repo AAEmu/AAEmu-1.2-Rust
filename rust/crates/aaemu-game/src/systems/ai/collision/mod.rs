@@ -506,6 +506,25 @@ pub fn sweep_capsule(
     Some(st.sweep(query::capsule(a, r, hh), b - a, ent_types, 0xFFFF_FFFF, &[]))
 }
 
+/// Static overlap of a sphere (`PrimitiveWorldIntersection`, zero sweep). `None` without the
+/// service; `Some(false)` when nothing intersects.
+pub fn overlaps_sphere(
+    server: &GameServer,
+    instance_id: u32,
+    center: [f32; 3],
+    radius: f32,
+    ent_types: u32,
+) -> Option<bool> {
+    let pw = phys_world(server, instance_id)?;
+    let c = v(center);
+    let ext = radius;
+    let min = Vec3::new(c.x - ext, c.y - ext, c.z - ext);
+    let max = Vec3::new(c.x + ext, c.y + ext, c.z + ext);
+    ensure_box(server, &pw, min, max);
+    let mut st = pw.lock();
+    Some(st.overlaps(query::sphere(c, radius), ent_types, 0xFFFF_FFFF, &[]))
+}
+
 /// `GetWaterLevel(pos)` (I3DEngine vt+568, 0x3013FCB0): the water-volume surface, else the
 /// ocean level; `None` when the point is not in water (the engine's −1e6).
 pub fn water_level(server: &GameServer, instance_id: u32, x: f32, y: f32, z: f32) -> Option<f32> {

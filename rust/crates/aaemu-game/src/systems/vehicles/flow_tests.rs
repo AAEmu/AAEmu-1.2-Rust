@@ -3206,3 +3206,353 @@ async fn hang_and_unhang_packets_only_mutate_the_authenticated_character() {
     .unwrap();
     assert_eq!(pb.core().sticky_parent(), 0);
 }
+
+// ---------------------------------------------------------------------------------------------
+// SummonPos summon placement (2026-10-22)
+// ---------------------------------------------------------------------------------------------
+
+const SUMMON_POS_SKILL: u32 = 58_003;
+const SLAVE_PART: u32 = 5002;
+
+fn summon_pos_data(spawn_range: u32) -> GameData {
+    use crate::systems::skills::data::effects::{EffectTemplate, SpecialEffect};
+    use crate::systems::skills::data::{EffectKind, SkillTemplate};
+    let mut d = slave_data();
+    d.items.templates.get_mut(&SLAVE_ITEM).unwrap().use_skill_id = SUMMON_POS_SKILL;
+    d.systems
+        .vehicles
+        .slave_templates
+        .get_mut(&SLAVE_TEMPLATE)
+        .unwrap()
+        .spawn_valid_area_range = spawn_range;
+    d.systems.skills.add_effect(
+        EffectKind::SpecialEffect,
+        EffectTemplate::Special(SpecialEffect {
+            id: 1,
+            special_effect_type_id: 60,
+            value1: 0,
+            value2: 0,
+            value3: 0,
+            value4: 0,
+        }),
+        1,
+    );
+    d.systems.skills.add_skill(SkillTemplate {
+        id: SUMMON_POS_SKILL,
+        target_type: 12, // SummonPos
+        level_rule_no_consideration: true,
+        effects: vec![crate::systems::skills::tests::skill_effect(
+            1,
+            EffectKind::SpecialEffect,
+            1,
+        )],
+        ..SkillTemplate::default()
+    });
+    d
+}
+
+/// A client that owns `SLAVE_ITEM` in its bag and can cast the summon skill.
+fn summon_pos_client(
+    server: &Arc<GameServer>,
+) -> (TestClient, PlayerRef, u64, Arc<crate::world::WorldInstance>) {
+    let mut a = TestClient::new(server, 1, 1);
+    let (pa, item_id) = player_with_item(server, &a, 1, PA, (100.0, 100.0), SLAVE_ITEM);
+    let bag = pa
+        .data()
+        .inventory
+        .get(slot_type::INVENTORY)
+        .unwrap()
+        .clone();
+    bag.lock().unwrap().items[0].owner_id = u64::from(pa.character_id);
+    server.items.add_container(bag);
+    a.conn.active_char = Some(pa.clone());
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    a.drain();
+    (a, pa, item_id, world)
+}
+
+fn cast_summon_pos(
+    server: &GameServer,
+    client: &mut TestClient,
+    item_id: u64,
+    x: f32,
+    y: f32,
+    z: f32,
+    yaw: f32,
+) {
+    use crate::systems::skills::handlers::{start_skill, CSStartSkillPacket};
+    use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+    start_skill(
+        server,
+        &mut client.conn,
+        CSStartSkillPacket {
+            skill_id: SUMMON_POS_SKILL,
+            caster: SkillCaster::Item {
+                obj_id: PA,
+                item_id,
+                item_template_id: SLAVE_ITEM,
+                type1: 0,
+                type2: 0,
+            },
+            target: SkillCastTarget::Position {
+                obj_id: 0,
+                x,
+                y,
+                z,
+                rot: yaw,
+                obj_id1: 0,
+                obj_id2: 0,
+            },
+            flag: 0,
+            skill_object: SkillObject::None,
+        },
+    );
+}
+
+async fn wait_for_slave(world: &Arc<crate::world::WorldInstance>) -> crate::world::SlaveRef {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(s) = slaves::get_active_slave_by_owner_obj_id(world, PA) {
+                break s;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("summon skill must create the vehicle")
+}
+
+#[tokio::test]
+async fn summon_pos_places_the_vehicle_at_the_chosen_spot() {
+    let server = server_with(summon_pos_data(50));
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let (mut a, _pa, item_id, world) = summon_pos_client(&server);
+    cast_summon_pos(&server, &mut a, item_id, 103.0, 104.0, 200.0, 1.25);
+    let slave = wait_for_slave(&world).await;
+    let t = slave.data().unit.transform;
+    assert_eq!((t.x, t.y), (103.0, 104.0));
+    assert!(
+        (t.rot_z - 1.25).abs() < 1e-6,
+        "yaw {}, wanted 1.25",
+        t.rot_z
+    );
+    assert!(
+        !error_codes(&a.drain()).contains(&super::error::SLAVE_SPAWN_ERROR_INVALID_AREA),
+        "a valid placement must not send the invalid-area error"
+    );
+}
+
+#[tokio::test]
+async fn summon_pos_outside_the_valid_area_errors_and_falls_back_in_front() {
+    let server = server_with(summon_pos_data(10));
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let (mut a, _pa, item_id, world) = summon_pos_client(&server);
+    cast_summon_pos(&server, &mut a, item_id, 130.0, 100.0, 0.0, 1.25);
+    let slave = wait_for_slave(&world).await;
+    let frames = a.drain();
+    assert!(
+        error_codes(&frames).contains(&super::error::SLAVE_SPAWN_ERROR_INVALID_AREA),
+        "invalid placement must send SlaveSpawnErrorInvalidArea"
+    );
+    // C# fallback: SpawnYOffset clamped to 5 m in front, 90 degrees CCW of the owner.
+    let t = slave.data().unit.transform;
+    assert_eq!((t.x, t.y), (100.0, 105.0));
+    assert!((t.rot_z - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+}
+
+#[tokio::test]
+async fn slave_equipment_equips_unequips_and_survives_a_resummon() {
+    use crate::models::item::ItemClass;
+    use crate::net::registry::ClientPacket;
+    use crate::systems::vehicles::packets::CSChangeSlaveEquipmentPacket;
+
+    let mut d = slave_data();
+    d.items.templates.insert(
+        SLAVE_PART,
+        ItemTemplate {
+            impl_id: crate::data::items::item_impl::SLAVE_EQUIPMENT,
+            ..ItemTemplate::plain(SLAVE_PART, 1)
+        },
+    );
+    let server = server_with(d);
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let mut a = TestClient::new(&server, 1, 1);
+    let (pa, item_id) = player_with_item(&server, &a, 1, PA, (100.0, 100.0), SLAVE_ITEM);
+    a.conn.active_char = Some(pa.clone());
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    let bag = pa
+        .data()
+        .inventory
+        .get(slot_type::INVENTORY)
+        .unwrap()
+        .clone();
+    bag.lock().unwrap().items[0].owner_id = u64::from(pa.character_id);
+    server.items.add_container(bag.clone());
+
+    let item = mates::owned_item(&server, &pa, item_id).unwrap();
+    let slave = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        SLAVE_TEMPLATE,
+        Some(item),
+        false,
+        None,
+        None,
+    )
+    .expect("slave");
+    let (tl, db_id) = {
+        let d = slave.data();
+        (d.unit.tl_id, d.id)
+    };
+    assert!(db_id > 0);
+
+    let mut part = server
+        .items
+        .create(
+            SLAVE_PART,
+            1,
+            0,
+            1,
+            &server.game_data.items,
+            &server.ids.item,
+            0,
+        )
+        .expect("part");
+    assert_eq!(part.class, ItemClass::SlaveEquipment);
+    part.slot_type = slot_type::INVENTORY;
+    part.slot = 7;
+    part.owner_id = u64::from(pa.character_id);
+    part.dirty = true;
+    let part_id = part.id;
+    bag.lock().unwrap().items.push(part.clone());
+    a.drain();
+
+    let character_id = pa.character_id;
+    let packet_body = |item1: Option<&crate::models::item::Item>,
+                       slot1: u8,
+                       item2: Option<&crate::models::item::Item>,
+                       slot2: u8,
+                       bts: bool| {
+        let mut s = PacketStream::new();
+        s.write_u32(character_id)
+            .write_u16(tl)
+            .write_u32(db_id)
+            .write_bool(bts);
+        match item1 {
+            Some(i) => {
+                s.write(i);
+            }
+            None => {
+                s.write_u32(0);
+            }
+        }
+        match item2 {
+            Some(i) => {
+                s.write(i);
+            }
+            None => {
+                s.write_u32(0);
+            }
+        }
+        s.write_u8(slot_type::INVENTORY)
+            .write_u8(slot1)
+            .write_u8(slot_type::EQUIPMENT_SLAVE)
+            .write_u8(slot2);
+        s.into_bytes()
+    };
+    let run = |body: Vec<u8>, a: &mut TestClient| {
+        let p = CSChangeSlaveEquipmentPacket::read(&mut PacketStream::from_bytes(body)).unwrap();
+        futures::executor::block_on(p.handle(&server, &mut a.conn)).unwrap();
+        a.drain()
+    };
+
+    // Equip bag slot 7 -> slave slot 3.
+    let frames = run(packet_body(Some(&part), 7, None, 3, false), &mut a);
+    assert!(ops(&frames).contains(&sc::SCSlaveEquipmentChangedPacket));
+    assert_eq!(
+        *body(&frames, sc::SCSlaveEquipmentChangedPacket)
+            .last()
+            .unwrap(),
+        1,
+        "success flag"
+    );
+    assert!(ops(&frames).contains(&sc::SCUnitEquipmentsChangedPacket));
+    assert!(bag.lock().unwrap().get_item_by_slot(7).is_none());
+    assert_eq!(
+        slave.data().equipment[3].as_ref().map(|i| i.id),
+        Some(part_id)
+    );
+    let equipment = server
+        .items
+        .find_container_for_character(pa.character_id, slot_type::EQUIPMENT_SLAVE, db_id)
+        .expect("persistent slave equipment container");
+    let stored = equipment
+        .lock()
+        .unwrap()
+        .get_item_by_slot(3)
+        .cloned()
+        .expect("part in the slave container");
+    assert_eq!(
+        (stored.id, stored.slot_type),
+        (part_id, slot_type::EQUIPMENT_SLAVE)
+    );
+
+    // Unequip slave slot 3 -> empty bag slot 9.
+    let frames = run(packet_body(None, 9, Some(&stored), 3, true), &mut a);
+    assert_eq!(
+        *body(&frames, sc::SCSlaveEquipmentChangedPacket)
+            .last()
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        bag.lock().unwrap().get_item_by_slot(9).map(|i| i.id),
+        Some(part_id)
+    );
+    assert!(slave.data().equipment[3].is_none());
+    assert!(equipment.lock().unwrap().get_item_by_slot(3).is_none());
+
+    // Equip again, then destroy the hull and summon the saved slave: the parts must come back
+    // from the persistent container (item_containers.mate_id == slave DB id).
+    let frames = run(packet_body(Some(&stored), 9, None, 3, false), &mut a);
+    assert_eq!(
+        *body(&frames, sc::SCSlaveEquipmentChangedPacket)
+            .last()
+            .unwrap(),
+        1
+    );
+    slaves::delete(&server, Some(&pa), world.id, slave.obj_id, false);
+    let item = mates::owned_item(&server, &pa, item_id).unwrap();
+    let again = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        SLAVE_TEMPLATE,
+        Some(item),
+        false,
+        None,
+        Some(slaves::SavedSlave {
+            id: db_id,
+            name: "Cart".into(),
+            hp: 1,
+            mp: 1,
+        }),
+    )
+    .expect("re-summoned slave");
+    assert_eq!(
+        again.data().equipment[3].as_ref().map(|i| i.id),
+        Some(part_id),
+        "the saved hull keeps its equipped parts"
+    );
+}
