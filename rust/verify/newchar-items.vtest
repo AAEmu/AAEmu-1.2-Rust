@@ -1,0 +1,11 @@
+# Character creation persists the starting supplies together with the character row: right after
+# create + spawn (no world save or departure save has run yet) the bag and equipment rows are
+# already in MySQL, so a server stop before the first save cannot lose them.
+suite newchar-items
+bot nci
+
+[nci]
+bag
+expectdb "SELECT COUNT(*)>=4 FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${nci}' AND ic.slot_type=2" 1
+expectdb "SELECT COUNT(*)>=1 FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${nci}' AND ic.slot_type=1" 1
+pump 1

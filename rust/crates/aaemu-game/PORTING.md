@@ -1732,6 +1732,8 @@ servers (see `rust/LIVE-TESTING.md`). Fixed porting bugs are in the git history 
   item task packets queued earlier (the C# sends those inline first too). `quests::events::with_quests`
   logs an error and returns `None` when the thread already holds the ops lock instead of hanging.
 
+* `CharacterManager.Create` saved only the `characters` row (`SaveDirectlyToDatabase`); the starting supplies (`item_containers` / `items`) waited for the next `SaveManager` run or the departure save. A server stop or crash in that window kept the character but lost its items, and the next select built empty containers. `db_character::save_new_character` now writes the new character's dirty containers and items in the same transaction (`ItemManager::prepare_save_for_owner`); suite `rust/verify/newchar-items.vtest`.
+
 Parity status of the scripted scenarios: `login`, `lobby` and `full` (fresh character) produce
 the same S->C traffic as the C# servers after id / time normalisation (0 findings); a second
 `full` round with the existing character only differs in the saved position precision above
