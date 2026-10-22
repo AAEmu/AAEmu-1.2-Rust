@@ -46,7 +46,7 @@ cargo run --release -p aaemu-tool-aipaths -- return-points \
   --pak10 "<10.x>/game_pak" --pak12 "<1.2>/game_pak" \
   --compact crates/aaemu-game/app/Data/compact.sqlite3 \
   --worldgates crates/aaemu-game/app/Data/Portal/worldgates.json \
-  [--skip <id,id,...>] [--update]
+  [--world <instance_world>]... [--worlds-dir <Data/Worlds>] [--skip <id,id,...>] [--update]
 ```
 
 * A gate is generated for every `return_points` row that a `Return` effect uses, that is not in
@@ -67,7 +67,22 @@ cargo run --release -p aaemu-tool-aipaths -- return-points \
 * `--skip` leaves ids out on purpose; the ids are recorded in the section's header comment. The
   committed file was generated with `--skip 399,400,533,627,681`, the gates the ground check
   rejects (not on the 1.2 terrain or navmesh).
-* Instance worlds (`instance_*`) are not read: their zones need per-world origins.
+* `--world <name>` (repeatable) also reads an instance world: `game/worlds/<name>/world.xml` of
+  both paks (instance zones have their own origin cells) and the 10.x
+  `game/worlds/<name>/level_design/zone/<key>/editor/return_point.xml` files. Only ids that the
+  main_world data does not know are looked up there, by the 1.2 `return_points.editor_name`
+  (never by id: ids 68/69 and 670/671 mean other points in 3.0/10.x). The zone must have the same
+  id and origin cell in the 1.2 and 10.x `world.xml` of that world, and the name must be unique
+  in the given worlds. The terrain check does not apply to instance worlds; instead the horizontal
+  distance to the nearest 1.2 spawn (`npc_spawns.json` / `doodad_spawns.json` of
+  `--worlds-dir`/`<world>`, default `Data/Worlds` next to the `Portal` folder) is printed as a
+  warning when it exceeds 40 m. The section header records the worlds, and a rerun needs the same
+  `--world` list (the section is regenerated as a whole). The committed file was generated with
+  `--world instance_library --world instance_nachashgar --world instance_nachashgar_easy
+  --world instance_howling_abyss --world instance_howling_abyss_2
+  --world instance_cradle_of_destruction`, which adds 67 gates (Nachashgar 524-532, 546-553,
+  561, 625, 626; Nachashgar easy 572-581; library 630-647, 654-669, 679; Howling Abyss 484, 525;
+  Cradle of Destruction 488). Immortal Isle (555, 567: 134 m below the nearest spawn) is not read.
 
 The ground check of the committed gates is
 `AAEMU_GAME_PAK=... cargo test -p aaemu-game real_worldgates -- --ignored`.

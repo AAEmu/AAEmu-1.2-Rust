@@ -83,6 +83,55 @@ fn generated_gates_include_the_liania_quest_gate() {
     }
 }
 
+/// Instance world gates generated with `--world` (`Return` effects of the Nachashgar portals,
+/// the library doors, Howling Abyss and the Cradle): id -> (zone key, name). Gates 578 and 632
+/// share their id with a hand written sub zone, so their `SubZoneId` is `100000 + Id`.
+const INSTANCE_GATES: &[(u32, u32, &str)] = &[
+    (484, 265, "portal_instance_howling_abyss"),
+    (488, 264, "sprigun_room"),
+    (524, 278, "portal_nachashgar_02"),
+    (525, 280, "portal_howling_abyss_2"),
+    (532, 278, "portal_nachashgar_09"),
+    (546, 278, "portal_nachashgar_back_01"),
+    (561, 278, "portal_nachashgar_010"),
+    (572, 292, "portal_nacha_easy_02"),
+    (581, 292, "portal_nacha_easy_back_01"),
+    (625, 278, "portal_nachashgar_09_c"),
+    (626, 278, "portal_nachashgar_09_a"),
+    (630, 296, "instance_library_1_up_1"),
+    (637, 297, "instance_library_2_dn_1"),
+    (647, 298, "instance_library_3_dn_3"),
+    (654, 296, "instance_library_1_Yn_in"),
+    (666, 298, "instance_library_3_Tirenep_in"),
+    (679, 296, "instance_library_1_Sealed_in2"),
+];
+
+#[test]
+fn instance_worldgates_are_loaded_with_their_worlds_zone() {
+    let (text, gates) = load_gates();
+    let generated = generated_ids(&text);
+    for (id, zone, name) in INSTANCE_GATES {
+        let g = gates
+            .iter()
+            .find(|g| g.id == *id)
+            .unwrap_or_else(|| panic!("gate {id} is missing"));
+        assert_eq!((g.zone_id, g.name.as_str()), (*zone, *name), "gate {id}");
+        assert!(generated.contains(id), "gate {id} is not generated");
+        assert!(g.x > 0.0 && g.y > 0.0 && g.z > 0.0, "gate {id}");
+    }
+    // 67 instance gates were added to the 40 main_world ones.
+    assert!(generated.len() >= 107, "only {} generated", generated.len());
+    let sub = |id: u32| gates.iter().find(|g| g.id == id).unwrap().sub_zone_id;
+    assert_eq!((sub(578), sub(632), sub(630)), (100_578, 100_632, 630));
+    // Library zone 297 starts at the origin cell (0, 2): Y + 2048.
+    let dn = gates.iter().find(|g| g.id == 637).unwrap();
+    assert!((dn.y - 2304.5).abs() < 0.1, "{}", dn.y);
+    // Ids that must stay out: rejected or low confidence points, reassigned ids.
+    for id in [399, 400, 533, 555, 567, 627, 681, 68, 69] {
+        assert!(!generated.contains(&id), "gate {id} must not be generated");
+    }
+}
+
 /// How far a generated gate may float above or sink below the terrain. The 10.x editor spheres
 /// sit on the ground; a few metres cover the heightmap sampling and small terrain edits.
 const GROUND_TOLERANCE: f32 = 5.0;
@@ -138,10 +187,19 @@ fn real_worldgates_follow_the_terrain() {
 
     let (text, gates) = load_gates();
     let generated = generated_ids(&text);
+    // The instance world gates have their own origins (no main_world terrain).
+    let main_zones: HashSet<u32> = main
+        .xml_world_zones()
+        .values()
+        .map(|z| z.zone_key)
+        .collect();
     assert!(generated.len() >= 40, "only {} generated", generated.len());
     let mut failures = Vec::new();
     let mut worst = 0.0f32;
-    for g in gates.iter().filter(|g| generated.contains(&g.id)) {
+    for g in gates
+        .iter()
+        .filter(|g| generated.contains(&g.id) && main_zones.contains(&g.zone_id))
+    {
         let zone = worlds.get_zone_id(Some(main), g.x, g.y);
         let ground = terrain.get_height(&files, g.x, g.y).unwrap_or(0.0);
         let off = (g.z - ground).abs();
