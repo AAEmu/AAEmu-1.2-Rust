@@ -220,6 +220,29 @@ pub struct SlaveInitialItem {
     pub item_id: u32,
 }
 
+/// `SlaveEquipSlots`: one equipment slot of a hull and the model attach point it occupies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlaveEquipSlot {
+    pub id: u32,
+    pub slave_id: u32,
+    pub attach_point_id: u8,
+    pub equip_slot_id: u8,
+    pub require_slot_id: i32,
+}
+
+/// `ItemSlaveEquipments`: what an item spawns when it sits in a hull equipment slot (a child
+/// slave and/or a doodad) and which hull / slot packs accept it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ItemSlaveEquipment {
+    pub id: u32,
+    pub item_id: u32,
+    pub slave_id: u32,
+    pub doodad_id: u32,
+    pub slave_equip_pack_id: u32,
+    pub slot_pack_id: u32,
+    pub require_item_id: u32,
+}
+
 /// `SlaveTemplate`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SlaveTemplate {
@@ -426,6 +449,14 @@ pub struct VehiclesData {
     /// `_attachPoints` (model id -> attach point -> location), points in file order.
     pub attach_points: HashMap<u32, Vec<(u8, AttachPointLocation)>>,
     pub slave_initial_items: HashMap<u32, Vec<SlaveInitialItem>>,
+    /// `slave_equip_slots` grouped by slave template id.
+    pub slave_equip_slots: HashMap<u32, Vec<SlaveEquipSlot>>,
+    /// `item_slave_equipments` keyed by item id.
+    pub item_slave_equipments: HashMap<u32, ItemSlaveEquipment>,
+    /// `allow_to_equip_slaves` grouped by `slave_equip_pack_id`.
+    pub slave_equip_packs: HashMap<u32, Vec<u32>>,
+    /// `allow_to_equip_slots` grouped by `slave_equipment_equip_slot_pack_id`.
+    pub slave_slot_packs: HashMap<u32, Vec<u8>>,
     /// `_slaveMountSkills` (id, slave id, mount skill id) in insertion order.
     pub slave_mount_skills: Vec<(u32, u32, u32)>,
     /// `_repairableSlaves` (slave id -> repair effect id).
@@ -617,6 +648,60 @@ impl VehiclesData {
                 .entry(item.pack_id)
                 .or_default()
                 .push(item);
+            Ok(())
+        })?;
+        for_each_row(ctx.conn, "SELECT * FROM slave_equip_slots", [], |r| {
+            let slot = SlaveEquipSlot {
+                id: r.u32("id")?,
+                slave_id: r.u32("slave_id")?,
+                attach_point_id: r.i32("attach_point_id")? as u8,
+                equip_slot_id: r.i32("equip_slot_id")? as u8,
+                require_slot_id: r.i32("require_slot_id")?,
+            };
+            self.slave_equip_slots
+                .entry(slot.slave_id)
+                .or_default()
+                .push(slot);
+            Ok(())
+        })?;
+        for_each_row(ctx.conn, "SELECT * FROM item_slave_equipments", [], |r| {
+            let item = ItemSlaveEquipment {
+                id: r.u32("id")?,
+                item_id: r.u32("item_id")?,
+                slave_id: r.u32_or("slave_id", 0)?,
+                doodad_id: r.u32_or("doodad_id", 0)?,
+                slave_equip_pack_id: r.u32_or("slave_equip_pack_id", 0)?,
+                slot_pack_id: r.u32_or("slot_pack_id", 0)?,
+                require_item_id: r.u32_or("require_item_id", 0)?,
+            };
+            if self
+                .item_slave_equipments
+                .insert(item.item_id, item)
+                .is_some()
+            {
+                tracing::warn!(
+                    "Duplicate entry for item_slave_equipments item {}",
+                    item.item_id
+                );
+            }
+            Ok(())
+        })?;
+        for_each_row(ctx.conn, "SELECT * FROM allow_to_equip_slaves", [], |r| {
+            let pack_id = r.u32("slave_equip_pack_id")?;
+            let slave_id = r.u32("slave_id")?;
+            let pack = self.slave_equip_packs.entry(pack_id).or_default();
+            if !pack.contains(&slave_id) {
+                pack.push(slave_id);
+            }
+            Ok(())
+        })?;
+        for_each_row(ctx.conn, "SELECT * FROM allow_to_equip_slots", [], |r| {
+            let pack_id = r.u32("slave_equipment_equip_slot_pack_id")?;
+            let slot_id = r.i32("equip_slot_id")? as u8;
+            let pack = self.slave_slot_packs.entry(pack_id).or_default();
+            if !pack.contains(&slot_id) {
+                pack.push(slot_id);
+            }
             Ok(())
         })?;
         for_each_row(ctx.conn, "SELECT * FROM slave_initial_buffs", [], |r| {
@@ -1082,6 +1167,81 @@ impl VehiclesData {
     /// `GetSlaveInitialItemPack(packId)`.
     pub fn slave_initial_item_pack(&self, pack_id: u32) -> Option<&[SlaveInitialItem]> {
         self.slave_initial_items.get(&pack_id).map(Vec::as_slice)
+    }
+
+    /// The equipment slots a hull declares (`slave_equip_slots`), in table order.
+    pub fn slave_equip_slots(&self, slave_id: u32) -> &[SlaveEquipSlot] {
+        self.slave_equip_slots
+            .get(&slave_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// The attach points an equipment slot occupies on a hull. A slot may drive more than one
+    /// point (front and rear lamps, both planks).
+    pub fn slave_equip_attach_points(&self, slave_id: u32, equip_slot_id: u8) -> Vec<u8> {
+        let mut points = Vec::new();
+        for slot in self.slave_equip_slots(slave_id) {
+            if slot.equip_slot_id == equip_slot_id && !points.contains(&slot.attach_point_id) {
+                points.push(slot.attach_point_id);
+            }
+        }
+        points
+    }
+
+    /// Whether `slave_id` declares `equip_slot_id` in `slave_equip_slots`.
+    pub fn has_slave_equip_slot(&self, slave_id: u32, equip_slot_id: u8) -> bool {
+        self.slave_equip_slots(slave_id)
+            .iter()
+            .any(|s| s.equip_slot_id == equip_slot_id)
+    }
+
+    /// Every attach point any declared equipment slot of the hull occupies.
+    pub fn slave_equip_attach_point_set(&self, slave_id: u32) -> std::collections::HashSet<u8> {
+        self.slave_equip_slots(slave_id)
+            .iter()
+            .map(|s| s.attach_point_id)
+            .collect()
+    }
+
+    /// `item_slave_equipments` row of an item template.
+    pub fn item_slave_equipment(&self, item_id: u32) -> Option<&ItemSlaveEquipment> {
+        self.item_slave_equipments.get(&item_id)
+    }
+
+    /// `allow_to_equip_slaves` check (an empty pack accepts nothing).
+    pub fn slave_equip_pack_allows(&self, pack_id: u32, slave_id: u32) -> bool {
+        self.slave_equip_packs
+            .get(&pack_id)
+            .is_some_and(|ids| ids.contains(&slave_id))
+    }
+
+    /// `allow_to_equip_slots` check (an empty pack accepts nothing).
+    pub fn slot_pack_allows(&self, pack_id: u32, equip_slot_id: u8) -> bool {
+        self.slave_slot_packs
+            .get(&pack_id)
+            .is_some_and(|slots| slots.contains(&equip_slot_id))
+    }
+
+    /// Whether `item_id` may be equipped on `slave_id` in `equip_slot_id`: the item needs an
+    /// `item_slave_equipments` row, the hull must declare the slot, and the item's hull / slot
+    /// packs (when set) must allow it.
+    pub fn can_equip_item_on_slave(&self, item_id: u32, slave_id: u32, equip_slot_id: u8) -> bool {
+        let Some(equip) = self.item_slave_equipment(item_id) else {
+            return false;
+        };
+        if !self.has_slave_equip_slot(slave_id, equip_slot_id) {
+            return false;
+        }
+        if equip.slave_equip_pack_id != 0
+            && !self.slave_equip_pack_allows(equip.slave_equip_pack_id, slave_id)
+        {
+            return false;
+        }
+        if equip.slot_pack_id != 0 && !self.slot_pack_allows(equip.slot_pack_id, equip_slot_id) {
+            return false;
+        }
+        true
     }
 
     /// `GetAttachPointsForSlave(modelId)`.

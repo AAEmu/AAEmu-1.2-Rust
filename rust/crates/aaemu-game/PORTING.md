@@ -309,7 +309,7 @@ Cross-subsystem: mates are despawned on dungeon entry and `PlayerCanEnter` check
 
 | Area (C#) | Rust | Status | Notes |
 |---|---|---|---|
-| `MateGameData`, `SlaveGameData` (templates, unit modifiers, initial items / buffs, passive buffs, doodad / healing point / slave bindings, drop doodads, mount skills, repairable slaves, `slave_attach_points*.json`), `TransferGameData` (templates, bindings, binding doodads, paths, client `transfer_path.xml` roads + `GetOwnerPaths`), `ShipyardManager.Load`, `TaxationsManager` table, `ModelManager` vehicle / ship models | `systems/vehicles/data.rs` | done | Gated test `real_compact_db_vehicle_tables` checks the row counts; `real_transfer_follows_its_client_route` loads the roads from the game_pak. |
+| `MateGameData`, `SlaveGameData` (templates, unit modifiers, initial items / buffs, passive buffs, doodad / healing point / slave bindings, drop doodads, mount skills, repairable slaves, `slave_equip_slots`, `item_slave_equipments`, `allow_to_equip_slaves` / `allow_to_equip_slots`, `slave_attach_points*.json`), `TransferGameData` (templates, bindings, binding doodads, paths, client `transfer_path.xml` roads + `GetOwnerPaths`), `ShipyardManager.Load`, `TaxationsManager` table, `ModelManager` vehicle / ship models | `systems/vehicles/data.rs` | done | Gated test `real_compact_db_vehicle_tables` checks the row counts; `real_transfer_follows_its_client_route` loads the roads from the game_pak. |
 | `MateManager` (per instance), `CharacterMates` (load / save / spawn / despawn), `Mate` (`AddExp`, `MateXpUpdateTask`, `RegenTick`, `DoFallDamage`, `OnZoneChange`, stats) | `systems/vehicles/mates.rs`, `stats.rs` | done | Mount / dismount (`SCUnitAttached` / `SCUnitDetached`, rider becomes a transform child), rename, target, user state, mate equipment packet (item move through `VehicleItemHooks`), kill exp, stun / unmount skills, death despawn. |
 | `SlaveManager` (per instance), `SlaveSpawner`, `SummonSlave` details, `Slave` (`DoDie`, `DoHpChangeTrigger` / repair points, `RegenTick`, `Save`, `OnZoneChange`, stats) | `systems/vehicles/slaves.rs` | done | Create (saved slave / persistent doodads / saved child slaves from MySQL, position, boats on the water surface, doodad and slave bindings at the model attach points), bind / unbind, delete with portal-time despawn, Rider's Escape, repair cooldown, `RepairSlaveEffect`, `SendMySlaveTask`, logout (+10 min) / disconnect despawn task, `slaves` table (`AfterCharacters`). |
 | `TransferManager` (per instance, 100 ms tick), `TransferSpawner`, `Transfer` route following (`GoToPath`, `MoveTo`, `NextPoint`) | `systems/vehicles/transfers.rs` | done | Carriage motor + boarding part + bench doodads, `SCOneUnitMovementPacket` (transfer move type) for both parts. Spawned from `SpawnManager.SpawnAll`. |
@@ -2518,7 +2518,8 @@ finishes and the NPC settles in HoldPosition without further movement.
   Skill 15802 also needs the 10.x `unboundedPlacement` rule: a position target with
   `MaxRange <= 0` is not rejected as `TooFarRange`.
 - **`CSChangeSlaveEquipmentPacket`.** The 1.2 C# read only the header and logged it ("coming
-  soon"), so the implementation follows the 10.x packet logic (`e113e88b6`) adapted to the 1.2
+  soon"), so the implementation follows the 10.x packet logic (`e533e88b6`, C# `develop`
+  2026-08-02) adapted to the 1.2
   client writer: `characterId u32`, `slaveTl u16`, `dbSlaveId u32`, `bts bool`, **one** item
   pair and the four location bytes (`397d12a0`; the 10.x `num` and per-entry `expireTime` do not
   exist in 1.2). Equip / unequip / re-slot move the item between the owner's bag and the slave's
@@ -2536,10 +2537,32 @@ finishes and the NPC settles in HoldPosition without further movement.
   is reused on the next summon / restart; NPC / spawner slaves keep the 1.2 in-memory pack.
 - **Deviation from 1.2:** slave equipment persistence and the `0xF2` container do not exist in
   the 1.2 C# at all; they are the 10.x design, recorded here because the 1.2 data already ships
-  `slave_initial_items`, `slave_equip_slots` and `item_slave_equipments`. The server additionally
-  rejects a non-slave-part item (impl 28) on equip; 10.x trusted the client for that.
-- **No equipment→skill link:** the 1.2 C# never connected equipped parts to cannon / vehicle
-  skills; slave mount skills still come from `slave_mount_skills` and child cannons from
-  `slave_bindings`. The 10.x `SpawnOrReplaceEquipmentVisual` / `item_slave_equipments` visual
-  spawning is not ported (no 1.2 C# reference), so equipping changes stats and the equipment
-  container but does not spawn replacement part doodads.
+  `slave_initial_items`, `slave_equip_slots` and `item_slave_equipments`.
+- **Equipment validation (1.2 data):** equipping checks the item's
+  `item_slave_equipments.slave_equip_pack_id` against `allow_to_equip_slaves` (the hull) and its
+  `slot_pack_id` against `allow_to_equip_slots` (the target slot); the hull must also declare the
+  slot in `slave_equip_slots`. A refused move sends `ErrorMessageType.ItemNotForPet` (204; the
+  1.2 client's "can't use that item on a summon" message) and moves nothing. 10.x trusted the
+  client for this; its `SLAVE_EQUIP_ERROR_REQUIRE_SLOT_AND_ITEM` / `..._UNEQUIP_FIRST` (804/805)
+  are for the client's slot-dependency rules, not for a part the hull does not accept.
+- **Equipment visuals (10.x `SpawnEquipmentVisualsFromInventory`):** every occupied equipment
+  slot spawns what `item_slave_equipments` maps it to at the slot's `slave_equip_slots` attach
+  points: a child slave (Steel Cannon 28852 -> slave 10, Harpoon Cannon 30306 -> slave 48) or a
+  doodad (sails, masts, lamps, planks, figureheads, bell, telescope, ...). A slot that drives two
+  points (front/rear lamp, both planks) spawns the visual at both. Unequipping removes exactly
+  that visual; a resummon respawns it from the persistent container. At attach points a declared
+  equipment slot owns, the 1.2 static `slave_bindings` / `slave_doodad_bindings` are skipped so a
+  part can be removed; static bindings still cover points without an equipment slot.
+- **Starter pack:** `slave_initial_items` rows are seeded only into slots the hull declares in
+  `slave_equip_slots` (slave 110 / 139 reference pack 1 without those slots; slave 21 has slot 0
+  at the cannon points and no starter cannons).
+- **Attach points:** models 511 (slave 22), 1482 (slave 132) and 1546 (slaves 139/142/143/145)
+  were recovered from the `$` helper nodes of the 1.2 client's `galleon_body_test.cgf`,
+  `boardship_body_test.cgf` and `middleship_body.cgf` (CGF units / 100, the same method and
+  values as the existing Clipper entry). Model 115 (`caravel.ship_body`) references a caravel
+  mesh that is not in the 1.2 pak, and model 117 (`galleon.cannon`, the cannon's gunner seat) is
+  an Entity `.chr` whose only node is its root (no `$` helpers), so those two still have no table
+  entry.
+- **No equipment skill link:** the 1.2 C# never connected equipped parts to cannon / vehicle
+  skills; slave mount skills still come from `slave_mount_skills`. The child slaves spawned for
+  equipment are visuals with the normal child-slave behaviour, as in the 10.x reference.

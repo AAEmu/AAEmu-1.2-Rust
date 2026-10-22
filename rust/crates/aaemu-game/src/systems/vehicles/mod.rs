@@ -263,6 +263,7 @@ pub mod error {
     pub const NOT_ENOUGH_ITEM: i16 = 27;
     pub const SLAVE_ALREADY_HAS_MASTER: i16 = 97;
     pub const SLAVE_SPAWN_ITEM_LOCKED: i16 = 101;
+    pub const ITEM_NOT_FOR_PET: i16 = 204;
     pub const NOT_READY: i16 = 206;
     pub const SLAVE_SPAWN_ERROR_NEED_REPAIR_TIME: i16 = 540;
     pub const SLAVE_SPAWN_ERROR_INVALID_AREA: i16 = 583;
