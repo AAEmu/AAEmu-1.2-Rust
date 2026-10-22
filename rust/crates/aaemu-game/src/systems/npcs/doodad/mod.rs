@@ -62,3 +62,7 @@ pub async fn save(
     }
     Ok(0)
 }
+
+#[cfg(test)]
+#[path = "gather_tests.rs"]
+mod gather_tests;

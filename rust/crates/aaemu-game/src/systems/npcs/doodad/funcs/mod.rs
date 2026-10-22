@@ -130,6 +130,29 @@ pub fn use_func(
             tracing::trace!("DoodadFuncHarvest");
             set_to_next_phase(ctx, true);
         }
+        // Gathering phase funcs: the 1.2 tables only carry the func id
+        // (`doodad_func_ore_mines` / `doodad_func_rock_mines`) or the shear type / term
+        // (`doodad_func_shears`); loot, depletion and regrowth live in the next func group
+        // (e.g. ore 255 -> 425 LootItem -> 426 Final / RatioRespawn, sheared 56 -> 57 LootItem
+        // + Timer). The C# bodies only logged, so the phase never advanced; advancing is what
+        // makes the authored loot / respawn chain run. The gathering skill covers labor
+        // (`consume_lp`) and the 1.2 server never validated `mainhand_tool_id`.
+        F::OreMine(_) => {
+            tracing::trace!("DoodadFuncOreMine");
+            set_to_next_phase(ctx, true);
+        }
+        F::RockMine(_) => {
+            tracing::trace!("DoodadFuncRockMine");
+            set_to_next_phase(ctx, true);
+        }
+        F::Shear(f) => {
+            tracing::trace!(
+                "DoodadFuncShear: ShearTypeId {}, ShearTerm {}",
+                f.shear_type_id,
+                f.shear_term
+            );
+            set_to_next_phase(ctx, true);
+        }
         F::OpenFarmInfo(f) => {
             // 1.2 commonfarm/info.alb opens on OPEN_COMMON_FARM_INFO. The packet's
             // count describes the position array, not the farm's planting capacity
@@ -200,13 +223,10 @@ pub fn use_func(
         | F::NaviOpenMailbox(_)
         | F::NaviRemove(_)
         | F::OpenPaper(_)
-        | F::OreMine(_)
         | F::ParentInfo(_)
         | F::PlantCollect(_)
         | F::RenewItem(_)
-        | F::RockMine(_)
         | F::SeedCollect(_)
-        | F::Shear(_)
         | F::SkinOff(_)
         | F::SoilCollect(_)
         | F::SpiceCollect(_)
