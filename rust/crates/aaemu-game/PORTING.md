@@ -1500,6 +1500,20 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   warning stays and prints the entry to add. Ten hand recorded gates are more than 5 m from their
   10.x point (221, 372, 617, 619, 628, 672, 673, 354, 652, and 48 by 6 m); they are untouched.
 
+* systems::skills (2026-10-22): `Return` (type 25) keeps a player inside its instance. The C#
+  `Return.cs` is a TODO placeholder: a missing gate fell back to `character.MainWorldPosition`
+  and loaded the main world, so an instance Return id without gate data ejected the player
+  (the instance Return ids had no gate data at all). The Rust now sends `SCErrorMsg`
+  `NO_RETURN_POINT` (439, the retail error string `no_return_point`) and leaves the player where
+  it is when the caller is in an instance and the gate is missing or its zone is not a zone of
+  the caller's instance world. A gate of the instance's own world moves the player inside it
+  (zone change hooks fire, only `SCTeleportUnit`, no `SCLoadInstance`). Outside an instance a
+  gate whose zone exists only in instance worlds is treated as missing (never instance
+  coordinates in the main world). The `MainWorldPosition` fallback remains only for the Memory
+  Tome (`value1 == 0`) outside instances. Retail resolves a Return gate in the caster's own
+  world (instance worlds ship their own `return_point.g`) and never falls back to the main world.
+  The C# closed-zone check of world gates (`Skill.cs` `portal_zone_check`) is not ported.
+
 * systems::npcs (2026-10-15): `DoodadFuncClout` with `UseOriginSource` takes the first doodad
   within 4 m of the caster as the area trigger's owner, and the C# scheduled the
   `DoodadFuncCloutTask` on that owner, so it changed that doodad's phase to the clout's
