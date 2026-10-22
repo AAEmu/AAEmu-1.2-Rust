@@ -3252,3 +3252,53 @@ fn real_data_ronbann_mine_npcs_are_on_the_mine_floor() {
         "Ronbann middle-cave placements found: {middle}"
     );
 }
+
+/// The Old Memoria Lake Tree placements of the level 38 quest "Low on Lumber" (context 2094:
+/// `QuestActObjItemGather` item 16035 x 5 with `highlight_doodad_id` 3848). The C# PR #1793
+/// (upstream 9549c76b) added seven trees at the lake; the shipped file already had one east of
+/// it. The doodad spawn loader must accept every entry (template id, position) and the seven
+/// lake positions must be present exactly once each.
+#[test]
+fn real_data_old_memoria_lake_trees_for_low_on_lumber() {
+    use crate::systems::npcs::doodad::spawner::{parse_list, DoodadSpawnerDef};
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("app/Data/Worlds/main_world/doodad_spawns.json");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let defs = parse_list(&text, DoodadSpawnerDef::from_json).expect("doodad_spawns.json");
+
+    let mut all: Vec<(f32, f32, f32, f32)> = defs
+        .iter()
+        .filter(|d| d.base.unit_id == 3848)
+        .map(|d| {
+            let p = &d.base.position;
+            (p.x, p.y, p.z, p.yaw)
+        })
+        .collect();
+    assert_eq!(all.len(), 8, "Old Memoria Lake Tree placements: {all:?}");
+    all.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    all.dedup();
+    assert_eq!(all.len(), 8, "duplicate Old Memoria Lake Tree placement");
+
+    // The seven PR #1793 placements around the lake (X ~9049-9098, Y ~9060-9121), plus the
+    // pre-existing one at (9078.5, 9125.3, 190.2, yaw 0) just north-east of them.
+    let mut lake: Vec<(f32, f32, f32, f32)> = all
+        .into_iter()
+        .filter(|&(x, y, _, _)| (9040.0..=9100.0).contains(&x) && (9050.0..=9130.0).contains(&y))
+        .collect();
+    let mut expected = vec![
+        (9097.6, 9063.8, 193.6, 126.6),
+        (9088.3, 9059.7, 194.7, 90.0),
+        (9063.3, 9087.7, 196.5, -53.4),
+        (9087.8, 9070.8, 192.2, 61.9),
+        (9064.6, 9098.9, 194.1, 42.2),
+        (9062.2, 9114.8, 193.9, -16.9),
+        (9048.9, 9120.5, 196.3, 30.9),
+        (9078.5, 9125.3, 190.2, 0.0),
+    ];
+    expected.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    lake.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(lake, expected);
+}
