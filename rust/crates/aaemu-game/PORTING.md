@@ -2403,8 +2403,8 @@ two bots before the fix (a foreign `Mount` caster, an NPC-only skill and a far d
 
 - **Mount caster.** `SkillCaster::Mount { obj_id }` may name the player itself, a mate the player
   may use (`may_use_mate`), or a slave the player summoned (`summoner_obj_id` / `summoner_id`),
-  is attached to (`attached_characters`, or `parent_obj_id`), or that is mounted on a slave the
-  player summoned (cannon on a ship). Any other object (NPC, doodad, another player, a foreign
+  is attached to (`attached_characters`, or `parent_obj_id`), or that is a harpoon mounted on a
+  slave the player summoned. A ship cannon (kind 8 child) answers only its gunner. Any other object (NPC, doodad, another player, a foreign
   slave) is refused with a warning and `SCSkillStarted` carrying `NO_PERM`.
 - **Range of doodad and slave targets.** The C# skipped the `TooFarRange` check for every Doodad
   or Slave target (its own TODO asks for a bounding-box check). The Rust now allows
@@ -2566,3 +2566,21 @@ finishes and the NPC settles in HoldPosition without further movement.
 - **No equipment skill link:** the 1.2 C# never connected equipped parts to cannon / vehicle
   skills; slave mount skills still come from `slave_mount_skills`. The child slaves spawned for
   equipment are visuals with the normal child-slave behaviour, as in the 10.x reference.
+- **Manned ship cannons (deviation, the C# has none of this):** a kind-8 slave mounted on another
+  slave (`slaves::is_manned_cannon`) has one gunner seat, attach point 1 (the `mount_attached_skills`
+  row of mount skill 16 / Fire Cannon 10473 -> skill 14372). `CSBindSlave` on it is refused with
+  `SLAVE_CANNOT_BIND` unless the character summoned the cannon, owns the carrier ship or is aboard
+  it (standing on it or seated on any of its points; the 1.2 data has no seat permission table, so
+  party / expedition membership is not required), with `SLAVE_ALREADY_HAS_MASTER` when the seat is
+  taken and `SLAVE_UNBIND_FIRST` when the character already rides another slave. Only the gunner
+  may cast the cannon's mount skills (`mount_authority::may_use_slave`); the carrier's owner no
+  longer fires it remotely. The gunner leaves through `CSDiscardSlave`, death (`on_death_event`),
+  teleport / `force_dismount`, the cannon being unequipped, or the carrier being recalled,
+  destroyed or despawned (`unbind_child_riders`). The gunner sits at the model's driver helper if
+  `slave_attach_points*.json` has one, else at `GUNNER_SEAT_OFFSET` (0, -0.8, 0) in the cannon
+  frame: model 117 has no helper in the data or the pak, and no cannon-like model with a seat helper
+  exists, so this is a documented constant. The gunner is a transform child of the cannon, which is
+  a child of the ship, so the position follows the moving ship. Fire Cannon is a ballistic position
+  skill (4 m area, 4-120 m, fixed 130-170 damage); the area damage and the `SCSkillFired` broadcast
+  (the client draws the projectile from the skill's projectile 13) are covered by
+  `ship_cannon_gunner_seat_skill_and_leaving`.

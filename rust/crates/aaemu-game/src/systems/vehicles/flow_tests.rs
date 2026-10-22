@@ -3957,3 +3957,240 @@ async fn slave_equipment_cannon_visuals_and_pack_validation() {
     assert!(bag.lock().unwrap().get_item_by_slot(7).is_some());
     assert!(other.data().equipment[3].is_none());
 }
+
+const FIRE_CANNON: u32 = 10473;
+const GUNNER_STATE_SKILL: u32 = 14372;
+const CANNON_MOUNT_SKILL: u32 = 16;
+const CANNON_TARGET_NPC: u32 = 901;
+
+/// `ship_equip_data` plus the 1.2 cannon fire skill: mount skill 16 -> skill 10473 (ballistic
+/// position target, 4 m area, 4-120 m, fixed damage), attached skill 14372 at the gunner seat.
+fn cannon_data() -> GameData {
+    use crate::systems::skills::data::effects::EffectTemplate;
+    use crate::systems::skills::data::{EffectKind, SkillTemplate};
+    let mut d = ship_equip_data();
+    d.systems.skills.add_effect(
+        EffectKind::DamageEffect,
+        EffectTemplate::Damage(Box::new(crate::systems::skills::tests::damage_effect(
+            183, 150,
+        ))),
+        183,
+    );
+    d.systems.skills.add_skill(SkillTemplate {
+        id: FIRE_CANNON,
+        target_type: 11, // BallisticPos
+        target_selection: 2,
+        // The real row is Hostile (4); this fixture has no factions.
+        target_relation: 5,
+        target_area_radius: 4,
+        min_range: 4,
+        max_range: 120,
+        source_mount: true,
+        level_rule_no_consideration: true,
+        effects: vec![crate::systems::skills::tests::skill_effect(
+            183,
+            EffectKind::DamageEffect,
+            183,
+        )],
+        ..SkillTemplate::default()
+    });
+    d.systems.skills.add_skill(SkillTemplate {
+        id: GUNNER_STATE_SKILL,
+        target_type: 0,
+        level_rule_no_consideration: true,
+        ..SkillTemplate::default()
+    });
+    d.systems
+        .vehicles
+        .mount_skills
+        .push(super::data::MountSkills {
+            id: CANNON_MOUNT_SKILL,
+            name: "Fire".into(),
+            skill_id: FIRE_CANNON,
+        });
+    d.systems
+        .vehicles
+        .mount_attached_skills
+        .push(super::data::MountAttachedSkills {
+            id: 131,
+            mount_skill_id: CANNON_MOUNT_SKILL,
+            attach_point_id: attach_point::DRIVER,
+            skill_id: GUNNER_STATE_SKILL,
+        });
+    d.systems.npcs.npc.templates.insert(
+        CANNON_TARGET_NPC,
+        NpcTemplate {
+            id: CANNON_TARGET_NPC,
+            name: "Target".into(),
+            level: 1,
+            ..NpcTemplate::default()
+        },
+    );
+    d
+}
+
+#[tokio::test]
+async fn ship_cannon_gunner_seat_skill_and_leaving() {
+    use crate::net::registry::ClientPacket;
+    use crate::systems::skills::handlers::{start_skill, CSStartSkillPacket};
+    use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+
+    let server = server_with(cannon_data());
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let mut a = TestClient::new(&server, 1, 1);
+    let mut b = TestClient::new(&server, 2, 2);
+    let mut c = TestClient::new(&server, 3, 3);
+    let pa = spawn_player(&server, &a, test_character(1, "Owner", 100.0, 100.0), PA);
+    let pb = spawn_player(&server, &b, test_character(2, "Crew", 101.0, 100.0), PB);
+    let pc = spawn_player(
+        &server,
+        &c,
+        test_character(3, "Stranger", 102.0, 100.0),
+        0x00F0_0003,
+    );
+    a.conn.active_char = Some(pa.clone());
+    b.conn.active_char = Some(pb.clone());
+    c.conn.active_char = Some(pc.clone());
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+
+    let hull = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        SHIP_HULL,
+        None,
+        false,
+        None,
+        None,
+    )
+    .expect("hull");
+    let cannon = world
+        .slave(hull.data().attached_slaves[0])
+        .expect("cannon child");
+    let cannon_tl = u32::from(cannon.data().unit.tl_id);
+    assert!(slaves::is_manned_cannon(&server, &cannon));
+    assert!(!slaves::is_manned_cannon(&server, &hull));
+
+    let target = spawn_npc_at(&server, 0x5000, CANNON_TARGET_NPC, 130.0, 130.0);
+    target.data().unit.hp = 1000;
+    target.data().unit.max_hp = 1000;
+    let fire = |client: &mut TestClient, x: f32, y: f32| {
+        start_skill(
+            &server,
+            &mut client.conn,
+            CSStartSkillPacket {
+                skill_id: FIRE_CANNON,
+                caster: SkillCaster::Mount {
+                    obj_id: cannon.obj_id,
+                    mount_skill_template_id: CANNON_MOUNT_SKILL,
+                },
+                target: SkillCastTarget::Position {
+                    obj_id: 0,
+                    x,
+                    y,
+                    z: 100.0,
+                    rot: 0.0,
+                    obj_id1: 0,
+                    obj_id2: 0,
+                },
+                flag: 0,
+                skill_object: SkillObject::None,
+            },
+        );
+    };
+    a.drain();
+    b.drain();
+    c.drain();
+
+    // Not manned yet: not even the ship owner may fire the cannon.
+    fire(&mut a, 130.0, 130.0);
+    assert_eq!(target.data().unit.hp, 1000);
+    a.drain();
+
+    // A stranger off the ship is refused with the bind error and is not seated.
+    slaves::bind_slave_by_tl(&server, &pc, cannon_tl);
+    assert!(error_codes(&c.drain()).contains(&super::error::SLAVE_CANNOT_BIND));
+    assert!(cannon.data().attached_characters.is_empty());
+
+    // The ship owner mans it at the gunner seat, behind the barrel.
+    slaves::bind_slave_by_tl(&server, &pa, cannon_tl);
+    assert!(ops(&a.drain()).contains(&sc::SCUnitAttachedPacket));
+    assert_eq!(
+        cannon.data().attached_characters,
+        vec![(attach_point::DRIVER, PA)]
+    );
+    assert_eq!(pa.data().unit.transform.parent_obj_id, cannon.obj_id);
+    let t = pa.data().unit.transform;
+    assert_eq!((t.x, t.y, t.z), slaves::GUNNER_SEAT_OFFSET);
+
+    // The gunner follows the cannon on the moving ship.
+    let before = world.world_pos_rot(&WorldObject::from(&pa));
+    hull.data().unit.transform.x += 25.0;
+    hull.data().unit.transform.y -= 10.0;
+    let after = world.world_pos_rot(&WorldObject::from(&pa));
+    assert!(
+        (after.x - before.x - 25.0).abs() < 1e-3,
+        "{before:?} {after:?}"
+    );
+    assert!((after.y - before.y + 10.0).abs() < 1e-3);
+
+    // Second gunner: a crew member standing on the ship is refused, one gunner per cannon.
+    world.attach_child(&WorldObject::from(&hull), &WorldObject::from(&pb));
+    slaves::bind_slave_by_tl(&server, &pb, cannon_tl);
+    assert!(error_codes(&b.drain()).contains(&super::error::SLAVE_ALREADY_HAS_MASTER));
+    assert_eq!(cannon.data().attached_characters.len(), 1);
+    // ... and cannot cast its skills either.
+    fire(&mut b, 130.0, 130.0);
+    assert_eq!(target.data().unit.hp, 1000);
+    b.drain();
+
+    // The gunner fires at a ground position: the unit in the area takes the shot.
+    fire(&mut a, 130.0, 130.0);
+    assert_eq!(target.data().unit.hp, 850, "fixed 150 damage");
+    let fa = a.drain();
+    assert!(ops(&fa).contains(&sc::SCSkillFiredPacket));
+    assert!(ops(&fa).contains(&sc::SCUnitPointsPacket));
+    assert!(ops(&b.drain()).contains(&sc::SCSkillFiredPacket));
+    // Out of the 4 m area: no damage.
+    fire(&mut a, 60.0, 60.0);
+    assert_eq!(target.data().unit.hp, 850);
+
+    // Leaving the cannon (CSDiscardSlave) frees the seat for the crew member.
+    let discard = super::packets::CSDiscardSlavePacket {
+        tl_id: cannon_tl as u16,
+    };
+    futures::executor::block_on(discard.handle(&server, &mut a.conn)).unwrap();
+    assert!(cannon.data().attached_characters.is_empty());
+    assert_eq!(pa.data().unit.transform.parent_obj_id, 0);
+    assert!(ops(&a.drain()).contains(&sc::SCUnitDetachedPacket));
+    b.drain();
+    slaves::bind_slave_by_tl(&server, &pb, cannon_tl);
+    assert_eq!(
+        cannon.data().attached_characters,
+        vec![(attach_point::DRIVER, PB)]
+    );
+    assert!(error_codes(&b.drain()).is_empty());
+
+    // The gunner dying leaves the cannon.
+    crate::systems::skills::combat::do_die(
+        &server,
+        &WorldObject::from(&pb),
+        Some(&WorldObject::from(&target)),
+        crate::systems::skills::types::KillReason::Damage,
+    );
+    assert!(cannon.data().attached_characters.is_empty());
+    assert_eq!(pb.data().unit.transform.parent_obj_id, 0);
+
+    // Recalling the ship unbinds a gunner too.
+    slaves::bind_slave_by_tl(&server, &pa, cannon_tl);
+    assert_eq!(cannon.data().attached_characters.len(), 1);
+    slaves::delete(&server, Some(&pa), world.id, hull.obj_id, false);
+    assert_eq!(pa.data().attached_point, attach_point::NONE);
+    assert_eq!(pa.data().unit.transform.parent_obj_id, 0);
+    assert!(!pa.data().is_riding);
+    assert!(cannon.data().attached_characters.is_empty());
+}

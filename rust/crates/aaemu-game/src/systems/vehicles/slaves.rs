@@ -483,6 +483,7 @@ fn remove_equipment_visual_at(
         .retain(|id| !children.contains(id));
     for id in &children {
         if let Some(child) = world.slave(*id) {
+            unbind_riders_of(server, &child, attach_reason::SLAVE_BINDING);
             world.delete(WorldObject::from(&child));
         }
     }
@@ -1139,12 +1140,118 @@ pub fn bind_slave(
         super::ship_physics::set_driver(server, &slave, true);
     }
     world.attach_child(&WorldObject::from(&slave), &me);
-    // TODO (C#): move to attach point's position
+    // TODO (C#): move to attach point's position (done for ship cannons only: their gunner
+    // stands behind the barrel; every other seat keeps the C# origin placement).
+    let (sx, sy, sz) = if is_manned_cannon(server, &slave) {
+        gunner_seat_offset(server, &slave, point)
+    } else {
+        (0.0, 0.0, 0.0)
+    };
     character
         .data()
         .unit
         .transform
-        .set_position(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        .set_position(sx, sy, sz, 0.0, 0.0, 0.0);
+}
+
+/// Gunner seat of a cannon in the cannon's local frame when its model has no seat helper. Cannon
+/// model 117 (every 1.2 cannon slave) is absent from `slave_attach_points*.json`, which only
+/// covers ship / vehicle models, and no cannon-shaped model there declares a driver helper, so
+/// the gunner stands 0.8 m behind the barrel pivot at its base height.
+pub const GUNNER_SEAT_OFFSET: (f32, f32, f32) = (0.0, -0.8, 0.0);
+
+/// The gunner's seat position on a cannon: the model's own `point` helper when the attach point
+/// data has one, else [`GUNNER_SEAT_OFFSET`].
+fn gunner_seat_offset(server: &GameServer, cannon: &SlaveRef, point: u8) -> (f32, f32, f32) {
+    let model_id = cannon.data().unit.model_id;
+    server
+        .systems
+        .vehicles
+        .attach_points_for_slave(server, model_id)
+        .and_then(|points| points.into_iter().find(|(p, _)| *p == point))
+        .map_or(GUNNER_SEAT_OFFSET, |(_, v)| (v.x, v.y, v.z))
+}
+
+/// A cannon (slave kind 8) mounted on another slave: one gunner at the driver seat, the
+/// `mount_attached_skills` seat of its fire skill. A cannon without a bearer keeps the plain
+/// C# bind rules.
+pub fn is_manned_cannon(server: &GameServer, slave: &SlaveRef) -> bool {
+    let (template_id, bearer) = {
+        let d = slave.data();
+        (d.unit.template_id, d.owner_obj_id)
+    };
+    bearer != 0
+        && server
+            .game_data
+            .systems
+            .vehicles
+            .slave_template(template_id)
+            .is_some_and(|t| t.slave_kind == super::data::slave_kind::SLAVE_EQUIPMENT)
+}
+
+/// Who may man a ship cannon: the cannon's summoner, the owner of the ship it is mounted on, or
+/// anybody aboard that ship (standing on it or seated on any of its attach points). The C#
+/// `BindSlave` has no such rule and the 1.2 data carries no seat permissions; this keeps the
+/// guns to the crew.
+pub fn may_man_cannon(character: &PlayerRef, cannon: &SlaveRef, world: &WorldInstance) -> bool {
+    let (bearer_id, summoner, summoner_id) = {
+        let d = cannon.data();
+        (d.owner_obj_id, d.summoner_obj_id, d.summoner_id)
+    };
+    let is_me = |obj: u32, id: u32| {
+        obj == character.obj_id || (character.character_id != 0 && id == character.character_id)
+    };
+    if is_me(summoner, summoner_id) {
+        return true;
+    }
+    let Some(bearer) = world.slave(bearer_id) else {
+        return true; // Orphaned: nobody to ask.
+    };
+    let d = bearer.data();
+    is_me(d.summoner_obj_id, d.summoner_id)
+        || character.data().unit.transform.parent_obj_id == bearer_id
+        || d.attached_characters
+            .iter()
+            .any(|(_, c)| *c == character.obj_id)
+}
+
+/// A gunner who dies leaves the cannon (a driver or passenger of a ship keeps the C# behaviour).
+pub fn on_gunner_death(server: &GameServer, player: &PlayerRef) {
+    let Some(world) = player_world(server, player) else {
+        return;
+    };
+    if let Some((cannon, _)) = get_is_mounted(&world, player.obj_id) {
+        if is_manned_cannon(server, &cannon) {
+            let tl = u32::from(cannon.data().unit.tl_id);
+            unbind_slave(server, player, tl, attach_reason::NONE);
+        }
+    }
+}
+
+/// Unbinds everybody riding the cannons / harpoons mounted on `slave` (their carrier goes away).
+fn unbind_child_riders(server: &GameServer, slave: &SlaveRef, reason: u8) {
+    let Some(world) = world_of(server, &WorldObject::from(slave)) else {
+        return;
+    };
+    let children = slave.data().attached_slaves.clone();
+    for id in children {
+        let Some(child) = world.slave(id) else {
+            continue;
+        };
+        unbind_riders_of(server, &child, reason);
+    }
+}
+
+fn unbind_riders_of(server: &GameServer, slave: &SlaveRef, reason: u8) {
+    let (tl, riders) = {
+        let d = slave.data();
+        (u32::from(d.unit.tl_id), d.attached_characters.clone())
+    };
+    for (_, c) in riders {
+        if let Some(p) = server.world.character_by_obj_id(c) {
+            unbind_slave(server, &p, tl, reason);
+        }
+    }
 }
 
 /// `BindSlave(connection, tlId)` (`CSBindSlavePacket`).
@@ -1157,6 +1264,20 @@ pub fn bind_slave_by_tl(server: &GameServer, character: &PlayerRef, tl_id: u32) 
     };
     if slave.data().unit.is_dead() {
         return;
+    }
+    if is_manned_cannon(server, &slave) {
+        if !may_man_cannon(character, &slave, &world) {
+            error(character, error::SLAVE_CANNOT_BIND);
+            return;
+        }
+        if slave.data().has_attached_at(attach_point::DRIVER) {
+            error(character, error::SLAVE_ALREADY_HAS_MASTER);
+            return;
+        }
+        if get_is_mounted(&world, character.obj_id).is_some() {
+            error(character, error::SLAVE_UNBIND_FIRST);
+            return;
+        }
     }
     bind_slave(
         server,
@@ -1205,6 +1326,7 @@ pub fn delete(
             unbind_slave(server, &p, tl, attach_reason::SLAVE_BINDING);
         }
     }
+    unbind_child_riders(server, &slave, attach_reason::SLAVE_BINDING);
     let (doodad_ids, slave_ids, portal_time, template_id) = {
         let d = slave.data();
         let portal = server
@@ -2838,6 +2960,7 @@ pub fn do_die(
             unbind_slave(server, &p, u32::from(tl), attach_reason::NONE);
         }
     }
+    unbind_child_riders(server, slave, attach_reason::NONE);
     if server
         .game_data
         .systems

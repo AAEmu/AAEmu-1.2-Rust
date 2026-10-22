@@ -261,8 +261,10 @@ pub mod error {
     pub const ITEM_FAILED_REPAIR: i16 = 23;
     pub const NOT_ENOUGH_MONEY: i16 = 26;
     pub const NOT_ENOUGH_ITEM: i16 = 27;
+    pub const SLAVE_CANNOT_BIND: i16 = 96;
     pub const SLAVE_ALREADY_HAS_MASTER: i16 = 97;
     pub const SLAVE_SPAWN_ITEM_LOCKED: i16 = 101;
+    pub const SLAVE_UNBIND_FIRST: i16 = 102;
     pub const ITEM_NOT_FOR_PET: i16 = 204;
     pub const NOT_READY: i16 = 206;
     pub const SLAVE_SPAWN_ERROR_NEED_REPAIR_TIME: i16 = 540;
@@ -375,6 +377,7 @@ pub fn on_death_event(server: &GameServer, victim: &WorldObject) {
     match victim {
         WorldObject::Shipyard(s) => shipyards::on_death(server, s),
         WorldObject::Mate(m) => mates::on_death(server, m),
+        WorldObject::Player(p) => slaves::on_gunner_death(server, p),
         _ => {}
     }
 }
