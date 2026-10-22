@@ -1697,7 +1697,8 @@ fn validated_summon_placement(
         world.id,
         [transform.x, transform.y, transform.z + 0.8],
         0.5,
-        crate::systems::ai::collision::query::mask::SOLID,
+        crate::systems::ai::collision::query::mask::SOLID_TERRAIN
+            & !crate::systems::ai::collision::query::mask::TERRAIN,
     )
     .unwrap_or(false);
     if inside {
