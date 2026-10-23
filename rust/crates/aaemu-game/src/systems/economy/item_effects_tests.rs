@@ -1760,16 +1760,32 @@ async fn mate_equipment_equip_unequip_and_refusal() {
 
 #[test]
 fn slave_and_repair_packets_decode() {
+    use crate::systems::vehicles::packets::{CSChangeSlaveEquipmentPacket, WireItem};
     let mut s = PacketStream::new();
-    s.write_u32(5).write_u16(6).write_u32(7).write_bool(true);
+    s.write_u32(5)
+        .write_u16(6)
+        .write_u32(7)
+        .write_bool(true)
+        .write_u32(0) // no item in slot 1
+        .write_u32(0) // no item in slot 2
+        .write_u8(slot_type::INVENTORY)
+        .write_u8(3)
+        .write_u8(slot_type::EQUIPMENT_SLAVE)
+        .write_u8(4);
     let p = CSChangeSlaveEquipmentPacket::read(&mut s).unwrap();
     assert_eq!(
         p,
         CSChangeSlaveEquipmentPacket {
-            id: 5,
-            tl: 6,
+            character_id: 5,
+            slave_tl: 6,
             db_slave_id: 7,
             bts: true,
+            item1: WireItem::default(),
+            item2: WireItem::default(),
+            slot1_type: slot_type::INVENTORY,
+            slot1: 3,
+            slot2_type: slot_type::EQUIPMENT_SLAVE,
+            slot2: 4,
         }
     );
     let mut s = PacketStream::new();
