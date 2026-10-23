@@ -31,8 +31,8 @@ fn summoned_by(slave: &SlaveRef, player: &PlayerRef, character_id: u32) -> bool 
 }
 
 /// A slave (ship, cannon, cart, ...) answers the skills of its owner and of the characters
-/// attached to it (driver, gunner, passengers); a cannon or a harpoon child also answers the
-/// owner of the slave it is mounted on.
+/// attached to it (driver, gunner, passengers); a harpoon child also answers the owner of the
+/// slave it is mounted on. A ship cannon answers only the character manning it.
 pub(super) fn may_use_slave(
     server: &crate::server::GameServer,
     player: &PlayerRef,
@@ -40,6 +40,15 @@ pub(super) fn may_use_slave(
 ) -> bool {
     let parent = player.data().unit.transform.parent_obj_id;
     let character_id = player.character_id;
+    // A cannon mounted on a ship answers its gunner only: manning it is what grants the shot.
+    if crate::systems::vehicles::slaves::is_manned_cannon(server, slave) {
+        return parent == slave.obj_id
+            || slave
+                .data()
+                .attached_characters
+                .iter()
+                .any(|(_, obj)| *obj == player.obj_id);
+    }
     if parent == slave.obj_id || summoned_by(slave, player, character_id) {
         return true;
     }

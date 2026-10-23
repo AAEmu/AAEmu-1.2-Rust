@@ -40,6 +40,16 @@ pub struct MainWorldPosition {
     pub pos: PositionAndRotation,
 }
 
+/// The client-chosen spot of a `SummonPos` cast (`SkillCastPositionTarget` and friends).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SummonPlacement {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    /// `SkillCastPositionTarget.PosRot`.
+    pub yaw: f32,
+}
+
 /// Outcome of an item action that can cancel the skill and show an error (`skill.Cancelled =
 /// true` + `SendErrorMessage`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,8 +266,17 @@ pub trait NpcSkillHooks: Send + Sync {
         not_ported("SlaveManager.BindSlave");
     }
 
-    /// `SlaveManager.Create(owner, skillItem)` (`SpawnSlave`).
-    fn spawn_slave(&self, _server: &GameServer, _player: &PlayerRef, _skill_item: &SkillCaster) {
+    /// `SlaveManager.Create(owner, skillItem, positionOverride)` (`SpawnSlave`). `placement` is
+    /// the `SummonPos` spot the client chose (`None` for a self-targeted summon item cast);
+    /// `max_range` is the skill template's `MaxRange` (`0` = unbounded).
+    fn spawn_slave(
+        &self,
+        _server: &GameServer,
+        _player: &PlayerRef,
+        _skill_item: &SkillCaster,
+        _placement: Option<SummonPlacement>,
+        _max_range: f32,
+    ) {
         not_ported("SlaveManager.Create");
     }
 

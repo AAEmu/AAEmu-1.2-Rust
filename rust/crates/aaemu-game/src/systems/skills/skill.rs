@@ -346,9 +346,19 @@ fn initial_target(
                 return Some(set_initial_target(server, caster, target_caster));
             }
         }
-        Some(
-            T::Party | T::Raid | T::Line | T::Pet | T::SummonPos | T::SourcePos | T::CursorPos,
-        ) => {}
+        Some(T::SummonPos) => {
+            // 10.x `Skill.GetInitialTarget`: the chosen summon spot is the target, so range,
+            // angle and obstacle checks see the placement instead of the caster.
+            if matches!(
+                target_caster,
+                SkillCastTarget::Position { .. }
+                    | SkillCastTarget::Position2 { .. }
+                    | SkillCastTarget::Position3 { .. }
+            ) {
+                return Some(set_initial_target(server, caster, target_caster));
+            }
+        }
+        Some(T::Party | T::Raid | T::Line | T::Pet | T::SourcePos | T::CursorPos) => {}
         None => {
             tracing::error!(
                 "SkillTargetType not supported {} (NotSupportedException)",
@@ -1707,7 +1717,15 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         let Some(template) = data.effect(kind, id) else {
             continue;
         };
-        let this_target_caster = if target.obj_id() == ctx.target_caster.obj_id() {
+        // Position casts (ground / ballistic / summon placement) have no unit obj id: keep the
+        // original target so effects can read the chosen coordinates and rotation.
+        let this_target_caster = if matches!(
+            ctx.target_caster,
+            SkillCastTarget::Position { .. }
+                | SkillCastTarget::Position2 { .. }
+                | SkillCastTarget::Position3 { .. }
+        ) || target.obj_id() == ctx.target_caster.obj_id()
+        {
             ctx.target_caster
         } else {
             SkillCastTarget::Unit(target.obj_id())

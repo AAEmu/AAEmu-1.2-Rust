@@ -200,6 +200,10 @@ pub(super) fn check(
     if distance < min_range {
         return fail("skill_too_close_range");
     }
+    // A position-targeted skill is cast at a spot on the ground; its template may carry
+    // max_range 0 because the client decides where the placement is legal (10.x
+    // `unboundedPlacement`; summon skill 15802 rejected every boat at 3.4 m without it).
+    let unbounded_placement = matches!(target, Target::Pos(_)) && template.max_range <= 0;
     // Doodads have no model radius and a ship's origin is far from its hull, so these targets
     // get an allowance on top of the skill's range (C# exempted them entirely).
     let extent = target.as_obj().map_or(0.0, |o| {
@@ -211,7 +215,7 @@ pub(super) fn check(
             0.0
         }
     });
-    if distance > max_range + extent {
+    if distance > max_range + extent && !unbounded_placement {
         return fail("skill_too_far_range");
     }
     if template.check_obstacle && !target.as_obj().is_some_and(|o| o.same(caster)) {

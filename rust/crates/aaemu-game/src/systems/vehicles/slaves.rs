@@ -11,14 +11,21 @@ use rand::Rng;
 use sqlx::Row;
 
 use crate::data::world_templates::WorldSpawnPosition;
+use crate::models::container::{slot_type, ContainerRef};
 use crate::models::doodad::doodad_owner_type;
 use crate::models::item::{Item, ItemClass};
+use crate::models::item_task::task_type;
 use crate::models::slave::Slave;
 use crate::models::transform::Transform;
 use crate::models::unit::{BaseUnitType, Bonus};
 use crate::packets::world::SCUnitPointsPacket;
 use crate::packets::world_objects::SCUnitAttachedPacket;
 use crate::server::GameServer;
+use crate::systems::economy::inventory::{self, Inv, ItemTxn};
+use crate::systems::economy::item_effect_packets::{
+    ItemAndLocation, SCSlaveEquipmentChangedPacket,
+};
+use crate::systems::economy::item_packets::SCUnitEquipmentsChangedPacket;
 use crate::systems::npcs::doodad::spawner::SimpleSpawnerDef;
 use crate::systems::npcs::spawn_manager;
 use crate::systems::skills::effects::EffectArgs;
@@ -343,6 +350,666 @@ pub fn character_slave(server: &GameServer, p: &PlayerRef) -> Option<WorldObject
 }
 
 // ---------------------------------------------------------------------------------------------
+// Slave equipment (`CSChangeSlaveEquipmentPacket`)
+// ---------------------------------------------------------------------------------------------
+
+/// `SlotMatches(wireItem, serverItem)`: the snapshot the client sent must describe the slot the
+/// server has, otherwise the move would touch an unrelated item.
+fn equipment_slot_matches(wire: &super::packets::WireItem, actual: Option<&Item>) -> bool {
+    if wire.template_id == 0 {
+        return actual.is_none();
+    }
+    actual.is_some_and(|i| i.template_id == wire.template_id && (wire.id == 0 || i.id == wire.id))
+}
+
+/// Reply to one `CSChangeSlaveEquipment` entry with the pre-move server snapshots (10.x
+/// `SCSlaveEquipmentChangedPacket`; the client applies the copies only when `success` is set).
+fn reply_slave_equipment(
+    character: &PlayerRef,
+    p: &super::packets::CSChangeSlaveEquipmentPacket,
+    on_slave: Option<&Item>,
+    in_bag: Option<&Item>,
+    success: bool,
+) {
+    character.send(SCSlaveEquipmentChangedPacket {
+        item_on_slave: ItemAndLocation {
+            item: on_slave.cloned(),
+            slot_type: p.slot1_type,
+            slot: p.slot1,
+        },
+        item_in_bag: ItemAndLocation {
+            item: in_bag.cloned(),
+            slot_type: p.slot2_type,
+            slot: p.slot2,
+        },
+        slave_tl_id: p.slave_tl,
+        character_id: p.character_id,
+        db_slave_id: p.db_slave_id,
+        bts: p.bts,
+        success,
+    });
+}
+
+/// Copies the persistent equipment container into the slave model mirror (stats and visibility
+/// read the mirror).
+fn mirror_slave_equipment(slave: &SlaveRef, container: &ContainerRef) {
+    let items = container.lock().expect("container poisoned").items.clone();
+    let mut d = slave.data();
+    d.equipment.fill(None);
+    for it in items {
+        let slot = it.slot.max(0) as usize;
+        if let Some(entry) = d.equipment.get_mut(slot) {
+            *entry = Some(it);
+        }
+    }
+}
+
+/// `SlaveGameData.IsBindingAttachPoint`: a static doodad / slave / healing-point binding owns the
+/// attach point, so equipment visuals never touch it. A point a declared equipment slot owns is
+/// driven by the container instead, even when the 1.2 data also lists a static binding there.
+fn is_binding_attach_point(
+    data: &super::data::VehiclesData,
+    template: &SlaveTemplate,
+    point: u8,
+) -> bool {
+    if data
+        .slave_equip_attach_point_set(template.id)
+        .contains(&point)
+    {
+        return false;
+    }
+    template
+        .doodad_bindings
+        .iter()
+        .any(|b| b.attach_point_id == point)
+        || template
+            .slave_bindings
+            .iter()
+            .any(|b| b.attach_point_id == point)
+        || template
+            .healing_point_doodads
+            .iter()
+            .any(|b| b.attach_point_id == point)
+}
+
+/// Removes the equipment-driven visual at one attach point (a child slave / doodad created by
+/// [`spawn_or_replace_equipment_visual`]). Static bindings are never removed.
+fn remove_equipment_visual_at(
+    server: &GameServer,
+    world: &Arc<WorldInstance>,
+    slave: &SlaveRef,
+    point: u8,
+) {
+    let data = &server.game_data.systems.vehicles;
+    if data
+        .slave_template(slave.data().unit.template_id)
+        .is_some_and(|t| is_binding_attach_point(data, t, point))
+    {
+        return;
+    }
+    let mut doodads = Vec::new();
+    let mut children = Vec::new();
+    {
+        let d = slave.data();
+        for id in &d.attached_doodads {
+            if world
+                .doodad(*id)
+                .is_some_and(|dd| dd.data().attach_point == point)
+            {
+                doodads.push(*id);
+            }
+        }
+        for id in &d.attached_slaves {
+            if world
+                .slave(*id)
+                .is_some_and(|s| s.data().attach_point_id as u8 == point)
+            {
+                children.push(*id);
+            }
+        }
+    }
+    slave
+        .data()
+        .attached_doodads
+        .retain(|id| !doodads.contains(id));
+    for id in &doodads {
+        if let Some(doodad) = world.doodad(*id) {
+            spawn_manager::backend::doodad_delete(server, world, &doodad);
+        }
+    }
+    slave
+        .data()
+        .attached_slaves
+        .retain(|id| !children.contains(id));
+    for id in &children {
+        if let Some(child) = world.slave(*id) {
+            unbind_riders_of(server, &child, attach_reason::SLAVE_BINDING);
+            world.delete(WorldObject::from(&child));
+        }
+    }
+}
+
+/// `SlaveManager.SpawnEquipmentDoodad`: the doodad a ship part becomes (sails, masts, lamps, ...).
+fn spawn_equipment_doodad(
+    server: &GameServer,
+    world: &Arc<WorldInstance>,
+    slave: &SlaveRef,
+    point: u8,
+    doodad_id: u32,
+    item: &Item,
+) {
+    let Some(doodad) =
+        crate::systems::npcs::doodad::manager::create(server, world, 0, doodad_id, None, true)
+    else {
+        tracing::warn!(
+            "Slave {}: doodad template {doodad_id} missing for equipment visual",
+            slave.data().unit.template_id
+        );
+        return;
+    };
+    let slave_obj = WorldObject::from(slave);
+    let (owner_obj_id, owner_id, slave_db_id, faction, spawn_time) = {
+        let d = slave.data();
+        (
+            d.summoner_obj_id,
+            d.summoner_id,
+            d.id,
+            d.unit.faction_id,
+            d.spawn_time_ms,
+        )
+    };
+    {
+        let mut d = doodad.data();
+        d.owner_obj_id = owner_obj_id;
+        d.parent_obj_id = slave.obj_id;
+        d.attach_point = point;
+        d.owner_id = owner_id;
+        d.plant_time = spawn_time / 1000;
+        d.owner_type = doodad_owner_type::SLAVE;
+        d.owner_db_id = slave_db_id;
+        d.data = i32::from(point);
+        d.faction_id = faction;
+        d.type2 = 1;
+        d.scale = 1.0;
+        d.transform.instance_id = world.id;
+        d.transform.set_position(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        if item.flags & crate::models::item::ITEM_FLAG_HAS_UCC != 0 && item.ucc_id > 0 {
+            d.ucc_id = item.ucc_id;
+        }
+    }
+    let start = crate::systems::npcs::doodad::phase::get_func_group_id(
+        &server.game_data.systems.npcs.doodad,
+        doodad_id,
+    );
+    crate::systems::npcs::doodad::manager::set_func_group_id(server, &doodad, start);
+    let dobj = WorldObject::from(&doodad);
+    world.attach_child(&slave_obj, &dobj);
+    apply_attach_point_location(server, world, slave, &dobj, point);
+    slave.data().attached_doodads.push(doodad.obj_id);
+    crate::systems::npcs::doodad::manager::init_doodad(server, world, &doodad);
+    crate::systems::npcs::doodad::manager::spawn(server, world, &doodad);
+}
+
+/// `SlaveManager.SpawnEquipmentChildSlave`: the child slave a part becomes (cannons, harpoons).
+fn spawn_equipment_child_slave(
+    server: &GameServer,
+    world: &Arc<WorldInstance>,
+    slave: &SlaveRef,
+    point: u8,
+    child_template_id: u32,
+) {
+    let data = &server.game_data.systems.vehicles;
+    let Some(child_template) = data.slave_template(child_template_id).cloned() else {
+        tracing::warn!(
+            "Slave {}: child template {child_template_id} missing for equipment visual",
+            slave.data().unit.template_id
+        );
+        return;
+    };
+    let Some(child_tl) = server.ids.tl.get_next_id().ok() else {
+        return;
+    };
+    let Some(child_obj_id) = server.ids.object.get_next_id().ok() else {
+        return;
+    };
+    let (summoner_id, summoner_obj_id, summoner_name, faction, slave_db_id) = {
+        let d = slave.data();
+        (
+            d.summoner_id,
+            d.summoner_obj_id,
+            d.summoner_name.clone(),
+            d.unit.faction_id,
+            d.id,
+        )
+    };
+    let mut c = Slave::new(0, child_template.id);
+    c.unit.tl_id = child_tl as u16;
+    c.unit.name = child_template.name.clone();
+    c.unit.level = child_template.level as u8;
+    c.unit.model_id = child_template.model_id;
+    c.unit.faction_id = faction;
+    c.summoner_id = summoner_id;
+    c.summoner_obj_id = summoner_obj_id;
+    c.summoner_name = summoner_name;
+    c.spawn_time_ms = now_ms();
+    c.attach_point_id = point as i8;
+    c.owner_obj_id = slave.obj_id;
+    c.owner_type = BaseUnitType::Slave;
+    c.unit.owner_id = slave_db_id;
+    let child = Entity::new(child_obj_id, c);
+    let child_obj = WorldObject::from(&child);
+    apply_slave_bonuses(server, &child_obj, &child_template);
+    stats::refresh_object_pools(server, &child_obj);
+    {
+        let mut d = child.data();
+        d.unit.hp = d.unit.max_hp;
+        d.unit.mp = d.unit.max_mp;
+        let w = world.world_pos_rot(&WorldObject::from(slave));
+        d.unit.transform.instance_id = world.id;
+        d.unit
+            .transform
+            .set_position(w.x, w.y, w.z, w.rot_x, w.rot_y, w.rot_z);
+    }
+    let slave_obj = WorldObject::from(slave);
+    world.attach_child(&slave_obj, &child_obj);
+    apply_attach_point_location(server, world, slave, &child_obj, point);
+    slave.data().attached_slaves.push(child_obj_id);
+    let changes = world.spawn(&child, &server.view_ctx());
+    crate::world::session::handle_zone_changes(server, changes);
+    let hp = child.data().unit.hp;
+    crate::systems::skills::combat::post_update_current_hp(
+        server,
+        &child_obj,
+        Some(&child_obj),
+        0,
+        hp,
+        KillReason::Unknown,
+    );
+}
+
+/// `SlaveManager.SpawnOrReplaceEquipmentVisual`: at every attach point the equipment slot
+/// occupies, remove the previous visual and spawn the one the item maps to (`None` unequips).
+pub fn spawn_or_replace_equipment_visual(
+    server: &GameServer,
+    world: &Arc<WorldInstance>,
+    slave: &SlaveRef,
+    item: Option<&Item>,
+    equip_slot_id: u8,
+) {
+    let data = &server.game_data.systems.vehicles;
+    let Some(template) = data.slave_template(slave.data().unit.template_id).cloned() else {
+        return;
+    };
+    let points = data.slave_equip_attach_points(template.id, equip_slot_id);
+    if points.is_empty() {
+        tracing::debug!(
+            "No slave_equip_slots entry for slave={} slot={equip_slot_id}",
+            template.id
+        );
+        return;
+    }
+    for point in points {
+        if is_binding_attach_point(data, &template, point) {
+            tracing::debug!(
+                "Skip equip visual at {point} on slave tpl={}: attach point is a static binding",
+                template.id
+            );
+            continue;
+        }
+        remove_equipment_visual_at(server, world, slave, point);
+        let Some(item) = item else {
+            continue;
+        };
+        let Some(visual) = data.item_slave_equipment(item.template_id) else {
+            tracing::warn!(
+                "No item_slave_equipments visual for item={} on slave tpl={} slot={equip_slot_id}",
+                item.template_id,
+                template.id
+            );
+            continue;
+        };
+        if visual.slave_id > 0 {
+            spawn_equipment_child_slave(server, world, slave, point, visual.slave_id);
+        } else if visual.doodad_id > 0 {
+            spawn_equipment_doodad(server, world, slave, point, visual.doodad_id, item);
+        }
+    }
+}
+
+/// `SlaveManager.SpawnEquipmentVisualsFromInventory`: spawn the visual of every equipped part.
+pub fn spawn_equipment_visuals_from_inventory(
+    server: &GameServer,
+    world: &Arc<WorldInstance>,
+    slave: &SlaveRef,
+) {
+    let items: Vec<(u8, Item)> = {
+        let d = slave.data();
+        d.equipment
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, item)| {
+                item.as_ref()
+                    .map(|i| (u8::try_from(slot).unwrap_or(u8::MAX), i.clone()))
+            })
+            .collect()
+    };
+    for (slot, item) in items {
+        spawn_or_replace_equipment_visual(server, world, slave, Some(&item), slot);
+    }
+}
+
+/// `CSChangeSlaveEquipmentPacket` (10.x `CSChangeSlaveEquipmentPacket.Read`, adapted to the 1.2
+/// one-pair body and opcode): equip, unequip or re-slot a ship / vehicle part. The persistent
+/// `EquipmentSlave` container is keyed by `(character id, slave DB id)` so the item rows survive
+/// a despawn and a server restart.
+pub fn change_slave_equipment(
+    server: &GameServer,
+    character: &PlayerRef,
+    p: &super::packets::CSChangeSlaveEquipmentPacket,
+) {
+    tracing::debug!(
+        "ChangeSlaveEquipment, Char: {}, Tl: {}, DbSlaveId: {}, Bts: {}",
+        p.character_id,
+        p.slave_tl,
+        p.db_slave_id,
+        p.bts
+    );
+    if p.character_id != character.character_id {
+        return;
+    }
+    let Some(world) = player_world(server, character) else {
+        return;
+    };
+    let slave = (if p.slave_tl != 0 {
+        get_slave_by_tl_id(&world, u32::from(p.slave_tl))
+    } else {
+        None
+    })
+    .or_else(|| {
+        if p.db_slave_id != 0 {
+            get_slave_by_db_id(&world, p.db_slave_id)
+        } else {
+            None
+        }
+    })
+    .or_else(|| get_active_slave_by_owner_obj_id(&world, character.obj_id));
+    let Some(slave) = slave else {
+        tracing::warn!(
+            "ChangeSlaveEquipment: {} has no slave tl={} db={}",
+            character.data().unit.name,
+            p.slave_tl,
+            p.db_slave_id
+        );
+        reply_slave_equipment(character, p, None, None, false);
+        return;
+    };
+    let (slave_db_id, owned) = {
+        let d = slave.data();
+        (d.id, d.summoner_id == character.character_id)
+    };
+    if p.db_slave_id != 0 && slave_db_id != 0 && slave_db_id != p.db_slave_id {
+        tracing::warn!(
+            "ChangeSlaveEquipment: slave {} does not match requested db id {}",
+            slave.obj_id,
+            p.db_slave_id
+        );
+        reply_slave_equipment(character, p, None, None, false);
+        return;
+    }
+    if !owned {
+        tracing::warn!(
+            "ChangeSlaveEquipment: {} does not own slave tl={} db={}",
+            character.data().unit.name,
+            p.slave_tl,
+            p.db_slave_id
+        );
+        reply_slave_equipment(character, p, None, None, false);
+        return;
+    }
+    if slave_db_id == 0 {
+        reply_slave_equipment(character, p, None, None, false);
+        return;
+    }
+    if p.slot2_type != slot_type::EQUIPMENT_SLAVE
+        || !matches!(
+            p.slot1_type,
+            slot_type::INVENTORY | slot_type::EQUIPMENT_SLAVE
+        )
+    {
+        tracing::warn!(
+            "ChangeSlaveEquipment: unsupported slots {}#{} <-> {}#{}",
+            p.slot1_type,
+            p.slot1,
+            p.slot2_type,
+            p.slot2
+        );
+        reply_slave_equipment(character, p, None, None, false);
+        return;
+    }
+    let equipment = server
+        .items
+        .find_container_for_character(
+            character.character_id,
+            slot_type::EQUIPMENT_SLAVE,
+            slave_db_id,
+        )
+        .unwrap_or_else(|| {
+            server.items.container_for_character(
+                character.character_id,
+                slot_type::EQUIPMENT_SLAVE,
+                slave_db_id,
+                &server.ids.container,
+            )
+        });
+    let bag = Inv::of(character).bag();
+    let size_ok = |c: &ContainerRef, slot: u8| {
+        let size = c.lock().expect("container poisoned").container_size();
+        size <= 0 || i32::from(slot) < size
+    };
+    if !size_ok(&equipment, p.slot2)
+        || (p.slot1_type == slot_type::EQUIPMENT_SLAVE && !size_ok(&equipment, p.slot1))
+        || (p.slot1_type == slot_type::INVENTORY && !size_ok(&bag, p.slot1))
+    {
+        tracing::warn!(
+            "ChangeSlaveEquipment: slot out of range {}#{} <-> {}#{}",
+            p.slot1_type,
+            p.slot1,
+            p.slot2_type,
+            p.slot2
+        );
+        reply_slave_equipment(character, p, None, None, false);
+        return;
+    }
+    let item1 = if p.slot1_type == slot_type::INVENTORY {
+        bag.lock()
+            .expect("container poisoned")
+            .get_item_by_slot(i32::from(p.slot1))
+            .cloned()
+    } else {
+        equipment
+            .lock()
+            .expect("container poisoned")
+            .get_item_by_slot(i32::from(p.slot1))
+            .cloned()
+    };
+    let item2 = equipment
+        .lock()
+        .expect("container poisoned")
+        .get_item_by_slot(i32::from(p.slot2))
+        .cloned();
+    if !equipment_slot_matches(&p.item1, item1.as_ref())
+        || !equipment_slot_matches(&p.item2, item2.as_ref())
+    {
+        tracing::warn!(
+            "ChangeSlaveEquipment: slot contents mismatch, client {}/{} server {}/{} for {}#{} <-> {}#{}",
+            p.item1.template_id,
+            p.item2.template_id,
+            item1.as_ref().map_or(0, |i| i.template_id),
+            item2.as_ref().map_or(0, |i| i.template_id),
+            p.slot1_type,
+            p.slot1,
+            p.slot2_type,
+            p.slot2
+        );
+        reply_slave_equipment(character, p, item1.as_ref(), item2.as_ref(), false);
+        return;
+    }
+    // Ship / vehicle parts only, and only where the hull / slot packs allow them. The 1.2 data
+    // carries the validation that the 10.x server left to the client:
+    // `item_slave_equipments.slave_equip_pack_id` -> `allow_to_equip_slaves` and
+    // `slot_pack_id` -> `allow_to_equip_slots`.
+    let slave_template_id = slave.data().unit.template_id;
+    let data = &server.game_data.systems.vehicles;
+    let allowed = |item: &Item, target_slot: u8| {
+        data.can_equip_item_on_slave(item.template_id, slave_template_id, target_slot)
+    };
+    for (item, target_slot) in [
+        (item1.as_ref(), p.slot2),
+        (
+            (p.slot1_type == slot_type::EQUIPMENT_SLAVE)
+                .then_some(item2.as_ref())
+                .flatten(),
+            p.slot1,
+        ),
+    ] {
+        let Some(item) = item else { continue };
+        if !allowed(item, target_slot) {
+            tracing::warn!(
+                "ChangeSlaveEquipment: item {} (template {}) cannot be equipped on slave tpl={} slot {}",
+                item.id,
+                item.template_id,
+                slave_template_id,
+                target_slot
+            );
+            error(character, super::error::ITEM_NOT_FOR_PET);
+            reply_slave_equipment(character, p, item1.as_ref(), item2.as_ref(), false);
+            return;
+        }
+    }
+    // Source / target: the 1.2 client always puts the slave slot second. If its first slot is
+    // empty the second item moves to it (unequip); both filled swaps them.
+    let move_args = match (&item1, &item2) {
+        (Some(i1), _) => Some((
+            if p.slot1_type == slot_type::INVENTORY {
+                bag.clone()
+            } else {
+                equipment.clone()
+            },
+            equipment.clone(),
+            p.slot1_type,
+            p.slot1,
+            i1.id,
+            slot_type::EQUIPMENT_SLAVE,
+            p.slot2,
+            item2.as_ref().map_or(0, |i| i.id),
+        )),
+        (None, Some(i2)) => Some((
+            equipment.clone(),
+            if p.slot1_type == slot_type::INVENTORY {
+                bag.clone()
+            } else {
+                equipment.clone()
+            },
+            slot_type::EQUIPMENT_SLAVE,
+            p.slot2,
+            i2.id,
+            p.slot1_type,
+            p.slot1,
+            0,
+        )),
+        (None, None) => None,
+    };
+    let Some((src, dst, from_type, from_slot, from_id, to_type, to_slot, to_id)) = move_args else {
+        reply_slave_equipment(character, p, item1.as_ref(), item2.as_ref(), false);
+        return;
+    };
+    let inv = Inv::of(character);
+    let mut txn = ItemTxn::begin(server);
+    let moved = inventory::split_or_move_item_ex(
+        &mut txn,
+        &inv,
+        task_type::INVALID,
+        Some(src),
+        Some(dst),
+        from_id,
+        from_type,
+        from_slot,
+        to_id,
+        to_type,
+        to_slot,
+        0,
+    );
+    crate::systems::economy::fx::flush(server, txn.into_fx());
+    if !moved {
+        reply_slave_equipment(character, p, item1.as_ref(), item2.as_ref(), false);
+        return;
+    }
+    mirror_slave_equipment(&slave, &equipment);
+    let mut touched = Vec::new();
+    for (slot, st) in [(p.slot1, p.slot1_type), (p.slot2, p.slot2_type)] {
+        if st == slot_type::EQUIPMENT_SLAVE && !touched.contains(&slot) {
+            touched.push(slot);
+        }
+    }
+    for slot in touched {
+        let item = equipment
+            .lock()
+            .expect("container poisoned")
+            .get_item_by_slot(i32::from(slot))
+            .cloned();
+        spawn_or_replace_equipment_visual(server, &world, &slave, item.as_ref(), slot);
+    }
+    let slave_obj = WorldObject::from(&slave);
+    crate::systems::skills::stats::update_vehicle_gear_bonuses(
+        server,
+        &slave_obj,
+        item1.as_ref(),
+        item2.as_ref(),
+    );
+    stats::refresh_object_pools(server, &slave_obj);
+    let (hp, mp) = {
+        let mut d = slave.data();
+        d.unit.hp = d.unit.hp.min(d.unit.max_hp);
+        d.unit.mp = d.unit.mp.min(d.unit.max_mp);
+        (d.unit.hp, d.unit.mp)
+    };
+    let mut changed = Vec::new();
+    for (slot, st) in [(p.slot1, p.slot1_type), (p.slot2, p.slot2_type)] {
+        if st != slot_type::EQUIPMENT_SLAVE || changed.iter().any(|(s, _)| *s == slot) {
+            continue;
+        }
+        let item = equipment
+            .lock()
+            .expect("container poisoned")
+            .get_item_by_slot(i32::from(slot))
+            .cloned();
+        changed.push((slot, item));
+    }
+    if !changed.is_empty() {
+        broadcast(
+            server,
+            &slave_obj,
+            &SCUnitEquipmentsChangedPacket {
+                obj_id: slave.obj_id,
+                items: changed,
+            },
+            false,
+        );
+    }
+    broadcast(
+        server,
+        &slave_obj,
+        &SCUnitPointsPacket {
+            obj_id: slave.obj_id,
+            hp,
+            mp,
+        },
+        true,
+    );
+    reply_slave_equipment(character, p, item1.as_ref(), item2.as_ref(), true);
+}
+
+// ---------------------------------------------------------------------------------------------
 // Bind / unbind
 // ---------------------------------------------------------------------------------------------
 
@@ -473,12 +1140,118 @@ pub fn bind_slave(
         super::ship_physics::set_driver(server, &slave, true);
     }
     world.attach_child(&WorldObject::from(&slave), &me);
-    // TODO (C#): move to attach point's position
+    // TODO (C#): move to attach point's position (done for ship cannons only: their gunner
+    // stands behind the barrel; every other seat keeps the C# origin placement).
+    let (sx, sy, sz) = if is_manned_cannon(server, &slave) {
+        gunner_seat_offset(server, &slave, point)
+    } else {
+        (0.0, 0.0, 0.0)
+    };
     character
         .data()
         .unit
         .transform
-        .set_position(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        .set_position(sx, sy, sz, 0.0, 0.0, 0.0);
+}
+
+/// Gunner seat of a cannon in the cannon's local frame when its model has no seat helper. Cannon
+/// model 117 (every 1.2 cannon slave) is absent from `slave_attach_points*.json`, which only
+/// covers ship / vehicle models, and no cannon-shaped model there declares a driver helper, so
+/// the gunner stands 0.8 m behind the barrel pivot at its base height.
+pub const GUNNER_SEAT_OFFSET: (f32, f32, f32) = (0.0, -0.8, 0.0);
+
+/// The gunner's seat position on a cannon: the model's own `point` helper when the attach point
+/// data has one, else [`GUNNER_SEAT_OFFSET`].
+fn gunner_seat_offset(server: &GameServer, cannon: &SlaveRef, point: u8) -> (f32, f32, f32) {
+    let model_id = cannon.data().unit.model_id;
+    server
+        .systems
+        .vehicles
+        .attach_points_for_slave(server, model_id)
+        .and_then(|points| points.into_iter().find(|(p, _)| *p == point))
+        .map_or(GUNNER_SEAT_OFFSET, |(_, v)| (v.x, v.y, v.z))
+}
+
+/// A cannon (slave kind 8) mounted on another slave: one gunner at the driver seat, the
+/// `mount_attached_skills` seat of its fire skill. A cannon without a bearer keeps the plain
+/// C# bind rules.
+pub fn is_manned_cannon(server: &GameServer, slave: &SlaveRef) -> bool {
+    let (template_id, bearer) = {
+        let d = slave.data();
+        (d.unit.template_id, d.owner_obj_id)
+    };
+    bearer != 0
+        && server
+            .game_data
+            .systems
+            .vehicles
+            .slave_template(template_id)
+            .is_some_and(|t| t.slave_kind == super::data::slave_kind::SLAVE_EQUIPMENT)
+}
+
+/// Who may man a ship cannon: the cannon's summoner, the owner of the ship it is mounted on, or
+/// anybody aboard that ship (standing on it or seated on any of its attach points). The C#
+/// `BindSlave` has no such rule and the 1.2 data carries no seat permissions; this keeps the
+/// guns to the crew.
+pub fn may_man_cannon(character: &PlayerRef, cannon: &SlaveRef, world: &WorldInstance) -> bool {
+    let (bearer_id, summoner, summoner_id) = {
+        let d = cannon.data();
+        (d.owner_obj_id, d.summoner_obj_id, d.summoner_id)
+    };
+    let is_me = |obj: u32, id: u32| {
+        obj == character.obj_id || (character.character_id != 0 && id == character.character_id)
+    };
+    if is_me(summoner, summoner_id) {
+        return true;
+    }
+    let Some(bearer) = world.slave(bearer_id) else {
+        return true; // Orphaned: nobody to ask.
+    };
+    let d = bearer.data();
+    is_me(d.summoner_obj_id, d.summoner_id)
+        || character.data().unit.transform.parent_obj_id == bearer_id
+        || d.attached_characters
+            .iter()
+            .any(|(_, c)| *c == character.obj_id)
+}
+
+/// A gunner who dies leaves the cannon (a driver or passenger of a ship keeps the C# behaviour).
+pub fn on_gunner_death(server: &GameServer, player: &PlayerRef) {
+    let Some(world) = player_world(server, player) else {
+        return;
+    };
+    if let Some((cannon, _)) = get_is_mounted(&world, player.obj_id) {
+        if is_manned_cannon(server, &cannon) {
+            let tl = u32::from(cannon.data().unit.tl_id);
+            unbind_slave(server, player, tl, attach_reason::NONE);
+        }
+    }
+}
+
+/// Unbinds everybody riding the cannons / harpoons mounted on `slave` (their carrier goes away).
+fn unbind_child_riders(server: &GameServer, slave: &SlaveRef, reason: u8) {
+    let Some(world) = world_of(server, &WorldObject::from(slave)) else {
+        return;
+    };
+    let children = slave.data().attached_slaves.clone();
+    for id in children {
+        let Some(child) = world.slave(id) else {
+            continue;
+        };
+        unbind_riders_of(server, &child, reason);
+    }
+}
+
+fn unbind_riders_of(server: &GameServer, slave: &SlaveRef, reason: u8) {
+    let (tl, riders) = {
+        let d = slave.data();
+        (u32::from(d.unit.tl_id), d.attached_characters.clone())
+    };
+    for (_, c) in riders {
+        if let Some(p) = server.world.character_by_obj_id(c) {
+            unbind_slave(server, &p, tl, reason);
+        }
+    }
 }
 
 /// `BindSlave(connection, tlId)` (`CSBindSlavePacket`).
@@ -491,6 +1264,20 @@ pub fn bind_slave_by_tl(server: &GameServer, character: &PlayerRef, tl_id: u32) 
     };
     if slave.data().unit.is_dead() {
         return;
+    }
+    if is_manned_cannon(server, &slave) {
+        if !may_man_cannon(character, &slave, &world) {
+            error(character, error::SLAVE_CANNOT_BIND);
+            return;
+        }
+        if slave.data().has_attached_at(attach_point::DRIVER) {
+            error(character, error::SLAVE_ALREADY_HAS_MASTER);
+            return;
+        }
+        if get_is_mounted(&world, character.obj_id).is_some() {
+            error(character, error::SLAVE_UNBIND_FIRST);
+            return;
+        }
     }
     bind_slave(
         server,
@@ -539,6 +1326,7 @@ pub fn delete(
             unbind_slave(server, &p, tl, attach_reason::SLAVE_BINDING);
         }
     }
+    unbind_child_riders(server, &slave, attach_reason::SLAVE_BINDING);
     let (doodad_ids, slave_ids, portal_time, template_id) = {
         let d = slave.data();
         let portal = server
@@ -795,8 +1583,15 @@ pub struct SavedChildSlave {
 }
 
 /// `SlaveManager.Create(owner, skillData)` (the `SpawnSlave` special effect): runs the async
-/// creation on a task.
-pub fn create_from_skill(server: &GameServer, owner: &PlayerRef, caster: &SkillCaster) {
+/// creation on a task. `placement` is the `SummonPos` spot the client chose; it is validated
+/// against the slave's `spawn_valid_area_range` / the skill range before use.
+pub fn create_from_skill(
+    server: &GameServer,
+    owner: &PlayerRef,
+    caster: &SkillCaster,
+    placement: Option<crate::systems::skills::ext::SummonPlacement>,
+    max_range: f32,
+) {
     let SkillCaster::Item {
         item_id,
         item_template_id,
@@ -810,7 +1605,17 @@ pub fn create_from_skill(server: &GameServer, owner: &PlayerRef, caster: &SkillC
     };
     let owner = owner.clone();
     let fut = async move {
-        create_for_owner(&server, &owner, item_id, item_template_id, false, None).await;
+        create_for_owner(
+            &server,
+            &owner,
+            item_id,
+            item_template_id,
+            false,
+            None,
+            placement,
+            max_range,
+        )
+        .await;
     };
     match tokio::runtime::Handle::try_current() {
         Ok(rt) => {
@@ -820,7 +1625,90 @@ pub fn create_from_skill(server: &GameServer, owner: &PlayerRef, caster: &SkillC
     }
 }
 
+/// The client-chosen `SummonPos` turned into a spawn transform, or `None` (with
+/// `SlaveSpawnErrorInvalidArea`) when the spot is too far, on the wrong surface or inside
+/// collision. `None` also means "no placement": the C# in-front placement is used.
+fn validated_summon_placement(
+    server: &GameServer,
+    world: &WorldInstance,
+    owner: &PlayerRef,
+    template: &SlaveTemplate,
+    placement: Option<crate::systems::skills::ext::SummonPlacement>,
+    max_range: f32,
+) -> Option<Transform> {
+    let p = placement?;
+    let invalid = |reason: &str| {
+        tracing::warn!(
+            "SlaveSpawn placement for template {} refused: {reason} at ({:.1},{:.1},{:.1})",
+            template.id,
+            p.x,
+            p.y,
+            p.z
+        );
+        error(owner, error::SLAVE_SPAWN_ERROR_INVALID_AREA);
+        None
+    };
+    let owner_pos = world.world_pos_rot(&WorldObject::from(owner));
+    // `slaves.spawn_valid_area_range` is the data-side limit (50 m in the 1.2 DB); the skill's
+    // own MaxRange is 0 for the boat summon (15802). Use the smaller nonzero limit.
+    let limit = [max_range, template.spawn_valid_area_range as f32]
+        .into_iter()
+        .filter(|v| *v > 0.0)
+        .fold(f32::INFINITY, f32::min);
+    let limit = if limit.is_finite() { limit } else { 50.0 };
+    let dx = p.x - owner_pos.x;
+    let dy = p.y - owner_pos.y;
+    if dx * dx + dy * dy > limit * limit {
+        return invalid("too far from the owner");
+    }
+    let mut transform = Transform {
+        instance_id: world.id,
+        zone_id: owner.data().unit.transform.zone_id,
+        ..Default::default()
+    };
+    transform.set_position(p.x, p.y, p.z, 0.0, 0.0, p.yaw);
+    if template.is_a_boat() {
+        if !super::ship_physics::is_water(server, world, [p.x, p.y, p.z]) {
+            return invalid("a ship must be summoned on water");
+        }
+        transform.set_height(super::ship_physics::water_surface(
+            server,
+            world,
+            [p.x, p.y, p.z],
+        ));
+    } else {
+        if super::ship_physics::is_water(server, world, [p.x, p.y, p.z]) {
+            return invalid("a land vehicle must be summoned on ground");
+        }
+        let ground = crate::systems::ai::collision::ground_height_or(
+            server,
+            world.id,
+            p.x,
+            p.y,
+            p.z,
+            || p.z,
+        );
+        transform.set_height(ground);
+    }
+    // A half-metre sphere just above the surface: the hull/aabb is not needed, this only
+    // rejects a spot inside a rock, cliff or doodad collider.
+    let inside = crate::systems::ai::collision::overlaps_sphere(
+        server,
+        world.id,
+        [transform.x, transform.y, transform.z + 0.8],
+        0.5,
+        crate::systems::ai::collision::query::mask::SOLID_TERRAIN
+            & !crate::systems::ai::collision::query::mask::TERRAIN,
+    )
+    .unwrap_or(false);
+    if inside {
+        return invalid("inside collision");
+    }
+    Some(transform)
+}
+
 /// `Create(owner, skillData, hideSpawnEffect, positionOverride)`.
+#[allow(clippy::too_many_arguments)]
 pub async fn create_for_owner(
     server: &GameServer,
     owner: &PlayerRef,
@@ -828,6 +1716,8 @@ pub async fn create_for_owner(
     item_template_id: u32,
     hide_spawn_effect: bool,
     position_override: Option<Transform>,
+    placement: Option<crate::systems::skills::ext::SummonPlacement>,
+    max_range: f32,
 ) -> Option<SlaveRef> {
     let world = player_world(server, owner)?;
     if let Some(active) = get_active_slave_by_owner_obj_id(&world, owner.obj_id) {
@@ -848,6 +1738,17 @@ pub async fn create_for_owner(
     {
         Some(crate::data::items::TemplateKind::SummonSlave { slave_id }) => *slave_id,
         _ => return None,
+    };
+    let template = server
+        .game_data
+        .systems
+        .vehicles
+        .slave_template(slave_id)?
+        .clone();
+    let position_override = if placement.is_some() {
+        validated_summon_placement(server, &world, owner, &template, placement, max_range)
+    } else {
+        position_override
     };
     create(
         server,
@@ -1389,14 +2290,111 @@ pub(crate) fn create_spawn(
             d.unit.mp = d.unit.max_mp;
         }
     }
-    // Equip it's default items. TODO (C#): Implement vehicle customization
-    if let Some(pack) = data.slave_initial_item_pack(template.slave_initial_item_pack_id) {
+    // Equip its default items. 10.x: player-owned slave parts live in a persistent
+    // `EquipmentSlave` container keyed by the slave DB id (`item_containers.mate_id`), seeded
+    // once per hull; the model mirror drives stats and visibility packets.
+    if owner_id > 0 && db_id > 0 {
+        let existing = server.items.find_container_for_character(
+            owner_id,
+            crate::models::container::slot_type::EQUIPMENT_SLAVE,
+            db_id,
+        );
+        let is_new_equipment = existing.is_none()
+            && !is_loaded
+            && item.as_ref().is_none_or(|i| i.details.slave_db_id == 0);
+        let container = existing.unwrap_or_else(|| {
+            server.items.container_for_character(
+                owner_id,
+                crate::models::container::slot_type::EQUIPMENT_SLAVE,
+                db_id,
+                &server.ids.container,
+            )
+        });
+        if is_new_equipment {
+            if let Some(pack) = data.slave_initial_item_pack(template.slave_initial_item_pack_id) {
+                let now = chrono::Utc::now().timestamp();
+                for initial in pack {
+                    if !data.has_slave_equip_slot(template.id, initial.equip_slot_id) {
+                        continue;
+                    }
+                    let Some(mut it) = server.items.create(
+                        initial.item_id,
+                        1,
+                        0,
+                        server.config.id,
+                        &server.game_data.items,
+                        &server.ids.item,
+                        now,
+                    ) else {
+                        continue;
+                    };
+                    it.slot_type = crate::models::container::slot_type::EQUIPMENT_SLAVE;
+                    it.slot = i32::from(initial.equip_slot_id);
+                    it.owner_id = u64::from(owner_id);
+                    it.dirty = true;
+                    if container
+                        .lock()
+                        .expect("container poisoned")
+                        .add_new_item(
+                            it.clone(),
+                            i32::from(initial.equip_slot_id),
+                            &server.game_data.items,
+                        )
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    let entered = {
+                        let mut d = slave.data();
+                        match d.equipment.get_mut(usize::from(initial.equip_slot_id)) {
+                            Some(slot) => {
+                                *slot = Some(it.clone());
+                                true
+                            }
+                            None => false,
+                        }
+                    };
+                    // EquipmentContainer.OnEnterContainer: the SCUnitEquipmentsChanged broadcast
+                    // reaches nobody (not spawned yet), then ParentUnit.UpdateGearBonuses(...).
+                    if entered {
+                        crate::systems::skills::stats::update_vehicle_gear_bonuses(
+                            server,
+                            &slave_obj,
+                            Some(&it),
+                            None,
+                        );
+                    }
+                }
+            }
+        } else {
+            let items = container.lock().expect("container poisoned").items.clone();
+            let mut d = slave.data();
+            for it in items {
+                let slot = it.slot.max(0) as usize;
+                if let Some(entry) = d.equipment.get_mut(slot) {
+                    *entry = Some(it);
+                }
+            }
+        }
+    } else if let Some(pack) = data.slave_initial_item_pack(template.slave_initial_item_pack_id) {
+        // NPC / spawner slaves have no DB row: keep the 1.2 C# in-memory starter pack.
         let now = chrono::Utc::now().timestamp();
         for initial in pack {
-            let Some(t) = server.game_data.items.template(initial.item_id) else {
+            if !data.has_slave_equip_slot(template.id, initial.equip_slot_id) {
+                continue;
+            }
+            let Some(it) = server.items.create_detached(
+                initial.item_id,
+                1,
+                0,
+                server.config.id,
+                &server.game_data.items,
+                now,
+            ) else {
                 continue;
             };
-            let mut it = Item::create(0, t, 1, 0, server.config.id, &server.game_data.items, now);
+            let mut it = it;
+            it.slot_type = crate::models::container::slot_type::EQUIPMENT_SLAVE;
             it.slot = i32::from(initial.equip_slot_id);
             let entered = {
                 let mut d = slave.data();
@@ -1408,8 +2406,6 @@ pub(crate) fn create_spawn(
                     None => false,
                 }
             };
-            // EquipmentContainer.OnEnterContainer: the SCUnitEquipmentsChanged broadcast reaches
-            // nobody (not spawned yet), then ParentUnit.UpdateGearBonuses(item, null).
             if entered {
                 crate::systems::skills::stats::update_vehicle_gear_bonuses(
                     server,
@@ -1503,8 +2499,14 @@ fn finish_create(
             d.spawn_time_ms,
         )
     };
+    // Attach points a declared equipment slot owns are driven by the equipment container instead
+    // of the static bindings, so unequipping a part can remove its visual.
+    let equipment_points = data.slave_equip_attach_point_set(template.id);
     // Create all remaining doodads that where not previously loaded
     for binding in &template.doodad_bindings {
+        if equipment_points.contains(&binding.attach_point_id) {
+            continue;
+        }
         let loaded_points: Vec<u8> = {
             let ids = slave.data().attached_doodads.clone();
             ids.iter()
@@ -1573,7 +2575,7 @@ fn finish_create(
 
     // Spawn Slave's slaves
     for binding in &template.slave_bindings {
-        if binding.owner_type != "Slave" {
+        if binding.owner_type != "Slave" || equipment_points.contains(&binding.attach_point_id) {
             continue;
         }
         let mut child_db_id = 0u32;
@@ -1655,6 +2657,10 @@ fn finish_create(
             KillReason::Unknown,
         );
     }
+
+    // Equipment-driven visuals (cannons, sails, masts, cargo, figureheads) from the parts the
+    // hull carries.
+    spawn_equipment_visuals_from_inventory(server, world, slave);
 
     // If it's a boat, add it to boat physics
     if template.is_a_boat() {
@@ -1955,6 +2961,7 @@ pub fn do_die(
             unbind_slave(server, &p, u32::from(tl), attach_reason::NONE);
         }
     }
+    unbind_child_riders(server, slave, attach_reason::NONE);
     if server
         .game_data
         .systems

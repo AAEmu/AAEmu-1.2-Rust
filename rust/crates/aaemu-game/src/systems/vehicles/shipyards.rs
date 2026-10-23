@@ -522,6 +522,8 @@ pub async fn shipyard_completed(server: &GameServer, shipyard: &ShipyardRef) {
                 item_template_id,
                 true,
                 Some(pos),
+                None,
+                0.0,
             )
             .await;
         }

@@ -379,7 +379,8 @@ pub fn spawn_pet(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         .spawn_mount(server, p, &args.caster_caster);
 }
 
-/// `SpawnSlave`: `SlaveManager.Create(owner, skillItem)`.
+/// `SpawnSlave`: `SlaveManager.Create(owner, skillItem)`. `SummonPos` casts carry the spot the
+/// player picked; a self-targeted summon item cast has no placement and keeps the C# offset.
 pub fn spawn_slave(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
     log_values(args, "SpawnSlave", v);
     let Some(p) = args.caster.as_ref().and_then(WorldObject::as_player) else {
@@ -394,12 +395,37 @@ pub fn spawn_slave(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         );
         return;
     }
-    server
-        .systems
-        .skills
-        .ext
-        .npcs()
-        .spawn_slave(server, p, &args.caster_caster);
+    let placement = match (&args.target, &args.target_caster) {
+        (Target::Pos(pos), SkillCastTarget::Position { rot, .. }) => {
+            Some(crate::systems::skills::ext::SummonPlacement {
+                x: pos.pos.x,
+                y: pos.pos.y,
+                z: pos.pos.z,
+                yaw: *rot,
+            })
+        }
+        (
+            Target::Pos(pos),
+            SkillCastTarget::Position2 { .. } | SkillCastTarget::Position3 { .. },
+        ) => Some(crate::systems::skills::ext::SummonPlacement {
+            x: pos.pos.x,
+            y: pos.pos.y,
+            z: pos.pos.z,
+            yaw: 0.0,
+        }),
+        _ => None,
+    };
+    let max_range = args
+        .source
+        .skill()
+        .map_or(0.0, |s| s.template.max_range as f32);
+    server.systems.skills.ext.npcs().spawn_slave(
+        server,
+        p,
+        &args.caster_caster,
+        placement,
+        max_range,
+    );
 }
 
 /// `AttachTo`: a character binds the target slave at attach point `value1`.
