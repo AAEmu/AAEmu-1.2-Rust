@@ -349,7 +349,7 @@ fn tower_def_packets_are_byte_exact() {
         current_step: 4,
     };
     let mut e = PacketStream::new();
-    e.write_i32(1)
+    e.write_u8(1)
         .write_u32(12)
         .write_u16(5)
         .write_u32(129)
@@ -363,6 +363,34 @@ fn tower_def_packets_are_byte_exact() {
         body(&SCTowerDefListPacket { infos: vec![info] }),
         e.into_bytes()
     );
+}
+
+#[test]
+fn tower_def_list_count_and_payload_are_bounded_for_the_1_2_client() {
+    for supplied in [0, 100, 101] {
+        let infos = (1..=supplied)
+            .map(|id| TowerDefInfo {
+                key: TowerDefKey {
+                    tower_def_id: id,
+                    zone_group_id: 0,
+                },
+                zone_id: 0,
+                spot_id: 0,
+                target_obj_id: 0,
+                position: (0.0, 0.0, 0.0),
+                current_step: 0,
+            })
+            .collect();
+        let emitted = supplied.min(100);
+        let mut expected = vec![emitted as u8];
+        for id in 1..=emitted {
+            expected.extend_from_slice(&id.to_le_bytes());
+            expected.extend_from_slice(&[0; 37]);
+        }
+        let actual = body(&SCTowerDefListPacket { infos });
+        assert_eq!(actual.len(), 1 + emitted as usize * 41);
+        assert_eq!(actual, expected, "supplied {supplied} tower entries");
+    }
 }
 
 #[test]

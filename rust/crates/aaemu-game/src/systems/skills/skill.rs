@@ -397,7 +397,9 @@ pub fn use_skill(
         }
         return (skill_result::NO_TARGET, 0);
     };
-    if let Err(result) = super::validation::check(server, skill, caster, target) {
+    if let Err(result) = super::validation::check(server, skill, caster, target)
+        .and_then(|()| super::validation::check_build_materials(server, skill, caster, target))
+    {
         return result;
     }
     // The 1.2 fishing reactions require the caster's own spawned NPC. OwnerId is
@@ -777,7 +779,10 @@ pub fn cast(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     }
     // Source, target and resources may change while the cast timer is running.
     let ready = super::validation::check(server, skill, caster, &ctx.target)
-        .and_then(|()| super::validation::check_resources(server, skill, caster));
+        .and_then(|()| super::validation::check_resources(server, skill, caster))
+        .and_then(|()| {
+            super::validation::check_build_materials(server, skill, caster, &ctx.target)
+        });
     if let Err((result, value)) = ready {
         if let Some(player) = caster.as_player() {
             let mut packet = SCSkillStartedPacket::new(
@@ -1622,6 +1627,16 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     let items = server.systems.skills.ext.items();
     let mut consumed_items: Vec<(u64, i32)> = Vec::new();
     let mut consumed_templates: Vec<(u32, i32)> = Vec::new();
+    let paid_building = |target: &Target, effect: &SkillEffect| {
+        player.is_some()
+            && target.as_obj().and_then(WorldObject::as_house).is_some()
+            && effect
+                .template
+                .and_then(|(kind, id)| data.effect(kind, id))
+                .is_some_and(|template| {
+                    crate::systems::housing::is_building_effect(server, template)
+                })
+    };
     if let Some(last) = last_applied {
         // Deviation: C# looked at the last applied effect only. Skills with mixed flags (a
         // consuming GainItem followed by an Interaction effect) never consumed the item, so the
@@ -1647,7 +1662,13 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             }
         }
         if let Some(p) = &player {
-            if let Some(e) = template_effect {
+            if let Some(e) = template_effect.filter(|e| {
+                // House construction pays at the progress commit, including stale/rejected
+                // targets. Never fall back to the optional debit for that same effect.
+                !to_apply.iter().any(|(target, candidate)| {
+                    std::ptr::eq(*candidate, *e) && paid_building(target, candidate)
+                })
+            }) {
                 // source item consumption, or enough of the item in the bag / equipment
                 if e.consume_source_item
                     || items.item_count(server, p, e.consume_item_id) >= e.consume_item_count
@@ -1743,7 +1764,50 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             skill_object: &ctx.skill_object,
         };
         args.source.always_hit = effect.always_hit;
-        if let EffectTemplate::KillNpcWithoutCorpse(k) = template {
+        if paid_building(target, effect) {
+            // This is the actual selected effect and target, rather than the router's
+            // "handled" bool (which says nothing about whether construction succeeded).
+            let p = player.as_ref().expect("paid building has a player");
+            let house = target
+                .as_obj()
+                .and_then(WorldObject::as_house)
+                .expect("paid building has a house");
+            match crate::systems::housing::ops::craft_building_paid(
+                server,
+                p,
+                house,
+                t.id,
+                effect.consume_item_id,
+                effect.consume_item_count,
+            ) {
+                Ok(()) => {
+                    let template_id = house.data().unit.template_id;
+                    crate::systems::quests::events::on_doodad_interaction(
+                        server,
+                        p,
+                        p,
+                        template_id,
+                    );
+                }
+                Err(error) => {
+                    if error == crate::systems::housing::ops::BuildActionError::MissingMaterial {
+                        let mut packet = SCSkillStartedPacket::new(
+                            skill.id,
+                            tl,
+                            ctx.caster_caster,
+                            this_target_caster,
+                            ctx.skill_object.clone(),
+                        );
+                        packet
+                            .set_skill_result(unit_reqs::skill_result_for_key("skill_need_reagent"))
+                            .set_result_uint(0);
+                        p.send(packet);
+                    }
+                    stop(server, skill, caster, 0);
+                    return;
+                }
+            }
+        } else if let EffectTemplate::KillNpcWithoutCorpse(k) = template {
             let npc = world_of(server, caster).and_then(|w| w.npc_by_template_id(k.npc_id));
             let effective = npc
                 .clone()

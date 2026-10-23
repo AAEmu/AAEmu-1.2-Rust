@@ -14,6 +14,7 @@
 
 use crate::data::world_data::Portal;
 use crate::models::item::Item;
+use crate::models::item_task::ItemFxList;
 use crate::models::movement::{GameStanceType, MoveTypeAlertness};
 use crate::models::npc::Npc;
 use crate::models::transform::PositionAndRotation;
@@ -444,6 +445,19 @@ pub trait ItemSkillHooks: Send + Sync {
         _template_id: u32,
         _amount: i32,
     ) {
+    }
+
+    /// Pay for a house build action atomically. Positive payments must fail unless the full
+    /// amount was consumed. Return item notifications for flushing after the housing lock is
+    /// released; implementations must release their economy lock before returning.
+    fn pay_building_material(
+        &self,
+        _server: &GameServer,
+        _player: &PlayerRef,
+        template_id: u32,
+        amount: i32,
+    ) -> Option<ItemFxList> {
+        (template_id == 0 || amount <= 0).then(ItemFxList::default)
     }
 
     /// `Inventory.Bag.AcquireDefaultItem(SkillEffectGainItem, itemId, amount)`.

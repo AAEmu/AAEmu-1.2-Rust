@@ -680,6 +680,28 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 
 ## Known deviations from the C#
 
+* systems::services (beauty salon): `ApplyBeautySalon` creates the requested hair item when
+  the equipment hair slot is empty. The C# guard required an existing hair item, so a paid
+  change could consume a Salon Certificate yet report hair 0. Same-hair requests still keep
+  the item; receipts still report actual equipment. Hair-creation failure still logs and
+  continues with the model update, receipt and certificate consumption, as in C#; failed
+  certificate consumption still logs without undoing the already broadcast appearance.
+
+* systems::services (music): 1.2 CS123 has independent `isTooltip` / `showBuffOnly`
+  bool bytes (native constructor `397acd70`, serializer `397b1480`). The C# packed
+  ushort switch ignored uncached playing `(false,false)` and `(true,true)`. Native
+  `39082550` sends `(isTooltip,false)` on a cache miss and `(false,true)` for cached
+  playing. Requests with `showBuffOnly=false` now load notes and echo `isTooltip`
+  in SC1e0; `showBuffOnly=true` retains the buff-only ScoreMemorized (6010) path,
+  including its lack of a song-existence check. `(true,true)` is representable but
+  is not emitted by the observed native cache flow; it follows the same buff-only
+  branch. Missing-song empty replies and existing read/ownership behavior remain.
+  Request u64 / lookup u32 / response 32-bit widths are unchanged: native SC1e0
+  sign-extends its signed32 note ID at `391e1691` before callback `391e169b`.
+  Arbitrary high request bits still alias the low32 song key; IDs >= 2^31 can
+  differ between zero-extended sheet IDs and sign-extended native cache keys.
+  No evidence establishes a safe ID-width or ownership-policy change here.
+
 * systems::skills / systems::npcs (`Interaction` special effect 10): the former C# class was a
   TODO stub. The 1.2 `special_effects` rows put a `WorldInteractionType` in `value1` (row 11030:
   19 `Use`, 36: 10 `DigTerrain`, 215: 29 `SummonBeanstalk`) and an optional doodad id in
@@ -1429,6 +1451,47 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `InitDoodad`): it was created at this time of day, so its Tod refers to the next occurrence,
   which the time-of-day watcher fires on crossing. The C# has no such suppression (its chain
   recursed). Boards respawned by their own Final, and every other spawn, keep the catch-up.
+
+* systems::npcs (2026-10-22): `DoodadFuncOreMine`, `DoodadFuncRockMine` and `DoodadFuncShear`
+  were log-only stubs in the C#, so their phases never advanced and ore / rock veins and the
+  shearing doodads could not be gathered. The 1.2 compact tables carry no loot, labor or tool
+  columns either (`doodad_func_ore_mines` / `doodad_func_rock_mines`: `id` only;
+  `doodad_func_shears`: `shear_type_id`, `shear_term`), so the Rust funcs now do what the
+  authored phase graph describes, like `DoodadFuncCutdown`: set `ToNextPhase` and let the
+  engine enter the func's `NextPhase` group. That group holds the `DoodadFuncLootItem` rows
+  (e.g. vein 326: 255 OreMine -> 425 three loot rolls -> 426 `Final` / `RatioRespawn`;
+  green ore 1532: 2371 -> 2372 -> `RatioChange` branches) and, for shearing, the regrow
+  `Timer` (56 Shear -> 57 loot + 30 s timer). Loot keeps its C# task type
+  (`RecoverDoodadItem`), so a full bag still sends `BagInvalidItem` and leaves the phase
+  unlocked. Labor is the gathering skill's `consume_lp`, enforced by the skill cast. The
+  tool is data only: the C# server never validated `SkillTemplate.MainhandToolId` (the 1.2
+  mining / shear ids 2654 and 15607 do not even resolve to `items` rows) and neither does
+  Rust, so there is no server-side tool refusal at 1.2 parity.
+  Authorization hardening (2026-10-23): phase progression now requires the current func's
+  authored skill before cast resources/effects and again at phase execution. A gathering
+  caster must be a character: an owned mate/slave cannot advance the phase while
+  bypassing character labor/quest checks, leaving a free loot retry for its owner. The generic
+  `GetFunc` skill-less fallback is still used for automatic loot chaining, but cannot authorize
+  gathering. Legacy `OreMine`/`RockMine`/`Shear` rows have zero/null `func_skill_id`; their
+  intentional server compatibility adapter uses the shipped basic skills 11106 for ore
+  (3 LP), 11107 for rock (0 LP), and 11642 for shearing (0 LP, quest 266 requirement). Skill
+  names, tools and effects support these pairings, but local 1.2 native/UI selection was not
+  verified; this is a defined server deviation, not a claim of native dispatch parity. An
+  explicit row skill takes precedence. The adapter selects a matching legacy function
+  before the generic fallback, including phases exposing multiple gathering types. Free Use
+  skill 15212 cannot mine ore 1534 (phase 2387 -> loot 8077), nor can the zero-labor rock skill
+  replace the ore skill. Skill-driven `Use` and `FakeUse` gathering keeps its binding (shearing
+  13802 on template 518 phase 5649, rock 11107 on template 1354 phase 2244). Gathering dispatch
+  is recognized by compact's tool asset and interaction metadata; authorization is
+  always an exact row/template/implicit skill match, without requiring every gather to cost
+  labor or requiring inventory tools that do not exist in the 1.2 item data.
+  Content limitation: the shipped compact retains rock 310's loot reference to item 4734
+  and sheep 307's references to item 3, but neither item exists in `items`. This skill
+  adapter does not create those production item definitions or replace their loot; normal
+  economy validation still refuses those missing drops with `BagInvalidItem`.
+  The ignored compact regression explicitly supplies in-memory, test-only item templates
+  for 4734 and 3 to exercise the authored rock/sheep dispatch and quantities. Ore 1534 uses
+  real item 8077. Passing the stand-in cases is not proof of complete live/client content.
 
 * systems::ai (2026-10-15): the optional compact patch
   `SQL/patches/compact/2026-10-14-fix-npc-ai-param-syntax.sql` repairs malformed Lua syntax
@@ -2538,6 +2601,58 @@ running in place). Four mirrored C# bugs and one missing safeguard:
 `flow_tests::follow_path_command_set_walks_every_route_point` runs the real command-set shape
 over three routes with an elevated point and checks every point is targeted in order, the set
 finishes and the NPC settles in HoldPosition without further movement.
+
+## Old Memoria Lake Tree spawns for "Low on Lumber" (C# PR #1793, 2026-10-22)
+
+Ported C# `develop` 9549c76b (PR #1793): seven `UnitId` 3848 (`Old Memoria Lake Tree`)
+placements in `app/Data/Worlds/main_world/doodad_spawns.json` at the Old Memoria lake
+(X ~9049-9098, Y ~9060-9121, Z ~192-197), next to the one placement the file already had. They
+make quest "Low on Lumber" (context 2094, level 38) satisfiable: `QuestActObjItemGather` id 890
+gathers item 16035 x 5 with `highlight_doodad_id` 3848. Data only: `DoodadSpawnerDef`
+(`systems/npcs/doodad/spawner.rs`) already reads `UnitId` / `Position`. Regression test
+`spawn_tests::real_data_old_memoria_lake_trees_for_low_on_lumber` loads the shipped file through
+the real `parse_list` and checks the eight placements.
+
+## Construction step materials (2026-10-22)
+
+* The construction step skill of an unfinished house needs the consume item of its effects: the
+  Scarecrow Garden (design 267) step skill 18553 "Construct Garden" ("Spend up to 10 Labor and
+  1 Lumber") keeps its Lumber (item 8337 x1) in `skill_effects.consume_item_id` /
+  `consume_item_count`, not in `skill_reagents`. The C# consumed an effect-level item only when
+  the player had it and never cancelled the cast, so anyone built houses for free (and the
+  Rust port mirrored that). `systems::skills::validation::check_build_materials` now refuses the
+  cast, at the start and again at fire time, with `skill_need_reagent` (result 36, the 1.2
+  "reagent missing" result the cast already sends for `skill_reagents`) when the target is an
+  unfinished house, the skill is the house's current build-step skill and the character lacks
+  the item count. Labor is still checked by `check_resources` as before and nothing is spent on
+  a refusal. Every other skill keeps the soft effect-level consume. Reason: retail refuses the
+  construction without the materials; the step tooltip says it spends 1 Lumber. Regression:
+  `systems::housing::lifecycle_tests::construction_step_needs_its_effect_consume_item_before_cast`.
+  The error text the
+  client shows for result 36 was not re-checked in the client binary.
+* `systems::housing`: the final availability check is early feedback, not the payment boundary.
+  A selected player-to-house Building `CraftEffect` now checks the live house and current step
+  under the housing operation lock, then consumes its full effect-level material through
+  `ItemSkillHooks::pay_building_material` immediately before advancing progress. The economy
+  bridge preflights inventory, equipment and bank under one item transaction; a defensive short
+  debit restores exact container snapshots and discards queued effects. Persistence completes
+  under the economy lock, which is released before progress callbacks; item callbacks flush
+  after the housing lock. Missing payment cancels with result 36, without progress, labor or
+  the success interaction quest event. Rejected/stale house effects never fall back to the
+  legacy optional debit. Other effects retain that optional behavior. Regressions remove the
+  last real item after the final availability snapshot, retry after replenishing, check exact
+  and extra stock in every supported container, and prove non-building NPC damage still applies
+  without its optional item. Zero-step designs already finish during placement; a subsequent
+  construction action is rejected before payment.
+* `systems::economy`: container consumption callbacks now report the actual consumed delta
+  exactly once for full, partial and preferred stacks. The C# `ItemContainer.ConsumeItem`
+  decremented a depleted stack to zero before `RemoveItem` reported its count; the Rust port
+  mirrored that zero-count event (plus a second, correct event for a preferred stack). Removal
+  now accepts the consumed delta internally while direct removals keep their remaining-count
+  semantics. The callback still precedes `EquipLeave`, and wire item tasks are unchanged.
+  Container regressions cover full/preferred/partial/multiple stacks, equipment callback order
+  and direct removal; the housing payment callback test covers both the last unit and a partial
+  stack, with both operation locks released.
 
 ## Slave summon placement and equipment (2026-10-22)
 

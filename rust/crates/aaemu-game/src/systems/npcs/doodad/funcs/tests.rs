@@ -216,6 +216,10 @@ async fn to_next_phase_funcs_and_stubs() {
         assert!(fx.to_next());
     }
     for t in [
+        // Gathering templates cannot advance without an authorized current-phase skill.
+        FuncTemplate::OreMine(DoodadFuncOreMine { id: 1 }),
+        FuncTemplate::RockMine(DoodadFuncRockMine { id: 1 }),
+        FuncTemplate::Shear(DoodadFuncShear::default()),
         FuncTemplate::StoreUi(DoodadFuncStoreUi::default()),
         FuncTemplate::EvidenceItemLoot(DoodadFuncEvidenceItemLoot::default()),
         FuncTemplate::TreeByProductsCollect(DoodadFuncTreeByProductsCollect::default()),

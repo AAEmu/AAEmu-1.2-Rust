@@ -401,6 +401,10 @@ pub fn do_func(
         return true;
     };
 
+    if !super::gathering::allows_func(ctx.server, func, skill_id, caster) {
+        return true;
+    }
+
     // then perform the function (DoodadFunc.Use -> template?.Use)
     if let Some(t) = ctx.data().func_template(func.func_id, &func.func_type) {
         if !crate::systems::instances::mentoring::authorize(ctx, caster, skill_id, t) {

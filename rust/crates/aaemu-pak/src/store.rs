@@ -93,6 +93,19 @@ impl UpdateLock {
     }
 }
 
+#[cfg(unix)]
+impl Drop for UpdateLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        extern "C" {
+            fn flock(fd: i32, operation: i32) -> i32;
+        }
+        // Closing alone leaves the lock held by descriptors inherited during a
+        // concurrent subprocess spawn. LOCK_UN releases it before our file closes.
+        let _ = unsafe { flock(self._file.as_raw_fd(), 8) };
+    }
+}
+
 fn reader_hash(mut reader: impl Read) -> Result<([u8; 32], u64)> {
     let mut sha = Sha256::new();
     let mut bytes = 0;
@@ -671,4 +684,32 @@ fn apply_with_hooks(
     before_publication()?;
     atomic_write(installed, &new_bytes)?;
     Ok(ApplyResult::Applied)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::tests::Fixture;
+
+    #[test]
+    fn writer_lock_drop_releases_with_cloned_descriptor() {
+        let fixture = Fixture::new();
+        let lock = UpdateLock::acquire(&fixture.0).unwrap();
+        // A subprocess inherits the same open file description until exec closes it.
+        let inherited = lock._file.try_clone().unwrap();
+        assert!(matches!(
+            UpdateLock::acquire(&fixture.0),
+            Err(crate::Error::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+
+        drop(lock);
+        let next_lock = UpdateLock::acquire(&fixture.0).unwrap();
+        drop(inherited);
+        assert!(matches!(
+            UpdateLock::acquire(&fixture.0),
+            Err(crate::Error::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+        drop(next_lock);
+        drop(UpdateLock::acquire(&fixture.0).unwrap());
+    }
 }

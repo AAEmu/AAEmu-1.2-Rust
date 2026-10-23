@@ -495,6 +495,9 @@ pub struct NpcData {
     pub grade_holdable_dps: HashMap<i32, (f32, f32)>,
     /// `localized_texts` `npcs.name` in the configured language.
     pub localized_names: HashMap<u32, String>,
+    /// `npc_interactions` (`npc_interaction_set_id` -> `skills.id` in table order): what the client's talk offers
+    /// an NPC that has no function flag (the beauty salon helper offers "Enter the beauty salon").
+    pub interactions: HashMap<i32, Vec<u32>>,
 }
 
 fn dup(what: &str, id: u32) -> crate::data::GameDataError {
@@ -935,6 +938,7 @@ impl NpcData {
         d.load_models(conn)?;
         d.load_weapons(conn)?;
         d.load_localized_names(conn, language)?;
+        d.load_interactions(conn)?;
         Ok(d)
     }
 
@@ -1055,6 +1059,22 @@ impl NpcData {
             );
         }
         Ok(())
+    }
+
+    /// Ordered skills for each `npc_interactions` interaction set.
+    fn load_interactions(&mut self, conn: &Connection) -> rusqlite::Result<()> {
+        for_each_row(
+            conn,
+            "SELECT * FROM npc_interactions ORDER BY id",
+            [],
+            |r| {
+                self.interactions
+                    .entry(r.i32("npc_interaction_set_id")?)
+                    .or_default()
+                    .push(r.u32("skill_id")?);
+                Ok(())
+            },
+        )
     }
 
     /// `localized_texts` rows for `npcs.name` (`LocalizationManager`).
@@ -1235,6 +1255,8 @@ mod tests {
         INSERT INTO item_weapons VALUES (1, 601, 1);
         CREATE TABLE items (id INT, level INT);
         INSERT INTO items VALUES (601, 20);
+        CREATE TABLE npc_interactions (id INT, npc_interaction_set_id INT, skill_id INT);
+        INSERT INTO npc_interactions VALUES (1, 12, 22780), (2, 12, 23469), (3, 13, 999);
         CREATE TABLE localized_texts (id INT, tbl_name TEXT, tbl_column_name TEXT, idx INT,
             en_us TEXT);
         INSERT INTO localized_texts VALUES (1, 'npcs', 'name', 100, 'Guard'),
@@ -1318,6 +1340,8 @@ mod tests {
         assert!(d.is_fly_or_swim(2) && !d.is_fly_or_swim(10) && !d.is_fly_or_swim(3));
         assert_eq!(d.weapons[&601].level, 20);
         assert_eq!(d.localized_name(100, "x"), "Guard");
+        assert_eq!(d.interactions[&12], vec![22780, 23469]);
+        assert_eq!(d.interactions[&13], vec![999]);
         assert_eq!(d.localized_name(101, "x"), "x");
         assert_eq!(d.total_character_customs.len(), 1);
         assert_eq!(d.total_character_custom(5).unwrap().modifier.len(), 128);

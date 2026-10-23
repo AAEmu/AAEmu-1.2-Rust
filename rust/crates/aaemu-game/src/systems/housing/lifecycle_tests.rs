@@ -21,6 +21,11 @@ use crate::opcodes::sc;
 use crate::server::GameServer;
 use crate::systems::economy::bridges::EconomyForHousing;
 use crate::systems::economy::inventory::Inv;
+use crate::systems::skills::data::{EffectKind, EffectTemplate, SkillTemplate};
+use crate::systems::skills::ext::ItemSkillHooks;
+use crate::systems::skills::skill::{self, CastCtx};
+use crate::systems::skills::state::{SkillRef, SkillRun};
+use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject, SkillTargetType};
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
 use crate::world::{Entity, HouseRef, PlayerRef, WorldObject};
 
@@ -28,6 +33,9 @@ const DESIGN: u32 = 300;
 const DESIGN_ITEM: u32 = 9000;
 const CHAIR_ITEM: u32 = 8000;
 const CHAIR_DOODAD: u32 = 5000;
+const LUMBER: u32 = 8337;
+const BUILD_SKILL: u32 = 11000;
+const BUILD_QUEST: u32 = 77;
 
 struct Fixture {
     server: GameServer,
@@ -194,6 +202,488 @@ fn give(f: &Fixture, slot_type: u8, template_id: u32, count: i32, slot: i32) -> 
 
 fn count(f: &Fixture, template_id: u32) -> i32 {
     Inv::of(&f.player).items_count_in(slot_type::INVENTORY, template_id, -1)
+}
+
+fn material_fixture() -> (Fixture, HouseRef) {
+    material_fixture_with_item(ItemTemplate::plain(LUMBER, 100))
+}
+
+fn material_fixture_with_item(material: ItemTemplate) -> (Fixture, HouseRef) {
+    use crate::systems::quests::model::{detail, kind};
+    use crate::systems::quests::templates::{ActKind, QuestComponentTemplate, QuestTemplate};
+
+    let mut data = GameData::empty();
+    data.items.templates.insert(LUMBER, material);
+    data.systems.skills.add_effect(
+        EffectKind::CraftEffect,
+        EffectTemplate::Craft {
+            id: 1,
+            world_interaction: 77,
+        },
+        1,
+    );
+    data.systems
+        .npcs
+        .area_trigger
+        .world_interaction_groups
+        .insert(
+            77,
+            crate::systems::npcs::area_trigger::world_interaction_group::BUILDING,
+        );
+    // A real interaction objective distinguishes a failed payment from the old router's
+    // "handled" result. Two actions are required, so the first success remains observable.
+    let quests = &mut data.systems.quests;
+    quests.add_template(QuestTemplate {
+        id: BUILD_QUEST,
+        detail_id: detail::NORMAL,
+        ..Default::default()
+    });
+    for (id, kind_id) in [(771, kind::START), (772, kind::PROGRESS)] {
+        quests.add_component(QuestComponentTemplate {
+            id,
+            quest_id: BUILD_QUEST,
+            kind_id,
+            ..Default::default()
+        });
+    }
+    quests.add_act(771, 771, 771, 0, ActKind::ConAutoComplete);
+    quests.add_act(
+        772,
+        772,
+        772,
+        2,
+        ActKind::ObjInteraction {
+            wi_id: 77,
+            doodad_id: DESIGN,
+            use_alias: false,
+            team_share: false,
+            highlight_doodad_id: 0,
+            highlight_doodad_phase: -1,
+            alias_id: 0,
+            phase: 0,
+        },
+    );
+    quests.finish();
+    let mut f = fixture_with_data(false, 400_000, None, data);
+    f.server
+        .systems
+        .skills
+        .ext
+        .items
+        .install(Arc::new(crate::systems::economy::bridges::EconomyForSkills));
+    crate::systems::skills::install_hooks(&f.server);
+    f.player.data().labor_power = 50;
+    f.player.data().unit.mp = 100;
+    let design = give(&f, slot_type::INVENTORY, DESIGN_ITEM, 1, 0);
+    ops::build(&f.server, &f.player, 1001, &packet(design));
+    let house = f.server.systems.housing.manager.all()[0].clone();
+    assert_eq!(
+        crate::systems::quests::events::add_quest(&f.server, &f.player, BUILD_QUEST, true),
+        Some(true)
+    );
+    f.server.systems.quests.run_queued_evaluations(&f.server);
+    assert_eq!(
+        f.player
+            .data()
+            .quest_state
+            .active_quest(BUILD_QUEST)
+            .unwrap()
+            .step,
+        kind::PROGRESS
+    );
+    f.client.drain();
+    (f, house)
+}
+
+fn build_skill(id: u32, amount: i32) -> SkillRef {
+    let mut effect = crate::systems::skills::tests::skill_effect(1, EffectKind::CraftEffect, 1);
+    effect.consume_item_id = LUMBER;
+    effect.consume_item_count = amount;
+    SkillRun::new(
+        Arc::new(SkillTemplate {
+            target_type: SkillTargetType::Building as i32,
+            consume_labor_power: 5,
+            effects: vec![effect],
+            ..crate::systems::skills::tests::skill_template(id)
+        }),
+        1,
+    )
+}
+
+fn build_ctx(f: &Fixture, house: &HouseRef) -> CastCtx {
+    CastCtx {
+        caster: WorldObject::from(&f.player),
+        caster_caster: SkillCaster::Unit(f.player.obj_id),
+        target: crate::systems::skills::geometry::Target::Obj(WorldObject::from(house)),
+        target_caster: SkillCastTarget::Unit(house.obj_id),
+        skill_object: SkillObject::None,
+    }
+}
+
+fn fire_build(f: &Fixture, house: &HouseRef, skill: &SkillRef) -> u16 {
+    let timeline = f.server.systems.skills.tl_ids.next_id(0, 0);
+    skill.state().tl_id = timeline;
+    skill.state().initial_target = house.obj_id;
+    skill::cast(&f.server, skill, &build_ctx(f, house));
+    assert_eq!(skill.tl_id(), 0);
+    assert!(!f.server.systems.skills.tl_ids.is_assigned(timeline));
+    timeline
+}
+
+fn interaction_progress(f: &Fixture) -> i32 {
+    f.player
+        .data()
+        .quest_state
+        .active_quest(BUILD_QUEST)
+        .unwrap()
+        .objectives[0]
+}
+
+/// Remove the last real material immediately after taking the final availability snapshot.
+/// `cast`, called directly below, performs exactly that check before applying the effect.
+/// The old optional-consumption path then sees zero and advances the house for free.
+struct RemoveAfterFinalCheck(std::sync::atomic::AtomicBool);
+
+impl ItemSkillHooks for RemoveAfterFinalCheck {
+    fn item_count(&self, server: &GameServer, player: &PlayerRef, id: u32) -> i32 {
+        use crate::systems::economy::{
+            bridges::EconomyForSkills,
+            inventory::{self, ItemTxn},
+        };
+        let snapshot = EconomyForSkills.item_count(server, player, id);
+        if self.0.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            assert_eq!(id, LUMBER);
+            assert_eq!(snapshot, 1);
+            let mut txn = ItemTxn::begin(server);
+            assert_eq!(
+                inventory::consume_item(
+                    &mut txn,
+                    &Inv::of(player),
+                    None,
+                    crate::models::item_task::task_type::DESTROY,
+                    id,
+                    1,
+                    None
+                ),
+                1
+            );
+        }
+        snapshot
+    }
+
+    fn pay_building_material(
+        &self,
+        server: &GameServer,
+        player: &PlayerRef,
+        id: u32,
+        amount: i32,
+    ) -> Option<crate::models::item_task::ItemFxList> {
+        crate::systems::economy::bridges::EconomyForSkills
+            .pay_building_material(server, player, id, amount)
+    }
+
+    fn consume_item_template(&self, server: &GameServer, player: &PlayerRef, id: u32, amount: i32) {
+        crate::systems::economy::bridges::EconomyForSkills
+            .consume_item_template(server, player, id, amount);
+    }
+}
+
+#[tokio::test]
+async fn construction_material_removed_after_final_check_cancels_without_progress_and_can_retry() {
+    let (mut f, house) = material_fixture();
+    give(&f, slot_type::INVENTORY, LUMBER, 1, 0);
+    let remover = Arc::new(RemoveAfterFinalCheck(std::sync::atomic::AtomicBool::new(
+        true,
+    )));
+    f.server.systems.skills.ext.items.install(remover.clone());
+    let skill = build_skill(BUILD_SKILL, 1);
+    let timeline = fire_build(&f, &house, &skill);
+    assert!(!remover.0.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(count(&f, LUMBER), 0);
+    assert!(skill.cancelled());
+    assert_eq!(house.data().current_action(), 0);
+    assert_eq!(f.player.data().labor_power, 50);
+    assert_eq!(interaction_progress(&f), 0);
+    let frames = f.client.drain();
+    assert!(!frames
+        .iter()
+        .any(|(op, _)| *op == sc::SCHouseBuildProgressPacket));
+    let mut expected = crate::systems::skills::packets::SCSkillStartedPacket::new(
+        BUILD_SKILL,
+        timeline,
+        SkillCaster::Unit(f.player.obj_id),
+        SkillCastTarget::Unit(house.obj_id),
+        SkillObject::None,
+    );
+    expected.set_skill_result(36);
+    let mut body = aaemu_commons::PacketStream::new();
+    aaemu_commons::Marshal::write(&expected, &mut body);
+    assert!(frames.contains(&(sc::SCSkillStartedPacket, body.into_bytes())));
+    assert!(frames
+        .iter()
+        .any(|(op, _)| *op == sc::SCCastingStoppedPacket));
+
+    // A failed payment leaves neither a progress reservation nor a stale cancellation.
+    give(&f, slot_type::INVENTORY, LUMBER, 1, 0);
+    let retry = build_skill(BUILD_SKILL, 1);
+    fire_build(&f, &house, &retry);
+    assert!(!retry.cancelled());
+    assert_eq!(house.data().current_action(), 1);
+    assert_eq!(count(&f, LUMBER), 0);
+    assert_eq!(f.player.data().labor_power, 45);
+    assert_eq!(interaction_progress(&f), 1);
+}
+
+#[tokio::test]
+async fn construction_material_exact_and_extra_stock_pay_once_for_one_action() {
+    for stock in [1, 2] {
+        for container in [slot_type::INVENTORY, slot_type::EQUIPMENT, slot_type::BANK] {
+            let (f, house) = if container == slot_type::EQUIPMENT {
+                // An equippable synthetic material exercises the same container contract
+                // without putting an invalid Lumber stack into a player's equipment.
+                let mut material = ItemTemplate::plain(LUMBER, 1);
+                material.kind = crate::data::items::TemplateKind::Accessory(
+                    crate::data::items::EquipTemplate {
+                        slot_type_id: 10, // ear slots 9 and 10
+                        ..Default::default()
+                    },
+                );
+                let f = material_fixture_with_item(material);
+                for n in 0..stock {
+                    give(&f.0, container, LUMBER, 1, 9 + n);
+                }
+                f
+            } else {
+                let f = material_fixture();
+                give(&f.0, container, LUMBER, stock, 0);
+                f
+            };
+            let skill = build_skill(BUILD_SKILL, 1);
+            fire_build(&f, &house, &skill);
+            assert!(!skill.cancelled());
+            assert_eq!(house.data().current_action(), 1);
+            assert_eq!(Inv::of(&f.player).items_count(LUMBER, -1), stock - 1);
+            assert_eq!(f.player.data().labor_power, 45);
+            assert_eq!(interaction_progress(&f), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn construction_step_needs_its_effect_consume_item_before_cast() {
+    let (f, house) = material_fixture();
+    let skill = build_skill(BUILD_SKILL, 1);
+    let ctx = build_ctx(&f, &house);
+    let mut target_caster = ctx.target_caster;
+    assert_eq!(
+        skill::use_skill(
+            &f.server,
+            &skill,
+            &ctx.caster,
+            ctx.caster_caster,
+            &mut target_caster,
+            Some(SkillObject::None),
+            false
+        ),
+        (36, 0)
+    );
+    assert_eq!(house.data().current_action(), 0);
+    assert_eq!(f.player.data().labor_power, 50);
+    assert_eq!(interaction_progress(&f), 0);
+}
+
+#[tokio::test]
+async fn construction_material_rejection_preserves_stock_labor_and_quest_progress() {
+    for rejection in [
+        "wrong skill",
+        "completed",
+        "missing step",
+        "stale",
+        "abandoned",
+        "wrong instance",
+        "unknown template",
+    ] {
+        let (mut f, house) = material_fixture();
+        let material = give(&f, slot_type::INVENTORY, LUMBER, 2, 0);
+        let id = match rejection {
+            "wrong skill" => BUILD_SKILL + 1,
+            "completed" => {
+                manager::set_current_step(&f.server, &house, -1, false);
+                BUILD_SKILL
+            }
+            "missing step" => {
+                house.data().current_step = 1;
+                BUILD_SKILL
+            }
+            "stale" => {
+                f.server.world.world(0).unwrap().remove_object(house.obj_id);
+                BUILD_SKILL
+            }
+            "abandoned" => {
+                house.data().unit.owner_id = 0;
+                BUILD_SKILL
+            }
+            "wrong instance" => {
+                house.data().unit.transform.instance_id = 99;
+                BUILD_SKILL
+            }
+            "unknown template" => {
+                house.data().unit.template_id = u32::MAX;
+                BUILD_SKILL
+            }
+            _ => unreachable!(),
+        };
+        let snapshot = || {
+            let h = house.data();
+            (h.current_step, h.current_action())
+        };
+        let before = snapshot();
+        f.client.drain();
+        let skill = build_skill(id, 1);
+        fire_build(&f, &house, &skill);
+        assert!(skill.cancelled(), "{rejection}");
+        assert_eq!(count(&f, LUMBER), 2, "{rejection}");
+        assert_eq!(Inv::of(&f.player).item_by_id(material).unwrap().count, 2);
+        assert_eq!(snapshot(), before, "{rejection}");
+        assert_eq!(f.player.data().labor_power, 50, "{rejection}");
+        assert_eq!(interaction_progress(&f), 0, "{rejection}");
+        assert!(
+            !f.client
+                .drain_ops()
+                .contains(&sc::SCHouseBuildProgressPacket),
+            "{rejection}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn construction_material_preflight_rejects_partial_payment_without_mutating_items() {
+    let (f, house) = material_fixture();
+    let bag_item = give(&f, slot_type::INVENTORY, LUMBER, 1, 2);
+    let bank_item = give(&f, slot_type::BANK, LUMBER, 1, 4);
+    let inv = Inv::of(&f.player);
+    let bag_before = inv.item_by_id(bag_item).unwrap();
+    let bank_before = inv.item_by_id(bank_item).unwrap();
+    // Exercise the checked production hook after validation; neither stack can cover the
+    // complete payment, so it must not debit the first stack and then fail on the second.
+    assert_eq!(
+        ops::craft_building_paid(&f.server, &f.player, &house, BUILD_SKILL, LUMBER, 3),
+        Err(ops::BuildActionError::MissingMaterial)
+    );
+    assert_eq!(inv.item_by_id(bag_item), Some(bag_before));
+    assert_eq!(inv.item_by_id(bank_item), Some(bank_before));
+    assert_eq!(house.data().current_action(), 0);
+}
+
+#[tokio::test]
+async fn construction_material_callbacks_run_after_housing_and_economy_unlock() {
+    struct Observe {
+        remaining: i32,
+        progress: std::sync::Mutex<Vec<i32>>,
+    }
+    impl crate::systems::economy::hooks::QuestItemHooks for Observe {
+        fn on_items_consumed(&self, server: &GameServer, player: &PlayerRef, id: u32, amount: i32) {
+            assert_eq!((id, amount), (LUMBER, 1));
+            let _housing = server
+                .systems
+                .housing
+                .operation_lock
+                .try_lock()
+                .expect("housing lock released before item callbacks");
+            assert!(!crate::systems::economy::System::ops_held_on_this_thread());
+            let _txn = crate::systems::economy::inventory::ItemTxn::begin(server);
+            assert_eq!(Inv::of(player).items_count(LUMBER, -1), self.remaining);
+            let house = server.systems.housing.manager.all()[0].clone();
+            self.progress
+                .lock()
+                .unwrap()
+                .push(house.data().current_action());
+        }
+    }
+    for stock in [1, 3] {
+        let (f, house) = material_fixture();
+        let observer = Arc::new(Observe {
+            remaining: stock - 1,
+            progress: std::sync::Mutex::new(Vec::new()),
+        });
+        f.server
+            .systems
+            .economy
+            .hooks
+            .quests
+            .install(observer.clone());
+        give(&f, slot_type::INVENTORY, LUMBER, stock, 0);
+        fire_build(&f, &house, &build_skill(BUILD_SKILL, 1));
+        assert_eq!(*observer.progress.lock().unwrap(), vec![1]);
+    }
+}
+
+#[tokio::test]
+async fn construction_material_default_hook_rejects_positive_payment() {
+    struct NoPayment;
+    impl ItemSkillHooks for NoPayment {}
+    let (f, house) = material_fixture();
+    give(&f, slot_type::INVENTORY, LUMBER, 1, 0);
+    f.server
+        .systems
+        .skills
+        .ext
+        .items
+        .install(Arc::new(NoPayment));
+    assert_eq!(
+        ops::craft_building_paid(&f.server, &f.player, &house, BUILD_SKILL, LUMBER, 1),
+        Err(ops::BuildActionError::MissingMaterial)
+    );
+    assert_eq!(house.data().current_action(), 0);
+    assert_eq!(count(&f, LUMBER), 1);
+}
+
+#[tokio::test]
+async fn construction_zero_step_design_is_finished_at_placement_without_a_build_action() {
+    const FREE_DESIGN: u32 = 301;
+    const FREE_DESIGN_ITEM: u32 = 9001;
+    let mut data = GameData::empty();
+    data.systems.housing.add_template(HousingTemplate {
+        id: FREE_DESIGN,
+        hp: 1000,
+        main_model_id: 701,
+        garden_radius: 8.0,
+        taxation: Some(Taxation {
+            id: 1,
+            tax: 100_001,
+            show: true,
+        }),
+        ..Default::default()
+    });
+    data.systems.housing.add_item_housing(HousingItemHousings {
+        id: 2,
+        item_id: FREE_DESIGN_ITEM,
+        design_id: FREE_DESIGN,
+    });
+    data.items
+        .templates
+        .insert(FREE_DESIGN_ITEM, ItemTemplate::plain(FREE_DESIGN_ITEM, 1));
+    let f = fixture_with_data(false, 400_000, None, data);
+    let design = give(&f, slot_type::INVENTORY, FREE_DESIGN_ITEM, 1, 0);
+    let mut packet = packet(design);
+    packet.design_id = FREE_DESIGN;
+    ops::build(&f.server, &f.player, 1001, &packet);
+    let house = f.server.systems.housing.manager.all()[0].clone();
+    assert_eq!(house.data().current_step, -1);
+    assert_eq!(house.data().unit.model_id, 701);
+    assert_eq!(house.data().all_action, 0);
+    // Both wrappers reject an action on the already completed zero-step house. Placement
+    // handles its completion, so the former step=None fallthrough is not a valid free action.
+    assert!(!ops::craft_building(
+        &f.server,
+        &f.player,
+        &house,
+        BUILD_SKILL
+    ));
+    assert_eq!(
+        ops::craft_building_paid(&f.server, &f.player, &house, BUILD_SKILL, LUMBER, 1),
+        Err(ops::BuildActionError::Rejected)
+    );
 }
 
 fn packet(item_id: u64) -> CSCreateHousePacket {

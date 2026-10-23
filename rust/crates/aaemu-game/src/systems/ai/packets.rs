@@ -20,9 +20,10 @@ packet_def!(
 );
 impl Marshal for SCPlaySoundPacket {
     fn write(&self, s: &mut PacketStream) {
+        // The 1.2 client's reader (x2game 397bea30) takes the NPC of a kind-2 cue as a 3-byte bc.
         s.write_u8(self.kind)
             .write_u32(self.bubble_id)
-            .write_u32(self.npc_obj_id);
+            .write_bc(self.npc_obj_id);
     }
 }
 
@@ -37,6 +38,6 @@ mod tests {
             bubble_id: 0x0102_0304,
             npc_obj_id: 0x00AB_CDEF,
         });
-        assert_eq!(body, vec![2, 4, 3, 2, 1, 0xEF, 0xCD, 0xAB, 0x00]);
+        assert_eq!(body, vec![2, 4, 3, 2, 1, 0xEF, 0xCD, 0xAB]);
     }
 }

@@ -957,6 +957,51 @@ impl ItemSkillHooks for EconomyForSkills {
         );
     }
 
+    fn pay_building_material(
+        &self,
+        server: &GameServer,
+        player: &PlayerRef,
+        template_id: u32,
+        amount: i32,
+    ) -> Option<ItemFxList> {
+        if template_id == 0 || amount <= 0 {
+            return Some(ItemFxList::default());
+        }
+        let mut txn = ItemTxn::begin(server);
+        let inv = Inv::of(player);
+        // Match both the availability check and Inventory.ConsumeItem's container set.
+        if inv.items_count(template_id, -1) < amount {
+            return None;
+        }
+        let snapshots: Vec<_> = [slot_type::INVENTORY, slot_type::EQUIPMENT, slot_type::BANK]
+            .into_iter()
+            .filter_map(|st| inv.get(st))
+            .map(|container| {
+                let snapshot = lock(&container).clone();
+                (container, snapshot)
+            })
+            .collect();
+        let consumed = inventory::consume_item(
+            &mut txn,
+            &inv,
+            None,
+            task_type::SKILL_EFFECT_CONSUMPTION,
+            template_id,
+            amount,
+            None,
+        );
+        if consumed != amount {
+            // ItemTxn drops by COMMITTING its effects. Restore the exact items (ids, slots,
+            // flags and container state) and discard every queued effect before it drops.
+            for (container, snapshot) in snapshots {
+                *lock(&container) = snapshot;
+            }
+            txn.env.take_fx();
+            return None;
+        }
+        Some(txn.into_fx())
+    }
+
     fn item_set(&self, server: &GameServer, item_set_id: u32) -> Vec<(u32, i32)> {
         server
             .game_data

@@ -91,6 +91,47 @@ pub(super) fn check_resources(
     Ok(())
 }
 
+/// Parity deviation (`PORTING.md`): the construction step of an unfinished house needs the
+/// consume item of its step skill's effects (e.g. 1 Lumber for the Scarecrow Garden). The C#
+/// consumed an effect-level item only when present and built for free otherwise; retail refuses
+/// the cast with the reagent error. Every other skill keeps the soft behaviour.
+pub(super) fn check_build_materials(
+    server: &GameServer,
+    skill: &SkillRun,
+    caster: &WorldObject,
+    target: &Target,
+) -> Result<(), (u8, u32)> {
+    let Some(player) = caster.as_player() else {
+        return Ok(());
+    };
+    let Some(house) = target.as_obj().and_then(WorldObject::as_house) else {
+        return Ok(());
+    };
+    let (finished, step) = {
+        let h = house.data();
+        (h.current_step < 0, h.current_step)
+    };
+    if finished {
+        return Ok(());
+    }
+    let Some(template) = crate::systems::housing::manager::template_of(server, house) else {
+        return Ok(());
+    };
+    if template.build_steps.get(&step).map(|s| s.skill_id) != Some(skill.id) {
+        return Ok(());
+    }
+    let items = server.systems.skills.ext.items();
+    let missing = skill.template.effects.iter().any(|e| {
+        e.consume_item_id != 0
+            && e.consume_item_count > 0
+            && items.item_count(server, player, e.consume_item_id) < e.consume_item_count
+    });
+    if missing {
+        return fail("skill_need_reagent");
+    }
+    Ok(())
+}
+
 pub(super) fn check(
     server: &GameServer,
     skill: &SkillRun,
@@ -98,6 +139,12 @@ pub(super) fn check(
     target: &Target,
 ) -> Result<(), (u8, u32)> {
     let template = &skill.template;
+    if let Some(doodad) = target.as_obj().and_then(WorldObject::as_doodad) {
+        if !crate::systems::npcs::doodad::gathering::allows_skill(server, doodad, template, caster)
+        {
+            return fail("skill_invalid_target");
+        }
+    }
     let (hp, buff_ids, moving) = caster
         .with_unit(|u| {
             let unit = u.unit();
