@@ -1,9 +1,10 @@
 //! Game server -> login server packets (`AAEmu.Login.Core.Packets.G2L`).
 //!
-//! Decoding uses the lenient C# `PacketStream` semantics. Each packet can also be encoded
+//! Decoding uses the lenient C# `PacketStream` semantics, except collection counts and
+//! character entries must fit the packet. Each packet can also be encoded
 //! (via [`OutgoingPacket`]) so a Rust game server can reuse these definitions.
 
-use aaemu_commons::{Marshal, PacketStream};
+use aaemu_commons::{Marshal, MarshalError, PacketStream};
 
 use super::{OutgoingPacket, PacketError};
 use crate::lenient::LenientRead;
@@ -31,12 +32,18 @@ impl GlRegisterGameServer {
     pub fn read(s: &mut PacketStream) -> Result<Self, PacketError> {
         let secret_key = s.l_string();
         let gs_id = GameServerId(s.l_u8());
-        let count = s.l_i32();
+        let count = s.read_i32()?;
         if count < 0 {
             // C#: `new List<GameServerId>(negative)` throws.
             return Err(PacketError::NegativeCount(count));
         }
-        let mirrors = (0..count).map(|_| GameServerId(s.l_u8())).collect();
+        // A strict byte read validates the count before allocating or iterating. Lenient
+        // reads would append defaults (and log) up to i32::MAX after EOF, before auth.
+        let mirrors = s
+            .read_bytes(count as usize)?
+            .into_iter()
+            .map(GameServerId)
+            .collect();
         Ok(Self {
             secret_key,
             gs_id,
@@ -131,19 +138,30 @@ impl GlRequestInfo {
     pub fn read(s: &mut PacketStream) -> Result<Self, PacketError> {
         let connection_id = ConnectionId(s.l_u32());
         let request_id = s.l_u32();
-        let count = s.l_i32();
+        let count = s.read_i32()?;
         if count < 0 {
             return Err(PacketError::NegativeCount(count));
         }
+        // Each entry needs two u32s, an i16 string length and two u8s, even for an empty
+        // name. Bound the count before the loop, then require each variable-length entry
+        // to consume its actual bytes rather than accepting partial/default characters.
+        const MIN_CHARACTER_BYTES: usize = 12;
+        if count as usize > s.remaining() / MIN_CHARACTER_BYTES {
+            return Err(MarshalError::Invalid(format!(
+                "GLRequestInfo character count {count} exceeds packet data"
+            ))
+            .into());
+        }
         let mut characters = Vec::new();
         for _ in 0..count {
-            // Deviation: the C# ReadCollection keeps appending default entries once the stream
-            // is exhausted (up to `count`, which may be ~2^31). Stop instead.
-            if s.remaining() == 0 {
-                tracing::error!("GLRequestInfo: character count {count} exceeds packet data");
-                break;
-            }
-            characters.push(LoginCharacterInfo::read_lenient(s));
+            characters.push(LoginCharacterInfo {
+                id: s.read_u32()?,
+                account_id: s.read_u32()?,
+                gs_id: 0,
+                name: s.read_string()?,
+                race: s.read_u8()?,
+                gender: s.read_u8()?,
+            });
         }
         Ok(Self {
             connection_id,
@@ -265,6 +283,139 @@ mod tests {
                 r.encode_payload().unwrap(),
                 hex_bytes("000004007465737401020000000203")
             );
+        }
+    }
+
+    #[test]
+    fn register_rejects_mirror_count_exceeding_remaining_bytes() {
+        // Count 2, but only one mirror byte. Do not reproduce the huge allocation.
+        let (op, mut s) = split_opcode(hex_bytes("0000040074657374010200000002")).unwrap();
+        assert!(G2lPacket::decode(op, &mut s).is_err());
+    }
+
+    #[test]
+    fn register_mirror_count_boundaries() {
+        for (count, bytes, expected) in [
+            (0, vec![], Some(vec![])),
+            (2, vec![2, 3], Some(vec![GameServerId(2), GameServerId(3)])),
+            (-1, vec![], None),
+            (i32::MAX, vec![2], None),
+        ] {
+            let mut body = PacketStream::new();
+            body.write_str("test")
+                .write_u8(1)
+                .write_i32(count)
+                .write_raw(&bytes);
+            let mut body = PacketStream::from_bytes(body.into_bytes());
+            let result = GlRegisterGameServer::read(&mut body);
+            match expected {
+                Some(mirrors) => {
+                    let result = result.unwrap();
+                    assert_eq!(result.secret_key, "test");
+                    assert_eq!(result.gs_id, GameServerId(1));
+                    assert_eq!(result.mirrors, mirrors);
+                    assert_eq!(body.remaining(), 0);
+                }
+                None if count < 0 => assert!(matches!(result, Err(PacketError::NegativeCount(-1)))),
+                None => assert!(matches!(
+                    result,
+                    Err(PacketError::Marshal(MarshalError::EndOfStream { .. }))
+                )),
+            }
+        }
+    }
+
+    #[test]
+    fn register_rejects_missing_or_partial_count() {
+        for bytes in [vec![], vec![2], vec![2, 0, 0]] {
+            let mut body = PacketStream::new();
+            body.write_str("test").write_u8(1).write_raw(&bytes);
+            let mut body = PacketStream::from_bytes(body.into_bytes());
+            assert!(GlRegisterGameServer::read(&mut body).is_err());
+        }
+    }
+
+    #[test]
+    fn register_preserves_lenient_secret_and_trailing_bytes() {
+        // A negative string length remains an empty secret; unrelated trailing bytes remain unread.
+        let mut body = PacketStream::from_bytes(hex_bytes("ffff0100000000aa"));
+        let packet = GlRegisterGameServer::read(&mut body).unwrap();
+        assert_eq!(packet.secret_key, "");
+        assert_eq!(packet.gs_id, GameServerId(1));
+        assert!(packet.mirrors.is_empty());
+        assert_eq!(body.unread(), [0xaa]);
+    }
+
+    #[test]
+    fn request_info_rejects_truncated_character() {
+        let (op, mut s) = split_opcode(hex_bytes("030001000000020000000100000001")).unwrap();
+        assert!(G2lPacket::decode(op, &mut s).is_err());
+    }
+
+    #[test]
+    fn request_info_count_boundaries() {
+        let empty_character = LoginCharacterInfo::default();
+        for (count, bytes, valid) in [
+            (0, vec![], true),
+            (1, vec![0; 12], true),
+            (2, vec![0; 24], true),
+            (1, vec![0; 11], false),
+            (2, vec![0; 12], false),
+            (-1, vec![], false),
+            (i32::MAX, vec![0; 12], false),
+        ] {
+            let mut body = PacketStream::new();
+            body.write_u32(1)
+                .write_u32(2)
+                .write_i32(count)
+                .write_raw(&bytes);
+            let mut body = PacketStream::from_bytes(body.into_bytes());
+            let result = GlRequestInfo::read(&mut body);
+            if valid {
+                let result = result.unwrap();
+                assert_eq!(result.connection_id, ConnectionId(1));
+                assert_eq!(result.request_id, 2);
+                assert_eq!(
+                    result.characters,
+                    vec![empty_character.clone(); count as usize]
+                );
+                assert_eq!(body.remaining(), 0);
+            } else if count < 0 {
+                assert!(matches!(result, Err(PacketError::NegativeCount(-1))));
+            } else {
+                assert!(result.is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn request_info_rejects_incomplete_variable_length_entry() {
+        let mut body = PacketStream::new();
+        body.write_u32(1)
+            .write_u32(2)
+            .write_i32(1)
+            .write_u32(10)
+            .write_u32(20)
+            .write_i16(5)
+            .write_raw(b"Alice")
+            .write_u8(1)
+            .write_u8(2);
+        let bytes = body.into_bytes();
+        // Every case still has >=12 character bytes, so the per-entry reads must reject
+        // truncated names and missing race/gender, independently of the count preflight.
+        for missing in 1..=5 {
+            let mut body = PacketStream::from_bytes(bytes[..bytes.len() - missing].to_vec());
+            assert!(GlRequestInfo::read(&mut body).is_err());
+        }
+    }
+
+    #[test]
+    fn request_info_rejects_missing_or_partial_count() {
+        for bytes in [vec![], vec![1], vec![1, 0, 0]] {
+            let mut body = PacketStream::new();
+            body.write_u32(1).write_u32(2).write_raw(&bytes);
+            let mut body = PacketStream::from_bytes(body.into_bytes());
+            assert!(GlRequestInfo::read(&mut body).is_err());
         }
     }
 

@@ -20,7 +20,7 @@ use crate::convert::{Vec3, CELL_SIZE};
 
 pub const USAGE: &str = "Usage: aaemu-aipaths return-points --pak10 <10.x game_pak> \
 --pak12 <1.2 game_pak> --compact <compact.sqlite3> --worldgates <Data/Portal/worldgates.json> \
-[--skip <id,id,...>] [--update]";
+[--world <instance_world>]... [--worlds-dir <Data/Worlds>] [--skip <id,id,...>] [--update]";
 
 /// First line of the generated section of `worldgates.json`.
 pub const BEGIN_MARKER: &str = "//----------------- Generated from the 10.x return_point.xml \
@@ -216,11 +216,30 @@ pub struct Gate {
 /// Where a point was found: `zone key` and the point.
 pub type Found = (u32, ReturnPoint);
 
+/// Horizontal distance in metres to the nearest 1.2 spawn of an instance world beyond which a
+/// generated instance gate is reported as suspicious.
+pub const SPAWN_WARN_METRES: f64 = 40.0;
+
+/// An instance world (`--world`): its own zone origins, its own `return_point.xml` points and the
+/// 1.2 spawn positions that stand in for the terrain check.
+#[derive(Debug, Default)]
+pub struct InstanceWorld {
+    pub name: String,
+    pub zones12: HashMap<u32, Zone>,
+    pub zones10: HashMap<u32, Zone>,
+    /// Lower-case point name to every `return_point.xml` entry of this world.
+    pub points: HashMap<String, Vec<Found>>,
+    /// World positions of the 1.2 NPC and doodad spawns of the world.
+    pub spawns: Vec<Vec3>,
+}
+
 /// Why a demanded return point has no generated gate.
 #[derive(Debug, Default)]
 pub struct Report {
     /// Reason to the ids it applies to.
     pub skipped: BTreeMap<String, BTreeSet<u32>>,
+    /// Instance gates that were generated but look suspicious (id, text).
+    pub warnings: Vec<(u32, String)>,
 }
 
 impl Report {
@@ -255,10 +274,91 @@ pub struct PlanInput<'a> {
     pub zones10: &'a HashMap<u32, Zone>,
     /// `zones.zone_key` to `zones.name` of the compact database.
     pub db_zones: &'a HashMap<u32, String>,
+    /// Instance worlds searched for the ids the main_world data does not know.
+    pub instances: &'a [InstanceWorld],
     /// The hand curated gates (never changed, their ids and sub zones are taken).
     pub existing: &'a [GateRow],
     /// Ids left out on purpose (`--skip`).
     pub skip: &'a BTreeSet<u32>,
+}
+
+/// `id`, or `100000 + id` when another gate already holds that number as its sub zone.
+fn take_sub_zone(used: &mut BTreeSet<u32>, id: u32) -> u32 {
+    let sub = if used.contains(&id) { 100_000 + id } else { id };
+    used.insert(sub);
+    sub
+}
+
+/// Horizontal distance from (x, y) to the nearest of `spawns`.
+fn nearest_spawn(spawns: &[Vec3], x: f64, y: f64) -> Option<f64> {
+    spawns
+        .iter()
+        .map(|s| (s[0] - x).hypot(s[1] - y))
+        .min_by(f64::total_cmp)
+}
+
+/// The gate of a demanded id from the `--world` instance worlds: the point must be unique, its
+/// zone must have the same id and origin cell in the 1.2 and 10.x `world.xml` of that world
+/// (the `SubZoneId` is filled in by the caller). The terrain check of main_world is replaced by
+/// the distance to the nearest 1.2 spawn, reported as a warning only. `None` (nothing reported)
+/// when no instance world knows the name; a problem is recorded in the report and `None` too.
+fn plan_instance(input: &PlanInput<'_>, d: &Demand, report: &mut Report) -> Option<Gate> {
+    let key = d.editor_name.to_lowercase();
+    let mut hits: Vec<(&InstanceWorld, u32, &ReturnPoint)> = Vec::new();
+    for w in input.instances {
+        for (zone, p) in w.points.get(&key).into_iter().flatten() {
+            hits.push((w, *zone, p));
+        }
+    }
+    let (world, zone_key, point) = *hits.first()?;
+    let (Some(z12), Some(z10)) = (world.zones12.get(&zone_key), world.zones10.get(&zone_key))
+    else {
+        report.skip("zone not in both world.xml files", d.id);
+        return None;
+    };
+    if z12.origin != z10.origin {
+        report.skip("zone origin differs between 1.2 and 10.x", d.id);
+        return None;
+    }
+    let here = world_position(z12, point);
+    let ambiguous = hits.iter().skip(1).any(|(w, k, p)| {
+        let other = w
+            .zones12
+            .get(k)
+            .map_or([f64::NAN; 3], |z| world_position(z, p));
+        w.name != world.name
+            || *k != zone_key
+            || (other[0] - here[0]).hypot(other[1] - here[1]) > 0.5
+    });
+    if ambiguous {
+        report.skip("several different positions", d.id);
+        return None;
+    }
+    match nearest_spawn(&world.spawns, here[0], here[1]) {
+        Some(m) if m <= SPAWN_WARN_METRES => {}
+        Some(m) => report.warnings.push((
+            d.id,
+            format!(
+                "{}: nearest 1.2 spawn of {} is {m:.1} m away",
+                d.editor_name, world.name
+            ),
+        )),
+        None => report.warnings.push((
+            d.id,
+            format!("{}: {} has no 1.2 spawns", d.editor_name, world.name),
+        )),
+    }
+    Some(Gate {
+        id: d.id,
+        name: d.editor_name.clone(),
+        display_name: d.display_name.clone(),
+        zone_id: zone_key,
+        x: round1(here[0]),
+        y: round1(here[1]),
+        z: round1(here[2]),
+        yaw: yaw_degrees(point.rotate),
+        sub_zone_id: d.id,
+    })
 }
 
 /// The gates to generate (sorted by id) and the report.
@@ -285,7 +385,13 @@ pub fn plan(input: &PlanInput<'_>) -> (Vec<Gate>, Report) {
             continue;
         }
         let Some(found) = input.points.get(&d.editor_name.to_lowercase()) else {
-            report.skip("no main_world return point in the 10.x data", d.id);
+            match plan_instance(input, d, &mut report) {
+                Some(mut gate) => {
+                    gate.sub_zone_id = take_sub_zone(&mut used_sub, d.id);
+                    gates.push(gate);
+                }
+                None => report.skip("no main_world return point in the 10.x data", d.id),
+            }
             continue;
         };
         let (zone_key, point) = &found[0];
@@ -319,11 +425,7 @@ pub fn plan(input: &PlanInput<'_>) -> (Vec<Gate>, Report) {
             report.skip("several different positions", d.id);
             continue;
         }
-        let mut sub_zone_id = d.id;
-        if used_sub.contains(&sub_zone_id) {
-            sub_zone_id = 100_000 + d.id;
-        }
-        used_sub.insert(sub_zone_id);
+        let sub_zone_id = take_sub_zone(&mut used_sub, d.id);
         gates.push(Gate {
             id: d.id,
             name: d.editor_name.clone(),
@@ -382,7 +484,12 @@ fn num(v: f64) -> String {
 
 /// The generated section of `worldgates.json`: marker, one commented entry per gate, end marker.
 /// Four space indentation like the hand written entries; `eol` ends every line.
-pub fn format_section(gates: &[Gate], skip: &BTreeSet<u32>, eol: &str) -> String {
+pub fn format_section(
+    gates: &[Gate],
+    skip: &BTreeSet<u32>,
+    worlds: &[String],
+    eol: &str,
+) -> String {
     let mut out = String::new();
     let mut line = |s: String| {
         out.push_str(&s);
@@ -400,6 +507,12 @@ pub fn format_section(gates: &[Gate], skip: &BTreeSet<u32>, eol: &str) -> String
         "    // SubZoneId is only the dictionary key of the gate (the gate Id, see the tool)."
             .to_string(),
     );
+    if !worlds.is_empty() {
+        line(format!(
+            "    // Instance worlds read with --world (zone origins per world): {}",
+            worlds.join(" ")
+        ));
+    }
     if !skip.is_empty() {
         let ids: Vec<String> = skip.iter().map(u32::to_string).collect();
         line(format!(
@@ -534,13 +647,18 @@ pub fn hand_curated(text: &str) -> Result<Vec<GateRow>> {
 
 /// `text` with its generated section replaced by `gates` (appended before the closing `]` when
 /// there is none; removed when `gates` is empty).
-pub fn splice(text: &str, gates: &[Gate], skip: &BTreeSet<u32>) -> Result<String> {
+pub fn splice(
+    text: &str,
+    gates: &[Gate],
+    skip: &BTreeSet<u32>,
+    worlds: &[String],
+) -> Result<String> {
     let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let (head, tail) = split_file(text)?;
     if gates.is_empty() {
         return Ok(format!("{head}{eol}]{tail}"));
     }
-    let section = format_section(gates, skip, eol);
+    let section = format_section(gates, skip, worlds, eol);
     Ok(format!("{head},{eol}{eol}{section}]{tail}"))
 }
 
@@ -549,8 +667,8 @@ fn read_text(pak: &AAPak, name: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// Every `game/worlds/main_world/level_design/zone/<key>/editor/return_point.xml`.
-fn return_point_files(pak: &AAPak) -> Vec<(String, u32)> {
+/// Every `game/worlds/<world>/level_design/zone/<key>/editor/return_point.xml`.
+fn return_point_files(pak: &AAPak, world: &str) -> Vec<(String, u32)> {
     let mut out = Vec::new();
     for f in pak.files() {
         let lower = f.name.to_lowercase().replace('\\', "/");
@@ -558,9 +676,10 @@ fn return_point_files(pak: &AAPak) -> Vec<(String, u32)> {
             continue;
         };
         let parts: Vec<&str> = rest.split('/').collect();
-        if let [MAIN_WORLD, "level_design", "zone", key, "editor", "return_point.xml"] =
-            parts.as_slice()
-        {
+        if let [w, "level_design", "zone", key, "editor", "return_point.xml"] = parts.as_slice() {
+            if *w != world.to_lowercase() {
+                continue;
+            }
             if let Ok(zone) = key.parse::<u32>() {
                 out.push((f.name.clone(), zone));
             }
@@ -570,12 +689,96 @@ fn return_point_files(pak: &AAPak) -> Vec<(String, u32)> {
     out
 }
 
+/// World positions of the `"Position": {"X", "Y", "Z"}` entries of the `*_spawns.json` files of
+/// `dir` (comments allowed).
+pub fn load_spawns(dir: &Path) -> Vec<Vec3> {
+    let mut out = Vec::new();
+    for name in ["npc_spawns.json", "doodad_spawns.json"] {
+        let Ok(text) = fs::read_to_string(dir.join(name)) else {
+            continue;
+        };
+        let clean = strip_comments(text.strip_prefix('\u{feff}').unwrap_or(&text));
+        let Ok(serde_json::Value::Array(items)) = serde_json::from_str(&clean) else {
+            continue;
+        };
+        for item in items {
+            let Some(p) = item.get("Position") else {
+                continue;
+            };
+            let c = |k: &str| p.get(k).and_then(serde_json::Value::as_f64);
+            if let (Some(x), Some(y), Some(z)) = (c("X"), c("Y"), c("Z")) {
+                out.push([x, y, z]);
+            }
+        }
+    }
+    out
+}
+
+/// Reads the `world.xml` of `world` from both paks and the `return_point.xml` files of the 10.x
+/// pak, and the 1.2 spawns from `worlds_dir`.
+fn load_instance_world(
+    pak10: &AAPak,
+    pak12: &AAPak,
+    world: &str,
+    worlds_dir: &Path,
+) -> Result<InstanceWorld> {
+    let world_xml = format!("game/worlds/{world}/world.xml");
+    let zones10 = parse_zones(
+        &read_text(pak10, &world_xml).with_context(|| format!("10.x {world} world.xml"))?,
+    )?;
+    let zones12 = parse_zones(
+        &read_text(pak12, &world_xml).with_context(|| format!("1.2 {world} world.xml"))?,
+    )?;
+    let mut points: HashMap<String, Vec<Found>> = HashMap::new();
+    for (name, zone) in return_point_files(pak10, world) {
+        let Some(xml) = read_text(pak10, &name) else {
+            eprintln!("warning: cannot read {name}");
+            continue;
+        };
+        match parse_return_points(&xml) {
+            Ok(list) => {
+                for p in list {
+                    points
+                        .entry(p.name.to_lowercase())
+                        .or_default()
+                        .push((zone, p));
+                }
+            }
+            Err(e) => eprintln!("warning: {name}: {e}"),
+        }
+    }
+    let spawns = load_spawns(&worlds_dir.join(world));
+    if spawns.is_empty() {
+        eprintln!(
+            "warning: no 1.2 spawns for {world} in {}",
+            worlds_dir.display()
+        );
+    }
+    eprintln!(
+        "{world}: {} zones, {} point names, {} spawns",
+        zones12.len(),
+        points.len(),
+        spawns.len()
+    );
+    Ok(InstanceWorld {
+        name: world.to_string(),
+        zones12,
+        zones10,
+        points,
+        spawns,
+    })
+}
+
 #[derive(Debug)]
 pub struct Options {
     pub pak10: PathBuf,
     pub pak12: PathBuf,
     pub compact: PathBuf,
     pub worldgates: PathBuf,
+    /// Instance worlds to read (`--world`, repeatable).
+    pub worlds: Vec<String>,
+    /// `Data/Worlds` of the game app (the 1.2 spawns); default: next to the `Portal` folder.
+    pub worlds_dir: Option<PathBuf>,
     pub skip: BTreeSet<u32>,
     pub update: bool,
 }
@@ -584,6 +787,8 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
     let (mut pak10, mut pak12, mut compact, mut worldgates) = (None, None, None, None);
     let mut update = false;
     let mut skip = BTreeSet::new();
+    let mut worlds: Vec<String> = Vec::new();
+    let mut worlds_dir = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut value = |name: &str| -> Result<PathBuf> {
@@ -596,6 +801,16 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
             "--pak12" => pak12 = Some(value("--pak12")?),
             "--compact" => compact = Some(value("--compact")?),
             "--worldgates" => worldgates = Some(value("--worldgates")?),
+            "--world" => {
+                let w = value("--world")?.to_string_lossy().into_owned();
+                if w.eq_ignore_ascii_case(MAIN_WORLD) {
+                    bail!("--world: {MAIN_WORLD} is always read, name an instance world");
+                }
+                if !worlds.contains(&w) {
+                    worlds.push(w);
+                }
+            }
+            "--worlds-dir" => worlds_dir = Some(value("--worlds-dir")?),
             "--skip" => {
                 for id in value("--skip")?.to_string_lossy().split(',') {
                     skip.insert(
@@ -614,6 +829,8 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
         pak12: pak12.with_context(|| USAGE)?,
         compact: compact.with_context(|| USAGE)?,
         worldgates: worldgates.with_context(|| USAGE)?,
+        worlds,
+        worlds_dir,
         skip,
         update,
     })
@@ -636,7 +853,7 @@ pub fn run(opts: &Options) -> Result<()> {
     let zones12 = parse_zones(&read_text(&pak12, &world_xml).context("1.2 main_world world.xml")?)?;
 
     let mut points: HashMap<String, Vec<Found>> = HashMap::new();
-    for (name, zone) in return_point_files(&pak10) {
+    for (name, zone) in return_point_files(&pak10, MAIN_WORLD) {
         let Some(xml) = read_text(&pak10, &name) else {
             eprintln!("warning: cannot read {name}");
             continue;
@@ -661,7 +878,20 @@ pub fn run(opts: &Options) -> Result<()> {
         existing.len()
     );
 
+    let worlds_dir = opts.worlds_dir.clone().unwrap_or_else(|| {
+        opts.worldgates
+            .parent()
+            .and_then(Path::parent)
+            .map_or_else(|| PathBuf::from("Worlds"), |d| d.join("Worlds"))
+    });
+    let instances = opts
+        .worlds
+        .iter()
+        .map(|w| load_instance_world(&pak10, &pak12, w, &worlds_dir))
+        .collect::<Result<Vec<_>>>()?;
+
     let (gates, report) = plan(&PlanInput {
+        instances: &instances,
         demand: &demand,
         points: &points,
         zones12: &zones12,
@@ -675,6 +905,9 @@ pub fn run(opts: &Options) -> Result<()> {
         let list: Vec<String> = ids.iter().map(u32::to_string).collect();
         eprintln!("skipped, {reason}: {} ({})", ids.len(), list.join(" "));
     }
+    for (id, text) in &report.warnings {
+        eprintln!("warning: gate {id}: {text}");
+    }
     eprintln!(
         "hand curated gates more than {MISMATCH_METRES} m from the 10.x return point \
          (id, 10.x zone, horizontal m, vertical m):"
@@ -684,12 +917,12 @@ pub fn run(opts: &Options) -> Result<()> {
     }
 
     if opts.update {
-        let new = splice(&text, &gates, &opts.skip)?;
+        let new = splice(&text, &gates, &opts.skip, &opts.worlds)?;
         fs::write(&opts.worldgates, new)
             .with_context(|| format!("write {}", opts.worldgates.display()))?;
         eprintln!("updated {}", opts.worldgates.display());
     } else {
-        print!("{}", format_section(&gates, &opts.skip, "\n"));
+        print!("{}", format_section(&gates, &opts.skip, &opts.worlds, "\n"));
     }
     Ok(())
 }

@@ -6,6 +6,7 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use anyhow::Context;
 use dashmap::DashMap;
 
 use super::request::RequestController;
@@ -81,6 +82,14 @@ pub struct GameController {
     game_servers: DashMap<GameServerId, GameServer>,
     /// mirror id -> parent id
     mirrors_id: Mutex<HashMap<GameServerId, GameServerId>>,
+    character_requests: DashMap<u32, Arc<CharacterRequest>>,
+}
+
+/// The recipient of an LGRequestInfo round-trip. The response has no world id on the wire.
+struct CharacterRequest {
+    connection_id: ConnectionId,
+    gs_id: GameServerId,
+    game_connection: Arc<InternalConnection>,
 }
 
 /// Resolves `host` to its first IPv4 address; on failure the host is returned un-parsed.
@@ -109,6 +118,7 @@ impl GameController {
             connections,
             game_servers: DashMap::new(),
             mirrors_id: Mutex::new(HashMap::new()),
+            character_requests: DashMap::new(),
         }
     }
 
@@ -223,17 +233,44 @@ impl GameController {
         }
     }
 
-    /// Unregisters a game server (its connection closed).
-    pub fn remove(&self, gs_id: GameServerId) {
+    /// Whether this connection currently owns the world (including registered mirrors).
+    pub fn owns_connection(
+        &self,
+        gs_id: GameServerId,
+        connection: &Arc<InternalConnection>,
+    ) -> bool {
+        self.game_servers.get(&gs_id).is_some_and(|gs| {
+            gs.connection
+                .as_ref()
+                .is_some_and(|owner| Arc::ptr_eq(owner, connection))
+        })
+    }
+
+    /// Unregisters a game server only if the closing connection still owns it.
+    pub fn remove(&self, gs_id: GameServerId, connection: &Arc<InternalConnection>) {
         let mirrors = {
             let Some(mut gs) = self.game_servers.get_mut(&gs_id) else {
                 return;
             };
+            if !gs
+                .connection
+                .as_ref()
+                .is_some_and(|owner| Arc::ptr_eq(owner, connection))
+            {
+                return;
+            }
             gs.connection = None;
             std::mem::take(&mut gs.mirrors)
         };
         for mirror_id in mirrors {
             if let Some(mut server) = self.game_servers.get_mut(&mirror_id) {
+                if !server
+                    .connection
+                    .as_ref()
+                    .is_some_and(|owner| Arc::ptr_eq(owner, connection))
+                {
+                    continue;
+                }
                 server.connection = None;
             }
             self.mirrors_id.lock().unwrap().remove(&mirror_id);
@@ -262,11 +299,23 @@ impl GameController {
             let (request_ids, wait) = self
                 .requests
                 .create(servers.len(), WORLD_LIST_REQUEST_TIMEOUT)?;
+            let mut character_requests = Vec::new();
             for (gs, &request_id) in servers.iter().zip(&request_ids) {
-                if !gs.active() || connection.has_characters(gs.id) {
+                let Some(game_connection) = &gs.connection else {
+                    self.requests.release_id(request_id);
+                    continue;
+                };
+                if connection.has_characters(gs.id) {
                     self.requests.release_id(request_id);
                     continue;
                 }
+                let request = Arc::new(CharacterRequest {
+                    connection_id: connection.id(),
+                    gs_id: gs.id,
+                    game_connection: game_connection.clone(),
+                });
+                self.character_requests.insert(request_id, request.clone());
+                character_requests.push((request_id, request));
                 gs.send_packet(&LgRequestInfo {
                     connection_id: connection.id(),
                     request_id,
@@ -274,6 +323,12 @@ impl GameController {
                 });
             }
             wait.await;
+            for (request_id, request) in character_requests {
+                // A completed id can already belong to another world-list request before
+                // this waiter resumes. Never remove the new request's authorization.
+                self.character_requests
+                    .remove_if(&request_id, |_, current| Arc::ptr_eq(current, &request));
+            }
         }
         // The C# list holds the live GameServer objects, so state is read after the wait.
         let game_servers = servers
@@ -284,6 +339,37 @@ impl GameController {
             game_servers,
             characters: connection.get_characters(),
         })
+    }
+
+    /// Applies characters and completes only the request sent to this internal connection.
+    pub fn complete_character_request(
+        &self,
+        connection: &Arc<InternalConnection>,
+        connection_id: ConnectionId,
+        request_id: u32,
+        characters: Vec<LoginCharacterInfo>,
+    ) -> anyhow::Result<()> {
+        let request = self
+            .character_requests
+            .get(&request_id)
+            .context("No pending character request for this response")?;
+        anyhow::ensure!(
+            request.connection_id == connection_id
+                && Arc::ptr_eq(&request.game_connection, connection)
+                && self.owns_connection(request.gs_id, connection),
+            "Character response does not match the pending client and game server"
+        );
+        if !characters.is_empty() {
+            let client = self
+                .connections
+                .get(connection_id)
+                .context("Character response client is no longer connected")?;
+            client.add_characters(request.gs_id, characters)?;
+        }
+        drop(request);
+        self.character_requests.remove(&request_id);
+        self.requests.release_id(request_id);
+        Ok(())
     }
 
     pub fn set_load(&self, gs_id: GameServerId, load: GsLoad) -> anyhow::Result<()> {

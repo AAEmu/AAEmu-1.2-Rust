@@ -271,6 +271,7 @@
     // Run the tool again to regenerate this section; do not edit it by hand.
     // Position = zone origin cell * 1024 + the zone-local ReturnPoint_<name> position;
     // SubZoneId is only the dictionary key of the gate (the gate Id, see the tool).
+    // Instance worlds read with --world (zone origins per world): instance_library instance_nachashgar instance_nachashgar_easy instance_howling_abyss instance_howling_abyss_2 instance_cradle_of_destruction
     // Left out with --skip (not on the 1.2 terrain or navmesh): 399 400 533 627 681
     {
         "Id": 6, // 마리아노플
@@ -583,6 +584,196 @@
         "SubZoneId": 411
     },
     {
+        "Id": 484, // 울부짖는 구렁텅이 2보스 귀환 장소
+        "Name": "portal_instance_howling_abyss",
+        "ZoneId": 265,
+        "X": 530.7,
+        "Y": 478.0,
+        "Z": 187.7,
+        "Yaw": 0.0,
+        "SubZoneId": 484
+    },
+    {
+        "Id": 488, // 미치광이의 침실로 통하는 공간이동의 문
+        "Name": "sprigun_room",
+        "ZoneId": 264,
+        "X": 180.7,
+        "Y": 716.2,
+        "Z": 183.0,
+        "Yaw": -179.0,
+        "SubZoneId": 488
+    },
+    {
+        "Id": 524, // 나차쉬가르 포탈 2
+        "Name": "portal_nachashgar_02",
+        "ZoneId": 278,
+        "X": 486.5,
+        "Y": 381.6,
+        "Z": 150.6,
+        "Yaw": -90.0,
+        "SubZoneId": 524
+    },
+    {
+        "Id": 525, // 영던_울구 2보스 귀환 장소
+        "Name": "portal_howling_abyss_2",
+        "ZoneId": 280,
+        "X": 530.7,
+        "Y": 478.0,
+        "Z": 187.7,
+        "Yaw": 0.0,
+        "SubZoneId": 525
+    },
+    {
+        "Id": 526, // 나차쉬가르 포탈 3
+        "Name": "portal_nachashgar_03",
+        "ZoneId": 278,
+        "X": 660.3,
+        "Y": 402.5,
+        "Z": 154.2,
+        "Yaw": -90.0,
+        "SubZoneId": 526
+    },
+    {
+        "Id": 527, // 나차쉬가르 포탈 4
+        "Name": "portal_nachashgar_04",
+        "ZoneId": 278,
+        "X": 865.2,
+        "Y": 390.8,
+        "Z": 146.2,
+        "Yaw": -90.0,
+        "SubZoneId": 527
+    },
+    {
+        "Id": 528, // 나차쉬가르 포탈 5
+        "Name": "portal_nachashgar_05",
+        "ZoneId": 278,
+        "X": 1098.4,
+        "Y": 389.8,
+        "Z": 151.3,
+        "Yaw": -90.0,
+        "SubZoneId": 528
+    },
+    {
+        "Id": 529, // 나차쉬가르 포탈 6
+        "Name": "portal_nachashgar_06",
+        "ZoneId": 278,
+        "X": 348.0,
+        "Y": 581.7,
+        "Z": 145.3,
+        "Yaw": -90.0,
+        "SubZoneId": 529
+    },
+    {
+        "Id": 530, // 나차쉬가르 포탈 7
+        "Name": "portal_nachashgar_07",
+        "ZoneId": 278,
+        "X": 517.7,
+        "Y": 577.3,
+        "Z": 144.7,
+        "Yaw": -90.0,
+        "SubZoneId": 530
+    },
+    {
+        "Id": 531, // 나차쉬가르 포탈 8
+        "Name": "portal_nachashgar_08",
+        "ZoneId": 278,
+        "X": 708.3,
+        "Y": 598.9,
+        "Z": 118.8,
+        "Yaw": -90.0,
+        "SubZoneId": 531
+    },
+    {
+        "Id": 532, // 나차쉬가르 포탈 09
+        "Name": "portal_nachashgar_09",
+        "ZoneId": 278,
+        "X": 884.3,
+        "Y": 609.7,
+        "Z": 132.3,
+        "Yaw": -90.0,
+        "SubZoneId": 532
+    },
+    {
+        "Id": 546, // 나차쉬가르 포탈 back_01
+        "Name": "portal_nachashgar_back_01",
+        "ZoneId": 278,
+        "X": 339.1,
+        "Y": 380.3,
+        "Z": 151.7,
+        "Yaw": 90.0,
+        "SubZoneId": 546
+    },
+    {
+        "Id": 547, // 나차쉬가르 포탈 back_02
+        "Name": "portal_nachashgar_back_02",
+        "ZoneId": 278,
+        "X": 542.0,
+        "Y": 383.9,
+        "Z": 150.6,
+        "Yaw": 90.0,
+        "SubZoneId": 547
+    },
+    {
+        "Id": 548, // 나차쉬가르 포탈 back_03
+        "Name": "portal_nachashgar_back_03",
+        "ZoneId": 278,
+        "X": 718.0,
+        "Y": 399.5,
+        "Z": 154.2,
+        "Yaw": 90.0,
+        "SubZoneId": 548
+    },
+    {
+        "Id": 549, // 나차쉬가르 포탈 back_04
+        "Name": "portal_nachashgar_back_04",
+        "ZoneId": 278,
+        "X": 924.5,
+        "Y": 389.8,
+        "Z": 146.2,
+        "Yaw": 90.0,
+        "SubZoneId": 549
+    },
+    {
+        "Id": 550, // 나차쉬가르 포탈 back_05
+        "Name": "portal_nachashgar_back_05",
+        "ZoneId": 278,
+        "X": 1152.3,
+        "Y": 388.3,
+        "Z": 151.3,
+        "Yaw": 90.0,
+        "SubZoneId": 550
+    },
+    {
+        "Id": 551, // 나차쉬가르 포탈 back_06
+        "Name": "portal_nachashgar_back_06",
+        "ZoneId": 278,
+        "X": 404.0,
+        "Y": 579.9,
+        "Z": 149.2,
+        "Yaw": 90.0,
+        "SubZoneId": 551
+    },
+    {
+        "Id": 552, // 나차쉬가르 포탈 back_07
+        "Name": "portal_nachashgar_back_07",
+        "ZoneId": 278,
+        "X": 574.2,
+        "Y": 577.4,
+        "Z": 144.7,
+        "Yaw": 90.0,
+        "SubZoneId": 552
+    },
+    {
+        "Id": 553, // 나차쉬가르 포탈 back_08
+        "Name": "portal_nachashgar_back_08",
+        "ZoneId": 278,
+        "X": 762.8,
+        "Y": 598.9,
+        "Z": 117.9,
+        "Yaw": 90.0,
+        "SubZoneId": 553
+    },
+    {
         "Id": 557, // 심연의 입구
         "Name": "o_abyss",
         "ZoneId": 276,
@@ -603,6 +794,476 @@
         "SubZoneId": 560
     },
     {
+        "Id": 561, // 나차쉬가르 포탈 010
+        "Name": "portal_nachashgar_010",
+        "ZoneId": 278,
+        "X": 1106.9,
+        "Y": 624.6,
+        "Z": 115.0,
+        "Yaw": -90.0,
+        "SubZoneId": 561
+    },
+    {
+        "Id": 572, // 불안정한 나차쉬가르 포탈 2
+        "Name": "portal_nacha_easy_02",
+        "ZoneId": 292,
+        "X": 486.5,
+        "Y": 381.6,
+        "Z": 150.6,
+        "Yaw": -90.0,
+        "SubZoneId": 572
+    },
+    {
+        "Id": 573, // 불안정한 나차쉬가르 포탈 3
+        "Name": "portal_nacha_easy_03",
+        "ZoneId": 292,
+        "X": 660.3,
+        "Y": 402.5,
+        "Z": 154.2,
+        "Yaw": -90.0,
+        "SubZoneId": 573
+    },
+    {
+        "Id": 574, // 불안정한 나차쉬가르 포탈 4
+        "Name": "portal_nacha_easy_04",
+        "ZoneId": 292,
+        "X": 865.2,
+        "Y": 390.8,
+        "Z": 146.2,
+        "Yaw": -90.0,
+        "SubZoneId": 574
+    },
+    {
+        "Id": 575, // 불안정한 나차쉬가르 포탈 5
+        "Name": "portal_nacha_easy_05",
+        "ZoneId": 292,
+        "X": 1098.4,
+        "Y": 389.8,
+        "Z": 151.3,
+        "Yaw": -90.0,
+        "SubZoneId": 575
+    },
+    {
+        "Id": 576, // 불안정한 나차쉬가르 포탈 6
+        "Name": "portal_nacha_easy_06",
+        "ZoneId": 292,
+        "X": 348.0,
+        "Y": 581.7,
+        "Z": 145.3,
+        "Yaw": -90.0,
+        "SubZoneId": 576
+    },
+    {
+        "Id": 577, // 불안정한 나차쉬가르 포탈 7
+        "Name": "portal_nacha_easy_07",
+        "ZoneId": 292,
+        "X": 517.7,
+        "Y": 577.3,
+        "Z": 144.7,
+        "Yaw": -90.0,
+        "SubZoneId": 577
+    },
+    {
+        "Id": 578, // 불안정한 나차쉬가르 포탈 8
+        "Name": "portal_nacha_easy_08",
+        "ZoneId": 292,
+        "X": 708.3,
+        "Y": 598.9,
+        "Z": 118.8,
+        "Yaw": -90.0,
+        "SubZoneId": 100578
+    },
+    {
+        "Id": 579, // 불안정한 나차쉬가르 포탈 9
+        "Name": "portal_nacha_easy_09",
+        "ZoneId": 292,
+        "X": 884.3,
+        "Y": 609.7,
+        "Z": 132.3,
+        "Yaw": -90.0,
+        "SubZoneId": 579
+    },
+    {
+        "Id": 580, // 불안정한 나차쉬가르 포탈 10
+        "Name": "portal_nacha_easy_010",
+        "ZoneId": 292,
+        "X": 1106.9,
+        "Y": 624.6,
+        "Z": 115.0,
+        "Yaw": -90.0,
+        "SubZoneId": 580
+    },
+    {
+        "Id": 581, // 불안정한 나차쉬가르 back_01
+        "Name": "portal_nacha_easy_back_01",
+        "ZoneId": 292,
+        "X": 340.3,
+        "Y": 380.1,
+        "Z": 151.7,
+        "Yaw": 0.0,
+        "SubZoneId": 581
+    },
+    {
+        "Id": 625, // 나차쉬가르 09_카르밀라
+        "Name": "portal_nachashgar_09_c",
+        "ZoneId": 278,
+        "X": 876.4,
+        "Y": 858.3,
+        "Z": 132.3,
+        "Yaw": -90.0,
+        "SubZoneId": 625
+    },
+    {
+        "Id": 626, // 나차쉬가르_09_아너린
+        "Name": "portal_nachashgar_09_a",
+        "ZoneId": 278,
+        "X": 647.8,
+        "Y": 858.3,
+        "Z": 132.3,
+        "Yaw": -90.0,
+        "SubZoneId": 626
+    },
+    {
+        "Id": 630, // 무한한 지식의 열람실 위 1
+        "Name": "instance_library_1_up_1",
+        "ZoneId": 296,
+        "X": 993.9,
+        "Y": 384.1,
+        "Z": 173.4,
+        "Yaw": 89.0,
+        "SubZoneId": 630
+    },
+    {
+        "Id": 631, // 무한한 지식의 열람실 아래 1
+        "Name": "instance_library_1_dn_1",
+        "ZoneId": 296,
+        "X": 998.5,
+        "Y": 373.1,
+        "Z": 133.3,
+        "Yaw": 0.0,
+        "SubZoneId": 631
+    },
+    {
+        "Id": 632, // 무한한 지식의 열람실 위 2
+        "Name": "instance_library_1_up_2",
+        "ZoneId": 296,
+        "X": 159.8,
+        "Y": 384.6,
+        "Z": 173.4,
+        "Yaw": 179.0,
+        "SubZoneId": 100632
+    },
+    {
+        "Id": 633, // 무한한 지식의 열람실 아래 2
+        "Name": "instance_library_1_dn_2",
+        "ZoneId": 296,
+        "X": 152.9,
+        "Y": 394.9,
+        "Z": 133.3,
+        "Yaw": 180.0,
+        "SubZoneId": 633
+    },
+    {
+        "Id": 634, // 무한한 지식의 열람실 위 3
+        "Name": "instance_library_1_up_3",
+        "ZoneId": 296,
+        "X": 767.9,
+        "Y": 607.7,
+        "Z": 173.4,
+        "Yaw": 90.0,
+        "SubZoneId": 634
+    },
+    {
+        "Id": 635, // 무한한 지식의 열람실 아래 3
+        "Name": "instance_library_1_dn_3",
+        "ZoneId": 296,
+        "X": 779.3,
+        "Y": 614.7,
+        "Z": 133.3,
+        "Yaw": 89.0,
+        "SubZoneId": 635
+    },
+    {
+        "Id": 636, // 책 읽는 정원 위 1
+        "Name": "instance_library_2_up_1",
+        "ZoneId": 297,
+        "X": 159.7,
+        "Y": 2304.0,
+        "Z": 169.4,
+        "Yaw": 0.0,
+        "SubZoneId": 636
+    },
+    {
+        "Id": 637, // 책 읽는 정원 아래 1
+        "Name": "instance_library_2_dn_1",
+        "ZoneId": 297,
+        "X": 106.3,
+        "Y": 2304.5,
+        "Z": 129.4,
+        "Yaw": 0.0,
+        "SubZoneId": 637
+    },
+    {
+        "Id": 638, // 책 읽는 정원 위 2
+        "Name": "instance_library_2_up_2",
+        "ZoneId": 297,
+        "X": 865.5,
+        "Y": 2176.1,
+        "Z": 169.4,
+        "Yaw": 0.0,
+        "SubZoneId": 638
+    },
+    {
+        "Id": 639, // 책 읽는 정원 아래 2
+        "Name": "instance_library_2_dn_2",
+        "ZoneId": 297,
+        "X": 917.6,
+        "Y": 2176.4,
+        "Z": 129.1,
+        "Yaw": 0.0,
+        "SubZoneId": 639
+    },
+    {
+        "Id": 640, // 책 읽는 정원 위 3
+        "Name": "instance_library_2_up_3",
+        "ZoneId": 297,
+        "X": 768.0,
+        "Y": 3040.2,
+        "Z": 168.9,
+        "Yaw": 0.0,
+        "SubZoneId": 640
+    },
+    {
+        "Id": 641, // 책 읽는 정원 아래 3
+        "Name": "instance_library_2_dn_3",
+        "ZoneId": 297,
+        "X": 768.2,
+        "Y": 3094.0,
+        "Z": 128.7,
+        "Yaw": 0.0,
+        "SubZoneId": 641
+    },
+    {
+        "Id": 642, // 비명 서고 위 1
+        "Name": "instance_library_3_up_1",
+        "ZoneId": 298,
+        "X": 398.2,
+        "Y": 4447.6,
+        "Z": 296.7,
+        "Yaw": 180.0,
+        "SubZoneId": 642
+    },
+    {
+        "Id": 643, // 비명 서고 아래 1
+        "Name": "instance_library_3_dn_1",
+        "ZoneId": 298,
+        "X": 382.7,
+        "Y": 4476.8,
+        "Z": 256.6,
+        "Yaw": -25.0,
+        "SubZoneId": 643
+    },
+    {
+        "Id": 644, // 비명 서고 위 2
+        "Name": "instance_library_3_up_2",
+        "ZoneId": 298,
+        "X": 625.7,
+        "Y": 5024.5,
+        "Z": 296.7,
+        "Yaw": 0.0,
+        "SubZoneId": 644
+    },
+    {
+        "Id": 645, // 비명 서고 아래 2
+        "Name": "instance_library_3_dn_2",
+        "ZoneId": 298,
+        "X": 642.9,
+        "Y": 4993.2,
+        "Z": 256.6,
+        "Yaw": 110.0,
+        "SubZoneId": 645
+    },
+    {
+        "Id": 646, // 비명 서고 위 3
+        "Name": "instance_library_3_up_3",
+        "ZoneId": 298,
+        "X": 928.5,
+        "Y": 4462.7,
+        "Z": 296.7,
+        "Yaw": -90.0,
+        "SubZoneId": 646
+    },
+    {
+        "Id": 647, // 비명 서고 아래 3
+        "Name": "instance_library_3_dn_3",
+        "ZoneId": 298,
+        "X": 898.0,
+        "Y": 4478.0,
+        "Z": 256.6,
+        "Yaw": 40.0,
+        "SubZoneId": 647
+    },
+    {
+        "Id": 654, // 윈의 비밀서재 출구
+        "Name": "instance_library_1_Yn_in",
+        "ZoneId": 296,
+        "X": 743.3,
+        "Y": 634.1,
+        "Z": 350.4,
+        "Yaw": 0.0,
+        "SubZoneId": 654
+    },
+    {
+        "Id": 655, // 윈의 비밀서재 입구
+        "Name": "instance_library_1_Yn_out",
+        "ZoneId": 296,
+        "X": 736.7,
+        "Y": 639.8,
+        "Z": 173.5,
+        "Yaw": 0.0,
+        "SubZoneId": 655
+    },
+    {
+        "Id": 656, // 스테노의 비밀서재 출구
+        "Name": "instance_library_1_Setno_in",
+        "ZoneId": 296,
+        "X": 1017.6,
+        "Y": 407.7,
+        "Z": 357.3,
+        "Yaw": 0.0,
+        "SubZoneId": 656
+    },
+    {
+        "Id": 657, // 스테노의 비밀서재 입구
+        "Name": "instance_library_1_Setno_out",
+        "ZoneId": 296,
+        "X": 1023.9,
+        "Y": 415.1,
+        "Z": 173.4,
+        "Yaw": 0.0,
+        "SubZoneId": 657
+    },
+    {
+        "Id": 658, // 봉인의 비밀서재 출구
+        "Name": "instance_library_1_Sealed_in",
+        "ZoneId": 296,
+        "X": 128.8,
+        "Y": 367.9,
+        "Z": 345.8,
+        "Yaw": 90.0,
+        "SubZoneId": 658
+    },
+    {
+        "Id": 659, // 봉인의 비밀서재 입구
+        "Name": "instance_library_1_Sealed_out",
+        "ZoneId": 296,
+        "X": 128.0,
+        "Y": 352.6,
+        "Z": 173.4,
+        "Yaw": 0.0,
+        "SubZoneId": 659
+    },
+    {
+        "Id": 660, // 비밀 정원 출구
+        "Name": "instance_library_2_garden_in",
+        "ZoneId": 297,
+        "X": 128.2,
+        "Y": 2277.4,
+        "Z": 288.5,
+        "Yaw": 0.0,
+        "SubZoneId": 660
+    },
+    {
+        "Id": 661, // 비밀 정원 입구
+        "Name": "instance_library_2_garden_out",
+        "ZoneId": 297,
+        "X": 122.3,
+        "Y": 2271.9,
+        "Z": 168.9,
+        "Yaw": 0.0,
+        "SubZoneId": 661
+    },
+    {
+        "Id": 662, // 안식의 방 출구
+        "Name": "instance_library_2_rest_in",
+        "ZoneId": 297,
+        "X": 878.4,
+        "Y": 2176.2,
+        "Z": 288.5,
+        "Yaw": 0.0,
+        "SubZoneId": 662
+    },
+    {
+        "Id": 663, // 안식의 방 입구
+        "Name": "instance_library_2_rest_out",
+        "ZoneId": 297,
+        "X": 889.8,
+        "Y": 2143.9,
+        "Z": 168.9,
+        "Yaw": 0.0,
+        "SubZoneId": 663
+    },
+    {
+        "Id": 664, // 클로인의 비밀서재 출구
+        "Name": "instance_library_2_Cloyne_in",
+        "ZoneId": 297,
+        "X": 768.8,
+        "Y": 3046.0,
+        "Z": 288.4,
+        "Yaw": 0.0,
+        "SubZoneId": 664
+    },
+    {
+        "Id": 665, // 클로인의 비밀서재 입구
+        "Name": "instance_library_2_Cloyne_out",
+        "ZoneId": 297,
+        "X": 735.6,
+        "Y": 3077.6,
+        "Z": 168.9,
+        "Yaw": 0.0,
+        "SubZoneId": 665
+    },
+    {
+        "Id": 666, // 티레네프의 비밀서재 출구
+        "Name": "instance_library_3_Tirenep_in",
+        "ZoneId": 298,
+        "X": 356.6,
+        "Y": 4479.7,
+        "Z": 514.1,
+        "Yaw": -90.0,
+        "SubZoneId": 666
+    },
+    {
+        "Id": 667, // 티레네프의 비밀서재 입구
+        "Name": "instance_library_3_Tirenep_out",
+        "ZoneId": 298,
+        "X": 351.2,
+        "Y": 4495.6,
+        "Z": 296.7,
+        "Yaw": -90.0,
+        "SubZoneId": 667
+    },
+    {
+        "Id": 668, // 비명서고의 비밀서재 출구
+        "Name": "instance_library_3_Scream_in",
+        "ZoneId": 298,
+        "X": 896.2,
+        "Y": 4454.8,
+        "Z": 512.9,
+        "Yaw": 0.0,
+        "SubZoneId": 668
+    },
+    {
+        "Id": 669, // 비명서고의 비밀서재 입구
+        "Name": "instance_library_3_Scream_out",
+        "ZoneId": 298,
+        "X": 880.6,
+        "Y": 4447.7,
+        "Z": 297.7,
+        "Yaw": 0.0,
+        "SubZoneId": 669
+    },
+    {
         "Id": 674, // 포탈 : 탄생의 절벽 퀘스트 포탈7
         "Name": "portal_falc_borncliff_7",
         "ZoneId": 184,
@@ -611,6 +1272,16 @@
         "Z": 556.5,
         "Yaw": 0.0,
         "SubZoneId": 674
+    },
+    {
+        "Id": 679, // 봉인의 비밀서재 출구
+        "Name": "instance_library_1_Sealed_in2",
+        "ZoneId": 296,
+        "X": 129.6,
+        "Y": 477.6,
+        "Z": 345.8,
+        "Yaw": 90.0,
+        "SubZoneId": 679
     },
     {
         "Id": 682, // 이슬 평원 1번 출구
