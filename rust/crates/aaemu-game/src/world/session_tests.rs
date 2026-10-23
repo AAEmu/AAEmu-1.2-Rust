@@ -4,8 +4,282 @@
 
 use std::sync::{Arc, Barrier};
 
+use crate::managers::save::capture_financial_snapshot;
+use crate::net::connection::GameState;
+use crate::systems::vehicles::mates::MateDb;
 use crate::test_support::{spawn_player, test_character, test_server, TestClient};
 use crate::world::session::{self, SelectDbData};
+
+async fn assert_select_preserves_live_session(selected_id: u32) {
+    let server = test_server();
+    // Any attempted load must fail immediately, without reaching a real database.
+    server.db.close().await;
+    let mut client = TestClient::new(&server, 1, 1007);
+    let character = test_character(7, "Live", 100.0, 100.0);
+    let mut sibling = test_character(8, "Other", 200.0, 200.0);
+    sibling.account_id = character.account_id;
+    client.conn.characters = vec![character.clone(), sibling];
+    assert_eq!(server.enter_world.reserve_character(7, 1), Ok(true));
+    session::select_loaded(
+        &server,
+        &mut client.conn,
+        character,
+        SelectDbData::default(),
+    )
+    .expect("initial select");
+    let player = client.conn.active_char.clone().unwrap();
+    {
+        let mut c = player.data();
+        c.money = 4321;
+        c.money2 = 8765;
+        c.labor_power_unsaved = -25;
+        c.unit.hp = 37;
+        c.unit.mp = 19;
+        c.is_online = true;
+    }
+    let world = server.world.world(0).unwrap();
+    world.spawn(&player, &server.view_ctx());
+    client.conn.state = GameState::World;
+    let region = player.region().expect("spawned player's region");
+
+    server.systems.vehicles.mates.character(7, |mates| {
+        mates.mates.push(MateDb {
+            id: 70,
+            item_id: 700,
+            name: "Mount".into(),
+            xp: 100,
+            level: 2,
+            mileage: 3,
+            hp: 41,
+            mp: 23,
+            owner: 7,
+            updated_at: Default::default(),
+            created_at: Default::default(),
+        });
+        // Progress and deletions accumulated since the original load must survive a select.
+        mates.get_mut(700).unwrap().xp += 300;
+        mates.removed.push(71);
+    });
+    let mates = server.systems.vehicles.mates.character_mates(7).unwrap();
+    client.drain();
+
+    for _ in 0..2 {
+        session::select_character(&server, &mut client.conn, selected_id)
+            .await
+            .expect("an in-world select is ignored before any database access");
+        assert!(Arc::ptr_eq(
+            client.conn.active_char.as_ref().unwrap(),
+            &player
+        ));
+        assert_eq!(client.conn.state, GameState::World);
+        assert!(!client.conn.is_closing());
+        let live = server.world.character_by_id(7).unwrap();
+        assert!(Arc::ptr_eq(&live, &player));
+        let spawned = world.character_by_obj_id(player.obj_id).unwrap();
+        assert!(Arc::ptr_eq(&spawned, &player));
+        assert_eq!(server.world.all_characters().len(), 1);
+        assert!(server.world.character_by_id(8).is_none());
+        assert_eq!(player.region(), Some(region));
+        assert!(player.is_visible());
+        assert_eq!(server.enter_world.character_owner(7), Some(1));
+        assert_eq!(server.enter_world.character_owner(8), None);
+        assert!(server.save.pending_departure(7).is_none());
+        {
+            let c = player.data();
+            assert_eq!(
+                (c.money, c.money2, c.labor_power_unsaved),
+                (4321, 8765, -25)
+            );
+            assert_eq!((c.unit.hp, c.unit.mp), (37, 19));
+            assert!(c.is_online);
+        }
+        assert_eq!(
+            server.systems.vehicles.mates.character_mates(7),
+            Some(mates.clone())
+        );
+        assert_eq!(
+            client.conn.characters[0].money, 0,
+            "the lobby copy stays stale"
+        );
+        assert!(
+            client.drain().is_empty(),
+            "no second select's initial packets"
+        );
+        assert!(client.commands().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn repeated_select_preserves_the_live_session() {
+    assert_select_preserves_live_session(7).await;
+}
+
+#[tokio::test]
+async fn selecting_another_character_preserves_the_live_session() {
+    assert_select_preserves_live_session(8).await;
+}
+
+#[tokio::test]
+async fn select_without_an_active_character_still_attempts_the_load() {
+    let server = test_server();
+    server.db.close().await;
+    let mut client = TestClient::new(&server, 1, 1007);
+    client.conn.characters = vec![test_character(7, "Lobby", 100.0, 100.0)];
+
+    let error = session::select_character(&server, &mut client.conn, 7)
+        .await
+        .expect_err("an initial select must reach the database");
+    assert!(
+        matches!(error, crate::GameError::Db(sqlx::Error::PoolClosed)),
+        "{error}"
+    );
+    assert!(client.conn.active_char.is_none());
+    assert_eq!(server.enter_world.character_owner(7), None);
+    assert!(server.world.all_characters().is_empty());
+}
+
+#[tokio::test]
+async fn a_stale_active_character_does_not_block_selecting_after_departure() {
+    let server = test_server();
+    server.db.close().await;
+    let mut old = TestClient::new(&server, 1, 1007);
+    let mut sibling = test_character(8, "Other", 100.0, 100.0);
+    sibling.account_id = 1007;
+    old.conn.characters = vec![sibling];
+    let stale = spawn_player(
+        &server,
+        &old,
+        test_character(7, "Returner", 100.0, 100.0),
+        0x107,
+    );
+    old.conn.active_char = Some(stale.clone());
+    let world = server.world.world(0).unwrap();
+    world.delete(&stale);
+    assert!(server.world.try_remove_character(stale.obj_id));
+
+    // A connection keeps active_char after departure. Even if the object id is reused by a
+    // newer session, only the exact Player still registered in the world triggers the guard.
+    let newer = TestClient::new(&server, 2, 1007);
+    let replacement = spawn_player(
+        &server,
+        &newer,
+        test_character(7, "Returner", 100.0, 100.0),
+        stale.obj_id,
+    );
+    assert_eq!(server.enter_world.reserve_character(7, 2), Ok(true));
+    let error = session::select_character(&server, &mut old.conn, 8)
+        .await
+        .expect_err("a departed active_char must not bypass the next select's load");
+    assert!(
+        matches!(error, crate::GameError::Db(sqlx::Error::PoolClosed)),
+        "{error}"
+    );
+    assert!(Arc::ptr_eq(old.conn.active_char.as_ref().unwrap(), &stale));
+    assert!(Arc::ptr_eq(
+        &server.world.character_by_id(7).unwrap(),
+        &replacement
+    ));
+    assert_eq!(server.enter_world.character_owner(7), Some(2));
+    assert_eq!(server.enter_world.character_owner(8), None);
+    assert!(server.save.pending_departure(7).is_none());
+}
+
+#[tokio::test]
+async fn force_release_retains_departing_state_for_the_next_financial_snapshot() {
+    let server = test_server();
+    server.db.close().await;
+    let departing_client = TestClient::new(&server, 1, 1007);
+    let other_client = TestClient::new(&server, 2, 1008);
+    let departing = spawn_player(
+        &server,
+        &departing_client,
+        test_character(7, "Departing", 100.0, 100.0),
+        0x107,
+    );
+    let other = spawn_player(
+        &server,
+        &other_client,
+        test_character(8, "Staying", 110.0, 110.0),
+        0x108,
+    );
+    {
+        let mut c = departing.data();
+        c.money = 4321;
+        c.money2 = 8765;
+        c.labor_power_unsaved = -25;
+        c.unit.hp = 37;
+    }
+    other.data().money = 99;
+    assert_eq!(server.enter_world.reserve_character(7, 1), Ok(true));
+    // An abandoned select can leave a reservation without a corresponding world entry.
+    assert_eq!(server.enter_world.reserve_character(9, 1), Ok(true));
+    assert_eq!(server.enter_world.reserve_character(8, 2), Ok(true));
+    let weak = Arc::downgrade(&departing);
+    let obj_id = departing.obj_id;
+    let region = other.region().unwrap();
+    drop(departing);
+
+    // There need not be an active_char on the failed connection for fallback cleanup to work.
+    assert!(departing_client.conn.active_char.is_none());
+    session::force_release_connection(&server, 1);
+    let retained = weak
+        .upgrade()
+        .expect("the departure set must retain the removed Player");
+    let pending = server.save.pending_departure(7).expect("pending departure");
+    assert!(Arc::ptr_eq(&pending, &retained));
+    assert!(server.world.character_by_id(7).is_none());
+    assert!(server.world.character_by_obj_id(obj_id).is_none());
+    let world = server.world.world(0).unwrap();
+    assert!(world.object(obj_id).is_none());
+    assert!(retained.region().is_none());
+    assert!(!retained.is_visible());
+    assert_eq!(server.enter_world.character_owner(7), None);
+    assert_eq!(server.enter_world.character_owner(9), None);
+    assert!(server.save.pending_departure(9).is_none());
+
+    // Repeated fallback cleanup and a connection with no active player are harmless.
+    session::force_release_connection(&server, 1);
+    session::force_release_connection(&server, 999);
+    assert!(Arc::ptr_eq(
+        &server.world.character_by_id(8).unwrap(),
+        &other
+    ));
+    assert!(Arc::ptr_eq(
+        &world.character_by_obj_id(other.obj_id).unwrap(),
+        &other
+    ));
+    assert_eq!(server.world.all_characters().len(), 1);
+    assert_eq!(server.enter_world.character_owner(8), Some(2));
+    assert_eq!(other.region(), Some(region));
+    assert!(other.is_visible());
+    assert_eq!(other.data().money, 99);
+    assert!(server.save.pending_departure(8).is_none());
+
+    let snapshot = capture_financial_snapshot(&server);
+    assert_eq!(
+        snapshot.characters.len(),
+        2,
+        "each live/departing wallet once"
+    );
+    let (player, saved) = snapshot
+        .characters
+        .iter()
+        .find(|(p, _)| p.character_id == 7)
+        .expect("force-removed player in the next save");
+    assert!(Arc::ptr_eq(player, &retained));
+    assert_eq!(
+        (saved.money, saved.money2, saved.labor_power_unsaved),
+        (4321, 8765, -25)
+    );
+    assert_eq!(saved.unit.hp, 37);
+    let (player, saved) = snapshot
+        .characters
+        .iter()
+        .find(|(p, _)| p.character_id == 8)
+        .expect("unrelated player still saved");
+    assert!(Arc::ptr_eq(player, &other));
+    assert_eq!(saved.money, 99);
+}
 
 #[tokio::test]
 async fn the_same_character_cannot_enter_the_world_twice() {
