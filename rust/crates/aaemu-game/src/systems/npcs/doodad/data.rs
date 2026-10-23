@@ -1864,7 +1864,8 @@ impl DoodadData {
 
     /// `GetFunc(funcGroupId, skillId)`: the first func of the group whose `SkillId` is the
     /// skill, or whose `DoodadFuncFakeUse.FakeSkillId` / `DoodadFuncUse.SkillId` (> 0) is the
-    /// skill; else the first func without skill and with `NextPhase != -1`; else the first func
+    /// skill; else a matching legacy gathering compatibility skill; else the first func without
+    /// skill and with `NextPhase != -1`; else the first func
     /// without skill.
     pub fn func_for_skill(&self, func_group_id: u32, skill_id: u32) -> Option<&DoodadFunc> {
         let funcs = self.funcs_by_groups.get(&func_group_id)?;
@@ -1885,6 +1886,17 @@ impl DoodadData {
                 }
                 _ => {}
             }
+        }
+        // The legacy gathering compatibility adapter supplies a skill when func_skill_id
+        // is absent. Resolve it before the unchanged generic skill-less fallback.
+        if let Some(func) = funcs.iter().find(|f| {
+            f.skill_id == 0
+                && self
+                    .func_template(f.func_id, &f.func_type)
+                    .and_then(super::gathering::legacy_skill)
+                    == Some(skill_id)
+        }) {
+            return Some(func);
         }
         // First we skip functions with NextPhase = -1
         if let Some(func) = funcs.iter().find(|f| f.skill_id == 0 && f.next_phase != -1) {

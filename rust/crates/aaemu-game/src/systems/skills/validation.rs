@@ -98,6 +98,12 @@ pub(super) fn check(
     target: &Target,
 ) -> Result<(), (u8, u32)> {
     let template = &skill.template;
+    if let Some(doodad) = target.as_obj().and_then(WorldObject::as_doodad) {
+        if !crate::systems::npcs::doodad::gathering::allows_skill(server, doodad, template, caster)
+        {
+            return fail("skill_invalid_target");
+        }
+    }
     let (hp, buff_ids, moving) = caster
         .with_unit(|u| {
             let unit = u.unit();

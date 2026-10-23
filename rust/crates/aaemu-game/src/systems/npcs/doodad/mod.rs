@@ -6,6 +6,7 @@ pub mod coffer;
 pub mod data;
 pub mod db;
 pub mod funcs;
+pub mod gathering;
 pub mod interactions;
 pub mod logic;
 pub mod manager;

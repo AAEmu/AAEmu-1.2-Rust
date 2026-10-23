@@ -1445,6 +1445,31 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   tool is data only: the C# server never validated `SkillTemplate.MainhandToolId` (the 1.2
   mining / shear ids 2654 and 15607 do not even resolve to `items` rows) and neither does
   Rust, so there is no server-side tool refusal at 1.2 parity.
+  Authorization hardening (2026-10-23): phase progression now requires the current func's
+  authored skill before cast resources/effects and again at phase execution. A gathering
+  caster must be a character: an owned mate/slave cannot advance the phase while
+  bypassing character labor/quest checks, leaving a free loot retry for its owner. The generic
+  `GetFunc` skill-less fallback is still used for automatic loot chaining, but cannot authorize
+  gathering. Legacy `OreMine`/`RockMine`/`Shear` rows have zero/null `func_skill_id`; their
+  intentional server compatibility adapter uses the shipped basic skills 11106 for ore
+  (3 LP), 11107 for rock (0 LP), and 11642 for shearing (0 LP, quest 266 requirement). Skill
+  names, tools and effects support these pairings, but local 1.2 native/UI selection was not
+  verified; this is a defined server deviation, not a claim of native dispatch parity. An
+  explicit row skill takes precedence. The adapter selects a matching legacy function
+  before the generic fallback, including phases exposing multiple gathering types. Free Use
+  skill 15212 cannot mine ore 1534 (phase 2387 -> loot 8077), nor can the zero-labor rock skill
+  replace the ore skill. Skill-driven `Use` and `FakeUse` gathering keeps its binding (shearing
+  13802 on template 518 phase 5649, rock 11107 on template 1354 phase 2244). Gathering dispatch
+  is recognized by compact's tool asset and interaction metadata; authorization is
+  always an exact row/template/implicit skill match, without requiring every gather to cost
+  labor or requiring inventory tools that do not exist in the 1.2 item data.
+  Content limitation: the shipped compact retains rock 310's loot reference to item 4734
+  and sheep 307's references to item 3, but neither item exists in `items`. This skill
+  adapter does not create those production item definitions or replace their loot; normal
+  economy validation still refuses those missing drops with `BagInvalidItem`.
+  The ignored compact regression explicitly supplies in-memory, test-only item templates
+  for 4734 and 3 to exercise the authored rock/sheep dispatch and quantities. Ore 1534 uses
+  real item 8077. Passing the stand-in cases is not proof of complete live/client content.
 
 * systems::ai (2026-10-15): the optional compact patch
   `SQL/patches/compact/2026-10-14-fix-npc-ai-param-syntax.sql` repairs malformed Lua syntax

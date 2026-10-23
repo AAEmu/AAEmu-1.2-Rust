@@ -75,6 +75,9 @@ pub fn use_func(
     let Some(_operation) = super::phase::Operation::enter(&ctx.doodad) else {
         return;
     };
+    if !super::gathering::allows_template(ctx.server, &ctx.doodad, t, skill_id, caster) {
+        return;
+    }
     use FuncTemplate as F;
     match t {
         // --- items / loot ---
@@ -135,7 +138,9 @@ pub fn use_func(
         // (`doodad_func_shears`); loot, depletion and regrowth live in the next func group
         // (e.g. ore 255 -> 425 LootItem -> 426 Final / RatioRespawn, sheared 56 -> 57 LootItem
         // + Timer). The C# bodies only logged, so the phase never advanced; advancing is what
-        // makes the authored loot / respawn chain run. The gathering skill covers labor
+        // makes the authored loot / respawn chain run. Gathering authorization above and
+        // before the cast prevents skill-less fallback from substituting a free Use skill.
+        // The gathering skill covers labor
         // (`consume_lp`) and the 1.2 server never validated `mainhand_tool_id`.
         F::OreMine(_) => {
             tracing::trace!("DoodadFuncOreMine");

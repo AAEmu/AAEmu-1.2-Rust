@@ -210,19 +210,16 @@ async fn to_next_phase_funcs_and_stubs() {
         FuncTemplate::Harvest(DoodadFuncHarvest { id: 1 }),
         FuncTemplate::OpenFarmInfo(DoodadFuncOpenFarmInfo { id: 1, farm_id: 0 }),
         FuncTemplate::PuzzleRoll(DoodadFuncPuzzleRoll::default()),
-        FuncTemplate::OreMine(DoodadFuncOreMine { id: 1 }),
-        FuncTemplate::RockMine(DoodadFuncRockMine { id: 1 }),
-        FuncTemplate::Shear(DoodadFuncShear {
-            id: 1,
-            shear_type_id: 1,
-            shear_term: 60_000,
-        }),
     ] {
         fx.doodad.data().phase.to_next_phase = false;
         fx.run(t, 0, 0);
         assert!(fx.to_next());
     }
     for t in [
+        // Gathering templates cannot advance without an authorized current-phase skill.
+        FuncTemplate::OreMine(DoodadFuncOreMine { id: 1 }),
+        FuncTemplate::RockMine(DoodadFuncRockMine { id: 1 }),
+        FuncTemplate::Shear(DoodadFuncShear::default()),
         FuncTemplate::StoreUi(DoodadFuncStoreUi::default()),
         FuncTemplate::EvidenceItemLoot(DoodadFuncEvidenceItemLoot::default()),
         FuncTemplate::TreeByProductsCollect(DoodadFuncTreeByProductsCollect::default()),

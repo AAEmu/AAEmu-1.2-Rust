@@ -12,6 +12,7 @@ use aaemu_commons::{Marshal, PacketStream};
 
 use crate::data::items::{GradeTemplate, ItemTemplate};
 use crate::data::GameData;
+use crate::net::registry::ClientPacket;
 use crate::opcodes::sc;
 use crate::server::GameServer;
 use crate::systems::economy::inventory::Inv;
@@ -51,6 +52,7 @@ const SHEEP_SHEARED: u32 = 22;
 
 const ORE_MINE_SKILL: u32 = 9100;
 const SHEAR_SKILL: u32 = 9101;
+const GENERIC_USE_SKILL: u32 = 15212;
 /// `mainhand_tool_id` of the 1.2 mining skills (data only: no server-side check).
 const PICKAXE: u32 = 2654;
 
@@ -105,6 +107,19 @@ impl DoodadBuilder {
         };
         self.data.funcs_by_id.insert(key, f.clone());
         self.data.funcs_by_groups.entry(group).or_default().push(f);
+        self
+    }
+
+    fn skill(mut self, group: u32, skill_id: u32) -> Self {
+        let f = self
+            .data
+            .funcs_by_groups
+            .get_mut(&group)
+            .unwrap()
+            .last_mut()
+            .unwrap();
+        f.skill_id = skill_id;
+        self.data.funcs_by_id.insert(f.func_key, f.clone());
         self
     }
 
@@ -197,6 +212,7 @@ fn game_data() -> GameData {
     s.add_skill(mining);
     let mut shear = crate::systems::skills::tests::skill_template(SHEAR_SKILL);
     shear.consume_labor_power = SHEAR_LABOR;
+    shear.mainhand_tool_id = 15607;
     shear.target_type = SkillTargetType::Doodad as i32;
     shear
         .effects
@@ -206,6 +222,16 @@ fn game_data() -> GameData {
             SHEAR_EFFECT,
         ));
     s.add_skill(shear);
+    let mut generic = crate::systems::skills::tests::skill_template(GENERIC_USE_SKILL);
+    generic.target_type = SkillTargetType::Doodad as i32;
+    generic
+        .effects
+        .push(crate::systems::skills::tests::skill_effect(
+            SHEAR_EFFECT,
+            EffectKind::InteractionEffect,
+            SHEAR_EFFECT,
+        ));
+    s.add_skill(generic);
 
     d.systems.npcs.doodad = DoodadBuilder::default()
         .template(VEIN, &[(VEIN_START, 1), (VEIN_LOOT, 2), (VEIN_DEPLETED, 2)])
@@ -214,6 +240,7 @@ fn game_data() -> GameData {
             FuncTemplate::OreMine(DoodadFuncOreMine { id: 1 }),
             VEIN_LOOT as i32,
         )
+        .skill(VEIN_START, ORE_MINE_SKILL)
         .func(VEIN_LOOT, loot(2, ORE), VEIN_DEPLETED as i32)
         .phase_func(VEIN_DEPLETED, regrow_timer(3, VEIN_START as i32))
         .template(ROCK, &[(ROCK_START, 1), (ROCK_LOOT, 2), (ROCK_DEPLETED, 2)])
@@ -222,6 +249,7 @@ fn game_data() -> GameData {
             FuncTemplate::RockMine(DoodadFuncRockMine { id: 7 }),
             ROCK_LOOT as i32,
         )
+        .skill(ROCK_START, ORE_MINE_SKILL)
         .func(ROCK_LOOT, loot(8, ORE), ROCK_DEPLETED as i32)
         .phase_func(ROCK_DEPLETED, regrow_timer(9, ROCK_START as i32))
         .template(
@@ -237,6 +265,7 @@ fn game_data() -> GameData {
             }),
             SHEEP_LOOT as i32,
         )
+        .skill(SHEEP_START, SHEAR_SKILL)
         .func(SHEEP_LOOT, loot(5, WOOL), SHEEP_SHEARED as i32)
         .phase_func(SHEEP_SHEARED, regrow_timer(6, SHEEP_START as i32))
         .data;
@@ -250,8 +279,15 @@ struct Fx {
 }
 
 fn fx() -> Fx {
-    let mut data = game_data();
+    fx_with(game_data())
+}
+
+fn fx_with(mut data: GameData) -> Fx {
     open_client_skills(&mut data);
+    fx_loaded(data)
+}
+
+fn fx_loaded(data: GameData) -> Fx {
     let server = std::sync::Arc::new(test_server_with(data));
     server.set_self();
     crate::systems::skills::bind(&server);
@@ -265,6 +301,10 @@ fn fx() -> Fx {
     let mut client = TestClient::new(&server, 1, 1001);
     let mut c = test_character(1, "Miner", 100.0, 100.0);
     c.labor_power = LABOR_BASE as i16;
+    c.unit.hp = 1000;
+    c.unit.max_hp = 1000;
+    c.unit.mp = 1000;
+    c.unit.max_mp = 1000;
     let player = spawn_player(&server, &client, c, 0x100);
     client.conn.active_char = Some(player.clone());
     client.drain();
@@ -286,14 +326,19 @@ impl Fx {
     }
 
     fn cast(&mut self, skill: u32, d: &DoodadRef) -> Vec<(u16, Vec<u8>)> {
+        self.cast_as(skill, SkillCaster::Unit(self.player.obj_id), d)
+    }
+
+    fn cast_as(&mut self, skill: u32, caster: SkillCaster, d: &DoodadRef) -> Vec<(u16, Vec<u8>)> {
+        self.client.drain(); // Only observe frames caused by this cast, not doodad creation.
         self.player.data().unit.skill_last_used_ms = 0;
-        let packet = CSStartSkillPacket {
-            skill_id: skill,
-            caster: SkillCaster::Unit(self.player.obj_id),
-            target: SkillCastTarget::Doodad(d.obj_id),
-            flag: 0,
-            skill_object: SkillObject::None,
-        };
+        let mut wire = PacketStream::new();
+        wire.write_u32(skill);
+        caster.write(&mut wire);
+        SkillCastTarget::Doodad(d.obj_id).write(&mut wire);
+        wire.write_u8(0);
+        let packet =
+            CSStartSkillPacket::read(&mut PacketStream::from_bytes(wire.into_bytes())).unwrap();
         start_skill(&self.server, &mut self.client.conn, packet);
         self.client.drain()
     }
@@ -310,12 +355,539 @@ impl Fx {
             .tasks
             .advance(&self.server, ms)
     }
+
+    async fn cast_and_wait(&mut self, skill: u32, d: &DoodadRef) -> Vec<(u16, Vec<u8>)> {
+        let mut frames = self.cast(skill, d);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+        while self.player.data().unit.skill_state.skill_task.is_some()
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            self.player.data().unit.skill_state.skill_task.is_none(),
+            "cast {skill} did not finish"
+        );
+        frames.extend(self.client.drain());
+        frames
+    }
 }
 
 fn body(p: &dyn Marshal) -> Vec<u8> {
     let mut s = PacketStream::new();
     p.write(&mut s);
     s.into_bytes()
+}
+
+fn assert_refused(fx: &Fx, d: &DoodadRef, skill: u32, frames: &[(u16, Vec<u8>)]) {
+    let mut expected = crate::systems::skills::packets::SCSkillStartedPacket::new(
+        skill,
+        0,
+        SkillCaster::Unit(fx.player.obj_id),
+        SkillCastTarget::Doodad(d.obj_id),
+        SkillObject::None,
+    );
+    expected.set_skill_result(skill_result::INVALID_TARGET);
+    assert!(
+        frames.contains(&(sc::SCSkillStartedPacket, body(&expected))),
+        "{frames:?}"
+    );
+    assert!(!frames.iter().any(|f| f.0 == sc::SCDoodadPhaseChangedPacket));
+    let c = fx.player.data();
+    assert_eq!(c.unit.global_cooldown_ms, 0);
+    assert_eq!(c.unit.skill_last_used_ms, 0);
+    assert!(c.unit.skill_state.skill_task.is_none());
+}
+
+#[tokio::test]
+async fn generic_use_15212_cannot_gather_at_zero_labor() {
+    for (template, start, authored) in [
+        (VEIN, VEIN_START, false),
+        (ROCK, ROCK_START, false),
+        (SHEEP, SHEEP_START, false),
+        (VEIN, VEIN_START, true),
+        (ROCK, ROCK_START, true),
+        (SHEEP, SHEEP_START, true),
+    ] {
+        let mut data = game_data();
+        if !authored {
+            data.systems
+                .npcs
+                .doodad
+                .funcs_by_groups
+                .get_mut(&start)
+                .unwrap()[0]
+                .skill_id = 0;
+        }
+        let mut fx = fx_with(data);
+        let d = fx.doodad(template);
+        fx.player.data().labor_power = 0;
+        let mana = fx.player.data().unit.mp;
+
+        let frames = fx.cast(GENERIC_USE_SKILL, &d);
+
+        assert_eq!(d.data().func_group_id, start, "target {template}");
+        assert_eq!(fx.count(ORE), 0);
+        assert_eq!(fx.count(WOOL), 0);
+        assert_eq!(fx.player.data().labor_power, 0);
+        assert_eq!(fx.player.data().unit.mp, mana);
+        assert_refused(&fx, &d, GENERIC_USE_SKILL, &frames);
+        assert_eq!(fx.advance(REGROW_MS as u64), 0);
+    }
+}
+
+#[tokio::test]
+async fn a_cheaper_mining_skill_cannot_replace_the_authored_skill() {
+    let mut data = game_data();
+    let mut cheap = (**data.systems.skills.skill(ORE_MINE_SKILL).unwrap()).clone();
+    cheap.id = 9200;
+    cheap.consume_labor_power = 0;
+    cheap.mana_cost = 25;
+    // Same tool and InteractionEffect as the real gathering skill: classification alone
+    // is not enough; the current function's authored skill must match.
+    data.systems.skills.add_skill(cheap);
+    let mut fx = fx_with(data);
+    fx.player.data().labor_power = 0;
+    let d = fx.doodad(VEIN);
+    let mana = fx.player.data().unit.mp;
+    let frames = fx.cast(9200, &d);
+    assert_eq!(fx.player.data().unit.mp, mana);
+    assert_eq!(d.data().func_group_id, VEIN_START);
+    assert_eq!(fx.count(ORE), 0);
+    assert_refused(&fx, &d, 9200, &frames);
+}
+
+#[tokio::test]
+async fn gathering_use_and_fake_use_dispatch_require_their_authored_skill() {
+    for fake in [false, true] {
+        let mut data = game_data();
+        let doodads = &mut data.systems.npcs.doodad;
+        let t = if fake {
+            FuncTemplate::FakeUse(DoodadFuncFakeUse {
+                id: 50,
+                fake_skill_id: ORE_MINE_SKILL,
+                ..Default::default()
+            })
+        } else {
+            FuncTemplate::Use(DoodadFuncUse {
+                id: 50,
+                skill_id: 0,
+            })
+        };
+        let f = &mut doodads.funcs_by_groups.get_mut(&VEIN_START).unwrap()[0];
+        f.func_type = t.func_type().into();
+        f.func_id = t.id();
+        // Match compact's normal Use row binding and FakeUse template binding.
+        f.skill_id = if fake { 0 } else { ORE_MINE_SKILL };
+        doodads.funcs_by_id.insert(f.func_key, f.clone());
+        doodads
+            .func_templates
+            .entry(t.func_type())
+            .or_default()
+            .insert(t.id(), t);
+        let mut fx = fx_with(data);
+        let d = fx.doodad(VEIN);
+        fx.player.data().labor_power = 0;
+        let frames = fx.cast(GENERIC_USE_SKILL, &d);
+        assert_eq!(d.data().func_group_id, VEIN_START);
+        assert_eq!(fx.count(ORE), 0);
+        assert_refused(&fx, &d, GENERIC_USE_SKILL, &frames);
+
+        fx.player.data().labor_power = LABOR_BASE as i16;
+        fx.cast(ORE_MINE_SKILL, &d);
+        assert_eq!(d.data().func_group_id, VEIN_DEPLETED, "fake={fake}");
+        assert_eq!(fx.count(ORE), 1);
+        assert_eq!(
+            fx.player.data().labor_power,
+            (LABOR_BASE - MINING_LABOR) as i16
+        );
+    }
+}
+
+#[tokio::test]
+async fn authorized_gathering_runs_every_skill_less_automatic_loot_row() {
+    let mut data = game_data();
+    let mut builder = DoodadBuilder {
+        data: std::mem::take(&mut data.systems.npcs.doodad),
+    };
+    builder = builder.func(VEIN_LOOT, loot(60, WOOL), VEIN_DEPLETED as i32);
+    data.systems.npcs.doodad = builder.data;
+    let mut fx = fx_with(data);
+    let d = fx.doodad(VEIN);
+    fx.cast(ORE_MINE_SKILL, &d);
+    assert_eq!(fx.count(ORE), 1);
+    assert_eq!(fx.count(WOOL), 1);
+    assert_eq!(d.data().func_group_id, VEIN_DEPLETED);
+    assert_eq!(
+        fx.player.data().labor_power,
+        (LABOR_BASE - MINING_LABOR) as i16
+    );
+}
+
+#[tokio::test]
+async fn owned_mate_cannot_advance_gathering_without_character_labor() {
+    let mut fx = fx();
+    fx.player.data().labor_power = 0;
+    let mut mate_data = crate::models::mate::Mate::new(1, 1);
+    mate_data.owner_obj_id = fx.player.obj_id;
+    mate_data.unit.hp = 1000;
+    mate_data.unit.mp = 1000;
+    mate_data.unit.transform.set_xyz(100.0, 100.0, 100.0);
+    let mate = crate::world::Entity::new(0x600, mate_data);
+    fx.server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&mate, &fx.server.view_ctx());
+    let d = fx.doodad(VEIN);
+    fx.cast_as(
+        ORE_MINE_SKILL,
+        SkillCaster::Mount {
+            obj_id: mate.obj_id,
+            mount_skill_template_id: 0,
+        },
+        &d,
+    );
+    assert_eq!(d.data().func_group_id, VEIN_START);
+    assert_eq!(fx.count(ORE), 0);
+    assert_eq!(fx.player.data().labor_power, 0);
+    assert_eq!(mate.data().unit.mp, 1000);
+    assert_eq!(mate.data().unit.skill_last_used_ms, 0);
+    assert!(mate.data().unit.skill_state.skill_task.is_none());
+
+    // The owner cannot follow a free mate cast with a generic loot retry.
+    let frames = fx.cast(GENERIC_USE_SKILL, &d);
+    assert_refused(&fx, &d, GENERIC_USE_SKILL, &frames);
+    assert_eq!(fx.count(ORE), 0);
+    assert_eq!(d.data().func_group_id, VEIN_START);
+
+    // The same target/skill works for its character caster and pays the normal cost.
+    fx.player.data().labor_power = LABOR_BASE as i16;
+    fx.cast(ORE_MINE_SKILL, &d);
+    assert_eq!(fx.count(ORE), 1);
+    assert_eq!(
+        fx.player.data().labor_power,
+        (LABOR_BASE - MINING_LABOR) as i16
+    );
+}
+
+#[tokio::test]
+async fn direct_phase_execution_cannot_bypass_gathering_authorization() {
+    let mut data = game_data();
+    data.systems
+        .npcs
+        .doodad
+        .funcs_by_groups
+        .get_mut(&VEIN_START)
+        .unwrap()[0]
+        .skill_id = 0;
+    let fx = fx_with(data);
+    let d = fx.doodad(VEIN);
+    let world = fx.server.world.world(0).unwrap();
+    let ctx = super::runtime::DoodadCtx::new(&fx.server, world, d.clone());
+    let caster = crate::world::WorldObject::from(&fx.player);
+    super::phase::use_doodad(&ctx, Some(&caster), GENERIC_USE_SKILL, 0);
+    assert_eq!(d.data().func_group_id, VEIN_START);
+    assert_eq!(fx.count(ORE), 0);
+}
+
+#[tokio::test]
+async fn unbound_gathering_funcs_require_their_implicit_skill() {
+    let mut data = game_data();
+    data.systems
+        .npcs
+        .doodad
+        .funcs_by_groups
+        .get_mut(&VEIN_START)
+        .unwrap()[0]
+        .skill_id = 0;
+    let mut fx = fx_with(data);
+    let d = fx.doodad(VEIN);
+    let frames = fx.cast(ORE_MINE_SKILL, &d);
+    assert_eq!(fx.player.data().labor_power, LABOR_BASE as i16);
+    assert_eq!(fx.count(ORE), 0);
+    assert_eq!(d.data().func_group_id, VEIN_START);
+    assert_refused(&fx, &d, ORE_MINE_SKILL, &frames);
+}
+
+#[tokio::test]
+async fn legacy_gathering_uses_implicit_skills_and_authored_labor() {
+    for (template, group, skill, source, cost, item, after) in [
+        (
+            VEIN,
+            VEIN_START,
+            11106,
+            ORE_MINE_SKILL,
+            3,
+            ORE,
+            VEIN_DEPLETED,
+        ),
+        (
+            ROCK,
+            ROCK_START,
+            11107,
+            ORE_MINE_SKILL,
+            0,
+            ORE,
+            ROCK_DEPLETED,
+        ),
+        (
+            SHEEP,
+            SHEEP_START,
+            11642,
+            SHEAR_SKILL,
+            0,
+            WOOL,
+            SHEEP_SHEARED,
+        ),
+    ] {
+        let mut data = game_data();
+        let mut gather = (**data.systems.skills.skill(source).unwrap()).clone();
+        gather.id = skill;
+        gather.consume_labor_power = cost;
+        data.systems.skills.add_skill(gather);
+        data.systems
+            .npcs
+            .doodad
+            .funcs_by_groups
+            .get_mut(&group)
+            .unwrap()[0]
+            .skill_id = 0;
+        if template == VEIN {
+            // A phase can expose multiple legacy funcs. Select the matching implicit
+            // skill before the generic first skill-less row, even if that row is RockMine.
+            let builder = DoodadBuilder {
+                data: std::mem::take(&mut data.systems.npcs.doodad),
+            }
+            .func(
+                VEIN_START,
+                FuncTemplate::RockMine(DoodadFuncRockMine { id: 70 }),
+                VEIN_LOOT as i32,
+            );
+            data.systems.npcs.doodad = builder.data;
+            data.systems
+                .npcs
+                .doodad
+                .funcs_by_groups
+                .get_mut(&group)
+                .unwrap()
+                .swap(0, 1);
+        }
+        let mut fx = fx_with(data);
+        let d = fx.doodad(template);
+        fx.cast(skill, &d);
+        assert_eq!(fx.player.data().labor_power, (LABOR_BASE - cost) as i16);
+        assert_eq!(fx.count(item), 1);
+        assert_eq!(d.data().func_group_id, after);
+    }
+}
+
+#[tokio::test]
+async fn shearing_without_labor_is_refused_before_gathering() {
+    let mut fx = fx();
+    fx.player.data().labor_power = 0;
+    let d = fx.doodad(SHEEP);
+    let frames = fx.cast(SHEAR_SKILL, &d);
+    assert_eq!(fx.count(WOOL), 0);
+    assert_eq!(d.data().func_group_id, SHEEP_START);
+    assert_eq!(fx.player.data().labor_power, 0);
+    let mut expected = crate::systems::skills::packets::SCSkillStartedPacket::new(
+        SHEAR_SKILL,
+        0,
+        SkillCaster::Unit(fx.player.obj_id),
+        SkillCastTarget::Doodad(d.obj_id),
+        SkillObject::None,
+    );
+    expected.set_skill_result(skill_result::NEED_LABOR_POWER);
+    assert!(frames.contains(&(sc::SCSkillStartedPacket, body(&expected))));
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_compact_gathering_with_test_only_removed_item_templates() {
+    use crate::data::client_files::ClientFileManager;
+
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let mut data = game_data();
+    data.skills = crate::data::skills::SkillData::load(&conn).unwrap();
+    data.systems.skills =
+        crate::systems::skills::Data::load_from(&conn, &ClientFileManager::new()).unwrap();
+    data.systems.npcs.doodad = DoodadData::load_from(&conn).unwrap();
+    data.items = crate::data::items::ItemData::load(&conn).unwrap();
+    let has_base_item = |id| {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM items WHERE id = ?1)",
+            [id],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap()
+    };
+    // Ore 1534 uses its complete, real compact item definition; never synthesize 8077.
+    assert!(has_base_item(8077));
+    // TEST ONLY: compact retains rock/sheep loot references to removed items 4734 and 3.
+    // Minimal in-memory stand-ins isolate authored dispatch, quantities and authorization.
+    // No skill, requirement, loot row, compact file or production item data is modified;
+    // successful stand-in cases do not establish complete usable live/client content.
+    for test_only_missing_item_template in [4734, 3] {
+        if !has_base_item(test_only_missing_item_template) {
+            // The loader can retain orphan subtype shells: item 3 has an item_weapons
+            // row but no base item, leaving max_count at zero. Replace that shell too.
+            data.items.templates.insert(
+                test_only_missing_item_template,
+                ItemTemplate::plain(test_only_missing_item_template, 100),
+            );
+        }
+    }
+    assert!(data.skills.is_client_sourced_skill(GENERIC_USE_SKILL));
+    let generic = data.systems.skills.skill(GENERIC_USE_SKILL).unwrap();
+    assert_eq!(generic.consume_labor_power, 0);
+    assert_eq!(generic.casting_time, 0);
+    assert!(!data
+        .systems
+        .skills
+        .unit_reqs
+        .get("Skill")
+        .unwrap()
+        .iter()
+        .any(|r| r.owner_id == GENERIC_USE_SKILL));
+
+    let mut fx = fx_loaded(data);
+    fx.player.data().labor_power = 0;
+    for (template, group, row) in [(1534, 2387, 2213), (310, 61, 1293), (307, 56, 53)] {
+        let f = fx.server.game_data.systems.npcs.doodad.func(row).unwrap();
+        assert_eq!(f.skill_id, 0);
+        assert_eq!(f.group_id, group);
+        let d = fx.doodad(template);
+        d.data().func_group_id = group;
+        fx.client.drain();
+        let frames = fx.cast(GENERIC_USE_SKILL, &d);
+        assert_eq!(d.data().func_group_id, group, "template {template}");
+        for item in [8077, 4734, 3] {
+            assert_eq!(fx.count(item), 0, "template {template}, item {item}");
+        }
+        assert_eq!(fx.player.data().labor_power, 0);
+        assert_refused(&fx, &d, GENERIC_USE_SKILL, &frames);
+        manager::delete(&fx.server, &fx.server.world.world(0).unwrap(), &d);
+    }
+    // Real compact encodes authored shearing on Use.func_skill_id, and the legacy rock
+    // skill on FakeUse.fake_skill_id. Neither is inferred from a generic Use effect.
+    for (template, group, skill) in [(518, 5649, 13802), (1354, 2244, 11107)] {
+        let d = fx.doodad(template);
+        d.data().func_group_id = group;
+        let skills = &fx.server.game_data.systems.skills;
+        assert!(super::gathering::allows_skill(
+            &fx.server,
+            &d,
+            skills.skill(skill).unwrap(),
+            &crate::world::WorldObject::from(&fx.player),
+        ));
+        assert!(!super::gathering::allows_skill(
+            &fx.server,
+            &d,
+            skills.skill(GENERIC_USE_SKILL).unwrap(),
+            &crate::world::WorldObject::from(&fx.player),
+        ));
+        manager::delete(&fx.server, &fx.server.world.world(0).unwrap(), &d);
+    }
+    // Rock's free skill has the same mining InteractionEffect kind. It cannot substitute
+    // for ore's implicit three-labor skill, even though both skills are client-common.
+    fx.player.data().unit.global_cooldown_ms = 0;
+    let ore = fx.doodad(1534);
+    ore.data().func_group_id = 2387;
+    let frames = fx.cast(11107, &ore);
+    assert_refused(&fx, &ore, 11107, &frames);
+    assert_eq!(fx.count(8077), 0);
+    assert_eq!(ore.data().func_group_id, 2387);
+    fx.player.data().labor_power = 2;
+    let frames = fx.cast(11106, &ore);
+    let mut expected = crate::systems::skills::packets::SCSkillStartedPacket::new(
+        11106,
+        0,
+        SkillCaster::Unit(fx.player.obj_id),
+        SkillCastTarget::Doodad(ore.obj_id),
+        SkillObject::None,
+    );
+    expected.set_skill_result(skill_result::NEED_LABOR_POWER);
+    assert!(
+        frames.contains(&(sc::SCSkillStartedPacket, body(&expected))),
+        "{frames:?}"
+    );
+    assert_eq!(fx.player.data().labor_power, 2);
+    assert_eq!(fx.count(8077), 0);
+    assert_eq!(ore.data().func_group_id, 2387);
+    manager::delete(&fx.server, &fx.server.world.world(0).unwrap(), &ore);
+
+    for (template, group, skill, cost, item, minimum, after) in [
+        (1534, 2387, 11106, 3, 8077, 1, 2389),
+        (310, 61, 11107, 0, 4734, 1, 1280),
+        (307, 56, 11642, 0, 3, 8, 57),
+    ] {
+        assert!(fx.server.game_data.skills.is_common_skill(skill));
+        let authored = fx.server.game_data.systems.skills.skill(skill).unwrap();
+        assert_eq!(authored.consume_labor_power, cost);
+        assert_eq!(authored.casting_time, 5000);
+        fx.player.data().labor_power = LABOR_BASE as i16;
+        fx.player.data().unit.global_cooldown_ms = 0;
+        let d = fx.doodad(template);
+        d.data().func_group_id = group;
+        let before = fx.count(item);
+        if skill == 11642 {
+            // Keep the real precomplete-quest requirement (kind 37) operative. Establish
+            // its state immediately before this cast: preceding loot events sync quests.
+            let frames = fx.cast(skill, &d);
+            let mut expected = crate::systems::skills::packets::SCSkillStartedPacket::new(
+                skill,
+                0,
+                SkillCaster::Unit(fx.player.obj_id),
+                SkillCastTarget::Doodad(d.obj_id),
+                SkillObject::None,
+            );
+            expected
+                .set_skill_result(crate::systems::skills::unit_reqs::skill_result_for_key(
+                    "skill_urk_precomplete_quest_context",
+                ))
+                .set_result_uint(266);
+            assert!(
+                frames.contains(&(sc::SCSkillStartedPacket, body(&expected))),
+                "{frames:?}"
+            );
+            assert_eq!(d.data().func_group_id, group);
+            assert_eq!(fx.count(item), before);
+            fx.player
+                .data()
+                .quests
+                .active
+                .push(crate::models::char_data::ActiveQuest {
+                    id: 266,
+                    template_id: 266,
+                    status: crate::systems::quests::model::status::PROGRESS,
+                    objectives: [0; 5],
+                    step: crate::systems::quests::model::kind::PROGRESS,
+                    acceptor_type: 0,
+                    component_id: 0,
+                    acceptor_id: 0,
+                    time_ms: crate::models::char_data::ActiveQuest::DATETIME_MIN_MS,
+                });
+        }
+        let frames = fx.cast_and_wait(skill, &d).await;
+        assert_eq!(
+            fx.player.data().labor_power,
+            (LABOR_BASE - cost) as i16,
+            "skill {skill}, {frames:?}"
+        );
+        assert!(
+            fx.count(item) >= before + minimum,
+            "skill {skill}, {frames:?}"
+        );
+        assert_eq!(d.data().func_group_id, after, "skill {skill}");
+        assert!(frames.iter().any(|f| f.0 == sc::SCDoodadPhaseChangedPacket));
+        manager::delete(&fx.server, &fx.server.world.world(0).unwrap(), &d);
+    }
 }
 
 #[tokio::test]
