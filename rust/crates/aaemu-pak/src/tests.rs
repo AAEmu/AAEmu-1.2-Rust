@@ -2,9 +2,9 @@ use crate::*;
 use std::fs;
 use std::path::PathBuf;
 
-struct Fixture(PathBuf);
+pub(super) struct Fixture(pub(super) PathBuf);
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let base = std::env::var_os("AAEMU_PAK_TEST_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
