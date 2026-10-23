@@ -387,7 +387,9 @@ pub fn use_skill(
         }
         return (skill_result::NO_TARGET, 0);
     };
-    if let Err(result) = super::validation::check(server, skill, caster, target) {
+    if let Err(result) = super::validation::check(server, skill, caster, target)
+        .and_then(|()| super::validation::check_build_materials(server, skill, caster, target))
+    {
         return result;
     }
     // The 1.2 fishing reactions require the caster's own spawned NPC. OwnerId is
@@ -767,7 +769,10 @@ pub fn cast(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     }
     // Source, target and resources may change while the cast timer is running.
     let ready = super::validation::check(server, skill, caster, &ctx.target)
-        .and_then(|()| super::validation::check_resources(server, skill, caster));
+        .and_then(|()| super::validation::check_resources(server, skill, caster))
+        .and_then(|()| {
+            super::validation::check_build_materials(server, skill, caster, &ctx.target)
+        });
     if let Err((result, value)) = ready {
         if let Some(player) = caster.as_player() {
             let mut packet = SCSkillStartedPacket::new(

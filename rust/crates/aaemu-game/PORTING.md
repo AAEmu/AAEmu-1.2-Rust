@@ -2502,3 +2502,20 @@ running in place). Four mirrored C# bugs and one missing safeguard:
 `flow_tests::follow_path_command_set_walks_every_route_point` runs the real command-set shape
 over three routes with an elevated point and checks every point is targeted in order, the set
 finishes and the NPC settles in HoldPosition without further movement.
+
+## Construction step materials (2026-10-22)
+
+* The construction step skill of an unfinished house needs the consume item of its effects: the
+  Scarecrow Garden (design 267) step skill 18553 "Construct Garden" ("Spend up to 10 Labor and
+  1 Lumber") keeps its Lumber (item 8337 x1) in `skill_effects.consume_item_id` /
+  `consume_item_count`, not in `skill_reagents`. The C# consumed an effect-level item only when
+  the player had it and never cancelled the cast, so anyone built houses for free (and the
+  Rust port mirrored that). `systems::skills::validation::check_build_materials` now refuses the
+  cast, at the start and again at fire time, with `skill_need_reagent` (result 36, the 1.2
+  "reagent missing" result the cast already sends for `skill_reagents`) when the target is an
+  unfinished house, the skill is the house's current build-step skill and the character lacks
+  the item count. Labor is still checked by `check_resources` as before and nothing is spent on
+  a refusal. Every other skill keeps the soft effect-level consume. Reason: retail refuses the
+  construction without the materials; the step tooltip says it spends 1 Lumber. Regression:
+  `systems::housing::tests::construction_step_needs_its_effect_consume_item`. The error text the
+  client shows for result 36 was not re-checked in the client binary.
