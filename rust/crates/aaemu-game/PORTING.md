@@ -680,6 +680,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 
 ## Known deviations from the C#
 
+* systems::services (beauty salon): `ApplyBeautySalon` creates the requested hair item when
+  the equipment hair slot is empty. The C# guard required an existing hair item, so a paid
+  change could consume a Salon Certificate yet report hair 0. Same-hair requests still keep
+  the item; receipts still report actual equipment. Hair-creation failure still logs and
+  continues with the model update, receipt and certificate consumption, as in C#; failed
+  certificate consumption still logs without undoing the already broadcast appearance.
+
 * systems::skills / systems::npcs (`Interaction` special effect 10): the former C# class was a
   TODO stub. The 1.2 `special_effects` rows put a `WorldInteractionType` in `value1` (row 11030:
   19 `Use`, 36: 10 `DigTerrain`, 215: 29 `SummonBeanstalk`) and an optional doodad id in
