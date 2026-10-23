@@ -9,6 +9,8 @@ use crate::net::packet::LEVEL_PLAIN;
 use crate::net::registry::PacketRegistry;
 use crate::opcodes::{cs, sc};
 use crate::packets::packet_def;
+use crate::systems::economy::mate_equipment::read_wire_item;
+pub use crate::systems::economy::mate_equipment::WireItem;
 
 use super::{mates, shipyards, slaves};
 
@@ -342,6 +344,45 @@ cs_packet!(
 );
 
 cs_packet!(
+    /// `CSChangeSlaveEquipmentPacket` (1.2 body: the header, one item pair and its two
+    /// locations; the 10.x count/expire fields do not exist in the 1.2 client writer
+    /// `397d1410` / `397d12a0`).
+    CSChangeSlaveEquipmentPacket {
+        character_id: u32,
+        slave_tl: u16,
+        db_slave_id: u32,
+        bts: bool,
+        item1: WireItem,
+        item2: WireItem,
+        slot1_type: u8,
+        slot1: u8,
+        slot2_type: u8,
+        slot2: u8,
+    }
+    read |s| {
+        Ok(Self {
+            character_id: s.read_u32()?,
+            slave_tl: s.read_u16()?,
+            db_slave_id: s.read_u32()?,
+            bts: s.read_bool()?,
+            item1: read_wire_item(s)?,
+            item2: read_wire_item(s)?,
+            slot1_type: s.read_u8()?,
+            slot1: s.read_u8()?,
+            slot2_type: s.read_u8()?,
+            slot2: s.read_u8()?,
+        })
+    }
+    handle |self, server, conn| {
+        let Some(p) = conn.active_char.clone() else {
+            return Ok(());
+        };
+        slaves::change_slave_equipment(server, &p, &self);
+        Ok(())
+    }
+);
+
+cs_packet!(
     /// `CSSpawnSlavePacket` (log only in C#).
     CSSpawnSlavePacket {
         slave_id: u32,
@@ -459,6 +500,7 @@ pub fn register(reg: &mut PacketRegistry) {
     reg.register::<CSBindSlavePacket>(LEVEL_PLAIN, cs::CSBindSlavePacket);
     reg.register::<CSChangeSlaveNamePacket>(LEVEL_PLAIN, cs::CSChangeSlaveNamePacket);
     reg.register::<CSDespawnSlavePacket>(LEVEL_PLAIN, cs::CSDespawnSlavePacket);
+    reg.register::<CSChangeSlaveEquipmentPacket>(LEVEL_PLAIN, cs::CSChangeSlaveEquipmentPacket);
     reg.register::<CSDestroySlavePacket>(LEVEL_PLAIN, cs::CSDestroySlavePacket);
     reg.register::<CSDiscardSlavePacket>(LEVEL_PLAIN, cs::CSDiscardSlavePacket);
     reg.register::<CSSpawnSlavePacket>(LEVEL_PLAIN, cs::CSSpawnSlavePacket);

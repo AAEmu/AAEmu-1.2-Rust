@@ -237,15 +237,12 @@ pub fn body_for_contact(w: &mut World, e: EntIdx, will_modify: bool) -> BodyId {
 /// proxy's `w` and `L` are cleared. Returns 1.
 pub fn update(w: &mut World, e: EntIdx, dt: f32, damping: f32) -> u32 {
     let cols = w.ent(e).colliders.clone();
-    let mut kept = Vec::new();
     for c in cols {
-        if crate::entities::has_constraint_contacts_with(w, c, e, 0) {
-            kept.push(c);
-        } else {
+        if !crate::entities::has_constraint_contacts_with(w, c, e, 0) {
             crate::entities::remove_collider(w, c, e, true);
+            crate::entities::remove_collider(w, e, c, true);
         }
     }
-    w.ent_mut(e).colliders = kept;
     lm(w, e).n_contacts = 0;
     let Some(p) = ld(w, e).proxy else {
         return 1;

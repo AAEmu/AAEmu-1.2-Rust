@@ -600,7 +600,7 @@ Public methods with no Rust counterpart by name, and their verdicts:
 | `CSChangeMateNamePacket.cs` | CSChangeMateNamePacket | ported | `CSChangeMateNamePacket` → `aaemu-game/src/systems/vehicles/packets.rs` |
 | `CSChangeMateTargetPacket.cs` | CSChangeMateTargetPacket | ported | `CSChangeMateTargetPacket` → `aaemu-game/src/systems/vehicles/packets.rs` |
 | `CSChangeMateUserStatePacket.cs` | CSChangeMateUserStatePacket | ported | `CSChangeMateUserStatePacket` → `aaemu-game/src/systems/vehicles/packets.rs` |
-| `CSChangeSlaveEquipmentPacket.cs` | CSChangeSlaveEquipmentPacket | ported | `CSChangeSlaveEquipmentPacket` → `aaemu-game/src/systems/economy/mate_equipment.rs` |
+| `CSChangeSlaveEquipmentPacket.cs` | CSChangeSlaveEquipmentPacket | ported | `CSChangeSlaveEquipmentPacket` → `aaemu-game/src/systems/vehicles/packets.rs` |
 | `CSChangeSlaveNamePacket.cs` | CSChangeSlaveNamePacket | ported | `CSChangeSlaveNamePacket` → `aaemu-game/src/systems/vehicles/packets.rs` |
 | `CSChangeSlaveTargetPacket.cs` | CSChangeSlaveTargetPacket | ported | `CSChangeSlaveTargetPacket` → `aaemu-game/src/packets/c2g_misc.rs` |
 | `CSChangeTargetPacket.cs` | CSChangeTargetPacket | ported | `CSChangeTargetPacket` → `aaemu-game/src/systems/skills/handlers.rs` |
