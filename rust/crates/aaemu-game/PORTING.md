@@ -687,6 +687,21 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   continues with the model update, receipt and certificate consumption, as in C#; failed
   certificate consumption still logs without undoing the already broadcast appearance.
 
+* systems::services (music): 1.2 CS123 has independent `isTooltip` / `showBuffOnly`
+  bool bytes (native constructor `397acd70`, serializer `397b1480`). The C# packed
+  ushort switch ignored uncached playing `(false,false)` and `(true,true)`. Native
+  `39082550` sends `(isTooltip,false)` on a cache miss and `(false,true)` for cached
+  playing. Requests with `showBuffOnly=false` now load notes and echo `isTooltip`
+  in SC1e0; `showBuffOnly=true` retains the buff-only ScoreMemorized (6010) path,
+  including its lack of a song-existence check. `(true,true)` is representable but
+  is not emitted by the observed native cache flow; it follows the same buff-only
+  branch. Missing-song empty replies and existing read/ownership behavior remain.
+  Request u64 / lookup u32 / response 32-bit widths are unchanged: native SC1e0
+  sign-extends its signed32 note ID at `391e1691` before callback `391e169b`.
+  Arbitrary high request bits still alias the low32 song key; IDs >= 2^31 can
+  differ between zero-extended sheet IDs and sign-extended native cache keys.
+  No evidence establishes a safe ID-width or ownership-policy change here.
+
 * systems::skills / systems::npcs (`Interaction` special effect 10): the former C# class was a
   TODO stub. The 1.2 `special_effects` rows put a `WorldInteractionType` in `value1` (row 11030:
   19 `Use`, 36: 10 `DigTerrain`, 215: 29 `SummonBeanstalk`) and an optional doodad id in
