@@ -2533,8 +2533,10 @@ finishes and the NPC settles in HoldPosition without further movement.
   `ItemClass::SlaveEquipment` with `ItemDetailType.SlaveEquipment` (12 opaque detail bytes);
   `read_wire_item` consumes detail bytes by detail type (gear 55, ship parts 12, ...) instead of
   always reading an `EquipItem`. Bind-on-equip applies in `EquipmentSlave` too. A player-owned
-  slave gets its starter pack only once (10.x `isNewEquipment`), and the persistent container
-  is reused on the next summon / restart; NPC / spawner slaves keep the 1.2 in-memory pack.
+  slave gets its starter pack when its equipment container is first created, including a saved
+  legacy hull whose summon item already names its DB id. An existing empty container represents
+  intentional unequipping and is reused on the next summon / restart without seeding again.
+  NPC / spawner slaves keep the in-memory defaults.
 - **Deviation from 1.2:** slave equipment persistence and the `0xF2` container do not exist in
   the 1.2 C# at all; they are the 10.x design, recorded here because the 1.2 data already ships
   `slave_initial_items`, `slave_equip_slots` and `item_slave_equipments`.
@@ -2550,12 +2552,18 @@ finishes and the NPC settles in HoldPosition without further movement.
   points: a child slave (Steel Cannon 28852 -> slave 10, Harpoon Cannon 30306 -> slave 48) or a
   doodad (sails, masts, lamps, planks, figureheads, bell, telescope, ...). A slot that drives two
   points (front/rear lamp, both planks) spawns the visual at both. Unequipping removes exactly
-  that visual; a resummon respawns it from the persistent container. At attach points a declared
-  equipment slot owns, the 1.2 static `slave_bindings` / `slave_doodad_bindings` are skipped so a
-  part can be removed; static bindings still cover points without an equipment slot.
+  that visual; a resummon respawns it from the persistent container. Static bindings are skipped
+  only for slots with initial equipment, so deliberately unequipped parts remain absent. An
+  authored default without an exact legal equipment equivalent remains a static binding.
 - **Starter pack:** `slave_initial_items` rows are seeded only into slots the hull declares in
   `slave_equip_slots` (slave 110 / 139 reference pack 1 without those slots; slave 21 has slot 0
-  at the cannon points and no starter cannons).
+  at the cannon points and no starter cannons). Missing defaults are inferred from static
+  bindings only when one legal item reproduces every binding of the slot (lowest item id breaks
+  ties deterministically). The item template must also exist: hull 21's slot-0 cannon visual
+  references missing item 28854, so all eight cannons remain static. Hull 14/75's static lamps
+  also have no equivalent equipment item. Real-data spawn regressions
+  cover hulls 14, 21, 75, 76 and 110; synthetic and MySQL restart tests cover initialization and
+  persistent empty slots (`vehicles/pr38_regression_tests.rs`).
 - **Attach points:** models 511 (slave 22), 1482 (slave 132) and 1546 (slaves 139/142/143/145)
   were recovered from the `$` helper nodes of the 1.2 client's `galleon_body_test.cgf`,
   `boardship_body_test.cgf` and `middleship_body.cgf` (CGF units / 100, the same method and
@@ -2573,10 +2581,14 @@ finishes and the NPC settles in HoldPosition without further movement.
   it (standing on it or seated on any of its points; the 1.2 data has no seat permission table, so
   party / expedition membership is not required), with `SLAVE_ALREADY_HAS_MASTER` when the seat is
   taken and `SLAVE_UNBIND_FIRST` when the character already rides another slave. Only the gunner
-  may cast the cannon's mount skills (`mount_authority::may_use_slave`); the carrier's owner no
+  may cast the cannon's mount skills (`mount_authority::may_use_slave`): its DRIVER seat must name
+  the player, and the player's attach point and transform parent must match. Standing on the
+  cannon alone grants no shot, even when the seat is empty. The carrier's owner no
   longer fires it remotely. The gunner leaves through `CSDiscardSlave`, death (`on_death_event`),
   teleport / `force_dismount`, the cannon being unequipped, or the carrier being recalled,
-  destroyed or despawned (`unbind_child_riders`). The gunner sits at the model's driver helper if
+  destroyed or despawned (`unbind_child_riders`). Carrier death detaches child riders before
+  deleting their cannons, preserving world coordinates, clearing seats and sending `SCUnitDetached`.
+  The gunner sits at the model's driver helper if
   `slave_attach_points*.json` has one, else at `GUNNER_SEAT_OFFSET` (0, -0.8, 0) in the cannon
   frame: model 117 has no helper in the data or the pak, and no cannon-like model with a seat helper
   exists, so this is a documented constant. The gunner is a transform child of the cannon, which is

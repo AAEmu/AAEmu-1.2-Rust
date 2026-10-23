@@ -46,6 +46,9 @@ const PB: u32 = 0x00F0_0002;
 #[path = "deck_standing_tests.rs"]
 mod deck_standing_tests;
 
+#[path = "pr38_regression_tests.rs"]
+mod pr38_regression_tests;
+
 fn exp_table() -> ExperienceTable {
     ExperienceTable::from_templates(
         (1..=3u8)
