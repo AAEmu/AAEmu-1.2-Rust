@@ -218,6 +218,7 @@ impl MusicManager {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SCUserNoteLoadedPacket {
     pub song: Option<SongData>,
+    pub is_tooltip: bool,
 }
 packet_def!(
     SCUserNoteLoadedPacket,
@@ -228,7 +229,7 @@ impl Marshal for SCUserNoteLoadedPacket {
     fn write(&self, s: &mut PacketStream) {
         if let Some(song) = &self.song {
             s.write_u32(song.id)
-                .write_u8(1)
+                .write_bool(self.is_tooltip)
                 .write_i32(song.song.encode_utf16().count() as i32)
                 .write_str(&song.title)
                 .write_str(&format!("{}\0", song.song));
@@ -332,7 +333,8 @@ impl ClientPacket for CSSendUserMusicPacket {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CSRequestMusicNotesPacket {
     pub id64: u64,
-    pub value2: u16,
+    pub is_tooltip: bool,
+    pub show_buff_only: bool,
 }
 
 impl ClientPacket for CSRequestMusicNotesPacket {
@@ -341,7 +343,9 @@ impl ClientPacket for CSRequestMusicNotesPacket {
     fn read(s: &mut PacketStream) -> Result<Self> {
         Ok(Self {
             id64: s.read_u64()?,
-            value2: s.read_u16()?,
+            // Native 1.2 constructor 397acd70 / serializer 397b1480: two bool bytes.
+            is_tooltip: s.read_bool()?,
+            show_buff_only: s.read_bool()?,
         })
     }
 
@@ -351,34 +355,38 @@ impl ClientPacket for CSRequestMusicNotesPacket {
         conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            tracing::warn!("Request Song, id: {}, value2:{}", self.id64, self.value2);
+            tracing::debug!(
+                "Request Song, id: {}, isTooltip:{}, showBuffOnly:{}",
+                self.id64,
+                self.is_tooltip,
+                self.show_buff_only
+            );
             let Some(p) = conn.active_char.clone() else {
                 return Ok(());
             };
-            match self.value2 {
-                1 => {
-                    let song = server
-                        .systems
-                        .services
-                        .music
-                        .get_song_by_id(self.id64 as u32);
-                    p.send(SCUserNoteLoadedPacket { song });
-                }
-                256 => {
-                    let me = WorldObject::from(&p);
-                    crate::systems::skills::buffs::add_buff_by_id(
-                        server,
-                        &me,
-                        BUFF_SCORE_MEMORIZED,
-                        &me,
-                        0,
-                    );
-                }
-                _ => tracing::warn!(
-                    "Unknown song request type id: {}, value2:{}",
-                    self.id64,
-                    self.value2
-                ),
+            // Native 39082550 sends (isTooltip, false) on a cache miss and
+            // (false, true) for cached playing. The latter only needs the buff.
+            if self.show_buff_only {
+                let me = WorldObject::from(&p);
+                crate::systems::skills::buffs::add_buff_by_id(
+                    server,
+                    &me,
+                    BUFF_SCORE_MEMORIZED,
+                    &me,
+                    0,
+                );
+            } else {
+                // Keep the C# low-32-bit lookup: native SC1e0 reads signed32,
+                // sign-extended into the cache key at 391e1691/391e169b.
+                let song = server
+                    .systems
+                    .services
+                    .music
+                    .get_song_by_id(self.id64 as u32);
+                p.send(SCUserNoteLoadedPacket {
+                    song,
+                    is_tooltip: self.is_tooltip,
+                });
             }
             Ok(())
         })
@@ -452,10 +460,18 @@ mod tests {
             .write_str("T")
             .write_str("abc\0");
         assert_eq!(
-            encode(&SCUserNoteLoadedPacket { song: Some(song) })[6..].to_vec(),
+            encode(&SCUserNoteLoadedPacket {
+                song: Some(song),
+                is_tooltip: true,
+            })[6..]
+                .to_vec(),
             e.into_bytes()
         );
-        assert!(encode(&SCUserNoteLoadedPacket { song: None })[6..].is_empty());
+        assert!(encode(&SCUserNoteLoadedPacket {
+            song: None,
+            is_tooltip: true,
+        })[6..]
+            .is_empty());
     }
 
     #[test]
@@ -497,6 +513,6 @@ mod tests {
         s.write_u64(5).write_u16(256);
         let p =
             CSRequestMusicNotesPacket::read(&mut PacketStream::from_bytes(s.into_bytes())).unwrap();
-        assert_eq!((p.id64, p.value2), (5, 256));
+        assert_eq!((p.id64, p.is_tooltip, p.show_buff_only), (5, false, true));
     }
 }
