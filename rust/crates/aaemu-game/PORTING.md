@@ -698,6 +698,24 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   branch. Missing-song empty replies and existing read/ownership behavior remain.
   Request u64 / lookup u32 / response 32-bit widths are unchanged: native SC1e0
   sign-extends its signed32 note ID at `391e1691` before callback `391e169b`.
+
+* systems::skills (music): the C# (and this port) send `SCSkillStarted` only for casts with a
+  cast time. The play (22213), pause (22214) and close-the-score (22217) skills are instant
+  (`casting_time` 0, `effect_delay` 200 ms), so the 1.2 client never received the own
+  `SCSkillStarted` it reacts to with CS121 (MIDI) / CS124 (End): the play effect then
+  broadcast an empty MIDI cache. A validated player cast of a skill whose catalog join
+  `skill_effects -> effects(SpecialEffect) -> special_effects` contains type 93 (`PlayUserMusic`)
+  or 94 (`PauseUserMusic`) now sends `SCSkillStarted` (same timeline id as the fire, cast times
+  0, no extra data) directly before its `SCSkillFired` (`skill::schedule_effects`,
+  `SkillRunState::music_started_pending`). No id list, no `application_method` filter, no change
+  for other instant skills, NPC casters, rejected casts (they keep the failure `SCSkillStarted`)
+  or the item-caster refusal of 22213 (sheet 28051 has no `use_skill_id`). Not a retail capture:
+  derived from the client contract. The authored 200 ms `effect_delay` is unchanged, so the
+  client's CS121 / CS122 must reach the server within `200 ms - one-way latency` of the fire
+  (compose relies on the same window for CS122); the live lane measured the CS121 arriving
+  ~0 ms after the Started on loopback. CS124 (`CSEndMusicPacket`) matches the C#: it is a no-op
+  while the 30 s ScoreMemorized (6010) buff is active and otherwise removes the tag-1155 play
+  buffs (6176 / 6177); pause (dispel tag 1202) keeps 6010, close (dispel tag 1155) removes it.
   Arbitrary high request bits still alias the low32 song key; IDs >= 2^31 can
   differ between zero-extended sheet IDs and sign-extended native cache keys.
   No evidence establishes a safe ID-width or ownership-policy change here.

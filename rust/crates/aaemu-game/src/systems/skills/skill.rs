@@ -559,6 +559,7 @@ pub fn use_skill(
         let mut state = skill.state();
         state.generation = state.generation.wrapping_add(1);
         state.cancelled = false;
+        state.music_started_pending = false;
         state.hit_types.clear();
     }
     caster.with_unit(|u| u.unit_mut().skill_state.condition_chance = true);
@@ -696,6 +697,9 @@ pub fn use_skill(
             cast(server, skill, &ctx2);
         }
     } else {
+        if is_player_music_skill(server, &template, caster) {
+            skill.state().music_started_pending = true;
+        }
         cast(server, skill, &ctx);
     }
     (skill_result::SUCCESS, 0)
@@ -1122,6 +1126,35 @@ pub fn end_channeling(
     }
 }
 
+/// Special effect types of `PlayUserMusic` / `PauseUserMusic`.
+const SPECIAL_PLAY_USER_MUSIC: i32 = 93;
+const SPECIAL_PAUSE_USER_MUSIC: i32 = 94;
+
+/// Whether a player's skill carries a play / pause score special effect in the static catalog
+/// (`skill_effects` -> `SpecialEffect` -> `special_effects.special_effect_type_id` 93 / 94).
+pub(super) fn is_player_music_skill(
+    server: &GameServer,
+    template: &SkillTemplate,
+    caster: &WorldObject,
+) -> bool {
+    if caster.as_player().is_none() {
+        return false;
+    }
+    let data = &server.game_data.systems.skills;
+    template.effects.iter().any(|e| {
+        e.template.is_some_and(|(kind, id)| {
+            matches!(
+                data.effect(kind, id),
+                Some(EffectTemplate::Special(s))
+                    if matches!(
+                        s.special_effect_type_id,
+                        SPECIAL_PLAY_USER_MUSIC | SPECIAL_PAUSE_USER_MUSIC
+                    )
+            )
+        })
+    })
+}
+
 /// `Skill.ScheduleEffects`.
 pub fn schedule_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     let caster = &ctx.caster;
@@ -1167,6 +1200,23 @@ pub fn schedule_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     };
     if weapon_anim > 0 {
         fired.fire_anim_id = weapon_anim;
+    }
+    // The 1.2 client reacts to its own `SCSkillStarted` of a play / pause score skill (special
+    // effects 93 / 94) by sending the MIDI cache / the end of the music. An instant cast has no
+    // cast-time `SCSkillStarted`, so the validated cast announces itself right before its fire.
+    if std::mem::take(&mut skill.state().music_started_pending) {
+        broadcast(
+            server,
+            caster,
+            &SCSkillStartedPacket::new(
+                skill.id,
+                fired.tl,
+                ctx.caster_caster,
+                ctx.target_caster,
+                ctx.skill_object.clone(),
+            ),
+            true,
+        );
     }
     broadcast(server, caster, &fired, true);
     if total_delay > 0 {

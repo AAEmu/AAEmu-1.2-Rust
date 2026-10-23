@@ -19,6 +19,7 @@ use crate::stream::StreamClient;
 mod cometsboon;
 mod doodad;
 mod fixes;
+mod music;
 mod plant;
 mod portal;
 mod questitem;

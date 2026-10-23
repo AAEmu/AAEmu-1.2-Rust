@@ -257,6 +257,15 @@ corpse (`/despawn npc <objId>`) and watches 130 s for exactly one respawn (serve
 `RUST_LOG=info,aaemu_game::systems::skills::plots=debug,aaemu_game::systems::npcs=debug` to see the
 debug lines.
 
+`m*` script commands (`aaemu-testclient/src/scenario/music.rs`, used by `rust/verify/musicrun1.vtest` /
+`musicrun2.vtest`) replay the 1.2 client's music wire sequence and fail on a missing callback:
+`mcompose` (item cast 22215, CS122 only after the received own `SCSkillFired`), `mrequest` (CS123 cold /
+tooltip / unknown / buff-only with reply checks), `mskill` (Unit cast; CS121 after the own
+`SCSkillStarted` of the play skill, CS124 after that of pause / close; checks the own broadcast, the game
+log receipt and `+buff:N` / `-buff:N` / `=buff:N` buff tokens), `mend`, `mwatch` (listener side: the
+received MIDI must hash like the one the composer sent). GM access is used only to seed paper 27902,
+instrument 6177 and labor.
+
 The combat step selects its NPC through `CSChangeTargetPacket` and faces it in movement
 packets so auto attacks and angle restrictions use the intended target. It matches skill responses to the player's object and skill IDs and reads
 the 1.2 `SkillResult` extra field before optional integer data. Missing combat NPCs and
