@@ -119,6 +119,9 @@ pub struct BotConfig {
     pub password: String,
     /// Character name used when the account has none.
     pub character: String,
+    /// Require creation of `character`, even if the account already has other characters.
+    #[serde(default)]
+    pub create_new_character: bool,
     #[serde(default = "default_gs")]
     pub game_server_id: u8,
     /// Skill cast on the nearest NPC (2 = melee attack).
@@ -405,6 +408,48 @@ async fn finish(
 
 const QUIET: Duration = Duration::from_millis(1500);
 
+fn character_to_select<'a>(
+    characters: &'a [crate::game::CharInfo],
+    requested: &str,
+    created: bool,
+) -> anyhow::Result<&'a crate::game::CharInfo> {
+    if created {
+        characters
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(requested))
+    } else {
+        characters.first()
+    }
+    .with_context(|| format!("no character returned for {requested} (created={created})"))
+}
+
+#[cfg(test)]
+mod creation_tests {
+    use super::character_to_select;
+    use crate::game::CharInfo;
+
+    #[test]
+    fn fresh_creation_selects_the_new_character_and_never_falls_back_to_existing() {
+        let mut characters = vec![CharInfo {
+            id: 1,
+            name: "Existing".into(),
+        }];
+        assert!(character_to_select(&characters, "Fresh", true).is_err());
+        characters.push(CharInfo {
+            id: 2,
+            name: "Fresh".into(),
+        });
+        assert_eq!(
+            character_to_select(&characters, "fresh", true).unwrap().id,
+            2
+        );
+        assert_eq!(
+            character_to_select(&characters, "Fresh", false).unwrap().id,
+            1
+        );
+    }
+}
+
 async fn run_inner(
     kind: Kind,
     cfg: &BotConfig,
@@ -504,7 +549,7 @@ async fn run_inner(
     r.end(s, format!("{} character(s)", game.state.characters.len()));
 
     let s = r.begin("game.create");
-    let created = if game.state.characters.is_empty() {
+    let created = if cfg.create_new_character || game.state.characters.is_empty() {
         game.create_character(&cfg.character).await?;
         let p = game
             .wait_for("character creation result", |p| {
@@ -519,7 +564,7 @@ async fn run_inner(
     } else {
         false
     };
-    let ch = game.state.characters[0].clone();
+    let ch = character_to_select(&game.state.characters, &cfg.character, created)?.clone();
     r.var("char_id", ch.id);
     r.end(
         s,
