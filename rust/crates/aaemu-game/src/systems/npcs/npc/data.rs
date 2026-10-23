@@ -1061,17 +1061,23 @@ impl NpcData {
         Ok(())
     }
 
-    /// `localized_texts` rows for `npcs.name` (`LocalizationManager`).
+    /// Ordered skills for each `npc_interactions` interaction set.
     fn load_interactions(&mut self, conn: &Connection) -> rusqlite::Result<()> {
-        for_each_row(conn, "SELECT * FROM npc_interactions ORDER BY id", [], |r| {
-            self.interactions
-                .entry(r.i32("npc_interaction_set_id")?)
-                .or_default()
-                .push(r.u32("skill_id")?);
-            Ok(())
-        })
+        for_each_row(
+            conn,
+            "SELECT * FROM npc_interactions ORDER BY id",
+            [],
+            |r| {
+                self.interactions
+                    .entry(r.i32("npc_interaction_set_id")?)
+                    .or_default()
+                    .push(r.u32("skill_id")?);
+                Ok(())
+            },
+        )
     }
 
+    /// `localized_texts` rows for `npcs.name` (`LocalizationManager`).
     fn load_localized_names(&mut self, conn: &Connection, language: &str) -> rusqlite::Result<()> {
         let sql = format!(
             "SELECT idx, \"{}\" AS txt FROM localized_texts \
