@@ -1186,10 +1186,9 @@ pub async fn save_directly_to_database(pool: &MySqlPool, c: &mut Character) -> b
 /// items in the same transaction (the C# left them to the next world save, so a stop or crash
 /// before it kept the `characters` row but lost the starting supplies; the next select then
 /// built empty containers).
-pub async fn save_new_character(server: &GameServer, c: &mut Character) -> bool {
-    // The item write and `commit_save` share the manager's pending-batch slot with the world
-    // save, so they run under the same transaction lock.
-    let _transaction = server.save.transaction_lock().await;
+/// The caller holds `server.save.transaction_lock()` from before inventory registration
+/// until commit or cleanup, excluding world snapshots of a partially created character.
+pub(crate) async fn save_new_character_locked(server: &GameServer, c: &mut Character) -> bool {
     let batch = server.items.prepare_save_for_owner(c.id);
     save_directly(&server.db, c, Some((&server.items, batch))).await
 }
@@ -1915,7 +1914,8 @@ mod tests {
             .add_new_item(item, 0, &server.game_data.items)
             .expect("fits");
 
-        assert!(save_new_character(&server, &mut c).await);
+        let _transaction = server.save.transaction_lock().await;
+        assert!(save_new_character_locked(&server, &mut c).await);
 
         let rows: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM items i JOIN item_containers ic              ON ic.container_id = i.container_id WHERE ic.owner_id = 7 AND i.id = ?",

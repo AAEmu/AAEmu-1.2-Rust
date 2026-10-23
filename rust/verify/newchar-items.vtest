@@ -2,7 +2,8 @@
 # create + spawn (no world save or departure save has run yet) the bag and equipment rows are
 # already in MySQL, so a server stop before the first save cannot lose them.
 suite newchar-items
-bot nci
+# Keep the provisioned account, but force creation/selection of a unique character every run.
+bot nci fresh
 
 [nci]
 bag

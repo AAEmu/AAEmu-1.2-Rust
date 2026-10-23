@@ -162,6 +162,46 @@ impl ItemManager {
         c
     }
 
+    /// Discard a rejected creation while the caller holds the save transaction lock, before
+    /// releasing its character ID. These rows never committed: do not queue SQL deletions or
+    /// acknowledge another owner's pending changes.
+    pub(crate) fn discard_new_character(
+        &self,
+        owner_id: u32,
+        created_items: &[(u64, bool)],
+        item_ids: &IdManager,
+        container_ids: &IdManager,
+    ) {
+        let _create = lock(&self.create_lock);
+        let rejected: Vec<_> = self
+            .all_containers()
+            .into_iter()
+            .filter(|c| c.lock().expect("container poisoned").owner_id == owner_id)
+            .collect();
+        lock(&self.containers).retain(|c| !rejected.iter().any(|r| Arc::ptr_eq(c, r)));
+        if let Some(batch) = lock(&self.pending_save).as_mut() {
+            batch.containers.retain(|(_, row)| row.owner_id != owner_id);
+            batch.items.retain(|(container, _, _)| {
+                !container
+                    .as_ref()
+                    .is_some_and(|c| rejected.iter().any(|r| Arc::ptr_eq(c, r)))
+            });
+        }
+        for container in rejected {
+            let mut c = container.lock().expect("container poisoned");
+            c.items.clear();
+            container_ids.release_id(c.container_id as u32);
+        }
+        for &(id, canceled_deletion) in created_items {
+            // Captured at allocation: another owner can queue/release an ID during setup.
+            // Restore its canceled deletion before freeing the ID for another operation.
+            if canceled_deletion {
+                self.mark_for_db_deletion(id);
+            }
+            item_ids.release_id(id as u32);
+        }
+    }
+
     /// `NewCofferContainer(characterId)`.
     pub fn new_coffer_container(
         &self,
@@ -207,6 +247,10 @@ impl ItemManager {
 
     /// `GetNewId` (+ removal from the deleted-items list).
     pub fn new_id(&self, item_ids: &IdManager) -> Option<u64> {
+        self.new_id_with_deletion(item_ids).map(|(id, _)| id)
+    }
+
+    fn new_id_with_deletion(&self, item_ids: &IdManager) -> Option<(u64, bool)> {
         let id = match item_ids.get_next_id() {
             Ok(id) => u64::from(id),
             Err(e) => {
@@ -214,8 +258,10 @@ impl ItemManager {
                 return None;
             }
         };
-        lock(&self.removed).retain(|&r| r != id);
-        Some(id)
+        let mut removed = lock(&self.removed);
+        let before = removed.len();
+        removed.retain(|&r| r != id);
+        Some((id, before != removed.len()))
     }
 
     /// `ItemManager.Create(templateId, count, grade)`. The item is not placed in a container.
@@ -230,8 +276,26 @@ impl ItemManager {
         item_ids: &IdManager,
         now: i64,
     ) -> Option<Item> {
+        self.create_with_deletion(template_id, count, grade, world_id, data, item_ids, now)
+            .map(|(item, _)| item)
+    }
+
+    /// Creation rollback needs the deletion canceled by THIS allocation, rather than a
+    /// snapshot taken before other owners could release more IDs. Ordinary creation ignores
+    /// the receipt and retains the existing new_id semantics.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn create_with_deletion(
+        &self,
+        template_id: u32,
+        count: i32,
+        grade: u8,
+        world_id: u8,
+        data: &ItemData,
+        item_ids: &IdManager,
+        now: i64,
+    ) -> Option<(Item, bool)> {
         let template = data.template(template_id)?;
-        let id = self.new_id(item_ids)?;
+        let (id, canceled_deletion) = self.new_id_with_deletion(item_ids)?;
         let treasure = if template.class_type() == ItemClass::TreasureMap {
             self.treasure_maps
                 .get()
@@ -239,8 +303,9 @@ impl ItemManager {
         } else {
             None
         };
-        Some(Item::create_ex(
-            id, template, count, grade, world_id, data, now, treasure,
+        Some((
+            Item::create_ex(id, template, count, grade, world_id, data, now, treasure),
+            canceled_deletion,
         ))
     }
 

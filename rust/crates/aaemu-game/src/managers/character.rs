@@ -12,7 +12,7 @@ use crate::data::character_templates::EquipItemsTemplate;
 use crate::data::items::{bind_type, ItemTemplate};
 use crate::db::get_account_details;
 use crate::db_character::{
-    check_for_deleted_characters, is_character_pending_deletion, save_new_character,
+    check_for_deleted_characters, is_character_pending_deletion, save_new_character_locked,
     set_delete_times,
 };
 use crate::error::{GameError, Result};
@@ -52,8 +52,47 @@ pub fn acquire_default_item(
     server: &GameServer,
     container: &ContainerRef,
     template_id: u32,
+    amount: i32,
+    grade: i32,
+) -> Result<bool> {
+    acquire_default_item_recorded(
+        server,
+        container,
+        template_id,
+        amount,
+        grade,
+        &mut Vec::new(),
+    )
+}
+
+fn create_starting_item(
+    server: &GameServer,
+    template_id: u32,
+    amount: i32,
+    grade: u8,
+    now: i64,
+    created_items: &mut Vec<(u64, bool)>,
+) -> Option<Item> {
+    let (item, canceled_deletion) = server.items.create_with_deletion(
+        template_id,
+        amount,
+        grade,
+        server.config.id,
+        &server.game_data.items,
+        &server.ids.item,
+        now,
+    )?;
+    created_items.push((item.id, canceled_deletion));
+    Some(item)
+}
+
+fn acquire_default_item_recorded(
+    server: &GameServer,
+    container: &ContainerRef,
+    template_id: u32,
     mut amount: i32,
     grade: i32,
+    created_items: &mut Vec<(u64, bool)>,
 ) -> Result<bool> {
     if amount <= 0 {
         return Ok(true);
@@ -107,15 +146,9 @@ pub fn acquire_default_item(
     drop(c);
     while amount > 0 {
         let add = amount.min(template.max_count);
-        let Some(mut item) = server.items.create(
-            template_id,
-            add,
-            grade as u8,
-            server.config.id,
-            data,
-            &server.ids.item,
-            now,
-        ) else {
+        let Some(mut item) =
+            create_starting_item(server, template_id, add, grade as u8, now, created_items)
+        else {
             tracing::error!(
                 "Failed to add item with ID {template_id}, possible duplicate entries!"
             );
@@ -181,19 +214,19 @@ fn set_equip_item_template(
     template_id: u32,
     slot: i32,
     grade: u8,
+    created_items: &mut Vec<(u64, bool)>,
 ) -> Option<Item> {
     if template_id == 0 {
         return None; // AddOrMoveExistingItem(null) -> false
     }
     let data = &server.game_data.items;
-    let Some(mut item) = server.items.create(
+    let Some(mut item) = create_starting_item(
+        server,
         template_id,
         1,
         grade,
-        server.config.id,
-        data,
-        &server.ids.item,
         Utc::now().timestamp(),
+        created_items,
     ) else {
         // Create returned null -> AddOrMoveExistingItem(null).
         return None;
@@ -219,6 +252,7 @@ fn equip_pack(
     inv: &Inventory,
     i: &EquipItemsTemplate,
     on_equip: &mut dyn FnMut(&Item),
+    created_items: &mut Vec<(u64, bool)>,
 ) {
     use equip_slot::*;
     for (slot, (id, grade)) in [
@@ -239,8 +273,31 @@ fn equip_pack(
         (MUSICAL, i.musical),
         (COSPLAY, i.cosplay),
     ] {
-        if let Some(item) = set_equip_item_template(server, inv, id, slot, grade) {
+        if let Some(item) = set_equip_item_template(server, inv, id, slot, grade, created_items) {
             on_equip(&item);
+        }
+    }
+}
+
+/// Declared after the save lock so rejected assets disappear before saves or ID reuse.
+struct NewCharacter<'a> {
+    server: &'a GameServer,
+    id: u32,
+    created_items: Vec<(u64, bool)>,
+    committed: bool,
+}
+
+impl Drop for NewCharacter<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.server.items.discard_new_character(
+                self.id,
+                &self.created_items,
+                &self.server.ids.item,
+                &self.server.ids.container,
+            );
+            self.server.names.remove_character_id(self.id);
+            self.server.ids.character.release_id(self.id);
         }
     }
 }
@@ -281,11 +338,20 @@ pub async fn create(
             .access_level_first_character
             .max(access_level);
     }
+    // Inventory::new registers containers immediately. Exclude world/departure snapshots
+    // throughout setup, SQL commit and failure cleanup, including setup errors below.
+    let _transaction = server.save.transaction_lock().await;
     let id = server
         .ids
         .character
         .get_next_id()
         .map_err(|e| GameError::Protocol(e.to_string()))?;
+    let mut creation = NewCharacter {
+        server,
+        id,
+        created_items: Vec::new(),
+        committed: false,
+    };
     server.names.add_character(id, &name, conn.account_id());
     let data = &server.game_data;
     let template = data
@@ -358,14 +424,27 @@ pub async fn create(
     let mut gear = |item: &Item| {
         crate::systems::skills::stats::update_gear_bonuses(server, &player, Some(item), None);
     };
-    equip_pack(server, &inv, &items.items, &mut gear);
+    equip_pack(
+        server,
+        &inv,
+        &items.items,
+        &mut gear,
+        &mut creation.created_items,
+    );
     for (i, &body) in req.body_items.iter().enumerate() {
         let item = if body == 0 && template.items[i] > 0 {
             template.items[i]
         } else {
             body
         };
-        if let Some(item) = set_equip_item_template(server, &inv, item, i as i32 + 19, 0) {
+        if let Some(item) = set_equip_item_template(
+            server,
+            &inv,
+            item,
+            i as i32 + 19,
+            0,
+            &mut creation.created_items,
+        ) {
             gear(&item);
         }
     }
@@ -377,7 +456,14 @@ pub async fn create(
     let mut slot = 10usize;
     let bag = c.inventory.bag().clone();
     for s in &items.supplies {
-        acquire_default_item(server, &bag, s.id, s.amount, i32::from(s.grade))?;
+        acquire_default_item_recorded(
+            server,
+            &bag,
+            s.id,
+            s.amount,
+            i32::from(s.grade),
+            &mut creation.created_items,
+        )?;
         c.set_action(slot, ActionSlotType::ItemType, u64::from(s.id));
         slot += 1;
     }
@@ -388,7 +474,14 @@ pub async fn create(
         .cloned()
         .ok_or_else(|| GameError::Protocol("no ability items for ability 0".into()))?;
     for s in &general.supplies {
-        acquire_default_item(server, &bag, s.id, s.amount, i32::from(s.grade))?;
+        acquire_default_item_recorded(
+            server,
+            &bag,
+            s.id,
+            s.amount,
+            i32::from(s.grade),
+            &mut creation.created_items,
+        )?;
         c.set_action(slot, ActionSlotType::ItemType, u64::from(s.id));
         slot += 1;
     }
@@ -412,7 +505,8 @@ pub async fn create(
     c.unit.mp = c.unit.max_mp;
     c.restore_saved_hp_mp();
 
-    if save_new_character(server, &mut c).await {
+    if save_new_character_locked(server, &mut c).await {
+        creation.committed = true;
         let resp = create_character_response(&c);
         conn.characters.push(c);
         conn.send(&resp);
@@ -421,13 +515,6 @@ pub async fn create(
         conn.send(&SCCharacterCreationFailedPacket {
             reason: CharacterCreateError::Failed as u8,
         });
-        server.ids.character.release_id(id);
-        server.names.remove_character_id(id);
-        // DeleteCharacterAssets(character, true): houses / guild / family / mails are later
-        // phases ("fullWipe is currently not implemented yet" in C# too).
-        tracing::warn!(
-            "DeleteCharacterAssets - fullWipe is currently not implemented yet, charId: {id}"
-        );
     }
     Ok(())
 }
