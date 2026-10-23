@@ -434,11 +434,9 @@ async fn two_players_see_each_other_move_talk_and_leave() {
     assert!(a.drain().is_empty());
 }
 
-/// Character creation with synthetic templates. MySQL is down, so `SaveDirectlyToDatabase`
-/// fails and the C# answers `SCCharacterCreationFailedPacket(Failed)` after building the whole
-/// character (its starting items stay in the item manager, as in C#).
+/// A failed creation must release all assets before its name and IDs can be reused.
 #[tokio::test]
-async fn create_character_builds_the_starting_kit_then_fails_to_save() {
+async fn create_character_save_failure_releases_assets_and_allows_retry() {
     use crate::data::character_templates::{AbilityItems, AbilitySupplyItem, CharacterTemplate};
     use crate::data::items::{EquipTemplate, GradeTemplate, ItemTemplate, TemplateKind};
     use crate::data::skills::{DefaultSkill, SkillTemplate};
@@ -540,52 +538,81 @@ async fn create_character_builds_the_starting_kit_then_fails_to_save() {
         ability3: 11,
         level: 1,
     };
-    crate::managers::character::create(&s, &mut a.conn, req.clone())
-        .await
-        .unwrap();
+    let body = |req: &CreateCharacterRequest| {
+        let mut body = PacketStream::new();
+        body.write_str(&req.name)
+            .write_u8(req.race)
+            .write_u8(req.gender);
+        for item in req.body_items {
+            body.write_u32(item);
+        }
+        req.model_params.write(&mut body);
+        body.write_u8(req.ability1)
+            .write_u8(req.ability2)
+            .write_u8(req.ability3)
+            .write_u8(req.level);
+        body.into_bytes()
+    };
+    let assert_released = || {
+        assert!(s.names.no_names_registered());
+        assert!(!s.names.name_exists("Newbie"));
+        assert_eq!(s.names.get_character_id("Newbie"), 0);
+        assert_eq!(s.names.get_character_name(1), None);
+        assert_eq!(s.names.get_character_account(1), 0);
+        // Never look up a missing container with find-or-create: that would register a new
+        // empty container and hide a leak. Inspect the global cache and save snapshot instead.
+        assert!(s.items.all_containers().is_empty());
+        let pending = s.items.prepare_save();
+        assert_eq!(pending.container_count(), 0);
+        assert!(pending.item_ids().is_empty());
+        assert!(pending.removed_ids().is_empty());
+        let first_item = crate::managers::id::ITEM_ID.first_id;
+        for id in first_item..first_item + 5 {
+            assert!(s.items.item_by_id(u64::from(id)).is_none());
+        }
+        for (ids, expected) in [
+            (&s.ids.character, crate::managers::id::CHARACTER_ID.first_id),
+            (&s.ids.item, first_item),
+            (&s.ids.container, crate::managers::id::CONTAINER_ID.first_id),
+        ] {
+            let id = ids.get_next_id().unwrap();
+            assert_eq!(id, expected);
+            ids.release_id(id);
+        }
+    };
+    a.frame(&s, cs::CSCreateCharacterPacket, &body(&req)).await;
     assert_eq!(
         a.drain(),
         vec![(sc::SCCharacterCreationFailedPacket, vec![3])]
     );
-    // The id and the name were released again.
-    assert!(s.names.no_names_registered());
+    assert_released();
     assert!(a.conn.characters.is_empty());
-    // Starting kit: chest armor (with its MaxDurability) + face body part, supplies in stacks.
-    let eq = s
-        .items
-        .container_for_character(1, slot_type::EQUIPMENT, 0, &s.ids.container);
-    {
-        let eq = eq.lock().unwrap();
-        let chest = eq.get_item_by_slot(2).unwrap();
-        assert_eq!(chest.template_id, 6001);
-        assert_eq!(chest.details.durability, 10);
-        assert_eq!(eq.get_item_by_slot(19).unwrap().template_id, 7001);
-    }
-    let bag = s
-        .items
-        .container_for_character(1, slot_type::INVENTORY, 0, &s.ids.container);
-    let mut counts: Vec<(i32, i32)> = bag
-        .lock()
-        .unwrap()
-        .items
-        .iter()
-        .map(|i| (i.slot, i.count))
-        .collect();
-    counts.sort();
-    assert_eq!(counts, vec![(0, 10), (1, 10), (2, 5)]);
+    assert_eq!(a.conn.account_id(), 1001); // the lobby session stays available for retry
+    assert!(a.conn.active_char.is_none());
+    assert!(!a.conn.is_closing());
 
     // Invalid names are refused before anything is created.
     let bad = CreateCharacterRequest {
         name: "bad name".into(),
-        ..req
+        ..req.clone()
     };
-    crate::managers::character::create(&s, &mut a.conn, bad)
-        .await
-        .unwrap();
+    a.frame(&s, cs::CSCreateCharacterPacket, &body(&bad)).await;
     assert_eq!(
         a.drain(),
         vec![(sc::SCCharacterCreationFailedPacket, vec![5])]
     );
+    assert_released();
+
+    // The same normalized name and character ID can be tried again, with no inherited kit.
+    a.frame(&s, cs::CSCreateCharacterPacket, &body(&req)).await;
+    assert_eq!(
+        a.drain(),
+        vec![(sc::SCCharacterCreationFailedPacket, vec![3])]
+    );
+    assert_released();
+    assert!(a.conn.characters.is_empty());
+    assert_eq!(a.conn.account_id(), 1001);
+    assert!(!a.conn.is_closing());
 }
 
 #[tokio::test]

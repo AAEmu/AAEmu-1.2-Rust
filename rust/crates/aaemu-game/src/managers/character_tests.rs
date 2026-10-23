@@ -143,6 +143,88 @@ fn creation_request(name: &str) -> CreateCharacterRequest {
 }
 
 #[tokio::test]
+async fn create_character_starting_kit_helpers_preserve_equipment_and_stacks() {
+    use crate::data::character_templates::EquipItemsTemplate;
+    use crate::data::items::{EquipTemplate, GradeTemplate, ItemTemplate, TemplateKind};
+    use crate::models::character::Inventory;
+
+    let mut data = GameData::empty();
+    data.items.config.durability_const = 1.0;
+    data.items.grades.insert(
+        0,
+        GradeTemplate {
+            grade: 0,
+            grade_order: 0,
+            durability: 1.0,
+        },
+    );
+    data.items.templates.insert(
+        6001,
+        ItemTemplate {
+            kind: TemplateKind::Armor(EquipTemplate {
+                slot_type_id: 3,
+                coverage: 10,
+                durability_ratio: 1.0,
+                durability_multiplier: 100,
+                ..Default::default()
+            }),
+            ..ItemTemplate::plain(6001, 1)
+        },
+    );
+    data.items.templates.insert(
+        7001,
+        ItemTemplate {
+            kind: TemplateKind::BodyPart {
+                slot_type_id: 23,
+                model_id: 1,
+            },
+            ..ItemTemplate::plain(7001, 1)
+        },
+    );
+    data.items
+        .templates
+        .insert(8001, ItemTemplate::plain(8001, 10));
+    let server = test_server_with(data);
+    let inventory = Inventory::new(1, 50, 50, &server.items, &server.ids.container);
+    let kit = EquipItemsTemplate {
+        shirt: (6001, 0),
+        ..Default::default()
+    };
+    let mut created_items = Vec::new();
+    super::equip_pack(&server, &inventory, &kit, &mut |_| {}, &mut created_items);
+    assert!(
+        super::set_equip_item_template(&server, &inventory, 7001, 19, 0, &mut created_items)
+            .is_some()
+    );
+    assert!(super::acquire_default_item_recorded(
+        &server,
+        inventory.bag(),
+        8001,
+        25,
+        0,
+        &mut created_items
+    )
+    .unwrap());
+
+    let equipment = inventory.equipment().lock().unwrap();
+    let chest = equipment.get_item_by_slot(2).unwrap();
+    assert_eq!(chest.template_id, 6001);
+    assert_eq!(chest.details.durability, 10);
+    assert_eq!(equipment.get_item_by_slot(19).unwrap().template_id, 7001);
+    drop(equipment);
+    let mut stacks: Vec<_> = inventory
+        .bag()
+        .lock()
+        .unwrap()
+        .items
+        .iter()
+        .map(|item| (item.slot, item.template_id, item.count))
+        .collect();
+    stacks.sort_unstable();
+    assert_eq!(stacks, vec![(0, 8001, 10), (1, 8001, 10), (2, 8001, 5)]);
+}
+
+#[tokio::test]
 async fn new_character_setup_error_discards_inventory_before_id_reuse() {
     let mut data = creation_data();
     data.skills = Default::default(); // fails after containers, equipment and supplies exist
