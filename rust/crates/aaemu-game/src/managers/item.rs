@@ -50,6 +50,16 @@ impl ItemSaveBatch {
     pub(crate) fn item_ids(&self) -> Vec<u64> {
         self.items.iter().map(|(_, _, item)| item.id).collect()
     }
+
+    /// The queued item deletions of this snapshot (test assertion helper).
+    pub(crate) fn removed_ids(&self) -> Vec<u64> {
+        self.removed.clone()
+    }
+
+    /// The number of container rows of this snapshot (test assertion helper).
+    pub(crate) fn container_count(&self) -> usize {
+        self.containers.len()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -520,12 +530,26 @@ impl ItemManager {
 
     /// Capture before database awaits, while the caller serializes economy operations.
     pub(crate) fn prepare_save(&self) -> ItemSaveBatch {
-        let mut batch = ItemSaveBatch {
-            removed: lock(&self.removed).clone(),
-            ..Default::default()
-        };
+        let mut batch = self.prepare_save_filtered(None);
+        batch.removed = lock(&self.removed).clone();
+        batch
+    }
+
+    /// The dirty containers and items of one character only, no queued deletions: character
+    /// creation writes the starting supplies together with the `characters` row, so a server
+    /// stop before the next world save cannot lose them. The caller holds the save transaction
+    /// lock (the write and [`Self::commit_save`] share the single pending-batch slot).
+    pub(crate) fn prepare_save_for_owner(&self, owner_id: u32) -> ItemSaveBatch {
+        self.prepare_save_filtered(Some(owner_id))
+    }
+
+    fn prepare_save_filtered(&self, owner: Option<u32>) -> ItemSaveBatch {
+        let mut batch = ItemSaveBatch::default();
         for container in self.all_containers() {
             let snapshot = container.lock().expect("container poisoned").clone();
+            if owner.is_some_and(|o| snapshot.owner_id != o) {
+                continue;
+            }
             if snapshot.slot_type != slot_type::NONE && snapshot.container_id > 0 && snapshot.dirty
             {
                 batch
@@ -540,9 +564,11 @@ impl ItemManager {
                 }
             }
         }
-        for item in lock(&self.loose).iter() {
-            if item.slot_type != slot_type::NONE && item.dirty {
-                batch.items.push((None, 0, item.clone()));
+        if owner.is_none() {
+            for item in lock(&self.loose).iter() {
+                if item.slot_type != slot_type::NONE && item.dirty {
+                    batch.items.push((None, 0, item.clone()));
+                }
             }
         }
         batch

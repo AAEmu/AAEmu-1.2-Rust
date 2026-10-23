@@ -1179,13 +1179,48 @@ async fn save_active_buffs(tx: &mut Transaction<'_, MySql>, c: &Character) {
 /// the state it had before the call (`save_character` advances `updated` and clears the removed
 /// lists while it works, so it runs on a clone that is applied only after the commit).
 pub async fn save_directly_to_database(pool: &MySqlPool, c: &mut Character) -> bool {
+    save_directly(pool, c, None).await
+}
+
+/// Character creation: [`save_directly_to_database`] plus the new character's containers and
+/// items in the same transaction (the C# left them to the next world save, so a stop or crash
+/// before it kept the `characters` row but lost the starting supplies; the next select then
+/// built empty containers).
+pub async fn save_new_character(server: &GameServer, c: &mut Character) -> bool {
+    // The item write and `commit_save` share the manager's pending-batch slot with the world
+    // save, so they run under the same transaction lock.
+    let _transaction = server.save.transaction_lock().await;
+    let batch = server.items.prepare_save_for_owner(c.id);
+    save_directly(&server.db, c, Some((&server.items, batch))).await
+}
+
+async fn save_directly(
+    pool: &MySqlPool,
+    c: &mut Character,
+    items: Option<(
+        &crate::managers::item::ItemManager,
+        crate::managers::item::ItemSaveBatch,
+    )>,
+) -> bool {
     let mut saved = c.clone();
+    let manager = items.as_ref().map(|(manager, _)| *manager);
     let res: Result<()> = async {
         let mut tx = pool.begin().await?;
         let now = Utc::now().timestamp();
-        match save_character(&mut tx, &mut saved, now).await {
+        let written = async {
+            save_character(&mut tx, &mut saved, now).await?;
+            if let Some((manager, batch)) = items {
+                manager.write_prepared(&mut tx, batch).await?;
+            }
+            Ok::<(), GameError>(())
+        }
+        .await;
+        match written {
             Ok(()) => {
                 tx.commit().await?;
+                if let Some(manager) = manager {
+                    manager.commit_save();
+                }
                 Ok(())
             }
             Err(e) => {
@@ -1799,6 +1834,99 @@ mod tests {
         // 4. What the next character load (`Character.Load` -> account details) reads.
         let reloaded = crate::db::get_account_details(&pool, &server.config, 1).await;
         assert_eq!(reloaded.labor, 893);
+        pool.close().await;
+    }
+
+    /// Character creation writes the starting supplies together with the `characters` row: a
+    /// stop before the next world save must not keep the character but lose its items.
+    #[tokio::test]
+    #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
+    async fn private_mysql_new_character_items_are_saved_with_the_character() {
+        use crate::systems::social::achievement_persistence::temporary_shadow_definition;
+        use crate::test_support::test_character;
+
+        let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+            return;
+        };
+        let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+        assert_eq!(
+            options.get_port(),
+            3317,
+            "only private MySQL3317 is allowed"
+        );
+        assert!(matches!(options.get_host(), "127.0.0.1" | "localhost"));
+        let pool = MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("private MySQL");
+        for table in [
+            "items",
+            "item_containers",
+            "characters",
+            "options",
+            "abilities",
+            "actabilities",
+            "appellations",
+            "character_active_buffs",
+            "portal_book_coords",
+            "portal_visited_district",
+            "friends",
+            "blocked",
+            "skills",
+            "quests",
+            "completed_quests",
+            "accounts",
+            "character_records",
+            "character_achievements",
+        ] {
+            let (_, definition): (String, String) =
+                sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            sqlx::query(&temporary_shadow_definition(&definition))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO `accounts` (`account_id`, `labor`) VALUES (1007, 1000)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut data = crate::data::GameData::empty();
+        let mut template = crate::data::items::ItemTemplate::plain(1000, 20);
+        template.name = "Starter".into();
+        data.items.templates.insert(1000, template);
+        let mut server = crate::test_support::test_server_with(data);
+        server.db = pool.clone();
+        let mut c = test_character(7, "Newbie", 500.0, 500.0);
+        c.inventory = Inventory::new(7, 50, 50, &server.items, &server.ids.container);
+        let item = server
+            .items
+            .create(1000, 1, 0, 1, &server.game_data.items, &server.ids.item, 0)
+            .expect("item");
+        let item_id = item.id;
+        c.inventory
+            .bag()
+            .lock()
+            .unwrap()
+            .add_new_item(item, 0, &server.game_data.items)
+            .expect("fits");
+
+        assert!(save_new_character(&server, &mut c).await);
+
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM items i JOIN item_containers ic              ON ic.container_id = i.container_id WHERE ic.owner_id = 7 AND i.id = ?",
+        )
+        .bind(item_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows, 1);
+        // The rows are marked clean, so the next world save does not rewrite them.
+        assert!(server.items.prepare_save_for_owner(7).item_ids().is_empty());
         pool.close().await;
     }
 

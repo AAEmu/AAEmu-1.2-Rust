@@ -12,7 +12,7 @@ use crate::data::character_templates::EquipItemsTemplate;
 use crate::data::items::{bind_type, ItemTemplate};
 use crate::db::get_account_details;
 use crate::db_character::{
-    check_for_deleted_characters, is_character_pending_deletion, save_directly_to_database,
+    check_for_deleted_characters, is_character_pending_deletion, save_new_character,
     set_delete_times,
 };
 use crate::error::{GameError, Result};
@@ -412,7 +412,7 @@ pub async fn create(
     c.unit.mp = c.unit.max_mp;
     c.restore_saved_hp_mp();
 
-    if save_directly_to_database(&server.db, &mut c).await {
+    if save_new_character(server, &mut c).await {
         let resp = create_character_response(&c);
         conn.characters.push(c);
         conn.send(&resp);
