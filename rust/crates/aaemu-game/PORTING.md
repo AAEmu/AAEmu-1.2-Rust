@@ -1523,7 +1523,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `NO_RETURN_POINT` (439, the retail error string `no_return_point`) and leaves the player where
   it is when the caller is in an instance and the gate is missing or its zone is not a zone of
   the caller's instance world. A gate of the instance's own world moves the player inside it
-  (zone change hooks fire, only `SCTeleportUnit`, no `SCLoadInstance`). Outside an instance a
+  (zone change hooks fire, only `SCTeleportUnit`, no `SCLoadInstance`). The character is re-filed
+  in the visibility grid immediately after the teleport is sent, outside its data lock, with
+  any grid zone changes dispatched afterwards. Distant gates remove it from departure observers
+  and show it to arrival observers without a movement packet; `CSTeleportEnded` repaints from
+  the arrival region without repeating observer deltas or zone changes. Outside an instance a
   gate whose zone exists only in instance worlds is treated as missing (never instance
   coordinates in the main world). The `MainWorldPosition` fallback remains only for the Memory
   Tome (`value1 == 0`) outside instances. Retail resolves a Return gate in the caster's own

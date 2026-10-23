@@ -2404,8 +2404,12 @@ async fn a_battlefield_result_scores_the_arena_ranking_board() {
 
 const RETURN_GATE_INSTANCE: u32 = 6001;
 const RETURN_GATE_MAIN: u32 = 6002;
+const RETURN_GATE_DISTANT: u32 = 6003;
+const RETURN_SKILL: u32 = 24979;
 
 fn return_gate_data() -> GameData {
+    use crate::systems::skills::data::{effects::SpecialEffect, EffectKind, EffectTemplate};
+
     let mut data = dungeon_data();
     let gate = |id: u32, zone_id: u32, x: f32| crate::data::world_data::Portal {
         id,
@@ -2423,11 +2427,36 @@ fn return_gate_data() -> GameData {
         vec![
             gate(RETURN_GATE_INSTANCE, DUNGEON_ZONE, 220.0),
             gate(RETURN_GATE_MAIN, TEST_ZONE, 120.0),
+            gate(RETURN_GATE_DISTANT, DUNGEON_ZONE, 1300.0),
         ],
         vec![],
         vec![],
     )
     .expect("gates");
+    data.systems.skills.add_effect(
+        EffectKind::SpecialEffect,
+        EffectTemplate::Special(SpecialEffect {
+            id: 1,
+            special_effect_type_id: 25,
+            value1: RETURN_GATE_DISTANT as i32,
+            value2: 0,
+            value3: 0,
+            value4: 0,
+        }),
+        1,
+    );
+    data.systems
+        .skills
+        .add_skill(crate::systems::skills::data::SkillTemplate {
+            target_type: 0, // Self
+            effects: vec![crate::systems::skills::tests::skill_effect(
+                1,
+                EffectKind::SpecialEffect,
+                1,
+            )],
+            ..crate::systems::skills::tests::skill_template(RETURN_SKILL)
+        });
+    crate::test_support::open_client_skills(&mut data);
     data
 }
 
@@ -2500,6 +2529,156 @@ async fn return_to_a_gate_of_the_instance_world_teleports_inside_it() {
     assert_eq!(t.instance_id, 100);
     assert_eq!(t.zone_id, DUNGEON_ZONE);
     assert!((t.x - 220.0).abs() < 0.01 && (t.y - 210.0).abs() < 0.01);
+}
+
+/// Return crosses disjoint visibility neighbourhoods, then the client completes the teleport
+/// without sending movement. Both observers and the caster must see the arrival region.
+#[tokio::test]
+async fn return_to_a_distant_instance_gate_refiles_visibility_without_movement() {
+    use crate::systems::skills::types::{convert_long, SkillCastTarget, SkillCaster};
+
+    #[derive(Default)]
+    struct ZoneChanges(std::sync::Mutex<Vec<(u32, u32, u32)>>);
+    impl crate::systems::UnitHooks for ZoneChanges {
+        fn on_unit_zone_change(
+            &self,
+            _server: &GameServer,
+            unit: &WorldObject,
+            old_zone: u32,
+            new_zone: u32,
+        ) {
+            self.0
+                .lock()
+                .unwrap()
+                .push((unit.obj_id(), old_zone, new_zone));
+        }
+    }
+
+    let server = build_return_server();
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    let mut old = Pc::new(&server, 2, "Departure", 110.0, 100.0);
+    let mut new = Pc::new(&server, 3, "Arrival", 120.0, 100.0);
+    form_party(&server, &a, &old);
+    form_party(&server, &a, &new);
+    enter_dungeon(&server, &mut a).await;
+    // The party shares the dungeon that Alpha's loader has already finished.
+    for observer in [&mut old, &mut new] {
+        use_enter_func(&server, &observer.p, DUNGEON_ZONE);
+        observer
+            .frame(&server, cs::CSInstanceLoadedPacket, &[])
+            .await;
+        assert_eq!(observer.instance(), a.instance());
+    }
+    new.move_to(&server, 1305.0, 210.0, 25.0).await;
+    let world = server.world.world(a.instance()).unwrap();
+    let departure = a.p.region().unwrap();
+    let arrival = new.p.region().unwrap();
+    assert_eq!(departure, (100, 3, 3));
+    assert_eq!(arrival, (100, 20, 3));
+    assert!(world
+        .objects_around(&WorldObject::from(&a.p))
+        .iter()
+        .any(|o| o.obj_id() == old.p.obj_id));
+    assert!(!world
+        .objects_around(&WorldObject::from(&a.p))
+        .iter()
+        .any(|o| o.obj_id() == new.p.obj_id));
+    let saved_main_world_position = a.p.data().main_world_position.unwrap();
+    let zone_changes = Arc::new(ZoneChanges::default());
+    server.systems.hooks.unit.install(zone_changes.clone());
+    a.frames();
+    old.frames();
+    new.frames();
+
+    let mut cast = PacketStream::new();
+    cast.write_u32(RETURN_SKILL);
+    SkillCaster::Unit(a.p.obj_id).write(&mut cast);
+    SkillCastTarget::Unit(a.p.obj_id).write(&mut cast);
+    cast.write_u8(0);
+    a.frame(&server, cs::CSStartSkillPacket, cast.as_bytes())
+        .await;
+    let sent = a.frames();
+    assert!(sent.iter().any(|(op, _)| *op == sc::SCTeleportUnitPacket));
+    assert!(!sent.iter().any(|(op, _)| *op == sc::SCLoadInstancePacket));
+    assert!(a.p.data().disabled_set_position);
+
+    let mut ended = PacketStream::new();
+    ended
+        .write_i64(convert_long(1300.0))
+        .write_i64(convert_long(210.0))
+        .write_f32(25.0);
+    for _ in 0..16 {
+        ended.write_u8(0);
+    }
+    a.frame(&server, cs::CSTeleportEndedPacket, ended.as_bytes())
+        .await;
+    let completed = a.frames();
+    assert!(!a.p.data().disabled_set_position);
+    assert_eq!(a.p.region(), Some(arrival));
+    assert!(!world
+        .region_object_ids((departure.1, departure.2))
+        .contains(&a.p.obj_id));
+    assert!(world
+        .region_object_ids((arrival.1, arrival.2))
+        .contains(&a.p.obj_id));
+    let state_count = |frames: &[(u16, Vec<u8>)], id| {
+        frames
+            .iter()
+            .filter(|(op, b)| *op == sc::SCUnitStatePacket && bc(b) == id)
+            .count()
+    };
+    assert!(removed_ids(&sent).contains(&old.p.obj_id));
+    assert_eq!(
+        state_count(&sent, new.p.obj_id),
+        1,
+        "arrival visibility is filed when Return moves the transform"
+    );
+    assert_eq!(
+        state_count(&completed, new.p.obj_id),
+        1,
+        "completion repaints the arrival"
+    );
+    assert_eq!(
+        state_count(&completed, old.p.obj_id),
+        0,
+        "departure must not be repainted"
+    );
+    assert_eq!(
+        removed_ids(&old.frames())
+            .iter()
+            .filter(|&&id| id == a.p.obj_id)
+            .count(),
+        1
+    );
+    assert_eq!(
+        state_count(&new.frames(), a.p.obj_id),
+        1,
+        "arrival observer sees the caster once"
+    );
+    let t = a.p.data().unit.transform;
+    assert_eq!(
+        (t.instance_id, t.world_id, t.zone_id),
+        (100, 1, DUNGEON_ZONE)
+    );
+    assert_eq!((t.x, t.y, t.z), (1300.0, 210.0, 25.0));
+    assert!((t.rot_z - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+    assert_eq!(
+        a.p.data().main_world_position,
+        Some(saved_main_world_position)
+    );
+    assert!(
+        zone_changes.0.lock().unwrap().is_empty(),
+        "same-zone Return must not fire zone hooks"
+    );
+
+    // A repeated completion may repaint for the caster, but must not repeat observer deltas
+    // or zone events, and must never re-file the player back at the departure.
+    a.frame(&server, cs::CSTeleportEndedPacket, ended.as_bytes())
+        .await;
+    assert!(old.frames().is_empty());
+    assert!(new.frames().is_empty());
+    assert!(zone_changes.0.lock().unwrap().is_empty());
+    assert_eq!(a.p.region(), Some(arrival));
 }
 
 /// Outside an instance a main-world gate still loads the main world (`SCLoadInstance` +

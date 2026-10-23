@@ -582,6 +582,13 @@ fn move_within_instance(server: &GameServer, p: &PlayerRef, t: &Portal) {
         z: t.z,
         z2: yaw,
     });
+    // The transform already moved. Re-file it now so TeleportEnded's repaint uses the
+    // arrival neighbourhood and both sets of observers are updated without client movement.
+    let instance_id = p.data().unit.transform.instance_id;
+    if let Some(world) = server.world.world(instance_id) {
+        let changes = world.add_visible_object(p, &server.view_ctx());
+        crate::world::session::handle_zone_changes(server, changes);
+    }
 }
 
 /// `Return` (recall / world gate return): `SCLoadInstancePacket` + `SCTeleportUnitPacket`.
