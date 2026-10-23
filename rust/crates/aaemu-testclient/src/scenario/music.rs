@@ -437,7 +437,7 @@ async fn settle(
     Ok(all)
 }
 
-fn held<'a>(m: &'a Music, tpl: u32) -> anyhow::Result<&'a Held> {
+fn held(m: &Music, tpl: u32) -> anyhow::Result<&Held> {
     m.held
         .get(&tpl)
         .with_context(|| format!("item {tpl} not added with `mitem`"))
