@@ -6,7 +6,6 @@ suite newchar-items
 bot nci fresh
 
 [nci]
-bag
 expectdb "SELECT COUNT(*)>=4 FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${nci}' AND ic.slot_type=2" 1
 expectdb "SELECT COUNT(*)>=1 FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${nci}' AND ic.slot_type=1" 1
 pump 1
