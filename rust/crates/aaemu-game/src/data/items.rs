@@ -806,6 +806,9 @@ impl ItemTemplate {
 
     /// `ItemTemplate.ClassType`.
     pub fn class_type(&self) -> ItemClass {
+        if self.impl_id == item_impl::SLAVE_EQUIPMENT {
+            return ItemClass::SlaveEquipment;
+        }
         match self.kind {
             TemplateKind::Item => ItemClass::Item,
             TemplateKind::Armor(_) => ItemClass::Armor,

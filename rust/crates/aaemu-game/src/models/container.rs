@@ -24,10 +24,11 @@ pub mod slot_type {
     pub const TRADE: u8 = 4;
     pub const MAIL: u8 = 5;
     pub const AUCTION: u8 = 6;
+    pub const EQUIPMENT_SLAVE: u8 = 0xF2;
     pub const EQUIPMENT_MATE: u8 = 252;
     pub const SYSTEM: u8 = 0xFF;
     /// `Enum.GetValues<SlotType>()` order.
-    pub const ALL: [u8; 9] = [
+    pub const ALL: [u8; 10] = [
         NONE,
         EQUIPMENT,
         INVENTORY,
@@ -35,6 +36,7 @@ pub mod slot_type {
         TRADE,
         MAIL,
         AUCTION,
+        EQUIPMENT_SLAVE,
         EQUIPMENT_MATE,
         SYSTEM,
     ];
@@ -323,6 +325,11 @@ impl ItemContainer {
         if self.is_equipment() {
             if item.count != 1 {
                 return false;
+            }
+            // Ship / vehicle parts are `ItemImplEnum.SlaveEquipment` templates, not character
+            // gear: the 10.x `EquipmentContainer.CanAccept` only checks the slot range.
+            if self.slot_type == slot_type::EQUIPMENT_SLAVE {
+                return target_slot >= 0 && target_slot < self.size;
             }
             // `Owner == null`: not applicable to NPCs (mate gear resolves its owner by id).
             if !self.has_owner && !(self.kind == ContainerKind::MateEquipment && self.owner_id > 0)
@@ -710,7 +717,10 @@ impl ItemContainer {
             }
             let bt = data.template(item.template_id).map_or(0, |t| t.bind_type);
             if (self.slot_type == slot_type::INVENTORY && bt == bind_type::BIND_ON_PICKUP)
-                || (self.slot_type == slot_type::EQUIPMENT && bt == bind_type::BIND_ON_EQUIP)
+                || (matches!(
+                    self.slot_type,
+                    slot_type::EQUIPMENT | slot_type::EQUIPMENT_SLAVE
+                ) && bt == bind_type::BIND_ON_EQUIP)
             {
                 item.flags |= ITEM_FLAG_SOUL_BOUND;
                 item.dirty = true;
