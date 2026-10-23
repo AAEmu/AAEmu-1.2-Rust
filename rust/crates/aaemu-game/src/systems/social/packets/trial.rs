@@ -205,11 +205,11 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCCriminalArrestedPacket(criminalObjId, criminal, arrestor)` (the obj id is a plain
-    /// `uint`, not a bc).
+    /// `SCCriminalArrestedPacket(criminalObjId, criminal, arrestor)`. The 1.2 client's reader
+    /// (x2game 397b6870) takes the obj id as a 3-byte bc before the two names.
     SCCriminalArrestedPacket { criminal_obj_id: u32, criminal: String, arrestor: String }
     |self, s| {
-        s.write_u32(self.criminal_obj_id)
+        s.write_bc(self.criminal_obj_id)
             .write_str(&self.criminal)
             .write_str(&self.arrestor);
     }
@@ -765,7 +765,7 @@ mod tests {
                 criminal: "C".into(),
                 arrestor: "A".into()
             }),
-            vec![0x0C, 0x0B, 0x0A, 0x00, 1, 0, b'C', 1, 0, b'A']
+            vec![0x0C, 0x0B, 0x0A, 1, 0, b'C', 1, 0, b'A']
         );
         assert_eq!(
             body(&SCForceAttackSetPacket {

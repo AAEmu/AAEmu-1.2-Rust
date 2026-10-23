@@ -349,7 +349,7 @@ fn tower_def_packets_are_byte_exact() {
         current_step: 4,
     };
     let mut e = PacketStream::new();
-    e.write_i32(1)
+    e.write_u8(1)
         .write_u32(12)
         .write_u16(5)
         .write_u32(129)

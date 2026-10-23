@@ -728,10 +728,15 @@ packet_def!(
     level = LEVEL_PLAIN,
     opcode = sc::SCTowerDefListPacket
 );
+impl SCTowerDefListPacket {
+    /// The 1.2 client reads the count as a byte and at most this many entries (x2game 397caad0).
+    pub const MAX_INFOS: usize = 100;
+}
 impl Marshal for SCTowerDefListPacket {
     fn write(&self, s: &mut PacketStream) {
-        s.write_i32(self.infos.len() as i32);
-        for i in &self.infos {
+        let infos = &self.infos[..self.infos.len().min(Self::MAX_INFOS)];
+        s.write_u8(infos.len() as u8);
+        for i in infos {
             i.write(s);
         }
     }
