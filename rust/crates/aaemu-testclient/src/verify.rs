@@ -263,12 +263,15 @@ fn fresh_character_name() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock after epoch")
         .as_nanos() as u64;
-    let previous = LAST
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
-            Some(now.max(last + 1))
-        })
-        .expect("always updates");
-    format!("Vn{:016x}", now.max(previous + 1))
+    let mut previous = LAST.load(Ordering::Relaxed);
+    let next = loop {
+        let next = now.max(previous + 1);
+        match LAST.compare_exchange_weak(previous, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break next,
+            Err(current) => previous = current,
+        }
+    };
+    format!("Vn{next:016x}")
 }
 
 fn bot_config(login: &str, password: &str, user: &str, fresh: bool) -> anyhow::Result<BotConfig> {
