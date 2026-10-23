@@ -757,3 +757,33 @@ async fn private_mysql_load_user_items_deletes_a_merged_stack_row() {
         .unwrap();
     assert_eq!(persisted, 8);
 }
+
+// ---- Character creation save (owner-scoped batch) ----
+
+/// The creation save writes only the new character's dirty containers and items, never another
+/// character's pending rows or the queued deletions (those stay with the world save).
+#[test]
+fn prepare_save_for_owner_selects_only_that_characters_rows() {
+    let manager = create_item_manager();
+    let container_ids = IdManager::new(crate::managers::id::CONTAINER_ID);
+    let data = data_with_templates(vec![ItemTemplate::plain(1000, 20)]);
+    for (owner, id) in [(7u32, 0x0100_0001u64), (8, 0x0100_0002)] {
+        let bag = manager.container_for_character(owner, slot_type::INVENTORY, 0, &container_ids);
+        let mut item = create_test_item(id, 1000, 1);
+        item.dirty = true;
+        bag.lock()
+            .unwrap()
+            .add_new_item(item, 0, &data)
+            .expect("fits");
+    }
+    manager.mark_for_db_deletion(0x0100_0099);
+
+    let batch = manager.prepare_save_for_owner(7);
+    assert_eq!(batch.item_ids(), vec![0x0100_0001]);
+    assert!(batch.removed_ids().is_empty());
+    assert_eq!(batch.container_count(), 1);
+
+    let all = manager.prepare_save();
+    assert_eq!(all.item_ids().len(), 2);
+    assert_eq!(all.removed_ids(), vec![0x0100_0099]);
+}
