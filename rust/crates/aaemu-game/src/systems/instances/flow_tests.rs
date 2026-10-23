@@ -2399,3 +2399,319 @@ async fn a_battlefield_result_scores_the_arena_ranking_board() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(ranking.score_of(5, 1, period).unwrap().v1, 4);
 }
+
+// ---- Return effect (world gates) inside instances ----
+
+const RETURN_GATE_INSTANCE: u32 = 6001;
+const RETURN_GATE_MAIN: u32 = 6002;
+const RETURN_GATE_DISTANT: u32 = 6003;
+const RETURN_SKILL: u32 = 24979;
+
+fn return_gate_data() -> GameData {
+    use crate::systems::skills::data::{effects::SpecialEffect, EffectKind, EffectTemplate};
+
+    let mut data = dungeon_data();
+    let gate = |id: u32, zone_id: u32, x: f32| crate::data::world_data::Portal {
+        id,
+        name: format!("gate_{id}"),
+        zone_id,
+        x,
+        y: 210.0,
+        z: 25.0,
+        yaw: 90.0,
+        sub_zone_id: id,
+        ..Default::default()
+    };
+    data.systems.npcs.portal = crate::systems::npcs::portal::data::PortalTables::from_parts(
+        vec![],
+        vec![
+            gate(RETURN_GATE_INSTANCE, DUNGEON_ZONE, 220.0),
+            gate(RETURN_GATE_MAIN, TEST_ZONE, 120.0),
+            gate(RETURN_GATE_DISTANT, DUNGEON_ZONE, 1300.0),
+        ],
+        vec![],
+        vec![],
+    )
+    .expect("gates");
+    data.systems.skills.add_effect(
+        EffectKind::SpecialEffect,
+        EffectTemplate::Special(SpecialEffect {
+            id: 1,
+            special_effect_type_id: 25,
+            value1: RETURN_GATE_DISTANT as i32,
+            value2: 0,
+            value3: 0,
+            value4: 0,
+        }),
+        1,
+    );
+    data.systems
+        .skills
+        .add_skill(crate::systems::skills::data::SkillTemplate {
+            target_type: 0, // Self
+            effects: vec![crate::systems::skills::tests::skill_effect(
+                1,
+                EffectKind::SpecialEffect,
+                1,
+            )],
+            ..crate::systems::skills::tests::skill_template(RETURN_SKILL)
+        });
+    crate::test_support::open_client_skills(&mut data);
+    data
+}
+
+fn cast_return(server: &GameServer, p: &PlayerRef, gate_id: i32) {
+    use crate::systems::skills::effects::{EffectArgs, EffectSource};
+    use crate::systems::skills::types::{CastAction, SkillCastTarget, SkillCaster, SkillObject};
+    let caster = WorldObject::from(p);
+    let args = EffectArgs {
+        caster: Some(caster.clone()),
+        caster_caster: SkillCaster::Unit(p.obj_id),
+        target: crate::systems::skills::geometry::Target::Obj(caster),
+        target_caster: SkillCastTarget::Unit(p.obj_id),
+        cast: CastAction::Skill {
+            skill_id: 24979,
+            tl_id: 1,
+        },
+        source: EffectSource::default(),
+        skill_object: &SkillObject::None,
+    };
+    crate::systems::skills::effects::special::execute(server, 25, &args, [gate_id, 0, 0, 0]);
+}
+
+async fn enter_dungeon(server: &Arc<GameServer>, a: &mut Pc) {
+    use_enter_func(server, &a.p, DUNGEON_ZONE);
+    let d = server
+        .systems
+        .instances
+        .dungeon_of_world(100)
+        .expect("dungeon");
+    await_loader(&d).await;
+    a.frame(server, cs::CSInstanceLoadedPacket, &[]).await;
+    a.frames();
+    assert_eq!(a.instance(), 100);
+}
+
+/// A gate id without data, or a gate of a main-world zone, never ejects a player from its
+/// instance: error 439, no `SCLoadInstance`, transform unchanged.
+#[tokio::test]
+async fn return_without_usable_gate_keeps_the_player_in_the_instance() {
+    let server = build_return_server();
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    enter_dungeon(&server, &mut a).await;
+    let before = a.p.data().unit.transform;
+    assert!(a.p.data().main_world_position.is_some());
+
+    for gate in [7777, RETURN_GATE_MAIN as i32] {
+        cast_return(&server, &a.p, gate);
+        let ops = a.ops();
+        assert!(!ops.contains(&sc::SCLoadInstancePacket), "gate {gate}");
+        assert!(!ops.contains(&sc::SCTeleportUnitPacket), "gate {gate}");
+        assert!(ops.contains(&sc::SCErrorMsgPacket), "gate {gate}");
+        assert_eq!(a.p.data().unit.transform, before, "gate {gate}");
+    }
+}
+
+/// A gate whose zone is in the player's instance world moves the player inside it.
+#[tokio::test]
+async fn return_to_a_gate_of_the_instance_world_teleports_inside_it() {
+    let server = build_return_server();
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    enter_dungeon(&server, &mut a).await;
+
+    cast_return(&server, &a.p, RETURN_GATE_INSTANCE as i32);
+    let frames = a.frames();
+    let ops: Vec<u16> = frames.iter().map(|f| f.0).collect();
+    assert!(!ops.contains(&sc::SCLoadInstancePacket));
+    assert!(ops.contains(&sc::SCTeleportUnitPacket));
+    assert!(!ops.contains(&sc::SCErrorMsgPacket));
+    let t = a.p.data().unit.transform;
+    assert_eq!(t.instance_id, 100);
+    assert_eq!(t.zone_id, DUNGEON_ZONE);
+    assert!((t.x - 220.0).abs() < 0.01 && (t.y - 210.0).abs() < 0.01);
+}
+
+/// Return crosses disjoint visibility neighbourhoods, then the client completes the teleport
+/// without sending movement. Both observers and the caster must see the arrival region.
+#[tokio::test]
+async fn return_to_a_distant_instance_gate_refiles_visibility_without_movement() {
+    use crate::systems::skills::types::{convert_long, SkillCastTarget, SkillCaster};
+
+    #[derive(Default)]
+    struct ZoneChanges(std::sync::Mutex<Vec<(u32, u32, u32)>>);
+    impl crate::systems::UnitHooks for ZoneChanges {
+        fn on_unit_zone_change(
+            &self,
+            _server: &GameServer,
+            unit: &WorldObject,
+            old_zone: u32,
+            new_zone: u32,
+        ) {
+            self.0
+                .lock()
+                .unwrap()
+                .push((unit.obj_id(), old_zone, new_zone));
+        }
+    }
+
+    let server = build_return_server();
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    let mut old = Pc::new(&server, 2, "Departure", 110.0, 100.0);
+    let mut new = Pc::new(&server, 3, "Arrival", 120.0, 100.0);
+    form_party(&server, &a, &old);
+    form_party(&server, &a, &new);
+    enter_dungeon(&server, &mut a).await;
+    // The party shares the dungeon that Alpha's loader has already finished.
+    for observer in [&mut old, &mut new] {
+        use_enter_func(&server, &observer.p, DUNGEON_ZONE);
+        observer
+            .frame(&server, cs::CSInstanceLoadedPacket, &[])
+            .await;
+        assert_eq!(observer.instance(), a.instance());
+    }
+    new.move_to(&server, 1305.0, 210.0, 25.0).await;
+    let world = server.world.world(a.instance()).unwrap();
+    let departure = a.p.region().unwrap();
+    let arrival = new.p.region().unwrap();
+    assert_eq!(departure, (100, 3, 3));
+    assert_eq!(arrival, (100, 20, 3));
+    assert!(world
+        .objects_around(&WorldObject::from(&a.p))
+        .iter()
+        .any(|o| o.obj_id() == old.p.obj_id));
+    assert!(!world
+        .objects_around(&WorldObject::from(&a.p))
+        .iter()
+        .any(|o| o.obj_id() == new.p.obj_id));
+    let saved_main_world_position = a.p.data().main_world_position.unwrap();
+    let zone_changes = Arc::new(ZoneChanges::default());
+    server.systems.hooks.unit.install(zone_changes.clone());
+    a.frames();
+    old.frames();
+    new.frames();
+
+    let mut cast = PacketStream::new();
+    cast.write_u32(RETURN_SKILL);
+    SkillCaster::Unit(a.p.obj_id).write(&mut cast);
+    SkillCastTarget::Unit(a.p.obj_id).write(&mut cast);
+    cast.write_u8(0);
+    a.frame(&server, cs::CSStartSkillPacket, cast.as_bytes())
+        .await;
+    let sent = a.frames();
+    assert!(sent.iter().any(|(op, _)| *op == sc::SCTeleportUnitPacket));
+    assert!(!sent.iter().any(|(op, _)| *op == sc::SCLoadInstancePacket));
+    assert!(a.p.data().disabled_set_position);
+
+    let mut ended = PacketStream::new();
+    ended
+        .write_i64(convert_long(1300.0))
+        .write_i64(convert_long(210.0))
+        .write_f32(25.0);
+    for _ in 0..16 {
+        ended.write_u8(0);
+    }
+    a.frame(&server, cs::CSTeleportEndedPacket, ended.as_bytes())
+        .await;
+    let completed = a.frames();
+    assert!(!a.p.data().disabled_set_position);
+    assert_eq!(a.p.region(), Some(arrival));
+    assert!(!world
+        .region_object_ids((departure.1, departure.2))
+        .contains(&a.p.obj_id));
+    assert!(world
+        .region_object_ids((arrival.1, arrival.2))
+        .contains(&a.p.obj_id));
+    let state_count = |frames: &[(u16, Vec<u8>)], id| {
+        frames
+            .iter()
+            .filter(|(op, b)| *op == sc::SCUnitStatePacket && bc(b) == id)
+            .count()
+    };
+    assert!(removed_ids(&sent).contains(&old.p.obj_id));
+    assert_eq!(
+        state_count(&sent, new.p.obj_id),
+        1,
+        "arrival visibility is filed when Return moves the transform"
+    );
+    assert_eq!(
+        state_count(&completed, new.p.obj_id),
+        1,
+        "completion repaints the arrival"
+    );
+    assert_eq!(
+        state_count(&completed, old.p.obj_id),
+        0,
+        "departure must not be repainted"
+    );
+    assert_eq!(
+        removed_ids(&old.frames())
+            .iter()
+            .filter(|&&id| id == a.p.obj_id)
+            .count(),
+        1
+    );
+    assert_eq!(
+        state_count(&new.frames(), a.p.obj_id),
+        1,
+        "arrival observer sees the caster once"
+    );
+    let t = a.p.data().unit.transform;
+    assert_eq!(
+        (t.instance_id, t.world_id, t.zone_id),
+        (100, 1, DUNGEON_ZONE)
+    );
+    assert_eq!((t.x, t.y, t.z), (1300.0, 210.0, 25.0));
+    assert!((t.rot_z - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+    assert_eq!(
+        a.p.data().main_world_position,
+        Some(saved_main_world_position)
+    );
+    assert!(
+        zone_changes.0.lock().unwrap().is_empty(),
+        "same-zone Return must not fire zone hooks"
+    );
+
+    // A repeated completion may repaint for the caster, but must not repeat observer deltas
+    // or zone events, and must never re-file the player back at the departure.
+    a.frame(&server, cs::CSTeleportEndedPacket, ended.as_bytes())
+        .await;
+    assert!(old.frames().is_empty());
+    assert!(new.frames().is_empty());
+    assert!(zone_changes.0.lock().unwrap().is_empty());
+    assert_eq!(a.p.region(), Some(arrival));
+}
+
+/// Outside an instance a main-world gate still loads the main world (`SCLoadInstance` +
+/// `SCTeleportUnit`), and a gate that exists only in an instance world is never used.
+#[tokio::test]
+async fn return_in_the_main_world_is_unchanged() {
+    let server = build_return_server();
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    a.frames();
+
+    cast_return(&server, &a.p, RETURN_GATE_MAIN as i32);
+    let ops = a.ops();
+    assert_eq!(
+        ops,
+        vec![sc::SCLoadInstancePacket, sc::SCTeleportUnitPacket]
+    );
+    let t = a.p.data().unit.transform;
+    assert_eq!((t.instance_id, t.zone_id), (0, TEST_ZONE));
+    assert!((t.x - 120.0).abs() < 0.01);
+
+    cast_return(&server, &a.p, RETURN_GATE_INSTANCE as i32);
+    assert!(a.ops().is_empty());
+    assert!((a.p.data().unit.transform.x - 120.0).abs() < 0.01);
+}
+
+fn build_return_server() -> Arc<GameServer> {
+    let server = dungeon_server_with(return_gate_data());
+    // The world gate lookup is the npcs subsystem's hook.
+    server
+        .systems
+        .skills
+        .ext
+        .npcs
+        .install(Arc::new(crate::systems::npcs::bridges::NpcSkills));
+    server
+}

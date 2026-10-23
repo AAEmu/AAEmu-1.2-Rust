@@ -211,7 +211,7 @@ async fn handle_connection(
     let _ = writer_task.await;
     tracing::info!("GameServer from {} disconnected", addr.ip());
     if let Some(gs_id) = connection.game_server() {
-        server.games.remove(gs_id);
+        server.games.remove(gs_id, &connection);
     }
     server.internal_connections.remove(connection.id);
 }

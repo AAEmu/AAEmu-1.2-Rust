@@ -9,7 +9,7 @@ use crate::auth::{
     AuthFlow, KoreaAuthFlow, KoreaStep, LoginClient, PasswordAuthFlow, ReconnectAuthFlow,
 };
 use crate::controllers::game::send_with_delay;
-use crate::models::GsRegisterResult;
+use crate::models::{GameServerId, GsRegisterResult};
 use crate::network::internal::InternalConnection;
 use crate::network::login::LoginConnection;
 use crate::packets::c2l::C2lPacket;
@@ -97,19 +97,18 @@ pub async fn handle_g2l(
 ) -> anyhow::Result<()> {
     match packet {
         G2lPacket::GameServerLoad(p) => {
-            // C#: `connection.GameServer!.Load` (NullReferenceException if not registered).
-            let gs_id = conn
-                .game_server()
-                .context("Object reference not set to an instance of an object (GameServer)")?;
+            let gs_id = authorize_game_server(server, conn, None)?;
             server.games.set_load(gs_id, p.load)
         }
         G2lPacket::PlayerEnter(p) => {
+            authorize_game_server(server, conn, Some(p.gs_id))?;
             server
                 .games
                 .route_enter_world_response(p.connection_id, p.gs_id, p.result);
             Ok(())
         }
         G2lPacket::PlayerReconnect(p) => {
+            authorize_game_server(server, conn, Some(p.gs_id))?;
             server
                 .logins
                 .add_reconnection_token(conn, p.gs_id, p.account_id, p.token);
@@ -131,19 +130,38 @@ pub async fn handle_g2l(
             Ok(())
         }
         G2lPacket::RequestInfo(p) => {
-            let login_connection = server.connections.get(p.connection_id);
-            if !p.characters.is_empty() {
-                // C#: `loginConnection!` / `connection.GameServer!` throw before ReleaseId.
-                let login_connection = login_connection.context(
-                    "Object reference not set to an instance of an object (login connection)",
-                )?;
-                let gs_id = conn
-                    .game_server()
-                    .context("Object reference not set to an instance of an object (GameServer)")?;
-                login_connection.add_characters(gs_id, p.characters)?;
-            }
-            server.requests.release_id(p.request_id);
-            Ok(())
+            authorize_game_server(server, conn, None)?;
+            server.games.complete_character_request(
+                conn,
+                p.connection_id,
+                p.request_id,
+                p.characters,
+            )
         }
     }
 }
+
+/// Registration alone is insufficient: a newer connection may now own the world. Mirrors
+/// are authorized through the controller's current connection, not a packet's claimed id.
+fn authorize_game_server(
+    server: &LoginServer,
+    conn: &Arc<InternalConnection>,
+    claimed_id: Option<GameServerId>,
+) -> anyhow::Result<GameServerId> {
+    let registered_id = conn
+        .game_server()
+        .context("Internal connection has not registered a game server")?;
+    anyhow::ensure!(
+        server.games.owns_connection(registered_id, conn),
+        "Internal connection no longer owns game server {registered_id}"
+    );
+    let gs_id = claimed_id.unwrap_or(registered_id);
+    anyhow::ensure!(
+        server.games.owns_connection(gs_id, conn),
+        "Internal connection is not authorized for game server {gs_id}"
+    );
+    Ok(gs_id)
+}
+
+#[cfg(test)]
+mod tests;

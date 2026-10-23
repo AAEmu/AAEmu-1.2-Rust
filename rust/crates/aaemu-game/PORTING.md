@@ -1500,6 +1500,40 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   warning stays and prints the entry to add. Ten hand recorded gates are more than 5 m from their
   10.x point (221, 372, 617, 619, 628, 672, 673, 354, 652, and 48 by 6 m); they are untouched.
 
+* systems::npcs (2026-10-22): `Data/Portal/worldgates.json` has 67 more generated gates for the
+  instance worlds. `aaemu-aipaths return-points --world <instance_world>` (repeatable) reads the
+  world's own `world.xml` (instance zones have their own origin cells, identical in the 1.2 and
+  10.x files of the worlds used) and its `level_design/zone/<key>/editor/return_point.xml` in the
+  10.x `game_pak`, looks the points up by the 1.2 `return_points.editor_name` and replaces the
+  terrain check by a nearest-1.2-spawn warning (the Nachashgar points lie 0.3-7 m from a portal
+  spawn; the library "up" floors have their nearest spawn 40 m lower, the floor pitch). Added:
+  Nachashgar 524-532, 546-553, 561, 625, 626; Nachashgar easy 572-581; library 630-647, 654-669,
+  679; Howling Abyss 484, 525; Cradle of Destruction 488. Left out: 399, 400, 533, 627, 681 (main
+  world, fail the ground check), 555 and 567 (Immortal Isle, 134 m from the nearest spawn), 68 and
+  69 (reassigned ids), 670 and 671 (zone 315 is not in 1.2), ids without any point (386, 568, ...)
+  and the 16 ids no version defines. `SubZoneId` is the gate id, `100000 + Id` for 578 and 632.
+  Research: Return gates of an instance resolve in the caster's world (retail ships a
+  `return_point.g` per instance world).
+  Not verified in a live run (no live suite yet: no stack was run for this change).
+
+* systems::skills (2026-10-22): `Return` (type 25) keeps a player inside its instance. The C#
+  `Return.cs` is a TODO placeholder: a missing gate fell back to `character.MainWorldPosition`
+  and loaded the main world, so an instance Return id without gate data ejected the player
+  (the instance Return ids had no gate data at all). The Rust now sends `SCErrorMsg`
+  `NO_RETURN_POINT` (439, the retail error string `no_return_point`) and leaves the player where
+  it is when the caller is in an instance and the gate is missing or its zone is not a zone of
+  the caller's instance world. A gate of the instance's own world moves the player inside it
+  (zone change hooks fire, only `SCTeleportUnit`, no `SCLoadInstance`). The character is re-filed
+  in the visibility grid immediately after the teleport is sent, outside its data lock, with
+  any grid zone changes dispatched afterwards. Distant gates remove it from departure observers
+  and show it to arrival observers without a movement packet; `CSTeleportEnded` repaints from
+  the arrival region without repeating observer deltas or zone changes. Outside an instance a
+  gate whose zone exists only in instance worlds is treated as missing (never instance
+  coordinates in the main world). The `MainWorldPosition` fallback remains only for the Memory
+  Tome (`value1 == 0`) outside instances. Retail resolves a Return gate in the caster's own
+  world (instance worlds ship their own `return_point.g`) and never falls back to the main world.
+  The C# closed-zone check of world gates (`Skill.cs` `portal_zone_check`) is not ported.
+
 * systems::npcs (2026-10-15): `DoodadFuncClout` with `UseOriginSource` takes the first doodad
   within 4 m of the caster as the area trigger's owner, and the C# scheduled the
   `DoodadFuncCloutTask` on that owner, so it changed that doodad's phase to the clout's

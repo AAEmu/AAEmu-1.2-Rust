@@ -168,7 +168,7 @@ async fn remove_after_add_clears_server_connection() {
     let (conn, _rx) = create_connection();
     sut.games.add(GS_ID1, vec![], &conn);
 
-    sut.games.remove(GS_ID1);
+    sut.games.remove(GS_ID1, &conn);
 
     assert!(!sut.games.get_game_server(GS_ID1).unwrap().active());
 }
@@ -183,7 +183,7 @@ async fn remove_with_mirrors_clears_mirror_connections() {
     let (conn, _rx) = create_connection();
     sut.games.add(GS_ID1, vec![GS_ID2], &conn);
 
-    sut.games.remove(GS_ID1);
+    sut.games.remove(GS_ID1, &conn);
 
     assert!(!sut.games.get_game_server(GS_ID2).unwrap().active());
     assert_eq!(sut.games.try_get_parent_id(GS_ID2), None);
@@ -192,8 +192,33 @@ async fn remove_with_mirrors_clears_mirror_connections() {
 #[test]
 fn remove_unknown_server_id_does_not_throw() {
     let sut = create_sut(&[]);
+    let (conn, _rx) = create_connection();
 
-    sut.games.remove(GS_ID1);
+    sut.games.remove(GS_ID1, &conn);
+}
+
+#[tokio::test]
+async fn replaced_connection_disconnect_keeps_new_owner_and_mirrors() {
+    let sut = create_sut(&[
+        (1, "World", "127.0.0.1", 1234, false),
+        (2, "Mirror", "127.0.0.1", 1234, false),
+    ]);
+    sut.games.load(&sut.config).await;
+    let (old, _rx) = create_connection();
+    let (current, _rx) = create_connection();
+    sut.games.add(GS_ID1, vec![GS_ID2], &old);
+    sut.games.add(GS_ID1, vec![GS_ID2], &current);
+
+    sut.games.remove(GS_ID1, &old);
+
+    assert!(!sut.games.owns_connection(GS_ID1, &old));
+    assert!(!sut.games.owns_connection(GS_ID2, &old));
+    assert!(sut.games.owns_connection(GS_ID1, &current));
+    assert!(sut.games.owns_connection(GS_ID2, &current));
+    assert_eq!(sut.games.try_get_parent_id(GS_ID2), Some(GS_ID1));
+    sut.games.remove(GS_ID1, &current);
+    assert!(!sut.games.get_game_server(GS_ID1).unwrap().active());
+    assert!(!sut.games.get_game_server(GS_ID2).unwrap().active());
 }
 
 #[tokio::test]
