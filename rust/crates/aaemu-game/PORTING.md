@@ -2517,5 +2517,29 @@ finishes and the NPC settles in HoldPosition without further movement.
   the item count. Labor is still checked by `check_resources` as before and nothing is spent on
   a refusal. Every other skill keeps the soft effect-level consume. Reason: retail refuses the
   construction without the materials; the step tooltip says it spends 1 Lumber. Regression:
-  `systems::housing::tests::construction_step_needs_its_effect_consume_item`. The error text the
+  `systems::housing::lifecycle_tests::construction_step_needs_its_effect_consume_item_before_cast`.
+  The error text the
   client shows for result 36 was not re-checked in the client binary.
+* `systems::housing`: the final availability check is early feedback, not the payment boundary.
+  A selected player-to-house Building `CraftEffect` now checks the live house and current step
+  under the housing operation lock, then consumes its full effect-level material through
+  `ItemSkillHooks::pay_building_material` immediately before advancing progress. The economy
+  bridge preflights inventory, equipment and bank under one item transaction; a defensive short
+  debit restores exact container snapshots and discards queued effects. Persistence completes
+  under the economy lock, which is released before progress callbacks; item callbacks flush
+  after the housing lock. Missing payment cancels with result 36, without progress, labor or
+  the success interaction quest event. Rejected/stale house effects never fall back to the
+  legacy optional debit. Other effects retain that optional behavior. Regressions remove the
+  last real item after the final availability snapshot, retry after replenishing, check exact
+  and extra stock in every supported container, and prove non-building NPC damage still applies
+  without its optional item. Zero-step designs already finish during placement; a subsequent
+  construction action is rejected before payment.
+* `systems::economy`: container consumption callbacks now report the actual consumed delta
+  exactly once for full, partial and preferred stacks. The C# `ItemContainer.ConsumeItem`
+  decremented a depleted stack to zero before `RemoveItem` reported its count; the Rust port
+  mirrored that zero-count event (plus a second, correct event for a preferred stack). Removal
+  now accepts the consumed delta internally while direct removals keep their remaining-count
+  semantics. The callback still precedes `EquipLeave`, and wire item tasks are unchanged.
+  Container regressions cover full/preferred/partial/multiple stacks, equipment callback order
+  and direct removal; the housing payment callback test covers both the last unit and a partial
+  stack, with both operation locks released.

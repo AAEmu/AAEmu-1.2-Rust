@@ -224,6 +224,44 @@ async fn guaranteed_hit_is_per_effect_and_does_not_change_the_cast_miss_cache() 
 }
 
 #[tokio::test]
+async fn nonbuilding_damage_still_applies_without_its_optional_effect_item() {
+    let mut data = GameData::empty();
+    data.systems.skills.add_effect(
+        EffectKind::DamageEffect,
+        EffectTemplate::Damage(Box::new(super::tests::damage_effect(1, 100))),
+        1,
+    );
+    let mut effect = super::tests::skill_effect(1, EffectKind::DamageEffect, 1);
+    effect.consume_item_id = 8337;
+    effect.consume_item_count = 1;
+    effect.always_hit = true;
+    let (server, _client, player, npc) = fixture(data);
+    server
+        .systems
+        .skills
+        .ext
+        .items
+        .install(Arc::new(crate::systems::economy::bridges::EconomyForSkills));
+    assert_eq!(
+        crate::systems::economy::inventory::Inv::of(&player).items_count(8337, -1),
+        0
+    );
+    let skill = SkillRun::new(
+        Arc::new(SkillTemplate {
+            effects: vec![effect],
+            ..super::tests::skill_template(1)
+        }),
+        1,
+    );
+    assert_eq!(
+        cast(&server, &skill, &player, &npc).0,
+        skill_result::SUCCESS
+    );
+    assert!(!skill.cancelled());
+    assert_eq!(npc.data().unit.hp, 900);
+}
+
+#[tokio::test]
 async fn channel_buffs_have_distinct_owners_and_cancel_stops_mana_ticks() {
     let mut data = GameData::empty();
     for id in [1, 2] {

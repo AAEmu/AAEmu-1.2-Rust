@@ -356,15 +356,8 @@ pub fn house_radius(server: &GameServer, obj: &WorldObject) -> Option<f32> {
     Some(r * scale)
 }
 
-/// The `CraftEffect` `Building` branch (routed from `ExtHooks::route_effect` before the other
-/// subsystems): a character building a house. `true` = handled.
-pub fn apply_effect(
-    server: &GameServer,
-    kind: EffectKind,
-    template: &EffectTemplate,
-    args: &EffectArgs<'_>,
-) -> bool {
-    let _ = kind;
+/// Structural classification shared by skill payment and the ordinary effect router.
+pub(crate) fn is_building_effect(server: &GameServer, template: &EffectTemplate) -> bool {
     let EffectTemplate::Craft {
         world_interaction, ..
     } = template
@@ -377,7 +370,19 @@ pub fn apply_effect(
         .npcs
         .area_trigger
         .get_world_interaction_group(*world_interaction);
-    if group != Some(crate::systems::npcs::area_trigger::world_interaction_group::BUILDING) {
+    group == Some(crate::systems::npcs::area_trigger::world_interaction_group::BUILDING)
+}
+
+/// The `CraftEffect` `Building` branch (routed from `ExtHooks::route_effect` before the other
+/// subsystems): a character building a house. `true` = handled.
+pub fn apply_effect(
+    server: &GameServer,
+    kind: EffectKind,
+    template: &EffectTemplate,
+    args: &EffectArgs<'_>,
+) -> bool {
+    let _ = kind;
+    if !is_building_effect(server, template) {
         return false;
     }
     let Some(player) = args.caster.as_ref().and_then(|c| c.as_player()).cloned() else {
@@ -389,7 +394,6 @@ pub fn apply_effect(
     let Some(house) = target.as_house().cloned() else {
         return false;
     };
-    tracing::debug!("CraftEffect, {world_interaction}");
     let used_skill = match args.cast {
         crate::systems::skills::types::CastAction::Skill { skill_id, .. } => skill_id,
         _ => 0,
