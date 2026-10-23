@@ -161,6 +161,10 @@ pub struct Entity {
     pub scale: f32,
     /// `+208` / `+216` colliders (entities this one is in contact with).
     pub colliders: Vec<EntIdx>,
+    /// Port lifetime bookkeeping, not a simulated field: users of this static collider.
+    /// Simclass-0 AddCollider keeps no reverse `colliders` entries, so destruction needs
+    /// these incoming links to detach sleeping users before deferred reclamation.
+    pub(crate) static_collider_users: Vec<EntIdx>,
     /// `+232` group leader (living).
     pub unk232: EntIdx,
     /// `+248`.
@@ -228,6 +232,7 @@ impl Entity {
             q2: Quat::IDENTITY,
             scale: 1.0,
             colliders: Vec::new(),
+            static_collider_users: Vec::new(),
             unk232: EntIdx::NONE,
             unk248: 0,
             time_idle: 0.0,
