@@ -65,9 +65,8 @@ pub fn apply_beauty_salon(
     if items.items_count(server, player, SALON_CERTIFICATE) <= 0 {
         return;
     }
-    let old_hair = hair_template(player);
-    if old_hair.is_some_and(|t| t != hair_model) && !items.replace_hair(server, player, hair_model)
-    {
+    let old_hair = hair_template(player).unwrap_or(0);
+    if old_hair != hair_model && !items.replace_hair(server, player, hair_model) {
         let (name, id) = {
             let c = player.data();
             (c.unit.name.clone(), c.id)
@@ -223,6 +222,10 @@ impl ClientPacket for CSBeautyshopDataPacket {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "beauty_salon_tests.rs"]
+mod flow_tests;
 
 #[cfg(test)]
 mod tests {
