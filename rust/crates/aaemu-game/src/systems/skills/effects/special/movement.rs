@@ -5,13 +5,15 @@
 //! subsystem's heightmaps; the navmesh path is not ported) is positive and within 5 m.
 
 use crate::data::world_data::Portal;
+use crate::data::world_templates::WorldSpawnPosition;
 use crate::models::character::DEFAULT_INSTANCE_ID;
 use crate::models::movement::{
     convert_radian_to_direction, MoveKind, MoveType, MoveTypeFlags, UnitMove,
 };
 use crate::models::transform::PositionAndRotation;
-use crate::packets::world::SCOneUnitMovementPacket;
+use crate::packets::world::{SCErrorMsgPacket, SCOneUnitMovementPacket};
 use crate::server::GameServer;
+use crate::systems::economy::error_message as err;
 use crate::systems::skills::ground_snap_rules as ground_snap;
 use crate::world::{now_ms, NpcRef, PlayerRef, WorldObject};
 
@@ -505,6 +507,83 @@ fn set_character_transform(
     t.set_position(pos.x, pos.y, pos.z, pos.rot_x, pos.rot_y, pos.rot_z);
 }
 
+/// Whether the world instance `instance_id` has a zone with key `zone_key`.
+fn zone_in_instance_world(server: &GameServer, instance_id: u32, zone_key: u32) -> bool {
+    server
+        .world
+        .worlds()
+        .iter()
+        .find(|w| w.id == instance_id)
+        .is_some_and(|w| {
+            w.template
+                .xml_world_zones()
+                .values()
+                .any(|z| z.zone_key == zone_key)
+        })
+}
+
+/// A zone that exists only in instance worlds (not in `main_world`).
+fn is_instance_only_zone(server: &GameServer, zone_key: u32) -> bool {
+    let worlds = &server.game_data.worlds;
+    let in_main = worlds
+        .get_world_template_by_name("main_world")
+        .is_some_and(|m| m.xml_world_zones().values().any(|z| z.zone_key == zone_key));
+    !in_main
+        && worlds
+            .templates()
+            .iter()
+            .any(|t| t.xml_world_zones().values().any(|z| z.zone_key == zone_key))
+}
+
+/// The "Need to add information to worldgates.json" hint for a missing gate id.
+fn log_missing_gate(server: &GameServer, p: &PlayerRef, id: i32) {
+    let tr = p.data().unit.transform;
+    let pos = world_pos(server, &Target::Obj(WorldObject::from(p)));
+    let sub_zone_id = p.data().sub_zone_id;
+    tracing::info!(
+        "Return: Need to add information to worldgates.json:
+        \"Id\": {}
+        \"ZoneId\": {},
+        \"X\": {},
+        \"Y\": {},
+        \"Z\": {},
+        \"Yaw\": {},
+        \"SubZoneId\": {}
+The coordinates need to be set correctly, these are just an example.",
+        id,
+        tr.zone_id,
+        pos.x,
+        pos.y,
+        pos.z,
+        pos.rot_z,
+        sub_zone_id
+    );
+}
+
+/// A gate of the caster's own instance world: keep the instance, move to the gate (zone change
+/// hooks fire like for a spawn position) and send only `SCTeleportUnit` (no `SCLoadInstance`).
+fn move_within_instance(server: &GameServer, p: &PlayerRef, t: &Portal) {
+    let yaw = deg_to_rad(t.yaw);
+    let wsp = WorldSpawnPosition {
+        zone_id: t.zone_id,
+        x: t.x,
+        y: t.y,
+        z: t.z,
+        yaw,
+        ..WorldSpawnPosition::default()
+    };
+    crate::systems::instances::worlds::apply_world_spawn_position(server, p, &wsp, 0);
+    p.data().set_disabled_set_position(true);
+    p.send(SCTeleportUnitPacket {
+        reason: TELEPORT_REASON_MOVE_TO_LOCATION,
+        error_message: 0,
+        x: t.x,
+        y: t.y,
+        z: t.z,
+        z2: yaw,
+    });
+}
+
 /// `Return` (recall / world gate return): `SCLoadInstancePacket` + `SCTeleportUnitPacket`.
 ///
 /// The instance and rotation in both notifications match the resulting transform.
@@ -522,6 +601,8 @@ pub fn return_(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         return;
     };
     let npcs = server.systems.skills.ext.npcs();
+    let instance_id = p.data().unit.transform.instance_id;
+    let in_instance = instance_id != DEFAULT_INSTANCE_ID;
     let trp = if v[0] == 0 {
         // Memory Tome for Recall skill
         let (district, faction) = {
@@ -543,6 +624,36 @@ pub fn return_(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         if trp.is_none() {
             tracing::warn!("Cannot find return WorldGate with id {}", v[0]);
         }
+        // Deviation from C# (its Return.cs is a TODO placeholder that fell back to
+        // `MainWorldPosition`): a gate is only used in the world its zone belongs to.
+        let trp = trp.filter(|t| {
+            let usable = if in_instance {
+                zone_in_instance_world(server, instance_id, t.zone_id)
+            } else {
+                !is_instance_only_zone(server, t.zone_id)
+            };
+            if !usable {
+                tracing::warn!(
+                    "Return WorldGate {} (zone {}) does not belong to the caster's world (instance {})",
+                    v[0],
+                    t.zone_id,
+                    instance_id
+                );
+            }
+            usable
+        });
+        if trp.is_none() && in_instance {
+            // Never eject the player to the main world: stay put.
+            log_missing_gate(server, p, v[0]);
+            p.send(SCErrorMsgPacket::new(err::NO_RETURN_POINT, 0, true));
+            return;
+        }
+        if let Some(t) = &trp {
+            if in_instance {
+                move_within_instance(server, p, t);
+                return;
+            }
+        }
         trp
     };
     if let Some(t) = &trp {
@@ -563,7 +674,7 @@ pub fn return_(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
             t.zone_id,
             PositionAndRotation::new(t.x, t.y, t.z, 0.0, 0.0, deg_to_rad(t.yaw)),
         );
-    } else if let Some(m) = npcs.main_world_position(server, p) {
+    } else if let Some(m) = npcs.main_world_position(server, p).filter(|_| !in_instance) {
         p.data().set_disabled_set_position(true);
         p.send(SCLoadInstancePacket {
             instance_id: m.instance_id,
@@ -587,19 +698,7 @@ pub fn return_(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         return;
     }
     let Some(t) = trp else {
-        let tr = p.data().unit.transform;
-        let pos = world_pos(server, &Target::Obj(WorldObject::from(p)));
-        let sub_zone_id = p.data().sub_zone_id;
-        tracing::info!(
-            "Return: Need to add information to worldgates.json:\r\n        \"Id\": {}\r\n        \"ZoneId\": {},\r\n        \"X\": {},\r\n        \"Y\": {},\r\n        \"Z\": {},\r\n        \"Yaw\": {},\r\n        \"SubZoneId\": {}\r\nThe coordinates need to be set correctly, these are just an example.",
-            v[0],
-            tr.zone_id,
-            pos.x,
-            pos.y,
-            pos.z,
-            pos.rot_z,
-            sub_zone_id
-        );
+        log_missing_gate(server, p, v[0]);
         return;
     };
     p.data().set_disabled_set_position(true);
