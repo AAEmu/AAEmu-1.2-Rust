@@ -9,13 +9,13 @@
 //!   once the login server accepts game-server registrations, all wired through environment
 //!   variables.
 //! * `ci` — the checks CI runs: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, and
-//!   the S->C packet coverage ratchet (`tools/opcode_coverage/sc_usage.py --check`, needs python).
+//!   the S->C packet coverage ratchet and its tests (`tools/opcode_coverage/`, needs python).
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -36,7 +36,7 @@ Commands:
               --no-db            do not start MySQL; use --db-host/--db-port or Config.Local.json
               --db-host <host>   MySQL host passed to the servers (default: 127.0.0.1)
               --db-port <port>   MySQL port (default: DB_PORT from .env, else 3306)
-  ci        cargo fmt --check, clippy -D warnings, test, S->C coverage ratchet (the CI checks)
+  ci        cargo fmt --check, clippy -D warnings, test, S->C coverage ratchet + tests (the CI checks)
 ";
 
 /// The login server's internal (game-server registration) port in the shipped `Config.json`.
@@ -526,16 +526,40 @@ fn ci() -> Result<()> {
 
 /// The S->C packet coverage ratchet (`rust/tools/opcode_coverage/sc_usage.py --check`): the lists
 /// of opcodes without a Rust type and of packets never sent may only shrink. Needs only python and
-/// the checked-in sources. A missing python interpreter is an error (the check must not pass
-/// silently); set `XTASK_SKIP_RATCHET=1` to skip it explicitly with a warning (refused when `CI`
-/// is set).
+/// the checked-in sources. Runs `test_sc_usage` with the same interpreter after the ratchet passes.
+/// A missing python interpreter is an error; set `XTASK_SKIP_RATCHET=1` to skip both explicitly
+/// with a warning (refused when `CI` is set).
 fn sc_ratchet() -> Result<()> {
-    let script = workspace_dir().join("tools/opcode_coverage/sc_usage.py");
+    sc_ratchet_with(
+        std::env::var_os("XTASK_SKIP_RATCHET").is_some_and(|v| v == "1"),
+        std::env::var_os("CI").is_some(),
+        Command::status,
+    )
+}
+
+fn sc_ratchet_with(
+    skip_requested: bool,
+    in_ci: bool,
+    mut execute: impl FnMut(&mut Command) -> std::io::Result<ExitStatus>,
+) -> Result<()> {
+    let dir = workspace_dir().join("tools/opcode_coverage");
+    let script = dir.join("sc_usage.py");
     for python in ["python3", "python"] {
         let mut cmd = Command::new(python);
-        cmd.arg(&script).arg("--check");
-        match cmd.status() {
-            Ok(status) if status.success() => return Ok(()),
+        cmd.arg(&script).arg("--check").current_dir(&dir);
+        match execute(&mut cmd) {
+            Ok(status) if status.success() => {
+                let mut tests = Command::new(python);
+                tests
+                    .args(["-m", "unittest", "test_sc_usage"])
+                    .current_dir(&dir);
+                let status =
+                    execute(&mut tests).with_context(|| format!("failed to start {tests:?}"))?;
+                if !status.success() {
+                    bail!("{tests:?} failed ({status})");
+                }
+                return Ok(());
+            }
             // Windows' App Execution Alias stub for a missing python exits with 9009.
             Ok(status) if cfg!(windows) && status.code() == Some(9009) => continue,
             Ok(status) => bail!("{cmd:?} failed ({status})"),
@@ -543,10 +567,7 @@ fn sc_ratchet() -> Result<()> {
             Err(e) => return Err(e).with_context(|| format!("failed to start {cmd:?}")),
         }
     }
-    skip_missing_python(
-        std::env::var_os("XTASK_SKIP_RATCHET").is_some_and(|v| v == "1"),
-        std::env::var_os("CI").is_some(),
-    )
+    skip_missing_python(skip_requested, in_ci)
 }
 
 /// No python interpreter was found: fail, unless the skip was requested explicitly and this is
@@ -554,12 +575,13 @@ fn sc_ratchet() -> Result<()> {
 fn skip_missing_python(skip_requested: bool, in_ci: bool) -> Result<()> {
     if skip_requested && !in_ci {
         eprintln!(
-            "warning: python not found; skipping the S->C coverage ratchet (XTASK_SKIP_RATCHET=1)"
+            "warning: python not found; skipping the S->C coverage ratchet and its tests \
+             (XTASK_SKIP_RATCHET=1)"
         );
         return Ok(());
     }
     bail!(concat!(
-        "python (python3 or python) not found: the S->C coverage ratchet ",
+        "python (python3 or python) not found: the S->C coverage ratchet and its tests ",
         "(tools/opcode_coverage/sc_usage.py --check) cannot run. Install python, or set ",
         "XTASK_SKIP_RATCHET=1 to skip it explicitly (not allowed when CI is set)"
     ))
@@ -568,6 +590,180 @@ fn skip_missing_python(skip_requested: bool, in_ci: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Error, ErrorKind};
+
+    fn exit_status(code: u32) -> ExitStatus {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::ExitStatusExt;
+            ExitStatus::from_raw(code)
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            ExitStatus::from_raw((code << 8) as i32)
+        }
+    }
+
+    fn fake_sc_ratchet(
+        skip_requested: bool,
+        in_ci: bool,
+        outcomes: Vec<std::io::Result<ExitStatus>>,
+        programs: &[&str],
+    ) -> Result<()> {
+        assert_eq!(outcomes.len(), programs.len());
+        let mut steps = programs.iter().zip(outcomes);
+        let result = sc_ratchet_with(skip_requested, in_ci, |cmd| {
+            let (program, outcome) = steps.next().expect("unexpected Python command");
+            assert_eq!(cmd.get_program(), *program);
+            outcome
+        });
+        assert!(
+            steps.next().is_none(),
+            "expected Python command did not run"
+        );
+        result
+    }
+
+    #[test]
+    fn ratchet_runs_unittests_with_same_python_and_correct_paths() {
+        let dir = workspace_dir().join("tools/opcode_coverage");
+        let script = dir.join("sc_usage.py");
+        let mut calls = 0;
+        // The skip only applies when no interpreter is found.
+        sc_ratchet_with(true, false, |cmd| {
+            assert_eq!(cmd.get_program(), "python3");
+            assert_eq!(cmd.get_current_dir(), Some(dir.as_path()));
+            let args: Vec<_> = cmd.get_args().collect();
+            match calls {
+                0 => assert_eq!(args, [script.as_os_str(), "--check".as_ref()]),
+                1 => assert_eq!(args, ["-m", "unittest", "test_sc_usage"]),
+                _ => panic!("unexpected Python command"),
+            }
+            calls += 1;
+            Ok(exit_status(0))
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn missing_python3_falls_back_to_python_for_ratchet_and_unittests() {
+        fake_sc_ratchet(
+            false,
+            false,
+            vec![
+                Err(ErrorKind::NotFound.into()),
+                Ok(exit_status(0)),
+                Ok(exit_status(0)),
+            ],
+            &["python3", "python", "python"],
+        )
+        .unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_python_alias_falls_back_to_python_for_ratchet_and_unittests() {
+        fake_sc_ratchet(
+            false,
+            false,
+            vec![
+                Ok(exit_status(9009)),
+                Ok(exit_status(0)),
+                Ok(exit_status(0)),
+            ],
+            &["python3", "python", "python"],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ratchet_failure_does_not_fall_back_or_honor_skip() {
+        let err = fake_sc_ratchet(true, false, vec![Ok(exit_status(1))], &["python3"]).unwrap_err();
+        assert!(err.to_string().contains("sc_usage.py"));
+        assert!(err.to_string().contains("failed"));
+    }
+
+    #[test]
+    fn python_permission_denied_does_not_fall_back_or_honor_skip() {
+        let err = fake_sc_ratchet(
+            true,
+            false,
+            vec![Err(ErrorKind::PermissionDenied.into())],
+            &["python3"],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("failed to start"));
+        assert_eq!(
+            err.downcast_ref::<Error>().unwrap().kind(),
+            ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn no_python_skips_both_checks_only_when_explicit_and_outside_ci() {
+        for skip_requested in [false, true] {
+            for in_ci in [false, true] {
+                let result = fake_sc_ratchet(
+                    skip_requested,
+                    in_ci,
+                    vec![
+                        Err(ErrorKind::NotFound.into()),
+                        Err(ErrorKind::NotFound.into()),
+                    ],
+                    &["python3", "python"],
+                );
+                assert_eq!(result.is_ok(), skip_requested && !in_ci);
+                if let Err(err) = result {
+                    assert!(err.to_string().contains("not found"));
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn missing_windows_aliases_obey_skip_policy() {
+        for in_ci in [false, true] {
+            let result = fake_sc_ratchet(
+                true,
+                in_ci,
+                vec![Ok(exit_status(9009)), Ok(exit_status(9009))],
+                &["python3", "python"],
+            );
+            assert_eq!(result.is_ok(), !in_ci);
+        }
+    }
+
+    #[test]
+    fn python_unittest_failure_propagates_without_fallback_or_skip() {
+        let err = fake_sc_ratchet(
+            true,
+            false,
+            vec![Ok(exit_status(0)), Ok(exit_status(1))],
+            &["python3", "python3"],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("test_sc_usage"));
+        assert!(err.to_string().contains("failed"));
+    }
+
+    #[test]
+    fn python_unittest_start_errors_propagate_without_fallback_or_skip() {
+        for kind in [ErrorKind::NotFound, ErrorKind::PermissionDenied] {
+            let err = fake_sc_ratchet(
+                true,
+                false,
+                vec![Ok(exit_status(0)), Err(kind.into())],
+                &["python3", "python3"],
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("test_sc_usage"));
+            assert!(err.to_string().contains("failed to start"));
+            assert_eq!(err.downcast_ref::<Error>().unwrap().kind(), kind);
+        }
+    }
 
     #[test]
     fn missing_python_fails_unless_skipped_explicitly_outside_ci() {
