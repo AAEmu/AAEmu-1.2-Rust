@@ -14,6 +14,7 @@
 
 use crate::data::world_data::Portal;
 use crate::models::item::Item;
+use crate::models::item_task::ItemFxList;
 use crate::models::movement::{GameStanceType, MoveTypeAlertness};
 use crate::models::npc::Npc;
 use crate::models::transform::PositionAndRotation;
@@ -38,6 +39,16 @@ pub struct MainWorldPosition {
     pub zone_id: u32,
     /// `MainWorldPosition.World` (rotation in radians).
     pub pos: PositionAndRotation,
+}
+
+/// The client-chosen spot of a `SummonPos` cast (`SkillCastPositionTarget` and friends).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SummonPlacement {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    /// `SkillCastPositionTarget.PosRot`.
+    pub yaw: f32,
 }
 
 /// Outcome of an item action that can cancel the skill and show an error (`skill.Cancelled =
@@ -256,8 +267,17 @@ pub trait NpcSkillHooks: Send + Sync {
         not_ported("SlaveManager.BindSlave");
     }
 
-    /// `SlaveManager.Create(owner, skillItem)` (`SpawnSlave`).
-    fn spawn_slave(&self, _server: &GameServer, _player: &PlayerRef, _skill_item: &SkillCaster) {
+    /// `SlaveManager.Create(owner, skillItem, positionOverride)` (`SpawnSlave`). `placement` is
+    /// the `SummonPos` spot the client chose (`None` for a self-targeted summon item cast);
+    /// `max_range` is the skill template's `MaxRange` (`0` = unbounded).
+    fn spawn_slave(
+        &self,
+        _server: &GameServer,
+        _player: &PlayerRef,
+        _skill_item: &SkillCaster,
+        _placement: Option<SummonPlacement>,
+        _max_range: f32,
+    ) {
         not_ported("SlaveManager.Create");
     }
 
@@ -425,6 +445,19 @@ pub trait ItemSkillHooks: Send + Sync {
         _template_id: u32,
         _amount: i32,
     ) {
+    }
+
+    /// Pay for a house build action atomically. Positive payments must fail unless the full
+    /// amount was consumed. Return item notifications for flushing after the housing lock is
+    /// released; implementations must release their economy lock before returning.
+    fn pay_building_material(
+        &self,
+        _server: &GameServer,
+        _player: &PlayerRef,
+        template_id: u32,
+        amount: i32,
+    ) -> Option<ItemFxList> {
+        (template_id == 0 || amount <= 0).then(ItemFxList::default)
     }
 
     /// `Inventory.Bag.AcquireDefaultItem(SkillEffectGainItem, itemId, amount)`.

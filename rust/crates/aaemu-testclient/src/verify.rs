@@ -6,7 +6,7 @@
 //! ```text
 //! # comments
 //! suite <display name>            # optional, defaults to the file stem
-//! bot <id> [gm]                   # one per bot; `gm` is provisioned by Scripts/verify.sh
+//! bot <id> [gm] [fresh]           # `gm` is provisioned by Scripts/verify.sh
 //!
 //! [<id>]
 //! <script command>                # everything else is script.rs syntax
@@ -15,6 +15,8 @@
 //! `${<id>}` in a command expands to that bot's character name. The account / character name
 //! is `v` + the first 8 alphanumerics of the file stem + the bot id (at most 18 characters,
 //! the server's character-name limit).
+//! `fresh` keeps that account but creates and selects a unique character on EVERY run;
+//! `${<id>}` then expands to the fresh character name. Creation failure fails the suite.
 //!
 //! Every bot logs in on its own, so the suite exercises the real login and game protocols.
 
@@ -34,6 +36,7 @@ pub struct BotDecl {
     /// The suite runner does not grant access; `Scripts/verify.sh` reads this through
     /// `verify --list-bots` and sets `accounts.access_level` before the run.
     pub gm: bool,
+    pub fresh: bool,
 }
 
 /// A parsed suite.
@@ -156,15 +159,19 @@ impl Suite {
                 if bots.iter().any(|b| b.id == id) {
                     bail!("{}:{}: duplicate bot '{id}'", path.display(), n + 1);
                 }
-                let gm = match parts.next() {
-                    None => false,
-                    Some("gm") => true,
-                    Some(other) => bail!(
-                        "{}:{}: expected `bot <id> [gm]`, not '{other}'",
-                        path.display(),
-                        n + 1
-                    ),
-                };
+                let mut gm = false;
+                let mut fresh = false;
+                for flag in parts {
+                    match flag {
+                        "gm" if !gm => gm = true,
+                        "fresh" if !fresh => fresh = true,
+                        other => bail!(
+                            "{}:{}: expected `bot <id> [gm] [fresh]`, not '{other}'",
+                            path.display(),
+                            n + 1
+                        ),
+                    }
+                }
                 if account_name(&code, id).len() > 18 {
                     bail!(
                         "{}:{}: account {} is longer than the 18-character character-name limit",
@@ -176,6 +183,7 @@ impl Suite {
                 bots.push(BotDecl {
                     id: id.to_string(),
                     gm,
+                    fresh,
                 });
                 continue;
             }
@@ -248,12 +256,31 @@ pub fn print_bots(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn bot_config(login: &str, password: &str, user: &str) -> anyhow::Result<BotConfig> {
+fn fresh_character_name() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_nanos() as u64;
+    let mut previous = LAST.load(Ordering::Relaxed);
+    let next = loop {
+        let next = now.max(previous + 1);
+        match LAST.compare_exchange_weak(previous, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break next,
+            Err(current) => previous = current,
+        }
+    };
+    format!("Vn{next:016x}")
+}
+
+fn bot_config(login: &str, password: &str, user: &str, fresh: bool) -> anyhow::Result<BotConfig> {
     Ok(serde_json::from_value(serde_json::json!({
         "login": login,
         "user": user,
         "password": password,
-        "character": user,
+        "character": if fresh { fresh_character_name() } else { user.into() },
+        "create_new_character": fresh,
     }))?)
 }
 
@@ -261,10 +288,16 @@ fn bot_config(login: &str, password: &str, user: &str) -> anyhow::Result<BotConf
 pub async fn run(path: &Path, login: &str, password: &str) -> anyhow::Result<SuiteReport> {
     let suite = Suite::load(path)?;
     let start = Instant::now();
+    let configs: Vec<_> = suite
+        .bots
+        .iter()
+        .map(|b| bot_config(login, password, &suite.account(&b.id), b.fresh))
+        .collect::<anyhow::Result<_>>()?;
     let names: BTreeMap<String, String> = suite
         .bots
         .iter()
-        .map(|b| (b.id.clone(), suite.account(&b.id)))
+        .zip(&configs)
+        .map(|(b, cfg)| (b.id.clone(), cfg.character.clone()))
         .collect();
     let sync_dir = std::env::temp_dir().join(format!(
         "aaemu-verify-{}-{}",
@@ -276,8 +309,7 @@ pub async fn run(path: &Path, login: &str, password: &str) -> anyhow::Result<Sui
     let label = path.display().to_string();
     let bots = suite.bots.len();
     let mut tasks = Vec::new();
-    for bot in &suite.bots {
-        let cfg = bot_config(login, password, &suite.account(&bot.id))?;
+    for (bot, cfg) in suite.bots.iter().zip(configs) {
         let text = suite.script(&bot.id, &names);
         let bot_id = bot.id.clone();
         let label = label.clone();
@@ -394,5 +426,33 @@ mod tests {
         assert!(Suite::load(&path).is_err());
         let path = suite_file("long-name.vtest", "bot abcdefghij\n[abcdefghij]\nme\n");
         assert!(Suite::load(&path).is_err());
+    }
+
+    #[test]
+    fn fresh_bot_requires_creation_on_each_run_and_expands_the_selected_name() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../verify/newchar-items.vtest");
+        let suite = Suite::load(&path).unwrap();
+        let bot = &suite.bots[0];
+        assert!(bot.fresh);
+        let account = suite.account(&bot.id);
+        let first = bot_config("unused", "unused", &account, bot.fresh).unwrap();
+        let second = bot_config("unused", "unused", &account, bot.fresh).unwrap();
+        assert!(first.create_new_character && second.create_new_character);
+        assert_eq!(first.user, second.user, "provisioned account stays stable");
+        assert_ne!(
+            first.character, second.character,
+            "rerun must create a fresh identity"
+        );
+        for cfg in [&first, &second] {
+            assert!(cfg.character.len() <= 18);
+            assert!(cfg.character.chars().all(|c| c.is_ascii_alphanumeric()));
+            let names = BTreeMap::from([(bot.id.clone(), cfg.character.clone())]);
+            assert!(suite
+                .script(&bot.id, &names)
+                .contains(&format!("c.name='{}'", cfg.character)));
+        }
+        let ordinary = bot_config("unused", "unused", &account, false).unwrap();
+        assert!(!ordinary.create_new_character);
+        assert_eq!(ordinary.character, account);
     }
 }

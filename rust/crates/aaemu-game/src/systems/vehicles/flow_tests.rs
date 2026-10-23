@@ -46,6 +46,9 @@ const PB: u32 = 0x00F0_0002;
 #[path = "deck_standing_tests.rs"]
 mod deck_standing_tests;
 
+#[path = "pr38_regression_tests.rs"]
+mod pr38_regression_tests;
+
 fn exp_table() -> ExperienceTable {
     ExperienceTable::from_templates(
         (1..=3u8)
@@ -2913,6 +2916,32 @@ fn real_compact_db_vehicle_tables() {
     for point in [21, 36, 60, 61] {
         assert!(coupe.iter().any(|(p, _)| *p == point), "point {point}");
     }
+    // Equipment tables: 92 slots over the seven customizable hulls, 43 item visuals, and the
+    // hull / slot packs.
+    let slots: usize = d.slave_equip_slots.values().map(Vec::len).sum();
+    assert_eq!((slots, d.item_slave_equipments.len()), (92, 43));
+    assert_eq!(d.slave_equip_slots[&22].len(), 27);
+    assert_eq!(
+        d.slave_equip_attach_points(22, 13),
+        vec![28, 29],
+        "the lamp slot drives the front and rear lamps"
+    );
+    assert!(d.can_equip_item_on_slave(28852, 22, 3));
+    assert!(!d.can_equip_item_on_slave(28852, 22, 0));
+    assert!(!d.can_equip_item_on_slave(28852, 21, 3));
+    assert!(!d.can_equip_item_on_slave(29723, 22, 3));
+    assert!(!d.has_slave_equip_slot(21, 3));
+    // Attach points recovered from the 1.2 client meshes.
+    for (slave, point) in [(22, 9), (22, 35), (132, 9), (139, 10), (139, 35)] {
+        let model = d.slave_templates[&slave].model_id;
+        let points = d
+            .attach_points_for_slave(model)
+            .unwrap_or_else(|| panic!("model {model} attach points"));
+        assert!(
+            points.iter().any(|(p, _)| *p == point),
+            "slave {slave} model {model} point {point}"
+        );
+    }
 }
 
 /// A server whose main_world covers the real map (31 x 31 cells), with the real vehicle data.
@@ -3205,4 +3234,966 @@ async fn hang_and_unhang_packets_only_mutate_the_authenticated_character() {
     .await
     .unwrap();
     assert_eq!(pb.core().sticky_parent(), 0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// SummonPos summon placement (2026-10-22)
+// ---------------------------------------------------------------------------------------------
+
+const SUMMON_POS_SKILL: u32 = 58_003;
+const SLAVE_PART: u32 = 5002;
+
+fn summon_pos_data(spawn_range: u32) -> GameData {
+    use crate::systems::skills::data::effects::{EffectTemplate, SpecialEffect};
+    use crate::systems::skills::data::{EffectKind, SkillTemplate};
+    let mut d = slave_data();
+    d.items.templates.get_mut(&SLAVE_ITEM).unwrap().use_skill_id = SUMMON_POS_SKILL;
+    d.systems
+        .vehicles
+        .slave_templates
+        .get_mut(&SLAVE_TEMPLATE)
+        .unwrap()
+        .spawn_valid_area_range = spawn_range;
+    d.systems.skills.add_effect(
+        EffectKind::SpecialEffect,
+        EffectTemplate::Special(SpecialEffect {
+            id: 1,
+            special_effect_type_id: 60,
+            value1: 0,
+            value2: 0,
+            value3: 0,
+            value4: 0,
+        }),
+        1,
+    );
+    d.systems.skills.add_skill(SkillTemplate {
+        id: SUMMON_POS_SKILL,
+        target_type: 12, // SummonPos
+        level_rule_no_consideration: true,
+        effects: vec![crate::systems::skills::tests::skill_effect(
+            1,
+            EffectKind::SpecialEffect,
+            1,
+        )],
+        ..SkillTemplate::default()
+    });
+    d
+}
+
+/// A client that owns `SLAVE_ITEM` in its bag and can cast the summon skill.
+fn summon_pos_client(
+    server: &Arc<GameServer>,
+) -> (TestClient, PlayerRef, u64, Arc<crate::world::WorldInstance>) {
+    let mut a = TestClient::new(server, 1, 1);
+    let (pa, item_id) = player_with_item(server, &a, 1, PA, (100.0, 100.0), SLAVE_ITEM);
+    let bag = pa
+        .data()
+        .inventory
+        .get(slot_type::INVENTORY)
+        .unwrap()
+        .clone();
+    bag.lock().unwrap().items[0].owner_id = u64::from(pa.character_id);
+    server.items.add_container(bag);
+    a.conn.active_char = Some(pa.clone());
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    a.drain();
+    (a, pa, item_id, world)
+}
+
+fn cast_summon_pos(
+    server: &GameServer,
+    client: &mut TestClient,
+    item_id: u64,
+    x: f32,
+    y: f32,
+    z: f32,
+    yaw: f32,
+) {
+    use crate::systems::skills::handlers::{start_skill, CSStartSkillPacket};
+    use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+    start_skill(
+        server,
+        &mut client.conn,
+        CSStartSkillPacket {
+            skill_id: SUMMON_POS_SKILL,
+            caster: SkillCaster::Item {
+                obj_id: PA,
+                item_id,
+                item_template_id: SLAVE_ITEM,
+                type1: 0,
+                type2: 0,
+            },
+            target: SkillCastTarget::Position {
+                obj_id: 0,
+                x,
+                y,
+                z,
+                rot: yaw,
+                obj_id1: 0,
+                obj_id2: 0,
+            },
+            flag: 0,
+            skill_object: SkillObject::None,
+        },
+    );
+}
+
+async fn wait_for_slave(world: &Arc<crate::world::WorldInstance>) -> crate::world::SlaveRef {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(s) = slaves::get_active_slave_by_owner_obj_id(world, PA) {
+                break s;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("summon skill must create the vehicle")
+}
+
+#[tokio::test]
+async fn summon_pos_places_the_vehicle_at_the_chosen_spot() {
+    let server = server_with(summon_pos_data(50));
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let (mut a, _pa, item_id, world) = summon_pos_client(&server);
+    cast_summon_pos(&server, &mut a, item_id, 103.0, 104.0, 200.0, 1.25);
+    let slave = wait_for_slave(&world).await;
+    let t = slave.data().unit.transform;
+    assert_eq!((t.x, t.y), (103.0, 104.0));
+    assert!(
+        (t.rot_z - 1.25).abs() < 1e-6,
+        "yaw {}, wanted 1.25",
+        t.rot_z
+    );
+    assert!(
+        !error_codes(&a.drain()).contains(&super::error::SLAVE_SPAWN_ERROR_INVALID_AREA),
+        "a valid placement must not send the invalid-area error"
+    );
+}
+
+#[tokio::test]
+async fn summon_pos_outside_the_valid_area_errors_and_falls_back_in_front() {
+    let server = server_with(summon_pos_data(10));
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let (mut a, _pa, item_id, world) = summon_pos_client(&server);
+    cast_summon_pos(&server, &mut a, item_id, 130.0, 100.0, 0.0, 1.25);
+    let slave = wait_for_slave(&world).await;
+    let frames = a.drain();
+    assert!(
+        error_codes(&frames).contains(&super::error::SLAVE_SPAWN_ERROR_INVALID_AREA),
+        "invalid placement must send SlaveSpawnErrorInvalidArea"
+    );
+    // C# fallback: SpawnYOffset clamped to 5 m in front, 90 degrees CCW of the owner.
+    let t = slave.data().unit.transform;
+    assert_eq!((t.x, t.y), (100.0, 105.0));
+    assert!((t.rot_z - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+}
+
+#[tokio::test]
+async fn slave_equipment_equips_unequips_and_survives_a_resummon() {
+    use crate::models::item::ItemClass;
+    use crate::net::registry::ClientPacket;
+    use crate::systems::vehicles::packets::CSChangeSlaveEquipmentPacket;
+
+    let mut d = slave_data();
+    d.items.templates.insert(
+        SLAVE_PART,
+        ItemTemplate {
+            impl_id: crate::data::items::item_impl::SLAVE_EQUIPMENT,
+            ..ItemTemplate::plain(SLAVE_PART, 1)
+        },
+    );
+    d.systems
+        .vehicles
+        .slave_equip_slots
+        .entry(SLAVE_TEMPLATE)
+        .or_default()
+        .push(super::data::SlaveEquipSlot {
+            id: 1,
+            slave_id: SLAVE_TEMPLATE,
+            attach_point_id: 9,
+            equip_slot_id: 3,
+            require_slot_id: -1,
+        });
+    d.systems.vehicles.item_slave_equipments.insert(
+        SLAVE_PART,
+        super::data::ItemSlaveEquipment {
+            id: 1,
+            item_id: SLAVE_PART,
+            slave_id: 0,
+            doodad_id: 0,
+            slave_equip_pack_id: 0,
+            slot_pack_id: 0,
+            require_item_id: 0,
+        },
+    );
+    let server = server_with(d);
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let mut a = TestClient::new(&server, 1, 1);
+    let (pa, item_id) = player_with_item(&server, &a, 1, PA, (100.0, 100.0), SLAVE_ITEM);
+    a.conn.active_char = Some(pa.clone());
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    let bag = pa
+        .data()
+        .inventory
+        .get(slot_type::INVENTORY)
+        .unwrap()
+        .clone();
+    bag.lock().unwrap().items[0].owner_id = u64::from(pa.character_id);
+    server.items.add_container(bag.clone());
+
+    let item = mates::owned_item(&server, &pa, item_id).unwrap();
+    let slave = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        SLAVE_TEMPLATE,
+        Some(item),
+        false,
+        None,
+        None,
+    )
+    .expect("slave");
+    let (tl, db_id) = {
+        let d = slave.data();
+        (d.unit.tl_id, d.id)
+    };
+    assert!(db_id > 0);
+
+    let mut part = server
+        .items
+        .create(
+            SLAVE_PART,
+            1,
+            0,
+            1,
+            &server.game_data.items,
+            &server.ids.item,
+            0,
+        )
+        .expect("part");
+    assert_eq!(part.class, ItemClass::SlaveEquipment);
+    part.slot_type = slot_type::INVENTORY;
+    part.slot = 7;
+    part.owner_id = u64::from(pa.character_id);
+    part.dirty = true;
+    let part_id = part.id;
+    bag.lock().unwrap().items.push(part.clone());
+    a.drain();
+
+    let character_id = pa.character_id;
+    let packet_body = |item1: Option<&crate::models::item::Item>,
+                       slot1: u8,
+                       item2: Option<&crate::models::item::Item>,
+                       slot2: u8,
+                       bts: bool| {
+        let mut s = PacketStream::new();
+        s.write_u32(character_id)
+            .write_u16(tl)
+            .write_u32(db_id)
+            .write_bool(bts);
+        match item1 {
+            Some(i) => {
+                s.write(i);
+            }
+            None => {
+                s.write_u32(0);
+            }
+        }
+        match item2 {
+            Some(i) => {
+                s.write(i);
+            }
+            None => {
+                s.write_u32(0);
+            }
+        }
+        s.write_u8(slot_type::INVENTORY)
+            .write_u8(slot1)
+            .write_u8(slot_type::EQUIPMENT_SLAVE)
+            .write_u8(slot2);
+        s.into_bytes()
+    };
+    let run = |body: Vec<u8>, a: &mut TestClient| {
+        let p = CSChangeSlaveEquipmentPacket::read(&mut PacketStream::from_bytes(body)).unwrap();
+        futures::executor::block_on(p.handle(&server, &mut a.conn)).unwrap();
+        a.drain()
+    };
+
+    // Equip bag slot 7 -> slave slot 3.
+    let frames = run(packet_body(Some(&part), 7, None, 3, false), &mut a);
+    assert!(ops(&frames).contains(&sc::SCSlaveEquipmentChangedPacket));
+    assert_eq!(
+        *body(&frames, sc::SCSlaveEquipmentChangedPacket)
+            .last()
+            .unwrap(),
+        1,
+        "success flag"
+    );
+    assert!(ops(&frames).contains(&sc::SCUnitEquipmentsChangedPacket));
+    assert!(bag.lock().unwrap().get_item_by_slot(7).is_none());
+    assert_eq!(
+        slave.data().equipment[3].as_ref().map(|i| i.id),
+        Some(part_id)
+    );
+    let equipment = server
+        .items
+        .find_container_for_character(pa.character_id, slot_type::EQUIPMENT_SLAVE, db_id)
+        .expect("persistent slave equipment container");
+    let stored = equipment
+        .lock()
+        .unwrap()
+        .get_item_by_slot(3)
+        .cloned()
+        .expect("part in the slave container");
+    assert_eq!(
+        (stored.id, stored.slot_type),
+        (part_id, slot_type::EQUIPMENT_SLAVE)
+    );
+
+    // Unequip slave slot 3 -> empty bag slot 9.
+    let frames = run(packet_body(None, 9, Some(&stored), 3, true), &mut a);
+    assert_eq!(
+        *body(&frames, sc::SCSlaveEquipmentChangedPacket)
+            .last()
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        bag.lock().unwrap().get_item_by_slot(9).map(|i| i.id),
+        Some(part_id)
+    );
+    assert!(slave.data().equipment[3].is_none());
+    assert!(equipment.lock().unwrap().get_item_by_slot(3).is_none());
+
+    // Equip again, then destroy the hull and summon the saved slave: the parts must come back
+    // from the persistent container (item_containers.mate_id == slave DB id).
+    let frames = run(packet_body(Some(&stored), 9, None, 3, false), &mut a);
+    assert_eq!(
+        *body(&frames, sc::SCSlaveEquipmentChangedPacket)
+            .last()
+            .unwrap(),
+        1
+    );
+    slaves::delete(&server, Some(&pa), world.id, slave.obj_id, false);
+    let item = mates::owned_item(&server, &pa, item_id).unwrap();
+    let again = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        SLAVE_TEMPLATE,
+        Some(item),
+        false,
+        None,
+        Some(slaves::SavedSlave {
+            id: db_id,
+            name: "Cart".into(),
+            hp: 1,
+            mp: 1,
+        }),
+    )
+    .expect("re-summoned slave");
+    assert_eq!(
+        again.data().equipment[3].as_ref().map(|i| i.id),
+        Some(part_id),
+        "the saved hull keeps its equipped parts"
+    );
+}
+
+const SHIP_HULL: u32 = 22;
+const OTHER_HULL: u32 = 23;
+const CANNON_ITEM: u32 = 28852;
+const CANNON_CHILD: u32 = 10;
+const SLOT20_ITEM: u32 = 5003;
+
+fn ship_equip_data() -> GameData {
+    use super::data::{ItemSlaveEquipment, SlaveEquipSlot, SlaveInitialItem};
+    let mut d = slave_data();
+    d.systems.vehicles.slave_templates.insert(
+        SHIP_HULL,
+        SlaveTemplate {
+            id: SHIP_HULL,
+            name: "Ship".into(),
+            model_id: 511,
+            level: 1,
+            slave_kind: super::data::slave_kind::MACHINE,
+            slave_initial_item_pack_id: 1,
+            // A static binding on an equipment attach point must not add a second cannon.
+            slave_bindings: vec![super::data::SlaveBinding {
+                id: 1,
+                owner_id: SHIP_HULL,
+                owner_type: "Slave".into(),
+                slave_id: CANNON_CHILD,
+                attach_point_id: 9,
+            }],
+            ..SlaveTemplate::default()
+        },
+    );
+    d.systems.vehicles.slave_templates.insert(
+        OTHER_HULL,
+        SlaveTemplate {
+            id: OTHER_HULL,
+            name: "Other".into(),
+            model_id: 512,
+            level: 1,
+            slave_kind: super::data::slave_kind::MACHINE,
+            ..SlaveTemplate::default()
+        },
+    );
+    d.systems.vehicles.slave_templates.insert(
+        CANNON_CHILD,
+        SlaveTemplate {
+            id: CANNON_CHILD,
+            name: "Steel Cannon".into(),
+            model_id: 117,
+            level: 1,
+            slave_kind: super::data::slave_kind::SLAVE_EQUIPMENT,
+            ..SlaveTemplate::default()
+        },
+    );
+    for item in [CANNON_ITEM, SLOT20_ITEM] {
+        d.items.templates.insert(
+            item,
+            ItemTemplate {
+                impl_id: crate::data::items::item_impl::SLAVE_EQUIPMENT,
+                ..ItemTemplate::plain(item, 1)
+            },
+        );
+    }
+    d.systems.vehicles.slave_initial_items.insert(
+        1,
+        vec![
+            SlaveInitialItem {
+                pack_id: 1,
+                equip_slot_id: 3,
+                item_id: CANNON_ITEM,
+            },
+            // No slave_equip_slots entry: must not be seeded.
+            SlaveInitialItem {
+                pack_id: 1,
+                equip_slot_id: 20,
+                item_id: SLOT20_ITEM,
+            },
+        ],
+    );
+    d.systems.vehicles.slave_equip_slots.insert(
+        SHIP_HULL,
+        vec![SlaveEquipSlot {
+            id: 1,
+            slave_id: SHIP_HULL,
+            attach_point_id: 9,
+            equip_slot_id: 3,
+            require_slot_id: -1,
+        }],
+    );
+    d.systems.vehicles.item_slave_equipments.insert(
+        CANNON_ITEM,
+        ItemSlaveEquipment {
+            id: 1,
+            item_id: CANNON_ITEM,
+            slave_id: CANNON_CHILD,
+            doodad_id: 0,
+            slave_equip_pack_id: 4,
+            slot_pack_id: 11,
+            require_item_id: 0,
+        },
+    );
+    d.systems
+        .vehicles
+        .slave_equip_packs
+        .insert(4, vec![SHIP_HULL]);
+    d.systems.vehicles.slave_slot_packs.insert(11, vec![3]);
+    d.systems.vehicles.attach_points.insert(
+        511,
+        vec![(
+            9,
+            WorldSpawnPosition {
+                x: 1.5,
+                y: 2.5,
+                z: 3.5,
+                ..WorldSpawnPosition::default()
+            },
+        )],
+    );
+    d
+}
+
+#[tokio::test]
+async fn slave_equipment_cannon_visuals_and_pack_validation() {
+    use crate::models::item::ItemClass;
+    use crate::net::registry::ClientPacket;
+    use crate::systems::vehicles::packets::CSChangeSlaveEquipmentPacket;
+
+    let server = server_with(ship_equip_data());
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let mut a = TestClient::new(&server, 1, 1);
+    let pa = spawn_player(&server, &a, test_character(1, "P1", 100.0, 100.0), PA);
+    a.conn.active_char = Some(pa.clone());
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    let bag = pa
+        .data()
+        .inventory
+        .get(slot_type::INVENTORY)
+        .unwrap()
+        .clone();
+    server.items.add_container(bag.clone());
+
+    let hull = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        SHIP_HULL,
+        None,
+        false,
+        None,
+        None,
+    )
+    .expect("hull");
+    let (tl, db_id) = {
+        let d = hull.data();
+        (d.unit.tl_id, d.id)
+    };
+    assert!(db_id > 0);
+
+    // The starter pack seeded the declared slot only and its cannon visual spawned.
+    assert_eq!(
+        hull.data().equipment[3].as_ref().map(|i| i.template_id),
+        Some(CANNON_ITEM)
+    );
+    assert!(
+        hull.data().equipment[20].is_none(),
+        "seeding must skip equipment slots the hull does not declare"
+    );
+    let equipment = server
+        .items
+        .find_container_for_character(pa.character_id, slot_type::EQUIPMENT_SLAVE, db_id)
+        .expect("persistent container");
+    assert!(equipment.lock().unwrap().get_item_by_slot(20).is_none());
+    let first_child = {
+        let ids = hull.data().attached_slaves.clone();
+        assert_eq!(ids.len(), 1, "the seeded cannon must spawn its child slave");
+        let child = world.slave(ids[0]).expect("child slave");
+        assert_eq!(child.data().unit.template_id, CANNON_CHILD);
+        assert_eq!(child.data().attach_point_id, 9);
+        let t = child.data().unit.transform;
+        assert_eq!((t.x, t.y, t.z), (1.5, 2.5, 3.5));
+        ids[0]
+    };
+
+    let character_id = pa.character_id;
+    let packet_body = |item1: Option<&crate::models::item::Item>,
+                       slot1: u8,
+                       item2: Option<&crate::models::item::Item>,
+                       slot2: u8|
+     -> Vec<u8> {
+        let mut s = PacketStream::new();
+        s.write_u32(character_id)
+            .write_u16(tl)
+            .write_u32(db_id)
+            .write_bool(false);
+        match item1 {
+            Some(i) => {
+                s.write(i);
+            }
+            None => {
+                s.write_u32(0);
+            }
+        }
+        match item2 {
+            Some(i) => {
+                s.write(i);
+            }
+            None => {
+                s.write_u32(0);
+            }
+        }
+        s.write_u8(slot_type::INVENTORY)
+            .write_u8(slot1)
+            .write_u8(slot_type::EQUIPMENT_SLAVE)
+            .write_u8(slot2);
+        s.into_bytes()
+    };
+    let run = |body: Vec<u8>, a: &mut TestClient| {
+        let p = CSChangeSlaveEquipmentPacket::read(&mut PacketStream::from_bytes(body)).unwrap();
+        futures::executor::block_on(p.handle(&server, &mut a.conn)).unwrap();
+        a.drain()
+    };
+    let stored = equipment
+        .lock()
+        .unwrap()
+        .get_item_by_slot(3)
+        .cloned()
+        .expect("cannon in the container");
+
+    // Unequip: the child slave goes away with the item.
+    let frames = run(packet_body(None, 9, Some(&stored), 3), &mut a);
+    assert_eq!(
+        *body(&frames, sc::SCSlaveEquipmentChangedPacket)
+            .last()
+            .unwrap(),
+        1
+    );
+    assert!(world.slave(first_child).is_none());
+    assert!(hull.data().attached_slaves.is_empty());
+    assert!(hull.data().equipment[3].is_none());
+
+    // Equip it again, then re-summon the saved hull: the persistent container respawns the visual.
+    let frames = run(packet_body(Some(&stored), 9, None, 3), &mut a);
+    assert_eq!(
+        *body(&frames, sc::SCSlaveEquipmentChangedPacket)
+            .last()
+            .unwrap(),
+        1
+    );
+    let respawned = hull.data().attached_slaves.clone();
+    assert_eq!(respawned.len(), 1);
+    slaves::delete(&server, Some(&pa), world.id, hull.obj_id, false);
+    assert!(world.slave(respawned[0]).is_none());
+    let again = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        SHIP_HULL,
+        None,
+        false,
+        None,
+        Some(slaves::SavedSlave {
+            id: db_id,
+            name: "Ship".into(),
+            hp: 1,
+            mp: 1,
+        }),
+    )
+    .expect("re-summoned hull");
+    let anew = again.data().attached_slaves.clone();
+    assert_eq!(
+        anew.len(),
+        1,
+        "re-summon must spawn the visual from the equipment container"
+    );
+    assert_eq!(
+        again.data().equipment[3].as_ref().map(|i| i.id),
+        Some(stored.id)
+    );
+
+    // Bag cannon into a slot the hull does not declare: refused, no move, proper error.
+    let mut extra = server
+        .items
+        .create(
+            CANNON_ITEM,
+            1,
+            0,
+            1,
+            &server.game_data.items,
+            &server.ids.item,
+            0,
+        )
+        .expect("extra cannon");
+    assert_eq!(extra.class, ItemClass::SlaveEquipment);
+    extra.slot_type = slot_type::INVENTORY;
+    extra.slot = 7;
+    extra.owner_id = u64::from(pa.character_id);
+    extra.dirty = true;
+    bag.lock().unwrap().items.push(extra.clone());
+    let frames = run(packet_body(Some(&extra), 7, None, 4), &mut a);
+    assert_eq!(
+        *body(&frames, sc::SCSlaveEquipmentChangedPacket)
+            .last()
+            .unwrap(),
+        0
+    );
+    assert!(error_codes(&frames).contains(&super::error::ITEM_NOT_FOR_PET));
+    assert!(bag.lock().unwrap().get_item_by_slot(7).is_some());
+    assert!(again.data().equipment[4].is_none());
+
+    // Same item on a hull whose pack does not allow it: refused as well.
+    let other = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        OTHER_HULL,
+        None,
+        false,
+        None,
+        None,
+    )
+    .expect("other hull");
+    let (other_tl, other_db) = {
+        let d = other.data();
+        (d.unit.tl_id, d.id)
+    };
+    let mut s = PacketStream::new();
+    s.write_u32(character_id)
+        .write_u16(other_tl)
+        .write_u32(other_db)
+        .write_bool(false);
+    s.write(&extra);
+    s.write_u32(0);
+    s.write_u8(slot_type::INVENTORY)
+        .write_u8(7)
+        .write_u8(slot_type::EQUIPMENT_SLAVE)
+        .write_u8(3);
+    let frames = run(s.into_bytes(), &mut a);
+    assert_eq!(
+        *body(&frames, sc::SCSlaveEquipmentChangedPacket)
+            .last()
+            .unwrap(),
+        0
+    );
+    assert!(error_codes(&frames).contains(&super::error::ITEM_NOT_FOR_PET));
+    assert!(bag.lock().unwrap().get_item_by_slot(7).is_some());
+    assert!(other.data().equipment[3].is_none());
+}
+
+const FIRE_CANNON: u32 = 10473;
+const GUNNER_STATE_SKILL: u32 = 14372;
+const CANNON_MOUNT_SKILL: u32 = 16;
+const CANNON_TARGET_NPC: u32 = 901;
+
+/// `ship_equip_data` plus the 1.2 cannon fire skill: mount skill 16 -> skill 10473 (ballistic
+/// position target, 4 m area, 4-120 m, fixed damage), attached skill 14372 at the gunner seat.
+fn cannon_data() -> GameData {
+    use crate::systems::skills::data::effects::EffectTemplate;
+    use crate::systems::skills::data::{EffectKind, SkillTemplate};
+    let mut d = ship_equip_data();
+    d.systems.skills.add_effect(
+        EffectKind::DamageEffect,
+        EffectTemplate::Damage(Box::new(crate::systems::skills::tests::damage_effect(
+            183, 150,
+        ))),
+        183,
+    );
+    d.systems.skills.add_skill(SkillTemplate {
+        id: FIRE_CANNON,
+        target_type: 11, // BallisticPos
+        target_selection: 2,
+        // The real row is Hostile (4); this fixture has no factions.
+        target_relation: 5,
+        target_area_radius: 4,
+        min_range: 4,
+        max_range: 120,
+        source_mount: true,
+        level_rule_no_consideration: true,
+        effects: vec![crate::systems::skills::tests::skill_effect(
+            183,
+            EffectKind::DamageEffect,
+            183,
+        )],
+        ..SkillTemplate::default()
+    });
+    d.systems.skills.add_skill(SkillTemplate {
+        id: GUNNER_STATE_SKILL,
+        target_type: 0,
+        level_rule_no_consideration: true,
+        ..SkillTemplate::default()
+    });
+    d.systems
+        .vehicles
+        .mount_skills
+        .push(super::data::MountSkills {
+            id: CANNON_MOUNT_SKILL,
+            name: "Fire".into(),
+            skill_id: FIRE_CANNON,
+        });
+    d.systems
+        .vehicles
+        .mount_attached_skills
+        .push(super::data::MountAttachedSkills {
+            id: 131,
+            mount_skill_id: CANNON_MOUNT_SKILL,
+            attach_point_id: attach_point::DRIVER,
+            skill_id: GUNNER_STATE_SKILL,
+        });
+    d.systems.npcs.npc.templates.insert(
+        CANNON_TARGET_NPC,
+        NpcTemplate {
+            id: CANNON_TARGET_NPC,
+            name: "Target".into(),
+            level: 1,
+            ..NpcTemplate::default()
+        },
+    );
+    d
+}
+
+#[tokio::test]
+async fn ship_cannon_gunner_seat_skill_and_leaving() {
+    use crate::net::registry::ClientPacket;
+    use crate::systems::skills::handlers::{start_skill, CSStartSkillPacket};
+    use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+
+    let server = server_with(cannon_data());
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let mut a = TestClient::new(&server, 1, 1);
+    let mut b = TestClient::new(&server, 2, 2);
+    let mut c = TestClient::new(&server, 3, 3);
+    let pa = spawn_player(&server, &a, test_character(1, "Owner", 100.0, 100.0), PA);
+    let pb = spawn_player(&server, &b, test_character(2, "Crew", 101.0, 100.0), PB);
+    let pc = spawn_player(
+        &server,
+        &c,
+        test_character(3, "Stranger", 102.0, 100.0),
+        0x00F0_0003,
+    );
+    a.conn.active_char = Some(pa.clone());
+    b.conn.active_char = Some(pb.clone());
+    c.conn.active_char = Some(pc.clone());
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+
+    let hull = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        SHIP_HULL,
+        None,
+        false,
+        None,
+        None,
+    )
+    .expect("hull");
+    let cannon = world
+        .slave(hull.data().attached_slaves[0])
+        .expect("cannon child");
+    let cannon_tl = u32::from(cannon.data().unit.tl_id);
+    assert!(slaves::is_manned_cannon(&server, &cannon));
+    assert!(!slaves::is_manned_cannon(&server, &hull));
+
+    let target = spawn_npc_at(&server, 0x5000, CANNON_TARGET_NPC, 130.0, 130.0);
+    target.data().unit.hp = 1000;
+    target.data().unit.max_hp = 1000;
+    let fire = |client: &mut TestClient, x: f32, y: f32| {
+        start_skill(
+            &server,
+            &mut client.conn,
+            CSStartSkillPacket {
+                skill_id: FIRE_CANNON,
+                caster: SkillCaster::Mount {
+                    obj_id: cannon.obj_id,
+                    mount_skill_template_id: CANNON_MOUNT_SKILL,
+                },
+                target: SkillCastTarget::Position {
+                    obj_id: 0,
+                    x,
+                    y,
+                    z: 100.0,
+                    rot: 0.0,
+                    obj_id1: 0,
+                    obj_id2: 0,
+                },
+                flag: 0,
+                skill_object: SkillObject::None,
+            },
+        );
+    };
+    a.drain();
+    b.drain();
+    c.drain();
+
+    // Not manned yet: not even the ship owner may fire the cannon.
+    fire(&mut a, 130.0, 130.0);
+    assert_eq!(target.data().unit.hp, 1000);
+    a.drain();
+
+    // A stranger off the ship is refused with the bind error and is not seated.
+    slaves::bind_slave_by_tl(&server, &pc, cannon_tl);
+    assert!(error_codes(&c.drain()).contains(&super::error::SLAVE_CANNOT_BIND));
+    assert!(cannon.data().attached_characters.is_empty());
+
+    // The ship owner mans it at the gunner seat, behind the barrel.
+    slaves::bind_slave_by_tl(&server, &pa, cannon_tl);
+    assert!(ops(&a.drain()).contains(&sc::SCUnitAttachedPacket));
+    assert_eq!(
+        cannon.data().attached_characters,
+        vec![(attach_point::DRIVER, PA)]
+    );
+    assert_eq!(pa.data().unit.transform.parent_obj_id, cannon.obj_id);
+    let t = pa.data().unit.transform;
+    assert_eq!((t.x, t.y, t.z), slaves::GUNNER_SEAT_OFFSET);
+
+    // The gunner follows the cannon on the moving ship.
+    let before = world.world_pos_rot(&WorldObject::from(&pa));
+    hull.data().unit.transform.x += 25.0;
+    hull.data().unit.transform.y -= 10.0;
+    let after = world.world_pos_rot(&WorldObject::from(&pa));
+    assert!(
+        (after.x - before.x - 25.0).abs() < 1e-3,
+        "{before:?} {after:?}"
+    );
+    assert!((after.y - before.y + 10.0).abs() < 1e-3);
+
+    // Second gunner: a crew member standing on the ship is refused, one gunner per cannon.
+    world.attach_child(&WorldObject::from(&hull), &WorldObject::from(&pb));
+    slaves::bind_slave_by_tl(&server, &pb, cannon_tl);
+    assert!(error_codes(&b.drain()).contains(&super::error::SLAVE_ALREADY_HAS_MASTER));
+    assert_eq!(cannon.data().attached_characters.len(), 1);
+    // ... and cannot cast its skills either.
+    fire(&mut b, 130.0, 130.0);
+    assert_eq!(target.data().unit.hp, 1000);
+    b.drain();
+
+    // The gunner fires at a ground position: the unit in the area takes the shot.
+    fire(&mut a, 130.0, 130.0);
+    assert_eq!(target.data().unit.hp, 850, "fixed 150 damage");
+    let fa = a.drain();
+    assert!(ops(&fa).contains(&sc::SCSkillFiredPacket));
+    assert!(ops(&fa).contains(&sc::SCUnitPointsPacket));
+    assert!(ops(&b.drain()).contains(&sc::SCSkillFiredPacket));
+    // Out of the 4 m area: no damage.
+    fire(&mut a, 60.0, 60.0);
+    assert_eq!(target.data().unit.hp, 850);
+
+    // Leaving the cannon (CSDiscardSlave) frees the seat for the crew member.
+    let discard = super::packets::CSDiscardSlavePacket {
+        tl_id: cannon_tl as u16,
+    };
+    futures::executor::block_on(discard.handle(&server, &mut a.conn)).unwrap();
+    assert!(cannon.data().attached_characters.is_empty());
+    assert_eq!(pa.data().unit.transform.parent_obj_id, 0);
+    assert!(ops(&a.drain()).contains(&sc::SCUnitDetachedPacket));
+    b.drain();
+    slaves::bind_slave_by_tl(&server, &pb, cannon_tl);
+    assert_eq!(
+        cannon.data().attached_characters,
+        vec![(attach_point::DRIVER, PB)]
+    );
+    assert!(error_codes(&b.drain()).is_empty());
+
+    // The gunner dying leaves the cannon.
+    crate::systems::skills::combat::do_die(
+        &server,
+        &WorldObject::from(&pb),
+        Some(&WorldObject::from(&target)),
+        crate::systems::skills::types::KillReason::Damage,
+    );
+    assert!(cannon.data().attached_characters.is_empty());
+    assert_eq!(pb.data().unit.transform.parent_obj_id, 0);
+
+    // Recalling the ship unbinds a gunner too.
+    slaves::bind_slave_by_tl(&server, &pa, cannon_tl);
+    assert_eq!(cannon.data().attached_characters.len(), 1);
+    slaves::delete(&server, Some(&pa), world.id, hull.obj_id, false);
+    assert_eq!(pa.data().attached_point, attach_point::NONE);
+    assert_eq!(pa.data().unit.transform.parent_obj_id, 0);
+    assert!(!pa.data().is_riding);
+    assert!(cannon.data().attached_characters.is_empty());
 }

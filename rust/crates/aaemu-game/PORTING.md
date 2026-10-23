@@ -309,7 +309,7 @@ Cross-subsystem: mates are despawned on dungeon entry and `PlayerCanEnter` check
 
 | Area (C#) | Rust | Status | Notes |
 |---|---|---|---|
-| `MateGameData`, `SlaveGameData` (templates, unit modifiers, initial items / buffs, passive buffs, doodad / healing point / slave bindings, drop doodads, mount skills, repairable slaves, `slave_attach_points*.json`), `TransferGameData` (templates, bindings, binding doodads, paths, client `transfer_path.xml` roads + `GetOwnerPaths`), `ShipyardManager.Load`, `TaxationsManager` table, `ModelManager` vehicle / ship models | `systems/vehicles/data.rs` | done | Gated test `real_compact_db_vehicle_tables` checks the row counts; `real_transfer_follows_its_client_route` loads the roads from the game_pak. |
+| `MateGameData`, `SlaveGameData` (templates, unit modifiers, initial items / buffs, passive buffs, doodad / healing point / slave bindings, drop doodads, mount skills, repairable slaves, `slave_equip_slots`, `item_slave_equipments`, `allow_to_equip_slaves` / `allow_to_equip_slots`, `slave_attach_points*.json`), `TransferGameData` (templates, bindings, binding doodads, paths, client `transfer_path.xml` roads + `GetOwnerPaths`), `ShipyardManager.Load`, `TaxationsManager` table, `ModelManager` vehicle / ship models | `systems/vehicles/data.rs` | done | Gated test `real_compact_db_vehicle_tables` checks the row counts; `real_transfer_follows_its_client_route` loads the roads from the game_pak. |
 | `MateManager` (per instance), `CharacterMates` (load / save / spawn / despawn), `Mate` (`AddExp`, `MateXpUpdateTask`, `RegenTick`, `DoFallDamage`, `OnZoneChange`, stats) | `systems/vehicles/mates.rs`, `stats.rs` | done | Mount / dismount (`SCUnitAttached` / `SCUnitDetached`, rider becomes a transform child), rename, target, user state, mate equipment packet (item move through `VehicleItemHooks`), kill exp, stun / unmount skills, death despawn. |
 | `SlaveManager` (per instance), `SlaveSpawner`, `SummonSlave` details, `Slave` (`DoDie`, `DoHpChangeTrigger` / repair points, `RegenTick`, `Save`, `OnZoneChange`, stats) | `systems/vehicles/slaves.rs` | done | Create (saved slave / persistent doodads / saved child slaves from MySQL, position, boats on the water surface, doodad and slave bindings at the model attach points), bind / unbind, delete with portal-time despawn, Rider's Escape, repair cooldown, `RepairSlaveEffect`, `SendMySlaveTask`, logout (+10 min) / disconnect despawn task, `slaves` table (`AfterCharacters`). |
 | `TransferManager` (per instance, 100 ms tick), `TransferSpawner`, `Transfer` route following (`GoToPath`, `MoveTo`, `NextPoint`) | `systems/vehicles/transfers.rs` | done | Carriage motor + boarding part + bench doodads, `SCOneUnitMovementPacket` (transfer move type) for both parts. Spawned from `SpawnManager.SpawnAll`. |
@@ -1541,6 +1541,40 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   warning stays and prints the entry to add. Ten hand recorded gates are more than 5 m from their
   10.x point (221, 372, 617, 619, 628, 672, 673, 354, 652, and 48 by 6 m); they are untouched.
 
+* systems::npcs (2026-10-22): `Data/Portal/worldgates.json` has 67 more generated gates for the
+  instance worlds. `aaemu-aipaths return-points --world <instance_world>` (repeatable) reads the
+  world's own `world.xml` (instance zones have their own origin cells, identical in the 1.2 and
+  10.x files of the worlds used) and its `level_design/zone/<key>/editor/return_point.xml` in the
+  10.x `game_pak`, looks the points up by the 1.2 `return_points.editor_name` and replaces the
+  terrain check by a nearest-1.2-spawn warning (the Nachashgar points lie 0.3-7 m from a portal
+  spawn; the library "up" floors have their nearest spawn 40 m lower, the floor pitch). Added:
+  Nachashgar 524-532, 546-553, 561, 625, 626; Nachashgar easy 572-581; library 630-647, 654-669,
+  679; Howling Abyss 484, 525; Cradle of Destruction 488. Left out: 399, 400, 533, 627, 681 (main
+  world, fail the ground check), 555 and 567 (Immortal Isle, 134 m from the nearest spawn), 68 and
+  69 (reassigned ids), 670 and 671 (zone 315 is not in 1.2), ids without any point (386, 568, ...)
+  and the 16 ids no version defines. `SubZoneId` is the gate id, `100000 + Id` for 578 and 632.
+  Research: Return gates of an instance resolve in the caster's world (retail ships a
+  `return_point.g` per instance world).
+  Not verified in a live run (no live suite yet: no stack was run for this change).
+
+* systems::skills (2026-10-22): `Return` (type 25) keeps a player inside its instance. The C#
+  `Return.cs` is a TODO placeholder: a missing gate fell back to `character.MainWorldPosition`
+  and loaded the main world, so an instance Return id without gate data ejected the player
+  (the instance Return ids had no gate data at all). The Rust now sends `SCErrorMsg`
+  `NO_RETURN_POINT` (439, the retail error string `no_return_point`) and leaves the player where
+  it is when the caller is in an instance and the gate is missing or its zone is not a zone of
+  the caller's instance world. A gate of the instance's own world moves the player inside it
+  (zone change hooks fire, only `SCTeleportUnit`, no `SCLoadInstance`). The character is re-filed
+  in the visibility grid immediately after the teleport is sent, outside its data lock, with
+  any grid zone changes dispatched afterwards. Distant gates remove it from departure observers
+  and show it to arrival observers without a movement packet; `CSTeleportEnded` repaints from
+  the arrival region without repeating observer deltas or zone changes. Outside an instance a
+  gate whose zone exists only in instance worlds is treated as missing (never instance
+  coordinates in the main world). The `MainWorldPosition` fallback remains only for the Memory
+  Tome (`value1 == 0`) outside instances. Retail resolves a Return gate in the caster's own
+  world (instance worlds ship their own `return_point.g`) and never falls back to the main world.
+  The C# closed-zone check of world gates (`Skill.cs` `portal_zone_check`) is not ported.
+
 * systems::npcs (2026-10-15): `DoodadFuncClout` with `UseOriginSource` takes the first doodad
   within 4 m of the caster as the area trigger's owner, and the C# scheduled the
   `DoodadFuncCloutTask` on that owner, so it changed that doodad's phase to the clout's
@@ -1772,6 +1806,8 @@ servers (see `rust/LIVE-TESTING.md`). Fixed porting bugs are in the git history 
   effect now runs in `fx::flush` after the lock is released, still before the labor packet, and after the
   item task packets queued earlier (the C# sends those inline first too). `quests::events::with_quests`
   logs an error and returns `None` when the thread already holds the ops lock instead of hanging.
+
+* `CharacterManager.Create` saved only the `characters` row (`SaveDirectlyToDatabase`); the starting supplies (`item_containers` / `items`) waited for the next `SaveManager` run or the departure save. A server stop or crash in that window kept the character but lost its items, and the next select built empty containers. `db_character::save_new_character_locked` now writes the new character's dirty containers and items in the same transaction (`ItemManager::prepare_save_for_owner`). Creation holds the save transaction lock from before inventory registration through commit or cleanup; setup errors and failed saves discard the rejected containers/items before releasing the name and character ID, without consuming other owners' changes or queued deletions. Canceled item deletions are recorded at each starter allocation, including IDs another owner releases after setup begins, and restored on rollback. Suite `rust/verify/newchar-items.vtest` uses a fresh character on every run, including reruns of its provisioned account.
 
 Parity status of the scripted scenarios: `login`, `lobby` and `full` (fresh character) produce
 the same S->C traffic as the C# servers after id / time normalisation (0 findings); a second
@@ -2444,8 +2480,8 @@ two bots before the fix (a foreign `Mount` caster, an NPC-only skill and a far d
 
 - **Mount caster.** `SkillCaster::Mount { obj_id }` may name the player itself, a mate the player
   may use (`may_use_mate`), or a slave the player summoned (`summoner_obj_id` / `summoner_id`),
-  is attached to (`attached_characters`, or `parent_obj_id`), or that is mounted on a slave the
-  player summoned (cannon on a ship). Any other object (NPC, doodad, another player, a foreign
+  is attached to (`attached_characters`, or `parent_obj_id`), or that is a harpoon mounted on a
+  slave the player summoned. A ship cannon (kind 8 child) answers only its gunner. Any other object (NPC, doodad, another player, a foreign
   slave) is refused with a warning and `SCSkillStarted` carrying `NO_PERM`.
 - **Range of doodad and slave targets.** The C# skipped the `TooFarRange` check for every Doodad
   or Slave target (its own TODO asks for a bounding-box check). The Rust now allows
@@ -2554,3 +2590,138 @@ gathers item 16035 x 5 with `highlight_doodad_id` 3848. Data only: `DoodadSpawne
 (`systems/npcs/doodad/spawner.rs`) already reads `UnitId` / `Position`. Regression test
 `spawn_tests::real_data_old_memoria_lake_trees_for_low_on_lumber` loads the shipped file through
 the real `parse_list` and checks the eight placements.
+
+## Construction step materials (2026-10-22)
+
+* The construction step skill of an unfinished house needs the consume item of its effects: the
+  Scarecrow Garden (design 267) step skill 18553 "Construct Garden" ("Spend up to 10 Labor and
+  1 Lumber") keeps its Lumber (item 8337 x1) in `skill_effects.consume_item_id` /
+  `consume_item_count`, not in `skill_reagents`. The C# consumed an effect-level item only when
+  the player had it and never cancelled the cast, so anyone built houses for free (and the
+  Rust port mirrored that). `systems::skills::validation::check_build_materials` now refuses the
+  cast, at the start and again at fire time, with `skill_need_reagent` (result 36, the 1.2
+  "reagent missing" result the cast already sends for `skill_reagents`) when the target is an
+  unfinished house, the skill is the house's current build-step skill and the character lacks
+  the item count. Labor is still checked by `check_resources` as before and nothing is spent on
+  a refusal. Every other skill keeps the soft effect-level consume. Reason: retail refuses the
+  construction without the materials; the step tooltip says it spends 1 Lumber. Regression:
+  `systems::housing::lifecycle_tests::construction_step_needs_its_effect_consume_item_before_cast`.
+  The error text the
+  client shows for result 36 was not re-checked in the client binary.
+* `systems::housing`: the final availability check is early feedback, not the payment boundary.
+  A selected player-to-house Building `CraftEffect` now checks the live house and current step
+  under the housing operation lock, then consumes its full effect-level material through
+  `ItemSkillHooks::pay_building_material` immediately before advancing progress. The economy
+  bridge preflights inventory, equipment and bank under one item transaction; a defensive short
+  debit restores exact container snapshots and discards queued effects. Persistence completes
+  under the economy lock, which is released before progress callbacks; item callbacks flush
+  after the housing lock. Missing payment cancels with result 36, without progress, labor or
+  the success interaction quest event. Rejected/stale house effects never fall back to the
+  legacy optional debit. Other effects retain that optional behavior. Regressions remove the
+  last real item after the final availability snapshot, retry after replenishing, check exact
+  and extra stock in every supported container, and prove non-building NPC damage still applies
+  without its optional item. Zero-step designs already finish during placement; a subsequent
+  construction action is rejected before payment.
+* `systems::economy`: container consumption callbacks now report the actual consumed delta
+  exactly once for full, partial and preferred stacks. The C# `ItemContainer.ConsumeItem`
+  decremented a depleted stack to zero before `RemoveItem` reported its count; the Rust port
+  mirrored that zero-count event (plus a second, correct event for a preferred stack). Removal
+  now accepts the consumed delta internally while direct removals keep their remaining-count
+  semantics. The callback still precedes `EquipLeave`, and wire item tasks are unchanged.
+  Container regressions cover full/preferred/partial/multiple stacks, equipment callback order
+  and direct removal; the housing payment callback test covers both the last unit and a partial
+  stack, with both operation locks released.
+
+## Slave summon placement and equipment (2026-10-22)
+
+- **SummonPos placement.** The 1.2 C# `SpawnSlave` special effect ignored `targetObj` and
+  always called `SlaveManager.Create(owner, skillData)`; the Rust port now follows the 10.x
+  `Skill.GetInitialTarget` / placement path. A `SummonPos` cast resolves the client-chosen spot
+  (world coordinates / yaw, including the `ObjId1` basis transform), validation sees that spot
+  (range, angle, obstacle, `target_only_water`) and the spawn uses it instead of the owner's
+  in-front offset. The spot is rejected (with `ErrorMessageType.SlaveSpawnErrorInvalidArea`,
+  583) and the 1.2 C# in-front placement is used when it is farther than
+  `slaves.spawn_valid_area_range` / the skill's `MaxRange` (the smaller nonzero limit; the boat
+  summon 15802 has `MaxRange` 0), when a ship spot is not on water, when a land-vehicle spot is
+  in water, or when a 0.5 m sphere just above the surface overlaps collision (`mask::SOLID`).
+  Skill 15802 also needs the 10.x `unboundedPlacement` rule: a position target with
+  `MaxRange <= 0` is not rejected as `TooFarRange`.
+- **`CSChangeSlaveEquipmentPacket`.** The 1.2 C# read only the header and logged it ("coming
+  soon"), so the implementation follows the 10.x packet logic (`e533e88b6`, C# `develop`
+  2026-08-02) adapted to the 1.2
+  client writer: `characterId u32`, `slaveTl u16`, `dbSlaveId u32`, `bts bool`, **one** item
+  pair and the four location bytes (`397d12a0`; the 10.x `num` and per-entry `expireTime` do not
+  exist in 1.2). Equip / unequip / re-slot move the item between the owner's bag and the slave's
+  persistent `EquipmentSlave` container (`SlotType 0xF2`, `ContainerKind::Equipment`,
+  `item_containers.mate_id` = slave DB id); the pre-move server snapshots are echoed in
+  `SCSlaveEquipmentChangedPacket(success)`, and the changed slots are broadcast as
+  `SCUnitEquipmentsChanged`, followed by `SCUnitPoints` when a part carries MaxHealth. Item
+  tasks go through the economy's `SplitOrMoveItemEx` (`ItemTaskType.Invalid`, as in C#), and the
+  slave model mirror is refreshed before `UpdateGearBonuses` / pool refresh.
+- **Ship parts.** Items with `item_impl = 28` (`ItemImplEnum.SlaveEquipment`) are now
+  `ItemClass::SlaveEquipment` with `ItemDetailType.SlaveEquipment` (12 opaque detail bytes);
+  `read_wire_item` consumes detail bytes by detail type (gear 55, ship parts 12, ...) instead of
+  always reading an `EquipItem`. Bind-on-equip applies in `EquipmentSlave` too. A player-owned
+  slave gets its starter pack when its equipment container is first created, including a saved
+  legacy hull whose summon item already names its DB id. An existing empty container represents
+  intentional unequipping and is reused on the next summon / restart without seeding again.
+  NPC / spawner slaves keep the in-memory defaults.
+- **Deviation from 1.2:** slave equipment persistence and the `0xF2` container do not exist in
+  the 1.2 C# at all; they are the 10.x design, recorded here because the 1.2 data already ships
+  `slave_initial_items`, `slave_equip_slots` and `item_slave_equipments`.
+- **Equipment validation (1.2 data):** equipping checks the item's
+  `item_slave_equipments.slave_equip_pack_id` against `allow_to_equip_slaves` (the hull) and its
+  `slot_pack_id` against `allow_to_equip_slots` (the target slot); the hull must also declare the
+  slot in `slave_equip_slots`. A refused move sends `ErrorMessageType.ItemNotForPet` (204; the
+  1.2 client's "can't use that item on a summon" message) and moves nothing. 10.x trusted the
+  client for this; its `SLAVE_EQUIP_ERROR_REQUIRE_SLOT_AND_ITEM` / `..._UNEQUIP_FIRST` (804/805)
+  are for the client's slot-dependency rules, not for a part the hull does not accept.
+- **Equipment visuals (10.x `SpawnEquipmentVisualsFromInventory`):** every occupied equipment
+  slot spawns what `item_slave_equipments` maps it to at the slot's `slave_equip_slots` attach
+  points: a child slave (Steel Cannon 28852 -> slave 10, Harpoon Cannon 30306 -> slave 48) or a
+  doodad (sails, masts, lamps, planks, figureheads, bell, telescope, ...). A slot that drives two
+  points (front/rear lamp, both planks) spawns the visual at both. Unequipping removes exactly
+  that visual; a resummon respawns it from the persistent container. Static bindings are skipped
+  only for slots with initial equipment, so deliberately unequipped parts remain absent. An
+  authored default without an exact legal equipment equivalent remains a static binding.
+- **Starter pack:** `slave_initial_items` rows are seeded only into slots the hull declares in
+  `slave_equip_slots` (slave 110 / 139 reference pack 1 without those slots; slave 21 has slot 0
+  at the cannon points and no starter cannons). Missing defaults are inferred from static
+  bindings only when one legal item reproduces every binding of the slot (lowest item id breaks
+  ties deterministically). The item template must also exist: hull 21's slot-0 cannon visual
+  references missing item 28854, so all eight cannons remain static. Hull 14/75's static lamps
+  also have no equivalent equipment item. Real-data spawn regressions
+  cover hulls 14, 21, 75, 76 and 110; synthetic and MySQL restart tests cover initialization and
+  persistent empty slots (`vehicles/pr38_regression_tests.rs`).
+- **Attach points:** models 511 (slave 22), 1482 (slave 132) and 1546 (slaves 139/142/143/145)
+  were recovered from the `$` helper nodes of the 1.2 client's `galleon_body_test.cgf`,
+  `boardship_body_test.cgf` and `middleship_body.cgf` (CGF units / 100, the same method and
+  values as the existing Clipper entry). Model 115 (`caravel.ship_body`) references a caravel
+  mesh that is not in the 1.2 pak, and model 117 (`galleon.cannon`, the cannon's gunner seat) is
+  an Entity `.chr` whose only node is its root (no `$` helpers), so those two still have no table
+  entry.
+- **No equipment skill link:** the 1.2 C# never connected equipped parts to cannon / vehicle
+  skills; slave mount skills still come from `slave_mount_skills`. The child slaves spawned for
+  equipment are visuals with the normal child-slave behaviour, as in the 10.x reference.
+- **Manned ship cannons (deviation, the C# has none of this):** a kind-8 slave mounted on another
+  slave (`slaves::is_manned_cannon`) has one gunner seat, attach point 1 (the `mount_attached_skills`
+  row of mount skill 16 / Fire Cannon 10473 -> skill 14372). `CSBindSlave` on it is refused with
+  `SLAVE_CANNOT_BIND` unless the character summoned the cannon, owns the carrier ship or is aboard
+  it (standing on it or seated on any of its points; the 1.2 data has no seat permission table, so
+  party / expedition membership is not required), with `SLAVE_ALREADY_HAS_MASTER` when the seat is
+  taken and `SLAVE_UNBIND_FIRST` when the character already rides another slave. Only the gunner
+  may cast the cannon's mount skills (`mount_authority::may_use_slave`): its DRIVER seat must name
+  the player, and the player's attach point and transform parent must match. Standing on the
+  cannon alone grants no shot, even when the seat is empty. The carrier's owner no
+  longer fires it remotely. The gunner leaves through `CSDiscardSlave`, death (`on_death_event`),
+  teleport / `force_dismount`, the cannon being unequipped, or the carrier being recalled,
+  destroyed or despawned (`unbind_child_riders`). Carrier death detaches child riders before
+  deleting their cannons, preserving world coordinates, clearing seats and sending `SCUnitDetached`.
+  The gunner sits at the model's driver helper if
+  `slave_attach_points*.json` has one, else at `GUNNER_SEAT_OFFSET` (0, -0.8, 0) in the cannon
+  frame: model 117 has no helper in the data or the pak, and no cannon-like model with a seat helper
+  exists, so this is a documented constant. The gunner is a transform child of the cannon, which is
+  a child of the ship, so the position follows the moving ship. Fire Cannon is a ballistic position
+  skill (4 m area, 4-120 m, fixed 130-170 damage); the area damage and the `SCSkillFired` broadcast
+  (the client draws the projectile from the skill's projectile 13) are covered by
+  `ship_cannon_gunner_seat_skill_and_leaving`.

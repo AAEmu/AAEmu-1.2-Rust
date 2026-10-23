@@ -24,10 +24,11 @@ pub mod slot_type {
     pub const TRADE: u8 = 4;
     pub const MAIL: u8 = 5;
     pub const AUCTION: u8 = 6;
+    pub const EQUIPMENT_SLAVE: u8 = 0xF2;
     pub const EQUIPMENT_MATE: u8 = 252;
     pub const SYSTEM: u8 = 0xFF;
     /// `Enum.GetValues<SlotType>()` order.
-    pub const ALL: [u8; 9] = [
+    pub const ALL: [u8; 10] = [
         NONE,
         EQUIPMENT,
         INVENTORY,
@@ -35,6 +36,7 @@ pub mod slot_type {
         TRADE,
         MAIL,
         AUCTION,
+        EQUIPMENT_SLAVE,
         EQUIPMENT_MATE,
         SYSTEM,
     ];
@@ -323,6 +325,11 @@ impl ItemContainer {
         if self.is_equipment() {
             if item.count != 1 {
                 return false;
+            }
+            // Ship / vehicle parts are `ItemImplEnum.SlaveEquipment` templates, not character
+            // gear: the 10.x `EquipmentContainer.CanAccept` only checks the slot range.
+            if self.slot_type == slot_type::EQUIPMENT_SLAVE {
+                return target_slot >= 0 && target_slot < self.size;
             }
             // `Owner == null`: not applicable to NPCs (mate gear resolves its owner by id).
             if !self.has_owner && !(self.kind == ContainerKind::MateEquipment && self.owner_id > 0)
@@ -710,7 +717,10 @@ impl ItemContainer {
             }
             let bt = data.template(item.template_id).map_or(0, |t| t.bind_type);
             if (self.slot_type == slot_type::INVENTORY && bt == bind_type::BIND_ON_PICKUP)
-                || (self.slot_type == slot_type::EQUIPMENT && bt == bind_type::BIND_ON_EQUIP)
+                || (matches!(
+                    self.slot_type,
+                    slot_type::EQUIPMENT | slot_type::EQUIPMENT_SLAVE
+                ) && bt == bind_type::BIND_ON_EQUIP)
             {
                 item.flags |= ITEM_FLAG_SOUL_BOUND;
                 item.dirty = true;
@@ -745,6 +755,20 @@ impl ItemContainer {
         release_id: bool,
         env: &mut ItemEnv<'_>,
     ) -> Option<Item> {
+        self.remove_item_task_with_consumed_count(task, item_id, release_id, None, env)
+    }
+
+    /// Consumption has already decremented a depleted stack to zero. Carry its actual delta
+    /// through removal so the one Consumed event still precedes EquipLeave, just as for an
+    /// ordinary direct removal (which uses the item's remaining count).
+    fn remove_item_task_with_consumed_count(
+        &mut self,
+        task: u8,
+        item_id: u64,
+        release_id: bool,
+        consumed_count: Option<i32>,
+        env: &mut ItemEnv<'_>,
+    ) -> Option<Item> {
         let idx = self.items.iter().position(|i| i.id == item_id)?;
         if !env.rules.can_destroy(&self.items[idx]) {
             return None;
@@ -769,11 +793,14 @@ impl ItemContainer {
             env.fx.push(ItemFx::ReleaseId(item.id));
         }
         self.update_free_slot_count();
-        env.fx.push(ItemFx::Consumed {
-            owner: self.owner_id,
-            template_id: item.template_id,
-            count: item.count,
-        });
+        let consumed_count = consumed_count.unwrap_or(item.count);
+        if consumed_count > 0 {
+            env.fx.push(ItemFx::Consumed {
+                owner: self.owner_id,
+                template_id: item.template_id,
+                count: consumed_count,
+            });
+        }
         self.on_leave_container(&item, old_slot, &mut env.fx);
         Some(item)
     }
@@ -805,13 +832,13 @@ impl ItemContainer {
                     return 0;
                 };
                 found.remove(pos);
-                total += self.consume_one(task, pid, &mut amount, &mut tasks, env, true);
+                total += self.consume_one(task, pid, &mut amount, &mut tasks, env);
             }
         }
         if amount > 0 {
             found.sort_by_key(|id| self.get_item_by_id(*id).map_or(0, |i| i.slot));
             for id in found {
-                total += self.consume_one(task, id, &mut amount, &mut tasks, env, false);
+                total += self.consume_one(task, id, &mut amount, &mut tasks, env);
                 if amount <= 0 {
                     break; // We are done with the list, leave the rest as is
                 }
@@ -831,7 +858,6 @@ impl ItemContainer {
         amount: &mut i32,
         tasks: &mut Vec<ItemTask>,
         env: &mut ItemEnv<'_>,
-        preferred: bool,
     ) -> i32 {
         let Some(item) = self.items.iter_mut().find(|i| i.id == id) else {
             return 0;
@@ -842,23 +868,14 @@ impl ItemContainer {
         *amount -= to_remove;
         let template_id = item.template_id;
         if item.count > 0 {
-            if !preferred {
-                env.fx.push(ItemFx::Consumed {
-                    owner: self.owner_id,
-                    template_id,
-                    count: to_remove,
-                });
-            }
-            tasks.push(ItemTask::count_update(item, -to_remove));
-        } else {
-            self.remove_item_task(task, id, true, env); // Normally, this can never fail
-        }
-        if preferred {
             env.fx.push(ItemFx::Consumed {
                 owner: self.owner_id,
                 template_id,
                 count: to_remove,
             });
+            tasks.push(ItemTask::count_update(item, -to_remove));
+        } else {
+            self.remove_item_task_with_consumed_count(task, id, true, Some(to_remove), env);
         }
         to_remove
     }

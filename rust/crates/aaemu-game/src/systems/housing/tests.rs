@@ -267,6 +267,24 @@ fn housing_data(tax_item: bool) -> GameData {
             show: true,
         },
     );
+    // The build step skills' `CraftEffect` (world interaction 1 = Building).
+    data.systems.skills.add_effect(
+        crate::systems::skills::data::EffectKind::CraftEffect,
+        crate::systems::skills::data::EffectTemplate::Craft {
+            id: 1,
+            world_interaction: 1,
+        },
+        1,
+    );
+    data.systems
+        .npcs
+        .area_trigger
+        .world_interaction_groups
+        .insert(
+            1,
+            crate::systems::npcs::area_trigger::world_interaction_group::BUILDING,
+        );
+    let h = &mut data.systems.housing;
     let mut build_steps = BTreeMap::new();
     build_steps.insert(0, step(0, 710, 11000, 2));
     build_steps.insert(1, step(1, 711, 11001, 1));

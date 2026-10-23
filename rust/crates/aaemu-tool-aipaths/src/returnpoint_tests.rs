@@ -100,6 +100,7 @@ fn run_plan(f: &Fixture, demand: &[Demand], existing: &[GateRow]) -> (Vec<Gate>,
         zones10: &f.zones10,
         db_zones: &f.db_zones,
         existing,
+        instances: &[],
         skip: &BTreeSet::new(),
     })
 }
@@ -250,13 +251,13 @@ fn comments_are_stripped_outside_strings_only() {
 
 #[test]
 fn section_is_commented_and_valid_json_with_the_file() {
-    let text = format_section(&[gate(5), gate(6)], &BTreeSet::new(), "\n");
+    let text = format_section(&[gate(5), gate(6)], &BTreeSet::new(), &[], "\n");
     assert!(text.starts_with("    //----"));
     assert!(text.contains("\"Y\": 0.0,"));
     assert!(text.contains("\"Yaw\": -90.0,"));
     assert!(text.contains("    },\n    {"));
     assert!(text.trim_end().ends_with(END_MARKER));
-    let spliced = splice(FILE, &[gate(5), gate(6)], &none()).unwrap();
+    let spliced = splice(FILE, &[gate(5), gate(6)], &none(), &[]).unwrap();
     assert_eq!(ids(&spliced), [1, 5, 6]);
     assert!(spliced.contains(BEGIN_MARKER));
     // The file keeps its line endings and its end.
@@ -266,15 +267,18 @@ fn section_is_commented_and_valid_json_with_the_file() {
 
 #[test]
 fn splice_is_idempotent_and_replaces_the_old_section() {
-    let once = splice(FILE, &[gate(5), gate(6)], &none()).unwrap();
-    assert_eq!(splice(&once, &[gate(5), gate(6)], &none()).unwrap(), once);
-    let replaced = splice(&once, &[gate(7)], &none()).unwrap();
+    let once = splice(FILE, &[gate(5), gate(6)], &none(), &[]).unwrap();
+    assert_eq!(
+        splice(&once, &[gate(5), gate(6)], &none(), &[]).unwrap(),
+        once
+    );
+    let replaced = splice(&once, &[gate(7)], &none(), &[]).unwrap();
     assert_eq!(ids(&replaced), [1, 7]);
     // Only the hand curated gate counts as existing, whatever the section holds.
     let hand: Vec<u32> = hand_curated(&once).unwrap().iter().map(|g| g.id).collect();
     assert_eq!(hand, [1]);
     // No gates: the section disappears and the original text comes back.
-    assert_eq!(splice(&once, &[], &none()).unwrap(), FILE);
+    assert_eq!(splice(&once, &[], &none(), &[]).unwrap(), FILE);
 }
 
 #[test]
@@ -294,11 +298,12 @@ fn skipped_ids_are_left_out_and_recorded_in_the_section() {
         zones10: &f.zones10,
         db_zones: &f.db_zones,
         existing: &[],
+        instances: &[],
         skip: &skip,
     });
     assert_eq!(gates.iter().map(|g| g.id).collect::<Vec<_>>(), [9]);
     assert_eq!(report.skipped["left out with --skip"], BTreeSet::from([30]));
-    let section = format_section(&gates, &skip, "\n");
+    let section = format_section(&gates, &skip, &[], "\n");
     assert!(section.contains("--skip (not on the 1.2 terrain or navmesh): 30"));
     let args: Vec<String> = [
         "--pak10",
@@ -315,4 +320,147 @@ fn skipped_ids_are_left_out_and_recorded_in_the_section() {
     .map(String::from)
     .to_vec();
     assert_eq!(parse_args(&args).unwrap().skip, BTreeSet::from([5, 7]));
+}
+
+const INSTANCE_WORLD12: &str = r#"<World name="instance_library">
+ <ZoneList>
+  <Zone name="instance_library_1" id="296" originX="0" originY="0"><cellList/></Zone>
+  <Zone name="instance_library_2" id="297" originX="0" originY="2"><cellList/></Zone>
+  <Zone name="instance_library_moved" id="298" originX="0" originY="4"><cellList/></Zone>
+ </ZoneList>
+</World>"#;
+
+const INSTANCE_WORLD10: &str = r#"<World name="instance_library">
+ <ZoneList>
+  <Zone name="instance_library_1" id="296" originX="0" originY="0"><cellList/></Zone>
+  <Zone name="instance_library_2" id="297" originX="0" originY="2"><cellList/></Zone>
+  <Zone name="instance_library_moved" id="298" originX="1" originY="4"><cellList/></Zone>
+ </ZoneList>
+</World>"#;
+
+fn library(spawns: Vec<crate::convert::Vec3>) -> InstanceWorld {
+    let mut points: HashMap<String, Vec<Found>> = HashMap::new();
+    let mut add = |zone: u32, p: ReturnPoint| {
+        points
+            .entry(p.name.to_lowercase())
+            .or_default()
+            .push((zone, p));
+    };
+    add(296, point("lib_up", [993.9, 384.1, 173.4]));
+    add(297, point("lib_dn", [106.3, 256.5, 129.4]));
+    add(298, point("lib_moved", [10.0, 10.0, 10.0]));
+    add(296, point("lib_far", [900.0, 900.0, 10.0]));
+    add(296, point("lib_twice", [10.0, 10.0, 10.0]));
+    add(297, point("lib_twice", [10.0, 10.0, 10.0]));
+    InstanceWorld {
+        name: "instance_library".into(),
+        zones12: zones(INSTANCE_WORLD12),
+        zones10: zones(INSTANCE_WORLD10),
+        points,
+        spawns,
+    }
+}
+
+#[test]
+fn instance_gates_use_the_world_origins_and_the_spawn_check_only_warns() {
+    let f = fixture();
+    let world = library(vec![[990.0, 380.0, 173.0], [5000.0, 5000.0, 0.0]]);
+    let worlds = [world];
+    let (gates, report) = plan(&PlanInput {
+        demand: &[
+            demand(630, "lib_up"),
+            demand(631, "lib_dn"),
+            demand(632, "lib_moved"),
+            demand(633, "lib_far"),
+            demand(634, "lib_twice"),
+            demand(635, "unknown"),
+        ],
+        points: &f.points,
+        zones12: &f.zones12,
+        zones10: &f.zones10,
+        db_zones: &f.db_zones,
+        existing: &[row(9, 632)],
+        instances: &worlds,
+        skip: &BTreeSet::new(),
+    });
+    let by_id = |id: u32| gates.iter().find(|g| g.id == id);
+    let up = by_id(630).expect("630");
+    assert_eq!(
+        (up.zone_id, up.x, up.y, up.z, up.sub_zone_id),
+        (296, 993.9, 384.1, 173.4, 630)
+    );
+    // Zone 297 has the origin cell (0, 2): Y + 2048.
+    let dn = by_id(631).expect("631");
+    assert_eq!((dn.zone_id, dn.x, dn.y), (297, 106.3, 2304.5));
+    // A zone whose origin differs between 1.2 and 10.x is not used.
+    assert!(by_id(632).is_none());
+    assert!(report.skipped["zone origin differs between 1.2 and 10.x"].contains(&632));
+    // Far from every spawn: generated, with a warning.
+    assert!(by_id(633).is_some());
+    assert!(report.warnings.iter().any(|(id, _)| *id == 633));
+    assert!(!report.warnings.iter().any(|(id, _)| *id == 630));
+    // The same name in two zones is ambiguous.
+    assert!(by_id(634).is_none());
+    assert!(report.skipped["several different positions"].contains(&634));
+    assert!(report.skipped["no main_world return point in the 10.x data"].contains(&635));
+}
+
+#[test]
+fn instance_gate_sub_zones_avoid_the_taken_ones() {
+    let f = fixture();
+    let worlds = [library(vec![[990.0, 380.0, 173.0]])];
+    let (gates, _) = plan(&PlanInput {
+        demand: &[demand(578, "lib_up")],
+        points: &f.points,
+        zones12: &f.zones12,
+        zones10: &f.zones10,
+        db_zones: &f.db_zones,
+        existing: &[row(1, 578)],
+        instances: &worlds,
+        skip: &BTreeSet::new(),
+    });
+    assert_eq!(gates[0].sub_zone_id, 100_578);
+}
+
+#[test]
+fn world_option_is_repeatable_and_rejects_main_world() {
+    let base = [
+        "--pak10",
+        "a",
+        "--pak12",
+        "b",
+        "--compact",
+        "c",
+        "--worldgates",
+        "d",
+    ];
+    let mut args: Vec<String> = base.map(String::from).to_vec();
+    args.extend(
+        [
+            "--world",
+            "instance_library",
+            "--world",
+            "instance_nachashgar",
+        ]
+        .map(String::from),
+    );
+    args.extend(["--world", "instance_library"].map(String::from));
+    assert_eq!(
+        parse_args(&args).unwrap().worlds,
+        ["instance_library", "instance_nachashgar"]
+    );
+    let mut bad: Vec<String> = base.map(String::from).to_vec();
+    bad.extend(["--world", "main_world"].map(String::from));
+    assert!(parse_args(&bad).is_err());
+}
+
+#[test]
+fn section_header_names_the_instance_worlds() {
+    let text = format_section(
+        &[gate(5)],
+        &BTreeSet::new(),
+        &["instance_library".to_string()],
+        "\n",
+    );
+    assert!(text.contains("--world (zone origins per world): instance_library"));
 }

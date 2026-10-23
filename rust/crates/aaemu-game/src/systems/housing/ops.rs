@@ -1566,77 +1566,125 @@ pub fn craft_building(
     house: &HouseRef,
     used_skill: u32,
 ) -> bool {
-    let _operation = server
+    craft_building_with_payment(server, player, house, used_skill, || {
+        Some(crate::models::item_task::ItemFxList::default())
+    })
+    .is_ok()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuildActionError {
+    Rejected,
+    MissingMaterial,
+}
+
+/// The selected skill effect pays immediately before committing progress, while the housing
+/// operation lock still protects the current house and step from demolition / another action.
+pub(crate) fn craft_building_paid(
+    server: &GameServer,
+    player: &PlayerRef,
+    house: &HouseRef,
+    used_skill: u32,
+    material_id: u32,
+    material_count: i32,
+) -> Result<(), BuildActionError> {
+    craft_building_with_payment(server, player, house, used_skill, || {
+        server.systems.skills.ext.items().pay_building_material(
+            server,
+            player,
+            material_id,
+            material_count,
+        )
+    })
+}
+
+fn craft_building_with_payment(
+    server: &GameServer,
+    player: &PlayerRef,
+    house: &HouseRef,
+    used_skill: u32,
+    pay: impl FnOnce() -> Option<crate::models::item_task::ItemFxList>,
+) -> Result<(), BuildActionError> {
+    let operation = server
         .systems
         .housing
         .operation_lock
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let Some(template) = template_of(server, house) else {
-        return false;
+        return Err(BuildActionError::Rejected);
     };
     if super::dominion::fort::is_fort(server, house)
         && !super::dominion::fort::allowed_to_interact(server, house, player)
     {
-        return false;
+        return Err(BuildActionError::Rejected);
     }
     let char_name = player.data().unit.name.clone();
-    let (current_action, current_step, owner, house_instance) = {
+    let (current_action, current_step, owner, house_instance, house_id) = {
         let h = house.data();
         (
             h.current_action(),
             h.current_step,
             h.unit.owner_id,
             h.unit.transform.instance_id,
+            h.id,
         )
     };
     if owner == 0 || current_step < 0 || player.data().unit.transform.instance_id != house_instance
     {
-        return false;
+        return Err(BuildActionError::Rejected);
+    }
+    let current = server.systems.housing.manager.by_id(house_id);
+    let world_house = server
+        .world
+        .world(house_instance)
+        .and_then(|w| w.house(house.obj_id));
+    if current.is_none_or(|h| !std::sync::Arc::ptr_eq(&h, house))
+        || world_house.is_none_or(|h| !std::sync::Arc::ptr_eq(&h, house))
+    {
+        return Err(BuildActionError::Rejected);
     }
     // Get the house's current build step
     let step = if current_action >= 0 && current_step < template.build_steps.len() as i32 {
         match template.build_steps.get(&current_step) {
-            Some(s) => Some(*s),
+            Some(s) => *s,
             None => {
                 // C#: BuildSteps[-1] of a finished house throws KeyNotFoundException.
                 tracing::error!(
                     "CraftEffect: house {} has no build step {current_step}",
                     house.obj_id
                 );
-                return false;
+                return Err(BuildActionError::Rejected);
             }
         }
     } else {
-        None
+        return Err(BuildActionError::Rejected);
     };
     // Compare if the used skill (correct pack) is still valid when used
-    if let Some(step) = step.filter(|s| used_skill != s.skill_id) {
+    if used_skill != step.skill_id {
         tracing::warn!(
             "{char_name} tried to building using the wrong skill, {used_skill} instead of {}",
             step.skill_id
         );
         player.data().skill_char.skill_cancelled = true;
         crate::systems::skills::skill::interrupt_skills(server, &WorldObject::from(player));
-        return false;
+        return Err(BuildActionError::Rejected);
     }
-    // When done, set step to -1
-    if template.build_steps.is_empty() {
-        manager::set_current_step(server, house, -1, false);
-    } else {
-        manager::add_build_action(server, house);
-        // MAKE_HOUSING: the owner's last build action finished the house (design id value1).
-        if owner == player.character_id && house.data().current_step == -1 {
-            crate::systems::report_achievement(
-                server,
-                player,
-                AchievementInput::Increment {
-                    kind_id: char_record_kind::MAKE_HOUSING,
-                    amount: 1,
-                    matcher: RecordMatch::Value1(template.id),
-                },
-            );
-        }
+    // No world/object lock is held while taking the economy lock. Payment releases it and
+    // returns deferred item callbacks, so progress callbacks can safely use the economy.
+    let item_fx = pay().ok_or(BuildActionError::MissingMaterial)?;
+    manager::add_build_action(server, house);
+    // MAKE_HOUSING: the owner's last build action finished the house (design id value1).
+    if owner == player.character_id && house.data().current_step == -1 {
+        crate::systems::report_achievement(
+            server,
+            player,
+            AchievementInput::Increment {
+                kind_id: char_record_kind::MAKE_HOUSING,
+                amount: 1,
+                matcher: RecordMatch::Value1(template.id),
+            },
+        );
     }
     let packet = {
         let h = house.data();
@@ -1662,5 +1710,7 @@ pub fn craft_building(
             }
         }
     }
-    true
+    drop(operation);
+    crate::systems::economy::fx::flush(server, item_fx);
+    Ok(())
 }

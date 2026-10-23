@@ -215,6 +215,9 @@ fn base_add_collider(w: &mut World, e: EntIdx, c: EntIdx) -> i32 {
         i += 1;
     }
     w.ent_mut(e).colliders.insert(i, c);
+    if w.ent(c).sim_class() == 0 {
+        w.ent_mut(c).static_collider_users.push(e);
+    }
     i as i32
 }
 
@@ -273,9 +276,19 @@ fn base_remove_collider(w: &mut World, e: EntIdx, c: EntIdx) -> i32 {
     match ent.colliders.iter().position(|&x| x == c) {
         Some(i) => {
             ent.colliders.remove(i);
+            w.ent_mut(c).static_collider_users.retain(|&user| user != e);
             i as i32
         }
         None => -1,
+    }
+}
+
+/// Clear outgoing links and their static lifetime bookkeeping together. Contact/mask
+/// cleanup remains in the class removal hooks, just as for `base_remove_collider`.
+fn clear_colliders(w: &mut World, e: EntIdx) {
+    let cols = std::mem::take(&mut w.ent_mut(e).colliders);
+    for c in cols {
+        w.ent_mut(c).static_collider_users.retain(|&user| user != e);
     }
 }
 
@@ -331,12 +344,14 @@ pub fn class_has_contacts_with(w: &World, e: EntIdx, other: EntIdx) -> bool {
 /// while the external-contact stamp is negative).
 pub fn detach_hook(w: &mut World, e: EntIdx, mode: i32) {
     match &w.ent(e).kind {
-        EntityKind::Living(_) => return living::detach_hook(w, e, mode),
-        EntityKind::Particle(_) => return particle::detach_hook(w, e, mode),
-        EntityKind::Rigid(r) if r.wheeled.is_some() => return wheeled::detach_hook(w, e, mode),
-        _ => {}
+        EntityKind::Living(_) => living::detach_hook(w, e, mode),
+        EntityKind::Particle(_) => particle::detach_hook(w, e, mode),
+        EntityKind::Rigid(r) if r.wheeled.is_some() => wheeled::detach_hook(w, e, mode),
+        _ => class_detach_hook(w, e, mode),
     }
-    class_detach_hook(w, e, mode);
+    // Particle's class hook deliberately skips the base hook. Unregister any remaining
+    // outgoing links here too, so no static can retain a user after its destruction.
+    clear_colliders(w, e);
 }
 
 /// Slot 54 of `CRigidEntity` (0x350A9DD0) / `CPhysicalEntity` (0x350530B0): what the derived
@@ -351,14 +366,21 @@ pub fn class_detach_hook(w: &mut World, e: EntIdx, mode: i32) {
     }
     if (w.ent(e).id_bits & 0xFF00_0000) as i32 <= 0x300_0000 {
         w.ent_mut(e).flags |= 0x8000_0000;
-        let cols = w.ent(e).colliders.clone();
+        let mut cols = w.ent(e).colliders.clone();
+        // Static entities intentionally have no reverse collider list. Include their
+        // incoming users so an asleep rigid cannot retain this index beyond cleanup.
+        for c in std::mem::take(&mut w.ent_mut(e).static_collider_users) {
+            if !cols.contains(&c) {
+                cols.push(c);
+            }
+        }
         for c in cols {
             if c != e {
                 remove_collider(w, c, e, true);
                 awake(w, c, 1, 1);
             }
         }
-        w.ent_mut(e).colliders.clear();
+        clear_colliders(w, e);
         let ent = w.ent(e);
         if ent.flags & 0x20 == 0
             && ((ent.pod_refs > 0 && ((ent.id_bits & 0xFF00_0000) as i32) < 0x300_0000)
