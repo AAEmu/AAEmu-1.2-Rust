@@ -112,7 +112,7 @@ impl PacketStream {
     // ---- reads -------------------------------------------------------------------------------
 
     fn take(&mut self, n: usize) -> Result<&[u8]> {
-        if self.pos + n > self.buf.len() {
+        if n > self.remaining() {
             return Err(MarshalError::EndOfStream {
                 pos: self.pos,
                 wanted: n,
@@ -456,6 +456,8 @@ impl From<Vec<u8>> for PacketStream {
 mod tests {
     use super::*;
 
+    type Reader = fn(&mut PacketStream) -> Result<()>;
+
     #[test]
     fn primitives_roundtrip() {
         let mut s = PacketStream::new();
@@ -475,6 +477,272 @@ mod tests {
         assert_eq!(s.read_f32().unwrap(), 1.5);
         assert!(s.read_bool().unwrap());
         assert!(matches!(s.read_u8(), Err(MarshalError::EndOfStream { .. })));
+    }
+
+    #[test]
+    fn oversized_byte_read_preserves_cursor() {
+        let mut s = PacketStream::from_bytes([0x11, 0x22, 0x33]);
+        assert_eq!(s.read_u8().unwrap(), 0x11);
+        assert_eq!(
+            s.read_bytes(usize::MAX),
+            Err(MarshalError::EndOfStream {
+                pos: 1,
+                wanted: usize::MAX,
+                len: 3,
+            })
+        );
+        assert_eq!(s.pos(), 1);
+        assert_eq!(s.unread(), &[0x22, 0x33]);
+        assert_eq!(s.read_u16().unwrap(), 0x3322);
+    }
+
+    #[test]
+    fn oversized_fixed_string_read_preserves_cursor() {
+        let mut s = PacketStream::from_bytes(b"abc".as_slice());
+        assert_eq!(s.read_u8().unwrap(), b'a');
+        assert_eq!(
+            s.read_string_fixed(usize::MAX),
+            Err(MarshalError::EndOfStream {
+                pos: 1,
+                wanted: usize::MAX,
+                len: 3,
+            })
+        );
+        assert_eq!(s.pos(), 1);
+        assert_eq!(s.unread(), b"bc");
+        assert_eq!(s.read_string_fixed(2).unwrap(), "bc");
+    }
+
+    #[test]
+    fn truncated_fixed_width_reads_preserve_cursor_and_can_retry() {
+        let readers: &[(usize, Reader)] = &[
+            (1, |s| s.read_bool().map(|_| ())),
+            (1, |s| s.read_u8().map(|_| ())),
+            (1, |s| s.read_i8().map(|_| ())),
+            (2, |s| s.read_i16().map(|_| ())),
+            (2, |s| s.read_u16().map(|_| ())),
+            (3, |s| s.read_bc().map(|_| ())),
+            (3, |s| s.read_string_fixed(3).map(|_| ())),
+            (4, |s| s.read_i32().map(|_| ())),
+            (4, |s| s.read_u32().map(|_| ())),
+            (4, |s| s.read_f32().map(|_| ())),
+            (8, |s| s.read_i64().map(|_| ())),
+            (8, |s| s.read_u64().map(|_| ())),
+            (8, |s| s.read_f64().map(|_| ())),
+            (9, |s| s.read_position().map(|_| ())),
+        ];
+        for &(width, read) in readers {
+            for available in 0..width {
+                let mut s = PacketStream::from_bytes(vec![0; 1 + available]);
+                s.read_u8().unwrap();
+                assert_eq!(
+                    read(&mut s),
+                    Err(MarshalError::EndOfStream {
+                        pos: 1,
+                        wanted: width,
+                        len: 1 + available,
+                    })
+                );
+                assert_eq!(s.pos(), 1);
+                assert_eq!(s.unread(), vec![0; available]);
+                s.write_raw(&vec![0; width - available]);
+                read(&mut s).unwrap();
+                assert_eq!(s.pos(), 1 + width);
+                assert_eq!(s.remaining(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn cursor_clamping_rollback_and_empty_reads() {
+        let mut s = PacketStream::from_bytes([0x11, 0x22]);
+        s.set_pos(usize::MAX);
+        assert_eq!(s.pos(), 2);
+        assert_eq!(s.remaining(), 0);
+        assert!(s.read_bytes(0).unwrap().is_empty());
+        assert_eq!(s.read_string_fixed(0).unwrap(), "");
+        assert!(matches!(s.read_u8(), Err(MarshalError::EndOfStream { .. })));
+        assert_eq!(s.pos(), 2);
+        s.rollback_by(1);
+        assert_eq!(s.read_u8().unwrap(), 0x22);
+        s.rollback_by(usize::MAX);
+        assert_eq!(s.pos(), 0);
+        assert_eq!(s.read_u8().unwrap(), 0x11);
+        s.rollback();
+        assert_eq!(s.read_u16().unwrap(), 0x2211);
+        s.clear();
+        assert!(s.is_empty());
+        assert_eq!(s.pos(), 0);
+        assert!(s.unread().is_empty());
+        s.write_u8(0x33);
+        assert_eq!(s.read_u8().unwrap(), 0x33);
+    }
+
+    #[test]
+    fn truncated_length_prefixed_reads_consume_only_complete_fields() {
+        let readers: [Reader; 3] = [
+            |s| s.read_bytes_sized().map(|_| ()),
+            |s| s.read_string().map(|_| ()),
+            |s| s.read_packet_stream().map(|_| ()),
+        ];
+        let wire = [3, 0, b'a', b'b', b'c'];
+        for read in readers {
+            for end in 0..wire.len() {
+                let mut s = PacketStream::from_bytes(&wire[..end]);
+                let (pos, wanted) = if end < 2 { (0, 2) } else { (2, 3) };
+                assert_eq!(
+                    read(&mut s),
+                    Err(MarshalError::EndOfStream {
+                        pos,
+                        wanted,
+                        len: end,
+                    })
+                );
+                assert_eq!(s.pos(), pos);
+                assert_eq!(s.unread(), &wire[pos..end]);
+                s.write_raw(&wire[end..]);
+                s.rollback();
+                read(&mut s).unwrap();
+                assert_eq!(s.pos(), wire.len());
+            }
+        }
+    }
+
+    #[test]
+    fn nonpositive_i16_lengths_leave_following_bytes_unread() {
+        // Preserve the signed length/C# behavior, including the high-bit boundary.
+        for prefix in [[0, 0], [0, 0x80], [0xff, 0xff]] {
+            let wire = [prefix[0], prefix[1], 0x42];
+            let mut s = PacketStream::from_bytes(wire);
+            assert!(s.read_bytes_sized().unwrap().is_empty());
+            assert_eq!(s.pos(), 2);
+            assert_eq!(s.read_u8().unwrap(), 0x42);
+
+            let mut s = PacketStream::from_bytes(wire);
+            assert_eq!(s.read_string().unwrap(), "");
+            assert_eq!(s.pos(), 2);
+            assert_eq!(s.read_u8().unwrap(), 0x42);
+
+            let mut s = PacketStream::from_bytes(wire);
+            let nested = s.read_packet_stream().unwrap();
+            assert!(nested.is_empty());
+            assert_eq!(nested.pos(), 0);
+            assert_eq!(s.pos(), 2);
+            assert_eq!(s.read_u8().unwrap(), 0x42);
+        }
+    }
+
+    #[test]
+    fn maximum_positive_i16_length_reads_entire_payload() {
+        let payload = vec![0x42; i16::MAX as usize];
+        let mut s = PacketStream::new();
+        s.write_bytes_sized(&payload).write_u8(0x99);
+        assert_eq!(&s.as_bytes()[..2], &[0xff, 0x7f]);
+        assert_eq!(s.read_bytes_sized().unwrap(), payload);
+        assert_eq!(s.read_u8().unwrap(), 0x99);
+    }
+
+    #[test]
+    fn strings_replace_invalid_utf8_and_trim_only_edge_nuls() {
+        let body = [0, b'a', 0xff, 0, b'b', 0];
+        let mut s = PacketStream::new();
+        s.write_bytes_sized(&body).write_u8(0x42);
+        assert_eq!(s.read_string().unwrap(), "a\u{fffd}\0b");
+        assert_eq!(s.read_u8().unwrap(), 0x42);
+
+        let mut s = PacketStream::from_bytes(body);
+        assert_eq!(s.read_string_fixed(body.len()).unwrap(), "a\u{fffd}\0b");
+        assert_eq!(s.remaining(), 0);
+    }
+
+    #[test]
+    fn pisc_width_boundaries_have_exact_wire_bytes() {
+        let cases: &[(i64, &[u8])] = &[
+            (0, &[0, 0]),
+            (0xff, &[0, 0xff]),
+            (0x100, &[1, 0, 1]),
+            (0xffff, &[1, 0xff, 0xff]),
+            (0x1_0000, &[2, 0, 0, 1]),
+            (0xff_ffff, &[2, 0xff, 0xff, 0xff]),
+            (0x100_0000, &[3, 0, 0, 0, 1]),
+            (0xffff_ffff, &[3, 0xff, 0xff, 0xff, 0xff]),
+        ];
+        for &(value, wire) in cases {
+            let mut s = PacketStream::new();
+            s.write_pisc(&[value]);
+            assert_eq!(s.as_bytes(), wire, "value {value:#x}");
+            let mut s = PacketStream::from_bytes(wire);
+            assert_eq!(s.read_pisc_w(1).unwrap(), [value]);
+            assert_eq!(s.remaining(), 0);
+        }
+    }
+
+    #[test]
+    fn pisc_groups_have_exact_headers_and_partial_final_group() {
+        let values = [
+            0xff,
+            0x100,
+            0x1_0000,
+            0x100_0000,
+            0xffff,
+            0xff_ffff,
+            0xffff_ffff,
+        ];
+        let wire = [
+            0xe4, 0xff, 0, 1, 0, 0, 1, 0, 0, 0, 1, // u8, u16, bc, u32
+            0x39, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // u16, bc, u32
+        ];
+        let mut s = PacketStream::new();
+        s.write_pisc_w(&values);
+        assert_eq!(s.as_bytes(), wire);
+        let mut s = PacketStream::from_bytes(wire);
+        assert_eq!(s.read_pisc_w(values.len()).unwrap(), values);
+        assert_eq!(s.remaining(), 0);
+    }
+
+    #[test]
+    fn truncated_pisc_groups_stop_before_incomplete_value() {
+        let wire = [
+            0xe4, 0xff, 0, 1, 0, 0, 1, 0, 0, 0, 1, // u8, u16, bc, u32
+            0x39, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // u16, bc, u32
+        ];
+        // Header/value offsets and widths, including the second group's header.
+        for (pos, wanted) in [
+            (0, 1),
+            (1, 1),
+            (2, 2),
+            (4, 3),
+            (7, 4),
+            (11, 1),
+            (12, 2),
+            (14, 3),
+            (17, 4),
+        ] {
+            for end in pos..pos + wanted {
+                let mut s = PacketStream::from_bytes(&wire[..end]);
+                assert_eq!(
+                    s.read_pisc_w(7),
+                    Err(MarshalError::EndOfStream {
+                        pos,
+                        wanted,
+                        len: end
+                    })
+                );
+                assert_eq!(s.pos(), pos);
+                assert_eq!(s.unread(), &wire[pos..end]);
+                assert_eq!(s.read_bytes(end - pos).unwrap(), wire[pos..end]);
+            }
+        }
+    }
+
+    #[test]
+    fn empty_pisc_groups_do_not_consume_or_write_bytes() {
+        let mut s = PacketStream::from_bytes([0x42]);
+        s.write_pisc_w(&[]);
+        assert_eq!(s.as_bytes(), &[0x42]);
+        assert!(s.read_pisc_w(0).unwrap().is_empty());
+        assert_eq!(s.pos(), 0);
+        assert_eq!(s.read_u8().unwrap(), 0x42);
     }
 
     #[test]

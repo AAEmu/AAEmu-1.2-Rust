@@ -93,4 +93,109 @@ mod tests {
         assert_eq!(c.decode(&mut buf).unwrap(), Some(vec![9]));
         assert_eq!(c.decode(&mut buf).unwrap(), None);
     }
+
+    #[test]
+    fn frame_lengths_have_exact_wire_bytes() {
+        for (len, header) in [(0, [0, 0]), (258, [2, 1]), (65_535, [0xff, 0xff])] {
+            let payload: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            let mut c = FrameCodec;
+            let mut buf = BytesMut::new();
+            c.encode(&payload, &mut buf).unwrap();
+            assert_eq!(&buf[..2], &header);
+            assert_eq!(&buf[2..], payload);
+            assert_eq!(c.decode(&mut buf).unwrap(), Some(payload));
+            assert!(buf.is_empty());
+            assert_eq!(c.decode(&mut buf).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn decodes_at_every_fragmentation_point() {
+        let payload: Vec<u8> = (0..258).map(|i| (i % 251) as u8).collect();
+        let mut wire = vec![2, 1];
+        wire.extend_from_slice(&payload);
+        for split in 0..=wire.len() {
+            let mut c = FrameCodec;
+            let mut buf = BytesMut::from(&wire[..split]);
+            if split < wire.len() {
+                for _ in 0..2 {
+                    assert_eq!(c.decode(&mut buf).unwrap(), None, "split {split}");
+                    assert_eq!(&buf[..], &wire[..split], "split {split}");
+                }
+            }
+            buf.extend_from_slice(&wire[split..]);
+            assert_eq!(c.decode(&mut buf).unwrap(), Some(payload.clone()));
+            assert!(buf.is_empty());
+            assert_eq!(c.decode(&mut buf).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn coalesced_frames_preserve_incomplete_trailing_frame() {
+        let cases: &[(&[u8], &[u8], &[u8])] = &[
+            (&[3], &[0, 9, 8, 7], &[9, 8, 7]),
+            (&[3, 0, 9], &[8, 7], &[9, 8, 7]),
+        ];
+        for &(trailing, rest, payload) in cases {
+            let mut c = FrameCodec;
+            let mut buf = BytesMut::from(&[0, 0, 2, 0, 0x10, 0x20][..]);
+            buf.extend_from_slice(trailing);
+            assert_eq!(c.decode(&mut buf).unwrap(), Some(vec![]));
+            assert_eq!(c.decode(&mut buf).unwrap(), Some(vec![0x10, 0x20]));
+            assert_eq!(c.decode(&mut buf).unwrap(), None);
+            assert_eq!(&buf[..], trailing);
+            buf.extend_from_slice(rest);
+            assert_eq!(c.decode(&mut buf).unwrap(), Some(payload.to_vec()));
+            assert!(buf.is_empty());
+        }
+    }
+
+    #[test]
+    fn decode_eof_rejects_every_truncated_frame() {
+        let wire = [3, 0, 1, 2, 3];
+        for end in 1..wire.len() {
+            let mut c = FrameCodec;
+            let mut buf = BytesMut::from(&wire[..end]);
+            let err = c.decode_eof(&mut buf).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::Other);
+            assert_eq!(&buf[..], &wire[..end]);
+        }
+    }
+
+    #[test]
+    fn decode_eof_drains_complete_frames_before_truncated_tail() {
+        let mut c = FrameCodec;
+        let mut buf = BytesMut::from(&[0, 0, 1, 0, 9, 2][..]);
+        assert_eq!(c.decode_eof(&mut buf).unwrap(), Some(vec![]));
+        assert_eq!(c.decode_eof(&mut buf).unwrap(), Some(vec![9]));
+        assert!(c.decode_eof(&mut buf).is_err());
+        assert_eq!(&buf[..], &[2]);
+    }
+
+    #[test]
+    fn decode_eof_accepts_complete_frame_and_empty_buffer() {
+        let mut c = FrameCodec;
+        let mut buf = BytesMut::new();
+        assert_eq!(c.decode_eof(&mut buf).unwrap(), None);
+        buf.extend_from_slice(&[1, 0, 9]);
+        assert_eq!(c.decode_eof(&mut buf).unwrap(), Some(vec![9]));
+        assert!(buf.is_empty());
+        assert_eq!(c.decode_eof(&mut buf).unwrap(), None);
+    }
+
+    #[test]
+    fn oversized_encode_preserves_destination() {
+        let mut c = FrameCodec;
+        let mut buf = BytesMut::from(&[1, 0, 9][..]);
+        let before = buf.clone();
+        let payload = vec![0; usize::from(u16::MAX) + 1];
+        let err = c.encode(&payload, &mut buf).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(buf, before);
+        c.encode([8], &mut buf).unwrap();
+        assert_eq!(&buf[..], &[1, 0, 9, 1, 0, 8]);
+        assert_eq!(c.decode(&mut buf).unwrap(), Some(vec![9]));
+        assert_eq!(c.decode(&mut buf).unwrap(), Some(vec![8]));
+        assert!(buf.is_empty());
+    }
 }
