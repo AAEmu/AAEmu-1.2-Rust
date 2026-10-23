@@ -971,3 +971,146 @@ async fn use_skill_without_template_warns_once_per_skill_id() {
     assert_eq!(warned.len(), 1);
     assert!(warned.contains(&20315));
 }
+
+/// Moves the caster's GCD / last-use clock back as if `ms` had passed.
+fn age_gcd(player: &PlayerRef, ms: i64) {
+    let mut p = player.data();
+    p.unit.skill_last_used_ms -= ms;
+    p.unit.global_cooldown_ms -= ms;
+}
+
+#[tokio::test]
+async fn global_cooldown_refuses_until_it_is_nearly_over() {
+    // Shoot Arrow (16064): no own cooldown, custom GCD of 700 ms.
+    let (server, _client, player, npc) = fixture(GameData::empty());
+    let skill = SkillRun::new(
+        Arc::new(SkillTemplate {
+            custom_gcd: 700,
+            ..super::tests::skill_template(16064)
+        }),
+        1,
+    );
+    assert_eq!(
+        cast(&server, &skill, &player, &npc).0,
+        skill_result::SUCCESS
+    );
+    assert!(player.data().unit.global_cooldown_ms > 0);
+    // Pressing again right away, 200 ms later (500 ms of GCD left) and 400 ms later
+    // (300 ms left): all refused, even the first press inside the GCD.
+    for aged in [0, 200, 200] {
+        age_gcd(&player, aged);
+        assert_eq!(
+            cast(&server, &skill, &player, &npc),
+            (skill_result::COOLDOWN_TIME, 0),
+            "refused after {aged} ms more"
+        );
+    }
+    // 100 ms left is inside the network grace, and the new press restarts the GCD.
+    age_gcd(&player, 200);
+    assert_eq!(
+        cast(&server, &skill, &player, &npc).0,
+        skill_result::SUCCESS
+    );
+    // Once the GCD has fully elapsed it succeeds as well.
+    age_gcd(&player, 800);
+    assert_eq!(
+        cast(&server, &skill, &player, &npc).0,
+        skill_result::SUCCESS
+    );
+}
+
+#[tokio::test]
+async fn ignore_global_cooldown_skills_are_not_blocked_by_the_gcd() {
+    let (server, _client, player, npc) = fixture(GameData::empty());
+    let gcd_skill = SkillRun::new(
+        Arc::new(SkillTemplate {
+            custom_gcd: 700,
+            ..super::tests::skill_template(1)
+        }),
+        1,
+    );
+    let free_skill = SkillRun::new(
+        Arc::new(SkillTemplate {
+            custom_gcd: 700,
+            ignore_global_cooldown: true,
+            ..super::tests::skill_template(20)
+        }),
+        1,
+    );
+    assert_eq!(
+        cast(&server, &gcd_skill, &player, &npc).0,
+        skill_result::SUCCESS
+    );
+    assert_eq!(
+        cast(&server, &gcd_skill, &player, &npc),
+        (skill_result::COOLDOWN_TIME, 0)
+    );
+    assert_eq!(
+        cast(&server, &free_skill, &player, &npc).0,
+        skill_result::SUCCESS
+    );
+}
+
+#[tokio::test]
+async fn plot_only_skill_starts_its_gcd_and_cooldown_immediately() {
+    let (server, _client, player, npc) = fixture(GameData::empty());
+    let skill = SkillRun::new(
+        Arc::new(SkillTemplate {
+            plot_id: Some(77),
+            plot_only: true,
+            custom_gcd: 500,
+            cooldown_time: 36_000,
+            ..super::tests::skill_template(13281)
+        }),
+        1,
+    );
+    assert_eq!(
+        cast(&server, &skill, &player, &npc).0,
+        skill_result::SUCCESS
+    );
+    {
+        let p = player.data();
+        assert!(p.unit.global_cooldown_ms > 0, "GCD set at plot start");
+        let end = p.unit.cooldowns.cooldowns.get(&13281).copied();
+        assert!(end.is_some_and(|e| e > crate::world::now_ms() + 30_000));
+    }
+    // The GCD alone refuses an immediate recast ...
+    assert_eq!(
+        cast(&server, &skill, &player, &npc),
+        (skill_result::COOLDOWN_TIME, 0)
+    );
+    // ... and once it is over, the skill's own cooldown still does.
+    age_gcd(&player, 1000);
+    assert_eq!(
+        cast(&server, &skill, &player, &npc),
+        (skill_result::COOLDOWN_TIME, 0)
+    );
+}
+
+#[tokio::test]
+async fn plot_only_skill_without_own_cooldown_is_still_gated_by_the_gcd() {
+    // Triple Slash (18132): cooldown 0, custom GCD 500, plot-only.
+    let (server, _client, player, npc) = fixture(GameData::empty());
+    let skill = SkillRun::new(
+        Arc::new(SkillTemplate {
+            plot_id: Some(77),
+            plot_only: true,
+            custom_gcd: 500,
+            ..super::tests::skill_template(18132)
+        }),
+        1,
+    );
+    assert_eq!(
+        cast(&server, &skill, &player, &npc).0,
+        skill_result::SUCCESS
+    );
+    assert_eq!(
+        cast(&server, &skill, &player, &npc),
+        (skill_result::COOLDOWN_TIME, 0)
+    );
+    age_gcd(&player, 600);
+    assert_eq!(
+        cast(&server, &skill, &player, &npc).0,
+        skill_result::SUCCESS
+    );
+}
