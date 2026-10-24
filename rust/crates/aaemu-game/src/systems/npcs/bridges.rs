@@ -20,7 +20,7 @@ use crate::systems::skills::effects::EffectArgs;
 use crate::systems::skills::ext::NpcSkillHooks;
 use crate::systems::skills::geometry::{around_radius, Target};
 use crate::systems::skills::stats::StatKind;
-use crate::systems::skills::types::{BuffRemoveOn, SkillObject};
+use crate::systems::skills::types::{BuffRemoveOn, SkillCastTarget, SkillCaster, SkillObject};
 use crate::world::{NpcRef, PlayerRef, WorldInstance, WorldObject};
 
 use super::doodad::interactions::world_interaction_type as wi;
@@ -498,7 +498,7 @@ impl NpcSkillHooks for NpcSkills {
 }
 
 /// `InteractionEffect.Apply`.
-fn interaction_effect(
+pub(crate) fn interaction_effect(
     server: &GameServer,
     world_interaction: i32,
     doodad_id: u32,
@@ -520,9 +520,23 @@ fn interaction_effect(
         Target::Pos(_) => None,
     };
     if let Some(skill) = args.source.skill() {
+        // `MagicalEnchant` reads the `SkillItem` caster (the lunastone) and the
+        // `SkillCastItemTarget` (the item to enchant); the other classes ignore them.
+        let casts = super::doodad::interactions::InteractionCasts {
+            caster_item_template_id: match args.caster_caster {
+                SkillCaster::Item {
+                    item_template_id, ..
+                } => Some(item_template_id),
+                _ => None,
+            },
+            target_item_id: match args.target_caster {
+                SkillCastTarget::Item { id, .. } => Some(id),
+                _ => None,
+            },
+        };
         match &target {
             Some(t) => {
-                super::doodad::interactions::execute_interaction(
+                super::doodad::interactions::execute_interaction_with(
                     server,
                     wi_type,
                     caster,
@@ -530,13 +544,28 @@ fn interaction_effect(
                     skill.template.id,
                     doodad_id,
                     None,
+                    casts,
                 );
             }
-            None => {
-                if let (wi::SUMMON_DOODAD, Target::Pos(p)) = (wi_type, &args.target) {
+            None => match (wi_type, &args.target) {
+                (wi::SUMMON_DOODAD, Target::Pos(p)) => {
                     super::doodad::interactions::summon_doodad_at(server, caster, p, doodad_id);
                 }
-            }
+                // The C# passes the cast details whatever the target resolved to.
+                (wi::MAGICAL_ENCHANT, _) => {
+                    super::doodad::interactions::execute_interaction_with(
+                        server,
+                        wi_type,
+                        caster,
+                        None,
+                        skill.template.id,
+                        doodad_id,
+                        None,
+                        casts,
+                    );
+                }
+                _ => {}
+            },
         }
     }
     let Some(character) = caster.as_player() else {

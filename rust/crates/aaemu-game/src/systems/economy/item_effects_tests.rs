@@ -640,6 +640,92 @@ async fn socketing_success_failure_and_dawnstone() {
     );
 }
 
+/// The lunafrost skill's `InteractionEffect` (`MAGICAL_ENCHANT`) carries the rune as the
+/// `SkillItem` caster and the armor as the `SkillCastItemTarget`: the rune must reach
+/// `magical_enchant` through the effect bridge.
+fn lunafrost_interaction(
+    w: &World,
+    caster: crate::systems::skills::types::SkillCaster,
+    target: crate::systems::skills::types::SkillCastTarget,
+) {
+    use crate::systems::npcs::doodad::interactions::world_interaction_type as wi;
+    use crate::systems::skills::effects::{EffectArgs, EffectSource};
+    use crate::systems::skills::geometry::Target;
+    use crate::systems::skills::state::SkillRun;
+    use crate::systems::skills::types::{CastAction, SkillObject};
+    use crate::world::WorldObject;
+
+    let skill = SkillRun::new(
+        Arc::new(crate::systems::skills::tests::skill_template(11285)),
+        1,
+    );
+    let args = EffectArgs {
+        caster: Some(WorldObject::from(&w.pa)),
+        caster_caster: caster,
+        target: Target::Obj(WorldObject::from(&w.pa)),
+        target_caster: target,
+        cast: CastAction::Skill {
+            skill_id: 11285,
+            tl_id: 0,
+        },
+        source: EffectSource::from_skill(skill),
+        skill_object: &SkillObject::None,
+    };
+    crate::systems::npcs::bridges::interaction_effect(
+        &w.server,
+        wi::MAGICAL_ENCHANT as i32,
+        0,
+        &args,
+    );
+}
+
+#[tokio::test]
+async fn lunafrost_interaction_effect_enchants_bag_and_equipped_items() {
+    use crate::systems::skills::types::{SkillCastTarget, SkillCaster};
+
+    let w = world();
+    super::bridges::install(&w.server);
+    let rune = SkillCaster::Item {
+        obj_id: w.pa.obj_id,
+        item_id: 1,
+        item_template_id: GEM,
+        type1: 0,
+        type2: 0,
+    };
+    let target = |id| SkillCastTarget::Item {
+        obj_id: w.pa.obj_id,
+        id,
+        type1: 0,
+        type2: 0,
+    };
+    let bag = give(&w, &w.pa.clone(), slot_type::INVENTORY, ARMOR, 1, 0);
+    let worn = give(
+        &w,
+        &w.pa.clone(),
+        slot_type::EQUIPMENT,
+        ARMOR,
+        1,
+        equip_slot::CHEST,
+    );
+
+    // Not an item target: nothing is enchanted.
+    lunafrost_interaction(&w, rune, SkillCastTarget::Unit(w.pa.obj_id));
+    assert_eq!(item(&w, bag).unwrap().details.rune_id, 0);
+
+    lunafrost_interaction(&w, rune, target(bag));
+    assert_eq!(item(&w, bag).unwrap().details.rune_id, GEM);
+    assert!(item(&w, bag).unwrap().dirty);
+
+    // An equipped item can be enchanted too.
+    lunafrost_interaction(&w, rune, target(worn));
+    assert_eq!(item(&w, worn).unwrap().details.rune_id, GEM);
+
+    // A non-SkillItem caster enchants nothing.
+    let other = give(&w, &w.pa.clone(), slot_type::INVENTORY, ARMOR, 1, 1);
+    lunafrost_interaction(&w, SkillCaster::Unit(w.pa.obj_id), target(other));
+    assert_eq!(item(&w, other).unwrap().details.rune_id, 0);
+}
+
 #[tokio::test]
 async fn lunastone_cap_scale_and_reset() {
     let mut w = world();

@@ -20,6 +20,7 @@ mod cometsboon;
 mod craft;
 mod doodad;
 mod fixes;
+mod lunafrost;
 mod plant;
 mod portal;
 mod questitem;
@@ -75,6 +76,10 @@ pub enum Kind {
     /// (see `scenario/fixes.rs`). GM account.
     #[serde(rename = "ghost")]
     Ghost,
+    /// Lunafrost enchant (skill 11285, `MAGICAL_ENCHANT`) of a bag and of a worn head armor (see
+    /// `scenario/lunafrost.rs`). GM account.
+    #[serde(rename = "lunafrost")]
+    Lunafrost,
     /// Portal book delete (`SCPortalDeleted`) and the Memory Tome recall-point binding (skill
     /// 14602 cast at doodad 841, see `scenario/portal.rs`). GM account.
     #[serde(rename = "portal")]
@@ -107,11 +112,12 @@ impl std::str::FromStr for Kind {
             "cometsboon" => Self::CometsBoon,
             "stonethrow" => Self::StoneThrow,
             "ghost" => Self::Ghost,
+            "lunafrost" => Self::Lunafrost,
             "portal" => Self::Portal,
             "craft" => Self::Craft,
             "script" => Self::Script,
             _ => bail!(
-                "unknown scenario '{s}' (login, lobby, full, combat, npc-return, mate-revive, questitem, doodad, \n                 plant, cometsboon, stonethrow, ghost, portal, craft, script, load)"
+                "unknown scenario '{s}' (login, lobby, full, combat, npc-return, mate-revive, questitem, doodad, \n                 plant, cometsboon, stonethrow, ghost, lunafrost, portal, craft, script, load)"
             ),
         })
     }
@@ -658,6 +664,11 @@ async fn run_inner(
     }
     if kind == Kind::Ghost {
         fixes::ghost(&mut game, r).await?;
+        drop(stream);
+        return Ok(());
+    }
+    if kind == Kind::Lunafrost {
+        lunafrost::run(&mut game, r).await?;
         drop(stream);
         return Ok(());
     }

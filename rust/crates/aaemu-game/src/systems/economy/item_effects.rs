@@ -749,7 +749,18 @@ pub fn item_socketing(
         },
     );
     drop(txn);
+    // The gems' unit modifiers are part of the gear bonuses of an equipped item.
+    if after.slot_type == slot_type::EQUIPMENT {
+        refresh_gear_bonuses(server, player);
+    }
     broadcast_with_self(server, player, &SCSkillEndedPacket { tl: skill_tl_id });
+}
+
+/// Recomputes the gear bonuses after an equipped item changed in place (gems, lunastone).
+fn refresh_gear_bonuses(server: &GameServer, player: &PlayerRef) {
+    if let Some(hooks) = server.systems.economy.hooks.gear.get() {
+        hooks.update_gear_bonuses(server, &WorldObject::from(player), None, None);
+    }
 }
 
 /// `MagicalEnchant.Execute` (world interaction: lunastones). The C# checks `targetType` before
@@ -765,8 +776,12 @@ pub fn magical_enchant(
     };
     let Some(skill_item) = skill_item else { return };
     let mut txn = ItemTxn::begin(server);
-    let bag = Inv::of(player).bag();
-    let mut g = lock(&bag);
+    // Deviation: the C# searched the bag only (`Bag.GetItemByItemId`); like the lunagem
+    // socketing this also finds the item in the equipment (and bank) container.
+    let Some(holder) = Inv::of(player).holder_of(target_id) else {
+        return;
+    };
+    let mut g = lock(&holder);
     let Some(equip) = g.get_item_by_id_mut(target_id) else {
         return;
     };
@@ -790,6 +805,11 @@ pub fn magical_enchant(
         player,
         task_packet(task_type::ENCHANT_MAGICAL, vec![ItemTask::update(&after)]),
     );
+    drop(txn);
+    // The lunastone's unit modifiers are part of the gear bonuses of an equipped item.
+    if after.slot_type == slot_type::EQUIPMENT {
+        refresh_gear_bonuses(server, player);
+    }
 }
 
 /// `ItemCapScale.Execute` (tempering). `skill_id` = `skill.Id` (`GetItemCapScale(skillId)`).

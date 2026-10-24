@@ -257,6 +257,14 @@ corpse (`/despawn npc <objId>`) and watches 130 s for exactly one respawn (serve
 `RUST_LOG=info,aaemu_game::systems::skills::plots=debug,aaemu_game::systems::npcs=debug` to see the
 debug lines.
 
+`lunafrost` (GM account, same prerequisites as `questitem`) checks the lunastone enchant: it adds a head
+armor (6735) and two "Whole Insightful Lunafrost" (24692, `item_enchanting_gems` slot group 5 = head), casts the
+use skill 11285 with the lunafrost as `SkillItem` caster and the armor as `SkillCastItemTarget`, and requires
+`SCItemSocketingLunastoneResult` (true, armor id, 24692), an `SCItemTaskSuccess` of type 49 (`EnchantMagical`)
+that updates the armor with the rune, and exactly one consumed lunafrost. It then equips the armor
+(`CSSwapItems` to the head slot) and repeats the cast on the worn item. The stat bonus of the worn rune is
+not visible on the wire (see the `gear_bonuses_include_the_rune_modifiers` unit test); the server log must show
+no warning or error around the `StartSkill: Id 11285` lines.
 `craft` (GM account, same prerequisites as `questitem`) spawns an Archeum Workbench (doodad 566, `/spawn doodad`),
 adds 100 Gilda Stars (item 23633), tops the bot's labor up by 12 (`/labor 12`; GM commands can only add labor) and sends
 `CSExecuteCraft` for craft 8000001 (3 labor per craft) with count 100, so the batch outlasts the labor. It requires at

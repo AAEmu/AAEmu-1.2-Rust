@@ -763,7 +763,7 @@ pub fn refresh_cached_stats(server: &GameServer, obj: &WorldObject) {
     });
 }
 /// The `Bonuses[GearBonusesIndex]` list of `UpdateGearBonuses`: the unit modifiers of the
-/// equipped, non-destroyed items and their gems.
+/// equipped, non-destroyed items, their gems and rune.
 pub fn gear_bonuses<'a>(
     server: &GameServer,
     items: impl IntoIterator<Item = &'a crate::models::item::Item>,
@@ -791,7 +791,14 @@ pub fn gear_bonuses<'a>(
                 value: t.value,
             });
         }
-        for gem in item.details.gem_ids {
+        // The gems and the lunastone (rune) enchanted onto the item.
+        for gem in item
+            .details
+            .gem_ids
+            .into_iter()
+            .chain(std::iter::once(item.details.rune_id))
+            .filter(|id| *id != 0)
+        {
             for t in mods.get(&gem).into_iter().flatten() {
                 bonuses.push(Bonus {
                     template: t.clone(),
@@ -917,6 +924,7 @@ mod vehicle_gear_tests {
     use super::*;
 
     const TWO_HANDED_SWORD: u32 = 9001;
+    const RUNE: u32 = 9003;
     const SHIELD: u32 = 9002;
     const EQUIP_SHIELD: u32 = 8226;
     const EQUIP_TWO_HANDED: u32 = 8227;
@@ -969,6 +977,15 @@ mod vehicle_gear_tests {
                 linear_level_bonus: 0,
             }],
         );
+        s.item_unit_modifiers.insert(
+            RUNE,
+            vec![BonusTemplate {
+                attribute: UnitAttribute::MaxHealth,
+                modifier_type: UnitModifierType::Value,
+                value: 7,
+                linear_level_bonus: 0,
+            }],
+        );
         let server = Arc::new(crate::test_support::test_server_with(d));
         crate::systems::skills::bind(&server);
         crate::systems::economy::bridges::install(&server);
@@ -1001,6 +1018,25 @@ mod vehicle_gear_tests {
                 .collect()
         })
         .unwrap_or_default()
+    }
+
+    /// A lunafrost (`details.rune_id`) grants its `unit_modifiers` like a socketed gem does.
+    #[tokio::test]
+    async fn gear_bonuses_include_the_rune_modifiers() {
+        let server = server();
+        let mut sword = item(&server, 11, TWO_HANDED_SWORD, equip_slot::MAINHAND);
+        let values = |it: &Item| -> Vec<i32> {
+            gear_bonuses(&server, [it])
+                .into_iter()
+                .map(|b| b.value)
+                .collect()
+        };
+        assert_eq!(values(&sword), vec![500]);
+        sword.details.rune_id = RUNE;
+        assert_eq!(values(&sword), vec![500, 7]);
+        // Gems and the rune add up.
+        sword.details.gem_ids[0] = RUNE;
+        assert_eq!(values(&sword), vec![500, 7, 7]);
     }
 
     /// `Mate.UpdateGearBonuses`: on summon (null, null) and on an equipment change through the

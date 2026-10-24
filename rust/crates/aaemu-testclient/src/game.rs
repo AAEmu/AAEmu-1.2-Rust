@@ -956,6 +956,50 @@ impl GameClient {
         self.send_cs(cs::CSStartSkillPacket, s.as_bytes()).await
     }
 
+    /// `CSStartSkillPacket` cast by an item on another item (`SkillCastItemTarget`): lunafrost /
+    /// lunagem / enchanting scrolls. The caster is the item `item_id`, the target the item
+    /// `target_item_id`.
+    pub async fn start_item_skill_on_item(
+        &mut self,
+        skill_id: u32,
+        item_id: u64,
+        item_template_id: u32,
+        target_item_id: u64,
+    ) -> anyhow::Result<()> {
+        let mut s = PacketStream::new();
+        s.write_u32(skill_id)
+            .write_u8(2) // SkillCasterType.Item
+            .write_bc(self.state.self_obj)
+            .write_u64(item_id)
+            .write_u32(item_template_id)
+            .write_u8(0) // type1
+            .write_u32(0) // type2
+            .write_u8(3) // SkillCastItemTarget
+            .write_bc(self.state.self_obj)
+            .write_u64(target_item_id)
+            .write_u32(0) // type1
+            .write_u8(0) // type2
+            .write_u8(0); // flag: no skill object
+        self.send_cs(cs::CSStartSkillPacket, s.as_bytes()).await
+    }
+
+    /// `CSSwapItemsPacket` between any two slots (`slot type` 1 = equipment, 2 = bag); an empty
+    /// destination slot has item id 0.
+    pub async fn swap_slots(
+        &mut self,
+        from: (u64, u8, u8),
+        to: (u64, u8, u8),
+    ) -> anyhow::Result<()> {
+        let mut s = PacketStream::new();
+        s.write_u64(from.0)
+            .write_u64(to.0)
+            .write_u8(from.1)
+            .write_u8(from.2)
+            .write_u8(to.1)
+            .write_u8(to.2);
+        self.send_cs(cs::CSSwapItemsPacket, s.as_bytes()).await
+    }
+
     /// `CSTeleportEndedPacket`: the client's answer to `SCTeleportUnitPacket` (the server
     /// then accepts our movement packets again and re-announces the objects around).
     pub async fn teleport_ended(&mut self, pos: (f32, f32, f32)) -> anyhow::Result<()> {
