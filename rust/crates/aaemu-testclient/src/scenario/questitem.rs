@@ -393,6 +393,11 @@ fn skip_task_item(s: &mut PacketStream) -> anyhow::Result<(u32, u64)> {
 /// The id of the item stack of `template_id` that an `SCItemTaskSuccessPacket` among `packets`
 /// added (`ItemAdd`) or grew (`ItemCountUpdate`); the last one wins.
 pub(super) fn stack_id(packets: &[Packet], template_id: u32) -> Option<u64> {
+    stack_location(packets, template_id).map(|(id, _, _)| id)
+}
+
+/// [`stack_id`] with the stack's `(item id, slot type, slot)`.
+pub(super) fn stack_location(packets: &[Packet], template_id: u32) -> Option<(u64, u8, u8)> {
     let mut found = None;
     for p in packets
         .iter()
@@ -406,21 +411,21 @@ pub(super) fn stack_id(packets: &[Packet], template_id: u32) -> Option<u64> {
                 match s.read_u8()? {
                     // Create, Take, ChangeOwner: slot type, slot, full item.
                     5 | 6 | 15 => {
-                        s.read_u8()?;
-                        s.read_u8()?;
+                        let slot_type = s.read_u8()?;
+                        let slot = s.read_u8()?;
                         let (template, id) = skip_task_item(&mut s)?;
                         if template == template_id {
-                            found = Some(id);
+                            found = Some((id, slot_type, slot));
                         }
                     }
                     // AddStack: slot type, slot, id, count, template.
                     4 => {
-                        s.read_u8()?;
-                        s.read_u8()?;
+                        let slot_type = s.read_u8()?;
+                        let slot = s.read_u8()?;
                         let id = s.read_u64()?;
                         s.read_i32()?;
                         if s.read_u32()? == template_id {
-                            found = Some(id);
+                            found = Some((id, slot_type, slot));
                         }
                     }
                     other => bail!("unsupported item task action {other}"),

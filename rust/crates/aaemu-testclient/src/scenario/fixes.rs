@@ -39,7 +39,7 @@ const GHOST_SPOT: f32 = 4.0;
 /// The respawn delay is 50 s; the whole watch lasts this long after the kill.
 const GHOST_WATCH: Duration = Duration::from_secs(130);
 
-async fn gm_access(game: &mut GameClient) -> anyhow::Result<()> {
+pub(super) async fn gm_access(game: &mut GameClient) -> anyhow::Result<()> {
     let reply = gm_command(game, "quest list").await?;
     let texts: Vec<String> = reply.iter().filter_map(chat_text).collect();
     ensure!(
