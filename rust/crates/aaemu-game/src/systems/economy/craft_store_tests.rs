@@ -43,7 +43,10 @@ const POWDER: u32 = 7100;
 const COIN_ITEM: u32 = 8000;
 const CRAFT: u32 = 1;
 const PACK_CRAFT: u32 = 2;
+const ACT_CRAFT: u32 = 3; // needs 100 actability points of group 5
+const NO_SKILL_CRAFT: u32 = 4; // its skill is not in the data
 const SKILL: u32 = 10;
+const ACT_SKILL: u32 = 11;
 const MERCHANT_NPC: u32 = 0x500;
 const TRADER_NPC: u32 = 0x501;
 
@@ -131,6 +134,32 @@ fn data() -> GameData {
                 ..CraftProduct::default()
             }],
             ..Craft::default()
+        },
+    );
+    econ.craft.crafts.insert(
+        ACT_CRAFT,
+        Craft {
+            id: ACT_CRAFT,
+            skill_id: ACT_SKILL,
+            actability_limit: 100,
+            ..Craft::default()
+        },
+    );
+    econ.craft.crafts.insert(
+        NO_SKILL_CRAFT,
+        Craft {
+            id: NO_SKILL_CRAFT,
+            skill_id: 999,
+            ..Craft::default()
+        },
+    );
+    econ.craft.skills.insert(
+        ACT_SKILL,
+        CraftSkill {
+            id: ACT_SKILL,
+            consume_labor_power: 1,
+            actability_group_id: 5,
+            cooldown_time: 0,
         },
     );
     econ.craft.skills.insert(
@@ -313,7 +342,7 @@ fn doodad_buy_body(doodad: u32, buy: &[(u32, i32, u8)], buy_back: &[i32]) -> Vec
 fn sc_craft_failed_bytes() {
     let p = SCCraftFailedPacket {
         id: 7,
-        craft_id: 0x1234,
+        item_id: 0x1234,
         count: 2,
     };
     let mut want = PacketStream::new();
@@ -326,7 +355,7 @@ fn sc_craft_failed_bytes() {
     // The client reads at most 20 entries: larger counts are capped, negative ones are empty.
     let capped = bytes(&SCCraftFailedPacket {
         id: 7,
-        craft_id: 0x1234,
+        item_id: 0x1234,
         count: 99,
     });
     let mut want = PacketStream::new();
@@ -337,7 +366,7 @@ fn sc_craft_failed_bytes() {
     assert_eq!(capped, want.into_bytes());
     let negative = bytes(&SCCraftFailedPacket {
         id: 7,
-        craft_id: 0x1234,
+        item_id: 0x1234,
         count: -3,
     });
     assert_eq!(negative, [7u32.to_le_bytes(), 0u32.to_le_bytes()].concat());
@@ -1829,4 +1858,98 @@ async fn craft_counts_and_consumes_bag_materials_only() {
         0
     );
     assert_eq!(Inv::of(&pa).items_count_in(slot_type::BANK, STACK, -1), 6);
+}
+
+/// Every `SCErrorMsg` among `frames`: `(error1, error2, notify)`.
+fn error_msgs(frames: Vec<(u16, Vec<u8>)>) -> Vec<(i16, i16, bool)> {
+    frames
+        .into_iter()
+        .filter(|(op, _)| *op == sc::SCErrorMsgPacket)
+        .map(|(_, b)| {
+            (
+                i16::from_le_bytes([b[0], b[1]]),
+                i16::from_le_bytes([b[2], b[3]]),
+                *b.last().unwrap() != 0,
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn every_craft_abort_path_sends_nonzero_non_notify_craft_cant_act_any_more() {
+    use crate::systems::skills::types::skill_result as r;
+    let mut w = world();
+    let rec = install_craft_hooks(&w);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+
+    // The 1.2 client resets its craft batch (greyed-out button) only on error1 148 with a
+    // nonzero error2 and isNotify false: assert that for every way a started batch is stopped.
+    let check = |w: &mut World, what: &str| {
+        let msgs = error_msgs(w.a.drain());
+        let (e1, e2, notify) = *msgs
+            .last()
+            .unwrap_or_else(|| panic!("{what}: no SCErrorMsg"));
+        assert_eq!(e1, 148, "{what}");
+        assert_ne!(e2, 0, "{what}");
+        assert!(!notify, "{what}");
+        let st = w.server.systems.economy.craft.state(1);
+        assert!(
+            !st.is_crafting && st.count == 0 && st.current_craft.is_none(),
+            "{what}: craft state not cleared: {st:?}"
+        );
+    };
+
+    execute_craft(&mut w, 999, 3);
+    check(&mut w, "unknown craft");
+
+    execute_craft(&mut w, CRAFT, 3); // no materials
+    check(&mut w, "missing materials");
+
+    execute_craft(&mut w, ACT_CRAFT, 3);
+    let msgs = error_msgs(w.a.drain());
+    // The message the C# showed (notify) stays, followed by the batch abort.
+    assert_eq!(msgs.first().map(|m| m.2), Some(true));
+    assert_eq!(msgs.last(), Some(&(148, error_message_actability(), false)));
+    assert_eq!(w.server.systems.economy.craft.state(1).current_craft, None);
+
+    execute_craft(&mut w, NO_SKILL_CRAFT, 3);
+    check(&mut w, "unknown craft skill");
+
+    give(&w, &pa, slot_type::INVENTORY, STACK, 20, 0);
+
+    // Cast refused by the skill.
+    *rec.cast_result.lock().unwrap() = r::NEED_LABOR_POWER;
+    execute_craft(&mut w, CRAFT, 3);
+    check(&mut w, "cast refused");
+    *rec.cast_result.lock().unwrap() = r::SUCCESS;
+
+    // Cast re-validation failure.
+    execute_craft(&mut w, CRAFT, 3);
+    w.a.drain();
+    craft::cast_failed(&w.server, &pa, SKILL, r::NEED_LABOR_POWER);
+    check(&mut w, "cast failed");
+
+    // Labor ran out before the product is handed out: the batch stops, no further casts.
+    execute_craft(&mut w, CRAFT, 3);
+    w.a.drain();
+    pa.data().labor_power = 4; // the craft skill costs 5
+    let casts = rec.casts.lock().unwrap().len();
+    craft::end_craft(&w.server, &pa);
+    check(&mut w, "labor ran out");
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(rec.casts.lock().unwrap().len(), casts, "no cast follows");
+    assert_eq!(Inv::of(&pa).items_count(PRODUCT, -1), 0);
+
+    // A trade pack is worn: crafting another one is refused.
+    pa.data().labor_power = 100;
+    execute_craft(&mut w, PACK_CRAFT, 1);
+    craft::end_craft(&w.server, &pa);
+    w.a.drain();
+    execute_craft(&mut w, PACK_CRAFT, 1);
+    check(&mut w, "backpack occupied");
+}
+
+fn error_message_actability() -> i16 {
+    crate::systems::economy::error_message::ACTABILITY_NOT_ENOUGH_POINT
 }

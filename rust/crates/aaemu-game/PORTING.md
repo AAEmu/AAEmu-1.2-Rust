@@ -2770,7 +2770,13 @@ Archeum Workbench) greyed out the craft button of every workbench until relog. D
   cost, so a character holding only the discounted amount had its last craft turned into a
   "fictitious step" (no products) that still cost labor. The craft state now stores the discounted
   cost (same formula as `skills::validation::labor_cost`).
+- The 1.2 client resets its craft batch (`IsWorkingCraft`, `CRAFT_ENDED`) only on `SCSkillStarted`
+  with a nonzero result or `SCErrorMsg` 148 with a nonzero reason and `isNotify == false`. Every
+  stop of a started batch therefore ends in `abort_craft_with`, including the not-enough-actability
+  path (which also keeps its notify message) and the two "fictitious step" paths of `EndCraft`
+  (labor, bag space): the C# kept casting the rest of the batch after sending the error, which the
+  client no longer showed; the batch now stops there. `SCCraftFailed` carries item template ids,
+  not craft ids (field renamed `item_id`); it stays unsent.
 - A refused house-bench access now logs why (`craft::housing_bench_denial`).
 
-Not verified on a live client: that `CraftCantActAnyMore` is what unlocks the 1.2 craft window.
-`SCCraftFailed` stays unsent (its `id` field is not understood).
+The `craft` scenario of `aaemu-testclient` drives the labor-exhaustion stop live.

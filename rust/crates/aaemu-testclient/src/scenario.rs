@@ -17,6 +17,7 @@ use crate::record::Recorder;
 use crate::stream::StreamClient;
 
 mod cometsboon;
+mod craft;
 mod doodad;
 mod fixes;
 mod plant;
@@ -78,6 +79,11 @@ pub enum Kind {
     /// 14602 cast at doodad 841, see `scenario/portal.rs`). GM account.
     #[serde(rename = "portal")]
     Portal,
+    /// A craft batch that runs out of labor ends with the `SCErrorMsg` 148 the client needs to
+    /// unlock its craft window (Gilda Star disintegration at an Archeum Workbench, see
+    /// `scenario/craft.rs`). GM account.
+    #[serde(rename = "craft")]
+    Craft,
     /// Ad-hoc live checks driven by the command file `$AAEMU_SCRIPT` (see `scenario/script.rs`).
     /// GM account.
     #[serde(rename = "script")]
@@ -102,9 +108,10 @@ impl std::str::FromStr for Kind {
             "stonethrow" => Self::StoneThrow,
             "ghost" => Self::Ghost,
             "portal" => Self::Portal,
+            "craft" => Self::Craft,
             "script" => Self::Script,
             _ => bail!(
-                "unknown scenario '{s}' (login, lobby, full, combat, npc-return, mate-revive, questitem, doodad, \n                 plant, cometsboon, stonethrow, ghost, portal, script, load)"
+                "unknown scenario '{s}' (login, lobby, full, combat, npc-return, mate-revive, questitem, doodad, \n                 plant, cometsboon, stonethrow, ghost, portal, craft, script, load)"
             ),
         })
     }
@@ -656,6 +663,11 @@ async fn run_inner(
     }
     if kind == Kind::Portal {
         portal::run(&mut game, cfg, r).await?;
+        drop(stream);
+        return Ok(());
+    }
+    if kind == Kind::Craft {
+        craft::run(&mut game, r).await?;
         drop(stream);
         return Ok(());
     }

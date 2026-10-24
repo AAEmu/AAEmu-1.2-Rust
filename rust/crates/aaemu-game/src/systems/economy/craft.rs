@@ -529,9 +529,9 @@ pub fn craft(server: &GameServer, player: &PlayerRef, craft_id: u32, count: i32,
                 skill.actability_group_id as u32,
                 true,
             );
-            cancel_craft(server, player);
-            // This breaks the craft panel, but shouldn't happen if the client is in sync with
-            // the server
+            // The C# stopped here and left the craft panel locked ("This breaks the craft
+            // panel"): the client only unlocks on a nonzero, non-notify CraftCantActAnyMore.
+            abort_craft_with(server, player, error_message::ACTABILITY_NOT_ENOUGH_POINT);
             return;
         }
     }
@@ -595,11 +595,19 @@ fn abort_reason(result: u8) -> i16 {
 /// Tells the client with the same `CraftCantActAnyMore` error the other stop paths use and
 /// clears the server state.
 pub fn abort_craft(server: &GameServer, player: &PlayerRef, result: u8) {
+    abort_craft_with(server, player, abort_reason(result));
+}
+
+/// [`abort_craft`] with the `ErrorMessageType` shown as the reason. The 1.2 client resets its
+/// craft batch (`IsWorkingCraft`, `CRAFT_ENDED`) only on `CraftCantActAnyMore` with a nonzero
+/// reason and `isNotify == false`, so every stop of a started batch goes through here.
+pub fn abort_craft_with(server: &GameServer, player: &PlayerRef, reason: i16) {
+    debug_assert_ne!(reason, 0);
     error2(
         &mut Out::Direct,
         player,
         error_message::CRAFT_CANT_ACT_ANY_MORE,
-        abort_reason(result),
+        reason,
         0,
         false,
     );
@@ -662,30 +670,16 @@ pub fn end_craft(server: &GameServer, player: &PlayerRef) {
             "|cFFFFFF00[Craft] Not enough Labor Powers for crafting! Performing a fictitious crafting step...|r",
         );
         // TODO not verified
-        error2(
-            &mut out,
-            player,
-            error_message::CRAFT_CANT_ACT_ANY_MORE,
-            error_message::NOT_ENOUGH_LABOR_POWER,
-            0,
-            false,
-        );
-        craft_or_cancel(server, player);
+        // Deviation: the C# went on with the rest of the batch ("fictitious step"), but the
+        // client resets its batch on this error, so the remaining crafts would run unseen.
+        abort_craft_with(server, player, error_message::NOT_ENOUGH_LABOR_POWER);
         return;
     }
 
     let inv = Inv::of(player);
     if inv.free_slot_count(slot_type::INVENTORY) < craft.craft_products.len() as i32 {
-        // TODO not verified
-        error2(
-            &mut Out::Direct,
-            player,
-            error_message::CRAFT_CANT_ACT_ANY_MORE,
-            error_message::NOT_ENOUGH_SPACE,
-            0,
-            false,
-        );
-        craft_or_cancel(server, player);
+        // TODO not verified (stops the batch like the labor case above)
+        abort_craft_with(server, player, error_message::NOT_ENOUGH_SPACE);
         return;
     }
 
@@ -898,22 +892,6 @@ fn report_crafted(server: &GameServer, player: &PlayerRef, produced: &[(u32, i32
     crate::systems::report_achievements(server, player, &inputs);
 }
 
-/// `CharacterCraft.CraftOrCancel()`.
-fn craft_or_cancel(server: &GameServer, player: &PlayerRef) {
-    if server
-        .systems
-        .economy
-        .craft
-        .state(player.character_id)
-        .count
-        > 0
-    {
-        schedule_craft(server, player);
-    } else {
-        cancel_craft(server, player);
-    }
-}
-
 /// The delay `ScheduleCraft` waits before the next craft of the batch: the remaining global
 /// cooldown when it is longer than the skill's `CooldownTime`.
 pub fn next_craft_delay_ms(server: &GameServer, player: &PlayerRef, skill_id: u32) -> Option<i64> {
@@ -1094,10 +1072,12 @@ impl CSSetCraftingPayPacket {
 sync_client_packet!(CSSetCraftingPayPacket);
 
 /// `SCCraftFailedPacket(id, craftId, count)` (never sent by the 1.2 C#; "TODO needs fixing").
+/// The client reads `u32` type, `i32` count and `count` item template ids (not craft ids; client
+/// RE), so `item_id` is an item template id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SCCraftFailedPacket {
     pub id: u32,
-    pub craft_id: u32,
+    pub item_id: u32,
     pub count: i32,
 }
 impl SCCraftFailedPacket {
@@ -1116,7 +1096,7 @@ impl Marshal for SCCraftFailedPacket {
         let count = self.count.clamp(0, Self::MAX_ENTRIES);
         s.write_u32(self.id).write_i32(count);
         for _ in 0..count {
-            s.write_u32(self.craft_id);
+            s.write_u32(self.item_id);
         }
     }
 }
