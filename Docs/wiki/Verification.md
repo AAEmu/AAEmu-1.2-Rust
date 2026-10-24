@@ -42,6 +42,7 @@ Environment it exports to the bots:
 | `AAEMU_VERIFY_GAME_LOG` | Game-server log read by `expectlog` (`<lane runtime>/logs/rs-game.log`) |
 | `AAEMU_VERIFY_MYSQL` | `mysql.exe` plus its arguments and the lane's game database, used by `expectdb` |
 | `AAEMU_VERIFY_PASSWORD` | Bot account password (default `testpass`) |
+| `AAEMU_VERIFY_CAPTURE_DIR` | Optional, read by `aaemu-testclient verify` (not exported by `verify.sh`): saves every bot's packet capture as `<suite code>-<bot id>.jsonl` in this directory. The captures contain the bots' login tickets (password hash): keep them out of git |
 
 ## The `.vtest` format
 
@@ -110,6 +111,33 @@ FAIL guild-guards: bot leader: [game.script] at script line 17 (`expectdb "SELEC
 and the run exits non-zero. Because `expectlog` only counts lines written after the command
 starts, start it before the action that should log (usually from another bot, after a `sync`).
 
+### Look (appearance) commands
+
+The three native appearance operations (item look conversion `CS049`, Skinize, Cleanup) need exact
+request bytes, the item ids / grades / made-unit values the server just handed out, and an ordered,
+timed view of the answers. Four commands cover that (`scenario/script.rs`, `scenario/look.rs`):
+
+| Command | Meaning |
+| --- | --- |
+| `item <template> <count> [as <label>]` | `/item add self`, then remember the stack the server created (`slot type`, `slot`, `id`, `grade`, `flags`, `count`, `made unit`, image template) under `<label>`; a merge into an existing stack refreshes every entry of that id |
+| `lookcs <opcode hex> <body…> [wait=<secs>] [until=ended\|none] [grace=<ms>]` | Send a client packet whose body is built from literal hex and placeholders, then capture every answer with its arrival time (relative to the send) until `wait` (default 8 s) or, with `until=ended`, `grace` (default 700 ms) after the first `SCSkillEnded` of the bot's own cast |
+| `lookexpect <expectation…>` \| `none` | Check the capture of the last `lookcs`: the relevant packets (skill started / fired / ended / stopped, `SCErrorMsg`, `SCItemTaskSuccess`) must match the list exactly and in order; `none` means no relevant packet at all |
+| `lookgap <from> <to> <min> <max>` | Assert the gap in milliseconds between two packets of the last capture (`send`, `started`, `fired`, `ended`, `err`, `task`, optionally `#n` for the n-th) |
+
+Body placeholders (`{...}` between literal hex bytes; `SELF` and `PEER` are the 3-byte object ids):
+`{id:R}` / `{item:R}` item id (u64), `{tpl:R}` template (u32), `{grade:R}`, `{flags:R}`, `{slot:R}`,
+`{st:R}` (u8), `{unit:R}` made unit (u32), `{count:R}` (i32) of the remembered item `R`, and
+`{u8:N}` / `{u16:N}` / `{u32:N}` / `{u64:N}` literal numbers (decimal or `0x`).
+
+Expectations: `started(skill[,castms][,echo][,fail=n])`, `fired(skill[,echo])`, `ended`,
+`err(code[,param])` and `task(reason[:row,…])` with rows `bits(R,hex)` (SetFlagsBits), `seize(R)`,
+`count(R,delta)` (AddStack delta), `image(R,tpl)` (UpdateDetail with that image; the other detail
+bytes must equal the creation), `create(R)`, `remove(R)`; a bare `task(reason)` is an empty receipt.
+`@lo-hi` after any token bounds its arrival time in milliseconds after the send. Skill packets of
+other players in sight are listed in the transcript but never counted (skill packets are broadcast).
+The transcript of every `lookcs` (request hex, per-packet `+ms` line with the body hex, ignored
+packets) is printed, and a mismatch embeds it in the error.
+
 ## Adding a suite
 
 1. Create `rust/verify/<name>.vtest` with the declarations and the bot sections.
@@ -128,6 +156,28 @@ The seed suites:
 | `emote-spoof` | `CSExpressEmotionPacket` for another object is ignored (`systems/services/express_text.rs`), while the sender's own emote is announced |
 | `guild-guards` | A guild-invitation reply without a pending invite is refused (`systems/social/expedition.rs`); a normal invite + accept joins |
 | `authority-guards` | A loot take from 5+ m is refused while a melee-range take works (`systems/economy/looting.rs`); an in-place resurrection without an offer is refused, with a scroll offer (item 18456) it works once, and the resurrection point always works (`systems/skills/resurrect.rs`) |
+
+The look suites guard the server side of the Bevy client's appearance UI. They are strict
+(request bytes, packet order, row bytes, timing windows, database rows) and record the server's
+CURRENT behaviour, known gaps included; none of them proposes a policy. Offline, the same behaviour
+is pinned by `systems/economy/look_appearance_tests.rs` (`cargo test -p aaemu-game look_appearance`;
+add `-- --ignored` with `AAEMU_COMPACT_DB` to run it on the real catalog).
+
+| Suite | Guards |
+| --- | --- |
+| `look-appearance` | One GM character through the whole chain: Skinize the donor, `CS049` without powder (`SCErrorMsg` 722 naming the powder), Skinize an already skinized item (739), `CS049` with 12 powder, Cleanup, Cleanup again (737) |
+| `look-skinize` | Skinize (skill 23741) with a powder stack of 1 / 2 / 3: `SetFlagsBits` 0x01 to 0x09 (reason 113), the powder is taken twice (stack ends at max(N-2, 0)), cast 5000 ms |
+| `look-cleanup` | Cleanup (skill 23457) of a converted base with a consumable stack of 1 / 2 / 3: image 0 (reason 111), the consumable is taken twice, cast 3000 ms |
+| `look-convert` | `CS049` with 9 / 10 / 12 powder: powder paid with reason 40 (Seize + empty receipt when used up), `Update` of the base with the donor's template as image (reason 111), donor Seize; no acknowledgement packet |
+| `look-refusals` | Unknown ids (207), non-equipment base (737), item-cast admission (`CSStartSkill` for an item the character does not own, or with another item's skill id, is dropped without any packet) and cancellation (another object id or a missing target item: started, fired, ended, no rows) |
+| `look-silent` | A base template without a recipe: no packet at all (the handler only logs `has no ItemLookConvert`); a second Cleanup inside the cooldown: `SCSkillStarted` with result 8 and timeline id 0 |
+| `look-gaps` | Expected-current gaps: 8 powder convert and take all 8, cloaks cost 15 powder, a glider base is refused 737, base equal to image destroys the item |
+| `look-quirks` | The item class is not policed: an armor donor and a non-equipment image item convert, Skinize flags any owned item |
+
+The suites read database rows with `expectdb` shortly after an action, so the **runtime**
+`Configurations/World.json` of the lane needs a short `AutoSaveInterval` (the QA lane uses `0.02`
+minutes); `verify.sh` does not patch it. Each suite uses its own `gm` bots on fresh characters, so
+they can be rerun; they never touch other accounts.
 
 ## Reports
 
