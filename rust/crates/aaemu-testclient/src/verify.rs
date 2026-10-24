@@ -308,12 +308,18 @@ pub async fn run(path: &Path, login: &str, password: &str) -> anyhow::Result<Sui
     std::fs::create_dir_all(&sync_dir)?;
     let label = path.display().to_string();
     let bots = suite.bots.len();
+    // Evidence: with AAEMU_VERIFY_CAPTURE_DIR every bot's complete packet capture (both
+    // directions, hex bodies, arrival ms) is written there as `<suite code>-<bot id>.jsonl`.
+    let capture_dir = std::env::var_os("AAEMU_VERIFY_CAPTURE_DIR").map(PathBuf::from);
     let mut tasks = Vec::new();
     for (bot, cfg) in suite.bots.iter().zip(configs) {
         let text = suite.script(&bot.id, &names);
         let bot_id = bot.id.clone();
         let label = label.clone();
         let sync_dir: PathBuf = sync_dir.clone();
+        let capture = capture_dir
+            .clone()
+            .map(|dir| dir.join(format!("{}-{}.jsonl", suite.code, bot.id)));
         tasks.push(tokio::spawn(async move {
             let out = {
                 let input = ScriptInput {
@@ -324,7 +330,18 @@ pub async fn run(path: &Path, login: &str, password: &str) -> anyhow::Result<Sui
                     sync_dir: Some(sync_dir.as_path()),
                 };
                 let rec = Recorder::new(true);
-                scenario::run_script(&cfg, &rec, &input).await
+                let out = scenario::run_script(&cfg, &rec, &input).await;
+                if let Some(file) = &capture {
+                    let saved = file
+                        .parent()
+                        .map_or(Ok(()), std::fs::create_dir_all)
+                        .map_err(anyhow::Error::from)
+                        .and_then(|()| rec.save(file));
+                    if let Err(e) = saved {
+                        eprintln!("could not save the capture {}: {e:#}", file.display());
+                    }
+                }
+                out
             };
             BotReport {
                 id: bot_id,

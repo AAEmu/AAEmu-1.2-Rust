@@ -16,11 +16,36 @@
 //! kill <npc template>                walk next to the nearest NPC, target it, `/kill`
 //! cast <skill> <npc template>        CSStartSkill on the nearest NPC
 //! dcast <skill> <doodad template>    doodad-target CSStartSkill
-//! item <template> <count>            `/item add self` and remember the stack id
+//! item <template> <count> [as <label>]
+//!                                    `/item add self`; remember the stack id and the row the
+//!                                    server announced (grade, flags, made unit, slot, image),
+//!                                    by template and by `<label>` (see "Placeholders")
 //! icast <skill> <item template> <npc template|self|peer|player:NAME>
 //!                                    cast from the remembered item stack
 //! waitpeer [secs] [name]             read packets until another player is in sight (60 s default)
-//! rawcs <opcode hex> [<body hex>]    send any client packet (`SELF` / `PEER` in the body hex)
+//! rawcs <opcode hex> [<body hex>]    send any client packet (`SELF` / `PEER` / `{...}` in the
+//!                                    body hex, see "Placeholders")
+//! lookcs <opcode hex> <body hex>... [wait=<secs>] [until=ended|none] [grace=<ms>]
+//!                                    like `rawcs`, then record every packet that follows (with
+//!                                    its socket arrival time) for `lookexpect` / `lookgap`. Body
+//!                                    fragments are joined; `wait` (default 8) is the limit,
+//!                                    `until=ended` stops `grace` ms (default 700) after the first
+//!                                    SCSkillEnded
+//! lookexpect <packet>...|none        fail unless the last `lookcs` saw exactly these skill /
+//!                                    SCErrorMsg / SCItemTaskSuccess packets in this order (`none`:
+//!                                    no such packet at all):
+//!                                    `started(<skill>[,<cast ms>][,echo][,fail=<n>])`,
+//!                                    `fired(<skill>[,echo])`, `ended`, `err(<code>[,<param>])`,
+//!                                    `task(<reason>[:<row>,...])` with rows `bits(R,<hex>)`,
+//!                                    `seize(R)`, `count(R,<delta>)`, `image(R,<template>)`,
+//!                                    `create(R)`, `remove(R)`; any packet may end in
+//!                                    `@<lo>-<hi>` (arrival ms after the send). `R` is a label or
+//!                                    template id of an `item` line; `echo` = the packet repeats
+//!                                    the request's caster / target / object bytes
+//! lookgap <from> <to> <min ms> <max ms>
+//!                                    fail unless the time between two packets of the last
+//!                                    `lookcs` (`send`, `started`, `fired`, `ended`, `err`, `task`,
+//!                                    optionally `#n`) is in range
 //! pkill [name]                       `/kill` with the peer targeted (GM)
 //! await <Event> [secs]               wait (60 s default) for a party/guild event and consume it
 //! partyinvite <name>                 CSInviteToTeam (party) by character name
@@ -42,6 +67,12 @@
 //!                                    the corpse, as the real client does
 //! ```
 //!
+//! Placeholders in `rawcs` / `lookcs` bodies: `SELF` / `PEER` (3-byte object ids),
+//! `{id:R}` (`{item:R}`) u64, `{tpl:R}` u32, `{grade:R}` u8, `{flags:R}` u8, `{unit:R}` u32
+//! made unit id, `{count:R}` i32, `{slot:R}` / `{st:R}` u8, `{u8:N}` `{u16:N}` `{u32:N}`
+//! `{u64:N}` literals (decimal or 0x hex); all little endian. `R` is the `<label>` of an `item`
+//! line or a template id (the latest stack of that template).
+//!
 //! Every failed expectation prints a `FAIL` line and makes the run exit non-zero.
 
 use std::collections::{HashMap, HashSet};
@@ -50,6 +81,7 @@ use std::time::{Duration, Instant};
 use aaemu_game::opcodes::{cs, sc};
 use anyhow::{bail, Context};
 
+use super::look::{self, Flow, Stacks};
 use super::questitem::{chat_text, gm_command, quest_state, stack_id};
 use super::{pump, skill_response_result, Runner};
 use crate::game::{parse_item_task, GameClient, Packet, UnitInfo};
@@ -368,6 +400,10 @@ async fn run_lines(
     let text = input.text;
     let s = r.begin("game.script");
     let mut items: HashMap<u32, u64> = HashMap::new();
+    // The rows `item` made the server announce (placeholders of `rawcs` / `lookcs`) and the
+    // packets the last `lookcs` recorded.
+    let mut stacks = Stacks::default();
+    let mut flow: Option<Flow> = None;
     let mut clock = 40_000u32;
     let mut last_npc = 0u32;
     let mut consumed: HashSet<usize> = HashSet::new();
@@ -565,10 +601,35 @@ async fn run_lines(
             "item" => {
                 let tpl: u32 = num(&parts, 0)?;
                 let count: u32 = num(&parts, 1)?;
+                let label = match parts.get(2).copied() {
+                    None => None,
+                    Some("as") => {
+                        Some(*parts.get(3).context("item <template> <count> as <label>")?)
+                    }
+                    Some(other) => bail!("item <template> <count> [as <label>], not '{other}'"),
+                };
                 let reply = gm_command(game, &format!("item add self {tpl} {count}")).await?;
                 if let Some(id) = stack_id(&reply, tpl) {
                     items.insert(tpl, id);
                     println!("    item {tpl} stack id {id}");
+                }
+                match stacks.learn(&reply, tpl, label) {
+                    Some(s) => println!(
+                        "    item {tpl}{}: st {} slot {} id {} grade {} flags {:#04x} count {} \
+                         made_unit {:#x} image {}",
+                        label.map(|l| format!(" as {l}")).unwrap_or_default(),
+                        s.slot_type,
+                        s.slot,
+                        s.id,
+                        s.grade,
+                        s.flags,
+                        s.count,
+                        s.made_unit,
+                        s.image
+                    ),
+                    None => println!(
+                        "    item {tpl}: no stack row learned (merged into a stack this script never saw?)"
+                    ),
                 }
                 show(&reply);
             }
@@ -860,38 +921,90 @@ async fn run_lines(
             "rawcs" => {
                 let opcode = u16::from_str_radix(parts.first().context("opcode")?, 16)?;
                 // `SELF` / `PEER` stand for our own / the first other player's object id in
-                // the packet's `bc` encoding.
-                let bc = |id: u32| {
-                    format!(
-                        "{:02x}{:02x}{:02x}",
-                        id & 0xff,
-                        (id >> 8) & 0xff,
-                        (id >> 16) & 0xff
-                    )
-                };
+                // the packet's `bc` encoding; `{...}` fills in remembered `item` rows.
                 let raw = parts.get(1).copied().unwrap_or("");
-                let peer_bc = if raw.contains("PEER") {
-                    bc(peer(game, None)
-                        .context("PEER needs another player in sight")?
-                        .obj_id)
+                let peer_obj = if raw.contains("PEER") {
+                    Some(
+                        peer(game, None)
+                            .context("PEER needs another player in sight")?
+                            .obj_id,
+                    )
                 } else {
-                    String::new()
+                    None
                 };
-                let hex = raw
-                    .replace("SELF", &bc(game.state.self_obj))
-                    .replace("PEER", &peer_bc);
-                anyhow::ensure!(
-                    hex.len() % 2 == 0 && hex.is_ascii(),
-                    "rawcs body hex must be an even number of hex digits"
-                );
-                let body: Vec<u8> = (0..hex.len() / 2)
-                    .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16))
-                    .collect::<Result<_, _>>()?;
+                let body = look::expand_body(raw, game.state.self_obj, peer_obj, &stacks)?;
                 game.send_cs(opcode, &body).await?;
                 let got = game
                     .drain(Duration::from_millis(1200), Duration::from_secs(6))
                     .await?;
                 show(&got);
+            }
+            "lookcs" => {
+                let opcode = u16::from_str_radix(
+                    parts
+                        .first()
+                        .context("lookcs <opcode hex> <body hex>... [wait=<secs>] [until=ended|none] [grace=<ms>]")?,
+                    16,
+                )?;
+                let mut raw = String::new();
+                let (mut wait_secs, mut until_ended, mut grace_ms) = (8.0f64, false, 700u64);
+                for part in &parts[1..] {
+                    if let Some(v) = part.strip_prefix("wait=") {
+                        wait_secs = v.parse().with_context(|| format!("bad {part}"))?;
+                    } else if let Some(v) = part.strip_prefix("until=") {
+                        until_ended = match v {
+                            "ended" => true,
+                            "none" => false,
+                            other => bail!("until=ended|none, not '{other}'"),
+                        };
+                    } else if let Some(v) = part.strip_prefix("grace=") {
+                        grace_ms = v.parse().with_context(|| format!("bad {part}"))?;
+                    } else {
+                        raw.push_str(part);
+                    }
+                }
+                let peer_obj = if raw.contains("PEER") {
+                    Some(
+                        peer(game, None)
+                            .context("PEER needs another player in sight")?
+                            .obj_id,
+                    )
+                } else {
+                    None
+                };
+                let body = look::expand_body(&raw, game.state.self_obj, peer_obj, &stacks)?;
+                let wait = look::Wait {
+                    max: Duration::from_secs_f64(wait_secs),
+                    until_ended,
+                    grace: Duration::from_millis(grace_ms),
+                };
+                let recorded = look::run_flow(game, opcode, body, wait).await?;
+                for line in look::transcript(&recorded).lines() {
+                    println!("    {line}");
+                }
+                flow = Some(recorded);
+            }
+            "lookexpect" => {
+                let recorded = flow
+                    .as_ref()
+                    .context("lookexpect needs a preceding lookcs")?;
+                let expect = look::parse_expect(rest)?;
+                look::check_flow(recorded, &stacks, &expect)?;
+                println!("    lookexpect ok: {} packet(s) in order", expect.len());
+            }
+            "lookgap" => {
+                let recorded = flow.as_ref().context("lookgap needs a preceding lookcs")?;
+                let (from, to) = (
+                    *parts
+                        .first()
+                        .context("lookgap <from> <to> <min ms> <max ms>")?,
+                    *parts
+                        .get(1)
+                        .context("lookgap <from> <to> <min ms> <max ms>")?,
+                );
+                let (min, max): (f64, f64) = (num(&parts, 2)?, num(&parts, 3)?);
+                let gap = look::gap(recorded, from, to, min, max)?;
+                println!("    lookgap {from} -> {to}: {gap:.1} ms (limits {min}..{max} ms)");
             }
             "partyinvite" => {
                 let target = parts.first().context("name")?;

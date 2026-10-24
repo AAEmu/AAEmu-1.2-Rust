@@ -3,7 +3,7 @@
 //! ```text
 //! aaemu-testclient run    [--config F] [--login H:P] [--user U] [--password P] [--character C]
 //!                         [--scenario login|lobby|full|combat|npc-return|mate-revive|questitem|doodad|plant|cometsboon|stonethrow|ghost|load]
-//!                         [--out capture.jsonl]
+//!                         [--out capture.jsonl] [--race N] [--gender N]   (new characters: 1 Nuian, 1 male / 2 female)
 //!                         [--npc-return-distance M] [--npc-return-away-secs S]
 //!                         [--revive-method repair|skill|none]   (mate-revive; GM account needed)
 //! aaemu-testclient parity [--config F] --a H:P --b H:P [--a-label cs] [--b-label rs]
@@ -14,6 +14,7 @@
 //!                         [--scenario load]
 //! aaemu-testclient verify --suite file.vtest [--login H:P] [--password P] [--list-bots]
 //!                         Run one live verification suite (see Docs/wiki/Verification.md).
+//!                         AAEMU_VERIFY_CAPTURE_DIR=<dir> also saves every bot's packet capture.
 //! ```
 //!
 //! Settings come from `--config` (JSON, see `testclient.example.json`), then the flags. Keep
@@ -94,6 +95,8 @@ fn bot_config(args: &Args) -> anyhow::Result<BotConfig> {
         ("skill", "skill_id"),
         ("quest", "quest_id"),
         ("gs", "game_server_id"),
+        ("race", "race"),
+        ("gender", "gender"),
     ] {
         if let Some(x) = args.get(flag) {
             obj.insert(key.into(), x.parse::<u64>()?.into());

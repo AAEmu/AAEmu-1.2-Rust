@@ -461,9 +461,19 @@ impl GameState {
     }
 }
 
+/// A packet with the instant the reader task took it off the socket (test-only timing: the
+/// script may consume it later, so this is the arrival time, not the consumption time).
+#[derive(Clone, Debug)]
+pub struct Arrival {
+    pub at: Instant,
+    pub level: u8,
+    pub opcode: u16,
+    pub body: Vec<u8>,
+}
+
 pub struct GameClient {
     writer: FramedWrite<OwnedWriteHalf, FrameCodec>,
-    rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    rx: mpsc::UnboundedReceiver<(Instant, Vec<u8>)>,
     rec: Recorder,
     count: u8,
     pub account_id: u32,
@@ -473,6 +483,11 @@ pub struct GameClient {
     pub ping_every: Duration,
     last_ping: Option<Instant>,
     started: Instant,
+    /// When the last level-1 packet was handed to the socket ([`GameClient::last_tx`]).
+    last_tx: Option<Instant>,
+    /// While `Some`, every received packet is appended with its arrival instant (the `look`
+    /// flows of the appearance suites read it; `None` costs nothing).
+    pub capture: Option<Vec<Arrival>>,
 }
 
 impl GameClient {
@@ -488,7 +503,7 @@ impl GameClient {
             loop {
                 match reader.next().await {
                     Some(Ok(frame)) => {
-                        if tx.send(frame).is_err() {
+                        if tx.send((Instant::now(), frame)).is_err() {
                             break;
                         }
                     }
@@ -514,11 +529,18 @@ impl GameClient {
             ping_every: Duration::from_secs(3),
             last_ping: None,
             started: Instant::now(),
+            last_tx: None,
+            capture: None,
         })
     }
 
     pub fn recorder(&self) -> &Recorder {
         &self.rec
+    }
+
+    /// When the last [`GameClient::send_cs`] packet was handed to the socket.
+    pub fn last_tx(&self) -> Option<Instant> {
+        self.last_tx
     }
 
     /// Sends a level-1 (`CS*`) packet.
@@ -536,6 +558,7 @@ impl GameClient {
         self.count = self.count.wrapping_add(1);
         p.extend_from_slice(&opcode.to_le_bytes());
         p.extend_from_slice(body);
+        self.last_tx = Some(Instant::now());
         self.writer.send(p).await?;
         Ok(())
     }
@@ -643,7 +666,18 @@ impl GameClient {
                 self.state.disconnected = true;
                 Err(anyhow!("game server closed the connection"))
             }
-            Ok(Some(frame)) => Ok(Some(self.decode(frame)?)),
+            Ok(Some((at, frame))) => {
+                let p = self.decode(frame)?;
+                if let Some(capture) = &mut self.capture {
+                    capture.push(Arrival {
+                        at,
+                        level: p.level,
+                        opcode: p.opcode,
+                        body: p.body.clone(),
+                    });
+                }
+                Ok(Some(p))
+            }
         }
     }
 
@@ -724,8 +758,19 @@ impl GameClient {
 
     /// `CSCreateCharacterPacket`: Nuian (1) male (1) Fighter (ability 1), default appearance.
     pub async fn create_character(&mut self, name: &str) -> anyhow::Result<()> {
+        self.create_character_as(name, 1, 1).await
+    }
+
+    /// `CSCreateCharacterPacket` for `race` / `gender` (1 = Nuian; gender 1 = male, 2 = female)
+    /// with the template defaults for body items and custom model.
+    pub async fn create_character_as(
+        &mut self,
+        name: &str,
+        race: u8,
+        gender: u8,
+    ) -> anyhow::Result<()> {
         let mut s = PacketStream::new();
-        s.write_str(name).write_u8(1).write_u8(1);
+        s.write_str(name).write_u8(race).write_u8(gender);
         for _ in 0..7 {
             s.write_u32(0); // body items: template defaults
         }

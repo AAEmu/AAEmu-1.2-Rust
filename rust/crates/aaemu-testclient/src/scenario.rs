@@ -19,6 +19,7 @@ use crate::stream::StreamClient;
 mod cometsboon;
 mod doodad;
 mod fixes;
+mod look;
 mod plant;
 mod portal;
 mod questitem;
@@ -122,6 +123,12 @@ pub struct BotConfig {
     /// Require creation of `character`, even if the account already has other characters.
     #[serde(default)]
     pub create_new_character: bool,
+    /// Race of a character the bot creates (1 = Nuian).
+    #[serde(default = "default_one")]
+    pub race: u8,
+    /// Gender of a character the bot creates (1 = male, 2 = female).
+    #[serde(default = "default_one")]
+    pub gender: u8,
     #[serde(default = "default_gs")]
     pub game_server_id: u8,
     /// Skill cast on the nearest NPC (2 = melee attack).
@@ -227,6 +234,9 @@ impl std::str::FromStr for ReviveMethod {
 }
 
 fn default_gs() -> u8 {
+    1
+}
+fn default_one() -> u8 {
     1
 }
 fn default_skill() -> u32 {
@@ -550,7 +560,8 @@ async fn run_inner(
 
     let s = r.begin("game.create");
     let created = if cfg.create_new_character || game.state.characters.is_empty() {
-        game.create_character(&cfg.character).await?;
+        game.create_character_as(&cfg.character, cfg.race, cfg.gender)
+            .await?;
         let p = game
             .wait_for("character creation result", |p| {
                 p.is_sc(sc::SCCreateCharacterResponsePacket)
