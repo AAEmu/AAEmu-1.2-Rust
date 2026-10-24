@@ -366,6 +366,17 @@ pub trait NpcSkillHooks: Send + Sync {
 
 /// Items, inventory, loot, crafting, mail, money (subsystem `economy`).
 pub trait ItemSkillHooks: Send + Sync {
+    /// economy: a cast re-validation failed (`Skill.Cast`) after the skill started. Ends the
+    /// character's craft batch when `skill_id` is the skill of its running craft.
+    fn craft_cast_failed(
+        &self,
+        _server: &GameServer,
+        _player: &PlayerRef,
+        _skill_id: u32,
+        _result: u8,
+    ) {
+    }
+
     /// Equipment contributions to a character's stats.
     fn gear_stats(&self, _server: &GameServer, _player: &PlayerRef) -> GearStats {
         GearStats::default()

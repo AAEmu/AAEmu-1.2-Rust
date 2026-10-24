@@ -485,8 +485,9 @@ impl crate::systems::economy::craft::CraftHooks for BenchRecorder {
         _: u32,
         _: u32,
         _: f32,
-    ) {
+    ) -> u8 {
         self.casts.fetch_add(1, Ordering::SeqCst);
+        0
     }
 }
 

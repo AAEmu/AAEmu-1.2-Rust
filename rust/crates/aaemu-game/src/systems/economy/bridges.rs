@@ -793,6 +793,16 @@ impl EconomyForSkills {
 }
 
 impl ItemSkillHooks for EconomyForSkills {
+    fn craft_cast_failed(
+        &self,
+        server: &GameServer,
+        player: &PlayerRef,
+        skill_id: u32,
+        result: u8,
+    ) {
+        super::craft::cast_failed(server, player, skill_id, result);
+    }
+
     fn drop_trade_pack_to_floor(&self, server: &GameServer, player: &PlayerRef) {
         item_effects::drop_trade_pack_to_floor(server, player);
     }
@@ -3401,11 +3411,11 @@ impl super::craft::CraftHooks for EconomyComposite {
         skill_id: u32,
         doodad_obj_id: u32,
         cast_time_multiplier: f32,
-    ) {
+    ) -> u8 {
         use crate::systems::skills::state::SkillRun;
         let Some(t) = server.game_data.systems.skills.skill(skill_id).cloned() else {
             tracing::error!("Craft: unknown skill {skill_id}");
-            return;
+            return crate::systems::skills::types::skill_result::INVALID_SKILL;
         };
         let skill = SkillRun::new(t, 1);
         skill.state().cast_time_multiplier = cast_time_multiplier;
@@ -3419,7 +3429,8 @@ impl super::craft::CraftHooks for EconomyComposite {
             &mut target,
             None,
             false,
-        );
+        )
+        .0
     }
 
     fn cancel_craft_skill(&self, server: &GameServer, player: &PlayerRef) {
