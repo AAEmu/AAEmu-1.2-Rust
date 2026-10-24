@@ -1206,6 +1206,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   and temper reset write plain `ItemDetails` fields; the C# setter-less fields did not mark
   `IsDirty`, so `ItemManager.Save` skipped them. Rust marks `Item.dirty` in those paths and the
   regressions assert the next prepared save snapshot contains the item.
+* systems::economy / npcs / skills (lunafrost, 2026-10): the C# `InteractionEffect` passed the
+  `SkillItem` caster and `SkillCastItemTarget` to `MagicalEnchant.Execute`; the Rust bridge dropped
+  them, so a lunafrost never applied. They are forwarded now. `MagicalEnchant` also looks the item up
+  in every item container (like `ItemSocketing`), not only `Bag.GetItemByItemId`, so a worn item can
+  be enchanted. `Unit.UpdateGearBonuses` (Rust `gear_bonuses`) now includes the unit modifiers of the
+  item's `rune_id` (the C# only counted the item and its gems), and socketing / enchanting a worn item
+  recomputes the gear bonuses immediately.
 * systems::services: the WebApi 500 page shows the Rust error chain instead of a .NET stack
   trace, and System.Text.Json / NotSupportedException messages are close paraphrases. Character
   `CreatedAt` of characters created in the running session is written without the `Z` of a
