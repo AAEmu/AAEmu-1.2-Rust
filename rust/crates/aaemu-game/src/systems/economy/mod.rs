@@ -45,6 +45,8 @@ pub mod item_handlers;
 pub mod item_packets;
 pub mod item_timers;
 pub mod items_data;
+#[cfg(test)]
+mod look_appearance_tests;
 pub mod loot;
 pub mod loot_data;
 pub mod loot_packets;
