@@ -2754,3 +2754,36 @@ the real `parse_list` and checks the eight placements.
   skill (4 m area, 4-120 m, fixed 130-170 damage); the area damage and the `SCSkillFired` broadcast
   (the client draws the projectile from the skill's projectile 13) are covered by
   `ship_cannon_gunner_seat_skill_and_leaving`.
+
+## Crafts that stop silently left the craft window locked (2026-10-24)
+
+Testers reported that crafting "Bound Tax Certificate" (craft 76, skill 16767, 200 labor, Building
+Plaque) or a long queue of "Disintegration: Gilda Stars" (craft 8000001, skill 8000016, 3 labor,
+Archeum Workbench) greyed out the craft button of every workbench until relog. Deviations from the
+1.2 C# `CharacterCraft`:
+
+- `Craft` ignored the `Skill.Use` result. A refused cast (not enough labor, reagent, range, GCD,
+  ...) therefore ended the batch with no packet and no state change, so the client kept waiting for
+  a craft that never started. The cast hook now returns the skill result; a refusal sends the same
+  `SCErrorMsg(CraftCantActAnyMore, reason)` the other stop paths use (labor -> `NotEnoughLaborPower`,
+  reagent -> `NotEnoughRequiredItem`, range -> `NotNearToTarget`, permission / target ->
+  `CraftPermissionDeny`, cooldown -> `CraftCooldown`, else `InternalError`) and runs `CancelCraft`.
+  A `Skill.Cast` re-validation failure of the craft skill (`craft::cast_failed`, called from
+  `skill::cast` through `ItemSkillHooks::craft_cast_failed`) ends the batch the same way.
+- Paths where the C# threw (unknown craft id, unknown craft skill, `SameAccount` permission with an
+  offline owner, unknown `DoodadFuncPermission`) and `ScheduleCraft` without a runtime now end the
+  batch with an error instead of leaving the client locked.
+- `ConsumeLaborPower` was the raw skill cost while `Skill.EndSkill` charges the vocation-discounted
+  cost, so a character holding only the discounted amount had its last craft turned into a
+  "fictitious step" (no products) that still cost labor. The craft state now stores the discounted
+  cost (same formula as `skills::validation::labor_cost`).
+- The 1.2 client resets its craft batch (`IsWorkingCraft`, `CRAFT_ENDED`) only on `SCSkillStarted`
+  with a nonzero result or `SCErrorMsg` 148 with a nonzero reason and `isNotify == false`. Every
+  stop of a started batch therefore ends in `abort_craft_with`, including the not-enough-actability
+  path (which also keeps its notify message) and the two "fictitious step" paths of `EndCraft`
+  (labor, bag space): the C# kept casting the rest of the batch after sending the error, which the
+  client no longer showed; the batch now stops there. `SCCraftFailed` carries item template ids,
+  not craft ids (field renamed `item_id`); it stays unsent.
+- A refused house-bench access now logs why (`craft::housing_bench_denial`).
+
+The `craft` scenario of `aaemu-testclient` drives the labor-exhaustion stop live.

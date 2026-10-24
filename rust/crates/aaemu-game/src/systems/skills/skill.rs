@@ -794,6 +794,13 @@ pub fn cast(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             );
             packet.set_skill_result(result).set_result_uint(value);
             player.send(packet);
+            // A craft cast that fails here never reaches `CraftEffect`: end the craft batch.
+            server
+                .systems
+                .skills
+                .ext
+                .items()
+                .craft_cast_failed(server, player, skill.id, result);
         }
         stop(server, skill, caster, 0);
         return;

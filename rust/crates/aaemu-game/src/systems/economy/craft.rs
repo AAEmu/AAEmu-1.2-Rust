@@ -26,6 +26,7 @@ use crate::opcodes::{cs, sc};
 use crate::packets::packet_def;
 use crate::packets::world::SCErrorMsgPacket;
 use crate::server::GameServer;
+use crate::systems::skills::types::skill_result;
 use crate::systems::social::achievement::char_record_kind;
 use crate::systems::social::achievement_hooks::{AchievementInput, RecordMatch};
 use crate::systems::HookSlot;
@@ -53,7 +54,9 @@ pub trait CraftHooks: Send + Sync {
     /// skills: `new Skill(SkillManager.GetSkillTemplate(skillId)) { CastTimeMultiplier }
     /// .Use(owner, SkillCasterUnit(owner.ObjId), SkillCastDoodadTarget(doodadObjId), null,
     /// false)`. When the cast's `CraftEffect` applies, the skills subsystem calls
-    /// [`end_craft`]. Default: nothing is cast (the craft never completes).
+    /// [`end_craft`]. Returns the `Skill.Use` result (`skill_result::SUCCESS` when the cast
+    /// started); the C# ignored it, which left the client waiting for a craft that never came.
+    /// Default: nothing is cast (the craft never completes), reported as a failure.
     fn start_craft_cast(
         &self,
         _server: &GameServer,
@@ -61,8 +64,9 @@ pub trait CraftHooks: Send + Sync {
         _skill_id: u32,
         _doodad_obj_id: u32,
         _cast_time_multiplier: f32,
-    ) {
+    ) -> u8 {
         tracing::warn!("CraftHooks::start_craft_cast is not installed (skills subsystem)");
+        skill_result::FAILURE
     }
 
     /// skills: `if (Owner.SkillTask != null) Owner.SkillTask.Skill.Cancelled = true;
@@ -225,13 +229,30 @@ fn housing_bench_access(
     doodad_id: u32,
     skill_id: u32,
 ) -> bool {
-    let Some(doodad) = server
+    match housing_bench_denial(server, player, doodad_id, skill_id) {
+        None => true,
+        Some(reason) => {
+            tracing::warn!(
+                "{} may not craft at doodad {doodad_id} (skill {skill_id}): {reason}",
+                player.data().unit.name
+            );
+            false
+        }
+    }
+}
+
+/// Why [`housing_bench_access`] refuses (`None` = allowed).
+fn housing_bench_denial(
+    server: &GameServer,
+    player: &PlayerRef,
+    doodad_id: u32,
+    skill_id: u32,
+) -> Option<&'static str> {
+    // Not a doodad (portable craft, id 0): allowed.
+    let doodad = server
         .world
         .object(doodad_id)
-        .and_then(|o| o.as_doodad().cloned())
-    else {
-        return true;
-    };
+        .and_then(|o| o.as_doodad().cloned())?;
     let (owner_type, house_id, instance_id, deleted) = {
         let d = doodad.data();
         (
@@ -242,29 +263,31 @@ fn housing_bench_access(
         )
     };
     if owner_type != crate::models::doodad::doodad_owner_type::HOUSING {
-        return true;
+        return None;
     }
     let Some(house) = crate::systems::housing::house_by_id(server, house_id) else {
-        return false;
+        return Some("the bench's house does not exist");
     };
-    if deleted
-        || player.data().unit.transform.instance_id != instance_id
-        || house.data().unit.transform.instance_id != instance_id
-        || !crate::systems::housing::allowed_to_interact(server, &house, player)
-    {
-        return false;
+    if deleted {
+        return Some("the bench is deleted");
     }
-    let Some(template) = server.game_data.systems.skills.skill(skill_id) else {
-        return true;
-    };
+    if player.data().unit.transform.instance_id != instance_id
+        || house.data().unit.transform.instance_id != instance_id
+    {
+        return Some("player, bench and house are in different instances");
+    }
+    if !crate::systems::housing::allowed_to_interact(server, &house, player) {
+        return Some("the house does not allow the player to interact");
+    }
+    let template = server.game_data.systems.skills.skill(skill_id)?;
     if template.max_range <= 0 {
-        return true;
+        return None;
     }
     let source = crate::systems::skills::geometry::Target::Obj(WorldObject::from(player));
     let target = crate::systems::skills::geometry::Target::Obj(WorldObject::from(&doodad));
     let source_pos = crate::systems::skills::geometry::world_pos(server, &source);
     let target_pos = crate::systems::skills::geometry::world_pos(server, &target);
-    [
+    if ![
         source_pos.x,
         source_pos.y,
         source_pos.z,
@@ -274,15 +297,29 @@ fn housing_bench_access(
     ]
     .into_iter()
     .all(f32::is_finite)
-        && crate::systems::skills::geometry::distance_to(server, &source, &target, true)
-            <= template.max_range as f32
+    {
+        return Some("a position is not finite");
+    }
+    (crate::systems::skills::geometry::distance_to(server, &source, &target, true)
+        > template.max_range as f32)
+        .then_some("the bench is out of the craft skill's range")
 }
 
 /// `CharacterCraft.Craft(craft, count, doodadId)`.
 pub fn craft(server: &GameServer, player: &PlayerRef, craft_id: u32, count: i32, doodad_id: u32) {
     let Some(craft) = server.game_data.systems.economy.craft.craft(craft_id) else {
-        // C#: CraftManager.GetCraftById throws KeyNotFoundException before Craft() runs.
+        // C#: CraftManager.GetCraftById throws KeyNotFoundException before Craft() runs and the
+        // client is left waiting. Deviation: end the (client side) batch with an error.
         tracing::error!("Craft: unknown craft {craft_id}");
+        error2(
+            &mut Out::Direct,
+            player,
+            error_message::CRAFT_CANT_ACT_ANY_MORE,
+            error_message::CRAFT_INVALID_CRAFT_TYPE,
+            0,
+            false,
+        );
+        cancel_craft(server, player);
         return;
     };
     let mgr = &server.systems.economy.craft;
@@ -370,10 +407,11 @@ pub fn craft(server: &GameServer, player: &PlayerRef, craft_id: u32, count: i32,
                             Some(o) => o.data().account_id == my_account,
                             None => {
                                 // C#: GetCharacterById(...).AccountId -> NullReferenceException
+                                // (the client stayed locked). Deviation: no permission.
                                 tracing::error!(
                                     "Craft: doodad owner {owner_id} is not online (C# throws)"
                                 );
-                                return;
+                                false
                             }
                         };
                     }
@@ -390,9 +428,10 @@ pub fn craft(server: &GameServer, player: &PlayerRef, craft_id: u32, count: i32,
                     }
                 }
                 _ => {
-                    // C#: throw new ArgumentOutOfRangeException
+                    // C#: throw new ArgumentOutOfRangeException (the client stayed locked).
+                    // Deviation: no permission.
                     tracing::error!("Craft: unknown DoodadFuncPermission {perm}");
-                    return;
+                    has_permission = false;
                 }
             }
             let (template_id, obj_id) = (doodad.data().template_id, doodad.obj_id);
@@ -434,16 +473,28 @@ pub fn craft(server: &GameServer, player: &PlayerRef, craft_id: u32, count: i32,
         .get(&craft.skill_id)
         .copied()
     else {
-        // C#: new Skill(null) -> NullReferenceException (IsCrafting stays set)
+        // C#: new Skill(null) -> NullReferenceException (IsCrafting stays set, the client stays
+        // locked). Deviation: end the batch with an error.
         tracing::error!(
             "Craft: unknown skill {} of craft {}",
             craft.skill_id,
             craft.id
         );
+        abort_craft(server, player, skill_result::INVALID_SKILL);
         return;
     };
+    // The labor the skill really charges (`Skill.EndSkill` applies the vocation's labor cost
+    // multiplier); the raw `ConsumeLaborPower` made `EndCraft` refuse a craft the skill still
+    // charged for.
+    let labor_step = player
+        .data()
+        .actability
+        .actabilities
+        .iter()
+        .find(|a| i64::from(a.id) == i64::from(skill.actability_group_id))
+        .map(|a| a.step);
     mgr.update(char_id, |s| {
-        s.consume_labor_power = skill.consume_labor_power
+        s.consume_labor_power = effective_labor_cost(skill.consume_labor_power, labor_step)
     });
     let mut speed_multiplier = 1f32;
     if skill.actability_group_id > 0 {
@@ -478,13 +529,103 @@ pub fn craft(server: &GameServer, player: &PlayerRef, craft_id: u32, count: i32,
                 skill.actability_group_id as u32,
                 true,
             );
-            cancel_craft(server, player);
-            // This breaks the craft panel, but shouldn't happen if the client is in sync with
-            // the server
+            // The C# stopped here and left the craft panel locked ("This breaks the craft
+            // panel"): the client only unlocks on a nonzero, non-notify CraftCantActAnyMore.
+            abort_craft_with(server, player, error_message::ACTABILITY_NOT_ENOUGH_POINT);
             return;
         }
     }
-    hooks.start_craft_cast(server, player, craft.skill_id, doodad_id, speed_multiplier);
+    let result =
+        hooks.start_craft_cast(server, player, craft.skill_id, doodad_id, speed_multiplier);
+    if result != skill_result::SUCCESS {
+        // `Skill.Use` refused the cast (labor, reagents, range, cooldown, ...): no skill ever
+        // started, so nothing else would tell the client its craft is over.
+        tracing::warn!(
+            "{} craft {} refused by skill {}: skill result {result}",
+            player.data().unit.name,
+            craft.id,
+            craft.skill_id
+        );
+        abort_craft(server, player, result);
+    }
+}
+
+/// `SkillManager`'s labor cost of a craft skill for a character with the given actability step
+/// (`validation::labor_cost`: the vocation multiplier, at least 1 when the skill costs labor).
+fn effective_labor_cost(raw: i32, step: Option<u8>) -> i32 {
+    let labor = raw.max(0);
+    let cost = step.map_or(labor, |step| {
+        (f64::from(labor)
+            * f64::from(crate::systems::skills::progress::labor_cost_multiplier(
+                step,
+            )))
+        .round_ties_even() as i32
+    });
+    if labor > 0 {
+        cost.max(1)
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn effective_labor_cost_for_tests(raw: i32, step: Option<u8>) -> i32 {
+    effective_labor_cost(raw, step)
+}
+
+/// The client message for a refused craft cast (`SkillResult` -> `ErrorMessageType`).
+fn abort_reason(result: u8) -> i16 {
+    match result {
+        skill_result::NEED_LABOR_POWER => error_message::NOT_ENOUGH_LABOR_POWER,
+        skill_result::NEED_REAGENT => error_message::NOT_ENOUGH_REQUIRED_ITEM,
+        skill_result::NO_PERM | skill_result::INVALID_TARGET | skill_result::NO_TARGET => {
+            error_message::CRAFT_PERMISSION_DENY
+        }
+        skill_result::TOO_FAR_RANGE | skill_result::TOO_CLOSE_RANGE | skill_result::OBSTACLE => {
+            error_message::NOT_NEAR_TO_TARGET
+        }
+        skill_result::BAG_FULL => error_message::NOT_ENOUGH_SPACE,
+        skill_result::COOLDOWN_TIME | skill_result::ON_CASTING => error_message::CRAFT_COOLDOWN,
+        _ => error_message::INTERNAL_ERROR,
+    }
+}
+
+/// Ends the whole craft batch because the next craft cannot start (or its cast failed): the
+/// C# just returned, leaving the client's craft window locked ("greyed out") until relog.
+/// Tells the client with the same `CraftCantActAnyMore` error the other stop paths use and
+/// clears the server state.
+pub fn abort_craft(server: &GameServer, player: &PlayerRef, result: u8) {
+    abort_craft_with(server, player, abort_reason(result));
+}
+
+/// [`abort_craft`] with the `ErrorMessageType` shown as the reason. The 1.2 client resets its
+/// craft batch (`IsWorkingCraft`, `CRAFT_ENDED`) only on `CraftCantActAnyMore` with a nonzero
+/// reason and `isNotify == false`, so every stop of a started batch goes through here.
+pub fn abort_craft_with(server: &GameServer, player: &PlayerRef, reason: i16) {
+    debug_assert_ne!(reason, 0);
+    error2(
+        &mut Out::Direct,
+        player,
+        error_message::CRAFT_CANT_ACT_ANY_MORE,
+        reason,
+        0,
+        false,
+    );
+    cancel_craft(server, player);
+}
+
+/// The craft skill's cast failed after it started (`Skill.Cast` re-validation): ends the batch
+/// when `skill_id` is the skill of the character's running craft.
+pub fn cast_failed(server: &GameServer, player: &PlayerRef, skill_id: u32, result: u8) {
+    let state = server.systems.economy.craft.state(player.character_id);
+    let is_current = state.is_crafting
+        && state
+            .current_craft
+            .and_then(|id| server.game_data.systems.economy.craft.craft(id))
+            .is_some_and(|c| c.skill_id == skill_id);
+    if is_current {
+        abort_craft(server, player, result);
+    }
 }
 
 fn permission_name(perm: u8) -> &'static str {
@@ -529,30 +670,16 @@ pub fn end_craft(server: &GameServer, player: &PlayerRef) {
             "|cFFFFFF00[Craft] Not enough Labor Powers for crafting! Performing a fictitious crafting step...|r",
         );
         // TODO not verified
-        error2(
-            &mut out,
-            player,
-            error_message::CRAFT_CANT_ACT_ANY_MORE,
-            error_message::NOT_ENOUGH_LABOR_POWER,
-            0,
-            false,
-        );
-        craft_or_cancel(server, player);
+        // Deviation: the C# went on with the rest of the batch ("fictitious step"), but the
+        // client resets its batch on this error, so the remaining crafts would run unseen.
+        abort_craft_with(server, player, error_message::NOT_ENOUGH_LABOR_POWER);
         return;
     }
 
     let inv = Inv::of(player);
     if inv.free_slot_count(slot_type::INVENTORY) < craft.craft_products.len() as i32 {
-        // TODO not verified
-        error2(
-            &mut Out::Direct,
-            player,
-            error_message::CRAFT_CANT_ACT_ANY_MORE,
-            error_message::NOT_ENOUGH_SPACE,
-            0,
-            false,
-        );
-        craft_or_cancel(server, player);
+        // TODO not verified (stops the batch like the labor case above)
+        abort_craft_with(server, player, error_message::NOT_ENOUGH_SPACE);
         return;
     }
 
@@ -765,22 +892,6 @@ fn report_crafted(server: &GameServer, player: &PlayerRef, produced: &[(u32, i32
     crate::systems::report_achievements(server, player, &inputs);
 }
 
-/// `CharacterCraft.CraftOrCancel()`.
-fn craft_or_cancel(server: &GameServer, player: &PlayerRef) {
-    if server
-        .systems
-        .economy
-        .craft
-        .state(player.character_id)
-        .count
-        > 0
-    {
-        schedule_craft(server, player);
-    } else {
-        cancel_craft(server, player);
-    }
-}
-
 /// The delay `ScheduleCraft` waits before the next craft of the batch: the remaining global
 /// cooldown when it is longer than the skill's `CooldownTime`.
 pub fn next_craft_delay_ms(server: &GameServer, player: &PlayerRef, skill_id: u32) -> Option<i64> {
@@ -807,11 +918,13 @@ fn schedule_craft(server: &GameServer, player: &PlayerRef) {
         .current_craft
         .and_then(|id| server.game_data.systems.economy.craft.craft(id))
     else {
+        // The batch was cancelled meanwhile: nothing to schedule.
         return;
     };
     let Some(delay) = next_craft_delay_ms(server, player, craft.skill_id) else {
         // C#: skillTemplate.CooldownTime on a null template -> NullReferenceException
         tracing::error!("ScheduleCraft: unknown skill {}", craft.skill_id);
+        abort_craft(server, player, skill_result::INVALID_SKILL);
         return;
     };
     let task = CraftTask {
@@ -822,6 +935,7 @@ fn schedule_craft(server: &GameServer, player: &PlayerRef) {
     };
     let (Some(server), Ok(rt)) = (server.self_arc(), tokio::runtime::Handle::try_current()) else {
         tracing::error!("ScheduleCraft: no server handle / runtime");
+        abort_craft(server, player, skill_result::FAILURE);
         return;
     };
     rt.spawn(async move {
@@ -958,10 +1072,12 @@ impl CSSetCraftingPayPacket {
 sync_client_packet!(CSSetCraftingPayPacket);
 
 /// `SCCraftFailedPacket(id, craftId, count)` (never sent by the 1.2 C#; "TODO needs fixing").
+/// The client reads `u32` type, `i32` count and `count` item template ids (not craft ids; client
+/// RE), so `item_id` is an item template id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SCCraftFailedPacket {
     pub id: u32,
-    pub craft_id: u32,
+    pub item_id: u32,
     pub count: i32,
 }
 impl SCCraftFailedPacket {
@@ -980,7 +1096,7 @@ impl Marshal for SCCraftFailedPacket {
         let count = self.count.clamp(0, Self::MAX_ENTRIES);
         s.write_u32(self.id).write_i32(count);
         for _ in 0..count {
-            s.write_u32(self.craft_id);
+            s.write_u32(self.item_id);
         }
     }
 }
