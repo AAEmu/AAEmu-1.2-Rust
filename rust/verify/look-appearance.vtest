@@ -1,0 +1,72 @@
+# Appearance conversion end to end on one fresh GM character, in the order the Bevy client uses it:
+#   E0 setup, E1 Skinize (skill 23741, powder 29880) the donor, E2 CS049 without powder (722),
+#   E3 Skinize an already skinized donor (739), E4 CS049 with 12 powder (11 merge into the E3
+#   stack), E5 Cleanup (skill 23457, consumable 29704) of the converted base, E6 Cleanup again (737).
+# Every request is the native client's byte layout (`lookcs` placeholders, see script.rs); the
+# expected packets are the server's CURRENT behaviour, including the double consumption of the
+# source item (G7). Nothing here is a policy proposal: look-gaps.vtest records the known gaps.
+# Needs World.json AutoSaveInterval 0.02 in the lane runtime so the `expectdb` checks see each
+# step (the run still passes without it as long as the retry windows cover the autosave).
+suite look-appearance
+bot qa gm fresh
+
+[qa]
+# E0: the fresh bag holds none of the four templates (starting supplies are persisted on create)
+expectdb "SELECT COUNT(*) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${qa}' AND i.template_id IN (26060,26118,29880,29704)" 0
+item 26118 1 as D
+item 29880 1 as P1
+
+# E1: Skinize the donor with exactly one powder. The powder is also the skill's reagent, so the
+# generic consumption finds no stack after the effect used it (G7): state, Seize, empty receipt.
+lookcs 52 {u32:23741} 02 SELF {id:P1}{tpl:P1}{grade:P1}{unit:P1} 03 SELF {id:D}{tpl:D}{grade:D} 00 wait=12 until=ended
+lookexpect started(23741,5000,echo)@80-800 fired(23741,echo)@5080-6500 task(113:bits(D,09)) task(113:seize(P1)) task(113) ended
+lookgap send started 80 800
+lookgap started fired 5000 5500
+lookgap fired ended 0 250
+expectdb "SELECT i.flags FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${qa}' AND i.template_id=26118" 9 8
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${qa}' AND i.template_id=29880" 0 8
+pump 2
+
+# E2: CS049 without any powder -> SCErrorMsg 722 naming the powder; nothing else
+item 26060 1 as B
+lookcs 49 {id:B}{id:D} wait=3
+lookexpect err(722,29880)@0-1500
+expectdb "SELECT HEX(SUBSTRING(i.details,1,4)) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${qa}' AND i.template_id=26060" 00000000 8
+pump 1
+
+# E3: Skinize the already skinized donor -> cast runs, SCErrorMsg 739 at fire time, powder untouched
+item 29880 1 as P3
+lookcs 52 {u32:23741} 02 SELF {id:P3}{tpl:P3}{grade:P3}{unit:P3} 03 SELF {id:D}{tpl:D}{grade:D} 00 wait=12 until=ended
+lookexpect started(23741,5000,echo)@80-800 fired(23741,echo)@5080-6500 err(739) ended
+lookgap fired ended 0 250
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${qa}' AND i.template_id=29880" 1 8
+expectdb "SELECT i.flags FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${qa}' AND i.template_id=26118" 9 8
+pump 2
+
+# E4: CS049 with 12 powder (11 merge into the E3 stack): 9 are paid, the base takes the donor's
+# template as its image, the donor is removed. No ack packet: the Update(9) row is the signal.
+item 29880 11
+lookcs 49 {id:B}{id:D} wait=3
+lookexpect task(40:count(P3,-9))@0-1500 task(111:image(B,26118)) task(40:seize(D))
+expectdb "SELECT HEX(SUBSTRING(i.details,1,4)) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${qa}' AND i.template_id=26060" 06660000 8
+expectdb "SELECT COUNT(*) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${qa}' AND i.template_id=26118" 0 8
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${qa}' AND i.template_id=29880" 3 8
+pump 1
+
+# E5: Cleanup the converted base with 3 consumables: image back to 0, two are paid (G7)
+item 29704 3 as C
+lookcs 52 {u32:23457} 02 SELF {id:C}{tpl:C}{grade:C}{unit:C} 03 SELF {id:B}{tpl:B}{grade:B} 00 wait=10 until=ended
+lookexpect started(23457,3000,echo)@80-800 fired(23457,echo)@3080-4500 task(111:image(B,0)) task(111:count(C,-1)) task(40:count(C,-1)) ended
+lookgap started fired 3000 3500
+lookgap fired ended 0 250
+expectdb "SELECT HEX(SUBSTRING(i.details,1,4)) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${qa}' AND i.template_id=26060" 00000000 8
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${qa}' AND i.template_id=29704" 1 8
+pump 2
+
+# E6: Cleanup again -> SCErrorMsg 737 at fire time, the consumable is untouched
+lookcs 52 {u32:23457} 02 SELF {id:C}{tpl:C}{grade:C}{unit:C} 03 SELF {id:B}{tpl:B}{grade:B} 00 wait=10 until=ended
+lookexpect started(23457,3000,echo)@80-800 fired(23457,echo)@3080-4500 err(737) ended
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${qa}' AND i.template_id=29704" 1 8
+# the final bag of the four templates: 26060 x1 (image 0), 29880 x3, 29704 x1
+expectdb "SELECT COUNT(*) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${qa}' AND i.template_id IN (26060,26118,29880,29704)" 3 8
+pump 1

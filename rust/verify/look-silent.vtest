@@ -1,0 +1,42 @@
+# CS049 answered with nothing at all, and a refused cast start:
+#   send/watch  CS049 whose base template has no recipe (armor slot type 4, template 6256): the handler logs
+#               `ConvertItemLook: template 6256 has no ItemLookConvert` and returns without a packet; the
+#               powder and both items stay (G8: the client needs its own timeout). `watch` waits for the log
+#               line (AAEMU_VERIFY_GAME_LOG) while `send` sends after the barrier.
+#   cool        a second Cleanup cast right after the first: SCSkillStarted with a failure result and timeline
+#               id 0 and no SCSkillEnded (the GCD refusal the client must unlock on).
+suite look-silent
+bot send gm fresh
+bot watch
+bot cool gm fresh
+
+[send]
+item 6256 1 as B
+item 6256 1 as D
+item 29880 9 as P
+sync armed 2
+pump 1
+lookcs 49 {id:B}{id:D} wait=4
+lookexpect none
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${send}' AND i.template_id=29880" 9 8
+expectdb "SELECT COUNT(*) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${send}' AND i.template_id=6256" 2 8
+expectdb "SELECT COUNT(*) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${send}' AND i.template_id=6256 AND HEX(SUBSTRING(i.details,1,4))<>'00000000'" 0 8
+sync done 2
+
+[watch]
+sync armed 2
+expectlog "ConvertItemLook: template 6256 has no ItemLookConvert" 20
+sync done 2
+
+[cool]
+item 26060 1 as B
+item 29704 5 as C
+# first cast: the base has no image, so it is cancelled with 737 at fire time, but it starts the GCD
+lookcs 52 {u32:23457} 02 SELF {id:C}{tpl:C}{grade:C}{unit:C} 03 SELF {id:B}{tpl:B}{grade:B} 00 wait=10 until=ended grace=50
+lookexpect started(23457,3000,echo)@80-800 fired(23457,echo)@3080-4500 err(737) ended
+# second cast at once: refused at the start
+lookcs 52 {u32:23457} 02 SELF {id:C}{tpl:C}{grade:C}{unit:C} 03 SELF {id:B}{tpl:B}{grade:B} 00 wait=3
+lookexpect started(23457,fail=8)@0-800
+pump 2
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${cool}' AND i.template_id=29704" 5 8
+pump 1

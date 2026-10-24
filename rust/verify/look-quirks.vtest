@@ -1,0 +1,38 @@
+# More expected-current behaviour the server does not police (G5 / G6): neither CS049 nor the Skinize
+# effect checks the item class beyond "base is equipment", skin kind, holdable, gender or security.
+#   g5a  CS049 with an ARMOR donor (chest 2691) for the weapon base 26060: converts, image = 2691
+#   g5b  CS049 with a NON-EQUIPMENT image item (the cleanup consumable 29704): converts, image = 29704
+#   g6   Skinize on an arbitrary owned non-equipment item (a cleanup consumable): flags |= 0x08
+suite look-quirks
+bot g5a gm fresh
+bot g5b gm fresh
+bot g6 gm fresh
+
+[g5a]
+item 26060 1 as B
+item 2691 1 as D
+item 29880 9 as P
+lookcs 49 {id:B}{id:D} wait=3
+lookexpect task(40:seize(P)) task(40) task(111:image(B,2691)) task(40:seize(D))
+expectdb "SELECT HEX(SUBSTRING(i.details,1,4)) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${g5a}' AND i.template_id=26060" 830A0000 8
+expectdb "SELECT COUNT(*) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${g5a}' AND i.template_id=2691" 0 8
+pump 1
+
+[g5b]
+item 26060 1 as B
+item 29704 1 as D
+item 29880 9 as P
+lookcs 49 {id:B}{id:D} wait=3
+lookexpect task(40:seize(P)) task(40) task(111:image(B,29704)) task(40:seize(D))
+expectdb "SELECT HEX(SUBSTRING(i.details,1,4)) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${g5b}' AND i.template_id=26060" 08740000 8
+expectdb "SELECT COUNT(*) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${g5b}' AND i.template_id=29704" 0 8
+pump 1
+
+[g6]
+item 29704 1 as T
+item 29880 3 as P
+lookcs 52 {u32:23741} 02 SELF {id:P}{tpl:P}{grade:P}{unit:P} 03 SELF {id:T}{tpl:T}{grade:T} 00 wait=12 until=ended
+lookexpect started(23741,5000,echo)@80-800 fired(23741,echo)@5080-6500 task(113:bits(T,08)) task(113:count(P,-1)) task(40:count(P,-1)) ended
+expectdb "SELECT i.flags FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${g6}' AND i.template_id=29704" 8 8
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${g6}' AND i.template_id=29880" 1 8
+pump 1

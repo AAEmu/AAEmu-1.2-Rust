@@ -1,0 +1,48 @@
+# Skinize (skill 23741, powder 29880) onto an unskinized BoP donor, powder stack N = 1 / 2 / 3, one fresh GM
+# character per N. The powder is the skill's source AND reagent (`use_skill_as_reagent`), and the effect
+# consumes it as well, so the server takes TWO powder per successful cast (G7, the C# behaviour): the
+# stack ends at max(N-2, 0). The receipts are the server's CURRENT behaviour, one SCItemTaskSuccess each:
+#   N=1  [113]{UpdateBits donor}  [113]{Seize powder}  [113]{}
+#   N=2  [113]{UpdateBits donor}  [113]{Count -1}  [40]{Seize powder}  [40]{}
+#   N=3  [113]{UpdateBits donor}  [113]{Count -1}  [40]{Count -1}
+# The donor is created with flags 0x01 and ends at 0x09 (same id and grade).
+suite look-skinize
+bot n1 gm fresh
+bot n2 gm fresh
+bot n3 gm fresh
+
+[n1]
+item 26118 1 as D
+item 29880 1 as P
+lookcs 52 {u32:23741} 02 SELF {id:P}{tpl:P}{grade:P}{unit:P} 03 SELF {id:D}{tpl:D}{grade:D} 00 wait=12 until=ended
+lookexpect started(23741,5000,echo)@80-800 fired(23741,echo)@5080-6500 task(113:bits(D,09)) task(113:seize(P)) task(113) ended
+lookgap send started 80 800
+lookgap started fired 5000 5500
+lookgap fired ended 0 250
+expectdb "SELECT i.flags FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${n1}' AND i.template_id=26118" 9 8
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${n1}' AND i.template_id=29880" 0 8
+pump 1
+
+[n2]
+item 26118 1 as D
+item 29880 2 as P
+lookcs 52 {u32:23741} 02 SELF {id:P}{tpl:P}{grade:P}{unit:P} 03 SELF {id:D}{tpl:D}{grade:D} 00 wait=12 until=ended
+lookexpect started(23741,5000,echo)@80-800 fired(23741,echo)@5080-6500 task(113:bits(D,09)) task(113:count(P,-1)) task(40:seize(P)) task(40) ended
+lookgap send started 80 800
+lookgap started fired 5000 5500
+lookgap fired ended 0 250
+expectdb "SELECT i.flags FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${n2}' AND i.template_id=26118" 9 8
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${n2}' AND i.template_id=29880" 0 8
+pump 1
+
+[n3]
+item 26118 1 as D
+item 29880 3 as P
+lookcs 52 {u32:23741} 02 SELF {id:P}{tpl:P}{grade:P}{unit:P} 03 SELF {id:D}{tpl:D}{grade:D} 00 wait=12 until=ended
+lookexpect started(23741,5000,echo)@80-800 fired(23741,echo)@5080-6500 task(113:bits(D,09)) task(113:count(P,-1)) task(40:count(P,-1)) ended
+lookgap send started 80 800
+lookgap started fired 5000 5500
+lookgap fired ended 0 250
+expectdb "SELECT i.flags FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${n3}' AND i.template_id=26118" 9 8
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${n3}' AND i.template_id=29880" 1 8
+pump 1

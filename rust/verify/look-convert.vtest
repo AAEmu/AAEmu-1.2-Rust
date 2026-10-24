@@ -1,0 +1,49 @@
+# CS049 ConvertItemLook with the powder stack at the recipe boundary: 9 (exactly the recipe, the stack is
+# used up), 10 and 12 (9 are taken, the rest stays). Recipe group 1 = 9 x 29880, no gold. Receipts, one
+# SCItemTaskSuccess each, in this order (there is no ack packet; the Update(9) row is the signal):
+#   N=9      [40]{Seize powder}  [40]{}  [111]{Update base image 26118}  [40]{Seize donor}
+#   N>=10    [40]{Count -9}  [111]{Update base image 26118}  [40]{Seize donor}
+# The base keeps its id, slot, grade (3: `fixed_grade`) and flags (0x01); only the detail image changes.
+suite look-convert
+bot p9 gm fresh
+bot p10 gm fresh
+bot p12 gm fresh
+
+[p9]
+item 26060 1 as B
+item 26118 1 as D
+item 29880 9 as P
+lookcs 49 {id:B}{id:D} wait=3
+lookexpect task(40:seize(P)) task(40) task(111:image(B,26118)) task(40:seize(D))
+lookgap send task 0 1500
+expectdb "SELECT HEX(SUBSTRING(i.details,1,4)) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${p9}' AND i.template_id=26060" 06660000 8
+expectdb "SELECT CONCAT(i.grade,'/',i.flags) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${p9}' AND i.template_id=26060" 3/1 8
+expectdb "SELECT COUNT(*) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${p9}' AND i.template_id=26118" 0 8
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${p9}' AND i.template_id=29880" 0 8
+pump 1
+
+[p10]
+item 26060 1 as B
+item 26118 1 as D
+item 29880 10 as P
+lookcs 49 {id:B}{id:D} wait=3
+lookexpect task(40:count(P,-9)) task(111:image(B,26118)) task(40:seize(D))
+lookgap send task 0 1500
+expectdb "SELECT HEX(SUBSTRING(i.details,1,4)) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${p10}' AND i.template_id=26060" 06660000 8
+expectdb "SELECT CONCAT(i.grade,'/',i.flags) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${p10}' AND i.template_id=26060" 3/1 8
+expectdb "SELECT COUNT(*) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${p10}' AND i.template_id=26118" 0 8
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${p10}' AND i.template_id=29880" 1 8
+pump 1
+
+[p12]
+item 26060 1 as B
+item 26118 1 as D
+item 29880 12 as P
+lookcs 49 {id:B}{id:D} wait=3
+lookexpect task(40:count(P,-9)) task(111:image(B,26118)) task(40:seize(D))
+lookgap send task 0 1500
+expectdb "SELECT HEX(SUBSTRING(i.details,1,4)) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${p12}' AND i.template_id=26060" 06660000 8
+expectdb "SELECT CONCAT(i.grade,'/',i.flags) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${p12}' AND i.template_id=26060" 3/1 8
+expectdb "SELECT COUNT(*) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${p12}' AND i.template_id=26118" 0 8
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${p12}' AND i.template_id=29880" 3 8
+pump 1

@@ -1,0 +1,58 @@
+# Known server gaps, pinned as EXPECTED CURRENT behaviour so a later fix flips a test on purpose (nothing
+# here asks for a policy change; the Bevy client must not compensate for any of it):
+#   g1  CS049 with 8 of the 9 powder converts and takes all 8 (C# parity; the native UI needs 9)
+#   g4  CS049 with base == image takes the powder, gives the base its own template as image, then removes
+#       the "donor" - which is the base: the item is destroyed
+#   g2  wearable slot 9 (cloaks): the server recipe is 15 x 29880 (first row of the raw scan), the native
+#       recipe group is 4 x 29880
+#   g3  a glider (item_impl 22) as the base is refused 737 although the native catalog walk allows it
+# G7 (double consumption) is pinned by look-skinize / look-cleanup, G5/G6 by look-quirks.
+suite look-gaps
+bot g1 gm fresh
+bot g4 gm fresh
+bot g2 gm fresh
+bot g3 gm fresh
+
+[g1]
+item 26060 1 as B
+item 26118 1 as D
+item 29880 8 as P
+lookcs 49 {id:B}{id:D} wait=3
+lookexpect task(40:seize(P)) task(40) task(111:image(B,26118)) task(40:seize(D))
+expectdb "SELECT HEX(SUBSTRING(i.details,1,4)) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${g1}' AND i.template_id=26060" 06660000 8
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${g1}' AND i.template_id=29880" 0 8
+expectdb "SELECT COUNT(*) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${g1}' AND i.template_id=26118" 0 8
+pump 1
+
+[g4]
+item 26060 1 as B
+item 29880 9 as P
+lookcs 49 {id:B}{id:B} wait=3
+lookexpect task(40:seize(P)) task(40) task(111:image(B,26060)) task(40:seize(B))
+expectdb "SELECT COUNT(*) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${g4}' AND i.template_id=26060" 0 8
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${g4}' AND i.template_id=29880" 0 8
+pump 1
+
+[g2]
+item 14361 1 as B
+item 14361 1 as D
+item 29880 20 as P
+lookcs 49 {id:B}{id:D} wait=3
+lookexpect task(40:count(P,-15)) task(111:image(B,14361)) task(40:seize(D))
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${g2}' AND i.template_id=29880" 5 8
+expectdb "SELECT COUNT(*) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${g2}' AND i.template_id=14361" 1 8
+pump 1
+
+[g3]
+# a glider goes straight into the backpack/glider slot of the equipment, and a second glider cannot be
+# added next to it ("No room on the backpack slot"), so the image item is an ordinary weapon: the
+# server only looks at the BASE class (item_impl 22 is not equipment for it)
+item 16385 1 as B
+item 26118 1 as D
+item 29880 9 as P
+lookcs 49 {id:B}{id:D} wait=3
+lookexpect err(737,0)
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${g3}' AND i.template_id=29880" 9 8
+expectdb "SELECT COUNT(*) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${g3}' AND i.template_id=16385" 1 8
+expectdb "SELECT COUNT(*) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${g3}' AND i.template_id=26118" 1 8
+pump 1

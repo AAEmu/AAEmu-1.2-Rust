@@ -1,0 +1,66 @@
+# Cleanup (skill 23457, consumable 29704) of a converted base, consumable stack N = 1 / 2 / 3, one fresh GM
+# character per N. Each bot first converts the base with CS049 (9 powder, exactly the recipe), then casts
+# Cleanup. Like Skinize the consumable is taken twice per successful cast (G7: the effect row has
+# consume_source_item = true and the generic step takes one more with reason 40): the stack ends at
+# max(N-2, 0). Receipts (one SCItemTaskSuccess each):
+#   N=1  [111]{Update base image 0}  [111]{Seize}  [111]{}
+#   N=2  [111]{Update base image 0}  [111]{Count -1}  [40]{Seize}  [40]{}
+#   N=3  [111]{Update base image 0}  [111]{Count -1}  [40]{Count -1}
+suite look-cleanup
+bot n1 gm fresh
+bot n2 gm fresh
+bot n3 gm fresh
+
+[n1]
+item 26060 1 as B
+item 26118 1 as D
+item 29880 9 as P
+# setup: CS049 with exactly the recipe's 9 powder -> the stack is fully used (Seize + empty receipt)
+lookcs 49 {id:B}{id:D} wait=3
+lookexpect task(40:seize(P)) task(40) task(111:image(B,26118)) task(40:seize(D))
+expectdb "SELECT HEX(SUBSTRING(i.details,1,4)) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${n1}' AND i.template_id=26060" 06660000 8
+item 29704 1 as C
+lookcs 52 {u32:23457} 02 SELF {id:C}{tpl:C}{grade:C}{unit:C} 03 SELF {id:B}{tpl:B}{grade:B} 00 wait=10 until=ended
+lookexpect started(23457,3000,echo)@80-800 fired(23457,echo)@3080-4500 task(111:image(B,0)) task(111:seize(C)) task(111) ended
+lookgap send started 80 800
+lookgap started fired 3000 3500
+lookgap fired ended 0 250
+expectdb "SELECT HEX(SUBSTRING(i.details,1,4)) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${n1}' AND i.template_id=26060" 00000000 8
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${n1}' AND i.template_id=29704" 0 8
+pump 1
+
+[n2]
+item 26060 1 as B
+item 26118 1 as D
+item 29880 9 as P
+# setup: CS049 with exactly the recipe's 9 powder -> the stack is fully used (Seize + empty receipt)
+lookcs 49 {id:B}{id:D} wait=3
+lookexpect task(40:seize(P)) task(40) task(111:image(B,26118)) task(40:seize(D))
+expectdb "SELECT HEX(SUBSTRING(i.details,1,4)) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${n2}' AND i.template_id=26060" 06660000 8
+item 29704 2 as C
+lookcs 52 {u32:23457} 02 SELF {id:C}{tpl:C}{grade:C}{unit:C} 03 SELF {id:B}{tpl:B}{grade:B} 00 wait=10 until=ended
+lookexpect started(23457,3000,echo)@80-800 fired(23457,echo)@3080-4500 task(111:image(B,0)) task(111:count(C,-1)) task(40:seize(C)) task(40) ended
+lookgap send started 80 800
+lookgap started fired 3000 3500
+lookgap fired ended 0 250
+expectdb "SELECT HEX(SUBSTRING(i.details,1,4)) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${n2}' AND i.template_id=26060" 00000000 8
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${n2}' AND i.template_id=29704" 0 8
+pump 1
+
+[n3]
+item 26060 1 as B
+item 26118 1 as D
+item 29880 9 as P
+# setup: CS049 with exactly the recipe's 9 powder -> the stack is fully used (Seize + empty receipt)
+lookcs 49 {id:B}{id:D} wait=3
+lookexpect task(40:seize(P)) task(40) task(111:image(B,26118)) task(40:seize(D))
+expectdb "SELECT HEX(SUBSTRING(i.details,1,4)) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${n3}' AND i.template_id=26060" 06660000 8
+item 29704 3 as C
+lookcs 52 {u32:23457} 02 SELF {id:C}{tpl:C}{grade:C}{unit:C} 03 SELF {id:B}{tpl:B}{grade:B} 00 wait=10 until=ended
+lookexpect started(23457,3000,echo)@80-800 fired(23457,echo)@3080-4500 task(111:image(B,0)) task(111:count(C,-1)) task(40:count(C,-1)) ended
+lookgap send started 80 800
+lookgap started fired 3000 3500
+lookgap fired ended 0 250
+expectdb "SELECT HEX(SUBSTRING(i.details,1,4)) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${n3}' AND i.template_id=26060" 00000000 8
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${n3}' AND i.template_id=29704" 1 8
+pump 1

@@ -1,0 +1,65 @@
+# Refusals the server answers with a packet or with a cancelled cast, one fresh GM character per group:
+#   ids    CS049 with an unknown base and/or image id -> SCErrorMsg 207 (FailedToUseItem), nothing consumed
+#   noneq  CS049 whose "base" is not equipment (a powder stack) -> SCErrorMsg 737, nothing consumed
+#   adm    item-cast admission and identity (CS052): the server DROPS a cast whose powder does not
+#          belong to the character or whose use skill is another skill (no packet at all, not even
+#          SCSkillStarted, G8), and CANCELS a cast whose item target carries another object id or whose
+#          target item does not exist (SCSkillStarted, SCSkillFired, SCSkillEnded, no row, no error)
+# Expectations are the server's current behaviour; look-gaps / look-quirks / look-silent hold the rest.
+suite look-refusals
+bot ids gm fresh
+bot noneq gm fresh
+bot adm gm fresh
+
+[ids]
+item 26060 1 as B
+item 29880 9 as P
+# unknown base and unknown image
+lookcs 49 {u64:123456789}{u64:987654321} wait=2
+lookexpect err(207,0)@0-1500
+# known base, unknown image
+lookcs 49 {id:B}{u64:987654321} wait=2
+lookexpect err(207,0)
+# unknown base, known image
+lookcs 49 {u64:123456789}{id:B} wait=2
+lookexpect err(207,0)
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${ids}' AND i.template_id=29880" 9 8
+expectdb "SELECT HEX(SUBSTRING(i.details,1,4)) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${ids}' AND i.template_id=26060" 00000000 8
+expectdb "SELECT COUNT(*) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${ids}' AND i.template_id=26060" 1 8
+pump 1
+
+[noneq]
+item 29880 9 as P
+item 26118 1 as D
+lookcs 49 {id:P}{id:D} wait=2
+lookexpect err(737,0)@0-1500
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${noneq}' AND i.template_id=29880" 9 8
+expectdb "SELECT COUNT(*) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${noneq}' AND i.template_id=26118" 1 8
+pump 1
+
+[adm]
+item 26118 1 as D
+item 29880 3 as P
+item 29704 3 as C
+# a. Cleanup's skill id with the Skinize powder: dropped before any packet
+lookcs 52 {u32:23457} 02 SELF {id:P}{tpl:P}{grade:P}{unit:P} 03 SELF {id:D}{tpl:D}{grade:D} 00 wait=2
+lookexpect none
+# b. Skinize's skill id with the cleanup consumable
+lookcs 52 {u32:23741} 02 SELF {id:C}{tpl:C}{grade:C}{unit:C} 03 SELF {id:D}{tpl:D}{grade:D} 00 wait=2
+lookexpect none
+# c. a source item id nobody owns
+lookcs 52 {u32:23741} 02 SELF {u64:123456789}{u32:29880}{u8:0}{u32:0} 03 SELF {id:D}{tpl:D}{grade:D} 00 wait=2
+lookexpect none
+# d. identity: the item target carries object id 1, not the caster's -> the cast runs and is cancelled
+lookcs 52 {u32:23741} 02 SELF {id:P}{tpl:P}{grade:P}{unit:P} 03 {u8:1}{u8:0}{u8:0} {id:D}{tpl:D}{grade:D} 00 wait=12 until=ended
+lookexpect started(23741,5000)@80-800 fired(23741)@5080-6500 ended
+pump 2
+# e. the target item id does not exist -> the cast runs and is cancelled
+lookcs 52 {u32:23741} 02 SELF {id:P}{tpl:P}{grade:P}{unit:P} 03 SELF {u64:123456789}{u32:26118}{u8:0} 00 wait=12 until=ended
+lookexpect started(23741,5000,echo)@80-800 fired(23741,echo)@5080-6500 ended
+pump 2
+# nothing was consumed, flagged or converted
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${adm}' AND i.template_id=29880" 3 8
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${adm}' AND i.template_id=29704" 3 8
+expectdb "SELECT i.flags FROM items i JOIN item_containers ic ON ic.container_id=i.container_id JOIN characters c ON c.id=ic.owner_id WHERE c.name='${adm}' AND i.template_id=26118" 1 8
+pump 1
