@@ -2,7 +2,8 @@
 //! unlock its craft window (GM account needed, see `rust/LIVE-TESTING.md`).
 //!
 //! The bot spawns an Archeum Workbench (doodad 566) next to itself with `/spawn doodad`, adds
-//! Gilda Stars (item 23633), sets its labor to a few points (`/labor`) and sends
+//! Gilda Stars (item 23633), tops its labor up by [`LABOR_TOP_UP`] (`/labor`; a GM command can
+//! only add labor, so the batch is sized to run past whatever the character has) and sends
 //! `CSExecuteCraft` for craft 8000001 "Disintegration: Gilda Stars" (skill 8000016, 3 labor per
 //! craft) with a count larger than the labor allows. The client resets its batch (greyed-out Craft
 //! button, `IsWorkingCraft`) only on `SCSkillStarted` with a nonzero result or `SCErrorMsg`
@@ -28,10 +29,12 @@ const CRAFT: u32 = 8_000_001;
 const MATERIAL: u32 = 23_633;
 /// Doodad 566 "Archeum Workbench".
 const BENCH: u32 = 566;
-/// Labor the bot is left with: two crafts at 3 labor each (the third is refused).
-const LABOR: i32 = 7;
-/// Batch size asked for.
-const COUNT: i32 = 6;
+/// Labor added before the batch so at least [`MIN_CRAFTS`] crafts are affordable (3 labor each).
+const LABOR_TOP_UP: i32 = 12;
+/// Batch size asked for (and Gilda Stars given): more crafts than a new character has labor for.
+const COUNT: i32 = 100;
+/// Longest the batch may take (about 1.5 s per craft).
+const BATCH_TIMEOUT: Duration = Duration::from_secs(240);
 /// Crafts that must succeed before the labor runs out.
 const MIN_CRAFTS: usize = 2;
 /// `ErrorMessageType.CraftCantActAnyMore` and `NotEnoughLaborPower`.
@@ -136,12 +139,11 @@ pub(super) async fn run(game: &mut GameClient, r: &mut Runner<'_>) -> anyhow::Re
         .cloned()
         .context("the spawned Archeum Workbench was not announced")?;
     gm_command(game, &format!("item add self {MATERIAL} {COUNT}")).await?;
-    gm_command(game, "labor -5000").await?;
-    gm_command(game, &format!("labor {LABOR}")).await?;
+    gm_command(game, &format!("labor {LABOR_TOP_UP}")).await?;
     r.end(
         s,
         format!(
-            "bench obj {} at {:?} ({:.1} m), {COUNT} Gilda Stars, labor {LABOR}",
+            "bench obj {} at {:?} ({:.1} m), {COUNT} Gilda Stars, labor +{LABOR_TOP_UP}",
             bench.obj_id,
             bench.pos,
             dist(me, bench.pos)
@@ -158,7 +160,7 @@ pub(super) async fn run(game: &mut GameClient, r: &mut Runner<'_>) -> anyhow::Re
     let mut packets = Vec::new();
     // The batch (about 1.5 s per craft), then a quiet period that must stay free of casts.
     let mut last_craft_packet = Instant::now();
-    while started.elapsed() < Duration::from_secs(40) {
+    while started.elapsed() < BATCH_TIMEOUT {
         if let Some(p) = game.recv_within(Duration::from_millis(250)).await? {
             let is_error = p.is_sc(sc::SCErrorMsgPacket);
             if p.is_sc(sc::SCSkillStartedPacket) || p.is_sc(sc::SCSkillEndedPacket) || is_error {

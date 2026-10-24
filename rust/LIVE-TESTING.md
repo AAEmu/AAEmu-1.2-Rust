@@ -258,10 +258,13 @@ corpse (`/despawn npc <objId>`) and watches 130 s for exactly one respawn (serve
 debug lines.
 
 `craft` (GM account, same prerequisites as `questitem`) spawns an Archeum Workbench (doodad 566, `/spawn doodad`),
-adds Gilda Stars (item 23633), leaves the bot 7 labor (`/labor -5000`, `/labor 7`) and sends `CSExecuteCraft` for craft
-8000001 (3 labor per craft) with count 6. It requires at least two completed crafts, then `SCErrorMsg` 148 with reason 29
-(`NotEnoughLaborPower`) and `isNotify == false` as the last error (the only stop the 1.2 client reacts to besides a failed
-`SCSkillStarted`), and no cast after it. Server log: `craft 8000001 refused by skill 8000016: skill result 39`.
+adds 100 Gilda Stars (item 23633), tops the bot's labor up by 12 (`/labor 12`; GM commands can only add labor) and sends
+`CSExecuteCraft` for craft 8000001 (3 labor per craft) with count 100, so the batch outlasts the labor. It requires at
+least two completed crafts (`SCSkillStarted` + `SCSkillEnded`), then `SCErrorMsg` 148 with reason 29
+(`NotEnoughLaborPower`) and `isNotify == false` as the last error (the only stop the 1.2 client unlocks its craft window
+on, besides a failed `SCSkillStarted`), and no cast after it. Run it on an account whose labor is not hugely negative
+or positive (a character with 30 labor runs about 15 crafts, 1 s each). Server log:
+`craft 8000001 refused by skill 8000016: skill result 39`.
 
 The combat step selects its NPC through `CSChangeTargetPacket` and faces it in movement
 packets so auto attacks and angle restrictions use the intended target. It matches skill responses to the player's object and skill IDs and reads
