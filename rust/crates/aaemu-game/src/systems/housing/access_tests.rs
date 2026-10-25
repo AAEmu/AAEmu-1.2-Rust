@@ -329,6 +329,38 @@ fn fixture_with_limits(always_public: bool, overall_limit: u32, group_limit: Opt
             1,
             FuncTemplate::RecoverItem(DoodadFuncRecoverItem { id: 1 }),
         );
+    // Crafting requires a current function that explicitly offers the recipe. Permission1
+    // retains the house policy exercised below; recoverable furniture alone is no bench.
+    data.systems.npcs.doodad.funcs_by_groups.insert(
+        71,
+        vec![DoodadFunc {
+            group_id: 71,
+            func_id: 1,
+            func_type: "DoodadFuncCraftPack".into(),
+            perm_id: 1,
+            ..Default::default()
+        }],
+    );
+    data.systems
+        .npcs
+        .doodad
+        .func_templates
+        .entry("DoodadFuncCraftPack")
+        .or_default()
+        .insert(
+            1,
+            FuncTemplate::CraftPack(
+                crate::systems::npcs::doodad::templates::DoodadFuncCraftPack {
+                    id: 1,
+                    craft_pack_id: 88,
+                },
+            ),
+        );
+    data.systems
+        .economy
+        .craft
+        .craft_pack_crafts
+        .insert(88, [88].into());
     let server = test_server_with(data);
     let eco = Arc::new(Eco::default());
     server.systems.housing.hooks.install(eco.clone());
@@ -493,6 +525,7 @@ impl crate::systems::economy::craft::CraftHooks for BenchRecorder {
 
 fn bench(fx: &Fx) -> (DoodadRef, Arc<BenchRecorder>) {
     let d = recoverable(fx);
+    d.data().func_group_id = 71;
     d.data().transform.set_xyz(101.0, 100.0, 100.0);
     fx.server
         .world

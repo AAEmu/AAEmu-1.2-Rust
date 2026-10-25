@@ -2,7 +2,7 @@
 //! `craft_materials`, `craft_pack_crafts`) and the `SkillTemplate` members `CharacterCraft` reads
 //! for a craft's skill (`consume_lp`, `actability_group_id`, `cooldown_time`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::data::items::TemplateKind;
 use crate::data::sqlite::for_each_row;
@@ -81,6 +81,8 @@ pub struct CraftData {
     pub crafts: HashMap<u32, Craft>,
     /// Skill facts of every skill a craft uses (`SkillManager.GetSkillTemplate(craft.SkillId)`).
     pub skills: HashMap<u32, CraftSkill>,
+    /// Recipes explicitly offered by each `DoodadFuncCraftPack`.
+    pub craft_pack_crafts: HashMap<u32, HashSet<u32>>,
 }
 
 impl CraftData {
@@ -140,8 +142,13 @@ impl CraftData {
             Ok(())
         })?;
         for_each_row(ctx.conn, "SELECT * FROM craft_pack_crafts", [], |r| {
-            if let Some(craft) = d.crafts.get_mut(&r.u32("craft_id")?) {
+            let craft_id = r.u32("craft_id")?;
+            if let Some(craft) = d.crafts.get_mut(&craft_id) {
                 craft.is_pack = true;
+                d.craft_pack_crafts
+                    .entry(r.u32("craft_pack_id")?)
+                    .or_default()
+                    .insert(craft_id);
             }
             Ok(())
         })?;
