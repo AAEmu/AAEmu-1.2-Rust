@@ -423,20 +423,9 @@ fn do_plot_end(server: &GameServer, state: &Arc<PlotState>) {
     let tl = skill.tl_id();
     broadcast(server, &caster, &SCPlotEndedPacket { tl }, true);
     end_plot_channel(server, state);
-    let now = now_ms();
-    let (id, cd) = (skill.template.id, skill.template.cooldown_time);
-    caster.with_unit(|u| u.unit_mut().cooldowns.add_cooldown(id, cd as u32, now));
-    if let Some(o) = super::relation::owner_character(server, &caster) {
-        if o.data().skill_char.ignore_skill_cooldowns {
-            o.send(super::packets::SCSkillCooldownResetPacket {
-                obj_id: o.obj_id,
-                skill_id: id,
-                tag_id: 0,
-                gcd: false,
-            });
-            caster.with_unit(|u| u.unit_mut().cooldowns.remove_cooldown(id));
-        }
-    }
+    // Cooldowns are committed at accepted plot-only use or successful cast, once.
+    // Plot completion must not reapply raw durations, extend the tag, or send a second UI update.
+    super::skill::reset_cooldown_if_ignored(server, skill, &caster);
     // Release only what this call took: a concurrent `end_skill` (interrupt) takes the id the
     // same way, so whichever comes second releases 0.
     server.systems.skills.tl_ids.release(skill.take_tl_id());

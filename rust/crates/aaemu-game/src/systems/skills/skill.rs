@@ -9,7 +9,7 @@ use std::sync::Arc;
 use rand::Rng;
 
 use crate::models::transform::PositionAndRotation;
-use crate::models::unit::{SkillAttribute, UnitAttribute};
+use crate::models::unit::{SkillAttribute, UnitAttribute, UnitCooldowns};
 use crate::server::GameServer;
 use crate::systems::social::achievement::char_record_kind;
 use crate::systems::social::achievement_hooks::{AchievementInput, RecordMatch};
@@ -21,8 +21,8 @@ use super::data::{EffectKind, EffectTemplate, SkillEffect, SkillTemplate};
 use super::effects::{self, EffectArgs, EffectSource};
 use super::geometry::{distance_to, is_front, world_of, world_pos, PosUnit, Target};
 use super::packets::{
-    CompressedGamePackets, SCCastingStoppedPacket, SCSkillCooldownResetPacket, SCSkillEndedPacket,
-    SCSkillFiredPacket, SCSkillStartedPacket, SCSkillStoppedPacket,
+    CompressedGamePackets, SCCastingStoppedPacket, SCCooldownsPacket, SCSkillCooldownResetPacket,
+    SCSkillEndedPacket, SCSkillFiredPacket, SCSkillStartedPacket, SCSkillStoppedPacket,
 };
 use super::relation::{can_attack, filter_with_relation, owner_character, relation_to};
 use super::state::{AutoAttackSlot, CancelToken, SkillRef, SkillRun, SkillTaskKind, SkillTaskSlot};
@@ -178,6 +178,92 @@ fn start_global_cooldown(server: &GameServer, skill: &SkillRef, caster: &WorldOb
     let mul = stat(server, caster, StatKind::GlobalCooldownMul) as f32;
     let ms = (gcd as f32 * (mul / 100.0)) as i64;
     caster.with_unit(|u| u.unit_mut().global_cooldown_ms = now + ms);
+}
+
+fn cooldown_ignored(server: &GameServer, caster: &WorldObject) -> bool {
+    caster
+        .as_player()
+        .cloned()
+        .or_else(|| owner_character(server, caster))
+        .is_some_and(|owner| owner.data().skill_char.ignore_skill_cooldowns)
+}
+
+fn on_skill_cooldown(
+    server: &GameServer,
+    skill: &SkillRun,
+    caster: &WorldObject,
+    now: i64,
+) -> bool {
+    // Preserve the existing server-controlled NPC policy: only a character or its
+    // controlled unit is subject to skill cooldown admission, on that unit's own store.
+    let owner = caster
+        .as_player()
+        .cloned()
+        .or_else(|| owner_character(server, caster));
+    let Some(owner) = owner else {
+        return false;
+    };
+    if owner.data().skill_char.ignore_skill_cooldowns {
+        return false;
+    }
+    caster
+        .with_unit(|u| {
+            u.unit_mut().cooldowns.check_skill_cooldown(
+                skill.template.id,
+                skill.template.cooldown_tag_id.max(0) as u32,
+                now,
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn start_skill_cooldown(server: &GameServer, skill: &SkillRun, caster: &WorldObject, now: i64) {
+    if cooldown_ignored(server, caster) {
+        return;
+    }
+    // Native 1.2 `3989A360` -> `3989F900`, attribute 1: modify the started skill's
+    // own cooldown, not each member's authored duration. Never cast a signed duration to u32.
+    let duration = apply_skill_modifiers(
+        server,
+        skill,
+        caster,
+        SkillAttribute::Cooldown,
+        f64::from(skill.template.cooldown_time),
+    )
+    .clamp(0.0, f64::from(u32::MAX)) as u32;
+    if duration == 0 {
+        return;
+    }
+    let tag = skill.template.cooldown_tag_id.max(0) as u32;
+    let packet = caster
+        .with_unit(|u| {
+            let cooldowns = &mut u.unit_mut().cooldowns;
+            cooldowns.add_cooldown(skill.template.id, duration, now);
+            cooldowns.add_tag_cooldown(tag, duration, now);
+            if tag == 0 {
+                return None;
+            }
+            // Native 1.2 397B2350 keeps these lists separate; 3989A290 takes
+            // max(individual, tag). Never manufacture individual entries for other members.
+            let mut affected = UnitCooldowns::default();
+            affected
+                .cooldowns
+                .insert(skill.template.id, cooldowns.cooldowns[&skill.template.id]);
+            affected
+                .tag_cooldowns
+                .insert(tag, cooldowns.tag_cooldowns[&tag]);
+            Some(SCCooldownsPacket::from_cooldowns(&affected, now))
+        })
+        .flatten();
+    if let Some(packet) = packet.filter(|p| !p.is_empty()) {
+        if let Some(owner) = caster
+            .as_player()
+            .cloned()
+            .or_else(|| owner_character(server, caster))
+        {
+            owner.send(packet);
+        }
+    }
 }
 
 fn lookup_base_unit(server: &GameServer, caster: &WorldObject, obj_id: u32) -> Option<WorldObject> {
@@ -438,9 +524,6 @@ pub fn use_skill(
         return (skill_result::INVALID_TARGET, 0);
     }
     let character = caster.as_player().cloned();
-    let cooldown_owner = character
-        .clone()
-        .or_else(|| owner_character(server, caster));
     let req = unit_reqs::can_use_skill_on_target(
         server,
         &template,
@@ -512,16 +595,8 @@ pub fn use_skill(
         }
     }
     let now = now_ms();
-    if template.cooldown_time > 0 {
-        if let Some(o) = &cooldown_owner {
-            let ignore = o.data().skill_char.ignore_skill_cooldowns;
-            let on_cd = caster
-                .with_unit(|u| u.unit_mut().cooldowns.check_cooldown(template.id, now))
-                .unwrap_or(false);
-            if !ignore && on_cd {
-                return (skill_result::COOLDOWN_TIME, 0);
-            }
-        }
+    if on_skill_cooldown(server, skill, caster, now) {
+        return (skill_result::COOLDOWN_TIME, 0);
     }
     skill.state().bypass_gcd = bypass_gcd;
     if !bypass_gcd {
@@ -633,17 +708,14 @@ pub fn use_skill(
         skill_object: skill_object.clone(),
     };
     if let Some(plot_id) = template.plot_id {
+        if template.plot_only {
+            // Plot-only skills never enter `cast`; commit cooldowns once at acceptance,
+            // before a plot can finish synchronously.
+            start_global_cooldown(server, skill, caster, now);
+            start_skill_cooldown(server, skill, caster, now);
+        }
         super::plots::run_plot(server, plot_id, ctx.clone(), skill.clone());
         if template.plot_only {
-            // `cast` never runs for a plot-only skill: start the GCD and the skill's own
-            // cooldown now, so it cannot be recast while the plot runs (`do_plot_end` adds the
-            // cooldown too, but `add_cooldown` keeps this earlier entry).
-            start_global_cooldown(server, skill, caster, now);
-            caster.with_unit(|u| {
-                u.unit_mut()
-                    .cooldowns
-                    .add_cooldown(template.id, template.cooldown_time as u32, now)
-            });
             return (skill_result::SUCCESS, 0);
         }
     }
@@ -836,6 +908,13 @@ pub fn cast(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         .map_or(Ok(()), |result| Err((result, 0)))
         .and_then(|()| super::validation::check_item_zone(server, caster, &ctx.caster_caster))
         .and_then(|()| super::validation::check(server, skill, caster, &ctx.target))
+        .and_then(|()| {
+            if on_skill_cooldown(server, skill, caster, now_ms()) {
+                Err((skill_result::COOLDOWN_TIME, 0))
+            } else {
+                Ok(())
+            }
+        })
         .and_then(|()| super::validation::check_resources(server, skill, caster))
         .and_then(|()| {
             super::validation::check_build_materials(server, skill, caster, &ctx.target)
@@ -863,8 +942,6 @@ pub fn cast(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         return;
     }
     let t = &skill.template;
-    let now = now_ms();
-    start_global_cooldown(server, skill, caster, now);
     if caster.as_npc().is_some() && t.skill_controller_id != 0 {
         if let Some(sc) = server
             .game_data
@@ -886,14 +963,7 @@ pub fn cast(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             }
         }
     }
-    caster.with_unit(|u| u.unit_mut().skill_state.skill_task = None);
-    consume_mana(server, skill, caster);
-    caster.with_unit(|u| {
-        u.unit_mut()
-            .cooldowns
-            .add_cooldown(t.id, t.cooldown_time as u32, now)
-    });
-    // Validate the cast item
+    // Validate the cast item before committing mana or cooldowns.
     if let (
         Some(p),
         SkillCaster::Item {
@@ -924,6 +994,11 @@ pub fn cast(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             }
         }
     }
+    let now = now_ms();
+    start_global_cooldown(server, skill, caster, now);
+    caster.with_unit(|u| u.unit_mut().skill_state.skill_task = None);
+    consume_mana(server, skill, caster);
+    start_skill_cooldown(server, skill, caster, now);
     if t.channeling_time > 0 {
         start_channeling(server, skill, ctx);
     } else {
@@ -2030,16 +2105,25 @@ pub fn end_skill(server: &GameServer, skill: &SkillRef, caster: &WorldObject) {
     }
 }
 
-fn reset_cooldown_if_ignored(server: &GameServer, skill: &SkillRun, caster: &WorldObject) {
+pub(super) fn reset_cooldown_if_ignored(
+    server: &GameServer,
+    skill: &SkillRun,
+    caster: &WorldObject,
+) {
     if let Some(o) = owner_character(server, caster) {
         if o.data().skill_char.ignore_skill_cooldowns {
+            let tag = skill.template.cooldown_tag_id.max(0) as u32;
+            caster.with_unit(|u| {
+                u.unit_mut()
+                    .cooldowns
+                    .remove_skill_cooldown(skill.template.id, tag);
+            });
             o.send(SCSkillCooldownResetPacket {
-                obj_id: o.obj_id,
+                obj_id: caster.obj_id(),
                 skill_id: skill.template.id,
-                tag_id: 0,
+                tag_id: tag,
                 gcd: false,
             });
-            caster.with_unit(|u| u.unit_mut().cooldowns.remove_cooldown(skill.template.id));
         }
     }
 }
@@ -2472,3 +2556,7 @@ mod owned_npc_target_tests;
 #[cfg(test)]
 #[path = "modifier_flow_tests.rs"]
 mod modifier_flow_tests;
+
+#[cfg(test)]
+#[path = "cooldown_tag_flow_tests.rs"]
+mod cooldown_tag_flow_tests;
