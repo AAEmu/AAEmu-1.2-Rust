@@ -27,7 +27,7 @@ fn data() -> GameData {
     let mut data = GameData::empty();
     data.experience = test_experience(55);
     data.formulas = crate::systems::vehicles::stats::tests::formulas(
-        &[(1, "100000", 14, 5), (2, "1000", 15, 5)],
+        &[(1, "100000", 14, 0), (2, "1000", 15, 0)],
         &[],
     );
     data
@@ -627,7 +627,7 @@ async fn modifier_area_buff_expands_real_target_selection_in_meters() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn modifier_channel_packet_and_ticks_share_a_snapshot_of_duration() {
     for boosted in [false, true] {
         let mut data = data();
@@ -672,13 +672,19 @@ async fn modifier_channel_packet_and_ticks_share_a_snapshot_of_duration() {
         let wire_duration = i16::from_le_bytes(fired[17..19].try_into().unwrap());
         assert_eq!(wire_duration, if boosted { 50 } else { 30 });
         skills::buffs::remove_buff(&server, &WorldObject::from(&player), 5326);
-        tokio::time::sleep(Duration::from_millis(270)).await;
+        // Install the spawned timers, then visit each deadline. Wall-clock sleeps
+        // can skip a tick under unrelated machine load and don't test this snapshot.
+        tokio::task::yield_now().await;
+        for _ in 0..5 {
+            tokio::time::advance(Duration::from_millis(50)).await;
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_millis(20)).await;
+        tokio::task::yield_now().await;
         assert_eq!(player.data().unit.skill_state.skill_task.is_some(), boosted);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        while player.data().unit.skill_state.skill_task.is_some()
-            && tokio::time::Instant::now() < deadline
-        {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        for step in [30, 50, 50, 50] {
+            tokio::time::advance(Duration::from_millis(step)).await;
+            tokio::task::yield_now().await;
         }
         assert!(player.data().unit.skill_state.skill_task.is_none());
         let packets = effects(&mut client);
