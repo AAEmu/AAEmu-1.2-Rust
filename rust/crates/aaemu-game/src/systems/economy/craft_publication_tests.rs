@@ -31,6 +31,9 @@ impl CraftHooks for CraftQuest {
         // already own spawn_lock here and the following quest callback would deadlock.
         server.systems.economy.wait_until_operation_blocked();
         events::on_craft(server, player, craft_id);
+        // Run the queued component while this callback still owns the outer item
+        // scope, so the actual quest-driven spawn contends with expired cleanup.
+        server.systems.quests.run_queued_evaluations(server);
     }
 }
 
@@ -62,8 +65,8 @@ async fn expired_source_item_doodad_contends_with_craft_quest_npc_spawn() {
     });
     for (id, step, spawner) in [
         (10, kind::START, 0),
-        (11, kind::PROGRESS, 0),
-        (12, kind::READY, 10),
+        (11, kind::PROGRESS, 10),
+        (12, kind::READY, 0),
     ] {
         q.add_component(QuestComponentTemplate {
             id,
@@ -156,10 +159,11 @@ async fn expired_source_item_doodad_contends_with_craft_quest_npc_spawn() {
             NpcSpawnerDef {
                 base,
                 count: 1,
-                npc_spawner_ids: Vec::new(),
+                npc_spawner_ids: vec![10],
             },
         )
         .unwrap();
+    assert_eq!(manager.get_npc_spawner(10).len(), 1);
     events::add_quest(&server, &player, 1, false);
     server.systems.quests.run_queued_evaluations(&server);
     assert_eq!(player.data().quests.active[0].step, kind::PROGRESS);
@@ -237,6 +241,7 @@ async fn expired_source_item_doodad_contends_with_craft_quest_npc_spawn() {
         1
     );
     assert_eq!(player.data().quests.active[0].step, kind::READY);
+    assert_eq!(player.data().quests.active[0].objectives[0], 1);
     let npcs = world.all_npcs();
     assert_eq!(npcs.len(), 1);
     assert_eq!(npcs[0].data().unit.template_id, 500);

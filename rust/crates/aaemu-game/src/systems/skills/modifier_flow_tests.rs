@@ -427,7 +427,9 @@ async fn modifier_existing_skill_damage_is_still_applied_once() {
     add_boost(
         &mut data,
         901,
-        vec![bonus(UnitAttribute::MainhandDps, 100_000)],
+        // Keep both f32 weapon-damage endpoints exact before floor/ceil, so
+        // random sampling cannot obscure whether the modifier was applied once.
+        vec![bonus(UnitAttribute::MainhandDps, 80_000)],
     );
     let mut damage = skills::tests::damage_effect(1, 0);
     damage.use_fixed_damage = false;
@@ -449,11 +451,18 @@ async fn modifier_existing_skill_damage_is_still_applied_once() {
     );
     client.drain();
     cast(&server, &player, npc.obj_id, &skill);
-    assert_eq!(effects(&mut client), vec![(npc.obj_id, 100)]);
+    assert_eq!(effects(&mut client), vec![(npc.obj_id, 80)]);
+    assert_eq!(npc.data().unit.hp, 920);
     apply_boost(&server, &player, 900);
     client.drain();
     cast(&server, &player, npc.obj_id, &skill);
-    assert_eq!(effects(&mut client), vec![(npc.obj_id, 110)]);
+    assert_eq!(effects(&mut client), vec![(npc.obj_id, 88)]);
+    assert_eq!(npc.data().unit.hp, 832);
+    skills::buffs::remove_buff(&server, &WorldObject::from(&player), 900);
+    client.drain();
+    cast(&server, &player, npc.obj_id, &skill);
+    assert_eq!(effects(&mut client), vec![(npc.obj_id, 80)]);
+    assert_eq!(npc.data().unit.hp, 752);
 }
 
 #[tokio::test]
