@@ -502,9 +502,74 @@ pub fn buff_ab_level(
 /// `UnitHooks.on_buff_event`: the inline C# behaviour around `_effects` changes.
 pub fn on_buff_event(server: &GameServer, owner: &WorldObject, event: &BuffEvent) {
     match event {
-        BuffEvent::Started(b) => on_started(server, owner, b),
-        BuffEvent::Refreshed(b) => on_refreshed(server, owner, b),
+        BuffEvent::Started(b) | BuffEvent::Refreshed(b) => {
+            // An earlier event in the same batch can already have removed this effect.
+            if get_buff(owner, b.index).is_none() {
+                return;
+            }
+            if matches!(event, BuffEvent::Started(_)) {
+                on_started(server, owner, b);
+            } else {
+                on_refreshed(server, owner, b);
+            }
+            remove_broken_buffs(server, owner);
+        }
         BuffEvent::Removed(b) => on_removed(server, owner, b),
+    }
+}
+
+/// Reconcile authored breaker tags after an accepted start/refresh, including effects
+/// applied by buff timers. Immunity/requirements/tolerance/stack rejection happens before
+/// these events. The native loaders establish the relation's direction; the acceptance
+/// boundary here is server policy, not a claimed native apply-vs-tick timing result.
+fn remove_broken_buffs(server: &GameServer, owner: &WorldObject) {
+    let data = &server.game_data.systems.skills;
+    let mut broken: Vec<Buff> = owner.with_base_unit(|u| {
+        let effects = &u.buffs().effects;
+        effects
+            .iter()
+            .filter(|b| !b.is_ended())
+            .filter(|b| {
+                data.buff_breakers.get(&b.template.id).is_some_and(|tags| {
+                    effects.iter().any(|other| {
+                        other.index != b.index
+                            && !other.is_ended()
+                            && data
+                                .buff_tags(other.template.id)
+                                .iter()
+                                .any(|t| tags.contains(t))
+                    })
+                })
+            })
+            .cloned()
+            .collect()
+    });
+    // Decide from one accepted snapshot. Mutual breakers and duplicate tags must not
+    // depend on HashMap order, or on callbacks changing the remaining candidates.
+    broken.sort_unstable_by_key(|b| b.index);
+    for b in broken {
+        exit(server, owner, b.index, false);
+        // A batch may contain an effect whose Started hook has not run yet. Finish its
+        // explicit exit now; the stale Started event above must not revive its controller.
+        if get_buff(owner, b.index).is_some_and(|e| e.state == effect_state::FINISHING) {
+            schedule_effect(server, owner, b.index, false);
+        }
+        // Remove first: stopping a channel can itself remove its channel/toggle buffs.
+        // Only cancel the channel that owns this buff, outside all object/controller locks.
+        let channel = owner
+            .with_unit(|u| u.unit().skill_state.skill_task.clone())
+            .flatten()
+            .filter(|task| {
+                b.caster_obj_id == owner.obj_id()
+                    && task.skill.template.id == b.skill_id
+                    && (task.skill.template.channeling_buff_id == b.template.id
+                        || task.skill.template.toggle_buff_id == b.template.id)
+            });
+        if let Some(task) = channel {
+            if let super::state::SkillTaskKind::EndChanneling { channel_doodad } = task.kind {
+                super::skill::stop(server, &task.skill, owner, channel_doodad);
+            }
+        }
     }
 }
 
@@ -1769,3 +1834,7 @@ pub type Attr = UnitAttribute;
 #[cfg(test)]
 #[path = "buff_removal_tests.rs"]
 mod buff_removal_tests;
+
+#[cfg(test)]
+#[path = "buff_breaker_tests.rs"]
+mod buff_breaker_tests;
