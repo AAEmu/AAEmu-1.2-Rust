@@ -383,16 +383,14 @@ async fn taking_loot_from_far_away_is_refused() {
         .write_u16(0)
         .write_u16(0);
     run::<CSLootItemPacket>(&mut w, 0, s.as_bytes());
-    let refused = SCLootItemFailedPacket {
-        error_message: super::error_message::TOO_FAR_AWAY,
-        loot_owner_type: 1,
-        loot_owner_obj_id: NPC_OBJ,
-        item_index: 1,
-        item_template_id: super::tests::STACK,
-    };
+    // Native 1.2 reader 397C2F00: i16 error, u64 lootable, u32 item template.
+    // TOO_FAR_AWAY=154, index=1, NPC=1/0x200, STACK=1000; exactly 14 bytes.
     assert_eq!(
         w.a.drain(),
-        vec![(sc::SCLootItemFailedPacket, body(&refused))],
+        vec![(
+            sc::SCLootItemFailedPacket,
+            vec![0x9a, 0, 1, 0, 1, 0, 0, 2, 0, 0, 0xe8, 3, 0, 0]
+        )],
         "the out-of-range take must be refused with TOO_FAR_AWAY"
     );
     assert_eq!(
@@ -461,16 +459,13 @@ async fn full_bag_fails_and_restores_the_entry() {
     assert!(!LootManager::try_take_loot(
         &w.server, &w.pa, NPC_OBJ, 1, false
     ));
-    let failed = SCLootItemFailedPacket {
-        error_message: super::error_message::BAG_FULL,
-        loot_owner_type: 1,
-        loot_owner_obj_id: NPC_OBJ,
-        item_index: 1,
-        item_template_id: super::tests::STACK,
-    };
+    // Native 1.2 reader 397C2F00: BAG_FULL=25, then the same lootable and template.
     assert_eq!(
         w.a.drain(),
-        vec![(sc::SCLootItemFailedPacket, body(&failed))]
+        vec![(
+            sc::SCLootItemFailedPacket,
+            vec![25, 0, 1, 0, 1, 0, 0, 2, 0, 0, 0xe8, 3, 0, 0]
+        )]
     );
     assert_eq!(w.server.systems.economy.loot.item_count(NPC_OBJ), 3);
 }

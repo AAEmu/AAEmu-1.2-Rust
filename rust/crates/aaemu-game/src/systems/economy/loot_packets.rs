@@ -120,7 +120,7 @@ impl Marshal for SCLootItemTookPacket {
 /// itemTemplateId)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SCLootItemFailedPacket {
-    /// `ErrorMessageType` (written as an `int`).
+    /// Native 1.2 `ErrorMessage` is i16 (reader 397C2F00), unlike the C# int.
     pub error_message: i16,
     pub loot_owner_type: u16,
     pub loot_owner_obj_id: u32,
@@ -134,7 +134,7 @@ packet_def!(
 );
 impl Marshal for SCLootItemFailedPacket {
     fn write(&self, s: &mut PacketStream) {
-        s.write_i32(i32::from(self.error_message))
+        s.write_i16(self.error_message)
             .write_u16(self.item_index)
             .write_u16(self.loot_owner_type)
             .write_bc(self.loot_owner_obj_id)
@@ -298,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn took_failed_state_packets_are_byte_exact() {
+    fn took_and_state_packets_are_byte_exact() {
         let took = SCLootItemTookPacket {
             item_template_id: 0x0102_0304,
             item_index: 2,
@@ -309,17 +309,6 @@ mod tests {
         assert_eq!(
             body(&took),
             vec![4, 3, 2, 1, 2, 0, 1, 0, 0xef, 0xcd, 0xab, 0, 5, 0, 0, 0]
-        );
-        let failed = SCLootItemFailedPacket {
-            error_message: 25,
-            loot_owner_type: 1,
-            loot_owner_obj_id: 0x10,
-            item_index: 3,
-            item_template_id: 9,
-        };
-        assert_eq!(
-            body(&failed),
-            vec![25, 0, 0, 0, 3, 0, 1, 0, 0x10, 0, 0, 0, 9, 0, 0, 0]
         );
         let st = SCLootableStatePacket {
             loot_owner_type: 1,
@@ -332,6 +321,37 @@ mod tests {
             looting: 2,
         };
         assert_eq!(body(&ls), vec![7, 0, 0, 2]);
+    }
+
+    #[test]
+    fn loot_item_failed_matches_native_1_2_i16_error_and_14_byte_body() {
+        // Native 1.2 x2game12.c, reader 397C2F00 (SC 0xfa): ErrorMessage:i16,
+        // lootable:u64 (index:u16, owner:u16, object:bc, padding:u8), type:u32.
+        // Distinct nonzero fields expose any shift; the negative error pins signed width.
+        for (error_message, expected) in [
+            (
+                25,
+                [
+                    0x19, 0, 0x34, 0x12, 0x78, 0x56, 0xde, 0xbc, 0x9a, 0, 0x78, 0x56, 0x34, 0x12,
+                ],
+            ),
+            (
+                -257,
+                [
+                    0xff, 0xfe, 0x34, 0x12, 0x78, 0x56, 0xde, 0xbc, 0x9a, 0, 0x78, 0x56, 0x34, 0x12,
+                ],
+            ),
+        ] {
+            let actual = body(&SCLootItemFailedPacket {
+                error_message,
+                item_index: 0x1234,
+                loot_owner_type: 0x5678,
+                loot_owner_obj_id: 0x009a_bcde,
+                item_template_id: 0x1234_5678,
+            });
+            assert_eq!(actual.len(), 14);
+            assert_eq!(actual, expected);
+        }
     }
 
     #[test]

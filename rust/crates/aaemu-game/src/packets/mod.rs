@@ -92,8 +92,8 @@ mod tests {
     }
 
     /// Every `RegisterPacket` call of the C# `GameNetwork()` constructor is registered in Rust
-    /// under the same (level, opcode) with the same packet class name, and Rust registers
-    /// nothing the C# does not. The C# table is a checked-in snapshot
+    /// under the same (level, opcode) with the same packet class name, except for documented
+    /// native 1.2 corrections. The C# table is a checked-in historical snapshot
     /// (`tests/fixtures/csharp_game_network_registry.tsv`) taken while the C# sources existed.
     #[test]
     fn registry_matches_csharp_game_network() {
@@ -111,6 +111,13 @@ mod tests {
             let name = cols.next().unwrap().to_string();
             expected.insert((level, opcode), name);
         }
+        // Native 1.2 ReturnMailById (3948B630 -> 393CD290, serializer 397BA450)
+        // sends 0xa3. C# called that slot ReportSpam and stranded ReturnMail on 0xfff.
+        // Preserve the historical fixture while checking the corrected live dispatch.
+        assert_eq!(
+            expected.insert((1, 0x0a3), "CSReturnMailPacket".into()),
+            Some("CSReportSpamPacket".into())
+        );
         assert!(
             expected.len() > 250,
             "parsed only {} registrations",
@@ -131,8 +138,6 @@ mod tests {
             }
         }
         for ((level, opcode), reg) in r.iter() {
-            // `CSReturnMailPacket` is commented out in C# (opcode 0xfff, never sent by 1.2):
-            // registering it is harmless.
             // `CSTakeScheduleItemPacket` is a 1.2 client packet the C# never registered
             // (`systems::npcs::schedule_item_packets`, opcode read off the client).
             // `CSRankSnapshotPacket` (0x130), `CSRequestSetBountyMoneyPacket` (0x11f),

@@ -239,16 +239,6 @@ sc_packet!(
     }
 );
 
-cs_packet!(
-    /// `CSReportSpamPacket` (logged only, as in C#).
-    CSReportSpamPacket { mail_id: i64 }
-    read |s| { Ok(Self { mail_id: s.read_i64()? }) }
-    handle |self, server, conn| {
-        tracing::debug!("ReportSpam, mailId: {}", self.mail_id);
-        Ok(())
-    }
-);
-
 // ---- Achievements (no achievement manager in the 1.2 C#; the Rust manager sends all of these
 // except `SCAchievementResetedPacket`) ----
 
@@ -317,7 +307,6 @@ impl SCAchievementResetedPacket {
 
 pub fn register(reg: &mut PacketRegistry) {
     reg.register::<CSUpdateDominionTaxRatePacket>(LEVEL_PLAIN, cs::CSUpdateDominionTaxRatePacket);
-    reg.register::<CSReportSpamPacket>(LEVEL_PLAIN, cs::CSReportSpamPacket);
 }
 
 #[cfg(test)]
@@ -713,11 +702,6 @@ mod tests {
                 id: 0x0102,
                 tax_rate: 10
             }
-        );
-        let mut s = PacketStream::from_bytes((-5i64).to_le_bytes().to_vec());
-        assert_eq!(
-            CSReportSpamPacket::read(&mut s).unwrap(),
-            CSReportSpamPacket { mail_id: -5 }
         );
     }
 }
