@@ -14,6 +14,9 @@
 //!                         [--scenario load]
 //! aaemu-testclient verify --suite file.vtest [--login H:P] [--password P] [--list-bots]
 //!                         Run one live verification suite (see Docs/wiki/Verification.md).
+//! aaemu-testclient control --describe
+//! aaemu-testclient control --config private.json --login H:P --capture game.jsonl
+//!                          [--deadline-ms 570000]
 //! ```
 //!
 //! Settings come from `--config` (JSON, see `testclient.example.json`), then the flags. Keep
@@ -31,6 +34,8 @@ use aaemu_testclient::verify;
 use anyhow::{bail, Context};
 use tracing_subscriber::EnvFilter;
 
+mod control;
+
 struct Args {
     cmd: String,
     flags: HashMap<String, String>,
@@ -38,7 +43,7 @@ struct Args {
 
 impl Args {
     fn parse() -> anyhow::Result<Self> {
-        const SWITCHES: &[&str] = &["list-bots"];
+        const SWITCHES: &[&str] = &["list-bots", "describe"];
         let mut it = std::env::args().skip(1);
         let cmd = it.next().unwrap_or_else(|| "help".into());
         let argv: Vec<String> = it.collect();
@@ -73,10 +78,28 @@ impl Args {
 }
 
 fn bot_config(args: &Args) -> anyhow::Result<BotConfig> {
+    bot_config_with(args, read_config)
+}
+
+fn read_config(path: &str) -> anyhow::Result<String> {
+    std::fs::read_to_string(path).with_context(|| format!("reading {path}"))
+}
+
+fn control_config(
+    args: &Args,
+    read: impl FnOnce(&str) -> anyhow::Result<String>,
+) -> anyhow::Result<BotConfig> {
+    // Discard the entire cause chain. Serde errors can quote a value supplied for password
+    // (e.g. an unquoted number), and main's Result termination uses Debug formatting.
+    bot_config_with(args, read).map_err(|_| anyhow::anyhow!("invalid control config"))
+}
+
+fn bot_config_with(
+    args: &Args,
+    read: impl FnOnce(&str) -> anyhow::Result<String>,
+) -> anyhow::Result<BotConfig> {
     let mut v: serde_json::Value = match args.get("config") {
-        Some(p) => serde_json::from_str(
-            &std::fs::read_to_string(p).with_context(|| format!("reading {p}"))?,
-        )?,
+        Some(p) => serde_json::from_str(&read(p)?)?,
         None => serde_json::json!({}),
     };
     let obj = v.as_object_mut().context("config must be a JSON object")?;
@@ -188,11 +211,24 @@ fn diff_files(a: &Path, b: &Path, cfg: &DiffConfig, la: &str, lb: &str) -> anyho
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
         )
         .init();
     let args = Args::parse()?;
+    if args.cmd == "control" {
+        if args.has("describe") {
+            println!("{}", control::describe());
+            return Ok(());
+        }
+        args.get("config")
+            .context("control requires --config <private config>")?;
+        let cfg = control_config(&args, read_config)?;
+        let capture = Path::new(args.get("capture").context("control requires --capture")?);
+        let deadline_ms = args.get("deadline-ms").unwrap_or("570000").parse()?;
+        return control::run(cfg, capture, deadline_ms).await;
+    }
     let kind: Kind = args.get("scenario").unwrap_or("full").parse()?;
     match args.cmd.as_str() {
         "run" => {
@@ -285,4 +321,35 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod control_config_tests {
+    use super::*;
+
+    #[test]
+    fn numeric_password_never_reaches_any_user_visible_error_format() {
+        const SECRET: &str = "782643915027481";
+        let args = Args {
+            cmd: "control".into(),
+            flags: HashMap::from([("config".into(), "private.json".into())]),
+        };
+        let text = format!(
+            r#"{{"login":"127.0.0.1:1","user":"owner","character":"Owner","password":{SECRET}}}"#
+        );
+        let error = control_config(&args, |_| Ok(text)).unwrap_err();
+        for visible in [
+            format!("{error}"),
+            format!("{error:#}"),
+            format!("{error:?}"),
+        ] {
+            assert!(visible.contains("invalid control config"));
+            assert!(!visible.contains(SECRET));
+        }
+        assert_eq!(error.chain().count(), 1);
+        // File/parse/flag errors are also scrubbed rather than attached as causes.
+        let error = control_config(&args, |_| anyhow::bail!("private cause {SECRET}")).unwrap_err();
+        assert!(!format!("{error:?}").contains(SECRET));
+        assert_eq!(error.chain().count(), 1);
+    }
 }
