@@ -557,6 +557,10 @@ async fn open_lobby(
         p.is_sc(sc::SCCharacterListPacket) && p.body.first() == Some(&1)
     })
     .await?;
+    ensure!(
+        game.state.char_list_done,
+        "incomplete character-list metadata"
+    );
     game.drain(Duration::from_millis(300), Duration::from_secs(2))
         .await?;
     r.end(s, format!("{} character(s)", game.state.characters.len()));
@@ -610,6 +614,20 @@ pub struct ControlSession {
     _login: LoginClient,
 }
 
+impl ControlSession {
+    /// Release this session's stream, login, and both game halves without application logout.
+    pub async fn disconnect_hard(self) {
+        let Self {
+            game,
+            stream,
+            _login: login,
+        } = self;
+        drop(stream);
+        drop(login);
+        game.disconnect_hard().await;
+    }
+}
+
 fn control_character(
     characters: &[crate::game::CharInfo],
     requested: &str,
@@ -630,6 +648,70 @@ fn control_character(
 mod control_character_tests {
     use super::control_character;
     use crate::game::CharInfo;
+
+    // Literal SCCharacterList wire body: last=true, count=2. First entry has a full
+    // equipment item (55-byte detail), nonzero BodyPart ids, faction text, and a Face
+    // model with a three-byte modifier. Second entry has a Hair model. No server encoder
+    // or preconstructed CharInfo vector participates in this regression.
+    const TWO_CHARACTERS: &str = concat!(
+        "01020a0000000500466972737401020a6f000000de0000004d00000054000000070046616374696f6e04000000050000",
+        "004f1a0000887766554433221101020100000001000102030405060708090a0b0c0d0e0f101112131415161718191a1b",
+        "1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435360b000000000000000c0000000d0000000e0f000000",
+        "000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "000000000000000000000000000000000000000000000000000000000000000000000000fb030000fc030000fd030000",
+        "fe030000ff0300000004000001040000000000000000000001020300a000000000000000400100000000000000f04103",
+        "5b0000005c0000005d0000005e0000000000003f0000803f0000803e01000200640000000000003f650000000000003f",
+        "660000000000003f670000000000003f6e0000006f000000700000000000403f78000000790000007a0000007b000000",
+        "7c000000030007080964006500000000000000020067000000000000006800000069000000000000006a0000006b0000",
+        "00000000006c000000000000006d000000000000006e006f000000700071000000000000007200000000000000730000",
+        "0000000000740000007500000000000000760000000000000077000000000000000178000000790000007a0000007b00",
+        "000000000000002a00000005004f776e657201020a6f000000de0000004d00000054000000070046616374696f6e0400",
+        "000005000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "00000000000000000000000000000000000000000000000000000000000000000000fb030000fc030000fd030000fe03",
+        "0000ff0300000004000001040000000000000000000001020300a000000000000000400100000000000000f041015b00",
+        "000064006500000000000000020067000000000000006800000069000000000000006a0000006b000000000000006c00",
+        "0000000000006d000000000000006e006f00000070007100000000000000720000000000000073000000000000007400",
+        "00007500000000000000760000000000000077000000000000000178000000790000007a0000007b0000000000000000",
+    );
+
+    #[test]
+    fn native_two_character_packet_selects_its_second_existing_id() {
+        use crate::game::{GameState, Packet, LEVEL_GAME};
+        use aaemu_game::opcodes::sc;
+        let body = hex::decode(TWO_CHARACTERS).unwrap();
+        let mut state = GameState::default();
+        state
+            .observe(&Packet {
+                level: LEVEL_GAME,
+                opcode: sc::SCCharacterListPacket,
+                body: body.clone(),
+            })
+            .unwrap();
+        assert!(state.char_list_done);
+        assert_eq!(
+            state.characters.iter().map(|c| c.id).collect::<Vec<_>>(),
+            [10, 42]
+        );
+        assert_eq!(
+            control_character(&state.characters, "Owner", None).unwrap(),
+            42
+        );
+        assert_eq!(
+            control_character(&state.characters, "ignored", Some(42)).unwrap(),
+            42
+        );
+        assert_eq!(state.characters[1].name, "Owner");
+        let mut truncated = GameState::default();
+        assert!(truncated
+            .observe(&Packet {
+                level: LEVEL_GAME,
+                opcode: sc::SCCharacterListPacket,
+                body: body[..body.len() - 1].to_vec()
+            })
+            .is_err());
+        assert!(truncated.characters.is_empty());
+        assert!(!truncated.char_list_done);
+    }
 
     #[test]
     fn control_never_falls_back_to_first_or_creates_a_missing_character() {
@@ -696,16 +778,32 @@ pub async fn control_tp(
     y: f32,
     z: f32,
     clock: u32,
+    until: tokio::time::Instant,
 ) -> anyhow::Result<()> {
-    game.state.last_teleport = None;
-    game.chat(0, &format!("/move {x} {y} {z}")).await?;
-    game.wait_sc(sc::SCTeleportUnitPacket).await?;
-    let at = game.state.self_pos;
-    game.teleport_ended(at).await?;
-    game.move_to(at, clock).await?;
-    game.drain(Duration::from_millis(1500), Duration::from_secs(8))
-        .await?;
-    Ok(())
+    tokio::time::timeout_at(until, async {
+        game.state.last_teleport = None;
+        game.chat(0, &format!("/move {x} {y} {z}")).await?;
+        game.wait_sc(sc::SCTeleportUnitPacket).await?;
+        let at = game
+            .state
+            .last_teleport
+            .context("teleport position missing")?;
+        game.teleport_ended(at).await?;
+        game.move_to(at, clock).await?;
+        // The completion boundary is the received teleport and the two sent acknowledgments.
+        // Ambient traffic is not an action acknowledgment and need never become quiet.
+        // Pump any immediate replies for a small slice of the *remaining* action budget.
+        let remaining = until.saturating_duration_since(tokio::time::Instant::now());
+        let max = remaining
+            .saturating_sub(Duration::from_millis(20))
+            .min(Duration::from_millis(100));
+        if !max.is_zero() {
+            game.drain(Duration::from_millis(10), max).await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("teleport command deadline")?
 }
 
 async fn run_inner(
@@ -2259,5 +2357,148 @@ mod mate_revive_tests {
         assert!("x".parse::<ReviveMethod>().is_err());
         assert_eq!("mate-revive".parse::<Kind>().unwrap(), Kind::MateRevive);
         assert_eq!("cometsboon".parse::<Kind>().unwrap(), Kind::CometsBoon);
+    }
+}
+
+#[cfg(test)]
+mod control_session_tests {
+    use super::*;
+    use aaemu_commons::net::FrameCodec;
+    use aaemu_game::opcodes::cs;
+    use futures::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio_util::codec::Framed;
+
+    fn frame(opcode: u16, body: &[u8]) -> Vec<u8> {
+        let mut frame = vec![0xdd, 1, 0, 0];
+        frame.extend_from_slice(&opcode.to_le_bytes());
+        frame.extend_from_slice(body);
+        frame
+    }
+
+    #[tokio::test]
+    async fn teleport_completes_under_continuous_ambient_traffic() {
+        let (io, peer) = tokio::io::duplex(64 * 1024);
+        let rec = Recorder::new(true);
+        let mut game = GameClient::from_io(io, rec.clone());
+        game.state.self_obj = 42;
+        let (stop, mut stopped) = tokio::sync::oneshot::channel();
+        let peer = tokio::spawn(async move {
+            let mut peer = Framed::new(peer, FrameCodec);
+            let chat = peer.next().await.unwrap().unwrap();
+            assert_eq!(
+                u16::from_le_bytes([chat[4], chat[5]]),
+                cs::CSSendChatMessagePacket
+            );
+            let mut teleport = PacketStream::new();
+            teleport
+                .write_u8(0)
+                .write_i16(0)
+                .write_position(10.0, 20.0, 30.0)
+                .write_f32(30.0);
+            peer.send(frame(sc::SCTeleportUnitPacket, teleport.as_bytes()))
+                .await
+                .unwrap();
+            let mut ambient = tokio::time::interval(Duration::from_millis(1));
+            let mut sent = 0;
+            let mut acks = Vec::new();
+            let mut stop_requested = false;
+            loop {
+                if stop_requested && acks.len() == 2 {
+                    return (sent, acks);
+                }
+                tokio::select! {
+                    _ = &mut stopped, if !stop_requested => stop_requested=true,
+                    _ = ambient.tick() => {
+                        peer.send(frame(sc::SCErrorMsgPacket, &[7,0])).await.unwrap();
+                        sent += 1;
+                    },
+                    incoming = peer.next() => {
+                        let bytes = incoming.unwrap().unwrap();
+                        acks.push(u16::from_le_bytes([bytes[4], bytes[5]]));
+                    },
+                }
+            }
+        });
+        let until = tokio::time::Instant::now() + Duration::from_secs(5);
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            control_tp(&mut game, 10.0, 20.0, 30.0, 1500, until),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        // The fixture keeps draining acknowledgments after this stop signal.
+        let _ = stop.send(());
+        let (sent, acks) = tokio::time::timeout(Duration::from_secs(1), peer)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(sent > 1);
+        assert_eq!(acks, [cs::CSTeleportEndedPacket, cs::CSMoveUnitPacket]);
+        assert_eq!(game.state.observed_self_pos, Some((10.0, 20.0, 30.0)));
+        game.disconnect_hard().await;
+    }
+
+    #[tokio::test]
+    async fn hard_close_releases_real_game_reader_writer_and_stream_without_logout() {
+        // Ephemeral loopback fixtures only: no AAEmu process, login handshake, or database.
+        let game_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let login_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let rec = Recorder::new(true);
+        let mut game = GameClient::connect(
+            &game_listener.local_addr().unwrap().to_string(),
+            rec.clone(),
+        )
+        .await
+        .unwrap();
+        let mut game_peer = game_listener.accept().await.unwrap().0;
+        let stream = StreamClient::connect(
+            &stream_listener.local_addr().unwrap().to_string(),
+            rec.clone(),
+        )
+        .await
+        .unwrap();
+        let mut stream_peer = stream_listener.accept().await.unwrap().0;
+        let login = LoginClient::connect(
+            &login_listener.local_addr().unwrap().to_string(),
+            rec.clone(),
+        )
+        .await
+        .unwrap();
+        let mut login_peer = login_listener.accept().await.unwrap().0;
+        let packet = frame(sc::SCErrorMsgPacket, &[7, 0]);
+        game_peer
+            .write_all(&(packet.len() as u16).to_le_bytes())
+            .await
+            .unwrap();
+        game_peer.write_all(&packet).await.unwrap();
+        game.recv_within(Duration::from_secs(1))
+            .await
+            .unwrap()
+            .unwrap();
+        let session = ControlSession {
+            game,
+            stream,
+            _login: login,
+        };
+        tokio::time::timeout(Duration::from_secs(1), session.disconnect_hard())
+            .await
+            .unwrap();
+        for peer in [&mut game_peer, &mut stream_peer, &mut login_peer] {
+            let mut bytes = Vec::new();
+            tokio::time::timeout(Duration::from_secs(1), peer.read_to_end(&mut bytes))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                bytes.is_empty(),
+                "close must emit no application logout or other packets"
+            );
+        }
+        assert_eq!(rec.events().len(), 1);
+        assert_eq!(rec.events()[0].opcode, sc::SCErrorMsgPacket);
     }
 }

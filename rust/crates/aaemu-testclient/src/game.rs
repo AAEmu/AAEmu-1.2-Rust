@@ -12,7 +12,7 @@ use aaemu_commons::PacketStream;
 use aaemu_game::opcodes::{cs, name_of, pp, sc};
 use anyhow::{anyhow, bail, Context};
 use futures::{SinkExt, StreamExt};
-use tokio::net::tcp::OwnedWriteHalf;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -62,6 +62,80 @@ pub fn packet_name(dir: Dir, level: u8, opcode: u16) -> &'static str {
 pub struct CharInfo {
     pub id: u32,
     pub name: String,
+}
+
+/// Consume one complete native `Character.Write` record. The list has no entry lengths;
+/// stopping after id/name would parse the next character from equipment or model bytes.
+fn read_character(s: &mut PacketStream) -> anyhow::Result<CharInfo> {
+    use aaemu_game::models::container::{equip_slot, EQUIPMENT_CONTAINER_SIZE};
+    use aaemu_game::models::item::detail_body_len;
+    use aaemu_game::models::unit_model::UnitCustomModelParams;
+
+    let id = s.read_u32()?;
+    let name = s.read_string()?;
+    s.read_u8()?; // race
+    s.read_u8()?; // gender
+    s.read_u8()?; // level
+    s.read_i32()?; // hp
+    s.read_i32()?; // mp
+    s.read_u32()?; // zone
+    s.read_u32()?; // faction
+    s.read_string()?; // faction name (variable length)
+    s.read_u32()?; // expedition
+    s.read_u32()?; // family
+    for slot in 0..EQUIPMENT_CONTAINER_SIZE {
+        let template = s.read_u32()?;
+        // Native appearance slots use BodyPart.Write (template only), including nonzero ids.
+        if template == 0 || (equip_slot::FACE..=equip_slot::BEARD).contains(&slot) {
+            continue;
+        }
+        s.read_u64()?; // instance id
+        s.read_u8()?; // grade
+        s.read_u8()?; // flags
+        s.read_i32()?; // count
+        let detail = s.read_u8()?;
+        let len = detail_body_len(detail);
+        anyhow::ensure!(detail == 0 || len != 0, "unknown equipment detail type");
+        s.read_bytes(len)?;
+        s.read_i64()?; // create time
+        s.read_i32()?; // lifespan
+        s.read_u32()?; // made unit id
+        s.read_u8()?; // world id
+        s.read_i64()?; // unsecure time
+        s.read_i64()?; // unpack time
+    }
+    s.read_bytes(3)?; // abilities
+    s.read_i64()?; // x
+    s.read_i64()?; // y
+    s.read_f32()?; // z
+    let _: UnitCustomModelParams = s.read()?;
+    s.read_i16()?; // labor
+    s.read_i64()?; // labor modified
+    s.read_i16()?; // dead count
+    s.read_i64()?; // dead time
+    s.read_i32()?; // rez wait
+    s.read_i64()?; // rez time
+    s.read_i32()?; // rez penalty
+    s.read_i64()?; // last world leave
+    s.read_i64()?; // money
+    s.read_i64()?; // money amount
+    s.read_i16()?; // crime
+    s.read_i32()?; // infamy
+    s.read_i16()?; // trials
+    s.read_i64()?; // delete request
+    s.read_i64()?; // transfer request
+    s.read_i64()?; // delete delay
+    s.read_i32()?; // consumed labor
+    s.read_i64()?; // loyalty
+    s.read_i64()?; // money2
+    s.read_i64()?; // money amount
+    s.read_bool()?; // auto AA point
+    s.read_i32()?; // prev point
+    s.read_i32()?; // point
+    s.read_i32()?; // gift
+    s.read_i64()?; // updated
+    s.read_u8()?; // force name change
+    Ok(CharInfo { id, name })
 }
 
 /// A unit seen in `SCUnitStatePacket`.
@@ -317,12 +391,14 @@ impl GameState {
         } else if p.is_sc(sc::SCCharacterListPacket) {
             let last = s.read_bool()?;
             let n = s.read_u8()?;
-            if n > 0 {
-                // Only the first entry can be located without decoding a whole Character.
-                let id = s.read_u32()?;
-                let name = s.read_string()?;
-                if !st.characters.iter().any(|c| c.id == id) {
-                    st.characters.push(CharInfo { id, name });
+            // Parse atomically: a malformed later entry must not authorize a partial list.
+            let characters = (0..n)
+                .map(|_| read_character(&mut s))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            anyhow::ensure!(s.remaining() == 0, "trailing character-list bytes");
+            for character in characters {
+                if !st.characters.iter().any(|c| c.id == character.id) {
+                    st.characters.push(character);
                 }
             }
             st.char_list_done |= last;
@@ -472,7 +548,7 @@ impl GameState {
 }
 
 pub struct GameClient {
-    writer: Option<FramedWrite<OwnedWriteHalf, FrameCodec>>,
+    writer: Option<FramedWrite<Box<dyn AsyncWrite + Unpin + Send>, FrameCodec>>,
     reader: SocketReader,
     rx: mpsc::Receiver<Vec<u8>>,
     rec: Recorder,
@@ -513,6 +589,24 @@ impl GameClient {
             .with_context(|| format!("connecting to game server {addr}"))?;
         sock.set_nodelay(true)?;
         let (rd, wr) = sock.into_split();
+        Ok(Self::from_parts(rd, wr, rec))
+    }
+
+    /// Use the same packet/state client over an owned async transport (including in-memory
+    /// deterministic fixtures). Production TCP keeps its native owned socket halves.
+    pub fn from_io(
+        io: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        rec: Recorder,
+    ) -> Self {
+        let (rd, wr) = tokio::io::split(io);
+        Self::from_parts(rd, wr, rec)
+    }
+
+    fn from_parts(
+        rd: impl AsyncRead + Unpin + Send + 'static,
+        wr: impl AsyncWrite + Unpin + Send + 'static,
+        rec: Recorder,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(256);
         let reader = tokio::spawn(async move {
             let mut reader = FramedRead::new(rd, FrameCodec);
@@ -534,8 +628,8 @@ impl GameClient {
                 }
             }
         });
-        Ok(Self {
-            writer: Some(FramedWrite::new(wr, FrameCodec)),
+        Self {
+            writer: Some(FramedWrite::new(Box::new(wr), FrameCodec)),
             reader: SocketReader(Some(reader)),
             rx,
             rec,
@@ -546,7 +640,7 @@ impl GameClient {
             ping_every: Duration::from_secs(3),
             last_ping: None,
             started: Instant::now(),
-        })
+        }
     }
 
     pub fn recorder(&self) -> &Recorder {

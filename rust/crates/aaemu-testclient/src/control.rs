@@ -7,7 +7,7 @@
 //! tracing goes to stderr. Events preceding a response have `seq <= response.event_seq`.
 //! This boundary orders observations; it does not imply that a server action has settled.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::future::Future;
 use std::io::{BufRead, Write};
 use std::path::Path;
@@ -19,7 +19,7 @@ use aaemu_testclient::scenario::{self, BotConfig, ControlSession};
 use anyhow::{bail, ensure, Context};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 const PROTOCOL: &str = "aaemu-control/1";
@@ -31,6 +31,9 @@ const MAX_PUMP_MS: u64 = 5000;
 const MAX_DEADLINE_MS: u64 = 600_000;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+const INPUT_QUEUE: usize = 16;
+const OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+const OUTPUT_COUNT: usize = 4096;
 
 pub(crate) fn describe() -> Value {
     json!({
@@ -51,11 +54,15 @@ pub(crate) fn describe() -> Value {
             "id_bytes": 64, "commands": MAX_COMMANDS, "pump_ms": MAX_PUMP_MS,
             "command_ms": COMMAND_TIMEOUT.as_millis(),
             "connect_ms": CONNECT_TIMEOUT.as_millis(), "deadline_ms": MAX_DEADLINE_MS,
-            "event_queue_bytes": 8 * 1024 * 1024, "event_queue_count": 2048
+            "event_queue_bytes": 8 * 1024 * 1024, "event_queue_count": 2048,
+            "input_queue_count": INPUT_QUEUE, "output_queue_bytes": OUTPUT_BYTES,
+            "output_queue_count": OUTPUT_COUNT
         },
         "incremental_game_capture": true,
         "capture_create_new": true,
         "auth_frames_omitted": true,
+        "opaque_game_batches": "control fails closed; ordinary scenario captures unchanged",
+        "eof": "cancels active action and discards queued commands",
         "capture_start": "post-lobby character select/spawn (each session)",
         "handshake_before_network": true,
         "initial_character": "existing configured name, never first/create",
@@ -276,10 +283,42 @@ fn read_line(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>, &'static str>
     }
 }
 
-enum Input {
-    Line(Vec<u8>),
-    End,
-    Fault(&'static str),
+/// Terminal notification cannot sit behind queued gameplay. In particular EOF cancels
+/// the active action and invalidates every queued line before another action is polled.
+struct Input {
+    lines: mpsc::Receiver<Vec<u8>>,
+    terminal: watch::Receiver<Option<&'static str>>,
+}
+
+fn read_input(
+    mut reader: impl BufRead,
+    lines: mpsc::Sender<Vec<u8>>,
+    terminal: watch::Sender<Option<&'static str>>,
+) {
+    let reason = loop {
+        match read_line(&mut reader) {
+            Ok(Some(line)) => match lines.try_send(line) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => break "input_queue_limit",
+                Err(mpsc::error::TrySendError::Closed(_)) => return,
+            },
+            Ok(None) => break "eof",
+            Err(code) => break code,
+        }
+    };
+    terminal.send_replace(Some(reason));
+}
+
+async fn termination(terminal: &mut watch::Receiver<Option<&'static str>>) -> &'static str {
+    loop {
+        let reason = *terminal.borrow_and_update();
+        if let Some(reason) = reason {
+            return reason;
+        }
+        if terminal.changed().await.is_err() {
+            return "eof";
+        }
+    }
 }
 
 struct Output {
@@ -289,23 +328,13 @@ struct Output {
 
 /// Detached, bounded stdio workers avoid Tokio's uncancellable blocking stdin read keeping
 /// the runtime alive after deadline. They own no sockets and are never joined on shutdown.
-fn stdio() -> anyhow::Result<(mpsc::Receiver<Input>, mpsc::Sender<Output>)> {
-    let (input_tx, input_rx) = mpsc::channel(1);
+fn stdio() -> anyhow::Result<(Input, mpsc::Sender<Output>)> {
+    let (input_tx, input_rx) = mpsc::channel(INPUT_QUEUE);
+    let (terminal_tx, terminal_rx) = watch::channel(None);
     std::thread::Builder::new()
         .name("control-input".into())
         .spawn(move || {
-            let mut stdin = std::io::stdin().lock();
-            loop {
-                let message = match read_line(&mut stdin) {
-                    Ok(Some(line)) => Input::Line(line),
-                    Ok(None) => Input::End,
-                    Err(code) => Input::Fault(code),
-                };
-                let terminal = !matches!(&message, Input::Line(_));
-                if input_tx.blocking_send(message).is_err() || terminal {
-                    break;
-                }
-            }
+            read_input(std::io::stdin().lock(), input_tx, terminal_tx);
         })?;
     let (output_tx, mut output_rx) = mpsc::channel::<Output>(1);
     // Use an owned OS handle rather than holding Rust's global stdout lock. A blocked
@@ -334,48 +363,75 @@ fn stdio() -> anyhow::Result<(mpsc::Receiver<Input>, mpsc::Sender<Output>)> {
                 }
             }
         })?;
-    Ok((input_rx, output_tx))
+    Ok((
+        Input {
+            lines: input_rx,
+            terminal: terminal_rx,
+        },
+        output_tx,
+    ))
+}
+
+struct QueuedOutput {
+    bytes: Vec<u8>,
+    until: Instant,
+}
+
+struct InFlight {
+    ack: oneshot::Receiver<std::io::Result<()>>,
+    until: Instant,
+    len: usize,
 }
 
 struct Reporter {
     output: mpsc::Sender<Output>,
     deadline: Instant,
+    budget: Instant,
     seq: u64,
+    queue: VecDeque<QueuedOutput>,
+    queued_bytes: usize,
+    flight: Option<InFlight>,
 }
 
 impl Reporter {
-    async fn write(&mut self, mut value: Value) -> anyhow::Result<()> {
+    fn new(output: mpsc::Sender<Output>, deadline: Instant) -> Self {
+        Self {
+            output,
+            deadline,
+            budget: deadline,
+            seq: 0,
+            queue: VecDeque::new(),
+            queued_bytes: 0,
+            flight: None,
+        }
+    }
+
+    fn write(&mut self, mut value: Value) -> anyhow::Result<()> {
         value["protocol"] = PROTOCOL.into();
         let mut bytes = serde_json::to_vec(&value)?;
         bytes.push(b'\n');
-        let (ack, completed) = oneshot::channel();
-        // A blocked/broken output must not hold game sockets indefinitely. Allow a small
-        // terminal reporting window after the network deadline; no gameplay runs then.
-        let until = (Instant::now() + Duration::from_secs(1))
-            .min(self.deadline + Duration::from_millis(200));
-        tokio::time::timeout_at(until, async {
-            self.output
-                .send(Output { bytes, ack })
-                .await
-                .context("stdout worker closed")?;
-            completed.await.context("stdout worker stopped")??;
-            Ok::<_, anyhow::Error>(())
-        })
-        .await
-        .context("stdout deadline")??;
+        ensure!(
+            self.queue.len() + usize::from(self.flight.is_some()) < OUTPUT_COUNT
+                && bytes.len() <= OUTPUT_BYTES.saturating_sub(self.queued_bytes),
+            "stdout queue limit"
+        );
+        self.queued_bytes += bytes.len();
+        self.queue.push_back(QueuedOutput {
+            bytes,
+            until: self.budget,
+        });
         Ok(())
     }
 
-    async fn events(&mut self, rec: &Recorder) -> anyhow::Result<()> {
+    fn events(&mut self, rec: &Recorder) -> anyhow::Result<()> {
         for event in rec.take_live_events()? {
             self.seq += 1;
-            self.write(json!({"type": "event", "seq": self.seq, "event": event}))
-                .await?;
+            self.write(json!({"type": "event", "seq": self.seq, "event": event}))?;
         }
         Ok(())
     }
 
-    async fn response(
+    fn response(
         &mut self,
         id: Option<RequestId>,
         result: Result<Value, &str>,
@@ -386,7 +442,76 @@ impl Reporter {
             Err(code) => json!({"type": "response", "id": id, "ok": false,
                               "error": {"code": code}, "event_seq": self.seq}),
         };
-        self.write(value).await
+        self.write(value)
+    }
+
+    fn has_work(&self) -> bool {
+        self.flight.is_some() || !self.queue.is_empty()
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        self.queue
+            .iter()
+            .map(|queued| queued.until)
+            .chain(self.flight.as_ref().map(|flight| flight.until))
+            .min()
+    }
+
+    /// One cancellation-safe output step, polled alongside action/EOF/deadline futures.
+    /// The ack and queued bytes live on Reporter, so losing a select race never loses them.
+    /// Every frame retains the shared action budget at enqueue time; acknowledgments cannot
+    /// restart a command's deadline. A one-second stalled-writer ceiling is additional.
+    async fn progress(&mut self) -> anyhow::Result<()> {
+        if self.flight.is_none() {
+            let Some(front) = self.queue.front() else {
+                return std::future::pending().await;
+            };
+            let until = self
+                .next_deadline()
+                .unwrap_or(front.until)
+                .min(Instant::now() + Duration::from_secs(1));
+            ensure!(Instant::now() < until, "stdout budget exhausted");
+            let permit = tokio::time::timeout_at(until, self.output.reserve())
+                .await
+                .context("stdout budget")?
+                .context("stdout worker closed")?;
+            let queued = self.queue.pop_front().context("stdout queue empty")?;
+            let len = queued.bytes.len();
+            let (ack, completed) = oneshot::channel();
+            permit.send(Output {
+                bytes: queued.bytes,
+                ack,
+            });
+            self.flight = Some(InFlight {
+                ack: completed,
+                until,
+                len,
+            });
+        }
+        let flight = self.flight.as_mut().context("stdout ack missing")?;
+        ensure!(Instant::now() < flight.until, "stdout budget exhausted");
+        tokio::time::timeout_at(flight.until, &mut flight.ack)
+            .await
+            .context("stdout budget")?
+            .context("stdout worker stopped")??;
+        let flight = self.flight.take().context("stdout ack missing")?;
+        self.queued_bytes -= flight.len;
+        Ok(())
+    }
+
+    /// Called only after sockets are closed. Earlier command budgets remain in force.
+    async fn finish(&mut self) -> anyhow::Result<()> {
+        let until = (Instant::now() + Duration::from_secs(1))
+            .min(self.deadline + Duration::from_millis(200));
+        tokio::time::timeout_at(until, async {
+            while self.has_work() {
+                self.progress().await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .context("terminal stdout budget")??;
+        Ok(())
     }
 }
 
@@ -428,10 +553,8 @@ impl Controller {
         let old = self.session.take();
         let old_self_obj = old.as_ref().map(|s| s.game.state.self_obj);
         let had_session = old.is_some();
-        if let Some(ControlSession { game, stream, .. }) = old {
-            // StreamClient owns one unsplit socket and no background task.
-            drop(stream);
-            game.disconnect_hard().await;
+        if let Some(session) = old {
+            session.disconnect_hard().await;
         }
         json!({"reason": reason, "t_ms": self.started.elapsed().as_millis(),
                "session_generation": self.generation, "old_self_obj": old_self_obj,
@@ -440,7 +563,7 @@ impl Controller {
                "closure_scope": "local socket handles", "sent_leave_world": false})
     }
 
-    async fn execute(&mut self, cmd: Command) -> anyhow::Result<Value> {
+    async fn execute(&mut self, cmd: Command, until: Instant) -> anyhow::Result<Value> {
         match cmd {
             Command::Hello => {
                 ensure!(!self.handshaken, "already handshaken");
@@ -475,7 +598,11 @@ impl Controller {
                 let game = &mut self.session.as_mut().context("no connected session")?.game;
                 match command {
                     Command::Pump(p) => {
-                        let until = Instant::now() + Duration::from_millis(p.ms);
+                        let until = (Instant::now() + Duration::from_millis(p.ms)).min(
+                            until
+                                .checked_sub(Duration::from_millis(20))
+                                .unwrap_or(until),
+                        );
                         while Instant::now() < until {
                             game.recv_within(until.saturating_duration_since(Instant::now()))
                                 .await?;
@@ -484,7 +611,7 @@ impl Controller {
                     Command::Gm(p) => scenario::control_gm(game, &p.command).await?,
                     Command::Tp(p) => {
                         self.clock = self.clock.wrapping_add(1500);
-                        scenario::control_tp(game, p.x, p.y, p.z, self.clock).await?;
+                        scenario::control_tp(game, p.x, p.y, p.z, self.clock, until).await?;
                     }
                     Command::RawCs(opcode, body) => game.send_cs(opcode, &body).await?,
                     _ => unreachable!("handled lifecycle method"),
@@ -521,29 +648,28 @@ enum Completion {
     Stopped(&'static str),
 }
 
-/// Keep capture/event delivery and EOF detection alive while the shared session code runs.
-/// One look-ahead command is allowed; subsequent input remains backpressured.
+/// No output branch awaits a batch. Action receive/keep-alive, terminal input, and
+/// command/global timers remain independently pollable while an output ack is delayed.
 async fn drive(
     future: impl Future<Output = anyhow::Result<Value>>,
     until: Instant,
     rec: &Recorder,
     report: &mut Reporter,
-    input: &mut mpsc::Receiver<Input>,
-    pending: &mut Option<Input>,
+    input: &mut Input,
 ) -> anyhow::Result<Completion> {
     tokio::pin!(future);
     let mut tick = tokio::time::interval(Duration::from_millis(20));
     loop {
+        let output_pending = report.has_work();
+        let output_until = report.next_deadline().unwrap_or(report.deadline);
         tokio::select! {
             biased;
+            reason = termination(&mut input.terminal) => return Ok(Completion::Stopped(reason)),
             _ = tokio::time::sleep_until(until) => return Ok(Completion::Stopped("command_deadline")),
+            _ = tokio::time::sleep_until(output_until), if output_pending => bail!("stdout budget exhausted"),
             result = &mut future => return Ok(Completion::Done(result)),
-            message = input.recv(), if pending.is_none() => match message {
-                Some(line @ Input::Line(_)) => *pending = Some(line),
-                Some(Input::Fault(code)) => return Ok(Completion::Stopped(code)),
-                Some(Input::End) | None => return Ok(Completion::Stopped("eof")),
-            },
-            _ = tick.tick() => report.events(rec).await?,
+            result = report.progress(), if output_pending => { result?; },
+            _ = tick.tick() => report.events(rec)?,
         }
     }
 }
@@ -551,56 +677,55 @@ async fn drive(
 async fn serve(
     controller: &mut Controller,
     report: &mut Reporter,
-    input: &mut mpsc::Receiver<Input>,
+    input: &mut Input,
 ) -> anyhow::Result<&'static str> {
-    let mut pending = None;
     let mut ids = HashSet::new();
     let mut count = 0;
     let mut next_poll = Instant::now();
-    report
-        .write(json!({"type": "capabilities", "capabilities": describe()}))
-        .await?;
+    report.write(json!({"type": "capabilities", "capabilities": describe()}))?;
     loop {
+        if let Some(reason) = *input.terminal.borrow() {
+            return Ok(reason);
+        }
         if Instant::now() >= report.deadline {
             return Ok("deadline");
         }
-        // Poll independently of stdin readiness: a stream of state/rawcs requests must
-        // not starve receive/keep-alive work, even with one look-ahead request queued.
+        // Poll receive/keep-alive even if stdin continuously supplies commands.
         if Instant::now() >= next_poll {
-            let idle = tokio::time::timeout_at(report.deadline, controller.idle()).await;
-            if !matches!(idle, Ok(Ok(()))) {
-                let closed = controller.disconnect("session_error").await;
-                report
-                    .write(json!({"type": "lifecycle", "closed": closed}))
-                    .await?;
+            let rec = controller.rec.clone();
+            let idle = async {
+                controller.idle().await?;
+                Ok(Value::Null)
+            };
+            match drive(idle, report.deadline, &rec, report, input).await? {
+                Completion::Done(Ok(_)) => {}
+                Completion::Done(Err(_)) => {
+                    let closed = controller.disconnect("session_error").await;
+                    report.write(json!({"type": "lifecycle", "closed": closed}))?;
+                }
+                Completion::Stopped("command_deadline") => return Ok("deadline"),
+                Completion::Stopped(reason) => return Ok(reason),
             }
-            report.events(&controller.rec).await?;
+            report.events(&rec)?;
             next_poll = Instant::now() + Duration::from_millis(50);
         }
-        let message = if let Some(message) = pending.take() {
-            Some(message)
-        } else {
-            tokio::select! {
-                biased;
-                _ = tokio::time::sleep_until(report.deadline) => return Ok("deadline"),
-                _ = tokio::time::sleep_until(next_poll) => continue,
-                message = input.recv() => message,
-            }
-        };
-        let line = match message {
-            Some(Input::Line(line)) => line,
-            Some(Input::Fault(code)) => {
-                report.response(None, Err(code)).await?;
-                return Ok(code);
-            }
-            Some(Input::End) | None => return Ok("eof"),
+        let output_pending = report.has_work();
+        let output_until = report.next_deadline().unwrap_or(report.deadline);
+        let line = tokio::select! {
+            biased;
+            reason = termination(&mut input.terminal) => return Ok(reason),
+            _ = tokio::time::sleep_until(report.deadline) => return Ok("deadline"),
+            _ = tokio::time::sleep_until(output_until), if output_pending => bail!("stdout budget exhausted"),
+            _ = tokio::time::sleep_until(next_poll) => continue,
+            result = report.progress(), if output_pending => { result?; continue; },
+            line = input.lines.recv() => match line { Some(line) => line, None => return Ok("eof") },
         };
         if Instant::now() >= report.deadline {
             return Ok("deadline");
         }
         count += 1;
         if count > MAX_COMMANDS {
-            report.response(None, Err("command_limit")).await?;
+            report.response(None, Err("command_limit"))?;
             return Ok("command_limit");
         }
         let (id, cmd) = match parse(&line) {
@@ -608,11 +733,11 @@ async fn serve(
             Err(e) => {
                 if let Some(id) = &e.id {
                     if !ids.insert(id.clone()) {
-                        report.response(None, Err("duplicate_id")).await?;
+                        report.response(None, Err("duplicate_id"))?;
                         return Ok("duplicate_id");
                     }
                 }
-                report.response(e.id, Err(e.code)).await?;
+                report.response(e.id, Err(e.code))?;
                 if e.fatal {
                     return Ok(e.code);
                 }
@@ -620,20 +745,18 @@ async fn serve(
             }
         };
         if !ids.insert(id.clone()) {
-            report.response(None, Err("duplicate_id")).await?;
+            report.response(None, Err("duplicate_id"))?;
             return Ok("duplicate_id");
         }
         if !controller.handshaken && !matches!(&cmd, Command::Hello) {
-            report.response(Some(id), Err("handshake_required")).await?;
+            report.response(Some(id), Err("handshake_required"))?;
             return Ok("handshake_required");
         }
         if (controller.handshaken && matches!(&cmd, Command::Hello))
             || matches!(&cmd, Command::Reconnect(id)
                 if !reconnect_allowed(controller.session.is_some(), controller.character_id, *id))
         {
-            report
-                .response(Some(id), Err("invalid_session_state"))
-                .await?;
+            report.response(Some(id), Err("invalid_session_state"))?;
             continue;
         }
         let closing = matches!(&cmd, Command::Close);
@@ -643,48 +766,32 @@ async fn serve(
         } else {
             COMMAND_TIMEOUT
         };
-        // Pump's requested maximum may equal the ordinary action ceiling.
-        let allowance = if matches!(&cmd, Command::Pump(_)) {
-            allowance + Duration::from_millis(100)
-        } else {
-            allowance
-        };
         let until = (Instant::now() + allowance).min(report.deadline);
+        report.budget = until;
         controller.rec.step(&format!("control.{count}"));
         let rec = controller.rec.clone();
-        let done = drive(
-            controller.execute(cmd),
-            until,
-            &rec,
-            report,
-            input,
-            &mut pending,
-        )
-        .await?;
+        let done = drive(controller.execute(cmd, until), until, &rec, report, input).await?;
         let mut stop = None;
         let result = match done {
             Completion::Done(Ok(value)) => Ok(value),
             Completion::Done(Err(error)) => {
                 tracing::debug!("control action failed: {error:#}");
                 let closed = controller.disconnect("session_error").await;
-                report
-                    .write(json!({"type": "lifecycle", "closed": closed}))
-                    .await?;
+                report.write(json!({"type": "lifecycle", "closed": closed}))?;
                 Err("session_error")
             }
             Completion::Stopped(code) => {
                 let closed = controller.disconnect(code).await;
-                report
-                    .write(json!({"type": "lifecycle", "closed": closed}))
-                    .await?;
+                report.write(json!({"type": "lifecycle", "closed": closed}))?;
                 if code != "command_deadline" || Instant::now() >= report.deadline {
                     stop = Some(code);
                 }
                 Err(code)
             }
         };
-        report.events(&rec).await?;
-        report.response(Some(id), result).await?;
+        report.events(&rec)?;
+        report.response(Some(id), result)?;
+        report.budget = report.deadline;
         if closing {
             return Ok("close");
         }
@@ -706,11 +813,7 @@ pub(crate) async fn run(cfg: BotConfig, capture: &Path, deadline_ms: u64) -> any
     let started = Instant::now();
     let rec = Recorder::incremental_game(capture)?;
     let (mut input, output) = stdio()?;
-    let mut report = Reporter {
-        output,
-        deadline: started + Duration::from_millis(deadline_ms),
-        seq: 0,
-    };
+    let mut report = Reporter::new(output, started + Duration::from_millis(deadline_ms));
     let mut controller = Controller {
         cfg,
         rec: rec.clone(),
@@ -735,11 +838,11 @@ pub(crate) async fn run(cfg: BotConfig, capture: &Path, deadline_ms: u64) -> any
     let closed = controller.disconnect(reason).await;
     let flushed = rec.flush_live();
     if outcome.is_ok() {
-        report.events(&rec).await?;
-        report
-            .write(json!({"type": "closed", "closed": closed}))
-            .await?;
+        report.budget = report.deadline + Duration::from_millis(200);
+        report.events(&rec)?;
+        report.write(json!({"type": "closed", "closed": closed}))?;
     }
+    report.finish().await?;
     flushed?;
     let reason = outcome?;
     ensure!(
@@ -866,17 +969,31 @@ mod tests {
         assert!(reconnect_allowed(false, Some(42), 42));
     }
 
+    fn input_pair() -> (
+        Input,
+        mpsc::Sender<Vec<u8>>,
+        watch::Sender<Option<&'static str>>,
+    ) {
+        let (lines, rx) = mpsc::channel(INPUT_QUEUE);
+        let (terminal, stopped) = watch::channel(None);
+        (
+            Input {
+                lines: rx,
+                terminal: stopped,
+            },
+            lines,
+            terminal,
+        )
+    }
+
     #[tokio::test]
     async fn eof_cancels_an_active_action_without_waiting_for_its_timeout() {
         let rec = Recorder::new(false);
         let (output, _reader) = mpsc::channel(1);
-        let mut report = Reporter {
-            output,
-            deadline: Instant::now() + CONNECT_TIMEOUT,
-            seq: 0,
-        };
-        let (sender, mut input) = mpsc::channel(1);
-        sender.send(Input::End).await.unwrap();
+        let until = Instant::now() + CONNECT_TIMEOUT;
+        let mut report = Reporter::new(output, until);
+        let (mut input, _lines, terminal) = input_pair();
+        terminal.send_replace(Some("eof"));
         let released = Arc::new(AtomicBool::new(false));
         let resource = Released(released.clone());
         let result = drive(
@@ -884,11 +1001,10 @@ mod tests {
                 let _resource = resource;
                 std::future::pending().await
             },
-            report.deadline,
+            until,
             &rec,
             &mut report,
             &mut input,
-            &mut None,
         )
         .await
         .unwrap();
@@ -900,12 +1016,9 @@ mod tests {
     async fn expired_deadline_cancels_even_when_input_is_idle() {
         let rec = Recorder::new(false);
         let (output, _reader) = mpsc::channel(1);
-        let mut report = Reporter {
-            output,
-            deadline: Instant::now(),
-            seq: 0,
-        };
-        let (_sender, mut input) = mpsc::channel(1);
+        let until = Instant::now();
+        let mut report = Reporter::new(output, until);
+        let (mut input, _lines, _terminal) = input_pair();
         let released = Arc::new(AtomicBool::new(false));
         let resource = Released(released.clone());
         let result = drive(
@@ -913,15 +1026,204 @@ mod tests {
                 let _resource = resource;
                 std::future::pending().await
             },
-            report.deadline,
+            until,
             &rec,
             &mut report,
             &mut input,
-            &mut None,
         )
         .await
         .unwrap();
         assert!(matches!(result, Completion::Stopped("command_deadline")));
         assert!(released.load(Ordering::SeqCst));
+    }
+    fn live_recorder() -> Recorder {
+        let rec = Recorder::incremental_game_to(std::io::sink());
+        rec.control_game_ready(true);
+        rec
+    }
+
+    #[tokio::test]
+    async fn delayed_output_acks_do_not_suspend_game_keepalive_or_command_deadline() {
+        use aaemu_commons::net::FrameCodec;
+        use aaemu_game::opcodes::{pp, sc};
+        use aaemu_testclient::game::GameClient;
+        use aaemu_testclient::record::{Channel, Dir};
+        use futures::StreamExt;
+        use std::sync::atomic::AtomicUsize;
+        use tokio_util::codec::FramedRead;
+
+        let rec = live_recorder();
+        let (io, peer) = tokio::io::duplex(64 * 1024);
+        let mut game = GameClient::from_io(io, rec.clone());
+        game.account_id = 1;
+        game.ping_every = Duration::from_millis(20);
+        let peer = tokio::spawn(async move {
+            let mut peer = FramedRead::new(peer, FrameCodec);
+            let mut pings = 0;
+            while let Some(packet) = peer.next().await {
+                let packet = packet.unwrap();
+                assert_eq!(packet[1], 2);
+                assert_eq!(u16::from_le_bytes([packet[2], packet[3]]), pp::PingPacket);
+                pings += 1;
+            }
+            pings
+        });
+        let (output, mut consumed) = mpsc::channel::<Output>(1);
+        let acknowledgments = Arc::new(AtomicUsize::new(0));
+        let counted = acknowledgments.clone();
+        let consumer = tokio::spawn(async move {
+            while let Some(packet) = consumed.recv().await {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                if packet.ack.send(Ok(())).is_err() {
+                    break;
+                }
+                counted.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let until = Instant::now() + Duration::from_millis(300);
+        let mut report = Reporter::new(output, until + Duration::from_secs(1));
+        report.budget = until;
+        // This batch needs at least 800ms of acknowledgments. The action has 300ms.
+        for _ in 0..32 {
+            rec.push(
+                Channel::Game,
+                Dir::S2C,
+                1,
+                sc::SCErrorMsgPacket,
+                "ambient",
+                &[7, 0],
+            );
+        }
+        report.events(&rec).unwrap();
+        let (mut input, _lines, _terminal) = input_pair();
+        let action = async {
+            loop {
+                if let Err(error) = game.recv_within(Duration::from_millis(5)).await {
+                    return Err::<Value, _>(error);
+                }
+            }
+        };
+        let done = tokio::time::timeout(
+            Duration::from_secs(2),
+            drive(action, until, &rec, &mut report, &mut input),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(done, Completion::Stopped("command_deadline")));
+        assert!(acknowledgments.load(Ordering::SeqCst) >= 2);
+        assert!(acknowledgments.load(Ordering::SeqCst) < 32);
+        assert!(report.has_work());
+        game.disconnect_hard().await;
+        let pings = tokio::time::timeout(Duration::from_secs(1), peer)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            pings >= 2,
+            "slow output starved the actual GameClient keep-alive path"
+        );
+        consumer.abort();
+        let _ = consumer.await;
+    }
+
+    #[tokio::test]
+    async fn active_action_plus_pending_rawcs_and_eof_never_sends_queued_gameplay() {
+        use aaemu_commons::net::FrameCodec;
+        use aaemu_testclient::game::GameClient;
+        use futures::StreamExt;
+        use tokio_util::codec::FramedRead;
+
+        let rec = live_recorder();
+        let (io, peer) = tokio::io::duplex(64 * 1024);
+        let mut game = GameClient::from_io(io, rec.clone());
+        game.account_id = 1;
+        let peer = tokio::spawn(async move {
+            let mut peer = FramedRead::new(peer, FrameCodec);
+            let mut packets = Vec::new();
+            while let Some(packet) = peer.next().await {
+                packets.push(packet.unwrap());
+            }
+            packets
+        });
+        let (output, _consumer) = mpsc::channel(1);
+        let until = Instant::now() + Duration::from_secs(1);
+        let mut report = Reporter::new(output, until);
+        let (mut input, lines, terminal) = input_pair();
+        let (started, ready) = oneshot::channel();
+        let producer = tokio::spawn(async move {
+            ready.await.unwrap();
+            let mut raw = request("rawcs", json!({"opcode":58,"body_hex":"abcd"}));
+            raw.push(b'\n');
+            // The real bounded input worker sees a queued rawcs followed by EOF.
+            read_input(Cursor::new(raw), lines, terminal);
+        });
+        let action = async {
+            let _ = started.send(());
+            loop {
+                if let Err(error) = game.recv_within(Duration::from_millis(10)).await {
+                    return Err::<Value, _>(error);
+                }
+            }
+        };
+        let done = drive(action, until, &rec, &mut report, &mut input)
+            .await
+            .unwrap();
+        assert!(matches!(done, Completion::Stopped("eof")));
+        producer.await.unwrap();
+        let queued = input.lines.try_recv().unwrap();
+        assert!(matches!(parse(&queued), Ok((_, Command::RawCs(58, _)))));
+        game.disconnect_hard().await;
+        let packets = tokio::time::timeout(Duration::from_secs(1), peer)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!packets.is_empty());
+        assert!(
+            packets.iter().all(|packet| packet[1] == 2),
+            "queued rawcs or CSLeaveWorld escaped after EOF"
+        );
+    }
+
+    #[test]
+    fn input_queue_overflow_signals_terminal_without_blocking_the_reader() {
+        let (mut input, lines, terminal) = input_pair();
+        read_input(
+            Cursor::new(b"{}\n".repeat(INPUT_QUEUE + 1)),
+            lines,
+            terminal,
+        );
+        assert_eq!(*input.terminal.borrow(), Some("input_queue_limit"));
+        let mut count = 0;
+        while input.lines.try_recv().is_ok() {
+            count += 1;
+        }
+        assert_eq!(count, INPUT_QUEUE);
+    }
+
+    #[tokio::test]
+    async fn earlier_command_output_budget_applies_even_behind_a_longer_lived_head() {
+        let rec = live_recorder();
+        let (output, _consumer) = mpsc::channel(1);
+        let until = Instant::now() + CONNECT_TIMEOUT;
+        let mut report = Reporter::new(output, until);
+        report.write(json!({"type":"capabilities"})).unwrap();
+        report.budget = Instant::now();
+        report
+            .response(Some(RequestId::Number(1)), Ok(Value::Null))
+            .unwrap();
+        let (mut input, _lines, _terminal) = input_pair();
+        let polled = Arc::new(AtomicBool::new(false));
+        let observed = polled.clone();
+        let action = async move {
+            observed.store(true, Ordering::SeqCst);
+            Ok(Value::Null)
+        };
+        let result = drive(action, until, &rec, &mut report, &mut input).await;
+        assert!(result.is_err());
+        assert!(
+            !polled.load(Ordering::SeqCst),
+            "expired output budget allowed later gameplay"
+        );
     }
 }

@@ -76,11 +76,17 @@ impl std::fmt::Debug for LiveCapture {
 
 fn public_game_event(channel: Channel, dir: Dir, level: u8, opcode: u16) -> bool {
     use aaemu_game::opcodes::{cs, sc};
+    // Credential-bearing game transitions in the 1.2 tables: enter-world cookie (C2S),
+    // stream token (S2C), and the reconnect token delivered after character selection.
+    // Login/stream channels are never public, regardless of session readiness.
     channel == Channel::Game
         && !(level == 1
             && match dir {
                 Dir::C2S => opcode == cs::X2EnterWorldPacket,
-                Dir::S2C => opcode == sc::X2EnterWorldResponsePacket,
+                Dir::S2C => matches!(
+                    opcode,
+                    sc::X2EnterWorldResponsePacket | sc::SCReconnectAuthPacket
+                ),
             })
 }
 
@@ -113,9 +119,13 @@ impl Recorder {
             .write(true)
             .create_new(true)
             .open(path)?;
-        Ok(Self::with_live_sink(Box::new(std::io::BufWriter::new(
-            file,
-        ))))
+        Ok(Self::incremental_game_to(std::io::BufWriter::new(file)))
+    }
+
+    /// The same bounded incremental capture with a caller-owned sink, e.g. an in-memory
+    /// writer for deterministic transport/loop tests. Authentication policy is identical.
+    pub fn incremental_game_to(sink: impl Write + Send + 'static) -> Self {
+        Self::with_live_sink(Box::new(sink))
     }
 
     fn with_live_sink(sink: Box<dyn Write + Send>) -> Self {
@@ -192,6 +202,15 @@ impl Recorder {
             .is_some_and(|live| !live.game_ready || !public_game_event(channel, dir, level, opcode))
         {
             return;
+        }
+        // Compressed batches have no per-packet lengths. Without decoding every contained
+        // opcode we cannot rule out embedded authentication. Fail closed in control mode;
+        // normal scenario recorders keep their existing raw-batch capture behavior.
+        if channel == Channel::Game && !matches!(level, 1 | 2) {
+            if let Some(live) = i.live.as_mut() {
+                live.failed = true;
+                return;
+            }
         }
         let ev = Event {
             t_ms: i.start.elapsed().as_millis() as u64,
@@ -313,6 +332,7 @@ mod tests {
             (Channel::Stream, Dir::C2S, 1),
             (Channel::Game, Dir::C2S, cs::X2EnterWorldPacket),
             (Channel::Game, Dir::S2C, sc::X2EnterWorldResponsePacket),
+            (Channel::Game, Dir::S2C, sc::SCReconnectAuthPacket),
         ] {
             rec.push(channel, dir, 1, opcode, "auth", b"private");
         }
@@ -321,6 +341,7 @@ mod tests {
         assert_eq!(persisted.flushes, 1);
         let event: Event = serde_json::from_slice(&persisted.bytes).unwrap();
         assert_eq!(event.body_bytes(), [7, 0]);
+        assert!(!String::from_utf8_lossy(&persisted.bytes).contains(&hex::encode(b"private")));
         drop(persisted);
         assert_eq!(rec.take_live_events().unwrap(), vec![event]);
         assert!(rec.take_live_events().unwrap().is_empty());
@@ -331,6 +352,52 @@ mod tests {
         rec.control_game_ready(false);
         push(&rec);
         assert_eq!(sink.0.lock().unwrap().flushes, 1);
+    }
+
+    #[test]
+    fn reconnect_token_after_readiness_is_absent_from_capture_and_stdout_events() {
+        let sink = Sink::default();
+        let rec = Recorder::with_live_sink(Box::new(sink.clone()));
+        rec.control_game_ready(true);
+        rec.push(
+            Channel::Game,
+            Dir::S2C,
+            1,
+            sc::SCReconnectAuthPacket,
+            "SCReconnectAuthPacket",
+            &[0x78, 0x56, 0x34, 0x12],
+        );
+        push(&rec);
+        let stdout_events = rec.take_live_events().unwrap();
+        assert_eq!(stdout_events.len(), 1);
+        assert_eq!(stdout_events[0].opcode, sc::SCErrorMsgPacket);
+        let persisted = sink.0.lock().unwrap();
+        let capture_events: Vec<Event> = String::from_utf8_lossy(&persisted.bytes)
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(capture_events, stdout_events);
+        assert!(!String::from_utf8_lossy(&persisted.bytes).contains("78563412"));
+    }
+
+    #[test]
+    fn opaque_post_ready_batches_cannot_bypass_auth_filter() {
+        let sink = Sink::default();
+        let rec = Recorder::with_live_sink(Box::new(sink.clone()));
+        rec.control_game_ready(true);
+        push(&rec);
+        let before = sink.0.lock().unwrap().bytes.clone();
+        // Inflated batch: zero header, reconnect opcode, credential. No safe boundaries.
+        rec.push(
+            Channel::Game,
+            Dir::S2C,
+            4,
+            1,
+            "CompressedGamePackets",
+            &[0, 0, 1, 0, 9, 8, 7, 6],
+        );
+        assert_eq!(sink.0.lock().unwrap().bytes, before);
+        assert!(rec.take_live_events().is_err());
     }
 
     #[test]
