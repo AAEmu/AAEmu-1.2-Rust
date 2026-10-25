@@ -56,6 +56,8 @@ pub struct System {
     pub mates: mates::MateManagers,
     /// The loaded `SlaveSpawner`s.
     pub slave_spawners: slaves::SlaveSpawners,
+    /// Summon identity reservations, departure/publication ordering and pending hull saves.
+    pub(crate) slave_summons: slaves::SlaveSummons,
     /// `world.TransferManager` of every instance + the transfer spawners.
     pub transfers: transfers::TransferManagers,
     /// `ShipyardManager`.
@@ -432,16 +434,11 @@ pub fn active_region_tick(server: &GameServer) {
 pub fn on_character_selected(server: &GameServer, player: &PlayerRef) {
     let char_id = player.data().id;
     mates::on_character_selected(server, char_id);
-    let instance = player.data().unit.transform.instance_id;
-    if let Some(world) = server.world.world(instance) {
-        if let Some(slave) = slaves::get_active_slave_by_owner_obj_id(&world, player.obj_id) {
-            tracing::warn!(
-                "{}: Abort the task of disabling vehicles",
-                player.data().unit.name
-            );
-            slave.data().leave_task = 0;
-        }
-    }
+    server
+        .systems
+        .vehicles
+        .slave_summons
+        .reconnect(server, player);
 }
 
 /// `CharacterMates.Load` (called from `Character.Load` at character select).
@@ -467,18 +464,24 @@ pub async fn save_character(server: &GameServer, character_id: u32) {
 
 /// The logout extension of `EnterWorldManager.Leave` (+10 minutes with an active vehicle).
 pub fn leave_extra_logout_ms(server: &GameServer, player: &PlayerRef) -> i32 {
-    let instance = player.data().unit.transform.instance_id;
-    match server.world.world(instance) {
-        Some(w) if slaves::get_active_slave_by_owner_obj_id(&w, player.obj_id).is_some() => {
-            1000 * 60 * 10
-        }
-        _ => 0,
+    if slaves::owned_roots(server, player.character_id).is_empty() {
+        0
+    } else {
+        1000 * 60 * 10
     }
 }
 
 /// `EnterWorldManager.LeaveWorldTask` part: despawn the owned mates and slaves (the caller then
 /// closes coffers and calls [`force_dismount`], as the C# order).
 pub fn on_leave_world(server: &GameServer, player: &PlayerRef) {
+    let Some(_departure) = server
+        .systems
+        .vehicles
+        .slave_summons
+        .departure(server, player)
+    else {
+        return;
+    };
     let (instance, id) = {
         let c = player.data();
         (c.unit.transform.instance_id, c.id)
@@ -493,6 +496,14 @@ pub fn on_leave_world(server: &GameServer, player: &PlayerRef) {
 /// `GameConnection.OnDisconnect` part: `RemoveAndDespawnActiveOwnedMatesSlaves()` (owned mates
 /// now, the active vehicle 10 minutes later unless the character logs in again).
 pub fn on_disconnect(server: &GameServer, player: &PlayerRef) {
+    let Some(_departure) = server
+        .systems
+        .vehicles
+        .slave_summons
+        .departure(server, player)
+    else {
+        return;
+    };
     let (instance, id) = {
         let c = player.data();
         (c.unit.transform.instance_id, c.id)
@@ -513,26 +524,36 @@ pub fn force_dismount_and_despawn(
     time_to_despawn_ms: u64,
 ) -> bool {
     let res = force_dismount(server, player, slaves::attach_reason::PREFAB_CHANGED);
-    let instance = player.data().unit.transform.instance_id;
-    let Some(world) = server.world.world(instance) else {
-        return res;
-    };
-    let Some(slave) = slaves::get_active_slave_by_owner_obj_id(&world, player.obj_id) else {
-        return res;
-    };
-    let gen = LEAVE_TASK_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    slave.data().leave_task = gen;
-    let (Some(server), Ok(rt)) = (server.self_arc(), tokio::runtime::Handle::try_current()) else {
-        return res;
-    };
-    let (player, slave) = (player.clone(), slave.clone());
-    rt.spawn(async move {
-        tokio::time::sleep(Duration::from_millis(time_to_despawn_ms)).await;
-        if slave.data().leave_task != gen {
-            return;
-        }
-        slaves::remove_and_despawn_all_active_owned_slaves(&server, &player, false);
-    });
+    for (world, slave) in slaves::owned_roots(server, player.character_id) {
+        let gen = LEAVE_TASK_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        slave.data().leave_task = gen;
+        let (Some(server), Ok(rt)) = (server.self_arc(), tokio::runtime::Handle::try_current())
+        else {
+            continue;
+        };
+        let player = player.clone();
+        rt.spawn(async move {
+            tokio::time::sleep(Duration::from_millis(time_to_despawn_ms)).await;
+            let _publication = server
+                .systems
+                .vehicles
+                .slave_summons
+                .departing
+                .lock()
+                .expect("slave departures poisoned");
+            if slave.data().leave_task != gen {
+                return;
+            }
+            if !world
+                .slave(slave.obj_id)
+                .is_some_and(|live| Arc::ptr_eq(&live, &slave))
+            {
+                return;
+            }
+            // A timer belongs to this hull, not whichever ship the owner summons later.
+            slaves::delete(&server, Some(&player), world.id, slave.obj_id, false);
+        });
+    }
     res
 }
 
@@ -560,6 +581,14 @@ pub fn force_dismount_and_despawn_test_slave(
             return;
         }
         let instance = slave.data().unit.transform.instance_id;
+        if !server
+            .world
+            .world(instance)
+            .and_then(|w| w.slave(slave.obj_id))
+            .is_some_and(|live| Arc::ptr_eq(&live, &slave))
+        {
+            return;
+        }
         slaves::delete(&server, Some(&player), instance, slave.obj_id, false);
     });
     res
