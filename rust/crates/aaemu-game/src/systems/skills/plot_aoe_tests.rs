@@ -55,7 +55,7 @@ fn event(id: u32, diminishing: bool, effects: Vec<PlotEventEffect>) -> PlotEvent
 fn data() -> GameData {
     let mut data = GameData::empty();
     data.formulas = crate::systems::vehicles::stats::tests::formulas(
-        &[(1, "100000", 14, 5), (2, "1000", 15, 5)],
+        &[(1, "100000", 14, 0), (2, "1000", 15, 0)],
         &[],
     );
     for id in [3, 4] {
@@ -111,6 +111,7 @@ fn data() -> GameData {
 fn fixture(data: GameData, count: u32) -> (Arc<GameServer>, TestClient, PlayerRef, Vec<NpcRef>) {
     let (server, client, player, _) = super::super::cast_validation_tests::fixture(data);
     player.data().unit.faction_id = 4;
+    super::super::stats::refresh_cached_stats(&server, &WorldObject::from(&player));
     let targets = (0..count)
         .map(|i| {
             let mut npc = Npc::new(1);

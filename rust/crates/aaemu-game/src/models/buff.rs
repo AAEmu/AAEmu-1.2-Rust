@@ -10,6 +10,8 @@
 //! counters, triggers, `TriggerRemoveOn`, tag checks, modifier-cache updates,
 //! `SCBuffCreatedPacket` broadcasts) is `systems::skills::buffs`.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use aaemu_commons::PacketStream;
 
 use crate::data::skills::{save_rule, stack_rule, BuffKind, BuffTemplate};
@@ -23,6 +25,8 @@ const MINIMUM_BUFF_DURATION_TO_SAVE: i32 = 60_000;
 /// `BuffConstants.LoggedOn`.
 pub const BUFF_LOGGED_ON: u32 = 2423;
 
+static NEXT_BUFF_INSTANCE: AtomicU64 = AtomicU64::new(1);
+
 /// `SkillCaster` as written by `SkillCaster.Write` (type + bc obj id). Only `SkillCasterUnit`
 /// is used by this phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -35,6 +39,9 @@ pub struct SkillCaster {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Buff {
     pub index: u32,
+    /// Internal lifetime identity. Explicit/wrapped indices can be reused; refreshes keep
+    /// this identity. Not serialized or persisted, and assigned only on insertion.
+    pub(crate) instance_id: u64,
     pub template: BuffTemplate,
     pub skill_caster: SkillCaster,
     /// `Caster?.Id` / `Caster?.Level` (`None` = no caster unit).
@@ -87,6 +94,7 @@ impl Buff {
     ) -> Self {
         Self {
             index: 0,
+            instance_id: 0,
             template,
             skill_caster,
             caster,
@@ -107,6 +115,12 @@ impl Buff {
             exit_replace: false,
             session_only: false,
         }
+    }
+
+    /// Whether a queued event / callback still refers to this inserted effect. A clone
+    /// retains its identity, whereas reinserting even that clone starts a new lifetime.
+    pub fn same_instance(&self, other: &Buff) -> bool {
+        self.instance_id != 0 && self.index == other.index && self.instance_id == other.instance_id
     }
 
     /// `GetTimeLeft` (-1 for a permanent buff).
@@ -412,6 +426,7 @@ impl Buffs {
                     .push(BuffEvent::Refreshed(self.effects[i].clone()));
             }
             None => {
+                buff.instance_id = NEXT_BUFF_INSTANCE.fetch_add(1, Ordering::Relaxed);
                 buff.tick = buff.template.tick;
                 buff.in_use = true;
                 self.events.push(BuffEvent::Started(buff.clone()));

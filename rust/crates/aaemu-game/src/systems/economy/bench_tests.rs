@@ -234,8 +234,19 @@ fn fixture(template: u32, group: u32, cast_time: i32) -> Fixture {
     );
     client.conn.active_char = Some(visitor.clone());
     owner_client.conn.active_char = Some(owner.clone());
-    visitor.data().labor_power = 1000;
-    owner.data().labor_power = 1000;
+    // Real characters have one entry per actability group. Construction (19) is
+    // required by ChangeLabor; omitting it makes the production path reject the debit.
+    for player in [&visitor, &owner] {
+        let mut c = player.data();
+        c.labor_power = 1000;
+        c.actability
+            .actabilities
+            .push(crate::models::char_data::Actability {
+                id: 19,
+                point: 0,
+                step: 0,
+            });
+    }
     server.names.add_character(1, "Visitor", 1001);
     server.names.add_character(2, "Owner", 1002);
     let mut house = House::new(1, 267);
@@ -311,6 +322,7 @@ async fn private_farm_visitor_crafts_tax_at_all_eight_authored_plaques_for_200_l
         request(&f.server, &mut f.client, TAX, BENCH, 1).await;
         assert_eq!(certificates(&f.visitor), 5, "plaque {template}");
         assert_eq!(f.visitor.data().labor_power, 800, "plaque {template}");
+        assert_eq!(f.visitor.data().actability.actabilities[0].point, 200);
     }
 }
 
