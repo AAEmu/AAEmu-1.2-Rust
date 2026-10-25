@@ -159,6 +159,10 @@ pub fn get_buff(owner: &WorldObject, index: u32) -> Option<Buff> {
     owner.with_base_unit(|b| b.buffs().effect_by_index(index).cloned())
 }
 
+fn current_buff(owner: &WorldObject, expected: &Buff) -> Option<Buff> {
+    get_buff(owner, expected.index).filter(|b| b.same_instance(expected))
+}
+
 fn set_buff<R>(owner: &WorldObject, index: u32, f: impl FnOnce(&mut Buff) -> R) -> Option<R> {
     owner.with_base_unit(|b| b.buffs_mut().effect_by_index_mut(index).map(f))
 }
@@ -504,7 +508,7 @@ pub fn on_buff_event(server: &GameServer, owner: &WorldObject, event: &BuffEvent
     match event {
         BuffEvent::Started(b) | BuffEvent::Refreshed(b) => {
             // An earlier event in the same batch can already have removed this effect.
-            if get_buff(owner, b.index).is_none() {
+            if current_buff(owner, b).is_none() {
                 return;
             }
             if matches!(event, BuffEvent::Started(_)) {
@@ -520,8 +524,9 @@ pub fn on_buff_event(server: &GameServer, owner: &WorldObject, event: &BuffEvent
 
 /// Reconcile authored breaker tags after an accepted start/refresh, including effects
 /// applied by buff timers. Immunity/requirements/tolerance/stack rejection happens before
-/// these events. The native loaders establish the relation's direction; the acceptance
-/// boundary here is server policy, not a claimed native apply-vs-tick timing result.
+/// these events. Immediate accepted-state reconciliation is the server compatibility
+/// policy. The native loaders establish direction, but the available client/zone dumps
+/// do not establish an authoritative consumer's apply-vs-tick timing.
 fn remove_broken_buffs(server: &GameServer, owner: &WorldObject) {
     let data = &server.game_data.systems.skills;
     let mut broken: Vec<Buff> = owner.with_base_unit(|u| {
@@ -548,14 +553,10 @@ fn remove_broken_buffs(server: &GameServer, owner: &WorldObject) {
     // depend on HashMap order, or on callbacks changing the remaining candidates.
     broken.sort_unstable_by_key(|b| b.index);
     for b in broken {
-        exit(server, owner, b.index, false);
-        // A batch may contain an effect whose Started hook has not run yet. Finish its
-        // explicit exit now; the stale Started event above must not revive its controller.
-        if get_buff(owner, b.index).is_some_and(|e| e.state == effect_state::FINISHING) {
-            schedule_effect(server, owner, b.index, false);
+        // A preceding removal callback may have replaced a later candidate at its index.
+        if current_buff(owner, &b).is_none() {
+            continue;
         }
-        // Remove first: stopping a channel can itself remove its channel/toggle buffs.
-        // Only cancel the channel that owns this buff, outside all object/controller locks.
         let channel = owner
             .with_unit(|u| u.unit().skill_state.skill_task.clone())
             .flatten()
@@ -565,9 +566,29 @@ fn remove_broken_buffs(server: &GameServer, owner: &WorldObject) {
                     && (task.skill.template.channeling_buff_id == b.template.id
                         || task.skill.template.toggle_buff_id == b.template.id)
             });
+        exit(server, owner, b.index, false);
+        // A batch may contain an effect whose Started hook has not run yet. Finish its
+        // explicit exit now; the stale Started event above must not revive its controller.
+        if current_buff(owner, &b).is_some_and(|e| e.state == effect_state::FINISHING) {
+            schedule_effect(server, owner, b.index, false);
+        }
+        // Remove first: stopping a channel can itself remove its channel/toggle buffs.
+        // Only cancel the channel that owns this buff, outside all object/controller locks.
         if let Some(task) = channel {
-            if let super::state::SkillTaskKind::EndChanneling { channel_doodad } = task.kind {
-                super::skill::stop(server, &task.skill, owner, channel_doodad);
+            // A removal callback can start a different cast of the same skill.
+            let still_current = owner
+                .with_unit(|u| {
+                    u.unit()
+                        .skill_state
+                        .skill_task
+                        .as_ref()
+                        .is_some_and(|live| Arc::ptr_eq(&live.skill, &task.skill))
+                })
+                .unwrap_or(false);
+            if still_current {
+                if let super::state::SkillTaskKind::EndChanneling { channel_doodad } = task.kind {
+                    super::skill::stop(server, &task.skill, owner, channel_doodad);
+                }
             }
         }
     }
@@ -579,6 +600,12 @@ fn on_started(server: &GameServer, owner: &WorldObject, b: &Buff) {
     // Triggers.SubscribeEvents + Events.OnBuffStarted
     subscribe_triggers(server, owner, b);
     fire_buff_trigger(server, owner, b.index, BuffEventTriggerKind::Started);
+    // Started effects run synchronously and can dispel/end this CREATED buff, apply a
+    // breaker, or replace it at the same explicit index. Preserve trigger order, but do
+    // not install modifiers, unmount, interrupt, or start a controller/timer afterwards.
+    let Some(b) = resume_started_buff(server, owner, b) else {
+        return;
+    };
     if template.id > 0 {
         let skill_mods = data.skill_modifiers_by_owner(template.id).to_vec();
         let buff_mods = data.buff_modifiers_for_buff(template.id).to_vec();
@@ -596,9 +623,15 @@ fn on_started(server: &GameServer, owner: &WorldObject, b: &Buff) {
             }
         }
         if template.stun || template.silence || template.sleep {
+            if resume_started_buff(server, owner, &b).is_none() {
+                return;
+            }
             super::skill::interrupt_skills(server, owner);
         }
     }
+    let Some(b) = resume_started_buff(server, owner, &b) else {
+        return;
+    };
     if b.duration > 0 || !template.tick_effects.is_empty() {
         // SetInUse(true, false) -> ScheduleEffect(false)
         schedule_effect(server, owner, b.index, false);
@@ -616,10 +649,26 @@ fn on_started(server: &GameServer, owner: &WorldObject, b: &Buff) {
     }
 }
 
+/// Finish an explicit exit deferred while the buff was CREATED. The existing queued
+/// CREATED removal path still runs Started triggers before reaching this boundary.
+fn resume_started_buff(server: &GameServer, owner: &WorldObject, b: &Buff) -> Option<Buff> {
+    let live = current_buff(owner, b)?;
+    if live.is_ended() {
+        if live.state == effect_state::FINISHING {
+            schedule_effect(server, owner, live.index, false);
+        }
+        return None;
+    }
+    Some(live)
+}
+
 fn on_refreshed(server: &GameServer, owner: &WorldObject, b: &Buff) {
     // SetInUse(true, true) -> UpdateEffect
     let template = full_template(server, &b.template);
     start(server, owner, b.index);
+    if !current_buff(owner, b).is_some_and(|live| !live.is_ended()) {
+        return;
+    }
     let now = now_ms();
     let Some(gen) = set_buff(owner, b.index, |e| {
         if e.duration == 0 {
@@ -799,6 +848,9 @@ fn stop_effect_task(server: &GameServer, owner: &WorldObject, index: u32, timed_
         fire_buff_trigger(server, owner, index, BuffEventTriggerKind::Timeout);
     }
     unsubscribe_triggers(server, owner, &b);
+    if current_buff(owner, &b).is_none() {
+        return;
+    }
     owner.with_base_unit(|u| u.buffs_mut().remove_effect_by_index(index));
     crate::systems::dispatch_buff_events(server, owner);
 }
@@ -1600,6 +1652,8 @@ pub struct TriggerSub {
     pub source_obj: u32,
     pub owner_obj: u32,
     pub buff_index: u32,
+    /// Internal buff lifetime, since an explicit index can be reused by a callback.
+    pub buff_instance_id: u64,
     pub template: BuffTriggerTemplate,
     /// `DamagedBuffTrigger` (else the generic `BuffTrigger`).
     pub damaged: bool,
@@ -1661,6 +1715,7 @@ fn subscribe_triggers(server: &GameServer, owner: &WorldObject, b: &Buff) {
             source_obj: if unit_event { owner.obj_id() } else { 0 },
             owner_obj: owner.obj_id(),
             buff_index: b.index,
+            buff_instance_id: b.instance_id,
             template: t.clone(),
             damaged,
         });
@@ -1677,7 +1732,11 @@ fn unsubscribe_triggers(server: &GameServer, owner: &WorldObject, b: &Buff) {
         .triggers
         .lock()
         .expect("triggers poisoned")
-        .retain(|s| !(s.owner_obj == owner_id && s.buff_index == b.index));
+        .retain(|s| {
+            !(s.owner_obj == owner_id
+                && s.buff_index == b.index
+                && s.buff_instance_id == b.instance_id)
+        });
 }
 
 /// Fires a buff-level event (`Started`, `Timeout`, `Dispelled`) of the buff at `index`.
@@ -1709,6 +1768,7 @@ fn fire_buff_trigger_with(
         .filter(|s| {
             s.owner_obj == owner_id
                 && s.buff_index == b.index
+                && s.buff_instance_id == b.instance_id
                 && s.source_obj == 0
                 && s.template.kind == kind as u16
         })
@@ -1739,6 +1799,9 @@ pub fn fire_unit_event(server: &GameServer, unit: u32, kind: BuffEventTriggerKin
         let Some(b) = get_buff(&owner, s.buff_index) else {
             continue;
         };
+        if b.instance_id != s.buff_instance_id {
+            continue;
+        }
         execute_trigger(server, &owner, &b, &s, amount);
     }
 }
