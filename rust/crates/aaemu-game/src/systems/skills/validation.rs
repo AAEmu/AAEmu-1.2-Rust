@@ -16,6 +16,31 @@ fn fail(key: &str) -> Result<(), (u8, u32)> {
     Err((skill_result_for_key(key), 0))
 }
 
+/// Item-caster tags belong to the owned item's server-side template, never the wire hint.
+pub(super) fn check_item_zone(
+    server: &GameServer,
+    caster: &WorldObject,
+    source: &super::types::SkillCaster,
+) -> Result<(), (u8, u32)> {
+    if let (Some(player), super::types::SkillCaster::Item { item_id, .. }) =
+        (caster.as_player(), source)
+    {
+        if let Some((template, _)) = server
+            .systems
+            .skills
+            .ext
+            .items()
+            .owned_item(server, player, *item_id)
+        {
+            if !crate::systems::economy::inventory::item_use_zone_allowed(server, player, template)
+            {
+                return fail("SKILL_CANNOT_USE_HERE");
+            }
+        }
+    }
+    Ok(())
+}
+
 fn in_water(server: &GameServer, target: &Target) -> bool {
     if target
         .as_obj()
@@ -139,6 +164,20 @@ pub(super) fn check(
     target: &Target,
 ) -> Result<(), (u8, u32)> {
     let template = &skill.template;
+    // Like the other cast restrictions, this also applies to administrators. A GM's
+    // cooldown override does not grant permission to use forbidden tags.
+    if caster.as_player().is_some()
+        && super::data::zone_rules::current_group(server, caster).is_some_and(|group| {
+            let data = &server.game_data.systems.skills;
+            data.zone_rules.bans_any(
+                group,
+                data.skill_tags.get(&skill.id).map_or(&[], Vec::as_slice),
+            )
+        })
+    {
+        // Native 1.2 x2game12.c:1983345: SkillResult 58 = ZONE_BANNED.
+        return fail("SKILL_CANNOT_USE_HERE");
+    }
     if let Some(doodad) = target.as_obj().and_then(WorldObject::as_doodad) {
         if !crate::systems::npcs::doodad::gathering::allows_skill(server, doodad, template, caster)
         {

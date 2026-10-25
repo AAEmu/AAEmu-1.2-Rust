@@ -384,6 +384,9 @@ pub fn use_skill(
     if !caster.is_unit() {
         return (skill_result::INVALID_SOURCE, 0);
     }
+    if let Err(result) = super::validation::check_item_zone(server, caster, &caster_caster) {
+        return result;
+    }
     let template = skill.template.clone();
     let resolved_target = initial_target(server, skill, caster, &caster_caster, target_caster);
     let Some(target) = &resolved_target else {
@@ -831,6 +834,7 @@ pub fn cast(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         .as_player()
         .and_then(|p| portal_zone_check(server, &skill.template, p, Some(&ctx.skill_object)))
         .map_or(Ok(()), |result| Err((result, 0)))
+        .and_then(|()| super::validation::check_item_zone(server, caster, &ctx.caster_caster))
         .and_then(|()| super::validation::check(server, skill, caster, &ctx.target))
         .and_then(|()| super::validation::check_resources(server, skill, caster))
         .and_then(|()| {

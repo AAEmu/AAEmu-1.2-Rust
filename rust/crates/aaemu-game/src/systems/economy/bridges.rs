@@ -2361,6 +2361,9 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
         } else {
             inv.item_by_id(item_id)
         }?;
+        if !inventory::item_use_zone_allowed(server, player, item.template_id) {
+            return None;
+        }
         let t = server.game_data.items.template(item.template_id);
         Some(crate::systems::npcs::hooks::DoodadSourceItem {
             item_id: item.id,

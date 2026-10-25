@@ -112,6 +112,16 @@ pub fn damage(
     args: &EffectArgs<'_>,
     packets: Option<&mut CompressedGamePackets>,
 ) {
+    damage_with_aoe(server, e, args, packets, None);
+}
+
+pub(super) fn damage_with_aoe(
+    server: &GameServer,
+    e: &DamageEffect,
+    args: &EffectArgs<'_>,
+    packets: Option<&mut CompressedGamePackets>,
+    aoe_multiplier: Option<f32>,
+) {
     let Some(trg) = args.target.as_obj().filter(|o| o.is_unit()).cloned() else {
         return;
     };
@@ -425,6 +435,13 @@ pub fn damage(
         _ => final_damage *= ts[7] as f32,
     }
     let value = (final_damage * reduction_mul) as i32;
+    // Native 1.2 damage diagnostic sub_39898330 (x2game12.c:1984147-1984167)
+    // multiplies the already integer damage, truncates, then enforces minimum 1.
+    // Only opted-in plot damage takes this compatibility path; counter policy is
+    // server-defined (PORTING.md), not evidence of a retail runtime implementation.
+    let value = aoe_multiplier.map_or(value, |multiplier| {
+        ((value as f32 * multiplier) as i32).max(1)
+    });
     let absorbed = (final_damage * (1.0 - reduction_mul)) as i32;
     let health_stolen = (value as f32 * (e.health_steal_ratio as f32 / 100.0)) as i32;
     let mana_stolen = (value as f32 * (e.mana_steal_ratio as f32 / 100.0)) as i32;

@@ -28,6 +28,10 @@ use super::state::{PlotStateRef, SkillRef};
 use super::stats::{stat, StatKind};
 use super::types::{tags, CastAction, PlotObject, RelationState, SkillTargetRelation};
 
+#[cfg(test)]
+#[path = "plot_aoe_tests.rs"]
+mod aoe_tests;
+
 /// The mutable part of `PlotState`.
 #[derive(Debug, Default)]
 pub struct PlotStateInner {
@@ -40,6 +44,9 @@ pub struct PlotStateInner {
     pub channeled_buffs: Vec<(WorldObject, u32)>,
     /// `HitObjects` (event id -> obj ids).
     pub hit_objects: HashMap<u32, Vec<u32>>,
+    /// Compatibility policy: first-seen distinct targets in this plot's current AoE wave.
+    /// Retain only the first authored maximum rank; later targets all use the final rate.
+    aoe_diminishing_ranks: HashMap<u32, u32>,
 }
 
 /// `PlotState`.
@@ -91,6 +98,33 @@ impl PlotState {
 
     pub fn caster(&self) -> &WorldObject {
         &self.ctx.caster
+    }
+
+    /// Server compatibility policy, not a recovered retail counter (see PORTING.md).
+    /// Called before damage hit resolution, including miss/immunity checks. Sibling
+    /// projectiles share this plot instance; repeat hits reuse their target's wave rank.
+    pub(super) fn aoe_damage_multiplier(&self, rates: &HashMap<u32, f32>, target_id: u32) -> f32 {
+        let Some(last_rank) = rates.keys().copied().max().filter(|&rank| rank > 0) else {
+            return 1.0;
+        };
+        let mut inner = self.inner();
+        let ranks = &mut inner.aoe_diminishing_ranks;
+        let rank = if let Some(&rank) = ranks.get(&target_id) {
+            rank
+        } else if ranks.len() < last_rank as usize {
+            let rank = ranks.len() as u32 + 1;
+            ranks.insert(target_id, rank);
+            rank
+        } else {
+            // No need to retain more identities: every subsequent target, including
+            // repeat hits on one of those targets, receives the same final rate.
+            last_rank
+        };
+        rates.get(&rank).copied().unwrap_or(100.0).max(0.0) / 100.0
+    }
+
+    pub(super) fn reset_aoe_diminishing(&self) {
+        self.inner().aoe_diminishing_ranks.clear();
     }
 }
 
@@ -1154,7 +1188,7 @@ fn apply_plot_effect(
             source: EffectSource::from_skill(state.skill.clone()),
             skill_object: &state.ctx.skill_object,
         };
-        effects::apply(server, kind, template, &args, None);
+        effects::apply_plot(server, kind, template, &args, state, event.aoe_diminishing);
     }
 }
 
