@@ -129,6 +129,9 @@ pub struct PlotData {
     pub events: HashMap<u32, PlotEventTemplate>,
     pub conditions: HashMap<u32, PlotCondition>,
     pub trees: HashMap<u32, PlotTree>,
+    /// `aoe_diminishings.id -> rate` in authored percentage units (100 means 100%).
+    /// Counter lifetime and lookup outside the authored ids are separate runtime rules.
+    pub aoe_diminishings: HashMap<u32, f32>,
 }
 
 impl PlotData {
@@ -152,6 +155,12 @@ impl PlotData {
 
     pub fn load(conn: &Connection) -> rusqlite::Result<Self> {
         let mut d = PlotData::default();
+        // Native 1.2 sub_39620E90 (x2game12.c:1321108-1321129) stores each float rate
+        // under its authored id. The 10.x reference sub_39BDC250 does the same.
+        for_each_row(conn, "SELECT id, rate FROM aoe_diminishings", [], |r| {
+            d.aoe_diminishings.insert(r.u32("id")?, r.f32("rate")?);
+            Ok(())
+        })?;
         let dup = |what: &str, id: u32| {
             rusqlite::Error::InvalidParameterName(format!("duplicate {what} {id} (Dictionary.Add)"))
         };
@@ -365,11 +374,11 @@ mod tests {
         assert_eq!(v, vec![(1, 'b'), (2, 'a'), (2, 'c'), (3, 'd')]);
     }
 
-    #[test]
-    fn trees_share_nodes_per_next_event() {
+    fn plot_db() -> Connection {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(
-            "CREATE TABLE plots (id, name, target_type_id);
+            "CREATE TABLE aoe_diminishings (id, rate);
+             CREATE TABLE plots (id, name, target_type_id);
              INSERT INTO plots VALUES (1, 'p', 0);
              CREATE TABLE plot_events (id, plot_id, position, name, source_update_method_id,
                target_update_method_id, target_update_method_param1, target_update_method_param2,
@@ -377,7 +386,7 @@ mod tests {
                target_update_method_param5, target_update_method_param6,
                target_update_method_param7, aoe_diminishing, target_update_method_param8,
                target_update_method_param9);
-             INSERT INTO plot_events VALUES (10,1,1,'',1,2,0,0,0,1,0,0,0,0,'f',0,0);
+             INSERT INTO plot_events VALUES (10,1,1,'',1,2,0,0,0,1,0,0,0,0,'t',0,0);
              INSERT INTO plot_events VALUES (11,1,2,'',1,2,0,0,0,1,0,0,0,0,'f',0,0);
              CREATE TABLE plot_conditions (id, not_condition, kind_id, param1, param2, param3);
              CREATE TABLE plot_event_conditions (id, event_id, condition_id, position, source_id, target_id, notify_failure);
@@ -390,6 +399,12 @@ mod tests {
              INSERT INTO plot_next_events VALUES (101,11,1,11,'f','f',500,0,'f',0,'f','f','f','f','f','f');",
         )
         .unwrap();
+        c
+    }
+
+    #[test]
+    fn trees_share_nodes_per_next_event() {
+        let c = plot_db();
         let d = PlotData::load(&c).unwrap();
         let t = d.tree(1).unwrap();
         // root -> node(11) -> node(11 via 101) -> (101 already built) itself
@@ -398,5 +413,65 @@ mod tests {
         assert_eq!(t.nodes[1].children, vec![2]);
         assert_eq!(t.nodes[2].children, vec![2]);
         assert_eq!(d.parent_next_event(t, 2).unwrap().delay, 500);
+    }
+
+    #[test]
+    fn aoe_diminishing_loader_preserves_authored_ids_rates_and_event_flags() {
+        let c = plot_db();
+        // The 1.2 compact's ten authored rows, deliberately out of id order. Native
+        // sub_39620E90 keys on id; neither SQL row order nor event position is the key.
+        c.execute_batch(
+            "INSERT INTO aoe_diminishings VALUES
+             (10,10.0),(9,10.0),(8,10.0),(7,25.0),(6,40.0),
+             (5,55.0),(4,70.0),(3,80.0),(2,90.0),(1,100.0);",
+        )
+        .unwrap();
+        let d = PlotData::load(&c).unwrap();
+        assert_eq!(d.aoe_diminishings.len(), 10);
+        let rates: Vec<_> = (1..=10).map(|id| d.aoe_diminishings[&id]).collect();
+        assert_eq!(
+            rates,
+            [100.0, 90.0, 80.0, 70.0, 55.0, 40.0, 25.0, 10.0, 10.0, 10.0]
+        );
+        assert!(d.event(10).unwrap().aoe_diminishing);
+        assert!(!d.event(11).unwrap().aoe_diminishing);
+    }
+
+    #[test]
+    fn aoe_diminishing_loader_retains_fractional_percentages() {
+        let c = plot_db();
+        c.execute_batch("INSERT INTO aoe_diminishings VALUES (3,77.5);")
+            .unwrap();
+        let d = PlotData::load(&c).unwrap();
+        assert_eq!(d.aoe_diminishings.get(&3), Some(&77.5));
+        assert_eq!(d.aoe_diminishings.len(), 1);
+    }
+
+    #[test]
+    #[ignore = "requires AAEMU_COMPACT_DB pointing to the native 1.2 compact.sqlite3"]
+    fn real_compact_db_aoe_diminishings() {
+        let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+            return;
+        };
+        let c =
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let d = PlotData::load(&c).unwrap();
+        assert_eq!(d.aoe_diminishings.len(), 10);
+        let rates: Vec<_> = (1..=10).map(|id| d.aoe_diminishings[&id]).collect();
+        assert_eq!(
+            rates,
+            [100.0, 90.0, 80.0, 70.0, 55.0, 40.0, 25.0, 10.0, 10.0, 10.0]
+        );
+        let mut flagged: Vec<_> = d
+            .events
+            .values()
+            .filter(|e| e.aoe_diminishing)
+            .map(|e| e.id)
+            .collect();
+        flagged.sort_unstable();
+        assert_eq!(
+            flagged,
+            [189, 239, 1141, 2149, 2723, 2903, 3481, 4627, 4631, 4700, 5323, 5511, 8110]
+        );
     }
 }
