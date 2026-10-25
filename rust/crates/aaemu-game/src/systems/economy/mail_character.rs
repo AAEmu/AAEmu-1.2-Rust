@@ -69,8 +69,9 @@ pub fn open_mailbox(txn: &mut ItemTxn<'_>, player: &PlayerRef) {
 pub fn read_mail(txn: &mut ItemTxn<'_>, player: &PlayerRef, is_sent: bool, id: i64) {
     let server = txn.server;
     let mails = &server.systems.economy.mail;
-    let mut st = mails.state();
-    let Some(m) = st.all.get_mut(id) else { return };
+    let Some(m) = mails.get_mail_by_id(id) else {
+        return;
+    };
     let owner = if is_sent {
         m.header.sender_id
     } else {
@@ -79,6 +80,11 @@ pub fn read_mail(txn: &mut ItemTxn<'_>, player: &PlayerRef, is_sent: bool, id: i
     if owner != player.character_id {
         return;
     }
+    if mail::expire_mail_at(txn, id, mail::now()) {
+        return;
+    }
+    let mut st = mails.state();
+    let Some(m) = st.all.get_mut(id) else { return };
     if !is_sent && (!m.is_delivered || m.body.recv_date > mail::now()) {
         return;
     }
@@ -256,6 +262,9 @@ pub fn get_attached(
     };
     let cid = player.character_id;
     if this_mail.header.receiver_id != cid {
+        return Ok(false);
+    }
+    if mail::expire_mail_at(txn, mail_id, mail::now()) {
         return Ok(false);
     }
     if !this_mail.is_delivered || this_mail.body.recv_date > mail::now() {
@@ -453,6 +462,18 @@ pub fn get_attached(
 
 /// `DeleteMail(id, isSent)`: only the receiver may delete received mail.
 pub fn delete_mail(txn: &mut ItemTxn<'_>, player: &PlayerRef, id: i64, is_sent: bool) {
+    if !is_sent
+        && txn
+            .server
+            .systems
+            .economy
+            .mail
+            .get_mail_by_id(id)
+            .is_some_and(|m| m.header.receiver_id == player.character_id)
+        && mail::expire_mail_at(txn, id, mail::now())
+    {
+        return;
+    }
     let server = txn.server;
     let mails = &server.systems.economy.mail;
     let mut st = mails.state();
@@ -488,10 +509,13 @@ pub fn return_mail(txn: &mut ItemTxn<'_>, player: &PlayerRef, id: i64) {
     let Some(this_mail) = server.systems.economy.mail.get_mail_by_id(id) else {
         return;
     };
-    if this_mail.header.receiver_id != player.character_id
-        || !this_mail.is_delivered
-        || this_mail.body.recv_date > mail::now()
-    {
+    if this_mail.header.receiver_id != player.character_id {
+        return;
+    }
+    if mail::expire_mail_at(txn, id, mail::now()) {
+        return;
+    }
+    if !this_mail.is_delivered || this_mail.body.recv_date > mail::now() {
         return;
     }
     mail::return_to_sender(txn, id);

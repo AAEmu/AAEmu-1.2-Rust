@@ -2034,6 +2034,7 @@ async fn send_rejects_name_mismatch_and_return_preserves_the_original_mail() {
 #[tokio::test]
 async fn load_rows_restore_mails() {
     let w = mail_world();
+    let received = mail::now() - 1;
     let item = give(&w, &w.pa.clone(), slot_type::MAIL, STACK, 2, 0);
     let mut ids = [0u64; 10];
     ids[0] = item;
@@ -2050,8 +2051,8 @@ async fn load_rows_restore_mails() {
             attachment_count: 9,
             receiver_id: 2,
             receiver_name: "Bob".into(),
-            send_date: 10,
-            received_date: 20,
+            send_date: received - 10,
+            received_date: received,
             money1: 5,
             attachment_ids: ids,
             ..MailRow::default()
