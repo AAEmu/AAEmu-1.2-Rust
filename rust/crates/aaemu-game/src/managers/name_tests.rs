@@ -67,7 +67,7 @@ fn validation_character_name_pending_deletion_failed() {
 
     let result = sut.validate_character_name(&char_name, || true);
 
-    assert_eq!(result, CharacterCreateError::Failed);
+    assert_eq!(result, CharacterCreateError::NamePendingDeletion);
 }
 
 #[test]
@@ -111,4 +111,46 @@ fn remove_character_id_works_as_expected() {
     assert_eq!(sut.get_character_name(char_id), None);
     assert_eq!(sut.get_character_id(&char_name), 0);
     assert_eq!(sut.get_character_account(char_id), 0);
+}
+
+#[test]
+fn lobby_blocked_names_match_native_partial_and_exact_rules_without_changing_regex() {
+    let rules = [
+        BlockedName {
+            text: "Admin".into(),
+            partial_match: true,
+        },
+        BlockedName {
+            text: "GM".into(),
+            partial_match: false,
+        },
+        BlockedName {
+            text: "Иван".into(),
+            partial_match: true,
+        },
+    ];
+    let sut = NameManager::default();
+    for name in ["Admin", "ADMIN", "MyAdMiNhero", "gM", "ИВАН", "НовыйИван"] {
+        assert_eq!(
+            sut.validate_character_name_with_blocks(name, &rules, || false),
+            CharacterCreateError::InvalidCharacters,
+            "{name}"
+        );
+    }
+    for name in ["Roger", "GMhero", "SomeGM", "Павел", "Игрок123"] {
+        assert_eq!(
+            sut.validate_character_name_with_blocks(name, &rules, || false),
+            CharacterCreateError::Ok,
+            "{name}"
+        );
+    }
+    let custom = NameManager::new(Some("^[a-zA-Z_-]{1,18}$"));
+    assert_eq!(
+        custom.validate_character_name_with_blocks("Valid-name", &rules, || false),
+        CharacterCreateError::Ok
+    );
+    assert_eq!(
+        custom.validate_character_name_with_blocks("AdMiN-name", &rules, || false),
+        CharacterCreateError::InvalidCharacters
+    );
 }

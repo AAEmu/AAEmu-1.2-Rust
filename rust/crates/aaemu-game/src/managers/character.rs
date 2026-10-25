@@ -30,8 +30,12 @@ use crate::packets::world::{
 use crate::server::GameServer;
 use crate::world::unit_state::create_character_response;
 
-/// `ErrorMessageType.CannotDeleteCharWhileBotSuspected`.
-pub const ERROR_CANNOT_DELETE_CHAR_WHILE_BOT_SUSPECTED: i16 = 624;
+/// Matches `AcAuthResponse.slot_count` in aaemu-login (base slots, without paid slots).
+pub const MAX_CHARACTERS_PER_ACCOUNT: i64 = 6;
+
+// Native 1.2 x2game12.c:391136-391163 (HandleErrorMessage, lobby errors).
+const ERROR_CHARACTER_EXPEDITION_OWNER: i16 = 333;
+const ERROR_CANNOT_DELETE_CHAR_WHILE_ON_PLAY: i16 = 575;
 
 /// The data `CSCreateCharacterPacket` carries.
 #[derive(Debug, Clone, PartialEq)]
@@ -309,12 +313,33 @@ pub async fn create(
     req: CreateCharacterRequest,
 ) -> Result<()> {
     let name = normalize_name(&req.name);
+    let data = &server.game_data;
+    // Reject unavailable and malformed race/gender pairs before allocating names or assets.
+    let Some(template) = data
+        .characters
+        .template(req.race, req.gender)
+        .filter(|t| t.creatable)
+        .cloned()
+    else {
+        conn.send(&SCCharacterCreationFailedPacket {
+            reason: CharacterCreateError::Failed as u8,
+        });
+        return Ok(());
+    };
+    // The same lock covers name validation, setup, slot counting and the SQL commit. In-flight
+    // creates on distinct connections cannot both claim the last slot or the same name. Drop
+    // (including cancellation) releases it after NewCharacter has rolled back its assets.
+    let _transaction = server.save.transaction_lock().await;
     let pending = if server.names.name_exists(&name) {
         is_character_pending_deletion(&server.db, &name).await?
     } else {
         false
     };
-    let code = server.names.validate_character_name(&name, || pending);
+    let code = server.names.validate_character_name_with_blocks(
+        &name,
+        &data.characters.blocked_names,
+        || pending,
+    );
     if code != CharacterCreateError::Ok {
         conn.send(&SCCharacterCreationFailedPacket { reason: code as u8 });
         return Ok(());
@@ -340,7 +365,6 @@ pub async fn create(
     }
     // Inventory::new registers containers immediately. Exclude world/departure snapshots
     // throughout setup, SQL commit and failure cleanup, including setup errors below.
-    let _transaction = server.save.transaction_lock().await;
     let id = server
         .ids
         .character
@@ -353,18 +377,6 @@ pub async fn create(
         committed: false,
     };
     server.names.add_character(id, &name, conn.account_id());
-    let data = &server.game_data;
-    let template = data
-        .characters
-        .template(req.race, req.gender)
-        .cloned()
-        .ok_or_else(|| {
-            GameError::Protocol(format!(
-                "no template for race {} gender {}",
-                req.race, req.gender
-            ))
-        })?;
-
     let mut c = Character::new(id, conn.account_id(), req.model_params.clone());
     c.unit.name = name.clone();
     c.race = req.race;
@@ -505,6 +517,34 @@ pub async fn create(
     c.unit.mp = c.unit.max_mp;
     c.restore_saved_hp_mp();
 
+    // Use persisted rows, not a connection's stale/empty lobby list. Pending deletions still
+    // occupy slots until deleted=1. Keep the save lock through the subsequent commit; the next
+    // create sees this one, and a failed create leaves neither a slot nor an inventory behind.
+    let slots = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM characters WHERE account_id = ? AND deleted = 0",
+    )
+    .bind(conn.account_id())
+    .fetch_one(&server.db)
+    .await;
+    match slots {
+        Ok(count) if count >= MAX_CHARACTERS_PER_ACCOUNT => {
+            conn.send(&SCCharacterCreationFailedPacket {
+                reason: CharacterCreateError::WorldLimit as u8,
+            });
+            return Ok(());
+        }
+        Err(e) => {
+            tracing::error!(
+                "Cannot count character slots for account {}: {e}",
+                conn.account_id()
+            );
+            conn.send(&SCCharacterCreationFailedPacket {
+                reason: CharacterCreateError::Failed as u8,
+            });
+            return Ok(());
+        }
+        Ok(_) => {}
+    }
     if save_new_character_locked(server, &mut c).await {
         creation.committed = true;
         let resp = create_character_response(&c);
@@ -517,6 +557,22 @@ pub async fn create(
         });
     }
     Ok(())
+}
+
+/// Excludes a concurrent select until the deletion request is committed. Never release an
+/// existing session's reservation, including one owned by this very connection.
+struct DeleteReservation<'a> {
+    server: &'a GameServer,
+    character_id: u32,
+    connection_id: u32,
+}
+
+impl Drop for DeleteReservation<'_> {
+    fn drop(&mut self) {
+        self.server
+            .enter_world
+            .release_character(self.character_id, self.connection_id);
+    }
 }
 
 /// Learn the selected ability's starters and make its first spell the primary shortcut.
@@ -574,7 +630,42 @@ pub async fn set_delete_character(
     conn: &mut GameConnection,
     character_id: u32,
 ) -> Result<()> {
-    if let Some(i) = conn.characters.iter().position(|c| c.id == character_id) {
+    if let Some(i) = conn
+        .characters
+        .iter()
+        .position(|c| c.id == character_id && c.account_id == conn.account_id())
+    {
+        if server.world.character_by_id(character_id).is_some()
+            || server.enter_world.reserve_character(character_id, conn.id) != Ok(true)
+        {
+            conn.send(&SCErrorMsgPacket::new(
+                ERROR_CANNOT_DELETE_CHAR_WHILE_ON_PLAY,
+                0,
+                false,
+            ));
+            return Ok(());
+        }
+        let _reservation = DeleteReservation {
+            server,
+            character_id,
+            connection_id: conn.id,
+        };
+        let _transaction = server.save.transaction_lock().await;
+        // The loaded lobby copy can predate an ownership transfer. Use the guild ledger,
+        // including guilds absent from that copy's expedition_id.
+        if server
+            .expeditions
+            .all()
+            .iter()
+            .any(|e| !e.is_disbanded && e.faction.owner_id == character_id)
+        {
+            conn.send(&SCErrorMsgPacket::new(
+                ERROR_CHARACTER_EXPEDITION_OWNER,
+                0,
+                false,
+            ));
+            return Ok(());
+        }
         let now = Utc::now().timestamp();
         let level = conn.characters[i].unit.level;
         let mut delay = 0;
@@ -583,11 +674,21 @@ pub async fn set_delete_character(
                 delay = t.delay;
             }
         }
-        let c = &mut conn.characters[i];
-        c.delete_request_time = now;
-        c.delete_time = now + i64::from(delay) * 60;
-        let (req, del) = (c.delete_request_time, c.delete_time);
-        if set_delete_times(&server.db, character_id, req, del).await? == 1 {
+        let (req, del) = (now, now + i64::from(delay) * 60);
+        let affected = sqlx::query(
+            "UPDATE characters SET delete_request_time = ?, delete_time = ? \
+             WHERE id = ? AND account_id = ? AND deleted = 0",
+        )
+        .bind(crate::db::from_unix(req))
+        .bind(crate::db::from_unix(del))
+        .bind(character_id)
+        .bind(conn.account_id())
+        .execute(&server.db)
+        .await?;
+        if affected.rows_affected() == 1 {
+            let c = &mut conn.characters[i];
+            c.delete_request_time = req;
+            c.delete_time = del;
             conn.send(&SCDeleteCharacterResponsePacket {
                 character_id,
                 status: 2,
@@ -595,12 +696,12 @@ pub async fn set_delete_character(
                 delete_time: del,
             });
         } else {
-            // Not the correct message, but it seems funny enough (C#)
-            conn.send(&SCErrorMsgPacket::new(
-                ERROR_CANNOT_DELETE_CHAR_WHILE_BOT_SUSPECTED,
-                0,
-                true,
-            ));
+            conn.send(&SCDeleteCharacterResponsePacket {
+                character_id,
+                status: 0,
+                delete_request_time: 0,
+                delete_time: 0,
+            });
         }
     } else {
         conn.send(&SCDeleteCharacterResponsePacket {

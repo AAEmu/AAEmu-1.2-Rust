@@ -7,15 +7,20 @@ use regex::Regex;
 use sqlx::mysql::MySqlPool;
 use sqlx::Row;
 
+use crate::data::character_templates::BlockedName;
+
 /// `CharacterCreateError`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum CharacterCreateError {
     Ok = 0,
-    /// Also generates "Name is pending deletion".
-    Failed = 3,
+    /// Native 1.2 `sub_3961BBC0`: general server error.
+    Failed = 2,
     NameAlreadyExists = 4,
     InvalidCharacters = 5,
+    NamePendingDeletion = 6,
+    /// Native 1.2 `sub_3961BBC0`: limit by world server.
+    WorldLimit = 9,
 }
 
 /// `NameManager.DefaultCharacterNameRegexPattern`.
@@ -153,11 +158,38 @@ impl NameManager {
     ) -> CharacterCreateError {
         if self.name_exists(name) {
             if pending_deletion() {
-                return CharacterCreateError::Failed;
+                return CharacterCreateError::NamePendingDeletion;
             }
             return CharacterCreateError::NameAlreadyExists;
         }
         if name.trim().is_empty() || !self.regex.is_match(name) {
+            return CharacterCreateError::InvalidCharacters;
+        }
+        CharacterCreateError::Ok
+    }
+
+    pub fn validate_character_name_with_blocks(
+        &self,
+        name: &str,
+        blocked_names: &[BlockedName],
+        pending_deletion: impl FnOnce() -> bool,
+    ) -> CharacterCreateError {
+        let result = self.validate_character_name(name, pending_deletion);
+        if result != CharacterCreateError::Ok {
+            return result;
+        }
+        // Native 1.2 x2game12.c:1738997-1739029, sub_397A7540:
+        // check_name uses XlFindStringI for partial_match, otherwise XlCompareStringI.
+        // Lowercasing covers the Latin/Cyrillic alphabet supported by the default regex.
+        let folded = name.to_lowercase();
+        if blocked_names.iter().any(|rule| {
+            let text = rule.text.to_lowercase();
+            if rule.partial_match {
+                folded.contains(&text)
+            } else {
+                folded == text
+            }
+        }) {
             return CharacterCreateError::InvalidCharacters;
         }
         CharacterCreateError::Ok
@@ -254,7 +286,7 @@ mod tests {
         );
         assert_eq!(
             m.validate_character_name("Taken", || true),
-            CharacterCreateError::Failed
+            CharacterCreateError::NamePendingDeletion
         );
         assert_eq!(
             m.validate_character_name("Bad name", || false),
