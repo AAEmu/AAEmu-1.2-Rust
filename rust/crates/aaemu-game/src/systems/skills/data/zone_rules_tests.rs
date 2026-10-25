@@ -6,6 +6,7 @@
 //! - 1766270..1766291 + 1748773..1748807: started-skill body, flags and byte result.
 //! - 1761305..1761336: two i16 errors, u32 type, bool notify in SCErrorMsg.
 //! - 1765129..1765192: caster discriminator, three-byte object ID and item fields.
+//!
 //! These literal failure bodies are native-layout fixtures, not Rust encode/decode round trips.
 
 use std::sync::Arc;

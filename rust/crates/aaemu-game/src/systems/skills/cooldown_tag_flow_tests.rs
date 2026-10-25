@@ -520,6 +520,45 @@ async fn gm_ignore_then_off_clears_the_same_native_records_and_preserves_longer_
 }
 
 #[tokio::test]
+async fn controlled_unit_shared_cooldown_does_not_populate_owners_native_snapshot() {
+    let (server, mut client, player, _) = fixture(data());
+    let now = now_ms();
+    player
+        .data()
+        .unit
+        .cooldowns
+        .add_tag_cooldown(9, 120_000, now);
+    let owner_cooldowns = player.data().unit.cooldowns.clone();
+    let mut data = crate::models::mate::Mate::new(1, 1);
+    data.owner_obj_id = player.obj_id;
+    let mate = crate::world::Entity::new(0x300, data);
+    let caster = WorldObject::from(&mate);
+    let skill = super::new_skill_for(
+        &server,
+        server
+            .game_data
+            .systems
+            .skills
+            .skill(POTION)
+            .unwrap()
+            .clone(),
+        Some(&caster),
+    );
+    client.drain();
+    super::start_skill_cooldown(&server, &skill, &caster, now);
+    assert_eq!(mate.data().unit.cooldowns.cooldowns[&POTION], now + 60_000);
+    assert_eq!(mate.data().unit.cooldowns.tag_cooldowns[&144], now + 60_000);
+    assert!(mate
+        .data()
+        .unit
+        .cooldowns
+        .check_skill_cooldown(POTION_NEXT, 144, now));
+    assert_eq!(player.data().unit.cooldowns, owner_cooldowns);
+    // 391D43C0 imports this subject-less packet into the local character manager.
+    assert!(!client.drain_ops().contains(&sc::SCCooldownsPacket));
+}
+
+#[tokio::test]
 async fn gm_reset_targets_the_controlled_units_native_store_instead_of_its_owners() {
     let (server, mut client, player, _) = fixture(data());
     let now = now_ms();

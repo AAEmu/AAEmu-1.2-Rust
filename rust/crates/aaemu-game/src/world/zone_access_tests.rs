@@ -236,7 +236,7 @@ async fn closed_zone_walk_warns_five_times_then_returns_and_refiles_visibility()
     assert!(arrival.drain_ops().contains(&sc::SCUnitStatePacket));
     assert!(departure.drain_ops().contains(&sc::SCUnitsRemovedPacket));
     let world = server.world.world(0).unwrap();
-    let around = world.players_around(&WorldObject::from(&p));
+    let around = world.players_around(WorldObject::from(&p));
     assert!(around.iter().any(|x| Arc::ptr_eq(x, &a)));
     assert!(!around.iter().any(|x| Arc::ptr_eq(x, &d)));
     // Native resurrection has no TeleportEnded acknowledgement: movement remains usable.

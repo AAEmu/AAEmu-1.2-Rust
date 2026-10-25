@@ -256,12 +256,11 @@ fn start_skill_cooldown(server: &GameServer, skill: &SkillRun, caster: &WorldObj
         })
         .flatten();
     if let Some(packet) = packet.filter(|p| !p.is_empty()) {
-        if let Some(owner) = caster
-            .as_player()
-            .cloned()
-            .or_else(|| owner_character(server, caster))
-        {
-            owner.send(packet);
+        // OnCooldowns (native 391D43C0) addresses the local character's manager;
+        // unlike SkillCooldownReset, the packet has no subject object ID. A mate's
+        // shared timers must not populate its owner's character cooldown store.
+        if let Some(player) = caster.as_player() {
+            player.send(packet);
         }
     }
 }
