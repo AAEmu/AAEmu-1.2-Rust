@@ -436,6 +436,27 @@
       "round": 3,
       "result": "no_new_actionable_P1_P2_within_documented_conservative_policy",
       "execution": "pending"
+    },
+    "cargo_integrated_game_build": {
+      "head": "8db0e003df5c329d9ee6522b09a26d0c7158dfc0",
+      "result": "held_at_memory_reserve_before_tests",
+      "minimum_free_gib": 7.936,
+      "native_diagnostics": "none before guard stopped the owned compiler subtree"
+    },
+    "selected_ignored_snapshot_checks": {
+      "binary_head": "1f53a66bdd0ab289ae2a26abbbaff084cddfcaff",
+      "binary_sha256": "836cf147a09b999582e302e8dae807cbd6d867e65a99da120abaa3ccc1009230",
+      "scope": "previously compiled snapshot; not final-head acceptance",
+      "compact_passed": 9,
+      "private_mysql_lobby_passed": 3,
+      "mail_expiry": "fixture signed/unsigned decode mismatch found; fixed da8e370ba, rebuilt execution pending",
+      "database_scope": "private 3317 lane_audit_final_game; connection-local temporary tables"
+    },
+    "remote_checks": {
+      "head": "5dfd7282b71ec84655b44b861b24991502dd5ff2",
+      "passed": 12,
+      "failed": 0,
+      "scope": "draft PR46 before cargo integration"
     }
   }
 }
