@@ -335,7 +335,7 @@ fn bench_denial(
                 (owner_type == owner::CHARACTER)
                     .then(|| server.names.get_character_account(owner_id))
             });
-            if account.is_some_and(|a| a == 0 || a != player.data().account_id) {
+            if account.is_none_or(|a| a == 0 || a != player.data().account_id) {
                 return Some("the crafting function requires the owner's account");
             }
         }

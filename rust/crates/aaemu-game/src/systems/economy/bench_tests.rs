@@ -33,6 +33,7 @@ const WRONG_PACK_GROUP: u32 = 90001;
 const PORTABLE: u32 = 90002;
 const OTHER_RECIPE: u32 = 90003;
 const HOUSE_PERMISSION_GROUP: u32 = 90004;
+const SAME_ACCOUNT_GROUP: u32 = 90005;
 
 // One live tax CraftPack phase per plaque template (other authored phases are checked by
 // the ignored real-data test below). The recipe's req_doodad_id is always canonical 2392.
@@ -182,6 +183,13 @@ fn data(cast_time: i32) -> GameData {
         permission::OWNER_ONLY,
     );
     add_pack(&mut data, WRONG_PACK_GROUP, 90001, 4, permission::ANY);
+    add_pack(
+        &mut data,
+        SAME_ACCOUNT_GROUP,
+        90005,
+        3,
+        permission::SAME_ACCOUNT,
+    );
     add_pack(
         &mut data,
         HOUSE_PERMISSION_GROUP,
@@ -338,6 +346,28 @@ async fn current_craft_pack_permission_beats_first_parent_info_and_public_house(
     request(&f.server, &mut f.owner_client, TAX, BENCH, 1).await;
     assert_eq!(certificates(&f.owner), 5);
     assert_eq!(f.owner.data().labor_power, 800);
+}
+
+#[tokio::test]
+async fn same_account_crafting_requires_a_resolved_matching_owner_account() {
+    for case in 0..3 {
+        let mut f = fixture(2392, SAME_ACCOUNT_GROUP, 0);
+        f.house.data().permission = housing_permission::PUBLIC;
+        match case {
+            0 => {} // Public housing does not waive the function's account requirement.
+            1 => f.house.data().account_id = f.visitor.data().account_id,
+            2 => f.bench.data().owner_type = 0, // No authoritative account to compare.
+            _ => unreachable!(),
+        }
+        request(&f.server, &mut f.client, TAX, BENCH, 1).await;
+        if case == 1 {
+            assert_eq!(certificates(&f.visitor), 5);
+            assert_eq!(f.visitor.data().labor_power, 800);
+        } else {
+            assert_denied(&mut f);
+            assert_eq!(f.visitor.data().labor_power, 1000);
+        }
+    }
 }
 
 #[tokio::test]
