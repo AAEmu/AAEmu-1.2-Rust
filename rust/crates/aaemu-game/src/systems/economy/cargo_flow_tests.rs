@@ -16,7 +16,7 @@ use crate::systems::economy::tests::{give, test_data, World, SINGLE};
 use crate::systems::npcs::doodad::runtime::DoodadCtx;
 use crate::systems::npcs::doodad::templates::*;
 use crate::systems::npcs::doodad::{funcs::items, interactions, manager, phase};
-use crate::systems::npcs::hooks::EconomyBridge;
+use crate::systems::npcs::hooks::{DoodadItemCleanup, EconomyBridge};
 use crate::systems::vehicles::data::{SlaveDoodadBinding, SlaveTemplate};
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
 use crate::world::{DoodadRef, Entity, SlaveRef, WorldObject};
@@ -31,6 +31,7 @@ const STORE_SKILL: u32 = 15307;
 const RECOVER_SKILL: u32 = 15309;
 const PACK: u32 = 18469;
 const GLIDER: u32 = 99991;
+const FURNITURE: u32 = 60000;
 
 fn authored_data() -> GameData {
     let mut data = test_data();
@@ -60,6 +61,13 @@ fn authored_data() -> GameData {
         },
     ];
     let doodads = &mut data.systems.npcs.doodad;
+    doodads.templates.insert(
+        FURNITURE,
+        DoodadTemplate {
+            id: FURNITURE,
+            ..Default::default()
+        },
+    );
     doodads.templates.insert(
         RACK,
         DoodadTemplate {
@@ -262,6 +270,21 @@ fn equipped(c: &CargoWorld) -> Item {
 fn cargo_state(rack: &DoodadRef) -> (u32, u64, u32) {
     let d = rack.data();
     (d.func_group_id, d.item_id, d.item_template_id)
+}
+
+fn cleanup_source(item_id: u64, template: u32) -> DoodadItemCleanup {
+    DoodadItemCleanup {
+        doodad_template_id: if template == PACK { RACK } else { FURNITURE },
+        owner_id: 1,
+        owner_type: if template == PACK {
+            doodad_owner_type::SLAVE
+        } else {
+            doodad_owner_type::CHARACTER
+        },
+        item_id,
+        item_template_id: template,
+        ..Default::default()
+    }
 }
 
 fn repeated_cycles(c: &mut CargoWorld) {
@@ -572,9 +595,9 @@ async fn both_cleanup_hooks_retain_cargo_without_any_spawned_reference() {
             .iter()
             .all(|d| d.data().item_id != id));
         if persisted_row_route {
-            EconomyForNpcs.release_deleted_doodad_items(&c.w.server, id, 0);
+            EconomyForNpcs.release_deleted_doodad_items(&c.w.server, cleanup_source(id, PACK));
         } else {
-            EconomyForNpcs.remove_expired_doodad_item(&c.w.server, id);
+            EconomyForNpcs.remove_expired_doodad_item(&c.w.server, cleanup_source(id, PACK));
         }
         assert!(!c.w.server.items.removed_items().contains(&id));
         assert_eq!(
@@ -593,9 +616,9 @@ async fn both_cleanup_hooks_retain_cargo_without_any_spawned_reference() {
         assert!(!c.w.server.items.removed_items().contains(&id));
         // Replayed cleanup of the stale alias cannot delete the pack after its recovery either.
         if persisted_row_route {
-            EconomyForNpcs.release_deleted_doodad_items(&c.w.server, id, 0);
+            EconomyForNpcs.release_deleted_doodad_items(&c.w.server, cleanup_source(id, PACK));
         } else {
-            EconomyForNpcs.remove_expired_doodad_item(&c.w.server, id);
+            EconomyForNpcs.remove_expired_doodad_item(&c.w.server, cleanup_source(id, PACK));
         }
         assert_eq!(equipped(&c).id, id);
         assert!(!c.w.server.items.removed_items().contains(&id));
@@ -609,12 +632,83 @@ async fn cargo_preservation_does_not_disable_ordinary_item_or_glider_cleanup() {
             let c = world(authored_data());
             let id = give(&c.w, &c.w.pa, slot_type::SYSTEM, template, 1, -1);
             if persisted_row_route {
-                EconomyForNpcs.release_deleted_doodad_items(&c.w.server, id, 0);
+                EconomyForNpcs
+                    .release_deleted_doodad_items(&c.w.server, cleanup_source(id, template));
             } else {
-                EconomyForNpcs.remove_expired_doodad_item(&c.w.server, id);
+                EconomyForNpcs
+                    .remove_expired_doodad_item(&c.w.server, cleanup_source(id, template));
             }
             assert!(c.w.server.items.item_by_id(id).is_none());
             assert!(c.w.server.items.removed_items().contains(&id));
+        }
+    }
+}
+
+fn recycle_pack_guid(c: &CargoWorld, id: u64, template: u32, slot_type: u8, slot: i32) {
+    {
+        let mut txn = ItemTxn::begin(&c.w.server);
+        let system = Inv::of(&c.w.pa)
+            .get(crate::models::container::slot_type::SYSTEM)
+            .unwrap();
+        assert!(system
+            .lock()
+            .unwrap()
+            .remove_item_task(task_type::INVALID, id, true, &mut txn.env)
+            .is_some());
+    }
+    assert_eq!(
+        give(&c.w, &c.w.pb, slot_type, template, 1, slot),
+        id,
+        "exercise actual allocator reuse, not just a stale item snapshot"
+    );
+    assert!(!c.w.server.items.removed_items().contains(&id));
+}
+
+fn record_item_releases(c: &CargoWorld) -> Arc<std::sync::Mutex<Vec<u32>>> {
+    let releases = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = releases.clone();
+    c.w.server
+        .ids
+        .item
+        .install_release_hook(move |id| observed.lock().unwrap().push(id));
+    releases
+}
+
+#[tokio::test]
+async fn both_cleanup_hooks_reject_recycled_foreign_items_and_unrelated_containers() {
+    for (template, target, slot) in [
+        (SINGLE, slot_type::INVENTORY, 0),
+        (SINGLE, slot_type::BANK, 0),
+        (SINGLE, slot_type::SYSTEM, -1),
+        (GLIDER, slot_type::EQUIPMENT, equip_slot::BACKPACK),
+    ] {
+        let c = world(authored_data());
+        let releases = record_item_releases(&c);
+        let id = give(&c.w, &c.w.pa, slot_type::SYSTEM, PACK, 1, -1);
+        recycle_pack_guid(&c, id, template, target, slot);
+        releases.lock().unwrap().clear();
+        let before = c.w.server.items.item_by_id(id).unwrap();
+        let foreign = Inv::of(&c.w.pb).get(target).unwrap();
+        let mut sources = vec![cleanup_source(id, PACK), cleanup_source(id, template)];
+        if target != slot_type::SYSTEM {
+            let mut same_owner = cleanup_source(id, template);
+            same_owner.owner_id = 2;
+            sources.push(same_owner);
+        }
+        for mut source in sources {
+            source.container_id = foreign.lock().unwrap().container_id;
+            EconomyForNpcs.remove_expired_doodad_item(&c.w.server, source);
+            EconomyForNpcs.release_deleted_doodad_items(&c.w.server, source);
+            assert_eq!(c.w.server.items.item_by_id(id).unwrap(), before);
+            assert!(releases.lock().unwrap().is_empty());
+            assert!(!c.w.server.items.removed_items().contains(&id));
+            assert!(Arc::ptr_eq(
+                &c.w.server
+                    .items
+                    .container_by_id(source.container_id)
+                    .unwrap(),
+                &foreign
+            ));
         }
     }
 }
@@ -778,10 +872,7 @@ async fn dangling_cargo_repair_requires_live_child_identity_not_a_reused_id() {
     assert!(Inv::of(&c.w.pa).equipped(equip_slot::BACKPACK).is_none());
 }
 
-#[tokio::test]
-#[ignore = "private MySQL3317 via AAEMU_TEST_MYSQL; connection-local temporary doodads table"]
-async fn private_mysql_saved_offline_rack_alias_survives_both_cleanup_routes() {
-    use crate::systems::npcs::doodad::db;
+async fn private_doodad_pool() -> sqlx::MySqlPool {
     use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
     use std::str::FromStr;
 
@@ -798,14 +889,24 @@ async fn private_mysql_saved_offline_rack_alias_survives_both_cleanup_routes() {
         .connect_with(options)
         .await
         .unwrap();
-    let (_, ddl): (String, String) = sqlx::query_as("SHOW CREATE TABLE doodads")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    sqlx::query(&ddl.replacen("CREATE TABLE", "CREATE TEMPORARY TABLE", 1))
-        .execute(&pool)
-        .await
-        .unwrap();
+    for table in ["doodads", "items", "item_containers"] {
+        let (_, ddl): (String, String) = sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query(&ddl.replacen("CREATE TABLE", "CREATE TEMPORARY TABLE", 1))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    pool
+}
+
+#[tokio::test]
+#[ignore = "private MySQL3317 via AAEMU_TEST_MYSQL; connection-local temporary tables"]
+async fn private_mysql_saved_offline_rack_alias_survives_both_cleanup_routes() {
+    use crate::systems::npcs::doodad::db;
+    let pool = private_doodad_pool().await;
 
     for persisted_row_route in [false, true] {
         // `doodads` is the connection-local temporary table created above.
@@ -918,6 +1019,159 @@ async fn private_mysql_saved_offline_rack_alias_survives_both_cleanup_routes() {
             .await
             .unwrap();
     }
+}
+
+async fn persist_inventory(c: &CargoWorld, pool: &sqlx::MySqlPool) {
+    let batch = {
+        let _economy = c.w.server.systems.economy.ops_lock();
+        c.w.server.items.prepare_save()
+    };
+    let mut tx = pool.begin().await.unwrap();
+    c.w.server
+        .items
+        .write_prepared(&mut tx, batch)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    c.w.server.items.commit_save();
+}
+
+#[tokio::test]
+#[ignore = "private MySQL3317 via AAEMU_TEST_MYSQL; connection-local temporary tables"]
+async fn private_mysql_stale_rack_guid_reuse_preserves_foreign_items_and_container() {
+    use crate::models::doodad::DoodadCofferState;
+    use crate::systems::npcs::doodad::db;
+
+    let pool = private_doodad_pool().await;
+    for (template, target, slot) in [
+        (SINGLE, slot_type::INVENTORY, 0),
+        (SINGLE, slot_type::BANK, 0),
+        (GLIDER, slot_type::EQUIPMENT, equip_slot::BACKPACK),
+    ] {
+        for table in ["doodads", "items", "item_containers"] {
+            // All three names refer to this connection's temporary tables.
+            sqlx::query(&format!("DELETE FROM `{table}`"))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let c = world_with_pool(authored_data(), Some(pool.clone()));
+        let releases = record_item_releases(&c);
+        let original_coffer =
+            c.w.server
+                .items
+                .new_coffer_container(1, &c.w.server.ids.container);
+        let container_id = original_coffer.lock().unwrap().container_id;
+        // Legacy rows may carry stale item-container references as well as cargo item GUIDs.
+        c.racks[0].data().coffer = Some(DoodadCofferState {
+            capacity: 1,
+            container_id,
+            opened_by: None,
+        });
+        let item_id = give(
+            &c.w,
+            &c.w.pa,
+            slot_type::EQUIPMENT,
+            PACK,
+            1,
+            equip_slot::BACKPACK,
+        );
+        use_rack(&c, 0, STORE_SKILL);
+        c.w.server
+            .systems
+            .npcs
+            .doodads
+            .persistence
+            .flush()
+            .await
+            .unwrap();
+        let deleted_id = c.racks[0].data().db_id;
+        recycle_pack_guid(&c, item_id, template, target, slot);
+        assert!(c.w.server.items.forget_container(container_id));
+        c.w.server.ids.container.release_id(container_id as u32);
+        let foreign_coffer =
+            c.w.server
+                .items
+                .new_coffer_container(2, &c.w.server.ids.container);
+        assert_eq!(
+            foreign_coffer.lock().unwrap().container_id,
+            container_id,
+            "exercise actual container allocator reuse"
+        );
+        persist_inventory(&c, &pool).await;
+        let before = c.w.server.items.item_by_id(item_id).unwrap();
+        releases.lock().unwrap().clear();
+        c.w.server.world.world(0).unwrap().delete(&c.racks[0]);
+        {
+            let mut conn = pool.acquire().await.unwrap();
+            assert!(db::delete_doodad_by_id(&c.w.server, &mut conn, deleted_id)
+                .await
+                .unwrap());
+        }
+        assert_eq!(c.w.server.items.item_by_id(item_id).unwrap(), before);
+        assert!(!c.w.server.items.removed_items().contains(&item_id));
+        assert!(releases.lock().unwrap().is_empty());
+        assert!(Arc::ptr_eq(
+            &c.w.server.items.container_by_id(container_id).unwrap(),
+            &foreign_coffer
+        ));
+        persist_inventory(&c, &pool).await;
+        let foreign_owner: u64 =
+            sqlx::query_scalar("SELECT CAST(owner AS UNSIGNED) FROM items WHERE id = ?")
+                .bind(item_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(foreign_owner, 2);
+        let container_owner: u64 = sqlx::query_scalar(
+            "SELECT CAST(owner_id AS UNSIGNED) FROM item_containers WHERE container_id = ?",
+        )
+        .bind(container_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(container_owner, 2);
+    }
+
+    for table in ["doodads", "items", "item_containers"] {
+        sqlx::query(&format!("DELETE FROM `{table}`"))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    // Control: a saved ordinary furniture reference still owns a matching System-escrow item.
+    let c = world_with_pool(authored_data(), Some(pool.clone()));
+    let releases = record_item_releases(&c);
+    let item_id = give(&c.w, &c.w.pa, slot_type::SYSTEM, SINGLE, 1, -1);
+    let instance = c.w.server.world.world(0).unwrap();
+    let furniture = manager::create(&c.w.server, &instance, 0, FURNITURE, None, true).unwrap();
+    {
+        let mut d = furniture.data();
+        d.is_persistent = true;
+        d.owner_type = doodad_owner_type::CHARACTER;
+        d.owner_id = 1;
+        d.item_id = item_id;
+        d.item_template_id = SINGLE;
+    }
+    db::save_now(&c.w.server, &furniture).await.unwrap();
+    persist_inventory(&c, &pool).await;
+    let db_id = furniture.data().db_id;
+    {
+        let mut conn = pool.acquire().await.unwrap();
+        assert!(db::delete_doodad_by_id(&c.w.server, &mut conn, db_id)
+            .await
+            .unwrap());
+    }
+    assert!(c.w.server.items.item_by_id(item_id).is_none());
+    assert!(c.w.server.items.removed_items().contains(&item_id));
+    assert_eq!(*releases.lock().unwrap(), vec![item_id as u32]);
+    persist_inventory(&c, &pool).await;
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items WHERE id = ?")
+        .bind(item_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(remaining, 0);
 }
 
 #[tokio::test]

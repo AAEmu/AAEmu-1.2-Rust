@@ -2729,85 +2729,119 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
         true
     }
 
-    fn remove_expired_doodad_item(&self, server: &GameServer, item_id: u64) {
+    fn remove_expired_doodad_item(
+        &self,
+        server: &GameServer,
+        source: crate::systems::npcs::hooks::DoodadItemCleanup,
+    ) {
         let mut txn = ItemTxn::begin(server);
-        if preserve_cargo_on_doodad_delete(server, item_id) {
-            return;
-        }
-        let Some(c) = server.items.holding_container(item_id) else {
-            return;
-        };
-        let mut g = lock(&c);
-        if matches!(g.slot_type, slot_type::NONE | slot_type::SYSTEM) {
-            g.remove_item_task(task_type::INVALID, item_id, true, &mut txn.env);
-        }
+        cleanup_doodad_escrow_item(&mut txn, source);
     }
 
-    fn release_deleted_doodad_items(&self, server: &GameServer, item_id: u64, container_id: u64) {
-        let _operation = ItemTxn::begin(server);
-        if preserve_cargo_on_doodad_delete(server, item_id) {
-            // Do not forget a referenced item's holding container either. Cargo racks normally
-            // have no attached container; ambiguous legacy rows are preserved conservatively.
-            return;
-        }
-        // item._holdingContainer = null; itemManager.ReleaseId(item.Id)
-        if item_id != 0 && server.items.item_by_id(item_id).is_some() {
-            if let Some(c) = server.items.holding_container(item_id) {
-                lock(&c).remove_item(item_id);
-            }
-            server.items.release_id(item_id, &server.ids.item);
-        }
-        // itemManager.DeleteItemContainer(container)
-        if container_id != 0 && server.items.forget_container(container_id) {
-            if let Ok(rt) = tokio::runtime::Handle::try_current() {
-                let pool = server.db.clone();
-                rt.spawn(async move {
-                    if let Err(e) = crate::managers::item::ItemManager::delete_container_row(
-                        &pool,
-                        container_id,
-                    )
-                    .await
-                    {
-                        tracing::error!("DeleteItemContainer {container_id}: {e}");
-                    }
-                });
-            }
+    fn release_deleted_doodad_items(
+        &self,
+        server: &GameServer,
+        source: crate::systems::npcs::hooks::DoodadItemCleanup,
+    ) {
+        let mut txn = ItemTxn::begin(server);
+        cleanup_doodad_escrow_item(&mut txn, source);
+        if source.container_id != 0 {
+            // A coffer's container has no immutable doodad/generation association. Even an
+            // empty container with a matching owner may be a reused allocation; retain it.
+            tracing::warn!(?source, "Retained doodad container: allocation provenance unavailable; reconciliation deferred");
         }
     }
 }
 
-/// These synchronous deletion hooks cannot rule out references in unloaded `doodads` rows.
-/// Retain cargo instead of releasing its sole item or queuing its row for deletion. This also
-/// protects packs already picked up from a stale rack. No world scan or DB await is needed.
-/// Known gliders/toy flags and ordinary doodad items keep their existing cleanup policy.
-/// A separate reconciliation/GC operation must establish that retained cargo is unreferenced;
-/// this fallback intentionally does not collect cargo orphaned by removal of its last rack.
-fn preserve_cargo_on_doodad_delete(server: &GameServer, item_id: u64) -> bool {
-    if item_id == 0 {
-        return false;
+/// Original rack references cannot authorize destruction after GUID reuse, regardless of the
+/// current item's class. Other doodads may remove only a unique, matching singleton in their
+/// original character owner's System escrow. Bag/equipment/bank, loose, foreign and mismatched
+/// items are retained. These checks establish escrow authority, not an allocation generation.
+/// Cargo/ambiguous item references and all saved container references still need reconciliation;
+/// these synchronous hooks do not prove absence of unloaded aliases or collect those orphans.
+fn cleanup_doodad_escrow_item(
+    txn: &mut ItemTxn<'_>,
+    source: crate::systems::npcs::hooks::DoodadItemCleanup,
+) {
+    use crate::models::doodad::doodad_owner_type;
+
+    let server = txn.server;
+    if source.item_id == 0 {
+        return;
     }
-    let Some(item) = server.items.item_by_id(item_id) else {
-        return false;
-    };
-    let cargo = match server
-        .game_data
-        .items
-        .template(item.template_id)
-        .map(|t| &t.kind)
-    {
+    let doodads = &server.game_data.systems.npcs.doodad;
+    let rack = doodads
+        .doodad_func_groups(source.doodad_template_id)
+        .iter()
+        .any(|group| {
+            doodads
+                .funcs_for_group(group.id)
+                .iter()
+                .any(|f| f.func_type == "DoodadFuncConsumeChanger")
+        });
+    let template = server.game_data.items.template(source.item_template_id);
+    let cargo = match template.map(|t| &t.kind) {
         Some(TemplateKind::Backpack { backpack_type }) => !matches!(
             *backpack_type,
             crate::data::items::backpack_type::GLIDER | crate::data::items::backpack_type::TOY_FLAG
         ),
-        None => item.class == ItemClass::Backpack,
         _ => false,
     };
-    if cargo {
-        tracing::warn!(item_id, item_template_id = item.template_id,
-            item_slot_type = item.slot_type,
-            "Retained doodad cargo item: unloaded persistent references have not been ruled out; orphan cleanup deferred");
+    if rack
+        || cargo
+        || source.owner_type == doodad_owner_type::SLAVE
+        || !matches!(
+            source.owner_type,
+            doodad_owner_type::CHARACTER | doodad_owner_type::HOUSING
+        )
+        || source.owner_id == 0
+        || source.item_template_id == 0
+        || !doodads.templates.contains_key(&source.doodad_template_id)
+        || !template.is_some_and(|t| t.max_count == 1)
+    {
+        tracing::warn!(?source, "Retained doodad item: original escrow authority is ambiguous or cargo-origin; reconciliation deferred");
+        return;
     }
-    cargo
+    let copies: usize = server
+        .items
+        .all_containers()
+        .iter()
+        .map(|c| {
+            lock(c)
+                .items
+                .iter()
+                .filter(|i| i.id == source.item_id)
+                .count()
+        })
+        .sum();
+    if copies != 1 {
+        return;
+    }
+    let Some(container) = server.items.holding_container(source.item_id) else {
+        return;
+    };
+    let mut container = lock(&container);
+    let matches = container.slot_type == slot_type::SYSTEM
+        && container.owner_id == source.owner_id
+        && container
+            .get_item_by_id(source.item_id)
+            .is_some_and(|item| {
+                item.slot_type == slot_type::SYSTEM
+                    && item.owner_id == u64::from(source.owner_id)
+                    && item.template_id == source.item_template_id
+                    && item.count == 1
+            });
+    if matches {
+        container.remove_item_task(task_type::INVALID, source.item_id, true, &mut txn.env);
+    } else {
+        tracing::warn!(
+            ?source,
+            actual_container_id = container.container_id,
+            actual_container_owner = container.owner_id,
+            actual_slot_type = container.slot_type,
+            "Retained doodad item: current holder does not match original owned System escrow"
+        );
+    }
 }
 
 /// A live cargo attachment, plus whether its persistent authored binding proves it safe to
