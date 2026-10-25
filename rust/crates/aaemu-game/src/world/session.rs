@@ -29,7 +29,6 @@ use crate::net::connection::{ConnCommand, GameConnection, GameState};
 use crate::packets::proxy::ChangeStatePacket;
 use crate::packets::world::*;
 use crate::server::GameServer;
-use crate::systems::skills::packets::SCCooldownsPacket;
 use crate::world::{broadcast, unit_state, Player, PlayerRef, WorldInstance, WorldObject};
 
 #[path = "zone_access.rs"]
@@ -615,7 +614,11 @@ pub fn select_loaded(
     }
     // Running skill cooldowns (the client appends them to its cooldown manager; an empty list
     // would change nothing, so it is not sent).
-    let cooldowns = SCCooldownsPacket::from_cooldowns(&snapshot.unit.cooldowns, now_ms());
+    let cooldowns = crate::systems::skills::skill::cooldown_snapshot(
+        server,
+        &snapshot.unit.cooldowns,
+        now_ms(),
+    );
     if !cooldowns.is_empty() {
         conn.send(&cooldowns);
     }
