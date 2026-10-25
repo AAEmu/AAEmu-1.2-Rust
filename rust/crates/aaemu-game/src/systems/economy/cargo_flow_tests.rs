@@ -193,8 +193,8 @@ fn world_with_pool(data: GameData, pool: Option<sqlx::MySqlPool>) -> CargoWorld 
     alice.inventory = Inventory::new(1, 50, 50, &server.items, &server.ids.container);
     let mut bob = test_character(2, "Bob", 101.0, 100.0);
     bob.inventory = Inventory::new(2, 50, 50, &server.items, &server.ids.container);
-    let pa = spawn_player(&server, &a, alice, 0x100);
-    let pb = spawn_player(&server, &b, bob, 0x101);
+    let pa = spawn_player(&server, &a, alice, server.ids.object.get_next_id().unwrap());
+    let pb = spawn_player(&server, &b, bob, server.ids.object.get_next_id().unwrap());
     a.conn.active_char = Some(pa.clone());
     b.conn.active_char = Some(pb.clone());
     let instance = server.world.world(0).unwrap();
@@ -203,7 +203,7 @@ fn world_with_pool(data: GameData, pool: Option<sqlx::MySqlPool>) -> CargoWorld 
     hull.unit.transform.set_xyz(100.0, 100.0, 100.0);
     hull.summoner_id = 1;
     hull.summoner_obj_id = pa.obj_id;
-    let hull = Entity::new(0x300, hull);
+    let hull = Entity::new(server.ids.object.get_next_id().unwrap(), hull);
     instance.spawn(&hull, &server.view_ctx());
     let racks = bindings
         .into_iter()
