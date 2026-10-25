@@ -1133,9 +1133,7 @@ mod tests {
         let (mut input, _lines, _terminal) = input_pair();
         let action = async {
             loop {
-                if let Err(error) = game.recv_within(Duration::from_millis(5)).await {
-                    return Err::<Value, _>(error);
-                }
+                game.recv_within(Duration::from_millis(5)).await?;
             }
         };
         let done = tokio::time::timeout(
@@ -1196,9 +1194,7 @@ mod tests {
         let action = async {
             let _ = started.send(());
             loop {
-                if let Err(error) = game.recv_within(Duration::from_millis(10)).await {
-                    return Err::<Value, _>(error);
-                }
+                game.recv_within(Duration::from_millis(10)).await?;
             }
         };
         let done = drive(action, until, &rec, &mut report, &mut input)
