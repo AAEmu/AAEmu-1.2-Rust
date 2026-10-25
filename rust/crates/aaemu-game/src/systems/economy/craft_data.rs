@@ -120,7 +120,8 @@ impl CraftData {
                 amount: r.i32_or("amount", 1)?, // We always want to produce at least 1 item ?
                 rate: r.i32("rate")?,
                 show_lower_crafts: r.bool("show_lower_crafts")?,
-                use_grade: r.bool("use_grade")?,
+                // Native 1.2 LoadCraftProductDescs (0x3982E6C0) reads text 't' / '1'.
+                use_grade: r.bool_str("use_grade")?,
                 item_grade_id: r.u32("item_grade_id")?,
             });
             Ok(())
@@ -135,7 +136,8 @@ impl CraftData {
                 craft_id,
                 item_id: r.u32("item_id")?,
                 amount: r.i32_or("amount", 1)?, // We always want to cost at least 1 item ?
-                main_grade: r.bool("main_grade")?,
+                // Native 1.2 LoadCraftMaterialDescs (0x3982E4D0) reads text 't' / '1'.
+                main_grade: r.bool_str("main_grade")?,
             });
             Ok(())
         })?;

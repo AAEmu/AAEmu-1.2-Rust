@@ -99,8 +99,14 @@ pub trait NpcEconomyHooks: Send + Sync {
         None
     }
 
-    /// `NpcManager.GetGoods(packId)?.SellsItem(itemId)`.
-    fn merchant_sells(&self, _server: &GameServer, _pack_id: u32, _item_id: u32) -> bool {
+    /// Whether the catalog offers this item at the grade sent by the 1.2 client.
+    fn merchant_sells(
+        &self,
+        _server: &GameServer,
+        _pack_id: u32,
+        _item_id: u32,
+        _grade: u8,
+    ) -> bool {
         false
     }
 

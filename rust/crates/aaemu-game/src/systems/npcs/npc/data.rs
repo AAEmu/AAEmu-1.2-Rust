@@ -27,6 +27,7 @@ use std::collections::HashMap;
 use rusqlite::Connection;
 
 use crate::data::formulas::Formula;
+use crate::data::items::ItemTemplate;
 use crate::data::sqlite::{for_each_row, SqlRow};
 use crate::models::unit::{BonusTemplate, UnitAttribute, UnitModifierType};
 use crate::models::unit_model::{FaceModel, UnitCustomModelParams, UnitCustomModelType};
@@ -442,9 +443,29 @@ impl MerchantGoods {
             .any(|i| i.item_template_id == item_template_id)
     }
 
-    /// `AddItemToStock` (the first grade of an item wins).
+    /// The client normalizes each stock grade through the item template before buying
+    /// (1.2 `sub_394FC6E0` -> `sub_397CD260`). A fixed grade takes precedence; an
+    /// ungradable template without a fixed grade uses basic. Zero is a grade, not a wildcard.
+    pub fn sells_item_at_grade(&self, template: &ItemTemplate, grade: u8) -> bool {
+        self.items.iter().any(|i| {
+            let offered_grade = if template.fixed_grade >= 0 {
+                template.fixed_grade as u8
+            } else if template.gradable {
+                i.grade
+            } else {
+                0
+            };
+            i.item_template_id == template.id && offered_grade == grade
+        })
+    }
+
+    /// Keep each item / grade pair offered by the catalog.
     pub fn add_item_to_stock(&mut self, item_template_id: u32, grade: u8) {
-        if self.sells_item(item_template_id) {
+        if self
+            .items
+            .iter()
+            .any(|i| i.item_template_id == item_template_id && i.grade == grade)
+        {
             return;
         }
         self.items.push(MerchantGoodsItem {
@@ -922,7 +943,8 @@ impl NpcData {
         for_each_row(conn, "SELECT * FROM merchant_goods", [], |r| {
             let id = r.u32("merchant_pack_id")?;
             let item_id = r.u32("item_id")?;
-            let grade = r.u8("grade_id")?;
+            // The 1.2 client reads this with sqlite3_column_int: NULL is basic (0).
+            let grade = r.u8_or("grade_id", 0)?;
             d.goods
                 .entry(id)
                 .or_insert_with(|| MerchantGoods {
@@ -1264,14 +1286,68 @@ mod tests {
     ";
 
     #[test]
-    fn merchant_goods_first_grade_wins() {
+    fn merchant_goods_preserve_distinct_grades() {
         let mut g = MerchantGoods::default();
         g.add_item_to_stock(5, 1);
         g.add_item_to_stock(5, 3);
+        g.add_item_to_stock(5, 1);
         g.add_item_to_stock(6, 0);
-        assert_eq!(g.items.len(), 2);
-        assert_eq!(g.items[0].grade, 1);
+        assert_eq!(g.items.len(), 3);
+        assert_eq!((g.items[0].grade, g.items[1].grade), (1, 3));
         assert!(g.sells_item(6) && !g.sells_item(7));
+    }
+
+    #[test]
+    fn merchant_goods_load_null_grade_as_basic() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(TEST_SCHEMA).unwrap();
+        c.execute_batch("INSERT INTO merchant_goods VALUES (4, 77, 12, NULL), (5, 77, 12, 0);")
+            .unwrap();
+        let d = NpcData::load_conn(&c, "en_us").unwrap();
+        assert_eq!(
+            d.goods(77).unwrap().items,
+            vec![
+                MerchantGoodsItem {
+                    item_template_id: 10,
+                    grade: 0
+                },
+                MerchantGoodsItem {
+                    item_template_id: 11,
+                    grade: 0
+                },
+                MerchantGoodsItem {
+                    item_template_id: 10,
+                    grade: 2
+                },
+                MerchantGoodsItem {
+                    item_template_id: 12,
+                    grade: 0
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn merchant_goods_validate_native_purchase_grade() {
+        let mut g = MerchantGoods::default();
+        g.add_item_to_stock(5, 0);
+        g.add_item_to_stock(5, 3);
+        let mut t = ItemTemplate::plain(5, 1);
+        t.gradable = true;
+        assert!(g.sells_item_at_grade(&t, 0));
+        assert!(g.sells_item_at_grade(&t, 3));
+        assert!(!g.sells_item_at_grade(&t, 11));
+        t.fixed_grade = 2;
+        assert!(g.sells_item_at_grade(&t, 2));
+        assert!(!g.sells_item_at_grade(&t, 0));
+        assert!(!g.sells_item_at_grade(&t, 3));
+        t.gradable = false;
+        assert!(g.sells_item_at_grade(&t, 2));
+        t.fixed_grade = -1;
+        assert!(g.sells_item_at_grade(&t, 0));
+        assert!(!g.sells_item_at_grade(&t, 3));
+        t.id = 7;
+        assert!(!g.sells_item_at_grade(&t, 0));
     }
 
     #[test]
@@ -1336,7 +1412,7 @@ mod tests {
         let t2 = d.template(101).unwrap();
         assert_eq!(t2.model_params.kind, UnitCustomModelType::SKIN);
         assert_eq!((t2.race, t2.gender), (0, 0));
-        assert_eq!(d.goods(77).unwrap().items.len(), 2);
+        assert_eq!(d.goods(77).unwrap().items.len(), 3);
         assert!(d.is_fly_or_swim(2) && !d.is_fly_or_swim(10) && !d.is_fly_or_swim(3));
         assert_eq!(d.weapons[&601].level, 20);
         assert_eq!(d.localized_name(100, "x"), "Guard");
