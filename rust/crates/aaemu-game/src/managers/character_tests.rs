@@ -83,6 +83,7 @@ fn creation_data() -> GameData {
         CharacterTemplate {
             race: 1,
             gender: 1,
+            creatable: true,
             num_inventory_slot: 50,
             num_bank_slot: 50,
             ..Default::default()
@@ -140,6 +141,546 @@ fn creation_request(name: &str) -> CreateCharacterRequest {
         ability3: 11,
         level: 1,
     }
+}
+
+async fn lobby_create(
+    server: &crate::GameServer,
+    client: &mut crate::test_support::TestClient,
+    request: CreateCharacterRequest,
+) -> crate::Result<()> {
+    use crate::net::registry::ClientPacket;
+    crate::packets::c2g_world::CSCreateCharacterPacket(request)
+        .handle(server, &mut client.conn)
+        .await
+}
+
+/// One pinned connection: all writes are shadowed by TEMPORARY tables and disappear at close.
+async fn private_lobby_pool() -> Option<sqlx::MySqlPool> {
+    use crate::systems::social::achievement_persistence::temporary_shadow_definition;
+    use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+    use std::str::FromStr;
+    let url = std::env::var("AAEMU_TEST_MYSQL").ok()?;
+    let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+    assert_eq!(
+        options.get_port(),
+        3317,
+        "only private MySQL3317 is allowed"
+    );
+    assert!(matches!(options.get_host(), "127.0.0.1" | "localhost"));
+    let pool = MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    for table in [
+        "items",
+        "item_containers",
+        "characters",
+        "options",
+        "abilities",
+        "actabilities",
+        "appellations",
+        "character_active_buffs",
+        "portal_book_coords",
+        "portal_visited_district",
+        "friends",
+        "blocked",
+        "skills",
+        "quests",
+        "completed_quests",
+        "accounts",
+        "character_records",
+        "character_achievements",
+    ] {
+        let (_, definition): (String, String) =
+            sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        sqlx::query(&temporary_shadow_definition(&definition))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("SET SESSION sql_mode='STRICT_ALL_TABLES'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    Some(pool)
+}
+
+async fn persisted_lobby_count(pool: &sqlx::MySqlPool, account: u32) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM characters WHERE account_id = ? AND deleted = 0")
+        .bind(account)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; temporary tables only"]
+async fn private_mysql_lobby_slots_five_six_seven_parallel_rollback_retry_and_account_isolation() {
+    use crate::test_support::TestClient;
+    let Some(pool) = private_lobby_pool().await else {
+        return;
+    };
+    let mut server = test_server_with(creation_data());
+    server.db = pool.clone();
+    sqlx::query("INSERT INTO accounts (account_id, labor) VALUES (1007, 1000), (1008, 1000)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut seed = TestClient::new(&server, 1, 1007);
+    for index in 0..5 {
+        lobby_create(
+            &server,
+            &mut seed,
+            creation_request(&format!("Seed{index}")),
+        )
+        .await
+        .unwrap();
+        assert!(seed
+            .drain_ops()
+            .contains(&crate::opcodes::sc::SCCreateCharacterResponsePacket));
+    }
+    assert_eq!(persisted_lobby_count(&pool, 1007).await, 5);
+    let pending_id = seed.conn.characters[0].id;
+    sqlx::query("UPDATE characters SET delete_request_time=UTC_TIMESTAMP(), delete_time=DATE_ADD(UTC_TIMESTAMP(), INTERVAL 1 DAY) WHERE id=?")
+        .bind(pending_id).execute(&pool).await.unwrap();
+    let inventory_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    // Reproduce a later SQL failure at slot 5: the refused sixth character must roll back.
+    // A required, unprovided column rejects the skill write after the character row; unlike
+    // triggers or CHECK constraints this also works on MySQL TEMPORARY tables.
+    sqlx::query("ALTER TABLE skills ADD COLUMN lobby_required INT NOT NULL")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut retry = TestClient::new(&server, 2, 1007); // deliberately no loaded character list
+    lobby_create(&server, &mut retry, creation_request("Retry"))
+        .await
+        .unwrap();
+    assert_creation_failure(&mut retry, 2);
+    assert_eq!(persisted_lobby_count(&pool, 1007).await, 5);
+    assert!(!server.names.name_exists("Retry"));
+    let after_failure: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(after_failure, inventory_rows);
+    sqlx::query("ALTER TABLE skills DROP COLUMN lobby_required")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut parallel = TestClient::new(&server, 3, 1007);
+    {
+        let transaction = server.save.transaction_lock().await;
+        let creates = async {
+            tokio::join!(
+                lobby_create(&server, &mut retry, creation_request("Retry")),
+                lobby_create(&server, &mut parallel, creation_request("Parallel")),
+            )
+        };
+        tokio::pin!(creates);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut creates)
+                .await
+                .is_err()
+        );
+        drop(transaction);
+        let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(10), creates)
+            .await
+            .unwrap();
+        a.unwrap();
+        b.unwrap();
+    }
+    assert_eq!(
+        retry.conn.characters.len() + parallel.conn.characters.len(),
+        1
+    );
+    let frames = [retry.drain(), parallel.drain()];
+    assert_eq!(
+        frames
+            .iter()
+            .flatten()
+            .filter(
+                |(op, body)| *op == crate::opcodes::sc::SCCharacterCreationFailedPacket
+                    && body == &[9]
+            )
+            .count(),
+        1
+    );
+    assert_eq!(
+        persisted_lobby_count(&pool, 1007).await,
+        6,
+        "pending deletion still consumes a slot"
+    );
+    lobby_create(&server, &mut seed, creation_request("Seventh"))
+        .await
+        .unwrap();
+    assert_creation_failure(&mut seed, 9);
+
+    // A full account never consumes a different account's slot or leaves its failed name.
+    let mut other = TestClient::new(&server, 4, 1008);
+    lobby_create(&server, &mut other, creation_request("Seventh"))
+        .await
+        .unwrap();
+    assert_eq!(other.conn.characters.len(), 1);
+    assert_eq!(persisted_lobby_count(&pool, 1008).await, 1);
+    other.drain();
+    let historical_id = other.conn.characters[0].id;
+    // Model a pre-existing over-limit account (7 rows), independently of the cached lists.
+    sqlx::query("UPDATE characters SET account_id=1007 WHERE id=?")
+        .bind(historical_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(persisted_lobby_count(&pool, 1007).await, 7);
+    lobby_create(&server, &mut seed, creation_request("Eighth"))
+        .await
+        .unwrap();
+    assert_creation_failure(&mut seed, 9);
+
+    // Fully deleted rows free slots; scheduled deletions above did not.
+    sqlx::query("UPDATE characters SET deleted=1 WHERE id IN (?, ?)")
+        .bind(historical_id)
+        .bind(seed.conn.characters[1].id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(persisted_lobby_count(&pool, 1007).await, 5);
+    lobby_create(&server, &mut seed, creation_request("Eighth"))
+        .await
+        .unwrap();
+    assert!(seed
+        .drain_ops()
+        .contains(&crate::opcodes::sc::SCCreateCharacterResponsePacket));
+    assert_eq!(persisted_lobby_count(&pool, 1007).await, 6);
+    assert_eq!(
+        server
+            .names
+            .get_character_account(server.names.get_character_id("Eighth")),
+        1007
+    );
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; temporary tables only"]
+async fn private_mysql_lobby_delete_changes_timestamps_only_for_current_owned_undeleted_row() {
+    use crate::test_support::TestClient;
+    let Some(pool) = private_lobby_pool().await else {
+        return;
+    };
+    let mut server = test_server_with(creation_data());
+    server.db = pool.clone();
+    sqlx::query("INSERT INTO accounts (account_id, labor) VALUES (1007, 1000)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut client = TestClient::new(&server, 1, 1007);
+    lobby_create(&server, &mut client, creation_request("Deletable"))
+        .await
+        .unwrap();
+    client.drain();
+    let id = client.conn.characters[0].id;
+    for (account, deleted) in [(1008u32, 0), (1007, 1)] {
+        sqlx::query("UPDATE characters SET account_id=?, deleted=? WHERE id=?")
+            .bind(account)
+            .bind(deleted)
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        lobby_delete(&server, &mut client, id).await.unwrap();
+        let frames = client.drain();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            frames[0].0,
+            crate::opcodes::sc::SCDeleteCharacterResponsePacket
+        );
+        let mut expected = id.to_le_bytes().to_vec();
+        expected.extend_from_slice(&[0; 17]); // native status=0 + two zero i64 timestamps
+        assert_eq!(frames[0].1, expected);
+        assert_eq!(client.conn.characters[0].delete_request_time, 0);
+        assert_eq!(client.conn.characters[0].delete_time, 0);
+        assert_eq!(server.enter_world.character_owner(id), None);
+    }
+    sqlx::query("UPDATE characters SET account_id=1007, deleted=0 WHERE id=?")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    lobby_delete(&server, &mut client, id).await.unwrap();
+    let frames = client.drain();
+    assert_eq!(frames.len(), 1);
+    assert_eq!(
+        frames[0].0,
+        crate::opcodes::sc::SCDeleteCharacterResponsePacket
+    );
+    assert_eq!(frames[0].1.len(), 21);
+    assert_eq!(frames[0].1[4], 2);
+    let persisted: (i64, i64) = sqlx::query_as(
+        "SELECT CAST(UNIX_TIMESTAMP(delete_request_time) AS SIGNED), CAST(UNIX_TIMESTAMP(delete_time) AS SIGNED) FROM characters WHERE id=?",
+    ).bind(id).fetch_one(&pool).await.unwrap();
+    let c = &client.conn.characters[0];
+    assert!(c.delete_request_time > 0);
+    assert_eq!(persisted, (c.delete_request_time, c.delete_time));
+    assert_eq!(server.enter_world.character_owner(id), None);
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; temporary tables only"]
+async fn private_mysql_lobby_parallel_names_have_one_owner_and_pending_names_use_native_reason() {
+    use crate::test_support::TestClient;
+    let Some(pool) = private_lobby_pool().await else {
+        return;
+    };
+    let mut server = test_server_with(creation_data());
+    server.db = pool.clone();
+    sqlx::query("INSERT INTO accounts (account_id, labor) VALUES (1007, 1000), (1008, 1000)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut a = TestClient::new(&server, 1, 1007);
+    let mut b = TestClient::new(&server, 2, 1008);
+    let (first, second) = tokio::join!(
+        lobby_create(&server, &mut a, creation_request("Unique")),
+        lobby_create(&server, &mut b, creation_request("uNIQUE")),
+    );
+    first.unwrap();
+    second.unwrap();
+    assert_eq!(a.conn.characters.len() + b.conn.characters.len(), 1);
+    let owner = if a.conn.characters.is_empty() {
+        assert_creation_failure(&mut a, 4);
+        b.conn.account_id()
+    } else {
+        assert_creation_failure(&mut b, 4);
+        a.conn.account_id()
+    };
+    let id = server.names.get_character_id("Unique");
+    assert_eq!(server.names.get_character_account(id), owner);
+    assert_eq!(
+        persisted_lobby_count(&pool, 1007).await + persisted_lobby_count(&pool, 1008).await,
+        1
+    );
+    a.drain();
+    b.drain();
+    sqlx::query("UPDATE characters SET delete_request_time=UTC_TIMESTAMP() WHERE id=?")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    lobby_create(&server, &mut a, creation_request("UNIQUE"))
+        .await
+        .unwrap();
+    assert_creation_failure(&mut a, 6); // native 'character name is to be deleted'
+    pool.close().await;
+}
+
+async fn lobby_delete(
+    server: &crate::GameServer,
+    client: &mut crate::test_support::TestClient,
+    character_id: u32,
+) -> crate::Result<()> {
+    use crate::net::registry::ClientPacket;
+    crate::packets::c2g_world::CSDeleteCharacterPacket { character_id }
+        .handle(server, &mut client.conn)
+        .await
+}
+
+fn assert_creation_failure(client: &mut crate::test_support::TestClient, reason: u8) {
+    // Native 1.2 sub_397B3060 (x2game12.c:1749639): exactly one u8, no i32 enum.
+    assert_eq!(
+        client.drain(),
+        vec![(
+            crate::opcodes::sc::SCCharacterCreationFailedPacket,
+            vec![reason]
+        )]
+    );
+}
+
+#[tokio::test]
+async fn lobby_create_rejects_unavailable_and_aliased_race_gender_before_allocating_assets() {
+    let mut data = creation_data();
+    let mut unavailable = data.characters.template(1, 1).unwrap().clone();
+    unavailable.race = 3;
+    unavailable.creatable = false;
+    data.characters.templates.insert(19, unavailable);
+    let server = test_server_with(data);
+    server.db.close().await;
+    let mut client = crate::test_support::TestClient::new(&server, 1, 1007);
+    for (race, gender) in [(3, 1), (1, 0), (1, 17), (17, 0), (255, 255)] {
+        let mut req = creation_request("Unavailable");
+        req.race = race;
+        req.gender = gender;
+        lobby_create(&server, &mut client, req).await.unwrap();
+        assert_creation_failure(&mut client, 2); // native general server failure, not continent block
+        assert!(client.conn.characters.is_empty());
+        assert!(server.names.no_names_registered());
+        assert!(server.items.all_containers().is_empty());
+    }
+    assert_eq!(server.ids.character.get_next_id().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn lobby_create_filters_invalid_blocked_and_case_variant_names() {
+    use crate::data::character_templates::BlockedName;
+    let mut data = creation_data();
+    data.characters.blocked_names = vec![
+        BlockedName {
+            text: "Admin".into(),
+            partial_match: true,
+        },
+        BlockedName {
+            text: "GM".into(),
+            partial_match: false,
+        },
+    ];
+    let server = test_server_with(data);
+    server.db.close().await;
+    let mut client = crate::test_support::TestClient::new(&server, 1, 1007);
+    for name in ["bad name", "", "Admin", "AdMiN", "TheAdMiNhero", "gM"] {
+        lobby_create(&server, &mut client, creation_request(name))
+            .await
+            .unwrap();
+        assert_creation_failure(&mut client, 5); // sub_391D3330: forbidden name
+        assert!(server.names.no_names_registered());
+        assert!(server.items.all_containers().is_empty());
+    }
+    for name in ["Accepted", "Павел", "GMhero"] {
+        lobby_create(&server, &mut client, creation_request(name))
+            .await
+            .unwrap();
+        // Reaches the closed DB, rather than being refused by the name filter.
+        assert_creation_failure(&mut client, 2);
+        assert!(server.names.no_names_registered());
+        assert!(server.items.all_containers().is_empty());
+    }
+}
+
+fn lobby_character(client: &mut crate::test_support::TestClient, id: u32) {
+    let mut c = Character::new(id, client.conn.account_id(), Default::default());
+    c.unit.name = "Deletable".into();
+    c.unit.level = 10;
+    client.conn.characters.push(c);
+}
+
+fn assert_delete_error(client: &mut crate::test_support::TestClient, expected: &[u8]) {
+    // Native 1.2 sub_397C3030 (x2game12.c:1761305): i16, i16, u32, bool.
+    // isNotify=false is required for HandleErrorMessage's dedicated lobby-error events.
+    assert_eq!(
+        client.drain(),
+        vec![(crate::opcodes::sc::SCErrorMsgPacket, expected.to_vec())]
+    );
+}
+
+#[tokio::test]
+async fn lobby_delete_refuses_online_and_inflight_select_on_any_connection() {
+    let server = test_server_with(creation_data());
+    server.db.close().await;
+    let mut client = crate::test_support::TestClient::new(&server, 1, 1007);
+    lobby_character(&mut client, 50);
+    for owner in [1, 2] {
+        assert_eq!(server.enter_world.reserve_character(50, owner), Ok(true));
+        lobby_delete(&server, &mut client, 50).await.unwrap();
+        assert_delete_error(&mut client, &[0x3f, 0x02, 0x3f, 0x02, 0, 0, 0, 0, 0]); // 575
+        assert_eq!(server.enter_world.character_owner(50), Some(owner));
+        assert_eq!(client.conn.characters[0].delete_request_time, 0);
+        server.enter_world.release_character(50, owner);
+    }
+    // Also protect a live world object when no session reservation is present.
+    let mut c = client.conn.characters[0].clone();
+    c.obj_id = 500;
+    let p = crate::world::Player::new(c, client.conn.handle());
+    assert!(server.world.try_add_character(&p));
+    lobby_delete(&server, &mut client, 50).await.unwrap();
+    assert_delete_error(&mut client, &[0x3f, 0x02, 0x3f, 0x02, 0, 0, 0, 0, 0]);
+    assert_eq!(server.enter_world.character_owner(50), None);
+}
+
+#[tokio::test]
+async fn lobby_delete_uses_current_expedition_owner_and_releases_refused_reservations() {
+    use crate::data::world_data::SystemFaction;
+    use crate::systems::social::expedition::Expedition;
+    let server = test_server_with(creation_data());
+    server.db.close().await;
+    let mut client = crate::test_support::TestClient::new(&server, 1, 1007);
+    lobby_character(&mut client, 50);
+    // The stale lobby character has expedition_id=0, but is now the authoritative owner.
+    server.expeditions.add(Expedition {
+        faction: SystemFaction {
+            id: 700,
+            owner_id: 50,
+            ..Default::default()
+        },
+        members: vec![],
+        policies: vec![],
+        removed_members: vec![],
+        is_disbanded: false,
+    });
+    lobby_delete(&server, &mut client, 50).await.unwrap();
+    assert_delete_error(&mut client, &[0x4d, 0x01, 0x4d, 0x01, 0, 0, 0, 0, 0]); // 333
+    assert_eq!(client.conn.characters[0].delete_request_time, 0);
+    assert_eq!(server.enter_world.character_owner(50), None);
+
+    // After ownership changes, the stale lobby expedition field must not block deletion.
+    client.conn.characters[0].unit.expedition_id = 700;
+    server
+        .expeditions
+        .with_mut(700, |e| e.faction.owner_id = 51)
+        .unwrap();
+    assert!(lobby_delete(&server, &mut client, 50).await.is_err()); // reaches the closed DB
+    assert!(client.drain().is_empty());
+    assert_eq!(client.conn.characters[0].delete_request_time, 0);
+    assert_eq!(server.enter_world.character_owner(50), None);
+    assert_eq!(server.enter_world.reserve_character(50, 2), Ok(true));
+    server.enter_world.release_character(50, 2);
+}
+
+#[tokio::test]
+async fn lobby_delete_cannot_mutate_another_accounts_lobby_character() {
+    let server = test_server_with(creation_data());
+    server.db.close().await;
+    let mut client = crate::test_support::TestClient::new(&server, 1, 1007);
+    lobby_character(&mut client, 50);
+    client.conn.characters[0].account_id = 1008;
+    lobby_delete(&server, &mut client, 50).await.unwrap();
+    // sub_397B2F50 / sub_391EA8C0: id:u32, status:u8=0, two zero i64 timestamps.
+    assert_eq!(
+        client.drain(),
+        vec![(
+            crate::opcodes::sc::SCDeleteCharacterResponsePacket,
+            vec![50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        )]
+    );
+    assert_eq!(client.conn.characters[0].delete_request_time, 0);
+    assert_eq!(server.enter_world.character_owner(50), None);
+}
+
+#[tokio::test]
+async fn lobby_delete_blocks_select_while_waiting_and_releases_on_cancellation() {
+    let server = test_server_with(creation_data());
+    server.db.close().await;
+    let mut client = crate::test_support::TestClient::new(&server, 1, 1007);
+    lobby_character(&mut client, 50);
+    let transaction = server.save.transaction_lock().await;
+    let mut deletion = Box::pin(lobby_delete(&server, &mut client, 50));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut deletion)
+            .await
+            .is_err()
+    );
+    assert_eq!(server.enter_world.reserve_character(50, 2), Err(1));
+    drop(deletion);
+    assert_eq!(server.enter_world.reserve_character(50, 2), Ok(true));
+    server.enter_world.release_character(50, 2);
+    drop(transaction);
 }
 
 #[tokio::test]
