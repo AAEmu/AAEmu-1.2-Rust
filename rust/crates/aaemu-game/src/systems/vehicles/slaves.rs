@@ -1573,6 +1573,15 @@ fn spawn_manager_of(
 }
 
 fn audit_retirement(server: &GameServer, world: &WorldInstance, root: &SlaveRef) {
+    let diagnostics = &server.systems.vehicles.slave_summons.diagnostics;
+    if !world
+        .slave(root.obj_id)
+        .is_some_and(|live| Arc::ptr_eq(&live, root))
+    {
+        // Numeric cached children cannot identify this lifetime after the hull ID was reused.
+        diagnostics.retiring(world.id, root, &[]);
+        return;
+    }
     let (children, doodads) = {
         let d = root.data();
         (d.attached_slaves.clone(), d.attached_doodads.clone())
@@ -1580,8 +1589,8 @@ fn audit_retirement(server: &GameServer, world: &WorldInstance, root: &SlaveRef)
     let doodads: Vec<_> = doodads
         .into_iter()
         .filter_map(|id| world.doodad(id))
+        .filter(|rack| super::audit::rack_parent_matches(&rack.data(), world.id, root.obj_id))
         .collect();
-    let diagnostics = &server.systems.vehicles.slave_summons.diagnostics;
     diagnostics.retiring(world.id, root, &doodads);
     for child in children.into_iter().filter_map(|id| world.slave(id)) {
         diagnostics.retiring(world.id, &child, &[]);

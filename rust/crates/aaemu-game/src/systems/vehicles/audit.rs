@@ -3,6 +3,8 @@
 //! The item operation scope must precede the publication gate. These protect summon item /
 //! hull publication together, but do NOT protect the spawn manager's direct world removals,
 //! every phase timer, or world-instance creation. Consequently v1 always says consistent:false.
+//! HP writers can also change the live-root lookup predicate before vehicle death protection.
+//! Queue, HP and world removal observations do not constitute an atomic authority snapshot.
 //! A complete authority cut needs a spawn-manager reference snapshot under a boundary shared
 //! with its queue drain and world removal. Its current public accessor exposes IDs only.
 //! Transform, visibility, phase and queue deadlines are explicitly temporal samples. A settled
@@ -255,6 +257,12 @@ fn item_fields(i: &Item) -> Value {
         "detail_type_and_body_hex": hex(&i.detail_type_and_details())})
 }
 
+/// Cached attached object IDs and Doodad.parent_obj_id can outlive a parent relation. The
+/// registered hull allocation is checked separately before using this live transform relation.
+pub(super) fn rack_parent_matches(rack: &Doodad, instance: u32, hull: u32) -> bool {
+    rack.transform.instance_id == instance && rack.transform.parent_obj_id == hull
+}
+
 /// No grants, find-or-create container calls, saves, SQL, or repairs. All guards are synchronous.
 pub fn snapshot(server: &GameServer, request: &Request) -> Value {
     let _items = server.systems.economy.operation_scope();
@@ -324,13 +332,15 @@ pub fn snapshot(server: &GameServer, request: &Request) -> Value {
             w.slave(slave.obj_id)
                 .is_some_and(|s| Arc::ptr_eq(&s, &slave))
         });
-        if let Some(world) = world {
+        let retained_doodads = doodads.clone();
+        // An old departure future can retain a hull after its object ID was recycled. Only
+        // the registered allocation may discover racks through numeric world parent fields.
+        // For an unregistered hull keep only weak references captured from its own lifetime.
+        if let Some(world) = world.filter(|_| registered) {
             for rack in world.all_doodads() {
                 let matches = {
                     let r = rack.data();
-                    r.parent_obj_id == slave.obj_id
-                        || r.transform.parent_obj_id == slave.obj_id
-                        || d.attached_doodads.contains(&rack.obj_id)
+                    rack_parent_matches(&r, instance, slave.obj_id)
                 };
                 if matches && !doodads.iter().any(|r| Arc::ptr_eq(r, &rack)) {
                     doodads.push(rack);
@@ -340,17 +350,26 @@ pub fn snapshot(server: &GameServer, request: &Request) -> Value {
         doodads.sort_by_key(|r| r.obj_id);
         let racks: Vec<_> = doodads.iter().map(|rack| {
             let r = rack.data().clone();
-            let registered = world.is_some_and(|w| w.doodad(rack.obj_id).is_some_and(|live| Arc::ptr_eq(&live, rack)));
+            let rack_registered = world.is_some_and(|w| w.doodad(rack.obj_id).is_some_and(|live| Arc::ptr_eq(&live, rack)));
+            let current = registered && rack_registered && rack_parent_matches(&r, instance, slave.obj_id);
             json!({"object_id": rack.obj_id, "db_id": r.db_id, "template_id": r.template_id,
                 "parent": r.parent_obj_id, "transform_parent": r.transform.parent_obj_id,
                 "attach": r.attach_point, "owner_id": r.owner_id, "owner_db_id": r.owner_db_id,
-                "owner_type": r.owner_type, "registered": registered, "persistent": r.is_persistent,
+                "owner_type": r.owner_type, "registered": rack_registered, "persistent": r.is_persistent,
+                "captured_retirement_reference": retained_doodads.iter().any(|old| Arc::ptr_eq(old, rack)),
+                "current_hull_association": current,
+                "association": if current { "registered_hull_parent" } else { "retained_hull_lifetime" },
                 "phase": r.func_group_id, "phase_time_ms": r.phase_time_ms,
                 "interaction_counts": r.phase.interaction_counts, "deleted": r.phase.deleted,
                 "func_task": r.phase.func_task, "item_id": r.item_id, "item_template_id": r.item_template_id,
                 "item": if r.item_id == 0 { Value::Null } else { item_snapshot(server, r.item_id) }})
         }).collect();
-        let rack_attach: Vec<_> = doodads.iter().map(|r| r.data().attach_point).collect();
+        // Historical references remain visible above but never count as current racks/cargo.
+        let rack_attach: Vec<_> = racks
+            .iter()
+            .filter(|r| r["current_hull_association"] == true)
+            .filter_map(|r| r["attach"].as_u64().map(|a| a as u8))
+            .collect();
         let missing: Vec<_> = (60..=79u8).filter(|p| !rack_attach.contains(p)).collect();
         let duplicate: Vec<_> = (60..=79u8)
             .filter(|p| rack_attach.iter().filter(|a| *a == p).count() > 1)
@@ -367,6 +386,7 @@ pub fn snapshot(server: &GameServer, request: &Request) -> Value {
             "item_live_root_lookup_member": registered && d.owner_type == BaseUnitType::Character && !d.unit.is_dead() && d.summoning_item_id == request.item_id,
             "local_transform_sample": [d.unit.transform.x, d.unit.transform.y, d.unit.transform.z, d.unit.transform.rot_x, d.unit.transform.rot_y, d.unit.transform.rot_z],
             "attached_slaves": d.attached_slaves, "attached_doodads": d.attached_doodads,
+            "rack_summary_scope": "current_registered_hull_parent",
             "missing_rack_attach": missing, "duplicate_rack_attach": duplicate, "doodads": racks}));
     }
     let queues: Vec<_> = worlds.iter().map(|world| {
@@ -381,7 +401,7 @@ pub fn snapshot(server: &GameServer, request: &Request) -> Value {
         "source_head": Value::Null, "provenance": "exact binary/source identity requires release manifest",
         "sample_sequence": sample, "consistent": false, "authority_consistent": false,
         "pending_supported": true, "retirement_consistent": false,
-        "unsupported": ["spawn queue retained references/direct world removals have no shared audit boundary", "phase/transform/visibility and queue deadlines are temporal samples; no interval proof"],
+        "unsupported": ["spawn queue retained references/direct world removals have no shared audit boundary", "HP writers affect live-root membership outside publication protection; world enumeration/removal has no shared snapshot boundary", "phase/transform/visibility and queue deadlines are temporal samples; no interval proof"],
         "publication_scope_held": true, "item_operation_scope_held": true,
         "world_instances": worlds.iter().map(|w| w.id).collect::<Vec<_>>(),
         "summon_item": item_snapshot(server, request.item_id),

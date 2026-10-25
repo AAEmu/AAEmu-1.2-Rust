@@ -263,6 +263,146 @@ async fn audit_observation_does_not_extend_retired_hull_lifetime() {
         .is_empty());
 }
 
+fn rack(
+    world: &WorldInstance,
+    object: u32,
+    parent: u32,
+    attach: u8,
+    item: u64,
+) -> crate::world::DoodadRef {
+    let mut data = Doodad::new(3446);
+    data.db_id = object + 1000;
+    data.parent_obj_id = parent;
+    data.transform.parent_obj_id = parent;
+    data.transform.instance_id = world.id;
+    data.attach_point = attach;
+    data.item_id = item;
+    data.item_template_id = 20090;
+    data.func_group_id = 8265;
+    let rack = Entity::new(object, data);
+    world.add_object(&rack);
+    rack
+}
+
+#[tokio::test]
+async fn audit_reused_hull_and_rack_ids_preserve_each_allocation() {
+    let (server, _client, _owner) = fixture();
+    let world = server.world.world(0).unwrap();
+    let old = hull(&world, 860, 7, 4001, false);
+    let old_rack = rack(&world, 861, old.obj_id, 60, 10_060);
+    old.data().attached_doodads.push(old_rack.obj_id);
+    old.data().leave_task = 88;
+    let _departure = server
+        .systems
+        .vehicles
+        .slave_summons
+        .diagnostics
+        .retirement(&old, 88);
+    audit_retirement(&server, &world, &old);
+    // The invalidated departure future still owns old handles after world removal. Both
+    // numeric IDs are then reused, while the captured weak references still name the old Arcs.
+    old.data().leave_task = 0;
+    world.remove_object(old_rack.obj_id);
+    world.remove_object(old.obj_id);
+    let replacement = hull(&world, old.obj_id, 7, 4001, false);
+    replacement.data().id = 2860;
+    let new_rack = rack(&world, old_rack.obj_id, replacement.obj_id, 60, 20_060);
+    new_rack.data().db_id = 2861;
+    // A later observation of the old timer must not capture the replacement via cached IDs.
+    audit_retirement(&server, &world, &old);
+    // Deliberately leave the new hull's cache empty: valid world-parent discovery still works.
+    let snap = audit::snapshot(&server, &request());
+    let candidates = snap["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 2);
+    let historic = candidates
+        .iter()
+        .find(|c| c["registered"] == false)
+        .unwrap();
+    let current = candidates.iter().find(|c| c["registered"] == true).unwrap();
+    assert_eq!(historic["object_id"], current["object_id"]);
+    assert_eq!(historic["db_id"], 1860);
+    assert_eq!(current["db_id"], 2860);
+    let old_rows = historic["doodads"].as_array().unwrap();
+    let new_rows = current["doodads"].as_array().unwrap();
+    assert_eq!(old_rows.len(), 1);
+    assert_eq!(new_rows.len(), 1);
+    assert_eq!(old_rows[0]["db_id"], 1861);
+    assert_eq!(old_rows[0]["item_id"], 10_060);
+    assert_eq!(old_rows[0]["registered"], false);
+    assert_eq!(old_rows[0]["captured_retirement_reference"], true);
+    assert_eq!(old_rows[0]["association"], "retained_hull_lifetime");
+    assert_eq!(old_rows[0]["current_hull_association"], false);
+    assert_eq!(new_rows[0]["db_id"], 2861);
+    assert_eq!(new_rows[0]["item_id"], 20_060);
+    assert_eq!(new_rows[0]["registered"], true);
+    assert_eq!(new_rows[0]["captured_retirement_reference"], false);
+    assert_eq!(new_rows[0]["association"], "registered_hull_parent");
+    assert_eq!(new_rows[0]["current_hull_association"], true);
+    assert!(historic["missing_rack_attach"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(60)));
+    assert!(!current["missing_rack_attach"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(60)));
+    assert_eq!(historic["duplicate_rack_attach"], json!([]));
+    assert_eq!(current["duplicate_rack_attach"], json!([]));
+    assert_eq!(snap["consistent"], false);
+    assert_eq!(snap["authority_consistent"], false);
+}
+
+#[tokio::test]
+async fn audit_registered_hull_ignores_recycled_cached_child_id() {
+    let (server, _client, _owner) = fixture();
+    let world = server.world.world(0).unwrap();
+    let root = hull(&world, 870, 7, 4001, false);
+    let old_rack = rack(&world, 871, root.obj_id, 60, 10_060);
+    root.data().attached_doodads.push(old_rack.obj_id);
+    audit_retirement(&server, &world, &root);
+    world.remove_object(old_rack.obj_id);
+    // A recycled cached ID alone is not a live transform relation.
+    let _unrelated = rack(&world, old_rack.obj_id, 999, 60, 20_060);
+    // Nor is a stale model parent, without the matching transform relation.
+    let stale_model_parent = rack(&world, 874, 999, 63, 20_063);
+    stale_model_parent.data().parent_obj_id = root.obj_id;
+    // A valid transform parent in a different instance is not this hull's current rack either.
+    let wrong_instance = rack(&world, 872, root.obj_id, 61, 20_061);
+    wrong_instance.data().transform.instance_id = 42;
+    root.data().attached_doodads.push(wrong_instance.obj_id);
+    // Re-capturing retirement evidence must not promote stale cached IDs to historical refs.
+    audit_retirement(&server, &world, &root);
+    let live = rack(&world, 873, root.obj_id, 62, 20_062);
+    let snap = audit::snapshot(&server, &request());
+    let candidate = &snap["candidates"][0];
+    assert_eq!(candidate["registered"], true);
+    let rows = candidate["doodads"].as_array().unwrap();
+    // The legitimate old weak reference survives as history; the unrelated allocations do not.
+    assert_eq!(rows.len(), 2);
+    let historic = rows.iter().find(|r| r["item_id"] == 10_060).unwrap();
+    assert_eq!(historic["captured_retirement_reference"], true);
+    assert_eq!(historic["current_hull_association"], false);
+    assert_eq!(historic["association"], "retained_hull_lifetime");
+    let current = rows.iter().find(|r| r["object_id"] == live.obj_id).unwrap();
+    assert_eq!(current["current_hull_association"], true);
+    assert!(rows
+        .iter()
+        .all(|r| r["item_id"] != 20_060 && r["item_id"] != 20_061 && r["item_id"] != 20_063));
+    assert!(candidate["missing_rack_attach"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(60)));
+    assert!(candidate["missing_rack_attach"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(61)));
+    assert!(!candidate["missing_rack_attach"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(62)));
+    assert_eq!(candidate["duplicate_rack_attach"], json!([]));
+}
+
 #[tokio::test]
 async fn audit_all_worlds_hidden_dead_children_retiring_and_owner_item_isolation() {
     let (server, _client, _owner) = fixture();
