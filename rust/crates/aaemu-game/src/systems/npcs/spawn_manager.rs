@@ -121,6 +121,148 @@ impl PersistentDoodads {
         }
         Ok(Self { rows: prepared })
     }
+
+    /// Called inside the item/publication scopes, before replacing any hull. Compare the
+    /// fetched receipt, not the before/after emptiness of the hull: a store/recover ABA can
+    /// leave an empty live rack while SQL has captured its former loaded reference.
+    pub(crate) fn validate_slave_cargo(
+        &self,
+        server: &GameServer,
+        hull_id: u32,
+        live_hull: Option<&crate::world::SlaveRef>,
+    ) -> anyhow::Result<()> {
+        use crate::models::container::slot_type;
+        use crate::models::item::ItemClass;
+        use crate::systems::npcs::doodad::funcs::items::cargo_empty_phase_for;
+
+        let mut row_ids = HashSet::new();
+        let mut packs = HashSet::new();
+        anyhow::ensure!(
+            live_hull.is_none_or(|h| h.data().id == hull_id),
+            "cargo preflight has a different live hull identity"
+        );
+        for prepared in &self.rows {
+            let row = &prepared.row;
+            anyhow::ensure!(
+                row.owner_type == doodad_owner_type::SLAVE
+                    && row.house_id == hull_id
+                    && row_ids.insert(row.id),
+                "persistent doodad batch has a duplicate or different hull identity"
+            );
+            let cargo = server
+                .game_data
+                .systems
+                .npcs
+                .doodad
+                .doodad_func_groups(row.template_id)
+                .iter()
+                .any(|group| {
+                    cargo_empty_phase_for(server, row.owner_type, row.template_id, group.id)
+                        .is_some()
+                });
+            if !cargo {
+                continue;
+            }
+            if row.item_id == 0 {
+                anyhow::ensure!(
+                    row.item_template_id == 0
+                        && cargo_empty_phase_for(
+                            server,
+                            row.owner_type,
+                            row.template_id,
+                            row.current_phase_id
+                        )
+                        .is_none(),
+                    "saved empty cargo rack has loaded metadata"
+                );
+                continue;
+            }
+            anyhow::ensure!(
+                cargo_empty_phase_for(
+                    server,
+                    row.owner_type,
+                    row.template_id,
+                    row.current_phase_id
+                )
+                .is_some(),
+                "saved cargo item is not in its loaded phase"
+            );
+            anyhow::ensure!(packs.insert(row.item_id), "aliased saved cargo item");
+            // A live version of this exact persistent hull must agree with the fetched
+            // loaded receipt. Other inactive summon items have no live rack to compare.
+            if let Some(hull) = live_hull {
+                let world = server
+                    .world
+                    .world_of(&WorldObject::from(hull))
+                    .ok_or_else(|| anyhow::anyhow!("cargo hull is no longer live"))?;
+                let matched = world.all_doodads().into_iter().any(|rack| {
+                    let d = rack.data();
+                    !d.phase.deleted
+                        && d.db_id == row.id
+                        && d.owner_type == row.owner_type
+                        && d.owner_id == row.owner_id
+                        && d.owner_db_id == hull_id
+                        && d.template_id == row.template_id
+                        && d.attach_point == row.attach_point
+                        && d.parent_obj_id == hull.obj_id
+                        && d.transform.parent_obj_id == hull.obj_id
+                        && d.func_group_id == row.current_phase_id
+                        && d.item_id == row.item_id
+                        && d.item_template_id == row.item_template_id
+                });
+                anyhow::ensure!(matched, "saved cargo receipt changed during hull load");
+            }
+            // System escrow alone is insufficient: the same GUID could now be stored on
+            // a different live hull. Include hidden/retiring registry objects in this scan.
+            for world in server.world.worlds() {
+                for rack in world.all_doodads() {
+                    let d = rack.data();
+                    if !d.phase.deleted && d.item_id == row.item_id {
+                        anyhow::ensure!(
+                            live_hull.is_some_and(|h| d.parent_obj_id == h.obj_id)
+                                && d.db_id == row.id
+                                && d.owner_db_id == hull_id,
+                            "saved cargo item is referenced by another live rack"
+                        );
+                    }
+                }
+            }
+            let holder = server
+                .items
+                .holding_container(row.item_id)
+                .ok_or_else(|| anyhow::anyhow!("saved cargo item left escrow"))?;
+            {
+                let holder = holder.lock().expect("container poisoned");
+                anyhow::ensure!(
+                    holder.slot_type == slot_type::SYSTEM
+                        && holder.get_item_by_id(row.item_id).is_some_and(|item| {
+                            item.slot_type == slot_type::SYSTEM
+                                && item.owner_id == u64::from(holder.owner_id)
+                                && item.template_id == row.item_template_id
+                                && item.class == ItemClass::Backpack
+                                && item.count == 1
+                        }),
+                    "saved cargo item no longer matches its escrow receipt"
+                );
+            }
+            let occurrences: usize = server
+                .items
+                .all_containers()
+                .iter()
+                .map(|container| {
+                    container
+                        .lock()
+                        .expect("container poisoned")
+                        .items
+                        .iter()
+                        .filter(|item| item.id == row.item_id)
+                        .count()
+                })
+                .sum();
+            anyhow::ensure!(occurrences == 1, "saved cargo item has multiple holders");
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -431,7 +573,10 @@ impl SpawnManagers {
         v
     }
 
-    /// `lock (_spawnLock)`.
+    /// `lock (_spawnLock)`. Callback-bearing entries acquire the economy operation scope
+    /// before this lock and before their own manager/object locks. Keep this primitive bare:
+    /// pure bookkeeping does not enter the economy, and a caller under a character lock
+    /// cannot safely acquire the item scope here. Quest NPC components remain deferred.
     pub fn spawn_lock(&self) -> ReentrantGuard<'_> {
         self.spawn_lock.lock()
     }
@@ -2021,6 +2166,7 @@ impl SpawnManager {
 
     /// One iteration of `CheckRespawns` (the 1 s respawn / despawn thread).
     pub fn check_respawns_tick(&self, server: &GameServer) {
+        let _items = server.systems.economy.operation_scope();
         let _serial = server.systems.npcs.spawns.spawn_lock();
         for e in Self::ready(
             &self.respawns,
@@ -2141,6 +2287,7 @@ impl SpawnManager {
         if group == 0 {
             return 0;
         }
+        let _items = server.systems.economy.operation_scope();
         let _serial = server.systems.npcs.spawns.spawn_lock();
         let spawners: Vec<_> = {
             let inner = self.inner();
@@ -2444,6 +2591,7 @@ impl SpawnManager {
     /// the instance is left to track, so a deliberately emptied instance cannot leave a growing
     /// set of placements whose 9 999 999 s respawn timers never drain).
     pub fn despawn_all(&self, server: &GameServer) -> usize {
+        let _items = server.systems.economy.operation_scope();
         let _serial = server.systems.npcs.spawns.spawn_lock();
         let spawns = &server.systems.npcs.spawns;
         let mut res = 0;
@@ -2484,6 +2632,7 @@ impl SpawnManager {
 
     /// `DeleteAllSpawners()`: removes every spawner and what they spawned.
     pub fn delete_all_spawners(&self, server: &GameServer) {
+        let _items = server.systems.economy.operation_scope();
         // Serialized with the activation pass so a stale queue cannot create NPCs between
         // despawning a placement's old members and detaching / resetting it.
         let _serial = server.systems.npcs.spawns.spawn_lock();
@@ -2952,6 +3101,7 @@ fn spawner_has_nonresident_live_npc(
 /// `World.NpcWarmRetentionSeconds` (residents stay after their first preparation) and expired
 /// ordinary ones are reclaimed within the same per-tick budget, counted in actual NPCs.
 pub fn active_region_tick_stats(server: &GameServer) -> ActivationStats {
+    let _items = server.systems.economy.operation_scope();
     // The whole pass holds the spawners' reentrant lock: creation, despawn, placement reload and
     // delete-all serialize against the queued candidates (sync fn, never held across an await).
     let _serial = server.systems.npcs.spawns.spawn_lock();

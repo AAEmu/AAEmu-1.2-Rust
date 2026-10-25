@@ -875,6 +875,7 @@ fn npc_spawner_spawn_effect(
     e: &crate::systems::skills::data::effects::NpcSpawnerSpawnEffect,
     args: &EffectArgs<'_>,
 ) {
+    let _items = server.systems.economy.operation_scope();
     let _serial = server.systems.npcs.spawns.spawn_lock();
     tracing::info!(
         "NpcSpawnerSpawnEffect: SpawnerId={}, LifeTime={}, UseSummonerAggroTarget={}, ActivationState={}",

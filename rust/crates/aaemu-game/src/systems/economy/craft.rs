@@ -33,6 +33,9 @@ use crate::systems::HookSlot;
 use crate::world::{DoodadRef, PlayerRef, WorldObject};
 
 use super::craft_data::Craft;
+#[cfg(test)]
+#[path = "craft_publication_tests.rs"]
+mod publication_tests;
 use super::error_message;
 use super::inventory::{self, Inv, ItemTxn, Out};
 use super::item_handlers::{active, sync_client_packet};

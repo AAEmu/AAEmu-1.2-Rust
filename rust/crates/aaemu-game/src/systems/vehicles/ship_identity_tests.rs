@@ -618,6 +618,276 @@ async fn persistent_batch_validation_and_stale_parent_have_no_world_side_effects
     assert!(manager.get_all_player_doodads().is_empty());
 }
 
+fn cargo_identity_data() -> GameData {
+    use crate::systems::npcs::doodad::templates::DoodadFunc;
+    let mut data = identity_data();
+    data.items.templates.insert(
+        29203,
+        ItemTemplate {
+            kind: TemplateKind::Backpack { backpack_type: 1 },
+            ..ItemTemplate::plain(29203, 1)
+        },
+    );
+    for (group, kind, next) in [
+        (8264, "DoodadFuncConsumeChanger", 8265),
+        (8265, "DoodadFuncRecoverItem", 8264),
+    ] {
+        data.systems.npcs.doodad.funcs_by_groups.insert(
+            group,
+            vec![DoodadFunc {
+                group_id: group,
+                func_type: kind.into(),
+                next_phase: next,
+                ..Default::default()
+            }],
+        );
+    }
+    data
+}
+
+fn original_pack(server: &GameServer, owner: &PlayerRef, slot: u8) -> u64 {
+    use crate::systems::economy::inventory::Inv;
+    let inventory = crate::models::character::Inventory::new(
+        owner.character_id,
+        50,
+        50,
+        &server.items,
+        &server.ids.container,
+    );
+    owner.data().inventory = inventory;
+    let id = loop {
+        let id = u64::from(server.ids.item.get_next_id().unwrap());
+        if server.items.item_by_id(id).is_none() {
+            break id;
+        }
+    };
+    let pack = Item::create(
+        id,
+        server.game_data.items.template(29203).unwrap(),
+        1,
+        0,
+        1,
+        &server.game_data.items,
+        0,
+    );
+    let container = Inv::of(owner).get(slot).unwrap();
+    let position = if slot == slot_type::EQUIPMENT {
+        i32::from(crate::models::container::equip_slot::BACKPACK)
+    } else {
+        -1
+    };
+    container
+        .lock()
+        .unwrap()
+        .add_new_item(pack, position, &server.game_data.items)
+        .unwrap();
+    id
+}
+
+#[tokio::test]
+async fn prefetched_loaded_rack_then_same_pack_recovery_refuses_same_item_replacement() {
+    use crate::systems::economy::bridges::EconomyForNpcs;
+    use crate::systems::economy::inventory::Inv;
+    use crate::systems::npcs::hooks::{CargoRecovery, EconomyBridge};
+    use crate::systems::npcs::{doodad::db, spawn_manager::PersistentDoodads};
+    let server = server_with(cargo_identity_data());
+    install_memory_loader(&server);
+    let mut client = TestClient::new(&server, 1, 1);
+    let (owner, item_id) = owner_with_ship(&server, &client, 1, PA, MERCHANT_ITEM);
+    let hull = root(&server, &owner, item_id, MERCHANT);
+    let rack = loaded_rack(&server, &hull);
+    {
+        let mut d = rack.data();
+        d.item_id = 0;
+        d.item_template_id = 0;
+        d.func_group_id = 8264;
+        d.is_persistent = true;
+        d.parent_obj_id = hull.obj_id;
+    }
+    server
+        .systems
+        .npcs
+        .spawns
+        .get(0)
+        .unwrap()
+        .add_player_doodad(rack.clone());
+    let pack_id = original_pack(&server, &owner, slot_type::EQUIPMENT);
+    let expected = server.items.item_by_id(pack_id).unwrap();
+    let release = Arc::new(Semaphore::new(0));
+    let entered = Arc::new(AtomicUsize::new(0));
+    let (weak, loading_owner, loading_rack, permits, calls) = (
+        Arc::downgrade(&server),
+        owner.clone(),
+        rack.clone(),
+        release.clone(),
+        entered.clone(),
+    );
+    *server
+        .systems
+        .npcs
+        .spawns
+        .test_persistent_loader
+        .lock()
+        .unwrap() = Some(Arc::new(move |_, _| {
+        let server = weak.upgrade().unwrap();
+        // Initial hull preflight saw an empty rack. SQL captures the loaded state while
+        // the same real pack is in System escrow, then pauses after preparing that row.
+        assert!(EconomyForNpcs.try_store_doodad_item(
+            &server,
+            &loading_owner,
+            &loading_rack,
+            &expected,
+            1
+        ));
+        loading_rack.data().func_group_id = 8265;
+        let row = db::snapshot(&server, &loading_rack).unwrap();
+        assert_eq!(row.item_id, pack_id);
+        let prepared = PersistentDoodads::prepare(&server, vec![row]).unwrap();
+        calls.fetch_add(1, Ordering::SeqCst);
+        let permits = permits.clone();
+        Box::pin(async move {
+            permits.acquire_owned().await.unwrap().forget();
+            Ok(prepared)
+        })
+    }));
+    client.drain();
+    let mut creation = Box::pin(summon(&server, &owner, item_id, MERCHANT_ITEM));
+    assert!(poll!(creation.as_mut()).is_pending());
+    assert_eq!(entered.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        server.items.item_by_id(pack_id).unwrap().slot_type,
+        slot_type::SYSTEM
+    );
+    assert!(matches!(
+        EconomyForNpcs.recover_doodad_cargo(&server, &owner, &rack),
+        CargoRecovery::Recovered
+    ));
+    rack.data().func_group_id = 8264;
+    assert_eq!(
+        Inv::of(&owner)
+            .equipped(crate::models::container::equip_slot::BACKPACK)
+            .unwrap()
+            .id,
+        pack_id
+    );
+    let hull_before = hull.data().clone();
+    let rack_before = rack.data().clone();
+    let item_before = server.items.item_by_id(item_id).unwrap();
+    let pack_before = server.items.item_by_id(pack_id).unwrap();
+    release.add_permits(1);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), creation)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(Arc::ptr_eq(&roots(&server, 1)[0], &hull));
+    assert_eq!(*hull.data(), hull_before);
+    assert_eq!(*rack.data(), rack_before);
+    assert_eq!(server.items.item_by_id(item_id).unwrap(), item_before);
+    assert_eq!(server.items.item_by_id(pack_id).unwrap(), pack_before);
+    let occurrences: usize = server
+        .items
+        .all_containers()
+        .iter()
+        .map(|c| {
+            c.lock()
+                .unwrap()
+                .items
+                .iter()
+                .filter(|i| i.id == pack_id)
+                .count()
+        })
+        .sum();
+    assert_eq!(occurrences, 1);
+    assert_eq!(server.world.world(0).unwrap().all_doodads().len(), 1);
+    assert_eq!(
+        server
+            .systems
+            .npcs
+            .spawns
+            .get(0)
+            .unwrap()
+            .get_all_player_doodads()
+            .len(),
+        1
+    );
+    assert!(!server.items.removed_items().contains(&pack_id));
+    assert!(!ops(&client.drain()).contains(&sc::SCSlaveCreatedPacket));
+}
+
+#[tokio::test]
+async fn different_inactive_saved_hull_restores_another_owners_system_cargo() {
+    use crate::systems::npcs::spawn_manager::PersistentDoodads;
+    let server = server_with(cargo_identity_data());
+    let client = TestClient::new(&server, 1, 1);
+    let (owner, item_id) = owner_with_ship(&server, &client, 1, PA, SECOND_SHIP_ITEM);
+    let active = root(&server, &owner, item_id, SHIP_HULL);
+    let contributor_client = TestClient::new(&server, 2, 2);
+    let contributor = spawn_player(
+        &server,
+        &contributor_client,
+        test_character(2, "Contributor", 100.0, 100.0),
+        PB,
+    );
+    let pack_id = original_pack(&server, &contributor, slot_type::SYSTEM);
+    let mut row = saved_rack_row(777);
+    row.item_id = pack_id;
+    row.item_template_id = 29203;
+    {
+        let prepared = PersistentDoodads::prepare(&server, vec![row.clone()]).unwrap();
+        let _items = server.systems.economy.operation_scope();
+        assert!(prepared.validate_slave_cargo(&server, 777, None).is_ok());
+    }
+    let target_item = loop {
+        let id = u64::from(server.ids.item.get_next_id().unwrap());
+        if server.items.item_by_id(id).is_none() {
+            break id;
+        }
+    };
+    second_item(&server, &owner, target_item, MERCHANT_ITEM);
+    server
+        .items
+        .update_item(target_item, |item| item.details.slave_db_id = 777)
+        .unwrap();
+    install_memory_loader(&server);
+    let weak = Arc::downgrade(&server);
+    *server
+        .systems
+        .npcs
+        .spawns
+        .test_persistent_loader
+        .lock()
+        .unwrap() = Some(Arc::new(move |_, parent| {
+        assert_eq!(parent, 777);
+        let prepared =
+            PersistentDoodads::prepare(&weak.upgrade().unwrap(), vec![row.clone()]).unwrap();
+        Box::pin(async move { Ok(prepared) })
+    }));
+    let restored = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        summon(&server, &owner, target_item, MERCHANT_ITEM),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(persistent_id(&restored), 777);
+    assert_eq!(restored.data().summoning_item_id, target_item);
+    assert!(!Arc::ptr_eq(&restored, &active));
+    assert_eq!(roots(&server, 1).len(), 1);
+    assert!(Arc::ptr_eq(&roots(&server, 1)[0], &restored));
+    let racks = server.world.world(0).unwrap().all_doodads();
+    assert_eq!(racks.len(), 1);
+    assert_eq!(racks[0].data().item_id, pack_id);
+    assert_eq!(racks[0].data().parent_obj_id, restored.obj_id);
+    assert_eq!(
+        server.items.item_by_id(pack_id).unwrap().slot_type,
+        slot_type::SYSTEM
+    );
+    assert_eq!(server.items.item_by_id(pack_id).unwrap().owner_id, 2);
+    assert!(!server.items.removed_items().contains(&pack_id));
+}
+
 #[tokio::test]
 async fn merchant_loaded_refusal_preserves_hull_rider_gunner_and_item_identity() {
     let server = server_with(identity_data());

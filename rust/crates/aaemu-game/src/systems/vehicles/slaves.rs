@@ -2389,6 +2389,22 @@ async fn create_with_placement(
                 return None;
             }
         }
+        if let Some(saved) = &loaded.saved {
+            let live_hull = prior.iter().map(|(_, hull)| hull).find(|hull| {
+                let h = hull.data();
+                h.id == saved.id
+                    && item
+                        .as_ref()
+                        .is_some_and(|item| h.summoning_item_id == item.id)
+            });
+            if let Err(error) = loaded
+                .doodads
+                .validate_slave_cargo(server, saved.id, live_hull)
+            {
+                tracing::warn!("SlaveManager.Create cargo preflight: {error}");
+                return None;
+            }
+        }
         // Commit the actual item update before altering the prior hull. A missing or moved
         // source (including an unlocked quest mutation) must fail at this boundary.
         let committed = if let (Some(owner), Some(item)) = (owner, &item) {

@@ -362,6 +362,7 @@ pub fn initialize(server: &GameServer) -> anyhow::Result<()> {
 }
 
 pub fn start(server: &GameServer, key: EventKey, zone_id: u32) -> anyhow::Result<()> {
+    let _items = server.systems.economy.operation_scope();
     let _serial = server.systems.npcs.spawns.spawn_lock();
     let event = prepare(server, key, zone_id)?;
     let first_wave_after = event.def.first_wave_after;
@@ -430,6 +431,7 @@ fn spawn_controllers(server: &GameServer, key: EventKey, id: u32) -> anyhow::Res
 
 /// Advance exactly one wave. GM requests cannot skip waves or replay an active wave.
 pub fn next_wave(server: &GameServer, key: EventKey, step: u32) -> anyhow::Result<()> {
+    let _items = server.systems.economy.operation_scope();
     let _serial = server.systems.npcs.spawns.spawn_lock();
     let (zone_id, targets, removed, removed_doodads) = {
         let mut state = manager(server)
@@ -518,6 +520,7 @@ pub fn end(server: &GameServer, key: EventKey) -> anyhow::Result<()> {
 }
 
 fn end_event(server: &GameServer, key: EventKey, keep_corpses: bool) -> anyhow::Result<()> {
+    let _items = server.systems.economy.operation_scope();
     let _serial = server.systems.npcs.spawns.spawn_lock();
     let event = manager(server)
         .state
@@ -773,6 +776,7 @@ pub fn on_death(server: &GameServer, victim: &WorldObject) {
     let Some(npc) = victim.as_npc() else {
         return;
     };
+    let _items = server.systems.economy.operation_scope();
     let _serial = server.systems.npcs.spawns.spawn_lock();
     let (world_id, zone_id, template) = {
         let n = npc.data();
@@ -837,6 +841,7 @@ fn wave_complete(p: &TowerDefProg, kills: &HashMap<u32, u32>, elapsed: f32) -> b
 }
 
 pub fn tick(server: &GameServer) {
+    let _items = server.systems.economy.operation_scope();
     let _serial = server.systems.npcs.spawns.spawn_lock();
     schedule_tick(server);
     let now = spawn_manager::now();
@@ -1064,6 +1069,7 @@ fn broadcast(server: &GameServer, world_id: u32, packet: impl ServerPacket + Clo
 
 /// End events before an instance is removed, while its NPCs are still reachable.
 pub fn cleanup_world(server: &GameServer, world_id: u32) {
+    let _items = server.systems.economy.operation_scope();
     let _serial = server.systems.npcs.spawns.spawn_lock();
     let keys: Vec<_> = manager(server)
         .state

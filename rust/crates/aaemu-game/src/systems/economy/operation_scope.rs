@@ -8,6 +8,9 @@
 //! Snapshot-only manager locks which never wait for an item operation need no scope.
 //! ItemTxn::unlocked remains guardless: callers under a character lock must not acquire
 //! this scope to compensate.
+//! Callback-bearing spawn chains enter scope -> spawn lock -> spawner/instance leaf locks
+//! before item callbacks. The bare spawn lock stays available for pure bookkeeping; adding
+//! an implicit scope there would invert callers which already hold character/object locks.
 
 use std::marker::PhantomData;
 use std::rc::Rc;

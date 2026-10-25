@@ -411,6 +411,7 @@ impl NpcSpawner {
 
     /// `Update()`: despawn (schedule / no player around) has priority over spawning.
     pub fn update(self: &Arc<Self>, server: &GameServer) {
+        let _items = server.systems.economy.operation_scope();
         let _lock = server.systems.npcs.spawns.spawn_lock();
         let mut did_action = false;
         if self.can_despawn_npcs(server) {
@@ -439,6 +440,7 @@ impl NpcSpawner {
         warm_present: bool,
         budget: i64,
     ) -> usize {
+        let _items = server.systems.economy.operation_scope();
         let _lock = server.systems.npcs.spawns.spawn_lock();
         let mut did_action = false;
         if self.can_despawn_npcs(server) {
@@ -945,6 +947,7 @@ impl NpcSpawner {
     /// cannot block or duplicate it. Corpse despawn timers, other placements and other instances
     /// stay intact; a cancelled id is released only when no world object or corpse timer owns it.
     pub fn force_spawn(self: &Arc<Self>, server: &GameServer, _obj_id: u32) -> Option<NpcRef> {
+        let _items = server.systems.economy.operation_scope();
         let _serial = server.systems.npcs.spawns.spawn_lock();
         if self.spawned_map().is_empty() {
             let t = self.template();
@@ -1255,6 +1258,7 @@ impl NpcSpawner {
     /// living population and the still-reserved respawn deadlines all still apply, and a failed
     /// pass leaves the spawner unscheduled so it is retried.
     pub fn do_spawn_bounded(self: &Arc<Self>, server: &GameServer, budget: i64) -> usize {
+        let _items = server.systems.economy.operation_scope();
         if budget <= 0 {
             return 0;
         }
@@ -1614,6 +1618,7 @@ impl NpcSpawner {
     ) {
         // Creation, event ownership and population bookkeeping must finish before an
         // event can end and delete the summoner's descendants.
+        let _items = server.systems.economy.operation_scope();
         let _serial = server.systems.npcs.spawns.spawn_lock();
         let Some(template) = server
             .game_data
