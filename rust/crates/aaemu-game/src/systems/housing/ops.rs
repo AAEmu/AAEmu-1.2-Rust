@@ -165,6 +165,7 @@ pub fn house_tax_info(server: &GameServer, player: &PlayerRef, tl: u16) {
 /// `Build(connection, designId, posX, posY, posZ, zRot, itemId, moneyAmount, ht,
 /// autoUseAaPoint)`.
 pub fn build(server: &GameServer, player: &PlayerRef, account_id: u32, p: &CSCreateHousePacket) {
+    let _items = server.systems.economy.operation_scope();
     let _operation = server
         .systems
         .housing
@@ -494,6 +495,7 @@ pub fn demolish(
     failed_to_pay_tax: bool,
     force_restore_all_decor: bool,
 ) {
+    let _items = server.systems.economy.operation_scope();
     let _operation = server
         .systems
         .housing
@@ -1006,6 +1008,7 @@ pub fn set_for_sale(
     buyer_id: u32,
     seller: Option<&PlayerRef>,
 ) -> bool {
+    let _items = server.systems.economy.operation_scope();
     let _operation = server
         .systems
         .housing
@@ -1106,6 +1109,7 @@ fn zone_group_text(server: &GameServer, house: &House) -> String {
 
 /// `CancelForSale(house, returnCertificates)`.
 pub fn cancel_for_sale(server: &GameServer, house: &HouseRef, return_certificates: bool) -> bool {
+    let _items = server.systems.economy.operation_scope();
     let _operation = server
         .systems
         .housing
@@ -1218,6 +1222,7 @@ pub fn update_furniture_owner(
 
 /// `BuyHouse(houseTlId, money, character)`.
 pub fn buy_house(server: &GameServer, tl: u16, money: u32, player: &PlayerRef) -> bool {
+    let _items = server.systems.economy.operation_scope();
     let _operation = server
         .systems
         .housing
@@ -1373,6 +1378,7 @@ pub fn decorate_house(
     player: &PlayerRef,
     p: &CSDecorateHousePacket,
 ) -> Result<bool, String> {
+    let _items = server.systems.economy.operation_scope();
     let _operation = server
         .systems
         .housing
@@ -1605,6 +1611,7 @@ fn craft_building_with_payment(
     used_skill: u32,
     pay: impl FnOnce() -> Option<crate::models::item_task::ItemFxList>,
 ) -> Result<(), BuildActionError> {
+    let _items = server.systems.economy.operation_scope();
     let operation = server
         .systems
         .housing

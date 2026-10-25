@@ -26,6 +26,16 @@ pub(crate) fn cargo_empty_phase(
         let d = rack.data();
         (d.owner_type, d.template_id, d.func_group_id)
     };
+    cargo_empty_phase_for(server, owner_type, template_id, group)
+}
+
+/// The same authored transition for a prefetched row, without allocating a live rack.
+pub(crate) fn cargo_empty_phase_for(
+    server: &crate::server::GameServer,
+    owner_type: u8,
+    template_id: u32,
+    group: u32,
+) -> Option<u32> {
     if owner_type != doodad_owner_type::SLAVE {
         return None;
     }
@@ -213,6 +223,7 @@ pub fn recover_item(
     let Some(player) = DoodadCtx::as_player(caster) else {
         return;
     };
+    let _items = ctx.server.systems.economy.operation_scope();
     let _operation = ctx
         .server
         .systems
@@ -514,6 +525,7 @@ pub fn consume_changer(
     let Some(player) = DoodadCtx::as_player(caster) else {
         return;
     };
+    let _items = ctx.server.systems.economy.operation_scope();
     let _operation = ctx
         .server
         .systems

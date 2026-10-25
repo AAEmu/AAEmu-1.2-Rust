@@ -711,13 +711,19 @@ impl AuctionManager {
             .extend(failed);
     }
 
-    /// Serialises the auction operations (outermost lock; mails are sent while it is held).
+    /// Serialises auction operations inside the item operation scope. Mail callbacks may
+    /// start ItemTxn while this lock is held, so mutating entries acquire the scope first.
     fn op(&self) -> MutexGuard<'_, ()> {
         self.op.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub(crate) fn operation_lock(&self) -> MutexGuard<'_, ()> {
         self.op()
+    }
+
+    #[cfg(test)]
+    pub(super) fn try_operation_lock(&self) -> std::sync::TryLockResult<MutexGuard<'_, ()>> {
+        self.op.try_lock()
     }
 
     pub(crate) fn prepare_save(&self, server: &GameServer) -> AuctionSaveBatch {
@@ -875,6 +881,7 @@ impl AuctionManager {
     /// `CancelAuctionLot(player, auctionId)`: only the seller may cancel a lot without bids.
     /// Return the original escrow item, preserving its ID and details.
     pub fn cancel_auction_lot(&self, server: &GameServer, player: &PlayerRef, auction_id: u64) {
+        let _items = server.systems.economy.operation_scope();
         let _op = self.op();
         let Some(lot) = self.lot(auction_id) else {
             tracing::warn!("AuctionLot with ID {auction_id} not found.");
@@ -936,6 +943,7 @@ impl AuctionManager {
         lot_id: u64,
         mut bid: AuctionBid,
     ) {
+        let _items = server.systems.economy.operation_scope();
         let _op = self.op();
         let Some(mut lot) = self.lot(lot_id) else {
             tracing::warn!("Invalid auctionItem passed to BidOnAuctionLot.");
@@ -1165,6 +1173,7 @@ impl AuctionManager {
     /// `UpdateAuctionHouse()` (`AuctionHouseTask`).
     pub fn update_auction_house(&self, server: &GameServer, now: DateTime<Utc>) {
         tracing::trace!("Updating Auction House!");
+        let _items = server.systems.economy.operation_scope();
         let _op = self.op();
         self.retry_pending_settlements(server);
         let expired: Vec<AuctionLot> = self
@@ -1241,6 +1250,7 @@ impl AuctionManager {
         buyout_price: i32,
         duration: u8,
     ) {
+        let _items = server.systems.economy.operation_scope();
         let _op = self.op();
         let mut txn = ItemTxn::begin(server);
         // Only the player's own unbound inventory item can enter auction escrow.

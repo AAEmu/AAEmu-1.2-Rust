@@ -488,8 +488,42 @@ impl SubCommand for SlaveSaveSubCommand {
 }
 
 /// `SlaveCmd`.
+#[derive(Default)]
+pub struct SlaveAuditSubCommand {
+    base: SubCommandBase,
+}
+
+impl SubCommand for SlaveAuditSubCommand {
+    fn base(&self) -> &SubCommandBase {
+        &self.base
+    }
+
+    fn execute_args(
+        &self,
+        ctx: &CommandContext<'_>,
+        _trigger: &str,
+        args: &[String],
+        out: &mut dyn MessageOutput,
+    ) -> anyhow::Result<()> {
+        use crate::systems::vehicles::audit;
+        // Raw args deliberately enforce exact arity (the generic typed-parameter loader
+        // ignores extra positional arguments). Authorization remains on the slave root.
+        let request = audit::Request::parse(args)?;
+        let snapshot = audit::snapshot(ctx.server()?, &request);
+        for chunk in audit::chunks(&request, &snapshot)? {
+            out.send_message(&chunk);
+        }
+        Ok(())
+    }
+
+    fn send_help_message(&self, out: &mut dyn MessageOutput) {
+        out.send_message("/slave audit <stable-character-id> <actual-summon-item-id> <nonce>; read-only, aaemu-slave-audit/1");
+    }
+}
+
 pub fn slave_cmd() -> RootCommand {
     RootCommand::new(&["slave"], "[slave]", "Root command to manage Slaves", "")
+        .register(Arc::new(SlaveAuditSubCommand::default()), &["audit"])
         .register(Arc::new(SlaveInformationSubCommand::default()), &["info"])
         .register(
             Arc::new(SlavePositionSubCommand::default()),

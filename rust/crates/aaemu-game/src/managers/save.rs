@@ -30,6 +30,7 @@ pub(crate) struct FinancialSnapshot {
 /// Capture property transactions before any database await. Claim/capture, tax payments,
 /// certificates, receipts and wallets must describe the same logical operation boundary.
 pub(crate) fn capture_financial_snapshot(server: &GameServer) -> FinancialSnapshot {
+    let _items = server.systems.economy.operation_scope();
     let _auction = server.systems.economy.auction.operation_lock();
     let _housing = server
         .systems

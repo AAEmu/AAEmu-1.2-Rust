@@ -1565,6 +1565,7 @@ pub fn pay_housing_tax(
     mail_id: i64,
     auto_use_aa_point: bool,
 ) -> bool {
+    let _items = server.systems.economy.operation_scope();
     let operation = server
         .systems
         .housing

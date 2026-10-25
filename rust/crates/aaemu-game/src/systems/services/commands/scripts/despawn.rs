@@ -14,6 +14,7 @@ impl Despawn {
 
 /// `ObjectIdManager.Instance.ReleaseId(obj.ObjId); obj.Delete();`
 pub(crate) fn release_and_delete(server: &GameServer, obj: &WorldObject) {
+    let _items = server.systems.economy.operation_scope();
     if let WorldObject::Npc(npc) = obj {
         // Deviation: an NPC that still has a queued respawn / corpse timer (a dead spawner NPC)
         // keeps its object id until the spawn manager's timers are done with it. Releasing it

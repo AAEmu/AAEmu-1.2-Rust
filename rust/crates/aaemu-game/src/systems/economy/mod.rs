@@ -57,6 +57,9 @@ pub mod mail_packets;
 #[cfg(test)]
 mod mail_tests;
 pub mod mate_equipment;
+mod operation_scope;
+#[cfg(test)]
+mod operation_scope_tests;
 #[cfg(test)]
 mod ported_unit_tests;
 pub mod repair;
@@ -86,6 +89,8 @@ pub struct System {
     pub hooks: hooks::EconomyHooks,
     /// Serialises item operations (see [`inventory::ItemTxn`]).
     ops: Mutex<()>,
+    /// Callback-bearing synchronous publications exclude ordinary item operations here.
+    operation_scope: operation_scope::OperationScope,
     /// `Inventory.PreviousBackPackItemId` by character id (glider re-equip after a trade pack).
     previous_backpack: Mutex<HashMap<u32, u64>>,
     /// Account-wide attributes (`account_attributes`, auction posting authority, ...).
@@ -118,22 +123,40 @@ thread_local! {
 }
 
 /// The held item-operation lock ([`System::ops_lock`]); tracks the holding thread.
-pub struct OpsGuard<'a>(Option<MutexGuard<'a, ()>>);
+pub struct OpsGuard<'a> {
+    guard: Option<MutexGuard<'a, ()>>,
+    _scope: operation_scope::OperationScopeGuard<'a>,
+}
 
 impl Drop for OpsGuard<'_> {
     fn drop(&mut self) {
-        self.0.take();
+        self.guard.take();
         OPS_HELD.with(|held| held.set(held.get().saturating_sub(1)));
     }
 }
 
 impl System {
+    /// Acquire before world/publication locks and after all awaits. Callback ItemTxn scopes
+    /// may reenter this outer boundary; callbacks must still run outside the ops mutex.
+    pub(crate) fn operation_scope(&self) -> operation_scope::OperationScopeGuard<'_> {
+        self.operation_scope.enter()
+    }
+
     /// The item-operation lock (outermost lock of every economy operation; never taken while a
     /// character or container lock is held).
     pub fn ops_lock(&self) -> OpsGuard<'_> {
+        let scope = self.operation_scope();
         let guard = self.ops.lock().unwrap_or_else(|e| e.into_inner());
         OPS_HELD.with(|held| held.set(held.get() + 1));
-        OpsGuard(Some(guard))
+        OpsGuard {
+            guard: Some(guard),
+            _scope: scope,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_until_operation_blocked(&self) {
+        self.operation_scope.wait_until_blocked();
     }
 
     /// Whether the current thread holds the item-operation lock. The lock is not re-entrant, so

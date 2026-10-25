@@ -77,6 +77,10 @@ impl<'a> ItemTxn<'a> {
     /// lock (the quest "locked hooks"): starting a normal transaction there could deadlock with
     /// an operation that holds the lock and waits for that character. Hand the effects to
     /// [`ItemTxn::into_fx`] and flush them once the character lock is released.
+    /// This path deliberately bypasses both the ops mutex and the outer publication scope.
+    /// It is not protected against concurrent world publication; callers must keep its quest
+    /// mutations confined to their already-locked character and must never acquire the outer
+    /// scope while holding that character lock.
     pub fn unlocked(server: &'a GameServer) -> Self {
         Self {
             server,
