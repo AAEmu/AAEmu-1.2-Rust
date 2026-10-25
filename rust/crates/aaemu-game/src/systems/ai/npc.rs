@@ -93,14 +93,14 @@ pub fn move_speed_mul(obj: &WorldObject) -> f32 {
 /// `NpcAi.GetRealMovementSpeed(baseMoveSpeed)`.
 pub fn real_movement_speed(obj: &WorldObject, base_move_speed: f64) -> f64 {
     let now = now_ms();
+    // The native limit bounds the complete raw attribute, including its neutral 1000.
     let speed_mul = obj
         .with_unit(|u| {
             u.unit()
-                .calculate_with_bonuses(0.0, UnitAttribute::MoveSpeedMul, now)
+                .calculate_with_bonuses(1000.0, UnitAttribute::MoveSpeedMul, now)
         })
-        .unwrap_or(0.0)
-        / 1000.0
-        + 1.0;
+        .unwrap_or(1000.0)
+        / 1000.0;
     if (speed_mul - 1.0).abs() > f64::EPSILON {
         base_move_speed * speed_mul
     } else {
