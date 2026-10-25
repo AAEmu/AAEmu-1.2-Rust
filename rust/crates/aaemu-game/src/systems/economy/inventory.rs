@@ -1732,6 +1732,29 @@ pub fn actability_time_multiplier(step: u8) -> f32 {
     T[usize::from(step).min(T.len() - 1)]
 }
 
+/// Validate item-cast location before costs, placement, summoning or item consumption.
+pub(crate) fn item_use_zone_allowed(
+    server: &GameServer,
+    player: &PlayerRef,
+    template_id: u32,
+) -> bool {
+    let banned =
+        crate::systems::skills::data::zone_rules::current_group(server, &WorldObject::from(player))
+            .is_some_and(|group| {
+                server
+                    .game_data
+                    .systems
+                    .skills
+                    .zone_rules
+                    .bans_item(group, template_id)
+            });
+    if banned {
+        // Native 1.2 x2game12.c:1163648: ErrorMessage 440 = item_cannot_use_here.
+        send_error_message(player, error_message::ITEM_CANNOT_USE_HERE, 0, true);
+    }
+    !banned
+}
+
 /// `Character.ItemUse(item)` (`Events.OnItemUse` -> quests).
 pub fn item_use(server: &GameServer, player: &PlayerRef, template_id: u32) {
     if template_id == 0 {

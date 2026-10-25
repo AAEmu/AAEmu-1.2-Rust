@@ -6,6 +6,7 @@ pub mod effects;
 pub mod misc;
 pub mod plots;
 pub mod templates;
+pub mod zone_rules;
 
 #[cfg(test)]
 mod buff_game_data_tests;
@@ -75,6 +76,8 @@ pub struct Data {
     pub skill_tags: HashMap<u32, Vec<u32>>,
     /// `_taggedSkills`.
     pub tagged_skills: HashMap<u32, Vec<u32>>,
+    /// Authored zone-group restrictions and item tag membership.
+    pub zone_rules: zone_rules::ZoneRules,
     /// `_skillModifiers` by owner id.
     pub skill_modifiers: HashMap<u32, Vec<SkillModifier>>,
     /// `_buffTriggers` by buff id.
@@ -131,6 +134,7 @@ impl Data {
         let mut d = Data {
             plots: PlotData::load(conn)?,
             anims: AnimData::load(conn, files)?,
+            zone_rules: zone_rules::ZoneRules::load(conn)?,
             ..Data::default()
         };
         // skills
