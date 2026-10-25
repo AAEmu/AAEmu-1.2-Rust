@@ -132,8 +132,9 @@
     },
     {
       "id": "shared-cooldown-tags",
-      "status": "revision_in_progress",
-      "note": "Native tag-list UI and matching GM server-state reset required before merge."
+      "status": "merged_pending_execution",
+      "note": "Native separate skill/tag snapshots and GM reset; root af5db95ba additionally isolates controlled-unit UI. Game all-target Clippy passed at af5db95ba; runtime regressions pending.",
+      "commit": "47217398ade1f50f9957b15a1e6ec1a72428eaa7"
     },
     {
       "id": "xp-buff-multiplier",
@@ -148,7 +149,9 @@
     },
     {
       "id": "unit-and-primary-stat-limits",
-      "status": "implementing"
+      "status": "partial_merged_pending_validation",
+      "commit": "ed2f7a9f3",
+      "note": "Native final raw unit caps implemented per server. Permanent pStat contribution ranges are loaded; contribution storage/behavior remain open. No final-primary 10000 cap invented."
     },
     {
       "id": "prison-and-other-skill-restrictions",
@@ -210,7 +213,9 @@
     },
     {
       "id": "mail-expiry-throttling-feedback-and-pagination",
-      "status": "implementing"
+      "status": "partial_merged_pending_validation",
+      "commit": "e712343a3211076ddef5db75658e6075aaa47bac",
+      "note": "Ordinary player-mail 14-day retention/return-once escrow policy implemented. Specialized mail, send throttles/level gates and pagination remain open. New ordinary expiry tests unexecuted."
     },
     {
       "id": "npc-physical-enchant",
@@ -371,6 +376,41 @@
       "id": "deprecated-empty-or-client-only-data",
       "status": "queued",
       "note": "Verify before deciding no server implementation is required."
+    },
+    {
+      "id": "trade-ship-cargo-reference-atomicity",
+      "status": "implementing",
+      "owner": "audit-tradeship",
+      "note": "Tester-reported stuck rack; source proves error14 is stale non-System item reference, not physical stacking. Production transaction and repair tests in progress."
+    },
+    {
+      "id": "trade-ship-live-root-identity-after-reconnect",
+      "status": "implementing",
+      "owner": "audit-ship-session",
+      "note": "Source proves failed loaded-hull deletion can be ignored by summon; root lookup includes child cannons. Async session/identity invariants under repair."
+    },
+    {
+      "id": "lane-allocation-concurrency",
+      "status": "implementing",
+      "owner": "audit-lane-lock",
+      "note": "Concurrent creation assigned the same port prefix; isolated allocator repair in progress."
     }
-  ]
+  ],
+  "recent_validation": {
+    "game_check": {
+      "head": "0cf0f23f500628ca6a0dc0cc6d46ecebc16ac9b8",
+      "result": "passed_all_targets"
+    },
+    "game_clippy": {
+      "head": "af5db95ba0687dcc4cfb7b164af77bbd038b28cc",
+      "result": "passed_all_targets_D_warnings"
+    },
+    "latest_mail_stats_clippy": {
+      "head": "dbd7cd95251ebc692a913128b650ba25b74ba1d9",
+      "result": "held_at_memory_reserve_before_completion",
+      "minimum_free_gib": 5.938747406005859
+    },
+    "current_full_lane_ci": "pending",
+    "current_live": "pending"
+  }
 }
