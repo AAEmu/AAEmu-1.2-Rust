@@ -651,11 +651,14 @@ pub trait EconomyBridge: Send + Sync {
     }
 
     /// `Doodad.Delete()` item cleanup: `GetItemByItemId(itemId)` held by a `None` / `System`
-    /// container -> `RemoveItem(Invalid, item, true)`. Default: nothing.
+    /// container -> `RemoveItem(Invalid, item, true)`. Cargo must be retained when unloaded
+    /// persistent references cannot be ruled out; collection of such orphans is deferred.
+    /// Default: nothing.
     fn remove_expired_doodad_item(&self, _server: &GameServer, _item_id: u64) {}
 
     /// `DeleteDoodadById` item part: the attached item loses its container and its id is
-    /// released; the attached container is deleted. Default: nothing.
+    /// released; the attached container is deleted. Cargo with unproven unloaded references
+    /// is conservatively retained, including an ambiguous attached container. Default: nothing.
     fn release_deleted_doodad_items(
         &self,
         _server: &GameServer,

@@ -158,6 +158,10 @@ struct CargoWorld {
 }
 
 fn world(data: GameData) -> CargoWorld {
+    world_with_pool(data, None)
+}
+
+fn world_with_pool(data: GameData, pool: Option<sqlx::MySqlPool>) -> CargoWorld {
     let bindings = data
         .systems
         .vehicles
@@ -169,7 +173,11 @@ fn world(data: GameData) -> CargoWorld {
         .cloned()
         .collect::<Vec<_>>();
     assert_eq!(bindings.len(), 20);
-    let server = Arc::new(test_server_with(data));
+    let mut server = test_server_with(data);
+    if let Some(pool) = pool {
+        server.db = pool;
+    }
+    let server = Arc::new(server);
     super::install(&server);
     let mut a = TestClient::new(&server, 1, 1001);
     let mut b = TestClient::new(&server, 2, 1002);
@@ -550,6 +558,68 @@ async fn duplicate_cleanup_preserves_the_sole_pack_for_the_surviving_rack() {
 }
 
 #[tokio::test]
+async fn both_cleanup_hooks_retain_cargo_without_any_spawned_reference() {
+    for persisted_row_route in [false, true] {
+        let c = world(authored_data());
+        let id = give(&c.w, &c.w.pa, slot_type::SYSTEM, PACK, 1, -1);
+        assert!(c
+            .w
+            .server
+            .world
+            .world(0)
+            .unwrap()
+            .all_doodads()
+            .iter()
+            .all(|d| d.data().item_id != id));
+        if persisted_row_route {
+            EconomyForNpcs.release_deleted_doodad_items(&c.w.server, id, 0);
+        } else {
+            EconomyForNpcs.remove_expired_doodad_item(&c.w.server, id);
+        }
+        assert!(!c.w.server.items.removed_items().contains(&id));
+        assert_eq!(
+            c.w.server.items.item_by_id(id).unwrap().slot_type,
+            slot_type::SYSTEM
+        );
+        // Model the surviving saved rack becoming available after cleanup.
+        {
+            let mut survivor = c.racks[0].data();
+            survivor.item_id = id;
+            survivor.item_template_id = PACK;
+        }
+        phase::set_func_group_id(&c.w.server, &c.racks[0], LOADED);
+        use_rack(&c, 0, RECOVER_SKILL);
+        assert_eq!(equipped(&c).id, id);
+        assert!(!c.w.server.items.removed_items().contains(&id));
+        // Replayed cleanup of the stale alias cannot delete the pack after its recovery either.
+        if persisted_row_route {
+            EconomyForNpcs.release_deleted_doodad_items(&c.w.server, id, 0);
+        } else {
+            EconomyForNpcs.remove_expired_doodad_item(&c.w.server, id);
+        }
+        assert_eq!(equipped(&c).id, id);
+        assert!(!c.w.server.items.removed_items().contains(&id));
+    }
+}
+
+#[tokio::test]
+async fn cargo_preservation_does_not_disable_ordinary_item_or_glider_cleanup() {
+    for persisted_row_route in [false, true] {
+        for template in [SINGLE, GLIDER] {
+            let c = world(authored_data());
+            let id = give(&c.w, &c.w.pa, slot_type::SYSTEM, template, 1, -1);
+            if persisted_row_route {
+                EconomyForNpcs.release_deleted_doodad_items(&c.w.server, id, 0);
+            } else {
+                EconomyForNpcs.remove_expired_doodad_item(&c.w.server, id);
+            }
+            assert!(c.w.server.items.item_by_id(id).is_none());
+            assert!(c.w.server.items.removed_items().contains(&id));
+        }
+    }
+}
+
+#[tokio::test]
 async fn dangling_rack_repair_does_not_move_another_players_pack_or_create_one() {
     let mut c = world(authored_data());
     let id = give(
@@ -674,6 +744,180 @@ async fn removal_ignores_stale_children_but_blocks_a_live_persistent_child() {
     let replacement = Entity::new(child.obj_id, child.data().clone());
     instance.spawn(&replacement, &c.w.server.view_ctx());
     assert!(interactions::doodad_allow_removal(&c.w.server, &c.racks[1]));
+}
+
+#[tokio::test]
+async fn dangling_cargo_repair_requires_live_child_identity_not_a_reused_id() {
+    let c = world(authored_data());
+    let missing_item = 9_000_000;
+    {
+        let mut rack = c.racks[0].data();
+        rack.item_id = missing_item;
+        rack.item_template_id = PACK;
+    }
+    phase::set_func_group_id(&c.w.server, &c.racks[0], LOADED);
+    let instance = c.w.server.world.world(0).unwrap();
+    let mut data = Doodad::new(RACK);
+    data.is_persistent = true;
+    let child = Entity::new(0x900, data);
+    instance.spawn(&child, &c.w.server.view_ctx());
+    instance.attach_child(&WorldObject::from(&c.racks[0]), &WorldObject::from(&child));
+    use_rack(&c, 0, RECOVER_SKILL);
+    assert_eq!(cargo_state(&c.racks[0]), (LOADED, missing_item, PACK));
+    // The cached child retains its old parent, but this live allocation with its id is unrelated.
+    instance.remove_object(child.obj_id);
+    let unrelated = Entity::new(child.obj_id, Doodad::new(RACK));
+    instance.spawn(&unrelated, &c.w.server.view_ctx());
+    use_rack(&c, 0, RECOVER_SKILL);
+    assert_eq!(cargo_state(&c.racks[0]), (EMPTY, 0, 0));
+    assert!(Arc::ptr_eq(
+        &instance.doodad(unrelated.obj_id).unwrap(),
+        &unrelated
+    ));
+    assert!(c.w.server.items.item_by_id(missing_item).is_none());
+    assert!(Inv::of(&c.w.pa).equipped(equip_slot::BACKPACK).is_none());
+}
+
+#[tokio::test]
+#[ignore = "private MySQL3317 via AAEMU_TEST_MYSQL; connection-local temporary doodads table"]
+async fn private_mysql_saved_offline_rack_alias_survives_both_cleanup_routes() {
+    use crate::systems::npcs::doodad::db;
+    use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+    use std::str::FromStr;
+
+    let options = MySqlConnectOptions::from_str(
+        &std::env::var("AAEMU_TEST_MYSQL").expect("AAEMU_TEST_MYSQL"),
+    )
+    .unwrap();
+    assert_eq!(options.get_port(), 3317);
+    assert!(matches!(options.get_host(), "127.0.0.1" | "localhost"));
+    let pool = MySqlPoolOptions::new()
+        .max_connections(1)
+        .idle_timeout(None)
+        .max_lifetime(None)
+        .connect_with(options)
+        .await
+        .unwrap();
+    let (_, ddl): (String, String) = sqlx::query_as("SHOW CREATE TABLE doodads")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query(&ddl.replacen("CREATE TABLE", "CREATE TEMPORARY TABLE", 1))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    for persisted_row_route in [false, true] {
+        // `doodads` is the connection-local temporary table created above.
+        sqlx::query("DELETE FROM doodads")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let c = world_with_pool(authored_data(), Some(pool.clone()));
+        let item_id = give(
+            &c.w,
+            &c.w.pa,
+            slot_type::EQUIPMENT,
+            PACK,
+            1,
+            equip_slot::BACKPACK,
+        );
+        use_rack(&c, 0, STORE_SKILL);
+        {
+            let mut survivor = c.racks[1].data();
+            survivor.item_id = item_id;
+            survivor.item_template_id = PACK;
+        }
+        phase::set_func_group_id(&c.w.server, &c.racks[1], LOADED);
+        c.w.server
+            .systems
+            .npcs
+            .doodads
+            .persistence
+            .flush()
+            .await
+            .unwrap();
+        let deleted_id = c.racks[0].data().db_id;
+        let survivor_id = c.racks[1].data().db_id;
+        let aliases: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM doodads WHERE item_id = ?")
+            .bind(item_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(aliases, 2);
+        let instance = c.w.server.world.world(0).unwrap();
+        // Unload the surviving object without deleting its saved row or its escrow item.
+        instance.delete(&c.racks[1]);
+        if persisted_row_route {
+            instance.delete(&c.racks[0]);
+            let mut connection = pool.acquire().await.unwrap();
+            assert!(
+                db::delete_doodad_by_id(&c.w.server, &mut connection, deleted_id)
+                    .await
+                    .unwrap()
+            );
+        } else {
+            manager::delete(&c.w.server, &instance, &c.racks[0]);
+        }
+        c.w.server
+            .systems
+            .npcs
+            .doodads
+            .persistence
+            .flush()
+            .await
+            .unwrap();
+        assert!(instance
+            .all_doodads()
+            .iter()
+            .all(|d| d.data().item_id != item_id));
+        assert_eq!(
+            c.w.server.items.item_by_id(item_id).unwrap().slot_type,
+            slot_type::SYSTEM
+        );
+        assert!(!c.w.server.items.removed_items().contains(&item_id));
+        let survivors: Vec<u64> =
+            sqlx::query_scalar("SELECT CAST(id AS UNSIGNED) FROM doodads WHERE item_id = ?")
+                .bind(item_id)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(survivors, vec![u64::from(survivor_id)]);
+        let spawns = c.w.server.systems.npcs.spawns.get_or_create(&instance);
+        assert_eq!(
+            spawns
+                .spawn_persistent_doodads(
+                    &c.w.server,
+                    doodad_owner_type::SLAVE,
+                    700,
+                    Some(&WorldObject::from(&c.hull)),
+                    true
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        let restored = instance.doodad_by_db_id(survivor_id).unwrap();
+        assert!(interactions::execute_interaction(
+            &c.w.server,
+            interactions::world_interaction_type::USE,
+            &WorldObject::from(&c.w.pa),
+            Some(&WorldObject::from(&restored)),
+            RECOVER_SKILL,
+            0,
+            None
+        ));
+        assert_eq!(equipped(&c).id, item_id);
+        assert!(!c.w.server.items.removed_items().contains(&item_id));
+        c.w.server
+            .systems
+            .npcs
+            .doodads
+            .persistence
+            .flush()
+            .await
+            .unwrap();
+    }
 }
 
 #[tokio::test]

@@ -2731,24 +2731,8 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
 
     fn remove_expired_doodad_item(&self, server: &GameServer, item_id: u64) {
         let mut txn = ItemTxn::begin(server);
-        // A duplicate rack can share the same escrow reference. Removing that duplicate must
-        // not destroy the sole pack still represented by another live doodad.
-        for world in server.world.worlds() {
-            for doodad in world.all_doodads() {
-                let protects_item = {
-                    let d = doodad.data();
-                    !d.phase.deleted && d.item_id == item_id
-                };
-                if protects_item {
-                    crate::systems::npcs::doodad::funcs::items::warn_item_reference(
-                        server,
-                        &doodad,
-                        item_id,
-                        "preserved item referenced by another live doodad during cleanup",
-                    );
-                    return;
-                }
-            }
+        if preserve_cargo_on_doodad_delete(server, item_id) {
+            return;
         }
         let Some(c) = server.items.holding_container(item_id) else {
             return;
@@ -2760,6 +2744,12 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
     }
 
     fn release_deleted_doodad_items(&self, server: &GameServer, item_id: u64, container_id: u64) {
+        let _operation = ItemTxn::begin(server);
+        if preserve_cargo_on_doodad_delete(server, item_id) {
+            // Do not forget a referenced item's holding container either. Cargo racks normally
+            // have no attached container; ambiguous legacy rows are preserved conservatively.
+            return;
+        }
         // item._holdingContainer = null; itemManager.ReleaseId(item.Id)
         if item_id != 0 && server.items.item_by_id(item_id).is_some() {
             if let Some(c) = server.items.holding_container(item_id) {
@@ -2784,6 +2774,40 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
             }
         }
     }
+}
+
+/// These synchronous deletion hooks cannot rule out references in unloaded `doodads` rows.
+/// Retain cargo instead of releasing its sole item or queuing its row for deletion. This also
+/// protects packs already picked up from a stale rack. No world scan or DB await is needed.
+/// Known gliders/toy flags and ordinary doodad items keep their existing cleanup policy.
+/// A separate reconciliation/GC operation must establish that retained cargo is unreferenced;
+/// this fallback intentionally does not collect cargo orphaned by removal of its last rack.
+fn preserve_cargo_on_doodad_delete(server: &GameServer, item_id: u64) -> bool {
+    if item_id == 0 {
+        return false;
+    }
+    let Some(item) = server.items.item_by_id(item_id) else {
+        return false;
+    };
+    let cargo = match server
+        .game_data
+        .items
+        .template(item.template_id)
+        .map(|t| &t.kind)
+    {
+        Some(TemplateKind::Backpack { backpack_type }) => !matches!(
+            *backpack_type,
+            crate::data::items::backpack_type::GLIDER | crate::data::items::backpack_type::TOY_FLAG
+        ),
+        None => item.class == ItemClass::Backpack,
+        _ => false,
+    };
+    if cargo {
+        tracing::warn!(item_id, item_template_id = item.template_id,
+            item_slot_type = item.slot_type,
+            "Retained doodad cargo item: unloaded persistent references have not been ruled out; orphan cleanup deferred");
+    }
+    cargo
 }
 
 /// A live cargo attachment, plus whether its persistent authored binding proves it safe to
@@ -2842,8 +2866,13 @@ fn cargo_attachment(server: &GameServer, rack: &DoodadRef) -> Option<bool> {
     Some(
         repairable
             && !rack.core().children().iter().any(|child| {
-                child.transform().parent_obj_id == rack.obj_id
-                    && world.object(child.obj_id()).is_some()
+                world.object(child.obj_id()).is_some_and(|live| {
+                    // ObjectCore belongs to the immutable Arc allocation, not its recycled id.
+                    std::ptr::eq(child.core(), live.core()) && {
+                        let transform = live.transform();
+                        transform.parent_obj_id == rack.obj_id && transform.instance_id == instance
+                    }
+                })
             }),
     )
 }
