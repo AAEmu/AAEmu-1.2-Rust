@@ -474,6 +474,7 @@ pub fn leave_extra_logout_ms(server: &GameServer, player: &PlayerRef) -> i32 {
 /// `EnterWorldManager.LeaveWorldTask` part: despawn the owned mates and slaves (the caller then
 /// closes coffers and calls [`force_dismount`], as the C# order).
 pub fn on_leave_world(server: &GameServer, player: &PlayerRef) {
+    let _items = server.systems.economy.operation_scope();
     let Some(_departure) = server
         .systems
         .vehicles
@@ -496,6 +497,7 @@ pub fn on_leave_world(server: &GameServer, player: &PlayerRef) {
 /// `GameConnection.OnDisconnect` part: `RemoveAndDespawnActiveOwnedMatesSlaves()` (owned mates
 /// now, the active vehicle 10 minutes later unless the character logs in again).
 pub fn on_disconnect(server: &GameServer, player: &PlayerRef) {
+    let _items = server.systems.economy.operation_scope();
     let Some(_departure) = server
         .systems
         .vehicles
@@ -534,13 +536,13 @@ pub fn force_dismount_and_despawn(
         let player = player.clone();
         rt.spawn(async move {
             tokio::time::sleep(Duration::from_millis(time_to_despawn_ms)).await;
+            let _items = server.systems.economy.operation_scope();
             let _publication = server
                 .systems
                 .vehicles
                 .slave_summons
-                .departing
-                .lock()
-                .expect("slave departures poisoned");
+                .publication_gate
+                .lock();
             if slave.data().leave_task != gen {
                 return;
             }
@@ -577,6 +579,8 @@ pub fn force_dismount_and_despawn_test_slave(
     let (player, slave) = (player.clone(), slave.clone());
     rt.spawn(async move {
         tokio::time::sleep(Duration::from_millis(time_to_despawn_ms)).await;
+        let _items = server.systems.economy.operation_scope();
+        let _publication = server.systems.vehicles.slave_summons.publication_scope();
         if slave.data().leave_task != gen {
             return;
         }

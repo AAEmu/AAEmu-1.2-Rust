@@ -61,6 +61,73 @@ pub const FIRST_FAKE_SPAWNER_ID: u32 = 9_000_001;
 /// spawners) quadratically, so a pathological configuration is clamped to a modest ring.
 pub const MAX_PREWARM_REGION_MARGIN: u32 = 4;
 
+/// Fully decoded persistent rows. Fetching/validating this batch allocates no world objects,
+/// changes no parent links and queues no persistence writes.
+#[derive(Debug, Default)]
+pub(crate) struct PersistentDoodads {
+    rows: Vec<PreparedDoodad>,
+}
+
+#[derive(Debug)]
+struct PreparedDoodad {
+    row: crate::systems::npcs::doodad::db::DoodadRow,
+    interaction_counts: HashMap<u32, u32>,
+}
+
+impl PersistentDoodads {
+    pub(crate) fn prepare(
+        server: &GameServer,
+        rows: Vec<crate::systems::npcs::doodad::db::DoodadRow>,
+    ) -> anyhow::Result<Self> {
+        let mut prepared = Vec::with_capacity(rows.len());
+        for row in rows {
+            anyhow::ensure!(row.id != 0, "persistent doodad has no database id");
+            let template = server
+                .game_data
+                .systems
+                .npcs
+                .doodad
+                .template(row.template_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "persistent doodad {}: template {} does not exist",
+                        row.id,
+                        row.template_id
+                    )
+                })?;
+            anyhow::ensure!(
+                [row.x, row.y, row.z, row.roll, row.pitch, row.yaw, row.scale]
+                    .iter()
+                    .all(|value| value.is_finite()),
+                "persistent doodad {}: non-finite transform",
+                row.id
+            );
+            anyhow::ensure!(
+                row.current_phase_id == 0
+                    || template
+                        .func_groups
+                        .iter()
+                        .any(|group| group.id == row.current_phase_id),
+                "persistent doodad {}: phase {} does not belong to template {}",
+                row.id,
+                row.current_phase_id,
+                row.template_id
+            );
+            let interaction_counts = serde_json::from_str(&row.interaction_counts)?;
+            prepared.push(PreparedDoodad {
+                row,
+                interaction_counts,
+            });
+        }
+        Ok(Self { rows: prepared })
+    }
+}
+
+#[cfg(test)]
+pub(crate) type PersistentDoodadLoad = dyn Fn(u8, i64) -> futures::future::BoxFuture<'static, anyhow::Result<PersistentDoodads>>
+    + Send
+    + Sync;
+
 /// The configured prewarm margin, clamped to [`MAX_PREWARM_REGION_MARGIN`].
 pub fn prewarm_region_margin(config: &WorldConfig) -> u32 {
     config
@@ -296,6 +363,8 @@ pub struct SpawnManagers {
     activation_rotation: AtomicU32,
     #[cfg(test)]
     pub(crate) test_backend: Mutex<Option<Arc<dyn backend::TestBackend>>>,
+    #[cfg(test)]
+    pub(crate) test_persistent_loader: Mutex<Option<Arc<PersistentDoodadLoad>>>,
 }
 
 impl std::fmt::Debug for SpawnManagers {
@@ -324,6 +393,8 @@ impl Default for SpawnManagers {
             activation_rotation: AtomicU32::new(0),
             #[cfg(test)]
             test_backend: Mutex::new(None),
+            #[cfg(test)]
+            test_persistent_loader: Mutex::new(None),
         }
     }
 }
@@ -1277,8 +1348,8 @@ impl SpawnManager {
 
     // ----- persistent doodads -----
 
-    /// `SpawnPersistentDoodads(ownerType, ownerId, useParentObject, doSpawn)`: the `doodads`
-    /// rows of an owner type (optionally of one `house_id`) into `PlayerDoodads`.
+    /// Compatibility entry point for startup/housing callers. Ships preload the same batch
+    /// before touching their old hull and call the synchronous publication method later.
     pub async fn spawn_persistent_doodads(
         &self,
         server: &GameServer,
@@ -1287,9 +1358,41 @@ impl SpawnManager {
         use_parent_object: Option<&WorldObject>,
         do_spawn: bool,
     ) -> anyhow::Result<usize> {
-        use crate::db::{dt, int, unix};
-        use sqlx::Row;
+        let prepared = self
+            .fetch_persistent_doodads(server, owner_type_to_spawn, owner_to_spawn_id)
+            .await?;
+        let _items = use_parent_object
+            .and_then(WorldObject::as_slave)
+            .map(|_| server.systems.economy.operation_scope());
+        let _parent_scope = use_parent_object
+            .and_then(WorldObject::as_slave)
+            .map(|_| server.systems.vehicles.slave_summons.publication_scope());
+        self.publish_persistent_doodads(server, prepared, use_parent_object, do_spawn)
+    }
 
+    pub(crate) async fn fetch_persistent_doodads(
+        &self,
+        server: &GameServer,
+        owner_type_to_spawn: u8,
+        owner_to_spawn_id: i64,
+    ) -> anyhow::Result<PersistentDoodads> {
+        use crate::db::{int, min_value};
+        use crate::systems::npcs::doodad::db::DoodadRow;
+        use sqlx::Row;
+        #[cfg(test)]
+        {
+            let loader = server
+                .systems
+                .npcs
+                .spawns
+                .test_persistent_loader
+                .lock()
+                .expect("test persistent loader poisoned")
+                .clone();
+            if let Some(loader) = loader {
+                return loader(owner_type_to_spawn, owner_to_spawn_id).await;
+            }
+        }
         let mut sql = String::from(
             "SELECT CAST(id AS SIGNED) AS id, CAST(template_id AS SIGNED) AS template_id, \
              CAST(current_phase_id AS SIGNED) AS current_phase_id, x, y, z, roll, pitch, yaw, scale, \
@@ -1310,27 +1413,110 @@ impl SpawnManager {
             q = q.bind(owner_to_spawn_id);
         }
         let rows = q.fetch_all(&server.db).await?;
+        let rows = rows
+            .into_iter()
+            .map(|r| -> anyhow::Result<DoodadRow> {
+                let float = |column: &str| -> sqlx::Result<f32> { r.try_get(column) };
+                let time = |column: &str| -> sqlx::Result<chrono::NaiveDateTime> {
+                    Ok(r.try_get::<Option<chrono::NaiveDateTime>, _>(column)?
+                        .unwrap_or_else(min_value))
+                };
+                Ok(DoodadRow {
+                    id: int(&r, "id")? as u32,
+                    owner_id: int(&r, "owner_id")? as u32,
+                    owner_type: int(&r, "owner_type")? as u8,
+                    attach_point: int(&r, "attach_point")? as u8,
+                    template_id: int(&r, "template_id")? as u32,
+                    current_phase_id: int(&r, "current_phase_id")? as u32,
+                    plant_time: time("plant_time")?,
+                    growth_time: time("growth_time")?,
+                    phase_time: time("phase_time")?,
+                    x: float("x")?,
+                    y: float("y")?,
+                    z: float("z")?,
+                    roll: float("roll")?,
+                    pitch: float("pitch")?,
+                    yaw: float("yaw")?,
+                    scale: float("scale")?,
+                    item_id: r.try_get("item_id")?,
+                    house_id: int(&r, "house_id")? as u32,
+                    parent_doodad: int(&r, "parent_doodad")? as u32,
+                    item_template_id: int(&r, "item_template_id")? as u32,
+                    item_container_id: r.try_get("item_container_id")?,
+                    data: int(&r, "data")? as i32,
+                    farm_type: int(&r, "farm_type")? as u8,
+                    interaction_counts: r
+                        .try_get::<Option<String>, _>("interaction_counts")?
+                        .unwrap_or_else(|| "{}".into()),
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        PersistentDoodads::prepare(server, rows)
+    }
+
+    /// Caller coordinates parent removal for the whole synchronous publication. The pointer
+    /// check rejects batches fetched for an earlier generation of a reused parent object id.
+    pub(crate) fn publish_persistent_doodads(
+        &self,
+        server: &GameServer,
+        prepared: PersistentDoodads,
+        use_parent_object: Option<&WorldObject>,
+        do_spawn: bool,
+    ) -> anyhow::Result<usize> {
+        use crate::db::unix;
+        use crate::systems::npcs::doodad::db::DoodadRow;
+        if let Some(parent) = use_parent_object {
+            anyhow::ensure!(
+                self.world
+                    .object(parent.obj_id())
+                    .is_some_and(|live| std::ptr::eq(live.core(), parent.core())),
+                "persistent doodad parent is no longer live"
+            );
+            if let Some(slave) = parent.as_slave() {
+                let db_id = slave.data().id;
+                anyhow::ensure!(
+                    prepared
+                        .rows
+                        .iter()
+                        .all(|d| d.row.owner_type == doodad_owner_type::SLAVE
+                            && d.row.house_id == db_id),
+                    "persistent doodad batch does not belong to this hull"
+                );
+            }
+        }
         let mut count = 0;
         let mut new_coffers = Vec::new();
-        for r in rows {
-            let template_id = int(&r, "template_id")? as u32;
-            let db_id = int(&r, "id")? as u32;
-            let f = |c: &str| -> anyhow::Result<f32> { Ok(r.try_get::<f32, _>(c)?) };
-            let (x, y, z) = (f("x")?, f("y")?, f("z")?);
-            let (roll, pitch, yaw) = (f("roll")?, f("pitch")?, f("yaw")?);
-            let scale = f("scale")?;
-            let owner_id = int(&r, "owner_id")? as u32;
-            let owner_type = int(&r, "owner_type")? as u8;
-            let attach_point = int(&r, "attach_point")? as u8;
-            let item_id: u64 = r.try_get("item_id")?;
-            let house_id = int(&r, "house_id")? as u32;
-            let parent_doodad = int(&r, "parent_doodad")? as u32;
-            let item_template_id = int(&r, "item_template_id")? as u32;
-            let item_container_id: u64 = r.try_get("item_container_id")?;
-            let data = int(&r, "data")? as i32;
-            let farm_type = int(&r, "farm_type")? as u8;
-            let phase_id = int(&r, "current_phase_id")? as u32;
-
+        for PreparedDoodad {
+            row,
+            interaction_counts,
+        } in prepared.rows
+        {
+            let DoodadRow {
+                id: db_id,
+                owner_id,
+                owner_type,
+                attach_point,
+                template_id,
+                current_phase_id: phase_id,
+                plant_time,
+                growth_time,
+                phase_time,
+                x,
+                y,
+                z,
+                roll,
+                pitch,
+                yaw,
+                scale,
+                item_id,
+                house_id,
+                parent_doodad,
+                item_template_id,
+                item_container_id,
+                data,
+                farm_type,
+                interaction_counts: _,
+            } = row;
             let Some(doodad) =
                 backend::doodad_create(server, &self.world, 0, template_id, None, true)
             else {
@@ -1346,17 +1532,14 @@ impl SpawnManager {
                 .get()
                 .and_then(|h| h.item_template_and_ucc(server, item_id))
                 .unwrap_or((item_template_id, 0));
-            let plant_time = dt(&r, "plant_time");
-            let growth_time = dt(&r, "growth_time");
-            let phase_time = dt(&r, "phase_time");
             {
                 let mut d = doodad.data();
                 d.db_id = db_id;
                 d.owner_id = owner_id;
                 d.owner_type = owner_type;
                 d.attach_point = attach_point;
-                d.plant_time = unix(plant_time);
-                d.growth_time_ms = growth_time.map_or(0, |t| t.and_utc().timestamp_millis().max(0));
+                d.plant_time = unix(Some(plant_time));
+                d.growth_time_ms = growth_time.and_utc().timestamp_millis().max(0);
                 d.item_id = item_id;
                 d.owner_db_id = house_id;
                 d.scale = if scale != 0.0 { scale } else { 1.0 };
@@ -1368,16 +1551,12 @@ impl SpawnManager {
             // `FuncGroupId = phaseId` (setter: PhaseTime = now, Save, phase caches), then
             // `OverridePhaseTime = PhaseTime = phase_time`.
             crate::systems::npcs::doodad::manager::set_func_group_id(server, &doodad, phase_id);
-            let interaction_counts = r
-                .try_get::<Option<String>, _>("interaction_counts")?
-                .map(|json| serde_json::from_str(&json))
-                .transpose()?;
             {
-                let pt = phase_time.map_or(0, |t| t.and_utc().timestamp_millis().max(0));
+                let pt = phase_time.and_utc().timestamp_millis().max(0);
                 let mut d = doodad.data();
                 d.phase.override_phase_time_ms = pt;
                 d.phase_time_ms = pt;
-                d.phase.interaction_counts = interaction_counts.unwrap_or_default();
+                d.phase.interaction_counts = interaction_counts;
             }
             let doodad_obj = WorldObject::from(&doodad);
             let mut has_parent = false;
@@ -1454,7 +1633,7 @@ impl SpawnManager {
                 }
             }
             // Slave AttachedDoodads
-            if owner_type_to_spawn == doodad_owner_type::SLAVE {
+            if owner_type == doodad_owner_type::SLAVE {
                 if let Some(slave) = use_parent_object.and_then(WorldObject::as_slave) {
                     let mut s = slave.data();
                     if !s.attached_doodads.contains(&doodad.obj_id) {

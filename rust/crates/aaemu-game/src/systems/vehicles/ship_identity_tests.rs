@@ -15,6 +15,40 @@ const SECOND_SHIP_ITEM: u32 = 23400;
 
 fn identity_data() -> GameData {
     let mut data = ship_equip_data();
+    for id in [511, 1205] {
+        data.systems
+            .vehicles
+            .model_types
+            .insert(id, (id, "ShipModel".into()));
+        data.systems.vehicles.ship_models.insert(
+            id,
+            super::super::data::ShipModel {
+                id,
+                mass: 100.0,
+                mass_box_size_x: 2.0,
+                mass_box_size_y: 6.0,
+                mass_box_size_z: 2.0,
+                ..Default::default()
+            },
+        );
+    }
+    use crate::systems::npcs::doodad::templates::{DoodadFuncGroups, DoodadTemplate};
+    data.systems.npcs.doodad.templates.insert(
+        3446,
+        DoodadTemplate {
+            id: 3446,
+            func_groups: [8264, 8265]
+                .into_iter()
+                .map(|id| DoodadFuncGroups {
+                    id,
+                    almighty: 3446,
+                    group_kind_id: if id == 8264 { 1 } else { 2 },
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        },
+    );
     data.systems
         .vehicles
         .slave_templates
@@ -184,6 +218,7 @@ fn install_memory_loader(server: &Arc<GameServer>) {
                     mp: 10,
                 }),
                 children: Vec::new(),
+                ..Default::default()
             })
         })
     })));
@@ -217,6 +252,370 @@ async fn summon(
     template: u32,
 ) -> Option<SlaveRef> {
     slaves::create_for_owner(server, owner, item_id, template, false, None, None, 0.0).await
+}
+
+fn saved_rack_row(parent: u32) -> crate::systems::npcs::doodad::db::DoodadRow {
+    crate::systems::npcs::doodad::db::DoodadRow {
+        id: 500,
+        owner_id: 1,
+        owner_type: doodad_owner_type::SLAVE,
+        attach_point: 60,
+        template_id: 3446,
+        current_phase_id: 8265,
+        plant_time: crate::db::min_value(),
+        growth_time: crate::db::min_value(),
+        phase_time: crate::db::min_value(),
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+        roll: 0.0,
+        pitch: 0.0,
+        yaw: 0.0,
+        scale: 1.0,
+        item_id: 0,
+        house_id: parent,
+        parent_doodad: 0,
+        item_template_id: 0,
+        item_container_id: 0,
+        data: 0,
+        farm_type: 0,
+        interaction_counts: "{}".into(),
+    }
+}
+
+async fn ordinary_mutation_waits_after_final_clone(destroy: bool) {
+    use crate::net::registry::ClientPacket;
+    use crate::systems::economy::inventory::{self, Inv, ItemTxn};
+    use std::sync::mpsc;
+    let server = server_with(identity_data());
+    install_memory_loader(&server);
+    let client = TestClient::new(&server, 1, 1);
+    let (owner, item_id) = owner_with_ship(&server, &client, 1, PA, SECOND_SHIP_ITEM);
+    let prior = root(&server, &owner, item_id, SHIP_HULL);
+    let (release, continuation) = mpsc::channel();
+    let continuation = Mutex::new(continuation);
+    let (entered, ready) = tokio::sync::oneshot::channel();
+    let entered = Mutex::new(Some(entered));
+    *server
+        .systems
+        .vehicles
+        .slave_summons
+        .test_after_item_validation
+        .lock()
+        .unwrap() = Some(slaves::TestPublicationHook(Arc::new(move |server| {
+        assert!(!crate::systems::economy::System::ops_held_on_this_thread());
+        // A callback may open its own normal transaction under the outer scope.
+        drop(ItemTxn::begin(server));
+        entered.lock().unwrap().take().unwrap().send(()).unwrap();
+        continuation
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+    })));
+    let creation_server = server.clone();
+    let creation_owner = owner.clone();
+    let creation = tokio::spawn(async move {
+        summon(&creation_server, &creation_owner, item_id, SECOND_SHIP_ITEM)
+            .await
+            .unwrap()
+            .obj_id
+    });
+    ready.await.unwrap();
+    let mutation_server = server.clone();
+    let mutation_owner = owner.clone();
+    let runtime = tokio::runtime::Handle::current();
+    let mutation = std::thread::spawn(move || {
+        let _runtime = runtime.enter();
+        if destroy {
+            let mut client = TestClient::new(&mutation_server, 2, 1);
+            client.conn.active_char = Some(mutation_owner);
+            futures::executor::block_on(
+                crate::systems::economy::item_handlers::CSDestroyItemPacket {
+                    item_id,
+                    slot_type: slot_type::INVENTORY,
+                    slot: 0,
+                    count: 1,
+                }
+                .handle(&mutation_server, &mut client.conn),
+            )
+            .unwrap();
+        } else {
+            let mut txn = ItemTxn::begin(&mutation_server);
+            let inv = Inv::of(&mutation_owner);
+            assert!(inventory::split_or_move_item(
+                &mut txn,
+                &inv,
+                crate::models::item_task::task_type::SWAP_ITEMS,
+                item_id,
+                slot_type::INVENTORY,
+                0,
+                0,
+                slot_type::BANK,
+                0,
+                0
+            ));
+        }
+    });
+    server.systems.economy.wait_until_operation_blocked();
+    assert_eq!(roots(&server, 1)[0].obj_id, prior.obj_id);
+    assert_eq!(
+        mates::owned_item(&server, &owner, item_id)
+            .unwrap()
+            .slot_type,
+        slot_type::INVENTORY
+    );
+    release.send(()).unwrap();
+    let published = creation.await.unwrap();
+    mutation.join().unwrap();
+    assert_ne!(published, prior.obj_id);
+    assert_eq!(roots(&server, 1)[0].obj_id, published);
+    let item = mates::owned_item(&server, &owner, item_id);
+    if destroy {
+        assert!(item.is_none());
+    } else {
+        assert_eq!(item.unwrap().slot_type, slot_type::BANK);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ordinary_destroy_waits_until_ship_publication_finishes() {
+    ordinary_mutation_waits_after_final_clone(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ordinary_bank_move_waits_until_ship_publication_finishes() {
+    ordinary_mutation_waits_after_final_clone(false).await;
+}
+
+#[tokio::test]
+async fn missing_actual_metadata_update_fails_before_prior_hull_replacement() {
+    let server = server_with(identity_data());
+    install_memory_loader(&server);
+    let mut client = TestClient::new(&server, 1, 1);
+    let (owner, item_id) = owner_with_ship(&server, &client, 1, PA, SECOND_SHIP_ITEM);
+    let prior = root(&server, &owner, item_id, SHIP_HULL);
+    let prior_state = prior.data().clone();
+    let bag = owner.data().inventory.bag().clone();
+    *server
+        .systems
+        .vehicles
+        .slave_summons
+        .test_after_item_validation
+        .lock()
+        .unwrap() = Some(slaves::TestPublicationHook(Arc::new(move |server| {
+        // Explicit limitation: unlocked quest-style writes do not enter the outer scope.
+        let mut txn = crate::systems::economy::inventory::ItemTxn::unlocked(server);
+        bag.lock()
+            .unwrap()
+            .remove_item_task(
+                crate::models::item_task::task_type::DESTROY,
+                item_id,
+                true,
+                &mut txn.env,
+            )
+            .unwrap();
+    })));
+    client.drain();
+    assert!(summon(&server, &owner, item_id, SECOND_SHIP_ITEM)
+        .await
+        .is_none());
+    assert_eq!(roots(&server, 1)[0].obj_id, prior.obj_id);
+    assert_eq!(*prior.data(), prior_state);
+    let packets = client.drain();
+    for opcode in [
+        sc::SCSlaveCreatedPacket,
+        sc::SCSlaveDespawnPacket,
+        sc::SCSlaveRemovedPacket,
+    ] {
+        assert!(!ops(&packets).contains(&opcode));
+    }
+}
+
+#[tokio::test]
+async fn panic_after_final_validation_releases_publication_and_item_reservations() {
+    let server = server_with(identity_data());
+    install_memory_loader(&server);
+    let client = TestClient::new(&server, 1, 1);
+    let (owner, item_id) = owner_with_ship(&server, &client, 1, PA, SECOND_SHIP_ITEM);
+    let prior = root(&server, &owner, item_id, SHIP_HULL);
+    *server
+        .systems
+        .vehicles
+        .slave_summons
+        .test_after_item_validation
+        .lock()
+        .unwrap() = Some(slaves::TestPublicationHook(Arc::new(|_| {
+        panic!("deliberate pre-publication panic")
+    })));
+    let task_server = server.clone();
+    let task_owner = owner.clone();
+    let task =
+        tokio::spawn(
+            async move { summon(&task_server, &task_owner, item_id, SECOND_SHIP_ITEM).await },
+        );
+    assert!(task.await.unwrap_err().is_panic());
+    assert_eq!(roots(&server, 1)[0].obj_id, prior.obj_id);
+    server
+        .systems
+        .vehicles
+        .slave_summons
+        .test_after_item_validation
+        .lock()
+        .unwrap()
+        .take();
+    let retry = summon(&server, &owner, item_id, SECOND_SHIP_ITEM)
+        .await
+        .unwrap();
+    assert_eq!(persistent_id(&retry), persistent_id(&prior));
+    assert_eq!(roots(&server, 1).len(), 1);
+}
+
+#[tokio::test]
+async fn persistent_query_then_direct_despawn_cannot_publish_orphan_racks_or_physics() {
+    use crate::net::registry::ClientPacket;
+    use crate::systems::ai::physics;
+    let mut data = identity_data();
+    data.systems.ai.ai.ship_models.insert(
+        1205,
+        crate::systems::ai::data::ShipModel {
+            id: 1205,
+            mass: 100.0,
+            mass_box_size_x: 2.0,
+            mass_box_size_y: 6.0,
+            mass_box_size_z: 2.0,
+            water_density: 1000.0,
+            ..Default::default()
+        },
+    );
+    let server = server_with(data);
+    server.systems.ai.physics.set_manual_ticks(true);
+    install_memory_loader(&server);
+    let mut client = TestClient::new(&server, 1, 1);
+    let (owner, item_id) = owner_with_ship(&server, &client, 1, PA, MERCHANT_ITEM);
+    client.conn.active_char = Some(owner.clone());
+    let prior = root(&server, &owner, item_id, MERCHANT);
+    let physics_world = server.systems.ai.physics.world(0).unwrap();
+    physics::run_world_tick(&server, &physics_world, 40);
+    assert!(physics::ship_state(&server, prior.obj_id).is_some());
+    let release = Arc::new(Semaphore::new(0));
+    let entered = Arc::new(AtomicUsize::new(0));
+    let (permits, calls, weak) = (release.clone(), entered.clone(), Arc::downgrade(&server));
+    *server
+        .systems
+        .npcs
+        .spawns
+        .test_persistent_loader
+        .lock()
+        .unwrap() = Some(Arc::new(move |_, parent| {
+        let prepared = crate::systems::npcs::spawn_manager::PersistentDoodads::prepare(
+            &weak.upgrade().unwrap(),
+            vec![saved_rack_row(parent as u32)],
+        )
+        .unwrap();
+        calls.fetch_add(1, Ordering::SeqCst);
+        let permits = permits.clone();
+        Box::pin(async move {
+            permits.acquire_owned().await.unwrap().forget();
+            Ok(prepared)
+        })
+    }));
+    client.drain();
+    let mut creation = Box::pin(summon(&server, &owner, item_id, MERCHANT_ITEM));
+    assert!(poll!(creation.as_mut()).is_pending());
+    assert_eq!(entered.load(Ordering::SeqCst), 1);
+    super::super::packets::CSDespawnSlavePacket {
+        slave_obj_id: prior.obj_id,
+    }
+    .handle(&server, &mut client.conn)
+    .await
+    .unwrap();
+    physics::run_world_tick(&server, &physics_world, 40);
+    assert!(physics::ship_state(&server, prior.obj_id).is_none());
+    release.add_permits(1);
+    assert!(creation.await.is_none());
+    physics::run_world_tick(&server, &physics_world, 40);
+    assert!(physics::ship_state(&server, prior.obj_id).is_none());
+    assert!(roots(&server, 1).is_empty());
+    assert!(server.world.world(0).unwrap().all_doodads().is_empty());
+    assert!(server
+        .systems
+        .npcs
+        .spawns
+        .get(0)
+        .unwrap()
+        .get_all_player_doodads()
+        .is_empty());
+    assert!(!ops(&client.drain()).contains(&sc::SCSlaveCreatedPacket));
+}
+
+#[tokio::test]
+async fn persistent_query_failure_preserves_prior_hull_cargo_and_emits_no_creation() {
+    let server = server_with(identity_data());
+    install_memory_loader(&server);
+    let mut client = TestClient::new(&server, 1, 1);
+    let (owner, item_id) = owner_with_ship(&server, &client, 1, PA, MERCHANT_ITEM);
+    let prior = root(&server, &owner, item_id, MERCHANT);
+    let rack = loaded_rack(&server, &prior);
+    {
+        let mut rack = rack.data();
+        rack.item_id = 0;
+        rack.item_template_id = 0;
+    }
+    let hull_before = prior.data().clone();
+    let rack_before = rack.data().clone();
+    let item_before = mates::owned_item(&server, &owner, item_id).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let queries = calls.clone();
+    *server
+        .systems
+        .npcs
+        .spawns
+        .test_persistent_loader
+        .lock()
+        .unwrap() = Some(Arc::new(move |_, _| {
+        queries.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { anyhow::bail!("deliberate persistent doodad query failure") })
+    }));
+    client.drain();
+    assert!(summon(&server, &owner, item_id, MERCHANT_ITEM)
+        .await
+        .is_none());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(*prior.data(), hull_before);
+    assert_eq!(*rack.data(), rack_before);
+    assert_eq!(
+        mates::owned_item(&server, &owner, item_id).unwrap(),
+        item_before
+    );
+    assert_eq!(roots(&server, 1)[0].obj_id, prior.obj_id);
+    assert_eq!(server.world.world(0).unwrap().all_doodads().len(), 1);
+    assert!(!ops(&client.drain()).contains(&sc::SCSlaveCreatedPacket));
+}
+
+#[tokio::test]
+async fn persistent_batch_validation_and_stale_parent_have_no_world_side_effects() {
+    use crate::systems::npcs::spawn_manager::PersistentDoodads;
+    let server = server_with(identity_data());
+    let client = TestClient::new(&server, 1, 1);
+    let (owner, item_id) = owner_with_ship(&server, &client, 1, PA, MERCHANT_ITEM);
+    let parent = root(&server, &owner, item_id, MERCHANT);
+    let row = saved_rack_row(persistent_id(&parent));
+    let mut malformed = row.clone();
+    malformed.id += 1;
+    malformed.interaction_counts = "invalid JSON".into();
+    assert!(PersistentDoodads::prepare(&server, vec![row.clone(), malformed]).is_err());
+    let prepared = PersistentDoodads::prepare(&server, vec![row]).unwrap();
+    let world = server.world.world(0).unwrap();
+    world.remove_object(parent.obj_id);
+    let replacement = Entity::new(parent.obj_id, parent.data().clone());
+    world.spawn(&replacement, &server.view_ctx());
+    let manager = server.systems.npcs.spawns.get(0).unwrap();
+    assert!(manager
+        .publish_persistent_doodads(&server, prepared, Some(&WorldObject::from(&parent)), true)
+        .is_err());
+    assert!(world.all_doodads().is_empty());
+    assert!(manager.get_all_player_doodads().is_empty());
 }
 
 #[tokio::test]
@@ -721,14 +1120,36 @@ async fn private_mysql_ship_save_fence_query_failure_retry_and_restart() {
         }
     }
     let make_server = || {
-        let mut server = test_server_with(identity_data());
+        let mut data = identity_data();
+        data.systems
+            .vehicles
+            .attach_points
+            .get_mut(&511)
+            .unwrap()
+            .push((60, WorldSpawnPosition::default()));
+        data.systems
+            .vehicles
+            .slave_templates
+            .get_mut(&SHIP_HULL)
+            .unwrap()
+            .doodad_bindings
+            .push(super::super::data::SlaveDoodadBinding {
+                id: 1,
+                owner_id: SHIP_HULL,
+                owner_type: "Slave".into(),
+                attach_point_id: 60,
+                doodad_id: 3446,
+                persist: true,
+                scale: 1.0,
+            });
+        let mut server = test_server_with(data);
         server.db = pool.clone();
         let server = Arc::new(server);
         server.set_self();
         server
     };
     let server = make_server();
-    let client = TestClient::new(&server, 1, 1);
+    let mut client = TestClient::new(&server, 1, 1);
     let (owner, item_id) = owner_with_ship(&server, &client, 1, PA, SECOND_SHIP_ITEM);
     let before = mates::owned_item(&server, &owner, item_id).unwrap();
     // A genuine SQL error must not become "no row" and allocate/publish a new identity.
@@ -773,6 +1194,56 @@ async fn private_mysql_ship_save_fence_query_failure_retry_and_restart() {
         .await
         .unwrap();
     assert_eq!(count, 1);
+    let item_before_failed_racks = mates::owned_item(&server, &owner, item_id).unwrap();
+    let hull_before_failed_racks = third.data().clone();
+    server
+        .systems
+        .npcs
+        .doodads
+        .persistence
+        .flush()
+        .await
+        .unwrap();
+    let rows_before_failed_racks: Vec<(u32, u32, u64)> =
+        sqlx::query_as("SELECT id, current_phase_id, item_id FROM doodads ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows_before_failed_racks.len(), 1);
+    client.drain();
+    // The writer was drained. Fail the persistent SELECT itself: the saved rack must survive
+    // without a replacement/default persistent row being seeded.
+    sqlx::query("ALTER TABLE doodads RENAME COLUMN interaction_counts TO unavailable_counts")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(summon(&server, &owner, item_id, SECOND_SHIP_ITEM)
+        .await
+        .is_none());
+    assert_eq!(*third.data(), hull_before_failed_racks);
+    assert_eq!(
+        mates::owned_item(&server, &owner, item_id).unwrap(),
+        item_before_failed_racks
+    );
+    assert!(!ops(&client.drain()).contains(&sc::SCSlaveCreatedPacket));
+    let rack_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM doodads")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        rack_count, 1,
+        "a failed rack query must not seed default persistent rows"
+    );
+    let rows_after_failed_racks: Vec<(u32, u32, u64)> =
+        sqlx::query_as("SELECT id, current_phase_id, item_id FROM doodads ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows_after_failed_racks, rows_before_failed_racks);
+    sqlx::query("ALTER TABLE doodads RENAME COLUMN unavailable_counts TO interaction_counts")
+        .execute(&pool)
+        .await
+        .unwrap();
     {
         let _transaction = server.save.transaction_lock().await;
         let mut tx = pool.begin().await.unwrap();

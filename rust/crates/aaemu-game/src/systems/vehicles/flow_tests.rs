@@ -143,6 +143,8 @@ fn server_with(d: GameData) -> Arc<GameServer> {
         Some(slaves::TestSlaveLoader(Arc::new(|_, _| {
             Box::pin(async { Ok(slaves::LoadedHull::default()) })
         })));
+    *s.systems.npcs.spawns.test_persistent_loader.lock().unwrap() =
+        Some(Arc::new(|_, _| Box::pin(async { Ok(Default::default()) })));
     s
 }
 
@@ -169,6 +171,7 @@ fn player_with_item(
         .unwrap()
         .clone();
     let mut item = Item::create(item_id, &t, 1, 0, 1, &server.game_data.items, 0);
+    item.owner_id = u64::from(id);
     item.slot_type = slot_type::INVENTORY;
     item.slot = 0;
     let bag = p

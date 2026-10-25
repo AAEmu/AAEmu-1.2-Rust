@@ -5,7 +5,7 @@
 //! Locking: one object data lock at a time; world calls never hold a data lock.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Mutex, Weak};
 
 use dashmap::DashMap;
 use rand::Rng;
@@ -15,7 +15,7 @@ use crate::data::world_templates::WorldSpawnPosition;
 use crate::models::container::{slot_type, ContainerRef};
 use crate::models::doodad::doodad_owner_type;
 use crate::models::item::{Item, ItemClass};
-use crate::models::item_task::task_type;
+use crate::models::item_task::{task_type, ItemTask};
 use crate::models::slave::Slave;
 use crate::models::transform::Transform;
 use crate::models::unit::{BaseUnitType, Bonus};
@@ -78,9 +78,13 @@ enum SummonKey {
 pub(crate) struct SlaveSummons {
     reservations: Mutex<HashMap<SummonKey, Weak<tokio::sync::Mutex<()>>>>,
     pub(super) departing: Mutex<HashMap<u32, u32>>,
+    /// Serializes complete synchronous hull publication/removal, including nested callbacks.
+    pub(super) publication_gate: spawn_manager::ReentrantLock,
     pending_saves: Mutex<HashMap<u64, Arc<Vec<SlaveRow>>>>,
     #[cfg(test)]
     pub(crate) test_loader: Mutex<Option<TestSlaveLoader>>,
+    #[cfg(test)]
+    pub(crate) test_after_item_validation: Mutex<Option<TestPublicationHook>>,
 }
 
 #[cfg(test)]
@@ -98,7 +102,22 @@ impl std::fmt::Debug for TestSlaveLoader {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct TestPublicationHook(pub Arc<dyn Fn(&GameServer) + Send + Sync>);
+
+#[cfg(test)]
+impl std::fmt::Debug for TestPublicationHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TestPublicationHook")
+    }
+}
+
 impl SlaveSummons {
+    pub(crate) fn publication_scope(&self) -> spawn_manager::ReentrantGuard<'_> {
+        self.publication_gate.lock()
+    }
+
     fn reservation(&self, key: SummonKey) -> Arc<tokio::sync::Mutex<()>> {
         let mut locks = self
             .reservations
@@ -117,21 +136,23 @@ impl SlaveSummons {
         &'a self,
         server: &GameServer,
         player: &PlayerRef,
-    ) -> Option<MutexGuard<'a, HashMap<u32, u32>>> {
+    ) -> Option<spawn_manager::ReentrantGuard<'a>> {
+        let publication = self.publication_gate.lock();
         let state = self.departing.lock().expect("slave departures poisoned");
         if state.get(&player.character_id) == Some(&player.conn.id)
             || !current_session(server, player)
         {
             return None;
         }
-        Some(state)
+        Some(publication)
     }
 
     pub(super) fn departure<'a>(
         &'a self,
         server: &GameServer,
         player: &PlayerRef,
-    ) -> Option<MutexGuard<'a, HashMap<u32, u32>>> {
+    ) -> Option<spawn_manager::ReentrantGuard<'a>> {
+        let publication = self.publication_gate.lock();
         let mut state = self.departing.lock().expect("slave departures poisoned");
         if !current_session(server, player)
             || state.get(&player.character_id) == Some(&player.conn.id)
@@ -139,15 +160,18 @@ impl SlaveSummons {
             return None;
         }
         state.insert(player.character_id, player.conn.id);
-        Some(state)
+        Some(publication)
     }
 
     pub(super) fn reconnect(&self, server: &GameServer, player: &PlayerRef) {
+        let _items = server.systems.economy.operation_scope();
+        let _publication = self.publication_gate.lock();
         let mut state = self.departing.lock().expect("slave departures poisoned");
         if !current_session(server, player) {
             return;
         }
         state.remove(&player.character_id);
+        drop(state);
         for (world, root) in owned_roots(server, player.character_id) {
             let (children, doodads) = {
                 let mut d = root.data();
@@ -1573,6 +1597,13 @@ fn try_delete(
     obj_id: u32,
     ignore_attached_item_warning: bool,
 ) -> bool {
+    let _items = server.systems.economy.operation_scope();
+    let _publication = server
+        .systems
+        .vehicles
+        .slave_summons
+        .publication_gate
+        .lock();
     let Some(world) = server.world.world(instance_id) else {
         return false;
     };
@@ -1837,6 +1868,7 @@ pub struct SavedChildSlave {
 pub(crate) struct LoadedHull {
     pub(crate) saved: Option<SavedSlave>,
     pub(crate) children: Vec<SavedChildSlave>,
+    pub(crate) doodads: spawn_manager::PersistentDoodads,
 }
 
 fn owned_summon_item(
@@ -2154,7 +2186,7 @@ async fn create_with_placement(
             .map(|(_, s)| s.data().summoning_item_id)
             .collect();
         flush_items.push(item.id);
-        match load_hull(server, owner_id, item, &flush_items).await {
+        match load_hull(server, world, owner_id, item, template_id, &flush_items).await {
             Ok(loaded) => loaded,
             Err(e) => {
                 tracing::error!("SlaveManager.Create({owner_id}, {}): {e}", item.id);
@@ -2164,7 +2196,29 @@ async fn create_with_placement(
     } else {
         LoadedHull::default()
     };
-    let spawned = {
+    if loaded.saved.as_ref().is_some_and(|saved| saved.id == 0) {
+        tracing::error!("Saved hull has no persistent identity");
+        return None;
+    }
+    for child in &loaded.children {
+        if child.id == 0
+            || server
+                .game_data
+                .systems
+                .vehicles
+                .slave_template(child.template_id)
+                .is_none()
+        {
+            tracing::error!(
+                "Saved slave child {} has invalid template {}",
+                child.id,
+                child.template_id
+            );
+            return None;
+        }
+    }
+    {
+        let _items = server.systems.economy.operation_scope();
         let _publication = match owner {
             Some(owner) => Some(summons.publication(server, owner)?),
             None => None,
@@ -2182,7 +2236,29 @@ async fn create_with_placement(
             }
             item = Some(fresh);
         }
+        #[cfg(test)]
+        {
+            let hook = summons
+                .test_after_item_validation
+                .lock()
+                .expect("test publication hook poisoned")
+                .clone();
+            if let Some(hook) = hook {
+                (hook.0)(server);
+            }
+        }
         if let Some(owner) = owner {
+            let current = owned_roots(server, owner_id);
+            if current.len() != prior.len()
+                || prior.iter().any(|(world, slave)| {
+                    !world
+                        .slave(slave.obj_id)
+                        .is_some_and(|live| Arc::ptr_eq(&live, slave))
+                        || !current.iter().any(|(_, live)| Arc::ptr_eq(live, slave))
+                })
+            {
+                return None;
+            }
             if placement.is_some() {
                 let template = server
                     .game_data
@@ -2200,13 +2276,35 @@ async fn create_with_placement(
             {
                 return None;
             }
-            for (w, s) in prior {
+        }
+        // Commit the actual item update before altering the prior hull. A missing or moved
+        // source (including an unlocked quest mutation) must fail at this boundary.
+        let committed = if let (Some(owner), Some(item)) = (owner, &item) {
+            let new_id = loaded.saved.is_none();
+            let db_id = match &loaded.saved {
+                Some(saved) => saved.id,
+                None => server.ids.character.get_next_id().ok()?,
+            };
+            match commit_summon_item(server, owner, item, db_id) {
+                Some(committed) => Some(committed),
+                None => {
+                    if new_id {
+                        server.ids.character.release_id(db_id);
+                    }
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(owner) = owner {
+            for (w, s) in owned_roots(server, owner_id) {
                 if !try_delete(server, Some(owner), w.id, s.obj_id, false) {
                     return None;
                 }
             }
         }
-        create_spawn(
+        let spawned = create_spawn_committed(
             server,
             world,
             owner,
@@ -2216,57 +2314,47 @@ async fn create_with_placement(
             hide_spawn_effect,
             position_override,
             loaded.saved,
-        )?
-    };
-    let db_id = spawned.slave.data().id;
-    if spawned.is_loaded {
-        // If this was a previously saved slave, load doodads from DB and spawn them
-        if let Some(sm) = spawn_manager_of(server, world.id) {
-            match sm
-                .spawn_persistent_doodads(
-                    server,
-                    doodad_owner_type::SLAVE,
-                    i64::from(db_id),
-                    Some(&WorldObject::from(&spawned.slave)),
-                    true,
-                )
-                .await
-            {
-                Ok(n) => tracing::debug!(
-                    "Loaded {n} doodads from DB for Slave {} (Db: {db_id}",
-                    spawned.slave.obj_id
-                ),
-                Err(e) => tracing::error!("SpawnPersistentDoodads (slave {db_id}): {e}"),
+            committed,
+        )?;
+        if spawned.is_loaded {
+            let manager = server.systems.npcs.spawns.get_or_create(world);
+            if let Err(error) = manager.publish_persistent_doodads(
+                server,
+                loaded.doodads,
+                Some(&WorldObject::from(&spawned.slave)),
+                true,
+            ) {
+                tracing::error!("Publish persistent slave doodads: {error}");
+                return None;
             }
         }
+        if !world
+            .slave(spawned.slave.obj_id)
+            .is_some_and(|live| Arc::ptr_eq(&live, &spawned.slave))
+        {
+            return None;
+        }
+        finish_create(
+            server,
+            world,
+            owner,
+            &spawned.slave,
+            &spawned.template,
+            item.as_ref(),
+            spawned.is_loaded,
+            loaded.children,
+        )
     }
-    // The hull was published before any departure can scan it. A delayed DB load must not
-    // finish an already removed hull (including adding it back to boat physics).
-    let _publication = summons.departing.lock().expect("slave departures poisoned");
-    if !world
-        .slave(spawned.slave.obj_id)
-        .is_some_and(|s| Arc::ptr_eq(&s, &spawned.slave))
-    {
-        return None;
-    }
-    finish_create(
-        server,
-        world,
-        owner,
-        &spawned.slave,
-        &spawned.template,
-        item.as_ref(),
-        spawned.is_loaded,
-        loaded.children,
-    )
 }
 
 async fn load_hull(
     server: &GameServer,
+    world: &Arc<WorldInstance>,
     owner_id: u32,
     item: &Item,
+    template_id: u32,
     flush_items: &[u64],
-) -> sqlx::Result<LoadedHull> {
+) -> anyhow::Result<LoadedHull> {
     #[cfg(test)]
     {
         let loader = server
@@ -2278,7 +2366,8 @@ async fn load_hull(
             .expect("test slave loader poisoned")
             .clone();
         if let Some(loader) = loader {
-            return (loader.0)(owner_id, item.id).await;
+            let loaded = (loader.0)(owner_id, item.id).await?;
+            return load_hull_doodads(server, world, loaded).await;
         }
     }
     let _transaction = server.save.transaction_lock().await;
@@ -2286,12 +2375,45 @@ async fn load_hull(
         flush_pending_save(server, item_id).await?;
     }
     server.systems.npcs.doodads.persistence.flush().await?;
-    let saved = load_saved_slave(server, owner_id, item.id, item.details.slave_db_id).await?;
+    let saved = load_saved_slave(
+        server,
+        owner_id,
+        item.id,
+        item.details.slave_db_id,
+        template_id,
+    )
+    .await?;
     let children = match &saved {
         Some(saved) => load_saved_children(server, saved.id, owner_id).await?,
         None => Vec::new(),
     };
-    Ok(LoadedHull { saved, children })
+    load_hull_doodads(
+        server,
+        world,
+        LoadedHull {
+            saved,
+            children,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+async fn load_hull_doodads(
+    server: &GameServer,
+    world: &Arc<WorldInstance>,
+    mut loaded: LoadedHull,
+) -> anyhow::Result<LoadedHull> {
+    if let Some(saved) = &loaded.saved {
+        loaded.doodads = server
+            .systems
+            .npcs
+            .spawns
+            .get_or_create(world)
+            .fetch_persistent_doodads(server, doodad_owner_type::SLAVE, i64::from(saved.id))
+            .await?;
+    }
+    Ok(loaded)
 }
 
 async fn load_saved_slave(
@@ -2299,9 +2421,10 @@ async fn load_saved_slave(
     owner_id: u32,
     item_id: u64,
     preferred_id: u32,
+    template_id: u32,
 ) -> sqlx::Result<Option<SavedSlave>> {
     let r = sqlx::query(
-        "SELECT CAST(id AS UNSIGNED) AS id, name, CAST(hp AS SIGNED) AS hp, CAST(mp AS SIGNED) AS mp \
+        "SELECT CAST(id AS UNSIGNED) AS id, CAST(template_id AS UNSIGNED) AS template_id, name, CAST(hp AS SIGNED) AS hp, CAST(mp AS SIGNED) AS mp \
          FROM slaves WHERE (owner_type = 0) AND (owner_id = ?) AND (summoner = ?) AND (item_id = ?) \
          ORDER BY (id = ?) DESC, id LIMIT 1",
     )
@@ -2312,6 +2435,11 @@ async fn load_saved_slave(
     .fetch_optional(&server.db)
     .await?;
     r.map(|r| {
+        if r.try_get::<Option<u64>, _>("template_id")? != Some(u64::from(template_id)) {
+            return Err(sqlx::Error::Protocol(
+                "saved hull does not match its summon item template".into(),
+            ));
+        }
         Ok(SavedSlave {
             id: r.try_get::<u64, _>("id")? as u32,
             name: r.try_get::<Option<String>, _>("name")?.unwrap_or_default(),
@@ -2473,6 +2601,52 @@ fn repair_seconds_left(item: &Item, now: i64) -> Option<i64> {
     (left > 0).then_some(left)
 }
 
+struct CommittedSummonItem {
+    db_id: u32,
+    task: ItemTask,
+}
+
+fn commit_summon_item(
+    server: &GameServer,
+    owner: &PlayerRef,
+    source: &Item,
+    db_id: u32,
+) -> Option<CommittedSummonItem> {
+    let result = {
+        let _ops = server.systems.economy.ops_lock();
+        super::mates::update_owned_item(server, Some(owner), source.id, |item| {
+            if item.id != source.id
+                || item.template_id != source.template_id
+                || item.owner_id != u64::from(owner.character_id)
+                || item.class != ItemClass::SummonSlave
+                || item.slot_type != slot_type::INVENTORY
+            {
+                return Err(None);
+            }
+            if let Some(left) = repair_seconds_left(item, chrono::Utc::now().timestamp()) {
+                return Err(Some(left));
+            }
+            item.details.slave_type = 0x02;
+            item.details.slave_db_id = db_id;
+            item.details.slave_repair_start_time = 0;
+            item.dirty = true;
+            Ok(super::packets::item_update(item))
+        })
+    };
+    match result {
+        Some(Ok(task)) => Some(CommittedSummonItem { db_id, task }),
+        Some(Err(Some(left))) => {
+            owner.send(crate::packets::world::SCErrorMsgPacket::new(
+                error::SLAVE_SPAWN_ERROR_NEED_REPAIR_TIME,
+                left as u32,
+                true,
+            ));
+            None
+        }
+        Some(Err(None)) | None => None,
+    }
+}
+
 /// The first half of `Create`: template, position, summon item checks, `SCSlaveCreatedPacket`,
 /// the slave itself (bonuses, HP / MP, initial items) and `Spawn()`. `saved` is the
 /// `load_saved_slave` row (owner + item only).
@@ -2487,6 +2661,33 @@ pub(crate) fn create_spawn(
     hide_spawn_effect: bool,
     position_override: Option<Transform>,
     saved: Option<SavedSlave>,
+) -> Option<Spawned> {
+    create_spawn_committed(
+        server,
+        world,
+        owner,
+        spawner,
+        template_id,
+        item,
+        hide_spawn_effect,
+        position_override,
+        saved,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_spawn_committed(
+    server: &GameServer,
+    world: &Arc<WorldInstance>,
+    owner: Option<&PlayerRef>,
+    spawner: Option<&Arc<SlaveSpawner>>,
+    template_id: u32,
+    item: Option<Item>,
+    hide_spawn_effect: bool,
+    position_override: Option<Transform>,
+    saved: Option<SavedSlave>,
+    committed: Option<CommittedSummonItem>,
 ) -> Option<Spawned> {
     let data = &server.game_data.systems.vehicles;
     let template = data
@@ -2633,44 +2834,25 @@ pub(crate) fn create_spawn(
         spawn_pos.rot_z = yaw;
     }
 
+    if let Some(committed) = &committed {
+        db_id = committed.db_id;
+    }
     // Get new Id to save if it has a player as owner
     if owner_id > 0 && db_id == 0 {
         db_id = server.ids.character.get_next_id().ok()?;
     }
 
-    // Update the summoning item
-    if let (Some(it), Some(o)) = (&item, owner) {
-        if it.class == ItemClass::SummonSlave {
-            let now = chrono::Utc::now().timestamp();
-            let res = super::mates::update_owned_item(server, Some(o), it.id, |i| {
-                if let Some(left) = repair_seconds_left(i, now) {
-                    return Err(left as f64);
-                }
-                i.details.slave_type = 0x02;
-                i.details.slave_db_id = db_id;
-                // SummonLocation (not part of the 1.2 detail bytes); RepairStartTime = MinValue
-                i.details.slave_repair_start_time = 0;
-                i.dirty = true;
-                Ok(super::packets::item_update(i))
-            });
-            match res {
-                Some(Err(left)) => {
-                    // Slave was destroyed and is on cooldown
-                    o.send(crate::packets::world::SCErrorMsgPacket::new(
-                        error::SLAVE_SPAWN_ERROR_NEED_REPAIR_TIME,
-                        left.round_ties_even() as u32,
-                        true,
-                    ));
-                    return None;
-                }
-                Some(Ok(task)) => o.send(SCItemTaskSuccessPacket {
-                    action: item_task_type::UPDATE_SUMMON_MATE_ITEM,
-                    tasks: vec![task],
-                    force_remove: Vec::new(),
-                }),
-                None => {}
-            }
-        }
+    let committed = match (committed, &item, owner) {
+        (Some(committed), _, _) => Some(committed),
+        (None, Some(item), Some(owner)) => Some(commit_summon_item(server, owner, item, db_id)?),
+        _ => None,
+    };
+    if let (Some(committed), Some(owner)) = (committed, owner) {
+        owner.send(SCItemTaskSuccessPacket {
+            action: item_task_type::UPDATE_SUMMON_MATE_ITEM,
+            tasks: vec![committed.task],
+            force_remove: Vec::new(),
+        });
     }
 
     // Create the Slave (packet)
@@ -3316,6 +3498,8 @@ pub fn do_die(
     killer: Option<&WorldObject>,
     kill_reason: KillReason,
 ) {
+    let _items = server.systems.economy.operation_scope();
+    let _publication = server.systems.vehicles.slave_summons.publication_scope();
     let obj = WorldObject::from(slave);
     crate::systems::skills::skill::interrupt_skills(server, &obj);
     crate::systems::skills::buffs::fire_unit_event(
