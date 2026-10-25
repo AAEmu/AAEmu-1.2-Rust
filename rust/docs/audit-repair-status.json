@@ -1,0 +1,370 @@
+{
+  "audit": "2026-10-25 missing-feature audit",
+  "baseline": "37e6f1aec",
+  "status": "in_progress",
+  "policy": "A finding closes only with source evidence and appropriate validation; missing native/content evidence stays explicit.",
+  "sources": [
+    "protocol-and-logs",
+    "opcode-table-gaps",
+    "items-economy",
+    "skills-combat-ai",
+    "quests-social-progression",
+    "housing-doodads",
+    "vehicles-pvp-instances",
+    "character-account-world"
+  ],
+  "items": [
+    {
+      "id": "mail-return",
+      "status": "focused_passed",
+      "owner": "audit-protocol",
+      "commit": "305664ae23d7a552f5a6db90677cabec52fe9b3c"
+    },
+    {
+      "id": "loot-error-width",
+      "status": "focused_passed",
+      "owner": "audit-protocol",
+      "commit": "305664ae23d7a552f5a6db90677cabec52fe9b3c"
+    },
+    {
+      "id": "merchant-grade",
+      "status": "merged_pending_validation",
+      "owner": "audit-economy",
+      "commit": "3de467a85f1c5aeed2efb2071030058ffeb8b29c"
+    },
+    {
+      "id": "craft-grade-flags",
+      "status": "merged_pending_validation",
+      "owner": "audit-economy",
+      "commit": "3de467a85f1c5aeed2efb2071030058ffeb8b29c"
+    },
+    {
+      "id": "web-api-authentication",
+      "status": "merged_pending_validation",
+      "owner": "audit-web",
+      "commit": "24b4699887d5350bc1a9e6f89267f98469fde8eb"
+    },
+    {
+      "id": "housing-bench-plaque-permissions",
+      "status": "merged_pending_validation",
+      "commit": "e2e9744b59d094b2ceb74c63626336664071a59f"
+    },
+    {
+      "id": "craft-bench-pack-and-required-doodad",
+      "status": "merged_pending_validation",
+      "commit": "e2e9744b59d094b2ceb74c63626336664071a59f"
+    },
+    {
+      "id": "closed-and-unknown-zones",
+      "status": "merged_pending_validation",
+      "commit": "e9a870b8c71e8e4dbf7509d7e72bbb33bcfef20a",
+      "note": "Unknown keys remain neutral; no invented safe destination. Parent corrected Doodad transform field after first compile check."
+    },
+    {
+      "id": "national-tax-rate",
+      "status": "queued"
+    },
+    {
+      "id": "vehicle-attachment-data",
+      "status": "partial_pending_rust_validation",
+      "commit": "ae83bd8f6609df3dab5943dba2420733b08c5de4",
+      "parent_native_python_tests_passed": 8,
+      "transforms_added": 87,
+      "item_summonable_templates_fixed": 14,
+      "item_summonable_templates_total": 22,
+      "open_required_points": 41,
+      "note": "Missing native assets/prefabs/helpers are explicit; no invented origin points."
+    },
+    {
+      "id": "ordinary-warning-noise-and-cleanup-cause",
+      "status": "queued"
+    },
+    {
+      "id": "slave-owned-doodad-housing-lookup",
+      "status": "queued"
+    },
+    {
+      "id": "aoe-diminishing",
+      "status": "loader_merged_runtime_open",
+      "commit": "04783cdeb438b3fefb551dbd05edb62255a11bff",
+      "note": "Native counter/reset writer is under a separate focused trace; runtime is not repaired."
+    },
+    {
+      "id": "skill-and-buff-modifiers",
+      "status": "merged_pending_validation",
+      "commit": "80303b48a224d83e88c17262ef92493b8b38f79c",
+      "open_subcases": [
+        "Vicious Implosion10710 plot580 radius",
+        "Crippling Mire10201 plot320 channel duration"
+      ]
+    },
+    {
+      "id": "buff-group-rank-and-per-caster-slots",
+      "status": "queued"
+    },
+    {
+      "id": "reflection",
+      "status": "queued"
+    },
+    {
+      "id": "attack-speed",
+      "status": "merged_pending_validation",
+      "commit": "80303b48a224d83e88c17262ef92493b8b38f79c"
+    },
+    {
+      "id": "buff-breakers",
+      "status": "draft_not_merged",
+      "commit": "0d935802542b3ef38a7114f5ccdde5ea7459f2b3",
+      "note": "Accepted-event implementation drafted; independent native timing trace pending."
+    },
+    {
+      "id": "buff-taunts",
+      "status": "queued"
+    },
+    {
+      "id": "casting-hit-delay-and-cancellation",
+      "status": "queued"
+    },
+    {
+      "id": "item-procs-and-set-procs",
+      "status": "queued"
+    },
+    {
+      "id": "shared-cooldown-tags",
+      "status": "queued"
+    },
+    {
+      "id": "xp-buff-multiplier",
+      "status": "merged_pending_validation",
+      "commit": "80303b48a224d83e88c17262ef92493b8b38f79c"
+    },
+    {
+      "id": "zone-banned-item-and-skill-tags",
+      "status": "implementing"
+    },
+    {
+      "id": "unit-and-primary-stat-limits",
+      "status": "queued"
+    },
+    {
+      "id": "prison-and-other-skill-restrictions",
+      "status": "queued"
+    },
+    {
+      "id": "damage-threat-percent-health-and-level-interpolation",
+      "status": "queued"
+    },
+    {
+      "id": "recipe-learning",
+      "status": "queued"
+    },
+    {
+      "id": "npc-groups",
+      "status": "queued"
+    },
+    {
+      "id": "npc-linked-aggro-and-missing-ai",
+      "status": "queued"
+    },
+    {
+      "id": "npc-alert-dead-events-and-friendship",
+      "status": "queued"
+    },
+    {
+      "id": "remaining-buff-attributes-and-controller-kinds",
+      "status": "queued"
+    },
+    {
+      "id": "stealth-visibility",
+      "status": "queued"
+    },
+    {
+      "id": "trade-pack-pricing-config-ratios-and-persistence",
+      "status": "queued"
+    },
+    {
+      "id": "premium-and-aa-points",
+      "status": "queued"
+    },
+    {
+      "id": "second-password-and-item-security",
+      "status": "queued"
+    },
+    {
+      "id": "item-level-gender-pickup-and-use-limits",
+      "status": "queued"
+    },
+    {
+      "id": "tempering-and-socket-data-rules",
+      "status": "queued"
+    },
+    {
+      "id": "craft-binding-and-required-grade",
+      "status": "queued"
+    },
+    {
+      "id": "mail-expiry-throttling-feedback-and-pagination",
+      "status": "queued"
+    },
+    {
+      "id": "npc-physical-enchant",
+      "status": "queued"
+    },
+    {
+      "id": "auction-filter-limits-and-authority",
+      "status": "queued"
+    },
+    {
+      "id": "missing-item-and-quest-feedback-packets",
+      "status": "queued"
+    },
+    {
+      "id": "quest-spawn-coverage",
+      "status": "queued"
+    },
+    {
+      "id": "nation-and-faction-flows",
+      "status": "queued"
+    },
+    {
+      "id": "bounty-board",
+      "status": "queued"
+    },
+    {
+      "id": "achievement-producers",
+      "status": "queued"
+    },
+    {
+      "id": "quest-and-skill-unit-requirements",
+      "status": "queued"
+    },
+    {
+      "id": "trial-jury-expedition-rename-and-quest-edge-fields",
+      "status": "queued"
+    },
+    {
+      "id": "doodad-phase-messages",
+      "status": "queued"
+    },
+    {
+      "id": "territory-statue-insert-counter",
+      "status": "queued"
+    },
+    {
+      "id": "navigation-doodad-expiry",
+      "status": "queued"
+    },
+    {
+      "id": "crest-printer-and-ucc",
+      "status": "queued"
+    },
+    {
+      "id": "house-repair-and-farm-notifications",
+      "status": "queued"
+    },
+    {
+      "id": "doodad-area-trigger-and-evidence-loot",
+      "status": "queued"
+    },
+    {
+      "id": "remaining-gathering-funcs",
+      "status": "queued"
+    },
+    {
+      "id": "puzzle-machines",
+      "status": "queued"
+    },
+    {
+      "id": "doodad-placement-surface-and-bundle-rules",
+      "status": "queued"
+    },
+    {
+      "id": "battle-pet-behavior-and-equipment",
+      "status": "queued"
+    },
+    {
+      "id": "movement-validation",
+      "status": "queued"
+    },
+    {
+      "id": "ship-handling-data",
+      "status": "queued"
+    },
+    {
+      "id": "shipyard-salvage",
+      "status": "queued"
+    },
+    {
+      "id": "instance-spawn-data",
+      "status": "queued"
+    },
+    {
+      "id": "instance-channel-and-client-driven-entry",
+      "status": "queued"
+    },
+    {
+      "id": "arena-restrictions-and-mirrored-instance-bugs",
+      "status": "queued"
+    },
+    {
+      "id": "siege-calendar-tickets-reinforcement-and-notifications",
+      "status": "queued"
+    },
+    {
+      "id": "racing",
+      "status": "queued"
+    },
+    {
+      "id": "remaining-geometry-and-physics-data",
+      "status": "queued"
+    },
+    {
+      "id": "cooldown-persistence",
+      "status": "queued"
+    },
+    {
+      "id": "disconnect-duplicate-login-and-dead-relogin",
+      "status": "queued"
+    },
+    {
+      "id": "resurrection-waits-and-server-enforcement",
+      "status": "queued"
+    },
+    {
+      "id": "name-chat-filtering-throttle-and-moderation",
+      "status": "partial_merged_pending_validation",
+      "note": "Native ASCII block-name rules implemented in7441d62; chat/throttle/moderation remain open."
+    },
+    {
+      "id": "character-recustomization",
+      "status": "queued"
+    },
+    {
+      "id": "character-slots-races-and-deletion-guards",
+      "status": "partial_merged_pending_validation",
+      "commit": "7441d62bcd2b85b89f907cf072428edad1ce1553",
+      "open_subcases": [
+        "nation/penalty/bot/transfer deletion policy",
+        "ownership transfer atomicity",
+        "delayed expiry guard recheck"
+      ]
+    },
+    {
+      "id": "event-schedule-notifications",
+      "status": "queued"
+    },
+    {
+      "id": "login-capacity-and-auth-rate-limits",
+      "status": "queued"
+    },
+    {
+      "id": "missing-buff-and-skill-controller-static-data",
+      "status": "queued"
+    },
+    {
+      "id": "deprecated-empty-or-client-only-data",
+      "status": "queued",
+      "note": "Verify before deciding no server implementation is required."
+    }
+  ]
+}

@@ -613,6 +613,18 @@ pub fn open_portal(
         tracing::error!("OpenPortal: portal {} is not in the book", effect.id);
         return None;
     };
+    let instance = owner.data().unit.transform.instance_id;
+    if !session::zone_access_allowed(
+        server,
+        owner,
+        instance,
+        portal_info.zone_id,
+        portal_info.x,
+        portal_info.y,
+    ) {
+        owner.send(SCErrorMsgPacket::new(session::CLOSED_ZONE, 0, true));
+        return None;
+    }
     if !check_can_open_portal(server, owner, portal_info.zone_id) {
         return None;
     }
@@ -852,6 +864,17 @@ pub fn use_portal_with_preference(
         tracing::warn!("UsePortal: npc {obj_id} is not a portal");
         return;
     };
+    if !session::zone_access_allowed(
+        server,
+        player,
+        teleport.instance_id,
+        teleport.zone_id,
+        teleport.x,
+        teleport.y,
+    ) {
+        player.send(SCErrorMsgPacket::new(session::CLOSED_ZONE, 0, true));
+        return;
+    }
     if only_my_portal && owner_id != player.character_id {
         player.send(SCErrorMsgPacket::new(error_message::NOT_MY_PORTAL, 0, true));
         return;
@@ -1088,6 +1111,11 @@ pub fn navi_teleport(server: &GameServer, player: &PlayerRef, obj_id: u32) {
         return;
     }
     let pos = world.world_pos_rot(&WorldObject::from(&doodad));
+    let zone_id = doodad.data().transform.zone_id;
+    if !session::zone_access_allowed(server, player, world.id, zone_id, pos.x, pos.y) {
+        player.send(SCErrorMsgPacket::new(session::CLOSED_ZONE, 0, true));
+        return;
+    }
     run_navi_func(server, &doodad, player, &func);
     player.data().set_disabled_set_position(true);
     player.send(packets::SCNaviTeleportPacket {
@@ -1188,6 +1216,10 @@ pub fn use_teleport(
         return;
     }
     if money_amount < 0 {
+        return;
+    }
+    if !session::zone_access_allowed(server, player, instance_id, dest.zone_id, dest.x, dest.y) {
+        player.send(SCErrorMsgPacket::new(session::CLOSED_ZONE, 0, true));
         return;
     }
     if money_amount > 0 {

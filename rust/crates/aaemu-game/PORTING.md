@@ -903,6 +903,14 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `CSBuySpecialtyItemPacket`, `CSReturnMailPacket` have no 1.2 opcode (0xfff): decoders exist, the
   1.2 client never sends them. The specialty / trade-pack mail delay use the C# defaults (no
   `Specialty` config section yet).
+* systems::economy (native 1.2 protocol, 2026-10-25): correction to the preceding ReturnMail
+  claim: the Return button (`read_mail.lua:946`) calls `ReturnMailById` (`3948B630` ->
+  `393CD290`), which sends opcode `0xa3` with an i64 mail id (`397BA450`). The preserved
+  opcode table misnames that slot `CSReportSpamPacket`; economy now registers ReturnMail
+  using that legacy constant, and social no longer claims it. The historical C# registry
+  fixture stays intact with an explicit native correction in its comparison test. Native
+  `SCLootItemFailedPacket` reader `397C2F00` consumes `ErrorMessage:i16`, an eight-byte
+  lootable and `type:u32` (14 bytes); the C# int error width is no longer mirrored.
 * systems::economy: the localized item names are loaded by four modules (items search, auction,
   mail, cash shop); a later cleanup can share one cache.
 * systems::services: authenticated `CSRequestCharBriefPacket` and `CSCharDetailPacket` requests
@@ -1218,6 +1226,12 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `CreatedAt` of characters created in the running session is written without the `Z` of a
   `DateTimeKind.Utc` value. The auction controllers serialise the lot's `Item` with its stored fields only
   (Id, TemplateId, Count, Grade, OwnerId, SlotType, Slot).
+* systems::services (WebApi security, 2026-10-25): unlike C#, the HTTP listener defaults to
+  loopback and rejects non-loopback binds without a configured `WebApiNetwork.ApiKey`.
+  Every route except read-only `GET /status` requires a Bearer credential, compared using
+  `subtle::ConstantTimeEq`; an absent or empty key grants no administrative access, including
+  on localhost. `Enabled: false` disables the listener. Keys and bind settings are snapshotted
+  at listener start; changes require restart. Existing tools must add the Authorization header.
 * systems::services: `TaskManager.GetQueueCount` (WebApi `/status`) only counts the tasks of
   this queue; the other subsystems run their timers as Tokio tasks.
 * systems::services: `TimedRewardsManager.DoTick` skips connections without an account (C#
