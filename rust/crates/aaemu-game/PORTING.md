@@ -1218,6 +1218,12 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `CreatedAt` of characters created in the running session is written without the `Z` of a
   `DateTimeKind.Utc` value. The auction controllers serialise the lot's `Item` with its stored fields only
   (Id, TemplateId, Count, Grade, OwnerId, SlotType, Slot).
+* systems::services (WebApi security, 2026-10-25): unlike C#, the HTTP listener defaults to
+  loopback and rejects non-loopback binds without a configured `WebApiNetwork.ApiKey`.
+  Every route except read-only `GET /status` requires a Bearer credential, compared using
+  `subtle::ConstantTimeEq`; an absent or empty key grants no administrative access, including
+  on localhost. `Enabled: false` disables the listener. Keys and bind settings are snapshotted
+  at listener start; changes require restart. Existing tools must add the Authorization header.
 * systems::services: `TaskManager.GetQueueCount` (WebApi `/status`) only counts the tasks of
   this queue; the other subsystems run their timers as Tokio tasks.
 * systems::services: `TimedRewardsManager.DoTick` skips connections without an account (C#
