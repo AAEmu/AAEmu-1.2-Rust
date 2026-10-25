@@ -168,6 +168,30 @@ Each subsystem records its status here, in its own section only (see `CONTRIBUTI
 | Movement hooks (`CSMoveUnit.RemoveEffects`, `Character.SetPosition` Move removal, fall damage) | `systems/skills/mod.rs` (`on_move_request`, `on_moved`) | done | Called from `world::session::move_unit`. |
 | `Skill.EndChanneling` target buff (`ChannelingTargetBuffId`) | `systems/skills/{skill,buffs}.rs` (`end_channeling`, `finish_effect_by_skill`) | deviation | **Deviation:** the C# `Buffs.RemoveEffect(templateId, skillId)` raised the buff's `OnTimeout` triggers on every removal; the Rust removal skips them for explicit removals (dispels, a stopped channel; see the FISH escape in `buff_removal_tests.rs`). Quest item grants hang on that trigger (GainItem on buff 3896 of skill 18449 'Extract Earth Crystal', 4 s channel under a 6 s buff, and the other channeling-target-buff quest skills of the item triage), so a channel that **runs to its end** now fires the target buff's Timeout triggers before removing it. A stopped / cancelled channel fires nothing (the C# granted the item then too). The caster-side `ChannelingBuffId` and buffs applied by skill effects (buff 1963 of 'Capture Crayfish') are unchanged: the latter expire on their own timer and fire Timeout already. |
 
+#### Raw attribute bounds and permanent pStats (2026-10-25)
+
+`systems::skills`: all 21 `unit_attribute_limits` overrides are loaded with native
+defaults of -2,000,000,000..2,000,000,000 (1.2 `39577A20`,
+`D:/aa-re/client12/decomp/x2game12.c:1178985`, `:1179175-1179181`). The consumer
+`398A0BC0` calls `395729F0` after formula, equipment and bonus arithmetic
+(`:1991333-1991338`, clamp at `:1169345-1169352`), before raw-unit conversions.
+The server preserves its existing bonus ordering and units and applies this final
+raw bound to character, NPC and vehicle calculations and direct UnitBase readers
+(XP and haste included). MoveSpeedMul starts at 1000, so its 3000 maximum means
+3x speed; ExpMul starts at 100 percentage points and has range 0..500. Limits are
+per-GameServer data shared by Arc with each unit, including detached refresh paths.
+As a numeric-safety policy, infinities saturate, NaN uses zero within the range,
+and NPC/vehicle integer bonus intermediates are widened before the final cap.
+This does not claim native parity for extreme overflow or non-finite inputs.
+
+The five `character_p_stat_limits` rows (0..10000) are loaded separately. Native
+`39752FC0` loads max/min (`:1647826-1647832`), and `3939DD10` checks proposed
+permanent pStat + delta (`:765713-765775`); they are **not final primary stat caps**.
+Character still lacks permanent pStat contribution state/persistence, and
+`world/unit_state.rs` emits six zero pStats. That feature remains open. Applying
+the table to final character attributes or to NPC/mate/slave primaries would
+invent a different rule. No storage, wire format or client/compact assets change.
+
 #### AoE diminishing compatibility policy (2026-10-25)
 
 `systems::skills`: `aoe_diminishings` loads authored float percentages by id (native 1.2

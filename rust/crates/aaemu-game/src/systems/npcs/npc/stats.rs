@@ -15,6 +15,7 @@
 
 use std::collections::HashMap;
 
+use crate::data::attribute_limits::UnitAttributeLimits;
 use crate::data::formulas::{
     FormulaManager, FormulaOwnerType, UnitFormulaKind, UnitFormulaVariableType,
 };
@@ -92,25 +93,38 @@ pub struct NpcStatCalc<'a> {
     pub template: &'a NpcTemplate,
     pub level: u8,
     pub bonuses: &'a Bonuses,
+    pub limits: &'a UnitAttributeLimits,
     pub mainhand: Option<WeaponDps>,
     pub offhand: Option<WeaponDps>,
     pub ranged: Option<WeaponDps>,
 }
 
 /// The int-getter bonus loop.
-fn apply_int(bonuses: &Bonuses, attr: UnitAttribute, mut res: i32) -> i32 {
+fn apply_int(
+    bonuses: &Bonuses,
+    limits: &UnitAttributeLimits,
+    attr: UnitAttribute,
+    res: i32,
+) -> i32 {
+    // Widen intermediates so a large stack cannot wrap before the final raw cap.
+    let mut res = f64::from(res);
     for b in bonuses.bonuses(attr) {
         if b.template.modifier_type == UnitModifierType::Percent {
-            res = res.wrapping_add((res.wrapping_mul(b.value) as f32 / 100.0) as i32);
+            res += f64::from(((res * f64::from(b.value)) as f32 / 100.0).trunc());
         } else {
-            res = res.wrapping_add(b.value);
+            res += f64::from(b.value);
         }
     }
-    res
+    limits.clamp(attr, res) as i32
 }
 
 /// The double-getter bonus loop (`DpsInc`, `RangedDpsInc`, `MDpsInc`).
-fn apply_f64(bonuses: &Bonuses, attr: UnitAttribute, mut res: f64) -> f64 {
+fn apply_f64(
+    bonuses: &Bonuses,
+    limits: &UnitAttributeLimits,
+    attr: UnitAttribute,
+    mut res: f64,
+) -> f64 {
     for b in bonuses.bonuses(attr) {
         if b.template.modifier_type == UnitModifierType::Percent {
             res += res * f64::from(b.value) / 100.0;
@@ -118,7 +132,7 @@ fn apply_f64(bonuses: &Bonuses, attr: UnitAttribute, mut res: f64) -> f64 {
             res += f64::from(b.value);
         }
     }
-    res
+    limits.clamp(attr, res)
 }
 
 /// Base attributes passed to the derived formulas.
@@ -175,7 +189,12 @@ impl NpcStatCalc<'_> {
     }
 
     fn base_attr(&self, kind: UnitFormulaKind, attr: UnitAttribute) -> i32 {
-        apply_int(self.bonuses, attr, self.eval(kind, None, false) as i32)
+        apply_int(
+            self.bonuses,
+            self.limits,
+            attr,
+            self.eval(kind, None, false) as i32,
+        )
     }
 
     fn base(&self) -> Base {
@@ -190,12 +209,17 @@ impl NpcStatCalc<'_> {
     }
 
     fn derived_int(&self, b: Base, kind: UnitFormulaKind, attr: UnitAttribute, add: i32) -> i32 {
-        let res = (self.eval(kind, Some(b), false) as i32).wrapping_add(add);
-        apply_int(self.bonuses, attr, res)
+        let res = (self.eval(kind, Some(b), false) as i32).saturating_add(add);
+        apply_int(self.bonuses, self.limits, attr, res)
     }
 
     fn derived_f64(&self, b: Base, kind: UnitFormulaKind, attr: UnitAttribute) -> i32 {
-        apply_f64(self.bonuses, attr, self.eval(kind, Some(b), false)) as i32
+        apply_f64(
+            self.bonuses,
+            self.limits,
+            attr,
+            self.eval(kind, Some(b), false),
+        ) as i32
     }
 
     /// `Dps` / `OffhandDps` / `RangedDps`: float `weapon.Dps + stat / 10f` with the bonuses,
@@ -210,7 +234,7 @@ impl NpcStatCalc<'_> {
                 res += b.value as f32;
             }
         }
-        (res * 1000.0) as i32
+        self.limits.clamp(attr, f64::from(res * 1000.0)) as i32
     }
 
     /// Every getter.
@@ -228,7 +252,7 @@ impl NpcStatCalc<'_> {
                     res += f64::from(bo.value);
                 }
             }
-            (res * 1000.0) as i32
+            self.limits.clamp(A::SpellDps, res * 1000.0) as i32
         };
         let kill_exp = if self.template.no_exp {
             0
@@ -290,6 +314,7 @@ pub fn npc_stats(gd: &GameData, npc: &Npc) -> Option<NpcStats> {
             template,
             level: npc.unit.level,
             bonuses: &npc.unit.bonuses,
+            limits: &gd.characters.unit_attribute_limits,
             mainhand: weapon(equip_slot::MAINHAND),
             offhand: weapon(equip_slot::OFFHAND),
             ranged: weapon(equip_slot::RANGED),
@@ -300,6 +325,9 @@ pub fn npc_stats(gd: &GameData, npc: &Npc) -> Option<NpcStats> {
 
 /// Caches `MaxHp`, `MaxMp` and the regen getters in `npc.unit` (shared code reads those).
 pub fn refresh_cached_stats(gd: &GameData, npc: &mut Npc) {
+    npc.unit
+        .bonuses
+        .bind_attribute_limits(&gd.characters.unit_attribute_limits);
     let Some(s) = npc_stats(gd, npc) else {
         return;
     };
@@ -384,6 +412,7 @@ pub(crate) mod tests {
             template: t,
             level,
             bonuses: b,
+            limits: &b.attribute_limits,
             mainhand: Some(WeaponDps {
                 dps: 30.5,
                 mdps: 12.25,
