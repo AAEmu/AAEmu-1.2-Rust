@@ -306,32 +306,49 @@ pub async fn delete_doodad_by_id(
     server.systems.npcs.doodads.persistence.flush().await?;
     // First grab the item related data
     let row = sqlx::query(
-        "SELECT CAST(item_id AS UNSIGNED) AS item_id, \
+        "SELECT CAST(owner_id AS UNSIGNED) AS owner_id, CAST(owner_type AS UNSIGNED) AS owner_type, \
+         CAST(template_id AS UNSIGNED) AS template_id, \
+         CAST(item_template_id AS UNSIGNED) AS item_template_id, CAST(item_id AS UNSIGNED) AS item_id, \
          CAST(item_container_id AS UNSIGNED) AS item_container_id FROM doodads WHERE id = ? LIMIT 1",
     )
     .bind(db_id)
     .fetch_optional(&mut *conn)
     .await?;
-    let (item_id, container_id) = match row {
-        Some(r) => (
-            r.try_get::<u64, _>("item_id")?,
-            r.try_get::<u64, _>("item_container_id")?,
-        ),
-        None => (0, 0),
+    let source = match row {
+        Some(r) => crate::systems::npcs::hooks::DoodadItemCleanup {
+            doodad_db_id: db_id,
+            doodad_template_id: r.try_get::<u64, _>("template_id")? as u32,
+            owner_id: r.try_get::<u64, _>("owner_id")? as u32,
+            owner_type: r.try_get::<u64, _>("owner_type")? as u8,
+            item_id: r.try_get::<u64, _>("item_id")?,
+            item_template_id: r.try_get::<u64, _>("item_template_id")? as u32,
+            container_id: r.try_get::<u64, _>("item_container_id")?,
+        },
+        None => return Ok(false),
     };
-    let n = sqlx::query("DELETE FROM doodads WHERE id = ?")
-        .bind(db_id)
-        .execute(&mut *conn)
-        .await?
-        .rows_affected();
+    // Do not clean up the selected reference if another writer replaced its owner or items.
+    let n = sqlx::query(
+        "DELETE FROM doodads WHERE id = ? AND owner_id = ? AND owner_type = ? \
+        AND template_id = ? AND item_id = ? AND item_template_id = ? AND item_container_id = ?",
+    )
+    .bind(db_id)
+    .bind(source.owner_id)
+    .bind(source.owner_type)
+    .bind(source.doodad_template_id)
+    .bind(source.item_id)
+    .bind(source.item_template_id)
+    .bind(source.container_id)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
     if n == 0 {
         tracing::error!("Failed to delete doodad from DB Id: {db_id}");
         return Ok(false);
     }
     server.ids.doodad.release_id(db_id); // Free up the Id
-    if item_id > 0 || container_id > 0 {
+    if source.item_id > 0 || source.container_id > 0 {
         if let Some(h) = server.systems.npcs.hooks.economy.get() {
-            h.release_deleted_doodad_items(server, item_id, container_id);
+            h.release_deleted_doodad_items(server, source);
         }
     }
     Ok(true)

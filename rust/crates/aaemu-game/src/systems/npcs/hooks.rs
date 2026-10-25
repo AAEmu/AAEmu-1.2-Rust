@@ -12,7 +12,15 @@
 
 use crate::server::GameServer;
 use crate::systems::HookSlot;
-use crate::world::{NpcRef, PlayerRef, WorldObject};
+use crate::world::{DoodadRef, NpcRef, PlayerRef, WorldObject};
+
+/// Result of recovering an authored vehicle cargo rack; stale repair never grants an item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CargoRecovery {
+    Failed,
+    Recovered,
+    ClearedStale(u32),
+}
 
 /// Implemented by the **skills** subsystem (`SkillManager`, `Skill.Use`, buffs, combat).
 pub trait SkillsBridge: Send + Sync {
@@ -418,6 +426,30 @@ pub trait EconomyBridge: Send + Sync {
         false
     }
 
+    /// Check the exact equipped source and vacant rack, then move and record it atomically.
+    /// The caller holds the housing operation lock before entering the economy operation.
+    fn try_store_doodad_item(
+        &self,
+        _server: &GameServer,
+        _player: &PlayerRef,
+        _doodad: &DoodadRef,
+        _source: &crate::models::item::Item,
+        _required_count: i32,
+    ) -> bool {
+        false
+    }
+
+    /// Recover vehicle cargo from System escrow, including backpack-space preflight, in one
+    /// item operation. Ordinary furniture recovery retains its separate behavior.
+    fn recover_doodad_cargo(
+        &self,
+        _server: &GameServer,
+        _player: &PlayerRef,
+        _doodad: &DoodadRef,
+    ) -> CargoRecovery {
+        CargoRecovery::Failed
+    }
+
     /// `Equipment.RemoveItem(task, item, true)` (`DoodadFuncBuyFish` / `ConvertFish`).
     fn remove_equipment_item(
         &self,
@@ -618,25 +650,34 @@ pub trait EconomyBridge: Send + Sync {
     ) {
     }
 
-    /// `Doodad.Delete()` item cleanup: `GetItemByItemId(itemId)` held by a `None` / `System`
-    /// container -> `RemoveItem(Invalid, item, true)`. Default: nothing.
-    fn remove_expired_doodad_item(&self, _server: &GameServer, _item_id: u64) {}
+    /// `Doodad.Delete()` item cleanup. The original doodad context, not a possibly recycled
+    /// item's current class, determines whether ordinary owned System escrow may be removed.
+    /// Cargo and ambiguous references are retained for reconciliation. Default: nothing.
+    fn remove_expired_doodad_item(&self, _server: &GameServer, _source: DoodadItemCleanup) {}
 
-    /// `DeleteDoodadById` item part: the attached item loses its container and its id is
-    /// released; the attached container is deleted. Default: nothing.
-    fn release_deleted_doodad_items(
-        &self,
-        _server: &GameServer,
-        _item_id: u64,
-        _container_id: u64,
-    ) {
-    }
+    /// `DeleteDoodadById` item part. Only matching ordinary owned System escrow may be removed.
+    /// Container GUIDs have no immutable link to the deleted row, so their deletion is deferred.
+    /// Default: nothing.
+    fn release_deleted_doodad_items(&self, _server: &GameServer, _source: DoodadItemCleanup) {}
 
     /// `HousingManager.GetHouseAtLocation(x, y)` (database id of the house whose land covers
     /// the point). Default: the housing subsystem.
     fn house_at_location(&self, server: &GameServer, x: f32, y: f32) -> Option<u32> {
         crate::systems::housing::house_at_location(server, x, y).map(|h| h.data().id)
     }
+}
+
+/// Original live/saved doodad metadata for item cleanup. Item and container GUIDs can be reused;
+/// this describes the source reference and does not assert an allocation-generation identity.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DoodadItemCleanup {
+    pub doodad_db_id: u32,
+    pub doodad_template_id: u32,
+    pub owner_id: u32,
+    pub owner_type: u8,
+    pub item_id: u64,
+    pub item_template_id: u32,
+    pub container_id: u64,
 }
 
 /// The item fields `CSCreateDoodadPacket` / `CreatePlayerDoodad` read.
