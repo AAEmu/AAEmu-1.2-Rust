@@ -845,6 +845,12 @@ async fn buff_breakers_started_trigger_cc_cleans_npc_controller_and_timer_paths(
 #[tokio::test]
 async fn buff_breakers_started_self_dispel_finishes_even_without_a_breaker_relation() {
     let mut d = reentrant_data();
+    // An unknown faction is attackable even against itself, so a friendly self-cure
+    // needs the same known faction as a live character.
+    d.factions.add(crate::data::world_data::SystemFaction {
+        id: 101,
+        ..Default::default()
+    });
     d.systems.skills.buff_breakers.clear();
     d.systems.skills.buff_triggers.clear();
     // Also cover the permanent/non-ticking start branch, which must not turn a deferred

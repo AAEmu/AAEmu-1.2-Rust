@@ -24,7 +24,8 @@ use super::*;
 fn fixture_data() -> GameData {
     let mut data = GameData::empty();
     data.formulas = crate::systems::vehicles::stats::tests::formulas(
-        &[(1, "100000", 14, 5), (2, "1000", 15, 5), (3, "100", 12, 5)],
+        // Character formulas use owner 0; owner 5 belongs to mates.
+        &[(1, "100000", 14, 0), (2, "1000", 15, 0), (3, "100", 12, 0)],
         &[],
     );
     for id in [3, 4] {

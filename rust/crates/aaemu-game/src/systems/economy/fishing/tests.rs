@@ -180,10 +180,7 @@ impl FishDamageFixture {
 
 #[tokio::test]
 async fn fish_creator_blocks_foreign_ordinary_siege_damage() {
-    use crate::systems::skills::packets::SCUnitDamagedPacket;
-    use crate::systems::skills::types::{CastAction, SkillCaster, SkillHitType};
     use crate::systems::skills::{buffs, types::DamageType};
-    use aaemu_commons::PacketStream;
     let mut f = FishDamageFixture::new();
     let original = f.fish.data().unit.buffs.effects[0].clone();
     assert_eq!(original.caster_obj_id, f.fish.obj_id);
@@ -212,20 +209,12 @@ async fn fish_creator_blocks_foreign_ordinary_siege_damage() {
     assert_eq!(f.fish.data().unit.skill_state.aggro_table, aggro);
     assert_eq!(f.foreign.data().unit.summarize_damage, 0);
     assert_eq!(f.fish.data().unit.buffs.effects[0], original);
-    let mut immune = SCUnitDamagedPacket::new(
-        CastAction::Skill {
-            skill_id: 91000,
-            tl_id: 0,
-        },
-        SkillCaster::Unit(f.foreign.obj_id),
-        f.foreign.obj_id,
-        f.fish.obj_id,
-        1,
-        0,
-    );
-    immune.hit_type = SkillHitType::Immune;
-    let mut expected = PacketStream::new();
-    expected.write(&immune);
+    // Native 1.2 damage reader 397C8760: skill 91000, unit caster 0x720,
+    // target 0x730, zero damage/healing, Immune flags. Immunity never reports 1 HP.
+    let expected = vec![
+        0, 120, 99, 1, 0, 0, 0, 0, 32, 7, 0, 32, 7, 0, 48, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 50,
+        1, 1, 1,
+    ];
     let frames = f.foreign_client.drain();
     assert_eq!(
         frames
@@ -240,7 +229,7 @@ async fn fish_creator_blocks_foreign_ordinary_siege_damage() {
             .find(|p| p.0 == sc::SCUnitDamagedPacket)
             .unwrap()
             .1,
-        expected.into_bytes(),
+        expected,
     );
     // A valid fishing skill tag still cannot override a different creator.
     f.damage_with_skill(&foreign, 3, Some(21196));

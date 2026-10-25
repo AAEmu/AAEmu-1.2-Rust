@@ -284,7 +284,9 @@ async fn food_glider_zero_duration_members_and_players_have_independent_groups()
         .contains_key(&UNTAGGED));
     let mut other = TestClient::new(&server, 2, 2);
     let mut c = test_character(2, "Other", 100.0, 100.0);
+    c.unit.hp = 1000;
     c.unit.mp = 100;
+    c.unit.max_mp = 1000;
     let other_player = spawn_player(&server, &other, c, 0x101);
     other.conn.active_char = Some(other_player.clone());
     other.drain();
