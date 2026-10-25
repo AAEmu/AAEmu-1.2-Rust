@@ -32,7 +32,8 @@ TERRAIN_TOL = 5.0
 CLIP = 1023.5
 NEIGHBOR_R = 40.0
 NEIGHBOR_DZ = 8.0
-DUP_R = 2.0
+DUP_R = 2.0  # among accepted 10.x entries
+MATCH_R = {"npc": 20.0, "doodad": 10.0}  # one-to-one match to existing 1.2 spawns
 
 # Doodad names that are markers or 10.x-only systems rather than world content.
 EXCLUDE_DOODAD_NAMES = [
@@ -153,6 +154,34 @@ def finish(a):
     kept = {"npc": [], "doodad": []}
     seen = {"npc": Grid(), "doodad": Grid()}  # accepted 10.x entries, to dedup among themselves
     excluded = collections.Counter()
+
+    # Filter 5: one-to-one match per template. Every 10.x candidate that passed filters 1-3 and 6
+    # (terrain not yet applied) is paired greedily, by ascending XY distance, with the nearest still
+    # unmatched existing 1.2 spawn of the same template within MATCH_R; matched candidates are the
+    # same spawn slightly moved and are dropped, only the surplus survives.
+    matched = set()
+    for kind, fname in (("npc", "npc_spawns.json"), ("doodad", "doodad_spawns.json")):
+        eg = Grid()
+        for j, (uid, x, y, z) in enumerate(load_spawn_file(os.path.join(a.world12, fname))):
+            eg.add(uid, x, y, j)
+        pairs = []
+        for i, c in enumerate(cands):
+            e = c["e"]
+            if c["kind"] != kind or not heights.get(str(i), {}).get("zone"):
+                continue
+            if kind == "doodad" and any(r.search(e.get("Title", "")) for r in EXCLUDE_DOODAD_NAMES):
+                continue
+            x, y = e["Position"]["X"], e["Position"]["Y"]
+            for n in eg.near(x, y, MATCH_R[kind]):
+                if n[0] == e["UnitId"]:
+                    pairs.append((math.hypot(n[1] - x, n[2] - y), i, n[3]))
+        pairs.sort()
+        used = set()
+        for d, i, j in pairs:
+            if i not in matched and j not in used:
+                matched.add(i)
+                used.add(j)
+
     for i, c in enumerate(cands):
         kind, e = c["kind"], c["e"]
         s = stats[kind]
@@ -167,6 +196,9 @@ def finish(a):
             s["f6 excluded doodad name"] += 1
             excluded[title] += 1
             continue
+        if i in matched:
+            s["f5 one-to-one match to existing 1.2 spawn"] += 1
+            continue
         ok = False
         if "h" in h:
             if h["h"] >= CLIP:
@@ -178,10 +210,8 @@ def finish(a):
         if not ok:
             s["f4 terrain / neighbour"] += 1
             continue
-        if any(n[0] == uid for n in grids[kind].near(x, y, DUP_R)) or any(
-            n[0] == uid for n in seen[kind].near(x, y, DUP_R)
-        ):
-            s["f5 duplicate within 2 m"] += 1
+        if any(n[0] == uid for n in seen[kind].near(x, y, DUP_R)):
+            s["f5b duplicate of another 10.x entry within 2 m"] += 1
             continue
         seen[kind].add(uid, x, y, z)
         kept[kind].append((entry(c), h["zone"]))
@@ -196,6 +226,16 @@ def finish(a):
         print(kind, dict(stats[kind]))
         top = collections.Counter((r["UnitId"], r["Title"]) for r, _ in kept[kind]).most_common(20)
         print(f"top {kind} templates:", top)
+    for kind, fname in (("npc", "npc_spawns.json"), ("doodad", "doodad_spawns.json")):
+        by = collections.defaultdict(list)
+        for uid, x, y, _z in load_spawn_file(os.path.join(a.world12, fname)):
+            by[uid].append((x, y))
+        hist = collections.Counter()
+        for r, _ in kept[kind]:
+            px, py = r["Position"]["X"], r["Position"]["Y"]
+            d = min((math.hypot(px - x, py - y) for x, y in by.get(r["UnitId"], ())), default=None)
+            hist["none" if d is None else "<5" if d < 5 else "<15" if d < 15 else "<50" if d < 50 else ">=50"] += 1
+        print(f"{kind} survivors by nearest same-template 1.2 spawn:", dict(hist))
     print("excluded doodad names:", dict(excluded))
     # Iron Vein per zone group before / after
     zg = db["zone_group"]
