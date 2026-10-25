@@ -402,6 +402,40 @@ Cross-subsystem: mates are despawned on dungeon entry and `PlayerCanEnter` check
 | `BaseUnit.GetDistanceTo` for shipyard targets (skill range check, `Skill.cs` `max_range`) | `systems/skills/geometry.rs` (`distance_to`), `systems/vehicles/shipyards.rs` (`shipyard_radius`) | deviation | **Deviation:** the C# measured skill range to the shipyard's center point (shipyard models are prefab models without an actor radius, so `ModelSize` was 0), which made the shipyard build skills (`min_range 0`, `max_range 4`) unusable anywhere but the exact center of a drydock ("Target is too far"). The Rust subtracts the shipyard template's `build_radius * Scale`, like the house `GardenRadius` rule. |
 | Mate / slave / transfer / shipyard C2G and G2C packets | `systems/vehicles/packets.rs` | done | 18 C->S, 16 S->C (byte-exact tests). `CSChangeSlaveTargetPacket` has no 1.2 opcode (0xfff). |
 | Hooks / physics | `systems/vehicles/{hooks,ship_physics}.rs` | done | `VehicleItemHooks` (`EndCraft`, economy). Ship physics and water call `systems::ai::physics` directly (`AddShip` / `RemoveShip`, helm request, driver seat, `GetWaterSurface` / `IsWater`); `ShipPhysicsHooks` (harpoon lines / tension / lifetime, `Throttle` / `Steering` after a move) and the radar ship lists are installed here. The npcs / social hooks call the mate / slave / dismount functions directly. |
+#### Summon replacement and retained cargo (2026-10-25)
+
+Player summons use root-only owner lookup across worlds and serialize requests by
+owner and persistent summon item. Session/departure generations and allocation
+identity are checked again after loading. Saved hull, child and doodad rows load
+before replacement; query failures, item-update failures, loaded-hull removal
+refusal and invalid explicit placement stop without replacing the prior hull.
+Invalid placement now refuses rather than falling back to another position.
+
+The final synchronous publication boundary coordinates ordinary item operations,
+direct despawn and current-session identity. Loaded cargo receipts are checked
+against the exact live hull/rack allocation and unique matching System escrow
+before metadata changes or deletion. This rejects a stale loaded row fetched
+before its original pack was recovered. Different inactive saved hulls can still
+restore legitimate cargo belonging to another player. The existing 600-second
+offline retention and delayed portal rendering remain intentional.
+
+The per-server item outer scope is thread-bound and reentrant; the inner economy
+ops mutex remains nonreentrant. Callback-bearing paths acquire the outer scope
+before existing auction/housing/spawn locks; callbacks retain their normal
+placement outside ops/object guards. No synchronous guard spans an await.
+Guardless quest item operations and direct writes bypassing coordinated APIs
+remain explicit limits, rather than a claim of global lock freedom.
+
+The read-only `/slave audit` command reports registered and retained allocations,
+pending task leases, item identities and rack observations with bounded replies.
+It explicitly returns `consistent:false` and `authority_consistent:false`: queue,
+HP, world-removal and temporal phase/transform observations do not share a global
+snapshot boundary. Normalized, filtered headless control captures supplement these
+observations; they do not establish native UI behavior or original compressed wire
+bytes. Deterministic flow tests cover the concurrency cases separately. The
+combined source has passed independent reviews and all-target compilation;
+combined executable tests, final lane CI and live acceptance remain pending.
+
 ### systems::services
 
 | Area (C#) | Rust | Status | Notes |

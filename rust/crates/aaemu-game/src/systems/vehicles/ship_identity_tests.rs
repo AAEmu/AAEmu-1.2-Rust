@@ -672,7 +672,7 @@ fn original_pack(server: &GameServer, owner: &PlayerRef, slot: u8) -> u64 {
     );
     let container = Inv::of(owner).get(slot).unwrap();
     let position = if slot == slot_type::EQUIPMENT {
-        i32::from(crate::models::container::equip_slot::BACKPACK)
+        crate::models::container::equip_slot::BACKPACK
     } else {
         -1
     };

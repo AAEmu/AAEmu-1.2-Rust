@@ -386,9 +386,10 @@
     },
     {
       "id": "trade-ship-live-root-identity-after-reconnect",
-      "status": "implementing",
+      "status": "source_reviewed_merged_pending_execution",
       "owner": "audit-ship-session",
-      "note": "Source proves failed loaded-hull deletion can be ignored by summon; root lookup includes child cannons. Async session/identity invariants under repair."
+      "note": "Three source review rounds clean after item publication, query-error/orphan, callback spawn-lock ordering and stale cargo receipt fixes. Combined compilation passes; new executable tests and live acceptance pending. Intentional600s retention remains. Guardless/direct-write limitations explicit.",
+      "commit": "54f98af143f8458175dc76ffe9afad132ec3b680"
     },
     {
       "id": "lane-allocation-concurrency",
@@ -396,6 +397,18 @@
       "owner": "audit-lane-lock",
       "note": "15 isolated root Python tests passed; original allocator fails concurrent allocation. Two real concurrent probe lanes received distinct prefixes and were removed. Windows/Linux workflow now runs the suite.",
       "commit": "090f515b6"
+    },
+    {
+      "id": "headless-control-reconnect-test-interface",
+      "status": "source_reviewed_merged_pending_execution",
+      "commit": "0d8e410d3dc20d88dce2b593c3fbdc7672897cb1",
+      "note": "Three source review rounds clean; bounded filtered/normalized events, exact character reconnect and socket/deadline handling. Executable validation pending."
+    },
+    {
+      "id": "ship-identity-observational-diagnostics",
+      "status": "source_reviewed_merged_pending_execution",
+      "commit": "6a406e5da2d319bc61cc073e761d4d3c08a005d9",
+      "note": "Source review findings closed; both consistency flags remain false. Supporting observations only, not a globally atomic authority proof."
     }
   ],
   "recent_validation": {
@@ -412,8 +425,8 @@
       "result": "held_at_memory_reserve_before_completion",
       "minimum_free_gib": 5.938747406005859
     },
-    "current_full_lane_ci": "pending_after_remaining_source_integration",
-    "current_live": "pending",
+    "current_full_lane_ci": "pending_after_focused_checks",
+    "current_live": "pending_source_gate_and_reviewed_release",
     "game_unit_tests": {
       "head": "7ac9af6eb3b7d0b511310d7865dc10a1f6bf2712",
       "passed": 2833,
@@ -463,6 +476,28 @@
       "compact_checks": 10,
       "private_mysql_checks": 6,
       "scope": "Explicit ignored tests; private 3317 lane_audit_final_game uses connection-local temporary tables. Includes Merchant twenty-rack cycles and both cargo persistence/allocator-reuse fixtures."
+    },
+    "combined_compilation": {
+      "head": "243953bdab1c077a93e02e71948f24ac03d5744a",
+      "result": "passed_game_and_testclient_all_targets",
+      "native_exit": 0,
+      "minimum_free_gib": 9.208076477050781,
+      "elapsed_seconds": 133.625
+    },
+    "combined_clippy": {
+      "head": "243953bdab1c077a93e02e71948f24ac03d5744a",
+      "result": "failed_two_test_helper_lints",
+      "findings": [
+        "audit receipt comparison allocation",
+        "redundant i32 backpack-index conversion"
+      ],
+      "correction": "corrected in current candidate; rerun pending"
+    },
+    "combined_seam_review": {
+      "head": "243953bdab1c077a93e02e71948f24ac03d5744a",
+      "tree": "742610fc88eec28566af33df34aae9086870d2c2",
+      "result": "no_new_concrete_P1_P2_within_declared_source_scope",
+      "execution": "none"
     }
   }
 }

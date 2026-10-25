@@ -592,7 +592,8 @@ fn reassemble(lines: &[String]) -> Option<Value> {
         return None;
     }
     let value: Value = serde_json::from_slice(&bytes).ok()?;
-    if value["nonce"] != end[1] || value["sample_sequence"].to_string() != end[2] {
+    let sequence: u64 = serde_json::from_str(end[2]).ok()?;
+    if value["nonce"] != end[1] || value["sample_sequence"].as_u64()? != sequence {
         return None;
     }
     Some(value)
