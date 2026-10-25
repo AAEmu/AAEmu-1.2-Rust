@@ -2177,6 +2177,7 @@ async fn private_mysql_quest_mail_auction_rollback_retry_and_reconnect() {
             crate::data::character_templates::CharacterTemplate {
                 race: 1,
                 gender: 1,
+                creatable: true,
                 ..Default::default()
             },
         );
