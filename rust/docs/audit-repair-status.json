@@ -46,9 +46,9 @@
     },
     {
       "id": "housing-bench-plaque-permissions",
-      "status": "merged_pending_validation",
+      "status": "unit_and_data_passed_full_gate_pending",
       "commit": "e2e9744b59d094b2ceb74c63626336664071a59f",
-      "note": "New flow fixtures corrected to initialize Construction19; strict200LP assertions awaiting rerun."
+      "note": "Construction19 fixtures corrected; full game unit suite and ignored compact plaque-pack checks pass at7ac."
     },
     {
       "id": "craft-bench-pack-and-required-doodad",
@@ -379,9 +379,9 @@
     },
     {
       "id": "trade-ship-cargo-reference-atomicity",
-      "status": "source_reviewed_merged_pending_validation",
+      "status": "unit_and_data_passed_full_gate_pending",
       "owner": "audit-tradeship",
-      "note": "Exact equipped-source deposit and checked recovery are integrated. Original-reference cleanup protects foreign/recycled items; ambiguous cargo and saved containers are conservatively retained. Allocation-generation proof and reconciliation/GC remain open. Cargo tests, ignored MySQL/compact checks and live acceptance are pending.",
+      "note": "Reviewed cargo source8c plus root fixture-ID correction7ac pass game unit suite, native Merchant all20rack cycles, private MySQL saved-alias and recycled-GUID cases. Reconnect identity repair is separate and still under review. Conservative cargo/container retention and reconciliation/GC limits remain.",
       "commit": "8c2e977b5ba6b7660e4739964465e0b1e97b9d7b"
     },
     {
@@ -412,19 +412,16 @@
       "result": "held_at_memory_reserve_before_completion",
       "minimum_free_gib": 5.938747406005859
     },
-    "current_full_lane_ci": "pending",
+    "current_full_lane_ci": "pending_after_remaining_source_integration",
     "current_live": "pending",
     "game_unit_tests": {
-      "head": "1f53a66bdd0ab289ae2a26abbbaff084cddfcaff",
-      "passed": 2813,
-      "failed": 6,
-      "ignored": 145,
-      "result": "completed_with_fixture_failures",
-      "fixture_corrections": [
-        "395386180",
-        "5dfd7282b"
-      ],
-      "corrected_execution": "pending; subsequent builds held at memory reserve before tests ran"
+      "head": "7ac9af6eb3b7d0b511310d7865dc10a1f6bf2712",
+      "passed": 2833,
+      "failed": 0,
+      "ignored": 148,
+      "result": "passed",
+      "minimum_free_gib": 7.448451995849609,
+      "source_unchanged": true
     },
     "latest_corrected_builds": {
       "head": "5dfd7282b71ec84655b44b861b24991502dd5ff2",
@@ -453,10 +450,19 @@
       "database_scope": "private 3317 lane_audit_final_game; connection-local temporary tables"
     },
     "remote_checks": {
-      "head": "5dfd7282b71ec84655b44b861b24991502dd5ff2",
+      "head": "7ac9af6eb3b7d0b511310d7865dc10a1f6bf2712",
       "passed": 12,
       "failed": 0,
-      "scope": "draft PR46 before cargo integration"
+      "scope": "Draft PR46 Windows/Linux build/tests/Clippy plus coverage, formatting, packet checks and other configured jobs."
+    },
+    "selected_ignored_current_checks": {
+      "head": "7ac9af6eb3b7d0b511310d7865dc10a1f6bf2712",
+      "binary_sha256": "fbb66fed5ca0f4c21ce8ac222e175be332f870ab266a82e3ffec09d76d227f68",
+      "passed": 16,
+      "failed": 0,
+      "compact_checks": 10,
+      "private_mysql_checks": 6,
+      "scope": "Explicit ignored tests; private 3317 lane_audit_final_game uses connection-local temporary tables. Includes Merchant twenty-rack cycles and both cargo persistence/allocator-reuse fixtures."
     }
   }
 }

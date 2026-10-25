@@ -309,8 +309,10 @@ items. Metadata matching does not establish allocation generation. Cargo and
 ambiguous item references, plus saved containers, may be retained after the last
 rack disappears; reconciliation and orphan collection remain open. Regression
 sources cover shuffled twenty-rack cycles, stale sources, failed recovery,
-allocator reuse and private-MySQL saved aliases. Source review is complete;
-exact-head execution and live reconnect acceptance are still pending.
+allocator reuse and private-MySQL saved aliases. At `7ac9af6eb`, the game unit suite,
+real-compact twenty-rack cycles and both private-MySQL cargo fixtures pass. Local
+combined-source CI and live reconnect acceptance remain pending; the asynchronous
+hull identity repair requires separate review and validation.
 
 ### systems::social
 
