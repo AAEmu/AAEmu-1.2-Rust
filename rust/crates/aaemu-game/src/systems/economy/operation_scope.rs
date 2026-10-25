@@ -1,5 +1,13 @@
 //! Synchronous operation boundary around callback-bearing world/item changes. The inner
 //! economy ops mutex stays non-reentrant; only this outer scope permits same-thread entry.
+//!
+//! Acquire this scope before callback-bearing manager/publication locks. Financial capture
+//! keeps its existing auction -> housing -> authority order inside the scope, followed by
+//! ops -> object/container leaf locks (at most one object data guard). Mutation callbacks
+//! run after ops/object guards drop and may then enter ItemTxn again on the same thread.
+//! Snapshot-only manager locks which never wait for an item operation need no scope.
+//! ItemTxn::unlocked remains guardless: callers under a character lock must not acquire
+//! this scope to compensate.
 
 use std::marker::PhantomData;
 use std::rc::Rc;

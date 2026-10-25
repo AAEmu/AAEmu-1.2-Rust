@@ -656,7 +656,8 @@ pub fn end_craft(server: &GameServer, player: &PlayerRef) {
     }
 
     // Keep the permission check and product/material commit together with house transfers
-    // and permission changes. Economy transactions are acquired after this housing lock.
+    // and permission changes. Enter the item scope before housing; ItemTxn follows it.
+    let _items = server.systems.economy.operation_scope();
     let housing_bench = server
         .world
         .object(state.doodad_id)

@@ -213,6 +213,7 @@ pub fn recover_item(
     let Some(player) = DoodadCtx::as_player(caster) else {
         return;
     };
+    let _items = ctx.server.systems.economy.operation_scope();
     let _operation = ctx
         .server
         .systems
@@ -514,6 +515,7 @@ pub fn consume_changer(
     let Some(player) = DoodadCtx::as_player(caster) else {
         return;
     };
+    let _items = ctx.server.systems.economy.operation_scope();
     let _operation = ctx
         .server
         .systems

@@ -1090,6 +1090,7 @@ pub fn pay_weekly_tax_for(server: &GameServer, house: &HouseRef, payer_id: Optio
 
 /// `CheckHousingTaxes()` (the `HousingTaxTask`, every 10 s).
 pub fn check_housing_taxes(server: &GameServer) {
+    let _items = server.systems.economy.operation_scope();
     let manager = &server.systems.housing.manager;
     if manager.checking_tax.swap(true, Ordering::SeqCst) {
         return;
@@ -1392,6 +1393,7 @@ pub fn reconcile_bound_doodads(server: &GameServer) -> (usize, usize) {
 
 /// `RemoveDeadHouse(house)` (`House.OnDeath`).
 pub fn remove_dead_house(server: &GameServer, house: &HouseRef) {
+    let _items = server.systems.economy.operation_scope();
     let _operation = server
         .systems
         .housing

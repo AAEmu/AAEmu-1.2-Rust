@@ -126,6 +126,7 @@ fn participation(
         );
         return Ok(());
     };
+    let _items = server.systems.economy.operation_scope();
     let _operation = server
         .systems
         .housing
@@ -309,6 +310,7 @@ impl Command for Dominion {
             CommandManager::send_default_help_text(self, out);
             return Ok(());
         };
+        let _items = server.systems.economy.operation_scope();
         let _operation = server
             .systems
             .housing

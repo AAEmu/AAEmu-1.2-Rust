@@ -390,6 +390,7 @@ pub fn complete_effect(server: &GameServer, args: &EffectArgs<'_>) {
     ) else {
         return;
     };
+    let _items = server.systems.economy.operation_scope();
     let _operation = server
         .systems
         .housing
@@ -565,6 +566,7 @@ pub fn handle_tower_death(server: &GameServer, victim: &WorldObject) -> bool {
     let Some((zone, identity)) = tower_identity(server, house) else {
         return false;
     };
+    let _items = server.systems.economy.operation_scope();
     let _operation = server
         .systems
         .housing
@@ -726,6 +728,7 @@ pub fn start_tick(server: &Arc<GameServer>) {
                 }
             }
             {
+                let _items = server.systems.economy.operation_scope();
                 let _operation = server
                     .systems
                     .housing

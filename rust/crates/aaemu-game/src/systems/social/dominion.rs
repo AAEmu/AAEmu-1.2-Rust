@@ -373,6 +373,7 @@ pub(crate) fn is_expedition_leader(
 
 /// Match the original native IsDominionOwner gate and its inclusive 0..50 slider.
 pub fn update_tax_rate(server: &GameServer, player: &PlayerRef, zone: u16, tax_rate: i32) {
+    let _items = server.systems.economy.operation_scope();
     let _operation = server
         .systems
         .housing
@@ -445,6 +446,7 @@ pub fn declare_effect(server: &GameServer, args: &EffectArgs<'_>) {
     {
         return;
     }
+    let _items = server.systems.economy.operation_scope();
     let operation = server
         .systems
         .housing
