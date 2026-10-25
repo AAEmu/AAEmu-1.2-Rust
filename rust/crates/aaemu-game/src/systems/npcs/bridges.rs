@@ -1117,7 +1117,10 @@ impl crate::systems::economy::hooks::NpcEconomyHooks for NpcsForEconomy {
         })
     }
 
-    fn merchant_sells(&self, server: &GameServer, pack_id: u32, item_id: u32) -> bool {
+    fn merchant_sells(&self, server: &GameServer, pack_id: u32, item_id: u32, grade: u8) -> bool {
+        let Some(template) = server.game_data.items.template(item_id) else {
+            return false;
+        };
         server
             .game_data
             .systems
@@ -1125,7 +1128,7 @@ impl crate::systems::economy::hooks::NpcEconomyHooks for NpcsForEconomy {
             .npc
             .goods
             .get(&pack_id)
-            .is_some_and(|g| g.sells_item(item_id))
+            .is_some_and(|g| g.sells_item_at_grade(template, grade))
     }
 
     fn specialty_coin_id(&self, server: &GameServer, npc: &NpcRef) -> u32 {

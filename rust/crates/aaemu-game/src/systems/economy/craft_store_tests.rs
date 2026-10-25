@@ -16,7 +16,9 @@ use crate::opcodes::sc;
 use crate::packets::world::SCErrorMsgPacket;
 use crate::server::GameServer;
 use crate::systems::economy::craft::{self, CSExecuteCraft, CraftHooks, SCCraftFailedPacket};
-use crate::systems::economy::craft_data::{Craft, CraftMaterial, CraftProduct, CraftSkill};
+use crate::systems::economy::craft_data::{
+    Craft, CraftData, CraftMaterial, CraftProduct, CraftSkill,
+};
 use crate::systems::economy::hooks::{NpcEconomyHooks, NpcShopInfo};
 use crate::systems::economy::inventory::Inv;
 use crate::systems::economy::item_packets::{
@@ -570,6 +572,123 @@ fn execute_craft(w: &mut World, craft_id: u32, count: i32) {
     run::<CSExecuteCraft>(w, 0, s.as_bytes());
 }
 
+fn load_craft_sql(rows: &str) -> CraftData {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE crafts (id, cast_delay, tool_id, skill_id, wi_id, milestone_id,
+            req_doodad_id, need_bind, ac_id, actability_limit, show_upper_crafts,
+            recommend_level, visible_order);
+        INSERT INTO crafts VALUES (1, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        CREATE TABLE craft_products (id, craft_id, item_id, amount, rate,
+            show_lower_crafts, use_grade, item_grade_id);
+        CREATE TABLE craft_materials (id, craft_id, item_id, amount, main_grade);
+        CREATE TABLE craft_pack_crafts (craft_id);
+        CREATE TABLE skills (id, consume_lp, actability_group_id, cooldown_time);
+        INSERT INTO skills VALUES (10, 5, 0, 0);",
+    )
+    .unwrap();
+    conn.execute_batch(rows).unwrap();
+    let files =
+        crate::data::client_files::ClientFileManager::from_sources(&[], std::path::Path::new("."));
+    CraftData::load(&crate::systems::DataLoadCtx {
+        conn: &conn,
+        app_path: std::path::Path::new("."),
+        files: &files,
+        language: "en_us",
+    })
+    .unwrap()
+}
+
+#[test]
+fn craft_grade_flags_load_sqlite_text() {
+    // Native 1.2 LoadCraftProductDescs / LoadCraftMaterialDescs (0x3982E6C0 / 0x3982E4D0)
+    // read the text flags, not sqlite3_column_int('t') == 0.
+    let d = load_craft_sql(
+        "INSERT INTO craft_products VALUES
+            (1, 1, 5000, 1, 100, 'f', 't', 3),
+            (2, 1, 5000, 1, 100, 'f', 'f', 0),
+            (3, 1, 5000, 1, 100, 'f', 1, 2),
+            (4, 1, 5000, 1, 100, 'f', 0, 0),
+            (5, 1, 5000, 1, 100, 'f', NULL, 0);
+        INSERT INTO craft_materials VALUES
+            (1, 1, 1000, 1, 'f'), (2, 1, 7000, 1, 't'),
+            (3, 1, 1000, 1, 0), (4, 1, 7000, 1, 1), (5, 1, 1000, 1, NULL);",
+    );
+    let c = d.craft(CRAFT).unwrap();
+    assert_eq!(
+        c.craft_products
+            .iter()
+            .map(|p| (p.use_grade, p.item_grade_id))
+            .collect::<Vec<_>>(),
+        vec![(true, 3), (false, 0), (true, 2), (false, 0), (false, 0)]
+    );
+    assert_eq!(
+        c.craft_materials
+            .iter()
+            .map(|m| m.main_grade)
+            .collect::<Vec<_>>(),
+        vec![false, true, false, true, false]
+    );
+}
+
+#[tokio::test]
+async fn craft_loaded_grade_recipes_create_expected_inventory() {
+    for (use_grade, main_grade, material, product_grade, fixed_grade, gradable, expected) in [
+        ("t", "f", STACK, 3, -1, true, 3),
+        ("f", "t", SWORD, 0, -1, true, 4),
+        // Keep the 1.2 equipment-material heuristic when the main_grade flag is unset.
+        ("f", "f", SWORD, 0, -1, true, 4),
+        ("t", "f", STACK, 3, 2, false, 2),
+        ("f", "f", STACK, 0, -1, true, 0),
+    ] {
+        let mut d = data();
+        d.systems.economy.craft = load_craft_sql(&format!(
+            "INSERT INTO craft_products VALUES (1, 1, {PRODUCT}, 1, 100, 'f', '{use_grade}', {product_grade});
+            INSERT INTO craft_materials VALUES (1, 1, {material}, 1, '{main_grade}');"
+        ));
+        let recipe = d.systems.economy.craft.craft(CRAFT).unwrap();
+        assert_eq!(recipe.craft_products[0].use_grade, use_grade == "t");
+        assert_eq!(recipe.craft_materials[0].main_grade, main_grade == "t");
+        let t = d.items.templates.get_mut(&PRODUCT).unwrap();
+        t.fixed_grade = fixed_grade;
+        t.gradable = gradable;
+        d.items.grades.insert(
+            4,
+            crate::data::items::GradeTemplate {
+                grade: 4,
+                grade_order: 4,
+                durability: 1.0,
+            },
+        );
+        let mut w = world_with_data(d);
+        let rec = install_craft_hooks(&w);
+        let pa = w.pa.clone();
+        pa.data().labor_power = 100;
+        let id = give(&w, &pa, slot_type::INVENTORY, material, 1, 0);
+        Inv::of(&pa)
+            .bag()
+            .lock()
+            .unwrap()
+            .get_item_by_id_mut(id)
+            .unwrap()
+            .grade = 4;
+        execute_craft(&mut w, CRAFT, 1);
+        assert_eq!(rec.casts.lock().unwrap().len(), 1);
+        craft::end_craft(&w.server, &pa);
+        let inv = Inv::of(&pa);
+        assert_eq!(inv.items_count(material, -1), 0);
+        let bag = inv.bag();
+        let bag = bag.lock().unwrap();
+        assert_eq!(bag.items.len(), 1);
+        let product = &bag.items[0];
+        assert_eq!(
+            (product.template_id, product.count, product.grade),
+            (PRODUCT, 1, expected)
+        );
+        assert_eq!(*rec.crafted.lock().unwrap(), vec![CRAFT]);
+    }
+}
+
 #[tokio::test]
 async fn craft_batch_consumes_materials_adds_products_and_reschedules() {
     let mut w = world();
@@ -878,8 +997,8 @@ impl NpcEconomyHooks for Shops {
         })
     }
 
-    fn merchant_sells(&self, _server: &GameServer, pack_id: u32, item_id: u32) -> bool {
-        pack_id == 7 && item_id == STACK
+    fn merchant_sells(&self, _server: &GameServer, pack_id: u32, item_id: u32, grade: u8) -> bool {
+        pack_id == 7 && item_id == STACK && grade == 0
     }
 }
 
@@ -901,6 +1020,144 @@ fn buy_body(npc: u32, buy: &[(u32, i32, u8)], buy_back: &[i32]) -> Vec<u8> {
     }
     s.write_bool(false);
     s.into_bytes()
+}
+
+fn catalog_world(mut d: GameData, stock: &[(u32, u8)]) -> World {
+    let mut goods = crate::systems::npcs::npc::data::MerchantGoods {
+        id: 7,
+        items: Vec::new(),
+    };
+    for &(item, grade) in stock {
+        goods.add_item_to_stock(item, grade);
+    }
+    d.systems.npcs.npc.goods.insert(7, goods);
+    d.systems.npcs.npc.templates.insert(
+        1234,
+        crate::systems::npcs::npc::data::NpcTemplate {
+            id: 1234,
+            merchant: true,
+            merchant_pack_id: 7,
+            ..Default::default()
+        },
+    );
+    let mut w = world_with_data(d);
+    // Use the real NPC catalog bridge, including its native fixed-grade normalization.
+    crate::systems::npcs::bridges::install_economy(&w.server);
+    spawn_npc(&mut w, MERCHANT_NPC, 1234, 101.0);
+    w
+}
+
+async fn buy_grade(w: &mut World, item_id: u32, grade: u8, count: i32, currency: u8) {
+    use crate::net::registry::ClientPacket;
+    CSBuyItemsPacket {
+        npc_obj_id: MERCHANT_NPC,
+        doodad_obj_id: 0,
+        unk_id: 0,
+        buy: vec![BuyEntry {
+            item_id,
+            grade,
+            count,
+            currency,
+        }],
+        buy_back: Vec::new(),
+        use_aa_point: false,
+    }
+    .handle(&w.server, &mut w.a.conn)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn shop_catalog_grades_create_distinct_paid_inventory() {
+    let mut d = data();
+    d.items.templates.get_mut(&STACK).unwrap().gradable = true;
+    let sword = d.items.templates.get_mut(&SWORD).unwrap();
+    sword.gradable = true;
+    sword.fixed_grade = -1;
+    sword.honor_price = 9;
+    let mut w = catalog_world(d, &[(STACK, 0), (STACK, 4), (STACK, 11), (SWORD, 4)]);
+    w.pa.data().money = 1000;
+    w.pa.data().honor_point = 100;
+    give(&w, &w.pa, slot_type::INVENTORY, STACK, 5, 0);
+    buy_grade(&mut w, STACK, 4, 2, shop_currency_type::MONEY).await;
+    buy_grade(&mut w, STACK, 11, 1, shop_currency_type::MONEY).await;
+    buy_grade(&mut w, SWORD, 4, 1, shop_currency_type::HONOR).await;
+    buy_grade(&mut w, STACK, 0, 1, shop_currency_type::MONEY).await;
+    let inv = Inv::of(&w.pa);
+    assert_eq!(inv.items_count(STACK, 0), 6);
+    assert_eq!(inv.items_count(STACK, 4), 2);
+    assert_eq!(inv.items_count(STACK, 11), 1);
+    assert_eq!(inv.items_count(SWORD, 4), 1);
+    let c = w.pa.data();
+    assert_eq!((c.money, c.honor_point, c.vocation_point), (960, 91, 0));
+}
+
+#[tokio::test]
+async fn shop_catalog_grades_reject_unlisted_grade_without_charge() {
+    for currency in [shop_currency_type::MONEY, shop_currency_type::HONOR] {
+        for grade in [0, 11] {
+            let mut d = data();
+            d.items.templates.get_mut(&STACK).unwrap().gradable = true;
+            let mut w = catalog_world(d, &[(STACK, 4)]);
+            w.pa.data().money = 1000;
+            w.pa.data().honor_point = 100;
+            buy_grade(&mut w, STACK, grade, 1, currency).await;
+            assert!(Inv::of(&w.pa).bag().lock().unwrap().items.is_empty());
+            let c = w.pa.data();
+            assert_eq!((c.money, c.honor_point), (1000, 100));
+        }
+    }
+}
+
+#[tokio::test]
+async fn shop_catalog_grades_respect_fixed_and_basic_templates() {
+    // Stock grade zero is basic for gradable gear; it is not "any grade" or "use default".
+    // Fixed grades are sent after normalization by native 1.2 sub_397CD260.
+    for (stock, fixed, gradable, requested, accepted) in [
+        (0, -1, true, 0, true),
+        (0, -1, true, 11, false),
+        (0, 2, false, 2, true),
+        (0, 2, false, 0, false),
+        (4, 2, false, 2, true),
+        (4, 2, false, 4, false),
+        (0, 2, true, 2, true),
+        (0, 2, true, 0, false),
+        (4, -1, false, 0, true),
+        (4, -1, false, 4, false),
+    ] {
+        let mut d = data();
+        let t = d.items.templates.get_mut(&STACK).unwrap();
+        t.fixed_grade = fixed;
+        t.gradable = gradable;
+        let mut w = catalog_world(d, &[(STACK, stock)]);
+        w.pa.data().money = 100;
+        buy_grade(&mut w, STACK, requested, 1, shop_currency_type::MONEY).await;
+        assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), i32::from(accepted));
+        assert_eq!(w.pa.data().money, if accepted { 90 } else { 100 });
+        if accepted {
+            assert_eq!(
+                item_at(&w.pa, slot_type::INVENTORY, 0).unwrap().grade,
+                requested
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn shop_catalog_grades_full_bag_rolls_back() {
+    let mut d = data();
+    d.items.templates.get_mut(&STACK).unwrap().gradable = true;
+    let mut w = catalog_world(d, &[(STACK, 0), (STACK, 4)]);
+    w.pa.data().honor_point = 100;
+    let bag = Inv::of(&w.pa).bag();
+    bag.lock().unwrap().set_container_size(1);
+    give(&w, &w.pa, slot_type::INVENTORY, STACK, 5, 0);
+    let before = bag.lock().unwrap().items.clone();
+    // A partial basic stack cannot take a higher-grade purchase.
+    buy_grade(&mut w, STACK, 4, 1, shop_currency_type::HONOR).await;
+    assert_eq!(bag.lock().unwrap().items, before);
+    assert_eq!(w.pa.data().honor_point, 100);
+    assert!(w.a.drain().is_empty());
 }
 
 #[tokio::test]
@@ -1661,6 +1918,24 @@ fn real_compact_db_craft_and_store_tables() {
     assert_eq!(products, 6938 - 10);
     assert_eq!(materials, 23475 - 54);
     assert_eq!(craft.crafts.values().filter(|c| c.is_pack).count(), 2153);
+    assert_eq!(
+        craft
+            .crafts
+            .values()
+            .flat_map(|c| &c.craft_products)
+            .filter(|p| p.use_grade)
+            .count(),
+        356
+    );
+    assert_eq!(
+        craft
+            .crafts
+            .values()
+            .flat_map(|c| &c.craft_materials)
+            .filter(|m| m.main_grade)
+            .count(),
+        101
+    );
     // The 't'/'f' columns read through GetBoolean(column) are all false.
     assert!(craft
         .crafts
