@@ -588,7 +588,7 @@ async fn expiry_failed_return_does_not_publish_owner_or_success_then_retries() {
     assert!(w.a.drain().is_empty() && w.b.drain().is_empty());
     mutate_item(&w.server, ids[0], |i| *i = item);
     let target = mail_container(&w.pa).unwrap();
-    target.lock().unwrap().size = 1;
+    target.lock().unwrap().set_container_size(1);
     // First attachment moves, second cannot fit. The original row and every item's
     // ownership must survive rollback before a later retry can publish the return.
     tick(&w.server, due);
@@ -600,7 +600,7 @@ async fn expiry_failed_return_does_not_publish_owner_or_success_then_retries() {
         assert_eq!(w.server.items.item_by_id(item).unwrap().owner_id, 2);
     }
     assert!(w.a.drain().is_empty() && w.b.drain().is_empty());
-    target.lock().unwrap().size = -1;
+    target.lock().unwrap().set_container_size(-1);
     tick(&w.server, due);
     assert_eq!(
         w.server

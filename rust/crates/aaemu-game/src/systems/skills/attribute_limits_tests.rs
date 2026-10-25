@@ -105,8 +105,10 @@ async fn attribute_limits_equipment_and_stacked_buff_flow_caps_only_final_value(
     );
 
     let t = server.game_data.items.template(ITEM).unwrap();
-    let mut item = Item::create(42, t, 1, 0, p.character_id, &server.game_data.items, 0);
+    let mut item = Item::create(42, t, 1, 0, 0, &server.game_data.items, 0);
     item.class = t.class_type();
+    item.owner_id = u64::from(p.character_id);
+    item.slot_type = crate::models::container::slot_type::EQUIPMENT;
     item.slot = equip_slot::MAINHAND;
     p.data()
         .inventory
