@@ -103,6 +103,35 @@ pub fn chance_succeeds(chance: i32) -> bool {
     chance > 0 && (chance >= 100 || rand::thread_rng().gen_range(0..100) < chance)
 }
 
+/// Plot-specific context is explicit so resets and sibling damage invocations refer to
+/// the originating plot instance, even when its SkillRun or caster has another active plot.
+pub(super) fn apply_plot(
+    server: &GameServer,
+    kind: EffectKind,
+    template: &EffectTemplate,
+    args: &EffectArgs<'_>,
+    plot: &super::plots::PlotState,
+    aoe_diminishing: bool,
+) {
+    match template {
+        EffectTemplate::Damage(t) => {
+            let multiplier = args
+                .target
+                .as_obj()
+                .filter(|target| aoe_diminishing && target.is_unit())
+                .map(|target| {
+                    plot.aoe_damage_multiplier(
+                        &server.game_data.systems.skills.plots.aoe_diminishings,
+                        target.obj_id(),
+                    )
+                });
+            combat::damage_with_aoe(server, t, args, None, multiplier);
+        }
+        EffectTemplate::ResetAoeDiminishing { .. } => plot.reset_aoe_diminishing(),
+        _ => apply(server, kind, template, args, None),
+    }
+}
+
 /// `EffectTemplate.Apply` dispatch.
 pub fn apply(
     server: &GameServer,
@@ -124,6 +153,7 @@ pub fn apply(
         T::Aggro(t) => combat::aggro(server, t, args),
         T::Special(t) => special::apply(server, t, args),
         T::FlyingStateChange { .. } => combat::flying_state_change(server, template, args),
+        // A reset has meaning only with its originating plot's context (`apply_plot`).
         T::ResetAoeDiminishing { .. } => {}
         T::SkillController(t) => combat::skill_controller(server, t, args),
         T::Bubble { id, kind_id } => unit_fx::bubble(server, *id, *kind_id, args),
