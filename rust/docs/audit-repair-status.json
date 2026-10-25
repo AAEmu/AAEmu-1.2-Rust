@@ -85,7 +85,9 @@
     },
     {
       "id": "aoe-diminishing",
-      "status": "implementing"
+      "status": "loader_merged_runtime_open",
+      "commit": "04783cdeb438b3fefb551dbd05edb62255a11bff",
+      "note": "Native counter/reset writer is under a separate focused trace; runtime is not repaired."
     },
     {
       "id": "skill-and-buff-modifiers",
@@ -111,7 +113,9 @@
     },
     {
       "id": "buff-breakers",
-      "status": "implementing"
+      "status": "draft_not_merged",
+      "commit": "0d935802542b3ef38a7114f5ccdde5ea7459f2b3",
+      "note": "Accepted-event implementation drafted; independent native timing trace pending."
     },
     {
       "id": "buff-taunts",
@@ -136,7 +140,7 @@
     },
     {
       "id": "zone-banned-item-and-skill-tags",
-      "status": "queued"
+      "status": "implementing"
     },
     {
       "id": "unit-and-primary-stat-limits",
@@ -328,7 +332,8 @@
     },
     {
       "id": "name-chat-filtering-throttle-and-moderation",
-      "status": "queued"
+      "status": "partial_merged_pending_validation",
+      "note": "Native ASCII block-name rules implemented in7441d62; chat/throttle/moderation remain open."
     },
     {
       "id": "character-recustomization",
@@ -336,7 +341,13 @@
     },
     {
       "id": "character-slots-races-and-deletion-guards",
-      "status": "implementing"
+      "status": "partial_merged_pending_validation",
+      "commit": "7441d62bcd2b85b89f907cf072428edad1ce1553",
+      "open_subcases": [
+        "nation/penalty/bot/transfer deletion policy",
+        "ownership transfer atomicity",
+        "delayed expiry guard recheck"
+      ]
     },
     {
       "id": "event-schedule-notifications",
