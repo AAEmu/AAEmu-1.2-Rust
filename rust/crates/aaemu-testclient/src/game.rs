@@ -268,6 +268,10 @@ pub struct GameState {
     pub selected_char: u32,
     pub self_obj: u32,
     pub self_pos: (f32, f32, f32),
+    /// Last position actually received from the server, independent of local movement sends.
+    pub observed_self_pos: Option<(f32, f32, f32)>,
+    pub observation_seq: u64,
+    pub observation_errors: u64,
     pub units: HashMap<u32, UnitInfo>,
     /// Doodads announced by `SCDoodad(s)CreatedPacket` and not removed since.
     pub doodads: HashMap<u32, DoodadInfo>,
@@ -297,6 +301,7 @@ pub struct GameState {
 impl GameState {
     /// Updates the state from a packet.
     pub fn observe(&mut self, p: &Packet) -> anyhow::Result<()> {
+        self.observation_seq += 1;
         if let Some(ev) = crate::social::decode(p) {
             self.social.push(ev);
         }
@@ -357,6 +362,7 @@ impl GameState {
             if unit_type == 0 && id == st.selected_char && id != 0 {
                 st.self_obj = obj_id;
                 st.self_pos = pos;
+                st.observed_self_pos = Some(pos);
             }
             st.units.insert(
                 obj_id,
@@ -380,6 +386,9 @@ impl GameState {
                     s.read_u8()?;
                 }
                 let pos = s.read_position()?;
+                if obj_id == st.self_obj {
+                    st.observed_self_pos = Some(pos);
+                }
                 if let Some(u) = st.units.get_mut(&obj_id) {
                     u.pos = pos;
                 }
@@ -391,6 +400,7 @@ impl GameState {
             let pos = s.read_position()?;
             st.last_teleport = Some(pos);
             st.self_pos = pos;
+            st.observed_self_pos = Some(pos);
         } else if p.is_sc(sc::SCDoodadCreatedPacket) {
             let d = read_doodad(&mut s)?;
             st.doodads.insert(d.obj_id, d);
@@ -462,8 +472,9 @@ impl GameState {
 }
 
 pub struct GameClient {
-    writer: FramedWrite<OwnedWriteHalf, FrameCodec>,
-    rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    writer: Option<FramedWrite<OwnedWriteHalf, FrameCodec>>,
+    reader: SocketReader,
+    rx: mpsc::Receiver<Vec<u8>>,
     rec: Recorder,
     count: u8,
     pub account_id: u32,
@@ -475,6 +486,26 @@ pub struct GameClient {
     started: Instant,
 }
 
+/// Aborting a client (including a cancelled connection attempt) must release the read half.
+struct SocketReader(Option<tokio::task::JoinHandle<()>>);
+
+impl SocketReader {
+    async fn close(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for SocketReader {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
+}
+
 impl GameClient {
     pub async fn connect(addr: &str, rec: Recorder) -> anyhow::Result<Self> {
         let sock = TcpStream::connect(addr)
@@ -482,13 +513,13 @@ impl GameClient {
             .with_context(|| format!("connecting to game server {addr}"))?;
         sock.set_nodelay(true)?;
         let (rd, wr) = sock.into_split();
-        let (tx, rx) = mpsc::unbounded_channel();
-        tokio::spawn(async move {
+        let (tx, rx) = mpsc::channel(256);
+        let reader = tokio::spawn(async move {
             let mut reader = FramedRead::new(rd, FrameCodec);
             loop {
                 match reader.next().await {
                     Some(Ok(frame)) => {
-                        if tx.send(frame).is_err() {
+                        if tx.send(frame).await.is_err() {
                             break;
                         }
                     }
@@ -504,7 +535,8 @@ impl GameClient {
             }
         });
         Ok(Self {
-            writer: FramedWrite::new(wr, FrameCodec),
+            writer: Some(FramedWrite::new(wr, FrameCodec)),
+            reader: SocketReader(Some(reader)),
             rx,
             rec,
             count: 0,
@@ -519,6 +551,19 @@ impl GameClient {
 
     pub fn recorder(&self) -> &Recorder {
         &self.rec
+    }
+
+    /// Close both game socket halves, without sending `CSLeaveWorldPacket`.
+    /// Awaiting the aborted reader confirms that its socket half was dropped.
+    pub async fn disconnect_hard(mut self) {
+        drop(self.writer.take());
+        self.reader.close().await;
+        // Preserve frames the reader had already delivered before it was stopped.
+        while let Ok(frame) = self.rx.try_recv() {
+            let _ = self.decode(frame);
+        }
+        self.rx.close();
+        self.state.disconnected = true;
     }
 
     /// Sends a level-1 (`CS*`) packet.
@@ -536,7 +581,11 @@ impl GameClient {
         self.count = self.count.wrapping_add(1);
         p.extend_from_slice(&opcode.to_le_bytes());
         p.extend_from_slice(body);
-        self.writer.send(p).await?;
+        self.writer
+            .as_mut()
+            .context("game writer closed")?
+            .send(p)
+            .await?;
         Ok(())
     }
 
@@ -554,7 +603,11 @@ impl GameClient {
         p.extend_from_slice(&[0xDD, LEVEL_PROXY]);
         p.extend_from_slice(&opcode.to_le_bytes());
         p.extend_from_slice(body);
-        self.writer.send(p).await?;
+        self.writer
+            .as_mut()
+            .context("game writer closed")?
+            .send(p)
+            .await?;
         Ok(())
     }
 
@@ -608,6 +661,7 @@ impl GameClient {
         self.rec
             .push(Channel::Game, Dir::S2C, level, opcode, p.name(), &p.body);
         if let Err(e) = self.observe(&p) {
+            self.state.observation_errors += 1;
             tracing::debug!("could not parse {}: {e}", p.name());
         }
         Ok(p)
@@ -1117,6 +1171,75 @@ impl GameClient {
                     .then(dist2(a.pos, me).total_cmp(&dist2(b.pos, me)))
             })
             .cloned()
+    }
+}
+
+#[cfg(test)]
+mod socket_reader_tests {
+    use super::SocketReader;
+    use tokio::sync::oneshot;
+
+    struct OnDrop(Option<oneshot::Sender<()>>);
+
+    impl Drop for OnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.take().unwrap().send(());
+        }
+    }
+
+    async fn reader() -> (SocketReader, oneshot::Receiver<()>) {
+        let (started, ready) = oneshot::channel();
+        let (stopped, done) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _resource = OnDrop(Some(stopped));
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        });
+        ready.await.unwrap();
+        (SocketReader(Some(task)), done)
+    }
+
+    #[tokio::test]
+    async fn explicit_close_and_cancelled_owner_release_reader_resources() {
+        let (mut task, stopped) = reader().await;
+        task.close().await;
+        assert!(stopped.await.is_ok());
+        task.close().await;
+
+        let (task, stopped) = reader().await;
+        drop(task);
+        assert!(stopped.await.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod observed_position_tests {
+    use super::*;
+
+    #[test]
+    fn server_observation_does_not_report_a_locally_predicted_position() {
+        let mut state = GameState {
+            self_obj: 42,
+            self_pos: (900.0, 900.0, 900.0),
+            ..GameState::default()
+        };
+        assert_eq!(state.observed_self_pos, None);
+        let mut body = PacketStream::new();
+        body.write_bc(42)
+            .write_u8(1)
+            .write_u32(123)
+            .write_u8(0)
+            .write_position(10.0, 20.0, 30.0);
+        state
+            .observe(&Packet {
+                level: LEVEL_GAME,
+                opcode: sc::SCOneUnitMovementPacket,
+                body: body.as_bytes().to_vec(),
+            })
+            .unwrap();
+        assert_eq!(state.observed_self_pos, Some((10.0, 20.0, 30.0)));
+        assert_eq!(state.self_pos, (900.0, 900.0, 900.0));
+        assert_eq!(state.observation_seq, 1);
     }
 }
 

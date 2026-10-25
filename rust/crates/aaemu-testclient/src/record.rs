@@ -50,6 +50,38 @@ struct Inner {
     step: String,
     events: Vec<Event>,
     enabled: bool,
+    live: Option<LiveCapture>,
+}
+
+/// Control mode drains this bounded queue to stdout; ordinary recorders still keep a Vec.
+const MAX_PENDING_EVENTS: usize = 2048;
+const MAX_PENDING_BYTES: usize = 8 * 1024 * 1024;
+
+struct LiveCapture {
+    sink: Box<dyn Write + Send>,
+    pending: Vec<Event>,
+    pending_bytes: usize,
+    failed: bool,
+    game_ready: bool,
+}
+
+impl std::fmt::Debug for LiveCapture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveCapture")
+            .field("pending", &self.pending.len())
+            .field("failed", &self.failed)
+            .finish_non_exhaustive()
+    }
+}
+
+fn public_game_event(channel: Channel, dir: Dir, level: u8, opcode: u16) -> bool {
+    use aaemu_game::opcodes::{cs, sc};
+    channel == Channel::Game
+        && !(level == 1
+            && match dir {
+                Dir::C2S => opcode == cs::X2EnterWorldPacket,
+                Dir::S2C => opcode == sc::X2EnterWorldResponsePacket,
+            })
 }
 
 /// Shared, cheaply cloneable capture buffer.
@@ -69,7 +101,64 @@ impl Recorder {
             step: "connect".into(),
             events: Vec::new(),
             enabled,
+            live: None,
         })))
+    }
+
+    /// Incremental, game-only capture for control mode. Refuses to overwrite evidence.
+    /// Login/stream authentication and game cookie/token packets are never retained here.
+    /// Unlike `new`, this recorder does not retain the entire run in memory.
+    pub fn incremental_game(path: &Path) -> anyhow::Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        Ok(Self::with_live_sink(Box::new(std::io::BufWriter::new(
+            file,
+        ))))
+    }
+
+    fn with_live_sink(sink: Box<dyn Write + Send>) -> Self {
+        let rec = Self::new(true);
+        rec.inner().live = Some(LiveCapture {
+            sink,
+            pending: Vec::new(),
+            pending_bytes: 0,
+            failed: false,
+            game_ready: false,
+        });
+        rec
+    }
+
+    /// Omit the authentication/lobby burst, including any compressed token-bearing frames.
+    /// Select/spawn and all subsequent gameplay remain available to the controller.
+    pub fn control_game_ready(&self, ready: bool) {
+        if let Some(live) = self.inner().live.as_mut() {
+            live.game_ready = ready;
+        }
+    }
+
+    /// Drain independent game events, after checking for capture/queue failures.
+    pub fn take_live_events(&self) -> anyhow::Result<Vec<Event>> {
+        let mut i = self.inner();
+        let live = i
+            .live
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("not a live recorder"))?;
+        anyhow::ensure!(!live.failed, "incremental capture failed or queue exceeded");
+        live.pending_bytes = 0;
+        Ok(std::mem::take(&mut live.pending))
+    }
+
+    pub fn flush_live(&self) -> anyhow::Result<()> {
+        if let Some(live) = self.inner().live.as_mut() {
+            anyhow::ensure!(!live.failed, "incremental capture failed or queue exceeded");
+            if live.sink.flush().is_err() {
+                live.failed = true;
+                anyhow::bail!("incremental capture flush failed");
+            }
+        }
+        Ok(())
     }
 
     fn inner(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -98,6 +187,12 @@ impl Recorder {
         if !i.enabled {
             return;
         }
+        if i.live
+            .as_ref()
+            .is_some_and(|live| !live.game_ready || !public_game_event(channel, dir, level, opcode))
+        {
+            return;
+        }
         let ev = Event {
             t_ms: i.start.elapsed().as_millis() as u64,
             channel,
@@ -108,7 +203,29 @@ impl Recorder {
             step: i.step.clone(),
             body: hex::encode(body),
         };
-        i.events.push(ev);
+        if let Some(live) = i.live.as_mut() {
+            if live.failed {
+                return;
+            }
+            let result = (|| -> anyhow::Result<()> {
+                let mut line = serde_json::to_vec(&ev)?;
+                line.push(b'\n');
+                anyhow::ensure!(
+                    live.pending.len() < MAX_PENDING_EVENTS
+                        && line.len() <= MAX_PENDING_BYTES.saturating_sub(live.pending_bytes),
+                    "live event queue exceeded"
+                );
+                live.sink.write_all(&line)?;
+                // A hard socket close or process kill must preserve earlier accepted frames.
+                live.sink.flush()?;
+                live.pending_bytes += line.len();
+                live.pending.push(ev);
+                Ok(())
+            })();
+            live.failed = result.is_err();
+        } else {
+            i.events.push(ev);
+        }
     }
 
     pub fn events(&self) -> Vec<Event> {
@@ -133,4 +250,115 @@ pub fn load(path: &Path) -> anyhow::Result<Vec<Event>> {
         .filter(|l| !l.trim().is_empty())
         .map(|l| Ok(serde_json::from_str(l)?))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aaemu_game::opcodes::{cs, sc};
+
+    #[derive(Default)]
+    struct Written {
+        bytes: Vec<u8>,
+        flushes: usize,
+        fail_flush: bool,
+    }
+
+    #[derive(Clone, Default)]
+    struct Sink(Arc<Mutex<Written>>);
+
+    impl Write for Sink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            let mut written = self.0.lock().unwrap();
+            written.flushes += 1;
+            if written.fail_flush {
+                return Err(std::io::Error::other("injected flush failure"));
+            }
+            Ok(())
+        }
+    }
+
+    fn push(rec: &Recorder) {
+        rec.push(
+            Channel::Game,
+            Dir::S2C,
+            1,
+            sc::SCErrorMsgPacket,
+            "SCErrorMsgPacket",
+            &[7, 0],
+        );
+    }
+
+    #[test]
+    fn live_capture_flushes_before_drain_and_omits_all_authentication_channels() {
+        let sink = Sink::default();
+        let rec = Recorder::with_live_sink(Box::new(sink.clone()));
+        rec.push(
+            Channel::Game,
+            Dir::S2C,
+            4,
+            1,
+            "CompressedGamePackets",
+            b"lobby-token",
+        );
+        assert!(sink.0.lock().unwrap().bytes.is_empty());
+        rec.control_game_ready(true);
+        for (channel, dir, opcode) in [
+            (Channel::Login, Dir::C2S, 4),
+            (Channel::Stream, Dir::C2S, 1),
+            (Channel::Game, Dir::C2S, cs::X2EnterWorldPacket),
+            (Channel::Game, Dir::S2C, sc::X2EnterWorldResponsePacket),
+        ] {
+            rec.push(channel, dir, 1, opcode, "auth", b"private");
+        }
+        push(&rec);
+        let persisted = sink.0.lock().unwrap();
+        assert_eq!(persisted.flushes, 1);
+        let event: Event = serde_json::from_slice(&persisted.bytes).unwrap();
+        assert_eq!(event.body_bytes(), [7, 0]);
+        drop(persisted);
+        assert_eq!(rec.take_live_events().unwrap(), vec![event]);
+        assert!(rec.take_live_events().unwrap().is_empty());
+        assert!(
+            rec.events().is_empty(),
+            "control must not retain the whole run"
+        );
+        rec.control_game_ready(false);
+        push(&rec);
+        assert_eq!(sink.0.lock().unwrap().flushes, 1);
+    }
+
+    #[test]
+    fn queue_or_sink_failure_is_observable_and_never_silently_resumes() {
+        let sink = Sink::default();
+        let rec = Recorder::with_live_sink(Box::new(sink.clone()));
+        rec.control_game_ready(true);
+        sink.0.lock().unwrap().fail_flush = true;
+        push(&rec);
+        assert!(rec.take_live_events().is_err());
+        sink.0.lock().unwrap().fail_flush = false;
+        assert!(rec.flush_live().is_err());
+
+        let rec = Recorder::with_live_sink(Box::new(Sink::default()));
+        rec.control_game_ready(true);
+        for _ in 0..=MAX_PENDING_EVENTS {
+            push(&rec);
+        }
+        assert!(rec.take_live_events().is_err());
+    }
+
+    #[test]
+    fn ordinary_recorders_still_buffer_every_channel() {
+        let rec = Recorder::new(true);
+        rec.push(Channel::Login, Dir::C2S, 0, 4, "auth", b"ticket");
+        rec.push(Channel::Stream, Dir::C2S, 0, 1, "join", b"token");
+        push(&rec);
+        assert_eq!(rec.events().len(), 3);
+        assert_eq!(rec.events()[0].body_bytes(), b"ticket");
+    }
 }

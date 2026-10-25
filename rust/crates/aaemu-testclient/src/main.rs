@@ -14,6 +14,9 @@
 //!                         [--scenario load]
 //! aaemu-testclient verify --suite file.vtest [--login H:P] [--password P] [--list-bots]
 //!                         Run one live verification suite (see Docs/wiki/Verification.md).
+//! aaemu-testclient control --describe
+//! aaemu-testclient control --config private.json --login H:P --capture game.jsonl
+//!                          [--deadline-ms 570000]
 //! ```
 //!
 //! Settings come from `--config` (JSON, see `testclient.example.json`), then the flags. Keep
@@ -31,6 +34,8 @@ use aaemu_testclient::verify;
 use anyhow::{bail, Context};
 use tracing_subscriber::EnvFilter;
 
+mod control;
+
 struct Args {
     cmd: String,
     flags: HashMap<String, String>,
@@ -38,7 +43,7 @@ struct Args {
 
 impl Args {
     fn parse() -> anyhow::Result<Self> {
-        const SWITCHES: &[&str] = &["list-bots"];
+        const SWITCHES: &[&str] = &["list-bots", "describe"];
         let mut it = std::env::args().skip(1);
         let cmd = it.next().unwrap_or_else(|| "help".into());
         let argv: Vec<String> = it.collect();
@@ -188,11 +193,24 @@ fn diff_files(a: &Path, b: &Path, cfg: &DiffConfig, la: &str, lb: &str) -> anyho
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
         )
         .init();
     let args = Args::parse()?;
+    if args.cmd == "control" {
+        if args.has("describe") {
+            println!("{}", control::describe());
+            return Ok(());
+        }
+        args.get("config")
+            .context("control requires --config <private config>")?;
+        let cfg = bot_config(&args).context("invalid control config")?;
+        let capture = Path::new(args.get("capture").context("control requires --capture")?);
+        let deadline_ms = args.get("deadline-ms").unwrap_or("570000").parse()?;
+        return control::run(cfg, capture, deadline_ms).await;
+    }
     let kind: Kind = args.get("scenario").unwrap_or("full").parse()?;
     match args.cmd.as_str() {
         "run" => {

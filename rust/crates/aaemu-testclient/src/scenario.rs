@@ -463,12 +463,12 @@ mod creation_tests {
     }
 }
 
-async fn run_inner(
+/// Existing login/lobby path shared by scenarios and the stdio controller.
+async fn open_lobby(
     kind: Kind,
     cfg: &BotConfig,
     r: &mut Runner<'_>,
-    script_input: Option<&ScriptInput<'_>>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<(GameClient, StreamClient, LoginClient)>> {
     // ---- login server ----
     let s = r.begin("login.auth");
     let mut login = LoginClient::connect(&cfg.login, r.rec.clone()).await?;
@@ -503,7 +503,7 @@ async fn run_inner(
         format!("{}:{} cookie {}", cookie.ip, cookie.port, cookie.cookie),
     );
     if kind == Kind::Login {
-        return Ok(());
+        return Ok(None);
     }
 
     // ---- game server: lobby ----
@@ -561,6 +561,163 @@ async fn run_inner(
         .await?;
     r.end(s, format!("{} character(s)", game.state.characters.len()));
 
+    Ok(Some((game, stream, login)))
+}
+
+async fn select_and_spawn(
+    game: &mut GameClient,
+    character_id: u32,
+    r: &mut Runner<'_>,
+) -> anyhow::Result<()> {
+    // ---- world ----
+    let s = r.begin("game.select");
+    game.select_character(character_id).await?;
+    game.wait_sc(sc::SCCharacterStatePacket).await?;
+    game.drain(QUIET, Duration::from_secs(10)).await?;
+    r.end(s, format!("{} bag items seen", game.state.bag_items.len()));
+
+    let s = r.begin("game.spawn");
+    game.spawn_character().await?;
+    game.wait_for("own SCUnitStatePacket", |p| p.is_sc(sc::SCUnitStatePacket))
+        .await?;
+    game.notify_in_game().await?;
+    game.notify_in_game_completed().await?;
+    game.drain(QUIET, Duration::from_secs(15)).await?;
+    ensure!(game.state.self_obj != 0, "own unit state not received");
+    r.var("self_obj", game.state.self_obj);
+    let npcs = game
+        .state
+        .units
+        .values()
+        .filter(|u| u.unit_type == 1)
+        .count();
+    r.end(
+        s,
+        format!(
+            "obj {} at {:?}, {npcs} npcs visible",
+            game.state.self_obj, game.state.self_pos
+        ),
+    );
+
+    Ok(())
+}
+
+/// A control session owns its connections and reuses the scenario login handoff.
+pub struct ControlSession {
+    pub game: GameClient,
+    pub stream: StreamClient,
+    // Preserve the ordinary scenario's login-connection lifetime through the handoff.
+    _login: LoginClient,
+}
+
+fn control_character(
+    characters: &[crate::game::CharInfo],
+    requested: &str,
+    character_id: Option<u32>,
+) -> anyhow::Result<u32> {
+    let mut matches = characters.iter().filter(|c| match character_id {
+        Some(id) => id != 0 && c.id == id,
+        None => c.name.eq_ignore_ascii_case(requested),
+    });
+    let ch = matches
+        .next()
+        .context("requested existing character not listed")?;
+    ensure!(matches.next().is_none(), "ambiguous existing character");
+    Ok(ch.id)
+}
+
+#[cfg(test)]
+mod control_character_tests {
+    use super::control_character;
+    use crate::game::CharInfo;
+
+    #[test]
+    fn control_never_falls_back_to_first_or_creates_a_missing_character() {
+        let characters = [
+            CharInfo {
+                id: 10,
+                name: "Unrelated".into(),
+            },
+            CharInfo {
+                id: 42,
+                name: "Owner".into(),
+            },
+        ];
+        assert_eq!(control_character(&characters, "owner", None).unwrap(), 42);
+        assert!(control_character(&characters, "missing", None).is_err());
+        assert!(control_character(&[], "Owner", None).is_err());
+        assert_eq!(
+            control_character(&characters, "renamed", Some(42)).unwrap(),
+            42
+        );
+        assert!(control_character(&characters, "Owner", Some(43)).is_err());
+        assert!(control_character(&characters, "Owner", Some(0)).is_err());
+    }
+}
+
+/// Connect once, selecting an existing character only. No creation or retries.
+pub async fn connect_control(
+    cfg: &BotConfig,
+    rec: &Recorder,
+    character_id: Option<u32>,
+) -> anyhow::Result<ControlSession> {
+    ensure!(
+        !cfg.create_new_character,
+        "control cannot create characters"
+    );
+    rec.control_game_ready(false);
+    let mut r = Runner {
+        rec,
+        out: Outcome::default(),
+    };
+    let (mut game, stream, login) = open_lobby(Kind::Full, cfg, &mut r)
+        .await?
+        .context("game lobby was not opened")?;
+    let id = control_character(&game.state.characters, &cfg.character, character_id)?;
+    rec.control_game_ready(true);
+    select_and_spawn(&mut game, id, &mut r).await?;
+    Ok(ControlSession {
+        game,
+        stream,
+        _login: login,
+    })
+}
+
+/// Use the scenario's GM chat path without printing command text or replies.
+pub async fn control_gm(game: &mut GameClient, command: &str) -> anyhow::Result<()> {
+    questitem::gm_command(game, command).await?;
+    Ok(())
+}
+
+/// The script `tp` sequence, using the position returned by the server.
+pub async fn control_tp(
+    game: &mut GameClient,
+    x: f32,
+    y: f32,
+    z: f32,
+    clock: u32,
+) -> anyhow::Result<()> {
+    game.state.last_teleport = None;
+    game.chat(0, &format!("/move {x} {y} {z}")).await?;
+    game.wait_sc(sc::SCTeleportUnitPacket).await?;
+    let at = game.state.self_pos;
+    game.teleport_ended(at).await?;
+    game.move_to(at, clock).await?;
+    game.drain(Duration::from_millis(1500), Duration::from_secs(8))
+        .await?;
+    Ok(())
+}
+
+async fn run_inner(
+    kind: Kind,
+    cfg: &BotConfig,
+    r: &mut Runner<'_>,
+    script_input: Option<&ScriptInput<'_>>,
+) -> anyhow::Result<()> {
+    let Some((mut game, stream, _login)) = open_lobby(kind, cfg, r).await? else {
+        return Ok(());
+    };
+
     let s = r.begin("game.create");
     let created = if cfg.create_new_character || game.state.characters.is_empty() {
         game.create_character(&cfg.character).await?;
@@ -597,35 +754,7 @@ async fn run_inner(
         return Ok(());
     }
 
-    // ---- world ----
-    let s = r.begin("game.select");
-    game.select_character(ch.id).await?;
-    game.wait_sc(sc::SCCharacterStatePacket).await?;
-    game.drain(QUIET, Duration::from_secs(10)).await?;
-    r.end(s, format!("{} bag items seen", game.state.bag_items.len()));
-
-    let s = r.begin("game.spawn");
-    game.spawn_character().await?;
-    game.wait_for("own SCUnitStatePacket", |p| p.is_sc(sc::SCUnitStatePacket))
-        .await?;
-    game.notify_in_game().await?;
-    game.notify_in_game_completed().await?;
-    game.drain(QUIET, Duration::from_secs(15)).await?;
-    ensure!(game.state.self_obj != 0, "own unit state not received");
-    r.var("self_obj", game.state.self_obj);
-    let npcs = game
-        .state
-        .units
-        .values()
-        .filter(|u| u.unit_type == 1)
-        .count();
-    r.end(
-        s,
-        format!(
-            "obj {} at {:?}, {npcs} npcs visible",
-            game.state.self_obj, game.state.self_pos
-        ),
-    );
+    select_and_spawn(&mut game, ch.id, r).await?;
 
     if kind == Kind::NpcReturn {
         npc_return(&mut game, cfg, r).await?;
