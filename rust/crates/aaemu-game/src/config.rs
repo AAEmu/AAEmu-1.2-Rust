@@ -62,7 +62,7 @@ pub struct AppConfig {
     pub login_network: NetworkConfig,
     /// `WebApiNetwork` (`None` = section missing: "WebApi will not start").
     #[serde(rename = "webapinetwork")]
-    pub web_api_network: Option<NetworkConfig>,
+    pub web_api_network: Option<WebApiConfig>,
     /// `MaxConcurencyThreadPool` (bound but unused by the C# server as well).
     #[serde(rename = "maxconcurencythreadpool", deserialize_with = "lenient")]
     pub max_concurency_thread_pool: i32,
@@ -175,6 +175,42 @@ pub struct NetworkConfig {
     pub port: u16,
     #[serde(rename = "numconnections", deserialize_with = "lenient")]
     pub num_connections: i32,
+}
+
+/// HTTP listener configuration. An absent key leaves only `/status` accessible.
+#[derive(Clone, Deserialize)]
+#[serde(default)]
+pub struct WebApiConfig {
+    #[serde(rename = "host")]
+    pub host: String,
+    #[serde(rename = "port", deserialize_with = "lenient")]
+    pub port: u16,
+    #[serde(rename = "enabled", deserialize_with = "lenient")]
+    pub enabled: bool,
+    #[serde(rename = "apikey")]
+    pub api_key: Option<String>,
+}
+
+impl Default for WebApiConfig {
+    fn default() -> Self {
+        Self {
+            host: "127.0.0.1".into(),
+            port: 1280,
+            enabled: true,
+            api_key: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for WebApiConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebApiConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("enabled", &self.enabled)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1141,7 +1177,9 @@ mod tests {
         assert_eq!(cfg.login_network.port, 1234);
         assert_eq!(cfg.connections.mysql_provider.port, 3306);
         let web = cfg.web_api_network.as_ref().expect("WebApiNetwork");
-        assert_eq!((web.host.as_str(), web.port), ("*", 1280));
+        assert_eq!((web.host.as_str(), web.port), ("127.0.0.1", 1280));
+        assert!(web.enabled);
+        assert!(web.api_key.is_none());
         assert_eq!(cfg.max_concurency_thread_pool, 8);
         assert!(cfg.discord_token.is_none());
         // World.json
@@ -1176,6 +1214,29 @@ mod tests {
         assert!(cfg.events.halloween.enabled);
         assert_eq!(cfg.events.halloween.start, "");
         assert_eq!(cfg.events.halloween.end, "");
+    }
+
+    #[test]
+    fn web_api_security_settings_bind_from_environment() {
+        let mut value = json!({"WebApiNetwork": {"Host": "127.0.0.1"}});
+        apply_env(
+            &mut value,
+            [
+                (
+                    "WebApiNetwork__ApiKey".into(),
+                    "synthetic-environment-key".into(),
+                ),
+                ("WebApiNetwork__Enabled".into(), "false".into()),
+            ],
+        );
+        let config = AppConfig::from_value(value).unwrap();
+        let web = config.web_api_network.unwrap();
+        assert_eq!(web.api_key.as_deref(), Some("synthetic-environment-key"));
+        assert!(!web.enabled);
+        assert!(AppConfig::from_value(json!({"WebApiNetwork": null}))
+            .unwrap()
+            .web_api_network
+            .is_none());
     }
 
     #[test]

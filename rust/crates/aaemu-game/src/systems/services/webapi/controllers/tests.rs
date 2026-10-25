@@ -3,23 +3,30 @@
 
 use std::sync::Arc;
 
+use super::super::auth_tests::{authenticated, TEST_KEY};
 use super::super::http::HttpRequest;
 use super::super::{on_received_request, WebApiServer};
 use super::*;
 use crate::test_support::{spawn_player, test_character, test_server, TestClient};
 
 fn api(server: &Arc<crate::GameServer>) -> WebApiServer {
+    server.config.update(|c| {
+        c.web_api_network = Some(crate::config::WebApiConfig {
+            api_key: Some(TEST_KEY.into()),
+            ..Default::default()
+        });
+    });
     WebApiServer::new(Arc::downgrade(server)).unwrap()
 }
 
 async fn get(api: &WebApiServer, url: &str) -> HttpResponse {
-    on_received_request(api, HttpRequest::new("GET", url, "HTTP/1.1")).await
+    on_received_request(api, authenticated(HttpRequest::new("GET", url, "HTTP/1.1"))).await
 }
 
 async fn post(api: &WebApiServer, url: &str, body: &str) -> HttpResponse {
     on_received_request(
         api,
-        HttpRequest::new("POST", url, "HTTP/1.1").with_body(body),
+        authenticated(HttpRequest::new("POST", url, "HTTP/1.1").with_body(body)),
     )
     .await
 }

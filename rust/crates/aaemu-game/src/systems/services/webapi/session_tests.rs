@@ -3,6 +3,7 @@
 
 use std::sync::Weak;
 
+use super::auth_tests::{authenticated, TEST_KEY};
 use super::http::{ok_html, HttpRequest};
 use super::route_mapper::{handler, Controller, Method, RouteMapper, RouteSpec};
 use super::*;
@@ -65,7 +66,9 @@ fn server() -> WebApiServer {
     mapper
         .discover_routes_from_type::<MyRegexController>()
         .unwrap();
-    WebApiServer::with_routes(mapper, Weak::new())
+    let mut api = WebApiServer::with_routes(mapper, Weak::new());
+    api.api_key = Some(TEST_KEY.into());
+    api
 }
 
 #[tokio::test]
@@ -89,7 +92,11 @@ async fn on_received_request_when_route_found_should_return_html() {
         ("GET", "/test/1", "test"),
         ("POST", "/test/1", "test-post"),
     ] {
-        let r = on_received_request(&server(), HttpRequest::new(method, path, "HTTP/1.1")).await;
+        let r = on_received_request(
+            &server(),
+            authenticated(HttpRequest::new(method, path, "HTTP/1.1")),
+        )
+        .await;
         assert_eq!(r.status, 200, "{method} {path}");
         assert_eq!(r.status_phrase, "OK");
         assert_eq!(r.content_type(), Some("text/html"));
@@ -111,7 +118,11 @@ async fn on_received_request_when_route_found_with_regex_should_return_html_with
             ["players", "search"],
         ),
     ] {
-        let r = on_received_request(&server(), HttpRequest::new(method, path, "HTTP/1.1")).await;
+        let r = on_received_request(
+            &server(),
+            authenticated(HttpRequest::new(method, path, "HTTP/1.1")),
+        )
+        .await;
         assert_eq!(r.status, 200);
         assert_eq!(r.status_phrase, "OK");
         assert_eq!(r.content_type(), Some("text/html"));
@@ -126,7 +137,11 @@ async fn on_received_request_when_route_found_with_regex_should_return_html_with
 
 #[tokio::test]
 async fn controller_errors_produce_the_500_page() {
-    let r = on_received_request(&server(), HttpRequest::new("GET", "/fail", "HTTP/1.1")).await;
+    let r = on_received_request(
+        &server(),
+        authenticated(HttpRequest::new("GET", "/fail", "HTTP/1.1")),
+    )
+    .await;
     assert_eq!(r.status, 500);
     assert_eq!(r.status_phrase, "Internal Server Error");
     assert_eq!(r.content_type(), Some("text/html"));
@@ -168,7 +183,7 @@ async fn served_over_http() {
     });
     let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
     s.write_all(
-        b"POST /multipleMatches/a/b?x=1 HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        b"POST /multipleMatches/a/b?x=1 HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer synthetic-webapi-test-key\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
     )
     .await
     .unwrap();
