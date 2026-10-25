@@ -98,7 +98,10 @@ pub fn trigger_combat_buffs(
 }
 
 fn level_range(lvl_md: f32, skill_level: i32, va_start: i32, va_end: i32) -> (f32, f32) {
-    let level_modifier = ((skill_level - 1) / 49 * (va_end - va_start) + va_start) as f32 * 0.01;
+    // Native 1.2 sub_398A7380: float interpolation, not the mirrored C# integer division.
+    let level_modifier = ((skill_level as f32 - 1.0) / 49.0 * (va_end as f32 - va_start as f32)
+        + va_start as f32)
+        * 0.01;
     (
         lvl_md - level_modifier * lvl_md + 0.5,
         (level_modifier + 1.0) * lvl_md + 0.5,
@@ -125,7 +128,10 @@ pub(super) fn damage_with_aoe(
     let Some(trg) = args.target.as_obj().filter(|o| o.is_unit()).cloned() else {
         return;
     };
-    if trg.with_unit(|u| u.unit().hp).unwrap_or(0) <= 0 {
+    let (target_hp, target_max_hp) = trg
+        .with_unit(|u| (u.unit().hp, u.unit().max_hp))
+        .unwrap_or_default();
+    if target_hp <= 0 {
         return;
     }
     let Some(caster) = args.caster.clone() else {
@@ -153,7 +159,7 @@ pub(super) fn damage_with_aoe(
             args.caster_caster,
             caster.obj_id(),
             trg.obj_id(),
-            1,
+            0,
             0,
         );
         p.hit_type = SkillHitType::Immune;
@@ -265,12 +271,13 @@ pub(super) fn damage_with_aoe(
             e.level_va_start,
             e.level_va_end,
         );
-        level_min += a;
-        level_max += b;
+        // sub_398A7380 adds 0.5 then truncates each endpoint before composing the base.
+        level_min += a.trunc();
+        level_max += b.trunc();
     }
     let dps_inc = match damage_type {
         Some(DamageType::Melee) => cs[4] as i32,
-        Some(DamageType::Magic) => cs[5] as i32 + cs[6] as i32,
+        Some(DamageType::Magic) => (cs[5] as i32).saturating_add(cs[6] as i32),
         Some(DamageType::Ranged) => cs[7] as i32,
         _ => 0,
     };
@@ -305,9 +312,32 @@ pub(super) fn damage_with_aoe(
         min = level_min + (variable_damage - scaled);
         max = level_max + (variable_damage + scaled);
     }
+    if e.use_percent_damage {
+        // 1.2 descriptors retain whole percentages (e.g. 4754/5162: 99% current HP).
+        // The diagnostic sub_39898330 has separate integer fixed/percent/level terms.
+        // Server-side percent evaluation is unavailable: /100 and truncation here are
+        // the compatibility interpretation of those authored rows, not a 10.x rule.
+        let health = if e.use_current_health {
+            target_hp
+        } else {
+            target_max_hp
+        }
+        .max(0);
+        let percent = |ratio: i32| {
+            (i64::from(health) * i64::from(ratio) / 100).clamp(0, i64::from(i32::MAX)) as f32
+        };
+        min += percent(e.percent_min);
+        max += percent(e.percent_max);
+        if e.use_fixed_damage {
+            min += e.fixed_min as f32;
+            max += e.fixed_max as f32;
+        }
+    }
     min *= e.multiplier;
     max *= e.multiplier;
-    let damage_mul = match damage_type {
+    // sub_3941B030 returns before unit attributes when its unit source is null.
+    // Doodad/environment sources have no stats; their neutral multiplier is 1.
+    let damage_mul = match damage_type.filter(|_| caster.is_unit()) {
         Some(DamageType::Melee) => cs[11] as f32,
         Some(DamageType::Magic) => cs[12] as f32,
         Some(DamageType::Ranged) => cs[13] as f32,
@@ -375,7 +405,9 @@ pub(super) fn damage_with_aoe(
             }
         }
     }
-    if e.use_fixed_damage {
+    // Preserve the existing standalone fixed-damage override. Combined fixed/percent
+    // descriptors (4821, 4944, 6198, ...) contribute both terms to the base above.
+    if e.use_fixed_damage && !e.use_percent_damage {
         min = e.fixed_min as f32;
         max = e.fixed_max as f32;
     }
@@ -434,17 +466,17 @@ pub(super) fn damage_with_aoe(
         }
         _ => final_damage *= ts[7] as f32,
     }
-    let value = (final_damage * reduction_mul) as i32;
+    let value = ((final_damage * reduction_mul) as i32).max(0);
     // Native 1.2 damage diagnostic sub_39898330 (x2game12.c:1984147-1984167)
     // multiplies the already integer damage, truncates, then enforces minimum 1.
-    // Only opted-in plot damage takes this compatibility path; counter policy is
-    // server-defined (PORTING.md), not evidence of a retail runtime implementation.
-    let value = aoe_multiplier.map_or(value, |multiplier| {
-        ((value as f32 * multiplier) as i32).max(1)
-    });
-    let absorbed = (final_damage * (1.0 - reduction_mul)) as i32;
-    let health_stolen = (value as f32 * (e.health_steal_ratio as f32 / 100.0)) as i32;
-    let mana_stolen = (value as f32 * (e.mana_steal_ratio as f32 / 100.0)) as i32;
+    // The final floor is unconditional in this landed-hit diagnostic, including
+    // multiplier 1. Misses and immunity returned above; only opted-in plots scale.
+    let value = aoe_multiplier
+        .map_or(value, |multiplier| (value as f32 * multiplier) as i32)
+        .max(1);
+    let absorbed = ((final_damage * (1.0 - reduction_mul)) as i32).max(0);
+    let health_stolen = ((value as f32 * (e.health_steal_ratio as f32 / 100.0)) as i32).max(0);
+    let mana_stolen = ((value as f32 * (e.mana_steal_ratio as f32 / 100.0)) as i32).max(0);
     let caster_t = Target::Obj(caster.clone());
     let trg_t = Target::Obj(trg.clone());
     let test_drive = matches!(args.cast, CastAction::Buff { buff_id: 6151, .. });
@@ -454,12 +486,15 @@ pub(super) fn damage_with_aoe(
         return;
     }
     unit_combat::reduce_current_hp(server, &trg, Some(&caster), value, KillReason::Damage);
-    caster.with_unit(|u| u.unit_mut().summarize_damage += value);
+    caster.with_unit(|u| {
+        let u = u.unit_mut();
+        u.summarize_damage = u.summarize_damage.saturating_add(value);
+    });
     if health_stolen > 0 || mana_stolen > 0 {
         let pts = caster.with_unit(|u| {
             let u = u.unit_mut();
-            u.hp = u.max_hp.min(u.hp + health_stolen);
-            u.mp = u.max_mp.min(u.mp + mana_stolen);
+            u.hp = u.max_hp.min(u.hp.saturating_add(health_stolen));
+            u.mp = u.max_mp.min(u.mp.saturating_add(mana_stolen));
             (u.hp, u.mp)
         });
         if let Some((hp, mp)) = pts {
@@ -548,7 +583,8 @@ pub(super) fn damage_with_aoe(
             },
         );
         // Npc.OnDamageReceived: aggro + AI (npc subsystem)
-        unit_combat::add_unit_aggro(server, &trg, AggroKind::Damage, &caster, value);
+        let threat = ((value as f32 * e.aggro_multiplier) as i32).max(0);
+        unit_combat::add_damage_aggro(server, &trg, &caster, value, threat);
         server
             .systems
             .skills
@@ -1107,17 +1143,5 @@ pub fn level_damage_range(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn level_range_matches_csharp_integer_math() {
-        // (Level - 1) / 49 is an integer division: levels 1..49 use VaStart only.
-        let (lo, hi) = level_damage_range(100.0, 1.0, 10, 80, 120);
-        assert!((lo - (100.0 - 0.8 * 100.0 + 0.5)).abs() < 1e-4);
-        assert!((hi - (1.8 * 100.0 + 0.5)).abs() < 1e-4);
-        let (lo, hi) = level_damage_range(100.0, 1.0, 50, 80, 120);
-        assert!((lo - (100.0 - 1.2 * 100.0 + 0.5)).abs() < 1e-4);
-        assert!((hi - (2.2 * 100.0 + 0.5)).abs() < 1e-4);
-    }
-}
+#[path = "damage_pipeline_tests.rs"]
+mod damage_pipeline_tests;

@@ -1068,6 +1068,36 @@ pub fn add_unit_aggro(
     unit: &WorldObject,
     amount: i32,
 ) -> bool {
+    add_aggro_amounts(server, owner, kind, unit, amount, None)
+}
+
+/// Damage effects award actual damage credit independently of their authored threat.
+/// Other callers retain `add_unit_aggro`'s historical zero/negative amount semantics.
+pub fn add_damage_aggro(
+    server: &GameServer,
+    owner: &WorldObject,
+    unit: &WorldObject,
+    damage: i32,
+    threat: i32,
+) -> bool {
+    add_aggro_amounts(
+        server,
+        owner,
+        AggroKind::Damage,
+        unit,
+        threat.max(0),
+        Some(damage.max(0)),
+    )
+}
+
+fn add_aggro_amounts(
+    server: &GameServer,
+    owner: &WorldObject,
+    kind: AggroKind,
+    unit: &WorldObject,
+    amount: i32,
+    damage_credit: Option<i32>,
+) -> bool {
     if buffs::check_buff_tag(server, owner, tags::NO_FIGHT)
         || buffs::check_buff_tag(server, owner, tags::RETURNING)
     {
@@ -1081,19 +1111,29 @@ pub fn add_unit_aggro(
         return false;
     }
     if kind == AggroKind::Damage {
-        add_tagger(server, owner, unit, amount);
+        add_tagger(server, owner, unit, damage_credit.unwrap_or(amount));
     }
     let aggro_mul = super::stats::stat(server, unit, super::stats::StatKind::AggroMul);
     let incoming = super::stats::stat(server, owner, super::stats::StatKind::IncomingAggroMul);
     let amount = (amount as f32 * (aggro_mul as f32 / 100.0)) as i32;
     let amount = (amount as f32 * (incoming as f32 / 100.0)) as i32;
     let unit_id = unit.obj_id();
+    if damage_credit.is_some() && amount <= 0 {
+        // A zero-threat hit still earns damage credit, but creates no aggro/watch.
+        return owner
+            .with_unit(|u| u.unit().skill_state.aggro_table.contains_key(&unit_id))
+            .unwrap_or(false);
+    }
     let existed = owner
         .with_unit(|u| {
             let table = &mut u.unit_mut().skill_state.aggro_table;
             match table.get_mut(&unit_id) {
                 Some(a) => {
-                    a.add(kind, amount);
+                    if damage_credit.is_some() {
+                        a.damage_aggro = a.damage_aggro.saturating_add(amount);
+                    } else {
+                        a.add(kind, amount);
+                    }
                     true
                 }
                 None => {
