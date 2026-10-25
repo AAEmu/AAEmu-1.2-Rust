@@ -168,6 +168,30 @@ Each subsystem records its status here, in its own section only (see `CONTRIBUTI
 | Movement hooks (`CSMoveUnit.RemoveEffects`, `Character.SetPosition` Move removal, fall damage) | `systems/skills/mod.rs` (`on_move_request`, `on_moved`) | done | Called from `world::session::move_unit`. |
 | `Skill.EndChanneling` target buff (`ChannelingTargetBuffId`) | `systems/skills/{skill,buffs}.rs` (`end_channeling`, `finish_effect_by_skill`) | deviation | **Deviation:** the C# `Buffs.RemoveEffect(templateId, skillId)` raised the buff's `OnTimeout` triggers on every removal; the Rust removal skips them for explicit removals (dispels, a stopped channel; see the FISH escape in `buff_removal_tests.rs`). Quest item grants hang on that trigger (GainItem on buff 3896 of skill 18449 'Extract Earth Crystal', 4 s channel under a 6 s buff, and the other channeling-target-buff quest skills of the item triage), so a channel that **runs to its end** now fires the target buff's Timeout triggers before removing it. A stopped / cancelled channel fires nothing (the C# granted the item then too). The caster-side `ChannelingBuffId` and buffs applied by skill effects (buff 1963 of 'Capture Crayfish') are unchanged: the latter expire on their own timer and fire Timeout already. |
 
+#### AoE diminishing compatibility policy (2026-10-25)
+
+`systems::skills`: `aoe_diminishings` loads authored float percentages by id (native 1.2
+`sub_39620E90`, `D:/aa-re/client12/decomp/x2game12.c:1321108`). Searing Rain 11939 / plot 1
+resets through plot-effect row 5680 (descriptor 2, event 246); next-event 288 repeats every
+500 ms. Next-event 3195 fans event 3 out per target at speed 20 to flagged event 2723 / Damage
+3172. Thus resetting on each child invocation would give every projectile the first rate.
+
+The chosen **server compatibility policy is provisional, not proven retail parity**: each plot
+instance keeps first-seen distinct-target ranks in existing execution order, shared across
+sibling damage events. Misses and immunity occupy ranks; repeat hits reuse their wave rank.
+Only flagged plot Damage effects participate. Reset clears only the calling plot's map.
+Targets beyond the last authored id use its final rate; storage is limited to N identities,
+where N is the last authored id (10 in 1.2). Rates apply after existing damage/modifier reductions to the
+integer result, then truncate with minimum 1 for landed damage, as the native 1.2 diagnostic
+`sub_39898330` describes (`x2game12.c:1984147-1984167`). Other damage, heals, buffs and CC retain
+their existing paths, and wire formats are unchanged.
+
+The native damage diagnostic (10.x `sub_39CECDB0`, parameter `+444`) is serialized debug data
+supplied by the world server; the available client/zone plot dispatcher executes visual
+effects, not the authoritative counter. Its producer is unavailable in these binaries.
+`plots::aoe_tests::aoe_policy_*` covers the compatibility policy through plot/combat flows;
+an authoritative native lifecycle experiment and live verification remain unperformed.
+
 #### Special effects added from data (2026-10-20)
 
 These `SpecialType` bodies were TODO stubs that only logged in the C# (`git show a2ab80abd^:AAEmu.Game/Models/Game/Skills/Effects/SpecialEffects/...`); the behaviour below is derived from the 1.2 data because value1..4 are 0.
