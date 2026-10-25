@@ -417,6 +417,14 @@ impl UnitCooldowns {
         individual || (tag_id != 0 && self.tag_cooldowns.contains_key(&tag_id))
     }
 
+    /// Match the native skill/tag reset without touching other individual timers or groups.
+    pub fn remove_skill_cooldown(&mut self, skill_id: u32, tag_id: u32) {
+        self.remove_cooldown(skill_id);
+        if tag_id != 0 {
+            self.tag_cooldowns.remove(&tag_id);
+        }
+    }
+
     /// `RemoveCooldown(skillId)`.
     pub fn remove_cooldown(&mut self, skill_id: u32) {
         self.cooldowns.remove(&skill_id);

@@ -180,36 +180,6 @@ fn start_global_cooldown(server: &GameServer, skill: &SkillRef, caster: &WorldOb
     caster.with_unit(|u| u.unit_mut().global_cooldown_ms = now + ms);
 }
 
-/// Project shared expiries onto authored members, including members absent from
-/// `tagged_skills`. Native 1.2 `3989A290` takes the maximum of skill/tag remaining
-/// times; explicit skill entries preserve that rule without cooling unrelated generic tags.
-/// `397B2350` reads the existing skill list, then the tag list (id/total/remaining u32).
-/// As in the existing reconnect snapshot, total is the remaining time: only expiries are stored.
-pub(crate) fn cooldown_snapshot(
-    server: &GameServer,
-    cooldowns: &UnitCooldowns,
-    now: i64,
-) -> SCCooldownsPacket {
-    let mut effective = UnitCooldowns::default();
-    effective.cooldowns.clone_from(&cooldowns.cooldowns);
-    for template in server.game_data.systems.skills.skills.values() {
-        let tag = template.cooldown_tag_id;
-        if tag <= 0 {
-            continue;
-        }
-        if let Some(&end) = cooldowns.tag_cooldowns.get(&(tag as u32)) {
-            if end > now {
-                effective
-                    .cooldowns
-                    .entry(template.id)
-                    .and_modify(|own| *own = (*own).max(end))
-                    .or_insert(end);
-            }
-        }
-    }
-    SCCooldownsPacket::from_cooldowns(&effective, now)
-}
-
 fn cooldown_ignored(server: &GameServer, caster: &WorldObject) -> bool {
     caster
         .as_player()
@@ -273,16 +243,15 @@ fn start_skill_cooldown(server: &GameServer, skill: &SkillRun, caster: &WorldObj
             if tag == 0 {
                 return None;
             }
-            // Send only this group's effective members. In particular, never overwrite
-            // a longer individual cooldown with the shorter shared expiry.
+            // Native 1.2 397B2350 keeps these lists separate; 3989A290 takes
+            // max(individual, tag). Never manufacture individual entries for other members.
             let mut affected = UnitCooldowns::default();
-            for template in server.game_data.systems.skills.skills.values() {
-                if template.cooldown_tag_id == skill.template.cooldown_tag_id {
-                    let end = cooldowns.tag_cooldowns[&tag]
-                        .max(*cooldowns.cooldowns.get(&template.id).unwrap_or(&0));
-                    affected.cooldowns.insert(template.id, end);
-                }
-            }
+            affected
+                .cooldowns
+                .insert(skill.template.id, cooldowns.cooldowns[&skill.template.id]);
+            affected
+                .tag_cooldowns
+                .insert(tag, cooldowns.tag_cooldowns[&tag]);
             Some(SCCooldownsPacket::from_cooldowns(&affected, now))
         })
         .flatten();
@@ -2143,13 +2112,18 @@ pub(super) fn reset_cooldown_if_ignored(
 ) {
     if let Some(o) = owner_character(server, caster) {
         if o.data().skill_char.ignore_skill_cooldowns {
+            let tag = skill.template.cooldown_tag_id.max(0) as u32;
+            caster.with_unit(|u| {
+                u.unit_mut()
+                    .cooldowns
+                    .remove_skill_cooldown(skill.template.id, tag);
+            });
             o.send(SCSkillCooldownResetPacket {
-                obj_id: o.obj_id,
+                obj_id: caster.obj_id(),
                 skill_id: skill.template.id,
-                tag_id: skill.template.cooldown_tag_id.max(0) as u32,
+                tag_id: tag,
                 gcd: false,
             });
-            caster.with_unit(|u| u.unit_mut().cooldowns.remove_cooldown(skill.template.id));
         }
     }
 }
