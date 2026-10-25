@@ -785,7 +785,7 @@ async fn private_mysql_expiry_return_rollback_retry_reload_and_disposal() {
     persist(&original, &pool, true).await;
     tick(&original, due);
     persist(&original, &pool, false).await;
-    let receiver: u32 = sqlx::query_scalar("SELECT receiver_id FROM mails WHERE id=?")
+    let receiver: i32 = sqlx::query_scalar("SELECT receiver_id FROM mails WHERE id=?")
         .bind(id)
         .fetch_one(&pool)
         .await

@@ -2862,18 +2862,14 @@ fn cargo_attachment(server: &GameServer, rack: &DoodadRef) -> Option<bool> {
     if parent == 0 || parent != transform_parent {
         return None;
     }
-    let Some(world) = server.world.world(instance) else {
-        return None;
-    };
+    let world = server.world.world(instance)?;
     if !world
         .doodad(rack.obj_id)
         .is_some_and(|live| Arc::ptr_eq(&live, rack))
     {
         return None;
     }
-    let Some(hull) = world.slave(parent) else {
-        return None;
-    };
+    let hull = world.slave(parent)?;
     let (id, hull_template, attached) = {
         let hull = hull.data();
         (

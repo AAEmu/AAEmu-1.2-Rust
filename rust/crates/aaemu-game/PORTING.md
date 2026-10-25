@@ -279,6 +279,39 @@ connected by `systems::economy::wiring`).
 | Item skill-effect bodies (grade enchant, socketing, conversion, cap scale, UCC imprint, ...), mate / slave equipment packets | `systems/economy/item_effects*.rs` | done | Called by the skills subsystem's effects. UCC imprint / cleanup require owned source and target items; client UCC casts require the actual source item's configured use skill, preserving the unrelated legacy bound-item portal exception. Dyeing checks the loaded `dyeable_items` allowlist. Invalid UCC / dye effects cancel deferred reagent consumption. |
 | Item skill-effect stubs given data-derived bodies (`GainItemWithPosImprint` 32, `RechargeItemBuff` 95, `ExpToItem` 96) | `systems/economy/item_effects.rs` | done (data-derived) | The C# `Execute` bodies were `// TODO` stubs, so the behaviour comes from `special_effects` 405 / 546 / 547 / 548 (32: create `value1` x1 with `SkillEffectGainItemWithPos`), 12446 / 17017 (95) and 12462 (96: `value1` XP -> `value2` x1 with `SkillEffectExpToItem`) plus the tool skills that cast them. `GainItemWithPosImprint` stores no position imprint: the 1.2 item details have no such field. `ExpToItem` subtracts the experience directly instead of through `AddExp` (which recomputes the level and could level the character down), sends `SCExpChangedPacket(-value1)`, checks bag room before spending the XP, and cancels so the reagent is kept. `RechargeItemBuff` takes the cast's item target, resets `charge_start_time` (and `charge_count` when the template has one) and re-applies the equipped item's gear buff through `apply_gear_buffs` with the item both removed and added, so the recharge buff is not stacked; the 1 s item timers read the new charge window on their next tick, so nothing is re-scheduled. |
 
+#### Cargo escrow and stale rack references (2026-10-25)
+
+Merchant-ship rack deposits now revalidate the exact equipped pack and a vacant
+rack in one economy transaction. Recovery validates System escrow and backpack
+space, moves the same item ID, and clears the rack reference together. A rejected
+pickup preserves the pack, the current backpack and recorded item effects.
+The shared path covers other hulls and ordinary racks; the real-data regression
+uses Merchant hull 75, item 23398 and its twenty attachment points 60..79.
+
+Error 14 (`INTERACTION_RECOVER_PARENT`) on this path means the referenced item is
+outside System escrow; it does not establish that another pack is physically on
+top. The separate persistent-child removal check uses error 207. Provably dangling
+persistent cargo references can return to the authored empty phase without moving
+or creating an item. Ambiguous references remain blocked with rack/item/container
+and hull diagnostics; current child allocation identity and parent/instance must
+match before a child can block repair or removal.
+
+Both live and saved-row cleanup receive the original doodad metadata. Original
+rack/cargo/Slave references never authorize deleting the current item at a recycled
+GUID. Ordinary furniture cleanup requires a unique singleton matching the original
+template and owner in that owner's System escrow. Items in inventory, equipment,
+bank or another owner's containers are retained. Saved container GUIDs alone never
+authorize container deletion. Saved-row removal checks its selected reference
+fields before invoking cleanup.
+
+This conservative policy protects unloaded rack aliases and recovered/recycled
+items. Metadata matching does not establish allocation generation. Cargo and
+ambiguous item references, plus saved containers, may be retained after the last
+rack disappears; reconciliation and orphan collection remain open. Regression
+sources cover shuffled twenty-rack cycles, stale sources, failed recovery,
+allocator reuse and private-MySQL saved aliases. Source review is complete;
+exact-head execution and live reconnect acceptance are still pending.
+
 ### systems::social
 
 | Area (C#) | Rust | Status | Notes |

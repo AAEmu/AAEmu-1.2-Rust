@@ -379,9 +379,10 @@
     },
     {
       "id": "trade-ship-cargo-reference-atomicity",
-      "status": "implementing",
+      "status": "source_reviewed_merged_pending_validation",
       "owner": "audit-tradeship",
-      "note": "Tester-reported stuck rack; source proves error14 is stale non-System item reference, not physical stacking. Production transaction and repair tests in progress."
+      "note": "Exact equipped-source deposit and checked recovery are integrated. Original-reference cleanup protects foreign/recycled items; ambiguous cargo and saved containers are conservatively retained. Allocation-generation proof and reconciliation/GC remain open. Cargo tests, ignored MySQL/compact checks and live acceptance are pending.",
+      "commit": "8c2e977b5ba6b7660e4739964465e0b1e97b9d7b"
     },
     {
       "id": "trade-ship-live-root-identity-after-reconnect",
@@ -391,9 +392,10 @@
     },
     {
       "id": "lane-allocation-concurrency",
-      "status": "implementing",
+      "status": "focused_passed_full_gate_pending",
       "owner": "audit-lane-lock",
-      "note": "Concurrent creation assigned the same port prefix; isolated allocator repair in progress."
+      "note": "15 isolated root Python tests passed; original allocator fails concurrent allocation. Two real concurrent probe lanes received distinct prefixes and were removed. Windows/Linux workflow now runs the suite.",
+      "commit": "090f515b6"
     }
   ],
   "recent_validation": {
@@ -411,6 +413,50 @@
       "minimum_free_gib": 5.938747406005859
     },
     "current_full_lane_ci": "pending",
-    "current_live": "pending"
+    "current_live": "pending",
+    "game_unit_tests": {
+      "head": "1f53a66bdd0ab289ae2a26abbbaff084cddfcaff",
+      "passed": 2813,
+      "failed": 6,
+      "ignored": 145,
+      "result": "completed_with_fixture_failures",
+      "fixture_corrections": [
+        "395386180",
+        "5dfd7282b"
+      ],
+      "corrected_execution": "pending; subsequent builds held at memory reserve before tests ran"
+    },
+    "latest_corrected_builds": {
+      "head": "5dfd7282b71ec84655b44b861b24991502dd5ff2",
+      "clippy": "held_at_memory_reserve",
+      "game_tests": "held_at_memory_reserve_before_execution"
+    },
+    "cargo_source_review": {
+      "head": "8c2e977b5ba6b7660e4739964465e0b1e97b9d7b",
+      "round": 3,
+      "result": "no_new_actionable_P1_P2_within_documented_conservative_policy",
+      "execution": "pending"
+    },
+    "cargo_integrated_game_build": {
+      "head": "8db0e003df5c329d9ee6522b09a26d0c7158dfc0",
+      "result": "held_at_memory_reserve_before_tests",
+      "minimum_free_gib": 7.936,
+      "native_diagnostics": "none before guard stopped the owned compiler subtree"
+    },
+    "selected_ignored_snapshot_checks": {
+      "binary_head": "1f53a66bdd0ab289ae2a26abbbaff084cddfcaff",
+      "binary_sha256": "836cf147a09b999582e302e8dae807cbd6d867e65a99da120abaa3ccc1009230",
+      "scope": "previously compiled snapshot; not final-head acceptance",
+      "compact_passed": 9,
+      "private_mysql_lobby_passed": 3,
+      "mail_expiry": "fixture signed/unsigned decode mismatch found; fixed da8e370ba, rebuilt execution pending",
+      "database_scope": "private 3317 lane_audit_final_game; connection-local temporary tables"
+    },
+    "remote_checks": {
+      "head": "5dfd7282b71ec84655b44b861b24991502dd5ff2",
+      "passed": 12,
+      "failed": 0,
+      "scope": "draft PR46 before cargo integration"
+    }
   }
 }
