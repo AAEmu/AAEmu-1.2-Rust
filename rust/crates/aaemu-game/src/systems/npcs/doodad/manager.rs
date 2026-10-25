@@ -245,14 +245,26 @@ pub fn delete(server: &GameServer, world: &Arc<WorldInstance>, doodad: &DoodadRe
     world.delete(doodad);
     area_trigger::remove_doodad_area_triggers(server, doodad.obj_id);
 
-    let (item_id, persistent, db_id) = {
+    let (source, persistent, db_id) = {
         let d = doodad.data();
-        (d.item_id, d.is_persistent, d.db_id)
+        (
+            crate::systems::npcs::hooks::DoodadItemCleanup {
+                doodad_db_id: d.db_id,
+                doodad_template_id: d.template_id,
+                owner_id: d.owner_id,
+                owner_type: d.owner_type,
+                item_id: d.item_id,
+                item_template_id: d.item_template_id,
+                container_id: d.coffer.as_ref().map_or(0, |c| c.container_id),
+            },
+            d.is_persistent,
+            d.db_id,
+        )
     };
     // Delete associated item if expired
-    if item_id > 0 {
+    if source.item_id > 0 {
         if let Some(h) = server.systems.npcs.hooks.economy.get() {
-            h.remove_expired_doodad_item(server, item_id);
+            h.remove_expired_doodad_item(server, source);
         }
     }
     if let Some(spawns) = server.systems.npcs.spawns.get(world.id) {
