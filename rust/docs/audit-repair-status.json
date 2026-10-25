@@ -28,26 +28,27 @@
     },
     {
       "id": "merchant-grade",
-      "status": "merged_pending_validation",
+      "status": "focused_passed_full_gate_pending",
       "owner": "audit-economy",
       "commit": "3de467a85f1c5aeed2efb2071030058ffeb8b29c"
     },
     {
       "id": "craft-grade-flags",
-      "status": "merged_pending_validation",
+      "status": "focused_passed_full_gate_pending",
       "owner": "audit-economy",
       "commit": "3de467a85f1c5aeed2efb2071030058ffeb8b29c"
     },
     {
       "id": "web-api-authentication",
-      "status": "merged_pending_validation",
+      "status": "focused_passed_full_gate_pending",
       "owner": "audit-web",
       "commit": "24b4699887d5350bc1a9e6f89267f98469fde8eb"
     },
     {
       "id": "housing-bench-plaque-permissions",
       "status": "merged_pending_validation",
-      "commit": "e2e9744b59d094b2ceb74c63626336664071a59f"
+      "commit": "e2e9744b59d094b2ceb74c63626336664071a59f",
+      "note": "New flow fixtures corrected to initialize Construction19; strict200LP assertions awaiting rerun."
     },
     {
       "id": "craft-bench-pack-and-required-doodad",
@@ -56,7 +57,7 @@
     },
     {
       "id": "closed-and-unknown-zones",
-      "status": "merged_pending_validation",
+      "status": "focused_passed_full_gate_pending",
       "commit": "e9a870b8c71e8e4dbf7509d7e72bbb33bcfef20a",
       "note": "Unknown keys remain neutral; no invented safe destination. Parent corrected Doodad transform field after first compile check."
     },
@@ -85,9 +86,9 @@
     },
     {
       "id": "aoe-diminishing",
-      "status": "loader_merged_runtime_open",
-      "commit": "04783cdeb438b3fefb551dbd05edb62255a11bff",
-      "note": "Native counter/reset writer is under a separate focused trace; runtime is not repaired."
+      "status": "runtime_merged_pending_retest",
+      "commit": "e6f6920da",
+      "note": "Plot-scoped first-seen distinct-target ranks/reset/clamp are explicit compatibility policy. Nativeworld-servercounter unavailable.10/11firstflows passed; health fixture corrected."
     },
     {
       "id": "skill-and-buff-modifiers",
@@ -113,9 +114,9 @@
     },
     {
       "id": "buff-breakers",
-      "status": "draft_not_merged",
-      "commit": "0d935802542b3ef38a7114f5ccdde5ea7459f2b3",
-      "note": "Accepted-event implementation drafted; independent native timing trace pending."
+      "status": "runtime_merged_pending_validation",
+      "commit": "8fe6039ee99476591ec43a5c0f513fd05e25d658",
+      "note": "Accepted-state compatibility policy. Lifetime identities stop reentrant Started callbacks leaking modifiers; native timing remains unverified."
     },
     {
       "id": "buff-taunts",
@@ -131,7 +132,8 @@
     },
     {
       "id": "shared-cooldown-tags",
-      "status": "queued"
+      "status": "revision_in_progress",
+      "note": "Native tag-list UI and matching GM server-state reset required before merge."
     },
     {
       "id": "xp-buff-multiplier",
@@ -140,11 +142,13 @@
     },
     {
       "id": "zone-banned-item-and-skill-tags",
-      "status": "implementing"
+      "status": "partial_merged_pending_validation",
+      "commit": "9dd3453085a829513db7bff1e1a80cc55a9963c3",
+      "note": "324unconditional rules enforced;9period24rules and Library1581missingmembership remain open."
     },
     {
       "id": "unit-and-primary-stat-limits",
-      "status": "queued"
+      "status": "implementing"
     },
     {
       "id": "prison-and-other-skill-restrictions",
@@ -152,7 +156,9 @@
     },
     {
       "id": "damage-threat-percent-health-and-level-interpolation",
-      "status": "queued"
+      "status": "partial_merged_pending_validation",
+      "commit": "917759c3fb637dec43adbb2d930da37f31b4a71a",
+      "note": "Authored floatlevel range/threat/HP-percent and numeric guards; percent/HP unit interpretation documented, target_health predicates remain open."
     },
     {
       "id": "recipe-learning",
@@ -204,7 +210,7 @@
     },
     {
       "id": "mail-expiry-throttling-feedback-and-pagination",
-      "status": "queued"
+      "status": "implementing"
     },
     {
       "id": "npc-physical-enchant",
