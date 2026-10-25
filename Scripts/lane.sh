@@ -39,6 +39,38 @@ setvar() { # setvar <lane> KEY VALUE: rewrite one KEY= line of the registry file
   local f; f=$(reg "$1"); grep -v "^$2=" "$f" > "$f.tmp" || true; echo "$2=$3" >> "$f.tmp"; mv "$f.tmp" "$f"; }
 mysql_up() { "${MYSQL[@]}" -N -e "select 1" >/dev/null 2>&1; }
 
+# mkdir is atomic in Git Bash as well as on Unix (flock is not shipped with Git for Windows).
+# Hold this across allocation AND publication, and serialize destructive cleanup with it too.
+# Never reclaim a lock by PID or age: PIDs are reused, and a killed shell may leave git running.
+# An interrupted/stale lock fails closed. After verifying ALL creators and their children have
+# stopped, inspect its files and any partial worktree/branch/target before removing it manually.
+allocation_lock() {
+  ALLOCATION_LOCK="$LANES/.allocation.lock"
+  ALLOCATION_OWNER=""
+  local timeout=${AAEMU_LANE_LOCK_TIMEOUT:-30} start=$SECONDS
+  [[ "$timeout" =~ ^[0-9]{1,6}$ ]] || die "AAEMU_LANE_LOCK_TIMEOUT must be seconds (0-999999)"
+  timeout=$((10#$timeout))
+  mkdir -p "$LANES"
+  trap 'allocation_unlock' EXIT
+  trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+  until mkdir "$ALLOCATION_LOCK" 2>/dev/null; do
+    # The owner may release it between the failed mkdir and this loop; retry even if gone.
+    if (( SECONDS - start >= timeout )); then
+      die "allocation/cleanup locked ($ALLOCATION_LOCK); retry. If interrupted, verify all creators and children stopped and inspect partial resources before manual recovery; never remove a lock by PID or age"
+    fi
+    sleep 0.1
+  done
+  # A unique marker also prevents our EXIT trap from releasing a replacement owner's lock.
+  # Interruption before the marker exists deliberately leaves a stale lock, never an unsafe unlock.
+  ALLOCATION_OWNER=$(mktemp -d "$ALLOCATION_LOCK/owner.XXXXXXXXXX")
+}
+allocation_owned() { [ -n "${ALLOCATION_OWNER:-}" ] && [ -d "$ALLOCATION_OWNER" ]; }
+allocation_unlock() {
+  allocation_owned || return 0
+  rm -f "$ALLOCATION_OWNER/lane.env"
+  rmdir "$ALLOCATION_OWNER" && rmdir "$ALLOCATION_LOCK"
+}
+
 # The lane whose worktree contains $PWD (or the script), unless a name was given.
 current() {
   local n=${1:-}
@@ -65,7 +97,7 @@ clients_on() {
 }
 port_free() { ! netstat -ano 2>/dev/null | grep LISTENING | grep -q ":$1 "; }
 
-cmd_new() {
+cmd_new() (
   local name="" type=fix base=$BASE_DEFAULT
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -74,13 +106,18 @@ cmd_new() {
     esac; shift
   done
   [[ "$name" =~ ^[a-z0-9][a-z0-9-]{1,30}$ ]] || die "name: 2-31 chars of a-z 0-9 - (e.g. quest-crash)"
-  [ -f "$(reg "$name")" ] && die "lane '$name' exists (Scripts/lane.sh info $name)"
+  allocation_lock
+  if [ -e "$(reg "$name")" ] || [ -L "$(reg "$name")" ]; then
+    die "lane '$name' exists (Scripts/lane.sh info $name)"
+  fi
   # Never share a target dir between worktrees: identical artifact names make cargo's mtime
   # fingerprints miss edits, so tests can silently run another worktree's code.
   local wt="$WT_ROOT/$name" branch="$type/$name" target="$TARGET_ROOT/$name"
-  [ -e "$wt" ] && die "$wt already exists"
-  [ -e "$target" ] && die "$target already exists (Scripts/lane.sh gc)"
-  mkdir -p "$LANES"
+  if [ -e "$wt" ] || [ -L "$wt" ]; then die "$wt already exists"; fi
+  if [ -e "$target" ] || [ -L "$target" ]; then die "$target already exists (Scripts/lane.sh gc)"; fi
+  git -C "$REPO" check-ref-format "refs/heads/$branch" || die "invalid branch '$branch'"
+  if git -C "$REPO" show-ref --verify --quiet "refs/heads/$branch"; then die "branch '$branch' already exists"; fi
+  local head; head=$(git -C "$REPO" rev-parse --verify "$base^{commit}")
 
   local prefix=""
   for p in "${PORT_PREFIXES[@]}"; do
@@ -90,7 +127,60 @@ cmd_new() {
   done
   [ -n "$prefix" ] || die "no free port block (24xxx-39xxx); finish old lanes first"
 
+  # Until lane.env is published the lock reserves all four resources. Roll back only artifacts
+  # we know we created, while still holding that lock. Ambiguous/partial Git failures retain it
+  # for inspection rather than deleting a pre-existing branch or allowing prefix reuse.
+  local target_started=0 target_created=0 worktree_started=0 worktree_created=0 published=0
+  new_exit() {
+    local status=$? clean=1
+    trap - EXIT
+    if ! allocation_owned; then
+      echo "lane: allocation lock ownership lost; leaving resources untouched" >&2
+      exit 1
+    fi
+    if [ "$published" = 0 ] && [ ! "$(reg "$name")" -ef "$ALLOCATION_OWNER/lane.env" ]; then
+      if [ "$worktree_created" = 1 ]; then
+        rm -f "$wt/rust/.cargo/config.toml" || clean=0
+        # No --force: unexpected changes or removal errors require inspection.
+        git -C "$REPO" worktree remove "$wt" || clean=0
+        if [ "$clean" = 1 ]; then
+          git -C "$REPO" update-ref -d "refs/heads/$branch" "$head" || clean=0
+        fi
+      elif [ "$worktree_started" = 1 ]; then
+        if [ -e "$wt" ] || git -C "$REPO" show-ref --verify --quiet "refs/heads/$branch"; then clean=0; fi
+      fi
+      if [ "$target_created" = 1 ] && [ "$clean" = 1 ]; then rmdir "$target" || clean=0; fi
+      if [ "$target_started" = 1 ] && [ "$target_created" = 0 ]; then
+        if [ -e "$target" ] || [ -L "$target" ]; then clean=0; fi
+      fi
+    fi
+    if [ "$clean" = 1 ]; then allocation_unlock
+    else echo "lane: partial creation retained with $ALLOCATION_LOCK; inspect $wt, $branch and $target before manual recovery" >&2; fi
+    exit "$status"
+  }
+  trap new_exit EXIT
+  # Leave the reservation details inside the lock for inspection after a hard interruption.
+  local db=${name//-/_}
+  cat > "$ALLOCATION_OWNER/lane.env" <<EOF
+LANE=$name
+BRANCH=$branch
+BASE=$base
+WT=$wt
+TARGET=$target
+PORT_PREFIX=$prefix
+LIVE=$LIVE_PREFIX$name
+DB_GAME=lane_${db}_game
+DB_LOGIN=lane_${db}_login
+CREATED=$(date +%Y-%m-%dT%H:%M:%S)
+CHECKED=
+EOF
+  mkdir -p "$WT_ROOT" "$TARGET_ROOT"
+  target_started=1
+  mkdir "$target"
+  target_created=1
+  worktree_started=1
   git -C "$REPO" worktree add -q "$wt" -b "$branch" "$base"
+  worktree_created=1
   mkdir -p "$wt/rust/.cargo"
   cat > "$wt/rust/.cargo/config.toml" <<EOF
 # Machine-local (gitignored), written by Scripts/lane.sh for lane '$name'.
@@ -108,23 +198,14 @@ debug = "line-tables-only"
 [profile.test]
 debug = "line-tables-only"
 EOF
-  local db=${name//-/_}
-  cat > "$(reg "$name")" <<EOF
-LANE=$name
-BRANCH=$branch
-BASE=$base
-WT=$wt
-TARGET=$target
-PORT_PREFIX=$prefix
-LIVE=$LIVE_PREFIX$name
-DB_GAME=lane_${db}_game
-DB_LOGIN=lane_${db}_login
-CREATED=$(date +%Y-%m-%dT%H:%M:%S)
-CHECKED=
-EOF
+  # Atomic, no-clobber publication of the unchanged registry format. A link also lets the EXIT
+  # trap recognize successful publication if a signal arrives before the next shell command.
+  allocation_owned || die "allocation lock ownership lost; leaving resources untouched"
+  ln -T "$ALLOCATION_OWNER/lane.env" "$(reg "$name")"
+  published=1
   echo "lane '$name' ready"
   cmd_info "$name"
-}
+)
 
 cmd_info() {
   local n; n=$(current "${1:-}"); load "$n"
@@ -199,9 +280,10 @@ stop_lane_procs() { # stop_lane_procs <live dir> <login port> <target dir or emp
   [ -z "$ids" ] || { echo "stopped processes: $(echo $ids)"; sleep 2; }
 }
 
-cmd_done() {
+cmd_done() (
   local name="" force=0 keep_branch=0
   for a in "$@"; do case "$a" in --force) force=1 ;; --keep-branch) keep_branch=1 ;; *) name=$a ;; esac; done
+  allocation_lock
   local n; n=$(current "$name"); load "$n"
   if [ -d "$WT" ] && [ $force = 0 ]; then
     [ -z "$(git -C "$WT" status --porcelain | grep -v 'rust/.cargo/')" ] \
@@ -225,13 +307,15 @@ cmd_done() {
   rm -f "$(reg "$n")"
   [ -d "$WT" ] && echo "note: $WT is still open in some process (a shell's cwd?); gc removes the empty folder later"
   echo "lane $n removed (worktree, target dir, runtime dir, databases$( [ $keep_branch = 1 ] || echo ', branch'))"
-}
+)
 
-cmd_gc() {
+cmd_gc() (
   local apply=0 min_age=24
   while [ $# -gt 0 ]; do
     case "$1" in --apply) apply=1 ;; --min-age-hours) min_age=$2; shift ;; *) die "unknown option $1" ;; esac; shift
   done
+  # A dry run is read-only. Applying GC must not delete an unpublished creator's target/worktree.
+  [ "$apply" = 0 ] || allocation_lock
   # Everything that is referenced stays: lane registry entries and any worktree's cargo target-dir.
   local keep=()
   for f in "$LANES"/*.env; do [ -f "$f" ] && keep+=("$(grep '^TARGET=' "$f" | cut -d= -f2-)" "$(grep '^LIVE=' "$f" | cut -d= -f2-)" "$(grep '^WT=' "$f" | cut -d= -f2-)"); done
@@ -270,7 +354,7 @@ cmd_gc() {
   fi
   [ $found = 1 ] || echo "  nothing to clean"
   [ $apply = 1 ] || echo "(dry run: add --apply to delete the candidates above)"
-}
+)
 
 case "${1:-}" in
   new) shift; cmd_new "$@" ;; list) cmd_list ;; info) shift; cmd_info "${1:-}" ;;
