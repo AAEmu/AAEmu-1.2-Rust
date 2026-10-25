@@ -447,7 +447,7 @@ pub fn chunks(request: &Request, snapshot: &Value) -> anyhow::Result<Vec<String>
     if bytes.len() > MAX_BYTES {
         bytes = serde_json::to_vec(&json!({"protocol": PROTOCOL, "nonce": request.nonce,
             "character_id": request.character_id, "item_id": request.item_id,
-            "sample_sequence": snapshot["sample_sequence"], "consistent": false,
+            "sample_sequence": snapshot["sample_sequence"], "consistent": false, "authority_consistent": false,
             "pending_supported": false, "unsupported": ["snapshot exceeds 65536 byte transport limit"], "source_capability": CAPABILITY}))?;
     }
     let sequence = &snapshot["sample_sequence"];

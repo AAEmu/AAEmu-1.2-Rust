@@ -621,6 +621,7 @@ fn audit_chunks_are_bounded_complete_and_reject_corrupt_or_stale_data() {
     let huge = json!({"nonce": req.nonce, "sample_sequence": 83, "payload": "x".repeat(70_000)});
     let unsupported = reassemble(&audit::chunks(&req, &huge).unwrap()).unwrap();
     assert_eq!(unsupported["consistent"], false);
+    assert_eq!(unsupported["authority_consistent"], false);
     assert!(unsupported.get("payload").is_none());
 }
 
