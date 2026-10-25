@@ -32,6 +32,13 @@ use crate::server::GameServer;
 use crate::systems::skills::packets::SCCooldownsPacket;
 use crate::world::{broadcast, unit_state, Player, PlayerRef, WorldInstance, WorldObject};
 
+#[path = "zone_access.rs"]
+mod zone_access;
+pub use zone_access::{zone_access_allowed, ZoneAccessState, CLOSED_ZONE};
+#[cfg(test)]
+#[path = "zone_access_tests.rs"]
+mod zone_access_tests;
+
 /// `LeaveWorldTargetType`.
 pub mod leave_target {
     pub const QUIT_GAME: u8 = 0;
@@ -77,11 +84,17 @@ fn mother_id(server: &GameServer, faction_id: u32) -> u32 {
 
 /// `Character.IsOnline` setter.
 pub fn set_online(server: &GameServer, p: &PlayerRef, value: bool) {
+    if !value {
+        zone_access::cancel(p);
+    }
     if p.data().is_online == value {
         return;
     }
     crate::systems::social::friend::send_status_change(server, p, true, value);
     p.data().is_online = value;
+    if value {
+        zone_access::update(server, p);
+    }
     // !value -> TeamManager.SetOffline
     crate::systems::social::session::on_online_changed(server, p, value);
 }
@@ -187,15 +200,13 @@ pub fn on_zone_change(server: &GameServer, p: &PlayerRef, last_zone: u32, new_zo
                 ability: 0,
                 language_type: 0,
             });
-            // Later phase: the forced transport out of closed zones for access level < 100
-            // (5 x SCErrorMsg(ClosedZone) every 2 s, then SCCharacterResurrected at the closest
-            // return portal).
             tracing::warn!("{} entered closed zone {}", p.data().unit.name, z.zone_key);
         }
         None => {
             tracing::warn!("{} entered unknown zone {new_zone}", p.data().unit.name);
         }
     }
+    zone_access::update(server, p);
 }
 
 /// `ChatManager.GetZoneChat(zoneKey)`.
@@ -931,6 +942,9 @@ pub async fn move_unit(server: &GameServer, conn: &mut GameConnection, obj_id: u
                 let t = target.transform();
                 (t.x, t.y, t.z)
             };
+            if let Some(player) = target.as_player() {
+                zone_access::remember_open_position(server, player);
+            }
             // An actor standing on an object sends its primary position in the
             // supporting object's frame and the auxiliary position in world
             // coordinates, whatever the object kind (gcFlags 1 unit, 2 gimmick,
@@ -974,6 +988,9 @@ pub async fn move_unit(server: &GameServer, conn: &mut GameConnection, obj_id: u
                 .leave_other_instance(&crate::world::WorldObject::from(&target), world.id);
             let changes = world.add_visible_object(&target, &server.view_ctx());
             handle_zone_changes(server, changes);
+            if let Some(player) = target.as_player() {
+                zone_access::update(server, player);
+            }
             // FinalizeTransform: every 5 s the movement speed analysis (SusManager)
             let new_pos = {
                 let t = target.transform();
@@ -1380,6 +1397,7 @@ pub async fn save_and_remove_from_world(server: &GameServer, active: Option<&Pla
     let Some(p) = active else {
         return;
     };
+    zone_access::cancel(p);
     // A duel / battlefield faction is temporary: restore it before the departure save so the
     // character is never persisted with its Red / Blue team or corps faction (RPA-09).
     server
@@ -1415,6 +1433,7 @@ pub async fn on_disconnect(server: &GameServer, conn: &mut GameConnection) {
         server.enter_world.release_connection(conn.id);
         return;
     };
+    zone_access::cancel(&p);
     crate::systems::housing::dominion::runtime::abort_character(server, p.character_id);
     crate::systems::housing::dominion::participants::clear_player(server, &p);
     crate::systems::economy::on_disconnect(server, &p);
@@ -1471,6 +1490,7 @@ pub fn force_release_connection(server: &GameServer, connection_id: u32) {
         if p.conn.id != connection_id {
             continue;
         }
+        zone_access::cancel(&p);
         // Drop the server-wide entry first: if the grid removal below panics on a poisoned
         // instance lock, the character must still not be lookable up by id / obj id.
         server.world.try_remove_character(p.obj_id);

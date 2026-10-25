@@ -504,7 +504,7 @@ pub fn use_skill(
         return result;
     }
     if let Some(c) = &character {
-        if let Some(result) = portal_zone_check(server, &template, c) {
+        if let Some(result) = portal_zone_check(server, &template, c, skill_object.as_ref()) {
             return (result, 0);
         }
     }
@@ -706,6 +706,7 @@ fn portal_zone_check(
     server: &GameServer,
     template: &SkillTemplate,
     c: &crate::world::PlayerRef,
+    skill_object: Option<&SkillObject>,
 ) -> Option<u8> {
     let (access, district, faction, instance) = {
         let d = c.data();
@@ -720,40 +721,88 @@ fn portal_zone_check(
         return None;
     }
     let data = &server.game_data.systems.skills;
-    let first = template.effects.first()?;
-    let (kind, id) = first.template?;
-    let mut zone_id: Option<u32> = None;
-    match data.effect(kind, id)? {
-        EffectTemplate::Special(s) if s.special_effect_type_id == 25 => {
-            if s.value1 > 0 {
-                // PortalManager.GetWorldGatesById: world gates are not loaded (portals subsystem)
-            } else {
-                let rp = server
-                    .game_data
-                    .portals
-                    .district_return_point(district, faction);
-                zone_id = server
-                    .game_data
-                    .portals
-                    .recalls
-                    .values()
-                    .flatten()
-                    .find(|p| p.id == rp)
-                    .map(|p| p.zone_id);
+    for effect in &template.effects {
+        let Some((kind, id)) = effect.template else {
+            continue;
+        };
+        let mut destination_instance = instance;
+        let destination = match data.effect(kind, id) {
+            Some(EffectTemplate::Special(s)) if s.special_effect_type_id == 25 => {
+                if s.value1 > 0 {
+                    crate::systems::npcs::portal::world_gates_by_id(server, s.value1 as u32)
+                        .cloned()
+                        .or_else(|| {
+                            if instance != 0 {
+                                return None;
+                            }
+                            let t = c.data().main_world_position?;
+                            destination_instance = t.instance_id;
+                            Some(crate::data::world_data::Portal {
+                                zone_id: t.zone_id,
+                                x: t.x,
+                                y: t.y,
+                                z: t.z,
+                                ..Default::default()
+                            })
+                        })
+                } else {
+                    destination_instance = crate::models::character::DEFAULT_INSTANCE_ID;
+                    let rp = server
+                        .game_data
+                        .portals
+                        .district_return_point(district, faction);
+                    server
+                        .game_data
+                        .portals
+                        .recalls
+                        .values()
+                        .flatten()
+                        .find(|p| p.id == rp)
+                        .cloned()
+                        .or_else(|| {
+                            if rp == 0 || instance != 0 {
+                                return None;
+                            }
+                            let t = c.data().main_world_position?;
+                            destination_instance = t.instance_id;
+                            Some(crate::data::world_data::Portal {
+                                zone_id: t.zone_id,
+                                x: t.x,
+                                y: t.y,
+                                z: t.z,
+                                ..Default::default()
+                            })
+                        })
+                }
+            }
+            Some(EffectTemplate::OpenPortal { .. }) => {
+                if instance != 0 {
+                    return Some(skill_result::INVALID_LOCATION);
+                }
+                match skill_object {
+                    Some(SkillObject::PortalInfo { id, .. }) => {
+                        crate::systems::npcs::portal::portal_info(&c.data().portals, *id as u32)
+                            .cloned()
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(p) = destination {
+            if !crate::world::session::zone_access_allowed(
+                server,
+                c,
+                destination_instance,
+                p.zone_id,
+                p.x,
+                p.y,
+            ) {
+                return Some(skill_result::NO_PERM);
             }
         }
-        EffectTemplate::OpenPortal { .. } if instance != 0 => {
-            return Some(skill_result::INVALID_LOCATION);
-        }
-        // character.Portals.GetPortalInfo(portalInfo.Id): portals subsystem
-        _ => {}
     }
-    let zone_id = zone_id?;
-    match server.game_data.zones.zone_by_key(zone_id) {
-        None => Some(skill_result::NO_PERM),
-        Some(z) if z.closed => Some(skill_result::NO_PERM),
-        _ => None,
-    }
+    None
 }
 
 /// `Skill.Cast(caster, casterCaster, target, targetCaster, skillObject)`.
@@ -778,7 +827,11 @@ pub fn cast(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         return;
     }
     // Source, target and resources may change while the cast timer is running.
-    let ready = super::validation::check(server, skill, caster, &ctx.target)
+    let ready = caster
+        .as_player()
+        .and_then(|p| portal_zone_check(server, &skill.template, p, Some(&ctx.skill_object)))
+        .map_or(Ok(()), |result| Err((result, 0)))
+        .and_then(|()| super::validation::check(server, skill, caster, &ctx.target))
         .and_then(|()| super::validation::check_resources(server, skill, caster))
         .and_then(|()| {
             super::validation::check_build_materials(server, skill, caster, &ctx.target)
