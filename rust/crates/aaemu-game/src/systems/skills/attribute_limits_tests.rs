@@ -105,8 +105,10 @@ async fn attribute_limits_equipment_and_stacked_buff_flow_caps_only_final_value(
     );
 
     let t = server.game_data.items.template(ITEM).unwrap();
-    let mut item = Item::create(42, t, 1, 0, p.character_id, &server.game_data.items, 0);
+    let mut item = Item::create(42, t, 1, 0, 0, &server.game_data.items, 0);
     item.class = t.class_type();
+    item.owner_id = u64::from(p.character_id);
+    item.slot_type = crate::models::container::slot_type::EQUIPMENT;
     item.slot = equip_slot::MAINHAND;
     p.data()
         .inventory
@@ -480,6 +482,64 @@ fn attribute_limits_dynamic_percent_order_and_extreme_stacks_remain_finite() {
         u.calculate_with_bonuses(f64::NAN, A::MoveSpeedMul, 500),
         0.0
     );
+}
+
+#[tokio::test]
+async fn attribute_limits_ai_movement_matches_stat_getter_at_raw_boundaries() {
+    use crate::systems::ai::npc;
+
+    // Literal native limits: complete MoveSpeedMul starts at 1000 and is bounded
+    // to -10000..3000 before /1000. Adding 1 after clamping a zero-based bonus
+    // made +5000 move at 4x while the stat getter correctly reported 3x.
+    let cases = [
+        (0, 0, 1.0),
+        (500, 0, 1.5),
+        (2000, 0, 3.0),
+        (2001, 0, 3.0),
+        (5000, 0, 3.0),
+        (-500, 0, 0.5),
+        (-1000, 0, 0.0),
+        (-10999, 0, -9.999),
+        (-11000, 0, -10.0),
+        (-11001, 0, -10.0),
+        (0, 50, 1.5),
+        (500, 100, 3.0),
+        (0, -50, 0.5),
+    ];
+    let mut d = data();
+    for (index, (flat, percent, _)) in cases.iter().enumerate() {
+        boost(
+            &mut d,
+            60100 + index as u32,
+            vec![
+                modifier(A::MoveSpeedMul, M::Value, *flat),
+                modifier(A::MoveSpeedMul, M::Percent, *percent),
+            ],
+        );
+    }
+    let (server, _client, _player, n) = skills::cast_validation_tests::fixture(d);
+    let obj = WorldObject::from(&n);
+    for (index, (flat, percent, expected_mul)) in cases.into_iter().enumerate() {
+        let buff_id = 60100 + index as u32;
+        assert_eq!(npc::real_movement_speed(&obj, 4.5), 4.5);
+        apply(&server, &obj, buff_id);
+        for base in [0.0, 0.75, 4.5] {
+            // Exercise the actual AI helper before evaluating the separate getter.
+            let actual = npc::real_movement_speed(&obj, base);
+            let expected = base * expected_mul;
+            let stat_speed = base * stat(&server, &obj, S::MoveSpeedMul);
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "flat {flat}, percent {percent}, base {base}: {actual} != {expected}"
+            );
+            assert!(
+                (actual - stat_speed).abs() < 1e-5,
+                "AI {actual} != stat-derived speed {stat_speed}"
+            );
+        }
+        skills::buffs::remove_buff(&server, &obj, buff_id);
+        assert_eq!(npc::real_movement_speed(&obj, 4.5), 4.5);
+    }
 }
 
 #[tokio::test]

@@ -73,6 +73,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
+      - name: Lane allocation regressions
+        run: python -I -B ../Scripts/test_lane.py
       - name: Build
         run: cargo build --workspace --all-targets --locked
       # Successor of the C# "Scripts Compile" step (the GM scripts are compiled into the binary).

@@ -24,7 +24,8 @@ use super::*;
 fn fixture_data() -> GameData {
     let mut data = GameData::empty();
     data.formulas = crate::systems::vehicles::stats::tests::formulas(
-        &[(1, "100000", 14, 5), (2, "1000", 15, 5), (3, "100", 12, 5)],
+        // Character formulas use owner 0; owner 5 belongs to mates.
+        &[(1, "100000", 14, 0), (2, "1000", 15, 0), (3, "100", 12, 0)],
         &[],
     );
     for id in [3, 4] {
@@ -516,6 +517,8 @@ async fn damage_pipeline_extreme_and_negative_inputs_never_heal_or_wrap() {
     for amount in [i32::MIN, i32::MAX] {
         let (server, mut client, player, npc) =
             skills::cast_validation_tests::fixture(fixture_data());
+        // Health theft clamps to the cached pool, populated during normal stat refresh.
+        skills::stats::refresh_cached_stats(&server, &WorldObject::from(&player));
         player.data().unit.summarize_damage = i32::MAX;
         player.data().unit.hp = 50;
         let mut effect = skills::tests::damage_effect(1, amount);
