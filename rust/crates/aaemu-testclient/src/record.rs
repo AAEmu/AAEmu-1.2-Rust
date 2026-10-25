@@ -54,7 +54,7 @@ struct Inner {
 }
 
 /// Control mode drains this bounded queue to stdout; ordinary recorders still keep a Vec.
-const MAX_PENDING_EVENTS: usize = 2048;
+const MAX_PENDING_EVENTS: usize = 8192;
 const MAX_PENDING_BYTES: usize = 8 * 1024 * 1024;
 
 struct LiveCapture {
@@ -175,6 +175,10 @@ impl Recorder {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    pub(crate) fn is_incremental(&self) -> bool {
+        self.inner().live.is_some()
+    }
+
     /// Starts a new scenario step; later frames are tagged with it.
     pub fn step(&self, name: &str) {
         self.inner().step = name.to_string();
@@ -193,6 +197,42 @@ impl Recorder {
         name: &str,
         body: &[u8],
     ) {
+        if channel == Channel::Game
+            && level == crate::game::LEVEL_COMPRESSED
+            && self.is_incremental()
+        {
+            if !self
+                .inner()
+                .live
+                .as_ref()
+                .is_some_and(|live| live.game_ready)
+            {
+                return;
+            }
+            // The caller supplies the inflated native body, just as an ordinary aggregate
+            // capture does. Share GameClient's atomic splitter, then apply the same auth
+            // policy to each entry. Never publish an outer batch containing a token.
+            match crate::game::split_game_batch(dir, opcode, body) {
+                Ok(packets) => {
+                    for packet in packets {
+                        self.push(
+                            channel,
+                            dir,
+                            packet.level,
+                            packet.opcode,
+                            crate::game::packet_name(dir, packet.level, packet.opcode),
+                            &packet.body,
+                        );
+                    }
+                }
+                Err(_) => {
+                    if let Some(live) = self.inner().live.as_mut() {
+                        live.failed = true;
+                    }
+                }
+            }
+            return;
+        }
         let mut i = self.inner();
         if !i.enabled {
             return;
@@ -203,9 +243,7 @@ impl Recorder {
         {
             return;
         }
-        // Compressed batches have no per-packet lengths. Without decoding every contained
-        // opcode we cannot rule out embedded authentication. Fail closed in control mode;
-        // normal scenario recorders keep their existing raw-batch capture behavior.
+        // Unknown levels have no validated public framing. DD04 is handled above.
         if channel == Channel::Game && !matches!(level, 1 | 2) {
             if let Some(live) = i.live.as_mut() {
                 live.failed = true;
@@ -381,13 +419,13 @@ mod tests {
     }
 
     #[test]
-    fn opaque_post_ready_batches_cannot_bypass_auth_filter() {
+    fn auth_only_post_ready_batch_never_retains_outer_or_inner_secret_bytes() {
         let sink = Sink::default();
         let rec = Recorder::with_live_sink(Box::new(sink.clone()));
         rec.control_game_ready(true);
         push(&rec);
         let before = sink.0.lock().unwrap().bytes.clone();
-        // Inflated batch: zero header, reconnect opcode, credential. No safe boundaries.
+        // A valid native reconnect-only batch must be filtered, not retained as raw DD04.
         rec.push(
             Channel::Game,
             Dir::S2C,
@@ -397,6 +435,25 @@ mod tests {
             &[0, 0, 1, 0, 9, 8, 7, 6],
         );
         assert_eq!(sink.0.lock().unwrap().bytes, before);
+        let events = rec.take_live_events().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].opcode, sc::SCErrorMsgPacket);
+    }
+
+    #[test]
+    fn malformed_batch_is_rejected_before_any_partial_event_or_secret_is_published() {
+        let sink = Sink::default();
+        let rec = Recorder::with_live_sink(Box::new(sink.clone()));
+        rec.control_game_ready(true);
+        rec.push(
+            Channel::Game,
+            Dir::S2C,
+            4,
+            1,
+            "CompressedGamePackets",
+            &[0, 0, 1, 0, 9, 8, 7, 6, 0xff],
+        );
+        assert!(sink.0.lock().unwrap().bytes.is_empty());
         assert!(rec.take_live_events().is_err());
     }
 

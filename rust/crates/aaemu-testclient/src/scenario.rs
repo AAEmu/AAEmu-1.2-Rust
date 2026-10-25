@@ -615,6 +615,15 @@ pub struct ControlSession {
 }
 
 impl ControlSession {
+    /// Own the three connections of an already established session.
+    pub fn new(game: GameClient, stream: StreamClient, login: LoginClient) -> Self {
+        Self {
+            game,
+            stream,
+            _login: login,
+        }
+    }
+
     /// Release this session's stream, login, and both game halves without application logout.
     pub async fn disconnect_hard(self) {
         let Self {
@@ -758,11 +767,7 @@ pub async fn connect_control(
     let id = control_character(&game.state.characters, &cfg.character, character_id)?;
     rec.control_game_ready(true);
     select_and_spawn(&mut game, id, &mut r).await?;
-    Ok(ControlSession {
-        game,
-        stream,
-        _login: login,
-    })
+    Ok(ControlSession::new(game, stream, login))
 }
 
 /// Use the scenario's GM chat path without printing command text or replies.

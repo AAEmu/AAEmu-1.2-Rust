@@ -31,9 +31,12 @@ const MAX_PUMP_MS: u64 = 5000;
 const MAX_DEADLINE_MS: u64 = 600_000;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+// Included in (never added to) command/connect/global ceilings. Socket cleanup and one
+// completion retain this slice even when the gameplay action never receives an answer.
+const REPORT_RESERVE: Duration = Duration::from_millis(250);
 const INPUT_QUEUE: usize = 16;
 const OUTPUT_BYTES: usize = 8 * 1024 * 1024;
-const OUTPUT_COUNT: usize = 4096;
+const OUTPUT_COUNT: usize = 8192;
 
 pub(crate) fn describe() -> Value {
     json!({
@@ -54,20 +57,26 @@ pub(crate) fn describe() -> Value {
             "id_bytes": 64, "commands": MAX_COMMANDS, "pump_ms": MAX_PUMP_MS,
             "command_ms": COMMAND_TIMEOUT.as_millis(),
             "connect_ms": CONNECT_TIMEOUT.as_millis(), "deadline_ms": MAX_DEADLINE_MS,
-            "event_queue_bytes": 8 * 1024 * 1024, "event_queue_count": 2048,
+            "cleanup_report_ms": REPORT_RESERVE.as_millis(),
+            "event_queue_bytes": 8 * 1024 * 1024, "event_queue_count": 8192,
             "input_queue_count": INPUT_QUEUE, "output_queue_bytes": OUTPUT_BYTES,
             "output_queue_count": OUTPUT_COUNT
         },
         "incremental_game_capture": true,
         "capture_create_new": true,
         "auth_frames_omitted": true,
-        "opaque_game_batches": "control fails closed; ordinary scenario captures unchanged",
+        "opaque_game_batches": "unsupported structures rejected; supported native DD04 expanded",
+        "game_batches": "validated native DD04 expanded into ordinary level-1 events; auth entries omitted; unknown/nested structures rejected",
+        "batch_limits": {"frame_bytes": aaemu_testclient::game::MAX_GAME_FRAME,
+            "inflated_bytes": aaemu_testclient::game::MAX_BATCH_BYTES,
+            "packets": aaemu_testclient::game::MAX_BATCH_PACKETS},
         "eof": "cancels active action and discards queued commands",
         "capture_start": "post-lobby character select/spawn (each session)",
         "handshake_before_network": true,
         "initial_character": "existing configured name, never first/create",
         "state_source": "client_observation",
         "automatic_retry": false,
+        "command_timeout": "one command_deadline response after socket closure; control remains disconnected for state, explicit same-character reconnect, or close",
         "hard_close": "local game write/read halves and stream; no CSLeaveWorld; FIN/RST, not logout",
         "completion": "one response per input line; event_seq is an observation boundary",
         "cleanup": "close, EOF, input/output failure or deadline closes only this session"
@@ -767,18 +776,44 @@ async fn serve(
             COMMAND_TIMEOUT
         };
         let until = (Instant::now() + allowance).min(report.deadline);
+        // Local state/cleanup remain usable in the global reporting slice; they do not
+        // wait for a gameplay acknowledgment. Network actions stop before that slice.
+        let work_until = if matches!(
+            &cmd,
+            Command::State | Command::Close | Command::DisconnectHard
+        ) {
+            until
+        } else {
+            until
+                .checked_sub(REPORT_RESERVE)
+                .unwrap_or_else(Instant::now)
+                .max(Instant::now())
+        };
         report.budget = until;
         controller.rec.step(&format!("control.{count}"));
         let rec = controller.rec.clone();
-        let done = drive(controller.execute(cmd, until), until, &rec, report, input).await?;
+        let done = drive(
+            controller.execute(cmd, work_until),
+            work_until,
+            &rec,
+            report,
+            input,
+        )
+        .await?;
         let mut stop = None;
         let result = match done {
             Completion::Done(Ok(value)) => Ok(value),
-            Completion::Done(Err(error)) => {
-                tracing::debug!("control action failed: {error:#}");
-                let closed = controller.disconnect("session_error").await;
+            Completion::Done(Err(_)) => {
+                // Native parser failures can retain input. No Display/Debug/cause logging.
+                tracing::debug!("control action failed");
+                let code = if Instant::now() >= work_until {
+                    "command_deadline"
+                } else {
+                    "session_error"
+                };
+                let closed = controller.disconnect(code).await;
                 report.write(json!({"type": "lifecycle", "closed": closed}))?;
-                Err("session_error")
+                Err(code)
             }
             Completion::Stopped(code) => {
                 let closed = controller.disconnect(code).await;
@@ -1225,5 +1260,181 @@ mod tests {
             !polled.load(Ordering::SeqCst),
             "expired output budget allowed later gameplay"
         );
+    }
+    async fn timeout_serve_case(end_with_eof: bool) {
+        use aaemu_testclient::game::GameClient;
+        use aaemu_testclient::login::LoginClient;
+        use aaemu_testclient::stream::StreamClient;
+        use std::sync::Mutex;
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        // Source-only fixture: ephemeral loopback transports, no emulator/auth/DB. Start
+        // with an established session so the full serve path executes the real tp method.
+        let rec = live_recorder();
+        let game_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let login_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut game = GameClient::connect(
+            &game_listener.local_addr().unwrap().to_string(),
+            rec.clone(),
+        )
+        .await
+        .unwrap();
+        let game_peer = game_listener.accept().await.unwrap().0;
+        let stream = StreamClient::connect(
+            &stream_listener.local_addr().unwrap().to_string(),
+            rec.clone(),
+        )
+        .await
+        .unwrap();
+        let stream_peer = stream_listener.accept().await.unwrap().0;
+        let login = LoginClient::connect(
+            &login_listener.local_addr().unwrap().to_string(),
+            rec.clone(),
+        )
+        .await
+        .unwrap();
+        let login_peer = login_listener.accept().await.unwrap().0;
+        game.account_id = 1;
+        game.state.selected_char = 42;
+        game.state.self_obj = 77;
+        game.state.observed_self_pos = Some((1.0, 2.0, 3.0));
+        let peers = [game_peer, stream_peer, login_peer].map(|mut peer| {
+            tokio::spawn(async move {
+                let mut bytes = Vec::new();
+                peer.read_to_end(&mut bytes).await.unwrap();
+                bytes
+            })
+        });
+        let cfg: BotConfig = serde_json::from_value(json!({"login":"127.0.0.1:1","user":"fixture",
+            "password":"fixture-only","character":"Owner"}))
+        .unwrap();
+        let started = Instant::now();
+        let mut controller = Controller {
+            cfg,
+            rec: rec.clone(),
+            session: Some(ControlSession::new(game, stream, login)),
+            handshaken: true,
+            character_id: Some(42),
+            generation: 1,
+            started,
+            clock: 40000,
+        };
+        let until = started + Duration::from_millis(800);
+        let (output, mut consumed) = mpsc::channel::<Output>(1);
+        let records = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let saved = records.clone();
+        let (observed, mut responses) = mpsc::channel::<Value>(4);
+        let consumer = tokio::spawn(async move {
+            while let Some(frame) = consumed.recv().await {
+                let value: Value = serde_json::from_slice(&frame.bytes).unwrap();
+                saved.lock().unwrap().push(value.clone());
+                frame.ack.send(Ok(())).unwrap();
+                if value["type"] == "response" {
+                    observed.send(value).await.unwrap();
+                }
+            }
+        });
+        let mut report = Reporter::new(output, until);
+        let (mut input, lines, terminal) = input_pair();
+        let tp = json!({"protocol":PROTOCOL,"id":1,"method":"tp","params":{"x":10,"y":20,"z":30}});
+        lines.send(serde_json::to_vec(&tp).unwrap()).await.unwrap();
+        let (finished, done) = oneshot::channel();
+        let serving = async {
+            let result = serve(&mut controller, &mut report, &mut input).await;
+            let _ = finished.send(());
+            result
+        };
+        let script = async move {
+            let timeout = responses.recv().await.unwrap();
+            assert_eq!(timeout["id"], 1);
+            assert_eq!(timeout["ok"], false);
+            assert_eq!(timeout["error"]["code"], "command_deadline");
+            // All three peer read tasks must observe EOF before any follow-up gameplay.
+            let mut evidence = Vec::new();
+            for peer in peers {
+                evidence.push(
+                    tokio::time::timeout(Duration::from_secs(1), peer)
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                );
+            }
+            let state = json!({"protocol":PROTOCOL,"id":2,"method":"state","params":{}});
+            lines
+                .send(serde_json::to_vec(&state).unwrap())
+                .await
+                .unwrap();
+            let state = responses.recv().await.unwrap();
+            assert_eq!(state["id"], 2);
+            assert_eq!(state["ok"], true);
+            assert_eq!(state["result"]["connected"], false);
+            assert_eq!(state["result"]["character_id"], 42);
+            if end_with_eof {
+                terminal.send_replace(Some("eof"));
+            }
+            // Keep stdin open in the deadline case until serve itself returns.
+            let keep_input = (lines, terminal);
+            let _ = done.await;
+            drop(keep_input);
+            evidence
+        };
+        let (result, evidence) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(serving, script)
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            result.unwrap(),
+            if end_with_eof { "eof" } else { "deadline" }
+        );
+        assert!(controller.session.is_none());
+        report.finish().await.unwrap();
+        {
+            let records = records.lock().unwrap();
+            assert_eq!(
+                records
+                    .iter()
+                    .filter(|r| r["type"] == "response" && r["id"] == 1)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                records
+                    .iter()
+                    .filter(|r| r["type"] == "lifecycle"
+                        && r["closed"]["reason"] == "command_deadline"
+                        && r["closed"]["game_read_closed"] == true
+                        && r["closed"]["game_write_closed"] == true
+                        && r["closed"]["stream_closed"] == true)
+                    .count(),
+                1
+            );
+        }
+        assert!(evidence[1].is_empty() && evidence[2].is_empty());
+        let mut wire = evidence[0].as_slice();
+        let mut chats = 0;
+        while !wire.is_empty() {
+            let len = usize::from(u16::from_le_bytes([wire[0], wire[1]]));
+            let frame = &wire[2..2 + len];
+            if frame[1] == 1 {
+                let opcode = u16::from_le_bytes([frame[4], frame[5]]);
+                assert_ne!(opcode, aaemu_game::opcodes::cs::CSLeaveWorldPacket);
+                if opcode == aaemu_game::opcodes::cs::CSSendChatMessagePacket {
+                    chats += 1;
+                }
+            }
+            wire = &wire[2 + len..];
+        }
+        assert_eq!(chats, 1, "tp must be attempted once, never retried");
+        consumer.abort();
+        let _ = consumer.await;
+    }
+
+    #[tokio::test]
+    async fn full_serve_timeout_reports_once_closes_sockets_and_remains_controllable() {
+        timeout_serve_case(true).await;
+        timeout_serve_case(false).await;
     }
 }
