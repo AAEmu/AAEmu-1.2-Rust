@@ -365,12 +365,30 @@ pub fn doodad_allow_removal(server: &GameServer, doodad: &DoodadRef) -> bool {
     if !coffer::coffer_is_empty(server, doodad) {
         return false;
     }
+    let instance = doodad.data().transform.instance_id;
     !doodad
         .core()
         .children()
         .iter()
         .filter_map(WorldObject::as_doodad)
-        .any(|c| c.data().is_persistent)
+        .any(|child| {
+            let (persistent, parent, child_instance) = {
+                let d = child.data();
+                (
+                    d.is_persistent && !d.phase.deleted,
+                    d.transform.parent_obj_id,
+                    d.transform.instance_id,
+                )
+            };
+            persistent
+                && parent == doodad.obj_id
+                && child_instance == instance
+                && server
+                    .world
+                    .world(instance)
+                    .and_then(|world| world.doodad(child.obj_id))
+                    .is_some_and(|live| std::sync::Arc::ptr_eq(&live, child))
+        })
 }
 
 /// `RecoverItem.Execute`.

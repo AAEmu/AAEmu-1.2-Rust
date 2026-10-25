@@ -12,7 +12,15 @@
 
 use crate::server::GameServer;
 use crate::systems::HookSlot;
-use crate::world::{NpcRef, PlayerRef, WorldObject};
+use crate::world::{DoodadRef, NpcRef, PlayerRef, WorldObject};
+
+/// Result of recovering an authored vehicle cargo rack; stale repair never grants an item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CargoRecovery {
+    Failed,
+    Recovered,
+    ClearedStale(u32),
+}
 
 /// Implemented by the **skills** subsystem (`SkillManager`, `Skill.Use`, buffs, combat).
 pub trait SkillsBridge: Send + Sync {
@@ -416,6 +424,30 @@ pub trait EconomyBridge: Send + Sync {
         _item_id: u64,
     ) -> bool {
         false
+    }
+
+    /// Check the exact equipped source and vacant rack, then move and record it atomically.
+    /// The caller holds the housing operation lock before entering the economy operation.
+    fn try_store_doodad_item(
+        &self,
+        _server: &GameServer,
+        _player: &PlayerRef,
+        _doodad: &DoodadRef,
+        _source: &crate::models::item::Item,
+        _required_count: i32,
+    ) -> bool {
+        false
+    }
+
+    /// Recover vehicle cargo from System escrow, including backpack-space preflight, in one
+    /// item operation. Ordinary furniture recovery retains its separate behavior.
+    fn recover_doodad_cargo(
+        &self,
+        _server: &GameServer,
+        _player: &PlayerRef,
+        _doodad: &DoodadRef,
+    ) -> CargoRecovery {
+        CargoRecovery::Failed
     }
 
     /// `Equipment.RemoveItem(task, item, true)` (`DoodadFuncBuyFish` / `ConvertFish`).
