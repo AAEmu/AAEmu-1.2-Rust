@@ -76,6 +76,7 @@ enum SummonKey {
 /// publication with departure. No object lock or synchronous guard crosses an await.
 #[derive(Debug, Default)]
 pub(crate) struct SlaveSummons {
+    pub(super) diagnostics: super::audit::Diagnostics,
     reservations: Mutex<HashMap<SummonKey, Weak<tokio::sync::Mutex<()>>>>,
     pub(super) departing: Mutex<HashMap<u32, u32>>,
     /// Serializes complete synchronous hull publication/removal, including nested callbacks.
@@ -114,6 +115,34 @@ impl std::fmt::Debug for TestPublicationHook {
 }
 
 impl SlaveSummons {
+    /// Observe the actual reservation table; never acquire or create an authority reservation.
+    pub(super) fn audit_identity(&self, owner: u32, item: u64) -> serde_json::Value {
+        let reservations = self
+            .reservations
+            .lock()
+            .expect("slave reservations poisoned");
+        let mut rows = Vec::new();
+        for (key, weak) in reservations.iter() {
+            let matches = match key {
+                SummonKey::Owner(id) => *id == owner,
+                SummonKey::Item(id) => *id == item,
+            };
+            if !matches {
+                continue;
+            }
+            if let Some(lock) = weak.upgrade() {
+                rows.push(serde_json::json!({"key": match key { SummonKey::Owner(_) => "owner", SummonKey::Item(_) => "item" }, "held_sample": lock.try_lock().is_err()}));
+            }
+        }
+        rows.sort_by_key(|r| r["key"].as_str().unwrap_or_default().to_owned());
+        drop(reservations);
+        let saves = self.pending_saves.lock().expect("slave saves poisoned");
+        let pending: Vec<_> = saves.iter().filter(|(id, rows)| **id == item || rows.iter().any(|r| r.summoner == owner)).map(|(id, rows)| serde_json::json!({"item": id, "rows": rows.iter().map(|r| serde_json::json!({"db_id": r.id, "item": r.item_id, "summoner": r.summoner, "owner_id": r.owner_id, "owner_type": r.owner_type, "attach": r.attach_point, "template": r.template_id})).collect::<Vec<_>>()})).collect();
+        serde_json::json!({"reservations_sample": rows,
+            "departing_connection": self.departing.lock().expect("slave departures poisoned").get(&owner).copied(),
+            "pending_hull_saves": pending})
+    }
+
     pub(crate) fn publication_scope(&self) -> spawn_manager::ReentrantGuard<'_> {
         self.publication_gate.lock()
     }
@@ -423,7 +452,7 @@ pub(super) fn owned_roots(
         .collect()
 }
 
-fn item_has_other_live_root(server: &GameServer, item_id: u64, owner_id: u32) -> bool {
+pub(super) fn item_has_other_live_root(server: &GameServer, item_id: u64, owner_id: u32) -> bool {
     server.world.worlds().into_iter().any(|world| {
         all_slaves(&world).into_iter().any(|slave| {
             let d = slave.data();
@@ -1543,6 +1572,26 @@ fn spawn_manager_of(
     server.systems.npcs.spawns.get(world_id)
 }
 
+fn audit_retirement(server: &GameServer, world: &WorldInstance, root: &SlaveRef) {
+    let (children, doodads) = {
+        let d = root.data();
+        (d.attached_slaves.clone(), d.attached_doodads.clone())
+    };
+    let doodads: Vec<_> = doodads
+        .into_iter()
+        .filter_map(|id| world.doodad(id))
+        .collect();
+    let diagnostics = &server.systems.vehicles.slave_summons.diagnostics;
+    diagnostics.retiring(world.id, root, &doodads);
+    for child in children.into_iter().filter_map(|id| world.slave(id)) {
+        diagnostics.retiring(world.id, &child, &[]);
+    }
+}
+
+#[cfg(test)]
+#[path = "audit_tests.rs"]
+mod audit_tests;
+
 /// `Delete(owner, objId, ignoreAttachedItemWarning)`.
 pub fn delete(
     server: &GameServer,
@@ -1613,6 +1662,7 @@ fn try_delete(
     if !can_delete(&world, &slave, owner, ignore_attached_item_warning) {
         return false;
     }
+    audit_retirement(server, &world, &slave);
     save(server, &slave);
     let (attached_chars, tl) = {
         let d = slave.data();
@@ -1907,8 +1957,16 @@ pub fn create_from_skill(
         return;
     };
     let owner = owner.clone();
+    // Construct the lease before the detached future exists, so even a never-polled task
+    // remains pending evidence. The captured lease drops on no runtime, abort and unwind.
+    let lease = server
+        .systems
+        .vehicles
+        .slave_summons
+        .diagnostics
+        .summon(owner.character_id, item_id);
     let fut = async move {
-        create_for_owner(
+        create_for_owner_job(
             &server,
             &owner,
             item_id,
@@ -1917,6 +1975,7 @@ pub fn create_from_skill(
             None,
             placement,
             max_range,
+            lease,
         )
         .await;
     };
@@ -2015,7 +2074,37 @@ fn validated_summon_placement(
 
 /// `Create(owner, skillData, hideSpawnEffect, positionOverride)`.
 #[allow(clippy::too_many_arguments)]
-pub async fn create_for_owner(
+pub fn create_for_owner<'a>(
+    server: &'a GameServer,
+    owner: &'a PlayerRef,
+    item_id: u64,
+    item_template_id: u32,
+    hide_spawn_effect: bool,
+    position_override: Option<Transform>,
+    placement: Option<crate::systems::skills::ext::SummonPlacement>,
+    max_range: f32,
+) -> impl std::future::Future<Output = Option<SlaveRef>> + Send + 'a {
+    let lease = server
+        .systems
+        .vehicles
+        .slave_summons
+        .diagnostics
+        .summon(owner.character_id, item_id);
+    create_for_owner_job(
+        server,
+        owner,
+        item_id,
+        item_template_id,
+        hide_spawn_effect,
+        position_override,
+        placement,
+        max_range,
+        lease,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_for_owner_job(
     server: &GameServer,
     owner: &PlayerRef,
     item_id: u64,
@@ -2024,7 +2113,9 @@ pub async fn create_for_owner(
     position_override: Option<Transform>,
     placement: Option<crate::systems::skills::ext::SummonPlacement>,
     max_range: f32,
+    lease: super::audit::Lease,
 ) -> Option<SlaveRef> {
+    lease.phase("validating");
     let world = player_world(server, owner)?;
     if item_id == 0 || item_template_id == 0 {
         return None;
@@ -2063,33 +2154,41 @@ pub async fn create_for_owner(
         position_override,
         placement,
         max_range,
+        &lease,
     )
     .await
 }
 
 /// `Create(owner, null, templateId, item, hideSpawnEffect, positionOverride)` with the DB parts
 /// (saved slave, its persistent doodads, its saved child slaves).
-pub async fn create(
-    server: &GameServer,
-    world: &Arc<WorldInstance>,
-    owner: Option<&PlayerRef>,
+pub fn create<'a>(
+    server: &'a GameServer,
+    world: &'a Arc<WorldInstance>,
+    owner: Option<&'a PlayerRef>,
     template_id: u32,
     item: Option<Item>,
     hide_spawn_effect: bool,
     position_override: Option<Transform>,
-) -> Option<SlaveRef> {
-    create_with_placement(
-        server,
-        world,
-        owner,
-        template_id,
-        item,
-        hide_spawn_effect,
-        position_override,
-        None,
-        0.0,
-    )
-    .await
+) -> impl std::future::Future<Output = Option<SlaveRef>> + Send + 'a {
+    let lease = server.systems.vehicles.slave_summons.diagnostics.summon(
+        owner.map_or(0, |o| o.character_id),
+        item.as_ref().map_or(0, |i| i.id),
+    );
+    async move {
+        create_with_placement(
+            server,
+            world,
+            owner,
+            template_id,
+            item,
+            hide_spawn_effect,
+            position_override,
+            None,
+            0.0,
+            &lease,
+        )
+        .await
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2103,6 +2202,7 @@ async fn create_with_placement(
     mut position_override: Option<Transform>,
     placement: Option<crate::systems::skills::ext::SummonPlacement>,
     max_range: f32,
+    lease: &super::audit::Lease,
 ) -> Option<SlaveRef> {
     server
         .game_data
@@ -2119,6 +2219,7 @@ async fn create_with_placement(
     let summons = &server.systems.vehicles.slave_summons;
     let owner_id = owner.map_or(0, |o| o.character_id);
     // Acquire in one order. Owned async guards release on all errors and future cancellation.
+    lease.phase("waiting_owner");
     let _owner_reservation = match owner {
         Some(_) => Some(
             summons
@@ -2128,6 +2229,7 @@ async fn create_with_placement(
         ),
         None => None,
     };
+    lease.phase("waiting_item");
     let _item_reservation = match (&item, owner) {
         (Some(item), Some(_)) if item.id != 0 => Some(
             summons
@@ -2137,6 +2239,7 @@ async fn create_with_placement(
         ),
         _ => None,
     };
+    lease.phase("active");
     let mut item = match (item, owner) {
         (Some(item), Some(owner)) => {
             let item = owned_summon_item(server, owner, item.id, item.template_id)?;
@@ -3501,6 +3604,9 @@ pub fn do_die(
     let _items = server.systems.economy.operation_scope();
     let _publication = server.systems.vehicles.slave_summons.publication_scope();
     let obj = WorldObject::from(slave);
+    if let Some(world) = server.world.world_of(&obj) {
+        audit_retirement(server, &world, slave);
+    }
     crate::systems::skills::skill::interrupt_skills(server, &obj);
     crate::systems::skills::buffs::fire_unit_event(
         server,

@@ -21,6 +21,7 @@
 //! | [`hooks`] | physics / economy hooks, the skills / social hook wrappers |
 //! | [`packets`] | every vehicle C->S / S->C packet |
 
+pub mod audit;
 pub mod data;
 pub mod effects;
 pub mod harpoon;
@@ -534,8 +535,16 @@ pub fn force_dismount_and_despawn(
             continue;
         };
         let player = player.clone();
+        let lease = server
+            .systems
+            .vehicles
+            .slave_summons
+            .diagnostics
+            .retirement(&slave, gen);
         rt.spawn(async move {
+            let task_lease = lease;
             tokio::time::sleep(Duration::from_millis(time_to_despawn_ms)).await;
+            task_lease.phase("active");
             let _items = server.systems.economy.operation_scope();
             let _publication = server
                 .systems
@@ -577,8 +586,16 @@ pub fn force_dismount_and_despawn_test_slave(
         return res;
     };
     let (player, slave) = (player.clone(), slave.clone());
+    let lease = server
+        .systems
+        .vehicles
+        .slave_summons
+        .diagnostics
+        .retirement(&slave, gen);
     rt.spawn(async move {
+        let task_lease = lease;
         tokio::time::sleep(Duration::from_millis(time_to_despawn_ms)).await;
+        task_lease.phase("active");
         let _items = server.systems.economy.operation_scope();
         let _publication = server.systems.vehicles.slave_summons.publication_scope();
         if slave.data().leave_task != gen {
