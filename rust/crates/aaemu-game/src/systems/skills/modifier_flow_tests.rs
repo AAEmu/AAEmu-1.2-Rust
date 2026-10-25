@@ -211,8 +211,8 @@ async fn modifier_exp_buff_boosts_positive_xp_and_active_abilities_only() {
 async fn modifier_exp_config_composes_and_large_gains_preserve_level_caps() {
     let mut data = data();
     add_boost(&mut data, 3084, vec![bonus(UnitAttribute::ExpMul, 20)]);
-    let mut server = crate::test_support::test_server_with(data);
-    server.config.world.exp_rate = 2.0;
+    let server = crate::test_support::test_server_with(data);
+    server.config.update(|c| c.world.exp_rate = 2.0);
     let mut c = crate::test_support::test_character(1, "XP", 100.0, 100.0);
     c.experience = 10_000;
     c.ability1 = 1;
@@ -233,7 +233,7 @@ async fn modifier_exp_config_composes_and_large_gains_preserve_level_caps() {
     assert_eq!(c.unit.level, 55);
     assert_eq!(c.experience, 55_000);
     assert_eq!(c.abilities.abilities[0].exp, 55_000);
-    server.config.world.exp_rate = -1.0;
+    server.config.update(|c| c.world.exp_rate = -1.0);
     assert_eq!(
         skills::progress::add_exp_locked(&server, &mut c, 100, true)
             .unwrap()
