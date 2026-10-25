@@ -28,6 +28,43 @@ use super::doodad::manager as doodads;
 
 /// `BaseUnitType.Npc`.
 const BASE_UNIT_TYPE_NPC: u32 = 1;
+
+/// Permission of the current function that actually offers this recipe. The 1.2 client's
+/// `sub_398A9480` checks both legacy CraftStart lists and CraftPack membership before sending
+/// CSExecuteCraft; another function in the same phase (such as ParentInfo) grants no access.
+pub fn doodad_craft_permission(
+    server: &GameServer,
+    doodad: &crate::world::DoodadRef,
+    craft_id: u32,
+) -> Option<u8> {
+    use super::doodad::templates::FuncTemplate;
+    let group = doodad.data().func_group_id;
+    let data = &server.game_data.systems.npcs.doodad;
+    let crafts = &server.game_data.systems.economy.craft;
+    data.doodad_funcs(group).iter().find_map(|func| {
+        let offers_craft = match data.func_template(func.func_id, &func.func_type)? {
+            FuncTemplate::CraftPack(pack) => crafts
+                .craft_pack_crafts
+                .get(&pack.craft_pack_id)
+                .is_some_and(|recipes| recipes.contains(&craft_id)),
+            FuncTemplate::CraftStart(start) => data
+                .phase_func_templates
+                .get("DoodadFuncCraftStartCraft")
+                .is_some_and(|recipes| {
+                    recipes.values().any(|recipe| {
+                        matches!(recipe, FuncTemplate::CraftStartCraft(r)
+                            if r.doodad_func_craft_start_id == start.id && r.craft_id == craft_id)
+                    })
+                }),
+            _ => false,
+        };
+        if !offers_craft {
+            return None;
+        }
+        u8::try_from(func.perm_id).ok()
+    })
+}
+
 /// Installs this subsystem's hook implementations into the other subsystems.
 pub fn install(server: &GameServer) {
     install_economy(server);

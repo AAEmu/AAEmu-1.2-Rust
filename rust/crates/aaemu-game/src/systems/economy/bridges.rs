@@ -3444,20 +3444,6 @@ impl super::craft::CraftHooks for EconomyComposite {
         crate::systems::skills::skill::interrupt_skills(server, &me);
     }
 
-    fn doodad_func_permission(&self, server: &GameServer, doodad: &DoodadRef) -> u8 {
-        let group = doodad.data().func_group_id;
-        server
-            .game_data
-            .systems
-            .npcs
-            .doodad
-            .doodad_funcs(group)
-            .first()
-            .map_or(super::craft::doodad_func_permission::ANY, |f| {
-                f.perm_id as u8
-            })
-    }
-
     fn account_house_zone_ids(&self, server: &GameServer, account_id: u32) -> Vec<u32> {
         server
             .systems
