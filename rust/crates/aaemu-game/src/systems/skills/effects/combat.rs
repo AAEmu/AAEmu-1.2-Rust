@@ -369,6 +369,27 @@ pub fn damage(
         min = e.fixed_min as f32;
         max = e.fixed_max as f32;
     }
+    // Native 1.2 sub_3941B030 / sub_39354450: a buff source
+    // uses BuffAttribute::Damage (3), including fixed damage; it is not a skill modifier.
+    if let Some(b) = args.source.buff.as_ref().filter(|_| skill.is_none()) {
+        let tags = server.game_data.systems.skills.buff_tags(b.id);
+        caster.with_unit(|u| {
+            let modifiers = &u.unit().buff_modifiers;
+            let apply = |value: f32| {
+                modifiers
+                    .apply(
+                        b.id,
+                        tags,
+                        crate::models::unit::BuffAttribute::Damage,
+                        f64::from(value),
+                    )
+                    .max(0.0)
+                    .min(f64::from(i32::MAX)) as f32
+            };
+            min = apply(min);
+            max = apply(max);
+        });
+    }
     let mut final_damage = rand_float(min, max);
     if e.target_buff_tag_id > 0 && buffs::check_buff_tag(server, &trg, e.target_buff_tag_id) {
         final_damage *= e.target_buff_bonus_mul;
@@ -663,6 +684,19 @@ pub fn heal(
         }
     }
     value = (value as f32 * cs[4] as f32) as i32;
+    if let Some(skill) = args.source.skill() {
+        // Native 1.2 sub_3941A460: Heal (12) follows HealMul, for fixed and
+        // computed healing alike. Reuse the cache's percent/value conventions.
+        value = super::super::skill::apply_skill_modifiers(
+            server,
+            skill,
+            &caster,
+            crate::models::unit::SkillAttribute::Heal,
+            f64::from(value),
+        )
+        .max(0.0)
+        .min(f64::from(i32::MAX)) as i32;
+    }
     if let Some(p) = caster.as_player() {
         if e.actability_group_id > 0 {
             let act = p
@@ -714,7 +748,7 @@ pub fn heal(
     let Some((old, hp, mp)) = trg.with_unit(|u| {
         let u = u.unit_mut();
         let old = u.hp;
-        u.hp = (u.hp + value).min(u.max_hp);
+        u.hp = u.hp.saturating_add(value).min(u.max_hp);
         (old, u.hp, u.mp)
     }) else {
         return;

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use rand::Rng;
 
 use crate::models::transform::PositionAndRotation;
-use crate::models::unit::SkillAttribute;
+use crate::models::unit::{SkillAttribute, UnitAttribute};
 use crate::server::GameServer;
 use crate::systems::social::achievement::char_record_kind;
 use crate::systems::social::achievement_hooks::{AchievementInput, RecordMatch};
@@ -882,6 +882,17 @@ pub fn start_channeling(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         .map(|target| (target.obj_id(), target.core() as *const _ as usize));
     let caster = &ctx.caster;
     let t = &skill.template;
+    // Native 1.2 sub_398A01B0, attribute 11: milliseconds, independent of CastTime.
+    // The fired packet encodes duration as signed i16 (ms / 10 + 10).
+    let channeling_time = apply_skill_modifiers(
+        server,
+        skill,
+        caster,
+        SkillAttribute::ChannelingTime,
+        f64::from(t.channeling_time),
+    )
+    .max(0.0)
+    .min(f64::from((i32::from(i16::MAX) - 10) * 10)) as i32;
     let data = &server.game_data.systems.skills;
     if t.channeling_buff_id != 0 {
         if let Some(b) = data.buff(t.channeling_buff_id).cloned() {
@@ -931,7 +942,7 @@ pub fn start_channeling(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             target: ctx.target_caster,
             skill_object: ctx.skill_object.clone(),
             computed_delay: 0,
-            channeling_time: t.channeling_time,
+            channeling_time,
             fire_anim_id: t.fire_anim_id,
         },
         true,
@@ -953,11 +964,12 @@ pub fn start_channeling(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             ctx.clone(),
             cancel.clone(),
             t.channeling_tick,
+            channeling_time,
         );
     }
     let skill2 = skill.clone();
     let ctx2 = ctx.clone();
-    let scheduled = super::tasks::schedule(server, i64::from(t.channeling_time), move |srv| {
+    let scheduled = super::tasks::schedule(server, i64::from(channeling_time), move |srv| {
         if cancel.is_cancelled() {
             return;
         }
@@ -990,9 +1002,10 @@ fn schedule_channel_tick(
     ctx: CastCtx,
     cancel: CancelToken,
     elapsed: i32,
+    duration: i32,
 ) {
     let interval = skill.template.channeling_tick;
-    if interval <= 0 || elapsed >= skill.template.channeling_time {
+    if interval <= 0 || elapsed >= duration {
         return;
     }
     super::tasks::schedule(server, i64::from(interval), move |server| {
@@ -1044,6 +1057,7 @@ fn schedule_channel_tick(
             ctx.clone(),
             cancel,
             elapsed.saturating_add(interval),
+            duration,
         );
     });
 }
@@ -1367,10 +1381,11 @@ fn append_hostile_ships_hit_by_siege_hull_aoe(
     caster: &Target,
     target_self: &Target,
     ctx: &CastCtx,
+    radius: f32,
     possible: &mut Vec<Target>,
 ) {
     use crate::systems::ai::physics::{siege_point_hits_ship, SIEGE_PIVOT_QUERY_SLACK_METERS};
-    if t.target_area_radius <= 0 {
+    if radius <= 0.0 {
         return;
     }
     if DamageType::from_raw(i64::from(t.damage_type_id)) != Some(DamageType::Siege) {
@@ -1382,7 +1397,6 @@ fn append_hostile_ships_hit_by_siege_hull_aoe(
     ) {
         return;
     }
-    let radius = t.target_area_radius as f32;
     let p = super::geometry::world_pos(server, target_self);
     let relation = SkillTargetRelation::from_raw(i64::from(t.target_relation))
         .unwrap_or(SkillTargetRelation::Any);
@@ -1426,6 +1440,16 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     let caster_t = Target::Obj(caster.clone());
     let target_self = &ctx.target;
     let selection = SkillTargetSelection::from_raw(i64::from(t.target_selection));
+    // Native 1.2 sub_398A01B0 attribute 3 / sub_39420B30: radius is in meters.
+    let area_radius = apply_skill_modifiers(
+        server,
+        skill,
+        caster,
+        SkillAttribute::AreaRadius,
+        f64::from(t.target_area_radius),
+    )
+    .max(0.0)
+    .min(f64::from(i32::MAX)) as f32;
     let mut possible: Vec<Target> = Vec::new();
     if t.target_siege
         && selection == Some(SkillTargetSelection::Source)
@@ -1433,8 +1457,7 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     {
         possible.push(target_self.clone());
     } else if t.target_area_radius > 0 {
-        let mut units =
-            super::geometry::around_radius(server, target_self, t.target_area_radius as f32, true);
+        let mut units = super::geometry::around_radius(server, target_self, area_radius, true);
         if selection == Some(SkillTargetSelection::Source) {
             if let Some(o) = target_self.as_obj() {
                 units.push(o.clone());
@@ -1456,6 +1479,7 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         &caster_t,
         target_self,
         ctx,
+        area_radius,
         &mut possible,
     );
     // Distinct
@@ -2133,10 +2157,20 @@ pub fn attack_delay(
 ) -> f64 {
     let gcd_mul = stat(server, caster, StatKind::GlobalCooldownMul);
     if matches!(t.id, 2..=4) && caster.as_player().is_some() {
-        let (slot, fallback) = match t.id {
-            2 => (equip_slot::MAINHAND, 1500.0),
-            3 => (equip_slot::OFFHAND, 1500.0),
-            _ => (equip_slot::RANGED, 1800.0),
+        let slot = match t.weapon_slot_for_auto_attack_id {
+            equip_slot::MAINHAND | equip_slot::OFFHAND | equip_slot::RANGED => {
+                t.weapon_slot_for_auto_attack_id
+            }
+            _ => match t.id {
+                2 => equip_slot::MAINHAND,
+                3 => equip_slot::OFFHAND,
+                _ => equip_slot::RANGED,
+            },
+        };
+        let fallback = if slot == equip_slot::RANGED {
+            1800.0
+        } else {
+            1500.0
         };
         let speed = server
             .systems
@@ -2144,9 +2178,22 @@ pub fn attack_delay(
             .ext
             .items()
             .weapon_holdable(server, caster, slot)
-            .filter(|h| h.speed > 0.0)
+            .filter(|h| h.speed.is_finite() && h.speed > 0.0)
             .map_or(fallback, |h| f64::from(h.speed));
-        return (speed * (gcd_mul / 100.0)).clamp(400.0, 5000.0);
+        let attr = if slot == equip_slot::RANGED {
+            UnitAttribute::RangedSpeedMul
+        } else {
+            UnitAttribute::MeleeSpeedMul
+        };
+        let haste = caster
+            .with_unit(|u| u.unit().calculate_with_bonuses(0.0, attr, now_ms()))
+            .unwrap_or(0.0);
+        // Native 1.2 sub_398B49E0: weapon delay * 1000 / (1000 + haste),
+        // guarding the denominator at 1. Offhand uses melee haste, ranged its own.
+        // Only this server repeat timer applies haste; the GCD remains once-only.
+        return (speed * (gcd_mul / 100.0) * 1000.0 / (1000.0 + haste.max(-999.0)))
+            .max(0.0)
+            .min(f64::from(i32::MAX));
     }
     let cast_mul = stat(server, caster, StatKind::CastTimeMul);
     let cast = f64::from(t.casting_time) * cast_mul;
@@ -2364,3 +2411,7 @@ mod auto_attack_lifecycle_tests {
 #[cfg(test)]
 #[path = "owned_npc_target_tests.rs"]
 mod owned_npc_target_tests;
+
+#[cfg(test)]
+#[path = "modifier_flow_tests.rs"]
+mod modifier_flow_tests;
