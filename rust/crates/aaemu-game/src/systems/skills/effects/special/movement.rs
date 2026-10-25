@@ -657,6 +657,21 @@ pub fn return_(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         }
         if let Some(t) = &trp {
             if in_instance {
+                if !crate::world::session::zone_access_allowed(
+                    server,
+                    p,
+                    instance_id,
+                    t.zone_id,
+                    t.x,
+                    t.y,
+                ) {
+                    p.send(SCErrorMsgPacket::new(
+                        crate::world::session::CLOSED_ZONE,
+                        0,
+                        true,
+                    ));
+                    return;
+                }
                 move_within_instance(server, p, t);
                 return;
             }
@@ -664,6 +679,21 @@ pub fn return_(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         trp
     };
     if let Some(t) = &trp {
+        if !crate::world::session::zone_access_allowed(
+            server,
+            p,
+            DEFAULT_INSTANCE_ID,
+            t.zone_id,
+            t.x,
+            t.y,
+        ) {
+            p.send(SCErrorMsgPacket::new(
+                crate::world::session::CLOSED_ZONE,
+                0,
+                true,
+            ));
+            return;
+        }
         p.data().set_disabled_set_position(true);
         p.send(SCLoadInstancePacket {
             instance_id: DEFAULT_INSTANCE_ID,
@@ -682,6 +712,21 @@ pub fn return_(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
             PositionAndRotation::new(t.x, t.y, t.z, 0.0, 0.0, deg_to_rad(t.yaw)),
         );
     } else if let Some(m) = npcs.main_world_position(server, p).filter(|_| !in_instance) {
+        if !crate::world::session::zone_access_allowed(
+            server,
+            p,
+            m.instance_id,
+            m.zone_id,
+            m.pos.x,
+            m.pos.y,
+        ) {
+            p.send(SCErrorMsgPacket::new(
+                crate::world::session::CLOSED_ZONE,
+                0,
+                true,
+            ));
+            return;
+        }
         p.data().set_disabled_set_position(true);
         p.send(SCLoadInstancePacket {
             instance_id: m.instance_id,
