@@ -19,7 +19,9 @@
 //! holding one; collect what you need, drop the guard, then act (see `world::object`).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use crate::data::attribute_limits::UnitAttributeLimits;
 use crate::models::buff::Buffs;
 use crate::models::transform::Transform;
 use crate::models::unit_model::UnitCustomModelParams;
@@ -268,9 +270,17 @@ impl DynamicBonus {
 pub struct Bonuses {
     pub statics: Vec<(u32, Vec<Bonus>)>,
     pub dynamics: Vec<(u32, Vec<DynamicBonus>)>,
+    /// Per-server data, bound before world insertion or detached stat calculation.
+    pub attribute_limits: Arc<UnitAttributeLimits>,
 }
 
 impl Bonuses {
+    pub fn bind_attribute_limits(&mut self, limits: &Arc<UnitAttributeLimits>) {
+        if !Arc::ptr_eq(&self.attribute_limits, limits) {
+            self.attribute_limits = Arc::clone(limits);
+        }
+    }
+
     /// `AddBonus(bonusIndex, bonus)`.
     pub fn add_bonus(&mut self, index: u32, bonus: Bonus) {
         match self.statics.iter_mut().find(|(i, _)| *i == index) {
@@ -326,7 +336,19 @@ impl Bonuses {
 
     /// `CalculateWithBonuses(value, attr)`: static flat, dynamic flat, static percent, dynamic
     /// percent. (`value * bonus.Value / 100f` is float arithmetic in C#.)
-    pub fn calculate(&self, mut value: f64, attr: UnitAttribute, now_ms: i64) -> f64 {
+    pub fn calculate(&self, value: f64, attr: UnitAttribute, now_ms: i64) -> f64 {
+        self.calculate_with_limits(value, attr, now_ms, &self.attribute_limits)
+    }
+
+    /// Explicit data also covers detached, immutable character evaluators. Apply the
+    /// native bound to the final raw attribute, preserving flat/percent bonus order.
+    pub fn calculate_with_limits(
+        &self,
+        mut value: f64,
+        attr: UnitAttribute,
+        now_ms: i64,
+        limits: &UnitAttributeLimits,
+    ) -> f64 {
         let statics = self.bonuses(attr);
         let dynamics = self.dynamic_bonuses(attr);
         for b in &statics {
@@ -353,7 +375,7 @@ impl Bonuses {
                 }
             }
         }
-        value
+        limits.clamp(attr, value)
     }
 }
 

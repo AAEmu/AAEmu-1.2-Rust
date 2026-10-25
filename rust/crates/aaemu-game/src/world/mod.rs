@@ -834,6 +834,11 @@ impl WorldInstance {
     /// `GameObject.Spawn()` (`ParentWorld.AddObject(this); Show()`).
     pub fn spawn(&self, obj: impl Into<WorldObject>, ctx: &ViewCtx<'_>) -> Vec<ZoneChange> {
         let obj = obj.into();
+        obj.with_unit(|u| {
+            u.unit_mut()
+                .bonuses
+                .bind_attribute_limits(&ctx.data.characters.unit_attribute_limits)
+        });
         self.add_object(&obj);
         self.show(obj, ctx)
     }

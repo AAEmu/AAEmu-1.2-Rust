@@ -14,6 +14,7 @@
 //!
 //! As in the 1.2 C# (no tolerant loaders), a failing table aborts startup.
 
+pub mod attribute_limits;
 pub mod character_templates;
 pub mod client_files;
 pub mod experience;

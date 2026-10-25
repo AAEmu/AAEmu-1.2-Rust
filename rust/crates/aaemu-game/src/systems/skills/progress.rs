@@ -138,6 +138,9 @@ pub fn add_exp_locked(
     mut exp_delta: i32,
     add_ability_exp: bool,
 ) -> Option<ExpGain> {
+    c.unit
+        .bonuses
+        .bind_attribute_limits(&server.game_data.characters.unit_attribute_limits);
     if exp_delta == 0 {
         return None;
     }

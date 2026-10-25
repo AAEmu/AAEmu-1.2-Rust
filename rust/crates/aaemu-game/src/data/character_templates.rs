@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use rusqlite::Connection;
 use serde::Deserialize;
@@ -89,6 +90,10 @@ pub struct ExpertLimit {
 
 #[derive(Debug, Clone, Default)]
 pub struct CharacterData {
+    /// Shared by every unit belonging to this GameServer, including non-characters.
+    pub unit_attribute_limits: Arc<super::attribute_limits::UnitAttributeLimits>,
+    /// Permanent pStat contribution ranges; the contribution feature is still unimplemented.
+    pub p_stat_limits: super::attribute_limits::CharacterPStatLimits,
     /// keyed by `16 * gender + race`.
     pub templates: HashMap<u8, CharacterTemplate>,
     pub ability_items: HashMap<u8, AbilityItems>,
@@ -176,6 +181,10 @@ impl CharacterData {
         default_world_id: u32,
     ) -> Result<Self, GameDataError> {
         let mut d = CharacterData {
+            unit_attribute_limits: Arc::new(super::attribute_limits::UnitAttributeLimits::load(
+                conn,
+            )?),
+            p_stat_limits: super::attribute_limits::CharacterPStatLimits::load(conn)?,
             blocked_names: load_blocked_names(conn)?,
             ..CharacterData::default()
         };

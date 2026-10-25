@@ -7,10 +7,11 @@
 
 use std::collections::HashMap;
 
+use crate::data::attribute_limits::UnitAttributeLimits;
 use crate::data::formulas::{FormulaOwnerType, UnitFormulaKind, UnitFormulaVariableType};
 use crate::models::unit::{UnitAttribute, UnitBase, UnitModifierType};
 use crate::server::GameServer;
-use crate::systems::skills::stats::{base_unit_stat, StatKind};
+use crate::systems::skills::stats::{base_unit_stat_with_limits, StatKind};
 use crate::world::WorldObject;
 
 /// Which getter set a unit kind uses.
@@ -37,19 +38,27 @@ impl VehicleKind {
 }
 
 /// `foreach (var bonus in GetBonuses(attr))` on an `int` result.
-fn int_bonuses(u: &UnitBase, mut res: i32, attr: UnitAttribute) -> i32 {
+fn int_bonuses(u: &UnitBase, limits: &UnitAttributeLimits, res: i32, attr: UnitAttribute) -> i32 {
+    // Keep the int getter's per-bonus truncation, widening before a large stack
+    // can overflow. Only the complete raw attribute receives its data bound.
+    let mut res = f64::from(res);
     for b in u.bonuses.bonuses(attr) {
         if b.template.modifier_type == UnitModifierType::Percent {
-            res += (res as f32 * b.value as f32 / 100.0) as i32;
+            res += f64::from((res as f32 * b.value as f32 / 100.0).trunc());
         } else {
-            res += b.value;
+            res += f64::from(b.value);
         }
     }
-    res
+    limits.clamp(attr, res) as i32
 }
 
 /// `foreach (var bonus in GetBonuses(attr))` on a `double` result.
-fn float_bonuses(u: &UnitBase, mut res: f64, attr: UnitAttribute) -> f64 {
+fn float_bonuses(
+    u: &UnitBase,
+    limits: &UnitAttributeLimits,
+    mut res: f64,
+    attr: UnitAttribute,
+) -> f64 {
     for b in u.bonuses.bonuses(attr) {
         if b.template.modifier_type == UnitModifierType::Percent {
             res += res * f64::from(b.value as f32 / 100.0);
@@ -57,7 +66,7 @@ fn float_bonuses(u: &UnitBase, mut res: f64, attr: UnitAttribute) -> f64 {
             res += f64::from(b.value);
         }
     }
-    res
+    limits.clamp(attr, res)
 }
 
 struct Eval<'a> {
@@ -86,7 +95,12 @@ impl Eval<'_> {
 
     fn base_attr(&self, kind: UnitFormulaKind, attr: UnitAttribute) -> i32 {
         let p = HashMap::from([("level", self.level())]);
-        int_bonuses(self.u, self.formula(kind, &p) as i32, attr)
+        int_bonuses(
+            self.u,
+            &self.server.game_data.characters.unit_attribute_limits,
+            self.formula(kind, &p) as i32,
+            attr,
+        )
     }
 
     fn str_(&self) -> i32 {
@@ -171,30 +185,51 @@ impl Eval<'_> {
                 let res = self.formula(K::MaxHealth, &self.pool_params(true, K::MaxHealth)) as i32;
                 if mate {
                     // `CalculateWithBonuses(res, MaxHealth)`
-                    f64::from(
-                        self.u
-                            .calculate_with_bonuses(f64::from(res), A::MaxHealth, self.now)
-                            as i32,
-                    )
+                    f64::from(self.u.bonuses.calculate_with_limits(
+                        f64::from(res),
+                        A::MaxHealth,
+                        self.now,
+                        &self.server.game_data.characters.unit_attribute_limits,
+                    ) as i32)
                 } else {
-                    f64::from(int_bonuses(self.u, res, A::MaxHealth))
+                    f64::from(int_bonuses(
+                        self.u,
+                        &self.server.game_data.characters.unit_attribute_limits,
+                        res,
+                        A::MaxHealth,
+                    ))
                 }
             }
             S::MaxMp => {
                 let res = self.formula(K::MaxMana, &self.pool_params(true, K::MaxMana)) as i32;
-                f64::from(int_bonuses(self.u, res, A::MaxMana))
+                f64::from(int_bonuses(
+                    self.u,
+                    &self.server.game_data.characters.unit_attribute_limits,
+                    res,
+                    A::MaxMana,
+                ))
             }
             S::HpRegen => {
                 let mut res =
                     self.formula(K::HealthRegen, &self.pool_params(false, K::HealthRegen)) as i32;
                 res += self.spi() / 10;
-                f64::from(int_bonuses(self.u, res, A::HealthRegen))
+                f64::from(int_bonuses(
+                    self.u,
+                    &self.server.game_data.characters.unit_attribute_limits,
+                    res,
+                    A::HealthRegen,
+                ))
             }
             S::MpRegen => {
                 let mut res =
                     self.formula(K::ManaRegen, &self.pool_params(false, K::ManaRegen)) as i32;
                 res += self.spi() / 10;
-                f64::from(int_bonuses(self.u, res, A::ManaRegen))
+                f64::from(int_bonuses(
+                    self.u,
+                    &self.server.game_data.characters.unit_attribute_limits,
+                    res,
+                    A::ManaRegen,
+                ))
             }
             S::PersistentHpRegen => {
                 let mut res = self.formula(
@@ -204,7 +239,12 @@ impl Eval<'_> {
                 if persistent_div {
                     res /= 5;
                 }
-                f64::from(int_bonuses(self.u, res, A::PersistentHealthRegen))
+                f64::from(int_bonuses(
+                    self.u,
+                    &self.server.game_data.characters.unit_attribute_limits,
+                    res,
+                    A::PersistentHealthRegen,
+                ))
             }
             S::PersistentMpRegen => {
                 let mut res = self.formula(
@@ -214,7 +254,12 @@ impl Eval<'_> {
                 if persistent_div {
                     res /= 5;
                 }
-                f64::from(int_bonuses(self.u, res, A::PersistentManaRegen))
+                f64::from(int_bonuses(
+                    self.u,
+                    &self.server.game_data.characters.unit_attribute_limits,
+                    res,
+                    A::PersistentManaRegen,
+                ))
             }
             S::LevelDps if combat => {
                 let ab = if mate { self.level() } else { 0.0 };
@@ -228,6 +273,7 @@ impl Eval<'_> {
                 let p = self.full_params();
                 f64::from(int_bonuses(
                     self.u,
+                    &self.server.game_data.characters.unit_attribute_limits,
                     self.formula(K::Armor, &p) as i32,
                     A::Armor,
                 ))
@@ -236,6 +282,7 @@ impl Eval<'_> {
                 let p = self.full_params();
                 f64::from(int_bonuses(
                     self.u,
+                    &self.server.game_data.characters.unit_attribute_limits,
                     self.formula(K::MagicResist, &p) as i32,
                     A::MagicResist,
                 ))
@@ -246,13 +293,23 @@ impl Eval<'_> {
             S::OffhandDps if slave => self.weapon_dps(f64::from(self.str_()), A::OffhandDps),
             S::RangedDps if slave => self.weapon_dps(f64::from(self.dex()), A::RangedDps),
             S::MDps if slave => self.weapon_dps(f64::from(self.int()), A::SpellDps),
-            other => base_unit_stat(self.u, other, self.now),
+            other => base_unit_stat_with_limits(
+                self.u,
+                other,
+                self.now,
+                &self.server.game_data.characters.unit_attribute_limits,
+            ),
         }
     }
 
     fn inc(&self, kind: UnitFormulaKind, attr: UnitAttribute) -> f64 {
         let p = self.full_params();
-        f64::from(float_bonuses(self.u, self.formula(kind, &p), attr) as i32)
+        f64::from(float_bonuses(
+            self.u,
+            &self.server.game_data.characters.unit_attribute_limits,
+            self.formula(kind, &p),
+            attr,
+        ) as i32)
     }
 
     fn weapon_dps(&self, attr_value: f64, attr: UnitAttribute) -> f64 {
@@ -264,7 +321,13 @@ impl Eval<'_> {
                 res += b.value as f32;
             }
         }
-        f64::from((res * 1000.0) as i32)
+        f64::from(
+            self.server
+                .game_data
+                .characters
+                .unit_attribute_limits
+                .clamp(attr, f64::from(res * 1000.0)) as i32,
+        )
     }
 }
 
@@ -315,6 +378,8 @@ pub fn stats_of(
 
 /// Recomputes the cached pool values (`max_hp`, `max_mp`, regen) of a detached unit.
 pub fn refresh_pools(server: &GameServer, kind: VehicleKind, u: &mut UnitBase) {
+    u.bonuses
+        .bind_attribute_limits(&server.game_data.characters.unit_attribute_limits);
     let v = stats_of(
         server,
         kind,
