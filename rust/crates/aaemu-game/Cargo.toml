@@ -41,3 +41,6 @@ twilight-gateway.workspace = true
 twilight-http.workspace = true
 twilight-model.workspace = true
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
