@@ -56,7 +56,9 @@
     },
     {
       "id": "closed-and-unknown-zones",
-      "status": "implementing"
+      "status": "merged_pending_validation",
+      "commit": "e9a870b8c71e8e4dbf7509d7e72bbb33bcfef20a",
+      "note": "Unknown keys remain neutral; no invented safe destination. Parent corrected Doodad transform field after first compile check."
     },
     {
       "id": "national-tax-rate",
@@ -64,7 +66,14 @@
     },
     {
       "id": "vehicle-attachment-data",
-      "status": "implementing"
+      "status": "partial_pending_rust_validation",
+      "commit": "ae83bd8f6609df3dab5943dba2420733b08c5de4",
+      "parent_native_python_tests_passed": 8,
+      "transforms_added": 87,
+      "item_summonable_templates_fixed": 14,
+      "item_summonable_templates_total": 22,
+      "open_required_points": 41,
+      "note": "Missing native assets/prefabs/helpers are explicit; no invented origin points."
     },
     {
       "id": "ordinary-warning-noise-and-cleanup-cause",
@@ -76,11 +85,16 @@
     },
     {
       "id": "aoe-diminishing",
-      "status": "queued"
+      "status": "implementing"
     },
     {
       "id": "skill-and-buff-modifiers",
-      "status": "implementing"
+      "status": "merged_pending_validation",
+      "commit": "80303b48a224d83e88c17262ef92493b8b38f79c",
+      "open_subcases": [
+        "Vicious Implosion10710 plot580 radius",
+        "Crippling Mire10201 plot320 channel duration"
+      ]
     },
     {
       "id": "buff-group-rank-and-per-caster-slots",
@@ -92,11 +106,12 @@
     },
     {
       "id": "attack-speed",
-      "status": "implementing"
+      "status": "merged_pending_validation",
+      "commit": "80303b48a224d83e88c17262ef92493b8b38f79c"
     },
     {
       "id": "buff-breakers",
-      "status": "queued"
+      "status": "implementing"
     },
     {
       "id": "buff-taunts",
@@ -116,7 +131,8 @@
     },
     {
       "id": "xp-buff-multiplier",
-      "status": "implementing"
+      "status": "merged_pending_validation",
+      "commit": "80303b48a224d83e88c17262ef92493b8b38f79c"
     },
     {
       "id": "zone-banned-item-and-skill-tags",
@@ -320,7 +336,7 @@
     },
     {
       "id": "character-slots-races-and-deletion-guards",
-      "status": "queued"
+      "status": "implementing"
     },
     {
       "id": "event-schedule-notifications",
