@@ -1111,7 +1111,7 @@ pub fn navi_teleport(server: &GameServer, player: &PlayerRef, obj_id: u32) {
         return;
     }
     let pos = world.world_pos_rot(&WorldObject::from(&doodad));
-    let zone_id = doodad.data().unit.transform.zone_id;
+    let zone_id = doodad.data().transform.zone_id;
     if !session::zone_access_allowed(server, player, world.id, zone_id, pos.x, pos.y) {
         player.send(SCErrorMsgPacket::new(session::CLOSED_ZONE, 0, true));
         return;
