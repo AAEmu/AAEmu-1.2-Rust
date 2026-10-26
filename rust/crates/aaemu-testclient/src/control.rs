@@ -330,6 +330,31 @@ async fn termination(terminal: &mut watch::Receiver<Option<&'static str>>) -> &'
     }
 }
 
+/// Timer futures provide wakeups, but an already-expired timer can initially poll Pending.
+/// Check synchronously before polling gameplay or consuming another command. EOF retains
+/// priority, including a closed input worker that has not published a terminal value.
+fn check_stop(
+    terminal: &watch::Receiver<Option<&'static str>>,
+    until: Instant,
+    output_until: Option<Instant>,
+    deadline_reason: &'static str,
+) -> anyhow::Result<Option<&'static str>> {
+    if let Some(reason) = *terminal.borrow() {
+        return Ok(Some(reason));
+    }
+    if terminal.has_changed().is_err() {
+        return Ok(Some("eof"));
+    }
+    let now = Instant::now();
+    if now >= until {
+        return Ok(Some(deadline_reason));
+    }
+    if let Some(until) = output_until {
+        ensure!(now < until, "stdout budget exhausted");
+    }
+    Ok(None)
+}
+
 struct Output {
     bytes: Vec<u8>,
     ack: oneshot::Sender<std::io::Result<()>>,
@@ -471,6 +496,9 @@ impl Reporter {
     /// Every frame retains the shared action budget at enqueue time; acknowledgments cannot
     /// restart a command's deadline. A one-second stalled-writer ceiling is additional.
     async fn progress(&mut self) -> anyhow::Result<()> {
+        if let Some(until) = self.next_deadline() {
+            ensure!(Instant::now() < until, "stdout budget exhausted");
+        }
         if self.flight.is_none() {
             let Some(front) = self.queue.front() else {
                 return std::future::pending().await;
@@ -484,6 +512,7 @@ impl Reporter {
                 .await
                 .context("stdout budget")?
                 .context("stdout worker closed")?;
+            ensure!(Instant::now() < until, "stdout budget exhausted");
             let queued = self.queue.pop_front().context("stdout queue empty")?;
             let len = queued.bytes.len();
             let (ack, completed) = oneshot::channel();
@@ -496,6 +525,9 @@ impl Reporter {
                 until,
                 len,
             });
+            // Starting a write can introduce an earlier stalled-writer ceiling. Return
+            // control so drive/serve recompute it before any further action poll.
+            return Ok(());
         }
         let flight = self.flight.as_mut().context("stdout ack missing")?;
         ensure!(Instant::now() < flight.until, "stdout budget exhausted");
@@ -503,6 +535,7 @@ impl Reporter {
             .await
             .context("stdout budget")?
             .context("stdout worker stopped")??;
+        ensure!(Instant::now() < flight.until, "stdout budget exhausted");
         let flight = self.flight.take().context("stdout ack missing")?;
         self.queued_bytes -= flight.len;
         Ok(())
@@ -667,17 +700,29 @@ async fn drive(
     input: &mut Input,
 ) -> anyhow::Result<Completion> {
     tokio::pin!(future);
+    let until = until.min(report.deadline);
+    let terminal = input.terminal.clone();
     let mut tick = tokio::time::interval(Duration::from_millis(20));
     loop {
-        let output_pending = report.has_work();
-        let output_until = report.next_deadline().unwrap_or(report.deadline);
+        let output_until = report.next_deadline();
+        if let Some(reason) = check_stop(&terminal, until, output_until, "command_deadline")? {
+            return Ok(Completion::Stopped(reason));
+        }
         tokio::select! {
             biased;
             reason = termination(&mut input.terminal) => return Ok(Completion::Stopped(reason)),
             _ = tokio::time::sleep_until(until) => return Ok(Completion::Stopped("command_deadline")),
-            _ = tokio::time::sleep_until(output_until), if output_pending => bail!("stdout budget exhausted"),
-            result = &mut future => return Ok(Completion::Done(result)),
-            result = report.progress(), if output_pending => { result?; },
+            _ = tokio::time::sleep_until(output_until.unwrap_or(until)), if output_until.is_some() => bail!("stdout budget exhausted"),
+            result = std::future::poll_fn(|cx| {
+                // A select can remain suspended across many executor polls. The loop
+                // check alone does not guard a ready action on a later wakeup.
+                match check_stop(&terminal, until, output_until, "command_deadline") {
+                    Ok(Some(reason)) => std::task::Poll::Ready(Ok(Completion::Stopped(reason))),
+                    Err(error) => std::task::Poll::Ready(Err(error)),
+                    Ok(None) => future.as_mut().poll(cx).map(|result| Ok(Completion::Done(result))),
+                }
+            }) => return result,
+            result = report.progress(), if output_until.is_some() => { result?; },
             _ = tick.tick() => report.events(rec)?,
         }
     }
@@ -693,11 +738,13 @@ async fn serve(
     let mut next_poll = Instant::now();
     report.write(json!({"type": "capabilities", "capabilities": describe()}))?;
     loop {
-        if let Some(reason) = *input.terminal.borrow() {
+        if let Some(reason) = check_stop(
+            &input.terminal,
+            report.deadline,
+            report.next_deadline(),
+            "deadline",
+        )? {
             return Ok(reason);
-        }
-        if Instant::now() >= report.deadline {
-            return Ok("deadline");
         }
         // Poll receive/keep-alive even if stdin continuously supplies commands.
         if Instant::now() >= next_poll {
@@ -718,19 +765,28 @@ async fn serve(
             report.events(&rec)?;
             next_poll = Instant::now() + Duration::from_millis(50);
         }
-        let output_pending = report.has_work();
-        let output_until = report.next_deadline().unwrap_or(report.deadline);
+        let output_until = report.next_deadline();
+        if let Some(reason) =
+            check_stop(&input.terminal, report.deadline, output_until, "deadline")?
+        {
+            return Ok(reason);
+        }
         let line = tokio::select! {
             biased;
             reason = termination(&mut input.terminal) => return Ok(reason),
             _ = tokio::time::sleep_until(report.deadline) => return Ok("deadline"),
-            _ = tokio::time::sleep_until(output_until), if output_pending => bail!("stdout budget exhausted"),
+            _ = tokio::time::sleep_until(output_until.unwrap_or(report.deadline)), if output_until.is_some() => bail!("stdout budget exhausted"),
             _ = tokio::time::sleep_until(next_poll) => continue,
-            result = report.progress(), if output_pending => { result?; continue; },
+            result = report.progress(), if output_until.is_some() => { result?; continue; },
             line = input.lines.recv() => match line { Some(line) => line, None => return Ok("eof") },
         };
-        if Instant::now() >= report.deadline {
-            return Ok("deadline");
+        if let Some(reason) = check_stop(
+            &input.terminal,
+            report.deadline,
+            report.next_deadline(),
+            "deadline",
+        )? {
+            return Ok(reason);
         }
         count += 1;
         if count > MAX_COMMANDS {
@@ -1071,6 +1127,63 @@ mod tests {
         assert!(matches!(result, Completion::Stopped("command_deadline")));
         assert!(released.load(Ordering::SeqCst));
     }
+
+    #[tokio::test]
+    async fn already_expired_command_or_global_deadline_never_polls_ready_action() {
+        for global_expired in [false, true] {
+            let rec = Recorder::new(false);
+            let (output, _consumer) = mpsc::channel(1);
+            let expired = Instant::now();
+            let later = expired + CONNECT_TIMEOUT;
+            let (command_until, global_until) = if global_expired {
+                (later, expired)
+            } else {
+                (expired, later)
+            };
+            let mut report = Reporter::new(output, global_until);
+            let (mut input, _lines, _terminal) = input_pair();
+            let polled = AtomicBool::new(false);
+            let action = async {
+                polled.store(true, Ordering::SeqCst);
+                Ok(Value::Null)
+            };
+            let result = drive(action, command_until, &rec, &mut report, &mut input)
+                .await
+                .unwrap();
+            assert!(matches!(result, Completion::Stopped("command_deadline")));
+            assert!(
+                !polled.load(Ordering::SeqCst),
+                "an already-expired ceiling allowed ready gameplay"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn eof_precedes_expired_budgets_without_polling_ready_action() {
+        for published in [false, true] {
+            let rec = Recorder::new(false);
+            let (output, _consumer) = mpsc::channel(1);
+            let until = Instant::now();
+            let mut report = Reporter::new(output, until);
+            report.write(json!({"type":"capabilities"})).unwrap();
+            let (mut input, _lines, terminal) = input_pair();
+            if published {
+                terminal.send_replace(Some("eof"));
+            }
+            drop(terminal);
+            let polled = AtomicBool::new(false);
+            let action = async {
+                polled.store(true, Ordering::SeqCst);
+                Ok(Value::Null)
+            };
+            let result = drive(action, until, &rec, &mut report, &mut input)
+                .await
+                .unwrap();
+            assert!(matches!(result, Completion::Stopped("eof")));
+            assert!(!polled.load(Ordering::SeqCst));
+        }
+    }
+
     fn live_recorder() -> Recorder {
         let rec = Recorder::incremental_game_to(std::io::sink());
         rec.control_game_ready(true);
@@ -1257,6 +1370,104 @@ mod tests {
             "expired output budget allowed later gameplay"
         );
     }
+
+    #[tokio::test]
+    async fn expired_output_budget_blocks_ready_action_with_an_ack_in_flight() {
+        for expired_flight in [false, true] {
+            let rec = live_recorder();
+            let (output, mut consumer) = mpsc::channel(1);
+            let until = Instant::now() + CONNECT_TIMEOUT;
+            let mut report = Reporter::new(output, until);
+            report.write(json!({"type":"capabilities"})).unwrap();
+            // Start a real output write, but withhold its acknowledgment. No sleep or
+            // timer-driver behavior is needed to inject an expired queue/ack budget.
+            report.progress().await.unwrap();
+            let unacknowledged = consumer.try_recv().unwrap();
+            assert!(report.flight.is_some());
+            if expired_flight {
+                report.flight.as_mut().unwrap().until = Instant::now();
+            } else {
+                report.budget = Instant::now();
+            }
+            report
+                .response(Some(RequestId::Number(1)), Ok(Value::Null))
+                .unwrap();
+            let (mut input, _lines, _terminal) = input_pair();
+            let polled = AtomicBool::new(false);
+            let action = async {
+                polled.store(true, Ordering::SeqCst);
+                Ok(Value::Null)
+            };
+            let result = drive(action, until, &rec, &mut report, &mut input).await;
+            assert!(result.is_err());
+            assert!(!polled.load(Ordering::SeqCst));
+            // Terminal draining must also honor the earlier queued budget while a
+            // longer-lived ack is in flight, rather than consuming that ack first.
+            assert!(report.progress().await.is_err());
+            assert!(consumer.try_recv().is_err());
+            drop(unacknowledged);
+        }
+    }
+
+    #[tokio::test]
+    async fn serve_checks_expired_budgets_before_consuming_queued_gameplay() {
+        for (expired_flight, eof) in [(false, false), (true, false), (false, true)] {
+            let rec = live_recorder();
+            let cfg = serde_json::from_value(json!({"login":"127.0.0.1:1","user":"fixture",
+                "password":"fixture-only","character":"Owner"}))
+            .unwrap();
+            // No sockets: any attempted rawcs would produce a session error. Leaving
+            // the request queued proves serve stops before parsing or executing it.
+            let mut controller = Controller {
+                cfg,
+                rec,
+                session: None,
+                handshaken: true,
+                character_id: Some(42),
+                generation: 1,
+                started: Instant::now(),
+                clock: 40000,
+            };
+            let until = Instant::now() + CONNECT_TIMEOUT;
+            let (output, mut consumer) = mpsc::channel(1);
+            let mut report = Reporter::new(output, until);
+            report.write(json!({"type":"capabilities"})).unwrap();
+            let unacknowledged = if expired_flight {
+                report.progress().await.unwrap();
+                report.flight.as_mut().unwrap().until = Instant::now();
+                Some(consumer.try_recv().unwrap())
+            } else {
+                None
+            };
+            report.budget = if expired_flight {
+                until
+            } else {
+                Instant::now()
+            };
+            report
+                .response(Some(RequestId::Number(1)), Ok(Value::Null))
+                .unwrap();
+            let (mut input, lines, terminal) = input_pair();
+            let rawcs = request("rawcs", json!({"opcode":58,"body_hex":"abcd"}));
+            lines.try_send(rawcs.clone()).unwrap();
+            if eof {
+                terminal.send_replace(Some("eof"));
+            }
+            let queued = report.queue.len();
+            let result = serve(&mut controller, &mut report, &mut input).await;
+            if eof {
+                assert_eq!(result.unwrap(), "eof");
+            } else {
+                assert!(result.is_err());
+            }
+            assert_eq!(input.lines.try_recv().unwrap(), rawcs);
+            assert_eq!(report.queue.len(), queued + 1); // Only serve's capabilities.
+            assert!(consumer.try_recv().is_err());
+            assert!(controller.session.is_none());
+            drop(unacknowledged);
+        }
+    }
+
     async fn timeout_serve_case(end_with_eof: bool) {
         use aaemu_testclient::game::GameClient;
         use aaemu_testclient::login::LoginClient;
