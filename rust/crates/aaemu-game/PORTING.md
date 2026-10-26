@@ -279,6 +279,41 @@ connected by `systems::economy::wiring`).
 | Item skill-effect bodies (grade enchant, socketing, conversion, cap scale, UCC imprint, ...), mate / slave equipment packets | `systems/economy/item_effects*.rs` | done | Called by the skills subsystem's effects. UCC imprint / cleanup require owned source and target items; client UCC casts require the actual source item's configured use skill, preserving the unrelated legacy bound-item portal exception. Dyeing checks the loaded `dyeable_items` allowlist. Invalid UCC / dye effects cancel deferred reagent consumption. |
 | Item skill-effect stubs given data-derived bodies (`GainItemWithPosImprint` 32, `RechargeItemBuff` 95, `ExpToItem` 96) | `systems/economy/item_effects.rs` | done (data-derived) | The C# `Execute` bodies were `// TODO` stubs, so the behaviour comes from `special_effects` 405 / 546 / 547 / 548 (32: create `value1` x1 with `SkillEffectGainItemWithPos`), 12446 / 17017 (95) and 12462 (96: `value1` XP -> `value2` x1 with `SkillEffectExpToItem`) plus the tool skills that cast them. `GainItemWithPosImprint` stores no position imprint: the 1.2 item details have no such field. `ExpToItem` subtracts the experience directly instead of through `AddExp` (which recomputes the level and could level the character down), sends `SCExpChangedPacket(-value1)`, checks bag room before spending the XP, and cancels so the reagent is kept. `RechargeItemBuff` takes the cast's item target, resets `charge_start_time` (and `charge_count` when the template has one) and re-applies the equipped item's gear buff through `apply_gear_buffs` with the item both removed and added, so the recharge buff is not stacked; the 1 s item timers read the new charge window on their next tick, so nothing is re-scheduled. |
 
+#### Cargo escrow and stale rack references (2026-10-25)
+
+Merchant-ship rack deposits now revalidate the exact equipped pack and a vacant
+rack in one economy transaction. Recovery validates System escrow and backpack
+space, moves the same item ID, and clears the rack reference together. A rejected
+pickup preserves the pack, the current backpack and recorded item effects.
+The shared path covers other hulls and ordinary racks; the real-data regression
+uses Merchant hull 75, item 23398 and its twenty attachment points 60..79.
+
+Error 14 (`INTERACTION_RECOVER_PARENT`) on this path means the referenced item is
+outside System escrow; it does not establish that another pack is physically on
+top. The separate persistent-child removal check uses error 207. Provably dangling
+persistent cargo references can return to the authored empty phase without moving
+or creating an item. Ambiguous references remain blocked with rack/item/container
+and hull diagnostics; current child allocation identity and parent/instance must
+match before a child can block repair or removal.
+
+Both live and saved-row cleanup receive the original doodad metadata. Original
+rack/cargo/Slave references never authorize deleting the current item at a recycled
+GUID. Ordinary furniture cleanup requires a unique singleton matching the original
+template and owner in that owner's System escrow. Items in inventory, equipment,
+bank or another owner's containers are retained. Saved container GUIDs alone never
+authorize container deletion. Saved-row removal checks its selected reference
+fields before invoking cleanup.
+
+This conservative policy protects unloaded rack aliases and recovered/recycled
+items. Metadata matching does not establish allocation generation. Cargo and
+ambiguous item references, plus saved containers, may be retained after the last
+rack disappears; reconciliation and orphan collection remain open. Regression
+sources cover shuffled twenty-rack cycles, stale sources, failed recovery,
+allocator reuse and private-MySQL saved aliases. At `7ac9af6eb`, the game unit suite,
+real-compact twenty-rack cycles and both private-MySQL cargo fixtures pass. Local
+combined-source CI and live reconnect acceptance remain pending; the asynchronous
+hull identity repair requires separate review and validation.
+
 ### systems::social
 
 | Area (C#) | Rust | Status | Notes |
@@ -367,6 +402,40 @@ Cross-subsystem: mates are despawned on dungeon entry and `PlayerCanEnter` check
 | `BaseUnit.GetDistanceTo` for shipyard targets (skill range check, `Skill.cs` `max_range`) | `systems/skills/geometry.rs` (`distance_to`), `systems/vehicles/shipyards.rs` (`shipyard_radius`) | deviation | **Deviation:** the C# measured skill range to the shipyard's center point (shipyard models are prefab models without an actor radius, so `ModelSize` was 0), which made the shipyard build skills (`min_range 0`, `max_range 4`) unusable anywhere but the exact center of a drydock ("Target is too far"). The Rust subtracts the shipyard template's `build_radius * Scale`, like the house `GardenRadius` rule. |
 | Mate / slave / transfer / shipyard C2G and G2C packets | `systems/vehicles/packets.rs` | done | 18 C->S, 16 S->C (byte-exact tests). `CSChangeSlaveTargetPacket` has no 1.2 opcode (0xfff). |
 | Hooks / physics | `systems/vehicles/{hooks,ship_physics}.rs` | done | `VehicleItemHooks` (`EndCraft`, economy). Ship physics and water call `systems::ai::physics` directly (`AddShip` / `RemoveShip`, helm request, driver seat, `GetWaterSurface` / `IsWater`); `ShipPhysicsHooks` (harpoon lines / tension / lifetime, `Throttle` / `Steering` after a move) and the radar ship lists are installed here. The npcs / social hooks call the mate / slave / dismount functions directly. |
+#### Summon replacement and retained cargo (2026-10-25)
+
+Player summons use root-only owner lookup across worlds and serialize requests by
+owner and persistent summon item. Session/departure generations and allocation
+identity are checked again after loading. Saved hull, child and doodad rows load
+before replacement; query failures, item-update failures, loaded-hull removal
+refusal and invalid explicit placement stop without replacing the prior hull.
+Invalid placement now refuses rather than falling back to another position.
+
+The final synchronous publication boundary coordinates ordinary item operations,
+direct despawn and current-session identity. Loaded cargo receipts are checked
+against the exact live hull/rack allocation and unique matching System escrow
+before metadata changes or deletion. This rejects a stale loaded row fetched
+before its original pack was recovered. Different inactive saved hulls can still
+restore legitimate cargo belonging to another player. The existing 600-second
+offline retention and delayed portal rendering remain intentional.
+
+The per-server item outer scope is thread-bound and reentrant; the inner economy
+ops mutex remains nonreentrant. Callback-bearing paths acquire the outer scope
+before existing auction/housing/spawn locks; callbacks retain their normal
+placement outside ops/object guards. No synchronous guard spans an await.
+Guardless quest item operations and direct writes bypassing coordinated APIs
+remain explicit limits, rather than a claim of global lock freedom.
+
+The read-only `/slave audit` command reports registered and retained allocations,
+pending task leases, item identities and rack observations with bounded replies.
+It explicitly returns `consistent:false` and `authority_consistent:false`: queue,
+HP, world-removal and temporal phase/transform observations do not share a global
+snapshot boundary. Normalized, filtered headless control captures supplement these
+observations; they do not establish native UI behavior or original compressed wire
+bytes. Deterministic flow tests cover the concurrency cases separately. The
+combined source has passed independent reviews and all-target compilation;
+combined executable tests, final lane CI and live acceptance remain pending.
+
 ### systems::services
 
 | Area (C#) | Rust | Status | Notes |
@@ -2353,6 +2422,7 @@ See Docs/wiki/Quest-Audit.md and Docs/wiki/Mail-Audit.md.
 | --- | --- | --- | --- |
 | Quest NPCs / doodads missing from every `*_spawns.json` | `app/Data/Worlds/{main_world,instance_library,instance_prologue,instance_nachashgar,instance_burntcastle_armory,arche_mall_world}`, `rust/tools/spawn_import/` | data | Positions from the 10.x pak (per-zone `npc_spawners.g`, per-cell `doodad.g`), the 1.2 `npc_spawner_npcs` rows and the git history of upstream spawn JSON. A position is imported only when it sits on the 1.2 heightmap (`|dz| <= 5 m`, ignored test `dump_terrain_heights`), next to an existing spawn of the same world (`<= 40 m`, `|dz| <= 8 m`: interiors, caves, bridges) or on clipped ground (heights are `u16 / 64`, so ground above 1024 m reads 1024) of a zone/frame verified by its other candidates. Editor-tier positions win over git-only ones. Imported: main_world 181 NPC / 58 doodad entries, instance_library 131 doodads, instance_prologue 8, instance_nachashgar 2, instance_burntcastle_armory 1, arche_mall_world 3 NPC / 1 doodad. Entries carry a `Title` naming the basis (the loader ignores it). |
 | Zones whose origin differs between the 1.2 and 10.x `world.xml` (190, 192, 193, 200, 227, 251, 266, 281, 286, 287) | same | data | The content sits at the 10.x position (zone origin x 1024 + local): the 1.2 origin never fits the 1.2 heightmap (0 of 154 editor candidates with unclipped terrain), the 10.x frame does (many points within 0.1 m). Z values above the 1024 m ceiling cannot be verified. Candidates whose terrain differs by tens of metres (10.x-only zones such as 157, parts of 190/281) were rejected. |
+| 10.x world spawns backported into 1.2 `main_world` | `app/Data/Worlds/main_world/{npc_spawns_10x,doodad_spawns_10x}.json`, `rust/tools/spawn_import/backport_10x.py` | data | Source: the 10.x `main_world` `npc_spawns.json` (28,434) / `doodad_spawns.json` (89,121). Filters in order: template id exists in the 1.2 compact (NPC -2,563, doodad -8,200); 10.x `Title` equals the 1.2 `en_us` name (ids were reused: NPC -2,202, doodad -60); the X/Y lies in a non-zero 1.2 `world.xml` zone (doodad -1,618); excluded doodad names `Restricted Area: Under Construction` (1,105) and `Sunken Treasure Chest` (1,323; no 1.2 system); the terrain rule of the October 17 import (`|dz| <= 5 m` to the 1.2 heightmap, or within 40 m / 8 m of an existing 1.2 spawn, or clipped ground; NPC -256, doodad -10,995) after the match; a one-to-one match per template before the terrain rule: each 10.x entry is paired, greedily by ascending XY distance, with the nearest unmatched existing 1.2 spawn of the same template within 20 m (NPC) / 10 m (doodad) and dropped (NPC -22,828, doodad -30,481), so shifted copies of an existing pack are not doubled and only the surplus survives; 10.x entries within 2 m of each other then collapse (NPC -6, doodad -3,677). Result: 579 NPC and 31,662 doodad entries (the loader's `npc_spawns*.json` / `doodad_spawns*.json` glob reads them; they carry `Title`). Zones whose 10.x terrain differs from 1.2 (e.g. most of Rookborne Basin, zone 270: 128 of 145 10.x Iron Veins sit 100-300 m off the 1.2 ground) are correctly rejected by the terrain rule, so that zone gains only 3 veins. Rerun steps are in the script docstring (the heightmap dump is the ignored test `dump_terrain_heights`). |
 | `NpcSpawner.SelectSpawnerId` for NORMAL multi-member spawners | `systems/npcs/npc/spawner.rs` (`select_spawner_id`) | matches the C# | Not changed. A JSON entry clones every game-data spawner that has its unit as a member and (memberwise clone) shares one `NpcSpawnerIds` list, so with more than one spawner only an AUTOCREATED unscheduled one or a scheduled one is ever selected: a unit that has no JSON entry of its own and is only a sibling of a NORMAL group spawner (Vicious/Silent Treant 3105/3106, Goblin Fighter 527, ...) never spawns. The 13 audit findings of this kind are all `ConAcceptNpcKill` starters, which `starter_accepts` evaluates as an OR over the component's acts, and in every one of the 7 quests other listed NPCs spawn, so no quest is blocked; the data would need real positions for these units (the 10.x editor has no placement of those group spawners). |
 
 ### `RedeemBuff` special effect (type 44)
