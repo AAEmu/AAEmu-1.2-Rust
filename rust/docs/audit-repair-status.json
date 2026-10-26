@@ -381,7 +381,7 @@
       "id": "trade-ship-cargo-reference-atomicity",
       "status": "unit_and_data_passed_full_gate_pending",
       "owner": "audit-tradeship",
-      "note": "Reviewed cargo source8c plus root fixture-ID correction7ac pass game unit suite, native Merchant all20rack cycles, private MySQL saved-alias and recycled-GUID cases. Reconnect identity repair is separate and still under review. Conservative cargo/container retention and reconciliation/GC limits remain.",
+      "note": "Reviewed cargo source8c plus root fixture-ID correction7ac pass game unit suite, native Merchant all20rack cycles, private MySQL saved-alias and recycled-GUID cases. Reconnect identity source review is clean; final combined execution and live acceptance remain pending. Conservative cargo/container retention and reconciliation/GC limits remain.",
       "commit": "8c2e977b5ba6b7660e4739964465e0b1e97b9d7b"
     },
     {
@@ -400,9 +400,9 @@
     },
     {
       "id": "headless-control-reconnect-test-interface",
-      "status": "source_reviewed_merged_pending_execution",
-      "commit": "0d8e410d3dc20d88dce2b593c3fbdc7672897cb1",
-      "note": "Three source review rounds clean; bounded filtered/normalized events, exact character reconnect and socket/deadline handling. Executable validation pending."
+      "status": "source_reviewed_package_tests_passed_final_gate_live_pending",
+      "commit": "578a6a7e68a8ea663eafdb5487f5f8d8f2a09180",
+      "note": "Fourth source review clean after an executed regression exposed expired Tokio timer first-poll behavior. Synchronous guards preserve EOF priority and reject expired command/global/output budgets before action polling. At96a67a5, all57 library and16 control/config tests pass, including real loopback hard-close and timeout flows. Final lane CI and live acceptance remain pending; captures are normalized and filtered."
     },
     {
       "id": "ship-identity-observational-diagnostics",
@@ -485,13 +485,20 @@
       "elapsed_seconds": 133.625
     },
     "combined_clippy": {
-      "head": "243953bdab1c077a93e02e71948f24ac03d5744a",
-      "result": "failed_two_test_helper_lints",
-      "findings": [
-        "audit receipt comparison allocation",
-        "redundant i32 backpack-index conversion"
-      ],
-      "correction": "corrected in current candidate; rerun pending"
+      "head": "ce4b860e9ea4a5d91ee029a0cda354b14d72bce8",
+      "result": "passed_game_and_testclient_all_targets_D_warnings",
+      "native_exit": 0,
+      "minimum_free_gib": 6.0239105224609375,
+      "elapsed_seconds": 109.36
+    },
+    "testclient_package": {
+      "head": "96a67a5a7a31a90ea66fdf42deecdbd42885fdb0",
+      "library_passed": 57,
+      "binary_passed": 16,
+      "failed": 0,
+      "native_exit": 0,
+      "minimum_free_gib": 10.375419616699219,
+      "source_unchanged": true
     },
     "combined_seam_review": {
       "head": "243953bdab1c077a93e02e71948f24ac03d5744a",

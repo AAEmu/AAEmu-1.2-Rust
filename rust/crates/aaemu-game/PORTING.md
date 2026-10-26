@@ -434,7 +434,12 @@ snapshot boundary. Normalized, filtered headless control captures supplement the
 observations; they do not establish native UI behavior or original compressed wire
 bytes. Deterministic flow tests cover the concurrency cases separately. The
 combined source has passed independent reviews and all-target compilation;
-combined executable tests, final lane CI and live acceptance remain pending.
+all 57 Testclient library and 16 control/config tests pass at `96a67a5a7`.
+These include literal native decoding, filtered compressed batches, real loopback
+socket closure and timeout completion. Synchronous checks reject expired output,
+command and global budgets before polling gameplay: an already-expired Tokio
+timer alone can initially return Pending. Final combined Game tests, lane CI and
+live acceptance remain pending.
 
 ### systems::services
 
