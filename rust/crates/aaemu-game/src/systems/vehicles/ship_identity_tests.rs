@@ -1474,7 +1474,7 @@ async fn private_mysql_ship_save_fence_query_failure_retry_and_restart() {
         .flush()
         .await
         .unwrap();
-    let rows_before_failed_racks: Vec<(u32, u32, u64)> =
+    let rows_before_failed_racks: Vec<(u32, i32, u64)> =
         sqlx::query_as("SELECT id, current_phase_id, item_id FROM doodads ORDER BY id")
             .fetch_all(&pool)
             .await
@@ -1504,7 +1504,7 @@ async fn private_mysql_ship_save_fence_query_failure_retry_and_restart() {
         rack_count, 1,
         "a failed rack query must not seed default persistent rows"
     );
-    let rows_after_failed_racks: Vec<(u32, u32, u64)> =
+    let rows_after_failed_racks: Vec<(u32, i32, u64)> =
         sqlx::query_as("SELECT id, current_phase_id, item_id FROM doodads ORDER BY id")
             .fetch_all(&pool)
             .await
