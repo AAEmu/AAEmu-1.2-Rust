@@ -6,6 +6,7 @@ pub mod effects;
 pub mod misc;
 pub mod plots;
 pub mod templates;
+pub mod zone_rules;
 
 #[cfg(test)]
 mod buff_game_data_tests;
@@ -71,10 +72,14 @@ pub struct Data {
     pub buff_tags: HashMap<u32, Vec<u32>>,
     /// `_taggedBuffs`: tag id -> buff ids.
     pub tagged_buffs: HashMap<u32, Vec<u32>>,
+    /// `buff_breakers`: buff id -> tags on the owner that end that buff.
+    pub buff_breakers: HashMap<u32, Vec<u32>>,
     /// `_skillTags`.
     pub skill_tags: HashMap<u32, Vec<u32>>,
     /// `_taggedSkills`.
     pub tagged_skills: HashMap<u32, Vec<u32>>,
+    /// Authored zone-group restrictions and item tag membership.
+    pub zone_rules: zone_rules::ZoneRules,
     /// `_skillModifiers` by owner id.
     pub skill_modifiers: HashMap<u32, Vec<SkillModifier>>,
     /// `_buffTriggers` by buff id.
@@ -131,6 +136,7 @@ impl Data {
         let mut d = Data {
             plots: PlotData::load(conn)?,
             anims: AnimData::load(conn, files)?,
+            zone_rules: zone_rules::ZoneRules::load(conn)?,
             ..Data::default()
         };
         // skills
@@ -296,6 +302,8 @@ impl Data {
             d.tagged_buffs.entry(tag).or_default().push(buff);
             Ok(())
         })?;
+        d.buff_breakers = load_buff_breakers(conn)?;
+        d.buff_breakers.retain(|id, _| buffs.contains_key(id));
         for_each_row(conn, "SELECT * FROM skill_modifiers", [], |r| {
             let attr = r.u32("skill_attribute_id")? as u8;
             let Some(skill_attribute) = SkillAttribute::from_u8(attr) else {
@@ -633,6 +641,29 @@ impl Data {
             );
         }
     }
+}
+
+/// The 1.2 loader (`395D17B0`) attaches each breaker tag to its `buff_id`, rather than
+/// treating `buff_id` as the buff to apply. The 10.x loader (`39B41DE0`) uses a set.
+pub(super) fn load_buff_breakers(conn: &Connection) -> rusqlite::Result<HashMap<u32, Vec<u32>>> {
+    let mut breakers: HashMap<u32, Vec<u32>> = HashMap::new();
+    for_each_row(
+        conn,
+        "SELECT buff_id, buff_tag_id FROM buff_breakers",
+        [],
+        |r| {
+            breakers
+                .entry(r.u32("buff_id")?)
+                .or_default()
+                .push(r.u32("buff_tag_id")?);
+            Ok(())
+        },
+    )?;
+    for tags in breakers.values_mut() {
+        tags.sort_unstable();
+        tags.dedup();
+    }
+    Ok(breakers)
 }
 
 #[cfg(test)]

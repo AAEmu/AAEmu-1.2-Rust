@@ -1,6 +1,6 @@
 //! Unit attribute getters (`Unit` virtual properties, the `Character` overrides evaluated through
 //! `FormulaManager` + `CalculateWithBonuses` + equipment, the `Npc` overrides through the npc
-//! subsystem hook). One call locks the object once and evaluates any number of attributes.
+//! subsystem hook). One call evaluates any number of attributes under the object's lock.
 
 use std::collections::HashMap;
 
@@ -221,11 +221,23 @@ pub fn composed_regen(base: f64, persistent: f64) -> f64 {
 
 /// The base `Unit` getter values (no override).
 pub fn base_unit_stat(u: &UnitBase, kind: StatKind, now: i64) -> f64 {
+    base_unit_stat_with_limits(u, kind, now, &u.bonuses.attribute_limits)
+}
+
+/// Explicit per-server data for detached vehicle evaluators too.
+pub fn base_unit_stat_with_limits(
+    u: &UnitBase,
+    kind: StatKind,
+    now: i64,
+    limits: &crate::data::attribute_limits::UnitAttributeLimits,
+) -> f64 {
     use StatKind as S;
     match kind {
         S::MoveSpeedMul => {
-            (u.calculate_with_bonuses(1000.0, UnitAttribute::MoveSpeedMul, now) as f32 / 1000.0)
-                as f64
+            (u.bonuses
+                .calculate_with_limits(1000.0, UnitAttribute::MoveSpeedMul, now, limits)
+                as f32
+                / 1000.0) as f64
         }
         S::GlobalCooldownMul => f64::from(u.global_cooldown_mul),
         S::MaxHp => f64::from(u.max_hp),
@@ -247,9 +259,14 @@ pub fn base_unit_stat(u: &UnitBase, kind: StatKind, now: i64) -> f64 {
         | S::IncomingRangedDamageMul
         | S::IncomingSpellDamageMul
         | S::IncomingSiegeDamageMul => 1.0,
-        S::AggroMul => u.calculate_with_bonuses(100.0, UnitAttribute::AggroMul, now) as f32 as f64,
+        S::AggroMul => u
+            .bonuses
+            .calculate_with_limits(100.0, UnitAttribute::AggroMul, now, limits)
+            as f32 as f64,
         S::IncomingAggroMul => {
-            u.calculate_with_bonuses(100.0, UnitAttribute::IncomingAggroMul, now) as f32 as f64
+            u.bonuses
+                .calculate_with_limits(100.0, UnitAttribute::IncomingAggroMul, now, limits)
+                as f32 as f64
         }
         _ => 0.0,
     }
@@ -287,7 +304,12 @@ impl<'a> CharStats<'a> {
     }
 
     fn cwb(&self, v: f64, a: UnitAttribute) -> f64 {
-        self.c.unit.calculate_with_bonuses(v, a, self.now)
+        self.c.unit.bonuses.calculate_with_limits(
+            v,
+            a,
+            self.now,
+            &self.server.game_data.characters.unit_attribute_limits,
+        )
     }
 
     fn formula(&self, kind: UnitFormulaKind, params: &HashMap<&str, f64>) -> f64 {
@@ -608,14 +630,15 @@ impl<'a> CharStats<'a> {
             S::HealCriticalMul => self.cwb(0.0, A::HealCriticalMul) as f32 as f64,
             S::Armor => {
                 let pa = self.all_params();
-                let res = self.formula(F::Armor, &pa) as i32 + self.inputs.gear.armor;
-                f64::from(self.cwb(f64::from(res), A::Armor) as i32)
+                let res = f64::from(self.formula(F::Armor, &pa) as i32)
+                    + f64::from(self.inputs.gear.armor);
+                f64::from(self.cwb(res, A::Armor) as i32)
             }
             S::MagicResistance => {
                 let pa = self.all_params();
-                let res =
-                    self.formula(F::MagicResist, &pa) as i32 + self.inputs.gear.magic_resistance;
-                f64::from(self.cwb(f64::from(res), A::MagicResist) as i32)
+                let res = f64::from(self.formula(F::MagicResist, &pa) as i32)
+                    + f64::from(self.inputs.gear.magic_resistance);
+                f64::from(self.cwb(res, A::MagicResist) as i32)
             }
             S::DefensePenetration => f64::from(self.cwb(0.0, A::IgnoreArmor) as i32),
             S::MagicPenetration => f64::from(self.cwb(0.0, A::MagicPenetration) as i32),
@@ -652,9 +675,9 @@ impl<'a> CharStats<'a> {
                 res as f32 as f64
             }
             S::LungCapacity => f64::from(self.cwb(60000.0, A::LungCapacity) as u32),
-            S::MoveSpeedMul | S::AggroMul | S::IncomingAggroMul => {
-                base_unit_stat(&self.c.unit, kind, self.now)
-            }
+            S::MoveSpeedMul => (self.cwb(1000.0, A::MoveSpeedMul) as f32 / 1000.0) as f64,
+            S::AggroMul => self.cwb(100.0, A::AggroMul) as f32 as f64,
+            S::IncomingAggroMul => self.cwb(100.0, A::IncomingAggroMul) as f32 as f64,
         }
     }
 }
@@ -674,8 +697,13 @@ pub fn char_inputs(server: &GameServer, p: &crate::world::PlayerRef) -> CharInpu
     }
 }
 
-/// Evaluates `kinds` for one object (locks it once). Doodads and non-units give 0.
+/// Binds per-server limits, then evaluates `kinds` for one object. Doodads and non-units give 0.
 pub fn stats(server: &GameServer, obj: &WorldObject, kinds: &[StatKind]) -> Vec<f64> {
+    obj.with_unit(|u| {
+        u.unit_mut()
+            .bonuses
+            .bind_attribute_limits(&server.game_data.characters.unit_attribute_limits);
+    });
     let now = now_ms();
     match obj {
         WorldObject::Player(p) => {
@@ -905,6 +933,10 @@ pub fn update_npc_gear_bonuses(
 ) {
     update_unit_gear_bonuses(server, &WorldObject::from(npc), added, removed);
 }
+
+#[cfg(test)]
+#[path = "attribute_limits_tests.rs"]
+mod attribute_limits_tests;
 
 #[cfg(test)]
 mod vehicle_gear_tests {

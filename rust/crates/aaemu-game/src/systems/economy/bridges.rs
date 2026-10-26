@@ -2124,6 +2124,222 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
         move_to_system_container(server, player, task, item_id)
     }
 
+    fn try_store_doodad_item(
+        &self,
+        server: &GameServer,
+        player: &PlayerRef,
+        doodad: &DoodadRef,
+        expected: &Item,
+        required_count: i32,
+    ) -> bool {
+        let mut txn = ItemTxn::begin(server);
+        doodad.data().phase.to_next_phase = false;
+        let inv = Inv::of(player);
+        let equipment = inv.equipment();
+        let Some(system) = inv.get(slot_type::SYSTEM) else {
+            return false;
+        };
+        if required_count != 1
+            || expected.count != required_count
+            || expected.slot_type != slot_type::EQUIPMENT
+            || expected.owner_id != u64::from(inv.character_id)
+        {
+            return false;
+        }
+        // The rack lock spans the container move and its reference update. No character or
+        // world lookup happens while it is held; item effects flush after both locks drop.
+        let mut d = doodad.data();
+        d.phase.to_next_phase = false;
+        if d.phase.deleted || d.item_id != 0 || d.item_template_id != 0 {
+            return false;
+        }
+        let moved = {
+            let (mut target, source) = inventory::lock_pair(&system, &equipment);
+            let Some(mut source) = source else {
+                return false;
+            };
+            let matches = source.owner_id == inv.character_id
+                && source.slot_type == slot_type::EQUIPMENT
+                && source.get_item_by_slot(expected.slot).is_some_and(|item| {
+                    item.id == expected.id
+                        && item.template_id == expected.template_id
+                        && item.count == required_count
+                        && item.slot_type == slot_type::EQUIPMENT
+                        && item.owner_id == u64::from(inv.character_id)
+                });
+            matches
+                && target.move_item_from(
+                    &mut source,
+                    task_type::DOODAD_ITEM_CHANGER,
+                    expected.id,
+                    -1,
+                    txn.data(),
+                    &mut txn.env.fx,
+                )
+        };
+        if moved {
+            d.item_id = expected.id;
+            d.item_template_id = expected.template_id;
+        }
+        moved
+    }
+
+    fn recover_doodad_cargo(
+        &self,
+        server: &GameServer,
+        player: &PlayerRef,
+        doodad: &DoodadRef,
+    ) -> crate::systems::npcs::hooks::CargoRecovery {
+        use crate::systems::npcs::doodad::funcs::items::cargo_empty_phase;
+        use crate::systems::npcs::hooks::CargoRecovery;
+
+        let mut txn = ItemTxn::begin(server);
+        doodad.data().phase.to_next_phase = false;
+        let inv = Inv::of(player);
+        let Some(empty) = cargo_empty_phase(server, doodad) else {
+            return CargoRecovery::Failed;
+        };
+        let Some(can_repair) = cargo_attachment(server, doodad) else {
+            return CargoRecovery::Failed;
+        };
+        let (item_id, template_id, group, attachment) = {
+            let d = doodad.data();
+            (
+                d.item_id,
+                d.item_template_id,
+                d.func_group_id,
+                (
+                    d.parent_obj_id,
+                    d.transform.parent_obj_id,
+                    d.owner_db_id,
+                    d.attach_point,
+                ),
+            )
+        };
+        if item_id == 0 || !inventory::is_auto_equip_trade_pack(txn.data(), template_id) {
+            return CargoRecovery::Failed;
+        }
+        let item = server.items.item_by_id(item_id);
+        let holder = server.items.holding_container(item_id);
+        let occurrences: usize = server
+            .items
+            .all_containers()
+            .iter()
+            .map(|container| {
+                lock(container)
+                    .items
+                    .iter()
+                    .filter(|i| i.id == item_id)
+                    .count()
+            })
+            .sum();
+        let outside_escrow = match (&item, &holder) {
+            (None, None) => occurrences == 0,
+            (Some(item), Some(holder)) if occurrences == 1 => {
+                let holder = lock(holder);
+                holder.slot_type != slot_type::SYSTEM
+                    && item.slot_type == holder.slot_type
+                    && item.template_id == template_id
+                    && item.class == ItemClass::Backpack
+                    && item.count == 1
+            }
+            _ => false, // Loose or multiply held items do not prove a dangling reference.
+        };
+        let mut d = doodad.data();
+        d.phase.to_next_phase = false;
+        if d.phase.deleted
+            || (d.item_id, d.item_template_id, d.func_group_id) != (item_id, template_id, group)
+            || (
+                d.parent_obj_id,
+                d.transform.parent_obj_id,
+                d.owner_db_id,
+                d.attach_point,
+            ) != attachment
+        {
+            return CargoRecovery::Failed;
+        }
+        if outside_escrow {
+            if !can_repair {
+                return CargoRecovery::Failed;
+            }
+            d.item_id = 0;
+            d.item_template_id = 0;
+            return CargoRecovery::ClearedStale(empty);
+        }
+        let (Some(item), Some(holder)) = (item, holder) else {
+            return CargoRecovery::Failed;
+        };
+        if occurrences != 1
+            || item.slot_type != slot_type::SYSTEM
+            || item.class != ItemClass::Backpack
+            || item.template_id != template_id
+            || item.count != 1
+            || lock(&holder).slot_type != slot_type::SYSTEM
+        {
+            return CargoRecovery::Failed;
+        }
+        let equipment = inv.equipment();
+        if !lock(&equipment).can_accept(
+            &item,
+            txn.data().template(template_id),
+            equip_slot::BACKPACK,
+        ) {
+            return CargoRecovery::Failed;
+        }
+        let backpack = inv.equipped(equip_slot::BACKPACK);
+        let bag = inv.bag();
+        if backpack.as_ref().is_some_and(|backpack| {
+            !matches!(txn.data().template(backpack.template_id).map(|t| &t.kind),
+                Some(TemplateKind::Backpack { backpack_type })
+                    if *backpack_type == crate::data::items::backpack_type::GLIDER)
+                || lock(&bag).place(backpack, -1, txn.data()).is_none()
+        }) {
+            return CargoRecovery::Failed;
+        }
+        // Preflight every destination before moving the glider. Keep a rollback snapshot for
+        // an unexpected failed second move; no failed operation may move the player's backpack.
+        let rollback = backpack.as_ref().map(|_| {
+            let equipment_before = lock(&equipment).clone();
+            let bag_before = lock(&bag).clone();
+            (
+                equipment_before,
+                bag_before,
+                server.systems.economy.previous_backpack(inv.character_id),
+            )
+        });
+        if !inventory::take_off_backpack(&mut txn, &inv, task_type::RECOVER_DOODAD_ITEM, true) {
+            return CargoRecovery::Failed;
+        }
+        let moved = {
+            let (mut target, source) = inventory::lock_pair(&equipment, &holder);
+            source.is_some_and(|mut source| {
+                target.move_item_from(
+                    &mut source,
+                    task_type::RECOVER_DOODAD_ITEM,
+                    item_id,
+                    equip_slot::BACKPACK,
+                    txn.data(),
+                    &mut txn.env.fx,
+                )
+            })
+        };
+        if !moved {
+            if let Some((equipment_before, bag_before, previous)) = rollback {
+                *lock(&equipment) = equipment_before;
+                *lock(&bag) = bag_before;
+                server
+                    .systems
+                    .economy
+                    .set_previous_backpack(inv.character_id, previous);
+                txn.env.fx.0.clear();
+            }
+            return CargoRecovery::Failed;
+        }
+        d.item_id = 0;
+        d.item_template_id = 0;
+        CargoRecovery::Recovered
+    }
+
     fn remove_equipment_item(
         &self,
         server: &GameServer,
@@ -2361,6 +2577,9 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
         } else {
             inv.item_by_id(item_id)
         }?;
+        if !inventory::item_use_zone_allowed(server, player, item.template_id) {
+            return None;
+        }
         let t = server.game_data.items.template(item.template_id);
         Some(crate::systems::npcs::hooks::DoodadSourceItem {
             item_id: item.id,
@@ -2510,42 +2729,182 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
         true
     }
 
-    fn remove_expired_doodad_item(&self, server: &GameServer, item_id: u64) {
-        let Some(c) = server.items.holding_container(item_id) else {
-            return;
-        };
+    fn remove_expired_doodad_item(
+        &self,
+        server: &GameServer,
+        source: crate::systems::npcs::hooks::DoodadItemCleanup,
+    ) {
         let mut txn = ItemTxn::begin(server);
-        let mut g = lock(&c);
-        if matches!(g.slot_type, slot_type::NONE | slot_type::SYSTEM) {
-            g.remove_item_task(task_type::INVALID, item_id, true, &mut txn.env);
-        }
+        cleanup_doodad_escrow_item(&mut txn, source);
     }
 
-    fn release_deleted_doodad_items(&self, server: &GameServer, item_id: u64, container_id: u64) {
-        // item._holdingContainer = null; itemManager.ReleaseId(item.Id)
-        if item_id != 0 && server.items.item_by_id(item_id).is_some() {
-            if let Some(c) = server.items.holding_container(item_id) {
-                lock(&c).remove_item(item_id);
-            }
-            server.items.release_id(item_id, &server.ids.item);
-        }
-        // itemManager.DeleteItemContainer(container)
-        if container_id != 0 && server.items.forget_container(container_id) {
-            if let Ok(rt) = tokio::runtime::Handle::try_current() {
-                let pool = server.db.clone();
-                rt.spawn(async move {
-                    if let Err(e) = crate::managers::item::ItemManager::delete_container_row(
-                        &pool,
-                        container_id,
-                    )
-                    .await
-                    {
-                        tracing::error!("DeleteItemContainer {container_id}: {e}");
-                    }
-                });
-            }
+    fn release_deleted_doodad_items(
+        &self,
+        server: &GameServer,
+        source: crate::systems::npcs::hooks::DoodadItemCleanup,
+    ) {
+        let mut txn = ItemTxn::begin(server);
+        cleanup_doodad_escrow_item(&mut txn, source);
+        if source.container_id != 0 {
+            // A coffer's container has no immutable doodad/generation association. Even an
+            // empty container with a matching owner may be a reused allocation; retain it.
+            tracing::warn!(?source, "Retained doodad container: allocation provenance unavailable; reconciliation deferred");
         }
     }
+}
+
+/// Original rack references cannot authorize destruction after GUID reuse, regardless of the
+/// current item's class. Other doodads may remove only a unique, matching singleton in their
+/// original character owner's System escrow. Bag/equipment/bank, loose, foreign and mismatched
+/// items are retained. These checks establish escrow authority, not an allocation generation.
+/// Cargo/ambiguous item references and all saved container references still need reconciliation;
+/// these synchronous hooks do not prove absence of unloaded aliases or collect those orphans.
+fn cleanup_doodad_escrow_item(
+    txn: &mut ItemTxn<'_>,
+    source: crate::systems::npcs::hooks::DoodadItemCleanup,
+) {
+    use crate::models::doodad::doodad_owner_type;
+
+    let server = txn.server;
+    if source.item_id == 0 {
+        return;
+    }
+    let doodads = &server.game_data.systems.npcs.doodad;
+    let rack = doodads
+        .doodad_func_groups(source.doodad_template_id)
+        .iter()
+        .any(|group| {
+            doodads
+                .funcs_for_group(group.id)
+                .iter()
+                .any(|f| f.func_type == "DoodadFuncConsumeChanger")
+        });
+    let template = server.game_data.items.template(source.item_template_id);
+    let cargo = match template.map(|t| &t.kind) {
+        Some(TemplateKind::Backpack { backpack_type }) => !matches!(
+            *backpack_type,
+            crate::data::items::backpack_type::GLIDER | crate::data::items::backpack_type::TOY_FLAG
+        ),
+        _ => false,
+    };
+    if rack
+        || cargo
+        || source.owner_type == doodad_owner_type::SLAVE
+        || !matches!(
+            source.owner_type,
+            doodad_owner_type::CHARACTER | doodad_owner_type::HOUSING
+        )
+        || source.owner_id == 0
+        || source.item_template_id == 0
+        || !doodads.templates.contains_key(&source.doodad_template_id)
+        || !template.is_some_and(|t| t.max_count == 1)
+    {
+        tracing::warn!(?source, "Retained doodad item: original escrow authority is ambiguous or cargo-origin; reconciliation deferred");
+        return;
+    }
+    let copies: usize = server
+        .items
+        .all_containers()
+        .iter()
+        .map(|c| {
+            lock(c)
+                .items
+                .iter()
+                .filter(|i| i.id == source.item_id)
+                .count()
+        })
+        .sum();
+    if copies != 1 {
+        return;
+    }
+    let Some(container) = server.items.holding_container(source.item_id) else {
+        return;
+    };
+    let mut container = lock(&container);
+    let matches = container.slot_type == slot_type::SYSTEM
+        && container.owner_id == source.owner_id
+        && container
+            .get_item_by_id(source.item_id)
+            .is_some_and(|item| {
+                item.slot_type == slot_type::SYSTEM
+                    && item.owner_id == u64::from(source.owner_id)
+                    && item.template_id == source.item_template_id
+                    && item.count == 1
+            });
+    if matches {
+        container.remove_item_task(task_type::INVALID, source.item_id, true, &mut txn.env);
+    } else {
+        tracing::warn!(
+            ?source,
+            actual_container_id = container.container_id,
+            actual_container_owner = container.owner_id,
+            actual_slot_type = container.slot_type,
+            "Retained doodad item: current holder does not match original owned System escrow"
+        );
+    }
+}
+
+/// A live cargo attachment, plus whether its persistent authored binding proves it safe to
+/// repair. Nonpersistent or equipment-created racks can recover normally but are not repaired.
+fn cargo_attachment(server: &GameServer, rack: &DoodadRef) -> Option<bool> {
+    let (instance, parent, transform_parent, hull_id, point, template_id, persistent) = {
+        let d = rack.data();
+        (
+            d.transform.instance_id,
+            d.parent_obj_id,
+            d.transform.parent_obj_id,
+            d.owner_db_id,
+            d.attach_point,
+            d.template_id,
+            d.is_persistent && !d.phase.deleted,
+        )
+    };
+    if parent == 0 || parent != transform_parent {
+        return None;
+    }
+    let world = server.world.world(instance)?;
+    if !world
+        .doodad(rack.obj_id)
+        .is_some_and(|live| Arc::ptr_eq(&live, rack))
+    {
+        return None;
+    }
+    let hull = world.slave(parent)?;
+    let (id, hull_template, attached) = {
+        let hull = hull.data();
+        (
+            hull.id,
+            hull.unit.template_id,
+            hull.attached_doodads.contains(&rack.obj_id),
+        )
+    };
+    if id != hull_id || !attached {
+        return None;
+    }
+    let repairable = persistent
+        && hull_id > 0
+        && server
+            .game_data
+            .systems
+            .vehicles
+            .slave_template(hull_template)
+            .is_some_and(|t| {
+                t.doodad_bindings
+                    .iter()
+                    .any(|b| b.persist && b.attach_point_id == point && b.doodad_id == template_id)
+            });
+    Some(
+        repairable
+            && !rack.core().children().iter().any(|child| {
+                world.object(child.obj_id()).is_some_and(|live| {
+                    // ObjectCore belongs to the immutable Arc allocation, not its recycled id.
+                    std::ptr::eq(child.core(), live.core()) && {
+                        let transform = live.transform();
+                        transform.parent_obj_id == rack.obj_id && transform.instance_id == instance
+                    }
+                })
+            }),
+    )
 }
 
 /// `Inventory.SystemContainer.AddOrMoveExistingItem(task, item)`.
@@ -3444,20 +3803,6 @@ impl super::craft::CraftHooks for EconomyComposite {
         crate::systems::skills::skill::interrupt_skills(server, &me);
     }
 
-    fn doodad_func_permission(&self, server: &GameServer, doodad: &DoodadRef) -> u8 {
-        let group = doodad.data().func_group_id;
-        server
-            .game_data
-            .systems
-            .npcs
-            .doodad
-            .doodad_funcs(group)
-            .first()
-            .map_or(super::craft::doodad_func_permission::ANY, |f| {
-                f.perm_id as u8
-            })
-    }
-
     fn account_house_zone_ids(&self, server: &GameServer, account_id: u32) -> Vec<u32> {
         server
             .systems
@@ -3628,3 +3973,7 @@ pub fn install(server: &GameServer) {
         });
     crate::systems::services::shutdown::BUYBACK_WIPE.install(wipe);
 }
+
+#[cfg(test)]
+#[path = "cargo_flow_tests.rs"]
+mod cargo_flow_tests;

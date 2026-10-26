@@ -463,12 +463,12 @@ mod creation_tests {
     }
 }
 
-async fn run_inner(
+/// Existing login/lobby path shared by scenarios and the stdio controller.
+async fn open_lobby(
     kind: Kind,
     cfg: &BotConfig,
     r: &mut Runner<'_>,
-    script_input: Option<&ScriptInput<'_>>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<(GameClient, StreamClient, LoginClient)>> {
     // ---- login server ----
     let s = r.begin("login.auth");
     let mut login = LoginClient::connect(&cfg.login, r.rec.clone()).await?;
@@ -503,7 +503,7 @@ async fn run_inner(
         format!("{}:{} cookie {}", cookie.ip, cookie.port, cookie.cookie),
     );
     if kind == Kind::Login {
-        return Ok(());
+        return Ok(None);
     }
 
     // ---- game server: lobby ----
@@ -557,9 +557,269 @@ async fn run_inner(
         p.is_sc(sc::SCCharacterListPacket) && p.body.first() == Some(&1)
     })
     .await?;
+    ensure!(
+        game.state.char_list_done,
+        "incomplete character-list metadata"
+    );
     game.drain(Duration::from_millis(300), Duration::from_secs(2))
         .await?;
     r.end(s, format!("{} character(s)", game.state.characters.len()));
+
+    Ok(Some((game, stream, login)))
+}
+
+async fn select_and_spawn(
+    game: &mut GameClient,
+    character_id: u32,
+    r: &mut Runner<'_>,
+) -> anyhow::Result<()> {
+    // ---- world ----
+    let s = r.begin("game.select");
+    game.select_character(character_id).await?;
+    game.wait_sc(sc::SCCharacterStatePacket).await?;
+    game.drain(QUIET, Duration::from_secs(10)).await?;
+    r.end(s, format!("{} bag items seen", game.state.bag_items.len()));
+
+    let s = r.begin("game.spawn");
+    game.spawn_character().await?;
+    game.wait_for("own SCUnitStatePacket", |p| p.is_sc(sc::SCUnitStatePacket))
+        .await?;
+    game.notify_in_game().await?;
+    game.notify_in_game_completed().await?;
+    game.drain(QUIET, Duration::from_secs(15)).await?;
+    ensure!(game.state.self_obj != 0, "own unit state not received");
+    r.var("self_obj", game.state.self_obj);
+    let npcs = game
+        .state
+        .units
+        .values()
+        .filter(|u| u.unit_type == 1)
+        .count();
+    r.end(
+        s,
+        format!(
+            "obj {} at {:?}, {npcs} npcs visible",
+            game.state.self_obj, game.state.self_pos
+        ),
+    );
+
+    Ok(())
+}
+
+/// A control session owns its connections and reuses the scenario login handoff.
+pub struct ControlSession {
+    pub game: GameClient,
+    pub stream: StreamClient,
+    // Preserve the ordinary scenario's login-connection lifetime through the handoff.
+    _login: LoginClient,
+}
+
+impl ControlSession {
+    /// Own the three connections of an already established session.
+    pub fn new(game: GameClient, stream: StreamClient, login: LoginClient) -> Self {
+        Self {
+            game,
+            stream,
+            _login: login,
+        }
+    }
+
+    /// Release this session's stream, login, and both game halves without application logout.
+    pub async fn disconnect_hard(self) {
+        let Self {
+            game,
+            stream,
+            _login: login,
+        } = self;
+        drop(stream);
+        drop(login);
+        game.disconnect_hard().await;
+    }
+}
+
+fn control_character(
+    characters: &[crate::game::CharInfo],
+    requested: &str,
+    character_id: Option<u32>,
+) -> anyhow::Result<u32> {
+    let mut matches = characters.iter().filter(|c| match character_id {
+        Some(id) => id != 0 && c.id == id,
+        None => c.name.eq_ignore_ascii_case(requested),
+    });
+    let ch = matches
+        .next()
+        .context("requested existing character not listed")?;
+    ensure!(matches.next().is_none(), "ambiguous existing character");
+    Ok(ch.id)
+}
+
+#[cfg(test)]
+mod control_character_tests {
+    use super::control_character;
+    use crate::game::CharInfo;
+
+    // Literal SCCharacterList wire body: last=true, count=2. First entry has a full
+    // equipment item (55-byte detail), nonzero BodyPart ids, faction text, and a Face
+    // model with a three-byte modifier. Second entry has a Hair model. No server encoder
+    // or preconstructed CharInfo vector participates in this regression.
+    const TWO_CHARACTERS: &str = concat!(
+        "01020a0000000500466972737401020a6f000000de0000004d00000054000000070046616374696f6e04000000050000",
+        "004f1a0000887766554433221101020100000001000102030405060708090a0b0c0d0e0f101112131415161718191a1b",
+        "1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435360b000000000000000c0000000d0000000e0f000000",
+        "000000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "000000000000000000000000000000000000000000000000000000000000000000000000fb030000fc030000fd030000",
+        "fe030000ff0300000004000001040000000000000000000001020300a000000000000000400100000000000000f04103",
+        "5b0000005c0000005d0000005e0000000000003f0000803f0000803e01000200640000000000003f650000000000003f",
+        "660000000000003f670000000000003f6e0000006f000000700000000000403f78000000790000007a0000007b000000",
+        "7c000000030007080964006500000000000000020067000000000000006800000069000000000000006a0000006b0000",
+        "00000000006c000000000000006d000000000000006e006f000000700071000000000000007200000000000000730000",
+        "0000000000740000007500000000000000760000000000000077000000000000000178000000790000007a0000007b00",
+        "000000000000002a00000005004f776e657201020a6f000000de0000004d00000054000000070046616374696f6e0400",
+        "000005000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "00000000000000000000000000000000000000000000000000000000000000000000fb030000fc030000fd030000fe03",
+        "0000ff0300000004000001040000000000000000000001020300a000000000000000400100000000000000f041015b00",
+        "000064006500000000000000020067000000000000006800000069000000000000006a0000006b000000000000006c00",
+        "0000000000006d000000000000006e006f00000070007100000000000000720000000000000073000000000000007400",
+        "00007500000000000000760000000000000077000000000000000178000000790000007a0000007b0000000000000000",
+    );
+
+    #[test]
+    fn native_two_character_packet_selects_its_second_existing_id() {
+        use crate::game::{GameState, Packet, LEVEL_GAME};
+        use aaemu_game::opcodes::sc;
+        let body = hex::decode(TWO_CHARACTERS).unwrap();
+        let mut state = GameState::default();
+        state
+            .observe(&Packet {
+                level: LEVEL_GAME,
+                opcode: sc::SCCharacterListPacket,
+                body: body.clone(),
+            })
+            .unwrap();
+        assert!(state.char_list_done);
+        assert_eq!(
+            state.characters.iter().map(|c| c.id).collect::<Vec<_>>(),
+            [10, 42]
+        );
+        assert_eq!(
+            control_character(&state.characters, "Owner", None).unwrap(),
+            42
+        );
+        assert_eq!(
+            control_character(&state.characters, "ignored", Some(42)).unwrap(),
+            42
+        );
+        assert_eq!(state.characters[1].name, "Owner");
+        let mut truncated = GameState::default();
+        assert!(truncated
+            .observe(&Packet {
+                level: LEVEL_GAME,
+                opcode: sc::SCCharacterListPacket,
+                body: body[..body.len() - 1].to_vec()
+            })
+            .is_err());
+        assert!(truncated.characters.is_empty());
+        assert!(!truncated.char_list_done);
+    }
+
+    #[test]
+    fn control_never_falls_back_to_first_or_creates_a_missing_character() {
+        let characters = [
+            CharInfo {
+                id: 10,
+                name: "Unrelated".into(),
+            },
+            CharInfo {
+                id: 42,
+                name: "Owner".into(),
+            },
+        ];
+        assert_eq!(control_character(&characters, "owner", None).unwrap(), 42);
+        assert!(control_character(&characters, "missing", None).is_err());
+        assert!(control_character(&[], "Owner", None).is_err());
+        assert_eq!(
+            control_character(&characters, "renamed", Some(42)).unwrap(),
+            42
+        );
+        assert!(control_character(&characters, "Owner", Some(43)).is_err());
+        assert!(control_character(&characters, "Owner", Some(0)).is_err());
+    }
+}
+
+/// Connect once, selecting an existing character only. No creation or retries.
+pub async fn connect_control(
+    cfg: &BotConfig,
+    rec: &Recorder,
+    character_id: Option<u32>,
+) -> anyhow::Result<ControlSession> {
+    ensure!(
+        !cfg.create_new_character,
+        "control cannot create characters"
+    );
+    rec.control_game_ready(false);
+    let mut r = Runner {
+        rec,
+        out: Outcome::default(),
+    };
+    let (mut game, stream, login) = open_lobby(Kind::Full, cfg, &mut r)
+        .await?
+        .context("game lobby was not opened")?;
+    let id = control_character(&game.state.characters, &cfg.character, character_id)?;
+    rec.control_game_ready(true);
+    select_and_spawn(&mut game, id, &mut r).await?;
+    Ok(ControlSession::new(game, stream, login))
+}
+
+/// Use the scenario's GM chat path without printing command text or replies.
+pub async fn control_gm(game: &mut GameClient, command: &str) -> anyhow::Result<()> {
+    questitem::gm_command(game, command).await?;
+    Ok(())
+}
+
+/// The script `tp` sequence, using the position returned by the server.
+pub async fn control_tp(
+    game: &mut GameClient,
+    x: f32,
+    y: f32,
+    z: f32,
+    clock: u32,
+    until: tokio::time::Instant,
+) -> anyhow::Result<()> {
+    tokio::time::timeout_at(until, async {
+        game.state.last_teleport = None;
+        game.chat(0, &format!("/move {x} {y} {z}")).await?;
+        game.wait_sc(sc::SCTeleportUnitPacket).await?;
+        let at = game
+            .state
+            .last_teleport
+            .context("teleport position missing")?;
+        game.teleport_ended(at).await?;
+        game.move_to(at, clock).await?;
+        // The completion boundary is the received teleport and the two sent acknowledgments.
+        // Ambient traffic is not an action acknowledgment and need never become quiet.
+        // Pump any immediate replies for a small slice of the *remaining* action budget.
+        let remaining = until.saturating_duration_since(tokio::time::Instant::now());
+        let max = remaining
+            .saturating_sub(Duration::from_millis(20))
+            .min(Duration::from_millis(100));
+        if !max.is_zero() {
+            game.drain(Duration::from_millis(10), max).await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("teleport command deadline")?
+}
+
+async fn run_inner(
+    kind: Kind,
+    cfg: &BotConfig,
+    r: &mut Runner<'_>,
+    script_input: Option<&ScriptInput<'_>>,
+) -> anyhow::Result<()> {
+    let Some((mut game, stream, _login)) = open_lobby(kind, cfg, r).await? else {
+        return Ok(());
+    };
 
     let s = r.begin("game.create");
     let created = if cfg.create_new_character || game.state.characters.is_empty() {
@@ -597,35 +857,7 @@ async fn run_inner(
         return Ok(());
     }
 
-    // ---- world ----
-    let s = r.begin("game.select");
-    game.select_character(ch.id).await?;
-    game.wait_sc(sc::SCCharacterStatePacket).await?;
-    game.drain(QUIET, Duration::from_secs(10)).await?;
-    r.end(s, format!("{} bag items seen", game.state.bag_items.len()));
-
-    let s = r.begin("game.spawn");
-    game.spawn_character().await?;
-    game.wait_for("own SCUnitStatePacket", |p| p.is_sc(sc::SCUnitStatePacket))
-        .await?;
-    game.notify_in_game().await?;
-    game.notify_in_game_completed().await?;
-    game.drain(QUIET, Duration::from_secs(15)).await?;
-    ensure!(game.state.self_obj != 0, "own unit state not received");
-    r.var("self_obj", game.state.self_obj);
-    let npcs = game
-        .state
-        .units
-        .values()
-        .filter(|u| u.unit_type == 1)
-        .count();
-    r.end(
-        s,
-        format!(
-            "obj {} at {:?}, {npcs} npcs visible",
-            game.state.self_obj, game.state.self_pos
-        ),
-    );
+    select_and_spawn(&mut game, ch.id, r).await?;
 
     if kind == Kind::NpcReturn {
         npc_return(&mut game, cfg, r).await?;
@@ -2130,5 +2362,183 @@ mod mate_revive_tests {
         assert!("x".parse::<ReviveMethod>().is_err());
         assert_eq!("mate-revive".parse::<Kind>().unwrap(), Kind::MateRevive);
         assert_eq!("cometsboon".parse::<Kind>().unwrap(), Kind::CometsBoon);
+    }
+}
+
+#[cfg(test)]
+mod control_session_tests {
+    use super::*;
+    use aaemu_commons::net::FrameCodec;
+    use aaemu_game::opcodes::cs;
+    use futures::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio_util::codec::Framed;
+
+    fn frame(opcode: u16, body: &[u8]) -> Vec<u8> {
+        let mut frame = vec![0xdd, 1, 0, 0];
+        frame.extend_from_slice(&opcode.to_le_bytes());
+        frame.extend_from_slice(body);
+        frame
+    }
+
+    #[tokio::test]
+    async fn teleport_completes_under_continuous_ambient_traffic() {
+        use crate::record::{Channel, Dir};
+
+        let (io, peer) = tokio::io::duplex(64 * 1024);
+        let rec = Recorder::new(true);
+        let mut game = GameClient::from_io(io, rec.clone());
+        game.state.self_obj = 42;
+        let (stop, mut stopped) = tokio::sync::oneshot::channel();
+        let peer = tokio::spawn(async move {
+            let mut peer = Framed::new(peer, FrameCodec);
+            let chat = peer.next().await.unwrap().unwrap();
+            assert_eq!(
+                u16::from_le_bytes([chat[4], chat[5]]),
+                cs::CSSendChatMessagePacket
+            );
+            let mut teleport = PacketStream::new();
+            teleport
+                .write_u8(0)
+                .write_i16(0)
+                .write_position(10.0, 20.0, 30.0)
+                .write_f32(30.0);
+            peer.send(frame(sc::SCTeleportUnitPacket, teleport.as_bytes()))
+                .await
+                .unwrap();
+            let ambient = frame(sc::SCErrorMsgPacket, &[7, 0]);
+            let mut sent = 0;
+            // Guarantee traffic after the teleport without depending on timer resolution.
+            for _ in 0..2 {
+                peer.send(ambient.clone()).await.unwrap();
+                sent += 1;
+            }
+            let (mut writer, mut reader) = peer.split();
+            let mut acks = Vec::new();
+            let mut stop_requested = false;
+            {
+                // Keep a pending send alive across ACKs; backpressure must not block reads/stop.
+                let sending = async {
+                    loop {
+                        writer.send(ambient.clone()).await.unwrap();
+                        sent += 1;
+                        tokio::task::yield_now().await;
+                    }
+                };
+                tokio::pin!(sending);
+                loop {
+                    if stop_requested && acks.len() == 2 {
+                        break;
+                    }
+                    tokio::select! {
+                        biased;
+                        _ = &mut stopped, if !stop_requested => stop_requested = true,
+                        incoming = reader.next() => {
+                            let bytes = incoming.unwrap().unwrap();
+                            acks.push(u16::from_le_bytes([bytes[4], bytes[5]]));
+                        },
+                        _ = &mut sending => unreachable!("ambient sender runs until stopped"),
+                    }
+                }
+            }
+            (sent, acks)
+        });
+        let until = tokio::time::Instant::now() + Duration::from_secs(5);
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            control_tp(&mut game, 10.0, 20.0, 30.0, 1500, until),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            rec.events()
+                .iter()
+                .filter(|event| {
+                    event.channel == Channel::Game
+                        && event.dir == Dir::S2C
+                        && event.level == crate::game::LEVEL_GAME
+                })
+                .skip_while(|event| event.opcode != sc::SCTeleportUnitPacket)
+                .skip(1)
+                .filter(|event| {
+                    event.opcode == sc::SCErrorMsgPacket && event.body_bytes() == [7, 0]
+                })
+                .count()
+                >= 2
+        );
+        // The fixture keeps draining acknowledgments after this stop signal.
+        let _ = stop.send(());
+        let (sent, acks) = tokio::time::timeout(Duration::from_secs(1), peer)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(sent > 1);
+        assert_eq!(acks, [cs::CSTeleportEndedPacket, cs::CSMoveUnitPacket]);
+        // Assert the server's decoded position, including native Z quantization.
+        assert_eq!(game.state.observed_self_pos, Some((10.0, 20.0, 29.9995)));
+        game.disconnect_hard().await;
+    }
+
+    #[tokio::test]
+    async fn hard_close_releases_real_game_reader_writer_and_stream_without_logout() {
+        // Ephemeral loopback fixtures only: no AAEmu process, login handshake, or database.
+        let game_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let login_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let rec = Recorder::new(true);
+        let mut game = GameClient::connect(
+            &game_listener.local_addr().unwrap().to_string(),
+            rec.clone(),
+        )
+        .await
+        .unwrap();
+        let mut game_peer = game_listener.accept().await.unwrap().0;
+        let stream = StreamClient::connect(
+            &stream_listener.local_addr().unwrap().to_string(),
+            rec.clone(),
+        )
+        .await
+        .unwrap();
+        let mut stream_peer = stream_listener.accept().await.unwrap().0;
+        let login = LoginClient::connect(
+            &login_listener.local_addr().unwrap().to_string(),
+            rec.clone(),
+        )
+        .await
+        .unwrap();
+        let mut login_peer = login_listener.accept().await.unwrap().0;
+        let packet = frame(sc::SCErrorMsgPacket, &[7, 0]);
+        game_peer
+            .write_all(&(packet.len() as u16).to_le_bytes())
+            .await
+            .unwrap();
+        game_peer.write_all(&packet).await.unwrap();
+        game.recv_within(Duration::from_secs(1))
+            .await
+            .unwrap()
+            .unwrap();
+        let session = ControlSession {
+            game,
+            stream,
+            _login: login,
+        };
+        tokio::time::timeout(Duration::from_secs(1), session.disconnect_hard())
+            .await
+            .unwrap();
+        for peer in [&mut game_peer, &mut stream_peer, &mut login_peer] {
+            let mut bytes = Vec::new();
+            tokio::time::timeout(Duration::from_secs(1), peer.read_to_end(&mut bytes))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                bytes.is_empty(),
+                "close must emit no application logout or other packets"
+            );
+        }
+        assert_eq!(rec.events().len(), 1);
+        assert_eq!(rec.events()[0].opcode, sc::SCErrorMsgPacket);
     }
 }

@@ -22,9 +22,9 @@ use sqlx::Row;
 use crate::data::Feature;
 use crate::db::{dt, from_unix, int, unix};
 use crate::models::char_data::CountUnreadMail;
-use crate::models::container::{slot_type, ContainerRef};
+use crate::models::container::{expire_item, slot_type, ContainerRef, MIN_DATE_TIME};
 use crate::models::item::{Item, UnixTime};
-use crate::models::item_task::{task_type, ItemFxList};
+use crate::models::item_task::{task_type, ItemFx, ItemFxList};
 use crate::server::GameServer;
 use crate::systems::HookSlot;
 use crate::world::PlayerRef;
@@ -153,7 +153,8 @@ pub const COST_EXPRESS_ATTACHMENT: i32 = 80;
 pub const COST_FREE_ATTACHMENT_COUNT: i32 = 1;
 /// `MailManager.NormalMailDelay` (30 minutes), in seconds.
 pub const NORMAL_MAIL_DELAY_SECS: i64 = 30 * 60;
-/// `MailManager.MailExpireDelay` (14 days), in seconds (unused in C#).
+/// Ordinary player mail retention (the formerly unused `MailManager.MailExpireDelay`).
+/// Policy: 14 days from scheduled receipt, including a fresh period after a return.
 pub const MAIL_EXPIRE_DELAY_SECS: i64 = 14 * 24 * 3600;
 /// `AppConfiguration.Specialty.TradePackMailDelayInMinutes` default.
 pub const DEFAULT_TRADE_PACK_MAIL_DELAY_MINUTES: f64 = 480.0;
@@ -293,6 +294,19 @@ impl BaseMail {
             && self.header.sender_id != self.header.receiver_id
             && self.header.sender_id > 0
             && (self.mail_type == mail_type::NORMAL || self.mail_type == mail_type::EXPRESS)
+    }
+
+    /// Only player mail belongs to this timer. System/quest rewards can also use NORMAL
+    /// but have sender id zero; tax, auction and commercial mail have separate owners.
+    fn is_expired_at(&self, time: UnixTime) -> bool {
+        self.header.sender_id > 0
+            && self.header.receiver_id > 0
+            && matches!(
+                self.mail_type,
+                mail_type::NORMAL | mail_type::EXPRESS | mail_type::REGISTERED
+            )
+            && self.body.recv_date <= time
+            && time.saturating_sub(self.body.recv_date) >= MAIL_EXPIRE_DELAY_SECS
     }
 
     /// `MailHeader` as written on the wire.
@@ -951,12 +965,15 @@ fn new_mail_id(server: &GameServer, st: &mut MailState) -> u32 {
 
 /// `DeleteMail(long id)` on a locked store.
 pub fn delete_mail_in(server: &GameServer, st: &mut MailState, id: i64) -> bool {
+    if st.all.remove(id).is_none() {
+        return false;
+    }
     if !st.deleted.contains(&id) {
         st.deleted.push(id);
         st.deletion_versions.insert(id, Arc::new(()));
     }
     server.ids.mail.release_id(id as u32);
-    st.all.remove(id).is_some()
+    true
 }
 
 /// `ExtractExtraForHouse(extra, out zoneGroupId, out houseId)` -> `(zoneGroupId, houseId)`.
@@ -1208,9 +1225,19 @@ pub fn notify_new_mail_by_name_if_online(
     m: &mut BaseMail,
     receiver_name: &str,
 ) -> bool {
+    notify_new_mail_at(server, fx, m, receiver_name, now())
+}
+
+fn notify_new_mail_at(
+    server: &GameServer,
+    fx: &mut ItemFxList,
+    m: &mut BaseMail,
+    receiver_name: &str,
+    time: UnixTime,
+) -> bool {
     tracing::trace!("NotifyNewMailByNameIfOnline() - {receiver_name}");
     // If unread and ready to deliver
-    if m.header.status != mail_status::READ && m.body.recv_date <= now() && !m.is_delivered {
+    if m.header.status != mail_status::READ && m.body.recv_date <= time && !m.is_delivered {
         if let Some(player) = server.world.character_by_name(receiver_name) {
             // TODO: Mia mail stuff
             let add_body = m.mail_type == mail_type::CHARGED;
@@ -1270,9 +1297,10 @@ pub fn notify_delete_mail_by_name_if_online(
 /// `SCGotMailPacket` is sent for every unread mail; every unread mail gets `IsDelivered`.
 pub fn get_current_mail_list(txn: &mut ItemTxn<'_>, character_id: u32) -> Vec<i64> {
     let server = txn.server;
+    let now = now();
+    expire_ordinary_mail_at(txn, now);
     // Try to grab the actual online Character object to send live updates
     let character = server.world.character_by_id(character_id);
-    let now = now();
     let mut st = server.systems.economy.mail.state();
     let ids: Vec<i64> = st
         .all
@@ -1321,28 +1349,167 @@ pub fn get_current_mail_list_for(server: &GameServer, character_id: u32) -> Vec<
 
 /// `CheckAllMailTimings()` (the `MailDeliveryTask`).
 pub fn check_all_mail_timings(txn: &mut ItemTxn<'_>) {
+    check_all_mail_timings_at(txn, now());
+}
+
+/// The timer and deterministic lifecycle tests share the same operation and clock value.
+pub fn check_all_mail_timings_at(txn: &mut ItemTxn<'_>, time: UnixTime) {
     tracing::trace!("CheckAllMailTimings");
+    // Expire before delivery: logging in after the deadline must not first announce stale mail.
+    expire_ordinary_mail_at(txn, time);
     let server = txn.server;
-    let now = now();
     let mut st = server.systems.economy.mail.state();
     let undelivered: Vec<i64> = st
         .all
         .iter()
-        .filter(|(_, m)| m.body.recv_date <= now && !m.is_delivered)
+        .filter(|(_, m)| m.body.recv_date <= time && !m.is_delivered && !m.is_expired_at(time))
         .map(|(k, _)| k)
         .collect();
     let mut delivered = 0;
     for id in &undelivered {
         let m = st.all.get_mut(*id).expect("listed");
         let name = m.receiver_name.clone();
-        if notify_new_mail_by_name_if_online(server, &mut txn.env.fx, m, &name) {
+        if notify_new_mail_at(server, &mut txn.env.fx, m, &name, time) {
             delivered += 1;
         }
     }
     if delivered > 0 {
         tracing::debug!("{delivered}/{} mail(s) delivered", undelivered.len());
     }
-    // TODO: Return expired mails back to owner if undelivered/unread
+}
+
+fn expire_ordinary_mail_at(txn: &mut ItemTxn<'_>, time: UnixTime) {
+    let ids: Vec<_> = txn
+        .server
+        .systems
+        .economy
+        .mail
+        .state()
+        .all
+        .iter()
+        .filter(|(_, m)| m.is_expired_at(time))
+        .map(|(id, _)| id)
+        .collect();
+    for id in ids {
+        expire_mail_at(txn, id, time);
+    }
+}
+
+/// is_delivered is reconstructed from dates on restart, while a newly selected
+/// character's counters start at zero. Recount after removal/return instead of
+/// decrementing a counter that might never have included this letter.
+fn refresh_received_count(
+    server: &GameServer,
+    player: &PlayerRef,
+    time: UnixTime,
+) -> CountUnreadMail {
+    let mut received = CountUnreadMail::default();
+    {
+        let st = server.systems.economy.mail.state();
+        for (_, m) in st.all.iter() {
+            if m.header.receiver_id == player.character_id
+                && m.is_delivered
+                && m.body.recv_date <= time
+                && m.header.status != mail_status::READ
+            {
+                received.update_received(m.mail_type, 1);
+            }
+        }
+    }
+    let mut c = player.data();
+    c.unread_mail.received = received.received;
+    c.unread_mail.mia_received = received.mia_received;
+    c.unread_mail.commercial_received = received.commercial_received;
+    c.unread_mail
+}
+
+/// Returns true when a requested ordinary mail has expired (also when a damaged escrow
+/// needs repair). Packet operations must not claim/delete/return it between timer ticks.
+/// All mutations use the caller's ItemTxn, like sends, takes and financial save snapshots.
+pub(super) fn expire_mail_at(txn: &mut ItemTxn<'_>, id: i64, time: UnixTime) -> bool {
+    let server = txn.server;
+    let Some(mail) = server.systems.economy.mail.get_mail_by_id(id) else {
+        return false;
+    };
+    if !mail.is_expired_at(time) {
+        return false;
+    }
+    if mail.can_return_mail()
+        && server
+            .names
+            .get_character_name(mail.header.sender_id)
+            .is_some()
+    {
+        // A failed relocation leaves the original letter intact for retry, never deletes
+        // escrow that was meant to be refunded, and never credits a wallet directly.
+        if !return_to_sender_at(txn, id, time) {
+            tracing::debug!(
+                mail_id = id,
+                "Expired mail return deferred: escrow needs repair"
+            );
+        }
+        return true;
+    }
+
+    // Read, registered, self-addressed, already returned, or sender deleted: terminal
+    // expiry. Only this receiver's mail escrow may be destroyed. A stale reference to
+    // an item already taken into a bag must never delete that item.
+    for &item_id in &mail.body.attachments {
+        let Some(mut item) = server.items.item_by_id(item_id) else {
+            continue;
+        };
+        if item.owner_id != u64::from(mail.header.receiver_id) || item.slot_type != slot_type::MAIL
+        {
+            continue;
+        }
+        if let Some(container) = server.items.holding_container(item_id) {
+            // Mail escrow expiry is unconditional, like item expiry; CanDestroy (for an
+            // active summon item) must not orphan an attachment when the letter disappears.
+            container
+                .lock()
+                .expect("container poisoned")
+                .remove_item(item_id);
+        } else {
+            server.items.take_loose(item_id);
+        }
+        if item.expiration_online_minutes_left > 0.0
+            || item.expiration_time > MIN_DATE_TIME
+            || item.unpack_time > MIN_DATE_TIME
+        {
+            txn.env
+                .fx
+                .push(expire_item(&mut item).with_owner(mail.header.receiver_id));
+        }
+        txn.env.fx.push(ItemFx::ReleaseId(item_id));
+    }
+    server.systems.economy.mail.delete_mail(server, id);
+    if let Some(receiver) = server.world.character_by_id(mail.header.receiver_id) {
+        let modified = mail.is_delivered && mail.header.status != mail_status::READ;
+        let count = refresh_received_count(server, &receiver, time);
+        txn.env.fx.send(
+            receiver.character_id,
+            SCMailDeletedPacket {
+                is_sent: false,
+                mail_id: id,
+                is_unread_mail_count_modified: modified,
+                count,
+            },
+        );
+    }
+    if mail.header.sender_id != mail.header.receiver_id {
+        if let Some(sender) = server.world.character_by_id(mail.header.sender_id) {
+            txn.env.fx.send(
+                sender.character_id,
+                SCMailDeletedPacket {
+                    is_sent: true,
+                    mail_id: id,
+                    is_unread_mail_count_modified: false,
+                    count: sender.data().unread_mail,
+                },
+            );
+        }
+    }
+    true
 }
 
 /// Schedules the `MailDeliveryTask` (30 s, then every 5 s).
@@ -1398,6 +1565,7 @@ pub fn pay_housing_tax(
     mail_id: i64,
     auto_use_aa_point: bool,
 ) -> bool {
+    let _items = server.systems.economy.operation_scope();
     let operation = server
         .systems
         .housing
@@ -1658,6 +1826,10 @@ pub fn delete_house_mails(txn: &mut ItemTxn<'_>, house_id: u32) {
 
 /// Return the existing mail once, preserving its item IDs and attached money.
 pub fn return_to_sender(txn: &mut ItemTxn<'_>, mail_id: i64) -> bool {
+    return_to_sender_at(txn, mail_id, now())
+}
+
+fn return_to_sender_at(txn: &mut ItemTxn<'_>, mail_id: i64, time: UnixTime) -> bool {
     let server = txn.server;
     let mails = &server.systems.economy.mail;
     let Some(mail) = mails.get_mail_by_id(mail_id) else {
@@ -1669,6 +1841,31 @@ pub fn return_to_sender(txn: &mut ItemTxn<'_>, mail_id: i64) -> bool {
     let Some(original_sender) = server.names.get_character_name(mail.header.sender_id) else {
         return false;
     };
+    if mail.body.attachments.iter().any(|id| {
+        server.items.item_by_id(*id).is_none_or(|item| {
+            item.owner_id != u64::from(mail.header.receiver_id) || item.slot_type != slot_type::MAIL
+        })
+    }) {
+        return false;
+    }
+    let mut swapped = mail.clone();
+    swapped.header.receiver_id = mail.header.sender_id;
+    swapped.receiver_name = original_sender.clone();
+    swapped.is_dirty = true;
+    swapped.header.sender_id = mail.header.receiver_id;
+    swapped.header.sender_name = mail.receiver_name.clone();
+    swapped.header.returned = true;
+    swapped.header.status = mail_status::UNREAD;
+    swapped.open_date = 0;
+    swapped.body.recv_date = time;
+    swapped.is_delivered = false;
+    swapped.header.attachments = swapped.get_total_attachment_count();
+    // Move escrow before publishing the new owner or sending any success packet. The
+    // mail containers do not stack attachments. Failure keeps the original row retryable.
+    if !relocate_attachments(txn, &swapped) {
+        relocate_attachments(txn, &mail);
+        return false;
+    }
     if let Some(r) = server.world.character_by_id(mail.header.receiver_id) {
         txn.env.fx.send(
             r.character_id,
@@ -1678,42 +1875,22 @@ pub fn return_to_sender(txn: &mut ItemTxn<'_>, mail_id: i64) -> bool {
             },
         );
     }
-    let swapped = mails.with_mail_mut(mail_id, |m| {
-        let original_receiver_id = m.header.receiver_id;
-        let original_receiver_name = m.receiver_name.clone();
-        m.header.receiver_id = m.header.sender_id;
-        m.receiver_name = original_sender.clone();
-        m.is_dirty = true;
-        m.header.sender_id = original_receiver_id;
-        m.header.sender_name = original_receiver_name;
-        m.header.returned = true;
-        m.header.status = mail_status::UNREAD;
-        m.open_date = 0;
-        m.body.recv_date = now();
-        m.is_delivered = false;
-        // Send(): recount + renumber before MailManager.Send
-        m.header.attachments = m.get_total_attachment_count();
-        m.clone()
-    });
-    let Some(swapped) = swapped else { return false };
-    renumber_slots(server, &swapped);
-    if !relocate_attachments(txn, &swapped) {
-        return false;
-    }
+    mails.with_mail_mut(mail_id, |m| *m = swapped);
     if mail.is_delivered && mail.header.status == mail_status::UNREAD {
         if let Some(receiver) = server.world.character_by_id(mail.header.receiver_id) {
-            receiver
-                .data()
-                .unread_mail
-                .update_received(mail.mail_type, -1);
+            refresh_received_count(server, &receiver, time);
             super::mail_character::send_unread_mail_count(&mut txn.env.fx, &receiver);
         }
     }
     mails.with_mail_mut(mail_id, |m| {
-        notify_new_mail_by_name_if_online(server, &mut txn.env.fx, m, &original_sender)
+        notify_new_mail_at(server, &mut txn.env.fx, m, &original_sender, time)
     });
     true
 }
+
+#[cfg(test)]
+#[path = "mail_expiry_tests.rs"]
+mod expiry_tests;
 
 /// The money / item part `send_system_mail` callers commonly need: a ready-to-send system mail
 /// (sender id 0) to `receiver_id` with `copper` attached and already-created loose `items`

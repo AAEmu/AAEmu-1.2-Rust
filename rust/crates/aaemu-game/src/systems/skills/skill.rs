@@ -9,7 +9,7 @@ use std::sync::Arc;
 use rand::Rng;
 
 use crate::models::transform::PositionAndRotation;
-use crate::models::unit::SkillAttribute;
+use crate::models::unit::{SkillAttribute, UnitAttribute, UnitCooldowns};
 use crate::server::GameServer;
 use crate::systems::social::achievement::char_record_kind;
 use crate::systems::social::achievement_hooks::{AchievementInput, RecordMatch};
@@ -21,8 +21,8 @@ use super::data::{EffectKind, EffectTemplate, SkillEffect, SkillTemplate};
 use super::effects::{self, EffectArgs, EffectSource};
 use super::geometry::{distance_to, is_front, world_of, world_pos, PosUnit, Target};
 use super::packets::{
-    CompressedGamePackets, SCCastingStoppedPacket, SCSkillCooldownResetPacket, SCSkillEndedPacket,
-    SCSkillFiredPacket, SCSkillStartedPacket, SCSkillStoppedPacket,
+    CompressedGamePackets, SCCastingStoppedPacket, SCCooldownsPacket, SCSkillCooldownResetPacket,
+    SCSkillEndedPacket, SCSkillFiredPacket, SCSkillStartedPacket, SCSkillStoppedPacket,
 };
 use super::relation::{can_attack, filter_with_relation, owner_character, relation_to};
 use super::state::{AutoAttackSlot, CancelToken, SkillRef, SkillRun, SkillTaskKind, SkillTaskSlot};
@@ -178,6 +178,91 @@ fn start_global_cooldown(server: &GameServer, skill: &SkillRef, caster: &WorldOb
     let mul = stat(server, caster, StatKind::GlobalCooldownMul) as f32;
     let ms = (gcd as f32 * (mul / 100.0)) as i64;
     caster.with_unit(|u| u.unit_mut().global_cooldown_ms = now + ms);
+}
+
+fn cooldown_ignored(server: &GameServer, caster: &WorldObject) -> bool {
+    caster
+        .as_player()
+        .cloned()
+        .or_else(|| owner_character(server, caster))
+        .is_some_and(|owner| owner.data().skill_char.ignore_skill_cooldowns)
+}
+
+fn on_skill_cooldown(
+    server: &GameServer,
+    skill: &SkillRun,
+    caster: &WorldObject,
+    now: i64,
+) -> bool {
+    // Preserve the existing server-controlled NPC policy: only a character or its
+    // controlled unit is subject to skill cooldown admission, on that unit's own store.
+    let owner = caster
+        .as_player()
+        .cloned()
+        .or_else(|| owner_character(server, caster));
+    let Some(owner) = owner else {
+        return false;
+    };
+    if owner.data().skill_char.ignore_skill_cooldowns {
+        return false;
+    }
+    caster
+        .with_unit(|u| {
+            u.unit_mut().cooldowns.check_skill_cooldown(
+                skill.template.id,
+                skill.template.cooldown_tag_id.max(0) as u32,
+                now,
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn start_skill_cooldown(server: &GameServer, skill: &SkillRun, caster: &WorldObject, now: i64) {
+    if cooldown_ignored(server, caster) {
+        return;
+    }
+    // Native 1.2 `3989A360` -> `3989F900`, attribute 1: modify the started skill's
+    // own cooldown, not each member's authored duration. Never cast a signed duration to u32.
+    let duration = apply_skill_modifiers(
+        server,
+        skill,
+        caster,
+        SkillAttribute::Cooldown,
+        f64::from(skill.template.cooldown_time),
+    )
+    .clamp(0.0, f64::from(u32::MAX)) as u32;
+    if duration == 0 {
+        return;
+    }
+    let tag = skill.template.cooldown_tag_id.max(0) as u32;
+    let packet = caster
+        .with_unit(|u| {
+            let cooldowns = &mut u.unit_mut().cooldowns;
+            cooldowns.add_cooldown(skill.template.id, duration, now);
+            cooldowns.add_tag_cooldown(tag, duration, now);
+            if tag == 0 {
+                return None;
+            }
+            // Native 1.2 397B2350 keeps these lists separate; 3989A290 takes
+            // max(individual, tag). Never manufacture individual entries for other members.
+            let mut affected = UnitCooldowns::default();
+            affected
+                .cooldowns
+                .insert(skill.template.id, cooldowns.cooldowns[&skill.template.id]);
+            affected
+                .tag_cooldowns
+                .insert(tag, cooldowns.tag_cooldowns[&tag]);
+            Some(SCCooldownsPacket::from_cooldowns(&affected, now))
+        })
+        .flatten();
+    if let Some(packet) = packet.filter(|p| !p.is_empty()) {
+        // OnCooldowns (native 391D43C0) addresses the local character's manager;
+        // unlike SkillCooldownReset, the packet has no subject object ID. A mate's
+        // shared timers must not populate its owner's character cooldown store.
+        if let Some(player) = caster.as_player() {
+            player.send(packet);
+        }
+    }
 }
 
 fn lookup_base_unit(server: &GameServer, caster: &WorldObject, obj_id: u32) -> Option<WorldObject> {
@@ -384,6 +469,9 @@ pub fn use_skill(
     if !caster.is_unit() {
         return (skill_result::INVALID_SOURCE, 0);
     }
+    if let Err(result) = super::validation::check_item_zone(server, caster, &caster_caster) {
+        return result;
+    }
     let template = skill.template.clone();
     let resolved_target = initial_target(server, skill, caster, &caster_caster, target_caster);
     let Some(target) = &resolved_target else {
@@ -435,9 +523,6 @@ pub fn use_skill(
         return (skill_result::INVALID_TARGET, 0);
     }
     let character = caster.as_player().cloned();
-    let cooldown_owner = character
-        .clone()
-        .or_else(|| owner_character(server, caster));
     let req = unit_reqs::can_use_skill_on_target(
         server,
         &template,
@@ -504,21 +589,13 @@ pub fn use_skill(
         return result;
     }
     if let Some(c) = &character {
-        if let Some(result) = portal_zone_check(server, &template, c) {
+        if let Some(result) = portal_zone_check(server, &template, c, skill_object.as_ref()) {
             return (result, 0);
         }
     }
     let now = now_ms();
-    if template.cooldown_time > 0 {
-        if let Some(o) = &cooldown_owner {
-            let ignore = o.data().skill_char.ignore_skill_cooldowns;
-            let on_cd = caster
-                .with_unit(|u| u.unit_mut().cooldowns.check_cooldown(template.id, now))
-                .unwrap_or(false);
-            if !ignore && on_cd {
-                return (skill_result::COOLDOWN_TIME, 0);
-            }
-        }
+    if on_skill_cooldown(server, skill, caster, now) {
+        return (skill_result::COOLDOWN_TIME, 0);
     }
     skill.state().bypass_gcd = bypass_gcd;
     if !bypass_gcd {
@@ -630,17 +707,14 @@ pub fn use_skill(
         skill_object: skill_object.clone(),
     };
     if let Some(plot_id) = template.plot_id {
+        if template.plot_only {
+            // Plot-only skills never enter `cast`; commit cooldowns once at acceptance,
+            // before a plot can finish synchronously.
+            start_global_cooldown(server, skill, caster, now);
+            start_skill_cooldown(server, skill, caster, now);
+        }
         super::plots::run_plot(server, plot_id, ctx.clone(), skill.clone());
         if template.plot_only {
-            // `cast` never runs for a plot-only skill: start the GCD and the skill's own
-            // cooldown now, so it cannot be recast while the plot runs (`do_plot_end` adds the
-            // cooldown too, but `add_cooldown` keeps this earlier entry).
-            start_global_cooldown(server, skill, caster, now);
-            caster.with_unit(|u| {
-                u.unit_mut()
-                    .cooldowns
-                    .add_cooldown(template.id, template.cooldown_time as u32, now)
-            });
             return (skill_result::SUCCESS, 0);
         }
     }
@@ -706,6 +780,7 @@ fn portal_zone_check(
     server: &GameServer,
     template: &SkillTemplate,
     c: &crate::world::PlayerRef,
+    skill_object: Option<&SkillObject>,
 ) -> Option<u8> {
     let (access, district, faction, instance) = {
         let d = c.data();
@@ -720,40 +795,88 @@ fn portal_zone_check(
         return None;
     }
     let data = &server.game_data.systems.skills;
-    let first = template.effects.first()?;
-    let (kind, id) = first.template?;
-    let mut zone_id: Option<u32> = None;
-    match data.effect(kind, id)? {
-        EffectTemplate::Special(s) if s.special_effect_type_id == 25 => {
-            if s.value1 > 0 {
-                // PortalManager.GetWorldGatesById: world gates are not loaded (portals subsystem)
-            } else {
-                let rp = server
-                    .game_data
-                    .portals
-                    .district_return_point(district, faction);
-                zone_id = server
-                    .game_data
-                    .portals
-                    .recalls
-                    .values()
-                    .flatten()
-                    .find(|p| p.id == rp)
-                    .map(|p| p.zone_id);
+    for effect in &template.effects {
+        let Some((kind, id)) = effect.template else {
+            continue;
+        };
+        let mut destination_instance = instance;
+        let destination = match data.effect(kind, id) {
+            Some(EffectTemplate::Special(s)) if s.special_effect_type_id == 25 => {
+                if s.value1 > 0 {
+                    crate::systems::npcs::portal::world_gates_by_id(server, s.value1 as u32)
+                        .cloned()
+                        .or_else(|| {
+                            if instance != 0 {
+                                return None;
+                            }
+                            let t = c.data().main_world_position?;
+                            destination_instance = t.instance_id;
+                            Some(crate::data::world_data::Portal {
+                                zone_id: t.zone_id,
+                                x: t.x,
+                                y: t.y,
+                                z: t.z,
+                                ..Default::default()
+                            })
+                        })
+                } else {
+                    destination_instance = crate::models::character::DEFAULT_INSTANCE_ID;
+                    let rp = server
+                        .game_data
+                        .portals
+                        .district_return_point(district, faction);
+                    server
+                        .game_data
+                        .portals
+                        .recalls
+                        .values()
+                        .flatten()
+                        .find(|p| p.id == rp)
+                        .cloned()
+                        .or_else(|| {
+                            if rp == 0 || instance != 0 {
+                                return None;
+                            }
+                            let t = c.data().main_world_position?;
+                            destination_instance = t.instance_id;
+                            Some(crate::data::world_data::Portal {
+                                zone_id: t.zone_id,
+                                x: t.x,
+                                y: t.y,
+                                z: t.z,
+                                ..Default::default()
+                            })
+                        })
+                }
+            }
+            Some(EffectTemplate::OpenPortal { .. }) => {
+                if instance != 0 {
+                    return Some(skill_result::INVALID_LOCATION);
+                }
+                match skill_object {
+                    Some(SkillObject::PortalInfo { id, .. }) => {
+                        crate::systems::npcs::portal::portal_info(&c.data().portals, *id as u32)
+                            .cloned()
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(p) = destination {
+            if !crate::world::session::zone_access_allowed(
+                server,
+                c,
+                destination_instance,
+                p.zone_id,
+                p.x,
+                p.y,
+            ) {
+                return Some(skill_result::NO_PERM);
             }
         }
-        EffectTemplate::OpenPortal { .. } if instance != 0 => {
-            return Some(skill_result::INVALID_LOCATION);
-        }
-        // character.Portals.GetPortalInfo(portalInfo.Id): portals subsystem
-        _ => {}
     }
-    let zone_id = zone_id?;
-    match server.game_data.zones.zone_by_key(zone_id) {
-        None => Some(skill_result::NO_PERM),
-        Some(z) if z.closed => Some(skill_result::NO_PERM),
-        _ => None,
-    }
+    None
 }
 
 /// `Skill.Cast(caster, casterCaster, target, targetCaster, skillObject)`.
@@ -778,7 +901,19 @@ pub fn cast(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         return;
     }
     // Source, target and resources may change while the cast timer is running.
-    let ready = super::validation::check(server, skill, caster, &ctx.target)
+    let ready = caster
+        .as_player()
+        .and_then(|p| portal_zone_check(server, &skill.template, p, Some(&ctx.skill_object)))
+        .map_or(Ok(()), |result| Err((result, 0)))
+        .and_then(|()| super::validation::check_item_zone(server, caster, &ctx.caster_caster))
+        .and_then(|()| super::validation::check(server, skill, caster, &ctx.target))
+        .and_then(|()| {
+            if on_skill_cooldown(server, skill, caster, now_ms()) {
+                Err((skill_result::COOLDOWN_TIME, 0))
+            } else {
+                Ok(())
+            }
+        })
         .and_then(|()| super::validation::check_resources(server, skill, caster))
         .and_then(|()| {
             super::validation::check_build_materials(server, skill, caster, &ctx.target)
@@ -806,8 +941,6 @@ pub fn cast(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         return;
     }
     let t = &skill.template;
-    let now = now_ms();
-    start_global_cooldown(server, skill, caster, now);
     if caster.as_npc().is_some() && t.skill_controller_id != 0 {
         if let Some(sc) = server
             .game_data
@@ -829,14 +962,7 @@ pub fn cast(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             }
         }
     }
-    caster.with_unit(|u| u.unit_mut().skill_state.skill_task = None);
-    consume_mana(server, skill, caster);
-    caster.with_unit(|u| {
-        u.unit_mut()
-            .cooldowns
-            .add_cooldown(t.id, t.cooldown_time as u32, now)
-    });
-    // Validate the cast item
+    // Validate the cast item before committing mana or cooldowns.
     if let (
         Some(p),
         SkillCaster::Item {
@@ -867,6 +993,11 @@ pub fn cast(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             }
         }
     }
+    let now = now_ms();
+    start_global_cooldown(server, skill, caster, now);
+    caster.with_unit(|u| u.unit_mut().skill_state.skill_task = None);
+    consume_mana(server, skill, caster);
+    start_skill_cooldown(server, skill, caster, now);
     if t.channeling_time > 0 {
         start_channeling(server, skill, ctx);
     } else {
@@ -882,6 +1013,17 @@ pub fn start_channeling(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         .map(|target| (target.obj_id(), target.core() as *const _ as usize));
     let caster = &ctx.caster;
     let t = &skill.template;
+    // Native 1.2 sub_398A01B0, attribute 11: milliseconds, independent of CastTime.
+    // The fired packet encodes duration as signed i16 (ms / 10 + 10).
+    let channeling_time = apply_skill_modifiers(
+        server,
+        skill,
+        caster,
+        SkillAttribute::ChannelingTime,
+        f64::from(t.channeling_time),
+    )
+    .max(0.0)
+    .min(f64::from((i32::from(i16::MAX) - 10) * 10)) as i32;
     let data = &server.game_data.systems.skills;
     if t.channeling_buff_id != 0 {
         if let Some(b) = data.buff(t.channeling_buff_id).cloned() {
@@ -931,7 +1073,7 @@ pub fn start_channeling(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             target: ctx.target_caster,
             skill_object: ctx.skill_object.clone(),
             computed_delay: 0,
-            channeling_time: t.channeling_time,
+            channeling_time,
             fire_anim_id: t.fire_anim_id,
         },
         true,
@@ -953,11 +1095,12 @@ pub fn start_channeling(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             ctx.clone(),
             cancel.clone(),
             t.channeling_tick,
+            channeling_time,
         );
     }
     let skill2 = skill.clone();
     let ctx2 = ctx.clone();
-    let scheduled = super::tasks::schedule(server, i64::from(t.channeling_time), move |srv| {
+    let scheduled = super::tasks::schedule(server, i64::from(channeling_time), move |srv| {
         if cancel.is_cancelled() {
             return;
         }
@@ -990,9 +1133,10 @@ fn schedule_channel_tick(
     ctx: CastCtx,
     cancel: CancelToken,
     elapsed: i32,
+    duration: i32,
 ) {
     let interval = skill.template.channeling_tick;
-    if interval <= 0 || elapsed >= skill.template.channeling_time {
+    if interval <= 0 || elapsed >= duration {
         return;
     }
     super::tasks::schedule(server, i64::from(interval), move |server| {
@@ -1044,6 +1188,7 @@ fn schedule_channel_tick(
             ctx.clone(),
             cancel,
             elapsed.saturating_add(interval),
+            duration,
         );
     });
 }
@@ -1367,10 +1512,11 @@ fn append_hostile_ships_hit_by_siege_hull_aoe(
     caster: &Target,
     target_self: &Target,
     ctx: &CastCtx,
+    radius: f32,
     possible: &mut Vec<Target>,
 ) {
     use crate::systems::ai::physics::{siege_point_hits_ship, SIEGE_PIVOT_QUERY_SLACK_METERS};
-    if t.target_area_radius <= 0 {
+    if radius <= 0.0 {
         return;
     }
     if DamageType::from_raw(i64::from(t.damage_type_id)) != Some(DamageType::Siege) {
@@ -1382,7 +1528,6 @@ fn append_hostile_ships_hit_by_siege_hull_aoe(
     ) {
         return;
     }
-    let radius = t.target_area_radius as f32;
     let p = super::geometry::world_pos(server, target_self);
     let relation = SkillTargetRelation::from_raw(i64::from(t.target_relation))
         .unwrap_or(SkillTargetRelation::Any);
@@ -1426,6 +1571,16 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     let caster_t = Target::Obj(caster.clone());
     let target_self = &ctx.target;
     let selection = SkillTargetSelection::from_raw(i64::from(t.target_selection));
+    // Native 1.2 sub_398A01B0 attribute 3 / sub_39420B30: radius is in meters.
+    let area_radius = apply_skill_modifiers(
+        server,
+        skill,
+        caster,
+        SkillAttribute::AreaRadius,
+        f64::from(t.target_area_radius),
+    )
+    .max(0.0)
+    .min(f64::from(i32::MAX)) as f32;
     let mut possible: Vec<Target> = Vec::new();
     if t.target_siege
         && selection == Some(SkillTargetSelection::Source)
@@ -1433,8 +1588,7 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     {
         possible.push(target_self.clone());
     } else if t.target_area_radius > 0 {
-        let mut units =
-            super::geometry::around_radius(server, target_self, t.target_area_radius as f32, true);
+        let mut units = super::geometry::around_radius(server, target_self, area_radius, true);
         if selection == Some(SkillTargetSelection::Source) {
             if let Some(o) = target_self.as_obj() {
                 units.push(o.clone());
@@ -1456,6 +1610,7 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         &caster_t,
         target_self,
         ctx,
+        area_radius,
         &mut possible,
     );
     // Distinct
@@ -1949,16 +2104,25 @@ pub fn end_skill(server: &GameServer, skill: &SkillRef, caster: &WorldObject) {
     }
 }
 
-fn reset_cooldown_if_ignored(server: &GameServer, skill: &SkillRun, caster: &WorldObject) {
+pub(super) fn reset_cooldown_if_ignored(
+    server: &GameServer,
+    skill: &SkillRun,
+    caster: &WorldObject,
+) {
     if let Some(o) = owner_character(server, caster) {
         if o.data().skill_char.ignore_skill_cooldowns {
+            let tag = skill.template.cooldown_tag_id.max(0) as u32;
+            caster.with_unit(|u| {
+                u.unit_mut()
+                    .cooldowns
+                    .remove_skill_cooldown(skill.template.id, tag);
+            });
             o.send(SCSkillCooldownResetPacket {
-                obj_id: o.obj_id,
+                obj_id: caster.obj_id(),
                 skill_id: skill.template.id,
-                tag_id: 0,
+                tag_id: tag,
                 gcd: false,
             });
-            caster.with_unit(|u| u.unit_mut().cooldowns.remove_cooldown(skill.template.id));
         }
     }
 }
@@ -2133,10 +2297,20 @@ pub fn attack_delay(
 ) -> f64 {
     let gcd_mul = stat(server, caster, StatKind::GlobalCooldownMul);
     if matches!(t.id, 2..=4) && caster.as_player().is_some() {
-        let (slot, fallback) = match t.id {
-            2 => (equip_slot::MAINHAND, 1500.0),
-            3 => (equip_slot::OFFHAND, 1500.0),
-            _ => (equip_slot::RANGED, 1800.0),
+        let slot = match t.weapon_slot_for_auto_attack_id {
+            equip_slot::MAINHAND | equip_slot::OFFHAND | equip_slot::RANGED => {
+                t.weapon_slot_for_auto_attack_id
+            }
+            _ => match t.id {
+                2 => equip_slot::MAINHAND,
+                3 => equip_slot::OFFHAND,
+                _ => equip_slot::RANGED,
+            },
+        };
+        let fallback = if slot == equip_slot::RANGED {
+            1800.0
+        } else {
+            1500.0
         };
         let speed = server
             .systems
@@ -2144,9 +2318,22 @@ pub fn attack_delay(
             .ext
             .items()
             .weapon_holdable(server, caster, slot)
-            .filter(|h| h.speed > 0.0)
+            .filter(|h| h.speed.is_finite() && h.speed > 0.0)
             .map_or(fallback, |h| f64::from(h.speed));
-        return (speed * (gcd_mul / 100.0)).clamp(400.0, 5000.0);
+        let attr = if slot == equip_slot::RANGED {
+            UnitAttribute::RangedSpeedMul
+        } else {
+            UnitAttribute::MeleeSpeedMul
+        };
+        let haste = caster
+            .with_unit(|u| u.unit().calculate_with_bonuses(0.0, attr, now_ms()))
+            .unwrap_or(0.0);
+        // Native 1.2 sub_398B49E0: weapon delay * 1000 / (1000 + haste),
+        // guarding the denominator at 1. Offhand uses melee haste, ranged its own.
+        // Only this server repeat timer applies haste; the GCD remains once-only.
+        return (speed * (gcd_mul / 100.0) * 1000.0 / (1000.0 + haste.max(-999.0)))
+            .max(0.0)
+            .min(f64::from(i32::MAX));
     }
     let cast_mul = stat(server, caster, StatKind::CastTimeMul);
     let cast = f64::from(t.casting_time) * cast_mul;
@@ -2364,3 +2551,11 @@ mod auto_attack_lifecycle_tests {
 #[cfg(test)]
 #[path = "owned_npc_target_tests.rs"]
 mod owned_npc_target_tests;
+
+#[cfg(test)]
+#[path = "modifier_flow_tests.rs"]
+mod modifier_flow_tests;
+
+#[cfg(test)]
+#[path = "cooldown_tag_flow_tests.rs"]
+mod cooldown_tag_flow_tests;

@@ -1,7 +1,7 @@
 //! The mail packets. C->S: `CSSendMailPacket`, `CSListMailPacket`, `CSListMailContinuePacket`,
 //! `CSReadMailPacket`, `CSTakeAttachmentItemPacket`, `CSTakeAttachmentMoneyPacket`,
 //! `CSTakeAttachmentSequentially`, `CSTakeAllAttachmentItemPacket`, `CSPayChargeMoneyPacket`,
-//! `CSDeleteMailPacket`, `CSReturnMailPacket` (0xfff in 1.2: never sent by the client).
+//! `CSDeleteMailPacket`, `CSReturnMailPacket` (native 1.2 opcode 0x0a3).
 //! S->C: `SCMailFailedPacket`, `SCMailSentPacket`, `SCGotMailPacket`, `SCMailListPacket`,
 //! `SCMailListEndPacket`, `SCMailBodyPacket`, `SCMailReceiverOpenedPacket`,
 //! `SCAttachmentTakenPacket`, `SCChargeMoneyPaidPacket`, `SCMailDeletedPacket`,
@@ -39,7 +39,10 @@ pub fn register(reg: &mut PacketRegistry) {
     reg.register::<CSTakeAttachmentSequentially>(LEVEL_PLAIN, cs::CSTakeAttachmentSequentially);
     reg.register::<CSPayChargeMoneyPacket>(LEVEL_PLAIN, cs::CSPayChargeMoneyPacket);
     reg.register::<CSDeleteMailPacket>(LEVEL_PLAIN, cs::CSDeleteMailPacket);
-    reg.register::<CSReturnMailPacket>(LEVEL_PLAIN, cs::CSReturnMailPacket);
+    // Native 1.2 ReturnMailById (3948B630 -> 393CD290) sends 0xa3, historically
+    // mislabeled CSReportSpamPacket in the preserved C# opcode table. The 1.2
+    // ReportSpam binding (3948B310) sends nothing; CSReturnMailPacket is 0xfff there.
+    reg.register::<CSReturnMailPacket>(LEVEL_PLAIN, cs::CSReportSpamPacket);
     reg.register::<CSTakeAllAttachmentItemPacket>(LEVEL_PLAIN, cs::CSTakeAllAttachmentItemPacket);
 }
 
@@ -719,7 +722,7 @@ impl CSDeleteMailPacket {
 }
 sync_client_packet!(CSDeleteMailPacket);
 
-/// `CSReturnMailPacket` (opcode 0xfff: not in the 1.2 offsets).
+/// Native 1.2 `ReturnMailById`: opcode 0xa3, mail id i64 (serializer 397BA450).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSReturnMailPacket {
     pub mail_id: i64,

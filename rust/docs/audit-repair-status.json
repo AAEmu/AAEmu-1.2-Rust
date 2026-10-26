@@ -1,0 +1,619 @@
+{
+  "audit": "2026-10-25 missing-feature audit",
+  "baseline": "37e6f1aec",
+  "status": "in_progress",
+  "policy": "A finding closes only with source evidence and appropriate validation; missing native/content evidence stays explicit.",
+  "sources": [
+    "protocol-and-logs",
+    "opcode-table-gaps",
+    "items-economy",
+    "skills-combat-ai",
+    "quests-social-progression",
+    "housing-doodads",
+    "vehicles-pvp-instances",
+    "character-account-world"
+  ],
+  "items": [
+    {
+      "id": "mail-return",
+      "status": "focused_passed",
+      "owner": "audit-protocol",
+      "commit": "305664ae23d7a552f5a6db90677cabec52fe9b3c"
+    },
+    {
+      "id": "loot-error-width",
+      "status": "focused_passed",
+      "owner": "audit-protocol",
+      "commit": "305664ae23d7a552f5a6db90677cabec52fe9b3c"
+    },
+    {
+      "id": "merchant-grade",
+      "status": "focused_passed_full_gate_pending",
+      "owner": "audit-economy",
+      "commit": "3de467a85f1c5aeed2efb2071030058ffeb8b29c"
+    },
+    {
+      "id": "craft-grade-flags",
+      "status": "focused_passed_full_gate_pending",
+      "owner": "audit-economy",
+      "commit": "3de467a85f1c5aeed2efb2071030058ffeb8b29c"
+    },
+    {
+      "id": "web-api-authentication",
+      "status": "focused_passed_full_gate_pending",
+      "owner": "audit-web",
+      "commit": "24b4699887d5350bc1a9e6f89267f98469fde8eb"
+    },
+    {
+      "id": "housing-bench-plaque-permissions",
+      "status": "unit_and_data_passed_full_gate_pending",
+      "commit": "e2e9744b59d094b2ceb74c63626336664071a59f",
+      "note": "Construction19 fixtures corrected; full game unit suite and ignored compact plaque-pack checks pass at7ac."
+    },
+    {
+      "id": "craft-bench-pack-and-required-doodad",
+      "status": "merged_pending_validation",
+      "commit": "e2e9744b59d094b2ceb74c63626336664071a59f"
+    },
+    {
+      "id": "closed-and-unknown-zones",
+      "status": "focused_passed_full_gate_pending",
+      "commit": "e9a870b8c71e8e4dbf7509d7e72bbb33bcfef20a",
+      "note": "Unknown keys remain neutral; no invented safe destination. Parent corrected Doodad transform field after first compile check."
+    },
+    {
+      "id": "national-tax-rate",
+      "status": "queued"
+    },
+    {
+      "id": "vehicle-attachment-data",
+      "status": "partial_pending_rust_validation",
+      "commit": "ae83bd8f6609df3dab5943dba2420733b08c5de4",
+      "parent_native_python_tests_passed": 8,
+      "transforms_added": 87,
+      "item_summonable_templates_fixed": 14,
+      "item_summonable_templates_total": 22,
+      "open_required_points": 41,
+      "note": "Missing native assets/prefabs/helpers are explicit; no invented origin points."
+    },
+    {
+      "id": "ordinary-warning-noise-and-cleanup-cause",
+      "status": "queued"
+    },
+    {
+      "id": "slave-owned-doodad-housing-lookup",
+      "status": "queued"
+    },
+    {
+      "id": "aoe-diminishing",
+      "status": "runtime_merged_pending_retest",
+      "commit": "e6f6920da",
+      "note": "Plot-scoped first-seen distinct-target ranks/reset/clamp are explicit compatibility policy. Nativeworld-servercounter unavailable.10/11firstflows passed; health fixture corrected."
+    },
+    {
+      "id": "skill-and-buff-modifiers",
+      "status": "merged_pending_validation",
+      "commit": "80303b48a224d83e88c17262ef92493b8b38f79c",
+      "open_subcases": [
+        "Vicious Implosion10710 plot580 radius",
+        "Crippling Mire10201 plot320 channel duration"
+      ]
+    },
+    {
+      "id": "buff-group-rank-and-per-caster-slots",
+      "status": "queued"
+    },
+    {
+      "id": "reflection",
+      "status": "queued"
+    },
+    {
+      "id": "attack-speed",
+      "status": "merged_pending_validation",
+      "commit": "80303b48a224d83e88c17262ef92493b8b38f79c"
+    },
+    {
+      "id": "buff-breakers",
+      "status": "runtime_merged_pending_validation",
+      "commit": "8fe6039ee99476591ec43a5c0f513fd05e25d658",
+      "note": "Accepted-state compatibility policy. Lifetime identities stop reentrant Started callbacks leaking modifiers; native timing remains unverified."
+    },
+    {
+      "id": "buff-taunts",
+      "status": "queued"
+    },
+    {
+      "id": "casting-hit-delay-and-cancellation",
+      "status": "queued"
+    },
+    {
+      "id": "item-procs-and-set-procs",
+      "status": "queued"
+    },
+    {
+      "id": "shared-cooldown-tags",
+      "status": "merged_pending_execution",
+      "note": "Native separate skill/tag snapshots and GM reset; root af5db95ba additionally isolates controlled-unit UI. Game all-target Clippy passed at af5db95ba; runtime regressions pending.",
+      "commit": "47217398ade1f50f9957b15a1e6ec1a72428eaa7"
+    },
+    {
+      "id": "xp-buff-multiplier",
+      "status": "merged_pending_validation",
+      "commit": "80303b48a224d83e88c17262ef92493b8b38f79c"
+    },
+    {
+      "id": "zone-banned-item-and-skill-tags",
+      "status": "partial_merged_pending_validation",
+      "commit": "9dd3453085a829513db7bff1e1a80cc55a9963c3",
+      "note": "324unconditional rules enforced;9period24rules and Library1581missingmembership remain open."
+    },
+    {
+      "id": "unit-and-primary-stat-limits",
+      "status": "partial_merged_pending_validation",
+      "commit": "ed2f7a9f3",
+      "note": "Native final raw unit caps implemented per server. Permanent pStat contribution ranges are loaded; contribution storage/behavior remain open. No final-primary 10000 cap invented."
+    },
+    {
+      "id": "prison-and-other-skill-restrictions",
+      "status": "queued"
+    },
+    {
+      "id": "damage-threat-percent-health-and-level-interpolation",
+      "status": "partial_merged_pending_validation",
+      "commit": "917759c3fb637dec43adbb2d930da37f31b4a71a",
+      "note": "Authored floatlevel range/threat/HP-percent and numeric guards; percent/HP unit interpretation documented, target_health predicates remain open."
+    },
+    {
+      "id": "recipe-learning",
+      "status": "queued"
+    },
+    {
+      "id": "npc-groups",
+      "status": "queued"
+    },
+    {
+      "id": "npc-linked-aggro-and-missing-ai",
+      "status": "queued"
+    },
+    {
+      "id": "npc-alert-dead-events-and-friendship",
+      "status": "queued"
+    },
+    {
+      "id": "remaining-buff-attributes-and-controller-kinds",
+      "status": "queued"
+    },
+    {
+      "id": "stealth-visibility",
+      "status": "queued"
+    },
+    {
+      "id": "trade-pack-pricing-config-ratios-and-persistence",
+      "status": "queued"
+    },
+    {
+      "id": "premium-and-aa-points",
+      "status": "queued"
+    },
+    {
+      "id": "second-password-and-item-security",
+      "status": "queued"
+    },
+    {
+      "id": "item-level-gender-pickup-and-use-limits",
+      "status": "queued"
+    },
+    {
+      "id": "tempering-and-socket-data-rules",
+      "status": "queued"
+    },
+    {
+      "id": "craft-binding-and-required-grade",
+      "status": "queued"
+    },
+    {
+      "id": "mail-expiry-throttling-feedback-and-pagination",
+      "status": "partial_merged_pending_validation",
+      "commit": "e712343a3211076ddef5db75658e6075aaa47bac",
+      "note": "Ordinary player-mail 14-day retention/return-once escrow policy implemented. Specialized mail, send throttles/level gates and pagination remain open. New ordinary expiry tests unexecuted."
+    },
+    {
+      "id": "npc-physical-enchant",
+      "status": "queued"
+    },
+    {
+      "id": "auction-filter-limits-and-authority",
+      "status": "queued"
+    },
+    {
+      "id": "missing-item-and-quest-feedback-packets",
+      "status": "queued"
+    },
+    {
+      "id": "quest-spawn-coverage",
+      "status": "queued"
+    },
+    {
+      "id": "nation-and-faction-flows",
+      "status": "queued"
+    },
+    {
+      "id": "bounty-board",
+      "status": "queued"
+    },
+    {
+      "id": "achievement-producers",
+      "status": "queued"
+    },
+    {
+      "id": "quest-and-skill-unit-requirements",
+      "status": "queued"
+    },
+    {
+      "id": "trial-jury-expedition-rename-and-quest-edge-fields",
+      "status": "queued"
+    },
+    {
+      "id": "doodad-phase-messages",
+      "status": "queued"
+    },
+    {
+      "id": "territory-statue-insert-counter",
+      "status": "queued"
+    },
+    {
+      "id": "navigation-doodad-expiry",
+      "status": "queued"
+    },
+    {
+      "id": "crest-printer-and-ucc",
+      "status": "queued"
+    },
+    {
+      "id": "house-repair-and-farm-notifications",
+      "status": "queued"
+    },
+    {
+      "id": "doodad-area-trigger-and-evidence-loot",
+      "status": "queued"
+    },
+    {
+      "id": "remaining-gathering-funcs",
+      "status": "queued"
+    },
+    {
+      "id": "puzzle-machines",
+      "status": "queued"
+    },
+    {
+      "id": "doodad-placement-surface-and-bundle-rules",
+      "status": "queued"
+    },
+    {
+      "id": "battle-pet-behavior-and-equipment",
+      "status": "queued"
+    },
+    {
+      "id": "movement-validation",
+      "status": "queued"
+    },
+    {
+      "id": "ship-handling-data",
+      "status": "queued"
+    },
+    {
+      "id": "shipyard-salvage",
+      "status": "queued"
+    },
+    {
+      "id": "instance-spawn-data",
+      "status": "queued"
+    },
+    {
+      "id": "instance-channel-and-client-driven-entry",
+      "status": "queued"
+    },
+    {
+      "id": "arena-restrictions-and-mirrored-instance-bugs",
+      "status": "queued"
+    },
+    {
+      "id": "siege-calendar-tickets-reinforcement-and-notifications",
+      "status": "queued"
+    },
+    {
+      "id": "racing",
+      "status": "queued"
+    },
+    {
+      "id": "remaining-geometry-and-physics-data",
+      "status": "queued"
+    },
+    {
+      "id": "cooldown-persistence",
+      "status": "queued"
+    },
+    {
+      "id": "disconnect-duplicate-login-and-dead-relogin",
+      "status": "queued"
+    },
+    {
+      "id": "resurrection-waits-and-server-enforcement",
+      "status": "queued"
+    },
+    {
+      "id": "name-chat-filtering-throttle-and-moderation",
+      "status": "partial_merged_pending_validation",
+      "note": "Native ASCII block-name rules implemented in7441d62; chat/throttle/moderation remain open."
+    },
+    {
+      "id": "character-recustomization",
+      "status": "queued"
+    },
+    {
+      "id": "character-slots-races-and-deletion-guards",
+      "status": "partial_merged_pending_validation",
+      "commit": "7441d62bcd2b85b89f907cf072428edad1ce1553",
+      "open_subcases": [
+        "nation/penalty/bot/transfer deletion policy",
+        "ownership transfer atomicity",
+        "delayed expiry guard recheck"
+      ]
+    },
+    {
+      "id": "event-schedule-notifications",
+      "status": "queued"
+    },
+    {
+      "id": "login-capacity-and-auth-rate-limits",
+      "status": "queued"
+    },
+    {
+      "id": "missing-buff-and-skill-controller-static-data",
+      "status": "queued"
+    },
+    {
+      "id": "deprecated-empty-or-client-only-data",
+      "status": "queued",
+      "note": "Verify before deciding no server implementation is required."
+    },
+    {
+      "id": "trade-ship-cargo-reference-atomicity",
+      "status": "ci_selected_checks_and_bounded_live_observation_verified",
+      "owner": "audit-tradeship",
+      "note": "At198b7d482 the official lane CI, the game unit suite and the explicit native Merchant all20rack cycle, private MySQL saved-alias and recycled-GUID checks pass. Independent cargo/SQL audit R36 found no P1/P2 for the positive 80-operation rack run; the R37 control audit found no P1 and its single P2 evidence qualification is resolved by explicit wording. The bag-negative and hard-close/reselect controls pass; in the second same-item resummon attempt the skill executed (started, fired, ended) and the subsequent loaded-hull replacement was refused with SCErrorMsg 801 SLAVE_EQUIPMENT_LOADED_ITEM, so it shows loaded-hull preservation; unloaded replacement and 600 s timer completion were not exercised in this live run. Conservative cargo/container retention and reconciliation/GC limits remain.",
+      "commit": "8c2e977b5ba6b7660e4739964465e0b1e97b9d7b"
+    },
+    {
+      "id": "trade-ship-live-root-identity-after-reconnect",
+      "status": "source_reviewed_ci_selected_checks_and_bounded_live_observation",
+      "owner": "audit-ship-session",
+      "note": "Three source review rounds clean after item publication, query-error/orphan, callback spawn-lock ordering and stale cargo receipt fixes. At198b7d482 the official lane CI and the selected ship save-fence/query-failure/restart checks pass. One bounded headless hard-close reselect left the same loaded hull registered and visible with a single current root, and in the second same-item summon attempt the skill executed and the subsequent loaded-hull replacement was refused with 801, leaving hull, racks, cargo and phases unchanged; unloaded replacement and 600 s timer completion were not exercised in this live run. Intentional600s retention remains. Guardless/direct-write limitations explicit.",
+      "commit": "54f98af143f8458175dc76ffe9afad132ec3b680"
+    },
+    {
+      "id": "lane-allocation-concurrency",
+      "status": "focused_passed_full_gate_pending",
+      "owner": "audit-lane-lock",
+      "note": "15 isolated root Python tests passed; original allocator fails concurrent allocation. Two real concurrent probe lanes received distinct prefixes and were removed. Windows/Linux workflow now runs the suite.",
+      "commit": "090f515b6"
+    },
+    {
+      "id": "headless-control-reconnect-test-interface",
+      "status": "source_reviewed_package_tests_and_lane_ci_passed_bounded_live_use",
+      "commit": "578a6a7e68a8ea663eafdb5487f5f8d8f2a09180",
+      "note": "Fourth source review clean after an executed regression exposed expired Tokio timer first-poll behavior. Synchronous guards preserve EOF priority and reject expired command/global/output budgets before action polling. At96a67a5, all57 library and16 control/config tests pass, including real loopback hard-close and timeout flows; both counts are unchanged in the198b7d482 lane CI. The bounded live reconnect control used it without a deadline overrun (see current_live); captures are normalized and filtered."
+    },
+    {
+      "id": "ship-identity-observational-diagnostics",
+      "status": "source_reviewed_ci_passed_live_observational",
+      "commit": "6a406e5da2d319bc61cc073e761d4d3c08a005d9",
+      "note": "Source review findings closed; the diagnostic, authority and retirement consistency flags all remain false. Supporting observations only, not a globally atomic authority proof; live use at198b7d482 stays observational."
+    }
+  ],
+  "recent_validation": {
+    "game_check": {
+      "head": "0cf0f23f500628ca6a0dc0cc6d46ecebc16ac9b8",
+      "result": "passed_all_targets"
+    },
+    "game_clippy": {
+      "head": "af5db95ba0687dcc4cfb7b164af77bbd038b28cc",
+      "result": "passed_all_targets_D_warnings"
+    },
+    "latest_mail_stats_clippy": {
+      "head": "dbd7cd95251ebc692a913128b650ba25b74ba1d9",
+      "result": "held_at_memory_reserve_before_completion",
+      "minimum_free_gib": 5.938747406005859
+    },
+    "current_full_lane_ci": {
+      "head": "198b7d4821df6d930c14c8a5d38c64846a43efe1",
+      "tree": "6795208a05103b9b090120606b166a59a0c88497",
+      "result": "passed",
+      "command": "Scripts/lane.sh check (cargo xtask ci)",
+      "native_exit": 0,
+      "elapsed_seconds": 91.10899999999674,
+      "minimum_free_gib": 12.508186340332031,
+      "source_unchanged": true,
+      "testclient_library_passed": 57,
+      "testclient_binary_passed": 16,
+      "scope": "Local official lane check; the full source build passed at the same head and tree."
+    },
+    "current_live": {
+      "status": "bounded_observational_controls_verified_with_loaded_hull_replacement_refused_801",
+      "executed_source_head": "198b7d4821df6d930c14c8a5d38c64846a43efe1",
+      "executed_source_tree": "6795208a05103b9b090120606b166a59a0c88497",
+      "scope": "Observed only on the executed source head above. Later documentation-only commits and checks do not change what was observed; the final documentation HEAD was not run live.",
+      "runtime_artifacts": "8 target/runtime EXE/PDB hashes and 4 native GUID/age pairs matched the executed source; no Rust source change since.",
+      "supporting_external_harness": {
+        "scope": "External PowerShell/Python driver and offline helper tests; not committed Rust tests and not retail proof.",
+        "helper_tests_passed": 191,
+        "helper_tests_skipped": 0,
+        "helper_test_manifest_sha256": "e9bf4b93b0d478b2c5241482feadc30ce4dd209bbf25fd488b7c5d00a1abbec2",
+        "helper_test_manifest_scope": "external main 191-test helper manifest",
+        "grid_preflight_mock_tests_passed": 209,
+        "grid_preflight_suites": "75+50+84 in three separate unittest processes",
+        "independent_source_review": "R33 and R34 clear"
+      },
+      "ground_grid_preflight": {
+        "review": "R35 independent raw/persistence/stop audit clear",
+        "water_nodes_observed": 20,
+        "instance": 0,
+        "pitch_metres": 6,
+        "min_depth_observed": 58.03979,
+        "surface_height": 100,
+        "cached_zone_observed": 180,
+        "spare_pack_drop_recover_roundtrips": 1,
+        "same_item_guid_after_recover": true,
+        "wrapper_elapsed_seconds": 43.703,
+        "exit": "OS exit 0, STOP0; same spare item back in equipment slot 26; no surviving doodad references.",
+        "prior_cargo_affected": false,
+        "scope": "20 sampled water nodes plus one same-GUID spare drop/recover on the headless Rust-server path",
+        "not_proven": "static objects; open water beyond the sampled nodes; the actual cast zone"
+      },
+      "full_merchant_run": {
+        "driver_status": "OBSERVATIONAL_SCENARIO_COMPLETE",
+        "driver_elapsed_seconds": 362.078,
+        "fresh_owners": 1,
+        "reported_counts": {
+          "loads": 40,
+          "unloads": 40,
+          "drops": 40,
+          "pickups": 20,
+          "negative_cases": 1,
+          "hard_drops": 1,
+          "reconnects": 1,
+          "resummon_attempts": 1
+        },
+        "reported_counts_note": "resummon_attempts is the raw driver count of one accepted same-item skill attempt: the skill executed, then the subsequent loaded-hull replacement was refused with 801. It is not a successful new hull.",
+        "run_conditions": "No retries, cap changes, original-item destroy, regrant or cooldown clearing; timing budgets unchanged; control cleanup completed.",
+        "initial_verifier_correction": "The initial read-only SQL verifier assumed character owner_type 1 instead of 254 and filtered saved racks by owner_id instead of house_id. Corrected source-derived filters returned unchanged common rows plus the 20 saved racks; no runtime or data retry.",
+        "r36_independent_cargo_sql_audit": {
+          "result": "CLEAR, no P1/P2 for the positive cargo run",
+          "positive_rack_operations": 80,
+          "racks_attached": "all 20 (attachment points 60..79) in 4 passes",
+          "drops": 40,
+          "pickups": 20,
+          "accepted_skill_timelines": 143,
+          "original_add_payloads_with_identical_immutable_fields": 160,
+          "unique_original_item_ids_kept_identical": 20,
+          "final_ground_references": 20,
+          "final_item_container": "System",
+          "final_saved_racks_empty": 20,
+          "glider_retained_in_bag": true,
+          "summon_item_and_saved_hull_retained": true,
+          "post_stop_sql_closure_checks_passed": 8,
+          "destroy_calls": "only recorded filler items (template 6735)",
+          "labor": "one natural credit of +10, no debit",
+          "wire_note": "Sanitized, expanded wire summaries; not original compressed or retail captures."
+        },
+        "r37_independent_control_audit": {
+          "result": "No P1; one P2 evidence qualification, resolved by the explicit resummon wording below (skill executed, subsequent loaded-hull replacement refused with 801). No rerun.",
+          "scope": "Negative, hard-close reconnect, same-item resummon attempt, root identity, deadlines, logs and cleanup; source and sanitized/normalized captures only, no private configuration or secrets read.",
+          "bag_negative": "One accepted negative on an attached rack: skill timeline started, fired, then ended with error 207; nothing else in the window. Bag 50/50 (5 existing plus 45 recorded filler items); real glider kept in its equipment cell; all inventory, rack and phase state unchanged; no item-task or phase packets. The 45 destroy calls hit only the recorded fillers (not originals, glider or summon); the glider was legally swapped into the bag.",
+          "hard_close": "Game and Stream connections both closed without a LeaveWorld; the same character was reselected once (connection 1 to 5); the same hull stayed registered and visible; retirement job generation 1 stayed waiting on its timer, still pending; reconnect leave generation reset to 0.",
+          "resummon_attempt": "The second same-item skill executed (accepted timeline: started, fired, ended), then SCErrorMsg 801 SLAVE_EQUIPMENT_LOADED_ITEM refused the subsequent loaded-hull replacement: the existing hull (template 75), all 20 racks, cargo and phases were preserved, drift 0, and only the initial SCSlaveCreated appears in the captures. So it shows loaded-hull preservation and a single root after reconnect; unloaded replacement and 600 s timer completion were not exercised in this live run.",
+          "root_identity": "91 audit chunk groups, all from the observer, with valid FNV checksums and nonces; 90 post-summon samples show a single current root and no other live root; the three consistency flags remain false. These are temporal observations, not global authority.",
+          "deadlines": "2892 requests, 2892 ok, none past their deadline; 141 operations (all 140 positive at 2.49 s or less, negative 1.58 s); 362.078 s total with 181.567 s reserve and a 537.015 s effective cap inside 540 s; no retries, cooldown clearing or cap changes. Reconnect used 16.9 s of its 20 s budget (3.1 s margin).",
+          "logs": "138 WARN lines (136 TeleportEnded, 1 slow tick, 1 expected negative Doodad item-reference refusal) and 1 ERROR (Login link, after the forced Login-before-Game STOP); 0 panics; startup excluded. The stop was forced, not a graceful shutdown, and the logs are not warning- or error-free.",
+          "cleanup": "All 8 runtime artifact hashes match; independent STOP0 with no owned Login/Game/Testclient process and 0 of the 5 lane ports. Authentication entries are omitted by the source and rejected by the adapter.",
+          "minor_qualifications": "The stage label after the negative was persisted but the rolling deadlines stayed valid. The observer was a living character 2.83 m from node 79, which is not a static-object mask."
+        }
+      },
+      "full_merchant80_acceptance": "Accepted for this one bounded headless run: 80 positive rack operations, 40 drops, 20 pickups, original-20 identity and final persisted SQL closure, with qualified controls. The same-item skill executed; subsequent loaded-hull replacement was refused with 801 and the existing hull was preserved. This is not a full-scenario pass, retail parity or global proof; the wider audit remains in_progress.",
+      "final_stop": "Independent STOP0: no owned Login/Game/Testclient process or lane listener (0 of the 5 lane ports); the 8 runtime artifact hashes, the clean source at the executed head and the 26 verified helper pins unchanged; shared MySQL TCP responds only.",
+      "proof_limits": [
+        "One bounded fresh owner on the headless Rust-server path; not retail parity, all world actors, all interleavings or global atomicity.",
+        "Post-STOP0 SQL proves the persisted end state only, not the exact save time or save order; DB item details are not asserted byte-identical to the wire serializer.",
+        "The doodad wire carries no item GUID; the native-to-item mapping is correlated and bound by the persisted row after STOP0.",
+        "The diagnostic, authority and retirement consistency flags remain false; queued, HP, world, phase and sampling exclusions and guardless or direct writes remain.",
+        "The 600 s offline hull retention and the root-versus-portal rendering distinction remain intentional.",
+        "The final 20 originals are legal world ground doodads in System, not bag items; backpack type 3 cannot be stowed. The glider is a type 2 bag item.",
+        "In the same-item resummon attempt the skill executed and the subsequent loaded-hull replacement was refused with 801; unloaded replacement, replacement of a retired hull and 600 s retirement-timer completion were not exercised in this live run.",
+        "Process stop was forced and the logs contain warnings and one Login-link error; the run is not claimed clean or gracefully shut down.",
+        "Passing CI closes no unrelated finding; the open wider-audit items are unchanged (9 timed zone bans, pStat contribution storage, 41 missing native attachment points, orphan reconciliation/GC; AoE rank/reset and immediate buff-break timing remain compatibility policy; tester-incident root cause is unattributed)."
+      ]
+    },
+    "game_unit_tests": {
+      "head": "198b7d4821df6d930c14c8a5d38c64846a43efe1",
+      "passed": 2878,
+      "failed": 0,
+      "ignored": 149,
+      "result": "passed",
+      "minimum_free_gib": 12.508186340332031,
+      "source_unchanged": true,
+      "scope": "Game package inside the official lane check."
+    },
+    "latest_corrected_builds": {
+      "head": "5dfd7282b71ec84655b44b861b24991502dd5ff2",
+      "clippy": "held_at_memory_reserve",
+      "game_tests": "held_at_memory_reserve_before_execution"
+    },
+    "cargo_source_review": {
+      "head": "8c2e977b5ba6b7660e4739964465e0b1e97b9d7b",
+      "round": 3,
+      "result": "no_new_actionable_P1_P2_within_documented_conservative_policy",
+      "execution": "pending"
+    },
+    "cargo_integrated_game_build": {
+      "head": "8db0e003df5c329d9ee6522b09a26d0c7158dfc0",
+      "result": "held_at_memory_reserve_before_tests",
+      "minimum_free_gib": 7.936,
+      "native_diagnostics": "none before guard stopped the owned compiler subtree"
+    },
+    "selected_ignored_snapshot_checks": {
+      "binary_head": "1f53a66bdd0ab289ae2a26abbbaff084cddfcaff",
+      "binary_sha256": "836cf147a09b999582e302e8dae807cbd6d867e65a99da120abaa3ccc1009230",
+      "scope": "previously compiled snapshot; not final-head acceptance",
+      "compact_passed": 9,
+      "private_mysql_lobby_passed": 3,
+      "mail_expiry": "fixture signed/unsigned decode mismatch found; fixed da8e370ba, rebuilt execution pending",
+      "database_scope": "private 3317 lane_audit_final_game; connection-local temporary tables"
+    },
+    "remote_checks": {
+      "head": "198b7d4821df6d930c14c8a5d38c64846a43efe1",
+      "passed": 12,
+      "failed": 0,
+      "scope": "Draft PR46 Windows/Linux build/tests/Clippy plus coverage, formatting, packet checks and other configured jobs."
+    },
+    "selected_ignored_current_checks": {
+      "head": "198b7d4821df6d930c14c8a5d38c64846a43efe1",
+      "binary_sha256": "51af57b83663b74078c8ab7ac3972f124ba2d291b7319b7d53a2eaa43213dcaa",
+      "attach_binary_sha256": "b06ba24f7d211585737d536f486114c0ca550ce10c03bc3662680544fecbae22",
+      "passed": 20,
+      "failed": 0,
+      "compact_checks": 12,
+      "private_mysql_checks": 8,
+      "environment_skips": 0,
+      "scope": "Explicit ignored tests run one selector per process; private 3317 lane_audit_final_game uses connection-local temporary tables. Includes Merchant twenty-rack cycles, both cargo persistence/allocator-reuse fixtures, ship query-failure/retry/save-fence/restart, legacy intentional-empty equipment and lobby/mail checks. Only these 20 explicit selectors; the other ignored tests were not run."
+    },
+    "combined_compilation": {
+      "head": "243953bdab1c077a93e02e71948f24ac03d5744a",
+      "result": "passed_game_and_testclient_all_targets",
+      "native_exit": 0,
+      "minimum_free_gib": 9.208076477050781,
+      "elapsed_seconds": 133.625
+    },
+    "combined_clippy": {
+      "head": "ce4b860e9ea4a5d91ee029a0cda354b14d72bce8",
+      "result": "passed_game_and_testclient_all_targets_D_warnings",
+      "native_exit": 0,
+      "minimum_free_gib": 6.0239105224609375,
+      "elapsed_seconds": 109.36
+    },
+    "testclient_package": {
+      "head": "96a67a5a7a31a90ea66fdf42deecdbd42885fdb0",
+      "library_passed": 57,
+      "binary_passed": 16,
+      "failed": 0,
+      "native_exit": 0,
+      "minimum_free_gib": 10.375419616699219,
+      "source_unchanged": true
+    },
+    "combined_seam_review": {
+      "head": "243953bdab1c077a93e02e71948f24ac03d5744a",
+      "tree": "742610fc88eec28566af33df34aae9086870d2c2",
+      "result": "no_new_concrete_P1_P2_within_declared_source_scope",
+      "execution": "none"
+    }
+  }
+}

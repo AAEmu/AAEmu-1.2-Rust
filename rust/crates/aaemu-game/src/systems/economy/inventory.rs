@@ -77,6 +77,10 @@ impl<'a> ItemTxn<'a> {
     /// lock (the quest "locked hooks"): starting a normal transaction there could deadlock with
     /// an operation that holds the lock and waits for that character. Hand the effects to
     /// [`ItemTxn::into_fx`] and flush them once the character lock is released.
+    /// This path deliberately bypasses both the ops mutex and the outer publication scope.
+    /// It is not protected against concurrent world publication; callers must keep its quest
+    /// mutations confined to their already-locked character and must never acquire the outer
+    /// scope while holding that character lock.
     pub fn unlocked(server: &'a GameServer) -> Self {
         Self {
             server,
@@ -1730,6 +1734,29 @@ pub fn actability_labor_cost_multiplier(step: u8) -> f32 {
 pub fn actability_time_multiplier(step: u8) -> f32 {
     const T: [f32; 8] = [1.00, 1.00, 0.95, 0.90, 0.85, 0.80, 0.77, 0.77];
     T[usize::from(step).min(T.len() - 1)]
+}
+
+/// Validate item-cast location before costs, placement, summoning or item consumption.
+pub(crate) fn item_use_zone_allowed(
+    server: &GameServer,
+    player: &PlayerRef,
+    template_id: u32,
+) -> bool {
+    let banned =
+        crate::systems::skills::data::zone_rules::current_group(server, &WorldObject::from(player))
+            .is_some_and(|group| {
+                server
+                    .game_data
+                    .systems
+                    .skills
+                    .zone_rules
+                    .bans_item(group, template_id)
+            });
+    if banned {
+        // Native 1.2 x2game12.c:1163648: ErrorMessage 440 = item_cannot_use_here.
+        send_error_message(player, error_message::ITEM_CANNOT_USE_HERE, 0, true);
+    }
+    !banned
 }
 
 /// `Character.ItemUse(item)` (`Events.OnItemUse` -> quests).

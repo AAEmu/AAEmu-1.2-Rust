@@ -49,6 +49,9 @@ mod deck_standing_tests;
 #[path = "pr38_regression_tests.rs"]
 mod pr38_regression_tests;
 
+#[path = "ship_identity_tests.rs"]
+mod ship_identity_tests;
+
 fn exp_table() -> ExperienceTable {
     ExperienceTable::from_templates(
         (1..=3u8)
@@ -134,6 +137,14 @@ fn data() -> GameData {
 fn server_with(d: GameData) -> Arc<GameServer> {
     let s = Arc::new(test_server_with(d));
     s.set_self();
+    // This synthetic server has no MySQL. Explicitly supply an empty saved-hull store;
+    // persistence/error regressions use their own loader or private temporary tables.
+    *s.systems.vehicles.slave_summons.test_loader.lock().unwrap() =
+        Some(slaves::TestSlaveLoader(Arc::new(|_, _| {
+            Box::pin(async { Ok(slaves::LoadedHull::default()) })
+        })));
+    *s.systems.npcs.spawns.test_persistent_loader.lock().unwrap() =
+        Some(Arc::new(|_, _| Box::pin(async { Ok(Default::default()) })));
     s
 }
 
@@ -160,6 +171,7 @@ fn player_with_item(
         .unwrap()
         .clone();
     let mut item = Item::create(item_id, &t, 1, 0, 1, &server.game_data.items, 0);
+    item.owner_id = u64::from(id);
     item.slot_type = slot_type::INVENTORY;
     item.slot = 0;
     let bag = p
@@ -3375,23 +3387,30 @@ async fn summon_pos_places_the_vehicle_at_the_chosen_spot() {
 }
 
 #[tokio::test]
-async fn summon_pos_outside_the_valid_area_errors_and_falls_back_in_front() {
+async fn summon_pos_outside_the_valid_area_errors_without_spawning() {
     let server = server_with(summon_pos_data(10));
     crate::systems::economy::bridges::install(&server);
     crate::systems::npcs::install_hooks(&server);
     super::install_hooks(&server);
     let (mut a, _pa, item_id, world) = summon_pos_client(&server);
     cast_summon_pos(&server, &mut a, item_id, 130.0, 100.0, 0.0, 1.25);
-    let slave = wait_for_slave(&world).await;
-    let frames = a.drain();
+    let frames = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut frames = Vec::new();
+        loop {
+            frames.extend(a.drain());
+            if error_codes(&frames).contains(&super::error::SLAVE_SPAWN_ERROR_INVALID_AREA) {
+                break frames;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("invalid summon placement must be handled");
     assert!(
         error_codes(&frames).contains(&super::error::SLAVE_SPAWN_ERROR_INVALID_AREA),
         "invalid placement must send SlaveSpawnErrorInvalidArea"
     );
-    // C# fallback: SpawnYOffset clamped to 5 m in front, 90 degrees CCW of the owner.
-    let t = slave.data().unit.transform;
-    assert_eq!((t.x, t.y), (100.0, 105.0));
-    assert!((t.rot_z - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+    assert!(slaves::get_active_slave_by_owner_obj_id(&world, PA).is_none());
 }
 
 #[tokio::test]
@@ -3619,6 +3638,9 @@ const SLOT20_ITEM: u32 = 5003;
 fn ship_equip_data() -> GameData {
     use super::data::{ItemSlaveEquipment, SlaveEquipSlot, SlaveInitialItem};
     let mut d = slave_data();
+    d.items.templates.get_mut(&SLAVE_ITEM).unwrap().kind = TemplateKind::SummonSlave {
+        slave_id: SHIP_HULL,
+    };
     d.systems.vehicles.slave_templates.insert(
         SHIP_HULL,
         SlaveTemplate {

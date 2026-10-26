@@ -9,12 +9,85 @@ use crate::models::container::{equip_slot, slot_type};
 use crate::models::doodad::doodad_owner_type;
 use crate::systems::npcs::doodad::runtime::DoodadCtx;
 use crate::systems::npcs::doodad::templates::{
-    DoodadFuncBuyFish, DoodadFuncConsumeChanger, DoodadFuncLootItem, DoodadFuncLootPack,
-    DoodadFuncPurchase, DoodadFuncRecoverItem, DoodadFuncRemoveItem,
+    doodad_func_group_kind, DoodadFuncBuyFish, DoodadFuncConsumeChanger, DoodadFuncLootItem,
+    DoodadFuncLootPack, DoodadFuncPurchase, DoodadFuncRecoverItem, DoodadFuncRemoveItem,
 };
+use crate::systems::npcs::hooks::CargoRecovery;
 use crate::systems::social::achievement::char_record_kind;
 use crate::systems::social::achievement_hooks::{AchievementInput, RecordMatch};
-use crate::world::{PlayerRef, WorldObject};
+use crate::world::{DoodadRef, PlayerRef, WorldObject};
+
+/// The authored loaded -> empty transition of a vehicle storage, not ordinary furniture.
+pub(crate) fn cargo_empty_phase(
+    server: &crate::server::GameServer,
+    rack: &DoodadRef,
+) -> Option<u32> {
+    let (owner_type, template_id, group) = {
+        let d = rack.data();
+        (d.owner_type, d.template_id, d.func_group_id)
+    };
+    cargo_empty_phase_for(server, owner_type, template_id, group)
+}
+
+/// The same authored transition for a prefetched row, without allocating a live rack.
+pub(crate) fn cargo_empty_phase_for(
+    server: &crate::server::GameServer,
+    owner_type: u8,
+    template_id: u32,
+    group: u32,
+) -> Option<u32> {
+    if owner_type != doodad_owner_type::SLAVE {
+        return None;
+    }
+    let data = &server.game_data.systems.npcs.doodad;
+    let recover = data
+        .funcs_for_group(group)
+        .iter()
+        .find(|f| f.func_type == "DoodadFuncRecoverItem" && f.next_phase > 0)?;
+    let empty = recover.next_phase as u32;
+    (data
+        .doodad_func_groups(template_id)
+        .iter()
+        .any(|g| g.id == empty && g.group_kind_id == doodad_func_group_kind::START)
+        && data
+            .funcs_for_group(empty)
+            .iter()
+            .any(|f| f.func_type == "DoodadFuncConsumeChanger" && f.next_phase == group as i32))
+    .then_some(empty)
+}
+
+pub(crate) fn warn_item_reference(
+    server: &crate::server::GameServer,
+    rack: &DoodadRef,
+    item_id: u64,
+    reason: &str,
+) {
+    let (rack_db_id, hull_db_id, hull_obj_id, attach_point) = {
+        let d = rack.data();
+        (d.db_id, d.owner_db_id, d.parent_obj_id, d.attach_point)
+    };
+    let (container_id, container_slot_type, container_owner_id) = server
+        .items
+        .holding_container(item_id)
+        .map(|c| {
+            let c = c.lock().expect("container poisoned");
+            (c.container_id, c.slot_type, c.owner_id)
+        })
+        .unwrap_or_default();
+    tracing::warn!(
+        rack_obj_id = rack.obj_id,
+        rack_db_id,
+        item_id,
+        container_id,
+        container_slot_type,
+        container_owner_id,
+        hull_db_id,
+        hull_obj_id,
+        attach_point,
+        reason,
+        "Doodad item reference refused or repaired"
+    );
+}
 
 /// `SCUnitEquipmentsChangedPacket`: one definition per opcode (`crate::systems::economy::item_packets::SCUnitEquipmentsChangedPacket`).
 pub use crate::systems::economy::item_packets::SCUnitEquipmentsChangedPacket;
@@ -145,10 +218,12 @@ pub fn recover_item(
     skill_id: u32,
     next_phase: i32,
 ) {
+    set_to_next_phase(ctx, false);
     // `caster.Name` / `(Character)caster` throw for a null / non-character caster.
     let Some(player) = DoodadCtx::as_player(caster) else {
         return;
     };
+    let _items = ctx.server.systems.economy.operation_scope();
     let _operation = ctx
         .server
         .systems
@@ -169,9 +244,6 @@ pub fn recover_item(
             d.template_id,
         )
     };
-    // Recovery can also be reached through an InteractionEffect, outside the phase
-    // machine's normal result reset. A failed recovery must never reuse an old success.
-    set_to_next_phase(ctx, false);
     if owner_type == doodad_owner_type::HOUSING && owner_db_id > 0 {
         let allowed =
             crate::systems::housing::house_by_id(ctx.server, owner_db_id).is_some_and(|house| {
@@ -198,6 +270,49 @@ pub fn recover_item(
     );
     let server = ctx.server;
     let eco = economy(server);
+    if cargo_empty_phase(server, &ctx.doodad).is_some() {
+        match eco.recover_doodad_cargo(server, player, &ctx.doodad) {
+            CargoRecovery::Recovered => {
+                if let Some(moved) = server.items.item_by_id(item_id) {
+                    crate::world::broadcast(
+                        &ctx.world,
+                        player,
+                        &SCUnitEquipmentsChangedPacket {
+                            obj_id: player.obj_id,
+                            items: vec![(moved.slot as u8, Some(moved))],
+                        },
+                        false,
+                    );
+                }
+                set_to_next_phase(ctx, true);
+            }
+            CargoRecovery::ClearedStale(empty) => {
+                warn_item_reference(
+                    server,
+                    &ctx.doodad,
+                    item_id,
+                    "cleared dangling cargo reference without moving an item",
+                );
+                super::super::manager::do_change_phase(
+                    server,
+                    &ctx.world,
+                    &ctx.doodad,
+                    Some(&WorldObject::from(player)),
+                    empty as i32,
+                );
+            }
+            CargoRecovery::Failed => {
+                warn_item_reference(
+                    server,
+                    &ctx.doodad,
+                    item_id,
+                    "cargo recovery failed escrow, rack or backpack preflight",
+                );
+                send_error(player, err::FAILED_TO_USE_ITEM);
+            }
+        }
+        return;
+    }
     let mut added_item = false;
     let item = server.items.item_by_id(item_id);
     if item_id > 0 {
@@ -406,16 +521,27 @@ pub fn consume_changer(
     caster: Option<&WorldObject>,
 ) {
     tracing::trace!("DoodadFuncConsumeChanger");
+    set_to_next_phase(ctx, false);
     let Some(player) = DoodadCtx::as_player(caster) else {
         return;
     };
+    let _items = ctx.server.systems.economy.operation_scope();
+    let _operation = ctx
+        .server
+        .systems
+        .housing
+        .operation_lock
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if ctx.doodad.data().phase.deleted {
+        return;
+    }
     let source = {
         let equipment = player.data().inventory.equipment().clone();
         let c = equipment.lock().expect("container poisoned");
-        c.get_item_by_slot(f.slot_id as i32)
-            .map(|i| (i.id, i.template_id))
+        c.get_item_by_slot(f.slot_id as i32).cloned()
     };
-    let Some((source_id, source_template)) = source else {
+    let Some(source) = source else {
         send_error(player, err::UNKNOWN_ITEM);
         return;
     };
@@ -423,41 +549,21 @@ pub fn consume_changer(
     if !ctx
         .data()
         .consume_changer_items(f.id)
-        .contains(&source_template)
+        .contains(&source.template_id)
     {
         send_error(player, err::STORE_INVALID_ITEM);
         return;
     }
-    let (template_id, owner_id) = {
-        let d = ctx.doodad.data();
-        (d.template_id, d.owner_id)
-    };
-    // TODO (C#): if this item count would be different from 1, this would cause issues
-    if f.count > 1 {
-        tracing::warn!(
-            "DoodadFuncConsumeChanger, expected source count is higher than one ({}) for slot {} on doodad type {} ({}) from player {}",
-            f.count,
-            f.slot_id,
-            template_id,
-            owner_id,
-            player.data().unit.name
+    if !economy(ctx.server).try_store_doodad_item(ctx.server, player, &ctx.doodad, &source, f.count)
+    {
+        warn_item_reference(
+            ctx.server,
+            &ctx.doodad,
+            source.id,
+            "cargo deposit source changed or rack occupied",
         );
-    }
-    // Move the actual item to the owner's SystemContainer
-    if !economy(ctx.server).move_item_to_system_container(
-        ctx.server,
-        player,
-        item_task::DOODAD_ITEM_CHANGER,
-        source_id,
-    ) {
-        set_to_next_phase(ctx, false);
         send_error(player, err::STORE_INVALID_ITEM);
         return;
-    }
-    {
-        let mut d = ctx.doodad.data();
-        d.item_id = source_id;
-        d.item_template_id = source_template;
     }
     set_to_next_phase(ctx, true);
 }

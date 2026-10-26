@@ -2,7 +2,7 @@
 //! `craft_materials`, `craft_pack_crafts`) and the `SkillTemplate` members `CharacterCraft` reads
 //! for a craft's skill (`consume_lp`, `actability_group_id`, `cooldown_time`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::data::items::TemplateKind;
 use crate::data::sqlite::for_each_row;
@@ -81,6 +81,8 @@ pub struct CraftData {
     pub crafts: HashMap<u32, Craft>,
     /// Skill facts of every skill a craft uses (`SkillManager.GetSkillTemplate(craft.SkillId)`).
     pub skills: HashMap<u32, CraftSkill>,
+    /// Recipes explicitly offered by each `DoodadFuncCraftPack`.
+    pub craft_pack_crafts: HashMap<u32, HashSet<u32>>,
 }
 
 impl CraftData {
@@ -120,7 +122,8 @@ impl CraftData {
                 amount: r.i32_or("amount", 1)?, // We always want to produce at least 1 item ?
                 rate: r.i32("rate")?,
                 show_lower_crafts: r.bool("show_lower_crafts")?,
-                use_grade: r.bool("use_grade")?,
+                // Native 1.2 LoadCraftProductDescs (0x3982E6C0) reads text 't' / '1'.
+                use_grade: r.bool_str("use_grade")?,
                 item_grade_id: r.u32("item_grade_id")?,
             });
             Ok(())
@@ -135,13 +138,19 @@ impl CraftData {
                 craft_id,
                 item_id: r.u32("item_id")?,
                 amount: r.i32_or("amount", 1)?, // We always want to cost at least 1 item ?
-                main_grade: r.bool("main_grade")?,
+                // Native 1.2 LoadCraftMaterialDescs (0x3982E4D0) reads text 't' / '1'.
+                main_grade: r.bool_str("main_grade")?,
             });
             Ok(())
         })?;
         for_each_row(ctx.conn, "SELECT * FROM craft_pack_crafts", [], |r| {
-            if let Some(craft) = d.crafts.get_mut(&r.u32("craft_id")?) {
+            let craft_id = r.u32("craft_id")?;
+            if let Some(craft) = d.crafts.get_mut(&craft_id) {
                 craft.is_pack = true;
+                d.craft_pack_crafts
+                    .entry(r.u32("craft_pack_id")?)
+                    .or_default()
+                    .insert(craft_id);
             }
             Ok(())
         })?;

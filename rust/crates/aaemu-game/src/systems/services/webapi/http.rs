@@ -4,13 +4,14 @@
 use super::json::JValue;
 
 /// `NetCoreServer.HttpRequest` (the members the controllers read).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct HttpRequest {
     /// `Method` as sent (`GET`, `POST`, ...).
     pub method: String,
     /// `Url`: the request target (path and query string, not decoded).
     pub url: String,
     pub protocol: String,
+    pub headers: axum::http::HeaderMap,
     /// `Body` (UTF-8).
     pub body: String,
 }
@@ -22,6 +23,7 @@ impl HttpRequest {
             method: method.to_string(),
             url: url.to_string(),
             protocol: protocol.to_string(),
+            headers: axum::http::HeaderMap::new(),
             body: String::new(),
         }
     }
@@ -29,6 +31,17 @@ impl HttpRequest {
     pub fn with_body(mut self, body: impl Into<String>) -> Self {
         self.body = body.into();
         self
+    }
+}
+
+impl std::fmt::Debug for HttpRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Authorization values must never appear in request diagnostics.
+        f.debug_struct("HttpRequest")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("protocol", &self.protocol)
+            .finish_non_exhaustive()
     }
 }
 

@@ -387,6 +387,7 @@ impl DoodadSpawner {
             {
                 return false;
             }
+            let _items = server.systems.economy.operation_scope();
             let _serial = server.systems.npcs.spawns.spawn_lock();
             if spawn {
                 if spawner.last().is_none() {
@@ -585,6 +586,7 @@ impl DoodadSpawner {
         item_id: u64,
         char_obj_id: u32,
     ) -> Option<DoodadRef> {
+        let _items = server.systems.economy.operation_scope();
         let _serial = server.systems.npcs.spawns.spawn_lock();
         self.reset_for_spawn();
         // C#: WorldManager.GetCharacterByObjId(charId).ParentWorld (null -> exception).
@@ -610,6 +612,7 @@ impl DoodadSpawner {
 
     /// `Spawn(objId)` (initial spawn and respawns). Only `objId == 0` creates a doodad.
     pub fn spawn(self: &Arc<Self>, server: &GameServer, obj_id: u32) -> Option<DoodadRef> {
+        let _items = server.systems.economy.operation_scope();
         let _serial = server.systems.npcs.spawns.spawn_lock();
         // TODO (C#): clean up each doodad using the same call
         self.reset_for_spawn();
@@ -667,6 +670,7 @@ impl DoodadSpawner {
 
     /// `Despawn(doodad)`.
     pub fn despawn(&self, server: &GameServer, doodad: &DoodadRef) {
+        let _items = server.systems.economy.operation_scope();
         let _serial = server.systems.npcs.spawns.spawn_lock();
         let spawns = &server.systems.npcs.spawns;
         // Spawn replaces the local list, but the world can still contain older linked spawns.
@@ -769,6 +773,7 @@ impl DoodadSpawner {
 
     /// `DoDespawn(doodad)` (`Doodad.DoDespawn` / `DoodadSpawnerDoDespawnTask`).
     pub fn do_despawn(self: &Arc<Self>, server: &GameServer, doodad: &DoodadRef) {
+        let _items = server.systems.economy.operation_scope();
         let _serial = server.systems.npcs.spawns.spawn_lock();
         let (template_id, obj_id, func_group_id) = {
             let d = doodad.data();
@@ -822,6 +827,7 @@ impl DoodadSpawner {
 
     /// `DoSpawn()`: spawns `Last` (with the game schedule checks).
     pub fn do_spawn(self: &Arc<Self>, server: &GameServer) {
+        let _items = server.systems.economy.operation_scope();
         let _serial = server.systems.npcs.spawns.spawn_lock();
         let schedule = &server.game_data.systems.npcs.schedule;
         let last_obj_id = self.last().map_or(0, |l| l.obj_id);

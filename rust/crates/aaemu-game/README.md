@@ -58,8 +58,10 @@ The configuration structure is as follows:
     "Port": 1250
 },
 "WebApiNetwork": {
-    "Host": "*",
-    "Port": 1280
+    "Host": "127.0.0.1",
+    "Port": 1280,
+    "Enabled": true,
+    "ApiKey": null
 },
 "LoginNetwork": {
     "Host": "%login_host%",             <-- the IP address of the login server
@@ -80,6 +82,12 @@ The configuration structure is as follows:
 ```
 
 ### Create Configuration File
+
+The Web API permits anonymous `GET /status` only. All `/api` routes require an
+explicit `WebApiNetwork.ApiKey` through the `Authorization: Bearer <key>` header;
+a missing key disables those routes. Non-loopback binds require a key or startup
+fails. See the [Web API migration guide](../../../Docs/wiki/Working-with-the-Config.json-files-and-server-listings.md#web-api-authentication-and-migration)
+for private key generation, remote access and disabling the listener.
 
 1. Create a file named `Config.Local.json` next to `Config.json` in the application directory
    (by default `rust/crates/aaemu-game/app/`). It is gitignored and overrides the default

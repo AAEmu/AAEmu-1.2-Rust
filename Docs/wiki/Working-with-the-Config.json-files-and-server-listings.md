@@ -93,6 +93,69 @@ from the C# version is still read between `Config.Local.json` and the
 environment variables, but it can no longer be managed with a tool; move those
 values to `Config.Local.json` or environment variables.)
 
+## Web API authentication and migration
+
+The game Web API now defaults to `127.0.0.1:1280`. Only `GET /status` is
+anonymous; it returns uptime, player count and task/skill metrics. Every other
+registered route requires `Authorization: Bearer <key>`, including character,
+world and auction reads, mail listing, GM commands and mail with attachments.
+Missing, invalid or duplicate credentials return HTTP 401 with a Bearer challenge.
+Commands still use the selected online character's command access level.
+
+For local status tooling, use this game's `Config.Local.json` override:
+
+```json
+{
+  "WebApiNetwork": {
+    "Host": "127.0.0.1",
+    "Port": 1280,
+    "Enabled": true,
+    "ApiKey": null
+  }
+}
+```
+
+An absent, null or empty `ApiKey` disables access to every authenticated route,
+including requests from localhost. To enable administrative tools, configure a
+private, randomly generated key of at least 32 random bytes in the game process's
+`WebApiNetwork__ApiKey` environment variable, or in the gitignored
+`Config.Local.json` field `WebApiNetwork.ApiKey`. Keys accept ASCII letters,
+digits and `-._~+/=`; whitespace is rejected. Keep the key separate from the
+Login/Game `SecretKey`. Never put the key in URLs or commit it.
+
+For example, generate a key privately in PowerShell before starting the game
+process from the same environment (these commands do not print the key):
+
+```powershell
+$webApiRandom = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+$webApiBytes = New-Object byte[] 32
+$webApiRandom.GetBytes($webApiBytes)
+$webApiRandom.Dispose()
+$env:WebApiNetwork__ApiKey = [Convert]::ToBase64String($webApiBytes)
+```
+
+An administrative caller using that same private environment can supply the header:
+
+```powershell
+$webApiHeaders = @{ Authorization = 'Bearer ' + $env:WebApiNetwork__ApiKey }
+Invoke-RestMethod -Uri http://127.0.0.1:1280/api/world/logged-characters -Headers $webApiHeaders
+```
+
+Existing configurations with `Host: "*"`, `0.0.0.0`, `::`, or any other
+non-loopback address now fail startup unless a nonempty valid key is configured.
+For local monitoring, change the host to `127.0.0.1`; for remote administration,
+configure the private key and use an HTTPS reverse proxy or SSH tunnel so the
+Bearer token is encrypted in transit. The HTTP listener itself does not provide TLS.
+Authentication does not make anonymous routes private: `/status` remains public
+on the configured interface. Restart the game process after changing the bind,
+key or `Enabled` setting; configuration reload does not restart the listener or
+rotate its credential snapshot.
+
+To disable the API even when the shipped config contains the section, set
+`"WebApiNetwork": { "Enabled": false }` in `Config.Local.json`. A missing or null
+section also disables it. Existing clients must add the Bearer header to every
+`/api` request; local `/status` checks continue to work without credentials.
+
 ## Tower defense event schedules
 
 Tower defense controllers are reserved for events instead of spawning permanently.

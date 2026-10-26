@@ -404,8 +404,8 @@ pub struct CooldownEntry {
 /// `SCCooldownsPacket`: the unit's running skill / tag cooldowns (`i32` count + entries each).
 /// The C# only ever sent it empty. The client's record reader (`397b64d0` -> `397b2350`)
 /// appends to its cooldown manager (an empty packet is not a reset) and holds 150 entries per
-/// list, so the writer never emits more. The server tracks no tag cooldowns, and keeps only the
-/// end time of a skill cooldown, so `total` is reported as the remaining time.
+/// list, so the writer never emits more. The server keeps expiry times for both stores,
+/// so `total` is reported as the remaining time.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SCCooldownsPacket {
     pub skills: Vec<CooldownEntry>,
@@ -415,26 +415,28 @@ impl SCCooldownsPacket {
     /// Entry cap per list of the client's record.
     pub const MAX_ENTRIES: usize = 150;
 
-    /// The still-running cooldowns of `cooldowns` at `now_ms`, ordered by skill id.
+    /// Still-running individual and shared cooldowns, each ordered by id and capped.
     pub fn from_cooldowns(cooldowns: &crate::models::unit::UnitCooldowns, now_ms: i64) -> Self {
-        let mut skills: Vec<CooldownEntry> = cooldowns
-            .cooldowns
-            .iter()
-            .filter(|(_, &end)| end > now_ms)
-            .map(|(&id, &end)| {
-                let remaining = (end - now_ms).min(i64::from(u32::MAX)) as u32;
-                CooldownEntry {
-                    id,
-                    total_ms: remaining,
-                    remaining_ms: remaining,
-                }
-            })
-            .collect();
-        skills.sort_by_key(|e| e.id);
-        skills.truncate(Self::MAX_ENTRIES);
+        let entries = |store: &std::collections::HashMap<u32, i64>| {
+            let mut entries: Vec<CooldownEntry> = store
+                .iter()
+                .filter(|(_, &end)| end > now_ms)
+                .map(|(&id, &end)| {
+                    let remaining = end.saturating_sub(now_ms).min(i64::from(u32::MAX)) as u32;
+                    CooldownEntry {
+                        id,
+                        total_ms: remaining,
+                        remaining_ms: remaining,
+                    }
+                })
+                .collect();
+            entries.sort_by_key(|e| e.id);
+            entries.truncate(Self::MAX_ENTRIES);
+            entries
+        };
         Self {
-            skills,
-            tags: Vec::new(),
+            skills: entries(&cooldowns.cooldowns),
+            tags: entries(&cooldowns.tag_cooldowns),
         }
     }
 

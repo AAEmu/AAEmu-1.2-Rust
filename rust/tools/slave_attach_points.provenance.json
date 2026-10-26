@@ -1,0 +1,4137 @@
+{
+  "baseline": "37e6f1aec",
+  "format": "native 1.2 r208022; see slave_attach_points.py docstring",
+  "models": [
+    {
+      "model": 2,
+      "slaves": [
+        2,
+        41,
+        107
+      ],
+      "item_summonable_slaves": [
+        2
+      ],
+      "required": [
+        0
+      ],
+      "already_present": [],
+      "points": {},
+      "unresolved": {
+        "0": {
+          "reason": "None (0): no named attach transform",
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 66,
+              "slave": 41,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "issues": [],
+      "normal": "prefab://prefabs/siege_weapon.xml/trebuchet_a.trebuchet_a",
+      "inspected_assets": [
+        {
+          "path": "game/objects/env/06_unit/04_siegeweapon/trebuchet_a.chr",
+          "sha256": "8b66d1799d753c27b9e7b88ec59c43bd16b5efb686ae0cc309cd4497e3c2195b"
+        },
+        {
+          "path": "game/prefabs/siege_weapon.xml",
+          "sha256": "64f698ff21163b79ef8842abc5553fbb5d97db3e3da0bc45f8f2c375b2552ae6"
+        }
+      ]
+    },
+    {
+      "model": 4,
+      "slaves": [
+        4,
+        42
+      ],
+      "item_summonable_slaves": [
+        4,
+        42
+      ],
+      "required": [
+        0
+      ],
+      "already_present": [],
+      "points": {},
+      "unresolved": {
+        "0": {
+          "reason": "None (0): no named attach transform",
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 57,
+              "slave": 4,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "issues": [],
+      "normal": "prefab://Prefabs/siege_weapon.xml/ground.ram",
+      "inspected_assets": [
+        {
+          "path": "game/prefabs/siege_weapon.xml",
+          "sha256": "64f698ff21163b79ef8842abc5553fbb5d97db3e3da0bc45f8f2c375b2552ae6"
+        }
+      ]
+    },
+    {
+      "model": 5,
+      "slaves": [
+        5
+      ],
+      "item_summonable_slaves": [
+        5
+      ],
+      "required": [
+        24,
+        35,
+        81
+      ],
+      "already_present": [],
+      "points": {
+        "24": {
+          "location": {
+            "X": -1.42433345,
+            "Y": -6.89326668,
+            "Z": 0.83646423,
+            "Roll": 7.89580808,
+            "Pitch": 0.0,
+            "Yaw": 179.99999135
+          },
+          "asset": "game/objects/env/06_unit/04_siegeweapon/siege_tower_a.chr",
+          "node": "ladder_left",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 492,
+              "slave": 5,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "35": {
+          "location": {
+            "X": -0.39981079,
+            "Y": 2.3511963,
+            "Z": 15.238708,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/prefabs/siege_tower.xml",
+          "node": "$helms",
+          "parents": [],
+          "kind": "prefab-helper",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 480,
+              "slave": 5,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "81": {
+          "location": {
+            "X": -1.98440182,
+            "Y": -1.09256768,
+            "Z": 14.48642063,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/04_siegeweapon/siege_tower_a.chr",
+          "node": "bell",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 478,
+              "slave": 5,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "unresolved": {},
+      "issues": [],
+      "normal": "prefab://prefabs/siege_tower.xml/siege_tower.siege_tower_normal",
+      "inspected_assets": [
+        {
+          "path": "game/objects/env/06_unit/04_siegeweapon/siege_tower_a.chr",
+          "sha256": "4b06478c604794cf394e374e8acd3f1fb80822f8af9a5aef0cd17953c91b6ba5"
+        },
+        {
+          "path": "game/prefabs/siege_tower.xml",
+          "sha256": "cfacf17dd88de16f2e0cb71208154cc1032928ab67b678cff86bcf2e63fd9c8a"
+        }
+      ]
+    },
+    {
+      "model": 6,
+      "slaves": [
+        6,
+        16,
+        18,
+        30,
+        43
+      ],
+      "item_summonable_slaves": [
+        6,
+        43
+      ],
+      "required": [
+        0
+      ],
+      "already_present": [],
+      "points": {},
+      "unresolved": {
+        "0": {
+          "reason": "None (0): no named attach transform",
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 59,
+              "slave": 6,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "issues": [
+        "asset absent: game/objects/env/architecture/siege/siegeweapon/ballista_a/ballista_a.chr"
+      ],
+      "normal": "prefab://Prefabs/siege_weapon.xml/ground.ballista_a",
+      "inspected_assets": [
+        {
+          "path": "game/prefabs/siege_weapon.xml",
+          "sha256": "64f698ff21163b79ef8842abc5553fbb5d97db3e3da0bc45f8f2c375b2552ae6"
+        }
+      ]
+    },
+    {
+      "model": 115,
+      "slaves": [
+        9
+      ],
+      "item_summonable_slaves": [
+        9
+      ],
+      "required": [
+        9,
+        10,
+        11,
+        12,
+        18
+      ],
+      "already_present": [],
+      "points": {},
+      "unresolved": {
+        "9": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$cannon0",
+            "$cannon0"
+          ],
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 2,
+              "slave": 9,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "10": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$cannon1",
+            "$cannon1"
+          ],
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 4,
+              "slave": 9,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "11": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$cannon2",
+            "$cannon2"
+          ],
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 5,
+              "slave": 9,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "12": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$cannon3",
+            "$cannon3"
+          ],
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 6,
+              "slave": 9,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "18": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$hook",
+            "$hook"
+          ],
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 3,
+              "slave": 9,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "issues": [
+        "asset absent: game/objects/env/nuia/props/ship/caravel/caravel_body.cgf",
+        "asset absent: game/objects/env/nuia/props/ship/caravel/caravel_sail1.cgf",
+        "asset absent: game/objects/env/nuia/props/ship/caravel/caravel_sail2.cgf",
+        "asset absent: game/objects/env/nuia/props/ship/caravel/ladder_r.cgf",
+        "asset absent: game/objects/env/nuia/props/ship/caravel/ladder_l.cgf",
+        "asset absent: game/objects/env/nuia/props/ship/caravel/caravel_rudder.cgf",
+        "asset absent: game/objects/env/nuia/props/ship/caravel/caravel_helms.cgf",
+        "asset absent: game/objects/env/nuia/props/ship/caravel/caravel_anchor.chr",
+        "asset absent: game/objects/env/nuia/props/ship/caravel/caravel_sail1.chr",
+        "asset absent: game/objects/env/nuia/props/ship/caravel/caravel_sail2.chr"
+      ],
+      "normal": "prefab://Prefabs/ship.xml/caravel.ship_body",
+      "inspected_assets": [
+        {
+          "path": "game/prefabs/ship.xml",
+          "sha256": "78a8be4a6ea90707e331c41d31faea95d11026800d1451d74666c10bf003f02d"
+        }
+      ]
+    },
+    {
+      "model": 127,
+      "slaves": [
+        13
+      ],
+      "item_summonable_slaves": [
+        13
+      ],
+      "required": [
+        0
+      ],
+      "already_present": [],
+      "points": {},
+      "unresolved": {
+        "0": {
+          "reason": "None (0): no named attach transform",
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 10,
+              "slave": 13,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "issues": [
+        "'game/objects/env/nuia/props/carriage/carriage_a.cgf'"
+      ],
+      "normal": "cgf://objects/Env/nuia/props/carriage/carriage_a.cgf",
+      "inspected_assets": []
+    },
+    {
+      "model": 129,
+      "slaves": [
+        15,
+        55,
+        91
+      ],
+      "item_summonable_slaves": [
+        15,
+        55,
+        91
+      ],
+      "required": [
+        2,
+        9,
+        10,
+        29,
+        35,
+        36
+      ],
+      "already_present": [
+        1,
+        2,
+        24,
+        25,
+        29,
+        35,
+        36
+      ],
+      "points": {},
+      "unresolved": {
+        "9": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$cannon0",
+            "$cannon0"
+          ],
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 85,
+              "slave": 55,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "10": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$cannon1",
+            "$cannon1"
+          ],
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 87,
+              "slave": 55,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "issues": [],
+      "normal": "prefab://prefabs/smallboat.xml/smallboat.smallboat_a",
+      "inspected_assets": [
+        {
+          "path": "game/objects/env/06_unit/01_ship/smallboat/smallboat_body.cgf",
+          "sha256": "074c9f9efe0715d9c3b4df92223e83d05d75c1877ffc4b9327871b7353b7f043"
+        },
+        {
+          "path": "game/prefabs/smallboat.xml",
+          "sha256": "cd6ea7d7fcad18abc58cc5f4d94113a1ecfab7500ace982646eaa6d7ecb9097d"
+        }
+      ]
+    },
+    {
+      "model": 130,
+      "slaves": [
+        17
+      ],
+      "item_summonable_slaves": [
+        17
+      ],
+      "required": [
+        9
+      ],
+      "already_present": [],
+      "points": {},
+      "unresolved": {
+        "9": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$cannon0",
+            "$cannon0"
+          ],
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 8,
+              "slave": 17,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "issues": [
+        "asset absent: game/objects/env/nuia/props/ship/caravel/ray.cgf",
+        "asset absent: game/objects/env/nuia/props/ship/caravel/caravel_helms.cgf"
+      ],
+      "normal": "prefab://Prefabs/ship.xml/ray.ship_body",
+      "inspected_assets": [
+        {
+          "path": "game/prefabs/ship.xml",
+          "sha256": "78a8be4a6ea90707e331c41d31faea95d11026800d1451d74666c10bf003f02d"
+        }
+      ]
+    },
+    {
+      "model": 392,
+      "slaves": [
+        19
+      ],
+      "item_summonable_slaves": [],
+      "required": [
+        0
+      ],
+      "already_present": [],
+      "points": {},
+      "unresolved": {
+        "0": {
+          "reason": "None (0): no named attach transform",
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 11,
+              "slave": 19,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "issues": [
+        "model descriptor 392 absent from compact"
+      ],
+      "inspected_assets": []
+    },
+    {
+      "model": 512,
+      "slaves": [
+        23
+      ],
+      "item_summonable_slaves": [],
+      "required": [
+        2,
+        3,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        35,
+        36,
+        37,
+        38,
+        39
+      ],
+      "already_present": [],
+      "points": {},
+      "unresolved": {
+        "2": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "bone_spine_passenger",
+            "$passenger0"
+          ],
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 65,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "3": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "bone_spine_passenger1",
+            "$passenger1"
+          ],
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 66,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "9": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$cannon0",
+            "$cannon0"
+          ],
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 35,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "10": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$cannon1",
+            "$cannon1"
+          ],
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 36,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "11": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$cannon2",
+            "$cannon2"
+          ],
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 37,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "12": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$cannon3",
+            "$cannon3"
+          ],
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 38,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "13": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$cannon4",
+            "$cannon4"
+          ],
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 39,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "14": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$cannon5",
+            "$cannon5"
+          ],
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 40,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "15": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$cannon6",
+            "$cannon6"
+          ],
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 41,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "16": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$cannon7",
+            "$cannon7"
+          ],
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 42,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "19": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$mast0",
+            "$mast0"
+          ],
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 23,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "20": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$mast1",
+            "$mast1"
+          ],
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 24,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "21": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$sail0",
+            "$sail0"
+          ],
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 25,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "22": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$sail1",
+            "$sail1"
+          ],
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 26,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "23": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$anchor",
+            "$anchor"
+          ],
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 33,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "24": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$ladder_left",
+            "$ladder_left"
+          ],
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 27,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "25": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$ladder_right",
+            "$ladder_right"
+          ],
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 28,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "26": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$plank_left",
+            "$plank_left"
+          ],
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 31,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "27": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$plank_right",
+            "$plank_right"
+          ],
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 32,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "28": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$lamp_front",
+            "$lamp_front"
+          ],
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 29,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "29": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$lamp_rear",
+            "$lamp_rear"
+          ],
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 30,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "35": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$helms",
+            "$helms"
+          ],
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 47,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "36": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$heal_point0",
+            "$heal_point0"
+          ],
+          "consumers": [
+            {
+              "table": "slave_healing_point_doodads",
+              "row": 10,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "37": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$heal_point1",
+            "$heal_point1"
+          ],
+          "consumers": [
+            {
+              "table": "slave_healing_point_doodads",
+              "row": 11,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "38": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$heal_point2",
+            "$heal_point2"
+          ],
+          "consumers": [
+            {
+              "table": "slave_healing_point_doodads",
+              "row": 12,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "39": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$heal_point3",
+            "$heal_point3"
+          ],
+          "consumers": [
+            {
+              "table": "slave_healing_point_doodads",
+              "row": 13,
+              "slave": 23,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "issues": [
+        "'game/prefabs/galleon02.xml'"
+      ],
+      "normal": "prefab://Prefabs/galleon02.xml/galleon02.galleon_step10_normal",
+      "inspected_assets": []
+    },
+    {
+      "model": 857,
+      "slaves": [
+        36
+      ],
+      "item_summonable_slaves": [
+        36
+      ],
+      "required": [
+        2
+      ],
+      "already_present": [],
+      "points": {},
+      "unresolved": {
+        "2": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "bone_spine_passenger",
+            "$passenger0"
+          ],
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 55,
+              "slave": 36,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "issues": [
+        "'game/objects/env/06_unit/04_siegeweapon/siegetank.chr'"
+      ],
+      "normal": "cga://objects/Env/06_unit/04_siegeweapon/siegetank.chr",
+      "inspected_assets": []
+    },
+    {
+      "model": 866,
+      "slaves": [
+        44
+      ],
+      "item_summonable_slaves": [
+        44
+      ],
+      "required": [
+        35
+      ],
+      "already_present": [],
+      "points": {},
+      "unresolved": {
+        "35": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$helms",
+            "$helms"
+          ],
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 57,
+              "slave": 44,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "issues": [],
+      "normal": "prefab://prefabs/galleon.xml/galleon.woodpiece01",
+      "inspected_assets": [
+        {
+          "path": "game/objects/env/06_unit/01_ship/galleon/galleon_item03.cgf",
+          "sha256": "fe7acf71f2d8e87d27caf06e5e4cdd459e511d8dc56bf635b004b67356762883"
+        },
+        {
+          "path": "game/prefabs/galleon.xml",
+          "sha256": "7ed7617d4ef68de5c60e336cf7c2a4a21486d4e2f6ae8d77a5820773fd569cda"
+        }
+      ]
+    },
+    {
+      "model": 867,
+      "slaves": [
+        45
+      ],
+      "item_summonable_slaves": [
+        45
+      ],
+      "required": [
+        35
+      ],
+      "already_present": [],
+      "points": {
+        "35": {
+          "location": {
+            "X": 0.0,
+            "Y": -2.2049498,
+            "Z": 2.60459892,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/01_ship/speedboat/speedboat_a.cgf",
+          "node": "$helms",
+          "parents": [
+            "body",
+            "speedboat_a"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 58,
+              "slave": 45,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "unresolved": {},
+      "issues": [],
+      "normal": "prefab://Prefabs/speedboat.xml/speedboat_a.speedboat_hwang",
+      "inspected_assets": [
+        {
+          "path": "game/objects/box.cgf",
+          "sha256": "921141b30889f84f0d8f1867da15aecdc15bd26672e12e666ebe7185406f8858"
+        },
+        {
+          "path": "game/objects/env/06_unit/01_ship/speedboat/speedboat_a.cgf",
+          "sha256": "a14e2bd1d3ba67a5fe18cafbf9218a1b4b85465e5b32c3dd8f9814fa07907089"
+        },
+        {
+          "path": "game/prefabs/speedboat.xml",
+          "sha256": "1ad4c9a7f32fc58ea29cc8ebbbc2b20e48ed3a1dac610869b4dd0bcca1f3630e"
+        }
+      ]
+    },
+    {
+      "model": 892,
+      "slaves": [
+        46,
+        53,
+        84
+      ],
+      "item_summonable_slaves": [
+        46
+      ],
+      "required": [
+        9
+      ],
+      "already_present": [],
+      "points": {
+        "9": {
+          "location": {
+            "X": 0.80468994,
+            "Y": -2.04911017,
+            "Z": 2.16120005,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/04_siegeweapon/siegetank_a.chr",
+          "node": "cannon0",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_yaw",
+            "pocenter",
+            "bone_rail"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 473,
+              "slave": 46,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "unresolved": {},
+      "issues": [],
+      "normal": "prefab://prefabs/siege_weapon.xml/siegetank_a.siegetank_a",
+      "inspected_assets": [
+        {
+          "path": "game/objects/env/06_unit/04_siegeweapon/siegetank_a.chr",
+          "sha256": "47cb57abd0304f91f6b0ebae25f59258547f8eb1f18e44c23bb7883b7e1b4bd7"
+        },
+        {
+          "path": "game/prefabs/siege_weapon.xml",
+          "sha256": "64f698ff21163b79ef8842abc5553fbb5d97db3e3da0bc45f8f2c375b2552ae6"
+        }
+      ]
+    },
+    {
+      "model": 898,
+      "slaves": [
+        50,
+        136
+      ],
+      "item_summonable_slaves": [
+        50
+      ],
+      "required": [
+        9
+      ],
+      "already_present": [],
+      "points": {
+        "9": {
+          "location": {
+            "X": 0.80468994,
+            "Y": -2.04911017,
+            "Z": 2.16120005,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/04_siegeweapon/siegetank_a.chr",
+          "node": "cannon0",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_yaw",
+            "pocenter",
+            "bone_rail"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 474,
+              "slave": 50,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 670,
+              "slave": 136,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "unresolved": {},
+      "issues": [],
+      "normal": "prefab://prefabs/siege_weapon.xml/siegetank_b.siegetank_b",
+      "inspected_assets": [
+        {
+          "path": "game/objects/env/06_unit/04_siegeweapon/siegetank_a.chr",
+          "sha256": "47cb57abd0304f91f6b0ebae25f59258547f8eb1f18e44c23bb7883b7e1b4bd7"
+        },
+        {
+          "path": "game/prefabs/siege_weapon.xml",
+          "sha256": "64f698ff21163b79ef8842abc5553fbb5d97db3e3da0bc45f8f2c375b2552ae6"
+        }
+      ]
+    },
+    {
+      "model": 899,
+      "slaves": [
+        51,
+        137
+      ],
+      "item_summonable_slaves": [
+        51
+      ],
+      "required": [
+        9
+      ],
+      "already_present": [],
+      "points": {
+        "9": {
+          "location": {
+            "X": 0.80468994,
+            "Y": -2.04911017,
+            "Z": 2.16120005,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/04_siegeweapon/siegetank_a.chr",
+          "node": "cannon0",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_yaw",
+            "pocenter",
+            "bone_rail"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 475,
+              "slave": 51,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 671,
+              "slave": 137,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "unresolved": {},
+      "issues": [],
+      "normal": "prefab://prefabs/siege_weapon.xml/siegetank_c.siegetank_c",
+      "inspected_assets": [
+        {
+          "path": "game/objects/env/06_unit/04_siegeweapon/siegetank_a.chr",
+          "sha256": "47cb57abd0304f91f6b0ebae25f59258547f8eb1f18e44c23bb7883b7e1b4bd7"
+        },
+        {
+          "path": "game/prefabs/siege_weapon.xml",
+          "sha256": "64f698ff21163b79ef8842abc5553fbb5d97db3e3da0bc45f8f2c375b2552ae6"
+        }
+      ]
+    },
+    {
+      "model": 1024,
+      "slaves": [
+        61
+      ],
+      "item_summonable_slaves": [
+        61
+      ],
+      "required": [
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        35,
+        36,
+        37,
+        38,
+        39,
+        46,
+        58,
+        59
+      ],
+      "already_present": [],
+      "points": {
+        "9": {
+          "location": {
+            "X": -4.29276672,
+            "Y": 2.23506424,
+            "Z": 4.4205661,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 83.00000122
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$cannon0",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 77,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "10": {
+          "location": {
+            "X": -4.4767865,
+            "Y": 0.2020467,
+            "Z": 4.48708954,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 83.99995896
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$cannon1",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 78,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "11": {
+          "location": {
+            "X": -4.57174072,
+            "Y": -3.67801453,
+            "Z": 4.64193115,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 92.00001601
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$cannon2",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 79,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "12": {
+          "location": {
+            "X": -4.46449463,
+            "Y": -5.55405579,
+            "Z": 4.74579041,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 93.99999888
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$cannon3",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 72,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "13": {
+          "location": {
+            "X": 4.30832184,
+            "Y": 2.23506409,
+            "Z": 4.4205661,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": -82.00000269
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$cannon4",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 73,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "14": {
+          "location": {
+            "X": 4.49234192,
+            "Y": 0.20204668,
+            "Z": 4.48708954,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": -86.00000112
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$cannon5",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 74,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "15": {
+          "location": {
+            "X": 4.58729614,
+            "Y": -3.67801453,
+            "Z": 4.64193115,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": -92.99999467
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$cannon6",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 75,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "16": {
+          "location": {
+            "X": 4.48005005,
+            "Y": -5.5540564,
+            "Z": 4.74579102,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": -93.99998923
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$cannon7",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 76,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "17": {
+          "location": {
+            "X": -0.02580078,
+            "Y": -17.12161865,
+            "Z": 6.53128357,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$cannon8",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_bindings",
+              "row": 80,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "19": {
+          "location": {
+            "X": -1.91e-06,
+            "Y": 10.39880371,
+            "Z": 4.53841064,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$mast0",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 105,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "20": {
+          "location": {
+            "X": 6.1e-07,
+            "Y": -2.66621552,
+            "Z": 4.55662964,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$mast1",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 106,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "21": {
+          "location": {
+            "X": -1.34e-06,
+            "Y": 10.39880371,
+            "Z": 4.53841064,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$sail0",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 107,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "22": {
+          "location": {
+            "X": 1.13e-06,
+            "Y": -2.66621552,
+            "Z": 4.55662811,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$sail1",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 108,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "23": {
+          "location": {
+            "X": 0.0,
+            "Y": 13.83623413,
+            "Z": 4.65069,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$anchor",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 114,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "24": {
+          "location": {
+            "X": -3.63965759,
+            "Y": -8.43711731,
+            "Z": 1.66250549,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 90.0
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$ladder_left",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 109,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "25": {
+          "location": {
+            "X": 3.16607452,
+            "Y": -8.43917725,
+            "Z": 1.51600861,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": -90.0
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$ladder_right",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 110,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "26": {
+          "location": {
+            "X": -4.9426236,
+            "Y": 9.73896606,
+            "Z": 4.52553986,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$plank_left",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 112,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "27": {
+          "location": {
+            "X": 4.81819489,
+            "Y": 9.7243042,
+            "Z": 4.52553986,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": -173.00000315
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$plank_right",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 113,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "28": {
+          "location": {
+            "X": -3.58012238,
+            "Y": -10.39539673,
+            "Z": 8.99327942,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 21.64487823
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$lamp_front",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 119,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "29": {
+          "location": {
+            "X": 3.62164337,
+            "Y": -10.28855225,
+            "Z": 8.99328064,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": -9.99999827
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$lamp_rear",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 111,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "35": {
+          "location": {
+            "X": 0.00038204,
+            "Y": -13.99029541,
+            "Z": 6.92423584,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$helms",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 116,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "36": {
+          "location": {
+            "X": 1.19121086,
+            "Y": 14.19112061,
+            "Z": 5.12247559,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$heal_point0",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_healing_point_doodads",
+              "row": 22,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "37": {
+          "location": {
+            "X": 5.11665863,
+            "Y": -0.7226757,
+            "Z": 3.33382629,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$heal_point1",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_healing_point_doodads",
+              "row": 23,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "38": {
+          "location": {
+            "X": -0.24652342,
+            "Y": -8.87354675,
+            "Z": 5.2601709,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$heal_point2",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_healing_point_doodads",
+              "row": 24,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "39": {
+          "location": {
+            "X": -0.92987915,
+            "Y": -10.47005615,
+            "Z": 1.97258972,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$heal_point3",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_healing_point_doodads",
+              "row": 25,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "46": {
+          "location": {
+            "X": -0.07826172,
+            "Y": -3.24843933,
+            "Z": 38.54605469,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$cannon9",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 115,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "58": {
+          "location": {
+            "X": -1.04451965,
+            "Y": -14.86150757,
+            "Z": -2.14507004,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 179.99998133
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$ladder_rear_left",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 117,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "59": {
+          "location": {
+            "X": 1.04451706,
+            "Y": -14.86150879,
+            "Z": -2.145065,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 179.99996403
+          },
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$ladder_rear_right",
+          "parents": [
+            "galleon_test_body_1",
+            "galleon_test_body"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 118,
+              "slave": 61,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "unresolved": {},
+      "issues": [],
+      "normal": "prefab://Prefabs/interaction_c.xml/galleon.galleon_test_body",
+      "inspected_assets": [
+        {
+          "path": "game/objects/env/01_nuia/001_ndeco/ndeco_cannonball_b.cgf",
+          "sha256": "474f1e411494ed33b0919064f9bf651783d6b7ea71577273ce54de56a4da1eb3"
+        },
+        {
+          "path": "game/objects/env/01_nuia/001_ndeco/ndeco_cookstore_chair01.cgf",
+          "sha256": "f9723ac8cbf6d71271ea71e9012430f7e1d227673fde7ee32410f2f08f6a1bdd"
+        },
+        {
+          "path": "game/objects/env/01_nuia/001_ndeco/ndeco_sandbag01.cgf",
+          "sha256": "6fa036403136b22a98d62dc04c80fda61cc6cce65591f53ca9e59b86d89f98f0"
+        },
+        {
+          "path": "game/objects/env/01_nuia/001_ndeco/old/barrel_oak_b.cgf",
+          "sha256": "4b315cd65cc43caf209f73b2555853c453f6c245adcb21d8d14235af83a858c7"
+        },
+        {
+          "path": "game/objects/env/01_nuia/001_ndeco/old/fisherbarrel.cgf",
+          "sha256": "7f81847b162fcfa1cf4b4f07a926c109589184c5f4bff849964b83f1f486d6a0"
+        },
+        {
+          "path": "game/objects/env/01_nuia/001_ndeco/old/rope_a01.cgf",
+          "sha256": "b05ed1d164801806d23b1522719c5be8bc90dc1339351f293b9c81ec8534942a"
+        },
+        {
+          "path": "game/objects/env/01_nuia/001_ndeco/old/rope_c01.cgf",
+          "sha256": "2c88c1427fefebd6613006011b3ac514ebad198c41c44057c99881869dcd6f49"
+        },
+        {
+          "path": "game/objects/env/01_nuia/001_ndeco/old/rope_c02.cgf",
+          "sha256": "ce68eb966cbe03f1f1bb3c13421572e9102330cb6e36625c81374348c513d398"
+        },
+        {
+          "path": "game/objects/env/01_nuia/06_mari/mari_oscar_chainbox.cgf",
+          "sha256": "bb108934b81c4bcc4c09f1d08710995dfc66426d954d48e5ab48c2662d8eef52"
+        },
+        {
+          "path": "game/objects/env/06_unit/01_ship/galleon/galleon_cannon.cgf",
+          "sha256": "561e4b7346f6236c183da8855679ff840a4b4e4d223380a20ea1c69958e11e45"
+        },
+        {
+          "path": "game/objects/env/06_unit/01_ship/galleon/galleon_flag0.chr",
+          "sha256": "6614af9b8a1690d74e496c16b4bf16c7cded4bfc1cfb18048e4fd3ca37160931"
+        },
+        {
+          "path": "game/objects/env/06_unit/01_ship/galleon/galleon_item01.cgf",
+          "sha256": "7a1c861a6546ba6e165dac47f082063d080587ddc69a18d60346b6b62e6bb516"
+        },
+        {
+          "path": "game/objects/env/06_unit/01_ship/galleon/galleon_rudder.cgf",
+          "sha256": "ef89844029a161e86d051e4bbcb4504b024b4da321e2f0ea4f765a227b207a74"
+        },
+        {
+          "path": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "sha256": "0cea8fce6a9104c552a150d41d955bbf02b9c417cf301021a508455e44b931e9"
+        },
+        {
+          "path": "game/objects/item/shield/shield_26_2/shield_26_2.cgf",
+          "sha256": "c918c903ff5b11af029282880b0bb0ddffa14469689c9e7f48d252f3bfbaa769"
+        },
+        {
+          "path": "game/prefabs/interaction_c.xml",
+          "sha256": "0ec3249c055594d0b3e43cd35a19456045b9b546ca8c39bb7397b91251d17e2d"
+        }
+      ]
+    },
+    {
+      "model": 1287,
+      "slaves": [
+        102
+      ],
+      "item_summonable_slaves": [
+        102
+      ],
+      "required": [
+        2,
+        35,
+        36
+      ],
+      "already_present": [],
+      "points": {
+        "2": {
+          "location": {
+            "X": -0.47789001,
+            "Y": 0.36952,
+            "Z": 0.9364399,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/01_ship/coupleduckship/coupleduckship.cgf",
+          "node": "$passenger0",
+          "parents": [
+            "body",
+            "coupleduckship"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 455,
+              "slave": 102,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "35": {
+          "location": {
+            "X": 0.39533997,
+            "Y": -0.12314003,
+            "Z": 1.41565994,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/01_ship/coupleduckship/coupleduckship.cgf",
+          "node": "$helms",
+          "parents": [
+            "body",
+            "coupleduckship"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 454,
+              "slave": 102,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "36": {
+          "location": {
+            "X": 0.0,
+            "Y": -1.81697433,
+            "Z": 1.82779999,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/01_ship/coupleduckship/coupleduckship.cgf",
+          "node": "$heal_point0",
+          "parents": [
+            "body",
+            "coupleduckship"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_healing_point_doodads",
+              "row": 61,
+              "slave": 102,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "unresolved": {},
+      "issues": [],
+      "normal": "prefab://prefabs/coupleduckship.xml/coupleduckship.coupleduckship_body",
+      "inspected_assets": [
+        {
+          "path": "game/objects/env/06_unit/01_ship/coupleduckship/coupleduckship.cgf",
+          "sha256": "831f8451ffff1e34979f2105323c4765a09f61b4609979ac49d17436828d7890"
+        },
+        {
+          "path": "game/objects/env/06_unit/01_ship/coupleduckship/coupleduckship_foot.chr",
+          "sha256": "f1063d15a25ac0ca61166bc9a5513741de92adbf79c64f9f76c82ac2b53fb141"
+        },
+        {
+          "path": "game/prefabs/coupleduckship.xml",
+          "sha256": "6e4407a62dae3a9a33a4bcae46b853b35db3331cbc2f3b6a1ff0c303452f4aab"
+        }
+      ]
+    },
+    {
+      "model": 1323,
+      "slaves": [
+        106,
+        117,
+        122
+      ],
+      "item_summonable_slaves": [
+        106,
+        122
+      ],
+      "required": [
+        21,
+        36,
+        60,
+        61
+      ],
+      "already_present": [],
+      "points": {
+        "21": {
+          "location": {
+            "X": 0.0,
+            "Y": 0.87057996,
+            "Z": 1.18104005,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body.chr",
+          "node": "sail0",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_trick",
+            "bone_body_base"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 477,
+              "slave": 106,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 589,
+              "slave": 117,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 634,
+              "slave": 122,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "36": {
+          "location": {
+            "X": 0.69189,
+            "Y": -0.13275997,
+            "Z": 1.07907999,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body.chr",
+          "node": "heal_point0",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_trick",
+            "bone_body_base"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_healing_point_doodads",
+              "row": 62,
+              "slave": 106,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_healing_point_doodads",
+              "row": 77,
+              "slave": 117,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "60": {
+          "location": {
+            "X": -0.52005464,
+            "Y": -2.1677649,
+            "Z": 0.68300521,
+            "Roll": -90.00001284,
+            "Pitch": -54.99995696,
+            "Yaw": -90.00000934
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body.chr",
+          "node": "box0",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_trick",
+            "bone_body_base"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 584,
+              "slave": 106,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "61": {
+          "location": {
+            "X": 0.52022153,
+            "Y": -2.1677649,
+            "Z": 0.68300521,
+            "Roll": 89.99998732,
+            "Pitch": -54.99998354,
+            "Yaw": -90.00000433
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body.chr",
+          "node": "box1",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_trick",
+            "bone_body_base"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 593,
+              "slave": 106,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "unresolved": {},
+      "issues": [],
+      "normal": "prefab://prefabs/speedcar.xml/speedcar.speedcar_body_r",
+      "inspected_assets": [
+        {
+          "path": "game/objects/env/06_unit/05_carriage/speedcar_body.chr",
+          "sha256": "88269f91bebd8e72781a65045726ec22729d69ac091cd9afe600063e388d8f00"
+        },
+        {
+          "path": "game/prefabs/speedcar.xml",
+          "sha256": "798116faf573a3c33349f1b1c22140bb1555689573dd8934ca87c24841b83a89"
+        }
+      ]
+    },
+    {
+      "model": 1371,
+      "slaves": [
+        112,
+        118
+      ],
+      "item_summonable_slaves": [
+        112
+      ],
+      "required": [
+        21,
+        36,
+        60,
+        61
+      ],
+      "already_present": [],
+      "points": {
+        "21": {
+          "location": {
+            "X": 0.0,
+            "Y": 0.87057996,
+            "Z": 1.18104005,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body.chr",
+          "node": "sail0",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_trick",
+            "bone_body_base"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 587,
+              "slave": 112,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 590,
+              "slave": 118,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "36": {
+          "location": {
+            "X": 0.69189,
+            "Y": -0.13275997,
+            "Z": 1.07907999,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body.chr",
+          "node": "heal_point0",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_trick",
+            "bone_body_base"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_healing_point_doodads",
+              "row": 76,
+              "slave": 112,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_healing_point_doodads",
+              "row": 79,
+              "slave": 118,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "60": {
+          "location": {
+            "X": -0.52005464,
+            "Y": -2.1677649,
+            "Z": 0.68300521,
+            "Roll": -90.00001284,
+            "Pitch": -54.99995696,
+            "Yaw": -90.00000934
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body.chr",
+          "node": "box0",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_trick",
+            "bone_body_base"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 588,
+              "slave": 112,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "61": {
+          "location": {
+            "X": 0.52022153,
+            "Y": -2.1677649,
+            "Z": 0.68300521,
+            "Roll": 89.99998732,
+            "Pitch": -54.99998354,
+            "Yaw": -90.00000433
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body.chr",
+          "node": "box1",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_trick",
+            "bone_body_base"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 599,
+              "slave": 112,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "unresolved": {},
+      "issues": [],
+      "normal": "prefab://prefabs/speedcar.xml/speedcar.speedcar_body_b",
+      "inspected_assets": [
+        {
+          "path": "game/objects/env/06_unit/05_carriage/speedcar_body.chr",
+          "sha256": "88269f91bebd8e72781a65045726ec22729d69ac091cd9afe600063e388d8f00"
+        },
+        {
+          "path": "game/prefabs/speedcar.xml",
+          "sha256": "798116faf573a3c33349f1b1c22140bb1555689573dd8934ca87c24841b83a89"
+        }
+      ]
+    },
+    {
+      "model": 1385,
+      "slaves": [
+        101,
+        120
+      ],
+      "item_summonable_slaves": [],
+      "required": [
+        21,
+        22,
+        24,
+        25,
+        36,
+        37,
+        38,
+        39,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        76
+      ],
+      "already_present": [],
+      "points": {
+        "21": {
+          "location": {
+            "X": 0.0,
+            "Y": 15.15861938,
+            "Z": 1.93809326,
+            "Roll": -1.6090013,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$sail0",
+          "parents": [
+            "boxship_old_2",
+            "boxship_old"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 517,
+              "slave": 101,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 551,
+              "slave": 101,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 620,
+              "slave": 120,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_bindings",
+              "row": 149,
+              "slave": 120,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "22": {
+          "location": {
+            "X": 0.0,
+            "Y": 1.55865067,
+            "Z": 1.32873474,
+            "Roll": -1.6090013,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$sail1",
+          "parents": [
+            "boxship_old_2",
+            "boxship_old"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 518,
+              "slave": 101,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 604,
+              "slave": 120,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "24": {
+          "location": {
+            "X": -2.40109009,
+            "Y": 12.69552368,
+            "Z": -1.10956696,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 71.01340743
+          },
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$ladder_left",
+          "parents": [
+            "boxship_old_2",
+            "boxship_old"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 537,
+              "slave": 101,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 615,
+              "slave": 120,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "25": {
+          "location": {
+            "X": 2.44303604,
+            "Y": 12.69552246,
+            "Z": -1.10635902,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": -63.9865921
+          },
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$ladder_right",
+          "parents": [
+            "boxship_old_2",
+            "boxship_old"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 538,
+              "slave": 101,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 616,
+              "slave": 120,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "36": {
+          "location": {
+            "X": -1.60562973,
+            "Y": -2.22354645,
+            "Z": 1.34844727,
+            "Roll": -31.84449881,
+            "Pitch": 3.04776432,
+            "Yaw": -147.0619414
+          },
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$heal_point0",
+          "parents": [
+            "boxship_old_2",
+            "boxship_old"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 572,
+              "slave": 101,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 623,
+              "slave": 120,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "37": {
+          "location": {
+            "X": 2.99039398,
+            "Y": -0.53385757,
+            "Z": 1.22506035,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$heal_point1",
+          "parents": [
+            "boxship_old_2",
+            "boxship_old"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 570,
+              "slave": 101,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 621,
+              "slave": 120,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "38": {
+          "location": {
+            "X": 0.76255249,
+            "Y": -10.80150879,
+            "Z": 1.83097321,
+            "Roll": -17.3346917,
+            "Pitch": -3.82501679,
+            "Yaw": -150.04003415
+          },
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$heal_point2",
+          "parents": [
+            "boxship_old_2",
+            "boxship_old"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 571,
+              "slave": 101,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 622,
+              "slave": 120,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "39": {
+          "location": {
+            "X": -1.69008774,
+            "Y": 13.50393433,
+            "Z": 1.87254852,
+            "Roll": -66.7200763,
+            "Pitch": -66.38009821,
+            "Yaw": 66.34809364
+          },
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$heal_point3",
+          "parents": [
+            "boxship_old_2",
+            "boxship_old"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 550,
+              "slave": 101,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 619,
+              "slave": 120,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "58": {
+          "location": {
+            "X": -1.91337097,
+            "Y": -12.50181641,
+            "Z": -1.46283188,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": -179.99999135
+          },
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$ladder_rear_left",
+          "parents": [
+            "boxship_old_2",
+            "boxship_old"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 539,
+              "slave": 101,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 617,
+              "slave": 120,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "59": {
+          "location": {
+            "X": 1.91337036,
+            "Y": -12.50181641,
+            "Z": -1.46283188,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": -179.99999135
+          },
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$ladder_rear_right",
+          "parents": [
+            "boxship_old_2",
+            "boxship_old"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 540,
+              "slave": 101,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 618,
+              "slave": 120,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "60": {
+          "location": {
+            "X": -2.38570313,
+            "Y": 12.47859131,
+            "Z": 4.42517761,
+            "Roll": -5.84543976,
+            "Pitch": 0.01637078,
+            "Yaw": 86.80389012
+          },
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box0",
+          "parents": [
+            "boxship_old_2",
+            "boxship_old"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 519,
+              "slave": 101,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 605,
+              "slave": 120,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "61": {
+          "location": {
+            "X": 3.77372406,
+            "Y": 11.7718396,
+            "Z": 5.30033264,
+            "Roll": 14.61988617,
+            "Pitch": -3.46511977,
+            "Yaw": 108.08774205
+          },
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box1",
+          "parents": [
+            "boxship_old_2",
+            "boxship_old"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 525,
+              "slave": 101,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 607,
+              "slave": 120,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "62": {
+          "location": {
+            "X": -4.77853394,
+            "Y": 2.81668457,
+            "Z": 3.8049884,
+            "Roll": -17.63500494,
+            "Pitch": 5.84323429,
+            "Yaw": 77.92499954
+          },
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box2",
+          "parents": [
+            "boxship_old_2",
+            "boxship_old"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 526,
+              "slave": 101,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 608,
+              "slave": 120,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "63": {
+          "location": {
+            "X": 3.68675873,
+            "Y": 3.93022034,
+            "Z": 3.87374054,
+            "Roll": 13.35100355,
+            "Pitch": -3.18382401,
+            "Yaw": 86.95435664
+          },
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box3",
+          "parents": [
+            "boxship_old_2",
+            "boxship_old"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 527,
+              "slave": 101,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 609,
+              "slave": 120,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "64": {
+          "location": {
+            "X": -3.90936157,
+            "Y": -4.94448669,
+            "Z": 5.00377747,
+            "Roll": -2.59864108,
+            "Pitch": -1.49955419,
+            "Yaw": 69.03402673
+          },
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box4",
+          "parents": [
+            "boxship_old_2",
+            "boxship_old"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 528,
+              "slave": 101,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 610,
+              "slave": 120,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "65": {
+          "location": {
+            "X": 1.47495453,
+            "Y": -10.06739441,
+            "Z": 4.89309875,
+            "Roll": 10.83311746,
+            "Pitch": -1.54938953,
+            "Yaw": 123.05834985
+          },
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box5",
+          "parents": [
+            "boxship_old_2",
+            "boxship_old"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 520,
+              "slave": 101,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 606,
+              "slave": 120,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "66": {
+          "location": {
+            "X": -2.29154297,
+            "Y": 6.43949036,
+            "Z": -0.64560669,
+            "Roll": -131.47489857,
+            "Pitch": 12.30072769,
+            "Yaw": 70.05732348
+          },
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box6",
+          "parents": [
+            "boxship_old_2",
+            "boxship_old"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 529,
+              "slave": 101,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 611,
+              "slave": 120,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "67": {
+          "location": {
+            "X": 2.25987289,
+            "Y": 8.95768433,
+            "Z": -0.4294125,
+            "Roll": 130.59802495,
+            "Pitch": -14.98278824,
+            "Yaw": 79.18461482
+          },
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box7",
+          "parents": [
+            "boxship_old_2",
+            "boxship_old"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 530,
+              "slave": 101,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 612,
+              "slave": 120,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "68": {
+          "location": {
+            "X": -2.20217819,
+            "Y": -8.47400269,
+            "Z": -0.35781158,
+            "Roll": -131.09412862,
+            "Pitch": 10.24646171,
+            "Yaw": 77.10754877
+          },
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box8",
+          "parents": [
+            "boxship_old_2",
+            "boxship_old"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 531,
+              "slave": 101,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 575,
+              "slave": 101,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 613,
+              "slave": 120,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 624,
+              "slave": 120,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "69": {
+          "location": {
+            "X": 1.90979797,
+            "Y": -8.05894348,
+            "Z": -1.06294098,
+            "Roll": 133.31709473,
+            "Pitch": -12.74193914,
+            "Yaw": 70.72046603
+          },
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box9",
+          "parents": [
+            "boxship_old_2",
+            "boxship_old"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 532,
+              "slave": 101,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 614,
+              "slave": 120,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "70": {
+          "location": {
+            "X": -0.58215088,
+            "Y": 5.17909302,
+            "Z": 1.28867584,
+            "Roll": 1.18520879,
+            "Pitch": -0.6037615,
+            "Yaw": -0.27913618
+          },
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box10",
+          "parents": [
+            "boxship_old_2",
+            "boxship_old"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 583,
+              "slave": 101,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 626,
+              "slave": 120,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "71": {
+          "location": {
+            "X": 0.6358844,
+            "Y": 5.21191528,
+            "Z": 1.29706161,
+            "Roll": 1.15850286,
+            "Pitch": -0.99305488,
+            "Yaw": 0.09124448
+          },
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box11",
+          "parents": [
+            "boxship_old_2",
+            "boxship_old"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 596,
+              "slave": 101,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 635,
+              "slave": 120,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "76": {
+          "location": {
+            "X": -0.58215027,
+            "Y": -2.47363617,
+            "Z": 1.28406952,
+            "Roll": -2.97758005,
+            "Pitch": -0.60376143,
+            "Yaw": -0.27913616
+          },
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box16",
+          "parents": [
+            "boxship_old_2",
+            "boxship_old"
+          ],
+          "kind": "cgf-local-node",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 576,
+              "slave": 101,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 625,
+              "slave": 120,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "unresolved": {},
+      "issues": [],
+      "normal": "prefab://prefabs/boxship_old.xml/boxship_old.boxship_old_normal",
+      "inspected_assets": [
+        {
+          "path": "game/objects/box.cgf",
+          "sha256": "921141b30889f84f0d8f1867da15aecdc15bd26672e12e666ebe7185406f8858"
+        },
+        {
+          "path": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "sha256": "837d9a5a00bc63ebc751b432f27cb4239f072a2550f1f802b38017c6574d0bb5"
+        },
+        {
+          "path": "game/prefabs/boxship_old.xml",
+          "sha256": "d61a1baa5724f20925d47f7f05373c0f57fc02975f9804ccd81cd4c5ec94a119"
+        }
+      ]
+    },
+    {
+      "model": 1402,
+      "slaves": [
+        109
+      ],
+      "item_summonable_slaves": [],
+      "required": [
+        21
+      ],
+      "already_present": [],
+      "points": {},
+      "unresolved": {
+        "21": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$sail0",
+            "$sail0"
+          ],
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 541,
+              "slave": 109,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "issues": [
+        "prefab missing/ambiguous: prefab://prefabs/boxship_old.xml/boxship_old.boxship_old_normal_2f"
+      ],
+      "normal": "prefab://prefabs/boxship_old.xml/boxship_old.boxship_old_normal_2f",
+      "inspected_assets": [
+        {
+          "path": "game/prefabs/boxship_old.xml",
+          "sha256": "d61a1baa5724f20925d47f7f05373c0f57fc02975f9804ccd81cd4c5ec94a119"
+        }
+      ]
+    },
+    {
+      "model": 1427,
+      "slaves": [
+        121
+      ],
+      "item_summonable_slaves": [
+        121
+      ],
+      "required": [
+        21,
+        36,
+        60,
+        61
+      ],
+      "already_present": [],
+      "points": {},
+      "unresolved": {
+        "21": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$sail0",
+            "$sail0"
+          ],
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 627,
+              "slave": 121,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "36": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$heal_point0",
+            "$heal_point0"
+          ],
+          "consumers": [
+            {
+              "table": "slave_healing_point_doodads",
+              "row": 80,
+              "slave": 121,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "60": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$box0",
+            "$box0"
+          ],
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 628,
+              "slave": 121,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "61": {
+          "reason": "native asset/helper absent; see issues and inspected sources",
+          "aliases": [
+            "$box1",
+            "$box1"
+          ],
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 629,
+              "slave": 121,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "issues": [
+        "prefab missing/ambiguous: prefab://prefabs/speedcar.xml/speedcar.speedcar_body_redbull"
+      ],
+      "normal": "prefab://prefabs/speedcar.xml/speedcar.speedcar_body_redbull",
+      "inspected_assets": [
+        {
+          "path": "game/prefabs/speedcar.xml",
+          "sha256": "798116faf573a3c33349f1b1c22140bb1555689573dd8934ca87c24841b83a89"
+        }
+      ]
+    },
+    {
+      "model": 1442,
+      "slaves": [
+        108,
+        123
+      ],
+      "item_summonable_slaves": [],
+      "required": [
+        9,
+        10
+      ],
+      "already_present": [],
+      "points": {
+        "9": {
+          "location": {
+            "X": 1.31732416,
+            "Y": -2.06066918,
+            "Z": 2.79388428,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/transfers_battle_foodtraffic.chr",
+          "node": "cannon0",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "Bone_back00",
+            "Bone_back01"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 633,
+              "slave": 108,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 680,
+              "slave": 123,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "10": {
+          "location": {
+            "X": -0.12301,
+            "Y": -3.09071016,
+            "Z": 3.20470023,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/transfers_battle_foodtraffic.chr",
+          "node": "cannon1",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "Bone_back00",
+            "Bone_back01"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 601,
+              "slave": 108,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "unresolved": {},
+      "issues": [],
+      "normal": "prefab://prefabs/vehicle_tractor.xml/transfers_battle_foodtraffic.transfers_battle_foodtraffic_body",
+      "inspected_assets": [
+        {
+          "path": "game/objects/env/06_unit/05_carriage/transfers_battle_foodtraffic.chr",
+          "sha256": "c8824fa506e450954719d4850d1debbe9a5e2c63e46c7c415f85ae618744ddb1"
+        },
+        {
+          "path": "game/prefabs/vehicle_tractor.xml",
+          "sha256": "c5c510acded32ecfae40e797b9c749f91ef77eff39ec41ffe4076593be3e3a17"
+        }
+      ]
+    },
+    {
+      "model": 1444,
+      "slaves": [
+        124
+      ],
+      "item_summonable_slaves": [
+        124
+      ],
+      "required": [
+        21,
+        36,
+        60,
+        61
+      ],
+      "already_present": [],
+      "points": {
+        "21": {
+          "location": {
+            "X": 0.0,
+            "Y": 0.87057996,
+            "Z": 1.18104005,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "sail0",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_trick",
+            "bone_body_base"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 630,
+              "slave": 124,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "36": {
+          "location": {
+            "X": 0.69189,
+            "Y": -0.13275997,
+            "Z": 1.07907999,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "heal_point0",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_trick",
+            "bone_body_base"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_healing_point_doodads",
+              "row": 81,
+              "slave": 124,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "60": {
+          "location": {
+            "X": -0.52005464,
+            "Y": -2.1677649,
+            "Z": 0.68300521,
+            "Roll": -90.00001284,
+            "Pitch": -54.99995696,
+            "Yaw": -90.00000934
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "box0",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_trick",
+            "bone_body_base"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 631,
+              "slave": 124,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "61": {
+          "location": {
+            "X": 0.52022153,
+            "Y": -2.1677649,
+            "Z": 0.68300521,
+            "Roll": 89.99998732,
+            "Pitch": -54.99998354,
+            "Yaw": -90.00000433
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "box1",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_trick",
+            "bone_body_base"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 632,
+              "slave": 124,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "unresolved": {},
+      "issues": [],
+      "normal": "prefab://prefabs/speedcar.xml/speedcar.speedcar_body_decal",
+      "inspected_assets": [
+        {
+          "path": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "sha256": "f0aa00a7c0f288fc5c2a169a49979091a2bd0acdc8387979f2e82a1d63f5f3ec"
+        },
+        {
+          "path": "game/prefabs/speedcar.xml",
+          "sha256": "798116faf573a3c33349f1b1c22140bb1555689573dd8934ca87c24841b83a89"
+        }
+      ]
+    },
+    {
+      "model": 1460,
+      "slaves": [
+        126,
+        135
+      ],
+      "item_summonable_slaves": [
+        126
+      ],
+      "required": [
+        21,
+        36,
+        60,
+        61
+      ],
+      "already_present": [],
+      "points": {
+        "21": {
+          "location": {
+            "X": 0.0,
+            "Y": 0.87057996,
+            "Z": 1.18104005,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "sail0",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_trick",
+            "bone_body_base"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 636,
+              "slave": 126,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 667,
+              "slave": 135,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "36": {
+          "location": {
+            "X": 0.69189,
+            "Y": -0.13275997,
+            "Z": 1.07907999,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "heal_point0",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_trick",
+            "bone_body_base"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_healing_point_doodads",
+              "row": 82,
+              "slave": 126,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "60": {
+          "location": {
+            "X": -0.52005464,
+            "Y": -2.1677649,
+            "Z": 0.68300521,
+            "Roll": -90.00001284,
+            "Pitch": -54.99995696,
+            "Yaw": -90.00000934
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "box0",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_trick",
+            "bone_body_base"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 637,
+              "slave": 126,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 668,
+              "slave": 135,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "61": {
+          "location": {
+            "X": 0.52022153,
+            "Y": -2.1677649,
+            "Z": 0.68300521,
+            "Roll": 89.99998732,
+            "Pitch": -54.99998354,
+            "Yaw": -90.00000433
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "box1",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_trick",
+            "bone_body_base"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 638,
+              "slave": 126,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 669,
+              "slave": 135,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "unresolved": {},
+      "issues": [],
+      "normal": "prefab://prefabs/speedcar_ucc.xml/speedcar_ucc.speedcar_body_r_ucc",
+      "inspected_assets": [
+        {
+          "path": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "sha256": "f0aa00a7c0f288fc5c2a169a49979091a2bd0acdc8387979f2e82a1d63f5f3ec"
+        },
+        {
+          "path": "game/prefabs/speedcar_ucc.xml",
+          "sha256": "ee89b93694dd7b0d78a2884d7d0bd40b3ab16a9e5c03390da90511d952abecdb"
+        }
+      ]
+    },
+    {
+      "model": 1461,
+      "slaves": [
+        127,
+        134
+      ],
+      "item_summonable_slaves": [
+        127
+      ],
+      "required": [
+        21,
+        36,
+        60,
+        61
+      ],
+      "already_present": [],
+      "points": {
+        "21": {
+          "location": {
+            "X": 0.0,
+            "Y": 0.87057996,
+            "Z": 1.18104005,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "sail0",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_trick",
+            "bone_body_base"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 639,
+              "slave": 127,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 664,
+              "slave": 134,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "36": {
+          "location": {
+            "X": 0.69189,
+            "Y": -0.13275997,
+            "Z": 1.07907999,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "heal_point0",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_trick",
+            "bone_body_base"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_healing_point_doodads",
+              "row": 83,
+              "slave": 127,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "60": {
+          "location": {
+            "X": -0.52005464,
+            "Y": -2.1677649,
+            "Z": 0.68300521,
+            "Roll": -90.00001284,
+            "Pitch": -54.99995696,
+            "Yaw": -90.00000934
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "box0",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_trick",
+            "bone_body_base"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 640,
+              "slave": 127,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 665,
+              "slave": 134,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "61": {
+          "location": {
+            "X": 0.52022153,
+            "Y": -2.1677649,
+            "Z": 0.68300521,
+            "Roll": 89.99998732,
+            "Pitch": -54.99998354,
+            "Yaw": -90.00000433
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "box1",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_trick",
+            "bone_body_base"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 641,
+              "slave": 127,
+              "owner_type": "Slave"
+            },
+            {
+              "table": "slave_doodad_bindings",
+              "row": 666,
+              "slave": 134,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "unresolved": {},
+      "issues": [],
+      "normal": "prefab://prefabs/speedcar_ucc.xml/speedcar_ucc.speedcar_body_b_ucc",
+      "inspected_assets": [
+        {
+          "path": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "sha256": "f0aa00a7c0f288fc5c2a169a49979091a2bd0acdc8387979f2e82a1d63f5f3ec"
+        },
+        {
+          "path": "game/prefabs/speedcar_ucc.xml",
+          "sha256": "ee89b93694dd7b0d78a2884d7d0bd40b3ab16a9e5c03390da90511d952abecdb"
+        }
+      ]
+    },
+    {
+      "model": 1462,
+      "slaves": [
+        128
+      ],
+      "item_summonable_slaves": [
+        128
+      ],
+      "required": [
+        21,
+        36,
+        60,
+        61
+      ],
+      "already_present": [],
+      "points": {
+        "21": {
+          "location": {
+            "X": 0.0,
+            "Y": 0.87057996,
+            "Z": 1.18104005,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "sail0",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_trick",
+            "bone_body_base"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 642,
+              "slave": 128,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "36": {
+          "location": {
+            "X": 0.69189,
+            "Y": -0.13275997,
+            "Z": 1.07907999,
+            "Roll": 0.0,
+            "Pitch": 0.0,
+            "Yaw": 0.0
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "heal_point0",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_trick",
+            "bone_body_base"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_healing_point_doodads",
+              "row": 84,
+              "slave": 128,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "60": {
+          "location": {
+            "X": -0.52005464,
+            "Y": -2.1677649,
+            "Z": 0.68300521,
+            "Roll": -90.00001284,
+            "Pitch": -54.99995696,
+            "Yaw": -90.00000934
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "box0",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_trick",
+            "bone_body_base"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 643,
+              "slave": 128,
+              "owner_type": "Slave"
+            }
+          ]
+        },
+        "61": {
+          "location": {
+            "X": 0.52022153,
+            "Y": -2.1677649,
+            "Z": 0.68300521,
+            "Roll": 89.99998732,
+            "Pitch": -54.99998354,
+            "Yaw": -90.00000433
+          },
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "box1",
+          "parents": [
+            "body",
+            "Bip01",
+            "Bip01 Pelvis",
+            "bone_trick",
+            "bone_body_base"
+          ],
+          "kind": "chr-absolute-bind",
+          "consumers": [
+            {
+              "table": "slave_doodad_bindings",
+              "row": 644,
+              "slave": 128,
+              "owner_type": "Slave"
+            }
+          ]
+        }
+      },
+      "unresolved": {},
+      "issues": [],
+      "normal": "prefab://prefabs/speedcar_ucc.xml/speedcar_ucc.speedcar_body_y_ucc",
+      "inspected_assets": [
+        {
+          "path": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "sha256": "f0aa00a7c0f288fc5c2a169a49979091a2bd0acdc8387979f2e82a1d63f5f3ec"
+        },
+        {
+          "path": "game/prefabs/speedcar_ucc.xml",
+          "sha256": "ee89b93694dd7b0d78a2884d7d0bd40b3ab16a9e5c03390da90511d952abecdb"
+        }
+      ]
+    }
+  ]
+}

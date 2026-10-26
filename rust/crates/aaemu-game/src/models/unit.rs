@@ -19,7 +19,9 @@
 //! holding one; collect what you need, drop the guard, then act (see `world::object`).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use crate::data::attribute_limits::UnitAttributeLimits;
 use crate::models::buff::Buffs;
 use crate::models::transform::Transform;
 use crate::models::unit_model::UnitCustomModelParams;
@@ -268,9 +270,17 @@ impl DynamicBonus {
 pub struct Bonuses {
     pub statics: Vec<(u32, Vec<Bonus>)>,
     pub dynamics: Vec<(u32, Vec<DynamicBonus>)>,
+    /// Per-server data, bound before world insertion or detached stat calculation.
+    pub attribute_limits: Arc<UnitAttributeLimits>,
 }
 
 impl Bonuses {
+    pub fn bind_attribute_limits(&mut self, limits: &Arc<UnitAttributeLimits>) {
+        if !Arc::ptr_eq(&self.attribute_limits, limits) {
+            self.attribute_limits = Arc::clone(limits);
+        }
+    }
+
     /// `AddBonus(bonusIndex, bonus)`.
     pub fn add_bonus(&mut self, index: u32, bonus: Bonus) {
         match self.statics.iter_mut().find(|(i, _)| *i == index) {
@@ -326,7 +336,19 @@ impl Bonuses {
 
     /// `CalculateWithBonuses(value, attr)`: static flat, dynamic flat, static percent, dynamic
     /// percent. (`value * bonus.Value / 100f` is float arithmetic in C#.)
-    pub fn calculate(&self, mut value: f64, attr: UnitAttribute, now_ms: i64) -> f64 {
+    pub fn calculate(&self, value: f64, attr: UnitAttribute, now_ms: i64) -> f64 {
+        self.calculate_with_limits(value, attr, now_ms, &self.attribute_limits)
+    }
+
+    /// Explicit data also covers detached, immutable character evaluators. Apply the
+    /// native bound to the final raw attribute, preserving flat/percent bonus order.
+    pub fn calculate_with_limits(
+        &self,
+        mut value: f64,
+        attr: UnitAttribute,
+        now_ms: i64,
+        limits: &UnitAttributeLimits,
+    ) -> f64 {
         let statics = self.bonuses(attr);
         let dynamics = self.dynamic_bonuses(attr);
         for b in &statics {
@@ -353,7 +375,7 @@ impl Bonuses {
                 }
             }
         }
-        value
+        limits.clamp(attr, value)
     }
 }
 
@@ -361,14 +383,25 @@ impl Bonuses {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct UnitCooldowns {
     pub cooldowns: HashMap<u32, i64>,
+    /// Shared expiry by authored `skills.cooldown_tag_id`, local to this unit.
+    pub tag_cooldowns: HashMap<u32, i64>,
 }
 
 impl UnitCooldowns {
     /// `AddCooldown(skillId, duration)` (an existing cooldown is kept).
     pub fn add_cooldown(&mut self, skill_id: u32, duration_ms: u32, now_ms: i64) {
+        if duration_ms == 0 {
+            return;
+        }
+        let end = now_ms.saturating_add(i64::from(duration_ms));
         self.cooldowns
             .entry(skill_id)
-            .or_insert(now_ms + i64::from(duration_ms));
+            .and_modify(|old| {
+                if *old <= now_ms {
+                    *old = end;
+                }
+            })
+            .or_insert(end);
     }
 
     /// `CheckCooldown(skillId)`: true while more than 250 ms are left; an (almost) expired
@@ -377,11 +410,41 @@ impl UnitCooldowns {
         let Some(&end) = self.cooldowns.get(&skill_id) else {
             return false;
         };
-        if end - now_ms > 250 {
+        if end.saturating_sub(now_ms) > 250 {
             return true;
         }
         self.cooldowns.remove(&skill_id);
         false
+    }
+
+    /// Start or extend a shared cooldown without shortening an existing expiry.
+    pub fn add_tag_cooldown(&mut self, tag_id: u32, duration_ms: u32, now_ms: i64) {
+        self.tag_cooldowns.retain(|_, end| *end > now_ms);
+        if tag_id == 0 || duration_ms == 0 {
+            return;
+        }
+        let end = now_ms.saturating_add(i64::from(duration_ms));
+        self.tag_cooldowns
+            .entry(tag_id)
+            .and_modify(|old| *old = (*old).max(end))
+            .or_insert(end);
+    }
+
+    /// A tagged member can be cooling down even if this unit has never used it.
+    /// Keep the existing 250 ms admission tolerance for both stores.
+    pub fn check_skill_cooldown(&mut self, skill_id: u32, tag_id: u32, now_ms: i64) -> bool {
+        let individual = self.check_cooldown(skill_id, now_ms);
+        self.tag_cooldowns
+            .retain(|_, end| end.saturating_sub(now_ms) > 250);
+        individual || (tag_id != 0 && self.tag_cooldowns.contains_key(&tag_id))
+    }
+
+    /// Match the native skill/tag reset without touching other individual timers or groups.
+    pub fn remove_skill_cooldown(&mut self, skill_id: u32, tag_id: u32) {
+        self.remove_cooldown(skill_id);
+        if tag_id != 0 {
+            self.tag_cooldowns.remove(&tag_id);
+        }
     }
 
     /// `RemoveCooldown(skillId)`.

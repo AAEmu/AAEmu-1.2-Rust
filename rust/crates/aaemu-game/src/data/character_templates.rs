@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use rusqlite::Connection;
 use serde::Deserialize;
@@ -20,6 +21,7 @@ use super::GameDataError;
 pub struct CharacterTemplate {
     pub race: u8,
     pub gender: u8,
+    pub creatable: bool,
     pub model_id: u32,
     pub faction_id: u32,
     pub zone_id: u32,
@@ -88,6 +90,10 @@ pub struct ExpertLimit {
 
 #[derive(Debug, Clone, Default)]
 pub struct CharacterData {
+    /// Shared by every unit belonging to this GameServer, including non-characters.
+    pub unit_attribute_limits: Arc<super::attribute_limits::UnitAttributeLimits>,
+    /// Permanent pStat contribution ranges; the contribution feature is still unimplemented.
+    pub p_stat_limits: super::attribute_limits::CharacterPStatLimits,
     /// keyed by `16 * gender + race`.
     pub templates: HashMap<u8, CharacterTemplate>,
     pub ability_items: HashMap<u8, AbilityItems>,
@@ -99,6 +105,14 @@ pub struct CharacterData {
     pub actability_categories: HashMap<u32, u32>,
     /// `_expertLimits` by step.
     pub expert_limits: Vec<ExpertLimit>,
+    /// `blocked_texts` rows with `check_name`; independent of the configured name regex.
+    pub blocked_names: Vec<BlockedName>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockedName {
+    pub text: String,
+    pub partial_match: bool,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -135,6 +149,8 @@ impl CharacterData {
     pub fn template(&self, race: u8, gender: u8) -> Option<&CharacterTemplate> {
         self.templates
             .get(&(16u8.wrapping_mul(gender).wrapping_add(race)))
+            // The packed key alone aliases malformed race/gender bytes (e.g. gender 17).
+            .filter(|t| t.race == race && t.gender == gender)
     }
 
     pub fn actability(&self, id: u32) -> Option<&ActabilityTemplate> {
@@ -164,7 +180,14 @@ impl CharacterData {
         zone_of: impl Fn(f32, f32) -> u32,
         default_world_id: u32,
     ) -> Result<Self, GameDataError> {
-        let mut d = CharacterData::default();
+        let mut d = CharacterData {
+            unit_attribute_limits: Arc::new(super::attribute_limits::UnitAttributeLimits::load(
+                conn,
+            )?),
+            p_stat_limits: super::attribute_limits::CharacterPStatLimits::load(conn)?,
+            blocked_names: load_blocked_names(conn)?,
+            ..CharacterData::default()
+        };
         let mut temp: HashMap<u32, u8> = HashMap::new();
         let mut rows = Vec::new();
         for_each_row(conn, "SELECT * FROM characters", [], |r| {
@@ -173,6 +196,7 @@ impl CharacterData {
                 CharacterTemplate {
                     race: r.u8("char_race_id")?,
                     gender: r.u8("char_gender_id")?,
+                    creatable: r.bool_str("creatable")?,
                     model_id: r.u32("model_id")?,
                     faction_id: r.u32("faction_id")?,
                     zone_id: r.u32("starting_zone_id")?,
@@ -381,5 +405,75 @@ impl CharacterData {
         }
         tracing::info!("Loaded {} character templates", d.templates.len());
         Ok(d)
+    }
+}
+
+fn load_blocked_names(conn: &Connection) -> Result<Vec<BlockedName>, GameDataError> {
+    let mut names = Vec::new();
+    for_each_row(conn, "SELECT * FROM blocked_texts", [], |r| {
+        if r.bool_str("check_name")? {
+            names.push(BlockedName {
+                text: r.string("utf8str")?,
+                partial_match: r.bool_str("partial_match")?,
+            });
+        }
+        Ok(())
+    })?;
+    Ok(names)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lobby_blocked_names_load_only_check_name_and_preserve_partial_match() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE blocked_texts (check_name TEXT, check_chat TEXT, partial_match TEXT, utf8str TEXT);
+             INSERT INTO blocked_texts VALUES
+                ('t', 'f', 't', 'Admin'), ('1', 'f', 'f', 'GM'),
+                ('f', 't', 't', 'ChatOnly'), ('f', 'f', 'f', 'Ignored');",
+        )
+        .unwrap();
+        assert_eq!(
+            load_blocked_names(&conn).unwrap(),
+            vec![
+                BlockedName {
+                    text: "Admin".into(),
+                    partial_match: true
+                },
+                BlockedName {
+                    text: "GM".into(),
+                    partial_match: false
+                },
+            ]
+        );
+    }
+
+    #[test]
+    #[ignore = "needs AAEMU_COMPACT_DB (read-only)"]
+    fn lobby_rules_real_compact_db() {
+        let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+            return;
+        };
+        let conn =
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let app = Path::new(env!("CARGO_MANIFEST_DIR")).join("app");
+        let data = CharacterData::load(&conn, &app, |_, _| 0, 0).unwrap();
+        for (race, gender) in [(1, 1), (1, 2), (4, 1), (4, 2), (5, 1), (5, 2)] {
+            assert!(data.template(race, gender).unwrap().creatable);
+        }
+        for (race, gender) in [(2, 2), (3, 1), (3, 2), (7, 1), (8, 1)] {
+            assert!(!data.template(race, gender).unwrap().creatable);
+        }
+        assert!(data
+            .blocked_names
+            .iter()
+            .any(|n| n.text == "Admin" && n.partial_match));
+        assert!(data
+            .blocked_names
+            .iter()
+            .any(|n| n.text == "GM" && !n.partial_match));
     }
 }

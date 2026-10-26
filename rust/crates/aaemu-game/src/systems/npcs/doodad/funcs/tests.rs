@@ -82,14 +82,22 @@ impl EconomyBridge for Rec {
         self.push(format!("consume {task} {t} {c}"));
         self.consumed
     }
-    fn move_item_to_system_container(
+    fn try_store_doodad_item(
         &self,
         _s: &GameServer,
         _p: &PlayerRef,
-        task: u8,
-        id: u64,
+        doodad: &DoodadRef,
+        source: &Item,
+        _count: i32,
     ) -> bool {
-        self.push(format!("system {task} {id}"));
+        self.push(format!(
+            "system {} {}",
+            item_task::DOODAD_ITEM_CHANGER,
+            source.id
+        ));
+        let mut d = doodad.data();
+        d.item_id = source.id;
+        d.item_template_id = source.template_id;
         true
     }
 }

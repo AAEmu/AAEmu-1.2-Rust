@@ -681,6 +681,8 @@ impl crate::systems::economy::cash_shop::CashShopQuestHooks for QuestsForEconomy
 }
 
 /// Execute authored component NPC behavior after releasing the quest owner's lock.
+/// Keep this on the deferred path: `with_quests` also drops ops before calling it, so
+/// callback-bearing spawners can enter item scope -> spawn lock without character inversion.
 pub(crate) fn run_npc_component(
     server: &GameServer,
     player: &PlayerRef,

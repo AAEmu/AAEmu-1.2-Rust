@@ -404,7 +404,7 @@ impl CSBuyItemsPacket {
                 return;
             }
             let sells = match (pack_id, &npc_hooks) {
-                (Some(pack), Some(h)) => h.merchant_sells(server, pack, e.item_id),
+                (Some(pack), Some(h)) => h.merchant_sells(server, pack, e.item_id, e.grade),
                 _ => false,
             };
             if !sells {
@@ -435,7 +435,7 @@ impl CSBuyItemsPacket {
                 return;
             };
             *total = sum;
-            items_buy.push((e.item_id, e.count));
+            items_buy.push((e.item_id, e.count, e.grade));
         }
 
         let inv = Inv::of(&p);
@@ -489,12 +489,12 @@ impl CSBuyItemsPacket {
         let mut staged_bag = bag.clone();
         let mut staged_buyback = buyback.clone();
         let mut succeeded = true;
-        for (item_id, count) in items_buy {
+        for (item_id, count, grade) in items_buy {
             let template = txn.data().template(item_id).expect("preflight template");
             let existing: Vec<_> = staged_bag
                 .items
                 .iter()
-                .filter(|i| i.template_id == item_id)
+                .filter(|i| i.template_id == item_id && i.grade == grade)
                 .collect();
             let units: i64 = existing.iter().map(|i| i64::from(i.count)).sum();
             let capacity = (existing.len() as i64 + i64::from(staged_bag.free_slot_count()))
@@ -507,7 +507,7 @@ impl CSBuyItemsPacket {
                     task_type::STORE_BUY,
                     item_id,
                     count,
-                    -1,
+                    i32::from(grade),
                     0,
                     &mut txn.env,
                 )

@@ -440,6 +440,20 @@ fn client_packets_decode() {
 }
 
 #[test]
+fn native_return_mail_request_decodes_i64() {
+    // Native 1.2 x2game12.c: ReturnMailById (3948B630) -> 393CD290, opcode 0xa3;
+    // serializer 397BA450 writes the mail id as a single i64 (archive slot +72).
+    let mut s = PacketStream::from_bytes(vec![8, 7, 6, 5, 4, 3, 2, 1]);
+    assert_eq!(
+        CSReturnMailPacket::read(&mut s).unwrap().mail_id,
+        0x0102_0304_0506_0708
+    );
+    assert!(s.unread().is_empty());
+    let mut truncated = PacketStream::from_bytes(vec![8, 7, 6, 5, 4, 3, 2]);
+    assert!(CSReturnMailPacket::read(&mut truncated).is_err());
+}
+
+#[test]
 fn dotnet_dict_reuses_freed_slots_lifo() {
     let mut d = DotNetDict::default();
     for k in 1..=5 {
@@ -2020,6 +2034,7 @@ async fn send_rejects_name_mismatch_and_return_preserves_the_original_mail() {
 #[tokio::test]
 async fn load_rows_restore_mails() {
     let w = mail_world();
+    let received = mail::now() - 1;
     let item = give(&w, &w.pa.clone(), slot_type::MAIL, STACK, 2, 0);
     let mut ids = [0u64; 10];
     ids[0] = item;
@@ -2036,8 +2051,8 @@ async fn load_rows_restore_mails() {
             attachment_count: 9,
             receiver_id: 2,
             receiver_name: "Bob".into(),
-            send_date: 10,
-            received_date: 20,
+            send_date: received - 10,
+            received_date: received,
             money1: 5,
             attachment_ids: ids,
             ..MailRow::default()
@@ -2163,6 +2178,7 @@ async fn private_mysql_quest_mail_auction_rollback_retry_and_reconnect() {
             crate::data::character_templates::CharacterTemplate {
                 race: 1,
                 gender: 1,
+                creatable: true,
                 ..Default::default()
             },
         );
@@ -2548,4 +2564,83 @@ async fn return_preserves_zero_one_and_ten_attachments_without_charging_a_fee() 
             assert_eq!(w.server.items.item_by_id(item).unwrap().owner_id, 1);
         }
     }
+}
+
+#[tokio::test]
+async fn native_return_mail_frame_checks_recipient_and_returns_attachments() {
+    let mut w = mail_world();
+    w.pa.data().money = 1000;
+    let item = give(&w, &w.pa, slot_type::INVENTORY, SINGLE, 1, 0);
+    assert_eq!(
+        send_p2p(
+            &w,
+            mail_type::EXPRESS,
+            "Bob",
+            50,
+            &[(slot_type::INVENTORY, 0)],
+        ),
+        mail_result::SUCCESS
+    );
+    let id = bob_mail_ids(&w.server)[0];
+    let original = w.server.systems.economy.mail.get_mail_by_id(id).unwrap();
+    assert!(original.is_delivered && original.can_return_mail());
+    let original_item = w.server.items.item_by_id(item).unwrap();
+    let alice_money = w.pa.data().money;
+    let bob_money = w.pb.data().money;
+    assert_eq!(w.pb.data().unread_mail.received, 1);
+    w.a.drain();
+    w.b.drain();
+
+    // The 1.2 UI's read_mail.lua:946 ReturnMailById -> native 393CD290 builds 0xa3,
+    // NOT the historical CSReturnMailPacket placeholder 0xfff. Keep the opcode literal
+    // and spell out the frame rather than using the server's registration/encoder.
+    let mut frame = vec![0xdd, 1, 0, 0, 0xa3, 0];
+    frame.extend_from_slice(&id.to_le_bytes());
+
+    // The original sender knows the id, but only the current recipient may return it.
+    w.server.handle_frame(&mut w.a.conn, &frame).await.unwrap();
+    assert_eq!(
+        w.server.systems.economy.mail.get_mail_by_id(id).unwrap(),
+        original
+    );
+    assert_eq!(w.server.items.item_by_id(item).unwrap(), original_item);
+    assert!(w.a.drain().is_empty());
+    assert!(w.b.drain().is_empty());
+    assert_eq!(w.pb.data().unread_mail.received, 1);
+
+    w.server.handle_frame(&mut w.b.conn, &frame).await.unwrap();
+    let returned = w.server.systems.economy.mail.get_mail_by_id(id).unwrap();
+    assert_eq!(w.server.systems.economy.mail.count(), 1);
+    assert_eq!(returned.header.receiver_id, 1);
+    assert_eq!(returned.receiver_name, "Alice");
+    assert_eq!(returned.header.sender_id, 2);
+    assert_eq!(returned.header.sender_name, "Bob");
+    assert!(returned.header.returned && returned.is_delivered);
+    assert_eq!(returned.body.attachments, vec![item]);
+    assert_eq!(returned.body.copper_coins, 50);
+    assert_eq!(returned.body.text, original.body.text);
+    let returned_item = w.server.items.item_by_id(item).unwrap();
+    assert_eq!(returned_item.owner_id, 1);
+    assert_eq!(returned_item.slot_type, slot_type::MAIL);
+    assert_eq!(returned_item.template_id, original_item.template_id);
+    assert_eq!(w.pa.data().money, alice_money);
+    assert_eq!(w.pb.data().money, bob_money);
+    assert_eq!(w.pb.data().unread_mail.received, 0);
+    assert_eq!(w.pa.data().unread_mail.received, 1);
+    let replies = w.b.drain();
+    assert_eq!(
+        ops(&replies),
+        vec![sc::SCMailReturnedPacket, sc::SCCountUnreadMailPacket]
+    );
+    assert_eq!(&replies[0].1[..8], &id.to_le_bytes());
+    assert_eq!(w.a.drain_ops(), vec![sc::SCGotMailPacket]);
+
+    // Even the new recipient cannot return a letter that was already returned.
+    w.server.handle_frame(&mut w.a.conn, &frame).await.unwrap();
+    assert_eq!(
+        w.server.systems.economy.mail.get_mail_by_id(id).unwrap(),
+        returned
+    );
+    assert!(w.a.drain().is_empty());
+    assert!(w.b.drain().is_empty());
 }

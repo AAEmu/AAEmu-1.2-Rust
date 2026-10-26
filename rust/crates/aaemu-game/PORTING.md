@@ -168,6 +168,54 @@ Each subsystem records its status here, in its own section only (see `CONTRIBUTI
 | Movement hooks (`CSMoveUnit.RemoveEffects`, `Character.SetPosition` Move removal, fall damage) | `systems/skills/mod.rs` (`on_move_request`, `on_moved`) | done | Called from `world::session::move_unit`. |
 | `Skill.EndChanneling` target buff (`ChannelingTargetBuffId`) | `systems/skills/{skill,buffs}.rs` (`end_channeling`, `finish_effect_by_skill`) | deviation | **Deviation:** the C# `Buffs.RemoveEffect(templateId, skillId)` raised the buff's `OnTimeout` triggers on every removal; the Rust removal skips them for explicit removals (dispels, a stopped channel; see the FISH escape in `buff_removal_tests.rs`). Quest item grants hang on that trigger (GainItem on buff 3896 of skill 18449 'Extract Earth Crystal', 4 s channel under a 6 s buff, and the other channeling-target-buff quest skills of the item triage), so a channel that **runs to its end** now fires the target buff's Timeout triggers before removing it. A stopped / cancelled channel fires nothing (the C# granted the item then too). The caster-side `ChannelingBuffId` and buffs applied by skill effects (buff 1963 of 'Capture Crayfish') are unchanged: the latter expire on their own timer and fire Timeout already. |
 
+#### Raw attribute bounds and permanent pStats (2026-10-25)
+
+`systems::skills`: all 21 `unit_attribute_limits` overrides are loaded with native
+defaults of -2,000,000,000..2,000,000,000 (1.2 `39577A20`,
+`D:/aa-re/client12/decomp/x2game12.c:1178985`, `:1179175-1179181`). The consumer
+`398A0BC0` calls `395729F0` after formula, equipment and bonus arithmetic
+(`:1991333-1991338`, clamp at `:1169345-1169352`), before raw-unit conversions.
+The server preserves its existing bonus ordering and units and applies this final
+raw bound to character, NPC and vehicle calculations and direct UnitBase readers
+(XP and haste included). MoveSpeedMul starts at 1000, so its 3000 maximum means
+3x speed; ExpMul starts at 100 percentage points and has range 0..500. Limits are
+per-GameServer data shared by Arc with each unit, including detached refresh paths.
+As a numeric-safety policy, infinities saturate, NaN uses zero within the range,
+and NPC/vehicle integer bonus intermediates are widened before the final cap.
+This does not claim native parity for extreme overflow or non-finite inputs.
+
+The five `character_p_stat_limits` rows (0..10000) are loaded separately. Native
+`39752FC0` loads max/min (`:1647826-1647832`), and `3939DD10` checks proposed
+permanent pStat + delta (`:765713-765775`); they are **not final primary stat caps**.
+Character still lacks permanent pStat contribution state/persistence, and
+`world/unit_state.rs` emits six zero pStats. That feature remains open. Applying
+the table to final character attributes or to NPC/mate/slave primaries would
+invent a different rule. No storage, wire format or client/compact assets change.
+
+#### AoE diminishing compatibility policy (2026-10-25)
+
+`systems::skills`: `aoe_diminishings` loads authored float percentages by id (native 1.2
+`sub_39620E90`, `D:/aa-re/client12/decomp/x2game12.c:1321108`). Searing Rain 11939 / plot 1
+resets through plot-effect row 5680 (descriptor 2, event 246); next-event 288 repeats every
+500 ms. Next-event 3195 fans event 3 out per target at speed 20 to flagged event 2723 / Damage
+3172. Thus resetting on each child invocation would give every projectile the first rate.
+
+The chosen **server compatibility policy is provisional, not proven retail parity**: each plot
+instance keeps first-seen distinct-target ranks in existing execution order, shared across
+sibling damage events. Misses and immunity occupy ranks; repeat hits reuse their wave rank.
+Only flagged plot Damage effects participate. Reset clears only the calling plot's map.
+Targets beyond the last authored id use its final rate; storage is limited to N identities,
+where N is the last authored id (10 in 1.2). Rates apply after existing damage/modifier reductions to the
+integer result, then truncate with minimum 1 for landed damage, as the native 1.2 diagnostic
+`sub_39898330` describes (`x2game12.c:1984147-1984167`). Other damage, heals, buffs and CC retain
+their existing paths, and wire formats are unchanged.
+
+The native damage diagnostic (10.x `sub_39CECDB0`, parameter `+444`) is serialized debug data
+supplied by the world server; the available client/zone plot dispatcher executes visual
+effects, not the authoritative counter. Its producer is unavailable in these binaries.
+`plots::aoe_tests::aoe_policy_*` covers the compatibility policy through plot/combat flows;
+an authoritative native lifecycle experiment and live verification remain unperformed.
+
 #### Special effects added from data (2026-10-20)
 
 These `SpecialType` bodies were TODO stubs that only logged in the C# (`git show a2ab80abd^:AAEmu.Game/Models/Game/Skills/Effects/SpecialEffects/...`); the behaviour below is derived from the 1.2 data because value1..4 are 0.
@@ -230,6 +278,56 @@ connected by `systems::economy::wiring`).
 | `CashShopManager`, `Models/Game/CashShop/**`, ICS / premium packets | `systems/economy/cash_shop.rs` | done | Gifts by `CommercialMail` (`wiring`); account credits SQL behind `CashShopDb`. |
 | Item skill-effect bodies (grade enchant, socketing, conversion, cap scale, UCC imprint, ...), mate / slave equipment packets | `systems/economy/item_effects*.rs` | done | Called by the skills subsystem's effects. UCC imprint / cleanup require owned source and target items; client UCC casts require the actual source item's configured use skill, preserving the unrelated legacy bound-item portal exception. Dyeing checks the loaded `dyeable_items` allowlist. Invalid UCC / dye effects cancel deferred reagent consumption. |
 | Item skill-effect stubs given data-derived bodies (`GainItemWithPosImprint` 32, `RechargeItemBuff` 95, `ExpToItem` 96) | `systems/economy/item_effects.rs` | done (data-derived) | The C# `Execute` bodies were `// TODO` stubs, so the behaviour comes from `special_effects` 405 / 546 / 547 / 548 (32: create `value1` x1 with `SkillEffectGainItemWithPos`), 12446 / 17017 (95) and 12462 (96: `value1` XP -> `value2` x1 with `SkillEffectExpToItem`) plus the tool skills that cast them. `GainItemWithPosImprint` stores no position imprint: the 1.2 item details have no such field. `ExpToItem` subtracts the experience directly instead of through `AddExp` (which recomputes the level and could level the character down), sends `SCExpChangedPacket(-value1)`, checks bag room before spending the XP, and cancels so the reagent is kept. `RechargeItemBuff` takes the cast's item target, resets `charge_start_time` (and `charge_count` when the template has one) and re-applies the equipped item's gear buff through `apply_gear_buffs` with the item both removed and added, so the recharge buff is not stacked; the 1 s item timers read the new charge window on their next tick, so nothing is re-scheduled. |
+
+#### Cargo escrow and stale rack references (2026-10-25)
+
+Merchant-ship rack deposits now revalidate the exact equipped pack and a vacant
+rack in one economy transaction. Recovery validates System escrow and backpack
+space, moves the same item ID, and clears the rack reference together. A rejected
+pickup preserves the pack, the current backpack and recorded item effects.
+The shared path covers other hulls and ordinary racks; the real-data regression
+uses Merchant hull 75, item 23398 and its twenty attachment points 60..79.
+
+Error 14 (`INTERACTION_RECOVER_PARENT`) on this path means the referenced item is
+outside System escrow; it does not establish that another pack is physically on
+top. The separate persistent-child removal check uses error 207. Provably dangling
+persistent cargo references can return to the authored empty phase without moving
+or creating an item. Ambiguous references remain blocked with rack/item/container
+and hull diagnostics; current child allocation identity and parent/instance must
+match before a child can block repair or removal.
+
+Both live and saved-row cleanup receive the original doodad metadata. Original
+rack/cargo/Slave references never authorize deleting the current item at a recycled
+GUID. Ordinary furniture cleanup requires a unique singleton matching the original
+template and owner in that owner's System escrow. Items in inventory, equipment,
+bank or another owner's containers are retained. Saved container GUIDs alone never
+authorize container deletion. Saved-row removal checks its selected reference
+fields before invoking cleanup.
+
+This conservative policy protects unloaded rack aliases and recovered/recycled
+items. Metadata matching does not establish allocation generation. Cargo and
+ambiguous item references, plus saved containers, may be retained after the last
+rack disappears; reconciliation and orphan collection remain open. Regression
+sources cover shuffled twenty-rack cycles, stale sources, failed recovery,
+allocator reuse and private-MySQL saved aliases. At `198b7d482`, the official lane
+check, the game unit suite, the real-compact twenty-rack cycles and both private-MySQL
+cargo fixtures pass. A bounded headless live run with one fresh owner (80 positive rack
+operations over four passes, forty drops, twenty pickups) kept the twenty original
+item IDs through every cycle and ended with twenty System ground references and twenty
+empty saved racks; an independent cargo and SQL audit found no P1/P2 for that
+positive run. The same run's bag-full negative left items, racks and phases unchanged,
+and a hard close with reselect kept the same loaded hull registered with a single
+current root. In a second summon of the same item the skill executed (started, fired,
+ended); the subsequent loaded-hull replacement was refused with error 801
+(`SLAVE_EQUIPMENT_LOADED_ITEM`), the loaded hull, racks, cargo and phases were
+preserved and only the initial SCSlaveCreated appears in the captures. That shows
+loaded-hull preservation; unloaded replacement and completion of the 600-second
+timer were not exercised in this live run. This is observational evidence on the
+Rust-server path, not retail parity or global atomicity; the post-STOP SQL proves
+persisted state, not save order, and the process stop was forced, so the logs are not
+warning- or error-free. Independent cargo/SQL and control reviews support this
+bounded observation with that replacement-refusal qualification; wider audit items
+remain open.
 
 ### systems::social
 
@@ -319,6 +417,45 @@ Cross-subsystem: mates are despawned on dungeon entry and `PlayerCanEnter` check
 | `BaseUnit.GetDistanceTo` for shipyard targets (skill range check, `Skill.cs` `max_range`) | `systems/skills/geometry.rs` (`distance_to`), `systems/vehicles/shipyards.rs` (`shipyard_radius`) | deviation | **Deviation:** the C# measured skill range to the shipyard's center point (shipyard models are prefab models without an actor radius, so `ModelSize` was 0), which made the shipyard build skills (`min_range 0`, `max_range 4`) unusable anywhere but the exact center of a drydock ("Target is too far"). The Rust subtracts the shipyard template's `build_radius * Scale`, like the house `GardenRadius` rule. |
 | Mate / slave / transfer / shipyard C2G and G2C packets | `systems/vehicles/packets.rs` | done | 18 C->S, 16 S->C (byte-exact tests). `CSChangeSlaveTargetPacket` has no 1.2 opcode (0xfff). |
 | Hooks / physics | `systems/vehicles/{hooks,ship_physics}.rs` | done | `VehicleItemHooks` (`EndCraft`, economy). Ship physics and water call `systems::ai::physics` directly (`AddShip` / `RemoveShip`, helm request, driver seat, `GetWaterSurface` / `IsWater`); `ShipPhysicsHooks` (harpoon lines / tension / lifetime, `Throttle` / `Steering` after a move) and the radar ship lists are installed here. The npcs / social hooks call the mate / slave / dismount functions directly. |
+#### Summon replacement and retained cargo (2026-10-25)
+
+Player summons use root-only owner lookup across worlds and serialize requests by
+owner and persistent summon item. Session/departure generations and allocation
+identity are checked again after loading. Saved hull, child and doodad rows load
+before replacement; query failures, item-update failures, loaded-hull removal
+refusal and invalid explicit placement stop without replacing the prior hull.
+Invalid placement now refuses rather than falling back to another position.
+
+The final synchronous publication boundary coordinates ordinary item operations,
+direct despawn and current-session identity. Loaded cargo receipts are checked
+against the exact live hull/rack allocation and unique matching System escrow
+before metadata changes or deletion. This rejects a stale loaded row fetched
+before its original pack was recovered. Different inactive saved hulls can still
+restore legitimate cargo belonging to another player. The existing 600-second
+offline retention and delayed portal rendering remain intentional.
+
+The per-server item outer scope is thread-bound and reentrant; the inner economy
+ops mutex remains nonreentrant. Callback-bearing paths acquire the outer scope
+before existing auction/housing/spawn locks; callbacks retain their normal
+placement outside ops/object guards. No synchronous guard spans an await.
+Guardless quest item operations and direct writes bypassing coordinated APIs
+remain explicit limits, rather than a claim of global lock freedom.
+
+The read-only `/slave audit` command reports registered and retained allocations,
+pending task leases, item identities and rack observations with bounded replies.
+It explicitly returns `consistent:false` and `authority_consistent:false`: queue,
+HP, world-removal and temporal phase/transform observations do not share a global
+snapshot boundary. Normalized, filtered headless control captures supplement these
+observations; they do not establish native UI behavior or original compressed wire
+bytes. Deterministic flow tests cover the concurrency cases separately. The
+combined source has passed independent reviews and all-target compilation;
+all 57 Testclient library and 16 control/config tests pass at `96a67a5a7`.
+These include literal native decoding, filtered compressed batches, real loopback
+socket closure and timeout completion. Synchronous checks reject expired output,
+command and global budgets before polling gameplay: an already-expired Tokio
+timer alone can initially return Pending. Final combined Game tests, lane CI and
+live acceptance remain pending.
+
 ### systems::services
 
 | Area (C#) | Rust | Status | Notes |
@@ -903,6 +1040,14 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `CSBuySpecialtyItemPacket`, `CSReturnMailPacket` have no 1.2 opcode (0xfff): decoders exist, the
   1.2 client never sends them. The specialty / trade-pack mail delay use the C# defaults (no
   `Specialty` config section yet).
+* systems::economy (native 1.2 protocol, 2026-10-25): correction to the preceding ReturnMail
+  claim: the Return button (`read_mail.lua:946`) calls `ReturnMailById` (`3948B630` ->
+  `393CD290`), which sends opcode `0xa3` with an i64 mail id (`397BA450`). The preserved
+  opcode table misnames that slot `CSReportSpamPacket`; economy now registers ReturnMail
+  using that legacy constant, and social no longer claims it. The historical C# registry
+  fixture stays intact with an explicit native correction in its comparison test. Native
+  `SCLootItemFailedPacket` reader `397C2F00` consumes `ErrorMessage:i16`, an eight-byte
+  lootable and `type:u32` (14 bytes); the C# int error width is no longer mirrored.
 * systems::economy: the localized item names are loaded by four modules (items search, auction,
   mail, cash shop); a later cleanup can share one cache.
 * systems::services: authenticated `CSRequestCharBriefPacket` and `CSCharDetailPacket` requests
@@ -1218,6 +1363,12 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `CreatedAt` of characters created in the running session is written without the `Z` of a
   `DateTimeKind.Utc` value. The auction controllers serialise the lot's `Item` with its stored fields only
   (Id, TemplateId, Count, Grade, OwnerId, SlotType, Slot).
+* systems::services (WebApi security, 2026-10-25): unlike C#, the HTTP listener defaults to
+  loopback and rejects non-loopback binds without a configured `WebApiNetwork.ApiKey`.
+  Every route except read-only `GET /status` requires a Bearer credential, compared using
+  `subtle::ConstantTimeEq`; an absent or empty key grants no administrative access, including
+  on localhost. `Enabled: false` disables the listener. Keys and bind settings are snapshotted
+  at listener start; changes require restart. Existing tools must add the Authorization header.
 * systems::services: `TaskManager.GetQueueCount` (WebApi `/status`) only counts the tasks of
   this queue; the other subsystems run their timers as Tokio tasks.
 * systems::services: `TimedRewardsManager.DoTick` skips connections without an account (C#

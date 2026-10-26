@@ -33,9 +33,16 @@ use crate::systems::HookSlot;
 use crate::world::{DoodadRef, PlayerRef, WorldObject};
 
 use super::craft_data::Craft;
+#[cfg(test)]
+#[path = "craft_publication_tests.rs"]
+mod publication_tests;
 use super::error_message;
 use super::inventory::{self, Inv, ItemTxn, Out};
 use super::item_handlers::{active, sync_client_packet};
+
+#[cfg(test)]
+#[path = "bench_tests.rs"]
+mod bench_tests;
 
 /// `DoodadFuncPermission`.
 pub mod doodad_func_permission {
@@ -49,7 +56,8 @@ pub mod doodad_func_permission {
     pub const ZONE_RESIDENTS: u8 = 8;
 }
 
-/// What crafting needs from other subsystems. Every method has a "not ported yet" default.
+/// What crafting needs from other subsystems. Station authorization defaults to the loaded
+/// NPC/craft data; the skill, housing bonus and quest hooks are installed at startup.
 pub trait CraftHooks: Send + Sync {
     /// skills: `new Skill(SkillManager.GetSkillTemplate(skillId)) { CastTimeMultiplier }
     /// .Use(owner, SkillCasterUnit(owner.ObjId), SkillCastDoodadTarget(doodadObjId), null,
@@ -73,9 +81,15 @@ pub trait CraftHooks: Send + Sync {
     /// Owner.InterruptSkills();`.
     fn cancel_craft_skill(&self, _server: &GameServer, _player: &PlayerRef) {}
 
-    /// npcs: `Doodad.FuncPermission` (`PermId` of the first current func, `Any` without one).
-    fn doodad_func_permission(&self, _server: &GameServer, _doodad: &DoodadRef) -> u8 {
-        doodad_func_permission::ANY
+    /// npcs: permission of the current crafting function whose authored list contains the
+    /// recipe. Missing membership denies access, including at the canonical req_doodad_id.
+    fn doodad_craft_permission(
+        &self,
+        server: &GameServer,
+        doodad: &DoodadRef,
+        craft_id: u32,
+    ) -> Option<u8> {
+        crate::systems::npcs::bridges::doodad_craft_permission(server, doodad, craft_id)
     }
 
     /// housing: `HousingManager.GetByAccountId(accountId)` -> the `Transform.ZoneId` of every
@@ -221,65 +235,129 @@ pub fn zone_group_id(server: &GameServer, zone_key: u32) -> u32 {
         .map_or(0, |z| z.group_id)
 }
 
-/// A direct crafting packet must obey the same house access rules as interacting with
-/// its furniture. Portable crafts and public world stations keep their normal skill checks.
-fn housing_bench_access(
+/// Authorize the recipe against the live station at both cast start and product commit.
+fn bench_access(
     server: &GameServer,
     player: &PlayerRef,
     doodad_id: u32,
-    skill_id: u32,
+    craft: &Craft,
+    hooks: &dyn CraftHooks,
 ) -> bool {
-    match housing_bench_denial(server, player, doodad_id, skill_id) {
+    match bench_denial(server, player, doodad_id, craft, hooks) {
         None => true,
         Some(reason) => {
             tracing::warn!(
-                "{} may not craft at doodad {doodad_id} (skill {skill_id}): {reason}",
-                player.data().unit.name
+                craft_id = craft.id,
+                skill_id = craft.skill_id,
+                "{} may not craft at doodad {doodad_id}: {reason}",
+                player.data().unit.name,
             );
             false
         }
     }
 }
 
-/// Why [`housing_bench_access`] refuses (`None` = allowed).
-fn housing_bench_denial(
+/// Why [`bench_access`] refuses (`None` = allowed).
+fn bench_denial(
     server: &GameServer,
     player: &PlayerRef,
     doodad_id: u32,
-    skill_id: u32,
+    craft: &Craft,
+    hooks: &dyn CraftHooks,
 ) -> Option<&'static str> {
-    // Not a doodad (portable craft, id 0): allowed.
-    let doodad = server
+    // Portable skills can name no target or the crafter. Neither form may bypass a
+    // station recipe's requirements; every other nonzero target must be a real bench.
+    if doodad_id == 0 || doodad_id == player.obj_id {
+        return (craft.req_doodad_id != 0 || craft.is_pack)
+            .then_some("the recipe requires a crafting station");
+    }
+    let Some(doodad) = server
         .world
         .object(doodad_id)
-        .and_then(|o| o.as_doodad().cloned())?;
-    let (owner_type, house_id, instance_id, deleted) = {
+        .and_then(|o| o.as_doodad().cloned())
+    else {
+        return Some("the crafting station does not exist");
+    };
+    let (owner_type, house_id, owner_id, instance_id, deleted) = {
         let d = doodad.data();
         (
             d.owner_type,
             d.owner_db_id,
+            d.owner_id,
             d.transform.instance_id,
             d.phase.deleted,
         )
     };
-    if owner_type != crate::models::doodad::doodad_owner_type::HOUSING {
-        return None;
-    }
-    let Some(house) = crate::systems::housing::house_by_id(server, house_id) else {
-        return Some("the bench's house does not exist");
-    };
     if deleted {
         return Some("the bench is deleted");
     }
-    if player.data().unit.transform.instance_id != instance_id
-        || house.data().unit.transform.instance_id != instance_id
-    {
-        return Some("player, bench and house are in different instances");
+    if player.data().unit.transform.instance_id != instance_id {
+        return Some("player and bench are in different instances");
     }
-    if !crate::systems::housing::allowed_to_interact(server, &house, player) {
-        return Some("the house does not allow the player to interact");
+    let Some(perm) = hooks.doodad_craft_permission(server, &doodad, craft.id) else {
+        return Some("the current crafting function does not offer this recipe");
+    };
+    use crate::models::doodad::doodad_owner_type as owner;
+    let house = if owner_type == owner::HOUSING {
+        let Some(house) = crate::systems::housing::house_by_id(server, house_id) else {
+            return Some("the bench's house does not exist");
+        };
+        if house.data().unit.transform.instance_id != instance_id {
+            return Some("bench and house are in different instances");
+        }
+        // CraftPack Any explicitly opens the recipe to visitors (including the eight tax
+        // plaques). Other functions retain the house's access rules.
+        if perm != doodad_func_permission::ANY
+            && !crate::systems::housing::allowed_to_interact(server, &house, player)
+        {
+            let h = house.data();
+            tracing::warn!(
+                house_id,
+                house_owner = h.unit.owner_id,
+                house_permission = h.permission,
+                craft_id = craft.id,
+                "Craft bench house access denied"
+            );
+            return Some("the house does not allow the player to interact");
+        }
+        Some(house)
+    } else {
+        None
+    };
+    use doodad_func_permission as p;
+    match perm {
+        p::ANY | p::PERMISSION1 | p::PERMISSION2 | p::PERMISSION4 | p::OWNER_RAID_MEMBERS => {}
+        p::OWNER_ONLY => {
+            let owner_id = house.as_ref().map_or(owner_id, |h| h.data().unit.owner_id);
+            if owner_id == 0 || player.character_id != owner_id {
+                return Some("the crafting function requires its owner");
+            }
+        }
+        p::SAME_ACCOUNT => {
+            let account = house.as_ref().map(|h| h.data().account_id).or_else(|| {
+                (owner_type == owner::CHARACTER)
+                    .then(|| server.names.get_character_account(owner_id))
+            });
+            if account.is_none_or(|a| a == 0 || a != player.data().account_id) {
+                return Some("the crafting function requires the owner's account");
+            }
+        }
+        p::ZONE_RESIDENTS => {
+            let zone_group = zone_group_id(server, doodad.data().transform.zone_id);
+            let account = player.data().account_id;
+            if !hooks
+                .account_house_zone_ids(server, account)
+                .into_iter()
+                .any(|zone| zone_group_id(server, zone) == zone_group)
+            {
+                return Some("the crafting function requires a zone resident");
+            }
+        }
+        _ => return Some("the crafting function has an unknown permission"),
     }
-    let template = server.game_data.systems.skills.skill(skill_id)?;
+    let Some(template) = server.game_data.systems.skills.skill(craft.skill_id) else {
+        return Some("the craft skill does not exist");
+    };
     if template.max_range <= 0 {
         return None;
     }
@@ -368,99 +446,11 @@ pub fn craft(server: &GameServer, player: &PlayerRef, craft_id: u32, count: i32,
         return;
     }
 
-    // Check if we have permission to actually use the doodad (mostly sanity check since the
-    // client already checks this before you can craft)
-    let mut has_permission = true;
-    if !housing_bench_access(server, player, doodad_id, craft.skill_id) {
-        error2(
-            &mut out,
-            player,
-            error_message::CRAFT_CANT_ACT_ANY_MORE,
-            error_message::CRAFT_PERMISSION_DENY,
-            0,
-            false,
-        );
-        cancel_craft(server, player);
+    if !bench_access(server, player, doodad_id, craft, hooks.as_ref()) {
+        abort_craft_with(server, player, error_message::CRAFT_PERMISSION_DENY);
         return;
     }
     let world = server.world.world_of(&WorldObject::from(player));
-    let doodad = world.as_ref().and_then(|w| w.doodad(doodad_id));
-    if let Some(doodad) = &doodad {
-        let perm = hooks.doodad_func_permission(server, doodad);
-        if perm != doodad_func_permission::ANY {
-            use doodad_func_permission as p;
-            match perm {
-                p::ANY
-                | p::PERMISSION1
-                | p::PERMISSION2
-                | p::OWNER_ONLY
-                | p::PERMISSION4
-                | p::OWNER_RAID_MEMBERS => {}
-                p::SAME_ACCOUNT => {
-                    let (owner_type, owner_id) = {
-                        let d = doodad.data();
-                        (d.owner_type, d.owner_id)
-                    };
-                    if owner_type == crate::models::doodad::doodad_owner_type::CHARACTER {
-                        let my_account = player.data().account_id;
-                        has_permission = match server.world.character_by_id(owner_id) {
-                            Some(o) => o.data().account_id == my_account,
-                            None => {
-                                // C#: GetCharacterById(...).AccountId -> NullReferenceException
-                                // (the client stayed locked). Deviation: no permission.
-                                tracing::error!(
-                                    "Craft: doodad owner {owner_id} is not online (C# throws)"
-                                );
-                                false
-                            }
-                        };
-                    }
-                }
-                p::ZONE_RESIDENTS => {
-                    has_permission = false;
-                    let zone_group = zone_group_id(server, doodad.data().transform.zone_id);
-                    let account = player.data().account_id;
-                    for house_zone in hooks.account_house_zone_ids(server, account) {
-                        if zone_group_id(server, house_zone) == zone_group {
-                            has_permission = true;
-                            break;
-                        }
-                    }
-                }
-                _ => {
-                    // C#: throw new ArgumentOutOfRangeException (the client stayed locked).
-                    // Deviation: no permission.
-                    tracing::error!("Craft: unknown DoodadFuncPermission {perm}");
-                    has_permission = false;
-                }
-            }
-            let (template_id, obj_id) = (doodad.data().template_id, doodad.obj_id);
-            send_debug_message(
-                server,
-                &mut out,
-                player,
-                &format!(
-                    "Crafting using @DOODAD_NAME({template_id}) - {template_id} (objId: {obj_id}) with current permission {} = {}",
-                    permission_name(perm),
-                    if has_permission { "True" } else { "False" }
-                ),
-            );
-        }
-    }
-
-    if !has_permission {
-        // TODO not verified
-        error2(
-            &mut out,
-            player,
-            error_message::CRAFT_CANT_ACT_ANY_MORE,
-            error_message::CRAFT_PERMISSION_DENY,
-            0,
-            false,
-        );
-        cancel_craft(server, player);
-        return;
-    }
 
     mgr.update(char_id, |s| s.is_crafting = true);
 
@@ -628,21 +618,6 @@ pub fn cast_failed(server: &GameServer, player: &PlayerRef, skill_id: u32, resul
     }
 }
 
-fn permission_name(perm: u8) -> &'static str {
-    use doodad_func_permission as p;
-    match perm {
-        p::ANY => "Any",
-        p::PERMISSION1 => "Permission1",
-        p::PERMISSION2 => "Permission2",
-        p::OWNER_ONLY => "OwnerOnly",
-        p::PERMISSION4 => "Permission4",
-        p::OWNER_RAID_MEMBERS => "OwnerRaidMembers",
-        p::SAME_ACCOUNT => "SameAccount",
-        p::ZONE_RESIDENTS => "ZoneResidents",
-        _ => "?",
-    }
-}
-
 /// `CharacterCraft.EndCraft()` (called by the skills subsystem when the craft skill's
 /// `CraftEffect` applies).
 pub fn end_craft(server: &GameServer, player: &PlayerRef) {
@@ -684,7 +659,8 @@ pub fn end_craft(server: &GameServer, player: &PlayerRef) {
     }
 
     // Keep the permission check and product/material commit together with house transfers
-    // and permission changes. Economy transactions are acquired after this housing lock.
+    // and permission changes. Enter the item scope before housing; ItemTxn follows it.
+    let _items = server.systems.economy.operation_scope();
     let housing_bench = server
         .world
         .object(state.doodad_id)
@@ -698,7 +674,7 @@ pub fn end_craft(server: &GameServer, player: &PlayerRef) {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
     });
-    if !housing_bench_access(server, player, state.doodad_id, craft.skill_id) {
+    if !bench_access(server, player, state.doodad_id, craft, mgr.hooks().as_ref()) {
         drop(operation);
         error2(
             &mut Out::Direct,

@@ -10,6 +10,7 @@ use aaemu_commons::{Marshal, PacketStream};
 use crate::data::formulas::FormulaKind;
 use crate::models::char_data::{ability, Skill};
 use crate::models::character::Character;
+use crate::models::unit::UnitAttribute;
 use crate::net::packet::LEVEL_PLAIN;
 use crate::opcodes::sc;
 use crate::packets::packet_def;
@@ -122,7 +123,7 @@ fn actability_exp_multiplier(_step: u8) -> f32 {
 /// character's lock is released.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExpGain {
-    /// The applied delta (after `ExpRate`).
+    /// The applied delta (after `ExpRate` and the caster's XP bonuses).
     pub exp: i32,
     pub should_add_ability_exp: bool,
     /// The new level when the character leveled up.
@@ -137,14 +138,29 @@ pub fn add_exp_locked(
     mut exp_delta: i32,
     add_ability_exp: bool,
 ) -> Option<ExpGain> {
+    c.unit
+        .bonuses
+        .bind_attribute_limits(&server.game_data.characters.unit_attribute_limits);
     if exp_delta == 0 {
         return None;
     }
     if exp_delta > 0 {
-        exp_delta = (f64::from(exp_delta) * server.config.world.exp_rate) as i32;
+        // Native 1.2 sub_398A0D60: ExpMul (95) starts at 100, unlike damage/haste's
+        // per-mille attributes. Apply Bonuses to that base so Percent rows work too.
+        let multiplier = c
+            .unit
+            .calculate_with_bonuses(100.0, UnitAttribute::ExpMul, now_ms());
+        let gain =
+            f64::from(exp_delta) * server.config.world.exp_rate.max(0.0) * multiplier.max(0.0)
+                / 100.0;
+        exp_delta = gain.max(0.0).min(f64::from(i32::MAX)) as i32;
     }
     let exp_table = &server.game_data.experience;
-    let mut new_exp = c.experience.wrapping_add(exp_delta);
+    let mut new_exp = if exp_delta > 0 {
+        c.experience.saturating_add(exp_delta)
+    } else {
+        c.experience.wrapping_add(exp_delta)
+    };
     let (new_level, overflow) = match exp_table.level_from_exp(new_exp, c.unit.level, false) {
         Ok(v) => v,
         Err(e) => {
@@ -167,7 +183,11 @@ pub fn add_exp_locked(
                 continue;
             }
             if let Some(ab) = c.abilities.get_mut(a) {
-                ab.exp = (ab.exp + exp_delta).min(max_exp);
+                ab.exp = if exp_delta > 0 {
+                    ab.exp.saturating_add(exp_delta).min(max_exp)
+                } else {
+                    (ab.exp + exp_delta).min(max_exp)
+                };
             }
         }
     }
