@@ -143,7 +143,8 @@ async fn expired_source_item_doodad_contends_with_craft_quest_npc_spawn() {
     let client = TestClient::new(&server, 1, 1001);
     let mut character = test_character(1, "Crafter", 100.0, 100.0);
     character.inventory = Inventory::new(1, 50, 50, &server.items, &server.ids.container);
-    let player = spawn_player(&server, &client, character, 0x100);
+    let player_obj_id = server.ids.object.get_next_id().unwrap();
+    let player = spawn_player(&server, &client, character, player_obj_id);
     let world = server.world.world(0).unwrap();
     let manager = server.systems.npcs.spawns.get_or_create(&world);
     let mut base = SpawnerBase {
@@ -195,6 +196,10 @@ async fn expired_source_item_doodad_contends_with_craft_quest_npc_spawn() {
     doodad.item_template_id = SOURCE;
     let doodad = Entity::new(server.ids.object.get_next_id().unwrap(), doodad);
     world.spawn(&doodad, &server.view_ctx());
+    assert_ne!(doodad.obj_id, player.obj_id);
+    assert!(world
+        .doodad(doodad.obj_id)
+        .is_some_and(|live| Arc::ptr_eq(&live, &doodad)));
     manager.add_player_doodad(doodad.clone());
     manager.add_despawn(
         &server,
@@ -246,7 +251,16 @@ async fn expired_source_item_doodad_contends_with_craft_quest_npc_spawn() {
     assert_eq!(npcs.len(), 1);
     assert_eq!(npcs[0].data().unit.template_id, 500);
     assert!(world.doodad(doodad.obj_id).is_none());
+    assert!(world.object(doodad.obj_id).is_none());
     assert!(doodad.data().phase.deleted);
+    assert!(!manager
+        .get_all_player_doodads()
+        .iter()
+        .any(|live| Arc::ptr_eq(live, &doodad)));
+    assert!(!manager.has_pending_timers(doodad.obj_id));
+    assert!(world
+        .object(player.obj_id)
+        .is_some_and(|live| live.same(&WorldObject::from(&player))));
     assert!(server.items.item_by_id(source_id).is_none());
     assert!(server.items.removed_items().contains(&source_id));
 }
