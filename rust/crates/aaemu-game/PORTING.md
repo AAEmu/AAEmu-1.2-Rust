@@ -309,10 +309,25 @@ items. Metadata matching does not establish allocation generation. Cargo and
 ambiguous item references, plus saved containers, may be retained after the last
 rack disappears; reconciliation and orphan collection remain open. Regression
 sources cover shuffled twenty-rack cycles, stale sources, failed recovery,
-allocator reuse and private-MySQL saved aliases. At `7ac9af6eb`, the game unit suite,
-real-compact twenty-rack cycles and both private-MySQL cargo fixtures pass. Local
-combined-source CI and live reconnect acceptance remain pending; the asynchronous
-hull identity repair requires separate review and validation.
+allocator reuse and private-MySQL saved aliases. At `198b7d482`, the official lane
+check, the game unit suite, the real-compact twenty-rack cycles and both private-MySQL
+cargo fixtures pass. A bounded headless live run with one fresh owner (80 positive rack
+operations over four passes, forty drops, twenty pickups) kept the twenty original
+item IDs through every cycle and ended with twenty System ground references and twenty
+empty saved racks; an independent cargo and SQL audit found no P1/P2 for that
+positive run. The same run's bag-full negative left items, racks and phases unchanged,
+and a hard close with reselect kept the same loaded hull registered with a single
+current root. In a second summon of the same item the skill executed (started, fired,
+ended); the subsequent loaded-hull replacement was refused with error 801
+(`SLAVE_EQUIPMENT_LOADED_ITEM`), the loaded hull, racks, cargo and phases were
+preserved and only the initial SCSlaveCreated appears in the captures. That shows
+loaded-hull preservation; unloaded replacement and completion of the 600-second
+timer were not exercised in this live run. This is observational evidence on the
+Rust-server path, not retail parity or global atomicity; the post-STOP SQL proves
+persisted state, not save order, and the process stop was forced, so the logs are not
+warning- or error-free. Independent cargo/SQL and control reviews support this
+bounded observation with that replacement-refusal qualification; wider audit items
+remain open.
 
 ### systems::social
 
