@@ -2442,7 +2442,8 @@ mod control_session_tests {
             .unwrap();
         assert!(sent > 1);
         assert_eq!(acks, [cs::CSTeleportEndedPacket, cs::CSMoveUnitPacket]);
-        assert_eq!(game.state.observed_self_pos, Some((10.0, 20.0, 30.0)));
+        // Assert the server's decoded position, including native Z quantization.
+        assert_eq!(game.state.observed_self_pos, Some((10.0, 20.0, 29.9995)));
         game.disconnect_hard().await;
     }
 

@@ -1596,7 +1596,8 @@ mod observed_position_tests {
                 body: body.as_bytes().to_vec(),
             })
             .unwrap();
-        assert_eq!(state.observed_self_pos, Some((10.0, 20.0, 30.0)));
+        // The native position codec quantizes the authored Z=30 to 29.9995.
+        assert_eq!(state.observed_self_pos, Some((10.0, 20.0, 29.9995)));
         assert_eq!(state.self_pos, (900.0, 900.0, 900.0));
         assert_eq!(state.observation_seq, 1);
     }
