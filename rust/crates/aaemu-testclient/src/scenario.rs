@@ -2384,6 +2384,8 @@ mod control_session_tests {
 
     #[tokio::test]
     async fn teleport_completes_under_continuous_ambient_traffic() {
+        use crate::record::{Channel, Dir};
+
         let (io, peer) = tokio::io::duplex(64 * 1024);
         let rec = Recorder::new(true);
         let mut game = GameClient::from_io(io, rec.clone());
@@ -2405,26 +2407,42 @@ mod control_session_tests {
             peer.send(frame(sc::SCTeleportUnitPacket, teleport.as_bytes()))
                 .await
                 .unwrap();
-            let mut ambient = tokio::time::interval(Duration::from_millis(1));
+            let ambient = frame(sc::SCErrorMsgPacket, &[7, 0]);
             let mut sent = 0;
+            // Guarantee traffic after the teleport without depending on timer resolution.
+            for _ in 0..2 {
+                peer.send(ambient.clone()).await.unwrap();
+                sent += 1;
+            }
+            let (mut writer, mut reader) = peer.split();
             let mut acks = Vec::new();
             let mut stop_requested = false;
-            loop {
-                if stop_requested && acks.len() == 2 {
-                    return (sent, acks);
-                }
-                tokio::select! {
-                    _ = &mut stopped, if !stop_requested => stop_requested=true,
-                    _ = ambient.tick() => {
-                        peer.send(frame(sc::SCErrorMsgPacket, &[7,0])).await.unwrap();
+            {
+                // Keep a pending send alive across ACKs; backpressure must not block reads/stop.
+                let sending = async {
+                    loop {
+                        writer.send(ambient.clone()).await.unwrap();
                         sent += 1;
-                    },
-                    incoming = peer.next() => {
-                        let bytes = incoming.unwrap().unwrap();
-                        acks.push(u16::from_le_bytes([bytes[4], bytes[5]]));
-                    },
+                        tokio::task::yield_now().await;
+                    }
+                };
+                tokio::pin!(sending);
+                loop {
+                    if stop_requested && acks.len() == 2 {
+                        break;
+                    }
+                    tokio::select! {
+                        biased;
+                        _ = &mut stopped, if !stop_requested => stop_requested = true,
+                        incoming = reader.next() => {
+                            let bytes = incoming.unwrap().unwrap();
+                            acks.push(u16::from_le_bytes([bytes[4], bytes[5]]));
+                        },
+                        _ = &mut sending => unreachable!("ambient sender runs until stopped"),
+                    }
                 }
             }
+            (sent, acks)
         });
         let until = tokio::time::Instant::now() + Duration::from_secs(5);
         tokio::time::timeout(
@@ -2434,6 +2452,22 @@ mod control_session_tests {
         .await
         .unwrap()
         .unwrap();
+        assert!(
+            rec.events()
+                .iter()
+                .filter(|event| {
+                    event.channel == Channel::Game
+                        && event.dir == Dir::S2C
+                        && event.level == crate::game::LEVEL_GAME
+                })
+                .skip_while(|event| event.opcode != sc::SCTeleportUnitPacket)
+                .skip(1)
+                .filter(|event| {
+                    event.opcode == sc::SCErrorMsgPacket && event.body_bytes() == [7, 0]
+                })
+                .count()
+                >= 2
+        );
         // The fixture keeps draining acknowledgments after this stop signal.
         let _ = stop.send(());
         let (sent, acks) = tokio::time::timeout(Duration::from_secs(1), peer)
