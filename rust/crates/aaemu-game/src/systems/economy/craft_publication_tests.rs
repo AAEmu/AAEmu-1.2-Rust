@@ -221,10 +221,11 @@ async fn expired_source_item_doodad_contends_with_craft_quest_npc_spawn() {
     let (craft_done, craft_result) = mpsc::channel();
     let runtime = tokio::runtime::Handle::current();
     let (tick_server, tick_runtime) = (server.clone(), runtime.clone());
+    let tick_manager = manager.clone();
     let tick = std::thread::spawn(move || {
         let _runtime = tick_runtime.enter();
         ready.recv_timeout(Duration::from_secs(5)).unwrap();
-        manager.check_respawns_tick(&tick_server);
+        tick_manager.check_respawns_tick(&tick_server);
         tick_done.send(()).unwrap();
     });
     let (craft_server, crafter) = (server.clone(), player.clone());
