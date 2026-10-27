@@ -310,7 +310,9 @@ async fn unauthorized_internal_tokens_are_rejected_over_sockets() {
         .await;
 
         // A subsequent valid registration is a processing barrier on this same socket.
-        // It must not retroactively legitimize a token sent before authentication.
+        // It must not retroactively legitimize a token sent before authentication. A peer
+        // that already sent a wrong secret is poisoned instead: the correct registration
+        // must not run, and the delayed error reply is the last packet on the connection.
         send(
             &mut gs,
             &GlRegisterGameServer {
@@ -320,13 +322,23 @@ async fn unauthorized_internal_tokens_are_rejected_over_sockets() {
             },
         )
         .await;
+        let expected = if secret.is_some() {
+            aaemu_login::models::GsRegisterResult::Error
+        } else {
+            aaemu_login::models::GsRegisterResult::Success
+        };
         let mut token_acknowledged = false;
         loop {
-            let (op, mut body) = recv(&mut gs).await;
+            let frame = tokio::time::timeout(Duration::from_secs(8), gs.next())
+                .await
+                .expect("timely registration result")
+                .expect("open")
+                .expect("ok");
+            let (op, mut body) = split_opcode(frame).unwrap();
             if op == l2g::opcodes::LG_REGISTER_GAME_SERVER {
                 assert_eq!(
                     LgRegisterGameServer::read(&mut body).unwrap().result,
-                    aaemu_login::models::GsRegisterResult::Success
+                    expected
                 );
                 break;
             }
@@ -482,5 +494,56 @@ async fn wrong_secret_is_refused_and_the_connection_is_closed() {
         matches!(closed, Ok(None) | Ok(Some(Err(_)))),
         "wrong-secret connection stayed open: {closed:?}"
     );
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn wrong_secret_poisons_the_connection_before_a_correct_registration() {
+    let (_server, internal_addr, _login_addr, shutdown) = start_server().await;
+    let mut rogue = Framed::new(TcpStream::connect(internal_addr).await.unwrap(), FrameCodec);
+    send(
+        &mut rogue,
+        &GlRegisterGameServer {
+            secret_key: "tesx".into(),
+            gs_id: GameServerId(1),
+            mirrors: vec![],
+        },
+    )
+    .await;
+    // The correct secret on the same connection, still inside the five-second reply window.
+    send(
+        &mut rogue,
+        &GlRegisterGameServer {
+            secret_key: "test".into(),
+            gs_id: GameServerId(1),
+            mirrors: vec![],
+        },
+    )
+    .await;
+
+    // Only the delayed Error reply may arrive; the correct registration must never run.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let mut errors = 0;
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let frame = tokio::time::timeout(left, rogue.next()).await;
+        match frame {
+            Ok(Some(Ok(frame))) => {
+                let (op, mut body) = split_opcode(frame).unwrap();
+                if op == l2g::opcodes::LG_REGISTER_GAME_SERVER {
+                    let result = LgRegisterGameServer::read(&mut body).unwrap().result;
+                    assert_ne!(
+                        result,
+                        aaemu_login::models::GsRegisterResult::Success,
+                        "a connection that sent a wrong secret registered"
+                    );
+                    errors += 1;
+                }
+            }
+            Ok(Some(Err(_))) | Ok(None) => break,
+            Err(_) => panic!("no error reply and close within the deadline"),
+        }
+    }
+    assert_eq!(errors, 1, "expected exactly one registration error reply");
     shutdown.cancel();
 }

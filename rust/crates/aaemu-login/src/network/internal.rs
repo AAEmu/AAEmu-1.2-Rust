@@ -33,6 +33,9 @@ pub struct InternalConnection {
     game_server: Mutex<Option<GameServerId>>,
     /// Never set by the C# code; kept for parity.
     pub block: AtomicBool,
+    /// Set by a failed registration: no further packet is handled, only the delayed error
+    /// reply is sent, then the connection closes.
+    poisoned: AtomicBool,
     closed: CancellationToken,
 }
 
@@ -44,8 +47,18 @@ impl InternalConnection {
             tx,
             game_server: Mutex::new(None),
             block: AtomicBool::new(false),
+            poisoned: AtomicBool::new(false),
             closed: CancellationToken::new(),
         }
+    }
+
+    /// Rejects every later packet on this connection (a wrong registration secret poisons it).
+    pub fn poison(&self) {
+        self.poisoned.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Relaxed)
     }
 
     pub fn game_server(&self) -> Option<GameServerId> {

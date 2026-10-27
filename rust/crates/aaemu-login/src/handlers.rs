@@ -100,6 +100,15 @@ pub async fn handle_g2l(
     conn: &Arc<InternalConnection>,
     packet: G2lPacket,
 ) -> anyhow::Result<()> {
+    // A connection that sent a wrong secret stays refused until its delayed error reply and
+    // close, so a correct secret in that window cannot register it.
+    if conn.is_poisoned() {
+        tracing::warn!(
+            "Connection {}: packet after a failed registration, ignored",
+            conn.ip
+        );
+        return Ok(());
+    }
     match packet {
         G2lPacket::GameServerLoad(p) => {
             let gs_id = authorize_game_server(server, conn, None)?;
@@ -122,6 +131,7 @@ pub async fn handle_g2l(
         G2lPacket::RegisterGameServer(p) => {
             if !secret_matches(&p.secret_key, &server.config.secret_key) {
                 tracing::error!("Connection {}, bad secret key", conn.ip);
+                conn.poison();
                 // Reply after the same delay as before, then close: a peer must not keep
                 // guessing the secret on the same connection.
                 let conn = conn.clone();
