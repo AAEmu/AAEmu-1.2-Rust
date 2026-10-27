@@ -839,6 +839,24 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   differ between zero-extended sheet IDs and sign-extended native cache keys.
   No evidence establishes a safe ID-width or ownership-policy change here.
 
+* systems::skills (music): the C# (and this port) send `SCSkillStarted` only for casts with a
+  cast time. The play (22213), pause (22214) and close-the-score (22217) skills are instant
+  (`casting_time` 0, `effect_delay` 200 ms), so the 1.2 client never received the own
+  `SCSkillStarted` it reacts to with CS121 (MIDI) / CS124 (End): the play effect then
+  broadcast an empty MIDI cache. A validated player cast of a skill whose catalog join
+  `skill_effects -> effects(SpecialEffect) -> special_effects` contains type 93 (`PlayUserMusic`)
+  or 94 (`PauseUserMusic`) now sends `SCSkillStarted` (same timeline id as the fire, cast times
+  0, no extra data) directly before its `SCSkillFired` (`skill::schedule_effects`,
+  `SkillRunState::music_started_pending`). No id list, no `application_method` filter, no change
+  for other instant skills, NPC casters, rejected casts (they keep the failure `SCSkillStarted`)
+  or the item-caster refusal of 22213 (sheet 28051 has no `use_skill_id`). Not a retail capture:
+  derived from the client contract. The authored 200 ms `effect_delay` is unchanged, so the
+  client's CS121 / CS122 must reach the server within `200 ms - one-way latency` of the fire
+  (compose relies on the same window for CS122); the live lane measured the CS121 arriving
+  ~0 ms after the Started on loopback. CS124 (`CSEndMusicPacket`) matches the C#: it is a no-op
+  while the 30 s ScoreMemorized (6010) buff is active and otherwise removes the tag-1155 play
+  buffs (6176 / 6177); pause (dispel tag 1202) keeps 6010, close (dispel tag 1155) removes it.
+
 * systems::skills / systems::npcs (`Interaction` special effect 10): the former C# class was a
   TODO stub. The 1.2 `special_effects` rows put a `WorldInteractionType` in `value1` (row 11030:
   19 `Use`, 36: 10 `DigTerrain`, 215: 29 `SummonBeanstalk`) and an optional doodad id in
@@ -1224,6 +1242,25 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   fabricated. RedeemBuff's second and third value slots (the damage / cap slots of other special
   actions), recipe/account/cinema placeholders, several other special actions and generic
   Anchor/Flowgraph still need authoritative behavior or protocol evidence. Passing covered tests does not certify every data-defined skill.
+* systems::skills (2026-10-27, `check_obstacle`): the C# tree had no obstacle check at all
+  (`git show a2ab80abd^:AAEmu.Game/Models/Game/Skills/Skill.cs`), but the 1.2 skills data has
+  the retail column. The 1.2 client is the oracle (`x2game_unpacked.dll`; Ghidra `aa12u`):
+  `FUN_390B5540` calls `RayWorldIntersection(Game)` with objtypes **7** (static + sleeping rigid
+  + rigid), or **0x107** when `check_terrain` is set, ray flags **0x2048F** (colltype-any,
+  collision class 2, ignore back faces, pierceability 15) and one hit; a hit maps to skill
+  result 0xC (`skill_obstacle`). `FUN_390B5650` shortens the end point by the target radius and
+  casts no ray when `distance <= radius`. Unit targets (`FUN_390B5C60` -> `FUN_3989C0D0`) run at
+  unit position height and skip the source and target colliders; position (ground) targets
+  (`FUN_390B5A30` -> `FUN_390B5790`) use the constant 0.5 (`DAT_3999C47C`) and skip only the
+  source. The former Rust ray was 1 m above both ends, used static+terrain (0x101) and the
+  default collision class, and had no radius gate; it rejected ground-anchored doodad
+  interactions through nearby doodad colliders (entrance doodad template 3674 / skill 10999,
+  exit 4535 / skill 16560) and re-checked at fire time with the same wrong rule. Rejections are
+  logged at `warn` with character, skill, target and result key (NPC casters at `debug`: AI
+  retries blocked casts). The flow tests in
+  `cast_validation_tests.rs` cover the height/mask/class rule, the radius gate, the 0.5 m
+  position radius and the terrain gate. Not modelled: the multi-part target variant
+  `FUN_3989DAE0` (loops the target's sub-shapes and passes if any part passes).
 * systems::skills: the labor margin requirement uses `GetMaxLabor(Payment.PremiumState)`; every
   connection has the default C# `AccountPayment` (premium until 2030), so the cap is 5000.
 * systems::skills (in-place resurrection, 2026-10-20): `CSResurrectCharacterPacket(in_place =
@@ -2679,6 +2716,26 @@ two bots before the fix (a foreign `Mount` caster, an NPC-only skill and a far d
   (`np_skills`) are deliberately absent. Possible over-blocking: a skill the 1.2 client casts that
   none of these tables names (the retail rule is not confirmed); such a cast is refused with a
   warning naming the skill id, so it is easy to add the table.
+- **Ability-tree skills need an active ability and a learned skill.** The C# `CSStartSkill` fell
+  through to the catch-all above and cast any skill id. The 1.2 client marks unlearned and
+  inactive-tree skills unusable in its UI: the action-slot UI carries `canUse` / `learned`
+  states (`scriptsbin/x2ui/components/action_slot.alb`) and the native
+  `X2::GameClient::SkillAccessor` publishes `learned`; that the client also refuses the press
+  is not shown in the decompile and was not observed live. The result codes are the client's:
+  `INVALID_SKILL` 0x1e and `INACTIVE_ABILITY` 0x1f (`out-x2game/x2game.dll.c`). `handlers::class_skill_denial` now refuses a client cast of a
+  skill with `ability_id != 0` when that ability is not one of the three active ones
+  (`SkillResult.INACTIVE_ABILITY`) or, for `need_learn` skills, when neither the skill nor a
+  same-ability-level variant is learned (`SkillResult.INVALID_SKILL`); the 27 tree skills with
+  `need_learn` false only need their ability active. Item, mount, default /
+  common and auto-attack casts are decided before the check; ability-less skills (buff, quest,
+  doodad, craft, NPC interaction, slash command, housing / shipyard) are unaffected, and the
+  real-data test pins that every id those tables name is ability-less. The only ability-tree
+  skills a client-facing source table names are mount skill 13572 (mount branch) and
+  quest/doodad conditions 10664, 10134, 12075 and 11380; they still need their ability active and
+  the skill learned, as the client requires. The exact result codes are our choice (the client
+  only needs a non-success `SCSkillStarted`). Not closed here: a `Mount` caster naming the player
+  itself still runs the mount branch (the self allowance above), and a bind-on-pickup item caster
+  can still name a different skill id (the legacy fireplace exception, narrowed for UCC effects).
 
 ## Ship repair timer and destroyed-vehicle HP (2026-10-20)
 

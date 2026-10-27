@@ -4,11 +4,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use subtle::ConstantTimeEq;
 
 use crate::auth::{
     AuthFlow, KoreaAuthFlow, KoreaStep, LoginClient, PasswordAuthFlow, ReconnectAuthFlow,
 };
-use crate::controllers::game::send_with_delay;
 use crate::models::{GameServerId, GsRegisterResult};
 use crate::network::internal::InternalConnection;
 use crate::network::login::LoginConnection;
@@ -89,12 +89,26 @@ pub async fn handle_c2l(
     }
 }
 
+/// Constant-time comparison of the shared game-server secret.
+fn secret_matches(given: &str, expected: &str) -> bool {
+    bool::from(given.as_bytes().ct_eq(expected.as_bytes()))
+}
+
 /// Dispatches a game server packet.
 pub async fn handle_g2l(
     server: &Arc<LoginServer>,
     conn: &Arc<InternalConnection>,
     packet: G2lPacket,
 ) -> anyhow::Result<()> {
+    // A connection that sent a wrong secret stays refused until its delayed error reply and
+    // close, so a correct secret in that window cannot register it.
+    if conn.is_poisoned() {
+        tracing::warn!(
+            "Connection {}: packet after a failed registration, ignored",
+            conn.ip
+        );
+        return Ok(());
+    }
     match packet {
         G2lPacket::GameServerLoad(p) => {
             let gs_id = authorize_game_server(server, conn, None)?;
@@ -115,15 +129,20 @@ pub async fn handle_g2l(
             Ok(())
         }
         G2lPacket::RegisterGameServer(p) => {
-            if p.secret_key != server.config.secret_key {
+            if !secret_matches(&p.secret_key, &server.config.secret_key) {
                 tracing::error!("Connection {}, bad secret key", conn.ip);
-                send_with_delay(
-                    conn.clone(),
-                    Duration::from_secs(5),
-                    LgRegisterGameServer {
+                conn.poison();
+                // Reply after the same delay as before, then close: a peer must not keep
+                // guessing the secret on the same connection.
+                let conn = conn.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    conn.send_packet(&LgRegisterGameServer {
                         result: GsRegisterResult::Error,
-                    },
-                );
+                    });
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    conn.close();
+                });
                 return Ok(());
             }
             server.games.add(p.gs_id, p.mirrors, conn);

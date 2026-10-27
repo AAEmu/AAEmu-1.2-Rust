@@ -38,7 +38,10 @@ flowchart LR
 
 A `Host` of `*` binds all IPv4 interfaces (`0.0.0.0`); any other value must be an IP address.
 The game server is a TCP *client* of the login server: it connects to `LoginNetwork.Host:Port`
-(which must match the login server's `InternalNetwork`).
+(which must match the login server's `InternalNetwork`). The shipped login `InternalNetwork.Host`
+is `127.0.0.1`, so only a game server on the same host can register; a game server on another
+host needs `"*"` or a specific interface address in the login `Config.Local.json` (the Compose
+stack sets `InternalNetwork__Host: "*"` and never publishes the port).
 
 ## Framing: `aaemu_commons::net::FrameCodec`
 

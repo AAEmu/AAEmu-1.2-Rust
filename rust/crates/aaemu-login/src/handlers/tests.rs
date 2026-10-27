@@ -101,7 +101,16 @@ async fn assert_unauthorized_token_rejected(secret: Option<&str>) {
         ),
         "unauthenticated internal peer seeded a usable reconnect token"
     );
-    assert!(result.is_err());
+    // An unregistered peer gets the authorization error; a wrong-secret peer is poisoned and
+    // ignored, so neither path may acknowledge the packet.
+    if secret.is_some() {
+        assert!(
+            result.is_ok() && conn.is_poisoned(),
+            "wrong-secret peer was not poisoned"
+        );
+    } else {
+        assert!(result.is_err(), "unregistered peer was not refused");
+    }
     assert!(
         rx.try_recv().is_err(),
         "must not acknowledge an unauthorized token"
@@ -116,6 +125,14 @@ async fn unregistered_connection_cannot_seed_reconnect_token() {
 #[tokio::test]
 async fn bad_secret_connection_cannot_seed_reconnect_token() {
     assert_unauthorized_token_rejected(Some("wrong")).await;
+}
+
+#[test]
+fn secret_comparison_accepts_only_the_exact_secret() {
+    assert!(secret_matches("test", "test"));
+    assert!(!secret_matches("tesx", "test"));
+    assert!(!secret_matches("test ", "test"));
+    assert!(!secret_matches("", "test"));
 }
 
 #[tokio::test]

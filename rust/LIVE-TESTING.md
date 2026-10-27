@@ -273,6 +273,14 @@ least two completed crafts (`SCSkillStarted` + `SCSkillEnded`), then `SCErrorMsg
 on, besides a failed `SCSkillStarted`), and no cast after it. Run it on an account whose labor is not hugely negative
 or positive (a character with 30 labor runs about 15 crafts, 1 s each). Server log:
 `craft 8000001 refused by skill 8000016: skill result 39`.
+`m*` script commands (`aaemu-testclient/src/scenario/music.rs`, used by `rust/verify/musicrun1.vtest` /
+`musicrun2.vtest`) replay the 1.2 client's music wire sequence and fail on a missing callback:
+`mcompose` (item cast 22215, CS122 only after the received own `SCSkillFired`), `mrequest` (CS123 cold /
+tooltip / unknown / buff-only with reply checks), `mskill` (Unit cast; CS121 after the own
+`SCSkillStarted` of the play skill, CS124 after that of pause / close; checks the own broadcast, the game
+log receipt and `+buff:N` / `-buff:N` / `=buff:N` buff tokens), `mend`, `mwatch` (listener side: the
+received MIDI must hash like the one the composer sent). GM access is used only to seed paper 27902,
+instrument 6177 and labor.
 
 The combat step selects its NPC through `CSChangeTargetPacket` and faces it in movement
 packets so auto attacks and angle restrictions use the intended target. It matches skill responses to the player's object and skill IDs and reads

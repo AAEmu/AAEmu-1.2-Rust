@@ -56,6 +56,9 @@ pub struct SkillRunState {
     pub auto_attack_index: i32,
     /// `ActivePlotState`.
     pub active_plot: Option<Arc<PlotState>>,
+    /// An instant player music skill (special effect 93 / 94) still owes its `SCSkillStarted`,
+    /// sent right before its `SCSkillFired` (see `skill::schedule_effects`).
+    pub music_started_pending: bool,
 }
 
 /// `Skill`: a template + level and the per-use state, shared by the cast and its tasks.

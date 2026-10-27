@@ -21,6 +21,7 @@ mod craft;
 mod doodad;
 mod fixes;
 mod lunafrost;
+mod music;
 mod plant;
 mod portal;
 mod questitem;

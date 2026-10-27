@@ -1206,3 +1206,6 @@ async fn pvp_kill_advances_a_conflict_zone_that_returned_to_tension() {
     // No honor outside Conflict / War (the C#/1.2 rule is unchanged).
     assert_eq!(killer.data().honor_gained_in_combat, 0);
 }
+
+#[path = "music_started_tests.rs"]
+mod music_started_tests;

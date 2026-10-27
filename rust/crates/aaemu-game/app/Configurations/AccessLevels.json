@@ -7,13 +7,13 @@
         "collectdominion": 0,
         "joinsiege": 0,
         "leavesiege": 0,
-        "fly": 0,
         
         "online": 0,
         "soloparty": 0,
-        "teleport": 0,
         
         // Moderaters
+        "fly": 50,
+        "teleport": 50,
         "announce": 50,
         "despawn": 50,
         "dist": 50,

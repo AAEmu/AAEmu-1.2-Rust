@@ -1,0 +1,52 @@
+# Native-client music lifecycle against the lane server (strict). Bots: composer (GM only to
+# seed paper / instrument / labor) and listener.
+#   compose: item cast 22215 -> received own Started + Fired -> CS122 (upload) -> sheet 28051
+#   CS123: cold (false,false), tooltip (true,false), unknown id, buff-only (false,true)
+#   play: Unit cast 22213 -> received own Started -> CS121 (MIDI) -> broadcast to both clients
+#   End: CS124 while the 6010 memorized buff is active keeps the play buff (C# behaviour);
+#        after it expired CS124 removes it
+#   pause 22214 / close 22217: received own Started -> CS124 sent, buffs per the catalog dispels
+# Every step fails the suite when the callback, sheet, broadcast or End does not happen.
+suite music-run1
+bot composer gm
+bot listener
+
+[composer]
+waitpeer 120 ${listener}
+gm labor 5000
+mitem 27902 3
+mitem 6177 1
+mequip 6177 18
+mcompose 3 "Harbor Song" "T120 O4 L4 CDEFGAB>C"
+expectdb "SELECT COUNT(*) FROM music m JOIN characters c ON c.id=m.author WHERE c.name='${composer}' AND m.title='Harbor Song' AND m.song LIKE 'T120 O4 L4 CDEFGAB>C%'" 1 5
+sync composed
+mrequest 0 0
+mrequest 1 0
+mrequest 0 0 unknown
+mrequest 0 1
+sync play
+mskill 22213 midi unit +buff:6177
+pump 1
+# CS124 while 6010 (memorized, 30 s) is active: the play buff stays
+mend =buff:6177
+pump 33
+# 6010 has expired: CS124 now removes the play buff
+mend -buff:6177
+mrequest 0 1
+mskill 22213 midi unit +buff:6177
+pump 1
+mskill 22214 end unit -buff:6177 =buff:6010
+pump 3
+mrequest 0 1
+mskill 22213 midi unit +buff:6177
+pump 2
+mskill 22217 end unit -buff:6177 -buff:6010
+pump 2
+sync done
+
+[listener]
+waitpeer 120 ${composer}
+sync composed
+sync play
+mwatch 150 send pause
+sync done
