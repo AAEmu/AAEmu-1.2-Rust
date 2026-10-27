@@ -91,8 +91,9 @@ pub struct System {
     ops: Mutex<()>,
     /// Callback-bearing synchronous publications exclude ordinary item operations here.
     operation_scope: operation_scope::OperationScope,
-    /// `Inventory.PreviousBackPackItemId` by character id (glider re-equip after a trade pack).
-    previous_backpack: Mutex<HashMap<u32, u64>>,
+    /// `Inventory.PreviousBackPackItemId` by character id (glider re-equip after a trade pack):
+    /// `(item id, template id)` of the glider that was taken off.
+    previous_backpack: Mutex<HashMap<u32, (u64, u32)>>,
     /// Account-wide attributes (`account_attributes`, auction posting authority, ...).
     pub account_attributes: account_attributes::AccountAttributes,
     /// `AuctionManager`.
@@ -165,22 +166,35 @@ impl System {
         OPS_HELD.with(|held| held.get() > 0)
     }
 
-    /// `Inventory.PreviousBackPackItemId = id`.
-    pub fn set_previous_backpack(&self, character_id: u32, item_id: u64) {
-        self.previous_backpack
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(character_id, item_id);
+    /// `Inventory.PreviousBackPackItemId = id`, with the glider's template id (id-reuse guard).
+    pub fn set_previous_backpack(&self, character_id: u32, item_id: u64, template_id: u32) {
+        self.restore_previous_backpack(character_id, Some((item_id, template_id)));
     }
 
-    /// `Inventory.PreviousBackPackItemId`.
-    pub fn previous_backpack(&self, character_id: u32) -> u64 {
+    /// The recorded `(item id, template id)` of the glider taken off for a trade pack.
+    pub fn previous_backpack(&self, character_id: u32) -> Option<(u64, u32)> {
         self.previous_backpack
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(&character_id)
             .copied()
-            .unwrap_or(0)
+    }
+
+    /// Sets or clears the record (rollbacks put back what [`System::previous_backpack`] read).
+    pub fn restore_previous_backpack(&self, character_id: u32, record: Option<(u64, u32)>) {
+        let mut map = self
+            .previous_backpack
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match record {
+            Some(r) => map.insert(character_id, r),
+            None => map.remove(&character_id),
+        };
+    }
+
+    /// Forgets the recorded glider.
+    pub fn clear_previous_backpack(&self, character_id: u32) {
+        self.restore_previous_backpack(character_id, None);
     }
 
     /// Startup after the phase-1/2 managers: DB loads, timers, hook installation.

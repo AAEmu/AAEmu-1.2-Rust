@@ -2330,7 +2330,7 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
                 server
                     .systems
                     .economy
-                    .set_previous_backpack(inv.character_id, previous);
+                    .restore_previous_backpack(inv.character_id, previous);
                 txn.env.fx.0.clear();
             }
             return CargoRecovery::Failed;

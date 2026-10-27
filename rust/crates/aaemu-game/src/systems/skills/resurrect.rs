@@ -223,6 +223,8 @@ pub fn resurrect_character(server: &GameServer, p: &PlayerRef, in_place: bool) {
     super::water::set_player_under_water(server, p, false);
     let lung = stat(server, &me, StatKind::LungCapacity) as u32;
     p.data().breath = lung;
+    // The glider a lost trade pack had replaced (kept while the character was dead).
+    crate::systems::economy::inventory::reequip_previous_glider(server, p);
 }
 
 /// `ApplyRevivalDebuffs(character, inPlace)`: in place (player-res) → no debuffs; PvP death in
