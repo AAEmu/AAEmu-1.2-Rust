@@ -12,6 +12,12 @@ Guidance for coding agents working in this repository.
   is not.
 - The push URLs of `origin` and `upstream` are disabled in the local git config (`no_push`). Do not
   re-enable them.
+- **`AAEmu/AAEmu` must not lose anything.** Its branches are being copied into their own
+  repositories (this one became [`AAEmu/AAEmu-1.2-Rust`](https://github.com/AAEmu/AAEmu-1.2-Rust)).
+  Until the owner explicitly says to delete the original repository, never delete, archive, rename
+  or transfer `AAEmu/AAEmu`, and never delete any of its branches or tags, by any route (git, `gh`,
+  REST or GraphQL). Copy branches out; never move them. On this machine a Claude Code PreToolUse
+  hook (`~/.claude/hooks/protect-aaemu-upstream.py`) enforces this; do not disable or bypass it.
 
 ## Sessions work in lanes (mandatory, every session)
 
