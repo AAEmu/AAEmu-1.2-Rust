@@ -392,7 +392,11 @@ pub fn raycast_ignoring_objects(
     let mut st = pw.lock();
     let skip: Vec<_> = ignored
         .iter()
-        .filter_map(|key| st.objects.get(key).map(|c| c.ent))
+        .filter_map(|key| match key.0 {
+            // Living proxies are the units' colliders; they are not in `objects`.
+            world::ObjKind::Unit => st.living.get(&key.1).copied(),
+            _ => st.objects.get(key).map(|c| c.ent),
+        })
         .collect();
     Some(st.raycast(a, b, objtypes, flags, &skip))
 }

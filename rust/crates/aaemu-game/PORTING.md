@@ -1224,6 +1224,24 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   fabricated. RedeemBuff's second and third value slots (the damage / cap slots of other special
   actions), recipe/account/cinema placeholders, several other special actions and generic
   Anchor/Flowgraph still need authoritative behavior or protocol evidence. Passing covered tests does not certify every data-defined skill.
+* systems::skills (2026-10-27, `check_obstacle`): the C# tree had no obstacle check at all
+  (`git show a2ab80abd^:AAEmu.Game/Models/Game/Skills/Skill.cs`), but the 1.2 skills data has
+  the retail column. The 1.2 client is the oracle (`x2game_unpacked.dll`; Ghidra `aa12u`):
+  `FUN_390B5540` calls `RayWorldIntersection(Game)` with objtypes **7** (static + sleeping rigid
+  + rigid), or **0x107** when `check_terrain` is set, ray flags **0x2048F** (colltype-any,
+  collision class 2, ignore back faces, pierceability 15) and one hit; a hit maps to skill
+  result 0xC (`skill_obstacle`). `FUN_390B5650` shortens the end point by the target radius and
+  casts no ray when `distance <= radius`. Unit targets (`FUN_390B5C60` -> `FUN_3989C0D0`) run at
+  unit position height and skip the source and target colliders; position (ground) targets
+  (`FUN_390B5A30` -> `FUN_390B5790`) use the constant 0.5 (`DAT_3999C47C`) and skip only the
+  source. The former Rust ray was 1 m above both ends, used static+terrain (0x101) and the
+  default collision class, and had no radius gate; it rejected ground-anchored doodad
+  interactions through nearby doodad colliders (entrance doodad template 3674 / skill 10999,
+  exit 4535 / skill 16560) and re-checked at fire time with the same wrong rule. Rejections are
+  logged at `warn` with character, skill, target and result key. The flow tests in
+  `cast_validation_tests.rs` cover the height/mask/class rule, the radius gate, the 0.5 m
+  position radius and the terrain gate. Not modelled: the multi-part target variant
+  `FUN_3989DAE0` (loops the target's sub-shapes and passes if any part passes).
 * systems::skills: the labor margin requirement uses `GetMaxLabor(Payment.PremiumState)`; every
   connection has the default C# `AccountPayment` (premium until 2030), so the cap is 5000.
 * systems::skills (in-place resurrection, 2026-10-20): `CSResurrectCharacterPacket(in_place =

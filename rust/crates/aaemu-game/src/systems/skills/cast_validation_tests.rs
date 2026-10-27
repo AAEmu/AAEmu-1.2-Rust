@@ -917,6 +917,326 @@ async fn obstacle_checks_reject_a_physical_wall_before_any_cast_mutation() {
     assert_eq!(cast(&server, &skill, &player, &npc).0, 0);
 }
 
+/// 1.2 client `FUN_390B5540` (`x2game.dll.c:149877`): the obstacle ray runs at unit
+/// position height, uses the static/sleeping/rigid classes with collision class 2 (terrain
+/// only with `check_terrain`), and skips the source and target colliders.
+#[tokio::test]
+async fn obstacle_ray_matches_the_retail_height_mask_and_collision_class() {
+    use crate::systems::ai::collision::models::{ModelPart, ModelPhys};
+    use crate::systems::ai::collision::world::{CellContent, StaticInstance};
+    use aaemu_physics::geometry::primitives::{BoxPrim, Primitive};
+    use aaemu_physics::math::{Quat, Vec3};
+
+    struct Flat(f32);
+    impl crate::systems::ai::collision::terrain::TerrainSource for Flat {
+        fn sample(&self, _x: i32, _y: i32) -> f32 {
+            self.0
+        }
+        fn size(&self) -> (i32, i32) {
+            (1024, 1024)
+        }
+    }
+
+    fn check(
+        terrain_z: f32,
+        wall: Vec3,
+        wall_flags: u32,
+        check_terrain: bool,
+        source_z: f32,
+        target_z: f32,
+    ) -> Result<(), (u8, u32)> {
+        let (server, _client, player, _npc) = fixture(GameData::empty());
+        server
+            .systems
+            .ai
+            .collision
+            .test_files
+            .set(Arc::new(std::collections::HashMap::new()))
+            .unwrap();
+        server
+            .systems
+            .ai
+            .collision
+            .test_terrain
+            .set(Arc::new(Flat(terrain_z)))
+            .unwrap_or_else(|_| panic!("terrain"));
+        let physics = crate::systems::ai::collision::phys_world(&server, 0).unwrap();
+        let geometry = physics
+            .lock()
+            .world
+            .register_primitive(&Primitive::Box(BoxPrim::aligned(
+                Vec3::ZERO,
+                Vec3::new(1.0, 0.5, 0.5),
+            )))
+            .unwrap();
+        physics.lock().insert_cell(CellContent {
+            cell: (0, 0),
+            instances: vec![StaticInstance {
+                model: Arc::new(ModelPhys {
+                    path: "test/skill-obstacle.cgf".into(),
+                    parts: vec![ModelPart {
+                        slot: 0,
+                        geom: geometry,
+                    }],
+                    blob_bytes: 0,
+                }),
+                pos: wall,
+                q: Quat::IDENTITY,
+                scale: 1.0,
+                flags_default: wall_flags,
+                density: 0.0,
+                ent_flags_or: 0x8000,
+                vegetation: false,
+            }],
+            ..Default::default()
+        });
+        player.data().unit.transform.set_xyz(100.0, 100.0, source_z);
+        let mut crop = crate::models::doodad::Doodad::new(1);
+        crop.transform.set_xyz(100.0, 110.0, target_z);
+        let crop = Entity::new(0x300, crop);
+        let crop_target = Target::Obj(WorldObject::from(&crop));
+        let skill = SkillRun::new(
+            Arc::new(SkillTemplate {
+                check_obstacle: true,
+                check_terrain,
+                target_type: super::types::SkillTargetType::Doodad as i32,
+                ..super::tests::skill_template(3)
+            }),
+            1,
+        );
+        super::validation::check(&server, &skill, &WorldObject::from(&player), &crop_target)
+    }
+
+    // The old +1 m ray hit a wall above the feet; the retail ray at position height does not.
+    assert!(check(
+        100.1,
+        Vec3::new(100.0, 105.0, 101.5),
+        0x18FFF,
+        false,
+        100.0,
+        100.0
+    )
+    .is_ok());
+    // A part without collision class 2 is not an obstacle to the skill ray (0x8000 only).
+    assert!(check(
+        100.1,
+        Vec3::new(100.0, 105.0, 100.0),
+        0x18FFD,
+        false,
+        100.0,
+        100.0
+    )
+    .is_ok());
+    // A class-2 static part still blocks.
+    assert_eq!(
+        check(
+            100.1,
+            Vec3::new(100.0, 105.0, 100.0),
+            0x18FFF,
+            false,
+            100.0,
+            100.0
+        )
+        .unwrap_err()
+        .0,
+        skill_result::OBSTACLE
+    );
+    // Terrain joins the mask only with `check_terrain`.
+    assert!(check(
+        101.0,
+        Vec3::new(100.0, 50.0, 50.0),
+        0x18FFF,
+        false,
+        102.0,
+        100.0
+    )
+    .is_ok());
+    assert_eq!(
+        check(
+            101.0,
+            Vec3::new(100.0, 50.0, 50.0),
+            0x18FFF,
+            true,
+            102.0,
+            100.0
+        )
+        .unwrap_err()
+        .0,
+        skill_result::OBSTACLE
+    );
+}
+
+/// 1.2 `FUN_390B5650` (`x2game.dll.c:149951`) casts no ray at all when `dist <= radius`;
+/// position (ground) targets (`FUN_390B5A30` -> `FUN_390B5790`) use radius 0.5
+/// (`DAT_3999C47C`) and skip only the source.
+#[tokio::test]
+async fn obstacle_ray_skips_inside_radius_and_uses_the_position_radius() {
+    use crate::models::transform::PositionAndRotation;
+    use crate::systems::ai::collision::models::{ModelPart, ModelPhys};
+    use crate::systems::ai::collision::world::{CellContent, StaticInstance};
+    use aaemu_physics::geometry::primitives::{BoxPrim, Primitive};
+    use aaemu_physics::math::{Quat, Vec3};
+
+    struct Flat;
+    impl crate::systems::ai::collision::terrain::TerrainSource for Flat {
+        fn sample(&self, _x: i32, _y: i32) -> f32 {
+            100.0
+        }
+        fn size(&self) -> (i32, i32) {
+            (1024, 1024)
+        }
+    }
+
+    fn setup(
+        data: GameData,
+        wall: Vec3,
+        half: Vec3,
+    ) -> (Arc<crate::GameServer>, TestClient, PlayerRef, NpcRef) {
+        let (server, client, player, npc) = fixture(data);
+        server
+            .systems
+            .ai
+            .collision
+            .test_files
+            .set(Arc::new(std::collections::HashMap::new()))
+            .unwrap();
+        server
+            .systems
+            .ai
+            .collision
+            .test_terrain
+            .set(Arc::new(Flat))
+            .unwrap_or_else(|_| panic!("terrain"));
+        let physics = crate::systems::ai::collision::phys_world(&server, 0).unwrap();
+        let geometry = physics
+            .lock()
+            .world
+            .register_primitive(&Primitive::Box(BoxPrim::aligned(Vec3::ZERO, half)))
+            .unwrap();
+        physics.lock().insert_cell(CellContent {
+            cell: (0, 0),
+            instances: vec![StaticInstance {
+                model: Arc::new(ModelPhys {
+                    path: "test/skill-obstacle-radius.cgf".into(),
+                    parts: vec![ModelPart {
+                        slot: 0,
+                        geom: geometry,
+                    }],
+                    blob_bytes: 0,
+                }),
+                pos: wall,
+                q: Quat::IDENTITY,
+                scale: 1.0,
+                flags_default: 0x18FFF,
+                density: 0.0,
+                ent_flags_or: 0x8000,
+                vegetation: false,
+            }],
+            ..Default::default()
+        });
+        (server, client, player, npc)
+    }
+
+    fn position(x: f32, y: f32, z: f32) -> Target {
+        Target::Pos(super::geometry::PosUnit {
+            instance_id: 0,
+            zone_id: 0,
+            pos: PositionAndRotation {
+                x,
+                y,
+                z,
+                ..Default::default()
+            },
+        })
+    }
+
+    fn check(
+        server: &crate::GameServer,
+        player: &PlayerRef,
+        target: &Target,
+    ) -> Result<(), (u8, u32)> {
+        let skill = SkillRun::new(
+            Arc::new(SkillTemplate {
+                check_obstacle: true,
+                ..super::tests::skill_template(3)
+            }),
+            1,
+        );
+        super::validation::check(server, &skill, &WorldObject::from(player), target)
+    }
+
+    // A unit target inside its own radius: no ray, even with a wall behind the caster.
+    let mut data = GameData::empty();
+    data.systems.skills.model_radii.insert(1, 1.0);
+    let (server, _client, player, npc) = setup(
+        data,
+        Vec3::new(100.0, 99.0, 100.0),
+        Vec3::new(1.0, 0.5, 0.5),
+    );
+    npc.data().unit.model_id = 1;
+    npc.data().unit.transform.set_xyz(100.0, 100.2, 100.0);
+    assert!(check(&server, &player, &Target::Obj(WorldObject::from(&npc))).is_ok());
+
+    // A thin obstacle just inside the target radius is not on the ray: the end point
+    // stops 1 m short of a target at 110.
+    let mut data = GameData::empty();
+    data.systems.skills.model_radii.insert(1, 1.0);
+    let (server, _client1b, player, npc) = setup(
+        data,
+        Vec3::new(100.0, 109.5, 101.0),
+        Vec3::new(1.0, 0.05, 1.0),
+    );
+    npc.data().unit.model_id = 1;
+    npc.data().unit.transform.set_xyz(100.0, 110.0, 100.0);
+    assert!(check(&server, &player, &Target::Obj(WorldObject::from(&npc))).is_ok());
+
+    // A wall further back still blocks the unit target.
+    let mut data = GameData::empty();
+    data.systems.skills.model_radii.insert(1, 1.0);
+    let (server, _client1c, player, npc) = setup(
+        data,
+        Vec3::new(100.0, 105.0, 101.0),
+        Vec3::new(1.0, 0.5, 1.0),
+    );
+    npc.data().unit.model_id = 1;
+    npc.data().unit.transform.set_xyz(100.0, 110.0, 100.0);
+    assert_eq!(
+        check(&server, &player, &Target::Obj(WorldObject::from(&npc)))
+            .unwrap_err()
+            .0,
+        skill_result::OBSTACLE
+    );
+
+    // A position target inside 0.5 m: no ray, even with a wall behind the caster.
+    let (server, _client2, player, _npc2) = setup(
+        GameData::empty(),
+        Vec3::new(100.0, 99.0, 100.0),
+        Vec3::new(1.0, 0.5, 0.5),
+    );
+    assert!(check(&server, &player, &position(100.0, 100.2, 100.0)).is_ok());
+
+    // The 0.5 m position radius stops the ray 0.2 m before a wall that sits at 109.75.
+    let (server, _client3, player, _npc3) = setup(
+        GameData::empty(),
+        Vec3::new(100.0, 109.75, 100.0),
+        Vec3::new(1.0, 0.05, 0.5),
+    );
+    assert!(check(&server, &player, &position(100.0, 110.0, 100.0)).is_ok());
+
+    // A wall on the way still blocks a position target.
+    let (server, _client4, player, _npc4) = setup(
+        GameData::empty(),
+        Vec3::new(100.0, 105.0, 100.0),
+        Vec3::new(1.0, 0.5, 0.5),
+    );
+    assert_eq!(
+        check(&server, &player, &position(100.0, 110.0, 100.0))
+            .unwrap_err()
+            .0,
+        skill_result::OBSTACLE
+    );
+}
+
 #[tokio::test]
 async fn insufficient_mana_keeps_ongoing_buffs_and_cast_timing_untouched() {
     let mut data = GameData::empty();
