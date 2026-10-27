@@ -2680,11 +2680,12 @@ two bots before the fix (a foreign `Mount` caster, an NPC-only skill and a far d
   none of these tables names (the retail rule is not confirmed); such a cast is refused with a
   warning naming the skill id, so it is easy to add the table.
 - **Ability-tree skills need an active ability and a learned skill.** The C# `CSStartSkill` fell
-  through to the catch-all above and cast any skill id. The 1.2 client refuses unlearned and
-  inactive-tree skills locally: the action-slot UI carries `canUse` / `learned` states
-  (`scriptsbin/x2ui/components/action_slot.alb`), the native `X2::GameClient::SkillAccessor`
-  publishes `learned`, and `URK_TRAINED_SKILL` is the 1.2 unmet-requirement name
-  (`out-x2game/x2game.dll.c`). `handlers::class_skill_denial` now refuses a client cast of a
+  through to the catch-all above and cast any skill id. The 1.2 client marks unlearned and
+  inactive-tree skills unusable in its UI: the action-slot UI carries `canUse` / `learned`
+  states (`scriptsbin/x2ui/components/action_slot.alb`) and the native
+  `X2::GameClient::SkillAccessor` publishes `learned`; that the client also refuses the press
+  is not shown in the decompile and was not observed live. The result codes are the client's:
+  `INVALID_SKILL` 0x1e and `INACTIVE_ABILITY` 0x1f (`out-x2game/x2game.dll.c`). `handlers::class_skill_denial` now refuses a client cast of a
   skill with `ability_id != 0` when that ability is not one of the three active ones
   (`SkillResult.INACTIVE_ABILITY`) or, for `need_learn` skills, when neither the skill nor a
   same-ability-level variant is learned (`SkillResult.INVALID_SKILL`). Item, mount, default /
