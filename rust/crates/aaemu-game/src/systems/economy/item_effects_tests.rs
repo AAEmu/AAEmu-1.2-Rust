@@ -1869,12 +1869,12 @@ async fn glider_stays_when_the_player_equipped_something_else_in_between() {
 
 #[tokio::test]
 async fn glider_stays_when_the_back_slot_is_taken_or_the_container_refuses() {
-    // The back slot is occupied: nothing is swapped out, the record is consumed.
+    // The back slot is occupied: nothing is swapped out, the record is kept.
     let w = world();
     let (_, glider) = pack_on_back(&w);
     assert!(!reequip_previous_glider(&w.server, &w.pa));
     assert_ne!(back(&w), Some(glider));
-    assert_eq!(recorded(&w), None);
+    assert!(recorded(&w).is_some());
 
     // The equipment container refuses the glider (not a bag item of this character's gear).
     let w = world();
@@ -1920,6 +1920,40 @@ async fn equipping_a_trade_pack_keeps_the_record_and_the_pack_in_place() {
     // The pack is then removed: the glider comes back.
     remove_pack(&w, on_back.id);
     assert_eq!(back(&w), Some(glider));
+}
+
+#[tokio::test]
+async fn resurrection_keeps_the_record_while_a_non_dropped_pack_is_worn() {
+    let w = world();
+    let (pack, glider) = pack_on_back(&w);
+    w.pa.data().unit.hp = 0;
+    w.pa.data().unit.hp = 10; // resurrected, the pack was not dropped on death
+    assert!(!reequip_previous_glider(&w.server, &w.pa));
+    assert_eq!(back(&w), Some(pack));
+    assert!(recorded(&w).is_some());
+    remove_pack(&w, pack);
+    assert_eq!(back(&w), Some(glider));
+}
+
+#[tokio::test]
+async fn glider_reequip_in_an_unlocked_transaction_waits_for_the_drain() {
+    let w = world();
+    let (pack, glider) = pack_on_back(&w);
+    {
+        let mut txn = ItemTxn::unlocked(&w.server);
+        let removed = Inv::of(&w.pa).equipment().lock().unwrap().remove_item_task(
+            task_type::DESTROY,
+            pack,
+            true,
+            &mut txn.env,
+        );
+        assert!(removed.is_some());
+    }
+    assert_eq!(back(&w), None);
+    assert!(recorded(&w).is_some());
+    crate::systems::economy::flush_deferred_glider_reequips(&w.server);
+    assert_eq!(back(&w), Some(glider));
+    assert_eq!(recorded(&w), None);
 }
 
 // ---------------------------------------------------------------------------------------------

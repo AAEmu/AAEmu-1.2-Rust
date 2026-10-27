@@ -212,10 +212,20 @@ pub fn flush_with(server: &GameServer, fx: ItemFxList, reequip: bool) {
             ItemFx::Orphaned(item) => server.items.add_loose(*item),
         }
     }
-    if reequip {
-        for id in candidates {
+    for id in candidates {
+        if reequip {
             if let Some(p) = owner(id) {
                 super::inventory::reequip_previous_glider(server, &p);
+            }
+        } else {
+            let mut q = server
+                .systems
+                .economy
+                .deferred_reequip
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !q.contains(&id) {
+                q.push(id);
             }
         }
     }

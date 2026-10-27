@@ -119,6 +119,7 @@ impl Drop for ItemTxn<'_> {
         let locked = self.guard.take().is_some();
         super::fx::flush_with(self.server, fx, locked);
         if locked {
+            super::flush_deferred_glider_reequips(self.server);
             crate::systems::flush_achievements(self.server);
         }
     }
@@ -503,6 +504,11 @@ pub fn reequip_previous_glider(server: &GameServer, player: &PlayerRef) -> bool 
     let mut txn = ItemTxn::begin(server);
     let inv = Inv::of(player);
     let equipment = inv.equipment();
+    // Something is worn (e.g. a pack that is not dropped on death): keep the record for when it
+    // leaves; `glider_reequip_candidates` drops it if the player equipped something else.
+    if inv.equipped(equip_slot::BACKPACK).is_some() {
+        return false;
+    }
     // Only this character's own bag counts (not bank, mail, trade, system container, others).
     let glider = inv
         .bag()

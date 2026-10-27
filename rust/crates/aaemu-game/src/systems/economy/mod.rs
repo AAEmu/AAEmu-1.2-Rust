@@ -94,6 +94,9 @@ pub struct System {
     /// `Inventory.PreviousBackPackItemId` by character id (glider re-equip after a trade pack):
     /// `(item id, template id)` of the glider that was taken off.
     previous_backpack: Mutex<HashMap<u32, (u64, u32)>>,
+    /// Characters whose glider re-equip could not run where the pack left the back slot (an
+    /// unlocked / nested transaction); drained by [`flush_deferred_glider_reequips`].
+    deferred_reequip: Mutex<Vec<u32>>,
     /// Account-wide attributes (`account_attributes`, auction posting authority, ...).
     pub account_attributes: account_attributes::AccountAttributes,
     /// `AuctionManager`.
@@ -256,6 +259,28 @@ pub fn on_leave_world(server: &GameServer, player: &crate::world::PlayerRef) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&id);
+}
+
+/// Runs the glider re-equips queued by [`fx::flush_with`] where it could not start a
+/// transaction. Call at safe points (no character or container lock, no item operation held),
+/// next to `flush_achievements`. Offline characters are skipped.
+pub fn flush_deferred_glider_reequips(server: &GameServer) {
+    if System::ops_held_on_this_thread() {
+        return;
+    }
+    let ids = std::mem::take(
+        &mut *server
+            .systems
+            .economy
+            .deferred_reequip
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    );
+    for id in ids {
+        if let Some(p) = server.world.character_by_id(id) {
+            inventory::reequip_previous_glider(server, &p);
+        }
+    }
 }
 
 /// Hard disconnect: cancel trades while both player handles can still be resolved.

@@ -157,6 +157,7 @@ impl GameServer {
                 let started = std::time::Instant::now();
                 let res = (reg.handler)(self, conn, raw.body).await;
                 // Achievement events queued under foreign locks run now that the handler is done.
+                crate::systems::economy::flush_deferred_glider_reequips(self);
                 crate::systems::flush_achievements(self);
                 let took = started.elapsed();
                 if took > std::time::Duration::from_millis(250) {

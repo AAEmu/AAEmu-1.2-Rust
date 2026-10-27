@@ -428,6 +428,7 @@ pub fn with_quests<R>(
         Ok(done) => done,
         Err(payload) => std::panic::resume_unwind(payload),
     };
+    crate::systems::economy::flush_deferred_glider_reequips(server);
     crate::systems::flush_achievements(server);
     if buffs_changed {
         crate::systems::dispatch_buff_events(server, &WorldObject::from(player.clone()));
