@@ -835,6 +835,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   branch. Missing-song empty replies and existing read/ownership behavior remain.
   Request u64 / lookup u32 / response 32-bit widths are unchanged: native SC1e0
   sign-extends its signed32 note ID at `391e1691` before callback `391e169b`.
+  Arbitrary high request bits still alias the low32 song key; IDs >= 2^31 can
+  differ between zero-extended sheet IDs and sign-extended native cache keys.
+  No evidence establishes a safe ID-width or ownership-policy change here.
 
 * systems::skills (music): the C# (and this port) send `SCSkillStarted` only for casts with a
   cast time. The play (22213), pause (22214) and close-the-score (22217) skills are instant
@@ -853,9 +856,6 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   ~0 ms after the Started on loopback. CS124 (`CSEndMusicPacket`) matches the C#: it is a no-op
   while the 30 s ScoreMemorized (6010) buff is active and otherwise removes the tag-1155 play
   buffs (6176 / 6177); pause (dispel tag 1202) keeps 6010, close (dispel tag 1155) removes it.
-  Arbitrary high request bits still alias the low32 song key; IDs >= 2^31 can
-  differ between zero-extended sheet IDs and sign-extended native cache keys.
-  No evidence establishes a safe ID-width or ownership-policy change here.
 
 * systems::skills / systems::npcs (`Interaction` special effect 10): the former C# class was a
   TODO stub. The 1.2 `special_effects` rows put a `WorldInteractionType` in `value1` (row 11030:
