@@ -4,7 +4,7 @@ name: Docker Images
 # regressions show up in pull requests.
 on:
   push:
-    branches: [master, develop]
+    branches: [main, master, develop]
     paths: ["docker/**", "docker-compose.yaml", "rust/**", "SQL/**", ".dockerignore"]
   pull_request:
     paths: ["docker/**", "docker-compose.yaml", "rust/**", "SQL/**", ".dockerignore"]

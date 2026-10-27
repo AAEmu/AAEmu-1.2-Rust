@@ -1,15 +1,14 @@
 # ![AAEmu](https://i.imgur.com/NFDY376.png)
 
-[![Rust](https://github.com/AAEmu/AAEmu/actions/workflows/rust.yml/badge.svg?branch=develop)](https://github.com/AAEmu/AAEmu/actions/workflows/rust.yml)
-[![Coverage Status](https://coveralls.io/repos/github/AAEmu/AAEmu/badge.svg?branch=develop)](https://coveralls.io/github/AAEmu/AAEmu?branch=develop)
-![Discord](https://img.shields.io/discord/479677351618281472?color=%235865F2&label=Discord&logo=Discord&logoColor=%23FFFFFF")
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/AAEmu/AAEmu)
+[![Rust](https://github.com/AAEmu/AAEmu-1.2-Rust/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/AAEmu/AAEmu-1.2-Rust/actions/workflows/rust.yml)
+![Discord](https://img.shields.io/discord/479677351618281472?color=%235865F2&label=Discord&logo=Discord&logoColor=%23FFFFFF)
 
-__Open source server software for ArcheAge (1.2) written in Rust__
+__AAEmu 1.2 (Rust): open source server software for ArcheAge 1.2 (`r208022`), written in Rust__
 
-> AAEmu was originally written in C# (.NET). The login server, game server and tools have been
-> ported to Rust and the C# code has been removed (it remains in the git history); the Cargo
-> workspace lives in [`rust/`](rust/).
+> This repository continues the Rust rewrite of [AAEmu](https://github.com/AAEmu/AAEmu), which was
+> originally written in C# (.NET). The login server, game server and tools have been ported to
+> Rust and the C# code has been removed (it remains in the git history); the Cargo workspace lives
+> in [`rust/`](rust/).
 
 ## Getting started
 
@@ -18,13 +17,13 @@ __Open source server software for ArcheAge (1.2) written in Rust__
 - **Rust** (stable) via [rustup](https://rustup.rs/), which provides `cargo`. No .NET SDK is needed.
 - **MySQL 8**, either installed locally or run with Docker (`docker compose up -d db`).
 - The **ArcheAge 1.2 client** files (`game_pak`) and a matching **`compact.sqlite3`** game database
-  (not distributed with this repository, see the [wiki](https://github.com/AAEmu/AAEmu/wiki/Dependencies-and-Downloads)).
+  (not distributed with this repository, see [Dependencies and Downloads](Docs/wiki/Dependencies-and-Downloads.md)).
 
 ### Quick start
 
 ```sh
-git clone https://github.com/AAEmu/AAEmu.git
-cd AAEmu/rust
+git clone https://github.com/AAEmu/AAEmu-1.2-Rust.git
+cd AAEmu-1.2-Rust/rust
 cargo build --release
 
 # MySQL + login + game in one command (needs Docker, creates .env from .env.example)
@@ -66,7 +65,7 @@ Each server reads its files from its *application directory*; in a source checko
 - Logging goes to stdout and is controlled by `RUST_LOG` (default `info`, e.g. `RUST_LOG=debug`).
 
 See the [login](rust/crates/aaemu-login/README.md) and [game](rust/crates/aaemu-game/README.md)
-server READMEs and the [Config.json wiki page](https://github.com/AAEmu/AAEmu/wiki/Working-with-the-Config.json-files-and-server-listings)
+server READMEs and the [Config.json wiki page](Docs/wiki/Working-with-the-Config.json-files-and-server-listings.md)
 for details.
 
 ### Building, testing and publishing
@@ -89,7 +88,7 @@ binaries from their folders.
 `docker-compose.yaml` runs MySQL (`db`), Adminer (`adminer`, http://localhost:8080), `login` and
 `game`, built from `docker/Dockerfile`. Copy `.env.example` to `.env`, then use
 `Scripts/docker-install-local.sh` (or `.ps1`) and `docker compose up -d`. See the
-[Docker Installation Guide](https://github.com/AAEmu/AAEmu/wiki/Docker-Installation-Guide).
+[Docker Installation Guide](Docs/wiki/Docker-Installation-Guide.md).
 
 ### Starting the game client
 
@@ -113,28 +112,24 @@ encrypted XML ticket in an inherited file mapping, `-handle` argument) is descri
 and 1.2 client data with the headless `aaemu-testclient` bot (smoke tests, parity checks, load tests).
 
 ### Setup, help & support, FAQs
-Head over to the [wiki](https://github.com/AAEmu/AAEmu/wiki).
+Head over to the [documentation](Docs/wiki/Home.md).
 If you don't find what you're looking for there, [talk to a human](#discussion). Please do not use our issue tracker for support requests.
 
 ### Discussion
 - [Community Discord](https://discord.gg/vn8E8E6)
-- [FAQ](https://github.com/AAEmu/AAEmu/wiki/FAQ)
-- [Mini troubleshooting guide](https://github.com/AAEmu/AAEmu/wiki/Mini-troubleshoot-guide)
-
-### Can I contribute?
-Yes you can! Contributions are welcomed provided that they comply with our [Contributing Guidelines](CONTRIBUTING.md). Please ensure you read the relevant sections of the guidelines carefully before making a Pull Request or opening an Issue.
+- [FAQ](Docs/wiki/FAQ.md)
+- [Mini troubleshooting guide](Docs/wiki/Mini-troubleshoot-guide.md)
 
 ## Contributing
 
-See [Contributing](CONTRIBUTING.md) for details. Thanks to all the people who already contributed!
+Contributions are welcome. Please read the [Contributing Guidelines](CONTRIBUTING.md) before
+opening a pull request or an issue, and the
+[porting guide](rust/crates/aaemu-game/CONTRIBUTING-PORT.md) before changing game server code.
+Thanks to everyone who contributed to AAEmu!
 
-<a href="https://github.com/AAEmu/AAEmu/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=AAEmu/AAEmu&max=750" />
+<a href="https://github.com/AAEmu/AAEmu-1.2-Rust/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=AAEmu/AAEmu-1.2-Rust&max=750" />
 </a>
-
-## Star History
-
-[![Star History Chart](https://star-history.dera.page/svg?repos=AAEmu/AAEmu&type=timeline)](https://star-history.dera.page/#AAEmu/AAEmu&type=timeline)
 
 ## Licensing information
 
@@ -151,4 +146,4 @@ See [Contributing](CONTRIBUTING.md) for details. Thanks to all the people who al
 	You should have received a copy of the GNU Lesser General Public License
 	along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-AAEmu/AAEmu are not affiliated with XLGames. All brands and trademarks belong to their respective owners. AAEmu is not a XLGames-approved software, nor is it associated with XLGames.
+AAEmu is not affiliated with XLGames. All brands and trademarks belong to their respective owners. AAEmu is not a XLGames-approved software, nor is it associated with XLGames.
