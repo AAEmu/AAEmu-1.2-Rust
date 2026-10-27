@@ -16,7 +16,7 @@ use crate::world::PlayerRef;
 use crate::systems::skills::data::{BuffTemplate, SkillTemplate};
 use crate::systems::skills::types::skill_result;
 
-use super::{CSStartSkillPacket, SkillCastTarget, SkillCaster, SkillObject};
+use super::{class_skill_denial, CSStartSkillPacket, SkillCastTarget, SkillCaster, SkillObject};
 
 const ABILITY: u8 = 3;
 const TREE_SKILL: u32 = 31001;
@@ -272,6 +272,28 @@ async fn item_granted_tree_skill_casts_without_learning() {
 }
 
 #[tokio::test]
+async fn denial_codes_are_the_1_2_result_codes() {
+    let (server, _client, p) = fixture(true, false, false);
+    assert_eq!(
+        class_skill_denial(&server, &p, TREE_SKILL),
+        Some(skill_result::INVALID_SKILL)
+    );
+    assert_eq!(
+        class_skill_denial(&server, &p, VARIANT_SKILL),
+        Some(skill_result::INVALID_SKILL)
+    );
+    assert_eq!(class_skill_denial(&server, &p, BUFF_SKILL), None);
+    let (server, _client, p) = fixture(false, true, false);
+    assert_eq!(
+        class_skill_denial(&server, &p, TREE_SKILL),
+        Some(skill_result::INACTIVE_ABILITY)
+    );
+    let (server, _client, p) = fixture(true, true, false);
+    assert_eq!(class_skill_denial(&server, &p, TREE_SKILL), None);
+    assert_eq!(class_skill_denial(&server, &p, VARIANT_SKILL), None);
+}
+
+#[tokio::test]
 async fn mount_caster_tree_skill_casts_without_learning() {
     // `may_cast_as` accepts the player itself as a `Mount` caster; the mount branch runs before
     // the class authority check, exactly as real mate / slave casts do.
@@ -288,4 +310,145 @@ async fn mount_caster_tree_skill_casts_without_learning() {
     .await
     .unwrap();
     assert!(p.data().unit.skill_last_used_ms > 0);
+}
+
+/// Sources whose skills must stay castable without an ability tree: item use, mount-attached
+/// rider skills, buff grants, crafts, NPC interactions, slash commands, quests, housing /
+/// shipyard steps. Every id they name is ability-less in the 1.2 data, so the class check
+/// returns `None` before the learned / fallback branches.
+const ABILITY_LESS_SOURCES: &[(&str, &str)] = &[
+    ("items", "use_skill_id"),
+    ("item_grade_skills", "skill_id"),
+    ("item_procs", "skill_id"),
+    ("item_cap_scales", "skill_id"),
+    ("buff_skills", "skill_id"),
+    ("mount_attached_skills", "skill_id"),
+    ("crafts", "skill_id"),
+    ("npc_interactions", "skill_id"),
+    ("slash_commands", "skill_id"),
+    ("quest_components", "skill_id"),
+    ("quest_act_supply_skills", "skill_id"),
+    ("quest_act_check_timers", "skill_id"),
+    ("housing_build_steps", "skill_id"),
+    ("shipyard_steps", "skill_id"),
+    ("default_skills", "skill_id"),
+    ("gimmicks", "skill_id"),
+    ("gimmicks", "collision_skill_id"),
+    ("sphere_skills", "skill_id"),
+    ("ai_events", "skill_id"),
+];
+
+/// The only ability-tree skills named by a client-facing doodad / quest / sphere / mount table:
+/// 13572 is a login-stage mount skill (the mount branch handles it), the others are quest or
+/// doodad conditions for class skills the player must still learn and have active.
+const CLASS_TREE_SOURCE_EXCEPTIONS: &[u32] = &[13572, 10664, 10134, 12075, 11380];
+
+const CLASS_TREE_SOURCES: &[(&str, &str)] = &[
+    ("mount_skills", "skill_id"),
+    ("doodad_funcs", "func_skill_id"),
+    ("doodad_func_uses", "skill_id"),
+    ("doodad_func_fake_uses", "skill_id"),
+    ("doodad_func_fake_uses", "fake_skill_id"),
+    ("doodad_func_conditional_uses", "fake_skill_id"),
+    ("doodad_func_renew_items", "skill_id"),
+    ("doodad_func_evidence_item_loots", "skill_id"),
+    ("doodad_func_skill_hits", "skill_id"),
+    ("sphere_doodad_interacts", "skill_id"),
+    ("quest_act_con_accept_skills", "skill_id"),
+];
+
+/// Pins the data invariant the authority check relies on. Future compact patches that hand a
+/// class-tree skill to one of these sources fail here so the cast policy is reviewed.
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only)"]
+fn real_data_skill_sources_do_not_smuggle_class_tree_skills() {
+    use rusqlite::OptionalExtension;
+
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open compact.sqlite3");
+    let ability = |id: u32| -> Option<i64> {
+        conn.query_row("SELECT ability_id FROM skills WHERE id=?1", [id], |r| {
+            r.get(0)
+        })
+        .optional()
+        .expect("skills lookup")
+    };
+    let ids = |table: &str, column: &str| -> Vec<u32> {
+        let sql = format!("SELECT DISTINCT {column} FROM {table} WHERE {column} > 0");
+        let mut stmt = conn
+            .prepare(&sql)
+            .unwrap_or_else(|e| panic!("{table}.{column}: {e}"));
+        let rows = stmt
+            .query_map([], |r| r.get::<_, i64>(0))
+            .unwrap_or_else(|e| panic!("{table}.{column}: {e}"));
+        rows.filter_map(|r| u32::try_from(r.expect("id")).ok())
+            .collect()
+    };
+
+    let mut known = 0;
+    let mut class_tree = 0;
+    for &(table, column) in ABILITY_LESS_SOURCES {
+        let mut count = 0;
+        for id in ids(table, column) {
+            if let Some(a) = ability(id) {
+                count += 1;
+                assert_eq!(
+                    a, 0,
+                    "{table}.{column} names class-tree skill {id} (ability {a}); its cast would \
+                     now need an active ability and learning"
+                );
+            }
+        }
+        known += count;
+        eprintln!("{table}.{column}: {count} known, all ability-less");
+    }
+    for &(table, column) in CLASS_TREE_SOURCES {
+        for id in ids(table, column) {
+            if let Some(a) = ability(id) {
+                if a != 0 {
+                    class_tree += 1;
+                    assert!(
+                        CLASS_TREE_SOURCE_EXCEPTIONS.contains(&id),
+                        "{table}.{column} names new class-tree skill {id} (ability {a}); decide \
+                         whether its cast path is a grant or a learned class skill"
+                    );
+                }
+            }
+        }
+    }
+    for id in CLASS_TREE_SOURCE_EXCEPTIONS {
+        assert!(
+            matches!(ability(*id), Some(a) if a != 0),
+            "exception {id} is no longer a class-tree skill"
+        );
+    }
+
+    let (total, ability_tree): (i64, i64) = conn
+        .query_row(
+            "SELECT COUNT(*), SUM(ability_id <> 0) FROM skills",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("skills count");
+    let need_learn: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM skills WHERE ability_id <> 0 AND need_learn = 0",
+            [],
+            |r| r.get(0),
+        )
+        .expect("need_learn count");
+    eprintln!(
+        "skills {total}, class-tree {ability_tree}, ability-less source ids {known}, \
+         class-tree source ids {class_tree}"
+    );
+    assert_eq!(ability_tree, 170, "unexpected class-tree skill count");
+    assert_eq!(
+        need_learn, 0,
+        "an ability-tree skill without need_learn changes the cast policy"
+    );
+    assert!(class_tree > 0, "no class-tree source was checked");
 }

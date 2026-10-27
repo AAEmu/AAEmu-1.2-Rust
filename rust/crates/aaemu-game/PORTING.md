@@ -2679,6 +2679,24 @@ two bots before the fix (a foreign `Mount` caster, an NPC-only skill and a far d
   (`np_skills`) are deliberately absent. Possible over-blocking: a skill the 1.2 client casts that
   none of these tables names (the retail rule is not confirmed); such a cast is refused with a
   warning naming the skill id, so it is easy to add the table.
+- **Ability-tree skills need an active ability and a learned skill.** The C# `CSStartSkill` fell
+  through to the catch-all above and cast any skill id. The 1.2 client refuses unlearned and
+  inactive-tree skills locally: the action-slot UI carries `canUse` / `learned` states
+  (`scriptsbin/x2ui/components/action_slot.alb`), the native `X2::GameClient::SkillAccessor`
+  publishes `learned`, and `URK_TRAINED_SKILL` is the 1.2 unmet-requirement name
+  (`out-x2game/x2game.dll.c`). `handlers::class_skill_denial` now refuses a client cast of a
+  skill with `ability_id != 0` when that ability is not one of the three active ones
+  (`SkillResult.INACTIVE_ABILITY`) or, for `need_learn` skills, when neither the skill nor a
+  same-ability-level variant is learned (`SkillResult.INVALID_SKILL`). Item, mount, default /
+  common and auto-attack casts are decided before the check; ability-less skills (buff, quest,
+  doodad, craft, NPC interaction, slash command, housing / shipyard) are unaffected, and the
+  real-data test pins that every id those tables name is ability-less. The only ability-tree
+  skills a client-facing source table names are mount skill 13572 (mount branch) and
+  quest/doodad conditions 10664, 10134, 12075 and 11380; they still need their ability active and
+  the skill learned, as the client requires. The exact result codes are our choice (the client
+  only needs a non-success `SCSkillStarted`). Not closed here: a `Mount` caster naming the player
+  itself still runs the mount branch (the self allowance above), and a bind-on-pickup item caster
+  can still name a different skill id (the legacy fireplace exception, narrowed for UCC effects).
 
 ## Ship repair timer and destroyed-vehicle HP (2026-10-20)
 
