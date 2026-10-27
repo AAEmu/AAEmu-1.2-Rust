@@ -12,7 +12,9 @@ Two phases around the ignored Rust test `dump_terrain_heights` (needs the 1.2 `g
 `prepare` applies the template and title filters and writes the terrain query; `finish` applies the
 zone, terrain / neighbour, duplicate and exclusion filters and writes `npc_spawns_10x.json` and
 `doodad_spawns_10x.json` into the 1.2 world folder (the loader reads every `npc_spawns*.json` /
-`doodad_spawns*.json`). Rules follow PORTING.md "Spawn data import".
+`doodad_spawns*.json`). Only mining veins are written as doodads: the 10.x source is a live-server
+snapshot whose other doodads are mostly player-planted crops, trees, livestock and furniture. Rules
+follow PORTING.md "Spawn data import".
 """
 import argparse
 import collections
@@ -41,6 +43,7 @@ EXCLUDE_DOODAD_NAMES = [
     re.compile(r"sunken treasure chest", re.I),
 ]
 IRON_VEIN = 1671
+VEIN = re.compile(r"\bvein\b", re.I)  # the only 10.x doodads shipped, see docstring
 # zone_groups.name (display name): Rookborne Basin, Feuille Sound (sea), White Arden, Tigerspine
 # Mountains, Silent Forest, Sanddeep
 REPORT_GROUPS = [
@@ -217,7 +220,7 @@ def finish(a):
         kept[kind].append((entry(c), h["zone"]))
         s["survivors"] += 1
     for kind, fname in (("npc", "npc_spawns_10x.json"), ("doodad", "doodad_spawns_10x.json")):
-        rows = [r for r, _ in kept[kind]]
+        rows = [r for r, _ in kept[kind] if kind == "npc" or VEIN.search(r["Title"])]
         rows.sort(key=lambda r: (r["UnitId"], r["Position"]["X"], r["Position"]["Y"], r["Position"]["Z"]))
         with open(os.path.join(a.world12, fname), "w", encoding="utf-8", newline="\n") as f:
             json.dump(rows, f, indent=2, ensure_ascii=False)
