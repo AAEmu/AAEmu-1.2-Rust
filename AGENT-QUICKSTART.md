@@ -42,7 +42,7 @@ sessions do not use it.
 
 | What | Path |
 |---|---|
-| Integration checkout (branch `rust-rewrite`, receives `lane.sh land` only) | `C:\Users\messe\Documents\GitHub\AAEmu-rust-1.2` — pushed to the user's fork `https://github.com/NickMesser/AAEmu` (remote `fork`). Never push to `origin`/`upstream` (AAEmu/AAEmu). |
+| Integration checkout (branch `rust-rewrite`, receives `lane.sh land` only) | `C:\Users\messe\Documents\GitHub\AAEmu-rust-1.2` — pushed to the main repository `https://github.com/AAEmu/AAEmu-1.2-Rust` (`git push aaemu12 rust-rewrite:main`). Never push to `origin`/`upstream` (AAEmu/AAEmu); the `fork` remote is retired. |
 | Lane worktrees / registry | `D:\aaemu-wt\<name>` / `D:\aaemu-lanes\<name>.env` |
 | Cargo build output | `D:\aaemu-target\<lane>` (lane's untracked `rust/.cargo/config.toml`; the integration checkout uses `D:\aaemu-target\main`) |
 | Lane runtime dirs (configs, binaries, logs, shots) | `D:\aaemu-live-<lane>\{rs-login,rs-game,bin,logs,shots}` |
