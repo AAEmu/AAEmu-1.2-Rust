@@ -436,7 +436,7 @@ fn real_data_skill_sources_do_not_smuggle_class_tree_skills() {
         .expect("skills count");
     let need_learn: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM skills WHERE ability_id <> 0 AND need_learn = 0",
+            "SELECT COUNT(*) FROM skills WHERE ability_id <> 0 AND need_learn = 'f'",
             [],
             |r| r.get(0),
         )
@@ -446,9 +446,10 @@ fn real_data_skill_sources_do_not_smuggle_class_tree_skills() {
          class-tree source ids {class_tree}"
     );
     assert_eq!(ability_tree, 170, "unexpected class-tree skill count");
+    // `need_learn` is stored as 't' / 'f'. These tree skills only need their ability active.
     assert_eq!(
-        need_learn, 0,
-        "an ability-tree skill without need_learn changes the cast policy"
+        need_learn, 27,
+        "the number of ability-tree skills castable without learning changed"
     );
     assert!(class_tree > 0, "no class-tree source was checked");
 }

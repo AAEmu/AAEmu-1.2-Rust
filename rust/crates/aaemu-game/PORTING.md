@@ -2724,7 +2724,8 @@ two bots before the fix (a foreign `Mount` caster, an NPC-only skill and a far d
   `INVALID_SKILL` 0x1e and `INACTIVE_ABILITY` 0x1f (`out-x2game/x2game.dll.c`). `handlers::class_skill_denial` now refuses a client cast of a
   skill with `ability_id != 0` when that ability is not one of the three active ones
   (`SkillResult.INACTIVE_ABILITY`) or, for `need_learn` skills, when neither the skill nor a
-  same-ability-level variant is learned (`SkillResult.INVALID_SKILL`). Item, mount, default /
+  same-ability-level variant is learned (`SkillResult.INVALID_SKILL`); the 27 tree skills with
+  `need_learn` false only need their ability active. Item, mount, default /
   common and auto-attack casts are decided before the check; ability-less skills (buff, quest,
   doodad, craft, NPC interaction, slash command, housing / shipyard) are unaffected, and the
   real-data test pins that every id those tables name is ability-less. The only ability-tree
