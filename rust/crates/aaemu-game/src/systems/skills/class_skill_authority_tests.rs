@@ -1,0 +1,291 @@
+//! Client casts of ability-tree skills need an active ability and (when `need_learn`) a learned
+//! skill; the 1.2 client enforces this locally, the server must too.
+//!
+//! The tests drive `CSStartSkillPacket` so they run against a server that still accepts any
+//! client skill id: the three `refused_*` tests fail there, every other source keeps casting.
+
+use std::sync::Arc;
+
+use crate::data::GameData;
+use crate::models::char_data::Skill;
+use crate::net::registry::ClientPacket;
+use crate::opcodes::sc;
+use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
+use crate::world::PlayerRef;
+
+use crate::systems::skills::data::{BuffTemplate, SkillTemplate};
+use crate::systems::skills::types::skill_result;
+
+use super::{CSStartSkillPacket, SkillCastTarget, SkillCaster, SkillObject};
+
+const ABILITY: u8 = 3;
+const TREE_SKILL: u32 = 31001;
+const VARIANT_SKILL: u32 = 31002;
+const BUFF_SKILL: u32 = 31003;
+const QUEST_SKILL: u32 = 31004;
+const DOODAD_SKILL: u32 = 31005;
+const ITEM_SKILL: u32 = 31006;
+const TOGGLE_SKILL: u32 = 31007;
+const TOGGLE_BUFF: u32 = 51007;
+const ITEM_TEMPLATE: u32 = crate::systems::economy::tests::STACK;
+
+fn tree_skill(id: u32) -> SkillTemplate {
+    SkillTemplate {
+        id,
+        ability_id: ABILITY,
+        ability_level: 1,
+        level_step: 10,
+        need_learn: true,
+        target_type: 9,
+        max_range: 4,
+        ..SkillTemplate::default()
+    }
+}
+
+fn plain_skill(id: u32) -> SkillTemplate {
+    // Ability-less, like the buff / quest / doodad interaction skills of the 1.2 data.
+    SkillTemplate {
+        id,
+        target_type: 9,
+        max_range: 4,
+        ..SkillTemplate::default()
+    }
+}
+
+fn data() -> GameData {
+    let mut data = GameData::empty();
+    data.systems.skills.add_skill(tree_skill(TREE_SKILL));
+    data.systems.skills.add_skill(tree_skill(VARIANT_SKILL));
+    for id in [BUFF_SKILL, QUEST_SKILL, DOODAD_SKILL] {
+        data.systems.skills.add_skill(plain_skill(id));
+        // The loader marks these ids from `buff_skills` / `quest_*` / `doodad_func_*`.
+        data.skills.add_client_sourced_skill(id);
+    }
+    let mut toggle = tree_skill(TOGGLE_SKILL);
+    toggle.toggle_buff_id = TOGGLE_BUFF;
+    data.systems.skills.add_skill(toggle);
+    data.systems.skills.add_buff(BuffTemplate {
+        id: TOGGLE_BUFF,
+        kind: 1,
+        duration: 0,
+        stack_rule: 1,
+        ..Default::default()
+    });
+    data
+}
+
+fn fixture(
+    active: bool,
+    learned: bool,
+    client_sourced: bool,
+) -> (Arc<crate::GameServer>, TestClient, PlayerRef) {
+    let mut data = data();
+    if client_sourced {
+        // The loader marks every id named by the player-facing source tables.
+        data.skills.add_client_sourced_skill(TREE_SKILL);
+    }
+    let server = Arc::new(test_server_with(data));
+    server.set_self();
+    crate::systems::skills::bind(&server);
+    let mut client = TestClient::new(&server, 1, 1001);
+    let mut ch = test_character(1, "Caster", 100.0, 100.0);
+    ch.ability1 = if active { ABILITY } else { 1 };
+    if learned {
+        ch.skills.skills.push(Skill {
+            id: TREE_SKILL,
+            level: 1,
+        });
+    }
+    let player = spawn_player(&server, &client, ch, 0x100);
+    client.conn.active_char = Some(player.clone());
+    client.drain();
+    (server, client, player)
+}
+
+fn packet(skill_id: u32, caster: SkillCaster, target: u32) -> CSStartSkillPacket {
+    CSStartSkillPacket {
+        skill_id,
+        caster,
+        target: SkillCastTarget::Unit(target),
+        flag: 0,
+        skill_object: SkillObject::None,
+    }
+}
+
+async fn cast(server: &crate::GameServer, client: &mut TestClient, p: &PlayerRef, skill: u32) {
+    packet(skill, SkillCaster::Unit(p.obj_id), p.obj_id)
+        .handle(server, &mut client.conn)
+        .await
+        .unwrap();
+}
+
+fn started_result(client: &mut TestClient, skill: u32) -> Option<u8> {
+    client
+        .drain()
+        .into_iter()
+        .find_map(|(op, body)| (op == sc::SCSkillStartedPacket).then_some(body))
+        .and_then(|body| {
+            let mut s = aaemu_commons::PacketStream::from_bytes(body);
+            if s.read_u32().ok() != Some(skill) {
+                return None;
+            }
+            let _ = s.read_u16();
+            // Unit caster / unit target / no skill object: the shapes these tests send.
+            let _ = s.read_u8();
+            let _ = s.read_bc();
+            let _ = s.read_u8();
+            let _ = s.read_bc();
+            let _ = s.read_u8();
+            let _ = s.read_u16();
+            let _ = s.read_u16();
+            let _ = s.read_u8();
+            let flags = s.read_u8().ok()?;
+            (flags & 1 != 0).then(|| s.read_u8().ok()).flatten()
+        })
+}
+
+#[tokio::test]
+async fn unlearned_tree_skill_of_an_active_ability_is_refused_with_invalid_skill() {
+    let (server, mut client, p) = fixture(true, false, false);
+    cast(&server, &mut client, &p, TREE_SKILL).await;
+    assert_eq!(p.data().unit.skill_last_used_ms, 0);
+    assert_eq!(
+        started_result(&mut client, TREE_SKILL),
+        Some(skill_result::INVALID_SKILL)
+    );
+}
+
+#[tokio::test]
+async fn unlearned_sourced_tree_skill_is_refused_with_invalid_skill() {
+    // Static tables name this class skill (a quest / doodad condition), but the character never
+    // learned it: the 1.2 client refuses it in the action bar.
+    let (server, mut client, p) = fixture(true, false, true);
+    cast(&server, &mut client, &p, TREE_SKILL).await;
+    assert_eq!(p.data().unit.skill_last_used_ms, 0);
+    assert_eq!(
+        started_result(&mut client, TREE_SKILL),
+        Some(skill_result::INVALID_SKILL)
+    );
+}
+
+#[tokio::test]
+async fn learned_tree_skill_of_an_inactive_ability_is_refused_with_inactive_ability() {
+    let (server, mut client, p) = fixture(false, true, false);
+    cast(&server, &mut client, &p, TREE_SKILL).await;
+    assert_eq!(p.data().unit.skill_last_used_ms, 0);
+    assert_eq!(
+        started_result(&mut client, TREE_SKILL),
+        Some(skill_result::INACTIVE_ABILITY)
+    );
+}
+
+#[tokio::test]
+async fn learned_tree_skill_of_an_active_ability_casts() {
+    let (server, mut client, p) = fixture(true, true, false);
+    cast(&server, &mut client, &p, TREE_SKILL).await;
+    assert!(p.data().unit.skill_last_used_ms > 0);
+    assert!(!client
+        .drain()
+        .iter()
+        .any(|(op, _)| *op == sc::SCSkillStartedPacket));
+}
+
+#[tokio::test]
+async fn variant_of_a_learned_tree_skill_casts() {
+    let (server, mut client, p) = fixture(true, true, false);
+    cast(&server, &mut client, &p, VARIANT_SKILL).await;
+    assert!(p.data().unit.skill_last_used_ms > 0);
+}
+
+#[tokio::test]
+async fn ability_less_buff_quest_and_doodad_skills_stay_castable() {
+    for skill in [BUFF_SKILL, QUEST_SKILL, DOODAD_SKILL] {
+        let (server, mut client, p) = fixture(true, false, true);
+        cast(&server, &mut client, &p, skill).await;
+        assert!(p.data().unit.skill_last_used_ms > 0, "skill {skill}");
+    }
+}
+
+#[tokio::test]
+async fn toggle_skill_of_an_active_ability_casts() {
+    let (server, mut client, p) = fixture(true, true, false);
+    cast(&server, &mut client, &p, TOGGLE_SKILL).await;
+    assert!(p.data().unit.skill_last_used_ms > 0);
+}
+
+#[tokio::test]
+async fn item_granted_tree_skill_casts_without_learning() {
+    let mut data = crate::systems::economy::tests::test_data();
+    data.systems.skills.add_skill(tree_skill(ITEM_SKILL));
+    data.items
+        .templates
+        .get_mut(&ITEM_TEMPLATE)
+        .expect("item template")
+        .use_skill_id = ITEM_SKILL;
+    let server = Arc::new(test_server_with(data));
+    server.set_self();
+    crate::systems::skills::bind(&server);
+    crate::systems::economy::bridges::install(&server);
+    let mut client = TestClient::new(&server, 1, 1001);
+    let mut ch = test_character(1, "ItemCaster", 100.0, 100.0);
+    ch.ability1 = 1;
+    let p = spawn_player(&server, &client, ch, 0x100);
+    client.conn.active_char = Some(p.clone());
+    server
+        .items
+        .add_container(crate::systems::economy::inventory::Inv::of(&p).bag());
+    let item = server
+        .items
+        .create(
+            ITEM_TEMPLATE,
+            1,
+            0,
+            1,
+            &server.game_data.items,
+            &server.ids.item,
+            0,
+        )
+        .expect("item");
+    let item_id = item.id;
+    crate::systems::economy::inventory::Inv::of(&p)
+        .bag()
+        .lock()
+        .unwrap()
+        .add_new_item(item, 0, &server.game_data.items)
+        .expect("bag add");
+    client.drain();
+    packet(
+        ITEM_SKILL,
+        SkillCaster::Item {
+            obj_id: p.obj_id,
+            item_id,
+            item_template_id: ITEM_TEMPLATE,
+            type1: 0,
+            type2: 0,
+        },
+        p.obj_id,
+    )
+    .handle(&server, &mut client.conn)
+    .await
+    .unwrap();
+    assert!(p.data().unit.skill_last_used_ms > 0);
+}
+
+#[tokio::test]
+async fn mount_caster_tree_skill_casts_without_learning() {
+    // `may_cast_as` accepts the player itself as a `Mount` caster; the mount branch runs before
+    // the class authority check, exactly as real mate / slave casts do.
+    let (server, mut client, p) = fixture(true, false, false);
+    packet(
+        TREE_SKILL,
+        SkillCaster::Mount {
+            obj_id: p.obj_id,
+            mount_skill_template_id: TREE_SKILL,
+        },
+        p.obj_id,
+    )
+    .handle(&server, &mut client.conn)
+    .await
+    .unwrap();
+    assert!(p.data().unit.skill_last_used_ms > 0);
+}

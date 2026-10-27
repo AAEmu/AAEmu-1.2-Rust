@@ -326,6 +326,10 @@ fn send_cast_refused(
 }
 
 #[cfg(test)]
+#[path = "class_skill_authority_tests.rs"]
+mod class_skill_authority_tests;
+
+#[cfg(test)]
 #[path = "ucc_item_authority_tests.rs"]
 mod ucc_item_authority_tests;
 
