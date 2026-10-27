@@ -2,16 +2,17 @@
 
 Guidance for coding agents working in this repository.
 
-## Git remotes: push only to the fork
+## Git remotes: the main repository is `AAEmu/AAEmu-1.2-Rust`
 
-- **Never push to `origin` or `upstream`** (both are `https://github.com/AAEmu/AAEmu.git`, the
-  upstream project). This covers every branch and tag, including branch deletions.
-- **Only ever push to `fork`** (`https://github.com/NickMesser/AAEmu.git`):
-  `git push -u fork <branch>`. Open pull requests from the fork.
-- This overrides `CONTRIBUTING.md`, which assumes your fork is called `origin`; in this checkout it
-  is not.
-- The push URLs of `origin` and `upstream` are disabled in the local git config (`no_push`). Do not
-  re-enable them.
+- **Main repository:** [`AAEmu/AAEmu-1.2-Rust`](https://github.com/AAEmu/AAEmu-1.2-Rust), remote
+  `aaemu12`. The integration branch `rust-rewrite` tracks `aaemu12/main`; publish it with
+  `git push aaemu12 rust-rewrite:main` (after `lane.sh land`). Feature branches that need review
+  are pushed to `aaemu12` and opened as pull requests against `main`.
+- **Never push to `origin` or `upstream`** (both are `https://github.com/AAEmu/AAEmu.git`, the old
+  multi-version project). This covers every branch and tag, including branch deletions.
+- **The fork is retired:** `fork` (`https://github.com/NickMesser/AAEmu.git`) is no longer used.
+- The push URLs of `origin`, `upstream` and `fork` are disabled in the local git config (`no_push`).
+  Do not re-enable them.
 - **`AAEmu/AAEmu` must not lose anything.** Its branches are being copied into their own
   repositories (this one became [`AAEmu/AAEmu-1.2-Rust`](https://github.com/AAEmu/AAEmu-1.2-Rust)).
   Until the owner explicitly says to delete the original repository, never delete, archive, rename
