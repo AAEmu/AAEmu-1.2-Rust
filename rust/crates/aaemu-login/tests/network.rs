@@ -448,3 +448,39 @@ async fn replaced_internal_socket_disconnect_does_not_unregister_current_owner()
     );
     shutdown.cancel();
 }
+
+#[tokio::test]
+async fn wrong_secret_is_refused_and_the_connection_is_closed() {
+    let (_server, internal_addr, _login_addr, shutdown) = start_server().await;
+    let mut rogue = Framed::new(TcpStream::connect(internal_addr).await.unwrap(), FrameCodec);
+    send(
+        &mut rogue,
+        &GlRegisterGameServer {
+            secret_key: "tesx".into(),
+            gs_id: GameServerId(1),
+            mirrors: vec![],
+        },
+    )
+    .await;
+
+    // The registration is refused after the five-second delay.
+    let frame = tokio::time::timeout(Duration::from_secs(8), rogue.next())
+        .await
+        .expect("timely registration error")
+        .expect("open")
+        .expect("ok");
+    let (op, mut body) = split_opcode(frame).unwrap();
+    assert_eq!(op, l2g::opcodes::LG_REGISTER_GAME_SERVER);
+    assert_eq!(
+        LgRegisterGameServer::read(&mut body).unwrap().result,
+        aaemu_login::models::GsRegisterResult::Error
+    );
+
+    // Then the login server drops the connection, so the peer cannot keep guessing on it.
+    let closed = tokio::time::timeout(Duration::from_secs(2), rogue.next()).await;
+    assert!(
+        matches!(closed, Ok(None) | Ok(Some(Err(_)))),
+        "wrong-secret connection stayed open: {closed:?}"
+    );
+    shutdown.cancel();
+}

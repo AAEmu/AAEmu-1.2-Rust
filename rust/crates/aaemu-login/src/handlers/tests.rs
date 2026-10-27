@@ -118,6 +118,14 @@ async fn bad_secret_connection_cannot_seed_reconnect_token() {
     assert_unauthorized_token_rejected(Some("wrong")).await;
 }
 
+#[test]
+fn secret_comparison_accepts_only_the_exact_secret() {
+    assert!(secret_matches("test", "test"));
+    assert!(!secret_matches("tesx", "test"));
+    assert!(!secret_matches("test ", "test"));
+    assert!(!secret_matches("", "test"));
+}
+
 #[tokio::test]
 async fn registered_connection_cannot_seed_an_unrelated_world_token() {
     let server = fixture().await;
