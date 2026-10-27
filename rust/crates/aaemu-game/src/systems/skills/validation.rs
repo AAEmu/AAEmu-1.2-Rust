@@ -360,7 +360,10 @@ pub(super) fn check(
                 crate::systems::ai::collision::query::ray_flags::SKILL_OBSTACLE,
                 &ignored,
             ) {
-                let character = caster.with_base_unit(|b| b.name().to_string());
+                let character = caster
+                    .as_player()
+                    .map(|p| p.data().unit.name.clone())
+                    .unwrap_or_else(|| caster.with_base_unit(|b| b.name().to_string()));
                 tracing::warn!(
                     character = %character,
                     skill = template.id,
