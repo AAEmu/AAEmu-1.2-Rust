@@ -143,6 +143,42 @@ async fn queries_and_doodad_colliders() {
 }
 
 #[tokio::test]
+async fn unit_colliders_are_skippable_by_obj_id() {
+    let s = server(100.0);
+    let pw = super::phys_world(&s, 0).unwrap();
+    // A living proxy is stored under `living`, not `objects`: the ignore list must find it
+    // there, or a caster's or target's own collider can block its interaction ray.
+    pw.lock().sync_living(
+        7,
+        &super::data::LivingParams::default(),
+        Vec3::new(500.0, 500.0, 100.0),
+    );
+    let from = [495.0, 500.0, 100.5];
+    let to = [505.0, 500.0, 100.5];
+    let query = |ignored| {
+        super::raycast_ignoring_objects(
+            &s,
+            0,
+            from,
+            to,
+            super::query::mask::ALL_TERRAIN_WATER,
+            super::query::ray_flags::WZ_RAYCASTING,
+            ignored,
+        )
+    };
+    assert!(matches!(
+        query(&[]),
+        Some(Some(hit))
+            if hit.owner
+                == Some(Owner::Object {
+                    kind: ObjKind::Unit,
+                    obj_id: 7,
+                })
+    ));
+    assert_eq!(query(&[(ObjKind::Unit, 7)]), Some(None));
+}
+
+#[tokio::test]
 async fn zone_fall_gate_in_the_movement_path() {
     // ground above the synthetic world's ocean level (100): no swimming
     let s = server(300.0);
