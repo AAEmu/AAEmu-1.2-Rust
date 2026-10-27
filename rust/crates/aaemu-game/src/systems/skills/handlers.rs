@@ -241,6 +241,16 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, p: CSStartSki
         );
         result = r;
         value = v;
+    } else if let Some(denied) = class_skill_denial(server, &player, skill_id) {
+        // Ability-tree skills of an inactive tree, or never learned: the 1.2 client refuses
+        // these locally (`URK_TRAINED_SKILL`), so only another client can send them.
+        tracing::warn!(
+            character = %player.data().unit.name,
+            skill_id,
+            result = denied,
+            "Client cast of an inactive or unlearned ability skill refused"
+        );
+        result = denied;
     } else if player.data().skills.skills.iter().any(|s| s.id == skill_id) {
         let Some(t) = server.game_data.systems.skills.skill(skill_id).cloned() else {
             return;
@@ -326,8 +336,46 @@ fn send_cast_refused(
 }
 
 #[cfg(test)]
+#[path = "class_skill_authority_tests.rs"]
+mod class_skill_authority_tests;
+
+#[cfg(test)]
 #[path = "ucc_item_authority_tests.rs"]
 mod ucc_item_authority_tests;
+
+/// Why a client `CSStartSkill` of an ability-tree skill is refused (`None` = allowed).
+///
+/// A skill that belongs to an ability (`ability_id != 0`) can only be cast while that ability
+/// is one of the character's three active ones (`INACTIVE_ABILITY`), and a skill that must be
+/// learned (`need_learn`) only after the character learned it or a skill of the same ability
+/// level (`INVALID_SKILL`). Skills with no ability (doodad / quest / item-driven and
+/// buff-granted ones) are not ability-tree skills and stay unrestricted; item, mount and
+/// default / common skills never reach this check, and GM commands cast through the server
+/// skill API instead of this handler.
+pub(super) fn class_skill_denial(
+    server: &GameServer,
+    player: &crate::world::PlayerRef,
+    skill_id: u32,
+) -> Option<u8> {
+    let t = server.game_data.systems.skills.skill(skill_id)?;
+    if t.ability_id == 0 {
+        return None;
+    }
+    let (active, learned) = {
+        let c = player.data();
+        (
+            [c.ability1, c.ability2, c.ability3].contains(&t.ability_id),
+            c.skills.skills.iter().any(|s| s.id == skill_id),
+        )
+    };
+    if !active {
+        return Some(skill_result::INACTIVE_ABILITY);
+    }
+    if t.need_learn && !learned && !is_variant_of_skill(server, player, skill_id) {
+        return Some(skill_result::INVALID_SKILL);
+    }
+    None
+}
 
 /// `CharacterSkills.IsVariantOfSkill(skillId)`.
 fn is_variant_of_skill(
