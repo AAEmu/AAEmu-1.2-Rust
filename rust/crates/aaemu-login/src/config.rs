@@ -544,6 +544,22 @@ mod tests {
     }
 
     #[test]
+    fn shipped_internal_network_binds_loopback() {
+        let app = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("app");
+        let args: Vec<String> = [
+            "--Connections:MySQLProvider:Host=127.0.0.1",
+            "--Connections:MySQLProvider:Port=3306",
+            "--Connections:MySQLProvider:User=aaemu",
+            "--Connections:MySQLProvider:Password=secret",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let cfg = AppConfig::load(&app, &args).unwrap();
+        assert_eq!(cfg.internal_network.host, "127.0.0.1");
+    }
+
+    #[test]
     fn env_and_args_override() {
         let mut root = base();
         apply_env(

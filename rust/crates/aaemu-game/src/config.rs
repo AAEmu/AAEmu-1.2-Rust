@@ -1204,6 +1204,8 @@ mod tests {
         // Specialty.json, AccessLevels.json, CharacterSettings.json
         assert_eq!(cfg.specialty.trade_pack_mail_delay_in_minutes, 480.0);
         assert_eq!(cfg.access_level_of("help"), Some(0));
+        assert_eq!(cfg.access_level_of("fly"), Some(50));
+        assert_eq!(cfg.access_level_of("teleport"), Some(50));
         assert_eq!(cfg.access_level_of("announce"), Some(50));
         assert_eq!(cfg.access_level_of("Announce"), None);
         assert!(cfg.account.delete_release_name);
