@@ -2996,3 +2996,17 @@ Archeum Workbench) greyed out the craft button of every workbench until relog. D
 - A refused house-bench access now logs why (`craft::housing_bench_denial`).
 
 The `craft` scenario of `aaemu-testclient` drives the labor-exhaustion stop live.
+
+## Glider re-equip after a trade pack (deviation)
+
+The C# put the glider back (`Inventory.PreviousBackPackItemId`) only in `PutDownBackpackEffect`.
+Here every route that takes an item out of the back slot re-equips it: the equipment container
+queues `ItemFx::EquipLeave` for the slot, and `economy::fx::flush` calls
+`inventory::reequip_previous_glider` (put down, death drop, turn-in / sale / destroy removals,
+moves to another container). The record is `(item id, template id)`; the glider is equipped only if
+that same item is still in the character's own bag, is a glider, the back slot is empty and the
+container accepts it (the same `can_accept` / `SplitOrMoveItem` path as `CSSwapItems`; the port's
+`CanAccept` has no level or class check for backpacks). Any failed check consumes the record, as
+does the player equipping something else into the back slot. A pack lost while the character is
+dead keeps the record until `resurrect_character`. The explicit `SCUnitEquipmentsChangedPacket`
+broadcast in `put_down_backpack` is gone (the equipment events broadcast leave and re-equip).

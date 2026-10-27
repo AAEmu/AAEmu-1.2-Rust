@@ -20,7 +20,7 @@ use crate::opcodes::sc;
 use crate::packets::world::{SCChatMessagePacket, SCErrorMsgPacket};
 use crate::server::GameServer;
 use crate::systems::economy::error_message;
-use crate::systems::economy::inventory::Inv;
+use crate::systems::economy::inventory::{Inv, ItemTxn};
 use crate::systems::economy::item_effect_packets::*;
 use crate::systems::economy::item_effects::*;
 use crate::systems::economy::item_packets::{
@@ -42,6 +42,8 @@ const POWDER: u32 = 5300;
 const SLAVE_ITEM: u32 = 5400;
 const BACKPACK: u32 = 5500;
 const TIMEGLASS: u32 = 5600;
+const PACK: u32 = 5510; // a trade pack (back slot)
+const GLIDER_HI: u32 = 5520; // another glider template
 const RECHARGEABLE: u32 = 5700;
 const TL: u16 = 0x77;
 
@@ -155,6 +157,24 @@ fn data() -> GameData {
             )
         },
     );
+    for (id, kind, level) in [
+        (PACK, crate::data::items::backpack_kind::TRADE_PACK, 1),
+        (GLIDER_HI, crate::data::items::backpack_type::GLIDER, 1),
+    ] {
+        d.items.templates.insert(
+            id,
+            ItemTemplate {
+                max_count: 1,
+                level,
+                ..ItemTemplate::new(
+                    id,
+                    TemplateKind::Backpack {
+                        backpack_type: kind,
+                    },
+                )
+            },
+        );
+    }
     d.items.enchanting_costs.insert(
         3,
         crate::data::items::EquipSlotEnchantingCost {
@@ -1562,6 +1582,7 @@ impl ItemEffectHooks for RecordingHooks {
 #[tokio::test]
 async fn put_down_backpack_drops_and_reequips_the_glider() {
     let mut w = world();
+    w.pa.data().unit.hp = 100;
     let pack = give(
         &w,
         &w.pa.clone(),
@@ -1571,7 +1592,10 @@ async fn put_down_backpack_drops_and_reequips_the_glider() {
         equip_slot::BACKPACK,
     );
     let glider = give(&w, &w.pa.clone(), slot_type::INVENTORY, BACKPACK, 1, 4);
-    w.server.systems.economy.set_previous_backpack(1, glider);
+    w.server
+        .systems
+        .economy
+        .set_previous_backpack(1, glider, BACKPACK);
     let hooks = Arc::new(RecordingHooks::default());
     w.server
         .systems
@@ -1600,17 +1624,10 @@ async fn put_down_backpack_drops_and_reequips_the_glider() {
     let ops = w.a.drain_ops();
     assert_eq!(ops[0], sc::SCItemTaskSuccessPacket); // DropBackpack
     assert_eq!(*ops.last().unwrap(), sc::SCItemTaskSuccessPacket); // SwapItems
-                                                                   // Bob: the equipment leave event, the explicit broadcast, then the glider equip.
+                                                                   // Bob: the equipment leave event, then the glider equip.
     assert_eq!(
         w.b.drain(),
         vec![
-            (
-                sc::SCUnitEquipmentsChangedPacket,
-                body(&SCUnitEquipmentsChangedPacket {
-                    obj_id: w.pa.obj_id,
-                    items: vec![(equip_slot::BACKPACK as u8, None)],
-                })
-            ),
             (
                 sc::SCUnitEquipmentsChangedPacket,
                 body(&SCUnitEquipmentsChangedPacket {
@@ -1630,6 +1647,313 @@ async fn put_down_backpack_drops_and_reequips_the_glider() {
             ),
         ]
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Glider re-equip after a trade pack left the back slot (any route)
+// ---------------------------------------------------------------------------------------------
+
+use crate::systems::economy::inventory::{lock_pair, reequip_previous_glider, split_or_move_item};
+
+/// A trade pack on the back, its glider (taken off) in the bag and recorded.
+fn pack_on_back(w: &World) -> (u64, u64) {
+    w.pa.data().unit.hp = 100;
+    let pack = give(
+        w,
+        &w.pa,
+        slot_type::EQUIPMENT,
+        PACK,
+        1,
+        equip_slot::BACKPACK,
+    );
+    let glider = give(w, &w.pa, slot_type::INVENTORY, BACKPACK, 1, 4);
+    w.server
+        .systems
+        .economy
+        .set_previous_backpack(1, glider, BACKPACK);
+    (pack, glider)
+}
+
+fn back(w: &World) -> Option<u64> {
+    Inv::of(&w.pa).equipped(equip_slot::BACKPACK).map(|i| i.id)
+}
+
+/// Turn-in / sale / destroy: the pack is removed from the equipment container.
+fn remove_pack(w: &World, pack: u64) {
+    let mut txn = ItemTxn::begin(&w.server);
+    let removed = Inv::of(&w.pa).equipment().lock().unwrap().remove_item_task(
+        task_type::DESTROY,
+        pack,
+        true,
+        &mut txn.env,
+    );
+    assert!(removed.is_some());
+}
+
+fn recorded(w: &World) -> Option<(u64, u32)> {
+    w.server.systems.economy.previous_backpack(1)
+}
+
+#[tokio::test]
+async fn glider_returns_when_the_pack_is_removed() {
+    let mut w = world();
+    let (pack, glider) = pack_on_back(&w);
+    w.b.drain();
+    remove_pack(&w, pack);
+    assert_eq!(back(&w), Some(glider));
+    assert_eq!(recorded(&w), None);
+    // Bob saw the pack leave and the glider arrive.
+    let seen = w.b.drain();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(
+        seen[1],
+        (
+            sc::SCUnitEquipmentsChangedPacket,
+            body(&SCUnitEquipmentsChangedPacket {
+                obj_id: w.pa.obj_id,
+                items: vec![(
+                    equip_slot::BACKPACK as u8,
+                    Inv::of(&w.pa).equipped(equip_slot::BACKPACK)
+                )],
+            })
+        )
+    );
+}
+
+#[tokio::test]
+async fn glider_returns_when_the_pack_moves_to_another_container() {
+    let w = world();
+    let (pack, glider) = pack_on_back(&w);
+    let inv = Inv::of(&w.pa);
+    {
+        let mut txn = ItemTxn::begin(&w.server);
+        let system = inv.get(slot_type::SYSTEM).unwrap();
+        let equipment = inv.equipment();
+        let data = txn.data();
+        let (mut sys, eq) = lock_pair(&system, &equipment);
+        assert!(sys.move_item_from(
+            &mut eq.unwrap(),
+            task_type::DROP_BACKPACK,
+            pack,
+            -1,
+            data,
+            &mut txn.env.fx
+        ));
+    }
+    assert_eq!(back(&w), Some(glider));
+}
+
+#[tokio::test]
+async fn glider_waits_for_the_resurrection() {
+    let w = world();
+    let (pack, glider) = pack_on_back(&w);
+    w.pa.data().unit.hp = 0;
+    remove_pack(&w, pack);
+    assert_eq!(back(&w), None);
+    assert!(recorded(&w).is_some());
+    w.pa.data().unit.hp = 10;
+    assert!(reequip_previous_glider(&w.server, &w.pa));
+    assert_eq!(back(&w), Some(glider));
+    assert_eq!(recorded(&w), None);
+}
+
+#[tokio::test]
+async fn glider_stays_in_the_bank() {
+    let w = world();
+    let (pack, glider) = pack_on_back(&w);
+    {
+        let inv = Inv::of(&w.pa);
+        let mut txn = ItemTxn::begin(&w.server);
+        let slot = inv.warehouse().lock().unwrap().get_unused_slot(-1);
+        assert!(split_or_move_item(
+            &mut txn,
+            &inv,
+            task_type::SWAP_ITEMS,
+            glider,
+            slot_type::INVENTORY,
+            4,
+            0,
+            slot_type::BANK,
+            slot as u8,
+            0
+        ));
+    }
+    remove_pack(&w, pack);
+    assert_eq!(back(&w), None);
+    assert_eq!(recorded(&w), None);
+}
+
+#[tokio::test]
+async fn glider_stays_when_destroyed() {
+    let w = world();
+    let (pack, glider) = pack_on_back(&w);
+    {
+        let mut txn = ItemTxn::begin(&w.server);
+        Inv::of(&w.pa).bag().lock().unwrap().remove_item_task(
+            task_type::DESTROY,
+            glider,
+            true,
+            &mut txn.env,
+        );
+    }
+    remove_pack(&w, pack);
+    assert_eq!(back(&w), None);
+    assert_eq!(recorded(&w), None);
+}
+
+#[tokio::test]
+async fn glider_stays_when_the_id_now_has_another_template() {
+    let w = world();
+    let (pack, glider) = pack_on_back(&w);
+    w.server
+        .systems
+        .economy
+        .set_previous_backpack(1, glider, GLIDER_HI);
+    remove_pack(&w, pack);
+    assert_eq!(back(&w), None);
+    assert_eq!(recorded(&w), None);
+}
+
+#[tokio::test]
+async fn glider_stays_when_it_belongs_to_another_character() {
+    let w = world();
+    let (pack, _) = pack_on_back(&w);
+    let theirs = give(&w, &w.pb, slot_type::INVENTORY, BACKPACK, 1, 4);
+    w.server
+        .systems
+        .economy
+        .set_previous_backpack(1, theirs, BACKPACK);
+    remove_pack(&w, pack);
+    assert_eq!(back(&w), None);
+    assert_eq!(recorded(&w), None);
+    assert!(Inv::of(&w.pb).equipped(equip_slot::BACKPACK).is_none());
+}
+
+#[tokio::test]
+async fn glider_stays_when_the_player_equipped_something_else_in_between() {
+    let w = world();
+    let (pack, glider) = pack_on_back(&w);
+    // The pack goes away while the character is dead (record kept) ...
+    w.pa.data().unit.hp = 0;
+    remove_pack(&w, pack);
+    assert!(recorded(&w).is_some());
+    // ... and the player equips another glider before the resurrection.
+    let other = give(&w, &w.pa, slot_type::INVENTORY, BACKPACK, 1, 5);
+    {
+        let inv = Inv::of(&w.pa);
+        let mut txn = ItemTxn::begin(&w.server);
+        assert!(split_or_move_item(
+            &mut txn,
+            &inv,
+            task_type::SWAP_ITEMS,
+            other,
+            slot_type::INVENTORY,
+            5,
+            0,
+            slot_type::EQUIPMENT,
+            equip_slot::BACKPACK as u8,
+            0
+        ));
+    }
+    assert_eq!(recorded(&w), None);
+    w.pa.data().unit.hp = 10;
+    reequip_previous_glider(&w.server, &w.pa);
+    assert_eq!(back(&w), Some(other));
+    assert!(Inv::of(&w.pa)
+        .bag()
+        .lock()
+        .unwrap()
+        .get_item_by_id(glider)
+        .is_some());
+}
+
+#[tokio::test]
+async fn glider_stays_when_the_back_slot_is_taken_or_the_container_refuses() {
+    // The back slot is occupied: nothing is swapped out, the record is kept.
+    let w = world();
+    let (_, glider) = pack_on_back(&w);
+    assert!(!reequip_previous_glider(&w.server, &w.pa));
+    assert_ne!(back(&w), Some(glider));
+    assert!(recorded(&w).is_some());
+
+    // The equipment container refuses the glider (not a bag item of this character's gear).
+    let w = world();
+    w.pa.data().unit.hp = 100;
+    let scroll = give(&w, &w.pa, slot_type::INVENTORY, SCROLL, 1, 4);
+    w.server
+        .systems
+        .economy
+        .set_previous_backpack(1, scroll, SCROLL);
+    assert!(!reequip_previous_glider(&w.server, &w.pa));
+    assert_eq!(back(&w), None);
+    assert_eq!(recorded(&w), None);
+}
+
+#[tokio::test]
+async fn equipping_a_trade_pack_keeps_the_record_and_the_pack_in_place() {
+    let w = world();
+    w.pa.data().unit.hp = 100;
+    let glider = give(
+        &w,
+        &w.pa,
+        slot_type::EQUIPMENT,
+        BACKPACK,
+        1,
+        equip_slot::BACKPACK,
+    );
+    {
+        let inv = Inv::of(&w.pa);
+        let mut txn = ItemTxn::begin(&w.server);
+        assert!(crate::systems::economy::inventory::try_equip_new_backpack(
+            &mut txn,
+            &inv,
+            task_type::SWAP_ITEMS,
+            PACK,
+            1,
+            0,
+            0
+        ));
+    }
+    let on_back = Inv::of(&w.pa).equipped(equip_slot::BACKPACK).unwrap();
+    assert_eq!(on_back.template_id, PACK);
+    assert_eq!(recorded(&w), Some((glider, BACKPACK)));
+    // The pack is then removed: the glider comes back.
+    remove_pack(&w, on_back.id);
+    assert_eq!(back(&w), Some(glider));
+}
+
+#[tokio::test]
+async fn resurrection_keeps_the_record_while_a_non_dropped_pack_is_worn() {
+    let w = world();
+    let (pack, glider) = pack_on_back(&w);
+    w.pa.data().unit.hp = 0;
+    w.pa.data().unit.hp = 10; // resurrected, the pack was not dropped on death
+    assert!(!reequip_previous_glider(&w.server, &w.pa));
+    assert_eq!(back(&w), Some(pack));
+    assert!(recorded(&w).is_some());
+    remove_pack(&w, pack);
+    assert_eq!(back(&w), Some(glider));
+}
+
+#[tokio::test]
+async fn glider_reequip_in_an_unlocked_transaction_waits_for_the_drain() {
+    let w = world();
+    let (pack, glider) = pack_on_back(&w);
+    {
+        let mut txn = ItemTxn::unlocked(&w.server);
+        let removed = Inv::of(&w.pa).equipment().lock().unwrap().remove_item_task(
+            task_type::DESTROY,
+            pack,
+            true,
+            &mut txn.env,
+        );
+        assert!(removed.is_some());
+    }
+    assert_eq!(back(&w), None);
+    assert!(recorded(&w).is_some());
+    crate::systems::economy::flush_deferred_glider_reequips(&w.server);
+    assert_eq!(back(&w), Some(glider));
+    assert_eq!(recorded(&w), None);
 }
 
 // ---------------------------------------------------------------------------------------------

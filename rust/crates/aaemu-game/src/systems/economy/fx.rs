@@ -38,9 +38,62 @@ pub fn flush_persistence(server: &GameServer, fx: &mut ItemFxList) {
 
 /// Runs `fx` (see the module docs).
 pub fn flush(server: &GameServer, fx: ItemFxList) {
+    flush_with(server, fx, !super::System::ops_held_on_this_thread());
+}
+
+/// Characters whose back slot lost a pack in `fx` while a taken-off glider is recorded. Also
+/// drops the record when something other than the pack/glider swap equipped the back slot.
+fn glider_reequip_candidates(server: &GameServer, fx: &ItemFxList) -> Vec<u32> {
+    use crate::models::container::equip_slot;
+    let economy = &server.systems.economy;
+    let back = equip_slot::BACKPACK as u8;
+    let mut out = Vec::new();
+    for e in &fx.0 {
+        match e {
+            ItemFx::EquipEnter {
+                owner,
+                mate_id: 0,
+                slot,
+                item,
+            } if *slot == back => {
+                let Some((glider, _)) = economy.previous_backpack(*owner) else {
+                    continue;
+                };
+                // The glider's own take-off + the pack equip is one operation: keep the record.
+                let takeoff = fx.0.iter().any(|l| {
+                    matches!(l, ItemFx::EquipLeave { owner: o, mate_id: 0, prev_slot, item: i }
+                        if o == owner && *prev_slot == back && i.id == glider)
+                });
+                if item.id != glider && !takeoff {
+                    economy.clear_previous_backpack(*owner);
+                }
+            }
+            ItemFx::EquipLeave {
+                owner,
+                mate_id: 0,
+                prev_slot,
+                item,
+            } if *prev_slot == back
+                && economy
+                    .previous_backpack(*owner)
+                    .is_some_and(|(glider, _)| glider != item.id)
+                && !out.contains(owner) =>
+            {
+                out.push(*owner);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// [`flush`]; `reequip` allows the glider re-equip (it starts an item transaction, so it must
+/// not run under a character lock or inside another transaction).
+pub fn flush_with(server: &GameServer, fx: ItemFxList, reequip: bool) {
     if fx.is_empty() {
         return;
     }
+    let candidates = glider_reequip_candidates(server, &fx);
     let mut owners: HashMap<u32, Option<PlayerRef>> = HashMap::new();
     let mut owner = |id: u32| -> Option<PlayerRef> {
         if id == 0 {
@@ -157,6 +210,23 @@ pub fn flush(server: &GameServer, fx: ItemFxList) {
             }
             ItemFx::ReleaseId(id) => server.items.release_id(id, &server.ids.item),
             ItemFx::Orphaned(item) => server.items.add_loose(*item),
+        }
+    }
+    for id in candidates {
+        if reequip {
+            if let Some(p) = owner(id) {
+                super::inventory::reequip_previous_glider(server, &p);
+            }
+        } else {
+            let mut q = server
+                .systems
+                .economy
+                .deferred_reequip
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !q.contains(&id) {
+                q.push(id);
+            }
         }
     }
 }

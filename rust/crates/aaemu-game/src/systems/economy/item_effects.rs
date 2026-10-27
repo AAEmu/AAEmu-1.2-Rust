@@ -1588,7 +1588,8 @@ pub fn conversion_effect() {
 // ---------------------------------------------------------------------------------------------
 
 /// `PutDownBackpackEffect.Apply` (drop the equipped trade pack as a doodad in front of the
-/// character, then re-equip the glider the pack replaced).
+/// character; the glider the pack replaced comes back through
+/// `inventory::reequip_previous_glider`).
 pub fn put_down_backpack(
     server: &GameServer,
     player: &PlayerRef,
@@ -1614,16 +1615,6 @@ pub fn put_down_backpack(
         return;
     }
     let char_id = player.character_id;
-    let prev_id = economy.previous_backpack(char_id);
-    let previous_glider = lock(&inv.bag()).get_item_by_id(prev_id).cloned();
-    // If no longer valid, reset the value here
-    if previous_glider
-        .as_ref()
-        .is_none_or(|g| g.slot_type != slot_type::INVENTORY)
-    {
-        economy.set_previous_backpack(char_id, 0);
-    }
-
     // pos = in front of the character (1 m), always facing north
     let obj = WorldObject::from(player);
     let here = match server.world.world_of(&obj) {
@@ -1683,42 +1674,9 @@ pub fn put_down_backpack(
         rot: [0.0; 3],
         house,
     };
-    if !hooks.spawn_backpack_doodad(server, player, &spawn) {
-        return;
-    }
-    if let Some(world) = server.world.world_of(&obj) {
-        crate::world::broadcast(
-            &world,
-            obj.clone(),
-            &SCUnitEquipmentsChangedPacket {
-                obj_id: player.obj_id,
-                items: vec![(equip_slot::BACKPACK as u8, None)],
-            },
-            false,
-        );
-    }
-    if let Some(glider) = previous_glider {
-        if inv.equipped(equip_slot::BACKPACK).is_none() {
-            let mut txn = ItemTxn::begin(server);
-            // The C# reads the live glider object's location here.
-            let glider = inv
-                .holder_of_any(glider.id)
-                .and_then(|c| lock(&c).get_item_by_id(glider.id).cloned())
-                .unwrap_or(glider);
-            inventory::split_or_move_item(
-                &mut txn,
-                &inv,
-                task_type::SWAP_ITEMS,
-                glider.id,
-                glider.slot_type,
-                glider.slot as u8,
-                0,
-                slot_type::EQUIPMENT,
-                equip_slot::BACKPACK as u8,
-                0,
-            );
-        }
-    }
+    hooks.spawn_backpack_doodad(server, player, &spawn);
+    // The glider the pack replaced is put back by `fx::flush` when the pack left the back slot
+    // (`inventory::reequip_previous_glider`), which also broadcasts the equipment changes.
 }
 
 /// `Character.DropTradePackToFloor()` (`Character.DoDie`): an equipped trade pack is moved to
