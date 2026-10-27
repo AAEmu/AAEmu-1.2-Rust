@@ -43,8 +43,8 @@ The configuration structure is as follows:
 ```
 "SecretKey": "test",
 "AutoAccount": true,
-"InternalNetwork": {  <-- Internal network (for game server)
-    "Host": "*",
+"InternalNetwork": {  <-- Internal network (for game server); "*" for a remote game server
+    "Host": "127.0.0.1",
     "Port": 1234
 },
 "Network": {          <-- External network (for clients)

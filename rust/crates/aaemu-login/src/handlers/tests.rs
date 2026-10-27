@@ -103,10 +103,14 @@ async fn assert_unauthorized_token_rejected(secret: Option<&str>) {
     );
     // An unregistered peer gets the authorization error; a wrong-secret peer is poisoned and
     // ignored, so neither path may acknowledge the packet.
-    assert!(
-        result.is_err() || conn.is_poisoned(),
-        "unauthorized internal packet was processed"
-    );
+    if secret.is_some() {
+        assert!(
+            result.is_ok() && conn.is_poisoned(),
+            "wrong-secret peer was not poisoned"
+        );
+    } else {
+        assert!(result.is_err(), "unregistered peer was not refused");
+    }
     assert!(
         rx.try_recv().is_err(),
         "must not acknowledge an unauthorized token"
