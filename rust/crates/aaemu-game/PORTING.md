@@ -1256,7 +1256,8 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   default collision class, and had no radius gate; it rejected ground-anchored doodad
   interactions through nearby doodad colliders (entrance doodad template 3674 / skill 10999,
   exit 4535 / skill 16560) and re-checked at fire time with the same wrong rule. Rejections are
-  logged at `warn` with character, skill, target and result key. The flow tests in
+  logged at `warn` with character, skill, target and result key (NPC casters at `debug`: AI
+  retries blocked casts). The flow tests in
   `cast_validation_tests.rs` cover the height/mask/class rule, the radius gate, the 0.5 m
   position radius and the terrain gate. Not modelled: the multi-part target variant
   `FUN_3989DAE0` (loops the target's sub-shapes and passes if any part passes).

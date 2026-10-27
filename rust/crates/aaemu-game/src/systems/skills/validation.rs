@@ -360,21 +360,31 @@ pub(super) fn check(
                 crate::systems::ai::collision::query::ray_flags::SKILL_OBSTACLE,
                 &ignored,
             ) {
-                let character = caster
-                    .as_player()
-                    .map(|p| p.data().unit.name.clone())
-                    .unwrap_or_else(|| caster.with_base_unit(|b| b.name().to_string()));
-                tracing::warn!(
-                    character = %character,
-                    skill = template.id,
-                    target = target.obj_id(),
-                    result_key = "skill_obstacle",
-                    check_terrain = template.check_terrain,
-                    from = ?source,
-                    to = ?to,
-                    ?hit,
-                    "Skill line of sight blocked"
-                );
+                // NPC AI retries blocked casts, so only player rejections are warnings.
+                if let Some(player) = caster.as_player() {
+                    let character = player.data().unit.name.clone();
+                    tracing::warn!(
+                        character = %character,
+                        skill = template.id,
+                        target = target.obj_id(),
+                        result_key = "skill_obstacle",
+                        check_terrain = template.check_terrain,
+                        from = ?source,
+                        to = ?to,
+                        ?hit,
+                        "Skill line of sight blocked"
+                    );
+                } else {
+                    tracing::debug!(
+                        caster = caster.obj_id(),
+                        skill = template.id,
+                        target = target.obj_id(),
+                        from = ?source,
+                        to = ?to,
+                        ?hit,
+                        "Skill line of sight blocked"
+                    );
+                }
                 return fail("skill_obstacle");
             }
         }
