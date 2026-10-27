@@ -411,3 +411,68 @@ async fn harness_runs_a_command() {
     assert!(out.is_empty());
     assert_eq!(gm.chat(), ["|cFFFFFFFF[Echo]|r hello world "]);
 }
+
+#[tokio::test]
+async fn fly_and_teleport_require_moderator_access() {
+    use crate::config::AppConfig;
+
+    let app = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("app");
+    if !app.join("Config.json").exists() {
+        return;
+    }
+    // The shipped Config.json keeps %login_port% / %db_port% placeholders.
+    let args: Vec<String> = [
+        "--LoginNetwork:Port=1234",
+        "/Connections:MySQLProvider:Port",
+        "3306",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let config = AppConfig::load_from(&app, None, Vec::new(), &args).unwrap();
+    let server = harness::server();
+    server
+        .systems
+        .services
+        .commands
+        .access_levels
+        .load(&config.access_level);
+    let mut player = harness::pc(&server, 1, "Player", 100.0, 100.0);
+
+    for command in ["fly", "teleport solis"] {
+        let (handled, out) = harness::run_at(&server, &player.p, command, 0).await;
+        assert!(handled, "{command} was not handled");
+        assert_eq!(out, ["|cFFFF0000Insufficient privileges.|r"], "{command}");
+        // Only the refusal chat may reach the client: no fly/teleport packet.
+        let frames = player.frames();
+        assert!(
+            frames
+                .iter()
+                .all(|(op, _)| *op == crate::opcodes::sc::SCChatMessagePacket),
+            "{command} ran without access: {frames:?}"
+        );
+    }
+
+    // Moderator level 50 still runs both commands.
+    let (handled, out) = harness::run_at(&server, &player.p, "teleport solis", 50).await;
+    assert!(handled);
+    assert_eq!(
+        out,
+        [harness::normal(
+            "teleport",
+            "Teleporting to |cFFFFFFFFSolis Headlands, Austera|r"
+        )]
+    );
+    assert!(player
+        .frames()
+        .iter()
+        .any(|(op, _)| *op == crate::opcodes::sc::SCTeleportUnitPacket));
+
+    let (handled, out) = harness::run_at(&server, &player.p, "fly", 50).await;
+    assert!(handled);
+    assert!(out.is_empty());
+    assert!(player
+        .frames()
+        .iter()
+        .any(|(op, _)| *op == crate::opcodes::sc::SCUnitFlyingStateChangedPacket));
+}
