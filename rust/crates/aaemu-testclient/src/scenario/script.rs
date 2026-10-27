@@ -198,7 +198,7 @@ async fn await_event(
 
 /// Splits an argument line, keeping double-quoted spans together (`expectdb "<sql>" <value>`,
 /// `expectlog "<regex>" [secs]`). Inside quotes, `\"` and `\\` are escapes.
-fn split_quoted(s: &str) -> anyhow::Result<Vec<String>> {
+pub(super) fn split_quoted(s: &str) -> anyhow::Result<Vec<String>> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut quoted = false;
@@ -234,7 +234,7 @@ fn split_quoted(s: &str) -> anyhow::Result<Vec<String>> {
 }
 
 /// Reads the complete lines appended to a log file since `offset`, then advances `offset`.
-fn read_log_since(path: &std::path::Path, offset: &mut u64) -> anyhow::Result<String> {
+pub(super) fn read_log_since(path: &std::path::Path, offset: &mut u64) -> anyhow::Result<String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path).with_context(|| format!("opening {path:?}"))?;
     f.seek(SeekFrom::Start(*offset))?;
@@ -368,6 +368,7 @@ async fn run_lines(
     let text = input.text;
     let s = r.begin("game.script");
     let mut items: HashMap<u32, u64> = HashMap::new();
+    let mut music = super::music::Music::default();
     let mut clock = 40_000u32;
     let mut last_npc = 0u32;
     let mut consumed: HashSet<usize> = HashSet::new();
@@ -561,6 +562,10 @@ async fn run_lines(
                     .drain(Duration::from_millis(1500), Duration::from_secs(8))
                     .await?;
                 show(&got);
+            }
+            c if c.starts_with('m') && super::music::is_command(c) => {
+                let args = split_quoted(rest)?;
+                super::music::command(game, &mut music, c, &args).await?;
             }
             "item" => {
                 let tpl: u32 = num(&parts, 0)?;

@@ -1,0 +1,18 @@
+# Persistence after the run1 run: same account / character logs in again. The sheet (detail 8
+# song id), the reduced paper stack, the stored title / notes and the equipped instrument must
+# have survived, a cold CS123 still returns the notes and the sheet still plays.
+suite music-run2
+bot composer gm
+
+[composer]
+mdb "SELECT CONCAT('labor ',a.labor,' consumed_lp ',c.consumed_lp) FROM characters c JOIN accounts a ON a.account_id=c.account_id WHERE c.name='${composer}'"
+msong "SELECT m.id FROM music m JOIN characters c ON c.id=m.author WHERE c.name='${composer}' AND m.title='Harbor Song' ORDER BY m.id DESC LIMIT 1" "Harbor Song" "T120 O4 L4 CDEFGAB>C"
+expectdb "SELECT COUNT(*) FROM items i JOIN characters c ON c.id=i.owner JOIN music m ON m.author=c.id WHERE c.name='${composer}' AND m.title='Harbor Song' AND i.template_id=28051 AND i.details=CONCAT(UNHEX(LPAD(HEX(m.id),2,'0')),REPEAT(CHAR(0),7))" 1
+expectdb "SELECT COALESCE(SUM(i.count),0) FROM items i JOIN characters c ON c.id=i.owner WHERE c.name='${composer}' AND i.template_id=27902" 2
+expectdb "SELECT COUNT(*) FROM items i JOIN characters c ON c.id=i.owner WHERE c.name='${composer}' AND i.template_id=6177 AND i.slot_type=1" 1
+mrequest 0 0
+mrequest 0 1
+mskill 22213 midi unit +buff:6177
+pump 2
+mskill 22217 end unit -buff:6177 -buff:6010
+pump 2
