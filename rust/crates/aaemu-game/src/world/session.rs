@@ -925,6 +925,15 @@ pub async fn move_unit(server: &GameServer, conn: &mut GameConnection, obj_id: u
                     send_message(&me, chat_type::SYSTEM, &server.config.world.motd);
                 }
             }
+            // The way back from a closed zone is the position from before this move. Record it
+            // while the transform and its parent still agree: `standing_on` below attaches the
+            // supporting object before the client's position in that object's frame is applied,
+            // and until then the old world position reads as an offset in the new frame (far
+            // outside the world: `GetZoneId: Coordinates out of bounds`, and a position outside
+            // the world kept as the "safe" one).
+            if let Some(player) = target.as_player() {
+                zone_access::remember_open_position(server, player);
+            }
             // Standing on objects (ship decks).
             crate::systems::vehicles::movement::standing_on(&world, &target, &mt, u);
             // If ActorFlag 0x40 is no longer set, it means we're no longer climbing/holding
@@ -942,9 +951,6 @@ pub async fn move_unit(server: &GameServer, conn: &mut GameConnection, obj_id: u
                 let t = target.transform();
                 (t.x, t.y, t.z)
             };
-            if let Some(player) = target.as_player() {
-                zone_access::remember_open_position(server, player);
-            }
             // An actor standing on an object sends its primary position in the
             // supporting object's frame and the auxiliary position in world
             // coordinates, whatever the object kind (gcFlags 1 unit, 2 gimmick,
