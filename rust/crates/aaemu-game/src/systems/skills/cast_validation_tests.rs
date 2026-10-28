@@ -917,6 +917,122 @@ async fn obstacle_checks_reject_a_physical_wall_before_any_cast_mutation() {
     assert_eq!(cast(&server, &skill, &player, &npc).0, 0);
 }
 
+/// Private workbench plaques sit inside their house's mesh: the owning house's collider must
+/// not block the line of sight to its doodads, but any other house still does.
+#[tokio::test]
+async fn obstacle_ray_ignores_the_collider_of_the_house_owning_the_target_doodad() {
+    use crate::models::house::House;
+    use crate::systems::ai::collision::models::{ModelPart, ModelPhys};
+    use crate::systems::ai::collision::objects::{shape_key, ColliderShape, ShapePart};
+    use crate::systems::ai::collision::world::ObjKind;
+    use aaemu_physics::geometry::primitives::{BoxPrim, Primitive};
+    use aaemu_physics::math::{Quat, Vec3};
+    struct Ground;
+    impl crate::systems::ai::collision::terrain::TerrainSource for Ground {
+        fn sample(&self, _x: i32, _y: i32) -> f32 {
+            100.1
+        }
+        fn size(&self) -> (i32, i32) {
+            (1024, 1024)
+        }
+    }
+    let (server, _client, player, _npc) = fixture(GameData::empty());
+    server
+        .systems
+        .ai
+        .collision
+        .test_files
+        .set(Arc::new(std::collections::HashMap::new()))
+        .unwrap();
+    server
+        .systems
+        .ai
+        .collision
+        .test_terrain
+        .set(Arc::new(Ground))
+        .unwrap_or_else(|_| panic!("terrain"));
+    let house = Entity::new(0x400, House::new(1, 172));
+    server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&house, &server.view_ctx());
+    let physics = crate::systems::ai::collision::phys_world(&server, 0).unwrap();
+    let geometry = physics
+        .lock()
+        .world
+        .register_primitive(&Primitive::Box(BoxPrim::aligned(
+            Vec3::ZERO,
+            Vec3::new(1.0, 0.1, 1.0),
+        )))
+        .unwrap();
+    let shape = ColliderShape {
+        parts: vec![ShapePart {
+            model: Arc::new(ModelPhys {
+                path: "test/house-wall.cgf".into(),
+                parts: vec![ModelPart {
+                    slot: 0,
+                    geom: geometry,
+                }],
+                blob_bytes: 0,
+            }),
+            pos: Vec3::ZERO,
+            q: Quat::IDENTITY,
+            scale: 1.0,
+            animation: None,
+        }],
+    };
+    let add_house_collider = |obj_id: u32| {
+        let key = shape_key(
+            "test/house-wall",
+            Vec3::new(100.0, 102.5, 101.0),
+            Quat::IDENTITY,
+            1.0,
+            (0x8000, u32::MAX),
+        );
+        assert!(physics.lock().set_object_shape_at(
+            ObjKind::House,
+            obj_id,
+            key,
+            Some(&shape),
+            false,
+            std::time::Instant::now()
+        ));
+    };
+    let mut plaque = crate::models::doodad::Doodad::new(1);
+    plaque.transform.set_xyz(100.0, 105.0, 100.0);
+    let plaque = Entity::new(0x300, plaque);
+    let target = Target::Obj(WorldObject::from(&plaque));
+    let skill = SkillRun::new(
+        Arc::new(SkillTemplate {
+            check_obstacle: true,
+            target_type: super::types::SkillTargetType::Doodad as i32,
+            ..super::tests::skill_template(3)
+        }),
+        1,
+    );
+    let check = || super::validation::check(&server, &skill, &WorldObject::from(&player), &target);
+    // Warm-up: the first query loads the cells (and drops colliders of unknown houses).
+    assert!(check().is_ok());
+    add_house_collider(house.obj_id);
+    assert_eq!(
+        check().unwrap_err().0,
+        skill_result::OBSTACLE,
+        "a free-standing doodad is blocked by a house"
+    );
+    plaque.data().parent_obj_id = house.obj_id;
+    assert!(
+        check().is_ok(),
+        "the owning house must not block its fixture"
+    );
+    add_house_collider(0x401);
+    assert_eq!(
+        check().unwrap_err().0,
+        skill_result::OBSTACLE,
+        "an unrelated house still blocks"
+    );
+}
+
 /// 1.2 client `FUN_390B5540` (`x2game.dll.c:149877`): the obstacle ray runs at unit
 /// position height, uses the static/sleeping/rigid classes with collision class 2 (terrain
 /// only with `check_terrain`), and skips the source and target colliders.
