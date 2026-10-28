@@ -296,10 +296,12 @@ pub fn use_doodad(
         set_func_group_id(server, &ctx.doodad, func_group_id as u32);
     }
 
+    let mut chained = false;
     loop {
         let (template_id, current) = {
             let mut d = ctx.doodad.data();
             d.phase.to_next_phase = false;
+            d.phase.loot_missed = false;
             d.phase.list_group_id.clear();
             (d.template_id, d.func_group_id)
         };
@@ -324,6 +326,22 @@ pub fn use_doodad(
                 if do_func(ctx, Some(caster), started_skill_id, Some(f)) {
                     ctx.doodad.data().phase.list_group_id.clear();
                     return;
+                }
+            }
+            // A skill-bound func (e.g. the "extend the life of dying plants" Use) leads to a
+            // bonus-loot group that has no interaction of its own. When every roll there
+            // missed, the doodad would sit in that group until its timer fires; the bonus
+            // is optional, so continue to the group's authored next phase instead.
+            if chained
+                && ctx.doodad.data().phase.loot_missed
+                && ctx.doodad.data().func_group_id == current
+            {
+                let next = all_funcs
+                    .iter()
+                    .find(|f| f.func_type == "DoodadFuncLootItem" && f.next_phase > 0)
+                    .map(|f| f.next_phase as u32);
+                if let Some(next) = next {
+                    set_func_group_id(server, &ctx.doodad, next);
                 }
             }
         } else if do_func(
@@ -353,6 +371,7 @@ pub fn use_doodad(
             return;
         }
         skill_id = 0;
+        chained = true;
     }
 }
 

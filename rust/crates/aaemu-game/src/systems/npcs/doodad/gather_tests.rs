@@ -975,3 +975,136 @@ async fn mining_without_labor_is_refused_and_changes_nothing() {
         "no NEED_LABOR_POWER in {frames:?}"
     );
 }
+
+const OLD_TREE: u32 = 104;
+const OLD_TREE_PHASE: u32 = 40;
+const OLD_TREE_EXTENDED: u32 = 41;
+const YOUNG_TREE_PHASE: u32 = 42;
+const THINNING_SKILL: u32 = 15874;
+const THINNING_EFFECT: u32 = 900_003;
+const THINNING_LABOR: i32 = 5;
+
+/// "Gather: Spend up to 5 Labor to extend the life of dying plants" (skill 15874): an
+/// `InteractionEffect` of `WorldInteractionType.Cutdown` (1) on an old tree whose
+/// `DoodadFuncUse` is bound to the skill and leads to a bonus-loot group (a skill-less
+/// `DoodadFuncLootItem` rolling `percent`) that returns the tree to its young phase.
+fn thinning_data(percent: i32) -> GameData {
+    let mut data = game_data();
+    let s = &mut data.systems.skills;
+    s.add_effect(
+        EffectKind::InteractionEffect,
+        EffectTemplate::Interaction {
+            id: THINNING_EFFECT,
+            world_interaction: 1,
+            doodad_id: 0,
+        },
+        THINNING_EFFECT,
+    );
+    let mut thinning = crate::systems::skills::tests::skill_template(THINNING_SKILL);
+    thinning.consume_labor_power = THINNING_LABOR;
+    thinning.target_type = SkillTargetType::Doodad as i32;
+    thinning
+        .effects
+        .push(crate::systems::skills::tests::skill_effect(
+            THINNING_EFFECT,
+            EffectKind::InteractionEffect,
+            THINNING_EFFECT,
+        ));
+    s.add_skill(thinning);
+    let doodads = std::mem::take(&mut data.systems.npcs.doodad);
+    data.systems.npcs.doodad = DoodadBuilder { data: doodads }
+        .template(
+            OLD_TREE,
+            &[
+                (OLD_TREE_PHASE, 1),
+                (OLD_TREE_EXTENDED, 2),
+                (YOUNG_TREE_PHASE, 1),
+            ],
+        )
+        .func(
+            OLD_TREE_PHASE,
+            FuncTemplate::Use(DoodadFuncUse {
+                id: 70,
+                skill_id: 0,
+            }),
+            OLD_TREE_EXTENDED as i32,
+        )
+        .skill(OLD_TREE_PHASE, THINNING_SKILL)
+        .func(
+            OLD_TREE_EXTENDED,
+            FuncTemplate::LootItem(DoodadFuncLootItem {
+                id: 71,
+                item_id: ORE,
+                count_min: 1,
+                count_max: 1,
+                percent,
+                ..DoodadFuncLootItem::default()
+            }),
+            YOUNG_TREE_PHASE as i32,
+        )
+        .phase_func(OLD_TREE_EXTENDED, regrow_timer(72, YOUNG_TREE_PHASE as i32))
+        .data;
+    data
+}
+
+/// The bonus roll is optional: a miss must still return the tree to its young phase (before
+/// the fix it stayed in the lootless group until the 180 s timer, so the cast looked dead),
+/// and a hit grants the item.
+#[tokio::test]
+async fn thinning_an_old_tree_pays_labor_and_returns_it_to_the_young_phase() {
+    for (percent, ore) in [(-1, 0), (10_000, 1)] {
+        let mut fx = fx_with(thinning_data(percent));
+        let d = fx.doodad(OLD_TREE);
+        assert_eq!(d.data().func_group_id, OLD_TREE_PHASE);
+
+        let frames = fx.cast(THINNING_SKILL, &d);
+
+        assert_eq!(
+            fx.player.data().labor_power,
+            (LABOR_BASE - THINNING_LABOR) as i16,
+            "{frames:?}"
+        );
+        assert_eq!(fx.count(ORE), ore, "percent {percent}");
+        assert_eq!(
+            d.data().func_group_id,
+            YOUNG_TREE_PHASE,
+            "percent {percent}"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_compact_thinning_returns_old_trees_to_their_young_phase() {
+    use crate::data::client_files::ClientFileManager;
+
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let mut data = game_data();
+    data.skills = crate::data::skills::SkillData::load(&conn).unwrap();
+    data.systems.skills =
+        crate::systems::skills::Data::load_from(&conn, &ClientFileManager::new()).unwrap();
+    data.systems.npcs.doodad = DoodadData::load_from(&conn).unwrap();
+    data.items = crate::data::items::ItemData::load(&conn).unwrap();
+    let mut fx = fx_loaded(data);
+    // (template, old group, young group): old birch, old yew, old cedar. The bonus loot
+    // rolls 42% / 26% / 29%, so repeat to exercise both outcomes.
+    for (template, old, young) in [(407, 944, 941), (408, 2858, 2857), (393, 2970, 2969)] {
+        for _ in 0..6 {
+            fx.player.data().unit.global_cooldown_ms = 0;
+            let d = fx.doodad(template);
+            d.data().func_group_id = old;
+            let frames = fx.cast_and_wait(THINNING_SKILL, &d).await;
+            assert_eq!(
+                d.data().func_group_id,
+                young,
+                "template {template}, {frames:?}"
+            );
+            manager::delete(&fx.server, &fx.server.world.world(0).unwrap(), &d);
+        }
+    }
+}
