@@ -1932,7 +1932,6 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   as the C# wrote it, meaning unverified. The send timing is inferred: no retail 1.2 server
   capture exists, and whether 1.2 also sent it on refresh / duration change is unknown;
   refreshes keep re-sending `SCBuffCreatedPacket` as before.
-
 * systems::economy (auction settlement, 2026-10-20): the C# ignored `MailForAuction.Send()`
   (`RemoveAuctionLotSold` / `RemoveAuctionLotFail` / `CancelAuctionLot` removed the lot anyway),
   so a mail that was not stored lost the seller's money or the buyer's item. Here a settlement
