@@ -15,6 +15,25 @@
 -- fires when the character row itself is deleted.
 --
 
+-- MySQL 8.4 rejects the foreign keys below unless `characters.id` has a unique key of its own
+-- (see 2026-10-28_aaemu_game_characters_unique_id.sql); add it first, only when missing.
+SET @has_unique_characters_id := (
+  SELECT COUNT(*) FROM (
+    SELECT `INDEX_NAME` FROM `information_schema`.`STATISTICS`
+    WHERE `TABLE_SCHEMA` = DATABASE()
+      AND `TABLE_NAME` = 'characters'
+      AND `NON_UNIQUE` = 0
+    GROUP BY `INDEX_NAME`
+    HAVING COUNT(*) = 1 AND MAX(`COLUMN_NAME` = 'id') = 1
+  ) AS `unique_characters_id`
+);
+SET @sql := IF(@has_unique_characters_id = 0,
+  'ALTER TABLE `characters` ADD UNIQUE KEY `uq_characters_id` (`id`)',
+  'SELECT 1');
+PREPARE uq_characters_id_stmt FROM @sql;
+EXECUTE uq_characters_id_stmt;
+DEALLOCATE PREPARE uq_characters_id_stmt;
+
 CREATE TABLE IF NOT EXISTS `character_records` (
   `owner`     int unsigned NOT NULL COMMENT 'Character whose record this is',
   `record_id` int unsigned NOT NULL COMMENT 'CharRecords.Id from game data',
