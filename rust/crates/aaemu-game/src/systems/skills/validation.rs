@@ -53,6 +53,30 @@ fn collision_kind(obj: &WorldObject) -> crate::systems::ai::collision::world::Ob
     }
 }
 
+/// Object id of the house a doodad belongs to: its parent when that is a house in the world,
+/// else the housing-owned doodad's `owner_db_id`. Doodad fields are copied out before calling
+/// into the world or housing manager (one object lock at a time).
+fn owning_house_obj_id(server: &GameServer, obj: &WorldObject) -> Option<u32> {
+    let doodad = obj.as_doodad()?;
+    let (parent_obj_id, owner_type, owner_db_id) = {
+        let d = doodad.data();
+        (d.parent_obj_id, d.owner_type, d.owner_db_id)
+    };
+    if parent_obj_id != 0 {
+        if let Some(house) = server
+            .world
+            .object(parent_obj_id)
+            .and_then(|o| o.as_house().cloned())
+        {
+            return Some(house.obj_id);
+        }
+    }
+    if owner_type == crate::models::doodad::doodad_owner_type::HOUSING && owner_db_id != 0 {
+        return crate::systems::housing::house_by_id(server, owner_db_id).map(|h| h.obj_id);
+    }
+    None
+}
+
 fn in_water(server: &GameServer, target: &Target) -> bool {
     if target
         .as_obj()
@@ -344,6 +368,14 @@ pub(super) fn check(
             if skip_target {
                 if let Some(obj) = target.as_obj() {
                     ignored.push((collision_kind(obj), obj.obj_id()));
+                    // A fixture of a house (tax plaque, workbench) sits on or inside the house
+                    // mesh, so the house's own collider must not block the line of sight.
+                    if let Some(house_obj_id) = owning_house_obj_id(server, obj) {
+                        ignored.push((
+                            crate::systems::ai::collision::world::ObjKind::House,
+                            house_obj_id,
+                        ));
+                    }
                 }
             }
             let objtypes = if template.check_terrain {
