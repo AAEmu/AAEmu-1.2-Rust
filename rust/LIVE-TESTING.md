@@ -396,6 +396,11 @@ With 200 concurrent logins the C# login server times out on its MySQL connection
 * `RUST_LOG=info,aaemu_game::net=debug,aaemu_login::network=debug` logs every game packet
   (`GamePacket: C->S ...` / `S->C ...`) and the login connections, which is the server-side trace
   of a client session.
+* `RUST_LOG=aaemu_game::net::fields=trace` additionally logs every client packet's level, opcode
+  name and full hex body (the bytes after the opcode; off unless the target is enabled). Use it to
+  compare what the original 1.2 client sends with another client's packets. It dumps everything
+  the client sends, including chat, mail and second-password data: never enable it on a shared or
+  production server, and do not share its logs.
 
 Verified with the real client (Windows 11, fullscreen 1920x1080, both servers release builds):
 launcher ticket accepted (`clienttest connected.`), server list (`LiveTest`, character count),
