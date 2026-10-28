@@ -3,6 +3,7 @@
 # ArcheAge 1.2 client started with aaemu-launcher. See AGENT-QUICKSTART.md.
 #
 #   Scripts/live-stack.sh build      # cargo build --profile live --bins (AAEMU_PROFILE=release for a full one)
+#                                    # + aadriver.dll via native/build.bat (needs MSVC x86; only warns)
 #   Scripts/live-stack.sh sync       # copy app/ configs + data into the runtime dirs
 #   Scripts/live-stack.sh db-reset   # drop + recreate the two throwaway databases
 #   Scripts/live-stack.sh start      # MySQL, login, game; waits until the game registered
@@ -15,7 +16,8 @@
 # the stack uses the lane's runtime dir, binaries, port block and databases, so several sessions
 # can each run their own stack. Without a lane it is the shared D:/aaemu-live stack on 21xxx.
 #
-# Every path is an environment variable so another machine can override it. Secrets (DB and test
+# Every path is an environment variable so another machine can override it (e.g. AAEMU_DB_USER, the
+# MySQL user in generated lane configs, default aaemu; AAEMU_DRIVER_DLL / AAEMU_DRIVER_OUT). Secrets (DB and test
 # account passwords) live only in $LIVE/cfg and the runtime Config.Local.json files, never in git.
 set -euo pipefail
 
@@ -46,11 +48,14 @@ CLIENT=${AAEMU_CLIENT:-D:/AA1.2/bin32/archeage.exe}       # read-only client ins
 LOGIN=${AAEMU_LOGIN:-127.0.0.1:21237}
 CLIENT_USER=${AAEMU_USER:-clienttest}
 PWFILE=${AAEMU_PASSWORD_FILE:-$TEMPLATE/cfg/client-test-password.txt}
+# In a lane BIN is the lane's own target dir, so the driver is built next to it, not in main's.
 DRIVER_DLL=${AAEMU_DRIVER_DLL:-$(dirname "$BIN")/aadriver/aadriver.dll}
+DRIVER_OUT=${AAEMU_DRIVER_OUT:-$(dirname "$DRIVER_DLL")}   # native/build.bat output dir
 CLIENT_PAK=${AAEMU_CLIENT_PAK:-D:/AA1.2/game_pak}
 COMPACT=${AAEMU_COMPACT_DB:-$TEMPLATE/rs-game/Data/compact.sqlite3}   # shared static game data
 DB_LOGIN=${DB_LOGIN:-rs_login}
 DB_GAME=${DB_GAME:-rs_game}
+DB_USER=${AAEMU_DB_USER:-aaemu}                           # MySQL user in the generated lane configs
 # Servers run from a copy in $LIVE/bin in lane mode, so the lane can rebuild while its stack runs.
 RUN=$BIN; [ -n "$LANE" ] && RUN=$LIVE/bin
 LOGIN_PORT=${LOGIN##*:}
@@ -68,7 +73,18 @@ pids_of() {
 running() { [ -n "$(pids_of "$1")" ]; }
 mysql_up() { "${MYSQL[@]}" -N -e "select 1" >/dev/null 2>&1; }
 
-cmd_build() { (cd "$REPO/rust" && cargo build --profile "$PROFILE" --bins); }
+cmd_build() {
+  (cd "$REPO/rust" && cargo build --profile "$PROFILE" --bins)
+  # The client needs the x86 aadriver.dll; build.bat's default (native/out) is not target/aadriver.
+  local bat=$REPO/rust/crates/aaemu-clientdriver/native/build.bat
+  if [ -f "$bat" ]; then
+    AADRIVER_OUT="$(winpath "$DRIVER_OUT")" cmd //c "$(winpath "$bat")" \
+      || echo "WARNING: native/build.bat failed (needs MSVC x86; it also runs the driver's tests); retry: AADRIVER_OUT=\"$(winpath "$DRIVER_OUT")\" $bat" >&2
+    [ -f "$DRIVER_DLL" ] || echo "WARNING: $DRIVER_DLL was not produced; the client starts without the driver" >&2
+  else
+    echo "WARNING: no $bat; cannot build aadriver.dll (set AAEMU_DRIVER_DLL to a built one)" >&2
+  fi
+}
 
 cmd_sync() {
   local app="$REPO/rust/crates/aaemu-game/app"
@@ -100,7 +116,7 @@ lane_configs() {
   "SkipHostResolve": true,
   "InternalNetwork": { "Host": "127.0.0.1", "Port": ${p}234 },
   "Network": { "Host": "127.0.0.1", "Port": ${p}237, "NumConnections": 100 },
-  "Connections": { "AutoApplyUpdates": true, "MySQLProvider": { "Database": "$DB_LOGIN", "Host": "127.0.0.1", "Port": "$MYSQL_PORT", "User": "aaemu", "Password": "$pw" } },
+  "Connections": { "AutoApplyUpdates": true, "MySQLProvider": { "Database": "$DB_LOGIN", "Host": "127.0.0.1", "Port": "$MYSQL_PORT", "User": "$DB_USER", "Password": "$pw" } },
   "GameServers": [ { "Id": 1, "Name": "Lane-$LANE", "Host": "127.0.0.1", "Port": ${p}239, "Hidden": false } ]
 }
 EOF
@@ -112,7 +128,7 @@ EOF
   "StreamNetwork": { "Host": "127.0.0.1", "Port": ${p}250 },
   "WebApiNetwork": { "Host": "127.0.0.1", "Port": ${p}280 },
   "LoginNetwork": { "Host": "127.0.0.1", "Port": "${p}234" },
-  "Connections": { "AutoApplyUpdates": true, "MySQLProvider": { "Database": "$DB_GAME", "Host": "127.0.0.1", "Port": "$MYSQL_PORT", "User": "aaemu", "Password": "$pw" } },
+  "Connections": { "AutoApplyUpdates": true, "MySQLProvider": { "Database": "$DB_GAME", "Host": "127.0.0.1", "Port": "$MYSQL_PORT", "User": "$DB_USER", "Password": "$pw" } },
   "ClientData": { "Sources": [ "$CLIENT_PAK" ] }
 }
 EOF
@@ -186,6 +202,8 @@ cmd_client() {
   [ -n "$LANE" ] && driver_args+=(--multi-client)   # other sessions may have a client open
   if [ -f "$DRIVER_DLL" ]; then
     driver_args+=(--driver-dll "$(cygpath -w "$DRIVER_DLL" 2>/dev/null || echo "$DRIVER_DLL")")
+  else
+    echo "WARNING: $DRIVER_DLL missing; run Scripts/live-stack.sh build" >&2
   fi
   ("$RUN/aaemu-launcher.exe" --client "$(cygpath -w "$CLIENT" 2>/dev/null || echo "$CLIENT")" \
      --login "$LOGIN" --user "$CLIENT_USER" --password-file "$PWFILE" \
