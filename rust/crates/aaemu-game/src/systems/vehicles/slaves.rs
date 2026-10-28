@@ -1999,7 +1999,7 @@ pub fn create_from_skill(
 /// The client-chosen `SummonPos` turned into a spawn transform, or `None` (with
 /// `SlaveSpawnErrorInvalidArea`) when the spot is too far, on the wrong surface or inside
 /// collision. `None` also means "no placement": the C# in-front placement is used.
-fn validated_summon_placement(
+pub(super) fn validated_summon_placement(
     server: &GameServer,
     world: &WorldInstance,
     owner: &PlayerRef,
@@ -2042,7 +2042,7 @@ fn validated_summon_placement(
     };
     transform.set_position(p.x, p.y, p.z, 0.0, 0.0, p.yaw);
     if template.is_a_boat() {
-        if !super::ship_physics::is_water(server, world, [p.x, p.y, p.z]) {
+        if !super::ship_physics::is_summon_water(server, world, [p.x, p.y, p.z]) {
             return invalid("a ship must be summoned on water");
         }
         transform.set_height(super::ship_physics::water_surface(
@@ -2292,7 +2292,7 @@ async fn create_with_placement(
     } else {
         Vec::new()
     };
-    let loaded = if let Some(item) = item.as_ref().filter(|_| owner_id != 0) {
+    let mut loaded = if let Some(item) = item.as_ref().filter(|_| owner_id != 0) {
         let mut flush_items: Vec<_> = prior
             .iter()
             .map(|(_, s)| s.data().summoning_item_id)

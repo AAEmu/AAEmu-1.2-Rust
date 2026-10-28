@@ -3413,6 +3413,57 @@ async fn summon_pos_outside_the_valid_area_errors_without_spawning() {
     assert!(slaves::get_active_slave_by_owner_obj_id(&world, PA).is_none());
 }
 
+/// The client picks boat summon points on its wave-displaced sea, a little above the nominal
+/// surface: `z = 100.3` over ocean level 100.0 was refused as "not on water".
+#[tokio::test]
+async fn boat_summon_point_slightly_above_the_sea_surface_is_accepted() {
+    use crate::systems::skills::ext::SummonPlacement;
+    let mut data = summon_pos_data(50);
+    data.systems
+        .vehicles
+        .slave_templates
+        .get_mut(&SLAVE_TEMPLATE)
+        .unwrap()
+        .slave_kind = super::data::slave_kind::BOAT;
+    let server = server_with(data);
+    let (mut a, pa, _item_id, world) = summon_pos_client(&server);
+    let template = server
+        .game_data
+        .systems
+        .vehicles
+        .slave_template(SLAVE_TEMPLATE)
+        .unwrap()
+        .clone();
+    assert!(template.is_a_boat());
+    assert_eq!(world.template.ocean_level, 100.0);
+    let place = |z: f32| {
+        slaves::validated_summon_placement(
+            &server,
+            &world,
+            &pa,
+            &template,
+            Some(SummonPlacement {
+                x: 103.0,
+                y: 104.0,
+                z,
+                yaw: 1.25,
+            }),
+            0.0,
+        )
+    };
+    for z in [99.0, 100.0, 100.058, 100.3, 100.6] {
+        let t = place(z).unwrap_or_else(|| panic!("z {z} over the sea must be accepted"));
+        assert_eq!((t.x, t.y, t.z), (103.0, 104.0, 100.0), "z {z}");
+    }
+    assert!(
+        !error_codes(&a.drain()).contains(&super::error::SLAVE_SPAWN_ERROR_INVALID_AREA),
+        "accepted placements must not send the invalid-area error"
+    );
+    // Beyond the tolerance the point is in the air, not on the water.
+    assert!(place(101.5).is_none());
+    assert!(error_codes(&a.drain()).contains(&super::error::SLAVE_SPAWN_ERROR_INVALID_AREA));
+}
+
 #[tokio::test]
 async fn slave_equipment_equips_unequips_and_survives_a_resummon() {
     use crate::models::item::ItemClass;
