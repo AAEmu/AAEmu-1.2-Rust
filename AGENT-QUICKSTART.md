@@ -24,6 +24,7 @@ The live stack, from inside the lane (it picks up the lane's ports, dirs and dat
 
 ```bash
 Scripts/live-stack.sh build    # `live` profile build of all binaries (~12 min cold, ~2.5 min after an edit)
+                               # + aadriver.dll and its native tests (needs MSVC x86; only warns without it)
 Scripts/live-stack.sh sync     # copy rust/crates/*/app configs + data (+ shared compact.sqlite3) into the runtime dirs
 Scripts/live-stack.sh start    # copies the binaries to <runtime>/bin, creates the lane DBs on first start,
                                # starts login + game; returns when the game registered (~1 min)
