@@ -53,30 +53,6 @@ fn collision_kind(obj: &WorldObject) -> crate::systems::ai::collision::world::Ob
     }
 }
 
-/// Object id of the house a doodad belongs to: its parent when that is a house in the world,
-/// else the housing-owned doodad's `owner_db_id`. Doodad fields are copied out before calling
-/// into the world or housing manager (one object lock at a time).
-fn owning_house_obj_id(server: &GameServer, obj: &WorldObject) -> Option<u32> {
-    let doodad = obj.as_doodad()?;
-    let (parent_obj_id, owner_type, owner_db_id) = {
-        let d = doodad.data();
-        (d.parent_obj_id, d.owner_type, d.owner_db_id)
-    };
-    if parent_obj_id != 0 {
-        if let Some(house) = server
-            .world
-            .object(parent_obj_id)
-            .and_then(|o| o.as_house().cloned())
-        {
-            return Some(house.obj_id);
-        }
-    }
-    if owner_type == crate::models::doodad::doodad_owner_type::HOUSING && owner_db_id != 0 {
-        return crate::systems::housing::house_by_id(server, owner_db_id).map(|h| h.obj_id);
-    }
-    None
-}
-
 fn in_water(server: &GameServer, target: &Target) -> bool {
     if target
         .as_obj()
@@ -340,7 +316,19 @@ pub(super) fn check(
     if distance > max_range + extent && !unbounded_placement {
         return fail("skill_too_far_range");
     }
-    if template.check_obstacle && !target.as_obj().is_some_and(|o| o.same(caster)) {
+    // The 1.2 client never runs the obstacle ray for a doodad target: the cast target check for
+    // wire type 4 (`FUN_3939E030`, IDA `sub_3939E030`, `x2game12.c:765943`) only looks the doodad
+    // up (result 9 when it is gone), while the one producer of skill result 0xC (`FUN_390B5540`)
+    // is reached only for unit (`FUN_390B5C60`) and position (`FUN_390B5A30`) targets, and unit
+    // ids never resolve to doodads. A doodad's origin also sits on or inside static map
+    // geometry (workbench stalls, house fixtures, objects baked into a brush), so the ray
+    // always hit that geometry and refused the interaction ("Too far from target"). The
+    // retail zone does not check obstacles either and the C# tree had no check at all.
+    if template.check_obstacle
+        && !target
+            .as_obj()
+            .is_some_and(|o| o.same(caster) || o.as_doodad().is_some())
+    {
         // 1.2 client `FUN_390B5650` (x2game.dll.c:149951): shorten the end point by the
         // target radius and cast no ray when `dist <= radius`; `FUN_390B5540`
         // (x2game.dll.c:149877) uses objtypes 7 (0x107 with `check_terrain`), ray flags
@@ -368,14 +356,6 @@ pub(super) fn check(
             if skip_target {
                 if let Some(obj) = target.as_obj() {
                     ignored.push((collision_kind(obj), obj.obj_id()));
-                    // A fixture of a house (tax plaque, workbench) sits on or inside the house
-                    // mesh, so the house's own collider must not block the line of sight.
-                    if let Some(house_obj_id) = owning_house_obj_id(server, obj) {
-                        ignored.push((
-                            crate::systems::ai::collision::world::ObjKind::House,
-                            house_obj_id,
-                        ));
-                    }
                 }
             }
             let objtypes = if template.check_terrain {
