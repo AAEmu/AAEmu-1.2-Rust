@@ -22,7 +22,7 @@ use crate::world::{now_ms, WorldObject};
 use super::data::{BuffTemplate, BuffTriggerTemplate};
 use super::effects::{self, EffectArgs, EffectSource};
 use super::geometry::Target;
-use super::packets::{SCBuffCreatedPacket, SCBuffRemovedPacket};
+use super::packets::{SCBuffCreatedPacket, SCBuffRemovedPacket, SCBuffUpdatedPacket};
 use super::state::SkillRun;
 use super::types::{
     tags, BuffEventTriggerKind, BuffRemoveOn, CastAction, DamageType, SkillCastTarget, SkillCaster,
@@ -872,17 +872,41 @@ pub fn exit(server: &GameServer, owner: &WorldObject, index: u32, replace: bool)
 }
 
 /// `Buff.ConsumeCharge(value)`: returns the part of `value` the charge did not absorb.
+///
+/// A non-passive buff that stays updated in place gets `SCBuffUpdatedPacket` (stack 1, the
+/// remaining charge) to the same audience as `SCBuffCreatedPacket` / `SCBuffRemovedPacket`;
+/// passive buffs send no buff packets at all. The C# had no sender, so the timing is inferred;
+/// no retail 1.2 server capture exists (see `PORTING.md`).
 pub fn consume_charge(server: &GameServer, owner: &WorldObject, index: u32, value: i32) -> i32 {
-    let Some((rest, exit_now)) = set_buff(owner, index, |e| {
-        let new_charge = (e.charge - value).max(0);
-        let rest = (value - e.charge).max(0);
+    let Some((rest, exit_now, charge, changed, passive)) = set_buff(owner, index, |e| {
+        let old = e.charge;
+        let new_charge = (old - value).max(0);
+        let rest = (value - old).max(0);
         e.charge = new_charge;
-        (rest, e.charge <= 0)
+        (
+            rest,
+            new_charge <= 0,
+            new_charge,
+            new_charge != old,
+            e.passive,
+        )
     }) else {
         return value;
     };
     if exit_now {
         exit(server, owner, index, false);
+    } else if changed && !passive {
+        broadcast(
+            server,
+            owner,
+            &SCBuffUpdatedPacket {
+                obj_id: owner.obj_id(),
+                index,
+                stack: 1,
+                charge,
+            },
+            true,
+        );
     }
     rest
 }

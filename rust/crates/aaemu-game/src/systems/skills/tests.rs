@@ -24,11 +24,13 @@ use super::packets::{inflate_stored, LEVEL_COMPRESSED};
 use super::types::{SkillCastTarget, SkillCaster, SkillObject};
 
 const PLAYER_OBJ: u32 = 0x100;
+const OBSERVER_OBJ: u32 = 0x101;
 const NPC_OBJ: u32 = 0x200;
 const DAMAGE_SKILL: u32 = 10_001;
 const HEAL_SKILL: u32 = 10_002;
 const PLOT_SKILL: u32 = 10_003;
 const BUFF_ID: u32 = 50_001;
+const CHARGE_BUFF: u32 = 50_002;
 
 pub(crate) fn damage_effect(id: u32, amount: i32) -> DamageEffect {
     DamageEffect {
@@ -763,6 +765,207 @@ async fn buff_bonuses_stacking_and_removal() {
         "{fr:x?}"
     );
     assert_eq!(f.player.data().unit.max_hp, 0);
+}
+
+/// A charged buff: `SCBuffCreatedPacket` carries the rolled real charge, consuming part of it
+/// broadcasts one `SCBuffUpdatedPacket` (0x0b9) with the remaining charge to the owner and an
+/// observer, and the exit sends only `SCBuffRemovedPacket`.
+#[tokio::test]
+async fn charged_buff_reports_real_charge_and_updates_on_consumption() {
+    let mut data = data();
+    data.systems.skills.add_buff(BuffTemplate {
+        id: CHARGE_BUFF,
+        kind: 1,
+        duration: 60_000,
+        ..BuffTemplate::default()
+    });
+    let server = Arc::new(open_server(data));
+    super::bind(&server);
+    let mut owner_client = TestClient::new(&server, 1, 1);
+    let mut observer_client = TestClient::new(&server, 2, 2);
+    let player = spawn_player(
+        &server,
+        &owner_client,
+        test_character(1, "Owner", 100.0, 100.0),
+        PLAYER_OBJ,
+    );
+    let observer = spawn_player(
+        &server,
+        &observer_client,
+        test_character(2, "Observer", 105.0, 100.0),
+        OBSERVER_OBJ,
+    );
+    owner_client.conn.active_char = Some(player.clone());
+    observer_client.conn.active_char = Some(observer.clone());
+    // Writing a character's state lazily inserts the two forced patron buffs and leaves their
+    // started events queued; flush them so the frames below belong to this buff only.
+    for p in [&player, &observer] {
+        crate::systems::dispatch_buff_events(&server, &WorldObject::from(p));
+    }
+    owner_client.drain();
+    observer_client.drain();
+
+    let me = WorldObject::from(&player);
+    super::buffs::add_buff_by_id_with_charge(&server, &me, CHARGE_BUFF, &me, 0, 5);
+    let index = player
+        .data()
+        .unit
+        .buffs
+        .effect_from_buff_id(CHARGE_BUFF)
+        .expect("effect")
+        .index;
+
+    // `Buff.WriteData`: PISC(Charge = 5, Duration / 10 = 6000, 0, Tick / 10 = 0).
+    let mut expected = PacketStream::new();
+    expected
+        .write_u8(0)
+        .write_bc(PLAYER_OBJ)
+        .write_u32(1) // Caster.Id (character id)
+        .write_bc(PLAYER_OBJ)
+        .write_u32(index)
+        .write_u32(CHARGE_BUFF)
+        .write_u8(10)
+        .write_i16(1)
+        .write_u32(0)
+        .write_pisc(&[5, 6000, 0, 0]);
+    let created = expected.into_bytes();
+    for (who, client) in [
+        ("owner", &mut owner_client),
+        ("observer", &mut observer_client),
+    ] {
+        let fr = frames(client);
+        let f = fr
+            .iter()
+            .find(|f| f.0 == sc::SCBuffCreatedPacket)
+            .unwrap_or_else(|| panic!("{who}: no buff created {fr:x?}"));
+        assert_eq!(f.1, created, "{who}");
+        assert!(
+            !fr.iter().any(|f| f.0 == sc::SCBuffUpdatedPacket),
+            "{who}: {fr:x?}"
+        );
+    }
+
+    // Part of the charge is consumed: one update with the remaining charge (stack stays 1).
+    assert_eq!(super::buffs::consume_charge(&server, &me, index, 2), 0);
+    assert_eq!(
+        player
+            .data()
+            .unit
+            .buffs
+            .effect_by_index(index)
+            .expect("effect")
+            .charge,
+        3
+    );
+    let mut expected = PacketStream::new();
+    expected
+        .write_bc(PLAYER_OBJ)
+        .write_u32(index)
+        .write_i32(1)
+        .write_i32(3);
+    let updated = expected.into_bytes();
+    for (who, client) in [
+        ("owner", &mut owner_client),
+        ("observer", &mut observer_client),
+    ] {
+        let fr = frames(client);
+        let updates: Vec<_> = fr
+            .iter()
+            .filter(|f| f.0 == sc::SCBuffUpdatedPacket)
+            .collect();
+        assert_eq!(updates.len(), 1, "{who}: {fr:x?}");
+        assert_eq!(updates[0].1, updated, "{who}");
+        assert!(!fr.iter().any(|f| f.0 == sc::SCBuffRemovedPacket), "{who}");
+    }
+
+    // The last charge is consumed: the buff exits, so there is a removal and no update.
+    assert_eq!(super::buffs::consume_charge(&server, &me, index, 3), 0);
+    assert!(!player.data().unit.buffs.check_buff(CHARGE_BUFF));
+    for (who, client) in [
+        ("owner", &mut owner_client),
+        ("observer", &mut observer_client),
+    ] {
+        let fr = frames(client);
+        assert!(
+            fr.iter().any(|f| f.0 == sc::SCBuffRemovedPacket),
+            "{who}: {fr:x?}"
+        );
+        assert!(
+            !fr.iter().any(|f| f.0 == sc::SCBuffUpdatedPacket),
+            "{who}: {fr:x?}"
+        );
+    }
+}
+
+/// Passive buffs never send `SCBuffCreated` / `SCBuffRemoved`, so consuming their charge must
+/// not send `SCBuffUpdated` either.
+#[tokio::test]
+async fn passive_charge_consumption_sends_no_buff_packets() {
+    let mut data = data();
+    data.systems.skills.add_buff(BuffTemplate {
+        id: CHARGE_BUFF,
+        kind: 1,
+        duration: 60_000,
+        ..BuffTemplate::default()
+    });
+    let server = Arc::new(open_server(data));
+    super::bind(&server);
+    let mut client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Owner", 100.0, 100.0),
+        PLAYER_OBJ,
+    );
+    client.conn.active_char = Some(player.clone());
+    crate::systems::dispatch_buff_events(&server, &WorldObject::from(&player));
+    client.drain();
+
+    let me = WorldObject::from(&player);
+    let template = server
+        .game_data
+        .systems
+        .skills
+        .buff(CHARGE_BUFF)
+        .cloned()
+        .expect("template");
+    let mut b = super::buffs::new_buff(
+        &server,
+        &template,
+        Some(&me),
+        &SkillCaster::Unit(PLAYER_OBJ),
+        None,
+        crate::world::now_ms(),
+    );
+    b.passive = true;
+    b.charge = 5;
+    super::buffs::add_buff(&server, &me, b, 0, 0);
+    let index = player
+        .data()
+        .unit
+        .buffs
+        .effect_from_buff_id(CHARGE_BUFF)
+        .expect("effect")
+        .index;
+    assert!(
+        client.drain_ops().is_empty(),
+        "passive buff start sends nothing"
+    );
+
+    assert_eq!(super::buffs::consume_charge(&server, &me, index, 2), 0);
+    let ops = client.drain_ops();
+    assert!(
+        !ops.contains(&sc::SCBuffUpdatedPacket) && !ops.contains(&sc::SCBuffCreatedPacket),
+        "{ops:x?}"
+    );
+
+    assert_eq!(super::buffs::consume_charge(&server, &me, index, 3), 0);
+    assert!(!player.data().unit.buffs.check_buff(CHARGE_BUFF));
+    let ops = client.drain_ops();
+    assert!(
+        !ops.contains(&sc::SCBuffUpdatedPacket) && !ops.contains(&sc::SCBuffRemovedPacket),
+        "{ops:x?}"
+    );
 }
 
 #[tokio::test]

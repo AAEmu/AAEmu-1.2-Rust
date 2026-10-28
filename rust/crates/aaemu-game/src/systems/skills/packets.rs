@@ -240,6 +240,37 @@ impl Marshal for SCBuffCreatedPacket {
     }
 }
 
+/// `SCBuffUpdatedPacket(objId, index, stack, charged)` (opcode 0x0b9).
+///
+/// The C# 1.2 server had only the opcode constant (`SCOffsets.cs:183`), no packet type or
+/// caller. The layout is from the 1.2 client's serializer `FUN_397c63f0`
+/// (`D:/aa-re/client12/out-x2game/x2game.dll.c:1721165`): BC3 unit object id, u32 buff
+/// instance index (named `buffId` by the client), i32 `stack`, i32 `charged` — 15 bytes. The
+/// client handler `0x391d5f20` fires Lua `OnBuffUpdated` (analysis:
+/// `D:/aaemu-client/wt/tps/docs/aa-net.md:7185-7187`). `charge` is the live `Buff.Charge`
+/// (`charged` on the wire). `stack` is sent as 1, as the C# `SCUnitStatePacket.WriteBuff`
+/// wrote it; the 1.2 meaning of that field is not verified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SCBuffUpdatedPacket {
+    pub obj_id: u32,
+    pub index: u32,
+    pub stack: i32,
+    pub charge: i32,
+}
+packet_def!(
+    SCBuffUpdatedPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCBuffUpdatedPacket
+);
+impl Marshal for SCBuffUpdatedPacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_bc(self.obj_id)
+            .write_u32(self.index)
+            .write_i32(self.stack)
+            .write_i32(self.charge);
+    }
+}
+
 /// `SCBuffRemovedPacket(objId, index)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SCBuffRemovedPacket {
@@ -1137,6 +1168,22 @@ mod tests {
             .write_u32(0)
             .write_pisc(&[0, 3000, 0, 100]);
         assert_eq!(body(&p), e.into_bytes());
+    }
+
+    /// 15 bytes: BC3 obj id, u32 instance index, i32 stack, i32 charged (client serializer
+    /// `FUN_397c63f0`).
+    #[test]
+    fn buff_updated_layout() {
+        let p = SCBuffUpdatedPacket {
+            obj_id: 0x20,
+            index: 3,
+            stack: 1,
+            charge: 7,
+        };
+        assert_eq!(
+            body(&p),
+            vec![0x20, 0x00, 0x00, 3, 0, 0, 0, 1, 0, 0, 0, 7, 0, 0, 0]
+        );
     }
 
     #[test]

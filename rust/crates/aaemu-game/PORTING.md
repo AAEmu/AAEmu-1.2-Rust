@@ -1917,6 +1917,22 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `PostDate`) and a buyout sends `SCAuctionBidPacket` with `isBuyout = true`, the lot's
   `direct_money` and the buyer's identity (the C# buyout branch sent nothing although the 1.2
   packet carries the flag). Seller / item mail delivery is unchanged.
+* systems::skills (buff charges, 2026-10-28): `Buff.WriteData` (`SCBuffCreatedPacket`) already
+  carried the real `Charge` in the C# and does here; this is not a deviation. The deviation is
+  `SCUnitStatePacket.WriteBuff`, which hardcoded `tickIndex 0, stack 1, charged 0`. The 1.2
+  client's NetBuff serializer (`FUN_397c9230`) names that field `charged`, so a re-sent unit
+  state dropped remaining charges; Rust now writes the live `Buff.Charge`. `stack` stays 1 as
+  the C# `SCUnitStatePacket.WriteBuff` wrote it (the model has no per-effect stack counter:
+  stacks are separate effects, one row each); the 1.2 meaning of that field is not verified.
+  `tickIndex` stays 0 (the C# value; no source for another).
+  `SCBuffUpdatedPacket` (0x0b9, 15 bytes, client serializer `FUN_397c63f0`) is also new: the C#
+  had only the opcode constant and no sender. It is broadcast, to the same audience as
+  `SCBuffCreated` / `SCBuffRemoved`, when `Buff.ConsumeCharge` leaves a non-passive buff alive
+  (passive buffs send no buff packets), and not when the buff exits. Its `stack` is likewise 1
+  as the C# wrote it, meaning unverified. The send timing is inferred: no retail 1.2 server
+  capture exists, and whether 1.2 also sent it on refresh / duration change is unknown;
+  refreshes keep re-sending `SCBuffCreatedPacket` as before.
+
 * systems::economy (auction settlement, 2026-10-20): the C# ignored `MailForAuction.Send()`
   (`RemoveAuctionLotSold` / `RemoveAuctionLotFail` / `CancelAuctionLot` removed the lot anyway),
   so a mail that was not stored lost the seller's money or the buyer's item. Here a settlement
