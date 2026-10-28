@@ -53,10 +53,6 @@ fn collision_kind(obj: &WorldObject) -> crate::systems::ai::collision::world::Ob
     }
 }
 
-fn collision_kind_house() -> crate::systems::ai::collision::world::ObjKind {
-    crate::systems::ai::collision::world::ObjKind::House
-}
-
 /// Object id of the house a doodad belongs to: its parent when that is a house in the world,
 /// else the housing-owned doodad's `owner_db_id`. Doodad fields are copied out before calling
 /// into the world or housing manager (one object lock at a time).
@@ -375,7 +371,10 @@ pub(super) fn check(
                     // A fixture of a house (tax plaque, workbench) sits on or inside the house
                     // mesh, so the house's own collider must not block the line of sight.
                     if let Some(house_obj_id) = owning_house_obj_id(server, obj) {
-                        ignored.push((collision_kind_house(), house_obj_id));
+                        ignored.push((
+                            crate::systems::ai::collision::world::ObjKind::House,
+                            house_obj_id,
+                        ));
                     }
                 }
             }
