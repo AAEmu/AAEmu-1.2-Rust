@@ -7,8 +7,9 @@ use std::time::Duration;
 use crate::data::world_data::{DistrictReturnPoint, Portal, Zone};
 use crate::data::world_templates::{WorldTemplate, WorldTemplates};
 use crate::data::GameData;
-use crate::models::movement::{MoveKind, MoveType, UnitMove};
+use crate::models::movement::{MoveKind, MoveType, MoveTypeActorFlags, UnitMove};
 use crate::models::npc::{Npc, PortalInfo};
+use crate::models::slave::Slave;
 use crate::models::transform::Transform;
 use crate::net::packet::encode_raw;
 use crate::opcodes::{cs, sc};
@@ -17,7 +18,7 @@ use crate::systems::npcs::portal::{self, PortalEffectObject, PortalTables};
 use crate::systems::skills::data::{effects::SpecialEffect, EffectKind, EffectTemplate};
 use crate::systems::skills::types::{skill_result, SkillCastTarget, SkillCaster, SkillObject};
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient, TEST_ZONE};
-use crate::world::{Entity, PlayerRef, WorldObject};
+use crate::world::{Entity, PlayerRef, SlaveRef, WorldObject};
 
 use super::{on_zone_change, zone_access};
 
@@ -28,7 +29,8 @@ const GATE: u32 = 10;
 
 fn data(respawn: bool) -> GameData {
     let mut data = GameData::empty();
-    for (key, closed) in [(TEST_ZONE, false), (CLOSED, true), (201, true)] {
+    // Zone key 0 ("login") is an open row of the real zones table.
+    for (key, closed) in [(0, false), (TEST_ZONE, false), (CLOSED, true), (201, true)] {
         data.zones.zones.insert(
             key,
             Zone {
@@ -647,4 +649,119 @@ async fn closed_zone_saved_return_and_unknown_mapping_are_checked_without_fabric
     assert!(!zone_access::zone_access_allowed(
         &server, &p, 0, 202, 1400.0, 100.0
     ));
+}
+
+/// Collects the formatted tracing output of the test's thread.
+#[derive(Clone, Default)]
+struct LogSink(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+    type Writer = LogSink;
+
+    fn make_writer(&'a self) -> LogSink {
+        self.clone()
+    }
+}
+
+/// A move that stands on `hull`, as the client sends it: the primary position is in the hull's
+/// frame, the auxiliary one (`x2`..) is the world position.
+async fn board(
+    server: &GameServer,
+    client: &mut TestClient,
+    p: &PlayerRef,
+    hull: &SlaveRef,
+    local: (f32, f32),
+    world: (f32, f32),
+) {
+    crate::world::session::move_unit(
+        server,
+        &mut client.conn,
+        p.obj_id,
+        MoveType::new(MoveKind::Unit(UnitMove {
+            x: local.0,
+            y: local.1,
+            z: 0.0,
+            vel_x: 10,
+            actor_flags: MoveTypeActorFlags::STANDING_ON_OBJECT,
+            gc_flags: 1,
+            gc_id: hull.obj_id,
+            x2: world.0,
+            y2: world.1,
+            z2: 100.0,
+            ..Default::default()
+        })),
+    )
+    .await;
+    tokio::task::yield_now().await;
+}
+
+/// A hull at (`x`, `y`) turned half a circle: the player's still-absolute position (100, 100)
+/// read as an offset in its frame lies at (`x` - 100, `y` - 100).
+fn flipped_hull(server: &GameServer, x: f32, y: f32) -> SlaveRef {
+    let mut hull = Slave::new(1, 1);
+    hull.unit
+        .transform
+        .set_position(x, y, 100.0, 0.0, 0.0, std::f32::consts::PI);
+    let hull = Entity::new(0x300, hull);
+    server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&hull, &server.view_ctx());
+    hull
+}
+
+/// `standing_on` attaches the new supporting object before the client's position (in the
+/// object's frame) is applied. The closed-zone bookkeeping that runs in between must not read the
+/// player's old world position as an offset in that frame, which put it far outside the world
+/// (`GetZoneId: Coordinates out of bounds`, always logged as a pair).
+#[tokio::test]
+async fn boarding_an_object_never_reads_the_old_world_position_as_a_local_one() {
+    let server = server(false);
+    let (mut client, p) = player(&server, 1, 100.0);
+    let hull = flipped_hull(&server, 20.0, 20.0);
+    client.drain();
+    let log = LogSink::default();
+    let _guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_writer(log.clone())
+            .with_ansi(false)
+            .finish(),
+    );
+    board(&server, &mut client, &p, &hull, (1.0, 1.0), (19.0, 19.0)).await;
+    assert_eq!(p.data().unit.transform.parent_obj_id, hull.obj_id);
+    let logged = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    assert!(!logged.contains("out of bounds"), "{logged}");
+}
+
+/// The misread position is also what `remember_open_position` stored as the way back: zone 0 is
+/// an open zone in the real data, so the position outside the world passed `safe_destination`
+/// and a later closed-zone eviction sent the player there.
+#[tokio::test(start_paused = true)]
+async fn boarding_an_object_in_a_closed_zone_keeps_the_last_real_open_position() {
+    let server = server(false);
+    let (mut client, p) = player(&server, 1, 100.0);
+    let hull = flipped_hull(&server, 1400.0, 20.0);
+    board(&server, &mut client, &p, &hull, (0.0, 0.0), (1400.0, 20.0)).await;
+    assert_eq!(p.data().unit.transform.zone_id, CLOSED);
+    for _ in 0..5 {
+        advance(2000).await;
+    }
+    advance(200).await;
+    let t = p.data().unit.transform;
+    assert_eq!(
+        (t.parent_obj_id, t.zone_id, t.x, t.y),
+        (0, TEST_ZONE, 100.0, 100.0)
+    );
 }
