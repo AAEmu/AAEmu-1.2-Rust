@@ -27,6 +27,7 @@ pub mod skills_enum {
     pub const BLESSING: u32 = 12084;
     pub const REPAIR: u32 = 12086;
     pub const USE_STORE: u32 = 12087;
+    pub const SLAVE_OCCUPY: u32 = 12076;
     pub const SLAVE_MOUNTING: u32 = 12077;
     pub const HEAL_PET_S_WOUNDS: u32 = 12195;
     pub const FORM_GUILD: u32 = 13736;
@@ -305,6 +306,13 @@ impl ClientPacket for CSStartInteractionPacket {
             if let Some(WorldObject::Mate(_)) = world.unit(self.npc_obj_id) {
                 me.send(packet(vec![skills_enum::SLAVE_MOUNTING]));
             }
+            // The 1.2 client acts on the first skill at once (FUN_393be850) and
+            // FUN_393bf310 maps 12076 to the bind request FUN_393464a0 (CSBindSlave
+            // 0x031), which `vehicles::slaves::bind_slave_by_tl` answers. The C#
+            // answered only NPCs and mates (see PORTING.md).
+            if let Some(WorldObject::Slave(_)) = world.unit(self.npc_obj_id) {
+                me.send(packet(vec![skills_enum::SLAVE_OCCUPY]));
+            }
             Ok(())
         })
     }
@@ -475,6 +483,33 @@ mod tests {
             0x44, 0x33, 0x22, 0x11, // modifierKeys
         ];
         assert_eq!(encode(&p), frame(0x07b, &body));
+    }
+
+    #[test]
+    fn slave_interaction_skill_list_bytes() {
+        let p = SCNpcInteractionSkillListPacket {
+            npc_obj_id: 0x0A0B0C,
+            obj_id: 0x000102,
+            extra_info: 1,
+            pick_id: 0,
+            mouse_button: 3,
+            modifier_keys: 0,
+            skill_list: vec![skills_enum::SLAVE_OCCUPY],
+        };
+        #[rustfmt::skip]
+        let body = [
+            0x0C, 0x0B, 0x0A, // bc npc
+            0x02, 0x01, 0x00, // bc obj
+            1, 0, 0, 0, // extraInfo
+            0, 0, 0, 0, // pickId
+            3, // mouseButton
+            1, 0, 0, 0, // count
+            0x2C, 0x2F, 0, 0, // 12076 (SLAVE_OCCUPY)
+            1, // interactable
+            0, 0, 0, 0, // modifierKeys
+        ];
+        assert_eq!(encode(&p), frame(0x07b, &body));
+        assert_eq!(skills_enum::SLAVE_OCCUPY, 12076);
     }
 
     #[test]
@@ -725,6 +760,58 @@ mod tests {
             .unwrap();
         assert_eq!(pa.data().unit.current_interaction_object, 0);
         assert_eq!(pa.data().unit.current_target, 0x200);
+    }
+
+    #[tokio::test]
+    async fn start_interaction_slave_answers_occupy() {
+        use crate::models::slave::Slave;
+        use crate::test_support::*;
+        use crate::world::Entity;
+
+        let server = test_server();
+        let mut a = TestClient::new(&server, 1, 1001);
+        let pa = spawn_player(&server, &a, test_character(1, "Alpha", 100.0, 100.0), 0x100);
+        a.conn.active_char = Some(pa.clone());
+        let world = server.world.world(0).unwrap();
+        let mut cart = Slave::new(1, 1);
+        cart.unit.transform.set_xyz(101.0, 100.0, 100.0);
+        world.spawn(Entity::new(0x300, cart), &server.view_ctx());
+        a.drain();
+
+        let req = CSStartInteractionPacket {
+            npc_obj_id: 0x300,
+            obj_id: 0x100,
+            extra_info: 1,
+            pick_id: 0,
+            mouse_button: 3,
+            modifier_keys: 0,
+        };
+        req.handle(&server, &mut a.conn).await.unwrap();
+        let expected = SCNpcInteractionSkillListPacket {
+            npc_obj_id: 0x300,
+            obj_id: 0x100,
+            extra_info: 1,
+            pick_id: 0,
+            mouse_button: 3,
+            modifier_keys: 0,
+            skill_list: vec![skills_enum::SLAVE_OCCUPY],
+        };
+        let mut body = PacketStream::new();
+        expected.write(&mut body);
+        assert_eq!(
+            a.drain(),
+            vec![(sc::SCNpcInteractionSkillListPacket, body.into_bytes())]
+        );
+
+        // An unknown object: no answer.
+        CSStartInteractionPacket {
+            npc_obj_id: 0x999,
+            ..req
+        }
+        .handle(&server, &mut a.conn)
+        .await
+        .unwrap();
+        assert!(a.drain().is_empty());
     }
 
     #[test]
