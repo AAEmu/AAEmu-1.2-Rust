@@ -193,7 +193,8 @@ CREATE TABLE IF NOT EXISTS `characters` (
   `reported_as_bot_count` INT NULL DEFAULT '0',
   `offline_guilty_time` INT NULL DEFAULT '0' COMMENT 'Guilty time for skipped trials',
   `offline_guilty_region` INT NULL DEFAULT '0' COMMENT 'Region for skipped trials',
-  PRIMARY KEY (`id`, `account_id`) USING BTREE
+  PRIMARY KEY (`id`, `account_id`) USING BTREE,
+  UNIQUE KEY `uq_characters_id` (`id`)
 ) ENGINE = InnoDB CHARACTER SET = utf8 COLLATE = utf8_general_ci COMMENT = 'Basic player character data' ROW_FORMAT = DYNAMIC;
 
 
