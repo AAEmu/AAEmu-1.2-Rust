@@ -142,7 +142,8 @@ impl Buff {
         (now_ms - self.start_time_ms) as u32
     }
 
-    /// `SCUnitStatePacket.WriteBuff`.
+    /// `SCUnitStatePacket.WriteBuff`, except that `charged` carries the live `Buff.Charge`
+    /// (the C# hardcoded 0; deliberate deviation, see `PORTING.md`).
     pub fn write_net(&self, s: &mut PacketStream, now_ms: i64) {
         s.write_u32(self.index).write_u32(self.template.id);
         // `stream.Write(effect.SkillCaster)`: item / doodad / mount casters carry more fields.
@@ -158,9 +159,14 @@ impl Buff {
             .write_i32(self.duration)
             .write_u32(self.time_elapsed(now_ms))
             .write_u32(self.tick as u32)
+            // NetBuff: `charged` is the live charge (client serializer name); the C# wrote a
+            // literal 0 here. `stack` stays 1 as the C# `SCUnitStatePacket.WriteBuff` wrote it
+            // (the model has no per-effect stack counter — multiple stacks are separate
+            // effects, one row each); the 1.2 meaning of this field is not verified.
+            // `tickIndex` stays 0 as in the C#.
             .write_i32(0) // tickIndex
             .write_i32(1) // stack
-            .write_i32(0) // charged
+            .write_i32(self.charge) // charged
             .write_u32(0); // cooldownSkill
     }
 
@@ -575,6 +581,7 @@ mod tests {
             1000,
         );
         buff.index = 9;
+        buff.charge = 4;
         let mut s = PacketStream::new();
         buff.write_net(&mut s, 1500);
         assert_eq!(
@@ -582,5 +589,8 @@ mod tests {
             4 + 4 + 1 + 3 + 4 + 1 + 2 + 4 + 4 + 4 + 4 + 4 + 4 + 4
         );
         assert_eq!(s.as_bytes()[23..27], 500u32.to_le_bytes());
+        assert_eq!(s.as_bytes()[31..35], 0i32.to_le_bytes()); // tickIndex
+        assert_eq!(s.as_bytes()[35..39], 1i32.to_le_bytes()); // stack
+        assert_eq!(s.as_bytes()[39..43], 4i32.to_le_bytes()); // charged
     }
 }
