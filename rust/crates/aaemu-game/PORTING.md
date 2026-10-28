@@ -1261,6 +1261,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `cast_validation_tests.rs` cover the height/mask/class rule, the radius gate, the 0.5 m
   position radius and the terrain gate. Not modelled: the multi-part target variant
   `FUN_3989DAE0` (loops the target's sub-shapes and passes if any part passes).
+  **Doodad targets are exempt** (2026-10-28): the client's cast target check for wire type 4
+  (`FUN_3939E030`, IDA `sub_3939E030`) only looks the doodad up, and `FUN_390B5540` (skill
+  result 0xC) is reached only for unit (`FUN_390B5C60`) and position (`FUN_390B5A30`) targets,
+  so a doodad's origin inside static map geometry (production: craft 6231 / skill 16766 at the
+  Two Crowns specialty bench, doodad 4235 at 13824.67 10604.76 120.54, whose ray always hit map
+  brush cell (13, 10)) must not refuse the interaction. This supersedes the earlier skip of
+  the owning house's collider for its fixtures.
 * systems::skills: the labor margin requirement uses `GetMaxLabor(Payment.PremiumState)`; every
   connection has the default C# `AccountPayment` (premium until 2030), so the cap is 5000.
 * systems::skills (in-place resurrection, 2026-10-20): `CSResurrectCharacterPacket(in_place =
