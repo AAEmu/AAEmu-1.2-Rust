@@ -132,6 +132,7 @@ pub fn loot_item(
     };
     let chance = random_next(0, 10000).unwrap_or(0);
     if chance > f.percent {
+        ctx.doodad.data().phase.loot_missed = true;
         return;
     }
     let Some(count) = random_next(f.count_min, f.count_max) else {

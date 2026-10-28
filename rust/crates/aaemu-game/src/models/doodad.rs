@@ -329,6 +329,8 @@ pub struct DoodadPhaseState {
     pub logic_output: Option<bool>,
     /// `ToNextPhase`.
     pub to_next_phase: bool,
+    /// A `DoodadFuncLootItem` row missed its percent roll during the current `Use` pass.
+    pub loot_missed: bool,
     /// `OverridePhase`.
     pub override_phase: i32,
     /// `PhaseRatio` (0..10000, rolled per phase func).
