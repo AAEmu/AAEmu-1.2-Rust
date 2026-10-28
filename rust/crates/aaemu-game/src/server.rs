@@ -152,6 +152,26 @@ impl GameServer {
                 raw.level
             )));
         }
+        if tracing::enabled!(
+            target: crate::net::FIELDS_TRACE_TARGET,
+            tracing::Level::TRACE
+        ) {
+            let names = if raw.level == LEVEL_PROXY {
+                opcodes::pp::NAMES
+            } else {
+                opcodes::cs::NAMES
+            };
+            let name = opcodes::name_of(names, raw.opcode).unwrap_or("unknown");
+            tracing::trace!(
+                target: crate::net::FIELDS_TRACE_TARGET,
+                "C->S level={} opcode=0x{:03X} {} len={} body={}",
+                raw.level,
+                raw.opcode,
+                name,
+                raw.body.unread().len(),
+                crate::net::body_hex(raw.body.unread())
+            );
+        }
         match self.registry.get(raw.level, raw.opcode) {
             Some(reg) => {
                 let started = std::time::Instant::now();
