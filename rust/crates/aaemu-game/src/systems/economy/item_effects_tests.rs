@@ -2364,3 +2364,90 @@ async fn item_plot_end_raises_item_use_for_a_consumed_source_item() {
     crate::systems::skills::plots::finish_item_plot(&w.server, 349, &state);
     assert_eq!(*log.0.lock().unwrap(), vec![STACK]);
 }
+
+// ---------------------------------------------------------------------------------------------
+// FishingLoot (basic fishing, skill 21571, a `Pos` target skill)
+// ---------------------------------------------------------------------------------------------
+
+fn bag_count(w: &World, template: u32) -> i32 {
+    Inv::of(&w.pa)
+        .bag()
+        .lock()
+        .unwrap()
+        .items
+        .iter()
+        .filter(|i| i.template_id == template)
+        .map(|i| i.count)
+        .sum()
+}
+
+/// The fishing plot's `FishingLoot` effect targets the cast position (the skill's target type is
+/// `Pos`); the catch must still be given from the zone group's sea pack.
+#[tokio::test]
+async fn fishing_loot_from_a_position_target_gives_the_sea_pack_item() {
+    use crate::data::world_data::Zone;
+    use crate::systems::economy::loot_data::{Loot, LootGroups, LootPack};
+    use crate::systems::skills::geometry::{PosUnit, Target};
+
+    let mut d = data();
+    d.zones.zones.insert(
+        129,
+        Zone {
+            id: 1,
+            zone_key: 129,
+            group_id: 1,
+            ..Default::default()
+        },
+    );
+    d.systems
+        .economy
+        .item_effects
+        .fishing_loot_packs
+        .insert(1, FishingLootPacks { land: 0, sea: 900 });
+    let loot = Loot {
+        id: 1,
+        group: 1,
+        item_id: STACK,
+        drop_rate: 1,
+        min_amount: 1,
+        max_amount: 1,
+        loot_pack_id: 900,
+        grade_id: 0,
+        always_drop: true,
+    };
+    d.systems.economy.loot.packs.insert(
+        900,
+        LootPack {
+            id: 900,
+            group_count: 1,
+            loots: vec![loot],
+            groups: vec![(
+                1,
+                LootGroups {
+                    id: 1,
+                    pack_id: 900,
+                    group_no: 1,
+                    drop_rate: 0,
+                    item_grade_distribution_id: 0,
+                },
+            )],
+            loots_by_group_no: vec![(1, vec![loot])],
+            ..Default::default()
+        },
+    );
+    let w = world_with_data(d);
+    let target = Target::Pos(PosUnit {
+        instance_id: 0,
+        zone_id: 129,
+        pos: crate::models::transform::PositionAndRotation {
+            x: 100.0,
+            y: 100.0,
+            z: 90.0,
+            ..Default::default()
+        },
+    });
+    assert_eq!(bag_count(&w, STACK), 0);
+    let mut rng = crate::systems::economy::loot::SharedRandom;
+    fishing_loot(&w.server, &w.pa, &target, [0; 4], &mut rng);
+    assert!(bag_count(&w, STACK) >= 1, "no fish was given");
+}

@@ -552,8 +552,8 @@ impl EconomyForSkills {
                 }
             }
             special::FISHING_LOOT => {
-                if let (Some(p), Some(t)) = (player_caster(args), args.target.as_obj()) {
-                    item_effects::fishing_loot(server, p, t, v, &mut rng);
+                if let Some(p) = player_caster(args) {
+                    item_effects::fishing_loot(server, p, &args.target, v, &mut rng);
                 }
             }
             special::ADD_CHARACTER_SLOT => {

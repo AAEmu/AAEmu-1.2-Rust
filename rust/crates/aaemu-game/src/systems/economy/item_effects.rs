@@ -27,6 +27,7 @@ use crate::models::item_task::{task_type, ItemFx, ItemTask};
 use crate::net::packet::ServerPacket;
 use crate::packets::world::SCChatMessagePacket;
 use crate::server::GameServer;
+use crate::systems::skills::geometry::{instance_and_zone, world_pos, Target};
 use crate::systems::social::achievement::char_record_kind;
 use crate::systems::social::achievement_hooks::{AchievementInput, RecordMatch};
 use crate::systems::HookSlot;
@@ -1440,11 +1441,11 @@ pub fn cleanup_ucc(
 }
 
 /// `FishingLoot.Execute`: the fishing loot pack of the target's zone group (land pack above
-/// z 101, sea pack otherwise).
+/// z 101, sea pack otherwise). The target is usually a position (fishing is a `Pos` skill).
 pub fn fishing_loot(
     server: &GameServer,
     player: &PlayerRef,
-    target: &WorldObject,
+    target: &Target,
     values: [i32; 4],
     rng: &mut dyn LootRng,
 ) {
@@ -1452,7 +1453,7 @@ pub fn fishing_loot(
     tracing::debug!(
         "Special effects: FishingLoot value1 {value1}, value2 {value2}, value3 {value3}, value4 {value4}"
     );
-    let zone_key = target.transform().zone_id;
+    let zone_key = instance_and_zone(target).1;
     let Some(zone) = server.game_data.zones.zone_by_key(zone_key) else {
         tracing::error!("FishingLoot: unknown zone {zone_key}"); // NRE in C#
         return;
@@ -1472,10 +1473,7 @@ pub fn fishing_loot(
         );
         return;
     };
-    let z = match server.world.world_of(target) {
-        Some(w) => w.world_pos_rot(target).z,
-        None => target.transform().z,
-    };
+    let z = world_pos(server, target).z;
     let loot_table_id = if z > 101.0 { packs.land } else { packs.sea };
     let Some(pack) = server.game_data.systems.economy.loot.pack(loot_table_id) else {
         return;
