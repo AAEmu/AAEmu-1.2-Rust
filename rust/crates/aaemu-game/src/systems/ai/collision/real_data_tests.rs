@@ -508,3 +508,82 @@ async fn real_collision_mistfiend_cave_walking_height() {
     println!("{above}/6 columns have the heightmap surface above the step range");
     assert!(above > 0, "the cave fixture must cover a surface above");
 }
+
+/// Boat-summon points the client sent on the shared server (`x, y, z` of the refused
+/// "a ship must be summoned on water" placements; all open sea).
+const REFUSED_SUMMON_POINTS: [(f32, f32, f32); 10] = [
+    (13841.5, 10491.5, 100.3),
+    (13831.4, 10480.7, 100.6),
+    (13822.1, 10501.5, 100.3),
+    (9800.4, 8609.2, 100.4),
+    (9802.4, 8613.8, 100.2),
+    (16300.0, 9016.3, 100.1),
+    (16382.9, 8961.7, 100.058),
+    (9806.8, 8620.4, 100.6),
+    (13731.0, 14070.8, 100.3),
+    (20083.7, 18003.8, 100.1),
+];
+
+/// Why the shared server refused open-sea boat summons: the ocean has no water volume, only
+/// the template level (`IsWater` is `z <= level`), and the client's points sit 0.06-0.6 m above
+/// it. The tolerant summon check accepts them and still rejects a beach just above sea level.
+#[test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+fn real_water_boat_summon_points() {
+    use crate::systems::ai::physics::water::WaterBodies;
+    use crate::systems::skills::controllers::Vec3 as WVec3;
+    use crate::systems::vehicles::ship_physics::{point_on_summon_water, SUMMON_WATER_TOLERANCE};
+    let Some(e) = env() else { return };
+    let wh = e.hm.template(e.template_id).expect("main_world heightmap");
+    let water = WaterBodies::new(e.ocean);
+    let tolerant = |water: &WaterBodies, p: [f32; 3]| {
+        point_on_summon_water(
+            p,
+            SUMMON_WATER_TOLERANCE,
+            |q| water.is_water(WVec3::new(q[0], q[1], q[2])).is_some(),
+            |q| water.get_water_surface(WVec3::new(q[0], q[1], q[2])).0,
+            |x, y| e.hm.world_height(e.template_id, x, y).ok(),
+        )
+    };
+    for &(x, y, z) in &REFUSED_SUMMON_POINTS {
+        // reading the height loads the cell, so its water volumes can be ingested
+        let ground = e.hm.world_height(e.template_id, x, y).unwrap();
+        water.sync_loaded_cells(wh, e.hm.files(), "main_world", e.ocean);
+        let strict = water.is_water(WVec3::new(x, y, z)).is_some();
+        println!(
+            "({x}, {y}, {z}): ground {ground}, surface {}, strict {strict}, tolerant {}",
+            water.get_water_surface(WVec3::new(x, y, z)).0,
+            tolerant(&water, [x, y, z]),
+        );
+        assert!(ground < e.ocean, "open sea at ({x}, {y})");
+        assert!(z > e.ocean, "the client point is above the nominal surface");
+        assert!(!strict, "the strict check refused ({x}, {y}, {z})");
+        assert!(tolerant(&water, [x, y, z]), "({x}, {y}, {z}) is open sea");
+        assert!(
+            !tolerant(&water, [x, y, e.ocean + SUMMON_WATER_TOLERANCE + 0.5]),
+            "a point well above the sea is not water"
+        );
+    }
+    // Land just above sea level (beaches) never becomes a boat spawn.
+    let mut beaches = 0;
+    for (cx, cy) in [(13, 10), (9, 8), (16, 8), (13, 13), (19, 17)] {
+        for ix in cx * 512..(cx + 1) * 512 {
+            for iy in cy * 512..(cy + 1) * 512 {
+                let ground = wh.grid_sample(e.hm.files(), ix, iy);
+                if ground <= e.ocean + 0.05 || ground >= e.ocean + SUMMON_WATER_TOLERANCE {
+                    continue;
+                }
+                let (x, y) = ((ix * 2) as f32, (iy * 2) as f32);
+                water.sync_loaded_cells(wh, e.hm.files(), "main_world", e.ocean);
+                let p = [x, y, ground + 0.05];
+                if water.is_water(WVec3::new(p[0], p[1], p[2])).is_some() {
+                    continue; // inside an authored water volume
+                }
+                beaches += 1;
+                assert!(!tolerant(&water, p), "beach ({x}, {y}, {}) is land", p[2]);
+            }
+        }
+    }
+    println!("{beaches} beach samples stayed land");
+    assert!(beaches > 1000);
+}

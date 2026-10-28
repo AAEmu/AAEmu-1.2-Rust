@@ -75,6 +75,41 @@ pub fn is_water(server: &GameServer, world: &WorldInstance, pos: [f32; 3]) -> bo
     physics::is_water(server, world.id, Vec3::new(pos[0], pos[1], pos[2])).is_some()
 }
 
+/// How far above the nominal water surface (metres) a client-chosen boat summon point may sit.
+/// The client picks the point on its animated, wave-displaced sea, so open-sea summon points
+/// arrive 0.05-0.6 m above the template ocean level (`z = 100.3` over level 100.0), which the
+/// strict [`is_water`] (`z <= surface`) refuses.
+pub const SUMMON_WATER_TOLERANCE: f32 = 1.0;
+
+/// [`is_water`] for a client-chosen boat summon point: the point itself, or the point lowered by
+/// [`SUMMON_WATER_TOLERANCE`], must be in water, and in the second case the terrain under it
+/// must be below the water surface (a beach just above sea level is land, not sea).
+pub fn is_summon_water(server: &GameServer, world: &WorldInstance, pos: [f32; 3]) -> bool {
+    point_on_summon_water(
+        pos,
+        SUMMON_WATER_TOLERANCE,
+        |p| is_water(server, world, p),
+        |p| water_surface(server, world, p),
+        |x, y| crate::systems::npcs::heightmap::world_height(server, world, x, y).ok(),
+    )
+}
+
+/// The tolerance logic of [`is_summon_water`] over the water queries (`is_water`, the surface
+/// height at a point, the terrain height at `x, y`, `None` when unknown).
+pub(crate) fn point_on_summon_water(
+    pos: [f32; 3],
+    tolerance: f32,
+    is_water: impl Fn([f32; 3]) -> bool,
+    surface: impl Fn([f32; 3]) -> f32,
+    ground: impl Fn(f32, f32) -> Option<f32>,
+) -> bool {
+    if is_water(pos) {
+        return true;
+    }
+    let probe = [pos[0], pos[1], pos[2] - tolerance];
+    is_water(probe) && ground(pos[0], pos[1]).is_some_and(|ground| ground < surface(probe))
+}
+
 /// The vehicles subsystem's [`ShipPhysicsHooks`] (`server.systems.hooks.ship_physics`).
 pub struct VehicleShipPhysics;
 
@@ -166,4 +201,79 @@ pub fn storm_blocks_slave_skill(server: &GameServer, slave: &SlaveRef, skill_id:
     };
     let in_storm = parent.data().unit.buffs.check_buff(STORM_BUFF_ID);
     in_storm
+}
+
+#[cfg(test)]
+mod summon_water_tests {
+    use super::*;
+
+    const OCEAN: f32 = 100.0;
+
+    /// The template ocean: water at or below its level, nothing above.
+    fn ocean(p: [f32; 3]) -> bool {
+        p[2] <= OCEAN
+    }
+
+    fn surface(_: [f32; 3]) -> f32 {
+        OCEAN
+    }
+
+    fn on_water(z: f32, ground: Option<f32>) -> bool {
+        point_on_summon_water(
+            [13841.5, 10491.5, z],
+            SUMMON_WATER_TOLERANCE,
+            ocean,
+            surface,
+            |_, _| ground,
+        )
+    }
+
+    /// The refused production placements (z 100.06-100.6 over deep sea) are water.
+    #[test]
+    fn open_sea_points_slightly_above_the_surface_are_water() {
+        for z in [99.0, 100.0, 100.058, 100.1, 100.3, 100.6, 101.0] {
+            assert!(on_water(z, Some(88.0)), "z {z}");
+        }
+    }
+
+    #[test]
+    fn points_beyond_the_tolerance_above_the_surface_are_not_water() {
+        for z in [101.01, 101.5, 105.0, 120.0] {
+            assert!(!on_water(z, Some(88.0)), "z {z}");
+        }
+    }
+
+    /// A beach a little above sea level must not become a boat spawn.
+    #[test]
+    fn terrain_at_or_above_the_surface_is_land_inside_the_tolerance_band() {
+        assert!(!on_water(100.4, Some(100.4)));
+        assert!(!on_water(100.4, Some(100.0)));
+        assert!(!on_water(100.9, Some(101.2)));
+        assert!(on_water(100.4, Some(99.9)));
+    }
+
+    #[test]
+    fn unknown_terrain_is_refused_only_inside_the_tolerance_band() {
+        assert!(!on_water(100.3, None));
+        assert!(on_water(99.5, None), "strict water never needs the terrain");
+    }
+
+    /// A lake: water between `surface - depth` and `surface`; the client's point sits above it.
+    #[test]
+    fn lake_points_slightly_above_the_surface_are_water() {
+        let (surface_z, depth) = (230.0f32, 6.0f32);
+        let lake = |p: [f32; 3]| p[2] <= surface_z && p[2] >= surface_z - depth;
+        let check = |z: f32, ground: f32| {
+            point_on_summon_water(
+                [5000.0, 6000.0, z],
+                SUMMON_WATER_TOLERANCE,
+                lake,
+                |_| surface_z,
+                |_, _| Some(ground),
+            )
+        };
+        assert!(check(230.4, 226.0));
+        assert!(!check(231.5, 226.0));
+        assert!(!check(230.4, 230.4), "a lake shore is land");
+    }
 }

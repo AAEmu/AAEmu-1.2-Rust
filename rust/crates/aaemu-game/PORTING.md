@@ -329,7 +329,7 @@ warning- or error-free. Independent cargo/SQL and control reviews support this
 bounded observation with that replacement-refusal qualification; wider audit items
 remain open.
 
-#### Stale saved cargo racks (2026-10-28)
+#### Stale saved cargo racks and client summon points (2026-10-28)
 
 Deviation from the C# `SlaveManager.Create`, which restored a rack's saved item reference
 unchecked: the saved-cargo preflight (`PersistentDoodads::validate_slave_cargo`) no longer
@@ -338,9 +338,18 @@ not the escrowed pack any more (moved out of System escrow, or the id was reused
 unrelated item). Such a rack is restored empty in its authored empty phase, the cleared row is
 persisted, and a warning names the rack and item ids; no item is granted, moved or deleted.
 Several holders of the id, an intact pack referenced by two racks or by a live rack of another
-hull, and a live-receipt mismatch still refuse. The stale rows came from ships despawned before
-`a0a62dbf3`, when deleting the live rack ran `remove_expired_doodad_item` and removed the
-escrowed pack while the persistent rack row kept its reference.
+hull, and a live-receipt mismatch still refuse. Such rows most likely date from before
+`a0a62dbf3`, when deleting a live rack ran `remove_expired_doodad_item` and removed the escrowed
+pack while the persistent rack row kept its reference; the surviving logs cannot prove it. Today
+cargo, rack and Slave references are retained by `cleanup_doodad_escrow_item`.
+
+Boat summon points are checked with `ship_physics::is_summon_water`: the client picks them on
+its wave-displaced sea 0.05-0.6 m above the nominal level (`z = 100.3` over ocean level
+100.0), which the strict `IsWater` (`z <= level`; the open ocean has no water volume) refused
+as "a ship must be summoned on water". A point up to `SUMMON_WATER_TOLERANCE` (1 m) above the
+water is accepted when the terrain under it is below the surface (so beaches stay land).
+Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAME_PAK`):
+`cargo test -p aaemu-game real_water_boat_summon_points -- --ignored --nocapture`.
 
 ### systems::social
 
