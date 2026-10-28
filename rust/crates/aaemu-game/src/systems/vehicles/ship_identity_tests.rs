@@ -835,7 +835,7 @@ async fn different_inactive_saved_hull_restores_another_owners_system_cargo() {
     row.item_id = pack_id;
     row.item_template_id = 29203;
     {
-        let prepared = PersistentDoodads::prepare(&server, vec![row.clone()]).unwrap();
+        let mut prepared = PersistentDoodads::prepare(&server, vec![row.clone()]).unwrap();
         let _items = server.systems.economy.operation_scope();
         assert!(prepared.validate_slave_cargo(&server, 777, None).is_ok());
     }
@@ -886,6 +886,261 @@ async fn different_inactive_saved_hull_restores_another_owners_system_cargo() {
     );
     assert_eq!(server.items.item_by_id(pack_id).unwrap().owner_id, 2);
     assert!(!server.items.removed_items().contains(&pack_id));
+}
+
+fn unused_item_id(server: &GameServer) -> u64 {
+    loop {
+        let id = u64::from(server.ids.item.get_next_id().unwrap());
+        if server.items.item_by_id(id).is_none() {
+            break id;
+        }
+    }
+}
+
+fn loaded_rack_row(item_id: u64) -> crate::systems::npcs::doodad::db::DoodadRow {
+    let mut row = saved_rack_row(777);
+    row.item_id = item_id;
+    row.item_template_id = 29203;
+    row
+}
+
+/// Summon a saved hull (db id 777) whose single cargo rack row is `row`, with the owner holding
+/// a second, otherwise unrelated ship. Returns the restored hull.
+async fn summon_saved_hull_with_rack(
+    server: &Arc<GameServer>,
+    owner: &PlayerRef,
+    row: crate::systems::npcs::doodad::db::DoodadRow,
+) -> Option<SlaveRef> {
+    use crate::systems::npcs::spawn_manager::PersistentDoodads;
+    let target_item = unused_item_id(server);
+    second_item(server, owner, target_item, MERCHANT_ITEM);
+    server
+        .items
+        .update_item(target_item, |item| item.details.slave_db_id = 777)
+        .unwrap();
+    install_memory_loader(server);
+    let weak = Arc::downgrade(server);
+    *server
+        .systems
+        .npcs
+        .spawns
+        .test_persistent_loader
+        .lock()
+        .unwrap() = Some(Arc::new(move |_, parent| {
+        assert_eq!(parent, 777);
+        let prepared =
+            PersistentDoodads::prepare(&weak.upgrade().unwrap(), vec![row.clone()]).unwrap();
+        Box::pin(async move { Ok(prepared) })
+    }));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        summon(server, owner, target_item, MERCHANT_ITEM),
+    )
+    .await
+    .unwrap()
+}
+
+/// How many cargo packs (template 29203) exist in any container.
+fn cargo_pack_count(server: &GameServer) -> usize {
+    server
+        .items
+        .all_containers()
+        .iter()
+        .map(|c| {
+            c.lock()
+                .unwrap()
+                .items
+                .iter()
+                .filter(|i| i.template_id == 29203)
+                .count()
+        })
+        .sum()
+}
+
+/// The ship from the bug report: its rack saved the id of an escrowed pack that was deleted
+/// while the rack row kept the reference. The summon used to be refused forever.
+#[tokio::test]
+async fn saved_cargo_rack_whose_pack_is_gone_is_restored_empty_and_the_ship_summons() {
+    let server = server_with(cargo_identity_data());
+    let client = TestClient::new(&server, 1, 1);
+    let (owner, item_id) = owner_with_ship(&server, &client, 1, PA, SECOND_SHIP_ITEM);
+    let active = root(&server, &owner, item_id, SHIP_HULL);
+    let missing = unused_item_id(&server);
+    assert!(server.items.item_by_id(missing).is_none());
+    let restored = summon_saved_hull_with_rack(&server, &owner, loaded_rack_row(missing))
+        .await
+        .expect("a rack with a vanished pack must not brick the ship");
+    assert_eq!(persistent_id(&restored), 777);
+    assert!(!Arc::ptr_eq(&restored, &active));
+    let racks = server.world.world(0).unwrap().all_doodads();
+    assert_eq!(racks.len(), 1);
+    {
+        let d = racks[0].data();
+        assert_eq!((d.item_id, d.item_template_id), (0, 0));
+        assert_eq!(d.func_group_id, 8264, "authored empty phase");
+        assert_eq!(d.parent_obj_id, restored.obj_id);
+        assert!(d.is_persistent);
+    }
+    // The state that gets persisted is the empty rack.
+    let row = crate::systems::npcs::doodad::db::snapshot(&server, &racks[0]).unwrap();
+    assert_eq!(
+        (row.item_id, row.item_template_id, row.current_phase_id),
+        (0, 0, 8264)
+    );
+    // Nothing was granted, moved or queued for deletion.
+    assert_eq!(cargo_pack_count(&server), 0);
+    assert!(server.items.item_by_id(missing).is_none());
+    assert!(!server.items.removed_items().contains(&missing));
+    // The cleared row was queued for the doodad writer (no database here, so it fails).
+    assert!(server
+        .systems
+        .npcs
+        .doodads
+        .persistence
+        .flush()
+        .await
+        .is_err());
+}
+
+/// The id was reused by an unrelated item (the actual production data: a stackable material and
+/// a character body part). The unrelated item must survive untouched.
+#[tokio::test]
+async fn saved_cargo_rack_whose_pack_id_was_reused_is_restored_empty_without_touching_the_item() {
+    let server = server_with(cargo_identity_data());
+    let client = TestClient::new(&server, 1, 1);
+    let (owner, item_id) = owner_with_ship(&server, &client, 1, PA, SECOND_SHIP_ITEM);
+    let _active = root(&server, &owner, item_id, SHIP_HULL);
+    let reused = unused_item_id(&server);
+    second_item(&server, &owner, reused, SECOND_SHIP_ITEM);
+    let unrelated = server.items.item_by_id(reused).unwrap();
+    assert_eq!(unrelated.slot_type, slot_type::INVENTORY);
+    let restored = summon_saved_hull_with_rack(&server, &owner, loaded_rack_row(reused))
+        .await
+        .expect("a reused pack id must not brick the ship");
+    assert_eq!(persistent_id(&restored), 777);
+    let racks = server.world.world(0).unwrap().all_doodads();
+    assert_eq!(racks.len(), 1);
+    {
+        let d = racks[0].data();
+        assert_eq!(
+            (d.item_id, d.item_template_id, d.func_group_id),
+            (0, 0, 8264)
+        );
+    }
+    assert_eq!(cargo_pack_count(&server), 0);
+    assert_eq!(server.items.item_by_id(reused).unwrap(), unrelated);
+    assert!(!server.items.removed_items().contains(&reused));
+}
+
+/// A pack that moved out of escrow (recovered into a backpack before the stale row was read)
+/// is not duplicated: the rack is reset empty and the pack stays where it is.
+#[tokio::test]
+async fn saved_cargo_rack_whose_pack_left_escrow_is_restored_empty_and_the_pack_stays() {
+    let server = server_with(cargo_identity_data());
+    let client = TestClient::new(&server, 1, 1);
+    let (owner, item_id) = owner_with_ship(&server, &client, 1, PA, SECOND_SHIP_ITEM);
+    let _active = root(&server, &owner, item_id, SHIP_HULL);
+    let crew_client = TestClient::new(&server, 2, 2);
+    let crew = spawn_player(
+        &server,
+        &crew_client,
+        test_character(2, "Crew", 100.0, 100.0),
+        PB,
+    );
+    let pack_id = original_pack(&server, &crew, slot_type::EQUIPMENT);
+    let pack = server.items.item_by_id(pack_id).unwrap();
+    let restored = summon_saved_hull_with_rack(&server, &owner, loaded_rack_row(pack_id))
+        .await
+        .expect("a recovered pack must not brick the ship");
+    assert_eq!(persistent_id(&restored), 777);
+    let racks = server.world.world(0).unwrap().all_doodads();
+    assert_eq!(racks.len(), 1);
+    assert_eq!(racks[0].data().item_id, 0);
+    assert_eq!(server.items.item_by_id(pack_id).unwrap(), pack);
+    let occurrences: usize = server
+        .items
+        .all_containers()
+        .iter()
+        .map(|c| {
+            c.lock()
+                .unwrap()
+                .items
+                .iter()
+                .filter(|i| i.id == pack_id)
+                .count()
+        })
+        .sum();
+    assert_eq!(occurrences, 1);
+}
+
+/// The cases the preflight was written for still refuse and change nothing.
+#[tokio::test]
+async fn cargo_preflight_still_refuses_duplicated_or_shared_escrow_references() {
+    use crate::systems::npcs::spawn_manager::PersistentDoodads;
+    let server = server_with(cargo_identity_data());
+    let client = TestClient::new(&server, 1, 1);
+    let (owner, item_id) = owner_with_ship(&server, &client, 1, PA, SECOND_SHIP_ITEM);
+    let active = root(&server, &owner, item_id, SHIP_HULL);
+    let _items = server.systems.economy.operation_scope();
+    let validate = |rows: Vec<crate::systems::npcs::doodad::db::DoodadRow>| {
+        PersistentDoodads::prepare(&server, rows)
+            .unwrap()
+            .validate_slave_cargo(&server, 777, None)
+            .map_err(|e| e.to_string())
+    };
+
+    // The same id held by two containers: never repaired blindly.
+    let pack_id = original_pack(&server, &owner, slot_type::SYSTEM);
+    let mut copy = server.items.item_by_id(pack_id).unwrap();
+    copy.slot_type = slot_type::INVENTORY;
+    copy.slot = 5;
+    owner
+        .data()
+        .inventory
+        .bag()
+        .clone()
+        .lock()
+        .unwrap()
+        .items
+        .push(copy);
+    assert_eq!(
+        validate(vec![loaded_rack_row(pack_id)]).unwrap_err(),
+        "saved cargo item has multiple holders"
+    );
+    owner
+        .data()
+        .inventory
+        .bag()
+        .clone()
+        .lock()
+        .unwrap()
+        .items
+        .retain(|i| i.id != pack_id);
+
+    // One intact escrow pack, two saved racks: aliasing.
+    let mut second = loaded_rack_row(pack_id);
+    second.id += 1;
+    second.attach_point += 1;
+    assert_eq!(
+        validate(vec![loaded_rack_row(pack_id), second]).unwrap_err(),
+        "aliased saved cargo item"
+    );
+
+    // One intact escrow pack that a live rack of another hull already holds.
+    let live = loaded_rack(&server, &active);
+    live.data().item_id = pack_id;
+    assert_eq!(
+        validate(vec![loaded_rack_row(pack_id)]).unwrap_err(),
+        "saved cargo item is referenced by another live rack"
+    );
+    live.data().item_id = 0;
+
+    // The intact pack itself restores fine and reports no repair.
+    let mut prepared = PersistentDoodads::prepare(&server, vec![loaded_rack_row(pack_id)]).unwrap();
+    assert_eq!(
+        prepared.validate_slave_cargo(&server, 777, None).unwrap(),
+        0
+    );
 }
 
 #[tokio::test]

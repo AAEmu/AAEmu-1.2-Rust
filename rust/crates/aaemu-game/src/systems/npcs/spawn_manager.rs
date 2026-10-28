@@ -72,6 +72,22 @@ pub(crate) struct PersistentDoodads {
 struct PreparedDoodad {
     row: crate::systems::npcs::doodad::db::DoodadRow,
     interaction_counts: HashMap<u32, u32>,
+    /// A cargo rack whose escrow reference was stale and was reset to the authored empty
+    /// state by [`PersistentDoodads::validate_slave_cargo`]; publication persists the row.
+    repaired: bool,
+}
+
+/// What the item manager currently holds under the id a saved cargo rack references.
+enum CargoEscrow {
+    /// Exactly the System-escrow pack the rack was saved with.
+    Intact,
+    /// No container holds the id any more (the pack was deleted and the id may be reused).
+    Gone,
+    /// A single holder exists but it is not the rack's escrow pack (moved, or the id was reused
+    /// by an unrelated item).
+    Mismatched,
+    /// Several containers hold the id: a duplication risk that must never be repaired blindly.
+    Ambiguous,
 }
 
 impl PersistentDoodads {
@@ -117,6 +133,7 @@ impl PersistentDoodads {
             prepared.push(PreparedDoodad {
                 row,
                 interaction_counts,
+                repaired: false,
             });
         }
         Ok(Self { rows: prepared })
@@ -125,24 +142,32 @@ impl PersistentDoodads {
     /// Called inside the item/publication scopes, before replacing any hull. Compare the
     /// fetched receipt, not the before/after emptiness of the hull: a store/recover ABA can
     /// leave an empty live rack while SQL has captured its former loaded reference.
+    ///
+    /// A rack whose escrow pack is gone or is no longer the escrowed pack (left the System
+    /// container, or its id was reused by an unrelated item, as happened to the cargo of ships
+    /// despawned before original-reference cleanup retained rack items) can never be
+    /// satisfied. Refusing the summon for it would brick the ship forever, so the prepared
+    /// row is reset to the authored empty rack (no item is granted or moved, so nothing can be
+    /// duplicated) and publication persists it. References that may duplicate cargo (several
+    /// holders, an intact pack shared by racks, or a live receipt mismatch) still refuse.
+    /// Returns the number of racks reset.
     pub(crate) fn validate_slave_cargo(
-        &self,
+        &mut self,
         server: &GameServer,
         hull_id: u32,
         live_hull: Option<&crate::world::SlaveRef>,
-    ) -> anyhow::Result<()> {
-        use crate::models::container::slot_type;
-        use crate::models::item::ItemClass;
+    ) -> anyhow::Result<usize> {
         use crate::systems::npcs::doodad::funcs::items::cargo_empty_phase_for;
 
         let mut row_ids = HashSet::new();
         let mut packs = HashSet::new();
+        let mut repaired = 0;
         anyhow::ensure!(
             live_hull.is_none_or(|h| h.data().id == hull_id),
             "cargo preflight has a different live hull identity"
         );
-        for prepared in &self.rows {
-            let row = &prepared.row;
+        for prepared in &mut self.rows {
+            let row = &mut prepared.row;
             anyhow::ensure!(
                 row.owner_type == doodad_owner_type::SLAVE
                     && row.house_id == hull_id
@@ -177,17 +202,17 @@ impl PersistentDoodads {
                 );
                 continue;
             }
-            anyhow::ensure!(
-                cargo_empty_phase_for(
-                    server,
-                    row.owner_type,
-                    row.template_id,
-                    row.current_phase_id
-                )
-                .is_some(),
-                "saved cargo item is not in its loaded phase"
+            let loaded_phase = cargo_empty_phase_for(
+                server,
+                row.owner_type,
+                row.template_id,
+                row.current_phase_id,
             );
-            anyhow::ensure!(packs.insert(row.item_id), "aliased saved cargo item");
+            let escrow = Self::cargo_escrow(server, row);
+            anyhow::ensure!(
+                !matches!(escrow, CargoEscrow::Ambiguous),
+                "saved cargo item has multiple holders"
+            );
             // A live version of this exact persistent hull must agree with the fetched
             // loaded receipt. Other inactive summon items have no live rack to compare.
             if let Some(hull) = live_hull {
@@ -212,6 +237,38 @@ impl PersistentDoodads {
                 });
                 anyhow::ensure!(matched, "saved cargo receipt changed during hull load");
             }
+            let reason = match escrow {
+                CargoEscrow::Intact | CargoEscrow::Ambiguous => None,
+                CargoEscrow::Gone => Some("the pack no longer exists"),
+                CargoEscrow::Mismatched => {
+                    Some("the item with that id is not the escrowed pack (moved or id reused)")
+                }
+            };
+            if let Some(reason) = reason {
+                tracing::warn!(
+                    rack_db_id = row.id,
+                    item_id = row.item_id,
+                    item_template_id = row.item_template_id,
+                    hull_db_id = hull_id,
+                    attach_point = row.attach_point,
+                    reason,
+                    "Saved cargo rack references a missing escrow pack; restoring the rack empty"
+                );
+                row.item_id = 0;
+                row.item_template_id = 0;
+                if let Some(empty) = loaded_phase {
+                    row.current_phase_id = empty;
+                }
+                row.phase_time = chrono::Utc::now().naive_utc();
+                prepared.repaired = true;
+                repaired += 1;
+                continue;
+            }
+            anyhow::ensure!(
+                loaded_phase.is_some(),
+                "saved cargo item is not in its loaded phase"
+            );
+            anyhow::ensure!(packs.insert(row.item_id), "aliased saved cargo item");
             // System escrow alone is insufficient: the same GUID could now be stored on
             // a different live hull. Include hidden/retiring registry objects in this scan.
             for world in server.world.worlds() {
@@ -227,41 +284,52 @@ impl PersistentDoodads {
                     }
                 }
             }
-            let holder = server
-                .items
-                .holding_container(row.item_id)
-                .ok_or_else(|| anyhow::anyhow!("saved cargo item left escrow"))?;
-            {
-                let holder = holder.lock().expect("container poisoned");
-                anyhow::ensure!(
-                    holder.slot_type == slot_type::SYSTEM
-                        && holder.get_item_by_id(row.item_id).is_some_and(|item| {
-                            item.slot_type == slot_type::SYSTEM
-                                && item.owner_id == u64::from(holder.owner_id)
-                                && item.template_id == row.item_template_id
-                                && item.class == ItemClass::Backpack
-                                && item.count == 1
-                        }),
-                    "saved cargo item no longer matches its escrow receipt"
-                );
-            }
-            let occurrences: usize = server
-                .items
-                .all_containers()
-                .iter()
-                .map(|container| {
-                    container
-                        .lock()
-                        .expect("container poisoned")
-                        .items
-                        .iter()
-                        .filter(|item| item.id == row.item_id)
-                        .count()
-                })
-                .sum();
-            anyhow::ensure!(occurrences == 1, "saved cargo item has multiple holders");
         }
-        Ok(())
+        Ok(repaired)
+    }
+
+    /// Classify the item a saved cargo rack references against the live item containers.
+    fn cargo_escrow(
+        server: &GameServer,
+        row: &crate::systems::npcs::doodad::db::DoodadRow,
+    ) -> CargoEscrow {
+        use crate::models::container::slot_type;
+        use crate::models::item::ItemClass;
+
+        let occurrences: usize = server
+            .items
+            .all_containers()
+            .iter()
+            .map(|container| {
+                container
+                    .lock()
+                    .expect("container poisoned")
+                    .items
+                    .iter()
+                    .filter(|item| item.id == row.item_id)
+                    .count()
+            })
+            .sum();
+        if occurrences > 1 {
+            return CargoEscrow::Ambiguous;
+        }
+        let Some(holder) = server.items.holding_container(row.item_id) else {
+            return CargoEscrow::Gone;
+        };
+        let holder = holder.lock().expect("container poisoned");
+        let intact = holder.slot_type == slot_type::SYSTEM
+            && holder.get_item_by_id(row.item_id).is_some_and(|item| {
+                item.slot_type == slot_type::SYSTEM
+                    && item.owner_id == u64::from(holder.owner_id)
+                    && item.template_id == row.item_template_id
+                    && item.class == ItemClass::Backpack
+                    && item.count == 1
+            });
+        if intact {
+            CargoEscrow::Intact
+        } else {
+            CargoEscrow::Mismatched
+        }
     }
 }
 
@@ -1634,6 +1702,7 @@ impl SpawnManager {
         for PreparedDoodad {
             row,
             interaction_counts,
+            repaired,
         } in prepared.rows
         {
             let DoodadRow {
@@ -1788,6 +1857,11 @@ impl SpawnManager {
             }
             // Only enable saving after the phase, counters, parent and position are restored.
             doodad.data().is_persistent = true;
+            if repaired {
+                // A cargo rack reset by `validate_slave_cargo`: the cleared reference must
+                // reach the database, or the stale row would be repaired on every summon.
+                crate::systems::npcs::doodad::db::save(server, &doodad);
+            }
             if do_spawn {
                 backend::doodad_spawn(server, &self.world, &doodad);
                 crate::systems::npcs::doodad::manager::init_doodad(server, &self.world, &doodad);

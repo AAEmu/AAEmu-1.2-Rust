@@ -329,6 +329,19 @@ warning- or error-free. Independent cargo/SQL and control reviews support this
 bounded observation with that replacement-refusal qualification; wider audit items
 remain open.
 
+#### Stale saved cargo racks (2026-10-28)
+
+Deviation from the C# `SlaveManager.Create`, which restored a rack's saved item reference
+unchecked: the saved-cargo preflight (`PersistentDoodads::validate_slave_cargo`) no longer
+refuses the summon forever when a rack's escrow pack is gone (no container holds the id) or is
+not the escrowed pack any more (moved out of System escrow, or the id was reused by an
+unrelated item). Such a rack is restored empty in its authored empty phase, the cleared row is
+persisted, and a warning names the rack and item ids; no item is granted, moved or deleted.
+Several holders of the id, an intact pack referenced by two racks or by a live rack of another
+hull, and a live-receipt mismatch still refuse. The stale rows came from ships despawned before
+`a0a62dbf3`, when deleting the live rack ran `remove_expired_doodad_item` and removed the
+escrowed pack while the persistent rack row kept its reference.
+
 ### systems::social
 
 | Area (C#) | Rust | Status | Notes |

@@ -2292,7 +2292,7 @@ async fn create_with_placement(
     } else {
         Vec::new()
     };
-    let loaded = if let Some(item) = item.as_ref().filter(|_| owner_id != 0) {
+    let mut loaded = if let Some(item) = item.as_ref().filter(|_| owner_id != 0) {
         let mut flush_items: Vec<_> = prior
             .iter()
             .map(|(_, s)| s.data().summoning_item_id)
