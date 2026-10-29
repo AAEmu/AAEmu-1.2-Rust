@@ -20,6 +20,12 @@ pub trait TerrainSource: Send + Sync {
     fn sample(&self, ix: i32, iy: i32) -> f32;
     /// Grid size `(nx, ny)` in samples.
     fn size(&self) -> (i32, i32);
+    /// Whether grid point `(ix, iy)` is a terrain hole (surface id 31): the 2 m square on its
+    /// positive X / Y side has no terrain surface (cave / basement entrances). No holes by
+    /// default.
+    fn is_hole(&self, _ix: i32, _iy: i32) -> bool {
+        false
+    }
 }
 
 /// Number of terrain callback slots (concurrent physics worlds with terrain).
@@ -37,13 +43,28 @@ fn height_cb<const K: usize>(ix: i32, iy: i32) -> f32 {
     }
 }
 
-/// No terrain holes (`typemask & surftype == 0` everywhere; `cover.ctc` is not read).
-fn surf_cb(_ix: i32, _iy: i32) -> u16 {
-    0
+/// The heightfield's `getSurfType`: [`HOLE_SURF`] on a terrain hole, 0 elsewhere. The
+/// heightfield primitive keeps its default `typemask` 0x8000 / `typehole` 1 / `typepower` 15
+/// (`(getSurfType & typemask) >> typepower == typehole`), so a hole cell has no collision
+/// surface and rays pass through (`cover.ctc` is not read).
+fn surf_cb<const K: usize>(ix: i32, iy: i32) -> u16 {
+    match SOURCES[K].read() {
+        Ok(g) => g
+            .as_ref()
+            .map_or(0, |s| if s.is_hole(ix, iy) { HOLE_SURF } else { 0 }),
+        Err(_) => 0,
+    }
 }
+
+/// The `getSurfType` value of a hole (the default `typemask` bit).
+pub const HOLE_SURF: u16 = 0x8000;
 
 macro_rules! height_table {
     ($($k:literal)*) => { [$(height_cb::<$k> as HeightFn),*] };
+}
+
+macro_rules! surf_table {
+    ($($k:literal)*) => { [$(surf_cb::<$k> as SurfTypeFn),*] };
 }
 
 macro_rules! seq256 {
@@ -62,6 +83,7 @@ macro_rules! seq256 {
 }
 
 static HEIGHT_FNS: [HeightFn; MAX_SLOTS] = seq256!(height_table);
+static SURF_FNS: [SurfTypeFn; MAX_SLOTS] = seq256!(surf_table);
 
 /// A borrowed callback slot; released on drop.
 #[derive(Debug)]
@@ -84,7 +106,7 @@ impl TerrainSlot {
     }
 
     pub fn surf_fn(&self) -> SurfTypeFn {
-        surf_cb
+        SURF_FNS[self.index]
     }
 
     /// The registered source.

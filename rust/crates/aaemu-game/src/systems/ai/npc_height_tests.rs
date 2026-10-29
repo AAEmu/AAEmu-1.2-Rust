@@ -36,9 +36,14 @@ const CELL_POINTS: usize = (CELL_HMAP_RESOLUTION * CELL_HMAP_RESOLUTION) as usiz
 
 /// A flat heightmap at `surface` metres for the test zone's cell (0, 0).
 fn heightmaps(surface: f32) -> Arc<HeightmapWorlds> {
+    heightmaps_with_holes(surface, &[])
+}
+
+/// [`heightmaps`] with terrain holes at the given grid points of cell (0, 0).
+fn heightmaps_with_holes(surface: f32, holes: &[(i32, i32)]) -> Arc<HeightmapWorlds> {
     let t = WorldHeightmap::with_size(0, "main_world", 2, 2, COEF);
     let value = (f64::from(surface) * COEF) as u16;
-    assert!(t.insert_cell(0, 0, vec![value; CELL_POINTS]));
+    assert!(t.insert_cell_with_holes(0, 0, vec![value; CELL_POINTS], holes));
     Arc::new(HeightmapWorlds::from_parts(
         Arc::new(ClientFileManager::new()),
         vec![t],
@@ -54,6 +59,18 @@ fn heightmaps(surface: f32) -> Arc<HeightmapWorlds> {
 fn cave_server(surface: f32) -> GameServer {
     let server = test_server_with(GameData::empty());
     server.systems.npcs.heightmaps.install(heightmaps(surface));
+    server
+}
+
+/// A test server whose terrain has a hole at grid point (250, 250): the 2 m square
+/// `[500, 502) x [500, 502)`.
+fn hole_server(surface: f32) -> GameServer {
+    let server = test_server_with(GameData::empty());
+    server
+        .systems
+        .npcs
+        .heightmaps
+        .install(heightmaps_with_holes(surface, &[(250, 250)]));
     server
 }
 
@@ -322,4 +339,171 @@ async fn flying_idle_and_ai_less_npcs_keep_the_reference_height() {
     // No AI: the terrain / navigation height, unclamped (the C# default path).
     let z = reference_height_in(&server, 0, None, 500.0, 500.0, 100.0, TEST_ZONE);
     assert!((z - 200.0).abs() < 0.1, "{z}");
+}
+
+// --- spawn_ground_z (`npc_spawn_on_terrain`) ---
+
+fn spawn_z_at(server: &GameServer, x: f32, y: f32, z: f32) -> f32 {
+    let world = server.world.world(0).expect("main_world");
+    crate::systems::npcs::npc::spawner::spawn_ground_z(server, &world, x, y, z).unwrap_or(z)
+}
+
+fn spawn_z(server: &GameServer, z: f32) -> f32 {
+    spawn_z_at(server, 500.0, 500.0, z)
+}
+
+#[tokio::test]
+async fn spawn_snaps_down_from_2m_above_the_ground() {
+    let server = cave_server(100.0);
+    let z = spawn_z(&server, 102.0);
+    assert!((z - 100.0).abs() < 0.1, "{z}");
+}
+
+#[tokio::test]
+async fn spawn_8m_above_the_ground_stays() {
+    let server = cave_server(100.0);
+    assert_eq!(spawn_z(&server, 108.0), 108.0);
+}
+
+#[tokio::test]
+async fn spawn_half_a_metre_above_the_ground_snaps() {
+    let server = cave_server(100.0);
+    let z = spawn_z(&server, 100.5);
+    assert!((z - 100.0).abs() < 0.1, "{z}");
+}
+
+#[tokio::test]
+async fn spawn_in_a_cave_with_no_floor_stays() {
+    let server = cave_server(200.0);
+    // Far under solid terrain: probably a cave whose floor we lack.
+    assert_eq!(spawn_z(&server, 100.0), 100.0);
+    assert_eq!(spawn_z(&server, 190.0), 190.0);
+}
+
+#[tokio::test]
+async fn spawn_sunk_a_few_metres_into_the_terrain_is_lifted_onto_it() {
+    let server = cave_server(200.0);
+    let z = spawn_z(&server, 197.0);
+    assert!((z - 200.0).abs() < 0.1, "{z}");
+    // Right under the sink limit.
+    let z = spawn_z(
+        &server,
+        200.0 - crate::systems::npcs::npc::spawner::SPAWN_SINK_SNAP + 0.5,
+    );
+    assert!((z - 200.0).abs() < 0.1, "{z}");
+}
+
+#[tokio::test]
+async fn spawn_under_a_terrain_hole_stays() {
+    let server = hole_server(200.0);
+    assert_eq!(spawn_z_at(&server, 500.5, 500.5, 197.0), 197.0);
+    // Just outside the hole the same sunk spawn is lifted.
+    let z = spawn_z_at(&server, 504.5, 500.5, 197.0);
+    assert!((z - 200.0).abs() < 0.1, "{z}");
+}
+
+#[tokio::test]
+async fn swimmer_above_a_seabed_under_the_water_surface_stays() {
+    // Ocean level 100 m: the seabed at 96 m is 4 m under the surface.
+    let server = cave_server(96.0);
+    assert_eq!(spawn_z(&server, 99.2), 99.2);
+    // Within the C# 1 m it still snaps to the floor.
+    let z = spawn_z(&server, 96.5);
+    assert!((z - 96.0).abs() < 0.1, "{z}");
+}
+
+#[tokio::test]
+async fn spawn_3m_above_a_box_snaps_onto_the_box_not_the_terrain() {
+    let server = cave_server(100.0);
+    add_cave_floor(&server, 103.0);
+    // Terrain is 6 m below the spawn (out of range); the box top 3 m below it is the floor.
+    let z = spawn_z(&server, 106.0);
+    assert!((z - 103.0).abs() < 0.01, "{z}");
+}
+
+#[tokio::test]
+async fn spawn_without_the_collision_service_keeps_the_1m_rule() {
+    let server = cave_server(100.0);
+    server.config.update(|c| c.physics.enable = false);
+    let z = spawn_z(&server, 100.5);
+    assert!((z - 100.0).abs() < 0.1, "{z}");
+    assert_eq!(spawn_z(&server, 102.0), 102.0);
+}
+
+// --- terrain holes ---
+
+fn static_ray_z(server: &GameServer, x: f32, y: f32) -> Option<f32> {
+    use crate::systems::ai::collision::query::{mask, ray_flags};
+    crate::systems::ai::collision::raycast(
+        server,
+        0,
+        [x, y, 110.0],
+        [x, y, 0.0],
+        mask::STATIC_TERRAIN,
+        ray_flags::DEFAULT,
+    )
+    .expect("service on")
+    .map(|h| h.pos.z)
+}
+
+#[tokio::test]
+async fn terrain_hole_lets_rays_through_to_the_box_below() {
+    let server = hole_server(100.0);
+    add_cave_floor(&server, 60.0);
+    // The query helper sees the hole (the box is 2 m wide around (500, 500)).
+    use crate::systems::ai::collision::terrain_is_hole;
+    assert_eq!(terrain_is_hole(&server, 0, 500.5, 500.5), Some(true));
+    assert_eq!(terrain_is_hole(&server, 0, 501.9, 500.0), Some(true));
+    assert_eq!(terrain_is_hole(&server, 0, 499.9, 500.5), Some(false));
+    assert_eq!(terrain_is_hole(&server, 0, 510.0, 500.0), Some(false));
+    // Through the hole the ray misses the terrain and lands on the box top.
+    let z = static_ray_z(&server, 500.5, 500.5).expect("hit");
+    assert!((z - 60.0).abs() < 0.01, "{z}");
+    // Next to the hole the terrain is still there.
+    let z = static_ray_z(&server, 504.5, 500.5).expect("hit");
+    assert!((z - 100.0).abs() < 0.1, "{z}");
+}
+
+#[tokio::test]
+async fn terrain_without_the_hole_stops_the_ray_at_the_surface() {
+    let server = cave_server(100.0);
+    add_cave_floor(&server, 60.0);
+    let z = static_ray_z(&server, 500.5, 500.5).expect("hit");
+    assert!((z - 100.0).abs() < 0.1, "{z}");
+}
+
+#[tokio::test]
+async fn spawn_above_the_saturated_heightmap_ceiling_keeps_its_height() {
+    // 1030 m does not fit the u16 heightmap (1024 m ceiling): the "terrain" reads 1023.98 and
+    // is only a lower bound, so a spawn on the real surface must not be pulled down onto it.
+    let server = cave_server(1030.0);
+    assert_eq!(spawn_z(&server, 1027.0), 1027.0);
+    assert_eq!(spawn_z(&server, 1030.5), 1030.5);
+}
+
+#[tokio::test]
+async fn spawn_inside_a_building_over_a_missing_floor_keeps_its_height() {
+    use crate::systems::ai::collision::world::CellContent;
+    // The hall's floor has no collision: the probe under the spawn only finds the terrain 4 m
+    // lower. The cell's brush bounds (the building shell) show the spawn is indoors.
+    let server = cave_server(100.0);
+    let pw = crate::systems::ai::collision::phys_world(&server, 0).expect("physics world");
+    assert!(pw.begin_load((0, 0)));
+    pw.end_load(
+        Some(CellContent {
+            cell: (0, 0),
+            brush_bounds: vec![[
+                PhysicsVec3::new(490.0, 490.0, 95.0),
+                PhysicsVec3::new(530.0, 530.0, 120.0),
+            ]],
+            ..CellContent::default()
+        }),
+        (0, 0),
+    );
+    assert_eq!(spawn_z_at(&server, 500.0, 500.0, 104.0), 104.0);
+    // Outside the bounds the same gap snaps onto the terrain, and within 1 m even inside.
+    let z = spawn_z_at(&server, 600.0, 500.0, 104.0);
+    assert!((z - 100.0).abs() < 0.1, "{z}");
+    let z = spawn_z_at(&server, 500.0, 500.0, 100.5);
+    assert!((z - 100.0).abs() < 0.1, "{z}");
 }

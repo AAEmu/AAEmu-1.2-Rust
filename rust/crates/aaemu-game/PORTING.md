@@ -624,6 +624,34 @@ the x2game / cry3dengine decompiles (addresses below). Config `Physics` (`Config
   NPC spawner points snap to it within 1 m (`npc_spawn_on_terrain`). Real data: 1 487 of the 1 524
   NPC spawns of the 4 busiest main_world cells are within 1 m of the physics ground (1 407 of the
   terrain elevation alone; 178 stand on brushes).
+* **Deviation:** `npc_spawn_on_terrain` (`systems/npcs/npc/spawner.rs`, `spawn_ground_z`) snapped a
+  spawn to the ground only within 1 m. When the ground probe (2 m above the spawn, downwards) hits
+  a floor (terrain, a building, a cave floor) the spawn now snaps onto it when it is less than
+  `SPAWN_GROUND_SNAP` (5 m) above it (or sunk up to the probe's 2 m); spawns authored 1-5 m
+  above the ground (about 5 % of main_world) no longer float. Larger gaps (structures, sea-surface
+  swimmers, instance data) and probe misses (caves with no floor, no collision service) keep the
+  C# 1 m rule, with three additions: a spawn 1 m or more above a floor under the water surface
+  (a surface swimmer) stays; a probe miss under solid, non-hole terrain less than
+  `SPAWN_SINK_SNAP` (6 m) deep is lifted onto the terrain (the client drew it buried), and
+  anything under a hole stays; a floor at the heightmap ceiling (`max_height / 4` = 1024 m in
+  main_world, the u16 height storage saturates) is not trusted; a spawn 1 m or more above a floor
+  and inside the bounding box of a loaded brush at least 6 m tall (a building / castle shell,
+  `inside_brush_bounds`) keeps its Z: the Two Crowns throne hall (about 100 crowd NPCs at
+  Z 242.8 around 13575-13636, 10427-10475) has no floor in our collision (the stairs brush's slab
+  covers only a diagonal band, `castle_nuia_001` has no floor geometry), so the probe falls through
+  to the terrain 4 m below and a snap would sink them under the hall floor. Flying and `underwater_creature`
+  NPCs are not snapped.
+* **Terrain holes:** the 1.2 `heightmap.dat` marks cave / basement entrances with surface id 31
+  (`raw & 0x1F` of a node-v5 sample; `cry3dengine` `IsHole` 0x300CAB30: the containing sector's
+  lower sample, a node with fewer than 33 samples is read at `floor(i * (size - 1) / 32)`, shared
+  sector edges belong to the positive-side sector). `NodeCell.surface` keeps the ids (taken
+  before `RescaleToInt` drops the fifth bit), `WorldHeightmap` a per-cell hole bitmap
+  (`grid_is_hole`), and the physics heightfield's `getSurfType` returns the default `typemask`
+  bit for a hole, so rays pass through (`TerrainSource::is_hole`, `terrain_is_hole`). The
+  C# ignored the holes (and `GetTerrainElevation` still answers over a hole, as native does).
+  Real data: cells 20,8 / 21,8 / 8,13 have 7 / 3 / 2 leaves with `hasHoles` and SID 31
+  (`real_terrain_holes`). Unchanged and unfixed: the C# height decode `data >> 4` (12 bit) differs
+  from the native `raw & 0xFFE0` (mean 0.05 m, max 0.25 m on the measured cells).
   **Visibility deviation (systems::npcs / world::unit_state, 2026-10-11):** NPC unit-state packets
   preserve the spawn/movement transform instead of the C# serializer's `GetReferenceHeight`
   mutation. That mutation could replace a collision floor with a coarse navmesh plane or reset

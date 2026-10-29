@@ -209,6 +209,8 @@ pub mod hmap {
         }
     }
 
+    /// The surface id of a terrain hole.
+    pub const HOLE_SURFACE_ID: u8 = 31;
     const INV_5CM: i32 = 20;
     const MASK_12BIT: u32 = (1 << 12) - 1;
 
@@ -225,6 +227,11 @@ pub mod hmap {
         pub f_range: f32,
         pub n_size: i32,
         pub p_hm_data: Vec<u16>,
+        /// The surface id of each sample of the 33 x 33 sector grid (`x * 33 + y`, like
+        /// `GetHeight`): `raw & 0x1F` (`raw & 0xF` from node version 7), 31 = terrain hole.
+        /// Empty without data. Taken from the file's raw samples, before `RescaleToInt`
+        /// drops the fifth surface bit.
+        pub surface: Vec<u8>,
         i_offset: i32,
         i_range: i32,
         i_step: i32,
@@ -266,12 +273,43 @@ pub mod hmap {
             br.f32()?;
             br.read_bytes(36i32.wrapping_add(unk_count))?;
 
+            n.surface = n.read_surface();
             n.init();
             if !disabled_re_calc && n.version < 7 {
                 n.rescale_to_int();
             }
             n.up_scale();
             Ok(n)
+        }
+
+        /// The surface ids of the 33 x 33 sector grid. Native `IsHole` (`cry3dengine` 0x300CAB30)
+        /// takes the containing sector's lower sample; a node with fewer than 33 samples per side
+        /// (spacing `64 / (size - 1)` m) is read at `floor(i * (size - 1) / 32)`, not rounded.
+        pub(crate) fn read_surface(&self) -> Vec<u8> {
+            let size = self.n_size;
+            if !(2..=33).contains(&size) {
+                return Vec::new();
+            }
+            let mask: u16 = if self.version < 7 { 0x1F } else { 0xF };
+            let size = size as usize;
+            let scale = (size - 1) as f32 / 32.0;
+            let at = |i: usize| ((i as f32 * scale).floor() as usize).min(size - 1);
+            let mut out = Vec::with_capacity(33 * 33);
+            for x in 0..33 {
+                for y in 0..33 {
+                    out.push((self.p_hm_data[at(x) * size + at(y)] & mask) as u8);
+                }
+            }
+            out
+        }
+
+        /// Whether sample `(unit_x, unit_y)` of the sector (0..=32) is a terrain hole.
+        pub fn is_hole_sample(&self, unit_x: i32, unit_y: i32) -> bool {
+            usize::try_from(unit_x * 33 + unit_y)
+                .ok()
+                .filter(|_| (0..=32).contains(&unit_x) && (0..=32).contains(&unit_y))
+                .and_then(|i| self.surface.get(i))
+                .is_some_and(|&s| s == HOLE_SURFACE_ID)
         }
 
         /// `RawDataToHeight`.
@@ -393,8 +431,9 @@ pub mod hmap {
 /// Result of `WorldCell.LoadCellHeightMapFromClientData`.
 #[derive(Debug)]
 enum CellLoad {
-    /// Returned `true`: the heightmap (`None` = all zeros: no file in the client data).
-    Loaded(Option<Box<[u16]>>),
+    /// Returned `true`: the heightmap (`None` = all zeros: no file in the client data) and the
+    /// terrain-hole bitmap (`None` = no holes).
+    Loaded(Option<Box<[u16]>>, Option<Box<[u64]>>),
     /// Returned `false` (`Hmap.Read` failed): `Loaded` stays false, the zeroed array is used
     /// and the next lookup tries again.
     Failed,
@@ -414,10 +453,10 @@ fn load_cell_height_map(
         "game/worlds/{world_name}/cells/{cell_x:03}_{cell_y:03}/client/terrain/heightmap.dat"
     );
     if !files.file_exists(&file) {
-        return CellLoad::Loaded(None);
+        return CellLoad::Loaded(None, None);
     }
     let Some(bytes) = files.read_file(&file) else {
-        return CellLoad::Loaded(None);
+        return CellLoad::Loaded(None, None);
     };
     let hmap = match hmap::Hmap::read(&bytes, false) {
         Ok(Some(h)) => h,
@@ -429,6 +468,7 @@ fn load_cell_height_map(
     };
     let sorted = hmap.sorted_nodes();
     let mut heights = vec![0u16; CELL_POINTS].into_boxed_slice();
+    let mut holes: Option<Box<[u64]>> = None;
     for sector_x in 0..SECTORS_PER_CELL {
         for sector_y in 0..SECTORS_PER_CELL {
             // sortedNodes[sectorX * SECTORS_PER_CELL + sectorY] (ArgumentOutOfRange when short)
@@ -450,11 +490,17 @@ fn load_cell_height_map(
                     // saturating conversion (.NET 9+).
                     let value = (f64::from(height) * height_max_coefficient) as u16;
                     heights[(o_x * CELL_HMAP_RESOLUTION + o_y) as usize] = value;
+                    if node.is_hole_sample(unit_x, unit_y) {
+                        let bit = (o_x * CELL_HMAP_RESOLUTION + o_y) as usize;
+                        let words = holes
+                            .get_or_insert_with(|| vec![0u64; CELL_POINTS.div_ceil(64)].into());
+                        words[bit / 64] |= 1 << (bit % 64);
+                    }
                 }
             }
         }
     }
-    CellLoad::Loaded(Some(heights))
+    CellLoad::Loaded(Some(heights), holes)
 }
 
 /// `WorldCell` (heightmap part).
@@ -462,6 +508,8 @@ fn load_cell_height_map(
 struct CellSlot {
     /// `Loaded` + `HeightMap` (`None` inside = all zeros).
     loaded: OnceLock<Option<Box<[u16]>>>,
+    /// Terrain holes of the cell (bit `x * 512 + y`, set before `loaded`); `None` = none.
+    holes: OnceLock<Option<Box<[u64]>>>,
     /// `_loadLock`.
     load_lock: Mutex<()>,
 }
@@ -527,6 +575,51 @@ impl WorldHeightmap {
         }
     }
 
+    /// [`insert_cell`](Self::insert_cell) with terrain holes: grid points `(x, y)` (cell-local,
+    /// `x * 512 + y` like the heights).
+    pub fn insert_cell_with_holes(
+        &self,
+        cell_x: i32,
+        cell_y: i32,
+        heights: Vec<u16>,
+        holes: &[(i32, i32)],
+    ) -> bool {
+        let Some(s) = self.slot(cell_x, cell_y) else {
+            return false;
+        };
+        if !holes.is_empty() {
+            let mut words = vec![0u64; CELL_POINTS.div_ceil(64)];
+            for &(x, y) in holes {
+                let bit = (x * CELL_HMAP_RESOLUTION + y) as usize;
+                words[bit / 64] |= 1 << (bit % 64);
+            }
+            let _ = s.holes.set(Some(words.into()));
+        }
+        self.insert_cell(cell_x, cell_y, heights)
+    }
+
+    /// Whether grid point `(ix, iy)` of the whole world (2 m grid) is a terrain hole (surface id
+    /// 31 of the sample owning the 2 m square on its positive side), loading its cell on
+    /// demand. False outside the map, in a cell without heightmap and for a failing cell.
+    pub fn grid_is_hole(&self, files: &ClientFileManager, ix: i32, iy: i32) -> bool {
+        if ix < 0 || iy < 0 {
+            return false;
+        }
+        let (cx, cy) = (ix / CELL_HMAP_RESOLUTION, iy / CELL_HMAP_RESOLUTION);
+        if cx >= self.cell_x || cy >= self.cell_y {
+            return false;
+        }
+        if self.verify_cell_loaded(files, cx, cy).is_err() {
+            return false;
+        }
+        let Some(Some(words)) = self.slot(cx, cy).and_then(|s| s.holes.get()) else {
+            return false;
+        };
+        let bit = ((ix % CELL_HMAP_RESOLUTION) * CELL_HMAP_RESOLUTION + iy % CELL_HMAP_RESOLUTION)
+            as usize;
+        words[bit / 64] >> (bit % 64) & 1 == 1
+    }
+
     /// `WorldCell.Loaded`.
     pub fn is_cell_loaded(&self, cell_x: i32, cell_y: i32) -> bool {
         self.slot(cell_x, cell_y)
@@ -580,7 +673,8 @@ impl WorldHeightmap {
             cell_y,
             self.height_max_coefficient,
         ) {
-            CellLoad::Loaded(h) => {
+            CellLoad::Loaded(h, holes) => {
+                let _ = slot.holes.set(holes);
                 let _ = slot.loaded.set(h);
                 Ok(slot.loaded.get().and_then(|h| h.as_deref()))
             }
@@ -1083,6 +1177,53 @@ mod tests {
 
     const COEF: f64 = 65535.0 / (4096.0 / 4.0);
 
+    #[test]
+    fn node_surface_ids_follow_the_native_lower_sample_rule() {
+        use hmap::{NodeCell, HOLE_SURFACE_ID};
+        // 33 x 33: the surface id is the low five bits of the raw sample (x-major).
+        let mut data = vec![0x1234u16; 33 * 33];
+        data[3 * 33 + 4] = 0xFFE0 | 31;
+        data[5 * 33 + 6] = 0x00A0 | 30;
+        let mut n = NodeCell::default();
+        n.version = 5;
+        n.n_size = 33;
+        n.p_hm_data = data;
+        let surface = n.read_surface();
+        assert_eq!(surface.len(), 33 * 33);
+        assert_eq!(surface[3 * 33 + 4], HOLE_SURFACE_ID);
+        assert_eq!(surface[3 * 33 + 4], 31);
+        assert_eq!(surface[5 * 33 + 6], 30);
+        assert_eq!(u16::from(surface[0]), 0x1234 & 0x1F);
+        // 3 x 3 (32 m spacing): sector points 16..=31 read sample 1 (shift, not rounding),
+        // 32 reads sample 2.
+        let mut data = vec![0u16; 9];
+        data[3] = 31;
+        let mut n = NodeCell::default();
+        n.version = 5;
+        n.n_size = 3;
+        n.p_hm_data = data;
+        let surface = n.read_surface();
+        assert_eq!(surface[15 * 33], 0);
+        assert_eq!(surface[16 * 33], 31);
+        assert_eq!(surface[31 * 33 + 15], 31);
+        assert_eq!(surface[31 * 33 + 16], 0);
+        assert_eq!(surface[32 * 33], 0);
+    }
+
+    #[test]
+    fn synthetic_hole_bits_are_per_grid_point() {
+        let t = WorldHeightmap::with_size(0, "test_world", 2, 2, COEF);
+        assert!(t.insert_cell_with_holes(1, 0, vec![1; CELL_POINTS], &[(0, 5), (511, 511)]));
+        let files = ClientFileManager::new();
+        let (bx, by) = (CELL_HMAP_RESOLUTION, 0);
+        assert!(t.grid_is_hole(&files, bx, by + 5));
+        assert!(t.grid_is_hole(&files, bx + 511, by + 511));
+        assert!(!t.grid_is_hole(&files, bx + 1, by + 5));
+        assert!(!t.grid_is_hole(&files, 0, 5));
+        assert!(!t.grid_is_hole(&files, -1, 5));
+        assert!(!t.grid_is_hole(&files, 4000, 5));
+    }
+
     fn synthetic() -> HeightmapWorlds {
         let t = WorldHeightmap::with_size(0, "test_world", 2, 2, COEF);
         // Cell (0,0): height(x, y) = x_index (in metres: 2 m grid → value = index units).
@@ -1294,6 +1435,115 @@ mod real_data_tests {
 
     pub(crate) fn app_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("app")
+    }
+
+    /// `AAEMU_GAME_PAK=D:\AA1.2\game_pak cargo test -p aaemu-game real_terrain_holes -- --ignored
+    /// --nocapture`: the `hasHoles` leaf counts of the AABevy survey (`aa-world.md`: cells 20,8 /
+    /// 21,8 / 8,13 have 7 / 3 / 2), the verified hole point (21204.25, 9026.5), and the height
+    /// difference between the C# `data >> 4` decode and the native `raw & 0xFFE0` one.
+    #[test]
+    #[ignore = "needs AAEMU_GAME_PAK"]
+    fn real_terrain_holes() {
+        let Ok(pak) = std::env::var("AAEMU_GAME_PAK") else {
+            return;
+        };
+        let app = app_path();
+        let files = Arc::new(ClientFileManager::from_sources(&[pak], &app));
+        let worlds = WorldTemplates::load(&files, &app).expect("world templates");
+        let main = worlds.get_world_template_by_name("main_world").unwrap();
+        let h = HeightmapWorlds::new(
+            files.clone(),
+            &worlds,
+            HeightmapConfig {
+                heightmaps_enable: true,
+                ..Default::default()
+            },
+        );
+        let t = h.template(main.id).unwrap();
+        for ((cx, cy), want) in [((20, 8), 7usize), ((21, 8), 3), ((8, 13), 2)] {
+            let bytes = files
+                .read_file(&format!(
+                    "game/worlds/main_world/cells/{cx:03}_{cy:03}/client/terrain/heightmap.dat"
+                ))
+                .unwrap();
+            let hm = hmap::Hmap::read(&bytes, false).unwrap().unwrap();
+            let leaves: Vec<_> = hm
+                .nodes
+                .iter()
+                .filter(|n| !n.p_hm_data.is_empty())
+                .collect();
+            let flagged = leaves.iter().filter(|n| n.b_has_holes != 0).count();
+            let with_sid31 = leaves
+                .iter()
+                .filter(|n| n.surface.contains(&hmap::HOLE_SURFACE_ID))
+                .count();
+            let (mut grid, mut versions) = (0, std::collections::BTreeSet::new());
+            for gx in 0..CELL_HMAP_RESOLUTION {
+                for gy in 0..CELL_HMAP_RESOLUTION {
+                    grid += usize::from(t.grid_is_hole(
+                        &files,
+                        cx * CELL_HMAP_RESOLUTION + gx,
+                        cy * CELL_HMAP_RESOLUTION + gy,
+                    ));
+                }
+            }
+            for n in &leaves {
+                versions.insert(n.version);
+            }
+            println!(
+                "cell {cx},{cy}: {} leaves, hasHoles {flagged}, leaves with SID 31 {with_sid31},                  hole grid points {grid}, node versions {versions:?}",
+                leaves.len()
+            );
+            assert_eq!(flagged, want, "hasHoles leaves of cell {cx},{cy}");
+            assert!(grid > 0, "no hole grid points in cell {cx},{cy}");
+        }
+        // AABevy's verified global control: (21204.25, 9026.5) is a hole.
+        let (ix, iy) = (
+            (21204.25f32 / 2.0).floor() as i32,
+            (9026.5f32 / 2.0).floor() as i32,
+        );
+        assert!(
+            t.grid_is_hole(&files, ix, iy),
+            "21204.25,9026.5 must be a hole"
+        );
+        let around: Vec<bool> = (-2..=2)
+            .map(|d| t.grid_is_hole(&files, ix + d * 8, iy))
+            .collect();
+        println!("holes along x around the control point (step 16 m): {around:?}");
+
+        // Height decode: `RawDataToHeight` (data >> 4 after RescaleToInt) against the native
+        // `offset + (raw & 0xFFE0) * range`, on the raw samples of three cells.
+        for (cx, cy) in [(20, 8), (21, 8), (8, 13), (16, 16)] {
+            let Some(bytes) = files.read_file(&format!(
+                "game/worlds/main_world/cells/{cx:03}_{cy:03}/client/terrain/heightmap.dat"
+            )) else {
+                continue;
+            };
+            let raw_nodes = hmap::Hmap::read(&bytes, true).unwrap().unwrap();
+            let conv = hmap::Hmap::read(&bytes, false).unwrap().unwrap();
+            let (mut max, mut sum, mut n) = (0f64, 0f64, 0usize);
+            for (a, b) in raw_nodes.nodes.iter().zip(conv.nodes.iter()) {
+                if a.n_size != 33 {
+                    continue;
+                }
+                for i in 0..a.p_hm_data.len() {
+                    let native = f64::from(a.f_offset)
+                        + f64::from(a.p_hm_data[i] & 0xFFE0) * f64::from(a.f_range);
+                    let Ok(cs) = b.get_height_by_index(i as u32) else {
+                        continue;
+                    };
+                    let d = (native - f64::from(cs)).abs();
+                    max = max.max(d);
+                    sum += d;
+                    n += 1;
+                }
+            }
+            println!(
+                "cell {cx},{cy}: C# vs native height over {n} samples (33x33 leaves): mean {:.4} m, max {:.4} m",
+                sum / n.max(1) as f64,
+                max
+            );
+        }
     }
 
     /// `AAEMU_GAME_PAK=D:\AA1.2\game_pak AAEMU_HEIGHT_QUERY=q.json AAEMU_HEIGHT_OUT=h.json cargo
