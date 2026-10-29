@@ -32,12 +32,24 @@ def wait_for_any(paths, timeout=30):
         time.sleep(0.02)
 
 
+def native_path(path):
+    """Git Bash reports /c/...; map it to C:/... for fixture existence checks."""
+    if os.name == "nt" and len(path) >= 3 and path[0] == "/" and path[2] == "/" and path[1].isalpha():
+        return path[1] + ":" + path[2:]
+    return path
+
+
 def fake_git(args):
-    """Only implement commands used by new/rollback; unexpected commands fail closed."""
+    """Only implement commands used by new/rollback/done; unexpected commands fail closed."""
     root = Path(os.environ["LANE_TEST_ROOT"]).resolve()
     refs = root / "refs"
     if args[:1] != ["-C"]:
         raise AssertionError(args)
+    # Like Git, fail if the caller's repository directory has been removed.
+    workdir = Path(native_path(args[1])).resolve()
+    if not workdir.is_dir():
+        print(f"fatal: cannot change to '{args[1]}': No such file or directory", file=sys.stderr)
+        return 128
     args = args[2:]
 
     def ref_path(ref):
@@ -57,6 +69,19 @@ def fake_git(args):
         if args[2] == "missing^{commit}":
             return 70
         print(HEAD)
+        return 0
+    if args == ["rev-parse", "--path-format=absolute", "--git-common-dir"]:
+        print((root / "repo/.git").as_posix())
+        return 0
+    if args[:2] == ["status", "--porcelain"]:
+        return 0
+    if args[:2] == ["merge-base", "--is-ancestor"]:
+        return 0
+    if args[:2] == ["branch", "-D"]:
+        ref = ref_path(args[2])
+        if not ref.is_file():
+            return 1
+        ref.unlink()
         return 0
     if args[:2] == ["worktree", "add"]:
         _, _, quiet, wt, flag, branch, base = args
@@ -79,10 +104,19 @@ def fake_git(args):
             return 70
         return 0
     if args[:2] == ["worktree", "remove"]:
+        rest = args[2:]
+        if rest[:1] == ["--force"]:
+            rest = rest[1:]
         if os.environ.get("LANE_TEST_FAIL") == "config-remove":
             return 73
-        wt = owned_path(args[2])
+        wt = owned_path(rest[0])
         shutil.rmtree(wt)
+        return 0
+    if args == ["worktree", "prune"]:
+        # Cleanup must run from the main checkout, even when the lane's worktree is gone.
+        if workdir != (root / "repo").resolve():
+            print(f"fatal: cannot prune from lane worktree '{workdir}'", file=sys.stderr)
+            return 128
         return 0
     if args[:2] == ["update-ref", "-d"]:
         ref = ref_path(args[2])
@@ -114,6 +148,7 @@ class AllocationTests(unittest.TestCase):
         self.addCleanup(self.reap)
         self.repo = self.root / "repo"
         (self.repo / "Scripts").mkdir(parents=True)
+        (self.repo / ".git").mkdir()
         shutil.copyfile(SCRIPT, self.repo / "Scripts/lane.sh")
         self.registry = self.root / "registry"
         self.registry.mkdir()
@@ -205,15 +240,15 @@ exec /usr/bin/ln "$@"
                 process.communicate(timeout=40)
         self.assertFalse((self.root / "forbidden").exists(), "a forbidden tool was invoked")
 
-    def start(self, *args, **env):
+    def start(self, *args, script=None, cwd=None, **env):
         process = subprocess.Popen(
             # Git's bin/bash.exe launcher prepends /mingw64/bin and /usr/bin to PATH.
             # Install shims inside that shell, then exec Bash directly so they stay first.
             [self.bash, "--noprofile", "--norc", "-c",
              'export PATH="$(cd "$LANE_TEST_SHIMS" && pwd):$PATH"; '
              'exec /usr/bin/bash --noprofile --norc "$@"', "lane-test",
-             (self.repo / "Scripts/lane.sh").as_posix(), *args],
-            cwd=self.repo, env=self.env | env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+             (script or self.repo / "Scripts/lane.sh").as_posix(), *args],
+            cwd=cwd or self.repo, env=self.env | env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True,
         )
         self.processes.append(process)
@@ -424,6 +459,20 @@ exec /usr/bin/ln "$@"
         self.assertEqual(entry.read_text(), "PORT_PREFIX=24\n")
         self.assertTrue((self.root / "wt/broken/.git").exists())
         self.assertTrue((self.root / "target/broken").exists())
+
+    def test_done_from_lane_copy_removes_entry_and_branch(self):
+        # `done` is normally run from inside the lane, whose copy of lane.sh must resolve Git to
+        # the main checkout: pruning after its own worktree is removed must still clean up.
+        self.finish(self.create("inside"))
+        lane = self.root / "wt/inside"
+        (lane / "Scripts").mkdir()
+        shutil.copyfile(SCRIPT, lane / "Scripts/lane.sh")
+        for command, body in (("powershell", "exit 0"), ("taskkill", "exit 0"), ("mysql.exe", "exit 1")):
+            self.shim(command, body)
+        output = self.finish(self.start("done", script=lane / "Scripts/lane.sh", cwd=lane))
+        self.assertIn("lane inside removed", output)
+        self.assertFalse((self.registry / "inside.env").exists())
+        self.assertFalse((self.root / "refs/fix/inside").exists())
 
     def test_waiters_and_destructive_cleanup_cannot_release_an_active_creators_lock(self):
         process = self.create("first", LANE_TEST_HOLD="first")

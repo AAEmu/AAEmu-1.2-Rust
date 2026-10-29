@@ -27,7 +27,13 @@ MYSQL_BIN=${AAEMU_MYSQL_BIN:-/c/Program Files/MySQL/MySQL Server 8.0/bin}
 MYSQL_PORT=${AAEMU_MYSQL_PORT:-3317}                # private instance; NEVER the user's 3306
 PORT_PREFIXES=(24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39)  # 21-23 belong to older stacks
 
-REPO=$(cd "$(dirname "$0")/.." && pwd)
+# Always act on the main checkout, never on the worktree this copy of the script lives in:
+# `land` and `done` are normally run from inside a lane, and must resolve git from the
+# repository that owns the common git dir even after that lane's worktree is gone.
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+GIT_COMMON_DIR=$(git -C "$SCRIPT_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || GIT_COMMON_DIR=
+if [ -n "$GIT_COMMON_DIR" ]; then REPO=$(cd "$GIT_COMMON_DIR/.." && pwd)
+else REPO=$(cd "$SCRIPT_DIR/.." && pwd); fi
 MYSQL=("$MYSQL_BIN/mysql.exe" -h127.0.0.1 -P"$MYSQL_PORT" -uroot)
 
 die() { echo "lane: $*" >&2; exit 1; }
@@ -285,6 +291,7 @@ cmd_done() (
   for a in "$@"; do case "$a" in --force) force=1 ;; --keep-branch) keep_branch=1 ;; *) name=$a ;; esac; done
   allocation_lock
   local n; n=$(current "$name"); load "$n"
+  cd "$REPO"  # never depend on a cwd inside the worktree this command removes
   if [ -d "$WT" ] && [ $force = 0 ]; then
     [ -z "$(git -C "$WT" status --porcelain | grep -v 'rust/.cargo/')" ] \
       || die "uncommitted work in $WT (commit + land it, or --force to discard)"
