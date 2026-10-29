@@ -63,6 +63,8 @@ mod handler_permission_tests;
 #[cfg(test)]
 mod leap_skill_controller_tests;
 #[cfg(test)]
+mod lizard_stun_flow_tests;
+#[cfg(test)]
 mod mana_regen_manager_tests;
 #[cfg(test)]
 mod resurrect_tests;
