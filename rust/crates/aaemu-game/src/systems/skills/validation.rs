@@ -17,7 +17,7 @@ const SLAVE_RANGE_ALLOWANCE: f64 = 40.0;
 /// allowed and sent, because it grazes ground-level terrain and clutter on gentle slopes (65
 /// `skill_obstacle` refusals on terrain in one run). The exact height the 1.2 client uses is not
 /// verified.
-const OBSTACLE_RAY_HEIGHT: f32 = 1.0;
+pub(crate) const OBSTACLE_RAY_HEIGHT: f32 = 1.0;
 
 fn fail(key: &str) -> Result<(), (u8, u32)> {
     Err((skill_result_for_key(key), 0))

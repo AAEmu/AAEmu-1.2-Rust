@@ -45,7 +45,7 @@ pub mod stats;
 pub mod tasks;
 pub mod types;
 pub mod unit_reqs;
-mod validation;
+pub(crate) mod validation;
 pub mod water;
 
 #[cfg(test)]
