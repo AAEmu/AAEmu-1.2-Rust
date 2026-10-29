@@ -1,0 +1,265 @@
+physoracle 1
+ret surface 1
+ret part ground 0
+ret part car 0
+ret part car 1
+ret part car 2
+ret part car 3
+ret part car 4
+step 10
+e car p 42000000 42000000 3f58e6fd q 3344d206 33957d68 26627a29 3f800000 v 346967b9 b3f28821 befbae82 w 34c049fd 34f8eeaa 28b4a038 sc 2 aw 1
+step 20
+e car p 42000000 42000000 3f3f32e4 q 33a11da7 34086622 28006bd6 3f800000 v 35844280 b51b4cbd bd9b67d9 w 32d29ed7 b2b9fe0e 295ec0dc sc 2 aw 1
+step 30
+e car p 42000000 42000000 3f2f330c q 33adf395 341ddd24 289dda2d 3f800000 v 35f489a0 b58ee179 bda3df3e w 33ab96ba 34433185 299e26e5 sc 2 aw 1
+step 40
+e car p 42000000 42000000 3f23c4a7 q 33c921ea 342cf47a 290073d6 3f800000 v 363fe905 b5dee2ed 3cdd1de9 w 33b9e01e 33aac2b1 29ad862b sc 2 aw 1
+ret params car 2 1
+ret getparams car 2 1 40400000
+ret action car 3 0
+step 41
+e car p 42000000 42000000 3f2354c0 q 33cc3a20 342e6060 2906b845 3f800000 v 3645c078 3ebd5517 bce82fef w 3d806b0a 3e3b42a7 3e4f63bd sc 2 aw 1
+step 42
+e car p 4200012e 42001276 3f23de23 q 3ac06a3b 3b335890 3b0578d0 3f7fff8d v 3db18a22 3f4c95cb 3d8f2422 w 3e012eb6 3e0c05ab 3ade6f82 sc 2 aw 1
+step 43
+e car p 42000407 42003a35 3f24dc79 q 3b92a049 3b9a3c2c 3b14111d 3f7ffe74 v 3d6cd52e 400be751 3e8d6e34 w 3e9fcded 3dbf6f6f 3c45f724 sc 2 aw 1
+step 44
+e car p 420005e0 42008cd0 3f27bbca q 3c22ef9a 3bc2e077 3b28f97a 3f7ffb63 v 3d1e22e4 4043295f 3f07e260 w 3eb0d571 3cf50031 3ce1d410 sc 2 aw 1
+step 45
+e car p 42000700 4200fa1c 3f2cc02c q 3c7ebd6c 3bcd9ab2 3b49ec53 3f7ff67a v 3c8efa8b 406b3571 3f40882d w 3e9b9d09 bc0edc27 3cfd2dad sc 2 aw 1
+step 46
+e car p 4200076f 42017c02 3f338346 q 3ca6d299 3bc57193 3b6dc7e2 3f7ff0ca v ba417ee1 4086d123 3f67bc5c w 3e76e6d9 bd054118 3cfdfbd6 sc 2 aw 1
+step 47
+e car p 42000749 42020f8d 3f3b7083 q 3cc544d8 3bb1a201 3b88d743 3f7feb76 v bc78c905 409560d2 3f7dad6e w 3e2b1682 bd3bcda3 3cf6b063 sc 2 aw 1
+step 48
+e car p 420006a9 4202b1fa 3f43f680 q 3cd9788c 3b981c3d 3b9a0cae 3f7fe778 v bcd96b77 40a18c67 3f81a97f w 3db8971d bd5209b9 3cebc739 sc 2 aw 1
+step 49
+e car p 420005c1 42035e1c 3f4bee34 q 3ce5b57f 3b78af28 3baab438 3f7fe4de v bcddb9b9 40a5d40e 3f4f795f w 3d7a8c1e bd662fd5 3cf5027f sc 2 aw 1
+step 50
+e car p 420004cf 42041172 3f52c76c q 3cebbffb 3b3ba946 3bbc0246 3f7fe382 v bcf13e59 40afbfc1 3f4530e5 w bbbeb998 bd67a51b 3cf5b687 sc 2 aw 1
+step 51
+e car p 420003c7 4204cf05 3f593557 q 3ce904c5 3b01806c 3bcce60e 3f7fe413 v bd04c5d0 40b86cc2 3f31c657 w bd7b5754 bd43e1f5 3ce56f5e sc 2 aw 1
+step 52
+e car p 420002a4 42059596 3f5eee80 q 3cdf32b7 3aa466bf 3bdc5ee9 3f7fe622 v bd126d7e 40c02d90 3f17629e w bdd17478 bd13b6e4 3ccef469 sc 2 aw 1
+step 53
+e car p 42000164 4206643f 3f63bc47 q 3cd05969 3a3fcba3 3bea202d 3f7fe91c v bd234b28 40c756fd 3ef0b5e8 w be01f88a bcc0d658 3cb5235b sc 2 aw 1
+step 54
+e car p 41ffffff 42073a75 3f677bfe q 3cbeb4df 39d4d925 3bf614f9 3f7fec62 v bd327d30 40ce3d57 3eae0493 w be0a42bc bc737871 3ca39076 sc 2 aw 1
+step 55
+e car p 41fffcf8 42081805 3f6a1e86 q 3cac7eeb 39593a89 3c007760 3f7fef74 v bd404161 40d5301e 3e564967 w be02b272 bc199281 3c995b1b sc 2 aw 1
+step 56
+e car p 41fff9b5 4208fd10 3f6ba758 q 3c9bc1ed 38bffff6 3c058c64 3f7ff1fb v bd4f73da 40dc75c2 3db0325b w bddb291b bbaefc21 3c922e9f sc 2 aw 1
+step 57
+e car p 41fff62f 4209e9fd 3f6c2a18 q 3c8e3220 3810a363 3c0a6507 3f7ff3ca v bd608126 40e44897 bcbfa632 w bd9c3959 bb22afc9 3c8d90fa sc 2 aw 1
+step 58
+e car p 41fff25e 420adf6f 3f6bc7b2 q 3c85113a 378965f7 3c0f1793 3f7ff4db v bd73ce16 40ecd545 bde96e93 w bd20582d ba036e0e 3c8aebb2 sc 2 aw 1
+step 59
+e car p 41ffee39 420bde34 3f6aab4b q 3c811cea 37bff621 3c13b4b4 3f7ff533 v bd84d603 40f63912 be3a8a03 w 39e4bcf6 3a60123f 3c89aaf9 sc 2 aw 1
+step 60
+e car p 41ffe9b4 420ce736 3f6906f9 q 3c828914 3838eba4 3c1847ed 3f7ff4da v bd912886 41004094 be675913 w 3d1e27ae 3ae890fa 3c895166 sc 2 aw 1
+step 61
+e car p 41ffe4c3 420dfb68 3f671071 q 3c89064c 389a19d2 3c1cd88a 3f7ff3d4 v bd9ee984 4105d564 be7aa194 w 3d936456 3b1be231 3c897a8d sc 2 aw 1
+step 62
+e car p 41ffdf59 420f1bb6 3f64fdb2 q 3c93d3f2 38e0205a 3c216a93 3f7ff225 v bdae12d3 410bd24b be7566b5 w 3dc85d97 3b3387fa 3c89df84 sc 2 aw 1
+step 63
+e car p 41ffd96c 421048f7 3f6301d2 q 3ca1dc05 39147300 3c25ffd9 3f7fefd8 v bdbe8d70 4112285e be5a1971 w 3dea78c1 3b3e010c 3c8a58d0 sc 2 aw 1
+step 64
+e car p 41ffd2ef 421183de 3f614a07 q 3cb1d545 39385bf3 3c2a98f8 3f7fed02 v bdd032f2 4118c3d7 be2c6d30 w 3df84e58 3b3c8bfc 3c8acb82 sc 2 aw 1
+step 65
+e car p 41ffcbda 4212ccf4 3f5ffb18 q 3cc2673f 395a69a3 3c2f35b9 3f7fe9cb v bde2d05b 411f8dc9 bde2310f w 3df28420 3b307684 3c8b2f1e sc 2 aw 1
+step 66
+e car p 41ffc425 42142490 3f5f2f5d q 3cd24c2f 39799531 3c33d5c1 3f7fe674 v bdf629b6 41266dd7 bd35fcef w 3ddb79e0 3b1ae6f3 3c8b7c09 sc 2 aw 1
+step 67
+e car p 41ffbbca 42158ad3 3f5ef584 q 3ce06c60 398a81f4 3c38786c 3f7fe33f v be04ff4d 412d4c10 3cc59c41 w 3db6cf38 3afbc2a0 3c8bb841 sc 2 aw 1
+step 68
+e car p 41ffb2c5 4216ffaf 3f5f5032 q 3cebf13e 39960f27 3c3d1d64 3f7fe072 v be0f0764 4134126b 3db7f9b0 w 3d88d16c 3ab691bb 3c8be0c4 sc 2 aw 1
+step 69
+e car p 41ffa914 421882e7 3f603691 q 3cf44e82 399f3be3 3c41c41f 3f7fde43 v be190f8d 413aae52 3e176c91 w 3d2bf16b 3a577e7a 3c8c0164 sc 2 aw 1
+step 70
+e car p 41ff9eb6 421a1418 3f6195bb q 3cf94313 39a9ce9f 3c466149 3f7fdcd9 v be2383d5 4141117a 3e4702db w 3c89acda 3a8af275 3c898d72 sc 2 aw 1
+step 71
+e car p 41ff93a6 421bb2c4 3f6352df q 3cfad31c 39b7fa3d 3c4aea64 3f7fdc3f v be2dcf57 414732d6 3e67f212 w bbe1fa28 3a585906 3c87f0f2 sc 2 aw 1
+step 72
+e car p 41ff87e7 421d5e5c 3f654de4 q 3cf93e80 39c6096b 3c4f66d4 3f7fdc67 v be37e46b 414d0e9d 3e78c457 w bce2e1fc 39b556d3 3c86ce3e sc 2 aw 1
+step 73
+e car p 41ff7b7d 421f164d 3f676449 q 3cf4f42a 39d1eee9 3c53da9b 3f7fdd35 v be41beeb 4152a655 3e795d9f w bd364d59 b955b799 3c85fac0 sc 2 aw 1
+step 74
+e car p 41ff6e6c 4220da09 3f6973fa q 3cee860c 39dae6b0 3c584847 3f7fde80 v be4b63ce 4158003e 3e6ae3a7 w bd67d55d ba3ba890 3c85465e sc 2 aw 1
+step 75
+e car p 41ff60b7 4222a910 3f6b5de9 q 3ce69cd5 39e0e8aa 3c5cb08e 3f7fe013 v be54e02f 415d26b8 3e4f8b01 w bd822944 ba919ca3 3c84a92d sc 2 aw 1
+step 76
+e car p 41ff5260 42248308 3f6d0ae3 q 3cde290a 39e5493c 3c6112d9 3f7fe1b4 v be5e71df 41623ef6 3e2fcef8 w bd6ec737 ba6f1874 3c839422 sc 2 aw 1
+step 77
+e car p 41ff4366 422667d0 3f6e7112 q 3cd692a0 39eaca23 3c656bc9 3f7fe316 v be680e9b 416743d0 3e0a9e0c w bd4775a8 ba29267a 3c82abd3 sc 2 aw 1
+step 78
+e car p 41ff33c8 42285748 3f6f86e3 q 3cd06bbf 39f19514 3c69bcbc 3f7fe41c v be71d3f2 416c459c 3dc7d4d9 w bd113495 b99b65a6 3c81cc44 sc 2 aw 1
+step 79
+e car p 41ff237e 422a5171 3f704b12 q 3ccc2bfd 39fe10d9 3c6dfa8a 3f7fe4b8 v be7c653b 417154e0 3d7ed84f w bc9c6d6c 3a89da4e 3c7cf055 sc 2 aw 1
+step 80
+e car p 41ff127e 422c5672 3f70c57e q 3cca48a8 3a09928c 3c721c7a 3f7fe4da v be83af85 417684a5 3d0a8389 w 3a750067 3b021046 3c782546 sc 2 aw 1
+ret status car 4 1 00000004 3f000000 3e800000 00000000 00000000 00000000 be83af85 417684a5 3d0a8389 00000004 00000003 451a98de 3f800000 4135f5f8 00000000
+ret status car 5 1 00000005 00000000 80000000 00000001 00000000 00000000 00000000 00000000 00000000 00000000 00000000 42045d27 4232318c b8c8d756 39a75eb8 371e6ea3 3f7fffff 42b4aaaa 00000001 3f49ffcc c1a64044 b8698000 00000000 3f800000 3f800000 3ec75846 3ecccccd 3e800000 3ecccccd 4526aaaa 00000000 406761ac
+ret status car 5 1 00000005 00000001 80000000 00000001 00000000 00000000 00000000 00000000 00000000 00000000 00000000 41f4bc8b 4231e5db 33379c73 39a75eb8 371e6ea3 3f7fffff 429adbbf 00000001 3f2341a9 c17aa586 b86a0000 00000000 3f800000 3f800000 3ec75846 3ecccccd 3e800000 3ecccccd 4135f5f8 00000000 3ff4a86e
+ret action car 3 0
+step 81
+e car p 41ff00c1 422e6697 3f710707 q 3ccb38a9 3a16d4d7 3c7628ff 3f7fe46c v be88cfb9 417b352f bcb8c564 w bd01e33e 3ad6ef85 3c7244da sc 2 aw 1
+step 82
+e car p 41feee63 42307fd8 3f709a1d q 3cc2f2c7 3a225130 3c7a1d33 3f7fe5ca v be8ce4c3 417eccfa be10ae99 w be1961ba bad5c4f7 3c6dd324 sc 2 aw 1
+step 83
+e car p 41fedb71 4232a139 3f6f443f q 3cade883 b88241f1 3c8071ea 3f7fe92c v be931544 4181e672 be3b9fb0 w be052f45 bda009e4 3d0163f9 sc 2 aw 1
+step 84
+e car p 41fec799 4234cde7 3f6db654 q 3c9e9268 ba8b6aed 3c84734e 3f7feb1d v be9a5c43 4184cb69 be3c215d w bd6f2133 bcc1380a 3c9ea0cc sc 2 aw 1
+step 85
+e car p 41feb2c7 423706fe 3f6c2a8f q 3c98bca6 baa88463 3c86d8ce 3f7febac v bea1ec7e 4187c34c be357ca7 w 3af78625 3beeed81 3c4c7825 sc 2 aw 1
+step 86
+e car p 41fe9cf1 42394cd7 3f6ab2ea q 3c9ac851 ba8e2d0c 3c885d29 3f7feb2e v bea9bc91 418ad61d be22cf35 w 3d4d9bd3 3cb30799 3c180398 sc 2 aw 1
+step 87
+e car p 41fe860f 423b9fe9 3f696a8a q 3ca30836 ba37f600 3c897e3e 3f7fe9c6 v beb201ea 418e06b1 be0195e9 w 3db05f05 3cdf8a0b 3c02e844 sc 2 aw 1
+step 88
+e car p 41fe6e11 423e00b1 3f6870b6 q 3cafc686 b98bbdf7 3c8a7b8a 3f7fe78c v beba37c2 4191534a bda34337 w 3de0c0fc 3cce332a 3c098554 sc 2 aw 1
+step 89
+e car p 41fe54f9 42406fa1 3f67e400 q 3cbf54ed 38f59f10 3c8b8c37 3f7fe49d v bec32be3 4194b5b6 bca6b296 w 3df87e19 3cbf1d35 3c087bee sc 2 aw 1
+step 90
+e car p 41fe3aaf 4242ed0d 3f67ddf6 q 3cd01735 39f02980 3c8c9f95 3f7fe131 v becc3a1d 419824e2 3d445eb1 w 3df9df20 3c9d9312 3c0cf364 sc 2 aw 1
+step 91
+e car p 41fe1f2f 42457920 3f686fad q 3ce09ad0 3a3f8f3a 3c8dbee3 3f7fdd89 v bed56ad2 419b9605 3df6defd w 3de7bfd3 3c7a2344 3c0e5457 sc 2 aw 1
+step 92
+e car p 41fe0272 424813d7 3f699fb2 q 3cefa20e 3a7870ce 3c8eddfb 3f7fd9f4 v bedecd92 419efd5b 3e4486d5 w 3dc5cdd9 3c41cdbc 3c09e090 sc 2 aw 1
+step 93
+e car p 41fde486 424abc09 3f6b3055 q 3cf723fa 3a9359a7 3c8feba4 3f7fd802 v bee61915 41a162f1 3e18c77e w bd93fff7 3c0fb981 3be74b25 sc 2 aw 1
+step 94
+e car p 41fdc5a7 424d6e37 3f6c556b q 3ce833f1 3aa9511c 3c90cade 3f7fdb5f v beecb9da 41a38b15 3d9f0112 w be63d5e2 3b846e39 3bcc785c sc 2 aw 1
+step 95
+e car p 41fda5e4 425029f7 3f6cf295 q 3cc95417 3a14257a 3c934cc9 3f7fe199 v bef538ff 41a6546a 3d981cb9 w be489c57 bdbce99b 3cd9a05d sc 2 aw 1
+step 96
+e car p 41fd84d9 4252f204 3f6d9ec5 q 3cb136ae ba17ab4e 3c96a368 3f7fe592 v beffec07 41a9452b 3daca35d w bdf19ebb bccf2e53 3c570d74 sc 2 aw 1
+step 97
+e car p 41fd626a 4255c66b 3f6e550a q 3ca34c73 ba4d3610 3c983720 3f7fe7a5 v bf04ee56 41ac0dd0 3d982464 w bd67002a 3c248fb5 3bd11981 sc 2 aw 1
+step 98
+e car p 41fd3eb2 4258a69c 3f6ef068 q 3c9d68e0 ba0a016e 3c98fdc2 3f7fe876 v bf096855 41aec6fd 3d66ecce w bbf98b34 3cbe4a18 3b9a0bf3 sc 2 aw 1
+step 99
+e car p 41fd19d2 425b9269 3f6f64b1 q 3c9dd6c8 b9081588 3c998b54 3f7fe853 v bf0d9e3e 41b182e9 3d226c2a w 3cfb1683 3ccb5c96 3b854f52 sc 2 aw 1
+step 100
+e car p 41fcf3ce 425e89ec 3f6fb80a q 3ca32e2c 398ebd3d 3c9a0455 3f7fe769 v bf11fbe7 41b44e26 3cf869a3 w 3d758da3 3cbc35a2 3b82dcae sc 2 aw 1
+step 101
+e car p 41fccc9b 42618d6e 3f6ffcc6 q 3cac3e3c 3a268753 3c9a8584 3f7fe5d6 v bf16a105 41b72fb8 3d040f74 w 3da666d2 3cabfc1f 3b96ac37 sc 2 aw 1
+step 102
+e car p 41fca42d 42649cdb 3f7031cb q 3cb59786 39c8c837 3c9c477b 3f7fe3f7 v bf1b8f86 41b9eaa8 3c9d0ae1 w 3d78ad5d bd36ac19 3c9a8fb2 sc 2 aw 1
+step 103
+e car p 41fc7a70 4267b778 3f703139 q 3cb92724 b980abd4 3c9ea746 3f7fe2f7 v bf2003bf 41bbfc56 bd894260 w bd9e92ae bc990ffa 3c26599e sc 2 aw 1
+step 104
+e car p 41fc4f76 426adb6e 3f6f9266 q 3cad8466 39c9f6bd 3c9e3bc7 3f7fe511 v bf24df09 41bed1ea bd8d343c w bd8ac395 3dbb25a3 bc6f5d65 sc 2 aw 1
+step 105
+e car p 41fc233e 426e0c12 3f6f1081 q 3ca6f9ef 3adeabe2 3c9c78cb 3f7fe656 v bf29661f 41c1fba3 bd120f3a w 3a4e8d81 3d2d98b5 bb2a439f sc 2 aw 1
+step 106
+e car p 41fbf5c8 42714a2d 3f6ed67c q 3ca90437 3b1617cf 3c9c4e82 3f7fe5f2 v bf2e4579 41c523aa bb3177c0 w 3d4f89c0 3c7b3ae1 3b9d7fed sc 2 aw 1
+step 107
+e car p 41fbc6fe 427495c4 3f6ee6f6 q 3cb14312 3b231cbb 3c9d14e6 3f7fe467 v bf3391fb 41c8544e 3d12511b w 3dadfbba 3b510e0c 3c0a4c47 sc 2 aw 1
+step 108
+e car p 41fb96d2 4277ee7c 3f6f3169 q 3cbb0cfc 3af318d4 3c9f9ba3 3f7fe25d v bf3915f7 41cb0cc0 3cc1f784 w 3cfbfe0e be12087a 3d27aeb3 sc 2 aw 1
+step 109
+e car p 41fb64ef 427b5367 3f6f85a3 q 3cc04b5d 3627147f 3ca4b122 3f7fe0b2 v bf40cacd 41cdeeef 3d0262c7 w bb5725b1 bd41f87f 3ca44c7d sc 2 aw 1
+step 110
+e car p 41fb3139 427ec365 3f6fa54e q 3cbaea54 ba229691 3ca72961 3f7fe147 v bf464261 41d04f28 bc93aafa w bdda3125 3d8c4b99 bc1441b6 sc 2 aw 1
+step 111
+e car p 41fafc03 42811f5b 3f6f9bf1 q 3caf6778 39f71065 3ca5fc89 3f7fe383 v bf4c06bf 41d39538 3cfbc071 w bce8c612 3d44aa74 bb1efda2 sc 2 aw 1
+step 112
+e car p 41fac542 4282e3ee 3f6ff5aa q 3cadb4b7 3aa0f68e 3ca5b429 3f7fe3ce v bf51c359 41d6c112 3d8a78c3 w 3ce0fc44 3d03c201 3b2c42af sc 2 aw 1
+step 113
+e car p 41fa8d08 4284aefa 3f707f11 q 3cb03f4c 3a886d47 3ca7724b 3f7fe31a v bf57a4fd 41d95b37 3d2cc7c7 w bc3e8834 bdf9aa82 3d19ecd4 sc 2 aw 1
+step 114
+e car p 41fa530b 42867f93 3f70d2af q 3cad30f5 393a4fff 3caa9c79 3f7fe321 v bf5e79ca 41dbf775 3c927fc8 w bd5d9dda 3df243c8 bc8c8265 sc 2 aw 1
+step 115
+e car p 41fa1780 428855bb 3f70eecf q 3ca5b4c0 3a9a8e2a 3ca9fb32 3f7fe46e v bf6404d2 41decb94 3c860f45 w bd0282f0 bc520a76 3c7734f5 sc 2 aw 1
+step 116
+e car p 41f9da4a 428a322a 3f7124af q 3ca38673 3a90ac23 3cabead5 3f7fe478 v bf6acd33 41e1e4e6 3d38a5d6 w 3ce5c099 3c29a2cb 3c456853 sc 2 aw 1
+step 117
+e car p 41f99b5a 428c14ea 3f7178cf q 3ca62bfa 3a236c25 3caedeb6 3f7fe390 v bf719782 41e47646 3c82df8b w bb685fce be0b592c 3d3a8fd2 sc 2 aw 1
+step 118
+e car p 41f95a60 428dfd2b 3f719250 q 3ca44cd6 b9cbb006 3cb2f71d 3f7fe32c v bf7974fb 41e70e66 bc211e7c w bd2f9550 3dfa6686 bc62a95b sc 2 aw 1
+step 119
+e car p 41f91789 428feb3e 3f71921f q 3ca14efe 3ab98997 3cb15798 3f7fe3de v bf7f0853 41ea0323 3b13741b w bb8a5d3c 3b36d602 3c848fee sc 2 aw 1
+step 120
+e car p 41f8d321 4291df4e 3f718a45 q 3c9fce03 3a556d38 3cb4edf8 3f7fe386 v bf8375e2 41ecd216 39246df8 w 3bb87d48 bd6edf28 3d03538c sc 2 aw 1
+ret action car 3 0
+step 121
+e car p 41f88cbc 4293d9b2 3f71ce77 q 3ca1d31e 3880e049 3cb914f4 3f7fe27b v bf8606a0 41efcea8 3db72847 w bb46fb7b 3d863682 3c089b9e sc 2 aw 1
+step 122
+e car p 41f8451b 4295d9c9 3f727966 q 3c9bc316 3a8a7ada 3cba28db 3f7fe332 v bf87cf83 41f1f63b 3d86dbfb w bdf6e430 bd7541a5 3cf41a45 sc 2 aw 1
+step 123
+e car p 41f7fc5a 4297def7 3f733471 q 3c8dcdba 39b3b5ab 3cbe0ec0 3f7fe489 v bf8abb47 41f4cf38 3e098636 w bd4f1357 bc415be8 3cbb2eaf sc 2 aw 1
+step 124
+e car p 41f7b1fa 4299ea1a 3f7475bc q 3c88ec7d 3970f457 3cc13284 3f7fe49d v bf8e9b19 41f779ff 3e393b2e w 3bda4f4d 3c9214e8 3ca1510a sc 2 aw 1
+step 125
+e car p 41f76594 429bfa52 3f75cd74 q 3c850c69 3a2a06b3 3cc356c6 3f7fe4b5 v bf919787 41f8fb01 3d98943a w be0a8a04 3d1356ac 3c1053c8 sc 2 aw 1
+step 126
+e car p 41f717b3 429e0da2 3f762b9f q 3c5d45c0 3aac984a 3cc464dc 3f7fe722 v bf93c265 41fa8203 bd0a3f70 w be4f6c9d bd805ae4 3ce533c7 sc 2 aw 1
+step 127
+e car p 41f6c895 42a024b3 3f75dd5b q 3c2d5972 3a1dc2ca 3cc822b0 3f7fe8c2 v bf96657f 41fcc1c8 bd57b1a9 w bdc47519 bc8bfde1 3ccd3038 sc 2 aw 1
+step 128
+e car p 41f67840 42a2403b 3f7537d1 q 3c123647 3a974ecf 3cca3567 3f7fe961 v bf97b1ca 41fe368f be36b195 w be145d7f 3da7d27e 3ba477c7 sc 2 aw 1
+step 129
+e car p 41f62752 42a45e95 3f7358dd q 3bc9f597 3b1c734b 3ccb16ff 3f7fea6d v bf987cb9 41ff4970 beb6012c w be71ae3e 3d0dd37a 3c66d1fa sc 2 aw 1
+step 130
+e car p 41f5d5fc 42a67f24 3f6fec57 q 3afb1723 3b3eb630 3ccd29b9 3f7feb0d v bf9926b7 42001aa0 bf0dd940 w bea12838 bb3445a6 3cb0dc0f sc 2 aw 1
+step 131
+e car p 41f58464 42a8a120 3f6a8866 q bb59ebae 3b44500e 3ccffa0e 3f7fea39 v bf9919aa 42000fb5 bf6152c3 w bea11a8b bb3ec325 3cb0222c sc 2 aw 1
+step 132
+e car p 41f532d3 42aac2ee 3f625ce9 q bc0c5151 3b49bb2e 3cd2c5d8 3f7fe798 v bf990c9d 420004cb bf9a6294 w bea10cd5 bb49407a 3caf6e13 sc 2 aw 1
+step 133
+e car p 41f4e149 42ace48d 3f576a1d q bc621fb2 3b4ef7a3 3cd58d22 3f7fe329 v bf98ff91 41fff3c5 bfc41839 w bea0ff1a bb53bda2 3caebfc1 sc 2 aw 1
+step 134
+e car p 41f48fc6 42af05fe 3f49b03e q bc9bf2b8 3b540582 3cd84ff9 3f7fdced v bf98f288 41ffddf4 bfedca50 w bea0f157 bb5e39fe 3cae172e sc 2 aw 1
+step 135
+e car p 41f43e4b 42b12740 3f392f88 q bcc6d0f7 3b58e4de 3cdb0e69 3f7fd4e6 v bf98e57e 41ffc826 c00bbc6d w bea0e390 bb68b4e8 3cad7452 sc 2 aw 1
+step 136
+e car p 41f3ecd6 42b34855 3f25e839 q bcf1aa48 3b5d95cd 3cddc87e 3f7fcb12 v bf98d877 41ffb257 c02091ea w bea0d5c2 bb732e08 3cacd723 sc 2 aw 1
+step 137
+e car p 41f39b68 42b5693b 3f0fda8c q bd0e3f2e 3b621866 3ce07e45 3f7fbf74 v bf98cb6f 41ff9c8d c03565a2 w bea0c7ed bb7da49f 3cac3f9b sc 2 aw 1
+step 138
+e car p 41f34a01 42b789f2 3eee0d7c q bd23a673 3b666cbe 3ce32fc9 3f7fb20b v bf98be6a 41ff86c4 c04a3792 w bea0ba13 bb840c44 3cabadb0 sc 2 aw 1
+step 139
+e car p 41f2f8a1 42b9aa7b 3eb6da18 q bd390acb 3b6a92eb 3ce5dd16 3f7fa2d6 v bf98b164 41ff70fd c05f07bd w bea0ac32 bb89449e 3cab215a sc 2 aw 1
+step 140
+e car p 41f2a747 42bbcad5 3e7436c9 q bd4e6c11 3b6e8b0a 3ce8863b 3f7f91d9 v bf98a462 41ff5b38 c073d622 w bea09e4d bb8e7b04 3caa9a91 sc 2 aw 1
+step 141
+e car p 41f255f5 42bdeb01 3ddf476c q bd63ca20 3b725535 3ceb2b45 3f7f7f14 v bf98975e 41ff4574 c0845161 w bea09061 bb93af35 3caa194d sc 2 aw 1
+step 142
+e car p 41f204aa 42c00afe bd00105e q bd7924cd 3b75f182 3cedcc3a 3f7f6a85 v bf988a5c 41ff2fb2 c08eb6cd w bea0826f bb98e11a 3ca99d85 sc 2 aw 1
+step 143
+e car p 41f1b366 42c22acd be3abfaf q bd873dfc 3b79600e 3cf0692a 3f7f5430 v bf987d5d 41ff19f2 c0991b57 w bea07478 bb9e1052 3ca9272f sc 2 aw 1
+step 144
+e car p 41f16229 42c44a6e beb0470e q bd91e7bb 3b7ca0f3 3cf30221 3f7f3c13 v bf98705d 41ff0433 c0a37efd w bea0667c bba33cb3 3ca8b644 sc 2 aw 1
+step 145
+e car p 41f110f2 42c669e1 bf045b9c q bd9c8f90 3b7fb44b 3cf59727 3f7f222e v bf98635f 41feee77 c0ade1c1 w bea05879 bba8660e 3ca84ab9 sc 2 aw 1
+step 146
+e car p 41f0bfc2 42c88925 bf3357ee q bda73568 3b814d1c 3cf8284c 3f7f0685 v bf985662 41fed8bd c0b843a1 w bea04a73 bbad8c13 3ca7e488 sc 2 aw 1
+step 147
+e car p 41f06e9a 42caa83b bf651841 q bdb1d931 3b82a969 3cfab598 3f7ee915 v bf984967 41fec305 c0c2a49f w bea03c65 bbb2aebb 3ca783a6 sc 2 aw 1
+step 148
+e car p 41f01d79 42ccc722 bf8cce2c q bdbc7ad7 3b83ef1f 3cfd3f1a 3f7ec9e1 v bf983c6c 41fead4f c0cd04bc w bea02e55 bbb7cd80 3ca7280a sc 2 aw 1
+step 149
+e car p 41efcc5e 42cee5dc bfa871fb q bdc71a4c 3b851e4c 3cffc4de 3f7ea8eb v bf982f74 41fe979a c0d763f6 w bea0203c bbbce84f 3ca6d1ab sc 2 aw 1
+step 150
+e car p 41ef7b4a 42d10467 bfc57770 q bdd1b776 3b8636fe 3d012375 3f7e8630 v bf98227b 41fe81e6 c0e1c24c w bea01222 bbc1ff11 3ca68081 sc 2 aw 1
+step 151
+e car p 41ef2a3d 42d322c4 bfe3de6d q bddc5246 3b873947 3d0262a7 3f7e61b2 v bf981583 41fe6c34 c0ec1fc1 w bea00401 bbc71171 3ca63482 sc 2 aw 1
+step 152
+e car p 41eed937 42d540f2 c001d36a q bde6eaa7 3b882537 3d03a00a 3f7e3b74 v bf98088e 41fe5686 c0f67c54 w be9ff5db bbcc1f41 3ca5eda4 sc 2 aw 1
+step 153
+e car p 41ee8837 42d75ef2 c0126843 q bdf1808a 3b88fade 3d04dba2 3f7e1374 v bf97fb98 41fe40d9 c1006c03 w be9fe7af bbd12835 3ca5abe0 sc 2 aw 1
+step 154
+e car p 41ee373f 42d97cc5 c023adb3 q bdfc13d8 3b89ba4d 3d061576 3f7de9b4 v bf97eea4 41fe2b2e c105996a w be9fd982 bbd62c4d 3ca56f29 sc 2 aw 1
+step 155
+e car p 41ede64e 42db9a69 c035a3aa q be035240 3b8a6395 3d074d8a 3f7dbe33 v bf97e1b1 41fe1584 c10ac660 w be9fcb4e bbdb2b42 3ca5377f sc 2 aw 1
+step 156
+e car p 41ed9564 42ddb7df c0484a1a q be089938 3b8af6c9 3d0883e7 3f7d90f4 v bf97d4c0 41fdffdd c10ff2e6 w be9fbd17 bbe024ba 3ca504c8 sc 2 aw 1
+step 157
+e car p 41ed4480 42dfd527 c05ba0f3 q be0ddecb 3b8b73f9 3d09b891 3f7d61f7 v bf97c7cf 41fdea37 c1151efb w be9faed9 bbe518a7 3ca4d709 sc 2 aw 1
+step 158
+e car p 41ecf3a3 42e1f241 c06fa827 q be1322f0 3b8bdb39 3d0aeb8c 3f7d313c v bf97bae0 41fdd493 c11a4a9e w be9fa099 bbea06dc 3ca4ae33 sc 2 aw 1
+step 159
+e car p 41eca2cd 42e40f2c c0822fd3 q be18659d 3b8c2c9c 3d0c1cdf 3f7cfec5 v bf97adf1 41fdbef0 c11f75d1 w be9f9252 bbeeef09 3ca48a3c sc 2 aw 1
+step 160
+e car p 41ec51fe 42e62be9 c08ce3b0 q be1da6c9 3b8c6834 3d0d4c8e 3f7cca92 v bf97a103 41fda950 c124a093 w be9f840a bbf3d10b 3ca46b1d sc 2 aw 1
+ret status car 4 1 00000004 00000000 be99999a 00000000 00000000 00000000 bf97a103 41fda950 c124a093 00000000 00000000 4431e813 3f800000 c3137a0c 00000000
