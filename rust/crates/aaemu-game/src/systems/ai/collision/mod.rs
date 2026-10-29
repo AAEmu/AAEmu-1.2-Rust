@@ -376,6 +376,26 @@ pub fn terrain_is_hole(server: &GameServer, instance_id: u32, x: f32, y: f32) ->
     Some(t.is_hole((x / 2.0).floor() as i32, (y / 2.0).floor() as i32))
 }
 
+/// Whether `(x, y, z)` lies inside the bounding box of a loaded brush that has collision
+/// (a building, a castle hall). A hall's floor may be missing from its collision geometry while
+/// the shell is present, so the ground probe under such a point can only be the terrain below
+/// the building. `None` without the service.
+pub fn inside_brush_bounds(
+    server: &GameServer,
+    instance_id: u32,
+    x: f32,
+    y: f32,
+    z: f32,
+) -> Option<bool> {
+    let pw = phys_world(server, instance_id)?;
+    ensure_box(server, &pw, Vec3::new(x, y, z), Vec3::new(x, y, z));
+    let st = pw.lock();
+    let inside = |b: &[Vec3; 2]| {
+        x >= b[0].x && x <= b[1].x && y >= b[0].y && y <= b[1].y && z >= b[0].z && z <= b[1].z
+    };
+    Some(st.cells.values().any(|c| c.brush_bounds.iter().any(inside)))
+}
+
 /// `RayWorldIntersection(from → to, objtypes, flags)`; loads the touched cells first.
 pub fn raycast(
     server: &GameServer,

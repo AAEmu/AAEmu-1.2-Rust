@@ -95,6 +95,10 @@ pub struct StaticInstance {
     pub vegetation: bool,
 }
 
+/// Brushes at least this tall (m) count as buildings in [`CellContent::brush_bounds`]; flat
+/// slabs (roads, plazas) do not.
+pub const BUILDING_MIN_HEIGHT: f32 = 6.0;
+
 /// Everything a cell adds, prepared outside the world lock.
 #[derive(Debug, Default)]
 pub struct CellContent {
@@ -105,6 +109,10 @@ pub struct CellContent {
     pub vegetation_records: usize,
     /// Records whose model is missing / has no physics.
     pub skipped: usize,
+    /// World-space bounding boxes (`m_WSBBox`) of the tall brushes ([`BUILDING_MIN_HEIGHT`]) that
+    /// have collision: where a building's shell stands even if its floor has no collision geometry
+    /// ([`super::inside_brush_bounds`]).
+    pub brush_bounds: Vec<[Vec3; 2]>,
     pub prepare_micros: u64,
 }
 
@@ -117,6 +125,8 @@ pub struct LoadedCell {
     pub last_used: Instant,
     /// Keeps the models referenced (cache eviction).
     pub models: Vec<Arc<ModelPhys>>,
+    /// [`CellContent::brush_bounds`].
+    pub brush_bounds: Vec<[Vec3; 2]>,
 }
 
 /// A world-object collider.
@@ -278,7 +288,13 @@ pub fn prepare_cell(
                             })
                             .clone();
                         match m {
-                            Some(m) => c.instances.push(brush_instance(m, origin, b)),
+                            Some(m) => {
+                                if b.bbox[1].z - b.bbox[0].z >= BUILDING_MIN_HEIGHT {
+                                    c.brush_bounds
+                                        .push([b.bbox[0] + origin, b.bbox[1] + origin]);
+                                }
+                                c.instances.push(brush_instance(m, origin, b));
+                            }
                             None => c.skipped += 1,
                         }
                     }
@@ -445,6 +461,7 @@ impl WorldState {
                 vegetation: nv,
                 last_used: Instant::now(),
                 models,
+                brush_bounds: content.brush_bounds,
             },
         );
         true

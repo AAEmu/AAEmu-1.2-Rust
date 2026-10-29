@@ -480,3 +480,30 @@ async fn spawn_above_the_saturated_heightmap_ceiling_keeps_its_height() {
     assert_eq!(spawn_z(&server, 1027.0), 1027.0);
     assert_eq!(spawn_z(&server, 1030.5), 1030.5);
 }
+
+#[tokio::test]
+async fn spawn_inside_a_building_over_a_missing_floor_keeps_its_height() {
+    use crate::systems::ai::collision::world::CellContent;
+    // The hall's floor has no collision: the probe under the spawn only finds the terrain 4 m
+    // lower. The cell's brush bounds (the building shell) show the spawn is indoors.
+    let server = cave_server(100.0);
+    let pw = crate::systems::ai::collision::phys_world(&server, 0).expect("physics world");
+    assert!(pw.begin_load((0, 0)));
+    pw.end_load(
+        Some(CellContent {
+            cell: (0, 0),
+            brush_bounds: vec![[
+                PhysicsVec3::new(490.0, 490.0, 95.0),
+                PhysicsVec3::new(530.0, 530.0, 120.0),
+            ]],
+            ..CellContent::default()
+        }),
+        (0, 0),
+    );
+    assert_eq!(spawn_z_at(&server, 500.0, 500.0, 104.0), 104.0);
+    // Outside the bounds the same gap snaps onto the terrain, and within 1 m even inside.
+    let z = spawn_z_at(&server, 600.0, 500.0, 104.0);
+    assert!((z - 100.0).abs() < 0.1, "{z}");
+    let z = spawn_z_at(&server, 500.0, 500.0, 100.5);
+    assert!((z - 100.0).abs() < 0.1, "{z}");
+}

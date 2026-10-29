@@ -1953,7 +1953,8 @@ pub(crate) const SPAWN_SINK_SNAP: f32 = 6.0;
 /// A ground probe that hits geometry (terrain, a building, a cave floor; it starts only 2 m
 /// above the spawn, so a cave roof is never hit) is a real floor: the spawn snaps onto it when
 /// it is less than [`SPAWN_GROUND_SNAP`] above it (or below it, at most the probe's 2 m), except
-/// that a spawn 1 m or more above a floor under the water surface is a swimmer and stays, and a
+/// that a spawn 1 m or more above a floor under the water surface is a swimmer and stays, a
+/// spawn 1 m or more above a floor inside a building's bounds is on a floor we lack, and a
 /// floor at the heightmap's height ceiling is not a floor (the data saturates there).
 ///
 /// Without a hit the probe found no floor under the spawn. Over a terrain hole the spawn stays.
@@ -1986,6 +1987,12 @@ pub(crate) fn spawn_ground_z(
         if z - floor >= 1.0
             && col::water_level(server, world.id, x, y, z).is_some_and(|level| floor + 0.1 < level)
         {
+            return None;
+        }
+        // Inside a building's bounds the terrain "floor" is the ground under the building: the
+        // hall's own floor may be missing from its collision (Two Crowns throne hall), so the
+        // authored Z is kept instead of sinking the spawn through its floor.
+        if z - floor >= 1.0 && col::inside_brush_bounds(server, world.id, x, y, z) == Some(true) {
             return None;
         }
         return (z - floor < SPAWN_GROUND_SNAP).then_some(floor);

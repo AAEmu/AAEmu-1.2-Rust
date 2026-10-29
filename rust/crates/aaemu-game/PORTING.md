@@ -634,7 +634,12 @@ the x2game / cry3dengine decompiles (addresses below). Config `Physics` (`Config
   (a surface swimmer) stays; a probe miss under solid, non-hole terrain less than
   `SPAWN_SINK_SNAP` (6 m) deep is lifted onto the terrain (the client drew it buried), and
   anything under a hole stays; a floor at the heightmap ceiling (`max_height / 4` = 1024 m in
-  main_world, the u16 height storage saturates) is not trusted. Flying and `underwater_creature`
+  main_world, the u16 height storage saturates) is not trusted; a spawn 1 m or more above a floor
+  and inside the bounding box of a loaded brush at least 6 m tall (a building / castle shell,
+  `inside_brush_bounds`) keeps its Z: the Two Crowns throne hall (about 100 crowd NPCs at
+  Z 242.8 around 13575-13636, 10427-10475) has no floor in our collision (the stairs brush's slab
+  covers only a diagonal band, `castle_nuia_001` has no floor geometry), so the probe falls through
+  to the terrain 4 m below and a snap would sink them under the hall floor. Flying and `underwater_creature`
   NPCs are not snapped.
 * **Terrain holes:** the 1.2 `heightmap.dat` marks cave / basement entrances with surface id 31
   (`raw & 0x1F` of a node-v5 sample; `cry3dengine` `IsHole` 0x300CAB30: the containing sector's
