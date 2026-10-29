@@ -2884,6 +2884,18 @@ Deviations from the C# `Skill.Use` (`Skill.cs` 135-153 + `Helper.CheckInterval`)
   entry). Not done: refusing a recast with `skill_on_casting` while `active_plot` runs, since
   plots chain follow-up skills through the same caster state.
 
+## Global cooldown of a player's timed cast (2026-10-29)
+
+Deviation from the C# `Skill.Cast`, which sets the GCD when the cast ends (harmless there because
+the C# barely enforced the GCD). With the enforcement above, a player who finished a timed cast
+(e.g. Insulating Lens, 2000 ms) had the next skill refused with `CooldownTime` for the ~1 s of
+GCD still left at the cast end, although the 1.2 client counts its GCD from the cast start (and
+keeps it when the cast is cancelled) and showed the skill as ready; Drop Back "did nothing"
+because the client only leaps once the server accepts. `use_skill` now starts the GCD when a timed
+cast is accepted for every non-NPC caster (players, player-driven mates and slaves) and flags it
+on the skill run (`gcd_started`) so `cast` does not restart it at cast end. NPC timed casts and all
+instant casts are unchanged (the NPC AI paces its skills from the cast-end GCD).
+
 ## Loot take range (2026-10-21)
 
 C# `TryTakeLootLocked` never checked the distance to the corpse (`MaxLootingRange`, 200 m, only
