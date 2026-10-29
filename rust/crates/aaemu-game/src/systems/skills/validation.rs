@@ -11,6 +11,13 @@ use super::unit_reqs::skill_result_for_key;
 const DOODAD_RANGE_ALLOWANCE: f64 = 15.0;
 /// Extra range for a slave target (large ships are centred far from their hull edge).
 const SLAVE_RANGE_ALLOWANCE: f64 = 40.0;
+/// How far above the source and the destination the obstacle ray is cast. This was the Rust/C#-era
+/// height (`+ 1.0` at both ends); 28286101a (2026-10-27) dropped it to feet level to follow the
+/// client's "unit position height", and the feet-level ray then refused casts the 1.2 client
+/// allowed and sent, because it grazes ground-level terrain and clutter on gentle slopes (65
+/// `skill_obstacle` refusals on terrain in one run). The exact height the 1.2 client uses is not
+/// verified.
+pub(crate) const OBSTACLE_RAY_HEIGHT: f32 = 1.0;
 
 fn fail(key: &str) -> Result<(), (u8, u32)> {
     Err((skill_result_for_key(key), 0))
@@ -352,6 +359,10 @@ pub(super) fn check(
                 to[1] -= dy / len * target_radius;
                 to[2] -= dz / len * target_radius;
             }
+            // Raising both ends by the same amount keeps the direction, so the radius gate and
+            // the shortening above hold unchanged.
+            let from = [source.x, source.y, source.z + OBSTACLE_RAY_HEIGHT];
+            to[2] += OBSTACLE_RAY_HEIGHT;
             let mut ignored = vec![(collision_kind(caster), caster.obj_id())];
             if skip_target {
                 if let Some(obj) = target.as_obj() {
@@ -366,7 +377,7 @@ pub(super) fn check(
             if let Some(Some(hit)) = crate::systems::ai::collision::raycast_ignoring_objects(
                 server,
                 caster.transform().instance_id,
-                [source.x, source.y, source.z],
+                from,
                 to,
                 objtypes,
                 crate::systems::ai::collision::query::ray_flags::SKILL_OBSTACLE,
@@ -381,8 +392,8 @@ pub(super) fn check(
                         target = target.obj_id(),
                         result_key = "skill_obstacle",
                         check_terrain = template.check_terrain,
-                        from = ?source,
-                        to = ?to,
+                        ?from,
+                        ?to,
                         ?hit,
                         "Skill line of sight blocked"
                     );
@@ -391,8 +402,8 @@ pub(super) fn check(
                         caster = caster.obj_id(),
                         skill = template.id,
                         target = target.obj_id(),
-                        from = ?source,
-                        to = ?to,
+                        ?from,
+                        ?to,
                         ?hit,
                         "Skill line of sight blocked"
                     );
