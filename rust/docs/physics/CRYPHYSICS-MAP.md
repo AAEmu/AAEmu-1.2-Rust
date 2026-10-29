@@ -421,7 +421,7 @@ Multi-threaded stepping (vars `+504` > 1) needs a real thread-task manager behin
 
 ---
 
-## 9b. 1.2 client oracle (x86) ? **works**
+## 9b. 1.2 client oracle (x86) - **works**
 
 `physoracle` has an `ORACLE_X86` build (`oracle/patch_entry.py`, `oracle/build_x86.bat`) that loads
 the unpacked 1.2 client `cryphysics.dll` standalone and re-runs the same scenarios. The golden
@@ -475,9 +475,14 @@ destroy (`0x3509E7D0`), 30 `SetSurfaceParameters` (`0x35081080`), 33 `TimeStep` 
 sim_class 44, recalc_bounds 48, byte 52. `pe_geomparams` is 88 B: density 4, mass 8, pos 12, q 24,
 scale 40, mtx3x4 44, mtx3x3 48, surface_idx 52, flags 56, collider 60, min_contact_dist 64,
 idmat_breakable 68, lattice 72, matMapping 76, nMats 80, recalcBBox 84. `pe_status_pos` is
-unchanged through `iSimClass` (+80; `time_back` moves to +100). Pointer-free params/actions
-(simulation, buoyancy, bbox, flags, timeout, impulse, awake, set_velocity, reset, drive) keep
-their x64 offsets.
+unchanged through `iSimClass` (+80), but the pointer fields move to 84 (`Matrix34*`), 88
+(`Matrix33*`), 92 (`pGeom`) and 96 (`pGeomProxy`) and `time_back` moves to +100
+(`FUN_3507f330` writes `param_2[0x15..0x18]`; CRigidEntity::GetStatus `0x350bdd20` reads
+`param_2[0x19]`). `pe_status_living` follows `FUN_35030500`; wheel status 5 (`0x351184d0`) drops
+the x64 wheel pos/q block at +16..43, so x64 +44..127 map to x86 +16..99, the x64 contact-entity
+pointer +128 is x86 +100 and mass share +136 is +104. Vehicle status 4 and dynamics 8 keep their
+x64 offsets. Pointer-free params/actions (simulation, buoyancy, bbox, flags, timeout, impulse,
+awake, set_velocity, reset, drive) keep their x64 offsets.
 
 **Physics-vars block.** `GetPhysVars` returns `world+0x48` (x64: `+0x68`); the block is 540 B.
 The first 29 words equal x64. After block `+116` two extra zero words follow (x86 world
@@ -492,16 +497,155 @@ shifted by +8; one extra zero ends the block at `+608`. The only value differenc
 float z `0x400DBD88` (2.214693). `oracle/trace_diff.py` reports the first divergence
 (step/entity/field) for future scenarios.
 
-**Limits.** Not ported in milestone 1: `ray` (1.2 `SRWIParams`/`ray_hit` layouts), heightfield
-terrain, trimesh geometry, non-global areas, living/wheeled/particle entities, `pe_params_part` /
-car / wheel layouts, and the internal-function probes (`--math`, `--p1a*`, `--p2*`, `--p4*`).
+**Milestone 2 (the rest of the x64 scenario suite).** The harness now sets MXCSR explicitly
+(`--mxcsr`, default = process value, recorded as `default=0x1f80 set=0x1f80`), marshals
+`pe_params_pos` / `part` / `outer_entity` / `foreign_data` between the x64 scenario image and
+the 1.2 layout, and maps entity/world/DLL offsets for the RE probes. Results per scenario and
+the evidence for every layout are in `tests/golden-12/README.md`. Of the 124 scenarios,
+**15 are identical, 61 divergent, 27 blocked and 21 not applicable** (the `p1a_*`
+internal-function probes). The blocked set is 16 trimesh/CGF scenarios (the 1.2
+`CreateMesh` slot 11 is `0x35153730`, but the x64-derived mesh builder in `p1c_mesh.c` was
+not ported), 9 non-global-area/PWI/query scenarios and 2 global-area-plus-geometry ones.
+The 15 identical scenarios are `box_on_ground`, `box_float_300kg`, `box_float_700kg`,
+`exp_buoyancy_same_step`, `p7_params_queue`, `params_neutral`, `ray_box`,
+`p2a1_rwi_box`, `p5_living_dims`, `p5_living_jump`, `p5_living_slope`, `p5_living_stairs`,
+`p5_living_swim`, `p5_living_walk` and `p4a_buoy_multipart`. The full per-scenario table
+(scenario | status | first divergence) is in `tests/golden-12/README.md`; the family summary
+is:
+
+| family | scenarios | identical | first divergence |
+|---|---|---|---|
+| rigid primitives | 13 | 4 | 1–6 ulp in a rotating body's `q`/`v` (`box_float_1500kg` step 149 `q[0]`, `box_on_box` step 1 `q[2]`, …) |
+| params/debug | 12 | 2 | `p7_params_base` `params 26` returns 0 (no 1.2 id 26); `engine_tables` vars block 540 B vs 632 B; others 1–6 ulp |
+| rays | 6 | 2 | `p2a4_ray_round` hit normal 1 ulp; `p2a4_sintab` table word 510 1 ulp; `p7_ray*` inherit the rigid `q` diff |
+| heightfield | 5 | 0 | 1–3 ulp in a hit distance/normal or a falling body's `q` |
+| particles | 11 | 0 | 1 ulp in a particle `q`/contact normal; `p5_particle_terrain` blocked (trimesh) |
+| living | 14 | 6 | `pair` one-step-earlier push; `push` one-step sleep timing; `ride`/`rigid` small transient trajectory differences (unproven as genuine); `bumps`/`net`/`terrain` 1–2 ulp |
+| buoyancy | 3 | 1 | `basic` 1 ulp; `variants` identical under fpu24, x87/SSE-only body `L`/`v` difference under fpu53 (min damping matches) |
+| wheeled | 12 | 0 | `car` `q` denormal or `p` 1 ulp; `settle*` first differ in the x64-only car-param +132 field |
+| P3 areas/queries | 9 | 0 | blocked: non-global areas / CheckAreas / PWI / RTE / CEWP / beam |
+| trimesh/CGF | 16 | 0 | blocked: 1.2 `CreateMesh` slot 11 `0x35153730`; `p1c_mesh.c` still x64-only |
+| `p1a_*` probes | 21 | 0 | not applicable: x64 internal-function probes |
+| **total** | **124** | **15** | **61 divergent, 27 blocked, 21 not applicable** |
+
+**Ray layout (1.2).** `SRWIParams` is 64 B (`FUN_351C2B00`): foreign data at +0/+4, org +12,
+dir +24, objtypes +36, flags +40, hits* +44, nMaxHits +48, phitLast +52, nSkipEnts +56,
+pSkipEnts +60. The `ray_hit` record is 64 B: dist +0, pCollider +4, ipart +8, partid +12,
+int16 +16/+18, surface +20, +24, pt +28, n +40, order +52, iPrim +56, pool ptr +60. The
+zero-direction test reads dir +24..+32 and the hit initialiser advances `hits` by 0x10 floats
+per record.
+
+**Heightfield (1.2).** `primitives::heightfield` keeps the x64 field offsets through +0x60
+(Basis 0, center 40, step 52, invstep 60, size 68, stride 76, width 80, hscale 84, typemask
+88, heightmask 90, typehole 92, +96); there is no pointer before them. The `getHeight` /
+`getSurfType` callbacks are 4-byte pointers at +100/+104 instead of x64 +104/+112, so the
+primitive is 108 B (`FUN_3515CE70`, `FUN_3510CCA0` copy +0x34..+0x68; geom-manager
+CreatePrimitive case 2 `0x351547B0`). `SetHeightfieldData` (`0x35093C00`) creates five terrain
+entities at world+0x52C+4*i (x64 +1568+8*i) and stores the caller's basis at world+0x544 and
+center at +0x568. All five heightfield scenarios run; the first divergences are 1–3 ulp in a
+hit distance/normal or a falling body's quaternion.
+
+**Particle params (1.2).** `pe_params_particle` (id 3, size 156) is identical to x64 through
+minVel +136; x64 pads `pColliderToIgnore` to +144, 1.2 has it at +140, so pierceability is
++144, collTypes +148 and areaCheckPeriod +152 (CParticleEntity::SetParams `0x35041F80` reads
+`param_2[0x23]..[0x26]`). Ten of the eleven particle scenarios run; `p5_particle_terrain`
+needs the trimesh floor that is not ported.
+
+**Living (1.2).** `player_dimensions` (1, 64 B) and `action_move` (1, 24 B) are pointer-free
+and keep the x64 layout. Player dynamics (4) keeps the x64 layout through collTypes +72, then
+pColliderToIgnore is +76 (x64 +80) and bActive +84 (x64 +92) (`0x3502F5D0`). `pe_status_living`
+(2) is ordered differently (`FUN_35030500`): x86 +4..83 -> x64 +4..83, +84 -> +88, +88..119
+-> +92..123, x64 +124 absent, +120..135 -> +128..143, +136 -> +144, +140 (ptr) -> +152, +144
+-> +164. Statuses are marshalled like params (one map per `pe_status` id the suite uses), so
+scenario `status` overrides keep their x64 offsets in 1.2 too. `pe_status_check_stance` (21) is
+pointer-free and matches. Six living scenarios are
+bit-identical (walk, dims, jump, slope, stairs, swim); `p5_living_bumps`/`net`/`terrain`
+differ by 1–2 ulp. The remaining four are timing/transient differences, not proof of a
+different rule: `p5_living_pair` is the same push of `c` one step earlier on x86 (step 19
+vs 20; identical before, ~1 ulp at shifted steps), `p5_living_push` first differs only in
+the sleep state at step 33 and then follows one step apart, and `p5_living_ride`/`rigid`
+diverge from the impulse step (31/11) with small but persisting trajectory differences
+(positions <=1.7 mm / 5.7 mm in the committed runs); whether these are genuinely different
+behaviour is unproven. `p5_living_stairs` crashed once in seven runs at heap VA
+`0x6A071250` (step 0) and is deterministic when it runs; `p5_living_mesh` needs trimesh.
+
+**Buoyancy (1.2).** `GatherBuoyancy` is `0x350CE9B0` and `ApplyBuoyancy` `0x350D1D80`
+(entity in ECX). The 1.2 `global_buoyancy` record is 76 B, not the x64 80 B; the trace
+repacks to 80 B and pads +76 with `ffbfffff`. `p4a_buoy_multipart` is bit-identical,
+`p4a_buoy_basic` differs by 1 ulp after ApplyBuoyancy, and `p4a_buoy_variants` is
+bit-identical under `--fpu 24`; under `--fpu 53` its body `L`/`v` differ from the x64 run
+because the x87 ApplyBuoyancy arithmetic keeps double intermediates, not because of a
+layout error (the min damping now matches: `3DD97A70`). Entity print mapping: 772->560,
+784->572, 796->584, 808->596, 956->740, 968->752, **damping 684->480, dampingFreefall
+688->484, min damping 692->488** (rigid SetParams `0x350D4920` maps sim +16 to E+0x1E0 and
+sim +32 to E+0x1E4; ApplyBuoyancy `0x350D1D80` blends E+0x1E0), submerged fraction
+1136->908, flags 504->332, minAwakeTime 608->404, timeIdle 252->212, simclass 71->59, awake
+508->336, last-contact step 1104->884. The 1.2 ctor sets E+480 (damping) to **0**, unlike
+the x64 0.1 default, with freefall damping 0.1 (`cryphysics.c` ~84568).
+
+**Wheeled (1.2).** `pe_params_wheel` (16, 80 B) is identical to x64. Car params (2) has no
+x64 +12 field: x64 +16..+87 map to +12..+83, the gear pointer moves from the 8-aligned +88
+to +84, and the tail +96..+131 maps to +88..+123 (size 124; SetParams `0x35116CD0`,
+GetParams `0x35113120`). The x64 +132 engine-brake / +136 rear-steer fields do not exist,
+which is the first divergence in `p5_wheeled_settle`/`settle_ray`. Wheeled parts use
+geomparams type 1: the x64 wheel fields +112..+183 move to 1.2 +88..+159 in the
+whole-struct geomparams conversion (`AddGeometry 0x35119FC0` reads bDriving at
+`param_3[0x16]`). GetParams output buffers reached through a scenario `buf:` pointer (the
+gear ratios) survive the reverse conversion. Vehicle status 4 keeps the x64 offsets.
+Wheel status 5 is marshalled (`0x351184D0`): 1.2 has no wheel pos/q block, so x64
++44..+127 map to x86 +16..+99, the contact-entity pointer x64 +128 becomes x86 +100
+(process-specific, zeroed before the reverse conversion) and mass share x64 +136 becomes
+x86 +104; the x64 +116..+124 tail is at x86 +88..96. Twelve wheeled scenarios
+run (car position matches; q denormals/velocity differ by 1 ulp), `p5_wheeled_mesh` needs
+trimesh. The wheeled family is not x87-dependent: its `--fpu 24` and `--fpu 53` traces are
+byte-identical. A rare startup crash at heap VA `0x6A071250` occurred a few times and did
+not reproduce in retries.
+
+**SSE vs x87.** The earlier note "both builds are SSE scalar, so the x87 precision control
+does not matter" is only true for the hot rigid path: 22 of the 25 scenarios are byte-identical
+under `--fpu 24` and `--fpu 53`, but `capsule_drop`, `p7_many_bodies` and `p7_ship_float`
+differ (the decompile has 144 `float10` helpers). Both modes are therefore part of the record
+for those three; identical 24/53 runs are expected and are not a divergence finding.
+
+**1.2 layouts (evidence).** `pe_params_pos`: pos +4, q +16, scale +32, mtx3x4 +36, mtx3x3 +40,
+simClass +44, recalc +48 (`FUN_3507b720` case 0). `pe_params_part`: pointer pairs +48/+52 and
++88/+92, mass +76, density +80, minContactDist +84, idmat +96, pLattice +100, idSkeleton +104,
+pMatMapping +108, nMats +112, bAddrefGeoms +120, idParent +124 (`FUN_3507b720` case 6,
+GetParams `FUN_3505c460` case 6; the last two explain the per-part flags reset when +124 is
+left 0). `pe_geomparams`: mtx3x4 48->44, mtx3x3 56->48, surface 64->52, flags 68->56,
+collider 72->60, minContactDist 76->64, idmatBreakable 80->68, lattice 88->72, matMapping
+96->76, nMats 104->80, recalcBBox 108->84; car wheel block 112..183 -> 88..159 and
+articulated id_body 112->88 (`AddGeometry` 0x35061170, wheeled 0x35119FC0); scenario field
+overrides are applied to the x64 image before this translation. `pe_params_foreign_data`:
+pointer +4, ints +8/+12/+16/+20. Entity: base pos +120, q
++132, scale +176, id +56, flags +76, parts pointer +236, nParts +240, structure +272; rigid
+body +532 (`GetRigidBody` 0x350B6E40), pending pose +276 (`ctor 0x350B69A0` sets `+0x2D` to
+`+0x114`), deferred P/L +740, gravity +412. World: simclass heads +628+4k, next link at
+entity+0x54; the two extra heads +676/+680 are x64 +760/+816. Surface tables are 0x208 below
+the x64 ones (`SetSurfaceParameters` 0x35081080). Size tables: params 0x35376380 (26 entries,
+no id 26), actions 0x35376330 (19), geomparams 0x3537626C (3, written by 0x351F42D0).
+
+**Limits after milestone 2.** Ported and running: rigid/static, rays, heightfield terrain,
+living, wheeled and particle entities, parts, global-area buoyancy and the engine-table
+probes. Still blocked: trimesh/CGF (`CreateMesh` slot 11 `0x35153730`; `p1c_mesh.c` is
+x64-only), non-global areas (spline/geometry/polygon) with CheckAreas and the PWI/RTE/
+CEWP/beam query helpers, and global-area-plus-geometry buoyancy. The `p1a_*` internal
+probes are not applicable (x64 internal functions); `contacts` and the `--math`/`--p2b`/
+`--p4b` probes were not ported. Operational caveat: a rare startup crash at heap VA
+`0x6A071250` (~1 in 50 runs, before the first step, scenario-independent) requires a retry;
+successful runs are deterministic and 88 committed traces reproduce bit-for-bit.
 
 ---
 
 ## 10. Porting plan for `aaemu-physics`
 
-Principles: port the x64 10.x semantics (identical to 1.2 in every way that matters, §2), keep the
-binary's float formulas and evaluation order (min/max idioms, the order of SSE operations), replace
+Principles: port the x64 10.x semantics. The 1.2 client engine is essentially the same engine
+(§2): 15 scenarios are bit-identical and the rest differ by 1–6 ulp from x86-vs-x64
+compiler/libm codegen, which grows over long runs. The genuine differences are struct/param
+layouts (params id 26 absent; car engine-brake/rear-steer fields x64-only) and possibly
+contact/sleep timing. `aaemu-physics` is therefore a faithful reference for the client's
+ship/car/character behaviour within float noise and usable with a tolerance, not for
+bit-exact lockstep. Keep the binary's float formulas and evaluation order (min/max idioms, the order of SSE operations), replace
 address-ordered sorts with id-ordered ones, and run single-threaded. Test every module against the
 oracle (§9). Interface layer: a Rust API shaped after the slot tables (world / entity / geometry) with
 typed params enums instead of `type`-tagged C structs. "Unused" sentinels become `Option`.

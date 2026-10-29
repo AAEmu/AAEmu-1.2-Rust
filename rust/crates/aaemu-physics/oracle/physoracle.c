@@ -30,6 +30,7 @@
 #include <fcntl.h>
 #include <math.h>
 #include <float.h>
+#include <xmmintrin.h>
 
 #ifdef ORACLE_X86
 /* 1.2 client cryphysics.dll, unpacked image (see CRYPHYSICS-MAP.md s9b). */
@@ -504,6 +505,17 @@ static LONG CALLBACK veh(PEXCEPTION_POINTERS e) {
 /* ------------------------------------------------------------------ helpers */
 static uint32_t fbits(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
 static float bitsf(uint32_t u) { float f; memcpy(&f, &u, 4); return f; }
+/* MXCSR: every SSE arithmetic instruction obeys it (rounding mode, FTZ/DAZ, exception masks).
+   The engine is SSE scalar in both builds (dynamics.md s6), so the x87 control word alone does
+   not pin the float model down.  Record the process default, then set it explicitly. */
+static unsigned g_mxcsr_default;
+static unsigned g_mxcsr;
+static void init_mxcsr(unsigned value, int have_value) {
+  g_mxcsr_default = _mm_getcsr();
+  g_mxcsr = have_value ? value : g_mxcsr_default;
+  _mm_setcsr(g_mxcsr);
+  fprintf(stderr, "mxcsr default=%#06x set=%#06x\n", g_mxcsr_default, _mm_getcsr());
+}
 static void die(const char *msg, const char *arg) {
   printf("ERROR %s %s\n", msg, arg ? arg : "");
   fflush(stdout);
@@ -599,17 +611,10 @@ static void fill_unused_f(unsigned char *b, int from, int to) {
 static int tmpl_params(int type, unsigned char *b) {
   memset(b, 0, 512);
   SETI(b, 0, type);
+  /* Both builds build the x64 image here (pointer fields hold a 32-bit value on x86).  The
+     x86 build converts it to its own layout in x86_convert() right before the engine call and
+     converts back after GetParams, so scenario field offsets and dump offsets stay x64. */
   switch (type) {
-#ifdef ORACLE_X86
-  case 0: /* pe_params_pos 56: pos 4, q 16, scale 32, mtx3x4 36, mtx3x3 40, sim 44, recalc 48 */
-    fill_unused_f(b, 4, 36);
-    SETP(b, 36, 0); SETP(b, 40, 0); SETI(b, 44, UNUSED_I); SETI(b, 48, 1); b[52] = 0;
-    return 56;
-  case 6: /* pe_params_part: pointer layout not ported (see CRYPHYSICS-MAP s9b) */
-  case 2: /* car params: pointer layout not ported */
-  case 16: /* wheel params: pointer layout not ported */
-    return 0;
-#else
   case 0: /* pe_params_pos 72 */
     fill_unused_f(b, 4, 40);
     SETP(b, 40, 0); SETP(b, 48, 0); SETI(b, 56, UNUSED_I); SETI(b, 60, 1); b[64] = 0;
@@ -628,12 +633,11 @@ static int tmpl_params(int type, unsigned char *b) {
     SETI(b, 28, UNUSED_I); SETI(b, 56, UNUSED_I); SETI(b, 84, UNUSED_I); SETP(b, 88, -1);
     SETI(b, 96, UNUSED_I); SETI(b, 100, UNUSED_I); SETI(b, 128, UNUSED_I); SETI(b, 136, UNUSED_I);
     return 144;
-  case 16: /* wheel params 80 (P5 wheeled) */
+  case 16: /* wheel params 80 (P5 wheeled, identical in 1.2) */
     fill_unused_f(b, 4, 80);
     SETI(b, 4, UNUSED_I); SETI(b, 8, UNUSED_I); SETI(b, 12, UNUSED_I); SETI(b, 16, UNUSED_I);
     SETI(b, 20, UNUSED_I); SETI(b, 52, UNUSED_I); SETI(b, 56, UNUSED_I);
     return 80;
-#endif
   case 10: /* simulation 84 (pointer-free, identical) */
     fill_unused_f(b, 4, 84);
     SETI(b, 4, UNUSED_I); SETI(b, 60, UNUSED_I); SETI(b, 64, UNUSED_I);
@@ -714,6 +718,329 @@ static void apply_fields(const Toks *t, unsigned char *b, int cap) {
   }
 }
 
+#ifdef ORACLE_X86
+/* ------------------------------------------------------------------ x86 param marshalling
+ * The scenario language uses x64 struct offsets.  Every pointer-bearing params struct is laid
+ * out differently in the 32-bit engine, so build the x64 image, convert it to the x86 layout
+ * right before the vtable call and convert GetParams' answer back.  Dumps keep using x64
+ * offsets.  Evidence for each field list: the x86 SetParams/GetParams decompile.
+ *   pe_params_pos (0): FUN_3507b720 case 0 (id 350?): pos +4, q +16, scale +32,
+ *     pMtx3x4 +36, pMtx3x3 +40, iSimClass +44, bRecalcBounds +48, byte +52
+ *   pe_params_part (6): same function, case 6: mass +76, density +80, minContactDist +84,
+ *     pPhysGeom +88, proxy +92, idmatBreakable +96, pLattice +100, idSkeleton +104,
+ *     pMatMapping +108, nMats +112, bAddrefGeoms +120 (GetParams FUN_3505c460 case 6)
+ *   pe_params_outer_entity (9): +4 pOuterEntity, +8 pBoundingGeometry
+ *   pe_params_foreign_data (11): +4 pForeignData, +8 iForeignData, +12 iForeignFlags,
+ *     +16 iForeignFlagsAND, +20 iForeignFlagsOR (GetParams FUN_3505c460 case 0xb)
+ * All other params used so far are pointer-free and keep the x64 offsets (entities.md s2.8). */
+typedef struct { unsigned char x64, x86, size; } OffMap;
+static const OffMap map_pos[] = {
+  {4, 4, 12}, {16, 16, 16}, {32, 32, 4}, {40, 36, 4}, {48, 40, 4}, {56, 44, 4}, {60, 48, 4}, {64, 52, 1}
+};
+static const OffMap map_part[] = {
+  {0, 0, 4}, {4, 4, 12}, {16, 16, 12}, {28, 28, 16}, {44, 44, 4}, {48, 48, 4}, {56, 52, 4},
+  {64, 56, 4}, {68, 60, 4}, {72, 64, 4}, {76, 68, 4}, {80, 72, 4}, {84, 76, 4}, {88, 80, 4},
+  {92, 84, 4}, {96, 88, 4}, {104, 92, 4}, {112, 96, 4}, {120, 100, 4}, {128, 104, 4},
+  {136, 108, 4}, {144, 112, 4}, {152, 120, 4}, {156, 124, 4}
+};
+static const OffMap map_outer[] = {{0, 0, 4}, {8, 4, 4}, {16, 8, 4}};
+static const OffMap map_foreign[] = {{0, 0, 4}, {8, 4, 4}, {16, 8, 4}, {20, 12, 4}, {24, 16, 4}, {28, 20, 4}};
+/* pe_params_particle (id 3): identical through minVel +136; pColliderToIgnore is 8-aligned at
+   x64 +144 but at x86 +140, then pierceability +144, collTypes +148, areaCheckPeriod +152
+   (CParticleEntity::SetParams 0x35041F80 reads [0x23]..[0x26], size 156). */
+/* car params (wheeled id 2): x86 has no x64 +12 field, so +16..+87 map to +12..+83; the
+   gear-ratio pointer is 8-aligned at x64 +88 but at x86 +84, and the tail +96..+131 maps to
+   +88..+123 (size 124; SetParams 0x35116CD0, GetParams 0x35113120). */
+static const OffMap map_car[] = {
+  {0, 0, 4}, {4, 4, 8}, {16, 12, 72}, {88, 84, 4}, {96, 88, 36}
+};
+/* player dynamics (params id 4): x64 size 104, x86 92; identical through collTypes +72, then
+   the 8-aligned pColliderToIgnore +80 moves to +76 and bActive +92 to +84 (CLivingEntity::
+   SetParams 0x3502F5D0 case 4 reads param_2[0x12]/[0x13]/[0x15]). */
+static const OffMap map_dynamics[] = {
+  {0, 0, 76}, {80, 76, 4}, {92, 84, 4}
+};
+static const OffMap map_particle[] = {
+  {0, 0, 4}, {4, 4, 4}, {8, 8, 4}, {12, 12, 4}, {16, 16, 4}, {20, 20, 12}, {32, 32, 4},
+  {36, 36, 4}, {40, 40, 4}, {44, 44, 4}, {48, 48, 4}, {52, 52, 4}, {56, 56, 12}, {68, 68, 12},
+  {80, 80, 12}, {92, 92, 12}, {104, 104, 12}, {116, 116, 16}, {132, 132, 4}, {136, 136, 4},
+  {144, 140, 4}, {152, 144, 4}, {156, 148, 4}, {160, 152, 4}
+};
+/* pe_status_* (GetStatus): the scenario image is x64; these maps marshal every status type the
+   suite uses into/out of the 1.2 layout at the vtable call.  Evidence (x86 cryphysics.c):
+   - pos (1): base GetStatus FUN_3507f330 writes mtx3x4 +84, mtx3x3 +88, pGeom +92, pGeomProxy
+     +96 (param_2[0x15..0x18]); CRigidEntity::GetStatus 0x350bdd20 reads time_back at +100
+     (param_2[0x19]).  Everything through iSimClass +80 is unchanged.
+   - living (2): FUN_35030500, see the field map below.
+   - vehicle (4): identical through +52 (0x351184d0); 1.2 adds an extra +56 count, not in x64.
+   - wheel (5): 0x351184d0 drops the x64 pos/q block +16..43, so x64 +44..127 shift to +16..99;
+     the x64 8-byte pCollider +128 becomes x86 +100 (wheel record +0x4F0) and mass share
+     x64 +136 -> x86 +104 (param_2[0x19]/[0x1a]).
+   - dynamics (8): rigid GetStatus 0x350bdd20 writes the x64 offsets through mass +112.
+   - collisions (9): 1.2 has the buffer pointer at +4 and the count at +8 (soft GetStatus
+     0x350f8880 reads param_2[1] as the buffer and param_2[2] as the count).
+   The remaining ids used by the suite are pointer-free and keep the x64 offsets. */
+static const OffMap map_status_pos[] = {
+  {0, 0, 4}, {4, 4, 16}, {20, 20, 4}, {24, 24, 36}, {60, 60, 16}, {76, 76, 4}, {80, 80, 4},
+  {88, 84, 4}, {96, 88, 4}, {104, 92, 4}, {112, 96, 4}, {120, 100, 4}
+};
+static const OffMap map_status_living[] = {
+  /* FUN_35030500 writes +4..+148: x86 +4..83 -> x64 +4..83, +84 -> +88, +88..119 -> +92..123,
+     x64 +124 is absent, +120..135 -> +128..143, +136 -> +144, +140 (ptr) -> +152,
+     +144 -> +164. */
+  {0, 0, 4}, {4, 4, 80}, {88, 84, 4}, {92, 88, 32}, {128, 120, 16}, {144, 136, 4},
+  {152, 140, 4}, {164, 144, 4}
+};
+static const OffMap map_status_vehicle[] = {{0, 0, 56}};
+static const OffMap map_status_wheel[] = {
+  {0, 0, 16}, {44, 16, 84}, {128, 100, 4}, {136, 104, 4}
+};
+static const OffMap map_status_awake[] = {{0, 0, 8}};
+static const OffMap map_status_dynamics[] = {{0, 0, 116}};
+static const OffMap map_status_collisions[] = {{0, 0, 4}, {8, 4, 4}, {16, 8, 4}};
+static const OffMap map_status_id[] = {{0, 0, 28}};
+static const OffMap map_status_nparts[] = {{0, 0, 8}};
+static const OffMap map_status_point[] = {{0, 0, 16}};
+static const OffMap map_status_abilities[] = {{0, 0, 24}};
+static const OffMap map_status_patch[] = {{0, 0, 28}};
+static const OffMap map_status_artic[] = {{0, 0, 8}};
+static const OffMap map_status_stance[] = {{0, 0, 72}};
+static const OffMap map_status_constraint[] = {{0, 0, 52}};
+static const OffMap *x86_status_offmap(int type, int *n) {
+  switch (type) {
+  case 1: *n = (int)(sizeof map_status_pos / sizeof map_status_pos[0]); return map_status_pos;
+  case 2: *n = (int)(sizeof map_status_living / sizeof map_status_living[0]); return map_status_living;
+  case 4: *n = (int)(sizeof map_status_vehicle / sizeof map_status_vehicle[0]); return map_status_vehicle;
+  case 5: *n = (int)(sizeof map_status_wheel / sizeof map_status_wheel[0]); return map_status_wheel;
+  case 7: *n = (int)(sizeof map_status_awake / sizeof map_status_awake[0]); return map_status_awake;
+  case 8: *n = (int)(sizeof map_status_dynamics / sizeof map_status_dynamics[0]); return map_status_dynamics;
+  case 9: *n = (int)(sizeof map_status_collisions / sizeof map_status_collisions[0]); return map_status_collisions;
+  case 10: *n = (int)(sizeof map_status_id / sizeof map_status_id[0]); return map_status_id;
+  case 12: *n = (int)(sizeof map_status_nparts / sizeof map_status_nparts[0]); return map_status_nparts;
+  case 13: *n = (int)(sizeof map_status_point / sizeof map_status_point[0]); return map_status_point;
+  case 15: *n = (int)(sizeof map_status_abilities / sizeof map_status_abilities[0]); return map_status_abilities;
+  case 19: *n = (int)(sizeof map_status_patch / sizeof map_status_patch[0]); return map_status_patch;
+  case 20: *n = (int)(sizeof map_status_artic / sizeof map_status_artic[0]); return map_status_artic;
+  case 21: *n = (int)(sizeof map_status_stance / sizeof map_status_stance[0]); return map_status_stance;
+  case 26: *n = (int)(sizeof map_status_constraint / sizeof map_status_constraint[0]); return map_status_constraint;
+  }
+  *n = 0;
+  return 0;
+}
+static int x86_status_convert(int type, const unsigned char *src, unsigned char *dst, int to86) {
+  int n;
+  const OffMap *m = x86_status_offmap(type, &n);
+  if (!m) return 0;
+  if (to86) {
+    memset(dst, 0, 512);
+  } else {
+    int end = 0;
+    for (int i = 0; i < n; i++)
+      if (m[i].x64 + m[i].size > end) end = m[i].x64 + m[i].size;
+    memset(dst, 0, (size_t)end);
+  }
+  for (int i = 0; i < n; i++) {
+    int so = to86 ? m[i].x64 : m[i].x86;
+    int doff = to86 ? m[i].x86 : m[i].x64;
+    memcpy(dst + doff, src + so, m[i].size);
+  }
+  return 1;
+}
+/* pe_geomparams (AddGeometry param 2): the 1.2 struct is 88 B plain, 160 B car and 92 B
+   articulated.  x64 mtx3x4 +48, mtx3x3 +56, surface +64, flags +68, collider +72,
+   minContactDist +76, idmatBreakable +80, lattice +88, matMapping +96, nMats +104,
+   recalcBBox +108 are +44, +48, +52, +56, +60, +64, +68, +72, +76, +80, +84 in 1.2.
+   Car type 1 keeps the wheel block at x64 +112..+183, which is +88..+159 in 1.2
+   (AddGeometry 0x35061170, wheeled 0x35119FC0); articulated type 2 has id_body +112 -> +88. */
+static const OffMap map_geom[] = {
+  {0, 0, 4}, {4, 4, 12}, {16, 16, 12}, {28, 28, 12}, {40, 40, 4},
+  {48, 44, 4}, {56, 48, 4}, {64, 52, 4}, {68, 56, 4}, {72, 60, 4}, {76, 64, 4},
+  {80, 68, 4}, {88, 72, 4}, {96, 76, 4}, {104, 80, 4}, {108, 84, 4}
+};
+static int x86_geomparams(int gtype, const unsigned char *src, unsigned char *dst, int to86) {
+  if (gtype < 0 || gtype > 2) return 0;
+  memset(dst, 0, 512);
+  for (int i = 0; i < (int)(sizeof map_geom / sizeof map_geom[0]); i++) {
+    int so = to86 ? map_geom[i].x64 : map_geom[i].x86;
+    int doff = to86 ? map_geom[i].x86 : map_geom[i].x64;
+    memcpy(dst + doff, src + so, map_geom[i].size);
+  }
+  if (gtype == 1) {
+    int so = to86 ? 112 : 88, doff = to86 ? 88 : 112;
+    memcpy(dst + doff, src + so, 72);
+  } else if (gtype == 2) {
+    int so = to86 ? 112 : 88, doff = to86 ? 88 : 112;
+    memcpy(dst + doff, src + so, 4);
+  }
+  return 1;
+}
+static const OffMap *x86_offmap(int type, int *n) {
+  switch (type) {
+  case 0: *n = (int)(sizeof map_pos / sizeof map_pos[0]); return map_pos;
+  case 6: *n = (int)(sizeof map_part / sizeof map_part[0]); return map_part;
+  case 9: *n = (int)(sizeof map_outer / sizeof map_outer[0]); return map_outer;
+  case 11: *n = (int)(sizeof map_foreign / sizeof map_foreign[0]); return map_foreign;
+  case 3: *n = (int)(sizeof map_particle / sizeof map_particle[0]); return map_particle;
+  case 4: *n = (int)(sizeof map_dynamics / sizeof map_dynamics[0]); return map_dynamics;
+  case 2: *n = (int)(sizeof map_car / sizeof map_car[0]); return map_car;
+  }
+  *n = 0;
+  return 0;
+}
+/* x64 entity/area byte offset -> x86 offset, for the scenario `peek`/`poke`/`snap` probes.
+ * Derived from the class ctors and accessors (see the comments); -1 = no known equivalent. */
+static int x86_entity_off(void *e, int off) {
+  int type = (int)(intptr_t)m_call0(e, 1); /* IPhysicalEntity slot 1 GetType */
+  if (type == 2 || type == 3 || type == 6) { /* rigid / wheeled / articulated */
+    if (off == 408) return 120; /* base pos (x64 +0x198, x86 +120: UpdatePosition 0x350bab60) */
+    if (off == 420) return 132; /* base q */
+    if (off >= 744 && off <= 944) return 532 + (off - 744); /* RigidBody: GetRigidBody 0x350b6e40 */
+    if (off == 952) return 736;                            /* body+208 Eaux (x86 +204) */
+    if (off >= 956) return 740 + (off - 956); /* deferred P/L and the fields after the body */
+    if (off == 196) return 176;               /* scale */
+    if (off == 448) return 276;               /* pending pos_new: ctor 0x350b69a0 +0x2d = +0x114 */
+    if (off == 460) return 288;               /* pending q_new (pos_new + 12) */
+    if (off >= 476 && off < 500) return 304 + (off - 476); /* pending bbox */
+    if (off == 616) return 412;               /* gravity: ctor 0x350b69a0 writes +0x19C */
+    if (off == 628) return 424;               /* gravityFreefall (+0x1A8) */
+    /* Rigid sim fields are -204 in 1.2: sim +16 damping -> E+480, sim +32 dampingFreefall
+       -> E+484, x64 per-step min damping 692 -> E+488 (SetParams 0x350D4920 cases at
+       cryphysics.c ~99677/99684, ApplyBuoyancy ~98431 blends E+480). */
+    if (off == 684) return 480;
+    if (off == 688) return 484;
+    if (off == 692) return 488;
+    if (off == 92) return 76;                 /* base flags */
+  } else if (type == 1 || type == 4 || type == 5) {
+    if (off == 408) return 120;
+    if (off == 420) return 132;
+    if (off == 196) return 176;
+    if (off == 92) return 76;  /* flags (ctor 0x35059590 writes 0x8640 at +0x4c) */
+    if (off == 252) return 212; /* timeIdle (SetParams id 23 writes [0x35]) */
+    if (off == 256) return 216;
+    if (off == 288) return 240; /* nParts */
+    if (off == 280) return 236; /* parts array */
+    if (off >= 280 && off < 280 + 136) { /* geom_part[0]: x64 stride 0x88, x86 stride 0x70;
+                                             the first 0x48 bytes are the same, then the pointer
+                                             fields shift (mass 0x4C->0x44, flags 0x50->0x48) */
+      int r = off - 280;
+      if (r < 0x38) return 236 + r;
+      if (r == 0x4c) return 236 + 0x44;
+      if (r == 0x50) return 236 + 0x48;
+      if (r == 0x54) return 236 + 0x4c;
+      if (r == 0x58) return 236 + 0x50;
+      if (r == 0x5c) return 236 + 0x54;
+    }
+  }
+  return -1;
+}
+/* x64 world byte offset -> x86.  The eight 512-entry surface tables are at x64 +0x1168.. and
+ * x86 +0xF60.. (SetSurfaceParameters 0x35081080 writes +0xF60,0x1760,0x1F60,0x2760,0x2F60,
+ * 0x3760,0x3F60,0x4760, 512 words each).  Everything else has no mapping yet. */
+static int x86_world_off(int off) {
+  if (off >= 0x1168 && off < 0x1168 + 8 * 0x800) return off - 0x208;
+  return -1;
+}
+/* x64 DLL table VA -> x86 (sub_351E5900 -> 0x351F42D0 writes the same three tables). */
+static unsigned x86_dll_va(unsigned va) {
+  if (va == 0x3537C640) return 0x35376380; /* params sizes, 27 ints */
+  if (va == 0x3537C5F0) return 0x35376330; /* action sizes, 19 ints */
+  if (va == 0x3537C5D8) return 0x3537626C; /* geomparams sizes, 3 ints */
+  if (va == 0x3537B450) return 0x35375268; /* quarter-wave sine table, 0x401 floats */
+  return 0;
+}
+/* Reverse map for `snapdiff`: print the x64 offset of a changed x86 word. */
+static int x86_entity_off_rev(void *e, int off) {
+  int type = (int)(intptr_t)m_call0(e, 1);
+  if (type == 2 || type == 3 || type == 6) {
+    if (off >= 532 && off <= 732) return 744 + (off - 532);
+    if (off == 736) return 952;
+    if (off >= 740) return 956 + (off - 740);
+    if (off == 120) return 408;
+    if (off == 132) return 420;
+    if (off == 176) return 196;
+    if (off == 276) return 448;
+    if (off == 288) return 460;
+    if (off == 304) return 476;
+    if (off == 336) return 508; /* CRigidEntity bAwake bits (IsAwake 0x350b6e30) */
+    if (off == 56) return 68;   /* id (x86 +0x38, x64 +0x44) */
+    if (off == 100) return 132; /* base bitfield (x86 +0x64, x64 +0x84) */
+  } else if (type == 1 || type == 4 || type == 5) {
+    if (off == 120) return 408;
+    if (off == 132) return 420;
+    if (off == 176) return 196;
+    if (off == 76) return 92;
+    if (off == 212) return 252;
+    if (off == 216) return 256;
+    if (off == 240) return 288;
+    if (off == 236) return 280;
+    if (off == 56) return 68;
+    if (off == 100) return 132;
+  }
+  return -1;
+}
+
+/* ---- 1.2 buoyancy probes (p4a_*): CRigidEntity::GatherBuoyancy 0x350CE9B0 and
+   ApplyBuoyancy 0x350D1D80 take the entity in ECX (__thiscall), dt/buffers on the stack. */
+static unsigned char g_x86_buoy_raw[76 * 8];
+static unsigned char g_x86_buoy[80 * 8]; /* repacked to the x64 80-byte trace layout */
+static int g_x86_nbuoy;
+typedef int(__fastcall *fn_gather86)(void *, void *, float, void *, int);
+typedef void(__fastcall *fn_buoy86)(void *, void *, float, float *, void *, int);
+static void x86_buoy_fill(void) {
+  for (int r = 0; r < 8; r++) {
+    unsigned char *b = g_x86_buoy_raw + 76 * r;
+    for (int o = 0; o < 76; o += 4) *(uint32_t *)(b + o) = 0x7F7F7F7Fu;
+    *(uint32_t *)b = 12;
+  }
+  memset(g_x86_buoy, 0x7F, sizeof g_x86_buoy);
+  for (int r = 0; r < 8; r++) *(uint32_t *)(g_x86_buoy + 80 * r) = 12;
+}
+static void x86_buoy_pack(int n) { /* 1.2 global_buoyancy is 76 B: pad +76 with the x64 sentinel
+                                       for the records the engine actually wrote */
+  for (int r = 0; r < n; r++) {
+    memcpy(g_x86_buoy + 80 * r, g_x86_buoy_raw + 76 * r, 76);
+    *(uint32_t *)(g_x86_buoy + 80 * r + 76) = 0xFFBFFFFFu;
+  }
+}
+static void x86_print_buoy(int n) {
+  printf(" B");
+  for (int i = 0; i < 20 * n; i++) printf(" %08x", ((uint32_t *)g_x86_buoy)[i]);
+}
+static void x86_print_state(void *e) {
+  unsigned char *p = (unsigned char *)e;
+  int offs[6] = {560, 572, 584, 596, 740, 752}; /* body P,L,w,v + deferred P,L */
+  printf(" S");
+  for (int k = 0; k < 6; k++) out_f((float *)(p + offs[k]), 3);
+  printf(" %08x %08x %08x %08x %08x", *(uint32_t *)(p + 488), *(uint32_t *)(p + 908),
+         *(uint32_t *)(p + 332) & 0x1FFFFFFFu, *(uint32_t *)(p + 404), *(uint32_t *)(p + 212));
+  printf(" %d %d %08x", (int)(signed char)p[59], (int)p[336], *(uint32_t *)(p + 884));
+}
+
+/* dst = x86 struct from the x64 image (to86 != 0) or the reverse (to86 == 0). */
+static int x86_convert(int type, const unsigned char *src, unsigned char *dst, int to86) {
+  int n;
+  const OffMap *m = x86_offmap(type, &n);
+  if (!m) return 0;
+  if (to86) {
+    memset(dst, 0, 512);
+  } else {
+    /* GetParams may have written an out-parameter buffer through a scenario pointer inside
+       dst (the car pGearRatio at x64 +88 points at `buf:400`).  Clear only the x64 struct
+       image so those bytes survive the reverse conversion. */
+    int end = 0;
+    for (int i = 0; i < n; i++)
+      if (m[i].x64 + m[i].size > end) end = m[i].x64 + m[i].size;
+    memset(dst, 0, (size_t)end);
+  }
+  for (int i = 0; i < n; i++) {
+    int so = to86 ? m[i].x64 : m[i].x86;
+    int doff = to86 ? m[i].x86 : m[i].x64;
+    memcpy(dst + doff, src + so, m[i].size);
+  }
+  return 1;
+}
+#endif
+
 /* P1a primitive-geometry probes (gprobe, gphysblob): owned by package P1a.
    Milestone 1 of the x86 (1.2 client) oracle drops the internal-function probes. */
 #ifndef ORACLE_X86
@@ -792,10 +1119,10 @@ static void *box_prim_geom(const Toks *t, int type) {
     parse_fv(need(t, "org"), (float *)prim, 3);
     parse_fv(need(t, "dir"), (float *)(prim + 12), 3);
   } break;
-  case 2: { /* heightfield primitive, 120 B (x64 layout; the x86 one is not ported) */
-#ifdef ORACLE_X86
-    die("heightfield primitives are not ported to the 1.2 oracle yet", 0);
-#endif
+  case 2: { /* heightfield primitive: x64 120 B, x86 108 B.  Basis 0, center +40, step +52,
+               invstep +60, size +68, stride +76, width +80, hscale +84, typemask +88,
+               heightmask +90, typehole +92, +96; the callbacks move from +104/+112 (8-byte
+               pointers) to +100/+104 (FUN_3515ce70/FUN_3510cca0 copy +0x34..+0x68). */
     float *f = (float *)prim;
     f[0] = f[4] = f[8] = 1;
     int n[2] = {64, 64};
@@ -819,25 +1146,31 @@ static void *box_prim_geom(const Toks *t, int type) {
     g_hf.kx = parse_f(get(t, "kx", "0"));
     g_hf.ky = parse_f(get(t, "ky", "0"));
     g_hf.amp = parse_f(get(t, "amp", "0"));
+#ifdef ORACLE_X86
+    SETP(prim, 100, (void *)hf_height);
+    SETP(prim, 104, (void *)hf_surf);
+#else
     SETP(prim, 104, (void *)hf_height);
     SETP(prim, 112, (void *)hf_surf);
+#endif
   } break;
   }
   void *g = m_prim(g_gm, type, prim);
   if (!g) die("CreatePrimitive failed", 0);
   if (type == 2 && get(t, "worldhf", 0)) {
-#ifndef ORACLE_X86
-    /* world slot 17 SetHeightfieldData(heightfield primitive*, matMapping, nMats) */
+    /* world slot 17/18 SetHeightfieldData(heightfield primitive*, matMapping, nMats).
+       It (re)creates one terrain entity per caller slot - x64 world+1568+8*i, 1.2 world+0x52C+4*i
+       (FUN_35093C00 loops five slots at param_1+0x52C) - and names them all "terrain". */
     m_hfdata(g_world, prim, 0, 0);
-    /* it (re)creates one terrain entity per caller slot at world+1568+8*i; name them all "terrain" */
     for (int i = 0; i < 5; i++) {
+#ifdef ORACLE_X86
+      void *te = *(void **)((char *)g_world + 0x52C + 4 * i);
+#else
       void *te = *(void **)((char *)g_world + 1568 + 8 * i);
+#endif
       if (te && !find_obj("terrain", 1)) add_obj("terrain", te, 1);
       else if (te) { int known = 0; for (int k = 0; k < g_nobj; k++) known |= g_obj[k].p == te; if (!known) add_obj("terrain", te, 1); }
     }
-#else
-    die("heightfield terrain is not ported to the 1.2 oracle yet", 0);
-#endif
   }
   return m_reg(g_gm, g);
 }
@@ -866,10 +1199,40 @@ static int ent_type_id(const char *s) {
 
 static void cmd_rwi(const Toks *t) {
 #ifdef ORACLE_X86
-  /* The 1.2 SRWIParams (64 B) and ray_hit (pointer-bearing) layouts are not ported in
-     milestone 1; the box scenarios do not use rays. */
-  (void)t;
-  die("ray is not ported to the 1.2 oracle yet", 0);
+  /* 1.2 SRWIParams is 64 B (FUN_351c2b00): +0 foreign data (2 words) + iForeignData,
+     org +12, dir +24, objtypes +36, flags +40, hits* +44, nMaxHits +48, phitLast +52,
+     nSkipEnts +56, pSkipEnts +60.  The ray_hit record is 64 B: dist +0, pCollider +4,
+     ipart +8, partid +12, int16 +16/+18, surface +20, +24, pt +28, n +40, order +52,
+     iPrim +56, pool ptr +60 (init +0/+52, local_24[5]/[7..9]/[0xe]). */
+  unsigned char p[64];
+  unsigned char hits[64 * 16];
+  memset(p, 0, sizeof p);
+  memset(hits, 0, sizeof hits);
+  int nmax = atoi(get(t, "max", "1"));
+  if (nmax < 1) nmax = 1;
+  if (nmax > 16) nmax = 16;
+  parse_fv(need(t, "org"), (float *)(p + 12), 3);
+  parse_fv(need(t, "dir"), (float *)(p + 24), 3);
+  SETI(p, 36, parse_u(get(t, "types", "0x13F")));
+  SETI(p, 40, parse_u(get(t, "flags", "0")));
+  SETP(p, 44, hits);
+  SETI(p, 48, nmax);
+  int n = ((fn_rwi)VT(g_world)[W_RayWorldIntersection])(g_world, 0, p, "physoracle",
+                                                       atoi(get(t, "caller", "4")));
+  printf("ray %s n %d\n", get(t, "name", "-"), n);
+  for (int i = 0; i < nmax; i++) {
+    unsigned char *h = hits + 64 * i;
+    if (*(float *)h < 0 && i > 0) continue;
+    printf("h %d d %08x e %s ip %d pid %d s %d p", i, fbits(*(float *)h),
+           name_of(*(void **)(h + 4)), *(int *)(h + 8), *(int *)(h + 12), *(int *)(h + 20));
+    out_f((float *)(h + 28), 3);
+    printf(" n");
+    out_f((float *)(h + 40), 3);
+    if (atoi(get(t, "ext", "0")))
+      printf(" x %d %d %d %d %d", *(short *)(h + 16), *(short *)(h + 18), *(int *)(h + 24),
+             *(int *)(h + 52), *(int *)(h + 56));
+    printf("\n");
+  }
 #else
   unsigned char p[96];
   unsigned char hits[80 * 16];
@@ -940,8 +1303,16 @@ static void run_line(char *line) {
 #endif
   } else if (!strcmp(c, "var")) {
 #ifdef ORACLE_X86
-    int off = atoi(need(&t, "off86")); /* x86 world offset 72..612: the layout shifts after +116 */
-    if (off < 72 || off > 612) die("var off86 outside the x86 physics-vars block", need(&t, "off86"));
+    /* off86= is the native x86 world offset; a scenario's x64 off= is translated with the
+       documented block shift (base 104->72; x64 +220 onwards is x86 +196, i.e. -24). */
+    int off;
+    const char *o86 = get(&t, "off86", 0);
+    if (o86) off = atoi(o86);
+    else {
+      int o64 = atoi(need(&t, "off"));
+      off = (o64 >= 220) ? o64 - 24 : o64 - 32;
+    }
+    if (off < 72 || off > 612) die("var offset outside the x86 physics-vars block", o86 ? o86 : need(&t, "off"));
 #else
     int off = atoi(need(&t, "off"));
     if (off < 104 || off > 632) die("var offset outside the physics-vars block", need(&t, "off"));
@@ -974,21 +1345,30 @@ static void run_line(char *line) {
     die("geominfo is not ported to the 1.2 oracle yet", 0);
 #endif
   } else if (!strcmp(c, "entity")) {
-    unsigned char pp[512];
+    unsigned char pp[512], *usep = pp;
+#ifdef ORACLE_X86
+    unsigned char pp86[512];
+#endif
     tmpl_params(0, pp);
     parse_fv(get(&t, "pos", "0,0,0"), (float *)(pp + 4), 3);
     float q[4] = {0, 0, 0, 1};
     parse_fv(get(&t, "q", "0,0,0,1"), q, 4);
     memcpy(pp + 16, q, 16);
     apply_fields(&t, pp, 512);
-    void *e = m_create(g_world, ent_type_id(need(&t, "type")), pp, atoi(get(&t, "id", "-1")));
+#ifdef ORACLE_X86
+    if (x86_convert(0, pp, pp86, 1)) usep = pp86;
+#endif
+    void *e = m_create(g_world, ent_type_id(need(&t, "type")), usep, atoi(get(&t, "id", "-1")));
     if (!e) die("CreatePhysicalEntity failed", need(&t, "name"));
     add_obj(need(&t, "name"), e, 1);
   } else if (!strcmp(c, "part")) {
     void *e = find_target(need(&t, "ent"));
     void *g = find_obj(need(&t, "geom"), 0);
     if (!g) die("unknown geom", need(&t, "geom"));
-    unsigned char gp[512];
+    unsigned char gp[512], *usep = gp;
+#ifdef ORACLE_X86
+    unsigned char gp86[512];
+#endif
     memset(gp, 0, sizeof gp);
     float *f = (float *)gp;
     SETI(gp, 0, 0);
@@ -999,25 +1379,19 @@ static void run_line(char *line) {
     parse_fv(get(&t, "q", "0,0,0,1"), q, 4);
     memcpy(gp + 24, q, 16);
     f[10] = parse_f(get(&t, "scale", "1"));
-#ifdef ORACLE_X86
-    /* pe_geomparams 88: surface 52, flags 56, collider 60, mincontact 64, idmat 68,
-       lattice 72, matMapping 76, nMats 80, recalcBBox 84 (verified in FUN_35061170) */
-    SETI(gp, 52, UNUSED_I);
-    SETI(gp, 56, parse_u(get(&t, "flags", "0x1809F")));
-    SETI(gp, 60, parse_u(get(&t, "collider", "0x1")));
-    *(float *)(gp + 64) = parse_f(get(&t, "mincontact", "U"));
-    SETI(gp, 68, -1);
-    SETI(gp, 84, 1);
-#else
     SETI(gp, 64, UNUSED_I);
     SETI(gp, 68, parse_u(get(&t, "flags", "0x1809F"))); /* = DEFAULT_PART_FLAGS in the Rust crate */
     SETI(gp, 72, parse_u(get(&t, "collider", "0x1")));
     *(float *)(gp + 76) = parse_f(get(&t, "mincontact", "U"));
     SETI(gp, 80, -1);
     SETI(gp, 108, 1);
-#endif
+    /* Build the x64 scenario image first, then translate the whole struct (including type 1's
+       wheel block) to the 1.2 layout, so field overrides keep their x64 offsets. */
     apply_fields(&t, gp, 512);
-    int id = m_addg(e, E_AddGeometry, g, gp, atoi(get(&t, "id", "-1")), 1);
+#ifdef ORACLE_X86
+    if (x86_geomparams(*(int *)gp, gp, gp86, 1)) usep = gp86;
+#endif
+    int id = m_addg(e, E_AddGeometry, g, usep, atoi(get(&t, "id", "-1")), 1);
     printf("ret part %s %d\n", need(&t, "ent"), id);
   } else if (!strcmp(c, "surface")) { /* SetSurfaceParameters(idx, bounciness, friction, flags) */
     int r = m_surf(g_world, atoi(need(&t, "idx")), parse_f(get(&t, "bounce", "0")),
@@ -1038,10 +1412,29 @@ static void run_line(char *line) {
     apply_fields(&t, b, 512);
     int r;
     int ts = atoi(get(&t, "ts", "1")); /* bThreadSafe of SetParams / Action (<= 0 may queue) */
-    if (c[0] == 'p') r = m_setp(e, E_SetParams, b, ts);
-    else if (c[0] == 'a') r = m_setp(e, E_Action, b, ts);
-    else if (c[0] == 'g') r = m_status(e, E_GetParams, b);
-    else r = m_status(e, E_GetStatus, b);
+    unsigned char *callb = b;
+#ifdef ORACLE_X86
+    unsigned char b86[1024];
+    /* params and statuses get the x86 layout at the vtable call; dumps keep using x64 offsets. */
+    if ((c[0] == 'p' || c[0] == 'g') && x86_convert(type, b, b86, 1)) callb = b86;
+    else if (c[0] == 's' && x86_status_convert(type, b, b86, 1)) callb = b86;
+#endif
+    if (c[0] == 'p') r = m_setp(e, E_SetParams, callb, ts);
+    else if (c[0] == 'a') r = m_setp(e, E_Action, callb, ts);
+    else if (c[0] == 'g') r = m_status(e, E_GetParams, callb);
+    else r = m_status(e, E_GetStatus, callb);
+#ifdef ORACLE_X86
+    if (callb != b) {
+      if (c[0] == 's') {
+        /* Wheel status (5) x86 +100 is the contact entity pointer (process-specific); it maps
+           to x64 +128, which no dump prints.  Zero it so a pointer never reaches the trace. */
+        if (type == 5 && (int)(intptr_t)m_call0(e, 1) == 3) *(uint32_t *)(b86 + 100) = 0;
+        x86_status_convert(type, b86, b, 0);
+      } else {
+        x86_convert(type, b86, b, 0);
+      }
+    }
+#endif
     printf("ret %s %s %d %d", c, need(&t, "target"), type, r);
     const char *dump = get(&t, "dump", 0); /* dump=OFF,NWORDS of the struct after the call */
     if (dump) {
@@ -1073,7 +1466,12 @@ static void run_line(char *line) {
   } else if (!strcmp(c, "peek")) { /* raw words of an entity/area object (RE experiments) */
     void *e = find_target(need(&t, "target"));
     int off = atoi(need(&t, "off")), n = atoi(get(&t, "n", "1"));
-    printf("peek %s %d", need(&t, "target"), off);
+#ifdef ORACLE_X86
+    int off86 = x86_entity_off(e, off);
+    if (off86 < 0) die("x86 probe offset has no mapping (scenario offsets are x64)", need(&t, "off"));
+    off = off86;
+#endif
+    printf("peek %s %d", need(&t, "target"), atoi(need(&t, "off")));
     for (int i = 0; i < n; i++) printf(" %08x", *(uint32_t *)((char *)e + off + 4 * i));
     printf("\n");
   } else if (!strcmp(c, "snap")) { /* remember n words of an object (pointers make raw dumps non-reproducible) */
@@ -1087,21 +1485,88 @@ static void run_line(char *line) {
     if (e != g_snap_obj) die("snapdiff target differs from snap target", need(&t, "target"));
     printf("snapdiff %s", need(&t, "target"));
     for (int i = 0; i < g_snap_n; i++)
-      if (((uint32_t *)e)[i] != g_snap[i]) printf(" %d", 4 * i);
+      if (((uint32_t *)e)[i] != g_snap[i]) {
+#ifdef ORACLE_X86
+        int r = x86_entity_off_rev(e, 4 * i);
+        printf(" %d", r >= 0 ? r : 4 * i);
+#else
+        printf(" %d", 4 * i);
+#endif
+      }
     printf("\n");
+  } else if (!strcmp(c, "rawpeekdll")) { /* debug: read the loaded image at an x86 VA */
+#ifdef ORACLE_X86
+    uint64_t va = strtoull(need(&t, "va"), 0, 0);
+    int n = atoi(get(&t, "n", "1"));
+    printf("rawpeekdll %llx", (unsigned long long)va);
+    for (int i = 0; i < n; i++) printf(" %08x", *(uint32_t *)VA(g_phys, (unsigned)va + 4 * i));
+    printf("\n");
+#else
+    (void)t;
+    die("rawpeekdll is an x86-only probe", 0);
+#endif
+  } else if (!strcmp(c, "addrof")) { /* debug: object address */
+    printf("addrof %s %p\n", need(&t, "target"), find_target(need(&t, "target")));
+  } else if (!strcmp(c, "rawpeek")) { /* entity words at a *x86* offset (debug) */
+#ifdef ORACLE_X86
+    void *e = find_target(need(&t, "target"));
+    int off = atoi(need(&t, "off")), n = atoi(get(&t, "n", "1"));
+    printf("rawpeek %s %d", need(&t, "target"), off);
+    for (int i = 0; i < n; i++) printf(" %08x", *(uint32_t *)((char *)e + off + 4 * i));
+    printf("\n");
+#else
+    (void)t;
+    die("rawpeek is an x86-only probe", 0);
+#endif
+  } else if (!strcmp(c, "findptr")) { /* world words that hold the object pointer (list heads) */
+#ifdef ORACLE_X86
+    void *e = find_target(need(&t, "target"));
+    printf("findptr %s", need(&t, "target"));
+    for (int off = 0; off + 4 <= 0x5400; off += 4)
+      if (*(uint32_t *)((char *)g_world + off) == (uint32_t)(uintptr_t)e) printf(" %d", off);
+    printf("\n");
+#else
+    (void)t;
+    die("findptr is an x86-only probe", 0);
+#endif
   } else if (!strcmp(c, "peekworld")) {
     int off = atoi(need(&t, "off")), n = atoi(get(&t, "n", "1"));
+    int off86 = off;
+#ifdef ORACLE_X86
+    off86 = x86_world_off(off);
+    if (off86 < 0) die("x86 world offset has no mapping (scenario offsets are x64)", need(&t, "off"));
+#endif
     printf("peekworld %d", off);
-    for (int i = 0; i < n; i++) printf(" %08x", *(uint32_t *)((char *)g_world + off + 4 * i));
+    for (int i = 0; i < n; i++) printf(" %08x", *(uint32_t *)((char *)g_world + off86 + 4 * i));
     printf("\n");
   } else if (!strcmp(c, "peekdll")) { /* raw words of the DLL image at VA (e.g. the params size tables) */
     uint64_t va = strtoull(need(&t, "va"), 0, 0);
+    uint64_t va86 = va;
+#ifdef ORACLE_X86
+    unsigned m = x86_dll_va((unsigned)va);
+    if (!m) die("x86 DLL address has no mapping (scenario addresses are x64)", need(&t, "va"));
+    va86 = m;
+#endif
     int n = atoi(get(&t, "n", "1"));
     printf("peekdll %llx", (unsigned long long)va);
-    for (int i = 0; i < n; i++) printf(" %08x", *(uint32_t *)VA(g_phys, va + 4 * i));
+    for (int i = 0; i < n; i++) printf(" %08x", *(uint32_t *)VA(g_phys, va86 + 4 * i));
     printf("\n");
   } else if (!strcmp(c, "listwhere")) { /* which world entity list (+664+8k, k=0..7, and +760/+816) holds the entity */
     void *e = find_target(need(&t, "target"));
+#ifdef ORACLE_X86
+    /* x86 world: simclass heads at +628+4k, two extra heads at +676/+680; the doubly linked
+       list nodes are at entity+0x54 (next) / +0x58 (prev).  Derived from findptr/rawpeek. */
+    int offs[10] = {628, 632, 636, 640, 644, 648, 652, 656, 676, 680};
+    int outs[10] = {664, 672, 680, 688, 696, 704, 712, 720, 760, 816};
+    printf("listwhere %s", need(&t, "target"));
+    for (int k = 0; k < 10; k++) {
+      int found = 0, guard = 0;
+      for (char *p = *(char **)((char *)g_world + offs[k]); p && guard < 100000; p = *(char **)(p + 0x54), guard++)
+        if (p == e) { found = 1; break; }
+      if (found) printf(" %d", outs[k]);
+    }
+    printf("\n");
+#else
     int offs[10] = {664, 672, 680, 688, 696, 704, 712, 720, 760, 816};
     printf("listwhere %s", need(&t, "target"));
     for (int k = 0; k < 10; k++) {
@@ -1111,6 +1576,7 @@ static void run_line(char *line) {
       if (found) printf(" %d", offs[k]);
     }
     printf("\n");
+#endif
   } else if (!strcmp(c, "contacts")) { /* the rigid entity's contact list (E+536): non-pointer fields of each record */
     void *e = find_target(need(&t, "target"));
     char *head = (char *)e + 536;
@@ -1128,6 +1594,47 @@ static void run_line(char *line) {
     printf("echo");
     for (int i = 1; i < t.n; i++) printf(" %s", t.k[i]);
     printf("\n");
+#ifdef ORACLE_X86
+  } else if (!strcmp(c, "poke")) { /* raw write into an entity, x64 offsets mapped to 1.2 */
+    unsigned char *p = (unsigned char *)find_target(need(&t, "target"));
+    int off = atoi(need(&t, "off"));
+    int o86 = x86_entity_off(p, off);
+    if (o86 < 0) die("x86 poke offset has no mapping (scenario offsets are x64)", need(&t, "off"));
+    const char *v;
+    if ((v = get(&t, "f", 0))) *(float *)(p + o86) = parse_f(v);
+    else if ((v = get(&t, "i", 0))) *(uint32_t *)(p + o86) = parse_u(v);
+    else if ((v = get(&t, "v", 0))) parse_fv(v, (float *)(p + o86), 3);
+    else if ((v = get(&t, "q", 0))) parse_fv(v, (float *)(p + o86), 4);
+    else die("poke needs f/i/v/q", 0);
+  } else if (!strcmp(c, "gather")) {
+    void *e = find_target(need(&t, "ent"));
+    int nmax = atoi(get(&t, "nmax", "4"));
+    if (nmax > 8) nmax = 8;
+    x86_buoy_fill();
+    int r = ((fn_gather86)VA(g_phys, 0x350CE9B0u))(e, 0, parse_f(need(&t, "dt")), g_x86_buoy_raw, nmax);
+    g_x86_nbuoy = r;
+    x86_buoy_pack(r);
+    printf("ga %s %d", get(&t, "tag", "-"), r);
+    x86_print_buoy(nmax);
+    x86_print_state(e);
+    printf("\n");
+  } else if (!strcmp(c, "abuoy")) {
+    void *e = find_target(need(&t, "ent"));
+    float g[3] = {0, 0, -9.81f};
+    parse_fv(get(&t, "g", "0,0,-9.81"), g, 3);
+    int n = atoi(get(&t, "n", "-1"));
+    if (n < 0) n = g_x86_nbuoy;
+    if (n < 0) n = 0;
+    ((fn_buoy86)VA(g_phys, 0x350D1D80u))(e, 0, parse_f(need(&t, "dt")), g, g_x86_buoy_raw, n);
+    printf("ab %s", get(&t, "tag", "-"));
+    x86_print_state(e);
+    printf("\n");
+  } else if (!strcmp(c, "estate")) {
+    void *e = find_target(need(&t, "ent"));
+    printf("es %s", get(&t, "tag", "-"));
+    x86_print_state(e);
+    printf("\n");
+#endif
 #ifndef ORACLE_X86
   } else if (p1a_command(c, &t)) {
   } else if (p3q_command(c, &t)) {
@@ -1566,30 +2073,37 @@ int main(int argc, char **argv) {
 #ifdef ORACLE_X86
   const char *init = "ctors", *t0 = getenv("AAEMU_PHYS_T0");
   int fpu = 53;
+  unsigned mxcsr = 0;
+  int have_mxcsr = 0;
   if (!rt) rt = "D:\\aaemu-target\\physics\\oracle-x86\\rt";
   int a = 1;
   while (a < argc) {
     if (!strcmp(argv[a], "--rt") && a + 1 < argc) { rt = argv[a + 1]; a += 2; }
     else if (!strcmp(argv[a], "--fpu") && a + 1 < argc) { fpu = atoi(argv[a + 1]); a += 2; }
+    else if (!strcmp(argv[a], "--mxcsr") && a + 1 < argc) { mxcsr = (unsigned)strtoul(argv[a + 1], 0, 0); have_mxcsr = 1; a += 2; }
     else if (!strcmp(argv[a], "--static-init") && a + 1 < argc) { init = argv[a + 1]; a += 2; }
     else if (!strcmp(argv[a], "--t0") && a + 1 < argc) { t0 = argv[a + 1]; a += 2; }
     else { scenario = argv[a++]; }
   }
   if (!scenario) {
     fprintf(stderr,
-            "usage: physoracle_x86 [--rt DIR] [--fpu 24|53|64] [--static-init none|tls|ctors]\n"
-            "                     [--t0 CAPTURE] SCENARIO|-\n");
+            "usage: physoracle_x86 [--rt DIR] [--fpu 24|53|64] [--mxcsr HEX]\n"
+            "                     [--static-init none|tls|ctors] [--t0 CAPTURE] SCENARIO|-\n");
     return 1;
   }
 #else
   if (!rt) rt = "D:\\aa-re\\cryphysics\\harness\\rt";
   int a = 1;
-  if (a + 1 < argc && !strcmp(argv[a], "--rt")) { rt = argv[a + 1]; a += 2; }
+  unsigned mxcsr = 0;
+  int have_mxcsr = 0;
+  while (a + 1 < argc && !strcmp(argv[a], "--rt")) { rt = argv[a + 1]; a += 2; }
+  while (a + 1 < argc && !strcmp(argv[a], "--mxcsr")) { mxcsr = (unsigned)strtoul(argv[a + 1], 0, 0); have_mxcsr = 1; a += 2; }
   if (a >= argc) {
-    fprintf(stderr, "usage: physoracle [--rt DIR] SCENARIO|-\n       physoracle [--rt DIR] --math NAME COUNT SEED\n");
+    fprintf(stderr, "usage: physoracle [--rt DIR] [--mxcsr HEX] SCENARIO|-\n       physoracle [--rt DIR] --math NAME COUNT SEED\n");
     return 1;
   }
   scenario = argv[a];
+  init_mxcsr(mxcsr, have_mxcsr);
 #endif
   char dll[MAX_PATH];
 #ifdef ORACLE_X86
@@ -1613,6 +2127,7 @@ int main(int argc, char **argv) {
     if (!VirtualProtect((void *)g_phys, 0x75D000, PAGE_EXECUTE_READWRITE, &old))
       fprintf(stderr, "VirtualProtect image failed (%lu)\n", GetLastError());
   }
+  init_mxcsr(mxcsr, have_mxcsr);
   set_fpu_precision(fpu);
   x86_static_init(init, t0);
   install_fake_env(g_phys);
