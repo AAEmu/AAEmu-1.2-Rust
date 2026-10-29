@@ -17,7 +17,7 @@
 //! cast <skill> <npc template>        CSStartSkill on the nearest NPC
 //! dcast <skill> <doodad template>    doodad-target CSStartSkill
 //! item <template> <count>            `/item add self` and remember the stack id
-//! icast <skill> <item template> <npc template|self|peer|player:NAME>
+//! icast <skill> <item template> <npc template|self|peer|player:NAME> [metres [max secs]]
 //!                                    cast from the remembered item stack
 //! waitpeer [secs] [name]             read packets until another player is in sight (60 s default)
 //! rawcs <opcode hex> [<body hex>]    send any client packet (`SELF` / `PEER` in the body hex)
@@ -62,6 +62,19 @@ fn dist(a: (f32, f32, f32), b: (f32, f32, f32)) -> f32 {
     ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) + (a.2 - b.2).powi(2)).sqrt()
 }
 
+/// `SCBuffCreatedPacket`: (owner obj id, buff template id).
+fn buff_created(p: &Packet) -> Option<(u32, u32)> {
+    use aaemu_game::systems::skills::types::SkillCaster;
+    let mut s = p.stream();
+    let kind = s.read_u8().ok()?;
+    SkillCaster::read(kind, &mut s).ok()?;
+    s.read_u32().ok()?;
+    let owner = s.read_bc().ok()?;
+    s.read_u32().ok()?;
+    let buff = s.read_u32().ok()?;
+    Some((owner, buff))
+}
+
 fn show(packets: &[Packet]) {
     let mut other: std::collections::BTreeMap<&'static str, usize> = Default::default();
     for p in packets {
@@ -73,6 +86,16 @@ fn show(packets: &[Packet]) {
                 "    {name} quest {q} status {} objectives {:?}",
                 st.status, st.objectives
             );
+        } else if p.is_sc(sc::SCBuffCreatedPacket) {
+            match buff_created(p) {
+                Some((owner, buff)) => println!("    SCBuffCreated owner {owner} buff {buff}"),
+                None => println!("    SCBuffCreated (unreadable)"),
+            }
+        } else if p.is_sc(sc::SCBuffRemovedPacket) {
+            let mut s = p.stream();
+            if let (Ok(owner), Ok(index)) = (s.read_bc(), s.read_u32()) {
+                println!("    SCBuffRemoved owner {owner} index {index}");
+            }
         } else if p.is_sc(sc::SCErrorMsgPacket) {
             println!("    SCErrorMsg {:?}", p.stream().read_i16());
         } else if p.is_sc(sc::SCItemTaskSuccessPacket) {
@@ -598,15 +621,34 @@ async fn run_lines(
                         let npc = nearest(game, tpl)
                             .with_context(|| format!("NPC {tpl} not in sight"))?;
                         clock += 1500;
-                        game.move_to((npc.pos.0 + 1.0, npc.pos.1, npc.pos.2), clock)
-                            .await?;
+                        // Optional 4th argument: cast from that many metres away (on the side
+                        // the bot came from) instead of 1 m next to the NPC, like a player does.
+                        let at = match parts.get(3).and_then(|d| d.parse::<f32>().ok()) {
+                            Some(d) => {
+                                let me = game.state.self_pos;
+                                let (dx, dy) = (me.0 - npc.pos.0, me.1 - npc.pos.1);
+                                let len = dx.hypot(dy).max(0.001);
+                                (
+                                    npc.pos.0 + dx / len * d,
+                                    npc.pos.1 + dy / len * d,
+                                    npc.pos.2,
+                                )
+                            }
+                            None => (npc.pos.0 + 1.0, npc.pos.1, npc.pos.2),
+                        };
+                        game.move_to(at, clock).await?;
                         game.change_target(npc.obj_id).await?;
                         npc.obj_id
                     }
                 };
                 game.start_item_skill(skill, item, item_tpl, target).await?;
+                // Optional 5th argument: read packets for at most that many seconds.
+                let max_wait = parts
+                    .get(4)
+                    .and_then(|d| d.parse::<u64>().ok())
+                    .unwrap_or(10);
                 let got = game
-                    .drain(Duration::from_millis(2000), Duration::from_secs(10))
+                    .drain(Duration::from_millis(2000), Duration::from_secs(max_wait))
                     .await?;
                 for p in &got {
                     if p.is_sc(sc::SCSkillStartedPacket) {
