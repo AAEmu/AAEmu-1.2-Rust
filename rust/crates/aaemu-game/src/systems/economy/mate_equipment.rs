@@ -28,7 +28,8 @@ use super::item_handlers::{active, sync_client_packet};
 use super::item_packets::SCUnitEquipmentsChangedPacket;
 
 /// A raw wire item (`Item.Read` / `Item.Write`): the fields the container code needs. The detail
-/// body is consumed according to its `ItemDetailType` (ship parts carry 12 bytes, gear 55).
+/// body is consumed according to its `ItemDetailType` (gear 55 bytes; the 1.2 reader has no
+/// `SlaveEquipment` tag, so ship parts carry no body).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WireItem {
     pub template_id: u32,

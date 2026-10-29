@@ -30,7 +30,6 @@ pub mod detail_type {
     pub const DECORATION: u8 = 7;
     pub const MUSIC_SHEET: u8 = 8;
     pub const GLIDER: u8 = 9;
-    pub const SLAVE_EQUIPMENT: u8 = 10;
     pub const LOCATION: u8 = 11;
     pub const TYPE_MAX: u8 = 12;
 }
@@ -61,7 +60,8 @@ pub enum ItemClass {
     SummonMate,
     SummonSlave,
     TreasureMap,
-    /// Ship / vehicle part (`item_impl` 28, `ItemDetailType.SlaveEquipment`).
+    /// Ship / vehicle part (`item_impl` 28). The 10.x `ItemDetailType.SlaveEquipment` detail
+    /// does not exist in the 1.2 client, so these items carry no wire detail body.
     SlaveEquipment,
 }
 
@@ -129,7 +129,10 @@ impl ItemClass {
             Self::SummonMate => detail_type::MATE,
             Self::SummonSlave => detail_type::SLAVE,
             Self::TreasureMap => detail_type::TREASURE,
-            Self::SlaveEquipment => detail_type::SLAVE_EQUIPMENT,
+            // 1.2 has no `ItemDetailType.SlaveEquipment` (the client item detail reader
+            // `3961edf0` only has cases 1..9), so ship parts go out as a plain item with no
+            // detail body.
+            Self::SlaveEquipment => detail_type::INVALID,
             _ => detail_type::INVALID,
         }
     }
@@ -144,7 +147,6 @@ impl ItemClass {
             Self::SummonMate => 6,
             Self::SummonSlave => 29,
             Self::TreasureMap => 24,
-            Self::SlaveEquipment => 12,
             _ => 0,
         }
     }
@@ -152,6 +154,7 @@ impl ItemClass {
 
 /// Detail body length of a raw `ItemDetailType` byte (the bytes after the type byte), as read
 /// by the 1.2 client's item detail reader `3961edf0` (the C# `ReadDetails` tables minus one).
+/// There is no case 10 (`SlaveEquipment`, later clients only): it reads no body either.
 pub fn detail_body_len(detail_type: u8) -> usize {
     match detail_type {
         detail_type::EQUIPMENT => 55,
@@ -162,7 +165,6 @@ pub fn detail_body_len(detail_type: u8) -> usize {
         detail_type::BIG_FISH | detail_type::DECORATION => 16,
         detail_type::MUSIC_SHEET => 8,
         detail_type::GLIDER => 4,
-        detail_type::SLAVE_EQUIPMENT => 12,
         _ => 0,
     }
 }
@@ -193,9 +195,6 @@ pub struct ItemDetails {
     /// `SummonSlave.RepairStartTime` (unix seconds, 0 = `DateTime.MinValue`). Never restored
     /// from the DB (the C# `ReadDetails` always falls back to `MinValue`).
     pub slave_repair_start_time: UnixTime,
-    /// `ItemDetailType.SlaveEquipment` body (opaque 12 bytes; the 1.2 C# base `Item` keeps it
-    /// as a raw blob).
-    pub slave_equipment: [u8; 12],
     // TreasureMap
     pub map_position_x: i64,
     pub map_position_y: i64,
@@ -285,8 +284,8 @@ impl Item {
             );
             class
         });
-        // Ship parts keep the base `Item` type string in the C# database but always use the
-        // `SlaveEquipment` detail (12 opaque bytes).
+        // Ship parts keep the base `Item` type string in the C# database; the `SlaveEquipment`
+        // class only drives the equipment logic (the 1.2 wire has no detail for it).
         let class = if template
             .is_some_and(|t| t.impl_id == crate::data::items::item_impl::SLAVE_EQUIPMENT)
         {
@@ -569,10 +568,6 @@ impl Item {
                     d.map_position_x = s.read_i64()?;
                     d.map_position_y = s.read_i64()?;
                 }
-                ItemClass::SlaveEquipment => {
-                    let bytes = s.read_bytes(12)?;
-                    d.slave_equipment.copy_from_slice(&bytes);
-                }
                 _ => {}
             }
             Ok(())
@@ -640,10 +635,8 @@ impl Item {
                     .write_i64(d.map_position_x)
                     .write_i64(d.map_position_y);
             }
-            ItemClass::SlaveEquipment => {
-                s.write_raw(&d.slave_equipment);
-            }
-            // Base Item.WriteDetails with DetailType Invalid writes nothing.
+            // Base Item.WriteDetails with DetailType Invalid writes nothing (ship parts,
+            // `ItemClass::SlaveEquipment`, have no 1.2 detail).
             _ => {}
         }
     }
@@ -1141,6 +1134,45 @@ mod tests {
             .write_u8(1)
             .write_i64(0)
             .write_i64(600);
+        assert_eq!(s.as_bytes(), want.as_bytes());
+    }
+
+    #[test]
+    fn slave_equipment_writes_no_detail_body() {
+        // Sailboat bell (item 29725, `item_impl` 28): the 1.2 client's item detail reader
+        // `3961edf0` has no SlaveEquipment case, so the item goes out as type 0 with no body.
+        let row = ItemRow {
+            type_name: "AAEmu.Game.Models.Game.Items.Item".into(),
+            id: 0x0102030405060708,
+            template_id: 29725,
+            count: 1,
+            details: vec![0xAA; 12],
+            ..ItemRow::default()
+        };
+        let t = ItemTemplate {
+            impl_id: crate::data::items::item_impl::SLAVE_EQUIPMENT,
+            ..ItemTemplate::plain(29725, 1)
+        };
+        let item = Item::from_row(row, Some(&t), 1);
+        assert_eq!(item.class, ItemClass::SlaveEquipment);
+        assert_eq!(item.detail_type_and_details(), vec![detail_type::INVALID]);
+        assert!(item.details_blob().is_empty());
+
+        let mut s = PacketStream::new();
+        item.write(&mut s);
+        let mut want = PacketStream::new();
+        want.write_u32(29725)
+            .write_u64(0x0102030405060708)
+            .write_u8(0)
+            .write_u8(0)
+            .write_i32(1)
+            .write_u8(detail_type::INVALID) // no detail body follows
+            .write_i64(0) // create time
+            .write_i32(0) // lifespan
+            .write_u32(0) // made unit id
+            .write_u8(1) // world id
+            .write_i64(0)
+            .write_i64(0);
         assert_eq!(s.as_bytes(), want.as_bytes());
     }
 

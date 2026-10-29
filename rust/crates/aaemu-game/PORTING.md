@@ -2654,6 +2654,7 @@ The Bevy 1.2 client (`AABevy1.2`) is the main client; its reverse-engineering no
 | M10 | Bounty rows write `notGuilty` before `guilty` | verified: row reader `397bebf0` reads `notGuilty` (`+0xc8`) then `guilty` (`+0xcc`) |
 | M14 | `SCUnitState` of a character sets flag bit3 (`0x0008`) while force attack is on, so late observers see Bloodlust | verified: the client chain is `397c9480` -> `398a1f90` -> unit+0x3bbc (the force-attack byte) for bit3 of the `u16` flags |
 | M15 | `SCCooldowns` has a full writer (`i32` count + `[id, total, remaining]` u32 triples, skills then tags, 150 per list) and is sent after `SCCharacterState` when the character has running skill cooldowns. The server keeps only the end time of a skill cooldown and no tags, so `total` equals `remaining` | verified: `397b64d0` -> `397b2350`; entries are appended, an empty list is no reset. Cooldowns are not persisted, so a freshly loaded character normally has none |
+| M24 | Slave-equipment items (`item_impl` 28, e.g. item 29725 on slave template 21) are written as detail type 0 (`Invalid`) with no detail body; the server no longer sends `ItemDetailType.SlaveEquipment` (10, 12 opaque bytes), which desynced every field after the item (the Bevy client rejected `SCUnitStatePacket` 0x069 and the original 1.2 client misparsed it) | verified: the 1.2 item detail reader `3961edf0` has cases only for tags 1..9 (bodies `0x38, 0x1e, 7, 10, 0x19, 0x11, 0x11, 9, 5` minus the type byte) and no case 10, so tag 10 reads no body; the C# 1.2 `ItemDetailType` numbering has no 10 either |
 | CS | The client CS table entries missing from `opcodes::cs` were added: `0x11f CSRequestSetBountyMoney`, `0x120 CSSendBountyUpdate`, `0x130 CSRankSnapshot` (already handled through a local const, now the table entry), `0x133 CSChangeAutoUseAAPoint` | the Bevy `opcodes.rs` (client table); 0x130 additionally by the RE notes in `ranking_packets.rs`. `0x11f`/`0x120` are logged no-ops (the bounty ledger is not wired to the wallet, TODO); `0x133` sets `Character.auto_use_aa_point` and answers with `SCItemTaskSuccess` (`ItemTaskType` 110 carrying the one-byte `ChangeAutoUseAAPoint` task, action 18); the 1.2 C# had the task class but no 0x133 handler, so this reply is inferred, not observed on a live client |
 
 Doc-only items:
@@ -2948,10 +2949,13 @@ the real `parse_list` and checks the eight placements.
   `SCUnitEquipmentsChanged`, followed by `SCUnitPoints` when a part carries MaxHealth. Item
   tasks go through the economy's `SplitOrMoveItemEx` (`ItemTaskType.Invalid`, as in C#), and the
   slave model mirror is refreshed before `UpdateGearBonuses` / pool refresh.
-- **Ship parts.** Items with `item_impl = 28` (`ItemImplEnum.SlaveEquipment`) are now
-  `ItemClass::SlaveEquipment` with `ItemDetailType.SlaveEquipment` (12 opaque detail bytes);
-  `read_wire_item` consumes detail bytes by detail type (gear 55, ship parts 12, ...) instead of
-  always reading an `EquipItem`. Bind-on-equip applies in `EquipmentSlave` too. A player-owned
+- **Ship parts.** Items with `item_impl = 28` (`ItemImplEnum.SlaveEquipment`) are
+  `ItemClass::SlaveEquipment`, but the 1.2 client has no detail type 10: its item detail reader
+  `3961edf0` only has cases 1..9, and reads no body for tag 10 (the C# `SlaveEquipment = 10` is
+  for later clients). The server therefore sends them as detail type 0 (`Invalid`) with no body,
+  like every other class without a 1.2 detail; `read_wire_item` consumes detail bytes by detail
+  type (gear 55, ...) instead of always reading an `EquipItem`. Bind-on-equip applies in
+  `EquipmentSlave` too. A player-owned
   slave gets its starter pack when its equipment container is first created, including a saved
   legacy hull whose summon item already names its DB id. An existing empty container represents
   intentional unequipping and is reused on the next summon / restart without seeding again.

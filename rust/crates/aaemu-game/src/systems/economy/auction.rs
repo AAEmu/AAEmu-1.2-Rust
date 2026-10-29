@@ -279,6 +279,8 @@ impl WireItem {
         i.flags = s.read_u8()?;
         i.count = s.read_i32()?;
         i.detail_type = s.read_u8()?;
+        // The 1.2 client's item detail reader `3961edf0` has no case 10 (SlaveEquipment, later
+        // clients only), so it reads no body for it either.
         let len: i32 = match i.detail_type {
             1 => 56,      // Equipment
             2 => 30,      // Slave
@@ -288,7 +290,6 @@ impl WireItem {
             6 | 7 => 17,  // BigFish / Decoration
             8 => 9,       // MusicSheet
             9 => 5,       // Glider
-            10 => 13,     // SlaveEquipment
             _ => 0,
         } - 1;
         if len > 0 {
