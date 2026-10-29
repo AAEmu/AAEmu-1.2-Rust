@@ -67,6 +67,8 @@ mod lizard_stun_flow_tests;
 #[cfg(test)]
 mod mana_regen_manager_tests;
 #[cfg(test)]
+mod quest_machine_flow_tests;
+#[cfg(test)]
 mod resurrect_tests;
 #[cfg(test)]
 mod sc_unit_impulse_packet_tests;
