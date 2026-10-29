@@ -1700,11 +1700,12 @@ fn try_delete(
     };
     let now = spawn_manager::now();
     let despawn_delayed = spawn_manager::add_secs(now, f64::from(portal_time - 0.5));
-    // slaveInfo.Transform.DetachAll()
+    // slaveInfo.Transform.DetachAll(): a remaining child (deck stander, attached doodad) keeps
+    // its world position as its new local one, so the owner's world pose survives the hull.
     let slave_obj = WorldObject::from(&slave);
     world.detach_child(&slave_obj);
     for child in slave_obj.core().take_children() {
-        child.with_transform(|t| t.parent_obj_id = 0);
+        world.detach_child(&child);
     }
     let spawns = spawn_manager_of(server, world.id);
     for id in &doodad_ids {
