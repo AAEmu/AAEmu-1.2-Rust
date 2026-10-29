@@ -2011,9 +2011,11 @@ fn overhead_clear(hit: Option<Option<f32>>, water: f32) -> bool {
     !matches!(hit, Some(Some(z)) if z > water + OVERHEAD_SURFACE_MARGIN)
 }
 
-/// [`overhead_clear`] with the production ray: from `water + hull_top + margin` down to just
-/// above the water at (`x`, `y`), against static, rigid and terrain colliders.
-fn overhead_clear_at(
+/// [`overhead_clear`] with the production rays between `water + hull_top + margin` and just
+/// above the water at (`x`, `y`), against static, rigid and terrain colliders. The downward ray
+/// finds the top of a pier, bridge or deck; a ray does not hit the solid it starts in, so the
+/// upward ray finds the underside of a deck thick enough to contain the downward ray's start.
+pub(crate) fn overhead_clear_at(
     server: &GameServer,
     instance_id: u32,
     x: f32,
@@ -2021,15 +2023,20 @@ fn overhead_clear_at(
     water: f32,
     hull_top: f32,
 ) -> bool {
-    let hit = crate::systems::ai::collision::raycast(
-        server,
-        instance_id,
-        [x, y, water + hull_top + OVERHEAD_CLEARANCE_MARGIN],
-        [x, y, water + OVERHEAD_SURFACE_MARGIN],
-        crate::systems::ai::collision::query::mask::SOLID_TERRAIN,
-        crate::systems::ai::collision::query::ray_flags::DEFAULT,
-    );
-    overhead_clear(hit.map(|hit| hit.map(|h| h.pos.z)), water)
+    let low = [x, y, water + OVERHEAD_SURFACE_MARGIN];
+    let high = [x, y, water + hull_top + OVERHEAD_CLEARANCE_MARGIN];
+    let ray = |from: [f32; 3], to: [f32; 3]| {
+        crate::systems::ai::collision::raycast(
+            server,
+            instance_id,
+            from,
+            to,
+            crate::systems::ai::collision::query::mask::SOLID_TERRAIN,
+            crate::systems::ai::collision::query::ray_flags::DEFAULT,
+        )
+        .map(|hit| hit.map(|h| h.pos.z))
+    };
+    overhead_clear(ray(high, low), water) && overhead_clear(ray(low, high), water)
 }
 
 /// The `!deep` summon fallback: 5 m in front of the owner along its facing, at the water

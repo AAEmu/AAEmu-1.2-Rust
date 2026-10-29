@@ -385,6 +385,43 @@ async fn vanished_deck_uses_world_backup_without_moving_character_transform() {
     assert_eq!(obj.transform(), before);
 }
 
+/// The boat summon's overhead clearance probe against real colliders: a pier deck between the
+/// water and the hull top blocks the spot, also when the deck is thick enough to contain the
+/// point the downward ray starts from (a ray does not hit the solid it starts in).
+#[tokio::test]
+async fn summon_overhead_clearance_sees_a_deck_that_contains_the_ray_start() {
+    use crate::systems::vehicles::slaves::overhead_clear_at;
+
+    // The plane at 90 stands in for the sea floor; the probe gets its water level passed in.
+    let s = server(90.0);
+    let (water, hull_top) = (100.0, 5.0);
+    let pw = super::phys_world(&s, 0).unwrap();
+    super::load_cell(&s, &pw, (0, 0));
+    let files = super::files(&s).unwrap();
+    let models = super::model_cache(&s, &files);
+    let mut shapes = HashMap::new();
+    let deck = |obj_id: u32, x: f32, z: f32, scale: f32| DoodadInfo {
+        obj_id,
+        model: "cgf://objects/test/box.cgf".into(),
+        pos: Vec3::new(x, 500.0, z),
+        q: Quat::IDENTITY,
+        scale,
+        flags: collision_flags(false, false, false),
+    };
+    // At x 500 a 6 m deck spans z 102..108 around the downward ray's start (100 + 5 + 1 = 106);
+    // at x 600 a 2 m deck spans z 102..104, below the start; x 700 is open water.
+    apply_doodads(
+        &pw,
+        &files,
+        &models,
+        &mut shapes,
+        &[deck(51, 500.0, 105.0, 3.0), deck(52, 600.0, 103.0, 1.0)],
+    );
+    assert!(!overhead_clear_at(&s, 0, 500.0, 500.0, water, hull_top));
+    assert!(!overhead_clear_at(&s, 0, 600.0, 500.0, water, hull_top));
+    assert!(overhead_clear_at(&s, 0, 700.0, 500.0, water, hull_top));
+}
+
 /// Equipment attached to a slave (masts, sails, cannons) is part of the ship, not a world
 /// obstacle: its collider would overlap the hull's own collision box and CryPhysics would
 /// eject the freshly spawned hull (a summoned cutter launched ~55 m up).

@@ -2509,7 +2509,11 @@ Additional world-side fixes from the same audit:
   sides is covered; the forward search still moves the centre along the player's facing.
   Overhead structures are checked separately: a downward ray from above the hull envelope
   (clipped bounds top + 1 m margin) to just above the water surface at every probe point
-  rejects a spot under a pier, bridge or deck as if it were shallow. If no forward candidate
+  rejects a spot under a pier, bridge or deck as if it were shallow. A ray does not hit the
+  solid it starts in, so a second ray runs up the same segment and finds the underside of a
+  deck thick enough to contain the downward ray's start
+  (`collision::flow_tests::summon_overhead_clearance_sees_a_deck_that_contains_the_ray_start`).
+  If no forward candidate
   is acceptable, the spot 5 m in front of the owner is used when it clears the same depth and
   clearance tests (its centre only; no further placement search), placed at the water surface
   there rather than at the owner's z (a pier or deck must not leave the hull in the air).
