@@ -1943,13 +1943,23 @@ pub fn spawn_member(
 /// within 1 m, which left spawns authored 1-5 m off the ground floating (or sunk).
 pub(crate) const SPAWN_GROUND_SNAP: f32 = 5.0;
 
+/// How far under solid terrain a spawn is still lifted onto the surface (m). The ground probe
+/// found no floor below it, so it sits inside the terrain and the client draws it buried.
+/// Deeper ones are left alone: likely real caves under solid terrain whose floor we lack.
+pub(crate) const SPAWN_SINK_SNAP: f32 = 6.0;
+
 /// `npc_spawn_on_terrain` for a walking NPC: the Z to spawn at, or `None` to keep the spawn Z.
 ///
 /// A ground probe that hits geometry (terrain, a building, a cave floor; it starts only 2 m
 /// above the spawn, so a cave roof is never hit) is a real floor: the spawn snaps onto it when
-/// it is less than [`SPAWN_GROUND_SNAP`] above it (or below it, at most the probe's 2 m). Without a
-/// hit (no collision service, a cave with no floor) the C# rule applies: the terrain elevation,
-/// else the heightmap, snapped only within 1 m.
+/// it is less than [`SPAWN_GROUND_SNAP`] above it (or below it, at most the probe's 2 m), except
+/// that a spawn 1 m or more above a floor under the water surface is a swimmer and stays, and a
+/// floor at the heightmap's height ceiling is not a floor (the data saturates there).
+///
+/// Without a hit the probe found no floor under the spawn. Over a terrain hole the spawn stays.
+/// Under solid terrain less than [`SPAWN_SINK_SNAP`] deep it is lifted onto the terrain. Otherwise
+/// (and without the collision service) the C# rule applies: the terrain elevation, else the
+/// heightmap, snapped only within 1 m.
 pub(crate) fn spawn_ground_z(
     server: &GameServer,
     world: &WorldInstance,
@@ -1958,6 +1968,9 @@ pub(crate) fn spawn_ground_z(
     z: f32,
 ) -> Option<f32> {
     use crate::systems::ai::collision as col;
+    // The heightmap stores `height * coefficient` in a u16, so heights saturate at
+    // `max_height / 4` (1024 m in main_world): a terrain "floor" there is only a lower bound.
+    let saturated = |h: f32| h >= world.template.max_height / 4.0 - 0.05;
     if let Some(Some(floor)) = col::ground_height_probe(
         server,
         world.id,
@@ -1967,7 +1980,23 @@ pub(crate) fn spawn_ground_z(
         col::GROUND_PROBE_UP,
         col::GROUND_PROBE_DOWN,
     ) {
+        if saturated(floor) {
+            return None;
+        }
+        if z - floor >= 1.0
+            && col::water_level(server, world.id, x, y, z).is_some_and(|level| floor + 0.1 < level)
+        {
+            return None;
+        }
         return (z - floor < SPAWN_GROUND_SNAP).then_some(floor);
+    }
+    if let Some(terrain) = col::terrain_height(server, world.id, x, y) {
+        if saturated(terrain) || col::terrain_is_hole(server, world.id, x, y) == Some(true) {
+            return None;
+        }
+        if terrain - z > 0.0 && terrain - z < SPAWN_SINK_SNAP {
+            return Some(terrain);
+        }
     }
     let ground = col::terrain_height_or(server, world.id, x, y, || {
         geo_data_height(server, world, x, y)

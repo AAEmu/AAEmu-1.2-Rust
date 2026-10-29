@@ -630,7 +630,12 @@ the x2game / cry3dengine decompiles (addresses below). Config `Physics` (`Config
   `SPAWN_GROUND_SNAP` (5 m) above it (or sunk up to the probe's 2 m); spawns authored 1-5 m
   above the ground (about 5 % of main_world) no longer float. Larger gaps (structures, sea-surface
   swimmers, instance data) and probe misses (caves with no floor, no collision service) keep the
-  C# 1 m rule. Flying and `underwater_creature` NPCs are not snapped.
+  C# 1 m rule, with three additions: a spawn 1 m or more above a floor under the water surface
+  (a surface swimmer) stays; a probe miss under solid, non-hole terrain less than
+  `SPAWN_SINK_SNAP` (6 m) deep is lifted onto the terrain (the client drew it buried), and
+  anything under a hole stays; a floor at the heightmap ceiling (`max_height / 4` = 1024 m in
+  main_world, the u16 height storage saturates) is not trusted. Flying and `underwater_creature`
+  NPCs are not snapped.
 * **Terrain holes:** the 1.2 `heightmap.dat` marks cave / basement entrances with surface id 31
   (`raw & 0x1F` of a node-v5 sample; `cry3dengine` `IsHole` 0x300CAB30: the containing sector's
   lower sample, a node with fewer than 33 samples is read at `floor(i * (size - 1) / 32)`, shared
