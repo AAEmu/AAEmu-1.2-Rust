@@ -152,21 +152,27 @@ impl ItemClass {
     }
 }
 
+/// Detail body lengths after the type byte, indexed by `ItemDetailType`: exactly the switch
+/// cases of the 1.2 client's item detail reader `3961edf0`. There is no case 10
+/// (`SlaveEquipment`, later clients only) and no case 11 (`Location`): both read no body.
+const DETAIL_BODY_LENS: [usize; 10] = [0, 55, 29, 6, 9, 24, 16, 16, 8, 4];
+
 /// Detail body length of a raw `ItemDetailType` byte (the bytes after the type byte), as read
 /// by the 1.2 client's item detail reader `3961edf0` (the C# `ReadDetails` tables minus one).
-/// There is no case 10 (`SlaveEquipment`, later clients only): it reads no body either.
 pub fn detail_body_len(detail_type: u8) -> usize {
-    match detail_type {
-        detail_type::EQUIPMENT => 55,
-        detail_type::SLAVE => 29,
-        detail_type::MATE => 6,
-        detail_type::UCC => 9,
-        detail_type::TREASURE | detail_type::LOCATION => 24,
-        detail_type::BIG_FISH | detail_type::DECORATION => 16,
-        detail_type::MUSIC_SHEET => 8,
-        detail_type::GLIDER => 4,
-        _ => 0,
-    }
+    DETAIL_BODY_LENS
+        .get(usize::from(detail_type))
+        .copied()
+        .unwrap_or(0)
+}
+
+/// `true` for the types the 1.2 client's detail reader knows (`Invalid` plus cases 1..=9).
+/// Types 10 and 11 must never be written; the client would not consume their body.
+pub fn is_supported_detail_type(detail_type: u8) -> bool {
+    detail_type == detail_type::INVALID
+        || DETAIL_BODY_LENS
+            .get(usize::from(detail_type))
+            .is_some_and(|len| *len > 0)
 }
 
 /// Class-specific detail fields (what each subclass' `ReadDetails` keeps).
@@ -487,10 +493,21 @@ impl Item {
         self.dirty = true;
     }
 
+    /// The `DetailType` byte `Item.Write` / the item task write. Every write path goes through
+    /// this guard: a type the 1.2 client cannot read (10, 11, ...) would desync the item.
+    pub fn wire_detail_type(&self) -> u8 {
+        let detail_type = self.class.detail_type();
+        debug_assert!(
+            is_supported_detail_type(detail_type),
+            "item detail type {detail_type} has no 1.2 client reader case"
+        );
+        detail_type
+    }
+
     /// `DetailType` + `WriteDetails` (the 128-byte detail block of item task packets, unpadded).
     pub fn detail_type_and_details(&self) -> Vec<u8> {
         let mut s = PacketStream::new();
-        s.write_u8(self.class.detail_type());
+        s.write_u8(self.wire_detail_type());
         self.write_details(&mut s);
         s.into_bytes()
     }
@@ -1052,7 +1069,7 @@ impl Marshal for Item {
             .write_u8(self.grade)
             .write_u8(self.flags)
             .write_i32(self.count)
-            .write_u8(self.class.detail_type());
+            .write_u8(self.wire_detail_type());
         self.write_details(s);
         s.write_i64(self.create_time)
             .write_i32(self.lifespan_mins)
@@ -1174,6 +1191,26 @@ mod tests {
             .write_i64(0)
             .write_i64(0);
         assert_eq!(s.as_bytes(), want.as_bytes());
+    }
+
+    #[test]
+    fn detail_body_lengths_match_the_1_2_client_reader() {
+        // `FUN_3961edf0`: cases 1..9 read these bodies after the type byte.
+        for (detail, len) in [0usize, 55, 29, 6, 9, 24, 16, 16, 8, 4]
+            .into_iter()
+            .enumerate()
+        {
+            let detail = detail as u8;
+            assert_eq!(detail_body_len(detail), len);
+            assert!(is_supported_detail_type(detail), "type {detail}");
+        }
+        // No case 10 (`SlaveEquipment`) and no case 11 (`Location`): both read no body, so
+        // they are never written as a non-zero body length.
+        for detail in [10u8, 11, 12, 255] {
+            assert_eq!(detail_body_len(detail), 0, "type {detail}");
+            assert!(!is_supported_detail_type(detail), "type {detail}");
+        }
+        assert_eq!(detail_body_len(detail_type::LOCATION), detail_body_len(10));
     }
 
     #[test]
