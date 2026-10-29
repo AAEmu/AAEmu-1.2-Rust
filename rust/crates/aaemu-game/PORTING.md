@@ -1318,6 +1318,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   Two Crowns specialty bench, doodad 4235 at 13824.67 10604.76 120.54, whose ray always hit map
   brush cell (13, 10)) must not refuse the interaction. This supersedes the earlier skip of
   the owning house's collider for its fixtures.
+  **Ray height** (2026-10-29): the ray is raised 1 m above both ends again
+  (`OBSTACLE_RAY_HEIGHT` in `validation.rs`, applied after the radius gate and the radius
+  shortening), superseding the "unit position height" (feet level) of 2026-10-27. On the shared
+  test server the feet-level ray refused 65 ordinary casts that the 1.2 client had allowed and
+  sent, every one a hit on plain terrain on a gentle slope (skill 11918, `check_terrain`, hit
+  normals within 0.17 of straight up). The height the 1.2 client really uses is not verified; 1 m
+  is the former Rust/C# value. NPC casters use the same rule.
 * systems::skills: the labor margin requirement uses `GetMaxLabor(Payment.PremiumState)`; every
   connection has the default C# `AccountPayment` (premium until 2030), so the cap is 5000.
 * systems::skills (in-place resurrection, 2026-10-20): `CSResurrectCharacterPacket(in_place =
