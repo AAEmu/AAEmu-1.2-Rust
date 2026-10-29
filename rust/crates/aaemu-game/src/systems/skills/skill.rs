@@ -162,6 +162,9 @@ const GCD_GRACE_MS: i64 = 150;
 
 /// Sets the caster's global cooldown from the skill template (`default_gcd` / `custom_gcd`
 /// scaled by the caster's `GlobalCooldownMul`). Skipped when the skill bypasses the GCD.
+///
+/// `cast` starts it, except for a player's timed cast, which `use_skill` starts at acceptance
+/// because the 1.2 client counts the GCD from the cast start (also when the cast is cancelled).
 fn start_global_cooldown(server: &GameServer, skill: &SkillRef, caster: &WorldObject, now: i64) {
     if skill.state().bypass_gcd {
         return;
@@ -637,6 +640,7 @@ pub fn use_skill(
         state.generation = state.generation.wrapping_add(1);
         state.cancelled = false;
         state.music_started_pending = false;
+        state.gcd_started = false;
         state.hit_types.clear();
     }
     caster.with_unit(|u| u.unit_mut().skill_state.condition_chance = true);
@@ -735,6 +739,13 @@ pub fn use_skill(
     let ctm = skill.state().cast_time_multiplier;
     cast_time = (f64::from(cast_time) * f64::from(ctm)).round_ties_even() as i32;
     if cast_time > 0 {
+        // The 1.2 client measures a player's global cooldown from the cast start, so start it
+        // now; `cast` would only start it at the cast end, refusing a skill the client already
+        // shows as ready. NPC casts keep the cast-end start (their AI pacing relies on it).
+        if caster.as_npc().is_none() {
+            start_global_cooldown(server, skill, caster, now);
+            skill.state().gcd_started = true;
+        }
         let mut p = SCSkillStartedPacket::new(
             skill.id,
             tl,
@@ -998,7 +1009,10 @@ pub fn cast(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         }
     }
     let now = now_ms();
-    start_global_cooldown(server, skill, caster, now);
+    // A player's timed cast started the global cooldown at acceptance (see `use_skill`).
+    if !std::mem::take(&mut skill.state().gcd_started) {
+        start_global_cooldown(server, skill, caster, now);
+    }
     caster.with_unit(|u| u.unit_mut().skill_state.skill_task = None);
     consume_mana(server, skill, caster);
     start_skill_cooldown(server, skill, caster, now);

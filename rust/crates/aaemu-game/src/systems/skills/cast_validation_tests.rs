@@ -1561,3 +1561,144 @@ async fn plot_only_skill_without_own_cooldown_is_still_gated_by_the_gcd() {
         skill_result::SUCCESS
     );
 }
+
+/// Waits for a timed cast to end: `cast` frees the caster's task slot after the cooldowns.
+async fn wait_for_cast_end(caster: &WorldObject) {
+    let task_free = || {
+        caster
+            .with_unit(|u| u.unit().skill_state.skill_task.is_none())
+            .unwrap_or(true)
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while !task_free() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(task_free(), "the timed cast did not end");
+}
+
+#[tokio::test]
+async fn player_timed_cast_starts_its_gcd_at_acceptance_not_at_cast_end() {
+    // Insulating Lens (10153) shape: a timed cast whose GCD outlasts most of the cast. The 1.2
+    // client counts the GCD from the cast start, so a skill pressed right after the cast bar
+    // ends must not be refused for the GCD time that the cast itself already used up.
+    let (server, _client, player, npc) = fixture(GameData::empty());
+    let timed = SkillRun::new(
+        Arc::new(SkillTemplate {
+            casting_time: 400,
+            custom_gcd: 3000,
+            ..super::tests::skill_template(10153)
+        }),
+        1,
+    );
+    let follow_up = SkillRun::new(
+        Arc::new(SkillTemplate {
+            custom_gcd: 700,
+            ..super::tests::skill_template(12049)
+        }),
+        1,
+    );
+    let before = crate::world::now_ms();
+    assert_eq!(
+        cast(&server, &timed, &player, &npc).0,
+        skill_result::SUCCESS
+    );
+    let after = crate::world::now_ms();
+    let gcd = player.data().unit.global_cooldown_ms;
+    assert!(
+        (before + 3000..=after + 3000).contains(&gcd),
+        "GCD set when the cast was accepted, not {gcd} (accepted at {before}..{after})"
+    );
+    wait_for_cast_end(&WorldObject::from(&player)).await;
+    assert!(!timed.cancelled());
+    assert_eq!(
+        player.data().unit.global_cooldown_ms,
+        gcd,
+        "the cast end does not restart the GCD"
+    );
+    // The cast used 400 ms of the 3000 ms GCD (more on a slow machine): up to 2600 ms are left,
+    // still refused ...
+    assert_eq!(
+        cast(&server, &follow_up, &player, &npc),
+        (skill_result::COOLDOWN_TIME, 0)
+    );
+    // ... but with 2500 ms more elapsed at most 100 ms (within the network grace) are left. The
+    // old cast-end GCD would still have 500 ms to go here.
+    age_gcd(&player, 2500);
+    assert_eq!(
+        cast(&server, &follow_up, &player, &npc).0,
+        skill_result::SUCCESS
+    );
+}
+
+#[tokio::test]
+async fn player_skill_right_after_a_cast_longer_than_its_gcd_is_accepted() {
+    let (server, _client, player, npc) = fixture(GameData::empty());
+    let timed = SkillRun::new(
+        Arc::new(SkillTemplate {
+            casting_time: 300,
+            custom_gcd: 200,
+            ..super::tests::skill_template(10153)
+        }),
+        1,
+    );
+    let follow_up = SkillRun::new(
+        Arc::new(SkillTemplate {
+            custom_gcd: 700,
+            ..super::tests::skill_template(12049)
+        }),
+        1,
+    );
+    assert_eq!(
+        cast(&server, &timed, &player, &npc).0,
+        skill_result::SUCCESS
+    );
+    let gcd = player.data().unit.global_cooldown_ms;
+    assert!(gcd > 0);
+    wait_for_cast_end(&WorldObject::from(&player)).await;
+    assert_eq!(player.data().unit.global_cooldown_ms, gcd);
+    assert_eq!(
+        cast(&server, &follow_up, &player, &npc).0,
+        skill_result::SUCCESS
+    );
+}
+
+#[tokio::test]
+async fn npc_timed_cast_still_starts_its_gcd_at_cast_end() {
+    let (server, _client, _player, npc) = fixture(GameData::empty());
+    let timed = SkillRun::new(
+        Arc::new(SkillTemplate {
+            casting_time: 100,
+            custom_gcd: 1000,
+            target_type: super::types::SkillTargetType::SelfTarget as i32,
+            ..super::tests::skill_template(10153)
+        }),
+        1,
+    );
+    let caster = WorldObject::from(&npc);
+    let started = crate::world::now_ms();
+    assert_eq!(
+        use_skill(
+            &server,
+            &timed,
+            &caster,
+            SkillCaster::Unit(npc.obj_id),
+            &mut SkillCastTarget::Unit(npc.obj_id),
+            Some(SkillObject::None),
+            false,
+        )
+        .0,
+        skill_result::SUCCESS
+    );
+    assert_eq!(
+        npc.data().unit.global_cooldown_ms,
+        0,
+        "no GCD while the NPC casts"
+    );
+    wait_for_cast_end(&caster).await;
+    assert!(!timed.cancelled());
+    let gcd = npc.data().unit.global_cooldown_ms;
+    assert!(
+        gcd >= started + 100 + 1000,
+        "NPC GCD starts at the cast end, not {gcd} (cast started at {started})"
+    );
+}
