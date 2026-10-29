@@ -373,7 +373,7 @@ pub fn write_task_item_details(s: &mut PacketStream, item: &Item) {
 /// `(short)128` + `DetailType` + `WriteDetails` + zero padding up to 128 bytes.
 fn write_padded_details(s: &mut PacketStream, item: &Item) {
     let mut details = PacketStream::new();
-    details.write_u8(item.class.detail_type());
+    details.write_u8(item.wire_detail_type());
     item.write_details_to(&mut details);
     s.write_i16(128).write_raw(details.as_bytes());
     // C#: `new byte[128 - details.Count]` (throws when the details exceed 128 bytes; no 1.2
