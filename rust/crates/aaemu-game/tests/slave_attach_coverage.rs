@@ -110,6 +110,29 @@ fn native_attach_literal_transforms_preserve_units_axes_and_parent_space() {
 }
 
 #[test]
+fn farm_wagon_crate_points_match_the_vehicle_tractor_prefab() {
+    let points = shipped();
+    // `game/prefabs/vehicle_tractor.xml`, prefab `vehicle_tractor.tractor_body`: the
+    // `cannonN` Comment markers are in metres. `model_attach_point_strings` maps attach
+    // point 9..12 to `$cannon0..3`, so the wagon's trade-pack crates sit on the same
+    // markers as the prefab (the old values were hand-rounded ~0.08 m inboard).
+    for (point, expected) in [
+        (9u8, [-0.629_516_6, -1.942_382_8, 1.141_372_7]),
+        (10, [-0.627_685_55, -3.170_410_2, 1.141_372_7]),
+        (11, [0.632_934_6, -3.174_682_6, 1.141_372_7]),
+        (12, [0.633_850_1, -1.942_016_6, 1.141_418_5]),
+    ] {
+        let actual = points[&(1008, point)];
+        for (got, want) in [actual.x, actual.y, actual.z].into_iter().zip(expected) {
+            assert!(
+                (got - want).abs() < 0.000_01,
+                "(1008, {point}): {got} != {want}"
+            );
+        }
+    }
+}
+
+#[test]
 #[ignore = "needs AAEMU_COMPACT_DB"]
 fn real_compact_attach_bindings_and_equipment_have_only_documented_content_gaps() {
     let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {

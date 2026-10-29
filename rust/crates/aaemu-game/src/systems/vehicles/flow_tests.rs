@@ -4097,6 +4097,105 @@ async fn slave_equipment_cannon_visuals_and_pack_validation() {
     assert!(other.data().equipment[3].is_none());
 }
 
+const FARM_WAGON: u32 = 69;
+const WAGON_CRATE: u32 = 9001;
+
+/// The shipped Farm Wagon (model 1008) attach points and four trade-pack crate bindings.
+fn farm_wagon_data() -> GameData {
+    use super::data::SlaveDoodadBinding;
+    use crate::systems::npcs::doodad::templates::DoodadTemplate;
+    let mut d = slave_data();
+    d.systems.npcs.doodad.templates.insert(
+        WAGON_CRATE,
+        DoodadTemplate {
+            id: WAGON_CRATE,
+            ..DoodadTemplate::default()
+        },
+    );
+    d.systems.vehicles.slave_templates.insert(
+        FARM_WAGON,
+        SlaveTemplate {
+            id: FARM_WAGON,
+            name: "Farm Wagon".into(),
+            model_id: 1008,
+            level: 1,
+            slave_kind: super::data::slave_kind::MACHINE,
+            doodad_bindings: [9u8, 10, 11, 12]
+                .into_iter()
+                .enumerate()
+                .map(|(i, attach_point_id)| SlaveDoodadBinding {
+                    id: i as u32 + 1,
+                    owner_id: FARM_WAGON,
+                    owner_type: "Slave".into(),
+                    attach_point_id,
+                    doodad_id: WAGON_CRATE,
+                    persist: false,
+                    scale: 1.0,
+                })
+                .collect(),
+            ..SlaveTemplate::default()
+        },
+    );
+    let wagon = super::data::parse_attach_points(include_str!(
+        "../../../app/Data/slave_attach_points.json"
+    ))
+    .expect("shipped attach points")
+    .into_iter()
+    .find(|(model, _)| *model == 1008)
+    .expect("Farm Wagon (model 1008)");
+    d.systems.vehicles.attach_points.insert(wagon.0, wagon.1);
+    d
+}
+
+#[tokio::test]
+async fn farm_wagon_crate_doodads_bind_at_the_prefab_cannon_offsets() {
+    let server = server_with(farm_wagon_data());
+    crate::systems::npcs::install_hooks(&server);
+    let a = TestClient::new(&server, 1, 1);
+    let pa = spawn_player(&server, &a, test_character(1, "Wagon", 100.0, 100.0), PA);
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    let wagon = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        FARM_WAGON,
+        None,
+        false,
+        None,
+        None,
+    )
+    .expect("wagon");
+    let crates = wagon.data().attached_doodads.clone();
+    assert_eq!(crates.len(), 4, "one crate per cannon marker");
+    // game/prefabs/vehicle_tractor.xml, vehicle_tractor.tractor_body, metres.
+    for (point, expected) in [
+        (9u8, [-0.629_516_6, -1.942_382_8, 1.141_372_7]),
+        (10, [-0.627_685_55, -3.170_410_2, 1.141_372_7]),
+        (11, [0.632_934_6, -3.174_682_6, 1.141_372_7]),
+        (12, [0.633_850_1, -1.942_016_6, 1.141_418_5]),
+    ] {
+        let crate_ = crates
+            .iter()
+            .filter_map(|id| world.doodad(*id))
+            .find(|d| d.data().attach_point == point)
+            .unwrap_or_else(|| panic!("no crate at point {point}"));
+        assert_eq!(
+            crate_.data().transform.parent_obj_id,
+            wagon.obj_id,
+            "crate {point} follows the wagon"
+        );
+        let t = crate_.data().transform;
+        for (got, want) in [(t.x, expected[0]), (t.y, expected[1]), (t.z, expected[2])] {
+            assert!(
+                (got - want).abs() < 0.000_01,
+                "crate at point {point}: {got} != {want}"
+            );
+        }
+    }
+}
+
 const FIRE_CANNON: u32 = 10473;
 const GUNNER_STATE_SKILL: u32 = 14372;
 const CANNON_MOUNT_SKILL: u32 = 16;
