@@ -385,7 +385,14 @@ pub fn add_ship(server: &Arc<GameServer>, instance_id: u32, spec: ShipSpec) -> b
         ) {
             let models = super::collision::model_cache(server, &files);
             ship.buoys = cry::prefab_buoys(&files, &models, reference);
-            ship.collision_bounds = cry::model_collision_bounds(&files, &models, reference);
+            // Keep the authored hull's length/beam, but clip its z-range to the hull envelope:
+            // the proxy union includes masts/rigging, and as one solid box it put the entity
+            // bounding box many metres above the waterline (the engine checks water areas at
+            // that centre; the hull then sank and buoyancy launched it). The mass box alone
+            // would lose the Longliner's authored 14 m half length (e9fabd00).
+            if let Some(bounds) = cry::model_collision_bounds(&files, &models, reference) {
+                ship.collision_bounds = Some(cry::clip_hull_bounds(bounds, &model));
+            }
         }
     }
     // the initial transform sync (rotation becomes yaw-only)

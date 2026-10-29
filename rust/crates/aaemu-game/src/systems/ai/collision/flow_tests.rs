@@ -384,3 +384,54 @@ async fn vanished_deck_uses_world_backup_without_moving_character_transform() {
     assert_eq!(pos, Vec3::new(500.0, 500.0, 302.0));
     assert_eq!(obj.transform(), before);
 }
+
+/// Equipment attached to a slave (masts, sails, cannons) is part of the ship, not a world
+/// obstacle: its collider would overlap the hull's own collision box and CryPhysics would
+/// eject the freshly spawned hull (a summoned cutter launched ~55 m up).
+#[tokio::test]
+async fn slave_equipment_doodads_get_no_ship_collider() {
+    use crate::data::GameData;
+    use crate::models::doodad::{doodad_owner_type, Doodad};
+    use crate::systems::npcs::doodad::templates::DoodadTemplate;
+    use crate::world::Entity;
+
+    let mut data = GameData::empty();
+    data.systems.npcs.doodad.templates.insert(
+        7,
+        DoodadTemplate {
+            id: 7,
+            collide_ship: true,
+            ..Default::default()
+        },
+    );
+    data.systems
+        .ai
+        .collision
+        .func_group_models
+        .insert(3, "cgf://objects/test/box.cgf".into());
+    let s = crate::test_support::test_server_with(data);
+    let world = s.world.world(0).unwrap();
+    let ctx = s.view_ctx();
+    for (obj_id, owner_type) in [
+        (41u32, doodad_owner_type::SYSTEM),
+        (42, doodad_owner_type::SLAVE),
+    ] {
+        let mut d = Doodad::new(obj_id);
+        d.template_id = 7;
+        d.func_group_id = 3;
+        d.owner_type = owner_type;
+        d.transform.set_position(500.0, 500.0, 101.0, 0.0, 0.0, 0.0);
+        world.spawn(Entity::new(obj_id, d), &ctx);
+    }
+    let infos = super::objects::collect_doodads(&s, &world, &[(0, 0)]);
+    assert_eq!(
+        infos.iter().map(|i| i.obj_id).collect::<Vec<_>>(),
+        vec![41],
+        "only the free-standing doodad becomes a collider"
+    );
+    assert_eq!(
+        infos[0].flags.0 & 0x80,
+        0x80,
+        "the free doodad still blocks ships"
+    );
+}

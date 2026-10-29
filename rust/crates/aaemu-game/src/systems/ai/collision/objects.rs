@@ -379,6 +379,12 @@ pub struct DoodadInfo {
     pub flags: (u32, u32),
 }
 
+/// A doodad that is a visual part of a slave (`doodad_owner_type::SLAVE`: masts, sails,
+/// cannons). It must not get a world collider; see [`collect_doodads`].
+fn is_slave_equipment(owner_type: u8) -> bool {
+    owner_type == crate::models::doodad::doodad_owner_type::SLAVE
+}
+
 /// The doodads of the loaded cells of a world with their collider inputs.
 pub fn collect_doodads(
     server: &GameServer,
@@ -393,10 +399,18 @@ pub fn collect_doodads(
             let Some(d) = o.as_doodad() else {
                 continue;
             };
-            let (template_id, func_group, scale) = {
+            let (template_id, func_group, scale, owner_type) = {
                 let dd = d.data();
-                (dd.template_id, dd.func_group_id, dd.scale)
+                (dd.template_id, dd.func_group_id, dd.scale, dd.owner_type)
             };
+            // Equipment attached to a slave (masts, sails, cannons) moves with its ship and
+            // must not become a world collider: the hull's collision box encloses the deck, so
+            // an equipment collider overlaps the hull and CryPhysics ejects the freshly spawned
+            // hull (a summoned cutter launched ~55 m up). Other objects never collide with a
+            // ship's own gear anyway.
+            if is_slave_equipment(owner_type) {
+                continue;
+            }
             let Some(model) = models.func_group_model(func_group) else {
                 continue;
             };
@@ -849,6 +863,17 @@ mod tests {
         assert_eq!(b[0].2.w, "0.70710671".parse::<f32>().unwrap());
         assert_eq!(b[0].3, 2.0);
         assert!(prefab_brushes(xml, "missing").is_empty());
+    }
+
+    #[test]
+    fn slave_equipment_doodads_are_not_world_colliders() {
+        use crate::models::doodad::doodad_owner_type;
+        // Masts, sails and cannons attached to a ship (the Cutter's gear is placed on its
+        // deck, inside the hull's collision box) must not become ship obstacles.
+        assert!(is_slave_equipment(doodad_owner_type::SLAVE));
+        assert!(!is_slave_equipment(doodad_owner_type::SYSTEM));
+        assert!(!is_slave_equipment(doodad_owner_type::HOUSING));
+        assert!(!is_slave_equipment(doodad_owner_type::CHARACTER));
     }
 
     #[test]
