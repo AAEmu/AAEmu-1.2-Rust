@@ -15,6 +15,18 @@ use aaemu_commons::{Marshal, MarshalError, PacketStream};
 
 type Result<T> = std::result::Result<T, MarshalError>;
 
+/// Vehicle / ship / transfer velocity shorts: `m/s = wire * 30 / 32767`.
+///
+/// The 1.2 client's type 2/3/5 movement readers decode `vel.x/y/z` as
+/// `(float)(short)vel * _DAT_399abe78 * _DAT_3999f7c0`, where `_DAT_399abe78` is `1/32767`
+/// and `_DAT_3999f7c0` is `30.0` in the unpacked 1.2 `x2game.dll`. A live capture of
+/// the original client measured the same scale on its own `CSMoveUnit` type 2 bodies (2026-10-29
+/// s67 item 6: 1/1092 gives a 0.994 mean ratio, 1/2048 gives 1.864; n=640).
+pub const VELOCITY_MPS_PER_SHORT: f32 = 30.0 / 32767.0;
+
+/// Wire units per m/s for vehicle / ship / transfer velocities (`32767 / 30`, ~1092.2).
+pub const VELOCITY_SHORTS_PER_MPS: f32 = 32767.0 / 30.0;
+
 // ---- enums / flags ------------------------------------------------------------------------------
 
 /// C# `MoveTypeEnum`. The wire value is a raw byte; see [`MoveType::type_raw`] for values outside
@@ -623,7 +635,8 @@ pub struct TransferMove {
     /// Base `WorldPos`, recomputed from `x`/`y`/`z` on read (the C# constructor sets it from
     /// the zero position). Not on the wire.
     pub world_pos: WorldPos,
-    /// Base `Velocity`: read as `ReadVector3Short() * 50`, written as `WriteVector3Short(v * 0.02)`.
+    /// Base `Velocity`: read as three shorts scaled by [`VELOCITY_MPS_PER_SHORT`], written back
+    /// with the inverse scale.
     pub velocity: [f32; 3],
     /// Base `Rot` (x, y, z, w): quaternion written without the scalar.
     pub rot: [f32; 4],
@@ -667,8 +680,11 @@ impl TransferMove {
     fn read(&mut self, s: &mut PacketStream) -> Result<()> {
         (self.x, self.y, self.z) = s.read_position()?;
         self.world_pos = WorldPos::from_xyz(self.x, self.y, self.z);
-        let v = s.read_vector3_short()?;
-        self.velocity = [v[0] * 50.0, v[1] * 50.0, v[2] * 50.0];
+        self.velocity = [
+            f32::from(s.read_i16()?) * VELOCITY_MPS_PER_SHORT,
+            f32::from(s.read_i16()?) * VELOCITY_MPS_PER_SHORT,
+            f32::from(s.read_i16()?) * VELOCITY_MPS_PER_SHORT,
+        ];
         self.rot = s.read_quaternion_short()?;
         self.ang_vel = s.read_vector3_f32()?;
         self.steering = s.read_i32()?;
@@ -681,7 +697,9 @@ impl TransferMove {
     fn write(&self, s: &mut PacketStream) {
         let v = self.velocity;
         s.write_position(self.x, self.y, self.z)
-            .write_vector3_short([v[0] * 0.02, v[1] * 0.02, v[2] * 0.02])
+            // `write_vector3_short` multiplies by 32767, so `v / 30` becomes
+            // `round(m/s * 32767 / 30)` (the inverse of [`VELOCITY_MPS_PER_SHORT`]).
+            .write_vector3_short([v[0] / 30.0, v[1] / 30.0, v[2] / 30.0])
             .write_quaternion_short(self.rot, false)
             .write_vector3_f32(self.ang_vel)
             .write_i32(self.steering)
@@ -1063,10 +1081,7 @@ mod tests {
         };
         assert_eq!(t.world_pos, WorldPos::from_xyz(t.x, t.y, t.z));
         assert_eq!(t.world_pos.x, (17_123.25f32 * 4096.0) as i64 * (1i64 << 32));
-        assert_eq!(
-            t.velocity[0],
-            1000.0 * aaemu_commons::packet_stream::SHORT_SCALE * 50.0
-        );
+        assert_eq!(t.velocity[0], 1000.0 * VELOCITY_MPS_PER_SHORT);
         assert!(t.rot[3] > 0.0);
         assert_eq!(t.ang_vel, [0.25, -0.5, 8.0]);
         assert_eq!(
@@ -1077,7 +1092,7 @@ mod tests {
 
     #[test]
     fn transfer_velocity_short_roundtrip_all() {
-        // Velocity goes short -> *SCALE*50 -> *0.02*32767 -> short; must be stable for all shorts.
+        // Velocity goes short -> *1/32767*30 -> /30*32767 -> short; must be stable for all shorts.
         for v in i16::MIN..=i16::MAX {
             let mut data = bytes(&[&header(0, 0), &pos_b()]);
             data.extend_from_slice(&v.to_le_bytes());
@@ -1087,6 +1102,21 @@ mod tests {
             data.extend_from_slice(&[0; 12 + 4 + 4 + 4 + 1]);
             roundtrip(5, &data);
         }
+    }
+
+    #[test]
+    fn transfer_velocity_uses_the_30_over_32767_scale() {
+        // 1092 is the captured 1.2 client scale for 1 m/s (32767/30).
+        let mut data = bytes(&[&header(0, 0), &pos_b()]);
+        data.extend_from_slice(&1092i16.to_le_bytes());
+        data.extend_from_slice(&0i16.to_le_bytes());
+        data.extend_from_slice(&0i16.to_le_bytes());
+        data.extend_from_slice(&[0; 6 + 12 + 4 + 4 + 4 + 1]);
+        let m = roundtrip(5, &data);
+        let MoveKind::Transfer(t) = m.kind else {
+            panic!()
+        };
+        assert!((t.velocity[0] - 1.0).abs() < 5e-4, "{}", t.velocity[0]);
     }
 
     #[test]

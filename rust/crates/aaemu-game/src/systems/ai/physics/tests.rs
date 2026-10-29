@@ -180,8 +180,13 @@ fn a_driven_ship_floats_sails_and_broadcasts_its_movement() {
     let crate::models::movement::MoveKind::Ship(sm) = m.move_type.kind else {
         panic!("ship move expected")
     };
-    // hull velocity = Speed * MoveSpeedMul / 4 along the bow (C#), * 2048 on the wire
-    assert!(sm.vel_y > 2900, "replicated velocity {}", sm.vel_y);
+    // Wire velocity uses the client's vehicle / ship scale (wire * 30 / 32767 = m/s).
+    let wire_speed = f32::from(sm.vel_y) * crate::models::movement::VELOCITY_MPS_PER_SHORT;
+    assert!(
+        (wire_speed - snap.velocity.y).abs() < 0.25,
+        "replicated velocity {wire_speed} vs hull {}",
+        snap.velocity.y
+    );
     assert_eq!(m.move_type.time, now as u32); // spawn time 0
                                               // the driver leaves: helm reset, the hull coasts down
     wp.enqueue(Pending::Driver {

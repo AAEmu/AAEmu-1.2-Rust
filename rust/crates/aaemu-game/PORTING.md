@@ -2011,6 +2011,14 @@ servers (see `rust/LIVE-TESTING.md`). Fixed porting bugs are in the git history 
 * Positions are saved with full `f32` precision. The C# (MySql.Data float parameters) stores
   them with ~6 significant digits (`15578.041` -> `15578.0`), so a re-login spawns a few cm away
   from where the C# would put it.
+* Vehicle / ship / transfer velocity shorts use the client's scale: `m/s = wire * 30 / 32767`
+  (1.2 `x2game.dll` type 2/3/5 movement readers; `_DAT_399abe78` = 1/32767,
+  `_DAT_3999f7c0` = 30.0), so 1 m/s is `32767/30` (~1092.2) wire units. The C# wrote ship
+  `VelX/Y/Z` with `const int velMultiplier = 2048` (`PhysicsManager.SendUpdatedMovementData`)
+  and `TransferData` read/wrote its velocity with a 50 factor (wire *655.3). The Rust ship
+  encoder and `TransferMove` now use the 30/32767 scale; positions and rotations are unchanged.
+  A live capture of the original client on 2026-10-29 measured 1/1092 on its own `CSMoveUnit`
+  type 2 bodies (ratio 0.994 at 1/1092 vs 1.864 at 1/2048, n=640).
 * `X2EnterWorldResponsePacket.token` (= game session id) is a counter (see above), so stream
   `CTJoin` tokens are small integers rather than `RemoteEndPoint.GetHashCode()` values.
 * A character created in this session keeps its in-memory state until it is selected (as C#

@@ -2,7 +2,9 @@
 //! the replication smoothing and the `ShipMoveType` broadcast with `SCOneUnitMovementPacket`,
 //! plus the transform written back to the slave.
 
-use crate::models::movement::{MoveKind, MoveType, MoveTypeFlags, ShipMove};
+use crate::models::movement::{
+    MoveKind, MoveType, MoveTypeFlags, ShipMove, VELOCITY_SHORTS_PER_MPS,
+};
 use crate::systems::ai::data::ShipModel;
 use crate::systems::ai::numerics::{deg_to_rad, Quat};
 
@@ -188,15 +190,18 @@ pub fn send_updated_movement_data(
         float_to_short(visual_q.z / QUATERNION_UNIT),
     );
 
-    const VEL_MULTIPLIER: f32 = 2048.0;
+    // The client decodes vehicle / ship velocity shorts as `wire * 30 / 32767` (1.2
+    // `x2game.dll` type 2/3 readers: `_DAT_399abe78` = 1/32767, `_DAT_3999f7c0` = 30.0; a live
+    // capture of the original client on 2026-10-29 measured 1/1092, not 1/2048, on its own
+    // CSMoveUnit type 2 bodies). The C# PhysicsManager.SendUpdatedMovementData wrote `* 2048`.
     let av = ship.body.angular_velocity;
     let sm = ShipMove {
         x: rep.pos_x,
         y: rep.pos_y,
         z: rep.pos_z,
-        vel_x: float_to_short(rep.vel_px * VEL_MULTIPLIER),
-        vel_y: float_to_short(rep.vel_py * VEL_MULTIPLIER),
-        vel_z: float_to_short(rep.vel_pz * VEL_MULTIPLIER),
+        vel_x: float_to_short(rep.vel_px * VELOCITY_SHORTS_PER_MPS),
+        vel_y: float_to_short(rep.vel_py * VELOCITY_SHORTS_PER_MPS),
+        vel_z: float_to_short(rep.vel_pz * VELOCITY_SHORTS_PER_MPS),
         rotation_x: rot_x,
         rotation_y: rot_y,
         rotation_z: rot_z,
@@ -234,6 +239,7 @@ mod tests {
     use super::super::ship::{PhysShip, ShipGameView};
     use super::super::tests::FakeEnv;
     use super::*;
+    use crate::models::movement::VELOCITY_MPS_PER_SHORT;
 
     #[test]
     fn rotation_shorts_follow_the_csharp_axis_swap() {
@@ -262,13 +268,37 @@ mod tests {
             panic!("ship move expected")
         };
         assert_eq!((m.x, m.y, m.z), (10.0, 20.0, 99.0));
-        assert_eq!(m.vel_y, 4096);
+        assert_eq!(m.vel_y, 2184); // 2 m/s * 32767/30, truncated
         assert_eq!(m.throttle, 30);
         assert_eq!(u.move_type.time, 5000);
         assert!(s.replication.seeded);
         // wave pitch only on water: some rotation is present
         assert!(s.wave_pitch_phase > 0.0);
         assert!((3.0..=14.0).contains(&visual_max_bank_deg(&s.model, 1.0)));
+    }
+
+    #[test]
+    fn ship_velocity_shorts_use_the_client_scale() {
+        let env = FakeEnv::flat(100.0, 50.0);
+        let mut s = PhysShip::new(
+            spec(7, 10.0, 20.0, 99.0, 0.0),
+            model(),
+            ShipGameView::default(),
+        );
+        s.cached_water_surface = 100.0;
+        s.cached_floor_level = 50.0;
+        // The hull moves north at 1 m/s (game +Y is the physical +Z).
+        s.body.velocity = crate::systems::skills::controllers::Vec3::new(0.0, 0.0, 1.0);
+        let u = send_updated_movement_data(&mut s, &env, 0.04, 1000);
+        let MoveKind::Ship(m) = u.move_type.kind else {
+            panic!("ship move expected")
+        };
+        assert_eq!(m.vel_y, 1092, "1 m/s must be round(32767/30)");
+        // The client decode (wire * 30 / 32767) gives 1 m/s back, and re-encoding the
+        // decoded value reproduces the same short.
+        let decoded = f32::from(m.vel_y) * VELOCITY_MPS_PER_SHORT;
+        assert!((decoded - 1.0).abs() < 5e-4, "decoded {decoded}");
+        assert_eq!(float_to_short(decoded * VELOCITY_SHORTS_PER_MPS), m.vel_y);
     }
 
     #[test]
