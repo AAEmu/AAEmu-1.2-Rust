@@ -108,6 +108,12 @@ impl TerrainSource for HeightmapTerrain {
     fn size(&self) -> (i32, i32) {
         self.size
     }
+
+    fn is_hole(&self, ix: i32, iy: i32) -> bool {
+        self.worlds
+            .template(self.template_id)
+            .is_some_and(|t| t.grid_is_hole(self.worlds.files(), ix, iy))
+    }
 }
 
 /// Files for cells / models: the client files, or the test map.
@@ -360,6 +366,14 @@ pub fn terrain_height(server: &GameServer, instance_id: u32, x: f32, y: f32) -> 
     let pw = phys_world(server, instance_id)?;
     let t = pw.terrain.as_ref()?;
     Some(terrain::terrain_elevation(t.as_ref(), x, y))
+}
+
+/// Whether `(x, y)` lies over a terrain hole (a cave / basement entrance without terrain
+/// surface). `None` without the service.
+pub fn terrain_is_hole(server: &GameServer, instance_id: u32, x: f32, y: f32) -> Option<bool> {
+    let pw = phys_world(server, instance_id)?;
+    let t = pw.terrain.as_ref()?;
+    Some(t.is_hole((x / 2.0).floor() as i32, (y / 2.0).floor() as i32))
 }
 
 /// `RayWorldIntersection(from → to, objtypes, flags)`; loads the touched cells first.

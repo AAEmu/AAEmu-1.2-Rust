@@ -36,9 +36,14 @@ const CELL_POINTS: usize = (CELL_HMAP_RESOLUTION * CELL_HMAP_RESOLUTION) as usiz
 
 /// A flat heightmap at `surface` metres for the test zone's cell (0, 0).
 fn heightmaps(surface: f32) -> Arc<HeightmapWorlds> {
+    heightmaps_with_holes(surface, &[])
+}
+
+/// [`heightmaps`] with terrain holes at the given grid points of cell (0, 0).
+fn heightmaps_with_holes(surface: f32, holes: &[(i32, i32)]) -> Arc<HeightmapWorlds> {
     let t = WorldHeightmap::with_size(0, "main_world", 2, 2, COEF);
     let value = (f64::from(surface) * COEF) as u16;
-    assert!(t.insert_cell(0, 0, vec![value; CELL_POINTS]));
+    assert!(t.insert_cell_with_holes(0, 0, vec![value; CELL_POINTS], holes));
     Arc::new(HeightmapWorlds::from_parts(
         Arc::new(ClientFileManager::new()),
         vec![t],
@@ -54,6 +59,18 @@ fn heightmaps(surface: f32) -> Arc<HeightmapWorlds> {
 fn cave_server(surface: f32) -> GameServer {
     let server = test_server_with(GameData::empty());
     server.systems.npcs.heightmaps.install(heightmaps(surface));
+    server
+}
+
+/// A test server whose terrain has a hole at grid point (250, 250): the 2 m square
+/// `[500, 502) x [500, 502)`.
+fn hole_server(surface: f32) -> GameServer {
+    let server = test_server_with(GameData::empty());
+    server
+        .systems
+        .npcs
+        .heightmaps
+        .install(heightmaps_with_holes(surface, &[(250, 250)]));
     server
 }
 
@@ -374,4 +391,46 @@ async fn spawn_without_the_collision_service_keeps_the_1m_rule() {
     let z = spawn_z(&server, 100.5);
     assert!((z - 100.0).abs() < 0.1, "{z}");
     assert_eq!(spawn_z(&server, 102.0), 102.0);
+}
+
+// --- terrain holes ---
+
+fn static_ray_z(server: &GameServer, x: f32, y: f32) -> Option<f32> {
+    use crate::systems::ai::collision::query::{mask, ray_flags};
+    crate::systems::ai::collision::raycast(
+        server,
+        0,
+        [x, y, 110.0],
+        [x, y, 0.0],
+        mask::STATIC_TERRAIN,
+        ray_flags::DEFAULT,
+    )
+    .expect("service on")
+    .map(|h| h.pos.z)
+}
+
+#[tokio::test]
+async fn terrain_hole_lets_rays_through_to_the_box_below() {
+    let server = hole_server(100.0);
+    add_cave_floor(&server, 60.0);
+    // The query helper sees the hole (the box is 2 m wide around (500, 500)).
+    use crate::systems::ai::collision::terrain_is_hole;
+    assert_eq!(terrain_is_hole(&server, 0, 500.5, 500.5), Some(true));
+    assert_eq!(terrain_is_hole(&server, 0, 501.9, 500.0), Some(true));
+    assert_eq!(terrain_is_hole(&server, 0, 499.9, 500.5), Some(false));
+    assert_eq!(terrain_is_hole(&server, 0, 510.0, 500.0), Some(false));
+    // Through the hole the ray misses the terrain and lands on the box top.
+    let z = static_ray_z(&server, 500.5, 500.5).expect("hit");
+    assert!((z - 60.0).abs() < 0.01, "{z}");
+    // Next to the hole the terrain is still there.
+    let z = static_ray_z(&server, 504.5, 500.5).expect("hit");
+    assert!((z - 100.0).abs() < 0.1, "{z}");
+}
+
+#[tokio::test]
+async fn terrain_without_the_hole_stops_the_ray_at_the_surface() {
+    let server = cave_server(100.0);
+    add_cave_floor(&server, 60.0);
+    let z = static_ray_z(&server, 500.5, 500.5).expect("hit");
+    assert!((z - 100.0).abs() < 0.1, "{z}");
 }

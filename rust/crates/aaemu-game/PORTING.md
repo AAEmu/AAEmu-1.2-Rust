@@ -631,6 +631,17 @@ the x2game / cry3dengine decompiles (addresses below). Config `Physics` (`Config
   above the ground (about 5 % of main_world) no longer float. Larger gaps (structures, sea-surface
   swimmers, instance data) and probe misses (caves with no floor, no collision service) keep the
   C# 1 m rule. Flying and `underwater_creature` NPCs are not snapped.
+* **Terrain holes:** the 1.2 `heightmap.dat` marks cave / basement entrances with surface id 31
+  (`raw & 0x1F` of a node-v5 sample; `cry3dengine` `IsHole` 0x300CAB30: the containing sector's
+  lower sample, a node with fewer than 33 samples is read at `floor(i * (size - 1) / 32)`, shared
+  sector edges belong to the positive-side sector). `NodeCell.surface` keeps the ids (taken
+  before `RescaleToInt` drops the fifth bit), `WorldHeightmap` a per-cell hole bitmap
+  (`grid_is_hole`), and the physics heightfield's `getSurfType` returns the default `typemask`
+  bit for a hole, so rays pass through (`TerrainSource::is_hole`, `terrain_is_hole`). The
+  C# ignored the holes (and `GetTerrainElevation` still answers over a hole, as native does).
+  Real data: cells 20,8 / 21,8 / 8,13 have 7 / 3 / 2 leaves with `hasHoles` and SID 31
+  (`real_terrain_holes`). Unchanged and unfixed: the C# height decode `data >> 4` (12 bit) differs
+  from the native `raw & 0xFFE0` (mean 0.05 m, max 0.25 m on the measured cells).
   **Visibility deviation (systems::npcs / world::unit_state, 2026-10-11):** NPC unit-state packets
   preserve the spawn/movement transform instead of the C# serializer's `GetReferenceHeight`
   mutation. That mutation could replace a collision floor with a coarse navmesh plane or reset
