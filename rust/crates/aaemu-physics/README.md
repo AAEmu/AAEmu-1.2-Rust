@@ -115,7 +115,7 @@ VMProtect profiler-timer thunk disabled) from the unpacked client image and the 
 `--t0 CAPTURE` enables the self-check against the client capture. `box_on_ground` and
 `box_float_300kg` are deterministic and **bit-identical to the x64 goldens** under both
 precisions; the traces are in `tests/golden-12/` (see its README). Build/run details and the
-1.2-only limits (no rays/heightfield/trimesh/living/wheeled yet): `oracle/README.md`;
+1.2-only limits (trimesh/CGF and non-global areas/queries are not ported yet): `oracle/README.md`;
 engine findings: `docs/physics/CRYPHYSICS-MAP.md` §9b. `oracle/trace_diff.py` prints the first
 divergence of two traces.
 
