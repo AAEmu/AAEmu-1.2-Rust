@@ -11,6 +11,7 @@
  */
 #include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #define IMAGE_BASE ((HMODULE)0x34FF0000)
 
