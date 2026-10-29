@@ -1939,6 +1939,42 @@ pub fn spawn_member(
     }
 }
 
+/// How far above a collision floor a spawn is still snapped onto it (m). The C# snapped only
+/// within 1 m, which left spawns authored 1-5 m off the ground floating (or sunk).
+pub(crate) const SPAWN_GROUND_SNAP: f32 = 5.0;
+
+/// `npc_spawn_on_terrain` for a walking NPC: the Z to spawn at, or `None` to keep the spawn Z.
+///
+/// A ground probe that hits geometry (terrain, a building, a cave floor; it starts only 2 m
+/// above the spawn, so a cave roof is never hit) is a real floor: the spawn snaps onto it when
+/// it is less than [`SPAWN_GROUND_SNAP`] above it (or below it, at most the probe's 2 m). Without a
+/// hit (no collision service, a cave with no floor) the C# rule applies: the terrain elevation,
+/// else the heightmap, snapped only within 1 m.
+pub(crate) fn spawn_ground_z(
+    server: &GameServer,
+    world: &WorldInstance,
+    x: f32,
+    y: f32,
+    z: f32,
+) -> Option<f32> {
+    use crate::systems::ai::collision as col;
+    if let Some(Some(floor)) = col::ground_height_probe(
+        server,
+        world.id,
+        x,
+        y,
+        z,
+        col::GROUND_PROBE_UP,
+        col::GROUND_PROBE_DOWN,
+    ) {
+        return (z - floor < SPAWN_GROUND_SNAP).then_some(floor);
+    }
+    let ground = col::terrain_height_or(server, world.id, x, y, || {
+        geo_data_height(server, world, x, y)
+    });
+    ((z - ground).abs() < 1.0).then_some(ground)
+}
+
 /// `NpcSpawnerNpc.SpawnNpc`.
 fn spawn_npc(
     server: &GameServer,
@@ -1961,20 +1997,22 @@ fn spawn_npc(
     };
     spawn_manager::forget_object_fields(server, npc.obj_id);
     // npc.RegisterNpcEvents(): `ai::hooks::spawn_positioned` (before GoToSpawn).
-    let can_fly = npc.data().can_fly;
-    if !can_fly {
+    let (can_fly, model_id) = {
+        let d = npc.data();
+        (d.can_fly, d.unit.model_id)
+    };
+    // bUnderwaterCreature swims in 3D (as in `systems::ai::npc`): no ground to stand on.
+    let underwater = server
+        .game_data
+        .systems
+        .ai
+        .ai
+        .actor_model(model_id)
+        .is_some_and(|m| m.underwater_creature);
+    if !can_fly && !underwater {
         let mut p = spawner.position();
-        // npc_spawn_on_terrain: the physics ground (collision service) under the spawn point
-        let new_z = crate::systems::ai::collision::ground_height_or(
-            server,
-            world.id,
-            p.x,
-            p.y,
-            p.z,
-            || geo_data_height(server, &world, p.x, p.y),
-        );
-        if (p.z - new_z).abs() < 1.0 {
-            p.z = new_z;
+        if let Some(z) = spawn_ground_z(server, &world, p.x, p.y, p.z) {
+            p.z = z;
             spawner.set_position(p);
         }
     }

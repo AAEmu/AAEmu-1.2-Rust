@@ -323,3 +323,55 @@ async fn flying_idle_and_ai_less_npcs_keep_the_reference_height() {
     let z = reference_height_in(&server, 0, None, 500.0, 500.0, 100.0, TEST_ZONE);
     assert!((z - 200.0).abs() < 0.1, "{z}");
 }
+
+// --- spawn_ground_z (`npc_spawn_on_terrain`) ---
+
+fn spawn_z(server: &GameServer, z: f32) -> f32 {
+    let world = server.world.world(0).expect("main_world");
+    crate::systems::npcs::npc::spawner::spawn_ground_z(server, &world, 500.0, 500.0, z).unwrap_or(z)
+}
+
+#[tokio::test]
+async fn spawn_snaps_down_from_2m_above_the_ground() {
+    let server = cave_server(100.0);
+    let z = spawn_z(&server, 102.0);
+    assert!((z - 100.0).abs() < 0.1, "{z}");
+}
+
+#[tokio::test]
+async fn spawn_8m_above_the_ground_stays() {
+    let server = cave_server(100.0);
+    assert_eq!(spawn_z(&server, 108.0), 108.0);
+}
+
+#[tokio::test]
+async fn spawn_half_a_metre_above_the_ground_snaps() {
+    let server = cave_server(100.0);
+    let z = spawn_z(&server, 100.5);
+    assert!((z - 100.0).abs() < 0.1, "{z}");
+}
+
+#[tokio::test]
+async fn spawn_in_a_cave_with_no_floor_stays() {
+    let server = cave_server(200.0);
+    assert_eq!(spawn_z(&server, 195.0), 195.0);
+    assert_eq!(spawn_z(&server, 100.0), 100.0);
+}
+
+#[tokio::test]
+async fn spawn_3m_above_a_box_snaps_onto_the_box_not_the_terrain() {
+    let server = cave_server(100.0);
+    add_cave_floor(&server, 103.0);
+    // Terrain is 6 m below the spawn (out of range); the box top 3 m below it is the floor.
+    let z = spawn_z(&server, 106.0);
+    assert!((z - 103.0).abs() < 0.01, "{z}");
+}
+
+#[tokio::test]
+async fn spawn_without_the_collision_service_keeps_the_1m_rule() {
+    let server = cave_server(100.0);
+    server.config.update(|c| c.physics.enable = false);
+    let z = spawn_z(&server, 100.5);
+    assert!((z - 100.0).abs() < 0.1, "{z}");
+    assert_eq!(spawn_z(&server, 102.0), 102.0);
+}

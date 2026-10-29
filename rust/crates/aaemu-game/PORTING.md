@@ -624,6 +624,13 @@ the x2game / cry3dengine decompiles (addresses below). Config `Physics` (`Config
   NPC spawner points snap to it within 1 m (`npc_spawn_on_terrain`). Real data: 1 487 of the 1 524
   NPC spawns of the 4 busiest main_world cells are within 1 m of the physics ground (1 407 of the
   terrain elevation alone; 178 stand on brushes).
+* **Deviation:** `npc_spawn_on_terrain` (`systems/npcs/npc/spawner.rs`, `spawn_ground_z`) snapped a
+  spawn to the ground only within 1 m. When the ground probe (2 m above the spawn, downwards) hits
+  a floor (terrain, a building, a cave floor) the spawn now snaps onto it when it is less than
+  `SPAWN_GROUND_SNAP` (5 m) above it (or sunk up to the probe's 2 m); spawns authored 1-5 m
+  above the ground (about 5 % of main_world) no longer float. Larger gaps (structures, sea-surface
+  swimmers, instance data) and probe misses (caves with no floor, no collision service) keep the
+  C# 1 m rule. Flying and `underwater_creature` NPCs are not snapped.
   **Visibility deviation (systems::npcs / world::unit_state, 2026-10-11):** NPC unit-state packets
   preserve the spawn/movement transform instead of the C# serializer's `GetReferenceHeight`
   mutation. That mutation could replace a collision floor with a coarse navmesh plane or reset
