@@ -1655,3 +1655,68 @@ async fn run_command_set_effect_does_not_start_the_simulation_mover_for_an_ai_np
     assert!(!sim.lock().unwrap().move_to_path_enabled);
     assert!(!npc.data().unit.is_in_patrol);
 }
+
+/// A `NpcControlEffect` `FollowPath` that arrives twice at once (the Timeout trigger of the
+/// channeling target buff of a quest item reaches the effect from the buff's own timer and from
+/// the end of the channel): the walk must start, and start once. A second caller that passed
+/// the `IsInPatrol` check before the first set it ran `GoToPath` again, which toggles the walk
+/// off (`MoveToPathEnabled = !MoveToPathEnabled`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn follow_path_effect_arriving_twice_at_once_starts_the_walk_once() {
+    let dir = std::env::temp_dir().join(format!("aaemu_follow_twice_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("twice.path"),
+        "|100.0|103.0|100.0|\n|100.0|120.0|100.0|\n|100.0|140.0|100.0|\n",
+    )
+    .unwrap();
+    let server = server();
+    server.systems.ai.set_paths_folder(dir.clone());
+    let npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        NPC_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    // A dead NPC does not take the scheduled steps of the walks started below (they would
+    // stop the walk of a later round); the effect itself does not care.
+    npc.data().unit.hp = 0;
+    let sim = Arc::new(std::sync::Mutex::new(super::simulation::Simulation::new(
+        Some(dir.clone()),
+    )));
+    server.systems.ai.simulations.insert(NPC_OBJ, sim.clone());
+    let effect = crate::systems::skills::data::effects::NpcControlEffect {
+        id: 1,
+        category_id: 2,
+        param_string: "twice".to_string(),
+        param_int: 2,
+    };
+    let handle = tokio::runtime::Handle::current();
+    let mut not_walking = 0;
+    for _ in 0..400 {
+        // the previous walk is over
+        super::simulation::stop_move(&server, &sim, &npc);
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|s| {
+            for _ in 0..2 {
+                s.spawn(|| {
+                    let _runtime = handle.enter();
+                    barrier.wait();
+                    super::hooks::npc_control_effect(&server, &effect, &npc);
+                });
+            }
+        });
+        let walking = super::simulation::lock_sim(&sim).move_to_path_enabled;
+        if !walking || !npc.data().unit.is_in_patrol {
+            not_walking += 1;
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        not_walking, 0,
+        "the walk was toggled off in {not_walking} of 400 double deliveries"
+    );
+}

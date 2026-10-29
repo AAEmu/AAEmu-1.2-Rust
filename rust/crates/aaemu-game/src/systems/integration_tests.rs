@@ -55,6 +55,11 @@ const CHANNEL_SKILL: u32 = 10_005;
 const NET_SKILL: u32 = 10_006;
 const CHANNEL_BUFF: u32 = 62_001;
 const NET_BUFF: u32 = 62_002;
+/// A channel of 80 ms whose target buff (`EQUAL_CHANNEL_BUFF`) lasts exactly as long: the
+/// buff's own timer and the end of the channel reach the Timeout trigger together, like skill
+/// 14054 'Insert Anima Into Stopped Machine' (5 s channel, buff 1728 with 5 s) and 17 more.
+const EQUAL_CHANNEL_SKILL: u32 = 10_007;
+const EQUAL_CHANNEL_BUFF: u32 = 62_003;
 
 /// NPC template of `npc_game_data` (level 10, KillExp 140).
 const VILLAGER: u32 = 200;
@@ -207,7 +212,11 @@ fn game_data() -> GameData {
         }),
         0,
     );
-    for (buff_id, duration) in [(CHANNEL_BUFF, 5_000), (NET_BUFF, 40)] {
+    for (buff_id, duration) in [
+        (CHANNEL_BUFF, 5_000),
+        (NET_BUFF, 40),
+        (EQUAL_CHANNEL_BUFF, 80),
+    ] {
         s.add_buff(crate::systems::skills::data::BuffTemplate {
             id: buff_id,
             kind: 2,
@@ -234,6 +243,10 @@ fn game_data() -> GameData {
     channel.channeling_time = 80;
     channel.channeling_target_buff_id = CHANNEL_BUFF;
     s.add_skill(channel);
+    let mut equal = skill_template(EQUAL_CHANNEL_SKILL);
+    equal.channeling_time = 80;
+    equal.channeling_target_buff_id = EQUAL_CHANNEL_BUFF;
+    s.add_skill(equal);
     let mut net = skill_template(NET_SKILL);
     net.effects
         .push(skill_effect(8_100, EffectKind::BuffEffect, 8_100));
@@ -1033,6 +1046,44 @@ async fn completed_channel_with_a_target_buff_grants_the_timeout_trigger_item() 
     wait_until(1_000, || !npc.data().unit.buffs.check_buff(CHANNEL_BUFF)).await;
     assert!(!npc.data().unit.buffs.check_buff(CHANNEL_BUFF));
     assert_eq!(items.item_count(&server, &a.p, QUEST_ITEM), 1);
+}
+
+/// The buff's own timer and the end of a channel of the same length both run the Timeout
+/// trigger of the target buff; it must run exactly once (a second GainItem hands out a second
+/// quest item, a second `NpcControlEffect` FollowPath toggles the walker back off).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn channel_and_target_buff_ending_together_fire_the_timeout_trigger_once() {
+    const N: u32 = 48;
+    let server = server_with(false);
+    let items = server.systems.skills.ext.items();
+    let mut pcs = Vec::new();
+    let mut npcs = Vec::new();
+    for i in 0..N {
+        pcs.push(pc(&server, 1 + i, &format!("Miner{i}"), 100.0));
+        npcs.push(villager(&server, 0x200 + i, 1_000));
+    }
+    for (a, npc) in pcs.iter_mut().zip(&npcs) {
+        cast(
+            &server,
+            a,
+            EQUAL_CHANNEL_SKILL,
+            SkillCastTarget::Unit(npc.obj_id),
+        );
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let counts: Vec<i32> = pcs
+        .iter()
+        .map(|a| items.item_count(&server, &a.p, QUEST_ITEM))
+        .collect();
+    assert!(
+        npcs.iter()
+            .all(|n| !n.data().unit.buffs.check_buff(EQUAL_CHANNEL_BUFF)),
+        "every channel buff must be gone"
+    );
+    assert!(
+        counts.iter().all(|c| *c == 1),
+        "each channel grants exactly one item: {counts:?}"
+    );
 }
 
 #[tokio::test]

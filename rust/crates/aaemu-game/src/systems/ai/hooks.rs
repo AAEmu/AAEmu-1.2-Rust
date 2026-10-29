@@ -246,6 +246,19 @@ pub fn spawn_spyglass(
     spawner.spawn(server, 0);
 }
 
+/// `if (npc.IsInPatrol) return; npc.IsInPatrol = true;` in one step. The effect can reach an NPC
+/// twice at once (the Timeout trigger of a channeling target buff comes from the buff's own
+/// timer and from the end of the channel); a second caller that passed the check before the
+/// first set the flag would run `Simulation.GoToPath` again, which toggles the walk off.
+fn begin_patrol(npc: &NpcRef) -> bool {
+    let mut n = npc.data();
+    if n.unit.is_in_patrol {
+        return false;
+    }
+    n.unit.is_in_patrol = true;
+    true
+}
+
 /// `NpcControlEffect.Apply` (target is an NPC).
 pub fn npc_control_effect(
     server: &GameServer,
@@ -269,10 +282,9 @@ pub fn npc_control_effect(
         0 | 1 | 4 => {}
         2 => {
             // FollowPath
-            if target.data().unit.is_in_patrol {
+            if !begin_patrol(target) {
                 return;
             }
-            target.data().unit.is_in_patrol = true;
             if let Some(sim) = sim {
                 {
                     let mut s = simulation::lock_sim(&sim);
@@ -333,10 +345,9 @@ pub fn npc_control_effect(
             // route, so two movers dragged the NPC to different points every tick and it never
             // got past the first few metres (PORTING.md).
             if !file.is_empty() && !super::manager::has_ai(server, target.obj_id) {
-                if target.data().unit.is_in_patrol {
+                if !begin_patrol(target) {
                     return;
                 }
-                target.data().unit.is_in_patrol = true;
                 if let Some(sim) = sim {
                     {
                         let mut s = simulation::lock_sim(&sim);
