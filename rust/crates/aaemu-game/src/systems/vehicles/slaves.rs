@@ -31,6 +31,9 @@ use crate::systems::npcs::doodad::spawner::SimpleSpawnerDef;
 use crate::systems::npcs::spawn_manager;
 use crate::systems::skills::effects::EffectArgs;
 use crate::systems::skills::packets::SCUnitDeathPacket;
+use crate::systems::skills::packets_special::{
+    SCTeleportUnitPacket, TELEPORT_REASON_MOVE_TO_LOCATION,
+};
 use crate::systems::skills::types::{
     BuffEventTriggerKind, BuffRemoveOn, KillReason, SkillCastTarget, SkillCaster,
 };
@@ -1704,8 +1707,12 @@ fn try_delete(
     // its world position as its new local one, so the owner's world pose survives the hull.
     let slave_obj = WorldObject::from(&slave);
     world.detach_child(&slave_obj);
+    let mut deck_standers = Vec::new();
     for child in slave_obj.core().take_children() {
         world.detach_child(&child);
+        if let Some(player) = child.as_player() {
+            deck_standers.push((player.clone(), child.transform()));
+        }
     }
     let spawns = spawn_manager_of(server, world.id);
     for id in &doodad_ids {
@@ -1739,6 +1746,20 @@ fn try_delete(
         );
     }
     world.remove_object(obj_id);
+    // A deck stander is only a transform child of the hull, so no SCUnitDetached/attached
+    // state reaches its client. It kept its world pose above; tell its own client where that
+    // is, as every other server-forced move does (portal, recall, GM teleport).
+    for (player, t) in deck_standers {
+        player.data().set_disabled_set_position(true);
+        player.send(SCTeleportUnitPacket {
+            reason: TELEPORT_REASON_MOVE_TO_LOCATION,
+            error_message: 0,
+            x: t.x,
+            y: t.y,
+            z: t.z,
+            z2: t.rot_z,
+        });
+    }
     if let Some(s) = &spawns {
         s.add_despawn(
             server,

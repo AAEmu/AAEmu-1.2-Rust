@@ -222,6 +222,43 @@ async fn doodad_frame_move_without_its_doodad_uses_the_world_position() {
 }
 
 #[tokio::test]
+async fn a_despawned_hull_teleports_its_deck_stander_to_the_world_pose() {
+    let (server, mut client, player, boat) = fixture();
+    let world = server.world.world(0).unwrap();
+    let me = WorldObject::from(&player);
+    packet(
+        MoveTypeFlags::NONE,
+        MoveTypeActorFlags::STANDING_ON_OBJECT,
+        boat.obj_id,
+    )
+    .handle(&server, &mut client.conn)
+    .await
+    .unwrap();
+    assert_eq!(me.transform().parent_obj_id, boat.obj_id);
+    let world_pose = world.world_pos_rot(&me);
+    client.drain();
+
+    slaves::delete(&server, None, world.id, boat.obj_id, true);
+    assert!(world.slave(boat.obj_id).is_none());
+    assert_eq!(me.transform().parent_obj_id, 0);
+    let frames = client.drain();
+    let body = super::body(&frames, sc::SCTeleportUnitPacket);
+    let mut s = PacketStream::from_bytes(body);
+    assert_eq!(
+        s.read_u8().unwrap(),
+        crate::systems::skills::packets_special::TELEPORT_REASON_MOVE_TO_LOCATION
+    );
+    assert_eq!(s.read_i16().unwrap(), 0);
+    let (x, y, z) = s.read_position().unwrap();
+    let yaw = s.read_f32().unwrap();
+    close(x, world_pose.x);
+    close(y, world_pose.y);
+    close(z, world_pose.z);
+    close(yaw, world_pose.rot_z);
+    assert!(player.data().disabled_set_position);
+}
+
+#[tokio::test]
 async fn removed_supporting_doodad_does_not_put_the_character_under_water() {
     let (server, mut client, player, _boat) = fixture();
     let world = server.world.world(0).unwrap();
