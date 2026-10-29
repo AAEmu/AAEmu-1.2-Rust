@@ -282,12 +282,16 @@ impl NetUnitHeader {
     }
 }
 
-/// How `Inventory_Equip` writes the non-body-part slots for a `BaseUnitType`.
+/// How `Inventory_Equip` writes the slots for a `BaseUnitType` (client reader `3961fa20`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EquipMode {
-    /// Character / Housing / Mate / Slave: `stream.Write(item)` or `0`.
+    /// Character / Housing / Mate: `stream.Write(item)` or `0`, except the body parts
+    /// (19..=25), which are template-only.
     Full,
-    /// Npc: `templateId, id, grade` or `0`.
+    /// Slave: full items in every slot; the client reads 19..=25 as full items only for
+    /// `BaseUnitType.Slave`.
+    Slave,
+    /// Npc: `templateId, id, grade` or `0`; Cosplay (27) is a full item.
     Npc,
     /// Transfer / Shipyard: only the 7 body-part slots (19..=25).
     BodyOnly,
@@ -333,33 +337,33 @@ fn write_inventory_equip(
     }
     for index in 0..28usize {
         let item = equipment.get(index).and_then(Option::as_ref);
-        if !(19..=25).contains(&index) {
-            if index != 27 {
-                match (mode, item) {
-                    (EquipMode::BodyOnly, _) => {}
-                    (EquipMode::Full, Some(item)) => item.write(s),
-                    (EquipMode::Npc, Some(item)) => {
-                        s.write_u32(item.template_id)
-                            .write_u64(item.id)
-                            .write_u8(item.grade);
-                    }
-                    (_, None) => {
-                        s.write_i32(0);
-                    }
-                }
-            } else {
-                if mode == EquipMode::BodyOnly {
-                    return;
-                }
-                match item {
-                    Some(item) => item.write(s), // Cosplay [27]
-                    None => {
-                        s.write_i32(0);
-                    }
+        if (19..=25).contains(&index) && mode != EquipMode::Slave {
+            s.write_u32(item.map_or(0, |i| i.template_id));
+            continue;
+        }
+        if index == 27 {
+            if mode == EquipMode::BodyOnly {
+                return;
+            }
+            match item {
+                Some(item) => item.write(s), // Cosplay [27]
+                None => {
+                    s.write_i32(0);
                 }
             }
-        } else {
-            s.write_u32(item.map_or(0, |i| i.template_id));
+            continue;
+        }
+        match (mode, item) {
+            (EquipMode::BodyOnly, _) => {}
+            (EquipMode::Full | EquipMode::Slave, Some(item)) => item.write(s),
+            (EquipMode::Npc, Some(item)) => {
+                s.write_u32(item.template_id)
+                    .write_u64(item.id)
+                    .write_u8(item.grade);
+            }
+            (_, None) => {
+                s.write_i32(0);
+            }
         }
     }
 }
@@ -588,7 +592,7 @@ pub fn slave_unit_state(
             summoner_id: slave.summoner_id,
         },
         equipment: &equipment,
-        equip_mode: EquipMode::Full,
+        equip_mode: EquipMode::Slave,
         attach1: AttachPoint1::Slave {
             point: slave.attach_point_id,
             owner_obj_id: slave.owner_obj_id,
