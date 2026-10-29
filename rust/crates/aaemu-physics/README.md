@@ -104,6 +104,21 @@ the **original** `xlcommon.dll` (the r575 one is a forwarding proxy that does no
 the game folder) and the `tbbmalloc_proxy.dll` stub built from `tbbstub.c`. Binaries are never
 committed.
 
+### The 1.2 client oracle (x86)
+
+The same `physoracle.c` also builds as a 32-bit `physoracle_x86.exe` (`oracle/build_x86.bat`).
+It loads the unpacked 1.2 client `cryphysics.dll` at its preferred base `0x34FF0000`;
+`oracle/patch_entry.py` prepares the untracked runtime (entry point 0, split `ntdll` imports,
+VMProtect profiler-timer thunk disabled) from the unpacked client image and the runtime DLLs in
+`D:/AA1.2/bin32`.
+`--fpu 24|53` sets the x87 precision, `--static-init tls|ctors` picks the static-init route and
+`--t0 CAPTURE` enables the self-check against the client capture. `box_on_ground` and
+`box_float_300kg` are deterministic and **bit-identical to the x64 goldens** under both
+precisions; the traces are in `tests/golden-12/` (see its README). Build/run details and the
+1.2-only limits (no rays/heightfield/trimesh/living/wheeled yet): `oracle/README.md`;
+engine findings: `docs/physics/CRYPHYSICS-MAP.md` §9b. `oracle/trace_diff.py` prints the first
+divergence of two traces.
+
 ### Tests and goldens
 
 | env | effect |

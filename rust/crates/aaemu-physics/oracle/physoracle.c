@@ -29,25 +29,65 @@
 #include <io.h>
 #include <fcntl.h>
 #include <math.h>
+#include <float.h>
 
+#ifdef ORACLE_X86
+/* 1.2 client cryphysics.dll, unpacked image (see CRYPHYSICS-MAP.md s9b). */
+#define IMAGE_BASE 0x34FF0000u
+#else
 #define IMAGE_BASE 0x35000000ULL
+#endif
 #define VA(h, va) ((void *)((char *)(h) + ((va) - IMAGE_BASE)))
 #define VT(obj) (*(void ***)(obj))
 
-/* ---- IPhysicalWorld slots (x64 10.x, CRYPHYSICS-MAP.md section 4) ---- */
+/* ---- IPhysicalWorld slots ---- */
+#ifdef ORACLE_X86
+/* x64 -> x86 shifts from CRYPHYSICS-MAP.md s9b / func_match.csv; the medium-confidence slots
+   (18, 22, 43, 80) were verified against the vtable at 0x351FC598 and the x86 decompile. */
+enum {
+  W_GetGeomManager = 10, W_SetupEntityGrid = 12, W_GetPhysVars = 21, W_CreatePhysicalEntity = 22,
+  W_DestroyPhysicalEntity = 25, W_TimeStep = 33, W_RayWorldIntersection = 43, W_AddGlobalArea = 80,
+  W_SetHeightfieldData = 18, W_SetSurfaceParameters = 30
+};
+#else
+/* x64 10.x, CRYPHYSICS-MAP.md section 4 */
 enum {
   W_GetGeomManager = 9, W_SetupEntityGrid = 11, W_GetPhysVars = 20, W_CreatePhysicalEntity = 21,
   W_DestroyPhysicalEntity = 24, W_TimeStep = 32, W_RayWorldIntersection = 42, W_AddGlobalArea = 80,
   W_SetHeightfieldData = 17, W_SetSurfaceParameters = 29
 };
-/* ---- IGeomManager slots ---- */
+#endif
+/* ---- IGeomManager slots (same in both builds) ---- */
 enum { G_CreatePrimitive = 7, G_RegisterGeometry = 9 };
-/* ---- IPhysicalEntity slots ---- */
+/* ---- IPhysicalEntity slots (same in both builds) ---- */
 enum { E_SetParams = 7, E_GetParams = 8, E_GetStatus = 9, E_Action = 10, E_AddGeometry = 11 };
 
 #define UNUSED_F_BITS 0xFFBFFFFFu
 #define UNUSED_I 0x80000000u
 
+#ifdef ORACLE_X86
+/* x86 vtable calls are __thiscall: `this` in ECX and every declared argument on the stack.
+   __fastcall gives ECX = first parameter, EDX = second, the rest on the stack, so a dummy
+   second parameter reproduces __thiscall exactly (callee pops the stack args). */
+typedef void *(__fastcall *fn_p)(void *, void *);
+typedef void *(__fastcall *fn_prim)(void *, void *, int, void *);
+typedef void *(__fastcall *fn_reg)(void *, void *, void *, int, int *, int);
+typedef int (__fastcall *fn_setp)(void *, void *, void *, int);
+typedef int (__fastcall *fn_stat)(void *, void *, void *);
+typedef int (__fastcall *fn_addg)(void *, void *, void *, void *, int, int);
+typedef int (__fastcall *fn_rwi)(void *, void *, void *, const char *, int);
+typedef int (__fastcall *fn_surf)(void *, void *, int, float, float, unsigned);
+typedef void (__fastcall *fn_hfdata)(void *, void *, void *, int *, int);
+typedef void (__fastcall *fn_timestep)(void *, void *, float, int);
+typedef void (__fastcall *fn_grid)(void *, void *, int, float, float, float, int, int, float, float, int);
+typedef void *(__fastcall *fn_create)(void *, void *, int, float, void *, void *, int, int, void *);
+/* direct (non-vtable) entry points */
+typedef void *(__cdecl *fn_alloc)(int);
+typedef void *(__fastcall *fn_worldctor)(void *);
+typedef void (__cdecl *fn_void0)(void);
+typedef void (__fastcall *fn_this0)(void *, void *);
+typedef void (__fastcall *fn_this1)(void *, void *, int);
+#else
 typedef void *(*fn_p)(void *);
 typedef void (*fn_grid)(void *, int, float *, int, int, float, float, int, int);
 typedef void *(*fn_create)(void *, int, float, void *, void *, int, int, void *, unsigned);
@@ -60,6 +100,96 @@ typedef int (*fn_addg)(void *, void *, void *, int, int);
 typedef int (*fn_rwi)(void *, void *, const char *, int);
 typedef void (*fn_hfdata)(void *, void *, int *, int);
 typedef int (*fn_surf)(void *, int, float, float, unsigned);
+#endif
+
+/* Vtable wrappers shared by the scenario interpreter. */
+static void *m_call0(void *o, int slot) {
+#ifdef ORACLE_X86
+  return ((fn_p)VT(o)[slot])(o, 0);
+#else
+  return ((fn_p)VT(o)[slot])(o);
+#endif
+}
+static int m_status(void *o, int slot, void *b) {
+#ifdef ORACLE_X86
+  return ((fn_stat)VT(o)[slot])(o, 0, b);
+#else
+  return ((fn_stat)VT(o)[slot])(o, b);
+#endif
+}
+static int m_setp(void *o, int slot, void *b, int ts) {
+#ifdef ORACLE_X86
+  return ((fn_setp)VT(o)[slot])(o, 0, b, ts);
+#else
+  return ((fn_setp)VT(o)[slot])(o, b, ts);
+#endif
+}
+static int m_addg(void *o, int slot, void *g, void *gp, int id, int recalc) {
+#ifdef ORACLE_X86
+  return ((fn_addg)VT(o)[slot])(o, 0, g, gp, id, recalc);
+#else
+  return ((fn_addg)VT(o)[slot])(o, g, gp, id, recalc);
+#endif
+}
+static void *m_create(void *o, int type, void *pp, int id) {
+#ifdef ORACLE_X86
+  if (getenv("AAEMU_PHYS_DEBUG")) fprintf(stderr, "m_create type=%d pp=%p id=%d\n", type, pp, id);
+  void *r = ((fn_create)VT(o)[W_CreatePhysicalEntity])(o, 0, type, 0.0f, pp, 0, 0, id, 0);
+  if (getenv("AAEMU_PHYS_DEBUG")) fprintf(stderr, "m_create -> %p vtable %p\n", r, r ? *(void **)r : 0);
+  return r;
+#else
+  return ((fn_create)VT(o)[W_CreatePhysicalEntity])(o, type, 0.0f, pp, 0, 0, id, 0, 0);
+#endif
+}
+static void m_grid(void *o, int axisz, const float *org, int nx, int ny, float sx, float sy, int pod, int cyclic) {
+#ifdef ORACLE_X86
+  ((fn_grid)VT(o)[W_SetupEntityGrid])(o, 0, axisz, org[0], org[1], org[2], nx, ny, sx, sy, cyclic);
+#else
+  ((fn_grid)VT(o)[W_SetupEntityGrid])(o, axisz, (float *)org, nx, ny, sx, sy, pod, cyclic);
+#endif
+}
+static void m_step(void *o, float dt, int flags) {
+#ifdef ORACLE_X86
+  ((fn_timestep)VT(o)[W_TimeStep])(o, 0, dt, flags);
+#else
+  ((fn_timestep)VT(o)[W_TimeStep])(o, dt, flags);
+#endif
+}
+static int m_rwi(void *o, void *p, const char *name, int caller) {
+#ifdef ORACLE_X86
+  return ((fn_rwi)VT(o)[W_RayWorldIntersection])(o, 0, p, name, caller);
+#else
+  return ((fn_rwi)VT(o)[W_RayWorldIntersection])(o, p, name, caller);
+#endif
+}
+static int m_surf(void *o, int idx, float bounce, float friction, unsigned flags) {
+#ifdef ORACLE_X86
+  return ((fn_surf)VT(o)[W_SetSurfaceParameters])(o, 0, idx, bounce, friction, flags);
+#else
+  return ((fn_surf)VT(o)[W_SetSurfaceParameters])(o, idx, bounce, friction, flags);
+#endif
+}
+static void m_hfdata(void *o, void *prim, int *mm, int nm) {
+#ifdef ORACLE_X86
+  ((fn_hfdata)VT(o)[W_SetHeightfieldData])(o, 0, prim, mm, nm);
+#else
+  ((fn_hfdata)VT(o)[W_SetHeightfieldData])(o, prim, mm, nm);
+#endif
+}
+static void *m_prim(void *gm, int type, void *prim) {
+#ifdef ORACLE_X86
+  return ((fn_prim)VT(gm)[G_CreatePrimitive])(gm, 0, type, prim);
+#else
+  return ((fn_prim)VT(gm)[G_CreatePrimitive])(gm, type, prim);
+#endif
+}
+static void *m_reg(void *gm, void *g) {
+#ifdef ORACLE_X86
+  return ((fn_reg)VT(gm)[G_RegisterGeometry])(gm, 0, g, 0, 0, 0);
+#else
+  return ((fn_reg)VT(gm)[G_RegisterGeometry])(gm, g, 0, 0, 0);
+#endif
+}
 
 static HMODULE g_phys;
 static void *g_world, *g_gm;
@@ -72,27 +202,296 @@ static void *g_snap_obj;
 typedef struct NullObj { void **vt; char pad[4096]; } NullObj;
 static NullObj g_null, g_cfg;
 static void *g_nullvt[1024], *g_cfgvt[1024];
+#ifdef ORACLE_X86
+/* x86 vtable calls are __thiscall: the callee pops the stack arguments.  A cdecl fake would
+   leave them on the stack and corrupt the caller (the profiler label ctor calls slot 1 with
+   one argument).  __fastcall with a dummy EDX reproduces __thiscall and pops what it declares. */
+static void *__fastcall nullfn(void *self, void *dummy) { (void)self; (void)dummy; return &g_null; }
+static void *__fastcall nullfn1(void *self, void *dummy, void *a1) { (void)self; (void)dummy; (void)a1; return &g_null; }
+static void *__fastcall nullfn2(void *self, void *dummy, void *a1, void *a2) { (void)self; (void)dummy; (void)a1; (void)a2; return &g_null; }
+#else
 static void *nullfn(void *self) { (void)self; return &g_null; }
-/* gEnv+112: its slot 20 returns a config block whose int at +248 limits |dir.x|, |dir.y| of
-   RayWorldIntersection rays ("DrawRayOnGrid, dir.x(%.1f), dir.y(%.1f)", an ArcheAge addition)
-   unless gEnv byte +289 is set. The object returns itself, so the int lives at g_cfg+248. */
+#endif
+/* x64: gEnv+112 -> slot 20 -> config block, ray limit at +248. x86 1.2: gEnv+0x38 ->
+   slot 21 -> config block, ray limit at +0x100 (FUN_35131540/I+0x54). The object returns
+   itself, so the int lives inside g_cfg. */
+#ifdef ORACLE_X86
+static void *__fastcall cfgfn(void *self, void *dummy) { (void)self; (void)dummy; return &g_cfg; }
+#else
 static void *cfgfn(void *self) { (void)self; return &g_cfg; }
+#endif
 static struct { void *ptrs[64]; unsigned char bytes[4096]; } g_env;
+#ifdef ORACLE_X86
+#define ENV_OFF_CONFIG 0x38
+#define ENV_OFF_RAYMAX 0x100
+#define ENV_OFF_BYPASS 0x95 /* DrawRayOnGrid bypass (x64: +289) */
+#define ENV_OFF_B2 0x96     /* copied into world+0x130 (x64: +290) */
+#define ENV_OFF_PROFILER 0x97
+#else
+#define ENV_OFF_CONFIG 112
+#define ENV_OFF_RAYMAX 248
+#define ENV_OFF_BYPASS 289
+#define ENV_OFF_B2 290
+#define ENV_OFF_PROFILER 0 /* x64 uses byte 289/290 and object pointers; no profiler byte */
+#endif
 static void install_fake_env(HMODULE h) {
   for (int i = 0; i < 1024; i++) g_nullvt[i] = (void *)nullfn;
+#ifdef ORACLE_X86
+  g_nullvt[1] = (void *)nullfn1;
+  g_nullvt[2] = (void *)nullfn2;
+#endif
   g_null.vt = g_nullvt;
   for (int i = 0; i < 1024; i++) g_cfgvt[i] = (void *)cfgfn;
   g_cfg.vt = g_cfgvt;
-  *(int *)((char *)&g_cfg + 248) = 1000; /* default ray grid limit, see "env raymax=" */
+  *(int *)((char *)&g_cfg + ENV_OFF_RAYMAX) = 1000; /* default ray grid limit, see "env raymax=" */
   memset(&g_env, 0, sizeof g_env);
+#ifdef ORACLE_X86
+  *(void **)((char *)&g_env + 0x00) = &g_null; /* +0 ISystem* (profiler label ctor) */
+  *(void **)((char *)&g_env + ENV_OFF_CONFIG) = &g_cfg;
+  ((unsigned char *)&g_env)[ENV_OFF_PROFILER] = 0;
+  *(void **)VA(h, 0x3537640C) = &g_env;
+#else
   g_env.ptrs[0] = &g_null;        /* +0   ISystem* */
   g_env.ptrs[112 / 8] = &g_cfg;   /* +112 config (ray grid limit at slot-20 result +248) */
   g_env.ptrs[152 / 8] = &g_null;  /* +152 log */
   g_env.ptrs[160 / 8] = &g_null;  /* +160 slot-19 void call in TimeStep */
   *(void **)VA(h, 0x3537C6D8ULL) = &g_env;
+#endif
 }
+
+static void die(const char *msg, const char *arg);
+
+#ifdef ORACLE_X86
+/* ------------------------------------------------------------------ 1.2 static init
+ * The unpacked image's .data is the t0 capture (post-CRT-init, pre-world), so it still holds
+ * the client process's TLS index, per-thread world table, a few heap pointers and guard bits.
+ * Route "ctors" restores .data from the (unpacked) file, zeroes those process-specific globals,
+ * runs the 35 CRT static ctors from the XC table and diffs the result against t0.  Route "tls"
+ * only allocates a TLS slot (the quick fix in the study).  Diagnostics go to stderr so stdout
+ * stays a clean trace. */
+#define X86_TLS_COUNT 0x3520D810u
+#define X86_TLS_INDEX 0x3520D814u
+#define X86_TLS_TABLE 0x3520D818u
+#define X86_TLS_TABLE_N 64
+#define X86_GUARD 0x35219930u
+#define X86_HEAP1 0x35208D3Cu
+#define X86_HEAP2 0x35252BC0u
+#define X86_XC_TABLE 0x351FA18Cu
+#define X86_XC_COUNT 35
+#define X86_TLSALLOC_CTOR 0x351F8E30u
+#define X86_WORLD_ALLOC 0x351F3BE0u
+#define X86_WORLD_CTOR 0x350889B0u
+#define X86_DEDICATED_FLAG 0x3523F4E8u
+#define X86_DATA_RVA 0x214000u
+#define X86_DATA_VSZ 0x172848u
+
+static int g_static_route; /* 0 none, 1 tls, 2 ctors */
+static unsigned g_tls_index = 0xFFFFFFFFu;
+
+static int known_runtime_word(unsigned va) {
+  if (va >= X86_TLS_COUNT && va < X86_TLS_TABLE + 4 * X86_TLS_TABLE_N) return 1;
+  if (va == X86_HEAP1 || va == X86_HEAP2 || va == X86_GUARD) return 1;
+  /* allocator bookkeeping written by FUN_351F3BE0's init (CryMalloc wrapper) */
+  if (va >= 0x353763E0u && va < 0x35376410u) return 1;
+  return 0;
+}
+
+/* Route "ctors" re-runs the two ctors that also call _atexit without the atexit half; the
+   first pass over the captured .data leaves these three initialization words different
+   (a guard bit and two self-pointers).  They are not physics state. */
+static int init_only_word(unsigned va) {
+  return va == 0x35208D18u || va == 0x35208E60u || va == 0x35376424u;
+}
+
+static void restore_data_from_file(HMODULE h) {
+  char path[MAX_PATH];
+  if (!GetModuleFileNameA(h, path, sizeof path)) die("GetModuleFileName failed", 0);
+  FILE *f = fopen(path, "rb");
+  if (!f) die("cannot reopen the DLL for .data", path);
+  unsigned char *file;
+  long sz;
+  fseek(f, 0, SEEK_END);
+  sz = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  file = (unsigned char *)malloc((size_t)sz);
+  if (!file || fread(file, 1, (size_t)sz, f) != (size_t)sz) die("cannot read the DLL", path);
+  fclose(f);
+  unsigned char *base = (unsigned char *)h;
+  unsigned e = *(unsigned *)(base + 0x3C);
+  unsigned nsec = *(unsigned short *)(base + e + 6);
+  unsigned so = *(unsigned short *)(base + e + 20);
+  unsigned opt = e + 24;
+  for (unsigned i = 0; i < nsec; i++) {
+    unsigned char *sh = base + opt + so + 40 * i;
+    if (!memcmp(sh, ".data", 5)) {
+      unsigned vsz = *(unsigned *)(sh + 8), va = *(unsigned *)(sh + 12);
+      unsigned rsz = *(unsigned *)(sh + 16), ra = *(unsigned *)(sh + 20);
+      unsigned char *dst = base + va;
+      unsigned copy = rsz < vsz ? rsz : vsz;
+      memcpy(dst, file + ra, copy);
+      if (copy < vsz) memset(dst + copy, 0, vsz - copy);
+      free(file);
+      return;
+    }
+  }
+  free(file);
+  die(".data section not found", 0);
+}
+
+static void x86_static_init(const char *route, const char *t0_path) {
+  unsigned char *base = (unsigned char *)g_phys;
+  unsigned char *t0 = 0;
+  long t0_sz = 0;
+  if (!strcmp(route, "none")) {
+    fprintf(stderr, "static-init route=none tls=%u\n", *(unsigned *)VA(g_phys, X86_TLS_INDEX));
+    return;
+  }
+  if (!strcmp(route, "ctors")) {
+    restore_data_from_file(g_phys);
+  }
+  if (t0_path && *t0_path) {
+    FILE *f = fopen(t0_path, "rb");
+    if (f) {
+      fseek(f, 0, SEEK_END);
+      t0_sz = ftell(f);
+      fseek(f, 0, SEEK_SET);
+      t0 = (unsigned char *)malloc((size_t)t0_sz);
+      if (t0 && fread(t0, 1, (size_t)t0_sz, f) != (size_t)t0_sz) {
+        free(t0);
+        t0 = 0;
+      }
+      fclose(f);
+    }
+    if (!t0) fprintf(stderr, "static-init t0 capture %s not readable\n", t0_path);
+  }
+  unsigned char *before = (unsigned char *)malloc(X86_DATA_VSZ);
+  if (!before) die("out of memory", 0);
+  memcpy(before, base + X86_DATA_RVA, X86_DATA_VSZ);
+
+  *(unsigned *)VA(g_phys, X86_TLS_COUNT) = 0;
+  *(unsigned *)VA(g_phys, X86_TLS_INDEX) = 0;
+  memset(VA(g_phys, X86_TLS_TABLE), 0, 4 * X86_TLS_TABLE_N);
+  *(unsigned *)VA(g_phys, X86_GUARD) = 0;
+  *(unsigned *)VA(g_phys, X86_HEAP1) = 0;
+  *(unsigned *)VA(g_phys, X86_HEAP2) = 0;
+
+  int ctors = 0;
+  if (!strcmp(route, "ctors")) {
+    unsigned *table = (unsigned *)VA(g_phys, X86_XC_TABLE);
+    for (int i = 0; i < X86_XC_COUNT; i++) {
+      unsigned fn = table[i];
+      if (fn < 0x34FF1000u || fn >= 0x34FF1000u + 0x208400u) {
+        fprintf(stderr, "static-init bad XC[%d]=%#x\n", i, fn);
+        continue;
+      }
+      if (getenv("AAEMU_PHYS_CTOR_TRACE")) fprintf(stderr, "ctor %d %#x\n", i, fn);
+      /* Four ctors end in _atexit().  The captured .data is post-CRT-init of the client
+         process, so its per-module atexit list points into the client's heap; re-running
+         _atexit here corrupts our heap (STATUS_HEAP_CORRUPTED inside _onexit).  Do the
+         non-atexit work by hand and skip the process-exit registration. */
+      if (fn == 0x351F8DB0u) { ctors++; continue; } /* only _atexit(...) */
+      if (fn == 0x351F8E00u) { /* FUN_35059590(&DAT_35208CE0, 0) then _atexit */
+        ((fn_this1)(base + (0x35059590u - IMAGE_BASE)))(VA(g_phys, 0x35208CE0u), 0, 0);
+        ctors++;
+        continue;
+      }
+      if (fn == 0x351F91A0u) { /* FUN_351F4A10(&DAT_35376414) then _atexit */
+        ((fn_this0)(base + (0x351F4A10u - IMAGE_BASE)))(VA(g_phys, 0x35376414u), 0);
+        ctors++;
+        continue;
+      }
+      if (fn == 0x351F9240u) { /* DAT_35376474 = 1 then _atexit */
+        *(unsigned char *)VA(g_phys, 0x35376474u) = 1;
+        ctors++;
+        continue;
+      }
+      ((fn_void0)(base + (fn - IMAGE_BASE)))();
+      ctors++;
+    }
+  }
+  /* route tls, and also the first ctor when the table was unavailable */
+  if (ctors == 0) {
+    unsigned fn = X86_TLSALLOC_CTOR;
+    ((fn_void0)(base + (fn - IMAGE_BASE)))();
+  }
+  g_tls_index = *(unsigned *)VA(g_phys, X86_TLS_INDEX);
+  g_static_route = ctors ? 2 : 1;
+
+  unsigned diffs = 0, known = 0, init_only = 0, unknown = 0;
+  unsigned char *after = base + X86_DATA_RVA;
+  for (unsigned off = 0; off < X86_DATA_VSZ; off += 4) {
+    if (!memcmp(after + off, before + off, 4)) continue;
+    unsigned va = IMAGE_BASE + X86_DATA_RVA + off;
+    unsigned o = *(unsigned *)(before + off), n = *(unsigned *)(after + off);
+    diffs++;
+    int k = known_runtime_word(va);
+    if (k) known++;
+    else if (init_only_word(va)) init_only++;
+    else {
+      unknown++;
+      if (unknown <= 16) fprintf(stderr, "static-init unexpected diff %#x: %08x -> %08x\n", va, o, n);
+    }
+    (void)o;
+    (void)n;
+  }
+  unsigned t0_diffs = 0xFFFFFFFFu, t0_unknown = 0xFFFFFFFFu, t0_init_only = 0;
+  if (t0 && t0_sz >= (long)(X86_DATA_RVA + X86_DATA_VSZ)) {
+    t0_diffs = 0;
+    t0_unknown = 0;
+    unsigned char *r = t0 + X86_DATA_RVA;
+    for (unsigned off = 0; off < X86_DATA_VSZ; off += 4) {
+      if (!memcmp(after + off, r + off, 4)) continue;
+      t0_diffs++;
+      if (known_runtime_word(IMAGE_BASE + X86_DATA_RVA + off)) {
+      } else if (init_only_word(IMAGE_BASE + X86_DATA_RVA + off)) {
+        t0_init_only++;
+      } else {
+        t0_unknown++;
+        if (t0_unknown <= 16)
+          fprintf(stderr, "static-init t0 diff %#x: t0=%08x now=%08x\n", IMAGE_BASE + X86_DATA_RVA + off,
+                  *(unsigned *)(r + off), *(unsigned *)(after + off));
+      }
+    }
+  }
+  fprintf(stderr, "static-init route=%s ctors=%d tls=%u data-diffs-vs-file=%u known=%u init-only=%u unknown=%u",
+          route, ctors, g_tls_index, diffs, known, init_only, unknown);
+  if (t0) fprintf(stderr, " t0-diffs=%u t0-init-only=%u t0-unknown=%u", t0_diffs, t0_init_only, t0_unknown);
+  fprintf(stderr, "\n");
+  free(before);
+  free(t0);
+}
+
+static void *x86_create_world(void) {
+  *(unsigned *)VA(g_phys, X86_DEDICATED_FLAG) = 0; /* client behaviour (dedicated-like flag) */
+  void *w = ((fn_alloc)((char *)g_phys + (X86_WORLD_ALLOC - IMAGE_BASE)))(0x53F0);
+  if (!w) die("world allocation failed", 0);
+  void *r = ((fn_worldctor)((char *)g_phys + (X86_WORLD_CTOR - IMAGE_BASE)))(w);
+  if (r != w) fprintf(stderr, "world-ctor returned %p for %p\n", r, w);
+  return w;
+}
+
+static void set_fpu_precision(int bits) {
+  unsigned short cw = 0;
+  if (bits == 24) _control87(_PC_24, _MCW_PC);
+  else if (bits == 53) _control87(_PC_53, _MCW_PC);
+  else if (bits == 64) _control87(_PC_64, _MCW_PC);
+  _control87(_RC_NEAR, _MCW_RC);
+  __asm fnstcw cw;
+  fprintf(stderr, "fpu precision=%d x87-control-word=%#06x\n", bits, (unsigned)cw);
+}
+#endif /* ORACLE_X86 */
+
 static LONG CALLBACK veh(PEXCEPTION_POINTERS e) {
+#ifdef ORACLE_X86
+  DWORD64 ip = e->ContextRecord->Eip;
+  fprintf(stderr, "x86 exception eip=%08lx esp=%08lx ebp=%08lx ret=%08lx eax=%08lx ecx=%08lx\n",
+          (unsigned long)e->ContextRecord->Eip, (unsigned long)e->ContextRecord->Esp,
+          (unsigned long)e->ContextRecord->Ebp,
+          (unsigned long)(e->ContextRecord->Esp ? *(unsigned long *)e->ContextRecord->Esp : 0),
+          (unsigned long)e->ContextRecord->Eax, (unsigned long)e->ContextRecord->Ecx);
+#else
   DWORD64 ip = e->ContextRecord->Rip;
+#endif
   if (e->ExceptionRecord->ExceptionCode == 0x406D1388) return EXCEPTION_CONTINUE_SEARCH; /* thread naming */
   printf("EXCEPTION %08lx at cryphysics VA %llx addr %llx (step %d)\n", e->ExceptionRecord->ExceptionCode,
          (unsigned long long)(ip - (DWORD64)g_phys + IMAGE_BASE),
@@ -192,11 +591,25 @@ static void fill_unused_f(unsigned char *b, int from, int to) {
   for (int o = from; o + 4 <= to; o += 4) *(uint32_t *)(b + o) = UNUSED_F_BITS;
 }
 #define SETI(b, off, v) (*(uint32_t *)((b) + (off)) = (uint32_t)(v))
+#ifdef ORACLE_X86
+#define SETP(b, off, v) (*(uint32_t *)((b) + (off)) = (uint32_t)(uintptr_t)(v))
+#else
 #define SETP(b, off, v) (*(uint64_t *)((b) + (off)) = (uint64_t)(v))
+#endif
 static int tmpl_params(int type, unsigned char *b) {
   memset(b, 0, 512);
   SETI(b, 0, type);
   switch (type) {
+#ifdef ORACLE_X86
+  case 0: /* pe_params_pos 56: pos 4, q 16, scale 32, mtx3x4 36, mtx3x3 40, sim 44, recalc 48 */
+    fill_unused_f(b, 4, 36);
+    SETP(b, 36, 0); SETP(b, 40, 0); SETI(b, 44, UNUSED_I); SETI(b, 48, 1); b[52] = 0;
+    return 56;
+  case 6: /* pe_params_part: pointer layout not ported (see CRYPHYSICS-MAP s9b) */
+  case 2: /* car params: pointer layout not ported */
+  case 16: /* wheel params: pointer layout not ported */
+    return 0;
+#else
   case 0: /* pe_params_pos 72 */
     fill_unused_f(b, 4, 40);
     SETP(b, 40, 0); SETP(b, 48, 0); SETI(b, 56, UNUSED_I); SETI(b, 60, 1); b[64] = 0;
@@ -210,11 +623,22 @@ static int tmpl_params(int type, unsigned char *b) {
     SETP(b, 96, -1); SETP(b, 104, -1); SETI(b, 112, UNUSED_I); SETP(b, 120, -1); SETI(b, 128, UNUSED_I);
     SETP(b, 136, -1); SETI(b, 144, 0); SETI(b, 152, 0); SETI(b, 156, UNUSED_I);
     return 160;
-  case 10: /* simulation 84 */
+  case 2: /* car params 144 (P5 wheeled) */
+    fill_unused_f(b, 4, 144);
+    SETI(b, 28, UNUSED_I); SETI(b, 56, UNUSED_I); SETI(b, 84, UNUSED_I); SETP(b, 88, -1);
+    SETI(b, 96, UNUSED_I); SETI(b, 100, UNUSED_I); SETI(b, 128, UNUSED_I); SETI(b, 136, UNUSED_I);
+    return 144;
+  case 16: /* wheel params 80 (P5 wheeled) */
+    fill_unused_f(b, 4, 80);
+    SETI(b, 4, UNUSED_I); SETI(b, 8, UNUSED_I); SETI(b, 12, UNUSED_I); SETI(b, 16, UNUSED_I);
+    SETI(b, 20, UNUSED_I); SETI(b, 52, UNUSED_I); SETI(b, 56, UNUSED_I);
+    return 80;
+#endif
+  case 10: /* simulation 84 (pointer-free, identical) */
     fill_unused_f(b, 4, 84);
     SETI(b, 4, UNUSED_I); SETI(b, 60, UNUSED_I); SETI(b, 64, UNUSED_I);
     return 84;
-  case 12: /* buoyancy 80 */
+  case 12: /* buoyancy 80 (pointer-free, identical) */
     fill_unused_f(b, 4, 80);
     SETI(b, 72, UNUSED_I);
     return 80;
@@ -227,16 +651,6 @@ static int tmpl_params(int type, unsigned char *b) {
   case 23: /* timeout 12 */
     fill_unused_f(b, 4, 12);
     return 12;
-  case 2: /* car params 144 (P5 wheeled) */
-    fill_unused_f(b, 4, 144);
-    SETI(b, 28, UNUSED_I); SETI(b, 56, UNUSED_I); SETI(b, 84, UNUSED_I); SETP(b, 88, -1);
-    SETI(b, 96, UNUSED_I); SETI(b, 100, UNUSED_I); SETI(b, 128, UNUSED_I); SETI(b, 136, UNUSED_I);
-    return 144;
-  case 16: /* wheel params 80 (P5 wheeled) */
-    fill_unused_f(b, 4, 80);
-    SETI(b, 4, UNUSED_I); SETI(b, 8, UNUSED_I); SETI(b, 12, UNUSED_I); SETI(b, 16, UNUSED_I);
-    SETI(b, 20, UNUSED_I); SETI(b, 52, UNUSED_I); SETI(b, 56, UNUSED_I);
-    return 80;
   }
   return 0;
 }
@@ -300,9 +714,12 @@ static void apply_fields(const Toks *t, unsigned char *b, int cap) {
   }
 }
 
-/* P1a primitive-geometry probes (gprobe, gphysblob): owned by package P1a */
+/* P1a primitive-geometry probes (gprobe, gphysblob): owned by package P1a.
+   Milestone 1 of the x86 (1.2 client) oracle drops the internal-function probes. */
+#ifndef ORACLE_X86
 #include "p1a_probes.c"
 #include "p3_queries.c" /* P3 query commands (additive) */
+#endif
 
 /* ------------------------------------------------------------------ heightfield callbacks */
 static struct { int mode; float h0, kx, ky, amp; } g_hf;
@@ -323,14 +740,14 @@ static void print_entity(void *e) {
   unsigned char sp[256], sd[256];
   memset(sp, 0, sizeof sp);
   SETI(sp, 0, 1); SETI(sp, 4, 0xFFFFFFFF); SETI(sp, 8, 0xFFFFFFFF);
-  ((fn_stat)VT(e)[E_GetStatus])(e, sp);
+  m_status(e, E_GetStatus, sp);
   memset(sd, 0, sizeof sd);
   SETI(sd, 0, 8); SETI(sd, 4, 0xFFFFFFFF); SETI(sd, 8, 0xFFFFFFFF);
-  int dyn = ((fn_stat)VT(e)[E_GetStatus])(e, sd);
+  int dyn = m_status(e, E_GetStatus, sd);
   unsigned char sa[16];
   memset(sa, 0, sizeof sa);
   SETI(sa, 0, 7);
-  int awake = ((fn_stat)VT(e)[E_GetStatus])(e, sa);
+  int awake = m_status(e, E_GetStatus, sa);
   printf("e %s p", name_of(e)); out_f((float *)(sp + 24), 3);
   printf(" q"); out_f((float *)(sp + 60), 4);
   if (dyn) { printf(" v"); out_f((float *)(sd + 12), 3); printf(" w"); out_f((float *)(sd + 24), 3); }
@@ -375,7 +792,10 @@ static void *box_prim_geom(const Toks *t, int type) {
     parse_fv(need(t, "org"), (float *)prim, 3);
     parse_fv(need(t, "dir"), (float *)(prim + 12), 3);
   } break;
-  case 2: { /* heightfield primitive, 120 B */
+  case 2: { /* heightfield primitive, 120 B (x64 layout; the x86 one is not ported) */
+#ifdef ORACLE_X86
+    die("heightfield primitives are not ported to the 1.2 oracle yet", 0);
+#endif
     float *f = (float *)prim;
     f[0] = f[4] = f[8] = 1;
     int n[2] = {64, 64};
@@ -403,19 +823,23 @@ static void *box_prim_geom(const Toks *t, int type) {
     SETP(prim, 112, (void *)hf_surf);
   } break;
   }
-  void *g = ((fn_prim)VT(g_gm)[G_CreatePrimitive])(g_gm, type, prim);
+  void *g = m_prim(g_gm, type, prim);
   if (!g) die("CreatePrimitive failed", 0);
   if (type == 2 && get(t, "worldhf", 0)) {
+#ifndef ORACLE_X86
     /* world slot 17 SetHeightfieldData(heightfield primitive*, matMapping, nMats) */
-    ((fn_hfdata)VT(g_world)[W_SetHeightfieldData])(g_world, prim, 0, 0);
+    m_hfdata(g_world, prim, 0, 0);
     /* it (re)creates one terrain entity per caller slot at world+1568+8*i; name them all "terrain" */
     for (int i = 0; i < 5; i++) {
       void *te = *(void **)((char *)g_world + 1568 + 8 * i);
       if (te && !find_obj("terrain", 1)) add_obj("terrain", te, 1);
       else if (te) { int known = 0; for (int k = 0; k < g_nobj; k++) known |= g_obj[k].p == te; if (!known) add_obj("terrain", te, 1); }
     }
+#else
+    die("heightfield terrain is not ported to the 1.2 oracle yet", 0);
+#endif
   }
-  return ((fn_reg)VT(g_gm)[G_RegisterGeometry])(g_gm, g, 0, 0, 0);
+  return m_reg(g_gm, g);
 }
 static int geom_type_id(const char *s) {
   if (!strcmp(s, "box")) return 0;
@@ -436,9 +860,17 @@ static int ent_type_id(const char *s) {
   return atoi(s);
 }
 
+#ifndef ORACLE_X86
 #include "p1c_mesh.c" /* P1c: trimesh geometry (type=mesh, geominfo) */
+#endif
 
 static void cmd_rwi(const Toks *t) {
+#ifdef ORACLE_X86
+  /* The 1.2 SRWIParams (64 B) and ray_hit (pointer-bearing) layouts are not ported in
+     milestone 1; the box scenarios do not use rays. */
+  (void)t;
+  die("ray is not ported to the 1.2 oracle yet", 0);
+#else
   unsigned char p[96];
   unsigned char hits[80 * 16];
   memset(p, 0, sizeof p);
@@ -469,10 +901,13 @@ static void cmd_rwi(const Toks *t) {
       printf(" x %d %d %d %d %d", *(short *)(h + 24), *(short *)(h + 26), *(int *)(h + 32), *(int *)(h + 60), *(int *)(h + 64));
     printf("\n");
   }
+#endif /* !ORACLE_X86 */
 }
 
 /* P3 areas / P4a water probes (package P3-areas) */
+#ifndef ORACLE_X86
 #include "p3_areas.c"
+#endif
 
 static void run_line(char *line) {
   Toks t;
@@ -481,39 +916,63 @@ static void run_line(char *line) {
   tokenize(line, &t);
   if (!t.n) return;
   const char *c = t.k[0];
+#ifndef ORACLE_X86
   if (p3_command(c, &t)) return;
+#endif
   if (!strcmp(c, "grid")) {
     float org[3] = {0, 0, -100}, st[2] = {4, 4};
     int n[2] = {64, 64};
     parse_fv(get(&t, "org", "0,0,-100"), org, 3);
     sscanf(get(&t, "n", "64,64"), "%d,%d", &n[0], &n[1]);
     parse_fv(get(&t, "step", "4,4"), st, 2);
-    ((fn_grid)VT(g_world)[W_SetupEntityGrid])(g_world, atoi(get(&t, "axisz", "2")), org, n[0], n[1], st[0], st[1],
-                                             atoi(get(&t, "pod", "0")), atoi(get(&t, "cyclic", "0")));
-  } else if (!strcmp(c, "env")) { /* fake gEnv knobs: raymax=N (int), b289=0|1, b290=0|1 */
+    m_grid(g_world, atoi(get(&t, "axisz", "2")), org, n[0], n[1], st[0], st[1],
+           atoi(get(&t, "pod", "0")), atoi(get(&t, "cyclic", "0")));
+  } else if (!strcmp(c, "env")) { /* fake gEnv knobs: raymax=N (int), b289/b95=0|1, b290/b96=0|1 */
     const char *v;
-    if ((v = get(&t, "raymax", 0))) *(int *)((char *)&g_cfg + 248) = atoi(v);
-    if ((v = get(&t, "b289", 0))) *((unsigned char *)&g_env + 289) = (unsigned char)atoi(v);
-    if ((v = get(&t, "b290", 0))) *((unsigned char *)&g_env + 290) = (unsigned char)atoi(v);
+    if ((v = get(&t, "raymax", 0))) *(int *)((char *)&g_cfg + ENV_OFF_RAYMAX) = atoi(v);
+#ifdef ORACLE_X86
+    if ((v = get(&t, "b95", 0))) *((unsigned char *)&g_env + ENV_OFF_BYPASS) = (unsigned char)atoi(v);
+    if ((v = get(&t, "b96", 0))) *((unsigned char *)&g_env + ENV_OFF_B2) = (unsigned char)atoi(v);
+    if ((v = get(&t, "b97", 0))) *((unsigned char *)&g_env + ENV_OFF_PROFILER) = (unsigned char)atoi(v);
+#else
+    if ((v = get(&t, "b289", 0))) *((unsigned char *)&g_env + ENV_OFF_BYPASS) = (unsigned char)atoi(v);
+    if ((v = get(&t, "b290", 0))) *((unsigned char *)&g_env + ENV_OFF_B2) = (unsigned char)atoi(v);
+#endif
   } else if (!strcmp(c, "var")) {
+#ifdef ORACLE_X86
+    int off = atoi(need(&t, "off86")); /* x86 world offset 72..612: the layout shifts after +116 */
+    if (off < 72 || off > 612) die("var off86 outside the x86 physics-vars block", need(&t, "off86"));
+#else
     int off = atoi(need(&t, "off"));
     if (off < 104 || off > 632) die("var offset outside the physics-vars block", need(&t, "off"));
+#endif
     const char *f = get(&t, "f", 0), *i = get(&t, "i", 0);
     if (f) *(float *)((char *)g_world + off) = parse_f(f);
     else if (i) *(uint32_t *)((char *)g_world + off) = parse_u(i);
     else die("var needs f= or i=", 0);
   } else if (!strcmp(c, "dumpvars")) {
-    void *vars = ((fn_p)VT(g_world)[W_GetPhysVars])(g_world);
+    void *vars = m_call0(g_world, W_GetPhysVars);
     printf("vars %d", (int)((char *)vars - (char *)g_world));
+#ifdef ORACLE_X86
+    for (int o = 0; o < 540; o += 4) printf(" %08x", *(uint32_t *)((char *)vars + o));
+#else
     for (int o = 0; o < 632 - 104; o += 4) printf(" %08x", *(uint32_t *)((char *)vars + o));
+#endif
     printf("\n");
   } else if (!strcmp(c, "geom")) {
+#ifndef ORACLE_X86
     if (!strcmp(need(&t, "type"), "mesh")) add_obj(need(&t, "name"), p1c_geom_mesh(&t), 0); /* P1c */
-    else add_obj(need(&t, "name"), box_prim_geom(&t, geom_type_id(need(&t, "type"))), 0);
+    else
+#endif
+    add_obj(need(&t, "name"), box_prim_geom(&t, geom_type_id(need(&t, "type"))), 0);
   } else if (!strcmp(c, "geominfo")) { /* P1c: summary of a registered geometry */
+#ifndef ORACLE_X86
     void *g = find_obj(need(&t, "name"), 0);
     if (!g) die("unknown geom", need(&t, "name"));
     p1c_geominfo(need(&t, "name"), g);
+#else
+    die("geominfo is not ported to the 1.2 oracle yet", 0);
+#endif
   } else if (!strcmp(c, "entity")) {
     unsigned char pp[512];
     tmpl_params(0, pp);
@@ -522,8 +981,7 @@ static void run_line(char *line) {
     parse_fv(get(&t, "q", "0,0,0,1"), q, 4);
     memcpy(pp + 16, q, 16);
     apply_fields(&t, pp, 512);
-    void *e = ((fn_create)VT(g_world)[W_CreatePhysicalEntity])(g_world, ent_type_id(need(&t, "type")), 0.0f, pp, 0, 0,
-                                                              atoi(get(&t, "id", "-1")), 0, 0);
+    void *e = m_create(g_world, ent_type_id(need(&t, "type")), pp, atoi(get(&t, "id", "-1")));
     if (!e) die("CreatePhysicalEntity failed", need(&t, "name"));
     add_obj(need(&t, "name"), e, 1);
   } else if (!strcmp(c, "part")) {
@@ -541,23 +999,34 @@ static void run_line(char *line) {
     parse_fv(get(&t, "q", "0,0,0,1"), q, 4);
     memcpy(gp + 24, q, 16);
     f[10] = parse_f(get(&t, "scale", "1"));
+#ifdef ORACLE_X86
+    /* pe_geomparams 88: surface 52, flags 56, collider 60, mincontact 64, idmat 68,
+       lattice 72, matMapping 76, nMats 80, recalcBBox 84 (verified in FUN_35061170) */
+    SETI(gp, 52, UNUSED_I);
+    SETI(gp, 56, parse_u(get(&t, "flags", "0x1809F")));
+    SETI(gp, 60, parse_u(get(&t, "collider", "0x1")));
+    *(float *)(gp + 64) = parse_f(get(&t, "mincontact", "U"));
+    SETI(gp, 68, -1);
+    SETI(gp, 84, 1);
+#else
     SETI(gp, 64, UNUSED_I);
     SETI(gp, 68, parse_u(get(&t, "flags", "0x1809F"))); /* = DEFAULT_PART_FLAGS in the Rust crate */
     SETI(gp, 72, parse_u(get(&t, "collider", "0x1")));
     *(float *)(gp + 76) = parse_f(get(&t, "mincontact", "U"));
     SETI(gp, 80, -1);
     SETI(gp, 108, 1);
+#endif
     apply_fields(&t, gp, 512);
-    int id = ((fn_addg)VT(e)[E_AddGeometry])(e, g, gp, atoi(get(&t, "id", "-1")), 1);
+    int id = m_addg(e, E_AddGeometry, g, gp, atoi(get(&t, "id", "-1")), 1);
     printf("ret part %s %d\n", need(&t, "ent"), id);
   } else if (!strcmp(c, "surface")) { /* SetSurfaceParameters(idx, bounciness, friction, flags) */
-    int r = ((fn_surf)VT(g_world)[W_SetSurfaceParameters])(g_world, atoi(need(&t, "idx")), parse_f(get(&t, "bounce", "0")),
-                                                        parse_f(get(&t, "friction", "h:3f99999a")), parse_u(get(&t, "flags", "0")));
+    int r = m_surf(g_world, atoi(need(&t, "idx")), parse_f(get(&t, "bounce", "0")),
+                   parse_f(get(&t, "friction", "h:3f99999a")), parse_u(get(&t, "flags", "0")));
     printf("ret surface %d\n", r);
   } else if (!strcmp(c, "area")) {
     const char *kind = get(&t, "kind", "global");
     if (strcmp(kind, "global")) die("only kind=global areas are supported", kind);
-    void *a = ((fn_p)VT(g_world)[W_AddGlobalArea])(g_world);
+    void *a = m_call0(g_world, W_AddGlobalArea);
     add_obj(need(&t, "name"), a, 2);
   } else if (!strcmp(c, "params") || !strcmp(c, "action") || !strcmp(c, "status") || !strcmp(c, "getparams")) {
     void *e = find_target(need(&t, "target"));
@@ -569,10 +1038,10 @@ static void run_line(char *line) {
     apply_fields(&t, b, 512);
     int r;
     int ts = atoi(get(&t, "ts", "1")); /* bThreadSafe of SetParams / Action (<= 0 may queue) */
-    if (c[0] == 'p') r = ((fn_setp)VT(e)[E_SetParams])(e, b, ts);
-    else if (c[0] == 'a') r = ((fn_setp)VT(e)[E_Action])(e, b, ts);
-    else if (c[0] == 'g') r = ((fn_stat)VT(e)[E_GetParams])(e, b);
-    else r = ((fn_stat)VT(e)[E_GetStatus])(e, b);
+    if (c[0] == 'p') r = m_setp(e, E_SetParams, b, ts);
+    else if (c[0] == 'a') r = m_setp(e, E_Action, b, ts);
+    else if (c[0] == 'g') r = m_status(e, E_GetParams, b);
+    else r = m_status(e, E_GetStatus, b);
     printf("ret %s %s %d %d", c, need(&t, "target"), type, r);
     const char *dump = get(&t, "dump", 0); /* dump=OFF,NWORDS of the struct after the call */
     if (dump) {
@@ -593,7 +1062,7 @@ static void run_line(char *line) {
     int flags = (int)parse_u(get(&t, "flags", "0x9F"));
     int every = atoi(get(&t, "every", "1"));
     for (int i = 0; i < n; i++) {
-      ((fn_timestep)VT(g_world)[W_TimeStep])(g_world, dt, flags);
+      m_step(g_world, dt, flags);
       g_step++;
       if (every > 0 && (g_step % every == 0 || i == n - 1)) print_trace();
     }
@@ -659,13 +1128,18 @@ static void run_line(char *line) {
     printf("echo");
     for (int i = 1; i < t.n; i++) printf(" %s", t.k[i]);
     printf("\n");
+#ifndef ORACLE_X86
   } else if (p1a_command(c, &t)) {
   } else if (p3q_command(c, &t)) {
+#endif
   } else {
     die("unknown command", c);
   }
 }
 
+/* The internal-function / pair probes below use hard-coded x64 addresses and calling
+   conventions; milestone 1 of the 1.2 oracle only ports the scenario loop. */
+#ifndef ORACLE_X86
 /* ------------------------------------------------------------------ math probes */
 static uint64_t g_rng;
 static uint64_t splitmix(void) {
@@ -1080,6 +1554,7 @@ static int p4a_ext_intersect(char *line); /* P4a primitive Intersect probe */
 #include "p2b_probe.c"
 #include "p4a_probe_intersect.c"
 #include "p4b_probe_solver.c" /* P4b contact solver probe */
+#endif /* !ORACLE_X86 */
 
 /* ------------------------------------------------------------------ main */
 int main(int argc, char **argv) {
@@ -1087,6 +1562,26 @@ int main(int argc, char **argv) {
   setvbuf(stdout, 0, _IOFBF, 1 << 16);
   AddVectoredExceptionHandler(1, veh);
   const char *rt = getenv("AAEMU_PHYS_RT");
+  const char *scenario = 0;
+#ifdef ORACLE_X86
+  const char *init = "ctors", *t0 = getenv("AAEMU_PHYS_T0");
+  int fpu = 53;
+  if (!rt) rt = "D:\\aaemu-target\\physics\\oracle-x86\\rt";
+  int a = 1;
+  while (a < argc) {
+    if (!strcmp(argv[a], "--rt") && a + 1 < argc) { rt = argv[a + 1]; a += 2; }
+    else if (!strcmp(argv[a], "--fpu") && a + 1 < argc) { fpu = atoi(argv[a + 1]); a += 2; }
+    else if (!strcmp(argv[a], "--static-init") && a + 1 < argc) { init = argv[a + 1]; a += 2; }
+    else if (!strcmp(argv[a], "--t0") && a + 1 < argc) { t0 = argv[a + 1]; a += 2; }
+    else { scenario = argv[a++]; }
+  }
+  if (!scenario) {
+    fprintf(stderr,
+            "usage: physoracle_x86 [--rt DIR] [--fpu 24|53|64] [--static-init none|tls|ctors]\n"
+            "                     [--t0 CAPTURE] SCENARIO|-\n");
+    return 1;
+  }
+#else
   if (!rt) rt = "D:\\aa-re\\cryphysics\\harness\\rt";
   int a = 1;
   if (a + 1 < argc && !strcmp(argv[a], "--rt")) { rt = argv[a + 1]; a += 2; }
@@ -1094,11 +1589,37 @@ int main(int argc, char **argv) {
     fprintf(stderr, "usage: physoracle [--rt DIR] SCENARIO|-\n       physoracle [--rt DIR] --math NAME COUNT SEED\n");
     return 1;
   }
+  scenario = argv[a];
+#endif
   char dll[MAX_PATH];
+#ifdef ORACLE_X86
+  snprintf(dll, sizeof dll, "%s\\cryphysics12.dll", rt);
+#else
   snprintf(dll, sizeof dll, "%s\\cryphysics_dedicate.dll", rt);
+#endif
   SetDllDirectoryA(rt);
   g_phys = LoadLibraryA(dll);
   if (!g_phys) { printf("ERROR LoadLibrary %s failed (%lu)\n", dll, GetLastError()); return 1; }
+#ifdef ORACLE_X86
+  if ((void *)g_phys != (void *)IMAGE_BASE) {
+    printf("ERROR image loaded at %p, expected %p\n", (void *)g_phys, (void *)IMAGE_BASE);
+    return 1;
+  }
+  {
+    /* The unpacked image keeps the VMProtect dispatcher in .reloc (section flags: not
+       executable).  The client made it executable during unpack; TimeStep calls a mutated
+       thunk that lives there.  Do the same before running any engine code. */
+    DWORD old = 0;
+    if (!VirtualProtect((void *)g_phys, 0x75D000, PAGE_EXECUTE_READWRITE, &old))
+      fprintf(stderr, "VirtualProtect image failed (%lu)\n", GetLastError());
+  }
+  set_fpu_precision(fpu);
+  x86_static_init(init, t0);
+  install_fake_env(g_phys);
+  g_world = x86_create_world();
+  g_gm = m_call0(g_world, W_GetGeomManager);
+  fprintf(stderr, "world %p vtable=%p geom-manager %p\n", g_world, *(void **)g_world, g_gm);
+#else
   if (!strcmp(argv[a], "--p2b")) { /* P2b: unprojection / helper probe, commands on stdin */
     p2b_run();
     return 0;
@@ -1127,11 +1648,14 @@ int main(int argc, char **argv) {
   g_world = ((void *(*)(void *))GetProcAddress(g_phys, "CreatePhysicalWorld"))(NULL);
   if (!g_world) { printf("ERROR CreatePhysicalWorld failed\n"); return 1; }
   install_fake_env(g_phys);
-  g_gm = ((fn_p)VT(g_world)[W_GetGeomManager])(g_world);
+  g_gm = m_call0(g_world, W_GetGeomManager);
+#endif
 
-  FILE *f = strcmp(argv[a], "-") ? fopen(argv[a], "rb") : stdin;
-  if (!f) die("cannot open scenario", argv[a]);
-  p1c_set_scenario_path(argv[a]);
+  FILE *f = strcmp(scenario, "-") ? fopen(scenario, "rb") : stdin;
+  if (!f) die("cannot open scenario", scenario);
+#ifndef ORACLE_X86
+  p1c_set_scenario_path(scenario);
+#endif
   printf("physoracle 1\n");
   char line[4096];
   while (fgets(line, sizeof line, f)) run_line(line);
