@@ -348,7 +348,19 @@ async fn quest_machine_chest_hands_out_the_metal_cylinder() {
         .add_visible_object(&fx.player, &fx.server.view_ctx());
     fx.client.drain();
     let have = |fx: &Fx| Inv::of(&fx.player).items_count(METAL_CYLINDER, -1);
+    // (step, first objective) of the quest: Progress (4) with nothing gathered.
+    let row = |fx: &Fx| {
+        fx.server.systems.quests.run_queued_evaluations(&fx.server);
+        fx.player
+            .data()
+            .quests
+            .active
+            .iter()
+            .find(|q| q.template_id == QUEST)
+            .map(|q| (q.step, q.objectives[0]))
+    };
     assert_eq!(have(&fx), 0);
+    assert_eq!(row(&fx), Some((4, 0)));
 
     fx.player.data().unit.skill_last_used_ms = 0;
     fx.player.data().unit.global_cooldown_ms = 0;
@@ -368,4 +380,6 @@ async fn quest_machine_chest_hands_out_the_metal_cylinder() {
     let ops = fx.client.drain_ops();
     eprintln!("chest cast frames: {ops:x?}");
     assert_eq!(have(&fx), 1, "the chest must hand out the Metal Cylinder");
+    // "Investigate the Suspicious Chest 1/1": the objective is done and the quest is Ready (6).
+    assert_eq!(row(&fx), Some((6, 1)));
 }
