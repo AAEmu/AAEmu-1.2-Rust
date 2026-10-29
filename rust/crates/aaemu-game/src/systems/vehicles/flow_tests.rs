@@ -1455,6 +1455,69 @@ async fn slave_summon_bind_drive_and_despawn() {
     assert!(ops(&b.drain()).contains(&sc::SCUnitsRemovedPacket));
 }
 
+/// A deck stander's transform is hull-local (`parent_obj_id` set) but it is not in the hull's
+/// `AttachedCharacters` (it was not bound as a driver). Replacing the hull must give the owner
+/// its world pose back before `create_spawn_committed` reads it: otherwise the summon places
+/// the new hull at the old ship-local coordinates (live capture: (0.96, -20.27) instead of
+/// 4293, 4122).
+#[tokio::test]
+async fn summoning_while_standing_on_the_prior_hull_uses_the_owners_world_position() {
+    let server = server_with(slave_data());
+    let mut a = TestClient::new(&server, 1, 1);
+    let (pa, item_id) = player_with_item(&server, &a, 1, PA, (100.0, 100.0), SLAVE_ITEM);
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    a.drain();
+
+    let item = mates::owned_item(&server, &pa, item_id).unwrap();
+    let prior = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        SLAVE_TEMPLATE,
+        Some(item),
+        false,
+        None,
+        None,
+    )
+    .expect("prior hull");
+    prior
+        .data()
+        .unit
+        .transform
+        .set_position(200.0, 300.0, 50.0, 0.0, 0.0, 0.0);
+    // Standing on the deck: parented with a ship-local position, not bound as a driver.
+    let me = WorldObject::from(&pa);
+    world.attach_child(&WorldObject::from(&prior), &me);
+    pa.data()
+        .unit
+        .transform
+        .set_position(1.0, -2.0, 3.0, 0.0, 0.0, 0.0);
+    a.drain();
+
+    let item = mates::owned_item(&server, &pa, item_id).unwrap();
+    let second = slaves::create(
+        &server,
+        &world,
+        Some(&pa),
+        SLAVE_TEMPLATE,
+        Some(item),
+        false,
+        None,
+    )
+    .await
+    .expect("second hull");
+    assert!(world.slave(prior.obj_id).is_none(), "prior hull replaced");
+    assert_eq!(pa.data().unit.transform.parent_obj_id, 0);
+    let owner = world.world_pos_rot(&me);
+    assert_eq!((owner.x, owner.y, owner.z), (201.0, 298.0, 53.0));
+    // 5 m in front (SpawnYOffset clamped to 5..50), level, 90 degrees CCW of the owner.
+    let t = second.data().unit.transform;
+    assert_eq!((t.x, t.y, t.z), (201.0, 303.0, 53.0));
+    assert!((t.rot_z - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+}
+
 #[tokio::test]
 async fn rename_slave_packet_checks_ownership_and_updates_the_saved_name() {
     use crate::net::registry::ClientPacket;
