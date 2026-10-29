@@ -1585,7 +1585,7 @@ async fn player_timed_cast_starts_its_gcd_at_acceptance_not_at_cast_end() {
     let timed = SkillRun::new(
         Arc::new(SkillTemplate {
             casting_time: 400,
-            custom_gcd: 1000,
+            custom_gcd: 3000,
             ..super::tests::skill_template(10153)
         }),
         1,
@@ -1605,7 +1605,7 @@ async fn player_timed_cast_starts_its_gcd_at_acceptance_not_at_cast_end() {
     let after = crate::world::now_ms();
     let gcd = player.data().unit.global_cooldown_ms;
     assert!(
-        (before + 1000..=after + 1000).contains(&gcd),
+        (before + 3000..=after + 3000).contains(&gcd),
         "GCD set when the cast was accepted, not {gcd} (accepted at {before}..{after})"
     );
     wait_for_cast_end(&WorldObject::from(&player)).await;
@@ -1615,14 +1615,15 @@ async fn player_timed_cast_starts_its_gcd_at_acceptance_not_at_cast_end() {
         gcd,
         "the cast end does not restart the GCD"
     );
-    // The cast used 400 ms of the 1000 ms GCD: 600 ms are left, still refused ...
+    // The cast used 400 ms of the 3000 ms GCD (more on a slow machine): up to 2600 ms are left,
+    // still refused ...
     assert_eq!(
         cast(&server, &follow_up, &player, &npc),
         (skill_result::COOLDOWN_TIME, 0)
     );
-    // ... but with 500 ms more elapsed only the network grace is left. The old cast-end GCD
-    // would still have ~500 ms to go here.
-    age_gcd(&player, 500);
+    // ... but with 2500 ms more elapsed at most 100 ms (within the network grace) are left. The
+    // old cast-end GCD would still have 500 ms to go here.
+    age_gcd(&player, 2500);
     assert_eq!(
         cast(&server, &follow_up, &player, &npc).0,
         skill_result::SUCCESS
