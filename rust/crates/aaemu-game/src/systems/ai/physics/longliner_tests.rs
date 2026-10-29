@@ -92,7 +92,10 @@ fn simulate_longliner(
     specification.model_id = 1360;
     specification.kind = super::super::SlaveKind::FISHBOAT;
     let mut ship = PhysShip::new(specification, model, ShipGameView::default());
-    ship.collision_bounds = bounds;
+    // Same production rule as `add_ship`: the recorded fixture stands in for
+    // `model_collision_bounds` (no client assets in a unit test), then the clip trims the rig's
+    // z-range while keeping the authored length/beam.
+    ship.collision_bounds = bounds.map(|b| super::super::cry::clip_hull_bounds(b, &model));
     ship.body.orientation =
         crate::systems::ai::numerics::Quat::from_yaw_pitch_roll(yaw, initial_tilt, 0.0);
     wp.enqueue(Pending::Add(Box::new(ship)));

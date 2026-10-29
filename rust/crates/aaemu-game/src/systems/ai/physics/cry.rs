@@ -134,6 +134,8 @@ pub fn prefab_buoys(files: &Files, models: &ModelCache, reference: &str) -> Vec<
 /// The native entity also has render/non-brush bounds not exposed by our model loader;
 /// use the authored DEFAULT physics proxies transformed into the prefab frame. This
 /// documented proxy adaptation avoids inventing dimensions when assets are available.
+/// The union includes mast/rigging proxies; [`clip_hull_bounds`] trims its z-range to the
+/// hull envelope before the box becomes the solid hull collider.
 pub fn model_collision_bounds(
     files: &Files,
     models: &ModelCache,
@@ -192,6 +194,26 @@ pub fn model_collision_bounds(
         .then_some(BoxPrim::aligned((min + max) * 0.5, half))
 }
 
+/// Freeboard kept above the mass-box top by the clipped hull collider (metres, model units).
+pub const HULL_FREEBOARD_METERS: f32 = 1.0;
+
+/// The authored hull bounds with their z-range clipped to the hull envelope of the mass box:
+/// the top is at most `mass_center_z + mass_box_size_z / 2 + HULL_FREEBOARD_METERS` (mast and
+/// rigging proxies are excluded), while the authored bottom (draft) and the authored XY extents
+/// (length/beam) stay untouched. A box already inside the envelope is returned unchanged, and a
+/// degenerate clip keeps the authored box. The result is still in unscaled prefab units.
+pub fn clip_hull_bounds(mut bounds: BoxPrim, m: &ShipModel) -> BoxPrim {
+    let mass_top = m.mass_center_z + m.mass_box_size_z.max(0.01) * 0.5;
+    let bottom = bounds.center.z - bounds.size.z;
+    let top = (bounds.center.z + bounds.size.z).min(mass_top + HULL_FREEBOARD_METERS);
+    if top <= bottom {
+        return bounds;
+    }
+    bounds.center.z = (top + bottom) * 0.5;
+    bounds.size.z = (top - bottom) * 0.5;
+    bounds
+}
+
 /// The parts of `InitPhysicalEntity` for a ship model at `scale`.
 pub fn ship_parts(m: &ShipModel, scale: f32) -> Vec<ShipPart> {
     ship_parts_with_bounds(m, scale, None)
@@ -212,19 +234,22 @@ pub fn ship_parts_with_bounds(m: &ShipModel, scale: f32, bounds: Option<BoxPrim>
     let hull_half = bounds.map_or(half, |b| b.size * s);
     let hull_center = bounds.map_or(c, |b| b.center * s);
     let mut parts = Vec::new();
-    // buoy tube (desc +200 length, +204 z offset, +208 radius; 0 → defaults from the bounds)
+    // buoy tube (desc +200 length, +204 z offset, +208 radius; 0 → defaults from the mass box)
+    // The desc's zero defaults come from the mass box (half beam / half length), not from the
+    // authored hull collision bounds: those are the whole ship's proxy AABB (for the Cutter they
+    // wrap the masts/deck, ~4x the waterline area) and an oversized buoy tube launches the hull.
     let tube_len = if m.tube_length == 0.0 {
-        hull_half.y
+        half.y
     } else {
         m.tube_length * s
     };
     let tube_r = if m.tube_radius == 0.0 {
-        hull_half.x
+        half.x
     } else {
         m.tube_radius * s
     };
     let tube_z = if m.tube_offset_z == 0.0 {
-        hull_half.x
+        half.x
     } else {
         m.tube_offset_z * s
     };
@@ -686,6 +711,16 @@ mod tests {
                     < 1e-5
             );
         }
+        // The zero tube defaults are the mass box's half beam / half length; taking them from
+        // the authored hull bounds (the whole ship's proxy AABB) made a Cutter's buoy volume
+        // ~4x too large and the engine launched the summoned hull ~55 m up.
+        let Primitive::Cylinder(tube) = ship_parts_with_bounds(&model, 1.0, Some(bounds))[0].prim
+        else {
+            panic!("buoy cylinder")
+        };
+        assert!((tube.r - model.mass_box_size_x * 0.5).abs() < 1e-6);
+        assert!((tube.hh - model.mass_box_size_y * 0.5).abs() < 1e-6);
+        assert!((tube.center.z - model.mass_box_size_x * 0.5).abs() < 1e-6);
         let mut explicit = model;
         explicit.tube_length = 7.0;
         explicit.tube_radius = 1.25;
@@ -700,6 +735,126 @@ mod tests {
         for (a, b) in fallback.iter().zip(explicit_fallback) {
             assert_same_primitive(a.prim, b.prim);
             assert_eq!((a.flags, a.collider, a.mass), (b.flags, b.collider, b.mass));
+        }
+    }
+
+    #[test]
+    fn fallback_buoy_tube_uses_the_mass_box_not_the_authored_collision_bounds() {
+        // The Cutter's authored hull bounds are the whole rig (center +18 m, 48 m tall); using
+        // them for the fallback buoy tube displaces many times the hull's mass and the engine
+        // buoyancy launches the hull. The desc's zero defaults are the mass box's half extents.
+        let model = model();
+        let bounds = BoxPrim::aligned(PVec3::new(0.0, 5.0, 18.0), PVec3::new(6.0, 23.0, 24.0));
+        let parts = ship_parts_with_bounds(&model, 1.0, Some(bounds));
+        let Primitive::Cylinder(tube) = parts[0].prim else {
+            panic!("buoy tube")
+        };
+        assert!(
+            (tube.r - model.mass_box_size_x * 0.5).abs() < 1e-6,
+            "{tube:?}"
+        );
+        assert!(
+            (tube.hh - model.mass_box_size_y * 0.5).abs() < 1e-6,
+            "{tube:?}"
+        );
+        assert!(
+            (tube.center.z - model.mass_box_size_x * 0.5).abs() < 1e-6,
+            "{tube:?}"
+        );
+        // Explicit desc values still override the fallback.
+        let mut explicit = model;
+        explicit.tube_length = 7.0;
+        explicit.tube_radius = 1.25;
+        explicit.tube_offset_z = 0.3;
+        let parts = ship_parts_with_bounds(&explicit, 1.0, Some(bounds));
+        let Primitive::Cylinder(tube) = parts[0].prim else {
+            panic!("buoy tube")
+        };
+        assert_eq!((tube.r, tube.hh, tube.center.z), (1.25, 7.0, 0.3));
+    }
+
+    #[test]
+    fn create_entity_builds_the_clipped_hull_for_longliner_and_cutter() {
+        // The authored proxy unions from the 1.2 assets for the two ships from the live
+        // reports: the Longliner keeps its 14 m authored half length, the Cutter's rig is
+        // trimmed to the hull envelope (top at the mass-box top + 1 m freeboard). `add_ship`
+        // applies the same clip to `model_collision_bounds`; the fixtures stand in for the
+        // asset load, then `create_entity` builds the production hull entity.
+        let longliner = ShipModel {
+            id: 19,
+            mass: 12000.0,
+            mass_center_z: -3.3,
+            mass_box_size_x: 5.0,
+            mass_box_size_y: 11.0,
+            mass_box_size_z: 10.0,
+            ..ShipModel::default()
+        };
+        let longliner_bounds = BoxPrim::aligned(
+            PVec3::new(0.0, 1.935_895_9, 3.577_293_2),
+            PVec3::new(4.577_419, 14.026_104, 5.289_681_4),
+        );
+        let cutter = ShipModel {
+            id: 6,
+            mass: 45000.0,
+            mass_center_z: -4.0,
+            mass_box_size_x: 6.5,
+            mass_box_size_y: 30.0,
+            mass_box_size_z: 14.5,
+            ..ShipModel::default()
+        };
+        let cutter_bounds = BoxPrim::aligned(
+            PVec3::new(0.000_734_329_2, 5.385_618, 17.994_78),
+            PVec3::new(5.960_227, 22.946_87, 23.838_594),
+        );
+
+        let pw = PhysWorld::new(0, 0, "t", 1, 1, 100.0, None);
+        let mut st = pw.lock();
+        for (model, authored) in [(longliner, longliner_bounds), (cutter, cutter_bounds)] {
+            let clipped = clip_hull_bounds(authored, &model);
+            let mass_top = model.mass_center_z + model.mass_box_size_z * 0.5;
+            assert!(
+                (clipped.center.z + clipped.size.z - (mass_top + HULL_FREEBOARD_METERS)).abs()
+                    < 1e-5,
+                "{clipped:?}"
+            );
+            assert!(
+                (clipped.center.z - clipped.size.z - (authored.center.z - authored.size.z)).abs()
+                    < 1e-5,
+                "the authored draft is kept"
+            );
+            assert_eq!(
+                (
+                    clipped.center.x,
+                    clipped.center.y,
+                    clipped.size.x,
+                    clipped.size.y
+                ),
+                (
+                    authored.center.x,
+                    authored.center.y,
+                    authored.size.x,
+                    authored.size.y
+                ),
+                "the authored length/beam are kept"
+            );
+            let mut ship = PhysShip::new(
+                spec(1, 300.0, 300.0, 100.0, 0.0),
+                model,
+                ShipGameView::default(),
+            );
+            ship.collision_bounds = Some(clipped);
+            let e = create_entity(&mut st, &ship).expect("ship entity");
+            let part = st.world.ents[e.0 as usize]
+                .as_ref()
+                .expect("entity")
+                .parts
+                .iter()
+                .find(|p| p.flags_collider == 0x80)
+                .expect("solid hull part");
+            let bb = part.pgeom.geom.bbox();
+            assert!((bb.center.z - clipped.center.z).abs() < 1e-4, "{bb:?}");
+            assert!((bb.size.z - clipped.size.z).abs() < 1e-4, "{bb:?}");
+            assert!((bb.size.y - clipped.size.y).abs() < 1e-4, "{bb:?}");
         }
     }
 
