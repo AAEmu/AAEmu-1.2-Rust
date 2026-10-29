@@ -238,8 +238,8 @@ fn slave_unit_state_with_slave_equipment_decodes_with_expected_length() {
     tail(&mut e, &[255, 0xFF], &posture, 0);
     assert_eq!(p.body, e.as_bytes());
 
-    // Decode the equipment the way the client does: a `u32` template id (body parts are
-    // template-only), then the full item with its detail body length.
+    // Decode the equipment the way the client does for a slave: every slot is a full item
+    // (`3961fa20` only reads 19..25 as template-only when `baseUnitType != 2`).
     let mut s = PacketStream::from_bytes(p.body);
     s.read_bc().unwrap();
     s.read_string().unwrap();
@@ -254,12 +254,9 @@ fn slave_unit_state_with_slave_equipment_decodes_with_expected_length() {
     s.read_u8().unwrap();
     s.read_u32().unwrap();
     let mut bell = None;
-    for slot in 0..28 {
+    for _ in 0..28 {
         let template = s.read_u32().unwrap();
         if template == 0 {
-            continue;
-        }
-        if (19..=25).contains(&slot) {
             continue;
         }
         s.read_u64().unwrap(); // instance id
@@ -306,6 +303,101 @@ fn slave_unit_state_with_slave_equipment_decodes_with_expected_length() {
     s.read_u8().unwrap();
     s.read_u8().unwrap();
     assert_eq!(s.remaining(), 0, "the item must not desync the packet");
+}
+
+/// The 1.2 client's equipment reader `3961fa20` reads slots 19..25 as template-only `u32`s
+/// only when `baseUnitType != 2`; for a slave they are full items like every other slot. A
+/// hull part in one of them (Harpoon Clipper: template 14, part 29742 in slot 23) must not be
+/// truncated, or the client reads the following bytes as item fields and runs off the buffer.
+#[test]
+fn slave_body_part_slots_are_full_items() {
+    let mut sl = Slave::new(321, 14);
+    sl.unit = base("Harpoon", 14);
+    sl.unit.tl_id = 7;
+    let part = item("SlaveEquipment", 0x1122334455667788, 29742, 4);
+    sl.equipment[23] = Some(part.clone());
+    let p = slave_unit_state(0x20, &mut sl, "", 0);
+
+    let mut e = PacketStream::new();
+    e.write_bc(0x20).write_str("Harpoon").write_u8(2);
+    e.write_u32(321).write_u16(7).write_u32(14).write_u32(0);
+    e.write_str("");
+    pos_scale_level_model(&mut e);
+    for _ in 0..23 {
+        e.write_i32(0);
+    }
+    part.write(&mut e);
+    for _ in 24..28 {
+        e.write_i32(0);
+    }
+    e.write_u8(0); // model params (slaves never get SetType(Skin))
+    let mut posture = vec![8, 0];
+    posture.extend_from_slice(&[0; 8]);
+    tail(&mut e, &[255, 0xFF], &posture, 0);
+    assert_eq!(p.body, e.as_bytes());
+
+    // Decode client-style to EOF: full items in every slot for `baseUnitType == 2`.
+    let mut s = PacketStream::from_bytes(p.body);
+    s.read_bc().unwrap();
+    s.read_string().unwrap();
+    s.read_u8().unwrap();
+    s.read_u32().unwrap();
+    s.read_u16().unwrap();
+    s.read_u32().unwrap();
+    s.read_u32().unwrap();
+    s.read_string().unwrap();
+    s.read_position().unwrap();
+    s.read_f32().unwrap();
+    s.read_u8().unwrap();
+    s.read_u32().unwrap();
+    let mut found = None;
+    for slot in 0..28 {
+        let template = s.read_u32().unwrap();
+        if template == 0 {
+            continue;
+        }
+        s.read_u64().unwrap(); // instance id
+        s.read_u8().unwrap(); // grade
+        s.read_u8().unwrap(); // flags
+        s.read_i32().unwrap(); // count
+        let detail = s.read_u8().unwrap();
+        s.read_bytes(crate::models::item::detail_body_len(detail))
+            .unwrap();
+        s.read_i64().unwrap(); // create time
+        s.read_i32().unwrap(); // lifespan
+        s.read_u32().unwrap(); // made unit id
+        s.read_u8().unwrap(); // world id
+        s.read_i64().unwrap(); // unsecure time
+        s.read_i64().unwrap(); // unpack time
+        found = Some((slot, template));
+    }
+    assert_eq!(found, Some((23, 29742)));
+
+    let _: UnitCustomModelParams = s.read().unwrap();
+    s.read_bc().unwrap();
+    s.read_i32().unwrap();
+    s.read_i32().unwrap();
+    s.read_i8().unwrap(); // attach point -1: no owner object
+    s.read_i8().unwrap(); // bonding object 0
+    s.read_u8().unwrap(); // TurretState
+    s.read_bool().unwrap();
+    s.read_f32().unwrap();
+    s.read_f32().unwrap();
+    s.read_u8().unwrap(); // active weapon
+    s.read_u8().unwrap(); // learned skills
+    s.read_i32().unwrap(); // learned buffs
+    s.read_i8().unwrap();
+    s.read_i8().unwrap();
+    s.read_i8().unwrap();
+    s.read_u8().unwrap(); // race / gender
+    s.read_pisc_w(4).unwrap();
+    s.read_pisc_w(4).unwrap();
+    s.read_pisc_w(2).unwrap();
+    s.read_u16().unwrap(); // flags
+    s.read_u8().unwrap(); // good / bad / hidden buffs
+    s.read_u8().unwrap();
+    s.read_u8().unwrap();
+    assert_eq!(s.remaining(), 0, "the part must not desync the packet");
 }
 
 #[test]
