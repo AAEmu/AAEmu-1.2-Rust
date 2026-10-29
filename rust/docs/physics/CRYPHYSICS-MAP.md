@@ -421,6 +421,83 @@ Multi-threaded stepping (vars `+504` > 1) needs a real thread-task manager behin
 
 ---
 
+## 9b. 1.2 client oracle (x86) ? **works**
+
+`physoracle` has an `ORACLE_X86` build (`oracle/patch_entry.py`, `oracle/build_x86.bat`) that loads
+the unpacked 1.2 client `cryphysics.dll` standalone and re-runs the same scenarios. The golden
+traces are in `crates/aaemu-physics/tests/golden-12/`; build/run steps and the runtime patches are
+in `oracle/README.md`.
+
+**Loading.** `patch_entry.py` copies `unpack_x86/cryphysics_unpacked.dll` and sets
+`AddressOfEntryPoint = 0` (no `DllMain`, no VMProtect stubs), keeping the preferred base
+`0x34FF0000`. The recovered import directory labelled six `ntdll` `Rtl*` imports as `kernel32`;
+they are split into their own `ntdll.dll` descriptors (otherwise `LoadLibrary` fails with error
+127). The x86 runtime DLLs come from the read-only 1.2 client: `msvcr100`, `msvcp100`, `xlcommon`,
+`xldiag`, `tbb`, `dbghelp`. The image's `.reloc` section is not executable but holds the
+VMProtect dispatcher; the client made it executable during unpack, and the harness does the same
+(`VirtualProtect`). `TimeStep` then calls the VM stub at `0x35081560` twice (profiler timer
+starts); with the profiler off (`gEnv+0x97 = 0`) the runtime copy replaces that thunk with `ret`.
+
+**Static init.** The unpacked image's `.data` is the captured t0 state (0 word diffs against
+`capture/t0`) and is already post-CRT-init, but it carries the client process's TLS index, world
+table and heap pointers. A true pre-init rebuild from the *packed* file is not possible: its
+`.data` raw (`0xC00`) is encrypted (471 of 768 words differ from t0). Two working routes:
+
+* `--static-init tls` (quick fix): allocate a fresh TLS slot, zero `0x3520D810/814` and the
+  64-entry table at `0x3520D818`, and the stale heap pointers `0x35208D3C`/`0x35252BC0`.
+* `--static-init ctors` (default): restore `.data` from the unpacked file, zero the same globals,
+  run the 35 CRT static ctors from the XC table `0x351FA18C` and diff against t0. Four ctors end
+  in `_atexit()` and cannot be replayed: the captured per-module atexit list points into the
+  client's heap, and `_onexit` corrupts our heap (`STATUS_HEAP_CORRUPTED`). `0x351F8DB0` is
+  skipped; the non-atexit halves of `0x351F8E00` / `0x351F91A0` are called by hand; `0x351F9240`'s
+  byte flag is set. Self-check: 5 process-specific words + 3 initialization-only words (guard bit
+  at `0x35208D18`, self-pointers at `0x35208E60`/`0x35376424`), no unexpected diffs. Both routes
+  produce identical traces.
+
+**World.** Allocate `0x53F0` with `FUN_351F3BE0`, construct with `0x350889B0` (`__thiscall`), set
+`DAT_3523F4E8 = 0` (client behaviour). The fake `gEnv` at `0x3537640C` is smaller than x64's:
+`+0` a null object (the profiler label ctor calls its slot 68), `+0x38` a config object whose
+slot 21 (vtable `+0x54`) returns a block with the ray-grid limit at `+0x100`, bytes `+0x95`
+(DrawRayOnGrid bypass) and `+0x96`, `+0x97 = 0` (profiler off). x86 fake methods must be
+`__thiscall` (or `__fastcall` with a dummy EDX): a cdecl fake leaves the arguments of slot 1 on
+the stack and corrupts the caller.
+
+**Verified slots.** World vtable `0x351FC598`: 10 `GetGeomManager` (`0x35089140`), 12
+`SetupEntityGrid` (`0x35089810`; `ret 0x24`: axisz, `Vec3` origin **by value**, nx, ny, stepx,
+stepy, cyclic), 18 `SetHeightfieldData` (`0x35093C00`), 21 `GetPhysVars` (`0x35089160`, returns
+`world+0x48`), 22 `CreatePhysicalEntity` (`0x3509E020`, `ret 0x1C`, 7 stack arguments), 25
+destroy (`0x3509E7D0`), 30 `SetSurfaceParameters` (`0x35081080`), 33 `TimeStep` (`0x3509F6A0`),
+43 `RayWorldIntersection` (`0x351C2B00`), 80 `AddGlobalArea` (`0x350526E0`). The geom manager is
+`world+8` (vtable `0x351FC518`): `CreatePrimitive` slot 7 (`ret 8`), `RegisterGeometry` slot 9
+(`ret 0x10`).
+
+**x86 struct layouts.** `pe_params_pos` is 56 B: pos 4, q 16, scale 32, mtx3x4 36, mtx3x3 40,
+sim_class 44, recalc_bounds 48, byte 52. `pe_geomparams` is 88 B: density 4, mass 8, pos 12, q 24,
+scale 40, mtx3x4 44, mtx3x3 48, surface_idx 52, flags 56, collider 60, min_contact_dist 64,
+idmat_breakable 68, lattice 72, matMapping 76, nMats 80, recalcBBox 84. `pe_status_pos` is
+unchanged through `iSimClass` (+80; `time_back` moves to +100). Pointer-free params/actions
+(simulation, buoyancy, bbox, flags, timeout, impulse, awake, set_velocity, reset, drive) keep
+their x64 offsets.
+
+**Physics-vars block.** `GetPhysVars` returns `world+0x48` (x64: `+0x68`); the block is 540 B.
+The first 29 words equal x64. After block `+116` two extra zero words follow (x86 world
+`+188/+192`); x64's time granularity (world `+220`) appears at x86 `+196`, and the rest is
+shifted by +8; one extra zero ends the block at `+608`. The only value difference is the
+`dedicated` flag at `+588`: 0 for the client (fake `gEnv`), 1 in the x64 golden (`gEnv == NULL`).
+`dumpvars` prints 135 words.
+
+**Golden scenarios.** `box_on_ground` and `box_float_300kg`, two runs each under x87 24-bit
+(control word `0x007F`) and 53-bit (`0x027F`), are deterministic and **bit-identical to the x64
+10.x traces** (line endings aside); there is no first divergence. Rest z `0x3EF62457` (0.480746),
+float z `0x400DBD88` (2.214693). `oracle/trace_diff.py` reports the first divergence
+(step/entity/field) for future scenarios.
+
+**Limits.** Not ported in milestone 1: `ray` (1.2 `SRWIParams`/`ray_hit` layouts), heightfield
+terrain, trimesh geometry, non-global areas, living/wheeled/particle entities, `pe_params_part` /
+car / wheel layouts, and the internal-function probes (`--math`, `--p1a*`, `--p2*`, `--p4*`).
+
+---
+
 ## 10. Porting plan for `aaemu-physics`
 
 Principles: port the x64 10.x semantics (identical to 1.2 in every way that matters, §2), keep the
