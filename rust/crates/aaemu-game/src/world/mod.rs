@@ -145,6 +145,10 @@ pub struct WorldInstance {
     pub id: u32,
     pub template: Arc<WorldTemplate>,
     grid: Mutex<Grid>,
+    /// Serializes a player planting's final placement check with the insert of its doodad:
+    /// hold it from the last `placement::refusal` through `spawn`, so a second planting at the
+    /// same spot sees the first. Lock order: this guard, then the grid / object data.
+    placement: Mutex<()>,
     /// `_objects` (every object of the instance by obj id; the typed C# dictionaries are
     /// filtered views of it).
     objects: DashMap<u32, WorldObject>,
@@ -161,10 +165,23 @@ impl WorldInstance {
             id,
             template,
             grid: Mutex::new(Grid::default()),
+            placement: Mutex::new(()),
             objects: DashMap::new(),
             characters: DashMap::new(),
             player_activity_revision: AtomicU64::new(0),
         }
+    }
+
+    /// Guards a player planting: the final placement check and the doodad's `spawn` both run
+    /// with this guard held, so two plantings at the same spot cannot both pass the check
+    /// before either is in the grid. See
+    /// `systems::npcs::doodad::manager::create_player_doodad_with_labor`.
+    ///
+    /// Lock order: this guard is taken first; the grid and one object's data may be locked
+    /// while it is held (`spawn` does). Nothing locks it while holding the grid, object data,
+    /// a container or an item lock.
+    pub fn placement_guard(&self) -> MutexGuard<'_, ()> {
+        self.placement.lock().expect("placement poisoned")
     }
 
     /// `GetRegionByPos`.

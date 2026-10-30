@@ -339,6 +339,27 @@ pub fn do_despawn(server: &GameServer, doodad: &DoodadRef) {
     }
 }
 
+/// Race-test hook between the final placement check and the doodad insert, inside the world's
+/// planting guard (threads that are not racing ignore it).
+#[cfg(test)]
+static PLACEMENT_PAUSE: Mutex<Option<Arc<dyn Fn() + Send + Sync>>> = Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_placement_pause(pause: Option<Arc<dyn Fn() + Send + Sync>>) {
+    *PLACEMENT_PAUSE.lock().expect("placement pause poisoned") = pause;
+}
+
+#[cfg(test)]
+fn run_placement_pause() {
+    let pause = PLACEMENT_PAUSE
+        .lock()
+        .expect("placement pause poisoned")
+        .clone();
+    if let Some(pause) = pause {
+        pause();
+    }
+}
+
 /// `CreatePlayerDoodad(character, id, x, y, z, zRot, scale, itemId, farmGroupKind,
 /// itemTemplateId, customData, ignoreHouses)`: creates, initialises, spawns and saves a *planted*
 /// player doodad (`CSCreateDoodadPacket`). The 1.2 seed-builder rules run first.
@@ -438,9 +459,16 @@ fn create_player_doodad_with_labor(
     // The planting path (`CSCreateDoodad`) uses the 1.2 seed builder's rules here; the packet
     // handler checks them too, in its earlier order. Server-spawned doodads (crime evidence and
     // the fake-trial pine) skip them (`create_player_doodad_server_spawned`).
+    //
+    // The final check and the spawn below are one critical section under the world's planting
+    // guard: a second planting at the same spot cannot pass its check while this doodad is not
+    // yet in the grid. The refusal error and the seed consumption run after the guard is
+    // dropped (no network send or economy callback under the guard).
+    let placement_guard = validate_placement.then(|| world.placement_guard());
     if validate_placement {
         if let Some(template) = server.game_data.systems.npcs.doodad.template(id) {
             if let Some(refusal) = placement::refusal(server, &world, player, template, pos) {
+                drop(placement_guard);
                 tracing::warn!(
                     "{char_name}: doodad {id} not placed at {pos:?}: {refusal:?} ({})",
                     refusal.error_message()
@@ -449,6 +477,8 @@ fn create_player_doodad_with_labor(
                 return None;
             }
         }
+        #[cfg(test)]
+        run_placement_pause();
     }
     let economy = server.systems.npcs.hooks.economy.get();
 
@@ -571,6 +601,13 @@ fn create_player_doodad_with_labor(
         }
     }
     let is_coffer = doodad.data().coffer.is_some();
+
+    // Insert the doodad into the world while the planting guard is still held, so the next
+    // planting's final check sees it. The seed is consumed only after the insert succeeded; a
+    // failed consumption removes the doodad again (the guard is dropped by then).
+    spawn(server, &world, &doodad);
+    drop(placement_guard);
+
     if let Some(h) = &economy {
         if item_id > 0 && !h.try_consume_doodad_source_item(server, player, id, item_id, labor_cost)
         {
@@ -587,7 +624,6 @@ fn create_player_doodad_with_labor(
     }
 
     doodad.data().is_persistent = true;
-    spawn(server, &world, &doodad);
     init_doodad(server, &world, &doodad);
     super::db::save(server, &doodad);
     if !doodad.data().phase.deleted {

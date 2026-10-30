@@ -1,3 +1,6 @@
+use std::sync::Condvar;
+use std::time::{Duration, Instant};
+
 use super::*;
 use crate::data::{items::ItemTemplate, GameData};
 use crate::systems::economy::inventory::Inv;
@@ -476,6 +479,143 @@ async fn round_doodads_refuse_a_spot_inside_the_sum_of_their_radii() {
         (102.0, 100.9, DRY_Z + 0.6),
     );
     assert!(codes.is_empty(), "3D overlap, not flat");
+}
+
+thread_local! {
+    /// Set on the two threads of [`two_plantings_at_the_same_spot_race_and_one_wins`], so the
+    /// shared pause hook ignores plantings of every other test in this process.
+    static RACING_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Greptile P1 on the planting validation: the overlap refusal was a snapshot check, so two
+/// players planting at the same empty spot could both pass it, both consume their seed and
+/// both insert an overlapping round doodad. The fix holds the world's placement guard from the
+/// final check through the doodad's spawn.
+///
+/// The test hook pauses the first planting just after its check. With the guard, the second
+/// planting waits for it and then sees the first doodad (277, seed kept); without the guard it
+/// enters the same window, passes its own check and inserts too, so both win (mutation).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_plantings_at_the_same_spot_race_and_one_wins() {
+    struct RacePause {
+        arrived: Mutex<usize>,
+        cv: Condvar,
+    }
+    struct ClearPause;
+    impl Drop for ClearPause {
+        fn drop(&mut self) {
+            set_placement_pause(None);
+        }
+    }
+
+    let (server, player_a, _, mut client_a) = fixture_with_client();
+    let seed_a = give(&server, &player_a, 1002, 1);
+    let server = Arc::new(server);
+    let client_b = TestClient::new(&server, 2, 1002);
+    let player_b = spawn_player(
+        &server,
+        &client_b,
+        test_character(2, "Planter Two", 100.0, 100.0),
+        server.ids.object.get_next_id().unwrap(),
+    );
+    player_b.data().labor_power = 20;
+    for (_, container) in player_b.data().inventory.containers.clone() {
+        server.items.add_container(container);
+    }
+    let seed_b = give(&server, &player_b, 1002, 1);
+    let mut client_b = client_b;
+
+    let pause = Arc::new(RacePause {
+        arrived: Mutex::new(0),
+        cv: Condvar::new(),
+    });
+    set_placement_pause(Some({
+        let pause = pause.clone();
+        Arc::new(move || {
+            if !RACING_THREAD.with(|racing| racing.get()) {
+                return;
+            }
+            let mut arrived = pause.arrived.lock().unwrap();
+            *arrived += 1;
+            pause.cv.notify_all();
+            if *arrived > 1 {
+                return;
+            }
+            // With the guard the second planting waits on it and never arrives here; let the
+            // first go after a short wait. Without the guard the second arrives and both go.
+            let deadline = Instant::now() + Duration::from_millis(250);
+            while *arrived < 2 {
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let (guard, _) = pause.cv.wait_timeout(arrived, deadline - now).unwrap();
+                arrived = guard;
+            }
+        })
+    }));
+    let _clear_pause = ClearPause;
+
+    let handle = tokio::runtime::Handle::current();
+    let plant =
+        |server: Arc<GameServer>, player: PlayerRef, seed: u64, handle: tokio::runtime::Handle| {
+            std::thread::spawn(move || {
+                let _runtime = handle.enter();
+                RACING_THREAD.with(|racing| racing.set(true));
+                handle_create_doodad(
+                    &server,
+                    &player,
+                    &CSCreateDoodadPacket {
+                        id: 4001,
+                        x: 110.0,
+                        y: 110.0,
+                        z: DRY_Z,
+                        z_rot: 0.0,
+                        scale: 1.0,
+                        item_id: seed,
+                    },
+                );
+            })
+        };
+    let a = plant(server.clone(), player_a.clone(), seed_a, handle.clone());
+    let b = plant(server.clone(), player_b.clone(), seed_b, handle.clone());
+    a.join().unwrap();
+    b.join().unwrap();
+
+    assert_eq!(
+        server.world.world(0).unwrap().all_doodads().len(),
+        1,
+        "exactly one doodad stands on the spot"
+    );
+    let codes_a: Vec<i16> = client_a
+        .drain()
+        .into_iter()
+        .filter(|(op, _)| *op == crate::opcodes::sc::SCErrorMsgPacket)
+        .map(|(_, body)| i16::from_le_bytes([body[0], body[1]]))
+        .collect();
+    let codes_b: Vec<i16> = client_b
+        .drain()
+        .into_iter()
+        .filter(|(op, _)| *op == crate::opcodes::sc::SCErrorMsgPacket)
+        .map(|(_, body)| i16::from_le_bytes([body[0], body[1]]))
+        .collect();
+    let kept_a = Inv::of(&player_a).item_by_id(seed_a).is_some();
+    let kept_b = Inv::of(&player_b).item_by_id(seed_b).is_some();
+    assert_ne!(kept_a, kept_b, "exactly one seed is consumed");
+    let (winner_codes, loser_codes) = if kept_a {
+        (&codes_b, &codes_a)
+    } else {
+        (&codes_a, &codes_b)
+    };
+    assert!(
+        winner_codes.is_empty(),
+        "the winner gets no refusal: {winner_codes:?}"
+    );
+    assert_eq!(
+        loser_codes,
+        &vec![error_message::DOODAD_SIM_TOO_CLOSE_TO_OTHER_DOODAD],
+        "the loser is told the spot is taken"
+    );
 }
 
 #[tokio::test]
