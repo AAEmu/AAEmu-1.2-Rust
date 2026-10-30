@@ -16,6 +16,7 @@ use sqlx::Row;
 use crate::models::container::slot_type;
 use crate::models::item::ItemClass;
 use crate::models::mate::{Mate, MatePassengerInfo};
+use crate::models::transform::Transform;
 use crate::packets::world::SCUnitPointsPacket;
 use crate::packets::world_objects::{SCTargetChangedPacket, SCUnitAttachedPacket};
 use crate::server::GameServer;
@@ -308,6 +309,14 @@ pub fn rename_mount(server: &GameServer, owner: &PlayerRef, tl_id: u32, new_name
     true
 }
 
+/// Seats a rider on its mount: local position and rotation both zero. The rider faces where the
+/// mount faces; the C# zeroed only the position, so the heading the rider had at mount time
+/// stayed as its local rotation and skewed the composed world heading that the skill angle
+/// checks (`target_angle`) read.
+pub(super) fn reset_rider_transform(transform: &mut Transform) {
+    transform.set_position(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+}
+
 /// `MountMate(connection, tlId, attachPoint, reason)`.
 pub fn mount_mate(server: &GameServer, character: &PlayerRef, tl_id: u32, point: u8, reason: u8) {
     let Some(mate) = manager_of(server, character).get_active_mate_by_tl_id(tl_id) else {
@@ -354,7 +363,7 @@ pub fn mount_mate(server: &GameServer, character: &PlayerRef, tl_id: u32, point:
                 }
                 {
                     let mut c = character.data();
-                    c.unit.transform.set_xyz(0.0, 0.0, 0.0);
+                    reset_rider_transform(&mut c.unit.transform);
                     c.is_riding = true;
                     c.attached_point = point;
                 }

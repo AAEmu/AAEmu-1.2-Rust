@@ -419,6 +419,26 @@ fn real_collision_doodad_models_resolve() {
     );
 }
 
+/// A real server: main_world as instance 0 (`WorldManager.CreateStaticInstances`) with the
+/// client heightmaps and the collision service (lazy pool, never used; needs a tokio runtime).
+fn real_server(e: &Env) -> crate::server::GameServer {
+    let worlds = WorldTemplates::load(&e.files, &app_path()).expect("world templates");
+    let mut config = crate::config::AppConfig {
+        id: 1,
+        ..Default::default()
+    };
+    config.connections.mysql_provider.host = "127.0.0.1".into();
+    config.connections.mysql_provider.port = 1;
+    let db = sqlx::mysql::MySqlPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_millis(200))
+        .connect_lazy_with(config.connections.mysql_provider.connect_options());
+    let mut data = crate::data::GameData::empty();
+    data.worlds = worlds;
+    let server = crate::server::GameServer::new(config, db, data);
+    server.systems.npcs.heightmaps.install(e.hm.clone());
+    server
+}
+
 /// Walking height resolution for the six Mistfiend (NPC 4227) spawns of Blackbreath Cave
 /// (`Data/Worlds/main_world/npc_spawns.json`): their authored Z sits below the heightmap
 /// surface, so the production `systems::ai::npc::reference_height_in` must never lift a
@@ -449,22 +469,7 @@ async fn real_collision_mistfiend_cave_walking_height() {
     }
     assert_eq!(spawns.len(), 6, "NPC 4227 spawns: {spawns:?}");
 
-    // A real server: main_world as instance 0 (`WorldManager.CreateStaticInstances`) with the
-    // client heightmaps and the collision service (lazy pool, never used).
-    let worlds = WorldTemplates::load(&e.files, &app_path()).expect("world templates");
-    let mut config = crate::config::AppConfig {
-        id: 1,
-        ..Default::default()
-    };
-    config.connections.mysql_provider.host = "127.0.0.1".into();
-    config.connections.mysql_provider.port = 1;
-    let db = sqlx::mysql::MySqlPoolOptions::new()
-        .acquire_timeout(std::time::Duration::from_millis(200))
-        .connect_lazy_with(config.connections.mysql_provider.connect_options());
-    let mut data = crate::data::GameData::empty();
-    data.worlds = worlds;
-    let server = crate::server::GameServer::new(config, db, data);
-    server.systems.npcs.heightmaps.install(e.hm.clone());
+    let server = real_server(&e);
 
     let mut above = 0;
     for s in &spawns {
@@ -586,4 +591,145 @@ fn real_water_boat_summon_points() {
     }
     println!("{beaches} beach samples stayed land");
     assert!(beaches > 1000);
+}
+
+/// Skill obstacle rays (`validation.rs`, `FUN_390B5540`: objtypes `SOLID_TERRAIN`, flags
+/// `SKILL_OBSTACLE`, `to` already shortened by the target radius) that the shared server logged
+/// as "Skill line of sight blocked" while the feet-level ray of 28286101a was in use: `(from, to,
+/// logged hit distance)`. All are skill 11918 at NPCs and hit plain terrain on gentle slopes
+/// (hit normals within 0.17 of straight up).
+const REFUSED_TERRAIN_RAYS: [([f32; 3], [f32; 3], f32); 6] = [
+    (
+        [20081.496, 7340.0938, 190.1103],
+        [20085.46, 7341.905, 189.39467],
+        3.638,
+    ),
+    (
+        [20105.953, 7335.5586, 187.4872],
+        [20115.842, 7332.403, 187.5405],
+        9.265,
+    ),
+    (
+        [20549.164, 7251.6543, 194.1449],
+        [20552.47, 7263.1826, 191.80545],
+        0.706,
+    ),
+    (
+        [20550.197, 7255.8984, 193.4926],
+        [20552.162, 7262.3022, 192.07394],
+        1.900,
+    ),
+    (
+        [20550.803, 7258.49, 193.0254],
+        [20551.89, 7261.642, 192.25285],
+        0.805,
+    ),
+    (
+        [20529.824, 7269.074, 188.9108],
+        [20520.742, 7270.4155, 187.92221],
+        3.848,
+    ),
+];
+
+/// A seventh logged refusal, over open sea off the Two Crowns coast (heightmap 93-97 m, ray at
+/// 100.3-101.1 m). The server logged a hit (owner not recorded), but the static world and the
+/// terrain answer nothing there at feet level, so the production hit must have come from a live
+/// object collider (a ship or doodad) that this replay does not have.
+const OPEN_SEA_RAY: ([f32; 3], [f32; 3]) = (
+    [13821.418, 10522.8125, 100.333],
+    [13818.172, 10503.699, 101.13336],
+);
+
+/// The logged terrain rays hit again at feet level (reproducing the production refusals), and
+/// the same rays raised by `OBSTACLE_RAY_HEIGHT` at both ends clear, as does the open-sea ray.
+#[tokio::test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+async fn real_skill_obstacle_rays_refused_at_feet_level_clear_when_raised() {
+    use crate::systems::skills::validation::OBSTACLE_RAY_HEIGHT;
+    let Some(e) = env() else { return };
+    let server = real_server(&e);
+    let cast = |from: [f32; 3], to: [f32; 3], raised: f32| {
+        super::raycast(
+            &server,
+            0,
+            [from[0], from[1], from[2] + raised],
+            [to[0], to[1], to[2] + raised],
+            mask::SOLID_TERRAIN,
+            ray_flags::SKILL_OBSTACLE,
+        )
+        .expect("collision service")
+    };
+    let mut still_blocked = Vec::new();
+    for (i, (from, to, logged)) in REFUSED_TERRAIN_RAYS.iter().enumerate() {
+        let feet = cast(*from, *to, 0.0).unwrap_or_else(|| panic!("ray {} must hit", i + 1));
+        assert!(
+            (feet.dist - logged).abs() < 0.01 && matches!(feet.owner, Some(Owner::Terrain)),
+            "ray {} hit {:?} at {}, the server logged terrain at {logged}",
+            i + 1,
+            feet.owner,
+            feet.dist
+        );
+        let raised = cast(*from, *to, OBSTACLE_RAY_HEIGHT);
+        println!(
+            "ray {}: feet terrain at {:.3}; raised {:?}",
+            i + 1,
+            feet.dist,
+            raised.as_ref().map(|h| (h.pos, h.dist, &h.owner))
+        );
+        if raised.is_some() {
+            still_blocked.push(i + 1);
+        }
+    }
+    let sea = cast(OPEN_SEA_RAY.0, OPEN_SEA_RAY.1, OBSTACLE_RAY_HEIGHT);
+    println!(
+        "open sea ray: raised {:?}",
+        sea.as_ref().map(|h| (h.pos, h.dist))
+    );
+    if sea.is_some() {
+        still_blocked.push(7);
+    }
+    assert!(
+        still_blocked.is_empty(),
+        "rays {still_blocked:?} still hit {OBSTACLE_RAY_HEIGHT} m above both ends"
+    );
+}
+
+/// Dry ground where Infinitb drowned on the shared server (quest area around (22 450, 7 100),
+/// ground z 272-282). Water volumes of cells 24-7 / 24-8 reaching past the old "local" band were
+/// stretched to the world origin and covered this land with 8-15 m of phantom water.
+#[test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+fn real_water_no_phantom_water_on_land() {
+    use crate::systems::ai::physics::water::WaterBodies;
+    use crate::systems::skills::controllers::Vec3 as WVec3;
+    let Some(e) = env() else { return };
+    let wh = e.hm.template(e.template_id).expect("main_world heightmap");
+    let water = WaterBodies::new(e.ocean);
+    for cx in 19..26 {
+        for cy in 4..10 {
+            let (x, y) = (cx as f32 * 1024.0 + 5.0, cy as f32 * 1024.0 + 5.0);
+            e.hm.world_height(e.template_id, x, y).unwrap();
+        }
+    }
+    water.sync_loaded_cells(wh, e.hm.files(), "main_world", e.ocean);
+    for a in water.areas_snapshot() {
+        let b = a.bounding_box;
+        assert!(
+            b.width < 4096.0 && b.height < 4096.0,
+            "{} spans {:?}",
+            a.name,
+            b
+        );
+    }
+    let mut wet = 0;
+    for ix in 0..60 {
+        for iy in 0..40 {
+            let (x, y) = (22350.0 + ix as f32 * 4.0, 7020.0 + iy as f32 * 4.0);
+            let ground = e.hm.world_height(e.template_id, x, y).unwrap();
+            if water.is_water(WVec3::new(x, y, ground + 0.1)).is_some() {
+                wet += 1;
+            }
+        }
+    }
+    assert_eq!(wet, 0, "dry ground samples read as water");
 }

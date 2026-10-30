@@ -470,6 +470,10 @@ async fn zone_rules_pending_skill_and_item_casts_recheck_zone_before_payment() {
         }
         assert!(run.cancelled());
         assert_eq!(run.tl_id(), 0);
+        // A player's timed cast starts the global cooldown when it is accepted and keeps it when
+        // the cast is cancelled, like the 1.2 client; it is not a payment.
+        assert!(f.player.data().unit.global_cooldown_ms > 0);
+        f.player.data().unit.global_cooldown_ms = 0;
         f.assert_no_costs_or_effects();
         let frames = f.client.drain();
         assert!(frames

@@ -517,7 +517,7 @@ live acceptance remain pending.
 | `Gimmick.MoveTowards`, flytrap gimmick | `systems/ai/gimmick.rs` | done | |
 | Hooks for npcs / skills (create AI by `ai_file_id`, spawn / engage / death / delete / faction, NPC control effect, spyglass), AStar GM commands | `systems/ai/hooks.rs` | done | `AiHooks` in `server.systems.hooks.ai`; the npcs `NpcSkills` calls the AI parts of `NpcSkillHooks` directly (no decorator); `AiAStarHooks` installed into the services `ASTAR_HOOKS`. |
 | `Physics/**`, `PhysicsManager` (ship hulls: Jitter2 world, `ShipController`, shore / ship–ship / doodad / cliff / static barrier contacts, buoyancy, whirlpool, storm lamps, harpoon tow, replication), `ShipSiegeAoEHit` geometry | `systems/ai/physics/` | done | The Jitter2 subset is bit-exact against Jitter2 2.8.8 for the integration (embedded reference test). Slaves call `add_ship` / `remove_ship` / `set_ship_request` / `set_ship_driver` / `ship_state` and may install `ShipPhysicsHooks` (harpoon rope state). |
-| `WaterBodies`, `WaterBodyArea`, `Models/CryEngine/Objects` (`object.dat`) | `systems/ai/physics/{water,objects_file}.rs` | done | Water areas of all 1 294 client `object.dat` files equal the C# output bit for bit (differential harness, gated test `real_ai_object_dat_water_bodies`). Gimmick `FloatToSurface` uses them. |
+| `WaterBodies`, `WaterBodyArea`, `Models/CryEngine/Objects` (`object.dat`) | `systems/ai/physics/{water,objects_file}.rs` | done | Water areas of all 1 294 client `object.dat` files equal the C# output bit for bit (differential harness, gated test `real_ai_object_dat_water_bodies`), except for one deviation: `WaterPointToWorld` always adds the cell offset. The C# took points outside `[-512, 2048]` for world coordinates, but every water point is cell-local, and 12 main_world volumes were stretched over dry land (drowning on land; gated test `real_water_no_phantom_water_on_land`). Gimmick `FloatToSurface` uses them. |
 | `ShipTuningDebug`, `HarpoonMechanicsDebug` logging, `ShipHarpoonRopeController` | – | not ported / slaves | Debug code is hard-wired off in the C#; the rope controller belongs to the slaves subsystem. |
 | (Rust only) the 10.x zone server's collision world: terrain heightfield, `brush.dat` / `vegetation.dat` statics from CGF `MeshPhysicsData`, doodad colliders, ocean / water-volume buoyancy areas, living-entity proxies of units, ray / sweep query service, `GetBlinkPosition`, ZWUnitFell, ZWReportMoveHack, ZWUnitCollision, CryPhysics hulls | `systems/ai/collision/`, `systems/ai/physics/cry.rs` | done | On the CryPhysics port (`aaemu-physics`), `Configurations/Physics.json`. See "systems::ai collision" below. |
 
@@ -1318,6 +1318,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   Two Crowns specialty bench, doodad 4235 at 13824.67 10604.76 120.54, whose ray always hit map
   brush cell (13, 10)) must not refuse the interaction. This supersedes the earlier skip of
   the owning house's collider for its fixtures.
+  **Ray height** (2026-10-29): the ray is raised 1 m above both ends again
+  (`OBSTACLE_RAY_HEIGHT` in `validation.rs`, applied after the radius gate and the radius
+  shortening), superseding the "unit position height" (feet level) of 2026-10-27. On the shared
+  test server the feet-level ray refused 65 ordinary casts that the 1.2 client had allowed and
+  sent, every one a hit on plain terrain on a gentle slope (skill 11918, `check_terrain`, hit
+  normals within 0.17 of straight up). The height the 1.2 client really uses is not verified; 1 m
+  is the former Rust/C# value. NPC casters use the same rule.
 * systems::skills: the labor margin requirement uses `GetMaxLabor(Payment.PremiumState)`; every
   connection has the default C# `AccountPayment` (premium until 2030), so the cap is 5000.
 * systems::skills (in-place resurrection, 2026-10-20): `CSResurrectCharacterPacket(in_place =
@@ -1413,6 +1420,15 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `AttachedCharacters` list is never filled).
 * systems::vehicles: `Transform.Parent = null` keeps the world position (`detach_child`); the C#
   keeps the local values until the next position update.
+* systems::vehicles (2026-10-29): a rider is seated with its local rotation zeroed as well as its
+  position (`mates::reset_rider_transform`, in `MountMate` and in the riding re-attach of
+  `CSMoveUnitPacket`). The C# `MountMate` only did `Local.SetPosition(0, 0, 0)`, so the heading the
+  character had when it mounted stayed as its local rotation and was added to the mount's heading
+  in `Transform.World`. Nothing in the C# read that heading while riding (it never checks
+  `target_angle`), but the Rust `target_angle` check of `skill_outof_angle` uses the caster's world
+  heading, so Charge / Overwhelm (`source_mount`, `target_angle` 180) from a mount were refused
+  whenever the leftover angle put the rider more than 90 degrees off the mount. Dismounting was
+  never affected (it uses the mount's world position and rotation).
 * systems::vehicles: `Thread.Sleep(50)` between `SCMateSpawnedPacket` and the mate spawn is not
   reproduced. Slave weapon dps is 0 (mate / slave `UpdateGearBonuses` is ported).
   Ship physics, water and the storm cannon block are `systems::ai` (`ship_physics`).
@@ -2895,6 +2911,18 @@ Deviations from the C# `Skill.Use` (`Skill.cs` 135-153 + `Helper.CheckInterval`)
   cooldown are now started when the plot starts (`DoPlotEnd`'s `AddCooldown` keeps the earlier
   entry). Not done: refusing a recast with `skill_on_casting` while `active_plot` runs, since
   plots chain follow-up skills through the same caster state.
+
+## Global cooldown of a player's timed cast (2026-10-29)
+
+Deviation from the C# `Skill.Cast`, which sets the GCD when the cast ends (harmless there because
+the C# barely enforced the GCD). With the enforcement above, a player who finished a timed cast
+(e.g. Insulating Lens, 2000 ms) had the next skill refused with `CooldownTime` for the ~1 s of
+GCD still left at the cast end, although the 1.2 client counts its GCD from the cast start (and
+keeps it when the cast is cancelled) and showed the skill as ready; Drop Back "did nothing"
+because the client only leaps once the server accepts. `use_skill` now starts the GCD when a timed
+cast is accepted for every non-NPC caster (players, player-driven mates and slaves) and flags it
+on the skill run (`gcd_started`) so `cast` does not restart it at cast end. NPC timed casts and all
+instant casts are unchanged (the NPC AI paces its skills from the cast-end GCD).
 
 ## Loot take range (2026-10-21)
 

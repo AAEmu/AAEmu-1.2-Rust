@@ -1008,11 +1008,12 @@ async fn obstacle_ray_is_not_cast_at_doodad_targets() {
     );
 }
 
-/// 1.2 client `FUN_390B5540` (`x2game.dll.c:149877`): the obstacle ray runs at unit
-/// position height, uses the static/sleeping/rigid classes with collision class 2 (terrain
-/// only with `check_terrain`), and skips the source and target colliders.
+/// 1.2 client `FUN_390B5540` (`x2game.dll.c:149877`): the obstacle ray uses the
+/// static/sleeping/rigid classes with collision class 2 (terrain only with `check_terrain`) and
+/// skips the source and target colliders. The ray is cast `OBSTACLE_RAY_HEIGHT` (1 m) above both
+/// ends: the feet-level ray of 28286101a refused ordinary casts in production.
 #[tokio::test]
-async fn obstacle_ray_matches_the_retail_height_mask_and_collision_class() {
+async fn obstacle_ray_is_raised_1m_and_uses_the_retail_mask_and_collision_class() {
     use crate::systems::ai::collision::models::{ModelPart, ModelPhys};
     use crate::systems::ai::collision::world::{CellContent, StaticInstance};
     use aaemu_physics::geometry::primitives::{BoxPrim, Primitive};
@@ -1096,10 +1097,20 @@ async fn obstacle_ray_matches_the_retail_height_mask_and_collision_class() {
         super::validation::check(&server, &skill, &WorldObject::from(&player), &npc_target)
     }
 
-    // The old +1 m ray hit a wall above the feet; the retail ray at position height does not.
+    // The ray runs 1 m above the feet (z 101): a low obstacle (z 99.5..100.5) passes under it...
     assert!(check(
         100.1,
-        Vec3::new(100.0, 105.0, 101.5),
+        Vec3::new(100.0, 105.0, 100.0),
+        0x18FFF,
+        false,
+        100.0,
+        100.0
+    )
+    .is_ok());
+    // ...and so does one that starts above it (z 102..103).
+    assert!(check(
+        100.1,
+        Vec3::new(100.0, 105.0, 102.5),
         0x18FFF,
         false,
         100.0,
@@ -1109,18 +1120,18 @@ async fn obstacle_ray_matches_the_retail_height_mask_and_collision_class() {
     // A part without collision class 2 is not an obstacle to the skill ray (0x8000 only).
     assert!(check(
         100.1,
-        Vec3::new(100.0, 105.0, 100.0),
+        Vec3::new(100.0, 105.0, 101.0),
         0x18FFD,
         false,
         100.0,
         100.0
     )
     .is_ok());
-    // A class-2 static part still blocks.
+    // A class-2 static part across the raised ray (z 100.5..101.5) still blocks.
     assert_eq!(
         check(
             100.1,
-            Vec3::new(100.0, 105.0, 100.0),
+            Vec3::new(100.0, 105.0, 101.0),
             0x18FFF,
             false,
             100.0,
@@ -1130,9 +1141,10 @@ async fn obstacle_ray_matches_the_retail_height_mask_and_collision_class() {
         .0,
         skill_result::OBSTACLE
     );
-    // Terrain joins the mask only with `check_terrain`.
+    // Terrain joins the mask only with `check_terrain`: the raised ray runs from z 103 to 101
+    // and crosses the terrain at 101.5.
     assert!(check(
-        101.0,
+        101.5,
         Vec3::new(100.0, 50.0, 50.0),
         0x18FFF,
         false,
@@ -1142,7 +1154,7 @@ async fn obstacle_ray_matches_the_retail_height_mask_and_collision_class() {
     .is_ok());
     assert_eq!(
         check(
-            101.0,
+            101.5,
             Vec3::new(100.0, 50.0, 50.0),
             0x18FFF,
             true,
@@ -1259,15 +1271,15 @@ async fn obstacle_ray_skips_inside_radius_and_uses_the_position_radius() {
     data.systems.skills.model_radii.insert(1, 1.0);
     let (server, _client, player, npc) = setup(
         data,
-        Vec3::new(100.0, 99.0, 100.0),
+        Vec3::new(100.0, 99.0, 101.0),
         Vec3::new(1.0, 0.5, 0.5),
     );
     npc.data().unit.model_id = 1;
     npc.data().unit.transform.set_xyz(100.0, 100.2, 100.0);
     assert!(check(&server, &player, &Target::Obj(WorldObject::from(&npc))).is_ok());
 
-    // A thin obstacle just inside the target radius is not on the ray: the end point
-    // stops 1 m short of a target at 110.
+    // A thin obstacle just inside the target radius is not on the ray (it runs at z 101): the
+    // end point stops 1 m short of a target at 110.
     let mut data = GameData::empty();
     data.systems.skills.model_radii.insert(1, 1.0);
     let (server, _client1b, player, npc) = setup(
@@ -1299,7 +1311,7 @@ async fn obstacle_ray_skips_inside_radius_and_uses_the_position_radius() {
     // A position target inside 0.5 m: no ray, even with a wall behind the caster.
     let (server, _client2, player, _npc2) = setup(
         GameData::empty(),
-        Vec3::new(100.0, 99.0, 100.0),
+        Vec3::new(100.0, 99.0, 101.0),
         Vec3::new(1.0, 0.5, 0.5),
     );
     assert!(check(&server, &player, &position(100.0, 100.2, 100.0)).is_ok());
@@ -1307,7 +1319,7 @@ async fn obstacle_ray_skips_inside_radius_and_uses_the_position_radius() {
     // The 0.5 m position radius stops the ray 0.2 m before a wall that sits at 109.75.
     let (server, _client3, player, _npc3) = setup(
         GameData::empty(),
-        Vec3::new(100.0, 109.75, 100.0),
+        Vec3::new(100.0, 109.75, 101.0),
         Vec3::new(1.0, 0.05, 0.5),
     );
     assert!(check(&server, &player, &position(100.0, 110.0, 100.0)).is_ok());
@@ -1315,7 +1327,7 @@ async fn obstacle_ray_skips_inside_radius_and_uses_the_position_radius() {
     // A wall on the way still blocks a position target.
     let (server, _client4, player, _npc4) = setup(
         GameData::empty(),
-        Vec3::new(100.0, 105.0, 100.0),
+        Vec3::new(100.0, 105.0, 101.0),
         Vec3::new(1.0, 0.5, 0.5),
     );
     assert_eq!(
@@ -1324,6 +1336,125 @@ async fn obstacle_ray_skips_inside_radius_and_uses_the_position_radius() {
             .0,
         skill_result::OBSTACLE
     );
+}
+
+/// Production (28286101a's feet-level ray, shared test server): 65 `skill_obstacle` refusals of
+/// casts at NPCs, every one a hit on plain terrain on a gentle slope (skill 11918,
+/// `check_terrain`, hit normals within 0.17 of straight up). A ray from the feet grazes a
+/// ground swell between two standing units; the ray 1 m above both ends clears it. NPC casters
+/// run the same check, and anything taller than the raised ray still blocks.
+#[tokio::test]
+async fn obstacle_ray_clears_low_terrain_swells_but_not_walls_or_high_ground() {
+    use crate::systems::ai::collision::models::{ModelPart, ModelPhys};
+    use crate::systems::ai::collision::world::{CellContent, StaticInstance};
+    use aaemu_physics::geometry::primitives::{BoxPrim, Primitive};
+    use aaemu_physics::math::{Quat, Vec3};
+
+    /// Flat ground at z 100 with a smooth swell of `.0` metres between grid rows 50 and 55
+    /// (world y 100 and 110), the span between the two units.
+    struct Swell(f32);
+    impl crate::systems::ai::collision::terrain::TerrainSource for Swell {
+        fn sample(&self, _x: i32, y: i32) -> f32 {
+            if (50..=55).contains(&y) {
+                100.0 + self.0 * ((y - 50) as f32 / 5.0 * std::f32::consts::PI).sin()
+            } else {
+                100.0
+            }
+        }
+        fn size(&self) -> (i32, i32) {
+            (1024, 1024)
+        }
+    }
+
+    /// One cast between a player at (100, 100) and an NPC at (100, 110), both at z 100, over
+    /// a swell of `swell` metres, with an optional 2 m tall wall (z 100..102) between them.
+    fn check(npc_casts: bool, swell: f32, wall: bool) -> Result<(), (u8, u32)> {
+        let (server, _client, player, npc) = fixture(GameData::empty());
+        server
+            .systems
+            .ai
+            .collision
+            .test_files
+            .set(Arc::new(std::collections::HashMap::new()))
+            .unwrap();
+        server
+            .systems
+            .ai
+            .collision
+            .test_terrain
+            .set(Arc::new(Swell(swell)))
+            .unwrap_or_else(|_| panic!("terrain"));
+        if wall {
+            let physics = crate::systems::ai::collision::phys_world(&server, 0).unwrap();
+            let geometry = physics
+                .lock()
+                .world
+                .register_primitive(&Primitive::Box(BoxPrim::aligned(
+                    Vec3::ZERO,
+                    Vec3::new(1.0, 0.5, 1.0),
+                )))
+                .unwrap();
+            physics.lock().insert_cell(CellContent {
+                cell: (0, 0),
+                instances: vec![StaticInstance {
+                    model: Arc::new(ModelPhys {
+                        path: "test/skill-obstacle-wall.cgf".into(),
+                        parts: vec![ModelPart {
+                            slot: 0,
+                            geom: geometry,
+                        }],
+                        blob_bytes: 0,
+                    }),
+                    pos: Vec3::new(100.0, 105.0, 101.0),
+                    q: Quat::IDENTITY,
+                    scale: 1.0,
+                    flags_default: 0x18FFF,
+                    density: 0.0,
+                    ent_flags_or: 0x8000,
+                    vegetation: false,
+                }],
+                ..Default::default()
+            });
+        }
+        player.data().unit.transform.set_xyz(100.0, 100.0, 100.0);
+        npc.data().unit.transform.set_xyz(100.0, 110.0, 100.0);
+        let skill = SkillRun::new(
+            Arc::new(SkillTemplate {
+                check_obstacle: true,
+                check_terrain: true,
+                ..super::tests::skill_template(3)
+            }),
+            1,
+        );
+        let (caster, target) = if npc_casts {
+            (WorldObject::from(&npc), WorldObject::from(&player))
+        } else {
+            (WorldObject::from(&player), WorldObject::from(&npc))
+        };
+        super::validation::check(&server, &skill, &caster, &Target::Obj(target))
+    }
+
+    for npc_casts in [false, true] {
+        // A 0.6 m swell lies across the feet-level ray but well below the raised one.
+        assert!(
+            check(npc_casts, 0.6, false).is_ok(),
+            "a low swell must not refuse the cast (npc caster: {npc_casts})"
+        );
+        // A wall taller than 1 m between the two still refuses it, with or without the swell.
+        for swell in [0.0, 0.6] {
+            assert_eq!(
+                check(npc_casts, swell, true).unwrap_err().0,
+                skill_result::OBSTACLE,
+                "the wall must refuse the cast (npc caster: {npc_casts}, swell: {swell})"
+            );
+        }
+        // Ground higher than the raised ray still blocks with `check_terrain`.
+        assert_eq!(
+            check(npc_casts, 1.8, false).unwrap_err().0,
+            skill_result::OBSTACLE,
+            "a hill above 1 m must refuse the cast (npc caster: {npc_casts})"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1559,5 +1690,146 @@ async fn plot_only_skill_without_own_cooldown_is_still_gated_by_the_gcd() {
     assert_eq!(
         cast(&server, &skill, &player, &npc).0,
         skill_result::SUCCESS
+    );
+}
+
+/// Waits for a timed cast to end: `cast` frees the caster's task slot after the cooldowns.
+async fn wait_for_cast_end(caster: &WorldObject) {
+    let task_free = || {
+        caster
+            .with_unit(|u| u.unit().skill_state.skill_task.is_none())
+            .unwrap_or(true)
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while !task_free() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(task_free(), "the timed cast did not end");
+}
+
+#[tokio::test]
+async fn player_timed_cast_starts_its_gcd_at_acceptance_not_at_cast_end() {
+    // Insulating Lens (10153) shape: a timed cast whose GCD outlasts most of the cast. The 1.2
+    // client counts the GCD from the cast start, so a skill pressed right after the cast bar
+    // ends must not be refused for the GCD time that the cast itself already used up.
+    let (server, _client, player, npc) = fixture(GameData::empty());
+    let timed = SkillRun::new(
+        Arc::new(SkillTemplate {
+            casting_time: 400,
+            custom_gcd: 3000,
+            ..super::tests::skill_template(10153)
+        }),
+        1,
+    );
+    let follow_up = SkillRun::new(
+        Arc::new(SkillTemplate {
+            custom_gcd: 700,
+            ..super::tests::skill_template(12049)
+        }),
+        1,
+    );
+    let before = crate::world::now_ms();
+    assert_eq!(
+        cast(&server, &timed, &player, &npc).0,
+        skill_result::SUCCESS
+    );
+    let after = crate::world::now_ms();
+    let gcd = player.data().unit.global_cooldown_ms;
+    assert!(
+        (before + 3000..=after + 3000).contains(&gcd),
+        "GCD set when the cast was accepted, not {gcd} (accepted at {before}..{after})"
+    );
+    wait_for_cast_end(&WorldObject::from(&player)).await;
+    assert!(!timed.cancelled());
+    assert_eq!(
+        player.data().unit.global_cooldown_ms,
+        gcd,
+        "the cast end does not restart the GCD"
+    );
+    // The cast used 400 ms of the 3000 ms GCD (more on a slow machine): up to 2600 ms are left,
+    // still refused ...
+    assert_eq!(
+        cast(&server, &follow_up, &player, &npc),
+        (skill_result::COOLDOWN_TIME, 0)
+    );
+    // ... but with 2500 ms more elapsed at most 100 ms (within the network grace) are left. The
+    // old cast-end GCD would still have 500 ms to go here.
+    age_gcd(&player, 2500);
+    assert_eq!(
+        cast(&server, &follow_up, &player, &npc).0,
+        skill_result::SUCCESS
+    );
+}
+
+#[tokio::test]
+async fn player_skill_right_after_a_cast_longer_than_its_gcd_is_accepted() {
+    let (server, _client, player, npc) = fixture(GameData::empty());
+    let timed = SkillRun::new(
+        Arc::new(SkillTemplate {
+            casting_time: 300,
+            custom_gcd: 200,
+            ..super::tests::skill_template(10153)
+        }),
+        1,
+    );
+    let follow_up = SkillRun::new(
+        Arc::new(SkillTemplate {
+            custom_gcd: 700,
+            ..super::tests::skill_template(12049)
+        }),
+        1,
+    );
+    assert_eq!(
+        cast(&server, &timed, &player, &npc).0,
+        skill_result::SUCCESS
+    );
+    let gcd = player.data().unit.global_cooldown_ms;
+    assert!(gcd > 0);
+    wait_for_cast_end(&WorldObject::from(&player)).await;
+    assert_eq!(player.data().unit.global_cooldown_ms, gcd);
+    assert_eq!(
+        cast(&server, &follow_up, &player, &npc).0,
+        skill_result::SUCCESS
+    );
+}
+
+#[tokio::test]
+async fn npc_timed_cast_still_starts_its_gcd_at_cast_end() {
+    let (server, _client, _player, npc) = fixture(GameData::empty());
+    let timed = SkillRun::new(
+        Arc::new(SkillTemplate {
+            casting_time: 100,
+            custom_gcd: 1000,
+            target_type: super::types::SkillTargetType::SelfTarget as i32,
+            ..super::tests::skill_template(10153)
+        }),
+        1,
+    );
+    let caster = WorldObject::from(&npc);
+    let started = crate::world::now_ms();
+    assert_eq!(
+        use_skill(
+            &server,
+            &timed,
+            &caster,
+            SkillCaster::Unit(npc.obj_id),
+            &mut SkillCastTarget::Unit(npc.obj_id),
+            Some(SkillObject::None),
+            false,
+        )
+        .0,
+        skill_result::SUCCESS
+    );
+    assert_eq!(
+        npc.data().unit.global_cooldown_ms,
+        0,
+        "no GCD while the NPC casts"
+    );
+    wait_for_cast_end(&caster).await;
+    assert!(!timed.cancelled());
+    let gcd = npc.data().unit.global_cooldown_ms;
+    assert!(
+        gcd >= started + 100 + 1000,
+        "NPC GCD starts at the cast end, not {gcd} (cast started at {started})"
     );
 }
