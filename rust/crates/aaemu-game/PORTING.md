@@ -1420,6 +1420,15 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `AttachedCharacters` list is never filled).
 * systems::vehicles: `Transform.Parent = null` keeps the world position (`detach_child`); the C#
   keeps the local values until the next position update.
+* systems::vehicles (2026-10-29): a rider is seated with its local rotation zeroed as well as its
+  position (`mates::reset_rider_transform`, in `MountMate` and in the riding re-attach of
+  `CSMoveUnitPacket`). The C# `MountMate` only did `Local.SetPosition(0, 0, 0)`, so the heading the
+  character had when it mounted stayed as its local rotation and was added to the mount's heading
+  in `Transform.World`. Nothing in the C# read that heading while riding (it never checks
+  `target_angle`), but the Rust `target_angle` check of `skill_outof_angle` uses the caster's world
+  heading, so Charge / Overwhelm (`source_mount`, `target_angle` 180) from a mount were refused
+  whenever the leftover angle put the rider more than 90 degrees off the mount. Dismounting was
+  never affected (it uses the mount's world position and rotation).
 * systems::vehicles: `Thread.Sleep(50)` between `SCMateSpawnedPacket` and the mate spawn is not
   reproduced. Slave weapon dps is 0 (mate / slave `UpdateGearBonuses` is ported).
   Ship physics, water and the storm cannon block are `systems::ai` (`ship_physics`).

@@ -163,6 +163,7 @@ pub fn player_riding(server: &GameServer, character: &PlayerRef, player: &Player
         if let Some(m) = mate {
             if let Some(world) = super::world_of(server, &me) {
                 world.attach_child(&WorldObject::from(&m), &me);
+                me.with_transform(mates::reset_rider_transform);
             }
         }
     }
