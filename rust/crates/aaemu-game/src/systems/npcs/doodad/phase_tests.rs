@@ -9,6 +9,7 @@ use crate::data::world_templates::WorldSpawnPosition;
 use crate::data::GameData;
 use crate::opcodes::sc;
 use crate::server::GameServer;
+use crate::systems::npcs::area_trigger::{AreaShape, AREA_SHAPE_CUBOID};
 use crate::systems::npcs::doodad::data::DoodadData;
 use crate::systems::npcs::doodad::logic;
 use crate::systems::npcs::doodad::manager;
@@ -102,6 +103,32 @@ impl Builder {
         let s = test_server_with(gd);
         s.systems.npcs.doodads.tasks.set_manual(true);
         s
+    }
+
+    /// [`Self::server`] with the skills bridge, a good `buff` and the arena `shape` the clout
+    /// applies it with.
+    fn clout_server(self, buff: u32, shape: AreaShape) -> Arc<GameServer> {
+        let mut gd = GameData::empty();
+        gd.systems.npcs.doodad = self.data;
+        gd.systems.npcs.area_trigger.shapes.insert(shape.id, shape);
+        gd.systems
+            .skills
+            .add_buff(crate::systems::skills::data::BuffTemplate {
+                id: buff,
+                kind: 1,
+                stack_rule: 1,
+                duration: 0,
+                ..Default::default()
+            });
+        gd.skills.buffs.insert(
+            buff,
+            crate::data::skills::BuffTemplate::simple(buff, crate::data::skills::BuffKind::Good),
+        );
+        let server = Arc::new(test_server_with(gd));
+        server.systems.npcs.doodads.tasks.set_manual(true);
+        server.set_self();
+        crate::systems::skills::bind(&server);
+        server
     }
 }
 
@@ -802,8 +829,8 @@ async fn ratio_respawn_guard_cleans_up_for_a_later_independent_respawn() {
 
 #[tokio::test]
 async fn clout_with_origin_source_changes_only_its_own_phase() {
-    // Doodad 5007 (NPC 10119's summon) next to the Amber Boulder 4252 (quest 3447): the clout's
-    // area may start at a nearby doodad, but its NextPhase / Final belong to the summon.
+    // Doodad 5007 (NPC 10119's summon) next to the Amber Boulder 4252 (quest 3447): the clout
+    // area stays at the summon (see the tests below) and its NextPhase / Final belong to it.
     const BYSTANDER: u32 = 200;
     let b = Builder::default()
         .template(BYSTANDER, &[(20, 1)])
@@ -854,6 +881,801 @@ async fn clout_with_origin_source_changes_only_its_own_phase() {
     assert!(summon.data().phase.deleted);
     assert!(!bystander.data().phase.deleted);
     assert!(f.world.doodad(0x600).is_some());
+}
+
+/// `aoe_shapes` 719: a 2 m half-length x 15.5 m half-width cuboid, 4 m high.
+fn comet_shape() -> AreaShape {
+    AreaShape {
+        id: 1,
+        kind: AREA_SHAPE_CUBOID,
+        value1: 2.0,
+        value2: 15.5,
+        value3: 4.0,
+    }
+}
+
+/// The clout of Comet's Boon (doodad 5017, `UseOriginSource`, buff 3771).
+fn comet_clout(buff: u32) -> FuncTemplate {
+    clout(buff, 1, 1000)
+}
+
+/// A `UseOriginSource` clout (`duration` ms) as its template row `id`.
+fn clout(buff: u32, id: u32, duration: i32) -> FuncTemplate {
+    clout_to(buff, id, duration, -1)
+}
+
+/// [`clout`] that moves its doodad to func group `next_phase` when it ends (`-1`: deletes it).
+fn clout_to(buff: u32, id: u32, duration: i32, next_phase: i32) -> FuncTemplate {
+    FuncTemplate::Clout(DoodadFuncClout {
+        id,
+        duration,
+        buff_id: buff,
+        next_phase,
+        aoe_shape_id: 1,
+        use_origin_source: true,
+        ..DoodadFuncClout::default()
+    })
+}
+
+/// Summons `template` 15.49 m in front of `player` (`SummonDoodad` order: create, place,
+/// `InitDoodad`, spawn).
+fn summon_in_front(
+    server: &GameServer,
+    world: &Arc<WorldInstance>,
+    player: &PlayerRef,
+    obj_id: u32,
+    template: u32,
+) -> DoodadRef {
+    let summon = manager::create(
+        server,
+        world,
+        obj_id,
+        template,
+        Some(&WorldObject::from(player)),
+        true,
+    )
+    .unwrap();
+    summon.data().transform.set_xyz(100.0, 100.0 + 15.49, 100.0);
+    manager::init_doodad(server, world, &summon);
+    manager::spawn(server, world, &summon);
+    summon
+}
+
+#[tokio::test]
+async fn summoned_clout_keeps_the_summon_as_area_origin() {
+    // A planted doodad 3.5 m from the caster must not move Comet's Boon's clout area: the
+    // caster stands 15.49 m behind the summon (inside its 15.5 m half-width) and 2.5 m off the
+    // nearby doodad's 2.0 m half-length. The C# anchor put the caster outside the area, so
+    // buff 3771 was never applied next to any doodad.
+    const BYSTANDER: u32 = 200;
+    const BUFF: u32 = 631;
+    let server = Builder::default()
+        .template(BYSTANDER, &[(20, 1)])
+        .template(TEMPLATE, &[(10, 1)])
+        .phase_func(10, comet_clout(BUFF))
+        .clout_server(BUFF, comet_shape());
+    let mut client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Alpha", 100.0, 100.0),
+        0x810,
+    );
+    client.drain();
+    let world = server.world.world(0).unwrap();
+
+    let bystander = manager::create(&server, &world, 0x600, BYSTANDER, None, true).unwrap();
+    bystander.data().transform.set_xyz(102.5, 102.5, 100.0);
+    manager::spawn(&server, &world, &bystander);
+
+    let summon = summon_in_front(&server, &world, &player, 0x500, TEMPLATE);
+    assert_eq!(
+        server
+            .systems
+            .npcs
+            .area_triggers
+            .attached_to(summon.obj_id)
+            .len(),
+        1,
+        "the clout must stay attached to the summon, not to the nearby doodad"
+    );
+    server.systems.npcs.area_triggers.tick(&server);
+    assert!(player.data().unit.buffs.check_buff(BUFF));
+
+    // The clout task ends the area: the buff leaves with the trigger.
+    assert_eq!(server.systems.npcs.doodads.tasks.advance(&server, 1000), 1);
+    assert!(!player.data().unit.buffs.check_buff(BUFF));
+    assert!(summon.data().phase.deleted);
+    assert!(server
+        .systems
+        .npcs
+        .area_triggers
+        .attached_to(summon.obj_id)
+        .is_empty());
+}
+
+#[tokio::test]
+async fn summoned_clout_applies_again_after_its_trigger_ended() {
+    // Cast, buff expires with the clout, cast again: the trigger count and buff state must not
+    // leak across summons (the second buff is created, not suppressed by a stale count).
+    const BUFF: u32 = 631;
+    let server = Builder::default()
+        .template(TEMPLATE, &[(10, 1)])
+        .phase_func(10, comet_clout(BUFF))
+        .clout_server(BUFF, comet_shape());
+    let mut client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Alpha", 100.0, 100.0),
+        0x810,
+    );
+    client.drain();
+    let world = server.world.world(0).unwrap();
+
+    for obj_id in [0x500, 0x501] {
+        let summon = summon_in_front(&server, &world, &player, obj_id, TEMPLATE);
+        server.systems.npcs.area_triggers.tick(&server);
+        assert!(player.data().unit.buffs.check_buff(BUFF));
+        assert_eq!(player.data().unit.trigger_count(BUFF), 1);
+        server.systems.npcs.doodads.tasks.advance(&server, 1000);
+        assert!(!player.data().unit.buffs.check_buff(BUFF));
+        assert_eq!(player.data().unit.trigger_count(BUFF), 0);
+        assert!(summon.data().phase.deleted);
+    }
+}
+
+#[tokio::test]
+async fn clout_ending_in_a_phase_change_is_not_entered_again_by_later_ticks() {
+    // `NextPhase != -1`: the clout task removes the trigger but its doodad stays visible, and the
+    // manager drops a removed trigger only at the end of the next tick. That tick must not run
+    // the removed trigger (its `OnDelete` already released the unit): entering it again would
+    // count the unit once more and re-apply the buff, which nothing ever removes.
+    const BUFF: u32 = 631;
+    let server = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2)])
+        .phase_func(10, clout_to(BUFF, 1, 1000, 11))
+        .clout_server(BUFF, comet_shape());
+    let mut client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Alpha", 100.0, 100.0),
+        0x810,
+    );
+    client.drain();
+    let world = server.world.world(0).unwrap();
+
+    let summon = summon_in_front(&server, &world, &player, 0x500, TEMPLATE);
+    server.systems.npcs.area_triggers.tick(&server);
+    assert!(player.data().unit.buffs.check_buff(BUFF));
+    assert_eq!(player.data().unit.trigger_count(BUFF), 1);
+
+    assert_eq!(server.systems.npcs.doodads.tasks.advance(&server, 1000), 1);
+    assert_eq!(group(&summon), 11);
+    assert!(summon.is_visible(), "the doodad outlives its clout");
+    assert!(!player.data().unit.buffs.check_buff(BUFF));
+    assert_eq!(player.data().unit.trigger_count(BUFF), 0);
+    for _ in 0..3 {
+        server.systems.npcs.area_triggers.tick(&server);
+        assert!(!player.data().unit.buffs.check_buff(BUFF));
+        assert_eq!(player.data().unit.trigger_count(BUFF), 0);
+    }
+    assert!(server.systems.npcs.area_triggers.triggers().is_empty());
+}
+
+#[tokio::test]
+async fn clout_of_a_doodad_initialised_before_its_spawn_waits_for_the_spawn() {
+    // `SummonDoodad` / `SpawnDoodad`: `InitDoodad()` runs on the invisible doodad, then `Spawn()`.
+    // An area tick between the two (the tick runs on its own thread) must neither drop the new
+    // trigger (its owner is not visible yet) nor enter units: the tick needs the owner's region,
+    // which `Spawn` assigns after it showed the owner.
+    const BUFF: u32 = 631;
+    let server = Builder::default()
+        .template(TEMPLATE, &[(10, 1)])
+        .phase_func(10, comet_clout(BUFF))
+        .clout_server(BUFF, comet_shape());
+    let mut client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Alpha", 100.0, 100.0),
+        0x810,
+    );
+    client.drain();
+    let world = server.world.world(0).unwrap();
+
+    let summon = manager::create(
+        &server,
+        &world,
+        0x500,
+        TEMPLATE,
+        Some(&WorldObject::from(&player)),
+        true,
+    )
+    .unwrap();
+    summon.data().transform.set_xyz(100.0, 100.0 + 15.49, 100.0);
+    manager::init_doodad(&server, &world, &summon);
+    assert!(!summon.is_visible());
+    for _ in 0..3 {
+        server.systems.npcs.area_triggers.tick(&server);
+        assert_eq!(
+            server
+                .systems
+                .npcs
+                .area_triggers
+                .attached_to(summon.obj_id)
+                .len(),
+            1,
+            "the trigger of the unspawned doodad stays"
+        );
+        assert!(!player.data().unit.buffs.check_buff(BUFF));
+    }
+
+    manager::spawn(&server, &world, &summon);
+    server.systems.npcs.area_triggers.tick(&server);
+    assert!(player.data().unit.buffs.check_buff(BUFF));
+    assert_eq!(player.data().unit.trigger_count(BUFF), 1);
+}
+
+#[tokio::test]
+async fn spawned_doodad_clout_with_origin_source_borrows_a_doodad_near_the_caster() {
+    // An already spawned (visible) doodad keeps the C# anchor `WorldManager.GetAround<Doodad>(
+    // caster, 4f)`, unlike a summon initialised before its Spawn (Comet's Boon, tests above).
+    const BYSTANDER: u32 = 200;
+    const BUFF: u32 = 631;
+    let server = Builder::default()
+        .template(BYSTANDER, &[(20, 1)])
+        .template(TEMPLATE, &[(10, 1)])
+        .phase_func(10, comet_clout(BUFF))
+        .clout_server(BUFF, comet_shape());
+    let mut client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Alpha", 100.0, 100.0),
+        0x810,
+    );
+    client.drain();
+    let world = server.world.world(0).unwrap();
+
+    let bystander = manager::create(&server, &world, 0x600, BYSTANDER, None, true).unwrap();
+    bystander.data().transform.set_xyz(101.0, 101.0, 100.0);
+    manager::spawn(&server, &world, &bystander);
+
+    // Created, spawned and only then initialised, 14 m from the caster (a planted doodad).
+    let owner = manager::create(
+        &server,
+        &world,
+        0x500,
+        TEMPLATE,
+        Some(&WorldObject::from(&player)),
+        true,
+    )
+    .unwrap();
+    owner.data().transform.set_xyz(114.0, 100.0, 100.0);
+    manager::spawn(&server, &world, &owner);
+    manager::init_doodad(&server, &world, &owner);
+
+    assert_eq!(
+        server
+            .systems
+            .npcs
+            .area_triggers
+            .attached_to(bystander.obj_id)
+            .len(),
+        1,
+        "a visible doodad's clout must borrow the doodad within 4 m of the caster"
+    );
+    assert!(server
+        .systems
+        .npcs
+        .area_triggers
+        .attached_to(owner.obj_id)
+        .is_empty());
+    // The caster stands inside the borrowed doodad's area.
+    server.systems.npcs.area_triggers.tick(&server);
+    assert!(player.data().unit.buffs.check_buff(BUFF));
+    assert_eq!(player.data().unit.trigger_count(BUFF), 1);
+
+    // The clout task still acts on the doodad that owns it (deviation of 2026-10-30).
+    server.systems.npcs.doodads.tasks.advance(&server, 1000);
+    assert!(owner.data().phase.deleted);
+    assert!(!bystander.data().phase.deleted);
+    assert!(world.doodad(0x600).is_some());
+
+    // The summon is gone but the trigger's owner (the borrowed doodad) stays visible: the buff
+    // left with the clout and later ticks must not bring it back.
+    assert!(!player.data().unit.buffs.check_buff(BUFF));
+    assert_eq!(player.data().unit.trigger_count(BUFF), 0);
+    assert!(server
+        .systems
+        .npcs
+        .area_triggers
+        .attached_to(bystander.obj_id)
+        .is_empty());
+    for _ in 0..3 {
+        server.systems.npcs.area_triggers.tick(&server);
+        assert!(!player.data().unit.buffs.check_buff(BUFF));
+        assert_eq!(player.data().unit.trigger_count(BUFF), 0);
+    }
+    assert!(server.systems.npcs.area_triggers.triggers().is_empty());
+}
+
+#[tokio::test]
+async fn overlapping_clouts_keep_the_buff_until_the_last_one_ends() {
+    // Two casters' comets cover one ally. The first clout's delete removes its trigger twice
+    // (`Doodad.Delete` then `DoodadFuncCloutTask`); `AreaTrigger.OnDelete` must take its units
+    // or the second decrement drops the ally's buff while the other clout still runs.
+    const OTHER: u32 = 101;
+    const BUFF: u32 = 631;
+    let server = Builder::default()
+        .template(TEMPLATE, &[(10, 1)])
+        .phase_func(10, clout(BUFF, 1, 1000))
+        .template(OTHER, &[(20, 1)])
+        .phase_func(20, clout(BUFF, 2, 3000))
+        .clout_server(BUFF, comet_shape());
+    let mut ca = TestClient::new(&server, 1, 1001);
+    let a = spawn_player(
+        &server,
+        &ca,
+        test_character(1, "Alpha", 100.0, 100.0),
+        0x810,
+    );
+    let mut cb = TestClient::new(&server, 2, 1002);
+    let b = spawn_player(&server, &cb, test_character(2, "Beta", 101.0, 100.0), 0x811);
+    let mut cc = TestClient::new(&server, 3, 1003);
+    let ally = spawn_player(
+        &server,
+        &cc,
+        test_character(3, "Gamma", 100.5, 103.0),
+        0x820,
+    );
+    ca.drain();
+    cb.drain();
+    cc.drain();
+    let world = server.world.world(0).unwrap();
+
+    for (obj_id, template, caster, x) in [(0x500, TEMPLATE, &a, 100.0), (0x501, OTHER, &b, 101.0)] {
+        let d = manager::create(
+            &server,
+            &world,
+            obj_id,
+            template,
+            Some(&WorldObject::from(caster)),
+            true,
+        )
+        .unwrap();
+        d.data().transform.set_xyz(x, 101.0, 100.0);
+        manager::init_doodad(&server, &world, &d);
+        manager::spawn(&server, &world, &d);
+    }
+    let casters = server.world.world(0).unwrap().all_doodads();
+    assert_eq!(casters.len(), 2);
+
+    server.systems.npcs.area_triggers.tick(&server);
+    assert!(ally.data().unit.buffs.check_buff(BUFF));
+    assert_eq!(ally.data().unit.trigger_count(BUFF), 2);
+
+    // The 1000 ms clout ends: the ally is still inside the 3000 ms one.
+    assert_eq!(server.systems.npcs.doodads.tasks.advance(&server, 1000), 1);
+    assert!(ally.data().unit.buffs.check_buff(BUFF));
+    assert_eq!(ally.data().unit.trigger_count(BUFF), 1);
+    for _ in 0..2 {
+        server.systems.npcs.area_triggers.tick(&server);
+        assert!(ally.data().unit.buffs.check_buff(BUFF));
+        assert_eq!(ally.data().unit.trigger_count(BUFF), 1);
+    }
+
+    // The last clout ends: now the buff goes.
+    assert_eq!(server.systems.npcs.doodads.tasks.advance(&server, 2000), 1);
+    assert!(!ally.data().unit.buffs.check_buff(BUFF));
+    assert_eq!(ally.data().unit.trigger_count(BUFF), 0);
+}
+
+#[tokio::test]
+async fn overlapping_clouts_ending_in_a_phase_change_keep_the_buff_until_the_last_one_ends() {
+    // As above, but the doodads stay visible after their clouts (`NextPhase != -1`): the area
+    // ticks between the two ends must neither enter the ally in the finished clout again nor
+    // let its count outlive the second clout.
+    const OTHER: u32 = 101;
+    const BUFF: u32 = 631;
+    let server = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2)])
+        .phase_func(10, clout_to(BUFF, 1, 1000, 11))
+        .template(OTHER, &[(20, 1), (21, 2)])
+        .phase_func(20, clout_to(BUFF, 2, 3000, 21))
+        .clout_server(BUFF, comet_shape());
+    let mut ca = TestClient::new(&server, 1, 1001);
+    let a = spawn_player(
+        &server,
+        &ca,
+        test_character(1, "Alpha", 100.0, 100.0),
+        0x810,
+    );
+    let mut cb = TestClient::new(&server, 2, 1002);
+    let b = spawn_player(&server, &cb, test_character(2, "Beta", 101.0, 100.0), 0x811);
+    let mut cc = TestClient::new(&server, 3, 1003);
+    let ally = spawn_player(
+        &server,
+        &cc,
+        test_character(3, "Gamma", 100.5, 103.0),
+        0x820,
+    );
+    ca.drain();
+    cb.drain();
+    cc.drain();
+    let world = server.world.world(0).unwrap();
+
+    let mut doodads = Vec::new();
+    for (obj_id, template, caster, x) in [(0x500, TEMPLATE, &a, 100.0), (0x501, OTHER, &b, 101.0)] {
+        let d = manager::create(
+            &server,
+            &world,
+            obj_id,
+            template,
+            Some(&WorldObject::from(caster)),
+            true,
+        )
+        .unwrap();
+        d.data().transform.set_xyz(x, 101.0, 100.0);
+        manager::init_doodad(&server, &world, &d);
+        manager::spawn(&server, &world, &d);
+        doodads.push(d);
+    }
+
+    server.systems.npcs.area_triggers.tick(&server);
+    assert!(ally.data().unit.buffs.check_buff(BUFF));
+    assert_eq!(ally.data().unit.trigger_count(BUFF), 2);
+
+    // The 1000 ms clout ends: the ally is still inside the 3000 ms one.
+    assert_eq!(server.systems.npcs.doodads.tasks.advance(&server, 1000), 1);
+    assert_eq!(group(&doodads[0]), 11);
+    assert_eq!(ally.data().unit.trigger_count(BUFF), 1);
+    for _ in 0..2 {
+        server.systems.npcs.area_triggers.tick(&server);
+        assert!(ally.data().unit.buffs.check_buff(BUFF));
+        assert_eq!(ally.data().unit.trigger_count(BUFF), 1);
+    }
+
+    // The last clout ends: the buff goes and stays away.
+    assert_eq!(server.systems.npcs.doodads.tasks.advance(&server, 2000), 1);
+    assert_eq!(group(&doodads[1]), 21);
+    for _ in 0..2 {
+        assert!(!ally.data().unit.buffs.check_buff(BUFF));
+        assert_eq!(ally.data().unit.trigger_count(BUFF), 0);
+        server.systems.npcs.area_triggers.tick(&server);
+    }
+    assert!(server.systems.npcs.area_triggers.triggers().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn delayed_spawn_doodad_keeps_its_clout_until_the_spawn() {
+    // `SpawnDoodad` (`special_effects` type 15, `value2` = 1000) spawns the doodad after the
+    // delay (`SpawnDoodad.cs`: `InitDoodad(); Thread.Sleep(delay); Spawn()`). Here the init and
+    // the spawn run together after the delay; the clout must exist then and apply its buff, and
+    // area ticks during the wait neither create nor drop it. The clout is shorter (500 ms) than
+    // the delay, so starting its timer at the cast would end it before the doodad exists.
+    use std::time::Duration;
+
+    use crate::systems::skills::effects::{EffectArgs, EffectSource};
+    use crate::systems::skills::geometry::Target;
+    use crate::systems::skills::types::{CastAction, SkillCastTarget, SkillCaster, SkillObject};
+
+    const BUFF: u32 = 631;
+    let server = Builder::default()
+        .template(TEMPLATE, &[(10, 1)])
+        .phase_func(10, clout(BUFF, 1, 500))
+        .clout_server(BUFF, comet_shape());
+    crate::systems::npcs::bridges::install(&server);
+    let mut client = TestClient::new(&server, 1, 1001);
+    let caster = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Alpha", 100.0, 100.0),
+        0x810,
+    );
+    let mut ally_client = TestClient::new(&server, 2, 1002);
+    // The synthetic world has no geodata: `SpawnDoodad` puts the doodad on the fallback ground
+    // height 0, so the ally stands on it (the caster stays at 100 and out of the area).
+    let mut ally_character = test_character(2, "Beta", 100.0, 103.0);
+    ally_character.unit.transform.set_xyz(100.0, 103.0, 0.0);
+    let ally = spawn_player(&server, &ally_client, ally_character, 0x820);
+    client.drain();
+    ally_client.drain();
+    let world = server.world.world(0).unwrap();
+
+    let cast = || EffectArgs {
+        caster: Some(WorldObject::from(&caster)),
+        caster_caster: SkillCaster::Unit(caster.obj_id),
+        target: Target::Obj(WorldObject::from(&caster)),
+        target_caster: SkillCastTarget::Unit(caster.obj_id),
+        cast: CastAction::Skill {
+            skill_id: 18_222,
+            tl_id: 1,
+        },
+        source: EffectSource::default(),
+        skill_object: &SkillObject::None,
+    };
+    crate::systems::skills::effects::special::execute(
+        &server,
+        15,
+        &cast(),
+        [TEMPLATE as i32, 1000, 0, 0],
+    );
+
+    assert!(
+        world.all_doodads().is_empty(),
+        "the summon is not spawned before the delay"
+    );
+    assert!(
+        server.systems.npcs.area_triggers.triggers().is_empty(),
+        "the start phase runs at the spawn, not at the cast"
+    );
+    // Area ticks during the wait must not create or remove anything.
+    for _ in 0..5 {
+        server.systems.npcs.area_triggers.tick(&server);
+    }
+    assert!(server.systems.npcs.area_triggers.triggers().is_empty());
+    assert!(!ally.data().unit.buffs.check_buff(BUFF));
+
+    // Drive the delay (doodad task queue in the port, tokio timer of the old path too).
+    tokio::task::yield_now().await;
+    server.systems.npcs.doodads.tasks.advance(&server, 1000);
+    tokio::time::advance(Duration::from_millis(1000)).await;
+    tokio::task::yield_now().await;
+    let summon = world.all_doodads().pop().expect("the spawned summon");
+    assert!(summon.is_visible());
+    assert_eq!(
+        server
+            .systems
+            .npcs
+            .area_triggers
+            .attached_to(summon.obj_id)
+            .len(),
+        1,
+        "the clout exists once the summon spawned"
+    );
+    server.systems.npcs.area_triggers.tick(&server);
+    assert!(ally.data().unit.buffs.check_buff(BUFF));
+    assert_eq!(ally.data().unit.trigger_count(BUFF), 1);
+
+    // The 500 ms clout ends: the trigger and its buff go with it.
+    assert_eq!(server.systems.npcs.doodads.tasks.advance(&server, 500), 1);
+    assert!(!ally.data().unit.buffs.check_buff(BUFF));
+    assert_eq!(ally.data().unit.trigger_count(BUFF), 0);
+    assert!(summon.data().phase.deleted);
+    assert!(world.all_doodads().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn delayed_spawn_doodads_cast_back_to_back_get_their_own_clouts() {
+    // The first cast's clout timer starts at its spawn (see above), so a second cast one second
+    // later does not inherit a stale trigger or an expired one.
+    use std::time::Duration;
+
+    use crate::systems::skills::effects::{EffectArgs, EffectSource};
+    use crate::systems::skills::geometry::Target;
+    use crate::systems::skills::types::{CastAction, SkillCastTarget, SkillCaster, SkillObject};
+
+    const BUFF: u32 = 631;
+    let server = Builder::default()
+        .template(TEMPLATE, &[(10, 1)])
+        .phase_func(10, clout(BUFF, 1, 1500))
+        .clout_server(BUFF, comet_shape());
+    crate::systems::npcs::bridges::install(&server);
+    let mut client = TestClient::new(&server, 1, 1001);
+    let caster = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Alpha", 100.0, 100.0),
+        0x810,
+    );
+    let mut ally_client = TestClient::new(&server, 2, 1002);
+    let mut ally_character = test_character(2, "Beta", 100.0, 103.0);
+    ally_character.unit.transform.set_xyz(100.0, 103.0, 0.0);
+    let ally = spawn_player(&server, &ally_client, ally_character, 0x820);
+    client.drain();
+    ally_client.drain();
+    let world = server.world.world(0).unwrap();
+
+    let cast = || EffectArgs {
+        caster: Some(WorldObject::from(&caster)),
+        caster_caster: SkillCaster::Unit(caster.obj_id),
+        target: Target::Obj(WorldObject::from(&caster)),
+        target_caster: SkillCastTarget::Unit(caster.obj_id),
+        cast: CastAction::Skill {
+            skill_id: 18_222,
+            tl_id: 1,
+        },
+        source: EffectSource::default(),
+        skill_object: &SkillObject::None,
+    };
+    let spawn_after_delay = async || {
+        tokio::task::yield_now().await;
+        server.systems.npcs.doodads.tasks.advance(&server, 1000);
+        tokio::time::advance(Duration::from_millis(1000)).await;
+        tokio::task::yield_now().await;
+    };
+    crate::systems::skills::effects::special::execute(
+        &server,
+        15,
+        &cast(),
+        [TEMPLATE as i32, 1000, 0, 0],
+    );
+    spawn_after_delay().await;
+    server.systems.npcs.area_triggers.tick(&server);
+    assert!(ally.data().unit.buffs.check_buff(BUFF));
+    assert_eq!(ally.data().unit.trigger_count(BUFF), 1);
+
+    crate::systems::skills::effects::special::execute(
+        &server,
+        15,
+        &cast(),
+        [TEMPLATE as i32, 1000, 0, 0],
+    );
+    assert_eq!(world.all_doodads().len(), 1, "the second summon waits");
+    spawn_after_delay().await;
+    assert_eq!(world.all_doodads().len(), 2);
+    server.systems.npcs.area_triggers.tick(&server);
+    assert_eq!(server.systems.npcs.area_triggers.triggers().len(), 2);
+    assert!(ally.data().unit.buffs.check_buff(BUFF));
+    assert_eq!(ally.data().unit.trigger_count(BUFF), 2);
+}
+
+/// A caster and an ally for a delayed `SpawnDoodad` summon of `TEMPLATE` whose start phase is a
+/// `clout_ms` clout. The synthetic world has no geodata: `SpawnDoodad` puts the doodad on the
+/// fallback ground height 0, so the ally stands on it (the caster stays at 100, out of the area).
+struct DelayedSummon {
+    server: Arc<GameServer>,
+    world: Arc<WorldInstance>,
+    caster: PlayerRef,
+    ally: PlayerRef,
+    ally_client: TestClient,
+    _caster_client: TestClient,
+}
+
+impl DelayedSummon {
+    fn new(buff: u32, clout_ms: i32) -> Self {
+        let server = Builder::default()
+            .template(TEMPLATE, &[(10, 1)])
+            .phase_func(10, clout(buff, 1, clout_ms))
+            .clout_server(buff, comet_shape());
+        crate::systems::npcs::bridges::install(&server);
+        let mut caster_client = TestClient::new(&server, 1, 1001);
+        let caster = spawn_player(
+            &server,
+            &caster_client,
+            test_character(1, "Alpha", 100.0, 100.0),
+            0x810,
+        );
+        let mut ally_client = TestClient::new(&server, 2, 1002);
+        let mut ally_character = test_character(2, "Beta", 100.0, 103.0);
+        ally_character.unit.transform.set_xyz(100.0, 103.0, 0.0);
+        let ally = spawn_player(&server, &ally_client, ally_character, 0x820);
+        caster_client.drain();
+        ally_client.drain();
+        let world = server.world.world(0).unwrap();
+        Self {
+            server,
+            world,
+            caster,
+            ally,
+            ally_client,
+            _caster_client: caster_client,
+        }
+    }
+
+    /// The `SpawnDoodad` special effect (type 15) of Comet's Boon: `TEMPLATE` after 1000 ms.
+    fn cast(&self) {
+        use crate::systems::skills::effects::{EffectArgs, EffectSource};
+        use crate::systems::skills::geometry::Target;
+        use crate::systems::skills::types::{
+            CastAction, SkillCastTarget, SkillCaster, SkillObject,
+        };
+
+        let args = EffectArgs {
+            caster: Some(WorldObject::from(&self.caster)),
+            caster_caster: SkillCaster::Unit(self.caster.obj_id),
+            target: Target::Obj(WorldObject::from(&self.caster)),
+            target_caster: SkillCastTarget::Unit(self.caster.obj_id),
+            cast: CastAction::Skill {
+                skill_id: 18_222,
+                tl_id: 1,
+            },
+            source: EffectSource::default(),
+            skill_object: &SkillObject::None,
+        };
+        crate::systems::skills::effects::special::execute(
+            &self.server,
+            15,
+            &args,
+            [TEMPLATE as i32, 1000, 0, 0],
+        );
+    }
+}
+
+#[tokio::test]
+async fn delayed_spawn_doodad_clout_stays_the_casters_when_the_caster_leaves_during_the_delay() {
+    // The C# ran `InitDoodad()` at the cast, with the caster in the world: `DoodadFuncClout.Use`
+    // took `areaTrigger.Caster = caster is Character ? caster : owner`. The port initialises
+    // after the delay; a caster who logged out meanwhile must not turn the clout into the
+    // doodad's own (its relation would be judged against a doodad, not the caster).
+    const BUFF: u32 = 631;
+    let f = DelayedSummon::new(BUFF, 500);
+    f.cast();
+    f.world.hide(&f.caster);
+    f.world.remove_object(f.caster.obj_id);
+    f.server.world.try_remove_character(f.caster.obj_id);
+    assert!(f.world.unit(f.caster.obj_id).is_none());
+
+    assert_eq!(
+        f.server.systems.npcs.doodads.tasks.advance(&f.server, 1000),
+        1
+    );
+    let summon = f.world.all_doodads().pop().expect("the spawned summon");
+    let triggers = f
+        .server
+        .systems
+        .npcs
+        .area_triggers
+        .attached_to(summon.obj_id);
+    assert_eq!(triggers.len(), 1);
+    assert_eq!(
+        triggers[0].caster.as_ref().map(WorldObject::obj_id),
+        Some(f.caster.obj_id),
+        "the clout belongs to the unit that cast the summon, not to the summon"
+    );
+    f.server.systems.npcs.area_triggers.tick(&f.server);
+    assert!(f.ally.data().unit.buffs.check_buff(BUFF));
+}
+
+#[tokio::test]
+async fn delayed_spawn_doodad_is_initialised_before_it_is_visible() {
+    // `SpawnDoodad.cs`: `InitDoodad()` runs on the invisible doodad, then `Spawn()`: a player who
+    // sees the summon appear gets its `SCDoodadCreated`, not the phase change of its init.
+    const BUFF: u32 = 631;
+    let mut f = DelayedSummon::new(BUFF, 500);
+    f.cast();
+    assert_eq!(
+        f.server.systems.npcs.doodads.tasks.advance(&f.server, 1000),
+        1
+    );
+    let ops = f.ally_client.drain_ops();
+    assert!(
+        ops.contains(&sc::SCDoodadCreatedPacket),
+        "the ally sees the summon appear"
+    );
+    assert!(
+        !ops.contains(&sc::SCDoodadPhaseChangedPacket),
+        "the start phase ran while the doodad was still invisible"
+    );
+    // The clout started with the visible summon all the same.
+    f.server.systems.npcs.area_triggers.tick(&f.server);
+    assert!(f.ally.data().unit.buffs.check_buff(BUFF));
+}
+
+#[tokio::test]
+async fn delayed_spawn_that_can_no_longer_run_releases_the_doodad_object_id() {
+    // `SpawnDoodad` allocates the summon's object id when it is cast. When its instance is gone
+    // by the time the delay is over the spawn is dropped, and nothing else owns the id.
+    use std::time::Duration;
+
+    let server = Builder::default().template(TEMPLATE, &[(10, 1)]).server();
+    let template = server.world.world(0).unwrap().template.clone();
+    let world = server.world.create_world_instance(template, 77);
+    let doodad = manager::create(&server, &world, 0, TEMPLATE, None, true).unwrap();
+    let obj_id = doodad.obj_id;
+    tasks::schedule_spawn(&server, &doodad, None, Duration::from_millis(1000));
+    drop(world);
+    assert!(server.world.remove_world(77));
+
+    assert_eq!(server.systems.npcs.doodads.tasks.advance(&server, 1000), 1);
+    assert_eq!(
+        server.ids.object.get_next_id().unwrap(),
+        obj_id,
+        "the dropped spawn gave its object id back"
+    );
 }
 
 #[tokio::test]

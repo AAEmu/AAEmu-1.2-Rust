@@ -45,6 +45,12 @@ pub enum FuncTaskKind {
     Tod { next_phase: i32 },
     /// `DoodadDeleteTask(owner)`.
     Delete,
+    /// `SpecialType.SpawnDoodad`'s delayed `doodad.Spawn()` (`SpawnDoodad.cs`:
+    /// `InitDoodad(); if (delay > 0) Thread.Sleep(delay); Spawn()`). Here `InitDoodad()` waits
+    /// for the delay as well, so the start phase (a clout) begins with the visible summon and
+    /// cannot expire while it is still pending. `DoodadTask::caster` is the owner unit the C#
+    /// `InitDoodad()` resolved at the cast.
+    Spawn,
     /// A family/link signal deferred while the target is processing an interaction.
     Pulse { source: DoodadRef, value: bool },
 }
@@ -305,6 +311,42 @@ pub fn cancel_func_task(doodad: &DoodadRef) -> bool {
     had
 }
 
+/// `SpecialType.SpawnDoodad`: `TaskManager.Schedule(doodad.Spawn(), delay)`, preceded by the
+/// `InitDoodad()` of the same step (see [`FuncTaskKind::Spawn`]). `owner` is the unit that
+/// `InitDoodad()` passes to the start phase (`ParentWorld.GetUnit(OwnerObjId)`), taken at the
+/// cast. Not a `FuncTask` (generation 0): a phase change must not cancel the spawn.
+pub fn schedule_spawn(
+    server: &GameServer,
+    doodad: &DoodadRef,
+    owner: Option<&WorldObject>,
+    delay: Duration,
+) {
+    schedule(
+        server,
+        DoodadTask {
+            world: server
+                .world
+                .world_of(&WorldObject::from(doodad))
+                .as_ref()
+                .map(Arc::downgrade),
+            doodad: doodad.clone(),
+            holder: doodad.clone(),
+            caster: owner.cloned(),
+            generation: 0,
+            kind: FuncTaskKind::Spawn,
+        },
+        delay,
+    );
+}
+
+/// A task that will never run leaves what it was scheduled for behind. A scheduled spawn's
+/// doodad never entered the world and nothing else owns the object id `create` allocated for it.
+fn discard(server: &GameServer, task: &DoodadTask) {
+    if matches!(task.kind, FuncTaskKind::Spawn) {
+        server.ids.object.release_id(task.doodad.obj_id);
+    }
+}
+
 /// `TaskManager.Schedule(new DoodadDeleteTask(doodad))` (no delay).
 pub fn schedule_delete(server: &GameServer, doodad: &DoodadRef) {
     schedule(
@@ -331,6 +373,7 @@ pub fn execute(server: &GameServer, task: DoodadTask) {
         return;
     }
     let Some(world) = task.world.as_ref().and_then(Weak::upgrade) else {
+        discard(server, &task);
         return;
     };
     if !server
@@ -338,6 +381,7 @@ pub fn execute(server: &GameServer, task: DoodadTask) {
         .world(world.id)
         .is_some_and(|current| Arc::ptr_eq(&current, &world))
     {
+        discard(server, &task);
         return;
     }
     let respawning = matches!(
@@ -347,12 +391,16 @@ pub fn execute(server: &GameServer, task: DoodadTask) {
             ..
         }
     );
+    // A scheduled spawn's doodad is not in the world yet; a deleted one is not spawned.
+    let spawning = matches!(task.kind, FuncTaskKind::Spawn);
     if !respawning
         && (task.doodad.data().phase.deleted
-            || !world
-                .doodad(task.doodad.obj_id)
-                .is_some_and(|current| Arc::ptr_eq(&current, &task.doodad)))
+            || (!spawning
+                && !world
+                    .doodad(task.doodad.obj_id)
+                    .is_some_and(|current| Arc::ptr_eq(&current, &task.doodad))))
     {
+        discard(server, &task);
         return;
     }
     let _operation = if respawning {
@@ -500,6 +548,20 @@ pub fn execute(server: &GameServer, task: DoodadTask) {
             phase::do_change_phase(&ctx, caster, next_phase);
         }
         FuncTaskKind::Delete => super::manager::delete(server, &ctx.world, &ctx.doodad),
+        FuncTaskKind::Spawn => {
+            tracing::trace!(
+                "[Doodad] SpawnDoodadTask: Doodad {}, TemplateId {template_id}",
+                ctx.doodad.obj_id
+            );
+            // `SpawnDoodad.cs`: `InitDoodad(); if (delay > 0) Thread.Sleep(delay); Spawn();`.
+            // The init moved behind the delay (a clout of the start phase would otherwise run,
+            // and expire, before its doodad exists) but keeps its place before the spawn: the
+            // start phase runs on the invisible doodad, so no viewer gets its phase changes, and
+            // the trigger it creates is first ticked once the spawn made the owner visible (an
+            // unspawned owner has no region, and `spawn` shows it before it enters one).
+            phase::init_doodad_for(&ctx, caster);
+            super::manager::spawn(server, &ctx.world, &ctx.doodad);
+        }
         FuncTaskKind::Pulse { source, value } => {
             let source_ctx = DoodadCtx::new(server, ctx.world.clone(), source);
             super::logic::receive(&source_ctx, &ctx.doodad, caster, value);

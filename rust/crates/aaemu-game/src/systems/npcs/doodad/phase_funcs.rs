@@ -482,8 +482,13 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
         .npcs
         .area_trigger
         .get_area_shape_by_id(f.aoe_shape_id);
-    let owner = if f.use_origin_source {
-        // look for a doodad within 4 m of the caster
+    let owner = if f.use_origin_source && ctx.doodad.core().is_visible() {
+        // `WorldManager.GetAround<Doodad>(caster, 4f)`: a doodad within 4 m of the caster
+        // anchors the trigger. A doodad initialised before its `Spawn` (the summon path, also
+        // a delayed `SpawnDoodad`) is not visible yet and keeps its own transform: the C#
+        // anchor moved the area away from the summon, which left the caster outside it when a
+        // planted doodad stood next to them (Comet's Boon 5017: caster 2.002 m off the clout's
+        // 2.0 m half-length).
         caster
             .and_then(|c| {
                 let cpos = ctx.world.world_pos_rot(c);
