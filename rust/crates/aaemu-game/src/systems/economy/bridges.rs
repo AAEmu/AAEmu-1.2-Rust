@@ -735,18 +735,41 @@ impl EconomyForSkills {
             }
         }
         // Use labor and recover exp (not ChangeLabor: no labor exp). Effects without a labor
-        // cost (the scrolls' 26611) restore only; the spend saturates at 0 so a stale read
-        // cannot drive the cached labor below 0.
+        // cost (the scrolls' 26611) restore only. The checks above ran on a snapshot, so the
+        // labor and the recoverable exp are re-checked, spent and taken under one lock: a
+        // concurrent change can neither make the recovery cheaper nor credit it twice.
+        let recoverable = {
+            let mut c = player.data();
+            if c.recoverable_exp <= 0 {
+                None
+            } else if e.need_labor_power && i32::from(c.labor_power) < needed {
+                Some(Err(()))
+            } else {
+                if e.need_labor_power {
+                    c.change_labor_power(-(needed as i16));
+                }
+                Some(Ok(std::mem::take(&mut c.recoverable_exp)))
+            }
+        };
+        let recoverable = match recoverable {
+            None => {
+                send_error_message_to(
+                    &mut out,
+                    player,
+                    error_message::CANNOT_RECOVER_ALL_NOT_ENOUGH,
+                );
+                return;
+            }
+            Some(Err(())) => {
+                send_error_message_to(&mut out, player, error_message::NOT_ENOUGH_LABOR_POWER);
+                return;
+            }
+            Some(Ok(recoverable)) => recoverable,
+        };
         if e.need_labor_power {
-            let spend = {
-                let mut c = player.data();
-                let spend = needed.min(i32::from(c.labor_power)).max(0);
-                c.change_labor_power(-(spend as i16));
-                spend
-            };
             player.send(
                 crate::systems::skills::progress::SCCharacterLaborPowerChangedPacket {
-                    amount: -spend,
+                    amount: -needed,
                     action: 0,
                     point: 0,
                     step: 0,
@@ -760,7 +783,6 @@ impl EconomyForSkills {
             reason: 1,
         });
         crate::systems::skills::progress::add_exp(server, player, recoverable, false);
-        player.data().recoverable_exp = 0;
     }
 
     /// The non-house, non-shipyard part of `CraftEffect.Apply` (housing and vehicles take their
