@@ -66,6 +66,10 @@ pub struct PhysicsConfig {
     /// Ships on the CryPhysics port (`aaemu-physics` rigid bodies) instead of the Jitter2 subset.
     #[serde(rename = "cryphysicsships", deserialize_with = "lenient")]
     pub cryphysics_ships: bool,
+    /// Summon search diagnostics: after the first valid candidate, keep scanning all 120
+    /// candidates and compare the 1.2 model box against the old hull envelope (default off).
+    #[serde(rename = "summondiagnostics", deserialize_with = "lenient")]
+    pub summon_diagnostics: bool,
 }
 
 impl Default for PhysicsConfig {
@@ -82,6 +86,7 @@ impl Default for PhysicsConfig {
             movement_verify_enable: false,
             fall_damage_zone_cap: true,
             cryphysics_ships: true,
+            summon_diagnostics: false,
         }
     }
 }

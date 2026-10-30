@@ -2499,29 +2499,41 @@ Additional world-side fixes from the same audit:
   the hull and would otherwise overlap its collision box (CryPhysics then ejects a freshly
   summoned hull). The exclusion is keyed on `doodad_owner_type::SLAVE` and therefore also
   covers cart equipment.
-* Summon placement probes the collision-world ground (`ground_height_probe`, mask
-  static+terrain) at the candidate centre and around the hull footprint instead of trusting
-  the heightmap alone; a probe miss (`Some(None)`) falls back to the terrain elevation (then
-  the heightmap) rather than "bottomless water". The probes use the hull footprint the solid
-  CryPhysics hull uses (the clipped authored collision bounds, else the mass box; scale 1.0
-  for a fresh summon) at the ship's FINAL yaw (owner yaw + 90°), sampled at the asymmetric
-  bow/stern extents, the longitudinal midpoint and both beam edges, so the middle of the long
-  sides is covered; the forward search still moves the centre along the player's facing.
-  Overhead structures are checked separately: a downward ray from above the hull envelope
-  (clipped bounds top + 1 m margin) to just above the water surface at every probe point
-  rejects a spot under a pier, bridge or deck as if it were shallow. A ray does not hit the
-  solid it starts in, so a second ray runs up the same segment and finds the underside of a
-  deck thick enough to contain the downward ray's start
-  (`collision::flow_tests::summon_overhead_clearance_sees_a_deck_that_contains_the_ray_start`).
-  If no forward candidate
-  is acceptable, the spot 5 m in front of the owner is used when it clears the same depth and
-  clearance tests (its centre only; no further placement search), placed at the water surface
-  there rather than at the owner's z (a pier or deck must not leave the hull in the air).
-  Remaining limitations: the checks sample points, not the whole hull volume; when every
-  candidate and the fallback fail, the C# initial spot is still used; and the terrain fallback
-  can read a harbour platform above the water (heightmap) even where the collision world is
-  open water, so the search may not move off a pier.
-
+* Summon placement. Player item summons (`SpawnSlave` / skill 15802, item use) follow the 1.2
+  client's own pre-cast search (`FUN_39347fb0`), a deviation from the C# `Create` placement:
+  120 candidates at `spawn_x_offset + i` metres forward along the player's facing (i = 0..39)
+  with lateral offsets `{0, +spawn_y_offset, -spawn_y_offset}`; the first passing candidate
+  wins. A candidate passes when (ships) the collision terrain is not above the water surface at
+  x/y, (land) the terrain is at most 10 m above the player, a ray from the player's eyes to the
+  candidate hits nothing (mask `SOLID_TERRAIN` 0x107, flags 0x8F; ships end at the water surface,
+  land at the candidate's own ground + 1 m, i.e. the 1.2 eye-to-eye rule), the model box (the
+  unclipped model bbox from the prefab collision proxies; the inertia mass box of the ship model
+  when the model reference is unavailable, e.g. no client assets) rotated to player yaw + 90
+  degrees overlaps no blocking static and no terrain heightfield, and the 3D player-to-candidate
+  distance is at most 80 m. The land candidate z is the static-aware ground (`ground_height_or`:
+  bridges, plazas, quays, then the heightmap), and the final spawn re-grounds a positioned land
+  slave the same way, so a vehicle on a bridge or quay does not sink to the terrain below it.
+  The box is an oriented `PrimitiveWorldIntersection` query (`box_obstacles`) for statics plus
+  `box_overlaps_terrain` for the heightfield (the PWI box query does not report heightfield
+  contacts); this 1.2 path has no +1 m top margin, no terrain point sampling and no
+  containment rays. Statics with a world AABB under 2 m (buoys, bollards, mooring posts) and
+  vegetation are ignored. If none of the 120 passes, the summon is refused with `SCErrorMsg`
+  100 (`SLAVE_SPAWN_SHIP_NEED_MORE_SPACE`), the summon item is not committed, the skill
+  cooldown and GCD are refunded — on the server and on the client with the same
+  `SCSkillCooldownResetPacket` the skill system uses — (also when a client `SummonPos` placement
+  fails the data-range or water checks with `SCErrorMsg` 583), and nothing is spawned. A client
+  `SummonPos` placement is validated with the same 1.2 checks instead of searching (the old
+  data-range and water sanity checks still run first). The old C# depth/overhead probes, the +1 m margin, the
+  nine-point terrain sampling and the containment rays remain in `hull_clear_at` only for GM
+  `/slave spawn` and spawner placement (no item), and its overhead probe now casts down and up
+  the same segment: the upward ray finds the underside of a deck thick enough to contain the
+  downward ray's start (`collision::flow_tests::summon_overhead_clearance_sees_a_deck_that_contains_the_ray_start`);
+  the player 1.2 model box rejects the same thick deck through the static/heightfield overlap.
+  Remaining limitations: the box-box intersect emits only clipped edge points, so a static
+  wholly inside the model box is not reported on this path (the old containment rays are
+  GM-only); land slaves use the terrain step and line of sight, not a vehicle-model box (only
+  ship models are loaded); and without a collision world (tests, Physics off) player placement
+  falls back to the C# in-front placement.
 Remaining packet stubs and table candidates are still subject to behavior review. Missing SQL
 mentions do not establish disuse (some names are selected dynamically); empty tables, client
 visuals and schema migration metadata do not imply missing server features. The 10.x reference

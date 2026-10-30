@@ -3438,9 +3438,11 @@ async fn summon_pos_places_the_vehicle_at_the_chosen_spot() {
     let slave = wait_for_slave(&world).await;
     let t = slave.data().unit.transform;
     assert_eq!((t.x, t.y), (103.0, 104.0));
+    // Ships and land vehicles spawn 90 degrees CCW of the player, the pose the 1.2 check used;
+    // the client's SummonPos yaw is not the spawn yaw.
     assert!(
-        (t.rot_z - 1.25).abs() < 1e-6,
-        "yaw {}, wanted 1.25",
+        (t.rot_z - std::f32::consts::FRAC_PI_2).abs() < 1e-6,
+        "yaw {}, wanted 90 degrees CCW of the player",
         t.rot_z
     );
     assert!(
