@@ -2,7 +2,7 @@
 //! caller 4) and its sort helper `sub_35079CC0`.
 
 use super::grid::aabb_overlap;
-use super::{EntIdx, World};
+use super::{EntIdx, World, MAX_CALLERS};
 use crate::math::Vec3;
 
 /// The magic-number floor of the grid code: `(int)((x − 0.5) + 12582912.0) − 0x4B400000`.
@@ -224,6 +224,15 @@ impl World {
         c.objtypes = objtypes;
         c.list.clone_from(&out);
         out
+    }
+
+    /// Drops the calling thread's `GetEntitiesInBox` cache (its `objtypes` no longer matches
+    /// any query), the same invalidation the ray query performs before it reuses the temp
+    /// list: a repeated query with an identical box walks the grid again instead of replaying
+    /// the previous result list.
+    pub fn invalidate_box_query_cache(&mut self) {
+        let caller = self.tls_thread.clamp(0, MAX_CALLERS as i32 - 1) as usize;
+        self.box_cache[caller].objtypes = -1;
     }
 }
 

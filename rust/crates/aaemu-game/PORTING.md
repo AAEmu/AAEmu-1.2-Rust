@@ -2595,18 +2595,27 @@ Additional world-side fixes from the same audit:
   wins. A candidate passes when (ships) the collision terrain is not above the water surface at
   x/y, (land) the terrain is at most 10 m above the player, a ray from the player's eyes to the
   candidate hits nothing (mask `SOLID_TERRAIN` 0x107, flags 0x8F; ships end at the water surface,
-  land at the candidate's own ground + 1 m, i.e. the 1.2 eye-to-eye rule), the model box (the
+  land at the candidate's terrain point lifted by 0.2 m), the model box (the
   unclipped model bbox from the prefab collision proxies; the inertia mass box of the ship model
   when the model reference is unavailable, e.g. no client assets) rotated to player yaw + 90
   degrees overlaps no blocking static and no terrain heightfield, and the 3D player-to-candidate
-  distance is at most 80 m. The land candidate z is the static-aware ground (`ground_height_or`:
-  bridges, plazas, quays, then the heightmap), and the final spawn re-grounds a positioned land
-  slave the same way, so a vehicle on a bridge or quay does not sink to the terrain below it.
+  distance is at most 80 m. The land candidate z, its distance check, the model box and the
+  final spawn (search, `SummonPos` validation, post-wait recheck and re-ground) are all the
+  terrain heightfield only (`GetTerrainElevation`, vtable `+0x1fc`), never statics: a deck,
+  bridge or quay above the candidate's terrain lies between the eyes and the terrain point, so
+  the 1.2 rule refuses the summon (error 100) instead of placing the vehicle on the floor. The
+  0.2 m lift of the land ray end is a deviation: 1.2 ends the ray exactly at the terrain point
+  and the lift avoids a float graze between the ray end and the heightfield (the Bevy client
+  port lifts its end the same way).
   The box is an oriented `PrimitiveWorldIntersection` query (`box_obstacles`) for statics plus
   `box_overlaps_terrain` for the heightfield (the PWI box query does not report heightfield
   contacts); this 1.2 path has no +1 m top margin, no terrain point sampling and no
   containment rays. Statics with a world AABB under 2 m (buoys, bollards, mooring posts) and
-  vegetation are ignored. If none of the 120 passes, the summon is refused with `SCErrorMsg`
+  vegetation are ignored. The box query batches: the engine's per-thread contact pool holds 64
+  records and 2040 border points and silently drops further parts, so a saturated round is
+  repeated with the entities already seen in the skip list (the identical-box query cache is
+  defeated by growing the batch box 1 mm per round, a conservative superset) for at most 8
+  rounds; a still-saturated query reports the spot as blocked. If none of the 120 passes, the summon is refused with `SCErrorMsg`
   100 (`SLAVE_SPAWN_SHIP_NEED_MORE_SPACE`), the summon item is not committed, the skill
   cooldown and GCD are refunded — on the server and on the client with the same
   `SCSkillCooldownResetPacket` the skill system uses — (also when a client `SummonPos` placement
