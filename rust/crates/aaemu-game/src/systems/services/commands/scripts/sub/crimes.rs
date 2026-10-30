@@ -713,6 +713,17 @@ const FAKE_PINE_DOODAD: u32 = 398;
 const FAKE_PINE_ITEM: u32 = 14898;
 const UPROOT_SKILL: u32 = 13789;
 
+/// `0` damage, `1` kill, `2` fake pine; tests queue exact kinds on the server's crime manager.
+fn fake_trial_evidence_kind(crimes: &crate::systems::social::crime::CrimeManager) -> u32 {
+    #[cfg(test)]
+    if let Some(v) = crimes.next_forced_fake_trial_rng() {
+        return v;
+    }
+    #[cfg(not(test))]
+    let _ = crimes;
+    rand::random::<u32>() % 3
+}
+
 impl CrimeFakeTrialSubCommand {
     async fn run(
         &self,
@@ -772,7 +783,7 @@ impl CrimeFakeTrialSubCommand {
             let pos = world_position(server, &target_obj);
             let mut fake_pine = None;
             let mut skill_id = 0u32;
-            let rng: u32 = rand::random::<u32>() % 3;
+            let rng: u32 = fake_trial_evidence_kind(crimes);
             // rng = 1; // for fixed murder
             let evidence = match rng {
                 0 => crimes.generate_evidence_from_damage(
@@ -1539,5 +1550,36 @@ mod tests {
             .all_doodads()
             .iter()
             .any(|d| d.data().template_id == 398));
+    }
+
+    /// The fake trial creates its pine through `CreatePlayerDoodad`, which is a server-side
+    /// evidence placement: a victim far away or standing in water must not refuse it (the
+    /// checked planting entry would answer 154/276 and abort the command).
+    #[tokio::test]
+    async fn crime_fake_trial_spawns_a_pine_for_a_far_wet_victim() {
+        let server = server();
+        let gm = harness::pc(&server, 1, "Gm", 100.0, 100.0);
+        let _crook = harness::pc(&server, 2, "Crook", 105.0, 100.0);
+        let victim = harness::pc(&server, 3, "Victim", 500.0, 100.0);
+        victim.p.data().unit.transform.z = 50.0; // below the synthetic ocean (100 m)
+        for (id, name) in [(1, "Gm"), (2, "Crook"), (3, "Victim")] {
+            server.names.add_character(id, name, 1000 + id);
+        }
+        server.systems.social.crimes.queue_fake_trial_rng(&[2]); // the fake-pine branch
+        let (_, out) = harness::run(&server, &gm.p, "crime fake crook victim evidence=1").await;
+        assert_eq!(
+            out,
+            ["|cFFFFFFFF[Crime Fake Trial] Putting Crook on trial by using 1 new evidence(s) to frame them with Victim as the victim.|r"]
+        );
+        let events = server.systems.social.crimes.crimes_of_player(2, true);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].reporter, 3);
+        assert_eq!(server.systems.social.trials.trial_ids().len(), 1);
+        // The pine was spawned at the target and deleted after the report.
+        let world = server.world.world(0).unwrap();
+        assert!(!world
+            .all_doodads()
+            .iter()
+            .any(|d| d.data().template_id == super::FAKE_PINE_DOODAD));
     }
 }

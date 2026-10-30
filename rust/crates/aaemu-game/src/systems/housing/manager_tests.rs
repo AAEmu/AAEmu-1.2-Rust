@@ -723,6 +723,8 @@ async fn beginner_plot_refuses_renewal_bills_and_does_not_charge_a_forged_paymen
 async fn crop_placement_on_rotated_house_preserves_world_position_and_saves_local_transform() {
     let server = test_housing_server();
     let house = house(&server, 1);
+    // Above the synthetic world's ocean level (100 m): the 1.2 placement rules refuse water.
+    house.data().unit.transform.set_xyz(200.0, 200.0, 100.0);
     house.data().unit.transform.rot_z = std::f32::consts::FRAC_PI_2;
     house.data().unit.scale = 2.0;
     manager::spawn_house(&server, &house);
@@ -737,7 +739,7 @@ async fn crop_placement_on_rotated_house_preserves_world_position_and_saves_loca
         &server,
         &player,
         4001,
-        (202.0, 201.0, 51.0),
+        (202.0, 201.0, 101.0),
         0.3,
         1.0,
         0,
@@ -751,7 +753,7 @@ async fn crop_placement_on_rotated_house_preserves_world_position_and_saves_loca
     let position = world.world_pos_rot(&crate::world::WorldObject::from(&doodad));
     assert!((position.x - 202.0).abs() < 1e-4);
     assert!((position.y - 201.0).abs() < 1e-4);
-    assert!((position.z - 51.0).abs() < 1e-4);
+    assert!((position.z - 101.0).abs() < 1e-4);
     assert!((position.rot_z - 0.3).abs() < 1e-4);
     let row = crate::systems::npcs::doodad::db::snapshot(&server, &doodad).unwrap();
     assert_eq!(row.house_id, 1);
