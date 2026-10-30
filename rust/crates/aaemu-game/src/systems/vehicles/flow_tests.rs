@@ -4577,6 +4577,139 @@ async fn unseated_player_cannot_set_turret_state() {
     assert!(!ops(&b.drain()).contains(&sc::SCUnitModelPostureChangedPacket));
 }
 
+/// A passenger on the hull is not seated on the cannon child, so the cannon aim stays put.
+#[tokio::test]
+async fn hull_passenger_cannot_aim_the_cannon_child() {
+    let server = server_with(cannon_data());
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let mut a = TestClient::new(&server, 1, 1);
+    let mut b = TestClient::new(&server, 2, 2);
+    let pa = spawn_player(&server, &a, test_character(1, "Owner", 100.0, 100.0), PA);
+    let pb = spawn_player(&server, &b, test_character(2, "Crew", 101.0, 100.0), PB);
+    a.conn.active_char = Some(pa.clone());
+    b.conn.active_char = Some(pb.clone());
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    let hull = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        SHIP_HULL,
+        None,
+        false,
+        None,
+        None,
+    )
+    .expect("hull");
+    let cannon = world
+        .slave(hull.data().attached_slaves[0])
+        .expect("cannon child");
+    a.drain();
+    b.drain();
+    slaves::bind_slave(
+        &server,
+        &pa,
+        hull.obj_id,
+        attach_point::PASSENGER0,
+        slaves::attach_reason::SLAVE_BINDING,
+    );
+    a.drain();
+    b.drain();
+
+    send_turret_state(&mut a, &server, cannon.obj_id, 0.5, 0.5).await;
+
+    let aim = {
+        let d = cannon.data();
+        (d.turret_pitch, d.turret_yaw)
+    };
+    assert_eq!(aim, (0.0, 0.0));
+    assert!(!ops(&a.drain()).contains(&sc::SCUnitModelPostureChangedPacket));
+    assert!(!ops(&b.drain()).contains(&sc::SCUnitModelPostureChangedPacket));
+}
+
+/// The client's `39356990` sends at most every 200 ms and only on change; the server drops an
+/// unchanged aim and anything inside its 150 ms window.
+#[tokio::test]
+async fn turret_state_is_throttled_and_deduplicated() {
+    let server = server_with(cannon_data());
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let mut a = TestClient::new(&server, 1, 1);
+    let mut b = TestClient::new(&server, 2, 2);
+    let pa = spawn_player(&server, &a, test_character(1, "Owner", 100.0, 100.0), PA);
+    let pb = spawn_player(&server, &b, test_character(2, "Crew", 101.0, 100.0), PB);
+    a.conn.active_char = Some(pa.clone());
+    b.conn.active_char = Some(pb.clone());
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    let hull = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        SHIP_HULL,
+        None,
+        false,
+        None,
+        None,
+    )
+    .expect("hull");
+    let cannon = world
+        .slave(hull.data().attached_slaves[0])
+        .expect("cannon child");
+    let cannon_tl = u32::from(cannon.data().unit.tl_id);
+    a.drain();
+    b.drain();
+    slaves::bind_slave_by_tl(&server, &pa, cannon_tl);
+    a.drain();
+    b.drain();
+
+    let posture = |pitch: f32, yaw: f32| {
+        let mut v = bc(cannon.obj_id);
+        v.extend(turret_posture(pitch, yaw));
+        v
+    };
+
+    send_turret_state(&mut a, &server, cannon.obj_id, 0.25, -0.5).await;
+    assert_eq!(
+        body(&b.drain(), sc::SCUnitModelPostureChangedPacket),
+        posture(0.25, -0.5)
+    );
+
+    // Changed, but inside the window: dropped, and the stored aim stays the accepted one.
+    send_turret_state(&mut a, &server, cannon.obj_id, 0.35, -0.6).await;
+    assert!(!ops(&b.drain()).contains(&sc::SCUnitModelPostureChangedPacket));
+    let aim = {
+        let d = cannon.data();
+        (d.turret_pitch, d.turret_yaw)
+    };
+    assert_eq!(aim, (0.25, -0.5));
+
+    tokio::time::sleep(Duration::from_millis(160)).await;
+    send_turret_state(&mut a, &server, cannon.obj_id, 0.35, -0.6).await;
+    assert_eq!(
+        body(&b.drain(), sc::SCUnitModelPostureChangedPacket),
+        posture(0.35, -0.6)
+    );
+
+    // Outside the window but unchanged: dropped.
+    tokio::time::sleep(Duration::from_millis(160)).await;
+    send_turret_state(&mut a, &server, cannon.obj_id, 0.35, -0.6).await;
+    assert!(!ops(&b.drain()).contains(&sc::SCUnitModelPostureChangedPacket));
+
+    // Outside the window and changed: relayed.
+    tokio::time::sleep(Duration::from_millis(160)).await;
+    send_turret_state(&mut a, &server, cannon.obj_id, 0.45, -0.7).await;
+    assert_eq!(
+        body(&b.drain(), sc::SCUnitModelPostureChangedPacket),
+        posture(0.45, -0.7)
+    );
+}
+
 /// A passenger seat (point 2) is a legitimate aim path too (the 1.2 tank gunner models sit
 /// there); the packet names the slave whose model carries the turret.
 #[tokio::test]

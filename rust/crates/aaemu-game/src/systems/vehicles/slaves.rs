@@ -1493,6 +1493,11 @@ pub fn may_man_cannon(character: &PlayerRef, cannon: &SlaveRef, world: &WorldIns
     owner || attached || character.data().unit.transform.parent_obj_id == bearer_id
 }
 
+/// Server-side turret-aim throttle. The 1.2 client's `FUN_39356990` already sends at most one
+/// packet per 200 ms (`DAT_3a169940 + 200 <= now`) and only when its model aim changed; 150 ms
+/// here additionally collapses datagrams that arrive together without hiding the client rate.
+pub const TURRET_STATE_MIN_INTERVAL_MS: i64 = 150;
+
 /// Applies a client turret aim (`CSTurretStatePacket`) to the slave named by `unit_id`.
 ///
 /// The 1.2 client sends the object id of the unit it controls (`39356990` uses `this+8`), so a
@@ -1500,7 +1505,8 @@ pub fn may_man_cannon(character: &PlayerRef, cannon: &SlaveRef, world: &WorldIns
 /// the tank passenger seat names the hull. Any attach point of that slave counts as seated; a
 /// sender who is not on it is ignored. The stored / relayed angles are the raw model-frame
 /// radians of the packet: the client producers already clamp them to the `vehicle_models` turret
-/// limits (or wrap full-circle yaws) before sending (`39425490` / `39425580`).
+/// limits (or wrap full-circle yaws) before sending (`39425490` / `39425580`). The aim is kept
+/// on the slave and is not cleared on unbind, so late viewers keep the last posture.
 pub fn set_turret_state(
     server: &GameServer,
     character: &PlayerRef,
@@ -1517,7 +1523,8 @@ pub fn set_turret_state(
     let Some(slave) = world.slave(unit_id) else {
         return;
     };
-    // Check and act under the same lock: only a character seated on this slave may aim it.
+    // Check and act under the same lock: only a character seated on this slave may aim it, and
+    // an unchanged aim or one inside the throttle window never reaches the other players.
     let posture = {
         let mut d = slave.data();
         if !d
@@ -1527,8 +1534,15 @@ pub fn set_turret_state(
         {
             return;
         }
+        let now = now_ms();
+        if (pitch == d.turret_pitch && yaw == d.turret_yaw)
+            || now - d.turret_last_update_ms < TURRET_STATE_MIN_INTERVAL_MS
+        {
+            return;
+        }
         d.turret_pitch = pitch;
         d.turret_yaw = yaw;
+        d.turret_last_update_ms = now;
         SCUnitModelPostureChangedPacket {
             obj_id: unit_id,
             posture: crate::models::unit::ModelPostureType::TurretState,
