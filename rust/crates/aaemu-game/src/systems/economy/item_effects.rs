@@ -338,6 +338,7 @@ pub fn grade_enchant(
     server: &GameServer,
     player: &PlayerRef,
     scroll: Option<SkillItem>,
+    scroll_item: Option<&Item>,
     target_item_id: Option<u64>,
     support_item_id: Option<u64>,
     values: [i32; 4],
@@ -380,7 +381,11 @@ pub fn grade_enchant(
         send_error_message_to(&mut txn.out(), player, error_message::NOT_ENOUGH_MONEY);
         return;
     }
-    if !inv.check_items(slot_type::INVENTORY, scroll.item_template_id, 1) {
+    let has_scroll = match scroll_item {
+        Some(item) => item.template_id == scroll.item_template_id && item.count > 0,
+        None => inv.check_items(slot_type::INVENTORY, scroll.item_template_id, 1),
+    };
+    if !has_scroll {
         // No scroll
         send_error_message_to(
             &mut txn.out(),
@@ -662,10 +667,12 @@ pub fn gold_cost(
 
 /// `ItemSocketing.Execute` (lunagems; `Item.DawnStone` removes every gem). Sends
 /// `SCSkillEndedPacket(skill_tl_id)` itself.
+#[allow(clippy::too_many_arguments)]
 pub fn item_socketing(
     server: &GameServer,
     player: &PlayerRef,
     gem: Option<SkillItem>,
+    gem_item: Option<&Item>,
     target_item_id: Option<u64>,
     values: [i32; 4],
     skill_tl_id: u16,
@@ -686,7 +693,7 @@ pub fn item_socketing(
     let mut txn = ItemTxn::begin(server);
     let inv = Inv::of(player);
     let target_holder = inv.holder_of(target_id);
-    let gem_item = inv.item_by_id(gem.item_id);
+    let gem_item = gem_item.cloned().or_else(|| inv.item_by_id(gem.item_id));
     let (Some(holder), Some(gem_item)) = (target_holder, gem_item) else {
         tracing::warn!(
             "Special effects: ItemSocketing targetItem {target_id} or gemItem {} not found",
@@ -990,6 +997,8 @@ pub fn cleanup_look_convert(
     server: &GameServer,
     player: &PlayerRef,
     powder: Option<SkillItem>,
+    powder_item: Option<&Item>,
+    powder_debited: bool,
     target_item_id: Option<u64>,
     values: [i32; 4],
 ) -> Outcome {
@@ -1020,8 +1029,14 @@ pub fn cleanup_look_convert(
     let Some(powder) = powder else {
         return Outcome::Cancelled;
     };
-    let Some(powder_item) = inv.item_by_id(powder.item_id) else {
-        return Outcome::Cancelled;
+    let powder_item = match powder_item {
+        Some(item) => item.clone(),
+        None => {
+            let Some(item) = inv.item_by_id(powder.item_id) else {
+                return Outcome::Cancelled;
+            };
+            item
+        }
     };
     if powder_item.count < 1 {
         return Outcome::Cancelled;
@@ -1039,14 +1054,17 @@ pub fn cleanup_look_convert(
         player,
         task_packet(task_type::CONVERT_ITEM_LOOK, vec![ItemTask::update(&after)]),
     );
-    if let Some(c) = inv.holder_of_any(powder_item.id) {
-        lock(&c).consume_item(
-            task_type::CONVERT_ITEM_LOOK,
-            powder_item.template_id,
-            1,
-            Some(powder_item.id),
-            &mut txn.env,
-        );
+    // The cast's debit already consumed the powder; only the fallback pays for it here.
+    if !powder_debited {
+        if let Some(c) = inv.holder_of_any(powder_item.id) {
+            lock(&c).consume_item(
+                task_type::CONVERT_ITEM_LOOK,
+                powder_item.template_id,
+                1,
+                Some(powder_item.id),
+                &mut txn.env,
+            );
+        }
     }
     Outcome::Done
 }
@@ -1285,6 +1303,7 @@ pub fn gain_item_with_emblem_imprint(
     server: &GameServer,
     target: Option<&PlayerRef>,
     source: Option<SkillItem>,
+    source_item: Option<&Item>,
     values: [i32; 4],
 ) {
     let [value1, value2, value3, value4] = values;
@@ -1295,8 +1314,14 @@ pub fn gain_item_with_emblem_imprint(
         tracing::error!("GainItemWithEmblemImprint: casterObj is not a SkillItem"); // InvalidCast
         return;
     };
-    let Some(source_item) = server.items.item_by_id(source.item_id) else {
-        return;
+    let source_item = match source_item {
+        Some(item) => item.clone(),
+        None => {
+            let Some(item) = server.items.item_by_id(source.item_id) else {
+                return;
+            };
+            item
+        }
     };
     if let Some(player) = target {
         create_stamp(server, player, &source_item);
@@ -1331,6 +1356,34 @@ pub fn apply_stamp(stamp: &Item, target: &mut Item) {
     target.set_ucc(stamp.ucc_id);
 }
 
+/// Resolve both UCC operands, preferring the cast's pre-debit `source_item` snapshot over the
+/// live (already debited) source. The caller holds an ItemTxn.
+fn ucc_operands(
+    player: &PlayerRef,
+    source: SkillItem,
+    source_item: Option<&Item>,
+    target_id: u64,
+) -> Option<(Item, ContainerRef)> {
+    if let Some(item) = source_item {
+        if source.item_id == target_id
+            || item.id != source.item_id
+            || item.template_id != source.item_template_id
+            || item.count <= 0
+        {
+            return None;
+        }
+        let inv = Inv::of(player);
+        let holder = inv.holder_of(target_id)?;
+        let valid_target = lock(&holder)
+            .get_item_by_id(target_id)
+            .is_some_and(|target| {
+                target.owner_id == u64::from(player.character_id) && target.count > 0
+            });
+        return valid_target.then_some((item.clone(), holder));
+    }
+    owned_ucc_items(player, source, target_id)
+}
+
 /// Resolve both UCC operands in the caster's inventory while the caller holds an ItemTxn.
 /// Loose items and other characters' containers cannot be addressed by an item skill.
 fn owned_ucc_items(
@@ -1362,6 +1415,7 @@ pub fn imprint_ucc(
     server: &GameServer,
     target: Option<&PlayerRef>,
     stamp: Option<SkillItem>,
+    stamp_item: Option<&Item>,
     target_item_id: Option<u64>,
 ) -> Outcome {
     tracing::trace!("ImprintUccEffect");
@@ -1369,7 +1423,7 @@ pub fn imprint_ucc(
         return Outcome::Cancelled;
     };
     let mut txn = ItemTxn::begin(server);
-    let Some((stamp_item, holder)) = owned_ucc_items(player, stamp, target_id) else {
+    let Some((stamp_item, holder)) = ucc_operands(player, stamp, stamp_item, target_id) else {
         return Outcome::Cancelled;
     };
     let target_item = {
@@ -1404,6 +1458,7 @@ pub fn cleanup_ucc(
     server: &GameServer,
     target: Option<&PlayerRef>,
     bleach: Option<SkillItem>,
+    bleach_item: Option<&Item>,
     target_item_id: Option<u64>,
 ) -> Outcome {
     tracing::trace!("CleanupUccEffect");
@@ -1411,7 +1466,7 @@ pub fn cleanup_ucc(
         return Outcome::Cancelled;
     };
     let mut txn = ItemTxn::begin(server);
-    let Some((_, holder)) = owned_ucc_items(player, bleach, target_id) else {
+    let Some((_, holder)) = ucc_operands(player, bleach, bleach_item, target_id) else {
         return Outcome::Cancelled;
     };
     let target_item = {
@@ -1512,6 +1567,8 @@ pub fn gain_loot_pack_item(
     player: &PlayerRef,
     effect: &GainLootPackItemEffect,
     source: Option<SkillItem>,
+    source_item: Option<&Item>,
+    source_debited: bool,
     rng: &mut dyn LootRng,
 ) {
     let Some(pack) = server
@@ -1543,7 +1600,9 @@ pub fn gain_loot_pack_item(
     }
     if effect.consume_source_item {
         let Some(source) = source else { return };
-        let Some(source_item) = lock(&bag).get_item_by_id(source.item_id).cloned() else {
+        // The skill debited the source item before this effect, so only its captured data is
+        // available; consuming it again would hit the bag it was already taken out of.
+        let Some(source_item) = source_item else {
             tracing::warn!(
                 "Invalid loot result items {} in lootpack {}",
                 source.item_id,
@@ -1554,12 +1613,14 @@ pub fn gain_loot_pack_item(
         if effect.inherit_grade {
             inherited_grade = Some(source_item.grade);
         }
-        lock(&bag).remove_item_task(
-            task_type::CONSUME_SKILL_SOURCE,
-            source_item.id,
-            true,
-            &mut txn.env,
-        );
+        if !source_debited {
+            lock(&bag).remove_item_task(
+                task_type::CONSUME_SKILL_SOURCE,
+                source_item.id,
+                true,
+                &mut txn.env,
+            );
+        }
     }
     // Give the results
     if !loot::give_loot_pack(

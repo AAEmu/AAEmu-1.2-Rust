@@ -166,6 +166,8 @@ pub struct SkillData {
     pub common_skills: Vec<u32>,
     /// Skills with a legitimate client-driven source (see [`CLIENT_SKILL_SOURCES`]).
     client_sourced: HashSet<u32>,
+    /// Skills reachable only through an item (`ITEM_SKILL_SOURCES` and no other client source).
+    item_only: HashSet<u32>,
 }
 
 /// `(table, column)` pairs of the static data that name skills a client may cast without owning
@@ -197,6 +199,21 @@ pub const CLIENT_SKILL_SOURCES: &[(&str, &str)] = &[
     ("housing_build_steps", "skill_id"),
     ("shipyard_steps", "skill_id"),
 ];
+
+/// The [`CLIENT_SKILL_SOURCES`] entries that reach a skill only through an item use (the
+/// `SkillCaster::Item` path, which validates and consumes the item). A skill named here and by
+/// no other source must never run as a plain unit cast.
+pub const ITEM_SKILL_SOURCES: &[(&str, &str)] =
+    &[("items", "use_skill_id"), ("item_grade_skills", "skill_id")];
+
+/// `SpecialEffect` types the 1.2 client casts from its own UI although no source table names
+/// them: type 30 `SavePortal`, the Teleport Book's record / rename (skills 11215 / 16841). The
+/// portal window (`edit_dialog_handler.alb`) sends a plain `CSStartSkill` with a
+/// `SavePortalInfo` object and there is no CS save-portal opcode. The effect itself still
+/// enforces the Memory Ink reagent (`skill_reagents`) and only renames the caster's own portal.
+/// Deliberately only type 30: other special effects (Return, SpawnDoodad, ...) would reopen
+/// NPC / event skills.
+pub const CLIENT_SKILL_SPECIAL_EFFECT_SOURCES: &[i32] = &[30];
 
 /// Effect classes whose skills the client casts from its own UI even though no source table
 /// names them: the priest's lost-experience prayer (skill 17063 "Offer Prayer",
@@ -246,6 +263,12 @@ impl SkillData {
     /// Whether `id` is named by a client-driven source ([`CLIENT_SKILL_SOURCES`]).
     pub fn is_client_sourced_skill(&self, id: u32) -> bool {
         self.client_sourced.contains(&id)
+    }
+
+    /// Whether `id` is reachable only through an item use ([`ITEM_SKILL_SOURCES`]) and no
+    /// other client source. Such a skill is only accepted on the `SkillCaster::Item` path.
+    pub fn is_item_only_skill(&self, id: u32) -> bool {
+        self.item_only.contains(&id)
     }
 
     /// Marks `id` as client-sourced (tests and fixtures).
@@ -391,6 +414,8 @@ impl SkillData {
             d.buffs.insert(t.id, t);
             Ok(())
         })?;
+        let mut item_sourced = HashSet::new();
+        let mut non_item_sourced = HashSet::new();
         for (table, column) in CLIENT_SKILL_SOURCES {
             // A source table missing from an older compact database only narrows the set.
             let sql = format!("SELECT {column} FROM {table} WHERE {column} > 0");
@@ -399,6 +424,11 @@ impl SkillData {
                 for id in ids {
                     if let Ok(id) = u32::try_from(id?) {
                         d.client_sourced.insert(id);
+                        if ITEM_SKILL_SOURCES.contains(&(table, column)) {
+                            item_sourced.insert(id);
+                        } else {
+                            non_item_sourced.insert(id);
+                        }
                     }
                 }
                 Ok(())
@@ -407,16 +437,49 @@ impl SkillData {
                 tracing::warn!("client skill source {table}.{column} not loaded: {e}");
             }
         }
+        for special_effect_type_id in CLIENT_SKILL_SPECIAL_EFFECT_SOURCES {
+            let loaded = conn
+                .prepare(
+                    "SELECT DISTINCT se.skill_id FROM skill_effects se \
+                     JOIN effects e ON e.id = se.effect_id \
+                     JOIN special_effects s ON s.id = e.actual_id AND e.actual_type = 'SpecialEffect' \
+                     WHERE s.special_effect_type_id = ?1 AND se.skill_id > 0",
+                )
+                .and_then(|mut stmt| {
+                    let ids = stmt.query_map([special_effect_type_id], |r| r.get::<_, i64>(0))?;
+                    for id in ids {
+                        if let Ok(id) = u32::try_from(id?) {
+                            d.client_sourced.insert(id);
+                            non_item_sourced.insert(id);
+                        }
+                    }
+                    Ok(())
+                });
+            if let Err(e) = loaded {
+                tracing::warn!(
+                    "client skill special effect source {special_effect_type_id} not loaded: {e}"
+                );
+            }
+        }
         for &(actual_type, table, column) in CLIENT_SKILL_EFFECT_SOURCES {
             // The effect table is the C# `SkillManager._effects` key: player recovery skills
             // (the priest's prayer) are reached through the client's own interaction UI.
             match effect_sourced_skills(conn, actual_type, table, column) {
-                Ok(ids) => d.client_sourced.extend(ids),
+                Ok(ids) => {
+                    non_item_sourced.extend(ids.iter().copied());
+                    d.client_sourced.extend(ids);
+                }
                 Err(e) => {
                     tracing::warn!("client skill effect source {actual_type} not loaded: {e}")
                 }
             }
         }
+        // An item skill that another source also hands to players (doodad / NPC interaction,
+        // craft, quest, ...) keeps its plain cast; only the item-exclusive ids are gated.
+        d.item_only = item_sourced
+            .into_iter()
+            .filter(|id| !non_item_sourced.contains(id))
+            .collect();
         d.finish();
         Ok(d)
     }
@@ -438,5 +501,32 @@ mod tests {
         assert_eq!(stored_skill_level(1, 3, 55), 19);
         assert_eq!(stored_skill_level(1, 1, 1000), 127);
         assert_eq!(stored_skill_level(5, 0, 1), 1);
+    }
+
+    /// `AAEMU_COMPACT_DB=... cargo test -p aaemu-game item_only_and_save_portal_sources \
+    /// -- --ignored`
+    #[test]
+    #[ignore = "needs AAEMU_COMPACT_DB (read-only)"]
+    fn item_only_and_save_portal_sources_real_compact_db() {
+        let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+            return;
+        };
+        let conn =
+            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let d = SkillData::load(&conn).unwrap();
+        // 26611 "Full XP Restoration" belongs to the XP Restoration Scrolls only.
+        assert!(d.is_client_sourced_skill(26611));
+        assert!(d.is_item_only_skill(26611));
+        // The priest prayer (PR #21's effect source) stays a plain cast, never item-only.
+        assert!(d.is_client_sourced_skill(17063));
+        assert!(!d.is_item_only_skill(17063));
+        // The Teleport Book's record / rename are SavePortal special-effect casts.
+        assert!(d.is_client_sourced_skill(11215));
+        assert!(d.is_client_sourced_skill(16841));
+        assert!(!d.is_item_only_skill(11215));
+        assert!(!d.is_item_only_skill(16841));
+        // 16387 "Save Location" is also a doodad interaction: still a plain cast.
+        assert!(d.is_client_sourced_skill(16387));
+        assert!(!d.is_item_only_skill(16387));
     }
 }

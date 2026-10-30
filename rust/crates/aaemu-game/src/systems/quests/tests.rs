@@ -4184,3 +4184,196 @@ async fn save_tutorial_caps_the_tutorial_entries() {
     );
     assert!(client.drain_ops().is_empty());
 }
+
+// ----- item-use quest events through a consumable Item cast -----
+
+const CASTABLE_ITEM: u32 = 7_100;
+const CASTABLE_SKILL: u32 = 20_100;
+
+/// A heal effect that consumes the casting item, plus the use skill / template of that item.
+fn castable_item_data(build: impl FnOnce(&mut QuestData)) -> GameData {
+    use crate::systems::skills::data::effects::{EffectTemplate, HealEffect};
+    use crate::systems::skills::data::EffectKind;
+
+    let mut d = QuestData::default();
+    build(&mut d);
+    d.finish();
+    let mut data = GameData::empty();
+    data.systems.quests = d;
+    data.systems.skills.add_effect(
+        EffectKind::HealEffect,
+        EffectTemplate::Heal(HealEffect {
+            id: 1,
+            use_fixed_heal: true,
+            fixed_min: 1,
+            fixed_max: 1,
+            use_level_heal: false,
+            level_md: 0.0,
+            level_va_start: 0,
+            level_va_end: 0,
+            percent: false,
+            use_charged_buff: false,
+            charged_buff_id: 0,
+            charged_mul: 0.0,
+            slave_applicable: false,
+            ignore_heal_aggro: false,
+            dps_multiplier: 0.0,
+            actability_group_id: 0,
+            actability_step: 0,
+            actability_mul: 0.0,
+            actability_add: 0.0,
+        }),
+        1,
+    );
+    let mut skill = crate::systems::skills::tests::skill_template(CASTABLE_SKILL);
+    skill.target_type = 0;
+    skill.damage_type_id = 0;
+    skill.casting_time = 0;
+    let mut effect = crate::systems::skills::tests::skill_effect(1, EffectKind::HealEffect, 1);
+    effect.consume_source_item = true;
+    effect.consume_item_count = 1;
+    skill.effects.push(effect);
+    data.systems.skills.add_skill(skill);
+    let mut item = ItemTemplate::plain(CASTABLE_ITEM, 1000);
+    item.use_skill_id = CASTABLE_SKILL;
+    data.items.templates.insert(CASTABLE_ITEM, item);
+    data
+}
+
+fn castable_item_server(
+    build: impl FnOnce(&mut QuestData),
+) -> (Arc<GameServer>, TestClient, PlayerRef) {
+    let server = Arc::new(test_server_with(castable_item_data(build)));
+    server.set_self();
+    crate::systems::skills::bind(&server);
+    crate::systems::economy::bridges::install(&server);
+    super::bridges::install(&server);
+    let mut client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(&server, &client, character(), 0x100);
+    client.conn.active_char = Some(player.clone());
+    (server, client, player)
+}
+
+/// Adds the castable item to the player's bag; returns its item id.
+fn give_castable_item(server: &GameServer, player: &PlayerRef, count: i32) -> u64 {
+    use crate::systems::economy::inventory::Inv;
+    let item = server
+        .items
+        .create(
+            CASTABLE_ITEM,
+            count,
+            0,
+            server.config.id,
+            &server.game_data.items,
+            &server.ids.item,
+            0,
+        )
+        .expect("castable item");
+    let id = item.id;
+    let bag = Inv::of(player).bag();
+    bag.lock()
+        .unwrap()
+        .add_new_item(item, 0, &server.game_data.items)
+        .expect("placed");
+    server.items.add_container(bag);
+    id
+}
+
+async fn cast_item_skill(
+    server: &GameServer,
+    client: &mut TestClient,
+    player: &PlayerRef,
+    item_id: u64,
+) {
+    use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+    crate::systems::skills::handlers::CSStartSkillPacket {
+        skill_id: CASTABLE_SKILL,
+        caster: SkillCaster::Item {
+            obj_id: player.obj_id,
+            item_id,
+            item_template_id: CASTABLE_ITEM,
+            type1: 0,
+            type2: 0,
+        },
+        target: SkillCastTarget::Unit(player.obj_id),
+        flag: 0,
+        skill_object: SkillObject::None,
+    }
+    .handle(server, &mut client.conn)
+    .await
+    .expect("cast");
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    server.systems.quests.run_queued_evaluations(server);
+}
+
+fn objective_count(player: &PlayerRef, quest_id: u32, index: usize) -> i32 {
+    player
+        .data()
+        .quests
+        .active
+        .iter()
+        .find(|q| q.template_id == quest_id)
+        .expect("active quest")
+        .objectives[index]
+}
+
+#[tokio::test]
+async fn consumable_item_cast_progresses_a_use_item_objective() {
+    let (server, mut client, player) = castable_item_server(|d| {
+        single_act_quest(
+            d,
+            200,
+            1,
+            ActKind::ObjItemUse {
+                item_id: CASTABLE_ITEM,
+                highlight_doodad_id: 0,
+                highlight_doodad_phase: -1,
+                use_alias: false,
+                alias_id: 0,
+                drop_when_destroy: false,
+            },
+        );
+    });
+    // One unit: the debit removes the item before the chance / ItemUse event is raised.
+    let item_id = give_castable_item(&server, &player, 1);
+    events::add_quest(&server, &player, 200, false);
+    server.systems.quests.run_queued_evaluations(&server);
+    cast_item_skill(&server, &mut client, &player, item_id).await;
+    assert_eq!(
+        objective_count(&player, 200, 0),
+        1,
+        "the use-item objective progresses for a consumed item"
+    );
+}
+
+#[tokio::test]
+async fn partial_consumption_updates_a_collect_objective() {
+    let (server, mut client, player) = castable_item_server(|d| {
+        single_act_quest(
+            d,
+            201,
+            3,
+            ActKind::ObjItemGather {
+                item_id: CASTABLE_ITEM,
+                highlight_doodad_id: 0,
+                highlight_doodad_phase: -1,
+                use_alias: false,
+                alias_id: 0,
+                cleanup: false,
+                drop_when_destroy: false,
+                destroy_when_drop: false,
+            },
+        );
+    });
+    // Two units in one stack: the cast consumes one and keeps the other.
+    let item_id = give_castable_item(&server, &player, 2);
+    events::add_quest(&server, &player, 201, false);
+    server.systems.quests.run_queued_evaluations(&server);
+    assert_eq!(objective_count(&player, 201, 0), 2, "initial count");
+    cast_item_skill(&server, &mut client, &player, item_id).await;
+    assert_eq!(
+        objective_count(&player, 201, 0),
+        1,
+        "the partial consume reports one consumed unit"
+    );
+}

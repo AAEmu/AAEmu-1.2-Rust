@@ -532,6 +532,24 @@ impl NpcSkillHooks for NpcSkills {
         super::portal::add_private_portal(server, player, x, y, z, z_rot, zone_id, name);
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn add_private_portal_with_id(
+        &self,
+        server: &GameServer,
+        player: &PlayerRef,
+        id: u32,
+        x: f32,
+        y: f32,
+        z: f32,
+        z_rot: f32,
+        zone_id: u32,
+        name: &str,
+    ) {
+        super::portal::add_private_portal_with_id(
+            server, player, id, x, y, z, z_rot, zone_id, name,
+        );
+    }
+
     fn rename_private_portal(&self, server: &GameServer, player: &PlayerRef, id: u32, name: &str) {
         super::portal::change_private_portal_name(server, player, id, name);
     }

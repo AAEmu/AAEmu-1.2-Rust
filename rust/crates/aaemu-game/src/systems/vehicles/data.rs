@@ -445,6 +445,8 @@ pub struct VehiclesData {
     pub npc_mount_skills: Vec<NpcMountSkills>,
     pub mount_skills: Vec<MountSkills>,
     pub mount_attached_skills: Vec<MountAttachedSkills>,
+    /// `buff_mount_skills` (buff id, mount skill id) in table order.
+    pub buff_mount_skills: Vec<(u32, u32)>,
     pub slave_templates: HashMap<u32, SlaveTemplate>,
     /// `_attachPoints` (model id -> attach point -> location), points in file order.
     pub attach_points: HashMap<u32, Vec<(u8, AttachPointLocation)>>,
@@ -575,6 +577,11 @@ impl VehiclesData {
                 return Err(dup("mount_attached_skills", m.id));
             }
         }
+        for_each_row(ctx.conn, "SELECT * FROM buff_mount_skills", [], |r| {
+            self.buff_mount_skills
+                .push((r.u32("buff_id")?, r.u32("mount_skill_id")?));
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -1138,6 +1145,23 @@ impl VehiclesData {
             .iter()
             .find(|m| m.skill_id == slave_skill_id)
             .map_or(0, |m| m.id)
+    }
+
+    /// The skill a mount-bar entry (`mount_skills.id`, as stored in `Mate.skills` /
+    /// `slave_mount_skills.mount_skill_id`) actually casts.
+    pub fn mount_skill_skill_id(&self, mount_skill_id: u32) -> u32 {
+        self.mount_skills
+            .iter()
+            .find(|m| m.id == mount_skill_id)
+            .map_or(0, |m| m.skill_id)
+    }
+
+    /// `buff_mount_skills`: the mount-bar entries a buff grants.
+    pub fn buff_mount_skill_ids(&self, buff_id: u32) -> impl Iterator<Item = u32> + '_ {
+        self.buff_mount_skills
+            .iter()
+            .filter(move |(b, _)| *b == buff_id)
+            .map(|(_, m)| *m)
     }
 
     // ----- SlaveGameData -----

@@ -309,6 +309,7 @@ fn enchant(w: &World, id: u64, support: Option<u64>, lucky: bool, rolls: &[i32])
         &w.server,
         &w.pa,
         scroll(),
+        None,
         Some(id),
         support,
         [i32::from(lucky), 0, 2, 0],
@@ -568,7 +569,16 @@ async fn socketing_success_failure_and_dawnstone() {
     // 1st socket: chance 10000
     mark_clean(&w, id);
     let mut rng = ScriptedRng::new(&[9999], &[]);
-    item_socketing(&w.server, &w.pa, gem_caster, Some(id), [0; 4], TL, &mut rng);
+    item_socketing(
+        &w.server,
+        &w.pa,
+        gem_caster,
+        None,
+        Some(id),
+        [0; 4],
+        TL,
+        &mut rng,
+    );
     let after = item(&w, id).unwrap();
     assert_eq!(after.details.gem_ids, [GEM, 0, 0, 0, 0, 0, 0]);
     assert!(after.dirty, "socketing must dirty the item");
@@ -600,7 +610,16 @@ async fn socketing_success_failure_and_dawnstone() {
     // 2nd socket: chance 0 -> every gem is lost
     mark_clean(&w, id);
     let mut rng = ScriptedRng::new(&[0], &[]);
-    item_socketing(&w.server, &w.pa, gem_caster, Some(id), [0; 4], TL, &mut rng);
+    item_socketing(
+        &w.server,
+        &w.pa,
+        gem_caster,
+        None,
+        Some(id),
+        [0; 4],
+        TL,
+        &mut rng,
+    );
     let after = item(&w, id).unwrap();
     assert_eq!(after.details.gem_ids, [0; 7]);
     assert!(
@@ -639,6 +658,7 @@ async fn socketing_success_failure_and_dawnstone() {
         &w.server,
         &w.pa,
         dawn_caster,
+        None,
         Some(id),
         [0; 4],
         TL,
@@ -847,7 +867,7 @@ async fn cleanup_look_convert_flow() {
     });
     // No image yet
     assert_eq!(
-        cleanup_look_convert(&w.server, &w.pa, caster, Some(id), [0; 4]),
+        cleanup_look_convert(&w.server, &w.pa, caster, None, false, Some(id), [0; 4]),
         Outcome::Cancelled
     );
     assert_eq!(
@@ -865,7 +885,7 @@ async fn cleanup_look_convert_flow() {
         .details
         .image_item_template_id = 999;
     assert_eq!(
-        cleanup_look_convert(&w.server, &w.pa, caster, Some(id), [0; 4]),
+        cleanup_look_convert(&w.server, &w.pa, caster, None, false, Some(id), [0; 4]),
         Outcome::Done
     );
     let after = item(&w, id).unwrap();
@@ -1142,6 +1162,36 @@ fn ucc_item_state(w: &World, id: u64) -> (Vec<u8>, u64, u64, bool) {
     (body(&item), item.ucc_id, item.owner_id, item.dirty)
 }
 
+/// [`ucc_item_state`] without `dirty`: a cancelled cast that debited a partial stack marks it
+/// dirty while restoring its count, which is not a data change.
+fn ucc_item_values(w: &World, id: u64) -> (Vec<u8>, u64, u64) {
+    let (body, ucc, owner, _) = ucc_item_state(w, id);
+    (body, ucc, owner)
+}
+
+/// The `SCItemTaskSuccessPacket` bodies a cast sent, in order.
+fn item_task_bodies(packets: &[(u16, Vec<u8>)]) -> Vec<Vec<u8>> {
+    packets
+        .iter()
+        .filter(|(op, _)| *op == sc::SCItemTaskSuccessPacket)
+        .map(|(_, body)| body.clone())
+        .collect()
+}
+
+/// The take/refund pair of a cancelled partial debit of one unit: count -1 then +1.
+fn partial_debit_refund_tasks(item: &crate::models::item::Item) -> Vec<Vec<u8>> {
+    vec![
+        tasks(
+            task_type::SKILL_REAGENTS,
+            vec![ItemTask::count_update(item, -1)],
+        ),
+        tasks(
+            task_type::SKILL_REAGENTS,
+            vec![ItemTask::count_update(item, 1)],
+        ),
+    ]
+}
+
 /// Exercise the real effect dispatch followed by skill-owned source consumption, rather
 /// than directly calling an effect and simulating its debit in the test.
 fn cast_ucc(
@@ -1356,8 +1406,9 @@ async fn ucc_foreign_source_target_or_resolved_player_cancels_without_debit() {
                 .get_item_by_id_mut(target_id)
                 .unwrap()
                 .set_ucc(0x1234);
-            let source_before = ucc_item_state(&w, source_id);
-            let target_before = ucc_item_state(&w, target_id);
+            let source_before = ucc_item_values(&w, source_id);
+            let target_before = ucc_item_values(&w, target_id);
+            let source_item = w.server.items.item_by_id(source_id).expect("source");
             let resolved_player = if matches!(case, "foreign_player" | "both_foreign") {
                 &w.pb
             } else {
@@ -1374,9 +1425,17 @@ async fn ucc_foreign_source_target_or_resolved_player_cancels_without_debit() {
                 resolved_player,
             );
             assert!(skill.cancelled(), "{case}, cleanup={cleanup}");
-            assert_eq!(ucc_item_state(&w, source_id), source_before, "{case}");
-            assert_eq!(ucc_item_state(&w, target_id), target_before, "{case}");
-            assert!(w.a.drain().is_empty(), "{case}");
+            assert_eq!(ucc_item_values(&w, source_id), source_before, "{case}");
+            assert_eq!(ucc_item_values(&w, target_id), target_before, "{case}");
+            // Only a source in the caster's own bag is debited and refunded; a foreign source
+            // is refused before the debit.
+            let own_source = !matches!(case, "foreign_source" | "both_foreign");
+            let expected = if own_source {
+                partial_debit_refund_tasks(&source_item)
+            } else {
+                Vec::new()
+            };
+            assert_eq!(item_task_bodies(&w.a.drain()), expected, "{case}");
             assert!(w.b.drain().is_empty(), "{case}");
         }
     }
@@ -1414,8 +1473,9 @@ async fn ucc_invalid_source_count_template_or_same_item_cancels_without_mutation
                 }
                 bag.get_item_by_id_mut(target_id).unwrap().set_ucc(0x1234);
             }
-            let source_before = ucc_item_state(&w, source_id);
-            let target_before = ucc_item_state(&w, target_id);
+            let source_before = ucc_item_values(&w, source_id);
+            let target_before = ucc_item_values(&w, target_id);
+            let source_item = w.server.items.item_by_id(source_id).expect("source");
             let skill = cast_ucc(
                 &w,
                 cleanup,
@@ -1435,9 +1495,15 @@ async fn ucc_invalid_source_count_template_or_same_item_cancels_without_mutation
                 &w.pa,
             );
             assert!(skill.cancelled(), "{case}, cleanup={cleanup}");
-            assert_eq!(ucc_item_state(&w, source_id), source_before, "{case}");
-            assert_eq!(ucc_item_state(&w, target_id), target_before, "{case}");
-            assert!(w.a.drain().is_empty(), "{case}");
+            assert_eq!(ucc_item_values(&w, source_id), source_before, "{case}");
+            assert_eq!(ucc_item_values(&w, target_id), target_before, "{case}");
+            // Only `same_item` takes a valid partial debit before the effect refuses it.
+            let expected = if case == "same_item" {
+                partial_debit_refund_tasks(&source_item)
+            } else {
+                Vec::new()
+            };
+            assert_eq!(item_task_bodies(&w.a.drain()), expected, "{case}");
             assert!(w.b.drain().is_empty(), "{case}");
         }
     }
@@ -1459,7 +1525,7 @@ async fn ucc_imprint_cleanup_and_stamp() {
         item_id: stamp,
         item_template_id: STACK,
     });
-    imprint_ucc(&w.server, Some(&w.pa), caster, Some(target));
+    imprint_ucc(&w.server, Some(&w.pa), caster, None, Some(target));
     let after = item(&w, target).unwrap();
     assert_eq!(after.ucc_id, 0xABCD);
     assert_ne!(after.flags & crate::models::item::ITEM_FLAG_HAS_UCC, 0);
@@ -1486,7 +1552,7 @@ async fn ucc_imprint_cleanup_and_stamp() {
     // The stamp is not consumed by the effect.
     assert!(item(&w, stamp).is_some());
 
-    cleanup_ucc(&w.server, Some(&w.pa), caster, Some(target));
+    cleanup_ucc(&w.server, Some(&w.pa), caster, None, Some(target));
     let after = item(&w, target).unwrap();
     assert_eq!(
         (
@@ -1517,7 +1583,7 @@ async fn ucc_imprint_cleanup_and_stamp() {
     );
 
     // Emblem imprint: a new crest stamp carrying the ink's UCC in the target's bag
-    gain_item_with_emblem_imprint(&w.server, Some(&w.pb), caster, [0; 4]);
+    gain_item_with_emblem_imprint(&w.server, Some(&w.pb), caster, None, [0; 4]);
     let crest = item_at(&w.pb, slot_type::INVENTORY, 0).unwrap();
     assert_eq!(
         (crest.template_id, crest.ucc_id),
@@ -2450,4 +2516,271 @@ async fn fishing_loot_from_a_position_target_gives_the_sea_pack_item() {
     let mut rng = crate::systems::economy::loot::SharedRandom;
     fishing_loot(&w.server, &w.pa, &target, [0; 4], &mut rng);
     assert!(bag_count(&w, STACK) >= 1, "no fish was given");
+}
+
+#[tokio::test]
+async fn full_refund_on_a_full_bag_keeps_the_item_loose_without_a_slot_add() {
+    use crate::systems::skills::ext::{ItemSkillHooks, TakenCastItem};
+
+    let mut w = world();
+    let bag = Inv::of(&w.pa).bag();
+    let size = bag.lock().unwrap().container_size();
+    for slot in 0..size {
+        give(&w, &w.pa, slot_type::INVENTORY, ARMOR, 1, slot);
+    }
+    assert_eq!(bag.lock().unwrap().free_slot_count(), 0, "bag is full");
+
+    let mut item = w
+        .server
+        .items
+        .create(
+            STACK,
+            1,
+            0,
+            1,
+            &w.server.game_data.items,
+            &w.server.ids.item,
+            0,
+        )
+        .expect("debited item");
+    let id = item.id;
+    item.owner_id = u64::from(w.pa.character_id);
+    item.slot = 0;
+    item.slot_type = slot_type::INVENTORY;
+    let taken = TakenCastItem {
+        item: item.clone(),
+        container: bag.clone(),
+        slot: 0,
+        amount: 1,
+        removed: true,
+    };
+
+    w.a.drain();
+    super::bridges::EconomyForSkills.refund_cast_source_item(&w.server, taken);
+    let loose = w.server.items.item_by_id(id).expect("loose refund");
+    assert!(loose.dirty, "the loose refund must be saved");
+    let bodies: Vec<Vec<u8>> =
+        w.a.drain()
+            .into_iter()
+            .filter(|(op, _)| *op == sc::SCItemTaskSuccessPacket)
+            .map(|(_, body)| body)
+            .collect();
+    assert!(
+        bodies.is_empty(),
+        "a loose item is in no slot, so no slot-add is reported"
+    );
+}
+
+fn take_partial(
+    w: &World,
+    item_id: u64,
+    template_id: u32,
+    amount: i32,
+) -> crate::systems::skills::ext::TakenCastItem {
+    use crate::systems::skills::ext::ItemSkillHooks;
+    super::bridges::EconomyForSkills
+        .take_cast_source_item(&w.server, &w.pa, item_id, template_id, amount)
+        .expect("tracked items")
+        .expect("source taken")
+}
+
+fn refund(w: &World, taken: crate::systems::skills::ext::TakenCastItem) {
+    use crate::systems::skills::ext::ItemSkillHooks;
+    super::bridges::EconomyForSkills.refund_cast_source_item(&w.server, taken);
+}
+
+fn only_item_tasks(w: &mut World) -> Vec<Vec<u8>> {
+    w.a.drain()
+        .into_iter()
+        .filter(|(op, _)| *op == sc::SCItemTaskSuccessPacket)
+        .map(|(_, body)| body)
+        .collect()
+}
+
+#[tokio::test]
+async fn partial_refund_adds_back_after_a_merge_into_the_kept_stack() {
+    let mut w = world();
+    let id = give(&w, &w.pa, slot_type::INVENTORY, STACK, 2, 0);
+    let taken = take_partial(&w, id, STACK, 1);
+    {
+        let bag = Inv::of(&w.pa).bag();
+        let mut bag = bag.lock().unwrap();
+        bag.get_item_by_id_mut(id).unwrap().count += 2;
+        bag.update_free_slot_count();
+    }
+    w.a.drain();
+    refund(&w, taken);
+    let after = item_at(&w.pa, slot_type::INVENTORY, 0).expect("kept stack");
+    assert_eq!(after.count, 4, "1 left + 2 merged + 1 refunded");
+    assert_eq!(
+        only_item_tasks(&mut w),
+        vec![tasks(
+            task_type::SKILL_REAGENTS,
+            vec![ItemTask::count_update(&after, 1)]
+        )],
+        "the refund count update names the merged stack and slot"
+    );
+}
+
+#[tokio::test]
+async fn partial_refund_adds_back_after_a_split_from_the_kept_stack() {
+    let mut w = world();
+    let id = give(&w, &w.pa, slot_type::INVENTORY, STACK, 3, 0);
+    let taken = take_partial(&w, id, STACK, 1);
+    {
+        let bag = Inv::of(&w.pa).bag();
+        let mut bag = bag.lock().unwrap();
+        bag.get_item_by_id_mut(id).unwrap().count = 1;
+        bag.update_free_slot_count();
+    }
+    // The split half lives in another slot.
+    let split = give(&w, &w.pa, slot_type::INVENTORY, STACK, 1, 4);
+    w.a.drain();
+    refund(&w, taken);
+    let after = item_at(&w.pa, slot_type::INVENTORY, 0).expect("kept stack");
+    assert_eq!(after.count, 2, "1 left + 1 refunded");
+    assert_eq!(
+        item_at(&w.pa, slot_type::INVENTORY, 4)
+            .expect("split half")
+            .id,
+        split
+    );
+    assert_eq!(
+        only_item_tasks(&mut w),
+        vec![tasks(
+            task_type::SKILL_REAGENTS,
+            vec![ItemTask::count_update(&after, 1)]
+        )]
+    );
+}
+
+#[tokio::test]
+async fn partial_refund_follows_the_kept_stack_to_a_new_slot() {
+    let mut w = world();
+    let id = give(&w, &w.pa, slot_type::INVENTORY, STACK, 2, 0);
+    let taken = take_partial(&w, id, STACK, 1);
+    {
+        let bag = Inv::of(&w.pa).bag();
+        let mut bag = bag.lock().unwrap();
+        bag.get_item_by_id_mut(id).unwrap().slot = 5;
+    }
+    w.a.drain();
+    refund(&w, taken);
+    let after = item_at(&w.pa, slot_type::INVENTORY, 5).expect("moved stack");
+    assert_eq!(after.count, 2);
+    assert_eq!(
+        only_item_tasks(&mut w),
+        vec![tasks(
+            task_type::SKILL_REAGENTS,
+            vec![ItemTask::count_update(&after, 1)]
+        )],
+        "the count update names the slot the stack now holds"
+    );
+}
+
+#[tokio::test]
+async fn partial_refund_recreates_the_debited_units_when_the_remainder_left() {
+    let mut w = world();
+    let id = give(&w, &w.pa, slot_type::INVENTORY, STACK, 2, 0);
+    {
+        let bag = Inv::of(&w.pa).bag();
+        bag.lock().unwrap().get_item_by_id_mut(id).unwrap().ucc_id = 0xABCD;
+    }
+    let taken = take_partial(&w, id, STACK, 1);
+    {
+        let bag = Inv::of(&w.pa).bag();
+        bag.lock().unwrap().items.retain(|i| i.id != id);
+    }
+    w.a.drain();
+    refund(&w, taken);
+    let bag = Inv::of(&w.pa).bag();
+    let bag = bag.lock().unwrap();
+    assert!(bag.get_item_by_id(id).is_none(), "the old stack is gone");
+    let restored = bag
+        .items
+        .iter()
+        .find(|i| i.template_id == STACK && i.id != id)
+        .expect("fresh stack");
+    assert_eq!(restored.count, 1);
+    assert_eq!(restored.ucc_id, 0xABCD, "properties come from the snapshot");
+    assert!(restored.dirty);
+    let restored = restored.clone();
+    drop(bag);
+    assert_eq!(
+        only_item_tasks(&mut w),
+        vec![tasks(
+            task_type::SKILL_REAGENTS,
+            vec![ItemTask::add(&restored)]
+        )]
+    );
+}
+
+#[tokio::test]
+async fn equipped_refund_restores_the_same_slot_with_equip_enter() {
+    use crate::models::container::equip_slot;
+
+    let mut w = world();
+    let id = give(&w, &w.pa, slot_type::EQUIPMENT, ARMOR, 1, equip_slot::CHEST);
+    let taken = take_partial(&w, id, ARMOR, 1);
+    w.a.drain();
+    w.b.drain();
+    refund(&w, taken);
+    let after =
+        item_at(&w.pa, slot_type::EQUIPMENT, equip_slot::CHEST as u8).expect("same equipment slot");
+    assert_eq!(after.id, id);
+    assert!(after.dirty);
+    assert_eq!(
+        only_item_tasks(&mut w),
+        vec![tasks(
+            task_type::SKILL_REAGENTS,
+            vec![ItemTask::add(&after)]
+        )]
+    );
+    let expected = body(&SCUnitEquipmentsChangedPacket {
+        obj_id: w.pa.obj_id,
+        items: vec![(equip_slot::CHEST as u8, Some(after))],
+    });
+    assert!(
+        w.b.drain()
+            .iter()
+            .any(|(op, body)| *op == sc::SCUnitEquipmentsChangedPacket && *body == expected),
+        "nearby players see the item back in its chest slot"
+    );
+}
+
+#[tokio::test]
+async fn equipped_refund_with_its_slot_taken_goes_to_the_bag_without_equip_enter() {
+    use crate::models::container::equip_slot;
+
+    let mut w = world();
+    let id = give(&w, &w.pa, slot_type::EQUIPMENT, ARMOR, 1, equip_slot::CHEST);
+    let taken = take_partial(&w, id, ARMOR, 1);
+    // Another item refilled the chest slot in the meantime.
+    let other = give(&w, &w.pa, slot_type::EQUIPMENT, ARMOR, 1, equip_slot::CHEST);
+    w.a.drain();
+    w.b.drain();
+    refund(&w, taken);
+    assert!(
+        item_at(&w.pa, slot_type::EQUIPMENT, equip_slot::CHEST as u8)
+            .is_some_and(|i| i.id == other),
+        "the refilled equipment slot is untouched"
+    );
+    let bag_item = item_at(&w.pa, slot_type::INVENTORY, 0)
+        .filter(|i| i.id == id)
+        .expect("refunded to the bag");
+    assert_eq!(bag_item.slot_type, slot_type::INVENTORY);
+    assert_eq!(
+        only_item_tasks(&mut w),
+        vec![tasks(
+            task_type::SKILL_REAGENTS,
+            vec![ItemTask::add(&bag_item)]
+        )],
+        "the client is told the item went to the bag"
+    );
+    assert!(
+        !w.b.drain()
+            .iter()
+            .any(|(op, _)| *op == sc::SCUnitEquipmentsChangedPacket),
+        "no equipment change is announced for a bag refund"
+    );
 }

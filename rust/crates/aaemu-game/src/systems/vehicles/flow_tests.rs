@@ -4260,6 +4260,11 @@ fn cannon_data() -> GameData {
             attach_point_id: attach_point::DRIVER,
             skill_id: GUNNER_STATE_SKILL,
         });
+    // The cannon's own driver bar entry (real data: `slave_mount_skills`).
+    d.systems
+        .vehicles
+        .slave_mount_skills
+        .push((1, CANNON_CHILD, CANNON_MOUNT_SKILL));
     d.systems.npcs.npc.templates.insert(
         CANNON_TARGET_NPC,
         NpcTemplate {
