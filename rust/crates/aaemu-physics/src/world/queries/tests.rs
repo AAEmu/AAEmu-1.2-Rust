@@ -856,3 +856,55 @@ fn terrain_world_side_with_stand_in_geometry() {
     r.w.set_heightfield_data(None, None);
     assert!(r.w.terrain.iter().all(|t| t.is_none()));
 }
+
+/// A static PWI over an empty region must not return the previous query's contacts. In the
+/// accumulating branch (`stop_at_first = false`) the engine returns the contact count in its
+/// float result and callers size the pool read by it, so a 0 result means "no contacts"
+/// (module docs step 7/8, `cryphysics/world.md` slot 65): PWI does not clear the pool itself,
+/// so without that check it still holds the previous query's records.
+#[test]
+fn pwi_empty_query_does_not_return_the_previous_contacts() {
+    let mut r = Runner::new();
+    r.run(
+        "grid axisz=2 org=0,0,-100 n=64,64 step=4,4\n\
+         geom name=crate type=box size=1,0.5,0.75\n\
+         entity name=crate type=static pos=32,32,0.75\n\
+         part ent=crate geom=crate mass=0 flags=0x1809F\n\
+         step n=1\n",
+    );
+    let crate_prim = *r.prims.get("crate").expect("crate primitive");
+    let query = |at: Vec3| {
+        let mut prim = crate_prim;
+        if let Primitive::Box(b) = &mut prim {
+            b.center = at;
+        }
+        PwiParams {
+            prim,
+            sweep_dir: Vec3::ZERO,
+            ent_types: 0x13F,
+            geom_flags_any: 0xFFFF_FFFF,
+            ip: Some(QueryIntersectionParams {
+                ip: crate::collision::contact::IntersectionParams::default(),
+                stop_at_first: false,
+            }),
+            want_contacts: true,
+            ..PwiParams::default()
+        }
+    };
+    let hit = r.w.pwi(&query(Vec3::new(32.5, 32.0, 0.75)));
+    assert!(!hit.contacts.is_empty(), "the crate is hit");
+    assert_eq!(hit.dist, hit.contacts.len() as f32);
+    let miss = r.w.pwi(&query(Vec3::new(200.0, 200.0, 50.0)));
+    assert_eq!(miss.dist, 0.0, "nothing was tested");
+    assert!(
+        miss.contacts.is_empty(),
+        "the empty query returned {} stale contacts",
+        miss.contacts.len()
+    );
+    // A hit after a hit starts a fresh pool: it returns its own contacts, not both queries'.
+    let again = r.w.pwi(&query(Vec3::new(32.5, 32.0, 0.75)));
+    assert_eq!(again.dist, again.contacts.len() as f32);
+    assert_eq!(again.contacts.len(), hit.contacts.len());
+    let twice = r.w.pwi(&query(Vec3::new(32.5, 32.0, 0.75)));
+    assert_eq!(twice.contacts.len(), hit.contacts.len());
+}

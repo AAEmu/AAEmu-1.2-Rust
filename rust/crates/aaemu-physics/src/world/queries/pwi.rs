@@ -29,7 +29,10 @@
 //!    * otherwise (caller params with `+98 = 0`) → `bSweepTest = 0`, `bKeepPrevContacts = 1`,
 //!      `t += count` (all contacts accumulate in the pool).
 //! 8. Returns the best `t` (0 when `>= 1e10`); `*pcontacts` = the best record (sweep) or the
-//!    contact pool. The skip entities lose the caller bit.
+//!    contact pool. In the accumulating case `t` is the number of contacts this call added and
+//!    callers read exactly `t` records: PWI never clears the pool, so a 0 result (nothing
+//!    tested or no part intersected) means the pool still holds the previous query's records
+//!    and must not be read. The skip entities lose the caller bit.
 //!
 //! Not ported: the per-thread part subsets (`entity+320/+328`, living/structure code) and the
 //! `nSkip < 0` nibble update for entities with flag 0x10; the debug callback.
@@ -97,7 +100,8 @@ pub struct PwiResult {
     /// static: 1.0 on the first intersection (default params) or the contact count
     /// (caller params with `+98 = 0`); 0 = nothing.
     pub dist: f32,
-    /// Sweep: the best contact; otherwise the contact pool of the last call.
+    /// Sweep: the best contact; otherwise the contacts this call accumulated (empty when
+    /// [`PwiResult::dist`] is 0: the pool is not cleared between queries).
     pub contacts: Vec<GeomContact>,
 }
 
@@ -447,9 +451,11 @@ impl World {
             best.as_ref()
                 .map(|b| vec![b.decode(&self.tscratch[tid])])
                 .unwrap_or_default()
-        } else {
+        } else if best_t > 0.0 {
             let s = &self.tscratch[tid];
             s.contacts(0, s.n_contacts())
+        } else {
+            Vec::new()
         };
         for &s in &p.skip {
             if !p.entities_only

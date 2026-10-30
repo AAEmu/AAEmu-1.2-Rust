@@ -3,9 +3,10 @@
 //! (vt+512 → 0x350964F0), with the object-type masks and ray flags the zone's game code uses
 //! (`ZONE-PHYSICS-USAGE.md` §2.6, `sub_x2game.md` §5).
 
-use aaemu_physics::geometry::primitives::{CapsulePrim, Primitive, SpherePrim};
-use aaemu_physics::math::Vec3;
-use aaemu_physics::world::queries::{PwiParams, RayHit, RwiParams};
+use aaemu_physics::collision::contact::IntersectionParams;
+use aaemu_physics::geometry::primitives::{BoxPrim, CapsulePrim, Primitive, SpherePrim};
+use aaemu_physics::math::{Mat33, Vec3};
+use aaemu_physics::world::queries::{PwiParams, QueryIntersectionParams, RayHit, RwiParams};
 use aaemu_physics::world::EntIdx;
 
 use super::world::{Owner, WorldState};
@@ -27,6 +28,10 @@ pub mod mask {
     pub const ALL_TERRAIN_WATER: u32 = 0x31F;
     /// static + terrain + water: glide start `sub_392E36B0`.
     pub const STATIC_TERRAIN_WATER: u32 = 0x301;
+    /// static only: the summon hull-envelope overlap. Terrain is left to the depth probes (a
+    /// hull legitimately sits above the seabed, and the heightfield has no back faces to test
+    /// the envelope against).
+    pub const STATIC: u32 = 0x001;
     /// static + sleeping + rigid + living (`WZBlinkUnit` capsule sweep, entTypes 15).
     pub const ENTITIES_15: u32 = 0xF;
     pub const TERRAIN: u32 = 0x100;
@@ -42,6 +47,9 @@ pub mod ray_flags {
     pub const SKILL_OBSTACLE: u32 = 0x0002_048F;
     /// `WZRayCasting` (0xFFFE048F: colltype-any with every class but 0).
     pub const WZ_RAYCASTING: u32 = 0xFFFE_048F;
+    /// [`DEFAULT`] without `rwi_ignore_back_faces` (0x0F): exit faces of a solid the ray starts
+    /// inside are reported, their normal pointing along the ray.
+    pub const WITH_BACK_FACES: u32 = 0x00F;
 }
 
 /// A ray hit.
@@ -165,6 +173,46 @@ impl WorldState {
         };
         self.world.pwi(&p).dist > 0.0
     }
+
+    /// Static overlap contacts of `prim`: the unique entities that intersect it and their
+    /// world AABBs. All contacts are collected (no stop at the first part), so the caller can
+    /// ignore vegetation and tiny statics.
+    pub fn overlap_entities(
+        &mut self,
+        prim: Primitive,
+        ent_types: u32,
+        geom_flags_any: u32,
+        skip: &[EntIdx],
+    ) -> Vec<(EntIdx, [Vec3; 2])> {
+        let p = PwiParams {
+            prim,
+            sweep_dir: Vec3::ZERO,
+            ent_types,
+            geom_flags_any,
+            skip: skip.to_vec(),
+            ip: Some(QueryIntersectionParams {
+                ip: IntersectionParams::default(),
+                stop_at_first: false,
+            }),
+            ..PwiParams::default()
+        };
+        let r = self.world.pwi(&p);
+        let mut out: Vec<(EntIdx, [Vec3; 2])> = Vec::new();
+        for c in &r.contacts {
+            let id = c.i_prim[0];
+            if id < 0 {
+                continue;
+            }
+            let Some(e) = self.world.entity_by_id(id) else {
+                continue;
+            };
+            if out.iter().any(|(x, _)| *x == e) {
+                continue;
+            }
+            out.push((e, self.world.ent(e).bbox));
+        }
+        out
+    }
 }
 
 /// A vertical capsule (`r`, half height of the cylindrical part `hh`) centred at `c`.
@@ -180,4 +228,16 @@ pub fn capsule(c: Vec3, r: f32, hh: f32) -> Primitive {
 /// A sphere.
 pub fn sphere(c: Vec3, r: f32) -> Primitive {
     Primitive::Sphere(SpherePrim { center: c, r })
+}
+
+/// A box centred at `c` with half extents `half`, its local X/Y axes turned by `yaw` about +Z
+/// (rows of the basis are the box axes, as `CBoxGeom`/`BoxGeom::to_local` read them).
+pub fn yaw_box(c: Vec3, half: Vec3, yaw: f32) -> Primitive {
+    let (s, co) = yaw.sin_cos();
+    Primitive::Box(BoxPrim {
+        basis: Mat33::from_array([co, s, 0.0, -s, co, 0.0, 0.0, 0.0, 1.0]),
+        oriented: 1,
+        center: c,
+        size: half,
+    })
 }

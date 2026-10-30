@@ -266,7 +266,11 @@ pub mod error {
     pub const NOT_ENOUGH_ITEM: i16 = 27;
     pub const SLAVE_CANNOT_BIND: i16 = 96;
     pub const SLAVE_ALREADY_HAS_MASTER: i16 = 97;
+    /// `SLAVE_SPAWN_SHIP_NEED_MORE_SPACE`: the 1.2 client's summon search found no spot.
+    pub const SLAVE_SPAWN_SHIP_NEED_MORE_SPACE: i16 = 100;
     pub const SLAVE_SPAWN_ITEM_LOCKED: i16 = 101;
+    /// `MATE_CANNOT_SPAWN_NO_SPACE` (mates; the slave path uses the ship code above).
+    pub const MATE_CANNOT_SPAWN_NO_SPACE: i16 = 108;
     pub const SLAVE_UNBIND_FIRST: i16 = 102;
     pub const ITEM_NOT_FOR_PET: i16 = 204;
     pub const NOT_READY: i16 = 206;
