@@ -1340,8 +1340,49 @@ pub async fn offline_blocked_infos(pool: &MySqlPool, ids: &[u32]) -> Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::systems::social::achievement_persistence::temporary_shadow_definition;
     use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
     use std::str::FromStr;
+
+    /// Every table `save_character` writes or `load_character` reads. A test must shadow all of
+    /// them: the save unconditionally deletes from `character_active_buffs` and rewrites both
+    /// achievement tables even when its fixture has no buffs or progress.
+    const CHARACTER_SAVE_TABLES: &[&str] = &[
+        "characters",
+        "accounts",
+        "options",
+        "abilities",
+        "actabilities",
+        "appellations",
+        "character_active_buffs",
+        "portal_book_coords",
+        "portal_visited_district",
+        "friends",
+        "blocked",
+        "skills",
+        "quests",
+        "completed_quests",
+        "character_records",
+        "character_achievements",
+    ];
+
+    /// Replaces each live table with a connection-local copy of its actual schema, so the test
+    /// never touches another session's rows on the shared MySQL3317. Temporary tables cannot
+    /// carry foreign keys, so [`temporary_shadow_definition`] drops them.
+    async fn shadow_tables(pool: &MySqlPool, tables: &[&str]) {
+        for table in tables {
+            let (_, definition): (String, String) =
+                sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
+                    .fetch_one(pool)
+                    .await
+                    .unwrap();
+            assert!(definition.starts_with("CREATE TABLE "));
+            sqlx::query(&temporary_shadow_definition(&definition))
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+    }
 
     #[test]
     fn a_temporary_faction_is_never_persisted() {
@@ -1365,8 +1406,6 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
     async fn private_mysql_character_save_preserves_both_bot_report_counters() {
-        use crate::systems::social::achievement_persistence::temporary_shadow_definition;
-
         let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
             return;
         };
@@ -1381,25 +1420,7 @@ mod tests {
             .connect_with(options)
             .await
             .expect("private MySQL");
-        // MySQL rejects an unqualified same-name CREATE ... LIKE as a duplicate alias.
-        // Shadow the live names with connection-local copies of their actual schemas, including
-        // the achievement tables `save_character` writes. Temporary tables cannot carry foreign
-        // keys, so the copied `FOREIGN KEY` constraints are dropped.
-        for table in [
-            "characters",
-            "character_active_buffs",
-            "character_records",
-            "character_achievements",
-        ] {
-            let (_, definition): (String, String) =
-                sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap();
-            assert!(definition.starts_with("CREATE TABLE "));
-            let temporary = temporary_shadow_definition(&definition);
-            sqlx::query(&temporary).execute(&pool).await.unwrap();
-        }
+        shadow_tables(&pool, CHARACTER_SAVE_TABLES).await;
         let mut character = Character::new(1, 1, UnitCustomModelParams::default());
         character.unit.name = "BotCounterFixture".into();
         character.created = Utc::now().timestamp();
@@ -1429,9 +1450,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
     async fn private_mysql_direct_save_failure_keeps_receipts_and_bookkeeping() {
-        use crate::systems::social::achievement_persistence::{
-            load_achievement_state, temporary_shadow_definition,
-        };
+        use crate::systems::social::achievement_persistence::load_achievement_state;
 
         let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
             return;
@@ -1447,30 +1466,7 @@ mod tests {
             .connect_with(options)
             .await
             .expect("private MySQL");
-        // Shadow every table the save writes with connection-local copies of their actual
-        // schemas, so no live row is touched. Temporary tables cannot carry foreign keys, so the
-        // copied constraints are dropped.
-        for table in [
-            "characters",
-            "character_active_buffs",
-            "character_records",
-            "character_achievements",
-            "friends",
-            "blocked",
-            "skills",
-            "quests",
-        ] {
-            let (_, definition): (String, String) =
-                sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap();
-            assert!(definition.starts_with("CREATE TABLE "));
-            sqlx::query(&temporary_shadow_definition(&definition))
-                .execute(&pool)
-                .await
-                .unwrap();
-        }
+        shadow_tables(&pool, CHARACTER_SAVE_TABLES).await;
 
         // The previously saved character: one paid completion (achievement 1) and one record.
         let earned = chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp");
@@ -1577,7 +1573,6 @@ mod tests {
     async fn private_mysql_spent_labor_survives_reload() {
         use crate::systems::quests::bridges::GameQuestHooks;
         use crate::systems::quests::hooks::QuestHooks;
-        use crate::systems::social::achievement_persistence::temporary_shadow_definition;
 
         let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
             return;
@@ -1593,27 +1588,8 @@ mod tests {
             .connect_with(options)
             .await
             .expect("private MySQL");
-        // Shadow the live names with connection-local copies of their actual schemas, including
-        // the `accounts` row the reload reads labor from. Temporary tables cannot carry foreign
-        // keys, so the copied `FOREIGN KEY` constraints are dropped.
-        for table in [
-            "characters",
-            "character_active_buffs",
-            "character_records",
-            "character_achievements",
-            "accounts",
-        ] {
-            let (_, definition): (String, String) =
-                sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap();
-            assert!(definition.starts_with("CREATE TABLE "));
-            sqlx::query(&temporary_shadow_definition(&definition))
-                .execute(&pool)
-                .await
-                .unwrap();
-        }
+        // `accounts` is shadowed too, so the reload reads the fixture's labor.
+        shadow_tables(&pool, CHARACTER_SAVE_TABLES).await;
         sqlx::query("INSERT INTO `accounts` (`account_id`, `labor`) VALUES (1, 1000)")
             .execute(&pool)
             .await
@@ -1702,6 +1678,64 @@ mod tests {
         pool.close().await;
     }
 
+    /// The death penalty's recoverable experience survives the relog: `save_character` writes it
+    /// and `load_character` reads it back, so the priest prayer after a new session restores the
+    /// exp lost before the logout (the prayer flow itself is in
+    /// `systems::skills::exp_recovery_tests`).
+    #[tokio::test]
+    #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
+    async fn private_mysql_recoverable_exp_survives_reload() {
+        use crate::test_support::{test_character, test_experience, test_server_with};
+
+        let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+            return;
+        };
+        let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+        assert_eq!(
+            options.get_port(),
+            3317,
+            "only private MySQL3317 is allowed"
+        );
+        let pool = MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("private MySQL");
+        shadow_tables(&pool, CHARACTER_SAVE_TABLES).await;
+        sqlx::query("INSERT INTO `accounts` (`account_id`, `labor`) VALUES (1, 100)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut data = crate::data::GameData::empty();
+        data.experience = test_experience(55);
+        let mut server = test_server_with(data);
+        server.db = pool.clone();
+        let mut character = test_character(1, "Recoverable", 100.0, 100.0);
+        character.account_id = 1;
+        character.unit.level = 10;
+        character.experience = 10_450; // level 10 death: 50 lost, 40 recoverable
+        character.recoverable_exp = 40;
+        character.created = Utc::now().timestamp();
+        let mut transaction = pool.begin().await.unwrap();
+        save_character(&mut transaction, &mut character, Utc::now().timestamp())
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        let (loaded, _) = load_character(&server, 1, 1)
+            .await
+            .unwrap()
+            .expect("saved character");
+        assert_eq!(loaded.experience, 10_450);
+        assert_eq!(
+            loaded.recoverable_exp, 40,
+            "the death penalty's recoverable exp must survive the relog"
+        );
+        assert_eq!(loaded.labor_power, 100);
+        pool.close().await;
+    }
+
     /// The real labor save path (`SaveManager` snapshot capture/write/commit and the departing
     /// save) against one online character: a rolled-back snapshot must not move the wallet, a
     /// committed retry must flush only the captured delta while a spend races it, and the
@@ -1712,7 +1746,6 @@ mod tests {
         use crate::managers::save::{
             capture_financial_snapshot, commit_financial_snapshot, write_financial_snapshot,
         };
-        use crate::systems::social::achievement_persistence::temporary_shadow_definition;
         use crate::test_support::{spawn_player, test_character, test_server, TestClient};
         use std::sync::Arc;
 
@@ -1731,45 +1764,21 @@ mod tests {
             .connect_with(options)
             .await
             .expect("private MySQL");
-        // Every table the financial snapshot path touches, connection-local: the mail test's
-        // financial list plus the account wallet and the two achievement tables `save_character`
-        // rewrites. Temporary tables cannot carry foreign keys, so those constraints are dropped.
-        for table in [
-            "housings",
-            "dominions",
-            "dominion_siege_participants",
-            "mails",
-            "items",
-            "item_containers",
-            "auction_house",
-            "characters",
-            "options",
-            "abilities",
-            "actabilities",
-            "appellations",
-            "character_active_buffs",
-            "portal_book_coords",
-            "portal_visited_district",
-            "friends",
-            "blocked",
-            "skills",
-            "quests",
-            "completed_quests",
-            "accounts",
-            "character_records",
-            "character_achievements",
-        ] {
-            let (_, definition): (String, String) =
-                sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap();
-            assert!(definition.starts_with("CREATE TABLE "));
-            sqlx::query(&temporary_shadow_definition(&definition))
-                .execute(&pool)
-                .await
-                .unwrap();
-        }
+        // The financial tables the snapshot path touches, on top of the character save's.
+        shadow_tables(
+            &pool,
+            &[
+                "housings",
+                "dominions",
+                "dominion_siege_participants",
+                "mails",
+                "items",
+                "item_containers",
+                "auction_house",
+            ],
+        )
+        .await;
+        shadow_tables(&pool, CHARACTER_SAVE_TABLES).await;
         sqlx::query("INSERT INTO `accounts` (`account_id`, `labor`) VALUES (1, 1000)")
             .execute(&pool)
             .await
@@ -1841,7 +1850,6 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
     async fn private_mysql_new_character_items_are_saved_with_the_character() {
-        use crate::systems::social::achievement_persistence::temporary_shadow_definition;
         use crate::test_support::test_character;
 
         let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
@@ -1859,36 +1867,8 @@ mod tests {
             .connect_with(options)
             .await
             .expect("private MySQL");
-        for table in [
-            "items",
-            "item_containers",
-            "characters",
-            "options",
-            "abilities",
-            "actabilities",
-            "appellations",
-            "character_active_buffs",
-            "portal_book_coords",
-            "portal_visited_district",
-            "friends",
-            "blocked",
-            "skills",
-            "quests",
-            "completed_quests",
-            "accounts",
-            "character_records",
-            "character_achievements",
-        ] {
-            let (_, definition): (String, String) =
-                sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap();
-            sqlx::query(&temporary_shadow_definition(&definition))
-                .execute(&pool)
-                .await
-                .unwrap();
-        }
+        shadow_tables(&pool, &["items", "item_containers"]).await;
+        shadow_tables(&pool, CHARACTER_SAVE_TABLES).await;
         sqlx::query("INSERT INTO `accounts` (`account_id`, `labor`) VALUES (1007, 1000)")
             .execute(&pool)
             .await
@@ -1954,8 +1934,6 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
     async fn private_mysql_retired_skill_level_is_savable() {
-        use crate::systems::social::achievement_persistence::temporary_shadow_definition;
-
         let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
             return;
         };
@@ -1970,29 +1948,7 @@ mod tests {
             .connect_with(options)
             .await
             .expect("private MySQL");
-        // Shadow every table `save_character` writes with connection-local copies of their
-        // actual schemas, so no live row is touched.
-        for table in [
-            "characters",
-            "character_active_buffs",
-            "character_records",
-            "character_achievements",
-            "friends",
-            "blocked",
-            "skills",
-            "quests",
-        ] {
-            let (_, definition): (String, String) =
-                sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap();
-            assert!(definition.starts_with("CREATE TABLE "));
-            sqlx::query(&temporary_shadow_definition(&definition))
-                .execute(&pool)
-                .await
-                .unwrap();
-        }
+        shadow_tables(&pool, CHARACTER_SAVE_TABLES).await;
 
         // Skill 10385: ability_level 99, level_step 3, ability level 55 (the cap). The old
         // formula stored level 243, MySQL rejects it (1264) and the whole save rolled back.
