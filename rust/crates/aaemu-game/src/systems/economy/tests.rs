@@ -1067,3 +1067,118 @@ async fn swap_between_bag_and_bank() {
     let f = w.a.drain();
     assert_eq!(f.len(), 1);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Equipment buffs that the EQUIPMENT_BUFF_TAG sweep does not cover
+// ---------------------------------------------------------------------------------------------
+
+const COSTUME: u32 = 34800; // recharge_buff_id, charge window open
+const BUFFED: u32 = 34801; // items.buff_id
+const COSTUME_BUFF: u32 = 11011;
+const BUFFED_BUFF: u32 = 11012;
+
+/// A world whose gear hooks run the real buff code: a permanent independent (stack rule 6)
+/// max-stack-1 buff without the equipment tag, handed out by a costume (recharge buff, 12 h
+/// charge window) and by a plain item buff.
+fn gear_buff_world() -> World {
+    use crate::systems::skills::data::BuffTemplate;
+    let mut d = test_data();
+    for (template, buff) in [(COSTUME, COSTUME_BUFF), (BUFFED, BUFFED_BUFF)] {
+        let is_costume = template == COSTUME;
+        d.items.templates.insert(
+            template,
+            ItemTemplate {
+                buff_id: if is_costume { 0 } else { buff },
+                kind: TemplateKind::Armor(EquipTemplate {
+                    slot_type_id: 3,
+                    coverage: 10,
+                    durability_ratio: 1.0,
+                    durability_multiplier: 100,
+                    charge_lifetime: if is_costume { 43200 } else { 0 },
+                    recharge_buff_id: if is_costume { buff } else { 0 },
+                    ..EquipTemplate::default()
+                }),
+                ..ItemTemplate::plain(template, 1)
+            },
+        );
+        d.systems.skills.add_buff(BuffTemplate {
+            id: buff,
+            kind: 1,
+            stack_rule: 6,
+            max_stack: 1,
+            duration: 0,
+            ..BuffTemplate::default()
+        });
+    }
+    let server = Arc::new(test_server_with(d));
+    server.set_self();
+    crate::systems::skills::bind(&server);
+    super::bridges::install(&server);
+    crate::systems::skills::bridges::install_economy(&server);
+    let mut a = TestClient::new(&server, 1, 1001);
+    let b = TestClient::new(&server, 2, 1002);
+    let pa = spawn_player(&server, &a, test_character(1, "Alice", 100.0, 100.0), 0x100);
+    let pb = spawn_player(&server, &b, test_character(2, "Bob", 101.0, 100.0), 0x101);
+    a.conn.active_char = Some(pa.clone());
+    a.drain();
+    World {
+        server,
+        a,
+        pa,
+        b,
+        pb,
+    }
+}
+
+fn buff_copies(p: &PlayerRef, buff_id: u32) -> usize {
+    crate::world::WorldObject::from(p).with_base_unit(|b| {
+        b.buffs()
+            .effects
+            .iter()
+            .filter(|e| e.template.id == buff_id)
+            .count()
+    })
+}
+
+/// Equips `template` from the bag, refreshes the gear twice like a character select and a
+/// loading-screen `CSNotifyInGame` do, then unequips it again.
+fn assert_gear_buff_does_not_leak(template: u32, buff_id: u32) {
+    let mut w = gear_buff_world();
+    let pa = w.pa.clone();
+    let id = give(&w, &pa, slot_type::INVENTORY, template, 1, 3);
+    {
+        // The recharge window starts when the costume is made.
+        let c = Inv::of(&pa).bag();
+        c.lock()
+            .unwrap()
+            .get_item_by_id_mut(id)
+            .unwrap()
+            .charge_start_time = chrono::Utc::now().timestamp();
+    }
+
+    let s = move_body(0, id, 1, equip_slot::CHEST as u8, 2, 3);
+    run::<CSSwapItemsPacket>(&mut w, 0, s.as_bytes());
+    assert!(item_at(&pa, 1, equip_slot::CHEST as u8).is_some());
+    assert_eq!(buff_copies(&pa, buff_id), 1, "equip");
+
+    for _ in 0..2 {
+        crate::systems::skills::stats::update_gear_bonuses(&w.server, &pa, None, None);
+        assert_eq!(buff_copies(&pa, buff_id), 1, "first-load gear refresh");
+    }
+
+    // The client sends FROM the bag item TO the empty bag slot.
+    let s = move_body(id, 0, 1, equip_slot::CHEST as u8, 2, 5);
+    run::<CSSwapItemsPacket>(&mut w, 0, s.as_bytes());
+    assert!(item_at(&pa, 1, equip_slot::CHEST as u8).is_none());
+    assert_eq!(buff_copies(&pa, buff_id), 0, "unequip");
+}
+
+#[tokio::test]
+async fn recharge_buff_of_a_costume_does_not_pile_up_on_gear_refresh() {
+    assert_gear_buff_does_not_leak(COSTUME, COSTUME_BUFF);
+}
+
+#[tokio::test]
+async fn untagged_item_buff_does_not_pile_up_on_gear_refresh() {
+    assert_gear_buff_does_not_leak(BUFFED, BUFFED_BUFF);
+}

@@ -2903,6 +2903,18 @@ cast is accepted for every non-NPC caster (players, player-driven mates and slav
 on the skill run (`gcd_started`) so `cast` does not restart it at cast end. NPC timed casts and all
 instant casts are unchanged (the NPC AI paces its skills from the cast-end GCD).
 
+## Equipment buffs are removed completely (2026-10-29)
+
+Deviation from the C# `Unit.ApplyEquipEffects`, which only cleared the buffs tagged
+`EQUIPMENT_BUFF_TAG` (156) on the first-load pass (character select, every `CSNotifyInGame`) and
+removed a single copy of the buff of an unequipped item. Gear buffs without that tag are
+permanent and independent (stack rule 6), e.g. the recharge buff 11011 of the costume "Late
+Autumn Pepe Friend" (`item_armors.recharge_buff_id`), so each pass added another copy and an
+unequip left one behind. The first-load pass now removes every copy of each item buff and
+recharge buff the equipped items produce before adding them again (`buffs::remove_all_buffs`),
+and an unequip removes every copy unless another equipped item still produces the same buff (two
+earrings share one buff), in which case it removes one as before.
+
 ## Loot take range (2026-10-21)
 
 C# `TryTakeLootLocked` never checked the distance to the corpse (`MaxLootingRange`, 200 m, only

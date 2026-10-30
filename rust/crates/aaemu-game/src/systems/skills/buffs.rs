@@ -1576,6 +1576,25 @@ pub fn remove_buff(server: &GameServer, owner: &WorldObject, buff_id: u32) {
     crate::systems::dispatch_buff_events(server, owner);
 }
 
+/// Every copy of a buff: `Buffs.RemoveBuff(buffId)` repeated until none is left. Not in the C#,
+/// which removed one copy per call, so permanent independent (stack rule 6) gear buffs that were
+/// re-added by each gear refresh piled up (see PORTING.md, "Equipment buffs").
+pub fn remove_all_buffs(server: &GameServer, owner: &WorldObject, buff_id: u32) {
+    owner.with_base_unit(|b| {
+        // Counted first: each `remove_buff` removes exactly one effect, so this terminates.
+        let copies = b
+            .buffs()
+            .effects
+            .iter()
+            .filter(|e| e.template.id == buff_id)
+            .count();
+        for _ in 0..copies {
+            b.buffs_mut().remove_buff(buff_id);
+        }
+    });
+    crate::systems::dispatch_buff_events(server, owner);
+}
+
 /// `Buffs.RemoveEffect(templateId, skillId)` with the behaviour.
 pub fn remove_effect_by_skill(
     server: &GameServer,

@@ -260,14 +260,35 @@ impl EconomyForSkills {
         use crate::systems::skills::buffs;
         let data = &server.game_data.items;
         if let Some(r) = removed {
-            if let Some(id) = Self::item_buff(server, r) {
-                if Self::check_buff(unit, id) {
-                    buffs::remove_buff(server, unit, id);
+            // `items` is the equipment after the change. A buff of the removed item loses every
+            // copy unless another equipped item still produces it (two earrings share one buff).
+            let still_worn = |id: u32| {
+                items.iter().any(|o| {
+                    o.id != r.id
+                        && !Self::is_destroyed(server, o)
+                        && (Self::item_buff(server, o) == Some(id)
+                            || data
+                                .template(o.template_id)
+                                .and_then(|t| t.equip())
+                                .is_some_and(|e| e.recharge_buff_id == id))
+                })
+            };
+            let remove = |id: u32| {
+                if !Self::check_buff(unit, id) {
+                    return;
                 }
+                if still_worn(id) {
+                    buffs::remove_buff(server, unit, id);
+                } else {
+                    buffs::remove_all_buffs(server, unit, id);
+                }
+            };
+            if let Some(id) = Self::item_buff(server, r) {
+                remove(id);
             }
             if let Some(e) = data.template(r.template_id).and_then(|t| t.equip()) {
-                if e.recharge_buff_id > 0 && Self::check_buff(unit, e.recharge_buff_id) {
-                    buffs::remove_buff(server, unit, e.recharge_buff_id);
+                if e.recharge_buff_id > 0 {
+                    remove(e.recharge_buff_id);
                 }
             }
         }
@@ -285,6 +306,22 @@ impl EconomyForSkills {
         if added.is_none() && removed.is_none() {
             // This is the first load check to apply buffs for equipped items.
             buffs::remove_buffs_by_tag(server, unit, buff_constants::EQUIPMENT_BUFF_TAG, 20);
+            // Gear buffs that are not tagged EQUIPMENT_BUFF_TAG (permanent recharge buffs, plain
+            // item buffs) survive that sweep and, being independent, would be added again.
+            for item in items {
+                for id in [
+                    Self::item_buff(server, item),
+                    data.template(item.template_id)
+                        .and_then(|t| t.equip())
+                        .map(|e| e.recharge_buff_id)
+                        .filter(|id| *id > 0),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    buffs::remove_all_buffs(server, unit, id);
+                }
+            }
             for item in items {
                 let Some(t) = data.template(item.template_id) else {
                     continue;
