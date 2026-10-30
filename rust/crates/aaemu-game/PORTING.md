@@ -2613,8 +2613,9 @@ Additional world-side fixes from the same audit:
   containment rays. Statics with a world AABB under 2 m (buoys, bollards, mooring posts) and
   vegetation are ignored. The box query batches: the engine's per-thread contact pool holds 64
   records and 2040 border points and silently drops further parts, so a saturated round is
-  repeated with the entities already seen in the skip list (the identical-box query cache is
-  defeated by growing the batch box 1 mm per round, a conservative superset) for at most 8
+  repeated with the entities already seen in the skip list (the batch box stays the client's exact
+  box; the caller's identical-box query cache is invalidated before every round with
+  `World::invalidate_box_query_cache`) for at most 8
   rounds; a still-saturated query reports the spot as blocked. If none of the 120 passes, the summon is refused with `SCErrorMsg`
   100 (`SLAVE_SPAWN_SHIP_NEED_MORE_SPACE`), the summon item is not committed, the skill
   cooldown and GCD are refunded — on the server and on the client with the same
