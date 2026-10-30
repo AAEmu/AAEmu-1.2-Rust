@@ -49,6 +49,9 @@ mod deck_standing_tests;
 #[path = "pr38_regression_tests.rs"]
 mod pr38_regression_tests;
 
+#[path = "rider_heading_tests.rs"]
+mod rider_heading_tests;
+
 #[path = "ship_identity_tests.rs"]
 mod ship_identity_tests;
 
