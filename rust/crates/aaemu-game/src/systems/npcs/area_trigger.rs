@@ -8,7 +8,8 @@
 //! shape around the owner doodad are compared with the previous list; entering units get the
 //! trigger's buff (`InsideBuffTemplate.Apply`, through the skills hook) and leaving ones lose it
 //! when their trigger count drops to 0; every `TickRate` ms the trigger's effects are applied to
-//! the units inside (skills hook).
+//! the units inside (skills hook). A removed trigger (`RemoveAreaTrigger`) releases its units at
+//! once and is inert from then on, although the manager only drops it at the end of the next tick.
 //!
 //! `GetAround(…, useModelSize: true)` widens the radius by the units' `ModelSize` (actor model
 //! radius × scale; doodad owners have none).
@@ -285,6 +286,12 @@ struct AreaTriggerState {
     units: Vec<WorldObject>,
     /// `_lastTick` (`None` = `DateTime.MinValue`).
     last_tick: Option<Instant>,
+    /// Not a C# member: `RemoveAreaTrigger` ran. The manager keeps a removed trigger in its list
+    /// until the end of its next tick; it must not be ticked meanwhile, and nothing enters it.
+    removed: bool,
+    /// Not a C# member: an `UpdateUnits` is applying its enters / leaves to the units it read.
+    /// A removal that lands meanwhile leaves releasing those units to it.
+    updating: bool,
 }
 
 /// `AreaTrigger`.
@@ -348,18 +355,51 @@ impl AreaTrigger {
         }
     }
 
-    /// `OnDelete()`.
-    pub fn on_delete(&self, server: &GameServer) {
+    /// `OnDelete()`; `false` when the trigger was removed before.
+    ///
+    /// Deviation: the C# iterates `Units` again on every `RemoveAreaTrigger` call, and the same
+    /// trigger is removed twice (`Doodad.Delete` and `DoodadFuncCloutTask`; also `Doodad.Delete`
+    /// after a phase change). The second `OnDelete` then dropped a buff still held by another
+    /// trigger of the same buff (two casters' comets on one ally). The trigger now dies once:
+    /// the first removal takes its units, and nothing enters it afterwards (its owner may stay
+    /// visible, and the manager only drops it at the end of the next tick).
+    fn on_delete(&self, server: &GameServer) -> bool {
+        let units = {
+            let mut state = self.state();
+            if state.removed {
+                return false;
+            }
+            state.removed = true;
+            if state.updating {
+                // An `update_units` is counting the units it read (a removal from the doodad
+                // task runtime): it releases them when it stores its result.
+                return true;
+            }
+            std::mem::take(&mut state.units)
+        };
+        self.release(server, units);
+        true
+    }
+
+    /// The part of `OnDelete()` that works on the units that were inside.
+    fn release(&self, server: &GameServer, units: Vec<WorldObject>) {
         if let Some(buff_id) = self.inside_buff_id {
-            let units = self.state().units.clone();
             for unit in &units {
                 leave_unit(server, unit, buff_id);
             }
         }
     }
 
+    /// Whether `RemoveAreaTrigger` ran for this trigger.
+    pub fn is_removed(&self) -> bool {
+        self.state().removed
+    }
+
     /// `UpdateUnits()`.
     fn update_units(self: &Arc<Self>, server: &GameServer) {
+        if self.is_removed() {
+            return;
+        }
         let (Some(owner), Some(shape)) = (&self.owner, &self.shape) else {
             remove_area_trigger(server, self);
             return;
@@ -376,7 +416,14 @@ impl AreaTrigger {
         let Some(current) = get_around_by_shape(server, &world, &owner_obj, shape) else {
             return;
         };
-        let old = self.state().units.clone();
+        let old = {
+            let mut state = self.state();
+            if state.removed {
+                return;
+            }
+            state.updating = true;
+            state.units.clone()
+        };
         // Character object IDs survive reconnects, but the PlayerRef and its
         // buff/trigger state do not. Compare the retained object's identity so
         // a replacement receives OnEnter even when no-player ticks were skipped.
@@ -410,7 +457,19 @@ impl AreaTrigger {
                 owner.obj_id
             );
         }
-        self.state().units = current;
+        let released = {
+            let mut state = self.state();
+            state.updating = false;
+            state.units = current;
+            if state.removed {
+                // `on_delete` landed while the enters / leaves above ran and left the units to
+                // this update: they are counted now, so release them.
+                std::mem::take(&mut state.units)
+            } else {
+                Vec::new()
+            }
+        };
+        self.release(server, released);
     }
 
     /// `ApplyEffects()`.
@@ -434,10 +493,10 @@ impl AreaTrigger {
         }
     }
 
-    /// `Tick(delta)` (the manager calls it every 200 ms).
+    /// `Tick(delta)` (the manager calls it every 200 ms). A removed trigger does nothing.
     pub fn tick(self: &Arc<Self>, server: &GameServer) {
         self.update_units(server);
-        if self.tick_rate > 0 {
+        if self.tick_rate > 0 && !self.is_removed() {
             let due = self
                 .state()
                 .last_tick
@@ -536,6 +595,10 @@ impl AreaTriggerManager {
             }
         }
         for trigger in self.triggers() {
+            // Removed, and dropped from the list below: its units are released already.
+            if trigger.is_removed() {
+                continue;
+            }
             let active = trigger.owner.as_ref().is_some_and(|o| {
                 let obj = WorldObject::from(o);
                 match (obj.region(), server.world.world_of(&obj)) {
@@ -573,10 +636,27 @@ pub fn add_area_trigger(server: &GameServer, trigger: Arc<AreaTrigger>) {
 }
 
 /// `AreaTriggerManager.RemoveAreaTrigger(trigger)`: `OnDelete` now, removal at the end of the
-/// next tick. Note (C#): calling it twice runs `OnDelete` twice (trigger counts decremented
-/// twice).
+/// next tick. Deviation: the trigger is also dropped from its owner's `AttachAreaTriggers`
+/// (the C# leaves it there until the doodad's own `Delete`), so a later doodad delete does not
+/// run `OnDelete` on a trigger that already left, and `attached_to` reflects the live triggers.
+/// A trigger is removed once: a repeated removal does nothing (the C# ran `OnDelete`, and so
+/// decremented the trigger counts, again; see `AreaTrigger::on_delete`), and the trigger is not
+/// ticked between its removal and its drop from the manager's list.
 pub fn remove_area_trigger(server: &GameServer, trigger: &Arc<AreaTrigger>) {
-    trigger.on_delete(server);
+    if !trigger.on_delete(server) {
+        return;
+    }
+    if let Some(owner) = &trigger.owner {
+        let mut attached = lock(&server.systems.npcs.area_triggers.attached);
+        if let Some(list) = attached.get_mut(&owner.obj_id) {
+            if let Some(i) = list.iter().position(|t| Arc::ptr_eq(t, trigger)) {
+                list.remove(i);
+            }
+            if list.is_empty() {
+                attached.remove(&owner.obj_id);
+            }
+        }
+    }
     lock(&server.systems.npcs.area_triggers.remove_queue).push(trigger.clone());
 }
 
@@ -728,6 +808,132 @@ mod tests {
             &WorldObject::from(&doodad),
             &WorldObject::from(&inside)
         ));
+    }
+
+    /// A visible doodad at (100, 100) with a sphere trigger (buff 631) over `count` NPCs
+    /// standing 5 m, 6 m, ... east of it.
+    fn sphere_trigger(
+        server: &GameServer,
+        world: &WorldInstance,
+        count: usize,
+    ) -> (Arc<AreaTrigger>, Vec<NpcRef>) {
+        let doodad = Entity::new(server.ids.object.get_next_id().unwrap(), Doodad::new(1));
+        {
+            let mut d = doodad.data();
+            d.transform.set_position(100.0, 100.0, 0.0, 0.0, 0.0, 0.0);
+            d.transform.instance_id = world.id;
+        }
+        let _ = world.spawn(&doodad, &server.view_ctx());
+        let npcs = (0..count)
+            .map(|i| spawn_npc(server, world, 105.0 + i as f32, 100.0))
+            .collect();
+        let trigger = Arc::new(AreaTrigger {
+            shape: Some(AreaShape {
+                id: 1000,
+                kind: AREA_SHAPE_SPHERE,
+                value1: 10.0,
+                value2: 0.0,
+                value3: 0.0,
+            }),
+            owner: Some(doodad.clone()),
+            caster: Some(WorldObject::from(&doodad)),
+            inside_buff_id: Some(631),
+            ..Default::default()
+        });
+        add_area_trigger(server, trigger.clone());
+        (trigger, npcs)
+    }
+
+    #[tokio::test]
+    async fn removed_trigger_never_enters_its_units_again() {
+        // The manager drops a removed trigger only at the end of its next tick, and `OnDelete`
+        // has released the units: the owner is still visible (a clout that ends in a phase
+        // change, a borrowed doodad), so a later update must not count the units a second time.
+        let server = test_server();
+        let world = server
+            .world
+            .worlds()
+            .into_iter()
+            .next()
+            .expect("main world");
+        let (trigger, npcs) = sphere_trigger(&server, &world, 2);
+        trigger.tick(&server);
+        assert_eq!(trigger.unit_ids().len(), 2);
+        for npc in &npcs {
+            assert_eq!(npc.data().unit.trigger_count(631), 1);
+        }
+
+        remove_area_trigger(&server, &trigger);
+        for npc in &npcs {
+            assert_eq!(npc.data().unit.trigger_count(631), 0);
+        }
+        for _ in 0..3 {
+            trigger.tick(&server);
+            assert!(trigger.unit_ids().is_empty());
+            for npc in &npcs {
+                assert_eq!(npc.data().unit.trigger_count(631), 0);
+            }
+        }
+        // Removing it again (the clout task after `Doodad.Delete`) changes nothing either.
+        remove_area_trigger(&server, &trigger);
+        for npc in &npcs {
+            assert_eq!(npc.data().unit.trigger_count(631), 0);
+        }
+    }
+
+    /// Removes `trigger` while an update of it is entering its first unit: a
+    /// `RemoveAreaTrigger` from the doodad task runtime that lands between the update reading
+    /// the units inside and storing them.
+    struct RemoveWhileEntering(Mutex<Option<Arc<AreaTrigger>>>);
+
+    impl crate::systems::npcs::hooks::SkillsBridge for RemoveWhileEntering {
+        fn apply_area_buff(
+            &self,
+            server: &GameServer,
+            _caster: &WorldObject,
+            _unit: &WorldObject,
+            _buff_id: u32,
+        ) {
+            let trigger = self.0.lock().unwrap().clone();
+            if let Some(trigger) = trigger {
+                remove_area_trigger(server, &trigger);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn removal_during_an_update_releases_the_units_that_update_entered() {
+        let server = test_server();
+        let world = server
+            .world
+            .worlds()
+            .into_iter()
+            .next()
+            .expect("main world");
+        let (trigger, npcs) = sphere_trigger(&server, &world, 2);
+        server
+            .systems
+            .npcs
+            .hooks
+            .skills
+            .install(Arc::new(RemoveWhileEntering(Mutex::new(Some(
+                trigger.clone(),
+            )))));
+
+        // The first unit's `OnEnter` removes the trigger; the update still enters the second.
+        trigger.tick(&server);
+        for npc in &npcs {
+            assert_eq!(
+                npc.data().unit.trigger_count(631),
+                0,
+                "the removal released every unit the update counted"
+            );
+        }
+        assert!(trigger.unit_ids().is_empty());
+        trigger.tick(&server);
+        for npc in &npcs {
+            assert_eq!(npc.data().unit.trigger_count(631), 0);
+        }
     }
 
     fn school_aura_server() -> Arc<GameServer> {

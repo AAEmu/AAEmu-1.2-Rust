@@ -609,9 +609,18 @@ pub fn on_skill_hit(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, skill_id:
 /// `InitDoodad()`: growth time (growth rate + climate bonus), then `DoChangePhase(owner unit,
 /// FuncGroupId)`.
 pub fn init_doodad(ctx: &DoodadCtx<'_>) {
-    let (template_id, plant_time, owner_obj_id) = {
+    let owner_obj_id = ctx.doodad.data().owner_obj_id;
+    let unit = ctx.world.unit(owner_obj_id);
+    init_doodad_for(ctx, unit.as_ref());
+}
+
+/// [`init_doodad`] with its owner unit (`ParentWorld.GetUnit(OwnerObjId)`) already resolved: an
+/// init that runs later than the C# `InitDoodad()` call it stands for (a delayed `SpawnDoodad`)
+/// passes the unit of that call, which may have left the world since.
+pub fn init_doodad_for(ctx: &DoodadCtx<'_>, unit: Option<&WorldObject>) {
+    let (template_id, plant_time) = {
         let d = ctx.doodad.data();
-        (d.template_id, d.plant_time, d.owner_obj_id)
+        (d.template_id, d.plant_time)
     };
     let total = ctx
         .data()
@@ -625,9 +634,8 @@ pub fn init_doodad(ctx: &DoodadCtx<'_>) {
     ctx.doodad.data().growth_time_ms = plant_time * 1000 + grow_time as i64;
 
     // Actually do the phase change
-    let unit = ctx.world.unit(owner_obj_id);
     let fg = ctx.doodad.data().func_group_id;
-    do_change_phase(ctx, unit.as_ref(), fg as i32);
+    do_change_phase(ctx, unit, fg as i32);
     // A ratio-respawn replacement's Tod catch-up suppression only covers its entry phase.
     ctx.doodad.data().phase.suppress_tod_catch_up = false;
 }

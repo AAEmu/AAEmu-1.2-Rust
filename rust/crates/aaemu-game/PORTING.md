@@ -1871,8 +1871,51 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `NextPhase`, a function group of the other template. NPC 10119 near Arach Hollow summons doodad
   5007, whose clout moved the Amber Boulder (4252) into 5007's `DoodadFuncFinal` phase. That
   deleted the boulder, so quest 3447 "Fellow Searchers" could not be completed. 991 clouts use
-  the origin source and 602 of them have a next phase. The borrowed doodad is still the trigger
-  origin, but the task now changes the phase of the doodad that owns the clout.
+  the origin source and 602 of them have a next phase. The task now changes the phase of the
+  doodad that owns the clout.
+
+* systems::npcs (2026-10-30): a `DoodadFuncClout` whose doodad is initialised before its `Spawn`
+  (the `SummonDoodad` path runs `InitDoodad` first, then `Spawn`) keeps that doodad as the area
+  trigger origin even with `UseOriginSource`. The C# anchor moved the area to the first doodad
+  within 4 m of the caster; when a planted crop stood next to the caster of Comet's Boon (skill
+  18222, summoned doodad 5017), the caster sat 2.002 m off the clout's 2.0 m half-length and
+  buff 3771 was never applied, leaving the doodad's speed trail without its buff. Already
+  spawned doodads keep the C# anchor. `Unit.DecrementTriggerCount` now clamps at 0 as the C#
+  `Unit.DecrementTriggerCount` does: a clout with `NextPhase == -1` is removed by the doodad
+  delete and again by its task, and the former -1 suppressed the buff of the next clout on the
+  same unit.
+
+* systems::npcs (2026-10-30): `SpecialType.SpawnDoodad` with `value2 > 0` runs `InitDoodad()`
+  and then `Spawn()` together when the delay expires (a doodad task), instead of initialising
+  at the cast and spawning from a bare tokio task. The C# order (`InitDoodad(); if (delay > 0)
+  Thread.Sleep(delay); Spawn()`) is kept inside that step: the start phase runs on the still
+  invisible doodad, so no viewer gets a phase change of its init, and the area trigger of a
+  clout is first ticked after the spawn (the tick needs the owner's region, which `Spawn`
+  assigns after it made the owner visible). Deviation: the init moved from the cast to the end
+  of the delay. The port's delayed spawn ran on the task runtime, and a clout whose `duration`
+  was shorter than `value2` ended (and deleted the doodad) while it was still pending. The
+  start phase now starts at the spawn, so e.g. the clout of a `SpawnDoodad` summon is applied
+  for its full duration after the doodad appears (the C# phase tasks were scheduled at the
+  cast, so an over-due clout task fired right after the spawn). The owner unit that
+  `InitDoodad()` hands to the phase (`ParentWorld.GetUnit(OwnerObjId)`; `DoodadFuncClout` takes
+  `areaTrigger.Caster = caster is Character ? caster : owner` from it) is taken at the cast, as
+  the C# init ran there: a caster who leaves during the delay still owns the clout, whose
+  target relation is not judged against the doodad instead. A delayed spawn that can no longer
+  run (its instance is gone) releases the doodad's object id, which nothing else owns.
+
+* systems::npcs (2026-10-30): an `AreaTrigger` is removed once. `RemoveAreaTrigger` drops the
+  trigger from its owner's `AttachAreaTriggers`; the C# ran `OnDelete` again on every removal
+  and left the trigger attached until the owner doodad was deleted. A clout with `NextPhase ==
+  -1` is removed by both `Doodad.Delete` and its `DoodadFuncCloutTask`, and two casters' comets
+  over one ally share the buff's trigger count: the duplicate `OnDelete` decremented it twice,
+  so the ally lost the buff when the first clout ended. The first removal now marks the trigger
+  removed and takes its `Units`; a repeated removal does nothing. A removed trigger is neither
+  ticked nor entered again, although the manager keeps it in its list until the end of the next
+  tick: its owner can stay visible (a clout with `NextPhase != -1`, or the doodad a
+  `UseOriginSource` clout borrowed), and an update would count every unit inside once more and
+  re-apply the buff, which nothing removes afterwards. A removal that lands while `UpdateUnits`
+  applies its enters and leaves (the doodad task runtime and the area tick run on different
+  threads) leaves releasing the counted units to that update.
 
 * systems::vehicles / managers::item (2026-10-15): the shared death hook ignores self-deaths
   of objects other than characters and mates instead of reporting a missing mate owner. A mate

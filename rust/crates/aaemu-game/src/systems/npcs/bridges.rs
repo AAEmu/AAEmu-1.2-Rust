@@ -25,6 +25,7 @@ use crate::world::{NpcRef, PlayerRef, WorldInstance, WorldObject};
 
 use super::doodad::interactions::world_interaction_type as wi;
 use super::doodad::manager as doodads;
+use super::doodad::tasks;
 
 /// `BaseUnitType.Npc`.
 const BASE_UNIT_TYPE_NPC: u32 = 1;
@@ -387,18 +388,22 @@ impl NpcSkillHooks for NpcSkills {
             d.transform
                 .set_position(pos.x, pos.y, z, pos.rot_x, pos.rot_y, pos.rot_z);
         }
-        doodads::init_doodad(server, &world, &doodad);
         if delay_ms > 0 {
-            let (Some(srv), Ok(rt)) = (server.self_arc(), tokio::runtime::Handle::try_current())
-            else {
-                doodads::spawn(server, &world, &doodad);
-                return;
-            };
-            rt.spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(delay_ms as u64)).await;
-                doodads::spawn(&srv, &world, &doodad);
-            });
+            // `SpawnDoodad.cs`: `doodad.InitDoodad(); if (delay > 0) Thread.Sleep(delay);
+            // doodad.Spawn();`. The init and the spawn run together once the delay is over (the
+            // start phase, e.g. a clout, begins with the visible summon). `InitDoodad()` hands
+            // the phase `ParentWorld.GetUnit(OwnerObjId)`: that unit is taken here, at the cast,
+            // so a caster who leaves during the delay still owns the clout.
+            let owner_obj_id = doodad.data().owner_obj_id;
+            let owner = world.unit(owner_obj_id);
+            tasks::schedule_spawn(
+                server,
+                &doodad,
+                owner.as_ref(),
+                std::time::Duration::from_millis(delay_ms as u64),
+            );
         } else {
+            doodads::init_doodad(server, &world, &doodad);
             doodads::spawn(server, &world, &doodad);
         }
     }
