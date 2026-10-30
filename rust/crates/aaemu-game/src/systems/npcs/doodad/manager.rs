@@ -843,6 +843,8 @@ pub fn on_time_of_day_change(server: &GameServer, new_time: f32, old_time: f32) 
                         has_loot_left: n.unit.has_loot_left,
                         anim_action_id: new_anim,
                         activate_animation: true,
+                        turret_pitch: 0.0,
+                        turret_yaw: 0.0,
                     }
                 };
                 crate::world::broadcast(&world, &npc, &p, false);

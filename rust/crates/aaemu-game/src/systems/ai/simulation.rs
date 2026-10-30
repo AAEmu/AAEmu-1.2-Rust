@@ -356,6 +356,8 @@ fn posture_off(server: &GameServer, npc: &NpcRef) {
             has_loot_left: n.unit.has_loot_left,
             anim_action_id: n.anim_action_id,
             activate_animation: false,
+            turret_pitch: 0.0,
+            turret_yaw: 0.0,
         }
     };
     crate::systems::skills::broadcast(server, &WorldObject::from(npc), &p, true);

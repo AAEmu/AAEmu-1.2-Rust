@@ -29,6 +29,7 @@ use crate::systems::economy::item_effect_packets::{
 };
 use crate::systems::economy::item_packets::SCUnitEquipmentsChangedPacket;
 use crate::systems::npcs::doodad::spawner::SimpleSpawnerDef;
+use crate::systems::npcs::npc::packets::SCUnitModelPostureChangedPacket;
 use crate::systems::npcs::spawn_manager;
 use crate::systems::skills::effects::EffectArgs;
 use crate::systems::skills::packets::SCUnitDeathPacket;
@@ -1490,6 +1491,60 @@ pub fn may_man_cannon(character: &PlayerRef, cannon: &SlaveRef, world: &WorldIns
         )
     };
     owner || attached || character.data().unit.transform.parent_obj_id == bearer_id
+}
+
+/// Applies a client turret aim (`CSTurretStatePacket`) to the slave named by `unit_id`.
+///
+/// The 1.2 client sends the object id of the unit it controls (`39356990` uses `this+8`), so a
+/// ship cannon names the cannon child slave, a hull with an installed turret names the hull, and
+/// the tank passenger seat names the hull. Any attach point of that slave counts as seated; a
+/// sender who is not on it is ignored. The stored / relayed angles are the raw model-frame
+/// radians of the packet: the client producers already clamp them to the `vehicle_models` turret
+/// limits (or wrap full-circle yaws) before sending (`39425490` / `39425580`).
+pub fn set_turret_state(
+    server: &GameServer,
+    character: &PlayerRef,
+    unit_id: u32,
+    pitch: f32,
+    yaw: f32,
+) {
+    if !pitch.is_finite() || !yaw.is_finite() {
+        return;
+    }
+    let Some(world) = player_world(server, character) else {
+        return;
+    };
+    let Some(slave) = world.slave(unit_id) else {
+        return;
+    };
+    // Check and act under the same lock: only a character seated on this slave may aim it.
+    let posture = {
+        let mut d = slave.data();
+        if !d
+            .attached_characters
+            .iter()
+            .any(|(_, c)| *c == character.obj_id)
+        {
+            return;
+        }
+        d.turret_pitch = pitch;
+        d.turret_yaw = yaw;
+        SCUnitModelPostureChangedPacket {
+            obj_id: unit_id,
+            posture: crate::models::unit::ModelPostureType::TurretState,
+            has_loot_left: false,
+            anim_action_id: 0,
+            activate_animation: false,
+            turret_pitch: pitch,
+            turret_yaw: yaw,
+        }
+    };
+    let obj = WorldObject::from(&slave);
+    for viewer in world.players_around(&obj) {
+        if viewer.obj_id != character.obj_id {
+            viewer.send(posture);
+        }
+    }
 }
 
 /// A gunner who dies leaves the cannon (a driver or passenger of a ship keeps the C# behaviour).

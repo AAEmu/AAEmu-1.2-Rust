@@ -4437,3 +4437,319 @@ async fn ship_cannon_gunner_seat_skill_and_leaving() {
     assert!(!pa.data().is_riding);
     assert!(cannon.data().attached_characters.is_empty());
 }
+
+/// The type-8 posture body of `SCUnitModelPostureChangedPacket` / `SCUnitStatePacket`:
+/// `u8 posture, bool isLooted, f32 pitch, f32 yaw` (1.2 client `397bda20` -> `397b1df0`).
+fn turret_posture(pitch: f32, yaw: f32) -> Vec<u8> {
+    let mut v = vec![8, 0];
+    v.extend_from_slice(&pitch.to_le_bytes());
+    v.extend_from_slice(&yaw.to_le_bytes());
+    v
+}
+
+fn unit_state_of(frames: &[(u16, Vec<u8>)], obj_id: u32) -> Option<Vec<u8>> {
+    frames
+        .iter()
+        .find(|(op, b)| *op == sc::SCUnitStatePacket && b.starts_with(&bc(obj_id)))
+        .map(|f| f.1.clone())
+}
+
+async fn send_turret_state(
+    client: &mut TestClient,
+    server: &GameServer,
+    unit_id: u32,
+    pitch: f32,
+    yaw: f32,
+) {
+    use crate::net::registry::ClientPacket;
+    crate::packets::c2g_misc::CSTurretStatePacket {
+        unit_id,
+        pitch,
+        yaw,
+    }
+    .handle(server, &mut client.conn)
+    .await
+    .unwrap();
+}
+
+/// A ship cannon gunner (the cannon child slave's driver seat) aims the cannon: the posture is
+/// stored and relayed to the other players in range.
+#[tokio::test]
+async fn seated_gunner_turret_state_is_stored_and_broadcast() {
+    let server = server_with(cannon_data());
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let mut a = TestClient::new(&server, 1, 1);
+    let mut b = TestClient::new(&server, 2, 2);
+    let pa = spawn_player(&server, &a, test_character(1, "Owner", 100.0, 100.0), PA);
+    let pb = spawn_player(&server, &b, test_character(2, "Crew", 101.0, 100.0), PB);
+    a.conn.active_char = Some(pa.clone());
+    b.conn.active_char = Some(pb.clone());
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    let hull = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        SHIP_HULL,
+        None,
+        false,
+        None,
+        None,
+    )
+    .expect("hull");
+    let cannon = world
+        .slave(hull.data().attached_slaves[0])
+        .expect("cannon child");
+    let cannon_tl = u32::from(cannon.data().unit.tl_id);
+    a.drain();
+    b.drain();
+    slaves::bind_slave_by_tl(&server, &pa, cannon_tl);
+    a.drain();
+    b.drain();
+
+    send_turret_state(&mut a, &server, cannon.obj_id, 0.25, -0.5).await;
+
+    let aim = {
+        let d = cannon.data();
+        (d.turret_pitch, d.turret_yaw)
+    };
+    assert_eq!(aim, (0.25, -0.5));
+    let fb = b.drain();
+    assert_eq!(body(&fb, sc::SCUnitModelPostureChangedPacket), {
+        let mut v = bc(cannon.obj_id);
+        v.extend(turret_posture(0.25, -0.5));
+        v
+    });
+    assert!(
+        !ops(&a.drain()).contains(&sc::SCUnitModelPostureChangedPacket),
+        "the aiming client keeps its local aim"
+    );
+}
+
+/// A player who is not seated on the slave cannot aim it, even while someone else is seated.
+#[tokio::test]
+async fn unseated_player_cannot_set_turret_state() {
+    let server = server_with(cannon_data());
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let mut a = TestClient::new(&server, 1, 1);
+    let mut b = TestClient::new(&server, 2, 2);
+    let pa = spawn_player(&server, &a, test_character(1, "Owner", 100.0, 100.0), PA);
+    let pb = spawn_player(&server, &b, test_character(2, "Stranger", 101.0, 100.0), PB);
+    a.conn.active_char = Some(pa.clone());
+    b.conn.active_char = Some(pb.clone());
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    let hull = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        SHIP_HULL,
+        None,
+        false,
+        None,
+        None,
+    )
+    .expect("hull");
+    let cannon = world
+        .slave(hull.data().attached_slaves[0])
+        .expect("cannon child");
+    let cannon_tl = u32::from(cannon.data().unit.tl_id);
+    a.drain();
+    b.drain();
+    slaves::bind_slave_by_tl(&server, &pa, cannon_tl);
+    a.drain();
+    b.drain();
+
+    send_turret_state(&mut b, &server, cannon.obj_id, 0.75, 1.25).await;
+
+    let aim = {
+        let d = cannon.data();
+        (d.turret_pitch, d.turret_yaw)
+    };
+    assert_eq!(aim, (0.0, 0.0));
+    assert!(!ops(&a.drain()).contains(&sc::SCUnitModelPostureChangedPacket));
+    assert!(!ops(&b.drain()).contains(&sc::SCUnitModelPostureChangedPacket));
+}
+
+/// A passenger seat (point 2) is a legitimate aim path too (the 1.2 tank gunner models sit
+/// there); the packet names the slave whose model carries the turret.
+#[tokio::test]
+async fn passenger_seat_can_set_the_slave_turret_state() {
+    let server = server_with(data());
+    let mut a = TestClient::new(&server, 1, 1);
+    let mut b = TestClient::new(&server, 2, 2);
+    let pa = spawn_player(&server, &a, test_character(1, "Gunner", 100.0, 100.0), PA);
+    let pb = spawn_player(&server, &b, test_character(2, "Crew", 101.0, 100.0), PB);
+    a.conn.active_char = Some(pa.clone());
+    b.conn.active_char = Some(pb.clone());
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    let slave = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        SLAVE_TEMPLATE,
+        None,
+        false,
+        None,
+        None,
+    )
+    .expect("vehicle");
+    a.drain();
+    b.drain();
+    slaves::bind_slave(
+        &server,
+        &pa,
+        slave.obj_id,
+        attach_point::PASSENGER0,
+        slaves::attach_reason::SLAVE_BINDING,
+    );
+    a.drain();
+    b.drain();
+
+    send_turret_state(&mut a, &server, slave.obj_id, -0.1, 1.5).await;
+
+    let aim = {
+        let d = slave.data();
+        (d.turret_pitch, d.turret_yaw)
+    };
+    assert_eq!(aim, (-0.1, 1.5));
+    let fb = b.drain();
+    assert_eq!(body(&fb, sc::SCUnitModelPostureChangedPacket), {
+        let mut v = bc(slave.obj_id);
+        v.extend(turret_posture(-0.1, 1.5));
+        v
+    });
+}
+
+/// A viewer who arrives after the aim was set gets the stored posture in its `SCUnitState`.
+#[tokio::test]
+async fn late_viewer_receives_the_stored_turret_state() {
+    let server = server_with(cannon_data());
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let mut a = TestClient::new(&server, 1, 1);
+    let pa = spawn_player(&server, &a, test_character(1, "Owner", 100.0, 100.0), PA);
+    a.conn.active_char = Some(pa.clone());
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    let hull = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        SHIP_HULL,
+        None,
+        false,
+        None,
+        None,
+    )
+    .expect("hull");
+    let cannon = world
+        .slave(hull.data().attached_slaves[0])
+        .expect("cannon child");
+    let cannon_tl = u32::from(cannon.data().unit.tl_id);
+    a.drain();
+    slaves::bind_slave_by_tl(&server, &pa, cannon_tl);
+    a.drain();
+    send_turret_state(&mut a, &server, cannon.obj_id, 0.25, -0.5).await;
+    a.drain();
+
+    let mut viewer = TestClient::new(&server, 3, 3);
+    spawn_player(
+        &server,
+        &viewer,
+        test_character(3, "Viewer", 102.0, 100.0),
+        0x00F0_0003,
+    );
+    let fv = viewer.drain();
+    let state = unit_state_of(&fv, cannon.obj_id).expect("cannon SCUnitState for the late viewer");
+    let posture = turret_posture(0.25, -0.5);
+    assert!(
+        state.windows(posture.len()).any(|w| w == posture),
+        "stored turret posture missing from {:02x?}",
+        state
+    );
+}
+
+/// The real 1.2 cannon slaves accept and store turret aim: 10 / 97 / 93 / 100 are the
+/// `SLAVE_EQUIPMENT` ship-cannon children (models 117 / 1255 / 1277) and 77 the standalone
+/// equipment cannon (`slave_kind_id` 7), each with a `slave_mount_skills` firing mount.
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_cannon_slaves_store_the_turret_state() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let d = load_real(&db, &[]);
+    for id in [10u32, 97, 93, 100, 77] {
+        let t = d.slave_template(id).unwrap_or_else(|| panic!("slave {id}"));
+        assert!(
+            matches!(t.slave_kind, 7 | 8),
+            "slave {id} kind {}",
+            t.slave_kind
+        );
+        assert!(
+            d.slave_mount_skills.iter().any(|(_, s, _)| *s == id),
+            "slave {id} mount skill"
+        );
+    }
+    let server = real_server(d);
+    let mut a = TestClient::new(&server, 1, 1);
+    let pa = spawn_player(&server, &a, test_character(1, "Gunner", 100.0, 100.0), PA);
+    a.conn.active_char = Some(pa.clone());
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    a.drain();
+
+    for (i, id) in [10u32, 97, 93, 100, 77].into_iter().enumerate() {
+        let t = server
+            .game_data
+            .systems
+            .vehicles
+            .slave_template(id)
+            .expect("slave template")
+            .clone();
+        let mut s = crate::models::slave::Slave::new(0, t.id);
+        s.unit.tl_id = server.ids.tl.get_next_id().expect("tl") as u16;
+        s.unit.name = t.name.clone();
+        s.unit.model_id = t.model_id;
+        s.unit.level = t.level as u8;
+        s.summoner_id = pa.character_id;
+        s.summoner_obj_id = PA;
+        s.summoner_name = pa.data().unit.name.clone();
+        let obj_id = server.ids.object.get_next_id().expect("obj");
+        let slave = crate::world::Entity::new(obj_id, s);
+        world.spawn(&slave, &server.view_ctx());
+        slaves::bind_slave(
+            &server,
+            &pa,
+            slave.obj_id,
+            attach_point::DRIVER,
+            slaves::attach_reason::NEW_MASTER,
+        );
+        assert_eq!(
+            slave.data().attached_characters,
+            vec![(attach_point::DRIVER, PA)]
+        );
+        a.drain();
+        let pitch = 0.1 * (i as f32 + 1.0);
+        let yaw = -0.2 * (i as f32 + 1.0);
+        send_turret_state(&mut a, &server, slave.obj_id, pitch, yaw).await;
+        let (stored, tl) = {
+            let d = slave.data();
+            ((d.turret_pitch, d.turret_yaw), u32::from(d.unit.tl_id))
+        };
+        assert_eq!(stored, (pitch, yaw), "slave {id}");
+        slaves::unbind_slave(&server, &pa, tl, 0);
+        a.drain();
+    }
+}
