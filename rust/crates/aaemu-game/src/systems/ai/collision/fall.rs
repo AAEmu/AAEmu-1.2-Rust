@@ -11,6 +11,8 @@
 //! client's `state.fallVel` (+84) unchanged when it exceeds 20 m/s. That path equals the C#
 //! behaviour (client value, no cap) and is what runs with `Physics.FallDamageZoneCap = false`
 //! or without the collision service; the default applies the tracker's (path a) gate and cap.
+//! The "exceeds 20 m/s" part of that path applies everywhere ([`is_safe_fall_vel`], used by
+//! `skills::combat::do_fall_damage`); the C# had no such gate and healed on a small `fallVel`.
 //!
 //! The 1.2 client reports its own `fallVel` (u16) and the C# `DoFallDamage` uses it directly.
 //! With `Physics.FallDamageZoneCap` the world now runs the zone's check first:
@@ -32,6 +34,22 @@ pub const SPEED_FATAL: f32 = 63.25;
 pub const FALL_GRAVITY: f32 = 20.0;
 /// *(inferred)* client `fallVel` units per m/s (`32000 / 63.25`).
 pub const FALL_VEL_UNITS_PER_MPS: f32 = 32000.0 / 63.25;
+
+/// A client `fallVel` in m/s ([`FALL_VEL_UNITS_PER_MPS`], *(inferred)*).
+pub fn client_fall_mps(client_fall_vel: u16) -> f32 {
+    f32::from(client_fall_vel) / FALL_VEL_UNITS_PER_MPS
+}
+
+/// `true` when a client `fallVel` does not exceed [`SPEED_SAFE`]: such a landing deals no fall
+/// damage, whatever path it came by (`skills::combat::do_fall_damage` applies this gate to the
+/// client value that is forwarded in water, without the collision service and with
+/// `FallDamageZoneCap` off). The zone forwards a client fall velocity only above 20 m/s
+/// (`sub_39232570`) and its tracker reports `impactVel` only from 20 m/s up. No integer client
+/// value lands exactly on 20 m/s with the inferred scale (10118.6), so the last value that is
+/// still safe is `SPEED_SAFE * FALL_VEL_UNITS_PER_MPS` truncated (10118).
+pub fn is_safe_fall_vel(client_fall_vel: u16) -> bool {
+    client_fall_mps(client_fall_vel) <= SPEED_SAFE
+}
 /// A unit is on the ground when its z is within this of the ground height.
 pub const GROUND_EPSILON: f32 = 0.5;
 
@@ -126,7 +144,7 @@ impl FallTracker {
 /// (no damage), `Some(v)` = the client `fallVel` to use (capped at the zone's impact
 /// velocity).
 pub fn zone_fall_vel(client_fall_vel: u16, start_z: f32, land_z: f32) -> Option<u16> {
-    let client_mps = f32::from(client_fall_vel) / FALL_VEL_UNITS_PER_MPS;
+    let client_mps = client_fall_mps(client_fall_vel);
     let impact = impact_velocity(client_mps, start_z, land_z);
     if impact < SPEED_SAFE {
         return None;
@@ -155,6 +173,23 @@ mod tests {
         assert_eq!(v, (2000f32.sqrt() * FALL_VEL_UNITS_PER_MPS) as u16);
         // client slower than the height cap: unchanged
         assert_eq!(zone_fall_vel(12000, 200.0, 100.0), Some(12000));
+    }
+
+    #[test]
+    fn client_fall_vel_up_to_the_safe_speed_is_safe() {
+        // 20 m/s = 10118.6 client units: 10118 is the last safe value, 10119 the first unsafe.
+        let last_safe = (SPEED_SAFE * FALL_VEL_UNITS_PER_MPS) as u16;
+        assert_eq!(last_safe, 10118);
+        for v in [0, 1, 500, 8599, 8600, 10000, last_safe] {
+            assert!(is_safe_fall_vel(v), "{v}");
+        }
+        for v in [last_safe + 1, 12000, 32000, u16::MAX] {
+            assert!(!is_safe_fall_vel(v), "{v}");
+        }
+        assert!((client_fall_mps(32000) - SPEED_FATAL).abs() < 1e-3);
+        // the zone gate (100 m drop: no height cap) agrees at the boundary
+        assert_eq!(zone_fall_vel(last_safe, 200.0, 100.0), None);
+        assert!(zone_fall_vel(last_safe + 1, 200.0, 100.0).is_some());
     }
 
     #[test]

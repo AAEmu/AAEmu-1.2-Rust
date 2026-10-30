@@ -874,7 +874,9 @@ impl UnitBase {
 
     pub fn decrement_trigger_count(&mut self, buff_id: u32) {
         if let Some(c) = self.trigger_counts.get_mut(&buff_id) {
-            *c -= 1;
+            if *c > 0 {
+                *c -= 1;
+            }
         }
     }
 

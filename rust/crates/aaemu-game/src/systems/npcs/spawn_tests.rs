@@ -2888,19 +2888,37 @@ async fn real_data_main_world_spawn_files() {
     let c = m.counts();
     println!("counts (npc clones, event, doodad, transfer, gimmick, slave) = {c:?}");
 
-    // Independent re-count of the raw JSON (straightforward quadratic filters on a grid).
-    let raw = |name: &str| -> Vec<serde_json::Value> {
-        let text = std::fs::read_to_string(world_path.join(name)).unwrap();
-        crate::systems::npcs::json::parse(&text)
+    // Independent re-count of the raw JSON (straightforward quadratic filters on a grid). The
+    // loader reads every `<prefix>*.json` in reverse file-name order (`spawn_files`), so the
+    // re-count concatenates them the same way.
+    let raw = |prefix: &str| -> Vec<serde_json::Value> {
+        let mut files: Vec<(String, std::path::PathBuf)> = std::fs::read_dir(&world_path)
             .unwrap()
-            .as_array()
-            .unwrap()
-            .clone()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+                (name.starts_with(prefix) && name.ends_with(".json")).then(|| (name, e.path()))
+            })
+            .collect();
+        files.sort();
+        files.reverse();
+        files
+            .into_iter()
+            .flat_map(|(_, path)| {
+                let text = std::fs::read_to_string(path).unwrap();
+                crate::systems::npcs::json::parse(&text)
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .clone()
+            })
+            .collect()
     };
     let num = |v: &serde_json::Value, k: &str| {
         v.get(k).and_then(serde_json::Value::as_f64).unwrap_or(0.0)
     };
-    let npc_raw = raw("npc_spawns.json");
+    let npc_raw = raw("npc_spawns");
     type NpcGrid = std::collections::HashMap<(u32, i64, i64, i64), Vec<(f32, f32, f32)>>;
     let mut kept: NpcGrid = std::collections::HashMap::new();
     let mut fake_seen: HashSet<u32> = HashSet::new();
@@ -2980,7 +2998,7 @@ async fn real_data_main_world_spawn_files() {
     assert_eq!(stats.npc_spawners, clones);
     assert_eq!(c[0], clones);
 
-    let doodad_raw = raw("doodad_spawns.json");
+    let doodad_raw = raw("doodad_spawns");
     type Grid = std::collections::HashMap<(u32, i64, i64), Vec<(f32, f32, f32)>>;
     let mut grid = Grid::new();
     let (mut ddup, mut dmissing, mut dkept) = (0, 0, 0);
@@ -3024,9 +3042,9 @@ async fn real_data_main_world_spawn_files() {
     assert_eq!(stats.doodad_spawners, dkept);
     assert_eq!(c[2], dkept);
 
-    assert_eq!(stats.gimmick_entries, raw("gimmick_spawns.json").len());
-    assert_eq!(stats.transfer_entries, raw("transfer_spawns.json").len());
-    assert_eq!(stats.slave_entries, raw("slave_spawns.json").len());
+    assert_eq!(stats.gimmick_entries, raw("gimmick_spawns").len());
+    assert_eq!(stats.transfer_entries, raw("transfer_spawns").len());
+    assert_eq!(stats.slave_entries, raw("slave_spawns").len());
     assert!(stats.npc_spawners > 10_000);
     assert!(stats.doodad_spawners > 10_000);
     assert!(stats.gimmick_spawners > 0 && stats.transfer_spawners > 0 && stats.slave_spawners > 0);
@@ -3038,6 +3056,138 @@ async fn real_data_main_world_spawn_files() {
             stats.slave_spawners
         ]
     );
+}
+
+/// The quest-fill spawn file loads every entry and each entry lies on the 1.2 height at its
+/// position (the live server's `GeoDataMode` path: the navmesh first, the terrain as fallback),
+/// in an open zone. `AAEMU_COMPACT_DB=... AAEMU_GAME_PAK=D:\AA1.2\game_pak cargo test -p
+/// aaemu-game real_data_quest_fill_spawns_on_terrain -- --ignored --nocapture`.
+#[tokio::test]
+#[ignore]
+async fn real_data_quest_fill_spawns_on_terrain() {
+    let (Ok(db), Ok(pak)) = (
+        std::env::var("AAEMU_COMPACT_DB"),
+        std::env::var("AAEMU_GAME_PAK"),
+    ) else {
+        return;
+    };
+    let world_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("app/Data/Worlds/main_world");
+    let fill_path = world_path.join("doodad_spawns_quest_fill.json");
+    let text = std::fs::read_to_string(&fill_path).expect("quest fill spawn file");
+    let defs = crate::systems::npcs::doodad::spawner::parse_list(
+        &text,
+        crate::systems::npcs::doodad::spawner::DoodadSpawnerDef::from_json,
+    )
+    .expect("parse quest fill spawn file");
+    assert!(!defs.is_empty(), "the quest fill file is empty");
+
+    // The entries are loadable spawners: the loader keeps each one and the compact DB has its
+    // doodad template.
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let mut data = GameData::empty();
+    data.systems.npcs.npc_spawners = NpcSpawnerData::load_from(&conn).unwrap();
+    let npcs = id_set(&conn, "npcs");
+    let doodads = id_set(&conn, "doodad_almighties");
+    let sd = &data.systems.npcs.npc_spawners;
+    let (transfers, gimmicks, slaves) = (
+        sd.transfer_template_ids.clone(),
+        id_set(&conn, "gimmicks"),
+        sd.slave_template_ids.clone(),
+    );
+    let server = Arc::new(test_server_with(data));
+    let m = manager(&server);
+    let npc = |id: u32| npcs.contains(&id);
+    let doodad = |id: u32| doodads.contains(&id);
+    let transfer = |id: u32| transfers.contains(&id);
+    let gimmick = |id: u32| gimmicks.contains(&id);
+    let slave = |id: u32| slaves.contains(&id);
+    let exists = TemplateExists {
+        npc: &npc,
+        doodad: &doodad,
+        transfer: &transfer,
+        gimmick: &gimmick,
+        slave: &slave,
+    };
+    m.load_spawn_files(&server, &world_path, &exists).unwrap();
+
+    // The 1.2 height of a position: the live server's `HeightmapWorlds::get_height` with the
+    // world's geodata installed (WorldManager.GetHeight in GeoDataMode).
+    use crate::data::client_files::ClientFileManager;
+    use crate::systems::ai::geodata::bai::{BaiFiles, UsedAreaNames};
+    use crate::systems::ai::geodata::manager::AiGeoData;
+    use crate::systems::ai::geodata::ClientBaiFiles;
+    use crate::systems::npcs::heightmap::{HeightmapConfig, HeightmapWorlds};
+    use crate::systems::skills::controllers::Vec3;
+    let app = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("app");
+    let files = Arc::new(ClientFileManager::from_sources(&[pak], &app));
+    let worlds = WorldTemplates::load(&files, &app).expect("world templates");
+    let main = worlds
+        .get_world_template_by_name("main_world")
+        .expect("main_world");
+    let heights = Arc::new(HeightmapWorlds::new(
+        files.clone(),
+        &worlds,
+        HeightmapConfig {
+            heightmaps_enable: true,
+            geo_data_mode: true,
+            pre_load_terrain: false,
+        },
+    ));
+    let bai: Arc<dyn BaiFiles + Send + Sync> = Arc::new(ClientBaiFiles(files.clone()));
+    let geo = Arc::new(AiGeoData::new(
+        main,
+        true,
+        bai,
+        Arc::new(UsedAreaNames::default()),
+        None,
+    ));
+    let main_id = main.id;
+    let geo_cb = geo.clone();
+    heights.install_geo_data(Arc::new(move |template_id, x, y, z| {
+        if template_id == main_id {
+            geo_cb.get_height(Vec3::new(x, y, z))
+        } else {
+            0.0
+        }
+    }));
+
+    for def in &defs {
+        let unit_id = def.base.unit_id;
+        let p = def.base.position;
+        let spawners = m.get_doodad_spawners_by_unit_id(unit_id);
+        assert!(
+            spawners.iter().any(|s| {
+                (s.position.x - p.x).abs() < 0.01
+                    && (s.position.y - p.y).abs() < 0.01
+                    && (s.position.z - p.z).abs() < 0.01
+            }),
+            "quest fill doodad {unit_id} has no loaded spawn at {p:?}"
+        );
+        let zone = worlds.get_zone_id(Some(main), p.x, p.y);
+        let closed: String = conn
+            .query_row(
+                "SELECT closed FROM zones WHERE zone_key = ?1",
+                [zone],
+                |r| r.get(0),
+            )
+            .expect("zone row");
+        assert_eq!(
+            closed, "f",
+            "quest fill doodad {unit_id} is in closed zone {zone}"
+        );
+        let height = heights.get_height(zone, p.x, p.y, p.z);
+        assert!(
+            (p.z - height).abs() <= 3.0,
+            "quest fill doodad {unit_id} at Z {} is {:.3} m from the 1.2 height {height}",
+            p.z,
+            (p.z - height).abs()
+        );
+        println!(
+            "quest fill doodad {unit_id}: zone {zone} (open), Z {} vs height {height:.5}",
+            p.z
+        );
+    }
 }
 
 /// The authored Mistfiend (NPC 4227) cave placements of the shipped `main_world` files with the
