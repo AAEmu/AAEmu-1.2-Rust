@@ -4630,8 +4630,9 @@ async fn hull_passenger_cannot_aim_the_cannon_child() {
     assert!(!ops(&b.drain()).contains(&sc::SCUnitModelPostureChangedPacket));
 }
 
-/// The client's `39356990` sends at most every 200 ms and only on change; the server drops an
-/// unchanged aim and anything inside its 150 ms window.
+/// The client's `39356990` sends at most every 200 ms and only on change; the server never
+/// relays an unchanged aim and relays a changed aim inside its 150 ms window only from the
+/// slave tick.
 #[tokio::test]
 async fn turret_state_is_throttled_and_deduplicated() {
     let server = server_with(cannon_data());
@@ -4680,33 +4681,149 @@ async fn turret_state_is_throttled_and_deduplicated() {
         posture(0.25, -0.5)
     );
 
-    // Changed, but inside the window: dropped, and the stored aim stays the accepted one.
+    // Changed, but inside the window: stored at once, relayed by the tick after the window.
     send_turret_state(&mut a, &server, cannon.obj_id, 0.35, -0.6).await;
     assert!(!ops(&b.drain()).contains(&sc::SCUnitModelPostureChangedPacket));
     let aim = {
         let d = cannon.data();
         (d.turret_pitch, d.turret_yaw)
     };
-    assert_eq!(aim, (0.25, -0.5));
+    assert_eq!(aim, (0.35, -0.6));
 
     tokio::time::sleep(Duration::from_millis(160)).await;
-    send_turret_state(&mut a, &server, cannon.obj_id, 0.35, -0.6).await;
+    super::active_region_tick(&server);
     assert_eq!(
         body(&b.drain(), sc::SCUnitModelPostureChangedPacket),
         posture(0.35, -0.6)
     );
 
-    // Outside the window but unchanged: dropped.
+    // Outside the window but unchanged: dropped, and the tick does not relay it again.
     tokio::time::sleep(Duration::from_millis(160)).await;
     send_turret_state(&mut a, &server, cannon.obj_id, 0.35, -0.6).await;
     assert!(!ops(&b.drain()).contains(&sc::SCUnitModelPostureChangedPacket));
+    super::active_region_tick(&server);
+    assert!(!ops(&b.drain()).contains(&sc::SCUnitModelPostureChangedPacket));
 
-    // Outside the window and changed: relayed.
-    tokio::time::sleep(Duration::from_millis(160)).await;
+    // Outside the window and changed: relayed at once.
     send_turret_state(&mut a, &server, cannon.obj_id, 0.45, -0.7).await;
     assert_eq!(
         body(&b.drain(), sc::SCUnitModelPostureChangedPacket),
         posture(0.45, -0.7)
+    );
+}
+
+/// Two changed aims that reach the server 50 ms apart (network jitter on two client sends
+/// 200 ms apart): the second one is stored at once and the tick relays it after the window,
+/// so a gunner who stops there does not leave the viewers on the first aim.
+#[tokio::test]
+async fn turret_aim_inside_the_window_is_stored_and_relayed_by_the_tick() {
+    let server = server_with(cannon_data());
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let mut a = TestClient::new(&server, 1, 1);
+    let mut b = TestClient::new(&server, 2, 2);
+    let pa = spawn_player(&server, &a, test_character(1, "Owner", 100.0, 100.0), PA);
+    let pb = spawn_player(&server, &b, test_character(2, "Crew", 101.0, 100.0), PB);
+    a.conn.active_char = Some(pa.clone());
+    b.conn.active_char = Some(pb.clone());
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    let hull = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        SHIP_HULL,
+        None,
+        false,
+        None,
+        None,
+    )
+    .expect("hull");
+    let cannon = world
+        .slave(hull.data().attached_slaves[0])
+        .expect("cannon child");
+    let cannon_tl = u32::from(cannon.data().unit.tl_id);
+    a.drain();
+    b.drain();
+    slaves::bind_slave_by_tl(&server, &pa, cannon_tl);
+    a.drain();
+    b.drain();
+
+    send_turret_state(&mut a, &server, cannon.obj_id, 0.25, -0.5).await;
+    b.drain();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    send_turret_state(&mut a, &server, cannon.obj_id, 0.35, -0.6).await;
+
+    let aim = {
+        let d = cannon.data();
+        (d.turret_pitch, d.turret_yaw)
+    };
+    assert_eq!(aim, (0.35, -0.6), "the newest aim is stored at once");
+    assert!(!ops(&b.drain()).contains(&sc::SCUnitModelPostureChangedPacket));
+
+    tokio::time::sleep(Duration::from_millis(160)).await;
+    super::active_region_tick(&server);
+    let mut expected = bc(cannon.obj_id);
+    expected.extend(turret_posture(0.35, -0.6));
+    assert_eq!(
+        body(&b.drain(), sc::SCUnitModelPostureChangedPacket),
+        expected
+    );
+}
+
+/// A viewer who arrives while the newest aim still waits for the throttle window gets that
+/// newest aim in its `SCUnitState`, not the one the players around last received.
+#[tokio::test]
+async fn late_viewer_sees_the_newest_turret_aim() {
+    let server = server_with(cannon_data());
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let mut a = TestClient::new(&server, 1, 1);
+    let pa = spawn_player(&server, &a, test_character(1, "Owner", 100.0, 100.0), PA);
+    a.conn.active_char = Some(pa.clone());
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    let hull = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        SHIP_HULL,
+        None,
+        false,
+        None,
+        None,
+    )
+    .expect("hull");
+    let cannon = world
+        .slave(hull.data().attached_slaves[0])
+        .expect("cannon child");
+    let cannon_tl = u32::from(cannon.data().unit.tl_id);
+    a.drain();
+    slaves::bind_slave_by_tl(&server, &pa, cannon_tl);
+    a.drain();
+    send_turret_state(&mut a, &server, cannon.obj_id, 0.25, -0.5).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    send_turret_state(&mut a, &server, cannon.obj_id, 0.35, -0.6).await;
+    a.drain();
+
+    let mut viewer = TestClient::new(&server, 3, 3);
+    spawn_player(
+        &server,
+        &viewer,
+        test_character(3, "Viewer", 102.0, 100.0),
+        0x00F0_0003,
+    );
+    let fv = viewer.drain();
+    let state = unit_state_of(&fv, cannon.obj_id).expect("cannon SCUnitState for the late viewer");
+    let posture = turret_posture(0.35, -0.6);
+    assert!(
+        state.windows(posture.len()).any(|w| w == posture),
+        "newest turret posture missing from {:02x?}",
+        state
     );
 }
 
