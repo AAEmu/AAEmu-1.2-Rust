@@ -2549,7 +2549,9 @@ Additional world-side fixes from the same audit:
   wholly inside the model box is not reported on this path (the old containment rays are
   GM-only); land slaves use the terrain step and line of sight, not a vehicle-model box (only
   ship models are loaded); and without a collision world (tests, Physics off) player placement
-  falls back to the C# in-front placement.
+  falls back to the C# in-front placement. `Physics:SummonDiagnostics` (Rust only, default
+  off) keeps scanning all 120 candidates after the first valid one and logs the 1.2 model box
+  against the old hull envelope per candidate (debug only).
 Remaining packet stubs and table candidates are still subject to behavior review. Missing SQL
 mentions do not establish disuse (some names are selected dynamically); empty tables, client
 visuals and schema migration metadata do not imply missing server features. The 10.x reference

@@ -901,4 +901,10 @@ fn pwi_empty_query_does_not_return_the_previous_contacts() {
         "the empty query returned {} stale contacts",
         miss.contacts.len()
     );
+    // A hit after a hit starts a fresh pool: it returns its own contacts, not both queries'.
+    let again = r.w.pwi(&query(Vec3::new(32.5, 32.0, 0.75)));
+    assert_eq!(again.dist, again.contacts.len() as f32);
+    assert_eq!(again.contacts.len(), hit.contacts.len());
+    let twice = r.w.pwi(&query(Vec3::new(32.5, 32.0, 0.75)));
+    assert_eq!(twice.contacts.len(), hit.contacts.len());
 }
