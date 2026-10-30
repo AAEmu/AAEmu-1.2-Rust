@@ -59,6 +59,8 @@ mod death_once_tests;
 #[cfg(test)]
 mod effect_task_manager_tests;
 #[cfg(test)]
+mod exp_recovery_tests;
+#[cfg(test)]
 mod fall_damage_tests;
 #[cfg(test)]
 mod handler_permission_tests;

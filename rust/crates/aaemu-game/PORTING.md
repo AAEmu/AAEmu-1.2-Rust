@@ -2916,10 +2916,11 @@ two bots before the fix (a foreign `Mount` caster, an NPC-only skill and a far d
   data (`SkillData::is_client_sourced_skill`, `CLIENT_SKILL_SOURCES`): doodad funcs / uses / fake
   uses / conditional uses / skill hits, sphere doodad interacts, crafts, NPC interactions, slash
   commands, buff skills, quest accept / supply / component / timer skills, item use skills and the
-  housing / shipyard build steps. Mount skills, mount-attached (rider) skills and NPC AI skills
-  (`np_skills`) are deliberately absent. Possible over-blocking: a skill the 1.2 client casts that
-  none of these tables names (the retail rule is not confirmed); such a cast is refused with a
-  warning naming the skill id, so it is easy to add the table.
+  housing / shipyard build steps, plus the effect-based recovery skills below. Mount skills,
+  mount-attached (rider) skills and NPC AI skills (`np_skills`) are deliberately absent. Possible
+  over-blocking: a skill the 1.2 client casts that none of these tables names (the retail rule is
+  not confirmed); such a cast is refused with a warning naming the skill id, so it is easy to add
+  the table.
 - **Ability-tree skills need an active ability and a learned skill.** The C# `CSStartSkill` fell
   through to the catch-all above and cast any skill id. The 1.2 client marks unlearned and
   inactive-tree skills unusable in its UI: the action-slot UI carries `canUse` / `learned`
@@ -2940,6 +2941,28 @@ two bots before the fix (a foreign `Mount` caster, an NPC-only skill and a far d
   only needs a non-success `SCSkillStarted`). Not closed here: a `Mount` caster naming the player
   itself still runs the mount branch (the self allowance above), and a bind-on-pickup item caster
   can still name a different skill id (the legacy fireplace exception, narrowed for UCC effects).
+
+## Lost-experience prayer cast (2026-10-30)
+
+The player report "lost XP not given back at Nuia" was the skill-cast hardening above refusing the
+priest's prayer: the client shows "You don't have permission." (`NO_PERM`, 0x2D). The 1.2 client
+casts skill 17063 "Offer Prayer" (`recover_exp_effects` 1: labor plus a priest within 10 m) as a
+plain `CSStartSkill` from its own interaction window
+(`scriptsbin/x2ui/messageboximpl/message_box_from_npc_interaction.alb` -> `X2Priest:RecoverExp`);
+it appears in no `CLIENT_SKILL_SOURCES` table, and `skill_req_skills` is a peace-zone restriction
+list, not a grant. 26611 "Full XP Restoration" is a different skill: `recover_exp_effects` 5 has no
+priest and no labor (300 s cooldown), and it is the skill of the XP Restoration Scrolls (items
+33965 / 33966 / 34024-34029, `items.use_skill_id`), already client-sourced through `items`; the
+priest window never casts it. The C# `CSStartSkillPacket` cast every template skill in its fallback
+branch, so the prayer worked there. `SkillData` now also marks the skills whose `skill_effects` row
+points at an `effects.actual_type = 'RecoverExpEffect'` row with
+`recover_exp_effects.need_priest = 't'` (`CLIENT_SKILL_EFFECT_SOURCES`): data-driven, not an id
+allowlist, so it adds only 17063 and item skills stay item-driven, and the effect's own
+`need_priest` / `need_labor_power` checks are unchanged. Labor is now spent only when
+`need_labor_power` is set, and saturating at 0: the scroll used to subtract the level-based amount
+anyway and could wrap labor negative. `recoverable_exp` was already saved and loaded
+(`db_character.rs`), so it survives a relog; a second death overwrites it exactly as
+`CharacterCombat.DoDie` does (`RecoverableExp = round(LastExpLoss * 0.8)`).
 
 ## Ship repair timer and destroyed-vehicle HP (2026-10-20)
 

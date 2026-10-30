@@ -734,16 +734,25 @@ impl EconomyForSkills {
                 return;
             }
         }
-        // Use labor and recover exp (not ChangeLabor: no labor exp)
-        player.data().change_labor_power(-(needed as i16));
-        player.send(
-            crate::systems::skills::progress::SCCharacterLaborPowerChangedPacket {
-                amount: -needed,
-                action: 0,
-                point: 0,
-                step: 0,
-            },
-        );
+        // Use labor and recover exp (not ChangeLabor: no labor exp). Effects without a labor
+        // cost (the scrolls' 26611) restore only; the spend saturates at 0 so a stale read
+        // cannot drive the cached labor below 0.
+        if e.need_labor_power {
+            let spend = {
+                let mut c = player.data();
+                let spend = needed.min(i32::from(c.labor_power)).max(0);
+                c.change_labor_power(-(spend as i16));
+                spend
+            };
+            player.send(
+                crate::systems::skills::progress::SCCharacterLaborPowerChangedPacket {
+                    amount: -spend,
+                    action: 0,
+                    point: 0,
+                    step: 0,
+                },
+            );
+        }
         player.send(crate::systems::skills::progress::SCRecoverableExpPacket {
             obj_id: player.obj_id,
             recoverable_exp: 0,
