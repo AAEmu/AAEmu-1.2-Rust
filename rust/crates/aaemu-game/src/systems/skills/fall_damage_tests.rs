@@ -170,6 +170,13 @@ async fn a_fall_damage_multiplier_below_minus_100_percent_cannot_heal() {
     );
     assert_eq!(f.fall(20000), 0);
     assert_eq!(f.hp(), MAX_HP / 2);
+    // At the 5 % floor a cancelled fall neither stuns nor reports a hit.
+    let mut f = f;
+    f.set_hp(MAX_HP / 20);
+    f.client.drain();
+    assert_eq!(f.fall(20000), 0);
+    assert_eq!(f.hp(), MAX_HP / 20);
+    assert!(!f.client.drain_ops().contains(&sc::SCEnvDamagePacket));
 }
 
 #[tokio::test]

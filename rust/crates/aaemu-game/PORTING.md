@@ -1531,7 +1531,7 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `do_fall_damage` deals no damage (and sends no `SCEnvDamagePacket`) up to
   `pl_fallDamage_SpeedSafe` (20 m/s, `collision::fall::SPEED_SAFE`, the threshold of the zone's
   own fall check; the client unit is the inferred 32000 / 63.25 per m/s, so `fallVel <= 10118`
-  is safe and 10119 hurts), clamps the damage after the multiplier at 0, and keeps the C# curve
+  is safe and 10119 hurts), clamps the damage after the multiplier at 0 (a fall cancelled to 0 neither stuns nor sends a packet), and keeps the C# curve
   above the gate (`fallVel >= 32000` still kills, the 5 % floor and the stun are unchanged).
   `reduce_current_hp` treats a negative damage value as 0 (a WARN; every caller passes a
   positive value, heals use `effects::combat::heal`) and keeps the result in `[0, max_hp]` (a

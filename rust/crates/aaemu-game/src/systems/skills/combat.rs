@@ -1654,6 +1654,10 @@ pub fn do_fall_damage(server: &GameServer, unit: &WorldObject, fall_vel: u16) ->
     let min_hp_left = max_hp / 20;
     let max_dmg_left = hp - min_hp_left;
     fall_dmg = ((f64::from(fall_dmg) + f64::from(fall_dmg) * mul) as i32).max(0);
+    // A fall the multiplier cancelled is no fall: no stun of a unit at the 5 % floor, no packet.
+    if fall_dmg == 0 && fall_vel < 32000 {
+        return 0;
+    }
     if fall_vel >= 32000 {
         reduce_current_hp(server, unit, Some(unit), hp, KillReason::Damage);
     } else if fall_dmg < max_dmg_left {
