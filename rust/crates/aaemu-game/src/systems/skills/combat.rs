@@ -55,6 +55,11 @@ pub fn set_in_battle(server: &GameServer, obj: &WorldObject, value: bool) {
 }
 
 /// `Character.ReduceCurrentHp` / `Unit.ReduceCurrentHp(attacker, value, killReason)`.
+///
+/// Rust-only bounds: damage never heals. The C# applied `Hp = Max(Hp - value, 0)` to any value,
+/// so a negative one (a fall damage formula below zero) raised `Hp` past `MaxHp`. A negative
+/// `value` is no damage here (heals go through `effects::combat::heal`), and the result stays
+/// within `[0, max_hp]` (a unit whose `max_hp` is 0, i.e. not known, is not capped).
 pub fn reduce_current_hp(
     server: &GameServer,
     target: &WorldObject,
@@ -62,6 +67,13 @@ pub fn reduce_current_hp(
     mut value: i32,
     kill_reason: KillReason,
 ) {
+    if value < 0 {
+        tracing::warn!(
+            "negative damage {value} on {} treated as 0 ({kill_reason:?})",
+            target.obj_id()
+        );
+        value = 0;
+    }
     let cfg = server.systems.skills.config();
     if let Some(p) = target.as_player() {
         if cfg.god_mode {
@@ -108,6 +120,9 @@ pub fn reduce_current_hp(
         u.death_processed = false;
         let old_hp = u.hp;
         u.hp = (old_hp - value).max(0);
+        if u.max_hp > 0 {
+            u.hp = u.hp.min(u.max_hp);
+        }
         (old_hp, u.hp, u.mp, true)
     }) else {
         return;
@@ -1601,7 +1616,18 @@ pub fn buff_of(unit: &WorldObject, buff_id: u32) -> Option<Buff> {
 
 /// `Unit.DoFallDamage(fallVel)` (+ the `Character` override that ignores fall damage from
 /// `IgnoreFallDamageAccessLevel` up). Returns the damage dealt. Called by the movement code.
+///
+/// Rust-only guards (PORTING.md, `systems::skills (fall damage)`). The C# curve
+/// `MaxHp * (fallVel - 8600) / 15000` is negative for every client `fallVel` below 8600, so a
+/// small jump landing healed the unit, and `ReduceCurrentHp` did not stop it:
+/// * a fall that does not exceed `pl_fallDamage_SpeedSafe` (20 m/s, `fall::SPEED_SAFE`, the
+///   threshold of the zone's own fall check) deals no damage and sends no `SCEnvDamagePacket`;
+/// * the damage after `FallDamageMul` is never negative: the buff / item modifiers of that
+///   attribute run from -25 % to +50 % and stack, so the sum can go below -100 %.
 pub fn do_fall_damage(server: &GameServer, unit: &WorldObject, fall_vel: u16) -> i32 {
+    if crate::systems::ai::collision::fall::is_safe_fall_vel(fall_vel) {
+        return 0;
+    }
     if let Some(p) = unit.as_player() {
         let access = p.data().access_level;
         if access >= server.config.world.ignore_fall_damage_access_level {
@@ -1627,7 +1653,11 @@ pub fn do_fall_damage(server: &GameServer, unit: &WorldObject, fall_vel: u16) ->
         max_hp.min((max_hp as f32 * ((i32::from(fall_vel) - 8600) as f32 / 15000.0)) as i32);
     let min_hp_left = max_hp / 20;
     let max_dmg_left = hp - min_hp_left;
-    fall_dmg = (f64::from(fall_dmg) + f64::from(fall_dmg) * mul) as i32;
+    fall_dmg = ((f64::from(fall_dmg) + f64::from(fall_dmg) * mul) as i32).max(0);
+    // A fall the multiplier cancelled is no fall: no stun of a unit at the 5 % floor, no packet.
+    if fall_dmg == 0 && fall_vel < 32000 {
+        return 0;
+    }
     if fall_vel >= 32000 {
         reduce_current_hp(server, unit, Some(unit), hp, KillReason::Damage);
     } else if fall_dmg < max_dmg_left {
