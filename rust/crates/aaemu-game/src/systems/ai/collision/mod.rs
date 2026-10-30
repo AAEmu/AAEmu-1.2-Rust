@@ -50,6 +50,7 @@ mod tests;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
+use aaemu_physics::geometry::primitives::Primitive;
 use aaemu_physics::math::Vec3;
 use dashmap::DashMap;
 
@@ -62,6 +63,7 @@ use self::config::GeometryLevel;
 use self::models::ModelCache;
 use self::query::{mask, ray_flags, Hit, SweepHit};
 use self::terrain::TerrainSource;
+use self::world::Owner;
 use self::world::PhysWorld;
 
 /// `server.systems.ai.collision`.
@@ -561,6 +563,79 @@ pub fn overlaps_sphere(
     ensure_box(server, &pw, min, max);
     let mut st = pw.lock();
     Some(st.overlaps(query::sphere(c, radius), ent_types, 0xFFFF_FFFF, &[]))
+}
+
+/// Static overlap of a yaw-oriented box (`PrimitiveWorldIntersection`, zero sweep): the unique
+/// entities that intersect it, with their owners and world AABBs, so callers can ignore
+/// vegetation and tiny statics. `half` is `[beam/2, length/2, height/2]`; `yaw` turns the
+/// box's local X/Y axes like the ship's final yaw. `None` without the service.
+pub fn box_obstacles(
+    server: &GameServer,
+    instance_id: u32,
+    center: [f32; 3],
+    half: [f32; 3],
+    yaw: f32,
+    ent_types: u32,
+) -> Option<Vec<(Owner, [Vec3; 2])>> {
+    let pw = phys_world(server, instance_id)?;
+    let c = v(center);
+    let (s, co) = yaw.sin_cos();
+    let ext = Vec3::new(
+        co.abs() * half[0] + s.abs() * half[1],
+        s.abs() * half[0] + co.abs() * half[1],
+        half[2],
+    );
+    ensure_box(server, &pw, c - ext, c + ext);
+    let mut st = pw.lock();
+    let half = Vec3::new(half[0], half[1], half[2]);
+    let entities = st.overlap_entities(query::yaw_box(c, half, yaw), ent_types, 0xFFFF_FFFF, &[]);
+    Some(
+        entities
+            .into_iter()
+            .filter_map(|(e, bb)| st.owner(e).map(|o| (o, bb)))
+            .collect(),
+    )
+}
+
+/// Overlap of a yaw-oriented box with the collision terrain heightfield
+/// (`overlap_box_heightfield`). PWI does not report heightfield contacts, so the 1.2 model-box
+/// terrain part is tested directly against the terrain entity's primitive. `None` without the
+/// service; `Some(false)` when there is no terrain.
+pub fn box_overlaps_terrain(
+    server: &GameServer,
+    instance_id: u32,
+    center: [f32; 3],
+    half: [f32; 3],
+    yaw: f32,
+) -> Option<bool> {
+    let pw = phys_world(server, instance_id)?;
+    let st = pw.lock();
+    let ent = st.terrain_ent;
+    if ent.is_none() {
+        return Some(false);
+    }
+    let Some(part) = st.world.ent(ent).parts.first() else {
+        return Some(false);
+    };
+    let Some(Primitive::Heightfield(hf)) = part.pgeom.geom.primitive(0) else {
+        return Some(false);
+    };
+    let half = Vec3::new(half[0], half[1], half[2]);
+    let Primitive::Box(b) = query::yaw_box(v(center), half, yaw) else {
+        return Some(false);
+    };
+    Some(aaemu_physics::collision::pairs::box_pairs::overlap_box_heightfield(&b, &hf))
+}
+
+/// The owner and world AABB of an entity a query hit (for filtering small statics).
+pub fn entity_owner_bounds(
+    server: &GameServer,
+    instance_id: u32,
+    ent: aaemu_physics::world::EntIdx,
+) -> Option<(Owner, [Vec3; 2])> {
+    let pw = phys_world(server, instance_id)?;
+    let st = pw.lock();
+    Some((st.owner(ent)?, st.world.ent(ent).bbox))
 }
 
 /// `GetWaterLevel(pos)` (I3DEngine vt+568, 0x3013FCB0): the water-volume surface, else the
