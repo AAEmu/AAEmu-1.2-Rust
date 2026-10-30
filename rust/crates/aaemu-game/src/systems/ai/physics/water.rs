@@ -419,11 +419,13 @@ fn footprint_too_small(a: &WaterBodyArea) -> bool {
 }
 
 /// `WaterPointToWorld(cellOffset, filePoint, surfaceZ)`.
+///
+/// Deviation: the C# took a point outside `[-512, 2048]` for a world coordinate and skipped the
+/// cell offset, but every `object.dat` water point of every 1.2 world is cell-local (the largest
+/// |x|, |y| is 2 104). The 12 main_world volumes reaching past that band were torn into polygons
+/// spanning the map, and dry land under them read as deep water (players drowned on land).
 fn water_point_to_world(cell_offset: Vec3, p: [f32; 3], surface_z: f32) -> Vec3 {
-    let local_band = CELL_SIZE as f32 * 2.0;
-    let local = p[0] <= local_band && p[1] <= local_band && p[0] >= -512.0 && p[1] >= -512.0;
-    let fp = Vec3::new(p[0], p[1], p[2]);
-    let xy = if local { cell_offset + fp } else { fp };
+    let xy = cell_offset + Vec3::new(p[0], p[1], p[2]);
     Vec3::new(xy.x, xy.y, surface_z)
 }
 
@@ -841,5 +843,32 @@ mod tests {
         let w = WaterBodies::new(100.0);
         w.add_from_cell_data(None, 100.0, 0, 0, &ObjectsFile::read(&object_dat(&block)));
         assert_eq!(w.area_count(), 0);
+    }
+
+    /// A contour reaching past -512 / 2048 from its cell origin (the real volumes of
+    /// main_world cells 24-7 and 24-8 go to -1 111 / 2 104) stays one cell-local polygon, it is
+    /// not stretched to the world origin over dry land.
+    #[test]
+    fn contour_beyond_the_cell_stays_local() {
+        let contour = [
+            [-1100.0, -300.0, 0.0],
+            [50.0, -300.0, 0.0],
+            [50.0, 100.0, 0.0],
+            [-1100.0, 100.0, 0.0],
+        ];
+        let block = water_record(0, [0.0, 0.0, 278.0], [0.0, 0.0, 293.0], 15.0, &[], &contour);
+        let w = WaterBodies::new(100.0);
+        w.add_from_cell_data(None, 100.0, 24, 7, &ObjectsFile::read(&object_dat(&block)));
+        let areas = w.areas_snapshot();
+        assert_eq!(areas.len(), 1);
+        let b = areas[0].bounding_box;
+        assert_eq!(
+            (b.x, b.y, b.width, b.height),
+            (23476.0, 6868.0, 1150.0, 400.0)
+        );
+        assert!(w.is_water(Vec3::new(24000.0, 7000.0, 290.0)).is_some());
+        // dry land far outside the volume, under the old stretched polygon
+        assert!(w.is_water(Vec3::new(22450.0, 7100.0, 280.0)).is_none());
+        assert!(w.is_water(Vec3::new(5000.0, 3000.0, 285.0)).is_none());
     }
 }

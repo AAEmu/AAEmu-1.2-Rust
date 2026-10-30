@@ -693,3 +693,43 @@ async fn real_skill_obstacle_rays_refused_at_feet_level_clear_when_raised() {
         "rays {still_blocked:?} still hit {OBSTACLE_RAY_HEIGHT} m above both ends"
     );
 }
+
+/// Dry ground where Infinitb drowned on the shared server (quest area around (22 450, 7 100),
+/// ground z 272-282). Water volumes of cells 24-7 / 24-8 reaching past the old "local" band were
+/// stretched to the world origin and covered this land with 8-15 m of phantom water.
+#[test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+fn real_water_no_phantom_water_on_land() {
+    use crate::systems::ai::physics::water::WaterBodies;
+    use crate::systems::skills::controllers::Vec3 as WVec3;
+    let Some(e) = env() else { return };
+    let wh = e.hm.template(e.template_id).expect("main_world heightmap");
+    let water = WaterBodies::new(e.ocean);
+    for cx in 19..26 {
+        for cy in 4..10 {
+            let (x, y) = (cx as f32 * 1024.0 + 5.0, cy as f32 * 1024.0 + 5.0);
+            e.hm.world_height(e.template_id, x, y).unwrap();
+        }
+    }
+    water.sync_loaded_cells(wh, e.hm.files(), "main_world", e.ocean);
+    for a in water.areas_snapshot() {
+        let b = a.bounding_box;
+        assert!(
+            b.width < 4096.0 && b.height < 4096.0,
+            "{} spans {:?}",
+            a.name,
+            b
+        );
+    }
+    let mut wet = 0;
+    for ix in 0..60 {
+        for iy in 0..40 {
+            let (x, y) = (22350.0 + ix as f32 * 4.0, 7020.0 + iy as f32 * 4.0);
+            let ground = e.hm.world_height(e.template_id, x, y).unwrap();
+            if water.is_water(WVec3::new(x, y, ground + 0.1)).is_some() {
+                wet += 1;
+            }
+        }
+    }
+    assert_eq!(wet, 0, "dry ground samples read as water");
+}
