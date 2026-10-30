@@ -666,7 +666,9 @@ the x2game / cry3dengine decompiles (addresses below). Config `Physics` (`Config
   `fallVel`: no damage when `min(v, √(40·Δh)) < 20 m/s`, else the client value capped at that
   speed. The client value is converted with 32000 / 63.25 units per m/s *(inferred from the C#
   curve)*. Swimming / hanging / attached units keep the client value (the movement path
-  `sub_39232570` forwards it). `FallDamageZoneCap = false` restores the C#.
+  `sub_39232570` forwards it). `FallDamageZoneCap = false` restores the C#, except for the
+  safe-speed gate and the never-negative damage of `do_fall_damage` (see the `systems::skills
+  (fall damage)` bullet below), which apply to every client value.
 * Movement verification (off by default): reasons 0, 11, 12, 15–17 and 19 are logged (no consumer).
   Deck-relative movement is composed through the live parent before collision proxy, terrain,
   water and verification queries. A vanished supporting object uses the packet's auxiliary
@@ -1516,6 +1518,34 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   damaged again or HP is restored (resurrection, repair, load), so a repaired tower or a
   resurrected character still dies once per life. Tests:
   `systems::skills::death_once_tests` (two racing hits on a player / an NPC, looped).
+* systems::skills (fall damage, 2026-10-30): the C# `Unit.DoFallDamage` deals
+  `MaxHp * (fallVel - 8600) / 15000`, which is negative for every client `fallVel` from 1 to
+  8599, and `ReduceCurrentHp` applied `Hp = Max(Hp - value, 0)` to it (`Hp` is a plain property,
+  no `MaxHp` cap). So a small jump landing HEALED the unit, past `MaxHp`: in water, without a
+  physics world and with `FallDamageZoneCap` off the client value reaches `DoFallDamage`
+  unchanged (a bot was healed 237 hp by a jump landing in water). The C# carries
+  `TODO: Maybe adjust formula & need to detect water landing?`. The damage after `FallDamageMul`
+  could also go negative: the unit modifiers of that attribute (`unit_modifiers`, attribute 92)
+  are 8 buffs at -10 to -25 % and 3 items at -20 / -10 / +50 %, and they stack (the six -22 / -25
+  buffs alone add up to -135 %), which healed on every fall. Rust:
+  `do_fall_damage` deals no damage (and sends no `SCEnvDamagePacket`) up to
+  `pl_fallDamage_SpeedSafe` (20 m/s, `collision::fall::SPEED_SAFE`, the threshold of the zone's
+  own fall check; the client unit is the inferred 32000 / 63.25 per m/s, so `fallVel <= 10118`
+  is safe and 10119 hurts), clamps the damage after the multiplier at 0, and keeps the C# curve
+  above the gate (`fallVel >= 32000` still kills, the 5 % floor and the stun are unchanged).
+  `reduce_current_hp` treats a negative damage value as 0 (a WARN; every caller passes a
+  positive value, heals use `effects::combat::heal`) and keeps the result in `[0, max_hp]` (a
+  unit whose `max_hp` is 0 is not capped). Water: neither the C# nor the data has a water rule
+  (the C# only carries the TODO above); the 1.2 zone's tracker skips swimming landings but its
+  movement path forwards a client fall velocity above 20 m/s, so water gets the same gate as
+  land and no deep-water exemption is implemented. **Needs capture** (real client in the water):
+  the `fallVel` and stance it sends when diving from a height. **Open:** the 10.x wire scale
+  is `u16 / 65535 * 128` m/s (`D:/aa-re/zone/agent_proto/zone_protocol.md`, 512 per m/s,
+  safe up to 10239) against the inferred 505.9 used here (also by the zone cap), unverified for
+  1.2; 185 `buffs` rows carry `fall_damage_immune` (human-cannon shields, ghost form, float-up
+  skills, the "immune to fall damage" buff), loaded into `BuffTemplate` but honoured by neither
+  the C# nor Rust. Tests: `systems::skills::fall_damage_tests`, `collision::fall::tests`,
+  `collision::flow_tests::a_landing_in_water_forwards_the_client_value_and_never_heals`.
 * systems::ai: calls into an NPC's AI from outside its tick (skills, aggro, npcs hooks) are queued and run right after the current AI step instead of re-entering it (`manager::post`); the AI tick runs on a blocking thread every ~100 ms; behaviour instances are kept per AI and accessed by kind. `UpdateAggroHelp` reaching a helper NPC without an AI logs and continues (the C# throws a `NullReferenceException` that cuts the whole behaviour tick short). `Npc.OnDamageReceived` on an AI-less NPC does nothing (C# NRE).
 * systems::ai: deletion marks an AI removed without waiting for its state mutex; the current holder detaches its owner and discards queued callbacks. This permits an NPC skill to delete its own caster and avoids the spawn-lock / AI-lock inversion during despawn. The global tick skips an AI whose state mutex is busy and retries on the next tick, so one external AI call cannot freeze movement and combat for every NPC.
 * systems::ai physics: Jitter's narrow phase (`MprEpa`) and contact solver are replaced by a box-vs-heightmap-triangle SAT with one contact per triangle and sequential impulses (Jitter's default friction / bias); the integration itself is exact. One physics world per instance is created with the first ship (C# starts a thread per instance at boot). Add / remove / helm / driver changes go through the pending queue (next tick); hull damage, movement packets and transform writes are applied after the tick; readers use per-tick snapshots. Water is kept per world template and a cell's `object.dat` is ingested when the physics or a water query sees the cell loaded. A height lookup error counts as height 0 (the C# exception skips the rest of that ship's tick). A ship whose game object is gone is skipped. Ship–ship harpoon tow resolves an explicit hook basis among the ships simulated this tick.
