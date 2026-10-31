@@ -180,8 +180,13 @@ impl WorldInstance {
     /// Lock order: this guard is taken first; the grid and one object's data may be locked
     /// while it is held (`spawn` does). Nothing locks it while holding the grid, object data,
     /// a container or an item lock.
+    ///
+    /// The guard protects no data, so a panic under it must not poison every later placement
+    /// in this world: a poisoned lock is taken over.
     pub fn placement_guard(&self) -> MutexGuard<'_, ()> {
-        self.placement.lock().expect("placement poisoned")
+        self.placement
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// `GetRegionByPos`.
