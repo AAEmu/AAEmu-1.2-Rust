@@ -203,6 +203,11 @@ pub fn execute_interaction_with(
     let Some(class) = interaction_class(wi_type) else {
         return false;
     };
+    // Every direct world-interaction caller (e.g. the CSLootOpenBag recover-item path) goes
+    // through here; the shared 334 check keeps the same rule as the skill Interaction effect.
+    if crate::systems::skills::glider::refuse_interaction(server, caster) {
+        return false;
+    }
     let target_doodad = target.and_then(WorldObject::as_doodad);
     match wi_type {
         wi::CHECK_GROWTH => check_growth(server, caster, target_doodad, skill_id),

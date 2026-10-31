@@ -153,6 +153,44 @@ fn should_log_item_cast_refusal(character_id: u32, reason: &'static str) -> bool
     true
 }
 
+/// The 1.2 linked-item rule (`FUN_393925c0`): a glider skill needs the equipped back-slot
+/// glider (`item_backpacks.backpack_type_id = 2`), and an `Item` cast must be that item. The
+/// client converts the default glider skill 14901 into the equipped item's use skill, so a unit
+/// cast is only legitimate for the glider's own use skill or a linked glider UI skill.
+fn glider_cast_refused(
+    server: &GameServer,
+    player: &crate::world::PlayerRef,
+    skill: &super::data::SkillTemplate,
+    caster: SkillCaster,
+) -> bool {
+    use super::glider;
+    use crate::data::items::backpack_type;
+    if !glider::is_glider_skill(skill) {
+        return false;
+    }
+    // A fold ends the current flight, so it stays legitimate when the glider item already
+    // expired or was destroyed while the gliding buff is still active.
+    if glider::is_glider_fold_skill(skill)
+        && glider::has_gliding_buff(server, &crate::world::WorldObject::from(player))
+    {
+        return false;
+    }
+    let Some(glider) = glider::equipped_glider(server, player) else {
+        return true;
+    };
+    match caster {
+        SkillCaster::Item { item_id, .. } => item_id != glider.id,
+        _ => {
+            let own_skill = server
+                .game_data
+                .items
+                .template(glider.template_id)
+                .map(|t| t.use_skill_id);
+            skill.link_backpack_type_id != backpack_type::GLIDER && own_skill != Some(skill.id)
+        }
+    }
+}
+
 /// `CSStartSkillPacket.Read` behaviour.
 pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStartSkillPacket) {
     let Some(player) = conn.active_char.clone() else {
@@ -178,6 +216,30 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
             character = %player.data().unit.name,
             skill_id,
             "Client cast of an item-only skill without its item refused"
+        );
+        send_cast_refused(&player, skill_id, p.caster, target, p.skill_object);
+        return;
+    }
+    // 1.2 glider skills: the back slot must hold a glider, and an item cast must be that
+    // equipped item (`FUN_393925c0`; failure raises `must_equip_proper_item` 326 client-side).
+    // The client resolves the default glider skill 14901 into the equipped item's use skill.
+    if data
+        .systems
+        .skills
+        .skill(skill_id)
+        .is_some_and(|t| glider_cast_refused(server, &player, t, p.caster))
+    {
+        tracing::warn!(
+            character = %player.data().unit.name,
+            skill_id,
+            caster = p.caster.obj_id(),
+            "Client glider cast refused: no matching glider in the backpack slot"
+        );
+        crate::systems::economy::inventory::send_error_message(
+            &player,
+            crate::systems::economy::error_message::MUST_EQUIP_PROPER_ITEM,
+            0,
+            true,
         );
         send_cast_refused(&player, skill_id, p.caster, target, p.skill_object);
         return;
@@ -454,6 +516,17 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
         );
         result = r;
         value = v;
+    }
+    if result == skill_result::SUCCESS
+        && data
+            .systems
+            .skills
+            .skill(skill_id)
+            .is_some_and(|t| super::glider::is_glider_fold_skill(t))
+    {
+        // A fold ends the flight. This also covers a glider that expired / was destroyed
+        // mid-flight: the client falls cleanly instead of the fold being refused.
+        super::glider::end_flight(server, &me);
     }
     if result != skill_result::SUCCESS {
         tracing::debug!(skill_id, result, value, "Client skill failed");

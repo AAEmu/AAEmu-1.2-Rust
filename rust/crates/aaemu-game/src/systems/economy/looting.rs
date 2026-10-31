@@ -1212,6 +1212,10 @@ impl CSLootOpenBagPacket {
 
     fn run(self, server: &GameServer, conn: &mut GameConnection) {
         let Some(player) = active(conn) else { return };
+        // Opening a loot bag is a world interaction; the client refuses it while gliding.
+        if crate::systems::skills::glider::refuse_interaction(server, &WorldObject::from(&player)) {
+            return;
+        }
         let Some(world) = server.world.world_of(&WorldObject::from(&player)) else {
             return;
         };

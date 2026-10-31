@@ -28,6 +28,7 @@ pub mod effects;
 pub(crate) mod explode_buff_rules;
 pub mod ext;
 pub mod geometry;
+pub mod glider;
 pub(crate) mod ground_snap_rules;
 pub mod handlers;
 mod mount_authority;
@@ -62,6 +63,8 @@ mod effect_task_manager_tests;
 mod exp_recovery_tests;
 #[cfg(test)]
 mod fall_damage_tests;
+#[cfg(test)]
+mod glider_gate_tests;
 #[cfg(test)]
 mod handler_permission_tests;
 #[cfg(test)]
