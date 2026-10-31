@@ -162,6 +162,26 @@ pub fn house_tax_info(server: &GameServer, player: &PlayerRef, tl: u16) {
 // Build
 // ---------------------------------------------------------------------------------------------
 
+#[cfg(test)]
+static PLACEMENT_PAUSE: std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_placement_pause(pause: Option<std::sync::Arc<dyn Fn() + Send + Sync>>) {
+    *PLACEMENT_PAUSE.lock().expect("placement pause poisoned") = pause;
+}
+
+#[cfg(test)]
+fn run_placement_pause() {
+    let pause = PLACEMENT_PAUSE
+        .lock()
+        .expect("placement pause poisoned")
+        .clone();
+    if let Some(pause) = pause {
+        pause();
+    }
+}
+
 /// `Build(connection, designId, posX, posY, posZ, zRot, itemId, moneyAmount, ht,
 /// autoUseAaPoint)`.
 pub fn build(server: &GameServer, player: &PlayerRef, account_id: u32, p: &CSCreateHousePacket) {
@@ -203,22 +223,30 @@ pub fn build(server: &GameServer, player: &PlayerRef, account_id: u32, p: &CSCre
         send_error(player, err::BAG_INVALID_ITEM);
         return;
     }
-    if let Err(e) = super::placement::validate_house(server, player, template, p.x, p.y, p.z) {
-        send_error(player, e);
-        return;
-    }
-    let fort_owner =
-        match super::dominion::fort::placement_owner(server, player, template, p.x, p.y) {
-            Ok(owner) => owner,
-            Err(e) => {
-                send_error(player, e);
-                return;
-            }
-        };
     let Some(world) = server.world.world_of(&WorldObject::from(player)) else {
         send_error(player, err::INVALID_HOUSE_INFO);
         return;
     };
+    // The final placement check and the house's insert/spawn are one critical section:
+    // a second CSCreateHouse at the same spot must see this house. Sends below only queue
+    // on the connection and never block.
+    let placement_guard = world.placement_guard();
+    if let Err(e) = super::placement::validate_house(server, player, template, p.x, p.y, p.z) {
+        drop(placement_guard);
+        send_error(player, e);
+        return;
+    }
+    #[cfg(test)]
+    run_placement_pause();
+    let fort_owner =
+        match super::dominion::fort::placement_owner(server, player, template, p.x, p.y) {
+            Ok(owner) => owner,
+            Err(e) => {
+                drop(placement_guard);
+                send_error(player, e);
+                return;
+            }
+        };
     let quote = match super::dominion::tax::quote_at(
         server,
         char_account,
@@ -341,6 +369,7 @@ pub fn build(server: &GameServer, player: &PlayerRef, account_id: u32, p: &CSCre
         player.send(my_house_packet(server, &house));
     }
     manager::spawn_house(server, &house);
+    drop(placement_guard);
     update_tax_info(server, &house);
     if let Ok(Some(state)) = revenue {
         crate::systems::social::dominion::broadcast_snapshot(server, &state, false);

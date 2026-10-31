@@ -36,6 +36,8 @@ mod lifecycle_tests;
 #[cfg(test)]
 mod manager_tests;
 #[cfg(test)]
+mod placement_flow_tests;
+#[cfg(test)]
 mod tests;
 
 use std::sync::Arc;

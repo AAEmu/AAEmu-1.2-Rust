@@ -184,6 +184,12 @@ impl WorldInstance {
         self.placement.lock().expect("placement poisoned")
     }
 
+    /// Whether another caller holds the placement guard (tests: verify the critical section).
+    #[cfg(test)]
+    pub(crate) fn placement_guard_is_locked(&self) -> bool {
+        self.placement.try_lock().is_err()
+    }
+
     /// `GetRegionByPos`.
     pub fn region_by_pos(&self, x: f32, y: f32) -> Option<(i32, i32)> {
         let sx = (x / REGION_SIZE as f32) as i32;
