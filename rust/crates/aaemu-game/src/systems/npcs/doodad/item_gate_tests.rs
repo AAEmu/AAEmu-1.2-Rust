@@ -260,6 +260,42 @@ async fn real_compact_db_ids_match_the_gate_fixtures() {
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(fuels, vec![34583, 26548]);
+    // The same shape on a ship bar: row 345 -> mount skill 22287, rider 25632, 10 fuels.
+    let ship: (u32, u32, u32) = conn
+        .query_row(
+            "SELECT mount_skill_id, attach_point_id, skill_id FROM mount_attached_skills              WHERE id = 345",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(ship, (345, 1, 25632));
+    let ship_mount: u32 = conn
+        .query_row(
+            "SELECT skill_id FROM mount_skills WHERE id = 345",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ship_mount, 22287);
+    let ship_fuel: Vec<(u32, i16)> = conn
+        .prepare("SELECT item_id, amount FROM skill_reagents WHERE skill_id = 25632 ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(ship_fuel, vec![(34583, 10), (26548, 10)]);
+    let with_reagents: i64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT mas.id) FROM mount_attached_skills mas              JOIN skill_reagents r ON r.skill_id = mas.skill_id",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        with_reagents >= 45,
+        "only {with_reagents} rider skills with reagents"
+    );
     let link: (i32, u32) = conn
         .query_row(
             "SELECT link_equip_slot_id, link_backpack_type_id FROM skills WHERE id = 15307",

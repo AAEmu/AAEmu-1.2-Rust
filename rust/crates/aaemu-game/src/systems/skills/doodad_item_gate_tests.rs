@@ -42,6 +42,14 @@ const RIDER_SKILL: u32 = 20292;
 const MOUNT_SKILL_ROW: u32 = 190;
 const ECO_FUEL: u32 = 34583;
 const ECO_FUEL_UNBOUND: u32 = 26548;
+const FUEL_BUFF: u32 = 4841;
+const FUEL_EFFECT: u32 = 26272;
+
+const SHIP: u32 = 21;
+const SHIP_MOUNT_SKILL: u32 = 22287;
+const SHIP_RIDER_SKILL: u32 = 25632;
+const SHIP_MOUNT_ROW: u32 = 345;
+const SHIP_FUEL_COUNT: i32 = 10;
 
 fn doodad_data() -> GameData {
     let mut data = crate::systems::economy::tests::test_data();
@@ -140,10 +148,32 @@ fn wagon_data() -> GameData {
         data.items.templates.insert(id, ItemTemplate::plain(id, 20));
     }
     let skills = &mut data.systems.skills;
+    skills.add_buff(super::data::BuffTemplate {
+        id: FUEL_BUFF,
+        kind: 1,
+        duration: 480_000,
+        ..Default::default()
+    });
+    skills.add_effect(
+        EffectKind::BuffEffect,
+        EffectTemplate::Buff(super::data::effects::BuffEffect {
+            id: FUEL_EFFECT,
+            buff_id: Some(FUEL_BUFF),
+            chance: 100,
+            stack: 1,
+            ab_level: 0,
+        }),
+        FUEL_EFFECT,
+    );
     let mut mount = super::tests::skill_template(MOUNT_SKILL);
     mount.target_type = 0;
     mount.casting_time = 0;
     mount.damage_type_id = 0;
+    mount.effects.push(super::tests::skill_effect(
+        FUEL_EFFECT,
+        EffectKind::BuffEffect,
+        FUEL_EFFECT,
+    ));
     skills.add_skill(mount);
     let mut rider = super::tests::skill_template(RIDER_SKILL);
     rider.target_type = 0;
@@ -180,6 +210,50 @@ fn wagon_data() -> GameData {
             mount_skill_id: MOUNT_SKILL_ROW,
             attach_point_id: attach_point::DRIVER,
             skill_id: RIDER_SKILL,
+        });
+    data
+}
+
+/// The real ship speed boost row 345 (`mount_skills` 345 -> 22287, rider 25632 x10 fuel).
+fn ship_data() -> GameData {
+    let mut data = wagon_data();
+    let skills = &mut data.systems.skills;
+    let mut mount = super::tests::skill_template(SHIP_MOUNT_SKILL);
+    mount.target_type = 0;
+    mount.casting_time = 0;
+    mount.damage_type_id = 0;
+    skills.add_skill(mount);
+    let mut rider = super::tests::skill_template(SHIP_RIDER_SKILL);
+    rider.target_type = 0;
+    rider.casting_time = 0;
+    rider.damage_type_id = 0;
+    rider.first_reagent_only = true;
+    skills.add_skill(rider);
+    for (id, item) in [(20, ECO_FUEL), (21, ECO_FUEL_UNBOUND)] {
+        skills.skill_reagents.push(SkillItemAmount {
+            id,
+            skill_id: SHIP_RIDER_SKILL,
+            item_id: item,
+            amount: SHIP_FUEL_COUNT as i16,
+        });
+    }
+    data.systems.vehicles.mount_skills.push(MountSkills {
+        id: SHIP_MOUNT_ROW,
+        name: "Ship boost".into(),
+        skill_id: SHIP_MOUNT_SKILL,
+    });
+    data.systems
+        .vehicles
+        .slave_mount_skills
+        .push((345, SHIP, SHIP_MOUNT_ROW));
+    data.systems
+        .vehicles
+        .mount_attached_skills
+        .push(MountAttachedSkills {
+            id: 345,
+            mount_skill_id: SHIP_MOUNT_ROW,
+            attach_point_id: attach_point::DRIVER,
+            skill_id: SHIP_RIDER_SKILL,
         });
     data
 }
@@ -493,7 +567,15 @@ struct WagonFixture {
 }
 
 fn wagon_fixture() -> WagonFixture {
-    let server = Arc::new(test_server_with(wagon_data()));
+    vehicle_fixture(wagon_data(), WAGON)
+}
+
+fn ship_fixture() -> WagonFixture {
+    vehicle_fixture(ship_data(), SHIP)
+}
+
+fn vehicle_fixture(data: GameData, slave_template: u32) -> WagonFixture {
+    let server = Arc::new(test_server_with(data));
     server.set_self();
     super::bind(&server);
     crate::systems::economy::bridges::install(&server);
@@ -507,7 +589,7 @@ fn wagon_fixture() -> WagonFixture {
     );
     client.conn.active_char = Some(player.clone());
     let instance = server.world.world(0).unwrap();
-    let mut wagon = Slave::new(WAGON_OBJ, WAGON);
+    let mut wagon = Slave::new(WAGON_OBJ, slave_template);
     wagon.summoner_id = 1;
     wagon.summoner_obj_id = player.obj_id;
     wagon.unit.transform.set_xyz(100.0, 100.0, 100.0);
@@ -556,6 +638,7 @@ async fn wagon_eco_fuel_without_the_item_is_refused_at_cast_start() {
     assert_eq!(started_value(&frames, MOUNT_SKILL), Some(ECO_FUEL));
     assert!(!frames.iter().any(|(op, _)| *op == sc::SCSkillFiredPacket));
     assert!(f.player.data().unit.skill_state.skill_task.is_none());
+    assert!(!f.wagon.data().unit.buffs.check_buff(FUEL_BUFF));
     assert_eq!(Inv::of(&f.player).items_count(ECO_FUEL, -1), 0);
     assert_eq!(Inv::of(&f.player).items_count(ECO_FUEL_UNBOUND, -1), 0);
     let _ = WorldObject::from(&f.wagon);
@@ -581,6 +664,58 @@ async fn wagon_eco_fuel_with_the_item_cast_and_consumes_it() {
     );
     assert!(
         started_results(&frames, RIDER_SKILL).is_empty(),
+        "{frames:x?}"
+    );
+    assert!(f.wagon.data().unit.buffs.check_buff(FUEL_BUFF));
+    assert_eq!(Inv::of(&f.player).items_count(ECO_FUEL, -1), 0);
+}
+
+fn ship_cast() -> CSStartSkillPacket {
+    CSStartSkillPacket {
+        skill_id: SHIP_MOUNT_SKILL,
+        caster: SkillCaster::Mount {
+            obj_id: WAGON_OBJ,
+            mount_skill_template_id: SHIP_MOUNT_ROW,
+        },
+        target: SkillCastTarget::Unit(WAGON_OBJ),
+        flag: 0,
+        skill_object: SkillObject::None,
+    }
+}
+
+/// A ship bar entry (row 345 -> 22287, rider 25632 x10 fuel) uses the same pre-check.
+#[tokio::test]
+async fn ship_speed_boost_without_fuel_is_refused_before_the_slave_cast() {
+    let mut f = ship_fixture();
+    start_skill(&f.server, &mut f.client.conn, ship_cast());
+    let frames = f.client.drain();
+    assert_eq!(
+        started_results(&frames, SHIP_MOUNT_SKILL),
+        vec![0x24],
+        "{frames:x?}"
+    );
+    assert_eq!(started_value(&frames, SHIP_MOUNT_SKILL), Some(ECO_FUEL));
+    assert!(!frames.iter().any(|(op, _)| *op == sc::SCSkillFiredPacket));
+    assert_eq!(Inv::of(&f.player).items_count(ECO_FUEL, -1), 0);
+}
+
+#[tokio::test]
+async fn ship_speed_boost_with_fuel_consumes_ten() {
+    let mut f = ship_fixture();
+    for slot in 0..SHIP_FUEL_COUNT {
+        give_at(
+            &f.server,
+            &f.player,
+            PLAYER_OBJ as u64 * 100 + 20 + slot as u64,
+            ECO_FUEL,
+            slot_type::INVENTORY,
+            slot,
+        );
+    }
+    start_skill(&f.server, &mut f.client.conn, ship_cast());
+    let frames = f.client.drain();
+    assert!(
+        !started_results(&frames, SHIP_MOUNT_SKILL).contains(&0x24),
         "{frames:x?}"
     );
     assert_eq!(Inv::of(&f.player).items_count(ECO_FUEL, -1), 0);

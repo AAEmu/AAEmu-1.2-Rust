@@ -470,6 +470,31 @@ pub fn use_skill(
     skill_object: Option<SkillObject>,
     bypass_gcd: bool,
 ) -> (u8, u32) {
+    use_skill_impl(
+        server,
+        skill,
+        caster,
+        caster_caster,
+        target_caster,
+        skill_object,
+        bypass_gcd,
+        false,
+    )
+}
+
+/// [`use_skill`] with a check-only mode: every refusal is returned exactly as a real use would
+/// return it, but a passing check stops before the first cast-state mutation.
+#[allow(clippy::too_many_arguments)]
+fn use_skill_impl(
+    server: &GameServer,
+    skill: &SkillRef,
+    caster: &WorldObject,
+    caster_caster: SkillCaster,
+    target_caster: &mut SkillCastTarget,
+    skill_object: Option<SkillObject>,
+    bypass_gcd: bool,
+    dry_run: bool,
+) -> (u8, u32) {
     if !caster.is_unit() {
         tracing::debug!(
             skill_id = skill.id,
@@ -672,6 +697,9 @@ pub fn use_skill(
             );
             return (skill_result::COOLDOWN_TIME, 0);
         }
+    }
+    if dry_run {
+        return (skill_result::SUCCESS, 0);
     }
     if let Some(task) = active_task {
         if let SkillTaskKind::EndChanneling { channel_doodad } = task.kind {
@@ -2605,6 +2633,27 @@ pub fn unit_use_skill(
     skill_id: u32,
     target: &WorldObject,
 ) -> u8 {
+    unit_use_skill_impl(server, unit, skill_id, target, false).0
+}
+
+/// The checks [`unit_use_skill`] performs for `skill_id`, without casting or changing the unit.
+/// Returns the first refusal exactly as the real use would return it.
+pub fn unit_use_skill_check(
+    server: &GameServer,
+    unit: &WorldObject,
+    skill_id: u32,
+    target: &WorldObject,
+) -> (u8, u32) {
+    unit_use_skill_impl(server, unit, skill_id, target, true)
+}
+
+fn unit_use_skill_impl(
+    server: &GameServer,
+    unit: &WorldObject,
+    skill_id: u32,
+    target: &WorldObject,
+    dry_run: bool,
+) -> (u8, u32) {
     let Some(t) = server.game_data.systems.skills.skill(skill_id).cloned() else {
         // Retail data has quest components pointing at skills without a `skills` row (see
         // PORTING.md); warn once per id, repeats go to debug.
@@ -2622,7 +2671,7 @@ pub fn unit_use_skill(
         } else {
             tracing::debug!("UseSkill: skill {skill_id} has no template (dangling retail reference), skipped; caster {caster} target {target}");
         }
-        return skill_result::INVALID_SKILL;
+        return (skill_result::INVALID_SKILL, 0);
     };
     let skill = SkillRun::new(t, 1);
     let mut sct = if target.as_doodad().is_some() {
@@ -2630,7 +2679,7 @@ pub fn unit_use_skill(
     } else {
         SkillCastTarget::Unit(target.obj_id())
     };
-    use_skill(
+    use_skill_impl(
         server,
         &skill,
         unit,
@@ -2638,8 +2687,8 @@ pub fn unit_use_skill(
         &mut sct,
         None,
         true,
+        dry_run,
     )
-    .0
 }
 
 /// `SkillManager.GetAttackDelay(template, caster, includeCooldown, additionalDelay)`.

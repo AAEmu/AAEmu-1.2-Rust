@@ -3510,9 +3510,14 @@ line of defence for an item that changes during the cast.
 
 The Farm Wagon's eco fuel is not a doodad func: skill 20291 (its bar entry, mount skill row 190)
 carries the rider skill 20292 (`mount_attached_skills`, attach point 1), whose `skill_reagents`
-are one of 26548 / 34583. The mount branch of `CSStartSkill` now pre-checks those reagents with the
-rider's template before using the mount skill, so the wagon refuses the press instead of playing
-the cast and failing when the rider skill runs. `validation::check_reagents` returns the missing
-item id as the `NEED_REAGENT` value for the same client text. The same gate covers every vehicle
-bar skill with an attached rider skill; only its reagents are pre-checked (mana / labor stay with
-the rider's own cast).
+are one of 26548 / 34583. The mount branch of `CSStartSkill` now runs the rider skill's **full**
+`Skill.Use` check (`skill::unit_use_skill_check`, the check-only mode of `use_skill`) before the
+slave skill casts, and refuses the press with the rider's result/value when it fails. That covers
+reagents, requirements, cooldown and the other checks the late `unit_use_skill` call would apply,
+so the missing fuel no longer leaves buff 4841 behind and no slave animation is played. With fuel
+the rider skill still runs after the mount skill and consumes the item. The same gate covers every
+`mount_attached_skills` row with reagents (the ship speed boosts 25632/22459/22449/22451/22450/
+22449, the cannon projectile rider skills, ...), not only the wagon. The 10.x decompile has
+`mount_skills.check_attach_point` / `must_use_check` and the `mount_attached_skills` loader
+(`x2game-dev_dedicate.dll.c:2614999-2615210`), consistent with a pre-check, but its runtime
+consumer was not located; the 1.2 ordering/result is therefore not proven there.
