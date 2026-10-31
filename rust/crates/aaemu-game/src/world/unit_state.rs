@@ -320,6 +320,9 @@ pub struct NetUnitSpec<'a> {
     pub posture: ModelPostureType,
     /// `Npc.AnimActionId` (`Unit.ModelPosture` animation override).
     pub anim_action_id: u32,
+    /// Turret aim written by `ModelPostureType::TurretState` (slaves; 0 for the other kinds).
+    pub turret_pitch: f32,
+    pub turret_yaw: f32,
     pub race_gender: u8,
 }
 
@@ -374,6 +377,8 @@ pub fn write_model_posture(
     posture: ModelPostureType,
     has_loot_left: bool,
     anim_action_id: u32,
+    turret_pitch: f32,
+    turret_yaw: f32,
 ) {
     s.write_u8(posture as u8).write_bool(has_loot_left);
     match posture {
@@ -396,7 +401,7 @@ pub fn write_model_posture(
                 .write_bool(false);
         }
         ModelPostureType::TurretState => {
-            s.write_f32(0.0).write_f32(0.0); // pitch, yaw
+            s.write_f32(turret_pitch).write_f32(turret_yaw);
         }
         ModelPostureType::None => {}
     }
@@ -503,7 +508,14 @@ pub fn write_net_unit(
     } else {
         s.write_i8(-1);
     }
-    write_model_posture(s, spec.posture, unit.has_loot_left, spec.anim_action_id);
+    write_model_posture(
+        s,
+        spec.posture,
+        unit.has_loot_left,
+        spec.anim_action_id,
+        spec.turret_pitch,
+        spec.turret_yaw,
+    );
     s.write_u8(unit.active_weapon);
     s.write_u8(0).write_i32(0); // learnedSkillCount, learnedBuffCount
     let (roll, pitch, yaw) = t.roll_pitch_yaw_sbytes();
@@ -569,6 +581,8 @@ pub fn npc_unit_state(
         bonding_obj_id: 0,
         posture: npc.model_posture_type(),
         anim_action_id: npc.anim_action_id,
+        turret_pitch: 0.0,
+        turret_yaw: 0.0,
         race_gender: npc.race_gender(),
     };
     let p = net_unit_packet(obj_id, &mut npc.unit, &spec, owner_name, now_ms);
@@ -600,6 +614,8 @@ pub fn slave_unit_state(
         bonding_obj_id: slave.bonding_obj_id,
         posture: slave.model_posture_type(),
         anim_action_id: 0,
+        turret_pitch: slave.turret_pitch,
+        turret_yaw: slave.turret_yaw,
         race_gender: slave.race_gender(),
     };
     let p = net_unit_packet(obj_id, &mut slave.unit, &spec, owner_name, now_ms);
@@ -627,6 +643,8 @@ pub fn house_unit_state(
         bonding_obj_id: 0,
         posture: house.model_posture_type(),
         anim_action_id: 0,
+        turret_pitch: 0.0,
+        turret_yaw: 0.0,
         race_gender: house.race_gender(),
     };
     let p = net_unit_packet(obj_id, &mut house.unit, &spec, owner_name, now_ms);
@@ -655,6 +673,8 @@ pub fn transfer_unit_state(
         bonding_obj_id: 0,
         posture: transfer.model_posture_type(),
         anim_action_id: 0,
+        turret_pitch: 0.0,
+        turret_yaw: 0.0,
         race_gender: transfer.race_gender(),
     };
     net_unit_packet(obj_id, &mut transfer.unit, &spec, owner_name, now_ms)
@@ -680,6 +700,8 @@ pub fn mate_unit_state(
         bonding_obj_id: 0,
         posture: mate.model_posture_type(),
         anim_action_id: 0,
+        turret_pitch: 0.0,
+        turret_yaw: 0.0,
         race_gender: mate.race_gender(),
     };
     let p = net_unit_packet(obj_id, &mut mate.unit, &spec, owner_name, now_ms);
@@ -705,6 +727,8 @@ pub fn shipyard_unit_state(
         bonding_obj_id: 0,
         posture: shipyard.model_posture_type(),
         anim_action_id: 0,
+        turret_pitch: 0.0,
+        turret_yaw: 0.0,
         race_gender: shipyard.race_gender(),
     };
     net_unit_packet(obj_id, &mut shipyard.unit, &spec, owner_name, now_ms)

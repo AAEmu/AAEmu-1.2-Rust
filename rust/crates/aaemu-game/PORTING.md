@@ -438,6 +438,7 @@ Cross-subsystem: mates are despawned on dungeon entry and `PlayerCanEnter` check
 | `CSMoveUnitPacket` vehicle branches (ship request, vehicle, mate xp, riding, standing on objects) | `systems/vehicles/movement.rs`, `world/session.rs` | done | Ship-deck support accepts the actor standing flag independently of the movement header, preserving valid GC-relative positions and the current-parent sentinel during controller updates. This corrects the mirrored C# header-only attachment test; clearing both support flags still disembarks. A unit no longer hanging (`HangingFromObject` unset) loses its sticky parent unless it is boarded on a transfer. |
 | `BaseUnit.GetDistanceTo` for shipyard targets (skill range check, `Skill.cs` `max_range`) | `systems/skills/geometry.rs` (`distance_to`), `systems/vehicles/shipyards.rs` (`shipyard_radius`) | deviation | **Deviation:** the C# measured skill range to the shipyard's center point (shipyard models are prefab models without an actor radius, so `ModelSize` was 0), which made the shipyard build skills (`min_range 0`, `max_range 4`) unusable anywhere but the exact center of a drydock ("Target is too far"). The Rust subtracts the shipyard template's `build_radius * Scale`, like the house `GardenRadius` rule. |
 | Mate / slave / transfer / shipyard C2G and G2C packets | `systems/vehicles/packets.rs` | done | 18 C->S, 16 S->C (byte-exact tests). `CSChangeSlaveTargetPacket` has no 1.2 opcode (0xfff). |
+| `CSTurretStatePacket` 0x036 (turret / cannon aim) | `packets/c2g_misc.rs`, `systems/vehicles/slaves.rs` (`set_turret_state`), `world/unit_state.rs`, `systems/npcs/npc/packets.rs` | deviation / capture-pending | **Deviation:** the C# `CSTurretStatePacket.Read` only logged the three fields and `Unit.ModelPosture` always wrote pitch/yaw 0, so no client ever saw a crewed cannon turn. The Rust decodes `bc unitId, f32 pitch, f32 yaw` (1.2 client writer `397c7640`), accepts it only from a character attached to any seat of the slave named by `unitId`, stores it on that slave and relays the same values to the other players in range as `SCUnitModelPostureChanged` 0x103 posture type 8 (`u8 type, bool isLooted, f32 pitch, f32 yaw`; client reader `397bda20` -> `397b1df0` applies it through `390bdec0`). A viewer that arrives later gets the stored aim in the slave's `SCUnitState` posture block. The aim is kept in the raw model-frame radians the client sent; the client producers already clamp / wrap them with the `vehicle_models` turret limits. The 1.2 client itself sends `CSTurretState` at most once per 200 ms and only when the aim changes (`39356990`: `DAT_3a169940 + 200 <= now`), and the server additionally never relays an unchanged aim and delays a changed aim that arrives less than 150 ms after the last relayed one for that slave; the newest aim is always stored on the slave at once (a late viewer's `SCUnitState` reads it) and the slave tick relays a pending aim once the window ends, so a final update inside the window is not lost. The stored aim is not cleared when the gunner leaves the seat, so late viewers keep seeing the last posture (as the two-client live run showed). **Capture-pending (S12):** the 1.2 *server* side is not proven. Capture with two clients: A mans a ship cannon (GM `/slave spawn 22` spawns a hull with eight cannons; `/slave spawn 25` a ground cannon) and pans / fires while B records 0x103; confirm whether the original server relays the aim, the packet's unit id (cannon child vs hull vs gunner), whether the gunner also receives the echo, that the angles are model-local radians and not clamped server-side, and whether a passenger seat (tank gunner, point 2) is a valid aim path. Record the result here and in the S12 research. |
 | Hooks / physics | `systems/vehicles/{hooks,ship_physics}.rs` | done | `VehicleItemHooks` (`EndCraft`, economy). Ship physics and water call `systems::ai::physics` directly (`AddShip` / `RemoveShip`, helm request, driver seat, `GetWaterSurface` / `IsWater`); `ShipPhysicsHooks` (harpoon lines / tension / lifetime, `Throttle` / `Steering` after a move) and the radar ship lists are installed here. The npcs / social hooks call the mate / slave / dismount functions directly. |
 #### Summon replacement and retained cargo (2026-10-25)
 
@@ -2595,18 +2596,28 @@ Additional world-side fixes from the same audit:
   wins. A candidate passes when (ships) the collision terrain is not above the water surface at
   x/y, (land) the terrain is at most 10 m above the player, a ray from the player's eyes to the
   candidate hits nothing (mask `SOLID_TERRAIN` 0x107, flags 0x8F; ships end at the water surface,
-  land at the candidate's own ground + 1 m, i.e. the 1.2 eye-to-eye rule), the model box (the
+  land at the candidate's terrain point lifted by 0.2 m), the model box (the
   unclipped model bbox from the prefab collision proxies; the inertia mass box of the ship model
   when the model reference is unavailable, e.g. no client assets) rotated to player yaw + 90
   degrees overlaps no blocking static and no terrain heightfield, and the 3D player-to-candidate
-  distance is at most 80 m. The land candidate z is the static-aware ground (`ground_height_or`:
-  bridges, plazas, quays, then the heightmap), and the final spawn re-grounds a positioned land
-  slave the same way, so a vehicle on a bridge or quay does not sink to the terrain below it.
+  distance is at most 80 m. The land candidate z, its distance check, the model box and the
+  final spawn (search, `SummonPos` validation, post-wait recheck and re-ground) are all the
+  terrain heightfield only (`GetTerrainElevation`, vtable `+0x1fc`), never statics: a deck,
+  bridge or quay above the candidate's terrain lies between the eyes and the terrain point, so
+  the 1.2 rule refuses the summon (error 100) instead of placing the vehicle on the floor. The
+  0.2 m lift of the land ray end is a deviation: 1.2 ends the ray exactly at the terrain point
+  and the lift avoids a float graze between the ray end and the heightfield (the Bevy client
+  port lifts its end the same way).
   The box is an oriented `PrimitiveWorldIntersection` query (`box_obstacles`) for statics plus
   `box_overlaps_terrain` for the heightfield (the PWI box query does not report heightfield
   contacts); this 1.2 path has no +1 m top margin, no terrain point sampling and no
   containment rays. Statics with a world AABB under 2 m (buoys, bollards, mooring posts) and
-  vegetation are ignored. If none of the 120 passes, the summon is refused with `SCErrorMsg`
+  vegetation are ignored. The box query batches: the engine's per-thread contact pool holds 64
+  records and 2040 border points and silently drops further parts, so a saturated round is
+  repeated with the entities already seen in the skip list (the batch box stays the client's exact
+  box; the caller's identical-box query cache is invalidated before every round with
+  `World::invalidate_box_query_cache`) for at most 8
+  rounds; a still-saturated query reports the spot as blocked. If none of the 120 passes, the summon is refused with `SCErrorMsg`
   100 (`SLAVE_SPAWN_SHIP_NEED_MORE_SPACE`), the summon item is not committed, the skill
   cooldown and GCD are refunded — on the server and on the client with the same
   `SCSkillCooldownResetPacket` the skill system uses — (also when a client `SummonPos` placement

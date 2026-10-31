@@ -175,15 +175,20 @@ impl WorldState {
     }
 
     /// Static overlap contacts of `prim`: the unique entities that intersect it and their
-    /// world AABBs. All contacts are collected (no stop at the first part), so the caller can
-    /// ignore vegetation and tiny statics.
+    /// world AABBs, plus whether the contact query was saturated. All contacts are collected
+    /// (no stop at the first part), so the caller can ignore vegetation and tiny statics.
+    ///
+    /// The per-thread contact pool holds 64 records and 2040 border points; the engine drops
+    /// further parts silently once it is full, so `saturated` means the returned entities are
+    /// not necessarily all that intersect. Callers must re-query with the seen entities in
+    /// `skip` (and refuse the spot if it never becomes complete).
     pub fn overlap_entities(
         &mut self,
         prim: Primitive,
         ent_types: u32,
         geom_flags_any: u32,
         skip: &[EntIdx],
-    ) -> Vec<(EntIdx, [Vec3; 2])> {
+    ) -> (Vec<(EntIdx, [Vec3; 2])>, bool) {
         let p = PwiParams {
             prim,
             sweep_dir: Vec3::ZERO,
@@ -211,7 +216,7 @@ impl WorldState {
             }
             out.push((e, self.world.ent(e).bbox));
         }
-        out
+        (out, r.saturated)
     }
 }
 
