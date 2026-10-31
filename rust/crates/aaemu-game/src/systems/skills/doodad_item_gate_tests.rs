@@ -3,6 +3,7 @@
 //! pressed, before the mount animation plays.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use aaemu_commons::PacketStream;
 
@@ -31,8 +32,12 @@ const RACK_OBJ: u32 = 0x200;
 const EMPTY: u32 = 8264;
 const LOADED: u32 = 8265;
 const STORE_SKILL: u32 = 15307;
+const RECOVER_SKILL: u32 = 15309;
 const PACK: u32 = 18469;
 const WRONG_PACK: u32 = 18470;
+const SHEEP: u32 = 9100;
+const SHEEP_GROUP: u32 = 9101;
+const SHEEP_OBJ: u32 = 0x210;
 const USE_EFFECT: u32 = 9_001;
 
 const WAGON: u32 = 60;
@@ -52,6 +57,10 @@ const SHIP_MOUNT_ROW: u32 = 345;
 const SHIP_FUEL_COUNT: i32 = 10;
 
 fn doodad_data() -> GameData {
+    doodad_data_with_cast_time(0)
+}
+
+fn doodad_data_with_cast_time(cast_ms: i32) -> GameData {
     let mut data = crate::systems::economy::tests::test_data();
     for id in [PACK, WRONG_PACK] {
         data.items.templates.insert(
@@ -98,6 +107,27 @@ fn doodad_data() -> GameData {
             ..Default::default()
         }],
     );
+    doodads.funcs_by_groups.insert(
+        LOADED,
+        vec![DoodadFunc {
+            group_id: LOADED,
+            func_id: 393,
+            func_key: 9998,
+            func_type: "DoodadFuncRecoverItem".into(),
+            next_phase: EMPTY as i32,
+            skill_id: RECOVER_SKILL,
+            perm_id: 5,
+            ..Default::default()
+        }],
+    );
+    doodads
+        .func_templates
+        .entry("DoodadFuncRecoverItem")
+        .or_default()
+        .insert(
+            393,
+            FuncTemplate::RecoverItem(DoodadFuncRecoverItem { id: 393 }),
+        );
     doodads
         .func_templates
         .entry("DoodadFuncConsumeChanger")
@@ -108,6 +138,43 @@ fn doodad_data() -> GameData {
                 id: 2,
                 slot_id: equip_slot::BACKPACK as u32,
                 count: 1,
+            }),
+        );
+    doodads.templates.insert(
+        SHEEP,
+        DoodadTemplate {
+            id: SHEEP,
+            func_groups: vec![DoodadFuncGroups {
+                id: SHEEP_GROUP,
+                almighty: SHEEP,
+                group_kind_id: doodad_func_group_kind::START,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+    doodads.funcs_by_groups.insert(
+        SHEEP_GROUP,
+        vec![DoodadFunc {
+            group_id: SHEEP_GROUP,
+            func_id: 1,
+            func_key: 1,
+            func_type: "DoodadFuncShear".into(),
+            next_phase: -1,
+            skill_id: 0,
+            ..Default::default()
+        }],
+    );
+    doodads
+        .func_templates
+        .entry("DoodadFuncShear")
+        .or_default()
+        .insert(
+            1,
+            FuncTemplate::Shear(DoodadFuncShear {
+                id: 1,
+                shear_type_id: 0,
+                shear_term: 0,
             }),
         );
     doodads
@@ -130,7 +197,7 @@ fn doodad_data() -> GameData {
     );
     let mut store = super::tests::skill_template(STORE_SKILL);
     store.target_type = super::types::SkillTargetType::Doodad as i32;
-    store.casting_time = 0;
+    store.casting_time = cast_ms;
     store.damage_type_id = 0;
     store.effects.push(super::tests::skill_effect(
         USE_EFFECT,
@@ -139,6 +206,17 @@ fn doodad_data() -> GameData {
     ));
     skills.add_skill(store);
     data.skills.add_client_sourced_skill(STORE_SKILL);
+    let mut recover = super::tests::skill_template(RECOVER_SKILL);
+    recover.target_type = super::types::SkillTargetType::Doodad as i32;
+    recover.casting_time = 0;
+    recover.damage_type_id = 0;
+    recover.effects.push(super::tests::skill_effect(
+        USE_EFFECT,
+        EffectKind::InteractionEffect,
+        USE_EFFECT,
+    ));
+    skills.add_skill(recover);
+    data.skills.add_client_sourced_skill(RECOVER_SKILL);
     data
 }
 
@@ -266,7 +344,15 @@ struct Fixture {
 }
 
 fn fixture() -> Fixture {
-    let server = Arc::new(test_server_with(doodad_data()));
+    fixture_with_data(doodad_data())
+}
+
+fn fixture_with_cast_time(cast_ms: i32) -> Fixture {
+    fixture_with_data(doodad_data_with_cast_time(cast_ms))
+}
+
+fn fixture_with_data(data: GameData) -> Fixture {
+    let server = Arc::new(test_server_with(data));
     server.set_self();
     super::bind(&server);
     crate::systems::economy::bridges::install(&server);
@@ -479,11 +565,23 @@ async fn storage_skill_without_a_pack_is_refused_at_cast_start() {
             .iter()
             .find(|(op, _)| *op == sc::SCSkillStartedPacket)
             .map(|(_, body)| body.clone()),
-        Some(expected_refused(STORE_SKILL, rack_obj, 0x24, 0))
+        Some(expected_refused(STORE_SKILL, rack_obj, 0x24, PACK))
     );
     assert!(
         has_error(&frames, error_message::UNKNOWN_ITEM),
         "{frames:x?}"
+    );
+    let error_at = frames
+        .iter()
+        .position(|(op, _)| *op == sc::SCErrorMsgPacket)
+        .expect("SCErrorMsg");
+    let started_at = frames
+        .iter()
+        .position(|(op, _)| *op == sc::SCSkillStartedPacket)
+        .expect("SCSkillStarted");
+    assert!(
+        error_at < started_at,
+        "SCErrorMsg must precede SCSkillStarted"
     );
     assert!(!frames.iter().any(|(op, _)| *op == sc::SCSkillFiredPacket));
     let d = f.rack.data();
@@ -548,15 +646,130 @@ async fn storage_skill_with_a_wrong_pack_is_refused_at_cast_start() {
         has_error(&frames, error_message::STORE_INVALID_ITEM),
         "{frames:x?}"
     );
+    assert_eq!(started_value(&frames, STORE_SKILL), Some(PACK));
     let d = f.rack.data();
-    assert_eq!(d.func_group_id, EMPTY);
-    assert_eq!((d.item_id, d.item_template_id), (0, 0));
+    assert_eq!(d.func_group_id, EMPTY, "{frames:x?}");
+    assert_eq!((d.item_id, d.item_template_id), (0, 0), "{frames:x?}");
     assert_eq!(
         Inv::of(&f.player)
             .equipped(equip_slot::BACKPACK)
             .map(|i| i.id),
-        Some(item_id)
+        Some(item_id),
+        "{frames:x?}"
     );
+}
+
+fn recover_cast(doodad_obj: u32) -> CSStartSkillPacket {
+    CSStartSkillPacket {
+        skill_id: RECOVER_SKILL,
+        caster: SkillCaster::Unit(PLAYER_OBJ),
+        target: SkillCastTarget::Doodad(doodad_obj),
+        flag: 0,
+        skill_object: SkillObject::None,
+    }
+}
+
+/// Taking the stored pack back (loaded phase, skill 15309) needs no pack on the back.
+#[tokio::test]
+async fn storage_take_back_without_a_pack_succeeds() {
+    let mut f = fixture();
+    let item_id = give_at(
+        &f.server,
+        &f.player,
+        PLAYER_OBJ as u64 * 100 + 3,
+        PACK,
+        slot_type::EQUIPMENT,
+        equip_slot::BACKPACK,
+    );
+    start_skill(&f.server, &mut f.client.conn, store_cast(f.rack.obj_id));
+    let _ = f.client.drain();
+    assert_eq!(f.rack.data().func_group_id, LOADED);
+    // The standalone test inventory does not register its containers; the stored item must be
+    // findable in the system container for the recovery move.
+    f.server.items.add_container(
+        Inv::of(&f.player)
+            .get(slot_type::SYSTEM)
+            .expect("system container"),
+    );
+    start_skill(&f.server, &mut f.client.conn, recover_cast(f.rack.obj_id));
+    let frames = f.client.drain();
+    assert!(
+        !has_error(&frames, error_message::UNKNOWN_ITEM)
+            && !has_error(&frames, error_message::STORE_INVALID_ITEM)
+            && !has_error(&frames, error_message::STORE_BACKPACK_NOGOODS),
+        "{frames:x?}"
+    );
+    let d = f.rack.data();
+    assert_eq!(d.func_group_id, EMPTY, "{frames:x?}");
+    assert_eq!((d.item_id, d.item_template_id), (0, 0), "{frames:x?}");
+    assert_eq!(
+        Inv::of(&f.player)
+            .equipped(equip_slot::BACKPACK)
+            .map(|i| i.id),
+        Some(item_id),
+        "{frames:x?}"
+    );
+}
+
+/// The cast-end `validation::check` refuses when the pack left the back during the cast.
+#[tokio::test]
+async fn storage_pack_removed_during_the_cast_is_refused_at_cast_end() {
+    let mut f = fixture_with_cast_time(100);
+    give_at(
+        &f.server,
+        &f.player,
+        PLAYER_OBJ as u64 * 100 + 4,
+        PACK,
+        slot_type::EQUIPMENT,
+        equip_slot::BACKPACK,
+    );
+    start_skill(&f.server, &mut f.client.conn, store_cast(f.rack.obj_id));
+    let _ = f.client.drain();
+    let item = Inv::of(&f.player)
+        .equipped(equip_slot::BACKPACK)
+        .expect("pack");
+    Inv::of(&f.player)
+        .get(slot_type::EQUIPMENT)
+        .expect("equipment")
+        .lock()
+        .unwrap()
+        .remove_item(item.id);
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let frames = f.client.drain();
+    assert_eq!(
+        started_results(&frames, STORE_SKILL),
+        vec![0x24],
+        "{frames:x?}"
+    );
+    assert_eq!(started_value(&frames, STORE_SKILL), Some(PACK));
+    assert!(!frames.iter().any(|(op, _)| *op == sc::SCSkillFiredPacket));
+    let d = f.rack.data();
+    assert_eq!(d.func_group_id, EMPTY);
+    assert_eq!((d.item_id, d.item_template_id), (0, 0));
+    assert!(f.player.data().unit.skill_state.skill_task.is_none());
+}
+
+/// A gathering-disallowed skill keeps INVALID_TARGET; the item gate does not pre-empt it.
+#[tokio::test]
+async fn disallowed_doodad_skill_keeps_invalid_target() {
+    let mut f = fixture();
+    let instance = f.server.world.world(0).unwrap();
+    let sheep = manager::create(&f.server, &instance, SHEEP_OBJ, SHEEP, None, true).expect("sheep");
+    sheep.data().transform.set_xyz(101.0, 100.0, 100.0);
+    instance.spawn(&sheep, &f.server.view_ctx());
+    f.client.drain();
+    start_skill(&f.server, &mut f.client.conn, store_cast(SHEEP_OBJ));
+    let frames = f.client.drain();
+    assert_eq!(
+        started_results(&frames, STORE_SKILL),
+        vec![0x22],
+        "{frames:x?}"
+    );
+    assert!(
+        !has_error(&frames, error_message::UNKNOWN_ITEM),
+        "{frames:x?}"
+    );
+    assert!(!frames.iter().any(|(op, _)| *op == sc::SCSkillFiredPacket));
 }
 
 struct WagonFixture {
@@ -666,6 +879,22 @@ async fn wagon_eco_fuel_with_the_item_cast_and_consumes_it() {
         started_results(&frames, RIDER_SKILL).is_empty(),
         "{frames:x?}"
     );
+    assert!(f.wagon.data().unit.buffs.check_buff(FUEL_BUFF));
+    assert_eq!(Inv::of(&f.player).items_count(ECO_FUEL, -1), 0);
+}
+
+/// A rider at a non-matching attach point is not pre-checked; the slave skill casts as before.
+#[tokio::test]
+async fn rider_at_a_nonmatching_attach_point_has_no_precheck() {
+    let mut f = wagon_fixture();
+    f.player.data().attached_point = attach_point::PASSENGER0;
+    start_skill(&f.server, &mut f.client.conn, wagon_cast());
+    let frames = f.client.drain();
+    assert!(
+        !started_results(&frames, MOUNT_SKILL).contains(&0x24),
+        "{frames:x?}"
+    );
+    assert!(frames.iter().any(|(op, _)| *op == sc::SCSkillFiredPacket));
     assert!(f.wagon.data().unit.buffs.check_buff(FUEL_BUFF));
     assert_eq!(Inv::of(&f.player).items_count(ECO_FUEL, -1), 0);
 }
