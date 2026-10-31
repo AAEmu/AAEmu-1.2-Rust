@@ -34,6 +34,8 @@ const PRAYER_EFFECT: u32 = 18_268;
 /// Skill 26611 "Full XP Restoration" (`recover_exp_effects` 5: no priest, no labor), the item
 /// skill of the XP Restoration Scrolls 33965 / 33966 / 34024-34029 (`items.use_skill_id`).
 const SCROLL_SKILL: u32 = 26_611;
+/// One of the real XP Restoration Scrolls (33965, `use_skill_id` 26611, used as a reagent).
+const SCROLL_ITEM: u32 = 33_965;
 /// `effects.id` of the scroll's `RecoverExpEffect` row.
 const SCROLL_EFFECT: u32 = 39_213;
 /// `NpcTemplate` id of the Nui temple priest.
@@ -135,8 +137,14 @@ fn game_data() -> GameData {
     let mut effect = skill_effect(SCROLL_EFFECT, EffectKind::RecoverExpEffect, 5);
     effect.friendly = true;
     effect.non_friendly = true;
+    // The real `skill_effects` row consumes one source item (the used scroll).
+    effect.consume_item_count = 1;
     scroll.effects.push(effect);
     s.add_skill(scroll);
+    let mut scroll_item = crate::data::items::ItemTemplate::plain(SCROLL_ITEM, 100);
+    scroll_item.use_skill_id = SCROLL_SKILL;
+    scroll_item.use_skill_as_reagent = true;
+    gd.items.templates.insert(SCROLL_ITEM, scroll_item);
     gd.systems.npcs.npc.templates.insert(
         PRIEST,
         NpcTemplate {
@@ -252,6 +260,47 @@ impl Fx {
         start_skill(&self.server, &mut self.client.conn, packet);
     }
 
+    /// Puts one real XP Restoration Scroll into the bag and returns its item id.
+    fn give_scroll(&self) -> u64 {
+        use crate::models::container::slot_type;
+        use crate::models::item::Item;
+        use crate::systems::economy::inventory::Inv;
+        let template = self
+            .server
+            .game_data
+            .items
+            .template(SCROLL_ITEM)
+            .expect("scroll template");
+        let mut item = Item::create(0x7001, template, 1, 0, 1, &self.server.game_data.items, 0);
+        item.owner_id = u64::from(self.player.character_id);
+        item.slot_type = slot_type::INVENTORY;
+        item.slot = 0;
+        let bag = Inv::of(&self.player).bag();
+        bag.lock().unwrap().items.push(item);
+        self.server.items.add_container(bag);
+        0x7001
+    }
+
+    /// The 1.2 client's `SkillItem` cast of the scroll: the item is the caster and its use skill
+    /// is the scroll's own skill.
+    fn cast_scroll(&mut self, item_id: u64) {
+        self.player.data().unit.skill_last_used_ms = 0;
+        let packet = CSStartSkillPacket {
+            skill_id: SCROLL_SKILL,
+            caster: SkillCaster::Item {
+                obj_id: self.player.obj_id,
+                item_id,
+                item_template_id: SCROLL_ITEM,
+                type1: 0,
+                type2: 0,
+            },
+            target: SkillCastTarget::Unit(self.player.obj_id),
+            flag: 0,
+            skill_object: SkillObject::None,
+        };
+        start_skill(&self.server, &mut self.client.conn, packet);
+    }
+
     fn pray(&mut self) {
         self.cast(PRAYER_SKILL);
     }
@@ -273,6 +322,10 @@ fn recover_exp_skills_are_client_sourced_from_the_effect_table() {
         "the priest prayer is cast by the client but named by no source table"
     );
     assert!(
+        !data.is_item_only_skill(PRAYER_SKILL),
+        "the effect source keeps the prayer a plain cast, not an item skill"
+    );
+    assert!(
         !data.is_client_sourced_skill(PRAYER_SKILL + 1),
         "an unrelated skill must stay unsourced"
     );
@@ -285,6 +338,10 @@ fn scroll_skill_is_sourced_by_items_not_by_the_priest_window() {
     assert!(
         data.is_client_sourced_skill(SCROLL_SKILL),
         "the scrolls name 26611 through items.use_skill_id"
+    );
+    assert!(
+        data.is_item_only_skill(SCROLL_SKILL),
+        "26611 is reached only through the scroll items"
     );
 
     let without_items = client_source_skills_with_items(false);
@@ -376,6 +433,52 @@ async fn prayer_at_a_priest_restores_the_lost_experience() {
 
 #[tokio::test]
 async fn scroll_restores_the_lost_experience_without_spending_labor() {
+    use crate::systems::economy::inventory::Inv;
+
+    let mut fx = fixture(2.0);
+    fx.player.data().labor_power = 0;
+    fx.die();
+    let (experience, recoverable) = {
+        let c = fx.player.data();
+        (c.experience, c.recoverable_exp)
+    };
+    assert!(recoverable > 0);
+    fx.client.drain();
+
+    let scroll = fx.give_scroll();
+    fx.cast_scroll(scroll);
+    {
+        let c = fx.player.data();
+        assert_eq!(
+            c.experience,
+            experience + recoverable,
+            "the scroll must restore the recoverable experience"
+        );
+        assert_eq!(c.recoverable_exp, 0);
+        assert_eq!(
+            c.labor_power, 0,
+            "a labor-free effect must not subtract the level cost (or wrap labor below 0)"
+        );
+    }
+    let frames = fx.client.drain();
+    assert!(
+        !frames
+            .iter()
+            .any(|(op, _)| *op == sc::SCCharacterLaborPowerChangedPacket),
+        "no labor change for a labor-free effect: {frames:x?}"
+    );
+    let ops: Vec<u16> = frames.iter().map(|(op, _)| *op).collect();
+    assert!(ops.contains(&sc::SCRecoverableExpPacket), "{ops:x?}");
+    assert_eq!(
+        Inv::of(&fx.player).items_count(SCROLL_ITEM, -1),
+        0,
+        "the scroll is consumed by the Item caster path"
+    );
+}
+
+/// 26611 is item-only: a plain Unit cast without the scroll must be refused before the effect.
+#[tokio::test]
+async fn scroll_skill_plain_unit_cast_is_refused_without_the_scroll() {
     let mut fx = fixture(2.0);
     fx.player.data().labor_power = 0;
     fx.die();
@@ -388,25 +491,23 @@ async fn scroll_restores_the_lost_experience_without_spending_labor() {
 
     fx.cast(SCROLL_SKILL);
     let c = fx.player.data();
-    assert_eq!(
-        c.experience,
-        experience + recoverable,
-        "the scroll must restore the recoverable experience"
-    );
-    assert_eq!(c.recoverable_exp, 0);
-    assert_eq!(
-        c.labor_power, 0,
-        "a labor-free effect must not subtract the level cost (or wrap labor below 0)"
-    );
+    assert_eq!(c.experience, experience, "the exploit must not restore exp");
+    assert_eq!(c.recoverable_exp, recoverable);
+    assert_eq!(c.labor_power, 0);
     let frames = fx.client.drain();
+    let refused = frames.iter().any(|(op, body)| {
+        *op == sc::SCSkillStartedPacket
+            && body.len() >= 4
+            && u32::from_le_bytes(body[0..4].try_into().unwrap()) == SCROLL_SKILL
+            && body.last() == Some(&0x2D) // NO_PERM
+    });
+    assert!(refused, "the plain cast must get NO_PERM: {frames:x?}");
     assert!(
         !frames
             .iter()
-            .any(|(op, _)| *op == sc::SCCharacterLaborPowerChangedPacket),
-        "no labor change for a labor-free effect: {frames:x?}"
+            .any(|(op, _)| *op == sc::SCRecoverableExpPacket),
+        "the effect must not run: {frames:x?}"
     );
-    let ops: Vec<u16> = frames.iter().map(|(op, _)| *op).collect();
-    assert!(ops.contains(&sc::SCRecoverableExpPacket), "{ops:x?}");
 }
 
 #[tokio::test]

@@ -1941,6 +1941,8 @@ fn execute_trigger(
                 amount,
                 is_trigger: true,
                 always_hit: false,
+                source_item: None,
+                source_item_debited: false,
             },
         )
     } else {
@@ -1952,6 +1954,8 @@ fn execute_trigger(
                 amount: 0,
                 is_trigger: false,
                 always_hit: false,
+                source_item: None,
+                source_item_debited: false,
             },
         )
     };

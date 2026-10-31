@@ -43,6 +43,9 @@ pub struct SkillRunState {
     /// Accepted casts of a reused SkillRun, independent of timeline ID release.
     pub generation: u64,
     pub cancelled: bool,
+    /// An effect cancelled the cast itself (as opposed to a client / channel stop): its source
+    /// item debit is refunded.
+    pub effect_cancelled: bool,
     /// `HitTypes` (target obj id -> hit type, `TryAdd` semantics where the C# uses it).
     pub hit_types: HashMap<u32, SkillHitType>,
     /// `InitialTarget?.ObjId` (`u32::MAX` = a position unit).

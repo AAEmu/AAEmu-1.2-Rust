@@ -82,8 +82,50 @@ fn template_skill(server: &GameServer, id: u32) -> Option<SkillRef> {
     }
 }
 
+/// The C# bind-on-pickup exception (`CSStartSkillPacket`, commit bfdc3268 / PR #615) was added
+/// for the house fireplace's `SavePortal`: the client sends a bind-on-pickup item as the
+/// `SkillItem` caster while the skill is the doodad's own `DoodadFuncUse`. Keep only that case:
+/// the packet must target a doodad within the skill's range whose current func group has a
+/// `DoodadFuncUse` for this skill. Any other mismatched skill id is refused.
+fn bind_on_pickup_doodad_use(
+    server: &GameServer,
+    player: &crate::world::PlayerRef,
+    skill: &SkillRef,
+    target: SkillCastTarget,
+) -> bool {
+    use super::geometry::Target;
+    use crate::systems::npcs::doodad::templates::FuncTemplate;
+
+    let SkillCastTarget::Doodad(obj_id) = target else {
+        return false;
+    };
+    let me = WorldObject::from(player);
+    let Some(world) = super::geometry::world_of(server, &me) else {
+        return false;
+    };
+    let Some(doodad) = world.object(obj_id).and_then(|o| o.as_doodad().cloned()) else {
+        return false;
+    };
+    let data = &server.game_data.systems.npcs.doodad;
+    let group = doodad.data().func_group_id;
+    let Some(func) = data.func_for_skill(group, skill.template.id) else {
+        return false;
+    };
+    let is_use = func.skill_id == skill.template.id
+        && matches!(
+            data.func_template(func.func_id, &func.func_type),
+            Some(FuncTemplate::Use(_))
+        );
+    if !is_use {
+        return false;
+    }
+    let target = Target::Obj(WorldObject::from(&doodad));
+    super::geometry::distance_to(server, &Target::Obj(me), &target, false)
+        <= skill.template.max_range.max(0) as f32
+}
+
 /// `CSStartSkillPacket.Read` behaviour.
-pub fn start_skill(server: &GameServer, conn: &mut GameConnection, p: CSStartSkillPacket) {
+pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStartSkillPacket) {
     let Some(player) = conn.active_char.clone() else {
         return;
     };
@@ -99,6 +141,18 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, p: CSStartSki
     let result;
     let mut value = 0u32;
     let data = &server.game_data;
+    // A skill reached only through an item use must come with that item: the plain unit cast
+    // would otherwise run it (and consume nothing) anywhere. The Item caster branch below
+    // validates the item's own use skill and consumes the reagent item.
+    if !p.caster.is_item() && data.skills.is_item_only_skill(skill_id) {
+        tracing::warn!(
+            character = %player.data().unit.name,
+            skill_id,
+            "Client cast of an item-only skill without its item refused"
+        );
+        send_cast_refused(&player, skill_id, p.caster, target, p.skill_object);
+        return;
+    }
     let is_default = data.skills.is_default_skill(skill_id);
     let is_common = data.skills.is_common_skill(skill_id);
     let auto = player.data().unit.skill_state.auto_attack.clone();
@@ -113,13 +167,25 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, p: CSStartSki
             return;
         };
         if !super::mount_authority::may_cast_as(server, &player, &caster) {
-            // Mount / slave skills are cast as the player, a mate the player may use, or a
-            // slave the player owns or is attached to; anything else is a forged packet.
+            // Mount / slave skills are cast as a mate the player may use or a slave the player
+            // owns or is attached to; anything else is a forged packet.
             tracing::warn!(
                 character = %player.data().unit.name,
                 skill_id,
                 caster = p.caster.obj_id(),
                 "Client cast as an object it does not own or ride refused"
+            );
+            send_cast_refused(&player, skill_id, p.caster, target, p.skill_object);
+            return;
+        }
+        if !super::mount_authority::may_use_vehicle_skill(server, &caster, skill_id) {
+            // A vehicle caster authorizes only the skills on its own bar (and those its buffs
+            // grant); any other id, such as an NPC / boss / GM skill, is not a mount cast.
+            tracing::warn!(
+                character = %player.data().unit.name,
+                skill_id,
+                caster = p.caster.obj_id(),
+                "Client cast of a skill outside the vehicle's bar refused"
             );
             send_cast_refused(&player, skill_id, p.caster, target, p.skill_object);
             return;
@@ -178,7 +244,9 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, p: CSStartSki
             .is_some_and(|a| a.skill.template.id == skill_id)
     {
         result = skill_result::SUCCESS;
-    } else if is_default || (is_common && !p.caster.is_item()) {
+    } else if !data.skills.is_item_only_skill(skill_id)
+        && (is_default || (is_common && !p.caster.is_item()))
+    {
         let Some(skill) = template_skill(server, skill_id) else {
             return;
         };
@@ -200,36 +268,46 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, p: CSStartSki
         }
     } else if let SkillCaster::Item { item_id, .. } = p.caster {
         let items = server.systems.skills.ext.items();
+        // Resolve the template from the owned item: the wire template id is a client hint and
+        // must never decide the use skill, the reagent or the consumed template.
         let Some((template_id, _)) = items.owned_item(server, &player, item_id) else {
             return;
         };
         let Some((use_skill_id, bind_on_pickup)) = items.item_use_skill(server, template_id) else {
             return;
         };
-        if skill_id != use_skill_id && !bind_on_pickup {
-            return;
-        }
         let Some(skill) = template_skill(server, skill_id) else {
             return;
         };
-        // The legacy bind-on-pickup exception supports fireplace portal actions, but
-        // binding alone cannot authorize imprinting or bleaching a UCC. Require the
-        // actual item's configured use skill at this client boundary; internal casts
-        // and plot children continue through the server-driven skill APIs.
         if skill_id != use_skill_id
-            && skill.template.effects.iter().any(|effect| {
-                matches!(
-                    effect.template,
-                    Some((
-                        super::data::EffectKind::ImprintUccEffect
-                            | super::data::EffectKind::CleanupUccEffect,
-                        _
-                    ))
-                )
-            })
+            && !(bind_on_pickup && bind_on_pickup_doodad_use(server, &player, &skill, target))
         {
+            // The item's own use skill is the only general authorization; item-only skills
+            // never take the legacy exception, and the exception itself is limited to the
+            // fireplace's real DoodadFuncUse interaction.
+            if data.skills.is_item_only_skill(skill_id) {
+                send_cast_refused(&player, skill_id, p.caster, target, p.skill_object);
+            }
             return;
         }
+        // Continue with the server-resolved template: `skill::use_skill` validates and consumes
+        // through it (item id, template and count), never through the client's hint.
+        p.caster = match p.caster {
+            SkillCaster::Item {
+                obj_id,
+                item_id,
+                type1,
+                type2,
+                ..
+            } => SkillCaster::Item {
+                obj_id,
+                item_id,
+                item_template_id: template_id,
+                type1,
+                type2,
+            },
+            caster => caster,
+        };
         let (r, v) = skill::use_skill(
             server,
             &skill,

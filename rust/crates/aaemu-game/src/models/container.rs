@@ -268,16 +268,12 @@ impl ItemContainer {
             let highest = self.items.iter().map(|i| i.slot).max().unwrap_or(-1) + 1;
             return preferred.max(highest);
         }
-        let need_new = preferred < 0 || self.items.iter().any(|i| i.slot == preferred);
-        if !need_new {
+        if preferred >= 0 && self.get_item_by_slot(preferred).is_none() {
             return preferred;
         }
-        let used: Vec<i32> = self
-            .items
-            .iter()
-            .filter(|i| i.slot != preferred)
-            .map(|i| i.slot)
-            .collect();
+        // Every occupied slot counts, including `preferred`: leaving it out let the scan
+        // return a slot another item already holds.
+        let used: Vec<i32> = self.items.iter().map(|i| i.slot).collect();
         (0..self.size).find(|s| !used.contains(s)).unwrap_or(-1)
     }
 
@@ -1302,5 +1298,36 @@ mod tests {
         let slotted = eq.slotted_items();
         assert_eq!(slotted.len(), 28);
         assert!(slotted[2].is_some());
+    }
+}
+
+#[cfg(test)]
+mod unused_slot_tests {
+    use super::*;
+    use crate::data::items::ItemTemplate;
+
+    fn item(id: u64, slot: i32, d: &ItemData) -> Item {
+        let mut i = Item::create(id, d.template(1).unwrap(), 1, 0, 1, d, 0);
+        i.slot = slot;
+        i
+    }
+
+    #[test]
+    fn get_unused_slot_never_returns_an_occupied_preferred_slot() {
+        let mut d = ItemData::default();
+        d.templates.insert(1, ItemTemplate::plain(1, 1));
+        let mut bag = ItemContainer::new(ContainerKind::Item, 7, slot_type::INVENTORY, 100);
+        bag.set_container_size(3);
+        bag.items.push(item(10, 0, &d));
+        assert_eq!(
+            bag.get_unused_slot(0),
+            1,
+            "occupied preferred slot is skipped"
+        );
+        bag.items.push(item(11, 1, &d));
+        assert_eq!(bag.get_unused_slot(0), 2, "the lowest free slot is chosen");
+        bag.items.push(item(12, 2, &d));
+        assert_eq!(bag.get_unused_slot(0), -1, "a full container has no slot");
+        assert_eq!(bag.get_unused_slot(1), -1, "still full");
     }
 }

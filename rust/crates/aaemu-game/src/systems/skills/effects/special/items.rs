@@ -70,7 +70,10 @@ fn send_error(p: &PlayerRef, error: i16) {
 /// `skill.Cancelled = true` (an error log where the C# skill is null).
 fn cancel_skill(args: &EffectArgs<'_>, action: &str) {
     match args.source.skill() {
-        Some(s) => s.state().cancelled = true,
+        Some(s) => {
+            s.state().cancelled = true;
+            s.state().effect_cancelled = true;
+        }
         None => {
             tracing::error!("Special effects: {action} without a skill (NullReferenceException)")
         }
@@ -210,12 +213,12 @@ pub fn gain_item_with_emblem_imprint(server: &GameServer, args: &EffectArgs<'_>,
         return;
     };
     if let Some(p) = args.target.as_obj().and_then(WorldObject::as_player) {
-        server
-            .systems
-            .skills
-            .ext
-            .items()
-            .ucc_create_stamp(server, p, item_id);
+        server.systems.skills.ext.items().ucc_create_stamp(
+            server,
+            p,
+            item_id,
+            args.source.source_item.as_deref(),
+        );
     }
 }
 
@@ -306,6 +309,7 @@ pub fn dyeing(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         dye_item_id,
         dye_template_id,
         target_item_id,
+        args.source.source_item.as_deref(),
     );
 }
 
@@ -423,7 +427,14 @@ fn look_convert(
     server: &GameServer,
     args: &EffectArgs<'_>,
     action: &str,
-    f: impl FnOnce(&GameServer, &PlayerRef, u64, Option<u64>) -> ItemActionResult,
+    f: impl FnOnce(
+        &GameServer,
+        &PlayerRef,
+        u64,
+        Option<u64>,
+        Option<&crate::models::item::Item>,
+        bool,
+    ) -> ItemActionResult,
 ) {
     let Some(p) = player_caster(args) else {
         cancel_skill(args, action);
@@ -434,7 +445,14 @@ fn look_convert(
         return;
     };
     let powder = skill_item(&args.caster_caster).map(|(id, _)| id);
-    match f(server, p, target_item_id, powder) {
+    match f(
+        server,
+        p,
+        target_item_id,
+        powder,
+        args.source.source_item.as_deref(),
+        args.source.source_item_debited,
+    ) {
         ItemActionResult::Done => {}
         ItemActionResult::Cancel => cancel_skill(args, action),
         ItemActionResult::CancelWithError(e) => {
@@ -448,18 +466,26 @@ fn look_convert(
 pub fn cleanup_look_convert(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
     log_values(args, "CleanupLookConvert", v);
     let items = server.systems.skills.ext.items();
-    look_convert(server, args, "CleanupLookConvert", |s, p, t, powder| {
-        items.cleanup_look_convert(s, p, t, powder)
-    });
+    look_convert(
+        server,
+        args,
+        "CleanupLookConvert",
+        |s, p, t, powder_id, powder, debited| {
+            items.cleanup_look_convert(s, p, t, powder_id, powder, debited)
+        },
+    );
 }
 
 /// `Skinize`: turns the target item into an image item, consuming the powder.
 pub fn skinize(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
     log_values(args, "Skinize", v);
     let items = server.systems.skills.ext.items();
-    look_convert(server, args, "Skinize", |s, p, t, powder| {
-        items.skinize(s, p, t, powder)
-    });
+    look_convert(
+        server,
+        args,
+        "Skinize",
+        |s, p, t, powder_id, powder, debited| items.skinize(s, p, t, powder_id, powder, debited),
+    );
 }
 
 /// `ItemSocketing`: a lunagem (or dawnstone) on the target equipment; ends the skill.
@@ -492,13 +518,13 @@ pub fn item_socketing(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         );
         return;
     };
-    if server
-        .systems
-        .skills
-        .ext
-        .items()
-        .item_socketing(server, p, gem_item_id, target_item_id)
-    {
+    if server.systems.skills.ext.items().item_socketing(
+        server,
+        p,
+        gem_item_id,
+        target_item_id,
+        args.source.source_item.as_deref(),
+    ) {
         broadcast_skill_ended(server, args, "ItemSocketing");
     }
 }
@@ -530,13 +556,12 @@ pub fn grade_enchant(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         is_lucky: v[0] != 0,
         item_type: v[2],
     };
-    if server
-        .systems
-        .skills
-        .ext
-        .items()
-        .grade_enchant(server, p, &request)
-    {
+    if server.systems.skills.ext.items().grade_enchant(
+        server,
+        p,
+        &request,
+        args.source.source_item.as_deref(),
+    ) {
         broadcast_skill_ended(server, args, "GradeEnchant");
     }
 }

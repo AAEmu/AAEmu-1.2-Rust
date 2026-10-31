@@ -165,7 +165,7 @@ async fn dye_hook_preserves_other_colors_and_rejects_foreign_or_mismatched_sourc
     let w = fixture();
     let target = give(&w, &w.pa, slot_type::INVENTORY, ARMOR, 1, 1);
     let foreign = give(&w, &w.pb, slot_type::INVENTORY, OTHER_COLOR, 2, 0);
-    EconomyForSkills.dye_item(&w.server, &w.pa, foreign, OTHER_COLOR, target);
+    EconomyForSkills.dye_item(&w.server, &w.pa, foreign, OTHER_COLOR, target, None);
     assert_eq!(
         item_at(&w.pa, slot_type::INVENTORY, 1)
             .unwrap()
@@ -176,7 +176,7 @@ async fn dye_hook_preserves_other_colors_and_rejects_foreign_or_mismatched_sourc
     assert!(w.pa.data().skill_char.skill_cancelled);
     let dye = give(&w, &w.pa, slot_type::INVENTORY, OTHER_COLOR, 2, 0);
     w.pa.data().skill_char.skill_cancelled = false;
-    EconomyForSkills.dye_item(&w.server, &w.pa, dye, DYE, target);
+    EconomyForSkills.dye_item(&w.server, &w.pa, dye, DYE, target, None);
     assert_eq!(
         item_at(&w.pa, slot_type::INVENTORY, 1)
             .unwrap()
@@ -186,7 +186,7 @@ async fn dye_hook_preserves_other_colors_and_rejects_foreign_or_mismatched_sourc
     );
     assert!(w.pa.data().skill_char.skill_cancelled);
     w.pa.data().skill_char.skill_cancelled = false;
-    EconomyForSkills.dye_item(&w.server, &w.pa, dye, OTHER_COLOR, target);
+    EconomyForSkills.dye_item(&w.server, &w.pa, dye, OTHER_COLOR, target, None);
     assert_eq!(
         item_at(&w.pa, slot_type::INVENTORY, 1)
             .unwrap()
