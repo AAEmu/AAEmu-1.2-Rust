@@ -1353,6 +1353,7 @@ pub fn unbind_slave(server: &GameServer, character: &PlayerRef, tl_id: u32, reas
 
 /// Why [`bind_slave`] refused a seat.
 enum BindRefusal {
+    Dead,
     TooFar,
     CannonPassenger,
     SeatTaken,
@@ -1530,7 +1531,9 @@ pub fn bind_slave(
     // point cannot both pass.
     let refusal = {
         let mut d = slave.data();
-        if reach.zip(gap).is_some_and(|(reach, gap)| gap >= reach) {
+        if d.unit.is_dead() {
+            Some(BindRefusal::Dead)
+        } else if reach.zip(gap).is_some_and(|(reach, gap)| gap >= reach) {
             Some(BindRefusal::TooFar)
         } else if point != attach_point::DRIVER && cannon {
             Some(BindRefusal::CannonPassenger)
@@ -1548,6 +1551,13 @@ pub fn bind_slave(
     };
     if let Some(refusal) = refusal {
         match refusal {
+            BindRefusal::Dead => {
+                tracing::debug!(
+                    "BindSlave: slave {} is dead; ignoring seat {}",
+                    obj_id,
+                    point
+                );
+            }
             BindRefusal::TooFar => {
                 tracing::debug!(
                     "BindSlave: character {} is {:.3} m from slave {} (reach {:.3} m)",

@@ -1501,6 +1501,7 @@ async fn a_taken_seat_is_silent_and_keeps_the_occupant() {
     c.conn.active_char = Some(pc.clone());
     let world = server.world.world(0).unwrap();
     let mut cart = Slave::new(0, SLAVE_TEMPLATE);
+    cart.unit.hp = 1000;
     cart.unit.transform.set_xyz(103.0, 100.0, 100.0);
     cart.unit.tl_id = 3;
     cart.summoner_obj_id = PA;
@@ -1720,6 +1721,7 @@ async fn passenger_skill_13863_seats_point_two_and_a_taken_seat_is_silent() {
     }
     let world = server.world.world(0).unwrap();
     let mut cart = Slave::new(0, SLAVE_TEMPLATE);
+    cart.unit.hp = 1000;
     cart.unit.transform.set_xyz(103.0, 100.0, 100.0);
     cart.unit.tl_id = 3;
     cart.summoner_obj_id = PA;
@@ -1776,6 +1778,57 @@ async fn passenger_skill_13863_seats_point_two_and_a_taken_seat_is_silent() {
     b.drain();
 }
 
+/// A dead slave (a wreck or a cart at 0 hp before it despawns) takes no passenger: 13863's
+/// `AttachTo` reaches `bind_slave` without the 12076 path's liveness check.
+#[tokio::test]
+async fn the_passenger_skill_does_not_seat_on_a_dead_slave() {
+    use crate::models::slave::Slave;
+    use crate::systems::skills::handlers::{start_skill, CSStartSkillPacket};
+    use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+    use crate::world::Entity;
+
+    let server = server_with(passenger_data());
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let mut b = TestClient::new(&server, 2, 2);
+    let pb = spawn_player(
+        &server,
+        &b,
+        test_character(2, "Passenger", 101.0, 100.0),
+        PB,
+    );
+    b.conn.active_char = Some(pb.clone());
+    {
+        let mut d = pb.data();
+        d.unit.hp = 1000;
+        d.unit.max_hp = 1000;
+    }
+    let world = server.world.world(0).unwrap();
+    let mut cart = Slave::new(0, SLAVE_TEMPLATE);
+    cart.unit.transform.set_xyz(103.0, 100.0, 100.0);
+    cart.unit.tl_id = 3;
+    cart.unit.hp = 0;
+    let cart = Entity::new(0x300, cart);
+    world.spawn(&cart, &server.view_ctx());
+    b.drain();
+
+    start_skill(
+        &server,
+        &mut b.conn,
+        CSStartSkillPacket {
+            skill_id: PASSENGER_SKILL,
+            caster: SkillCaster::Unit(PB),
+            target: SkillCastTarget::Unit(cart.obj_id),
+            flag: 0,
+            skill_object: SkillObject::None,
+        },
+    );
+    assert!(cart.data().attached_characters.is_empty());
+    assert_eq!(pb.data().unit.transform.parent_obj_id, 0);
+    assert!(!ops(&b.drain()).contains(&sc::SCUnitAttachedPacket));
+}
+
 /// The client's own bind reach: 12076 uses a 4.0 m surface gap (`FUN_39346290` ->
 /// `FUN_39093860(..., 16.0)`), 13863 3.0 m (`FUN_393bf270` -> 9.0), widened to 3.5 m while
 /// riding a mate (the S11 reading of `+0x3c26`; capture-pending S11-C5). A forged bind / cast
@@ -1812,6 +1865,7 @@ async fn a_slave_outside_the_client_reach_is_refused_and_an_in_reach_one_is_seat
     }
     let world = server.world.world(0).unwrap();
     let mut cart = Slave::new(0, SLAVE_TEMPLATE);
+    cart.unit.hp = 1000;
     cart.unit.transform.set_xyz(102.9, 100.0, 100.0);
     cart.unit.tl_id = 3;
     cart.unit.hp = 1000;
@@ -1886,6 +1940,7 @@ async fn a_character_on_one_slave_cannot_bind_a_second_one() {
     a.conn.active_char = Some(pa.clone());
     let world = server.world.world(0).unwrap();
     let mut first = Slave::new(0, SLAVE_TEMPLATE);
+    first.unit.hp = 1000;
     first.unit.transform.set_xyz(101.0, 100.0, 100.0);
     first.unit.tl_id = 3;
     first.unit.hp = 1000;
@@ -1894,6 +1949,7 @@ async fn a_character_on_one_slave_cannot_bind_a_second_one() {
     let first = Entity::new(0x300, first);
     world.spawn(&first, &server.view_ctx());
     let mut second = Slave::new(0, SLAVE_TEMPLATE);
+    second.unit.hp = 1000;
     second.unit.transform.set_xyz(102.0, 100.0, 100.0);
     second.unit.tl_id = 4;
     second.unit.hp = 1000;
@@ -1990,6 +2046,7 @@ async fn a_cannon_refuses_the_passenger_seat_skill() {
     }
     let world = server.world.world(0).unwrap();
     let mut cannon = Slave::new(0, 8);
+    cannon.unit.hp = 1000;
     cannon.unit.transform.set_xyz(101.0, 100.0, 100.0);
     cannon.unit.tl_id = 3;
     cannon.summoner_obj_id = PA;
@@ -2068,6 +2125,7 @@ async fn ship_seats_measure_the_mass_box_not_the_hull_origin() {
     }
     let world = server.world.world(0).unwrap();
     let mut hull = Slave::new(0, 22);
+    hull.unit.hp = 1000;
     hull.unit.model_id = 511;
     hull.unit.transform.set_xyz(100.0, 100.0, 100.0);
     hull.unit.tl_id = 3;
@@ -2161,6 +2219,7 @@ async fn a_dead_passenger_is_unbound_and_can_board_another_slave_after_resurrect
     }
     let world = server.world.world(0).unwrap();
     let mut first = Slave::new(0, SLAVE_TEMPLATE);
+    first.unit.hp = 1000;
     first.unit.transform.set_xyz(100.0, 100.0, 100.0);
     first.unit.tl_id = 3;
     first.unit.hp = 1000;
@@ -2169,6 +2228,7 @@ async fn a_dead_passenger_is_unbound_and_can_board_another_slave_after_resurrect
     let first = Entity::new(0x300, first);
     world.spawn(&first, &server.view_ctx());
     let mut second = Slave::new(0, SLAVE_TEMPLATE);
+    second.unit.hp = 1000;
     second.unit.transform.set_xyz(100.0, 100.0, 100.0);
     second.unit.tl_id = 4;
     second.unit.hp = 1000;
@@ -2393,6 +2453,7 @@ async fn client_motion_and_despawn_cannot_control_other_players_or_slaves() {
     assert_eq!(pa.data().unit.transform.x, 500.0);
 
     let mut hull = Slave::new(2, 1);
+    hull.unit.hp = 1000;
     hull.unit.transform.set_xyz(510.0, 500.0, 99.0);
     hull.unit.tl_id = 3;
     hull.summoner_obj_id = PB;
@@ -2465,6 +2526,7 @@ async fn slave_driver_ignores_late_walking_and_reattaches_in_the_correct_frame()
     client.conn.active_char = Some(player.clone());
     let world = server.world.world(0).unwrap();
     let mut hull = Slave::new(1, 1);
+    hull.unit.hp = 1000;
     hull.unit
         .transform
         .set_position(1000.0, 1000.0, 99.0, 0.0, 0.0, std::f32::consts::FRAC_PI_2);
@@ -2533,6 +2595,7 @@ async fn deck_movement_uses_relative_coordinates_and_keeps_the_current_parent() 
     client.conn.active_char = Some(player.clone());
     let world = server.world.world(0).unwrap();
     let mut hull = Slave::new(1, 1);
+    hull.unit.hp = 1000;
     hull.unit
         .transform
         .set_position(1000.0, 1000.0, 99.0, 0.0, 0.0, std::f32::consts::FRAC_PI_2);
@@ -3883,6 +3946,7 @@ async fn real_cart_and_ship_slaves_offer_the_passenger_seat() {
             .unwrap_or_else(|| panic!("slave {template}"))
             .clone();
         let mut s = Slave::new(0, t.id);
+        s.unit.hp = 1000;
         s.unit.model_id = t.model_id;
         s.unit.tl_id = server.ids.tl.get_next_id().unwrap() as u16;
         s.unit.transform.set_xyz(100.0, 100.0, 100.0);
@@ -5904,6 +5968,7 @@ async fn real_cannon_slaves_store_the_turret_state() {
             .expect("slave template")
             .clone();
         let mut s = crate::models::slave::Slave::new(0, t.id);
+        s.unit.hp = 1000;
         s.unit.tl_id = server.ids.tl.get_next_id().expect("tl") as u16;
         s.unit.name = t.name.clone();
         s.unit.model_id = t.model_id;
