@@ -584,11 +584,17 @@ pub fn check_alert(c: &mut AiCtx<'_>, _k: BehaviorKind) -> bool {
 fn report_npc_without_ai(obj_id: u32) -> bool {
     static REPORTED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u32>>> =
         std::sync::OnceLock::new();
-    REPORTED
+    // Respawned NPCs get fresh object ids: bound the set so it cannot grow for the life of
+    // the process. A clear only lets each NPC warn once more.
+    const MAX_REPORTED: usize = 4096;
+    let mut reported = REPORTED
         .get_or_init(Default::default)
         .lock()
-        .expect("no-AI report set poisoned")
-        .insert(obj_id)
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if reported.len() >= MAX_REPORTED {
+        reported.clear();
+    }
+    reported.insert(obj_id)
 }
 
 /// `Behavior.UpdateAggroHelp(abuser, radius)`.
