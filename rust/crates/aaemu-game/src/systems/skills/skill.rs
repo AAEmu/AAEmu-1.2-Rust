@@ -471,9 +471,18 @@ pub fn use_skill(
     bypass_gcd: bool,
 ) -> (u8, u32) {
     if !caster.is_unit() {
+        tracing::debug!(
+            skill_id = skill.id,
+            "Skill use refused: the caster is not a unit"
+        );
         return (skill_result::INVALID_SOURCE, 0);
     }
     if let Err(result) = super::validation::check_item_zone(server, caster, &caster_caster) {
+        tracing::debug!(
+            skill_id = skill.id,
+            result = ?result,
+            "Skill use refused: the item cannot be used in this zone"
+        );
         return result;
     }
     let template = skill.template.clone();
@@ -492,6 +501,12 @@ pub fn use_skill(
     if let Err(result) = super::validation::check(server, skill, caster, target)
         .and_then(|()| super::validation::check_build_materials(server, skill, caster, target))
     {
+        tracing::debug!(
+            skill_id = skill.id,
+            result = ?result,
+            target = target.obj_id(),
+            "Skill use refused: the source / target validation failed"
+        );
         return result;
     }
     // The 1.2 fishing reactions require the caster's own spawned NPC. OwnerId is
@@ -577,10 +592,22 @@ pub fn use_skill(
         .flatten();
     if let Some(task) = &active_task {
         match task.kind {
-            SkillTaskKind::Cast => return (unit_reqs::skill_result_for_key("skill_on_casting"), 0),
+            SkillTaskKind::Cast => {
+                tracing::debug!(
+                    skill_id = skill.id,
+                    active_skill = task.skill.template.id,
+                    "Skill use refused: the caster is already casting"
+                );
+                return (unit_reqs::skill_result_for_key("skill_on_casting"), 0);
+            }
             SkillTaskKind::EndChanneling { .. }
                 if !task.skill.template.stop_channeling_on_start_skill =>
             {
+                tracing::debug!(
+                    skill_id = skill.id,
+                    active_skill = task.skill.template.id,
+                    "Skill use refused: the caster is channeling"
+                );
                 return (
                     unit_reqs::skill_result_for_key("skill_cannot_cast_in_channeling"),
                     0,
@@ -590,6 +617,11 @@ pub fn use_skill(
         }
     }
     if let Err(result) = super::validation::check_resources(server, skill, caster) {
+        tracing::debug!(
+            skill_id = skill.id,
+            result = ?result,
+            "Skill use refused: the caster lacks the resources"
+        );
         return result;
     }
     if let Some(c) = &character {
@@ -599,6 +631,10 @@ pub fn use_skill(
     }
     let now = now_ms();
     if on_skill_cooldown(server, skill, caster, now) {
+        tracing::debug!(
+            skill_id = skill.id,
+            "Skill use refused: the skill is on cooldown"
+        );
         return (skill_result::COOLDOWN_TIME, 0);
     }
     skill.state().bypass_gcd = bypass_gcd;
@@ -619,9 +655,21 @@ pub fn use_skill(
         // attempt inside the 150 ms interval, so the first press during any GCD got through.
         // Refuse outright while more than the network grace of the cooldown is left.
         if last_used + delay - now > GCD_GRACE_MS {
+            tracing::debug!(
+                skill_id = skill.id,
+                last_used,
+                now,
+                "Skill use refused: the previous skill was used too recently"
+            );
             return (skill_result::COOLDOWN_TIME, 0);
         }
         if !template.ignore_global_cooldown && gcd - now > GCD_GRACE_MS {
+            tracing::debug!(
+                skill_id = skill.id,
+                global_cooldown_ms = gcd,
+                now,
+                "Skill use refused: the global cooldown is still running"
+            );
             return (skill_result::COOLDOWN_TIME, 0);
         }
     }
@@ -1680,6 +1728,12 @@ impl CastSourceDebit<'_> {
 pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     let caster = &ctx.caster;
     if !caster.is_unit() || skill.cancelled() {
+        tracing::debug!(
+            skill_id = skill.id,
+            caster_is_unit = caster.is_unit(),
+            cancelled = skill.cancelled(),
+            "Skill effects skipped"
+        );
         return;
     }
     let t = skill.template.clone();
@@ -1826,14 +1880,38 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                         vec![caster_t.clone()]
                     }
                 }
-                None => Vec::new(),
+                None => {
+                    tracing::debug!(
+                        skill_id = t.id,
+                        effect_id = effect.effect_id,
+                        application_method = effect.application_method,
+                        "Skill effect skipped: unknown application method"
+                    );
+                    Vec::new()
+                }
             };
         for target in effected {
             let relation = relation_to(server, &caster_t, &target);
             if effect.start_level > caster_level || effect.end_level < caster_level {
+                tracing::debug!(
+                    skill_id = t.id,
+                    effect_id = effect.effect_id,
+                    target = target.obj_id(),
+                    caster_level,
+                    start_level = effect.start_level,
+                    end_level = effect.end_level,
+                    "Skill effect skipped: caster level outside the effect's level range"
+                );
                 continue;
             }
             if effect.friendly && !effect.non_friendly && relation != RelationState::Friendly {
+                tracing::debug!(
+                    skill_id = t.id,
+                    effect_id = effect.effect_id,
+                    target = target.obj_id(),
+                    ?relation,
+                    "Skill effect skipped: the effect is friendly-only"
+                );
                 continue;
             }
             if !effect.friendly
@@ -1842,34 +1920,79 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                 && ((relation == RelationState::Friendly && !force_attack)
                     || caster_t.obj_id() == target.obj_id())
             {
+                tracing::debug!(
+                    skill_id = t.id,
+                    effect_id = effect.effect_id,
+                    target = target.obj_id(),
+                    ?relation,
+                    "Skill effect skipped: the effect is hostile-only"
+                );
                 continue;
             }
             let tp = world_pos(server, &target);
             if effect.front && !effect.back && !is_front(&caster_pos, &tp) {
+                tracing::debug!(
+                    skill_id = t.id,
+                    effect_id = effect.effect_id,
+                    target = target.obj_id(),
+                    "Skill effect skipped: the target is behind the caster"
+                );
                 continue;
             }
             if !effect.front && effect.back && is_front(&caster_pos, &tp) {
+                tracing::debug!(
+                    skill_id = t.id,
+                    effect_id = effect.effect_id,
+                    target = target.obj_id(),
+                    "Skill effect skipped: the effect is back-only"
+                );
                 continue;
             }
             if effect.source_buff_tag_id > 0
                 && !buffs::check_buffs_by_tag(server, caster, effect.source_buff_tag_id)
             {
+                tracing::debug!(
+                    skill_id = t.id,
+                    effect_id = effect.effect_id,
+                    tag = effect.source_buff_tag_id,
+                    "Skill effect skipped: the caster lacks the required buff tag"
+                );
                 continue;
             }
             if effect.source_no_buff_tag_id > 0
                 && buffs::check_buffs_by_tag(server, caster, effect.source_no_buff_tag_id)
             {
+                tracing::debug!(
+                    skill_id = t.id,
+                    effect_id = effect.effect_id,
+                    tag = effect.source_no_buff_tag_id,
+                    "Skill effect skipped: the caster has the forbidden buff tag"
+                );
                 continue;
             }
             if let Some(o) = target.as_obj() {
                 if effect.target_buff_tag_id > 0
                     && !buffs::check_buffs_by_tag(server, o, effect.target_buff_tag_id)
                 {
+                    tracing::debug!(
+                        skill_id = t.id,
+                        effect_id = effect.effect_id,
+                        target = target.obj_id(),
+                        tag = effect.target_buff_tag_id,
+                        "Skill effect skipped: the target lacks the required buff tag"
+                    );
                     continue;
                 }
                 if effect.target_no_buff_tag_id > 0
                     && buffs::check_buffs_by_tag(server, o, effect.target_no_buff_tag_id)
                 {
+                    tracing::debug!(
+                        skill_id = t.id,
+                        effect_id = effect.effect_id,
+                        target = target.obj_id(),
+                        tag = effect.target_no_buff_tag_id,
+                        "Skill effect skipped: the target has the forbidden buff tag"
+                    );
                     continue;
                 }
             }
@@ -1879,10 +2002,24 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                     data.npcs_by_tag(effect.target_npc_tag_id).contains(&tid)
                 });
                 if !ok {
+                    tracing::debug!(
+                        skill_id = t.id,
+                        effect_id = effect.effect_id,
+                        target = target.obj_id(),
+                        tag = effect.target_npc_tag_id,
+                        "Skill effect skipped: the target NPC is not in the required tag"
+                    );
                     continue;
                 }
             }
             if !effects::chance_succeeds(effect.chance) {
+                tracing::debug!(
+                    skill_id = t.id,
+                    effect_id = effect.effect_id,
+                    target = target.obj_id(),
+                    chance = effect.chance,
+                    "Skill effect skipped: the chance roll failed"
+                );
                 continue;
             }
             if let (Some(last), Some((EffectKind::NpcSpawnerSpawnEffect, id))) =
@@ -1997,6 +2134,13 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                 });
             }
             Some(Err(())) => {
+                tracing::warn!(
+                    skill_id = t.id,
+                    item_id,
+                    item_template_id = template_id,
+                    amount,
+                    "Skill cast cancelled: the source item is no longer in the caster's bag or equipment"
+                );
                 skill.state().cancelled = true;
                 stop(server, skill, caster, 0);
                 return;
@@ -2008,6 +2152,13 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                     .owned_item(server, p, item_id)
                     .is_some_and(|(tid, count)| tid == template_id && count >= amount.max(0));
                 if !ok {
+                    tracing::warn!(
+                        skill_id = t.id,
+                        item_id,
+                        item_template_id = template_id,
+                        amount,
+                        "Skill cast cancelled: the source item is not owned in the required template and count"
+                    );
                     skill.state().cancelled = true;
                     stop(server, skill, caster, 0);
                     return;
@@ -2077,6 +2228,13 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             continue;
         };
         let Some(template) = data.effect(kind, id) else {
+            tracing::debug!(
+                skill_id = t.id,
+                effect_id = effect.effect_id,
+                ?kind,
+                id,
+                "Skill effect skipped: the effect template is missing from the game data"
+            );
             continue;
         };
         // Position casts (ground / ballistic / summon placement) have no unit obj id: keep the

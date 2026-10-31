@@ -581,6 +581,24 @@ pub fn check_alert(c: &mut AiCtx<'_>, _k: BehaviorKind) -> bool {
     }
 }
 
+/// Whether this AI-less NPC has not been reported yet (the help loop runs on every tick, and
+/// the crawler produced 429 repeated errors for a handful of ambient NPCs).
+fn report_npc_without_ai(obj_id: u32) -> bool {
+    static REPORTED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u32>>> =
+        std::sync::OnceLock::new();
+    // Respawned NPCs get fresh object ids: bound the set so it cannot grow for the life of
+    // the process. A clear only lets each NPC warn once more.
+    const MAX_REPORTED: usize = 4096;
+    let mut reported = REPORTED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if reported.len() >= MAX_REPORTED {
+        reported.clear();
+    }
+    reported.insert(obj_id)
+}
+
 /// `Behavior.UpdateAggroHelp(abuser, radius)`.
 pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
     let t = template_scalars(c);
@@ -633,13 +651,16 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
             continue;
         }
         // npc.Ai.Owner.AddUnitAggro(...) + npc.Ai.OnAggroTargetChanged(): an NPC without an
-        // AI throws a NullReferenceException there, which ends this loop.
+        // AI threw a NullReferenceException in C#, which ended the whole help loop. Keep
+        // helping the remaining linked NPCs and report each AI-less one once.
         if !super::manager::has_ai(c.server, other_npc.obj_id) {
-            tracing::error!(
-                "UpdateAggroHelp: npc {} has no AI (NullReferenceException in C#)",
-                other_npc.obj_id
-            );
-            return;
+            if report_npc_without_ai(other_npc.obj_id) {
+                tracing::warn!(
+                    "UpdateAggroHelp: npc {} has no AI; skipped (C# threw a NullReferenceException)",
+                    other_npc.obj_id
+                );
+            }
+            continue;
         }
         add_unit_aggro(c.server, &other, AggroKind::Damage, abuser, 1);
         super::manager::post(c.server, other_npc.obj_id, |o| o.on_aggro_target_changed());
@@ -2654,6 +2675,144 @@ mod tests {
     fn delta_uses_the_millisecond_component() {
         assert_eq!(delta_seconds(120), 0.12);
         assert_eq!(delta_seconds(1120), 0.12);
+    }
+
+    /// `update_aggro_help` walks the linked NPCs in region order. An AI-less NPC used to end the
+    /// loop (the C# NullReferenceException), so the NPCs behind it never helped and the error
+    /// repeated on every tick. It must be skipped with one report, and the next NPC must help.
+    #[tokio::test]
+    async fn aggro_help_skips_an_ai_less_npc_and_still_helps_the_next() {
+        use super::super::framework::{AiKind, NpcAi};
+        use crate::data::GameData;
+        use crate::models::npc::Npc;
+        use crate::systems::npcs::npc::data::NpcTemplate;
+        use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
+        use crate::world::Entity;
+
+        const CASTER: u32 = 0x2E1;
+        const NO_AI: u32 = 0x2E2;
+        const HELPER: u32 = 0x2E3;
+        const ABUSER: u32 = 0x2E4;
+
+        let mut data = GameData::empty();
+        for id in [7000u32, 7001, 7002] {
+            data.systems.npcs.npc.templates.insert(
+                id,
+                NpcTemplate {
+                    id,
+                    aggression: true,
+                    attack_start_range_scale: 1.0,
+                    accept_aggro_link: true,
+                    aggro_link_help_dist: 30.0,
+                    ..NpcTemplate::default()
+                },
+            );
+        }
+        let server = Arc::new(test_server_with(data));
+        server.set_self();
+        crate::systems::skills::bind(&server);
+        let client = TestClient::new(&server, 1, 1001);
+        let player = spawn_player(
+            &server,
+            &client,
+            test_character(1, "Tank", 98.0, 100.0),
+            ABUSER,
+        );
+        let world = server.world.world(0).unwrap();
+
+        let mut caster = Npc::new(7000);
+        caster.unit.transform.set_xyz(100.0, 100.0, 100.0);
+        let caster = Entity::new(CASTER, caster);
+        world.spawn(&caster, &server.view_ctx());
+        // First in the region list on purpose.
+        let mut ai_less = Npc::new(7002);
+        ai_less.unit.transform.set_xyz(101.0, 100.0, 100.0);
+        let ai_less = Entity::new(NO_AI, ai_less);
+        world.spawn(&ai_less, &server.view_ctx());
+        assert!(!super::super::manager::has_ai(&server, NO_AI));
+        let mut helper = Npc::new(7001);
+        helper.unit.transform.set_xyz(102.0, 100.0, 100.0);
+        let helper = Entity::new(HELPER, helper);
+        server.systems.ai.ais.add_ai(&helper, AiKind::HoldPosition);
+        world.spawn(&helper, &server.view_ctx());
+
+        let abuser = WorldObject::from(&player);
+        let mut ai = NpcAi::new(AiKind::AlmightyNpc, &caster);
+        let mut context = AiCtx {
+            server: &server,
+            npc: caster.clone(),
+            obj: WorldObject::from(&caster),
+            ai: &mut ai,
+        };
+        let lines = warnings(|| {
+            update_aggro_help(&mut context, &abuser, 200.0);
+            // A second tick: the AI-less NPC is reported once, and the helper keeps its aggro.
+            update_aggro_help(&mut context, &abuser, 200.0);
+        });
+
+        assert!(
+            helper
+                .data()
+                .unit
+                .skill_state
+                .aggro_table
+                .contains_key(&player.obj_id),
+            "the NPC after the AI-less one must still receive aggro help"
+        );
+        assert!(
+            !caster
+                .data()
+                .unit
+                .skill_state
+                .aggro_table
+                .contains_key(&player.obj_id),
+            "the caster does not add itself"
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.contains("has no AI") && l.contains(&NO_AI.to_string()))
+                .count(),
+            1,
+            "the AI-less NPC must be reported once, got {lines:?}"
+        );
+    }
+
+    /// Captures the formatted WARN lines of the current thread.
+    #[derive(Clone, Default)]
+    struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = LogCapture;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn warnings(f: impl FnOnce()) -> Vec<String> {
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(capture.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let bytes = capture.0.lock().unwrap();
+        String::from_utf8_lossy(&bytes)
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(str::to_string)
+            .collect()
     }
 }
 
