@@ -568,6 +568,12 @@ pub(crate) fn interaction_effect(
     let Some(caster) = &args.caster else {
         return;
     };
+    // Doodad use (gathering, looting a doodad, the mailbox, ...) is a skill Interaction effect,
+    // not CSStartInteraction; the client's interaction gate (FUN_393b3d50) refuses it while
+    // gliding. Answer 334 through the shared check.
+    if crate::systems::skills::glider::refuse_interaction(server, caster) {
+        return;
+    }
     let wi_type = world_interaction as u32;
     if super::doodad::interactions::interaction_class(wi_type).is_none() {
         tracing::error!("InteractionEffect, Unknown world interaction: {world_interaction}");

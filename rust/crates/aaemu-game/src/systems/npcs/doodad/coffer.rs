@@ -322,6 +322,16 @@ impl ClientPacket for CSCofferInteractionPacket {
             let Some(me) = conn.active_char.clone() else {
                 return Ok(());
             };
+            // 1.2 refuses an interaction while gliding (`FUN_393b3d50`, error 334). Closing a
+            // coffer already open is not an interaction.
+            if self.opening
+                && crate::systems::skills::glider::refuse_interaction(
+                    server,
+                    &WorldObject::from(&me),
+                )
+            {
+                return Ok(());
+            }
             let name = me.data().unit.name.clone();
             if self.opening {
                 if !open_coffer_doodad(server, &me, self.coffer_obj_id) {

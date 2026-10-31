@@ -3368,3 +3368,49 @@ container accepts it (the same `can_accept` / `SplitOrMoveItem` path as `CSSwapI
 does the player equipping something else into the back slot. A pack lost while the character is
 dead keeps the record until `resurrect_character`. The explicit `SCUnitEquipmentsChangedPacket`
 broadcast in `put_down_backpack` is gone (the equipment events broadcast leave and re-equip).
+
+## Glider deploy gate and the gliding error codes (2026-10-31)
+
+The C# defined `CannotInteractWhileGliding` / `CannotChangeBackpackInGliding` but never raised them
+and did not check the equipped glider. The Rust adds the 1.2 rules at these entry points
+(`systems::skills::glider` holds the shared predicates):
+
+- `CSStartSkill` of a glider skill requires the equipped glider. A glider skill is a deploy skill
+  (`skills.skill_controller_id` 2687, 31 rows) or a linked glider skill
+  (`skills.link_backpack_type_id` 2: 14901 "glider use" with `link_equip_slot_id` 26, 17657 "glider
+  fold"). The back-slot item must be a glider (`item_backpacks.backpack_type_id` 2), and an
+  `Item` cast must be exactly that equipped item. This mirrors the client's link check
+  `FUN_393925c0` (item backpack type == `link_backpack_type_id` in the linked slot), whose failure
+  raises `must_equip_proper_item` 326. The client converts the default glider skill 14901 into the
+  equipped item's `use_skill_id` (item 14677 -> 12373), so the deploy arrives as an `Item` cast.
+  A refused cast sends `SCErrorMsg(326)` and the `SCSkillStarted` `NO_PERM` result.
+- `CSSwapItemsPacket` / `CSSplitBagItemPacket` moves that take an item out of, or put one into, the
+  back slot while the unit is gliding raise `cannot_change_backpack_in_gliding` 543, mirroring the
+  client's equip validation `FUN_394e41f0`.
+- **Gliding state:** `is_gliding` is an active `buffs.gliding = 't'` buff **while airborne**
+  (`skill_state.airborne`, set by `on_actor_move`). The 1.2 client's stance-4 check ends on the
+  landing movement, while buffs 7431 / 1675 (test / indun flight skills) are not `remove_on_land`
+  and would otherwise keep blocking a landed player. The buff alone (`has_gliding_buff`) is used
+  only for the fold.
+- **Every interaction entry path** uses one shared 334 check (`glider::refuse_interaction`):
+  the skill `InteractionEffect` (`interaction_effect`, which is how doodad use / gathering /
+  looting a doodad / the mailbox arrive) and the direct `execute_interaction_with` path (the
+  CSLootOpenBag recover-item func), `CSStartInteractionPacket`, `CSInteractNPCPacket` (NPC and
+  gimmick targets), `CSLootOpenBagPacket` and opening a `CSCofferInteractionPacket`. The client's
+  gate is `FUN_393b3d50`, which runs before its interaction action `FUN_390a6af0`. A landed unit
+  with a lingering 7431 / 1675 buff is not gliding and is not refused.
+- **Fold when the glider is gone:** the back slot can still change mid-flight through a timed
+  glider expiring or `CSDestroyItem` on the equipped slot. A fold skill (`link_backpack_type_id`
+  2 with `link_equip_slot_id` -1, e.g. 17657) is accepted while a gliding buff is active even with
+  no equipped glider, and the successful fold ends every active gliding buff (`glider::end_flight`)
+  so the client falls cleanly instead of getting `must_equip_proper_item` 326. Without a flight, a
+  forged fold still needs the equipped glider.
+- **Not added:** an airborne requirement for deploying. The 1.2 glider skill has only the authored
+  `unit_reqs` NotUnderWater and NoBuffTag 306 (`unit_reqs` 28592 / 28593), the client start path
+  `FUN_393989e0` checks only the linked item (no stance / air test), and the startup lift
+  (`gliding_startup_speed`) is what takes off from the ground. The double-jump deploy height /
+  freefall gate (`OPTION_ITEM_USE_GLIDE_WITH_DOUBLE_JUMP`, option 57) remains capture-pending
+  (S14-C4).
+- **Not gated:** the internal automatic backpack replacement (`Inventory.TryEquipNewBackPack` from
+  loot / craft / quests). Those callers may hold the character lock, so a `buffs` check there could
+  deadlock; the client-side interaction and equip gates that lead to them are covered above.
