@@ -247,35 +247,46 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
     // 1.2 doodad-use skills: the func's item requirement must be met before the cast starts.
     // The client has no pre-check for these (`link_equip_slot_id` -1) and only stops the cast
     // when `SCSkillStarted` carries a non-zero result; it plays the bar and animation otherwise.
-    if let (SkillCastTarget::Doodad(obj_id), Some(skill)) =
-        (target, data.systems.skills.skill(skill_id))
-    {
-        let doodad = super::geometry::world_of(server, &me)
-            .and_then(|world| world.object(obj_id))
-            .and_then(|object| object.as_doodad().cloned());
-        if let Some(refusal) = doodad.and_then(|doodad| {
-            crate::systems::npcs::doodad::item_gate::skill_item_refusal(server, &doodad, skill, &me)
-        }) {
-            tracing::warn!(
-                character = %player.data().unit.name,
-                skill_id,
-                doodad = obj_id,
-                result = refusal.result,
-                "Client doodad cast refused: the func's item requirement is not met"
-            );
-            if let Some(error) = refusal.error {
-                crate::systems::economy::inventory::send_error_message(&player, error, 0, true);
+    // A Mount caster's effect caster is the slave, so only a player caster acting on its own
+    // behalf is gated here. `allows_skill` runs first: a disallowed skill must keep its
+    // INVALID_TARGET answer instead of turning into an item refusal.
+    if !matches!(p.caster, SkillCaster::Mount { .. }) {
+        if let (SkillCastTarget::Doodad(obj_id), Some(skill)) =
+            (target, data.systems.skills.skill(skill_id))
+        {
+            let doodad = super::geometry::world_of(server, &me)
+                .and_then(|world| world.object(obj_id))
+                .and_then(|object| object.as_doodad().cloned());
+            if let Some(doodad) = doodad.filter(|doodad| {
+                crate::systems::npcs::doodad::gathering::allows_skill(server, doodad, skill, &me)
+            }) {
+                if let Some(refusal) = crate::systems::npcs::doodad::item_gate::skill_item_refusal(
+                    server, &doodad, skill, &me,
+                ) {
+                    tracing::debug!(
+                        character = %player.data().unit.name,
+                        skill_id,
+                        doodad = obj_id,
+                        result = refusal.result,
+                        "Client doodad cast refused: the func's item requirement is not met"
+                    );
+                    if let Some(error) = refusal.error {
+                        crate::systems::economy::inventory::send_error_message(
+                            &player, error, 0, true,
+                        );
+                    }
+                    send_cast_failed(
+                        &player,
+                        skill_id,
+                        p.caster,
+                        target,
+                        p.skill_object,
+                        refusal.result,
+                        refusal.value,
+                    );
+                    return;
+                }
             }
-            send_cast_failed(
-                &player,
-                skill_id,
-                p.caster,
-                target,
-                p.skill_object,
-                refusal.result,
-                refusal.value,
-            );
-            return;
         }
     }
     let is_default = data.skills.is_default_skill(skill_id);
@@ -355,7 +366,7 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
             let (result, value) =
                 skill::unit_use_skill_check(server, &me, rider_skill, rider_target);
             if result != skill_result::SUCCESS {
-                tracing::warn!(
+                tracing::debug!(
                     character = %player.data().unit.name,
                     skill_id,
                     rider_skill,

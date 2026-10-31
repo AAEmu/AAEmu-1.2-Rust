@@ -62,6 +62,10 @@ pub fn skill_item_refusal(
     };
     match template {
         FuncTemplate::ConsumeChanger(f) => {
+            // The 1.2 client turns a NEED_REAGENT value into an item name; use the first item
+            // the func accepts so the text never looks up an unrelated template.
+            let accepted = data.consume_changer_items(f.id);
+            let value = accepted.first().copied().unwrap_or(0);
             let equipment = player.data().inventory.equipment().clone();
             let source = equipment
                 .lock()
@@ -69,13 +73,10 @@ pub fn skill_item_refusal(
                 .get_item_by_slot(f.slot_id as i32)
                 .cloned();
             let Some(source) = source else {
-                return need_reagent(0, Some(error_message::UNKNOWN_ITEM));
+                return need_reagent(value, Some(error_message::UNKNOWN_ITEM));
             };
-            if !data
-                .consume_changer_items(f.id)
-                .contains(&source.template_id)
-            {
-                return need_reagent(0, Some(error_message::STORE_INVALID_ITEM));
+            if !accepted.contains(&source.template_id) {
+                return need_reagent(value, Some(error_message::STORE_INVALID_ITEM));
             }
             None
         }
@@ -85,7 +86,14 @@ pub fn skill_item_refusal(
             }
             None
         }
-        FuncTemplate::BuyFish(_) | FuncTemplate::ConvertFish(_) => {
+        FuncTemplate::BuyFish(f) => {
+            if Inv::of(player).equipped(equip_slot::BACKPACK).is_none() {
+                // Name the fish item the func buys, not template 0.
+                return need_reagent(f.item_id, Some(error_message::STORE_BACKPACK_NOGOODS));
+            }
+            None
+        }
+        FuncTemplate::ConvertFish(_) => {
             if Inv::of(player).equipped(equip_slot::BACKPACK).is_none() {
                 return need_reagent(0, Some(error_message::STORE_BACKPACK_NOGOODS));
             }

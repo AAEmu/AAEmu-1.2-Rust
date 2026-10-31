@@ -3521,3 +3521,18 @@ the rider skill still runs after the mount skill and consumes the item. The same
 `mount_skills.check_attach_point` / `must_use_check` and the `mount_attached_skills` loader
 (`x2game-dev_dedicate.dll.c:2614999-2615210`), consistent with a pre-check, but its runtime
 consumer was not located; the 1.2 ordering/result is therefore not proven there.
+- **RemoveItem now needs the full count before the cast.** Before, the func body consumed what
+  the bag held and advanced the phase whenever the remaining balance was >0
+  (`bag_consume_item`/`container.rs:806`), so a partial stack paid and advanced. Doodads 7261 and
+  7281-7283 (item 29943 x10 / x30) could be advanced with fewer items; the cast-start gate now
+  requires `item_id` x `count` (the effect-time consume stays as the second check).
+- **The rider's full check can now refuse the vehicle skill itself.** Because the mount skill is
+  refused when the rider's `Skill.Use` check fails, unit requirements, cooldowns and target
+  requirements that used to fail only after the slave cast now stop the press. Examples: horse
+  archery 11018 / 11019 / 17156 need a bow, and torpedo 25538 -> 23123 needs target NPC 13680.
+  The same applies to buff requirements and to the rider's own cooldown.
+- ConsumeChanger refusals now carry the first accepted `doodad_func_consume_changer_items` id and
+  BuyFish carries the func's fish item id as the `NEED_REAGENT` value (they were 0), so the 1.2
+  client's item-name lookup (`x2game.dll.c:742315`) always finds a template. The doodad gate runs
+  after `gathering::allows_skill` (a disallowed skill keeps `INVALID_TARGET`) and is skipped for
+  Mount casters, whose effect caster is the slave.

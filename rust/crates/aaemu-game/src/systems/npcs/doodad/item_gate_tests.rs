@@ -7,12 +7,13 @@ use std::sync::Arc;
 use crate::data::items::{ItemTemplate, TemplateKind};
 use crate::models::container::{equip_slot, slot_type};
 use crate::models::item::Item;
+use crate::models::npc::Npc;
 use crate::server::GameServer;
 use crate::systems::economy::inventory::Inv;
 use crate::systems::npcs::doodad::manager;
 use crate::systems::npcs::doodad::templates::*;
 use crate::test_support::*;
-use crate::world::{DoodadRef, PlayerRef, WorldObject};
+use crate::world::{DoodadRef, Entity, PlayerRef, WorldObject};
 
 use super::skill_item_refusal;
 
@@ -183,6 +184,7 @@ async fn buy_fish_without_a_backpack_is_refused() {
         refusal.result,
         crate::systems::skills::types::skill_result::NEED_REAGENT
     );
+    assert_eq!(refusal.value, REQUIRED);
     assert_eq!(
         refusal.error,
         Some(crate::systems::npcs::doodad::funcs::error_message::STORE_BACKPACK_NOGOODS)
@@ -304,4 +306,23 @@ async fn real_compact_db_ids_match_the_gate_fixtures() {
         )
         .unwrap();
     assert_eq!(link, (-1, 1));
+}
+/// An NPC caster is not a character: the item gate leaves it alone.
+#[tokio::test]
+async fn npc_caster_is_not_gated() {
+    let f = fixture(
+        "DoodadFuncConsumeChanger",
+        FuncTemplate::ConsumeChanger(DoodadFuncConsumeChanger {
+            id: 1,
+            slot_id: equip_slot::BACKPACK as u32,
+            count: 1,
+        }),
+        15307,
+    );
+    let npc = Entity::new(0x400, Npc::new(1));
+    let skill = crate::systems::skills::tests::skill_template(15307);
+    assert_eq!(
+        skill_item_refusal(&f.server, &f.doodad, &skill, &WorldObject::from(&npc)),
+        None
+    );
 }
