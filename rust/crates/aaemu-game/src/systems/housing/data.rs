@@ -415,6 +415,8 @@ pub struct HousingData {
     pub groups: HashMap<u32, HousingGroup>,
     /// Allowed categories for each placement group.
     pub group_categories: HashMap<u32, Vec<u32>>,
+    /// Authored construct limit per `(housing_group_id, category_id)`; 0 = unlimited.
+    pub max_construct_count: HashMap<(u32, u32), u32>,
     /// Per-house furniture caps, keyed by (limit id, crafting furniture group).
     pub decoration_limits: HashMap<(u32, u32), u32>,
     templates: HashMap<u32, HousingTemplate>,
@@ -470,10 +472,14 @@ impl HousingData {
             Ok(())
         })?;
         for_each_row(conn, "SELECT * FROM housing_group_categories", [], |r| {
+            let group_id = r.u32("housing_group_id")?;
+            let category_id = r.u32("category_id")?;
             d.group_categories
-                .entry(r.u32("housing_group_id")?)
+                .entry(group_id)
                 .or_default()
-                .push(r.u32("category_id")?);
+                .push(category_id);
+            d.max_construct_count
+                .insert((group_id, category_id), r.u32_or("max_construct_count", 0)?);
             Ok(())
         })?;
         for_each_row(conn, "SELECT * FROM housing_deco_limit_elems", [], |r| {
@@ -1017,7 +1023,8 @@ pub(crate) mod tests {
             monument_doodad_id INT);
         CREATE TABLE housing_areas (id INT, housing_group_id INT);
         CREATE TABLE housing_groups (id INT, houseless NUM, existing_category_id INT, can_extend NUM);
-        CREATE TABLE housing_group_categories (id INT, housing_group_id INT, category_id INT);
+        CREATE TABLE housing_group_categories (id INT, housing_group_id INT, category_id INT,
+            max_construct_count INT);
         CREATE TABLE housing_deco_limit_elems (id INT, housing_deco_limit_id INT, deco_actability_group_id INT, count INT);
         CREATE TABLE taxations (id INT, tax INT, desc TEXT, SHOW NUM);
         CREATE TABLE item_housings (id INT, item_id INT, design_id INT);
@@ -1380,6 +1387,10 @@ pub(crate) mod tests {
         assert_eq!(d.groups.len(), rows("housing_groups"));
         assert_eq!(
             d.group_categories.values().map(Vec::len).sum::<usize>(),
+            rows("housing_group_categories")
+        );
+        assert_eq!(
+            d.max_construct_count.len(),
             rows("housing_group_categories")
         );
         assert_eq!(d.decoration_limits.len(), rows("housing_deco_limit_elems"));
