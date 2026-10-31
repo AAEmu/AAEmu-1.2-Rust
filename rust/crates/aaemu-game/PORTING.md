@@ -3478,3 +3478,61 @@ and did not check the equipped glider. The Rust adds the 1.2 rules at these entr
 - **Not gated:** the internal automatic backpack replacement (`Inventory.TryEquipNewBackPack` from
   loot / craft / quests). Those callers may hold the character lock, so a `buffs` check there could
   deadlock; the client-side interaction and equip gates that lead to them are covered above.
+
+## Doodad func item requirements at cast start (2026-10-31)
+
+The C# checked the item requirement of a doodad-use func only inside the func body, after the
+skill had already started. The 1.2 client has no pre-check for these skills
+(`skills.link_equip_slot_id` is -1: 15307, 21910, 22225, 15734, 21904, 22201, 13789, ...) and only
+stops a cast when `SCSkillStarted` carries a non-zero result (1.2 client `FUN_3939a810`, about
+750316-750338 in `out-x2game/x2game.dll.c`), so the bar and animation played before the effect
+refused. `systems::npcs::doodad::item_gate::skill_item_refusal` now answers the same requirement
+at the cast start, through `skills::validation::check` (both `Skill.Use` and `Skill.Cast`) and
+before the mount/rider branch of `CSStartSkill` for player casters:
+
+- `DoodadFuncConsumeChanger` (trade-pack storage, Hang Fish, Store Fish in Water Tank, tic-tac-toe):
+  the equipped `slot_id` item missing -> `SCErrorMsg(UNKNOWN_ITEM 213)`; an item not in
+  `doodad_func_consume_changer_items` -> `SCErrorMsg(STORE_INVALID_ITEM 87)`.
+- `DoodadFuncRemoveItem`: the bag must hold `item_id` x `count`.
+- `DoodadFuncBuyFish` / `DoodadFuncConvertFish`: the backpack slot must hold a pack ->
+  `SCErrorMsg(STORE_BACKPACK_NOGOODS 361)`.
+- `DoodadFuncPurchase` / `DoodadFuncRecoverItem` stay effect-time only: their reasons (bag space,
+  ownership) were not shown to be cast-start checks.
+
+The refusal result is `NEED_REAGENT` (0x24) with the item template id as its value where one is
+known; the 1.2 client's result handler (`FUN_39390900`) names that item for 0x24. **Inferred:** the
+10.x zone decompile (`x2game-dev_dedicate.dll.c`) contains only the `DoodadFuncConsumeChanger`
+descriptor loader and factory (2841893-2842045 and 2605824-2606182) and no use / can-use check, so
+the real 1.2 result code is not recoverable; the choice follows the research recommendation
+(`Doodad item requirements ...`, 2026-10-31-tradepack-gate.md) and the `SkillResult` 36 =
+`NEED_REAGENT` mapping in the same decompile (2826887). The effect-time checks stay as a second
+line of defence for an item that changes during the cast.
+
+The Farm Wagon's eco fuel is not a doodad func: skill 20291 (its bar entry, mount skill row 190)
+carries the rider skill 20292 (`mount_attached_skills`, attach point 1), whose `skill_reagents`
+are one of 26548 / 34583. The mount branch of `CSStartSkill` now runs the rider skill's **full**
+`Skill.Use` check (`skill::unit_use_skill_check`, the check-only mode of `use_skill`) before the
+slave skill casts, and refuses the press with the rider's result/value when it fails. That covers
+reagents, requirements, cooldown and the other checks the late `unit_use_skill` call would apply,
+so the missing fuel no longer leaves buff 4841 behind and no slave animation is played. With fuel
+the rider skill still runs after the mount skill and consumes the item. The same gate covers every
+`mount_attached_skills` row with reagents (the ship speed boosts 25632/22459/22449/22451/22450/
+22449, the cannon projectile rider skills, ...), not only the wagon. The 10.x decompile has
+`mount_skills.check_attach_point` / `must_use_check` and the `mount_attached_skills` loader
+(`x2game-dev_dedicate.dll.c:2614999-2615210`), consistent with a pre-check, but its runtime
+consumer was not located; the 1.2 ordering/result is therefore not proven there.
+- **RemoveItem now needs the full count before the cast.** Before, the func body consumed what
+  the bag held and advanced the phase whenever the remaining balance was >0
+  (`bag_consume_item`/`container.rs:806`), so a partial stack paid and advanced. Doodads 7261 and
+  7281-7283 (item 29943 x10 / x30) could be advanced with fewer items; the cast-start gate now
+  requires `item_id` x `count` (the effect-time consume stays as the second check).
+- **The rider's full check can now refuse the vehicle skill itself.** Because the mount skill is
+  refused when the rider's `Skill.Use` check fails, unit requirements, cooldowns and target
+  requirements that used to fail only after the slave cast now stop the press. Examples: horse
+  archery 11018 / 11019 / 17156 need a bow, and torpedo 25538 -> 23123 needs target NPC 13680.
+  The same applies to buff requirements and to the rider's own cooldown.
+- ConsumeChanger refusals now carry the first accepted `doodad_func_consume_changer_items` id and
+  BuyFish carries the func's fish item id as the `NEED_REAGENT` value (they were 0), so the 1.2
+  client's item-name lookup (`x2game.dll.c:742315`) always finds a template. The doodad gate runs
+  after `gathering::allows_skill` (a disallowed skill keeps `INVALID_TARGET`) and is skipped for
+  Mount casters, whose effect caster is the slave.

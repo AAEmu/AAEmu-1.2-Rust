@@ -8,6 +8,7 @@ pub mod db;
 pub mod funcs;
 pub mod gathering;
 pub mod interactions;
+pub mod item_gate;
 pub mod logic;
 pub mod manager;
 pub mod natural;

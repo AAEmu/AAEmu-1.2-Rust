@@ -1287,6 +1287,27 @@ impl GameClient {
         self.send_cs(cs::CSStartSkillPacket, s.as_bytes()).await
     }
 
+    /// `CSStartSkillPacket` from a vehicle bar entry: mount caster (the vehicle) on itself, the
+    /// way the 1.2 client casts a slave / mate skill. `mount_skill_template_id` is the client's
+    /// bar-row hint; the server resolves the mount row and rider skill from `skill_id`
+    /// (`mount_skills.skill_id` -> `mount_attached_skills`), not from this field.
+    pub async fn start_mount_skill(
+        &mut self,
+        skill_id: u32,
+        mount_obj: u32,
+        mount_skill_template_id: u32,
+    ) -> anyhow::Result<()> {
+        let mut s = PacketStream::new();
+        s.write_u32(skill_id)
+            .write_u8(3) // SkillCasterType.Mount
+            .write_bc(mount_obj)
+            .write_u32(mount_skill_template_id)
+            .write_u8(0) // target type Unit
+            .write_bc(mount_obj)
+            .write_u8(0); // flag: no skill object
+        self.send_cs(cs::CSStartSkillPacket, s.as_bytes()).await
+    }
+
     /// `CSSwapAbilityPacket` (replace ability `old` with `new` in the character's slots).
     pub async fn swap_ability(&mut self, old: u8, new: u8) -> anyhow::Result<()> {
         let mut s = PacketStream::new();
