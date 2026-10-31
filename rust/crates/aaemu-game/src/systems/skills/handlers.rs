@@ -335,36 +335,43 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
             }
         }
         // The vehicle bar skill can carry a rider / operator skill (`mount_attached_skills`).
-        // Its reagents belong to the press that fires it, so refuse the mount skill before the
-        // cast when the rider skill's item is missing (the Farm Wagon's eco fuel, 20291 ->
-        // 20292). The 1.2 client shows the cast otherwise and the rider skill fails only when
-        // the mount skill has already fired.
+        // Its full use check belongs to the press that fires it: run the same checks
+        // `unit_use_skill` would run before the slave skill casts, so a refusal (missing
+        // reagent, cooldown, requirement, ...) leaves neither the slave animation nor its buff
+        // behind (the Farm Wagon's eco fuel, 20291 -> 20292). On success the rider still runs
+        // and consumes the item after the mount skill, as before.
         let rider_skill = data
             .systems
             .vehicles
             .mount_attached_skill(skill_id, player.data().attached_point);
-        if rider_skill != 0 {
-            if let Some(rider) = data.systems.skills.skill(rider_skill) {
-                if let Err((result, value)) = super::validation::check_reagents(server, rider, &me)
-                {
-                    tracing::warn!(
-                        character = %player.data().unit.name,
-                        skill_id,
-                        rider_skill,
-                        result,
-                        "Client mount cast refused: the attached rider skill lacks its reagent"
-                    );
-                    send_cast_failed(
-                        &player,
-                        skill_id,
-                        p.caster,
-                        target,
-                        p.skill_object,
-                        result,
-                        value,
-                    );
-                    return;
-                }
+        let rider_target = (rider_skill != 0).then(|| {
+            let current = player.data().unit.current_target;
+            super::geometry::world_of(server, &me)
+                .and_then(|w| w.object(current))
+                .filter(WorldObject::is_unit)
+                .unwrap_or_else(|| me.clone())
+        });
+        if let (rider_skill, Some(rider_target)) = (rider_skill, rider_target.as_ref()) {
+            let (result, value) =
+                skill::unit_use_skill_check(server, &me, rider_skill, rider_target);
+            if result != skill_result::SUCCESS {
+                tracing::warn!(
+                    character = %player.data().unit.name,
+                    skill_id,
+                    rider_skill,
+                    result,
+                    "Client mount cast refused: the attached rider skill's use check failed"
+                );
+                send_cast_failed(
+                    &player,
+                    skill_id,
+                    p.caster,
+                    target,
+                    p.skill_object,
+                    result,
+                    value,
+                );
+                return;
             }
         }
         let (r, _v) = skill::use_skill(
@@ -389,12 +396,8 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
         if mount_attached_skill == 0 {
             return;
         }
-        // Use player's currently selected target for the rider/operator skill
-        let current = player.data().unit.current_target;
-        let rider_target = super::geometry::world_of(server, &me)
-            .and_then(|w| w.object(current))
-            .filter(WorldObject::is_unit)
-            .unwrap_or_else(|| me.clone());
+        // The rider target was resolved before the mount cast and the pre-check used it.
+        let rider_target = rider_target.unwrap_or_else(|| me.clone());
         result = skill::unit_use_skill(server, &me, mount_attached_skill, &rider_target);
     } else if is_auto
         && auto
