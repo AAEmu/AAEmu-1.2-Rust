@@ -325,6 +325,7 @@ async fn parent_only_cannon_attack(occupied: bool) {
     let cannon = world.slave(cannon_id).unwrap();
     if occupied {
         let tl = u32::from(cannon.data().unit.tl_id);
+        super::stand_next_to(&world, &owner, &WorldObject::from(&cannon));
         slaves::bind_slave_by_tl(&server, &owner, tl);
     }
     // The authenticated movement path accepts a supporting object, but grants no gunner seat.
@@ -390,6 +391,7 @@ async fn parent_only_cannon_attack(occupied: bool) {
         owner.data().attached_point = attach_point::DRIVER;
     } else {
         let tl = u32::from(cannon.data().unit.tl_id);
+        super::stand_next_to(&world, &owner, &WorldObject::from(&cannon));
         slaves::bind_slave_by_tl(&server, &owner, tl);
     }
     start_skill(&server, &mut a.conn, shot);
@@ -421,6 +423,7 @@ async fn carrier_death_detaches_gunner_before_deleting_cannon() {
     let cannon_id = carrier.data().attached_slaves[0];
     let cannon = world.slave(cannon_id).unwrap();
     let tl = u32::from(cannon.data().unit.tl_id);
+    super::stand_next_to(&world, &owner, &WorldObject::from(&cannon));
     slaves::bind_slave_by_tl(&server, &owner, tl);
     carrier
         .data()

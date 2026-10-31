@@ -15,6 +15,13 @@
 //! target <npc template>              select the nearest NPC of that template
 //! kill <npc template>                walk next to the nearest NPC, target it, `/kill`
 //! cast <skill> <npc template>        CSStartSkill on the nearest NPC
+//! slave <template>                  nearest slave (obj / tl / template)
+//! interact <template>               CSStartInteraction on the slave, print its skill list
+//! bind <template>                   CSBindSlave 0x031 with the slave's tl
+//! scast <skill> <template> [point]  CSStartSkill on the nearest slave (wait for the attach)
+//! scastfail <skill> <template> <code>  CSStartSkill on the slave, wait for SCErrorMsg
+//! expectattach <point>              fail unless SCUnitAttached for us at that point
+//! expecterror <code>                fail unless SCErrorMsg with that code
 //! dcast <skill> <doodad template>    doodad-target CSStartSkill
 //! item <template> <count>            `/item add self` and remember the stack id
 //! icast <skill> <item template> <npc template|self|peer|player:NAME> [metres [max secs]]
@@ -159,6 +166,23 @@ fn nearest(game: &GameClient, tpl: u32) -> Option<UnitInfo> {
         .filter(|u| u.unit_type == 1 && u.id == tpl)
         .min_by(|a, b| dist(a.pos, me).total_cmp(&dist(b.pos, me)))
         .cloned()
+}
+
+/// The nearest slave (unit type 2) of `template`.
+fn nearest_slave(game: &GameClient, template: u32) -> Option<UnitInfo> {
+    let me = game.state.self_pos;
+    game.state
+        .units
+        .values()
+        .filter(|u| u.unit_type == 2 && u.id == template)
+        .min_by(|a, b| dist(a.pos, me).total_cmp(&dist(b.pos, me)))
+        .cloned()
+}
+
+/// `(child, point, parent, reason)` of an `SCUnitAttachedPacket` body.
+fn unit_attached(body: &[u8]) -> anyhow::Result<(u32, u8, u32, u8)> {
+    let mut s = aaemu_commons::PacketStream::from_bytes(body.to_vec());
+    Ok((s.read_bc()?, s.read_u8()?, s.read_bc()?, s.read_u8()?))
 }
 
 fn num<T: std::str::FromStr>(parts: &[&str], i: usize) -> anyhow::Result<T> {
@@ -564,6 +588,146 @@ async fn run_lines(
                     .drain(Duration::from_millis(1500), Duration::from_secs(8))
                     .await?;
                 show(&got);
+            }
+            "slave" => {
+                let tpl: u32 = num(&parts, 0)?;
+                let s = nearest_slave(game, tpl)
+                    .with_context(|| format!("slave {tpl} not in sight"))?;
+                println!(
+                    "    slave obj {} tl {} tpl {} at {:?}",
+                    s.obj_id, s.tl_id, s.id, s.pos
+                );
+            }
+            "interact" => {
+                let tpl: u32 = num(&parts, 0)?;
+                let s = nearest_slave(game, tpl)
+                    .with_context(|| format!("slave {tpl} not in sight"))?;
+                clock += 1500;
+                game.move_to((s.pos.0 + 1.0, s.pos.1, s.pos.2), clock)
+                    .await?;
+                game.change_target(s.obj_id).await?;
+                game.drain(Duration::from_millis(300), Duration::from_secs(1))
+                    .await?;
+                game.start_interaction(s.obj_id).await?;
+                let list = game
+                    .wait_for("SCNpcInteractionSkillListPacket", |p| {
+                        p.is_sc(sc::SCNpcInteractionSkillListPacket)
+                            && super::interaction_skill_list(&p.body)
+                                .is_ok_and(|(npc, _)| npc == s.obj_id)
+                    })
+                    .await?;
+                let (_, skills) = super::interaction_skill_list(&list.body)?;
+                println!(
+                    "    slave obj {} tl {} offers {skills:?}",
+                    s.obj_id, s.tl_id
+                );
+                if let Some(want) = parts.get(1) {
+                    let want: u32 = want.parse()?;
+                    anyhow::ensure!(
+                        skills.contains(&want),
+                        "slave {} offers {skills:?}, not {want}",
+                        s.obj_id
+                    );
+                }
+                last_npc = s.obj_id;
+            }
+            "bind" => {
+                let tpl: u32 = num(&parts, 0)?;
+                let s = nearest_slave(game, tpl)
+                    .with_context(|| format!("slave {tpl} not in sight"))?;
+                clock += 1500;
+                game.move_to((s.pos.0 + 1.0, s.pos.1, s.pos.2), clock)
+                    .await?;
+                let mut body = aaemu_commons::PacketStream::new();
+                body.write_u16(s.tl_id);
+                game.send_cs(cs::CSBindSlavePacket, body.as_bytes()).await?;
+                if let Some(point) = parts.get(1) {
+                    let point: u8 = point.parse()?;
+                    let me = game.state.self_obj;
+                    let p = game
+                        .wait_for("SCUnitAttachedPacket", |p| {
+                            p.is_sc(sc::SCUnitAttachedPacket)
+                                && unit_attached(&p.body)
+                                    .is_ok_and(|(child, pt, _, _)| child == me && pt == point)
+                        })
+                        .await?;
+                    let (child, pt, parent, reason) = unit_attached(&p.body)?;
+                    println!(
+                        "    SCUnitAttached child {child} point {pt} parent {parent} reason {reason}"
+                    );
+                } else {
+                    let got = game
+                        .drain(Duration::from_millis(1500), Duration::from_secs(8))
+                        .await?;
+                    show(&got);
+                }
+            }
+            "scast" => {
+                let skill: u32 = num(&parts, 0)?;
+                let tpl: u32 = num(&parts, 1)?;
+                let s = nearest_slave(game, tpl)
+                    .with_context(|| format!("slave {tpl} not in sight"))?;
+                clock += 1500;
+                game.move_to((s.pos.0 + 1.0, s.pos.1, s.pos.2), clock)
+                    .await?;
+                game.change_target(s.obj_id).await?;
+                game.start_skill(skill, s.obj_id).await?;
+                if let Some(point) = parts.get(2) {
+                    let point: u8 = point.parse()?;
+                    let me = game.state.self_obj;
+                    let p = game
+                        .wait_for("SCUnitAttachedPacket", |p| {
+                            p.is_sc(sc::SCUnitAttachedPacket)
+                                && unit_attached(&p.body)
+                                    .is_ok_and(|(child, pt, _, _)| child == me && pt == point)
+                        })
+                        .await?;
+                    let (child, pt, parent, reason) = unit_attached(&p.body)?;
+                    println!(
+                        "    SCUnitAttached child {child} point {pt} parent {parent} reason {reason}"
+                    );
+                } else {
+                    let got = game
+                        .drain(Duration::from_millis(1500), Duration::from_secs(8))
+                        .await?;
+                    show(&got);
+                }
+            }
+            "scastfail" => {
+                let skill: u32 = num(&parts, 0)?;
+                let tpl: u32 = num(&parts, 1)?;
+                let code: i16 = num(&parts, 2)?;
+                let s = nearest_slave(game, tpl)
+                    .with_context(|| format!("slave {tpl} not in sight"))?;
+                game.start_skill(skill, s.obj_id).await?;
+                game.wait_for("SCErrorMsgPacket", |p| {
+                    p.is_sc(sc::SCErrorMsgPacket) && p.stream().read_i16().ok() == Some(code)
+                })
+                .await?;
+                println!("    SCErrorMsg {code}");
+            }
+            "expectattach" => {
+                let point: u8 = num(&parts, 0)?;
+                let me = game.state.self_obj;
+                let p = game
+                    .wait_for("SCUnitAttachedPacket", |p| {
+                        p.is_sc(sc::SCUnitAttachedPacket)
+                            && unit_attached(&p.body)
+                                .is_ok_and(|(child, pt, _, _)| child == me && pt == point)
+                    })
+                    .await?;
+                let (child, pt, parent, reason) = unit_attached(&p.body)?;
+                println!(
+                    "    SCUnitAttached child {child} point {pt} parent {parent} reason {reason}"
+                );
+            }
+            "expecterror" => {
+                let code: i16 = num(&parts, 0)?;
+                game.wait_for("SCErrorMsgPacket", |p| {
+                    p.is_sc(sc::SCErrorMsgPacket) && p.stream().read_i16().ok() == Some(code)
+                })
+                .await?;
+                println!("    SCErrorMsg {code}");
             }
             "dcast" => {
                 let skill: u32 = num(&parts, 0)?;

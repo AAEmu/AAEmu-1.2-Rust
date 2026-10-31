@@ -373,7 +373,7 @@ pub struct UnitInfo {
     pub obj_id: u32,
     pub name: String,
     pub unit_type: u8,
-    /// Character id (type 0) or NPC template id (type 1).
+    /// Character id (type 0), NPC / slave template id (types 1 / 2).
     pub id: u32,
     pub pos: (f32, f32, f32),
     /// Transport-layer id of a mate (type 5, `SCUnitStatePacket`); 0 for every other unit.
@@ -651,6 +651,14 @@ impl GameState {
                     let tpl = s.read_u32()?;
                     s.read_u32()?;
                     s.read_u8()?;
+                    tpl
+                }
+                2 => {
+                    // Slave: db id, tl id, template id, summoner character id.
+                    s.read_u32()?;
+                    tl_id = s.read_u16()?;
+                    let tpl = s.read_u32()?;
+                    s.read_u32()?;
                     tpl
                 }
                 5 => {

@@ -234,7 +234,7 @@ These `SpecialType` bodies were TODO stubs that only logged in the C# (`git show
 | `NpcManager.Load` (customs, body parts, templates, equip packs, postures, unit modifiers, initial buffs, merchants / goods) | `npc/data.rs` | done | 13 382 templates on the real DB. Creatures.xml names, `LoadAiParams` not ported. |
 | `NpcManager.Create`, `LoadCustom` (.NET `Random(123456789)` parity), `Npc` stats (Str..KillExp from the unit formulas + template bonuses), `InitializeSpawnBuffs`, `AnimActionId` | `npc/manager.rs`, `npc/stats.rs` | done | Every real template creates without error. The AI is created through `server.systems.hooks.ai` (`systems::ai`). |
 | `Npc.DoDie` | `npc/death.rs` | done | Kill exp (team eligibility, `PlayerExpModifier`, mate exp, TagShare contributors), quest kill events, loot (`LootManager.GenerateLoot` through the economy), aggro / tagger clean-up, spawner despawn, `Ai.GoToDead()` (`systems::ai`). |
-| NPC interaction packets (CSStartInteraction, CSInteractNPC(End), CSSelectInteractionEx; SCNpcInteractionSkillList, SCAiAggro, SCNpcChatMessage, SCUnitModelPostureChanged, SCAggroTargetChanged) | `npc/packets.rs` | done | Byte-exact tests. Merchant / bank / auction UIs are economy's. **Deviation:** `CSStartInteractionPacket` also answers a slave with skill 12076 (occupy), so the 1.2 client's first-skill path (`FUN_393be850` / `FUN_393bf310`) sends `CSBindSlave` 0x031 (bound by `vehicles::slaves::bind_slave_by_tl`); the C# answered only NPCs and mates (12077). |
+| NPC interaction packets (CSStartInteraction, CSInteractNPC(End), CSSelectInteractionEx; SCNpcInteractionSkillList, SCAiAggro, SCNpcChatMessage, SCUnitModelPostureChanged, SCAggroTargetChanged) | `npc/packets.rs` | done | Byte-exact tests. Merchant / bank / auction UIs are economy's. **Deviation:** `CSStartInteractionPacket` also answers a slave with one seat skill, because the 1.2 client acts on the first list entry (`FUN_393be850` / `FUN_393be280`): 12076 (occupy) while the driver seat is free, else 13863 (passenger seat, `special_effects` 2378 value1 2) while point 2 is free and the slave is not a cannon; a slave with both seats taken keeps 12076; the bind then ignores the taken seat silently (C# behaviour). The C# answered only NPCs and mates (12077). |
 | `NpcGameData` (npc_spawners, npc_spawner_npcs, member index, generated spawners) | `npc/spawner_data.rs` | done | |
 | `NpcSpawner`, `NpcSpawnerNpc`, `DoodadSpawner`, `Spawner<T>` | `npc/spawner.rs`, `doodad/spawner.rs` | done | Schedules / time windows / population caches, respawn + despawn timing, exact-identity reconciliation of direct deletes (see deviations). Ordinary populations keep the authored `Count` / `min_population` baseline (default 1) and per-slot respawn deadlines (see deviations). AI home position / follow path / simulation through `server.systems.hooks.ai` (`systems::ai`). |
 | `SpawnManager` (one per instance) + `WorldManager.ActiveRegionTick` spawner part | `spawn_manager.rs` | done | main_world: 25 118 NPC entries -> 24 047 ordinary placements / 38 174 spawner clones (1 011 duplicates and 60 event entries filtered, 0 missing templates), 42 649 doodads, 69 transfers, 14 gimmicks, 5 slaves, 0 parse errors. Ordinary spawning is a bounded per-instance 64 m region-index activation pass (`World.NpcPrewarmRegionMargin` / `World.NpcSpawnTickMs` / `World.NpcSpawnsPerTick`) with warm retention and resident-service retention (`World.NpcWarmRetentionSeconds` / `World.NpcResidentServiceNpcs`; see deviations). Persistent doodads from MySQL. Transfers / slaves: `systems::vehicles`; houses and their doodads: `systems::housing`; trial court doodads / NPCs linked after the spawns (`TrialManager.Initialize*`). |
@@ -431,7 +431,7 @@ Cross-subsystem: mates are despawned on dungeon entry and `PlayerCanEnter` check
 |---|---|---|---|
 | `MateGameData`, `SlaveGameData` (templates, unit modifiers, initial items / buffs, passive buffs, doodad / healing point / slave bindings, drop doodads, mount skills, repairable slaves, `slave_equip_slots`, `item_slave_equipments`, `allow_to_equip_slaves` / `allow_to_equip_slots`, `slave_attach_points*.json`), `TransferGameData` (templates, bindings, binding doodads, paths, client `transfer_path.xml` roads + `GetOwnerPaths`), `ShipyardManager.Load`, `TaxationsManager` table, `ModelManager` vehicle / ship models | `systems/vehicles/data.rs` | done | Gated test `real_compact_db_vehicle_tables` checks the row counts; `real_transfer_follows_its_client_route` loads the roads from the game_pak. |
 | `MateManager` (per instance), `CharacterMates` (load / save / spawn / despawn), `Mate` (`AddExp`, `MateXpUpdateTask`, `RegenTick`, `DoFallDamage`, `OnZoneChange`, stats) | `systems/vehicles/mates.rs`, `stats.rs` | done | Mount / dismount (`SCUnitAttached` / `SCUnitDetached`, rider becomes a transform child), rename, target, user state, mate equipment packet (item move through `VehicleItemHooks`), kill exp, stun / unmount skills, death despawn. |
-| `SlaveManager` (per instance), `SlaveSpawner`, `SummonSlave` details, `Slave` (`DoDie`, `DoHpChangeTrigger` / repair points, `RegenTick`, `Save`, `OnZoneChange`, stats) | `systems/vehicles/slaves.rs` | done | Create (saved slave / persistent doodads / saved child slaves from MySQL, position, boats on the water surface, doodad and slave bindings at the model attach points), bind / unbind, delete with portal-time despawn, Rider's Escape, repair cooldown, `RepairSlaveEffect`, `SendMySlaveTask`, logout (+10 min) / disconnect despawn task, `slaves` table (`AfterCharacters`). |
+| `SlaveManager` (per instance), `SlaveSpawner`, `SummonSlave` details, `Slave` (`DoDie`, `DoHpChangeTrigger` / repair points, `RegenTick`, `Save`, `OnZoneChange`, stats) | `systems/vehicles/slaves.rs` | done | Create (saved slave / persistent doodads / saved child slaves from MySQL, position, boats on the water surface, doodad and slave bindings at the model attach points), bind / unbind (the seat check, client reach and reservation run under the slave's one lock; a taken seat is silent as in the C#, an already-seated character is refused with `slave_unbind_first` 0x66, a cannon refuses the passenger seat with `slave_cannot_bind` 0x60, and the owners-mark driver refusal keeps 0x61), delete with portal-time despawn, Rider's Escape, repair cooldown, `RepairSlaveEffect`, `SendMySlaveTask`, logout (+10 min) / disconnect despawn task, `slaves` table (`AfterCharacters`). |
 | `TransferManager` (per instance, 100 ms tick), `TransferSpawner`, `Transfer` route following (`GoToPath`, `MoveTo`, `NextPoint`) | `systems/vehicles/transfers.rs` | done | Carriage motor + boarding part + bench doodads, `SCOneUnitMovementPacket` (transfer move type) for both parts. Spawned from `SpawnManager.SpawnAll`. |
 | `ShipyardManager` runtime, `Shipyard` build steps, `CraftEffect` shipyard branches, `ShipyardTickTask`, `ShipyardCompleteTask` | `systems/vehicles/shipyards.rs`, `effects.rs` | done | Requirements via the skills item hooks + money (`SCItemTaskSuccess` money form). |
 | `ShipHarpoonRopeController`, `CSUnhangPacket` | `systems/vehicles/harpoon.rs` | done | Tow forces are physics (`ShipHarpoonTowPhysics`): the per-tick entry points are exposed for the physics port. |
@@ -1423,6 +1423,34 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `AttachedCharacters` list is never filled).
 * systems::vehicles: `Transform.Parent = null` keeps the world position (`detach_child`); the C#
   keeps the local values until the next position update.
+* systems::vehicles (2026-10-31, passenger seats): `BindSlave` takes the reach from its caller:
+  the 12076 driver bind passes 4.0 m (`FUN_39346290` -> `FUN_39093860(..., 16.0)`, strictly
+  under 4.0), the 13863 passenger interaction passes the passenger reach (`FUN_393bf270` ->
+  `FUN_39093860(..., 9.0)`, strictly under 3.0, widened to 12.25 = 3.5 m by the target's
+  `+0x3c26` flag), and the doodad BoardTransfer path passes `None` because its doodad func has
+  its own use-range check. The gap is measured against the ship model's mass box when the slave
+  has a ship model, else the requested attach point's world position, and only falls back to
+  the slave origin when neither exists; a ship's bare origin is never the measure (a merchant
+  ship's seat / helm can be far from the origin). The 3.5 m branch keys on the character's
+  `is_riding`, but the decompile reads `+0x3c26` from the target (where it is also the dead
+  flag), so this is capture-pending (S11-C5). A bind outside the reach answers `TOO_FAR_AWAY`
+  0x9a. A character already in any slave's `attached_characters` is refused with
+  `slave_unbind_first` 0x66 (`FUN_39346290`); a mate is not in that list, so S11-C5 stays open.
+  The passenger seat is refused on a cannon (slave kind 7 / 8) with `slave_cannot_bind` 0x60.
+  A taken seat keeps the C# silent return (debug log); the client message table's 0x61 is not
+  evidenced for that case (S11-C2 capture-pending), and 0x61 is kept only for the C# owners-mark
+  driver refusal. A character who dies is unbound from any slave seat through the same
+  `unbind_slave` path as logout (the C# only did this for cannon gunners, so a ship driver /
+  passenger kept a stale seat and the one-slave guard then refused every later bind).
+  **Capture-pending (S11-C6):** whether 1.2 refuses an enemy / non-owner ship is unproven; the
+  `+0x3c26` flag may be a faction / owner flag and no faction rule is implemented.
+  `CSBindSlave` 0x031 has no attach
+  point in the 1.2 packet (client `FUN_393464a0` writes only the target tl) and its only builder
+  is 12076 "occupy", so `bind_slave_by_tl` keeps driver point 1; the passenger seat is skill
+  13863 -> `AttachTo` (`special_effects` 2378 type 53 value1 2), which reaches point 2 now that
+  `CSStartInteractionPacket` offers 13863 once the driver seat is taken (NPC interaction row).
+  `CSDiscardSlave` 0x032 has no server-side speed check in the C#; the 1.2 client refuses to
+  send it above 5 m/s with message 0x67 (`FUN_39345aa0`), so the server keeps none.
 * systems::vehicles (2026-10-29): a rider is seated with its local rotation zeroed as well as its
   position (`mates::reset_rider_transform`, in `MountMate` and in the riding re-attach of
   `CSMoveUnitPacket`). The C# `MountMate` only did `Local.SetPosition(0, 0, 0)`, so the heading the
@@ -3010,7 +3038,10 @@ two bots before the fix (a foreign `Mount` caster, an NPC-only skill and a far d
   window sends a plain `CSStartSkill` with a `SavePortalInfo` object. `SkillData` now sources the
   skills whose effect is `SpecialEffect` 30 `SavePortal` (`CLIENT_SKILL_SPECIAL_EFFECT_SOURCES`,
   narrow by type id, not by effect class). The effect still requires the Memory Ink reagent
-  (`skill_reagents`) and only renames the caster's own portal.
+  (`skill_reagents`) and only renames the caster's own portal. The same list now includes type
+  53 `AttachTo`: the 1.2 slave action bar (`FUN_393bbb80`) adds 13863 "Take the Passenger Seat"
+  and `FUN_39362f50` sends it as a plain `CSStartSkill`, and no source table names it. Its effect
+  only binds the caster to the target slave at the value1 seat.
 
 ### Item, vehicle bar and SavePortal hardening (2026-10-30)
 

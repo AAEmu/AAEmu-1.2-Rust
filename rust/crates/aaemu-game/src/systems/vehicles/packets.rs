@@ -338,6 +338,9 @@ cs_packet!(
     handle |self, server, conn| {
         tracing::debug!("DiscardSlave, Tl: {}", self.tl_id);
         let p = active_char!(conn);
+        // The 1.2 client refuses to send this above 5 m/s (speed^2 > 25, message 0x67) in
+        // `FUN_39345aa0`; the C# `UnbindSlave` has no server-side speed check and this port
+        // keeps none (see PORTING.md).
         slaves::unbind_slave(server, &p, u32::from(self.tl_id), slaves::attach_reason::SLAVE_BINDING);
         Ok(())
     }
