@@ -168,6 +168,8 @@ fn slave_unit_state_bytes() {
     sl.attach_point_id = 3;
     sl.owner_obj_id = 0x0A0B0C;
     sl.bonding_obj_id = 0x000102;
+    sl.turret_pitch = 0.25;
+    sl.turret_yaw = -0.5;
     let p = slave_unit_state(0x20, &mut sl, "", 0);
 
     let mut e = PacketStream::new();
@@ -182,7 +184,8 @@ fn slave_unit_state_bytes() {
                    // AttachPoint1: point 3 + OwnerObjId bc; AttachPoint2: BondingObjId bc.
                    // TurretState posture: type 8, isLooted, pitch, yaw.
     let mut posture = vec![8, 0];
-    posture.extend_from_slice(&[0; 8]);
+    posture.extend_from_slice(&0.25f32.to_le_bytes());
+    posture.extend_from_slice(&(-0.5f32).to_le_bytes());
     tail(
         &mut e,
         &[3, 0x0C, 0x0B, 0x0A, 0x02, 0x01, 0x00],

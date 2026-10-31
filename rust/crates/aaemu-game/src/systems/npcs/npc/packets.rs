@@ -130,14 +130,17 @@ pub fn npc_chat_name(server: &GameServer, npc_name: &str, template_id: u32) -> S
 }
 
 /// `SCUnitModelPostureChangedPacket(unit, animActionId, activateAnimation)`; the posture type
-/// and `HasLootLeft` are read from the unit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// and `HasLootLeft` are read from the unit. `turret_pitch` / `turret_yaw` are only written for
+/// `ModelPostureType::TurretState` (the 1.2 client's `397bda20` -> `397b1df0` reader).
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SCUnitModelPostureChangedPacket {
     pub obj_id: u32,
     pub posture: ModelPostureType,
     pub has_loot_left: bool,
     pub anim_action_id: u32,
     pub activate_animation: bool,
+    pub turret_pitch: f32,
+    pub turret_yaw: f32,
 }
 packet_def!(
     SCUnitModelPostureChangedPacket,
@@ -168,7 +171,7 @@ impl Marshal for SCUnitModelPostureChangedPacket {
                     .write_bool(false);
             }
             ModelPostureType::TurretState => {
-                s.write_f32(0.0).write_f32(0.0);
+                s.write_f32(self.turret_pitch).write_f32(self.turret_yaw);
             }
             ModelPostureType::None => {}
         }
@@ -612,6 +615,8 @@ mod tests {
             has_loot_left: false,
             anim_action_id: 0x01020304,
             activate_animation: false,
+            turret_pitch: 0.0,
+            turret_yaw: 0.0,
         };
         assert_eq!(
             encode(&p),
@@ -625,11 +630,21 @@ mod tests {
         assert_eq!(encode(&p), frame(0x103, &[0x00, 0x02, 0x00, 0, 1]));
         let p = SCUnitModelPostureChangedPacket {
             posture: ModelPostureType::TurretState,
+            has_loot_left: false,
+            turret_pitch: 0.25,
+            turret_yaw: -0.5,
             ..p
         };
         assert_eq!(
             encode(&p),
-            frame(0x103, &[0x00, 0x02, 0x00, 8, 1, 0, 0, 0, 0, 0, 0, 0, 0])
+            frame(
+                0x103,
+                &[
+                    0x00, 0x02, 0x00, 8, 0, // posture type, isLooted
+                    0, 0, 0x80, 0x3E, // pitch 0.25
+                    0, 0, 0x00, 0xBF, // yaw -0.5
+                ]
+            )
         );
     }
 

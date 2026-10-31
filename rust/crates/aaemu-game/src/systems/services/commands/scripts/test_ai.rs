@@ -398,6 +398,8 @@ impl Command for TestAI {
                         has_loot_left: n.unit.has_loot_left,
                         anim_action_id: new_anim,
                         activate_animation: enable_anim,
+                        turret_pitch: 0.0,
+                        turret_yaw: 0.0,
                     }
                 };
                 crate::systems::skills::broadcast(server, &WorldObject::from(&npc), &packet, false);
