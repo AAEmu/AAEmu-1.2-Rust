@@ -908,6 +908,7 @@ mod tests {
         b.conn.active_char = Some(pb.clone());
         let world = server.world.world(0).unwrap();
         let mut cart = Slave::new(0, 68);
+        cart.unit.hp = 1000;
         cart.unit.transform.set_xyz(103.0, 100.0, 100.0);
         cart.unit.tl_id = 3;
         cart.summoner_obj_id = 0x100;
