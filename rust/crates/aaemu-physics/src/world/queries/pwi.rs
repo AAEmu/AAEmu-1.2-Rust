@@ -103,6 +103,12 @@ pub struct PwiResult {
     /// Sweep: the best contact; otherwise the contacts this call accumulated (empty when
     /// [`PwiResult::dist`] is 0: the pool is not cleared between queries).
     pub contacts: Vec<GeomContact>,
+    /// The per-caller contact pool ran out during this query: the contact count reached its 64
+    /// records or the border-point pool reached 2040, so the `Intersect` gate
+    /// (`prim_intersect.rs`, the original's 0x35151F20 / 0x3515A6D0) dropped further parts
+    /// silently. An accumulating caller must not read this as a complete result. Observation
+    /// only: the engine behaviour is unchanged.
+    pub saturated: bool,
 }
 
 /// The primitive geometry of a query, centred at the origin, and the centre (`gwd1.offset`).
@@ -263,6 +269,7 @@ impl World {
             return PwiResult {
                 dist: 1.0,
                 contacts: Vec::new(),
+                saturated: false,
             };
         }
         PwiResult::default()
@@ -468,6 +475,15 @@ impl World {
             }
         }
         let dist = if best_t >= 1.0e10 { 0.0 } else { best_t as f32 };
+        // The `Intersect` gate stops at 64 contact records and 2040 border points; both counters
+        // are reset by the first part of an accumulating query, so they describe this query.
+        // Empty results never report saturation (the pool may still hold stale records).
+        let saturated = if contacts.is_empty() {
+            false
+        } else {
+            let s = &self.tscratch[tid];
+            s.n_contacts() >= 64 || s.n_border() >= 2040
+        };
         PwiResult {
             dist,
             contacts: if p.want_contacts {
@@ -475,6 +491,7 @@ impl World {
             } else {
                 Vec::new()
             },
+            saturated,
         }
     }
 }

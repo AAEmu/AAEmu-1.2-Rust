@@ -2415,7 +2415,9 @@ pub(super) fn validated_summon_placement(
         if super::ship_physics::is_water(server, world, [p.x, p.y, p.z]) {
             return invalid("a land vehicle must be summoned on ground");
         }
-        crate::systems::ai::collision::ground_height_or(server, world.id, p.x, p.y, p.z, || p.z)
+        // The 1.2 land rule has no static ground: the spot sits on the terrain heightfield,
+        // and a deck above it is refused later by the line-of-sight ray, not used as the floor.
+        summon_terrain(server, world, p.x, p.y)
     };
     // The spawn height already carries the ship's waterline offset, so the 1.2 check runs on
     // exactly the transform `create_spawn_committed` places.
@@ -3488,22 +3490,8 @@ fn create_spawn_committed(
             spawn_pos.z += offset_z;
         } else {
             // TODO (C#): check for maximum height difference for summoning
-            let h = crate::systems::ai::collision::ground_height_or(
-                server,
-                world.id,
-                spawn_pos.x,
-                spawn_pos.y,
-                spawn_pos.z,
-                || {
-                    crate::systems::npcs::heightmap::world_height(
-                        server,
-                        world,
-                        spawn_pos.x,
-                        spawn_pos.y,
-                    )
-                    .unwrap_or(0.0)
-                },
-            );
+            // The 1.2 land rule's ground is the terrain heightfield only.
+            let h = summon_terrain(server, world, spawn_pos.x, spawn_pos.y);
             if h > 0.0 {
                 spawn_pos.set_height(h);
             }
@@ -3514,23 +3502,9 @@ fn create_spawn_committed(
         spawn_pos.rot_z = final_yaw;
     } else if !template.is_a_boat() {
         // A searched or client-chosen land spot carries its surface height already; re-ground
-        // it here so a static floor (bridge, plaza, quay) wins over the terrain below it.
-        let h = crate::systems::ai::collision::ground_height_or(
-            server,
-            world.id,
-            spawn_pos.x,
-            spawn_pos.y,
-            spawn_pos.z,
-            || {
-                crate::systems::npcs::heightmap::world_height(
-                    server,
-                    world,
-                    spawn_pos.x,
-                    spawn_pos.y,
-                )
-                .unwrap_or(0.0)
-            },
-        );
+        // it here with the same 1.2 rule as the search: the terrain heightfield only, never a
+        // static floor above it (a deck would have blocked the search's line of sight).
+        let h = summon_terrain(server, world, spawn_pos.x, spawn_pos.y);
         if h > 0.0 {
             spawn_pos.set_height(h);
         }
@@ -5044,12 +5018,14 @@ mod summon_hull_overlap_tests {
     use aaemu_physics::math::{Quat, Vec3};
     use aaemu_physics::world::World;
 
+    use crate::data::client_files::ClientFileManager;
     use crate::data::items::{ItemTemplate, TemplateKind};
     use crate::models::container::slot_type;
     use crate::models::item::Item;
     use crate::systems::ai::collision::models::{ModelPart, ModelPhys};
     use crate::systems::ai::collision::terrain::tests::Plane;
     use crate::systems::ai::collision::world::{CellContent, StaticInstance};
+    use crate::systems::npcs::heightmap::{HeightmapConfig, HeightmapWorlds};
     use crate::systems::skills::data::SkillTemplate;
     use crate::systems::vehicles::data::{slave_kind, SlaveTemplate};
     use crate::test_support::{spawn_player, test_character, TestClient};
@@ -5057,8 +5033,8 @@ mod summon_hull_overlap_tests {
     use super::{
         create_for_owner, get_active_slave_by_owner_obj_id, hull_clear_at, model_box_clear_at,
         overhead_clear_at, summon_candidate_1_2, summon_candidate_points, summon_model_box,
-        summon_offset_z, summon_placement_clear_1_2, validated_summon_placement, HullEnvelope,
-        HullFootprint, ShipModel,
+        summon_offset_z, summon_placement_clear_1_2, summon_terrain, validated_summon_placement,
+        HullEnvelope, HullFootprint, ShipModel,
     };
     use crate::systems::skills::ext::SummonPlacement;
     use aaemu_commons::PacketStream;
@@ -5324,6 +5300,28 @@ mod summon_hull_overlap_tests {
         assert!(clear(&s));
     }
 
+    /// The batched query keeps the client's 1.2 hull box exact in every round: a pier half a
+    /// millimetre outside the envelope is not a contact. (The earlier batching grew its first
+    /// box by a millimetre to defeat the identical-box cache and would report this pier.)
+    #[tokio::test]
+    async fn a_pier_half_a_millimetre_outside_the_hull_is_clear() {
+        let s = world(&[(Vec3::new(507.0005, 500.0, 100.0), Vec3::new(2.0, 2.0, 2.0))]);
+        let found = crate::systems::ai::collision::box_obstacles(
+            &s,
+            0,
+            [500.0, 500.0, 100.5],
+            [5.0, 15.0, 2.5],
+            0.0,
+            crate::systems::ai::collision::query::mask::STATIC_TERRAIN,
+        )
+        .unwrap();
+        assert!(
+            found.is_empty(),
+            "the exact envelope stops short of the pier: {found:?}"
+        );
+        assert!(clear(&s));
+    }
+
     /// Vegetation is decorative for hull placement, whatever its size.
     #[tokio::test]
     async fn vegetation_inside_the_envelope_is_ignored() {
@@ -5352,6 +5350,57 @@ mod summon_hull_overlap_tests {
             "the vegetation entity intersects the envelope box"
         );
         assert!(clear(&s));
+    }
+
+    /// The physics contact pool holds 64 records and drops further parts silently
+    /// (`prim_intersect.rs` gate; `pwi.rs:402-404`). Vegetation is filtered only after the
+    /// query, so a wall of 64 vegetation parts can fill the pool and hide a pier that is tested
+    /// later. `box_obstacles` batches with a skip list of the entities already seen, so the
+    /// pier behind the vegetation is still found and the spot is refused.
+    #[tokio::test]
+    async fn a_pier_behind_vegetation_filling_the_contact_pool_is_found() {
+        let mut statics = vec![(
+            Vec3::new(503.0, 507.0, 100.0),
+            Vec3::new(2.5, 2.5, 2.5),
+            false,
+        )];
+        for i in 0..64 {
+            statics.push((
+                Vec3::new(
+                    496.0 + (i % 8) as f32 * 1.1,
+                    491.0 + (i / 8) as f32 * 2.5,
+                    103.0,
+                ),
+                Vec3::splat(0.4),
+                true,
+            ));
+        }
+        let s = world_at(GROUND, &statics);
+        assert!(
+            !clear(&s),
+            "the pier overlaps the hull envelope behind the vegetation"
+        );
+    }
+
+    /// Dense vegetation alone fills the contact pool too; the batched query collects the
+    /// remaining parts and, with every owner vegetation, the spot stays accepted (batching, not
+    /// the fail-safe refusal).
+    #[tokio::test]
+    async fn dense_vegetation_filling_the_contact_pool_is_still_accepted() {
+        let mut statics = Vec::new();
+        for i in 0..80 {
+            statics.push((
+                Vec3::new(
+                    496.0 + (i % 8) as f32 * 1.1,
+                    487.0 + (i / 8) as f32 * 2.5,
+                    103.0,
+                ),
+                Vec3::splat(0.4),
+                true,
+            ));
+        }
+        let s = world_at(GROUND, &statics);
+        assert!(clear(&s), "vegetation is never a hull obstacle");
     }
 
     /// Yaw 90: the off-centre footprint must put the box mid 5 m along -X with the length
@@ -5566,6 +5615,13 @@ mod summon_hull_overlap_tests {
         let world = near.world.world(0).unwrap();
         let t = summon_candidate_1_2(&near, &world, &p, &template).expect("candidate");
         assert!((t.z - 201.0).abs() < 1e-4, "{t:?}");
+        // z = 100 + 2.1·y: 1150 at the player, 1160.5 at the first candidate (10.5 m, over the
+        // 1.2 `terrain - player_z <= 10` boundary).
+        let above = slope_server(100.0, 2.1, &[]);
+        let (_client, p) = search_player(&above);
+        p.data().unit.transform.set_height(1150.0);
+        let world = above.world.world(0).unwrap();
+        assert!(summon_candidate_1_2(&above, &world, &p, &template).is_none());
         // z = 100 + 2.5·y: 1350 at the player, 1362.5 at the first candidate (12.5 m).
         let far = slope_server(100.0, 2.5, &[]);
         let (_client, p) = search_player(&far);
@@ -5574,8 +5630,8 @@ mod summon_hull_overlap_tests {
         assert!(summon_candidate_1_2(&far, &world, &p, &template).is_none());
     }
 
-    /// 6 m up over 30 m: the candidate's ground is above the player's feet, so the ray must end
-    /// above the candidate's own ground (the 1.2 eye-to-eye rule), not at the player's feet.
+    /// 6 m up over 30 m: the candidate's terrain point is above the player's feet, so the ray
+    /// must end above the candidate's own terrain (the 1.2 rule), not at the player's feet.
     #[tokio::test]
     async fn an_uphill_land_summon_is_accepted() {
         let s = slope_server(100.0, 0.2, &[]);
@@ -5587,7 +5643,7 @@ mod summon_hull_overlap_tests {
         assert!((t.z - 206.0).abs() < 1e-4, "{t:?}");
     }
 
-    /// A client `SummonPos` uphill is validated with the same eye-to-eye ray.
+    /// A client `SummonPos` uphill is validated with the same terrain-point ray.
     #[tokio::test]
     async fn an_uphill_client_placement_is_validated() {
         let s = slope_server(100.0, 0.2, &[]);
@@ -5612,6 +5668,51 @@ mod summon_hull_overlap_tests {
         ));
     }
 
+    /// Without the collision service the client placement's land surface is the same terrain
+    /// helper as every other land path (`summon_terrain`: heightmap, else 0), not the client's
+    /// `z`: the 1.2 rule has no static ground to fall back to.
+    #[tokio::test]
+    async fn a_client_placement_without_collision_uses_the_terrain_fallback() {
+        let s = crate::test_support::test_server_with(land_data());
+        s.config.update(|c| c.physics.enable = false);
+        let files = Arc::new(ClientFileManager::from_sources(
+            &[],
+            std::path::Path::new("."),
+        ));
+        s.systems
+            .npcs
+            .heightmaps
+            .install(Arc::new(HeightmapWorlds::new(
+                files,
+                &s.game_data.worlds,
+                HeightmapConfig {
+                    heightmaps_enable: true,
+                    ..Default::default()
+                },
+            )));
+        let (_client, p) = search_player(&s);
+        // x = -2 makes the heightmap read fail (`x % 1024 / 2 < 0`), so the terrain helper
+        // falls back to 0; the old placement fallback kept the client's z (200).
+        p.data()
+            .unit
+            .transform
+            .set_position(-2.0, 500.0, 200.0, 0.0, 0.0, 0.0);
+        let world = s.world.world(0).unwrap();
+        let placement = SummonPlacement {
+            x: -2.0,
+            y: 530.0,
+            z: 200.0,
+            yaw: 0.0,
+        };
+        let t = validated_summon_placement(&s, &world, &p, &land_template(), Some(placement), 0.0)
+            .expect("placement");
+        assert!(
+            (t.z - summon_terrain(&s, &world, t.x, t.y)).abs() < 1e-4,
+            "the fallback must be the terrain helper: {t:?}"
+        );
+        assert!((t.z - 0.0).abs() < 1e-4, "no heightmap data: {t:?}");
+    }
+
     /// A wall between the player and the spot still refuses the summon.
     #[tokio::test]
     async fn a_wall_between_the_player_and_a_land_spot_refuses() {
@@ -5626,11 +5727,14 @@ mod summon_hull_overlap_tests {
         assert!(summon_candidate_1_2(&s, &world, &p, &land_template()).is_none());
     }
 
-    /// A cart summoned on a bridge/plaza/quay must spawn on the static floor, not on the terrain
-    /// under it: the search and the final spawn use the same static-aware ground.
+    /// The 1.2 land rule takes the candidate height from the terrain only
+    /// (`I3DEngine::GetTerrainElevation`, `FUN_39347fb0`). A deck between the player's eyes and
+    /// the candidate's terrain point is therefore hit by the line-of-sight ray (statics + terrain,
+    /// mask 0x107) and the summon is refused with error 100, instead of the deck becoming the
+    /// spawn floor.
     #[tokio::test]
-    async fn a_land_summon_spawns_on_a_static_floor_above_the_terrain() {
-        // A 1 m slab with its top 5 m above the terrain, under the player and the candidate.
+    async fn a_deck_above_the_candidate_terrain_refuses_a_land_summon() {
+        // A 1 m slab with its top 5 m above the terrain, under the player and every candidate.
         let s = world_on(
             land_data(),
             Plane {
@@ -5646,24 +5750,117 @@ mod summon_hull_overlap_tests {
             )],
         );
         install_empty_hull_loader(&s);
-        let (_client, p) = search_player(&s);
+        let (mut client, p) = search_player(&s);
+        client.conn.active_char = Some(p.clone());
         p.data().unit.transform.set_height(105.0);
         give_summon_item(&s, &p, 0x9110);
-        let slave = tokio::time::timeout(
+        let result = tokio::time::timeout(
             Duration::from_secs(2),
             create_for_owner(&s, &p, 0x9110, RULE_ITEM, false, None, None, 0.0),
         )
         .await
-        .expect("summon job")
-        .expect("the cart spawns on the floor");
-        let t = slave.data().unit.transform;
+        .expect("summon job");
+        assert!(result.is_none(), "the deck blocks every candidate's ray");
         assert!(
-            (t.x - 500.0).abs() < 1e-4 && (t.y - 530.0).abs() < 1e-4,
-            "{t:?}"
+            s.items.item_by_id(0x9110).is_some(),
+            "a refused summon keeps the item"
+        );
+        let codes: Vec<i16> = client
+            .drain()
+            .iter()
+            .filter(|f| f.0 == crate::opcodes::sc::SCErrorMsgPacket)
+            .map(|f| i16::from_le_bytes([f.1[0], f.1[1]]))
+            .collect();
+        assert!(codes.contains(&100), "{codes:?}");
+    }
+
+    /// The same deck above the terrain refuses a client-supplied `SummonPos`: the 1.2
+    /// placement check's line-of-sight ray hits it (error 100) and the item is not used.
+    #[tokio::test]
+    async fn a_deck_above_the_candidate_terrain_refuses_a_client_placement() {
+        let s = world_on(
+            land_data(),
+            Plane {
+                a: 110.0,
+                b: 0.0,
+                c: 0.0,
+                n: 1024,
+            },
+            &[(
+                Vec3::new(500.0, 515.0, 114.5),
+                Vec3::new(10.0, 25.0, 0.5),
+                false,
+            )],
+        );
+        install_empty_hull_loader(&s);
+        let (mut client, p) = search_player(&s);
+        client.conn.active_char = Some(p.clone());
+        p.data().unit.transform.set_height(115.0);
+        give_summon_item(&s, &p, 0x9210);
+        let placement = SummonPlacement {
+            x: 500.0,
+            y: 530.0,
+            z: 110.0,
+            yaw: 0.0,
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            create_for_owner(&s, &p, 0x9210, RULE_ITEM, false, None, Some(placement), 0.0),
+        )
+        .await
+        .expect("summon job");
+        assert!(
+            result.is_none(),
+            "the deck blocks the client placement's ray"
         );
         assert!(
-            (t.z - 105.0).abs() < 1e-4,
-            "the floor, not the terrain below: {t:?}"
+            s.items.item_by_id(0x9210).is_some(),
+            "a refused summon keeps the item"
+        );
+        let codes: Vec<i16> = client
+            .drain()
+            .iter()
+            .filter(|f| f.0 == crate::opcodes::sc::SCErrorMsgPacket)
+            .map(|f| i16::from_le_bytes([f.1[0], f.1[1]]))
+            .collect();
+        assert!(codes.contains(&100), "{codes:?}");
+    }
+
+    /// A positioned land spawn re-grounds to the terrain, not to a low static floor: the 1.2
+    /// land rule never uses statics as the ground (the search, placement and recheck paths do
+    /// the same).
+    #[tokio::test]
+    async fn a_land_spawn_under_a_low_deck_regrounds_to_the_terrain() {
+        let s = world_on(
+            land_data(),
+            Plane {
+                a: 100.0,
+                b: 0.0,
+                c: 0.0,
+                n: 1024,
+            },
+            &[(
+                Vec3::new(500.0, 530.0, 100.75),
+                Vec3::new(10.0, 10.0, 0.25),
+                false,
+            )],
+        );
+        install_empty_hull_loader(&s);
+        let (_client, p) = search_player(&s);
+        give_summon_item(&s, &p, 0x9111);
+        let mut at = crate::models::transform::Transform::default();
+        at.set_position(500.0, 530.0, 100.0, 0.0, 0.0, 0.0);
+        let slave = tokio::time::timeout(
+            Duration::from_secs(2),
+            create_for_owner(&s, &p, 0x9111, RULE_ITEM, false, Some(at), None, 0.0),
+        )
+        .await
+        .expect("summon job")
+        .expect("the cart spawns");
+        let t = slave.data().unit.transform;
+        assert!(
+            (t.z - 100.0).abs() < 1e-4,
+            "the terrain, not the low deck top: {t:?}"
         );
     }
 
@@ -6149,6 +6346,66 @@ mod summon_hull_overlap_tests {
         })));
     }
 
+    /// Adds a deck above the player and the chosen spot once the item wait is over: the spot
+    /// the search accepted becomes covered while the summon job waits.
+    fn cover_spot_after_item_validation(s: &crate::GameServer) {
+        *s.systems
+            .vehicles
+            .slave_summons
+            .test_after_item_validation
+            .lock()
+            .unwrap() = Some(super::TestPublicationHook(Arc::new(|server| {
+            let pw = crate::systems::ai::collision::phys_world(server, 0).expect("physics world");
+            let mut st = pw.lock();
+            assert!(st
+                .add_static_instance(
+                    &static_box(
+                        Vec3::new(10.0, 25.0, 0.5),
+                        Vec3::new(500.0, 515.0, 114.5),
+                        false,
+                    ),
+                    crate::systems::ai::collision::world::Owner::Brush { cell: (0, 0) },
+                )
+                .is_some());
+        })));
+    }
+
+    /// A deck that appears above the player's chosen spot during the waits is caught by the
+    /// post-wait recheck: the recheck's line-of-sight ray hits it, the rerun search finds no
+    /// candidate either, and the summon refuses with error 100 without using the item.
+    #[tokio::test]
+    async fn a_deck_appearing_after_the_search_refuses_the_post_wait_recheck() {
+        let s = world_at_with(land_data(), 110.0, &[]);
+        install_empty_hull_loader(&s);
+        let (mut client, p) = search_player(&s);
+        client.conn.active_char = Some(p.clone());
+        p.data().unit.transform.set_height(115.0);
+        give_summon_item(&s, &p, 0x9211);
+        p.data().unit.cooldowns.add_cooldown(RULE_SKILL, 10_000, 0);
+        p.data().unit.global_cooldown_ms = 10_000;
+        cover_spot_after_item_validation(&s);
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            create_for_owner(&s, &p, 0x9211, RULE_ITEM, false, None, None, 0.0),
+        )
+        .await
+        .expect("summon job");
+        assert!(
+            result.is_none(),
+            "the deck blocks the recheck and the rerun search"
+        );
+        assert!(s.items.item_by_id(0x9211).is_some(), "the item is not used");
+        let codes: Vec<i16> = client
+            .drain()
+            .iter()
+            .filter(|f| f.0 == crate::opcodes::sc::SCErrorMsgPacket)
+            .map(|f| i16::from_le_bytes([f.1[0], f.1[1]]))
+            .collect();
+        assert!(codes.contains(&100), "{codes:?}");
+        assert!(!p.data().unit.cooldowns.cooldowns.contains_key(&RULE_SKILL));
+        assert_eq!(p.data().unit.global_cooldown_ms, 0);
+    }
+
     /// A spot chosen before the waits is rechecked at the player's current pose; when it no
     /// longer passes, the search reruns from there instead of spawning the stale spot.
     #[tokio::test]
@@ -6355,21 +6612,20 @@ pub(crate) fn summon_candidate_points(
     out
 }
 
-/// The collision terrain height at (x, y), the heightmap when the service has no terrain.
+/// The land summon candidate height: `I3DEngine::GetTerrainElevation(x, y, 0)` (vtable
+/// `+0x1fc`), i.e. the terrain heightfield only, never static geometry (`FUN_39347fb0`). The
+/// heightmap is the fallback when the collision service has no terrain. A deck, bridge or quay
+/// above the terrain is not a landing spot for the 1.2 rule; it blocks the line of sight instead.
 fn summon_terrain(server: &GameServer, world: &WorldInstance, x: f32, y: f32) -> f32 {
     crate::systems::ai::collision::terrain_height_or(server, world.id, x, y, || {
         crate::systems::npcs::heightmap::world_height(server, world, x, y).unwrap_or(0.0)
     })
 }
 
-/// The ground under a land summon candidate at (x, y), probed down from `z`: statics such as
-/// bridges, plazas and quays first, the heightmap when nothing is hit. Searching from the
-/// player's feet keeps a found floor on the spawn surface instead of the terrain below it.
-fn summon_ground(server: &GameServer, world: &WorldInstance, x: f32, y: f32, z: f32) -> f32 {
-    crate::systems::ai::collision::ground_height_or(server, world.id, x, y, z, || {
-        crate::systems::npcs::heightmap::world_height(server, world, x, y).unwrap_or(0.0)
-    })
-}
+/// How far above the candidate's terrain point a land summon line-of-sight ray ends. 1.2 ends
+/// the ray exactly at the point; the 0.2 m lift is a deviation that avoids a float graze
+/// between the ray end and the heightfield (the Bevy client port lifts its end the same way).
+const SUMMON_LOS_END_LIFT: f32 = 0.2;
 
 /// The 1.2 line-of-sight rule: a ray from the player's eyes to the candidate hits nothing
 /// (static + terrain, rays 0x8F). No collision service counts as clear.
@@ -6492,8 +6748,8 @@ fn model_box_clear_at(
 
 /// The 1.2 client summon search (`FUN_39347fb0`): the first candidate that passes all four
 /// checks wins. The candidate z is the water surface for ships (terrain must not be above it)
-/// and the ground for land slaves (statics such as bridges, plazas and quays first, then the
-/// heightmap; the terrain is at most 10 m above the player). The model box is the unclipped
+/// and the terrain for land slaves (`GetTerrainElevation`, vtable `+0x1fc`; the terrain is at
+/// most 10 m above the player). The model box is the unclipped
 /// model bbox rotated by the player yaw plus 90 degrees; the distance cap is 80 m. Returns the
 /// final spawn transform, or `None` when none of the 120 candidates passes. Debug logs the
 /// per-check rejection counts; the separate `Physics:SummonDiagnostics` option keeps scanning
@@ -6534,7 +6790,7 @@ pub(crate) fn summon_candidate_1_2(
         } else {
             None
         };
-        let z = water.unwrap_or_else(|| summon_ground(server, world, x, y, me.z));
+        let z = water.unwrap_or(terrain);
         let terrain_ok = water.map_or(terrain - me.z <= 10.0, |water| terrain <= water);
         if !terrain_ok {
             terrain_rej += 1;
@@ -6544,10 +6800,14 @@ pub(crate) fn summon_candidate_1_2(
         if !distance_ok {
             distance_rej += 1;
         }
-        // Ships are seen against the water surface. Land candidates use an eye-to-eye ray like
-        // the 1.2 rule (from z + 1): ending at the player's foot height would put the endpoint
-        // under an uphill candidate's ground and refuse it.
-        let los_to = if is_boat { [x, y, z] } else { [x, y, z + 1.0] };
+        // Ships are seen against the water surface. Land rays end at the candidate's terrain
+        // point (lifted by [`SUMMON_LOS_END_LIFT`]): a deck between the eyes and the terrain is
+        // hit and refuses the spot, and an uphill terrain point is not under the player's feet.
+        let los_to = if is_boat {
+            [x, y, z]
+        } else {
+            [x, y, z + SUMMON_LOS_END_LIFT]
+        };
         let los_ok = summon_los_clear(server, world.id, [me.x, me.y, me.z + 1.0], los_to);
         if !los_ok {
             los_rej += 1;
@@ -6615,11 +6875,13 @@ pub(super) fn summon_placement_clear_1_2(
         0.0
     };
     let water = transform.z - offset_z;
-    let (dx, dy, dz) = (transform.x - me.x, transform.y - me.y, water - me.z);
+    let terrain = summon_terrain(server, world, transform.x, transform.y);
+    // Land uses the terrain-only surface on every path; ships keep the water surface.
+    let surface = if is_boat { water } else { terrain };
+    let (dx, dy, dz) = (transform.x - me.x, transform.y - me.y, surface - me.z);
     if dx * dx + dy * dy + dz * dz > 80.0 * 80.0 {
         return false;
     }
-    let terrain = summon_terrain(server, world, transform.x, transform.y);
     if is_boat {
         if terrain > water {
             return false;
@@ -6627,12 +6889,12 @@ pub(super) fn summon_placement_clear_1_2(
     } else if terrain - me.z > 10.0 {
         return false;
     }
-    // Land uses an eye-to-eye ray: `water` is the candidate's own (static-aware) ground, so the
-    // endpoint is above the floor it will spawn on, not at the player's foot height.
+    // Land rays end just above the candidate's terrain point ([`SUMMON_LOS_END_LIFT`]); a deck
+    // between the eyes and that point is hit, so a bridge or quay above the terrain refuses.
     let los_to = if is_boat {
-        [transform.x, transform.y, water]
+        [transform.x, transform.y, surface]
     } else {
-        [transform.x, transform.y, water + 1.0]
+        [transform.x, transform.y, surface + SUMMON_LOS_END_LIFT]
     };
     if !summon_los_clear(server, world.id, [me.x, me.y, me.z + 1.0], los_to) {
         return false;
@@ -6643,7 +6905,7 @@ pub(super) fn summon_placement_clear_1_2(
             world.id,
             transform.x,
             transform.y,
-            water,
+            surface,
             transform.rot_z,
             &bounds,
             offset_z,
@@ -6674,7 +6936,7 @@ fn revalidated_searched_placement(
     let surface = if is_boat {
         super::ship_physics::water_surface(server, world, [transform.x, transform.y, me.z])
     } else {
-        summon_ground(server, world, transform.x, transform.y, transform.z)
+        summon_terrain(server, world, transform.x, transform.y)
     };
     let mut check = transform;
     check.set_position(
