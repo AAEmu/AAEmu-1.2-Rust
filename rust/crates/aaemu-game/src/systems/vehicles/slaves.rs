@@ -1356,6 +1356,7 @@ enum BindRefusal {
     Dead,
     TooFar,
     CannonPassenger,
+    NoSuchSeat,
     SeatTaken,
     OwnersMark,
 }
@@ -1491,6 +1492,18 @@ pub fn is_cannon_kind(kind: u32) -> bool {
     )
 }
 
+/// Whether the slave's model declares `point` in `model_bindings`. This is the 1.2 client's own
+/// seat test: `FUN_393bbb80` offers 13863 only when `FUN_390c9f70(2)` finds point 2 in the model's
+/// binding list, and the server applies the same rule to every non-driver seat.
+pub fn model_has_attach_point(server: &GameServer, slave: &SlaveRef, point: u8) -> bool {
+    let template_id = slave.data().unit.template_id;
+    server
+        .game_data
+        .systems
+        .vehicles
+        .slave_has_attach_point(template_id, point)
+}
+
 /// `BindSlave(character, objId, attachPoint, bondKind)`.
 pub fn bind_slave(
     server: &GameServer,
@@ -1527,6 +1540,15 @@ pub fn bind_slave(
     // lock); the comparison and the reservation run under that one lock.
     let gap = reach.map(|_| bind_gap(server, &world, character, &slave, point));
     let cannon = is_cannon_kind(slave_kind(server, &slave));
+    // The 1.2 client only offers a seat the model declares (see [`model_has_attach_point`]); the
+    // driver point 1 keeps the C# rules. The model data is immutable, so this snapshot needs no
+    // lock; the check and the reservation below still run under the slave's one lock.
+    let template_id = slave.data().unit.template_id;
+    let seat_exists = server
+        .game_data
+        .systems
+        .vehicles
+        .slave_has_attach_point(template_id, point);
     // Check and reserve the seat under the slave's one lock, so two binds racing for the same
     // point cannot both pass.
     let refusal = {
@@ -1537,6 +1559,8 @@ pub fn bind_slave(
             Some(BindRefusal::TooFar)
         } else if point != attach_point::DRIVER && cannon {
             Some(BindRefusal::CannonPassenger)
+        } else if point != attach_point::DRIVER && !seat_exists {
+            Some(BindRefusal::NoSuchSeat)
         } else if d.has_attached_at(point) {
             Some(BindRefusal::SeatTaken)
         } else if point == attach_point::DRIVER
@@ -1574,6 +1598,16 @@ pub fn bind_slave(
                     obj_id
                 );
                 error(character, error::SLAVE_CANNOT_BIND);
+            }
+            BindRefusal::NoSuchSeat => {
+                // A missing seat is as silent as a taken one: the 1.2 client never offers it, and
+                // the original server's answer to a forged bind is capture-pending (S11-C2).
+                tracing::debug!(
+                    "BindSlave: slave {} (template {}) has no seat point {}; ignoring",
+                    obj_id,
+                    template_id,
+                    point
+                );
             }
             BindRefusal::SeatTaken => {
                 // The C# returns silently; the client message table has no seat-taken text and

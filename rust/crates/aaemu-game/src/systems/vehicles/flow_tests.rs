@@ -134,6 +134,12 @@ fn data() -> GameData {
             ..SlaveTemplate::default()
         },
     );
+    // The test cart has a driver and a passenger seat, as the 1.2 client reads them from
+    // `model_bindings`.
+    d.systems
+        .vehicles
+        .model_bindings
+        .insert(300, vec![attach_point::DRIVER, attach_point::PASSENGER0]);
     d
 }
 
@@ -1829,6 +1835,233 @@ async fn the_passenger_skill_does_not_seat_on_a_dead_slave() {
     assert!(!ops(&b.drain()).contains(&sc::SCUnitAttachedPacket));
 }
 
+/// The 1.2 client only offers / accepts a seat its model declares (`model_bindings`): the Farm
+/// Wagon (slave 60, model 1008) has no point 2, so 13863 is not offered and a forged bind there is
+/// ignored silently; the Red Farm Hauler (slave 146, model 1553) has one and takes the passenger.
+/// A point the model does declare (a ship cannon's point 9) still binds.
+#[tokio::test]
+async fn model_bindings_decide_which_seats_a_slave_offers_and_accepts() {
+    use crate::models::slave::Slave;
+    use crate::net::registry::ClientPacket;
+    use crate::systems::npcs::npc::packets::{
+        CSStartInteractionPacket, SCNpcInteractionSkillListPacket,
+    };
+    use crate::systems::skills::handlers::{start_skill, CSStartSkillPacket};
+    use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+    use crate::systems::vehicles::data::SlaveTemplate;
+    use crate::world::Entity;
+    use aaemu_commons::{Marshal, PacketStream};
+
+    let mut d = passenger_data();
+    d.systems.vehicles.slave_templates.insert(
+        60,
+        SlaveTemplate {
+            id: 60,
+            name: "Farm Wagon".into(),
+            model_id: 1008,
+            slave_kind: super::data::slave_kind::MACHINE,
+            ..SlaveTemplate::default()
+        },
+    );
+    d.systems.vehicles.slave_templates.insert(
+        146,
+        SlaveTemplate {
+            id: 146,
+            name: "Red Farm Hauler".into(),
+            model_id: 1553,
+            slave_kind: super::data::slave_kind::MACHINE,
+            ..SlaveTemplate::default()
+        },
+    );
+    d.systems.vehicles.slave_templates.insert(
+        23,
+        SlaveTemplate {
+            id: 23,
+            name: "Ship".into(),
+            model_id: 512,
+            slave_kind: super::data::slave_kind::BIG_SAILING_SHIP,
+            ..SlaveTemplate::default()
+        },
+    );
+    d.systems
+        .vehicles
+        .model_bindings
+        .insert(1008, vec![attach_point::DRIVER, 35, 9, 10, 11, 12]);
+    d.systems.vehicles.model_bindings.insert(
+        1553,
+        vec![
+            attach_point::DRIVER,
+            attach_point::PASSENGER0,
+            35,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+        ],
+    );
+    d.systems
+        .vehicles
+        .model_bindings
+        .insert(512, vec![attach_point::DRIVER, attach_point::PASSENGER0, 9]);
+    let server = server_with(d);
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let mut a = TestClient::new(&server, 1, 1);
+    let mut b = TestClient::new(&server, 2, 2);
+    let pa = spawn_player(&server, &a, test_character(1, "Driver", 100.0, 100.0), PA);
+    let pb = spawn_player(
+        &server,
+        &b,
+        test_character(2, "Passenger", 101.0, 100.0),
+        PB,
+    );
+    a.conn.active_char = Some(pa.clone());
+    b.conn.active_char = Some(pb.clone());
+    for p in [&pa, &pb] {
+        let mut c = p.data();
+        c.unit.hp = 1000;
+        c.unit.max_hp = 1000;
+    }
+    let world = server.world.world(0).unwrap();
+    let spawn = |template: u32, model: u32, obj_id: u32, tl: u16, x: f32| {
+        let mut s = Slave::new(0, template);
+        s.unit.hp = 1000;
+        s.unit.max_hp = 1000;
+        s.unit.model_id = model;
+        s.unit.tl_id = tl;
+        s.unit.transform.set_xyz(x, 100.0, 100.0);
+        s.summoner_obj_id = PA;
+        s.summoner_id = pa.character_id;
+        let s = Entity::new(obj_id, s);
+        world.spawn(&s, &server.view_ctx());
+        s
+    };
+    let interaction = |slave_obj: u32, skills: Vec<u32>| {
+        let p = SCNpcInteractionSkillListPacket {
+            npc_obj_id: slave_obj,
+            obj_id: PB,
+            extra_info: 1,
+            pick_id: 0,
+            mouse_button: 3,
+            modifier_keys: 0,
+            skill_list: skills,
+        };
+        let mut s = PacketStream::new();
+        p.write(&mut s);
+        vec![(sc::SCNpcInteractionSkillListPacket, s.into_bytes())]
+    };
+    let req = |slave_obj: u32| CSStartInteractionPacket {
+        npc_obj_id: slave_obj,
+        obj_id: PB,
+        extra_info: 1,
+        pick_id: 0,
+        mouse_button: 3,
+        modifier_keys: 0,
+    };
+    let cast = |client: &mut TestClient, caster: u32, target: u32| {
+        start_skill(
+            &server,
+            &mut client.conn,
+            CSStartSkillPacket {
+                skill_id: PASSENGER_SKILL,
+                caster: SkillCaster::Unit(caster),
+                target: SkillCastTarget::Unit(target),
+                flag: 0,
+                skill_object: SkillObject::None,
+            },
+        );
+    };
+
+    // Farm Wagon: the model has no point 2. With the driver seat taken the interaction list keeps
+    // the occupy skill, and a forged passenger cast attaches nobody silently.
+    let wagon = spawn(60, 1008, 0x300, 3, 103.0);
+    a.drain();
+    b.drain();
+    slaves::bind_slave(
+        &server,
+        &pa,
+        wagon.obj_id,
+        attach_point::DRIVER,
+        7,
+        Some(4.0),
+    );
+    a.drain();
+    b.drain();
+    req(wagon.obj_id)
+        .handle(&server, &mut b.conn)
+        .await
+        .unwrap();
+    assert_eq!(b.drain(), interaction(wagon.obj_id, vec![12_076]));
+    cast(&mut b, PB, wagon.obj_id);
+    let fb = b.drain();
+    assert!(
+        !ops(&fb).contains(&sc::SCUnitAttachedPacket) && error_codes(&fb).is_empty(),
+        "a missing seat must be silent: {:x?}",
+        ops(&fb)
+    );
+    assert_eq!(
+        wagon.data().attached_characters,
+        vec![(attach_point::DRIVER, PA)]
+    );
+    assert_eq!(pb.data().unit.transform.parent_obj_id, 0);
+    slaves::unbind_slave(&server, &pa, 3, slaves::attach_reason::SLAVE_BINDING);
+    a.drain();
+
+    // Red Farm Hauler: model 1553 has point 2, so it is offered once the driver seat is taken and
+    // the cast seats the passenger.
+    let hauler = spawn(146, 1553, 0x301, 4, 103.0);
+    a.drain();
+    b.drain();
+    slaves::bind_slave(
+        &server,
+        &pa,
+        hauler.obj_id,
+        attach_point::DRIVER,
+        7,
+        Some(4.0),
+    );
+    a.drain();
+    b.drain();
+    req(hauler.obj_id)
+        .handle(&server, &mut b.conn)
+        .await
+        .unwrap();
+    assert_eq!(b.drain(), interaction(hauler.obj_id, vec![13_863]));
+    cast(&mut b, PB, hauler.obj_id);
+    assert_eq!(
+        hauler.data().attached_characters,
+        vec![(attach_point::DRIVER, PA), (attach_point::PASSENGER0, PB)]
+    );
+    assert_eq!(pb.data().attached_point, attach_point::PASSENGER0);
+    slaves::unbind_slave(&server, &pb, 4, slaves::attach_reason::SLAVE_BINDING);
+    slaves::unbind_slave(&server, &pa, 4, slaves::attach_reason::SLAVE_BINDING);
+    a.drain();
+    b.drain();
+
+    // A point the model does declare still binds: a ship cannon's gunner seat at point 9.
+    let ship = spawn(23, 512, 0x302, 5, 103.0);
+    a.drain();
+    b.drain();
+    slaves::bind_slave(
+        &server,
+        &pa,
+        ship.obj_id,
+        9,
+        slaves::attach_reason::BOARD_TRANSFER,
+        None,
+    );
+    assert_eq!(
+        ship.data().attached_characters,
+        vec![(9, PA)],
+        "a declared cannon seat must still bind"
+    );
+    a.drain();
+}
+
 /// The client's own bind reach: 12076 uses a 4.0 m surface gap (`FUN_39346290` ->
 /// `FUN_39093860(..., 16.0)`), 13863 3.0 m (`FUN_393bf270` -> 9.0), widened to 3.5 m while
 /// riding a mate (the S11 reading of `+0x3c26`; capture-pending S11-C5). A forged bind / cast
@@ -2108,6 +2341,10 @@ async fn ship_seats_measure_the_mass_box_not_the_hull_origin() {
             ..SlaveTemplate::default()
         },
     );
+    d.systems
+        .vehicles
+        .model_bindings
+        .insert(511, vec![attach_point::DRIVER, attach_point::PASSENGER0]);
     let server = server_with(d);
     crate::systems::economy::bridges::install(&server);
     crate::systems::npcs::install_hooks(&server);
@@ -3868,12 +4105,40 @@ fn real_compact_db_vehicle_tables() {
     }
 }
 
-/// Real 1.2 cart / ship / cannon slaves. The shipped `slave_attach_points*.json` lists the
-/// driver helper for the ships and only the Rowboat a passenger point; cart / car passenger
-/// points live on the client model (`$passenger0`, `attach_anims`) and are absent from that
-/// JSON. The interaction list must therefore offer the passenger skill 13863 for a real cart
-/// or ship whose driver seat is taken (point 2 free) and never for a cannon, and the real
-/// `AttachTo` row must still be special type 53 value1 2.
+/// The real `model_bindings` of the Farm Wagon (slave 60, model 1008) and the two-seat Red Farm
+/// Hauler (slave 146, model 1553). The wagon has no `$passenger0` point, so the seat rule must
+/// never offer or accept point 2 on it.
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+fn real_model_bindings_pin_the_farm_wagon_seat() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let d = load_real(&db, &[]);
+    let mut wagon = d.model_bindings.get(&1008).cloned().unwrap_or_default();
+    wagon.sort_unstable();
+    assert_eq!(wagon, vec![1, 9, 10, 11, 12, 35], "model 1008 bindings");
+    assert!(!d.model_has_attach_point(1008, attach_point::PASSENGER0));
+    assert!(!d.slave_has_attach_point(60, attach_point::PASSENGER0));
+    let mut hauler = d.model_bindings.get(&1553).cloned().unwrap_or_default();
+    hauler.sort_unstable();
+    assert_eq!(
+        hauler,
+        vec![1, 2, 9, 10, 11, 12, 13, 14, 15, 35],
+        "model 1553 bindings"
+    );
+    assert!(d.slave_has_attach_point(146, attach_point::PASSENGER0));
+    // Rowboats, tanks and cars read the same table.
+    for (slave, model) in [(55u32, 129u32), (36, 857), (106, 1323)] {
+        assert_eq!(d.slave_templates[&slave].model_id, model);
+        assert!(d.slave_has_attach_point(slave, attach_point::PASSENGER0));
+    }
+}
+
+/// Real 1.2 cart / ship / cannon slaves. The 1.2 client offers 13863 only when the model declares
+/// point 2 in `model_bindings`, so the interaction list must offer it for a real rowboat / ship
+/// whose driver seat is taken, never for the Farm Wagon (model 1008: points 1, 35, 9-12 only) or a
+/// cannon, and the real `AttachTo` row must still be special type 53 value1 2.
 #[tokio::test]
 #[ignore = "needs AAEMU_COMPACT_DB"]
 async fn real_cart_and_ship_slaves_offer_the_passenger_seat() {
@@ -3937,7 +4202,13 @@ async fn real_cart_and_ship_slaves_offer_the_passenger_seat() {
     let world = server.world.world(0).unwrap();
     server.systems.npcs.spawns.get_or_create(&world);
     a.drain();
-    for (template, taken_skill) in [(60u32, 13_863u32), (21, 13_863), (10, 12_076)] {
+    for (template, taken_skill) in [
+        (60u32, 12_076u32), // Farm Wagon: no passenger point in model 1008
+        (21, 12_076),       // Eznan Cutter: no point 2 either
+        (55, 13_863),       // Rowboat: model 129 has point 2
+        (23, 13_863),       // ship: model 512 has point 2
+        (10, 12_076),       // cannon
+    ] {
         let t = server
             .game_data
             .systems
