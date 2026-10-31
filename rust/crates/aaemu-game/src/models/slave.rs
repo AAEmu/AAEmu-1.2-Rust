@@ -48,6 +48,23 @@ pub struct Slave {
     /// `Throttle` / `Steering` (physics output).
     pub throttle: i8,
     pub steering: i8,
+    /// Newest `CSTurretState` aim, in radians in the slave model's frame (the frame the 1.2
+    /// client's model aim uses; relayed unchanged in posture type 8). Late viewers read it in
+    /// `SCUnitState`.
+    pub turret_pitch: f32,
+    pub turret_yaw: f32,
+    /// The aim the players around last received (an unchanged aim is never relayed again).
+    pub turret_relayed_pitch: f32,
+    pub turret_relayed_yaw: f32,
+    /// Unix ms of the last relayed turret aim (the server-side 150 ms throttle).
+    pub turret_last_update_ms: i64,
+    /// A newer stored aim waits for the throttle window to end; the 1 s slave tick
+    /// ([`regen_tick`], `systems::vehicles::slaves`) relays it.
+    ///
+    /// [`regen_tick`]: crate::systems::vehicles::slaves::regen_tick
+    pub turret_relay_pending: bool,
+    /// The character whose pending aim the slave tick will relay (never echoed back).
+    pub turret_pending_sender_obj_id: u32,
     /// `HarpoonRope` (`ShipHarpoonRopeState`).
     pub harpoon_rope: ShipHarpoonRopeState,
     /// `LeaveTask` / `CancelTokenSource` (generation of the pending despawn task, 0 = none).
@@ -107,6 +124,13 @@ impl Slave {
             steering_request: 0,
             throttle: 0,
             steering: 0,
+            turret_pitch: 0.0,
+            turret_yaw: 0.0,
+            turret_relayed_pitch: 0.0,
+            turret_relayed_yaw: 0.0,
+            turret_last_update_ms: 0,
+            turret_relay_pending: false,
+            turret_pending_sender_obj_id: 0,
             harpoon_rope: ShipHarpoonRopeState::default(),
             leave_task: 0,
         }

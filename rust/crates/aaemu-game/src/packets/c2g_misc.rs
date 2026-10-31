@@ -1,8 +1,13 @@
-//! C->G packets of `Core/Packets/C2G` whose C# `Read` only logs: `CSEditCharacterPacket`,
-//! `CSTurretStatePacket`, and the log-only packets the 1.2 C# defines but never registers (opcode
-//! 0xfff, commented out in `GameNetwork`): `CSResetQuestContextPacket`,
-//! `CSAcceptCheatQuestContextPacket`, `CSSearchListPacket`, `CSChangeExpeditionSponsorPacket`,
-//! `CSChangeSlaveTargetPacket`, `CSSetTeamOfficerPacket`, `CSUpdateNationalTaxRatePacket`.
+//! C->G packets of `Core/Packets/C2G` whose C# `Read` only logs: `CSEditCharacterPacket` and the
+//! log-only packets the 1.2 C# defines but never registers (opcode 0xfff, commented out in
+//! `GameNetwork`): `CSResetQuestContextPacket`, `CSAcceptCheatQuestContextPacket`,
+//! `CSSearchListPacket`, `CSChangeExpeditionSponsorPacket`, `CSChangeSlaveTargetPacket`,
+//! `CSSetTeamOfficerPacket`, `CSUpdateNationalTaxRatePacket`.
+//!
+//! `CSTurretStatePacket` is decoded here but handled by the vehicles subsystem: the 1.2 client's
+//! aim producers (`39425490` / `39425580`) send the controlled unit's slave object id with the
+//! model-frame pitch and yaw, and the client's posture reader (`397bda20` -> `397b1df0`) turns a
+//! type-8 posture into the same model aim (`390bdec0`).
 
 use aaemu_commons::PacketStream;
 use futures::future::BoxFuture;
@@ -47,14 +52,49 @@ log_only_packet!(
     CSEditCharacterPacket, error, "CSEditCharacterPacket is not implemented!" {}
 );
 
-log_only_packet!(
-    /// `CSTurretStatePacket` (0x036).
-    CSTurretStatePacket, debug, "TurretState, UnitId: {}, Pitch: {}, Yaw: {}" {
-        unit_id: u32 => read_bc,
-        pitch: f32 => read_f32,
-        yaw: f32 => read_f32,
+/// `CSTurretStatePacket` (0x036): `bc unitId, f32 pitch, f32 yaw` (1.2 client writer
+/// `397c7640`). The unit is the slave the client controls, and the aim is in that model's frame.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CSTurretStatePacket {
+    pub unit_id: u32,
+    pub pitch: f32,
+    pub yaw: f32,
+}
+
+impl ClientPacket for CSTurretStatePacket {
+    const NAME: &'static str = "CSTurretStatePacket";
+
+    fn read(s: &mut PacketStream) -> Result<Self> {
+        Ok(Self {
+            unit_id: s.read_bc()?,
+            pitch: s.read_f32()?,
+            yaw: s.read_f32()?,
+        })
     }
-);
+
+    fn handle<'a>(
+        self,
+        server: &'a GameServer,
+        conn: &'a mut GameConnection,
+    ) -> BoxFuture<'a, Result<()>> {
+        tracing::debug!(
+            "TurretState, UnitId: {}, Pitch: {}, Yaw: {}",
+            self.unit_id,
+            self.pitch,
+            self.yaw
+        );
+        if let Some(p) = conn.active_char.clone() {
+            crate::systems::vehicles::slaves::set_turret_state(
+                server,
+                &p,
+                self.unit_id,
+                self.pitch,
+                self.yaw,
+            );
+        }
+        Box::pin(async { Ok(()) })
+    }
+}
 
 log_only_packet!(
     /// `CSResetQuestContextPacket` (not registered in 1.2).
