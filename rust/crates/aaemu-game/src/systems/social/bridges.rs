@@ -236,7 +236,9 @@ impl SocialHooks for GameSocialHooks {
         item_template_id: u32,
         custom_data: i32,
     ) -> Option<DoodadRef> {
-        doodads::create_player_doodad(
+        // Crime evidence (bloodstains / footprints) and the fake-trial pine: server-spawned
+        // doodads, not plantings.
+        doodads::create_player_doodad_server_spawned(
             server,
             owner,
             template_id,

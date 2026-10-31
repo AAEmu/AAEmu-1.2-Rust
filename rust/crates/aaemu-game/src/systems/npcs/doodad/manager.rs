@@ -19,6 +19,7 @@ use super::packets::{
     error_message, error_msg, CSCreateDoodadPacket, SCDoodadChangedPacket, SCUnbondDoodadPacket,
 };
 use super::phase;
+use super::placement;
 use super::runtime::DoodadCtx;
 use super::tasks::{self, TaskScheduler};
 use crate::models::doodad::{doodad_owner_type, Doodad};
@@ -338,9 +339,30 @@ pub fn do_despawn(server: &GameServer, doodad: &DoodadRef) {
     }
 }
 
+/// Race-test hook between the final placement check and the doodad insert, inside the world's
+/// planting guard (threads that are not racing ignore it).
+#[cfg(test)]
+static PLACEMENT_PAUSE: Mutex<Option<Arc<dyn Fn() + Send + Sync>>> = Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_placement_pause(pause: Option<Arc<dyn Fn() + Send + Sync>>) {
+    *PLACEMENT_PAUSE.lock().expect("placement pause poisoned") = pause;
+}
+
+#[cfg(test)]
+fn run_placement_pause() {
+    let pause = PLACEMENT_PAUSE
+        .lock()
+        .expect("placement pause poisoned")
+        .clone();
+    if let Some(pause) = pause {
+        pause();
+    }
+}
+
 /// `CreatePlayerDoodad(character, id, x, y, z, zRot, scale, itemId, farmGroupKind,
-/// itemTemplateId, customData, ignoreHouses)`: creates, initialises, spawns and saves a player
-/// doodad.
+/// itemTemplateId, customData, ignoreHouses)`: creates, initialises, spawns and saves a *planted*
+/// player doodad (`CSCreateDoodadPacket`). The 1.2 seed-builder rules run first.
 #[allow(clippy::too_many_arguments)]
 pub fn create_player_doodad(
     server: &GameServer,
@@ -368,6 +390,42 @@ pub fn create_player_doodad(
         custom_data,
         ignore_houses,
         0,
+        true,
+    )
+}
+
+/// `CreatePlayerDoodad` for doodads the server spawns itself (crime evidence: bloodstains,
+/// footprints and the fake-trial pine). These are server-side placements, not player plantings:
+/// the 1.2 client never places them, so the seed-builder rules do not apply and they may stand
+/// under the unit they describe or away from the owner.
+#[allow(clippy::too_many_arguments)]
+pub fn create_player_doodad_server_spawned(
+    server: &GameServer,
+    player: &PlayerRef,
+    id: u32,
+    pos: (f32, f32, f32),
+    z_rot: f32,
+    scale: f32,
+    item_id: u64,
+    farm_type: u8,
+    item_template_id: u32,
+    custom_data: i32,
+    ignore_houses: bool,
+) -> Option<DoodadRef> {
+    create_player_doodad_with_labor(
+        server,
+        player,
+        id,
+        pos,
+        z_rot,
+        scale,
+        item_id,
+        farm_type,
+        item_template_id,
+        custom_data,
+        ignore_houses,
+        0,
+        false,
     )
 }
 
@@ -385,6 +443,7 @@ fn create_player_doodad_with_labor(
     custom_data: i32,
     ignore_houses: bool,
     labor_cost: i16,
+    validate_placement: bool,
 ) -> Option<DoodadRef> {
     let (x, y, z) = pos;
     let pobj = WorldObject::from(player);
@@ -397,6 +456,30 @@ fn create_player_doodad_with_labor(
         tracing::warn!("{char_name}: doodad {id} not placed: character is in no world");
         return None;
     };
+    // The planting path (`CSCreateDoodad`) uses the 1.2 seed builder's rules here; the packet
+    // handler checks them too, in its earlier order. Server-spawned doodads (crime evidence and
+    // the fake-trial pine) skip them (`create_player_doodad_server_spawned`).
+    //
+    // The final check and the spawn below are one critical section under the world's planting
+    // guard: a second planting at the same spot cannot pass its check while this doodad is not
+    // yet in the grid. The refusal error and the seed consumption run after the guard is
+    // dropped (no network send or economy callback under the guard).
+    let placement_guard = validate_placement.then(|| world.placement_guard());
+    if validate_placement {
+        if let Some(template) = server.game_data.systems.npcs.doodad.template(id) {
+            if let Some(refusal) = placement::refusal(server, &world, player, template, pos) {
+                drop(placement_guard);
+                tracing::warn!(
+                    "{char_name}: doodad {id} not placed at {pos:?}: {refusal:?} ({})",
+                    refusal.error_message()
+                );
+                player.send(error_msg(refusal.error_message()));
+                return None;
+            }
+        }
+        #[cfg(test)]
+        run_placement_pause();
+    }
     let economy = server.systems.npcs.hooks.economy.get();
 
     let target_house = if ignore_houses {
@@ -518,6 +601,13 @@ fn create_player_doodad_with_labor(
         }
     }
     let is_coffer = doodad.data().coffer.is_some();
+
+    // Insert the doodad into the world while the planting guard is still held, so the next
+    // planting's final check sees it. The seed is consumed only after the insert succeeded; a
+    // failed consumption removes the doodad again (the guard is dropped by then).
+    spawn(server, &world, &doodad);
+    drop(placement_guard);
+
     if let Some(h) = &economy {
         if item_id > 0 && !h.try_consume_doodad_source_item(server, player, id, item_id, labor_cost)
         {
@@ -534,7 +624,6 @@ fn create_player_doodad_with_labor(
     }
 
     doodad.data().is_persistent = true;
-    spawn(server, &world, &doodad);
     init_doodad(server, &world, &doodad);
     super::db::save(server, &doodad);
     if !doodad.data().phase.deleted {
@@ -544,14 +633,6 @@ fn create_player_doodad_with_labor(
     }
     Some(doodad)
 }
-
-/// Anti-cheat sanity bound (metres, horizontal) of a client doodad placement from the server's
-/// position of the player. Rust only: the C# `CSCreateDoodadPacket` has no range check. The planting
-/// skills (10953 sapling / animal, 25536 seeds) have `max_range` 2, but the 1.2 client does not
-/// enforce it (live placements arrive 10.5 m and 15.6 m away), the server position of a walking
-/// player lags the client, and the vertical term adds terrain error, so this only rejects
-/// placements that are clearly out of reach.
-const PLACE_RANGE_SANITY: f32 = 30.0;
 
 /// `CSCreateDoodadPacket.Read` body.
 pub fn handle_create_doodad(server: &GameServer, player: &PlayerRef, p: &CSCreateDoodadPacket) {
@@ -584,6 +665,18 @@ pub fn handle_create_doodad(server: &GameServer, player: &PlayerRef, p: &CSCreat
         .and_then(|h| h.doodad_source_item(server, player, p.item_id, true))
     else {
         tracing::warn!("CreateDoodad, provided an invalid ItemId: {}", p.item_id);
+        // Inference: `FAILED_TO_USE_ITEM` 207 is the 1.2 client's seed-use cancellation, not a
+        // captured server answer. `item_use_zone_allowed` already answered 440 when the zone
+        // bans the item; only an item that is not in the bag needs this answer.
+        let in_bag = crate::systems::economy::inventory::Inv::of(player)
+            .bag()
+            .lock()
+            .expect("bag poisoned")
+            .get_item_by_id(p.item_id)
+            .is_some();
+        if !in_bag {
+            player.send(error_msg(error_message::FAILED_TO_USE_ITEM));
+        }
         return;
     };
     if !economy.as_ref().is_some_and(|h| {
@@ -596,38 +689,23 @@ pub fn handle_create_doodad(server: &GameServer, player: &PlayerRef, p: &CSCreat
             item.template_id,
             p.id
         );
+        // Inference (no capture): see `error_message::FAILED_TO_USE_ITEM`.
+        player.send(error_msg(error_message::FAILED_TO_USE_ITEM));
         return;
     }
     let Some(template) = server.game_data.systems.npcs.doodad.template(p.id) else {
         tracing::warn!("CreateDoodad, unknown doodad template {}", p.id);
+        // Inference (no capture): see `error_message::FAILED_TO_USE_ITEM`.
+        player.send(error_msg(error_message::FAILED_TO_USE_ITEM));
         return;
     };
-    let player_pos = world.world_pos_rot(&WorldObject::from(player));
-    let range = server
-        .game_data
-        .systems
-        .skills
-        .skill(item.use_skill_id)
-        .map_or(PLACE_RANGE_SANITY, |skill| {
-            (skill.max_range as f32).max(PLACE_RANGE_SANITY)
-        });
-    let distance_squared = (p.x - player_pos.x).powi(2) + (p.y - player_pos.y).powi(2);
-    if distance_squared > range * range {
+    // The 1.2 seed builder's rules (`FUN_393a8fa0`): area, water, 30 m 3D range, doodads, units.
+    if let Some(refusal) = placement::refusal(server, &world, player, template, pos) {
         tracing::warn!(
-            "CreateDoodad, doodad {} is {:.1} m away, range {range}",
-            p.id,
-            distance_squared.sqrt()
+            "CreateDoodad, doodad {} at {pos:?} refused: {refusal:?}",
+            p.id
         );
-        player.send(error_msg(error_message::TOO_FAR_AWAY));
-        return;
-    }
-    let target_zone = world.template.zone_id_at(p.x, p.y);
-    if template.restrict_zone_id != 0 && template.restrict_zone_id != target_zone {
-        tracing::warn!(
-            "CreateDoodad, doodad {} is restricted to zone {}, target zone is {target_zone}",
-            p.id,
-            template.restrict_zone_id
-        );
+        player.send(error_msg(refusal.error_message()));
         return;
     }
     // Get cost from related skill
@@ -675,6 +753,7 @@ pub fn handle_create_doodad(server: &GameServer, player: &PlayerRef, p: &CSCreat
     };
     create_player_doodad_with_labor(
         server, player, p.id, pos, p.z_rot, p.scale, p.item_id, farm_type, 0, 0, false, labor_cost,
+        true,
     );
 }
 

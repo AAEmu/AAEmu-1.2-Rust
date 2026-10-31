@@ -350,11 +350,32 @@ struct State {
 #[derive(Debug, Default)]
 pub struct CrimeManager {
     state: Mutex<State>,
+    /// Tests: exact fake-trial evidence kinds consumed before the random roll.
+    #[cfg(test)]
+    forced_fake_trial_rng: Mutex<std::collections::VecDeque<u32>>,
 }
 
 impl CrimeManager {
     fn st(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().expect("crime manager poisoned")
+    }
+
+    /// Tests: queue exact fake-trial evidence kinds (`0` damage, `1` kill, `2` fake pine).
+    #[cfg(test)]
+    pub fn queue_fake_trial_rng(&self, kinds: &[u32]) {
+        self.forced_fake_trial_rng
+            .lock()
+            .expect("fake trial rng poisoned")
+            .extend(kinds.iter().copied());
+    }
+
+    /// Tests: the next queued fake-trial evidence kind.
+    #[cfg(test)]
+    pub fn next_forced_fake_trial_rng(&self) -> Option<u32> {
+        self.forced_fake_trial_rng
+            .lock()
+            .expect("fake trial rng poisoned")
+            .pop_front()
     }
 
     /// `GetCrimesOfPlayer(playerId, includeOld)`.

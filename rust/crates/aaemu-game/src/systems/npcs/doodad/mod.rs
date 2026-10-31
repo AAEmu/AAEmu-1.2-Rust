@@ -14,6 +14,7 @@ pub mod natural;
 pub mod packets;
 pub mod phase;
 pub mod phase_funcs;
+pub mod placement;
 pub mod runtime;
 pub mod spawner;
 pub mod tasks;
