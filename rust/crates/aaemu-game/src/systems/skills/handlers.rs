@@ -244,6 +244,40 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
         send_cast_refused(&player, skill_id, p.caster, target, p.skill_object);
         return;
     }
+    // 1.2 doodad-use skills: the func's item requirement must be met before the cast starts.
+    // The client has no pre-check for these (`link_equip_slot_id` -1) and only stops the cast
+    // when `SCSkillStarted` carries a non-zero result; it plays the bar and animation otherwise.
+    if let (SkillCastTarget::Doodad(obj_id), Some(skill)) =
+        (target, data.systems.skills.skill(skill_id))
+    {
+        let doodad = super::geometry::world_of(server, &me)
+            .and_then(|world| world.object(obj_id))
+            .and_then(|object| object.as_doodad().cloned());
+        if let Some(refusal) = doodad.and_then(|doodad| {
+            crate::systems::npcs::doodad::item_gate::skill_item_refusal(server, &doodad, skill, &me)
+        }) {
+            tracing::warn!(
+                character = %player.data().unit.name,
+                skill_id,
+                doodad = obj_id,
+                result = refusal.result,
+                "Client doodad cast refused: the func's item requirement is not met"
+            );
+            if let Some(error) = refusal.error {
+                crate::systems::economy::inventory::send_error_message(&player, error, 0, true);
+            }
+            send_cast_failed(
+                &player,
+                skill_id,
+                p.caster,
+                target,
+                p.skill_object,
+                refusal.result,
+                refusal.value,
+            );
+            return;
+        }
+    }
     let is_default = data.skills.is_default_skill(skill_id);
     let is_common = data.skills.is_common_skill(skill_id);
     let auto = player.data().unit.skill_state.auto_attack.clone();
@@ -298,6 +332,39 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
                     .set_result_uint(0);
                 player.send(pkt);
                 return;
+            }
+        }
+        // The vehicle bar skill can carry a rider / operator skill (`mount_attached_skills`).
+        // Its reagents belong to the press that fires it, so refuse the mount skill before the
+        // cast when the rider skill's item is missing (the Farm Wagon's eco fuel, 20291 ->
+        // 20292). The 1.2 client shows the cast otherwise and the rider skill fails only when
+        // the mount skill has already fired.
+        let rider_skill = data
+            .systems
+            .vehicles
+            .mount_attached_skill(skill_id, player.data().attached_point);
+        if rider_skill != 0 {
+            if let Some(rider) = data.systems.skills.skill(rider_skill) {
+                if let Err((result, value)) = super::validation::check_reagents(server, rider, &me)
+                {
+                    tracing::warn!(
+                        character = %player.data().unit.name,
+                        skill_id,
+                        rider_skill,
+                        result,
+                        "Client mount cast refused: the attached rider skill lacks its reagent"
+                    );
+                    send_cast_failed(
+                        &player,
+                        skill_id,
+                        p.caster,
+                        target,
+                        p.skill_object,
+                        result,
+                        value,
+                    );
+                    return;
+                }
             }
         }
         let (r, _v) = skill::use_skill(
@@ -530,10 +597,31 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
     }
     if result != skill_result::SUCCESS {
         tracing::debug!(skill_id, result, value, "Client skill failed");
-        let mut pkt = SCSkillStartedPacket::new(skill_id, 0, p.caster, target, p.skill_object);
-        pkt.set_skill_result(result).set_result_uint(value);
-        player.send(pkt);
+        send_cast_failed(
+            &player,
+            skill_id,
+            p.caster,
+            target,
+            p.skill_object,
+            result,
+            value,
+        );
     }
+}
+
+/// Answers a refused client cast with the started-skill packet carrying `result` / `value`.
+fn send_cast_failed(
+    player: &crate::world::PlayerRef,
+    skill_id: u32,
+    caster: SkillCaster,
+    target: SkillCastTarget,
+    object: SkillObject,
+    result: u8,
+    value: u32,
+) {
+    let mut pkt = SCSkillStartedPacket::new(skill_id, 0, caster, target, object);
+    pkt.set_skill_result(result).set_result_uint(value);
+    player.send(pkt);
 }
 
 /// Answers a refused client cast with the started-skill packet carrying `NO_PERM`.
@@ -544,10 +632,15 @@ fn send_cast_refused(
     target: SkillCastTarget,
     object: SkillObject,
 ) {
-    let mut pkt = SCSkillStartedPacket::new(skill_id, 0, caster, target, object);
-    pkt.set_skill_result(skill_result::NO_PERM)
-        .set_result_uint(0);
-    player.send(pkt);
+    send_cast_failed(
+        player,
+        skill_id,
+        caster,
+        target,
+        object,
+        skill_result::NO_PERM,
+        0,
+    );
 }
 
 #[cfg(test)]

@@ -19,11 +19,14 @@
 //! interact <template>               CSStartInteraction on the slave, print its skill list
 //! bind <template>                   CSBindSlave 0x031 with the slave's tl
 //! scast <skill> <template> [point]  CSStartSkill on the nearest slave (wait for the attach)
+//! mcast <skill> <template> <mount row>  vehicle bar cast (Mount caster) on the nearest slave
 //! scastfail <skill> <template> <code>  CSStartSkill on the slave, wait for SCErrorMsg
 //! expectattach <point>              fail unless SCUnitAttached for us at that point
 //! expecterror <code>                fail unless SCErrorMsg with that code
 //! dcast <skill> <doodad template>    doodad-target CSStartSkill
-//! item <template> <count>            `/item add self` and remember the stack id
+//! item <template> <count>            `/item add self` and remember the stack id / slot
+//! equip <template> <slot>            move the remembered stack to equipment slot `slot` (26 = back)
+//! moveitem <id> <ftype> <fslot> <ttype> <tslot>  CSSwapItemsPacket with an explicit item id
 //! icast <skill> <item template> <npc template|self|peer|player:NAME> [metres [max secs]]
 //!                                    cast from the remembered item stack
 //! waitpeer [secs] [name]             read packets until another player is in sight (60 s default)
@@ -57,7 +60,7 @@ use std::time::{Duration, Instant};
 use aaemu_game::opcodes::{cs, sc};
 use anyhow::{bail, Context};
 
-use super::questitem::{chat_text, gm_command, quest_state, stack_id};
+use super::questitem::{chat_text, gm_command, quest_state, stack_id, stack_location};
 use super::{pump, skill_response_result, Runner};
 use crate::game::{parse_item_task, GameClient, Packet, UnitInfo};
 use crate::social::{self, SocialEvent};
@@ -415,6 +418,7 @@ async fn run_lines(
     let text = input.text;
     let s = r.begin("game.script");
     let mut items: HashMap<u32, u64> = HashMap::new();
+    let mut item_slots: HashMap<u32, (u8, u8)> = HashMap::new();
     let mut music = super::music::Music::default();
     let mut clock = 40_000u32;
     let mut last_npc = 0u32;
@@ -721,6 +725,22 @@ async fn run_lines(
                     "    SCUnitAttached child {child} point {pt} parent {parent} reason {reason}"
                 );
             }
+            "mcast" => {
+                let skill: u32 = num(&parts, 0)?;
+                let tpl: u32 = num(&parts, 1)?;
+                let mount_row: u32 = num(&parts, 2)?;
+                let s = nearest_slave(game, tpl)
+                    .with_context(|| format!("slave {tpl} not in sight"))?;
+                clock += 1500;
+                game.move_to((s.pos.0 + 1.0, s.pos.1, s.pos.2), clock)
+                    .await?;
+                game.change_target(s.obj_id).await?;
+                game.start_mount_skill(skill, s.obj_id, mount_row).await?;
+                let got = game
+                    .drain(Duration::from_millis(1500), Duration::from_secs(8))
+                    .await?;
+                show(&got);
+            }
             "expecterror" => {
                 let code: i16 = num(&parts, 0)?;
                 game.wait_for("SCErrorMsgPacket", |p| {
@@ -741,9 +761,13 @@ async fn run_lines(
                     .min_by(|a, b| dist(a.pos, me).total_cmp(&dist(b.pos, me)))
                     .cloned()
                     .with_context(|| format!("doodad {tpl} not in sight"))?;
-                clock += 1500;
-                game.move_to((d.pos.0 + 1.0, d.pos.1, d.pos.2), clock)
-                    .await?;
+                // An attached doodad's position is parent-local; the bot is already on the
+                // vehicle, so moving to it would walk away from the ship.
+                if d.parent_obj_id == 0 {
+                    clock += 1500;
+                    game.move_to((d.pos.0 + 1.0, d.pos.1, d.pos.2), clock)
+                        .await?;
+                }
                 game.start_doodad_skill(skill, d.obj_id).await?;
                 let got = game
                     .drain(Duration::from_millis(1500), Duration::from_secs(8))
@@ -762,7 +786,40 @@ async fn run_lines(
                     items.insert(tpl, id);
                     println!("    item {tpl} stack id {id}");
                 }
+                if let Some((_, slot_type, slot)) = stack_location(&reply, tpl) {
+                    item_slots.insert(tpl, (slot_type, slot));
+                    println!("    item {tpl} at slot type {slot_type} slot {slot}");
+                }
                 show(&reply);
+            }
+            "moveitem" => {
+                let id: u64 = num(&parts, 0)?;
+                let from_type: u8 = num(&parts, 1)?;
+                let from_slot: u8 = num(&parts, 2)?;
+                let to_type: u8 = num(&parts, 3)?;
+                let to_slot: u8 = num(&parts, 4)?;
+                game.swap_slots((id, from_type, from_slot), (0, to_type, to_slot))
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(1500), Duration::from_secs(8))
+                    .await?;
+                show(&got);
+            }
+            "equip" => {
+                let tpl: u32 = num(&parts, 0)?;
+                let slot: u8 = num(&parts, 1)?;
+                let id = *items
+                    .get(&tpl)
+                    .with_context(|| format!("item {tpl} not added with `item`"))?;
+                let (slot_type, from_slot) = *item_slots
+                    .get(&tpl)
+                    .with_context(|| format!("item {tpl} has no known slot"))?;
+                game.swap_slots((id, slot_type, from_slot), (0, 1, slot))
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(1500), Duration::from_secs(8))
+                    .await?;
+                show(&got);
             }
             "icast" => {
                 let skill: u32 = num(&parts, 0)?;

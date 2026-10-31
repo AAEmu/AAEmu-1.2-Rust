@@ -117,22 +117,42 @@ pub(super) fn check_resources(
     if labor_cost(skill, player) > i32::from(player.data().labor_power) {
         return fail("skill_need_labor_power");
     }
-    let reagents = server.game_data.systems.skills.reagents_for(skill.id);
-    if !reagents.is_empty() {
-        let items = server.systems.skills.ext.items();
-        let enough = |reagent: &super::data::SkillItemAmount| {
-            items.item_count(server, player, reagent.item_id) >= i32::from(reagent.amount)
-        };
-        let available = if skill.template.first_reagent_only {
-            reagents.iter().any(enough)
-        } else {
-            reagents.iter().all(enough)
-        };
-        if !available {
-            return fail("skill_need_reagent");
-        }
+    check_reagents(server, &skill.template, caster)
+}
+
+/// The `skill_reagents` requirement, checked before a cast and again when it ends. A player
+/// caster without any one of the required items gets `NEED_REAGENT` with the missing item's
+/// template id as the value: the 1.2 client's result handler (`FUN_39390900`, 0x24) puts an
+/// item name into the text from that value.
+pub(super) fn check_reagents(
+    server: &GameServer,
+    template: &super::data::SkillTemplate,
+    caster: &WorldObject,
+) -> Result<(), (u8, u32)> {
+    let Some(player) = caster.as_player() else {
+        return Ok(());
+    };
+    let reagents = server.game_data.systems.skills.reagents_for(template.id);
+    if reagents.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    let items = server.systems.skills.ext.items();
+    let enough = |reagent: &super::data::SkillItemAmount| {
+        items.item_count(server, player, reagent.item_id) >= i32::from(reagent.amount)
+    };
+    let available = if template.first_reagent_only {
+        reagents.iter().any(enough)
+    } else {
+        reagents.iter().all(enough)
+    };
+    if available {
+        return Ok(());
+    }
+    let missing = reagents
+        .iter()
+        .find(|r| !enough(r))
+        .map_or(0, |r| r.item_id);
+    Err((skill_result_for_key("skill_need_reagent"), missing))
 }
 
 /// Parity deviation (`PORTING.md`): the construction step of an unfinished house needs the
@@ -201,6 +221,14 @@ pub(super) fn check(
         if !crate::systems::npcs::doodad::gathering::allows_skill(server, doodad, template, caster)
         {
             return fail("skill_invalid_target");
+        }
+        // The func's item requirement is enforced at the cast start too, not only when the
+        // effect runs: the 1.2 client plays the cast bar and animation for a successful
+        // `SCSkillStarted` and stops the cast on a non-zero result.
+        if let Some(refusal) = crate::systems::npcs::doodad::item_gate::skill_item_refusal(
+            server, doodad, template, caster,
+        ) {
+            return Err((refusal.result, refusal.value));
         }
     }
     let (hp, buff_ids, moving) = caster

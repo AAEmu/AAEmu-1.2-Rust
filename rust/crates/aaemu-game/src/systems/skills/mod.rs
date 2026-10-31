@@ -58,6 +58,8 @@ mod cast_validation_tests;
 #[cfg(test)]
 mod death_once_tests;
 #[cfg(test)]
+mod doodad_item_gate_tests;
+#[cfg(test)]
 mod effect_task_manager_tests;
 #[cfg(test)]
 mod exp_recovery_tests;
