@@ -207,13 +207,16 @@ pub const ITEM_SKILL_SOURCES: &[(&str, &str)] =
     &[("items", "use_skill_id"), ("item_grade_skills", "skill_id")];
 
 /// `SpecialEffect` types the 1.2 client casts from its own UI although no source table names
-/// them: type 30 `SavePortal`, the Teleport Book's record / rename (skills 11215 / 16841). The
+/// them: type 30 `SavePortal`, the Teleport Book's record / rename (skills 11215 / 16841), and
+/// type 53 `AttachTo`, the slave action bar's "Take the Passenger Seat" (skill 13863). The
 /// portal window (`edit_dialog_handler.alb`) sends a plain `CSStartSkill` with a
-/// `SavePortalInfo` object and there is no CS save-portal opcode. The effect itself still
-/// enforces the Memory Ink reagent (`skill_reagents`) and only renames the caster's own portal.
-/// Deliberately only type 30: other special effects (Return, SpawnDoodad, ...) would reopen
-/// NPC / event skills.
-pub const CLIENT_SKILL_SPECIAL_EFFECT_SOURCES: &[i32] = &[30];
+/// `SavePortalInfo` object and there is no CS save-portal opcode; the slave action bar
+/// (`FUN_393bbb80`) adds 13863 and `FUN_39362f50` sends it as a plain `CSStartSkill`. The
+/// effects still enforce their own rules: SavePortal needs the Memory Ink reagent
+/// (`skill_reagents`) and only renames the caster's own portal; AttachTo only binds the caster
+/// to the target slave. Other special effects (Return, SpawnDoodad, ...) would reopen NPC /
+/// event skills and stay out.
+pub const CLIENT_SKILL_SPECIAL_EFFECT_SOURCES: &[i32] = &[30, 53];
 
 /// Effect classes whose skills the client casts from its own UI even though no source table
 /// names them: the priest's lost-experience prayer (skill 17063 "Offer Prayer",
@@ -528,5 +531,8 @@ mod tests {
         // 16387 "Save Location" is also a doodad interaction: still a plain cast.
         assert!(d.is_client_sourced_skill(16387));
         assert!(!d.is_item_only_skill(16387));
+        // The slave action bar's passenger seat (AttachTo, special type 53) is a plain cast.
+        assert!(d.is_client_sourced_skill(13863));
+        assert!(!d.is_item_only_skill(13863));
     }
 }

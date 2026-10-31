@@ -1160,10 +1160,22 @@ async fn merchant_loaded_refusal_preserves_hull_rider_gunner_and_item_identity()
     let cannon_id = hull.data().attached_slaves[0];
     let cannon = world.slave(cannon_id).unwrap();
     let tl = u32::from(hull.data().unit.tl_id);
+    stand_next_to(&world, &owner, &WorldObject::from(&hull));
     slaves::bind_slave_by_tl(&server, &owner, tl);
     let pos = world.world_pos_rot(&WorldObject::from(&cannon));
     gunner.data().unit.transform.set_xyz(pos.x, pos.y, pos.z);
     world.attach_child(&WorldObject::from(&hull), &WorldObject::from(&gunner));
+    // Both are children of the hull: use the cannon's own local offset so the 4.0 m bind
+    // reach sees the gunner at the cannon after the attach conversion.
+    let cannon_local = cannon.data().unit.transform;
+    gunner.data().unit.transform.set_position(
+        cannon_local.x,
+        cannon_local.y,
+        cannon_local.z,
+        0.0,
+        0.0,
+        0.0,
+    );
     let cannon_tl = u32::from(cannon.data().unit.tl_id);
     slaves::bind_slave_by_tl(&server, &gunner, cannon_tl);
     assert!(!hull.data().attached_characters.is_empty());

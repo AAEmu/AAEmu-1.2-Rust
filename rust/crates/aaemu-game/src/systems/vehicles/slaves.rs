@@ -1322,17 +1322,16 @@ pub fn unbind_slave(server: &GameServer, character: &PlayerRef, tl_id: u32, reas
         );
         return;
     };
-    let point = slave
-        .data()
-        .attached_characters
-        .iter()
-        .find(|(_, c)| *c == character.obj_id)
-        .map_or(attach_point::NONE, |(p, _)| *p);
-    if point != attach_point::NONE {
-        slave
-            .data()
-            .attached_characters
-            .retain(|(p, _)| *p != point);
+    // Find and remove the character's own seat under the slave's one lock: a re-bind between a
+    // check and a separate `retain` could remove the seat the character moved to.
+    let removed = {
+        let mut d = slave.data();
+        d.attached_characters
+            .iter()
+            .position(|(_, c)| *c == character.obj_id)
+            .map(|i| d.attached_characters.remove(i))
+    };
+    if let Some((point, _)) = removed {
         if point == attach_point::DRIVER {
             super::ship_physics::set_driver(server, &slave, false);
         }
@@ -1352,6 +1351,145 @@ pub fn unbind_slave(server: &GameServer, character: &PlayerRef, tl_id: u32, reas
     );
 }
 
+/// Why [`bind_slave`] refused a seat.
+enum BindRefusal {
+    TooFar,
+    CannonPassenger,
+    SeatTaken,
+    OwnersMark,
+}
+
+/// Surface gap the client's own bind reach checks allow: the 12076 driver bind uses
+/// `FUN_39346290` -> `FUN_39093860(..., 16.0)` (strictly under 4.0 m); the 13863 passenger
+/// interaction uses `FUN_393bf270` -> `FUN_39093860(..., 9.0)` (strictly under 3.0 m), widened
+/// to 12.25 (3.5 m) when the target's `+0x3c26` flag is set. The S11 client work reads that flag
+/// as "riding a mate" (capture-pending S11-C5), keyed on the character's `is_riding`; the
+/// decompile reads `+0x3c26` from the target, so the flag's owner is not proven. This keeps the
+/// S11 reading the passenger-seat task asked for.
+pub fn passenger_reach(character: &PlayerRef) -> f32 {
+    if character.data().is_riding {
+        3.5
+    } else {
+        3.0
+    }
+}
+
+/// `Vector3.Transform(value, Quaternion.Inverse(rotation))`.
+fn inverse_rotate(q: crate::models::transform::Quaternion, v: [f32; 3]) -> [f32; 3] {
+    crate::models::transform::Quaternion {
+        x: -q.x,
+        y: -q.y,
+        z: -q.z,
+        w: q.w,
+    }
+    .rotate(v)
+}
+
+/// Surface gap for a slave bind reach. The client measures its collision geometry
+/// (`FUN_39093860`); the server uses the ship model's mass box when the slave has one and the
+/// requested attach point's world position when the data has it, taking the smaller gap. It only
+/// falls back to the slave origin when neither exists (carts: the origin sits at the seat). A
+/// ship's bare origin is never the measure.
+fn bind_gap(
+    server: &GameServer,
+    world: &WorldInstance,
+    character: &PlayerRef,
+    slave: &SlaveRef,
+    point: u8,
+) -> f32 {
+    let me = WorldObject::from(character);
+    let player = world.world_pos_rot(&me);
+    let player_radius = crate::systems::skills::geometry::model_size(
+        server,
+        &crate::systems::skills::geometry::Target::Obj(me),
+    );
+    let slave_obj = WorldObject::from(slave);
+    let slave_pos = world.world_pos_rot(&slave_obj);
+    let (model_id, scale) = {
+        let d = slave.data();
+        (
+            d.unit.model_id,
+            if d.unit.scale > 0.0 {
+                d.unit.scale
+            } else {
+                1.0
+            },
+        )
+    };
+    let vehicles = &server.game_data.systems.vehicles;
+    let box_distance = vehicles.ship_model(model_id).map(|model| {
+        let center = [
+            model.mass_center_x * scale,
+            model.mass_center_y * scale,
+            model.mass_center_z * scale,
+        ];
+        let half = [
+            model.mass_box_size_x.abs() * scale * 0.5,
+            model.mass_box_size_y.abs() * scale * 0.5,
+            model.mass_box_size_z.abs() * scale * 0.5,
+        ];
+        let local = inverse_rotate(
+            slave_pos.to_quaternion(),
+            [
+                player.x - slave_pos.x,
+                player.y - slave_pos.y,
+                player.z - slave_pos.z,
+            ],
+        );
+        let mut sum = 0.0;
+        for i in 0..3 {
+            let d = local[i] - center[i];
+            let q = d.clamp(-half[i], half[i]);
+            sum += (d - q) * (d - q);
+        }
+        sum.sqrt()
+    });
+    let point_distance = vehicles
+        .attach_points_for_slave(model_id)
+        .and_then(|points| points.iter().find(|(p, _)| *p == point).map(|(_, l)| *l))
+        .map(|location| {
+            let rotated = slave_pos.to_quaternion().rotate([
+                location.x * scale,
+                location.y * scale,
+                location.z * scale,
+            ]);
+            let dx = player.x - (slave_pos.x + rotated[0]);
+            let dy = player.y - (slave_pos.y + rotated[1]);
+            let dz = player.z - (slave_pos.z + rotated[2]);
+            (dx * dx + dy * dy + dz * dz).sqrt()
+        });
+    let distance = match (box_distance, point_distance) {
+        (Some(box_gap), Some(point_gap)) => box_gap.min(point_gap),
+        (Some(gap), None) | (None, Some(gap)) => gap,
+        (None, None) => {
+            let dx = player.x - slave_pos.x;
+            let dy = player.y - slave_pos.y;
+            let dz = player.z - slave_pos.z;
+            (dx * dx + dy * dy + dz * dz).sqrt()
+        }
+    };
+    (distance - player_radius).max(0.0)
+}
+
+/// `SlaveTemplate.SlaveKind` (0 when the template is not loaded).
+pub fn slave_kind(server: &GameServer, slave: &SlaveRef) -> u32 {
+    server
+        .game_data
+        .systems
+        .vehicles
+        .slave_template(slave.data().unit.template_id)
+        .map_or(0, |t| t.slave_kind)
+}
+
+/// A cannon (slave kind 7 siege weapon / 8 slave equipment) has only its gunner seat at point
+/// 1, never a passenger seat.
+pub fn is_cannon_kind(kind: u32) -> bool {
+    matches!(
+        kind,
+        super::data::slave_kind::SIEGE_WEAPON | super::data::slave_kind::SLAVE_EQUIPMENT
+    )
+}
+
 /// `BindSlave(character, objId, attachPoint, bondKind)`.
 pub fn bind_slave(
     server: &GameServer,
@@ -1359,6 +1497,7 @@ pub fn bind_slave(
     obj_id: u32,
     point: u8,
     bond_kind: u8,
+    reach: Option<f32>,
 ) {
     let Some(world) = player_world(server, character) else {
         return;
@@ -1366,22 +1505,82 @@ pub fn bind_slave(
     let Some(slave) = world.slave(obj_id) else {
         return;
     };
-    let (taken, has_mark, summoner) = {
-        let d = slave.data();
-        (
-            d.has_attached_at(point),
-            d.unit.buffs.check_buff(buff::OWNERS_MARK),
-            d.summoner_obj_id,
-        )
-    };
-    if taken {
-        return;
-    }
-    if point == attach_point::DRIVER && has_mark && summoner != character.obj_id {
-        error(character, error::SLAVE_ALREADY_HAS_MASTER);
+    // One slave at a time: the 1.2 client refuses a second slave bind with
+    // `slave_unbind_first` 0x66 (`FUN_39346290`). A mate is not in a slave's
+    // `attached_characters`, so the S11-C5 mate case stays open. `get_is_mounted` walks every
+    // slave, so it runs before this slave's lock.
+    if get_is_mounted(&world, character.obj_id).is_some() {
+        tracing::debug!(
+            "BindSlave: character {} is already on a slave; refusing seat {} of {}",
+            character.obj_id,
+            point,
+            obj_id
+        );
+        error(character, error::SLAVE_UNBIND_FIRST);
         return;
     }
     let me = WorldObject::from(character);
+    // The caller decides the reach: 12076 passes 4.0, 13863 the passenger reach, and the
+    // doodad BoardTransfer path passes `None` because its own doodad func already checked the
+    // range. The gap is snapshotted before the slave lock (the player is a different object
+    // lock); the comparison and the reservation run under that one lock.
+    let gap = reach.map(|_| bind_gap(server, &world, character, &slave, point));
+    let cannon = is_cannon_kind(slave_kind(server, &slave));
+    // Check and reserve the seat under the slave's one lock, so two binds racing for the same
+    // point cannot both pass.
+    let refusal = {
+        let mut d = slave.data();
+        if reach.zip(gap).is_some_and(|(reach, gap)| gap >= reach) {
+            Some(BindRefusal::TooFar)
+        } else if point != attach_point::DRIVER && cannon {
+            Some(BindRefusal::CannonPassenger)
+        } else if d.has_attached_at(point) {
+            Some(BindRefusal::SeatTaken)
+        } else if point == attach_point::DRIVER
+            && d.unit.buffs.check_buff(buff::OWNERS_MARK)
+            && d.summoner_obj_id != character.obj_id
+        {
+            Some(BindRefusal::OwnersMark)
+        } else {
+            d.attached_characters.push((point, character.obj_id));
+            None
+        }
+    };
+    if let Some(refusal) = refusal {
+        match refusal {
+            BindRefusal::TooFar => {
+                tracing::debug!(
+                    "BindSlave: character {} is {:.3} m from slave {} (reach {:.3} m)",
+                    character.obj_id,
+                    gap.unwrap_or_default(),
+                    obj_id,
+                    reach.unwrap_or_default()
+                );
+                error(character, error::TOO_FAR_AWAY);
+            }
+            BindRefusal::CannonPassenger => {
+                tracing::debug!(
+                    "BindSlave: slave {} is a cannon and has no passenger seat",
+                    obj_id
+                );
+                error(character, error::SLAVE_CANNOT_BIND);
+            }
+            BindRefusal::SeatTaken => {
+                // The C# returns silently; the client message table has no seat-taken text and
+                // the original server's answer is capture-pending (S11-C2).
+                tracing::debug!(
+                    "BindSlave: seat {} of slave {} is taken; ignoring",
+                    point,
+                    obj_id
+                );
+            }
+            BindRefusal::OwnersMark => {
+                // The C# sends `SlaveAlreadyHasMaster` for this driver-seat refusal only.
+                error(character, error::SLAVE_ALREADY_HAS_MASTER);
+            }
+        }
+        return;
+    }
     broadcast(
         server,
         &me,
@@ -1406,10 +1605,6 @@ pub fn bind_slave(
             true,
         );
     }
-    slave
-        .data()
-        .attached_characters
-        .push((point, character.obj_id));
     if point == attach_point::DRIVER {
         super::ship_physics::set_driver(server, &slave, true);
     }
@@ -1619,16 +1814,16 @@ pub fn flush_pending_turret_state(server: &GameServer, slave: &SlaveRef) {
     }
 }
 
-/// A gunner who dies leaves the cannon (a driver or passenger of a ship keeps the C# behaviour).
-pub fn on_gunner_death(server: &GameServer, player: &PlayerRef) {
+/// A character who dies leaves any slave seat through the same `unbind_slave` path as logout.
+/// The C# only force-dismounted cannon gunners here, so a ship driver or passenger kept a stale
+/// seat and the one-slave guard then refused every later bind; the Rust unbinds every seat.
+pub fn on_character_death(server: &GameServer, player: &PlayerRef) {
     let Some(world) = player_world(server, player) else {
         return;
     };
-    if let Some((cannon, _)) = get_is_mounted(&world, player.obj_id) {
-        if is_manned_cannon(server, &cannon) {
-            let tl = u32::from(cannon.data().unit.tl_id);
-            unbind_slave(server, player, tl, attach_reason::NONE);
-        }
+    if let Some((slave, _)) = get_is_mounted(&world, player.obj_id) {
+        let tl = u32::from(slave.data().unit.tl_id);
+        unbind_slave(server, player, tl, attach_reason::NONE);
     }
 }
 
@@ -1658,7 +1853,11 @@ fn unbind_riders_of(server: &GameServer, slave: &SlaveRef, reason: u8) {
     }
 }
 
-/// `BindSlave(connection, tlId)` (`CSBindSlavePacket`).
+/// `BindSlave(connection, tlId)` (`CSBindSlavePacket`). The 1.2 packet body is only the target
+/// timeline id (`FUN_393464a0` writes `target+0x41c`; `FUN_39346290` holds the reach / riding
+/// checks) and its only builder is skill 12076 "occupy" (`FUN_393bf310` -> `FUN_39362f50`), so
+/// this path always asks for driver point 1. The passenger seat is skill 13863 -> `AttachTo`
+/// (`special_effects` 2378 value1 2), which reaches [`bind_slave`] directly.
 pub fn bind_slave_by_tl(server: &GameServer, character: &PlayerRef, tl_id: u32) {
     let Some(world) = player_world(server, character) else {
         return;
@@ -1669,19 +1868,9 @@ pub fn bind_slave_by_tl(server: &GameServer, character: &PlayerRef, tl_id: u32) 
     if slave.data().unit.is_dead() {
         return;
     }
-    if is_manned_cannon(server, &slave) {
-        if !may_man_cannon(character, &slave, &world) {
-            error(character, error::SLAVE_CANNOT_BIND);
-            return;
-        }
-        if slave.data().has_attached_at(attach_point::DRIVER) {
-            error(character, error::SLAVE_ALREADY_HAS_MASTER);
-            return;
-        }
-        if get_is_mounted(&world, character.obj_id).is_some() {
-            error(character, error::SLAVE_UNBIND_FIRST);
-            return;
-        }
+    if is_manned_cannon(server, &slave) && !may_man_cannon(character, &slave, &world) {
+        error(character, error::SLAVE_CANNOT_BIND);
+        return;
     }
     bind_slave(
         server,
@@ -1689,6 +1878,7 @@ pub fn bind_slave_by_tl(server: &GameServer, character: &PlayerRef, tl_id: u32) 
         slave.obj_id,
         attach_point::DRIVER,
         attach_reason::NEW_MASTER,
+        Some(4.0),
     );
 }
 

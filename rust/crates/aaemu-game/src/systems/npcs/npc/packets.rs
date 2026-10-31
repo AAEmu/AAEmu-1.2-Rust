@@ -17,7 +17,8 @@ use crate::net::registry::{ClientPacket, PacketRegistry};
 use crate::opcodes::{cs, sc};
 use crate::packets::packet_def;
 use crate::server::GameServer;
-use crate::world::WorldObject;
+use crate::systems::vehicles::data::attach_point;
+use crate::world::{SlaveRef, WorldObject};
 
 /// `SkillsEnum` values used by the interaction code.
 pub mod skills_enum {
@@ -29,6 +30,9 @@ pub mod skills_enum {
     pub const USE_STORE: u32 = 12087;
     pub const SLAVE_OCCUPY: u32 = 12076;
     pub const SLAVE_MOUNTING: u32 = 12077;
+    /// `Take the Passenger Seat` (skill 13863, `special_effects` 2378 type 53 `AttachTo`
+    /// value1 2).
+    pub const SLAVE_PASSENGER: u32 = 13863;
     pub const HEAL_PET_S_WOUNDS: u32 = 12195;
     pub const FORM_GUILD: u32 = 13736;
     pub const WAR_SUPPORT: u32 = 12660;
@@ -239,6 +243,32 @@ pub fn interaction_option(t: &super::data::NpcTemplate) -> u32 {
     }
 }
 
+/// The one seat skill `SCNpcInteractionSkillList` offers for a slave. The 1.2 client acts on the
+/// first skill at once (`FUN_393be850` -> `FUN_393be280`), and its dynamic action bar adds the
+/// passenger skill 13863 when the slave has a free passenger point (`FUN_393bbb80` checks point
+/// 2). The interaction list therefore offers the driver seat (12076) while it is free and the
+/// passenger seat (13863) once the driver seat is taken; point 2 is the only passenger seat the
+/// 1.2 data reaches (`special_effects` 2378 type 53 value1 2). A cannon (slave kind 7 / 8) has
+/// only its gunner seat, and a slave with both seats taken keeps 12076; the bind then ignores
+/// the taken seat silently (C# behaviour).
+pub(crate) fn slave_interaction_skill(server: &GameServer, slave: &SlaveRef) -> u32 {
+    let kind = crate::systems::vehicles::slaves::slave_kind(server, slave);
+    let (driver_taken, passenger_taken) = {
+        let d = slave.data();
+        (
+            d.has_attached_at(attach_point::DRIVER),
+            d.has_attached_at(attach_point::PASSENGER0),
+        )
+    };
+    if !driver_taken {
+        return skills_enum::SLAVE_OCCUPY;
+    }
+    if !passenger_taken && !crate::systems::vehicles::slaves::is_cannon_kind(kind) {
+        return skills_enum::SLAVE_PASSENGER;
+    }
+    skills_enum::SLAVE_OCCUPY
+}
+
 /// The skills `SCNpcInteractionSkillList` lists for an NPC: its function ([`interaction_option`]), else the skills of its
 /// `npc_interaction_set_id` (`npc_interactions`: the beauty salon helper offers "Enter the beauty salon", 22780), else 0.
 pub fn interaction_skills(data: &super::data::NpcData, t: &super::data::NpcTemplate) -> Vec<u32> {
@@ -315,10 +345,11 @@ impl ClientPacket for CSStartInteractionPacket {
             }
             // The 1.2 client acts on the first skill at once (FUN_393be850) and
             // FUN_393bf310 maps 12076 to the bind request FUN_393464a0 (CSBindSlave
-            // 0x031), which `vehicles::slaves::bind_slave_by_tl` answers. The C#
+            // 0x031), which `vehicles::slaves::bind_slave_by_tl` answers; 13863 is the
+            // passenger seat skill (CSStartSkill -> `AttachTo` value1 2). The C#
             // answered only NPCs and mates (see PORTING.md).
-            if let Some(WorldObject::Slave(_)) = world.unit(self.npc_obj_id) {
-                me.send(packet(vec![skills_enum::SLAVE_OCCUPY]));
+            if let Some(WorldObject::Slave(slave)) = world.unit(self.npc_obj_id) {
+                me.send(packet(vec![slave_interaction_skill(server, &slave)]));
             }
             Ok(())
         })
@@ -835,6 +866,186 @@ mod tests {
         .await
         .unwrap();
         assert!(a.drain().is_empty());
+    }
+
+    /// The interaction list acts on its first skill, so a taken driver seat must hand the
+    /// client the passenger skill (13863) while point 2 is free; with both seats taken the
+    /// occupy skill stays so the bind answers `slave_already_has_master`.
+    #[tokio::test]
+    async fn start_interaction_slave_offers_the_passenger_seat_once_the_driver_seat_is_taken() {
+        use crate::models::slave::Slave;
+        use crate::systems::vehicles::data::slave_kind;
+        use crate::systems::vehicles::data::SlaveTemplate;
+        use crate::systems::vehicles::slaves;
+        use crate::test_support::*;
+        use crate::world::Entity;
+
+        let mut d = crate::data::GameData::empty();
+        d.systems.vehicles.slave_templates.insert(
+            68,
+            SlaveTemplate {
+                id: 68,
+                slave_kind: slave_kind::MACHINE,
+                ..SlaveTemplate::default()
+            },
+        );
+        let server = test_server_with(d);
+        let mut a = TestClient::new(&server, 1, 1001);
+        let mut b = TestClient::new(&server, 2, 1002);
+        let pa = spawn_player(
+            &server,
+            &a,
+            test_character(1, "Driver", 100.0, 100.0),
+            0x100,
+        );
+        let pb = spawn_player(
+            &server,
+            &b,
+            test_character(2, "Passenger", 101.0, 100.0),
+            0x101,
+        );
+        a.conn.active_char = Some(pa.clone());
+        b.conn.active_char = Some(pb.clone());
+        let world = server.world.world(0).unwrap();
+        let mut cart = Slave::new(0, 68);
+        cart.unit.transform.set_xyz(103.0, 100.0, 100.0);
+        cart.unit.tl_id = 3;
+        cart.summoner_obj_id = 0x100;
+        let cart = Entity::new(0x300, cart);
+        world.spawn(&cart, &server.view_ctx());
+        a.drain();
+        b.drain();
+
+        let req = CSStartInteractionPacket {
+            npc_obj_id: cart.obj_id,
+            obj_id: 0x100,
+            extra_info: 1,
+            pick_id: 0,
+            mouse_button: 3,
+            modifier_keys: 0,
+        };
+        let expected = |skills: Vec<u32>| {
+            let p = SCNpcInteractionSkillListPacket {
+                npc_obj_id: cart.obj_id,
+                obj_id: 0x100,
+                extra_info: 1,
+                pick_id: 0,
+                mouse_button: 3,
+                modifier_keys: 0,
+                skill_list: skills,
+            };
+            let mut body = PacketStream::new();
+            p.write(&mut body);
+            (sc::SCNpcInteractionSkillListPacket, body.into_bytes())
+        };
+
+        // Driver seat free: the occupy skill.
+        req.handle(&server, &mut a.conn).await.unwrap();
+        assert_eq!(a.drain(), vec![expected(vec![skills_enum::SLAVE_OCCUPY])]);
+
+        // Driver seat taken: the passenger seat skill, because the client acts on the first.
+        slaves::bind_slave(
+            &server,
+            &pa,
+            cart.obj_id,
+            crate::systems::vehicles::data::attach_point::DRIVER,
+            7,
+            Some(4.0),
+        );
+        a.drain();
+        b.drain();
+        req.handle(&server, &mut b.conn).await.unwrap();
+        assert_eq!(
+            b.drain(),
+            vec![expected(vec![skills_enum::SLAVE_PASSENGER])]
+        );
+
+        // Both seats taken: the occupy skill, whose bind answers the taken-seat error.
+        slaves::bind_slave(
+            &server,
+            &pb,
+            cart.obj_id,
+            crate::systems::vehicles::data::attach_point::PASSENGER0,
+            7,
+            Some(3.0),
+        );
+        a.drain();
+        b.drain();
+        req.handle(&server, &mut b.conn).await.unwrap();
+        assert_eq!(b.drain(), vec![expected(vec![skills_enum::SLAVE_OCCUPY])]);
+    }
+
+    /// A cannon's only seat is the gunner's point 1; it never offers the passenger skill. A
+    /// slave without a template (test data) keeps the occupy skill too.
+    #[tokio::test]
+    async fn slave_interaction_skill_never_offers_a_passenger_seat_on_a_cannon() {
+        use crate::models::slave::Slave;
+        use crate::systems::vehicles::data::{attach_point, slave_kind, SlaveTemplate};
+        use crate::test_support::*;
+        use crate::world::Entity;
+
+        let mut d = crate::data::GameData::empty();
+        d.systems.vehicles.slave_templates.insert(
+            8,
+            SlaveTemplate {
+                id: 8,
+                slave_kind: slave_kind::SLAVE_EQUIPMENT,
+                ..SlaveTemplate::default()
+            },
+        );
+        let server = test_server_with(d);
+        let a = TestClient::new(&server, 1, 1001);
+        let pa = spawn_player(
+            &server,
+            &a,
+            test_character(1, "Gunner", 100.0, 100.0),
+            0x100,
+        );
+        let world = server.world.world(0).unwrap();
+        let mut cannon = Slave::new(0, 8);
+        cannon.unit.tl_id = 3;
+        cannon.summoner_obj_id = 0x100;
+        let cannon = Entity::new(0x300, cannon);
+        world.spawn(&cannon, &server.view_ctx());
+        crate::systems::vehicles::slaves::bind_slave(
+            &server,
+            &pa,
+            cannon.obj_id,
+            attach_point::DRIVER,
+            7,
+            Some(4.0),
+        );
+        assert_eq!(
+            super::slave_interaction_skill(&server, &cannon),
+            skills_enum::SLAVE_OCCUPY
+        );
+    }
+
+    #[test]
+    fn slave_passenger_skill_list_bytes() {
+        let p = SCNpcInteractionSkillListPacket {
+            npc_obj_id: 0x0A0B0C,
+            obj_id: 0x000102,
+            extra_info: 1,
+            pick_id: 0,
+            mouse_button: 3,
+            modifier_keys: 0,
+            skill_list: vec![skills_enum::SLAVE_PASSENGER],
+        };
+        #[rustfmt::skip]
+        let body = [
+            0x0C, 0x0B, 0x0A, // bc npc
+            0x02, 0x01, 0x00, // bc obj
+            1, 0, 0, 0, // extraInfo
+            0, 0, 0, 0, // pickId
+            3, // mouseButton
+            1, 0, 0, 0, // count
+            0x27, 0x36, 0, 0, // 13863 (SLAVE_PASSENGER)
+            1, // interactable
+            0, 0, 0, 0, // modifierKeys
+        ];
+        assert_eq!(encode(&p), frame(0x07b, &body));
+        assert_eq!(skills_enum::SLAVE_PASSENGER, 13863);
     }
 
     #[test]

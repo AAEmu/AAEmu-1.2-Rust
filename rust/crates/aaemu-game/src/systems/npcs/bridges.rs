@@ -481,6 +481,7 @@ impl NpcSkillHooks for NpcSkills {
             slave_obj_id,
             attach_point as u8,
             slaves::attach_reason::NEW_MASTER,
+            Some(slaves::passenger_reach(player)),
         );
     }
 

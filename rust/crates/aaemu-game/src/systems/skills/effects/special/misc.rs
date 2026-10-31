@@ -632,7 +632,9 @@ pub fn spawn_slave(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
     );
 }
 
-/// `AttachTo`: a character binds the target slave at attach point `value1`.
+/// `AttachTo`: a character binds the target slave at attach point `value1`. The 1.2 data has one
+/// row of this type (`special_effects` 2378, type 53) with value1 2 and value2..4 0, reached by
+/// skill 13863; the C# `AttachTo` also passes `value1`, so the passenger seat is point 2.
 pub fn attach_to(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
     log_values(args, "AttachTo", v);
     let Some(slave) = args.target.as_obj().filter(|t| t.as_slave().is_some()) else {

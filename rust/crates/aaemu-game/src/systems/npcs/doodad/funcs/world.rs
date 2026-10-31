@@ -121,6 +121,9 @@ pub fn attachment(f: &DoodadFuncAttachment, ctx: &DoodadCtx<'_>, caster: Option<
             parent,
             f.attach_point_id,
             crate::systems::vehicles::slaves::attach_reason::BOARD_TRANSFER,
+            // The doodad func already checked its own use range; the ship's seat helper can be
+            // far from the hull origin, so no bind reach here.
+            None,
         );
     }
 }
