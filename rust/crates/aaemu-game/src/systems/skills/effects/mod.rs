@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use rand::Rng;
 
+use crate::models::item::Item;
 use crate::server::GameServer;
 use crate::world::WorldObject;
 
@@ -35,6 +36,13 @@ pub struct EffectSource {
     pub is_trigger: bool,
     /// The individual SkillEffect bypasses the cast's miss roll.
     pub always_hit: bool,
+    /// The `Item` cast's source item as it was just before its debit. Effects that read the
+    /// casting item (UCC, dye, loot grade, style powder) use this snapshot, because the debit
+    /// already took the live item out of the bag.
+    pub source_item: Option<Arc<Item>>,
+    /// The source item was taken out of its container before the effects (the cast consumes
+    /// it); effects that would otherwise consume it themselves must not do so again.
+    pub source_item_debited: bool,
 }
 
 impl EffectSource {

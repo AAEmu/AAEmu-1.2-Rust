@@ -19,6 +19,7 @@ use super::buffs;
 use super::combat as unit_combat;
 use super::data::{EffectKind, EffectTemplate, SkillEffect, SkillTemplate};
 use super::effects::{self, EffectArgs, EffectSource};
+use super::ext::TakenCastItem;
 use super::geometry::{distance_to, is_front, world_of, world_pos, PosUnit, Target};
 use super::packets::{
     CompressedGamePackets, SCCastingStoppedPacket, SCCooldownsPacket, SCSkillCooldownResetPacket,
@@ -470,9 +471,18 @@ pub fn use_skill(
     bypass_gcd: bool,
 ) -> (u8, u32) {
     if !caster.is_unit() {
+        tracing::debug!(
+            skill_id = skill.id,
+            "Skill use refused: the caster is not a unit"
+        );
         return (skill_result::INVALID_SOURCE, 0);
     }
     if let Err(result) = super::validation::check_item_zone(server, caster, &caster_caster) {
+        tracing::debug!(
+            skill_id = skill.id,
+            result = ?result,
+            "Skill use refused: the item cannot be used in this zone"
+        );
         return result;
     }
     let template = skill.template.clone();
@@ -491,6 +501,12 @@ pub fn use_skill(
     if let Err(result) = super::validation::check(server, skill, caster, target)
         .and_then(|()| super::validation::check_build_materials(server, skill, caster, target))
     {
+        tracing::debug!(
+            skill_id = skill.id,
+            result = ?result,
+            target = target.obj_id(),
+            "Skill use refused: the source / target validation failed"
+        );
         return result;
     }
     // The 1.2 fishing reactions require the caster's own spawned NPC. OwnerId is
@@ -576,10 +592,22 @@ pub fn use_skill(
         .flatten();
     if let Some(task) = &active_task {
         match task.kind {
-            SkillTaskKind::Cast => return (unit_reqs::skill_result_for_key("skill_on_casting"), 0),
+            SkillTaskKind::Cast => {
+                tracing::debug!(
+                    skill_id = skill.id,
+                    active_skill = task.skill.template.id,
+                    "Skill use refused: the caster is already casting"
+                );
+                return (unit_reqs::skill_result_for_key("skill_on_casting"), 0);
+            }
             SkillTaskKind::EndChanneling { .. }
                 if !task.skill.template.stop_channeling_on_start_skill =>
             {
+                tracing::debug!(
+                    skill_id = skill.id,
+                    active_skill = task.skill.template.id,
+                    "Skill use refused: the caster is channeling"
+                );
                 return (
                     unit_reqs::skill_result_for_key("skill_cannot_cast_in_channeling"),
                     0,
@@ -589,6 +617,11 @@ pub fn use_skill(
         }
     }
     if let Err(result) = super::validation::check_resources(server, skill, caster) {
+        tracing::debug!(
+            skill_id = skill.id,
+            result = ?result,
+            "Skill use refused: the caster lacks the resources"
+        );
         return result;
     }
     if let Some(c) = &character {
@@ -598,6 +631,10 @@ pub fn use_skill(
     }
     let now = now_ms();
     if on_skill_cooldown(server, skill, caster, now) {
+        tracing::debug!(
+            skill_id = skill.id,
+            "Skill use refused: the skill is on cooldown"
+        );
         return (skill_result::COOLDOWN_TIME, 0);
     }
     skill.state().bypass_gcd = bypass_gcd;
@@ -618,9 +655,21 @@ pub fn use_skill(
         // attempt inside the 150 ms interval, so the first press during any GCD got through.
         // Refuse outright while more than the network grace of the cooldown is left.
         if last_used + delay - now > GCD_GRACE_MS {
+            tracing::debug!(
+                skill_id = skill.id,
+                last_used,
+                now,
+                "Skill use refused: the previous skill was used too recently"
+            );
             return (skill_result::COOLDOWN_TIME, 0);
         }
         if !template.ignore_global_cooldown && gcd - now > GCD_GRACE_MS {
+            tracing::debug!(
+                skill_id = skill.id,
+                global_cooldown_ms = gcd,
+                now,
+                "Skill use refused: the global cooldown is still running"
+            );
             return (skill_result::COOLDOWN_TIME, 0);
         }
     }
@@ -639,6 +688,7 @@ pub fn use_skill(
         let mut state = skill.state();
         state.generation = state.generation.wrapping_add(1);
         state.cancelled = false;
+        state.effect_cancelled = false;
         state.music_started_pending = false;
         state.gcd_started = false;
         state.hit_types.clear();
@@ -711,6 +761,23 @@ pub fn use_skill(
         target_caster: *target_caster,
         skill_object: skill_object.clone(),
     };
+    if template.plot_id.is_some() {
+        // Plot-only skills never reach `apply_effects`: verify the cast item is still the same
+        // owned item before the plot runs (the plot itself consumes plot reagents).
+        if let (Some(p), SkillCaster::Item { item_id, .. }) = (caster.as_player(), caster_caster) {
+            let items = server.systems.skills.ext.items();
+            let still_owned =
+                items
+                    .owned_item(server, p, item_id)
+                    .is_some_and(|(template_id, _)| {
+                        items.consume_owned_item(server, p, item_id, template_id, 0) != Some(false)
+                    });
+            if !still_owned {
+                skill.state().cancelled = true;
+                return (skill_result::INVALID_SOURCE, 0);
+            }
+        }
+    }
     if let Some(plot_id) = template.plot_id {
         if template.plot_only {
             // Plot-only skills never enter `cast`; commit cooldowns once at acceptance,
@@ -1623,10 +1690,50 @@ fn append_hostile_ships_hit_by_siege_hull_aoe(
     }
 }
 
+/// Refunds the cast's taken source item unless the cast result was committed. Dropping the
+/// guard refunds: an early refusal (missing reagent, failed build) or an effect that cancels
+/// while nothing could be charged.
+struct CastSourceDebit<'a> {
+    server: &'a GameServer,
+    taken: Option<TakenCastItem>,
+}
+
+impl Drop for CastSourceDebit<'_> {
+    fn drop(&mut self) {
+        if let Some(taken) = self.taken.take() {
+            self.server
+                .systems
+                .skills
+                .ext
+                .items()
+                .refund_cast_source_item(self.server, taken);
+        }
+    }
+}
+
+impl CastSourceDebit<'_> {
+    fn commit(&mut self) {
+        if let Some(taken) = self.taken.take() {
+            self.server
+                .systems
+                .skills
+                .ext
+                .items()
+                .commit_cast_source_item(self.server, taken);
+        }
+    }
+}
+
 /// `Skill.ApplyEffects(caster, casterCaster, targetSelf, targetCaster, skillObject)`.
 pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     let caster = &ctx.caster;
     if !caster.is_unit() || skill.cancelled() {
+        tracing::debug!(
+            skill_id = skill.id,
+            caster_is_unit = caster.is_unit(),
+            cancelled = skill.cancelled(),
+            "Skill effects skipped"
+        );
         return;
     }
     let t = skill.template.clone();
@@ -1773,14 +1880,38 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                         vec![caster_t.clone()]
                     }
                 }
-                None => Vec::new(),
+                None => {
+                    tracing::debug!(
+                        skill_id = t.id,
+                        effect_id = effect.effect_id,
+                        application_method = effect.application_method,
+                        "Skill effect skipped: unknown application method"
+                    );
+                    Vec::new()
+                }
             };
         for target in effected {
             let relation = relation_to(server, &caster_t, &target);
             if effect.start_level > caster_level || effect.end_level < caster_level {
+                tracing::debug!(
+                    skill_id = t.id,
+                    effect_id = effect.effect_id,
+                    target = target.obj_id(),
+                    caster_level,
+                    start_level = effect.start_level,
+                    end_level = effect.end_level,
+                    "Skill effect skipped: caster level outside the effect's level range"
+                );
                 continue;
             }
             if effect.friendly && !effect.non_friendly && relation != RelationState::Friendly {
+                tracing::debug!(
+                    skill_id = t.id,
+                    effect_id = effect.effect_id,
+                    target = target.obj_id(),
+                    ?relation,
+                    "Skill effect skipped: the effect is friendly-only"
+                );
                 continue;
             }
             if !effect.friendly
@@ -1789,34 +1920,79 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                 && ((relation == RelationState::Friendly && !force_attack)
                     || caster_t.obj_id() == target.obj_id())
             {
+                tracing::debug!(
+                    skill_id = t.id,
+                    effect_id = effect.effect_id,
+                    target = target.obj_id(),
+                    ?relation,
+                    "Skill effect skipped: the effect is hostile-only"
+                );
                 continue;
             }
             let tp = world_pos(server, &target);
             if effect.front && !effect.back && !is_front(&caster_pos, &tp) {
+                tracing::debug!(
+                    skill_id = t.id,
+                    effect_id = effect.effect_id,
+                    target = target.obj_id(),
+                    "Skill effect skipped: the target is behind the caster"
+                );
                 continue;
             }
             if !effect.front && effect.back && is_front(&caster_pos, &tp) {
+                tracing::debug!(
+                    skill_id = t.id,
+                    effect_id = effect.effect_id,
+                    target = target.obj_id(),
+                    "Skill effect skipped: the effect is back-only"
+                );
                 continue;
             }
             if effect.source_buff_tag_id > 0
                 && !buffs::check_buffs_by_tag(server, caster, effect.source_buff_tag_id)
             {
+                tracing::debug!(
+                    skill_id = t.id,
+                    effect_id = effect.effect_id,
+                    tag = effect.source_buff_tag_id,
+                    "Skill effect skipped: the caster lacks the required buff tag"
+                );
                 continue;
             }
             if effect.source_no_buff_tag_id > 0
                 && buffs::check_buffs_by_tag(server, caster, effect.source_no_buff_tag_id)
             {
+                tracing::debug!(
+                    skill_id = t.id,
+                    effect_id = effect.effect_id,
+                    tag = effect.source_no_buff_tag_id,
+                    "Skill effect skipped: the caster has the forbidden buff tag"
+                );
                 continue;
             }
             if let Some(o) = target.as_obj() {
                 if effect.target_buff_tag_id > 0
                     && !buffs::check_buffs_by_tag(server, o, effect.target_buff_tag_id)
                 {
+                    tracing::debug!(
+                        skill_id = t.id,
+                        effect_id = effect.effect_id,
+                        target = target.obj_id(),
+                        tag = effect.target_buff_tag_id,
+                        "Skill effect skipped: the target lacks the required buff tag"
+                    );
                     continue;
                 }
                 if effect.target_no_buff_tag_id > 0
                     && buffs::check_buffs_by_tag(server, o, effect.target_no_buff_tag_id)
                 {
+                    tracing::debug!(
+                        skill_id = t.id,
+                        effect_id = effect.effect_id,
+                        target = target.obj_id(),
+                        tag = effect.target_no_buff_tag_id,
+                        "Skill effect skipped: the target has the forbidden buff tag"
+                    );
                     continue;
                 }
             }
@@ -1826,10 +2002,24 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                     data.npcs_by_tag(effect.target_npc_tag_id).contains(&tid)
                 });
                 if !ok {
+                    tracing::debug!(
+                        skill_id = t.id,
+                        effect_id = effect.effect_id,
+                        target = target.obj_id(),
+                        tag = effect.target_npc_tag_id,
+                        "Skill effect skipped: the target NPC is not in the required tag"
+                    );
                     continue;
                 }
             }
             if !effects::chance_succeeds(effect.chance) {
+                tracing::debug!(
+                    skill_id = t.id,
+                    effect_id = effect.effect_id,
+                    target = target.obj_id(),
+                    chance = effect.chance,
+                    "Skill effect skipped: the chance roll failed"
+                );
                 continue;
             }
             if let (Some(last), Some((EffectKind::NpcSpawnerSpawnEffect, id))) =
@@ -1863,37 +2053,59 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                     crate::systems::housing::is_building_effect(server, template)
                 })
     };
-    if let Some(last) = last_applied {
-        // Deviation: C# looked at the last applied effect only. Skills with mixed flags (a
-        // consuming GainItem followed by an Interaction effect) never consumed the item, so the
-        // last applied effect that carries `consume_source_item` / `consume_item_id` wins.
+    // `SavePortal` creates an entry only after its own atomic reagent take in `misc.rs`; the
+    // generic optional effect-item debit must not take a second one.
+    let save_portal = t.effects.iter().any(|effect| {
+        effect
+            .template
+            .and_then(|(kind, id)| data.effect(kind, id))
+            .is_some_and(|template| {
+                matches!(
+                    template,
+                    EffectTemplate::Special(s) if s.special_effect_type_id == 30
+                )
+            })
+    });
+    // The cast item is the source of the skill: consume it (or only re-verify it when the skill
+    // consumes nothing) before the reagents, products and effects run, so an item that left the
+    // bag during a cast time refuses the cast instead of firing for free.
+    let mut owned_item_use: Option<(u64, u32, i32)> = None;
+    if let SkillCaster::Item {
+        item_id,
+        item_template_id,
+        ..
+    } = ctx.caster_caster
+    {
+        let amount = last_applied.map_or(0, |last| {
+            // Deviation: C# looked at the last applied effect only. Skills with mixed flags (a
+            // consuming GainItem followed by an Interaction effect) never consumed the item, so
+            // the last applied effect that carries `consume_source_item` / `consume_item_id`
+            // wins.
+            let applied = || to_apply.iter().map(|(_, e)| *e);
+            if let Some(e) = applied().rev().find(|e| e.consume_source_item) {
+                e.consume_item_count
+            } else if items.use_skill_as_reagent(server, item_template_id) {
+                last.consume_item_count
+            } else {
+                0
+            }
+        });
+        owned_item_use = Some((item_id, item_template_id, amount));
+    }
+    if last_applied.is_some() {
         let applied = || to_apply.iter().map(|(_, e)| *e);
-        let source_effect = applied().rev().find(|e| e.consume_source_item);
         let template_effect = applied()
             .rev()
             .find(|e| e.consume_item_id != 0 && e.consume_item_count > 0);
-        if let (
-            SkillCaster::Item {
-                item_id,
-                item_template_id,
-                ..
-            },
-            Some(_),
-        ) = (ctx.caster_caster, &player)
-        {
-            if let Some(e) = source_effect {
-                consumed_items.push((item_id, e.consume_item_count));
-            } else if items.use_skill_as_reagent(server, item_template_id) {
-                consumed_items.push((item_id, last.consume_item_count));
-            }
-        }
         if let Some(p) = &player {
             if let Some(e) = template_effect.filter(|e| {
-                // House construction pays at the progress commit, including stale/rejected
-                // targets. Never fall back to the optional debit for that same effect.
-                !to_apply.iter().any(|(target, candidate)| {
-                    std::ptr::eq(*candidate, *e) && paid_building(target, candidate)
-                })
+                // SavePortal pays its effect items in its own atomic step; house construction
+                // pays at the progress commit, including stale/rejected targets. Never fall
+                // back to the optional debit for those.
+                !save_portal
+                    && !to_apply.iter().any(|(target, candidate)| {
+                        std::ptr::eq(*candidate, *e) && paid_building(target, candidate)
+                    })
             }) {
                 // source item consumption, or enough of the item in the bag / equipment
                 if e.consume_source_item
@@ -1904,9 +2116,60 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             }
         }
     }
+    // Debit the cast item before anything else can be granted: the owner, template and count
+    // must still match and it must sit in the caster's bag or equipment. The item stays out of
+    // its container until the result is committed, so no mover can reach it mid-cast; a missing
+    // item refuses the whole result (no reagents, products or effects).
+    let mut source_debit: Option<CastSourceDebit<'_>> = None;
+    let mut source_item = None;
+    let mut source_item_debited = false;
+    if let (Some((item_id, template_id, amount)), Some(p)) = (owned_item_use, &player) {
+        match items.take_cast_source_item(server, p, item_id, template_id, amount) {
+            Some(Ok(taken)) => {
+                source_item = Some(std::sync::Arc::new(taken.item.clone()));
+                source_item_debited = taken.amount > 0;
+                source_debit = Some(CastSourceDebit {
+                    server,
+                    taken: Some(taken),
+                });
+            }
+            Some(Err(())) => {
+                tracing::warn!(
+                    skill_id = t.id,
+                    item_id,
+                    item_template_id = template_id,
+                    amount,
+                    "Skill cast cancelled: the source item is no longer in the caster's bag or equipment"
+                );
+                skill.state().cancelled = true;
+                stop(server, skill, caster, 0);
+                return;
+            }
+            None => {
+                // Hooks that do not track items: keep the owner-check semantics with the read
+                // API they provide.
+                let ok = items
+                    .owned_item(server, p, item_id)
+                    .is_some_and(|(tid, count)| tid == template_id && count >= amount.max(0));
+                if !ok {
+                    tracing::warn!(
+                        skill_id = t.id,
+                        item_id,
+                        item_template_id = template_id,
+                        amount,
+                        "Skill cast cancelled: the source item is not owned in the required template and count"
+                    );
+                    skill.state().cancelled = true;
+                    stop(server, skill, caster, 0);
+                    return;
+                }
+                source_item = server.items.item_by_id(item_id).map(std::sync::Arc::new);
+            }
+        }
+    }
     let reagents = data.reagents_for(t.id);
     let products = data.products_for(t.id);
-    if !reagents.is_empty() || !products.is_empty() {
+    if !save_portal && (!reagents.is_empty() || !products.is_empty()) {
         if let Some(p) = &player {
             if !reagents.is_empty() {
                 let mut found = false;
@@ -1941,6 +2204,9 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
     }
     let mut current_weight = 0;
     let mut packets = CompressedGamePackets::new();
+    let mut effect_source = EffectSource::from_skill(skill.clone());
+    effect_source.source_item = source_item.clone();
+    effect_source.source_item_debited = source_item_debited;
     let tl = skill.tl_id();
     for (target, effect) in &to_apply {
         if effect.weight > 0 {
@@ -1962,6 +2228,13 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             continue;
         };
         let Some(template) = data.effect(kind, id) else {
+            tracing::debug!(
+                skill_id = t.id,
+                effect_id = effect.effect_id,
+                ?kind,
+                id,
+                "Skill effect skipped: the effect template is missing from the game data"
+            );
             continue;
         };
         // Position casts (ground / ballistic / summon placement) have no unit obj id: keep the
@@ -1986,7 +2259,7 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                 skill_id: t.id,
                 tl_id: tl,
             },
-            source: EffectSource::from_skill(skill.clone()),
+            source: effect_source.clone(),
             skill_object: &ctx.skill_object,
         };
         args.source.always_hit = effect.always_hit;
@@ -2016,6 +2289,8 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                     );
                 }
                 Err(error) => {
+                    // The cast's own effect refused its payment: refund the source item.
+                    skill.state().effect_cancelled = true;
                     if error == crate::systems::housing::ops::BuildActionError::MissingMaterial {
                         let mut packet = SCSkillStartedPacket::new(
                             skill.id,
@@ -2048,11 +2323,16 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
             }
         } else {
             effects::apply(server, kind, template, &args, Some(&mut packets));
+            // Dyeing rejects through the C# `Character.SkillCancelled` flag (the hook has no
+            // `SkillRun` handle). `cast` clears that flag when it accepts the cast, so a true
+            // value seen here was set by one of this cast's own effects; record it in this
+            // run's state instead of consulting the character flag at refund time.
             if player
                 .as_ref()
                 .is_some_and(|p| p.data().skill_char.skill_cancelled)
             {
                 skill.state().cancelled = true;
+                skill.state().effect_cancelled = true;
             }
         }
         if effect.item_set_id > 0 {
@@ -2077,7 +2357,7 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                 .skills
                 .ext
                 .quests()
-                .item_use(server, p, item_id);
+                .item_use_template(server, p, item_template_id);
             if items.use_skill_as_reagent(server, item_template_id)
                 && reagents.is_empty()
                 && products.is_empty()
@@ -2104,6 +2384,17 @@ pub fn apply_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
                     "Unable to find a treasure map to take from user {name} ({id}) when digging up treasure"
                 );
             }
+        }
+    }
+    // An effect that cancels itself (invalid UCC/dye target, missing build material) refunds
+    // the source item it could not charge for. A client / channel stop that lands while the
+    // effects run (no effect cancelled) still pays for the effects that went out.
+    // Only this cast's own run state decides the refund: the per-character flag can be left
+    // set by another skill and must not make a successful cast refund its source.
+    let effect_cancelled = skill.state().effect_cancelled;
+    if let Some(mut debit) = source_debit {
+        if !effect_cancelled {
+            debit.commit();
         }
     }
     if !skill.cancelled() {

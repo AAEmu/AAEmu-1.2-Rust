@@ -438,6 +438,7 @@ Cross-subsystem: mates are despawned on dungeon entry and `PlayerCanEnter` check
 | `CSMoveUnitPacket` vehicle branches (ship request, vehicle, mate xp, riding, standing on objects) | `systems/vehicles/movement.rs`, `world/session.rs` | done | Ship-deck support accepts the actor standing flag independently of the movement header, preserving valid GC-relative positions and the current-parent sentinel during controller updates. This corrects the mirrored C# header-only attachment test; clearing both support flags still disembarks. A unit no longer hanging (`HangingFromObject` unset) loses its sticky parent unless it is boarded on a transfer. |
 | `BaseUnit.GetDistanceTo` for shipyard targets (skill range check, `Skill.cs` `max_range`) | `systems/skills/geometry.rs` (`distance_to`), `systems/vehicles/shipyards.rs` (`shipyard_radius`) | deviation | **Deviation:** the C# measured skill range to the shipyard's center point (shipyard models are prefab models without an actor radius, so `ModelSize` was 0), which made the shipyard build skills (`min_range 0`, `max_range 4`) unusable anywhere but the exact center of a drydock ("Target is too far"). The Rust subtracts the shipyard template's `build_radius * Scale`, like the house `GardenRadius` rule. |
 | Mate / slave / transfer / shipyard C2G and G2C packets | `systems/vehicles/packets.rs` | done | 18 C->S, 16 S->C (byte-exact tests). `CSChangeSlaveTargetPacket` has no 1.2 opcode (0xfff). |
+| `CSTurretStatePacket` 0x036 (turret / cannon aim) | `packets/c2g_misc.rs`, `systems/vehicles/slaves.rs` (`set_turret_state`), `world/unit_state.rs`, `systems/npcs/npc/packets.rs` | deviation / capture-pending | **Deviation:** the C# `CSTurretStatePacket.Read` only logged the three fields and `Unit.ModelPosture` always wrote pitch/yaw 0, so no client ever saw a crewed cannon turn. The Rust decodes `bc unitId, f32 pitch, f32 yaw` (1.2 client writer `397c7640`), accepts it only from a character attached to any seat of the slave named by `unitId`, stores it on that slave and relays the same values to the other players in range as `SCUnitModelPostureChanged` 0x103 posture type 8 (`u8 type, bool isLooted, f32 pitch, f32 yaw`; client reader `397bda20` -> `397b1df0` applies it through `390bdec0`). A viewer that arrives later gets the stored aim in the slave's `SCUnitState` posture block. The aim is kept in the raw model-frame radians the client sent; the client producers already clamp / wrap them with the `vehicle_models` turret limits. The 1.2 client itself sends `CSTurretState` at most once per 200 ms and only when the aim changes (`39356990`: `DAT_3a169940 + 200 <= now`), and the server additionally never relays an unchanged aim and delays a changed aim that arrives less than 150 ms after the last relayed one for that slave; the newest aim is always stored on the slave at once (a late viewer's `SCUnitState` reads it) and the slave tick relays a pending aim once the window ends, so a final update inside the window is not lost. The stored aim is not cleared when the gunner leaves the seat, so late viewers keep seeing the last posture (as the two-client live run showed). **Capture-pending (S12):** the 1.2 *server* side is not proven. Capture with two clients: A mans a ship cannon (GM `/slave spawn 22` spawns a hull with eight cannons; `/slave spawn 25` a ground cannon) and pans / fires while B records 0x103; confirm whether the original server relays the aim, the packet's unit id (cannon child vs hull vs gunner), whether the gunner also receives the echo, that the angles are model-local radians and not clamped server-side, and whether a passenger seat (tank gunner, point 2) is a valid aim path. Record the result here and in the S12 research. |
 | Hooks / physics | `systems/vehicles/{hooks,ship_physics}.rs` | done | `VehicleItemHooks` (`EndCraft`, economy). Ship physics and water call `systems::ai::physics` directly (`AddShip` / `RemoveShip`, helm request, driver seat, `GetWaterSurface` / `IsWater`); `ShipPhysicsHooks` (harpoon lines / tension / lifetime, `Throttle` / `Steering` after a move) and the radar ship lists are installed here. The npcs / social hooks call the mate / slave / dismount functions directly. |
 #### Summon replacement and retained cargo (2026-10-25)
 
@@ -509,7 +510,7 @@ live acceptance remain pending.
 | Area (C#) | Rust | Status | Notes |
 |---|---|---|---|
 | `NpcManager.LoadAiParams` (NLua), `Models/Game/AI/v2/Params/**`, `AiGameData` (commands, command sets, chat bubbles, events), `ModelManager` (actor models + game stances, ship models) | `systems/ai/{lua,params,data}.rs` | done | A Lua 5.4 subset evaluator with `System.Convert` semantics; all 2 489 `npc_ai_params` rows produce the same values as NLua (differential harness, gated test `real_compact_db_params_match_nlua`; rows 443 / 835 / 1975 fail to parse in both). |
-| `NpcAi` framework, `AiUtils.GetAiByType`, all `AiCharacters/**`, every `Behavior` (incl. Archer / BigMonster / Flytrap / WildBoar / AlmightyAttack / Talk / FollowPath / Return / Dead / Despawning / Spawning / Hold / Idle / Roaming / Alert / RunCommandSet / DoNothing) | `systems/ai/{framework,behaviors}.rs` | done | State machine, GoTo overrides, transitions, check intervals, skill queue / selection, aggression / alert / help, return, follow path, greetings (`SCNpcChatMessage` + `SCPlaySound`). |
+| `NpcAi` framework, `AiUtils.GetAiByType`, all `AiCharacters/**`, every `Behavior` (incl. Archer / BigMonster / Flytrap / WildBoar / AlmightyAttack / Talk / FollowPath / Return / Dead / Despawning / Spawning / Hold / Idle / Roaming / Alert / RunCommandSet / DoNothing) | `systems/ai/{framework,behaviors}.rs` | done | State machine, GoTo overrides, transitions, check intervals, skill queue / selection, aggression / alert / help, return, follow path, greetings (`SCNpcChatMessage` + `SCPlaySound`). **Deviation:** `UpdateAggroHelp` skips a linked NPC without an AI (one warning per NPC) and keeps helping the remaining NPCs; the C# `NullReferenceException` ended the whole loop. |
 | `AIManager` (100 ms tick, `AddAi`, region activity) | `systems/ai/manager.rs` | done | Per-AI mutex + queued calls; activity-based candidate selection and bounded `World.AiWorkerThreads` chunk batches (see deviations). |
 | AI members of `Npc` / `Unit` (`MoveTowards`, `LookTowards`, `StopMovement`, `SetTarget`, `CurrentAggroTarget`, `CurrentGameStance`, `BaseMoveSpeed`, `OnDamageReceived`, `CheckIfEmptyAggroToReturn`, `ClearAllAggro`, `FindPath`), `NpcEvents` | `systems/ai/{npc,combat,skills,npc_events}.rs` | done | `SCOneUnitMovementPacket` movement, aggro tables through the skills API. |
 | `AiPathsManager` (`Data/Path`), `AiPathHandler`, `Units/Route/Simulation` | `systems/ai/{path_handler,simulation}.rs` | done | Every `Data/Path/*.path` file loads (test). Routes are generated from the 10.x client, see the 2026-10-16 note. |
@@ -2628,18 +2629,28 @@ Additional world-side fixes from the same audit:
   wins. A candidate passes when (ships) the collision terrain is not above the water surface at
   x/y, (land) the terrain is at most 10 m above the player, a ray from the player's eyes to the
   candidate hits nothing (mask `SOLID_TERRAIN` 0x107, flags 0x8F; ships end at the water surface,
-  land at the candidate's own ground + 1 m, i.e. the 1.2 eye-to-eye rule), the model box (the
+  land at the candidate's terrain point lifted by 0.2 m), the model box (the
   unclipped model bbox from the prefab collision proxies; the inertia mass box of the ship model
   when the model reference is unavailable, e.g. no client assets) rotated to player yaw + 90
   degrees overlaps no blocking static and no terrain heightfield, and the 3D player-to-candidate
-  distance is at most 80 m. The land candidate z is the static-aware ground (`ground_height_or`:
-  bridges, plazas, quays, then the heightmap), and the final spawn re-grounds a positioned land
-  slave the same way, so a vehicle on a bridge or quay does not sink to the terrain below it.
+  distance is at most 80 m. The land candidate z, its distance check, the model box and the
+  final spawn (search, `SummonPos` validation, post-wait recheck and re-ground) are all the
+  terrain heightfield only (`GetTerrainElevation`, vtable `+0x1fc`), never statics: a deck,
+  bridge or quay above the candidate's terrain lies between the eyes and the terrain point, so
+  the 1.2 rule refuses the summon (error 100) instead of placing the vehicle on the floor. The
+  0.2 m lift of the land ray end is a deviation: 1.2 ends the ray exactly at the terrain point
+  and the lift avoids a float graze between the ray end and the heightfield (the Bevy client
+  port lifts its end the same way).
   The box is an oriented `PrimitiveWorldIntersection` query (`box_obstacles`) for statics plus
   `box_overlaps_terrain` for the heightfield (the PWI box query does not report heightfield
   contacts); this 1.2 path has no +1 m top margin, no terrain point sampling and no
   containment rays. Statics with a world AABB under 2 m (buoys, bollards, mooring posts) and
-  vegetation are ignored. If none of the 120 passes, the summon is refused with `SCErrorMsg`
+  vegetation are ignored. The box query batches: the engine's per-thread contact pool holds 64
+  records and 2040 border points and silently drops further parts, so a saturated round is
+  repeated with the entities already seen in the skip list (the batch box stays the client's exact
+  box; the caller's identical-box query cache is invalidated before every round with
+  `World::invalidate_box_query_cache`) for at most 8
+  rounds; a still-saturated query reports the spot as blocked. If none of the 120 passes, the summon is refused with `SCErrorMsg`
   100 (`SLAVE_SPAWN_SHIP_NEED_MORE_SPACE`), the summon item is not committed, the skill
   cooldown and GCD are refunded — on the server and on the client with the same
   `SCSkillCooldownResetPacket` the skill system uses — (also when a client `SummonPos` placement
@@ -2985,9 +2996,90 @@ two bots before the fix (a foreign `Mount` caster, an NPC-only skill and a far d
   skills a client-facing source table names are mount skill 13572 (mount branch) and
   quest/doodad conditions 10664, 10134, 12075 and 11380; they still need their ability active and
   the skill learned, as the client requires. The exact result codes are our choice (the client
-  only needs a non-success `SCSkillStarted`). Not closed here: a `Mount` caster naming the player
-  itself still runs the mount branch (the self allowance above), and a bind-on-pickup item caster
-  can still name a different skill id (the legacy fireplace exception, narrowed for UCC effects).
+  only needs a non-success `SCSkillStarted`).
+- **Item-only skills.** `items.use_skill_id` and `item_grade_skills` are player-facing sources,
+  so the fallback branch ran an item's use skill as a plain unit cast and consumed nothing
+  (e.g. 26611 "Full XP Restoration" for free). `SkillData` now keeps the ids named by those two
+  tables and by no other source in a separate `item_only` set
+  (`SkillData::is_item_only_skill`); the `CSStartSkill` handler refuses a non-`Item` caster of
+  one with `NO_PERM` and only the `SkillCaster::Item` branch runs it (validating the item's own
+  use skill and consuming the reagent item). A skill another source also names (doodad / NPC
+  interaction, craft, ...) keeps its plain cast.
+- **SavePortal special-effect source.** Skills 11215 "Entering location in Teleport Book..." and
+  16841 "Editing Location in Teleport Book..." are not named by any source table: the 1.2 portal
+  window sends a plain `CSStartSkill` with a `SavePortalInfo` object. `SkillData` now sources the
+  skills whose effect is `SpecialEffect` 30 `SavePortal` (`CLIENT_SKILL_SPECIAL_EFFECT_SOURCES`,
+  narrow by type id, not by effect class). The effect still requires the Memory Ink reagent
+  (`skill_reagents`) and only renames the caster's own portal.
+
+### Item, vehicle bar and SavePortal hardening (2026-10-30)
+
+- **Item template from the owned item.** The `CSStartSkill` `SkillCaster::Item` branch resolves
+  the template from `ItemManager` and rewrites the caster before `Skill.Use`, so the client's
+  `ItemTemplateId` never decides the use skill, the reagent or the consumed template. Item-only
+  skills require `skill_id ==` the owned template's `UseSkillId`. The C# bind-on-pickup
+  exception (`bfdc3268`, PR #615) is kept only for its evidence-backed case: the house
+  fireplace's `DoodadFuncUse`, where the packet targets that doodad in range and its current
+  func group has a `Use` func for the skill. Consumption is debit-first through
+  `ItemSkillHooks::take_cast_source_item` (see the 2026-10-30 section below): the item is
+  checked and taken under one container lock before the result, and a cancelled effect refunds
+  it. Plot-only item skills verify the same owned item before the plot runs.
+- **SavePortal creation.** `SpecialEffect` 30 `SavePortal` only records a new book entry when the
+  casting skill pays a reagent (`skill_reagents` or an effect-level `consume_item_id` /
+  `consume_source_item`). Skill 16841 "Editing Location in Teleport Book..." has no reagent and
+  may only rename an existing portal of the character; 11215 pays its `skill_reagents` Memory
+  Ink, and 16387 pays an effect-level Memory Ink taken atomically by the effect and only when
+  the cast targets a real fireplace doodad in range with its `DoodadFuncUse`. No portal-book cap
+  exists in the C# `PortalManager` /
+  `CharacterPortals` or in the 1.2 data (the client UI pages the list by `COUNT_PER_PAGE`); none
+  is invented here.
+- **Vehicle bar caster.** A `Mount` caster must be a mate the player may use or a slave the
+  player owns / is attached to; the player itself is no longer accepted. The skill id must be on
+  the vehicle bar: the mate's `Mate.skills` mount-skill ids, the slave template's
+  `slave_mount_skills`, or a `buff_mount_skills` entry of an active vehicle buff, each mapped
+  through `mount_skills.skill_id`. This closes the NPC / boss / GM skill bypass; the rider /
+  operator skill still runs as the player through `mount_attached_skills`.
+
+### Skill source item debit before the result (2026-10-30)
+
+**Deviation:** C# `Skill.ApplyEffects` (`AAEmu.Game/Models/Game/Skills/Skill.cs` at
+`a2ab80abd^`, the `if (!Cancelled)` block after the effect loop) collected `consumedItems` /
+`consumedItemTemplates` while the effects ran and consumed them only after every effect, so a
+cast-time item that left the bag during the cast still granted the products (granted before the
+effects) and effects, and the final `ConsumeItem` either missed it or took it from another
+container (mail, auction, a trade partner's bag). The Rust port now debits first: right before
+the reagents, products and effects, `ItemSkillHooks::take_cast_source_item` verifies the owner,
+template and count under the economy operation lock. Only the caster's bag or equipment may hold
+the item (never a trade, mail, auction, bank or coffer copy); equipment is a real source (trade
+pack bundles such as item 14513 are equipped and cast their `PutDownBackpack` skill), so a full
+consume pushes the container's `EquipLeave` event. If the item is not there the whole result is
+refused (no reagents, products or effects). A full-stack consume removes the item and sends its
+removal at take time, before a product can take the freed slot; a partial consume decrements the
+count in place and sends a count update at take time, so the kept stack holds its slot.
+`commit_cast_source_item` pushes `Consumed` (the consumed amount) and releases the id for a full
+consume; `refund_cast_source_item` re-adds a full item (a bag source to its own slot only while
+free, otherwise a free bag slot; an equipment source only to its own slot, otherwise to the bag;
+neither ever to another equipment slot, so no wrong `EquipEnter`) or increments a partial stack
+back, sending the matching add / count update and saving the item. A full container leaves the
+item loose with no slot-add task (it is in no slot); the next relog places it. Effects that read the casting item (UCC imprint/cleanup, dyeing,
+loot-pack grade, socketing, grading scroll, look-convert powder, emblem stamp) use the pre-debit
+snapshot passed in `EffectSource::source_item`, and `Character.ItemUse` quest events are raised
+from that template instead of a live item lookup. Partial consumption also raises `Consumed`, so
+quest collect counters drop. The item reservation map (and its trade / sale / destroy checks) is
+removed: the item is physically absent (or its count already reduced) while the result is
+decided, so those movers cannot reach it. `consume_owned_item` remains only for the plot-only
+cast's pre-plot ownership check.
+Regression tests: `cast_item_with_products_{destroyed,mailed_or_auctioned,traded}_mid_cast_*`,
+`kept_cast_item_grants_its_product_and_effect_and_is_consumed_once`,
+`full_cast_item_removal_precedes_the_product_in_the_same_slot`,
+`partial_cast_item_debits_in_place_before_the_product_add`,
+`cancelled_ucc_cast_refunds_the_debited_source_item_exactly`,
+`cancelled_full_ucc_cast_removes_then_restores_the_item_at_its_slot`,
+`channeled_cast_cancelled_after_a_tick_consumes_the_item_once`,
+`consumable_item_cast_progresses_a_use_item_objective`,
+`partial_consumption_updates_a_collect_objective`,
+`full_refund_on_a_full_bag_keeps_the_item_loose_and_notifies_the_client`,
+`consuming_an_equipped_source_item_runs_the_equip_leave_path`.
 
 ## Lost-experience prayer cast (2026-10-30)
 
@@ -3309,3 +3401,49 @@ container accepts it (the same `can_accept` / `SplitOrMoveItem` path as `CSSwapI
 does the player equipping something else into the back slot. A pack lost while the character is
 dead keeps the record until `resurrect_character`. The explicit `SCUnitEquipmentsChangedPacket`
 broadcast in `put_down_backpack` is gone (the equipment events broadcast leave and re-equip).
+
+## Glider deploy gate and the gliding error codes (2026-10-31)
+
+The C# defined `CannotInteractWhileGliding` / `CannotChangeBackpackInGliding` but never raised them
+and did not check the equipped glider. The Rust adds the 1.2 rules at these entry points
+(`systems::skills::glider` holds the shared predicates):
+
+- `CSStartSkill` of a glider skill requires the equipped glider. A glider skill is a deploy skill
+  (`skills.skill_controller_id` 2687, 31 rows) or a linked glider skill
+  (`skills.link_backpack_type_id` 2: 14901 "glider use" with `link_equip_slot_id` 26, 17657 "glider
+  fold"). The back-slot item must be a glider (`item_backpacks.backpack_type_id` 2), and an
+  `Item` cast must be exactly that equipped item. This mirrors the client's link check
+  `FUN_393925c0` (item backpack type == `link_backpack_type_id` in the linked slot), whose failure
+  raises `must_equip_proper_item` 326. The client converts the default glider skill 14901 into the
+  equipped item's `use_skill_id` (item 14677 -> 12373), so the deploy arrives as an `Item` cast.
+  A refused cast sends `SCErrorMsg(326)` and the `SCSkillStarted` `NO_PERM` result.
+- `CSSwapItemsPacket` / `CSSplitBagItemPacket` moves that take an item out of, or put one into, the
+  back slot while the unit is gliding raise `cannot_change_backpack_in_gliding` 543, mirroring the
+  client's equip validation `FUN_394e41f0`.
+- **Gliding state:** `is_gliding` is an active `buffs.gliding = 't'` buff **while airborne**
+  (`skill_state.airborne`, set by `on_actor_move`). The 1.2 client's stance-4 check ends on the
+  landing movement, while buffs 7431 / 1675 (test / indun flight skills) are not `remove_on_land`
+  and would otherwise keep blocking a landed player. The buff alone (`has_gliding_buff`) is used
+  only for the fold.
+- **Every interaction entry path** uses one shared 334 check (`glider::refuse_interaction`):
+  the skill `InteractionEffect` (`interaction_effect`, which is how doodad use / gathering /
+  looting a doodad / the mailbox arrive) and the direct `execute_interaction_with` path (the
+  CSLootOpenBag recover-item func), `CSStartInteractionPacket`, `CSInteractNPCPacket` (NPC and
+  gimmick targets), `CSLootOpenBagPacket` and opening a `CSCofferInteractionPacket`. The client's
+  gate is `FUN_393b3d50`, which runs before its interaction action `FUN_390a6af0`. A landed unit
+  with a lingering 7431 / 1675 buff is not gliding and is not refused.
+- **Fold when the glider is gone:** the back slot can still change mid-flight through a timed
+  glider expiring or `CSDestroyItem` on the equipped slot. A fold skill (`link_backpack_type_id`
+  2 with `link_equip_slot_id` -1, e.g. 17657) is accepted while a gliding buff is active even with
+  no equipped glider, and the successful fold ends every active gliding buff (`glider::end_flight`)
+  so the client falls cleanly instead of getting `must_equip_proper_item` 326. Without a flight, a
+  forged fold still needs the equipped glider.
+- **Not added:** an airborne requirement for deploying. The 1.2 glider skill has only the authored
+  `unit_reqs` NotUnderWater and NoBuffTag 306 (`unit_reqs` 28592 / 28593), the client start path
+  `FUN_393989e0` checks only the linked item (no stance / air test), and the startup lift
+  (`gliding_startup_speed`) is what takes off from the ground. The double-jump deploy height /
+  freefall gate (`OPTION_ITEM_USE_GLIDE_WITH_DOUBLE_JUMP`, option 57) remains capture-pending
+  (S14-C4).
+- **Not gated:** the internal automatic backpack replacement (`Inventory.TryEquipNewBackPack` from
+  loot / craft / quests). Those callers may hold the character lock, so a `buffs` check there could
+  deadlock; the client-side interaction and equip gates that lead to them are covered above.

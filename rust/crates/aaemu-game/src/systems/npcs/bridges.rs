@@ -532,6 +532,24 @@ impl NpcSkillHooks for NpcSkills {
         super::portal::add_private_portal(server, player, x, y, z, z_rot, zone_id, name);
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn add_private_portal_with_id(
+        &self,
+        server: &GameServer,
+        player: &PlayerRef,
+        id: u32,
+        x: f32,
+        y: f32,
+        z: f32,
+        z_rot: f32,
+        zone_id: u32,
+        name: &str,
+    ) {
+        super::portal::add_private_portal_with_id(
+            server, player, id, x, y, z, z_rot, zone_id, name,
+        );
+    }
+
     fn rename_private_portal(&self, server: &GameServer, player: &PlayerRef, id: u32, name: &str) {
         super::portal::change_private_portal_name(server, player, id, name);
     }
@@ -550,6 +568,12 @@ pub(crate) fn interaction_effect(
     let Some(caster) = &args.caster else {
         return;
     };
+    // Doodad use (gathering, looting a doodad, the mailbox, ...) is a skill Interaction effect,
+    // not CSStartInteraction; the client's interaction gate (FUN_393b3d50) refuses it while
+    // gliding. Answer 334 through the shared check.
+    if crate::systems::skills::glider::refuse_interaction(server, caster) {
+        return;
+    }
     let wi_type = world_interaction as u32;
     if super::doodad::interactions::interaction_class(wi_type).is_none() {
         tracing::error!("InteractionEffect, Unknown world interaction: {world_interaction}");

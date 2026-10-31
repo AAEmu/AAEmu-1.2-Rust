@@ -80,6 +80,11 @@ pub struct SkillTemplate {
     pub channeling_doodad_id: u32,
     pub cooldown_tag_id: i32,
     pub skill_controller_id: u32,
+    /// `link_backpack_type_id`: the `BackpackType` a linked skill needs in
+    /// `link_equip_slot_id` (1.2 `FUN_393925c0`; 0 = no backpack requirement).
+    pub link_backpack_type_id: u32,
+    /// `link_equip_slot_id` (`EquipmentItemSlot`; -1 = no linked slot).
+    pub link_equip_slot_id: i32,
     pub repeat_count: i32,
     pub repeat_tick: i32,
     pub toggle_buff_id: u32,
@@ -224,6 +229,19 @@ fn read_skill(
             &r.string_or("skill_controller_id", "0")?,
             "skill_controller_id",
         )? as u32,
+        link_backpack_type_id: if r.has("link_backpack_type_id") {
+            parse_nullable(
+                &r.string_or("link_backpack_type_id", "0")?,
+                "link_backpack_type_id",
+            )? as u32
+        } else {
+            0
+        },
+        link_equip_slot_id: if r.has("link_equip_slot_id") {
+            r.i32_or("link_equip_slot_id", -1)?
+        } else {
+            -1
+        },
         repeat_count: r.i32("repeat_count")?,
         repeat_tick: r.i32("repeat_tick")?,
         toggle_buff_id: r.u32_or("toggle_buff_id", 0)?,

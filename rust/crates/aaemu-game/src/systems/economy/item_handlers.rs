@@ -8,7 +8,7 @@ use aaemu_commons::PacketStream;
 use chrono::Utc;
 
 use crate::error::Result;
-use crate::models::container::slot_type;
+use crate::models::container::{equip_slot, slot_type};
 use crate::models::item::ITEM_FLAG_SOUL_BOUND;
 use crate::models::item_task::{task_type, ItemFx, ItemTask};
 use crate::net::connection::GameConnection;
@@ -99,6 +99,23 @@ impl MoveArgs {
             to_slot: s.read_u8()?,
         })
     }
+
+    /// Whether the move takes an item out of, or puts one into, the back slot.
+    fn changes_back_slot(&self) -> bool {
+        let back = equip_slot::BACKPACK as u8;
+        (self.from_slot_type == slot_type::EQUIPMENT && self.from_slot == back)
+            || (self.to_slot_type == slot_type::EQUIPMENT && self.to_slot == back)
+    }
+}
+
+/// The 1.2 client refuses a back-slot change while gliding (`FUN_394e41f0`, error 543
+/// `cannot_change_backpack_in_gliding`): raise the same error and leave both items in place.
+fn back_slot_change_refused(server: &GameServer, player: &PlayerRef, args: &MoveArgs) -> bool {
+    args.changes_back_slot()
+        && crate::systems::skills::glider::is_gliding(
+            server,
+            &crate::world::WorldObject::from(player),
+        )
 }
 
 /// `CSSwapItemsPacket`.
@@ -117,6 +134,15 @@ impl CSSwapItemsPacket {
     fn run(self, server: &GameServer, conn: &mut GameConnection) {
         let Some(p) = active(conn) else { return };
         let a = self.args;
+        if back_slot_change_refused(server, &p, &a) {
+            inventory::send_error_message(
+                &p,
+                error_message::CANNOT_CHANGE_BACKPACK_IN_GLIDING,
+                0,
+                true,
+            );
+            return;
+        }
         let inv = Inv::of(&p);
         let ok = {
             let mut txn = ItemTxn::begin(server);
@@ -158,6 +184,15 @@ impl CSSplitBagItemPacket {
     fn run(self, server: &GameServer, conn: &mut GameConnection) {
         let Some(p) = active(conn) else { return };
         let a = self.args;
+        if back_slot_change_refused(server, &p, &a) {
+            inventory::send_error_message(
+                &p,
+                error_message::CANNOT_CHANGE_BACKPACK_IN_GLIDING,
+                0,
+                true,
+            );
+            return;
+        }
         let inv = Inv::of(&p);
         let mut txn = ItemTxn::begin(server);
         inventory::split_or_move_item(

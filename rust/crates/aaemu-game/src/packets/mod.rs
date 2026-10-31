@@ -51,7 +51,7 @@ pub fn build_registry() -> PacketRegistry {
     let mut r = PacketRegistry::new();
     c2g::register(&mut r); // X2EnterWorld, leave world, character list
     c2g_world::register(&mut r); // character lifecycle, world entry, movement, chat
-    c2g_misc::register(&mut r); // log-only packets (CSEditCharacter, CSTurretState)
+    c2g_misc::register(&mut r); // CSEditCharacter (log-only), CSTurretState (vehicles)
     proxy::register(&mut r); // level-2 proxy packets
     crate::systems::register_packets(&mut r);
     for (level, opcode, old, new) in r.duplicates() {

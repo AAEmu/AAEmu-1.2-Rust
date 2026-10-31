@@ -2,8 +2,6 @@
 
 use std::sync::Arc;
 
-use aaemu_commons::{Marshal, PacketStream};
-
 use crate::data::items::{bind_type, ItemTemplate};
 use crate::models::container::slot_type;
 use crate::net::registry::ClientPacket;
@@ -212,48 +210,113 @@ async fn configured_imprint_and_both_bleaches_cast_and_consume_their_real_source
 }
 
 #[tokio::test]
-async fn bind_on_pickup_exception_still_allows_non_ucc_client_skills() {
+async fn bind_on_pickup_item_cannot_authorize_a_non_ucc_client_skill() {
+    // The legacy C# exception was only for the house fireplace's doodad interaction. A BoP
+    // item with no use skill cannot authorize an arbitrary client skill id.
     let mut w = fixture();
     let (source, target) = operands(&w, TORCH);
+    let before_source = item_at(&w.pa, slot_type::INVENTORY, 0).unwrap();
     cast(&mut w, NON_UCC_SKILL, source, TORCH, target).await;
-    assert!(w.pa.data().unit.skill_last_used_ms > 0);
-    // An instant cast skips Started and broadcasts Fired from ScheduleEffects.
-    // Check the actual skill/source/target bytes rather than only a GCD update.
-    let frames = w.a.drain();
-    let fired = &frames
-        .iter()
-        .find(|(op, _)| *op == sc::SCSkillFiredPacket)
-        .expect("allowed instant item skill must fire")
-        .1;
-    let mut stream = PacketStream::from_bytes(fired.clone());
-    assert_eq!(stream.read_u32().unwrap(), NON_UCC_SKILL);
-    let tl = stream.read_u16().unwrap();
-    let expected = super::super::packets::SCSkillFiredPacket {
-        id: NON_UCC_SKILL,
-        tl,
-        caster: SkillCaster::Item {
-            obj_id: w.pa.obj_id,
-            item_id: source,
-            item_template_id: TORCH,
-            type1: 0,
-            type2: 0,
-        },
-        target: SkillCastTarget::Item {
-            obj_id: w.pa.obj_id,
-            id: target,
-            type1: 0,
-            type2: 0,
-        },
-        skill_object: SkillObject::None,
-        computed_delay: 0,
-        channeling_time: 0,
-        fire_anim_id: 0,
-    };
-    let mut expected_body = PacketStream::new();
-    expected.write(&mut expected_body);
-    assert_eq!(fired, &expected_body.into_bytes());
+    assert_eq!(w.pa.data().unit.skill_last_used_ms, 0);
     assert_eq!(
-        item_at(&w.pa, slot_type::INVENTORY, 1).unwrap().ucc_id,
-        0x1234
+        item_at(&w.pa, slot_type::INVENTORY, 0).unwrap(),
+        before_source
+    );
+    assert!(w.a.drain().is_empty());
+    assert!(w.b.drain().is_empty());
+}
+
+#[tokio::test]
+async fn cancelled_ucc_cast_refunds_the_debited_source_item_exactly() {
+    // A stackable reagent ink is taken before the effect runs; the effect then rejects a target
+    // that belongs to another player and the skill cancels. The item must come back unchanged:
+    // same id, slot, count, grade and UCC data.
+    let mut w = fixture();
+    let (source, _own_target) = operands(&w, 17662);
+    let foreign = give(&w, &w.pb, slot_type::INVENTORY, ARMOR, 1, 1);
+    let before = item_at(&w.pa, slot_type::INVENTORY, 0).unwrap();
+    let before_state = (
+        before.id,
+        before.slot,
+        before.slot_type,
+        before.count,
+        before.grade,
+        before.ucc_id,
+        before.dirty,
+    );
+    cast(&mut w, 14433, source, 17662, foreign).await;
+    let after = item_at(&w.pa, slot_type::INVENTORY, 0).expect("the ink is back");
+    assert_eq!(
+        (
+            after.id,
+            after.slot,
+            after.slot_type,
+            after.count,
+            after.grade,
+            after.ucc_id,
+            after.dirty,
+        ),
+        before_state
+    );
+    assert!(!w.a.drain_ops().contains(&sc::SCItemUccDataChangedPacket));
+}
+
+fn item_task_body(action: u8, tasks: Vec<crate::models::item_task::ItemTask>) -> Vec<u8> {
+    use crate::systems::economy::item_packets::SCItemTaskSuccessPacket;
+    use aaemu_commons::{Marshal, PacketStream};
+    let mut s = PacketStream::new();
+    SCItemTaskSuccessPacket {
+        action,
+        tasks,
+        force_remove: Vec::new(),
+    }
+    .write(&mut s);
+    s.into_bytes()
+}
+
+#[tokio::test]
+async fn cancelled_full_ucc_cast_removes_then_restores_the_item_at_its_slot() {
+    use crate::models::item_task::{task_type, ItemTask};
+
+    let mut w = fixture();
+    // One-unit source: the take removes the whole item, so the refund must re-add it.
+    let source = give(&w, &w.pa, slot_type::INVENTORY, 17662, 1, 0);
+    let foreign = give(&w, &w.pb, slot_type::INVENTORY, ARMOR, 1, 1);
+    let before = item_at(&w.pa, slot_type::INVENTORY, 0).expect("ink");
+    w.a.drain();
+    cast(&mut w, 14433, source, 17662, foreign).await;
+    let after = item_at(&w.pa, slot_type::INVENTORY, 0).expect("ink is back");
+    assert_eq!(
+        (
+            after.id,
+            after.slot,
+            after.count,
+            after.template_id,
+            after.ucc_id
+        ),
+        (
+            before.id,
+            before.slot,
+            before.count,
+            before.template_id,
+            before.ucc_id
+        )
+    );
+    let bodies: Vec<Vec<u8>> =
+        w.a.drain()
+            .into_iter()
+            .filter(|(op, _)| *op == sc::SCItemTaskSuccessPacket)
+            .map(|(_, body)| body)
+            .collect();
+    assert_eq!(
+        bodies,
+        vec![
+            item_task_body(
+                task_type::SKILL_REAGENTS,
+                vec![ItemTask::remove_slot(&before)]
+            ),
+            item_task_body(task_type::SKILL_REAGENTS, vec![ItemTask::add(&before)]),
+        ],
+        "the client removes the ink on the debit and gets it back on the refund"
     );
 }

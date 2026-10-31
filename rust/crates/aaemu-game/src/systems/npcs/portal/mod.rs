@@ -437,13 +437,36 @@ pub fn add_private_portal(
     zone_id: u32,
     name: &str,
 ) {
-    let id = match server.ids.private_book.get_next_id() {
-        Ok(id) => id,
+    let Some(id) = next_private_portal_id(server) else {
+        return;
+    };
+    add_private_portal_with_id(server, player, id, x, y, z, z_rot, zone_id, name);
+}
+
+/// Reserve the next book id before a caller takes its reagent; `None` when the book is full.
+pub fn next_private_portal_id(server: &GameServer) -> Option<u32> {
+    match server.ids.private_book.get_next_id() {
+        Ok(id) => Some(id),
         Err(e) => {
             tracing::error!("AddPrivatePortal: {e}");
-            return;
+            None
         }
-    };
+    }
+}
+
+/// [`add_private_portal`] with an id already taken by [`next_private_portal_id`].
+#[allow(clippy::too_many_arguments)]
+pub fn add_private_portal_with_id(
+    server: &GameServer,
+    player: &PlayerRef,
+    id: u32,
+    x: f32,
+    y: f32,
+    z: f32,
+    z_rot: f32,
+    zone_id: u32,
+    name: &str,
+) {
     let portal = {
         let mut c = player.data();
         let portal = Portal {

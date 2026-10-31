@@ -569,6 +569,13 @@ pub fn overlaps_sphere(
 /// entities that intersect it, with their owners and world AABBs, so callers can ignore
 /// vegetation and tiny statics. `half` is `[beam/2, length/2, height/2]`; `yaw` turns the
 /// box's local X/Y axes like the ship's final yaw. `None` without the service.
+///
+/// The physics contact pool holds 64 records (2040 border points) and the engine drops further
+/// parts silently when it is full, so the query repeats with the entities already seen in its
+/// skip list until it is complete (at most [`BOX_OBSTACLE_QUERY_ROUNDS`] rounds). Every round
+/// invalidates the `GetEntitiesInBox` identical-box cache, so the skip list takes effect while
+/// the queried box stays the exact 1.2 box. A spot whose query never completes is reported as
+/// blocked, never accepted: the synthetic [`Owner::Terrain`] entry blocks in every caller.
 pub fn box_obstacles(
     server: &GameServer,
     instance_id: u32,
@@ -588,14 +595,42 @@ pub fn box_obstacles(
     ensure_box(server, &pw, c - ext, c + ext);
     let mut st = pw.lock();
     let half = Vec3::new(half[0], half[1], half[2]);
-    let entities = st.overlap_entities(query::yaw_box(c, half, yaw), ent_types, 0xFFFF_FFFF, &[]);
-    Some(
-        entities
-            .into_iter()
-            .filter_map(|(e, bb)| st.owner(e).map(|o| (o, bb)))
-            .collect(),
-    )
+    let mut seen: Vec<aaemu_physics::world::EntIdx> = Vec::new();
+    let mut found: Vec<(Owner, [Vec3; 2])> = Vec::new();
+    let mut complete = false;
+    for _round in 0..BOX_OBSTACLE_QUERY_ROUNDS {
+        // `GetEntitiesInBox` replays its last identical-box list from the per-caller cache, so
+        // the skip list would have no effect on a repeated query. Drop that cache entry before
+        // every round (the same invalidation the ray query does), keeping the box exact.
+        st.world.invalidate_box_query_cache();
+        let prim = query::yaw_box(c, half, yaw);
+        let (entities, saturated) = st.overlap_entities(prim, ent_types, 0xFFFF_FFFF, &seen);
+        let seen_now = entities.len();
+        for (e, bb) in entities {
+            if let Some(owner) = st.owner(e) {
+                found.push((owner, bb));
+            }
+            seen.push(e);
+        }
+        if !saturated {
+            complete = true;
+            break;
+        }
+        if seen_now == 0 {
+            break;
+        }
+    }
+    if !complete {
+        // The pool stayed full after every round: refuse the spot instead of accepting a query
+        // that may have dropped a blocking part.
+        found.push((Owner::Terrain, [Vec3::ZERO, Vec3::ZERO]));
+    }
+    Some(found)
 }
+
+/// How many batched overlap queries [`box_obstacles`] may run before it treats a saturated
+/// contact pool as blocking.
+pub const BOX_OBSTACLE_QUERY_ROUNDS: usize = 8;
 
 /// Overlap of a yaw-oriented box with the collision terrain heightfield
 /// (`overlap_box_heightfield`). PWI does not report heightfield contacts, so the 1.2 model-box

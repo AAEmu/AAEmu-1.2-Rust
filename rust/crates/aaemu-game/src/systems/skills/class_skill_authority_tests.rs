@@ -294,9 +294,9 @@ async fn denial_codes_are_the_1_2_result_codes() {
 }
 
 #[tokio::test]
-async fn mount_caster_tree_skill_casts_without_learning() {
-    // `may_cast_as` accepts the player itself as a `Mount` caster; the mount branch runs before
-    // the class authority check, exactly as real mate / slave casts do.
+async fn mount_caster_cannot_name_the_player_itself() {
+    // A `Mount` caster is a mate or slave only. Naming the player itself used to enter the
+    // mount branch before the class authority check and cast any skill; it is now refused.
     let (server, mut client, p) = fixture(true, false, false);
     packet(
         TREE_SKILL,
@@ -309,7 +309,10 @@ async fn mount_caster_tree_skill_casts_without_learning() {
     .handle(&server, &mut client.conn)
     .await
     .unwrap();
-    assert!(p.data().unit.skill_last_used_ms > 0);
+    assert_eq!(p.data().unit.skill_last_used_ms, 0);
+    assert!(client
+        .drain_ops()
+        .contains(&crate::opcodes::sc::SCSkillStartedPacket));
 }
 
 /// Sources whose skills must stay castable without an ability tree: item use, mount-attached
