@@ -2774,6 +2774,107 @@ async fn refused_early_completion_answers_with_sc_quest_context_failed() {
 }
 
 #[tokio::test]
+async fn let_it_done_without_reward_answers_when_ready_does_not_complete() {
+    let (server, _rec) = server_with(|d| {
+        d.add_template(QuestTemplate {
+            let_it_done: true,
+            ..quest(70)
+        });
+        d.add_component(component(701, 70, kind::START));
+        d.add_act(701, 701, 701, 0, ActKind::ConAutoComplete);
+        d.add_component(component(702, 70, kind::PROGRESS));
+        d.add_act(
+            702,
+            702,
+            702,
+            2,
+            ActKind::ObjMonsterHunt {
+                npc_id: 600,
+                use_alias: false,
+                alias_id: 0,
+                highlight_doodad_id: 0,
+                highlight_doodad_phase: -1,
+            },
+        );
+        // The report act is overridden by TryCompleteQuestAsLetItDone, but the craft act in
+        // the other Ready component keeps the step from completing.
+        d.add_component(component(703, 70, kind::READY));
+        d.add_act(
+            703,
+            703,
+            703,
+            0,
+            ActKind::ConReportNpc {
+                npc_id: 500,
+                use_alias: false,
+                alias_id: 0,
+            },
+        );
+        d.add_component(component(704, 70, kind::READY));
+        d.add_act(
+            704,
+            704,
+            704,
+            99,
+            ActKind::ObjCraft {
+                craft_id: 70,
+                use_alias: false,
+                alias_id: 0,
+                highlight_doodad_id: 0,
+                highlight_doodad_phase: -1,
+            },
+        );
+        // No Reward component: the early completion has to finish at Ready.
+    });
+    let mut client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(&server, &client, character(), 0x100);
+    client.conn.active_char = Some(player.clone());
+    events::add_quest(&server, &player, 70, false);
+    server.systems.quests.run_queued_evaluations(&server);
+    events::with_quests(&server, &player, None, |ctx| {
+        for _ in 0..2 {
+            ctx.dispatch(&QuestEvent::MonsterHunt {
+                npc_id: 600,
+                count: 1,
+            })
+            .unwrap();
+        }
+    })
+    .expect("not nested");
+    server.systems.quests.run_queued_evaluations(&server);
+    client.drain();
+
+    CSTryQuestCompleteAsLetItDonePacket {
+        id: 70,
+        obj_id: 0,
+        selected: 0,
+    }
+    .handle(&server, &mut client.conn)
+    .await
+    .unwrap();
+    server.systems.quests.run_queued_evaluations(&server);
+    let frames = client.drain();
+    let failed: Vec<_> = frames
+        .iter()
+        .filter(|f| f.0 == sc::SCQuestContextFailedPacket)
+        .collect();
+    assert_eq!(
+        failed.len(),
+        1,
+        "expected exactly one SCQuestContextFailed, got {frames:?}"
+    );
+    assert_eq!(
+        failed[0].1,
+        failed_bytes(70, super::packets::quest_error::INVALID_QUEST_STATUS)
+    );
+    assert_eq!(
+        player.data().quests.active[0].step,
+        kind::READY,
+        "the quest completed instead of staying at Ready"
+    );
+}
+
+#[tokio::test]
 async fn completed_cinema_resends_neighbours_before_advancing_its_objective() {
     use crate::net::registry::ClientPacket;
     let (server, _) = server_with(|d| {

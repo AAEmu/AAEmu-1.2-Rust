@@ -114,11 +114,12 @@ impl Marshal for SCQuestContextResetPacket {
 /// Reason bytes of `SCQuestContextFailedPacket` (`0x146`).
 ///
 /// The client raises `QUEST_ERROR_INFO` with the byte and shows
-/// `locale.questContext.errors[err]`. That table is built 1-based in
-/// `x2ui/baselib/locale_helper.alb` (`errors = { already_have, invalid_quest, ... }`,
-/// `SETLIST` at instruction 654); the 10.x server's `QuestStatusFailed` enum has the same
-/// numbering (`InvalidQuest = 2`, `InvalidNpcOrQuest = 7`, `InvalidQuestStatus = 12`,
-/// `InvalidDoodad = 19`).
+/// `locale.questContext.errors[err]`. `x2ui/baselib/locale_helper.alb` builds that table as a
+/// 1-based Lua list (`SETLIST` at instruction 654; value 1 is `already_have`, 2
+/// `invalid_quest`, ...), and `quest_context.alb` proto 22 (the `QUEST_ERROR_INFO` handler)
+/// indexes it directly with its first argument. The client's own pre-checks use the same
+/// codes: `FUN_3937a2d0` sends 2 when the quest is invalid and 0x14 after its can-interact
+/// check fails.
 pub mod quest_error {
     pub const INVALID_QUEST: u8 = 2;
     pub const INVALID_NPC_OR_QUEST: u8 = 7;
