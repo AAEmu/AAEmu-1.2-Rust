@@ -1492,18 +1492,6 @@ pub fn is_cannon_kind(kind: u32) -> bool {
     )
 }
 
-/// Whether the slave's model declares `point` in `model_bindings`. This is the 1.2 client's own
-/// seat test: `FUN_393bbb80` offers 13863 only when `FUN_390c9f70(2)` finds point 2 in the model's
-/// binding list, and the server applies the same rule to every non-driver seat.
-pub fn model_has_attach_point(server: &GameServer, slave: &SlaveRef, point: u8) -> bool {
-    let template_id = slave.data().unit.template_id;
-    server
-        .game_data
-        .systems
-        .vehicles
-        .slave_has_attach_point(template_id, point)
-}
-
 /// `BindSlave(character, objId, attachPoint, bondKind)`.
 pub fn bind_slave(
     server: &GameServer,
@@ -1540,9 +1528,10 @@ pub fn bind_slave(
     // lock); the comparison and the reservation run under that one lock.
     let gap = reach.map(|_| bind_gap(server, &world, character, &slave, point));
     let cannon = is_cannon_kind(slave_kind(server, &slave));
-    // The 1.2 client only offers a seat the model declares (see [`model_has_attach_point`]); the
-    // driver point 1 keeps the C# rules. The model data is immutable, so this snapshot needs no
-    // lock; the check and the reservation below still run under the slave's one lock.
+    // The 1.2 client only offers a seat the model declares (`model_bindings`, the same list
+    // `FUN_393bbb80` scans); the driver point 1 keeps the C# rules. The model data is immutable,
+    // so this snapshot needs no lock; the check and the reservation below still run under the
+    // slave's one lock.
     let template_id = slave.data().unit.template_id;
     let seat_exists = server
         .game_data
