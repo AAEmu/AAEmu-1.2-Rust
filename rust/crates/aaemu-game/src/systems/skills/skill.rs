@@ -422,8 +422,23 @@ fn initial_target(
                 return None;
             }
         }
-        Some(T::Pos | T::BallisticPos | T::ArtilleryPos) => {
+        Some(T::Pos) => {
             return Some(set_initial_target(server, caster, target_caster));
+        }
+        Some(T::BallisticPos | T::ArtilleryPos) => {
+            // A cannon shot is an aimed impact point (`SkillCastTarget::Position`, path A of the
+            // 1.2 client). The Lua bar (path B) sends a Unit target for these types; treating it
+            // as a position kept the caster's own spot under `set_initial_target`, i.e. distance
+            // 0, and refused the shot as too close. The 1.2 client answers NO_TARGET (0x9).
+            if matches!(
+                target_caster,
+                SkillCastTarget::Position { .. }
+                    | SkillCastTarget::Position2 { .. }
+                    | SkillCastTarget::Position3 { .. }
+            ) {
+                return Some(set_initial_target(server, caster, target_caster));
+            }
+            return None;
         }
         Some(T::RelativePos) => {
             if matches!(

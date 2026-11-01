@@ -196,6 +196,85 @@ pub(super) fn check_build_materials(
     Ok(())
 }
 
+/// The 1.2 client only fires a cannon when its aim preview passes: the impact point is the
+/// ballistic arc from the muzzle (`FUN_394322f0`), the camera aim clamps the turret to the
+/// model's `vehicle_models` pitch / yaw limits (`FUN_39425490`), and a failed `CanUse` on that
+/// Position target blocks the click (`DAT_3a5a4ea4`). The `CanUse` body is spliced, so the
+/// exact predicate is not recoverable [I]: this checks the same geometry from the cannon's
+/// world pose (parent ship yaw composed with the attach point), the model window and the
+/// skill's `pitch_angle`, and answers `OUTOF_ANGLE` (0x10, the client's SkillResult for
+/// pitch / model limit failures).
+fn check_ballistic_aim(
+    server: &GameServer,
+    template: &super::data::SkillTemplate,
+    caster: &WorldObject,
+    target: &Target,
+) -> Result<(), (u8, u32)> {
+    use super::types::SkillTargetType;
+    if template.target_type != SkillTargetType::BallisticPos as i32
+        && template.target_type != SkillTargetType::ArtilleryPos as i32
+    {
+        return Ok(());
+    }
+    // Unit targets never reach here for these types (they are refused as NO_TARGET).
+    if !matches!(target, Target::Pos(_)) {
+        return Ok(());
+    }
+    let source = super::geometry::world_pos(server, &Target::Obj(caster.clone()));
+    let destination = super::geometry::world_pos(server, target);
+    let dx = f64::from(destination.x - source.x);
+    let dy = f64::from(destination.y - source.y);
+    let horizontal = dx.hypot(dy);
+    if horizontal <= f64::EPSILON {
+        // The range check owns a zero-distance shot.
+        return Ok(());
+    }
+    let elevation = f64::from(destination.z - source.z)
+        .atan2(horizontal)
+        .to_degrees();
+    if template.pitch_angle > 0.0 && elevation > f64::from(template.pitch_angle) {
+        tracing::debug!(
+            elevation,
+            pitch_angle = template.pitch_angle,
+            "Skill use refused: the impact point is above the skill's pitch angle"
+        );
+        return fail("skill_outof_angle");
+    }
+    let Some(slave) = caster.as_slave() else {
+        return Ok(());
+    };
+    let model_id = slave.data().unit.model_id;
+    let Some(model) = server.game_data.systems.vehicles.vehicle_model(model_id) else {
+        return Ok(());
+    };
+    if elevation > f64::from(model.turret_pitch_angle_max)
+        || elevation < f64::from(model.turret_pitch_angle_min)
+    {
+        tracing::debug!(
+            elevation,
+            min = model.turret_pitch_angle_min,
+            max = model.turret_pitch_angle_max,
+            "Skill use refused: the impact point is outside the turret pitch limits"
+        );
+        return fail("skill_outof_angle");
+    }
+    let heading = dy.atan2(dx).to_degrees();
+    let relative =
+        super::geometry::clamp_deg(heading - 90.0 - f64::from(source.rot_z).to_degrees());
+    if relative > f64::from(model.turret_yaw_angle_max)
+        || relative < f64::from(model.turret_yaw_angle_min)
+    {
+        tracing::debug!(
+            relative,
+            min = model.turret_yaw_angle_min,
+            max = model.turret_yaw_angle_max,
+            "Skill use refused: the impact point is outside the turret yaw window"
+        );
+        return fail("skill_outof_angle");
+    }
+    Ok(())
+}
+
 pub(super) fn check(
     server: &GameServer,
     skill: &SkillRun,
@@ -295,6 +374,7 @@ pub(super) fn check(
     {
         return fail("skill_invalid_target");
     }
+    check_ballistic_aim(server, template, caster, target)?;
     if template.target_angle > 0
         && !super::geometry::in_angle(&source, &destination, template.target_angle as f32)
     {

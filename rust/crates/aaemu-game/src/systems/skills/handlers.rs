@@ -205,7 +205,7 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
         p.caster.obj_id(),
         target.obj_id()
     );
-    let result;
+    let mut result;
     let mut value = 0u32;
     let data = &server.game_data;
     // A skill reached only through an item use must come with that item: the plain unit cast
@@ -385,7 +385,7 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
                 return;
             }
         }
-        let (r, _v) = skill::use_skill(
+        let (r, v) = skill::use_skill(
             server,
             &skill,
             &caster,
@@ -394,6 +394,8 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
             Some(p.skill_object.clone()),
             false,
         );
+        result = r;
+        value = v;
         // Harpoon rope controller + MateGameData.GetMountAttachedSkills (vehicles subsystem)
         let mount_attached_skill = crate::systems::vehicles::on_mount_skill_used(
             server,
@@ -407,9 +409,15 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
         if mount_attached_skill == 0 {
             return;
         }
-        // The rider target was resolved before the mount cast and the pre-check used it.
-        let rider_target = rider_target.unwrap_or_else(|| me.clone());
-        result = skill::unit_use_skill(server, &me, mount_attached_skill, &rider_target);
+        // The rider/operator skill belongs to a successful mount cast. A refused mount skill
+        // (e.g. NO_TARGET for a unit target on a BallisticPos cannon skill) must keep its
+        // result: running the rider anyway would overwrite it with its own result and hide
+        // the refusal from the client.
+        if r == skill_result::SUCCESS {
+            // The rider target was resolved before the mount cast and the pre-check used it.
+            let rider_target = rider_target.unwrap_or_else(|| me.clone());
+            result = skill::unit_use_skill(server, &me, mount_attached_skill, &rider_target);
+        }
     } else if is_auto
         && auto
             .as_ref()

@@ -65,6 +65,9 @@ pub struct SkillTemplate {
     pub check_obstacle: bool,
     pub weapon_slot_for_angle_id: i32,
     pub target_angle: i32,
+    /// `pitch_angle`, degrees: the highest firing elevation the skill allows (`[I]`: the 1.2
+    /// `CanUse` body is spliced; the aim preview's `OUTOF_ANGLE` is the only reader evidenced).
+    pub pitch_angle: f32,
     pub weapon_slot_for_range_id: i32,
     pub weapon_slot_for_auto_attack_id: i32,
     pub min_range: i32,
@@ -210,6 +213,11 @@ fn read_skill(
         },
         weapon_slot_for_angle_id: r.i32("weapon_slot_for_angle_id")?,
         target_angle: r.i32("target_angle")?,
+        pitch_angle: if r.has("pitch_angle") {
+            r.f32("pitch_angle")?
+        } else {
+            0.0
+        },
         weapon_slot_for_range_id: r.i32("weapon_slot_for_range_id")?,
         weapon_slot_for_auto_attack_id: r.i32("weapon_slot_for_autoattack_id")?,
         min_range: r.i32("min_range")?,

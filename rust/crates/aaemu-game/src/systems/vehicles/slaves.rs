@@ -1711,10 +1711,12 @@ pub const TURRET_STATE_MIN_INTERVAL_MS: i64 = 150;
 /// The 1.2 client sends the object id of the unit it controls (`39356990` uses `this+8`), so a
 /// ship cannon names the cannon child slave, a hull with an installed turret names the hull, and
 /// the tank passenger seat names the hull. Any attach point of that slave counts as seated; a
-/// sender who is not on it is ignored. The stored / relayed angles are the raw model-frame
-/// radians of the packet: the client producers already clamp them to the `vehicle_models` turret
-/// limits (or wrap full-circle yaws) before sending (`39425490` / `39425580`). The aim is kept
-/// on the slave and is not cleared on unbind, so late viewers keep the last posture.
+/// sender who is not on it is ignored. Only a slave whose model is a `VehicleModel` has a turret:
+/// the client producers (`39425490` / `39425580`) need a `VehicleUnitModel` and clamp / wrap the
+/// angles to that model's `vehicle_models` limits before sending, so the server clamps the raw
+/// model-frame radians to the same limits (defence against a modified client) and ignores a
+/// slave without a `VehicleModel` row. The aim is kept on the slave and is not cleared on unbind,
+/// so late viewers keep the last posture.
 ///
 /// The newest aim is always stored (under the slave lock) so a suppressed relay can never
 /// leave late viewers on an older one; the throttle only decides whether it is relayed now or
@@ -1735,6 +1737,17 @@ pub fn set_turret_state(
     let Some(slave) = world.slave(unit_id) else {
         return;
     };
+    let model_id = slave.data().unit.model_id;
+    let Some(model) = server
+        .game_data
+        .systems
+        .vehicles
+        .vehicle_model(model_id)
+        .copied()
+    else {
+        return;
+    };
+    let (pitch, yaw) = model.clamp_turret_angles(pitch, yaw);
     // Check and act under the same lock: only a character seated on this slave may aim it, an
     // unchanged aim is never relayed, and a changed aim inside the window waits for the tick.
     let posture = {
