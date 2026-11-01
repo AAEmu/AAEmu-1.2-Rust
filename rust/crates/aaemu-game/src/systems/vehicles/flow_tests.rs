@@ -1687,6 +1687,46 @@ fn passenger_data() -> GameData {
     d
 }
 
+/// The Red Farm Hauler (slave 146, model 1553) of the 2026-11-01 live log: `model_bindings`
+/// declares the passenger seat at point 2, `slave_attach_points.json` locates only its cannon
+/// points 9-14 on the rear flatbed, and the model has no ship model. The positions are the real
+/// rows.
+fn hauler_data() -> GameData {
+    let mut d = passenger_data();
+    d.systems.vehicles.slave_templates.insert(
+        146,
+        SlaveTemplate {
+            id: 146,
+            name: "Red Farm Hauler".into(),
+            model_id: 1553,
+            slave_kind: super::data::slave_kind::MACHINE,
+            ..SlaveTemplate::default()
+        },
+    );
+    d.systems
+        .vehicles
+        .model_bindings
+        .insert(1553, vec![1, 2, 9, 10, 11, 12, 13, 14, 35]);
+    let at = |x: f32, y: f32, z: f32| WorldSpawnPosition {
+        x,
+        y,
+        z,
+        ..WorldSpawnPosition::default()
+    };
+    d.systems.vehicles.attach_points.insert(
+        1553,
+        vec![
+            (9, at(-0.55, -2.0, 1.15)),
+            (10, at(0.55, -2.0, 1.15)),
+            (11, at(0.55, -3.2, 1.15)),
+            (12, at(-0.55, -3.2, 1.15)),
+            (13, at(0.55, -2.6, 2.15)),
+            (14, at(-0.55, -2.6, 2.15)),
+        ],
+    );
+    d
+}
+
 /// Skill 13863 (`Take the Passenger Seat`) seats the caster at point 2 through the real
 /// `CSStartSkill` handler and `AttachTo` special effect; a second character on the same seat
 /// is ignored silently, as the C# does.
@@ -2158,6 +2198,188 @@ async fn a_slave_outside_the_client_reach_is_refused_and_an_in_reach_one_is_seat
         cart.data().attached_characters,
         vec![(attach_point::PASSENGER0, 0x00F0_0003)]
     );
+}
+
+/// The 1.2 client offers the Red Farm Hauler's passenger seat from beside the hull: it measures
+/// the distance to the vehicle's collision parts, not to the model origin (`FUN_39093860` ->
+/// `FUN_3989bf90`). Model 1553 has no ship model and no located point 2, so the origin fallback
+/// refused a player beside the rear seat more than 3 m from the origin (live log 2026-11-01
+/// 14:22:40-14:22:42, three `TOO_FAR_AWAY` answers). The model's nearest located attach point
+/// stands in for the hull; a player beyond both the hull and the origin is still refused, and the
+/// driver bind still uses the 4.0 m reach.
+#[tokio::test]
+async fn passenger_beside_the_hull_is_in_reach_without_a_ship_model_or_a_located_seat() {
+    use crate::models::slave::Slave;
+    use crate::systems::skills::handlers::{start_skill, CSStartSkillPacket};
+    use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+    use crate::world::Entity;
+
+    let server = server_with(hauler_data());
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let mut a = TestClient::new(&server, 1, 1);
+    let mut b = TestClient::new(&server, 2, 2);
+    let mut c = TestClient::new(&server, 3, 3);
+    let pa = spawn_player(&server, &a, test_character(1, "Driver", 100.0, 100.0), PA);
+    let pb = spawn_player(&server, &b, test_character(2, "Beside", 105.0, 97.5), PB);
+    let pc = spawn_player(
+        &server,
+        &c,
+        test_character(3, "Far", 110.0, 100.0),
+        0x00F0_0003,
+    );
+    a.conn.active_char = Some(pa.clone());
+    b.conn.active_char = Some(pb.clone());
+    c.conn.active_char = Some(pc.clone());
+    for p in [&pb, &pc] {
+        let mut d = p.data();
+        d.unit.hp = 1000;
+        d.unit.max_hp = 1000;
+    }
+    let world = server.world.world(0).unwrap();
+    let mut hauler = Slave::new(0, 146);
+    hauler.unit.hp = 1000;
+    hauler.unit.max_hp = 1000;
+    hauler.unit.model_id = 1553;
+    hauler.unit.tl_id = 3;
+    hauler.unit.transform.set_xyz(103.0, 100.0, 100.0);
+    hauler.summoner_obj_id = PA;
+    hauler.summoner_id = pa.character_id;
+    let hauler = Entity::new(0x300, hauler);
+    world.spawn(&hauler, &server.view_ctx());
+    a.drain();
+    b.drain();
+    c.drain();
+
+    let cast = |client: &mut TestClient, caster: u32, target: u32| {
+        start_skill(
+            &server,
+            &mut client.conn,
+            CSStartSkillPacket {
+                skill_id: PASSENGER_SKILL,
+                caster: SkillCaster::Unit(caster),
+                target: SkillCastTarget::Unit(target),
+                flag: 0,
+                skill_object: SkillObject::None,
+            },
+        );
+    };
+
+    // The driver stands 3.0 m from the origin, farther (4.2 m) from the rear cannon points: the
+    // smaller origin distance keeps the unchanged 4.0 m driver reach.
+    slaves::bind_slave_by_tl(&server, &pa, 3);
+    assert_eq!(
+        hauler.data().attached_characters,
+        vec![(attach_point::DRIVER, PA)]
+    );
+    a.drain();
+
+    // The passenger stands beside the rear seat: 3.2 m from the origin but 1.9 m from the nearest
+    // located attach point.
+    cast(&mut b, PB, hauler.obj_id);
+    let fb = b.drain();
+    assert!(
+        !error_codes(&fb).contains(&super::error::TOO_FAR_AWAY),
+        "the client offers this seat: {:x?}",
+        error_codes(&fb)
+    );
+    assert!(ops(&fb).contains(&sc::SCUnitAttachedPacket));
+    assert_eq!(
+        hauler.data().attached_characters,
+        vec![(attach_point::DRIVER, PA), (attach_point::PASSENGER0, PB)]
+    );
+    assert_eq!(pb.data().attached_point, attach_point::PASSENGER0);
+
+    // 7 m from the origin, beyond the hull and the origin bound.
+    cast(&mut c, 0x00F0_0003, hauler.obj_id);
+    assert_eq!(
+        error_codes(&c.drain()),
+        vec![super::error::TOO_FAR_AWAY],
+        "a player away from the hull is still refused"
+    );
+    assert_eq!(
+        hauler.data().attached_characters,
+        vec![(attach_point::DRIVER, PA), (attach_point::PASSENGER0, PB)]
+    );
+}
+
+/// The live log's second F bind (2026-11-01 14:22:50): after `CSDiscardSlave` the driver had
+/// driven the hauler 3.5 m and stood 4.9 m from its origin beside the rear hull, and the re-bind
+/// was refused with `TOO_FAR_AWAY`. The discard does clear the seat; the refusal was the same
+/// origin-only gap. The 4.0 m driver reach is unchanged and still refuses a player away from the
+/// hull.
+#[tokio::test]
+async fn a_discarded_driver_rebinds_beside_the_hull_and_a_far_one_is_still_refused() {
+    use crate::models::slave::Slave;
+    use crate::net::registry::ClientPacket;
+    use crate::systems::vehicles::packets::{CSBindSlavePacket, CSDiscardSlavePacket};
+    use crate::world::Entity;
+
+    let server = server_with(hauler_data());
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let mut a = TestClient::new(&server, 1, 1);
+    let pa = spawn_player(&server, &a, test_character(1, "Driver", 103.0, 98.0), PA);
+    a.conn.active_char = Some(pa.clone());
+    let world = server.world.world(0).unwrap();
+    let mut hauler = Slave::new(0, 146);
+    hauler.unit.hp = 1000;
+    hauler.unit.max_hp = 1000;
+    hauler.unit.model_id = 1553;
+    hauler.unit.tl_id = 3;
+    hauler.unit.transform.set_xyz(103.0, 100.0, 100.0);
+    hauler.summoner_obj_id = PA;
+    hauler.summoner_id = pa.character_id;
+    let hauler = Entity::new(0x300, hauler);
+    world.spawn(&hauler, &server.view_ctx());
+    a.drain();
+
+    CSBindSlavePacket { tl_id: 3 }
+        .handle(&server, &mut a.conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        hauler.data().attached_characters,
+        vec![(attach_point::DRIVER, PA)]
+    );
+    a.drain();
+
+    // Discard, then stand where the live driver stood: 4.5 m behind the origin, beside the hull.
+    CSDiscardSlavePacket { tl_id: 3 }
+        .handle(&server, &mut a.conn)
+        .await
+        .unwrap();
+    assert!(hauler.data().attached_characters.is_empty());
+    assert!(slaves::get_is_mounted(&world, PA).is_none());
+    a.drain();
+    pa.data().unit.transform.set_xyz(103.0, 95.5, 100.0);
+
+    CSBindSlavePacket { tl_id: 3 }
+        .handle(&server, &mut a.conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        hauler.data().attached_characters,
+        vec![(attach_point::DRIVER, PA)],
+        "the client offers the driver seat from beside the hull"
+    );
+    assert!(error_codes(&a.drain()).is_empty());
+
+    // 9 m behind the origin is beyond the hull and the origin bound: the 4.0 m reach still holds.
+    CSDiscardSlavePacket { tl_id: 3 }
+        .handle(&server, &mut a.conn)
+        .await
+        .unwrap();
+    a.drain();
+    pa.data().unit.transform.set_xyz(103.0, 91.0, 100.0);
+    CSBindSlavePacket { tl_id: 3 }
+        .handle(&server, &mut a.conn)
+        .await
+        .unwrap();
+    assert_eq!(error_codes(&a.drain()), vec![super::error::TOO_FAR_AWAY]);
+    assert!(hauler.data().attached_characters.is_empty());
 }
 
 /// One slave at a time: the client refuses a second bind with `slave_unbind_first` 0x66

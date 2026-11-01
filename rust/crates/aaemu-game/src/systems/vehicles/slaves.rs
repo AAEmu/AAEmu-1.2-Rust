@@ -1387,11 +1387,19 @@ fn inverse_rotate(q: crate::models::transform::Quaternion, v: [f32; 3]) -> [f32;
     .rotate(v)
 }
 
-/// Surface gap for a slave bind reach. The client measures its collision geometry
-/// (`FUN_39093860`); the server uses the ship model's mass box when the slave has one and the
-/// requested attach point's world position when the data has it, taking the smaller gap. It only
-/// falls back to the slave origin when neither exists (carts: the origin sits at the seat). A
-/// ship's bare origin is never the measure.
+/// Surface gap for a slave bind reach. The client measures the distance from the character's
+/// collision primitive to each collision part of the target and keeps the smallest
+/// (`FUN_39093860` -> `FUN_390b3ae0` for the target's parts, `FUN_3989bf90` -> `FUN_398b1ab0` for
+/// the per-part shape distance). The server approximates that: the ship model's mass box when the
+/// slave has one, the requested attach point's world position when the data has it, and the
+/// nearest located attach point of the model (`slave_attach_points*.json`) when it does not. The
+/// model's located attach points stand in for its collision parts, which is why a player beside a
+/// hull whose requested point has no location is still in reach. That fallback keeps the smaller
+/// of the origin distance and the nearest located point: the origin lies inside the hull, so its
+/// distance is an upper bound on the surface gap, and a model whose only located points sit at one
+/// end (the Red Farm Hauler's cannon points at the rear) must not tighten the reach at the other.
+/// Only a model with no located point at all uses the origin alone (carts: the origin sits at the
+/// seat); a ship's bare origin is never the measure.
 fn bind_gap(
     server: &GameServer,
     world: &WorldInstance,
@@ -1446,20 +1454,30 @@ fn bind_gap(
         }
         sum.sqrt()
     });
-    let point_distance = vehicles
-        .attach_points_for_slave(model_id)
+    let points = vehicles.attach_points_for_slave(model_id);
+    let location_gap = |location: &WorldSpawnPosition| {
+        let rotated = slave_pos.to_quaternion().rotate([
+            location.x * scale,
+            location.y * scale,
+            location.z * scale,
+        ]);
+        let dx = player.x - (slave_pos.x + rotated[0]);
+        let dy = player.y - (slave_pos.y + rotated[1]);
+        let dz = player.z - (slave_pos.z + rotated[2]);
+        (dx * dx + dy * dy + dz * dz).sqrt()
+    };
+    let point_distance = points
         .and_then(|points| points.iter().find(|(p, _)| *p == point).map(|(_, l)| *l))
-        .map(|location| {
-            let rotated = slave_pos.to_quaternion().rotate([
-                location.x * scale,
-                location.y * scale,
-                location.z * scale,
-            ]);
-            let dx = player.x - (slave_pos.x + rotated[0]);
-            let dy = player.y - (slave_pos.y + rotated[1]);
-            let dz = player.z - (slave_pos.z + rotated[2]);
-            (dx * dx + dy * dy + dz * dz).sqrt()
-        });
+        .map(|location| location_gap(&location));
+    // The requested seat has no location in the data (for example the Red Farm Hauler, model
+    // 1553, declares point 2 but `slave_attach_points.json` only locates its cannon points).
+    // Measure to the nearest located point of the same model instead of the bare origin, as the
+    // client measures to the nearest collision part of the target.
+    let nearest_point_distance = points
+        .into_iter()
+        .flatten()
+        .map(|(_, location)| location_gap(location))
+        .min_by(f32::total_cmp);
     let distance = match (box_distance, point_distance) {
         (Some(box_gap), Some(point_gap)) => box_gap.min(point_gap),
         (Some(gap), None) | (None, Some(gap)) => gap,
@@ -1467,7 +1485,8 @@ fn bind_gap(
             let dx = player.x - slave_pos.x;
             let dy = player.y - slave_pos.y;
             let dz = player.z - slave_pos.z;
-            (dx * dx + dy * dy + dz * dz).sqrt()
+            let origin_gap = (dx * dx + dy * dy + dz * dz).sqrt();
+            nearest_point_distance.map_or(origin_gap, |point_gap| point_gap.min(origin_gap))
         }
     };
     (distance - player_radius).max(0.0)
