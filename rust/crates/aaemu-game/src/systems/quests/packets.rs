@@ -111,6 +111,41 @@ impl Marshal for SCQuestContextResetPacket {
     }
 }
 
+/// Reason bytes of `SCQuestContextFailedPacket` (`0x146`).
+///
+/// The client raises `QUEST_ERROR_INFO` with the byte and shows
+/// `locale.questContext.errors[err]`. That table is built 1-based in
+/// `x2ui/baselib/locale_helper.alb` (`errors = { already_have, invalid_quest, ... }`,
+/// `SETLIST` at instruction 654); the 10.x server's `QuestStatusFailed` enum has the same
+/// numbering (`InvalidQuest = 2`, `InvalidNpcOrQuest = 7`, `InvalidQuestStatus = 12`,
+/// `InvalidDoodad = 19`).
+pub mod quest_error {
+    pub const INVALID_QUEST: u8 = 2;
+    pub const INVALID_NPC_OR_QUEST: u8 = 7;
+    pub const INVALID_QUEST_STATUS: u8 = 12;
+    pub const INVALID_DOODAD: u8 = 19;
+}
+
+/// `SCQuestContextFailedPacket(questId, err)` (`0x146`). The client's reader
+/// `FUN_397b5c90` (vtable `399b3a5c`) reads the field `"type"` as a u32 at `+0xc` and
+/// `"err"` as one byte at `+0x10`; `OnQuestContextFailed` (`FUN_391dbcd0`) forwards both
+/// to `FUN_3937a130`, which raises `QUEST_ERROR_INFO` and ends quest directing mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SCQuestContextFailedPacket {
+    pub quest_id: u32,
+    pub err: u8,
+}
+packet_def!(
+    SCQuestContextFailedPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCQuestContextFailedPacket
+);
+impl Marshal for SCQuestContextFailedPacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_u32(self.quest_id).write_u8(self.err);
+    }
+}
+
 /// `SCQuestRewardedByMailPacket(questList)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SCQuestRewardedByMailPacket {
@@ -446,6 +481,10 @@ impl ClientPacket for CSTryQuestCompleteAsLetItDonePacket {
                     target,
                     self.obj_id
                 );
+                p.send(SCQuestContextFailedPacket {
+                    quest_id: self.id,
+                    err: quest_error::INVALID_NPC_OR_QUEST,
+                });
                 return Ok(());
             }
             let (id, selected) = (self.id, self.selected);
