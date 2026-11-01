@@ -3188,33 +3188,14 @@ async fn real_data_quest_fill_spawns_on_terrain() {
         let offset = p.z - height;
         assert!(
             offset >= -max_below && offset <= max_above,
-            "quest fill doodad {unit_id} at Z {} is {offset:.3} m from the 1.2 height {height}              (allowed {max_below} m below, {max_above} m above)",
+            "quest fill doodad {unit_id} at Z {} is {offset:.3} m from the 1.2 height {height} \
+             (allowed {max_below} m below, {max_above} m above)",
             p.z,
         );
         println!(
             "quest fill doodad {unit_id}: zone {zone} (open), Z {} vs height {height:.5}",
             p.z
         );
-    }
-
-    // Reference only: the neighbouring Ronbann quest doodads (1878 firewood, 1879 bonfire) come
-    // from the 1.2 spawn data; show their Z against the same navmesh height.
-    for unit_id in [1878u32, 1879] {
-        for s in m.get_doodad_spawners_by_unit_id(unit_id) {
-            let p = s.position;
-            if (p.x - 12840.0).abs() > 100.0 || (p.y - 16320.0).abs() > 100.0 {
-                continue;
-            }
-            let zone = worlds.get_zone_id(Some(main), p.x, p.y);
-            let height = heights.get_height(zone, p.x, p.y, p.z);
-            println!(
-                "ronbann neighbour doodad {unit_id} at ({:.1}, {:.1}) Z {} vs height {height:.3}: {:+.3}",
-                p.x,
-                p.y,
-                p.z,
-                p.z - height
-            );
-        }
     }
 }
 
