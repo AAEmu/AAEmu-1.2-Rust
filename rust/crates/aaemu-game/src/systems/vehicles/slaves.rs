@@ -1738,9 +1738,9 @@ pub const TURRET_STATE_MIN_INTERVAL_MS: i64 = 150;
 /// the client producers (`39425490` / `39425580`) need a `VehicleUnitModel` and clamp / wrap the
 /// angles to that model's `vehicle_models` limits before sending, so the server clamps the raw
 /// model-frame radians to the same limits (defence against a modified client); a limit stored
-/// as a non-numeric value (the text `'f'` in the real rows) is "no limit", a reversed window is
-/// sorted, and it ignores a slave without a `VehicleModel` row. The aim is kept on the slave and is not cleared on unbind,
-/// so late viewers keep the last posture.
+/// as a non-numeric value (the text `'f'` in the real rows) is "no limit", and a reversed window
+/// is sorted. A slave without a `VehicleModel` row has no turret and is ignored. The aim is kept
+/// on the slave and is not cleared on unbind, so late viewers keep the last posture.
 ///
 /// The newest aim is always stored (under the slave lock) so a suppressed relay can never
 /// leave late viewers on an older one; the throttle only decides whether it is relayed now or
