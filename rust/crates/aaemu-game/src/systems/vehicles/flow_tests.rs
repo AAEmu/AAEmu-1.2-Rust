@@ -6063,6 +6063,105 @@ async fn turret_state_outside_the_model_limits_is_clamped() {
     });
 }
 
+/// The skill's own `pitch_angle` is checked too: a low-arc copy of the cannon skill (10 deg)
+/// refuses an impact point 20 deg above the cannon even though the model allows 35 deg.
+#[tokio::test]
+async fn beyond_the_skill_pitch_angle_is_refused() {
+    use super::data::{MountAttachedSkills, MountSkills};
+    use crate::net::registry::ClientPacket;
+    use crate::systems::skills::handlers::CSStartSkillPacket;
+    use crate::systems::skills::types::{skill_result, SkillCastTarget, SkillCaster, SkillObject};
+
+    const LOW_ARC_SKILL: u32 = FIRE_CANNON + 1;
+    const LOW_ARC_MOUNT: u32 = CANNON_MOUNT_SKILL + 1;
+    let mut d = cannon_data();
+    let mut low_arc = (*d.systems.skills.skills[&FIRE_CANNON]).clone();
+    low_arc.id = LOW_ARC_SKILL;
+    low_arc.pitch_angle = 10.0;
+    d.systems.skills.add_skill(low_arc);
+    d.systems.vehicles.mount_skills.push(MountSkills {
+        id: LOW_ARC_MOUNT,
+        name: "Low arc".into(),
+        skill_id: LOW_ARC_SKILL,
+    });
+    d.systems
+        .vehicles
+        .slave_mount_skills
+        .push((2, CANNON_CHILD, LOW_ARC_MOUNT));
+    // The mount bar needs an attached rider skill; without one the handler returns before it
+    // can answer the refusal.
+    d.systems
+        .vehicles
+        .mount_attached_skills
+        .push(MountAttachedSkills {
+            id: 132,
+            mount_skill_id: LOW_ARC_MOUNT,
+            attach_point_id: attach_point::DRIVER,
+            skill_id: GUNNER_STATE_SKILL,
+        });
+    let server = server_with(d);
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let mut a = TestClient::new(&server, 1, 1);
+    let pa = spawn_player(&server, &a, test_character(1, "Owner", 100.0, 100.0), PA);
+    a.conn.active_char = Some(pa.clone());
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    let hull = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        SHIP_HULL,
+        None,
+        false,
+        None,
+        None,
+    )
+    .expect("hull");
+    let cannon = world
+        .slave(hull.data().attached_slaves[0])
+        .expect("cannon child");
+    let cannon_tl = u32::from(cannon.data().unit.tl_id);
+    a.drain();
+    stand_next_to(&world, &pa, &WorldObject::from(&cannon));
+    slaves::bind_slave_by_tl(&server, &pa, cannon_tl);
+    a.drain();
+
+    let aim = world.world_pos_rot(&WorldObject::from(&cannon));
+    let forward = (-aim.rot_z.sin(), aim.rot_z.cos());
+    let target = SkillCastTarget::Position {
+        obj_id: 0,
+        x: aim.x + 40.0 * forward.0,
+        y: aim.y + 40.0 * forward.1,
+        z: aim.z + 40.0 * 20f32.to_radians().tan(),
+        rot: 0.0,
+        obj_id1: 0,
+        obj_id2: 0,
+    };
+    CSStartSkillPacket {
+        skill_id: LOW_ARC_SKILL,
+        caster: SkillCaster::Mount {
+            obj_id: cannon.obj_id,
+            mount_skill_template_id: LOW_ARC_MOUNT,
+        },
+        target,
+        flag: 0,
+        skill_object: SkillObject::None,
+    }
+    .handle(&server, &mut a.conn)
+    .await
+    .unwrap();
+    let frames = a.drain();
+    assert_eq!(
+        started_result(&frames, LOW_ARC_SKILL),
+        Some(skill_result::OUTOF_ANGLE),
+        "{:x?}",
+        frames
+    );
+}
+
 /// A slave whose model is not a `VehicleModel` has no turret (the client needs a
 /// `VehicleUnitModel` to aim), so an aim packet is ignored: nothing is stored or relayed.
 #[tokio::test]
