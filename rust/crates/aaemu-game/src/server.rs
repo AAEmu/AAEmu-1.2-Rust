@@ -22,6 +22,7 @@ use crate::managers::{AccountManager, EnterWorldManager, StreamManager};
 use crate::net::connection::{ConnectionTable, GameConnection};
 use crate::net::packet::{decode_frame, LEVEL_PLAIN, LEVEL_PROXY};
 use crate::net::registry::PacketRegistry;
+use crate::net::reply_delay::ReplyDelay;
 use crate::opcodes;
 use crate::world::WorldManager;
 
@@ -31,6 +32,8 @@ pub struct GameServer {
     pub game_data: Arc<GameData>,
     pub registry: PacketRegistry,
     pub connections: ConnectionTable,
+    /// `Debug:ReplyDelay` (`None` = off), resolved once at startup.
+    pub reply_delay: Option<Arc<ReplyDelay>>,
     pub enter_world: EnterWorldManager,
     pub accounts: AccountManager,
     pub streams: StreamManager,
@@ -60,6 +63,7 @@ impl GameServer {
     pub fn new(config: AppConfig, db: MySqlPool, game_data: GameData) -> Self {
         let ids = Arc::new(IdManagers::default());
         let world = Arc::new(WorldManager::default());
+        let reply_delay = ReplyDelay::resolve(&config.debug.reply_delay);
         // WorldManager.CreateStaticInstances: main_world as instance 0 (dungeon instances from
         // the configuration are a later phase).
         if let Some(t) = game_data.worlds.get_world_template_by_name("main_world") {
@@ -84,6 +88,7 @@ impl GameServer {
             game_data: Arc::new(game_data),
             registry: crate::packets::build_registry(),
             connections: ConnectionTable::default(),
+            reply_delay,
             enter_world: EnterWorldManager::default(),
             accounts: AccountManager::default(),
             streams: StreamManager::default(),
@@ -175,7 +180,10 @@ impl GameServer {
         match self.registry.get(raw.level, raw.opcode) {
             Some(reg) => {
                 let started = std::time::Instant::now();
+                // `Debug:ReplyDelay` "replies to C->S X": frames sent while the handler runs.
+                conn.begin_reply(raw.level, raw.opcode);
                 let res = (reg.handler)(self, conn, raw.body).await;
+                conn.end_reply();
                 // Achievement events queued under foreign locks run now that the handler is done.
                 crate::systems::economy::flush_deferred_glider_reequips(self);
                 crate::systems::flush_achievements(self);
