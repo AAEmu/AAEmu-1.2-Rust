@@ -1898,6 +1898,7 @@ impl<'a> Ctx<'a> {
                 tracing::warn!(
                     "TryCompleteQuestAsLetItDone, {who}, Quest {quest_id}: has no Reward step and its Ready step did not complete, left at Ready"
                 );
+                self.send_report_refused(quest_id, quest_error::INVALID_QUEST_STATUS);
             }
         } else {
             // Neither a Ready nor a Reward step: complete right away.
