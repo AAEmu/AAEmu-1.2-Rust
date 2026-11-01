@@ -448,6 +448,9 @@ pub struct VehiclesData {
     /// `buff_mount_skills` (buff id, mount skill id) in table order.
     pub buff_mount_skills: Vec<(u32, u32)>,
     pub slave_templates: HashMap<u32, SlaveTemplate>,
+    /// `model_bindings` (owner type `Model`): model id -> attach points, in table order. The
+    /// 1.2 client's seat test (`FUN_393bbb80` -> `FUN_390c9f70`) scans this list.
+    pub model_bindings: HashMap<u32, Vec<u8>>,
     /// `_attachPoints` (model id -> attach point -> location), points in file order.
     pub attach_points: HashMap<u32, Vec<(u8, AttachPointLocation)>>,
     pub slave_initial_items: HashMap<u32, Vec<SlaveInitialItem>>,
@@ -526,6 +529,7 @@ impl VehiclesData {
         let mut d = Self::default();
         d.load_mates(ctx)?;
         d.load_slaves(ctx)?;
+        d.load_model_bindings(ctx)?;
         d.load_slave_attachment_point_locations(&ctx.app_path.join("Data"));
         d.load_transfers(ctx)?;
         d.load_shipyards(ctx)?;
@@ -818,6 +822,29 @@ impl VehiclesData {
             }
             Ok(())
         })?;
+        Ok(())
+    }
+
+    /// `model_bindings`: the attach points a model declares. The 1.2 client offers the passenger
+    /// seat only for a point in this list (`FUN_393bbb80` -> `FUN_390c9f70`), so the server uses it
+    /// as the seat rule too. An out-of-range `attach_point_id` is skipped.
+    fn load_model_bindings(&mut self, ctx: &DataLoadCtx<'_>) -> Result<(), GameDataError> {
+        for_each_row(
+            ctx.conn,
+            "SELECT owner_id, attach_point_id FROM model_bindings WHERE owner_type='Model'",
+            [],
+            |r| {
+                let model_id = r.u32("owner_id")?;
+                let Ok(point) = u8::try_from(r.i32("attach_point_id")?) else {
+                    return Ok(());
+                };
+                let points = self.model_bindings.entry(model_id).or_default();
+                if !points.contains(&point) {
+                    points.push(point);
+                }
+                Ok(())
+            },
+        )?;
         Ok(())
     }
 
@@ -1271,6 +1298,19 @@ impl VehiclesData {
     /// `GetAttachPointsForSlave(modelId)`.
     pub fn attach_points_for_slave(&self, model_id: u32) -> Option<&[(u8, AttachPointLocation)]> {
         self.attach_points.get(&model_id).map(Vec::as_slice)
+    }
+
+    /// Whether `model_id` declares `point` in `model_bindings`.
+    pub fn model_has_attach_point(&self, model_id: u32, point: u8) -> bool {
+        self.model_bindings
+            .get(&model_id)
+            .is_some_and(|points| points.contains(&point))
+    }
+
+    /// Whether the model of slave template `slave_template_id` declares `point`.
+    pub fn slave_has_attach_point(&self, slave_template_id: u32, point: u8) -> bool {
+        self.slave_template(slave_template_id)
+            .is_some_and(|t| self.model_has_attach_point(t.model_id, point))
     }
 
     /// `HasRepairEffectId(templateId, expectedEffectId)`.
