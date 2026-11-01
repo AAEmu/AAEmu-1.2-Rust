@@ -1,0 +1,4344 @@
+{
+  "source": "native ArcheAge 1.2 r208022 game_pak via rust/tools/slave_attach_points.py (Extractor.model); points used by slave_bindings / slave_doodad_bindings",
+  "models": {
+    "5": {
+      "points": {
+        "24": {
+          "X": -1.42433345,
+          "Y": -6.89326668,
+          "Z": 0.83646423,
+          "Roll": 7.89580808,
+          "Pitch": 0.0,
+          "Yaw": 179.99999135,
+          "asset": "game/objects/env/06_unit/04_siegeweapon/siege_tower_a.chr",
+          "node": "ladder_left",
+          "kind": "chr-absolute-bind"
+        },
+        "35": {
+          "X": -0.39981079,
+          "Y": 2.3511963,
+          "Z": 15.238708,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/prefabs/siege_tower.xml",
+          "node": "$helms",
+          "kind": "prefab-helper"
+        },
+        "81": {
+          "X": -1.98440182,
+          "Y": -1.09256768,
+          "Z": 14.48642063,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/04_siegeweapon/siege_tower_a.chr",
+          "node": "bell",
+          "kind": "chr-absolute-bind"
+        }
+      },
+      "uri": "prefab://prefabs/siege_tower.xml/siege_tower.siege_tower_normal"
+    },
+    "128": {
+      "points": {
+        "9": {
+          "X": 0.0,
+          "Y": 9.05,
+          "Z": 1.315,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/speedboat/speedboat_a.cgf",
+          "node": "$cannon0",
+          "kind": "cgf-local-node"
+        },
+        "10": {
+          "X": 3.03168427,
+          "Y": 0.64566505,
+          "Z": 0.67246597,
+          "Roll": -1.14211775,
+          "Pitch": 0.10650404,
+          "Yaw": -88.63598899,
+          "asset": "game/objects/env/06_unit/01_ship/speedboat/speedboat_a.cgf",
+          "node": "$cannon1",
+          "kind": "cgf-local-node"
+        },
+        "21": {
+          "X": 0.0,
+          "Y": 5.85,
+          "Z": 1.095,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/speedboat/speedboat_a.cgf",
+          "node": "$sail0",
+          "kind": "cgf-local-node"
+        },
+        "28": {
+          "X": 2.55805878,
+          "Y": -3.34295471,
+          "Z": 1.67647461,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/speedboat/speedboat_a.cgf",
+          "node": "$lamp_front",
+          "kind": "cgf-local-node"
+        },
+        "29": {
+          "X": -2.57136993,
+          "Y": -3.34295471,
+          "Z": 1.67647461,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/speedboat/speedboat_a.cgf",
+          "node": "$lamp_rear",
+          "kind": "cgf-local-node"
+        },
+        "35": {
+          "X": 0.0,
+          "Y": -2.2049498,
+          "Z": 1.73912994,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/speedboat/speedboat_a.cgf",
+          "node": "$helms",
+          "kind": "cgf-local-node"
+        },
+        "47": {
+          "X": -3.00885834,
+          "Y": 1.13992905,
+          "Z": 0.72717529,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 44.9999885,
+          "asset": "game/objects/env/06_unit/01_ship/speedboat/speedboat_a.cgf",
+          "node": "$cannon10",
+          "kind": "cgf-local-node"
+        },
+        "48": {
+          "X": -3.80155731,
+          "Y": 0.29137411,
+          "Z": 0.95929649,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -89.99996136,
+          "asset": "game/objects/env/06_unit/01_ship/speedboat/speedboat_a.cgf",
+          "node": "$cannon11",
+          "kind": "cgf-local-node"
+        },
+        "49": {
+          "X": 3.71218384,
+          "Y": -0.5143206,
+          "Z": 0.96287079,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 112.50006412,
+          "asset": "game/objects/env/06_unit/01_ship/speedboat/speedboat_a.cgf",
+          "node": "$cannon12",
+          "kind": "cgf-local-node"
+        },
+        "58": {
+          "X": -2.14562775,
+          "Y": -6.47719604,
+          "Z": -1.54135208,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 179.99989937,
+          "asset": "game/objects/env/06_unit/01_ship/speedboat/speedboat_a.cgf",
+          "node": "$ladder_rear_left",
+          "kind": "cgf-local-node"
+        },
+        "59": {
+          "X": 2.14562988,
+          "Y": -6.47719727,
+          "Z": -1.5413472,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 179.99996403,
+          "asset": "game/objects/env/06_unit/01_ship/speedboat/speedboat_a.cgf",
+          "node": "$ladder_rear_right",
+          "kind": "cgf-local-node"
+        }
+      },
+      "uri": "prefab://Prefabs/speedboat.xml/speedboat_a.speedboat_a"
+    },
+    "129": {
+      "points": {
+        "2": {
+          "X": -2.2e-07,
+          "Y": -1.77872681,
+          "Z": 0.93063828,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -0.00018396,
+          "asset": "game/objects/env/06_unit/01_ship/smallboat/smallboat_body.cgf",
+          "node": "$passenger0",
+          "kind": "cgf-local-node"
+        },
+        "29": {
+          "X": 0.0,
+          "Y": 1.99653839,
+          "Z": 1.46256393,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/smallboat/smallboat_body.cgf",
+          "node": "$lamp_rear",
+          "kind": "cgf-local-node"
+        },
+        "35": {
+          "X": 0.0,
+          "Y": 0.0,
+          "Z": 1.27489532,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/smallboat/smallboat_body.cgf",
+          "node": "$helms",
+          "kind": "cgf-local-node"
+        }
+      },
+      "uri": "prefab://prefabs/smallboat.xml/smallboat.smallboat_a"
+    },
+    "393": {
+      "points": {
+        "9": {
+          "X": -4.29276672,
+          "Y": 2.23506424,
+          "Z": 4.4205661,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 83.00000122,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon0",
+          "kind": "cgf-local-node"
+        },
+        "10": {
+          "X": -4.4767865,
+          "Y": 0.2020467,
+          "Z": 4.48708954,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 83.99995896,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon1",
+          "kind": "cgf-local-node"
+        },
+        "11": {
+          "X": -4.57174072,
+          "Y": -3.67801453,
+          "Z": 4.64193115,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 92.00001601,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon2",
+          "kind": "cgf-local-node"
+        },
+        "12": {
+          "X": -4.46449463,
+          "Y": -5.55405579,
+          "Z": 4.74579041,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 93.99999888,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon3",
+          "kind": "cgf-local-node"
+        },
+        "13": {
+          "X": 4.30832184,
+          "Y": 2.23506409,
+          "Z": 4.4205661,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -82.00000269,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon4",
+          "kind": "cgf-local-node"
+        },
+        "14": {
+          "X": 4.49234192,
+          "Y": 0.20204668,
+          "Z": 4.48708954,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -86.00000112,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon5",
+          "kind": "cgf-local-node"
+        },
+        "15": {
+          "X": 4.58729614,
+          "Y": -3.67801453,
+          "Z": 4.64193115,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -92.99999467,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon6",
+          "kind": "cgf-local-node"
+        },
+        "16": {
+          "X": 4.48005005,
+          "Y": -5.5540564,
+          "Z": 4.74579102,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -93.99998923,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon7",
+          "kind": "cgf-local-node"
+        },
+        "19": {
+          "X": -1.91e-06,
+          "Y": 10.39880371,
+          "Z": 4.53841064,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$mast0",
+          "kind": "cgf-local-node"
+        },
+        "20": {
+          "X": 6.1e-07,
+          "Y": -2.66621552,
+          "Z": 4.55662964,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$mast1",
+          "kind": "cgf-local-node"
+        },
+        "21": {
+          "X": -1.34e-06,
+          "Y": 10.39880371,
+          "Z": 4.53841064,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$sail0",
+          "kind": "cgf-local-node"
+        },
+        "22": {
+          "X": 1.13e-06,
+          "Y": -2.66621552,
+          "Z": 4.55662811,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$sail1",
+          "kind": "cgf-local-node"
+        },
+        "23": {
+          "X": 0.0,
+          "Y": 13.83623413,
+          "Z": 4.65069,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$anchor",
+          "kind": "cgf-local-node"
+        },
+        "24": {
+          "X": -5.42189026,
+          "Y": -1.69091003,
+          "Z": -2.22113007,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 90.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$ladder_left",
+          "kind": "cgf-local-node"
+        },
+        "25": {
+          "X": 5.37818359,
+          "Y": -1.69091034,
+          "Z": -2.22113007,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -90.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$ladder_right",
+          "kind": "cgf-local-node"
+        },
+        "26": {
+          "X": -5.36973389,
+          "Y": -1.66871445,
+          "Z": 4.52553986,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$plank_left",
+          "kind": "cgf-local-node"
+        },
+        "27": {
+          "X": 5.37130859,
+          "Y": -1.68337585,
+          "Z": 4.52553986,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 179.02693885,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$plank_right",
+          "kind": "cgf-local-node"
+        },
+        "28": {
+          "X": -3.58012238,
+          "Y": -10.39539673,
+          "Z": 8.99327942,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 21.64487823,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$lamp_front",
+          "kind": "cgf-local-node"
+        },
+        "29": {
+          "X": 3.62164337,
+          "Y": -10.28855225,
+          "Z": 8.99328064,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -9.99999827,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$lamp_rear",
+          "kind": "cgf-local-node"
+        },
+        "35": {
+          "X": 0.00038204,
+          "Y": -13.99029541,
+          "Z": 6.92423584,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$helms",
+          "kind": "cgf-local-node"
+        },
+        "47": {
+          "X": 2.42724777,
+          "Y": -11.80543823,
+          "Z": 5.96707031,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -90.00000966,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon10",
+          "kind": "cgf-local-node"
+        },
+        "48": {
+          "X": -4.16263092,
+          "Y": -7.35874939,
+          "Z": 1.9113887,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -179.99995037,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon11",
+          "kind": "cgf-local-node"
+        },
+        "49": {
+          "X": -3.8852066,
+          "Y": -8.4025116,
+          "Z": 1.80970612,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -134.99994317,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon12",
+          "kind": "cgf-local-node"
+        },
+        "50": {
+          "X": -3.66450134,
+          "Y": -9.18667419,
+          "Z": 1.6617569,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -134.99994317,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon13",
+          "kind": "cgf-local-node"
+        },
+        "51": {
+          "X": 3.80925659,
+          "Y": -7.19227478,
+          "Z": 1.94433807,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -179.99995037,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon14",
+          "kind": "cgf-local-node"
+        },
+        "52": {
+          "X": 4.05256409,
+          "Y": -8.25201111,
+          "Z": 1.84106171,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 135.00000519,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon15",
+          "kind": "cgf-local-node"
+        },
+        "53": {
+          "X": 3.62726624,
+          "Y": -9.24733826,
+          "Z": 1.7023703,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 135.00000519,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon16",
+          "kind": "cgf-local-node"
+        },
+        "58": {
+          "X": -1.04451965,
+          "Y": -14.86150757,
+          "Z": -2.14507004,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 179.99998133,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$ladder_rear_left",
+          "kind": "cgf-local-node"
+        },
+        "59": {
+          "X": 1.04451706,
+          "Y": -14.86150879,
+          "Z": -2.145065,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 179.99996403,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$ladder_rear_right",
+          "kind": "cgf-local-node"
+        },
+        "60": {
+          "X": 0.72844482,
+          "Y": 2.2308931,
+          "Z": 4.4177536,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.35952773,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$box0",
+          "kind": "cgf-local-node"
+        },
+        "61": {
+          "X": -0.59932858,
+          "Y": 2.16686035,
+          "Z": 4.4177536,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -14.52434414,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$box1",
+          "kind": "cgf-local-node"
+        },
+        "62": {
+          "X": -0.59932827,
+          "Y": 3.45552551,
+          "Z": 4.4177536,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.35952773,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$box2",
+          "kind": "cgf-local-node"
+        },
+        "63": {
+          "X": 0.77278069,
+          "Y": 3.56703125,
+          "Z": 4.42033203,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 23.65467114,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$box3",
+          "kind": "cgf-local-node"
+        },
+        "80": {
+          "X": 0.0,
+          "Y": -0.0907344,
+          "Z": 34.13692383,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$telescope",
+          "kind": "cgf-local-node"
+        },
+        "81": {
+          "X": -0.07826172,
+          "Y": -3.24843933,
+          "Z": 38.54605469,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$bell",
+          "kind": "cgf-local-node"
+        }
+      },
+      "uri": "prefab://Prefabs/galleon.xml/galleon.step_10galleon_normal"
+    },
+    "511": {
+      "points": {
+        "9": {
+          "X": -4.29276672,
+          "Y": 2.23506424,
+          "Z": 4.4205661,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 83.00000122,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$cannon0",
+          "kind": "cgf-local-node"
+        },
+        "10": {
+          "X": -4.4767865,
+          "Y": 0.2020467,
+          "Z": 4.48708954,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 83.99995896,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$cannon1",
+          "kind": "cgf-local-node"
+        },
+        "11": {
+          "X": -4.57174072,
+          "Y": -3.67801453,
+          "Z": 4.64193115,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 92.00001601,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$cannon2",
+          "kind": "cgf-local-node"
+        },
+        "12": {
+          "X": -4.46449463,
+          "Y": -5.55405579,
+          "Z": 4.74579041,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 93.99999888,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$cannon3",
+          "kind": "cgf-local-node"
+        },
+        "13": {
+          "X": 4.30832184,
+          "Y": 2.23506409,
+          "Z": 4.4205661,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -82.00000269,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$cannon4",
+          "kind": "cgf-local-node"
+        },
+        "14": {
+          "X": 4.49234192,
+          "Y": 0.20204668,
+          "Z": 4.48708954,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -86.00000112,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$cannon5",
+          "kind": "cgf-local-node"
+        },
+        "15": {
+          "X": 4.58729614,
+          "Y": -3.67801453,
+          "Z": 4.64193115,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -92.99999467,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$cannon6",
+          "kind": "cgf-local-node"
+        },
+        "16": {
+          "X": 4.48005005,
+          "Y": -5.5540564,
+          "Z": 4.74579102,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -93.99998923,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$cannon7",
+          "kind": "cgf-local-node"
+        },
+        "19": {
+          "X": -1.91e-06,
+          "Y": 10.39880371,
+          "Z": 4.53841064,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$mast0",
+          "kind": "cgf-local-node"
+        },
+        "20": {
+          "X": 6.1e-07,
+          "Y": -2.66621552,
+          "Z": 4.55662964,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$mast1",
+          "kind": "cgf-local-node"
+        },
+        "21": {
+          "X": -1.34e-06,
+          "Y": 10.39880371,
+          "Z": 4.53841064,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$sail0",
+          "kind": "cgf-local-node"
+        },
+        "22": {
+          "X": 1.13e-06,
+          "Y": -2.66621552,
+          "Z": 4.55662811,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$sail1",
+          "kind": "cgf-local-node"
+        },
+        "23": {
+          "X": 0.0,
+          "Y": 13.83623413,
+          "Z": 4.65069,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$anchor",
+          "kind": "cgf-local-node"
+        },
+        "24": {
+          "X": -5.42189026,
+          "Y": -1.69091003,
+          "Z": -2.22113007,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 90.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$ladder_left",
+          "kind": "cgf-local-node"
+        },
+        "25": {
+          "X": 5.37818359,
+          "Y": -1.69091034,
+          "Z": -2.22113007,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -89.99998068,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$ladder_right",
+          "kind": "cgf-local-node"
+        },
+        "26": {
+          "X": -5.36973389,
+          "Y": -1.66871445,
+          "Z": 4.52553986,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$plank_left",
+          "kind": "cgf-local-node"
+        },
+        "27": {
+          "X": 5.37130859,
+          "Y": -1.68337585,
+          "Z": 4.52553986,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 179.02691142,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$plank_right",
+          "kind": "cgf-local-node"
+        },
+        "28": {
+          "X": -3.7146405,
+          "Y": -10.47039551,
+          "Z": 7.13656006,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$lamp_front",
+          "kind": "cgf-local-node"
+        },
+        "29": {
+          "X": 3.72083496,
+          "Y": -10.45785278,
+          "Z": 7.16510681,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$lamp_rear",
+          "kind": "cgf-local-node"
+        },
+        "35": {
+          "X": 0.00038204,
+          "Y": -13.99029541,
+          "Z": 6.92423584,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$helms",
+          "kind": "cgf-local-node"
+        },
+        "47": {
+          "X": 2.42724777,
+          "Y": -11.80543823,
+          "Z": 5.96707031,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -90.00000966,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$cannon10",
+          "kind": "cgf-local-node"
+        },
+        "48": {
+          "X": -4.16263092,
+          "Y": -7.35874939,
+          "Z": 1.9113887,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -179.99995037,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$cannon11",
+          "kind": "cgf-local-node"
+        },
+        "49": {
+          "X": -3.8852066,
+          "Y": -8.4025116,
+          "Z": 1.80970612,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -134.99994317,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$cannon12",
+          "kind": "cgf-local-node"
+        },
+        "50": {
+          "X": -3.66450134,
+          "Y": -9.18667419,
+          "Z": 1.6617569,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -134.99994317,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$cannon13",
+          "kind": "cgf-local-node"
+        },
+        "51": {
+          "X": 3.80925659,
+          "Y": -7.19227478,
+          "Z": 1.94433807,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -179.99995037,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$cannon14",
+          "kind": "cgf-local-node"
+        },
+        "52": {
+          "X": 4.05256409,
+          "Y": -8.25201111,
+          "Z": 1.84106171,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 135.00000519,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$cannon15",
+          "kind": "cgf-local-node"
+        },
+        "53": {
+          "X": 3.62726624,
+          "Y": -9.24733826,
+          "Z": 1.7023703,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 135.00000519,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$cannon16",
+          "kind": "cgf-local-node"
+        },
+        "57": {
+          "X": 0.0,
+          "Y": 20.09587524,
+          "Z": 2.331362,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$name_plate01",
+          "kind": "cgf-local-node"
+        },
+        "58": {
+          "X": -1.04451965,
+          "Y": -14.86150757,
+          "Z": -2.14507004,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 179.99995401,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$ladder_rear_left",
+          "kind": "cgf-local-node"
+        },
+        "59": {
+          "X": 1.04451706,
+          "Y": -14.86150879,
+          "Z": -2.145065,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 179.99996403,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$ladder_rear_right",
+          "kind": "cgf-local-node"
+        },
+        "60": {
+          "X": 0.72844482,
+          "Y": 2.2308931,
+          "Z": 4.4177536,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.35952779,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$box0",
+          "kind": "cgf-local-node"
+        },
+        "61": {
+          "X": -0.59932858,
+          "Y": 2.16686035,
+          "Z": 4.4177536,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -14.52434414,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$box1",
+          "kind": "cgf-local-node"
+        },
+        "62": {
+          "X": -0.59932827,
+          "Y": 3.45552551,
+          "Z": 4.4177536,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.35952779,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$box2",
+          "kind": "cgf-local-node"
+        },
+        "63": {
+          "X": 0.77278069,
+          "Y": 3.56703125,
+          "Z": 4.42033203,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 23.65467114,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$box3",
+          "kind": "cgf-local-node"
+        },
+        "80": {
+          "X": 0.0,
+          "Y": -0.16871305,
+          "Z": 34.13692383,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$telescope",
+          "kind": "cgf-local-node"
+        },
+        "81": {
+          "X": -0.07826172,
+          "Y": -3.45642364,
+          "Z": 38.54605469,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body_test.cgf",
+          "node": "$bell",
+          "kind": "cgf-local-node"
+        }
+      },
+      "uri": "prefab://Prefabs/galleon01.xml/galleon01.step_10galleon_normal"
+    },
+    "523": {
+      "points": {
+        "9": {
+          "X": -4.29276672,
+          "Y": 2.21174881,
+          "Z": 4.4205661,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 83.00000122,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon0",
+          "kind": "cgf-local-node"
+        },
+        "10": {
+          "X": -4.4767865,
+          "Y": 0.17873127,
+          "Z": 4.48708954,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 83.99995896,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon1",
+          "kind": "cgf-local-node"
+        },
+        "11": {
+          "X": -4.57174072,
+          "Y": -3.70132996,
+          "Z": 4.64193115,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 92.00001601,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon2",
+          "kind": "cgf-local-node"
+        },
+        "12": {
+          "X": -4.46449463,
+          "Y": -5.57737122,
+          "Z": 4.74579041,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 93.99999888,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon3",
+          "kind": "cgf-local-node"
+        },
+        "13": {
+          "X": 4.30832184,
+          "Y": 2.21174866,
+          "Z": 4.4205661,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -82.00000269,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon4",
+          "kind": "cgf-local-node"
+        },
+        "14": {
+          "X": 4.49234192,
+          "Y": 0.17873125,
+          "Z": 4.48708954,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -86.00000112,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon5",
+          "kind": "cgf-local-node"
+        },
+        "15": {
+          "X": 4.58729614,
+          "Y": -3.70132996,
+          "Z": 4.64193115,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -92.99999467,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon6",
+          "kind": "cgf-local-node"
+        },
+        "16": {
+          "X": 4.48005005,
+          "Y": -5.57737183,
+          "Z": 4.74579102,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -93.99998923,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon7",
+          "kind": "cgf-local-node"
+        },
+        "19": {
+          "X": -1.91e-06,
+          "Y": 10.37548828,
+          "Z": 4.53841064,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$mast0",
+          "kind": "cgf-local-node"
+        },
+        "20": {
+          "X": 6.1e-07,
+          "Y": -2.68953094,
+          "Z": 4.55662964,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$mast1",
+          "kind": "cgf-local-node"
+        },
+        "21": {
+          "X": -1.34e-06,
+          "Y": 10.37548828,
+          "Z": 4.53841064,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$sail0",
+          "kind": "cgf-local-node"
+        },
+        "22": {
+          "X": 1.13e-06,
+          "Y": -2.68953094,
+          "Z": 4.55662811,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$sail1",
+          "kind": "cgf-local-node"
+        },
+        "23": {
+          "X": 0.0,
+          "Y": 13.8129187,
+          "Z": 4.65069,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$anchor",
+          "kind": "cgf-local-node"
+        },
+        "24": {
+          "X": -5.42189026,
+          "Y": -1.71422546,
+          "Z": -2.22113007,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 90.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$ladder_left",
+          "kind": "cgf-local-node"
+        },
+        "25": {
+          "X": 5.37818359,
+          "Y": -1.71422577,
+          "Z": -2.22113007,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -90.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$ladder_right",
+          "kind": "cgf-local-node"
+        },
+        "26": {
+          "X": -5.36973389,
+          "Y": -1.69202988,
+          "Z": 4.52553986,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$plank_left",
+          "kind": "cgf-local-node"
+        },
+        "27": {
+          "X": 5.37130859,
+          "Y": -1.70669128,
+          "Z": 4.52553986,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 179.02693885,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$plank_right",
+          "kind": "cgf-local-node"
+        },
+        "28": {
+          "X": -3.58012238,
+          "Y": -10.41871216,
+          "Z": 8.99327942,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 21.64487823,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$lamp_front",
+          "kind": "cgf-local-node"
+        },
+        "29": {
+          "X": 3.62164337,
+          "Y": -10.31186768,
+          "Z": 8.99328064,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -9.99999827,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$lamp_rear",
+          "kind": "cgf-local-node"
+        },
+        "35": {
+          "X": 0.00038204,
+          "Y": -14.01361084,
+          "Z": 6.92423584,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$helms",
+          "kind": "cgf-local-node"
+        },
+        "47": {
+          "X": 2.42724777,
+          "Y": -11.82875366,
+          "Z": 5.96707031,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -90.00000966,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon10",
+          "kind": "cgf-local-node"
+        },
+        "48": {
+          "X": -4.16263092,
+          "Y": -7.38206482,
+          "Z": 1.9113887,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -179.99995037,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon11",
+          "kind": "cgf-local-node"
+        },
+        "49": {
+          "X": -3.8852066,
+          "Y": -8.42582703,
+          "Z": 1.80970612,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -134.99994317,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon12",
+          "kind": "cgf-local-node"
+        },
+        "50": {
+          "X": -3.66450134,
+          "Y": -9.20998962,
+          "Z": 1.6617569,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -134.99994317,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon13",
+          "kind": "cgf-local-node"
+        },
+        "51": {
+          "X": 3.80925659,
+          "Y": -7.21559021,
+          "Z": 1.94433807,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -179.99995037,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon14",
+          "kind": "cgf-local-node"
+        },
+        "52": {
+          "X": 4.05256409,
+          "Y": -8.27532654,
+          "Z": 1.84106171,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 135.00000519,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon15",
+          "kind": "cgf-local-node"
+        },
+        "53": {
+          "X": 3.62726624,
+          "Y": -9.27065369,
+          "Z": 1.7023703,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 135.00000519,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$cannon16",
+          "kind": "cgf-local-node"
+        },
+        "58": {
+          "X": -1.04451965,
+          "Y": -14.884823,
+          "Z": -2.14507004,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 179.99998133,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$ladder_rear_left",
+          "kind": "cgf-local-node"
+        },
+        "59": {
+          "X": 1.04451706,
+          "Y": -14.88482422,
+          "Z": -2.145065,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 179.99996403,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$ladder_rear_right",
+          "kind": "cgf-local-node"
+        },
+        "60": {
+          "X": 0.72844482,
+          "Y": 2.20757767,
+          "Z": 4.4177536,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.35952773,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$box0",
+          "kind": "cgf-local-node"
+        },
+        "61": {
+          "X": -0.59932858,
+          "Y": 2.14354492,
+          "Z": 4.4177536,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -14.52434414,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$box1",
+          "kind": "cgf-local-node"
+        },
+        "62": {
+          "X": -0.59932827,
+          "Y": 3.43221008,
+          "Z": 4.4177536,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.35952773,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$box2",
+          "kind": "cgf-local-node"
+        },
+        "63": {
+          "X": 0.77278069,
+          "Y": 3.54371582,
+          "Z": 4.42033203,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 23.65467114,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$box3",
+          "kind": "cgf-local-node"
+        },
+        "80": {
+          "X": 0.0,
+          "Y": -0.11404983,
+          "Z": 34.13692383,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$telescope",
+          "kind": "cgf-local-node"
+        },
+        "81": {
+          "X": -0.07826172,
+          "Y": -3.27175476,
+          "Z": 38.54605469,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_body.cgf",
+          "node": "$bell",
+          "kind": "cgf-local-node"
+        }
+      },
+      "uri": "prefab://Prefabs/galleon_pirate01.xml/pirate.step_10pirate_normal"
+    },
+    "867": {
+      "points": {
+        "35": {
+          "X": 0.0,
+          "Y": -2.2049498,
+          "Z": 2.60459892,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/speedboat/speedboat_a.cgf",
+          "node": "$helms",
+          "kind": "cgf-local-node"
+        }
+      },
+      "uri": "prefab://Prefabs/speedboat.xml/speedboat_a.speedboat_hwang"
+    },
+    "892": {
+      "points": {
+        "9": {
+          "X": 0.80468994,
+          "Y": -2.04911017,
+          "Z": 2.16120005,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/04_siegeweapon/siegetank_a.chr",
+          "node": "cannon0",
+          "kind": "chr-absolute-bind"
+        }
+      },
+      "uri": "prefab://prefabs/siege_weapon.xml/siegetank_a.siegetank_a"
+    },
+    "898": {
+      "points": {
+        "9": {
+          "X": 0.80468994,
+          "Y": -2.04911017,
+          "Z": 2.16120005,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/04_siegeweapon/siegetank_a.chr",
+          "node": "cannon0",
+          "kind": "chr-absolute-bind"
+        }
+      },
+      "uri": "prefab://prefabs/siege_weapon.xml/siegetank_b.siegetank_b"
+    },
+    "899": {
+      "points": {
+        "9": {
+          "X": 0.80468994,
+          "Y": -2.04911017,
+          "Z": 2.16120005,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/04_siegeweapon/siegetank_a.chr",
+          "node": "cannon0",
+          "kind": "chr-absolute-bind"
+        }
+      },
+      "uri": "prefab://prefabs/siege_weapon.xml/siegetank_c.siegetank_c"
+    },
+    "1008": {
+      "points": {},
+      "uri": "prefab://prefabs/vehicle_tractor.xml/vehicle_tractor.tractor_body"
+    },
+    "1024": {
+      "points": {
+        "9": {
+          "X": -4.29276672,
+          "Y": 2.23506424,
+          "Z": 4.4205661,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 83.00000122,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$cannon0",
+          "kind": "cgf-local-node"
+        },
+        "10": {
+          "X": -4.4767865,
+          "Y": 0.2020467,
+          "Z": 4.48708954,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 83.99995896,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$cannon1",
+          "kind": "cgf-local-node"
+        },
+        "11": {
+          "X": -4.57174072,
+          "Y": -3.67801453,
+          "Z": 4.64193115,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 92.00001601,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$cannon2",
+          "kind": "cgf-local-node"
+        },
+        "12": {
+          "X": -4.46449463,
+          "Y": -5.55405579,
+          "Z": 4.74579041,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 93.99999888,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$cannon3",
+          "kind": "cgf-local-node"
+        },
+        "13": {
+          "X": 4.30832184,
+          "Y": 2.23506409,
+          "Z": 4.4205661,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -82.00000269,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$cannon4",
+          "kind": "cgf-local-node"
+        },
+        "14": {
+          "X": 4.49234192,
+          "Y": 0.20204668,
+          "Z": 4.48708954,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -86.00000112,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$cannon5",
+          "kind": "cgf-local-node"
+        },
+        "15": {
+          "X": 4.58729614,
+          "Y": -3.67801453,
+          "Z": 4.64193115,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -92.99999467,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$cannon6",
+          "kind": "cgf-local-node"
+        },
+        "16": {
+          "X": 4.48005005,
+          "Y": -5.5540564,
+          "Z": 4.74579102,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -93.99998923,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$cannon7",
+          "kind": "cgf-local-node"
+        },
+        "17": {
+          "X": -0.02580078,
+          "Y": -17.12161865,
+          "Z": 6.53128357,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$cannon8",
+          "kind": "cgf-local-node"
+        },
+        "19": {
+          "X": -1.91e-06,
+          "Y": 10.39880371,
+          "Z": 4.53841064,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$mast0",
+          "kind": "cgf-local-node"
+        },
+        "20": {
+          "X": 6.1e-07,
+          "Y": -2.66621552,
+          "Z": 4.55662964,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$mast1",
+          "kind": "cgf-local-node"
+        },
+        "21": {
+          "X": -1.34e-06,
+          "Y": 10.39880371,
+          "Z": 4.53841064,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$sail0",
+          "kind": "cgf-local-node"
+        },
+        "22": {
+          "X": 1.13e-06,
+          "Y": -2.66621552,
+          "Z": 4.55662811,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$sail1",
+          "kind": "cgf-local-node"
+        },
+        "23": {
+          "X": 0.0,
+          "Y": 13.83623413,
+          "Z": 4.65069,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$anchor",
+          "kind": "cgf-local-node"
+        },
+        "24": {
+          "X": -3.63965759,
+          "Y": -8.43711731,
+          "Z": 1.66250549,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 90.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$ladder_left",
+          "kind": "cgf-local-node"
+        },
+        "25": {
+          "X": 3.16607452,
+          "Y": -8.43917725,
+          "Z": 1.51600861,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -90.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$ladder_right",
+          "kind": "cgf-local-node"
+        },
+        "26": {
+          "X": -4.9426236,
+          "Y": 9.73896606,
+          "Z": 4.52553986,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$plank_left",
+          "kind": "cgf-local-node"
+        },
+        "27": {
+          "X": 4.81819489,
+          "Y": 9.7243042,
+          "Z": 4.52553986,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -173.00000315,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$plank_right",
+          "kind": "cgf-local-node"
+        },
+        "28": {
+          "X": -3.58012238,
+          "Y": -10.39539673,
+          "Z": 8.99327942,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 21.64487823,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$lamp_front",
+          "kind": "cgf-local-node"
+        },
+        "29": {
+          "X": 3.62164337,
+          "Y": -10.28855225,
+          "Z": 8.99328064,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -9.99999827,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$lamp_rear",
+          "kind": "cgf-local-node"
+        },
+        "35": {
+          "X": 0.00038204,
+          "Y": -13.99029541,
+          "Z": 6.92423584,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$helms",
+          "kind": "cgf-local-node"
+        },
+        "46": {
+          "X": -0.07826172,
+          "Y": -3.24843933,
+          "Z": 38.54605469,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$cannon9",
+          "kind": "cgf-local-node"
+        },
+        "58": {
+          "X": -1.04451965,
+          "Y": -14.86150757,
+          "Z": -2.14507004,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 179.99998133,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$ladder_rear_left",
+          "kind": "cgf-local-node"
+        },
+        "59": {
+          "X": 1.04451706,
+          "Y": -14.86150879,
+          "Z": -2.145065,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 179.99996403,
+          "asset": "game/objects/env/06_unit/01_ship/galleon/galleon_test_body.cgf",
+          "node": "$ladder_rear_right",
+          "kind": "cgf-local-node"
+        }
+      },
+      "uri": "prefab://Prefabs/interaction_c.xml/galleon.galleon_test_body"
+    },
+    "1046": {
+      "points": {
+        "17": {
+          "X": -8.65069763,
+          "Y": -25.86409668,
+          "Z": 3.51318817,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 28.94967608,
+          "asset": "game/objects/env/06_unit/01_ship/cruise/cruise_a.cgf",
+          "node": "$cannon8",
+          "kind": "cgf-local-node"
+        },
+        "18": {
+          "X": -3.58912445,
+          "Y": -10.37684814,
+          "Z": 10.22879761,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -179.99999135,
+          "asset": "game/objects/env/06_unit/01_ship/cruise/cruise_a.cgf",
+          "node": "$hook",
+          "kind": "cgf-local-node"
+        },
+        "19": {
+          "X": 0.0,
+          "Y": 22.31987549,
+          "Z": 10.04872681,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/cruise/cruise_a.cgf",
+          "node": "$mast0",
+          "kind": "cgf-local-node"
+        },
+        "20": {
+          "X": -3.48780731,
+          "Y": -18.47322632,
+          "Z": 11.63710937,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/cruise/cruise_a.cgf",
+          "node": "$mast1",
+          "kind": "cgf-local-node"
+        },
+        "21": {
+          "X": 3.46064362,
+          "Y": -18.48676514,
+          "Z": 11.6371106,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/cruise/cruise_a.cgf",
+          "node": "$sail0",
+          "kind": "cgf-local-node"
+        },
+        "26": {
+          "X": -3.55404602,
+          "Y": -29.20271973,
+          "Z": 3.31130463,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/cruise/cruise_a.cgf",
+          "node": "$plank_left",
+          "kind": "cgf-local-node"
+        },
+        "27": {
+          "X": 3.53469238,
+          "Y": -29.24562744,
+          "Z": 3.31130463,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/cruise/cruise_a.cgf",
+          "node": "$plank_right",
+          "kind": "cgf-local-node"
+        },
+        "35": {
+          "X": 0.0,
+          "Y": -19.58595459,
+          "Z": 13.13444946,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/cruise/cruise_a.cgf",
+          "node": "$helms",
+          "kind": "cgf-local-node"
+        },
+        "46": {
+          "X": -8.09945557,
+          "Y": -27.06631104,
+          "Z": 3.51318817,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -20.89841193,
+          "asset": "game/objects/env/06_unit/01_ship/cruise/cruise_a.cgf",
+          "node": "$cannon9",
+          "kind": "cgf-local-node"
+        },
+        "47": {
+          "X": -7.51163574,
+          "Y": -28.34193115,
+          "Z": 3.51318817,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 36.65065411,
+          "asset": "game/objects/env/06_unit/01_ship/cruise/cruise_a.cgf",
+          "node": "$cannon10",
+          "kind": "cgf-local-node"
+        },
+        "48": {
+          "X": -6.90400574,
+          "Y": -29.61591064,
+          "Z": 3.51318817,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 19.98076585,
+          "asset": "game/objects/env/06_unit/01_ship/cruise/cruise_a.cgf",
+          "node": "$cannon11",
+          "kind": "cgf-local-node"
+        },
+        "49": {
+          "X": -6.23620483,
+          "Y": -30.78436279,
+          "Z": 3.51318817,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 14.31089247,
+          "asset": "game/objects/env/06_unit/01_ship/cruise/cruise_a.cgf",
+          "node": "$cannon12",
+          "kind": "cgf-local-node"
+        },
+        "50": {
+          "X": -5.50706543,
+          "Y": -31.91858154,
+          "Z": 3.51318817,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 36.02705141,
+          "asset": "game/objects/env/06_unit/01_ship/cruise/cruise_a.cgf",
+          "node": "$cannon13",
+          "kind": "cgf-local-node"
+        },
+        "51": {
+          "X": 8.65599731,
+          "Y": -25.86409668,
+          "Z": 3.51318817,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 74.72821105,
+          "asset": "game/objects/env/06_unit/01_ship/cruise/cruise_a.cgf",
+          "node": "$cannon14",
+          "kind": "cgf-local-node"
+        },
+        "52": {
+          "X": 8.05350586,
+          "Y": -27.06631104,
+          "Z": 3.51318817,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 52.62722349,
+          "asset": "game/objects/env/06_unit/01_ship/cruise/cruise_a.cgf",
+          "node": "$cannon15",
+          "kind": "cgf-local-node"
+        },
+        "53": {
+          "X": 7.38458984,
+          "Y": -28.34193115,
+          "Z": 3.51318817,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -12.83392567,
+          "asset": "game/objects/env/06_unit/01_ship/cruise/cruise_a.cgf",
+          "node": "$cannon16",
+          "kind": "cgf-local-node"
+        },
+        "54": {
+          "X": 6.79725525,
+          "Y": -29.61591064,
+          "Z": 3.51318817,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -28.16848815,
+          "asset": "game/objects/env/06_unit/01_ship/cruise/cruise_a.cgf",
+          "node": "$cannon17",
+          "kind": "cgf-local-node"
+        },
+        "55": {
+          "X": 6.16707581,
+          "Y": -30.78436279,
+          "Z": 3.51318817,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -22.46386319,
+          "asset": "game/objects/env/06_unit/01_ship/cruise/cruise_a.cgf",
+          "node": "$cannon18",
+          "kind": "cgf-local-node"
+        },
+        "56": {
+          "X": 5.4746167,
+          "Y": -31.91858154,
+          "Z": 3.51318817,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -29.5437651,
+          "asset": "game/objects/env/06_unit/01_ship/cruise/cruise_a.cgf",
+          "node": "$cannon19",
+          "kind": "cgf-local-node"
+        }
+      },
+      "uri": "prefab://Prefabs/cruise.xml/cruise.cruise_a"
+    },
+    "1205": {
+      "points": {
+        "9": {
+          "X": -3.26333984,
+          "Y": 2.798909,
+          "Z": 1.3363916,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 90.00000966,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$cannon0",
+          "kind": "cgf-local-node"
+        },
+        "10": {
+          "X": 3.22025146,
+          "Y": 2.69917938,
+          "Z": 1.33012207,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -90.00000966,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$cannon1",
+          "kind": "cgf-local-node"
+        },
+        "11": {
+          "X": 3.02781128,
+          "Y": -7.5197699,
+          "Z": 1.9969931,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 76.64414421,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$cannon2",
+          "kind": "cgf-local-node"
+        },
+        "12": {
+          "X": -3.28516846,
+          "Y": -6.75307007,
+          "Z": 1.92522293,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -77.67548191,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$cannon3",
+          "kind": "cgf-local-node"
+        },
+        "21": {
+          "X": 0.0,
+          "Y": 15.15861938,
+          "Z": 1.93809326,
+          "Roll": -1.6090013,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$sail0",
+          "kind": "cgf-local-node"
+        },
+        "22": {
+          "X": 0.0,
+          "Y": 1.55865067,
+          "Z": 1.32873474,
+          "Roll": -1.6090013,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$sail1",
+          "kind": "cgf-local-node"
+        },
+        "24": {
+          "X": -2.40109009,
+          "Y": 12.69552368,
+          "Z": -1.10956696,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 71.01340743,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$ladder_left",
+          "kind": "cgf-local-node"
+        },
+        "25": {
+          "X": 2.44303604,
+          "Y": 12.69552246,
+          "Z": -1.10635902,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -63.9865921,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$ladder_right",
+          "kind": "cgf-local-node"
+        },
+        "28": {
+          "X": 3.0213269,
+          "Y": -8.40139404,
+          "Z": 2.71934265,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$lamp_front",
+          "kind": "cgf-local-node"
+        },
+        "29": {
+          "X": -3.04154541,
+          "Y": -8.38165955,
+          "Z": 2.71829529,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$lamp_rear",
+          "kind": "cgf-local-node"
+        },
+        "35": {
+          "X": -0.00379792,
+          "Y": -5.84117004,
+          "Z": 2.27466507,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$helms",
+          "kind": "cgf-local-node"
+        },
+        "58": {
+          "X": -1.91337097,
+          "Y": -12.50181641,
+          "Z": -1.46283188,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -179.99999135,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$ladder_rear_left",
+          "kind": "cgf-local-node"
+        },
+        "59": {
+          "X": 1.91337036,
+          "Y": -12.50181641,
+          "Z": -1.46283188,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -179.99999135,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$ladder_rear_right",
+          "kind": "cgf-local-node"
+        },
+        "60": {
+          "X": -0.53421021,
+          "Y": 11.22974976,
+          "Z": 1.87821259,
+          "Roll": 4.76842828,
+          "Pitch": 2.02648689,
+          "Yaw": -2.76972402,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$box0",
+          "kind": "cgf-local-node"
+        },
+        "61": {
+          "X": 0.73276245,
+          "Y": 11.22974976,
+          "Z": 1.88176865,
+          "Roll": 4.89095441,
+          "Pitch": -2.15017107,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$box1",
+          "kind": "cgf-local-node"
+        },
+        "62": {
+          "X": -0.53064083,
+          "Y": 10.03509033,
+          "Z": 1.78379333,
+          "Roll": 3.92457515,
+          "Pitch": 2.00083649,
+          "Yaw": -1.75699814,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$box2",
+          "kind": "cgf-local-node"
+        },
+        "63": {
+          "X": 0.73276245,
+          "Y": 10.04018494,
+          "Z": 1.78599686,
+          "Roll": 3.97685853,
+          "Pitch": -2.14989807,
+          "Yaw": 0.03429417,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$box3",
+          "kind": "cgf-local-node"
+        },
+        "64": {
+          "X": -0.59344543,
+          "Y": 8.84380432,
+          "Z": 1.70676697,
+          "Roll": 3.92456963,
+          "Pitch": 3.2986588,
+          "Yaw": 0.23659765,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$box4",
+          "kind": "cgf-local-node"
+        },
+        "65": {
+          "X": 0.70821594,
+          "Y": 8.85739319,
+          "Z": 1.6943689,
+          "Roll": 4.5049373,
+          "Pitch": -4.46333681,
+          "Yaw": -0.58865278,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$box5",
+          "kind": "cgf-local-node"
+        },
+        "66": {
+          "X": -0.61559326,
+          "Y": 7.63673706,
+          "Z": 1.61698425,
+          "Roll": 3.92457487,
+          "Pitch": 2.00084311,
+          "Yaw": -1.75697047,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$box6",
+          "kind": "cgf-local-node"
+        },
+        "67": {
+          "X": 0.6358844,
+          "Y": 7.64183167,
+          "Z": 1.61918777,
+          "Roll": 3.97685853,
+          "Pitch": -2.14989807,
+          "Yaw": 0.03429417,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$box7",
+          "kind": "cgf-local-node"
+        },
+        "68": {
+          "X": -0.62751949,
+          "Y": 6.43835754,
+          "Z": 1.34741638,
+          "Roll": 4.00182322,
+          "Pitch": -0.51808355,
+          "Yaw": -1.75598704,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$box8",
+          "kind": "cgf-local-node"
+        },
+        "69": {
+          "X": 0.6358844,
+          "Y": 6.44345337,
+          "Z": 1.3468576,
+          "Roll": 3.9768628,
+          "Pitch": -1.15886482,
+          "Yaw": 0.034308,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$box9",
+          "kind": "cgf-local-node"
+        },
+        "70": {
+          "X": -0.58215088,
+          "Y": 5.17909302,
+          "Z": 1.28867584,
+          "Roll": 1.18520879,
+          "Pitch": -0.6037615,
+          "Yaw": -0.27913618,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$box10",
+          "kind": "cgf-local-node"
+        },
+        "71": {
+          "X": 0.6358844,
+          "Y": 5.21191528,
+          "Z": 1.29706161,
+          "Roll": 1.15850286,
+          "Pitch": -0.99305488,
+          "Yaw": 0.09124448,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$box11",
+          "kind": "cgf-local-node"
+        },
+        "72": {
+          "X": -0.09572266,
+          "Y": 5.90251831,
+          "Z": 2.23721405,
+          "Roll": 1.76464992,
+          "Pitch": -0.8564783,
+          "Yaw": 14.26319666,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$box12",
+          "kind": "cgf-local-node"
+        },
+        "73": {
+          "X": 0.01517212,
+          "Y": 8.16805481,
+          "Z": 2.66416412,
+          "Roll": 3.16395611,
+          "Pitch": 0.71156311,
+          "Yaw": -11.75251609,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$box13",
+          "kind": "cgf-local-node"
+        },
+        "74": {
+          "X": -0.58215088,
+          "Y": -1.25045204,
+          "Z": 1.38771515,
+          "Roll": 0.08097783,
+          "Pitch": -0.18100003,
+          "Yaw": -0.27913619,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$box14",
+          "kind": "cgf-local-node"
+        },
+        "75": {
+          "X": 0.63588501,
+          "Y": -1.22080612,
+          "Z": 1.38857651,
+          "Roll": 0.76234949,
+          "Pitch": -0.00885193,
+          "Yaw": 0.09123762,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$box15",
+          "kind": "cgf-local-node"
+        },
+        "76": {
+          "X": -0.58215027,
+          "Y": -2.47363617,
+          "Z": 1.28406952,
+          "Roll": -2.97758005,
+          "Pitch": -0.60376143,
+          "Yaw": -0.27913616,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$box16",
+          "kind": "cgf-local-node"
+        },
+        "77": {
+          "X": 0.63588501,
+          "Y": -2.44148468,
+          "Z": 1.27920044,
+          "Roll": -1.83188419,
+          "Pitch": 0.27610764,
+          "Yaw": 0.05457321,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$box17",
+          "kind": "cgf-local-node"
+        },
+        "78": {
+          "X": -0.55829895,
+          "Y": -3.67850372,
+          "Z": 1.48092133,
+          "Roll": -4.86929638,
+          "Pitch": -0.181,
+          "Yaw": -0.24217116,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$box18",
+          "kind": "cgf-local-node"
+        },
+        "79": {
+          "X": 0.62103634,
+          "Y": -3.65993103,
+          "Z": 1.48017731,
+          "Roll": -4.18791691,
+          "Pitch": -0.00885193,
+          "Yaw": 0.0912377,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$box19",
+          "kind": "cgf-local-node"
+        },
+        "80": {
+          "X": 0.0,
+          "Y": 18.05186279,
+          "Z": 2.35214096,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship.cgf",
+          "node": "$telescope",
+          "kind": "cgf-local-node"
+        }
+      },
+      "uri": "prefab://prefabs/boxship.xml/boxship.boxship_normal"
+    },
+    "1249": {
+      "points": {
+        "9": {
+          "X": -3.71035065,
+          "Y": 6.57985596,
+          "Z": 4.43059448,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 85.500003,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$cannon0",
+          "kind": "cgf-local-node"
+        },
+        "10": {
+          "X": -3.86448456,
+          "Y": 4.4299823,
+          "Z": 4.3631839,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 86.00000112,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$cannon1",
+          "kind": "cgf-local-node"
+        },
+        "11": {
+          "X": -4.13030334,
+          "Y": 0.24445175,
+          "Z": 4.36446991,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 86.00000112,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$cannon2",
+          "kind": "cgf-local-node"
+        },
+        "12": {
+          "X": -4.23866638,
+          "Y": -1.73147888,
+          "Z": 4.36830078,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 87.50000152,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$cannon3",
+          "kind": "cgf-local-node"
+        },
+        "13": {
+          "X": 3.70873749,
+          "Y": 6.57985596,
+          "Z": 4.37590729,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -85.99997682,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$cannon4",
+          "kind": "cgf-local-node"
+        },
+        "14": {
+          "X": 3.86863647,
+          "Y": 4.44806671,
+          "Z": 4.36155426,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -86.99997637,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$cannon5",
+          "kind": "cgf-local-node"
+        },
+        "15": {
+          "X": 4.12750427,
+          "Y": 0.32134022,
+          "Z": 4.36427979,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -86.50000525,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$cannon6",
+          "kind": "cgf-local-node"
+        },
+        "16": {
+          "X": 4.23388611,
+          "Y": -1.70629471,
+          "Z": 4.35409821,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -87.99999365,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$cannon7",
+          "kind": "cgf-local-node"
+        },
+        "21": {
+          "X": 0.0,
+          "Y": 10.64255737,
+          "Z": 4.49536316,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -44.99999166,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$sail0",
+          "kind": "cgf-local-node"
+        },
+        "22": {
+          "X": 9.8e-07,
+          "Y": -1.06223999,
+          "Z": 4.4953598,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -44.99999166,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$sail1",
+          "kind": "cgf-local-node"
+        },
+        "23": {
+          "X": 0.0,
+          "Y": 19.7746582,
+          "Z": 5.43888306,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$anchor",
+          "kind": "cgf-local-node"
+        },
+        "24": {
+          "X": -5.17174072,
+          "Y": 2.38077423,
+          "Z": -2.22112823,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 90.0,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$ladder_left",
+          "kind": "cgf-local-node"
+        },
+        "25": {
+          "X": 5.15967529,
+          "Y": 2.38077423,
+          "Z": -2.22112823,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -83.49989448,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$ladder_right",
+          "kind": "cgf-local-node"
+        },
+        "26": {
+          "X": -5.13944824,
+          "Y": 2.40340683,
+          "Z": 4.38368561,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -1.55649094,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$plank_left",
+          "kind": "cgf-local-node"
+        },
+        "27": {
+          "X": 5.13419434,
+          "Y": 2.39588974,
+          "Z": 4.38368561,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -178.98527109,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$plank_right",
+          "kind": "cgf-local-node"
+        },
+        "28": {
+          "X": -3.68920349,
+          "Y": -14.54789307,
+          "Z": 6.96355225,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$lamp_front",
+          "kind": "cgf-local-node"
+        },
+        "29": {
+          "X": 3.68920349,
+          "Y": -14.54789307,
+          "Z": 6.96355225,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$lamp_rear",
+          "kind": "cgf-local-node"
+        },
+        "35": {
+          "X": 0.0,
+          "Y": -11.81182495,
+          "Z": 6.59629028,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$helms",
+          "kind": "cgf-local-node"
+        },
+        "47": {
+          "X": 2.6249881,
+          "Y": -17.20425781,
+          "Z": 4.38139709,
+          "Roll": -11.12549994,
+          "Pitch": -9.35833982,
+          "Yaw": -39.58651854,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$cannon10",
+          "kind": "cgf-local-node"
+        },
+        "48": {
+          "X": -3.93575989,
+          "Y": -8.9232666,
+          "Z": 1.54329529,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -179.99995037,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$cannon11",
+          "kind": "cgf-local-node"
+        },
+        "49": {
+          "X": -3.63805237,
+          "Y": -10.04394165,
+          "Z": 1.19631042,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 135.00000203,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$cannon12",
+          "kind": "cgf-local-node"
+        },
+        "50": {
+          "X": -3.5407663,
+          "Y": -11.44177246,
+          "Z": 0.91740784,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 101.0000014,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$cannon13",
+          "kind": "cgf-local-node"
+        },
+        "51": {
+          "X": 3.99512207,
+          "Y": -8.9232666,
+          "Z": 1.54329529,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -179.99995037,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$cannon14",
+          "kind": "cgf-local-node"
+        },
+        "52": {
+          "X": 3.91625488,
+          "Y": -10.33216431,
+          "Z": 1.19631042,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 39.0000118,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$cannon15",
+          "kind": "cgf-local-node"
+        },
+        "53": {
+          "X": 4.0245105,
+          "Y": -11.44177246,
+          "Z": 0.98706093,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 101.0000014,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$cannon16",
+          "kind": "cgf-local-node"
+        },
+        "58": {
+          "X": -1.81303833,
+          "Y": -15.16531006,
+          "Z": -2.88983002,
+          "Roll": -2.16033426,
+          "Pitch": 0.0,
+          "Yaw": -179.99989937,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$ladder_rear_left",
+          "kind": "cgf-local-node"
+        },
+        "59": {
+          "X": 1.79252319,
+          "Y": -15.16531006,
+          "Z": -2.88983002,
+          "Roll": -2.16033426,
+          "Pitch": 0.0,
+          "Yaw": -179.99989937,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$ladder_rear_right",
+          "kind": "cgf-local-node"
+        },
+        "60": {
+          "X": -0.73929687,
+          "Y": 16.27168213,
+          "Z": 5.17947815,
+          "Roll": 4.89569384,
+          "Pitch": -1.36081963,
+          "Yaw": 10.45971125,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$box0",
+          "kind": "cgf-local-node"
+        },
+        "61": {
+          "X": 0.68823242,
+          "Y": 16.2255957,
+          "Z": 5.18132751,
+          "Roll": 4.16334317,
+          "Pitch": -0.38721717,
+          "Yaw": 3.4991609,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$box1",
+          "kind": "cgf-local-node"
+        },
+        "62": {
+          "X": -0.74397453,
+          "Y": 6.37286682,
+          "Z": 4.39750244,
+          "Roll": 1.77483493,
+          "Pitch": 0.94610603,
+          "Yaw": -20.47035127,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$box2",
+          "kind": "cgf-local-node"
+        },
+        "63": {
+          "X": 0.76136711,
+          "Y": 6.38047241,
+          "Z": 4.40100708,
+          "Roll": 3.0095436,
+          "Pitch": 0.21781725,
+          "Yaw": 4.99526624,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$box3",
+          "kind": "cgf-local-node"
+        },
+        "80": {
+          "X": 0.0,
+          "Y": 7.7808197,
+          "Z": 4.53404999,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$telescope",
+          "kind": "cgf-local-node"
+        },
+        "81": {
+          "X": 0.0,
+          "Y": -9.06164429,
+          "Z": 6.4035968,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -90.00000966,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body.cgf",
+          "node": "$bell",
+          "kind": "cgf-local-node"
+        }
+      },
+      "uri": "prefab://prefabs/boardship.xml/boardship.step_10boardship_normal"
+    },
+    "1287": {
+      "points": {
+        "2": {
+          "X": -0.47789001,
+          "Y": 0.36952,
+          "Z": 0.9364399,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/coupleduckship/coupleduckship.cgf",
+          "node": "$passenger0",
+          "kind": "cgf-local-node"
+        },
+        "35": {
+          "X": 0.39533997,
+          "Y": -0.12314003,
+          "Z": 1.41565994,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/coupleduckship/coupleduckship.cgf",
+          "node": "$helms",
+          "kind": "cgf-local-node"
+        }
+      },
+      "uri": "prefab://prefabs/coupleduckship.xml/coupleduckship.coupleduckship_body"
+    },
+    "1288": {
+      "points": {
+        "28": {
+          "X": -0.83576382,
+          "Y": 1.52866308,
+          "Z": 1.20848263,
+          "Roll": -32.67663044,
+          "Pitch": -23.58527862,
+          "Yaw": -90.1837282,
+          "asset": "game/objects/env/06_unit/01_ship/soloship/soloship_a.cgf",
+          "node": "$lamp_front",
+          "kind": "cgf-local-node"
+        },
+        "29": {
+          "X": -0.00845589,
+          "Y": -1.58937995,
+          "Z": 1.37060102,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/soloship/soloship_a.cgf",
+          "node": "$lamp_rear",
+          "kind": "cgf-local-node"
+        },
+        "35": {
+          "X": -0.00012207,
+          "Y": 0.46081783,
+          "Z": 1.3067443,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/soloship/soloship_a.cgf",
+          "node": "$helms",
+          "kind": "cgf-local-node"
+        }
+      },
+      "uri": "prefab://prefabs/soloship.xml/soloship.soloship_a_body"
+    },
+    "1323": {
+      "points": {
+        "21": {
+          "X": 0.0,
+          "Y": 0.87057996,
+          "Z": 1.18104005,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body.chr",
+          "node": "sail0",
+          "kind": "chr-absolute-bind"
+        },
+        "60": {
+          "X": -0.52005464,
+          "Y": -2.1677649,
+          "Z": 0.68300521,
+          "Roll": -90.00001284,
+          "Pitch": -54.99995696,
+          "Yaw": -90.00000934,
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body.chr",
+          "node": "box0",
+          "kind": "chr-absolute-bind"
+        },
+        "61": {
+          "X": 0.52022153,
+          "Y": -2.1677649,
+          "Z": 0.68300521,
+          "Roll": 89.99998732,
+          "Pitch": -54.99998354,
+          "Yaw": -90.00000433,
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body.chr",
+          "node": "box1",
+          "kind": "chr-absolute-bind"
+        }
+      },
+      "uri": "prefab://prefabs/speedcar.xml/speedcar.speedcar_body_r"
+    },
+    "1360": {
+      "points": {
+        "9": {
+          "X": 0.0,
+          "Y": 9.05997253,
+          "Z": 3.76394653,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$cannon0",
+          "kind": "cgf-local-node"
+        },
+        "10": {
+          "X": -1.64111352,
+          "Y": -15.52789783,
+          "Z": 2.2899518,
+          "Roll": 0.00776994,
+          "Pitch": 0.0,
+          "Yaw": 0.26336322,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.chr",
+          "node": "cannon1",
+          "kind": "chr-absolute-bind"
+        },
+        "11": {
+          "X": 1.64073837,
+          "Y": -15.52811813,
+          "Z": 2.28995252,
+          "Roll": 0.00776994,
+          "Pitch": 0.0,
+          "Yaw": 0.1579051,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.chr",
+          "node": "cannon2",
+          "kind": "chr-absolute-bind"
+        },
+        "13": {
+          "X": -3.2527536,
+          "Y": 5.62920715,
+          "Z": 1.87939453,
+          "Roll": 14.94547144,
+          "Pitch": 1.29257664,
+          "Yaw": -119.8304455,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$cannon4",
+          "kind": "cgf-local-node"
+        },
+        "14": {
+          "X": -0.03043457,
+          "Y": -1.93659729,
+          "Z": 6.43642639,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 179.99944858,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$cannon5",
+          "kind": "cgf-local-node"
+        },
+        "15": {
+          "X": -1.82780762,
+          "Y": 2.07367416,
+          "Z": 2.24105545,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 4.99999946,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$cannon6",
+          "kind": "cgf-local-node"
+        },
+        "16": {
+          "X": -0.83027336,
+          "Y": 1.84330643,
+          "Z": 2.13078522,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -145.00000245,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$cannon7",
+          "kind": "cgf-local-node"
+        },
+        "17": {
+          "X": -0.48059082,
+          "Y": 2.71855591,
+          "Z": 2.24105545,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 92.91507036,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$cannon8",
+          "kind": "cgf-local-node"
+        },
+        "24": {
+          "X": -4.28938965,
+          "Y": 0.13676575,
+          "Z": 1.25487183,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 97.91857039,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$ladder_left",
+          "kind": "cgf-local-node"
+        },
+        "25": {
+          "X": 4.33198212,
+          "Y": 0.10825012,
+          "Z": 1.25487183,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -97.91898609,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$ladder_right",
+          "kind": "cgf-local-node"
+        },
+        "28": {
+          "X": -2.72225098,
+          "Y": -9.53555664,
+          "Z": 6.83188721,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$lamp_front",
+          "kind": "cgf-local-node"
+        },
+        "29": {
+          "X": 2.72225098,
+          "Y": -9.53555664,
+          "Z": 6.83188721,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$lamp_rear",
+          "kind": "cgf-local-node"
+        },
+        "35": {
+          "X": 0.00119629,
+          "Y": -3.99748505,
+          "Z": 6.86728394,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$helms",
+          "kind": "cgf-local-node"
+        },
+        "46": {
+          "X": 1.45081543,
+          "Y": 2.63487701,
+          "Z": 2.13078522,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -57.06555003,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$cannon9",
+          "kind": "cgf-local-node"
+        },
+        "47": {
+          "X": 1.84063965,
+          "Y": 1.76510162,
+          "Z": 2.24105545,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -15.00046055,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$cannon10",
+          "kind": "cgf-local-node"
+        },
+        "58": {
+          "X": -1.77769043,
+          "Y": -5.39798523,
+          "Z": 3.21927917,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 90.0,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$ladder_rear_left",
+          "kind": "cgf-local-node"
+        },
+        "59": {
+          "X": 1.77769043,
+          "Y": -5.39798523,
+          "Z": 3.21927917,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -90.00000966,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$ladder_rear_right",
+          "kind": "cgf-local-node"
+        },
+        "60": {
+          "X": 2.96686493,
+          "Y": 4.2703775,
+          "Z": 3.0331488,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$box0",
+          "kind": "cgf-local-node"
+        },
+        "61": {
+          "X": 0.61053223,
+          "Y": -2.31950211,
+          "Z": 2.84904602,
+          "Roll": 6.60969082,
+          "Pitch": 0.0,
+          "Yaw": 0.35952772,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$box1",
+          "kind": "cgf-local-node"
+        },
+        "62": {
+          "X": -0.64289063,
+          "Y": -2.27457001,
+          "Z": 2.84904602,
+          "Roll": 6.60969167,
+          "Pitch": 0.0,
+          "Yaw": 7.0164858,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$box2",
+          "kind": "cgf-local-node"
+        },
+        "63": {
+          "X": -3.14180664,
+          "Y": 4.82099915,
+          "Z": 3.0337323,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$box3",
+          "kind": "cgf-local-node"
+        },
+        "80": {
+          "X": 4.395e-05,
+          "Y": -8.24817444,
+          "Z": 6.30482239,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -179.99999135,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$telescope",
+          "kind": "cgf-local-node"
+        }
+      },
+      "uri": "prefab://prefabs/fishboat.xml/fishboat.fishboat_body"
+    },
+    "1371": {
+      "points": {
+        "21": {
+          "X": 0.0,
+          "Y": 0.87057996,
+          "Z": 1.18104005,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body.chr",
+          "node": "sail0",
+          "kind": "chr-absolute-bind"
+        },
+        "60": {
+          "X": -0.52005464,
+          "Y": -2.1677649,
+          "Z": 0.68300521,
+          "Roll": -90.00001284,
+          "Pitch": -54.99995696,
+          "Yaw": -90.00000934,
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body.chr",
+          "node": "box0",
+          "kind": "chr-absolute-bind"
+        },
+        "61": {
+          "X": 0.52022153,
+          "Y": -2.1677649,
+          "Z": 0.68300521,
+          "Roll": 89.99998732,
+          "Pitch": -54.99998354,
+          "Yaw": -90.00000433,
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body.chr",
+          "node": "box1",
+          "kind": "chr-absolute-bind"
+        }
+      },
+      "uri": "prefab://prefabs/speedcar.xml/speedcar.speedcar_body_b"
+    },
+    "1383": {
+      "points": {
+        "9": {
+          "X": 0.0,
+          "Y": 9.05997253,
+          "Z": 3.76394653,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$cannon0",
+          "kind": "cgf-local-node"
+        },
+        "10": {
+          "X": -1.64111352,
+          "Y": -15.52789783,
+          "Z": 2.2899518,
+          "Roll": 0.00776994,
+          "Pitch": 0.0,
+          "Yaw": 0.26336322,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.chr",
+          "node": "cannon1",
+          "kind": "chr-absolute-bind"
+        },
+        "11": {
+          "X": 1.64073837,
+          "Y": -15.52811813,
+          "Z": 2.28995252,
+          "Roll": 0.00776994,
+          "Pitch": 0.0,
+          "Yaw": 0.1579051,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.chr",
+          "node": "cannon2",
+          "kind": "chr-absolute-bind"
+        },
+        "13": {
+          "X": -3.2527536,
+          "Y": 5.62920715,
+          "Z": 1.87939453,
+          "Roll": 14.94547144,
+          "Pitch": 1.29257664,
+          "Yaw": -119.8304455,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$cannon4",
+          "kind": "cgf-local-node"
+        },
+        "14": {
+          "X": -0.03043457,
+          "Y": -1.93659729,
+          "Z": 6.43642639,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 179.99944858,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$cannon5",
+          "kind": "cgf-local-node"
+        },
+        "15": {
+          "X": -1.82780762,
+          "Y": 2.07367416,
+          "Z": 2.24105545,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 4.99999946,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$cannon6",
+          "kind": "cgf-local-node"
+        },
+        "16": {
+          "X": -0.83027336,
+          "Y": 1.84330643,
+          "Z": 2.13078522,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -145.00000245,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$cannon7",
+          "kind": "cgf-local-node"
+        },
+        "17": {
+          "X": -0.48059082,
+          "Y": 2.71855591,
+          "Z": 2.24105545,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 92.91507036,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$cannon8",
+          "kind": "cgf-local-node"
+        },
+        "24": {
+          "X": -4.28938965,
+          "Y": 0.13676575,
+          "Z": 1.25487183,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 97.91857039,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$ladder_left",
+          "kind": "cgf-local-node"
+        },
+        "25": {
+          "X": 4.33198212,
+          "Y": 0.10825012,
+          "Z": 1.25487183,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -97.91898609,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$ladder_right",
+          "kind": "cgf-local-node"
+        },
+        "28": {
+          "X": -2.72225098,
+          "Y": -9.53555664,
+          "Z": 6.83188721,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$lamp_front",
+          "kind": "cgf-local-node"
+        },
+        "29": {
+          "X": 2.72225098,
+          "Y": -9.53555664,
+          "Z": 6.83188721,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$lamp_rear",
+          "kind": "cgf-local-node"
+        },
+        "35": {
+          "X": 0.00119629,
+          "Y": -3.99748505,
+          "Z": 6.86728394,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$helms",
+          "kind": "cgf-local-node"
+        },
+        "46": {
+          "X": 1.45081543,
+          "Y": 2.63487701,
+          "Z": 2.13078522,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -57.06555003,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$cannon9",
+          "kind": "cgf-local-node"
+        },
+        "47": {
+          "X": 1.84063965,
+          "Y": 1.76510162,
+          "Z": 2.24105545,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -15.00046055,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$cannon10",
+          "kind": "cgf-local-node"
+        },
+        "58": {
+          "X": -1.77769043,
+          "Y": -5.39798523,
+          "Z": 3.21927917,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 90.0,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$ladder_rear_left",
+          "kind": "cgf-local-node"
+        },
+        "59": {
+          "X": 1.77769043,
+          "Y": -5.39798523,
+          "Z": 3.21927917,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -90.00000966,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$ladder_rear_right",
+          "kind": "cgf-local-node"
+        },
+        "60": {
+          "X": 2.96686493,
+          "Y": 4.2703775,
+          "Z": 3.0331488,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$box0",
+          "kind": "cgf-local-node"
+        },
+        "61": {
+          "X": 0.61053223,
+          "Y": -2.31950211,
+          "Z": 2.84904602,
+          "Roll": 6.60969082,
+          "Pitch": 0.0,
+          "Yaw": 0.35952772,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$box1",
+          "kind": "cgf-local-node"
+        },
+        "62": {
+          "X": -0.64289063,
+          "Y": -2.27457001,
+          "Z": 2.84904602,
+          "Roll": 6.60969167,
+          "Pitch": 0.0,
+          "Yaw": 7.0164858,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$box2",
+          "kind": "cgf-local-node"
+        },
+        "63": {
+          "X": -3.14180664,
+          "Y": 4.82099915,
+          "Z": 3.0337323,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$box3",
+          "kind": "cgf-local-node"
+        },
+        "80": {
+          "X": 4.395e-05,
+          "Y": -8.24817444,
+          "Z": 6.30482239,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -179.99999135,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$telescope",
+          "kind": "cgf-local-node"
+        }
+      },
+      "uri": "prefab://prefabs/fishboat.xml/fishboat.fishboat_body_white"
+    },
+    "1384": {
+      "points": {
+        "9": {
+          "X": 0.0,
+          "Y": 9.05997253,
+          "Z": 3.76394653,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$cannon0",
+          "kind": "cgf-local-node"
+        },
+        "10": {
+          "X": -1.64111352,
+          "Y": -15.52789783,
+          "Z": 2.2899518,
+          "Roll": 0.00776994,
+          "Pitch": 0.0,
+          "Yaw": 0.26336322,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.chr",
+          "node": "cannon1",
+          "kind": "chr-absolute-bind"
+        },
+        "11": {
+          "X": 1.64073837,
+          "Y": -15.52811813,
+          "Z": 2.28995252,
+          "Roll": 0.00776994,
+          "Pitch": 0.0,
+          "Yaw": 0.1579051,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.chr",
+          "node": "cannon2",
+          "kind": "chr-absolute-bind"
+        },
+        "13": {
+          "X": -3.2527536,
+          "Y": 5.62920715,
+          "Z": 1.87939453,
+          "Roll": 14.94547144,
+          "Pitch": 1.29257664,
+          "Yaw": -119.8304455,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$cannon4",
+          "kind": "cgf-local-node"
+        },
+        "14": {
+          "X": -0.03043457,
+          "Y": -1.93659729,
+          "Z": 6.43642639,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 179.99944858,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$cannon5",
+          "kind": "cgf-local-node"
+        },
+        "15": {
+          "X": -1.82780762,
+          "Y": 2.07367416,
+          "Z": 2.24105545,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 4.99999946,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$cannon6",
+          "kind": "cgf-local-node"
+        },
+        "16": {
+          "X": -0.83027336,
+          "Y": 1.84330643,
+          "Z": 2.13078522,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -145.00000245,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$cannon7",
+          "kind": "cgf-local-node"
+        },
+        "17": {
+          "X": -0.48059082,
+          "Y": 2.71855591,
+          "Z": 2.24105545,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 92.91507036,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$cannon8",
+          "kind": "cgf-local-node"
+        },
+        "24": {
+          "X": -4.28938965,
+          "Y": 0.13676575,
+          "Z": 1.25487183,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 97.91857039,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$ladder_left",
+          "kind": "cgf-local-node"
+        },
+        "25": {
+          "X": 4.33198212,
+          "Y": 0.10825012,
+          "Z": 1.25487183,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -97.91898609,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$ladder_right",
+          "kind": "cgf-local-node"
+        },
+        "28": {
+          "X": -2.72225098,
+          "Y": -9.53555664,
+          "Z": 6.83188721,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$lamp_front",
+          "kind": "cgf-local-node"
+        },
+        "29": {
+          "X": 2.72225098,
+          "Y": -9.53555664,
+          "Z": 6.83188721,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$lamp_rear",
+          "kind": "cgf-local-node"
+        },
+        "35": {
+          "X": 0.00119629,
+          "Y": -3.99748505,
+          "Z": 6.86728394,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$helms",
+          "kind": "cgf-local-node"
+        },
+        "46": {
+          "X": 1.45081543,
+          "Y": 2.63487701,
+          "Z": 2.13078522,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -57.06555003,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$cannon9",
+          "kind": "cgf-local-node"
+        },
+        "47": {
+          "X": 1.84063965,
+          "Y": 1.76510162,
+          "Z": 2.24105545,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -15.00046055,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$cannon10",
+          "kind": "cgf-local-node"
+        },
+        "58": {
+          "X": -1.77769043,
+          "Y": -5.39798523,
+          "Z": 3.21927917,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 90.0,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$ladder_rear_left",
+          "kind": "cgf-local-node"
+        },
+        "59": {
+          "X": 1.77769043,
+          "Y": -5.39798523,
+          "Z": 3.21927917,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -90.00000966,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$ladder_rear_right",
+          "kind": "cgf-local-node"
+        },
+        "60": {
+          "X": 2.96686493,
+          "Y": 4.2703775,
+          "Z": 3.0331488,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$box0",
+          "kind": "cgf-local-node"
+        },
+        "61": {
+          "X": 0.61053223,
+          "Y": -2.31950211,
+          "Z": 2.84904602,
+          "Roll": 6.60969082,
+          "Pitch": 0.0,
+          "Yaw": 0.35952772,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$box1",
+          "kind": "cgf-local-node"
+        },
+        "62": {
+          "X": -0.64289063,
+          "Y": -2.27457001,
+          "Z": 2.84904602,
+          "Roll": 6.60969167,
+          "Pitch": 0.0,
+          "Yaw": 7.0164858,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$box2",
+          "kind": "cgf-local-node"
+        },
+        "63": {
+          "X": -3.14180664,
+          "Y": 4.82099915,
+          "Z": 3.0337323,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$box3",
+          "kind": "cgf-local-node"
+        },
+        "80": {
+          "X": 4.395e-05,
+          "Y": -8.24817444,
+          "Z": 6.30482239,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -179.99999135,
+          "asset": "game/objects/env/06_unit/01_ship/fishboat/fishboat.cgf",
+          "node": "$telescope",
+          "kind": "cgf-local-node"
+        }
+      },
+      "uri": "prefab://prefabs/fishboat.xml/fishboat.fishboat_body_pink"
+    },
+    "1385": {
+      "points": {
+        "21": {
+          "X": 0.0,
+          "Y": 15.15861938,
+          "Z": 1.93809326,
+          "Roll": -1.6090013,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$sail0",
+          "kind": "cgf-local-node"
+        },
+        "22": {
+          "X": 0.0,
+          "Y": 1.55865067,
+          "Z": 1.32873474,
+          "Roll": -1.6090013,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$sail1",
+          "kind": "cgf-local-node"
+        },
+        "24": {
+          "X": -2.40109009,
+          "Y": 12.69552368,
+          "Z": -1.10956696,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 71.01340743,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$ladder_left",
+          "kind": "cgf-local-node"
+        },
+        "25": {
+          "X": 2.44303604,
+          "Y": 12.69552246,
+          "Z": -1.10635902,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -63.9865921,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$ladder_right",
+          "kind": "cgf-local-node"
+        },
+        "36": {
+          "X": -1.60562973,
+          "Y": -2.22354645,
+          "Z": 1.34844727,
+          "Roll": -31.84449881,
+          "Pitch": 3.04776432,
+          "Yaw": -147.0619414,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$heal_point0",
+          "kind": "cgf-local-node"
+        },
+        "37": {
+          "X": 2.99039398,
+          "Y": -0.53385757,
+          "Z": 1.22506035,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$heal_point1",
+          "kind": "cgf-local-node"
+        },
+        "38": {
+          "X": 0.76255249,
+          "Y": -10.80150879,
+          "Z": 1.83097321,
+          "Roll": -17.3346917,
+          "Pitch": -3.82501679,
+          "Yaw": -150.04003415,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$heal_point2",
+          "kind": "cgf-local-node"
+        },
+        "39": {
+          "X": -1.69008774,
+          "Y": 13.50393433,
+          "Z": 1.87254852,
+          "Roll": -66.7200763,
+          "Pitch": -66.38009821,
+          "Yaw": 66.34809364,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$heal_point3",
+          "kind": "cgf-local-node"
+        },
+        "58": {
+          "X": -1.91337097,
+          "Y": -12.50181641,
+          "Z": -1.46283188,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -179.99999135,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$ladder_rear_left",
+          "kind": "cgf-local-node"
+        },
+        "59": {
+          "X": 1.91337036,
+          "Y": -12.50181641,
+          "Z": -1.46283188,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -179.99999135,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$ladder_rear_right",
+          "kind": "cgf-local-node"
+        },
+        "60": {
+          "X": -2.38570313,
+          "Y": 12.47859131,
+          "Z": 4.42517761,
+          "Roll": -5.84543976,
+          "Pitch": 0.01637078,
+          "Yaw": 86.80389012,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box0",
+          "kind": "cgf-local-node"
+        },
+        "61": {
+          "X": 3.77372406,
+          "Y": 11.7718396,
+          "Z": 5.30033264,
+          "Roll": 14.61988617,
+          "Pitch": -3.46511977,
+          "Yaw": 108.08774205,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box1",
+          "kind": "cgf-local-node"
+        },
+        "62": {
+          "X": -4.77853394,
+          "Y": 2.81668457,
+          "Z": 3.8049884,
+          "Roll": -17.63500494,
+          "Pitch": 5.84323429,
+          "Yaw": 77.92499954,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box2",
+          "kind": "cgf-local-node"
+        },
+        "63": {
+          "X": 3.68675873,
+          "Y": 3.93022034,
+          "Z": 3.87374054,
+          "Roll": 13.35100355,
+          "Pitch": -3.18382401,
+          "Yaw": 86.95435664,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box3",
+          "kind": "cgf-local-node"
+        },
+        "64": {
+          "X": -3.90936157,
+          "Y": -4.94448669,
+          "Z": 5.00377747,
+          "Roll": -2.59864108,
+          "Pitch": -1.49955419,
+          "Yaw": 69.03402673,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box4",
+          "kind": "cgf-local-node"
+        },
+        "65": {
+          "X": 1.47495453,
+          "Y": -10.06739441,
+          "Z": 4.89309875,
+          "Roll": 10.83311746,
+          "Pitch": -1.54938953,
+          "Yaw": 123.05834985,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box5",
+          "kind": "cgf-local-node"
+        },
+        "66": {
+          "X": -2.29154297,
+          "Y": 6.43949036,
+          "Z": -0.64560669,
+          "Roll": -131.47489857,
+          "Pitch": 12.30072769,
+          "Yaw": 70.05732348,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box6",
+          "kind": "cgf-local-node"
+        },
+        "67": {
+          "X": 2.25987289,
+          "Y": 8.95768433,
+          "Z": -0.4294125,
+          "Roll": 130.59802495,
+          "Pitch": -14.98278824,
+          "Yaw": 79.18461482,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box7",
+          "kind": "cgf-local-node"
+        },
+        "68": {
+          "X": -2.20217819,
+          "Y": -8.47400269,
+          "Z": -0.35781158,
+          "Roll": -131.09412862,
+          "Pitch": 10.24646171,
+          "Yaw": 77.10754877,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box8",
+          "kind": "cgf-local-node"
+        },
+        "69": {
+          "X": 1.90979797,
+          "Y": -8.05894348,
+          "Z": -1.06294098,
+          "Roll": 133.31709473,
+          "Pitch": -12.74193914,
+          "Yaw": 70.72046603,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box9",
+          "kind": "cgf-local-node"
+        },
+        "70": {
+          "X": -0.58215088,
+          "Y": 5.17909302,
+          "Z": 1.28867584,
+          "Roll": 1.18520879,
+          "Pitch": -0.6037615,
+          "Yaw": -0.27913618,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box10",
+          "kind": "cgf-local-node"
+        },
+        "71": {
+          "X": 0.6358844,
+          "Y": 5.21191528,
+          "Z": 1.29706161,
+          "Roll": 1.15850286,
+          "Pitch": -0.99305488,
+          "Yaw": 0.09124448,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box11",
+          "kind": "cgf-local-node"
+        },
+        "76": {
+          "X": -0.58215027,
+          "Y": -2.47363617,
+          "Z": 1.28406952,
+          "Roll": -2.97758005,
+          "Pitch": -0.60376143,
+          "Yaw": -0.27913616,
+          "asset": "game/objects/env/06_unit/01_ship/boxship/boxship_old.cgf",
+          "node": "$box16",
+          "kind": "cgf-local-node"
+        }
+      },
+      "uri": "prefab://prefabs/boxship_old.xml/boxship_old.boxship_old_normal"
+    },
+    "1406": {
+      "points": {
+        "21": {
+          "X": 0.0,
+          "Y": 0.87057996,
+          "Z": 1.18104005,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body.chr",
+          "node": "sail0",
+          "kind": "chr-absolute-bind"
+        },
+        "60": {
+          "X": -0.52005464,
+          "Y": -2.1677649,
+          "Z": 0.68300521,
+          "Roll": -90.00001284,
+          "Pitch": -54.99995696,
+          "Yaw": -90.00000934,
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body.chr",
+          "node": "box0",
+          "kind": "chr-absolute-bind"
+        },
+        "61": {
+          "X": 0.52022153,
+          "Y": -2.1677649,
+          "Z": 0.68300521,
+          "Roll": 89.99998732,
+          "Pitch": -54.99998354,
+          "Yaw": -90.00000433,
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body.chr",
+          "node": "box1",
+          "kind": "chr-absolute-bind"
+        }
+      },
+      "uri": "prefab://prefabs/speedcar.xml/speedcar.speedcar_body_y"
+    },
+    "1442": {
+      "points": {
+        "9": {
+          "X": 1.31732416,
+          "Y": -2.06066918,
+          "Z": 2.79388428,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/05_carriage/transfers_battle_foodtraffic.chr",
+          "node": "cannon0",
+          "kind": "chr-absolute-bind"
+        },
+        "10": {
+          "X": -0.12301,
+          "Y": -3.09071016,
+          "Z": 3.20470023,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/05_carriage/transfers_battle_foodtraffic.chr",
+          "node": "cannon1",
+          "kind": "chr-absolute-bind"
+        }
+      },
+      "uri": "prefab://prefabs/vehicle_tractor.xml/transfers_battle_foodtraffic.transfers_battle_foodtraffic_body"
+    },
+    "1444": {
+      "points": {
+        "21": {
+          "X": 0.0,
+          "Y": 0.87057996,
+          "Z": 1.18104005,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "sail0",
+          "kind": "chr-absolute-bind"
+        },
+        "60": {
+          "X": -0.52005464,
+          "Y": -2.1677649,
+          "Z": 0.68300521,
+          "Roll": -90.00001284,
+          "Pitch": -54.99995696,
+          "Yaw": -90.00000934,
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "box0",
+          "kind": "chr-absolute-bind"
+        },
+        "61": {
+          "X": 0.52022153,
+          "Y": -2.1677649,
+          "Z": 0.68300521,
+          "Roll": 89.99998732,
+          "Pitch": -54.99998354,
+          "Yaw": -90.00000433,
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "box1",
+          "kind": "chr-absolute-bind"
+        }
+      },
+      "uri": "prefab://prefabs/speedcar.xml/speedcar.speedcar_body_decal"
+    },
+    "1460": {
+      "points": {
+        "21": {
+          "X": 0.0,
+          "Y": 0.87057996,
+          "Z": 1.18104005,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "sail0",
+          "kind": "chr-absolute-bind"
+        },
+        "60": {
+          "X": -0.52005464,
+          "Y": -2.1677649,
+          "Z": 0.68300521,
+          "Roll": -90.00001284,
+          "Pitch": -54.99995696,
+          "Yaw": -90.00000934,
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "box0",
+          "kind": "chr-absolute-bind"
+        },
+        "61": {
+          "X": 0.52022153,
+          "Y": -2.1677649,
+          "Z": 0.68300521,
+          "Roll": 89.99998732,
+          "Pitch": -54.99998354,
+          "Yaw": -90.00000433,
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "box1",
+          "kind": "chr-absolute-bind"
+        }
+      },
+      "uri": "prefab://prefabs/speedcar_ucc.xml/speedcar_ucc.speedcar_body_r_ucc"
+    },
+    "1461": {
+      "points": {
+        "21": {
+          "X": 0.0,
+          "Y": 0.87057996,
+          "Z": 1.18104005,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "sail0",
+          "kind": "chr-absolute-bind"
+        },
+        "60": {
+          "X": -0.52005464,
+          "Y": -2.1677649,
+          "Z": 0.68300521,
+          "Roll": -90.00001284,
+          "Pitch": -54.99995696,
+          "Yaw": -90.00000934,
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "box0",
+          "kind": "chr-absolute-bind"
+        },
+        "61": {
+          "X": 0.52022153,
+          "Y": -2.1677649,
+          "Z": 0.68300521,
+          "Roll": 89.99998732,
+          "Pitch": -54.99998354,
+          "Yaw": -90.00000433,
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "box1",
+          "kind": "chr-absolute-bind"
+        }
+      },
+      "uri": "prefab://prefabs/speedcar_ucc.xml/speedcar_ucc.speedcar_body_b_ucc"
+    },
+    "1462": {
+      "points": {
+        "21": {
+          "X": 0.0,
+          "Y": 0.87057996,
+          "Z": 1.18104005,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "sail0",
+          "kind": "chr-absolute-bind"
+        },
+        "60": {
+          "X": -0.52005464,
+          "Y": -2.1677649,
+          "Z": 0.68300521,
+          "Roll": -90.00001284,
+          "Pitch": -54.99995696,
+          "Yaw": -90.00000934,
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "box0",
+          "kind": "chr-absolute-bind"
+        },
+        "61": {
+          "X": 0.52022153,
+          "Y": -2.1677649,
+          "Z": 0.68300521,
+          "Roll": 89.99998732,
+          "Pitch": -54.99998354,
+          "Yaw": -90.00000433,
+          "asset": "game/objects/env/06_unit/05_carriage/speedcar_body_decal.chr",
+          "node": "box1",
+          "kind": "chr-absolute-bind"
+        }
+      },
+      "uri": "prefab://prefabs/speedcar_ucc.xml/speedcar_ucc.speedcar_body_y_ucc"
+    },
+    "1464": {
+      "points": {
+        "9": {
+          "X": -0.60279411,
+          "Y": -1.98611534,
+          "Z": 1.14375114,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/05_carriage/transfers_trailer_b_body.chr",
+          "node": "cannon0",
+          "kind": "chr-absolute-bind"
+        },
+        "10": {
+          "X": 0.61167115,
+          "Y": -1.98611569,
+          "Z": 1.14375114,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -89.99999706,
+          "asset": "game/objects/env/06_unit/05_carriage/transfers_trailer_b_body.chr",
+          "node": "cannon1",
+          "kind": "chr-absolute-bind"
+        },
+        "11": {
+          "X": -0.60279417,
+          "Y": -3.17636538,
+          "Z": 1.14375138,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 90.00001478,
+          "asset": "game/objects/env/06_unit/05_carriage/transfers_trailer_b_body.chr",
+          "node": "cannon2",
+          "kind": "chr-absolute-bind"
+        },
+        "12": {
+          "X": 0.61167115,
+          "Y": -3.17636442,
+          "Z": 1.14375162,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/05_carriage/transfers_trailer_b_body.chr",
+          "node": "cannon3",
+          "kind": "chr-absolute-bind"
+        },
+        "13": {
+          "X": -0.60279417,
+          "Y": -2.54918218,
+          "Z": 2.12672758,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 90.00001478,
+          "asset": "game/objects/env/06_unit/05_carriage/transfers_trailer_b_body.chr",
+          "node": "cannon4",
+          "kind": "chr-absolute-bind"
+        },
+        "14": {
+          "X": 0.61166996,
+          "Y": -2.54918242,
+          "Z": 2.1267271,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 90.00001478,
+          "asset": "game/objects/env/06_unit/05_carriage/transfers_trailer_b_body.chr",
+          "node": "cannon5",
+          "kind": "chr-absolute-bind"
+        }
+      },
+      "uri": "prefab://prefabs/vehicle_tractor.xml/vehicle_tractor_b.tractor_b_body"
+    },
+    "1482": {
+      "points": {
+        "19": {
+          "X": 0.0,
+          "Y": 10.64255737,
+          "Z": 4.49536316,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body_test.cgf",
+          "node": "$mast0",
+          "kind": "cgf-local-node"
+        },
+        "20": {
+          "X": 0.0,
+          "Y": -1.15274132,
+          "Z": 3.67200531,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body_test.cgf",
+          "node": "$mast1",
+          "kind": "cgf-local-node"
+        },
+        "21": {
+          "X": 0.0,
+          "Y": 10.64255737,
+          "Z": 4.49536316,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body_test.cgf",
+          "node": "$sail0",
+          "kind": "cgf-local-node"
+        },
+        "22": {
+          "X": 0.0,
+          "Y": -1.152742,
+          "Z": 3.67200531,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body_test.cgf",
+          "node": "$sail1",
+          "kind": "cgf-local-node"
+        },
+        "28": {
+          "X": -4.00077637,
+          "Y": -14.8961731,
+          "Z": 7.30155334,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body_test.cgf",
+          "node": "$lamp_front",
+          "kind": "cgf-local-node"
+        },
+        "29": {
+          "X": 4.02856628,
+          "Y": -14.89232666,
+          "Z": 7.30155334,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body_test.cgf",
+          "node": "$lamp_rear",
+          "kind": "cgf-local-node"
+        },
+        "35": {
+          "X": 0.0,
+          "Y": -11.81182495,
+          "Z": 6.59629028,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body_test.cgf",
+          "node": "$helms",
+          "kind": "cgf-local-node"
+        },
+        "57": {
+          "X": 0.0,
+          "Y": 23.36662842,
+          "Z": 2.45781967,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body_test.cgf",
+          "node": "$name_plate01",
+          "kind": "cgf-local-node"
+        },
+        "81": {
+          "X": 0.0,
+          "Y": -9.06164429,
+          "Z": 9.73218994,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": -90.00000966,
+          "asset": "game/objects/env/06_unit/01_ship/boardship/boardship_body_test.cgf",
+          "node": "$bell",
+          "kind": "cgf-local-node"
+        }
+      },
+      "uri": "prefab://prefabs/galleon01.xml/galleon01.step_10boardship_normal"
+    },
+    "1546": {
+      "points": {
+        "10": {
+          "X": 8.8e-07,
+          "Y": -20.14759277,
+          "Z": -8.8e-07,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/middleship/middleship_body.cgf",
+          "node": "$cannon1",
+          "kind": "cgf-local-node"
+        },
+        "35": {
+          "X": 0.00636711,
+          "Y": -22.12350098,
+          "Z": 11.14475586,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/01_ship/middleship/middleship_body.cgf",
+          "node": "$helms",
+          "kind": "cgf-local-node"
+        }
+      },
+      "uri": "prefab://prefabs/middleship.xml/middleship.middleship_body"
+    },
+    "1553": {
+      "points": {
+        "9": {
+          "X": -0.60553449,
+          "Y": -1.98611534,
+          "Z": 1.17294431,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 90.00000795,
+          "asset": "game/objects/env/06_unit/05_carriage/transfers_trailer_c.chr",
+          "node": "cannon0",
+          "kind": "chr-absolute-bind"
+        },
+        "10": {
+          "X": 0.60893083,
+          "Y": -1.98611617,
+          "Z": 1.17294478,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 90.00000795,
+          "asset": "game/objects/env/06_unit/05_carriage/transfers_trailer_c.chr",
+          "node": "cannon1",
+          "kind": "chr-absolute-bind"
+        },
+        "11": {
+          "X": -0.60553467,
+          "Y": -3.17636538,
+          "Z": 1.17294431,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 90.00000795,
+          "asset": "game/objects/env/06_unit/05_carriage/transfers_trailer_c.chr",
+          "node": "cannon2",
+          "kind": "chr-absolute-bind"
+        },
+        "12": {
+          "X": 0.60893059,
+          "Y": -3.17636442,
+          "Z": 1.17294466,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 90.00000795,
+          "asset": "game/objects/env/06_unit/05_carriage/transfers_trailer_c.chr",
+          "node": "cannon3",
+          "kind": "chr-absolute-bind"
+        },
+        "13": {
+          "X": -0.60279447,
+          "Y": -2.54918242,
+          "Z": 2.15592074,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 90.00000795,
+          "asset": "game/objects/env/06_unit/05_carriage/transfers_trailer_c.chr",
+          "node": "cannon4",
+          "kind": "chr-absolute-bind"
+        },
+        "14": {
+          "X": 0.61166966,
+          "Y": -2.54918242,
+          "Z": 2.15592074,
+          "Roll": 0.0,
+          "Pitch": 0.0,
+          "Yaw": 0.0,
+          "asset": "game/objects/env/06_unit/05_carriage/transfers_trailer_c.chr",
+          "node": "cannon5",
+          "kind": "chr-absolute-bind"
+        }
+      },
+      "uri": "prefab://prefabs/vehicle_tractor.xml/vehicle_tractor_c.tractor_body"
+    }
+  },
+  "unresolved": {
+    "129": {
+      "points": [
+        9,
+        10
+      ]
+    },
+    "1008": {
+      "points": [
+        9,
+        10,
+        11,
+        12
+      ]
+    },
+    "1406": {
+      "points": [
+        9
+      ]
+    },
+    "8000009": {
+      "points": [
+        9,
+        10
+      ],
+      "error": "cyclic/deep/orphan hierarchy"
+    }
+  }
+}
