@@ -1430,9 +1430,21 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `FUN_39093860(..., 9.0)`, strictly under 3.0, widened to 12.25 = 3.5 m by the target's
   `+0x3c26` flag), and the doodad BoardTransfer path passes `None` because its doodad func has
   its own use-range check. The gap is measured against the ship model's mass box when the slave
-  has a ship model, else the requested attach point's world position, and only falls back to
-  the slave origin when neither exists; a ship's bare origin is never the measure (a merchant
-  ship's seat / helm can be far from the origin). The 3.5 m branch keys on the character's
+  has a ship model, else the requested attach point's world position, else the smaller of the
+  slave origin distance and the nearest located attach point of the model
+  (`slave_attach_points*.json`); the client measures the minimum distance from the character's
+  collision primitive to the target's collision parts (`FUN_39093860` -> `FUN_390b3ae0` for the
+  parts, `FUN_3989bf90` -> `FUN_398b1ab0` for the per-shape distance), and the located attach
+  points stand in for those parts. The origin bound is kept so the fallback never tightens a
+  reach: the 2026-11-01 14:22 live log had the Red Farm Hauler (slave 146, model 1553, no ship
+  model, point 2 declared by `model_bindings` but located only by its cannon points 9-14)
+  refuse the passenger seat beside the rear hull (3.2-5.0 m from the origin, 1.9-2.6 m from
+  the located points) and the 14:22:50 driver re-bind (4.9 m from the origin); tested by
+  `passenger_beside_the_hull_is_in_reach_without_a_ship_model_or_a_located_seat` and
+  `a_discarded_driver_rebinds_beside_the_hull_and_a_far_one_is_still_refused`. A model with no
+  located point at all keeps the origin (carts: the origin sits at the seat); a ship's bare
+  origin is never the measure (a merchant ship's seat / helm can be far from the origin). The
+  3.5 m branch keys on the character's
   `is_riding`, but the decompile reads `+0x3c26` from the target (where it is also the dead
   flag), so this is capture-pending (S11-C5). A bind outside the reach answers `TOO_FAR_AWAY`
   0x9a. A character already in any slave's `attached_characters` is refused with
