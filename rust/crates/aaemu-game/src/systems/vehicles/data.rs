@@ -454,12 +454,13 @@ impl VehicleModel {
 }
 
 /// `MathUtil.WrapAngle` into [-pi, pi] (the client's full-circle key-aim rule, `39425580`).
-fn wrap_pi(mut angle: f32) -> f32 {
+/// Normalise with a remainder, never a loop: a modified client can send any finite f32.
+fn wrap_pi(angle: f32) -> f32 {
     let two_pi = std::f32::consts::TAU;
-    while angle > std::f32::consts::PI {
+    let mut angle = angle % two_pi;
+    if angle > std::f32::consts::PI {
         angle -= two_pi;
-    }
-    while angle < -std::f32::consts::PI {
+    } else if angle < -std::f32::consts::PI {
         angle += two_pi;
     }
     angle
