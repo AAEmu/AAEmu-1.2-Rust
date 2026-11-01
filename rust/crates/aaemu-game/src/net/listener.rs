@@ -15,6 +15,7 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::net::connection::{ConnCommand, GameConnection};
 use crate::net::outbox::{outbox, OutFrame, OutboxReceiver};
+use crate::net::reply_delay::ReplyDelayConn;
 use crate::server::GameServer;
 
 /// Frames written to the socket buffer before one flush.
@@ -50,17 +51,19 @@ pub async fn serve(server: Arc<GameServer>, socket: TcpStream, peer: SocketAddr)
 
     let (out_tx, out_rx) = outbox();
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<ConnCommand>();
+    let (mut conn, _) = GameConnection::new(id, peer, out_tx, cmd_tx.clone());
+    // Before the table entry and any `Player` handle: `Debug:ReplyDelay` (`None` when off).
+    conn.set_reply_delay(server.reply_delay.clone());
+    let handle = conn.handle();
+    // The writer sees the strict latch so a frame that raced the selected one cannot overtake it.
+    let delay = conn.reply_delay_state();
     let mut writer = tokio::spawn(write_frames(
         id,
         FramedWrite::new(wr, FrameCodec),
         out_rx,
-        cmd_tx.clone(),
+        cmd_tx,
+        delay,
     ));
-
-    let (mut conn, _) = GameConnection::new(id, peer, out_tx, cmd_tx);
-    // Before the table entry and any `Player` handle: `Debug:ReplyDelay` (`None` when off).
-    conn.set_reply_delay(server.reply_delay.clone());
-    let handle = conn.handle();
     server.connections.add(handle.clone());
     // Created before the packet loop: a panic in a packet handler or in `leave_world_task` too
     // must release the session's reservation, remove a half-left world entry and free the
@@ -127,6 +130,7 @@ async fn write_frames<S>(
     mut sink: S,
     mut frames: OutboxReceiver,
     commands: mpsc::UnboundedSender<ConnCommand>,
+    delay: Option<Arc<ReplyDelayConn>>,
 ) where
     S: Sink<Bytes> + Unpin + Send + 'static,
     S::Error: std::fmt::Debug,
@@ -169,6 +173,18 @@ async fn write_frames<S>(
         if frame.release_at.is_some() {
             pending.push_back(frame);
             continue;
+        }
+
+        // Strict mode race: a frame queued by another thread at the same moment as the selected
+        // one can carry no deadline. Behind held frames it must wait, not overtake them.
+        if !pending.is_empty() {
+            if let Some(delay) = &delay {
+                if delay.strict() {
+                    let release_at = tokio::time::Instant::now() + delay.delay();
+                    pending.push_back(OutFrame::delayed(frame.bytes, release_at));
+                    continue;
+                }
+            }
         }
 
         // An immediate frame is not held; batch the immediate frames queued behind it and keep
@@ -407,7 +423,7 @@ mod tests {
         let (commands, _commands_rx) = mpsc::unbounded_channel();
         let sink = RecordingSink::default();
         let start = tokio::time::Instant::now();
-        let writer = tokio::spawn(super::write_frames(1, sink.clone(), rx, commands));
+        let writer = tokio::spawn(super::write_frames(1, sink.clone(), rx, commands, None));
 
         for byte in [b"a".as_slice(), b"b", b"c"] {
             tx.push(OutFrame::now(Bytes::copy_from_slice(byte)));
@@ -426,7 +442,7 @@ mod tests {
         let (commands, _commands_rx) = mpsc::unbounded_channel();
         let sink = RecordingSink::default();
         let release = tokio::time::Instant::now() + Duration::from_millis(600);
-        let writer = tokio::spawn(super::write_frames(1, sink.clone(), rx, commands));
+        let writer = tokio::spawn(super::write_frames(1, sink.clone(), rx, commands, None));
 
         for byte in [b"a".as_slice(), b"b", b"c"] {
             tx.push(OutFrame::delayed(Bytes::copy_from_slice(byte), release));
@@ -461,16 +477,56 @@ mod tests {
             .frame(frame(sc::SCSkillFiredPacket))
             .release_at
             .is_none());
-        reply.set_reply_to(1, cs::CSStartSkillPacket);
-        assert!(reply
-            .frame(frame(sc::SCSkillFiredPacket))
-            .release_at
-            .is_some());
-        reply.clear_reply_to();
+        crate::net::reply_delay::with_reply_context(1, cs::CSStartSkillPacket, async {
+            assert!(reply
+                .frame(frame(sc::SCSkillFiredPacket))
+                .release_at
+                .is_some());
+        })
+        .await;
         assert!(reply
             .frame(frame(sc::SCSkillFiredPacket))
             .release_at
             .is_none());
+    }
+
+    /// Strict mode race: a frame queued with no deadline while a held one waits must go behind it.
+    #[tokio::test(start_paused = true)]
+    async fn strict_mode_queues_a_racing_immediate_frame_behind_the_held_one() {
+        let (tx, rx) = outbox();
+        let (commands, _commands_rx) = mpsc::unbounded_channel();
+        let sink = RecordingSink::default();
+        let delay = ReplyDelayConn::new(reply_delay(&["SCSkillStarted"], &[], true));
+        let writer = tokio::spawn(super::write_frames(
+            1,
+            sink.clone(),
+            rx,
+            commands,
+            Some(delay.clone()),
+        ));
+
+        // The selected frame latches strict mode and is held; the second frame raced it and has
+        // no deadline (another thread queued it without seeing the latch).
+        tx.push(delay.frame(frame(sc::SCSkillStartedPacket)));
+        tx.push(OutFrame::now(frame(sc::SCErrorMsgPacket)));
+        drop(tx);
+        tokio::task::yield_now().await;
+        assert!(sink.frames().is_empty(), "nothing before the delay");
+        tokio::time::advance(Duration::from_millis(600)).await;
+        tokio::task::yield_now().await;
+        writer.await.unwrap();
+
+        let opcodes: Vec<u16> = sink
+            .frames()
+            .iter()
+            .map(|f| u16::from_le_bytes([f[4], f[5]]))
+            .collect();
+        assert_eq!(opcodes, [sc::SCSkillStartedPacket, sc::SCErrorMsgPacket]);
+        assert_eq!(
+            sink.times()[0],
+            sink.times()[1],
+            "both written when the held frame was due, in order"
+        );
     }
 
     /// Strict mode through the writer: the unselected frame after the held one cannot overtake it.
@@ -480,7 +536,13 @@ mod tests {
         let (commands, _commands_rx) = mpsc::unbounded_channel();
         let sink = RecordingSink::default();
         let delay = ReplyDelayConn::new(reply_delay(&["SCSkillStarted"], &[], true));
-        let writer = tokio::spawn(super::write_frames(1, sink.clone(), rx, commands));
+        let writer = tokio::spawn(super::write_frames(
+            1,
+            sink.clone(),
+            rx,
+            commands,
+            Some(delay.clone()),
+        ));
 
         tx.push(delay.frame(frame(sc::SCErrorMsgPacket)));
         tx.push(delay.frame(frame(sc::SCSkillStartedPacket)));

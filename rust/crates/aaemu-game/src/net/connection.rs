@@ -338,18 +338,9 @@ impl GameConnection {
         self.delay = config.map(ReplyDelayConn::new);
     }
 
-    /// Marks the C->S packet whose handler is about to run (`replies to C->S X` selector).
-    pub(crate) fn begin_reply(&mut self, level: u8, opcode: u16) {
-        if let Some(delay) = &self.delay {
-            delay.set_reply_to(level, opcode);
-        }
-    }
-
-    /// Clears the reply context once the handler returned.
-    pub(crate) fn end_reply(&mut self) {
-        if let Some(delay) = &self.delay {
-            delay.clear_reply_to();
-        }
+    /// The `Debug:ReplyDelay` state (the writer needs the strict latch), `None` when off.
+    pub(crate) fn reply_delay_state(&self) -> Option<Arc<ReplyDelayConn>> {
+        self.delay.clone()
     }
 
     pub fn account_id(&self) -> u32 {
