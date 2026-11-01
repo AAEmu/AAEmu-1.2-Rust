@@ -1516,12 +1516,13 @@ async fn slave_summon_bind_drive_and_despawn() {
     assert!(ops(&b.drain()).contains(&sc::SCUnitsRemovedPacket));
 }
 
-/// A seat another character already holds is silent, as in the C#: no error and no attach,
-/// the occupant stays, and the seat frees when the occupant leaves. The check and the
-/// reservation happen under the slave's one lock, so the seat can never be handed to two
-/// characters. The C# owners-mark refusal is the only taken-driver case that sends 0x61.
+/// A seat another character already holds answers `slave_already_has_master` 0x61 with
+/// `isNotify = false` (the form that clears the client's pending bind request; the C# returned
+/// silently, but that leaves the client stuck on "already requested"): no attach, the occupant
+/// stays, and the seat frees when the occupant leaves. The check and the reservation happen
+/// under the slave's one lock, so the seat can never be handed to two characters.
 #[tokio::test]
-async fn a_taken_seat_is_silent_and_keeps_the_occupant() {
+async fn a_taken_seat_answers_a_clearing_error_and_keeps_the_occupant() {
     use crate::models::slave::Slave;
     use crate::world::Entity;
 
@@ -1574,7 +1575,7 @@ async fn a_taken_seat_is_silent_and_keeps_the_occupant() {
     b.drain();
     c.drain();
 
-    // The driver seat is taken: B is ignored silently (C# behaviour), not attached.
+    // The driver seat is taken: B is not attached and gets the clearing 0x61.
     slaves::bind_slave(
         &server,
         &pb,
@@ -1583,9 +1584,10 @@ async fn a_taken_seat_is_silent_and_keeps_the_occupant() {
         7,
         Some(4.0),
     );
-    assert!(
-        b.drain().is_empty(),
-        "a taken seat must not answer an error or attach"
+    assert_eq!(
+        body(&b.drain(), sc::SCErrorMsgPacket),
+        vec![0x61, 0, 0x61, 0, 0, 0, 0, 0, 0],
+        "a taken seat must answer the clearing error, not attach"
     );
     assert_eq!(
         cart.data().attached_characters,
@@ -1616,7 +1618,7 @@ async fn a_taken_seat_is_silent_and_keeps_the_occupant() {
     assert!(ops(&a.drain()).contains(&sc::SCUnitAttachedPacket));
     c.drain();
 
-    // A third character on the taken passenger seat is ignored silently too.
+    // A third character on the taken passenger seat gets the clearing 0x61, not silence.
     slaves::bind_slave(
         &server,
         &pc,
@@ -1625,7 +1627,10 @@ async fn a_taken_seat_is_silent_and_keeps_the_occupant() {
         7,
         Some(3.0),
     );
-    assert!(c.drain().is_empty());
+    assert_eq!(
+        body(&c.drain(), sc::SCErrorMsgPacket),
+        vec![0x61, 0, 0x61, 0, 0, 0, 0, 0, 0]
+    );
     assert_eq!(cart.data().attached_characters.len(), 2);
 
     // Leaving frees the seat for the next character.
@@ -1677,8 +1682,8 @@ async fn a_taken_seat_is_silent_and_keeps_the_occupant() {
         Some(4.0),
     );
     assert_eq!(
-        error_codes(&b.drain()),
-        vec![super::error::SLAVE_ALREADY_HAS_MASTER]
+        body(&b.drain(), sc::SCErrorMsgPacket),
+        vec![0x61, 0, 0x61, 0, 0, 0, 0, 0, 0]
     );
     assert!(cart.data().attached_characters.is_empty());
 }
@@ -1769,9 +1774,10 @@ fn hauler_data() -> GameData {
 
 /// Skill 13863 (`Take the Passenger Seat`) seats the caster at point 2 through the real
 /// `CSStartSkill` handler and `AttachTo` special effect; a second character on the same seat
-/// is ignored silently, as the C# does.
+/// gets the clearing `slave_already_has_master` 0x61 (the C# was silent, which left the client's
+/// pending bind request set).
 #[tokio::test]
-async fn passenger_skill_13863_seats_point_two_and_a_taken_seat_is_silent() {
+async fn passenger_skill_13863_seats_point_two_and_a_taken_seat_answers_a_clearing_error() {
     use crate::models::slave::Slave;
     use crate::systems::skills::handlers::{start_skill, CSStartSkillPacket};
     use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
@@ -1848,13 +1854,14 @@ async fn passenger_skill_13863_seats_point_two_and_a_taken_seat_is_silent() {
     a.drain();
     c.drain();
 
-    // The passenger seat is now taken: the second cast attaches nobody and sends no error.
+    // The passenger seat is now taken: the second cast attaches nobody and answers the clearing
+    // 0x61 (`isNotify = false`).
     cast(&mut c, 0x00F0_0003, cart.obj_id);
     let fc = c.drain();
-    assert!(
-        !ops(&fc).contains(&sc::SCUnitAttachedPacket) && !ops(&fc).contains(&sc::SCErrorMsgPacket),
-        "a taken seat must be silent: {:x?}",
-        ops(&fc)
+    assert!(!ops(&fc).contains(&sc::SCUnitAttachedPacket));
+    assert_eq!(
+        body(&fc, sc::SCErrorMsgPacket),
+        vec![0x61, 0, 0x61, 0, 0, 0, 0, 0, 0]
     );
     assert_eq!(
         cart.data().attached_characters,
@@ -1916,9 +1923,9 @@ async fn the_passenger_skill_does_not_seat_on_a_dead_slave() {
 }
 
 /// The 1.2 client only offers / accepts a seat its model declares (`model_bindings`): the Farm
-/// Wagon (slave 60, model 1008) has no point 2, so 13863 is not offered and a forged bind there is
-/// ignored silently; the Red Farm Hauler (slave 146, model 1553) has one and takes the passenger.
-/// A point the model does declare (a ship cannon's point 9) still binds.
+/// Wagon (slave 60, model 1008) has no point 2, so 13863 is not offered and a forged bind there
+/// answers the clearing 0x60; the Red Farm Hauler (slave 146, model 1553) has one and takes the
+/// passenger. A point the model does declare (a ship cannon's point 9) still binds.
 #[tokio::test]
 async fn model_bindings_decide_which_seats_a_slave_offers_and_accepts() {
     use crate::models::slave::Slave;
@@ -2057,7 +2064,7 @@ async fn model_bindings_decide_which_seats_a_slave_offers_and_accepts() {
     };
 
     // Farm Wagon: the model has no point 2. With the driver seat taken the interaction list keeps
-    // the occupy skill, and a forged passenger cast attaches nobody silently.
+    // the occupy skill, and a forged passenger cast attaches nobody and answers 0x60.
     let wagon = spawn(60, 1008, 0x300, 3, 103.0);
     a.drain();
     b.drain();
@@ -2078,10 +2085,11 @@ async fn model_bindings_decide_which_seats_a_slave_offers_and_accepts() {
     assert_eq!(b.drain(), interaction(wagon.obj_id, vec![12_076]));
     cast(&mut b, PB, wagon.obj_id);
     let fb = b.drain();
-    assert!(
-        !ops(&fb).contains(&sc::SCUnitAttachedPacket) && error_codes(&fb).is_empty(),
-        "a missing seat must be silent: {:x?}",
-        ops(&fb)
+    assert!(!ops(&fb).contains(&sc::SCUnitAttachedPacket));
+    assert_eq!(
+        body(&fb, sc::SCErrorMsgPacket),
+        vec![0x60, 0, 0x60, 0, 0, 0, 0, 0, 0],
+        "a missing seat must clear the pending bind request"
     );
     assert_eq!(
         wagon.data().attached_characters,
@@ -2205,15 +2213,22 @@ async fn a_slave_outside_the_client_reach_is_refused_and_an_in_reach_one_is_seat
         );
     };
 
-    // Far driver bind (7.1 m > 4.0 m) through the 0x031 handler path.
+    // Far driver bind (7.1 m > 4.0 m) through the 0x031 handler path: the clearing form
+    // (`isNotify = false`) or the client keeps its pending bind request.
     slaves::bind_slave_by_tl(&server, &pb, 3);
-    assert_eq!(error_codes(&b.drain()), vec![super::error::TOO_FAR_AWAY]);
+    assert_eq!(
+        body(&b.drain(), sc::SCErrorMsgPacket),
+        vec![0x9a, 0, 0x9a, 0, 0, 0, 0, 0, 0]
+    );
     assert!(cart.data().attached_characters.is_empty());
 
     // Far passenger cast (7.1 m > 3.0 m) through the real skill runner.
     cast(&mut b, PB, cart.obj_id);
     let fb = b.drain();
-    assert!(error_codes(&fb).contains(&super::error::TOO_FAR_AWAY));
+    assert_eq!(
+        body(&fb, sc::SCErrorMsgPacket),
+        vec![0x9a, 0, 0x9a, 0, 0, 0, 0, 0, 0]
+    );
     assert!(!ops(&fb).contains(&sc::SCUnitAttachedPacket));
     assert!(cart.data().attached_characters.is_empty());
 
@@ -2386,7 +2401,7 @@ async fn a_discarded_driver_rebinds_beside_the_hull_and_a_far_one_is_still_refus
     );
     a.drain();
 
-    // Discard, then stand where the live driver stood: 4.5 m behind the origin, beside the hull.
+    // Discard, then stand where the live driver stood: 4.9 m behind the origin, beside the hull.
     CSDiscardSlavePacket { tl_id: 3 }
         .handle(&server, &mut a.conn)
         .await
@@ -2394,7 +2409,7 @@ async fn a_discarded_driver_rebinds_beside_the_hull_and_a_far_one_is_still_refus
     assert!(hauler.data().attached_characters.is_empty());
     assert!(slaves::get_is_mounted(&world, PA).is_none());
     a.drain();
-    pa.data().unit.transform.set_xyz(103.0, 95.5, 100.0);
+    pa.data().unit.transform.set_xyz(103.0, 95.1, 100.0);
 
     CSBindSlavePacket { tl_id: 3 }
         .handle(&server, &mut a.conn)
@@ -2418,8 +2433,25 @@ async fn a_discarded_driver_rebinds_beside_the_hull_and_a_far_one_is_still_refus
         .handle(&server, &mut a.conn)
         .await
         .unwrap();
-    assert_eq!(error_codes(&a.drain()), vec![super::error::TOO_FAR_AWAY]);
+    let refused = a.drain();
+    assert_eq!(
+        body(&refused, sc::SCErrorMsgPacket),
+        vec![0x9a, 0, 0x9a, 0, 0, 0, 0, 0, 0],
+        "the refusal must be the clearing (isNotify = false) form"
+    );
     assert!(hauler.data().attached_characters.is_empty());
+
+    // The refusal latches nothing: the next in-reach bind succeeds.
+    pa.data().unit.transform.set_xyz(103.0, 95.1, 100.0);
+    CSBindSlavePacket { tl_id: 3 }
+        .handle(&server, &mut a.conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        hauler.data().attached_characters,
+        vec![(attach_point::DRIVER, PA)]
+    );
+    assert!(error_codes(&a.drain()).is_empty());
 }
 
 /// One slave at a time: the client refuses a second bind with `slave_unbind_first` 0x66
@@ -2471,8 +2503,8 @@ async fn a_character_on_one_slave_cannot_bind_a_second_one() {
     // The 0x031 handler path to a second slave.
     slaves::bind_slave_by_tl(&server, &pa, 4);
     assert_eq!(
-        error_codes(&a.drain()),
-        vec![super::error::SLAVE_UNBIND_FIRST]
+        body(&a.drain(), sc::SCErrorMsgPacket),
+        vec![0x66, 0, 0x66, 0, 0, 0, 0, 0, 0]
     );
     assert!(second.data().attached_characters.is_empty());
 
@@ -2491,8 +2523,8 @@ async fn a_character_on_one_slave_cannot_bind_a_second_one() {
     );
     assert!(second.data().attached_characters.is_empty());
 
-    // A second seat on the same slave is refused too (the client's same-slave bind is silent,
-    // but a forged one must not duplicate the character).
+    // A second seat on the same slave is refused too (a forged bind must not duplicate the
+    // character; the same 0x66 clears the client's pending request).
     slaves::bind_slave(
         &server,
         &pa,
@@ -2561,7 +2593,10 @@ async fn a_cannon_refuses_the_passenger_seat_skill() {
         },
     );
     let fa = a.drain();
-    assert_eq!(error_codes(&fa), vec![super::error::SLAVE_CANNOT_BIND]);
+    assert_eq!(
+        body(&fa, sc::SCErrorMsgPacket),
+        vec![0x60, 0, 0x60, 0, 0, 0, 0, 0, 0]
+    );
     assert!(!ops(&fa).contains(&sc::SCUnitAttachedPacket));
     assert!(cannon.data().attached_characters.is_empty());
 }
@@ -5930,7 +5965,7 @@ async fn ship_cannon_gunner_seat_skill_and_leaving() {
     );
     assert!((after.y - before.y + 10.0).abs() < 1e-3);
 
-    // Second gunner: a crew member standing on the ship is ignored silently (C# taken seat),
+    // Second gunner: a crew member standing on the ship gets the clearing taken-seat 0x61,
     // one gunner per cannon. Put the crew member at the cannon's own local offset so it is
     // inside the 4.0 m bind reach after the hull moved.
     world.attach_child(&WorldObject::from(&hull), &WorldObject::from(&pb));
@@ -5944,12 +5979,10 @@ async fn ship_cannon_gunner_seat_skill_and_leaving() {
         0.0,
     );
     slaves::bind_slave_by_tl(&server, &pb, cannon_tl);
-    let fbp = b.drain();
-    assert!(
-        fbp.is_empty(),
-        "a taken cannon seat must be silent: {:x?} {:?}",
-        ops(&fbp),
-        error_codes(&fbp)
+    assert_eq!(
+        body(&b.drain(), sc::SCErrorMsgPacket),
+        vec![0x61, 0, 0x61, 0, 0, 0, 0, 0, 0],
+        "a taken cannon seat must answer the clearing error"
     );
     assert_eq!(cannon.data().attached_characters.len(), 1);
     // ... and cannot cast its skills either.

@@ -917,6 +917,13 @@ mod tests {
             body(&SCErrorMsgPacket::new(300, 0, true)),
             vec![0x2C, 1, 0x2C, 1, 0, 0, 0, 0, 1]
         );
+        // A bind refusal: `isNotify = false` is the form the client's `HandleErrorMessage`
+        // processes through `FUN_393457e0`, which clears the pending bind request (`local+0x10`)
+        // for 0x48/0x60/0x61/0x66/0x9a.
+        assert_eq!(
+            body(&SCErrorMsgPacket::new(154, 0, false)),
+            vec![0x9A, 0, 0x9A, 0, 0, 0, 0, 0, 0]
+        );
         assert_eq!(
             body(&SCPrepareLeaveWorldPacket {
                 time: 10_000,
