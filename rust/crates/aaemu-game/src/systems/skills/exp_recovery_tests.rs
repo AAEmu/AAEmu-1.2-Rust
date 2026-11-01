@@ -161,8 +161,8 @@ fn game_data() -> GameData {
 
 /// A server with the hooks `systems::start_all` installs (the delay effect and the death tail
 /// need them).
-fn server() -> Arc<crate::GameServer> {
-    let server = Arc::new(test_server_with(game_data()));
+fn server_with(data: GameData) -> Arc<crate::GameServer> {
+    let server = Arc::new(test_server_with(data));
     server.set_self();
     crate::systems::skills::bind(&server);
     crate::systems::npcs::install_hooks(&server);
@@ -182,7 +182,11 @@ struct Fx {
 
 /// `priest_distance` is the priest's x offset from the player at (100, 100).
 fn fixture(priest_distance: f32) -> Fx {
-    let server = server();
+    fixture_with(game_data(), priest_distance)
+}
+
+fn fixture_with(data: GameData, priest_distance: f32) -> Fx {
+    let server = server_with(data);
     let mut client = TestClient::new(&server, 1, 1001);
     let mut character = test_character(1, "Prayer", 100.0, 100.0);
     character.unit.level = 10;
@@ -303,6 +307,21 @@ impl Fx {
 
     fn pray(&mut self) {
         self.cast(PRAYER_SKILL);
+    }
+
+    /// The engine call from the priest window casts at the character's current target (the
+    /// priest the player clicked), not at self; the skill's self target type resolves it back
+    /// to the caster.
+    fn pray_at_priest(&mut self) {
+        self.player.data().unit.skill_last_used_ms = 0;
+        let packet = CSStartSkillPacket {
+            skill_id: PRAYER_SKILL,
+            caster: SkillCaster::Unit(self.player.obj_id),
+            target: SkillCastTarget::Unit(self.priest.obj_id),
+            flag: 0,
+            skill_object: SkillObject::None,
+        };
+        start_skill(&self.server, &mut self.client.conn, packet);
     }
 }
 
@@ -586,4 +605,276 @@ async fn recoverable_exp_carried_into_a_new_session_is_restored_by_the_prayer() 
         LEVEL_10_START + 500 - first_loss() + first_recoverable()
     );
     assert_eq!(c.recoverable_exp, 0);
+}
+
+/// `SkillData` and the full skill catalog exactly as the server loads them from the real
+/// `compact.sqlite3` (`crate::data::mod.rs`): the prayer's real template (casting time 6500,
+/// `default_gcd`, obstacle check, `link_backpack_type_id` 1) and the real
+/// `RecoverExpEffect` templates, instead of the small hand-built fixture.
+fn real_game_data(conn: &Connection) -> GameData {
+    let mut gd = crate::systems::npcs::npc::manager::tests::npc_game_data();
+    gd.experience = test_experience(55);
+    gd.skills = crate::data::SkillData::load(conn).expect("client skill sources");
+    gd.systems.skills = crate::systems::skills::data::Data::load_from(
+        conn,
+        &crate::data::client_files::ClientFileManager::new(),
+    )
+    .expect("skill catalog");
+    gd.systems.npcs.npc.templates.insert(
+        PRIEST,
+        NpcTemplate {
+            id: PRIEST,
+            name: "Nui Temple Priest".into(),
+            level: 50,
+            faction_id: 101,
+            priest: true,
+            ..Default::default()
+        },
+    );
+    gd
+}
+
+/// `AAEMU_COMPACT_DB=... cargo test -p aaemu-game real_compact_db_prayer_cast -- --ignored`
+///
+/// The real 1.2 `npcs` rows mark the four temple priests `priest = 't'`, and the real skill
+/// 17063 is a 6.5 s cast at self whose effect row points at `recover_exp_effects` 1
+/// (`need_labor_power`, `need_priest`). Casting it through `CSStartSkill` on the real catalog
+/// must restore the lost experience, not answer NO_PERM.
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_compact_db_prayer_cast_restores_the_lost_experience() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let mut fx = fixture_with(real_game_data(&conn), 2.0);
+    assert!(
+        fx.server
+            .game_data
+            .systems
+            .skills
+            .skill(PRAYER_SKILL)
+            .is_some(),
+        "the real catalog must carry 17063"
+    );
+    fx.die();
+    {
+        let c = fx.player.data();
+        assert_eq!(c.experience, LEVEL_10_START + 500 - first_loss());
+        assert_eq!(c.recoverable_exp, first_recoverable());
+    }
+    fx.client.drain();
+
+    fx.pray_at_priest();
+    // 17063 casts for 6500 ms in the real data.
+    tokio::time::sleep(std::time::Duration::from_millis(7_000)).await;
+    {
+        let c = fx.player.data();
+        assert_eq!(
+            c.experience,
+            LEVEL_10_START + 500 - first_loss() + first_recoverable(),
+            "the real prayer must restore the recoverable experience"
+        );
+        assert_eq!(c.recoverable_exp, 0);
+        assert_eq!(c.labor_power, 100 - 10);
+    }
+    let frames = fx.client.drain();
+    let refused = frames.iter().any(|(op, body)| {
+        *op == sc::SCSkillStartedPacket
+            && body.len() >= 4
+            && u32::from_le_bytes(body[0..4].try_into().unwrap()) == PRAYER_SKILL
+            && body.last() == Some(&0x2D) // NO_PERM
+    });
+    assert!(!refused, "the real cast must not be refused: {frames:x?}");
+}
+
+/// The XP Restoration Scroll's own real item row (33965: `use_skill_id` 26611,
+/// `use_skill_as_reagent = 't'`) so the item-caster path can consume it.
+fn add_real_scroll_item(gd: &mut GameData) {
+    let mut scroll_item = crate::data::items::ItemTemplate::plain(SCROLL_ITEM, 100);
+    scroll_item.use_skill_id = SCROLL_SKILL;
+    scroll_item.use_skill_as_reagent = true;
+    gd.items.templates.insert(SCROLL_ITEM, scroll_item);
+}
+
+/// `AAEMU_COMPACT_DB=... cargo test -p aaemu-game real_compact_db_scroll -- --ignored`
+///
+/// The scroll's description says it is usable while dead; its real skill 26611 is item-only,
+/// the `Item` caster consumes the scroll, and effect 5 has no priest and no labor. The corpse
+/// cast must restore the experience through the real catalog.
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_compact_db_scroll_cast_while_dead_restores_the_lost_experience() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let mut data = real_game_data(&conn);
+    add_real_scroll_item(&mut data);
+    let mut fx = fixture_with(data, 2.0);
+    fx.player.data().labor_power = 0;
+    fx.die();
+    // The death packet leaves the HP pool to the caller; a corpse has hp 0.
+    fx.player.data().unit.hp = 0;
+    let (experience, recoverable) = {
+        let c = fx.player.data();
+        (c.experience, c.recoverable_exp)
+    };
+    assert!(recoverable > 0);
+    fx.client.drain();
+
+    let scroll = fx.give_scroll();
+    fx.cast_scroll(scroll);
+    {
+        let c = fx.player.data();
+        assert_eq!(
+            c.experience,
+            experience + recoverable,
+            "the dead character's scroll restores the recoverable experience"
+        );
+        assert_eq!(c.recoverable_exp, 0);
+        assert_eq!(c.labor_power, 0, "effect 5 has no labor cost");
+    }
+    let frames = fx.client.drain();
+    let refused = frames.iter().any(|(op, body)| {
+        *op == sc::SCSkillStartedPacket
+            && body.len() >= 4
+            && u32::from_le_bytes(body[0..4].try_into().unwrap()) == SCROLL_SKILL
+            && body.last() == Some(&0x2D)
+    });
+    assert!(
+        !refused,
+        "the real scroll cast must not be refused: {frames:x?}"
+    );
+}
+
+/// The prayer above level 50 costs `50 + (level - 50) * 20` labor, the real data's
+/// `formulas` row 7 (`if_negative(pc_level - 51, pc_level, 50 + (pc_level - 50) * 20)`),
+/// not the flat level.
+#[tokio::test]
+async fn prayer_above_level_50_costs_the_scaled_labor() {
+    let mut fx = fixture(2.0);
+    {
+        let mut c = fx.player.data();
+        c.unit.level = 51;
+        c.experience = 51_000 + 500;
+    }
+    fx.die();
+    let (experience, recoverable) = {
+        let c = fx.player.data();
+        (c.experience, c.recoverable_exp)
+    };
+    assert!(recoverable > 0);
+    fx.client.drain();
+
+    fx.pray();
+    {
+        let c = fx.player.data();
+        assert_eq!(c.experience, experience + recoverable);
+        assert_eq!(c.recoverable_exp, 0);
+        assert_eq!(c.labor_power, 100 - 70, "level 51 prayer costs 70 labor");
+    }
+    let frames = fx.client.drain();
+    let labor_amount = frames
+        .iter()
+        .find(|(op, _)| *op == sc::SCCharacterLaborPowerChangedPacket)
+        .map(|(_, body)| i32::from_le_bytes(body[0..4].try_into().unwrap()));
+    assert_eq!(labor_amount, Some(-70));
+    assert!(
+        frames.iter().any(|(op, _)| *op == sc::SCExpChangedPacket),
+        "the restored exp must reach the client: {frames:x?}"
+    );
+}
+
+/// Not enough labor is a real refusal with the 1.2 `NOT_ENOUGH_LABOR_POWER` error, and it
+/// must not take the recoverable exp or any labor.
+#[tokio::test]
+async fn prayer_without_enough_labor_is_refused_and_changes_nothing() {
+    let mut fx = fixture(2.0);
+    fx.player.data().labor_power = 9; // a level-10 prayer needs 10
+    fx.die();
+    let (experience, recoverable) = {
+        let c = fx.player.data();
+        (c.experience, c.recoverable_exp)
+    };
+    assert!(recoverable > 0);
+    fx.client.drain();
+
+    fx.pray();
+    {
+        let c = fx.player.data();
+        assert_eq!(c.experience, experience);
+        assert_eq!(c.recoverable_exp, recoverable);
+        assert_eq!(c.labor_power, 9);
+    }
+    let frames = fx.client.drain();
+    let error = frames.iter().any(|(op, body)| {
+        *op == sc::SCErrorMsgPacket
+            && body.len() >= 2
+            && i16::from_le_bytes([body[0], body[1]])
+                == crate::systems::economy::error_message::NOT_ENOUGH_LABOR_POWER
+    });
+    assert!(
+        error,
+        "the prayer must answer NOT_ENOUGH_LABOR_POWER: {frames:x?}"
+    );
+}
+
+/// Nothing to recover is the effect's other real refusal; the client normally never sends the
+/// cast then (`X2Priest:GetCostForRecoverExp` returns nil), so a direct `CSStartSkill` must be
+/// answered without touching exp or labor.
+#[tokio::test]
+async fn prayer_without_recoverable_experience_is_refused() {
+    let mut fx = fixture(2.0);
+    fx.client.drain();
+
+    fx.pray();
+    {
+        let c = fx.player.data();
+        assert_eq!(c.experience, LEVEL_10_START + 500);
+        assert_eq!(c.recoverable_exp, 0);
+        assert_eq!(c.labor_power, 100);
+    }
+    let frames = fx.client.drain();
+    let error = frames.iter().any(|(op, body)| {
+        *op == sc::SCErrorMsgPacket
+            && body.len() >= 2
+            && i16::from_le_bytes([body[0], body[1]])
+                == crate::systems::economy::error_message::CANNOT_RECOVER_ALL_NOT_ENOUGH
+    });
+    assert!(
+        error,
+        "the prayer must answer CANNOT_RECOVER_ALL_NOT_ENOUGH: {frames:x?}"
+    );
+}
+
+/// The real 1.2 `npcs` rows: these four temple priests have `priest = 't'`; no other NPC does.
+/// The effect looks the flag up by template id, so every one of them can host the prayer.
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+fn real_compact_db_four_temple_priests() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let ids: Vec<u32> = conn
+        .prepare("SELECT id FROM npcs WHERE priest = 't' ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get::<_, i64>(0))
+        .unwrap()
+        .map(|r| r.unwrap() as u32)
+        .collect();
+    assert_eq!(ids, vec![502, 1664, 5614, 5615], "real priest templates");
+    for id in ids {
+        let template = NpcTemplate {
+            id,
+            level: 50,
+            priest: true,
+            ..Default::default()
+        };
+        assert!(template.priest, "template {id} hosts the prayer");
+    }
 }
