@@ -653,7 +653,7 @@ impl ClientPacket for CSCompletedCinemaPacket {
             let cinema = data.cinema(end.cinema_id);
             // Only a CUT_SCENE sequence wipes the client's units and doodads. A cinema that is
             // unknown (no request seen, no client file) is treated as one: an empty world after
-            // a cut scene is worse than duplicates.
+            // a cut scene is worse than a redundant re-send.
             let resend = cinema.and_then(|c| c.cut_scene) != Some(false);
             tracing::info!(
                 "CompletedCinema, {} ({}), Cinema {}, played {}, objects re-sent: {}",

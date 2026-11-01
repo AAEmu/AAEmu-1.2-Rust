@@ -1176,11 +1176,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   doodads only for a sequence whose root `Flags` has bit `0x8` (CUT_SCENE) set, `SCUnitState`
   is dropped while it plays (`0x391D4C30`), and nothing is restored at the end. The other
   cinemas (92 of the 111 quest-component cinemas, e.g. every `sl_*` story video) remove
-  nothing, so the unconditional re-send created each nearby unit and doodad a second time
-  without a remove. `cinemas.name` is looked up in `game/worlds/<world>/cinemas/<name>.xml` at
-  startup (`quests/cinema.rs`, `main_world` first) and only the `<Sequence ... Flags="...">`
-  attribute is read; a cinema without a client file is "unknown" and keeps the C# behaviour (an
-  empty world after a cut scene is worse than duplicates). Which cinema plays is known from
+  nothing, so after them the unconditional re-send repeated the create of every nearby unit and
+  doodad the client still had, without a remove (in a live run the client kept one entity per
+  id, so it is redundant rather than visible, but it replays e.g. the rider attach). `cinemas.name`
+  is looked up in `game/worlds/<world>/cinemas/<name>.xml` at startup (`quests/cinema.rs`,
+  `main_world` first) and only the `<Sequence ... Flags="...">` attribute is read; a cinema
+  without a client file is "unknown" and keeps the C# behaviour (an empty world after a cut
+  scene is worse than a redundant re-send). Which cinema plays is known from
   `CSRequestPermissionToPlayCinemaForDirectingMode`, whose `u32` is the quest **component** id
   (not the quest context id; body `u32 component, bc npc, bc doodad`; the client never waits
   for an answer): the component's `cinema_id`, else its `QuestActObjCinema`. A `CinemaEffect`
