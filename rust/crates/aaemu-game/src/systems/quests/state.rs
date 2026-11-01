@@ -267,6 +267,14 @@ pub struct Subscription {
     pub path: ActPath,
 }
 
+/// A cinema the client is about to play or is playing, with the server time (unix ms) it was
+/// requested / started at. `cinema_id` 0 is an unknown cinema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CinemaMark {
+    pub cinema_id: u32,
+    pub at_ms: i64,
+}
+
 /// `Character.Quests` (live part) + `Character.Events` quest subscriptions +
 /// `CurrentlyPlayingCinemaId`.
 #[derive(Debug, Clone, Default)]
@@ -278,7 +286,13 @@ pub struct QuestState {
     next_handle: QuestHandle,
     /// The subscriptions in invocation-list order.
     pub subs: Vec<Subscription>,
+    /// `CurrentlyPlayingCinemaId`: the cinema a `QuestActObjCinema` claimed on start.
     pub currently_playing_cinema_id: u32,
+    /// The cinema the client announced (`CSRequestPermissionToPlayCinemaForDirectingMode`) or a
+    /// `CinemaEffect` started, until its `CSStartedCinemaPacket` (Rust addition).
+    pub requested_cinema: Option<CinemaMark>,
+    /// The cinema between `CSStartedCinemaPacket` and `CSCompletedCinemaPacket` (Rust addition).
+    pub playing_cinema: Option<CinemaMark>,
     /// Set once `CharacterQuests.Load` built the active quests from the DB rows.
     pub loaded: bool,
     /// Evaluations requested by an operation without a player handle (data-level tests).

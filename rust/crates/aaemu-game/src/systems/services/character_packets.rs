@@ -275,18 +275,6 @@ impl ClientPacket for CSRankCharacterPacket {
         })
     }
 }
-// One-way notification: the client opens the directing dialog for a component with a cinema
-// and sends the component id + npc + doodad; the 1.2 server has no reply (`FUN_3949e990`).
-log_only_packet!(
-    CSRequestPermissionToPlayCinemaForDirectingMode,
-    debug,
-    |s| {
-        let component_id = s.read_u32()?;
-        let npc = s.read_bc()?;
-        let doodad = s.read_bc()?;
-        format!(", ComponentId: {component_id}, Npc: {npc}, Doodad: {doodad}")
-    }
-);
 log_only_packet!(CSRequestSecondPasswordKeyTablesPacket, debug, |s| {
     let _ = s;
     String::new()
@@ -859,10 +847,6 @@ pub fn register(reg: &mut PacketRegistry) {
     reg.register::<CSEditorGameModePacket>(LEVEL_PLAIN, cs::CSEditorGameModePacket);
     reg.register::<CSRankCharacterPacket>(LEVEL_PLAIN, cs::CSRankCharacterPacket);
     reg.register::<CSRequestCharBriefPacket>(LEVEL_PLAIN, cs::CSRequestCharBriefPacket);
-    reg.register::<CSRequestPermissionToPlayCinemaForDirectingMode>(
-        LEVEL_PLAIN,
-        cs::CSRequestPermissionToPlayCinemaForDirectingMode,
-    );
     reg.register::<CSRequestSecondPasswordKeyTablesPacket>(
         LEVEL_PLAIN,
         cs::CSRequestSecondPasswordKeyTablesPacket,

@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use rusqlite::Connection;
 
+use super::cinema::{load_cinemas, CinemaInfo};
 use super::model::{kind, QuestSupplies};
 use super::templates::{ActKind, ActRef, QuestActTemplate, QuestComponentTemplate, QuestTemplate};
 use super::unit_reqs::UnitReqsData;
@@ -163,6 +164,9 @@ pub struct QuestData {
     pub sphere_order: Vec<u32>,
     /// `quest_sign_sphere.g` areas of `main_world` (zone-local coordinates).
     pub sign_spheres: Vec<RawSignSphere>,
+    /// `cinemas` rows with the CUT_SCENE flag of their client sequence (Rust addition, see
+    /// [`super::cinema`]).
+    pub cinemas: HashMap<u32, CinemaInfo>,
 }
 
 fn err(msg: impl Into<String>) -> GameDataError {
@@ -195,6 +199,7 @@ impl QuestData {
         d.drop_self_referencing_requirements();
         d.load_spheres(conn)?;
         d.sign_spheres = load_sign_spheres(files, "main_world")?;
+        d.cinemas = load_cinemas(conn, files)?;
         tracing::info!("Loaded {} quests", d.templates.len());
         Ok(d)
     }
@@ -1542,6 +1547,44 @@ impl QuestData {
     /// `GetComponent(componentId)`.
     pub fn component(&self, id: u32) -> Option<&QuestComponentTemplate> {
         self.components.get(&id)
+    }
+
+    /// The cinema a quest component plays: its own `cinema_id`, else the cinema of a
+    /// `QuestActObjCinema` on it. `None` for an unknown component or one without a cinema.
+    pub fn component_cinema_id(&self, component_id: u32) -> Option<u32> {
+        let c = self.components.get(&component_id)?;
+        if c.cinema_id != 0 {
+            return Some(c.cinema_id);
+        }
+        c.acts.iter().find_map(|&a| match self.acts[a].kind {
+            ActKind::ObjCinema { cinema_id, .. } => Some(cinema_id),
+            _ => None,
+        })
+    }
+
+    /// The `cinemas` row `id` (`None` for 0 and unknown ids).
+    pub fn cinema(&self, id: u32) -> Option<&CinemaInfo> {
+        self.cinemas.get(&id)
+    }
+
+    /// `"<id> <name> (cut scene | not a cut scene | no sequence file)"` for the logs, `"unknown"`
+    /// for cinema id 0.
+    pub fn cinema_label(&self, id: u32) -> String {
+        if id == 0 {
+            return "unknown".to_string();
+        }
+        match self.cinema(id) {
+            None => format!("{id} (not in the cinemas table)"),
+            Some(c) => format!(
+                "{id} {} ({})",
+                c.name,
+                match c.cut_scene {
+                    Some(true) => "cut scene",
+                    Some(false) => "not a cut scene",
+                    None => "no sequence file",
+                }
+            ),
+        }
     }
 
     /// `GetSupplies(level)`.
