@@ -81,6 +81,8 @@ pub type PlayerRef = Arc<Player>;
 
 impl Player {
     pub fn new(character: Character, conn: ConnectionHandle) -> PlayerRef {
+        // `Debug:ReplyDelay` character filter (no-op when the switch is off).
+        conn.observe_character_name(&character.unit.name);
         Arc::new(Self {
             obj_id: character.obj_id,
             character_id: character.id,

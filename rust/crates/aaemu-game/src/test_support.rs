@@ -90,14 +90,24 @@ impl TestClient {
         let (out_tx, out) = crate::net::outbox::outbox();
         let (cmd_tx, cmd) = mpsc::unbounded_channel();
         let peer: SocketAddr = "127.0.0.1:50000".parse().expect("addr");
-        let (mut conn, handle) = GameConnection::new(id, peer, out_tx, cmd_tx);
+        let (mut conn, _) = GameConnection::new(id, peer, out_tx, cmd_tx);
         conn.set_account_id(account);
-        server.connections.add(handle);
+        conn.set_reply_delay(server.reply_delay.clone());
+        server.connections.add(conn.handle());
         Self {
             conn,
             out,
             _cmd: cmd,
         }
+    }
+
+    /// Queued frames with their `Debug:ReplyDelay` deadline (`None` = not held).
+    pub fn drain_frames(&mut self) -> Vec<crate::net::outbox::OutFrame> {
+        let mut v = Vec::new();
+        while let Ok(f) = self.out.try_recv_frame() {
+            v.push(f);
+        }
+        v
     }
 
     /// Drained frames as (opcode, body); level-2 frames are tagged `0x8000 | opcode`.
