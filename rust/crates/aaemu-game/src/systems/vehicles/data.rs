@@ -421,12 +421,13 @@ pub struct VehicleModel {
     pub wheeled_vehicle_gear_speed_ratio_2: f32,
     pub wheeled_vehicle_gear_speed_ratio_3: f32,
     /// `turret_pitch_angle_min` / `_max`, degrees, as `FUN_39425490` clamps them
-    /// (after `DEG2RAD 0x3999cf98 = 0.017453292`).
-    pub turret_pitch_angle_min: f32,
-    pub turret_pitch_angle_max: f32,
+    /// (after `DEG2RAD 0x3999cf98 = 0.017453292`). `None` when the stored value is not numeric
+    /// (the real `vehicle_models` rows store the text `'f'`): no limit on that side.
+    pub turret_pitch_angle_min: Option<f32>,
+    pub turret_pitch_angle_max: Option<f32>,
     /// `turret_yaw_angle_min` / `_max`, degrees.
-    pub turret_yaw_angle_min: f32,
-    pub turret_yaw_angle_max: f32,
+    pub turret_yaw_angle_min: Option<f32>,
+    pub turret_yaw_angle_max: Option<f32>,
 }
 
 impl VehicleModel {
@@ -435,21 +436,33 @@ impl VehicleModel {
     /// `DEG2RAD`; `39425580` key aim wraps a full-circle yaw into +/-pi instead of clamping).
     /// The packet's pitch/yaw are model-frame radians; the data columns are degrees.
     pub fn clamp_turret_angles(&self, pitch: f32, yaw: f32) -> (f32, f32) {
-        let (pitch_min, pitch_max) = (
-            self.turret_pitch_angle_min.to_radians(),
-            self.turret_pitch_angle_max.to_radians(),
+        let pitch = clamp_limit(
+            pitch,
+            self.turret_pitch_angle_min,
+            self.turret_pitch_angle_max,
         );
-        let (yaw_min, yaw_max) = (
-            self.turret_yaw_angle_min.to_radians(),
-            self.turret_yaw_angle_max.to_radians(),
-        );
-        let pitch = pitch.clamp(pitch_min, pitch_max);
-        let yaw = if self.turret_yaw_angle_max - self.turret_yaw_angle_min >= 360.0 {
-            wrap_pi(yaw)
-        } else {
-            yaw.clamp(yaw_min, yaw_max)
+        let yaw = match (self.turret_yaw_angle_min, self.turret_yaw_angle_max) {
+            (Some(min), Some(max)) if max - min >= 360.0 => wrap_pi(yaw),
+            _ => clamp_limit(yaw, self.turret_yaw_angle_min, self.turret_yaw_angle_max),
         };
         (pitch, yaw)
+    }
+}
+
+/// Clamp `value` (radians) to a window given in degrees. A missing or non-finite bound is no
+/// limit. A window whose minimum is above its maximum (bad data) is sorted instead of being
+/// handed to `f32::clamp`, which panics when `min > max`.
+fn clamp_limit(value: f32, min: Option<f32>, max: Option<f32>) -> f32 {
+    let min = min.map(f32::to_radians).filter(|v| v.is_finite());
+    let max = max.map(f32::to_radians).filter(|v| v.is_finite());
+    match (min, max) {
+        (Some(a), Some(b)) => {
+            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+            value.clamp(lo, hi)
+        }
+        (Some(lo), None) => value.max(lo),
+        (None, Some(hi)) => value.min(hi),
+        (None, None) => value,
     }
 }
 
@@ -1125,10 +1138,10 @@ impl VehiclesData {
                 wheeled_vehicle_gear_speed_ratio_1: r.f32("wheeled_vehicle_gear_speed_ratio_1")?,
                 wheeled_vehicle_gear_speed_ratio_2: r.f32("wheeled_vehicle_gear_speed_ratio_2")?,
                 wheeled_vehicle_gear_speed_ratio_3: r.f32("wheeled_vehicle_gear_speed_ratio_3")?,
-                turret_pitch_angle_min: r.f32("turret_pitch_angle_min")?,
-                turret_pitch_angle_max: r.f32("turret_pitch_angle_max")?,
-                turret_yaw_angle_min: r.f32("turret_yaw_angle_min")?,
-                turret_yaw_angle_max: r.f32("turret_yaw_angle_max")?,
+                turret_pitch_angle_min: r.f32_opt("turret_pitch_angle_min")?,
+                turret_pitch_angle_max: r.f32_opt("turret_pitch_angle_max")?,
+                turret_yaw_angle_min: r.f32_opt("turret_yaw_angle_min")?,
+                turret_yaw_angle_max: r.f32_opt("turret_yaw_angle_max")?,
             };
             self.vehicle_models.entry(m.id).or_insert(m);
             Ok(())
@@ -1531,10 +1544,10 @@ mod tests {
     #[test]
     fn turret_angles_clamp_to_the_model_and_wrap_a_full_circle_yaw() {
         let limited = VehicleModel {
-            turret_pitch_angle_min: -20.0,
-            turret_pitch_angle_max: 35.0,
-            turret_yaw_angle_min: -22.0,
-            turret_yaw_angle_max: 22.0,
+            turret_pitch_angle_min: Some(-20.0),
+            turret_pitch_angle_max: Some(35.0),
+            turret_yaw_angle_min: Some(-22.0),
+            turret_yaw_angle_max: Some(22.0),
             ..VehicleModel::default()
         };
         assert_eq!(
@@ -1542,15 +1555,45 @@ mod tests {
             (35f32.to_radians(), -22f32.to_radians())
         );
         let full_circle = VehicleModel {
-            turret_pitch_angle_min: -90.0,
-            turret_pitch_angle_max: 90.0,
-            turret_yaw_angle_min: -360.0,
-            turret_yaw_angle_max: 360.0,
+            turret_pitch_angle_min: Some(-90.0),
+            turret_pitch_angle_max: Some(90.0),
+            turret_yaw_angle_min: Some(-360.0),
+            turret_yaw_angle_max: Some(360.0),
             ..VehicleModel::default()
         };
         // Any finite f32, even one no loop could normalise in reason: a remainder.
         let (_, yaw) = full_circle.clamp_turret_angles(0.0, 1.0e30);
         assert!(yaw.abs() <= std::f32::consts::PI);
+    }
+
+    #[test]
+    fn turret_angles_survive_a_reversed_window_and_a_missing_limit() {
+        // `f32::clamp` panics when min > max; a bad row is sorted instead.
+        let reversed = VehicleModel {
+            turret_pitch_angle_min: Some(30.0),
+            turret_pitch_angle_max: Some(-30.0),
+            turret_yaw_angle_min: Some(45.0),
+            turret_yaw_angle_max: Some(-45.0),
+            ..VehicleModel::default()
+        };
+        assert_eq!(
+            reversed.clamp_turret_angles(1.0, -1.0),
+            (30f32.to_radians(), -45f32.to_radians())
+        );
+        // The training ballista (vehicle_models 6): the real row stores `turret_yaw_angle_max`
+        // as the text 'f', which the loader keeps as `None` (no limit).
+        let ballista = VehicleModel {
+            turret_pitch_angle_min: Some(-0.1),
+            turret_pitch_angle_max: Some(0.1),
+            turret_yaw_angle_min: Some(0.0),
+            turret_yaw_angle_max: None,
+            ..VehicleModel::default()
+        };
+        assert_eq!(ballista.clamp_turret_angles(0.0, 0.5), (0.0, 0.5));
+        assert_eq!(ballista.clamp_turret_angles(0.0, -0.5), (0.0, 0.0));
+        // No limits at all.
+        let open = VehicleModel::default();
+        assert_eq!(open.clamp_turret_angles(1.0, -1.0), (1.0, -1.0));
     }
 
     #[test]

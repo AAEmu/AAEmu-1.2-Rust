@@ -346,12 +346,7 @@ async fn parent_only_cannon_attack(occupied: bool) {
     .unwrap();
     assert_eq!(attacker.data().unit.transform.parent_obj_id, cannon.obj_id);
     assert_eq!(attacker.data().attached_point, attach_point::NONE);
-    // Aim along the cannon's own world facing: inside the vehicle model's +/-22 deg yaw window.
-    let aim = world.world_pos_rot(&WorldObject::from(&cannon));
-    let forward = (-aim.rot_z.sin(), aim.rot_z.cos());
-    let shot_x = aim.x + 40.0 * forward.0;
-    let shot_y = aim.y + 40.0 * forward.1;
-    let target = spawn_npc_at(&server, 0x5000, CANNON_TARGET_NPC, shot_x, shot_y);
+    let target = spawn_npc_at(&server, 0x5000, CANNON_TARGET_NPC, 130.0, 130.0);
     target.data().unit.hp = 1000;
     target.data().unit.max_hp = 1000;
     let shot = CSStartSkillPacket {
@@ -362,8 +357,8 @@ async fn parent_only_cannon_attack(occupied: bool) {
         },
         target: SkillCastTarget::Position {
             obj_id: 0,
-            x: shot_x,
-            y: shot_y,
+            x: 130.0,
+            y: 130.0,
             z: 100.0,
             rot: 0.0,
             obj_id1: 0,
