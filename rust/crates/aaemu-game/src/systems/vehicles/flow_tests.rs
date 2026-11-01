@@ -1516,12 +1516,13 @@ async fn slave_summon_bind_drive_and_despawn() {
     assert!(ops(&b.drain()).contains(&sc::SCUnitsRemovedPacket));
 }
 
-/// A seat another character already holds is silent, as in the C#: no error and no attach,
-/// the occupant stays, and the seat frees when the occupant leaves. The check and the
-/// reservation happen under the slave's one lock, so the seat can never be handed to two
-/// characters. The C# owners-mark refusal is the only taken-driver case that sends 0x61.
+/// A seat another character already holds answers `slave_already_has_master` 0x61 with
+/// `isNotify = false` (the form that clears the client's pending bind request; the C# returned
+/// silently, but that leaves the client stuck on "already requested"): no attach, the occupant
+/// stays, and the seat frees when the occupant leaves. The check and the reservation happen
+/// under the slave's one lock, so the seat can never be handed to two characters.
 #[tokio::test]
-async fn a_taken_seat_is_silent_and_keeps_the_occupant() {
+async fn a_taken_seat_answers_a_clearing_error_and_keeps_the_occupant() {
     use crate::models::slave::Slave;
     use crate::world::Entity;
 
@@ -1574,7 +1575,7 @@ async fn a_taken_seat_is_silent_and_keeps_the_occupant() {
     b.drain();
     c.drain();
 
-    // The driver seat is taken: B is ignored silently (C# behaviour), not attached.
+    // The driver seat is taken: B is not attached and gets the clearing 0x61.
     slaves::bind_slave(
         &server,
         &pb,
@@ -1583,9 +1584,10 @@ async fn a_taken_seat_is_silent_and_keeps_the_occupant() {
         7,
         Some(4.0),
     );
-    assert!(
-        b.drain().is_empty(),
-        "a taken seat must not answer an error or attach"
+    assert_eq!(
+        body(&b.drain(), sc::SCErrorMsgPacket),
+        vec![0x61, 0, 0x61, 0, 0, 0, 0, 0, 0],
+        "a taken seat must answer the clearing error, not attach"
     );
     assert_eq!(
         cart.data().attached_characters,
@@ -1616,7 +1618,7 @@ async fn a_taken_seat_is_silent_and_keeps_the_occupant() {
     assert!(ops(&a.drain()).contains(&sc::SCUnitAttachedPacket));
     c.drain();
 
-    // A third character on the taken passenger seat is ignored silently too.
+    // A third character on the taken passenger seat gets the clearing 0x61, not silence.
     slaves::bind_slave(
         &server,
         &pc,
@@ -1625,7 +1627,10 @@ async fn a_taken_seat_is_silent_and_keeps_the_occupant() {
         7,
         Some(3.0),
     );
-    assert!(c.drain().is_empty());
+    assert_eq!(
+        body(&c.drain(), sc::SCErrorMsgPacket),
+        vec![0x61, 0, 0x61, 0, 0, 0, 0, 0, 0]
+    );
     assert_eq!(cart.data().attached_characters.len(), 2);
 
     // Leaving frees the seat for the next character.
@@ -1677,8 +1682,8 @@ async fn a_taken_seat_is_silent_and_keeps_the_occupant() {
         Some(4.0),
     );
     assert_eq!(
-        error_codes(&b.drain()),
-        vec![super::error::SLAVE_ALREADY_HAS_MASTER]
+        body(&b.drain(), sc::SCErrorMsgPacket),
+        vec![0x61, 0, 0x61, 0, 0, 0, 0, 0, 0]
     );
     assert!(cart.data().attached_characters.is_empty());
 }
@@ -1727,11 +1732,52 @@ fn passenger_data() -> GameData {
     d
 }
 
+/// The Red Farm Hauler (slave 146, model 1553) of the 2026-11-01 live log: `model_bindings`
+/// declares the passenger seat at point 2, `slave_attach_points.json` locates only its cannon
+/// points 9-14 on the rear flatbed, and the model has no ship model. The positions are the real
+/// rows.
+fn hauler_data() -> GameData {
+    let mut d = passenger_data();
+    d.systems.vehicles.slave_templates.insert(
+        146,
+        SlaveTemplate {
+            id: 146,
+            name: "Red Farm Hauler".into(),
+            model_id: 1553,
+            slave_kind: super::data::slave_kind::MACHINE,
+            ..SlaveTemplate::default()
+        },
+    );
+    d.systems
+        .vehicles
+        .model_bindings
+        .insert(1553, vec![1, 2, 9, 10, 11, 12, 13, 14, 35]);
+    let at = |x: f32, y: f32, z: f32| WorldSpawnPosition {
+        x,
+        y,
+        z,
+        ..WorldSpawnPosition::default()
+    };
+    d.systems.vehicles.attach_points.insert(
+        1553,
+        vec![
+            (9, at(-0.55, -2.0, 1.15)),
+            (10, at(0.55, -2.0, 1.15)),
+            (11, at(0.55, -3.2, 1.15)),
+            (12, at(-0.55, -3.2, 1.15)),
+            (13, at(0.55, -2.6, 2.15)),
+            (14, at(-0.55, -2.6, 2.15)),
+        ],
+    );
+    d
+}
+
 /// Skill 13863 (`Take the Passenger Seat`) seats the caster at point 2 through the real
 /// `CSStartSkill` handler and `AttachTo` special effect; a second character on the same seat
-/// is ignored silently, as the C# does.
+/// gets the clearing `slave_already_has_master` 0x61 (the C# was silent, which left the client's
+/// pending bind request set).
 #[tokio::test]
-async fn passenger_skill_13863_seats_point_two_and_a_taken_seat_is_silent() {
+async fn passenger_skill_13863_seats_point_two_and_a_taken_seat_answers_a_clearing_error() {
     use crate::models::slave::Slave;
     use crate::systems::skills::handlers::{start_skill, CSStartSkillPacket};
     use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
@@ -1808,13 +1854,14 @@ async fn passenger_skill_13863_seats_point_two_and_a_taken_seat_is_silent() {
     a.drain();
     c.drain();
 
-    // The passenger seat is now taken: the second cast attaches nobody and sends no error.
+    // The passenger seat is now taken: the second cast attaches nobody and answers the clearing
+    // 0x61 (`isNotify = false`).
     cast(&mut c, 0x00F0_0003, cart.obj_id);
     let fc = c.drain();
-    assert!(
-        !ops(&fc).contains(&sc::SCUnitAttachedPacket) && !ops(&fc).contains(&sc::SCErrorMsgPacket),
-        "a taken seat must be silent: {:x?}",
-        ops(&fc)
+    assert!(!ops(&fc).contains(&sc::SCUnitAttachedPacket));
+    assert_eq!(
+        body(&fc, sc::SCErrorMsgPacket),
+        vec![0x61, 0, 0x61, 0, 0, 0, 0, 0, 0]
     );
     assert_eq!(
         cart.data().attached_characters,
@@ -1876,9 +1923,9 @@ async fn the_passenger_skill_does_not_seat_on_a_dead_slave() {
 }
 
 /// The 1.2 client only offers / accepts a seat its model declares (`model_bindings`): the Farm
-/// Wagon (slave 60, model 1008) has no point 2, so 13863 is not offered and a forged bind there is
-/// ignored silently; the Red Farm Hauler (slave 146, model 1553) has one and takes the passenger.
-/// A point the model does declare (a ship cannon's point 9) still binds.
+/// Wagon (slave 60, model 1008) has no point 2, so 13863 is not offered and a forged bind there
+/// answers the clearing 0x60; the Red Farm Hauler (slave 146, model 1553) has one and takes the
+/// passenger. A point the model does declare (a ship cannon's point 9) still binds.
 #[tokio::test]
 async fn model_bindings_decide_which_seats_a_slave_offers_and_accepts() {
     use crate::models::slave::Slave;
@@ -2017,7 +2064,7 @@ async fn model_bindings_decide_which_seats_a_slave_offers_and_accepts() {
     };
 
     // Farm Wagon: the model has no point 2. With the driver seat taken the interaction list keeps
-    // the occupy skill, and a forged passenger cast attaches nobody silently.
+    // the occupy skill, and a forged passenger cast attaches nobody and answers 0x60.
     let wagon = spawn(60, 1008, 0x300, 3, 103.0);
     a.drain();
     b.drain();
@@ -2038,10 +2085,11 @@ async fn model_bindings_decide_which_seats_a_slave_offers_and_accepts() {
     assert_eq!(b.drain(), interaction(wagon.obj_id, vec![12_076]));
     cast(&mut b, PB, wagon.obj_id);
     let fb = b.drain();
-    assert!(
-        !ops(&fb).contains(&sc::SCUnitAttachedPacket) && error_codes(&fb).is_empty(),
-        "a missing seat must be silent: {:x?}",
-        ops(&fb)
+    assert!(!ops(&fb).contains(&sc::SCUnitAttachedPacket));
+    assert_eq!(
+        body(&fb, sc::SCErrorMsgPacket),
+        vec![0x60, 0, 0x60, 0, 0, 0, 0, 0, 0],
+        "a missing seat must clear the pending bind request"
     );
     assert_eq!(
         wagon.data().attached_characters,
@@ -2165,15 +2213,22 @@ async fn a_slave_outside_the_client_reach_is_refused_and_an_in_reach_one_is_seat
         );
     };
 
-    // Far driver bind (7.1 m > 4.0 m) through the 0x031 handler path.
+    // Far driver bind (7.1 m > 4.0 m) through the 0x031 handler path: the clearing form
+    // (`isNotify = false`) or the client keeps its pending bind request.
     slaves::bind_slave_by_tl(&server, &pb, 3);
-    assert_eq!(error_codes(&b.drain()), vec![super::error::TOO_FAR_AWAY]);
+    assert_eq!(
+        body(&b.drain(), sc::SCErrorMsgPacket),
+        vec![0x9a, 0, 0x9a, 0, 0, 0, 0, 0, 0]
+    );
     assert!(cart.data().attached_characters.is_empty());
 
     // Far passenger cast (7.1 m > 3.0 m) through the real skill runner.
     cast(&mut b, PB, cart.obj_id);
     let fb = b.drain();
-    assert!(error_codes(&fb).contains(&super::error::TOO_FAR_AWAY));
+    assert_eq!(
+        body(&fb, sc::SCErrorMsgPacket),
+        vec![0x9a, 0, 0x9a, 0, 0, 0, 0, 0, 0]
+    );
     assert!(!ops(&fb).contains(&sc::SCUnitAttachedPacket));
     assert!(cart.data().attached_characters.is_empty());
 
@@ -2198,6 +2253,205 @@ async fn a_slave_outside_the_client_reach_is_refused_and_an_in_reach_one_is_seat
         cart.data().attached_characters,
         vec![(attach_point::PASSENGER0, 0x00F0_0003)]
     );
+}
+
+/// The 1.2 client offers the Red Farm Hauler's passenger seat from beside the hull: it measures
+/// the distance to the vehicle's collision parts, not to the model origin (`FUN_39093860` ->
+/// `FUN_3989bf90`). Model 1553 has no ship model and no located point 2, so the origin fallback
+/// refused a player beside the rear seat more than 3 m from the origin (live log 2026-11-01
+/// 14:22:40-14:22:42, three `TOO_FAR_AWAY` answers). The model's nearest located attach point
+/// stands in for the hull; a player beyond both the hull and the origin is still refused, and the
+/// driver bind still uses the 4.0 m reach.
+#[tokio::test]
+async fn passenger_beside_the_hull_is_in_reach_without_a_ship_model_or_a_located_seat() {
+    use crate::models::slave::Slave;
+    use crate::systems::skills::handlers::{start_skill, CSStartSkillPacket};
+    use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+    use crate::world::Entity;
+
+    let server = server_with(hauler_data());
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let mut a = TestClient::new(&server, 1, 1);
+    let mut b = TestClient::new(&server, 2, 2);
+    let mut c = TestClient::new(&server, 3, 3);
+    let pa = spawn_player(&server, &a, test_character(1, "Driver", 100.0, 100.0), PA);
+    let pb = spawn_player(&server, &b, test_character(2, "Beside", 105.0, 97.5), PB);
+    let pc = spawn_player(
+        &server,
+        &c,
+        test_character(3, "Far", 110.0, 100.0),
+        0x00F0_0003,
+    );
+    a.conn.active_char = Some(pa.clone());
+    b.conn.active_char = Some(pb.clone());
+    c.conn.active_char = Some(pc.clone());
+    for p in [&pb, &pc] {
+        let mut d = p.data();
+        d.unit.hp = 1000;
+        d.unit.max_hp = 1000;
+    }
+    let world = server.world.world(0).unwrap();
+    let mut hauler = Slave::new(0, 146);
+    hauler.unit.hp = 1000;
+    hauler.unit.max_hp = 1000;
+    hauler.unit.model_id = 1553;
+    hauler.unit.tl_id = 3;
+    hauler.unit.transform.set_xyz(103.0, 100.0, 100.0);
+    hauler.summoner_obj_id = PA;
+    hauler.summoner_id = pa.character_id;
+    let hauler = Entity::new(0x300, hauler);
+    world.spawn(&hauler, &server.view_ctx());
+    a.drain();
+    b.drain();
+    c.drain();
+
+    let cast = |client: &mut TestClient, caster: u32, target: u32| {
+        start_skill(
+            &server,
+            &mut client.conn,
+            CSStartSkillPacket {
+                skill_id: PASSENGER_SKILL,
+                caster: SkillCaster::Unit(caster),
+                target: SkillCastTarget::Unit(target),
+                flag: 0,
+                skill_object: SkillObject::None,
+            },
+        );
+    };
+
+    // The driver stands 3.0 m from the origin, farther (4.2 m) from the rear cannon points: the
+    // smaller origin distance keeps the unchanged 4.0 m driver reach.
+    slaves::bind_slave_by_tl(&server, &pa, 3);
+    assert_eq!(
+        hauler.data().attached_characters,
+        vec![(attach_point::DRIVER, PA)]
+    );
+    a.drain();
+
+    // The passenger stands beside the rear seat: 3.2 m from the origin but 1.9 m from the nearest
+    // located attach point.
+    cast(&mut b, PB, hauler.obj_id);
+    let fb = b.drain();
+    assert!(
+        !error_codes(&fb).contains(&super::error::TOO_FAR_AWAY),
+        "the client offers this seat: {:x?}",
+        error_codes(&fb)
+    );
+    assert!(ops(&fb).contains(&sc::SCUnitAttachedPacket));
+    assert_eq!(
+        hauler.data().attached_characters,
+        vec![(attach_point::DRIVER, PA), (attach_point::PASSENGER0, PB)]
+    );
+    assert_eq!(pb.data().attached_point, attach_point::PASSENGER0);
+
+    // 7 m from the origin, beyond the hull and the origin bound.
+    cast(&mut c, 0x00F0_0003, hauler.obj_id);
+    assert_eq!(
+        error_codes(&c.drain()),
+        vec![super::error::TOO_FAR_AWAY],
+        "a player away from the hull is still refused"
+    );
+    assert_eq!(
+        hauler.data().attached_characters,
+        vec![(attach_point::DRIVER, PA), (attach_point::PASSENGER0, PB)]
+    );
+}
+
+/// The live log's second F bind (2026-11-01 14:22:50): after `CSDiscardSlave` the driver had
+/// driven the hauler 3.5 m and stood 4.9 m from its origin beside the rear hull, and the re-bind
+/// was refused with `TOO_FAR_AWAY`. The discard does clear the seat; the refusal was the same
+/// origin-only gap. The 4.0 m driver reach is unchanged and still refuses a player away from the
+/// hull.
+#[tokio::test]
+async fn a_discarded_driver_rebinds_beside_the_hull_and_a_far_one_is_still_refused() {
+    use crate::models::slave::Slave;
+    use crate::net::registry::ClientPacket;
+    use crate::systems::vehicles::packets::{CSBindSlavePacket, CSDiscardSlavePacket};
+    use crate::world::Entity;
+
+    let server = server_with(hauler_data());
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let mut a = TestClient::new(&server, 1, 1);
+    let pa = spawn_player(&server, &a, test_character(1, "Driver", 103.0, 98.0), PA);
+    a.conn.active_char = Some(pa.clone());
+    let world = server.world.world(0).unwrap();
+    let mut hauler = Slave::new(0, 146);
+    hauler.unit.hp = 1000;
+    hauler.unit.max_hp = 1000;
+    hauler.unit.model_id = 1553;
+    hauler.unit.tl_id = 3;
+    hauler.unit.transform.set_xyz(103.0, 100.0, 100.0);
+    hauler.summoner_obj_id = PA;
+    hauler.summoner_id = pa.character_id;
+    let hauler = Entity::new(0x300, hauler);
+    world.spawn(&hauler, &server.view_ctx());
+    a.drain();
+
+    CSBindSlavePacket { tl_id: 3 }
+        .handle(&server, &mut a.conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        hauler.data().attached_characters,
+        vec![(attach_point::DRIVER, PA)]
+    );
+    a.drain();
+
+    // Discard, then stand where the live driver stood: 4.9 m behind the origin, beside the hull.
+    CSDiscardSlavePacket { tl_id: 3 }
+        .handle(&server, &mut a.conn)
+        .await
+        .unwrap();
+    assert!(hauler.data().attached_characters.is_empty());
+    assert!(slaves::get_is_mounted(&world, PA).is_none());
+    a.drain();
+    pa.data().unit.transform.set_xyz(103.0, 95.1, 100.0);
+
+    CSBindSlavePacket { tl_id: 3 }
+        .handle(&server, &mut a.conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        hauler.data().attached_characters,
+        vec![(attach_point::DRIVER, PA)],
+        "the client offers the driver seat from beside the hull"
+    );
+    assert!(error_codes(&a.drain()).is_empty());
+
+    // 9 m behind the origin is beyond the hull and the origin bound: the 4.0 m reach still holds.
+    CSDiscardSlavePacket { tl_id: 3 }
+        .handle(&server, &mut a.conn)
+        .await
+        .unwrap();
+    a.drain();
+    pa.data().unit.transform.set_xyz(103.0, 91.0, 100.0);
+    CSBindSlavePacket { tl_id: 3 }
+        .handle(&server, &mut a.conn)
+        .await
+        .unwrap();
+    let refused = a.drain();
+    assert_eq!(
+        body(&refused, sc::SCErrorMsgPacket),
+        vec![0x9a, 0, 0x9a, 0, 0, 0, 0, 0, 0],
+        "the refusal must be the clearing (isNotify = false) form"
+    );
+    assert!(hauler.data().attached_characters.is_empty());
+
+    // The refusal latches nothing: the next in-reach bind succeeds.
+    pa.data().unit.transform.set_xyz(103.0, 95.1, 100.0);
+    CSBindSlavePacket { tl_id: 3 }
+        .handle(&server, &mut a.conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        hauler.data().attached_characters,
+        vec![(attach_point::DRIVER, PA)]
+    );
+    assert!(error_codes(&a.drain()).is_empty());
 }
 
 /// One slave at a time: the client refuses a second bind with `slave_unbind_first` 0x66
@@ -2249,8 +2503,8 @@ async fn a_character_on_one_slave_cannot_bind_a_second_one() {
     // The 0x031 handler path to a second slave.
     slaves::bind_slave_by_tl(&server, &pa, 4);
     assert_eq!(
-        error_codes(&a.drain()),
-        vec![super::error::SLAVE_UNBIND_FIRST]
+        body(&a.drain(), sc::SCErrorMsgPacket),
+        vec![0x66, 0, 0x66, 0, 0, 0, 0, 0, 0]
     );
     assert!(second.data().attached_characters.is_empty());
 
@@ -2269,8 +2523,8 @@ async fn a_character_on_one_slave_cannot_bind_a_second_one() {
     );
     assert!(second.data().attached_characters.is_empty());
 
-    // A second seat on the same slave is refused too (the client's same-slave bind is silent,
-    // but a forged one must not duplicate the character).
+    // A second seat on the same slave is refused too (a forged bind must not duplicate the
+    // character; the same 0x66 clears the client's pending request).
     slaves::bind_slave(
         &server,
         &pa,
@@ -2339,7 +2593,10 @@ async fn a_cannon_refuses_the_passenger_seat_skill() {
         },
     );
     let fa = a.drain();
-    assert_eq!(error_codes(&fa), vec![super::error::SLAVE_CANNOT_BIND]);
+    assert_eq!(
+        body(&fa, sc::SCErrorMsgPacket),
+        vec![0x60, 0, 0x60, 0, 0, 0, 0, 0, 0]
+    );
     assert!(!ops(&fa).contains(&sc::SCUnitAttachedPacket));
     assert!(cannon.data().attached_characters.is_empty());
 }
@@ -5899,7 +6156,7 @@ async fn ship_cannon_gunner_seat_skill_and_leaving() {
     );
     assert!((after.y - before.y + 10.0).abs() < 1e-3);
 
-    // Second gunner: a crew member standing on the ship is ignored silently (C# taken seat),
+    // Second gunner: a crew member standing on the ship gets the clearing taken-seat 0x61,
     // one gunner per cannon. Put the crew member at the cannon's own local offset so it is
     // inside the 4.0 m bind reach after the hull moved.
     world.attach_child(&WorldObject::from(&hull), &WorldObject::from(&pb));
@@ -5913,12 +6170,10 @@ async fn ship_cannon_gunner_seat_skill_and_leaving() {
         0.0,
     );
     slaves::bind_slave_by_tl(&server, &pb, cannon_tl);
-    let fbp = b.drain();
-    assert!(
-        fbp.is_empty(),
-        "a taken cannon seat must be silent: {:x?} {:?}",
-        ops(&fbp),
-        error_codes(&fbp)
+    assert_eq!(
+        body(&b.drain(), sc::SCErrorMsgPacket),
+        vec![0x61, 0, 0x61, 0, 0, 0, 0, 0, 0],
+        "a taken cannon seat must answer the clearing error"
     );
     assert_eq!(cannon.data().attached_characters.len(), 1);
     // ... and cannot cast its skills either.
@@ -7071,4 +7326,479 @@ async fn real_cannons_fire_where_the_model_limits_would_have_refused() {
         slaves::unbind_slave(&server, &pa, tl, 0);
         client.drain();
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Mount rider skills (`mount_attached_skills`): the client names the `mount_skills` row
+// ---------------------------------------------------------------------------------------------
+
+use crate::systems::skills::handlers::{start_skill, CSStartSkillPacket};
+use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+use crate::world::Entity;
+
+const WATER_MOUNT_SKILL: u32 = 15_546; // slave 146 bar row 59 -> skill 15546
+const WATER_MOUNT_ROW: u32 = 59; // '물 퍼올리기' (real)
+const WATER_SAMPLE_MOUNT_ROW: u32 = 226; // '물 퍼올리기(견본)' (sample, same skill id)
+const WATER_RIDER_SKILL: u32 = 21_505; // row 59, attach point 1 (driver)
+const WATER_SAMPLE_RIDER_SKILL: u32 = 15_548; // row 226, attach point 1 (display only)
+const WATERING_MOUNT_SKILL: u32 = 15_450; // slave 146 bar row 56 -> skill 15450
+const WATERING_MOUNT_ROW: u32 = 56;
+const WATERING_SAMPLE_MOUNT_ROW: u32 = 225;
+const WATERING_RIDER_SKILL: u32 = 21_504; // row 56, attach point 1 (consumes 10 water)
+const RED_FARM_HAULER: u32 = 146;
+const WATER_ITEM: u32 = 15_694;
+const WATER_LOOT_PACK: u32 = 7_732;
+const WATER_LOOT: u32 = 71_267;
+const WATER_COUNT: i32 = 10;
+
+/// The mount skill ids carried by a skill id's `mount_skills` rows, in 1.2 rowid order.
+fn mount_rows_for_skill(server: &GameServer, skill_id: u32) -> Vec<u32> {
+    server
+        .game_data
+        .systems
+        .vehicles
+        .mount_skills
+        .iter()
+        .filter(|m| m.skill_id == skill_id)
+        .map(|m| m.id)
+        .collect()
+}
+
+fn skill_ids_of(frames: &[(u16, Vec<u8>)], op: u16) -> Vec<u32> {
+    frames
+        .iter()
+        .filter(|(o, _)| *o == op)
+        .map(|(_, body)| u32::from_le_bytes([body[0], body[1], body[2], body[3]]))
+        .collect()
+}
+
+fn water_count(player: &PlayerRef) -> i32 {
+    crate::systems::economy::inventory::Inv::of(player).items_count(WATER_ITEM, -1)
+}
+
+fn give_water(server: &GameServer, player: &PlayerRef, item_id: u64, count: i32) {
+    use crate::models::item::Item;
+    use crate::systems::economy::inventory::Inv;
+    let template = server
+        .game_data
+        .items
+        .template(WATER_ITEM)
+        .expect("water template");
+    let mut item = Item::create(item_id, template, count, 0, 1, &server.game_data.items, 0);
+    item.owner_id = u64::from(player.character_id);
+    item.slot = -1;
+    let bag = Inv::of(player).bag();
+    bag.lock()
+        .expect("bag")
+        .add_new_item(item, 0, &server.game_data.items)
+        .expect("water");
+    server.items.add_container(bag);
+}
+
+/// The real 1.2 rows of the Red Farm Hauler and of the tractor pair, with the duplicate
+/// `mount_skills` rows in their real order: 226 '물 퍼올리기(견본)' (rowid 132) before 59
+/// '물 퍼올리기' (rowid 316), and 225 '물 뿌리기(견본)' before 56 '물 뿌리기'. Resolving the
+/// rider by skill id picked the sample row's display-only 15548.
+fn mount_rider_data() -> GameData {
+    use super::data::{MountAttachedSkills, MountSkills};
+    use crate::systems::economy::loot_data::{Loot, LootPack};
+    use crate::systems::skills::data::effects::{EffectTemplate, GainLootPackItemEffect};
+    use crate::systems::skills::data::{EffectKind, SkillItemAmount};
+
+    let mut data = crate::systems::economy::tests::test_data();
+    let skills = &mut data.systems.skills;
+    skills.add_effect(
+        EffectKind::GainLootPackItemEffect,
+        EffectTemplate::GainLootPackItem(GainLootPackItemEffect {
+            id: 251,
+            loot_pack_id: WATER_LOOT_PACK,
+            consume_source_item: false,
+            consume_item_id: 0,
+            consume_count: 0,
+            inherit_grade: false,
+        }),
+        251,
+    );
+    let mut mount = crate::systems::skills::tests::skill_template(WATER_MOUNT_SKILL);
+    mount.target_type = 5; // AnyUnit
+    mount.casting_time = 5_000;
+    mount.damage_type_id = 0;
+    skills.add_skill(mount);
+    let mut sample = crate::systems::skills::tests::skill_template(WATER_SAMPLE_RIDER_SKILL);
+    sample.target_type = 0;
+    sample.damage_type_id = 0;
+    skills.add_skill(sample);
+    let mut rider = crate::systems::skills::tests::skill_template(WATER_RIDER_SKILL);
+    rider.target_type = 0;
+    rider.casting_time = 5_000;
+    rider.damage_type_id = 0;
+    let mut effect = crate::systems::skills::tests::skill_effect(
+        29_504,
+        EffectKind::GainLootPackItemEffect,
+        251,
+    );
+    effect.application_method = 3; // SourceOnce
+    effect.friendly = true;
+    effect.non_friendly = true;
+    rider.effects.push(effect);
+    skills.add_skill(rider);
+    let mut watering = crate::systems::skills::tests::skill_template(WATERING_MOUNT_SKILL);
+    watering.target_type = 5;
+    watering.damage_type_id = 0;
+    skills.add_skill(watering);
+    let mut watering_rider = crate::systems::skills::tests::skill_template(WATERING_RIDER_SKILL);
+    watering_rider.target_type = 0;
+    watering_rider.damage_type_id = 0;
+    skills.add_skill(watering_rider);
+    skills.skill_reagents.push(SkillItemAmount {
+        id: 2_373,
+        skill_id: WATERING_RIDER_SKILL,
+        item_id: WATER_ITEM,
+        amount: WATER_COUNT as i16,
+    });
+
+    let vehicles = &mut data.systems.vehicles;
+    for (id, skill_id) in [
+        (WATER_SAMPLE_MOUNT_ROW, WATER_MOUNT_SKILL),
+        (WATER_MOUNT_ROW, WATER_MOUNT_SKILL),
+        (WATERING_SAMPLE_MOUNT_ROW, WATERING_MOUNT_SKILL),
+        (WATERING_MOUNT_ROW, WATERING_MOUNT_SKILL),
+    ] {
+        vehicles.mount_skills.push(MountSkills {
+            id,
+            name: format!("mount {id}"),
+            skill_id,
+        });
+    }
+    for (id, mount_skill_id, skill_id) in [
+        (320, WATER_SAMPLE_MOUNT_ROW, WATER_SAMPLE_RIDER_SKILL),
+        (192, WATER_MOUNT_ROW, WATER_RIDER_SKILL),
+        (321, WATERING_SAMPLE_MOUNT_ROW, WATER_SAMPLE_RIDER_SKILL),
+        (231, WATERING_MOUNT_ROW, WATERING_RIDER_SKILL),
+    ] {
+        vehicles.mount_attached_skills.push(MountAttachedSkills {
+            id,
+            mount_skill_id,
+            attach_point_id: attach_point::DRIVER,
+            skill_id,
+        });
+    }
+    vehicles
+        .slave_mount_skills
+        .push((443, RED_FARM_HAULER, WATER_MOUNT_ROW));
+    vehicles
+        .slave_mount_skills
+        .push((442, RED_FARM_HAULER, WATERING_MOUNT_ROW));
+
+    let loot = Loot {
+        id: WATER_LOOT,
+        group: 1,
+        item_id: WATER_ITEM,
+        drop_rate: 10_000_000,
+        min_amount: WATER_COUNT,
+        max_amount: WATER_COUNT,
+        loot_pack_id: WATER_LOOT_PACK,
+        grade_id: 0,
+        always_drop: false,
+    };
+    data.systems.economy.loot.packs.insert(
+        WATER_LOOT_PACK,
+        LootPack {
+            id: WATER_LOOT_PACK,
+            group_count: 1,
+            loots: vec![loot],
+            groups: Vec::new(),
+            actability_groups: Vec::new(),
+            loots_by_group_no: vec![(1, vec![loot])],
+        },
+    );
+    data.items
+        .templates
+        .insert(WATER_ITEM, ItemTemplate::plain(WATER_ITEM, 1_000));
+    data
+}
+
+fn mount_rider_server() -> Arc<GameServer> {
+    let server = server_with(mount_rider_data());
+    crate::systems::skills::bind(&server);
+    crate::systems::economy::bridges::install(&server);
+    server
+}
+
+/// A player bound to the driver seat of a Red Farm Hauler (template 146).
+fn bind_water_driver(server: &Arc<GameServer>, client: &mut TestClient) -> (PlayerRef, SlaveRef) {
+    let player = spawn_player(
+        server,
+        client,
+        test_character(1, "Driver", 100.0, 100.0),
+        PA,
+    );
+    {
+        let mut d = player.data();
+        d.unit.hp = 1_000;
+        d.unit.max_hp = 1_000;
+        d.unit.mp = 1_000;
+        d.unit.max_mp = 1_000;
+    }
+    client.conn.active_char = Some(player.clone());
+    let world = server.world.world(0).unwrap();
+    let mut s = crate::models::slave::Slave::new(0x300, RED_FARM_HAULER);
+    s.unit.hp = 1_000;
+    s.unit.max_hp = 1_000;
+    s.unit.tl_id = server.ids.tl.get_next_id().expect("tl") as u16;
+    s.summoner_id = player.character_id;
+    s.summoner_obj_id = player.obj_id;
+    s.summoner_name = player.data().unit.name.clone();
+    s.unit.transform.set_xyz(100.0, 100.0, 100.0);
+    let slave = Entity::new(0x300, s);
+    world.spawn(&slave, &server.view_ctx());
+    let tl = u32::from(slave.data().unit.tl_id);
+    slaves::bind_slave_by_tl(server, &player, tl);
+    client.drain();
+    (player, slave)
+}
+
+fn water_cast(slave_obj_id: u32, skill_id: u32, mount_skill_id: u32) -> CSStartSkillPacket {
+    CSStartSkillPacket {
+        skill_id,
+        caster: SkillCaster::Mount {
+            obj_id: slave_obj_id,
+            mount_skill_template_id: mount_skill_id,
+        },
+        target: SkillCastTarget::Unit(slave_obj_id),
+        flag: 0,
+        skill_object: SkillObject::None,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn water_rider_follows_the_mount_skill_row_the_client_pressed() {
+    let server = mount_rider_server();
+    assert_eq!(
+        mount_rows_for_skill(&server, WATER_MOUNT_SKILL),
+        vec![WATER_SAMPLE_MOUNT_ROW, WATER_MOUNT_ROW],
+        "the 1.2 data lists the sample row first; resolving by skill id picks it"
+    );
+    let mut client = TestClient::new(&server, 1, 1);
+    let (player, slave) = bind_water_driver(&server, &mut client);
+    assert_eq!(player.data().attached_point, attach_point::DRIVER);
+    start_skill(
+        &server,
+        &mut client.conn,
+        water_cast(slave.obj_id, WATER_MOUNT_SKILL, WATER_MOUNT_ROW),
+    );
+    let frames = client.drain();
+    assert!(
+        skill_ids_of(&frames, sc::SCSkillStartedPacket).contains(&WATER_RIDER_SKILL),
+        "the driver rider 21505 must start: {:x?}",
+        ops(&frames)
+    );
+    assert!(
+        !skill_ids_of(&frames, sc::SCSkillFiredPacket).contains(&WATER_SAMPLE_RIDER_SKILL),
+        "the sample rider 15548 must not run: {:x?}",
+        ops(&frames)
+    );
+    assert_eq!(
+        water_count(&player),
+        0,
+        "the rider grants at the end of its cast"
+    );
+    // Let the spawned cast tasks register their timers before visiting the deadline.
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_millis(5_100)).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    let frames = client.drain();
+    assert!(
+        skill_ids_of(&frames, sc::SCSkillFiredPacket).contains(&WATER_RIDER_SKILL),
+        "the 5 s rider cast must fire: {:x?}",
+        ops(&frames)
+    );
+    assert!(
+        ops(&frames).contains(&sc::SCItemTaskSuccessPacket),
+        "the client must see the item task: {:x?}",
+        ops(&frames)
+    );
+    assert_eq!(water_count(&player), WATER_COUNT, "10 x item 15694");
+}
+
+#[tokio::test(start_paused = true)]
+async fn water_rider_needs_the_driver_attach_point() {
+    let server = mount_rider_server();
+    let mut client = TestClient::new(&server, 1, 1);
+    let (player, slave) = bind_water_driver(&server, &mut client);
+    // A passenger is not the attach point the rider row is bound to.
+    player.data().attached_point = attach_point::PASSENGER0;
+    start_skill(
+        &server,
+        &mut client.conn,
+        water_cast(slave.obj_id, WATER_MOUNT_SKILL, WATER_MOUNT_ROW),
+    );
+    let frames = client.drain();
+    assert!(
+        !skill_ids_of(&frames, sc::SCSkillStartedPacket).contains(&WATER_RIDER_SKILL),
+        "a passenger must not start the driver rider: {:x?}",
+        ops(&frames)
+    );
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_millis(5_100)).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    let frames = client.drain();
+    assert!(
+        skill_ids_of(&frames, sc::SCSkillFiredPacket).contains(&WATER_MOUNT_SKILL),
+        "the mount skill itself still casts: {:x?}",
+        ops(&frames)
+    );
+    assert_eq!(water_count(&player), 0, "a passenger gets no water");
+}
+
+#[tokio::test(start_paused = true)]
+async fn watering_rider_follows_the_mount_skill_row_and_consumes_ten_water() {
+    let server = mount_rider_server();
+    assert_eq!(
+        mount_rows_for_skill(&server, WATERING_MOUNT_SKILL),
+        vec![WATERING_SAMPLE_MOUNT_ROW, WATERING_MOUNT_ROW],
+        "the 1.2 data lists the watering sample row first"
+    );
+    let mut client = TestClient::new(&server, 1, 1);
+    let (player, slave) = bind_water_driver(&server, &mut client);
+    give_water(&server, &player, 0x7001, WATER_COUNT);
+    assert_eq!(water_count(&player), WATER_COUNT);
+    start_skill(
+        &server,
+        &mut client.conn,
+        water_cast(slave.obj_id, WATERING_MOUNT_SKILL, WATERING_MOUNT_ROW),
+    );
+    let frames = client.drain();
+    let fired = skill_ids_of(&frames, sc::SCSkillFiredPacket);
+    assert!(fired.contains(&WATERING_RIDER_SKILL), "{:x?}", ops(&frames));
+    assert!(
+        !fired.contains(&WATER_SAMPLE_RIDER_SKILL),
+        "the sample rider must not run: {:x?}",
+        ops(&frames)
+    );
+    assert_eq!(water_count(&player), 0, "the rider consumes 10 water");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Real data (gated): the Red Farm Hauler driver's Create Water
+// ---------------------------------------------------------------------------------------------
+
+/// The real 1.2 skill, vehicle, item and loot rows the water cast needs.
+fn real_mount_rider_server(db: &str) -> Arc<GameServer> {
+    let conn =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("compact db");
+    let app = app_path();
+    let files = ClientFileManager::from_sources(&[], &app);
+    let ctx = DataLoadCtx {
+        conn: &conn,
+        app_path: &app,
+        files: &files,
+        language: "en_us",
+    };
+    let mut data = GameData::empty();
+    data.items = crate::data::ItemData::load(&conn).expect("item data");
+    data.systems.vehicles = super::Data::load(&ctx).expect("vehicles data");
+    data.systems.skills = crate::systems::skills::Data::load(&ctx).expect("skills data");
+    data.systems.economy = crate::systems::economy::Data::load(&ctx).expect("economy data");
+    let server = real_game_server(data);
+    crate::systems::skills::bind(&server);
+    crate::systems::economy::bridges::install(&server);
+    server
+}
+
+#[tokio::test(start_paused = true)]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_farm_hauler_driver_gets_ten_water_from_skill_15546() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let server = real_mount_rider_server(&db);
+    let d = &server.game_data.systems.vehicles;
+    assert_eq!(
+        d.slave_mount_skill_list(RED_FARM_HAULER),
+        vec![201, 369, 65, 56, 59],
+        "slave 146 bar (slave_mount_skills rows 439-443)"
+    );
+    assert_eq!(
+        d.mount_attached_skill(WATER_MOUNT_ROW, 1),
+        WATER_RIDER_SKILL
+    );
+    assert_eq!(
+        d.mount_attached_skill(WATER_SAMPLE_MOUNT_ROW, 1),
+        WATER_SAMPLE_RIDER_SKILL
+    );
+    assert_eq!(
+        d.mount_attached_skill(WATERING_MOUNT_ROW, 1),
+        WATERING_RIDER_SKILL
+    );
+    // Every row of the real table resolves by its own `(mount_skill_id, attach_point_id)`.
+    for row in &d.mount_attached_skills {
+        assert_eq!(
+            d.mount_attached_skill(row.mount_skill_id, row.attach_point_id),
+            row.skill_id,
+            "mount_attached_skills row {}",
+            row.id
+        );
+    }
+
+    let mut client = TestClient::new(&server, 1, 1);
+    let pa = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Driver", 100.0, 100.0),
+        PA,
+    );
+    {
+        let mut c = pa.data();
+        c.unit.hp = 1_000;
+        c.unit.max_hp = 1_000;
+        c.unit.mp = 1_000;
+        c.unit.max_mp = 1_000;
+    }
+    client.conn.active_char = Some(pa.clone());
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    let slave = spawn_real_slave(&server, &world, &pa, RED_FARM_HAULER, (100.0, 100.0, 100.0));
+    slaves::bind_slave(
+        &server,
+        &pa,
+        slave.obj_id,
+        attach_point::DRIVER,
+        slaves::attach_reason::NEW_MASTER,
+        Some(4.0),
+    );
+    assert_eq!(pa.data().attached_point, attach_point::DRIVER);
+    client.drain();
+    assert_eq!(water_count(&pa), 0);
+
+    start_skill(
+        &server,
+        &mut client.conn,
+        water_cast(slave.obj_id, WATER_MOUNT_SKILL, WATER_MOUNT_ROW),
+    );
+    let frames = client.drain();
+    assert!(
+        skill_ids_of(&frames, sc::SCSkillStartedPacket).contains(&WATER_RIDER_SKILL),
+        "{:x?}",
+        ops(&frames)
+    );
+    assert_eq!(water_count(&pa), 0);
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_millis(5_100)).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    client.drain();
+    assert_eq!(water_count(&pa), WATER_COUNT, "10 x item 15694 (Water)");
 }

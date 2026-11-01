@@ -431,6 +431,7 @@ Cross-subsystem: mates are despawned on dungeon entry and `PlayerCanEnter` check
 | Area (C#) | Rust | Status | Notes |
 |---|---|---|---|
 | `MateGameData`, `SlaveGameData` (templates, unit modifiers, initial items / buffs, passive buffs, doodad / healing point / slave bindings, drop doodads, mount skills, repairable slaves, `slave_equip_slots`, `item_slave_equipments`, `allow_to_equip_slaves` / `allow_to_equip_slots`, `model_bindings` (model -> declared attach points), `slave_attach_points*.json`), `TransferGameData` (templates, bindings, binding doodads, paths, client `transfer_path.xml` roads + `GetOwnerPaths`), `ShipyardManager.Load`, `TaxationsManager` table, `ModelManager` vehicle / ship models | `systems/vehicles/data.rs` | done | Gated test `real_compact_db_vehicle_tables` checks the row counts; `real_transfer_follows_its_client_route` loads the roads from the game_pak. |
+| Mount rider / operator skill lookup (`GetMountAttachedSkills` -> `mount_attached_skills`) | `systems/skills/handlers.rs`, `systems/skills/mount_authority.rs`, `systems/vehicles/{data,mod}.rs` | deviation | **Deviation:** the C# `MateGameData.GetMountAttachedSkills` scanned `mount_skills` for the *skill id*, so a skill with two rows always resolved to the first one in table (rowid) order. The 1.2 data has such duplicates: 15546 is both 226 '물 퍼올리기(견본)' (rowid 132) and 59 '물 퍼올리기' (rowid 316); the C# scan picked 226 -> rider 15548 (the display-only "견본" skill, no effects) instead of 59 -> 21505 (`GainLootPackItemEffect` 29504 -> loot pack 7732, 10 x item 15694 Water), so the Red Farm Hauler's Create Water produced no water (live owner run 2026-11-01 14:53:16/14:53:28: `SCSkillStarted`, `SCUnitPoints`, `SCSkillFired`, `SCSkillEnded` for the mount cast plus the instant 15548, no item). The Rust uses the `mount_skills` row the client names in `CSStartSkillPacket` (`SkillCasterMount.MountSkillTemplateId`; the real 1.2 client sends the row id: 59 for 15546, 16 for 10473, 201 for 20704, 369 for 27032 in the owner captures) and requires that row to be on the vehicle's bar (its own `slave_mount_skills` / mate `skills` entries or an active `buff_mount_skills` grant) and to cast the pressed skill. The rider is scheduled exactly as in the C#: `Character.UseSkill(rider)` right after the mount skill is accepted, so the mount cast and the rider's own cast (15546 and 21505 are both 5000 ms) run together and the item is granted once at the end of the rider cast. The same duplicate-skill-id rows (15450 -> 56 '물 뿌리기' vs 225, 16650 (4 rows), 17097, 17649, 20291, 20249, 11017, 15580) now resolve by the pressed row; the datas' 20 `mount_attached_skills` rows whose mount skill is on no slave/mate/buff bar are untouched (unreachable through the bar, not resolved by skill id either). Tests: `water_rider_follows_the_mount_skill_row_the_client_pressed`, `water_rider_needs_the_driver_attach_point`, `watering_rider_follows_the_mount_skill_row_and_consumes_ten_water`, and the gated `real_farm_hauler_driver_gets_ten_water_from_skill_15546`. |
 | `MateManager` (per instance), `CharacterMates` (load / save / spawn / despawn), `Mate` (`AddExp`, `MateXpUpdateTask`, `RegenTick`, `DoFallDamage`, `OnZoneChange`, stats) | `systems/vehicles/mates.rs`, `stats.rs` | done | Mount / dismount (`SCUnitAttached` / `SCUnitDetached`, rider becomes a transform child), rename, target, user state, mate equipment packet (item move through `VehicleItemHooks`), kill exp, stun / unmount skills, death despawn. |
 | `SlaveManager` (per instance), `SlaveSpawner`, `SummonSlave` details, `Slave` (`DoDie`, `DoHpChangeTrigger` / repair points, `RegenTick`, `Save`, `OnZoneChange`, stats) | `systems/vehicles/slaves.rs` | done | Create (saved slave / persistent doodads / saved child slaves from MySQL, position, boats on the water surface, doodad and slave bindings at the model attach points), bind / unbind (the seat check - a non-driver point must be declared by the slave's model in `model_bindings` - client reach and reservation run under the slave's one lock; a missing or taken seat is silent as in the C#, an already-seated character is refused with `slave_unbind_first` 0x66, a cannon refuses the passenger seat with `slave_cannot_bind` 0x60, and the owners-mark driver refusal keeps 0x61), delete with portal-time despawn, Rider's Escape, repair cooldown, `RepairSlaveEffect`, `SendMySlaveTask`, logout (+10 min) / disconnect despawn task, `slaves` table (`AfterCharacters`). |
 | `TransferManager` (per instance, 100 ms tick), `TransferSpawner`, `Transfer` route following (`GoToPath`, `MoveTo`, `NextPoint`) | `systems/vehicles/transfers.rs` | done | Carriage motor + boarding part + bench doodads, `SCOneUnitMovementPacket` (transfer move type) for both parts. Spawned from `SpawnManager.SpawnAll`. |
@@ -1430,17 +1431,31 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `FUN_39093860(..., 9.0)`, strictly under 3.0, widened to 12.25 = 3.5 m by the target's
   `+0x3c26` flag), and the doodad BoardTransfer path passes `None` because its doodad func has
   its own use-range check. The gap is measured against the ship model's mass box when the slave
-  has a ship model, else the requested attach point's world position, and only falls back to
-  the slave origin when neither exists; a ship's bare origin is never the measure (a merchant
-  ship's seat / helm can be far from the origin). The 3.5 m branch keys on the character's
+  has a ship model, else the requested attach point's world position, else the smaller of the
+  slave origin distance and the nearest located attach point of the model
+  (`slave_attach_points*.json`); the client measures the minimum distance from the character's
+  collision primitive to the target's collision parts (`FUN_39093860` -> `FUN_390b3ae0` for the
+  parts, `FUN_3989bf90` -> `FUN_398b1ab0` for the per-shape distance), and the located attach
+  points stand in for those parts. The origin bound is kept so the fallback never tightens a
+  reach: the 2026-11-01 14:22 live log had the Red Farm Hauler (slave 146, model 1553, no ship
+  model, point 2 declared by `model_bindings` but located only by its cannon points 9-14)
+  refuse the passenger seat beside the rear hull (3.2-5.0 m from the origin, 1.9-2.6 m from
+  the located points) and the 14:22:50 driver re-bind (4.9 m from the origin); tested by
+  `passenger_beside_the_hull_is_in_reach_without_a_ship_model_or_a_located_seat` and
+  `a_discarded_driver_rebinds_beside_the_hull_and_a_far_one_is_still_refused`. A model with no
+  located point at all keeps the origin (carts: the origin sits at the seat); a ship's bare
+  origin is never the measure (a merchant ship's seat / helm can be far from the origin). The
+  3.5 m branch keys on the character's
   `is_riding`, but the decompile reads `+0x3c26` from the target (where it is also the dead
   flag), so this is capture-pending (S11-C5). A bind outside the reach answers `TOO_FAR_AWAY`
   0x9a. A character already in any slave's `attached_characters` is refused with
   `slave_unbind_first` 0x66 (`FUN_39346290`); a mate is not in that list, so S11-C5 stays open.
   The passenger seat is refused on a cannon (slave kind 7 / 8) with `slave_cannot_bind` 0x60.
-  A taken seat keeps the C# silent return (debug log); the client message table's 0x61 is not
-  evidenced for that case (S11-C2 capture-pending), and 0x61 is kept only for the C# owners-mark
-  driver refusal. A character who dies is unbound from any slave seat through the same
+  A taken seat answered silently in the C#; it now answers `slave_already_has_master` 0x61
+  (S11-C2 capture-pending for the exact code), and 0x61 is also kept for the C# owners-mark
+  driver refusal. A missing seat answers `slave_cannot_bind` 0x60. Every refusal uses the
+  clearing SCErrorMsg form described in the 2026-11-01 bind-refusal bullet below. A character
+  who dies is unbound from any slave seat through the same
   `unbind_slave` path as logout (the C# only did this for cannon gunners, so a ship driver /
   passenger kept a stale seat and the one-slave guard then refused every later bind).
   **Capture-pending (S11-C6):** whether 1.2 refuses an enemy / non-owner ship is unproven; the
@@ -1453,6 +1468,31 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `CSDiscardSlave` 0x032 has no server-side speed check in the C#; the 1.2 client refuses to
   send it above 5 m/s with message 0x67 (`FUN_39345aa0`), so the server keeps none.
 
+* systems::vehicles (2026-11-01, bind refusal replies): the 1.2 client sets a pending bind
+  request (local actor `+0x10` = target tl) in the `CSBindSlave` builder (`FUN_393464a0`,
+  decompile 678169-678180 / asm `0x393464d8`), refuses a repeat while it is set with
+  `already_requested` 0x13 (`FUN_39346290`, decompile 678120-678125 / asm `0x39346383`), and
+  clears it in `FUN_393457e0` for codes 0x48/0x60/0x61/0x66/0x9a (decompile 677413-677444);
+  `OnSlaveBound` also clears it (`FUN_391d4760` -> `FUN_39345d00`, decompile 363755-363762).
+  `HandleErrorMessage` (`FUN_391e5070`) only calls `FUN_393457e0` when the packet's `isNotify`
+  byte is false (decompile 377162-377170); with it true it takes the notify branch
+  (`FUN_391e4f00`) and returns first. The live 2026-11-01 14:22:50 bind refusal sent
+  `isNotify = true`, so the client showed `already_requested` on every later F press and sent
+  nothing until 14:40. Every bind refusal (dead, too far, cannon passenger, missing seat, taken
+  seat, owners mark, already on a slave, missing/despawned target) now answers an `SCErrorMsg`
+  with `isNotify = false` and a clearing code; the exact original reply for the formerly silent
+  cases is capture-pending (S11-C2), but the clearing reply is required. The 14:22:50 refusal
+  itself was the origin-only gap fixed by the passenger-seat bullet above (4.9 m from the
+  origin, 1.5 m from the located rear points), not the discard: `CSDiscardSlave` cleared the
+  seat (the second bind was not refused with `slave_unbind_first`). Tested byte-exactly by
+  `passenger_skill_13863_seats_point_two_and_a_taken_seat_answers_a_clearing_error`,
+  `a_taken_seat_answers_a_clearing_error_and_keeps_the_occupant`,
+  `model_bindings_decide_which_seats_a_slave_offers_and_accepts`,
+  `a_slave_outside_the_client_reach_is_refused_and_an_in_reach_one_is_seated`,
+  `a_character_on_one_slave_cannot_bind_a_second_one`,
+  `a_cannon_refuses_the_passenger_seat_skill` and
+  `a_discarded_driver_rebinds_beside_the_hull_and_a_far_one_is_still_refused`.
+
 * systems::vehicles (2026-11-01, seat bindings): the 1.2 client offers the passenger skill 13863
   only when the slave's model declares point 2: `FUN_393bbb80` scans the model's binding list
   (`FUN_390c9f70`) for the point. The server never loaded `model_bindings`, so it offered and
@@ -1460,7 +1500,8 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   points 1, 35 and 9-12 (helm and cargo doodads), so a passenger rode at the model origin on a seat
   retail never had. `model_bindings` is now loaded in `systems/vehicles/data.rs` (model id ->
   declared points, row `owner_type='Model'`) and `bind_slave` refuses any non-driver point the
-  slave's model lacks with a debug log and no reply, like a taken seat; the C# accepted any point.
+  slave's model lacks with a debug log and the clearing `slave_cannot_bind` 0x60; the C#
+  accepted any point.
   The interaction list offers 13863 only when the model declares point 2. Driver point 1 keeps the
   C# rules, cannon kinds keep `slave_cannot_bind` 0x60, and declared cannon / turret points (for
   example point 9 on ship model 512) still bind. Tested by
