@@ -452,9 +452,13 @@ impl<'a> Ctx<'a> {
         // Deviation: `SetStep` clears `ComponentId` (the final C# then sent 0 in the update of
         // a step change), but the client plays the cinema of a non-dialog component only when
         // an update names that component, and the pre-rewrite C# sent the current one. The
-        // component that completed the step is named once, in this update.
+        // component that completed the Progress step is named once, in this update. (Only
+        // Progress: `SCQuestContextStartedPacket` already named the Start component, and the
+        // client runs a named component's effects again for every packet that names it.)
         let completed_component = if res {
-            self.quest(h).map_or(0, |q| q.component_id)
+            self.quest(h)
+                .filter(|q| q.step == kind::PROGRESS)
+                .map_or(0, |q| q.component_id)
         } else {
             0
         };

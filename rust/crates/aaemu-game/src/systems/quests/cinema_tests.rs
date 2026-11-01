@@ -669,11 +669,12 @@ async fn the_completing_component_is_named_once_in_the_update() {
         drain(ctx);
         let step = |ctx: &Ctx<'_>| ctx.st.active_quest(70).unwrap().step;
         assert_eq!(step(ctx), kind::PROGRESS);
-        // Entering the steps: the Start step completed and names its component, the first
-        // evaluation of the Progress step (objective open) names none.
+        // Entering the steps: the completed Start step is not named again (its
+        // `SCQuestContextStartedPacket` named it), the first evaluation of the Progress step
+        // (objective open) names none.
         assert_eq!(
             update_components(&std::mem::take(&mut ctx.sent)),
-            vec![701, 0]
+            vec![0, 0]
         );
 
         // One of two kills: the objective is not complete, the update is as before.

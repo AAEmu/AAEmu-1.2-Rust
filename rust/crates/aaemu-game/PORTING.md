@@ -1215,11 +1215,12 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   component 19053 `zq_19_life` on `QuestActObjItemUse`, 2264/9983 `nu_01_scott` on
   `ObjItemGather`, 2386/10257 `el_01_dagger` on `ObjInteraction`) never played theirs. The C#
   before the quest rewrite (`Quest.Update`, `50130e2b2~1`) sent the current component id.
-  Deviation from the final C#: the update of the evaluation that **completes** a step
-  carries the component `run_components` left in `component_id` (the last passing one),
-  once; the updates of the new step (and of evaluations that do not complete a step) are as
-  before. Every quest gets this, so the Start step's completion also names the Start component
-  right after `SCQuestContextStartedPacket`, as the pre-rewrite C# did. When that component has
+  Deviation from the final C#: the update of the evaluation that **completes the Progress
+  step** carries the component `run_components` left in `component_id` (the last passing
+  one), once; the updates of the new step (and of evaluations that do not complete a step) are
+  as before. Every quest gets this. Other steps are not named: `SCQuestContextStartedPacket`
+  already named the Start component, and the client re-runs a component's effects for every
+  packet that names it. When that component has
   a cinema (`QuestData::component_cinema_id`) it becomes the character's requested cinema
   (`QuestState::requested_cinema`), like a permission request, so the following Started /
   Completed packets know the cinema (cut-scene re-send decision, logs).
