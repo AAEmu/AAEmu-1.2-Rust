@@ -24,12 +24,27 @@ set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 LANES=${AAEMU_LANES:-D:/aaemu-lanes}
 LANE=${AAEMU_LANE:-}
+# Linked worktrees (lanes) have a git dir ending in .git/worktrees/<name>. Match that name first:
+# the C:/AAEMU_DISK <-> D: junction makes `pwd -P` of the same worktree differ by drive, so the WT
+# comparison below alone would miss the lane and fall back to the shared runtime.
+GIT_DIR_ABS=$(git -C "$REPO" rev-parse --absolute-git-dir 2>/dev/null || true)
+GIT_LANE=""
+case "$GIT_DIR_ABS" in */worktrees/*) GIT_LANE=${GIT_DIR_ABS##*/} ;; esac
+if [ -z "$LANE" ] && [ -n "$GIT_LANE" ] && [ -f "$LANES/$GIT_LANE.env" ]; then
+  LANE=$GIT_LANE
+fi
 if [ -z "$LANE" ]; then
   for f in "$LANES"/*.env; do
     [ -f "$f" ] || continue
     wt=$(sed -n 's/^WT=//p' "$f"); [ -d "$wt" ] || continue
     [ "$(cd "$wt" && pwd -P)" = "$(cd "$REPO" && pwd -P)" ] && LANE=$(basename "$f" .env)
   done
+fi
+# A linked worktree is never allowed to fall back to the shared runtime (it used to truncate its
+# compact.sqlite3). The integration checkout is not under .git/worktrees and keeps the shared stack.
+if [ -z "$LANE" ] && [ -n "$GIT_LANE" ]; then
+  echo "live-stack: $REPO is the git worktree '$GIT_LANE' but $LANES/$GIT_LANE.env is missing; refusing to use the shared runtime (Scripts/lane.sh new <name>)" >&2
+  exit 1
 fi
 if [ -n "$LANE" ]; then
   [ -f "$LANES/$LANE.env" ] || { echo "no lane '$LANE' (Scripts/lane.sh list)" >&2; exit 1; }

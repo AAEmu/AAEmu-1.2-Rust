@@ -3193,6 +3193,21 @@ anyway and could wrap labor negative. `recoverable_exp` was already saved and lo
 (`db_character.rs`), so it survives a relog; a second death overwrites it exactly as
 `CharacterCombat.DoDie` does (`RecoverableExp = round(LastExpLoss * 0.8)`).
 
+Rechecked 2026-11-01 against the real catalog (not the fixture): the prayer's real 6.5 s cast
+restores the recoverable exp both when the client targets the priest and when it targets self;
+the four real `npcs` rows with `priest = 't'` are 502 / 1664 / 5614 / 5615, and the effect accepts
+all of them by template flag (no faction check). The level-band labor is `formulas` row 7
+(`if_negative(pc_level - 51, pc_level, 50 + (pc_level - 50) * 20)`), matching the effect's
+formula; above level 50 a level-51 prayer spends 70 labor. The XP Restoration Scroll (33965,
+`use_skill_as_reagent = 't'`) works through the `SkillCaster::Item` cast while the character is
+dead (skill 26611 has `source_dead = target_dead = 't'`, effect 5 has no priest and no labor).
+The real refusals keep the C# codes: nothing to recover answers
+`CANNOT_RECOVER_ALL_NOT_ENOUGH` (796) and insufficient labor `NOT_ENOUGH_LABOR_POWER` (29); the
+1.2 client itself never sends the prayer with nothing to recover because
+`X2Priest:GetCostForRecoverExp` returns nil then. The reported "You don't have permission." on
+2026-11-01 is therefore the pre-#21 client-source refusal: the current data sources 17063 through
+`CLIENT_SKILL_EFFECT_SOURCES` and both paths restore the experience.
+
 ## Ship repair timer and destroyed-vehicle HP (2026-10-20)
 
 Deviations from the 1.2 C# `Slave.DoDie` / `SlaveManager.Create` (the check already existed, but
