@@ -96,6 +96,16 @@ pub struct RawPacket {
     pub body: PacketStream,
 }
 
+/// Channel level and opcode of an encoded frame payload, without decoding its body.
+pub fn frame_level_opcode(payload: &[u8]) -> Option<(u8, u16)> {
+    let level = *payload.get(1)?;
+    let at = if level == LEVEL_PLAIN { 4 } else { 2 };
+    Some((
+        level,
+        u16::from_le_bytes([*payload.get(at)?, *payload.get(at + 1)?]),
+    ))
+}
+
 /// Parses one frame payload (starting at the `0xDD` byte) the way
 /// `GameProtocolHandler.OnReceive` does.
 pub fn decode_frame(payload: &[u8]) -> Result<RawPacket> {
@@ -170,5 +180,20 @@ mod tests {
         assert!(decode_frame(&[0xDD]).is_err());
         assert!(decode_frame(&[0xDD, 0x01, 0x00, 0x00, 0x01]).is_err());
         assert!(decode_frame(&[0xDD, 0x02, 0x01]).is_err());
+    }
+
+    #[test]
+    fn peeks_the_opcode_of_both_levels() {
+        assert_eq!(
+            frame_level_opcode(&[0xDD, 0x01, 0xAA, 0xBB, 0x34, 0x12, 9]),
+            Some((1, 0x1234))
+        );
+        assert_eq!(
+            frame_level_opcode(&[0xDD, 0x02, 0x0F, 0x00]),
+            Some((2, 0x000F))
+        );
+        assert_eq!(frame_level_opcode(&[0xDD]), None);
+        assert_eq!(frame_level_opcode(&[0xDD, 0x01, 0x00, 0x00, 0x01]), None);
+        assert_eq!(frame_level_opcode(&[0xDD, 0x02, 0x01]), None);
     }
 }
