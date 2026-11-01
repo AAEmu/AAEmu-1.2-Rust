@@ -275,12 +275,18 @@ impl ClientPacket for CSRankCharacterPacket {
         })
     }
 }
-log_only_packet!(CSRequestPermissionToPlayCinemaForDirectingMode, warn, |s| {
-    let _quest_context_id = s.read_u32()?;
-    let _npc = s.read_bc()?;
-    let _doodad = s.read_bc()?;
-    String::new()
-});
+// One-way notification: the client opens the directing dialog for a component with a cinema
+// and sends the component id + npc + doodad; the 1.2 server has no reply (`FUN_3949e990`).
+log_only_packet!(
+    CSRequestPermissionToPlayCinemaForDirectingMode,
+    debug,
+    |s| {
+        let component_id = s.read_u32()?;
+        let npc = s.read_bc()?;
+        let doodad = s.read_bc()?;
+        format!(", ComponentId: {component_id}, Npc: {npc}, Doodad: {doodad}")
+    }
+);
 log_only_packet!(CSRequestSecondPasswordKeyTablesPacket, debug, |s| {
     let _ = s;
     String::new()
