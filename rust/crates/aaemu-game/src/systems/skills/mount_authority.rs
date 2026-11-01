@@ -91,30 +91,19 @@ pub(super) fn may_cast_as(
     }
 }
 
-/// Whether `skill_id` is on the mount / slave bar of `caster`: the mate's `skills` entries and
-/// the slave template's `slave_mount_skills`, each a `mount_skills.id` that maps to the skill the
-/// client casts, plus the entries `buff_mount_skills` grants through the vehicle's active buffs.
-/// The bar also decides the rider / operator skill through `mount_attached_skills`.
-pub(super) fn may_use_vehicle_skill(
+/// The `mount_skills` rows the vehicle bar of `caster` offers: the mate's `skills` entries or
+/// the slave template's `slave_mount_skills`, plus the entries `buff_mount_skills` grants
+/// through the vehicle's active buffs.
+fn vehicle_bar_mount_skills(
     server: &crate::server::GameServer,
     caster: &WorldObject,
-    skill_id: u32,
-) -> bool {
+) -> Option<Vec<u32>> {
     let data = &server.game_data.systems.vehicles;
-    let mut mount_ids = Vec::new();
-    match caster {
-        WorldObject::Mate(mate) => mount_ids.extend(mate.data().skills.iter().copied()),
-        WorldObject::Slave(slave) => {
-            mount_ids.extend(data.slave_mount_skill_list(slave.data().unit.template_id))
-        }
-        _ => return false,
-    }
-    if mount_ids
-        .iter()
-        .any(|id| data.mount_skill_skill_id(*id) == skill_id)
-    {
-        return true;
-    }
+    let mut mount_ids = match caster {
+        WorldObject::Mate(mate) => mate.data().skills.clone(),
+        WorldObject::Slave(slave) => data.slave_mount_skill_list(slave.data().unit.template_id),
+        _ => return None,
+    };
     let buffs: Vec<u32> = caster
         .with_unit(|u| {
             u.unit()
@@ -125,10 +114,42 @@ pub(super) fn may_use_vehicle_skill(
                 .collect()
         })
         .unwrap_or_default();
-    buffs.iter().any(|buff_id| {
-        data.buff_mount_skill_ids(*buff_id)
-            .any(|id| data.mount_skill_skill_id(id) == skill_id)
+    for buff_id in buffs {
+        mount_ids.extend(data.buff_mount_skill_ids(buff_id));
+    }
+    Some(mount_ids)
+}
+
+/// Whether `skill_id` is on the mount / slave bar of `caster`: the mate's `skills` entries and
+/// the slave template's `slave_mount_skills`, each a `mount_skills.id` that maps to the skill the
+/// client casts, plus the entries `buff_mount_skills` grants through the vehicle's active buffs.
+/// The bar also decides the rider / operator skill through `mount_attached_skills`.
+pub(super) fn may_use_vehicle_skill(
+    server: &crate::server::GameServer,
+    caster: &WorldObject,
+    skill_id: u32,
+) -> bool {
+    let data = &server.game_data.systems.vehicles;
+    vehicle_bar_mount_skills(server, caster).is_some_and(|ids| {
+        ids.iter()
+            .any(|id| data.mount_skill_skill_id(*id) == skill_id)
     })
+}
+
+/// Whether the client's `mount_skills` row (`CSStartSkill.Caster.MountSkillTemplateId`) is on
+/// the bar of `caster` and casts `skill_id`. The sender names the row it pressed, so a row that
+/// is absent or names another skill is stale / forged; resolving the rider by it also keeps the
+/// duplicate skill ids of the 1.2 data apart (59 '물 퍼올리기' vs 226 '물 퍼올리기(견본)').
+pub(super) fn may_use_vehicle_skill_row(
+    server: &crate::server::GameServer,
+    caster: &WorldObject,
+    mount_skill_id: u32,
+    skill_id: u32,
+) -> bool {
+    let data = &server.game_data.systems.vehicles;
+    mount_skill_id != 0
+        && vehicle_bar_mount_skills(server, caster).is_some_and(|ids| ids.contains(&mount_skill_id))
+        && data.mount_skill_skill_id(mount_skill_id) == skill_id
 }
 
 #[cfg(test)]

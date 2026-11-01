@@ -1187,16 +1187,16 @@ impl VehiclesData {
         out
     }
 
-    /// `GetMountAttachedSkills(mateSkill, attachPoint)`.
-    pub fn mount_attached_skill(&self, mate_skill: u32, attach_point: u8) -> u32 {
-        let id = self
-            .mount_skills
-            .iter()
-            .find(|m| m.skill_id == mate_skill)
-            .map_or(0, |m| m.id);
+    /// `GetMountAttachedSkills(mountSkillId, attachPoint)`: `mount_skill_id` is the
+    /// `mount_skills` row the vehicle bar pressed (`CSStartSkill.Caster.MountSkillTemplateId`),
+    /// not the skill id. The 1.2 data has two `mount_skills` rows for skill 15546 (59
+    /// '물 퍼올리기' and 226 '물 퍼올리기(견본)'), so the C# scan by skill id picked the sample
+    /// row and its display-only rider 15548; the row the client names resolves 59 -> 21505.
+    /// Deviation recorded in PORTING.md.
+    pub fn mount_attached_skill(&self, mount_skill_id: u32, attach_point: u8) -> u32 {
         self.mount_attached_skills
             .iter()
-            .find(|m| m.mount_skill_id == id && m.attach_point_id == attach_point)
+            .find(|m| m.mount_skill_id == mount_skill_id && m.attach_point_id == attach_point)
             .map_or(0, |m| m.skill_id)
     }
 
