@@ -146,9 +146,9 @@ pub struct Ctx<'a> {
     pub report_refused: Vec<u32>,
 }
 
-/// The result of one report event, collected across the quest's report acts: a quest may
-/// have several report NPCs / doodads (OR components), so a mismatch in one act does not
-/// refuse the report when another act accepts it.
+/// The result of one report event, collected across the quest's report acts: a component may
+/// hold several report NPCs / doodads (OR acts), so a mismatch in one act does not refuse the
+/// report when another act accepts it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReportReply {
     /// A report act matched the NPC / doodad of the event.
