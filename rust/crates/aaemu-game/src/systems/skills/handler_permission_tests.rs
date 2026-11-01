@@ -1028,7 +1028,7 @@ async fn rename_portal_skill_cannot_record_a_location_and_renames_an_existing_on
 /// skill 13350 is `mount_skills` 34 (`slave_mount_skills`). Only bar ids may be cast.
 #[tokio::test]
 async fn vehicle_bar_accepts_real_mount_and_slave_skills_and_refuses_other_ids() {
-    use super::types::{caster_type, SkillObject};
+    use super::types::{caster_type, SkillCaster, SkillObject};
     use crate::models::mate::Mate;
     use crate::systems::vehicles::data::MountSkills;
 
@@ -1096,20 +1096,28 @@ async fn vehicle_bar_accepts_real_mount_and_slave_skills_and_refuses_other_ids()
     slave_data.unit.mp = 100;
     let slave = Entity::new(0x300, slave_data);
     world.spawn(&slave, &server.view_ctx());
-    let mut cast = |obj_id: u32, skill: u32| {
+    let mut cast = |obj_id: u32, skill: u32, mount_id: u32| {
         let mut packet = cast_packet_as(caster_type::MOUNT, obj_id, obj_id);
         packet.skill_id = skill;
         packet.skill_object = SkillObject::None;
+        if let SkillCaster::Mount {
+            mount_skill_template_id,
+            ..
+        } = &mut packet.caster
+        {
+            *mount_skill_template_id = mount_id;
+        }
         super::handlers::start_skill(&server, &mut client.conn, packet);
     };
-    cast(mate.obj_id, MOUNT_SKILL);
+    // The 1.2 client sends the `mount_skills` row it pressed, not the skill id.
+    cast(mate.obj_id, MOUNT_SKILL, MOUNT_ID);
     assert_eq!(mate.data().unit.hp, 650);
-    cast(slave.obj_id, SLAVE_SKILL);
+    cast(slave.obj_id, SLAVE_SKILL, SLAVE_ID);
     assert_eq!(slave.data().unit.mp, 75);
     // The player is not its own mount, and a vehicle bar does not authorize other skill ids.
-    cast(a.obj_id, NPC_SKILL);
+    cast(a.obj_id, NPC_SKILL, MOUNT_ID);
     assert_eq!(a.data().unit.hp, 500);
-    cast(mate.obj_id, NPC_SKILL);
+    cast(mate.obj_id, NPC_SKILL, MOUNT_ID);
     assert_eq!(mate.data().unit.hp, 650);
 }
 

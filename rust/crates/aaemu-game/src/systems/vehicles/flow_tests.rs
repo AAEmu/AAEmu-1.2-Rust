@@ -7327,3 +7327,478 @@ async fn real_cannons_fire_where_the_model_limits_would_have_refused() {
         client.drain();
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Mount rider skills (`mount_attached_skills`): the client names the `mount_skills` row
+// ---------------------------------------------------------------------------------------------
+
+use crate::systems::skills::handlers::{start_skill, CSStartSkillPacket};
+use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+use crate::world::Entity;
+
+const WATER_MOUNT_SKILL: u32 = 15_546; // slave 146 bar row 59 -> skill 15546
+const WATER_MOUNT_ROW: u32 = 59; // '물 퍼올리기' (real)
+const WATER_SAMPLE_MOUNT_ROW: u32 = 226; // '물 퍼올리기(견본)' (sample, same skill id)
+const WATER_RIDER_SKILL: u32 = 21_505; // row 59, attach point 1 (driver)
+const WATER_SAMPLE_RIDER_SKILL: u32 = 15_548; // row 226, attach point 1 (display only)
+const WATERING_MOUNT_SKILL: u32 = 15_450; // slave 146 bar row 56 -> skill 15450
+const WATERING_MOUNT_ROW: u32 = 56;
+const WATERING_SAMPLE_MOUNT_ROW: u32 = 225;
+const WATERING_RIDER_SKILL: u32 = 21_504; // row 56, attach point 1 (consumes 10 water)
+const RED_FARM_HAULER: u32 = 146;
+const WATER_ITEM: u32 = 15_694;
+const WATER_LOOT_PACK: u32 = 7_732;
+const WATER_LOOT: u32 = 71_267;
+const WATER_COUNT: i32 = 10;
+
+/// The mount skill ids carried by a skill id's `mount_skills` rows, in 1.2 rowid order.
+fn mount_rows_for_skill(server: &GameServer, skill_id: u32) -> Vec<u32> {
+    server
+        .game_data
+        .systems
+        .vehicles
+        .mount_skills
+        .iter()
+        .filter(|m| m.skill_id == skill_id)
+        .map(|m| m.id)
+        .collect()
+}
+
+fn skill_ids_of(frames: &[(u16, Vec<u8>)], op: u16) -> Vec<u32> {
+    frames
+        .iter()
+        .filter(|(o, _)| *o == op)
+        .map(|(_, body)| u32::from_le_bytes([body[0], body[1], body[2], body[3]]))
+        .collect()
+}
+
+fn water_count(player: &PlayerRef) -> i32 {
+    crate::systems::economy::inventory::Inv::of(player).items_count(WATER_ITEM, -1)
+}
+
+fn give_water(server: &GameServer, player: &PlayerRef, item_id: u64, count: i32) {
+    use crate::models::item::Item;
+    use crate::systems::economy::inventory::Inv;
+    let template = server
+        .game_data
+        .items
+        .template(WATER_ITEM)
+        .expect("water template");
+    let mut item = Item::create(item_id, template, count, 0, 1, &server.game_data.items, 0);
+    item.owner_id = u64::from(player.character_id);
+    item.slot = -1;
+    let bag = Inv::of(player).bag();
+    bag.lock()
+        .expect("bag")
+        .add_new_item(item, 0, &server.game_data.items)
+        .expect("water");
+    server.items.add_container(bag);
+}
+
+/// The real 1.2 rows of the Red Farm Hauler and of the tractor pair, with the duplicate
+/// `mount_skills` rows in their real order: 226 '물 퍼올리기(견본)' (rowid 132) before 59
+/// '물 퍼올리기' (rowid 316), and 225 '물 뿌리기(견본)' before 56 '물 뿌리기'. Resolving the
+/// rider by skill id picked the sample row's display-only 15548.
+fn mount_rider_data() -> GameData {
+    use super::data::{MountAttachedSkills, MountSkills};
+    use crate::systems::economy::loot_data::{Loot, LootPack};
+    use crate::systems::skills::data::effects::{EffectTemplate, GainLootPackItemEffect};
+    use crate::systems::skills::data::{EffectKind, SkillItemAmount};
+
+    let mut data = crate::systems::economy::tests::test_data();
+    let skills = &mut data.systems.skills;
+    skills.add_effect(
+        EffectKind::GainLootPackItemEffect,
+        EffectTemplate::GainLootPackItem(GainLootPackItemEffect {
+            id: 251,
+            loot_pack_id: WATER_LOOT_PACK,
+            consume_source_item: false,
+            consume_item_id: 0,
+            consume_count: 0,
+            inherit_grade: false,
+        }),
+        251,
+    );
+    let mut mount = crate::systems::skills::tests::skill_template(WATER_MOUNT_SKILL);
+    mount.target_type = 5; // AnyUnit
+    mount.casting_time = 5_000;
+    mount.damage_type_id = 0;
+    skills.add_skill(mount);
+    let mut sample = crate::systems::skills::tests::skill_template(WATER_SAMPLE_RIDER_SKILL);
+    sample.target_type = 0;
+    sample.damage_type_id = 0;
+    skills.add_skill(sample);
+    let mut rider = crate::systems::skills::tests::skill_template(WATER_RIDER_SKILL);
+    rider.target_type = 0;
+    rider.casting_time = 5_000;
+    rider.damage_type_id = 0;
+    let mut effect = crate::systems::skills::tests::skill_effect(
+        29_504,
+        EffectKind::GainLootPackItemEffect,
+        251,
+    );
+    effect.application_method = 3; // SourceOnce
+    effect.friendly = true;
+    effect.non_friendly = true;
+    rider.effects.push(effect);
+    skills.add_skill(rider);
+    let mut watering = crate::systems::skills::tests::skill_template(WATERING_MOUNT_SKILL);
+    watering.target_type = 5;
+    watering.damage_type_id = 0;
+    skills.add_skill(watering);
+    let mut watering_rider = crate::systems::skills::tests::skill_template(WATERING_RIDER_SKILL);
+    watering_rider.target_type = 0;
+    watering_rider.damage_type_id = 0;
+    skills.add_skill(watering_rider);
+    skills.skill_reagents.push(SkillItemAmount {
+        id: 2_373,
+        skill_id: WATERING_RIDER_SKILL,
+        item_id: WATER_ITEM,
+        amount: WATER_COUNT as i16,
+    });
+
+    let vehicles = &mut data.systems.vehicles;
+    for (id, skill_id) in [
+        (WATER_SAMPLE_MOUNT_ROW, WATER_MOUNT_SKILL),
+        (WATER_MOUNT_ROW, WATER_MOUNT_SKILL),
+        (WATERING_SAMPLE_MOUNT_ROW, WATERING_MOUNT_SKILL),
+        (WATERING_MOUNT_ROW, WATERING_MOUNT_SKILL),
+    ] {
+        vehicles.mount_skills.push(MountSkills {
+            id,
+            name: format!("mount {id}"),
+            skill_id,
+        });
+    }
+    for (id, mount_skill_id, skill_id) in [
+        (320, WATER_SAMPLE_MOUNT_ROW, WATER_SAMPLE_RIDER_SKILL),
+        (192, WATER_MOUNT_ROW, WATER_RIDER_SKILL),
+        (321, WATERING_SAMPLE_MOUNT_ROW, WATER_SAMPLE_RIDER_SKILL),
+        (231, WATERING_MOUNT_ROW, WATERING_RIDER_SKILL),
+    ] {
+        vehicles.mount_attached_skills.push(MountAttachedSkills {
+            id,
+            mount_skill_id,
+            attach_point_id: attach_point::DRIVER,
+            skill_id,
+        });
+    }
+    vehicles
+        .slave_mount_skills
+        .push((443, RED_FARM_HAULER, WATER_MOUNT_ROW));
+    vehicles
+        .slave_mount_skills
+        .push((442, RED_FARM_HAULER, WATERING_MOUNT_ROW));
+
+    let loot = Loot {
+        id: WATER_LOOT,
+        group: 1,
+        item_id: WATER_ITEM,
+        drop_rate: 10_000_000,
+        min_amount: WATER_COUNT,
+        max_amount: WATER_COUNT,
+        loot_pack_id: WATER_LOOT_PACK,
+        grade_id: 0,
+        always_drop: false,
+    };
+    data.systems.economy.loot.packs.insert(
+        WATER_LOOT_PACK,
+        LootPack {
+            id: WATER_LOOT_PACK,
+            group_count: 1,
+            loots: vec![loot],
+            groups: Vec::new(),
+            actability_groups: Vec::new(),
+            loots_by_group_no: vec![(1, vec![loot])],
+        },
+    );
+    data.items
+        .templates
+        .insert(WATER_ITEM, ItemTemplate::plain(WATER_ITEM, 1_000));
+    data
+}
+
+fn mount_rider_server() -> Arc<GameServer> {
+    let server = server_with(mount_rider_data());
+    crate::systems::skills::bind(&server);
+    crate::systems::economy::bridges::install(&server);
+    server
+}
+
+/// A player bound to the driver seat of a Red Farm Hauler (template 146).
+fn bind_water_driver(server: &Arc<GameServer>, client: &mut TestClient) -> (PlayerRef, SlaveRef) {
+    let player = spawn_player(
+        server,
+        client,
+        test_character(1, "Driver", 100.0, 100.0),
+        PA,
+    );
+    {
+        let mut d = player.data();
+        d.unit.hp = 1_000;
+        d.unit.max_hp = 1_000;
+        d.unit.mp = 1_000;
+        d.unit.max_mp = 1_000;
+    }
+    client.conn.active_char = Some(player.clone());
+    let world = server.world.world(0).unwrap();
+    let mut s = crate::models::slave::Slave::new(0x300, RED_FARM_HAULER);
+    s.unit.hp = 1_000;
+    s.unit.max_hp = 1_000;
+    s.unit.tl_id = server.ids.tl.get_next_id().expect("tl") as u16;
+    s.summoner_id = player.character_id;
+    s.summoner_obj_id = player.obj_id;
+    s.summoner_name = player.data().unit.name.clone();
+    s.unit.transform.set_xyz(100.0, 100.0, 100.0);
+    let slave = Entity::new(0x300, s);
+    world.spawn(&slave, &server.view_ctx());
+    let tl = u32::from(slave.data().unit.tl_id);
+    slaves::bind_slave_by_tl(server, &player, tl);
+    client.drain();
+    (player, slave)
+}
+
+fn water_cast(slave_obj_id: u32, skill_id: u32, mount_skill_id: u32) -> CSStartSkillPacket {
+    CSStartSkillPacket {
+        skill_id,
+        caster: SkillCaster::Mount {
+            obj_id: slave_obj_id,
+            mount_skill_template_id: mount_skill_id,
+        },
+        target: SkillCastTarget::Unit(slave_obj_id),
+        flag: 0,
+        skill_object: SkillObject::None,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn water_rider_follows_the_mount_skill_row_the_client_pressed() {
+    let server = mount_rider_server();
+    assert_eq!(
+        mount_rows_for_skill(&server, WATER_MOUNT_SKILL),
+        vec![WATER_SAMPLE_MOUNT_ROW, WATER_MOUNT_ROW],
+        "the 1.2 data lists the sample row first; resolving by skill id picks it"
+    );
+    let mut client = TestClient::new(&server, 1, 1);
+    let (player, slave) = bind_water_driver(&server, &mut client);
+    assert_eq!(player.data().attached_point, attach_point::DRIVER);
+    start_skill(
+        &server,
+        &mut client.conn,
+        water_cast(slave.obj_id, WATER_MOUNT_SKILL, WATER_MOUNT_ROW),
+    );
+    let frames = client.drain();
+    assert!(
+        skill_ids_of(&frames, sc::SCSkillStartedPacket).contains(&WATER_RIDER_SKILL),
+        "the driver rider 21505 must start: {:x?}",
+        ops(&frames)
+    );
+    assert!(
+        !skill_ids_of(&frames, sc::SCSkillFiredPacket).contains(&WATER_SAMPLE_RIDER_SKILL),
+        "the sample rider 15548 must not run: {:x?}",
+        ops(&frames)
+    );
+    assert_eq!(
+        water_count(&player),
+        0,
+        "the rider grants at the end of its cast"
+    );
+    // Let the spawned cast tasks register their timers before visiting the deadline.
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_millis(5_100)).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    let frames = client.drain();
+    assert!(
+        skill_ids_of(&frames, sc::SCSkillFiredPacket).contains(&WATER_RIDER_SKILL),
+        "the 5 s rider cast must fire: {:x?}",
+        ops(&frames)
+    );
+    assert!(
+        ops(&frames).contains(&sc::SCItemTaskSuccessPacket),
+        "the client must see the item task: {:x?}",
+        ops(&frames)
+    );
+    assert_eq!(water_count(&player), WATER_COUNT, "10 x item 15694");
+}
+
+#[tokio::test(start_paused = true)]
+async fn water_rider_needs_the_driver_attach_point() {
+    let server = mount_rider_server();
+    let mut client = TestClient::new(&server, 1, 1);
+    let (player, slave) = bind_water_driver(&server, &mut client);
+    // A passenger is not the attach point the rider row is bound to.
+    player.data().attached_point = attach_point::PASSENGER0;
+    start_skill(
+        &server,
+        &mut client.conn,
+        water_cast(slave.obj_id, WATER_MOUNT_SKILL, WATER_MOUNT_ROW),
+    );
+    let frames = client.drain();
+    assert!(
+        !skill_ids_of(&frames, sc::SCSkillStartedPacket).contains(&WATER_RIDER_SKILL),
+        "a passenger must not start the driver rider: {:x?}",
+        ops(&frames)
+    );
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_millis(5_100)).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    let frames = client.drain();
+    assert!(
+        skill_ids_of(&frames, sc::SCSkillFiredPacket).contains(&WATER_MOUNT_SKILL),
+        "the mount skill itself still casts: {:x?}",
+        ops(&frames)
+    );
+    assert_eq!(water_count(&player), 0, "a passenger gets no water");
+}
+
+#[tokio::test(start_paused = true)]
+async fn watering_rider_follows_the_mount_skill_row_and_consumes_ten_water() {
+    let server = mount_rider_server();
+    assert_eq!(
+        mount_rows_for_skill(&server, WATERING_MOUNT_SKILL),
+        vec![WATERING_SAMPLE_MOUNT_ROW, WATERING_MOUNT_ROW],
+        "the 1.2 data lists the watering sample row first"
+    );
+    let mut client = TestClient::new(&server, 1, 1);
+    let (player, slave) = bind_water_driver(&server, &mut client);
+    give_water(&server, &player, 0x7001, WATER_COUNT);
+    assert_eq!(water_count(&player), WATER_COUNT);
+    start_skill(
+        &server,
+        &mut client.conn,
+        water_cast(slave.obj_id, WATERING_MOUNT_SKILL, WATERING_MOUNT_ROW),
+    );
+    let frames = client.drain();
+    let fired = skill_ids_of(&frames, sc::SCSkillFiredPacket);
+    assert!(fired.contains(&WATERING_RIDER_SKILL), "{:x?}", ops(&frames));
+    assert!(
+        !fired.contains(&WATER_SAMPLE_RIDER_SKILL),
+        "the sample rider must not run: {:x?}",
+        ops(&frames)
+    );
+    assert_eq!(water_count(&player), 0, "the rider consumes 10 water");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Real data (gated): the Red Farm Hauler driver's Create Water
+// ---------------------------------------------------------------------------------------------
+
+/// The real 1.2 skill, vehicle, item and loot rows the water cast needs.
+fn real_mount_rider_server(db: &str) -> Arc<GameServer> {
+    let conn =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("compact db");
+    let app = app_path();
+    let files = ClientFileManager::from_sources(&[], &app);
+    let ctx = DataLoadCtx {
+        conn: &conn,
+        app_path: &app,
+        files: &files,
+        language: "en_us",
+    };
+    let mut data = GameData::empty();
+    data.items = crate::data::ItemData::load(&conn).expect("item data");
+    data.systems.vehicles = super::Data::load(&ctx).expect("vehicles data");
+    data.systems.skills = crate::systems::skills::Data::load(&ctx).expect("skills data");
+    data.systems.economy = crate::systems::economy::Data::load(&ctx).expect("economy data");
+    let server = real_game_server(data);
+    crate::systems::skills::bind(&server);
+    crate::systems::economy::bridges::install(&server);
+    server
+}
+
+#[tokio::test(start_paused = true)]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_farm_hauler_driver_gets_ten_water_from_skill_15546() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let server = real_mount_rider_server(&db);
+    let d = &server.game_data.systems.vehicles;
+    assert_eq!(
+        d.slave_mount_skill_list(RED_FARM_HAULER),
+        vec![201, 369, 65, 56, 59],
+        "slave 146 bar (slave_mount_skills rows 439-443)"
+    );
+    assert_eq!(
+        d.mount_attached_skill(WATER_MOUNT_ROW, 1),
+        WATER_RIDER_SKILL
+    );
+    assert_eq!(
+        d.mount_attached_skill(WATER_SAMPLE_MOUNT_ROW, 1),
+        WATER_SAMPLE_RIDER_SKILL
+    );
+    assert_eq!(
+        d.mount_attached_skill(WATERING_MOUNT_ROW, 1),
+        WATERING_RIDER_SKILL
+    );
+    // Every row of the real table resolves by its own `(mount_skill_id, attach_point_id)`.
+    for row in &d.mount_attached_skills {
+        assert_eq!(
+            d.mount_attached_skill(row.mount_skill_id, row.attach_point_id),
+            row.skill_id,
+            "mount_attached_skills row {}",
+            row.id
+        );
+    }
+
+    let mut client = TestClient::new(&server, 1, 1);
+    let pa = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Driver", 100.0, 100.0),
+        PA,
+    );
+    {
+        let mut c = pa.data();
+        c.unit.hp = 1_000;
+        c.unit.max_hp = 1_000;
+        c.unit.mp = 1_000;
+        c.unit.max_mp = 1_000;
+    }
+    client.conn.active_char = Some(pa.clone());
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    let slave = spawn_real_slave(&server, &world, &pa, RED_FARM_HAULER, (100.0, 100.0, 100.0));
+    slaves::bind_slave(
+        &server,
+        &pa,
+        slave.obj_id,
+        attach_point::DRIVER,
+        slaves::attach_reason::NEW_MASTER,
+        Some(4.0),
+    );
+    assert_eq!(pa.data().attached_point, attach_point::DRIVER);
+    client.drain();
+    assert_eq!(water_count(&pa), 0);
+
+    start_skill(
+        &server,
+        &mut client.conn,
+        water_cast(slave.obj_id, WATER_MOUNT_SKILL, WATER_MOUNT_ROW),
+    );
+    let frames = client.drain();
+    assert!(
+        skill_ids_of(&frames, sc::SCSkillStartedPacket).contains(&WATER_RIDER_SKILL),
+        "{:x?}",
+        ops(&frames)
+    );
+    assert_eq!(water_count(&pa), 0);
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_millis(5_100)).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    client.drain();
+    assert_eq!(water_count(&pa), WATER_COUNT, "10 x item 15694 (Water)");
+}

@@ -663,12 +663,15 @@ pub fn on_instance_change(server: &GameServer, player: &PlayerRef) -> bool {
 
 /// The mount / slave branch of `CSStartSkillPacket` after the mount skill was used: the
 /// harpoon rope controller (slave casters) and the rider / operator skill
-/// (`MateGameData.GetMountAttachedSkills`). Returns the rider skill id (0 = none).
+/// (`MateGameData.GetMountAttachedSkills`). `mount_skill_id` is the `mount_skills` row the
+/// client pressed (`SkillCasterMount.MountSkillTemplateId`). Returns the rider skill id
+/// (0 = none).
 pub fn on_mount_skill_used(
     server: &GameServer,
     player: &PlayerRef,
     caster: &WorldObject,
     skill_id: u32,
+    mount_skill_id: u32,
     success: bool,
     target: &crate::systems::skills::types::SkillCastTarget,
 ) -> u32 {
@@ -679,7 +682,7 @@ pub fn on_mount_skill_used(
             .game_data
             .systems
             .vehicles
-            .mount_attached_skill(skill_id, ap)
+            .mount_attached_skill(mount_skill_id, ap)
     } else {
         0
     };
