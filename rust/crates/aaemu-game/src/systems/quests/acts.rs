@@ -1122,8 +1122,18 @@ impl Ctx<'_> {
                 }
                 self.add_objective(h, a, 1)?;
             }
-            (ObjCinema { cinema_id, .. }, QuestEvent::CinemaStarted { .. }) => {
-                self.st.currently_playing_cinema_id = *cinema_id;
+            (
+                ObjCinema { cinema_id, .. },
+                QuestEvent::CinemaStarted {
+                    cinema_id: started, ..
+                },
+            ) => {
+                // Deviation: the C# claimed every cinema that started. The client announces
+                // the cinema of a quest component (`CSRequestPermissionToPlayCinema...`), so
+                // an announced cinema other than this objective's is not this objective's.
+                if *started == 0 || started == cinema_id {
+                    self.st.currently_playing_cinema_id = *cinema_id;
+                }
             }
             (ObjCinema { cinema_id, .. }, QuestEvent::CinemaEnded { .. }) => {
                 if self.st.currently_playing_cinema_id != *cinema_id {

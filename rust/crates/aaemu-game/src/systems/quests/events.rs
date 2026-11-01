@@ -12,7 +12,7 @@ use super::engine::{Ctx, Deferred, KillUnitInfo, QuestEnv, UnitSnapshot};
 use super::model::acceptor;
 use super::packets::{quest_error, SCQuestContextFailedPacket};
 use super::spheres::SphereQuest;
-use super::state::EventKind;
+use super::state::{CinemaMark, EventKind};
 use crate::models::character::Character;
 use crate::server::GameServer;
 use crate::systems::social::achievement::char_record_kind;
@@ -1033,18 +1033,79 @@ pub fn on_enter_quest_starter_sphere(
     });
 }
 
-/// `Events.OnCinemaStarted` (`CSStartedCinemaPacket`).
+/// The cinema a `CSCompletedCinemaPacket` ends.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CinemaEnd {
+    /// `cinemas.id`, 0 when it is unknown.
+    pub cinema_id: u32,
+    /// Milliseconds since its `CSStartedCinemaPacket`; `None` when none was seen.
+    pub played_ms: Option<i64>,
+}
+
+/// The cinema that ends now: the playing one, else the one a `QuestActObjCinema` claimed, else
+/// unknown.
+fn cinema_end(st: &super::state::QuestState, now_ms: i64) -> CinemaEnd {
+    let playing = st.playing_cinema;
+    let cinema_id = playing
+        .map(|m| m.cinema_id)
+        .filter(|id| *id != 0)
+        .unwrap_or(st.currently_playing_cinema_id);
+    CinemaEnd {
+        cinema_id,
+        played_ms: playing.map(|m| (now_ms - m.at_ms).max(0)),
+    }
+}
+
+/// Rust addition: the client is about to play cinema `cinema_id`, announced by
+/// `CSRequestPermissionToPlayCinemaForDirectingMode` or started by a `CinemaEffect`. The next
+/// `CSStartedCinemaPacket` is that cinema. 0 forgets an earlier announcement (the new request
+/// has no known cinema).
+pub fn request_cinema(server: &GameServer, player: &PlayerRef, cinema_id: u32) {
+    run_or_queue(server, player, move |ctx| {
+        let at_ms = ctx.now_ms;
+        ctx.st.requested_cinema = (cinema_id != 0).then_some(CinemaMark { cinema_id, at_ms });
+    });
+}
+
+/// `Events.OnCinemaStarted` (`CSStartedCinemaPacket`). The event carries the announced cinema,
+/// 0 when the client played one without announcing it (a `QuestActObjCinema` objective on
+/// quest start).
 pub fn on_cinema_started(server: &GameServer, player: &PlayerRef) {
     run_or_queue(server, player, |ctx| {
-        let cinema_id = ctx.st.currently_playing_cinema_id;
+        let now_ms = ctx.now_ms;
+        let cinema_id = ctx
+            .st
+            .requested_cinema
+            .take()
+            .filter(|r| (now_ms - r.at_ms).abs() <= super::cinema::REQUEST_TTL_MS)
+            .map_or(0, |r| r.cinema_id);
+        ctx.st.playing_cinema = Some(CinemaMark {
+            cinema_id,
+            at_ms: now_ms,
+        });
+        tracing::info!(
+            "StartedCinema, {} ({}), Cinema {}",
+            ctx.c.unit.name,
+            ctx.c.id,
+            ctx.data.cinema_label(cinema_id)
+        );
         dispatch_logged(ctx, &QuestEvent::CinemaStarted { cinema_id });
     });
+}
+
+/// Which cinema `CSCompletedCinemaPacket` ends and for how long it played; call before
+/// [`on_cinema_ended`] (which forgets it). Not for use inside a quest operation.
+pub fn cinema_ending(player: &PlayerRef) -> CinemaEnd {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    cinema_end(&player.data().quest_state, now_ms)
 }
 
 /// `Events.OnCinemaEnded` (`CSCompletedCinemaPacket`).
 pub fn on_cinema_ended(server: &GameServer, player: &PlayerRef) {
     run_or_queue(server, player, |ctx| {
-        let cinema_id = ctx.st.currently_playing_cinema_id;
+        let CinemaEnd { cinema_id, .. } = cinema_end(ctx.st, ctx.now_ms);
+        ctx.st.playing_cinema = None;
+        ctx.st.requested_cinema = None;
         dispatch_logged(ctx, &QuestEvent::CinemaEnded { cinema_id });
     });
 }
