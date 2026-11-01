@@ -27,7 +27,7 @@ use crate::systems::npcs::npc::data::NpcTemplate;
 use crate::systems::skills::ext::ItemSkillHooks;
 use crate::systems::DataLoadCtx;
 use crate::test_support::*;
-use crate::world::{NpcRef, PlayerRef, WorldObject};
+use crate::world::{NpcRef, PlayerRef, SlaveRef, WorldObject};
 
 use super::data::{
     attach_point, ShipyardStep, ShipyardTemplate, SlaveTemplate, TransferPath, TransferRoad,
@@ -217,6 +217,46 @@ fn error_codes(frames: &[(u16, Vec<u8>)]) -> Vec<i16> {
         .filter(|f| f.0 == sc::SCErrorMsgPacket)
         .map(|f| i16::from_le_bytes([f.1[0], f.1[1]]))
         .collect()
+}
+
+/// The `SCSkillStarted` result of `skill` (Mount caster, Position or Unit target, no skill
+/// object: the shapes the cannon flow sends).
+fn started_result(frames: &[(u16, Vec<u8>)], skill: u32) -> Option<u8> {
+    frames
+        .iter()
+        .filter(|f| f.0 == sc::SCSkillStartedPacket)
+        .find_map(|(_, body)| {
+            let mut s = PacketStream::from_bytes(body.clone());
+            if s.read_u32().ok()? != skill {
+                return None;
+            }
+            let _ = s.read_u16();
+            let caster = s.read_u8().ok()?;
+            let _ = s.read_bc();
+            if caster == 3 {
+                let _ = s.read_u32();
+            }
+            match s.read_u8().ok()? {
+                1 => {
+                    let _ = s.read_i64();
+                    let _ = s.read_i64();
+                    let _ = s.read_f32();
+                    let _ = s.read_f32();
+                    let _ = s.read_bc();
+                    let _ = s.read_bc();
+                }
+                0 | 4 => {
+                    let _ = s.read_bc();
+                }
+                _ => return None,
+            }
+            let _ = s.read_u8();
+            let _ = s.read_u16();
+            let _ = s.read_u16();
+            let _ = s.read_u8();
+            let flags = s.read_u8().ok()?;
+            (flags & 1 != 0).then(|| s.read_u8().ok()).flatten()
+        })
 }
 
 /// The actions of the `SCItemTaskSuccessPacket`s in `frames`.
@@ -4253,6 +4293,34 @@ async fn real_cart_and_ship_slaves_offer_the_passenger_seat() {
 fn real_server(d: super::Data) -> Arc<GameServer> {
     let mut data = GameData::empty();
     data.systems.vehicles = d;
+    real_game_server(data)
+}
+
+/// A server with the real 1.2 skill and vehicle rows, on the synthetic test world.
+fn real_skill_server(db: &str) -> Arc<GameServer> {
+    let conn =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("compact db");
+    let app = app_path();
+    let files = ClientFileManager::from_sources(&[], &app);
+    let ctx = DataLoadCtx {
+        conn: &conn,
+        app_path: &app,
+        files: &files,
+        language: "en_us",
+    };
+    let mut data = GameData::empty();
+    data.systems.vehicles = super::Data::load(&ctx).expect("vehicles data");
+    data.systems.skills = crate::systems::skills::Data::load(&ctx).expect("skills data");
+    // The tower cannon's rider skill 14372 needs one steel cannonball (23671).
+    data.items
+        .templates
+        .insert(23671, ItemTemplate::plain(23671, 1));
+    real_game_server(data)
+}
+
+/// A `GameServer` on the synthetic map whose instance 0 covers 32 x 32 cells.
+fn real_game_server(mut data: GameData) -> Arc<GameServer> {
     data.worlds = WorldTemplates::from_templates(
         vec![WorldTemplate::synthetic(0, "main_world", 32, 32, TEST_ZONE)],
         Vec::new(),
@@ -5492,6 +5560,23 @@ fn cannon_data() -> GameData {
         .vehicles
         .slave_mount_skills
         .push((1, CANNON_CHILD, CANNON_MOUNT_SKILL));
+    // The real data shape: models 117 -> vehicle_models 10 (slave 77 and every ship cannon),
+    // pitch -20..35 deg, yaw -22..22 deg (`compact.sqlite3`).
+    d.systems
+        .vehicles
+        .model_types
+        .insert(117, (10, "VehicleModel".into()));
+    d.systems.vehicles.vehicle_models.insert(
+        10,
+        VehicleModel {
+            id: 10,
+            turret_pitch_angle_min: Some(-20.0),
+            turret_pitch_angle_max: Some(35.0),
+            turret_yaw_angle_min: Some(-22.0),
+            turret_yaw_angle_max: Some(22.0),
+            ..VehicleModel::default()
+        },
+    );
     d.systems.npcs.npc.templates.insert(
         CANNON_TARGET_NPC,
         NpcTemplate {
@@ -5657,8 +5742,35 @@ async fn ship_cannon_gunner_seat_skill_and_leaving() {
     assert!(ops(&fa).contains(&sc::SCSkillFiredPacket));
     assert!(ops(&fa).contains(&sc::SCUnitPointsPacket));
     assert!(ops(&b.drain()).contains(&sc::SCSkillFiredPacket));
-    // Out of the 4 m area: no damage.
+    // Out of the 4 m area: no damage. Wait out the 150 ms global cooldown so the shot is
+    // really cast instead of refused as COOLDOWN_TIME.
+    tokio::time::sleep(Duration::from_millis(160)).await;
     fire(&mut a, 60.0, 60.0);
+    assert_eq!(target.data().unit.hp, 850);
+    assert!(ops(&a.drain()).contains(&sc::SCSkillFiredPacket));
+
+    // A Unit target on a BallisticPos skill is NO_TARGET (0x9), not a shot at the caster.
+    start_skill(
+        &server,
+        &mut a.conn,
+        CSStartSkillPacket {
+            skill_id: FIRE_CANNON,
+            caster: SkillCaster::Mount {
+                obj_id: cannon.obj_id,
+                mount_skill_template_id: CANNON_MOUNT_SKILL,
+            },
+            target: SkillCastTarget::Unit(target.obj_id),
+            flag: 0,
+            skill_object: SkillObject::None,
+        },
+    );
+    let frames = a.drain();
+    assert_eq!(
+        started_result(&frames, FIRE_CANNON),
+        Some(crate::systems::skills::types::skill_result::NO_TARGET),
+        "{:x?}",
+        frames
+    );
     assert_eq!(target.data().unit.hp, 850);
 
     // Leaving the cannon (CSDiscardSlave) frees the seat for the crew member.
@@ -5696,6 +5808,184 @@ async fn ship_cannon_gunner_seat_skill_and_leaving() {
     assert_eq!(pa.data().unit.transform.parent_obj_id, 0);
     assert!(!pa.data().is_riding);
     assert!(cannon.data().attached_characters.is_empty());
+}
+
+/// The skill's `target_angle` cone is measured from the cannon's composed world facing (hull
+/// yaw + the attach point's yaw), not from the hull alone. The hull is turned 45 deg and the
+/// cannon carries a 45 deg attach yaw, so the cannon faces west; the shot is aimed at a fixed
+/// world direction (west of the cannon), which a hull-only or attach-only composition would
+/// place 45 deg outside the 50 deg cone.
+#[tokio::test]
+async fn cannon_fires_at_a_fixed_world_direction_with_the_hull_turned() {
+    use crate::systems::skills::handlers::{start_skill, CSStartSkillPacket};
+    use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+    let mut d = cannon_data();
+    let cannon_skill = d
+        .systems
+        .skills
+        .skills
+        .get_mut(&FIRE_CANNON)
+        .expect("cannon skill");
+    Arc::get_mut(cannon_skill)
+        .expect("sole cannon skill reference")
+        .target_angle = 50;
+    let server = server_with(d);
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let mut a = TestClient::new(&server, 1, 1);
+    let pa = spawn_player(&server, &a, test_character(1, "Owner", 100.0, 100.0), PA);
+    a.conn.active_char = Some(pa.clone());
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    let hull = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        SHIP_HULL,
+        None,
+        false,
+        None,
+        None,
+    )
+    .expect("hull");
+    let cannon = world
+        .slave(hull.data().attached_slaves[0])
+        .expect("cannon child");
+    let cannon_tl = u32::from(cannon.data().unit.tl_id);
+    // Hull yaw 45 deg + attach yaw 45 deg = cannon world yaw 90 deg (facing -x, west).
+    let hull_t = hull.data().unit.transform;
+    hull.data().unit.transform.set_position(
+        hull_t.x,
+        hull_t.y,
+        hull_t.z,
+        0.0,
+        0.0,
+        std::f32::consts::FRAC_PI_4,
+    );
+    let cannon_t = cannon.data().unit.transform;
+    cannon.data().unit.transform.set_position(
+        cannon_t.x,
+        cannon_t.y,
+        cannon_t.z,
+        0.0,
+        0.0,
+        std::f32::consts::FRAC_PI_4,
+    );
+    a.drain();
+    stand_next_to(&world, &pa, &WorldObject::from(&cannon));
+    slaves::bind_slave_by_tl(&server, &pa, cannon_tl);
+    a.drain();
+
+    let origin = world.world_pos_rot(&WorldObject::from(&cannon));
+    assert!(
+        (origin.rot_z - std::f32::consts::FRAC_PI_2).abs() < 1e-4,
+        "{origin:?}"
+    );
+    let (shot_x, shot_y) = (origin.x - 40.0, origin.y);
+    start_skill(
+        &server,
+        &mut a.conn,
+        CSStartSkillPacket {
+            skill_id: FIRE_CANNON,
+            caster: SkillCaster::Mount {
+                obj_id: cannon.obj_id,
+                mount_skill_template_id: CANNON_MOUNT_SKILL,
+            },
+            target: SkillCastTarget::Position {
+                obj_id: 0,
+                x: shot_x,
+                y: shot_y,
+                z: 100.0,
+                rot: 0.0,
+                obj_id1: 0,
+                obj_id2: 0,
+            },
+            flag: 0,
+            skill_object: SkillObject::None,
+        },
+    );
+    let frames = a.drain();
+    assert!(
+        ops(&frames).contains(&sc::SCSkillFiredPacket),
+        "{:x?}",
+        ops(&frames)
+    );
+}
+
+/// A reversed `vehicle_models` window (min above max) is bad data, not a panic: the clamp uses
+/// the sorted window and the aim is still stored and relayed.
+#[tokio::test]
+async fn degenerate_turret_window_does_not_panic() {
+    let mut d = data();
+    d.systems
+        .vehicles
+        .model_types
+        .insert(300, (54, "VehicleModel".into()));
+    d.systems.vehicles.vehicle_models.insert(
+        54,
+        VehicleModel {
+            id: 54,
+            turret_pitch_angle_min: Some(30.0),
+            turret_pitch_angle_max: Some(-30.0),
+            turret_yaw_angle_min: Some(45.0),
+            turret_yaw_angle_max: Some(-45.0),
+            ..VehicleModel::default()
+        },
+    );
+    let server = server_with(d);
+    let mut a = TestClient::new(&server, 1, 1);
+    let mut b = TestClient::new(&server, 2, 2);
+    let pa = spawn_player(&server, &a, test_character(1, "Gunner", 100.0, 100.0), PA);
+    let pb = spawn_player(&server, &b, test_character(2, "Crew", 101.0, 100.0), PB);
+    a.conn.active_char = Some(pa.clone());
+    b.conn.active_char = Some(pb.clone());
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    let slave = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        SLAVE_TEMPLATE,
+        None,
+        false,
+        None,
+        None,
+    )
+    .expect("vehicle");
+    a.drain();
+    b.drain();
+    stand_next_to(&world, &pa, &WorldObject::from(&slave));
+    slaves::bind_slave(
+        &server,
+        &pa,
+        slave.obj_id,
+        attach_point::PASSENGER0,
+        slaves::attach_reason::SLAVE_BINDING,
+        Some(3.0),
+    );
+    a.drain();
+    b.drain();
+
+    send_turret_state(&mut a, &server, slave.obj_id, 1.0, -1.0).await;
+
+    let aim = {
+        let d = slave.data();
+        (d.turret_pitch, d.turret_yaw)
+    };
+    assert_eq!(
+        aim,
+        (30f32.to_radians(), -45f32.to_radians()),
+        "the reversed window is sorted, not a panic"
+    );
+    let fb = b.drain();
+    assert_eq!(body(&fb, sc::SCUnitModelPostureChangedPacket), {
+        let mut v = bc(slave.obj_id);
+        v.extend(turret_posture(aim.0, aim.1));
+        v
+    });
 }
 
 /// The type-8 posture body of `SCUnitModelPostureChangedPacket` / `SCUnitStatePacket`:
@@ -5771,17 +6061,17 @@ async fn seated_gunner_turret_state_is_stored_and_broadcast() {
     a.drain();
     b.drain();
 
-    send_turret_state(&mut a, &server, cannon.obj_id, 0.25, -0.5).await;
+    send_turret_state(&mut a, &server, cannon.obj_id, 0.25, -0.3).await;
 
     let aim = {
         let d = cannon.data();
         (d.turret_pitch, d.turret_yaw)
     };
-    assert_eq!(aim, (0.25, -0.5));
+    assert_eq!(aim, (0.25, -0.3));
     let fb = b.drain();
     assert_eq!(body(&fb, sc::SCUnitModelPostureChangedPacket), {
         let mut v = bc(cannon.obj_id);
-        v.extend(turret_posture(0.25, -0.5));
+        v.extend(turret_posture(0.25, -0.3));
         v
     });
     assert!(
@@ -5940,40 +6230,40 @@ async fn turret_state_is_throttled_and_deduplicated() {
         v
     };
 
-    send_turret_state(&mut a, &server, cannon.obj_id, 0.25, -0.5).await;
+    send_turret_state(&mut a, &server, cannon.obj_id, 0.25, -0.3).await;
     assert_eq!(
         body(&b.drain(), sc::SCUnitModelPostureChangedPacket),
-        posture(0.25, -0.5)
+        posture(0.25, -0.3)
     );
 
     // Changed, but inside the window: stored at once, relayed by the tick after the window.
-    send_turret_state(&mut a, &server, cannon.obj_id, 0.35, -0.6).await;
+    send_turret_state(&mut a, &server, cannon.obj_id, 0.35, -0.32).await;
     assert!(!ops(&b.drain()).contains(&sc::SCUnitModelPostureChangedPacket));
     let aim = {
         let d = cannon.data();
         (d.turret_pitch, d.turret_yaw)
     };
-    assert_eq!(aim, (0.35, -0.6));
+    assert_eq!(aim, (0.35, -0.32));
 
     tokio::time::sleep(Duration::from_millis(160)).await;
     super::active_region_tick(&server);
     assert_eq!(
         body(&b.drain(), sc::SCUnitModelPostureChangedPacket),
-        posture(0.35, -0.6)
+        posture(0.35, -0.32)
     );
 
     // Outside the window but unchanged: dropped, and the tick does not relay it again.
     tokio::time::sleep(Duration::from_millis(160)).await;
-    send_turret_state(&mut a, &server, cannon.obj_id, 0.35, -0.6).await;
+    send_turret_state(&mut a, &server, cannon.obj_id, 0.35, -0.32).await;
     assert!(!ops(&b.drain()).contains(&sc::SCUnitModelPostureChangedPacket));
     super::active_region_tick(&server);
     assert!(!ops(&b.drain()).contains(&sc::SCUnitModelPostureChangedPacket));
 
     // Outside the window and changed: relayed at once.
-    send_turret_state(&mut a, &server, cannon.obj_id, 0.45, -0.7).await;
+    send_turret_state(&mut a, &server, cannon.obj_id, 0.45, -0.34).await;
     assert_eq!(
         body(&b.drain(), sc::SCUnitModelPostureChangedPacket),
-        posture(0.45, -0.7)
+        posture(0.45, -0.34)
     );
 }
 
@@ -6017,22 +6307,22 @@ async fn turret_aim_inside_the_window_is_stored_and_relayed_by_the_tick() {
     a.drain();
     b.drain();
 
-    send_turret_state(&mut a, &server, cannon.obj_id, 0.25, -0.5).await;
+    send_turret_state(&mut a, &server, cannon.obj_id, 0.25, -0.3).await;
     b.drain();
     tokio::time::sleep(Duration::from_millis(50)).await;
-    send_turret_state(&mut a, &server, cannon.obj_id, 0.35, -0.6).await;
+    send_turret_state(&mut a, &server, cannon.obj_id, 0.35, -0.32).await;
 
     let aim = {
         let d = cannon.data();
         (d.turret_pitch, d.turret_yaw)
     };
-    assert_eq!(aim, (0.35, -0.6), "the newest aim is stored at once");
+    assert_eq!(aim, (0.35, -0.32), "the newest aim is stored at once");
     assert!(!ops(&b.drain()).contains(&sc::SCUnitModelPostureChangedPacket));
 
     tokio::time::sleep(Duration::from_millis(160)).await;
     super::active_region_tick(&server);
     let mut expected = bc(cannon.obj_id);
-    expected.extend(turret_posture(0.35, -0.6));
+    expected.extend(turret_posture(0.35, -0.32));
     assert_eq!(
         body(&b.drain(), sc::SCUnitModelPostureChangedPacket),
         expected
@@ -6072,9 +6362,9 @@ async fn late_viewer_sees_the_newest_turret_aim() {
     stand_next_to(&world, &pa, &WorldObject::from(&cannon));
     slaves::bind_slave_by_tl(&server, &pa, cannon_tl);
     a.drain();
-    send_turret_state(&mut a, &server, cannon.obj_id, 0.25, -0.5).await;
+    send_turret_state(&mut a, &server, cannon.obj_id, 0.25, -0.3).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
-    send_turret_state(&mut a, &server, cannon.obj_id, 0.35, -0.6).await;
+    send_turret_state(&mut a, &server, cannon.obj_id, 0.35, -0.32).await;
     a.drain();
 
     let mut viewer = TestClient::new(&server, 3, 3);
@@ -6086,7 +6376,7 @@ async fn late_viewer_sees_the_newest_turret_aim() {
     );
     let fv = viewer.drain();
     let state = unit_state_of(&fv, cannon.obj_id).expect("cannon SCUnitState for the late viewer");
-    let posture = turret_posture(0.35, -0.6);
+    let posture = turret_posture(0.35, -0.32);
     assert!(
         state.windows(posture.len()).any(|w| w == posture),
         "newest turret posture missing from {:02x?}",
@@ -6098,7 +6388,26 @@ async fn late_viewer_sees_the_newest_turret_aim() {
 /// there); the packet names the slave whose model carries the turret.
 #[tokio::test]
 async fn passenger_seat_can_set_the_slave_turret_state() {
-    let server = server_with(data());
+    // The cart's model 300 is a `VehicleModel` here: the client only sends turret aim for a
+    // `VehicleUnitModel` (`FUN_390b3750`), so a slave without one has no turret (see
+    // `non_vehicle_slave_gets_no_posture_relay`).
+    let mut d = data();
+    d.systems
+        .vehicles
+        .model_types
+        .insert(300, (54, "VehicleModel".into()));
+    d.systems.vehicles.vehicle_models.insert(
+        54,
+        VehicleModel {
+            id: 54,
+            turret_pitch_angle_min: Some(-45.0),
+            turret_pitch_angle_max: Some(45.0),
+            turret_yaw_angle_min: Some(-180.0),
+            turret_yaw_angle_max: Some(180.0),
+            ..VehicleModel::default()
+        },
+    );
+    let server = server_with(d);
     let mut a = TestClient::new(&server, 1, 1);
     let mut b = TestClient::new(&server, 2, 2);
     let pa = spawn_player(&server, &a, test_character(1, "Gunner", 100.0, 100.0), PA);
@@ -6148,6 +6457,110 @@ async fn passenger_seat_can_set_the_slave_turret_state() {
     });
 }
 
+/// Turret aim outside the model's limits is clamped before it is stored and relayed
+/// (`vehicle_models` 10: pitch -20..35 deg, yaw -22..22 deg), like the client's `39425490`.
+#[tokio::test]
+async fn turret_state_outside_the_model_limits_is_clamped() {
+    let server = server_with(cannon_data());
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let mut a = TestClient::new(&server, 1, 1);
+    let mut b = TestClient::new(&server, 2, 2);
+    let pa = spawn_player(&server, &a, test_character(1, "Owner", 100.0, 100.0), PA);
+    let pb = spawn_player(&server, &b, test_character(2, "Crew", 101.0, 100.0), PB);
+    a.conn.active_char = Some(pa.clone());
+    b.conn.active_char = Some(pb.clone());
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    let hull = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        SHIP_HULL,
+        None,
+        false,
+        None,
+        None,
+    )
+    .expect("hull");
+    let cannon = world
+        .slave(hull.data().attached_slaves[0])
+        .expect("cannon child");
+    let cannon_tl = u32::from(cannon.data().unit.tl_id);
+    a.drain();
+    b.drain();
+    stand_next_to(&world, &pa, &WorldObject::from(&cannon));
+    slaves::bind_slave_by_tl(&server, &pa, cannon_tl);
+    a.drain();
+    b.drain();
+
+    send_turret_state(&mut a, &server, cannon.obj_id, 1.0, -1.0).await;
+
+    let (pitch, yaw) = (35f32.to_radians(), -22f32.to_radians());
+    let aim = {
+        let d = cannon.data();
+        (d.turret_pitch, d.turret_yaw)
+    };
+    assert_eq!(aim, (pitch, yaw));
+    let fb = b.drain();
+    assert_eq!(body(&fb, sc::SCUnitModelPostureChangedPacket), {
+        let mut v = bc(cannon.obj_id);
+        v.extend(turret_posture(pitch, yaw));
+        v
+    });
+}
+
+/// A slave whose model is not a `VehicleModel` has no turret (the client needs a
+/// `VehicleUnitModel` to aim), so an aim packet is ignored: nothing is stored or relayed.
+#[tokio::test]
+async fn non_vehicle_slave_gets_no_posture_relay() {
+    let server = server_with(data());
+    let mut a = TestClient::new(&server, 1, 1);
+    let mut b = TestClient::new(&server, 2, 2);
+    let pa = spawn_player(&server, &a, test_character(1, "Gunner", 100.0, 100.0), PA);
+    let pb = spawn_player(&server, &b, test_character(2, "Crew", 101.0, 100.0), PB);
+    a.conn.active_char = Some(pa.clone());
+    b.conn.active_char = Some(pb.clone());
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    let slave = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        SLAVE_TEMPLATE,
+        None,
+        false,
+        None,
+        None,
+    )
+    .expect("vehicle");
+    a.drain();
+    b.drain();
+    stand_next_to(&world, &pa, &WorldObject::from(&slave));
+    slaves::bind_slave(
+        &server,
+        &pa,
+        slave.obj_id,
+        attach_point::PASSENGER0,
+        slaves::attach_reason::SLAVE_BINDING,
+        Some(3.0),
+    );
+    a.drain();
+    b.drain();
+
+    send_turret_state(&mut a, &server, slave.obj_id, 0.1, 0.2).await;
+
+    let aim = {
+        let d = slave.data();
+        (d.turret_pitch, d.turret_yaw)
+    };
+    assert_eq!(aim, (0.0, 0.0));
+    assert!(!ops(&b.drain()).contains(&sc::SCUnitModelPostureChangedPacket));
+}
+
 /// A viewer who arrives after the aim was set gets the stored posture in its `SCUnitState`.
 #[tokio::test]
 async fn late_viewer_receives_the_stored_turret_state() {
@@ -6180,7 +6593,7 @@ async fn late_viewer_receives_the_stored_turret_state() {
     stand_next_to(&world, &pa, &WorldObject::from(&cannon));
     slaves::bind_slave_by_tl(&server, &pa, cannon_tl);
     a.drain();
-    send_turret_state(&mut a, &server, cannon.obj_id, 0.25, -0.5).await;
+    send_turret_state(&mut a, &server, cannon.obj_id, 0.25, -0.3).await;
     a.drain();
 
     let mut viewer = TestClient::new(&server, 3, 3);
@@ -6192,7 +6605,7 @@ async fn late_viewer_receives_the_stored_turret_state() {
     );
     let fv = viewer.drain();
     let state = unit_state_of(&fv, cannon.obj_id).expect("cannon SCUnitState for the late viewer");
-    let posture = turret_posture(0.25, -0.5);
+    let posture = turret_posture(0.25, -0.3);
     assert!(
         state.windows(posture.len()).any(|w| w == posture),
         "stored turret posture missing from {:02x?}",
@@ -6210,6 +6623,29 @@ async fn real_cannon_slaves_store_the_turret_state() {
         return;
     };
     let d = load_real(&db, &[]);
+    // The turret clamp reads this real row: model 117 -> vm 10, the cannon's limits.
+    let vm = d.vehicle_model(117).expect("model 117 vehicle model");
+    assert_eq!(
+        (
+            vm.turret_pitch_angle_min,
+            vm.turret_pitch_angle_max,
+            vm.turret_yaw_angle_min,
+            vm.turret_yaw_angle_max,
+        ),
+        (Some(-20.0), Some(35.0), Some(-22.0), Some(22.0))
+    );
+    // The training ballista (slave 43, model 6 -> vm 6): `turret_yaw_angle_max` is the text
+    // 'f' in the real data and is kept as "no limit" instead of the C# coerce-to-0.0.
+    let ballista = d.vehicle_model(6).expect("model 6 vehicle model");
+    assert_eq!(
+        (
+            ballista.turret_pitch_angle_min,
+            ballista.turret_pitch_angle_max,
+            ballista.turret_yaw_angle_min,
+            ballista.turret_yaw_angle_max,
+        ),
+        (Some(-0.1), Some(0.1), Some(0.0), None)
+    );
     for id in [10u32, 97, 93, 100, 77] {
         let t = d.slave_template(id).unwrap_or_else(|| panic!("slave {id}"));
         assert!(
@@ -6264,8 +6700,9 @@ async fn real_cannon_slaves_store_the_turret_state() {
             vec![(attach_point::DRIVER, PA)]
         );
         a.drain();
-        let pitch = 0.1 * (i as f32 + 1.0);
-        let yaw = -0.2 * (i as f32 + 1.0);
+        // Inside every cannon model's limits (the narrowest here is vm 10's -22..22 deg).
+        let pitch = 0.05 * (i as f32 + 1.0);
+        let yaw = -0.05 * (i as f32 + 1.0);
         send_turret_state(&mut a, &server, slave.obj_id, pitch, yaw).await;
         let (stored, tl) = {
             let d = slave.data();
@@ -6274,5 +6711,173 @@ async fn real_cannon_slaves_store_the_turret_state() {
         assert_eq!(stored, (pitch, yaw), "slave {id}");
         slaves::unbind_slave(&server, &pa, tl, 0);
         a.drain();
+    }
+}
+
+/// A slave spawned from a real `slaves` template (no hull / equipment path).
+fn spawn_real_slave(
+    server: &GameServer,
+    world: &Arc<crate::world::WorldInstance>,
+    summoner: &PlayerRef,
+    template_id: u32,
+    at: (f32, f32, f32),
+) -> SlaveRef {
+    let t = server
+        .game_data
+        .systems
+        .vehicles
+        .slave_template(template_id)
+        .unwrap_or_else(|| panic!("slave {template_id}"))
+        .clone();
+    let mut s = crate::models::slave::Slave::new(0, t.id);
+    s.unit.hp = 1000;
+    s.unit.tl_id = server.ids.tl.get_next_id().expect("tl") as u16;
+    s.unit.name = t.name.clone();
+    s.unit.model_id = t.model_id;
+    s.unit.transform.set_xyz(at.0, at.1, at.2);
+    s.unit.level = t.level as u8;
+    s.summoner_id = summoner.character_id;
+    s.summoner_obj_id = summoner.obj_id;
+    s.summoner_name = summoner.data().unit.name.clone();
+    let obj_id = server.ids.object.get_next_id().expect("obj");
+    let slave = crate::world::Entity::new(obj_id, s);
+    world.spawn(&slave, &server.view_ctx());
+    slave
+}
+
+/// The real 1.2 rows that a model-limit refusal broke. The client evaluates `CanUse` on the
+/// aimed Position before it clamps the turret to the model (`FUN_394322f0` step 7, the clamp
+/// in step 8), so these are legal shots even though the turret cannot reach them:
+/// - slave 43 training ballista, vm 6 (pitch -0.1..0.1 deg, `turret_yaw_angle_max` = 'f'),
+///   10 deg off-axis inside the skill's 40 deg `target_angle`;
+/// - slave 93 tower cannon, vm 42 (pitch min -20 deg), 15 m above a target 30 m out;
+/// - slave 77 ship cannon, vm 10 (pitch min -20 deg), 20 m above a target 40 m out.
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_cannons_fire_where_the_model_limits_would_have_refused() {
+    use crate::systems::skills::handlers::{start_skill, CSStartSkillPacket};
+    use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let server = real_skill_server(&db);
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let mut client = TestClient::new(&server, 1, 1);
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+
+    // (slave template, skill, caster position, fixed world target position)
+    type Point = (f32, f32, f32);
+    type Case = (u32, u32, Point, Point);
+    let cases: [Case; 3] = [
+        (43, 13562, (100.0, 100.0, 100.0), (106.946, 139.392, 100.0)),
+        (93, 19439, (100.0, 100.0, 115.0), (100.0, 130.0, 100.0)),
+        (77, 17742, (100.0, 100.0, 120.0), (100.0, 140.0, 100.0)),
+    ];
+    for (i, (slave_id, skill_id, at, target)) in cases.into_iter().enumerate() {
+        // A fresh player per case: a successful cast arms the global cooldown.
+        let obj_id = 0x00F0_0100 + i as u32;
+        let pa = spawn_player(
+            &server,
+            &client,
+            test_character(i as u32 + 1, "Gunner", at.0, at.1),
+            obj_id,
+        );
+        pa.data().unit.transform.set_xyz(at.0, at.1, at.2);
+        pa.data().unit.hp = 1000;
+        pa.data().unit.max_hp = 1000;
+        client.conn.active_char = Some(pa.clone());
+        // The tower cannon's rider skill 14372 requires one steel cannonball (23671).
+        let item_template = server
+            .game_data
+            .items
+            .template(23671)
+            .expect("steel cannonball")
+            .clone();
+        let mut item = Item::create(
+            0x9000 + i as u64,
+            &item_template,
+            1,
+            0,
+            1,
+            &server.game_data.items,
+            0,
+        );
+        item.owner_id = u64::from(pa.character_id);
+        item.slot_type = slot_type::INVENTORY;
+        item.slot = i as i32;
+        let bag = pa
+            .data()
+            .inventory
+            .get(slot_type::INVENTORY)
+            .expect("bag")
+            .clone();
+        bag.lock().unwrap().items.push(item);
+        let mount_id = server
+            .game_data
+            .systems
+            .vehicles
+            .slave_mount_skills
+            .iter()
+            .find(|(_, slave, _)| *slave == slave_id)
+            .map(|(_, _, mount)| *mount)
+            .unwrap_or_else(|| panic!("slave {slave_id} mount skill"));
+        assert_eq!(
+            server
+                .game_data
+                .systems
+                .vehicles
+                .mount_skill_skill_id(mount_id),
+            skill_id,
+            "slave {slave_id}"
+        );
+        let slave = spawn_real_slave(&server, &world, &pa, slave_id, at);
+        slaves::bind_slave(
+            &server,
+            &pa,
+            slave.obj_id,
+            attach_point::DRIVER,
+            slaves::attach_reason::NEW_MASTER,
+            Some(4.0),
+        );
+        assert_eq!(
+            slave.data().attached_characters,
+            vec![(attach_point::DRIVER, obj_id)]
+        );
+        client.drain();
+        start_skill(
+            &server,
+            &mut client.conn,
+            CSStartSkillPacket {
+                skill_id,
+                caster: SkillCaster::Mount {
+                    obj_id: slave.obj_id,
+                    mount_skill_template_id: mount_id,
+                },
+                target: SkillCastTarget::Position {
+                    obj_id: 0,
+                    x: target.0,
+                    y: target.1,
+                    z: target.2,
+                    rot: 0.0,
+                    obj_id1: 0,
+                    obj_id2: 0,
+                },
+                flag: 0,
+                skill_object: SkillObject::None,
+            },
+        );
+        let frames = client.drain();
+        assert!(
+            ops(&frames).contains(&sc::SCSkillFiredPacket),
+            "slave {slave_id} skill {skill_id}: {:x?}",
+            ops(&frames)
+        );
+        let tl = u32::from(slave.data().unit.tl_id);
+        slaves::unbind_slave(&server, &pa, tl, 0);
+        client.drain();
     }
 }
