@@ -17,7 +17,9 @@
 //! The `RepliesTo` context is a task-local set around the packet handler, so it applies only to
 //! frames the connection task itself sends while the handler runs (including `player.send` through
 //! the character's connection handle). A frame another task queues through a connection handle
-//! during a handler await is not a reply and is not held.
+//! during a handler await is not a reply and is not held, and neither is a frame another
+//! connection's handler sends to this connection: the context carries the connection id and only
+//! that connection's own `ReplyDelayConn` accepts it.
 //!
 //! Nothing is allocated, timed or logged per packet while the switch is off: the server keeps
 //! `reply_delay: None` and the connection keeps no delay state.
@@ -43,14 +45,22 @@ use crate::opcodes::{cs, pp, sc};
 pub const MAX_DELAY_MS: u64 = 60_000;
 
 tokio::task_local! {
-    /// `(level << 16) | opcode` of the C->S packet the current task's handler is running.
-    static REPLY_CONTEXT: u32;
+    /// Connection id and `(level << 16) | opcode` of the C->S packet the current task's handler
+    /// is running.
+    static REPLY_CONTEXT: (u32, u32);
 }
 
-/// Runs `future` with `level`/`opcode` as the C->S packet being handled
+/// Runs `future` with the C->S `level`/`opcode` handled on connection `conn_id`
 /// ([`crate::server::GameServer::handle_frame`]).
-pub(crate) async fn with_reply_context<F: Future>(level: u8, opcode: u16, future: F) -> F::Output {
-    REPLY_CONTEXT.scope(reply_key(level, opcode), future).await
+pub(crate) async fn with_reply_context<F: Future>(
+    conn_id: u32,
+    level: u8,
+    opcode: u16,
+    future: F,
+) -> F::Output {
+    REPLY_CONTEXT
+        .scope((conn_id, reply_key(level, opcode)), future)
+        .await
 }
 
 /// Resolved `Debug:ReplyDelay` shared by every connection; `None` on the server = off.
@@ -156,6 +166,8 @@ impl ReplyDelay {
 /// (`DelayEverythingAfter`) latch.
 #[derive(Debug)]
 pub struct ReplyDelayConn {
+    /// Session id of the connection this state belongs to (`REPLY_CONTEXT` must match it).
+    conn_id: u32,
     config: Arc<ReplyDelay>,
     /// `0` = no character yet, `1` = matches `CharacterName`, `2` = does not.
     name_match: AtomicU8,
@@ -164,8 +176,9 @@ pub struct ReplyDelayConn {
 }
 
 impl ReplyDelayConn {
-    pub fn new(config: Arc<ReplyDelay>) -> Arc<Self> {
+    pub fn new(conn_id: u32, config: Arc<ReplyDelay>) -> Arc<Self> {
         Arc::new(Self {
+            conn_id,
             config,
             name_match: AtomicU8::new(0),
             strict: AtomicBool::new(false),
@@ -218,9 +231,12 @@ impl ReplyDelayConn {
         if level == LEVEL_PLAIN && self.config.packets.contains(&opcode) {
             return true;
         }
-        // Task-local: only the connection task's sends inside the handler carry the context.
+        // Task-local: only this connection's own sends inside its handler carry the context.
+        // Another connection's handler sending to this one runs on its own task with its own id.
         REPLY_CONTEXT
-            .try_with(|reply_to| self.config.replies_to.contains(reply_to))
+            .try_with(|(conn_id, reply_to)| {
+                *conn_id == self.conn_id && self.config.replies_to.contains(reply_to)
+            })
             .unwrap_or(false)
     }
 }
@@ -294,7 +310,7 @@ mod tests {
     #[test]
     fn selects_by_packet_name_and_by_the_packet_being_handled() {
         let by_name = ReplyDelay::resolve(&config(&["SCSkillStarted"], &[])).unwrap();
-        let conn = ReplyDelayConn::new(by_name);
+        let conn = ReplyDelayConn::new(1, by_name);
         assert!(conn
             .frame(frame(sc::SCSkillStartedPacket))
             .release_at
@@ -305,12 +321,12 @@ mod tests {
             .is_none());
 
         let by_reply = ReplyDelay::resolve(&config(&[], &["CSStartSkill"])).unwrap();
-        let conn = ReplyDelayConn::new(by_reply);
+        let conn = ReplyDelayConn::new(1, by_reply);
         assert!(conn
             .frame(frame(sc::SCSkillStartedPacket))
             .release_at
             .is_none());
-        REPLY_CONTEXT.sync_scope(reply_key(LEVEL_PLAIN, cs::CSStartSkillPacket), || {
+        REPLY_CONTEXT.sync_scope((1, reply_key(LEVEL_PLAIN, cs::CSStartSkillPacket)), || {
             assert!(conn
                 .frame(frame(sc::SCSkillFiredPacket))
                 .release_at
@@ -329,7 +345,7 @@ mod tests {
         let resolved = ReplyDelay::resolve(&cfg).unwrap();
         assert_eq!(resolved.delay, Duration::from_millis(MAX_DELAY_MS));
         // The frame deadline is `now + MAX_DELAY_MS`: it must not overflow-panic.
-        let conn = ReplyDelayConn::new(resolved);
+        let conn = ReplyDelayConn::new(1, resolved);
         assert!(conn
             .frame(frame(sc::SCSkillStartedPacket))
             .release_at
@@ -340,7 +356,7 @@ mod tests {
     fn character_filter_matches_case_insensitively_and_holds_until_the_name_is_known() {
         let mut cfg = config(&["SCSkillStarted"], &[]);
         cfg.character_name = Some("Capture".into());
-        let conn = ReplyDelayConn::new(ReplyDelay::resolve(&cfg).unwrap());
+        let conn = ReplyDelayConn::new(1, ReplyDelay::resolve(&cfg).unwrap());
 
         // No character yet: lobby frames of the capture account are not held.
         assert!(conn
@@ -363,7 +379,7 @@ mod tests {
     fn delay_everything_after_holds_all_later_frames() {
         let mut cfg = config(&["SCSkillStarted"], &[]);
         cfg.delay_everything_after = true;
-        let conn = ReplyDelayConn::new(ReplyDelay::resolve(&cfg).unwrap());
+        let conn = ReplyDelayConn::new(1, ReplyDelay::resolve(&cfg).unwrap());
 
         let before = conn.frame(frame(sc::SCErrorMsgPacket));
         assert!(before.release_at.is_none());
@@ -443,7 +459,7 @@ mod tests {
         let server = server_with(config(&[], &["Ping"]));
         let mut client = TestClient::new(&server, 1, 1000);
         let handle = client.conn.handle();
-        with_reply_context(LEVEL_PROXY, pp::PingPacket, async {
+        with_reply_context(client.conn.id, LEVEL_PROXY, pp::PingPacket, async {
             // The connection task's own send (e.g. `player.send` in the handler) is a reply.
             client.conn.send(&SCCombatClearedPacket { obj_id: 1 });
             // Another task sharing a handle queues a broadcast while the handler awaits: not a
@@ -466,6 +482,43 @@ mod tests {
             frames[1].release_at.is_none(),
             "another task's send through a handle is not held"
         );
+    }
+
+    #[tokio::test]
+    async fn another_connections_handler_send_to_this_connection_is_not_held() {
+        use crate::systems::skills::packets::SCCombatClearedPacket;
+        use crate::world::Player;
+
+        // No character filter: the connection id alone must reject B's context on A.
+        let server = server_with(config(&[], &["CSStartSkill"]));
+        let mut a = TestClient::new(&server, 1, 1000);
+        let a_player = Player::new(test_character(1, "Alpha", 100.0, 100.0), a.conn.handle());
+        let b = TestClient::new(&server, 2, 1001);
+
+        // B's handler runs with B's reply context and broadcasts to A's handle.
+        with_reply_context(b.conn.id, LEVEL_PLAIN, cs::CSStartSkillPacket, async {
+            a_player.send(SCCombatClearedPacket {
+                obj_id: a_player.obj_id,
+            });
+        })
+        .await;
+        let frames = a.drain_frames();
+        assert_eq!(frames.len(), 1);
+        assert!(
+            frames[0].release_at.is_none(),
+            "B's send to A is not a reply to A's request"
+        );
+
+        // A's own handler reply is still held.
+        with_reply_context(a.conn.id, LEVEL_PLAIN, cs::CSStartSkillPacket, async {
+            a_player.send(SCCombatClearedPacket {
+                obj_id: a_player.obj_id,
+            });
+        })
+        .await;
+        let frames = a.drain_frames();
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].release_at.is_some(), "A's own reply is held");
     }
 
     #[tokio::test]

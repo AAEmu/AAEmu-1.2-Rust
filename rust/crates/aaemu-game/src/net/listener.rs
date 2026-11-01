@@ -464,7 +464,8 @@ mod tests {
     /// The connection state selects frames by S->C name and by the C->S packet being handled.
     #[tokio::test(start_paused = true)]
     async fn selection_and_strict_mode_hold_the_full_order() {
-        let delay = ReplyDelayConn::new(reply_delay(&["SCSkillStarted"], &["CSStartSkill"], true));
+        let delay =
+            ReplyDelayConn::new(1, reply_delay(&["SCSkillStarted"], &["CSStartSkill"], true));
         let started = delay.frame(frame(sc::SCSkillStartedPacket));
         let strict_after = delay.frame(frame(sc::SCErrorMsgPacket));
         assert!(started.release_at.is_some());
@@ -472,12 +473,12 @@ mod tests {
         assert!(strict_after.release_at >= started.release_at);
 
         // "Replies to CSStartSkill": only while that handler runs.
-        let reply = ReplyDelayConn::new(reply_delay(&[], &["CSStartSkill"], false));
+        let reply = ReplyDelayConn::new(1, reply_delay(&[], &["CSStartSkill"], false));
         assert!(reply
             .frame(frame(sc::SCSkillFiredPacket))
             .release_at
             .is_none());
-        crate::net::reply_delay::with_reply_context(1, cs::CSStartSkillPacket, async {
+        crate::net::reply_delay::with_reply_context(1, 1, cs::CSStartSkillPacket, async {
             assert!(reply
                 .frame(frame(sc::SCSkillFiredPacket))
                 .release_at
@@ -496,7 +497,7 @@ mod tests {
         let (tx, rx) = outbox();
         let (commands, _commands_rx) = mpsc::unbounded_channel();
         let sink = RecordingSink::default();
-        let delay = ReplyDelayConn::new(reply_delay(&["SCSkillStarted"], &[], true));
+        let delay = ReplyDelayConn::new(1, reply_delay(&["SCSkillStarted"], &[], true));
         let writer = tokio::spawn(super::write_frames(
             1,
             sink.clone(),
@@ -535,7 +536,7 @@ mod tests {
         let (tx, rx) = outbox();
         let (commands, _commands_rx) = mpsc::unbounded_channel();
         let sink = RecordingSink::default();
-        let delay = ReplyDelayConn::new(reply_delay(&["SCSkillStarted"], &[], true));
+        let delay = ReplyDelayConn::new(1, reply_delay(&["SCSkillStarted"], &[], true));
         let writer = tokio::spawn(super::write_frames(
             1,
             sink.clone(),

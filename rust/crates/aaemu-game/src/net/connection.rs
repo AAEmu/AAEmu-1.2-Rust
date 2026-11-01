@@ -335,7 +335,8 @@ impl GameConnection {
 
     /// Attaches `Debug:ReplyDelay` to this connection and every handle made from it.
     pub fn set_reply_delay(&mut self, config: Option<Arc<ReplyDelay>>) {
-        self.delay = config.map(ReplyDelayConn::new);
+        let id = self.id;
+        self.delay = config.map(|config| ReplyDelayConn::new(id, config));
     }
 
     /// The `Debug:ReplyDelay` state (the writer needs the strict latch), `None` when off.
