@@ -1176,6 +1176,28 @@ mod tests {
     }
 
     #[test]
+    fn binds_debug_reply_delay_from_json() {
+        let cfg = AppConfig::from_value(json!({
+            "Debug": {
+                "ReplyDelay": {
+                    "DelayMs": "600",
+                    "Packets": ["SCSkillStarted", "SCSkillFired"],
+                    "RepliesTo": ["CSStartSkill"],
+                    "CharacterName": "Capture",
+                    "DelayEverythingAfter": true
+                }
+            }
+        }))
+        .unwrap();
+        let delay = &cfg.debug.reply_delay;
+        assert_eq!(delay.delay_ms, 600);
+        assert_eq!(delay.packets, ["SCSkillStarted", "SCSkillFired"]);
+        assert_eq!(delay.replies_to, ["CSStartSkill"]);
+        assert_eq!(delay.character_name.as_deref(), Some("Capture"));
+        assert!(delay.delay_everything_after);
+    }
+
+    #[test]
     fn relaxed_json() {
         let src = "{\n // c\n \"a\": \"x//y\\\"\", /* b */ \"b\": [1, 2, // t\n],\n}";
         let v: Value = serde_json::from_str(&relax_json(src)).unwrap();

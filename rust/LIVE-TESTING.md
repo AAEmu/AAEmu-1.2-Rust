@@ -442,9 +442,11 @@ This opt-in switch holds chosen S->C frames for `DelayMs` before they reach the 
 * `Packets` — S->C packet names from `opcodes::sc::NAMES`; `SCSkillStarted` and
   `SCSkillStartedPacket` are the same selector (case-insensitive). Unknown names are warned about
   and ignored.
-* `RepliesTo` — C->S packet names (`opcodes::cs::NAMES` / `pp::NAMES`): every frame sent while that
-  handler runs is held. Only synchronous sends see the context; a timer that fires after the
-  handler is not a "reply" and is not held.
+* `RepliesTo` — C->S packet names (`opcodes::cs::NAMES` / `pp::NAMES`): every frame the connection
+  task sends while that handler runs is held, including `player.send` through the character's
+  connection handle. The context is task-local: a frame another task queues through a handle
+  during a handler await (e.g. a mob broadcast while the handler waits on the DB) is not a reply
+  and is not held.
 * `CharacterName` — optional, case-insensitive: only that character's connection is affected (the
   name is recorded when the character is attached, `Player::new`). Lobby frames of the account and
   other players on the same server are not held.
@@ -454,6 +456,8 @@ This opt-in switch holds chosen S->C frames for `DelayMs` before they reach the 
   needs strict ordering (e.g. `SCSkillStarted` before `SCSkillFired`).
 * The delay applies to every recipient of a selected broadcast, so combine it with
   `CharacterName` when other sessions play beside the capture.
+* `DelayMs` is clamped to 60000 ms. The disconnect path waits at most 5 s for the writer to flush,
+  so a hold above 5 s drops held frames when the connection closes.
 
 Startup logs `Debug:ReplyDelay on: <ms>; S->C packets [...]; replies to C->S [...]; character ...`
 once when it is active; nothing is logged per packet. Measure the effect from the capture's own

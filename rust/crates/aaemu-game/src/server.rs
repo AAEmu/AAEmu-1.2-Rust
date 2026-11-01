@@ -180,10 +180,14 @@ impl GameServer {
         match self.registry.get(raw.level, raw.opcode) {
             Some(reg) => {
                 let started = std::time::Instant::now();
-                // `Debug:ReplyDelay` "replies to C->S X": frames sent while the handler runs.
-                conn.begin_reply(raw.level, raw.opcode);
-                let res = (reg.handler)(self, conn, raw.body).await;
-                conn.end_reply();
+                // `Debug:ReplyDelay` "replies to C->S X": task-local, so only this connection
+                // task's sends while the handler runs are replies (not other tasks' broadcasts).
+                let res = crate::net::reply_delay::with_reply_context(
+                    raw.level,
+                    raw.opcode,
+                    (reg.handler)(self, conn, raw.body),
+                )
+                .await;
                 // Achievement events queued under foreign locks run now that the handler is done.
                 crate::systems::economy::flush_deferred_glider_reequips(self);
                 crate::systems::flush_achievements(self);
