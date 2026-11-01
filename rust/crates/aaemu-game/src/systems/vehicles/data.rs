@@ -1529,6 +1529,31 @@ mod tests {
     }
 
     #[test]
+    fn turret_angles_clamp_to_the_model_and_wrap_a_full_circle_yaw() {
+        let limited = VehicleModel {
+            turret_pitch_angle_min: -20.0,
+            turret_pitch_angle_max: 35.0,
+            turret_yaw_angle_min: -22.0,
+            turret_yaw_angle_max: 22.0,
+            ..VehicleModel::default()
+        };
+        assert_eq!(
+            limited.clamp_turret_angles(1.0, -1.0),
+            (35f32.to_radians(), -22f32.to_radians())
+        );
+        let full_circle = VehicleModel {
+            turret_pitch_angle_min: -90.0,
+            turret_pitch_angle_max: 90.0,
+            turret_yaw_angle_min: -360.0,
+            turret_yaw_angle_max: 360.0,
+            ..VehicleModel::default()
+        };
+        // Any finite f32, even one no loop could normalise in reason: a remainder.
+        let (_, yaw) = full_circle.clamp_turret_angles(0.0, 1.0e30);
+        assert!(yaw.abs() <= std::f32::consts::PI);
+    }
+
+    #[test]
     fn owner_paths_copy_named_roads_once() {
         let mut d = VehiclesData::default();
         d.transfer_templates.insert(
