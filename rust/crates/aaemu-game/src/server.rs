@@ -183,6 +183,7 @@ impl GameServer {
                 // `Debug:ReplyDelay` "replies to C->S X": task-local, so only this connection
                 // task's sends while the handler runs are replies (not other tasks' broadcasts).
                 let res = crate::net::reply_delay::with_reply_context(
+                    conn.id,
                     raw.level,
                     raw.opcode,
                     (reg.handler)(self, conn, raw.body),
