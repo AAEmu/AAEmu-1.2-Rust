@@ -265,8 +265,9 @@ pub mod error {
     pub const NOT_ENOUGH_MONEY: i16 = 26;
     pub const NOT_ENOUGH_ITEM: i16 = 27;
     pub const SLAVE_CANNOT_BIND: i16 = 96;
-    /// `SLAVE_ALREADY_HAS_MASTER`: only the C# owners-mark driver refusal (a taken seat is
-    /// silent, as in the C#).
+    /// `SLAVE_ALREADY_HAS_MASTER`: the owners-mark driver refusal and a taken seat. The C# was
+    /// silent for a taken seat; the reply is now required to clear the client's pending bind
+    /// request (the exact original code is capture-pending S11-C2).
     pub const SLAVE_ALREADY_HAS_MASTER: i16 = 97;
     /// `TOO_FAR_AWAY`: the client's 0x9a bind / interaction reach refusal.
     pub const TOO_FAR_AWAY: i16 = 154;
@@ -286,6 +287,19 @@ pub mod error {
 /// `Character.SendErrorMessage(type)`.
 pub fn error(p: &PlayerRef, error: i16) {
     p.send(crate::packets::world::SCErrorMsgPacket::new(error, 0, true));
+}
+
+/// `Character.SendErrorMessage(type)` for a slave bind refusal. The client sets the pending bind
+/// request (local actor `+0x10`) in the `CSBindSlave` builder (`FUN_393464a0`), refuses a repeat
+/// with `already_requested` 0x13 while it is set (`FUN_39346290`), and clears it in
+/// `FUN_393457e0` for codes 0x48/0x60/0x61/0x66/0x9a. `HandleErrorMessage` only reaches that
+/// function when `isNotify` is false: with it true it takes the notify branch
+/// (`FUN_391e5070` -> `FUN_391e4f00`) and returns first. A notify refusal therefore leaves the
+/// client stuck on "already requested", sending nothing (live log 2026-11-01 14:22:50-14:40).
+pub fn bind_error(p: &PlayerRef, error: i16) {
+    p.send(crate::packets::world::SCErrorMsgPacket::new(
+        error, 0, false,
+    ));
 }
 
 /// `Unit.SetPosition(x, y, z, roll, pitch, yaw)` of a world object (+ the region update of
@@ -649,12 +663,15 @@ pub fn on_instance_change(server: &GameServer, player: &PlayerRef) -> bool {
 
 /// The mount / slave branch of `CSStartSkillPacket` after the mount skill was used: the
 /// harpoon rope controller (slave casters) and the rider / operator skill
-/// (`MateGameData.GetMountAttachedSkills`). Returns the rider skill id (0 = none).
+/// (`MateGameData.GetMountAttachedSkills`). `mount_skill_id` is the `mount_skills` row the
+/// client pressed (`SkillCasterMount.MountSkillTemplateId`). Returns the rider skill id
+/// (0 = none).
 pub fn on_mount_skill_used(
     server: &GameServer,
     player: &PlayerRef,
     caster: &WorldObject,
     skill_id: u32,
+    mount_skill_id: u32,
     success: bool,
     target: &crate::systems::skills::types::SkillCastTarget,
 ) -> u32 {
@@ -665,7 +682,7 @@ pub fn on_mount_skill_used(
             .game_data
             .systems
             .vehicles
-            .mount_attached_skill(skill_id, ap)
+            .mount_attached_skill(mount_skill_id, ap)
     } else {
         0
     };

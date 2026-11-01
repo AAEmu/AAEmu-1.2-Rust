@@ -108,6 +108,9 @@ pub struct AppConfig {
     pub debug_info: bool,
     #[serde(rename = "debuginfolevel", deserialize_with = "lenient")]
     pub debug_info_level: u32,
+    /// `Debug` (Rust only: opt-in capture aids, off by default).
+    #[serde(rename = "debug")]
+    pub debug: DebugConfig,
     /// `Expedition` / `Justice` (`systems::social::config`).
     #[serde(rename = "expedition")]
     pub expedition: crate::systems::social::config::ExpeditionConfig,
@@ -156,6 +159,7 @@ impl Default for AppConfig {
             default_language: "en_us".into(),
             debug_info: true,
             debug_info_level: 100,
+            debug: DebugConfig::default(),
             expedition: Default::default(),
             justice: Default::default(),
             dungeons: Default::default(),
@@ -538,6 +542,38 @@ impl Default for HalloweenConfig {
     }
 }
 
+/// `Debug` (Rust only: opt-in aids for capturing the original client, off by default).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct DebugConfig {
+    /// `Debug:ReplyDelay` (`net::reply_delay`).
+    #[serde(rename = "replydelay")]
+    pub reply_delay: ReplyDelayConfig,
+}
+
+/// `Debug:ReplyDelay`: holds selected server replies for `DelayMs` so a capture can tell client
+/// rules from reactions to our server. Off unless `DelayMs` is set and a selector resolves.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ReplyDelayConfig {
+    /// Delay applied to a selected frame, in milliseconds (`0` = off).
+    #[serde(rename = "delayms", deserialize_with = "lenient")]
+    pub delay_ms: u64,
+    /// S->C packet names (`SCSkillStarted` or `SCSkillStartedPacket`, case-insensitive).
+    #[serde(rename = "packets")]
+    pub packets: Vec<String>,
+    /// C->S packet names: every frame sent while such a packet is handled is delayed.
+    #[serde(rename = "repliesto")]
+    pub replies_to: Vec<String>,
+    /// Only connections whose character has this name are affected (`None` = all).
+    #[serde(rename = "charactername")]
+    pub character_name: Option<String>,
+    /// Once a selected frame was delayed, hold every later frame of the connection too, so the
+    /// full order is preserved (see [`crate::net::reply_delay`]).
+    #[serde(rename = "delayeverythingafter", deserialize_with = "lenient")]
+    pub delay_everything_after: bool,
+}
+
 /// `ClientDataConfig`.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -606,7 +642,7 @@ pub const USER_SECRETS_ID: &str = "426ad5c3-9a72-44e9-88f5-4b5940b98c28";
 
 /// The top-level `AppConfiguration` members (environment variables are only applied below
 /// these keys; anything else could never bind).
-const TOP_LEVEL_KEYS: [&str; 30] = [
+const TOP_LEVEL_KEYS: [&str; 31] = [
     "physics",
     "id",
     "additionalesid",
@@ -637,6 +673,7 @@ const TOP_LEVEL_KEYS: [&str; 30] = [
     "defaultlanguage",
     "debuginfo",
     "debuginfolevel",
+    "debug",
 ];
 
 impl AppConfig {
@@ -1136,6 +1173,28 @@ mod tests {
         assert_eq!(cfg.login_network.port, 1234);
         assert!(cfg.account.delete_release_name);
         assert_eq!(cfg.account.access_level_first_account, 100);
+    }
+
+    #[test]
+    fn binds_debug_reply_delay_from_json() {
+        let cfg = AppConfig::from_value(json!({
+            "Debug": {
+                "ReplyDelay": {
+                    "DelayMs": "600",
+                    "Packets": ["SCSkillStarted", "SCSkillFired"],
+                    "RepliesTo": ["CSStartSkill"],
+                    "CharacterName": "Capture",
+                    "DelayEverythingAfter": true
+                }
+            }
+        }))
+        .unwrap();
+        let delay = &cfg.debug.reply_delay;
+        assert_eq!(delay.delay_ms, 600);
+        assert_eq!(delay.packets, ["SCSkillStarted", "SCSkillFired"]);
+        assert_eq!(delay.replies_to, ["CSStartSkill"]);
+        assert_eq!(delay.character_name.as_deref(), Some("Capture"));
+        assert!(delay.delay_everything_after);
     }
 
     #[test]

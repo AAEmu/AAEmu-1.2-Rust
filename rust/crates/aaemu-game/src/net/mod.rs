@@ -6,6 +6,7 @@ pub mod listener;
 pub mod outbox;
 pub mod packet;
 pub mod registry;
+pub mod reply_delay;
 
 /// Tracing target of the opt-in client-packet field log
 /// (`RUST_LOG=aaemu_game::net::fields=trace`).

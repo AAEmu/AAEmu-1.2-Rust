@@ -15,8 +15,9 @@ use tokio::sync::mpsc;
 
 use crate::models::character::Character;
 use crate::models::item::UnixTime;
-use crate::net::outbox::{outbox, Outbox, Push, MAX_QUEUED_BYTES};
+use crate::net::outbox::{outbox, OutFrame, Outbox, Push, MAX_QUEUED_BYTES};
 use crate::net::packet::{encode, ServerPacket, INVALID_OPCODE};
+use crate::net::reply_delay::{ReplyDelay, ReplyDelayConn};
 
 /// `GameState`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -90,6 +91,8 @@ pub struct ConnectionHandle {
     last_ping_ms: Arc<AtomicI64>,
     tx: mpsc::UnboundedSender<ConnCommand>,
     writer: Outbox,
+    /// `Debug:ReplyDelay` (`None` = off).
+    delay: Option<Arc<ReplyDelayConn>>,
 }
 
 impl ConnectionHandle {
@@ -105,6 +108,7 @@ impl ConnectionHandle {
             last_ping_ms: Arc::new(AtomicI64::new(i64::MIN)),
             tx,
             writer,
+            delay: None,
         }
     }
 
@@ -138,6 +142,10 @@ impl ConnectionHandle {
     /// queue is over [`MAX_QUEUED_BYTES`] stopped reading: the frame is dropped and the
     /// connection closed.
     pub fn send_frame(&self, frame: Bytes) {
+        let frame = match &self.delay {
+            Some(delay) => delay.frame(frame),
+            None => OutFrame::now(frame),
+        };
         if let Push::Overflow { first: true } = self.writer.push(frame) {
             tracing::warn!(
                 "session {}: more than {} MiB queued for the client, closing the connection",
@@ -160,6 +168,13 @@ impl ConnectionHandle {
     /// Queues [`ConnCommand::ReturnToWorldList`] for the connection task.
     pub fn return_to_world_list(&self) {
         let _ = self.tx.send(ConnCommand::ReturnToWorldList);
+    }
+
+    /// Records the character for the `Debug:ReplyDelay` character-name filter.
+    pub fn observe_character_name(&self, name: &str) {
+        if let Some(delay) = &self.delay {
+            delay.observe_character_name(name);
+        }
     }
 }
 
@@ -263,6 +278,8 @@ pub struct GameConnection {
     writer: Outbox,
     commands: mpsc::UnboundedSender<ConnCommand>,
     closing: bool,
+    /// `Debug:ReplyDelay` (`None` = off).
+    delay: Option<Arc<ReplyDelayConn>>,
 }
 
 impl std::fmt::Debug for GameConnection {
@@ -295,6 +312,7 @@ impl GameConnection {
             last_ping_ms: last_ping_ms.clone(),
             tx: commands.clone(),
             writer: writer.clone(),
+            delay: None,
         };
         let conn = Self {
             id,
@@ -310,8 +328,20 @@ impl GameConnection {
             writer,
             commands,
             closing: false,
+            delay: None,
         };
         (conn, handle)
+    }
+
+    /// Attaches `Debug:ReplyDelay` to this connection and every handle made from it.
+    pub fn set_reply_delay(&mut self, config: Option<Arc<ReplyDelay>>) {
+        let id = self.id;
+        self.delay = config.map(|config| ReplyDelayConn::new(id, config));
+    }
+
+    /// The `Debug:ReplyDelay` state (the writer needs the strict latch), `None` when off.
+    pub(crate) fn reply_delay_state(&self) -> Option<Arc<ReplyDelayConn>> {
+        self.delay.clone()
     }
 
     pub fn account_id(&self) -> u32 {
@@ -335,7 +365,11 @@ impl GameConnection {
         let Some(bytes) = encode_for_send(packet) else {
             return;
         };
-        match self.writer.push(bytes) {
+        let frame = match &self.delay {
+            Some(delay) => delay.frame(bytes),
+            None => OutFrame::now(bytes),
+        };
+        match self.writer.push(frame) {
             Push::Queued => {}
             Push::Closed => self.closing = true,
             Push::Overflow { first } => {
@@ -360,6 +394,7 @@ impl GameConnection {
             last_ping_ms: self.last_ping_ms.clone(),
             tx: self.commands.clone(),
             writer: self.writer.clone(),
+            delay: self.delay.clone(),
         }
     }
 

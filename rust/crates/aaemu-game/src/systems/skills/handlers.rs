@@ -326,6 +326,32 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
             send_cast_refused(&player, skill_id, p.caster, target, p.skill_object);
             return;
         }
+        // The client names the exact `mount_skills` row it pressed; using it keeps the 1.2
+        // duplicate skill ids apart (59 '물 퍼올리기' vs 226 '물 퍼올리기(견본)', both 15546)
+        // and picks that row's rider / operator skill.
+        let mount_skill_id = match p.caster {
+            SkillCaster::Mount {
+                mount_skill_template_id,
+                ..
+            } => mount_skill_template_id,
+            _ => 0,
+        };
+        if !super::mount_authority::may_use_vehicle_skill_row(
+            server,
+            &caster,
+            mount_skill_id,
+            skill_id,
+        ) {
+            tracing::warn!(
+                character = %player.data().unit.name,
+                skill_id,
+                mount_skill_id,
+                caster = p.caster.obj_id(),
+                "Client mount cast names a mount skill row outside the vehicle's bar refused"
+            );
+            send_cast_refused(&player, skill_id, p.caster, target, p.skill_object);
+            return;
+        }
         // StormShipLogic.TryBlockMountOrSlaveSkill (vehicles + ai storm buff)
         if let Some(slave) = caster.as_slave() {
             if crate::systems::vehicles::ship_physics::storm_blocks_slave_skill(
@@ -354,7 +380,7 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
         let rider_skill = data
             .systems
             .vehicles
-            .mount_attached_skill(skill_id, player.data().attached_point);
+            .mount_attached_skill(mount_skill_id, player.data().attached_point);
         let rider_target = (rider_skill != 0).then(|| {
             let current = player.data().unit.current_target;
             super::geometry::world_of(server, &me)
@@ -402,6 +428,7 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
             &player,
             &caster,
             skill_id,
+            mount_skill_id,
             r == skill_result::SUCCESS,
             &target,
         );
