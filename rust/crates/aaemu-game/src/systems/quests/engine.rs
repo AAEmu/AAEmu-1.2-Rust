@@ -15,7 +15,8 @@ use super::packets::{
     SCQuestContextUpdatedPacket, SCQuestRewardedByMailPacket,
 };
 use super::state::{
-    ActPath, Quest, QuestActState, QuestComponentState, QuestHandle, QuestState, QuestStepState,
+    ActPath, CinemaMark, Quest, QuestActState, QuestComponentState, QuestHandle, QuestState,
+    QuestStepState,
 };
 use super::templates::ActKind;
 use super::unit_reqs::{ReqEnv, ReqSubject};
@@ -448,6 +449,15 @@ impl<'a> Ctx<'a> {
             }
         }
 
+        // Deviation: `SetStep` clears `ComponentId` (the final C# then sent 0 in the update of
+        // a step change), but the client plays the cinema of a non-dialog component only when
+        // an update names that component, and the pre-rewrite C# sent the current one. The
+        // component that completed the step is named once, in this update.
+        let completed_component = if res {
+            self.quest(h).map_or(0, |q| q.component_id)
+        } else {
+            0
+        };
         if res {
             self.go_to_next_step(h);
         }
@@ -455,12 +465,34 @@ impl<'a> Ctx<'a> {
         // Send update to player
         if let Some(q) = self.quest(h) {
             if !q.skip_update {
-                let (row, cid) = (q.row(), q.component_id);
+                let named = completed_component != 0;
+                let cid = if named {
+                    completed_component
+                } else {
+                    q.component_id
+                };
+                let row = q.row();
                 let now = self.now_ms;
                 self.send(SCQuestContextUpdatedPacket::new(row, cid, now));
+                if named {
+                    self.expect_component_cinema(cid);
+                }
             }
         }
         res
+    }
+
+    /// An update named `component_id`: when the component has a cinema the client now plays it
+    /// (unless the component is dialog-driven), so the next `CSStartedCinemaPacket` is that
+    /// cinema (Rust addition; `events::request_cinema` for a running operation). A component
+    /// without a cinema leaves a pending request alone.
+    fn expect_component_cinema(&mut self, component_id: u32) {
+        if let Some(cinema_id) = self.data.component_cinema_id(component_id) {
+            self.st.requested_cinema = Some(CinemaMark {
+                cinema_id,
+                at_ms: self.now_ms,
+            });
+        }
     }
 
     /// `GoToNextStep`.

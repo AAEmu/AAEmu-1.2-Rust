@@ -8,12 +8,13 @@ use aaemu_commons::PacketStream;
 
 use super::cinema::{self, parse_sequence_flags, CinemaInfo};
 use super::data::QuestData;
-use super::events;
+use super::engine::Ctx;
+use super::events::{self, QuestEvent};
 use super::model::kind;
 use super::packets::*;
 use super::state::CinemaMark;
 use super::templates::{ActKind, QuestComponentTemplate, QuestTemplate};
-use super::tests::{character, server_with};
+use super::tests::{character, server_with, with_ctx};
 use crate::data::client_files::ClientFileManager;
 use crate::data::pak::test_util::{build_pak, temp_path};
 use crate::data::pak::PakFileType;
@@ -326,6 +327,48 @@ fn cinema_data(d: &mut QuestData) {
             alias_id: 0,
         },
     );
+    progress_quest(d, 70, 16, 600, 2);
+    progress_quest(d, 71, 0, 601, 1);
+}
+
+/// Quest `qid`: Start (auto) -> Progress (`count` kills of NPC `npc`, component `qid * 10 + 2`
+/// plays `cinema_id`, 0 = none) -> Ready (report to NPC 500).
+fn progress_quest(d: &mut QuestData, qid: u32, cinema_id: u32, npc: u32, count: i32) {
+    d.add_template(quest(qid));
+    d.add_component(component(qid * 10 + 1, qid, kind::START, 0));
+    d.add_act(
+        qid * 10 + 1,
+        qid * 10 + 1,
+        qid * 10 + 1,
+        0,
+        ActKind::ConAutoComplete,
+    );
+    d.add_component(component(qid * 10 + 2, qid, kind::PROGRESS, cinema_id));
+    d.add_act(
+        qid * 10 + 2,
+        qid * 10 + 2,
+        qid * 10 + 2,
+        count,
+        ActKind::ObjMonsterHunt {
+            npc_id: npc,
+            use_alias: false,
+            alias_id: 0,
+            highlight_doodad_id: 0,
+            highlight_doodad_phase: -1,
+        },
+    );
+    d.add_component(component(qid * 10 + 3, qid, kind::READY, 0));
+    d.add_act(
+        qid * 10 + 3,
+        qid * 10 + 3,
+        qid * 10 + 3,
+        0,
+        ActKind::ConReportNpc {
+            npc_id: 500,
+            use_alias: false,
+            alias_id: 0,
+        },
+    );
 }
 
 struct Scene {
@@ -580,6 +623,144 @@ async fn the_cinema_effect_names_the_cinema_for_a_character_target() {
     assert!(apply(&s, WorldObject::from(s.player.clone())));
     assert_eq!(s.requested(), Some(16));
     s.send(CSStartedCinemaPacket).await;
+    s.send(CSCompletedCinemaPacket).await;
+    assert_eq!(s.resent(), (true, true));
+}
+
+// ----- the component that completes a step is named in the update -----
+
+/// The component ids of the `SCQuestContextUpdatedPacket`s in `frames`: the body ends with the
+/// component id and the four `para` values.
+fn update_components(frames: &[(u16, Vec<u8>)]) -> Vec<u32> {
+    frames
+        .iter()
+        .filter(|(op, _)| *op == sc::SCQuestContextUpdatedPacket)
+        .map(|(_, body)| {
+            let at = body.len() - 20;
+            u32::from_le_bytes(body[at..at + 4].try_into().unwrap())
+        })
+        .collect()
+}
+
+/// Runs the queued evaluations of a data-level context.
+fn drain(ctx: &mut Ctx<'_>) {
+    while !ctx.st.local_queue.is_empty() {
+        let h = ctx.st.local_queue.remove(0);
+        if ctx.st.quest(h).is_none() {
+            continue;
+        }
+        ctx.starting_evaluation(h);
+        ctx.run_current_step(h);
+    }
+}
+
+fn kill(ctx: &mut Ctx<'_>, npc_id: u32) {
+    ctx.dispatch(&QuestEvent::MonsterHunt { npc_id, count: 1 })
+        .unwrap();
+    drain(ctx);
+}
+
+#[tokio::test]
+async fn the_completing_component_is_named_once_in_the_update() {
+    let (server, _) = server_with(cinema_data);
+    let mut c = character();
+    with_ctx(&server, &mut c, Default::default(), |ctx| {
+        assert!(ctx.add_quest(70, false, 0, 0));
+        drain(ctx);
+        let step = |ctx: &Ctx<'_>| ctx.st.active_quest(70).unwrap().step;
+        assert_eq!(step(ctx), kind::PROGRESS);
+        // Entering the steps: the Start step completed and names its component, the first
+        // evaluation of the Progress step (objective open) names none.
+        assert_eq!(
+            update_components(&std::mem::take(&mut ctx.sent)),
+            vec![701, 0]
+        );
+
+        // One of two kills: the objective is not complete, the update is as before.
+        kill(ctx, 600);
+        assert_eq!(step(ctx), kind::PROGRESS);
+        let partial = update_components(&std::mem::take(&mut ctx.sent));
+        assert!(!partial.is_empty());
+        assert!(partial.iter().all(|c| *c == 0), "{partial:?}");
+
+        // The second kill completes the step: this update names the component, the update of
+        // the Ready step evaluation that follows does not repeat it.
+        kill(ctx, 600);
+        assert_eq!(step(ctx), kind::READY);
+        let done = update_components(&std::mem::take(&mut ctx.sent));
+        assert_eq!(done, vec![702, 0]);
+    });
+}
+
+#[tokio::test]
+async fn the_named_component_sets_the_requested_cinema() {
+    let (server, _) = server_with(cinema_data);
+    let mut c = character();
+    with_ctx(&server, &mut c, Default::default(), |ctx| {
+        assert!(ctx.add_quest(70, false, 0, 0));
+        drain(ctx);
+        kill(ctx, 600);
+        assert_eq!(
+            ctx.st.requested_cinema, None,
+            "not before the step completes"
+        );
+        kill(ctx, 600);
+        assert_eq!(
+            ctx.st.requested_cinema,
+            Some(CinemaMark {
+                cinema_id: 16,
+                at_ms: ctx.now_ms
+            })
+        );
+    });
+}
+
+#[tokio::test]
+async fn a_component_without_a_cinema_leaves_the_requested_cinema_alone() {
+    let (server, _) = server_with(cinema_data);
+    for pending in [
+        None,
+        // The quest dialog of a cinema was opened and is still waiting for its accept.
+        Some(CinemaMark {
+            cinema_id: 80,
+            at_ms: 5,
+        }),
+    ] {
+        let mut c = character();
+        c.quest_state.requested_cinema = pending;
+        with_ctx(&server, &mut c, Default::default(), |ctx| {
+            assert!(ctx.add_quest(71, false, 0, 0));
+            drain(ctx);
+            std::mem::take(&mut ctx.sent);
+            kill(ctx, 601);
+            let updates = update_components(&std::mem::take(&mut ctx.sent));
+            assert_eq!(updates, vec![712, 0]);
+            assert_eq!(ctx.st.requested_cinema, pending);
+        });
+    }
+}
+
+#[tokio::test]
+async fn a_progress_cinema_is_announced_to_the_client_and_restores_a_cut_scene() {
+    let mut s = scene();
+    events::add_quest(&s.server, &s.player, 70, false);
+    s.server.systems.quests.run_queued_evaluations(&s.server);
+    s.client.drain();
+    for _ in 0..2 {
+        events::with_quests(&s.server, &s.player, None, |ctx| {
+            let _ = ctx.dispatch(&QuestEvent::MonsterHunt {
+                npc_id: 600,
+                count: 1,
+            });
+        });
+        s.server.systems.quests.run_queued_evaluations(&s.server);
+    }
+    let frames = s.client.drain();
+    assert_eq!(update_components(&frames), vec![0, 702, 0]);
+    assert_eq!(s.requested(), Some(16));
+    // The client plays it: the cinema is known (a cut scene), so the neighbours come back.
+    s.send(CSStartedCinemaPacket).await;
+    assert_eq!(s.playing(), Some(16));
     s.send(CSCompletedCinemaPacket).await;
     assert_eq!(s.resent(), (true, true));
 }
