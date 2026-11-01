@@ -1524,6 +1524,8 @@ pub fn bind_slave(
         return;
     };
     let Some(slave) = world.slave(obj_id) else {
+        // The target vanished between the request and the bind: clear the pending request.
+        super::bind_error(character, error::SLAVE_CANNOT_BIND);
         return;
     };
     // One slave at a time: the 1.2 client refuses a second slave bind with
@@ -1537,7 +1539,7 @@ pub fn bind_slave(
             point,
             obj_id
         );
-        error(character, error::SLAVE_UNBIND_FIRST);
+        super::bind_error(character, error::SLAVE_UNBIND_FIRST);
         return;
     }
     let me = WorldObject::from(character);
@@ -1589,6 +1591,9 @@ pub fn bind_slave(
                     obj_id,
                     point
                 );
+                // A refusal must answer: the client keeps its pending bind request until an
+                // SCErrorMsg code in `FUN_393457e0`'s clear set arrives (S11-C7).
+                super::bind_error(character, error::SLAVE_CANNOT_BIND);
             }
             BindRefusal::TooFar => {
                 tracing::debug!(
@@ -1598,37 +1603,40 @@ pub fn bind_slave(
                     obj_id,
                     reach.unwrap_or_default()
                 );
-                error(character, error::TOO_FAR_AWAY);
+                super::bind_error(character, error::TOO_FAR_AWAY);
             }
             BindRefusal::CannonPassenger => {
                 tracing::debug!(
                     "BindSlave: slave {} is a cannon and has no passenger seat",
                     obj_id
                 );
-                error(character, error::SLAVE_CANNOT_BIND);
+                super::bind_error(character, error::SLAVE_CANNOT_BIND);
             }
             BindRefusal::NoSuchSeat => {
-                // A missing seat is as silent as a taken one: the 1.2 client never offers it, and
-                // the original server's answer to a forged bind is capture-pending (S11-C2).
+                // A forged seat the model does not declare. The 1.2 client never offers it; the
+                // original server's answer is capture-pending (S11-C2), but a refusal must still
+                // clear the client's pending bind request.
                 tracing::debug!(
                     "BindSlave: slave {} (template {}) has no seat point {}; ignoring",
                     obj_id,
                     template_id,
                     point
                 );
+                super::bind_error(character, error::SLAVE_CANNOT_BIND);
             }
             BindRefusal::SeatTaken => {
-                // The C# returns silently; the client message table has no seat-taken text and
-                // the original server's answer is capture-pending (S11-C2).
+                // The C# returns silently; the original server's answer is capture-pending
+                // (S11-C2). `slave_already_has_master` is the closest clearing message.
                 tracing::debug!(
                     "BindSlave: seat {} of slave {} is taken; ignoring",
                     point,
                     obj_id
                 );
+                super::bind_error(character, error::SLAVE_ALREADY_HAS_MASTER);
             }
             BindRefusal::OwnersMark => {
                 // The C# sends `SlaveAlreadyHasMaster` for this driver-seat refusal only.
-                error(character, error::SLAVE_ALREADY_HAS_MASTER);
+                super::bind_error(character, error::SLAVE_ALREADY_HAS_MASTER);
             }
         }
         return;
@@ -1915,13 +1923,17 @@ pub fn bind_slave_by_tl(server: &GameServer, character: &PlayerRef, tl_id: u32) 
         return;
     };
     let Some(slave) = get_slave_by_tl_id(&world, tl_id) else {
+        // The target despawned between the request and the bind: still clear the client's
+        // pending bind request, or every later F press shows "already requested" (S11-C7).
+        super::bind_error(character, error::SLAVE_CANNOT_BIND);
         return;
     };
     if slave.data().unit.is_dead() {
+        super::bind_error(character, error::SLAVE_CANNOT_BIND);
         return;
     }
     if is_manned_cannon(server, &slave) && !may_man_cannon(character, &slave, &world) {
-        error(character, error::SLAVE_CANNOT_BIND);
+        super::bind_error(character, error::SLAVE_CANNOT_BIND);
         return;
     }
     bind_slave(
