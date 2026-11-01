@@ -408,7 +408,7 @@ impl ShipyardTemplate {
 // Models
 // ---------------------------------------------------------------------------------------------
 
-/// `VehicleModel` (the members the transfer movement reads).
+/// `VehicleModel` (the members the transfer movement and turret aim read).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct VehicleModel {
     pub id: u32,
@@ -420,6 +420,49 @@ pub struct VehicleModel {
     pub wheeled_vehicle_gear_speed_ratio_1: f32,
     pub wheeled_vehicle_gear_speed_ratio_2: f32,
     pub wheeled_vehicle_gear_speed_ratio_3: f32,
+    /// `turret_pitch_angle_min` / `_max`, degrees, as `FUN_39425490` clamps them
+    /// (after `DEG2RAD 0x3999cf98 = 0.017453292`).
+    pub turret_pitch_angle_min: f32,
+    pub turret_pitch_angle_max: f32,
+    /// `turret_yaw_angle_min` / `_max`, degrees.
+    pub turret_yaw_angle_min: f32,
+    pub turret_yaw_angle_max: f32,
+}
+
+impl VehicleModel {
+    /// Clamp a turret aim to the model's limits, in radians, as the 1.2 client does before it
+    /// sends `CSTurretState` (`39425490` camera aim -> `3922aed0(v, lo, hi)`, degrees *
+    /// `DEG2RAD`; `39425580` key aim wraps a full-circle yaw into +/-pi instead of clamping).
+    /// The packet's pitch/yaw are model-frame radians; the data columns are degrees.
+    pub fn clamp_turret_angles(&self, pitch: f32, yaw: f32) -> (f32, f32) {
+        let (pitch_min, pitch_max) = (
+            self.turret_pitch_angle_min.to_radians(),
+            self.turret_pitch_angle_max.to_radians(),
+        );
+        let (yaw_min, yaw_max) = (
+            self.turret_yaw_angle_min.to_radians(),
+            self.turret_yaw_angle_max.to_radians(),
+        );
+        let pitch = pitch.clamp(pitch_min, pitch_max);
+        let yaw = if self.turret_yaw_angle_max - self.turret_yaw_angle_min >= 360.0 {
+            wrap_pi(yaw)
+        } else {
+            yaw.clamp(yaw_min, yaw_max)
+        };
+        (pitch, yaw)
+    }
+}
+
+/// `MathUtil.WrapAngle` into [-pi, pi] (the client's full-circle key-aim rule, `39425580`).
+fn wrap_pi(mut angle: f32) -> f32 {
+    let two_pi = std::f32::consts::TAU;
+    while angle > std::f32::consts::PI {
+        angle -= two_pi;
+    }
+    while angle < -std::f32::consts::PI {
+        angle += two_pi;
+    }
+    angle
 }
 
 /// `ShipModelV1` (the members the slave spawning reads; the rest is the physics' data).
@@ -1081,6 +1124,10 @@ impl VehiclesData {
                 wheeled_vehicle_gear_speed_ratio_1: r.f32("wheeled_vehicle_gear_speed_ratio_1")?,
                 wheeled_vehicle_gear_speed_ratio_2: r.f32("wheeled_vehicle_gear_speed_ratio_2")?,
                 wheeled_vehicle_gear_speed_ratio_3: r.f32("wheeled_vehicle_gear_speed_ratio_3")?,
+                turret_pitch_angle_min: r.f32("turret_pitch_angle_min")?,
+                turret_pitch_angle_max: r.f32("turret_pitch_angle_max")?,
+                turret_yaw_angle_min: r.f32("turret_yaw_angle_min")?,
+                turret_yaw_angle_max: r.f32("turret_yaw_angle_max")?,
             };
             self.vehicle_models.entry(m.id).or_insert(m);
             Ok(())

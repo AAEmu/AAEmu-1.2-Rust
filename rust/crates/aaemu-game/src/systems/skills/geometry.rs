@@ -161,7 +161,7 @@ pub fn distance_to(server: &GameServer, from: &Target, to: &Target, include_z: b
 }
 
 /// `MathUtil.ClampDegAngle`: [-180, 180].
-fn clamp_deg(mut a: f64) -> f64 {
+pub(super) fn clamp_deg(mut a: f64) -> f64 {
     while a > 180.0 {
         a -= 360.0;
     }

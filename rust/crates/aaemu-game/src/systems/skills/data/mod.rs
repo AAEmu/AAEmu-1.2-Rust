@@ -688,6 +688,8 @@ mod tests {
         assert_eq!(d.manual_funcs.len(), 3);
         assert_eq!(d.manual_funcs[&11], vec![-1000, -1000, -700, -350]);
         assert_eq!(d.manual_funcs[&15], vec![500, 150]);
+        // Cannon "Fire Cannon" (mount skill 116): the aim validation reads pitch_angle.
+        assert_eq!(d.skills[&17742].pitch_angle, 60.0);
         let effect_counts: Vec<String> = EffectKind::ALL
             .iter()
             .map(|k| format!("{}={}", k.name(), d.effects.get(k).map_or(0, |m| m.len())))
