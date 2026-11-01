@@ -19,9 +19,11 @@ use crate::data::GameDataError;
 pub const SEQUENCE_FLAG_CUT_SCENE: u32 = 0x8;
 
 /// Longest a `CSRequestPermissionToPlayCinemaForDirectingMode` (or `CinemaEffect`) stays
-/// attributable to the next `CSStartedCinemaPacket` (ms). The client starts the cinema right
-/// after it asked; an older request belongs to a cinema that never started.
-pub const REQUEST_TTL_MS: i64 = 30_000;
+/// attributable to the next `CSStartedCinemaPacket` (ms). The client sends the request when the
+/// quest dialog opens, but starts the cinema only when the player accepts / turns in, after
+/// reading the bubbles (32 s in a live run, minutes are possible). A request older than 10
+/// minutes belongs to a dialog the player abandoned.
+pub const REQUEST_TTL_MS: i64 = 600_000;
 
 /// One `cinemas` row with what the client files say about its sequence.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1184,11 +1184,24 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `CSRequestPermissionToPlayCinemaForDirectingMode`, whose `u32` is the quest **component** id
   (not the quest context id; body `u32 component, bc npc, bc doodad`; the client never waits
   for an answer): the component's `cinema_id`, else its `QuestActObjCinema`. A `CinemaEffect`
-  applied to a character names its cinema the same way. The request is valid for 30 s for the
-  next `CSStartedCinemaPacket`; the client plays `QuestActObjCinema` objectives on quest start
+  applied to a character names its cinema the same way. The client sends the request when the
+  quest dialog opens and `CSStartedCinemaPacket` only when the player accepts / turns in (32 s
+  later in a live run, minutes are possible), so a request names the next started cinema for
+  10 minutes (`REQUEST_TTL_MS`); the client plays `QuestActObjCinema` objectives on quest start
   without a request. `QuestActObjCinema` now only claims a started cinema that is unknown or
   its own (the C# claimed whichever cinema started, so the cinema of another component could
   complete or block the objective).
+  A cut scene also clears the client's own-mate records, and the re-send then re-creates the
+  horse (`SCUnitState`, `SCMateState`, `SCUnitPoints`) and re-attaches the rider
+  (`SCUnitAttached`). The client's attach-to-mate path (x2game `0x39355C80`, from
+  `OnUnitAttached` `0x391D49D0` -> `0x39362770` -> `0x390B3F10`) looks the mate record up by tl
+  id (`0x3933F000`) without a null check and crashes reading `0x20` in `0x3933E600` (a mounted
+  player after a cut scene: 2 of 2 live runs); a horse that is out but not ridden survives
+  but is lost as the pet (`X2Mate:IsPlayerPetExists()` false). Only `SCMateSpawnedPacket`
+  (`OnMateSpawned` `0x391DB180` -> `0x3933FD00`) creates the record, so before the re-send of a
+  cut scene (or unidentified cinema) the owner gets an `SCMateSpawnedPacket` for each of its
+  spawned mates again (`vehicles::mates::resend_owner_mates_spawned`; the summon builds the
+  same packet in `mate_spawned_packet`).
 * systems::quests (SaveTutorial, 2026-10-20): `CSSaveTutorialPacket` accepts only real tutorial
   entries (`quest_contexts.category_id = 45`, 101 rows in the 1.2 data, kept in
   `QuestData::tutorial_ids`) and at most 256 of them. The C# stored any id as a completed quest,

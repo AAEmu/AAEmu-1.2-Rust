@@ -665,6 +665,10 @@ impl ClientPacket for CSCompletedCinemaPacket {
                 resend
             );
             if resend {
+                // The cut-scene wipe also clears the client's own-mate records; the mates
+                // re-created below need theirs first (a rider attached to a mate without a
+                // record crashes the client).
+                crate::systems::vehicles::mates::resend_owner_mates_spawned(server, &p);
                 crate::systems::npcs::portal::resend_visible_objects_to_character(server, &p);
             }
             events::on_cinema_ended(server, &p);
