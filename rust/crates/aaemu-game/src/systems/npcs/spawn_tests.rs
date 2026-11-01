@@ -3177,11 +3177,20 @@ async fn real_data_quest_fill_spawns_on_terrain() {
             "quest fill doodad {unit_id} is in closed zone {zone}"
         );
         let height = heights.get_height(zone, p.x, p.y, p.z);
+        // Doodad 1877 "Dungeon Cobweb" is a prefab hung across the Ronbann cave mouth, so its
+        // authored Z (10.x doodad.g and doodad_map, 372.802) is allowed to float up to 6 m above
+        // the navmesh height. Every other fill entry must stand on the terrain within 3 m.
+        let (max_below, max_above) = if unit_id == 1877 {
+            (3.0, 6.0)
+        } else {
+            (3.0, 3.0)
+        };
+        let offset = p.z - height;
         assert!(
-            (p.z - height).abs() <= 3.0,
-            "quest fill doodad {unit_id} at Z {} is {:.3} m from the 1.2 height {height}",
+            offset >= -max_below && offset <= max_above,
+            "quest fill doodad {unit_id} at Z {} is {offset:.3} m from the 1.2 height {height} \
+             (allowed {max_below} m below, {max_above} m above)",
             p.z,
-            (p.z - height).abs()
         );
         println!(
             "quest fill doodad {unit_id}: zone {zone} (open), Z {} vs height {height:.5}",

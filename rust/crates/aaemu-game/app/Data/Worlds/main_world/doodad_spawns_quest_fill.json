@@ -8,5 +8,15 @@
       "Z": 352.82,
       "Yaw": 66.9998
     }
+  },
+  {
+    "UnitId": 1877,
+    "Title": "quest fill 1618: Dungeon Cobweb (10x doodad.g + doodad_map)",
+    "Position": {
+      "X": 12840.637,
+      "Y": 16329.311,
+      "Z": 372.802,
+      "Yaw": 0
+    }
   }
 ]

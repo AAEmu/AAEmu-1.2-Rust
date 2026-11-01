@@ -520,6 +520,37 @@ fn unmount_mate_by(
     );
 }
 
+/// `SCMateSpawnedPacket(mate)`: the owner's client creates its record of the mate from it
+/// (`OnMateSpawned`); the mate's unit state, mate state and attach packets need that record.
+fn mate_spawned_packet(mate: &MateRef) -> SCMateSpawnedPacket {
+    let d = mate.data();
+    SCMateSpawnedPacket {
+        tl_id: d.unit.tl_id,
+        id: d.id,
+        item_id: d.item_id,
+        user_state: d.user_state,
+        experience: d.experience,
+        mileage: d.mileage,
+        spawn_delay_time: d.spawn_delay_time,
+        skills: d.skills.clone(),
+    }
+}
+
+/// Sends `owner` an `SCMateSpawnedPacket` for each of its spawned mates again (Rust addition).
+/// A CUT_SCENE cinema clears the 1.2 client's own-mate records, so the mate re-created by the
+/// following re-send of the visible objects (and a rider re-attached to it) would otherwise
+/// find no record: attaching to the mate crashes the client, a mate that is only standing there
+/// is lost as the player's pet. Send this before the mates' unit states.
+pub fn resend_owner_mates_spawned(server: &GameServer, owner: &PlayerRef) {
+    let owner_id = owner.data().id;
+    for mate in manager_of(server, owner).get_active_mates(owner_id) {
+        let deleted = mate.data().deleted;
+        if !deleted {
+            owner.send(mate_spawned_packet(&mate));
+        }
+    }
+}
+
 /// `AddActiveMateAndSpawn(owner, mate, item)`.
 fn add_active_mate_and_spawn(
     server: &GameServer,
@@ -549,20 +580,7 @@ fn add_active_mate_and_spawn(
         tasks: item_update.into_iter().collect(),
         force_remove: Vec::new(),
     });
-    let spawned = {
-        let d = mate.data();
-        SCMateSpawnedPacket {
-            tl_id: d.unit.tl_id,
-            id: d.id,
-            item_id: d.item_id,
-            user_state: d.user_state,
-            experience: d.experience,
-            mileage: d.mileage,
-            spawn_delay_time: d.spawn_delay_time,
-            skills: d.skills.clone(),
-        }
-    };
-    owner.send(spawned);
+    owner.send(mate_spawned_packet(mate));
     // Thread.Sleep(50): not reproduced (packet order is kept by the connection queue).
     if let Some(world) = world_of(server, &WorldObject::from(owner)) {
         let changes = world.spawn(mate, &server.view_ctx());
