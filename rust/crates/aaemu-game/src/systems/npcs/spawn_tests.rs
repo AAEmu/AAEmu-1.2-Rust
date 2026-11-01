@@ -3058,6 +3058,21 @@ async fn real_data_main_world_spawn_files() {
     );
 }
 
+/// Quest fill doodads whose authored Z (10.x `doodad.g` and `doodad_map`, which agree) lies above
+/// the 1.2 navmesh height on purpose: `(doodad id, max metres above the navmesh, why)`.
+const RAISED_FILL_PLACEMENTS: &[(u32, f32, &str)] = &[
+    (
+        1877,
+        6.0,
+        "Dungeon Cobweb: a prefab hung across the Ronbann cave mouth, 4.9 m above the navmesh",
+    ),
+    (
+        3377,
+        6.0,
+        "Pirate Urn (quest 2908): 5.0 m above the navmesh and the raw heightmap, with NPC spawns 30-60 m away on that ground at 226.36, so a raised ledge (not visually confirmed)",
+    ),
+];
+
 /// The quest-fill spawn file loads every entry and each entry lies on the 1.2 height at its
 /// position (the live server's `GeoDataMode` path: the navmesh first, the terrain as fallback),
 /// in an open zone. `AAEMU_COMPACT_DB=... AAEMU_GAME_PAK=D:\AA1.2\game_pak cargo test -p
@@ -3177,14 +3192,12 @@ async fn real_data_quest_fill_spawns_on_terrain() {
             "quest fill doodad {unit_id} is in closed zone {zone}"
         );
         let height = heights.get_height(zone, p.x, p.y, p.z);
-        // Doodad 1877 "Dungeon Cobweb" is a prefab hung across the Ronbann cave mouth, so its
-        // authored Z (10.x doodad.g and doodad_map, 372.802) is allowed to float up to 6 m above
-        // the navmesh height. Every other fill entry must stand on the terrain within 3 m.
-        let (max_below, max_above) = if unit_id == 1877 {
-            (3.0, 6.0)
-        } else {
-            (3.0, 3.0)
-        };
+        // Every fill entry must stand on the terrain within 3 m, except the deliberately raised
+        // placements of `RAISED_FILL_PLACEMENTS` (they may float further above the navmesh).
+        let (max_below, max_above) = RAISED_FILL_PLACEMENTS
+            .iter()
+            .find(|(id, ..)| *id == unit_id)
+            .map_or((3.0, 3.0), |(_, above, _)| (3.0, *above));
         let offset = p.z - height;
         assert!(
             offset >= -max_below && offset <= max_above,
