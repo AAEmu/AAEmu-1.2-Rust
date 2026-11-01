@@ -183,9 +183,15 @@ impl QuestSkillHooks for QuestsForSkills {
                 super::events::accept_quest_effect(server, character, *quest_id, item);
                 true
             }
-            EffectTemplate::Cinema { .. } => {
-                // `CinemalEffect.Apply` only traces.
+            EffectTemplate::Cinema { cinema_id, .. } => {
+                // `CinemalEffect.Apply` only traces. The client plays the cinema for the
+                // target; remember which one for its `CSStartedCinemaPacket`.
                 tracing::trace!("CinemalEffect");
+                if let Target::Obj(target) = &args.target {
+                    if let Some(character) = target.as_player() {
+                        super::events::request_cinema(server, character, *cinema_id);
+                    }
+                }
                 true
             }
             _ => false,

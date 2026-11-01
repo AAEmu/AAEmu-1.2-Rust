@@ -403,7 +403,7 @@ Economy hooks (`server.systems.housing.hooks`): installed by `economy::bridges::
 | `QuestActConAcceptItemGain` start | `systems/quests/events.rs` (`on_items_acquired`), `engine.rs` (`start_quests_from_item_gain`), `data.rs` (`item_gain_starters`) | deviation | **Deviation:** gaining an item starts every quest with a `ConAcceptItemGain` on its Start component (not active, not completed unless repeatable, count in the bag reached, unit requirements met) with the item as acceptor. The C# never did: `Inventory.cs` has the `OnItemGather` call commented out and `RunAct` only compared the acceptor, so the Blue Salt Brotherhood letters (4881-4888), 5450, 6160 and the level 1 "Today's To-do" quests (1955-1961, 2140-2146) could not be started. Inferred from the data (those items have no `item_accept_quests` row); the retail trigger is not verified. The 15 "starter item without `starter_quests` entry" simulator notes were all of this kind: the quests have no `item_accept_quests` binding at all, so there was no mapping to fix. |
 | Sphere state across logout | `systems/quests/spheres.rs` (`forget_character`), `mod.rs` (`on_leave_world`) | deviation | **Deviation:** leaving the world drops the character's sphere triggers and its last starter-sphere position. The C# kept both, so a re-login inside a quest sphere compared against the position from the previous session and never raised the enter event (stuck sphere quests). The tick also prunes positions of characters that are no longer in the world. |
 | `with_quests` panic safety | `systems/quests/events.rs` | deviation | **Deviation:** a panic in a quest operation (or a queued one) is caught around the locked section, the quest state is put back, the thread-local active entry removed and the panic resumed. Without it the character's later quest events on that thread were queued forever. |
-| Quest packets (CS: StartQuestContext, CompleteQuestContext, DropQuestContext, QuestTalkMade, QuestStartWith, TryQuestCompleteAsLetItDone, RestartMainQuest, SaveTutorial, StartedCinema, CompletedCinema; SC: QuestContextStarted/Updated/Completed/Reset, QuestRewardedByMail, DoodadQuestAccept, TutorialSaved, AppellationGained) | `packets.rs` | done | Byte-exact tests. `SCQuestsPacket` now writes `Quest.Id` as `long`. |
+| Quest packets (CS: StartQuestContext, CompleteQuestContext, DropQuestContext, QuestTalkMade, QuestStartWith, TryQuestCompleteAsLetItDone, RestartMainQuest, SaveTutorial, RequestPermissionToPlayCinemaForDirectingMode, StartedCinema, CompletedCinema; SC: QuestContextStarted/Updated/Completed/Reset, QuestRewardedByMail, DoodadQuestAccept, TutorialSaved, AppellationGained) | `packets.rs` | done | Byte-exact tests. `SCQuestsPacket` now writes `Quest.Id` as `long`. |
 | `QuestCommandUtil` / `QuestCmd` (GM) | `systems/services/commands/scripts/quest_cmd.rs` | done | `quests::events::send_quests` / `send_completed_quests` added. |
 
 ### systems::instances
@@ -491,7 +491,7 @@ live acceptance remain pending.
 | `AccountManager` remainder | `systems/services/accounts.rs`, `db.rs` | done | |
 | `TimedRewardsManager`, `TimedRewardsTask` | `systems/services/timed_rewards.rs` | done | |
 | `CharacterManager` remainder (`GetEffectiveAccessLevel`, `PlayerRoll` + `CSRollDicePacket` / `SCDiceValuePacket`, `StartOnlineTracking` / `CharacterOnlineTrackingTask`, `AddOfflineCrimePoints`, `ApplyBeautySalon` + `CSEnter/ExitBeautySalonPacket`, `CSBeautyshopDataPacket`, `SCCharacterGenderAndModelModifiedPacket`) | `systems/services/{character,beauty_salon}.rs` | done | Beauty salon item work through `BEAUTY_SALON_ITEMS` (economy). |
-| Character packets: `CSActiveWeaponChangedPacket`, `CSBroadcastVisualOptionPacket`, `CSChangeAppellationPacket` (`CharacterAppellations.Change`), `CSIdleStatusPacket`, `CSRefreshInCharacterListPacket`, `CSRequestUIDataPacket`, `CSSaveUIDataPacket`, `CSUpdateActionSlotPacket`, `CSRestrictCheckPacket`, `CSSetLpManageCharacterPacket` and the log-only `CSCharDetailPacket`, `CSCleanupLogicLinkPacket`, `CSConsoleCmdUsedPacket`, `CSCriminalLockedPacket`, `CSEditorGameModePacket`, `CSRankCharacterPacket`, `CSRequestCharBriefPacket`, `CSRequestPermissionToPlayCinemaForDirectingMode`, `CSRequestSecondPasswordKeyTablesPacket`, `CSSetupSecondPassword`, `CSResturnAddrsPacket` (+ `SCActiveWeaponChangedPacket`, `SCUnitVisualOptionsPacket`, `SCAppellationChangedPacket`, `SCUnitIdleStatusPacket`, `SCRefreshInCharacterListPacket`, `SCResultRestrictCheckPacket`, `SCLpManagedPacket`) | `systems/services/character_packets.rs` | done | Byte-exact tests. `CSHangPacket` / `CSUnhangPacket` are `systems/vehicles/harpoon.rs` (sticky parents, rope break); `CSResurrectCharacterPacket` is `systems/skills/resurrect.rs`. |
+| Character packets: `CSActiveWeaponChangedPacket`, `CSBroadcastVisualOptionPacket`, `CSChangeAppellationPacket` (`CharacterAppellations.Change`), `CSIdleStatusPacket`, `CSRefreshInCharacterListPacket`, `CSRequestUIDataPacket`, `CSSaveUIDataPacket`, `CSUpdateActionSlotPacket`, `CSRestrictCheckPacket`, `CSSetLpManageCharacterPacket` and the log-only `CSCharDetailPacket`, `CSCleanupLogicLinkPacket`, `CSConsoleCmdUsedPacket`, `CSCriminalLockedPacket`, `CSEditorGameModePacket`, `CSRankCharacterPacket`, `CSRequestCharBriefPacket`, `CSRequestSecondPasswordKeyTablesPacket`, `CSSetupSecondPassword`, `CSResturnAddrsPacket` (+ `SCActiveWeaponChangedPacket`, `SCUnitVisualOptionsPacket`, `SCAppellationChangedPacket`, `SCUnitIdleStatusPacket`, `SCRefreshInCharacterListPacket`, `SCResultRestrictCheckPacket`, `SCLpManagedPacket`) | `systems/services/character_packets.rs` | done | Byte-exact tests. `CSHangPacket` / `CSUnhangPacket` are `systems/vehicles/harpoon.rs` (sticky parents, rope break); `CSResurrectCharacterPacket` is `systems/skills/resurrect.rs`. |
 | `CharacterManager` `bag_expands` / `expand_expert_limits`, `Inventory.ExpandSlot`, `CharacterActability.Regrade` / `ExpandExpert`, `CSExpandSlotsPacket`, `CSExpandExpertPacket`, `CSUpgrade/DowngradeExpertLimitPacket` (+ `SCInvenExpandedPacket`, `SCExpertLimitModifiedPacket`, `SCExpertExpandedPacket`) | `systems/services/expands.rs` | done | Item checks / consumption through `CHARACTER_ITEM_OPS` (economy). |
 | `CommandManager`, `AccessLevelManager`, `Models/Game/ICommand`, `Utils/Scripts/**` | `systems/services/commands/` | done (infra) | Ports of `SubCommandBaseTests`, `NumericSubCommandParameterTests`, `AccessLevelManagerTests`, `DoodadChainSubCommandTests`. AStar sub commands need `ASTAR_HOOKS` (AI path finding). `Scripts/SubCommands/Doodads/DoodadSetAgeCommand` is ported (`commands/doodads.rs`, port of `DoodadSetAgeCommandTests` through a test root with the `DoodadCmd` aliases); the `DoodadCmd` root itself is the scripts phase. |
 | `ExpressTextManager`, `CSExpressEmotionPacket`, `SCEmotionExpressedPacket` | `systems/services/express_text.rs` | done | Deviation: an emote whose sender object id is not the sender's own character is dropped (the C# broadcast the client-supplied id). |
@@ -1169,6 +1169,41 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   switch): they abort the event invocation list / sphere tick. Out-of-range objective reads
   that would throw in RunAct / score sums read 0 (no 1.2 quest triggers them).
 * systems::quests: the daily reset runs at 00:00 UTC (C# cron in server local time).
+* systems::quests (cinemas, 2026-11-01): the C# `CSCompletedCinemaPacket` re-sent every visible
+  object (`SCUnitState` / doodads) after **every** cinema. The Rust server re-sends them only
+  after a CUT_SCENE cinema, or after one it cannot identify. 1.2 client evidence (x2game.dll):
+  `BeginCutScene` (`0x3915B960`) removes every unit except the local player and clears all
+  doodads only for a sequence whose root `Flags` has bit `0x8` (CUT_SCENE) set, `SCUnitState`
+  is dropped while it plays (`0x391D4C30`), and nothing is restored at the end. The other
+  cinemas (92 of the 111 quest-component cinemas, e.g. every `sl_*` story video) remove
+  nothing, so after them the unconditional re-send repeated the create of every nearby unit and
+  doodad the client still had, without a remove (in a live run the client kept one entity per
+  id, so it is redundant rather than visible, but it replays e.g. the rider attach). `cinemas.name`
+  is looked up in `game/worlds/<world>/cinemas/<name>.xml` at startup (`quests/cinema.rs`,
+  `main_world` first) and only the `<Sequence ... Flags="...">` attribute is read; a cinema
+  without a client file is "unknown" and keeps the C# behaviour (an empty world after a cut
+  scene is worse than a redundant re-send). Which cinema plays is known from
+  `CSRequestPermissionToPlayCinemaForDirectingMode`, whose `u32` is the quest **component** id
+  (not the quest context id; body `u32 component, bc npc, bc doodad`; the client never waits
+  for an answer): the component's `cinema_id`, else its `QuestActObjCinema`. A `CinemaEffect`
+  applied to a character names its cinema the same way. The client sends the request when the
+  quest dialog opens and `CSStartedCinemaPacket` only when the player accepts / turns in (32 s
+  later in a live run, minutes are possible), so a request names the next started cinema for
+  10 minutes (`REQUEST_TTL_MS`); the client plays `QuestActObjCinema` objectives on quest start
+  without a request. `QuestActObjCinema` now only claims a started cinema that is unknown or
+  its own (the C# claimed whichever cinema started, so the cinema of another component could
+  complete or block the objective).
+  A cut scene also clears the client's own-mate records, and the re-send then re-creates the
+  horse (`SCUnitState`, `SCMateState`, `SCUnitPoints`) and re-attaches the rider
+  (`SCUnitAttached`). The client's attach-to-mate path (x2game `0x39355C80`, from
+  `OnUnitAttached` `0x391D49D0` -> `0x39362770` -> `0x390B3F10`) looks the mate record up by tl
+  id (`0x3933F000`) without a null check and crashes reading `0x20` in `0x3933E600` (a mounted
+  player after a cut scene: 2 of 2 live runs); a horse that is out but not ridden survives
+  but is lost as the pet (`X2Mate:IsPlayerPetExists()` false). Only `SCMateSpawnedPacket`
+  (`OnMateSpawned` `0x391DB180` -> `0x3933FD00`) creates the record, so before the re-send of a
+  cut scene (or unidentified cinema) the owner gets an `SCMateSpawnedPacket` for each of its
+  spawned mates again (`vehicles::mates::resend_owner_mates_spawned`; the summon builds the
+  same packet in `mate_spawned_packet`).
 * systems::quests (SaveTutorial, 2026-10-20): `CSSaveTutorialPacket` accepts only real tutorial
   entries (`quest_contexts.category_id = 45`, 101 rows in the 1.2 data, kept in
   `QuestData::tutorial_ids`) and at most 256 of them. The C# stored any id as a completed quest,
@@ -2531,9 +2566,10 @@ Confirmed gaps fixed in the world server (1.2 opcodes and packet layouts retaine
   They use the existing validated early-completion path or evaluate an automatic/journal
   Ready step. NPC/doodad report acts still require their object. Packet flows cover rejected
   premature/omitted-NPC requests, journal completion, early-completion thresholds and replay.
-* Cinema completion resends neighbouring world objects before raising quest events, matching
-  the former 1.2 C# packet handler. A packet flow checks NPC state/points replication and the
-  cinema objective's normal transition to Ready.
+* Cinema completion resends neighbouring world objects before raising quest events after a
+  CUT_SCENE (or unidentified) cinema only, see the systems::quests cinema deviation. A packet
+  flow checks NPC state/points replication and the cinema objective's normal transition to
+  Ready.
 
 Additional world-side fixes from the same audit:
 

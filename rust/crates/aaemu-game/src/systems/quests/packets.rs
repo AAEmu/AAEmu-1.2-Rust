@@ -1,7 +1,8 @@
 //! Quest packets: `CSStartQuestContextPacket`, `CSCompleteQuestContextPacket`,
 //! `CSDropQuestContextPacket`, `CSQuestTalkMadePacket`, `CSQuestStartWithPacket`,
 //! `CSTryQuestCompleteAsLetItDonePacket`, `CSRestartMainQuestPacket`, `CSSaveTutorialPacket`,
-//! `CSStartedCinemaPacket`, `CSCompletedCinemaPacket` and the quest S->C packets.
+//! `CSRequestPermissionToPlayCinemaForDirectingMode`, `CSStartedCinemaPacket`,
+//! `CSCompletedCinemaPacket` and the quest S->C packets.
 
 use aaemu_commons::{Marshal, PacketStream};
 use futures::future::BoxFuture;
@@ -552,6 +553,55 @@ impl ClientPacket for CSSaveTutorialPacket {
     }
 }
 
+/// `CSRequestPermissionToPlayCinemaForDirectingMode`: the 1.2 client sends it before it plays
+/// the cinema of a quest component it just accepted / turned in / talked about, and never waits
+/// for an answer. The `u32` is the quest **component** id (not the quest context id).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CSRequestPermissionToPlayCinemaForDirectingMode {
+    pub component_id: u32,
+    pub npc_obj_id: u32,
+    pub doodad_obj_id: u32,
+}
+
+impl ClientPacket for CSRequestPermissionToPlayCinemaForDirectingMode {
+    const NAME: &'static str = "CSRequestPermissionToPlayCinemaForDirectingMode";
+
+    fn read(s: &mut PacketStream) -> Result<Self> {
+        Ok(Self {
+            component_id: s.read_u32()?,
+            npc_obj_id: s.read_bc()?,
+            doodad_obj_id: s.read_bc()?,
+        })
+    }
+
+    fn handle<'a>(
+        self,
+        server: &'a GameServer,
+        conn: &'a mut GameConnection,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let Some(p) = active(conn) else {
+                return Ok(());
+            };
+            let data = &server.game_data.systems.quests;
+            let quest_id = data.component(self.component_id).map_or(0, |c| c.quest_id);
+            let cinema_id = data.component_cinema_id(self.component_id);
+            tracing::info!(
+                "RequestPermissionToPlayCinema, {} ({}), Quest {}, Component {}, Cinema {}, NpcObjId {}, DoodadObjId {}",
+                p.data().unit.name,
+                p.character_id,
+                quest_id,
+                self.component_id,
+                cinema_id.map_or("none".to_string(), |id| data.cinema_label(id)),
+                self.npc_obj_id,
+                self.doodad_obj_id
+            );
+            events::request_cinema(server, &p, cinema_id.unwrap_or(0));
+            Ok(())
+        })
+    }
+}
+
 /// `CSStartedCinemaPacket` (empty).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSStartedCinemaPacket;
@@ -569,7 +619,6 @@ impl ClientPacket for CSStartedCinemaPacket {
         conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            tracing::warn!("StartedCinema");
             if let Some(p) = active(conn) {
                 events::on_cinema_started(server, &p);
             }
@@ -578,7 +627,8 @@ impl ClientPacket for CSStartedCinemaPacket {
     }
 }
 
-/// `CSCompletedCinemaPacket` (empty): restore neighbouring objects before quest events.
+/// `CSCompletedCinemaPacket` (empty): restores the neighbouring objects a cut scene removed
+/// from the client, then raises the quest events.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSCompletedCinemaPacket;
 
@@ -595,11 +645,33 @@ impl ClientPacket for CSCompletedCinemaPacket {
         conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            tracing::warn!("CompletedCinema");
-            if let Some(p) = active(conn) {
+            let Some(p) = active(conn) else {
+                return Ok(());
+            };
+            let data = &server.game_data.systems.quests;
+            let end = events::cinema_ending(&p);
+            let cinema = data.cinema(end.cinema_id);
+            // Only a CUT_SCENE sequence wipes the client's units and doodads. A cinema that is
+            // unknown (no request seen, no client file) is treated as one: an empty world after
+            // a cut scene is worse than a redundant re-send.
+            let resend = cinema.and_then(|c| c.cut_scene) != Some(false);
+            tracing::info!(
+                "CompletedCinema, {} ({}), Cinema {}, played {}, objects re-sent: {}",
+                p.data().unit.name,
+                p.character_id,
+                data.cinema_label(end.cinema_id),
+                end.played_ms
+                    .map_or("? ms".to_string(), |ms| format!("{ms} ms")),
+                resend
+            );
+            if resend {
+                // The cut-scene wipe also clears the client's own-mate records; the mates
+                // re-created below need theirs first (a rider attached to a mate without a
+                // record crashes the client).
+                crate::systems::vehicles::mates::resend_owner_mates_spawned(server, &p);
                 crate::systems::npcs::portal::resend_visible_objects_to_character(server, &p);
-                events::on_cinema_ended(server, &p);
             }
+            events::on_cinema_ended(server, &p);
             Ok(())
         })
     }

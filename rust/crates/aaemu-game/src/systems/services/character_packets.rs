@@ -275,12 +275,6 @@ impl ClientPacket for CSRankCharacterPacket {
         })
     }
 }
-log_only_packet!(CSRequestPermissionToPlayCinemaForDirectingMode, warn, |s| {
-    let _quest_context_id = s.read_u32()?;
-    let _npc = s.read_bc()?;
-    let _doodad = s.read_bc()?;
-    String::new()
-});
 log_only_packet!(CSRequestSecondPasswordKeyTablesPacket, debug, |s| {
     let _ = s;
     String::new()
@@ -853,10 +847,6 @@ pub fn register(reg: &mut PacketRegistry) {
     reg.register::<CSEditorGameModePacket>(LEVEL_PLAIN, cs::CSEditorGameModePacket);
     reg.register::<CSRankCharacterPacket>(LEVEL_PLAIN, cs::CSRankCharacterPacket);
     reg.register::<CSRequestCharBriefPacket>(LEVEL_PLAIN, cs::CSRequestCharBriefPacket);
-    reg.register::<CSRequestPermissionToPlayCinemaForDirectingMode>(
-        LEVEL_PLAIN,
-        cs::CSRequestPermissionToPlayCinemaForDirectingMode,
-    );
     reg.register::<CSRequestSecondPasswordKeyTablesPacket>(
         LEVEL_PLAIN,
         cs::CSRequestSecondPasswordKeyTablesPacket,

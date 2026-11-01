@@ -15,6 +15,7 @@
 
 pub mod acts;
 pub mod bridges;
+pub mod cinema;
 pub mod data;
 pub mod engine;
 pub mod events;
@@ -26,6 +27,8 @@ pub mod state;
 pub mod templates;
 pub mod unit_reqs;
 
+#[cfg(test)]
+mod cinema_tests;
 #[cfg(test)]
 mod followup_tests;
 #[cfg(test)]
@@ -475,6 +478,10 @@ pub fn register(reg: &mut PacketRegistry) {
     );
     reg.register::<CSRestartMainQuestPacket>(LEVEL_PLAIN, cs::CSRestartMainQuestPacket);
     reg.register::<CSSaveTutorialPacket>(LEVEL_PLAIN, cs::CSSaveTutorialPacket);
+    reg.register::<CSRequestPermissionToPlayCinemaForDirectingMode>(
+        LEVEL_PLAIN,
+        cs::CSRequestPermissionToPlayCinemaForDirectingMode,
+    );
     reg.register::<CSStartedCinemaPacket>(LEVEL_PLAIN, cs::CSStartedCinemaPacket);
     reg.register::<CSCompletedCinemaPacket>(LEVEL_PLAIN, cs::CSCompletedCinemaPacket);
 }
