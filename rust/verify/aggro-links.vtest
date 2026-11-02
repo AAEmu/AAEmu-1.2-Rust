@@ -1,0 +1,26 @@
+# NPC aggro link groups (aggro_links / npc_aggro_links), data-inferred rule AGGROLINK-1.
+#
+# Members of group 70: NPC 8219 "Sichimi bandit fighter" (helper, aggro_link_help_dist 50) and
+# NPC 8220 "Sichimi bandit ruffian" (leader, also group 72). main_world places them together at
+# (24201.326, 8912.35, 567) and (24198.924, 8906.95, 567). Both templates are non-aggressive
+# with `aggro_link_special_rule_id` 0, so neither helps the other through the template rules
+# (`UpdateAggroHelp` needs `aggression` for rule 0). With the link group, 8219 must join when
+# 8220 is attacked.
+#
+# The world spawner jitters placements (and the roaming AI walks them apart), so spawn one copy
+# of each next to the bot; the bot spawn point is 10.8 km from any main_world 8219/8220
+# placement, so `nearest` cannot pick a world copy. The helper distance of 50 m absorbs the
+# drift of the two roaming spawns. GM access is needed for `/spawn npc`; the game log must run
+# with `aaemu_game::systems::ai::behaviors=debug` (`Scripts/verify.sh` sets it).
+suite aggro-links
+bot linker gm
+
+[linker]
+gm spawn npc 8219
+pump 1
+gm spawn npc 8220
+pump 1
+units 8219 8220
+castraw 2 8220
+expectlog "aggro link: group member joined the fight" 20
+pump 4

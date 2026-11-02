@@ -96,9 +96,10 @@ else
   exit 1
 fi
 
-# The spoof check reads a debug line from the express-text handler; give the game log filter
-# that module, then restart this lane's stack so the filter and the patched config apply.
-export RUST_LOG="${RUST_LOG:-info},aaemu_game::systems::services::express_text=debug"
+# The spoof check reads a debug line from the express-text handler and the aggro-link suite one
+# from the AI behaviors; give the game log those filters, then restart this lane's stack so the
+# filters and the patched config apply.
+export RUST_LOG="${RUST_LOG:-info},aaemu_game::systems::services::express_text=debug,aaemu_game::systems::ai::behaviors=debug"
 "$REPO/Scripts/live-stack.sh" stop
 
 export AAEMU_VERIFY_GAME_LOG="$GAME_LOG"
