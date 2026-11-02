@@ -94,6 +94,24 @@ fn chat(t: i16, msg: &str) -> PacketStream {
     s
 }
 
+fn whisper(target: &str, msg: &str) -> PacketStream {
+    let mut s = PacketStream::new();
+    s.write_i16(chat_type::WHISPER)
+        .write_i16(0)
+        .write_i32(0)
+        .write_str(target)
+        .write_str(msg)
+        .write_u8(0)
+        .write_i32(0);
+    s
+}
+
+fn name_body(name: &str) -> PacketStream {
+    let mut s = PacketStream::new();
+    s.write_str(name);
+    s
+}
+
 fn user_join(name: &str, password: &str, create: bool) -> PacketStream {
     let mut s = PacketStream::new();
     s.write_str(name).write_str(password).write_bool(create);
@@ -1896,6 +1914,17 @@ async fn family_create_join_leave_disband() {
         s.write_u32(invitor).write_bool(true).write_str("Kid");
         s
     };
+    // Bob blocked Al: the family invitation is dropped silently until he unblocks.
+    b.send(&server, cs::CSAddBlockedUserPacket, name_body("Al"))
+        .await;
+    assert_eq!(b.ops(), vec![sc::SCAddBlockedUserPacket]);
+    a.send(&server, cs::CSFamilyInviteMemberPacket, invite("Bob"))
+        .await;
+    assert!(a.ops().is_empty() && b.ops().is_empty());
+    b.send(&server, cs::CSDeleteBlockedUserPacket, name_body("Al"))
+        .await;
+    assert_eq!(b.ops(), vec![sc::SCDeleteBlockedUserPacket]);
+
     a.send(&server, cs::CSFamilyInviteMemberPacket, invite("Bob"))
         .await;
     assert_eq!(b.ops(), vec![sc::SCFamilyInvitationPacket]);
@@ -2073,11 +2102,137 @@ async fn friends_and_blocked_users() {
         .await;
     assert_eq!(a.ops(), vec![sc::SCDeleteBlockedUserPacket]);
     assert_eq!(a.p.data().removed_blocked, vec![2]);
-    // Unknown (offline) names are ignored for blocks.
+    // Unknown names are ignored for blocks.
     a.send(&server, cs::CSAddBlockedUserPacket, name("Nobody"))
         .await;
     assert!(a.ops().is_empty());
     let _ = b.ops();
+}
+
+/// Every direct player-to-player delivery path checks the recipient's block list, and
+/// unblocking restores delivery. The blocked side is silent: 1.2 has no "target blocked you"
+/// error (capture-pending, case `BLOCK-LIST-1`).
+#[tokio::test]
+async fn blocked_sender_is_silently_dropped_on_every_direct_path() {
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    a.p.data().unit.hp = 100; // a dead challenge target is refused before the block check
+    settle(&mut [&mut a, &mut b]);
+
+    a.send(&server, cs::CSAddBlockedUserPacket, name_body("Bob"))
+        .await;
+    assert_eq!(a.ops(), vec![sc::SCAddBlockedUserPacket]);
+
+    // Whisper: no packet reaches either side.
+    b.send(&server, cs::CSSendChatMessagePacket, whisper("Al", "hi"))
+        .await;
+    assert!(a.frames().is_empty() && b.frames().is_empty());
+
+    // Party invite (named; area invites call the same path).
+    b.send(&server, cs::CSInviteToTeamPacket, invite(0, "Al"))
+        .await;
+    assert!(a.frames().is_empty() && b.frames().is_empty());
+
+    // Family invite.
+    let family_invite = |name: &str| {
+        let mut s = PacketStream::new();
+        s.write_str(name).write_str("Kid");
+        s
+    };
+    b.send(&server, cs::CSFamilyInviteMemberPacket, family_invite("Al"))
+        .await;
+    assert!(a.frames().is_empty() && b.frames().is_empty());
+
+    // Friend add.
+    b.send(&server, cs::CSAddFriendPacket, name_body("Al"))
+        .await;
+    assert!(a.frames().is_empty() && b.frames().is_empty());
+    assert!(b.p.data().friends.is_empty());
+
+    // Trade request.
+    let mut obj = PacketStream::new();
+    obj.write_bc(a.p.obj_id);
+    b.send(&server, cs::CSCanStartTradePacket, obj).await;
+    assert!(a.frames().is_empty() && b.frames().is_empty());
+
+    // Duel request (challenged character id, plain u32).
+    let mut id = PacketStream::new();
+    id.write_u32(a.p.character_id);
+    b.send(&server, cs::CSChallengeDuelPacket, id).await;
+    assert!(a.frames().is_empty() && b.frames().is_empty());
+
+    // Unblock: every path delivers again.
+    a.send(&server, cs::CSDeleteBlockedUserPacket, name_body("Bob"))
+        .await;
+    assert_eq!(a.ops(), vec![sc::SCDeleteBlockedUserPacket]);
+
+    b.send(&server, cs::CSSendChatMessagePacket, whisper("Al", "hi"))
+        .await;
+    assert_eq!(a.ops(), vec![sc::SCChatMessagePacket]);
+    assert_eq!(b.ops(), vec![sc::SCChatMessagePacket]);
+
+    b.send(&server, cs::CSInviteToTeamPacket, invite(0, "Al"))
+        .await;
+    assert_eq!(a.ops(), vec![sc::SCAskToJoinTeamPacket]);
+
+    b.send(&server, cs::CSFamilyInviteMemberPacket, family_invite("Al"))
+        .await;
+    assert_eq!(a.ops(), vec![sc::SCFamilyInvitationPacket]);
+
+    b.send(&server, cs::CSAddFriendPacket, name_body("Al"))
+        .await;
+    assert_eq!(b.ops(), vec![sc::SCAddFriendPacket]);
+    assert_eq!(b.p.data().friends.len(), 1);
+
+    let mut obj = PacketStream::new();
+    obj.write_bc(a.p.obj_id);
+    b.send(&server, cs::CSCanStartTradePacket, obj).await;
+    assert_eq!(a.ops(), vec![sc::SCCanStartTradePacket]);
+
+    let mut id = PacketStream::new();
+    id.write_u32(a.p.character_id);
+    b.send(&server, cs::CSChallengeDuelPacket, id).await;
+    assert_eq!(a.ops(), vec![sc::SCDuelChallengedPacket]);
+}
+
+/// Blocking also resolves offline characters through `NameManager`, so the added reply and the
+/// persisted list stay consistent with the login `SCBlockedUsers` snapshot.
+#[tokio::test]
+async fn blocking_an_offline_character_uses_the_name_manager() {
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    settle(&mut [&mut a]);
+    server.names.add_character(9, "Offline", 1009);
+
+    a.send(&server, cs::CSAddBlockedUserPacket, name_body("offline"))
+        .await;
+    assert_eq!(
+        a.frames(),
+        vec![(
+            sc::SCAddBlockedUserPacket,
+            body(
+                &crate::systems::social::packets::friend::SCAddBlockedUserPacket {
+                    character_id: 9,
+                    character_name: "Offline".into(),
+                    success: true,
+                    error_message: 0
+                }
+            )
+        )]
+    );
+    assert_eq!(a.p.data().blocked, vec![(1, 9)]);
+
+    a.send(&server, cs::CSDeleteBlockedUserPacket, name_body("OFFLINE"))
+        .await;
+    assert_eq!(a.ops(), vec![sc::SCDeleteBlockedUserPacket]);
+    assert!(a.p.data().blocked.is_empty());
+    assert_eq!(a.p.data().removed_blocked, vec![9]);
+
+    // An unregistered name is still ignored.
+    a.send(&server, cs::CSAddBlockedUserPacket, name_body("Nobody"))
+        .await;
+    assert!(a.ops().is_empty());
 }
 
 #[tokio::test]
@@ -2160,6 +2315,21 @@ async fn guild_invite_and_rank_guards() {
         s.write_u32(id).write_u32(1).write_bool(true);
         s
     };
+
+    // An invited player who blocked the leader gets no guild invitation; unblocking restores
+    // delivery (capture-pending, case `BLOCK-LIST-1`).
+    out.send(&server, cs::CSAddBlockedUserPacket, name_body("Lead"))
+        .await;
+    assert_eq!(out.ops(), vec![sc::SCAddBlockedUserPacket]);
+    let mut invite_out = PacketStream::new();
+    invite_out.write_str("Out");
+    leader
+        .send(&server, cs::CSInviteToExpeditionPacket, invite_out)
+        .await;
+    assert!(out.ops().is_empty() && leader.ops().is_empty());
+    out.send(&server, cs::CSDeleteBlockedUserPacket, name_body("Lead"))
+        .await;
+    assert_eq!(out.ops(), vec![sc::SCDeleteBlockedUserPacket]);
 
     // No invitation at all: the reply joins nothing.
     out.send(&server, cs::CSReplyExpeditionInvitationPacket, reply(77))

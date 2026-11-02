@@ -178,6 +178,17 @@ pub async fn add_friend(server: &GameServer, owner: &PlayerRef, name: &str) {
         // TODO (C#): ERROR MESSAGE ALREADY ADDED
         return;
     };
+    // A friend add is a direct player-to-player request even though 1.2 has no separate
+    // request packet (the list entry is written immediately): do not add someone who blocked
+    // the owner. Offline targets have no loaded blocked list, so only online targets are
+    // checked (capture-pending, case `BLOCK-LIST-2`).
+    if server
+        .world
+        .character_by_id(friend.character_id)
+        .is_some_and(|target| is_blocked_by(&target, owner.character_id))
+    {
+        return;
+    }
     if owner
         .data()
         .friends
@@ -236,48 +247,80 @@ pub async fn remove_friend(server: &GameServer, owner: &PlayerRef, name: &str) {
     });
 }
 
-/// `CharacterBlocked.AddBlockedUser(name)` (online characters only).
+/// `true` when `recipient` has blocked `sender_id`.
+///
+/// Every delivery path reads the list once under the recipient's lock and drops the delivery
+/// when it returns `true`. The 1.2 client only displays what the server sends (its whisper
+/// handler in `chat/chat_msg_event.alb` has no block-list check), so the server enforces the
+/// list. 1.2 retail's sender-side reply is unknown: the client has no "target blocked you"
+/// error, so the sender gets nothing (capture-pending, case `BLOCK-LIST-1`).
+pub fn is_blocked_by(recipient: &PlayerRef, sender_id: u32) -> bool {
+    let owner_id = recipient.character_id;
+    recipient
+        .data()
+        .blocked
+        .iter()
+        .any(|&(owner, blocked)| owner == owner_id && blocked == sender_id)
+}
+
+/// Resolves a character name for the blocked list: the online character first, else the
+/// `NameManager` registration (offline characters, including deleted-name exclusions). The
+/// C# only resolved online characters, so blocking an offline player silently failed.
+fn blocked_target(server: &GameServer, name: &str) -> Option<(u32, String)> {
+    if let Some(p) = server.world.character_by_name(name) {
+        let c = p.data();
+        return Some((c.id, c.unit.name.clone()));
+    }
+    let id = server
+        .names
+        .get_character_id(&crate::managers::name::normalize_name(name));
+    if id == 0 {
+        return None;
+    }
+    let display = server
+        .names
+        .get_character_name(id)
+        .unwrap_or_else(|| crate::managers::name::normalize_name(name));
+    Some((id, display))
+}
+
+/// `CharacterBlocked.AddBlockedUser(name)`.
 pub fn add_blocked_user(server: &GameServer, owner: &PlayerRef, name: &str) {
-    let Some(blocked) = server.world.character_by_name(name) else {
+    let Some((blocked_id, blocked_name)) = blocked_target(server, name) else {
         return;
     };
-    let blocked_name = blocked.data().unit.name.clone();
     {
         let mut c = owner.data();
-        if c.blocked.iter().any(|(_, b)| *b == blocked.character_id) {
+        if c.blocked.iter().any(|(_, b)| *b == blocked_id) {
             return; // already blocked
         }
-        c.blocked.push((owner.character_id, blocked.character_id));
+        c.blocked.push((owner.character_id, blocked_id));
     }
     owner.send(SCAddBlockedUserPacket {
-        character_id: blocked.character_id,
+        character_id: blocked_id,
         character_name: blocked_name,
         success: true,
         error_message: 0,
     });
 }
 
-/// `CharacterBlocked.RemoveBlockedUser(name)` (online characters only).
+/// `CharacterBlocked.RemoveBlockedUser(name)`.
 pub fn remove_blocked_user(server: &GameServer, owner: &PlayerRef, name: &str) {
-    let Some(blocked) = server.world.character_by_name(name) else {
+    let Some((blocked_id, _)) = blocked_target(server, name) else {
         return;
     };
     {
         let mut c = owner.data();
-        match c
-            .blocked
-            .iter()
-            .position(|(_, b)| *b == blocked.character_id)
-        {
+        match c.blocked.iter().position(|(_, b)| *b == blocked_id) {
             Some(i) => {
                 c.blocked.remove(i);
-                c.removed_blocked.push(blocked.character_id);
+                c.removed_blocked.push(blocked_id);
             }
             None => return, // not blocked
         }
     }
     owner.send(SCDeleteBlockedUserPacket {
-        character_id: blocked.character_id,
+        character_id: blocked_id,
         success: true,
         blocked_name: name.to_string(),
         error_message: 0,
