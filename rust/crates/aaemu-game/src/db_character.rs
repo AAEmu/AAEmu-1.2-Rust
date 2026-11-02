@@ -1252,8 +1252,7 @@ async fn save_cooldowns(tx: &mut Transaction<'_, MySql>, c: &Character, now_ms: 
         for row in cooldown_rows(c, now_ms) {
             sqlx::query(
                 "INSERT INTO `character_cooldowns` (`character_id`, `cooldown_type`, `cooldown_id`, \
-                 `expires_at_ms`) VALUES (?, ?, ?, ?) \
-                 ON DUPLICATE KEY UPDATE `expires_at_ms`=GREATEST(`expires_at_ms`, VALUES(`expires_at_ms`))",
+                 `expires_at_ms`) VALUES (?, ?, ?, ?)",
             )
             .bind(c.id)
             .bind(row.kind)

@@ -41,6 +41,11 @@ const ESCAPE: u32 = 20297;
 const POTION: u32 = 11717;
 const TAGGED_POTION: u32 = 11720;
 const TAG: u32 = 144;
+/// A toggle skill (native `3939b010`: `toggle_buff_id != 0`, no tube instrument animation):
+/// the client starts its individual cooldown itself. `TOGGLE_TAGGED` adds a shared group.
+const TOGGLE: u32 = 21002;
+const TOGGLE_TAGGED: u32 = 21003;
+const GLIDER_TAG: u32 = 296;
 
 fn data() -> GameData {
     let mut data = GameData::empty();
@@ -49,10 +54,17 @@ fn data() -> GameData {
         (ESCAPE, 0, 1_800_000),
         (POTION, 0, 43_200_000),
         (TAGGED_POTION, TAG as i32, 60_000),
+        (TOGGLE, 0, 10_000),
+        (TOGGLE_TAGGED, GLIDER_TAG as i32, 10_000),
     ] {
         data.systems.skills.add_skill(SkillTemplate {
             cooldown_tag_id: tag,
             cooldown_time: duration,
+            toggle_buff_id: if id == TOGGLE || id == TOGGLE_TAGGED {
+                1458
+            } else {
+                0
+            },
             ..skills::tests::skill_template(id)
         });
     }
@@ -360,8 +372,66 @@ async fn cooldown_effect_reports_the_source_skills_timer() {
     assert!(!client.drain_ops().contains(&sc::SCCooldownsPacket));
 }
 
-/// The real 1.2 data: Recall / Escape and the long-cooldown consumable are untagged, so the
-/// per-skill entry is the only thing that can make the client show their countdown.
+/// Native `3939b010` starts the client-side cooldown itself for a toggle skill
+/// (`toggle_buff_id != 0`, `tube_instrument_fire_anim_id == 0`); a per-cast `SCCooldowns`
+/// would append a duplicate record each time until `39899d40` silently drops every later one.
+#[tokio::test]
+async fn locally_started_toggle_skills_get_no_per_cast_cooldown() {
+    let (server, mut client, player, npc) = fixture(data());
+    for _ in 0..200 {
+        // Let the next press pass while keeping the started coordination (admission and
+        // persistence still see it, only the client update is suppressed).
+        player.data().unit.cooldowns.remove_cooldown(TOGGLE);
+        cast(&server, &mut client, TOGGLE, npc.obj_id);
+        let frames = client.drain();
+        assert!(frames.iter().any(|(op, _)| *op == sc::SCSkillFiredPacket));
+        assert!(
+            !frames.iter().any(|(op, _)| *op == sc::SCCooldownsPacket),
+            "the client already started this toggle cooldown"
+        );
+    }
+    assert!(player.data().unit.cooldowns.cooldowns.contains_key(&TOGGLE));
+}
+
+/// A tagged toggle skill still needs the shared group (the client cannot infer membership),
+/// but its individual timer is the client's own, so only the tag list is sent.
+#[tokio::test]
+async fn tagged_toggle_skill_sends_only_the_shared_tag() {
+    let (server, mut client, player, npc) = fixture(data());
+    cast(&server, &mut client, TOGGLE_TAGGED, npc.obj_id);
+    let frames = client.drain();
+    assert!(frames.iter().any(|(op, _)| *op == sc::SCSkillFiredPacket));
+    let ui = cooldown_packet(&frames).expect("tag update");
+    assert!(ui.skills.is_empty());
+    assert_eq!(ui.tags.len(), 1);
+    assert_eq!(ui.tags[0].0, GLIDER_TAG);
+    assert_eq!(ui.tags[0].2, 10_000);
+    assert!(player
+        .data()
+        .unit
+        .cooldowns
+        .cooldowns
+        .contains_key(&TOGGLE_TAGGED));
+}
+
+#[test]
+fn native_reader_bytes_for_a_tag_only_update() {
+    let mut c = test_character(1, "Caster", 100.0, 100.0);
+    c.unit.cooldowns.add_tag_cooldown(GLIDER_TAG, 10_000, 1_000);
+    let packet = SCCooldownsPacket::from_cooldowns(&c.unit.cooldowns, 1_000);
+    let mut body = PacketStream::new();
+    Marshal::write(&packet, &mut body);
+    // 397b2350: skillCount 0, tagCount 1, (296, 10000, 10000).
+    assert_eq!(
+        body.into_bytes(),
+        [0, 0, 0, 0, 1, 0, 0, 0, 0x28, 0x01, 0, 0, 0x10, 0x27, 0, 0, 0x10, 0x27, 0, 0]
+    );
+}
+
+/// The real 1.2 data: Recall / Escape and the long-cooldown consumable are untagged and
+/// non-toggle (`toggle_buff_id` NULL), so native `3939b010` does not start their timer and the
+/// per-skill entry is the only thing that can make the client show it. A glider is a toggle
+/// skill (`toggle_buff_id` 1458, no tube animation), which the client does start itself.
 #[test]
 #[ignore = "needs AAEMU_COMPACT_DB"]
 fn real_compact_recall_escape_and_consumables_are_untagged() {
@@ -391,4 +461,14 @@ fn real_compact_recall_escape_and_consumables_are_untagged() {
         )
         .unwrap();
     assert_eq!(row, (19_266, 43_200_000, None));
+    for (id, toggle, tube) in [(RECALL, None, None), (13411, Some(1458), None)] {
+        let row: (Option<i64>, Option<i64>) = db
+            .query_row(
+                "SELECT toggle_buff_id, tube_instrument_fire_anim_id FROM skills WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (toggle, tube), "skill {id}");
+    }
 }
