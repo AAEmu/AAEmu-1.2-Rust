@@ -381,7 +381,18 @@ async fn use_portal_teleports_and_teleport_ended_resends_objects() {
     use_portal(&server, &me, 0xABCDEF);
     assert!(client.drain().is_empty());
 
-    // CSTeleportEnded: position updates allowed again, neighbours re-sent.
+    // An observer at the landing spot: the completion repaint must show them.
+    let observer_client = TestClient::new(&server, 2, 2);
+    let _observer = spawn_player(
+        &server,
+        &observer_client,
+        test_character(2, "Bob", 500.0, 600.0),
+        0x11,
+    );
+    client.drain();
+
+    // CSTeleportEnded: the server follows the reported position, leaves the old region (the
+    // portal and plain NPC there are removed) and repaints the arrival neighbourhood.
     CSTeleportEndedPacket {
         x: 500.0,
         y: 600.0,
@@ -392,15 +403,17 @@ async fn use_portal_teleports_and_teleport_ended_resends_objects() {
     .await
     .unwrap();
     assert!(!me.data().disabled_set_position);
+    let t = me.data().unit.transform;
+    assert_eq!((t.x, t.y, t.z), (500.0, 600.0, 70.0));
+    assert_eq!(me.region(), Some((0, 7, 9)));
     let ops = client.drain_ops();
-    assert_eq!(
-        ops,
-        vec![
-            sc::SCUnitStatePacket,
-            sc::SCUnitPointsPacket,
-            sc::SCUnitStatePacket,
-            sc::SCUnitPointsPacket
-        ]
+    assert!(
+        ops.contains(&sc::SCUnitsRemovedPacket),
+        "the old neighbourhood is removed: {ops:?}"
+    );
+    assert!(
+        ops.contains(&sc::SCUnitStatePacket) && ops.contains(&sc::SCUnitPointsPacket),
+        "the arrival observer is shown: {ops:?}"
     );
 }
 

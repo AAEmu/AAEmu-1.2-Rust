@@ -252,6 +252,22 @@ These `SpecialType` bodies were TODO stubs that only logged in the C# (`git show
 | `TimeManager.OnTimeOfDayChange` (NPC postures, doodad ToD triggers) | `doodad/manager.rs` | done | 10 s poller started by the doodad part (TimeManager has no callback). |
 | Cross-subsystem behaviour | `hooks.rs`, `bridges.rs` | done | `SkillsBridge` (skills), `EconomyBridge` (economy), `QuestsBridge` (quests) in `server.systems.npcs.hooks`; this subsystem implements `NpcSkillHooks`, `NpcEconomyHooks`, `LootNpcHooks`, `TreasureMapSource` (`bridges.rs`). See "Phase 3b wiring". |
 
+**NPC faction on the wire (verified 2026-11-02, owner session).** `NpcManager.Create` sends
+`npcs.faction_id` unchanged (`npc/manager.rs` `create`, `world/unit_state.rs` `write_net_unit`
+faction pisc). The 1.2 client colours the target frame from the relation of that faction to the
+local player: `x2ui/unitframe/unitframe.alb` `ChangeHpBarTexture_forNpc` chooses
+`S_HP_HOSTILE` / `S_HP_NEUTRAL` / `S_HP_FRIENDLY` from `X2Unit:GetCombatRelationshipStr`
+(`FUN_394c0d80` -> `FUN_39028240` -> `FUN_39838880`), whose relation follows the mother chain
+(`FUN_398a37a0` walks `faction+0x20`) and the `system_faction_relations` states 1 hostile /
+2 neutral / 3 friendly. NPC name plates are yellow (only players are green), so a yellow name
+is not a relation. The owner-session NPCs are therefore 1.2-correct as sent: Amutar (npc 3443,
+`faction_id` 2 neutral) has an orange target frame and no attack permission; Mutani (5772,
+faction 109, the Harani player's own faction) and the guide Lucius (12078, faction 1) have
+green target frames; the Harani player Aouj (character 38) is faction 109. Locked by
+`world::unit_state_tests::real_compact_db_npc_unit_state_faction`,
+`systems::skills::relation::tests::harani_player_relation_mapping` and
+`systems::skills::relation::tests::real_compact_db_faction_relation_for_harani_player`.
+
 ### systems::economy
 
 Layering: `models::item_task` (`ItemTask`, `ItemTaskType`, recorded effects `ItemFx`) →
@@ -938,6 +954,31 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   removed through its `SlaveSpawner` (`Despawn` broadcasts the removal and releases the slot)
   and the spawner creates the replacement at its authored transform; a slave without a
   spawner is destroyed and logged, with nothing respawned.
+* systems::skills / world::session (zone-group buffs across teleports): the C# `Transform.ZoneId`
+  setter ran `Character.OnZoneChange`, which is what removes a zone group's buff when the group
+  is left (open sea: buff 7743 "irregular sea wind", the turbulence debuff, on zone groups
+  29/30/36/39/40/59/60). Several ported teleports assigned the zone directly and skipped it, so
+  Recall / portals / GM moves / resurrections out of open sea kept the buff until the next
+  region change. Every server-forced destination now goes through
+  `session::teleport_character` (`world/session.rs`), which applies the transform, moves the
+  instance object table and dispatches `OnZoneChange`; the arrival is filed by
+  `CSInstanceLoadedPacket` (`systems/instances/worlds.rs`) or, for a same-instance teleport, by
+  `session::file_teleport_arrival`. A rider, a bound seat or a doodad bond is released first
+  (`vehicles::force_dismount`, `PrefabChanged`, as the GM teleport and the trial do); the
+  parentless transform would otherwise leave it half attached on the server. **Deviation:** `CSTeleportEndedPacket` now follows the
+  client's reported landing position and refiles the region before repainting (the C# only ran
+  `ResendVisibleObjectsToCharacter`), so GM `/move`, same-instance portals and navi teleports
+  re-evaluate the zone without waiting for a movement packet. Only a teleport armed through
+  `DisabledSetPosition` is followed; an unsolicited completion still repaints but changes
+  nothing. The reported position is world-frame, so a character standing on another object is
+  detached first. Resurrections
+  (`CSResurrectCharacterPacket`, `Escape`) apply the statue position immediately because the 1.2
+  client does not answer `SCCharacterResurrected` with `CSTeleportEnded`. Tests:
+  `systems/skills/zone_buff_tests.rs`.
+* systems::instances (`return_to_main_world`): **Deviation:** the C# clone's new `Transform`
+  fired `OnZoneChange(0, mainZone)`, leaving the instance zone's chat channel and zone-group buff
+  behind; the Rust passes the zone actually left (`world/session.rs::teleport_character`), so a
+  zone-group buff of the instance zone is removed.
 * systems::skills (`SextantPos` special effect 69): row 7181 (values 0) is the only row, on
   skill 18416 "measure my current position" (item 24795 Sextant). The caster receives a system
   chat message with the world position. No authored system-message coordinate format exists in
@@ -1489,7 +1530,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `FUN_39093860(..., 9.0)`, strictly under 3.0, widened to 12.25 = 3.5 m by the target's
   `+0x3c26` flag), and the doodad BoardTransfer path passes `None` because its doodad func has
   its own use-range check. The gap is measured against the ship model's mass box when the slave
-  has a ship model, else the requested attach point's world position, else the smaller of the
+  has a ship model (the 2026-11-02 bullet below replaces the land-vehicle fallback with the
+  model's collision bounds when the client assets are available), else the requested attach
+  point's world position, else the smaller of the
   slave origin distance and the nearest located attach point of the model
   (`slave_attach_points*.json`); the client measures the minimum distance from the character's
   collision primitive to the target's collision parts (`FUN_39093860` -> `FUN_390b3ae0` for the
@@ -1525,6 +1568,27 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `CSStartInteractionPacket` offers 13863 once the driver seat is taken (NPC interaction row).
   `CSDiscardSlave` 0x032 has no server-side speed check in the C#; the 1.2 client refuses to
   send it above 5 m/s with message 0x67 (`FUN_39345aa0`), so the server keeps none.
+
+* systems::vehicles (2026-11-02, bind reach measured to the body): the 1.2 client's 12076
+  driver bind and 13863 passenger interaction both measure to the vehicle's collision
+  geometry, not to the model origin or the attach points (`FUN_39346290` ->
+  `FUN_39093860(..., 16.0)` and `FUN_393bf270` -> `FUN_39093860(..., 9.0)`;
+  `FUN_3989bf90` -> `FUN_398b1ab0` is the per-part shape distance). The live 2026-11-02
+  01:43:54-58 log (original client, Red Farm Hauler slave 146 / model 1553) had `CSBindSlave`
+  tl 0x56 refused with `TOO_FAR_AWAY` four times from beside the cab and bound only at
+  01:44:17; the land-vehicle fallback measured the model origin and the rear cannon attach
+  points. Land vehicles now measure to the union of the prefab body's collision proxies
+  (`vehicle_models.normal`; the prefab's static `AnimObject` body is included). The 1.2 `.chr`
+  body model carries no `MeshPhysicsData`; its same-named `.cgf` holds the body proxies.
+  Ships keep the mass box and the 4.0 m / 3.0 m reach constants are unchanged. The union AABB
+  over-approximates the target's collision parts: in a concave gap between parts the measured
+  gap can be smaller than 1.2's shape-to-shape minimum (`FUN_3989bf90`), never larger for the
+  same body, so the reach is never stricter than the client for the same geometry. A model
+  without client geometry keeps the attach-point fallback. The Bevy client is being changed in
+  parallel to measure its reach to the drawn body AABB, so client and server now both measure
+  to the body. Tested by
+  `land_vehicle_bind_measures_the_body_bounds_not_the_rear_attach_points` and the gated
+  `real_hauler_bind_measures_the_client_body_collision_bounds`.
 
 * systems::vehicles (2026-11-01, bind refusal replies): the 1.2 client sets a pending bind
   request (local actor `+0x10` = target tl) in the `CSBindSlave` builder (`FUN_393464a0`,
@@ -3006,7 +3070,7 @@ The Bevy 1.2 client (`AABevy1.2`) is the main client; its reverse-engineering no
 | M9 | A missing trial reporter name is written as an empty string (the C# omitted the length) | per Bevy RE notes (string always has its `u16` length) |
 | M10 | Bounty rows write `notGuilty` before `guilty` | verified: row reader `397bebf0` reads `notGuilty` (`+0xc8`) then `guilty` (`+0xcc`) |
 | M14 | `SCUnitState` of a character sets flag bit3 (`0x0008`) while force attack is on, so late observers see Bloodlust | verified: the client chain is `397c9480` -> `398a1f90` -> unit+0x3bbc (the force-attack byte) for bit3 of the `u16` flags |
-| M15 | `SCCooldowns` has a full writer (`i32` count + `[id, total, remaining]` u32 triples, skills then tags, 150 per list) and is sent after `SCCharacterState` when the character has running skill cooldowns. The server keeps only the end time of a skill cooldown and no tags, so `total` equals `remaining` | verified: `397b64d0` -> `397b2350`; entries are appended, an empty list is no reset. Cooldowns are not persisted, so a freshly loaded character normally has none |
+| M15 | `SCCooldowns` has a full writer (`i32` count + `[id, total, remaining]` u32 triples, skills then tags, 150 per list). It is sent after `SCCharacterState` for restored cooldowns and after a cast only where the client cannot start the timer itself (a `plot_only` cast with a plot, which sends no `SCSkillFired`, or a `timing_id == 0` skill), with the shared tag entry when the skill has one. The client starts ordinary skills (`toggle_buff_id == 0 && timing_id != 0`) on `SCSkillFired` and toggle skills on `OnBuffRemoved`; the `Cooldown` special effect is client-applied. Only end times are stored, so `total` equals `remaining` | verified: `397b64d0` -> `397b2350`; `OnCooldowns` `391d43c0` -> `39899d40` appends without de-duplication and caps at 150, and is what `GetActionCooldown` (`3943f310` -> `3989a3e0`/`3989a290`) reads. Template `+0x1bc` = `timing_id`, `+0x1c0` = `toggle_buff_id` (loader columns 0x87/0x88), `DAT_3a17770c` = 0. Cooldowns are persisted in `character_cooldowns` (absolute Unix-ms expiries) and restored by `Character.Load`; the C# kept them in memory only |
 | M24 | Slave-equipment items (`item_impl` 28, e.g. item 29725 on slave template 21) are written as detail type 0 (`Invalid`) with no detail body; the server no longer sends `ItemDetailType.SlaveEquipment` (10, 12 opaque bytes), which desynced every field after the item (the Bevy client rejected `SCUnitStatePacket` 0x069 and the original 1.2 client misparsed it) | verified: the 1.2 item detail reader `3961edf0` has cases only for tags 1..9 (bodies `0x38, 0x1e, 7, 10, 0x19, 0x11, 0x11, 9, 5` minus the type byte) and no case 10, so tag 10 reads no body; the C# 1.2 `ItemDetailType` numbering has no 10 either |
 | M25 | `SCUnitState` `Inventory_Equip` for slaves writes full items in slots 19..25 (the C# wrote only the template id for every unit type). A hull part there (Harpoon Clipper, template 14, part 29742 in slot 23) made the original 1.2 client read the following bytes as item fields and run off the packet (`sc error; cur=105 prev=97`, `Packet Error !!!`); Housing (3), Mate (5) and Character (0) keep template-only body parts, Npc (1) keeps `templateId, id, grade` outside 19..25 with a full-item Cosplay slot (27), Transfer/Shipyard write only 19..25 | verified: the client equipment reader `3961fa20` reads 19..25 as a template-only `u32` only when `baseUnitType != 2`; for a slave every slot goes through the full item reader `3961f500` |
 | CS | The client CS table entries missing from `opcodes::cs` were added: `0x11f CSRequestSetBountyMoney`, `0x120 CSSendBountyUpdate`, `0x130 CSRankSnapshot` (already handled through a local const, now the table entry), `0x133 CSChangeAutoUseAAPoint` | the Bevy `opcodes.rs` (client table); 0x130 additionally by the RE notes in `ranking_packets.rs`. `0x11f`/`0x120` are logged no-ops (the bounty ledger is not wired to the wallet, TODO); `0x133` sets `Character.auto_use_aa_point` and answers with `SCItemTaskSuccess` (`ItemTaskType` 110 carrying the one-byte `ChangeAutoUseAAPoint` task, action 18); the 1.2 C# had the task class but no 0x133 handler, so this reply is inferred, not observed on a live client |
@@ -3251,6 +3315,21 @@ allowlist, so it adds only 17063 and item skills stay item-driven, and the effec
 anyway and could wrap labor negative. `recoverable_exp` was already saved and loaded
 (`db_character.rs`), so it survives a relog; a second death overwrites it exactly as
 `CharacterCombat.DoDie` does (`RecoverableExp = round(LastExpLoss * 0.8)`).
+
+Rechecked 2026-11-01 against the real catalog (not the fixture): the prayer's real 6.5 s cast
+restores the recoverable exp both when the client targets the priest and when it targets self;
+the four real `npcs` rows with `priest = 't'` are 502 / 1664 / 5614 / 5615, and the effect accepts
+all of them by template flag (no faction check). The level-band labor is `formulas` row 7
+(`if_negative(pc_level - 51, pc_level, 50 + (pc_level - 50) * 20)`), matching the effect's
+formula; above level 50 a level-51 prayer spends 70 labor. The XP Restoration Scroll (33965,
+`use_skill_as_reagent = 't'`) works through the `SkillCaster::Item` cast while the character is
+dead (skill 26611 has `source_dead = target_dead = 't'`, effect 5 has no priest and no labor).
+The real refusals keep the C# codes: nothing to recover answers
+`CANNOT_RECOVER_ALL_NOT_ENOUGH` (796) and insufficient labor `NOT_ENOUGH_LABOR_POWER` (29); the
+1.2 client itself never sends the prayer with nothing to recover because
+`X2Priest:GetCostForRecoverExp` returns nil then. The reported "You don't have permission." on
+2026-11-01 is therefore the pre-#21 client-source refusal: the current data sources 17063 through
+`CLIENT_SKILL_EFFECT_SOURCES` and both paths restore the experience.
 
 ## Ship repair timer and destroyed-vehicle HP (2026-10-20)
 
@@ -3654,3 +3733,66 @@ consumer was not located; the 1.2 ordering/result is therefore not proven there.
   client's item-name lookup (`x2game.dll.c:742315`) always finds a template. The doodad gate runs
   after `gathering::allows_skill` (a disallowed skill keeps `INVALID_TARGET`) and is skipped for
   Mount casters, whose effect caster is the slave.
+
+## Cooldown display and persistence (2026-11-02)
+
+The C# `SCCooldownsPacket` was a stub that was never sent, and `UnitCooldowns` lived only in
+memory; the port's writer was already correct but only reported a cast when the skill had an
+authored `cooldown_tag_id`. Native `OnCooldowns` (`x2game.dll.c:363574`, handler `391d43c0` ->
+`39899d40`) appends entries to the client's cooldown manager, and the action bar reads that
+manager through `GetActionCooldown` (`3943f310` -> `3989a3e0` -> `3989a290`). `39899d40`
+appends without de-duplication and silently drops entries once a list holds 150 (DEC
+1930822-1930831), so the server must not resend entries the client already has.
+
+The client starts most cooldowns itself. `OnSkillFired` (`3939b010`) calls
+`39368f90` -> `39368440` -> `3989a360` -> `39899f90` when the `SCSkillFired` packet's f bit0
+(`+0x154`, DEC 750636) and trailing flag bit1 (`+0x160`, DEC 750694) are 0 and the template has
+`toggle_buff_id` (`+0x1c0`) equal to the zero-initialised `DAT_3a17770c` and `timing_id`
+(`+0x1bc`) non-zero. The loader's temporary row struct is based at `[ebp-0x2c8]` (its first
+column is stored there and `FUN_39719df0` copies from it), and column 0x87 is stored at
+`[ebp-0x10c]` = temp+0x1bc, column 0x88 at `[ebp-0x108]` = temp+0x1c0 (disasm
+397327fe-3973281d): so `+0x1bc` is `timing_id` and `+0x1c0` is `toggle_buff_id`. Cross-checks:
+column 0x27 `cooldown_tag_id` -> `+0x84` (read by `39899f90`) and column 0x28 `cooldown_time` ->
+`+0x88` (read by `39368f90`). `DAT_3a17770c` is the zero dword in `.data` at RVA 0x118770c (base
+0x38ff0000; no writer in `.text`). The condition is `toggle_buff_id == 0 && timing_id != 0`:
+15085 of the 15126 skills, including Recall (14849 / 21586), Escape (20297) and the consumables.
+`39899f90` de-duplicates by id and, when the template has a `cooldown_tag_id`, writes only the
+TAG entry, so the client starts shared tags for these skills too.
+
+Toggle skills are started by `OnBuffRemoved` (`39389b70` -> `39368f90`, DEC 736146) when the
+toggle buff is removed. The `Cooldown` special effect (40) is applied by the client itself
+(`OnPlotEvent` special 0x28 -> `39368440`), and the casting / channeling / plot casting-stopped
+packets carry their own duration (`39899f90` at DEC 738201, 739427, 747156). None of these
+paths needs a server `SCCooldowns` update.
+
+The server sends a per-cast `SCCooldowns` only where the client cannot start the timer:
+
+- `plot_only` with a `plot_id`: `use_skill` commits the cooldown and returns before `cast`, so no
+  `SCSkillFired` is sent (133 skills with a cooldown; the other `plot_only` rows have no plot id
+  and do fire).
+- the 8 `timing_id == 0` skills (2 with a cooldown: 2 and 4).
+- the entries are sent with the individual timer and, when the skill has one, its shared tag.
+
+This keeps `OnSkillCooldownReset` (`391d6420`) clearing the single record; the `ResetCooldown`
+special effect (43) and `InstantGameManager` reset (`instant_game.rs`, one
+`SCSkillCooldownReset` per skill of tag 378) send their resets and clear the matching server
+records. Clearing them is a deviation forced by persistence: the C# reset only sent the client
+packet, which was enough while `UnitCooldowns` died with the session; here a relog would
+otherwise restore a cooldown the battlefield reset removed. The battlefield reset clears each
+skill's shared `cooldown_tag_id` record as well: tag cooldowns are persisted too, and a running
+tag would keep refusing the skills the reset showed as ready.
+
+Recall's path: skill 14849 / 21586 is **not** `plot_only` and has no `plot_id`; it is a normal
+`timing_id == 1`, `toggle_buff_id == 0` skill, so the client starts its 2000 ms cooldown itself.
+The original "no countdown after using Recall" report is therefore not caused by a missing
+per-cast packet; the confirmed relog symptom was the memory-only store, which is fixed by the
+persistence below (the select sync re-sends every restored entry).
+
+Persistence: `character_cooldowns` (`character_id`, `cooldown_type` 0 = skill id / 1 =
+`cooldown_tag_id`, `cooldown_id`, `expires_at_ms` BIGINT Unix ms) is rewritten by every
+`Character.Save` with the unexpired entries and read by `Character.Load`
+(`db_character::fetch_character_cooldowns` -> `apply_cooldown_rows`). The select sync
+(`world::session::send_running_cooldowns`) sends the restored list, and the same map backs
+`UnitCooldowns::check_skill_cooldown`, so a cast before the restored expiry is refused with
+`COOLDOWN_TIME`. **Deviation:** the C# had no persistence and no real cooldown packet; this port
+adds both.

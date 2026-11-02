@@ -277,6 +277,11 @@ pub fn cooldown(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         f64::from(v[0]),
     );
     let skill_id = skill.template.id;
+    if duration <= 0.0 {
+        return;
+    }
+    // The 1.2 client applies the `Cooldown` special effect itself (`OnPlotEvent` special 0x28
+    // -> `39368440`), so the server must not also send an `SCCooldowns` update here.
     caster.with_unit(|u| {
         u.unit_mut()
             .cooldowns

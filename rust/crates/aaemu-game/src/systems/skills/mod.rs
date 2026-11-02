@@ -56,6 +56,8 @@ mod buff_tests;
 #[cfg(test)]
 mod cast_validation_tests;
 #[cfg(test)]
+mod cooldown_persistence_tests;
+#[cfg(test)]
 mod death_once_tests;
 #[cfg(test)]
 mod doodad_item_gate_tests;
@@ -89,6 +91,8 @@ mod skill_tests;
 pub(crate) mod tests;
 #[cfg(test)]
 mod tl_id_flow_tests;
+#[cfg(test)]
+mod zone_buff_tests;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};

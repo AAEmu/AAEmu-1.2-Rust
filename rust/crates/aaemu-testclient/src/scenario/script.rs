@@ -15,6 +15,8 @@
 //! target <npc template>              select the nearest NPC of that template
 //! kill <npc template>                walk next to the nearest NPC, target it, `/kill`
 //! cast <skill> <npc template>        CSStartSkill on the nearest NPC
+//! castraw <skill> <npc template>     walk next to the nearest NPC, target it, send CSStartSkill
+//!                                    and do not drain (the caller asserts the delayed effect packets)
 //! slave <template>                  nearest slave (obj / tl / template)
 //! interact <template>               CSStartInteraction on the slave, print its skill list
 //! bind <template>                   CSBindSlave 0x031 with the slave's tl
@@ -592,6 +594,18 @@ async fn run_lines(
                     .drain(Duration::from_millis(1500), Duration::from_secs(8))
                     .await?;
                 show(&got);
+            }
+            "castraw" => {
+                let skill: u32 = num(&parts, 0)?;
+                let tpl: u32 = num(&parts, 1)?;
+                let npc = nearest(game, tpl).with_context(|| format!("NPC {tpl} not in sight"))?;
+                clock += 1500;
+                game.move_to((npc.pos.0 + 1.0, npc.pos.1, npc.pos.2), clock)
+                    .await?;
+                game.change_target(npc.obj_id).await?;
+                game.start_skill(skill, npc.obj_id).await?;
+                last_npc = npc.obj_id;
+                // No drain: delayed effect packets are the caller's assertions.
             }
             "slave" => {
                 let tpl: u32 = num(&parts, 0)?;
