@@ -89,6 +89,8 @@ mod skill_tests;
 pub(crate) mod tests;
 #[cfg(test)]
 mod tl_id_flow_tests;
+#[cfg(test)]
+mod zone_buff_tests;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};

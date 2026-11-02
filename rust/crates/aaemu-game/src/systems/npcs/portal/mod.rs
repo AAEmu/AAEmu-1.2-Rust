@@ -973,13 +973,18 @@ pub fn use_portal_with_preference(
             ang_y: deg_to_rad(teleport.rot_y),
             ang_z: deg_to_rad(teleport.rot_z),
         });
-        let mut c = player.data();
-        let parent = c.unit.transform.parent_obj_id;
-        c.unit.transform = Transform {
-            instance_id: teleport.world_id,
-            parent_obj_id: parent,
-            ..teleport
-        };
+        // `character.Transform = TeleportPosition.Clone(); InstanceId = TeleportPosition.WorldId`
+        // also runs `Character.OnZoneChange` in the C#; the helper dispatches it so zone-group
+        // buffs (open sea) are re-evaluated. The arrival is filed by `CSInstanceLoadedPacket`.
+        crate::world::session::teleport_character(
+            server,
+            player,
+            Transform {
+                instance_id: teleport.world_id,
+                zone_id: teleport.zone_id,
+                ..teleport
+            },
+        );
     } else {
         player.data().set_disabled_set_position(true);
     }
