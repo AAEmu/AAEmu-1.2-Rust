@@ -10,6 +10,7 @@ use std::cell::RefCell;
 
 use super::engine::{Ctx, Deferred, KillUnitInfo, QuestEnv, UnitSnapshot};
 use super::model::acceptor;
+use super::packets::{quest_error, SCQuestContextFailedPacket};
 use super::spheres::SphereQuest;
 use super::state::{CinemaMark, EventKind};
 use crate::models::character::Character;
@@ -390,6 +391,8 @@ pub fn with_quests<R>(
                 deferred: Vec::new(),
                 buffs_changed: false,
                 sent: Vec::new(),
+                report_reply: None,
+                report_refused: Vec::new(),
             };
             if !ctx.st.loaded {
                 ctx.load_from_rows();
@@ -518,27 +521,31 @@ fn dispatch_logged(ctx: &mut Ctx<'_>, ev: &QuestEvent) {
 }
 
 /// One WARN for a turn-in the server dropped before any quest act saw it (a bug report of
-/// "cannot turn in" otherwise leaves no trace in the log).
-fn warn_report_refused(player: &PlayerRef, quest_id: u32, reason: &str) {
+/// "cannot turn in" otherwise leaves no trace in the log), and the `SCQuestContextFailed`
+/// answer that lets the client leave quest directing mode.
+fn warn_report_refused(player: &PlayerRef, quest_id: u32, err: u8, reason: &str) {
     let (name, id) = {
         let c = player.data();
         (c.unit.name.clone(), c.id)
     };
     tracing::warn!("Report refused, {name} ({id}), Quest {quest_id}: {reason}");
+    player.send(SCQuestContextFailedPacket { quest_id, err });
 }
 
 /// Logs why a turn-in at `kind` (`NPC` / `doodad`) template `target_id` cannot reach a report
 /// act: the quest is not active, or it has no report act of that kind at all (a mismatching
 /// target and unfinished objectives are logged by the act itself). The event is dispatched
-/// regardless; it is a no-op in both cases.
-fn log_unreachable_report(ctx: &mut Ctx<'_>, quest_id: u32, kind: &str, target_id: u32) {
+/// regardless; it is a no-op in both cases. The refusal is answered here, and `true` tells
+/// the caller not to answer it a second time after the dispatch.
+fn log_unreachable_report(ctx: &mut Ctx<'_>, quest_id: u32, kind: &str, target_id: u32) -> bool {
     if ctx.st.active_handle(quest_id).is_none() {
         ctx.log_refusal(
             "Report",
             quest_id,
             &format!("{kind} {target_id}: the quest is not active"),
         );
-        return;
+        ctx.send_report_refused(quest_id, quest_error::INVALID_QUEST);
+        return true;
     }
     let class = if kind == "NPC" {
         "QuestActConReportNpc"
@@ -555,7 +562,10 @@ fn log_unreachable_report(ctx: &mut Ctx<'_>, quest_id: u32, kind: &str, target_i
             quest_id,
             &format!("{kind} {target_id}: the quest has no {kind} report act"),
         );
+        ctx.send_report_refused(quest_id, quest_error::INVALID_NPC_OR_QUEST);
+        return true;
     }
+    false
 }
 
 // ----- QuestManagerEvents -----
@@ -578,13 +588,15 @@ pub fn on_report(
             warn_report_refused(
                 player,
                 quest_id,
+                quest_error::INVALID_NPC_OR_QUEST,
                 &format!("NPC object {npc_obj_id} is not in the character's world"),
             );
             return;
         };
         let npc_id = npc.data().unit.template_id;
         run_or_queue(server, player, move |ctx| {
-            log_unreachable_report(ctx, quest_id, "NPC", npc_id);
+            let answered = log_unreachable_report(ctx, quest_id, "NPC", npc_id);
+            ctx.report_reply = None;
             dispatch_logged(
                 ctx,
                 &QuestEvent::ReportNpc {
@@ -593,6 +605,9 @@ pub fn on_report(
                     selected,
                 },
             );
+            if !answered {
+                ctx.finish_report(quest_id, quest_error::INVALID_NPC_OR_QUEST);
+            }
         });
     } else if doodad_obj_id > 0 {
         // Turning in at a Doodad?
@@ -600,13 +615,15 @@ pub fn on_report(
             warn_report_refused(
                 player,
                 quest_id,
+                quest_error::INVALID_DOODAD,
                 &format!("doodad object {doodad_obj_id} is not in the character's world"),
             );
             return;
         };
         let doodad_id = doodad.data().template_id;
         run_or_queue(server, player, move |ctx| {
-            log_unreachable_report(ctx, quest_id, "doodad", doodad_id);
+            let answered = log_unreachable_report(ctx, quest_id, "doodad", doodad_id);
+            ctx.report_reply = None;
             dispatch_logged(
                 ctx,
                 &QuestEvent::ReportDoodad {
@@ -615,12 +632,16 @@ pub fn on_report(
                     selected,
                 },
             );
+            if !answered {
+                ctx.finish_report(quest_id, quest_error::INVALID_DOODAD);
+            }
         });
     } else {
         // Object-free reporting must not skip objectives or an NPC/doodad report act.
         run_or_queue(server, player, move |ctx| {
             let Some(h) = ctx.st.active_handle(quest_id) else {
                 ctx.log_refusal("Report", quest_id, "no target: the quest is not active");
+                ctx.send_report_refused(quest_id, quest_error::INVALID_QUEST);
                 return;
             };
             let step = ctx.st.quest(h).map(|q| q.step);
@@ -636,6 +657,7 @@ pub fn on_report(
                     quest_id,
                     &format!("no target: the quest is at step {step:?}, not ready"),
                 );
+                ctx.send_report_refused(quest_id, quest_error::INVALID_QUEST_STATUS);
                 return;
             }
             let automatic_report = ctx.data.template(quest_id).is_some_and(|t| {
@@ -656,6 +678,7 @@ pub fn on_report(
                     quest_id,
                     "no target: the ready step needs a report to an NPC or doodad",
                 );
+                ctx.send_report_refused(quest_id, quest_error::INVALID_QUEST_STATUS);
                 return;
             }
             if let Some(q) = ctx.st.quest_mut(h) {

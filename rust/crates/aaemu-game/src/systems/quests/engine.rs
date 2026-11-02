@@ -11,8 +11,9 @@ use super::model::{
     FACTION_MONSTROSITY,
 };
 use super::packets::{
-    SCQuestContextCompletedPacket, SCQuestContextResetPacket, SCQuestContextStartedPacket,
-    SCQuestContextUpdatedPacket, SCQuestRewardedByMailPacket,
+    quest_error, SCQuestContextCompletedPacket, SCQuestContextFailedPacket,
+    SCQuestContextResetPacket, SCQuestContextStartedPacket, SCQuestContextUpdatedPacket,
+    SCQuestRewardedByMailPacket,
 };
 use super::state::{
     ActPath, CinemaMark, Quest, QuestActState, QuestComponentState, QuestHandle, QuestState,
@@ -140,6 +141,25 @@ pub struct Ctx<'a> {
     pub buffs_changed: bool,
     /// Packets sent through [`Ctx::send`] when there is no player (tests).
     pub sent: Vec<(u16, Vec<u8>)>,
+    /// What the report acts saw while a `ReportNpc` / `ReportDoodad` event was dispatched.
+    pub report_reply: Option<ReportReply>,
+    /// Quest ids already answered with [`SCQuestContextFailedPacket`] in this operation.
+    pub report_refused: Vec<u32>,
+}
+
+/// The result of one report event, collected across the quest's report acts: a component may
+/// hold several report NPCs / doodads (OR acts), so a mismatch in one act does not refuse the
+/// report when another act accepts it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReportReply {
+    /// A report act matched the NPC / doodad of the event.
+    pub target_matched: bool,
+    /// The matching act advanced the quest.
+    pub accepted: bool,
+    /// Refusal of the matching act (it matched but could not run).
+    pub matched_refusal: Option<u8>,
+    /// Refusal of a non-matching act (wrong NPC / doodad).
+    pub mismatch_refusal: Option<u8>,
 }
 
 /// Quest ids from here on have a completed block id above `u16::MAX` (`SCCompletedQuests`).
@@ -211,6 +231,44 @@ impl<'a> Ctx<'a> {
             );
             self.st.refusal_log.insert(key, self.now_ms);
         }
+    }
+
+    /// Answers a refused quest report with `SCQuestContextFailedPacket` (0x146), at most
+    /// once per quest for this operation. Independent of [`Ctx::log_refusal`]'s repeat
+    /// suppression: even a refusal that is only logged at DEBUG is answered.
+    pub fn send_report_refused(&mut self, quest_id: u32, err: u8) {
+        if self.report_refused.contains(&quest_id) {
+            return;
+        }
+        self.report_refused.push(quest_id);
+        self.send(SCQuestContextFailedPacket { quest_id, err });
+    }
+
+    /// The reply of the report event being dispatched, created on first use.
+    pub fn report_reply(&mut self) -> &mut ReportReply {
+        self.report_reply.get_or_insert_with(ReportReply::default)
+    }
+
+    /// Sends the answer of a finished report event when no report act accepted the turn-in.
+    /// `wrong_target` is the error for an NPC/doodad that is not one of the quest's report
+    /// targets.
+    pub fn finish_report(&mut self, quest_id: u32, wrong_target: u8) {
+        let Some(reply) = self.report_reply.take() else {
+            // Active quest, but no report act is listening at this step.
+            self.send_report_refused(quest_id, quest_error::INVALID_QUEST_STATUS);
+            return;
+        };
+        if reply.accepted {
+            return;
+        }
+        let err = if reply.target_matched {
+            reply
+                .matched_refusal
+                .unwrap_or(quest_error::INVALID_QUEST_STATUS)
+        } else {
+            reply.mismatch_refusal.unwrap_or(wrong_target)
+        };
+        self.send_report_refused(quest_id, err);
     }
 
     fn quest(&self, h: QuestHandle) -> Option<&Quest> {
@@ -1828,6 +1886,7 @@ impl<'a> Ctx<'a> {
                 quest_id,
                 "the quest is not active",
             );
+            self.send_report_refused(quest_id, quest_error::INVALID_QUEST);
             return;
         };
         let let_it_done = self.data.template(quest_id).is_some_and(|t| t.let_it_done);
@@ -1837,6 +1896,7 @@ impl<'a> Ctx<'a> {
                 quest_id,
                 "the quest cannot be completed early (not LetItDone)",
             );
+            self.send_report_refused(quest_id, quest_error::INVALID_QUEST_STATUS);
             return;
         }
         let objective = self.objective_status(h);
@@ -1847,6 +1907,7 @@ impl<'a> Ctx<'a> {
                 quest_id,
                 &format!("objectives not far enough ({objective:?}, objectives {objectives:?})"),
             );
+            self.send_report_refused(quest_id, quest_error::INVALID_QUEST_STATUS);
             return;
         }
         if let Some(q) = self.quest_mut(h) {
@@ -1873,6 +1934,7 @@ impl<'a> Ctx<'a> {
                 tracing::warn!(
                     "TryCompleteQuestAsLetItDone, {who}, Quest {quest_id}: has no Reward step and its Ready step did not complete, left at Ready"
                 );
+                self.send_report_refused(quest_id, quest_error::INVALID_QUEST_STATUS);
             }
         } else {
             // Neither a Ready nor a Reward step: complete right away.
