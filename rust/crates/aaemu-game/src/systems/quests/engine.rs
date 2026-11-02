@@ -145,6 +145,11 @@ pub struct Ctx<'a> {
     pub report_reply: Option<ReportReply>,
     /// Quest ids already answered with [`SCQuestContextFailedPacket`] in this operation.
     pub report_refused: Vec<u32>,
+    /// Whether a refused report is answered with [`SCQuestContextFailedPacket`]: only a
+    /// report the client asked for (`CSCompleteQuestContext`) puts it in quest directing
+    /// mode. A server-side report (`DoodadFuncQuest`, a doodad click on an owned quest) is
+    /// only logged, so a click before the objectives are met shows no quest error.
+    pub answer_reports: bool,
 }
 
 /// The result of one report event, collected across the quest's report acts: a component may
@@ -237,7 +242,7 @@ impl<'a> Ctx<'a> {
     /// once per quest for this operation. Independent of [`Ctx::log_refusal`]'s repeat
     /// suppression: even a refusal that is only logged at DEBUG is answered.
     pub fn send_report_refused(&mut self, quest_id: u32, err: u8) {
-        if self.report_refused.contains(&quest_id) {
+        if !self.answer_reports || self.report_refused.contains(&quest_id) {
             return;
         }
         self.report_refused.push(quest_id);

@@ -347,7 +347,7 @@ impl QuestsBridge for QuestsForNpcs {
         doodad_obj_id: u32,
         selective: i32,
     ) {
-        super::events::on_report(
+        super::events::on_server_report(
             server,
             player,
             quest_id,
