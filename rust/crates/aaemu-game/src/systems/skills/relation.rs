@@ -324,4 +324,71 @@ mod tests {
         assert_eq!(faction_relation(&server, 150, 148), RelationState::Friendly);
         assert_eq!(faction_relation(&server, 0, 101), RelationState::Neutral);
     }
+
+    /// The real 1.2 factions of the owner-session report: a Harani player (109) sees the
+    /// neutral machine Amutar (3443, faction 2) as neutral, the West Ishvara Mutani (5772,
+    /// faction 109) and the friendly guide Lucius (12078, faction 1) as friendly, and the
+    /// kobold miners (3350, faction 115) as hostile. This is the mapping the client's target
+    /// frame colours by (`GetCombatRelationshipStr`, decompile `FUN_394c0d80` -> `FUN_39838880`).
+    #[tokio::test]
+    #[ignore = "needs AAEMU_COMPACT_DB"]
+    async fn real_compact_db_faction_relation_for_harani_player() {
+        let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+            return;
+        };
+        use crate::data::world_data::{FactionData, Localization};
+        use rusqlite::{Connection, OpenFlags};
+        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let loc = Localization::load(&conn, "en_us").unwrap();
+        let mut data = GameData::empty();
+        data.factions = FactionData::load(&conn, &loc).unwrap();
+        let server = crate::test_support::test_server_with(data);
+        assert_eq!(faction_relation(&server, 109, 2), RelationState::Neutral); // Amutar
+        assert_eq!(faction_relation(&server, 109, 109), RelationState::Friendly); // Mutani
+        assert_eq!(faction_relation(&server, 109, 1), RelationState::Friendly); // Lucius
+        assert_eq!(faction_relation(&server, 109, 115), RelationState::Hostile); // kobolds
+        assert_eq!(faction_relation(&server, 109, 149), RelationState::Friendly); // nation
+                                                                                  // Nuia, via mothers 149/148
+        assert_eq!(faction_relation(&server, 109, 101), RelationState::Hostile);
+    }
+
+    /// The owner-session mapping with the real mother chains: a Harani player (West Ishvara
+    /// 109, mother Haranya Alliance 149) against the neutral machine Amutar (2), the same
+    /// faction Mutani (109), the friendly guide Lucius (1), the kobold miners (115) and Nuia
+    /// (Crescent Throne 101, mother Nuia Alliance 148). The 1.2 client follows the same mother
+    /// chains in `FUN_398a3660` (decompile: `FUN_398a37a0` walks `faction+0x20` to the root).
+    #[tokio::test]
+    async fn harani_player_relation_mapping() {
+        let mut data = GameData::empty();
+        for f in [
+            faction(1, 0),
+            faction(2, 0),
+            faction(3, 0),
+            faction(101, 148),
+            faction(109, 149),
+            faction(115, 0),
+            faction(148, 0),
+            faction(149, 0),
+        ] {
+            data.factions.add(f);
+        }
+        for (id, id2, state) in [
+            (148, 149, RelationState::Hostile),
+            (149, 115, RelationState::Hostile),
+            (101, 109, RelationState::Hostile),
+        ] {
+            data.factions.relations.push(FactionRelation {
+                id,
+                id2,
+                state: state as u8,
+                exp_time: 0,
+            });
+        }
+        let server = crate::test_support::test_server_with(data);
+        assert_eq!(faction_relation(&server, 109, 2), RelationState::Neutral);
+        assert_eq!(faction_relation(&server, 109, 109), RelationState::Friendly);
+        assert_eq!(faction_relation(&server, 109, 1), RelationState::Friendly);
+        assert_eq!(faction_relation(&server, 109, 115), RelationState::Hostile);
+        assert_eq!(faction_relation(&server, 109, 101), RelationState::Hostile);
+    }
 }
