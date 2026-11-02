@@ -239,26 +239,38 @@ fn start_skill_cooldown(server: &GameServer, skill: &SkillRun, caster: &WorldObj
         return;
     }
     let tag = skill.template.cooldown_tag_id.max(0) as u32;
-    let packet = caster
-        .with_unit(|u| {
-            let cooldowns = &mut u.unit_mut().cooldowns;
-            cooldowns.add_cooldown(skill.template.id, duration, now);
-            cooldowns.add_tag_cooldown(tag, duration, now);
-            if tag == 0 {
-                return None;
-            }
-            // Native 1.2 397B2350 keeps these lists separate; 3989A290 takes
-            // max(individual, tag). Never manufacture individual entries for other members.
-            let mut affected = UnitCooldowns::default();
+    // Native `3939b010` (OnSkillFired) starts the client-side cooldown itself when the packet's
+    // f bit0 (`+0x154`, DEC 750636) and trailing flag bit1 (`+0x160`, DEC 750694) are 0 and the
+    // template has `toggle_buff_id == 0` (`+0x1c0`, compared with the zero-initialised
+    // DAT_3a17770c) and `timing_id != 0` (`+0x1bc`). Toggle skills' cooldown is started by
+    // `OnBuffRemoved` (`39389b70` -> `39368f90`). A `plot_only` cast with a plot never sends
+    // `SCSkillFired`, so the client cannot start it and the server must send the update.
+    // Sending an entry the client already appended would duplicate it: `39899d40` does not
+    // de-duplicate and drops additions once the list holds 150.
+    let fires = !(skill.template.plot_only && skill.template.plot_id.is_some());
+    let client_starts_cooldown =
+        fires && (skill.template.toggle_buff_id != 0 || skill.template.timing_id != 0);
+    let packet = caster.with_unit(|u| {
+        let cooldowns = &mut u.unit_mut().cooldowns;
+        cooldowns.add_cooldown(skill.template.id, duration, now);
+        cooldowns.add_tag_cooldown(tag, duration, now);
+        // Native 1.2 397B2350 keeps these lists separate; 3989A290 takes
+        // max(individual, tag). Never manufacture individual entries for other members.
+        // A client-started skill needs no packet at all: `39899f90` writes the individual entry
+        // or the tag entry from the client's own template, so sending either one duplicates it.
+        let mut affected = UnitCooldowns::default();
+        if !client_starts_cooldown {
             affected
                 .cooldowns
                 .insert(skill.template.id, cooldowns.cooldowns[&skill.template.id]);
-            affected
-                .tag_cooldowns
-                .insert(tag, cooldowns.tag_cooldowns[&tag]);
-            Some(SCCooldownsPacket::from_cooldowns(&affected, now))
-        })
-        .flatten();
+            if tag != 0 {
+                affected
+                    .tag_cooldowns
+                    .insert(tag, cooldowns.tag_cooldowns[&tag]);
+            }
+        }
+        SCCooldownsPacket::from_cooldowns(&affected, now)
+    });
     if let Some(packet) = packet.filter(|p| !p.is_empty()) {
         // OnCooldowns (native 391D43C0) addresses the local character's manager;
         // unlike SkillCooldownReset, the packet has no subject object ID. A mate's
