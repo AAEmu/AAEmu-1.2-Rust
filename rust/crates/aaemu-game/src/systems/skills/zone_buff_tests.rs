@@ -10,11 +10,13 @@ use aaemu_commons::PacketStream;
 use crate::data::world_data::{Portal, Zone, ZoneData, ZoneGroup};
 use crate::data::world_templates::{WorldTemplate, XmlWorldZone};
 use crate::data::GameData;
+use crate::models::npc::Npc;
 use crate::models::transform::Transform;
 use crate::net::packet::{encode, ServerPacket};
 use crate::net::registry::ClientPacket;
 use crate::opcodes::{cs, sc};
 use crate::systems::npcs::portal::data::PortalTables;
+use crate::systems::services::commands::scripts::util::teleport_player;
 use crate::systems::skills::data::effects::SpecialEffect;
 use crate::systems::skills::data::{BuffTemplate, EffectKind, EffectTemplate, SkillTemplate};
 use crate::systems::skills::packets::SCBuffRemovedPacket;
@@ -24,7 +26,7 @@ use crate::test_support::{
     spawn_player, test_character, test_server_with_world, TestClient, TEST_ZONE,
 };
 use crate::world::session;
-use crate::world::{PlayerRef, WorldObject};
+use crate::world::{Entity, PlayerRef, WorldObject};
 use crate::GameServer;
 
 /// `s_silent_sea_7` (real data: zone key 180, group 36, group buff 7743).
@@ -333,6 +335,11 @@ async fn teleport_ended_out_of_the_open_sea_removes_the_turbulence_buff() {
     assert!(pc.has_turbulence());
     let index = pc.buff_index();
 
+    // GM `/move` / portal / navi: the teleport is armed with `SCTeleportUnit`.
+    teleport_player(&pc.p, 0, LAND_SPOT.0, LAND_SPOT.1, 100.0, 0.0);
+    assert!(pc.p.data().disabled_set_position);
+    pc.client.drain();
+
     let mut s = PacketStream::new();
     s.write_i64(crate::models::transform::convert_long(LAND_SPOT.0))
         .write_i64(crate::models::transform::convert_long(LAND_SPOT.1))
@@ -347,6 +354,77 @@ async fn teleport_ended_out_of_the_open_sea_removes_the_turbulence_buff() {
     assert!(!pc.has_turbulence());
     assert_eq!(pc.p.data().unit.transform.zone_id, LAND_ZONE);
     assert_eq!(pc.p.region(), Some((0, 10, 10)));
+}
+
+#[tokio::test]
+async fn unprompted_teleport_ended_does_not_move_the_character() {
+    // Only a teleport the server started may move the server copy; an unsolicited completion
+    // must not rewrite the position, the region or the zone-group buffs.
+    let server = server();
+    let mut pc = Pc::new(&server, 1, "Sailor", SEA_START);
+    assert!(pc.has_turbulence());
+    let index = pc.buff_index();
+    assert!(!pc.p.data().disabled_set_position);
+    let before = pc.p.data().unit.transform;
+
+    let mut s = PacketStream::new();
+    s.write_i64(crate::models::transform::convert_long(LAND_SPOT.0))
+        .write_i64(crate::models::transform::convert_long(LAND_SPOT.1))
+        .write_f32(100.0);
+    for _ in 0..16 {
+        s.write_u8(0);
+    }
+    pc.frame(&server, cs::CSTeleportEndedPacket, s.as_bytes())
+        .await;
+    let frames = pc.client.drain();
+    assert!(!frames.contains(&removed_body(&pc, index)));
+    assert_eq!(pc.p.data().unit.transform, before);
+    assert!(pc.has_turbulence());
+    assert_eq!(pc.p.region(), Some((0, 1, 1)));
+}
+
+#[tokio::test]
+async fn teleport_ended_detaches_a_deck_stander_before_following_the_position() {
+    // A GM `/move` of a character standing on a ship deck reports a world position; the old
+    // parent must not be composed with it (its region / zone would otherwise win).
+    let server = server();
+    let mut pc = Pc::new(&server, 1, "Sailor", SEA_START);
+    assert!(pc.has_turbulence());
+    let index = pc.buff_index();
+
+    let mut hull = Npc::new(1);
+    hull.unit
+        .transform
+        .set_position(SEA_START.0, SEA_START.1, 100.0, 0.0, 0.0, 0.0);
+    hull.unit.transform.zone_id = SEA_ZONE;
+    let hull = Entity::new(server.ids.object.get_next_id().expect("obj id"), hull);
+    let world = server.world.world(0).expect("main_world");
+    world.spawn(&hull, &server.view_ctx());
+    world.attach_child(&WorldObject::from(&hull), &WorldObject::from(&pc.p));
+    pc.p.data().unit.transform.set_xyz(0.0, 0.0, 0.0);
+    pc.client.drain();
+    assert_ne!(pc.p.data().unit.transform.parent_obj_id, 0);
+
+    teleport_player(&pc.p, 0, LAND_SPOT.0, LAND_SPOT.1, 100.0, 0.0);
+    pc.client.drain();
+    let mut s = PacketStream::new();
+    s.write_i64(crate::models::transform::convert_long(LAND_SPOT.0))
+        .write_i64(crate::models::transform::convert_long(LAND_SPOT.1))
+        .write_f32(100.0);
+    for _ in 0..16 {
+        s.write_u8(0);
+    }
+    pc.frame(&server, cs::CSTeleportEndedPacket, s.as_bytes())
+        .await;
+    let frames = pc.client.drain();
+
+    assert_eq!(pc.p.data().unit.transform.parent_obj_id, 0);
+    let t = pc.p.data().unit.transform;
+    assert_eq!((t.x, t.y, t.z), (LAND_SPOT.0, LAND_SPOT.1, 100.0));
+    assert_eq!(t.zone_id, LAND_ZONE);
+    assert_eq!(pc.p.region(), Some((0, 10, 10)));
+    assert!(frames.contains(&removed_body(&pc, index)));
+    assert!(!pc.has_turbulence());
 }
 
 #[tokio::test]

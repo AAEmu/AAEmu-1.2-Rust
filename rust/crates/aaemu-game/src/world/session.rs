@@ -316,6 +316,10 @@ pub fn resurrect_at(server: &GameServer, p: &PlayerRef, destination: Transform) 
 /// `CSTeleportEndedPacket`: the client reports its landing position after an `SCTeleportUnit`.
 /// The server copy follows it and the region membership is re-evaluated, so a teleport out of a
 /// zone group (open sea) removes that group's buffs even when no movement packet follows.
+///
+/// The reported position is in world coordinates, so a character that stood on another object
+/// (a ship deck, a moving gimmick) is detached first; otherwise the new world position would be
+/// composed with the old parent and land in the parent's region / zone.
 pub fn teleport_ended(server: &GameServer, p: &PlayerRef, x: f32, y: f32, z: f32) {
     let Some((filed_instance, _, _)) = p.region() else {
         // An instance load is pending: `instance_loaded` files the arrival.
@@ -323,6 +327,13 @@ pub fn teleport_ended(server: &GameServer, p: &PlayerRef, x: f32, y: f32, z: f32
     };
     if filed_instance != p.data().unit.transform.instance_id {
         return;
+    }
+    let obj = WorldObject::from(p);
+    if obj.transform().parent_obj_id != 0 {
+        match server.world.world_of(&obj) {
+            Some(w) => w.detach_child(&obj),
+            None => p.data().unit.transform.parent_obj_id = 0,
+        }
     }
     p.data().unit.transform.set_xyz(x, y, z);
     file_teleport_arrival(server, p);
