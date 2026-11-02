@@ -53,8 +53,10 @@ const TOGGLE: u32 = 21002;
 const PLOT_ONLY: u32 = 21004;
 /// The rare `timing_id == 0` skill: the client does not start its timer on `SCSkillFired`.
 const TIMING_ZERO: u32 = 21005;
-/// A skill in the battlefield reset group (`playerSkillsTag` 378).
+/// A skill in the battlefield reset group (`playerSkillsTag` 378), with its own shared
+/// cooldown tag.
 const BATTLEFIELD_SKILL: u32 = 21006;
+const BATTLEFIELD_TAG: u32 = 145;
 
 fn data() -> GameData {
     let mut data = GameData::empty();
@@ -67,7 +69,15 @@ fn data() -> GameData {
         (TOGGLE, 0, 10_000, 1, 1458, false, None),
         (PLOT_ONLY, 0, 10_000, 1, 0, true, Some(1)),
         (TIMING_ZERO, 0, 500, 0, 0, false, None),
-        (BATTLEFIELD_SKILL, 0, 10_000, 1, 0, false, None),
+        (
+            BATTLEFIELD_SKILL,
+            BATTLEFIELD_TAG as i32,
+            10_000,
+            1,
+            0,
+            false,
+            None,
+        ),
     ] {
         data.systems.skills.add_skill(SkillTemplate {
             cooldown_tag_id: tag,
@@ -396,11 +406,17 @@ async fn cooldown_effect_updates_the_server_store_without_a_packet() {
 async fn battlefield_reset_clears_the_server_records_and_sends_resets() {
     let (server, mut client, player, _) = fixture(data());
     let now = now_ms();
-    player
-        .data()
-        .unit
-        .cooldowns
-        .add_cooldown(BATTLEFIELD_SKILL, 10_000, now);
+    {
+        let mut p = player.data();
+        p.unit
+            .cooldowns
+            .add_cooldown(BATTLEFIELD_SKILL, 10_000, now);
+        p.unit
+            .cooldowns
+            .add_tag_cooldown(BATTLEFIELD_TAG, 10_000, now);
+        // An unrelated shared group is not part of the reset.
+        p.unit.cooldowns.add_tag_cooldown(TAG, 10_000, now);
+    }
     client.drain();
     crate::systems::instances::instant_game::reset_all_skill_cooldowns(&server, &player, false);
     assert!(!player
@@ -409,6 +425,17 @@ async fn battlefield_reset_clears_the_server_records_and_sends_resets() {
         .cooldowns
         .cooldowns
         .contains_key(&BATTLEFIELD_SKILL));
+    {
+        let p = player.data();
+        assert!(
+            !p.unit
+                .cooldowns
+                .tag_cooldowns
+                .contains_key(&BATTLEFIELD_TAG),
+            "the reset skill's shared cooldown tag is cleared as well"
+        );
+        assert!(p.unit.cooldowns.tag_cooldowns.contains_key(&TAG));
+    }
     assert!(
         !client.drain_frames().is_empty(),
         "the compressed reset packet is sent"

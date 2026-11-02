@@ -963,7 +963,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `session::teleport_character` (`world/session.rs`), which applies the transform, moves the
   instance object table and dispatches `OnZoneChange`; the arrival is filed by
   `CSInstanceLoadedPacket` (`systems/instances/worlds.rs`) or, for a same-instance teleport, by
-  `session::file_teleport_arrival`. **Deviation:** `CSTeleportEndedPacket` now follows the
+  `session::file_teleport_arrival`. A rider, a bound seat or a doodad bond is released first
+  (`vehicles::force_dismount`, `PrefabChanged`, as the GM teleport and the trial do); the
+  parentless transform would otherwise leave it half attached on the server. **Deviation:** `CSTeleportEndedPacket` now follows the
   client's reported landing position and refiles the region before repainting (the C# only ran
   `ResendVisibleObjectsToCharacter`), so GM `/move`, same-instance portals and navi teleports
   re-evaluate the zone without waiting for a movement packet. Only a teleport armed through
@@ -3798,7 +3800,9 @@ special effect (43) and `InstantGameManager` reset (`instant_game.rs`, one
 `SCSkillCooldownReset` per skill of tag 378) send their resets and clear the matching server
 records. Clearing them is a deviation forced by persistence: the C# reset only sent the client
 packet, which was enough while `UnitCooldowns` died with the session; here a relog would
-otherwise restore a cooldown the battlefield reset removed.
+otherwise restore a cooldown the battlefield reset removed. The battlefield reset clears each
+skill's shared `cooldown_tag_id` record as well: tag cooldowns are persisted too, and a running
+tag would keep refusing the skills the reset showed as ready.
 
 Recall's path: skill 14849 / 21586 is **not** `plot_only` and has no `plot_id`; it is a normal
 `timing_id == 1`, `toggle_buff_id == 0` skill, so the client starts its 2000 ms cooldown itself.
