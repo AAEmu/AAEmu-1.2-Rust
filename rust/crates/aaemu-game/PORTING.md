@@ -161,8 +161,10 @@ Each subsystem records its status here, in its own section only (see `CONTRIBUTI
 | `Models/Game/Skills/{Skill,SkillCaster,SkillCastTarget,SkillObject,CastAction,SkillController*}`, `Core/Packets/{C2G,G2C}` skill / buff packets | `systems/skills/{types,packets,skill,handlers}.rs` | done | Byte-exact wire types (tested), `Skill.Use` / `Cast` / `Channeling` / `Apply` / `EndSkill` / `Stop`, GCD + cooldowns, mana, labor / vocation, reagents via `ItemSkillHooks`, auto attack loop, `CompressedGamePackets`. Data gap: 6 `quest_components.skill_id` values (20315, 11212, 17708, 13737, 11981, 13590) have no `skills` row. The C# `Unit.UseSkill` threw a NullReferenceException there; Rust skips the cast (the quest continues) and `unit_use_skill` warns once per skill id (`missing_skill_warned`), repeats go to debug. |
 | `Models/Game/Skills/Plots/*` | `systems/skills/plots.rs` | done | Plot tree execution (async), conditions 1..17, target info updates (area / random unit / random area), channeling finish, `SCPlotEvent` / `SCPlotEnded`. Deviation: the timeline-id release in plot end, `end_skill` and `stop_skill` is take-and-clear under the skill state lock (`SkillRun::take_tl_id`); C# did an unsynchronised `ReleaseId(TlId); TlId = 0`, so an interrupted plot skill could release the same id twice. The `Tried to release unused Id` warning names the last owner (caster obj id, skill id), like C# `AssignedUnit`. |
 | `Models/Game/Units/Buffs` behaviour, `Skills/Buff`, `Skills/Effects/{Buff,Damage,Heal,Dispel,RestoreMana,ManaBurn,Aggro,FlyingStateChange,SkillController,...}`, `CombatBuffs`, `BuffTriggers` | `systems/skills/{buffs,effects/*}.rs` | done | Start / dispel / tick tasks, tolerance, stack rules, charges, `TriggerRemoveOn`, tag removal, absorption, triggers, area ticks. Explicit dispel emits Dispelled without Timeout; natural expiry retains Timeout. This corrects the mirrored C# removal path, which invoked the FISH escape trigger when catch plot 792 dispelled FISH before lethal damage. Queued CREATED handling and existing removal packet order are retained. Refreshing permanent non-ticking buffs invalidates old timers without treating GetTimeLeft=-1 as expiry; finite expiration and permanent tick cadence remain scheduled. This corrects the mirrored C# refresh timer path. Special effects routed through `ExtHooks::route_special` where they belong to another subsystem. |
+| `buffs.transform_buff_id` (stack replacement) | `systems/skills/{buffs,data}.rs` (`transform_at_max_stack`); stack bookkeeping in `models/buff.rs` unchanged | added | The C# loaded the column and never read it. The 1.2 rows plus their tooltips establish the rule: the application that reaches `max_stack` replaces the stacks with `transform_buff_id`, not the one after it (1757 `max_stack` 2 "Two stacks turn it into Nymph's Flame"; 2214 `max_stack` 4 "Stacks up to 3 times. A 4th stack Stuns" -> 2541; 2407 `max_stack` 5 "Petrifies upon reaching 5 stacks"; 2724 "at the 4th stack"; 5793 "At 20 or higher tension"). All 66 rows are `stack_rule_id` 4 with `max_stack >= 2`; the authored chains 4152 -> 4752 -> 4101 and 5378 -> 5379 -> 5380 run through the normal add path (a transform that reaches its own cap transforms again), bounded by a chain depth / visited-id guard. Every stack is removed through the normal removal path (Dispel hooks, `SCBuffRemovedPacket`) after the max-th stack's Started hooks, and the replacement keeps the triggering application's caster, skill, skill level and ability level. The live GM run (`/buff 2656` x3, `max_stack` 3) sent three `SCBuffCreatedPacket`, three `SCBuffRemovedPacket` and one `SCBuffCreatedPacket` for 2657. **Inferred (no 1.2 server evidence):** the create-the-max-stack-then-replace ordering, the caster/skill carry-over, and a missing / cyclic transform id keeping today's refresh-at-cap behaviour (a missing target is reported once at load and the column is cleared). Real-DB test `skills_real_compact_db_transform_buffs` (66 rows, target exists, stack rule 4, `max_stack >= 2`). |
 | `Units/Unit` combat (`ReduceCurrentHp`, `DoDie`, aggro / tagging, `SetInBattle`, criminal / force attack, invisibility, `DoFallDamage`), `BaseUnit.CanAttack` / relations, regen, `UpdateGearBonuses`, all `Character` stat getters | `systems/skills/{combat,relation,stats,regen}.rs` | done | MaxHp / MaxMp etc. with buffs, passives and gear (`GearStats` hook). NPC death side effects through `NpcSkillHooks`. |
 | Taunt buffs (`buffs.taunt` / `buffs.taunt_with_top_aggro`) | `systems/skills/{combat,buffs,state}.rs`, `systems/ai/{behaviors,combat}.rs`, `systems/quests/bridges.rs`, `systems/skills/effects/special/unit_actions.rs` | added (10x-only) | The 1.2 client and the C# have no taunt logic; the mechanic is derived from the 10.x zone server `NpcAggroTable::TauntedBy` / `CancelTauntedBy` / `CopyTopAggro`, and the 1.2 data agrees (134 `taunt='t'` buffs, 97 also `taunt_with_top_aggro`; buff 171, buff 502 "highest threat", skill 17300). On the generic buff-start path (`on_started`, so trigger- and script-applied buffs are covered too) an NPC holder gets `taunted_by(caster, taunt_with_top_aggro)`: refused when the caster is the holder or explicitly friendly to it (10x refuses a `CanAttack`-false caster; the 1.2 PvE monsters are faction-neutral to players and attack through AI aggression, so `CanAttack` would refuse every taunt on them; this is recorded as a deviation from the 10x check); the aggro entry is created through `AddUnitAggro` (zero threat), stamped with the server clock (non-zero), and with `taunt_with_top_aggro` its total is raised to the current highest total of the table (one-off copy, never above). `sorted_abusers` sorts any stamped entry above every unstamped one and the latest stamp first; `aggro_rating_in_percent` and `aggro_rating_percent` mirror that order. On buff end (expiry, dispel, death, explicit removal) `cancel_taunted_by` clears the stamp only while no other taunt buff of that caster remains; threat is not reduced, so a top-aggro copy persists. `aggro_copy` drops the stamp and `aggro_reset` clears it. **Capture-pending:** re-stamping on refresh (TAUNT-1) and the copy/reset stamp behaviour (TAUNT-2) are chosen, the 10x decompile does not show them. 10x also refuses members of the NPC's own group; Rust has no runtime NPC group membership (`npc_groups` is not loaded), so none is checked. Tests: `taunt_*`, `refreshing_the_taunt_buff_restamps_the_table`, `aggro_copy_drops_and_reset_clears_the_taunt_stamp`, gated `real_compact_taunt_buffs_and_the_skills_that_apply_them`. |
+| Aura buffs (`aura_radius`, `aura_relation_id`, `aura_slave_buff_id`, `aura_child_only`) and crowd buffs (`crowd_buff_id`, `crowd_radius`, `crowd_number`, `crowd_friendly`, `crowd_hostile`) | `systems/skills/aura.rs` | data-inferred / capture-pending | The 1.2 client only reads the columns and has no runtime; no 1.2 zone binary exists, so the rules come from the localized descriptions. A 1 s enter/leave driver (the area-trigger update pattern) grants the slave buff to units in `aura_radius` passing `aura_relation_id` (the owner too for Any/Friendly/Party/Raid), removes only the copy with caster = aura owner, and grants `crowd_buff_id` while `crowd_number` *other* carriers of the source buff are in `crowd_radius` and match `crowd_friendly` / `crowd_hostile`. The dangling slave 6668 -> 6669, the self-reference 1224 and the 15 aura rows without a slave buff are skipped with one load warning. Case ids AURA-1..8 / CROWD-1..4; update period, slave caster identity, owner counting, child attach scope and dead-owner behaviour are UNKNOWN. |
 | Learning / progression (`LearnSkill`, `LearnBuff`, `ResetSkills`, `SwapAbility`, `AddExp`, labor, game points) | `systems/skills/progress.rs` | done | Labor accrual uses zero-based actability steps into ordered `expert_limits`, matching inventory / regrade; step 4 caps at 50,000 (row id 5), avoiding the former row-id lookup that reduced it to 40,000. Capped gains and packet deltas have regression coverage. |
 | `Skills/Effects/SpecialEffects/*` (141 named `SpecialType` actions), `BubbleEffect`, `ImpulseEffect`, `PhysicalExplosionEffect` | `systems/skills/effects/{special/*,unit_fx}.rs`, `packets_special.rs` | partial | Ported actions and subsystem hooks are present, but historical logging placeholders do not establish gameplay completeness. Buff stealing, component-selective aggro copy/reset, target loss, NPC despawn, ongoing-buff cancellation and pet recovery now execute. ExplodeBuff, MoveToGround and RedeemBuff now execute (see below). Client visuals use the existing skill/plot notifications. 13 extra S->C packets, byte-exact tests. |
 | `Skills/SkillControllers/{Floating,Wandering,Leap,Dash,Rotate}` | `systems/skills/controllers.rs` | partial | Rotate uses native constructor/tick timing (`0x3924E1D0` / `0x392315C0`) with 1.2 controller7678 regression coverage. Generic Anchor and Flowgraph remain unverified; native 10.x Anchor parameter kinds1001..1039 differ from the 1.2 data kinds1..3. Harpoon ropes have a separate vehicles implementation. |
@@ -218,6 +220,76 @@ effects, not the authoritative counter. Its producer is unavailable in these bin
 `plots::aoe_tests::aoe_policy_*` covers the compatibility policy through plot/combat flows;
 an authoritative native lifecycle experiment and live verification remain unperformed.
 
+#### Aura and crowd buffs (data-inferred, capture-pending)
+
+`systems::skills::aura`: the 1.2 `buffs` catalog has 85 `aura_radius > 0` rows (relations
+Any 22, Friendly 18, Party 1, Raid 13, Hostile 28, Others 3) and 37 `crowd_buff_id > 0` rows,
+but neither the 1.2 client (`x2game.dll.c`) nor the C# history contains an aura/crowd runtime;
+the 10.x-only columns (`aura_creator_only`, `aura_max_count`, `crowd_check_buff_id`, ...) are
+deliberately not implemented. The rules are a strong reading of the localized descriptions
+(research `D:/aaemu-audits/gap-audit-2026-11-02/research/aura-crowd.md`), marked capture-pending
+until a retail 1.2 zone server can be recorded:
+
+* **AURA-1/AURA-2:** the slave buff (`aura_slave_buff_id`) is applied with the aura owner as
+  caster to every unit within `aura_radius` that passes
+  `relation::filter_with_relation(aura_relation_id, owner, ..)`; the owner is included for
+  Any/Friendly/Party/Raid ("caster and allies").
+* **AURA-3:** leaving the radius / failing the relation removes only the copy whose caster is
+  the aura owner, so a separately cast copy survives. Every tick renews a current member that
+  holds no live copy from any caster: natural expiry, a dispel, death cleanup, a caster that
+  left, or a REFRESH stack-rule overwrite that moved the caster to another owner. It does not
+  add while another caster's copy exists, so two owners do not overwrite each other every
+  second; the remaining owner re-adds within one tick after the other leaves. Copies whose
+  caster is not the aura owner are never removed by it.
+* **AURA-4:** the driver is a 1000 ms enter/leave diff (no `on_moved` hook); the 1.2 update
+  period is UNKNOWN.
+* **AURA-5:** `aura_child_only` reaches the owner's attached characters (slave
+  `attached_characters`, mate `passengers`) plus the owner's mount/vehicle (transform parent)
+  inside the radius. The exact 1.2 attach scope is UNKNOWN.
+* **AURA-6:** the owner losing the aura effect (timeout, dispel, death with `remove_on_death`,
+  despawn) strips every recipient at once; a logout or a teleport to another instance is
+  detected by the next 1 s tick, which strips the stored recipients without a radius query (a
+  teleport then re-evaluates in the new position). A dead owner whose aura lacks
+  `remove_on_death` keeps its aura (UNKNOWN).
+* **AURA-7:** the loader warns once and skips the dangling slave 6668 -> 6669, the
+  self-reference 1224 and the 15 aura rows with no slave buff.
+* **AURA-8:** a registry entry stores the owner's `ObjectCore` identity and is dropped unless
+  the same object still holds a live source effect. A logged-out owner whose object id is
+  reused immediately, or a Started event that races a Removed, therefore cannot keep a ghost
+  aura. A dead recipient (hp <= 0) does not get the slave buff re-added unless the slave
+  template is `dead_applicable`; a resurrected unit in range gets it on the next tick.
+* **CROWD-1..4:** every 1000 ms a source-buff carrier counts the OTHER units within
+  `crowd_radius` that also carry the source buff and are friendly (`GetRelationStateTo` =
+  Friendly and not attackable) and/or hostile (`CanAttack`), per `crowd_friendly` /
+  `crowd_hostile`; at `crowd_number` the owner gets `crowd_buff_id` self-cast, below it the
+  buff is removed. Whether 1.2 counts the owner, and which units count, is UNKNOWN (the 10.x
+  check columns are that refinement).
+
+Known limitations (evidence is insufficient for a code rule, left as-is):
+
+* `aura_child_only` with relation 0 also reaches the owner itself (the aura target list adds
+  the owner for Any); the data descriptions say "caster and passenger", so this is plausible
+  but unproven.
+* `Party` filters like `Any` in `relation::filter_with_relation` (mirrored C# quirk), so the
+  relation-2 aura and the relation-0 auras also reach hostile units.
+* One crowd buff shared by two source buffs on the same holder can flap if the sources
+  disagree on the threshold (crowd 1857 "With Travel Companion" is reachable from many
+  "Overburdened" ids); the last evaluated source wins for one tick.
+* Long slave buffs 7115 / 1068 can outlive the owner across a relog because buff persistence
+  keeps them and no aura owner is registered after the restore; the remaining effect lives at
+  most its own duration (<= 60 s).
+* `Entry.crowd_active` is bookkeeping only: removing and re-adding a timed crowd buff leaves a
+  gap of up to one tick. The same applies to a timed aura slave that expires in range; the
+  renewal happens on the next tick.
+* The test client's `GameState.buffs` index map is not cleared on `SCUnitsRemoved`, so a
+  reused obj id can inherit stale indices in a bot run (verification tooling only).
+
+Tests: `systems::skills::aura::aura_tests` (relation matrix, enter/leave, every owner-loss
+path, child-only, self-reference/dangling, crowd threshold with friendly-only counting,
+separately cast copy) and the gated real-data test `real_compact_aura_and_crowd_catalogs`.
+Live verification: two headless clients in a party, GM aura on A, B in radius receives
+`SCBuffCreated`, B leaves -> `SCBuffRemoved`, A loses the aura -> B's copy removed.
+
 #### Special effects added from data (2026-10-20)
 
 These `SpecialType` bodies were TODO stubs that only logged in the C# (`git show a2ab80abd^:AAEmu.Game/Models/Game/Skills/Effects/SpecialEffects/...`); the behaviour below is derived from the 1.2 data because value1..4 are 0.
@@ -238,6 +310,7 @@ These `SpecialType` bodies were TODO stubs that only logged in the C# (`git show
 | `Npc.DoDie` | `npc/death.rs` | done | Kill exp (team eligibility, `PlayerExpModifier`, mate exp, TagShare contributors), quest kill events, loot (`LootManager.GenerateLoot` through the economy), aggro / tagger clean-up, spawner despawn, `Ai.GoToDead()` (`systems::ai`). |
 | NPC interaction packets (CSStartInteraction, CSInteractNPC(End), CSSelectInteractionEx; SCNpcInteractionSkillList, SCAiAggro, SCNpcChatMessage, SCUnitModelPostureChanged, SCAggroTargetChanged) | `npc/packets.rs` | done | Byte-exact tests. Merchant / bank / auction UIs are economy's. **Deviation:** `CSStartInteractionPacket` also answers a slave with one seat skill, because the 1.2 client acts on the first list entry (`FUN_393be850` / `FUN_393be280`): 12076 (occupy) while the driver seat is free, else 13863 (passenger seat, `special_effects` 2378 value1 2) while point 2 is free, the slave's model declares point 2 in `model_bindings` and the slave is not a cannon; a slave with both seats taken keeps 12076; the bind then ignores the taken seat silently (C# behaviour). The C# answered only NPCs and mates (12077). |
 | `NpcGameData` (npc_spawners, npc_spawner_npcs, member index, generated spawners) | `npc/spawner_data.rs` | done | |
+| `NpcGroupGameData` (`npc_groups`, `npc_group_members`) | `npc/group_data.rs` | done | 158 groups / 571 member rows on the real DB; every one of the 147 `NpcGroup` spawner rows resolves to a group whose 531 member NPC templates exist. A `"NpcGroup"` spawner member expands into all group members at the spawner position plus `formation_offset_*` (see deviations). |
 | `NpcSpawner`, `NpcSpawnerNpc`, `DoodadSpawner`, `Spawner<T>` | `npc/spawner.rs`, `doodad/spawner.rs` | done | Schedules / time windows / population caches, respawn + despawn timing, exact-identity reconciliation of direct deletes (see deviations). Ordinary populations keep the authored `Count` / `min_population` baseline (default 1) and per-slot respawn deadlines (see deviations). AI home position / follow path / simulation through `server.systems.hooks.ai` (`systems::ai`). |
 | `SpawnManager` (one per instance) + `WorldManager.ActiveRegionTick` spawner part | `spawn_manager.rs` | done | main_world: 25 118 NPC entries -> 24 047 ordinary placements / 38 174 spawner clones (1 011 duplicates and 60 event entries filtered, 0 missing templates), 42 649 doodads, 69 transfers, 14 gimmicks, 5 slaves, 0 parse errors. Ordinary spawning is a bounded per-instance 64 m region-index activation pass (`World.NpcPrewarmRegionMargin` / `World.NpcSpawnTickMs` / `World.NpcSpawnsPerTick`) with warm retention and resident-service retention (`World.NpcWarmRetentionSeconds` / `World.NpcResidentServiceNpcs`; see deviations). Persistent doodads from MySQL. Transfers / slaves: `systems::vehicles`; houses and their doodads: `systems::housing`; trial court doodads / NPCs linked after the spawns (`TrialManager.Initialize*`). |
 | `DoodadManager.Load` (templates, func groups, funcs, phase funcs, all 121 func template tables) | `doodad/data.rs`, `doodad/templates.rs` | done | 7 124 templates, 13 974 funcs, 24 465 phase funcs (counts match the DB). |
@@ -285,7 +358,7 @@ connected by `systems::economy::wiring`).
 | `ItemContainer`, `EquipmentContainer`, `MateEquipmentContainer`, `CofferContainer` | `models/container.rs` | done | `AddOrMoveExistingItem` (new / moved / same container), `RemoveItem`, `ConsumeItem`, `AcquireDefaultItem(Ex)` (timers, charges, crafter), `SpaceLeftForItem`, `ApplyBindRules`, `Wipe`, `ReNumberSlots`, coffer `CanAccept`, `OnEnter/LeaveContainer` events. |
 | `Inventory` (SplitOrMoveItem(Ex), 2H weapon handling, backpacks, ExpandSlot, coffers, ConsumeItem, counts), `Character` money / game points / labor / `ItemUse` / `SendErrorMessage`, `ErrorMessageType` | `systems/economy/inventory.rs`, `error_message.rs` | done | `ChangeLabor`'s `AddExp` is a hook (`ProgressionHooks`). |
 | Core item C2G (`CSSwapItems`, `CSSplitBagItem`, `CSDestroyItem`, `CSExpandSlots`, `CSDeposit/WithdrawMoney`, `CSSplit/SwapCofferItem(s)`, `CSItem(Un)Secure`, `CSEquipments(Un)Secure`, `CSThisTimeUnpackItem`) | `systems/economy/item_handlers.rs` | done | Deposit / withdraw require a positive amount and a banker NPC (the `banker` template flag) within 5 m of the current interaction object (the C# did neither). |
-| `ItemManager` (all templates / tables, user items, `Create`, timers, `UnwrapItem`, auction search helpers, loot convert fish), `ItemGameData`, `ItemConversionGameData`, `FishDetailsGameData`, item model stats (durability, repair cost, attributes, DPS, armor), procs | `data/items.rs`, `managers/item.rs`, `models/item.rs`, `systems/economy/{items_data,item_timers}.rs` | done | `ItemManager` lists are leaf locks (snapshot before locking containers). |
+| `ItemManager` (all templates / tables, user items, `Create`, timers, `UnwrapItem`, auction search helpers, loot convert fish), `ItemGameData`, `ItemConversionGameData`, `FishDetailsGameData`, item model stats (durability, repair cost, attributes, DPS, armor), procs | `data/items.rs`, `managers/item.rs`, `models/item.rs`, `systems/economy/{items_data,item_timers,procs}.rs` | done | `ItemManager` lists are leaf locks (snapshot before locking containers). Procs are a new feature (the C# never fired one; see the item-procs deviation). |
 | `LootGameData`, `Models/Game/Items/Loots/**`, `LootingContainer`, loot packets | `systems/economy/{loot_data,loot,looting,loot_packets}.rs` | done | NPC death / despawn / team rules through `LootNpcHooks`, `LootTeamHooks`, `LootQuestHooks`. |
 | Repair (`Character.DoRepair`, `CSRepairSingleEquipment`, `CSRepairAllEquipments`), durability loss | `systems/economy/repair.rs` | done | Combat calls `on_damage_taken` / `on_death`. |
 | `CraftManager`, `Models/Game/Crafts`, `CharacterCraft`, `CraftTask`, `CSExecuteCraft`, `SCCraftFailed` | `systems/economy/{craft,craft_data}.rs` | done | Cast through `CraftHooks::start_craft_cast`; skills call `craft::end_craft`. |
@@ -376,7 +449,7 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 | `TeamManager`, `Models/Game/Team` | `systems/social/team.rs`, `packets/team.rs` | done | Invitations (single / area, 60 s timeout), create, AskRiskyTeam (leave / kick / dismiss + auto-disband), owner / role / marker / looting rule / ping / move, raid conversion, SetOffline / MemberRemoveFromTeam / UpdateAtLogin / UpdatePosition, 500 ms remote-member sync (delta cache, 5 s forced resync, upper-triangle pairs), zombie-team disband (5 min), loot winner helpers. Events (OnTeamJoin/Leave) are quest-side: not called. |
 | `ExpeditionManager`, `Models/Game/Expeditions` | `systems/social/expedition.rs`, `packets/expedition.rs` (`managers::expedition` re-exports) | done | Load, create (party checks, cost, `SCItemTaskSuccessPacket` money-only form), invite / reply, leave, kick, member role, owner, role policy, disband (stays listed as `$deleted-guild-<id>`), `Expedition.Save` per change, offline leave for character deletion. Rename / sponsor are log-only / not in 1.2 as in C#. |
 | `FamilyManager`, `Models/Game/Family` | `systems/social/family.rs`, `packets/family.rs` | done | Load, invite / reply / create, leave, kick (offline existence check), title, steward, login / logout, disband, save, offline leave for character deletion. |
-| `FriendMananger`, `CharacterFriends`, `CharacterBlocked` | `systems/social/friend.rs`, `packets/friend.rs` (`managers::friend` re-exports) | done | Add / remove friends (online or by DB name lookup), block / unblock (online only), status changes incl. `InParty`. |
+| `FriendMananger`, `CharacterFriends`, `CharacterBlocked` | `systems/social/friend.rs`, `packets/friend.rs` (`managers::friend` re-exports) | done | Add / remove friends (online or by DB name lookup), block / unblock (online or by `NameManager` for offline names), status changes incl. `InParty`. The blocked list is enforced on every direct delivery path (whisper, team / area / expedition / family invite, friend add, trade and duel request); see the block-list deviation. |
 | `ChatManager`, `Models/Game/Chat` | `systems/social/chat.rs`, `session.rs` (`managers::chat` re-exports) | done | All channel kinds incl. party / raid / court, CleanUpChannels, party / raid / raid-leader / judge routing. User channels (`CSJoinUserChatChannel`) are log-only as in C#. |
 | `FactionManager` relations, `SystemFaction.GetRelationState`, `Unit/Character.SetFaction` | `systems/social/faction.rs`, `packets/faction.rs` | done | Relation table validated against compact.sqlite3 (gated test). Faction CS packets are log-only as in C#; every SCFaction* struct ported. |
 | `GameData/AchievementGameData` (`achievements`, `achievement_objectives`, `pre_completed_achievements`, `char_records`), `Models/Game/Achievement` | `systems/social/achievement.rs` (`server.game_data.systems.social.achievements`) | done | Loader + port of `AchievementGameDataTests`; gated real-DB test `achievement_game_data_real_compact_db`. The C# 1.2 tree has no manager; the Rust achievement manager / runtime / hooks / rewards (`achievement_*.rs`) read them (see "Achievement producers" below). |
@@ -873,9 +946,10 @@ Deviations of the wiring:
   (taking it under a character lock could deadlock with an operation waiting for that
   character).
 * `AcceptQuestEffect` approximates the C# `ImplId` lookup by the effect's quest id.
-* Item procs of equip item set bonuses are not registered: `UnitProcs.RollProcsForKind` skips
-  every proc whose cooldown has elapsed and `LastProc` starts at `DateTime.MinValue`, so no proc
-  ever fires in the C#.
+* Item procs are implemented by `systems::economy::procs` (set, item binding and holdable
+  sources) and rolled from the damage pipeline; the C# never fired one (inverted cooldown,
+  sources never registered at runtime, off-by-one roll). The capture-pending choices are listed
+  under "Known deviations from the C#" (`systems::economy (item procs)`).
 * `ItemSkillHooks::create_sheet_music` and `TimedRewardsManager.DoDailyAccountLogin` run their DB
   work as tasks (the C# blocks).
 * AStar GM commands read the NPC's `PathNode` only when its AI is not in the middle of a step
@@ -890,7 +964,57 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 
 ## Known deviations from the C#
 
+* systems::social (blocked users): `CharacterBlocked` was stored and sent at login but never
+  read, so a blocked player could still whisper, invite (party / raid / area, expedition,
+  family), add as a friend, request a trade or a duel. Every one of those delivery paths now
+  checks the recipient's list under the recipient's own lock
+  (`systems::social::friend::is_blocked_by`) and drops the delivery when the sender is on it.
+  Blocking / unblocking also resolves offline names through `NameManager` (the C# only accepted
+  online names); unknown names are still ignored without a reply, as in the C#, and the
+  successful `SCAddBlockedUser` / `SCDeleteBlockedUser` replies carry the resolved id / name, so
+  the login `SCBlockedUsers` snapshot and the reply describe the same `blocked` row. The
+  sender-side reply is silent: the 1.2 client has no "target blocked you" error, and its
+  whisper display (`chat/chat_msg_event.alb`, function 20) has no block-list check; the
+  block / unblock UI only uses the existing 352 / 353 / 354 and 551 / 553 codes.
+  **Capture-pending** (`BLOCK-LIST-1`): 1.2 retail's exact sender-side reply is unknown.
+  Friend requests to an **offline** target are not blocked because an offline character's list
+  is not loaded (`BLOCK-LIST-2`), and mail is delivered as before: no 1.2 client mail filter or
+  error / system text for mail from a blocked player was found (`BLOCK-LIST-3`).
+
 * systems::npcs (persistent doodads): `SpawnPersistentDoodads` skips the housing lookup for SLAVE-owned rows. In the C# every row with `houseId > 0` was resolved as a house, but for vehicle cargo racks `house_id` holds the hull id, so it logged "can't find it's owning house" (or, if a house with that id existed, parented the rack to it before the slave re-attach).
+
+* systems::npcs (2026-11-02, NPC groups): the C# `NpcGroupGameData` loaded `npc_groups` /
+  `npc_group_members` but never used them: `NpcSpawnerNpc.SpawnNpcGroup` just called
+  `SpawnNpc`, so the row's `MemberId` (an `npc_groups.id`) was created as an NPC template id.
+  All 147 `NpcGroup` spawner rows resolve to a group; 134 of those group ids also exist as an
+  unrelated NPC template id (so the wrong NPC spawned) and the other 13 spawned nothing. Rust
+  deviates: a `"NpcGroup"` member spawns every `npc_group_members.npc_id` of `MemberId`'s group
+  at the spawner position plus that member's `formation_offset_x/y/z`, each with the ordinary
+  spawner link, population registration and respawn bookkeeping. The member -> spawner template
+  index (`GetSpawnerIds`) is unchanged: it is keyed by `npc_spawner_npcs.member_id` only. The
+  shipped main_world data places every group member NPC individually under its NPC id, and each
+  of those ids has an ordinary (mostly AUTOCREATED) member row, so those placements keep
+  selecting the ordinary single-NPC spawner and never the group template. A group template is
+  selected by a placement only where the authored `UnitId` is the group id itself: groups 32,
+  42, 44, 45, 79 and 80 in main_world (21 placements), which are exactly the rows that
+  previously spawned the colliding NPC template (group 32 "Juggernaut slave overseer" was
+  placed as NPC 32 "porter"). GM `/spawn` of an NPC template id that equals a group id
+  resolves the group template the same way; event spawners and `SpawnEffect` build/select
+  ordinary `"Npc"` templates and do not reach groups. The group batch is one authored
+  encounter: it spawns whole even when fewer population slots remain (group 44: 9 members at
+  `max_population` 1; group 80: 5 at 1), so it can exceed the spawner cap and the per-tick
+  activation budget; ordinary `"Npc"` members keep the hard per-unit cap. This is a documented
+  deviation, not fixed. The population target still counts individual NPCs, so a partially
+  killed group may not schedule a per-member respawn while enough members live; it refills
+  when the spawner empties. `get_npc_spawner_at` (`SpawnEffect`) now rewrites only an ordinary
+  `"Npc"` member row; a summoned unit whose id equals a group id keeps the generated single-NPC
+  fallback instead of replacing the shared group template's rows. Capture-pending:
+  `formation_offset_*` are applied as authored
+  world-axis deltas, not rotated by the spawner yaw (the 1.2 client `game_pak` only exposes
+  runtime AI formation strings such as `FORMATION_POINT` / `FormationManager`, no placement
+  rule). `aggro_rule_id` (group aggro), `is_leader` / `is_move_leader` (leader following),
+  `formation_tension` and `enable_respawn` (true for 42 of the 141 groups used by spawners) are
+  loaded but not applied.
 
 * systems::services (beauty salon): `ApplyBeautySalon` creates the requested hair item when
   the equipment hair slot is empty. The C# guard required an existing hair item, so a paid
@@ -1110,6 +1234,38 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * systems::economy: item operations are serialised by the economy operation lock (`ItemTxn`) and
   their packets / quest events are flushed after the container locks are released, in the C#
   order; character packets sent during an operation go through the same queue (`Out`).
+* systems::economy (item procs, 2026-11): procs fire where the C# never did. Sources, rebuilt
+  by the gear-bonus pass (`apply_gear_buffs` -> `procs::refresh`, so equip / unequip, login,
+  repair, gear break and gem changes all refresh them): set
+  `equip_item_set_bonuses.proc_id` when the piece count reaches `num_pieces` (destroyed pieces
+  still count, like the set buffs), `item_proc_bindings` of every equipped non-destroyed item
+  (the C# never loaded the table), and `holdables.item_proc_id` of every equipped
+  non-destroyed weapon (the C# never read the column). Deduplicated by proc id per unit.
+  Deviations from the C#: the roll is `rng in [0, 100) < chance_rate` (the C# passed at
+  `rate + 1` percent; `item_level_based_chance_bonus` is ignored, **CAPTURE-PENDING
+  item-procs-1**); the cooldown blocks until `cooldown_sec` after the proc last fired and the
+  stamp is per unit / proc id, surviving a re-equip in the session (not persisted; a refused
+  cast puts the old stamp back), where the C# checked it inverted and never stamped; kinds 1-8
+  roll on the attacker for a landed melee / magic / ranged / siege hit, 9-16 on the victim
+  (`SkillHitType` supplies the crit filter), kinds 17-20 have no 1.2 data and are not rolled.
+  The proc skill is cast by the owner, bypassing the GCD; a self-targeted skill (75 of the 92
+  proc skills) targets the owner, any other targets the other unit of the damage event
+  (**CAPTURE-PENDING item-procs-2**); the cloned template has `casting_time` / `mana_cost`
+  zeroed (two proc skills carry a 2.0 / 2.67 s cast time; 14921 also has mana 100). The rest
+  of `use_skill` still runs (**CAPTURE-PENDING item-procs-3**): a proc is refused while the
+  owner is casting or channeling (and can stop a channel for a skill with
+  `stop_channeling_on_start_skill`), it resets the owner's `skill_cancelled` /
+  `condition_chance` mid-skill, a unit requirement failure warns per hit, and an NPC
+  `NO_TARGET` pokes its AI.
+  A proc skill's own synchronous damage does not roll procs again (thread-local cast guard);
+  its projectile / `effect_delay` / `effect_speed` / plot effects and the DoTs it applies fire
+  later, outside the guard, and can roll procs again (bounded by the item-proc and skill
+  cooldowns; **CAPTURE-PENDING item-procs-4**). A proc skill's hit therefore does not roll the
+  victim's take-damage kinds (**CAPTURE-PENDING item-procs-5**). DoT ticks and Heal damage
+  effects do roll procs in this implementation. The proc packets are broadcast before the
+  triggering `SCUnitDamaged`. The hot path allocates the per-kind id lists and takes up to six
+  unit locks per hit; left as is. The active procs and cooldowns live on
+  `UnitBase.item_procs`; death does not clear them (the C# has no reference either).
 * systems::economy (account attributes): the C# `AccountAttributeManager.Apply` saved synchronously;
   the Rust applies the effect to the cache and persists in a background task (skill effects are
   synchronous), serialised per account by the account lock. Each save takes the cache snapshot
@@ -2513,8 +2669,9 @@ and in NPC wandering / buff remaining times.
   a mail container (no source container) raises no consumed event.
 * systems::economy: `ExpandExpert` adds the vocation cost; craft / backpack / weapon booleans read as numbers are
   false for `'t'` texts; `Specialty.VendorExist` reads the `id` column.
-* systems::economy: `ItemProc` `ignoreRoll` never procs; `HDps` uses the magic DPS grade value;
-  fish conversion only uses the first pack.
+* systems::economy: `HDps` uses the magic DPS grade value; fish conversion only uses the first
+  pack. (`ItemProc` no longer mirrors the C# non-firing behaviour; see the item-procs deviation
+  above.)
 * systems::economy: auction — original cancellation-copy and missing balance checks
   are corrected in the quest/mail audit below.
 * systems::economy: `ItemManager.LoadUserItems` deletes the row of a loaded stack that was merged

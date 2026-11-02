@@ -237,14 +237,29 @@ pub fn check_damage_immune(
 
 // ------------------------------------------------------------------ AddBuff
 
+/// Longest transform chain followed in one `AddBuff` call. The data chains are two links
+/// (4152 -> 4752 -> 4101 and 5378 -> 5379 -> 5380); a longer chain is treated as bad data.
+const MAX_TRANSFORM_CHAIN: usize = 8;
+
 /// `Buffs.AddBuff(buff, index, forcedDuration)`: tolerance, duration modifiers, stack rules,
 /// then the start behaviour (through the buff events) and a final tolerance buff.
 pub fn add_buff(
     server: &GameServer,
     owner: &WorldObject,
+    buff: Buff,
+    index: u32,
+    forced_duration: i32,
+) {
+    add_buff_inner(server, owner, buff, index, forced_duration, &mut Vec::new());
+}
+
+fn add_buff_inner(
+    server: &GameServer,
+    owner: &WorldObject,
     mut buff: Buff,
     index: u32,
     forced_duration: i32,
+    transform_chain: &mut Vec<u32>,
 ) {
     let data = &server.game_data.systems.skills;
     let now = now_ms();
@@ -377,14 +392,28 @@ pub fn add_buff(
     }
     buff.duration = duration;
 
-    let (skill_caster, caster_obj, skill_id, skill_level) = (
+    let (skill_caster, caster_obj, skill_id, skill_level, ab_level) = (
         buff_skill_caster(&buff),
         buff.caster_obj_id,
         buff.skill_id,
         buff.skill_level,
+        buff.ab_level,
     );
     owner.with_base_unit(|b| b.buffs_mut().add_buff_with_duration(buff, index, now));
     crate::systems::dispatch_buff_events(server, owner);
+    transform_at_max_stack(
+        server,
+        owner,
+        &template,
+        &BuffApplication {
+            caster_obj,
+            skill_caster: &skill_caster,
+            skill_id,
+            skill_level,
+            ab_level,
+        },
+        transform_chain,
+    );
 
     if final_tolerance_buff > 0 {
         if let Some(t) = data.buff(final_tolerance_buff).cloned() {
@@ -404,6 +433,91 @@ pub fn add_buff(
             add_buff(server, owner, b, 0, 0);
         }
     }
+}
+
+/// The application of an accepted buff, carried into its transform replacement.
+struct BuffApplication<'a> {
+    caster_obj: u32,
+    skill_caster: &'a SkillCaster,
+    skill_id: u32,
+    skill_level: u8,
+    ab_level: u32,
+}
+
+/// Replace `template`'s stacks with `transform_buff_id` once the application that reaches
+/// `max_stack` has landed.
+///
+/// Evidence (1.2 tooltips): buff 1757 (`max_stack` 2) "Two stacks turn it into Nymph's Flame",
+/// buff 2214 (`max_stack` 4) "Stacks up to 3 times. A 4th stack Stuns", buff 2407
+/// (`max_stack` 5) "Petrifies upon reaching 5 stacks": the transform happens on the
+/// `max_stack`-th application, not the one after it. All 66 rows are `stack_rule_id` 4 with
+/// `max_stack >= 2` (compact `buffs`). The stacks are removed through the normal removal path
+/// (Dispel hooks and `SCBuffRemovedPacket`) and the replacement keeps the caster, skill and
+/// ability level of the triggering application, then goes through the normal add path so a
+/// transform that reaches its own cap transforms again (4152 -> 4752 -> 4101).
+fn transform_at_max_stack(
+    server: &GameServer,
+    owner: &WorldObject,
+    template: &Arc<BuffTemplate>,
+    application: &BuffApplication<'_>,
+    transform_chain: &mut Vec<u32>,
+) {
+    if template.transform_buff_id == 0 || template.max_stack <= 0 {
+        return;
+    }
+    let stacks = owner.with_base_unit(|b| b.buffs().buff_count_by_id(template.id));
+    if stacks < template.max_stack {
+        return;
+    }
+    let data = &server.game_data.systems.skills;
+    let Some(transform) = data.buff(template.transform_buff_id).cloned() else {
+        // `Data::load_from` warns once and clears such ids; a synthetic template keeps today's
+        // refresh-at-cap behaviour.
+        return;
+    };
+    if transform_chain.len() >= MAX_TRANSFORM_CHAIN || transform_chain.contains(&transform.id) {
+        tracing::warn!(
+            buff = template.id,
+            transform = transform.id,
+            depth = transform_chain.len(),
+            "AddBuff: transform chain does not terminate; keeping the stacks"
+        );
+        return;
+    }
+    let indices: Vec<u32> = owner.with_base_unit(|b| {
+        b.buffs()
+            .effects
+            .iter()
+            .filter(|e| e.template.id == template.id)
+            .map(|e| e.index)
+            .collect()
+    });
+    for index in indices {
+        exit(server, owner, index, false);
+    }
+    // Same caster / skill as the application that reached the cap (inferred; the 1.2 data and
+    // tooltips only establish the replacement itself).
+    let caster = find_obj(server, application.caster_obj);
+    let skill = (application.skill_id != 0)
+        .then(|| data.skill(application.skill_id).cloned())
+        .flatten()
+        .map(|t| SkillRun::new(t, application.skill_level));
+    let mut b = new_buff(
+        server,
+        &transform,
+        caster.as_ref(),
+        application.skill_caster,
+        skill.as_deref(),
+        now_ms(),
+    );
+    b.ab_level = application.ab_level;
+    // Keep the source application's skill even when its template is not loaded (a synthetic
+    // template or a removed skill row); `new_buff` only fills these from a `SkillRun`.
+    b.skill_id = application.skill_id;
+    b.skill_level = application.skill_level;
+    transform_chain.push(template.id);
+    add_buff_inner(server, owner, b, 0, 0, transform_chain);
+    transform_chain.pop();
 }
 
 /// `Buffs.AddBuff(buffId, caster, forcedDuration)`.
@@ -644,6 +758,7 @@ fn on_started(server: &GameServer, owner: &WorldObject, b: &Buff) {
         });
         start(server, owner, b.index);
     }
+    super::aura::on_buff_started(server, owner, &b);
     let tags = data.buff_tags(template.id);
     if (tags.contains(&tags::NO_FIGHT) || tags.contains(&tags::RETURNING)) && owner.is_unit() {
         combat::clear_all_aggro(server, owner);
@@ -721,6 +836,9 @@ fn remove_modifiers(server: &GameServer, owner: &WorldObject, buff_id: u32) {
 }
 
 fn on_removed(server: &GameServer, owner: &WorldObject, b: &Buff) {
+    // An aura / crowd source unregisters and strips what it applied before the rest of the
+    // removal behaviour runs (AURA-3 / AURA-6 / CROWD-4).
+    super::aura::on_buff_removed(server, owner, b);
     let template = full_template(server, &b.template);
     let caster = find_obj(server, b.caster_obj_id);
     if b.state == effect_state::FINISHED {
@@ -1983,3 +2101,7 @@ mod buff_removal_tests;
 #[cfg(test)]
 #[path = "buff_breaker_tests.rs"]
 mod buff_breaker_tests;
+
+#[cfg(test)]
+#[path = "buff_transform_tests.rs"]
+mod buff_transform_tests;

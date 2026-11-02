@@ -1293,7 +1293,7 @@ fn real_compact_db_items_and_loot() {
     let d = ItemData::load(&conn).unwrap();
     println!(
         "templates {} (unused {}), grades {}, holdables {}, wearables {}, kinds {}, slots {}, dyes {}, \
-         modifiers {}, procs {}, equip sets {}, look converts {}/{}/{}, runes {}, backpacks {}, body parts {}, \
+         modifiers {}, procs {}, proc bindings {}/{}, equip sets {}, look converts {}/{}/{}, runes {}, backpacks {}, body parts {}, \
          enchant costs {}, supports {}, socket {}, cap scales {}, distributions {}, npc loot {}, fish {}, \
          doodads {}, unit modifiers {} items / {} rows, armor grade buffs {}, item sets {}",
         d.templates.len(),
@@ -1306,6 +1306,8 @@ fn real_compact_db_items_and_loot() {
         d.default_dye_ids.len(),
         d.modifiers.len(),
         d.item_procs.len(),
+        d.item_proc_bindings.len(),
+        d.item_proc_bindings.values().map(Vec::len).sum::<usize>(),
         d.equip_item_sets.len(),
         d.item_look_converts.len(),
         d.holdable_item_look_converts.len(),
@@ -1344,6 +1346,11 @@ fn real_compact_db_items_and_loot() {
     assert_eq!(d.default_dye_ids.len(), 37);
     assert_eq!(d.modifiers.len(), 79);
     assert_eq!(d.item_procs.len(), 99);
+    assert_eq!(d.item_proc_bindings.len(), 49);
+    assert_eq!(
+        d.item_proc_bindings.values().map(Vec::len).sum::<usize>(),
+        51
+    );
     assert_eq!(d.equip_item_sets.len(), 225);
     assert_eq!(
         d.equip_item_sets
@@ -1516,7 +1523,7 @@ fn real_compact_db_items_and_loot() {
 }
 
 #[test]
-fn item_proc_checks_mirror_the_csharp() {
+fn item_proc_roll_is_percent_and_cooldown_blocks_until_it_elapses() {
     let mut d = ItemData::default();
     d.item_procs.insert(
         4,
@@ -1529,18 +1536,17 @@ fn item_proc_checks_mirror_the_csharp() {
         },
     );
     let p = crate::models::item::ItemProc::new(4);
-    assert_eq!(p.apply(&d, 0, false, || 30), Some(900));
-    assert_eq!(p.apply(&d, 0, false, || 31), None);
-    // ignoreRoll never procs (C# condition is inverted)
-    assert_eq!(p.apply(&d, 0, true, || 0), None);
+    // chance_rate is a percentage: roll 29 fires, roll 30 does not (the C# passed rate+1).
+    assert_eq!(p.apply(&d, 0, || 29), Some(900));
+    assert_eq!(p.apply(&d, 0, || 30), None);
     let cooling = crate::models::item::ItemProc {
         last_proc_ms: 5_000,
         ..p
     };
-    assert_eq!(cooling.apply(&d, 14_999, false, || 0), None);
-    assert_eq!(cooling.apply(&d, 15_000, false, || 0), Some(900));
+    assert_eq!(cooling.apply(&d, 14_999, || 0), None);
+    assert_eq!(cooling.apply(&d, 15_000, || 0), Some(900));
     assert_eq!(
-        crate::models::item::ItemProc::new(5).apply(&d, 0, false, || 0),
+        crate::models::item::ItemProc::new(5).apply(&d, 0, || 0),
         None
     );
 }

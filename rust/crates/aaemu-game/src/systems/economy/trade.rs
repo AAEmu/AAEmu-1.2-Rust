@@ -219,6 +219,11 @@ pub fn can_start_trade(server: &GameServer, owner: &PlayerRef, target: &PlayerRe
     if owner.obj_id == target.obj_id {
         return;
     }
+    // A blocked trade request never reaches the target; the 1.2 client has no sender-side
+    // error for it (capture-pending, case `BLOCK-LIST-1`).
+    if crate::systems::social::friend::is_blocked_by(target, owner.character_id) {
+        return;
+    }
     let mut trades = manager(server).lock();
     if is_trading(server, &mut trades, owner.obj_id)
         || is_trading(server, &mut trades, target.obj_id)
