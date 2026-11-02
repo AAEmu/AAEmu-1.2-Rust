@@ -375,7 +375,7 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 | `TeamManager`, `Models/Game/Team` | `systems/social/team.rs`, `packets/team.rs` | done | Invitations (single / area, 60 s timeout), create, AskRiskyTeam (leave / kick / dismiss + auto-disband), owner / role / marker / looting rule / ping / move, raid conversion, SetOffline / MemberRemoveFromTeam / UpdateAtLogin / UpdatePosition, 500 ms remote-member sync (delta cache, 5 s forced resync, upper-triangle pairs), zombie-team disband (5 min), loot winner helpers. Events (OnTeamJoin/Leave) are quest-side: not called. |
 | `ExpeditionManager`, `Models/Game/Expeditions` | `systems/social/expedition.rs`, `packets/expedition.rs` (`managers::expedition` re-exports) | done | Load, create (party checks, cost, `SCItemTaskSuccessPacket` money-only form), invite / reply, leave, kick, member role, owner, role policy, disband (stays listed as `$deleted-guild-<id>`), `Expedition.Save` per change, offline leave for character deletion. Rename / sponsor are log-only / not in 1.2 as in C#. |
 | `FamilyManager`, `Models/Game/Family` | `systems/social/family.rs`, `packets/family.rs` | done | Load, invite / reply / create, leave, kick (offline existence check), title, steward, login / logout, disband, save, offline leave for character deletion. |
-| `FriendMananger`, `CharacterFriends`, `CharacterBlocked` | `systems/social/friend.rs`, `packets/friend.rs` (`managers::friend` re-exports) | done | Add / remove friends (online or by DB name lookup), block / unblock (online only), status changes incl. `InParty`. |
+| `FriendMananger`, `CharacterFriends`, `CharacterBlocked` | `systems/social/friend.rs`, `packets/friend.rs` (`managers::friend` re-exports) | done | Add / remove friends (online or by DB name lookup), block / unblock (online or by `NameManager` for offline names), status changes incl. `InParty`. The blocked list is enforced on every direct delivery path (whisper, team / area / expedition / family invite, friend add, trade and duel request); see the block-list deviation. |
 | `ChatManager`, `Models/Game/Chat` | `systems/social/chat.rs`, `session.rs` (`managers::chat` re-exports) | done | All channel kinds incl. party / raid / court, CleanUpChannels, party / raid / raid-leader / judge routing. User channels (`CSJoinUserChatChannel`) are log-only as in C#. |
 | `FactionManager` relations, `SystemFaction.GetRelationState`, `Unit/Character.SetFaction` | `systems/social/faction.rs`, `packets/faction.rs` | done | Relation table validated against compact.sqlite3 (gated test). Faction CS packets are log-only as in C#; every SCFaction* struct ported. |
 | `GameData/AchievementGameData` (`achievements`, `achievement_objectives`, `pre_completed_achievements`, `char_records`), `Models/Game/Achievement` | `systems/social/achievement.rs` (`server.game_data.systems.social.achievements`) | done | Loader + port of `AchievementGameDataTests`; gated real-DB test `achievement_game_data_real_compact_db`. The C# 1.2 tree has no manager; the Rust achievement manager / runtime / hooks / rewards (`achievement_*.rs`) read them (see "Achievement producers" below). |
@@ -888,6 +888,23 @@ the dead NPC after `DoDie` cleared them (`OnDamageReceived` runs after `ReduceCu
 is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 
 ## Known deviations from the C#
+
+* systems::social (blocked users): `CharacterBlocked` was stored and sent at login but never
+  read, so a blocked player could still whisper, invite (party / raid / area, expedition,
+  family), add as a friend, request a trade or a duel. Every one of those delivery paths now
+  checks the recipient's list under the recipient's own lock
+  (`systems::social::friend::is_blocked_by`) and drops the delivery when the sender is on it.
+  Blocking / unblocking also resolves offline names through `NameManager` (the C# only accepted
+  online names); unknown names are still ignored without a reply, as in the C#, and the
+  successful `SCAddBlockedUser` / `SCDeleteBlockedUser` replies carry the resolved id / name, so
+  the login `SCBlockedUsers` snapshot and the reply describe the same `blocked` row. The
+  sender-side reply is silent: the 1.2 client has no "target blocked you" error, and its
+  whisper display (`chat/chat_msg_event.alb`, function 20) has no block-list check; the
+  block / unblock UI only uses the existing 352 / 353 / 354 and 551 / 553 codes.
+  **Capture-pending** (`BLOCK-LIST-1`): 1.2 retail's exact sender-side reply is unknown.
+  Friend requests to an **offline** target are not blocked because an offline character's list
+  is not loaded (`BLOCK-LIST-2`), and mail is delivered as before: no 1.2 client mail filter or
+  error / system text for mail from a blocked player was found (`BLOCK-LIST-3`).
 
 * systems::npcs (persistent doodads): `SpawnPersistentDoodads` skips the housing lookup for SLAVE-owned rows. In the C# every row with `houseId > 0` was resolved as a house, but for vehicle cargo racks `house_id` holds the hull id, so it logged "can't find it's owning house" (or, if a house with that id existed, parented the rack to it before the slave re-attach).
 

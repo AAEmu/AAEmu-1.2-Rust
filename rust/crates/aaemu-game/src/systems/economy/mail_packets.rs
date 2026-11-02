@@ -432,6 +432,9 @@ impl CSSendMailPacket {
             inventory::send_error_message(&p, error_message::MAIL_FAIL_MAILBOX_NOT_FOUND, 0, true);
             return;
         }
+        // capture-pending (BLOCK-LIST-3): the 1.2 client has no mail-side block filter and no
+        // error/system text for mail from a blocked player was found, so 1.2 retail's rule is
+        // unknown. Mail is delivered as before; see PORTING.md.
         let mut txn = ItemTxn::begin(server);
         let result = mail_character::send_mail_to_player(
             &mut txn,

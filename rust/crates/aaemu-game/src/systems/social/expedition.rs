@@ -783,6 +783,11 @@ pub fn invite(server: &GameServer, inviter: &PlayerRef, invited_name: &str) {
     let Some(invited) = server.world.character_by_name(invited_name) else {
         return;
     };
+    // The invited player receives nothing when the inviter is on their block list
+    // (capture-pending for the missing 1.2 sender-side reply, case `BLOCK-LIST-1`).
+    if crate::systems::social::friend::is_blocked_by(&invited, inviter.character_id) {
+        return;
+    }
     if expedition_of(server, &invited).is_some() {
         return;
     }
