@@ -549,6 +549,9 @@ pub(super) fn damage_with_aoe(
         unit_combat::set_in_battle(server, &caster, was | trg_alive);
         caster.with_unit(|u| u.unit_mut().last_combat_activity_ms = now);
     }
+    // Item procs of the hit (attacker kinds 1-8, victim kinds 9-16), before the combat buffs as
+    // in `DamageEffect.Apply`; a proc skill's own damage is guarded by `procs::proc_casting`.
+    crate::systems::economy::procs::roll_damage(server, &caster, &trg, damage_type, hit_type);
     trigger_combat_buffs(server, &caster, &caster, hit_type, false);
     trigger_combat_buffs(server, &trg, &caster, hit_type, false);
     let mut p = SCUnitDamagedPacket::new(
