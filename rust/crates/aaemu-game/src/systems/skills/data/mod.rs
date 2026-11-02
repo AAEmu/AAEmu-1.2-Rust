@@ -112,6 +112,9 @@ pub struct Data {
     pub zone_group_buffs: HashMap<u32, u32>,
     /// Blessings sold through the 1.2 priest interaction.
     pub priest_buffs: HashMap<u32, super::priest::PriestBuff>,
+    /// `content_configs` id 39 (`ability_change_cost`): copper per character level charged by
+    /// the 1.2 ability change UI (`X2Ability.GetAbilityChangeCost`). 0 when the row is absent.
+    pub ability_change_cost: i32,
 }
 
 fn dup(what: &str, id: u32) -> rusqlite::Error {
@@ -463,6 +466,7 @@ impl Data {
         d.npc_tags = misc::load_npc_tags(conn)?;
         d.zone_group_buffs = misc::load_zone_group_buffs(conn)?;
         d.priest_buffs = super::priest::load(conn)?;
+        d.ability_change_cost = misc::load_content_config(conn, 39)?;
         Ok(d)
     }
 
@@ -767,6 +771,8 @@ mod tests {
         assert!(d.skills.len() > 10_000);
         assert!(d.buffs.len() > 5_000);
         assert!(d.plots.trees.len() > 1_000);
+        // `content_configs` 39 (`X2Ability.GetAbilityChangeCost` reads it as `0x27`).
+        assert_eq!(d.ability_change_cost, 200);
         // Every skill effect / trigger points at a loaded template.
         for s in d.skills.values() {
             for e in &s.effects {
