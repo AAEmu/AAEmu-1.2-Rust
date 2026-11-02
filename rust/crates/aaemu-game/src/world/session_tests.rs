@@ -594,3 +594,77 @@ async fn private_mysql_reentry_loads_the_state_the_departure_save_committed() {
     assert_eq!(server.enter_world.character_owner(1), Some(2));
     pool.close().await;
 }
+
+/// The offline infamy crossed the threshold while the character was away: the select path
+/// applies `Character.SetFaction(Pirate)` once (the faction in the later spawn state is then
+/// already Pirate; the player is not in the world regions during the select, so nobody else is
+/// notified yet).
+#[tokio::test]
+async fn select_applies_the_pirate_faction_at_the_threshold_once() {
+    use crate::data::skills::{BuffKind, BuffTemplate};
+    use crate::data::world_data::SystemFaction;
+    use crate::data::GameData;
+    use crate::opcodes::sc;
+    use crate::systems::social::packets::body;
+    use crate::systems::social::packets::faction::SCUnitFactionChangedPacket;
+
+    let mut data = GameData::empty();
+    for id in [3710u32, 4832] {
+        data.skills
+            .buffs
+            .insert(id, BuffTemplate::simple(id, BuffKind::Good));
+    }
+    for (id, mother) in [(101u32, 0u32), (161, 0)] {
+        data.factions.add(SystemFaction {
+            id,
+            mother_id: mother,
+            ..Default::default()
+        });
+    }
+    let server = crate::test_support::test_server_with(data);
+    let mut observer_client = TestClient::new(&server, 2, 1008);
+    let observer = spawn_player(
+        &server,
+        &observer_client,
+        test_character(8, "Observer", 105.0, 100.0),
+        0x108,
+    );
+    observer_client.drain();
+
+    let mut client = TestClient::new(&server, 1, 1007);
+    let mut character = test_character(7, "Crook", 100.0, 100.0);
+    character.infamy_point = 3_000;
+    session::select_loaded(
+        &server,
+        &mut client.conn,
+        character,
+        SelectDbData::default(),
+    )
+    .expect("select");
+    let player = client.conn.active_char.clone().expect("selected");
+    assert_eq!(player.data().unit.faction_id, 161);
+
+    let expected = SCUnitFactionChangedPacket {
+        obj_id: player.obj_id,
+        unit_name: "Crook".into(),
+        id: 101,
+        id2: 161,
+        temp: false,
+    };
+    let find = |frames: &[(u16, Vec<u8>)]| -> Vec<Vec<u8>> {
+        frames
+            .iter()
+            .filter(|f| f.0 == sc::SCUnitFactionChangedPacket)
+            .map(|f| f.1.clone())
+            .collect()
+    };
+    assert_eq!(
+        find(&client.drain()),
+        vec![body(&expected)],
+        "the pirate is told exactly once (the 1.2 client shows \"$1 became pirate.\")"
+    );
+    // The select path adds the character to the world table but does not spawn it in a region
+    // yet, so there is no around-player broadcast here (the spawn's SCUnitState carries 161).
+    assert!(find(&observer_client.drain()).is_empty());
+    assert_eq!(observer.data().unit.faction_id, 101);
+}

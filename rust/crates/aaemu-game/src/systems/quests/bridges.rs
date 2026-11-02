@@ -481,7 +481,7 @@ impl QuestHooks for GameQuestHooks {
         c: &mut Character,
         points: i16,
     ) {
-        let packet = crate::systems::social::crime::add_crime(
+        let (packet, became_pirate) = crate::systems::social::crime::add_crime(
             server,
             c,
             points,
@@ -489,11 +489,22 @@ impl QuestHooks for GameQuestHooks {
         );
         if let Some(p) = player {
             p.send(packet);
-            // Wanted / crime buffs added by the crime point setter.
+            // Wanted / crime buffs added by the crime point setter, then the `SetFaction(Pirate)`
+            // the threshold asks for (it needs the world, so it runs after the lock is released).
             let p = p.clone();
             super::events::after_unlock(server, c.id, move |s| {
+                if became_pirate {
+                    crate::systems::social::faction::set_faction_persistent(
+                        s,
+                        &p,
+                        crate::data::world_data::factions::PIRATE,
+                    );
+                }
                 crate::systems::dispatch_buff_events(s, &WorldObject::from(&p))
             });
+        } else if became_pirate {
+            // No live player to notify (offline quest reward / tests): only the saved field.
+            c.unit.faction_id = crate::data::world_data::factions::PIRATE;
         }
     }
 
