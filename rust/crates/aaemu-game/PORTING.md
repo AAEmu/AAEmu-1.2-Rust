@@ -954,6 +954,26 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   removed through its `SlaveSpawner` (`Despawn` broadcasts the removal and releases the slot)
   and the spawner creates the replacement at its authored transform; a slave without a
   spawner is destroyed and logged, with nothing respawned.
+* systems::skills / world::session (zone-group buffs across teleports): the C# `Transform.ZoneId`
+  setter ran `Character.OnZoneChange`, which is what removes a zone group's buff when the group
+  is left (open sea: buff 7743 "irregular sea wind", the turbulence debuff, on zone groups
+  29/30/36/39/40/59/60). Several ported teleports assigned the zone directly and skipped it, so
+  Recall / portals / GM moves / resurrections out of open sea kept the buff until the next
+  region change. Every server-forced destination now goes through
+  `session::teleport_character` (`world/session.rs`), which applies the transform, moves the
+  instance object table and dispatches `OnZoneChange`; the arrival is filed by
+  `CSInstanceLoadedPacket` (`systems/instances/worlds.rs`) or, for a same-instance teleport, by
+  `session::file_teleport_arrival`. **Deviation:** `CSTeleportEndedPacket` now follows the
+  client's reported landing position and refiles the region before repainting (the C# only ran
+  `ResendVisibleObjectsToCharacter`), so GM `/move`, same-instance portals and navi teleports
+  re-evaluate the zone without waiting for a movement packet. Resurrections
+  (`CSResurrectCharacterPacket`, `Escape`) apply the statue position immediately because the 1.2
+  client does not answer `SCCharacterResurrected` with `CSTeleportEnded`. Tests:
+  `systems/skills/zone_buff_tests.rs`.
+* systems::instances (`return_to_main_world`): **Deviation:** the C# clone's new `Transform`
+  fired `OnZoneChange(0, mainZone)`, leaving the instance zone's chat channel and zone-group buff
+  behind; the Rust passes the zone actually left (`world/session.rs::teleport_character`), so a
+  zone-group buff of the instance zone is removed.
 * systems::skills (`SextantPos` special effect 69): row 7181 (values 0) is the only row, on
   skill 18416 "measure my current position" (item 24795 Sextant). The caster receives a system
   chat message with the world position. No authored system-message coordinate format exists in
