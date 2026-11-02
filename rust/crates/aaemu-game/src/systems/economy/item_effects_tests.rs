@@ -767,6 +767,26 @@ async fn socketing_success_failure_and_dawnstone() {
             install: false,
         })
     );
+
+    // Removing from an item with no gems is rejected with `item_sockets_empty`, without a roll.
+    w.pa.data().skill_char.skill_cancelled = false;
+    mark_clean(&w, id);
+    let mut rng = ScriptedRng::new(&[], &[]);
+    item_socketing(
+        &w.server,
+        &w.pa,
+        dawn_caster,
+        None,
+        Some(id),
+        [0; 4],
+        TL,
+        &mut rng,
+    );
+    assert!(rng.int_calls.is_empty());
+    assert_eq!(w.a.drain(), vec![error(error_message::ITEM_SOCKETS_EMPTY)]);
+    assert_eq!(item(&w, id).unwrap().details.gem_ids, [0; 7]);
+    assert!(!item(&w, id).unwrap().dirty);
+    assert!(w.pa.data().skill_char.skill_cancelled);
 }
 
 /// Runs the real `ItemSocketing` special effect: `special::execute` routes to the installed
