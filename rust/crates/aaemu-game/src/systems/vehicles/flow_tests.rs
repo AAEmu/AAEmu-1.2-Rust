@@ -1274,7 +1274,7 @@ async fn mate_revive_is_refused_without_a_stabler_interaction_or_while_the_corps
 }
 
 #[tokio::test]
-async fn second_summon_replaces_the_active_mate_and_logout_clears_entry() {
+async fn second_use_of_the_same_summon_item_dismisses_the_mate() {
     let server = server_with(data());
     let mut a = TestClient::new(&server, 1, 1);
     let (pa, item_id) = player_with_item(&server, &a, 1, PA, (100.0, 100.0), MATE_ITEM);
@@ -1283,7 +1283,7 @@ async fn second_summon_replaces_the_active_mate_and_logout_clears_entry() {
     let first = m.get_active_mates(1).pop().expect("first mate");
     let first_obj = first.obj_id;
     assert!(server.world.world(0).unwrap().mate(first_obj).is_some());
-    // Live state the despawn must save before the same item is re-summoned.
+    // Live state the despawn must save.
     {
         let mut d = first.data();
         d.experience = 4321;
@@ -1291,43 +1291,103 @@ async fn second_summon_replaces_the_active_mate_and_logout_clears_entry() {
     }
     a.drain();
 
-    // A second use of the whistle replaces the first mate and spawns the new one; the C# only
-    // despawned the old one and spawned nothing.
+    // Using the same summon item again dismisses the mate (the 1.2 toggle): no new
+    // SCMateSpawned, and the row keeps the live state the despawn saved.
     mates::spawn_mount(&server, &pa, item_id);
     let frames = a.drain();
-    let active = m.get_active_mates(1);
-    assert_eq!(active.len(), 1, "exactly one mate stays active");
-    let second = active[0].clone();
-    assert!(!Arc::ptr_eq(&first, &second));
+    assert!(m.get_active_mates(1).is_empty(), "the mate is dismissed");
     assert!(first.data().deleted);
-    assert_eq!(second.data().item_id, item_id);
+    assert!(server.world.world(0).unwrap().mate(first_obj).is_none());
+    assert!(ops(&frames).contains(&sc::SCUnitsRemovedPacket));
+    assert!(!ops(&frames).contains(&sc::SCMateSpawnedPacket));
+    let row = server
+        .systems
+        .vehicles
+        .mates
+        .character_mates(1)
+        .unwrap()
+        .get(item_id)
+        .cloned()
+        .expect("mate row");
+    assert_eq!((row.xp, row.hp), (4321, 42));
+
+    // A third use summons it again (the toggle back on), and logout still clears the entry.
+    mates::spawn_mount(&server, &pa, item_id);
+    let second = m.get_active_mates(1).pop().expect("re-summoned mate");
     let (exp, hp) = {
         let d = second.data();
         (d.experience, d.unit.hp)
     };
-    assert_eq!(
-        (exp, hp),
-        (4321, 42),
-        "the despawn saves the live state before the same item is re-summoned"
-    );
+    assert_eq!((exp, hp), (4321, 42));
+    assert!(server.world.world(0).unwrap().mate(second.obj_id).is_some());
+    mates::remove_and_despawn_all_active_owned_mates(&server, 0, 1);
+    assert!(server.world.world(0).unwrap().mate(second.obj_id).is_none());
+    assert!(m.get_active_mates(1).is_empty());
+}
+
+/// The toggle is per summon item, not per template: a second whistle (a different item id
+/// bound to the same mate template) is a different mate and replaces the first.
+#[tokio::test]
+async fn a_second_whistle_of_the_same_template_replaces_the_mate() {
+    let server = server_with(data());
+    let mut a = TestClient::new(&server, 1, 1);
+    let (pa, first_item) = player_with_item(&server, &a, 1, PA, (100.0, 100.0), MATE_ITEM);
+    let second_item = give_item(&server, &pa, 0x9003, MATE_ITEM);
+    mates::spawn_mount(&server, &pa, first_item);
+    let m = server.systems.vehicles.mates.get(0);
+    let first = m.get_active_mates(1).pop().expect("first mate");
+    a.drain();
+
+    mates::spawn_mount(&server, &pa, second_item);
+    let frames = a.drain();
+    let active = m.get_active_mates(1);
+    assert_eq!(active.len(), 1);
+    let second = active[0].clone();
+    assert_eq!(second.data().item_id, second_item);
+    assert!(first.data().deleted);
+    assert!(ops(&frames).contains(&sc::SCMateSpawnedPacket));
+    assert!(ops(&frames).contains(&sc::SCUnitsRemovedPacket));
     let in_world = server
         .world
         .world(0)
         .unwrap()
         .mate(second.obj_id)
-        .expect("the new mate is spawned");
+        .expect("the new whistle's mate is spawned");
     assert!(Arc::ptr_eq(&in_world, &second));
-    assert!(ops(&frames).contains(&sc::SCMateSpawnedPacket));
-    assert!(ops(&frames).contains(&sc::SCUnitsRemovedPacket));
+}
 
-    // Logout path: the new mate is deleted and the list entry keyed by the character id is
-    // removed.
-    mates::remove_and_despawn_all_active_owned_mates(&server, 0, 1);
-    assert!(server.world.world(0).unwrap().mate(second.obj_id).is_none());
-    assert!(m.get_active_mates(1).is_empty());
-    // The whistle can be reused right away (no stale entry blocks the summon).
-    mates::spawn_mount(&server, &pa, item_id);
+/// A summon that is refused (a dead mate) keeps the current mate out: the despawn runs only
+/// after the checks.
+#[tokio::test]
+async fn a_refused_summon_keeps_the_current_mate() {
+    let server = server_with(data());
+    let mut a = TestClient::new(&server, 1, 1);
+    let (pa, mount_item) = player_with_item(&server, &a, 1, PA, (100.0, 100.0), MATE_ITEM);
+    let pet_item = give_item(&server, &pa, 0x9004, PET_ITEM);
+    {
+        let bag = pa
+            .data()
+            .inventory
+            .get(slot_type::INVENTORY)
+            .cloned()
+            .unwrap();
+        let mut g = bag.lock().unwrap();
+        g.get_item_by_id_mut(pet_item).unwrap().details.mate_dead = 1;
+    }
+    mates::spawn_mount(&server, &pa, mount_item);
+    let m = server.systems.vehicles.mates.get(0);
+    let mount = m.get_active_mates(1).pop().expect("mount");
+    a.drain();
+
+    mates::spawn_mount(&server, &pa, pet_item);
+    let frames = a.drain();
+    assert_eq!(
+        error_codes(&frames),
+        vec![error_message::MATE_CANNOT_SPAWN_WHILE_CORPSE]
+    );
     assert_eq!(m.get_active_mates(1).len(), 1);
+    assert!(!mount.data().deleted);
+    assert!(server.world.world(0).unwrap().mate(mount.obj_id).is_some());
 }
 
 /// The 1.2 client has one player pet (`X2Mate:IsPlayerPetExists` / `DismissPet`, one pet

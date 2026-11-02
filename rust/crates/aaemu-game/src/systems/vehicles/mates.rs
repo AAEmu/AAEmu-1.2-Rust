@@ -903,22 +903,20 @@ pub fn spawn_mount(server: &GameServer, owner: &PlayerRef, skill_item_id: u64) {
         super::error(owner, error_message::MATE_CANNOT_SPAWN_WHILE_CORPSE);
         return;
     }
-    // The summon is valid: despawn the previous mate (as the C# did, so the owner is unmounted
-    // before the new mate's position is taken from the owner's transform) and continue to
-    // spawn the new one. Unlike the C#, the despawn happens only for a summon that will spawn
-    // and the summon does not return early.
+    // Using the summon item of the mate that is out dismisses it: the 1.2 C# despawned the
+    // active mate(s) and returned (one pet, the item toggles). A different mate's item replaces
+    // it: despawn the previous mate (as the C# did, so the owner is unmounted before the new
+    // mate's position is taken from the owner's transform) and continue to spawn the new one.
     let manager = manager_of(server, owner);
-    for old in manager.get_active_mates(owner_id) {
+    let active = manager.get_active_mates(owner_id);
+    let toggles = active.iter().any(|old| old.data().item_id == skill_item_id);
+    for old in &active {
         let tl = u32::from(old.data().unit.tl_id);
         despawn_mate(server, owner, tl);
     }
-    // Re-read after the despawn: when the previous mate was this item, the despawn saved its
-    // live hp / level / xp into the row.
-    let saved = server
-        .systems
-        .vehicles
-        .mates
-        .character(owner_id, |cm| cm.get(skill_item_id).cloned());
+    if toggles {
+        return;
+    }
     let Ok(tl_id) = server.ids.tl.get_next_id() else {
         return;
     };

@@ -1690,21 +1690,32 @@ async fn summon_mate(
     item_id: u64,
     previous_obj: Option<u32>,
 ) -> anyhow::Result<MateView> {
-    // The server replaces an active mate and spawns the new one, so a missing SCMateSpawned is
-    // a real failure (it used to be retried because the old server despawned the previous mate
-    // and spawned nothing).
+    // Using the summon item of the mate that is already out dismisses it (the 1.2 toggle), so
+    // a leftover active mate makes the first use spawn nothing; repeat once when no
+    // SCMateSpawned follows.
     let spawned_before = game.state.mate_spawn_count;
     let default_timeout = game.timeout;
     game.timeout = Duration::from_secs(6);
-    game.use_item_skill(cfg.mate_item_skill_id, item_id, cfg.mate_item_template)
-        .await?;
-    let got = game
-        .wait_for("SCMateSpawnedPacket", |p| {
-            p.is_sc(sc::SCMateSpawnedPacket) || p.is_sc(sc::SCErrorMsgPacket)
-        })
-        .await;
+    let mut got = None;
+    for _attempt in 0..2 {
+        game.use_item_skill(cfg.mate_item_skill_id, item_id, cfg.mate_item_template)
+            .await?;
+        let r = game
+            .wait_for("SCMateSpawnedPacket", |p| {
+                p.is_sc(sc::SCMateSpawnedPacket) || p.is_sc(sc::SCErrorMsgPacket)
+            })
+            .await;
+        match r {
+            Ok(p) => {
+                got = Some(p);
+                break;
+            }
+            Err(e) if game.state.disconnected => return Err(e),
+            Err(_) => {}
+        }
+    }
     game.timeout = default_timeout;
-    let got = got.context("no SCMateSpawnedPacket after the item use")?;
+    let got = got.context("no SCMateSpawnedPacket after two item uses")?;
     if got.is_sc(sc::SCErrorMsgPacket) {
         bail!(
             "summon rejected with SCErrorMsg {}",
