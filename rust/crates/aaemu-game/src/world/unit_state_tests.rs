@@ -1,7 +1,7 @@
 //! Byte-exact `SCUnitStatePacket` bodies for the non-character `BaseUnitType`s. The expected
 //! bytes are spelled out field by field from the 1.2 C# `SCUnitStatePacket.Write`.
 
-use aaemu_commons::{Marshal, PacketStream};
+use aaemu_commons::{Marshal, PacketStream, Unmarshal};
 
 use super::unit_state::*;
 use crate::data::skills::{BuffKind, BuffTemplate};
@@ -492,4 +492,94 @@ fn mate_unit_state_bytes() {
     e.write_u8(0);
     tail(&mut e, &[255, 0xFF], &[0, 0], 0);
     assert_eq!(p.body, e.as_bytes());
+}
+
+/// Reads the faction pisc of an `SCUnitStatePacket` body for an NPC without equipment.
+fn npc_unit_state_faction(body: &[u8]) -> i64 {
+    let mut s = PacketStream::from_bytes(body.to_vec());
+    s.read_bc().unwrap(); // objId
+    s.read_string().unwrap(); // name
+    assert_eq!(s.read_u8().unwrap(), 1); // BaseUnitType.Npc
+    s.read_bc().unwrap(); // objId
+    s.read_u32().unwrap(); // templateId
+    s.read_u32().unwrap(); // ownerId
+    s.read_u8().unwrap(); // clientDriven
+    s.read_string().unwrap(); // owner name
+    s.read_position().unwrap();
+    s.read_f32().unwrap(); // scale
+    s.read_u8().unwrap(); // level
+    s.read_u32().unwrap(); // modelId
+    for _ in 0..28 {
+        assert_eq!(s.read_i32().unwrap(), 0, "test NPC has no equipment");
+    }
+    UnitCustomModelParams::read(&mut s).unwrap();
+    s.read_bc().unwrap();
+    s.read_i32().unwrap(); // preciseHealth
+    s.read_i32().unwrap(); // preciseMana
+    s.read_u8().unwrap(); // AttachPoint1
+    s.read_i8().unwrap(); // AttachPoint2
+    match s.read_u8().unwrap() {
+        0 => {} // ModelPostureType.None
+        1 => {
+            s.read_bool().unwrap();
+            for _ in 0..8 {
+                s.read_bool().unwrap();
+            }
+        }
+        4 => {
+            s.read_u32().unwrap();
+            s.read_bool().unwrap();
+        }
+        6 => {
+            s.read_u32().unwrap();
+            s.read_f32().unwrap();
+            s.read_i32().unwrap();
+            s.read_bool().unwrap();
+            s.read_bool().unwrap();
+        }
+        8 => {
+            s.read_f32().unwrap();
+            s.read_f32().unwrap();
+        }
+        other => panic!("unexpected posture {other}"),
+    }
+    s.read_bool().unwrap(); // isLooted
+    s.read_u8().unwrap(); // ActiveWeapon
+    s.read_u8().unwrap(); // learnedSkillCount
+    s.read_i32().unwrap(); // learnedBuffCount
+    s.read_i8().unwrap();
+    s.read_i8().unwrap();
+    s.read_i8().unwrap();
+    s.read_u8().unwrap(); // raceGender
+    s.read_pisc_w(4).unwrap(); // ???, ???, appellation, 0
+    s.read_pisc_w(4).unwrap()[0]
+}
+
+/// The real 1.2 `npcs.faction_id` reaches the wire unchanged: Amutar (3443) is the neutral
+/// system faction 2, Mutani (5772) is West Ishvara 109 (the Harani player's faction) and the
+/// guide Lucius (12078) is the friendly system faction 1.
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_compact_db_npc_unit_state_faction() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    use rusqlite::{Connection, OpenFlags};
+    let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let mut gd = crate::data::GameData::empty();
+    gd.items = crate::data::ItemData::load(&conn).unwrap();
+    gd.skills = crate::data::SkillData::load(&conn).unwrap();
+    gd.formulas = crate::data::FormulaManager::load(&conn).unwrap();
+    let loc = crate::data::world_data::Localization::load(&conn, "en_us").unwrap();
+    gd.factions = crate::data::FactionData::load(&conn, &loc).unwrap();
+    gd.systems.npcs.npc =
+        crate::systems::npcs::npc::data::NpcData::load_conn(&conn, "en_us").unwrap();
+    let server = crate::test_support::test_server_with(gd);
+    for (template_id, faction_id) in [(3443u32, 2i64), (5772, 109), (12078, 1)] {
+        let npc = crate::systems::npcs::npc::manager::create(&server, 0, template_id).unwrap();
+        assert_eq!(i64::from(npc.data().unit.faction_id), faction_id);
+        let mut n = npc.data();
+        let p = npc_unit_state(npc.obj_id, &mut n, "", 0);
+        assert_eq!(npc_unit_state_faction(&p.body), faction_id);
+    }
 }
