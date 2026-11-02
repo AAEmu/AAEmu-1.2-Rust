@@ -882,40 +882,60 @@ pub async fn reply_invite(
     save(server, id1).await;
 }
 
+/// What [`change_role_policy`] did under the expedition lock.
+enum PolicyChange {
+    NotMember,
+    NotOwner,
+    NoPolicy,
+    Changed(Vec<u32>),
+}
+
 /// `ExpeditionManager.ChangeExpeditionRolePolicy(connection, policy)`.
+///
+/// Deviation from C#: C# checked the editor's `Expel` right and copied only name / invite /
+/// join_siege / promote / expel, dropping the other five permission flags the packet carries.
+/// The 1.2 client's role-policy tab only enables its check boxes when the editor's own role is
+/// 255 (owner): `expedition_management.alb` decorates each policy with
+/// `SET_POLICY = (role == 255)` and `expedition_management_role_policy_tab.alb`'s
+/// `CanChangePolicy` requires that flag and a lower target role. The server therefore requires
+/// the owner and a target role below 255, and stores every field. Capture-pending: no 1.2
+/// server-side oracle for the rule itself (the client UI is the evidence).
 pub async fn change_role_policy(server: &GameServer, p: &PlayerRef, policy: ExpeditionRolePolicy) {
     let id = policy.expedition_id;
-    let Some(e) = server.expeditions.get(id) else {
-        tracing::error!("ChangeExpeditionRolePolicy: no expedition {id}");
-        return;
-    };
-    let Some(member) = e.member(p.character_id) else {
-        return;
-    };
-    match e.policy_by_role(member.role) {
-        Some(x) if x.expel => {}
-        Some(_) => return,
-        None => {
-            tracing::error!("Expedition {id} has no policy for role {}", member.role);
-            return;
+    let result = server.expeditions.with_mut(id, |e| {
+        let Some(role) = e.member(p.character_id).map(|m| m.role) else {
+            return PolicyChange::NotMember;
+        };
+        if role != 255 || policy.role >= role {
+            return PolicyChange::NotOwner;
         }
-    }
-    let updated = server.expeditions.with_mut(id, |e| {
         match e.policies.iter_mut().find(|x| x.role == policy.role) {
             Some(cur) => {
-                cur.name = policy.name.clone();
-                cur.invite = policy.invite;
-                cur.join_siege = policy.join_siege;
-                cur.promote = policy.promote;
-                cur.expel = policy.expel;
-                Some(e.member_ids())
+                *cur = policy.clone();
+                PolicyChange::Changed(e.member_ids())
             }
-            None => None,
+            None => PolicyChange::NoPolicy,
         }
     });
-    let Some(Some(members)) = updated else {
-        tracing::error!("Expedition {id} has no policy for role {}", policy.role);
-        return;
+    let members = match result {
+        None => {
+            tracing::error!("ChangeExpeditionRolePolicy: no expedition {id}");
+            return;
+        }
+        Some(PolicyChange::NotMember) => return,
+        Some(PolicyChange::NotOwner) => {
+            tracing::warn!(
+                "ChangeExpeditionRolePolicy: character {} may not edit expedition {id} role {}",
+                p.character_id,
+                policy.role
+            );
+            return;
+        }
+        Some(PolicyChange::NoPolicy) => {
+            tracing::error!("Expedition {id} has no policy for role {}", policy.role);
+            return;
+        }
+        Some(PolicyChange::Changed(members)) => members,
     };
     send_to_members(
         server,
