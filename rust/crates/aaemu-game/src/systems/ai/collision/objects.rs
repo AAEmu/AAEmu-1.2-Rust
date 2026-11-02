@@ -23,13 +23,14 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use aaemu_physics::geometry::primitives::BoxPrim;
 use aaemu_physics::math::{Mat33, Quat, Vec3};
 
 use crate::server::GameServer;
 use crate::world::{WorldInstance, WorldObject};
 
 use super::cells::normalize_model_path;
-use super::models::{ModelCache, ModelPhys};
+use super::models::{phys_slot, ModelCache, ModelPhys};
 use super::world::{ColliderKey, ObjKind, PhysWorld};
 use super::Files;
 
@@ -332,6 +333,58 @@ pub fn resolve_shape(
         }
         ModelRef::Dummy => None,
     }
+}
+
+/// The union of the parts' default (colliding) geometry bounding boxes, transformed into the
+/// shape's frame. This is the model's collision bounds as one oriented box: the client's
+/// bind reach measures to the target's collision parts (`FUN_39093860` -> `FUN_3989bf90`);
+/// the union box is the server-side stand-in for those parts. `None` when no part has a
+/// default geometry or the union is degenerate.
+pub fn shape_bounds(shape: &ColliderShape) -> Option<BoxPrim> {
+    let mut min = Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
+    let mut max = Vec3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+    let mut found = false;
+    for part in &shape.parts {
+        let Some(geometry) = part.model.slot(phys_slot::DEFAULT) else {
+            continue;
+        };
+        let bounds = geometry.geom.bbox();
+        if !part.scale.is_finite() || part.scale <= 0.0 {
+            return None;
+        }
+        for corner in 0..8 {
+            let local = Vec3::new(
+                if corner & 1 == 0 {
+                    -bounds.size.x
+                } else {
+                    bounds.size.x
+                },
+                if corner & 2 == 0 {
+                    -bounds.size.y
+                } else {
+                    bounds.size.y
+                },
+                if corner & 4 == 0 {
+                    -bounds.size.z
+                } else {
+                    bounds.size.z
+                },
+            );
+            let point = part.pos
+                + part
+                    .q
+                    .rotate((bounds.center + bounds.basis.transpose().mul_vec(local)) * part.scale);
+            if !point.x.is_finite() || !point.y.is_finite() || !point.z.is_finite() {
+                return None;
+            }
+            min = Vec3::new(min.x.min(point.x), min.y.min(point.y), min.z.min(point.z));
+            max = Vec3::new(max.x.max(point.x), max.y.max(point.y), max.z.max(point.z));
+            found = true;
+        }
+    }
+    let half = (max - min) * 0.5;
+    (found && half.x > 0.0 && half.y > 0.0 && half.z > 0.0)
+        .then_some(BoxPrim::aligned((min + max) * 0.5, half))
 }
 
 /// The world placement of a doodad as the zone receives it (position, quaternion, scale).

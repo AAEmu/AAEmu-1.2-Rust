@@ -148,50 +148,62 @@ pub fn model_collision_bounds(
         &mut xml,
         &objects::parse_model_ref(reference),
     )?;
-    let mut min = PVec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
-    let mut max = PVec3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
-    let mut found = false;
-    for part in shape.parts {
-        let Some(geometry) = part.model.slot(phys_slot::DEFAULT) else {
+    objects::shape_bounds(&shape)
+}
+
+/// A model cache entry for a prefab's static `AnimObject` body. The 1.2 vehicle prefabs
+/// (`vehicle_models.normal`, e.g. `vehicle_tractor_c.tractor_body`) name the body as a
+/// `.chr`, which carries no `MeshPhysicsData` (the Red Farm Hauler's
+/// `transfers_trailer_c.chr` has none); the same-named `.cgf` beside it holds the body
+/// collision proxies. A model that does have physics is used as-is.
+fn body_model(
+    models: &ModelCache,
+    path: &str,
+) -> Option<Arc<crate::systems::ai::collision::models::ModelPhys>> {
+    if let Some(model) = models.get(path) {
+        return Some(model);
+    }
+    let lower = path.to_ascii_lowercase();
+    let stem = lower
+        .strip_suffix(".chr")
+        .or_else(|| lower.strip_suffix(".cga"))?;
+    models.get(&format!("{}.cgf", &path[..stem.len()]))
+}
+
+/// The collision bounds of a model reference including a prefab's static `AnimObject`
+/// bodies, which [`model_collision_bounds`] does not resolve (it reads `Brush` objects only).
+/// This is the box the 1.2 client's bind reach measures to for land vehicles: the union of
+/// the body's collision proxies in the model frame. `None` when no geometry is available.
+pub fn model_bounds_including_bodies(
+    files: &Files,
+    models: &ModelCache,
+    reference: &str,
+) -> Option<BoxPrim> {
+    if let Some(bounds) = model_collision_bounds(files, models, reference) {
+        return Some(bounds);
+    }
+    let objects::ModelRef::Prefab { library, name } = objects::parse_model_ref(reference) else {
+        return None;
+    };
+    let bytes = files.read(&library)?;
+    let xml = crate::data::client_files::decode_text(&bytes);
+    let mut shape = objects::ColliderShape::default();
+    for (path, pos, q, scale) in objects::prefab_house_geometry(&xml, &name) {
+        let Some(model) = body_model(models, &path) else {
             continue;
         };
-        let bounds = geometry.geom.bbox();
-        if !part.scale.is_finite() || part.scale <= 0.0 {
-            return None;
+        if model.slot(phys_slot::DEFAULT).is_none() {
+            continue;
         }
-        for corner in 0..8 {
-            let local = PVec3::new(
-                if corner & 1 == 0 {
-                    -bounds.size.x
-                } else {
-                    bounds.size.x
-                },
-                if corner & 2 == 0 {
-                    -bounds.size.y
-                } else {
-                    bounds.size.y
-                },
-                if corner & 4 == 0 {
-                    -bounds.size.z
-                } else {
-                    bounds.size.z
-                },
-            );
-            let point = part.pos
-                + part
-                    .q
-                    .rotate((bounds.center + bounds.basis.transpose().mul_vec(local)) * part.scale);
-            if !point.x.is_finite() || !point.y.is_finite() || !point.z.is_finite() {
-                return None;
-            }
-            min = PVec3::new(min.x.min(point.x), min.y.min(point.y), min.z.min(point.z));
-            max = PVec3::new(max.x.max(point.x), max.y.max(point.y), max.z.max(point.z));
-            found = true;
-        }
+        shape.parts.push(objects::ShapePart {
+            model,
+            pos,
+            q,
+            scale,
+            animation: None,
+        });
     }
-    let half = (max - min) * 0.5;
-    (found && half.x > 0.0 && half.y > 0.0 && half.z > 0.0)
-        .then_some(BoxPrim::aligned((min + max) * 0.5, half))
+    objects::shape_bounds(&shape)
 }
 
 /// Freeboard kept above the mass-box top by the clipped hull collider (metres, model units).
