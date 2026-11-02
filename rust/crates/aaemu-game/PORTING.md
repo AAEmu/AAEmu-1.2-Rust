@@ -252,6 +252,22 @@ These `SpecialType` bodies were TODO stubs that only logged in the C# (`git show
 | `TimeManager.OnTimeOfDayChange` (NPC postures, doodad ToD triggers) | `doodad/manager.rs` | done | 10 s poller started by the doodad part (TimeManager has no callback). |
 | Cross-subsystem behaviour | `hooks.rs`, `bridges.rs` | done | `SkillsBridge` (skills), `EconomyBridge` (economy), `QuestsBridge` (quests) in `server.systems.npcs.hooks`; this subsystem implements `NpcSkillHooks`, `NpcEconomyHooks`, `LootNpcHooks`, `TreasureMapSource` (`bridges.rs`). See "Phase 3b wiring". |
 
+**NPC faction on the wire (verified 2026-11-02, owner session).** `NpcManager.Create` sends
+`npcs.faction_id` unchanged (`npc/manager.rs` `create`, `world/unit_state.rs` `write_net_unit`
+faction pisc). The 1.2 client colours the target frame from the relation of that faction to the
+local player: `x2ui/unitframe/unitframe.alb` `ChangeHpBarTexture_forNpc` chooses
+`S_HP_HOSTILE` / `S_HP_NEUTRAL` / `S_HP_FRIENDLY` from `X2Unit:GetCombatRelationshipStr`
+(`FUN_394c0d80` -> `FUN_39028240` -> `FUN_39838880`), whose relation follows the mother chain
+(`FUN_398a37a0` walks `faction+0x20`) and the `system_faction_relations` states 1 hostile /
+2 neutral / 3 friendly. NPC name plates are yellow (only players are green), so a yellow name
+is not a relation. The owner-session NPCs are therefore 1.2-correct as sent: Amutar (npc 3443,
+`faction_id` 2 neutral) has an orange target frame and no attack permission; Mutani (5772,
+faction 109, the Harani player's own faction) and the guide Lucius (12078, faction 1) have
+green target frames; the Harani player Aouj (character 38) is faction 109. Locked by
+`world::unit_state_tests::real_compact_db_npc_unit_state_faction`,
+`systems::skills::relation::tests::harani_player_relation_mapping` and
+`systems::skills::relation::tests::real_compact_db_faction_relation_for_harani_player`.
+
 ### systems::economy
 
 Layering: `models::item_task` (`ItemTask`, `ItemTaskType`, recorded effects `ItemFx`) →
@@ -3274,6 +3290,21 @@ allowlist, so it adds only 17063 and item skills stay item-driven, and the effec
 anyway and could wrap labor negative. `recoverable_exp` was already saved and loaded
 (`db_character.rs`), so it survives a relog; a second death overwrites it exactly as
 `CharacterCombat.DoDie` does (`RecoverableExp = round(LastExpLoss * 0.8)`).
+
+Rechecked 2026-11-01 against the real catalog (not the fixture): the prayer's real 6.5 s cast
+restores the recoverable exp both when the client targets the priest and when it targets self;
+the four real `npcs` rows with `priest = 't'` are 502 / 1664 / 5614 / 5615, and the effect accepts
+all of them by template flag (no faction check). The level-band labor is `formulas` row 7
+(`if_negative(pc_level - 51, pc_level, 50 + (pc_level - 50) * 20)`), matching the effect's
+formula; above level 50 a level-51 prayer spends 70 labor. The XP Restoration Scroll (33965,
+`use_skill_as_reagent = 't'`) works through the `SkillCaster::Item` cast while the character is
+dead (skill 26611 has `source_dead = target_dead = 't'`, effect 5 has no priest and no labor).
+The real refusals keep the C# codes: nothing to recover answers
+`CANNOT_RECOVER_ALL_NOT_ENOUGH` (796) and insufficient labor `NOT_ENOUGH_LABOR_POWER` (29); the
+1.2 client itself never sends the prayer with nothing to recover because
+`X2Priest:GetCostForRecoverExp` returns nil then. The reported "You don't have permission." on
+2026-11-01 is therefore the pre-#21 client-source refusal: the current data sources 17063 through
+`CLIENT_SKILL_EFFECT_SOURCES` and both paths restore the experience.
 
 ## Ship repair timer and destroyed-vehicle HP (2026-10-20)
 
