@@ -117,6 +117,17 @@ impl<'a, 'b> SqlRow<'a, 'b> {
     pub fn f32(&self, col: &str) -> rusqlite::Result<f32> {
         Ok(self.f64(col)? as f32)
     }
+    /// `GetFloat` when the stored value is numeric, `None` for NULL or a text / blob value.
+    /// The real 1.2 `compact.sqlite3` stores the text `'f'` in some `vehicle_models` REAL
+    /// columns, which the C# coercion silently read as 0.0; callers that mean "no limit" use
+    /// this instead.
+    pub fn f32_opt(&self, col: &str) -> rusqlite::Result<Option<f32>> {
+        match self.value(col)? {
+            ValueRef::Null | ValueRef::Text(_) | ValueRef::Blob(_) => Ok(None),
+            ValueRef::Integer(i) => Ok(Some(i as f32)),
+            ValueRef::Real(f) => Ok(Some(f as f32)),
+        }
+    }
     pub fn f32_or(&self, col: &str, d: f32) -> rusqlite::Result<f32> {
         if self.is_null(col)? {
             Ok(d)
