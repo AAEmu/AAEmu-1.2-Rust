@@ -652,7 +652,7 @@ pub fn reset_skills(server: &GameServer, p: &PlayerRef, ability_id: u8) {
 /// Both client paths reach this function; the checks, the debit and the swap share one character
 /// lock, and the packets are sent after it.
 pub fn swap_ability(server: &GameServer, p: &PlayerRef, old: u8, new: u8) {
-    let (removed_buffs, cost) = {
+    let (removed_buffs, cost, money) = {
         let mut c = p.data();
         let actives = [c.ability1, c.ability2, c.ability3];
         // `FUN_398a1710`: only AbilityType 1..=10 (Fight .. Love) are class abilities.
@@ -692,6 +692,13 @@ pub fn swap_ability(server: &GameServer, p: &PlayerRef, old: u8, new: u8) {
         };
         if cost > 0 && c.money < cost {
             drop(c);
+            tracing::warn!(
+                character = p.character_id,
+                old,
+                new,
+                cost,
+                "SwapAbility: not enough money"
+            );
             crate::systems::economy::inventory::send_error_message(
                 p,
                 crate::systems::economy::error_message::NOT_ENOUGH_MONEY,
@@ -755,7 +762,7 @@ pub fn swap_ability(server: &GameServer, p: &PlayerRef, old: u8, new: u8) {
         if cost > 0 {
             c.money -= cost;
         }
-        (removed_buffs, cost)
+        (removed_buffs, cost, c.money)
     };
     for b in removed_buffs {
         remove_passive_buff(server, p, b);
@@ -792,6 +799,7 @@ pub fn swap_ability(server: &GameServer, p: &PlayerRef, old: u8, new: u8) {
         old,
         new,
         cost,
+        money,
         "SwapAbility: ability changed"
     );
     crate::systems::report_achievement(
