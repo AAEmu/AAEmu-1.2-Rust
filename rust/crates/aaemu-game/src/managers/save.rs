@@ -27,9 +27,28 @@ pub(crate) struct FinancialSnapshot {
     pub(crate) characters: Vec<(PlayerRef, Character)>,
 }
 
+/// Which characters a snapshot writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SnapshotScope {
+    /// Autosave / shutdown / tests: every online and departing character.
+    Everyone,
+    /// A logout: the pending departures plus the other online characters whose wallet
+    /// (`money`, `money2`) differs from what the database holds, or that carry unflushed labor.
+    /// A clean character has nothing to commit with the property state, so a logout wave is
+    /// O(departures) instead of O(online) per logout.
+    Departure,
+}
+
 /// Capture property transactions before any database await. Claim/capture, tax payments,
 /// certificates, receipts and wallets must describe the same logical operation boundary.
 pub(crate) fn capture_financial_snapshot(server: &GameServer) -> FinancialSnapshot {
+    capture_financial_snapshot_for(server, SnapshotScope::Everyone)
+}
+
+pub(crate) fn capture_financial_snapshot_for(
+    server: &GameServer,
+    scope: SnapshotScope,
+) -> FinancialSnapshot {
     let _items = server.systems.economy.operation_scope();
     let _auction = server.systems.economy.auction.operation_lock();
     let _housing = server
@@ -42,6 +61,12 @@ pub(crate) fn capture_financial_snapshot(server: &GameServer) -> FinancialSnapsh
     let dominions = server.systems.housing.dominions.prepare_save();
     let _economy = server.systems.economy.ops_lock();
     let mut players = server.world.all_characters();
+    if scope == SnapshotScope::Departure {
+        // Money moves between characters (trade, mail, auction, houses, treasury): a wallet
+        // that differs from the committed one belongs to the same transaction as the property
+        // rows above. Reads one data lock at a time, then the committed-money map.
+        players.retain(|p| server.save.is_financially_dirty(p));
+    }
     for player in server
         .save
         .departing
@@ -164,6 +189,74 @@ mod tests {
         assert_eq!(live.parent_obj_id, slave.obj_id);
         assert_eq!((live.x, live.y, live.z), (2.0, -3.0, 4.0));
     }
+
+    fn captured_ids(snapshot: &FinancialSnapshot) -> Vec<u32> {
+        let mut ids: Vec<u32> = snapshot
+            .characters
+            .iter()
+            .map(|(p, _)| p.character_id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    #[tokio::test]
+    async fn departure_snapshot_skips_clean_online_characters() {
+        let s = test_server();
+        let client = TestClient::new(&s, 1, 1);
+        let leaving = spawn_player(&s, &client, test_character(1, "Leaver", 1.0, 1.0), 0x100);
+        let clean = spawn_player(&s, &client, test_character(2, "Clean", 2.0, 2.0), 0x101);
+        let _unknown = spawn_player(&s, &client, test_character(3, "Unknown", 3.0, 3.0), 0x102);
+        s.save.seed_committed_money(&clean);
+        s.save.remember_departing(&leaving);
+        s.world.try_remove_character(leaving.obj_id);
+
+        let snapshot = capture_financial_snapshot_for(&s, SnapshotScope::Departure);
+        // `unknown` has no committed wallet: dirty by default.
+        assert_eq!(captured_ids(&snapshot), vec![1, 3]);
+    }
+
+    #[tokio::test]
+    async fn departure_snapshot_includes_counterpart_with_changed_money_or_labor() {
+        let s = test_server();
+        let client = TestClient::new(&s, 1, 1);
+        let leaving = spawn_player(&s, &client, test_character(1, "Leaver", 1.0, 1.0), 0x100);
+        let trader = spawn_player(&s, &client, test_character(2, "Trader", 2.0, 2.0), 0x101);
+        let laborer = spawn_player(&s, &client, test_character(3, "Laborer", 3.0, 3.0), 0x102);
+        let clean = spawn_player(&s, &client, test_character(4, "Clean", 4.0, 4.0), 0x103);
+        for p in [&trader, &laborer, &clean] {
+            s.save.seed_committed_money(p);
+        }
+        s.save.remember_departing(&leaving);
+        s.world.try_remove_character(leaving.obj_id);
+
+        // A trade paid the counterpart.
+        trader.data().money += 500;
+        laborer.data().labor_power_unsaved = -3;
+        let snapshot = capture_financial_snapshot_for(&s, SnapshotScope::Departure);
+        assert_eq!(captured_ids(&snapshot), vec![1, 2, 3]);
+
+        // The committed ack makes the trader clean again.
+        let money = {
+            let c = trader.data();
+            (c.money, c.money2)
+        };
+        s.save.set_committed_money(2, money);
+        let snapshot = capture_financial_snapshot_for(&s, SnapshotScope::Departure);
+        assert_eq!(captured_ids(&snapshot), vec![1, 3]);
+    }
+
+    #[tokio::test]
+    async fn autosave_snapshot_captures_every_character() {
+        let s = test_server();
+        let client = TestClient::new(&s, 1, 1);
+        let a = spawn_player(&s, &client, test_character(1, "A", 1.0, 1.0), 0x100);
+        let b = spawn_player(&s, &client, test_character(2, "B", 2.0, 2.0), 0x101);
+        s.save.seed_committed_money(&a);
+        s.save.seed_committed_money(&b);
+        let snapshot = capture_financial_snapshot(&s);
+        assert_eq!(captured_ids(&snapshot), vec![1, 2]);
+    }
 }
 
 struct CharacterSaveAck {
@@ -269,6 +362,9 @@ pub(crate) fn commit_financial_snapshot(server: &GameServer, receipt: FinancialS
         .schedule_items
         .commit_save(receipt.schedule_items);
     for ack in receipt.characters {
+        server
+            .save
+            .set_committed_money(ack.player.character_id, ack.money);
         let mut live = ack.player.data();
         let unchanged_money = (live.money, live.money2) == ack.money;
         live.updated = ack.updated;
@@ -294,6 +390,7 @@ pub(crate) fn commit_financial_snapshot(server: &GameServer, receipt: FinancialS
             {
                 departing.remove(&ack.player.character_id);
                 drop(departing);
+                server.save.forget_committed_money(ack.player.character_id);
                 if server
                     .world
                     .character_by_obj_id(ack.player.obj_id)
@@ -316,9 +413,51 @@ pub struct SaveManager {
     transactions: tokio::sync::Mutex<()>,
     /// Keep departed wallets available for a full transaction retry after database failure.
     departing: Mutex<HashMap<u32, PlayerRef>>,
+    /// `(money, money2)` last committed to (or loaded from) the database per online character.
+    /// A character without an entry counts as financially dirty. Never held with a data lock.
+    committed_money: Mutex<HashMap<u32, (i64, i64)>>,
 }
 
 impl SaveManager {
+    /// Seeds the committed wallet of a character that just entered the world from the database.
+    pub(crate) fn seed_committed_money(&self, player: &PlayerRef) {
+        let money = {
+            let c = player.data();
+            (c.money, c.money2)
+        };
+        self.set_committed_money(player.character_id, money);
+    }
+
+    fn set_committed_money(&self, character_id: u32, money: (i64, i64)) {
+        self.committed_money
+            .lock()
+            .expect("committed money poisoned")
+            .insert(character_id, money);
+    }
+
+    fn forget_committed_money(&self, character_id: u32) {
+        self.committed_money
+            .lock()
+            .expect("committed money poisoned")
+            .remove(&character_id);
+    }
+
+    /// True when the wallet differs from the committed one (or none is known), or labor is
+    /// pending. Money is the only character-row field other characters' operations change.
+    fn is_financially_dirty(&self, player: &PlayerRef) -> bool {
+        let (money, labor_pending) = {
+            let c = player.data();
+            ((c.money, c.money2), c.labor_power_unsaved != 0)
+        };
+        labor_pending
+            || self
+                .committed_money
+                .lock()
+                .expect("committed money poisoned")
+                .get(&player.character_id)
+                != Some(&money)
+    }
+
     pub(crate) fn pending_departure(&self, character_id: u32) -> Option<PlayerRef> {
         self.departing
             .lock()
@@ -372,7 +511,7 @@ impl SaveManager {
     ) -> bool {
         self.remember_departing(player);
         let result: crate::Result<()> = async {
-            let snapshot = capture_financial_snapshot(server);
+            let snapshot = capture_financial_snapshot_for(server, SnapshotScope::Departure);
             let mut tx = server.db.begin().await?;
             let receipt = write_financial_snapshot(server, &mut tx, snapshot).await?;
             tx.commit().await?;

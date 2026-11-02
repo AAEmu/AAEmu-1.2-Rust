@@ -16,6 +16,7 @@ use crate::login::LoginClient;
 use crate::record::Recorder;
 use crate::stream::StreamClient;
 
+mod busy;
 mod cometsboon;
 mod craft;
 mod doodad;
@@ -94,6 +95,10 @@ pub enum Kind {
     /// GM account.
     #[serde(rename = "script")]
     Script,
+    /// Capacity test: a fully active player (teleport, mate, boat, spawns, skill casts, moves,
+    /// chat) for `busy_secs` (see `scenario/busy.rs`). GM account.
+    #[serde(rename = "busy")]
+    Busy,
 }
 
 impl std::str::FromStr for Kind {
@@ -117,8 +122,9 @@ impl std::str::FromStr for Kind {
             "portal" => Self::Portal,
             "craft" => Self::Craft,
             "script" => Self::Script,
+            "busy" => Self::Busy,
             _ => bail!(
-                "unknown scenario '{s}' (login, lobby, full, combat, npc-return, mate-revive, questitem, doodad, \n                 plant, cometsboon, stonethrow, ghost, lunafrost, portal, craft, script, load)"
+                "unknown scenario '{s}' (login, lobby, full, combat, npc-return, mate-revive, questitem, doodad, \n                 plant, cometsboon, stonethrow, ghost, lunafrost, portal, craft, script, busy, load)"
             ),
         })
     }
@@ -210,6 +216,14 @@ pub struct BotConfig {
     /// `questitem`: casts tried (rejected ones included) before the step fails.
     #[serde(default = "default_quest_item_max_attempts")]
     pub quest_item_max_attempts: u32,
+    /// `busy`: seconds of the activity loop.
+    #[serde(default = "default_busy_secs")]
+    pub busy_secs: u64,
+    /// `busy`: boat summon item (15817: Rowboat scroll, slave 15) and its use skill (15802).
+    #[serde(default = "default_busy_boat_item")]
+    pub busy_boat_item: u32,
+    #[serde(default = "default_busy_boat_skill")]
+    pub busy_boat_skill: u32,
 }
 
 /// The client packet that asks a stablehand to revive the dead mate. The real protocol is still
@@ -299,6 +313,15 @@ fn default_quest_item_uses() -> u32 {
 }
 fn default_quest_item_pos() -> [f32; 3] {
     [11041.0, 15622.0, 246.0]
+}
+fn default_busy_secs() -> u64 {
+    300
+}
+fn default_busy_boat_item() -> u32 {
+    15817
+}
+fn default_busy_boat_skill() -> u32 {
+    15802
 }
 fn default_quest_item_max_attempts() -> u32 {
     12
@@ -907,6 +930,11 @@ async fn run_inner(
     }
     if kind == Kind::Portal {
         portal::run(&mut game, cfg, r).await?;
+        drop(stream);
+        return Ok(());
+    }
+    if kind == Kind::Busy {
+        busy::run(&mut game, cfg, r).await?;
         drop(stream);
         return Ok(());
     }
