@@ -818,21 +818,28 @@ fn update_target(c: &mut AiCtx<'_>) -> bool {
 }
 
 /// `AggroTable.Values.OrderByDescending(TotalAggro).Select(Owner)` (missing objects stay as
-/// `None` and are skipped).
+/// `None` and are skipped), extended with the 10.x taunt order (10x-ONLY): an entry with a
+/// taunt stamp sorts above every unstamped entry and the latest stamp wins. Unstamped entries
+/// keep the total order; the stable sort keeps the table (obj id) order on ties.
 fn sorted_abusers(c: &AiCtx<'_>) -> Vec<Option<WorldObject>> {
-    let mut entries: Vec<(u32, i32)> = c
+    let mut entries: Vec<(u32, i32, u32)> = c
         .npc
         .data()
         .unit
         .skill_state
         .aggro_table
         .iter()
-        .map(|(k, a)| (*k, a.total()))
+        .map(|(k, a)| (*k, a.total(), a.taunt_time))
         .collect();
-    entries.sort_by_key(|e| std::cmp::Reverse(e.1));
+    entries.sort_by(|a, b| match (a.2, b.2) {
+        (0, 0) => b.1.cmp(&a.1),
+        (0, _) => std::cmp::Ordering::Greater,
+        (_, 0) => std::cmp::Ordering::Less,
+        (x, y) => y.cmp(&x),
+    });
     entries
         .into_iter()
-        .map(|(id, _)| c.server.world.object(id))
+        .map(|(id, _, _)| c.server.world.object(id))
         .collect()
 }
 
