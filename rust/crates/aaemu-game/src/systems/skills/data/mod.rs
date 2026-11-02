@@ -430,6 +430,7 @@ impl Data {
                 Ok(())
             },
         )?;
+        super::aura::warn_catalog(&buffs);
         // `transform_buff_id` replaces the buff's stacks when they reach `max_stack`. A row
         // whose target is absent keeps today's refresh-at-cap behaviour; warn once for the
         // whole catalog.

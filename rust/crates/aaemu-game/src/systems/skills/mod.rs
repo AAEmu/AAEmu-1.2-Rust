@@ -18,6 +18,7 @@
 //! * [`stats`] — attribute getters; [`relation`] / [`geometry`] — targeting helpers;
 //! * [`ext`] — hooks into the npcs / economy / quests / social subsystems.
 
+pub mod aura;
 pub mod bridges;
 pub mod buff_reqs;
 pub mod buffs;
@@ -147,6 +148,8 @@ pub struct System {
     pub aggro_watch: Mutex<HashMap<u32, HashSet<u32>>>,
     /// `ManaRegenManager.Registrations` (character id -> entry).
     pub mana_regen: Mutex<HashMap<u32, regen::ManaRegenEntry>>,
+    /// Aura / crowd buff owners and the recipients they applied (AURA-4, CROWD-1).
+    pub aura: aura::AuraState,
     /// Skill ids `Unit.UseSkill` already reported as missing from the static data (the C# threw a
     /// NullReferenceException on every call, here only the first call per id is a warning).
     pub(crate) missing_skill_warned: Mutex<HashSet<u32>>,
@@ -158,6 +161,7 @@ impl System {
     pub async fn start(server: &Arc<GameServer>) -> anyhow::Result<()> {
         bind(server);
         regen::start_tickers(server);
+        aura::start_ticker(server);
         Ok(())
     }
 
