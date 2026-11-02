@@ -511,9 +511,8 @@ impl EconomyForSkills {
         );
     }
 
-    /// `Unit.ApplyEquipItemSetBonuses()`. The item procs of the set bonuses are not registered:
-    /// `UnitProcs.RollProcsForKind` skips every proc whose cooldown has elapsed (and
-    /// `LastProc` starts at `DateTime.MinValue`), so a C# proc never fires.
+    /// `Unit.ApplyEquipItemSetBonuses()`. The set procs are collected by
+    /// [`super::procs::refresh`] in the gear-bonus pass; this function keeps the buff part.
     fn apply_equip_item_set_bonuses(server: &GameServer, unit: &WorldObject, items: &[Item]) {
         use crate::systems::skills::buffs;
         let data = &server.game_data.items;
@@ -1430,6 +1429,10 @@ impl ItemSkillHooks for EconomyForSkills {
         Self::apply_weapon_wield_buff(server, unit);
         Self::apply_armor_grade_buff(server, unit, &items, added, removed);
         Self::apply_equip_item_set_bonuses(server, unit, &items);
+        // Set, item-binding and holdable procs of the current equipment. Rebuilt on every gear
+        // change (equip / unequip, gear break, repair, login, weapon-set swap, gem change), so
+        // the active set always matches the equipped items.
+        super::procs::refresh(server, unit, &items);
     }
 
     fn apply_effect(
