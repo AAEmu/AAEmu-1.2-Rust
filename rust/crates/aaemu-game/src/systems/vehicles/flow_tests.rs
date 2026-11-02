@@ -4549,6 +4549,197 @@ async fn real_cart_and_ship_slaves_offer_the_passenger_seat() {
     }
 }
 
+/// Attach point 10 (Cannon1) shipped with point 47's (Cannon10, the stern cannon) transform in
+/// the 2023 upstream data. The 1.2 `galleon_body.cgf` helper `$cannon1` is the port broadside
+/// cannon, the mirror of point 14 (Cannon5); the Growling Yawl (model 523) carries a copy of the
+/// same rows. Pin both in the shipped data before the bind test.
+#[test]
+fn eznan_cutter_and_growling_yawl_cannon_points_mirror_their_partner() {
+    let shipped = super::data::parse_attach_points(include_str!(
+        "../../../app/Data/slave_attach_points.json"
+    ))
+    .expect("shipped attach points");
+    for model in [393u32, 523] {
+        let points = shipped
+            .iter()
+            .find(|(id, _)| *id == model)
+            .map(|(_, points)| points)
+            .unwrap_or_else(|| panic!("model {model} attach points"));
+        let cannon = |point: u8| {
+            points
+                .iter()
+                .find(|(p, _)| *p == point)
+                .map(|(_, location)| *location)
+                .unwrap_or_else(|| panic!("model {model} point {point}"))
+        };
+        // Points 9-16 are four mirrored broadside pairs: opposite X, same Y / Z.
+        for point in 9u8..=16 {
+            let a = cannon(point);
+            assert!(
+                (9u8..=16).any(|other| other != point && {
+                    let b = cannon(other);
+                    (a.x + b.x).abs() <= 1.0 && (a.y - b.y).abs() <= 1.0 && (a.z - b.z).abs() <= 1.0
+                }),
+                "model {model} cannon point {point} has no mirror partner"
+            );
+        }
+        // The port cannon is the exact mirror of point 14, not the stern offset it shipped with.
+        let ten = cannon(10);
+        let fourteen = cannon(14);
+        let mirrored = |a: f32, b: f32| (a + b).abs(); // X flips sign
+        assert!(
+            mirrored(ten.x, fourteen.x) <= 0.05
+                && (ten.y - fourteen.y).abs() <= 0.05
+                && (ten.z - fourteen.z).abs() <= 0.05,
+            "model {model} point 10 ({}, {}, {}) must mirror point 14 ({}, {}, {})",
+            ten.x,
+            ten.y,
+            ten.z,
+            fourteen.x,
+            fourteen.y,
+            fourteen.z
+        );
+        // The true helpers are authored at 84 / -86 degrees, not exactly +-90.
+        let yaw_diff = (ten.yaw - -fourteen.yaw).to_degrees().rem_euclid(360.0);
+        assert!(
+            yaw_diff.min(360.0 - yaw_diff) <= 10.0,
+            "model {model} point 10 yaw {} does not mirror point 14 yaw {}",
+            ten.yaw.to_degrees(),
+            fourteen.yaw.to_degrees()
+        );
+    }
+}
+
+/// The owner's 2026-11-01 Eznan Cutter session: the cannon at tl 0x52 (attach point 10) was
+/// refused with `TOO_FAR_AWAY` (154) four times while the seven others bound at 1.1-2.9 m,
+/// because the server placed it on the bad stern offset 12-13 m away. With the real
+/// `slave_bindings`, every cannon point must mirror its partner and the player standing beside
+/// the port cannon at point 10 must man it.
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_eznan_cutter_port_cannon_at_point_10_binds_beside_the_deck() {
+    use crate::models::transform::Transform;
+
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let d = load_real(&db, &[]);
+    let hull_template = d.slave_template(21).expect("Eznan Cutter").clone();
+    assert_eq!(hull_template.model_id, 393);
+    let mut cannons: Vec<u8> = hull_template
+        .slave_bindings
+        .iter()
+        .filter(|b| b.owner_type == "Slave")
+        .map(|b| b.attach_point_id)
+        .collect();
+    cannons.sort_unstable();
+    assert_eq!(
+        cannons,
+        vec![9, 10, 11, 12, 13, 14, 15, 16],
+        "the real Eznan Cutter broadside cannons"
+    );
+
+    // Every real cannon point has a mirror partner in the shipped data (catches other bad rows).
+    let shipped = super::data::parse_attach_points(include_str!(
+        "../../../app/Data/slave_attach_points.json"
+    ))
+    .expect("shipped attach points");
+    let points = shipped
+        .iter()
+        .find(|(id, _)| *id == 393)
+        .map(|(_, points)| points)
+        .expect("model 393 attach points");
+    let at = |point: u8| {
+        points
+            .iter()
+            .find(|(p, _)| *p == point)
+            .map(|(_, location)| *location)
+            .unwrap_or_else(|| panic!("model 393 point {point}"))
+    };
+    for &point in &cannons {
+        let a = at(point);
+        assert!(
+            cannons.iter().any(|&other| {
+                if other == point {
+                    return false;
+                }
+                let b = at(other);
+                (a.x + b.x).abs() <= 1.0 && (a.y - b.y).abs() <= 1.0 && (a.z - b.z).abs() <= 1.0
+            }),
+            "model 393 cannon point {point} has no mirror partner"
+        );
+    }
+
+    let server = real_server(d);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let mut a = TestClient::new(&server, 1, 1);
+    let pa = spawn_player(&server, &a, test_character(1, "Owner", 100.0, 100.0), PA);
+    a.conn.active_char = Some(pa.clone());
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    a.drain();
+
+    let mut spawn_at = Transform::default();
+    spawn_at.set_xyz(100.0, 100.0, 100.0);
+    let hull = slaves::create_core(
+        &server,
+        &world,
+        Some(&pa),
+        None,
+        21,
+        None,
+        true,
+        Some(spawn_at),
+        None,
+    )
+    .expect("summoned Eznan Cutter");
+    let cannon = hull
+        .data()
+        .attached_slaves
+        .iter()
+        .filter_map(|id| world.slave(*id))
+        .find(|child| child.data().attach_point_id == 10)
+        .expect("cannon child at attach point 10");
+    // The child's local offset is the hull's attach point. The old data put it at the stern.
+    let local = cannon.data().unit.transform;
+    assert!(
+        local.x < -4.4 && local.y.abs() < 0.3 && (local.z - 4.487).abs() < 0.01,
+        "cannon point 10 local offset ({}, {}, {}) is not the port broadside",
+        local.x,
+        local.y,
+        local.z
+    );
+
+    // The client draws the cannon at the model's real `$cannon1` helper, not at the packet
+    // position, so the player stands there: 4.4767865 m to port and 4.48708954 m up (the
+    // native 1.2 galleon_body.cgf node; the corrected JSON row). With the old stern row the
+    // server measures ~13 m to its cannon and refuses.
+    let hull_pos = world.world_pos_rot(&WorldObject::from(&hull));
+    let deck = (-4.476_786_5_f32, 0.202_046_7_f32, 4.487_089_6_f32);
+    let player_at = (
+        hull_pos.x + deck.0 + 1.0,
+        hull_pos.y + deck.1,
+        hull_pos.z + deck.2,
+    );
+    pa.data()
+        .unit
+        .transform
+        .set_xyz(player_at.0, player_at.1, player_at.2);
+    let cannon_tl = u32::from(cannon.data().unit.tl_id);
+    slaves::bind_slave_by_tl(&server, &pa, cannon_tl);
+    assert_eq!(
+        cannon.data().attached_characters,
+        vec![(attach_point::DRIVER, PA)],
+        "the player beside the port cannon must man it"
+    );
+    let frames = a.drain();
+    assert!(
+        !error_codes(&frames).contains(&error_message::TOO_FAR_AWAY),
+        "bind must not be refused as too far"
+    );
+}
+
 /// A server whose main_world covers the real map (31 x 31 cells), with the real vehicle data.
 fn real_server(d: super::Data) -> Arc<GameServer> {
     let mut data = GameData::empty();
