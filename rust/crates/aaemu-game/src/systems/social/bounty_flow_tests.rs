@@ -361,6 +361,8 @@ async fn arrest_pays_the_whole_total_once_and_resets_it() {
         paid(&find(&frames, sc::SCBountyPaidPacket)[0]),
         ("Arrestor".into(), "Wanted".into(), 350)
     );
+    // The court room and jail made `arrest_criminal` start a real case.
+    assert_eq!(b.p.data().arrest_count, 1);
     let tasks: Vec<(u8, i32)> = find(&frames, sc::SCItemTaskSuccessPacket)
         .iter()
         .map(|b| money_task(b))
@@ -409,6 +411,7 @@ async fn a_kill_without_a_court_case_pays_nothing_and_keeps_the_pledge() {
     let frames = d.client.drain();
     assert!(find(&frames, sc::SCBountyPaidPacket).is_empty());
     assert_eq!(d.p.data().money, 0);
+    assert_eq!(b.p.data().arrest_count, 0);
     assert_eq!(
         server
             .systems
