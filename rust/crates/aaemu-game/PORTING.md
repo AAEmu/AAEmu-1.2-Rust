@@ -873,6 +873,8 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 
 ## Known deviations from the C#
 
+* systems::npcs (persistent doodads): `SpawnPersistentDoodads` skips the housing lookup for SLAVE-owned rows. In the C# every row with `houseId > 0` was resolved as a house, but for vehicle cargo racks `house_id` holds the hull id, so it logged "can't find it's owning house" (or, if a house with that id existed, parented the rack to it before the slave re-attach).
+
 * systems::services (beauty salon): `ApplyBeautySalon` creates the requested hair item when
   the equipment hair slot is empty. The C# guard required an existing hair item, so a paid
   change could consume a Salon Certificate yet report hair 0. Same-hair requests still keep
@@ -2142,15 +2144,16 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   (`combat::drop_aggro_table`, NPC death and `ClearAllAggroTargetsAndCheckCombatState`), so
   stale holders no longer receive the victim's death fan-out.
 
-* Static-data gaps (2026-10-15): buffs 2149, 1142 and 1933 reference absent skill controllers
-  3554, 1806 and 7749 in the available 1.2 compact copies. Their controller behavior remains
+* Static-data gaps (2026-10-15): buffs 2149, 1142, 1933 and 1434 reference absent skill controllers
+  3554, 1806, 7749 and 2395 in the available 1.2 compact copies (the 1.2 client's own
+  `compact.sqlite3` lacks them too; the 10.x and C# data set these buffs' controller id to 0). Their controller behavior remains
   unsupported pending authentic definitions; no replacement parameters are invented. The supplied
   BuffEffect warnings also reference 33 absent buff templates, ten referenced by skill rows.
   Restoring them requires an authentic 1.2 dataset. Counts (compact.sqlite3): 338 buffs
   reference 113 absent skill controllers (also 6121 for buff 4341, 2883 for buff 1643) and 35
   BuffEffect rows reference 30 absent buffs (16 of them used by skill effects). The C# warned on
-  every buff start; the Rust port warns once per (buff, controller) pair (repeats at debug) plus
-  one startup summary for each gap, with per-row detail at debug. Skill 14602
+  every buff start; the Rust port's startup summary warns for each gap (per-row detail at debug); the
+  runtime skip on buff start logs at debug. Skill 14602
   already exists and uses the inherited fallback cast path for Memory Tome interactions; its
   "undefined use type" diagnostic does not mean the skill template is absent: it is the normal
   path for doodad / quest-interaction skills (14907, 14599, 16520..16620, 19015 ... are
