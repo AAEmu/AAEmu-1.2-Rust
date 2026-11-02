@@ -632,28 +632,35 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
         if npc::distance_to(c.server, &other, &c.obj, false) > ot.aggro_link_help_dist {
             continue;
         }
-        let sight_ok = || !ot.aggro_link_sight_check || npc::can_see_target(c.server, abuser);
+        // The template path is the C# `UpdateAggroHelp` (Behavior.cs, `a2ab80abd^`): the
+        // special-rule branch requires `aggro_link_sight_check` to be enabled AND the abuser
+        // visible; a template with sight check off never helps through rules 1..4.
         let template_helps = if ot.aggression && ot.aggro_link_special_rule_id == 0 {
             true
         } else {
-            let relation = || {
-                crate::systems::skills::relation::relation_to(
-                    c.server,
-                    &crate::systems::skills::geometry::Target::Obj(other.clone()),
-                    &crate::systems::skills::geometry::Target::Obj(c.obj.clone()),
-                )
-            };
-            use crate::systems::skills::types::RelationState as R;
-            sight_ok()
-                && match ot.aggro_link_special_rule_id {
+            if !(ot.aggro_link_sight_check && npc::can_see_target(c.server, abuser)) {
+                false
+            } else {
+                let relation = || {
+                    crate::systems::skills::relation::relation_to(
+                        c.server,
+                        &crate::systems::skills::geometry::Target::Obj(other.clone()),
+                        &crate::systems::skills::geometry::Target::Obj(c.obj.clone()),
+                    )
+                };
+                use crate::systems::skills::types::RelationState as R;
+                match ot.aggro_link_special_rule_id {
                     1 => faction == my_faction,
                     2 => relation() == R::Friendly,
                     3 => relation() == R::Neutral,
                     4 => true,
                     _ => false,
                 }
+            }
         };
-        let link_helps = same_group && sight_ok();
+        // Link path (AGGROLINK-1): the sight check applies only when the helper enables it.
+        let link_helps =
+            same_group && (!ot.aggro_link_sight_check || npc::can_see_target(c.server, abuser));
         if !template_helps && !link_helps {
             continue;
         }
@@ -3159,6 +3166,94 @@ mod tests {
         assert!(
             table.contains_key(&player_b.obj_id),
             "the helper must help its group 501 member"
+        );
+    }
+
+    /// The link-group path must not relax the template sight gate for non-members. The C#
+    /// `UpdateAggroHelp` special-rule branch needs `aggro_link_sight_check` enabled (Behavior.cs,
+    /// `a2ab80abd^`), so a rule-4 non-member with the flag off does not help; the same template
+    /// with the flag on still does (control). Only the link path may ignore the flag.
+    #[tokio::test]
+    async fn aggro_link_does_not_relax_the_template_sight_gate_for_non_members() {
+        use super::super::framework::{AiKind, NpcAi};
+        use crate::data::GameData;
+        use crate::models::npc::Npc;
+        use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
+        use crate::world::Entity;
+
+        const LEADER: u32 = 0x350;
+        const NO_SIGHT: u32 = 0x351;
+        const WITH_SIGHT: u32 = 0x352;
+        const ABUSER: u32 = 0x353;
+
+        let mut data = GameData::empty();
+        data.systems
+            .npcs
+            .npc
+            .templates
+            .insert(7300, link_only_template(7300, true, true, 30.0));
+        data.systems.npcs.npc.templates.insert(
+            7301,
+            crate::systems::npcs::npc::data::NpcTemplate {
+                aggro_link_special_rule_id: 4,
+                aggro_link_sight_check: false,
+                ..link_only_template(7301, true, true, 30.0)
+            },
+        );
+        data.systems.npcs.npc.templates.insert(
+            7302,
+            crate::systems::npcs::npc::data::NpcTemplate {
+                aggro_link_special_rule_id: 4,
+                aggro_link_sight_check: true,
+                ..link_only_template(7302, true, true, 30.0)
+            },
+        );
+        let server = Arc::new(test_server_with(data));
+        server.set_self();
+        crate::systems::skills::bind(&server);
+        let client = TestClient::new(&server, 1, 1001);
+        let player = spawn_player(
+            &server,
+            &client,
+            test_character(1, "Tank", 98.0, 100.0),
+            ABUSER,
+        );
+
+        let mut leader = Npc::new(7300);
+        leader.unit.transform.set_xyz(100.0, 100.0, 100.0);
+        let leader = Entity::new(LEADER, leader);
+        server
+            .world
+            .world(0)
+            .unwrap()
+            .spawn(&leader, &server.view_ctx());
+        let no_sight = spawn_link_npc(&server, NO_SIGHT, 7301, 105.0);
+        let with_sight = spawn_link_npc(&server, WITH_SIGHT, 7302, 110.0);
+
+        let abuser = WorldObject::from(&player);
+        let mut ai = NpcAi::new(AiKind::AlmightyNpc, &leader);
+        let mut context = AiCtx {
+            server: &server,
+            npc: leader.clone(),
+            obj: WorldObject::from(&leader),
+            ai: &mut ai,
+        };
+        update_aggro_help(&mut context, &abuser, 200.0);
+
+        let has_aggro = |npc: &crate::world::NpcRef| {
+            npc.data()
+                .unit
+                .skill_state
+                .aggro_table
+                .contains_key(&player.obj_id)
+        };
+        assert!(
+            !has_aggro(&no_sight),
+            "a non-member with aggro_link_sight_check off must keep refusing special-rule help"
+        );
+        assert!(
+            has_aggro(&with_sight),
+            "a non-member with the sight check on still helps through rule 4"
         );
     }
 
