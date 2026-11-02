@@ -1453,6 +1453,39 @@ mod tests {
     }
 
     /// The bounty requests the 1.2 client sends (0x11f / 0x120; blob(name) = u16 length + bytes).
+    /// The exact bodies the 1.2 client writes (readers `397b13a0` / `397bc6b0`): a `u16`-length
+    /// name, and `u32 targetId, name, i32 amount`. The name is capped at the client's 128-byte
+    /// buffer.
+    #[test]
+    fn c2s_bounty_requests_read_the_client_bytes() {
+        let request = [6, 0, b'W', b'a', b'n', b't', b'e', b'd'];
+        assert_eq!(
+            CSRequestSetBountyMoneyPacket::read(&mut PacketStream::from_bytes(request.to_vec()))
+                .unwrap(),
+            CSRequestSetBountyMoneyPacket {
+                name: "Wanted".into()
+            }
+        );
+        let update = vec![
+            0x44, 0x33, 0x22, 0x11, //
+            6, 0, b'W', b'a', b'n', b't', b'e', b'd', //
+            0x78, 0xEC, 0xFF, 0xFF, // -5000
+        ];
+        assert_eq!(
+            CSSendBountyUpdatePacket::read(&mut PacketStream::from_bytes(update)).unwrap(),
+            CSSendBountyUpdatePacket {
+                target_id: 0x11223344,
+                name: "Wanted".into(),
+                money: -5000
+            }
+        );
+
+        let mut long = PacketStream::new();
+        long.write_str(&"a".repeat(200));
+        let capped = CSRequestSetBountyMoneyPacket::read(&mut long).unwrap();
+        assert_eq!(capped.name.len(), BOUNTY_NAME_MAX_BYTES);
+    }
+
     #[test]
     fn c2s_bounty_requests_decode() {
         assert_eq!(
