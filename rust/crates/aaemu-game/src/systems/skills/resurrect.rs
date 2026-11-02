@@ -202,6 +202,25 @@ pub fn resurrect_character(server: &GameServer, p: &PlayerRef, in_place: bool) {
         }
     };
     super::broadcast(server, &me, &packet, true);
+    if portal.x != 0.0 {
+        // The client does not answer a resurrection with `CSTeleportEnded`: apply the temple /
+        // statue position to the server copy now so the destination zone (and its buffs) is
+        // re-evaluated even if no movement packet follows.
+        let instance_id = p.data().unit.transform.instance_id;
+        crate::world::session::resurrect_at(
+            server,
+            p,
+            crate::models::transform::Transform {
+                instance_id,
+                zone_id: portal.zone_id,
+                x: portal.x,
+                y: portal.y,
+                z: portal.z,
+                rot_z: portal.z_rot,
+                ..Default::default()
+            },
+        );
+    }
     let (hp, mp) = {
         let c = p.data();
         (c.unit.hp, c.unit.mp)
