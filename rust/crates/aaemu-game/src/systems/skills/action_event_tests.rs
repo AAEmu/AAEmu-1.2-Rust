@@ -309,6 +309,7 @@ async fn aggro_reset_selects_components_and_copy_registers_watchers() {
             damage_aggro: 100,
             heal_aggro: 0,
             etc_aggro: 7,
+            taunt_time: 0,
         }
     );
     execute(&server, 104, &args(&source, &target), [0; 4]);
@@ -329,6 +330,53 @@ async fn aggro_reset_selects_components_and_copy_registers_watchers() {
     // Native copy is a no-op when the source table is empty.
     execute(&server, 104, &args(&source, &target), [0; 4]);
     assert!(!other.data().unit.skill_state.aggro_table.is_empty());
+}
+
+#[tokio::test]
+async fn aggro_copy_drops_and_reset_clears_the_taunt_stamp() {
+    let (server, _client, player, npc) = fixture(GameData::empty());
+    let player_obj = WorldObject::from(&player);
+    let source = WorldObject::from(&npc);
+    let mut n = Npc::new(2);
+    n.unit.hp = 1000;
+    n.unit.transform.set_xyz(105.0, 100.0, 100.0);
+    let other = Entity::new(0x300, n);
+    server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&other, &server.view_ctx());
+    let target = WorldObject::from(&other);
+    super::combat::add_unit_aggro(&server, &source, AggroKind::Damage, &player_obj, 100);
+    npc.data()
+        .unit
+        .skill_state
+        .aggro_table
+        .get_mut(&player_obj.obj_id())
+        .unwrap()
+        .taunt_time = 1234;
+
+    execute(&server, 104, &args(&source, &target), [0; 4]);
+    let copied = other.data().unit.skill_state.aggro_table[&player_obj.obj_id()];
+    assert_eq!(copied.damage_aggro, 100);
+    assert_eq!(
+        copied.taunt_time, 0,
+        "aggro_copy must not carry the taunt lock"
+    );
+
+    // A reset clears stamps too (TAUNT-2).
+    other
+        .data()
+        .unit
+        .skill_state
+        .aggro_table
+        .get_mut(&player_obj.obj_id())
+        .unwrap()
+        .taunt_time = 77;
+    execute(&server, 105, &args(&player_obj, &target), [1, 0, 0, 50]);
+    let reset = other.data().unit.skill_state.aggro_table[&player_obj.obj_id()];
+    assert_eq!(reset.damage_aggro, 50);
+    assert_eq!(reset.taunt_time, 0, "aggro_reset must clear the stamp");
 }
 
 #[tokio::test]

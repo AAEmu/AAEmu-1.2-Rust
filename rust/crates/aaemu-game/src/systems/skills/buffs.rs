@@ -632,6 +632,8 @@ fn on_started(server: &GameServer, owner: &WorldObject, b: &Buff) {
     let Some(b) = resume_started_buff(server, owner, &b) else {
         return;
     };
+    // 10.x NpcAggroTable::TauntedBy on buff creation (10x-ONLY; see PORTING.md).
+    combat::on_taunt_buff_applied(server, owner, &b);
     if b.duration > 0 || !template.tick_effects.is_empty() {
         // SetInUse(true, false) -> ScheduleEffect(false)
         schedule_effect(server, owner, b.index, false);
@@ -669,6 +671,8 @@ fn on_refreshed(server: &GameServer, owner: &WorldObject, b: &Buff) {
     if !current_buff(owner, b).is_some_and(|live| !live.is_ended()) {
         return;
     }
+    // Re-stamp the taunt on refresh (TAUNT-1: the 10x refresh path is unknown).
+    combat::on_taunt_buff_applied(server, owner, b);
     let now = now_ms();
     let Some(gen) = set_buff(owner, b.index, |e| {
         if e.duration == 0 {
@@ -733,6 +737,10 @@ fn on_removed(server: &GameServer, owner: &WorldObject, b: &Buff) {
         unsubscribe_triggers(server, owner, b);
         restore_faction(server, owner, &template);
         remove_modifiers(server, owner, template.id);
+    }
+    if template.taunt {
+        // 10x CancelTauntedBy, after Dispelled has run (10x-ONLY; see PORTING.md).
+        combat::cancel_taunted_by(server, owner, b.caster_obj_id);
     }
     super::stats::refresh_cached_stats(server, owner);
 }
