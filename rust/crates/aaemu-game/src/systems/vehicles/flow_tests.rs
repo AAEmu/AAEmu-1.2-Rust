@@ -487,6 +487,59 @@ async fn mount_and_dismount_flow() {
 /// The movement speed baseline must not survive a ride, a teleport or a mate respawn (they were
 /// reported as 40 to 3000 m/s runs / pets).
 #[tokio::test]
+async fn a_server_teleport_dismounts_the_rider_instead_of_leaving_it_half_attached() {
+    let server = server_with(data());
+    let mut a = TestClient::new(&server, 1, 1);
+    let (pa, item_id) = player_with_item(&server, &a, 1, PA, (100.0, 100.0), MATE_ITEM);
+    a.conn.active_char = Some(pa.clone());
+    mates::spawn_mount(&server, &pa, item_id);
+    let mate = server
+        .systems
+        .vehicles
+        .mates
+        .get(0)
+        .get_active_mates(1)
+        .pop()
+        .expect("active mate");
+    let tl = u32::from(mate.data().unit.tl_id);
+    mates::mount_mate(&server, &pa, tl, attach_point::DRIVER, 1);
+    assert!(pa.data().is_riding);
+    a.drain();
+
+    let destination = crate::models::transform::Transform {
+        instance_id: 0,
+        x: 300.0,
+        y: 300.0,
+        z: 100.0,
+        ..crate::models::transform::Transform::default()
+    };
+    assert!(crate::world::session::teleport_character(
+        &server,
+        &pa,
+        destination
+    ));
+    assert!(!pa.data().is_riding);
+    assert_eq!(pa.data().attached_point, 0);
+    let t = pa.data().unit.transform;
+    assert_eq!((t.parent_obj_id, t.x, t.y), (0, 300.0, 300.0));
+    assert!(mate
+        .data()
+        .passenger(attach_point::DRIVER)
+        .is_none_or(|seat| seat.obj_id == 0));
+    assert!(server
+        .systems
+        .vehicles
+        .mates
+        .get(0)
+        .get_is_mounted(PA)
+        .is_none());
+    assert!(
+        ops(&a.drain()).contains(&sc::SCUnitDetachedPacket),
+        "the client is told the rider left the mount"
+    );
+}
+
+#[tokio::test]
 async fn riding_teleports_and_mate_respawns_reseed_the_speed_baseline() {
     use crate::models::movement::UnitMove;
     use crate::systems::services::sus::SampleCtx;
@@ -2560,6 +2613,70 @@ fn vehicle_bounds_cache_keeps_both_hits_and_misses() {
         "a cached hit is not reloaded"
     );
     assert_eq!(loads, 2);
+}
+
+/// A bind before the client files are available (heightmaps not loaded yet, or physics off)
+/// falls back to the attach-point measure but does not cache the miss: once the files are
+/// there, the next bind measures the body.
+#[tokio::test]
+async fn land_vehicle_bounds_are_not_cached_before_the_client_files_load() {
+    use crate::models::slave::Slave;
+    use crate::net::registry::ClientPacket;
+    use crate::systems::vehicles::packets::CSBindSlavePacket;
+    use crate::world::Entity;
+
+    let server = server_with(hauler_geometry_data());
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let mut a = TestClient::new(&server, 1, 1);
+    let pa = spawn_player(&server, &a, test_character(1, "Near", 107.2, 100.0), PA);
+    a.conn.active_char = Some(pa.clone());
+    {
+        let mut data = pa.data();
+        data.unit.hp = 1000;
+        data.unit.max_hp = 1000;
+    }
+    let world = server.world.world(0).unwrap();
+    let mut hauler = Slave::new(0, 146);
+    hauler.unit.hp = 1000;
+    hauler.unit.max_hp = 1000;
+    hauler.unit.model_id = 1553;
+    hauler.unit.tl_id = 3;
+    hauler.unit.transform.set_xyz(103.0, 100.0, 100.0);
+    hauler.summoner_obj_id = PA;
+    hauler.summoner_id = pa.character_id;
+    let hauler = Entity::new(0x300, hauler);
+    world.spawn(&hauler, &server.view_ctx());
+    a.drain();
+
+    // No client files yet: 4.2 m from the origin is outside the fallback reach.
+    CSBindSlavePacket { tl_id: 3 }
+        .handle(&server, &mut a.conn)
+        .await
+        .unwrap();
+    assert_eq!(error_codes(&a.drain()), vec![super::error::TOO_FAR_AWAY]);
+    assert!(
+        server.systems.vehicles.vehicle_bounds.get(&1553).is_none(),
+        "a bind without client files must not cache the missing bounds"
+    );
+
+    // The files arrive: the same position now binds against the body.
+    server
+        .systems
+        .ai
+        .collision
+        .test_files
+        .set(Arc::new(hauler_geometry_files()))
+        .unwrap();
+    CSBindSlavePacket { tl_id: 3 }
+        .handle(&server, &mut a.conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        hauler.data().attached_characters,
+        vec![(attach_point::DRIVER, PA)]
+    );
 }
 
 /// The 2026-11-02 01:43-01:44 capture: the client offers the driver bind beside the Red Farm
