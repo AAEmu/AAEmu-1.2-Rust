@@ -1437,14 +1437,16 @@ fn vehicle_model_bounds(
     server: &GameServer,
     model_id: u32,
 ) -> Option<aaemu_physics::geometry::primitives::BoxPrim> {
+    // Only a result read from the model files is cached: the client files are unavailable
+    // until the heightmaps load (or while physics is off), and that must not pin `None`.
+    let reference = server
+        .game_data
+        .systems
+        .vehicles
+        .vehicle_model_refs
+        .get(&model_id)?;
+    let files = crate::systems::ai::collision::files(server)?;
     cached_vehicle_bounds(&server.systems.vehicles.vehicle_bounds, model_id, || {
-        let reference = server
-            .game_data
-            .systems
-            .vehicles
-            .vehicle_model_refs
-            .get(&model_id)?;
-        let files = crate::systems::ai::collision::files(server)?;
         let models = crate::systems::ai::collision::model_cache(server, &files);
         crate::systems::ai::physics::cry::model_bounds_including_bodies(&files, &models, reference)
     })
