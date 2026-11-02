@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! aaemu-testclient run    [--config F] [--login H:P] [--user U] [--password P] [--character C]
-//!                         [--scenario login|lobby|full|combat|npc-return|mate-revive|questitem|doodad|plant|cometsboon|stonethrow|ghost|lunafrost|portal|craft|load]
+//!                         [--scenario login|lobby|full|combat|npc-return|mate-revive|questitem|doodad|plant|cometsboon|stonethrow|ghost|lunafrost|portal|craft|busy|load]
 //!                         [--out capture.jsonl]
 //!                         [--npc-return-distance M] [--npc-return-away-secs S]
 //!                         [--revive-method repair|skill|none]   (mate-revive; GM account needed)
@@ -11,7 +11,7 @@
 //!                         [--rounds N]
 //! aaemu-testclient diff   --a capA.jsonl --b capB.jsonl [--masks masks.json]
 //! aaemu-testclient load   [--config F] [--login H:P] --bots N [--prefix load] [--ramp-ms 20]
-//!                         [--scenario load]
+//!                         [--scenario load|busy] [--busy-secs 300]
 //! aaemu-testclient verify --suite file.vtest [--login H:P] [--password P] [--list-bots]
 //!                         Run one live verification suite (see Docs/wiki/Verification.md).
 //! aaemu-testclient control --describe
@@ -121,6 +121,9 @@ fn bot_config_with(
         if let Some(x) = args.get(flag) {
             obj.insert(key.into(), x.parse::<u64>()?.into());
         }
+    }
+    if let Some(x) = args.get("busy-secs") {
+        obj.insert("busy_secs".into(), x.parse::<u64>()?.into());
     }
     if let Some(x) = args.get("npc-return-distance") {
         obj.insert("npc_return_distance".into(), x.parse::<f64>()?.into());
