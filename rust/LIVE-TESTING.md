@@ -415,3 +415,51 @@ second session entering the world again at the saved position. No server errors.
 
 Stop the servers (Ctrl+C, or `taskkill //IM aaemu-game.exe //IM aaemu-login.exe //IM
 AAEmu.Game.exe //IM AAEmu.Login.exe`), then shut the private MySQL down (`SHUTDOWN` above).
+
+## 8. Delaying selected server replies (`Debug:ReplyDelay`)
+
+At localhost the server answers a C->S packet in about 1 ms, inside the same client frame, so a
+capture cannot tell a client rule from a reaction to our reply (evidence audit 2026-11-01, F2).
+This opt-in switch holds chosen S->C frames for `DelayMs` before they reach the socket. It is
+**off by default** and changes nothing but the send time: no game logic, no server-side timing.
+
+`Config.Local.json` (game server; restart to change, it is resolved once at startup):
+
+```json
+{
+  "Debug": {
+    "ReplyDelay": {
+      "DelayMs": 600,
+      "Packets": ["SCSkillStarted", "SCSkillFired", "SCCombatCleared"],
+      "RepliesTo": ["CSStartSkill", "CSCompletedCinema"],
+      "CharacterName": "Capturechar",
+      "DelayEverythingAfter": false
+    }
+  }
+}
+```
+
+* `Packets` — S->C packet names from `opcodes::sc::NAMES`; `SCSkillStarted` and
+  `SCSkillStartedPacket` are the same selector (case-insensitive). Unknown names are warned about
+  and ignored.
+* `RepliesTo` — C->S packet names (`opcodes::cs::NAMES` / `pp::NAMES`): every frame the connection
+  task sends while that handler runs is held, including `player.send` through the character's
+  connection handle. The context is task-local: a frame another task queues through a handle
+  during a handler await (e.g. a mob broadcast while the handler waits on the DB) is not a reply
+  and is not held.
+* `CharacterName` — optional, case-insensitive: only that character's connection is affected (the
+  name is recorded when the character is attached, `Player::new`). Lobby frames of the account and
+  other players on the same server are not held.
+* `DelayEverythingAfter` — `false` (default) holds only selected frames; an unselected frame
+  queued after a held one is written immediately and overtakes it. `true` holds every later frame
+  of that connection for the same delay, so the full order is preserved. Use it when the capture
+  needs strict ordering (e.g. `SCSkillStarted` before `SCSkillFired`).
+* The delay applies to every recipient of a selected broadcast, so combine it with
+  `CharacterName` when other sessions play beside the capture.
+* `DelayMs` is clamped to 60000 ms. The disconnect path waits at most 5 s for the writer to flush,
+  so a hold above 5 s drops held frames when the connection closes.
+
+Startup logs `Debug:ReplyDelay on: <ms>; S->C packets [...]; replies to C->S [...]; character ...`
+once when it is active; nothing is logged per packet. Measure the effect from the capture's own
+client clock (e.g. `aaemu-testclient --out run.jsonl`, then compare `t_ms` of `CSStartSkill` and
+`SCSkillStarted`), not from the server log tail: the server log has 1 s resolution.
