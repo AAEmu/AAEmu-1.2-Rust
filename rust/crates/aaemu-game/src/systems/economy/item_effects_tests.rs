@@ -6,8 +6,9 @@ use aaemu_commons::{Marshal, PacketStream};
 
 use crate::data::formulas::FormulaManager;
 use crate::data::items::{
-    EquipTemplate, FullGradeTemplate, ItemCapScale, ItemGradeEnchantingSupport, ItemTemplate,
-    TemplateKind, ITEM_CREST_STAMP, ITEM_DAWN_STONE,
+    EquipSlotGroupMap, EquipTemplate, FullGradeTemplate, ItemCapScale, ItemGradeEnchantingSupport,
+    ItemSocket, ItemSocketLevelLimit, ItemSocketNumLimit, ItemTemplate, TemplateKind,
+    ITEM_CREST_STAMP, ITEM_DAWN_STONE,
 };
 use crate::data::GameData;
 use crate::managers::chat::chat_type;
@@ -35,9 +36,14 @@ use crate::test_support::{spawn_player, test_character, test_server_with, TestCl
 use crate::world::{Entity, PlayerRef};
 
 const ARMOR: u32 = 2100; // chest, no binding, level 10
+const SOCKET_ARMOR: u32 = 2110; // chest, level 20, level requirement 50
+const LOW_ARMOR: u32 = 2111; // chest, level 20, level requirement 40
 const SCROLL: u32 = 5000;
 const CHARM: u32 = 5100;
-const GEM: u32 = 5200;
+const GEM: u32 = 5200; // chest lunagem, requires a level-50 item
+const HANDS_GEM: u32 = 5201; // hands lunagem, no level limit
+const LOW_GEM: u32 = 5202; // chest lunagem, no level limit (only the item-level gate applies)
+const FAIL_GEM: u32 = 5203; // hands lunagem requiring a level-50 item (fails level and group)
 const POWDER: u32 = 5300;
 const SLAVE_ITEM: u32 = 5400;
 const BACKPACK: u32 = 5500;
@@ -104,16 +110,117 @@ fn data() -> GameData {
     armor.disenchantable = true;
     armor.impl_id = 3;
     d.items.templates.insert(ARMOR, armor);
+    for (template, level_requirement) in [(SOCKET_ARMOR, 50), (LOW_ARMOR, 40)] {
+        let mut socket_armor = ItemTemplate::new(
+            template,
+            TemplateKind::Armor(EquipTemplate {
+                slot_type_id: 3,
+                coverage: 10,
+                durability_ratio: 1.0,
+                durability_multiplier: 100,
+                ..EquipTemplate::default()
+            }),
+        );
+        socket_armor.max_count = 1;
+        socket_armor.level = 20;
+        socket_armor.level_requirement = level_requirement;
+        d.items.templates.insert(template, socket_armor);
+    }
     for (id, max) in [
         (SCROLL, 10),
         (CHARM, 10),
         (GEM, 10),
+        (HANDS_GEM, 10),
+        (LOW_GEM, 10),
+        (FAIL_GEM, 10),
         (POWDER, 10),
         (ITEM_DAWN_STONE, 10),
         (TIMEGLASS, 10),
     ] {
         d.items.templates.insert(id, ItemTemplate::plain(id, max));
     }
+    // Socket rules used by the socketing tests: chest slot type 3 fits group 23, hands fits 18.
+    d.items.item_socket_num_limits.insert(
+        (3, 0),
+        ItemSocketNumLimit {
+            id: 1,
+            slot_id: 3,
+            grade_id: 0,
+            num_socket: 2,
+        },
+    );
+    d.items.item_socket_level_limits.insert(
+        GEM,
+        ItemSocketLevelLimit {
+            id: 1,
+            item_id: GEM,
+            level: 50,
+        },
+    );
+    d.items.item_socket_level_limits.insert(
+        HANDS_GEM,
+        ItemSocketLevelLimit {
+            id: 2,
+            item_id: HANDS_GEM,
+            level: 0,
+        },
+    );
+    d.items.item_socket_level_limits.insert(
+        FAIL_GEM,
+        ItemSocketLevelLimit {
+            id: 3,
+            item_id: FAIL_GEM,
+            level: 50,
+        },
+    );
+    d.items.item_sockets.insert(
+        GEM,
+        ItemSocket {
+            id: 1,
+            item_id: GEM,
+            equip_slot_group_id: 23,
+        },
+    );
+    d.items.item_sockets.insert(
+        HANDS_GEM,
+        ItemSocket {
+            id: 2,
+            item_id: HANDS_GEM,
+            equip_slot_group_id: 18,
+        },
+    );
+    d.items.item_sockets.insert(
+        LOW_GEM,
+        ItemSocket {
+            id: 3,
+            item_id: LOW_GEM,
+            equip_slot_group_id: 23,
+        },
+    );
+    d.items.item_sockets.insert(
+        FAIL_GEM,
+        ItemSocket {
+            id: 4,
+            item_id: FAIL_GEM,
+            equip_slot_group_id: 18,
+        },
+    );
+    d.items.equip_slot_group_maps.insert(
+        23,
+        vec![EquipSlotGroupMap {
+            id: 1,
+            equip_slot_group_id: 23,
+            equip_slot_type_id: 3,
+        }],
+    );
+    d.items.equip_slot_group_maps.insert(
+        18,
+        vec![EquipSlotGroupMap {
+            id: 2,
+            equip_slot_group_id: 18,
+            equip_slot_type_id: 6,
+        }],
+    );
     // A rechargeable equip (the 1.2 "costume wash" mechanic: recharge_buff_id + charge window).
     let mut rechargeable = ItemTemplate::new(
         RECHARGEABLE,
@@ -552,7 +659,7 @@ fn charm_chance_math() {
 #[tokio::test]
 async fn socketing_success_failure_and_dawnstone() {
     let mut w = world();
-    let id = give(&w, &w.pa.clone(), slot_type::INVENTORY, ARMOR, 1, 0);
+    let id = give(&w, &w.pa.clone(), slot_type::INVENTORY, SOCKET_ARMOR, 1, 0);
     let gem = give(&w, &w.pa.clone(), slot_type::INVENTORY, GEM, 3, 1);
     let dawn = give(
         &w,
@@ -678,6 +785,192 @@ async fn socketing_success_failure_and_dawnstone() {
             install: false,
         })
     );
+
+    // Removing from an item with no gems is rejected with `item_sockets_empty`, without a roll.
+    w.pa.data().skill_char.skill_cancelled = false;
+    mark_clean(&w, id);
+    let mut rng = ScriptedRng::new(&[], &[]);
+    item_socketing(
+        &w.server,
+        &w.pa,
+        dawn_caster,
+        None,
+        Some(id),
+        [0; 4],
+        TL,
+        &mut rng,
+    );
+    assert!(rng.int_calls.is_empty());
+    assert_eq!(w.a.drain(), vec![error(error_message::ITEM_SOCKETS_EMPTY)]);
+    assert_eq!(item(&w, id).unwrap().details.gem_ids, [0; 7]);
+    assert!(!item(&w, id).unwrap().dirty);
+    assert!(w.pa.data().skill_char.skill_cancelled);
+}
+
+/// Runs the real `ItemSocketing` special effect: `special::execute` routes to the installed
+/// economy hook, which calls `item_effects::item_socketing`.
+fn socketing_effect(w: &World, gem_item_id: u64, gem_template_id: u32, target_item_id: u64) {
+    use crate::systems::skills::effects::{EffectArgs, EffectSource};
+    use crate::systems::skills::geometry::Target;
+    use crate::systems::skills::state::SkillRun;
+    use crate::systems::skills::types::{CastAction, SkillCastTarget, SkillCaster, SkillObject};
+    use crate::world::WorldObject;
+
+    let skill = SkillRun::new(
+        Arc::new(crate::systems::skills::tests::skill_template(23728)),
+        1,
+    );
+    let args = EffectArgs {
+        caster: Some(WorldObject::from(&w.pa)),
+        caster_caster: SkillCaster::Item {
+            obj_id: w.pa.obj_id,
+            item_id: gem_item_id,
+            item_template_id: gem_template_id,
+            type1: 0,
+            type2: 0,
+        },
+        target: Target::Obj(WorldObject::from(&w.pa)),
+        target_caster: SkillCastTarget::Item {
+            obj_id: w.pa.obj_id,
+            id: target_item_id,
+            type1: 0,
+            type2: 0,
+        },
+        cast: CastAction::Skill {
+            skill_id: 23728,
+            tl_id: 1,
+        },
+        source: EffectSource::from_skill(skill),
+        skill_object: &SkillObject::None,
+    };
+    crate::systems::skills::effects::special::execute(&w.server, 106, &args, [0; 4]);
+}
+
+fn fill_gems(w: &World, id: u64, gems: &[u32]) {
+    let c = Inv::of(&w.pa).bag();
+    let mut g = c.lock().unwrap();
+    let item = g.get_item_by_id_mut(id).unwrap();
+    item.details.gem_ids.fill(0);
+    item.details.gem_ids[..gems.len()].copy_from_slice(gems);
+    item.dirty = false;
+}
+
+#[tokio::test]
+async fn socketing_rejects_gem_for_the_wrong_slot_group() {
+    let mut w = world();
+    super::bridges::install(&w.server);
+    let target = give(&w, &w.pa.clone(), slot_type::INVENTORY, SOCKET_ARMOR, 1, 0);
+    let gem = give(&w, &w.pa.clone(), slot_type::INVENTORY, HANDS_GEM, 1, 1);
+    mark_clean(&w, target);
+    w.pa.data().skill_char.skill_cancelled = false;
+    socketing_effect(&w, gem, HANDS_GEM, target);
+    assert_eq!(w.a.drain(), vec![error(error_message::INVALID_TARGET)]);
+    assert_eq!(item(&w, target).unwrap().details.gem_ids, [0; 7]);
+    assert!(!item(&w, target).unwrap().dirty);
+    assert!(
+        w.pa.data().skill_char.skill_cancelled,
+        "a rejected socketing must cancel the cast so the gem is refunded"
+    );
+}
+
+#[tokio::test]
+async fn socketing_rejects_a_gem_above_the_target_level_limit() {
+    let mut w = world();
+    super::bridges::install(&w.server);
+    let target = give(&w, &w.pa.clone(), slot_type::INVENTORY, LOW_ARMOR, 1, 0);
+    let gem = give(&w, &w.pa.clone(), slot_type::INVENTORY, GEM, 1, 1);
+    mark_clean(&w, target);
+    w.pa.data().skill_char.skill_cancelled = false;
+    socketing_effect(&w, gem, GEM, target);
+    assert_eq!(w.a.drain(), vec![error(error_message::SOCKET_TARGET_LEVEL)]);
+    assert_eq!(item(&w, target).unwrap().details.gem_ids, [0; 7]);
+    assert!(w.pa.data().skill_char.skill_cancelled);
+}
+
+#[tokio::test]
+async fn socketing_rejects_a_target_below_the_minimum_item_level() {
+    let mut w = world();
+    super::bridges::install(&w.server);
+    let target = give(&w, &w.pa.clone(), slot_type::INVENTORY, ARMOR, 1, 0);
+    let gem = give(&w, &w.pa.clone(), slot_type::INVENTORY, LOW_GEM, 1, 1);
+    mark_clean(&w, target);
+    w.pa.data().skill_char.skill_cancelled = false;
+    socketing_effect(&w, gem, LOW_GEM, target);
+    assert_eq!(w.a.drain(), vec![error(error_message::SOCKET_TARGET_LEVEL)]);
+    assert_eq!(item(&w, target).unwrap().details.gem_ids, [0; 7]);
+}
+
+#[tokio::test]
+async fn socketing_rejects_a_target_with_no_num_socket_limit() {
+    let mut w = world();
+    super::bridges::install(&w.server);
+    let target = give(&w, &w.pa.clone(), slot_type::INVENTORY, SOCKET_ARMOR, 1, 0);
+    // Slot 3 has a limit only for grade 0; grade 1 has no row (0 sockets).
+    set_grade(&w, target, 1);
+    let gem = give(&w, &w.pa.clone(), slot_type::INVENTORY, GEM, 1, 1);
+    mark_clean(&w, target);
+    w.pa.data().skill_char.skill_cancelled = false;
+    socketing_effect(&w, gem, GEM, target);
+    assert_eq!(w.a.drain(), vec![error(error_message::INVALID_TARGET)]);
+    assert_eq!(item(&w, target).unwrap().details.gem_ids, [0; 7]);
+    assert!(w.pa.data().skill_char.skill_cancelled);
+}
+
+#[tokio::test]
+async fn socketing_level_limit_wins_over_the_slot_group() {
+    let mut w = world();
+    super::bridges::install(&w.server);
+    // LOW_ARMOR requires level 40; FAIL_GEM needs 50 and is a hands gem on a chest armor.
+    let target = give(&w, &w.pa.clone(), slot_type::INVENTORY, LOW_ARMOR, 1, 0);
+    let gem = give(&w, &w.pa.clone(), slot_type::INVENTORY, FAIL_GEM, 1, 1);
+    mark_clean(&w, target);
+    w.pa.data().skill_char.skill_cancelled = false;
+    socketing_effect(&w, gem, FAIL_GEM, target);
+    assert_eq!(w.a.drain(), vec![error(error_message::SOCKET_TARGET_LEVEL)]);
+    assert_eq!(item(&w, target).unwrap().details.gem_ids, [0; 7]);
+    assert!(w.pa.data().skill_char.skill_cancelled);
+}
+
+#[tokio::test]
+async fn socketing_enforces_the_num_socket_limit() {
+    let mut w = world();
+    super::bridges::install(&w.server);
+    let target = give(&w, &w.pa.clone(), slot_type::INVENTORY, SOCKET_ARMOR, 1, 0);
+    // Slot 3 (chest), grade 0 allows 2 gems in the test data.
+    fill_gems(&w, target, &[GEM, GEM]);
+    let gem = give(&w, &w.pa.clone(), slot_type::INVENTORY, GEM, 1, 1);
+    mark_clean(&w, target);
+    w.pa.data().skill_char.skill_cancelled = false;
+    socketing_effect(&w, gem, GEM, target);
+    assert_eq!(w.a.drain(), vec![error(error_message::ITEM_SOCKETS_FULL)]);
+    assert_eq!(item(&w, target).unwrap().details.gem_ids[2], 0);
+    assert!(w.pa.data().skill_char.skill_cancelled);
+}
+
+#[tokio::test]
+async fn socketing_a_valid_gem_still_succeeds() {
+    let mut w = world();
+    super::bridges::install(&w.server);
+    let target = give(&w, &w.pa.clone(), slot_type::INVENTORY, SOCKET_ARMOR, 1, 0);
+    let gem = give(&w, &w.pa.clone(), slot_type::INVENTORY, GEM, 1, 1);
+    mark_clean(&w, target);
+    w.pa.data().skill_char.skill_cancelled = false;
+    socketing_effect(&w, gem, GEM, target);
+    let after = item(&w, target).unwrap();
+    assert_eq!(after.details.gem_ids, [GEM, 0, 0, 0, 0, 0, 0]);
+    assert!(after.dirty);
+    assert!(!w.pa.data().skill_char.skill_cancelled);
+    let frames = w.a.drain();
+    assert!(frames.iter().any(|(opcode, raw)| {
+        *opcode == sc::SCItemSocketingLunagemResultPacket
+            && *raw
+                == body(&SCItemSocketingLunagemResultPacket {
+                    result: 1,
+                    item_id: target,
+                    template_id: GEM,
+                    install: true,
+                })
+    }));
 }
 
 /// The lunafrost skill's `InteractionEffect` (`MAGICAL_ENCHANT`) carries the rune as the

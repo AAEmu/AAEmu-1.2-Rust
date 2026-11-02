@@ -26,6 +26,7 @@ mod plant;
 mod portal;
 mod questitem;
 mod script;
+mod socket;
 
 /// Which scenario to run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +86,10 @@ pub enum Kind {
     /// 14602 cast at doodad 841, see `scenario/portal.rs`). GM account.
     #[serde(rename = "portal")]
     Portal,
+    /// Lunagem socketing (skill 23728): a wrong slot group is rejected with error 18 and the gem
+    /// survives, a fitting gem is installed and consumed (see `scenario/socket.rs`). GM account.
+    #[serde(rename = "socket")]
+    Socket,
     /// A craft batch that runs out of labor ends with the `SCErrorMsg` 148 the client needs to
     /// unlock its craft window (Gilda Star disintegration at an Archeum Workbench, see
     /// `scenario/craft.rs`). GM account.
@@ -115,10 +120,11 @@ impl std::str::FromStr for Kind {
             "ghost" => Self::Ghost,
             "lunafrost" => Self::Lunafrost,
             "portal" => Self::Portal,
+            "socket" => Self::Socket,
             "craft" => Self::Craft,
             "script" => Self::Script,
             _ => bail!(
-                "unknown scenario '{s}' (login, lobby, full, combat, npc-return, mate-revive, questitem, doodad, \n                 plant, cometsboon, stonethrow, ghost, lunafrost, portal, craft, script, load)"
+                "unknown scenario '{s}' (login, lobby, full, combat, npc-return, mate-revive, questitem, doodad, \n                 plant, cometsboon, stonethrow, ghost, lunafrost, portal, socket, craft, script, load)"
             ),
         })
     }
@@ -907,6 +913,11 @@ async fn run_inner(
     }
     if kind == Kind::Portal {
         portal::run(&mut game, cfg, r).await?;
+        drop(stream);
+        return Ok(());
+    }
+    if kind == Kind::Socket {
+        socket::run(&mut game, r).await?;
         drop(stream);
         return Ok(());
     }

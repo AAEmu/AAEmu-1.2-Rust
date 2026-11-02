@@ -376,7 +376,7 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 | `TeamManager`, `Models/Game/Team` | `systems/social/team.rs`, `packets/team.rs` | done | Invitations (single / area, 60 s timeout), create, AskRiskyTeam (leave / kick / dismiss + auto-disband), owner / role / marker / looting rule / ping / move, raid conversion, SetOffline / MemberRemoveFromTeam / UpdateAtLogin / UpdatePosition, 500 ms remote-member sync (delta cache, 5 s forced resync, upper-triangle pairs), zombie-team disband (5 min), loot winner helpers. Events (OnTeamJoin/Leave) are quest-side: not called. |
 | `ExpeditionManager`, `Models/Game/Expeditions` | `systems/social/expedition.rs`, `packets/expedition.rs` (`managers::expedition` re-exports) | done | Load, create (party checks, cost, `SCItemTaskSuccessPacket` money-only form), invite / reply, leave, kick, member role, owner, role policy, disband (stays listed as `$deleted-guild-<id>`), `Expedition.Save` per change, offline leave for character deletion. Rename / sponsor are log-only / not in 1.2 as in C#. |
 | `FamilyManager`, `Models/Game/Family` | `systems/social/family.rs`, `packets/family.rs` | done | Load, invite / reply / create, leave, kick (offline existence check), title, steward, login / logout, disband, save, offline leave for character deletion. |
-| `FriendMananger`, `CharacterFriends`, `CharacterBlocked` | `systems/social/friend.rs`, `packets/friend.rs` (`managers::friend` re-exports) | done | Add / remove friends (online or by DB name lookup), block / unblock (online only), status changes incl. `InParty`. |
+| `FriendMananger`, `CharacterFriends`, `CharacterBlocked` | `systems/social/friend.rs`, `packets/friend.rs` (`managers::friend` re-exports) | done | Add / remove friends (online or by DB name lookup), block / unblock (online or by `NameManager` for offline names), status changes incl. `InParty`. The blocked list is enforced on every direct delivery path (whisper, team / area / expedition / family invite, friend add, trade and duel request); see the block-list deviation. |
 | `ChatManager`, `Models/Game/Chat` | `systems/social/chat.rs`, `session.rs` (`managers::chat` re-exports) | done | All channel kinds incl. party / raid / court, CleanUpChannels, party / raid / raid-leader / judge routing. User channels (`CSJoinUserChatChannel`) are log-only as in C#. |
 | `FactionManager` relations, `SystemFaction.GetRelationState`, `Unit/Character.SetFaction` | `systems/social/faction.rs`, `packets/faction.rs` | done | Relation table validated against compact.sqlite3 (gated test). Faction CS packets are log-only as in C#; every SCFaction* struct ported. |
 | `GameData/AchievementGameData` (`achievements`, `achievement_objectives`, `pre_completed_achievements`, `char_records`), `Models/Game/Achievement` | `systems/social/achievement.rs` (`server.game_data.systems.social.achievements`) | done | Loader + port of `AchievementGameDataTests`; gated real-DB test `achievement_game_data_real_compact_db`. The C# 1.2 tree has no manager; the Rust achievement manager / runtime / hooks / rewards (`achievement_*.rs`) read them (see "Achievement producers" below). |
@@ -890,6 +890,23 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 
 ## Known deviations from the C#
 
+* systems::social (blocked users): `CharacterBlocked` was stored and sent at login but never
+  read, so a blocked player could still whisper, invite (party / raid / area, expedition,
+  family), add as a friend, request a trade or a duel. Every one of those delivery paths now
+  checks the recipient's list under the recipient's own lock
+  (`systems::social::friend::is_blocked_by`) and drops the delivery when the sender is on it.
+  Blocking / unblocking also resolves offline names through `NameManager` (the C# only accepted
+  online names); unknown names are still ignored without a reply, as in the C#, and the
+  successful `SCAddBlockedUser` / `SCDeleteBlockedUser` replies carry the resolved id / name, so
+  the login `SCBlockedUsers` snapshot and the reply describe the same `blocked` row. The
+  sender-side reply is silent: the 1.2 client has no "target blocked you" error, and its
+  whisper display (`chat/chat_msg_event.alb`, function 20) has no block-list check; the
+  block / unblock UI only uses the existing 352 / 353 / 354 and 551 / 553 codes.
+  **Capture-pending** (`BLOCK-LIST-1`): 1.2 retail's exact sender-side reply is unknown.
+  Friend requests to an **offline** target are not blocked because an offline character's list
+  is not loaded (`BLOCK-LIST-2`), and mail is delivered as before: no 1.2 client mail filter or
+  error / system text for mail from a blocked player was found (`BLOCK-LIST-3`).
+
 * systems::npcs (persistent doodads): `SpawnPersistentDoodads` skips the housing lookup for SLAVE-owned rows. In the C# every row with `houseId > 0` was resolved as a house, but for vehicle cargo racks `house_id` holds the hull id, so it logged "can't find it's owning house" (or, if a house with that id existed, parented the rack to it before the slave re-attach).
 
 * systems::npcs (2026-11-02, NPC groups): the C# `NpcGroupGameData` loaded `npc_groups` /
@@ -997,7 +1014,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `session::teleport_character` (`world/session.rs`), which applies the transform, moves the
   instance object table and dispatches `OnZoneChange`; the arrival is filed by
   `CSInstanceLoadedPacket` (`systems/instances/worlds.rs`) or, for a same-instance teleport, by
-  `session::file_teleport_arrival`. **Deviation:** `CSTeleportEndedPacket` now follows the
+  `session::file_teleport_arrival`. A rider, a bound seat or a doodad bond is released first
+  (`vehicles::force_dismount`, `PrefabChanged`, as the GM teleport and the trial do); the
+  parentless transform would otherwise leave it half attached on the server. **Deviation:** `CSTeleportEndedPacket` now follows the
   client's reported landing position and refiles the region before repainting (the C# only ran
   `ResendVisibleObjectsToCharacter`), so GM `/move`, same-instance portals and navi teleports
   re-evaluate the zone without waiting for a movement packet. Only a teleport armed through
@@ -1703,6 +1722,28 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   and temper reset write plain `ItemDetails` fields; the C# setter-less fields did not mark
   `IsDirty`, so `ItemManager.Save` skipped them. Rust marks `Item.dirty` in those paths and the
   regressions assert the next prepared save snapshot contains the item.
+* systems::economy (lunagem socketing rules, 2026-11): the C# `ItemSocketing.Execute` only
+  checked the 7-element `GemIds` array. Rust also applies the rules the 1.2 client itself checks
+  (`FUN_397ceb80` in the client decompile): the target's `items.LEVEL` must be >= 20
+  (`content_configs` id 62, kind 24); a lunagem may only go into gear whose
+  `items.level_requirement` is at least its `item_socket_level_limits.level`; the gem's
+  `item_sockets.equip_slot_group_id` must map through `equip_slot_group_maps` to the target
+  template's `EquipmentItemSlotType`; and the target may hold at most
+  `item_socket_num_limits[slot type][grade]` gems. `item_socket_num_limits.slot_id` is the
+  **equip slot type** (the client feeds the target's slot type straight into the lookup), not an
+  equip slot group. The level check runs before the slot-group/limit checks. A missing or zero
+  num-limit row means 0 sockets (`FUN_395aca00` returns 0) and the client reports 18
+  (`invalid_target`), not 742; only an existing limit already reached is `item_sockets_full`. A
+  missing level-limit row means no limit (`FUN_395aca70` returns `INT_MAX`), and the 15
+  `item_sockets` rows whose item has no `items` row (test/removed items) are skipped at load.
+  Rejections send the 1.2 error codes 18 (`invalid_target`, wrong slot group or no socket
+  limit), 742 (`item_sockets_full`),
+  743 (`item_sockets_empty`) or 781 (`socket_target_level`) and cancel the cast, which refunds
+  the gem and skips the roll; the C# returned early without cancelling, so the
+  `UseSkillAsReagent` gem was consumed even on a rejected attempt. DawnStone removal keeps its
+  old behavior except for the client's `item_sockets_empty` rejection. Existing items with more
+  gems than the current limit are left untouched at load, and regrade keeps their gems unchanged
+  (as the C# did; the client only warns that a downgrade can lose them).
 * systems::economy / npcs / skills (lunafrost, 2026-10): the C# `InteractionEffect` passed the
   `SkillItem` caster and `SkillCastItemTarget` to `MagicalEnchant.Execute`; the Rust bridge dropped
   them, so a lunafrost never applied. They are forwarded now. `MagicalEnchant` also looks the item up
@@ -2450,7 +2491,7 @@ and in NPC wandering / buff remaining times.
   a member joining an existing team never joins the party / raid
   chat (but can still talk into it); `IsMarked` compares mark object ids with character ids;
   `ExpeditionManager.ChangeOwner` does not update `OwnerName`; `ReplyInvite` does not check an
-  existing guild; `ChangeExpeditionRolePolicy` requires the Expel right; disbanded guilds stay in
+  existing guild; disbanded guilds stay in
   the list; family invitations always carry family id 1; hard disconnects keep the family member's
   character set; `GetTrialChat` throws when the faction has no court and the player is in no trial;
   `CSAddFriend` accepts yourself.
@@ -3192,6 +3233,15 @@ Deviations from the 1.2 C# `ExpeditionManager` / `TeamManager`, which trusted ev
 - `ChangeLootingRule` accepted any character id as loot master. It must now be 0 or a member of the
   team; otherwise only that field is ignored (logged). Over-head markers are unchanged: their
   target is any unit or object, not a team member.
+- `ChangeExpeditionRolePolicy` required the editor's `Expel` flag and copied only `Name`, `Invite`,
+  `JoinSiege`, `Promote` and `Expel`, so an edit silently dropped `DominionDeclare`, `Dismiss`,
+  `Chat`, `ManagerChat` and `SiegeMaster` from the stored policy and the broadcast (the 1.2 packet
+  carries all nine flags). The Rust stores the whole policy and follows the 1.2 client's
+  role-policy tab instead of the C# right: `expedition_management.alb` decorates each policy with
+  `SET_POLICY = (role == 255)`, and `expedition_management_role_policy_tab.alb`'s
+  `CanChangePolicy` requires that flag plus a lower target role. Only the owner may edit, and the
+  owner's own policy is not editable. **Capture-pending:** the rule comes from the client UI, not
+  from a 1.2 server capture; the C# `Expel` check is not mirrored.
 
 ## Client skill cast authority (2026-10-20)
 
@@ -3810,7 +3860,9 @@ special effect (43) and `InstantGameManager` reset (`instant_game.rs`, one
 `SCSkillCooldownReset` per skill of tag 378) send their resets and clear the matching server
 records. Clearing them is a deviation forced by persistence: the C# reset only sent the client
 packet, which was enough while `UnitCooldowns` died with the session; here a relog would
-otherwise restore a cooldown the battlefield reset removed.
+otherwise restore a cooldown the battlefield reset removed. The battlefield reset clears each
+skill's shared `cooldown_tag_id` record as well: tag cooldowns are persisted too, and a running
+tag would keep refusing the skills the reset showed as ready.
 
 Recall's path: skill 14849 / 21586 is **not** `plot_only` and has no `plot_id`; it is a normal
 `timing_id == 1`, `toggle_buff_id == 0` skill, so the client starts its 2000 ms cooldown itself.

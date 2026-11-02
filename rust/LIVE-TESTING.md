@@ -265,6 +265,13 @@ that updates the armor with the rune, and exactly one consumed lunafrost. It the
 (`CSSwapItems` to the head slot) and repeats the cast on the worn item. The stat bonus of the worn rune is
 not visible on the wire (see the `gear_bonuses_include_the_rune_modifiers` unit test); the server log must show
 no warning or error around the `StartSkill: Id 11285` lines.
+`socket` (GM account, same prerequisites as `questitem`) checks the lunagem socket rules: it adds
+a grade-4 chest armor (19327) and two lunagems with the GM `/item add` command. A hands lunagem
+(30959, `item_sockets` group 18) on the chest is rejected with `SCErrorMsg` 18 (`invalid_target`)
+and the gem is not consumed (a second cast of the same stack is rejected too). A chest lunagem
+(30958, group 17, no level limit) is installed on the armor: `SCItemSocketingLunagemResult` with
+result 1, the armor id, the gem template and `install=true`, a `Socketing` item task (99) that
+updates the armor, and exactly one `SkillReagents` task that consumes the gem stack.
 `craft` (GM account, same prerequisites as `questitem`) spawns an Archeum Workbench (doodad 566, `/spawn doodad`),
 adds 100 Gilda Stars (item 23633), tops the bot's labor up by 12 (`/labor 12`; GM commands can only add labor) and sends
 `CSExecuteCraft` for craft 8000001 (3 labor per craft) with count 100, so the batch outlasts the labor. It requires at

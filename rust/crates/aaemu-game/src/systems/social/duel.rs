@@ -342,6 +342,11 @@ impl DuelManager {
             send_error(challenger, util::error::BAD_DUEL_TARGET);
             return;
         };
+        // A blocked challenger's duel request is dropped silently; 1.2 has no dedicated
+        // sender-side error (capture-pending, case `BLOCK-LIST-1`).
+        if crate::systems::social::friend::is_blocked_by(&challenged, challenger.character_id) {
+            return;
+        }
         let duel = Arc::new(Duel::new(challenger.clone(), challenged.clone()));
         {
             // One critical section: check and register, so two challenges cannot both pass.

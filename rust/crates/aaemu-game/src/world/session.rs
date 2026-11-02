@@ -232,6 +232,15 @@ pub fn teleport_character(server: &GameServer, p: &PlayerRef, destination: Trans
             destination.instance_id
         );
     }
+    // A rider, a bound seat or a doodad bond would stay half attached on the server once the
+    // transform loses its parent (the client is moved off it): dismount first, as the GM
+    // teleport and the trial do (`Character.ForceDismount`, `AttachUnitReason.PrefabChanged`).
+    // A player only standing on a deck has nothing to release and is just detached below.
+    crate::systems::vehicles::force_dismount(
+        server,
+        p,
+        crate::systems::vehicles::slaves::attach_reason::PREFAB_CHANGED,
+    );
     let obj = WorldObject::from(p);
     let old = p.data().unit.transform;
     // The C# `new Transform(character, null, ...)` has no parent.
@@ -1218,6 +1227,13 @@ pub async fn send_chat_message(
             let target = server.world.character_by_name(target_name);
             match target {
                 Some(t) if t.data().is_online => {
+                    // A blocked sender's whisper is dropped silently: the 1.2 client has no
+                    // "target has blocked you" error and its own whisper display does not
+                    // filter, so only the server can enforce the list (capture-pending, case
+                    // `BLOCK-LIST-1`).
+                    if crate::systems::social::friend::is_blocked_by(&t, me.character_id) {
+                        return;
+                    }
                     let (tf, mf) = (
                         mother_id(server, t.data().unit.faction_id),
                         mother_id(server, sender.faction_id),

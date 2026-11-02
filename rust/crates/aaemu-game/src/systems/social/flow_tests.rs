@@ -94,6 +94,24 @@ fn chat(t: i16, msg: &str) -> PacketStream {
     s
 }
 
+fn whisper(target: &str, msg: &str) -> PacketStream {
+    let mut s = PacketStream::new();
+    s.write_i16(chat_type::WHISPER)
+        .write_i16(0)
+        .write_i32(0)
+        .write_str(target)
+        .write_str(msg)
+        .write_u8(0)
+        .write_i32(0);
+    s
+}
+
+fn name_body(name: &str) -> PacketStream {
+    let mut s = PacketStream::new();
+    s.write_str(name);
+    s
+}
+
 fn user_join(name: &str, password: &str, create: bool) -> PacketStream {
     let mut s = PacketStream::new();
     s.write_str(name).write_str(password).write_bool(create);
@@ -1465,6 +1483,160 @@ async fn guild_create_invite_kick_roles_and_disband() {
     assert_eq!(pcs[0].p.data().unit.expedition_id, 0);
 }
 
+/// The role-policy packet carries nine permission flags. The 1.2 client only lets the owner
+/// (role 255) edit a lower role (`SET_POLICY = role == 255` in its role-policy tab), so a
+/// Commander's `Expel` right must not help. Every field must reach the stored policy and the
+/// broadcast packet the members receive.
+#[tokio::test]
+async fn guild_role_policy_change_copies_every_field() {
+    use crate::data::world_data::SystemFaction;
+    use crate::systems::social::expedition::{Expedition, ExpeditionMember, ExpeditionRolePolicy};
+
+    let server = test_server();
+    let mut owner = pc(&server, 1, "Owner", 100.0, 100.0);
+    let mut officer = pc(&server, 2, "Officer", 101.0, 100.0);
+    let id = 7;
+    let member = |character_id: u32, name: &str, role: u8| ExpeditionMember {
+        expedition_id: id,
+        character_id,
+        in_party: false,
+        is_online: true,
+        last_world_leave_time: 0,
+        name: name.into(),
+        level: 10,
+        zone_id: 0,
+        id3: 0,
+        abilities: [0; 3],
+        role,
+        position: (0.0, 0.0, 0.0),
+        memo: String::new(),
+        transfer_requested_time: 0,
+    };
+    let policy = |role: u8, name: &str, flags: [bool; 9]| ExpeditionRolePolicy {
+        expedition_id: id,
+        role,
+        name: name.into(),
+        dominion_declare: flags[0],
+        invite: flags[1],
+        expel: flags[2],
+        promote: flags[3],
+        dismiss: flags[4],
+        chat: flags[5],
+        manager_chat: flags[6],
+        siege_master: flags[7],
+        join_siege: flags[8],
+    };
+    owner.p.data().unit.expedition_id = id;
+    officer.p.data().unit.expedition_id = id;
+    server.expeditions.add(Expedition {
+        faction: SystemFaction {
+            id,
+            name: "Knights".into(),
+            owner_id: 1,
+            owner_name: "Owner".into(),
+            ..SystemFaction::default()
+        },
+        members: vec![member(1, "Owner", 255), member(2, "Officer", 3)],
+        policies: vec![
+            policy(0, "Apprentice", [false; 9]),
+            policy(3, "Commander", [true; 9]),
+            policy(255, "General", [true; 9]),
+        ],
+        removed_members: Vec::new(),
+        is_disbanded: false,
+    });
+    settle(&mut [&mut owner, &mut officer]);
+
+    let request = |role: u8, name: &str, flag: bool| {
+        let mut s = PacketStream::new();
+        s.write_u32(id)
+            .write_u8(role)
+            .write_str(name)
+            .write_bool(flag)
+            .write_bool(flag)
+            .write_bool(flag)
+            .write_bool(flag)
+            .write_bool(flag)
+            .write_bool(flag)
+            .write_bool(flag)
+            .write_bool(flag)
+            .write_bool(flag);
+        s
+    };
+
+    // Role 3 carries the C# Expel right, but the 1.2 client only enables the check boxes for
+    // the owner: the change must not be stored and nothing is broadcast.
+    officer
+        .send(
+            &server,
+            cs::CSChangeExpeditionRolePolicyPacket,
+            request(0, "Hacked", true),
+        )
+        .await;
+    assert_eq!(
+        server
+            .expeditions
+            .get(id)
+            .unwrap()
+            .policy_by_role(0)
+            .unwrap()
+            .name,
+        "Apprentice"
+    );
+    assert!(officer.ops().is_empty());
+
+    // The owner cannot edit their own (role 255) policy either.
+    owner
+        .send(
+            &server,
+            cs::CSChangeExpeditionRolePolicyPacket,
+            request(255, "Me", false),
+        )
+        .await;
+    assert_eq!(
+        server
+            .expeditions
+            .get(id)
+            .unwrap()
+            .policy_by_role(255)
+            .unwrap()
+            .name,
+        "General"
+    );
+    assert!(owner.ops().is_empty());
+
+    // The owner edits role 0 with every flag set: all nine fields must be kept in the stored
+    // policy and in the packet broadcast to both members.
+    owner
+        .send(
+            &server,
+            cs::CSChangeExpeditionRolePolicyPacket,
+            request(0, "Recruit", true),
+        )
+        .await;
+    let expected = policy(0, "Recruit", [true; 9]);
+    assert_eq!(
+        server
+            .expeditions
+            .get(id)
+            .unwrap()
+            .policy_by_role(0)
+            .unwrap(),
+        &expected
+    );
+    for x in [&mut owner, &mut officer] {
+        let frames = x.frames();
+        let changed = find(&frames, sc::SCExpeditionRolePolicyChangedPacket);
+        assert_eq!(changed.len(), 1);
+        let mut s = PacketStream::from_bytes(changed[0].clone());
+        assert_eq!(
+            ExpeditionRolePolicy::read(&mut s).expect("policy"),
+            expected
+        );
+        assert!(s.read_bool().expect("success"));
+    }
+}
+
 #[tokio::test]
 async fn guild_creation_needs_a_full_party() {
     let server = test_server();
@@ -1604,6 +1776,127 @@ async fn private_mysql_expedition_owner_transition_persists_consistent_snapshot(
 }
 
 #[tokio::test]
+#[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses connection-local temporary expedition tables"]
+async fn private_mysql_expedition_role_policy_persists_every_field() {
+    use crate::data::world_data::SystemFaction;
+    use crate::systems::social::expedition::{self, Expedition, ExpeditionRolePolicy};
+    use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+    use std::str::FromStr;
+    let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+        return;
+    };
+    let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+    assert_eq!(
+        options.get_port(),
+        3317,
+        "Only private MySQL3317 is allowed"
+    );
+    let pool = MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    // Single-connection temporary tables shadow the application tables for this test only.
+    let mut schemas = Vec::new();
+    for table in [
+        "expeditions",
+        "expedition_members",
+        "expedition_role_policies",
+    ] {
+        let (_, ddl): (String, String) = sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(ddl.starts_with("CREATE TABLE"));
+        schemas.push(ddl.replacen("CREATE TABLE", "CREATE TEMPORARY TABLE", 1));
+    }
+    for ddl in schemas {
+        sqlx::query(&ddl).execute(&pool).await.unwrap();
+    }
+    let mut server = test_server();
+    server.db = pool.clone();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    settle(&mut [&mut a]);
+    a.p.data().unit.expedition_id = 77;
+    let policy = |role: u8, name: &str, flags: [bool; 9]| ExpeditionRolePolicy {
+        expedition_id: 77,
+        role,
+        name: name.into(),
+        dominion_declare: flags[0],
+        invite: flags[1],
+        expel: flags[2],
+        promote: flags[3],
+        dismiss: flags[4],
+        chat: flags[5],
+        manager_chat: flags[6],
+        siege_master: flags[7],
+        join_siege: flags[8],
+    };
+    server.expeditions.add(Expedition {
+        faction: SystemFaction {
+            id: 77,
+            name: "Knights".into(),
+            owner_id: 1,
+            owner_name: "Al".into(),
+            mother_id: 148,
+            ..Default::default()
+        },
+        members: vec![expedition::member_from_character(&server, 77, &a.p, true)],
+        policies: vec![policy(0, "Apprentice", [false; 9])],
+        removed_members: Vec::new(),
+        is_disbanded: false,
+    });
+    let mut request = PacketStream::new();
+    request
+        .write_u32(77)
+        .write_u8(0)
+        .write_str("Recruit")
+        .write_bool(true)
+        .write_bool(true)
+        .write_bool(true)
+        .write_bool(true)
+        .write_bool(true)
+        .write_bool(true)
+        .write_bool(true)
+        .write_bool(true)
+        .write_bool(true);
+    a.send(&server, cs::CSChangeExpeditionRolePolicyPacket, request)
+        .await;
+    let saved: (i64, i64, i64, i64, i64, i64, i64, i64, i64, String) = sqlx::query_as(
+        "SELECT CAST(dominion_declare AS SIGNED), CAST(invite AS SIGNED), CAST(expel AS SIGNED), \
+         CAST(promote AS SIGNED), CAST(dismiss AS SIGNED), CAST(chat AS SIGNED), \
+         CAST(manager_chat AS SIGNED), CAST(siege_master AS SIGNED), CAST(join_siege AS SIGNED), name \
+         FROM expedition_role_policies WHERE expedition_id = 77 AND role = 0",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(saved, (1, 1, 1, 1, 1, 1, 1, 1, 1, "Recruit".into()));
+    // Reload from the temporary tables: the whole policy round-trips.
+    server.expeditions.load(&pool).await.unwrap();
+    assert_eq!(
+        server
+            .expeditions
+            .get(77)
+            .unwrap()
+            .policy_by_role(0)
+            .unwrap(),
+        &policy(0, "Recruit", [true; 9])
+    );
+    for table in [
+        "expedition_role_policies",
+        "expedition_members",
+        "expeditions",
+    ] {
+        sqlx::query(&format!("DROP TEMPORARY TABLE {table}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    pool.close().await;
+}
+
+#[tokio::test]
 async fn family_create_join_leave_disband() {
     let server = test_server();
     let mut a = pc(&server, 1, "Al", 100.0, 100.0);
@@ -1621,6 +1914,17 @@ async fn family_create_join_leave_disband() {
         s.write_u32(invitor).write_bool(true).write_str("Kid");
         s
     };
+    // Bob blocked Al: the family invitation is dropped silently until he unblocks.
+    b.send(&server, cs::CSAddBlockedUserPacket, name_body("Al"))
+        .await;
+    assert_eq!(b.ops(), vec![sc::SCAddBlockedUserPacket]);
+    a.send(&server, cs::CSFamilyInviteMemberPacket, invite("Bob"))
+        .await;
+    assert!(a.ops().is_empty() && b.ops().is_empty());
+    b.send(&server, cs::CSDeleteBlockedUserPacket, name_body("Al"))
+        .await;
+    assert_eq!(b.ops(), vec![sc::SCDeleteBlockedUserPacket]);
+
     a.send(&server, cs::CSFamilyInviteMemberPacket, invite("Bob"))
         .await;
     assert_eq!(b.ops(), vec![sc::SCFamilyInvitationPacket]);
@@ -1798,11 +2102,137 @@ async fn friends_and_blocked_users() {
         .await;
     assert_eq!(a.ops(), vec![sc::SCDeleteBlockedUserPacket]);
     assert_eq!(a.p.data().removed_blocked, vec![2]);
-    // Unknown (offline) names are ignored for blocks.
+    // Unknown names are ignored for blocks.
     a.send(&server, cs::CSAddBlockedUserPacket, name("Nobody"))
         .await;
     assert!(a.ops().is_empty());
     let _ = b.ops();
+}
+
+/// Every direct player-to-player delivery path checks the recipient's block list, and
+/// unblocking restores delivery. The blocked side is silent: 1.2 has no "target blocked you"
+/// error (capture-pending, case `BLOCK-LIST-1`).
+#[tokio::test]
+async fn blocked_sender_is_silently_dropped_on_every_direct_path() {
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    a.p.data().unit.hp = 100; // a dead challenge target is refused before the block check
+    settle(&mut [&mut a, &mut b]);
+
+    a.send(&server, cs::CSAddBlockedUserPacket, name_body("Bob"))
+        .await;
+    assert_eq!(a.ops(), vec![sc::SCAddBlockedUserPacket]);
+
+    // Whisper: no packet reaches either side.
+    b.send(&server, cs::CSSendChatMessagePacket, whisper("Al", "hi"))
+        .await;
+    assert!(a.frames().is_empty() && b.frames().is_empty());
+
+    // Party invite (named; area invites call the same path).
+    b.send(&server, cs::CSInviteToTeamPacket, invite(0, "Al"))
+        .await;
+    assert!(a.frames().is_empty() && b.frames().is_empty());
+
+    // Family invite.
+    let family_invite = |name: &str| {
+        let mut s = PacketStream::new();
+        s.write_str(name).write_str("Kid");
+        s
+    };
+    b.send(&server, cs::CSFamilyInviteMemberPacket, family_invite("Al"))
+        .await;
+    assert!(a.frames().is_empty() && b.frames().is_empty());
+
+    // Friend add.
+    b.send(&server, cs::CSAddFriendPacket, name_body("Al"))
+        .await;
+    assert!(a.frames().is_empty() && b.frames().is_empty());
+    assert!(b.p.data().friends.is_empty());
+
+    // Trade request.
+    let mut obj = PacketStream::new();
+    obj.write_bc(a.p.obj_id);
+    b.send(&server, cs::CSCanStartTradePacket, obj).await;
+    assert!(a.frames().is_empty() && b.frames().is_empty());
+
+    // Duel request (challenged character id, plain u32).
+    let mut id = PacketStream::new();
+    id.write_u32(a.p.character_id);
+    b.send(&server, cs::CSChallengeDuelPacket, id).await;
+    assert!(a.frames().is_empty() && b.frames().is_empty());
+
+    // Unblock: every path delivers again.
+    a.send(&server, cs::CSDeleteBlockedUserPacket, name_body("Bob"))
+        .await;
+    assert_eq!(a.ops(), vec![sc::SCDeleteBlockedUserPacket]);
+
+    b.send(&server, cs::CSSendChatMessagePacket, whisper("Al", "hi"))
+        .await;
+    assert_eq!(a.ops(), vec![sc::SCChatMessagePacket]);
+    assert_eq!(b.ops(), vec![sc::SCChatMessagePacket]);
+
+    b.send(&server, cs::CSInviteToTeamPacket, invite(0, "Al"))
+        .await;
+    assert_eq!(a.ops(), vec![sc::SCAskToJoinTeamPacket]);
+
+    b.send(&server, cs::CSFamilyInviteMemberPacket, family_invite("Al"))
+        .await;
+    assert_eq!(a.ops(), vec![sc::SCFamilyInvitationPacket]);
+
+    b.send(&server, cs::CSAddFriendPacket, name_body("Al"))
+        .await;
+    assert_eq!(b.ops(), vec![sc::SCAddFriendPacket]);
+    assert_eq!(b.p.data().friends.len(), 1);
+
+    let mut obj = PacketStream::new();
+    obj.write_bc(a.p.obj_id);
+    b.send(&server, cs::CSCanStartTradePacket, obj).await;
+    assert_eq!(a.ops(), vec![sc::SCCanStartTradePacket]);
+
+    let mut id = PacketStream::new();
+    id.write_u32(a.p.character_id);
+    b.send(&server, cs::CSChallengeDuelPacket, id).await;
+    assert_eq!(a.ops(), vec![sc::SCDuelChallengedPacket]);
+}
+
+/// Blocking also resolves offline characters through `NameManager`, so the added reply and the
+/// persisted list stay consistent with the login `SCBlockedUsers` snapshot.
+#[tokio::test]
+async fn blocking_an_offline_character_uses_the_name_manager() {
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    settle(&mut [&mut a]);
+    server.names.add_character(9, "Offline", 1009);
+
+    a.send(&server, cs::CSAddBlockedUserPacket, name_body("offline"))
+        .await;
+    assert_eq!(
+        a.frames(),
+        vec![(
+            sc::SCAddBlockedUserPacket,
+            body(
+                &crate::systems::social::packets::friend::SCAddBlockedUserPacket {
+                    character_id: 9,
+                    character_name: "Offline".into(),
+                    success: true,
+                    error_message: 0
+                }
+            )
+        )]
+    );
+    assert_eq!(a.p.data().blocked, vec![(1, 9)]);
+
+    a.send(&server, cs::CSDeleteBlockedUserPacket, name_body("OFFLINE"))
+        .await;
+    assert_eq!(a.ops(), vec![sc::SCDeleteBlockedUserPacket]);
+    assert!(a.p.data().blocked.is_empty());
+    assert_eq!(a.p.data().removed_blocked, vec![9]);
+
+    // An unregistered name is still ignored.
+    a.send(&server, cs::CSAddBlockedUserPacket, name_body("Nobody"))
+        .await;
+    assert!(a.ops().is_empty());
 }
 
 #[tokio::test]
@@ -1885,6 +2315,21 @@ async fn guild_invite_and_rank_guards() {
         s.write_u32(id).write_u32(1).write_bool(true);
         s
     };
+
+    // An invited player who blocked the leader gets no guild invitation; unblocking restores
+    // delivery (capture-pending, case `BLOCK-LIST-1`).
+    out.send(&server, cs::CSAddBlockedUserPacket, name_body("Lead"))
+        .await;
+    assert_eq!(out.ops(), vec![sc::SCAddBlockedUserPacket]);
+    let mut invite_out = PacketStream::new();
+    invite_out.write_str("Out");
+    leader
+        .send(&server, cs::CSInviteToExpeditionPacket, invite_out)
+        .await;
+    assert!(out.ops().is_empty() && leader.ops().is_empty());
+    out.send(&server, cs::CSDeleteBlockedUserPacket, name_body("Lead"))
+        .await;
+    assert_eq!(out.ops(), vec![sc::SCDeleteBlockedUserPacket]);
 
     // No invitation at all: the reply joins nothing.
     out.send(&server, cs::CSReplyExpeditionInvitationPacket, reply(77))
