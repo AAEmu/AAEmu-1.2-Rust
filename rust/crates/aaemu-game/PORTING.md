@@ -3654,3 +3654,13 @@ consumer was not located; the 1.2 ordering/result is therefore not proven there.
   client's item-name lookup (`x2game.dll.c:742315`) always finds a template. The doodad gate runs
   after `gathering::allows_skill` (a disallowed skill keeps `INVALID_TARGET`) and is skipped for
   Mount casters, whose effect caster is the slave.
+- **Departure saves write only the departing and financially dirty characters.** C# `Character.Save`
+  at logout saved the departing character only; the Rust departure save also commits the global
+  property sets (items, mail, auction, houses) so money moved by a counterpart never splits from
+  its character row. It used to rewrite every online character per logout (O(N) per logout, O(N^2)
+  in a logout wave, all under `transaction_lock`). `SnapshotScope::Departure` now captures the
+  pending departures plus online characters whose `(money, money2)` differ from the value last
+  committed/loaded (`SaveManager::committed_money`, seeded on enter-world, set by the commit ack,
+  dropped on final departure; no entry = dirty) or that hold `labor_power_unsaved != 0`. Autosave
+  and shutdown still capture everyone. Money is the only character-row field another character's
+  operation changes. The "Saved N active buff(s)" log is `debug!`.
