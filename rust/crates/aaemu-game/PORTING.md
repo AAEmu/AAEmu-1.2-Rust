@@ -162,6 +162,7 @@ Each subsystem records its status here, in its own section only (see `CONTRIBUTI
 | `Models/Game/Skills/Plots/*` | `systems/skills/plots.rs` | done | Plot tree execution (async), conditions 1..17, target info updates (area / random unit / random area), channeling finish, `SCPlotEvent` / `SCPlotEnded`. Deviation: the timeline-id release in plot end, `end_skill` and `stop_skill` is take-and-clear under the skill state lock (`SkillRun::take_tl_id`); C# did an unsynchronised `ReleaseId(TlId); TlId = 0`, so an interrupted plot skill could release the same id twice. The `Tried to release unused Id` warning names the last owner (caster obj id, skill id), like C# `AssignedUnit`. |
 | `Models/Game/Units/Buffs` behaviour, `Skills/Buff`, `Skills/Effects/{Buff,Damage,Heal,Dispel,RestoreMana,ManaBurn,Aggro,FlyingStateChange,SkillController,...}`, `CombatBuffs`, `BuffTriggers` | `systems/skills/{buffs,effects/*}.rs` | done | Start / dispel / tick tasks, tolerance, stack rules, charges, `TriggerRemoveOn`, tag removal, absorption, triggers, area ticks. Explicit dispel emits Dispelled without Timeout; natural expiry retains Timeout. This corrects the mirrored C# removal path, which invoked the FISH escape trigger when catch plot 792 dispelled FISH before lethal damage. Queued CREATED handling and existing removal packet order are retained. Refreshing permanent non-ticking buffs invalidates old timers without treating GetTimeLeft=-1 as expiry; finite expiration and permanent tick cadence remain scheduled. This corrects the mirrored C# refresh timer path. Special effects routed through `ExtHooks::route_special` where they belong to another subsystem. |
 | `Units/Unit` combat (`ReduceCurrentHp`, `DoDie`, aggro / tagging, `SetInBattle`, criminal / force attack, invisibility, `DoFallDamage`), `BaseUnit.CanAttack` / relations, regen, `UpdateGearBonuses`, all `Character` stat getters | `systems/skills/{combat,relation,stats,regen}.rs` | done | MaxHp / MaxMp etc. with buffs, passives and gear (`GearStats` hook). NPC death side effects through `NpcSkillHooks`. |
+| Aura buffs (`aura_radius`, `aura_relation_id`, `aura_slave_buff_id`, `aura_child_only`) and crowd buffs (`crowd_buff_id`, `crowd_radius`, `crowd_number`, `crowd_friendly`, `crowd_hostile`) | `systems/skills/aura.rs` | data-inferred / capture-pending | The 1.2 client only reads the columns and has no runtime; no 1.2 zone binary exists, so the rules come from the localized descriptions. A 1 s enter/leave driver (the area-trigger update pattern) grants the slave buff to units in `aura_radius` passing `aura_relation_id` (the owner too for Any/Friendly/Party/Raid), removes only the copy with caster = aura owner, and grants `crowd_buff_id` while `crowd_number` *other* carriers of the source buff are in `crowd_radius` and match `crowd_friendly` / `crowd_hostile`. The dangling slave 6668 -> 6669, the self-reference 1224 and the 15 aura rows without a slave buff are skipped with one load warning. Case ids AURA-1..7 / CROWD-1..4; update period, slave caster identity, owner counting, child attach scope and dead-owner behaviour are UNKNOWN. |
 | Learning / progression (`LearnSkill`, `LearnBuff`, `ResetSkills`, `SwapAbility`, `AddExp`, labor, game points) | `systems/skills/progress.rs` | done | Labor accrual uses zero-based actability steps into ordered `expert_limits`, matching inventory / regrade; step 4 caps at 50,000 (row id 5), avoiding the former row-id lookup that reduced it to 40,000. Capped gains and packet deltas have regression coverage. |
 | `Skills/Effects/SpecialEffects/*` (141 named `SpecialType` actions), `BubbleEffect`, `ImpulseEffect`, `PhysicalExplosionEffect` | `systems/skills/effects/{special/*,unit_fx}.rs`, `packets_special.rs` | partial | Ported actions and subsystem hooks are present, but historical logging placeholders do not establish gameplay completeness. Buff stealing, component-selective aggro copy/reset, target loss, NPC despawn, ongoing-buff cancellation and pet recovery now execute. ExplodeBuff, MoveToGround and RedeemBuff now execute (see below). Client visuals use the existing skill/plot notifications. 13 extra S->C packets, byte-exact tests. |
 | `Skills/SkillControllers/{Floating,Wandering,Leap,Dash,Rotate}` | `systems/skills/controllers.rs` | partial | Rotate uses native constructor/tick timing (`0x3924E1D0` / `0x392315C0`) with 1.2 controller7678 regression coverage. Generic Anchor and Flowgraph remain unverified; native 10.x Anchor parameter kinds1001..1039 differ from the 1.2 data kinds1..3. Harpoon ropes have a separate vehicles implementation. |
@@ -216,6 +217,47 @@ supplied by the world server; the available client/zone plot dispatcher executes
 effects, not the authoritative counter. Its producer is unavailable in these binaries.
 `plots::aoe_tests::aoe_policy_*` covers the compatibility policy through plot/combat flows;
 an authoritative native lifecycle experiment and live verification remain unperformed.
+
+#### Aura and crowd buffs (data-inferred, capture-pending)
+
+`systems::skills::aura`: the 1.2 `buffs` catalog has 85 `aura_radius > 0` rows (relations
+Any 22, Friendly 18, Party 1, Raid 13, Hostile 28, Others 3) and 37 `crowd_buff_id > 0` rows,
+but neither the 1.2 client (`x2game.dll.c`) nor the C# history contains an aura/crowd runtime;
+the 10.x-only columns (`aura_creator_only`, `aura_max_count`, `crowd_check_buff_id`, ...) are
+deliberately not implemented. The rules are a strong reading of the localized descriptions
+(research `D:/aaemu-audits/gap-audit-2026-11-02/research/aura-crowd.md`), marked capture-pending
+until a retail 1.2 zone server can be recorded:
+
+* **AURA-1/AURA-2:** the slave buff (`aura_slave_buff_id`) is applied with the aura owner as
+  caster to every unit within `aura_radius` that passes
+  `relation::filter_with_relation(aura_relation_id, owner, ..)`; the owner is included for
+  Any/Friendly/Party/Raid ("caster and allies").
+* **AURA-3:** leaving the radius / failing the relation removes only the copy whose caster is
+  the aura owner, so a separately cast copy survives.
+* **AURA-4:** the driver is a 1000 ms enter/leave diff (no `on_moved` hook); the 1.2 update
+  period is UNKNOWN.
+* **AURA-5:** `aura_child_only` reaches the owner's attached characters (slave
+  `attached_characters`, mate `passengers`) plus the owner's mount/vehicle (transform parent)
+  inside the radius. The exact 1.2 attach scope is UNKNOWN.
+* **AURA-6:** the owner losing the aura effect (timeout, dispel, death with `remove_on_death`,
+  despawn) strips every recipient at once; a logout or a teleport to another instance is
+  detected by the next 1 s tick, which strips the stored recipients without a radius query (a
+  teleport then re-evaluates in the new position). A dead owner whose aura lacks
+  `remove_on_death` keeps its aura (UNKNOWN).
+* **AURA-7:** the loader warns once and skips the dangling slave 6668 -> 6669, the
+  self-reference 1224 and the 15 aura rows with no slave buff.
+* **CROWD-1..4:** every 1000 ms a source-buff carrier counts the OTHER units within
+  `crowd_radius` that also carry the source buff and are friendly (`GetRelationStateTo` =
+  Friendly and not attackable) and/or hostile (`CanAttack`), per `crowd_friendly` /
+  `crowd_hostile`; at `crowd_number` the owner gets `crowd_buff_id` self-cast, below it the
+  buff is removed. Whether 1.2 counts the owner, and which units count, is UNKNOWN (the 10.x
+  check columns are that refinement).
+
+Tests: `systems::skills::aura::aura_tests` (relation matrix, enter/leave, every owner-loss
+path, child-only, self-reference/dangling, crowd threshold with friendly-only counting,
+separately cast copy) and the gated real-data test `real_compact_aura_and_crowd_catalogs`.
+Live verification: two headless clients in a party, GM aura on A, B in radius receives
+`SCBuffCreated`, B leaves -> `SCBuffRemoved`, A loses the aura -> B's copy removed.
 
 #### Special effects added from data (2026-10-20)
 

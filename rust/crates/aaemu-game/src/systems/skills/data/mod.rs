@@ -430,6 +430,7 @@ impl Data {
                 Ok(())
             },
         )?;
+        super::aura::warn_catalog(&buffs);
         d.buffs = buffs.into_iter().map(|(k, v)| (k, Arc::new(v))).collect();
         d.area_shapes = misc::load_area_shapes(conn)?;
         d.model_radii = misc::load_actor_model_radii(conn)?;
