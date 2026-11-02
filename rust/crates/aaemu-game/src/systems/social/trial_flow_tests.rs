@@ -1950,3 +1950,116 @@ async fn crime_report_through_hooks() {
     assert!(!crimes.report_bot_expired(&server, &criminal.p));
     assert!(crimes.report_bot_expired(&server, &reporter.p));
 }
+
+/// `CheckWantedThreshold` -> `Character.SetFaction(Pirate)` through the real crime report path:
+/// the nearby witness receives `SCUnitFactionChanged` exactly once (the 1.2 client turns it into
+/// "$1 became pirate.", x2game `sub_396A1C20`), and the house / guild / party effects of
+/// `Character.SetFaction` run. A repeated `SetFaction(Pirate)` is then a no-op.
+#[tokio::test]
+async fn infamy_threshold_sets_the_pirate_faction_with_its_side_effects() {
+    use crate::systems::social::expedition::{self, Expedition};
+    use crate::systems::social::packets::faction::SCUnitFactionChangedPacket;
+
+    let server = justice_server();
+    server
+        .systems
+        .social
+        .hooks
+        .install(Arc::new(FakeHooks::default()));
+    let mut criminal = player(&server, 1, "Crook", |c| c.infamy_point = 2_990);
+    let mut reporter = player(&server, 2, "Witness", |_| {});
+    let victim = player(&server, 3, "Victim", |_| {});
+
+    // The criminal owns the party; the witness joins it.
+    let teams = &server.systems.social.teams;
+    teams.ask_to_join(&server, &criminal.p, "", 0, true, Some(&reporter.p));
+    teams.reply_to_join_team(
+        &server,
+        &reporter.p,
+        0,
+        true,
+        criminal.p.character_id,
+        false,
+        "",
+        false,
+    );
+    assert!(criminal.p.data().in_party && reporter.p.data().in_party);
+
+    // The criminal is the general of a Nuian guild: `Character.SetFaction` kicks it when the
+    // faction changes to Pirate (the general's policy has Expel, as in the C# `Kick`).
+    let members = [(&criminal.p, 255u8), (&reporter.p, 0u8)]
+        .into_iter()
+        .map(|(p, role)| {
+            p.data().unit.expedition_id = 77;
+            let mut m = expedition::member_from_character(&server, 77, p, false);
+            m.role = role;
+            m
+        })
+        .collect();
+    server.expeditions.add(Expedition {
+        faction: SystemFaction {
+            id: 77,
+            name: "Knights".into(),
+            owner_id: criminal.p.character_id,
+            owner_name: "Crook".into(),
+            mother_id: NUIA,
+            ..Default::default()
+        },
+        members,
+        policies: expedition::default_policies(&server, 77),
+        removed_members: Vec::new(),
+        is_disbanded: false,
+    });
+    criminal.client.drain();
+    reporter.client.drain();
+
+    // A murder report by the witness: +25 infamy crosses 3000.
+    let mut d = Doodad::new(878);
+    d.owner_type = doodad_owner_type::CHARACTER;
+    d.owner_id = criminal.p.character_id;
+    d.data = victim.p.character_id as i32;
+    let evidence = Entity::new(0x900, d);
+    let event = server
+        .systems
+        .social
+        .crimes
+        .report_crime(&server, &reporter.p, &evidence, 1, 0, 0, "seen")
+        .await;
+    assert!(event.is_some());
+
+    let expected = SCUnitFactionChangedPacket {
+        obj_id: criminal.p.obj_id,
+        unit_name: "Crook".into(),
+        id: 101,
+        id2: 161,
+        temp: false,
+    };
+    let frames = reporter.client.drain();
+    assert_eq!(
+        find(&frames, sc::SCUnitFactionChangedPacket),
+        vec![body(&expected)],
+        "the nearby witness sees exactly one faction change"
+    );
+    assert_eq!(
+        find(&criminal.client.drain(), sc::SCUnitFactionChangedPacket),
+        vec![body(&expected)],
+        "the new pirate sees it too"
+    );
+    assert_eq!(criminal.p.data().unit.faction_id, 161);
+    assert!(!criminal.p.data().in_party, "removed from the party");
+    assert_eq!(
+        criminal.p.data().unit.expedition_id,
+        0,
+        "removed from the guild"
+    );
+    assert!(server
+        .expeditions
+        .get(77)
+        .is_some_and(|e| e.member(criminal.p.character_id).is_none()
+            && e.member(reporter.p.character_id).is_some()));
+
+    // A later SetFaction(Pirate) is consistent: old == new, so no second broadcast.
+    crate::systems::social::faction::set_faction(&server, &criminal.p, 161).await;
+    assert!(find(&reporter.client.drain(), sc::SCUnitFactionChangedPacket).is_empty());
+    assert_eq!(criminal.p.data().unit.faction_id, 161);
+}

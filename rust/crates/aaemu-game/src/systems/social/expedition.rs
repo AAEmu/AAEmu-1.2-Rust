@@ -1005,7 +1005,10 @@ pub async fn kick(server: &GameServer, kicker: &PlayerRef, kicked_id: u32) {
         return;
     };
     // Deviation from C#: only a strictly higher rank can expel (so the leader never can be).
-    if me.role <= kicked.role {
+    // A self-kick is `Character.SetFaction`'s guild removal (the C# `Kick` also checks only the
+    // caller's policy, so a commander / general leaves its guild on a faction change); it cannot
+    // expel anyone else and is exempt from the rank guard.
+    if kicked_id != kicker.character_id && me.role <= kicked.role {
         tracing::warn!(
             "Kick: member {} (role {}) tried to expel {kicked_id} (role {}) of expedition {id}",
             kicker.character_id,

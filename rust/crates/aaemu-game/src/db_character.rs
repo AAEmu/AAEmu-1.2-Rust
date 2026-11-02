@@ -64,9 +64,14 @@ fn opt_int(r: &MySqlRow, col: &str) -> Result<i64> {
 }
 
 impl Character {
-    /// `CheckWantedThreshold` (the buff / faction part; `SetFaction` side effects on houses,
-    /// guild and party are not ported — see PORTING.md).
-    pub fn check_wanted_threshold(&mut self, server: &GameServer, now_ms: i64) {
+    /// `CheckWantedThreshold` (the buff part) and the pirate decision. Returns `true` when the
+    /// infamy threshold is crossed while the character is not a pirate: the caller must run
+    /// `Character.SetFaction(Pirate)` (see `social::faction::set_faction` /
+    /// `set_faction_persistent`) **after** releasing the character's data lock, because the
+    /// change broadcasts and touches houses / guild / party. The faction field is deliberately
+    /// left unchanged here.
+    #[must_use = "run SetFaction(Pirate) after releasing the character's data lock"]
+    pub fn check_wanted_threshold(&mut self, server: &GameServer, now_ms: i64) -> bool {
         let add = |c: &mut Character, id: u32| {
             if c.unit.buffs.check_buff(id) {
                 return;
@@ -83,6 +88,7 @@ impl Character {
                 None => tracing::error!("CheckWantedThreshold: no buff template {id}"),
             }
         };
+        let mut became_pirate = false;
         if self.infamy_point >= PIRATE_CRIME_POINT_THRESHOLD {
             add(self, BUFF_WANTED);
             add(self, BUFF_CONTEMPTUOUS);
@@ -93,7 +99,7 @@ impl Character {
                     self.unit.name,
                     self.infamy_point
                 );
-                self.unit.faction_id = FACTION_PIRATE;
+                became_pirate = true;
             }
         } else {
             if self.crime_point >= WANTED_CRIME_POINT_THRESHOLD {
@@ -103,6 +109,7 @@ impl Character {
             }
             self.unit.buffs.remove_buff(BUFF_CONTEMPTUOUS);
         }
+        became_pirate
     }
 }
 
@@ -182,15 +189,18 @@ pub async fn load_character(
     c.vocation_point = int(&row, "vocation_point")? as i32;
     let now_ms = Utc::now().timestamp_millis();
     // CrimePoint / InfamyPoint setters: clamp to >= 0 and CheckWantedThreshold (only on change).
+    // The load only restores the wanted buffs; the `SetFaction(Pirate)` the threshold asks for
+    // needs the live world and runs in `world::session::select_loaded` (`Character.Load` is also
+    // used for the lobby list / deletion checks, where there is no player to notify).
     let crime = (int(&row, "crime_point")? as i16).max(0);
     if crime != 0 {
         c.crime_point = crime;
-        c.check_wanted_threshold(server, now_ms);
+        let _ = c.check_wanted_threshold(server, now_ms);
     }
     let infamy = (int(&row, "crime_record")? as i32).max(0);
     if infamy != 0 {
         c.infamy_point = infamy;
-        c.check_wanted_threshold(server, now_ms);
+        let _ = c.check_wanted_threshold(server, now_ms);
     }
     c.jury_point = int(&row, "jury_point")? as i32;
     c.hostile_faction_kills = int(&row, "hostile_faction_kills")? as u32;

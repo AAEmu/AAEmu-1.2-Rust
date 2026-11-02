@@ -211,12 +211,12 @@ impl SubCommand for CrimeAddPointSubCommand {
         if crime_points != 0 || infamy_points != 0 || jury_points != 0 {
             // If something changed, go to change mode
             let now = crate::world::now_ms();
-            let (packet, jury_packet) = {
+            let (packet, jury_packet, became_pirate) = {
                 let mut c = target.data();
                 let cp = c.crime_point.wrapping_add(crime_points);
-                crime::set_crime_point(server, &mut c, cp, now);
+                let mut became_pirate = crime::set_crime_point(server, &mut c, cp, now);
                 let ip = c.infamy_point.wrapping_add(infamy_points);
-                crime::set_infamy_point(server, &mut c, ip, now);
+                became_pirate |= crime::set_infamy_point(server, &mut c, ip, now);
                 let packet = SCCrimeChangedPacket {
                     points: i32::from(crime_points),
                     crime_points: c.crime_point,
@@ -224,8 +224,16 @@ impl SubCommand for CrimeAddPointSubCommand {
                     crime_state: crime::crime_state(&c),
                 };
                 let jp = c.jury_point.wrapping_add(jury_points);
-                (packet, crime::set_jury_point(&mut c, jp))
+                (packet, crime::set_jury_point(&mut c, jp), became_pirate)
             };
+            // The threshold's `SetFaction(Pirate)` needs the world: run it after the data lock.
+            if became_pirate {
+                crate::systems::social::faction::set_faction_persistent(
+                    server,
+                    &target,
+                    crate::data::world_data::factions::PIRATE,
+                );
+            }
             target.send(packet);
             if let Some(p) = jury_packet {
                 target.send(p);
