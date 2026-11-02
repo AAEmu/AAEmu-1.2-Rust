@@ -1,0 +1,20 @@
+# NPC aggro link groups (aggro_links / npc_aggro_links), data-inferred rule AGGROLINK-1.
+#
+# main_world places two members of group 66 at the same spot: NPC 508 "wandering tree
+# spirit" and NPC 7624 "tree giant" (9966.957, 15162.164, 234.23795). Both templates are
+# non-aggressive with `aggro_link_special_rule_id` 0, so neither helps the other through the
+# template rules (`UpdateAggroHelp` needs `aggression` for rule 0). With the link group, the
+# other member must join the fight when one is attacked.
+#
+# Run the game log with `aaemu_game::systems::ai=debug` so the join is visible. GM access is
+# needed for the `/move` teleport.
+suite aggro-links
+bot linker gm
+
+[linker]
+tp 9963 15162 234
+pump 4
+units 508 7624
+castraw 2 508
+expectlog "aggro link: group member joined the fight" 20
+pump 4
