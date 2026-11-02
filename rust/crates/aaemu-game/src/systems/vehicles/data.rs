@@ -530,6 +530,10 @@ pub struct VehiclesData {
     /// `ModelManager._modelTypes` (model id -> (sub id, sub type)).
     pub model_types: HashMap<u32, (u32, String)>,
     pub vehicle_models: HashMap<u32, VehicleModel>,
+    /// `vehicle_models.normal` by model id: the prefab / `cgf://` reference the client loads
+    /// for the vehicle body (the Red Farm Hauler, model 1553, is
+    /// `prefab://prefabs/vehicle_tractor.xml/vehicle_tractor_c.tractor_body`).
+    pub vehicle_model_refs: HashMap<u32, String>,
     pub ship_models: HashMap<u32, ShipModel>,
 }
 
@@ -1153,6 +1157,9 @@ impl VehiclesData {
     }
 
     fn load_models(&mut self, ctx: &DataLoadCtx<'_>) -> Result<(), GameDataError> {
+        // `vehicle_models.normal` is joined to its `models` row below; keep it by sub id
+        // until the `models` table maps model ids to sub ids.
+        let mut vehicle_refs: HashMap<u32, String> = HashMap::new();
         for_each_row(ctx.conn, "SELECT * FROM vehicle_models", [], |r| {
             let m = VehicleModel {
                 id: r.u32("id")?,
@@ -1170,6 +1177,10 @@ impl VehiclesData {
                 turret_yaw_angle_min: r.f32_opt("turret_yaw_angle_min")?,
                 turret_yaw_angle_max: r.f32_opt("turret_yaw_angle_max")?,
             };
+            let reference = r.string_or("normal", "")?;
+            if !reference.trim().is_empty() {
+                vehicle_refs.insert(m.id, reference);
+            }
             self.vehicle_models.entry(m.id).or_insert(m);
             Ok(())
         })?;
@@ -1195,6 +1206,13 @@ impl VehiclesData {
             let id = r.u32("id")?;
             let sub_id = r.u32("sub_id")?;
             let sub_type = r.string("sub_type")?;
+            if sub_type == "VehicleModel" {
+                if let Some(reference) = vehicle_refs.get(&sub_id) {
+                    self.vehicle_model_refs
+                        .entry(id)
+                        .or_insert_with(|| reference.clone());
+                }
+            }
             self.model_types.entry(id).or_insert((sub_id, sub_type));
             Ok(())
         })?;

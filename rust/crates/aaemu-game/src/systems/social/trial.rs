@@ -320,7 +320,7 @@ fn run_effect(server: &GameServer, e: Effect) {
                     old.delete(&p);
                 }
             }
-            p.data().unit.transform = destination;
+            crate::world::session::teleport_character(server, &p, destination);
             let changes = if old_instance == destination.instance_id {
                 world.add_visible_object(&p, &server.view_ctx())
             } else {

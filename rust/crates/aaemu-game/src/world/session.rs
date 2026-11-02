@@ -25,6 +25,7 @@ use crate::models::character::{Character, DEFAULT_INSTANCE_ID};
 use crate::models::container::slot_type;
 use crate::models::item::Item;
 use crate::models::movement::{MoveKind, MoveType, MoveTypeActorFlags};
+use crate::models::transform::Transform;
 use crate::net::connection::{ConnCommand, GameConnection, GameState};
 use crate::packets::proxy::ChangeStatePacket;
 use crate::packets::world::*;
@@ -207,6 +208,135 @@ pub fn on_zone_change(server: &GameServer, p: &PlayerRef, last_zone: u32, new_zo
         }
     }
     zone_access::update(server, p);
+}
+
+/// The Rust equivalent of C# `character.Transform = new Transform(character, null, zoneId,
+/// instanceId, x, y, z, ...)`: applies a server-forced teleport destination to the server's
+/// copy, moves the character's object table entry to the destination instance, and fires
+/// `Character.OnZoneChange` for the zone it leaves (`Unit.OnZoneChange` zone-group buffs such as
+/// the open-sea turbulence buff 7743, zone chat, closed-zone handling).
+///
+/// The arrival is filed by the caller like in the C#: `CSInstanceLoadedPacket` after an
+/// `SCLoadInstancePacket`, or [`file_teleport_arrival`] for a same-instance teleport. A missing
+/// destination instance is logged and only the transform is applied (test / data fixtures).
+pub fn teleport_character(server: &GameServer, p: &PlayerRef, destination: Transform) -> bool {
+    let world = server
+        .world
+        .worlds()
+        .into_iter()
+        .find(|w| w.id == destination.instance_id);
+    if world.is_none() {
+        tracing::warn!(
+            "Teleport of '{}' to unknown world instance {}",
+            p.data().unit.name,
+            destination.instance_id
+        );
+    }
+    let obj = WorldObject::from(p);
+    let old = p.data().unit.transform;
+    // The C# `new Transform(character, null, ...)` has no parent.
+    if let Some(old_world) = server.world.world_of(&obj) {
+        old_world.detach_child(&obj);
+    }
+    {
+        let mut c = p.data();
+        let t = &mut c.unit.transform;
+        t.instance_id = destination.instance_id;
+        t.world_id = world
+            .as_ref()
+            .map_or(destination.world_id, |w| w.template.id);
+        t.zone_id = destination.zone_id;
+        t.set_position(
+            destination.x,
+            destination.y,
+            destination.z,
+            destination.rot_x,
+            destination.rot_y,
+            destination.rot_z,
+        );
+        t.parent_obj_id = 0;
+    }
+    // The object tables move with the transform so lookups find the character in the instance
+    // it is in. The old instance's region grid lets go when the arrival is filed
+    // (`instance_loaded` / `add_visible_object`), like the C# `AddVisibleObject` does.
+    if old.instance_id != destination.instance_id {
+        if let Some(old_world) = server
+            .world
+            .worlds()
+            .into_iter()
+            .find(|w| w.id == old.instance_id)
+        {
+            old_world.remove_object(p.obj_id);
+        }
+        if let Some(world) = world {
+            world.add_object(p);
+        }
+    }
+    if old.zone_id != destination.zone_id {
+        on_zone_change(server, p, old.zone_id, destination.zone_id);
+    }
+    true
+}
+
+/// Files a teleported character into the destination region and dispatches the zone changes a
+/// region move causes (`CSInstanceLoadedPacket` / `CSTeleportEndedPacket`). A character whose
+/// instance load is still pending has no region yet; its arrival is filed by
+/// [`crate::systems::instances::worlds::instance_loaded`] instead.
+pub fn file_teleport_arrival(server: &GameServer, p: &PlayerRef) {
+    if p.region().is_none() {
+        return;
+    }
+    let instance_id = p.data().unit.transform.instance_id;
+    let Some(world) = server.world.world(instance_id) else {
+        return;
+    };
+    let changes = world.add_visible_object(p, &server.view_ctx());
+    handle_zone_changes(server, changes);
+}
+
+/// A server-driven resurrection displacement (temple / statue, `Escape`): applies the position
+/// like [`teleport_character`] and files the arrival. The 1.2 client does not answer
+/// `SCCharacterResurrectedPacket` with `CSTeleportEnded`, so the server cannot wait for a
+/// movement report to learn the destination zone.
+pub fn resurrect_at(server: &GameServer, p: &PlayerRef, destination: Transform) {
+    let Some(world) = server.world.world(destination.instance_id) else {
+        return;
+    };
+    let mut destination = destination;
+    // The zone the server lands in is the one at the coordinates; the caller's zone id is only
+    // a fallback for an out-of-bounds position.
+    let derived = world.template.zone_id_at(destination.x, destination.y);
+    if derived > 0 {
+        destination.zone_id = derived;
+    }
+    teleport_character(server, p, destination);
+    file_teleport_arrival(server, p);
+}
+
+/// `CSTeleportEndedPacket`: the client reports its landing position after an `SCTeleportUnit`.
+/// The server copy follows it and the region membership is re-evaluated, so a teleport out of a
+/// zone group (open sea) removes that group's buffs even when no movement packet follows.
+///
+/// The reported position is in world coordinates, so a character that stood on another object
+/// (a ship deck, a moving gimmick) is detached first; otherwise the new world position would be
+/// composed with the old parent and land in the parent's region / zone.
+pub fn teleport_ended(server: &GameServer, p: &PlayerRef, x: f32, y: f32, z: f32) {
+    let Some((filed_instance, _, _)) = p.region() else {
+        // An instance load is pending: `instance_loaded` files the arrival.
+        return;
+    };
+    if filed_instance != p.data().unit.transform.instance_id {
+        return;
+    }
+    let obj = WorldObject::from(p);
+    if obj.transform().parent_obj_id != 0 {
+        match server.world.world_of(&obj) {
+            Some(w) => w.detach_child(&obj),
+            None => p.data().unit.transform.parent_obj_id = 0,
+        }
+    }
+    p.data().unit.transform.set_xyz(x, y, z);
+    file_teleport_arrival(server, p);
 }
 
 /// `ChatManager.GetZoneChat(zoneKey)`.

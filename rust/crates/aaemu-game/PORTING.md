@@ -954,6 +954,29 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   removed through its `SlaveSpawner` (`Despawn` broadcasts the removal and releases the slot)
   and the spawner creates the replacement at its authored transform; a slave without a
   spawner is destroyed and logged, with nothing respawned.
+* systems::skills / world::session (zone-group buffs across teleports): the C# `Transform.ZoneId`
+  setter ran `Character.OnZoneChange`, which is what removes a zone group's buff when the group
+  is left (open sea: buff 7743 "irregular sea wind", the turbulence debuff, on zone groups
+  29/30/36/39/40/59/60). Several ported teleports assigned the zone directly and skipped it, so
+  Recall / portals / GM moves / resurrections out of open sea kept the buff until the next
+  region change. Every server-forced destination now goes through
+  `session::teleport_character` (`world/session.rs`), which applies the transform, moves the
+  instance object table and dispatches `OnZoneChange`; the arrival is filed by
+  `CSInstanceLoadedPacket` (`systems/instances/worlds.rs`) or, for a same-instance teleport, by
+  `session::file_teleport_arrival`. **Deviation:** `CSTeleportEndedPacket` now follows the
+  client's reported landing position and refiles the region before repainting (the C# only ran
+  `ResendVisibleObjectsToCharacter`), so GM `/move`, same-instance portals and navi teleports
+  re-evaluate the zone without waiting for a movement packet. Only a teleport armed through
+  `DisabledSetPosition` is followed; an unsolicited completion still repaints but changes
+  nothing. The reported position is world-frame, so a character standing on another object is
+  detached first. Resurrections
+  (`CSResurrectCharacterPacket`, `Escape`) apply the statue position immediately because the 1.2
+  client does not answer `SCCharacterResurrected` with `CSTeleportEnded`. Tests:
+  `systems/skills/zone_buff_tests.rs`.
+* systems::instances (`return_to_main_world`): **Deviation:** the C# clone's new `Transform`
+  fired `OnZoneChange(0, mainZone)`, leaving the instance zone's chat channel and zone-group buff
+  behind; the Rust passes the zone actually left (`world/session.rs::teleport_character`), so a
+  zone-group buff of the instance zone is removed.
 * systems::skills (`SextantPos` special effect 69): row 7181 (values 0) is the only row, on
   skill 18416 "measure my current position" (item 24795 Sextant). The caster receives a system
   chat message with the world position. No authored system-message coordinate format exists in
@@ -1505,7 +1528,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `FUN_39093860(..., 9.0)`, strictly under 3.0, widened to 12.25 = 3.5 m by the target's
   `+0x3c26` flag), and the doodad BoardTransfer path passes `None` because its doodad func has
   its own use-range check. The gap is measured against the ship model's mass box when the slave
-  has a ship model, else the requested attach point's world position, else the smaller of the
+  has a ship model (the 2026-11-02 bullet below replaces the land-vehicle fallback with the
+  model's collision bounds when the client assets are available), else the requested attach
+  point's world position, else the smaller of the
   slave origin distance and the nearest located attach point of the model
   (`slave_attach_points*.json`); the client measures the minimum distance from the character's
   collision primitive to the target's collision parts (`FUN_39093860` -> `FUN_390b3ae0` for the
@@ -1541,6 +1566,27 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `CSStartInteractionPacket` offers 13863 once the driver seat is taken (NPC interaction row).
   `CSDiscardSlave` 0x032 has no server-side speed check in the C#; the 1.2 client refuses to
   send it above 5 m/s with message 0x67 (`FUN_39345aa0`), so the server keeps none.
+
+* systems::vehicles (2026-11-02, bind reach measured to the body): the 1.2 client's 12076
+  driver bind and 13863 passenger interaction both measure to the vehicle's collision
+  geometry, not to the model origin or the attach points (`FUN_39346290` ->
+  `FUN_39093860(..., 16.0)` and `FUN_393bf270` -> `FUN_39093860(..., 9.0)`;
+  `FUN_3989bf90` -> `FUN_398b1ab0` is the per-part shape distance). The live 2026-11-02
+  01:43:54-58 log (original client, Red Farm Hauler slave 146 / model 1553) had `CSBindSlave`
+  tl 0x56 refused with `TOO_FAR_AWAY` four times from beside the cab and bound only at
+  01:44:17; the land-vehicle fallback measured the model origin and the rear cannon attach
+  points. Land vehicles now measure to the union of the prefab body's collision proxies
+  (`vehicle_models.normal`; the prefab's static `AnimObject` body is included). The 1.2 `.chr`
+  body model carries no `MeshPhysicsData`; its same-named `.cgf` holds the body proxies.
+  Ships keep the mass box and the 4.0 m / 3.0 m reach constants are unchanged. The union AABB
+  over-approximates the target's collision parts: in a concave gap between parts the measured
+  gap can be smaller than 1.2's shape-to-shape minimum (`FUN_3989bf90`), never larger for the
+  same body, so the reach is never stricter than the client for the same geometry. A model
+  without client geometry keeps the attach-point fallback. The Bevy client is being changed in
+  parallel to measure its reach to the drawn body AABB, so client and server now both measure
+  to the body. Tested by
+  `land_vehicle_bind_measures_the_body_bounds_not_the_rear_attach_points` and the gated
+  `real_hauler_bind_measures_the_client_body_collision_bounds`.
 
 * systems::vehicles (2026-11-01, bind refusal replies): the 1.2 client sets a pending bind
   request (local actor `+0x10` = target tl) in the `CSBindSlave` builder (`FUN_393464a0`,
