@@ -434,12 +434,12 @@ pub fn escape(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         v[3]
     );
     let instance_id = p.data().unit.transform.instance_id;
-    let (x, y, z, z_rot) = if DEFAULT_INSTANCE_ID != instance_id {
+    let (zone_hint, x, y, z, z_rot) = if DEFAULT_INSTANCE_ID != instance_id {
         let Some(w) = world_of(server, caster) else {
             return;
         };
         let sp = w.template.spawn_position;
-        (sp.x, sp.y, sp.z, sp.yaw)
+        (sp.zone_id, sp.x, sp.y, sp.z, sp.yaw)
     } else {
         match server
             .systems
@@ -448,11 +448,12 @@ pub fn escape(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
             .npcs()
             .closest_return_portal(server, p)
         {
-            Some(portal) => (portal.x, portal.y, portal.z, portal.z_rot),
+            Some(portal) => (portal.zone_id, portal.x, portal.y, portal.z, portal.z_rot),
             None => {
                 // GetClosestReturnPortal's fail-safe portal (current position, ZRot 0).
                 let pos = world_pos(server, &Target::Obj(caster.clone()));
-                (pos.x, pos.y, pos.z, 0.0)
+                let zone = p.data().unit.transform.zone_id;
+                (zone, pos.x, pos.y, pos.z, 0.0)
             }
         }
     };
@@ -467,6 +468,19 @@ pub fn escape(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
             z_rot,
         },
         true,
+    );
+    crate::world::session::resurrect_at(
+        server,
+        p,
+        crate::models::transform::Transform {
+            instance_id,
+            zone_id: zone_hint,
+            x,
+            y,
+            z,
+            rot_z: z_rot,
+            ..Default::default()
+        },
     );
 }
 
@@ -493,18 +507,30 @@ fn recall_by_id(server: &GameServer, id: u32) -> Option<Portal> {
 }
 
 /// `character.Transform = new Transform(character, null, zoneId, instanceId, x, y, z, roll,
-/// pitch, yaw)` (the world parent link is left to the world code).
+/// pitch, yaw)`: the C# constructor's `ZoneId` setter runs `Character.OnZoneChange`, which the
+/// shared teleport helper dispatches (zone-group buffs, zone chat, closed-zone handling).
 fn set_character_transform(
+    server: &GameServer,
     p: &PlayerRef,
     instance_id: u32,
     zone_id: u32,
     pos: PositionAndRotation,
 ) {
-    let mut c = p.data();
-    let t = &mut c.unit.transform;
-    t.instance_id = instance_id;
-    t.zone_id = zone_id;
-    t.set_position(pos.x, pos.y, pos.z, pos.rot_x, pos.rot_y, pos.rot_z);
+    crate::world::session::teleport_character(
+        server,
+        p,
+        crate::models::transform::Transform {
+            instance_id,
+            zone_id,
+            x: pos.x,
+            y: pos.y,
+            z: pos.z,
+            rot_x: pos.rot_x,
+            rot_y: pos.rot_y,
+            rot_z: pos.rot_z,
+            ..Default::default()
+        },
+    );
 }
 
 /// Whether the world instance `instance_id` has a zone with key `zone_key`.
@@ -706,6 +732,7 @@ pub fn return_(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
             ang_z: deg_to_rad(t.yaw),
         });
         set_character_transform(
+            server,
             p,
             0,
             t.zone_id,
@@ -738,7 +765,7 @@ pub fn return_(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
             ang_y: m.pos.rot_y,
             ang_z: m.pos.rot_z,
         });
-        set_character_transform(p, m.instance_id, m.zone_id, m.pos);
+        set_character_transform(server, p, m.instance_id, m.zone_id, m.pos);
         p.send(SCTeleportUnitPacket {
             reason: TELEPORT_REASON_MOVE_TO_LOCATION,
             error_message: 0,
