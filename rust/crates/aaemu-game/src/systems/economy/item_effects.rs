@@ -672,9 +672,11 @@ pub fn gold_cost(
 const ITEM_SOCKET_MIN_ITEM_LEVEL: i32 = 20;
 
 /// Gate for installing one lunagem, mirroring the client's `FUN_397ceb80`:
-/// `item_sockets` gives the gem's equip slot group, `equip_slot_group_maps` the slot types that
-/// group covers, `item_socket_level_limits` the target's minimum level requirement and
-/// `item_socket_num_limits` the maximum number of gems for the target's slot type and grade.
+/// `item_socket_level_limits` is checked first (`socket_target_level`), then the gem's equip
+/// slot group (`item_sockets`) against the target slot type through `equip_slot_group_maps`,
+/// and `item_socket_num_limits` for the target's slot type and grade. A missing/zero socket
+/// limit is `invalid_target` (`FUN_395aca00` returns 0, the client maps it to 0x12); only an
+/// existing limit reached by the current gem count is `item_sockets_full`.
 /// Returns the `SCErrorMsg` code the 1.2 client uses for the rejected rule.
 fn socket_install_rejection(
     data: &ItemData,
@@ -683,21 +685,22 @@ fn socket_install_rejection(
     gem_template_id: u32,
     gem_count: usize,
 ) -> Result<(), i16> {
-    let Some(group_id) = data.item_socket_group(gem_template_id) else {
-        return Err(error_message::INVALID_TARGET);
-    };
     if let Some(required_level) = data.item_socket_level_limit(gem_template_id) {
         if template.level_requirement < required_level {
             return Err(error_message::SOCKET_TARGET_LEVEL);
         }
     }
+    let Some(group_id) = data.item_socket_group(gem_template_id) else {
+        return Err(error_message::INVALID_TARGET);
+    };
     let Some(slot_type_id) = template.gear_slot_type() else {
         return Err(error_message::INVALID_TARGET);
     };
-    if !data.socket_group_allows(group_id, slot_type_id) {
+    let limit = data.item_socket_num_limit(slot_type_id, target.grade);
+    if limit == 0 || !data.socket_group_allows(group_id, slot_type_id) {
         return Err(error_message::INVALID_TARGET);
     }
-    if gem_count >= usize::from(data.item_socket_num_limit(slot_type_id, target.grade)) {
+    if gem_count >= usize::from(limit) {
         return Err(error_message::ITEM_SOCKETS_FULL);
     }
     Ok(())

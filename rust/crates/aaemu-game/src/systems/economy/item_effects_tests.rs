@@ -43,6 +43,7 @@ const CHARM: u32 = 5100;
 const GEM: u32 = 5200; // chest lunagem, requires a level-50 item
 const HANDS_GEM: u32 = 5201; // hands lunagem, no level limit
 const LOW_GEM: u32 = 5202; // chest lunagem, no level limit (only the item-level gate applies)
+const FAIL_GEM: u32 = 5203; // hands lunagem requiring a level-50 item (fails level and group)
 const POWDER: u32 = 5300;
 const SLAVE_ITEM: u32 = 5400;
 const BACKPACK: u32 = 5500;
@@ -131,6 +132,7 @@ fn data() -> GameData {
         (GEM, 10),
         (HANDS_GEM, 10),
         (LOW_GEM, 10),
+        (FAIL_GEM, 10),
         (POWDER, 10),
         (ITEM_DAWN_STONE, 10),
         (TIMEGLASS, 10),
@@ -163,6 +165,14 @@ fn data() -> GameData {
             level: 0,
         },
     );
+    d.items.item_socket_level_limits.insert(
+        FAIL_GEM,
+        ItemSocketLevelLimit {
+            id: 3,
+            item_id: FAIL_GEM,
+            level: 50,
+        },
+    );
     d.items.item_sockets.insert(
         GEM,
         ItemSocket {
@@ -185,6 +195,14 @@ fn data() -> GameData {
             id: 3,
             item_id: LOW_GEM,
             equip_slot_group_id: 23,
+        },
+    );
+    d.items.item_sockets.insert(
+        FAIL_GEM,
+        ItemSocket {
+            id: 4,
+            item_id: FAIL_GEM,
+            equip_slot_group_id: 18,
         },
     );
     d.items.equip_slot_group_maps.insert(
@@ -880,6 +898,37 @@ async fn socketing_rejects_a_target_below_the_minimum_item_level() {
     socketing_effect(&w, gem, LOW_GEM, target);
     assert_eq!(w.a.drain(), vec![error(error_message::SOCKET_TARGET_LEVEL)]);
     assert_eq!(item(&w, target).unwrap().details.gem_ids, [0; 7]);
+}
+
+#[tokio::test]
+async fn socketing_rejects_a_target_with_no_num_socket_limit() {
+    let mut w = world();
+    super::bridges::install(&w.server);
+    let target = give(&w, &w.pa.clone(), slot_type::INVENTORY, SOCKET_ARMOR, 1, 0);
+    // Slot 3 has a limit only for grade 0; grade 1 has no row (0 sockets).
+    set_grade(&w, target, 1);
+    let gem = give(&w, &w.pa.clone(), slot_type::INVENTORY, GEM, 1, 1);
+    mark_clean(&w, target);
+    w.pa.data().skill_char.skill_cancelled = false;
+    socketing_effect(&w, gem, GEM, target);
+    assert_eq!(w.a.drain(), vec![error(error_message::INVALID_TARGET)]);
+    assert_eq!(item(&w, target).unwrap().details.gem_ids, [0; 7]);
+    assert!(w.pa.data().skill_char.skill_cancelled);
+}
+
+#[tokio::test]
+async fn socketing_level_limit_wins_over_the_slot_group() {
+    let mut w = world();
+    super::bridges::install(&w.server);
+    // LOW_ARMOR requires level 40; FAIL_GEM needs 50 and is a hands gem on a chest armor.
+    let target = give(&w, &w.pa.clone(), slot_type::INVENTORY, LOW_ARMOR, 1, 0);
+    let gem = give(&w, &w.pa.clone(), slot_type::INVENTORY, FAIL_GEM, 1, 1);
+    mark_clean(&w, target);
+    w.pa.data().skill_char.skill_cancelled = false;
+    socketing_effect(&w, gem, FAIL_GEM, target);
+    assert_eq!(w.a.drain(), vec![error(error_message::SOCKET_TARGET_LEVEL)]);
+    assert_eq!(item(&w, target).unwrap().details.gem_ids, [0; 7]);
+    assert!(w.pa.data().skill_char.skill_cancelled);
 }
 
 #[tokio::test]

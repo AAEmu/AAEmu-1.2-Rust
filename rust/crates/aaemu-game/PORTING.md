@@ -1678,10 +1678,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   template's `EquipmentItemSlotType`; and the target may hold at most
   `item_socket_num_limits[slot type][grade]` gems. `item_socket_num_limits.slot_id` is the
   **equip slot type** (the client feeds the target's slot type straight into the lookup), not an
-  equip slot group. A missing num-limit row means 0 sockets (`FUN_395aca00` returns 0), a missing
-  level-limit row means no limit (`FUN_395aca70` returns `INT_MAX`), and the 15 `item_sockets`
-  rows whose item has no `items` row (test/removed items) are skipped at load. Rejections send
-  the 1.2 error codes 18 (`invalid_target`, wrong slot group), 742 (`item_sockets_full`),
+  equip slot group. The level check runs before the slot-group/limit checks. A missing or zero
+  num-limit row means 0 sockets (`FUN_395aca00` returns 0) and the client reports 18
+  (`invalid_target`), not 742; only an existing limit already reached is `item_sockets_full`. A
+  missing level-limit row means no limit (`FUN_395aca70` returns `INT_MAX`), and the 15
+  `item_sockets` rows whose item has no `items` row (test/removed items) are skipped at load.
+  Rejections send the 1.2 error codes 18 (`invalid_target`, wrong slot group or no socket
+  limit), 742 (`item_sockets_full`),
   743 (`item_sockets_empty`) or 781 (`socket_target_level`) and cancel the cast, which refunds
   the gem and skips the roll; the C# returned early without cancelling, so the
   `UseSkillAsReagent` gem was consumed even on a rejected attempt. DawnStone removal keeps its
