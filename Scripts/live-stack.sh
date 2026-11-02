@@ -14,7 +14,8 @@
 #
 # Lane mode: run from a lane worktree (Scripts/lane.sh new <name>) or with AAEMU_LANE=<name> and
 # the stack uses the lane's runtime dir, binaries, port block and databases, so several sessions
-# can each run their own stack. Without a lane it is the shared D:/aaemu-live stack on 21xxx.
+# can each run their own stack. Without a lane it is the shared D:/aaemu-live stack on 21xxx; a
+# linked git worktree that is not a lane needs AAEMU_SHARED=1 for that.
 #
 # Every path is an environment variable so another machine can override it (e.g. AAEMU_DB_USER, the
 # MySQL user in generated lane configs, default aaemu; AAEMU_DRIVER_DLL / AAEMU_DRIVER_OUT). Secrets (DB and test
@@ -40,10 +41,11 @@ if [ -z "$LANE" ]; then
     [ "$(cd "$wt" && pwd -P)" = "$(cd "$REPO" && pwd -P)" ] && LANE=$(basename "$f" .env)
   done
 fi
-# A linked worktree is never allowed to fall back to the shared runtime (it used to truncate its
-# compact.sqlite3). The integration checkout is not under .git/worktrees and keeps the shared stack.
-if [ -z "$LANE" ] && [ -n "$GIT_LANE" ]; then
-  echo "live-stack: $REPO is the git worktree '$GIT_LANE' but $LANES/$GIT_LANE.env is missing; refusing to use the shared runtime (Scripts/lane.sh new <name>)" >&2
+# A linked worktree without a lane never falls back to the shared runtime silently (it used to
+# truncate its compact.sqlite3). A checkout that is itself a linked worktree but meant to run the
+# shared stack (e.g. an integration checkout made with `git worktree add`) opts in with AAEMU_SHARED=1.
+if [ -z "$LANE" ] && [ -n "$GIT_LANE" ] && [ "${AAEMU_SHARED:-}" != 1 ]; then
+  echo "live-stack: $REPO is the git worktree '$GIT_LANE' but $LANES/$GIT_LANE.env is missing; refusing to use the shared runtime (Scripts/lane.sh new <name>, AAEMU_LANE=<name>, or AAEMU_SHARED=1 for the shared stack)" >&2
   exit 1
 fi
 if [ -n "$LANE" ]; then
