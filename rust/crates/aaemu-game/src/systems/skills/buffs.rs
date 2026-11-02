@@ -1831,6 +1831,51 @@ pub fn absorption_effects(server: &GameServer, owner: &WorldObject) -> Vec<u32> 
     })
 }
 
+/// One live reflection buff of an owner whose `reflection_type_id` is the incoming hit's
+/// `DamageType`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReflectionBuff {
+    pub index: u32,
+    pub buff_id: u32,
+    /// `reflection_chance` (percent, 0-100).
+    pub chance: i32,
+    /// `reflection_target_ratio` (percent of the received damage returned to the attacker).
+    pub target_ratio: i32,
+}
+
+/// The owner's live reflection buffs that match an incoming hit, in buff order.
+///
+/// `reflection_type_id` is the `DamageType` of the hit to reflect (1 Melee, 2 Magic, 3 Siege,
+/// 4 Ranged; verified against the 1.2 rows and their tooltips). `reflection_chance` is the
+/// percent chance to reflect and `reflection_target_ratio` the percent of the received damage
+/// that is returned; `reflection_ratio` has no settled meaning and is not read here
+/// (REFLECT-1, capture-pending; see `PORTING.md`).
+pub fn reflection_effects(
+    server: &GameServer,
+    owner: &WorldObject,
+    damage_type: DamageType,
+) -> Vec<ReflectionBuff> {
+    let data = &server.game_data.systems.skills;
+    owner.with_base_unit(|b| {
+        b.buffs()
+            .effects
+            .iter()
+            .filter(|e| !e.is_ended())
+            .filter_map(|e| {
+                let t = data.buff(e.template.id)?;
+                (t.reflection_chance > 0 && t.reflection_type_id == damage_type as u32).then_some(
+                    ReflectionBuff {
+                        index: e.index,
+                        buff_id: t.id,
+                        chance: t.reflection_chance,
+                        target_ratio: t.reflection_target_ratio,
+                    },
+                )
+            })
+            .collect()
+    })
+}
+
 // ------------------------------------------------------------------ triggers
 
 /// One subscribed `BuffTrigger` (`BuffTriggersHandler._triggers` entry).
@@ -1845,6 +1890,9 @@ pub struct TriggerSub {
     pub template: BuffTriggerTemplate,
     /// `DamagedBuffTrigger` (else the generic `BuffTrigger`).
     pub damaged: bool,
+    /// `DamageBuffTrigger` (event 3, damage dealt by the owner): it carries the event amount
+    /// like `damaged`, but targets the owner as the C# trigger does.
+    pub damage: bool,
 }
 
 /// `BuffTriggersHandler.SubscribeEvents`.
@@ -1873,11 +1921,11 @@ fn subscribe_triggers(server: &GameServer, owner: &WorldObject, b: &Buff) {
     use BuffEventTriggerKind as K;
     for t in templates {
         let kind = K::from_raw(i64::from(t.kind));
-        let (unit_event, damaged) = match kind {
+        let (unit_event, damaged, damage) = match kind {
+            Some(K::Damage) => (true, false, true),
             Some(
                 K::Attack
                 | K::Attacked
-                | K::Damage
                 | K::Death
                 | K::Landing
                 | K::ChannelingCancel
@@ -1887,12 +1935,12 @@ fn subscribe_triggers(server: &GameServer, owner: &WorldObject, b: &Buff) {
                 | K::DamagedCollision
                 | K::Immotality
                 | K::Time,
-            ) => (true, false),
+            ) => (true, false, false),
             Some(
                 K::Damaged | K::DamagedMelee | K::DamagedRanged | K::DamagedSpell | K::DamagedSiege,
-            ) => (true, true),
+            ) => (true, true, false),
             Some(K::Dispelled | K::Timeout | K::Started | K::RemoveOnMove | K::RemoveOnDamage) => {
-                (false, false)
+                (false, false, false)
             }
             _ => {
                 tracing::trace!("Unimplemented BuffTrigger[\"{:?}\"]", kind);
@@ -1906,6 +1954,7 @@ fn subscribe_triggers(server: &GameServer, owner: &WorldObject, b: &Buff) {
             buff_instance_id: b.instance_id,
             template: t.clone(),
             damaged,
+            damage,
         });
     }
 }
@@ -2035,7 +2084,11 @@ fn execute_trigger(
     }
     let template = full_template(server, &b.template);
     let skill_object = SkillObject::None;
-    let (effect_caster, source_info) = if s.damaged {
+    // `DamagedBuffTrigger` and `DamageBuffTrigger` both apply the effect from the owner with
+    // the buff template as the source and the event's damage amount. The C# `DamageBuffTrigger`
+    // uses `args.Attacker`, which `OnDamageArgs` fills with the damage caster itself, so the
+    // target stays the owner here too.
+    let (effect_caster, source_info) = if s.damaged || s.damage {
         (
             Some(owner.clone()),
             EffectSource {
@@ -2043,6 +2096,7 @@ fn execute_trigger(
                 buff: Some(template.clone()),
                 amount,
                 is_trigger: true,
+                use_damage_amount: t.use_damage_amount,
                 always_hit: false,
                 source_item: None,
                 source_item_debited: false,
@@ -2056,6 +2110,7 @@ fn execute_trigger(
                 buff: None,
                 amount: 0,
                 is_trigger: false,
+                use_damage_amount: t.use_damage_amount,
                 always_hit: false,
                 source_item: None,
                 source_item_debited: false,
