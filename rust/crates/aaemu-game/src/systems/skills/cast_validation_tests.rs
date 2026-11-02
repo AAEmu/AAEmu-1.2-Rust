@@ -386,62 +386,77 @@ async fn magic_misses_do_no_damage_but_guaranteed_hit_bypasses_them() {
 }
 
 #[tokio::test]
-async fn stun_and_walking_restrictions_allow_only_configured_casts() {
-    for (stunned, walking) in [(true, false), (false, true)] {
-        let mut data = GameData::empty();
-        data.systems.skills.add_buff(BuffTemplate {
-            id: 10,
-            stun: stunned,
-            ..Default::default()
-        });
-        let (server, _client, player, npc) = fixture(data);
-        let caster = WorldObject::from(&player);
-        // Keep the live unit stats; the validation reads the actual active buff set.
-        let mut b = crate::models::buff::Buff::new(
-            super::buffs::net_template(&server, server.game_data.systems.skills.buff(10).unwrap()),
-            super::buffs::unit_caster(player.obj_id),
-            Some((1, 10)),
-            crate::world::now_ms(),
-        );
-        b.state = crate::models::buff::effect_state::ACTING;
-        player.data().unit.buffs.effects.push(b);
-        player.data().unit.skill_state.moving = walking;
-        let skill = SkillRun::new(
-            Arc::new(SkillTemplate {
-                source_cannot_use_while_walk: walking,
-                ..super::tests::skill_template(1)
-            }),
-            1,
-        );
-        let expected = if stunned {
-            "skill_cannot_cast_in_stun"
-        } else {
-            "skill_cannot_cast_while_walking"
-        };
-        assert_eq!(
-            cast(&server, &skill, &player, &npc).0,
-            super::unit_reqs::skill_result_for_key(expected)
-        );
-        assert_eq!(player.data().unit.skill_last_used_ms, 0);
-        if stunned {
-            let skill = SkillRun::new(
-                Arc::new(SkillTemplate {
-                    source_stun: true,
-                    ..super::tests::skill_template(2)
-                }),
-                1,
-            );
-            assert_eq!(
-                super::validation::check(
-                    &server,
-                    &skill,
-                    &caster,
-                    &Target::Obj(WorldObject::from(&npc))
-                ),
-                Ok(())
-            );
-        }
-    }
+async fn a_stunned_caster_is_refused_unless_the_skill_allows_stun() {
+    let mut data = GameData::empty();
+    data.systems.skills.add_buff(BuffTemplate {
+        id: 10,
+        stun: true,
+        ..Default::default()
+    });
+    let (server, _client, player, npc) = fixture(data);
+    let caster = WorldObject::from(&player);
+    // Keep the live unit stats; the validation reads the actual active buff set.
+    let mut b = crate::models::buff::Buff::new(
+        super::buffs::net_template(&server, server.game_data.systems.skills.buff(10).unwrap()),
+        super::buffs::unit_caster(player.obj_id),
+        Some((1, 10)),
+        crate::world::now_ms(),
+    );
+    b.state = crate::models::buff::effect_state::ACTING;
+    player.data().unit.buffs.effects.push(b);
+    let skill = SkillRun::new(Arc::new(super::tests::skill_template(1)), 1);
+    assert_eq!(
+        cast(&server, &skill, &player, &npc).0,
+        super::unit_reqs::skill_result_for_key("skill_cannot_cast_in_stun")
+    );
+    assert_eq!(player.data().unit.skill_last_used_ms, 0);
+    let skill = SkillRun::new(
+        Arc::new(SkillTemplate {
+            source_stun: true,
+            ..super::tests::skill_template(2)
+        }),
+        1,
+    );
+    assert_eq!(
+        super::validation::check(
+            &server,
+            &skill,
+            &caster,
+            &Target::Obj(WorldObject::from(&npc))
+        ),
+        Ok(())
+    );
+}
+
+/// `source_cannot_use_while_walk` is not enforced (`PORTING.md`): the C# never read it, and the
+/// client's walk mode is not in the move packets. 60 of the 70 flagged 1.2 skills are mount dash
+/// skills (Run!, Keep Running!, ...) that players press while running.
+#[tokio::test]
+async fn a_moving_caster_can_cast_a_source_cannot_use_while_walk_skill() {
+    let (server, _client, player, npc) = fixture(GameData::empty());
+    let caster = WorldObject::from(&player);
+    // A character move with a velocity, as `CSMoveUnit` reports it.
+    super::on_move_request(&server, &player, 10, 0, 0);
+    let skill = SkillRun::new(
+        Arc::new(SkillTemplate {
+            source_cannot_use_while_walk: true,
+            ..super::tests::skill_template(1)
+        }),
+        1,
+    );
+    assert_eq!(
+        super::validation::check(
+            &server,
+            &skill,
+            &caster,
+            &Target::Obj(WorldObject::from(&npc))
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        cast(&server, &skill, &player, &npc).0,
+        skill_result::SUCCESS
+    );
 }
 
 #[tokio::test]
