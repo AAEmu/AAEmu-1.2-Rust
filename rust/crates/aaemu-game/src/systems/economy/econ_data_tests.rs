@@ -1544,3 +1544,70 @@ fn item_proc_checks_mirror_the_csharp() {
         None
     );
 }
+
+/// The three socket rule tables load cleanly and agree with the shipped 1.2 `compact.sqlite3`:
+/// every gem id that has an `items` row is loaded, every loaded gem has a slot group with at
+/// least one mapped slot type, and every `item_socket_num_limits` row names a real
+/// `EquipmentItemSlotType` and grade.
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only)"]
+fn real_compact_socket_rule_tables_are_consistent() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let d = ItemData::load(&conn).unwrap();
+
+    // 31 slot ids x 12 grades; no row is rejected by the loader.
+    assert_eq!(d.item_socket_num_limits.len(), 372);
+    for ((slot_id, grade), limit) in &d.item_socket_num_limits {
+        assert!(
+            (1..=crate::data::items::equipment_item_slot_type::COSPLAY).contains(slot_id),
+            "num limit {} names a non-existent slot {slot_id}",
+            limit.id
+        );
+        assert!(
+            (0..=i32::from(crate::data::items::item_grade::MYTHIC)).contains(grade),
+            "num limit {} names a non-existent grade {grade}",
+            limit.id
+        );
+        assert!(limit.num_socket <= 7);
+    }
+
+    // The level table has no dangling ids.
+    assert_eq!(d.item_socket_level_limits.len(), 108);
+    for (item_id, limit) in &d.item_socket_level_limits {
+        assert!(
+            d.templates.contains_key(item_id),
+            "level limit {} names missing item {item_id}",
+            limit.id
+        );
+        assert_eq!(d.template(*item_id).unwrap().category_id, 152);
+    }
+
+    // 123 raw item_sockets rows: 15 belong to test/removed items with no `items` row, so the
+    // loader skips them; all 108 real lunagems load and every group has a slot-type map.
+    let raw: i64 = conn
+        .query_row("SELECT COUNT(*) FROM item_sockets", [], |r| r.get(0))
+        .unwrap();
+    let joinable: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM item_sockets s JOIN items i ON i.id = s.item_id",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(raw, 123);
+    assert_eq!(raw - joinable, 15);
+    assert_eq!(d.item_sockets.len(), joinable as usize);
+    for (item_id, socket) in &d.item_sockets {
+        assert!(d.templates.contains_key(item_id));
+        let maps = d
+            .equip_slot_group_maps
+            .get(&socket.equip_slot_group_id)
+            .unwrap_or_else(|| panic!("socket {} has no slot group map", socket.id));
+        assert!(!maps.is_empty());
+    }
+}

@@ -18,7 +18,9 @@ use std::sync::Arc;
 use rusqlite::Connection;
 
 use crate::data::formulas::FormulaKind;
-use crate::data::items::{FullGradeTemplate, ItemGradeEnchantingSupport, TemplateKind};
+use crate::data::items::{
+    FullGradeTemplate, ItemData, ItemGradeEnchantingSupport, ItemTemplate, TemplateKind,
+};
 use crate::data::sqlite::for_each_row;
 use crate::managers::chat::chat_type;
 use crate::models::container::{equip_slot, slot_type, ContainerRef};
@@ -665,8 +667,48 @@ pub fn gold_cost(
 // Socketing / tempering / looks
 // ---------------------------------------------------------------------------------------------
 
+/// The 1.2 client refuses to socket into items below this item level (`content_configs` id 62,
+/// kind 24, value 20; checked before the install/remove branch of `FUN_397ceb80`).
+const ITEM_SOCKET_MIN_ITEM_LEVEL: i32 = 20;
+
+/// Gate for installing one lunagem, mirroring the client's `FUN_397ceb80`:
+/// `item_socket_level_limits` is checked first (`socket_target_level`), then the gem's equip
+/// slot group (`item_sockets`) against the target slot type through `equip_slot_group_maps`,
+/// and `item_socket_num_limits` for the target's slot type and grade. A missing/zero socket
+/// limit is `invalid_target` (`FUN_395aca00` returns 0, the client maps it to 0x12); only an
+/// existing limit reached by the current gem count is `item_sockets_full`.
+/// Returns the `SCErrorMsg` code the 1.2 client uses for the rejected rule.
+fn socket_install_rejection(
+    data: &ItemData,
+    target: &Item,
+    template: &ItemTemplate,
+    gem_template_id: u32,
+    gem_count: usize,
+) -> Result<(), i16> {
+    if let Some(required_level) = data.item_socket_level_limit(gem_template_id) {
+        if template.level_requirement < required_level {
+            return Err(error_message::SOCKET_TARGET_LEVEL);
+        }
+    }
+    let Some(group_id) = data.item_socket_group(gem_template_id) else {
+        return Err(error_message::INVALID_TARGET);
+    };
+    let Some(slot_type_id) = template.gear_slot_type() else {
+        return Err(error_message::INVALID_TARGET);
+    };
+    let limit = data.item_socket_num_limit(slot_type_id, target.grade);
+    if limit == 0 || !data.socket_group_allows(group_id, slot_type_id) {
+        return Err(error_message::INVALID_TARGET);
+    }
+    if gem_count >= usize::from(limit) {
+        return Err(error_message::ITEM_SOCKETS_FULL);
+    }
+    Ok(())
+}
+
 /// `ItemSocketing.Execute` (lunagems; `Item.DawnStone` removes every gem). Sends
-/// `SCSkillEndedPacket(skill_tl_id)` itself.
+/// `SCSkillEndedPacket(skill_tl_id)` itself. A rejected attempt sends the client's error and
+/// sets `skill_cancelled`, so the cast refunds the source gem and no socket roll happens.
 #[allow(clippy::too_many_arguments)]
 pub fn item_socketing(
     server: &GameServer,
@@ -699,44 +741,68 @@ pub fn item_socketing(
             "Special effects: ItemSocketing targetItem {target_id} or gemItem {} not found",
             gem.item_id
         );
+        drop(txn);
+        player.data().skill_char.skill_cancelled = true;
         return;
     };
     let mut g = lock(&holder);
     let Some(equip) = g.get_item_by_id_mut(target_id) else {
+        drop(g);
+        player.data().skill_char.skill_cancelled = true;
         return;
     };
     if !equip.is_equip() {
         tracing::warn!("Special effects: ItemSocketing targetItem {target_id} was not a EquipItem");
+        drop(g);
+        player.data().skill_char.skill_cancelled = true;
         return;
     }
+    let data = &server.game_data.items;
+    let mut rejection = None;
     let mut result = 0u8;
     let mut installed = false;
-    let gems = &mut equip.details.gem_ids;
-    if gem_item.template_id != crate::data::items::ITEM_DAWN_STONE {
-        // Add LunaGem
-        let gem_count = gems.iter().filter(|&&id| id != 0).count();
-        // Reject if the item has no free gem sockets
-        if gem_count >= gems.len() {
-            tracing::warn!(
-                "Special effects: ItemSocketing target {target_id} has no free gem sockets"
-            );
-            return;
+    match data.template(equip.template_id) {
+        None => rejection = Some(error_message::INVALID_TARGET),
+        Some(template) if template.level < ITEM_SOCKET_MIN_ITEM_LEVEL => {
+            rejection = Some(error_message::SOCKET_TARGET_LEVEL);
         }
-        // Roll for Success
-        let gem_roll = rng.next_i32(0, 10000);
-        let gem_chance = server.game_data.items.socket_chance(gem_count as u32);
-        if i64::from(gem_roll) < i64::from(gem_chance) {
-            gems[gem_count] = gem_item.template_id;
-            result = 1;
-        } else {
-            // Failed: a failed socket attempt removes ALL currently socketed gems.
-            gems.fill(0);
+        Some(template) => {
+            let gem_count = equip.details.gem_ids.iter().filter(|&&id| id != 0).count();
+            if gem_item.template_id == crate::data::items::ITEM_DAWN_STONE {
+                // DawnStone: the 1.2 client rejects a removal with no gems (`item_sockets_empty`).
+                if gem_count == 0 {
+                    rejection = Some(error_message::ITEM_SOCKETS_EMPTY);
+                } else {
+                    equip.details.gem_ids.fill(0);
+                    result = 1;
+                }
+            } else if let Err(error) =
+                socket_install_rejection(data, equip, template, gem_item.template_id, gem_count)
+            {
+                rejection = Some(error);
+            } else {
+                // All rules pass: roll for success. A rejected attempt never reaches this roll.
+                let gem_roll = rng.next_i32(0, 10000);
+                let gem_chance = data.socket_chance(gem_count as u32);
+                if i64::from(gem_roll) < i64::from(gem_chance) {
+                    equip.details.gem_ids[gem_count] = gem_item.template_id;
+                    result = 1;
+                } else {
+                    // Failed: a failed socket attempt removes ALL currently socketed gems.
+                    equip.details.gem_ids.fill(0);
+                }
+                installed = true;
+            }
         }
-        installed = true;
-    } else {
-        // DawnStone
-        gems.fill(0);
-        result = 1;
+    }
+    if let Some(error) = rejection {
+        drop(g);
+        send_error_message_to(&mut txn.out(), player, error);
+        drop(txn);
+        // The cast already took the gem as its source item; cancelling refunds it and keeps
+        // a rejected attempt free of a socket roll.
+        player.data().skill_char.skill_cancelled = true;
+        return;
     }
     // GemIds is a plain array, so no C# property setter marked the item dirty; without this the
     // next `ItemManager.Save` skips the socketing.
