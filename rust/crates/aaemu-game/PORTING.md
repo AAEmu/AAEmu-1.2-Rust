@@ -1218,10 +1218,26 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   (its AI busy on another thread), `DeadBehavior`'s `ClearAllAggro` sent the corpse home and
   `ReturnState` restored its hp, so town guards kept fighting the mob they had killed (gray hp
   bar in the client). Test: `ai::flow_tests::guard_kill_while_the_mob_ai_is_busy_keeps_the_mob_dead`.
-* `Character.Load` for a character with InfamyPoint >= 3000: the Wanted / Contemptuous buffs are
-  added and the faction becomes Pirate as in C#; `SetFaction`'s side effects (house factions,
-  `ExpeditionManager.Kick(this.Connection, ...)` — which throws on the null lobby connection and
-  aborts `CSListCharacter` in C# — and the party kick) are not reproduced.
+* `Character.CheckWantedThreshold` (InfamyPoint >= 3000): the Wanted / Contemptuous buffs are
+  added under the character's data lock, but the faction is no longer assigned there. The check
+  returns a "became a pirate" signal and every caller that has a live player runs
+  `Character.SetFaction(Pirate)` after releasing the lock: the crime report / GM crime-points
+  paths, the quest `AddCrime` path and `CSSelectCharacter` (for infamy that crossed while the
+  character was offline; `Character.Load` itself is also used for the lobby list and deletion
+  checks, where there is no player to notify). The change thus broadcasts
+  `SCUnitFactionChangedPacket` once (the 1.2 client turns it into "$1 became pirate.", x2game
+  `sub_396A1C20` with faction 161) and runs the ported `Character.SetFaction` side effects:
+  house faction sync, guild removal and party removal. Deviation: the C#
+  `ExpeditionManager.Kick(this.Connection, ...)` throws on the null lobby connection and aborts
+  `CSListCharacter`; the Rust applies the change at select where the connection exists. The
+  guild removal is a dedicated server-side path (`expedition::remove_member_for_faction_change`),
+  not the client `Kick` handler: the C# `Kick` only acts on roles whose policy has `Expel`, so
+  ordinary members stayed in the guild after becoming pirates, and it removed an owner like
+  anyone else, leaving `OwnerId` on a non-member. The Rust removes an ordinary member as a
+  normal leave (same packets as `Leave`) and dismisses the guild when the member is its owner:
+  the 1.2 client refuses an owner's leave (`expedition_owner_cannot_leave`, error 310) and only
+  offers the owner's dismiss path (`expedition_owner_dismiss`, 301). **Capture-pending PIRATE-1:**
+  no retail capture of a guild owner's forced faction change; the dismissal is the chosen rule.
 * `CheckForDeletedCharactersDeletion`: the rename / `deleted = 1` / packets are done;
   `DeleteCharacterAssets` (houses, guild, family, mail returns) is a later phase.
 * `GameConnection.OnDisconnect` → `UpdateLoginTime(0)` for connections that never entered (inserts
@@ -3407,7 +3423,10 @@ Deviations from the 1.2 C# `ExpeditionManager` / `TeamManager`, which trusted ev
   match it, is consumed by any answer, and a character already in a guild cannot join another.
 - `Kick` and `ChangeMemberRole` only checked the caller's policy flag (and `role > new_role`). Both
   now also require the caller's role to be strictly higher than the target's current role, so the
-  leader (255) can neither be expelled nor demoted, and equals cannot act on each other.
+  leader (255) can neither be expelled nor demoted, and equals cannot act on each other. The
+  client `Kick` packet keeps this guard; `Character.SetFaction`'s guild removal does not go
+  through it (see `remove_member_for_faction_change` above), so an owner can still leave on a
+  faction change without allowing a client self-kick.
 - `ChangeLootingRule` accepted any character id as loot master. It must now be 0 or a member of the
   team; otherwise only that field is ignored (logged). Over-head markers are unchanged: their
   target is any unit or object, not a team member.
