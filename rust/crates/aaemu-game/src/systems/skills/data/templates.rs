@@ -88,6 +88,9 @@ pub struct SkillTemplate {
     pub repeat_count: i32,
     pub repeat_tick: i32,
     pub toggle_buff_id: u32,
+    /// `tube_instrument_fire_anim_id`: native `3939b010` starts a toggle skill's local cooldown
+    /// only when this is 0 (`toggle_buff_id != 0` is the other half of the condition).
+    pub tube_instrument_fire_anim_id: u32,
     pub target_dead: bool,
     pub channeling_buff_id: u32,
     pub reagent_corpse_status_id: i32,
@@ -245,6 +248,7 @@ fn read_skill(
         repeat_count: r.i32("repeat_count")?,
         repeat_tick: r.i32("repeat_tick")?,
         toggle_buff_id: r.u32_or("toggle_buff_id", 0)?,
+        tube_instrument_fire_anim_id: r.u32_or("tube_instrument_fire_anim_id", 0)?,
         target_dead: r.bool_str("target_dead")?,
         channeling_buff_id: r.u32_or("channeling_buff_id", 0)?,
         reagent_corpse_status_id: r.i32("reagent_corpse_status_id")?,
