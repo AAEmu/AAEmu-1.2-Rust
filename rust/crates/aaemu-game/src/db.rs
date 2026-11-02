@@ -328,7 +328,7 @@ pub async fn add_divine_clock_time(pool: &MySqlPool, account_ids: &[u32], delta:
     }
     let marks = vec!["?"; account_ids.len()].join(",");
     let sql = format!(
-        "UPDATE accounts SET divine_clock_time = LEAST(CAST(divine_clock_time AS UNSIGNED) + ?, 4294967295)          WHERE account_id IN ({marks})"
+        "UPDATE accounts SET divine_clock_time = LEAST(CAST(divine_clock_time AS UNSIGNED) + ?, 4294967295) WHERE account_id IN ({marks})"
     );
     let mut q = sqlx::query(&sql).bind(u64::from(delta));
     for id in account_ids {
