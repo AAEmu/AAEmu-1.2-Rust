@@ -254,8 +254,6 @@ pub struct ToleranceCounter {
 /// Per-unit skill / combat state (`UnitBase.skill_state`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct UnitSkillState {
-    /// Last movement request has nonzero velocity.
-    pub moving: bool,
     /// Last authenticated movement reported a jump or an airborne actor.
     pub airborne: bool,
     /// `SkillTask`.

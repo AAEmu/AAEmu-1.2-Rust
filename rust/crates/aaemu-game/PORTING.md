@@ -3728,6 +3728,17 @@ consumer was not located; the 1.2 ordering/result is therefore not proven there.
   requirements that used to fail only after the slave cast now stop the press. Examples: horse
   archery 11018 / 11019 / 17156 need a bow, and torpedo 25538 -> 23123 needs target NPC 13680.
   The same applies to buff requirements and to the rider's own cooldown.
+- **`source_cannot_use_while_walk` is not enforced.** The C# loaded the column
+  (`SourceCannotUseWhileWalk`) but never read it. The Rust `validation::check` (batch commit
+  668e4196b) refused a cast with `skill_cannot_cast_while_walking` (20) whenever the caster's last
+  own move had a velocity. That is not the client's walk mode (the move packets carry no walk
+  bit), and 60 of the 70 flagged 1.2 skills are mount bar skills or their rider skills (Run!,
+  Dash, Overrun, Breakthrough, Skydash, Charge, ...), pressed while running. A mounted rider
+  never refreshes the flag (its mate's moves go to the mate), so once the rider pre-check above
+  checked the linked rider skill, Stormdarter Run! 17092 (rider 18228) and Keep Running! 17526
+  (rider 12815) were refused with result 20 and no visible error after the rider had walked up
+  to the mount. The check and `UnitSkillState.moving` are removed; the template field stays
+  loaded. Walk mode is client state.
 - ConsumeChanger refusals now carry the first accepted `doodad_func_consume_changer_items` id and
   BuyFish carries the func's fish item id as the `NEED_REAGENT` value (they were 0), so the 1.2
   client's item-name lookup (`x2game.dll.c:742315`) always finds a template. The doodad gate runs
