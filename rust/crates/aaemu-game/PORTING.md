@@ -950,7 +950,10 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `session::file_teleport_arrival`. **Deviation:** `CSTeleportEndedPacket` now follows the
   client's reported landing position and refiles the region before repainting (the C# only ran
   `ResendVisibleObjectsToCharacter`), so GM `/move`, same-instance portals and navi teleports
-  re-evaluate the zone without waiting for a movement packet. Resurrections
+  re-evaluate the zone without waiting for a movement packet. Only a teleport armed through
+  `DisabledSetPosition` is followed; an unsolicited completion still repaints but changes
+  nothing. The reported position is world-frame, so a character standing on another object is
+  detached first. Resurrections
   (`CSResurrectCharacterPacket`, `Escape`) apply the statue position immediately because the 1.2
   client does not answer `SCCharacterResurrected` with `CSTeleportEnded`. Tests:
   `systems/skills/zone_buff_tests.rs`.
