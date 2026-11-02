@@ -1112,7 +1112,7 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   order; character packets sent during an operation go through the same queue (`Out`).
 * systems::economy (item procs, 2026-11): procs fire where the C# never did. Sources, rebuilt
   by the gear-bonus pass (`apply_gear_buffs` -> `procs::refresh`, so equip / unequip, login,
-  weapon-set swap, repair, gear break and gem changes all refresh them): set
+  repair, gear break and gem changes all refresh them): set
   `equip_item_set_bonuses.proc_id` when the piece count reaches `num_pieces` (destroyed pieces
   still count, like the set buffs), `item_proc_bindings` of every equipped non-destroyed item
   (the C# never loaded the table), and `holdables.item_proc_id` of every equipped
@@ -1127,10 +1127,21 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   The proc skill is cast by the owner, bypassing the GCD; a self-targeted skill (75 of the 92
   proc skills) targets the owner, any other targets the other unit of the damage event
   (**CAPTURE-PENDING item-procs-2**); the cloned template has `casting_time` / `mana_cost`
-  zeroed (two proc skills carry a 2.0 / 2.67 s cast time), **CAPTURE-PENDING item-procs-3**.
-  A proc skill's own damage does not roll procs again (thread-local cast guard). The active
-  procs and cooldowns live on `UnitBase.item_procs`; death does not clear them (the C# has no
-  reference either).
+  zeroed (two proc skills carry a 2.0 / 2.67 s cast time; 14921 also has mana 100). The rest
+  of `use_skill` still runs (**CAPTURE-PENDING item-procs-3**): a proc is refused while the
+  owner is casting or channeling (and can stop a channel for a skill with
+  `stop_channeling_on_start_skill`), it resets the owner's `skill_cancelled` /
+  `condition_chance` mid-skill, a unit requirement failure warns per hit, and an NPC
+  `NO_TARGET` pokes its AI.
+  A proc skill's own synchronous damage does not roll procs again (thread-local cast guard);
+  its projectile / `effect_delay` / `effect_speed` / plot effects and the DoTs it applies fire
+  later, outside the guard, and can roll procs again (bounded by the item-proc and skill
+  cooldowns; **CAPTURE-PENDING item-procs-4**). A proc skill's hit therefore does not roll the
+  victim's take-damage kinds (**CAPTURE-PENDING item-procs-5**). DoT ticks and Heal damage
+  effects do roll procs in this implementation. The proc packets are broadcast before the
+  triggering `SCUnitDamaged`. The hot path allocates the per-kind id lists and takes up to six
+  unit locks per hit; left as is. The active procs and cooldowns live on
+  `UnitBase.item_procs`; death does not clear them (the C# has no reference either).
 * systems::economy (account attributes): the C# `AccountAttributeManager.Apply` saved synchronously;
   the Rust applies the effect to the cache and persists in a background task (skill effects are
   synchronous), serialised per account by the account lock. Each save takes the cache snapshot

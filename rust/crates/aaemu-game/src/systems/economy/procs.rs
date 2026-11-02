@@ -67,12 +67,17 @@ pub mod chance_kind {
 }
 
 thread_local! {
-    /// A proc skill is being cast on this thread: the damage it deals must not roll procs
-    /// again. `use_skill` runs its instant effects synchronously, so a thread-local is enough.
+    /// A proc skill is being cast on this thread: the damage it deals in the same call must not
+    /// roll procs again. This covers only the synchronous part of `use_skill`; a proc skill's
+    /// projectile / `effect_delay` / `effect_speed` / plot effects and the DoTs it applies run
+    /// later, when the guard is gone, and can roll procs again (bounded by the item-proc and
+    /// skill cooldowns; **CAPTURE-PENDING item-procs-4**).
     static PROC_CASTING: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Set while a proc skill is cast; the damage of that skill sees it and skips proc rolls.
+/// Set while a proc skill's synchronous effects run; their damage skips proc rolls. A proc
+/// skill's own hit therefore does not roll the victim's take-damage procs either
+/// (**CAPTURE-PENDING item-procs-5**).
 struct ProcCastGuard;
 
 impl ProcCastGuard {
@@ -384,9 +389,12 @@ fn victim_kinds(damage_type: Option<DamageType>, hit_type: SkillHitType) -> Vec<
 /// `ItemProc.Apply`. The C# used `SkillCasterUnit(owner)` / `SkillCastTargetDoodad(owner)` and
 /// did not bypass the GCD. The orchestrator decision (see `PORTING.md`) casts the proc
 /// instantly: the cloned template has `casting_time` / `mana_cost` zeroed (two 1.2 proc
-/// skills, 14921 and 14922, carry a 2.0 / 2.67 s cast time; every proc skill has mana 0 and no
-/// reagent row, so the normal validation charges nothing). `CAPTURE-PENDING item-procs-3`: the
-/// 1.2 server may have honoured the template cast time instead.
+/// skills, 14921 and 14922, carry a 2.0 / 2.67 s cast time; 14921 is also the one proc skill
+/// with a nonzero mana cost, 100). No proc skill has a reagent row, but the rest of
+/// `use_skill` runs unchanged: the cast is refused while the owner is casting or channeling
+/// (and can stop a channel for a skill with `stop_channeling_on_start_skill`), it resets the
+/// owner's `skill_cancelled` / `condition_chance`, a unit requirement failure warns per hit and
+/// an NPC `NO_TARGET` pokes its AI (**CAPTURE-PENDING item-procs-3**).
 fn cast_proc_skill(
     server: &GameServer,
     owner: &WorldObject,
@@ -427,6 +435,5 @@ fn cast_proc_skill(
         None,
         true,
     );
-    eprintln!("PROC CAST done guard={} result={result}", proc_casting());
     result == skill_result::SUCCESS
 }
