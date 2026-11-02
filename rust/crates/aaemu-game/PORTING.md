@@ -4026,7 +4026,8 @@ Flow (`systems/social/packets/trial.rs`, readers `397b13a0` / `397bc6b0` /
   `SCSetBountyDone(targetId 0, name, 0, 585)`; a refused self-target gets 586.
 * `CSSendBountyUpdate(targetId, name, amount)` requires the matching permit from the request,
   checks the id/name again and must still find the target online and wanted. It debits exactly
-  `amount` copper through `subtract_money(..., ItemTaskType.SET_BOUNTY_MONEY = 87)` and answers
+  `amount` copper through `change_money(Inventory -> None, ..., ItemTaskType.SET_BOUNTY_MONEY =
+  87)`, which checks and debits under one character lock, and answers
   `SCSetBountyDone(targetId, name, newTotal, 0)`. Every refusal is error **585** (no such online
   target) or **586** (everything else) through that packet; the client shows the id.
 * Pledges **stack** per target (several payers, and several placements per payer) and have **no
@@ -4039,19 +4040,23 @@ Flow (`systems/social/packets/trial.rs`, readers `397b13a0` / `397bc6b0` /
 Payout (`systems/skills/combat.rs`, inside the arrest decision of `character_death_tail`): the
 arresting player receives the whole accumulated total with `ItemTaskType.PAY_BOUNTY_MONEY = 88`
 and `SCBountyPaid(hunter, arrested, total)`; the pledges become paid and the target's total
-resets to 0. The hook is inside the `if arrest` branch, so an NPC, guard or mob kill (no
-`arrestor`) and a pirate killed where the arrest is skipped pay nothing (BOUNTY-4). A repeated
-settlement pays nothing, and a self kill is never paid.
+resets to 0. The hook is inside the `if arrest` branch and pays only when
+`arrest_criminal(..)` answered `Some`: an NPC, guard or mob kill (no `arrestor`), a pirate killed
+where the arrest is skipped, and a region with no court room or no jail all pay nothing and keep
+the pledges (BOUNTY-4). A repeated settlement pays nothing, and a self kill is never paid.
 
 Persistence (`systems/social/bounty.rs`, `SQL/updates/2026-11-02_aaemu_game_bounty.sql` and
 `SQL/aaemu_game.sql`): `bounty_pledges(id, payer_id, target_id, amount, created, paid)`. Paid rows
-stay as the record of who contributed; `id` continues above the highest saved id on load. The
-rows are captured under the economy operation lock together with the character wallet snapshot
-(`managers/save::capture_financial_snapshot` -> `BountyManager::prepare_save`) and written by
-`social::System::save(AfterCharacters)` in the same transaction as `Character.Save`, so a
-pledge and the debit that paid for it commit or roll back together. `CharacterLoad` sends the
-character's own active total in the verified `SCCharacterState.bountyMoney` field (X2G
-1302074-1302079); `SCUnitBountyMoney` is not sent (BOUNTY-3).
+stay in the table as the record of who contributed, but are dropped from memory once their paid
+state is committed; `id` continues above the highest saved id on load (unpaid rows only). The
+dirty rows (new or newly paid) are captured under the economy operation lock together with the
+character wallet snapshot (`managers/save::capture_financial_snapshot` -> `BountyManager::
+prepare_save`) and written by `social::System::save(AfterCharacters)` in the same transaction as
+`Character.Save`; `commit_financial_snapshot` clears the dirty set only after the transaction
+commits, so a rolled-back save is retried instead of losing the pledge. A save with no dirty rows
+writes nothing. `CharacterLoad` sends the character's own active total in the verified
+`SCCharacterState.bountyMoney` field (X2G 1302074-1302079); `SCUnitBountyMoney` is not sent
+(BOUNTY-3).
 
 Policy decisions / capture-pending (each also a case id in the code):
 
@@ -4073,6 +4078,13 @@ Policy decisions / capture-pending (each also a case id in the code):
   zone / faction) is unknown. It is sent to the arresting player only. Whether a pirate killed in
   a desperado zone (where `arrest` is false) should pay is also unknown; the arrest text ties the
   payout to an arrest, so it does not pay.
+* **BOUNTY-5** settlement edge cases. The arrester must still be online when the death tail runs;
+  otherwise nothing settles and the pledges stay (the copper must reach a live character). The
+  death tail may also run while the non-reentrant economy ops lock is held (an item or skill
+  effect killed the victim); settlement then logs and keeps the pledges instead of deadlocking.
+  A deleted character's pledges are never refunded and stay in the table for its id. Arena and
+  instance deaths use the ordinary PvP death tail, so they pay like any other arrest. None of
+  these have 1.2 evidence; they are safe defaults.
 * **BOUNTY-board** `CSNaviOpenBounty` / `SCBountyList`. The row layout is verified (M10), but the
   C# comment records that a filled list broke the 1.2 client Lua and the cause was never found.
   The handler keeps answering the empty `(0, 0)` list; a non-empty list must be tested on the

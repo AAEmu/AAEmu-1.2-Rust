@@ -4,6 +4,7 @@
 use aaemu_commons::PacketStream;
 
 use crate::data::skills::{BuffKind, BuffTemplate};
+use crate::data::world_data::SystemFaction;
 use crate::data::GameData;
 use crate::models::npc::Npc;
 use crate::net::packet::{encode_raw, LEVEL_PLAIN};
@@ -12,14 +13,29 @@ use crate::server::GameServer;
 use crate::systems::skills::combat::do_die;
 use crate::systems::skills::types::KillReason;
 use crate::systems::social::bounty::BountyManager;
+use crate::systems::social::config::{CourtRoomConfig, JailConfig, JusticeConfig, SpawnPosition};
 use crate::systems::social::crime::buff as crime_buff;
 use crate::systems::social::util;
 use crate::test_support::*;
 use crate::world::{Entity, PlayerRef, WorldObject};
 
+const NUIA: u32 = 148;
+
+fn spawn_pos(x: f32, y: f32, z: f32) -> SpawnPosition {
+    SpawnPosition {
+        world_id: 0,
+        zone_id: TEST_ZONE,
+        x,
+        y,
+        z,
+        yaw: 0.0,
+    }
+}
+
 /// A test server with the wanted buff and its 894 tag, which `combat` and the bounty placement
-/// both test with `check_buff_tag`.
-fn bounty_server() -> GameServer {
+/// both test with `check_buff_tag`. With `justice`, a Nuian court room and jail exist so
+/// `arrest_criminal` really starts a case; without them it answers `None`.
+fn bounty_server_with_justice(justice: bool) -> GameServer {
     let mut data = GameData::empty();
     let mut template = BuffTemplate::simple(crime_buff::WANTED, BuffKind::Bad);
     template.duration = 3_600_000;
@@ -32,7 +48,40 @@ fn bounty_server() -> GameServer {
         .skills
         .tagged_buffs
         .insert(crime_buff::TAG_WANTED, vec![crime_buff::WANTED]);
-    test_server_with(data)
+    for (id, mother) in [(101, NUIA), (NUIA, 0)] {
+        data.factions.add(SystemFaction {
+            id,
+            mother_id: mother,
+            ..SystemFaction::default()
+        });
+    }
+    let server = test_server_with(data);
+    if justice {
+        server.config.update(|c| {
+            c.justice = JusticeConfig {
+                court_rooms: vec![CourtRoomConfig {
+                    id: 1,
+                    name: "Nuian Main Court".into(),
+                    faction: NUIA,
+                    defendant: spawn_pos(150.0, 160.0, 70.0),
+                    holding_cell: spawn_pos(200.0, 210.0, 60.0),
+                }],
+                jails: vec![JailConfig {
+                    id: 1,
+                    name: "Nuian Jail".into(),
+                    faction: NUIA,
+                    pos: spawn_pos(300.0, 310.0, 50.0),
+                }],
+                ..JusticeConfig::default()
+            };
+        });
+        server.systems.social.trials.load(&server);
+    }
+    server
+}
+
+fn bounty_server() -> GameServer {
+    bounty_server_with_justice(true)
 }
 
 struct Pc {
@@ -340,6 +389,37 @@ async fn arrest_pays_the_whole_total_once_and_resets_it() {
 }
 
 #[tokio::test]
+async fn a_kill_without_a_court_case_pays_nothing_and_keeps_the_pledge() {
+    let server = bounty_server_with_justice(false);
+    let mut a = player(&server, 1, "Payer", false, 1000);
+    let b = player(&server, 2, "Wanted", true, 0);
+    let mut d = player(&server, 4, "Killer", false, 0);
+
+    place(&server, &mut a, b.p.character_id, "Wanted", 100).await;
+    a.client.drain();
+    d.client.drain();
+
+    do_die(
+        &server,
+        &WorldObject::from(&b.p),
+        Some(&WorldObject::from(&d.p)),
+        KillReason::Damage,
+    );
+
+    let frames = d.client.drain();
+    assert!(find(&frames, sc::SCBountyPaidPacket).is_empty());
+    assert_eq!(d.p.data().money, 0);
+    assert_eq!(
+        server
+            .systems
+            .social
+            .bounties
+            .active_total(b.p.character_id),
+        100
+    );
+}
+
+#[tokio::test]
 async fn npc_kills_and_non_wanted_victims_never_pay() {
     let server = bounty_server();
     let mut a = player(&server, 1, "Payer", false, 1000);
@@ -483,6 +563,7 @@ async fn bounty_pledges_round_trip_through_mysql() {
     let mut tx = pool.begin().await.unwrap();
     let written = server.systems.social.bounties.save(&mut tx).await.unwrap();
     tx.commit().await.unwrap();
+    server.systems.social.bounties.commit_save();
     assert_eq!(written, 2);
 
     let restored = BountyManager::default();

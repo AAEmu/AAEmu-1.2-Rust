@@ -829,15 +829,19 @@ fn character_death_tail(
             .is_some_and(|g| g.pirate_desperado);
         !desperado
     };
-    if arrest {
-        server
+    if arrest
+        && server
             .systems
             .social
             .trials
-            .arrest_criminal(server, victim_p, Some(&arrestor));
-        // The wanted player's accumulated bounty goes to the arresting player. This is inside
-        // the arrest decision: an NPC, guard or mob kill has no `arrestor` (it returned above)
-        // and a pirate killed where the arrest is skipped pays nothing (BOUNTY-4).
+            .arrest_criminal(server, victim_p, Some(&arrestor))
+            .is_some()
+    {
+        // The wanted player's accumulated bounty goes to the arresting player, and only when a
+        // court case really started: `arrest_criminal` answers `None` when the region has no
+        // court room or jail (or both parties are outside the justice system). An NPC, guard or
+        // mob kill has no `arrestor` (it returned above) and a pirate killed where the arrest is
+        // skipped pays nothing (BOUNTY-4).
         server
             .systems
             .social

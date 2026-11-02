@@ -170,6 +170,11 @@ impl BountyLedger {
         self.pledges.get(&id)
     }
 
+    /// Drops a pledge whose paid state is already saved. Returns the removed row.
+    pub fn remove_pledge(&mut self, id: u64) -> Option<BountyPledge> {
+        self.pledges.remove(&id)
+    }
+
     /// Every pledge, ascending id.
     pub fn pledges(&self) -> impl Iterator<Item = &BountyPledge> {
         self.pledges.values()

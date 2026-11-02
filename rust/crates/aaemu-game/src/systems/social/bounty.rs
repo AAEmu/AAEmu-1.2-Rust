@@ -18,7 +18,7 @@
 //! * `SCUnitBountyMoney` is not sent: its writer has not been located in the 1.2 client (only
 //!   the handler `391d6680`), so the layout is not confirmed (BOUNTY-3).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
 
 use sqlx::mysql::MySqlPool;
@@ -92,6 +92,8 @@ struct BountyState {
     ledger: BountyLedger,
     /// One outstanding `RequestSetBountyMoney` per payer, replaced by the next request.
     permits: HashMap<u32, Permit>,
+    /// Pledges whose current row is not in `bounty_pledges` yet (new or newly paid).
+    dirty: BTreeSet<u64>,
 }
 
 /// The rows a save has to write, captured under the economy operation lock together with the
@@ -108,10 +110,13 @@ pub struct BountyManager {
     /// Captured by `capture_financial_snapshot` and written by `System::save`, so the pledge rows
     /// and the debited wallets describe the same instant.
     pending_save: Mutex<Option<BountySaveBatch>>,
+    /// The last written batch, applied to the dirty set only after the transaction commits.
+    pending_commit: Mutex<Option<BountySaveBatch>>,
 }
 
 impl BountyManager {
-    /// `Load()`: every pledge, paid or not, in id order. A failed read fails startup.
+    /// `Load()`: the pledges in id order. Paid rows are restored only to keep id allocation
+    /// above them and are then dropped from memory. A failed read fails startup.
     pub async fn load(&self, pool: &MySqlPool) -> Result<()> {
         let rows = sqlx::query(
             "SELECT CAST(`id` AS SIGNED) AS id, CAST(`payer_id` AS SIGNED) AS payer_id, \
@@ -153,44 +158,61 @@ impl BountyManager {
             .ledger
             .restore(snapshot)
             .map_err(|e| crate::GameError::Protocol(format!("bounty_pledges row: {e}")))?;
+        // Keep the restored `next_pledge_id` above paid ids, then drop the paid history from
+        // memory.
+        let paid: Vec<u64> = state
+            .ledger
+            .pledges()
+            .filter(|p| p.paid)
+            .map(|p| p.id)
+            .collect();
+        for id in paid {
+            state.ledger.remove_pledge(id);
+        }
         tracing::info!(
-            "Loaded bounty pledges: {} ({} active)",
-            state.ledger.pledges().count(),
+            "Loaded bounty pledges: {} active",
             state.ledger.pledges().filter(|p| !p.paid).count(),
         );
         Ok(())
     }
 
-    /// Captures the ledger for the next `System::save`, under the economy operation lock the
+    /// The dirty rows as a save batch.
+    fn dirty_batch(&self) -> BountySaveBatch {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        BountySaveBatch {
+            pledges: BountySnapshot {
+                pledges: state
+                    .dirty
+                    .iter()
+                    .filter_map(|id| state.ledger.pledge(*id).cloned())
+                    .collect(),
+            },
+        }
+    }
+
+    /// Captures the dirty rows for the next `System::save`, under the economy operation lock the
     /// caller already holds.
     pub(crate) fn prepare_save(&self) {
-        let batch = BountySaveBatch {
-            pledges: self
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .ledger
-                .snapshot(),
-        };
+        let batch = self.dirty_batch();
         *self.pending_save.lock().unwrap_or_else(|e| e.into_inner()) = Some(batch);
     }
 
-    /// Writes the prepared rows (or a fresh snapshot when no capture ran), inside the caller's
-    /// transaction. Returns the number of rows written.
+    /// Writes the prepared dirty rows (or the current dirty set when no capture ran), inside the
+    /// caller's transaction. Returns the number of rows written.
+    ///
+    /// The dirty set is cleared only by [`Self::commit_save`] after the transaction commits, so a
+    /// rolled-back save is retried on the next one.
     pub(crate) async fn save(&self, tx: &mut Transaction<'_, MySql>) -> Result<usize> {
+        *self
+            .pending_commit
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         let batch = self
             .pending_save
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take()
-            .unwrap_or_else(|| BountySaveBatch {
-                pledges: self
-                    .state
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .ledger
-                    .snapshot(),
-            });
+            .unwrap_or_else(|| self.dirty_batch());
         let count = batch.pledges.pledges.len();
         for pledge in &batch.pledges.pledges {
             sqlx::query(
@@ -208,7 +230,46 @@ impl BountyManager {
             .execute(&mut **tx)
             .await?;
         }
+        *self
+            .pending_commit
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(batch);
         Ok(count)
+    }
+
+    /// Applies a committed save: clears the dirty rows it wrote and drops paid rows from memory.
+    /// A row that changed after the capture stays dirty for the next save.
+    pub(crate) fn commit_save(&self) {
+        let Some(batch) = self
+            .pending_commit
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        else {
+            return;
+        };
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        for written in &batch.pledges.pledges {
+            let current = state.ledger.pledge(written.id).cloned();
+            if current.as_ref() != Some(written) {
+                continue;
+            }
+            state.dirty.remove(&written.id);
+            if written.paid {
+                state.ledger.remove_pledge(written.id);
+            }
+        }
+    }
+
+    /// The number of pledge rows still held in memory (tests).
+    #[cfg(test)]
+    pub(crate) fn tracked_pledge_count(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .ledger
+            .pledges()
+            .count()
     }
 
     /// The accumulated unpaid bounty on `target_character_id`.
@@ -299,28 +360,36 @@ impl BountyManager {
         if payer.data().money < i64::from(amount) {
             return Err(PlacementError::NotEnoughMoney);
         }
-        if !inventory::subtract_money(
+        // `change_money` checks the purse and debits it under the same character lock. A plain
+        // `subtract_money` reads from `None`, which never checks funds, so a concurrent wallet
+        // change could overdraw the payer.
+        if !inventory::change_money(
             &mut Out::Direct,
             payer,
             slot_type::INVENTORY,
+            slot_type::NONE,
             amount,
             task_type::SET_BOUNTY_MONEY,
         ) {
             return Err(PlacementError::NotEnoughMoney);
         }
-        if let Err(error) = state.ledger.commit_placement(&plan) {
-            // Cannot happen under the lock; refund rather than destroying the copper.
-            drop(state);
-            inventory::add_money(
-                &mut Out::Direct,
-                payer,
-                slot_type::INVENTORY,
-                amount,
-                task_type::SET_BOUNTY_MONEY,
-            );
-            return Err(PlacementError::Ledger(error));
-        }
+        let pledge = match state.ledger.commit_placement(&plan) {
+            Ok(pledge) => pledge,
+            Err(error) => {
+                // Cannot happen under the lock; refund rather than destroying the copper.
+                drop(state);
+                inventory::add_money(
+                    &mut Out::Direct,
+                    payer,
+                    slot_type::INVENTORY,
+                    amount,
+                    task_type::SET_BOUNTY_MONEY,
+                );
+                return Err(PlacementError::Ledger(error));
+            }
+        };
         state.permits.remove(&payer.character_id);
+        state.dirty.insert(pledge.id);
         Ok(state.ledger.active_total(target_id))
     }
 
@@ -336,11 +405,45 @@ impl BountyManager {
         if target.character_id == arrestor.character_id {
             return 0;
         }
+        // The killer can have left between the death and the tail; then there is nobody to pay,
+        // so keep the pledges instead of crediting an offline character.
+        if server
+            .world
+            .character_by_id(arrestor.character_id)
+            .is_none()
+        {
+            tracing::debug!(
+                "Bounty settlement of {} skipped: arrester {} is no longer online",
+                target.character_id,
+                arrestor.character_id
+            );
+            return 0;
+        }
+        if crate::systems::economy::System::ops_held_on_this_thread() {
+            // The ops lock below is not re-entrant; waiting for it on this thread would hang the
+            // death path and every later economy operation.
+            tracing::error!(
+                "Bounty settlement of {} skipped: the economy ops lock is held on this thread",
+                target.character_id
+            );
+            return 0;
+        }
         let _ops = server.systems.economy.ops_lock();
         let total = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let ids: Vec<u64> = state
+                .ledger
+                .pledges()
+                .filter(|p| !p.paid && p.target.character_id == target.character_id)
+                .map(|p| p.id)
+                .collect();
             match state.ledger.settle_arrest(target.character_id) {
-                Ok(total) => total,
+                Ok(total) => {
+                    for id in ids {
+                        state.dirty.insert(id);
+                    }
+                    total
+                }
                 Err(error) => {
                     tracing::error!(
                         "Bounty settlement of {} failed: {error}",
@@ -387,5 +490,254 @@ impl BountyManager {
             target.character_id
         );
         total
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::managers::save::{
+        capture_financial_snapshot, commit_financial_snapshot, write_financial_snapshot,
+    };
+    use crate::test_support::test_server;
+    use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+    use std::str::FromStr;
+
+    async fn temp_pool() -> Option<MySqlPool> {
+        let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+            return None;
+        };
+        let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+        assert_eq!(
+            options.get_port(),
+            3317,
+            "only private MySQL3317 is allowed"
+        );
+        let pool = MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("private MySQL");
+        let ddl = include_str!("../../../../../../SQL/updates/2026-11-02_aaemu_game_bounty.sql")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .replace("CREATE TABLE IF NOT EXISTS", "CREATE TEMPORARY TABLE");
+        for statement in ddl.split(';').filter(|s| !s.trim().is_empty()) {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+        Some(pool)
+    }
+
+    fn insert_dirty(server: &GameServer, payer: u32, target: u32, amount: i64) -> u64 {
+        let mut state = server
+            .systems
+            .social
+            .bounties
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let plan = state
+            .ledger
+            .prepare_placement(
+                BountyActor {
+                    character_id: payer,
+                },
+                BountyActor {
+                    character_id: target,
+                },
+                amount,
+                true,
+                1,
+            )
+            .unwrap();
+        let pledge = state.ledger.commit_placement(&plan).unwrap();
+        state.dirty.insert(pledge.id);
+        pledge.id
+    }
+
+    fn settle_dirty(server: &GameServer, target: u32) -> i64 {
+        let mut state = server
+            .systems
+            .social
+            .bounties
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let ids: Vec<u64> = state
+            .ledger
+            .pledges()
+            .filter(|p| !p.paid && p.target.character_id == target)
+            .map(|p| p.id)
+            .collect();
+        let total = state.ledger.settle_arrest(target).unwrap();
+        for id in ids {
+            state.dirty.insert(id);
+        }
+        total
+    }
+
+    #[tokio::test]
+    #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only a temporary table"]
+    async fn a_second_save_without_changes_writes_nothing() {
+        let Some(pool) = temp_pool().await else {
+            return;
+        };
+        let server = test_server();
+        insert_dirty(&server, 1, 2, 100);
+
+        server.systems.social.bounties.prepare_save();
+        let mut tx = pool.begin().await.unwrap();
+        assert_eq!(
+            server.systems.social.bounties.save(&mut tx).await.unwrap(),
+            1
+        );
+        tx.commit().await.unwrap();
+        server.systems.social.bounties.commit_save();
+        assert_eq!(server.systems.social.bounties.tracked_pledge_count(), 1);
+
+        server.systems.social.bounties.prepare_save();
+        let mut tx = pool.begin().await.unwrap();
+        assert_eq!(
+            server.systems.social.bounties.save(&mut tx).await.unwrap(),
+            0
+        );
+        tx.commit().await.unwrap();
+        server.systems.social.bounties.commit_save();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only a temporary table"]
+    async fn a_paid_pledge_is_written_once_then_dropped_from_memory() {
+        let Some(pool) = temp_pool().await else {
+            return;
+        };
+        let server = test_server();
+        insert_dirty(&server, 1, 2, 100);
+        server.systems.social.bounties.prepare_save();
+        let mut tx = pool.begin().await.unwrap();
+        assert_eq!(
+            server.systems.social.bounties.save(&mut tx).await.unwrap(),
+            1
+        );
+        tx.commit().await.unwrap();
+        server.systems.social.bounties.commit_save();
+        assert_eq!(settle_dirty(&server, 2), 100);
+
+        server.systems.social.bounties.prepare_save();
+        let mut tx = pool.begin().await.unwrap();
+        assert_eq!(
+            server.systems.social.bounties.save(&mut tx).await.unwrap(),
+            1
+        );
+        tx.commit().await.unwrap();
+        server.systems.social.bounties.commit_save();
+        assert_eq!(server.systems.social.bounties.tracked_pledge_count(), 0);
+
+        let paid: i64 = sqlx::query_scalar(
+            "SELECT CAST(`paid` AS SIGNED) FROM `bounty_pledges` WHERE `id` = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(paid, 1);
+        server.systems.social.bounties.prepare_save();
+        let mut tx = pool.begin().await.unwrap();
+        assert_eq!(
+            server.systems.social.bounties.save(&mut tx).await.unwrap(),
+            0
+        );
+        tx.commit().await.unwrap();
+        server.systems.social.bounties.commit_save();
+
+        let restored = BountyManager::default();
+        restored.load(&pool).await.unwrap();
+        assert_eq!(restored.tracked_pledge_count(), 0);
+        assert_eq!(restored.active_total(2), 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only a temporary table"]
+    async fn a_rolled_back_save_is_retried() {
+        let Some(pool) = temp_pool().await else {
+            return;
+        };
+        let server = test_server();
+        insert_dirty(&server, 1, 2, 100);
+
+        server.systems.social.bounties.prepare_save();
+        let mut tx = pool.begin().await.unwrap();
+        assert_eq!(
+            server.systems.social.bounties.save(&mut tx).await.unwrap(),
+            1
+        );
+        tx.rollback().await.unwrap();
+
+        server.systems.social.bounties.prepare_save();
+        let mut tx = pool.begin().await.unwrap();
+        assert_eq!(
+            server.systems.social.bounties.save(&mut tx).await.unwrap(),
+            1
+        );
+        tx.commit().await.unwrap();
+        server.systems.social.bounties.commit_save();
+
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM `bounty_pledges`")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only a temporary table"]
+    async fn the_financial_snapshot_writes_unpaid_and_paid_rows() {
+        let Some(pool) = temp_pool().await else {
+            return;
+        };
+        let server = test_server();
+        insert_dirty(&server, 1, 2, 100);
+        insert_dirty(&server, 3, 4, 250);
+        assert_eq!(settle_dirty(&server, 4), 250);
+
+        let snapshot = capture_financial_snapshot(&server);
+        let mut tx = pool.begin().await.unwrap();
+        let receipt = write_financial_snapshot(&server, &mut tx, snapshot)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        commit_financial_snapshot(&server, receipt);
+
+        let rows: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT CAST(`target_id` AS SIGNED), CAST(`paid` AS SIGNED) \
+             FROM `bounty_pledges` ORDER BY `target_id`",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows, vec![(2, 0), (4, 1)]);
+        assert_eq!(server.systems.social.bounties.tracked_pledge_count(), 1);
+
+        let restored = BountyManager::default();
+        restored.load(&pool).await.unwrap();
+        assert_eq!(restored.active_total(2), 100);
+        assert_eq!(restored.active_total(4), 0);
+        assert_eq!(restored.tracked_pledge_count(), 1);
+        // The paid id 1 is still reserved, so the next pledge gets id 3, not 1.
+        {
+            let mut state = restored.state.lock().unwrap();
+            let plan = state
+                .ledger
+                .prepare_placement(
+                    BountyActor { character_id: 5 },
+                    BountyActor { character_id: 6 },
+                    50,
+                    true,
+                    2,
+                )
+                .unwrap();
+            assert_eq!(state.ledger.commit_placement(&plan).unwrap().id, 3);
+        }
     }
 }
