@@ -2,6 +2,7 @@
 //! despawn / death, a transfer following its route, shipyard build steps, and the gated
 //! real-data tests (`AAEMU_COMPACT_DB`, `AAEMU_GAME_PAK`).
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -2457,6 +2458,257 @@ async fn a_discarded_driver_rebinds_beside_the_hull_and_a_far_one_is_still_refus
     assert!(error_codes(&a.drain()).is_empty());
 }
 
+/// A synthetic `mesh_physics_data` CGF with one default box of the given half extents.
+fn box_cgf(half: [f32; 3]) -> Vec<u8> {
+    use aaemu_physics::geometry::primitives::BoxPrim;
+    use aaemu_physics::geometry::shapes::stream::{save_phys_geometry, PhysGeomHeader};
+    use aaemu_physics::geometry::shapes::BoxGeom;
+    use aaemu_physics::math::{Quat, Vec3};
+
+    let geometry = BoxGeom::new(&BoxPrim::aligned(
+        Vec3::ZERO,
+        Vec3::new(half[0], half[1], half[2]),
+    ));
+    let mut blob = Vec::new();
+    save_phys_geometry(
+        &PhysGeomHeader {
+            inertia: Vec3::splat(1.0),
+            q: Quat::IDENTITY,
+            origin: Vec3::ZERO,
+            volume: 8.0,
+            unk52: 1,
+            surface_idx: 0,
+        },
+        &geometry,
+        &mut blob,
+    );
+    crate::systems::ai::collision::cgf::tests::synthetic_cgf(&blob)
+}
+
+/// The Red Farm Hauler's model reference plus a synthetic body for it: the 1.2 prefab names
+/// the body as a physicalized `AnimObject` whose `.chr` has no `MeshPhysicsData`; the
+/// same-named `.cgf` holds the collision proxies. Half extents (1.7, 2.8, 1.0) put the 4.2 m
+/// driver spot 2.5 m from the body but 4.2 m from the model origin and 4.3 m from the rear
+/// cannon points, i.e. outside every fallback measure.
+fn hauler_geometry_data() -> GameData {
+    let mut d = hauler_data();
+    d.systems.vehicles.vehicle_model_refs.insert(
+        1553,
+        "prefab://prefabs/vehicle_tractor.xml/vehicle_tractor_c.tractor_body".into(),
+    );
+    d
+}
+
+fn hauler_geometry_files() -> HashMap<String, Vec<u8>> {
+    let prefab = r#"<PrefabsLibrary><Prefab Name="vehicle_tractor_c.tractor_body"><Objects>
+      <Object Type="Entity" Name="body" EntityClass="AnimObject">
+        <Properties object_Model="game/objects/env/06_unit/05_carriage/transfers_trailer_c.chr">
+          <Physics bPhysicalize="1" bArticulated="0" Mass="-1" Density="-1" bRigidBody="1"/>
+        </Properties>
+      </Object>
+    </Objects></Prefab></PrefabsLibrary>"#;
+    let mut files = HashMap::new();
+    files.insert(
+        "game/prefabs/vehicle_tractor.xml".to_string(),
+        prefab.as_bytes().to_vec(),
+    );
+    files.insert(
+        "game/objects/env/06_unit/05_carriage/transfers_trailer_c.cgf".to_string(),
+        box_cgf([1.7, 2.8, 1.0]),
+    );
+    files
+}
+
+/// Bounds are cached per model id, including a negative result: a second bind of the same
+/// model must not re-read and re-parse the prefab library, and a model without geometry must
+/// not repeat its failed model lookups.
+#[test]
+fn vehicle_bounds_cache_keeps_both_hits_and_misses() {
+    use aaemu_physics::geometry::primitives::BoxPrim;
+    use aaemu_physics::math::Vec3;
+
+    let cache = dashmap::DashMap::new();
+    let mut loads = 0;
+    assert!(slaves::cached_vehicle_bounds(&cache, 1553, || {
+        loads += 1;
+        None
+    })
+    .is_none());
+    assert!(
+        slaves::cached_vehicle_bounds(&cache, 1553, || {
+            loads += 1;
+            Some(BoxPrim::aligned(Vec3::ZERO, Vec3::splat(1.0)))
+        })
+        .is_none(),
+        "a cached miss is not reloaded"
+    );
+    assert_eq!(loads, 1);
+    let bounds = BoxPrim::aligned(Vec3::new(1.0, 2.0, 3.0), Vec3::new(1.0, 2.0, 3.0));
+    assert_eq!(
+        slaves::cached_vehicle_bounds(&cache, 511, || {
+            loads += 1;
+            Some(bounds)
+        }),
+        Some(bounds)
+    );
+    assert_eq!(
+        slaves::cached_vehicle_bounds(&cache, 511, || {
+            loads += 1;
+            None
+        }),
+        Some(bounds),
+        "a cached hit is not reloaded"
+    );
+    assert_eq!(loads, 2);
+}
+
+/// The 2026-11-02 01:43-01:44 capture: the client offers the driver bind beside the Red Farm
+/// Hauler's cab and the server refused with `TOO_FAR_AWAY` because the only located attach
+/// points are the rear cannons. The client measures to the body's collision geometry
+/// (`FUN_39346290` -> `FUN_39093860` -> `FUN_3989bf90`), so the server now measures the land
+/// vehicle's model collision bounds. 2.5 m from the body (4.2 m from the origin, outside the
+/// 4.0 m reach by every old measure) binds; 5 m from the body is refused. The passenger reach
+/// keeps 3.0 m but also uses the body: 2.2 m from it binds, 3.2 m is refused.
+#[tokio::test]
+async fn land_vehicle_bind_measures_the_body_bounds_not_the_rear_attach_points() {
+    use crate::models::slave::Slave;
+    use crate::net::registry::ClientPacket;
+    use crate::systems::skills::handlers::{start_skill, CSStartSkillPacket};
+    use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+    use crate::systems::vehicles::packets::CSBindSlavePacket;
+    use crate::world::Entity;
+
+    let server = server_with(hauler_geometry_data());
+    server
+        .systems
+        .ai
+        .collision
+        .test_files
+        .set(Arc::new(hauler_geometry_files()))
+        .unwrap();
+    crate::systems::economy::bridges::install(&server);
+    crate::systems::npcs::install_hooks(&server);
+    super::install_hooks(&server);
+    let mut a = TestClient::new(&server, 1, 1);
+    let mut b = TestClient::new(&server, 2, 2);
+    let mut c = TestClient::new(&server, 3, 3);
+    let mut d = TestClient::new(&server, 4, 4);
+    // Hauler at (103, 100); model +X is world +X. Body half width 1.7, so the driver at
+    // 4.2 m is 2.5 m from the body, the far one at 6.7 m is 5 m from it.
+    let pa = spawn_player(&server, &a, test_character(1, "Near", 107.2, 100.0), PA);
+    let pb = spawn_player(&server, &b, test_character(2, "Far", 109.7, 100.0), PB);
+    let pc = spawn_player(
+        &server,
+        &c,
+        test_character(3, "Passenger", 106.9, 100.0),
+        0x00F0_0003,
+    );
+    let pd = spawn_player(
+        &server,
+        &d,
+        test_character(4, "FarPassenger", 107.9, 100.0),
+        0x00F0_0004,
+    );
+    for (client, p) in [(&mut a, &pa), (&mut b, &pb)] {
+        client.conn.active_char = Some(p.clone());
+    }
+    c.conn.active_char = Some(pc.clone());
+    d.conn.active_char = Some(pd.clone());
+    for p in [&pa, &pb, &pc, &pd] {
+        let mut data = p.data();
+        data.unit.hp = 1000;
+        data.unit.max_hp = 1000;
+    }
+    let world = server.world.world(0).unwrap();
+    let mut hauler = Slave::new(0, 146);
+    hauler.unit.hp = 1000;
+    hauler.unit.max_hp = 1000;
+    hauler.unit.model_id = 1553;
+    hauler.unit.tl_id = 3;
+    hauler.unit.transform.set_xyz(103.0, 100.0, 100.0);
+    hauler.summoner_obj_id = PA;
+    hauler.summoner_id = pa.character_id;
+    let hauler = Entity::new(0x300, hauler);
+    world.spawn(&hauler, &server.view_ctx());
+    for client in [&mut a, &mut b, &mut c, &mut d] {
+        client.drain();
+    }
+
+    // 5 m from the body: refused, and the 4.0 m reach is unchanged.
+    CSBindSlavePacket { tl_id: 3 }
+        .handle(&server, &mut b.conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        error_codes(&b.drain()),
+        vec![super::error::TOO_FAR_AWAY],
+        "5 m from the body is outside the 4.0 m driver reach"
+    );
+    assert!(hauler.data().attached_characters.is_empty());
+
+    // 2.5 m from the body, 4.2 m from the origin and 4.3 m from the rear cannon points:
+    // only the body measure is inside the reach.
+    CSBindSlavePacket { tl_id: 3 }
+        .handle(&server, &mut a.conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        hauler.data().attached_characters,
+        vec![(attach_point::DRIVER, PA)]
+    );
+    assert!(error_codes(&a.drain()).is_empty());
+    assert!(
+        server
+            .systems
+            .vehicles
+            .vehicle_bounds
+            .get(&1553)
+            .is_some_and(|bounds| bounds.is_some()),
+        "the bind loaded and cached the model bounds"
+    );
+
+    let cast = |client: &mut TestClient, caster: u32, target: u32| {
+        start_skill(
+            &server,
+            &mut client.conn,
+            CSStartSkillPacket {
+                skill_id: PASSENGER_SKILL,
+                caster: SkillCaster::Unit(caster),
+                target: SkillCastTarget::Unit(target),
+                flag: 0,
+                skill_object: SkillObject::None,
+            },
+        );
+    };
+
+    // The passenger reach is unchanged at 3.0 m: 2.2 m from the body binds, even though the
+    // origin is 3.9 m away (outside the old origin measure).
+    cast(&mut c, 0x00F0_0003, hauler.obj_id);
+    assert!(error_codes(&c.drain()).is_empty());
+    assert_eq!(
+        hauler.data().attached_characters,
+        vec![
+            (attach_point::DRIVER, PA),
+            (attach_point::PASSENGER0, 0x00F0_0003)
+        ]
+    );
+
+    // 3.2 m from the body is outside the unchanged 3.0 m passenger reach.
+    cast(&mut d, 0x00F0_0004, hauler.obj_id);
+    assert_eq!(
+        error_codes(&d.drain()),
+        vec![super::error::TOO_FAR_AWAY],
+        "3.2 m from the body is outside the 3.0 m passenger reach"
+    );
+    assert_eq!(
+        hauler.data().attached_characters,
+        vec![
+            (attach_point::DRIVER, PA),
+            (attach_point::PASSENGER0, 0x00F0_0003)
+        ]
+    );
+}
+
 /// One slave at a time: the client refuses a second bind with `slave_unbind_first` 0x66
 /// (`FUN_39346290`), and a forged second bind (driver or passenger) gets the same error.
 #[tokio::test]
@@ -4364,6 +4616,11 @@ fn real_compact_db_vehicle_tables() {
     assert!(d.ship_model(d.slave_templates[&9].model_id).is_some());
     let carriage = d.transfer_template(6).unwrap();
     assert!(d.vehicle_model(carriage.model_id).is_some());
+    assert_eq!(
+        d.vehicle_model_refs.get(&1553).map(String::as_str),
+        Some("prefab://prefabs/vehicle_tractor.xml/vehicle_tractor_c.tractor_body"),
+        "the Red Farm Hauler's model reference"
+    );
     // slave_attach_points.json of the server data
     assert!(!d.attach_points.is_empty());
     let clipper = d
@@ -4433,6 +4690,144 @@ fn real_model_bindings_pin_the_farm_wagon_seat() {
         assert_eq!(d.slave_templates[&slave].model_id, model);
         assert!(d.slave_has_attach_point(slave, attach_point::PASSENGER0));
     }
+}
+
+/// The real Red Farm Hauler (model 1553) against the real client assets: the body is a
+/// physicalized `AnimObject` whose `.chr` has no `MeshPhysicsData`; the same-named `.cgf`
+/// carries the collision proxies. The bind gap must measure to those proxies, not to the model
+/// origin or the rear cannon attach points. The spot is 2.5 m from the front-side body corner,
+/// more than 4.0 m from the origin, so only the body measure is inside the 4.0 m reach.
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB and AAEMU_GAME_PAK"]
+async fn real_hauler_bind_measures_the_client_body_collision_bounds() {
+    use crate::models::slave::Slave;
+    use crate::net::registry::ClientPacket;
+    use crate::systems::vehicles::packets::{CSBindSlavePacket, CSDiscardSlavePacket};
+    use crate::world::Entity;
+
+    let (Ok(db), Ok(pak)) = (
+        std::env::var("AAEMU_COMPACT_DB"),
+        std::env::var("AAEMU_GAME_PAK"),
+    ) else {
+        return;
+    };
+    let vehicles = load_real(&db, std::slice::from_ref(&pak));
+    let reference = vehicles
+        .vehicle_model_refs
+        .get(&1553)
+        .cloned()
+        .expect("model 1553 reference");
+    let app = app_path();
+    let client = ClientFileManager::from_sources(std::slice::from_ref(&pak), &app);
+    let crate::systems::ai::collision::objects::ModelRef::Prefab { library, name } =
+        crate::systems::ai::collision::objects::parse_model_ref(&reference)
+    else {
+        panic!("model 1553 is a prefab");
+    };
+    let xml = client.read_to_string(&library);
+    assert!(!xml.is_empty(), "prefab {library}");
+    let body = crate::systems::ai::collision::objects::prefab_house_geometry(&xml, &name)
+        .into_iter()
+        .next()
+        .expect("hauler body entity");
+    assert!(body.0.ends_with(".chr"), "body model {}", body.0);
+    let cgf = format!("{}.cgf", &body.0[..body.0.len() - 4]);
+    let mut files = HashMap::new();
+    files.insert(library, xml.into_bytes());
+    files.insert(
+        cgf.clone(),
+        client
+            .read_file(&cgf)
+            .unwrap_or_else(|| panic!("missing {cgf}")),
+    );
+
+    let mut data = GameData::empty();
+    data.systems.vehicles = vehicles;
+    let server = server_with(data);
+    server
+        .systems
+        .ai
+        .collision
+        .test_files
+        .set(Arc::new(files))
+        .unwrap();
+    let files = crate::systems::ai::collision::files(&server).unwrap();
+    let models = crate::systems::ai::collision::model_cache(&server, &files);
+    let bounds = crate::systems::ai::physics::cry::model_bounds_including_bodies(
+        &files, &models, &reference,
+    )
+    .expect("the real hauler's collision body");
+    println!(
+        "hauler bounds center {:?} half {:?}",
+        bounds.center, bounds.size
+    );
+    assert!(bounds.size.x > 0.3, "{bounds:?}");
+    assert!(
+        bounds.size.y > 1.5,
+        "the body is longer than it is wide: {bounds:?}"
+    );
+    assert!(bounds.size.z > 0.3, "{bounds:?}");
+
+    let mut a = TestClient::new(&server, 1, 1);
+    let pa = spawn_player(&server, &a, test_character(1, "Near", 100.0, 100.0), PA);
+    a.conn.active_char = Some(pa.clone());
+    let world = server.world.world(0).unwrap();
+    let mut hauler = Slave::new(0, 146);
+    hauler.unit.hp = 1000;
+    hauler.unit.max_hp = 1000;
+    hauler.unit.model_id = 1553;
+    hauler.unit.tl_id = 3;
+    hauler.unit.transform.set_xyz(103.0, 100.0, 100.0);
+    hauler.summoner_obj_id = PA;
+    hauler.summoner_id = pa.character_id;
+    let hauler = Entity::new(0x300, hauler);
+    world.spawn(&hauler, &server.view_ctx());
+    a.drain();
+
+    // 2.5 m out from the front-side body corner (the +Y side; the located cannon points are
+    // at -Y), so the origin and every located attach point are farther than 4.0 m.
+    let out = 2.5 / std::f32::consts::SQRT_2;
+    let x = 103.0 + bounds.center.x + bounds.size.x + out;
+    let y = 100.0 + bounds.center.y + bounds.size.y + out;
+    assert!(
+        (x - 103.0).powi(2) + (y - 100.0).powi(2) > 16.0,
+        "the spot must be outside the old origin measure"
+    );
+    pa.data().unit.transform.set_xyz(x, y, 100.0);
+
+    CSBindSlavePacket { tl_id: 3 }
+        .handle(&server, &mut a.conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        hauler.data().attached_characters,
+        vec![(attach_point::DRIVER, PA)],
+        "the client offers the driver seat from beside the cab"
+    );
+    assert!(error_codes(&a.drain()).is_empty());
+
+    // 5 m from the same body corner is outside the unchanged 4.0 m reach.
+    CSDiscardSlavePacket { tl_id: 3 }
+        .handle(&server, &mut a.conn)
+        .await
+        .unwrap();
+    a.drain();
+    let far = 5.0 / std::f32::consts::SQRT_2;
+    pa.data().unit.transform.set_xyz(
+        103.0 + bounds.center.x + bounds.size.x + far,
+        100.0 + bounds.center.y + bounds.size.y + far,
+        100.0,
+    );
+    CSBindSlavePacket { tl_id: 3 }
+        .handle(&server, &mut a.conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        error_codes(&a.drain()),
+        vec![super::error::TOO_FAR_AWAY],
+        "5 m from the body is outside the 4.0 m driver reach"
+    );
+    assert!(hauler.data().attached_characters.is_empty());
 }
 
 /// Real 1.2 cart / ship / cannon slaves. The 1.2 client offers 13863 only when the model declares

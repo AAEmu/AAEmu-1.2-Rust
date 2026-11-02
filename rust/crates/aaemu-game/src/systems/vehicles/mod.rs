@@ -65,6 +65,10 @@ pub struct System {
     pub shipyards: shipyards::ShipyardManager,
     /// Hooks other owners install (physics, economy).
     pub hooks: hooks::VehicleHooks,
+    /// Land-vehicle collision bounds by model id (`None` = no client geometry), loaded once
+    /// per model by [`slaves::bind_gap`]. The model geometry is immutable, so no invalidation.
+    pub(crate) vehicle_bounds:
+        dashmap::DashMap<u32, Option<aaemu_physics::geometry::primitives::BoxPrim>>,
     /// `SlaveGameData._attachPoints` after a `/scripts reloadslavepoints` (`None` = the loaded
     /// game data).
     reloaded_attach_points: std::sync::RwLock<Option<AttachPoints>>,
