@@ -4,9 +4,12 @@
 //! `(id, total, remaining)` u32 triples, then `i32 tagCount` and the same triples; `OnCooldowns`
 //! (`391d43c0`) -> `39899d40` appends them to the local character's cooldown manager, which is
 //! what the action bar asks through `GetActionCooldown` (`3943f310` -> `3989a3e0`/`3989a290`).
-//! An untagged skill (Recall 14849, Escape 20297, most consumables) therefore still needs an
-//! `SCCooldownsPacket` with its individual entry: sending nothing leaves the client with no
-//! countdown. The end time is persisted as an absolute Unix-ms stamp, so a relog restores it.
+//! The client starts the cooldown itself for an ordinary skill (`3939b010` when
+//! `toggle_buff_id == 0 && timing_id != 0` and the fired packet's two flag bits are 0), for a
+//! toggle skill when its buff is removed (`39389b70`), and applies the `Cooldown` special effect
+//! itself. The server therefore sends `SCCooldowns` per cast only for a cast that never sends
+//! `SCSkillFired` (`plot_only` with a plot) or a `timing_id == 0` skill. The end time is
+//! persisted as an absolute Unix-ms stamp and the select sync restores it after a relog.
 
 use std::sync::Arc;
 
@@ -41,33 +44,45 @@ const ESCAPE: u32 = 20297;
 const POTION: u32 = 11717;
 const TAGGED_POTION: u32 = 11720;
 const TAG: u32 = 144;
-/// A toggle skill (native `3939b010`: `toggle_buff_id != 0`, no tube instrument animation):
-/// the client starts its individual cooldown itself. `TOGGLE_TAGGED` adds a shared group.
+/// An ordinary untagged skill: `timing_id` 1, no toggle, started by the client itself.
+const ORDINARY: u32 = 21001;
+/// A toggle skill: the client starts its cooldown in `OnBuffRemoved` (`39389b70`).
 const TOGGLE: u32 = 21002;
-const TOGGLE_TAGGED: u32 = 21003;
-const GLIDER_TAG: u32 = 296;
+/// A `plot_only` skill with a plot: it never sends `SCSkillFired`, so the server must send the
+/// timer.
+const PLOT_ONLY: u32 = 21004;
+/// The rare `timing_id == 0` skill: the client does not start its timer on `SCSkillFired`.
+const TIMING_ZERO: u32 = 21005;
+/// A skill in the battlefield reset group (`playerSkillsTag` 378).
+const BATTLEFIELD_SKILL: u32 = 21006;
 
 fn data() -> GameData {
     let mut data = GameData::empty();
-    for (id, tag, duration) in [
-        (RECALL, 0, 2_000),
-        (ESCAPE, 0, 1_800_000),
-        (POTION, 0, 43_200_000),
-        (TAGGED_POTION, TAG as i32, 60_000),
-        (TOGGLE, 0, 10_000),
-        (TOGGLE_TAGGED, GLIDER_TAG as i32, 10_000),
+    for (id, tag, duration, timing_id, toggle_buff_id, plot_only, plot_id) in [
+        (RECALL, 0, 2_000, 1, 0, false, None),
+        (ESCAPE, 0, 1_800_000, 1, 0, false, None),
+        (POTION, 0, 43_200_000, 1, 0, false, None),
+        (TAGGED_POTION, TAG as i32, 60_000, 1, 0, false, None),
+        (ORDINARY, 0, 10_000, 1, 0, false, None),
+        (TOGGLE, 0, 10_000, 1, 1458, false, None),
+        (PLOT_ONLY, 0, 10_000, 1, 0, true, Some(1)),
+        (TIMING_ZERO, 0, 500, 0, 0, false, None),
+        (BATTLEFIELD_SKILL, 0, 10_000, 1, 0, false, None),
     ] {
         data.systems.skills.add_skill(SkillTemplate {
             cooldown_tag_id: tag,
             cooldown_time: duration,
-            toggle_buff_id: if id == TOGGLE || id == TOGGLE_TAGGED {
-                1458
-            } else {
-                0
-            },
+            timing_id,
+            toggle_buff_id,
+            plot_only,
+            plot_id,
             ..skills::tests::skill_template(id)
         });
     }
+    data.systems
+        .skills
+        .tagged_skills
+        .insert(378, vec![BATTLEFIELD_SKILL]);
     data
 }
 
@@ -158,28 +173,87 @@ fn relog(player: &PlayerRef, now_ms: i64) -> UnitCooldowns {
     fresh.unit.cooldowns
 }
 
+/// The client starts the cooldown itself for an ordinary skill (`3939b010`: `toggle_buff_id`
+/// 0, `timing_id` 1, fired flag bits 0) and `39899f90` writes either the skill or the tag entry
+/// from its own template. No server entry may be appended: `39899d40` does not de-duplicate and
+/// drops additions once the list holds 150.
 #[tokio::test]
-async fn recall_untagged_cast_sends_the_native_cooldown_packet() {
+async fn client_started_casts_send_no_cooldown_packet() {
     let (server, mut client, player, npc) = fixture(data());
-    cast(&server, &mut client, RECALL, npc.obj_id);
+    for _ in 0..200 {
+        // Let the next press pass while keeping the started coordination: admission and
+        // persistence still see it, only the client update is suppressed.
+        player.data().unit.cooldowns.remove_cooldown(ORDINARY);
+        cast(&server, &mut client, ORDINARY, npc.obj_id);
+        let frames = client.drain();
+        assert!(frames.iter().any(|(op, _)| *op == sc::SCSkillFiredPacket));
+        assert!(
+            !frames.iter().any(|(op, _)| *op == sc::SCCooldownsPacket),
+            "the client starts an ordinary skill's timer itself"
+        );
+    }
+    assert!(player
+        .data()
+        .unit
+        .cooldowns
+        .cooldowns
+        .contains_key(&ORDINARY));
+
+    // Recall, the tagged consumable and a toggle skill are client-started too (toggle on
+    // buff removal, `OnBuffRemoved` 39389b70 -> 39368f90).
+    for id in [RECALL, POTION, TAGGED_POTION, TOGGLE] {
+        let mut p = player.data();
+        p.unit.cooldowns.remove_cooldown(id);
+        p.unit.cooldowns.tag_cooldowns.remove(&TAG);
+        drop(p);
+        cast(&server, &mut client, id, npc.obj_id);
+        let frames = client.drain();
+        assert!(
+            frames.iter().any(|(op, _)| *op == sc::SCSkillFiredPacket),
+            "skill {id}"
+        );
+        assert!(
+            !frames.iter().any(|(op, _)| *op == sc::SCCooldownsPacket),
+            "skill {id}"
+        );
+    }
+}
+
+/// A `plot_only` cast with a plot never sends `SCSkillFired` (the `use_skill` plot branch
+/// returns before `cast`), so the client never starts the timer and the server must send it.
+#[tokio::test]
+async fn plot_only_cast_sends_the_server_cooldown_packet() {
+    let (server, mut client, player, npc) = fixture(data());
+    cast(&server, &mut client, PLOT_ONLY, npc.obj_id);
+    let frames = client.drain();
+    assert!(!frames.iter().any(|(op, _)| *op == sc::SCSkillFiredPacket));
+    let ui = cooldown_packet(&frames).expect("plot-only cooldown packet");
+    assert_eq!(ui.skills, vec![(PLOT_ONLY, 10_000, 10_000)]);
+    assert!(ui.tags.is_empty());
+    assert!(player
+        .data()
+        .unit
+        .cooldowns
+        .cooldowns
+        .contains_key(&PLOT_ONLY));
+}
+
+/// The 8 `timing_id == 0` skills fail the client's `3939b010` test, so their timer comes from
+/// the server.
+#[tokio::test]
+async fn timing_zero_skill_sends_the_server_cooldown_packet() {
+    let (server, mut client, player, npc) = fixture(data());
+    cast(&server, &mut client, TIMING_ZERO, npc.obj_id);
     let frames = client.drain();
     assert!(frames.iter().any(|(op, _)| *op == sc::SCSkillFiredPacket));
-    let ui = cooldown_packet(&frames).expect("untagged skill cooldown packet");
-    // 397b2350: count 1, (14849, 2000, 2000), then an empty tag list. The remaining time is
-    // the authored 2000 ms because the packet is built with the cast's own `now`.
-    assert_eq!(
-        ui.skills,
-        vec![(RECALL, 2_000, 2_000)],
-        "individual entry without a tag"
-    );
-    assert!(ui.tags.is_empty());
-    let remaining = player.data().unit.cooldowns.cooldowns[&RECALL] - now_ms();
-    assert!(
-        (1_900..=2_000).contains(&remaining),
-        "remaining = {remaining}"
-    );
-    cast(&server, &mut client, RECALL, npc.obj_id);
-    assert_denied(&client.drain(), skill_result::COOLDOWN_TIME);
+    let ui = cooldown_packet(&frames).expect("timing-zero cooldown packet");
+    assert_eq!(ui.skills, vec![(TIMING_ZERO, 500, 500)]);
+    assert!(player
+        .data()
+        .unit
+        .cooldowns
+        .cooldowns
+        .contains_key(&TIMING_ZERO));
 }
 
 #[tokio::test]
@@ -214,17 +288,13 @@ async fn relog_restores_recall_and_login_sync_and_admission_see_it() {
 async fn consumable_and_tagged_cooldowns_survive_relog() {
     let (server, mut client, player, npc) = fixture(data());
     cast(&server, &mut client, POTION, npc.obj_id);
-    assert_eq!(
-        cooldown_packet(&client.drain())
-            .expect("consumable packet")
-            .skills[0]
-            .0,
-        POTION
-    );
+    let frames = client.drain();
+    assert!(frames.iter().any(|(op, _)| *op == sc::SCSkillFiredPacket));
+    assert!(!frames.iter().any(|(op, _)| *op == sc::SCCooldownsPacket));
     cast(&server, &mut client, TAGGED_POTION, npc.obj_id);
-    let ui = cooldown_packet(&client.drain()).expect("tagged packet");
-    assert_eq!(ui.skills[0].0, TAGGED_POTION);
-    assert_eq!(ui.tags[0].0, TAG);
+    let frames = client.drain();
+    assert!(frames.iter().any(|(op, _)| *op == sc::SCSkillFiredPacket));
+    assert!(!frames.iter().any(|(op, _)| *op == sc::SCCooldownsPacket));
 
     let now = now_ms();
     let rows = cooldown_rows(&player.data(), now);
@@ -261,59 +331,10 @@ async fn consumable_and_tagged_cooldowns_survive_relog() {
     assert_denied(&client.drain(), skill_result::COOLDOWN_TIME);
 }
 
+/// The 1.2 client applies the `Cooldown` special effect (40) itself (`OnPlotEvent` special
+/// 0x28 -> `39368440`), so the server only updates its own store and sends no packet.
 #[tokio::test]
-async fn expired_cooldowns_are_neither_saved_nor_restored() {
-    let (server, mut client, player, npc) = fixture(data());
-    let now = now_ms();
-    {
-        let mut p = player.data();
-        p.unit.cooldowns.cooldowns.insert(ESCAPE, now - 1);
-        p.unit.cooldowns.tag_cooldowns.insert(TAG, now - 1);
-        p.unit.cooldowns.add_cooldown(RECALL, 2_000, now);
-    }
-    let rows = cooldown_rows(&player.data(), now);
-    assert_eq!(rows.len(), 1);
-    assert_eq!((rows[0].kind, rows[0].id), (COOLDOWN_TYPE_SKILL, RECALL));
-
-    let mut fresh = test_character(1, "Caster", 100.0, 100.0);
-    apply_cooldown_rows(&mut fresh, &rows, now);
-    assert_eq!(fresh.unit.cooldowns.cooldowns.len(), 1);
-    assert!(fresh.unit.cooldowns.cooldowns.contains_key(&RECALL));
-    assert!(fresh.unit.cooldowns.tag_cooldowns.is_empty());
-
-    // An expired timer does not lock the skill: the cast path removes it and fires.
-    player
-        .data()
-        .unit
-        .cooldowns
-        .cooldowns
-        .insert(ESCAPE, now - 1);
-    cast(&server, &mut client, ESCAPE, npc.obj_id);
-    assert!(client
-        .drain()
-        .iter()
-        .any(|(op, _)| *op == sc::SCSkillFiredPacket));
-}
-
-#[test]
-fn native_reader_bytes_for_an_untagged_cooldown() {
-    let mut c = test_character(1, "Caster", 100.0, 100.0);
-    c.unit.cooldowns.add_cooldown(RECALL, 2_000, 1_000);
-    let packet = SCCooldownsPacket::from_cooldowns(&c.unit.cooldowns, 1_000);
-    let mut body = PacketStream::new();
-    Marshal::write(&packet, &mut body);
-    // 397b2350: skillCount 1, (14849, 2000, 2000), tagCount 0.
-    assert_eq!(
-        body.into_bytes(),
-        [1, 0, 0, 0, 0x01, 0x3a, 0, 0, 0xd0, 0x07, 0, 0, 0xd0, 0x07, 0, 0, 0, 0, 0, 0]
-    );
-}
-
-/// The `Cooldown` special effect (`40`) starts a cooldown without a cast of its own; it must
-/// report it like `start_skill_cooldown` so the client counts it down. No 1.2 skill references
-/// the effect, so this drives it directly.
-#[tokio::test]
-async fn cooldown_effect_reports_the_source_skills_timer() {
+async fn cooldown_effect_updates_the_server_store_without_a_packet() {
     let (server, mut client, player, _) = fixture(data());
     let caster = WorldObject::from(&player);
     let skill = skills::skill::new_skill_for(
@@ -342,11 +363,7 @@ async fn cooldown_effect_reports_the_source_skills_timer() {
     };
     client.drain();
     skills::effects::special::execute(&server, 40, &args, [5_000, 0, 0, 0]);
-    let ui = cooldown_packet(&client.drain()).expect("effect cooldown packet");
-    assert_eq!(ui.skills.len(), 1);
-    assert_eq!(ui.skills[0].0, POTION);
-    assert_eq!(ui.skills[0].2, 5_000);
-    assert!(ui.tags.is_empty());
+    assert!(!client.drain_ops().contains(&sc::SCCooldownsPacket));
     let remaining = player.data().unit.cooldowns.cooldowns[&POTION] - now_ms();
     assert!(
         (4_900..=5_000).contains(&remaining),
@@ -372,66 +389,50 @@ async fn cooldown_effect_reports_the_source_skills_timer() {
     assert!(!client.drain_ops().contains(&sc::SCCooldownsPacket));
 }
 
-/// Native `3939b010` starts the client-side cooldown itself for a toggle skill
-/// (`toggle_buff_id != 0`, `tube_instrument_fire_anim_id == 0`); a per-cast `SCCooldowns`
-/// would append a duplicate record each time until `39899d40` silently drops every later one.
+/// The battlefield reset sends one `SCSkillCooldownReset` per tag-378 skill and, because the
+/// port persists cooldowns, must also clear those server records (the C# reset could rely on
+/// the client packet alone; a relog here would restore a cooldown the reset removed).
 #[tokio::test]
-async fn locally_started_toggle_skills_get_no_per_cast_cooldown() {
-    let (server, mut client, player, npc) = fixture(data());
-    for _ in 0..200 {
-        // Let the next press pass while keeping the started coordination (admission and
-        // persistence still see it, only the client update is suppressed).
-        player.data().unit.cooldowns.remove_cooldown(TOGGLE);
-        cast(&server, &mut client, TOGGLE, npc.obj_id);
-        let frames = client.drain();
-        assert!(frames.iter().any(|(op, _)| *op == sc::SCSkillFiredPacket));
-        assert!(
-            !frames.iter().any(|(op, _)| *op == sc::SCCooldownsPacket),
-            "the client already started this toggle cooldown"
-        );
-    }
-    assert!(player.data().unit.cooldowns.cooldowns.contains_key(&TOGGLE));
-}
-
-/// A tagged toggle skill still needs the shared group (the client cannot infer membership),
-/// but its individual timer is the client's own, so only the tag list is sent.
-#[tokio::test]
-async fn tagged_toggle_skill_sends_only_the_shared_tag() {
-    let (server, mut client, player, npc) = fixture(data());
-    cast(&server, &mut client, TOGGLE_TAGGED, npc.obj_id);
-    let frames = client.drain();
-    assert!(frames.iter().any(|(op, _)| *op == sc::SCSkillFiredPacket));
-    let ui = cooldown_packet(&frames).expect("tag update");
-    assert!(ui.skills.is_empty());
-    assert_eq!(ui.tags.len(), 1);
-    assert_eq!(ui.tags[0].0, GLIDER_TAG);
-    assert_eq!(ui.tags[0].2, 10_000);
-    assert!(player
+async fn battlefield_reset_clears_the_server_records_and_sends_resets() {
+    let (server, mut client, player, _) = fixture(data());
+    let now = now_ms();
+    player
+        .data()
+        .unit
+        .cooldowns
+        .add_cooldown(BATTLEFIELD_SKILL, 10_000, now);
+    client.drain();
+    crate::systems::instances::instant_game::reset_all_skill_cooldowns(&server, &player, false);
+    assert!(!player
         .data()
         .unit
         .cooldowns
         .cooldowns
-        .contains_key(&TOGGLE_TAGGED));
+        .contains_key(&BATTLEFIELD_SKILL));
+    assert!(
+        !client.drain_frames().is_empty(),
+        "the compressed reset packet is sent"
+    );
 }
 
 #[test]
 fn native_reader_bytes_for_a_tag_only_update() {
     let mut c = test_character(1, "Caster", 100.0, 100.0);
-    c.unit.cooldowns.add_tag_cooldown(GLIDER_TAG, 10_000, 1_000);
+    c.unit.cooldowns.add_tag_cooldown(TAG, 10_000, 1_000);
     let packet = SCCooldownsPacket::from_cooldowns(&c.unit.cooldowns, 1_000);
     let mut body = PacketStream::new();
     Marshal::write(&packet, &mut body);
-    // 397b2350: skillCount 0, tagCount 1, (296, 10000, 10000).
+    // 397b2350: skillCount 0, tagCount 1, (144, 10000, 10000).
     assert_eq!(
         body.into_bytes(),
-        [0, 0, 0, 0, 1, 0, 0, 0, 0x28, 0x01, 0, 0, 0x10, 0x27, 0, 0, 0x10, 0x27, 0, 0]
+        [0, 0, 0, 0, 1, 0, 0, 0, 0x90, 0, 0, 0, 0x10, 0x27, 0, 0, 0x10, 0x27, 0, 0]
     );
 }
 
-/// The real 1.2 data: Recall / Escape and the long-cooldown consumable are untagged and
-/// non-toggle (`toggle_buff_id` NULL), so native `3939b010` does not start their timer and the
-/// per-skill entry is the only thing that can make the client show it. A glider is a toggle
-/// skill (`toggle_buff_id` 1458, no tube animation), which the client does start itself.
+/// The real 1.2 data behind the rule: Recall / Escape and the consumable are ordinary
+/// `toggle_buff_id == 0, timing_id == 1` skills, which the client starts itself; a glider is a
+/// toggle skill (`toggle_buff_id` 1458, cooldown on removal); skill 10201 is `plot_only` with a
+/// plot, so it never sends `SCSkillFired`; skill 2 is one of the eight `timing_id == 0` skills.
 #[test]
 #[ignore = "needs AAEMU_COMPACT_DB"]
 fn real_compact_recall_escape_and_consumables_are_untagged() {
@@ -461,14 +462,38 @@ fn real_compact_recall_escape_and_consumables_are_untagged() {
         )
         .unwrap();
     assert_eq!(row, (19_266, 43_200_000, None));
-    for (id, toggle, tube) in [(RECALL, None, None), (13411, Some(1458), None)] {
-        let row: (Option<i64>, Option<i64>) = db
+    for (id, timing, toggle) in [(RECALL, 1, None), (21_586, 1, None), (ESCAPE, 1, None)] {
+        let row: (i64, Option<i64>) = db
             .query_row(
-                "SELECT toggle_buff_id, tube_instrument_fire_anim_id FROM skills WHERE id = ?1",
+                "SELECT timing_id, toggle_buff_id FROM skills WHERE id = ?1",
                 [id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!(row, (toggle, tube), "skill {id}");
+        assert_eq!(row, (timing, toggle), "skill {id}");
     }
+    let glider: (i64, Option<i64>) = db
+        .query_row(
+            "SELECT timing_id, toggle_buff_id FROM skills WHERE id = 13411",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(glider, (1, Some(1458)));
+    let plot: (String, i64) = db
+        .query_row(
+            "SELECT plot_only, plot_id FROM skills WHERE id = 10201",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(plot, ("t".to_string(), 320));
+    let timing_zero: (i64, i64) = db
+        .query_row(
+            "SELECT timing_id, cooldown_time FROM skills WHERE id = 2",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(timing_zero, (0, 300));
 }

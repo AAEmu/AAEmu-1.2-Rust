@@ -3006,7 +3006,7 @@ The Bevy 1.2 client (`AABevy1.2`) is the main client; its reverse-engineering no
 | M9 | A missing trial reporter name is written as an empty string (the C# omitted the length) | per Bevy RE notes (string always has its `u16` length) |
 | M10 | Bounty rows write `notGuilty` before `guilty` | verified: row reader `397bebf0` reads `notGuilty` (`+0xc8`) then `guilty` (`+0xcc`) |
 | M14 | `SCUnitState` of a character sets flag bit3 (`0x0008`) while force attack is on, so late observers see Bloodlust | verified: the client chain is `397c9480` -> `398a1f90` -> unit+0x3bbc (the force-attack byte) for bit3 of the `u16` flags |
-| M15 | `SCCooldowns` has a full writer (`i32` count + `[id, total, remaining]` u32 triples, skills then tags, 150 per list). It is sent after `SCCharacterState` for restored cooldowns, after an accepted cast for a skill the client does not start itself (native `3939b010` starts only toggle skills: `toggle_buff_id != 0 && tube_instrument_fire_anim_id == 0`; Recall/Escape/consumables do not), always with the shared tag entry when the skill has one, and by the `Cooldown` special effect. Only the end time of each skill / tag cooldown is stored, so `total` equals `remaining` | verified: `397b64d0` -> `397b2350`; `OnCooldowns` `391d43c0` -> `39899d40` appends without de-duplication and caps at 150, and is what `GetActionCooldown` (`3943f310` -> `3989a3e0`/`3989a290`) reads. Cooldowns are persisted in `character_cooldowns` (absolute Unix-ms expiries) and restored by `Character.Load`; the C# kept them in memory only |
+| M15 | `SCCooldowns` has a full writer (`i32` count + `[id, total, remaining]` u32 triples, skills then tags, 150 per list). It is sent after `SCCharacterState` for restored cooldowns and after a cast only where the client cannot start the timer itself (a `plot_only` cast with a plot, which sends no `SCSkillFired`, or a `timing_id == 0` skill), with the shared tag entry when the skill has one. The client starts ordinary skills (`toggle_buff_id == 0 && timing_id != 0`) on `SCSkillFired` and toggle skills on `OnBuffRemoved`; the `Cooldown` special effect is client-applied. Only end times are stored, so `total` equals `remaining` | verified: `397b64d0` -> `397b2350`; `OnCooldowns` `391d43c0` -> `39899d40` appends without de-duplication and caps at 150, and is what `GetActionCooldown` (`3943f310` -> `3989a3e0`/`3989a290`) reads. Template `+0x1bc` = `timing_id`, `+0x1c0` = `toggle_buff_id` (loader columns 0x87/0x88), `DAT_3a17770c` = 0. Cooldowns are persisted in `character_cooldowns` (absolute Unix-ms expiries) and restored by `Character.Load`; the C# kept them in memory only |
 | M24 | Slave-equipment items (`item_impl` 28, e.g. item 29725 on slave template 21) are written as detail type 0 (`Invalid`) with no detail body; the server no longer sends `ItemDetailType.SlaveEquipment` (10, 12 opaque bytes), which desynced every field after the item (the Bevy client rejected `SCUnitStatePacket` 0x069 and the original 1.2 client misparsed it) | verified: the 1.2 item detail reader `3961edf0` has cases only for tags 1..9 (bodies `0x38, 0x1e, 7, 10, 0x19, 0x11, 0x11, 9, 5` minus the type byte) and no case 10, so tag 10 reads no body; the C# 1.2 `ItemDetailType` numbering has no 10 either |
 | M25 | `SCUnitState` `Inventory_Equip` for slaves writes full items in slots 19..25 (the C# wrote only the template id for every unit type). A hull part there (Harpoon Clipper, template 14, part 29742 in slot 23) made the original 1.2 client read the following bytes as item fields and run off the packet (`sc error; cur=105 prev=97`, `Packet Error !!!`); Housing (3), Mate (5) and Character (0) keep template-only body parts, Npc (1) keeps `templateId, id, grade` outside 19..25 with a full-item Cosplay slot (27), Transfer/Shipyard write only 19..25 | verified: the client equipment reader `3961fa20` reads 19..25 as a template-only `u32` only when `baseUnitType != 2`; for a slave every slot goes through the full item reader `3961f500` |
 | CS | The client CS table entries missing from `opcodes::cs` were added: `0x11f CSRequestSetBountyMoney`, `0x120 CSSendBountyUpdate`, `0x130 CSRankSnapshot` (already handled through a local const, now the table entry), `0x133 CSChangeAutoUseAAPoint` | the Bevy `opcodes.rs` (client table); 0x130 additionally by the RE notes in `ranking_packets.rs`. `0x11f`/`0x120` are logged no-ops (the bounty ledger is not wired to the wallet, TODO); `0x133` sets `Character.auto_use_aa_point` and answers with `SCItemTaskSuccess` (`ItemTaskType` 110 carrying the one-byte `ChangeAutoUseAAPoint` task, action 18); the 1.2 C# had the task class but no 0x133 handler, so this reply is inferred, not observed on a live client |
@@ -3659,31 +3659,53 @@ consumer was not located; the 1.2 ordering/result is therefore not proven there.
 
 The C# `SCCooldownsPacket` was a stub that was never sent, and `UnitCooldowns` lived only in
 memory; the port's writer was already correct but only reported a cast when the skill had an
-authored `cooldown_tag_id`. Recall (14849 / 21586), Escape (20297) and most consumables have no
-tag, so their casts sent no `SCCooldownsPacket` at all. Native `OnCooldowns`
-(`x2game.dll.c:363574`, handler `391d43c0` -> `39899d40`) appends entries to the client's
-cooldown manager, and the action bar reads that manager through `GetActionCooldown` (`3943f310`
--> `3989a3e0` -> `3989a290`). `39899d40` appends without de-duplication and silently drops
-entries once a list holds 150 (DEC 1930822-1930831), so the server must not resend entries the
-client already has.
+authored `cooldown_tag_id`. Native `OnCooldowns` (`x2game.dll.c:363574`, handler `391d43c0` ->
+`39899d40`) appends entries to the client's cooldown manager, and the action bar reads that
+manager through `GetActionCooldown` (`3943f310` -> `3989a3e0` -> `3989a290`). `39899d40`
+appends without de-duplication and silently drops entries once a list holds 150 (DEC
+1930822-1930831), so the server must not resend entries the client already has.
 
-`OnSkillFired` (`3939b010`, DEC 750706) starts a client-side cooldown itself for some skills:
-`39368f90` -> `39368440` -> `3989a360` -> `39899f90` when template `+0x1c0` equals the
-zero-initialised `DAT_3a17770c` and template `+0x1bc` is non-zero. The skill loader copies its
-temporary row struct based at `[ebp-0x2c8]` into the template (`FUN_39731870`, DEC 1578921 ->
-`FUN_39719df0`), so `+0x1bc` is loader column `0x88` = `toggle_buff_id` and `+0x1c0` is column
-`0x89` = `tube_instrument_fire_anim_id`; `DAT_3a17770c` is the zero .data global (read from
-`x2game_unpacked.dll`, RVA 0x118770c, no writer). The condition is therefore
-`toggle_buff_id != 0 && tube_instrument_fire_anim_id == 0`, i.e. toggle skills. Recall, Escape
-and the consumables have `toggle_buff_id` NULL (0), so the client does **not** start their
-timer and the server entry is required. The plot-casting / channeling / casting-stopped handlers
-also call `39899f90` (DEC 738201, 739427, 747156) with a duration carried by the stop packet;
-those are stop/cancel paths, not an accepted cast.
+The client starts most cooldowns itself. `OnSkillFired` (`3939b010`) calls
+`39368f90` -> `39368440` -> `3989a360` -> `39899f90` when the `SCSkillFired` packet's f bit0
+(`+0x154`, DEC 750636) and trailing flag bit1 (`+0x160`, DEC 750694) are 0 and the template has
+`toggle_buff_id` (`+0x1c0`) equal to the zero-initialised `DAT_3a17770c` and `timing_id`
+(`+0x1bc`) non-zero. The loader's temporary row struct is based at `[ebp-0x2c8]` (its first
+column is stored there and `FUN_39719df0` copies from it), and column 0x87 is stored at
+`[ebp-0x10c]` = temp+0x1bc, column 0x88 at `[ebp-0x108]` = temp+0x1c0 (disasm
+397327fe-3973281d): so `+0x1bc` is `timing_id` and `+0x1c0` is `toggle_buff_id`. Cross-checks:
+column 0x27 `cooldown_tag_id` -> `+0x84` (read by `39899f90`) and column 0x28 `cooldown_time` ->
+`+0x88` (read by `39368f90`). `DAT_3a17770c` is the zero dword in `.data` at RVA 0x118770c (base
+0x38ff0000; no writer in `.text`). The condition is `toggle_buff_id == 0 && timing_id != 0`:
+15085 of the 15126 skills, including Recall (14849 / 21586), Escape (20297) and the consumables.
+`39899f90` de-duplicates by id and, when the template has a `cooldown_tag_id`, writes only the
+TAG entry, so the client starts shared tags for these skills too.
 
-The per-cast `SCCooldowns` therefore carries the individual entry only when the client does not
-start it itself (not a toggle skill), plus the shared tag entry whenever the skill has one (the
-client cannot infer group membership). The login sync still sends every restored entry. The
-client picks the longer timer with `3989a290`.
+Toggle skills are started by `OnBuffRemoved` (`39389b70` -> `39368f90`, DEC 736146) when the
+toggle buff is removed. The `Cooldown` special effect (40) is applied by the client itself
+(`OnPlotEvent` special 0x28 -> `39368440`), and the casting / channeling / plot casting-stopped
+packets carry their own duration (`39899f90` at DEC 738201, 739427, 747156). None of these
+paths needs a server `SCCooldowns` update.
+
+The server sends a per-cast `SCCooldowns` only where the client cannot start the timer:
+
+- `plot_only` with a `plot_id`: `use_skill` commits the cooldown and returns before `cast`, so no
+  `SCSkillFired` is sent (133 skills with a cooldown; the other `plot_only` rows have no plot id
+  and do fire).
+- the 8 `timing_id == 0` skills (2 with a cooldown: 2 and 4).
+- the entries are sent with the individual timer and, when the skill has one, its shared tag.
+
+This keeps `OnSkillCooldownReset` (`391d6420`) clearing the single record; the `ResetCooldown`
+special effect (43) and `InstantGameManager` reset (`instant_game.rs`, one
+`SCSkillCooldownReset` per skill of tag 378) send their resets and clear the matching server
+records. Clearing them is a deviation forced by persistence: the C# reset only sent the client
+packet, which was enough while `UnitCooldowns` died with the session; here a relog would
+otherwise restore a cooldown the battlefield reset removed.
+
+Recall's path: skill 14849 / 21586 is **not** `plot_only` and has no `plot_id`; it is a normal
+`timing_id == 1`, `toggle_buff_id == 0` skill, so the client starts its 2000 ms cooldown itself.
+The original "no countdown after using Recall" report is therefore not caused by a missing
+per-cast packet; the confirmed relog symptom was the memory-only store, which is fixed by the
+persistence below (the select sync re-sends every restored entry).
 
 Persistence: `character_cooldowns` (`character_id`, `cooldown_type` 0 = skill id / 1 =
 `cooldown_tag_id`, `cooldown_id`, `expires_at_ms` BIGINT Unix ms) is rewritten by every
@@ -3692,6 +3714,4 @@ Persistence: `character_cooldowns` (`character_id`, `cooldown_type` 0 = skill id
 (`world::session::send_running_cooldowns`) sends the restored list, and the same map backs
 `UnitCooldowns::check_skill_cooldown`, so a cast before the restored expiry is refused with
 `COOLDOWN_TIME`. **Deviation:** the C# had no persistence and no real cooldown packet; this port
-adds both. The `Cooldown` special effect (40) also sends its update now (no 1.2 skill references
-the effect), except for a toggle skill the client starts itself, and ignores non-positive
-durations instead of wrapping them to `u32`.
+adds both.

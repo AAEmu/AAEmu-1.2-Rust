@@ -239,33 +239,35 @@ fn start_skill_cooldown(server: &GameServer, skill: &SkillRun, caster: &WorldObj
         return;
     }
     let tag = skill.template.cooldown_tag_id.max(0) as u32;
-    // Native 1.2 `3939b010` (OnSkillFired) starts a client-side cooldown itself only when the
-    // template's `tube_instrument_fire_anim_id` (`+0x1c0`, compared with the zero-initialised
-    // DAT_3a17770c) is 0 and its `toggle_buff_id` (`+0x1bc`) is non-zero; for anything else
-    // (Recall, Escape, consumables) the server must send the timer. Sending it again for a
-    // skill the client already started would append a duplicate record, and `39899d40` appends
-    // without de-duplication: 150 such records fill the list and later server entries are
-    // silently dropped.
+    // Native `3939b010` (OnSkillFired) starts the client-side cooldown itself when the packet's
+    // f bit0 (`+0x154`, DEC 750636) and trailing flag bit1 (`+0x160`, DEC 750694) are 0 and the
+    // template has `toggle_buff_id == 0` (`+0x1c0`, compared with the zero-initialised
+    // DAT_3a17770c) and `timing_id != 0` (`+0x1bc`). Toggle skills' cooldown is started by
+    // `OnBuffRemoved` (`39389b70` -> `39368f90`). A `plot_only` cast with a plot never sends
+    // `SCSkillFired`, so the client cannot start it and the server must send the update.
+    // Sending an entry the client already appended would duplicate it: `39899d40` does not
+    // de-duplicate and drops additions once the list holds 150.
+    let fires = !(skill.template.plot_only && skill.template.plot_id.is_some());
     let client_starts_cooldown =
-        skill.template.toggle_buff_id != 0 && skill.template.tube_instrument_fire_anim_id == 0;
+        fires && (skill.template.toggle_buff_id != 0 || skill.template.timing_id != 0);
     let packet = caster.with_unit(|u| {
         let cooldowns = &mut u.unit_mut().cooldowns;
         cooldowns.add_cooldown(skill.template.id, duration, now);
         cooldowns.add_tag_cooldown(tag, duration, now);
         // Native 1.2 397B2350 keeps these lists separate; 3989A290 takes
         // max(individual, tag). Never manufacture individual entries for other members.
-        // A shared tag is always sent: the client cannot know the group membership, even for
-        // a toggle skill whose individual timer it started itself.
+        // A client-started skill needs no packet at all: `39899f90` writes the individual entry
+        // or the tag entry from the client's own template, so sending either one duplicates it.
         let mut affected = UnitCooldowns::default();
         if !client_starts_cooldown {
             affected
                 .cooldowns
                 .insert(skill.template.id, cooldowns.cooldowns[&skill.template.id]);
-        }
-        if tag != 0 {
-            affected
-                .tag_cooldowns
-                .insert(tag, cooldowns.tag_cooldowns[&tag]);
+            if tag != 0 {
+                affected
+                    .tag_cooldowns
+                    .insert(tag, cooldowns.tag_cooldowns[&tag]);
+            }
         }
         SCCooldownsPacket::from_cooldowns(&affected, now)
     });
