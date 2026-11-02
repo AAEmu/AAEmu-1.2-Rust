@@ -586,6 +586,39 @@ pub struct ItemCapScale {
     pub scale_max: i32,
 }
 
+/// `item_socket_num_limits`: max sockets of an item by equip slot type and grade.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ItemSocketNumLimit {
+    pub id: u32,
+    pub slot_id: u32,
+    pub grade_id: i32,
+    pub num_socket: u8,
+}
+
+/// `item_socket_level_limits`: the target item's level requirement for a lunagem.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ItemSocketLevelLimit {
+    pub id: u32,
+    pub item_id: u32,
+    pub level: i32,
+}
+
+/// `item_sockets`: the equip slot group a lunagem fits.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ItemSocket {
+    pub id: u32,
+    pub item_id: u32,
+    pub equip_slot_group_id: u32,
+}
+
+/// `equip_slot_group_maps`: the equip slot types a slot group covers (one row per pair).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EquipSlotGroupMap {
+    pub id: u32,
+    pub equip_slot_group_id: u32,
+    pub equip_slot_type_id: u32,
+}
+
 /// `GradeDistributions` (`item_grade_distributions`; `weights[i]` = `Weight{i}`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GradeDistributions {
@@ -908,6 +941,14 @@ pub struct ItemData {
     pub enchanting_supports: HashMap<u32, ItemGradeEnchantingSupport>,
     /// `_socketChance`.
     pub socket_chance: HashMap<u32, u32>,
+    /// `item_socket_num_limits` (by equip slot type and grade).
+    pub item_socket_num_limits: HashMap<(u32, i32), ItemSocketNumLimit>,
+    /// `item_socket_level_limits` (by lunagem item id).
+    pub item_socket_level_limits: HashMap<u32, ItemSocketLevelLimit>,
+    /// `item_sockets` (by lunagem item id).
+    pub item_sockets: HashMap<u32, ItemSocket>,
+    /// `equip_slot_group_maps` (by equip slot group id, in table order).
+    pub equip_slot_group_maps: HashMap<u32, Vec<EquipSlotGroupMap>>,
     /// `_itemCapScales` (by skill id).
     pub item_cap_scales: HashMap<u32, ItemCapScale>,
     /// `_itemGradeDistributions`.
@@ -1043,6 +1084,34 @@ impl ItemData {
             .get(&num_sockets.wrapping_add(1))
             .copied()
             .unwrap_or(0)
+    }
+
+    /// Max gem sockets for an equip slot type and grade. A missing row means no socket
+    /// (`FUN_395aca00` returns 0), so installing is impossible there.
+    pub fn item_socket_num_limit(&self, slot_type_id: u32, grade: u8) -> u8 {
+        self.item_socket_num_limits
+            .get(&(slot_type_id, i32::from(grade)))
+            .map_or(0, |l| l.num_socket)
+    }
+
+    /// The lunagem's minimum target level requirement (`None` = no limit, as the client's
+    /// `FUN_395aca70` returns `INT_MAX` for a missing row).
+    pub fn item_socket_level_limit(&self, item_id: u32) -> Option<i32> {
+        self.item_socket_level_limits.get(&item_id).map(|l| l.level)
+    }
+
+    /// The equip slot group a lunagem fits (`None` = the gem declares no socket group).
+    pub fn item_socket_group(&self, item_id: u32) -> Option<u32> {
+        self.item_sockets
+            .get(&item_id)
+            .map(|s| s.equip_slot_group_id)
+    }
+
+    /// Whether the gem's `equip_slot_group_id` covers `slot_type_id` (`equip_slot_group_maps`).
+    pub fn socket_group_allows(&self, group_id: u32, slot_type_id: u32) -> bool {
+        self.equip_slot_group_maps
+            .get(&group_id)
+            .is_some_and(|maps| maps.iter().any(|m| m.equip_slot_type_id == slot_type_id))
     }
 
     /// `GetItemCapScale(skillId)`.
@@ -1703,6 +1772,99 @@ impl ItemData {
             let n = r.u32("num_sockets")?;
             let chance = r.u32("success_ratio")?;
             data.socket_chance.entry(n).or_insert(chance);
+            Ok(())
+        })?;
+
+        // `slot_id` is an `EquipmentItemSlotType` id (the client feeds the target template's
+        // slot type straight into this table's lookup, `FUN_397cc290` -> `FUN_395aca00`).
+        for_each_row(conn, "SELECT * FROM item_socket_num_limits", [], |r| {
+            let limit = ItemSocketNumLimit {
+                id: r.u32("id")?,
+                slot_id: r.u32("slot_id")?,
+                grade_id: r.i32("grade_id")?,
+                num_socket: r.u8("num_socket")?,
+            };
+            // Skip rows that cannot describe a real item (bad slot / grade / > 7 gem array).
+            if !(1..=equipment_item_slot_type::COSPLAY).contains(&limit.slot_id)
+                || !(0..=i32::from(item_grade::MYTHIC)).contains(&limit.grade_id)
+                || limit.num_socket > 7
+            {
+                tracing::warn!(
+                    "item_socket_num_limits {}: bad slot {} / grade {} / sockets {}",
+                    limit.id,
+                    limit.slot_id,
+                    limit.grade_id,
+                    limit.num_socket
+                );
+                return Ok(());
+            }
+            data.item_socket_num_limits
+                .entry((limit.slot_id, limit.grade_id))
+                .or_insert(limit);
+            Ok(())
+        })?;
+
+        for_each_row(conn, "SELECT * FROM item_socket_level_limits", [], |r| {
+            let limit = ItemSocketLevelLimit {
+                id: r.u32("id")?,
+                item_id: r.u32("item_id")?,
+                level: r.i32("level")?,
+            };
+            if !data.templates.contains_key(&limit.item_id) {
+                tracing::warn!(
+                    "item_socket_level_limits {}: item {} is not in the items table",
+                    limit.id,
+                    limit.item_id
+                );
+                return Ok(());
+            }
+            data.item_socket_level_limits
+                .entry(limit.item_id)
+                .or_insert(limit);
+            Ok(())
+        })?;
+
+        // The 1.2 table has 15 rows for test/removed items (no `items` row); they cannot be
+        // used by any real item, so skip them instead of failing the catalog.
+        for_each_row(conn, "SELECT * FROM item_sockets", [], |r| {
+            let socket = ItemSocket {
+                id: r.u32("id")?,
+                item_id: r.u32("item_id")?,
+                equip_slot_group_id: r.u32_or("equip_slot_group_id", 0)?,
+            };
+            // Rows left over from removed/test items have no items row (and often no group);
+            // they are expected in the shipped 1.2 data and cannot be used by any real item.
+            if socket.equip_slot_group_id == 0 || !data.templates.contains_key(&socket.item_id) {
+                tracing::debug!(
+                    "item_sockets {}: item {} / equip slot group {} is not loadable",
+                    socket.id,
+                    socket.item_id,
+                    socket.equip_slot_group_id
+                );
+                return Ok(());
+            }
+            data.item_sockets.entry(socket.item_id).or_insert(socket);
+            Ok(())
+        })?;
+
+        for_each_row(conn, "SELECT * FROM equip_slot_group_maps", [], |r| {
+            let map = EquipSlotGroupMap {
+                id: r.u32("id")?,
+                equip_slot_group_id: r.u32("equip_slot_group_id")?,
+                equip_slot_type_id: r.u32("equip_slot_type_id")?,
+            };
+            if !(1..=equipment_item_slot_type::COSPLAY).contains(&map.equip_slot_type_id) {
+                tracing::warn!(
+                    "equip_slot_group_maps {}: bad slot type {}",
+                    map.id,
+                    map.equip_slot_type_id
+                );
+                return Ok(());
+            }
+            data.equip_slot_group_maps
+                .entry(map.equip_slot_group_id)
+                .or_default()
+                .push(map);
             Ok(())
         })?;
 
