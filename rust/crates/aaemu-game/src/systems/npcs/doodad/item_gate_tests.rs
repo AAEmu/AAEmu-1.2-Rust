@@ -214,14 +214,14 @@ async fn real_compact_db_ids_match_the_gate_fixtures() {
     let conn =
         rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
-    let slot: (u32, String, u32) = conn
+    let slot: (u32, u32, u32) = conn
         .query_row(
-            "SELECT id, dos.doodad_func_group_id, slot_id FROM doodad_func_consume_changers dc              JOIN doodad_funcs dos ON dos.actual_func_id = dc.id              WHERE dos.id = 7481 AND dos.actual_func_type = 'DoodadFuncConsumeChanger'",
+            "SELECT dc.id, dos.doodad_func_group_id, slot_id FROM doodad_func_consume_changers dc              JOIN doodad_funcs dos ON dos.actual_func_id = dc.id              WHERE dos.id = 7481 AND dos.actual_func_type = 'DoodadFuncConsumeChanger'",
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .unwrap();
-    assert_eq!(slot, (2, "8264".to_string(), 26));
+    assert_eq!(slot, (2, 8264, 26));
     let next: (i32, u32) = conn
         .query_row(
             "SELECT next_phase, func_skill_id FROM doodad_funcs WHERE id = 7481",
@@ -240,7 +240,7 @@ async fn real_compact_db_ids_match_the_gate_fixtures() {
     assert_eq!(pack, 18469);
     let mount: u32 = conn
         .query_row(
-            "SELECT ms.skill_id FROM slave_mount_skills sms              JOIN mount_skills ms ON ms.id = sms.mount_skill_id WHERE sms.slave_id = 60",
+            "SELECT ms.skill_id FROM slave_mount_skills sms              JOIN mount_skills ms ON ms.id = sms.mount_skill_id WHERE sms.slave_id = 60 AND ms.id = 190",
             [],
             |r| r.get(0),
         )
@@ -262,7 +262,8 @@ async fn real_compact_db_ids_match_the_gate_fixtures() {
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(fuels, vec![34583, 26548]);
-    // The same shape on a ship bar: row 345 -> mount skill 22287, rider 25632, 10 fuels.
+    // The same shape on a ship bar: mount_attached_skills 345 -> mount_skills row 268
+    // (skill 22287), rider 25632, 10 fuels.
     let ship: (u32, u32, u32) = conn
         .query_row(
             "SELECT mount_skill_id, attach_point_id, skill_id FROM mount_attached_skills              WHERE id = 345",
@@ -270,10 +271,10 @@ async fn real_compact_db_ids_match_the_gate_fixtures() {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .unwrap();
-    assert_eq!(ship, (345, 1, 25632));
+    assert_eq!(ship, (268, 1, 25632));
     let ship_mount: u32 = conn
         .query_row(
-            "SELECT skill_id FROM mount_skills WHERE id = 345",
+            "SELECT skill_id FROM mount_skills WHERE id = 268",
             [],
             |r| r.get(0),
         )

@@ -352,6 +352,7 @@ pub(super) fn with_ctx<R>(
             sent: Vec::new(),
             report_reply: None,
             report_refused: Vec::new(),
+            answer_reports: true,
         };
         let r = f(&mut ctx);
         ctx.sync_rows();
@@ -2636,6 +2637,25 @@ async fn refused_reports_answer_with_sc_quest_context_failed() {
     assert_one_failed(&mut client, 52, super::packets::quest_error::INVALID_DOODAD);
 
     // The right doodad, objectives not complete.
+    events::on_report(&server, &player, 52, 0, 0x300, 0);
+    assert_one_failed(
+        &mut client,
+        52,
+        super::packets::quest_error::INVALID_QUEST_STATUS,
+    );
+
+    // A server-side report (DoodadFuncQuest, a doodad used on an owned quest) did not put
+    // the client in directing mode: its refusals are only logged, never answered.
+    for doodad_obj_id in [0x300, 0x302, 0x999] {
+        events::on_server_report(&server, &player, 52, 0, doodad_obj_id, 0);
+        server.systems.quests.run_queued_evaluations(&server);
+        let ops = client.drain_ops();
+        assert!(
+            !ops.contains(&sc::SCQuestContextFailedPacket),
+            "a server-side report {doodad_obj_id:#x} was answered with a refusal: {ops:?}"
+        );
+    }
+    // The flag is scoped to the server report: a client report right after is answered.
     events::on_report(&server, &player, 52, 0, 0x300, 0);
     assert_one_failed(
         &mut client,
