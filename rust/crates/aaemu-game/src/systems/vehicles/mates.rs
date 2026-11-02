@@ -863,14 +863,6 @@ fn sync_summon_item(
 /// `owner.Mates.SpawnMount(skillItem)`.
 pub fn spawn_mount(server: &GameServer, owner: &PlayerRef, skill_item_id: u64) {
     let owner_id = owner.data().id;
-    let manager = manager_of(server, owner);
-    // Despawn the previous mate first (as the C# did) so the owner is unmounted before the new
-    // mate's spawn position is taken from the owner's transform. Unlike the C#, the summon
-    // then continues and spawns the new mate.
-    for old in manager.get_active_mates(owner_id) {
-        let tl = u32::from(old.data().unit.tl_id);
-        despawn_mate(server, owner, tl);
-    }
     let Some(item) = owned_item(server, owner, skill_item_id) else {
         return;
     };
@@ -911,6 +903,22 @@ pub fn spawn_mount(server: &GameServer, owner: &PlayerRef, skill_item_id: u64) {
         super::error(owner, error_message::MATE_CANNOT_SPAWN_WHILE_CORPSE);
         return;
     }
+    // The summon is valid: despawn the previous mate (as the C# did, so the owner is unmounted
+    // before the new mate's position is taken from the owner's transform) and continue to
+    // spawn the new one. Unlike the C#, the despawn happens only for a summon that will spawn
+    // and the summon does not return early.
+    let manager = manager_of(server, owner);
+    for old in manager.get_active_mates(owner_id) {
+        let tl = u32::from(old.data().unit.tl_id);
+        despawn_mate(server, owner, tl);
+    }
+    // Re-read after the despawn: when the previous mate was this item, the despawn saved its
+    // live hp / level / xp into the row.
+    let saved = server
+        .systems
+        .vehicles
+        .mates
+        .character(owner_id, |cm| cm.get(skill_item_id).cloned());
     let Ok(tl_id) = server.ids.tl.get_next_id() else {
         return;
     };

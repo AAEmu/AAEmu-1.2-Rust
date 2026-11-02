@@ -1283,6 +1283,12 @@ async fn second_summon_replaces_the_active_mate_and_logout_clears_entry() {
     let first = m.get_active_mates(1).pop().expect("first mate");
     let first_obj = first.obj_id;
     assert!(server.world.world(0).unwrap().mate(first_obj).is_some());
+    // Live state the despawn must save before the same item is re-summoned.
+    {
+        let mut d = first.data();
+        d.experience = 4321;
+        d.unit.hp = 42;
+    }
     a.drain();
 
     // A second use of the whistle replaces the first mate and spawns the new one; the C# only
@@ -1295,6 +1301,15 @@ async fn second_summon_replaces_the_active_mate_and_logout_clears_entry() {
     assert!(!Arc::ptr_eq(&first, &second));
     assert!(first.data().deleted);
     assert_eq!(second.data().item_id, item_id);
+    let (exp, hp) = {
+        let d = second.data();
+        (d.experience, d.unit.hp)
+    };
+    assert_eq!(
+        (exp, hp),
+        (4321, 42),
+        "the despawn saves the live state before the same item is re-summoned"
+    );
     let in_world = server
         .world
         .world(0)
