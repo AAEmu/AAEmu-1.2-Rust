@@ -579,6 +579,12 @@ impl TeamManager {
                 None => return,
             },
         };
+        // A blocked inviter gets no invitation (named and area invites both end here). The
+        // 1.2 client has no "target blocked you" error, so the owner gets no reply
+        // (capture-pending, case `BLOCK-LIST-1`).
+        if friend::is_blocked_by(&target, owner.character_id) {
+            return;
+        }
         // Only hostile players cannot be invited.
         if faction::player_relation(server, owner, &target) == relation_state::HOSTILE {
             send_error(owner, error::TEAM_INVITE_REFUSED);

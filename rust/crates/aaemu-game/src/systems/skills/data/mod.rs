@@ -430,6 +430,30 @@ impl Data {
                 Ok(())
             },
         )?;
+        super::aura::warn_catalog(&buffs);
+        // `transform_buff_id` replaces the buff's stacks when they reach `max_stack`. A row
+        // whose target is absent keeps today's refresh-at-cap behaviour; warn once for the
+        // whole catalog.
+        {
+            let mut absent: Vec<(u32, u32)> = buffs
+                .values()
+                .filter(|b| b.transform_buff_id != 0 && !buffs.contains_key(&b.transform_buff_id))
+                .map(|b| (b.id, b.transform_buff_id))
+                .collect();
+            if !absent.is_empty() {
+                absent.sort_unstable();
+                for (id, _) in &absent {
+                    if let Some(b) = buffs.get_mut(id) {
+                        b.transform_buff_id = 0;
+                    }
+                }
+                tracing::warn!(
+                    buffs = absent.len(),
+                    sample = ?&absent[..absent.len().min(5)],
+                    "buffs reference transform buffs absent from the static data; their transform is skipped"
+                );
+            }
+        }
         d.buffs = buffs.into_iter().map(|(k, v)| (k, Arc::new(v))).collect();
         d.area_shapes = misc::load_area_shapes(conn)?;
         d.model_radii = misc::load_actor_model_radii(conn)?;
@@ -787,6 +811,50 @@ mod tests {
                 d.effect(EffectKind::PlayLogEffect, id),
                 Some(EffectTemplate::PlayLog { .. })
             ));
+        }
+    }
+
+    /// The spec's transform rows: all 66 `transform_buff_id` buffs are stack rule 4 with
+    /// `max_stack >= 2`, every target exists, and the two authored chains are present.
+    #[test]
+    #[ignore = "needs AAEMU_COMPACT_DB"]
+    fn skills_real_compact_db_transform_buffs() {
+        let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+            return;
+        };
+        let conn =
+            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let mut files = crate::data::client_files::ClientFileManager::new();
+        if let Ok(pak) = std::env::var("AAEMU_GAME_PAK") {
+            files.add_source(&pak, std::path::Path::new("."));
+        }
+        let d = Data::load_from(&conn, &files).unwrap();
+        let mut rows: Vec<(u32, u32)> = Vec::new();
+        for_each_row(
+            &conn,
+            "SELECT id, transform_buff_id FROM buffs WHERE transform_buff_id != 0",
+            [],
+            |r| {
+                rows.push((r.u32("id")?, r.u32("transform_buff_id")?));
+                Ok(())
+            },
+        )
+        .unwrap();
+        rows.sort_unstable();
+        assert_eq!(rows.len(), 66);
+        for (id, transform_id) in rows {
+            let t = d.buff(id).unwrap_or_else(|| panic!("buff {id} not loaded"));
+            assert_eq!(t.transform_buff_id, transform_id, "buff {id}");
+            assert_eq!(t.stack_rule, 4, "buff {id} stack rule");
+            assert!(t.max_stack >= 2, "buff {id} max_stack {}", t.max_stack);
+            assert!(
+                d.buff(transform_id).is_some(),
+                "buff {id} transform {transform_id} not loaded"
+            );
+        }
+        for (a, b, c) in [(4152, 4752, 4101), (5378, 5379, 5380)] {
+            assert_eq!(d.buff(a).unwrap().transform_buff_id, b);
+            assert_eq!(d.buff(b).unwrap().transform_buff_id, c);
         }
     }
 }

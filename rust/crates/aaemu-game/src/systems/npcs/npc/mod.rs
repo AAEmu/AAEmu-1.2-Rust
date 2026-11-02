@@ -4,6 +4,7 @@
 
 pub mod data;
 pub mod death;
+pub mod group_data;
 pub mod manager;
 pub mod packets;
 pub mod residency;

@@ -7,12 +7,15 @@
 //! ```text
 //! gm <command line>                  GM chat command (without the leading slash)
 //! tp <x> <y> <z>                     /move there, acknowledge the teleport, wait for the area
+//! moverel <dx> <dy> <dz>             /move to self + delta (e.g. leave an aura radius)
+//! gopeer [name]                      /move to the peer's position (no drain)
 //! pump <secs>                        just read packets
 //! units [<npc template>...]          NPCs in sight (all within 60 m when no template given)
 //! doodads [<doodad template>...]     doodads in sight (all within 40 m when none given)
 //! sq <quest> <npc template|0>        CSStartQuestContext from the nearest NPC of that template
 //! cq <quest> <npc template|0> [sel]  CSCompleteQuestContext at that NPC
 //! target <npc template>              select the nearest NPC of that template
+//! targetself                         select our own unit (e.g. for `/buff` on self)
 //! kill <npc template>                walk next to the nearest NPC, target it, `/kill`
 //! cast <skill> <npc template>        CSStartSkill on the nearest NPC
 //! castraw <skill> <npc template>     walk next to the nearest NPC, target it, send CSStartSkill
@@ -44,6 +47,11 @@
 //! sync <token> [count]              suite barrier: wait until `count` bots (default: all) are here
 //! expectpkt <PacketName> [secs]     fail unless the packet arrives within `secs` (default 5)
 //! expectnopkt <PacketName> [secs]   fail if the packet arrives within `secs` (default 5)
+//! expectbuff <buff> [self|peer|player:NAME] [secs]
+//!                                   fail unless SCBuffCreated for that buff / owner arrives
+//! expectbuffremoved <buff> [self|peer|player:NAME] [secs]
+//!                                   fail unless SCBuffRemoved for a previously announced
+//!                                   SCBuffCreated of that buff / owner arrives
 //! expectlog <regex> [secs]          fail unless a new game-log line matches (AAEMU_VERIFY_GAME_LOG)
 //! expectdb "<sql>" <value> [secs]   fail unless the SQL's value equals `value`
 //!                                   (AAEMU_VERIFY_MYSQL; re-checked for `secs` when given)
@@ -74,17 +82,17 @@ fn dist(a: (f32, f32, f32), b: (f32, f32, f32)) -> f32 {
     ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) + (a.2 - b.2).powi(2)).sqrt()
 }
 
-/// `SCBuffCreatedPacket`: (owner obj id, buff template id).
-fn buff_created(p: &Packet) -> Option<(u32, u32)> {
+/// `SCBuffCreatedPacket`: (owner obj id, buff index, buff template id).
+fn buff_created(p: &Packet) -> Option<(u32, u32, u32)> {
     use aaemu_game::systems::skills::types::SkillCaster;
     let mut s = p.stream();
     let kind = s.read_u8().ok()?;
     SkillCaster::read(kind, &mut s).ok()?;
     s.read_u32().ok()?;
     let owner = s.read_bc().ok()?;
-    s.read_u32().ok()?;
+    let index = s.read_u32().ok()?;
     let buff = s.read_u32().ok()?;
-    Some((owner, buff))
+    Some((owner, index, buff))
 }
 
 fn show(packets: &[Packet]) {
@@ -100,7 +108,9 @@ fn show(packets: &[Packet]) {
             );
         } else if p.is_sc(sc::SCBuffCreatedPacket) {
             match buff_created(p) {
-                Some((owner, buff)) => println!("    SCBuffCreated owner {owner} buff {buff}"),
+                Some((owner, index, buff)) => {
+                    println!("    SCBuffCreated owner {owner} index {index} buff {buff}")
+                }
                 None => println!("    SCBuffCreated (unreadable)"),
             }
         } else if p.is_sc(sc::SCBuffRemovedPacket) {
@@ -298,6 +308,115 @@ pub(super) fn read_log_since(path: &std::path::Path, offset: &mut u64) -> anyhow
     Ok(String::from_utf8_lossy(&buf[..complete]).into_owned())
 }
 
+/// The object a buff expectation watches (`self`, `peer` or `player:NAME`).
+fn buff_target(game: &GameClient, spec: Option<&str>) -> anyhow::Result<u32> {
+    match spec.unwrap_or("self") {
+        "self" => Ok(game.state.self_obj),
+        "peer" => Ok(peer(game, None)?.obj_id),
+        other => match other.strip_prefix("player:") {
+            Some(name) => Ok(peer(game, Some(name))?.obj_id),
+            None => bail!("buff target must be self, peer or player:NAME (got '{other}')"),
+        },
+    }
+}
+
+/// `expectbuff <buff> [self|peer|player:NAME] [secs]`.
+async fn expect_buff(
+    game: &mut GameClient,
+    buff: u32,
+    spec: Option<&str>,
+    secs: u64,
+) -> anyhow::Result<()> {
+    let target = buff_target(game, spec)?;
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        // The state tracks every buff packet, including those an earlier command drained.
+        if let Some(indices) = game.state.buffs.get(&(target, buff)) {
+            let indices: Vec<u32> = indices.iter().copied().collect();
+            if !indices.is_empty() {
+                println!("    buff {buff} on {target} present (indices {indices:?})");
+                return Ok(());
+            }
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            bail!("expected buff {buff} on {target} within {secs} s; it did not arrive");
+        }
+        game.recv_within(left.min(Duration::from_millis(250)))
+            .await?;
+    }
+}
+
+/// `expectbuffremoved <buff> [self|peer|player:NAME] [secs]`.
+async fn expect_buff_removed(
+    game: &mut GameClient,
+    buff: u32,
+    spec: Option<&str>,
+    secs: u64,
+) -> anyhow::Result<()> {
+    let target = buff_target(game, spec)?;
+    anyhow::ensure!(
+        game.state
+            .buffs
+            .get(&(target, buff))
+            .is_some_and(|indices| !indices.is_empty()),
+        "expected buff {buff} on {target} to be present before waiting for its removal"
+    );
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        if game
+            .state
+            .buffs
+            .get(&(target, buff))
+            .is_none_or(|indices| indices.is_empty())
+        {
+            println!("    buff {buff} on {target} removed");
+            return Ok(());
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            bail!("expected buff {buff} on {target} to be removed within {secs} s; it was not");
+        }
+        game.recv_within(left.min(Duration::from_millis(250)))
+            .await?;
+    }
+}
+
+/// `/move` to `(x, y, z)`, acknowledge it and wait for the area around the new position.
+async fn teleport_to(
+    game: &mut GameClient,
+    clock: &mut u32,
+    x: f32,
+    y: f32,
+    z: f32,
+    drain: bool,
+) -> anyhow::Result<()> {
+    game.state.last_teleport = None;
+    game.chat(0, &format!("/move {x} {y} {z}")).await?;
+    game.wait_for("SCTeleportUnitPacket", |p| {
+        p.is_sc(sc::SCTeleportUnitPacket)
+    })
+    .await?;
+    let at = game.state.self_pos;
+    game.teleport_ended(at).await?;
+    *clock += 1500;
+    game.move_to(at, *clock).await?;
+    if !drain {
+        println!("    moved to {at:?}");
+        return Ok(());
+    }
+    let got = game
+        .drain(Duration::from_millis(1500), Duration::from_secs(8))
+        .await?;
+    println!(
+        "    teleported to {at:?}; {} units, {} doodads in sight",
+        game.state.units.len(),
+        game.state.doodads.len()
+    );
+    show(&got);
+    Ok(())
+}
+
 /// `expectpkt <PacketName> [secs]`.
 async fn expect_packet(game: &mut GameClient, want: &str, secs: u64) -> anyhow::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(secs);
@@ -443,27 +562,24 @@ async fn run_lines(
             "tp" => {
                 let (x, y, z): (f32, f32, f32) =
                     (num(&parts, 0)?, num(&parts, 1)?, num(&parts, 2)?);
-                game.state.last_teleport = None;
-                game.chat(0, &format!("/move {x} {y} {z}")).await?;
-                game.wait_for("SCTeleportUnitPacket", |p| {
-                    p.is_sc(sc::SCTeleportUnitPacket)
-                })
-                .await?;
-                let at = game.state.self_pos;
-                game.teleport_ended(at).await?;
-                clock += 1500;
-                game.move_to(at, clock).await?;
-                let got = game
-                    .drain(Duration::from_millis(1500), Duration::from_secs(8))
-                    .await?;
-                println!(
-                    "    teleported to {at:?}; {} units, {} doodads in sight",
-                    game.state.units.len(),
-                    game.state.doodads.len()
-                );
-                show(&got);
+                teleport_to(game, &mut clock, x, y, z, true).await?;
+            }
+            "moverel" => {
+                let (dx, dy, dz): (f32, f32, f32) =
+                    (num(&parts, 0)?, num(&parts, 1)?, num(&parts, 2)?);
+                let (x, y, z) = game.state.self_pos;
+                // No drain: the caller asserts the buff enter / leave packets that follow.
+                teleport_to(game, &mut clock, x + dx, y + dy, z + dz, false).await?;
+            }
+            "gopeer" => {
+                let p = peer(game, parts.first().copied())?;
+                teleport_to(game, &mut clock, p.pos.0, p.pos.1, p.pos.2, false).await?;
             }
             "pump" => show(&pump(game, num(&parts, 0)?).await?),
+            "targetself" => {
+                game.change_target(game.state.self_obj).await?;
+                println!("    target self {}", game.state.self_obj);
+            }
             "units" => {
                 let tpls: Vec<u32> = parts.iter().filter_map(|p| p.parse().ok()).collect();
                 let me = game.state.self_pos;
@@ -1017,6 +1133,16 @@ async fn run_lines(
                 let name = parts.first().context("expectnopkt <PacketName> [secs]")?;
                 let secs: u64 = parts.get(1).and_then(|x| x.parse().ok()).unwrap_or(5);
                 expect_no_packet(game, name, secs).await?;
+            }
+            "expectbuff" => {
+                let buff: u32 = num(&parts, 0)?;
+                let secs: u64 = parts.get(2).and_then(|x| x.parse().ok()).unwrap_or(10);
+                expect_buff(game, buff, parts.get(1).copied(), secs).await?;
+            }
+            "expectbuffremoved" => {
+                let buff: u32 = num(&parts, 0)?;
+                let secs: u64 = parts.get(2).and_then(|x| x.parse().ok()).unwrap_or(10);
+                expect_buff_removed(game, buff, parts.get(1).copied(), secs).await?;
             }
             "expectlog" => {
                 let args = split_quoted(rest)?;

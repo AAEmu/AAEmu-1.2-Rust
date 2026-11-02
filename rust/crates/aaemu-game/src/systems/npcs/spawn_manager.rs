@@ -2503,7 +2503,23 @@ impl SpawnManager {
     ) -> Option<Arc<NpcSpawner>> {
         let _g = self.lock_spawner.lock().expect("poisoned");
         let data = &server.game_data.systems.npcs.npc_spawners;
-        let (id, template) = match data.get_spawner_ids(unit_id) {
+        // Only a template that lists this NPC as an ordinary member may be rewritten: an
+        // `NpcGroup` row is keyed by its group id, and retargeting it would replace the group's
+        // first member (and therefore its whole spawn) with the summoned unit. A member that is
+        // only reachable through a group keeps the C# fallback: one generated single-NPC
+        // spawner.
+        let picked = data.get_spawner_ids(unit_id).and_then(|ids| {
+            ids.into_iter().find_map(|id| {
+                let template = data.get_npc_spawner_template(id)?;
+                let nsn = template
+                    .npcs
+                    .iter()
+                    .find(|n| n.member_type == "Npc" && n.member_id == unit_id)?
+                    .clone();
+                Some((id, nsn))
+            })
+        });
+        let (id, template) = match picked {
             None => {
                 let id = server.ids.object.get_next_id().ok()?;
                 let mut t = NpcSpawnerTemplate::with_spawner(id);
@@ -2512,10 +2528,7 @@ impl SpawnManager {
                 t.npcs[0].member_type = "Npc".into();
                 (id, Arc::new(t))
             }
-            Some(ids) => {
-                let id = *ids.first()?;
-                data.get_npc_spawner_template(id)?;
-                let mut nsn = data.get_npc_spawner_npc(id)?;
+            Some((id, mut nsn)) => {
                 nsn.member_id = unit_id;
                 nsn.unit_id = unit_id;
                 data.replace_template_npcs(id, nsn);
