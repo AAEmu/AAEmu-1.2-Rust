@@ -280,29 +280,13 @@ pub fn cooldown(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
     if duration <= 0.0 {
         return;
     }
-    // The client starts a toggle skill's individual cooldown itself (native `3939b010`, see
-    // `start_skill_cooldown`), so only report a skill it does not start.
-    let client_starts_cooldown =
-        skill.template.toggle_buff_id != 0 && skill.template.tube_instrument_fire_anim_id == 0;
-    let now = now_ms();
-    let packet = caster.with_unit(|u| {
-        let cooldowns = &mut u.unit_mut().cooldowns;
-        cooldowns.add_cooldown(skill_id, duration as u32, now);
-        let mut affected = crate::models::unit::UnitCooldowns::default();
-        if !client_starts_cooldown {
-            affected
-                .cooldowns
-                .insert(skill_id, cooldowns.cooldowns[&skill_id]);
-        }
-        crate::systems::skills::packets::SCCooldownsPacket::from_cooldowns(&affected, now)
+    // The 1.2 client applies the `Cooldown` special effect itself (`OnPlotEvent` special 0x28
+    // -> `39368440`), so the server must not also send an `SCCooldowns` update here.
+    caster.with_unit(|u| {
+        u.unit_mut()
+            .cooldowns
+            .add_cooldown(skill_id, duration as u32, now_ms())
     });
-    // `OnCooldowns` (native 391D43C0) is what starts the countdown in the client's manager. No
-    // 1.2 skill uses this effect, but the path must tell the client like a cast cooldown does.
-    if let Some(packet) = packet.filter(|p| !p.is_empty()) {
-        if let Some(player) = caster.as_player() {
-            player.send(packet);
-        }
-    }
 }
 
 /// `GlobalCooldown`: `GlobalCooldown = now + value1 * (GlobalCooldownMul / 100)`.
