@@ -408,7 +408,7 @@ impl ShipyardTemplate {
 // Models
 // ---------------------------------------------------------------------------------------------
 
-/// `VehicleModel` (the members the transfer movement reads).
+/// `VehicleModel` (the members the transfer movement and turret aim read).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct VehicleModel {
     pub id: u32,
@@ -420,6 +420,63 @@ pub struct VehicleModel {
     pub wheeled_vehicle_gear_speed_ratio_1: f32,
     pub wheeled_vehicle_gear_speed_ratio_2: f32,
     pub wheeled_vehicle_gear_speed_ratio_3: f32,
+    /// `turret_pitch_angle_min` / `_max`, degrees, as `FUN_39425490` clamps them
+    /// (after `DEG2RAD 0x3999cf98 = 0.017453292`). `None` when the stored value is not numeric
+    /// (the real `vehicle_models` rows store the text `'f'`): no limit on that side.
+    pub turret_pitch_angle_min: Option<f32>,
+    pub turret_pitch_angle_max: Option<f32>,
+    /// `turret_yaw_angle_min` / `_max`, degrees.
+    pub turret_yaw_angle_min: Option<f32>,
+    pub turret_yaw_angle_max: Option<f32>,
+}
+
+impl VehicleModel {
+    /// Clamp a turret aim to the model's limits, in radians, as the 1.2 client does before it
+    /// sends `CSTurretState` (`39425490` camera aim -> `3922aed0(v, lo, hi)`, degrees *
+    /// `DEG2RAD`; `39425580` key aim wraps a full-circle yaw into +/-pi instead of clamping).
+    /// The packet's pitch/yaw are model-frame radians; the data columns are degrees.
+    pub fn clamp_turret_angles(&self, pitch: f32, yaw: f32) -> (f32, f32) {
+        let pitch = clamp_limit(
+            pitch,
+            self.turret_pitch_angle_min,
+            self.turret_pitch_angle_max,
+        );
+        let yaw = match (self.turret_yaw_angle_min, self.turret_yaw_angle_max) {
+            (Some(min), Some(max)) if max - min >= 360.0 => wrap_pi(yaw),
+            _ => clamp_limit(yaw, self.turret_yaw_angle_min, self.turret_yaw_angle_max),
+        };
+        (pitch, yaw)
+    }
+}
+
+/// Clamp `value` (radians) to a window given in degrees. A missing or non-finite bound is no
+/// limit. A window whose minimum is above its maximum (bad data) is sorted instead of being
+/// handed to `f32::clamp`, which panics when `min > max`.
+fn clamp_limit(value: f32, min: Option<f32>, max: Option<f32>) -> f32 {
+    let min = min.map(f32::to_radians).filter(|v| v.is_finite());
+    let max = max.map(f32::to_radians).filter(|v| v.is_finite());
+    match (min, max) {
+        (Some(a), Some(b)) => {
+            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+            value.clamp(lo, hi)
+        }
+        (Some(lo), None) => value.max(lo),
+        (None, Some(hi)) => value.min(hi),
+        (None, None) => value,
+    }
+}
+
+/// `MathUtil.WrapAngle` into [-pi, pi] (the client's full-circle key-aim rule, `39425580`).
+/// Normalise with a remainder, never a loop: a modified client can send any finite f32.
+fn wrap_pi(angle: f32) -> f32 {
+    let two_pi = std::f32::consts::TAU;
+    let mut angle = angle % two_pi;
+    if angle > std::f32::consts::PI {
+        angle -= two_pi;
+    } else if angle < -std::f32::consts::PI {
+        angle += two_pi;
+    }
+    angle
 }
 
 /// `ShipModelV1` (the members the slave spawning reads; the rest is the physics' data).
@@ -448,6 +505,9 @@ pub struct VehiclesData {
     /// `buff_mount_skills` (buff id, mount skill id) in table order.
     pub buff_mount_skills: Vec<(u32, u32)>,
     pub slave_templates: HashMap<u32, SlaveTemplate>,
+    /// `model_bindings` (owner type `Model`): model id -> attach points, in table order. The
+    /// 1.2 client's seat test (`FUN_393bbb80` -> `FUN_390c9f70`) scans this list.
+    pub model_bindings: HashMap<u32, Vec<u8>>,
     /// `_attachPoints` (model id -> attach point -> location), points in file order.
     pub attach_points: HashMap<u32, Vec<(u8, AttachPointLocation)>>,
     pub slave_initial_items: HashMap<u32, Vec<SlaveInitialItem>>,
@@ -526,6 +586,7 @@ impl VehiclesData {
         let mut d = Self::default();
         d.load_mates(ctx)?;
         d.load_slaves(ctx)?;
+        d.load_model_bindings(ctx)?;
         d.load_slave_attachment_point_locations(&ctx.app_path.join("Data"));
         d.load_transfers(ctx)?;
         d.load_shipyards(ctx)?;
@@ -821,6 +882,29 @@ impl VehiclesData {
         Ok(())
     }
 
+    /// `model_bindings`: the attach points a model declares. The 1.2 client offers the passenger
+    /// seat only for a point in this list (`FUN_393bbb80` -> `FUN_390c9f70`), so the server uses it
+    /// as the seat rule too. An out-of-range `attach_point_id` is skipped.
+    fn load_model_bindings(&mut self, ctx: &DataLoadCtx<'_>) -> Result<(), GameDataError> {
+        for_each_row(
+            ctx.conn,
+            "SELECT owner_id, attach_point_id FROM model_bindings WHERE owner_type='Model'",
+            [],
+            |r| {
+                let model_id = r.u32("owner_id")?;
+                let Ok(point) = u8::try_from(r.i32("attach_point_id")?) else {
+                    return Ok(());
+                };
+                let points = self.model_bindings.entry(model_id).or_default();
+                if !points.contains(&point) {
+                    points.push(point);
+                }
+                Ok(())
+            },
+        )?;
+        Ok(())
+    }
+
     /// `LoadSlaveAttachmentPointLocations` (`Data/slave_attach_points*.json`).
     pub fn load_slave_attachment_point_locations(&mut self, data_folder: &std::path::Path) {
         tracing::info!("Loading Slave Model Attach Points...");
@@ -1081,6 +1165,10 @@ impl VehiclesData {
                 wheeled_vehicle_gear_speed_ratio_1: r.f32("wheeled_vehicle_gear_speed_ratio_1")?,
                 wheeled_vehicle_gear_speed_ratio_2: r.f32("wheeled_vehicle_gear_speed_ratio_2")?,
                 wheeled_vehicle_gear_speed_ratio_3: r.f32("wheeled_vehicle_gear_speed_ratio_3")?,
+                turret_pitch_angle_min: r.f32_opt("turret_pitch_angle_min")?,
+                turret_pitch_angle_max: r.f32_opt("turret_pitch_angle_max")?,
+                turret_yaw_angle_min: r.f32_opt("turret_yaw_angle_min")?,
+                turret_yaw_angle_max: r.f32_opt("turret_yaw_angle_max")?,
             };
             self.vehicle_models.entry(m.id).or_insert(m);
             Ok(())
@@ -1126,16 +1214,16 @@ impl VehiclesData {
         out
     }
 
-    /// `GetMountAttachedSkills(mateSkill, attachPoint)`.
-    pub fn mount_attached_skill(&self, mate_skill: u32, attach_point: u8) -> u32 {
-        let id = self
-            .mount_skills
-            .iter()
-            .find(|m| m.skill_id == mate_skill)
-            .map_or(0, |m| m.id);
+    /// `GetMountAttachedSkills(mountSkillId, attachPoint)`: `mount_skill_id` is the
+    /// `mount_skills` row the vehicle bar pressed (`CSStartSkill.Caster.MountSkillTemplateId`),
+    /// not the skill id. The 1.2 data has two `mount_skills` rows for skill 15546 (59
+    /// '물 퍼올리기' and 226 '물 퍼올리기(견본)'), so the C# scan by skill id picked the sample
+    /// row and its display-only rider 15548; the row the client names resolves 59 -> 21505.
+    /// Deviation recorded in PORTING.md.
+    pub fn mount_attached_skill(&self, mount_skill_id: u32, attach_point: u8) -> u32 {
         self.mount_attached_skills
             .iter()
-            .find(|m| m.mount_skill_id == id && m.attach_point_id == attach_point)
+            .find(|m| m.mount_skill_id == mount_skill_id && m.attach_point_id == attach_point)
             .map_or(0, |m| m.skill_id)
     }
 
@@ -1271,6 +1359,19 @@ impl VehiclesData {
     /// `GetAttachPointsForSlave(modelId)`.
     pub fn attach_points_for_slave(&self, model_id: u32) -> Option<&[(u8, AttachPointLocation)]> {
         self.attach_points.get(&model_id).map(Vec::as_slice)
+    }
+
+    /// Whether `model_id` declares `point` in `model_bindings`.
+    pub fn model_has_attach_point(&self, model_id: u32, point: u8) -> bool {
+        self.model_bindings
+            .get(&model_id)
+            .is_some_and(|points| points.contains(&point))
+    }
+
+    /// Whether the model of slave template `slave_template_id` declares `point`.
+    pub fn slave_has_attach_point(&self, slave_template_id: u32, point: u8) -> bool {
+        self.slave_template(slave_template_id)
+            .is_some_and(|t| self.model_has_attach_point(t.model_id, point))
     }
 
     /// `HasRepairEffectId(templateId, expectedEffectId)`.
@@ -1478,6 +1579,61 @@ mod tests {
             ),
             Some(129)
         );
+    }
+
+    #[test]
+    fn turret_angles_clamp_to_the_model_and_wrap_a_full_circle_yaw() {
+        let limited = VehicleModel {
+            turret_pitch_angle_min: Some(-20.0),
+            turret_pitch_angle_max: Some(35.0),
+            turret_yaw_angle_min: Some(-22.0),
+            turret_yaw_angle_max: Some(22.0),
+            ..VehicleModel::default()
+        };
+        assert_eq!(
+            limited.clamp_turret_angles(1.0, -1.0),
+            (35f32.to_radians(), -22f32.to_radians())
+        );
+        let full_circle = VehicleModel {
+            turret_pitch_angle_min: Some(-90.0),
+            turret_pitch_angle_max: Some(90.0),
+            turret_yaw_angle_min: Some(-360.0),
+            turret_yaw_angle_max: Some(360.0),
+            ..VehicleModel::default()
+        };
+        // Any finite f32, even one no loop could normalise in reason: a remainder.
+        let (_, yaw) = full_circle.clamp_turret_angles(0.0, 1.0e30);
+        assert!(yaw.abs() <= std::f32::consts::PI);
+    }
+
+    #[test]
+    fn turret_angles_survive_a_reversed_window_and_a_missing_limit() {
+        // `f32::clamp` panics when min > max; a bad row is sorted instead.
+        let reversed = VehicleModel {
+            turret_pitch_angle_min: Some(30.0),
+            turret_pitch_angle_max: Some(-30.0),
+            turret_yaw_angle_min: Some(45.0),
+            turret_yaw_angle_max: Some(-45.0),
+            ..VehicleModel::default()
+        };
+        assert_eq!(
+            reversed.clamp_turret_angles(1.0, -1.0),
+            (30f32.to_radians(), -45f32.to_radians())
+        );
+        // The training ballista (vehicle_models 6): the real row stores `turret_yaw_angle_max`
+        // as the text 'f', which the loader keeps as `None` (no limit).
+        let ballista = VehicleModel {
+            turret_pitch_angle_min: Some(-0.1),
+            turret_pitch_angle_max: Some(0.1),
+            turret_yaw_angle_min: Some(0.0),
+            turret_yaw_angle_max: None,
+            ..VehicleModel::default()
+        };
+        assert_eq!(ballista.clamp_turret_angles(0.0, 0.5), (0.0, 0.5));
+        assert_eq!(ballista.clamp_turret_angles(0.0, -0.5), (0.0, 0.0));
+        // No limits at all.
+        let open = VehicleModel::default();
+        assert_eq!(open.clamp_turret_angles(1.0, -1.0), (1.0, -1.0));
     }
 
     #[test]

@@ -185,3 +185,109 @@ fn real_compact_attach_bindings_and_equipment_have_only_documented_content_gaps(
     assert_eq!(missing, expected, "unreviewed native attach content gaps");
     assert_eq!(missing.len(), 41);
 }
+
+/// `fixtures/slave_attach_points_native.json` holds the 1.2 game_pak transforms of every
+/// attach point that a `slave_bindings` / `slave_doodad_bindings` row uses, extracted with
+/// `rust/tools/slave_attach_points.py` (`Extractor.model`; asset / node per point). The
+/// fixture is checked in because the Rust tests cannot run the pak extractor.
+type NativePoints = BTreeMap<(u32, u8), [f64; 3]>;
+type NativeGaps = BTreeSet<(u32, u8)>;
+
+fn native_consumed() -> (NativePoints, NativeGaps) {
+    let root: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/slave_attach_points_native.json"))
+            .expect("native attach fixture");
+    let mut points = BTreeMap::new();
+    for (model, record) in root["models"].as_object().expect("fixture models") {
+        let model: u32 = model.parse().expect("fixture model id");
+        for (point, value) in record["points"].as_object().expect("fixture points") {
+            let point: u8 = point.parse().expect("fixture attach point");
+            let component = |key: &str| value[key].as_f64().expect("fixture coordinate");
+            points.insert(
+                (model, point),
+                [component("X"), component("Y"), component("Z")],
+            );
+        }
+    }
+    let mut unresolved = BTreeSet::new();
+    for (model, record) in root["unresolved"].as_object().expect("fixture unresolved") {
+        let model: u32 = model.parse().expect("fixture model id");
+        for point in record["points"].as_array().expect("unresolved points") {
+            unresolved.insert((model, point.as_u64().expect("attach point") as u8));
+        }
+    }
+    (points, unresolved)
+}
+
+/// Every consumed point of the shipped JSON must match the native 1.2 transform within 0.1 m.
+/// This is the guard for the point-10/47 copy class (Clipper, Eznan Cutter, fishboats, ...):
+/// it compares the JSON with values extracted from the pak, not with the JSON itself.
+#[test]
+fn consumed_attach_points_match_the_native_extraction() {
+    let (native, _) = native_consumed();
+    assert!(native.len() >= 377, "native fixture unexpectedly small");
+    let shipped = shipped();
+    for ((model, point), pak) in &native {
+        let got = shipped.get(&(*model, *point)).unwrap_or_else(|| {
+            panic!("shipped data misses consumed attach point ({model}, {point})")
+        });
+        let distance = ((f64::from(got.x) - pak[0]).powi(2)
+            + (f64::from(got.y) - pak[1]).powi(2)
+            + (f64::from(got.z) - pak[2]).powi(2))
+        .sqrt();
+        assert!(
+            distance <= 0.1,
+            "({model}, {point}) is {distance:.3} m from the native transform: shipped ({}, {}, {}), pak ({}, {}, {})",
+            got.x,
+            got.y,
+            got.z,
+            pak[0],
+            pak[1],
+            pak[2]
+        );
+    }
+}
+
+/// The fixture covers every consumer row of a model that the shipped JSON has; the only
+/// misses are the extractor's documented gaps. Regenerate the fixture if this fails.
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+fn real_compact_consumed_attach_points_are_covered_by_the_native_extraction() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let models: BTreeSet<u32> = shipped().keys().map(|(model, _)| *model).collect();
+    let mut query = conn
+        .prepare(
+            "SELECT s.model_id, b.attach_point_id FROM slave_bindings b JOIN slaves s ON s.id=b.owner_id
+             UNION SELECT s.model_id, b.attach_point_id FROM slave_doodad_bindings b JOIN slaves s ON s.id=b.owner_id",
+        )
+        .unwrap();
+    let consumed: BTreeSet<(u32, u8)> = query
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .filter(|(model, _)| models.contains(model))
+        .collect();
+    assert!(!consumed.is_empty());
+    let (native, unresolved) = native_consumed();
+    let missing: BTreeSet<_> = consumed
+        .iter()
+        .copied()
+        .filter(|key| !native.contains_key(key) && !unresolved.contains(key))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "consumed attach points without a native value: {missing:?}"
+    );
+    let gaps: BTreeSet<_> = consumed
+        .iter()
+        .copied()
+        .filter(|key| !native.contains_key(key))
+        .collect();
+    assert_eq!(
+        gaps, unresolved,
+        "regenerate the native attach fixture when the extractor coverage changes"
+    );
+}

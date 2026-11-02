@@ -47,8 +47,9 @@ fn client(server: &GameServer, id: u32) -> Client {
     let (out_tx, out) = crate::net::outbox::outbox();
     let (cmd_tx, cmd) = mpsc::unbounded_channel();
     let peer: SocketAddr = "127.0.0.1:50000".parse().unwrap();
-    let (conn, handle) = GameConnection::new(id, peer, out_tx, cmd_tx);
-    server.connections.add(handle);
+    let (mut conn, _) = GameConnection::new(id, peer, out_tx, cmd_tx);
+    conn.set_reply_delay(server.reply_delay.clone());
+    server.connections.add(conn.handle());
     Client { conn, out, cmd }
 }
 

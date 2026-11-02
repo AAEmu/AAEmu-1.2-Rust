@@ -1356,6 +1356,7 @@ enum BindRefusal {
     Dead,
     TooFar,
     CannonPassenger,
+    NoSuchSeat,
     SeatTaken,
     OwnersMark,
 }
@@ -1386,11 +1387,19 @@ fn inverse_rotate(q: crate::models::transform::Quaternion, v: [f32; 3]) -> [f32;
     .rotate(v)
 }
 
-/// Surface gap for a slave bind reach. The client measures its collision geometry
-/// (`FUN_39093860`); the server uses the ship model's mass box when the slave has one and the
-/// requested attach point's world position when the data has it, taking the smaller gap. It only
-/// falls back to the slave origin when neither exists (carts: the origin sits at the seat). A
-/// ship's bare origin is never the measure.
+/// Surface gap for a slave bind reach. The client measures the distance from the character's
+/// collision primitive to each collision part of the target and keeps the smallest
+/// (`FUN_39093860` -> `FUN_390b3ae0` for the target's parts, `FUN_3989bf90` -> `FUN_398b1ab0` for
+/// the per-part shape distance). The server approximates that: the ship model's mass box when the
+/// slave has one, the requested attach point's world position when the data has it, and the
+/// nearest located attach point of the model (`slave_attach_points*.json`) when it does not. The
+/// model's located attach points stand in for its collision parts, which is why a player beside a
+/// hull whose requested point has no location is still in reach. That fallback keeps the smaller
+/// of the origin distance and the nearest located point: the origin lies inside the hull, so its
+/// distance is an upper bound on the surface gap, and a model whose only located points sit at one
+/// end (the Red Farm Hauler's cannon points at the rear) must not tighten the reach at the other.
+/// Only a model with no located point at all uses the origin alone (carts: the origin sits at the
+/// seat); a ship's bare origin is never the measure.
 fn bind_gap(
     server: &GameServer,
     world: &WorldInstance,
@@ -1445,20 +1454,30 @@ fn bind_gap(
         }
         sum.sqrt()
     });
-    let point_distance = vehicles
-        .attach_points_for_slave(model_id)
+    let points = vehicles.attach_points_for_slave(model_id);
+    let location_gap = |location: &WorldSpawnPosition| {
+        let rotated = slave_pos.to_quaternion().rotate([
+            location.x * scale,
+            location.y * scale,
+            location.z * scale,
+        ]);
+        let dx = player.x - (slave_pos.x + rotated[0]);
+        let dy = player.y - (slave_pos.y + rotated[1]);
+        let dz = player.z - (slave_pos.z + rotated[2]);
+        (dx * dx + dy * dy + dz * dz).sqrt()
+    };
+    let point_distance = points
         .and_then(|points| points.iter().find(|(p, _)| *p == point).map(|(_, l)| *l))
-        .map(|location| {
-            let rotated = slave_pos.to_quaternion().rotate([
-                location.x * scale,
-                location.y * scale,
-                location.z * scale,
-            ]);
-            let dx = player.x - (slave_pos.x + rotated[0]);
-            let dy = player.y - (slave_pos.y + rotated[1]);
-            let dz = player.z - (slave_pos.z + rotated[2]);
-            (dx * dx + dy * dy + dz * dz).sqrt()
-        });
+        .map(|location| location_gap(&location));
+    // The requested seat has no location in the data (for example the Red Farm Hauler, model
+    // 1553, declares point 2 but `slave_attach_points.json` only locates its cannon points).
+    // Measure to the nearest located point of the same model instead of the bare origin, as the
+    // client measures to the nearest collision part of the target.
+    let nearest_point_distance = points
+        .into_iter()
+        .flatten()
+        .map(|(_, location)| location_gap(location))
+        .min_by(f32::total_cmp);
     let distance = match (box_distance, point_distance) {
         (Some(box_gap), Some(point_gap)) => box_gap.min(point_gap),
         (Some(gap), None) | (None, Some(gap)) => gap,
@@ -1466,7 +1485,8 @@ fn bind_gap(
             let dx = player.x - slave_pos.x;
             let dy = player.y - slave_pos.y;
             let dz = player.z - slave_pos.z;
-            (dx * dx + dy * dy + dz * dz).sqrt()
+            let origin_gap = (dx * dx + dy * dy + dz * dz).sqrt();
+            nearest_point_distance.map_or(origin_gap, |point_gap| point_gap.min(origin_gap))
         }
     };
     (distance - player_radius).max(0.0)
@@ -1504,6 +1524,8 @@ pub fn bind_slave(
         return;
     };
     let Some(slave) = world.slave(obj_id) else {
+        // The target vanished between the request and the bind: clear the pending request.
+        super::bind_error(character, error::SLAVE_CANNOT_BIND);
         return;
     };
     // One slave at a time: the 1.2 client refuses a second slave bind with
@@ -1517,7 +1539,7 @@ pub fn bind_slave(
             point,
             obj_id
         );
-        error(character, error::SLAVE_UNBIND_FIRST);
+        super::bind_error(character, error::SLAVE_UNBIND_FIRST);
         return;
     }
     let me = WorldObject::from(character);
@@ -1527,6 +1549,16 @@ pub fn bind_slave(
     // lock); the comparison and the reservation run under that one lock.
     let gap = reach.map(|_| bind_gap(server, &world, character, &slave, point));
     let cannon = is_cannon_kind(slave_kind(server, &slave));
+    // The 1.2 client only offers a seat the model declares (`model_bindings`, the same list
+    // `FUN_393bbb80` scans); the driver point 1 keeps the C# rules. The model data is immutable,
+    // so this snapshot needs no lock; the check and the reservation below still run under the
+    // slave's one lock.
+    let template_id = slave.data().unit.template_id;
+    let seat_exists = server
+        .game_data
+        .systems
+        .vehicles
+        .slave_has_attach_point(template_id, point);
     // Check and reserve the seat under the slave's one lock, so two binds racing for the same
     // point cannot both pass.
     let refusal = {
@@ -1537,6 +1569,8 @@ pub fn bind_slave(
             Some(BindRefusal::TooFar)
         } else if point != attach_point::DRIVER && cannon {
             Some(BindRefusal::CannonPassenger)
+        } else if point != attach_point::DRIVER && !seat_exists {
+            Some(BindRefusal::NoSuchSeat)
         } else if d.has_attached_at(point) {
             Some(BindRefusal::SeatTaken)
         } else if point == attach_point::DRIVER
@@ -1557,6 +1591,9 @@ pub fn bind_slave(
                     obj_id,
                     point
                 );
+                // A refusal must answer: the client keeps its pending bind request until an
+                // SCErrorMsg code in `FUN_393457e0`'s clear set arrives (S11-C7).
+                super::bind_error(character, error::SLAVE_CANNOT_BIND);
             }
             BindRefusal::TooFar => {
                 tracing::debug!(
@@ -1566,27 +1603,40 @@ pub fn bind_slave(
                     obj_id,
                     reach.unwrap_or_default()
                 );
-                error(character, error::TOO_FAR_AWAY);
+                super::bind_error(character, error::TOO_FAR_AWAY);
             }
             BindRefusal::CannonPassenger => {
                 tracing::debug!(
                     "BindSlave: slave {} is a cannon and has no passenger seat",
                     obj_id
                 );
-                error(character, error::SLAVE_CANNOT_BIND);
+                super::bind_error(character, error::SLAVE_CANNOT_BIND);
+            }
+            BindRefusal::NoSuchSeat => {
+                // A forged seat the model does not declare. The 1.2 client never offers it; the
+                // original server's answer is capture-pending (S11-C2), but a refusal must still
+                // clear the client's pending bind request.
+                tracing::debug!(
+                    "BindSlave: slave {} (template {}) has no seat point {}; ignoring",
+                    obj_id,
+                    template_id,
+                    point
+                );
+                super::bind_error(character, error::SLAVE_CANNOT_BIND);
             }
             BindRefusal::SeatTaken => {
-                // The C# returns silently; the client message table has no seat-taken text and
-                // the original server's answer is capture-pending (S11-C2).
+                // The C# returns silently; the original server's answer is capture-pending
+                // (S11-C2). `slave_already_has_master` is the closest clearing message.
                 tracing::debug!(
                     "BindSlave: seat {} of slave {} is taken; ignoring",
                     point,
                     obj_id
                 );
+                super::bind_error(character, error::SLAVE_ALREADY_HAS_MASTER);
             }
             BindRefusal::OwnersMark => {
                 // The C# sends `SlaveAlreadyHasMaster` for this driver-seat refusal only.
-                error(character, error::SLAVE_ALREADY_HAS_MASTER);
+                super::bind_error(character, error::SLAVE_ALREADY_HAS_MASTER);
             }
         }
         return;
@@ -1711,9 +1761,12 @@ pub const TURRET_STATE_MIN_INTERVAL_MS: i64 = 150;
 /// The 1.2 client sends the object id of the unit it controls (`39356990` uses `this+8`), so a
 /// ship cannon names the cannon child slave, a hull with an installed turret names the hull, and
 /// the tank passenger seat names the hull. Any attach point of that slave counts as seated; a
-/// sender who is not on it is ignored. The stored / relayed angles are the raw model-frame
-/// radians of the packet: the client producers already clamp them to the `vehicle_models` turret
-/// limits (or wrap full-circle yaws) before sending (`39425490` / `39425580`). The aim is kept
+/// sender who is not on it is ignored. Only a slave whose model is a `VehicleModel` has a turret:
+/// the client producers (`39425490` / `39425580`) need a `VehicleUnitModel` and clamp / wrap the
+/// angles to that model's `vehicle_models` limits before sending, so the server clamps the raw
+/// model-frame radians to the same limits (defence against a modified client); a limit stored
+/// as a non-numeric value (the text `'f'` in the real rows) is "no limit", and a reversed window
+/// is sorted. A slave without a `VehicleModel` row has no turret and is ignored. The aim is kept
 /// on the slave and is not cleared on unbind, so late viewers keep the last posture.
 ///
 /// The newest aim is always stored (under the slave lock) so a suppressed relay can never
@@ -1735,6 +1788,17 @@ pub fn set_turret_state(
     let Some(slave) = world.slave(unit_id) else {
         return;
     };
+    let model_id = slave.data().unit.model_id;
+    let Some(model) = server
+        .game_data
+        .systems
+        .vehicles
+        .vehicle_model(model_id)
+        .copied()
+    else {
+        return;
+    };
+    let (pitch, yaw) = model.clamp_turret_angles(pitch, yaw);
     // Check and act under the same lock: only a character seated on this slave may aim it, an
     // unchanged aim is never relayed, and a changed aim inside the window waits for the tick.
     let posture = {
@@ -1873,13 +1937,17 @@ pub fn bind_slave_by_tl(server: &GameServer, character: &PlayerRef, tl_id: u32) 
         return;
     };
     let Some(slave) = get_slave_by_tl_id(&world, tl_id) else {
+        // The target despawned between the request and the bind: still clear the client's
+        // pending bind request, or every later F press shows "already requested" (S11-C7).
+        super::bind_error(character, error::SLAVE_CANNOT_BIND);
         return;
     };
     if slave.data().unit.is_dead() {
+        super::bind_error(character, error::SLAVE_CANNOT_BIND);
         return;
     }
     if is_manned_cannon(server, &slave) && !may_man_cannon(character, &slave, &world) {
-        error(character, error::SLAVE_CANNOT_BIND);
+        super::bind_error(character, error::SLAVE_CANNOT_BIND);
         return;
     }
     bind_slave(

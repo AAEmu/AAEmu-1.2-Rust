@@ -350,6 +350,9 @@ pub(super) fn with_ctx<R>(
             deferred: Vec::new(),
             buffs_changed: false,
             sent: Vec::new(),
+            report_reply: None,
+            report_refused: Vec::new(),
+            answer_reports: true,
         };
         let r = f(&mut ctx);
         ctx.sync_rows();
@@ -480,6 +483,16 @@ fn sc_quest_context_packets_bytes() {
     s.write_u32(130).write_raw(&body8).write_u32(2);
     assert_eq!(body(&p), s.into_bytes());
     assert_eq!(p.opcode(), sc::SCQuestContextResetPacket);
+
+    // SCQuestContextFailedPacket: reader FUN_397b5c90 reads "type" as u32 then "err" as
+    // one byte (vtable 399b3a5c, the class registered with opcode 0x146).
+    let p = SCQuestContextFailedPacket {
+        quest_id: 4781,
+        err: 12,
+    };
+    assert_eq!(body(&p), vec![0xad, 0x12, 0, 0, 12]);
+    assert_eq!(p.opcode(), sc::SCQuestContextFailedPacket);
+    assert_eq!(p.opcode(), 0x146);
 }
 
 #[test]
@@ -2107,6 +2120,24 @@ fn decode(frames: Vec<(u16, Vec<u8>)>) -> Vec<u16> {
     frames.into_iter().map(|f| f.0).collect()
 }
 
+/// `SCQuestContextFailedPacket` body: quest id, then the one-byte error.
+fn failed_bytes(quest_id: u32, err: u8) -> Vec<u8> {
+    let mut s = PacketStream::new();
+    s.write_u32(quest_id).write_u8(err);
+    s.into_bytes()
+}
+
+/// The refused report answered exactly once, with `quest_id` and `err` and nothing else.
+fn assert_one_failed(client: &mut TestClient, quest_id: u32, err: u8) {
+    let frames = client.drain();
+    assert_eq!(
+        decode(frames.clone()),
+        vec![sc::SCQuestContextFailedPacket],
+        "expected exactly one SCQuestContextFailed, got {frames:?}"
+    );
+    assert_eq!(frames[0].1, failed_bytes(quest_id, err));
+}
+
 #[tokio::test]
 async fn item_group_quests_track_inventory_use_and_cleanup_only_matching_items() {
     let (server, _) = server_with(|d| {
@@ -2347,7 +2378,12 @@ async fn npc_quest_flow_through_packets_and_events() {
     server.systems.quests.run_queued_evaluations(&server);
     assert_eq!(player.data().quests.active[0].step, kind::PROGRESS);
     assert!(rec.take().is_empty());
-    assert!(client.drain().is_empty());
+    // The refused report is answered so the client can leave directing mode.
+    let frames = client.drain();
+    assert_eq!(decode(frames.clone()), vec![sc::SCQuestContextFailedPacket]);
+    let mut failed = PacketStream::new();
+    failed.write_u32(100).write_u8(12);
+    assert_eq!(frames[0].1, failed.into_bytes());
 
     // Kill objective through the event API
     events::on_npc_killed(&server, &player, &wolf);
@@ -2372,7 +2408,11 @@ async fn npc_quest_flow_through_packets_and_events() {
     server.systems.quests.run_queued_evaluations(&server);
     assert_eq!(player.data().quests.active[0].step, kind::READY);
     assert!(rec.take().is_empty());
-    assert!(client.drain().is_empty());
+    let frames = client.drain();
+    assert_eq!(decode(frames.clone()), vec![sc::SCQuestContextFailedPacket]);
+    let mut failed = PacketStream::new();
+    failed.write_u32(100).write_u8(12);
+    assert_eq!(frames[0].1, failed.into_bytes());
 
     // Turn in at the NPC (CSCompleteQuestContextPacket)
     let complete = CSCompleteQuestContextPacket {
@@ -2409,6 +2449,449 @@ async fn npc_quest_flow_through_packets_and_events() {
     assert_eq!(c.experience, 300);
     assert_eq!(c.money, 50);
     assert_eq!(server.systems.quests.queued_count(), 0);
+}
+
+/// Adds a quest `id` that runs Start -> Progress (hunt NPC 600 x2) -> Ready, with a report
+/// act of `report` (None = no report act) and a small Reward step.
+fn report_quest(d: &mut QuestData, id: u32, report: Option<ActKind>) {
+    d.add_template(quest(id));
+    d.add_component(component(id * 10 + 1, id, kind::START));
+    d.add_act(
+        id * 10 + 1,
+        id * 10 + 1,
+        id * 10 + 1,
+        0,
+        ActKind::ConAutoComplete,
+    );
+    d.add_component(component(id * 10 + 2, id, kind::PROGRESS));
+    d.add_act(
+        id * 10 + 2,
+        id * 10 + 2,
+        id * 10 + 2,
+        2,
+        ActKind::ObjMonsterHunt {
+            npc_id: 600,
+            use_alias: false,
+            alias_id: 0,
+            highlight_doodad_id: 0,
+            highlight_doodad_phase: -1,
+        },
+    );
+    d.add_component(component(id * 10 + 3, id, kind::READY));
+    if let Some(k) = report {
+        d.add_act(id * 10 + 3, id * 10 + 3, id * 10 + 3, 0, k);
+    } else {
+        d.add_act(
+            id * 10 + 3,
+            id * 10 + 3,
+            id * 10 + 3,
+            0,
+            ActKind::ConAutoComplete,
+        );
+    }
+    d.add_component(component(id * 10 + 4, id, kind::REWARD));
+    d.add_act(
+        id * 10 + 4,
+        id * 10 + 4,
+        id * 10 + 4,
+        0,
+        ActKind::SupplyCopper { amount: 10 },
+    );
+}
+
+#[tokio::test]
+async fn refused_reports_answer_with_sc_quest_context_failed() {
+    let (server, _rec) = server_with(|d| {
+        report_quest(
+            d,
+            50,
+            Some(ActKind::ConReportNpc {
+                npc_id: 500,
+                use_alias: false,
+                alias_id: 0,
+            }),
+        );
+        report_quest(
+            d,
+            52,
+            Some(ActKind::ConReportDoodad {
+                doodad_id: 700,
+                use_alias: false,
+                alias_id: 0,
+            }),
+        );
+        // Active quest with no NPC report act: the turn-in cannot reach any act.
+        report_quest(d, 53, None);
+        // Quest 51 has two report NPCs; the act that does not match must not refuse a
+        // turn-in the other act accepts.
+        d.add_template(quest(51));
+        d.add_component(component(511, 51, kind::START));
+        d.add_act(511, 511, 511, 0, ActKind::ConAutoComplete);
+        d.add_component(component(512, 51, kind::PROGRESS));
+        d.add_act(
+            512,
+            512,
+            512,
+            2,
+            ActKind::ObjMonsterHunt {
+                npc_id: 600,
+                use_alias: false,
+                alias_id: 0,
+                highlight_doodad_id: 0,
+                highlight_doodad_phase: -1,
+            },
+        );
+        d.add_component(component(513, 51, kind::READY));
+        d.add_act(
+            513,
+            513,
+            513,
+            0,
+            ActKind::ConReportNpc {
+                npc_id: 500,
+                use_alias: false,
+                alias_id: 0,
+            },
+        );
+        d.add_act(
+            513,
+            514,
+            514,
+            0,
+            ActKind::ConReportNpc {
+                npc_id: 501,
+                use_alias: false,
+                alias_id: 0,
+            },
+        );
+        d.add_component(component(515, 51, kind::REWARD));
+        d.add_act(515, 515, 515, 0, ActKind::SupplyCopper { amount: 10 });
+    });
+    let mut client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(&server, &client, character(), 0x100);
+    client.conn.active_char = Some(player.clone());
+    let world = server.world.world(0).unwrap();
+    let spawn = |obj_id: u32, data: crate::models::npc::Npc| {
+        let mut data = data;
+        data.unit.transform.set_xyz(105.0, 105.0, 100.0);
+        world.spawn(Entity::new(obj_id, data), &server.view_ctx());
+    };
+    spawn(0x200, crate::models::npc::Npc::new(500));
+    spawn(0x202, crate::models::npc::Npc::new(501));
+    let mut right_doodad = crate::models::doodad::Doodad::new(700);
+    right_doodad.transform.set_xyz(105.0, 105.0, 100.0);
+    let right_doodad = Entity::new(0x300, right_doodad);
+    world.spawn(&right_doodad, &server.view_ctx());
+    let mut wrong_doodad = crate::models::doodad::Doodad::new(701);
+    wrong_doodad.transform.set_xyz(105.0, 105.0, 100.0);
+    let wrong_doodad = Entity::new(0x302, wrong_doodad);
+    world.spawn(&wrong_doodad, &server.view_ctx());
+    for id in [50, 51, 52, 53] {
+        events::add_quest(&server, &player, id, false);
+    }
+    server.systems.quests.run_queued_evaluations(&server);
+    client.drain();
+
+    // NPC object not in the character's world.
+    events::on_report(&server, &player, 50, 0x999, 0, 0);
+    assert_one_failed(
+        &mut client,
+        50,
+        super::packets::quest_error::INVALID_NPC_OR_QUEST,
+    );
+
+    // Another NPC than the quest's report NPC.
+    events::on_report(&server, &player, 50, 0x202, 0, 0);
+    assert_one_failed(
+        &mut client,
+        50,
+        super::packets::quest_error::INVALID_NPC_OR_QUEST,
+    );
+
+    // The right NPC, objectives not complete (the live quest 1065 refusal).
+    events::on_report(&server, &player, 50, 0x200, 0, 0);
+    assert_one_failed(
+        &mut client,
+        50,
+        super::packets::quest_error::INVALID_QUEST_STATUS,
+    );
+
+    // A quest the character does not have.
+    events::on_report(&server, &player, 999, 0x200, 0, 0);
+    assert_one_failed(&mut client, 999, super::packets::quest_error::INVALID_QUEST);
+
+    // An active quest that has no NPC report act at all.
+    events::on_report(&server, &player, 53, 0x200, 0, 0);
+    assert_one_failed(
+        &mut client,
+        53,
+        super::packets::quest_error::INVALID_NPC_OR_QUEST,
+    );
+
+    // Doodad object not in the character's world.
+    events::on_report(&server, &player, 52, 0, 0x999, 0);
+    assert_one_failed(&mut client, 52, super::packets::quest_error::INVALID_DOODAD);
+
+    // Another doodad than the quest's report doodad.
+    events::on_report(&server, &player, 52, 0, 0x302, 0);
+    assert_one_failed(&mut client, 52, super::packets::quest_error::INVALID_DOODAD);
+
+    // The right doodad, objectives not complete.
+    events::on_report(&server, &player, 52, 0, 0x300, 0);
+    assert_one_failed(
+        &mut client,
+        52,
+        super::packets::quest_error::INVALID_QUEST_STATUS,
+    );
+
+    // A server-side report (DoodadFuncQuest, a doodad used on an owned quest) did not put
+    // the client in directing mode: its refusals are only logged, never answered.
+    for doodad_obj_id in [0x300, 0x302, 0x999] {
+        events::on_server_report(&server, &player, 52, 0, doodad_obj_id, 0);
+        server.systems.quests.run_queued_evaluations(&server);
+        let ops = client.drain_ops();
+        assert!(
+            !ops.contains(&sc::SCQuestContextFailedPacket),
+            "a server-side report {doodad_obj_id:#x} was answered with a refusal: {ops:?}"
+        );
+    }
+    // The flag is scoped to the server report: a client report right after is answered.
+    events::on_report(&server, &player, 52, 0, 0x300, 0);
+    assert_one_failed(
+        &mut client,
+        52,
+        super::packets::quest_error::INVALID_QUEST_STATUS,
+    );
+
+    // A successful report still completes (0x14b) and is not answered with 0x146.
+    events::with_quests(&server, &player, None, |ctx| {
+        for _ in 0..2 {
+            ctx.dispatch(&QuestEvent::MonsterHunt {
+                npc_id: 600,
+                count: 1,
+            })
+            .unwrap();
+        }
+    })
+    .expect("not nested");
+    server.systems.quests.run_queued_evaluations(&server);
+    client.drain();
+    events::on_report(&server, &player, 50, 0x200, 0, 0);
+    server.systems.quests.run_queued_evaluations(&server);
+    let ops = client.drain_ops();
+    assert!(
+        ops.contains(&sc::SCQuestContextCompletedPacket),
+        "a successful report did not complete the quest: {ops:?}"
+    );
+    assert!(
+        !ops.contains(&sc::SCQuestContextFailedPacket),
+        "a successful report was answered with a refusal: {ops:?}"
+    );
+
+    // A quest with two report NPCs: reporting to the second one must not be answered with
+    // a refusal by the first act (which does not match).
+    events::with_quests(&server, &player, None, |ctx| {
+        for _ in 0..2 {
+            ctx.dispatch(&QuestEvent::MonsterHunt {
+                npc_id: 600,
+                count: 1,
+            })
+            .unwrap();
+        }
+    })
+    .expect("not nested");
+    server.systems.quests.run_queued_evaluations(&server);
+    client.drain();
+    events::on_report(&server, &player, 51, 0x202, 0, 0);
+    server.systems.quests.run_queued_evaluations(&server);
+    let ops = client.drain_ops();
+    assert!(
+        ops.contains(&sc::SCQuestContextCompletedPacket),
+        "the matching report NPC did not complete the quest: {ops:?}"
+    );
+    assert!(
+        !ops.contains(&sc::SCQuestContextFailedPacket),
+        "a mismatching report act refused an accepted turn-in: {ops:?}"
+    );
+}
+
+#[tokio::test]
+async fn refused_early_completion_answers_with_sc_quest_context_failed() {
+    let (server, _rec) = server_with(|d| {
+        report_quest(d, 60, Some(ActKind::ConReportJournal));
+        // 60 allows early completion; 61 does not.
+        if let Some(t) = d.templates.get_mut(&60) {
+            t.let_it_done = true;
+        }
+        report_quest(d, 61, Some(ActKind::ConReportJournal));
+    });
+    let mut client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(&server, &client, character(), 0x100);
+    client.conn.active_char = Some(player.clone());
+    for id in [60, 61] {
+        events::add_quest(&server, &player, id, false);
+    }
+    server.systems.quests.run_queued_evaluations(&server);
+    client.drain();
+
+    // The client's report target is not the NPC it named.
+    player.data().unit.current_target = 0x999;
+    CSTryQuestCompleteAsLetItDonePacket {
+        id: 60,
+        obj_id: 0x200,
+        selected: 0,
+    }
+    .handle(&server, &mut client.conn)
+    .await
+    .unwrap();
+    assert_one_failed(
+        &mut client,
+        60,
+        super::packets::quest_error::INVALID_NPC_OR_QUEST,
+    );
+    player.data().unit.current_target = 0;
+
+    // LetItDone quest whose objectives are not far enough.
+    CSTryQuestCompleteAsLetItDonePacket {
+        id: 60,
+        obj_id: 0,
+        selected: 0,
+    }
+    .handle(&server, &mut client.conn)
+    .await
+    .unwrap();
+    assert_one_failed(
+        &mut client,
+        60,
+        super::packets::quest_error::INVALID_QUEST_STATUS,
+    );
+
+    // Quest that cannot be completed early at all.
+    CSTryQuestCompleteAsLetItDonePacket {
+        id: 61,
+        obj_id: 0,
+        selected: 0,
+    }
+    .handle(&server, &mut client.conn)
+    .await
+    .unwrap();
+    assert_one_failed(
+        &mut client,
+        61,
+        super::packets::quest_error::INVALID_QUEST_STATUS,
+    );
+
+    // Quest that is not active.
+    CSTryQuestCompleteAsLetItDonePacket {
+        id: 999,
+        obj_id: 0,
+        selected: 0,
+    }
+    .handle(&server, &mut client.conn)
+    .await
+    .unwrap();
+    assert_one_failed(&mut client, 999, super::packets::quest_error::INVALID_QUEST);
+}
+
+#[tokio::test]
+async fn let_it_done_without_reward_answers_when_ready_does_not_complete() {
+    let (server, _rec) = server_with(|d| {
+        d.add_template(QuestTemplate {
+            let_it_done: true,
+            ..quest(70)
+        });
+        d.add_component(component(701, 70, kind::START));
+        d.add_act(701, 701, 701, 0, ActKind::ConAutoComplete);
+        d.add_component(component(702, 70, kind::PROGRESS));
+        d.add_act(
+            702,
+            702,
+            702,
+            2,
+            ActKind::ObjMonsterHunt {
+                npc_id: 600,
+                use_alias: false,
+                alias_id: 0,
+                highlight_doodad_id: 0,
+                highlight_doodad_phase: -1,
+            },
+        );
+        // The report act is overridden by TryCompleteQuestAsLetItDone, but the craft act in
+        // the other Ready component keeps the step from completing.
+        d.add_component(component(703, 70, kind::READY));
+        d.add_act(
+            703,
+            703,
+            703,
+            0,
+            ActKind::ConReportNpc {
+                npc_id: 500,
+                use_alias: false,
+                alias_id: 0,
+            },
+        );
+        d.add_component(component(704, 70, kind::READY));
+        d.add_act(
+            704,
+            704,
+            704,
+            99,
+            ActKind::ObjCraft {
+                craft_id: 70,
+                use_alias: false,
+                alias_id: 0,
+                highlight_doodad_id: 0,
+                highlight_doodad_phase: -1,
+            },
+        );
+        // No Reward component: the early completion has to finish at Ready.
+    });
+    let mut client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(&server, &client, character(), 0x100);
+    client.conn.active_char = Some(player.clone());
+    events::add_quest(&server, &player, 70, false);
+    server.systems.quests.run_queued_evaluations(&server);
+    events::with_quests(&server, &player, None, |ctx| {
+        for _ in 0..2 {
+            ctx.dispatch(&QuestEvent::MonsterHunt {
+                npc_id: 600,
+                count: 1,
+            })
+            .unwrap();
+        }
+    })
+    .expect("not nested");
+    server.systems.quests.run_queued_evaluations(&server);
+    client.drain();
+
+    CSTryQuestCompleteAsLetItDonePacket {
+        id: 70,
+        obj_id: 0,
+        selected: 0,
+    }
+    .handle(&server, &mut client.conn)
+    .await
+    .unwrap();
+    server.systems.quests.run_queued_evaluations(&server);
+    let frames = client.drain();
+    let failed: Vec<_> = frames
+        .iter()
+        .filter(|f| f.0 == sc::SCQuestContextFailedPacket)
+        .collect();
+    assert_eq!(
+        failed.len(),
+        1,
+        "expected exactly one SCQuestContextFailed, got {frames:?}"
+    );
+    assert_eq!(
+        failed[0].1,
+        failed_bytes(70, super::packets::quest_error::INVALID_QUEST_STATUS)
+    );
+    assert_eq!(
+        player.data().quests.active[0].step,
+        kind::READY,
+        "the quest completed instead of staying at Ready"
+    );
 }
 
 #[tokio::test]

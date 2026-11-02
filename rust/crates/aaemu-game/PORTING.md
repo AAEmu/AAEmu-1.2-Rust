@@ -166,6 +166,7 @@ Each subsystem records its status here, in its own section only (see `CONTRIBUTI
 | `Skills/Effects/SpecialEffects/*` (141 named `SpecialType` actions), `BubbleEffect`, `ImpulseEffect`, `PhysicalExplosionEffect` | `systems/skills/effects/{special/*,unit_fx}.rs`, `packets_special.rs` | partial | Ported actions and subsystem hooks are present, but historical logging placeholders do not establish gameplay completeness. Buff stealing, component-selective aggro copy/reset, target loss, NPC despawn, ongoing-buff cancellation and pet recovery now execute. ExplodeBuff, MoveToGround and RedeemBuff now execute (see below). Client visuals use the existing skill/plot notifications. 13 extra S->C packets, byte-exact tests. |
 | `Skills/SkillControllers/{Floating,Wandering,Leap,Dash,Rotate}` | `systems/skills/controllers.rs` | partial | Rotate uses native constructor/tick timing (`0x3924E1D0` / `0x392315C0`) with 1.2 controller7678 regression coverage. Generic Anchor and Flowgraph remain unverified; native 10.x Anchor parameter kinds1001..1039 differ from the 1.2 data kinds1..3. Harpoon ropes have a separate vehicles implementation. |
 | Movement hooks (`CSMoveUnit.RemoveEffects`, `Character.SetPosition` Move removal, fall damage) | `systems/skills/mod.rs` (`on_move_request`, `on_moved`) | done | Called from `world::session::move_unit`. |
+| Cannon fire aim: `BallisticPos` / `ArtilleryPos` targets, `vehicle_models` turret limits | `systems/skills/{skill,validation}.rs`, `systems/vehicles/data.rs` (`VehicleModel::clamp_turret_angles`) | deviation | **Deviation:** the C# `Skill.GetInitialTarget` mapped every `Pos` / `BallisticPos` / `ArtilleryPos` cast target through `SetInitialTarget`, whose non-position arm kept the caster's own position, and it never checked the target cone. The Rust refuses a Unit / Doodad target on `BallisticPos` / `ArtilleryPos` with `NO_TARGET` 0x9 (the 1.2 client's result for a missing target; the Lua bar, path B, sends a Unit target for cannons); a Position target is then held only to the skill's own `target_angle` cone, measured from the cannon's composed world facing (parent ship yaw + attach point). It does **not** refuse on `skills.pitch_angle` or the `vehicle_models` pitch / yaw limits: the client evaluates `CanUse` on the aim before it clamps the turret to those model limits (`FUN_394322f0` steps 7 then 8 -> `FUN_39425490`), and the spliced `CanUse` body shows no `pitch_angle` reader, so the model limits cannot block a shot (the aim preview's ballistic solve also starts at the `item_hand_r` muzzle, which the server does not reproduce). The model limits clamp the stored / relayed `CSTurretState` posture instead (see the `CSTurretStatePacket` row). A refused mount cast now keeps its own result even when a rider / operator skill is linked (the rider only runs after a successful mount skill). |
 | `Skill.EndChanneling` target buff (`ChannelingTargetBuffId`) | `systems/skills/{skill,buffs}.rs` (`end_channeling`, `finish_effect_by_skill`) | deviation | **Deviation:** the C# `Buffs.RemoveEffect(templateId, skillId)` raised the buff's `OnTimeout` triggers on every removal; the Rust removal skips them for explicit removals (dispels, a stopped channel; see the FISH escape in `buff_removal_tests.rs`). Quest item grants hang on that trigger (GainItem on buff 3896 of skill 18449 'Extract Earth Crystal', 4 s channel under a 6 s buff, and the other channeling-target-buff quest skills of the item triage), so a channel that **runs to its end** now ends the target buff the way its own timer would (ACTING -> FINISHED, Timeout triggers, removal). The data pairs a channel with a target buff of the very same length in 18 skills with a Timeout trigger (e.g. 14054 'Insert Anima Into Stopped Machine', buff 1728, 5 s each), so the buff's own timer and the end of the channel reach the Timeout together; taking the buff from ACTING is an atomic claim (`finish_effect_by_skill`, `schedule_effect`), the loser leaves the buff alone, and the Timeout runs once (before, a second `GainItem` or `NpcControlEffect` followed in about one channel in ten: `integration_tests::channel_and_target_buff_ending_together_fire_the_timeout_trigger_once`). A stopped / cancelled channel fires nothing (the C# granted the item then too). The caster-side `ChannelingBuffId` and buffs applied by skill effects (buff 1963 of 'Capture Crayfish') are unchanged: the latter expire on their own timer and fire Timeout already. |
 
 #### Raw attribute bounds and permanent pStats (2026-10-25)
@@ -234,7 +235,7 @@ These `SpecialType` bodies were TODO stubs that only logged in the C# (`git show
 | `NpcManager.Load` (customs, body parts, templates, equip packs, postures, unit modifiers, initial buffs, merchants / goods) | `npc/data.rs` | done | 13 382 templates on the real DB. Creatures.xml names, `LoadAiParams` not ported. |
 | `NpcManager.Create`, `LoadCustom` (.NET `Random(123456789)` parity), `Npc` stats (Str..KillExp from the unit formulas + template bonuses), `InitializeSpawnBuffs`, `AnimActionId` | `npc/manager.rs`, `npc/stats.rs` | done | Every real template creates without error. The AI is created through `server.systems.hooks.ai` (`systems::ai`). |
 | `Npc.DoDie` | `npc/death.rs` | done | Kill exp (team eligibility, `PlayerExpModifier`, mate exp, TagShare contributors), quest kill events, loot (`LootManager.GenerateLoot` through the economy), aggro / tagger clean-up, spawner despawn, `Ai.GoToDead()` (`systems::ai`). |
-| NPC interaction packets (CSStartInteraction, CSInteractNPC(End), CSSelectInteractionEx; SCNpcInteractionSkillList, SCAiAggro, SCNpcChatMessage, SCUnitModelPostureChanged, SCAggroTargetChanged) | `npc/packets.rs` | done | Byte-exact tests. Merchant / bank / auction UIs are economy's. **Deviation:** `CSStartInteractionPacket` also answers a slave with one seat skill, because the 1.2 client acts on the first list entry (`FUN_393be850` / `FUN_393be280`): 12076 (occupy) while the driver seat is free, else 13863 (passenger seat, `special_effects` 2378 value1 2) while point 2 is free and the slave is not a cannon; a slave with both seats taken keeps 12076; the bind then ignores the taken seat silently (C# behaviour). The C# answered only NPCs and mates (12077). |
+| NPC interaction packets (CSStartInteraction, CSInteractNPC(End), CSSelectInteractionEx; SCNpcInteractionSkillList, SCAiAggro, SCNpcChatMessage, SCUnitModelPostureChanged, SCAggroTargetChanged) | `npc/packets.rs` | done | Byte-exact tests. Merchant / bank / auction UIs are economy's. **Deviation:** `CSStartInteractionPacket` also answers a slave with one seat skill, because the 1.2 client acts on the first list entry (`FUN_393be850` / `FUN_393be280`): 12076 (occupy) while the driver seat is free, else 13863 (passenger seat, `special_effects` 2378 value1 2) while point 2 is free, the slave's model declares point 2 in `model_bindings` and the slave is not a cannon; a slave with both seats taken keeps 12076; the bind then ignores the taken seat silently (C# behaviour). The C# answered only NPCs and mates (12077). |
 | `NpcGameData` (npc_spawners, npc_spawner_npcs, member index, generated spawners) | `npc/spawner_data.rs` | done | |
 | `NpcSpawner`, `NpcSpawnerNpc`, `DoodadSpawner`, `Spawner<T>` | `npc/spawner.rs`, `doodad/spawner.rs` | done | Schedules / time windows / population caches, respawn + despawn timing, exact-identity reconciliation of direct deletes (see deviations). Ordinary populations keep the authored `Count` / `min_population` baseline (default 1) and per-slot respawn deadlines (see deviations). AI home position / follow path / simulation through `server.systems.hooks.ai` (`systems::ai`). |
 | `SpawnManager` (one per instance) + `WorldManager.ActiveRegionTick` spawner part | `spawn_manager.rs` | done | main_world: 25 118 NPC entries -> 24 047 ordinary placements / 38 174 spawner clones (1 011 duplicates and 60 event entries filtered, 0 missing templates), 42 649 doodads, 69 transfers, 14 gimmicks, 5 slaves, 0 parse errors. Ordinary spawning is a bounded per-instance 64 m region-index activation pass (`World.NpcPrewarmRegionMargin` / `World.NpcSpawnTickMs` / `World.NpcSpawnsPerTick`) with warm retention and resident-service retention (`World.NpcWarmRetentionSeconds` / `World.NpcResidentServiceNpcs`; see deviations). Persistent doodads from MySQL. Transfers / slaves: `systems::vehicles`; houses and their doodads: `systems::housing`; trial court doodads / NPCs linked after the spawns (`TrialManager.Initialize*`). |
@@ -403,7 +404,8 @@ Economy hooks (`server.systems.housing.hooks`): installed by `economy::bridges::
 | `QuestActConAcceptItemGain` start | `systems/quests/events.rs` (`on_items_acquired`), `engine.rs` (`start_quests_from_item_gain`), `data.rs` (`item_gain_starters`) | deviation | **Deviation:** gaining an item starts every quest with a `ConAcceptItemGain` on its Start component (not active, not completed unless repeatable, count in the bag reached, unit requirements met) with the item as acceptor. The C# never did: `Inventory.cs` has the `OnItemGather` call commented out and `RunAct` only compared the acceptor, so the Blue Salt Brotherhood letters (4881-4888), 5450, 6160 and the level 1 "Today's To-do" quests (1955-1961, 2140-2146) could not be started. Inferred from the data (those items have no `item_accept_quests` row); the retail trigger is not verified. The 15 "starter item without `starter_quests` entry" simulator notes were all of this kind: the quests have no `item_accept_quests` binding at all, so there was no mapping to fix. |
 | Sphere state across logout | `systems/quests/spheres.rs` (`forget_character`), `mod.rs` (`on_leave_world`) | deviation | **Deviation:** leaving the world drops the character's sphere triggers and its last starter-sphere position. The C# kept both, so a re-login inside a quest sphere compared against the position from the previous session and never raised the enter event (stuck sphere quests). The tick also prunes positions of characters that are no longer in the world. |
 | `with_quests` panic safety | `systems/quests/events.rs` | deviation | **Deviation:** a panic in a quest operation (or a queued one) is caught around the locked section, the quest state is put back, the thread-local active entry removed and the panic resumed. Without it the character's later quest events on that thread were queued forever. |
-| Quest packets (CS: StartQuestContext, CompleteQuestContext, DropQuestContext, QuestTalkMade, QuestStartWith, TryQuestCompleteAsLetItDone, RestartMainQuest, SaveTutorial, RequestPermissionToPlayCinemaForDirectingMode, StartedCinema, CompletedCinema; SC: QuestContextStarted/Updated/Completed/Reset, QuestRewardedByMail, DoodadQuestAccept, TutorialSaved, AppellationGained) | `packets.rs` | done | Byte-exact tests. `SCQuestsPacket` now writes `Quest.Id` as `long`. |
+| Quest packets (CS: StartQuestContext, CompleteQuestContext, DropQuestContext, QuestTalkMade, QuestStartWith, TryQuestCompleteAsLetItDone, RestartMainQuest, SaveTutorial, RequestPermissionToPlayCinemaForDirectingMode, StartedCinema, CompletedCinema; SC: QuestContextStarted/Updated/Completed/Reset, QuestContextFailed, QuestRewardedByMail, DoodadQuestAccept, TutorialSaved, AppellationGained) | `packets.rs` | done | Byte-exact tests. `SCQuestsPacket` now writes `Quest.Id` as `long`. `SCQuestContextFailedPacket` (0x146) is `u32 questId + u8 err`; the client reader `FUN_397b5c90` (class registered with opcode 0x146, vtable `399b3a5c`) reads the fields `type` and `err`, and `OnQuestContextFailed` (`FUN_391dbcd0`) raises `QUEST_ERROR_INFO`, which ends quest directing mode. |
+| Refused quest reports | `packets.rs` (`quest_error`, `SCQuestContextFailedPacket`), `engine.rs` (`send_report_refused`, `finish_report`), `acts.rs`, `events.rs` | done | Every refused `CSCompleteQuestContext` report and `TryCompleteAsLetItDone` is answered once with 0x146, independent of the WARN repeat dedupe. A server-side report (`DoodadFuncQuest`, a doodad used on an owned quest: `events::on_server_report`) is only logged: the client did not enter quest directing mode, and a 0x146 there would show a quest error on every early click. The client error table `locale.questContext.errors` is built 1-based (`x2ui/baselib/locale_helper.alb`, `SETLIST` at instruction 654: `already_have`, `invalid_quest`, ...); the `QUEST_ERROR_INFO` handler `quest_context.alb` proto 22 indexes it directly with its first argument, and the client's local pre-checks use the same numbers (`FUN_3937a2d0`: 2 for an invalid quest, 0x14 after its can-interact check fails). Reason mapping (inferred from the client key names and those local codes, not captured from a 1.2 server): objectives not ready / wrong status -> 12 `invalid_quest_status`, wrong or missing NPC -> 7 `invalid_npc_or_quest`, wrong or missing doodad -> 19 `invalid_doodad`, quest not active -> 2 `invalid_quest`. |
 | `QuestCommandUtil` / `QuestCmd` (GM) | `systems/services/commands/scripts/quest_cmd.rs` | done | `quests::events::send_quests` / `send_completed_quests` added. |
 
 ### systems::instances
@@ -429,16 +431,17 @@ Cross-subsystem: mates are despawned on dungeon entry and `PlayerCanEnter` check
 
 | Area (C#) | Rust | Status | Notes |
 |---|---|---|---|
-| `MateGameData`, `SlaveGameData` (templates, unit modifiers, initial items / buffs, passive buffs, doodad / healing point / slave bindings, drop doodads, mount skills, repairable slaves, `slave_equip_slots`, `item_slave_equipments`, `allow_to_equip_slaves` / `allow_to_equip_slots`, `slave_attach_points*.json`), `TransferGameData` (templates, bindings, binding doodads, paths, client `transfer_path.xml` roads + `GetOwnerPaths`), `ShipyardManager.Load`, `TaxationsManager` table, `ModelManager` vehicle / ship models | `systems/vehicles/data.rs` | done | Gated test `real_compact_db_vehicle_tables` checks the row counts; `real_transfer_follows_its_client_route` loads the roads from the game_pak. |
+| `MateGameData`, `SlaveGameData` (templates, unit modifiers, initial items / buffs, passive buffs, doodad / healing point / slave bindings, drop doodads, mount skills, repairable slaves, `slave_equip_slots`, `item_slave_equipments`, `allow_to_equip_slaves` / `allow_to_equip_slots`, `model_bindings` (model -> declared attach points), `slave_attach_points*.json`), `TransferGameData` (templates, bindings, binding doodads, paths, client `transfer_path.xml` roads + `GetOwnerPaths`), `ShipyardManager.Load`, `TaxationsManager` table, `ModelManager` vehicle / ship models | `systems/vehicles/data.rs` | done | Gated test `real_compact_db_vehicle_tables` checks the row counts; `real_transfer_follows_its_client_route` loads the roads from the game_pak. |
+| Mount rider / operator skill lookup (`GetMountAttachedSkills` -> `mount_attached_skills`) | `systems/skills/handlers.rs`, `systems/skills/mount_authority.rs`, `systems/vehicles/{data,mod}.rs` | deviation | **Deviation:** the C# `MateGameData.GetMountAttachedSkills` scanned `mount_skills` for the *skill id*, so a skill with two rows always resolved to the first one in table (rowid) order. The 1.2 data has such duplicates: 15546 is both 226 '물 퍼올리기(견본)' (rowid 132) and 59 '물 퍼올리기' (rowid 316); the C# scan picked 226 -> rider 15548 (the display-only "견본" skill, no effects) instead of 59 -> 21505 (`GainLootPackItemEffect` 29504 -> loot pack 7732, 10 x item 15694 Water), so the Red Farm Hauler's Create Water produced no water (live owner run 2026-11-01 14:53:16/14:53:28: `SCSkillStarted`, `SCUnitPoints`, `SCSkillFired`, `SCSkillEnded` for the mount cast plus the instant 15548, no item). The Rust uses the `mount_skills` row the client names in `CSStartSkillPacket` (`SkillCasterMount.MountSkillTemplateId`; the real 1.2 client sends the row id: 59 for 15546, 16 for 10473, 201 for 20704, 369 for 27032 in the owner captures) and requires that row to be on the vehicle's bar (its own `slave_mount_skills` / mate `skills` entries or an active `buff_mount_skills` grant) and to cast the pressed skill. The rider is scheduled exactly as in the C#: `Character.UseSkill(rider)` right after the mount skill is accepted, so the mount cast and the rider's own cast (15546 and 21505 are both 5000 ms) run together and the item is granted once at the end of the rider cast. The same duplicate-skill-id rows (15450 -> 56 '물 뿌리기' vs 225, 16650 (4 rows), 17097, 17649, 20291, 20249, 11017, 15580) now resolve by the pressed row; the datas' 20 `mount_attached_skills` rows whose mount skill is on no slave/mate/buff bar are untouched (unreachable through the bar, not resolved by skill id either). Tests: `water_rider_follows_the_mount_skill_row_the_client_pressed`, `water_rider_needs_the_driver_attach_point`, `watering_rider_follows_the_mount_skill_row_and_consumes_ten_water`, and the gated `real_farm_hauler_driver_gets_ten_water_from_skill_15546`. |
 | `MateManager` (per instance), `CharacterMates` (load / save / spawn / despawn), `Mate` (`AddExp`, `MateXpUpdateTask`, `RegenTick`, `DoFallDamage`, `OnZoneChange`, stats) | `systems/vehicles/mates.rs`, `stats.rs` | done | Mount / dismount (`SCUnitAttached` / `SCUnitDetached`, rider becomes a transform child), rename, target, user state, mate equipment packet (item move through `VehicleItemHooks`), kill exp, stun / unmount skills, death despawn. |
-| `SlaveManager` (per instance), `SlaveSpawner`, `SummonSlave` details, `Slave` (`DoDie`, `DoHpChangeTrigger` / repair points, `RegenTick`, `Save`, `OnZoneChange`, stats) | `systems/vehicles/slaves.rs` | done | Create (saved slave / persistent doodads / saved child slaves from MySQL, position, boats on the water surface, doodad and slave bindings at the model attach points), bind / unbind (the seat check, client reach and reservation run under the slave's one lock; a taken seat is silent as in the C#, an already-seated character is refused with `slave_unbind_first` 0x66, a cannon refuses the passenger seat with `slave_cannot_bind` 0x60, and the owners-mark driver refusal keeps 0x61), delete with portal-time despawn, Rider's Escape, repair cooldown, `RepairSlaveEffect`, `SendMySlaveTask`, logout (+10 min) / disconnect despawn task, `slaves` table (`AfterCharacters`). |
+| `SlaveManager` (per instance), `SlaveSpawner`, `SummonSlave` details, `Slave` (`DoDie`, `DoHpChangeTrigger` / repair points, `RegenTick`, `Save`, `OnZoneChange`, stats) | `systems/vehicles/slaves.rs` | done | Create (saved slave / persistent doodads / saved child slaves from MySQL, position, boats on the water surface, doodad and slave bindings at the model attach points), bind / unbind (the seat check - a non-driver point must be declared by the slave's model in `model_bindings` - client reach and reservation run under the slave's one lock; a missing or taken seat is silent as in the C#, an already-seated character is refused with `slave_unbind_first` 0x66, a cannon refuses the passenger seat with `slave_cannot_bind` 0x60, and the owners-mark driver refusal keeps 0x61), delete with portal-time despawn, Rider's Escape, repair cooldown, `RepairSlaveEffect`, `SendMySlaveTask`, logout (+10 min) / disconnect despawn task, `slaves` table (`AfterCharacters`). |
 | `TransferManager` (per instance, 100 ms tick), `TransferSpawner`, `Transfer` route following (`GoToPath`, `MoveTo`, `NextPoint`) | `systems/vehicles/transfers.rs` | done | Carriage motor + boarding part + bench doodads, `SCOneUnitMovementPacket` (transfer move type) for both parts. Spawned from `SpawnManager.SpawnAll`. |
 | `ShipyardManager` runtime, `Shipyard` build steps, `CraftEffect` shipyard branches, `ShipyardTickTask`, `ShipyardCompleteTask` | `systems/vehicles/shipyards.rs`, `effects.rs` | done | Requirements via the skills item hooks + money (`SCItemTaskSuccess` money form). |
 | `ShipHarpoonRopeController`, `CSUnhangPacket` | `systems/vehicles/harpoon.rs` | done | Tow forces are physics (`ShipHarpoonTowPhysics`): the per-tick entry points are exposed for the physics port. |
 | `CSMoveUnitPacket` vehicle branches (ship request, vehicle, mate xp, riding, standing on objects) | `systems/vehicles/movement.rs`, `world/session.rs` | done | Ship-deck support accepts the actor standing flag independently of the movement header, preserving valid GC-relative positions and the current-parent sentinel during controller updates. This corrects the mirrored C# header-only attachment test; clearing both support flags still disembarks. A unit no longer hanging (`HangingFromObject` unset) loses its sticky parent unless it is boarded on a transfer. |
 | `BaseUnit.GetDistanceTo` for shipyard targets (skill range check, `Skill.cs` `max_range`) | `systems/skills/geometry.rs` (`distance_to`), `systems/vehicles/shipyards.rs` (`shipyard_radius`) | deviation | **Deviation:** the C# measured skill range to the shipyard's center point (shipyard models are prefab models without an actor radius, so `ModelSize` was 0), which made the shipyard build skills (`min_range 0`, `max_range 4`) unusable anywhere but the exact center of a drydock ("Target is too far"). The Rust subtracts the shipyard template's `build_radius * Scale`, like the house `GardenRadius` rule. |
 | Mate / slave / transfer / shipyard C2G and G2C packets | `systems/vehicles/packets.rs` | done | 18 C->S, 16 S->C (byte-exact tests). `CSChangeSlaveTargetPacket` has no 1.2 opcode (0xfff). |
-| `CSTurretStatePacket` 0x036 (turret / cannon aim) | `packets/c2g_misc.rs`, `systems/vehicles/slaves.rs` (`set_turret_state`), `world/unit_state.rs`, `systems/npcs/npc/packets.rs` | deviation / capture-pending | **Deviation:** the C# `CSTurretStatePacket.Read` only logged the three fields and `Unit.ModelPosture` always wrote pitch/yaw 0, so no client ever saw a crewed cannon turn. The Rust decodes `bc unitId, f32 pitch, f32 yaw` (1.2 client writer `397c7640`), accepts it only from a character attached to any seat of the slave named by `unitId`, stores it on that slave and relays the same values to the other players in range as `SCUnitModelPostureChanged` 0x103 posture type 8 (`u8 type, bool isLooted, f32 pitch, f32 yaw`; client reader `397bda20` -> `397b1df0` applies it through `390bdec0`). A viewer that arrives later gets the stored aim in the slave's `SCUnitState` posture block. The aim is kept in the raw model-frame radians the client sent; the client producers already clamp / wrap them with the `vehicle_models` turret limits. The 1.2 client itself sends `CSTurretState` at most once per 200 ms and only when the aim changes (`39356990`: `DAT_3a169940 + 200 <= now`), and the server additionally never relays an unchanged aim and delays a changed aim that arrives less than 150 ms after the last relayed one for that slave; the newest aim is always stored on the slave at once (a late viewer's `SCUnitState` reads it) and the slave tick relays a pending aim once the window ends, so a final update inside the window is not lost. The stored aim is not cleared when the gunner leaves the seat, so late viewers keep seeing the last posture (as the two-client live run showed). **Capture-pending (S12):** the 1.2 *server* side is not proven. Capture with two clients: A mans a ship cannon (GM `/slave spawn 22` spawns a hull with eight cannons; `/slave spawn 25` a ground cannon) and pans / fires while B records 0x103; confirm whether the original server relays the aim, the packet's unit id (cannon child vs hull vs gunner), whether the gunner also receives the echo, that the angles are model-local radians and not clamped server-side, and whether a passenger seat (tank gunner, point 2) is a valid aim path. Record the result here and in the S12 research. |
+| `CSTurretStatePacket` 0x036 (turret / cannon aim) | `packets/c2g_misc.rs`, `systems/vehicles/slaves.rs` (`set_turret_state`), `world/unit_state.rs`, `systems/npcs/npc/packets.rs` | deviation / capture-pending | **Deviation:** the C# `CSTurretStatePacket.Read` only logged the three fields and `Unit.ModelPosture` always wrote pitch/yaw 0, so no client ever saw a crewed cannon turn. The Rust decodes `bc unitId, f32 pitch, f32 yaw` (1.2 client writer `397c7640`), accepts it only from a character attached to any seat of the slave named by `unitId`, stores it on that slave and relays the same values to the other players in range as `SCUnitModelPostureChanged` 0x103 posture type 8 (`u8 type, bool isLooted, f32 pitch, f32 yaw`; client reader `397bda20` -> `397b1df0` applies it through `390bdec0`). A viewer that arrives later gets the stored aim in the slave's `SCUnitState` posture block. The server clamps the model-frame radians to the slave's `vehicle_models` turret limits before storing / relaying (degrees -> radians, and a full-circle yaw wraps into +/-pi like the client's key aim); a non-numeric limit (the text `'f'` the real rows store in `turret_yaw_angle_max`) is no limit, and a reversed window is sorted instead of panicking; it ignores a slave whose model is not a `VehicleModel` (the client only sends turret aim for a `VehicleUnitModel`, `FUN_390b3750`). The 1.2 client itself sends `CSTurretState` at most once per 200 ms and only when the aim changes (`39356990`: `DAT_3a169940 + 200 <= now`), and the server additionally never relays an unchanged aim and delays a changed aim that arrives less than 150 ms after the last relayed one for that slave; the newest aim is always stored on the slave at once (a late viewer's `SCUnitState` reads it) and the slave tick relays a pending aim once the window ends, so a final update inside the window is not lost. The stored aim is not cleared when the gunner leaves the seat, so late viewers keep seeing the last posture (as the two-client live run showed). **Capture-pending (S12):** the 1.2 *server* side is not proven. Capture with two clients: A mans a ship cannon (GM `/slave spawn 22` spawns a hull with eight cannons; `/slave spawn 25` a ground cannon) and pans / fires while B records 0x103; confirm whether the original server relays the aim, the packet's unit id (cannon child vs hull vs gunner), whether the gunner also receives the echo, that the angles are model-local radians and whether the original server clamps them, and whether a passenger seat (tank gunner, point 2) is a valid aim path. Record the result here and in the S12 research. |
 | Hooks / physics | `systems/vehicles/{hooks,ship_physics}.rs` | done | `VehicleItemHooks` (`EndCraft`, economy). Ship physics and water call `systems::ai::physics` directly (`AddShip` / `RemoveShip`, helm request, driver seat, `GetWaterSurface` / `IsWater`); `ShipPhysicsHooks` (harpoon lines / tension / lifetime, `Throttle` / `Steering` after a move) and the radar ship lists are installed here. The npcs / social hooks call the mate / slave / dismount functions directly. |
 #### Summon replacement and retained cargo (2026-10-25)
 
@@ -1486,17 +1489,31 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `FUN_39093860(..., 9.0)`, strictly under 3.0, widened to 12.25 = 3.5 m by the target's
   `+0x3c26` flag), and the doodad BoardTransfer path passes `None` because its doodad func has
   its own use-range check. The gap is measured against the ship model's mass box when the slave
-  has a ship model, else the requested attach point's world position, and only falls back to
-  the slave origin when neither exists; a ship's bare origin is never the measure (a merchant
-  ship's seat / helm can be far from the origin). The 3.5 m branch keys on the character's
+  has a ship model, else the requested attach point's world position, else the smaller of the
+  slave origin distance and the nearest located attach point of the model
+  (`slave_attach_points*.json`); the client measures the minimum distance from the character's
+  collision primitive to the target's collision parts (`FUN_39093860` -> `FUN_390b3ae0` for the
+  parts, `FUN_3989bf90` -> `FUN_398b1ab0` for the per-shape distance), and the located attach
+  points stand in for those parts. The origin bound is kept so the fallback never tightens a
+  reach: the 2026-11-01 14:22 live log had the Red Farm Hauler (slave 146, model 1553, no ship
+  model, point 2 declared by `model_bindings` but located only by its cannon points 9-14)
+  refuse the passenger seat beside the rear hull (3.2-5.0 m from the origin, 1.9-2.6 m from
+  the located points) and the 14:22:50 driver re-bind (4.9 m from the origin); tested by
+  `passenger_beside_the_hull_is_in_reach_without_a_ship_model_or_a_located_seat` and
+  `a_discarded_driver_rebinds_beside_the_hull_and_a_far_one_is_still_refused`. A model with no
+  located point at all keeps the origin (carts: the origin sits at the seat); a ship's bare
+  origin is never the measure (a merchant ship's seat / helm can be far from the origin). The
+  3.5 m branch keys on the character's
   `is_riding`, but the decompile reads `+0x3c26` from the target (where it is also the dead
   flag), so this is capture-pending (S11-C5). A bind outside the reach answers `TOO_FAR_AWAY`
   0x9a. A character already in any slave's `attached_characters` is refused with
   `slave_unbind_first` 0x66 (`FUN_39346290`); a mate is not in that list, so S11-C5 stays open.
   The passenger seat is refused on a cannon (slave kind 7 / 8) with `slave_cannot_bind` 0x60.
-  A taken seat keeps the C# silent return (debug log); the client message table's 0x61 is not
-  evidenced for that case (S11-C2 capture-pending), and 0x61 is kept only for the C# owners-mark
-  driver refusal. A character who dies is unbound from any slave seat through the same
+  A taken seat answered silently in the C#; it now answers `slave_already_has_master` 0x61
+  (S11-C2 capture-pending for the exact code), and 0x61 is also kept for the C# owners-mark
+  driver refusal. A missing seat answers `slave_cannot_bind` 0x60. Every refusal uses the
+  clearing SCErrorMsg form described in the 2026-11-01 bind-refusal bullet below. A character
+  who dies is unbound from any slave seat through the same
   `unbind_slave` path as logout (the C# only did this for cannon gunners, so a ship driver /
   passenger kept a stale seat and the one-slave guard then refused every later bind).
   **Capture-pending (S11-C6):** whether 1.2 refuses an enemy / non-owner ship is unproven; the
@@ -1508,6 +1525,47 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `CSStartInteractionPacket` offers 13863 once the driver seat is taken (NPC interaction row).
   `CSDiscardSlave` 0x032 has no server-side speed check in the C#; the 1.2 client refuses to
   send it above 5 m/s with message 0x67 (`FUN_39345aa0`), so the server keeps none.
+
+* systems::vehicles (2026-11-01, bind refusal replies): the 1.2 client sets a pending bind
+  request (local actor `+0x10` = target tl) in the `CSBindSlave` builder (`FUN_393464a0`,
+  decompile 678169-678180 / asm `0x393464d8`), refuses a repeat while it is set with
+  `already_requested` 0x13 (`FUN_39346290`, decompile 678120-678125 / asm `0x39346383`), and
+  clears it in `FUN_393457e0` for codes 0x48/0x60/0x61/0x66/0x9a (decompile 677413-677444);
+  `OnSlaveBound` also clears it (`FUN_391d4760` -> `FUN_39345d00`, decompile 363755-363762).
+  `HandleErrorMessage` (`FUN_391e5070`) only calls `FUN_393457e0` when the packet's `isNotify`
+  byte is false (decompile 377162-377170); with it true it takes the notify branch
+  (`FUN_391e4f00`) and returns first. The live 2026-11-01 14:22:50 bind refusal sent
+  `isNotify = true`, so the client showed `already_requested` on every later F press and sent
+  nothing until 14:40. Every bind refusal (dead, too far, cannon passenger, missing seat, taken
+  seat, owners mark, already on a slave, missing/despawned target) now answers an `SCErrorMsg`
+  with `isNotify = false` and a clearing code; the exact original reply for the formerly silent
+  cases is capture-pending (S11-C2), but the clearing reply is required. The 14:22:50 refusal
+  itself was the origin-only gap fixed by the passenger-seat bullet above (4.9 m from the
+  origin, 1.5 m from the located rear points), not the discard: `CSDiscardSlave` cleared the
+  seat (the second bind was not refused with `slave_unbind_first`). Tested byte-exactly by
+  `passenger_skill_13863_seats_point_two_and_a_taken_seat_answers_a_clearing_error`,
+  `a_taken_seat_answers_a_clearing_error_and_keeps_the_occupant`,
+  `model_bindings_decide_which_seats_a_slave_offers_and_accepts`,
+  `a_slave_outside_the_client_reach_is_refused_and_an_in_reach_one_is_seated`,
+  `a_character_on_one_slave_cannot_bind_a_second_one`,
+  `a_cannon_refuses_the_passenger_seat_skill` and
+  `a_discarded_driver_rebinds_beside_the_hull_and_a_far_one_is_still_refused`.
+
+* systems::vehicles (2026-11-01, seat bindings): the 1.2 client offers the passenger skill 13863
+  only when the slave's model declares point 2: `FUN_393bbb80` scans the model's binding list
+  (`FUN_390c9f70`) for the point. The server never loaded `model_bindings`, so it offered and
+  accepted point 2 on every non-cannon slave. The Farm Wagon (slave 60, model 1008) declares only
+  points 1, 35 and 9-12 (helm and cargo doodads), so a passenger rode at the model origin on a seat
+  retail never had. `model_bindings` is now loaded in `systems/vehicles/data.rs` (model id ->
+  declared points, row `owner_type='Model'`) and `bind_slave` refuses any non-driver point the
+  slave's model lacks with a debug log and the clearing `slave_cannot_bind` 0x60; the C#
+  accepted any point.
+  The interaction list offers 13863 only when the model declares point 2. Driver point 1 keeps the
+  C# rules, cannon kinds keep `slave_cannot_bind` 0x60, and declared cannon / turret points (for
+  example point 9 on ship model 512) still bind. Tested by
+  `model_bindings_decide_which_seats_a_slave_offers_and_accepts`,
+  `real_model_bindings_pin_the_farm_wagon_seat` and the updated
+  `real_cart_and_ship_slaves_offer_the_passenger_seat`.
 * systems::vehicles (2026-10-29): a rider is seated with its local rotation zeroed as well as its
   position (`mates::reset_rider_transform`, in `MountMate` and in the riding re-attach of
   `CSMoveUnitPacket`). The C# `MountMate` only did `Local.SetPosition(0, 0, 0)`, so the heading the
@@ -3100,7 +3158,8 @@ two bots before the fix (a foreign `Mount` caster, an NPC-only skill and a far d
   (`skill_reagents`) and only renames the caster's own portal. The same list now includes type
   53 `AttachTo`: the 1.2 slave action bar (`FUN_393bbb80`) adds 13863 "Take the Passenger Seat"
   and `FUN_39362f50` sends it as a plain `CSStartSkill`, and no source table names it. Its effect
-  only binds the caster to the target slave at the value1 seat.
+  only binds the caster to the target slave at the value1 seat, and only when the model declares
+  that seat in `model_bindings` (see the 2026-11-01 seat bindings bullet).
 
 ### Item, vehicle bar and SavePortal hardening (2026-10-30)
 
@@ -3537,3 +3596,61 @@ and did not check the equipped glider. The Rust adds the 1.2 rules at these entr
 - **Not gated:** the internal automatic backpack replacement (`Inventory.TryEquipNewBackPack` from
   loot / craft / quests). Those callers may hold the character lock, so a `buffs` check there could
   deadlock; the client-side interaction and equip gates that lead to them are covered above.
+
+## Doodad func item requirements at cast start (2026-10-31)
+
+The C# checked the item requirement of a doodad-use func only inside the func body, after the
+skill had already started. The 1.2 client has no pre-check for these skills
+(`skills.link_equip_slot_id` is -1: 15307, 21910, 22225, 15734, 21904, 22201, 13789, ...) and only
+stops a cast when `SCSkillStarted` carries a non-zero result (1.2 client `FUN_3939a810`, about
+750316-750338 in `out-x2game/x2game.dll.c`), so the bar and animation played before the effect
+refused. `systems::npcs::doodad::item_gate::skill_item_refusal` now answers the same requirement
+at the cast start, through `skills::validation::check` (both `Skill.Use` and `Skill.Cast`) and
+before the mount/rider branch of `CSStartSkill` for player casters:
+
+- `DoodadFuncConsumeChanger` (trade-pack storage, Hang Fish, Store Fish in Water Tank, tic-tac-toe):
+  the equipped `slot_id` item missing -> `SCErrorMsg(UNKNOWN_ITEM 213)`; an item not in
+  `doodad_func_consume_changer_items` -> `SCErrorMsg(STORE_INVALID_ITEM 87)`.
+- `DoodadFuncRemoveItem`: the bag must hold `item_id` x `count`.
+- `DoodadFuncBuyFish` / `DoodadFuncConvertFish`: the backpack slot must hold a pack ->
+  `SCErrorMsg(STORE_BACKPACK_NOGOODS 361)`.
+- `DoodadFuncPurchase` / `DoodadFuncRecoverItem` stay effect-time only: their reasons (bag space,
+  ownership) were not shown to be cast-start checks.
+
+The refusal result is `NEED_REAGENT` (0x24) with the item template id as its value where one is
+known; the 1.2 client's result handler (`FUN_39390900`) names that item for 0x24. **Inferred:** the
+10.x zone decompile (`x2game-dev_dedicate.dll.c`) contains only the `DoodadFuncConsumeChanger`
+descriptor loader and factory (2841893-2842045 and 2605824-2606182) and no use / can-use check, so
+the real 1.2 result code is not recoverable; the choice follows the research recommendation
+(`Doodad item requirements ...`, 2026-10-31-tradepack-gate.md) and the `SkillResult` 36 =
+`NEED_REAGENT` mapping in the same decompile (2826887). The effect-time checks stay as a second
+line of defence for an item that changes during the cast.
+
+The Farm Wagon's eco fuel is not a doodad func: skill 20291 (its bar entry, mount skill row 190)
+carries the rider skill 20292 (`mount_attached_skills`, attach point 1), whose `skill_reagents`
+are one of 26548 / 34583. The mount branch of `CSStartSkill` now runs the rider skill's **full**
+`Skill.Use` check (`skill::unit_use_skill_check`, the check-only mode of `use_skill`) before the
+slave skill casts, and refuses the press with the rider's result/value when it fails. That covers
+reagents, requirements, cooldown and the other checks the late `unit_use_skill` call would apply,
+so the missing fuel no longer leaves buff 4841 behind and no slave animation is played. With fuel
+the rider skill still runs after the mount skill and consumes the item. The same gate covers every
+`mount_attached_skills` row with reagents (the ship speed boosts 25632/22459/22449/22451/22450/
+22449, the cannon projectile rider skills, ...), not only the wagon. The 10.x decompile has
+`mount_skills.check_attach_point` / `must_use_check` and the `mount_attached_skills` loader
+(`x2game-dev_dedicate.dll.c:2614999-2615210`), consistent with a pre-check, but its runtime
+consumer was not located; the 1.2 ordering/result is therefore not proven there.
+- **RemoveItem now needs the full count before the cast.** Before, the func body consumed what
+  the bag held and advanced the phase whenever the remaining balance was >0
+  (`bag_consume_item`/`container.rs:806`), so a partial stack paid and advanced. Doodads 7261 and
+  7281-7283 (item 29943 x10 / x30) could be advanced with fewer items; the cast-start gate now
+  requires `item_id` x `count` (the effect-time consume stays as the second check).
+- **The rider's full check can now refuse the vehicle skill itself.** Because the mount skill is
+  refused when the rider's `Skill.Use` check fails, unit requirements, cooldowns and target
+  requirements that used to fail only after the slave cast now stop the press. Examples: horse
+  archery 11018 / 11019 / 17156 need a bow, and torpedo 25538 -> 23123 needs target NPC 13680.
+  The same applies to buff requirements and to the rider's own cooldown.
+- ConsumeChanger refusals now carry the first accepted `doodad_func_consume_changer_items` id and
+  BuyFish carries the func's fish item id as the `NEED_REAGENT` value (they were 0), so the 1.2
+  client's item-name lookup (`x2game.dll.c:742315`) always finds a template. The doodad gate runs
+  after `gathering::allows_skill` (a disallowed skill keeps `INVALID_TARGET`) and is skipped for
+  Mount casters, whose effect caster is the slave.

@@ -8,7 +8,7 @@ use super::events::QuestEvent;
 use super::model::{
     acceptor, game_point, item_task, kind, sphere_trigger, ItemCreationDefinition, ObjectiveStatus,
 };
-use super::packets::SCAppellationGainedPacket;
+use super::packets::{quest_error, SCAppellationGainedPacket};
 use super::state::{ActPath, EventKind, QuestHandle};
 use super::templates::ActKind;
 use crate::models::container::slot_type;
@@ -1159,8 +1159,10 @@ impl Ctx<'_> {
                         quest_template,
                         &format!("NPC {n} is not the report NPC {npc_id}"),
                     );
+                    self.report_reply().mismatch_refusal = Some(quest_error::INVALID_NPC_OR_QUEST);
                     return Ok(());
                 }
+                self.report_reply().target_matched = true;
                 if !self.report_ready(h, quest_template) {
                     let status = self.objective_status(h);
                     self.log_refusal(
@@ -1168,6 +1170,7 @@ impl Ctx<'_> {
                         quest_template,
                         &format!("NPC {n}: the objectives are not complete ({status:?})"),
                     );
+                    self.report_reply().matched_refusal = Some(quest_error::INVALID_QUEST_STATUS);
                     return Ok(());
                 }
                 if let Some(q) = self.st.quest_mut(h) {
@@ -1177,6 +1180,7 @@ impl Ctx<'_> {
                 if self.st.quest(h).is_some_and(|q| q.step <= kind::PROGRESS) {
                     self.set_step(h, kind::READY);
                 }
+                self.report_reply().accepted = true;
                 self.request_evaluation(h);
             }
             (
@@ -1196,8 +1200,10 @@ impl Ctx<'_> {
                         quest_template,
                         &format!("doodad {d} is not the report doodad {doodad_id}"),
                     );
+                    self.report_reply().mismatch_refusal = Some(quest_error::INVALID_DOODAD);
                     return Ok(());
                 }
+                self.report_reply().target_matched = true;
                 if !self.report_ready(h, quest_template) {
                     let status = self.objective_status(h);
                     self.log_refusal(
@@ -1205,6 +1211,7 @@ impl Ctx<'_> {
                         quest_template,
                         &format!("doodad {d}: the objectives are not complete ({status:?})"),
                     );
+                    self.report_reply().matched_refusal = Some(quest_error::INVALID_QUEST_STATUS);
                     return Ok(());
                 }
                 if let Some(q) = self.st.quest_mut(h) {
@@ -1214,6 +1221,7 @@ impl Ctx<'_> {
                 if self.st.quest(h).is_some_and(|q| q.step == kind::PROGRESS) {
                     self.set_step(h, kind::READY);
                 }
+                self.report_reply().accepted = true;
                 self.request_evaluation(h);
             }
             (ConReportJournal, QuestEvent::ReportJournal) => {

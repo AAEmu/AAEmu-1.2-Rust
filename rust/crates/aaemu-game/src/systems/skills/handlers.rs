@@ -205,7 +205,7 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
         p.caster.obj_id(),
         target.obj_id()
     );
-    let result;
+    let mut result;
     let mut value = 0u32;
     let data = &server.game_data;
     // A skill reached only through an item use must come with that item: the plain unit cast
@@ -244,6 +244,51 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
         send_cast_refused(&player, skill_id, p.caster, target, p.skill_object);
         return;
     }
+    // 1.2 doodad-use skills: the func's item requirement must be met before the cast starts.
+    // The client has no pre-check for these (`link_equip_slot_id` -1) and only stops the cast
+    // when `SCSkillStarted` carries a non-zero result; it plays the bar and animation otherwise.
+    // A Mount caster's effect caster is the slave, so only a player caster acting on its own
+    // behalf is gated here. `allows_skill` runs first: a disallowed skill must keep its
+    // INVALID_TARGET answer instead of turning into an item refusal.
+    if !matches!(p.caster, SkillCaster::Mount { .. }) {
+        if let (SkillCastTarget::Doodad(obj_id), Some(skill)) =
+            (target, data.systems.skills.skill(skill_id))
+        {
+            let doodad = super::geometry::world_of(server, &me)
+                .and_then(|world| world.object(obj_id))
+                .and_then(|object| object.as_doodad().cloned());
+            if let Some(doodad) = doodad.filter(|doodad| {
+                crate::systems::npcs::doodad::gathering::allows_skill(server, doodad, skill, &me)
+            }) {
+                if let Some(refusal) = crate::systems::npcs::doodad::item_gate::skill_item_refusal(
+                    server, &doodad, skill, &me,
+                ) {
+                    tracing::debug!(
+                        character = %player.data().unit.name,
+                        skill_id,
+                        doodad = obj_id,
+                        result = refusal.result,
+                        "Client doodad cast refused: the func's item requirement is not met"
+                    );
+                    if let Some(error) = refusal.error {
+                        crate::systems::economy::inventory::send_error_message(
+                            &player, error, 0, true,
+                        );
+                    }
+                    send_cast_failed(
+                        &player,
+                        skill_id,
+                        p.caster,
+                        target,
+                        p.skill_object,
+                        refusal.result,
+                        refusal.value,
+                    );
+                    return;
+                }
+            }
+        }
+    }
     let is_default = data.skills.is_default_skill(skill_id);
     let is_common = data.skills.is_common_skill(skill_id);
     let auto = player.data().unit.skill_state.auto_attack.clone();
@@ -281,6 +326,32 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
             send_cast_refused(&player, skill_id, p.caster, target, p.skill_object);
             return;
         }
+        // The client names the exact `mount_skills` row it pressed; using it keeps the 1.2
+        // duplicate skill ids apart (59 '물 퍼올리기' vs 226 '물 퍼올리기(견본)', both 15546)
+        // and picks that row's rider / operator skill.
+        let mount_skill_id = match p.caster {
+            SkillCaster::Mount {
+                mount_skill_template_id,
+                ..
+            } => mount_skill_template_id,
+            _ => 0,
+        };
+        if !super::mount_authority::may_use_vehicle_skill_row(
+            server,
+            &caster,
+            mount_skill_id,
+            skill_id,
+        ) {
+            tracing::warn!(
+                character = %player.data().unit.name,
+                skill_id,
+                mount_skill_id,
+                caster = p.caster.obj_id(),
+                "Client mount cast names a mount skill row outside the vehicle's bar refused"
+            );
+            send_cast_refused(&player, skill_id, p.caster, target, p.skill_object);
+            return;
+        }
         // StormShipLogic.TryBlockMountOrSlaveSkill (vehicles + ai storm buff)
         if let Some(slave) = caster.as_slave() {
             if crate::systems::vehicles::ship_physics::storm_blocks_slave_skill(
@@ -300,7 +371,47 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
                 return;
             }
         }
-        let (r, _v) = skill::use_skill(
+        // The vehicle bar skill can carry a rider / operator skill (`mount_attached_skills`).
+        // Its full use check belongs to the press that fires it: run the same checks
+        // `unit_use_skill` would run before the slave skill casts, so a refusal (missing
+        // reagent, cooldown, requirement, ...) leaves neither the slave animation nor its buff
+        // behind (the Farm Wagon's eco fuel, 20291 -> 20292). On success the rider still runs
+        // and consumes the item after the mount skill, as before.
+        let rider_skill = data
+            .systems
+            .vehicles
+            .mount_attached_skill(mount_skill_id, player.data().attached_point);
+        let rider_target = (rider_skill != 0).then(|| {
+            let current = player.data().unit.current_target;
+            super::geometry::world_of(server, &me)
+                .and_then(|w| w.object(current))
+                .filter(WorldObject::is_unit)
+                .unwrap_or_else(|| me.clone())
+        });
+        if let (rider_skill, Some(rider_target)) = (rider_skill, rider_target.as_ref()) {
+            let (result, value) =
+                skill::unit_use_skill_check(server, &me, rider_skill, rider_target);
+            if result != skill_result::SUCCESS {
+                tracing::debug!(
+                    character = %player.data().unit.name,
+                    skill_id,
+                    rider_skill,
+                    result,
+                    "Client mount cast refused: the attached rider skill's use check failed"
+                );
+                send_cast_failed(
+                    &player,
+                    skill_id,
+                    p.caster,
+                    target,
+                    p.skill_object,
+                    result,
+                    value,
+                );
+                return;
+            }
+        }
+        let (r, v) = skill::use_skill(
             server,
             &skill,
             &caster,
@@ -309,12 +420,15 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
             Some(p.skill_object.clone()),
             false,
         );
+        result = r;
+        value = v;
         // Harpoon rope controller + MateGameData.GetMountAttachedSkills (vehicles subsystem)
         let mount_attached_skill = crate::systems::vehicles::on_mount_skill_used(
             server,
             &player,
             &caster,
             skill_id,
+            mount_skill_id,
             r == skill_result::SUCCESS,
             &target,
         );
@@ -322,13 +436,15 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
         if mount_attached_skill == 0 {
             return;
         }
-        // Use player's currently selected target for the rider/operator skill
-        let current = player.data().unit.current_target;
-        let rider_target = super::geometry::world_of(server, &me)
-            .and_then(|w| w.object(current))
-            .filter(WorldObject::is_unit)
-            .unwrap_or_else(|| me.clone());
-        result = skill::unit_use_skill(server, &me, mount_attached_skill, &rider_target);
+        // The rider/operator skill belongs to a successful mount cast. A refused mount skill
+        // (e.g. NO_TARGET for a unit target on a BallisticPos cannon skill) must keep its
+        // result: running the rider anyway would overwrite it with its own result and hide
+        // the refusal from the client.
+        if r == skill_result::SUCCESS {
+            // The rider target was resolved before the mount cast and the pre-check used it.
+            let rider_target = rider_target.unwrap_or_else(|| me.clone());
+            result = skill::unit_use_skill(server, &me, mount_attached_skill, &rider_target);
+        }
     } else if is_auto
         && auto
             .as_ref()
@@ -530,10 +646,31 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
     }
     if result != skill_result::SUCCESS {
         tracing::debug!(skill_id, result, value, "Client skill failed");
-        let mut pkt = SCSkillStartedPacket::new(skill_id, 0, p.caster, target, p.skill_object);
-        pkt.set_skill_result(result).set_result_uint(value);
-        player.send(pkt);
+        send_cast_failed(
+            &player,
+            skill_id,
+            p.caster,
+            target,
+            p.skill_object,
+            result,
+            value,
+        );
     }
+}
+
+/// Answers a refused client cast with the started-skill packet carrying `result` / `value`.
+fn send_cast_failed(
+    player: &crate::world::PlayerRef,
+    skill_id: u32,
+    caster: SkillCaster,
+    target: SkillCastTarget,
+    object: SkillObject,
+    result: u8,
+    value: u32,
+) {
+    let mut pkt = SCSkillStartedPacket::new(skill_id, 0, caster, target, object);
+    pkt.set_skill_result(result).set_result_uint(value);
+    player.send(pkt);
 }
 
 /// Answers a refused client cast with the started-skill packet carrying `NO_PERM`.
@@ -544,10 +681,15 @@ fn send_cast_refused(
     target: SkillCastTarget,
     object: SkillObject,
 ) {
-    let mut pkt = SCSkillStartedPacket::new(skill_id, 0, caster, target, object);
-    pkt.set_skill_result(skill_result::NO_PERM)
-        .set_result_uint(0);
-    player.send(pkt);
+    send_cast_failed(
+        player,
+        skill_id,
+        caster,
+        target,
+        object,
+        skill_result::NO_PERM,
+        0,
+    );
 }
 
 #[cfg(test)]
