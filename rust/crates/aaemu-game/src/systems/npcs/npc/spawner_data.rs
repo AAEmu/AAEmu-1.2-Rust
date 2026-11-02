@@ -19,6 +19,7 @@ use std::sync::{Arc, RwLock};
 use rusqlite::Connection;
 
 use crate::data::sqlite::for_each_row;
+use crate::systems::npcs::npc::group_data::NpcGroupData;
 use crate::systems::DataLoadCtx;
 
 /// `NpcSpawnerCategory` (`npc_spawner_category_id`; the C# enum cast keeps any value).
@@ -275,8 +276,43 @@ impl NpcSpawnerData {
     }
 
     /// `GetSpawnerIds(memberId)` (`null` = `None`).
+    ///
+    /// The index also contains the NPC ids of `"NpcGroup"` member rows after
+    /// [`Self::index_npc_groups`]; the C# only indexed the raw `MemberId` (the group id), which
+    /// no world placement uses.
     pub fn get_spawner_ids(&self, member_id: u32) -> Option<Vec<u32>> {
         self.read().member_spawners.get(&member_id).cloned()
+    }
+
+    /// Adds the group member NPC ids of every `"NpcGroup"` member row to the member ->
+    /// spawner template id index. A world placement names a concrete NPC template in `UnitId`,
+    /// so without this a `"NpcGroup"` spawner template could never be selected for its own
+    /// placements (the group id is not an NPC template id). Ids already present keep their
+    /// position; a spawner template is never listed twice for one NPC.
+    pub fn index_npc_groups(&self, groups: &NpcGroupData) {
+        let mut inner = self.write();
+        let additions: Vec<(u32, u32)> = inner
+            .npcs
+            .iter()
+            .filter(|nsn| nsn.member_type == "NpcGroup")
+            .flat_map(|nsn| {
+                groups
+                    .members(nsn.member_id)
+                    .iter()
+                    .map(move |m| (m.npc_id, nsn.npc_spawner_template_id))
+            })
+            .collect();
+        for (npc_id, spawner_id) in additions {
+            let spawners = inner.member_spawners.entry(npc_id).or_default();
+            if !spawners.contains(&spawner_id) {
+                spawners.push(spawner_id);
+            }
+        }
+    }
+
+    /// Every member row in insertion order (diagnostics / real-data tests).
+    pub fn all_npc_spawner_npcs(&self) -> Vec<NpcSpawnerNpc> {
+        self.read().npcs.clone()
     }
 
     /// `GetNpcSpawnerTemplate(id)`.

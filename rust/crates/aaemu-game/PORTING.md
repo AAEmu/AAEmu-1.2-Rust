@@ -237,6 +237,7 @@ These `SpecialType` bodies were TODO stubs that only logged in the C# (`git show
 | `Npc.DoDie` | `npc/death.rs` | done | Kill exp (team eligibility, `PlayerExpModifier`, mate exp, TagShare contributors), quest kill events, loot (`LootManager.GenerateLoot` through the economy), aggro / tagger clean-up, spawner despawn, `Ai.GoToDead()` (`systems::ai`). |
 | NPC interaction packets (CSStartInteraction, CSInteractNPC(End), CSSelectInteractionEx; SCNpcInteractionSkillList, SCAiAggro, SCNpcChatMessage, SCUnitModelPostureChanged, SCAggroTargetChanged) | `npc/packets.rs` | done | Byte-exact tests. Merchant / bank / auction UIs are economy's. **Deviation:** `CSStartInteractionPacket` also answers a slave with one seat skill, because the 1.2 client acts on the first list entry (`FUN_393be850` / `FUN_393be280`): 12076 (occupy) while the driver seat is free, else 13863 (passenger seat, `special_effects` 2378 value1 2) while point 2 is free, the slave's model declares point 2 in `model_bindings` and the slave is not a cannon; a slave with both seats taken keeps 12076; the bind then ignores the taken seat silently (C# behaviour). The C# answered only NPCs and mates (12077). |
 | `NpcGameData` (npc_spawners, npc_spawner_npcs, member index, generated spawners) | `npc/spawner_data.rs` | done | |
+| `NpcGroupGameData` (`npc_groups`, `npc_group_members`) | `npc/group_data.rs` | done | 158 groups / 571 member rows on the real DB; every one of the 147 `NpcGroup` spawner rows resolves to a group whose 531 member NPC templates exist. A `"NpcGroup"` spawner member expands into all group members at the spawner position plus `formation_offset_*` (see deviations). |
 | `NpcSpawner`, `NpcSpawnerNpc`, `DoodadSpawner`, `Spawner<T>` | `npc/spawner.rs`, `doodad/spawner.rs` | done | Schedules / time windows / population caches, respawn + despawn timing, exact-identity reconciliation of direct deletes (see deviations). Ordinary populations keep the authored `Count` / `min_population` baseline (default 1) and per-slot respawn deadlines (see deviations). AI home position / follow path / simulation through `server.systems.hooks.ai` (`systems::ai`). |
 | `SpawnManager` (one per instance) + `WorldManager.ActiveRegionTick` spawner part | `spawn_manager.rs` | done | main_world: 25 118 NPC entries -> 24 047 ordinary placements / 38 174 spawner clones (1 011 duplicates and 60 event entries filtered, 0 missing templates), 42 649 doodads, 69 transfers, 14 gimmicks, 5 slaves, 0 parse errors. Ordinary spawning is a bounded per-instance 64 m region-index activation pass (`World.NpcPrewarmRegionMargin` / `World.NpcSpawnTickMs` / `World.NpcSpawnsPerTick`) with warm retention and resident-service retention (`World.NpcWarmRetentionSeconds` / `World.NpcResidentServiceNpcs`; see deviations). Persistent doodads from MySQL. Transfers / slaves: `systems::vehicles`; houses and their doodads: `systems::housing`; trial court doodads / NPCs linked after the spawns (`TrialManager.Initialize*`). |
 | `DoodadManager.Load` (templates, func groups, funcs, phase funcs, all 121 func template tables) | `doodad/data.rs`, `doodad/templates.rs` | done | 7 124 templates, 13 974 funcs, 24 465 phase funcs (counts match the DB). |
@@ -890,6 +891,30 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 ## Known deviations from the C#
 
 * systems::npcs (persistent doodads): `SpawnPersistentDoodads` skips the housing lookup for SLAVE-owned rows. In the C# every row with `houseId > 0` was resolved as a house, but for vehicle cargo racks `house_id` holds the hull id, so it logged "can't find it's owning house" (or, if a house with that id existed, parented the rack to it before the slave re-attach).
+
+* systems::npcs (2026-11-02, NPC groups): the C# `NpcGroupGameData` loaded `npc_groups` /
+  `npc_group_members` but never used them: `NpcSpawnerNpc.SpawnNpcGroup` just called
+  `SpawnNpc`, so the row's `MemberId` (an `npc_groups.id`) was created as an NPC template id.
+  All 147 `NpcGroup` spawner rows resolve to a group; 134 of those group ids also exist as an
+  unrelated NPC template id (so the wrong NPC spawned) and the other 13 spawned nothing. Rust
+  deviates: a `"NpcGroup"` member spawns every `npc_group_members.npc_id` of `MemberId`'s group
+  at the spawner position plus that member's `formation_offset_x/y/z`, each with the ordinary
+  spawner link, population registration and respawn bookkeeping. The member -> spawner template
+  index (`GetSpawnerIds`) also maps the group's member NPC ids to the group's spawner template;
+  the C# index only knew the raw group id, so a world placement (whose `UnitId` is a member
+  NPC) never selected the group template. The group batch is one authored encounter: it spawns
+  whole even when fewer population slots remain (a `max_population` of 1 with a 3-member group
+  yields 3 units), while ordinary `"Npc"` members keep the hard per-unit cap. The population
+  target still counts individual NPCs, so a partially killed group may not schedule a
+  per-member respawn while enough members live; it refills when the spawner empties.
+  `get_npc_spawner_at` (`SpawnEffect`) now rewrites only an ordinary `"Npc"` member row; a unit
+  reachable only through a group keeps the generated single-NPC fallback instead of corrupting
+  the shared group template. Capture-pending: `formation_offset_*` are applied as authored
+  world-axis deltas, not rotated by the spawner yaw (the 1.2 client `game_pak` only exposes
+  runtime AI formation strings such as `FORMATION_POINT` / `FormationManager`, no placement
+  rule). `aggro_rule_id` (group aggro), `is_leader` / `is_move_leader` (leader following),
+  `formation_tension` and `enable_respawn` (true for 42 of the 141 groups used by spawners) are
+  loaded but not applied.
 
 * systems::services (beauty salon): `ApplyBeautySalon` creates the requested hair item when
   the equipment hair slot is empty. The C# guard required an existing hair item, so a paid
