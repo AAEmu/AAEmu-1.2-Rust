@@ -11,8 +11,13 @@
 //!   (`FilterWithRelation`, relative to the aura owner); the slave buff's caster is the owner.
 //! * AURA-2: the owner itself is a recipient for Any / Friendly / Party / Raid (the
 //!   descriptions say "caster and allies"); whether 1.2 does this is inferred.
-//! * AURA-3: a recipient leaving the radius or failing the relation loses the copy applied by
-//!   this aura (matched by template id and caster obj id, so a separately cast copy survives).
+//! * AURA-3: a recipient leaving the radius or failing the relation loses only the copy applied
+//!   by this aura (matched by template id and caster obj id, so a copy from another caster
+//!   survives). Every tick also renews a current member that holds no live copy from ANY caster
+//!   (expired, dispelled, dropped on death, or its caster left); it does not add while another
+//!   caster's copy exists, so two owners do not refresh each other forever. A copy whose caster
+//!   was overwritten by a REFRESH stack rule is re-added by the remaining owner within one tick
+//!   after the overwriting owner leaves.
 //! * AURA-4: the aura is evaluated on a 1000 ms enter/leave diff (no movement hook); the 1.2
 //!   update period is UNKNOWN.
 //! * AURA-5: `aura_child_only` reaches only the owner's attached characters (slave
@@ -24,6 +29,10 @@
 //!   keeps its aura (UNKNOWN in 1.2).
 //! * AURA-7: a dangling slave id (6668 -> 6669), a self-referencing slave (1224 -> 1224) and an
 //!   aura without a slave buff (15 rows) are skipped and reported once at load.
+//! * AURA-8: an entry is dropped unless the same owner object still holds a live source effect
+//!   (object identity + effect check), so a recycled object id or a removal that raced the
+//!   registration cannot leave a ghost aura. Recipients that are dead do not get the slave
+//!   buff re-added unless it is `dead_applicable`.
 //! * CROWD-1: a unit carrying a buff with `crowd_buff_id > 0` gets that buff (self-cast) while
 //!   at least `crowd_number` OTHER units carry the same source buff within `crowd_radius` and
 //!   match `crowd_friendly` / `crowd_hostile`; the crowd buff is removed when the count drops.
@@ -57,6 +66,9 @@ static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug, Clone)]
 struct Entry {
     owner_obj_id: u32,
+    /// Identity of the owner object (`ObjectCore` address), so a recycled obj id cannot keep a
+    /// ghost aura alive (AURA-8).
+    owner_core: usize,
     /// The aura / crowd source buff on the owner.
     buff_id: u32,
     /// Distinguishes a re-registered entry from an older tick's snapshot.
@@ -150,6 +162,7 @@ impl AuraState {
 impl Entry {
     fn new(
         owner_obj_id: u32,
+        owner_core: usize,
         buff_id: u32,
         instance_id: u32,
         t: &BuffTemplate,
@@ -157,6 +170,7 @@ impl Entry {
     ) -> Self {
         Self {
             owner_obj_id,
+            owner_core,
             buff_id,
             generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
             instance_id,
@@ -202,13 +216,25 @@ pub fn on_buff_started(server: &GameServer, owner: &WorldObject, b: &Buff) {
     if !has_slave && !is_crowd {
         return;
     }
+    // A Started event queued before a concurrent removal can arrive after the effect is gone;
+    // do not register a ghost entry for it (AURA-8).
+    let holds = owner.with_base_unit(|b| {
+        b.buffs()
+            .effects
+            .iter()
+            .any(|e| !e.is_ended() && e.template.id == id)
+    });
+    if !holds {
+        return;
+    }
     let key = (owner.obj_id(), id);
     // Read the transform before taking the registry lock, so the registry is never held while
     // an object's data is locked.
     let instance_id = owner.transform().instance_id;
+    let owner_core = owner.core() as *const _ as usize;
     let mut map = server.systems.skills.aura.lock();
     map.entry(key)
-        .or_insert_with(|| Entry::new(owner.obj_id(), id, instance_id, t, has_slave));
+        .or_insert_with(|| Entry::new(owner.obj_id(), owner_core, id, instance_id, t, has_slave));
 }
 
 /// Unregisters the owner and strips what this aura / crowd effect applied (AURA-3, AURA-6,
@@ -278,6 +304,21 @@ fn step(server: &GameServer, key: (u32, u32), mut entry: Entry) {
         return;
     };
     if !geometry::is_live_object(server, &owner) {
+        drop_entry(server, key, &entry);
+        return;
+    }
+    // A recycled obj id or a removal that raced the registration must not keep a ghost aura.
+    if owner.core() as *const _ as usize != entry.owner_core {
+        drop_entry(server, key, &entry);
+        return;
+    }
+    let holds_source = owner.with_base_unit(|b| {
+        b.buffs()
+            .effects
+            .iter()
+            .any(|e| !e.is_ended() && e.template.id == entry.buff_id)
+    });
+    if !holds_source {
         drop_entry(server, key, &entry);
         return;
     }
@@ -370,19 +411,36 @@ fn sync_recipients(
     owner: &WorldObject,
     current: HashSet<u32>,
 ) {
+    // Leave: only this aura's copy goes (AURA-3).
     let removed: Vec<u32> = entry.recipients.difference(&current).copied().collect();
-    let added: Vec<u32> = current.difference(&entry.recipients).copied().collect();
     for id in removed {
         if let Some(obj) = buffs::find_obj(server, id) {
             remove_owned(server, &obj, entry.slave_buff_id, entry.owner_obj_id);
         }
     }
+    // Every current member needs a live copy, not merely a member that just entered: expiry,
+    // dispels, death cleanup and a leaving caster all drop it while the member stays in range.
+    // A copy from any caster counts, so two owners covering the same unit do not overwrite each
+    // other every tick (REFRESH stack rule would move the caster back and forth).
+    let dead_applicable = server
+        .game_data
+        .systems
+        .skills
+        .buff(entry.slave_buff_id)
+        .is_some_and(|t| t.dead_applicable);
     let mut applied = Vec::new();
-    for id in added {
-        if let Some(obj) = buffs::find_obj(server, id) {
-            buffs::add_buff_by_id(server, &obj, entry.slave_buff_id, owner, 0);
-            applied.push(id);
+    for id in &current {
+        let Some(obj) = buffs::find_obj(server, *id) else {
+            continue;
+        };
+        if has_live_buff(&obj, entry.slave_buff_id) {
+            continue;
         }
+        if !dead_applicable && obj.with_unit(|u| u.unit().hp <= 0).unwrap_or(false) {
+            continue;
+        }
+        buffs::add_buff_by_id(server, &obj, entry.slave_buff_id, owner, 0);
+        applied.push(*id);
     }
     // The entry can be unregistered (or re-registered) while the buffs above start. Commit only
     // onto the same generation; otherwise the additions above belong to an ended aura.
@@ -464,6 +522,16 @@ fn crowd_count(server: &GameServer, entry: &Entry, owner: &WorldObject) -> i32 {
         }
     }
     count
+}
+
+/// Whether the unit holds a live copy of `buff_id` from any caster (AURA-3).
+fn has_live_buff(owner: &WorldObject, buff_id: u32) -> bool {
+    owner.with_base_unit(|b| {
+        b.buffs()
+            .effects
+            .iter()
+            .any(|e| !e.is_ended() && e.template.id == buff_id)
+    })
 }
 
 /// The index of the effect with `buff_id` whose caster is `caster_obj_id`.

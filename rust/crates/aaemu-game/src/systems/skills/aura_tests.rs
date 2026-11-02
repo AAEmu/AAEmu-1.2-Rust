@@ -7,11 +7,12 @@ use std::sync::Arc;
 
 use crate::data::world_data::{FactionRelation, SystemFaction};
 use crate::data::GameData;
+use crate::models::npc::Npc;
 use crate::models::slave::Slave;
 use crate::systems::skills::data::templates;
 use crate::systems::skills::data::BuffTemplate;
-use crate::systems::skills::types::RelationState;
-use crate::systems::skills::{aura, buffs, install_hooks};
+use crate::systems::skills::types::{stack_rule, RelationState};
+use crate::systems::skills::{aura, bind, buffs};
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient, TEST_ZONE};
 use crate::world::{Entity, PlayerRef, WorldObject};
 use crate::GameServer;
@@ -34,6 +35,10 @@ const AURA_SELF_REF: u32 = 9020;
 const AURA_DANGLING: u32 = 9030;
 const AURA_DEATH: u32 = 9040;
 const SLAVE_DEATH: u32 = 9140;
+const AURA_REFRESH: u32 = 9011;
+const SLAVE_REFRESH: u32 = 9130;
+const AURA_TIMED: u32 = 9012;
+const SLAVE_TIMED: u32 = 9131;
 const CROWD_SOURCE: u32 = 9200;
 const CROWD_BUFF: u32 = 9201;
 
@@ -90,6 +95,8 @@ fn aura_server() -> Arc<GameServer> {
             remove_on_death: true,
             ..aura_buff(AURA_DEATH, 20, 0, SLAVE_DEATH)
         },
+        aura_buff(AURA_REFRESH, 20, 1, SLAVE_REFRESH),
+        aura_buff(AURA_TIMED, 20, 1, SLAVE_TIMED),
         BuffTemplate {
             crowd_buff_id: CROWD_BUFF,
             crowd_radius: 10.0,
@@ -109,14 +116,25 @@ fn aura_server() -> Arc<GameServer> {
         SLAVE_HOSTILE,
         SLAVE_OTHERS,
         SLAVE_CHILD,
-        SLAVE_DEATH,
         CROWD_BUFF,
     ] {
         data.systems.skills.add_buff(buff(id));
     }
+    data.systems.skills.add_buff(BuffTemplate {
+        remove_on_death: true,
+        ..buff(SLAVE_DEATH)
+    });
+    data.systems.skills.add_buff(BuffTemplate {
+        stack_rule: stack_rule::REFRESH,
+        ..buff(SLAVE_REFRESH)
+    });
+    data.systems.skills.add_buff(BuffTemplate {
+        duration: 60,
+        ..buff(SLAVE_TIMED)
+    });
     let server = Arc::new(test_server_with(data));
     server.set_self();
-    install_hooks(&server);
+    bind(&server);
     server
 }
 
@@ -254,23 +272,155 @@ async fn enter_and_leave_radius_adds_and_removes_the_slave_buff() {
     let server = aura_server();
     let w = world(&server);
     w.a.add(&server, AURA_FRIENDLY);
-    // A separately cast copy (caster = the ally itself) must survive the aura removal. It is
-    // added first so a removal that ignores the caster would take *it* instead.
-    buffs::add_buff_by_id(&server, &w.ally.obj(), SLAVE_FRIENDLY, &w.ally.obj(), 0);
     aura::tick(&server);
-    assert_eq!(w.ally.count(SLAVE_FRIENDLY), 2);
+    assert_eq!(w.ally.casters(SLAVE_FRIENDLY), vec![w.a.p.obj_id]);
 
     w.ally.move_to(150.0);
     aura::tick(&server);
-    assert_eq!(w.ally.casters(SLAVE_FRIENDLY), vec![w.ally.p.obj_id]);
-    assert_eq!(w.ally.count(SLAVE_FRIENDLY), 1);
+    assert!(!w.ally.has(SLAVE_FRIENDLY), "leaving removes the aura copy");
 
-    // Re-entering the radius adds the aura copy again.
+    // Re-entering the radius adds it again (the member is not in the stored set any more).
     w.ally.move_to(110.0);
     aura::tick(&server);
-    let mut casters = w.ally.casters(SLAVE_FRIENDLY);
-    casters.sort_unstable();
-    assert_eq!(casters, vec![w.a.p.obj_id, w.ally.p.obj_id]);
+    assert_eq!(w.ally.casters(SLAVE_FRIENDLY), vec![w.a.p.obj_id]);
+}
+
+#[tokio::test]
+async fn refresh_slave_is_renewed_when_its_caster_leaves() {
+    // Real slave buffs (all 66 with stack rule 1) use REFRESH, so a second owner's copy would
+    // overwrite the caster instead of adding an effect. The remaining owner must re-add the buff
+    // on the next tick after the overwriting owner leaves (AURA-3).
+    let server = aura_server();
+    let a = Pc::new(&server, 1, 100.0, 101);
+    let b = Pc::new(&server, 2, 105.0, 101);
+    let x = Pc::new(&server, 3, 110.0, 101);
+    a.add(&server, AURA_REFRESH);
+    b.add(&server, AURA_REFRESH);
+    aura::tick(&server);
+    assert_eq!(x.count(SLAVE_REFRESH), 1, "REFRESH keeps one copy");
+    let caster = x.casters(SLAVE_REFRESH)[0];
+    let (departing, remaining) = if caster == a.p.obj_id {
+        (&a, &b)
+    } else {
+        (&b, &a)
+    };
+
+    buffs::remove_buff(&server, &departing.obj(), AURA_REFRESH);
+    assert!(
+        !x.has(SLAVE_REFRESH),
+        "the only copy was the departing owner's"
+    );
+    aura::tick(&server);
+    assert!(
+        x.has(SLAVE_REFRESH),
+        "the remaining owner renews it next tick"
+    );
+    assert_eq!(x.casters(SLAVE_REFRESH), vec![remaining.p.obj_id]);
+}
+
+#[tokio::test]
+async fn dead_recipient_gets_the_slave_buff_back_after_resurrect() {
+    let server = aura_server();
+    let w = world(&server);
+    w.a.add(&server, AURA_DEATH);
+    aura::tick(&server);
+    assert!(w.ally.has(SLAVE_DEATH));
+
+    w.ally.p.data().unit.hp = 0;
+    buffs::remove_effects_on_death(&server, &w.ally.obj());
+    aura::tick(&server);
+    assert!(
+        !w.ally.has(SLAVE_DEATH),
+        "a dead unit does not get the slave buff re-added"
+    );
+
+    w.ally.p.data().unit.hp = 100;
+    aura::tick(&server);
+    assert!(
+        w.ally.has(SLAVE_DEATH),
+        "resurrected in range, the slave buff returns"
+    );
+}
+
+#[tokio::test]
+async fn expired_and_dispelled_slave_buffs_are_renewed_in_place() {
+    let server = aura_server();
+    let w = world(&server);
+    w.a.add(&server, AURA_TIMED);
+    aura::tick(&server);
+    assert!(w.ally.has(SLAVE_TIMED));
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(!w.ally.has(SLAVE_TIMED), "the slave's own timer removed it");
+    aura::tick(&server);
+    assert!(w.ally.has(SLAVE_TIMED), "a timed slave is renewed in range");
+
+    w.a.add(&server, AURA_FRIENDLY);
+    aura::tick(&server);
+    assert!(w.ally.has(SLAVE_FRIENDLY));
+    buffs::remove_buff(&server, &w.ally.obj(), SLAVE_FRIENDLY);
+    assert!(!w.ally.has(SLAVE_FRIENDLY));
+    aura::tick(&server);
+    assert!(w.ally.has(SLAVE_FRIENDLY), "a dispelled slave is renewed");
+}
+
+#[tokio::test]
+async fn third_party_copy_is_not_hijacked_or_removed() {
+    // A separately cast REFRESH copy on a current member must not be overwritten by the aura
+    // (which would make the aura's leave-removal take the third party's copy away).
+    let server = aura_server();
+    let a = Pc::new(&server, 1, 100.0, 101);
+    let x = Pc::new(&server, 2, 105.0, 101);
+    let third = Pc::new(&server, 3, 107.0, 101);
+    buffs::add_buff_by_id(&server, &x.obj(), SLAVE_REFRESH, &third.obj(), 0);
+    a.add(&server, AURA_REFRESH);
+    aura::tick(&server);
+    assert_eq!(
+        x.casters(SLAVE_REFRESH),
+        vec![third.p.obj_id],
+        "the aura does not overwrite another caster's copy"
+    );
+
+    x.move_to(150.0);
+    aura::tick(&server);
+    assert_eq!(
+        x.casters(SLAVE_REFRESH),
+        vec![third.p.obj_id],
+        "leaving removes only the aura's own copy"
+    );
+}
+
+#[tokio::test]
+async fn recycled_owner_id_does_not_keep_a_ghost_aura() {
+    let server = aura_server();
+    let w = world(&server);
+    w.a.add(&server, AURA_FRIENDLY);
+    aura::tick(&server);
+    assert!(w.ally.has(SLAVE_FRIENDLY));
+
+    // Logout: the object leaves the world without Removed events, and object ids are released
+    // for immediate reuse.
+    let instance = server.world.world(0).expect("main_world");
+    instance.remove_object(w.a.p.obj_id);
+    server.world.try_remove_character(w.a.p.obj_id);
+
+    // A different unit on the recycled id must not inherit the aura.
+    let mut ghost = Npc::new(1);
+    ghost.unit.hp = 100;
+    ghost.unit.max_hp = 100;
+    ghost.unit.transform.set_xyz(100.0, 100.0, 100.0);
+    ghost.unit.transform.zone_id = TEST_ZONE;
+    let ghost = Entity::new(w.a.p.obj_id, ghost);
+    instance.spawn(&ghost, &server.view_ctx());
+    aura::tick(&server);
+
+    assert!(
+        !WorldObject::from(&ghost).with_base_unit(|b| b.buffs().check_buff(SLAVE_FRIENDLY)),
+        "the recycled unit is not an aura owner"
+    );
+    assert!(
+        server.systems.skills.aura.is_empty(),
+        "the ghost entry is dropped"
+    );
 }
 
 #[tokio::test]
@@ -346,6 +496,8 @@ async fn child_only_reaches_only_attached_units() {
     let rider = Pc::new(&server, 1, 100.0, 101);
     let bystander = Pc::new(&server, 2, 100.5, 101);
     let mut slave = Slave::new(1, 1);
+    slave.unit.hp = 100;
+    slave.unit.max_hp = 100;
     slave.unit.transform.set_xyz(100.0, 100.0, 100.0);
     slave.unit.transform.zone_id = TEST_ZONE;
     slave.attached_characters.push((1, rider.p.obj_id));
