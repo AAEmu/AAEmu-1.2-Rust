@@ -309,7 +309,15 @@ async fn untagged_skill_keeps_its_individual_cooldown_and_negative_tags_are_not_
         });
         let (server, mut client, player, npc) = fixture(data);
         cast(&server, &mut client, UNTAGGED, npc.obj_id);
-        assert!(client.drain_ops().contains(&sc::SCSkillFiredPacket));
+        let frames = client.drain();
+        assert!(frames.iter().any(|(op, _)| *op == sc::SCSkillFiredPacket));
+        // The individual timer reaches the client even without a tag (native OnCooldowns
+        // appends it; an untagged cast without a packet had no countdown).
+        let ui = cooldown_lists(&frames);
+        assert_eq!(ui.skills.len(), 1);
+        assert_eq!(ui.skills[0].0, UNTAGGED);
+        assert!(ui.skills[0].2 > 0);
+        assert!(ui.tags.is_empty());
         assert!(player.data().unit.cooldowns.tag_cooldowns.is_empty());
         cast(&server, &mut client, UNTAGGED, npc.obj_id);
         assert_denied(&client.drain(), skill_result::COOLDOWN_TIME);

@@ -277,11 +277,26 @@ pub fn cooldown(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
         f64::from(v[0]),
     );
     let skill_id = skill.template.id;
-    caster.with_unit(|u| {
-        u.unit_mut()
+    if duration <= 0.0 {
+        return;
+    }
+    let now = now_ms();
+    let packet = caster.with_unit(|u| {
+        let cooldowns = &mut u.unit_mut().cooldowns;
+        cooldowns.add_cooldown(skill_id, duration as u32, now);
+        let mut affected = crate::models::unit::UnitCooldowns::default();
+        affected
             .cooldowns
-            .add_cooldown(skill_id, duration as u32, now_ms())
+            .insert(skill_id, cooldowns.cooldowns[&skill_id]);
+        crate::systems::skills::packets::SCCooldownsPacket::from_cooldowns(&affected, now)
     });
+    // `OnCooldowns` (native 391D43C0) is what starts the countdown in the client's manager. No
+    // 1.2 skill uses this effect, but the path must tell the client like a cast cooldown does.
+    if let Some(packet) = packet.filter(|p| !p.is_empty()) {
+        if let Some(player) = caster.as_player() {
+            player.send(packet);
+        }
+    }
 }
 
 /// `GlobalCooldown`: `GlobalCooldown = now + value1 * (GlobalCooldownMul / 100)`.

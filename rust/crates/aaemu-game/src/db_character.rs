@@ -615,6 +615,12 @@ pub async fn load_character_details(server: &GameServer, c: &mut Character) -> R
         read_action_slots(&mut c.slots, &blob);
     }
 
+    // Running skill / shared-tag cooldowns. The C# `UnitCooldowns` was memory-only; this port
+    // persists the absolute expiries in `character_cooldowns` so a relog keeps the countdown and
+    // still refuses a cast until it runs out.
+    let cooldown_rows = fetch_character_cooldowns(pool, id).await;
+    apply_cooldown_rows(c, &cooldown_rows, Utc::now().timestamp_millis());
+
     // Mails: MailManager.GetCurrentMailList(Id) runs while the character is not registered in
     // the WorldManager yet, so the unread counters stay 0 (as in C#).
     c.unread_mail = CountUnreadMail::default();
@@ -820,6 +826,115 @@ pub fn apply_active_buffs(
     }
 }
 
+/// A `character_cooldowns` row: one running skill or shared tag cooldown of a character.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SavedCooldownRow {
+    /// `0` = skill id (`skills.id`), `1` = shared tag (`skills.cooldown_tag_id`).
+    pub kind: u8,
+    pub id: u32,
+    /// Unix milliseconds UTC when the cooldown expires.
+    pub expires_at_ms: i64,
+}
+
+/// `character_cooldowns.cooldown_type` of a per-skill cooldown.
+pub const COOLDOWN_TYPE_SKILL: u8 = 0;
+/// `character_cooldowns.cooldown_type` of a shared cooldown tag.
+pub const COOLDOWN_TYPE_TAG: u8 = 1;
+
+/// The rows `save_character` writes for the character's running cooldowns. Expired entries are
+/// dropped instead of persisted, so a relog neither restores a finished cooldown nor keeps a
+/// dead row forever. The client keeps at most 150 entries per list, but a character can only
+/// start cooldowns of skills it cast, so the stores stay small without a cap here.
+pub fn cooldown_rows(c: &Character, now_ms: i64) -> Vec<SavedCooldownRow> {
+    let mut rows = Vec::new();
+    for (&id, &end) in &c.unit.cooldowns.cooldowns {
+        if end > now_ms {
+            rows.push(SavedCooldownRow {
+                kind: COOLDOWN_TYPE_SKILL,
+                id,
+                expires_at_ms: end,
+            });
+        }
+    }
+    for (&id, &end) in &c.unit.cooldowns.tag_cooldowns {
+        if end > now_ms {
+            rows.push(SavedCooldownRow {
+                kind: COOLDOWN_TYPE_TAG,
+                id,
+                expires_at_ms: end,
+            });
+        }
+    }
+    rows.sort_by_key(|row| (row.kind, row.id));
+    rows
+}
+
+/// Restore [`cooldown_rows`] into a character (`Character.Load`). Expired rows and rows of an
+/// unknown kind are skipped; an existing longer expiry is kept.
+pub fn apply_cooldown_rows(c: &mut Character, rows: &[SavedCooldownRow], now_ms: i64) {
+    let mut restored = 0;
+    for row in rows {
+        if row.expires_at_ms <= now_ms {
+            continue;
+        }
+        let store = match row.kind {
+            COOLDOWN_TYPE_SKILL => &mut c.unit.cooldowns.cooldowns,
+            COOLDOWN_TYPE_TAG => &mut c.unit.cooldowns.tag_cooldowns,
+            _ => {
+                tracing::warn!(
+                    "LoadCharacterCooldowns: unknown cooldown type {} for character {}, skipping",
+                    row.kind,
+                    c.id
+                );
+                continue;
+            }
+        };
+        store
+            .entry(row.id)
+            .and_modify(|end| *end = (*end).max(row.expires_at_ms))
+            .or_insert(row.expires_at_ms);
+        restored += 1;
+    }
+    if restored > 0 {
+        tracing::info!(
+            "Restored {restored} active cooldown(s) for character {}",
+            c.id
+        );
+    }
+}
+
+/// The query half of the cooldown load (errors are logged and leave the character without
+/// restored cooldowns, like the active-buff load).
+pub async fn fetch_character_cooldowns(
+    pool: &MySqlPool,
+    character_id: u32,
+) -> Vec<SavedCooldownRow> {
+    let rows = match sqlx::query(
+        "SELECT CAST(cooldown_type AS SIGNED) AS cooldown_type, \
+         CAST(cooldown_id AS SIGNED) AS cooldown_id, expires_at_ms \
+         FROM `character_cooldowns` WHERE `character_id` = ?",
+    )
+    .bind(character_id)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Failed to load cooldowns for character {character_id}: {e}");
+            return Vec::new();
+        }
+    };
+    rows.iter()
+        .filter_map(|r| {
+            Some(SavedCooldownRow {
+                kind: int(r, "cooldown_type").ok()? as u8,
+                id: int(r, "cooldown_id").ok()? as u32,
+                expires_at_ms: int(r, "expires_at_ms").ok()? as i64,
+            })
+        })
+        .collect()
+}
+
 /// The `faction_id` a character save writes: the active temporary faction (duel Red / Blue
 /// team, battlefield corps) is never persisted; its origin faction is written instead. A crash
 /// during a duel / battlefield therefore reloads the original faction (RPA-09).
@@ -988,6 +1103,7 @@ pub async fn save_character(
             .await?;
     }
     save_active_buffs(tx, c).await;
+    save_cooldowns(tx, c, Utc::now().timestamp_millis()).await;
     save_portals(tx, c).await?;
     // Friends
     if !c.removed_friends.is_empty() {
@@ -1122,6 +1238,39 @@ async fn save_portals(tx: &mut Transaction<'_, MySql>, c: &Character) -> Result<
         .await?;
     }
     Ok(())
+}
+
+/// Save the character's running cooldowns: rewrite the rows each save, dropping expired ones.
+/// Errors are logged instead of failing the whole character save, like the active-buff rows.
+async fn save_cooldowns(tx: &mut Transaction<'_, MySql>, c: &Character, now_ms: i64) {
+    let res: Result<usize> = async {
+        sqlx::query("DELETE FROM `character_cooldowns` WHERE `character_id` = ?")
+            .bind(c.id)
+            .execute(&mut **tx)
+            .await?;
+        let mut saved = 0;
+        for row in cooldown_rows(c, now_ms) {
+            sqlx::query(
+                "INSERT INTO `character_cooldowns` (`character_id`, `cooldown_type`, `cooldown_id`, \
+                 `expires_at_ms`) VALUES (?, ?, ?, ?) \
+                 ON DUPLICATE KEY UPDATE `expires_at_ms`=GREATEST(`expires_at_ms`, VALUES(`expires_at_ms`))",
+            )
+            .bind(c.id)
+            .bind(row.kind)
+            .bind(row.id)
+            .bind(row.expires_at_ms)
+            .execute(&mut **tx)
+            .await?;
+            saved += 1;
+        }
+        Ok(saved)
+    }
+    .await;
+    match res {
+        Ok(n) if n > 0 => tracing::info!("Saved {n} active cooldown(s) for character {}", c.id),
+        Ok(_) => {}
+        Err(e) => tracing::error!("Failed to save cooldowns for character {}: {e}", c.id),
+    }
 }
 
 /// `Buffs.SaveActiveBuffs` (errors are logged, as in C#).
@@ -1355,6 +1504,7 @@ mod tests {
         "actabilities",
         "appellations",
         "character_active_buffs",
+        "character_cooldowns",
         "portal_book_coords",
         "portal_visited_district",
         "friends",
@@ -1975,6 +2125,60 @@ mod tests {
         .await
         .unwrap();
         assert_eq!((id, level), (10385, 1));
+        pool.close().await;
+    }
+
+    /// `save_character` -> `load_character_details` must keep running skill and shared-tag
+    /// cooldowns (absolute expiries) and drop the expired ones, so Recall / Escape / a long
+    /// cooldown consumable cannot be recast right after a relog.
+    #[tokio::test]
+    #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses only temporary tables"]
+    async fn private_mysql_cooldowns_survive_relog_and_expired_rows_are_dropped() {
+        let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+            return;
+        };
+        let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+        assert_eq!(
+            options.get_port(),
+            3317,
+            "only private MySQL3317 is allowed"
+        );
+        let pool = MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("private MySQL");
+        shadow_tables(&pool, CHARACTER_SAVE_TABLES).await;
+
+        let now = Utc::now().timestamp_millis();
+        let mut character = Character::new(1, 1, UnitCustomModelParams::default());
+        character.unit.name = "CooldownFixture".into();
+        character.created = Utc::now().timestamp();
+        character.unit.cooldowns.add_cooldown(14849, 60_000, now); // Recall
+        character.unit.cooldowns.add_tag_cooldown(144, 120_000, now); // shared potion group
+        character.unit.cooldowns.cooldowns.insert(20297, now - 1); // Escape: already over
+
+        assert!(save_directly_to_database(&pool, &mut character).await);
+        let rows = fetch_character_cooldowns(&pool, 1).await;
+        assert_eq!(rows.len(), 2, "expired Escape row is not written");
+        assert!(rows
+            .iter()
+            .any(|r| r.kind == COOLDOWN_TYPE_SKILL && r.id == 14849 && r.expires_at_ms > now));
+        assert!(rows
+            .iter()
+            .any(|r| r.kind == COOLDOWN_TYPE_TAG && r.id == 144 && r.expires_at_ms > now));
+
+        let mut reloaded = Character::new(1, 1, UnitCustomModelParams::default());
+        reloaded.id = 1;
+        apply_cooldown_rows(&mut reloaded, &rows, Utc::now().timestamp_millis());
+        assert!(reloaded.unit.cooldowns.cooldowns.contains_key(&14849));
+        assert!(reloaded.unit.cooldowns.tag_cooldowns.contains_key(&144));
+        assert!(!reloaded.unit.cooldowns.cooldowns.contains_key(&20297));
+
+        // A save with nothing running clears the table (the rows are rewritten, not appended).
+        character.unit.cooldowns = crate::models::unit::UnitCooldowns::default();
+        assert!(save_directly_to_database(&pool, &mut character).await);
+        assert!(fetch_character_cooldowns(&pool, 1).await.is_empty());
         pool.close().await;
     }
 
