@@ -407,6 +407,13 @@ fn mount_data(d: &mut GameData) {
             ..Default::default()
         },
     );
+    d.systems.vehicles.model_bindings.insert(
+        77,
+        vec![
+            crate::systems::vehicles::data::attach_point::DRIVER,
+            crate::systems::vehicles::data::attach_point::PASSENGER0,
+        ],
+    );
     d.items.templates.insert(
         60_091,
         ItemTemplate {

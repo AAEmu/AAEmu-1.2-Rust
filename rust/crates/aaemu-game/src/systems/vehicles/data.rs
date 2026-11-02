@@ -21,6 +21,8 @@ pub mod attach_point {
     pub const DRIVER: u8 = 1;
     pub const PASSENGER0: u8 = 2;
     pub const PASSENGER1: u8 = 3;
+    pub const PASSENGER2: u8 = 4;
+    pub const PASSENGER3: u8 = 5;
     pub const TRAILED0: u8 = 30;
     pub const HEAL_POINT0: u8 = 36;
     pub const HEAL_POINT9: u8 = 45;

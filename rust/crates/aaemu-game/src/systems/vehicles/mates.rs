@@ -139,9 +139,11 @@ impl MateManager {
         None
     }
 
-    /// `_activeMates[ownerId]` get-or-add, then `Add(mate)`; `false` when the owner already
-    /// had a mate (the C# despawns that one instead).
-    fn add_or_first(&self, owner_id: u32, mate: &MateRef) -> Result<(), MateRef> {
+    /// Makes `mate` the owner's only active mate and returns the mates that were active before.
+    /// The swap happens under the list's one lock, so a summon can never leave two mates
+    /// active. The caller despawns the returned mates (the manager lock is a leaf lock and
+    /// must not be held while locking a mate or a player).
+    fn replace(&self, owner_id: u32, mate: &MateRef) -> Vec<MateRef> {
         let mut a = self.active();
         let idx = match a.iter().position(|(o, _)| *o == owner_id) {
             Some(i) => i,
@@ -150,11 +152,7 @@ impl MateManager {
                 a.len() - 1
             }
         };
-        if let Some(first) = a[idx].1.first() {
-            return Err(first.clone());
-        }
-        a[idx].1.push(mate.clone());
-        Ok(())
+        std::mem::replace(&mut a[idx].1, vec![mate.clone()])
     }
 
     fn remove(&self, owner_id: u32, obj_id: u32) {
@@ -560,12 +558,11 @@ fn add_active_mate_and_spawn(
 ) {
     let owner_id = owner.data().id;
     let manager = manager_of(server, owner);
-    if let Err(first) = manager.add_or_first(owner_id, mate) {
-        // TODO (C#): multiple pets of different types; the C# despawns the old one and returns
-        // without spawning the new mate.
-        let tl = u32::from(first.data().unit.tl_id);
-        despawn_mate(server, owner, tl);
-        return;
+    // The 1.2 client has one player pet (`X2Mate:IsPlayerPetExists` / `DismissPet`, one pet
+    // frame; `SCMateSpawnedPacket` carries no slot or kind), so a new summon replaces the old
+    // one. The C# despawned the old mate and returned without spawning the new one.
+    for old in manager.replace(owner_id, mate) {
+        despawn_mate_ref(server, owner, &old);
     }
     // `CharacterMates.CreateNewMate`: `ResetAnalyzeMountDeltaMovement(mount.Id)` (the mate's
     // database id outlives its spawns).
@@ -629,6 +626,45 @@ pub fn remove_active_mate_and_despawn(server: &GameServer, owner: &PlayerRef, tl
     let Some(mate) = manager.get_active_mate_by_tl_id(tl_id) else {
         return;
     };
+    manager.remove(owner.data().id, mate.obj_id);
+    despawn_mate_ref(server, owner, &mate);
+}
+
+/// Saves a mate's live state into its `mates` row and despawns it. The mate is no longer in the
+/// manager's active list (`replace` or `remove` took it out), so this must not look it up there.
+fn despawn_mate_ref(server: &GameServer, owner: &PlayerRef, mate: &MateRef) {
+    if mate.data().owner_obj_id != owner.obj_id {
+        return;
+    }
+    let owner_id = owner.data().id;
+    let tl_id = u32::from(mate.data().unit.tl_id);
+    let snapshot = {
+        let d = mate.data();
+        (
+            d.item_id,
+            d.unit.hp,
+            d.unit.mp,
+            d.unit.level,
+            d.experience,
+            d.mileage,
+            d.unit.name.clone(),
+        )
+    };
+    server.systems.vehicles.mates.character(owner_id, |cm| {
+        if let Some(db) = cm.get_mut(snapshot.0) {
+            db.hp = snapshot.1;
+            db.mp = snapshot.2;
+            db.level = u16::from(snapshot.3);
+            db.xp = snapshot.4;
+            db.mileage = snapshot.5;
+            db.name = snapshot.6.clone();
+            db.updated_at = chrono::Utc::now().naive_utc();
+        }
+    });
+    if snapshot.1 <= 0 {
+        // Idempotent: the death hook already flagged the item and told the client.
+        record_mate_death(server, owner, snapshot.0, snapshot.3, snapshot.4);
+    }
     let instance = owner.data().unit.transform.instance_id;
     let passengers = mate.data().passengers.clone();
     for (point, _) in &passengers {
@@ -640,8 +676,7 @@ pub fn remove_active_mate_and_despawn(server: &GameServer, owner: &PlayerRef, tl
             attach_reason::SLAVE_BINDING,
         );
     }
-    manager.remove(owner.data().id, mate.obj_id);
-    delete_mate(server, &mate);
+    delete_mate(server, mate);
     tracing::debug!(
         "Mount removed. ownerObjId: {}, tlId: {tl_id}, mateObjId: {}",
         owner.obj_id,
@@ -829,14 +864,12 @@ fn sync_summon_item(
 pub fn spawn_mount(server: &GameServer, owner: &PlayerRef, skill_item_id: u64) {
     let owner_id = owner.data().id;
     let manager = manager_of(server, owner);
-    let mut despawned_old = false;
+    // Despawn the previous mate first (as the C# did) so the owner is unmounted before the new
+    // mate's spawn position is taken from the owner's transform. Unlike the C#, the summon
+    // then continues and spawns the new mate.
     for old in manager.get_active_mates(owner_id) {
         let tl = u32::from(old.data().unit.tl_id);
         despawn_mate(server, owner, tl);
-        despawned_old = true;
-    }
-    if despawned_old {
-        return;
     }
     let Some(item) = owned_item(server, owner, skill_item_id) else {
         return;
@@ -923,23 +956,37 @@ pub fn spawn_mount(server: &GameServer, owner: &PlayerRef, skill_item_id: u64) {
     m.mileage = db.mileage;
     m.spawn_delay_time = 0;
     m.mate_kind_id = template.mate_kind_id;
-    // TODO (C#): spawn with the template's seat count; 2 seats by default.
-    m.passengers = vec![
-        (
-            attach_point::DRIVER,
-            MatePassengerInfo {
-                obj_id: 0,
-                reason: 0,
-            },
-        ),
-        (
-            attach_point::PASSENGER0,
-            MatePassengerInfo {
-                obj_id: 0,
-                reason: 0,
-            },
-        ),
-    ];
+    // The seats are the attach points the mate's model declares (`model_bindings`), which is
+    // the list the 1.2 client's seat test scans (`FUN_390c9f70`): a horse has driver + one
+    // passenger, the elephant five seats, a battle pet none. The C# hard-coded driver +
+    // passenger0 for every mate.
+    m.passengers = server
+        .game_data
+        .systems
+        .vehicles
+        .model_bindings
+        .get(&template.model_id)
+        .map(|points| {
+            let mut points: Vec<u8> = points
+                .iter()
+                .copied()
+                .filter(|point| (attach_point::DRIVER..=attach_point::PASSENGER3).contains(point))
+                .collect();
+            points.sort_unstable();
+            points
+                .into_iter()
+                .map(|point| {
+                    (
+                        point,
+                        MatePassengerInfo {
+                            obj_id: 0,
+                            reason: 0,
+                        },
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     // Transform = Owner.Transform.CloneDetached(mount)
     m.unit.transform = crate::models::transform::Transform {
         instance_id: owner_world.instance_id,
@@ -1016,43 +1063,15 @@ pub fn spawn_mount(server: &GameServer, owner: &PlayerRef, skill_item_id: u64) {
 
 /// `owner.Mates.DespawnMate(tlId)`.
 pub fn despawn_mate(server: &GameServer, owner: &PlayerRef, tl_id: u32) {
-    if !manager_of(server, owner)
-        .get_active_mate_by_tl_id(tl_id)
-        .is_some_and(|mate| mate.data().owner_obj_id == owner.obj_id)
-    {
+    let manager = manager_of(server, owner);
+    let Some(mate) = manager.get_active_mate_by_tl_id(tl_id) else {
+        return;
+    };
+    if mate.data().owner_obj_id != owner.obj_id {
         return;
     }
-    let owner_id = owner.data().id;
-    if let Some(mate) = manager_of(server, owner).get_active_mate_by_tl_id(tl_id) {
-        let snapshot = {
-            let d = mate.data();
-            (
-                d.item_id,
-                d.unit.hp,
-                d.unit.mp,
-                d.unit.level,
-                d.experience,
-                d.mileage,
-                d.unit.name.clone(),
-            )
-        };
-        server.systems.vehicles.mates.character(owner_id, |cm| {
-            if let Some(db) = cm.get_mut(snapshot.0) {
-                db.hp = snapshot.1;
-                db.mp = snapshot.2;
-                db.level = u16::from(snapshot.3);
-                db.xp = snapshot.4;
-                db.mileage = snapshot.5;
-                db.name = snapshot.6.clone();
-                db.updated_at = chrono::Utc::now().naive_utc();
-            }
-        });
-        if snapshot.1 <= 0 {
-            // Idempotent: the death hook already flagged the item and told the client.
-            record_mate_death(server, owner, snapshot.0, snapshot.3, snapshot.4);
-        }
-    }
-    remove_active_mate_and_despawn(server, owner, tl_id);
+    manager.remove(owner.data().id, mate.obj_id);
+    despawn_mate_ref(server, owner, &mate);
 }
 
 /// Marks the mate of the summon item `item_id` dead: the `mates` row loses its HP, the item gets
