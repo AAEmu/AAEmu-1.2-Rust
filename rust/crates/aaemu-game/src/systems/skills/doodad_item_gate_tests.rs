@@ -53,7 +53,7 @@ const FUEL_EFFECT: u32 = 26272;
 const SHIP: u32 = 21;
 const SHIP_MOUNT_SKILL: u32 = 22287;
 const SHIP_RIDER_SKILL: u32 = 25632;
-const SHIP_MOUNT_ROW: u32 = 345;
+const SHIP_MOUNT_ROW: u32 = 268;
 const SHIP_FUEL_COUNT: i32 = 10;
 
 fn doodad_data() -> GameData {
@@ -292,7 +292,8 @@ fn wagon_data() -> GameData {
     data
 }
 
-/// The real ship speed boost row 345 (`mount_skills` 345 -> 22287, rider 25632 x10 fuel).
+/// The real ship speed boost: `mount_skills` row 268 -> 22287, `mount_attached_skills` 345 ->
+/// rider 25632 x10 fuel.
 fn ship_data() -> GameData {
     let mut data = wagon_data();
     let skills = &mut data.systems.skills;

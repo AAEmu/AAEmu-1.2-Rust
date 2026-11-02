@@ -1792,7 +1792,9 @@ impl SpawnManager {
                     }
                 }
             }
-            if house_id > 0 && !has_parent {
+            // For SLAVE rows `house_id` is the vehicle hull id, not a house: they are attached to
+            // the slave through `use_parent_object` below, never looked up in housing.
+            if house_id > 0 && !has_parent && owner_type != doodad_owner_type::SLAVE {
                 // HousingManager.GetHouseById(OwnerDbId): parent + bound doodad registration
                 // (UsePersistentHouseDoodads).
                 if !crate::systems::housing::attach_loaded_doodad(
