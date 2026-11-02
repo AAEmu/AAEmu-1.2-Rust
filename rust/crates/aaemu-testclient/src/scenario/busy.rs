@@ -79,6 +79,9 @@ struct Counts {
     moves: u32,
     chats: u32,
     packets: u64,
+    /// Target (name, template id, position) of the last cast and the first rejection code.
+    last_target: String,
+    first_reject: Option<(i64, String)>,
 }
 
 pub(super) async fn run(
@@ -157,6 +160,14 @@ pub(super) async fn run(
         format!("spawn doodad {SPAWN_DOODAD}"),
         format!("spawn doodad {SPAWN_DOODAD}"),
     ] {
+        if cmd.starts_with("spawn doodad") && spawned == 2 {
+            // `/spawn` drops things 3 m in front of the bot: step aside so the doodads do not
+            // sit on the NPCs and block the line of sight of the casts.
+            let p = game.state.self_pos;
+            game.move_to((p.0 + 8.0, p.1, p.2), 4000).await?;
+            game.drain(Duration::from_millis(300), Duration::from_secs(1))
+                .await?;
+        }
         let reply = gm_command(game, &cmd).await?;
         if reply
             .iter()
@@ -180,7 +191,7 @@ pub(super) async fn run(
         s,
         format!(
             "{}s: {} casts ({} answered, {} rejected), {} self actions, {} moves, {} chats, \
-             {} packets, SCErrorMsg [{}]",
+             {} packets, SCErrorMsg [{}], first reject {:?}",
             cfg.busy_secs,
             counts.casts,
             counts.responses,
@@ -189,7 +200,8 @@ pub(super) async fn run(
             counts.moves,
             counts.chats,
             counts.packets,
-            errors.join(" ")
+            errors.join(" "),
+            counts.first_reject
         ),
     );
 
@@ -260,12 +272,13 @@ async fn activity(game: &mut GameClient, cfg: &BotConfig, idx: u64) -> anyhow::R
             // A skill on the nearest NPC (when one is close enough to walk up to).
             1 => {
                 let here = game.state.self_pos;
-                if let Some(npc) = game.nearest_unit(1).filter(|n| dist(n.pos, here) < 30.0) {
+                if let Some(npc) = cast_target(game).filter(|n| dist(n.pos, here) < 30.0) {
                     game.move_to_facing((npc.pos.0 + 1.2, npc.pos.1, npc.pos.2), npc.pos, clock)
                         .await?;
                     game.change_target(npc.obj_id).await?;
                     game.start_skill(cfg.skill_id, npc.obj_id).await?;
                     c.casts += 1;
+                    c.last_target = format!("{} tpl {} at {:?}", npc.name, npc.id, npc.pos);
                 }
             }
             // Self targeted: a buff every other time, a heal otherwise.
@@ -302,8 +315,12 @@ async fn activity(game: &mut GameClient, cfg: &BotConfig, idx: u64) -> anyhow::R
         for p in &packets {
             if own_skill_response(p, cfg.skill_id, me) {
                 c.responses += 1;
-                if skill_response_result(p).unwrap_or(0) != 0 {
+                let result = skill_response_result(p).unwrap_or(0);
+                if result != 0 {
                     c.rejected += 1;
+                    if c.first_reject.is_none() {
+                        c.first_reject = Some((i64::from(result), c.last_target.clone()));
+                    }
                 }
             } else if p.is_sc(sc::SCErrorMsgPacket) {
                 *c.errors
@@ -316,6 +333,18 @@ async fn activity(game: &mut GameClient, cfg: &BotConfig, idx: u64) -> anyhow::R
         }
     }
     Ok(c)
+}
+
+/// The closest GM spawned dummy NPC (a safe target), else the closest NPC.
+fn cast_target(game: &GameClient) -> Option<crate::game::UnitInfo> {
+    let me = game.state.self_pos;
+    game.state
+        .units
+        .values()
+        .filter(|u| u.unit_type == 1 && u.id == SPAWN_NPC)
+        .min_by(|a, b| dist(a.pos, me).total_cmp(&dist(b.pos, me)))
+        .cloned()
+        .or_else(|| game.nearest_unit(1))
 }
 
 fn dist(a: (f32, f32, f32), b: (f32, f32, f32)) -> f32 {
