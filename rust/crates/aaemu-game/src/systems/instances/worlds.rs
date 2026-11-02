@@ -293,63 +293,54 @@ pub fn clone_detached(server: &GameServer, p: &PlayerRef) -> Transform {
     clone
 }
 
-/// Detaches a player from its parent (`Transform.DetachAll` for the parent part).
-fn detach(server: &GameServer, p: &PlayerRef) {
-    let parent = p.data().unit.transform.parent_obj_id;
-    if parent == 0 {
-        return;
-    }
-    let obj = WorldObject::from(p);
-    match server.world.world_of(&obj) {
-        Some(w) => w.detach_child(&obj),
-        None => p.data().unit.transform.parent_obj_id = 0,
-    }
-}
-
 /// `character.Transform.ApplyWorldSpawnPosition(wsp, newInstanceId)`. Note (C#): the rotation
 /// is stored as given (degrees from `world_spawns.json`) and the `ZoneId` setter fires
-/// `OnZoneChange(old, new)`; both mirrored.
+/// `OnZoneChange(old, new)`; both mirrored (the zone change, the instance membership and the
+/// instance object tables are applied by [`session::teleport_character`]).
 pub fn apply_world_spawn_position(
     server: &GameServer,
     p: &PlayerRef,
     wsp: &WorldSpawnPosition,
     new_instance_id: u32,
 ) {
-    detach(server, p);
-    let world_id = (new_instance_id != 0).then(|| template_id_of(server, new_instance_id));
-    let old_zone = {
-        let mut c = p.data();
-        let t = &mut c.unit.transform;
-        if new_instance_id != 0 {
-            t.instance_id = new_instance_id;
-            t.world_id = world_id.unwrap_or(0);
-        }
-        let old = t.zone_id;
-        t.zone_id = wsp.zone_id;
-        t.set_position(wsp.x, wsp.y, wsp.z, wsp.roll, wsp.pitch, wsp.yaw);
-        old
+    let instance_id = if new_instance_id != 0 {
+        new_instance_id
+    } else {
+        p.data().unit.transform.instance_id
     };
-    if old_zone != wsp.zone_id {
-        session::on_zone_change(server, p, old_zone, wsp.zone_id);
-    }
+    session::teleport_character(
+        server,
+        p,
+        Transform {
+            instance_id,
+            zone_id: wsp.zone_id,
+            x: wsp.x,
+            y: wsp.y,
+            z: wsp.z,
+            rot_x: wsp.roll,
+            rot_y: wsp.pitch,
+            rot_z: wsp.yaw,
+            ..Default::default()
+        },
+    );
 }
 
 /// `character.Transform = character.MainWorldPosition.Clone(); Transform.InstanceId =
 /// DefaultInstanceId` + `SCLoadInstancePacket(MainWorldPosition.WorldId, ZoneId, World.Position,
 /// World.Rotation.DegToRad())`. `None` when there is no `MainWorldPosition` (nothing changes).
 ///
-/// Mirrored C# quirks: the rotation (already in radians) goes through `DegToRad` again, and the
-/// clone's `ZoneId` setter fires `OnZoneChange(0, zoneId)` (the instance's zone chat channel is
-/// not left).
+/// Mirrored C# quirk: the rotation (already in radians) goes through `DegToRad` again.
+/// Deviation: the C# clone's new `Transform` fired `OnZoneChange(0, zoneId)` (the instance's
+/// zone chat channel was never left); the Rust passes the zone actually left so its zone-group
+/// buff is removed (`PORTING.md`).
 pub fn return_to_main_world(server: &GameServer, p: &PlayerRef) -> Option<Transform> {
     let mwp = p.data().main_world_position?;
-    detach(server, p);
-    {
-        let mut c = p.data();
-        c.set_disabled_set_position(true);
-        c.unit.transform = Transform {
+    p.data().set_disabled_set_position(true);
+    session::teleport_character(
+        server,
+        p,
+        Transform {
             instance_id: DEFAULT_INSTANCE_ID,
-            world_id: mwp.world_id,
             zone_id: mwp.zone_id,
             x: mwp.x,
             y: mwp.y,
@@ -357,12 +348,9 @@ pub fn return_to_main_world(server: &GameServer, p: &PlayerRef) -> Option<Transf
             rot_x: mwp.rot_x,
             rot_y: mwp.rot_y,
             rot_z: mwp.rot_z,
-            parent_obj_id: 0,
-        };
-    }
-    if mwp.zone_id != 0 {
-        session::on_zone_change(server, p, 0, mwp.zone_id);
-    }
+            ..Default::default()
+        },
+    );
     p.send(SCLoadInstancePacket {
         instance_id: mwp.world_id,
         zone_id: mwp.zone_id,

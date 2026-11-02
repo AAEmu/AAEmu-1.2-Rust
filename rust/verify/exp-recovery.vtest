@@ -1,0 +1,47 @@
+# Death-penalty experience recovery through the 1.2 priest prayer (skill 17063).
+#
+# The victim (GM) reaches level 21 and adds 5 000 exp, so the next death loses the 5 % of the
+# level span into `recoverable_exp` (80 % recoverable). The caster (GM) kills it at the Nui
+# temple priest 502 spawn (`npc_spawns.json` UnitId 502 at 23039.76 11540.64 252.7, where both
+# bots teleport). The victim revives with `/revive` (the GM revive keeps the recoverable exp)
+# and casts 17063 the way the 1.2 priest window does (`X2Priest:RecoverExp` -> `CSStartSkill`,
+# unit caster, the priest as target; the skill resolves its self target back to the caster and
+# the effect needs a priest within 10 m). The recovery must answer with
+# `SCRecoverableExpPacket` (zero left), `SCCharacterLaborPowerChangedPacket` (level 21 labor)
+# and `SCExpChangedPacket`; the pre-#21 `NO_PERM` refusal would leave the exp lost.
+#
+# `castraw` is used instead of `cast` because `cast` drains for up to 8 s and would swallow the
+# 6.5 s prayer's effect packets, which are what this suite asserts. It walks to the priest first,
+# as the real client does; the prayer's 10 m priest check needs that.
+
+suite exp-recovery
+bot victim gm
+bot caster gm
+
+[caster]
+gm level 21
+# Both bots meet at the Nui temple priest 502 spawn (`npc_spawns.json` UnitId 502 at
+# 23039.76 11540.64 252.7); the characters remember their last position between runs.
+tp 23039.76 11540.64 252.7
+pump 3
+waitpeer 120 ${victim}
+sync ready 2
+pkill ${victim}
+sync dead 2
+
+[victim]
+gm level 21
+gm xp 5000
+gm labor 100
+tp 23039.76 11540.64 252.7
+pump 3
+sync ready 2
+sync dead 2
+gm revive ${victim}
+pump 1
+# CSStartSkill: skill 17063, Unit caster (self), Unit target (the priest), no skill object.
+castraw 17063 502
+# The effect sends the labor change first, then SCRecoverableExpPacket, then the exp delta.
+expectpkt SCCharacterLaborPowerChangedPacket 12
+expectpkt SCRecoverableExpPacket 5
+expectpkt SCExpChangedPacket 5

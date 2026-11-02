@@ -719,18 +719,26 @@ pub fn on_disconnect(server: &GameServer, p: &PlayerRef) {
 /// tagged `playerSkillsTag` (378), compressed.
 pub fn reset_all_skill_cooldowns(server: &GameServer, p: &PlayerRef, trigger_gcd: bool) {
     let mut packets = CompressedGamePackets::new();
-    for skill_id in server
-        .game_data
-        .systems
-        .skills
-        .skills_by_tag(PLAYER_SKILLS_TAG)
     {
-        packets.add(&SCSkillCooldownResetPacket {
-            obj_id: p.obj_id,
-            skill_id: *skill_id,
-            tag_id: 0,
-            gcd: trigger_gcd,
-        });
+        // The C# kept cooldowns in memory only, so its reset could rely on the client packet.
+        // The port persists them, so the server records must be cleared too or a relog would
+        // restore a cooldown the battlefield reset removed. A skill's shared cooldown tag is
+        // persisted as well, so it is cleared with the skill (it would otherwise keep refusing
+        // the tagged skills the reset packet showed as ready).
+        let skills = &server.game_data.systems.skills;
+        let mut c = p.data();
+        for skill_id in skills.skills_by_tag(PLAYER_SKILLS_TAG) {
+            let tag = skills
+                .skill(*skill_id)
+                .map_or(0, |s| s.cooldown_tag_id.max(0) as u32);
+            c.unit.cooldowns.remove_skill_cooldown(*skill_id, tag);
+            packets.add(&SCSkillCooldownResetPacket {
+                obj_id: p.obj_id,
+                skill_id: *skill_id,
+                tag_id: 0,
+                gcd: trigger_gcd,
+            });
+        }
     }
     p.send(packets);
 }

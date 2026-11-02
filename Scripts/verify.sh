@@ -26,6 +26,10 @@ if [ -z "$LANE" ] || [ ! -f "$LANES/$LANE.env" ]; then
 fi
 # shellcheck disable=SC1090
 source "$LANES/$LANE.env"   # LIVE TARGET PORT_PREFIX DB_GAME DB_LOGIN ...
+# Every child `Scripts/live-stack.sh` call must use this lane. Its own detection cannot rely on
+# `pwd -P` alone (the C:/AAEMU_DISK <-> D: junction makes the same worktree compare unequal), and a
+# fallback would drive the shared D:/aaemu-live runtime.
+export AAEMU_LANE="$LANE"
 
 MYSQL_BIN=${AAEMU_MYSQL_BIN:-/c/Program Files/MySQL/MySQL Server 8.0/bin}
 MYSQL_PORT=${AAEMU_MYSQL_PORT:-3317}        # the private instance; NEVER 3306

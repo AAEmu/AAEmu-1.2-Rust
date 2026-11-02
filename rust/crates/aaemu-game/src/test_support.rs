@@ -25,7 +25,15 @@ pub const TEST_ZONE: u32 = 100;
 /// A server with game data `data` plus a synthetic 2x2-cell `main_world` (32x32 sectors of
 /// 64 m, zone [`TEST_ZONE`] everywhere) and the two buff templates `SCUnitStatePacket` forces
 /// on characters.
-pub fn test_server_with(mut data: GameData) -> GameServer {
+pub fn test_server_with(data: GameData) -> GameServer {
+    test_server_with_world(
+        data,
+        WorldTemplate::synthetic(0, "main_world", 2, 2, TEST_ZONE),
+    )
+}
+
+/// [`test_server_with`] with a caller-built `main_world` template (e.g. more than one zone key).
+pub fn test_server_with_world(mut data: GameData, world: WorldTemplate) -> GameServer {
     let mut config = AppConfig {
         id: 1,
         ..AppConfig::default()
@@ -35,11 +43,7 @@ pub fn test_server_with(mut data: GameData) -> GameServer {
     let db = MySqlPoolOptions::new()
         .acquire_timeout(Duration::from_millis(200))
         .connect_lazy_with(config.connections.mysql_provider.connect_options());
-    data.worlds = WorldTemplates::from_templates(
-        vec![WorldTemplate::synthetic(0, "main_world", 2, 2, TEST_ZONE)],
-        Vec::new(),
-    )
-    .expect("synthetic world");
+    data.worlds = WorldTemplates::from_templates(vec![world], Vec::new()).expect("test world");
     for id in UNIT_STATE_FORCED_BUFFS {
         let mut t = BuffTemplate::simple(id, BuffKind::Good);
         t.duration = 0;
