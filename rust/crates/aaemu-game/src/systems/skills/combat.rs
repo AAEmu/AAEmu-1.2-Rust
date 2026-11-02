@@ -1232,6 +1232,124 @@ fn add_aggro_amounts(
     existed
 }
 
+/// `NpcAggroTable::TauntedBy(caster, copyTop)` of the 10.x zone server (10x-ONLY; the 1.2
+/// client and the C# have no taunt logic, but buffs 171 / 502 and skill 17300 describe it).
+///
+/// Only an NPC holder has a stamped table (10x checks the victim's unit kind). 10x refuses
+/// `CreateAggro` when the NPC cannot attack the caster; in the 1.2 data most PvE monsters are
+/// faction-neutral to players and attack through AI aggression instead, so `CanAttack` alone
+/// would refuse every taunt on them. Rust therefore refuses only an explicitly friendly caster
+/// (plus the holder itself above). 10x additionally refuses members of the NPC's own group, but
+/// Rust has no runtime NPC group membership (`npc_groups` is not loaded), so there is nothing to
+/// check. Creates the entry with the same side effects as a zero-threat `AddUnitAggro`, stamps
+/// it, and with `copy_top` raises its total to the current highest total of the table (a one-off
+/// copy, never above it).
+pub fn taunted_by(server: &GameServer, npc: &WorldObject, caster: &WorldObject, copy_top: bool) {
+    if npc.as_npc().is_none() || !caster.is_unit() || npc.same(caster) {
+        return;
+    }
+    if super::relation::relation_to(
+        server,
+        &Target::Obj(npc.clone()),
+        &Target::Obj(caster.clone()),
+    ) == super::types::RelationState::Friendly
+    {
+        return;
+    }
+    add_unit_aggro(server, npc, AggroKind::Etc, caster, 0);
+    let caster_id = caster.obj_id();
+    // 10x uses its server clock. A stamp of 0 means "no taunt", so keep it non-zero.
+    let stamp = now_ms().max(1) as u32;
+    let stamped = npc
+        .with_unit(|u| {
+            let table = &mut u.unit_mut().skill_state.aggro_table;
+            let top = if copy_top {
+                table.values().map(Aggro::total).max().unwrap_or(0)
+            } else {
+                0
+            };
+            let Some(entry) = table.get_mut(&caster_id) else {
+                return false;
+            };
+            entry.taunt_time = stamp;
+            if copy_top {
+                let total = entry.total();
+                if top > total {
+                    entry.etc_aggro = entry.etc_aggro.wrapping_add(top - total);
+                }
+            }
+            true
+        })
+        .unwrap_or(false);
+    if stamped {
+        tracing::debug!(
+            "taunt: npc {} locked on caster {} (copy_top = {copy_top})",
+            npc.obj_id(),
+            caster_id
+        );
+        crate::systems::ai::manager::post(server, npc.obj_id(), |c| c.on_aggro_target_changed());
+    }
+}
+
+/// `NpcAggroTable::CancelTauntedBy(caster)` (10x-ONLY): clears the caster's stamp only when no
+/// other taunt buff from that caster remains on the NPC. Threat is not reduced.
+pub fn cancel_taunted_by(server: &GameServer, npc: &WorldObject, caster_obj_id: u32) {
+    if npc.as_npc().is_none() || caster_obj_id == 0 {
+        return;
+    }
+    let remaining = npc.with_base_unit(|b| {
+        b.buffs().effects.iter().any(|e| {
+            e.caster_obj_id == caster_obj_id
+                && server
+                    .game_data
+                    .systems
+                    .skills
+                    .buff(e.template.id)
+                    .is_some_and(|t| t.taunt)
+        })
+    });
+    if remaining {
+        return;
+    }
+    let cleared = npc
+        .with_unit(|u| {
+            u.unit_mut()
+                .skill_state
+                .aggro_table
+                .get_mut(&caster_obj_id)
+                .map(|e| {
+                    let stamped = e.taunt_time != 0;
+                    e.taunt_time = 0;
+                    stamped
+                })
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    if cleared {
+        tracing::debug!(
+            "taunt: npc {} released caster {caster_obj_id}",
+            npc.obj_id()
+        );
+        crate::systems::ai::manager::post(server, npc.obj_id(), |c| c.on_aggro_target_changed());
+    }
+}
+
+/// The generic buff-start hook of a taunt buff (`on_started` / `on_refreshed`): 10.x runs
+/// `TauntedBy` when the buff is created on an NPC. Re-stamping a refresh is capture-pending
+/// (TAUNT-1; the 10x refresh path is unknown).
+pub fn on_taunt_buff_applied(server: &GameServer, owner: &WorldObject, b: &Buff) {
+    let Some(template) = server.game_data.systems.skills.buff(b.template.id) else {
+        return;
+    };
+    if !template.taunt || b.caster_obj_id == 0 {
+        return;
+    }
+    let Some(caster) = buffs::find_obj(server, b.caster_obj_id) else {
+        return;
+    };
+    taunted_by(server, owner, &caster, template.taunt_with_top_aggro);
+}
+
 /// `Unit.ClearAggroOfUnit(unit)` on `owner`.
 pub fn clear_aggro_of_unit(server: &GameServer, owner: &WorldObject, unit: &WorldObject) {
     clear_aggro_of_unit_inner(server, owner, unit, true);
