@@ -245,17 +245,18 @@ pub fn interaction_option(t: &super::data::NpcTemplate) -> u32 {
 
 /// The one seat skill `SCNpcInteractionSkillList` offers for a slave. The 1.2 client acts on the
 /// first skill at once (`FUN_393be850` -> `FUN_393be280`), and its dynamic action bar adds the
-/// passenger skill 13863 when the slave has a free passenger point (`FUN_393bbb80` checks point
-/// 2). The interaction list therefore offers the driver seat (12076) while it is free and the
-/// passenger seat (13863) once the driver seat is taken; point 2 is the only passenger seat the
-/// 1.2 data reaches (`special_effects` 2378 type 53 value1 2). A cannon (slave kind 7 / 8) has
-/// only its gunner seat, and a slave with both seats taken keeps 12076; the bind then ignores
-/// the taken seat silently (C# behaviour).
+/// passenger skill 13863 only when the slave's model declares point 2 (`FUN_393bbb80` scans the
+/// model's `model_bindings` for the point). The interaction list therefore offers the driver seat
+/// (12076) while it is free and the passenger seat (13863) once the driver seat is taken and the
+/// model has point 2; point 2 is the only passenger seat the 1.2 data reaches (`special_effects`
+/// 2378 type 53 value1 2). A cannon (slave kind 7 / 8) has only its gunner seat, and a slave with
+/// both seats taken keeps 12076; the bind then ignores the taken seat silently (C# behaviour).
 pub(crate) fn slave_interaction_skill(server: &GameServer, slave: &SlaveRef) -> u32 {
     let kind = crate::systems::vehicles::slaves::slave_kind(server, slave);
-    let (driver_taken, passenger_taken) = {
+    let (template_id, driver_taken, passenger_taken) = {
         let d = slave.data();
         (
+            d.unit.template_id,
             d.has_attached_at(attach_point::DRIVER),
             d.has_attached_at(attach_point::PASSENGER0),
         )
@@ -263,7 +264,15 @@ pub(crate) fn slave_interaction_skill(server: &GameServer, slave: &SlaveRef) -> 
     if !driver_taken {
         return skills_enum::SLAVE_OCCUPY;
     }
-    if !passenger_taken && !crate::systems::vehicles::slaves::is_cannon_kind(kind) {
+    let has_passenger_seat = server
+        .game_data
+        .systems
+        .vehicles
+        .slave_has_attach_point(template_id, attach_point::PASSENGER0);
+    if has_passenger_seat
+        && !passenger_taken
+        && !crate::systems::vehicles::slaves::is_cannon_kind(kind)
+    {
         return skills_enum::SLAVE_PASSENGER;
     }
     skills_enum::SLAVE_OCCUPY
@@ -874,8 +883,8 @@ mod tests {
     #[tokio::test]
     async fn start_interaction_slave_offers_the_passenger_seat_once_the_driver_seat_is_taken() {
         use crate::models::slave::Slave;
-        use crate::systems::vehicles::data::slave_kind;
         use crate::systems::vehicles::data::SlaveTemplate;
+        use crate::systems::vehicles::data::{attach_point, slave_kind};
         use crate::systems::vehicles::slaves;
         use crate::test_support::*;
         use crate::world::Entity;
@@ -885,10 +894,15 @@ mod tests {
             68,
             SlaveTemplate {
                 id: 68,
+                model_id: 300,
                 slave_kind: slave_kind::MACHINE,
                 ..SlaveTemplate::default()
             },
         );
+        d.systems
+            .vehicles
+            .model_bindings
+            .insert(300, vec![attach_point::DRIVER, attach_point::PASSENGER0]);
         let server = test_server_with(d);
         let mut a = TestClient::new(&server, 1, 1001);
         let mut b = TestClient::new(&server, 2, 1002);
