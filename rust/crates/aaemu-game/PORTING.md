@@ -1539,7 +1539,10 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   points. Land vehicles now measure to the union of the prefab body's collision proxies
   (`vehicle_models.normal`; the prefab's static `AnimObject` body is included). The 1.2 `.chr`
   body model carries no `MeshPhysicsData`; its same-named `.cgf` holds the body proxies.
-  Ships keep the mass box, the 4.0 m / 3.0 m reach constants are unchanged, and a model
+  Ships keep the mass box and the 4.0 m / 3.0 m reach constants are unchanged. The union AABB
+  over-approximates the target's collision parts: in a concave gap between parts the measured
+  gap can be smaller than 1.2's shape-to-shape minimum (`FUN_3989bf90`), never larger for the
+  same body, so the reach is never stricter than the client for the same geometry. A model
   without client geometry keeps the attach-point fallback. The Bevy client is being changed in
   parallel to measure its reach to the drawn body AABB, so client and server now both measure
   to the body. Tested by
