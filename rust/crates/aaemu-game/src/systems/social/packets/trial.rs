@@ -8,8 +8,12 @@ use crate::models::transform::convert_long;
 use crate::net::packet::LEVEL_PLAIN;
 use crate::net::registry::PacketRegistry;
 use crate::opcodes::cs;
+use crate::systems::skills::buffs;
+use crate::systems::skills::types::tags;
+use crate::systems::social::bounty::{CANNOT_SET_BOUNTY, CANNOT_SET_BOUNTY_FOR_SUCH_NAME};
 use crate::systems::social::crime::BountyDescription;
 use crate::systems::social::util;
+use crate::world::WorldObject;
 
 /// `SCBotSuspectReportedPacket`, `SCCharacterResurrectedPacket`, `SCForceAttackSetPacket`,
 /// `SCTeleportUnitPacket`: the skills subsystem's definitions (one per opcode).
@@ -51,6 +55,18 @@ fn write_bounty_name(s: &mut PacketStream, name: &str) {
         end -= 1;
     }
     s.write_str(&name[..end]);
+}
+
+/// Reads a bounty name the way the 1.2 client writes it: at most [`BOUNTY_NAME_MAX_BYTES`]
+/// UTF-8 bytes, cut on a character boundary. The client never sends a longer name; this keeps a
+/// malformed body from reaching the character lookup with garbage.
+fn read_bounty_name(s: &mut PacketStream) -> crate::error::Result<String> {
+    let name = s.read_string()?;
+    let mut end = name.len().min(BOUNTY_NAME_MAX_BYTES);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    Ok(name[..end].to_string())
 }
 
 sc_packet!(
@@ -379,9 +395,9 @@ sc_packet!(
     /// `SCSetBountyPermittedPacket(type, name, moneyAmount, allowed)`: whether the client may
     /// place the bounty (`allowed == false` makes it show error 584). Reader `0x397c6fc0`:
     /// `u32`, name (128-byte buffer), mandatory `i64`, `u8`.
-    SCSetBountyPermittedPacket { kind: u32, name: String, money_amount: i64, allowed: bool }
+    SCSetBountyPermittedPacket { target_id: u32, name: String, money_amount: i64, allowed: bool }
     |self, s| {
-        s.write_u32(self.kind);
+        s.write_u32(self.target_id);
         write_bounty_name(s, &self.name);
         s.write_i64(self.money_amount).write_bool(self.allowed);
     }
@@ -390,9 +406,9 @@ sc_packet!(
 sc_packet!(
     /// `SCSetBountyDonePacket(type, name, moneyAmount, errorMessage)`: the placement result
     /// (`0` = placed, `585` = name refused). Reader `0x397c7080`; the error is a plain `i16`.
-    SCSetBountyDonePacket { kind: u32, name: String, money_amount: i64, error_message: i16 }
+    SCSetBountyDonePacket { target_id: u32, name: String, money_amount: i64, error_message: i16 }
     |self, s| {
-        s.write_u32(self.kind);
+        s.write_u32(self.target_id);
         write_bounty_name(s, &self.name);
         s.write_i64(self.money_amount).write_i16(self.error_message);
     }
@@ -611,31 +627,118 @@ cs_packet!(
 );
 
 cs_packet!(
-    /// `CSRequestSetBountyMoneyPacket` (0x11f; client serializer `397b13a0`, per Bevy RE notes):
-    /// the client asks whether it may put a bounty on `name`. Not answered yet: the bounty
-    /// ledger (`bounty_runtime.rs`) is not wired to the wallet or the board.
-    // TODO: answer with `SCSetBountyPermittedPacket` once placement is wired to the wallet.
+    /// `CSRequestSetBountyMoneyPacket` (0x11f; client serializer `397b13a0`): the client asks
+    /// whether it may put a bounty on `name`. Only an online, currently wanted target is
+    /// allowed; the answer is `SCSetBountyPermitted` (the client shows error 584 for
+    /// `allowed == false`) or, when the name is unknown, `SCSetBountyDone` with error 585.
     CSRequestSetBountyMoneyPacket { name: String }
-    read |s| { Ok(Self { name: s.read_string()? }) }
+    read |s| { Ok(Self { name: read_bounty_name(s)? }) }
     handle |self, server, conn| {
-        tracing::warn!("RequestSetBountyMoney (not implemented), Name: {}", self.name);
+        let p = active_char!(conn);
+        let Some(target) = server.world.character_by_name(&self.name) else {
+            tracing::debug!("RequestSetBountyMoney: no online target '{}'", self.name);
+            p.send(SCSetBountyDonePacket {
+                target_id: 0,
+                name: self.name.clone(),
+                money_amount: 0,
+                error_message: CANNOT_SET_BOUNTY_FOR_SUCH_NAME,
+            });
+            return Ok(());
+        };
+        let target_id = target.character_id;
+        let target_name = target.data().unit.name.clone();
+        let total = server.systems.social.bounties.active_total(target_id);
+        if target_id == p.character_id {
+            p.send(SCSetBountyDonePacket {
+                target_id,
+                name: target_name,
+                money_amount: total,
+                error_message: CANNOT_SET_BOUNTY,
+            });
+            return Ok(());
+        }
+        if !buffs::check_buff_tag(server, &WorldObject::from(target), tags::WANTED) {
+            p.send(SCSetBountyPermittedPacket {
+                target_id,
+                name: target_name,
+                money_amount: total,
+                allowed: false,
+            });
+            return Ok(());
+        }
+        server
+            .systems
+            .social
+            .bounties
+            .permit(p.character_id, target_id);
+        p.send(SCSetBountyPermittedPacket {
+            target_id,
+            name: target_name,
+            money_amount: total,
+            allowed: true,
+        });
         Ok(())
     }
 );
 
 cs_packet!(
-    /// `CSSendBountyUpdatePacket` (0x120; client serializer `397bc6b0`, per Bevy RE notes): place
-    /// (`kind`) a bounty of `money` on `name`. The client's money field is a signed 32-bit value.
-    /// Not applied yet, see [`CSRequestSetBountyMoneyPacket`].
-    // TODO: debit the wallet, record the pledge in the bounty ledger and answer with
-    // `SCSetBountyDonePacket`.
-    CSSendBountyUpdatePacket { kind: u32, name: String, money: i32 }
-    read |s| { Ok(Self { kind: s.read_u32()?, name: s.read_string()?, money: s.read_i32()? }) }
+    /// `CSSendBountyUpdatePacket` (0x120; client serializer `397bc6b0`): place a bounty of
+    /// `money` copper on the character `target_id` named `name`. The client's money field is a
+    /// signed 32-bit value.
+    ///
+    /// Every condition is re-checked here: the target must still be online and wanted, the
+    /// id must match the name and the payer must hold a permit from
+    /// [`CSRequestSetBountyMoneyPacket`] (a second update without one is refused). The
+    /// refusal and the success both go through `SCSetBountyDone`.
+    CSSendBountyUpdatePacket { target_id: u32, name: String, money: i32 }
+    read |s| { Ok(Self { target_id: s.read_u32()?, name: read_bounty_name(s)?, money: s.read_i32()? }) }
     handle |self, server, conn| {
-        tracing::warn!(
-            "SendBountyUpdate (not implemented), Kind: {}, Name: {}, Money: {}",
-            self.kind, self.name, self.money
-        );
+        let p = active_char!(conn);
+        let bounties = &server.systems.social.bounties;
+        let target = server.world.character_by_id(self.target_id);
+        let target_name = target
+            .as_ref()
+            .map(|target| target.data().unit.name.clone());
+        let error = match &target_name {
+            None => Some(CANNOT_SET_BOUNTY_FOR_SUCH_NAME),
+            Some(name) if !name.eq_ignore_ascii_case(&self.name) => Some(CANNOT_SET_BOUNTY),
+            Some(_) if !bounties.has_permit(p.character_id, self.target_id) => {
+                Some(CANNOT_SET_BOUNTY)
+            }
+            Some(_) => None,
+        };
+        if let Some(error) = error {
+            p.send(SCSetBountyDonePacket {
+                target_id: self.target_id,
+                name: target_name.unwrap_or_else(|| self.name.clone()),
+                money_amount: bounties.active_total(self.target_id),
+                error_message: error,
+            });
+            return Ok(());
+        }
+        match bounties.place(server, &p, self.target_id, self.money) {
+            Ok(total) => {
+                p.send(SCSetBountyDonePacket {
+                    target_id: self.target_id,
+                    name: target_name.unwrap_or_default(),
+                    money_amount: total,
+                    error_message: 0,
+                });
+            }
+            Err(error) => {
+                tracing::debug!(
+                    "SendBountyUpdate refused for {} on {}: {error:?}",
+                    p.character_id,
+                    self.target_id
+                );
+                p.send(SCSetBountyDonePacket {
+                    target_id: self.target_id,
+                    name: target_name.unwrap_or_else(|| self.name.clone()),
+                    money_amount: bounties.active_total(self.target_id),
+                    error_message: error.message_id(),
+                });
+            }
+        }
         Ok(())
     }
 );
@@ -1030,7 +1133,7 @@ mod tests {
         // no group/optional-flag byte may appear anywhere.
         assert_eq!(
             body(&SCSetBountyPermittedPacket {
-                kind: 0x11223344,
+                target_id: 0x11223344,
                 name: "Test".into(),
                 money_amount: 1_000_000,
                 allowed: true,
@@ -1045,7 +1148,7 @@ mod tests {
         // allowed=false is the client's error-584 branch.
         assert_eq!(
             body(&SCSetBountyPermittedPacket {
-                kind: 0x11223344,
+                target_id: 0x11223344,
                 name: "Test".into(),
                 money_amount: 1_000_000,
                 allowed: false,
@@ -1060,7 +1163,7 @@ mod tests {
         // The money is mandatory even when zero.
         assert_eq!(
             body(&SCSetBountyPermittedPacket {
-                kind: 1,
+                target_id: 1,
                 name: "T".into(),
                 money_amount: 0,
                 allowed: true,
@@ -1071,7 +1174,7 @@ mod tests {
         // ErrorMessage 0 (placed) and the client's rejection ids 584 / 585.
         assert_eq!(
             body(&SCSetBountyDonePacket {
-                kind: 0x11223344,
+                target_id: 0x11223344,
                 name: "Test".into(),
                 money_amount: 1_000_000,
                 error_message: 0,
@@ -1085,7 +1188,7 @@ mod tests {
         );
         assert_eq!(
             body(&SCSetBountyDonePacket {
-                kind: 0x11223344,
+                target_id: 0x11223344,
                 name: "Test".into(),
                 money_amount: 1_000_000,
                 error_message: 585,
@@ -1099,7 +1202,7 @@ mod tests {
         );
         assert_eq!(
             body(&SCSetBountyDonePacket {
-                kind: 0x11223344,
+                target_id: 0x11223344,
                 name: "Test".into(),
                 money_amount: 1_000_000,
                 error_message: 584,
@@ -1148,7 +1251,7 @@ mod tests {
         assert_eq!(long.len(), 2 + BOUNTY_NAME_MAX_BYTES + 2 + 8);
 
         let permitted = body(&SCSetBountyPermittedPacket {
-            kind: 1,
+            target_id: 1,
             name: "a".repeat(200),
             money_amount: 0,
             allowed: true,
@@ -1365,7 +1468,7 @@ mod tests {
                 s.write_u32(1).write_str("Wanted").write_i32(-5000);
             }),
             CSSendBountyUpdatePacket {
-                kind: 1,
+                target_id: 1,
                 name: "Wanted".into(),
                 money: -5000
             }

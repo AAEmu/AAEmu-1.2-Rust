@@ -41,6 +41,9 @@ pub(crate) fn capture_financial_snapshot(server: &GameServer) -> FinancialSnapsh
     let houses = crate::systems::housing::manager::prepare_save(server);
     let dominions = server.systems.housing.dominions.prepare_save();
     let _economy = server.systems.economy.ops_lock();
+    // Captured with the wallets: `System::save(AfterCharacters)` writes these rows in the same
+    // transaction, so a pledge and its debit commit or roll back together.
+    server.systems.social.bounties.prepare_save();
     let mut players = server.world.all_characters();
     for player in server
         .save

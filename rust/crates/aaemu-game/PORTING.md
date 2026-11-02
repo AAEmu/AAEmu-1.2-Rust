@@ -454,7 +454,7 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 | `FactionManager` relations, `SystemFaction.GetRelationState`, `Unit/Character.SetFaction` | `systems/social/faction.rs`, `packets/faction.rs` | done | Relation table validated against compact.sqlite3 (gated test). Faction CS packets are log-only as in C#; every SCFaction* struct ported. |
 | `GameData/AchievementGameData` (`achievements`, `achievement_objectives`, `pre_completed_achievements`, `char_records`), `Models/Game/Achievement` | `systems/social/achievement.rs` (`server.game_data.systems.social.achievements`) | done | Loader + port of `AchievementGameDataTests`; gated real-DB test `achievement_game_data_real_compact_db`. The C# 1.2 tree has no manager; the Rust achievement manager / runtime / hooks / rewards (`achievement_*.rs`) read them (see "Achievement producers" below). |
 | `DuelManager`, `Models/Game/Duels`, duel tasks | `systems/social/duel.rs`, `packets/duel.rs` | done | Request / accept (flag via hook) / start / stop / cancel, distance + HP checks, end timer (tokio tasks; `set_delays` test hook). |
-| `CrimeManager`, `TrialManager`, `Models/Game/Crime`, `TrialUpdateTask` | `systems/social/{crime,trial}.rs`, `packets/trial.rs` | done | Crime table load / save (`AfterItems`), report / evidence (hooks), bot reports, trial / jury flow with 5 s tick, audience, bounty board (empty list as C#). Arrests, authenticated jury choices, guilty pleas, acquittals, court cleanup and reconnect jail enforcement have packet-flow regressions; prisoner buffs persist remaining online time. |
+| `CrimeManager`, `TrialManager`, `Models/Game/Crime`, `TrialUpdateTask` | `systems/social/{crime,trial}.rs`, `packets/trial.rs` | done | Crime table load / save (`AfterItems`), report / evidence (hooks), bot reports, trial / jury flow with 5 s tick, audience, bounty placement / arrest payout (`systems/social/{bounty,bounty_runtime}.rs`, `bounty_pledges`; see "Wanted-player bounty"). The board is still the empty list (BOUNTY-board). Arrests, authenticated jury choices, guilty pleas, acquittals, court cleanup and reconnect jail enforcement have packet-flow regressions; prisoner buffs persist remaining online time. |
 | `DominionData`, `Models/Game/Achievement`, rename / chat bubble / NPC chat / spam packets | `systems/social/{dominion,achievement}.rs`, `packets/misc.rs` | done (data + packets) | No C# manager drives them in 1.2. |
 | `RankingGameData` (later C# history), 1.2 ranking packets | `systems/social/ranking_{data,packets,runtime,manager,persistence}.rs` | done (arena + fishing boards) | Not in the 1.2 C#; Rust only. Request path, MySQL persistence (`character_rank_scores`, `rank_period_payouts`), score hooks and period-close reward letters: see "Ranking boards" under Known deviations. |
 | `RadarManager` | – | not social | Telescope / fish school registration from buff templates: skills / npcs. |
@@ -3276,7 +3276,7 @@ The Bevy 1.2 client (`AABevy1.2`) is the main client; its reverse-engineering no
 | M15 | `SCCooldowns` has a full writer (`i32` count + `[id, total, remaining]` u32 triples, skills then tags, 150 per list). It is sent after `SCCharacterState` for restored cooldowns and after a cast only where the client cannot start the timer itself (a `plot_only` cast with a plot, which sends no `SCSkillFired`, or a `timing_id == 0` skill), with the shared tag entry when the skill has one. The client starts ordinary skills (`toggle_buff_id == 0 && timing_id != 0`) on `SCSkillFired` and toggle skills on `OnBuffRemoved`; the `Cooldown` special effect is client-applied. Only end times are stored, so `total` equals `remaining` | verified: `397b64d0` -> `397b2350`; `OnCooldowns` `391d43c0` -> `39899d40` appends without de-duplication and caps at 150, and is what `GetActionCooldown` (`3943f310` -> `3989a3e0`/`3989a290`) reads. Template `+0x1bc` = `timing_id`, `+0x1c0` = `toggle_buff_id` (loader columns 0x87/0x88), `DAT_3a17770c` = 0. Cooldowns are persisted in `character_cooldowns` (absolute Unix-ms expiries) and restored by `Character.Load`; the C# kept them in memory only |
 | M24 | Slave-equipment items (`item_impl` 28, e.g. item 29725 on slave template 21) are written as detail type 0 (`Invalid`) with no detail body; the server no longer sends `ItemDetailType.SlaveEquipment` (10, 12 opaque bytes), which desynced every field after the item (the Bevy client rejected `SCUnitStatePacket` 0x069 and the original 1.2 client misparsed it) | verified: the 1.2 item detail reader `3961edf0` has cases only for tags 1..9 (bodies `0x38, 0x1e, 7, 10, 0x19, 0x11, 0x11, 9, 5` minus the type byte) and no case 10, so tag 10 reads no body; the C# 1.2 `ItemDetailType` numbering has no 10 either |
 | M25 | `SCUnitState` `Inventory_Equip` for slaves writes full items in slots 19..25 (the C# wrote only the template id for every unit type). A hull part there (Harpoon Clipper, template 14, part 29742 in slot 23) made the original 1.2 client read the following bytes as item fields and run off the packet (`sc error; cur=105 prev=97`, `Packet Error !!!`); Housing (3), Mate (5) and Character (0) keep template-only body parts, Npc (1) keeps `templateId, id, grade` outside 19..25 with a full-item Cosplay slot (27), Transfer/Shipyard write only 19..25 | verified: the client equipment reader `3961fa20` reads 19..25 as a template-only `u32` only when `baseUnitType != 2`; for a slave every slot goes through the full item reader `3961f500` |
-| CS | The client CS table entries missing from `opcodes::cs` were added: `0x11f CSRequestSetBountyMoney`, `0x120 CSSendBountyUpdate`, `0x130 CSRankSnapshot` (already handled through a local const, now the table entry), `0x133 CSChangeAutoUseAAPoint` | the Bevy `opcodes.rs` (client table); 0x130 additionally by the RE notes in `ranking_packets.rs`. `0x11f`/`0x120` are logged no-ops (the bounty ledger is not wired to the wallet, TODO); `0x133` sets `Character.auto_use_aa_point` and answers with `SCItemTaskSuccess` (`ItemTaskType` 110 carrying the one-byte `ChangeAutoUseAAPoint` task, action 18); the 1.2 C# had the task class but no 0x133 handler, so this reply is inferred, not observed on a live client |
+| CS | The client CS table entries missing from `opcodes::cs` were added: `0x11f CSRequestSetBountyMoney`, `0x120 CSSendBountyUpdate`, `0x130 CSRankSnapshot` (already handled through a local const, now the table entry), `0x133 CSChangeAutoUseAAPoint` | the Bevy `opcodes.rs` (client table); 0x130 additionally by the RE notes in `ranking_packets.rs`. `0x11f`/`0x120` now answer with `SCSetBountyPermitted` / `SCSetBountyDone` and place the pledge (see "Wanted-player bounty"); `0x133` sets `Character.auto_use_aa_point` and answers with `SCItemTaskSuccess` (`ItemTaskType` 110 carrying the one-byte `ChangeAutoUseAAPoint` task, action 18); the 1.2 C# had the task class but no 0x133 handler, so this reply is inferred, not observed on a live client |
 
 Doc-only items:
 
@@ -4008,3 +4008,77 @@ Persistence: `character_cooldowns` (`character_id`, `cooldown_type` 0 = skill id
 `UnitCooldowns::check_skill_cooldown`, so a cast before the restored expiry is refused with
 `COOLDOWN_TIME`. **Deviation:** the C# had no persistence and no real cooldown packet; this port
 adds both.
+
+## Wanted-player bounty (2026-11-02)
+
+The 1.2 C# tree only had the packet shells: `CSRequestSetBountyMoney` / `CSSendBountyUpdate`
+were logged no-ops and `CSNaviOpenBounty` answered an empty list (the comment there records that
+real rows broke the client Lua). This port implements placement and payout from the client
+evidence; none of it is recovered 1.2 server logic.
+
+Flow (`systems/social/packets/trial.rs`, readers `397b13a0` / `397bc6b0` /
+`397c6fc0` / `397c7080` / `397c7180`):
+
+* `CSRequestSetBountyMoney(name)` resolves an **online** character a player can name and answers
+  `SCSetBountyPermitted(targetId, name, curTotal, allowed)`. Only the wanted buff tag allows the
+  placement (`check_buff_tag(.., tags::WANTED)`, the same predicate as the arrest); `allowed ==
+  false` is the client's error **584** (`FUN_3907dee0`, `0x248`). An unknown name gets
+  `SCSetBountyDone(targetId 0, name, 0, 585)`; a refused self-target gets 586.
+* `CSSendBountyUpdate(targetId, name, amount)` requires the matching permit from the request,
+  checks the id/name again and must still find the target online and wanted. It debits exactly
+  `amount` copper through `subtract_money(..., ItemTaskType.SET_BOUNTY_MONEY = 87)` and answers
+  `SCSetBountyDone(targetId, name, newTotal, 0)`. Every refusal is error **585** (no such online
+  target) or **586** (everything else) through that packet; the client shows the id.
+* Pledges **stack** per target (several payers, and several placements per payer) and have **no
+  fee** (`SET_BOUNTY_MONEY` task, amount = pledge). `amount` is the client's signed `i32`, so
+  `0 < amount <= payer's purse`; the funds refusal is 586 (see BOUNTY-1).
+* The delay between the two packets is a server-side permit, `PERMIT_TTL_MS` = 5 minutes, replaced
+  by the next request and consumed only by a successful placement. A second
+  `CSSendBountyUpdate` without a new request gets 586.
+
+Payout (`systems/skills/combat.rs`, inside the arrest decision of `character_death_tail`): the
+arresting player receives the whole accumulated total with `ItemTaskType.PAY_BOUNTY_MONEY = 88`
+and `SCBountyPaid(hunter, arrested, total)`; the pledges become paid and the target's total
+resets to 0. The hook is inside the `if arrest` branch, so an NPC, guard or mob kill (no
+`arrestor`) and a pirate killed where the arrest is skipped pay nothing (BOUNTY-4). A repeated
+settlement pays nothing, and a self kill is never paid.
+
+Persistence (`systems/social/bounty.rs`, `SQL/updates/2026-11-02_aaemu_game_bounty.sql` and
+`SQL/aaemu_game.sql`): `bounty_pledges(id, payer_id, target_id, amount, created, paid)`. Paid rows
+stay as the record of who contributed; `id` continues above the highest saved id on load. The
+rows are captured under the economy operation lock together with the character wallet snapshot
+(`managers/save::capture_financial_snapshot` -> `BountyManager::prepare_save`) and written by
+`social::System::save(AfterCharacters)` in the same transaction as `Character.Save`, so a
+pledge and the debit that paid for it commit or roll back together. `CharacterLoad` sends the
+character's own active total in the verified `SCCharacterState.bountyMoney` field (X2G
+1302074-1302079); `SCUnitBountyMoney` is not sent (BOUNTY-3).
+
+Policy decisions / capture-pending (each also a case id in the code):
+
+* **BOUNTY-1** amount bounds and the 585/586 split. The client has error strings only for 584
+  ("not wanted", `SCSetBountyPermitted.allowed == false`), 585 ("no such name") and 586
+  (generic); the decompile gives no server predicate. Chosen: `0 < amount <= purse`, no fee,
+  self-target refused with 586, insufficient funds 586. Needs an original-server capture.
+* **BOUNTY-2** offline targets, permit TTL, no expiry. A target must be online to be bountied
+  (the client's name comes from a live unit menu); the pledge survives the target's or the
+  payer's logout and a restart, and is paid whenever the target is arrested later. Whether 1.2
+  allowed an offline target, and whether `bountyTime` (`SCCharacterState`, still 0) means an
+  expiry, is unknown; the permit TTL is our bounded-map policy, not client behaviour.
+* **BOUNTY-3** `SCUnitBountyMoney` (`0x0bb`). The handler `FUN_391d6680` and its `+0xc` id /
+  `+0x10` i64 offsets are known, but the packet **writer** was not located, so the wire layout is
+  unconfirmed. Nothing is sent (not even on a total change or on visibility) rather than guessing
+  a layout; a live capture of a 1.2 server is needed.
+* **BOUNTY-4** `SCBountyPaid` recipients and the no-arrest case. The client's chat text
+  (`ui_text` 4764) names the hunter, the arrested and the amount; the recipient scope (hunter /
+  zone / faction) is unknown. It is sent to the arresting player only. Whether a pirate killed in
+  a desperado zone (where `arrest` is false) should pay is also unknown; the arrest text ties the
+  payout to an arrest, so it does not pay.
+* **BOUNTY-board** `CSNaviOpenBounty` / `SCBountyList`. The row layout is verified (M10), but the
+  C# comment records that a filled list broke the 1.2 client Lua and the cause was never found.
+  The handler keeps answering the empty `(0, 0)` list; a non-empty list must be tested on the
+  original client first.
+
+Deviation from the removed C# history: C# never placed, settled or persisted a bounty, so there
+is no C# behaviour to mirror. The pre-existing `bounty_runtime.rs` design invented a 24-hour
+expiry, a placement fee and a same-account refusal; all three are gone in favour of the
+client-evidenced rules above.

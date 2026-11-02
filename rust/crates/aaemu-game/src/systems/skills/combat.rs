@@ -835,6 +835,14 @@ fn character_death_tail(
             .social
             .trials
             .arrest_criminal(server, victim_p, Some(&arrestor));
+        // The wanted player's accumulated bounty goes to the arresting player. This is inside
+        // the arrest decision: an NPC, guard or mob kill has no `arrestor` (it returned above)
+        // and a pirate killed where the arrest is skipped pays nothing (BOUNTY-4).
+        server
+            .systems
+            .social
+            .bounties
+            .settle_arrest(server, victim_p, &arrestor);
     }
 }
 

@@ -618,7 +618,8 @@ pub fn select_loaded(
 
     let data = &server.game_data;
     let snapshot = player.data().clone();
-    conn.send(&unit_state::character_state(&snapshot));
+    let bounty_money = server.systems.social.bounties.active_total(snapshot.id);
+    conn.send(&unit_state::character_state(&snapshot, bounty_money));
     conn.send(&SCCharacterGamePointsPacket {
         honor_point: snapshot.honor_point,
         vocation_point: snapshot.vocation_point,
