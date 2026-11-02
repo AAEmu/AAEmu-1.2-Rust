@@ -17,6 +17,7 @@ use super::mail::{
     self, mail_status, mail_type, BaseMail, COST_EXPRESS, COST_EXPRESS_ATTACHMENT,
     COST_FREE_ATTACHMENT_COUNT, COST_NORMAL, COST_NORMAL_ATTACHMENT, ITEM_COINS,
 };
+use super::mail_template::quote_arg;
 
 /// `LocalizationManager.Get("items", "name", templateId, fallback)`.
 pub fn item_name(server: &GameServer, template_id: u32, fallback: &str) -> String {
@@ -277,7 +278,9 @@ impl MailForAuction {
         };
         self.mail.body.text = format!(
             "body('{}', {}, {})",
-            self.item_name, count, self.item_buyout_price
+            quote_arg(&self.item_name),
+            count,
+            self.item_buyout_price
         );
         self.attach_item(server, self.buyer_id);
         self.mail.is_dirty = true;
@@ -307,7 +310,7 @@ impl MailForAuction {
         };
         self.mail.body.text = format!(
             "body('{}', {}, {}, {}, {}, {})",
-            self.item_name,
+            quote_arg(&self.item_name),
             count,
             self.seller_share,
             self.item_buyout_price,
@@ -351,7 +354,7 @@ impl MailForAuction {
             tracing::error!("MailForAuction.{sender}: NullReferenceException (_item)");
             return false;
         };
-        self.mail.body.text = format!("body('{}', {})", self.item_name, count);
+        self.mail.body.text = format!("body('{}', {})", quote_arg(&self.item_name), count);
         self.attach_item(server, self.seller_id);
         self.mail.is_dirty = true;
         true
@@ -373,7 +376,7 @@ impl MailForAuction {
         self.mail.receiver_name = name_buyer;
         self.mail.mail_type = mail_type::AUC_OFF_FAIL;
         self.mail.title = TITLE_BID_LOST.to_string();
-        self.mail.body.text = format!("body('{}')", self.item_name);
+        self.mail.body.text = format!("body('{}')", quote_arg(&self.item_name));
         self.mail.attach_money(previous_bid, 0, 0);
         true
     }
@@ -522,7 +525,7 @@ impl MailForSpeciality {
             self.mail.attach_money(self.item_count_seller, 0, 0);
             self.mail.body.text = format!(
                 "body('{}', {}, {}, {}, {}, {}, {}, {}, {}, {})",
-                self.trade_pack_name,
+                quote_arg(&self.trade_pack_name),
                 self.traded_rate,
                 payout,
                 if self.seller_is_crafter {
@@ -545,7 +548,7 @@ impl MailForSpeciality {
             // For item delivery, the client will calculate the total for you depending on receiverCase
             self.mail.body.text = format!(
                 "body('{}', {}, {}, {}, {}, {}, {}, {}, {}, {})",
-                self.trade_pack_name,
+                quote_arg(&self.trade_pack_name),
                 self.traded_rate,
                 0,
                 0,
@@ -587,7 +590,7 @@ impl MailForSpeciality {
             self.mail.attach_money(self.item_count_crafter, 0, 0);
             self.mail.body.text = format!(
                 "body('{}', {}, {}, {}, {}, {}, {}, {}, {}, {})",
-                self.trade_pack_name,
+                quote_arg(&self.trade_pack_name),
                 self.traded_rate,
                 payout,
                 self.item_count_base,
@@ -604,7 +607,7 @@ impl MailForSpeciality {
             }
             self.mail.body.text = format!(
                 "body('{}', {}, {}, {}, {}, {}, {}, {}, {}, {})",
-                self.trade_pack_name,
+                quote_arg(&self.trade_pack_name),
                 self.traded_rate,
                 0,
                 0,
@@ -716,7 +719,7 @@ impl MailForTax {
         }
         mail.body.text = format!(
             "body('{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}')",
-            house.name,
+            quote_arg(&house.name),
             house.place_date.max(0),
             house.protection_end_date.max(0),
             payment_dead_line.max(0),
@@ -841,7 +844,10 @@ impl CommercialMail {
                 None => server.items.add_loose(item),
             }
         }
-        let title = self.purchased_item_title.replace('\'', "\\'");
+        // The client parses these as `title('…')` / `body(…)` in two stages that both need the
+        // quoted arguments escaped (parentheses included), see `mail_template`. The C# wrote the
+        // title with only `'` escaped.
+        let title = quote_arg(&self.purchased_item_title);
         self.mail.title = format!("title('{title}')");
         self.mail.open_date = 946_684_800; // 2000-01-01, always in the past
         let is_present = if self.is_gift && !self.sender_name.is_empty() {
@@ -850,9 +856,9 @@ impl CommercialMail {
             "false"
         };
         let gifter_name = if self.is_gift {
-            self.sender_name.as_str()
+            quote_arg(&self.sender_name)
         } else {
-            ""
+            String::new()
         };
         let gift_string = if self.is_gift { "1" } else { "0" };
         let refund_string = if self.is_refund { "1" } else { "0" };

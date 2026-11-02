@@ -54,6 +54,7 @@ pub mod mail_character;
 pub mod mail_data;
 pub mod mail_kinds;
 pub mod mail_packets;
+pub mod mail_template;
 #[cfg(test)]
 mod mail_tests;
 pub mod mate_equipment;

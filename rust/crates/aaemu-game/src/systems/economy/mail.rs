@@ -708,6 +708,7 @@ impl MailManager {
         st.all = DotNetDict::default();
         st.deleted.clear();
         st.deletion_versions.clear();
+        let mut repaired = 0usize;
         for r in rows {
             let mut m = BaseMail {
                 id: i64::from(r.id as i32),
@@ -776,7 +777,10 @@ impl MailManager {
             m.header.attachments = attachment_count as u8;
             // Set internal delivered flag
             m.is_delivered = m.body.recv_date <= now;
-            m.is_dirty = false;
+            // Marketplace mails written before their item names were escaped: rewrite them and
+            // let the next save persist the fix.
+            m.is_dirty = super::mail_template::repair_charged_mail(&mut m);
+            repaired += usize::from(m.is_dirty);
             // Remove from delete list if it's a recycled Id
             let id = m.id;
             st.clear_deletion(id);
@@ -784,6 +788,9 @@ impl MailManager {
                 // C#: Dictionary.Add throws (the load aborts).
                 tracing::error!("Duplicate mail id {id} in mails table");
             }
+        }
+        if repaired > 0 {
+            tracing::info!("Repaired {repaired} marketplace mail(s) with unescaped parentheses");
         }
     }
 
