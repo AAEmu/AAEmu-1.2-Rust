@@ -980,7 +980,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `session::teleport_character` (`world/session.rs`), which applies the transform, moves the
   instance object table and dispatches `OnZoneChange`; the arrival is filed by
   `CSInstanceLoadedPacket` (`systems/instances/worlds.rs`) or, for a same-instance teleport, by
-  `session::file_teleport_arrival`. **Deviation:** `CSTeleportEndedPacket` now follows the
+  `session::file_teleport_arrival`. A rider, a bound seat or a doodad bond is released first
+  (`vehicles::force_dismount`, `PrefabChanged`, as the GM teleport and the trial do); the
+  parentless transform would otherwise leave it half attached on the server. **Deviation:** `CSTeleportEndedPacket` now follows the
   client's reported landing position and refiles the region before repainting (the C# only ran
   `ResendVisibleObjectsToCharacter`), so GM `/move`, same-instance portals and navi teleports
   re-evaluate the zone without waiting for a movement packet. Only a teleport armed through
@@ -1686,6 +1688,28 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   and temper reset write plain `ItemDetails` fields; the C# setter-less fields did not mark
   `IsDirty`, so `ItemManager.Save` skipped them. Rust marks `Item.dirty` in those paths and the
   regressions assert the next prepared save snapshot contains the item.
+* systems::economy (lunagem socketing rules, 2026-11): the C# `ItemSocketing.Execute` only
+  checked the 7-element `GemIds` array. Rust also applies the rules the 1.2 client itself checks
+  (`FUN_397ceb80` in the client decompile): the target's `items.LEVEL` must be >= 20
+  (`content_configs` id 62, kind 24); a lunagem may only go into gear whose
+  `items.level_requirement` is at least its `item_socket_level_limits.level`; the gem's
+  `item_sockets.equip_slot_group_id` must map through `equip_slot_group_maps` to the target
+  template's `EquipmentItemSlotType`; and the target may hold at most
+  `item_socket_num_limits[slot type][grade]` gems. `item_socket_num_limits.slot_id` is the
+  **equip slot type** (the client feeds the target's slot type straight into the lookup), not an
+  equip slot group. The level check runs before the slot-group/limit checks. A missing or zero
+  num-limit row means 0 sockets (`FUN_395aca00` returns 0) and the client reports 18
+  (`invalid_target`), not 742; only an existing limit already reached is `item_sockets_full`. A
+  missing level-limit row means no limit (`FUN_395aca70` returns `INT_MAX`), and the 15
+  `item_sockets` rows whose item has no `items` row (test/removed items) are skipped at load.
+  Rejections send the 1.2 error codes 18 (`invalid_target`, wrong slot group or no socket
+  limit), 742 (`item_sockets_full`),
+  743 (`item_sockets_empty`) or 781 (`socket_target_level`) and cancel the cast, which refunds
+  the gem and skips the roll; the C# returned early without cancelling, so the
+  `UseSkillAsReagent` gem was consumed even on a rejected attempt. DawnStone removal keeps its
+  old behavior except for the client's `item_sockets_empty` rejection. Existing items with more
+  gems than the current limit are left untouched at load, and regrade keeps their gems unchanged
+  (as the C# did; the client only warns that a downgrade can lose them).
 * systems::economy / npcs / skills (lunafrost, 2026-10): the C# `InteractionEffect` passed the
   `SkillItem` caster and `SkillCastItemTarget` to `MagicalEnchant.Execute`; the Rust bridge dropped
   them, so a lunafrost never applied. They are forwarded now. `MagicalEnchant` also looks the item up
@@ -3793,7 +3817,9 @@ special effect (43) and `InstantGameManager` reset (`instant_game.rs`, one
 `SCSkillCooldownReset` per skill of tag 378) send their resets and clear the matching server
 records. Clearing them is a deviation forced by persistence: the C# reset only sent the client
 packet, which was enough while `UnitCooldowns` died with the session; here a relog would
-otherwise restore a cooldown the battlefield reset removed.
+otherwise restore a cooldown the battlefield reset removed. The battlefield reset clears each
+skill's shared `cooldown_tag_id` record as well: tag cooldowns are persisted too, and a running
+tag would keep refusing the skills the reset showed as ready.
 
 Recall's path: skill 14849 / 21586 is **not** `plot_only` and has no `plot_id`; it is a normal
 `timing_id == 1`, `toggle_buff_id == 0` skill, so the client starts its 2000 ms cooldown itself.
