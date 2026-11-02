@@ -888,6 +888,85 @@ async fn different_inactive_saved_hull_restores_another_owners_system_cargo() {
     assert!(!server.items.removed_items().contains(&pack_id));
 }
 
+/// A house whose id collides with a hull id (`house_id` of a SLAVE row is the hull id).
+fn colliding_house(server: &GameServer, id: u32) -> crate::world::HouseRef {
+    let house = Entity::new(
+        server.ids.object.get_next_id().unwrap(),
+        crate::models::house::House::new(id, 1),
+    );
+    house.data().unit.tl_id = 4242;
+    assert!(server.systems.housing.manager.insert(&house));
+    house
+}
+
+/// A saved rack's `house_id` is the hull id; it must never be resolved as a house, even when a
+/// house with that id exists. Housing-owned rows keep attaching to their house.
+#[tokio::test]
+async fn saved_slave_rack_is_not_attached_to_a_house_with_the_hull_id() {
+    let server = server_with(cargo_identity_data());
+    let client = TestClient::new(&server, 1, 1);
+    let (owner, item_id) = owner_with_ship(&server, &client, 1, PA, SECOND_SHIP_ITEM);
+    let _active = root(&server, &owner, item_id, SHIP_HULL);
+    let house = colliding_house(&server, 777);
+    let missing = unused_item_id(&server);
+    let restored = summon_saved_hull_with_rack(&server, &owner, loaded_rack_row(missing))
+        .await
+        .expect("hull with cargo rack summons");
+    let racks = server.world.world(0).unwrap().all_doodads();
+    assert_eq!(racks.len(), 1);
+    assert_eq!(racks[0].data().parent_obj_id, restored.obj_id);
+    assert_eq!(racks[0].data().transform.parent_obj_id, restored.obj_id);
+    assert!(restored.data().attached_doodads.contains(&racks[0].obj_id));
+    assert!(house
+        .core()
+        .children()
+        .iter()
+        .all(|c| c.obj_id() != racks[0].obj_id));
+    assert!(server
+        .systems
+        .housing
+        .manager
+        .attached(house.obj_id)
+        .is_empty());
+}
+
+#[tokio::test]
+async fn housing_owned_persistent_rows_still_attach_to_their_house() {
+    use crate::systems::npcs::spawn_manager::PersistentDoodads;
+    let server = server_with(cargo_identity_data());
+    let house = colliding_house(&server, 777);
+    let world = server.world.world(0).unwrap();
+    let spawns = server.systems.npcs.spawns.get_or_create(&world);
+    let mut row = saved_rack_row(777);
+    row.owner_type = doodad_owner_type::HOUSING;
+    let weak = Arc::downgrade(&server);
+    *server
+        .systems
+        .npcs
+        .spawns
+        .test_persistent_loader
+        .lock()
+        .unwrap() = Some(Arc::new(move |_, _| {
+        let prepared =
+            PersistentDoodads::prepare(&weak.upgrade().unwrap(), vec![row.clone()]).unwrap();
+        Box::pin(async move { Ok(prepared) })
+    }));
+    assert_eq!(
+        spawns
+            .spawn_persistent_doodads(&server, doodad_owner_type::HOUSING, -1, None, false)
+            .await
+            .unwrap(),
+        1
+    );
+    let rack = spawns.get_all_player_doodads().pop().unwrap();
+    assert_eq!(rack.data().parent_obj_id, house.obj_id);
+    assert!(house
+        .core()
+        .children()
+        .iter()
+        .any(|c| c.obj_id() == rack.obj_id));
+}
+
 fn unused_item_id(server: &GameServer) -> u64 {
     loop {
         let id = u64::from(server.ids.item.get_next_id().unwrap());
