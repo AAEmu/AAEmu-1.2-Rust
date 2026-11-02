@@ -121,6 +121,15 @@ CREATE TABLE IF NOT EXISTS `character_active_buffs` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Stores active buffs across player sessions';
 
 
+CREATE TABLE IF NOT EXISTS `character_cooldowns` (
+  `character_id`  INT UNSIGNED NOT NULL COMMENT 'Character who owns this cooldown',
+  `cooldown_type` TINYINT UNSIGNED NOT NULL COMMENT '0 = skill id, 1 = shared cooldown tag',
+  `cooldown_id`   INT UNSIGNED NOT NULL COMMENT 'skills.id or skills.cooldown_tag_id',
+  `expires_at_ms` BIGINT NOT NULL COMMENT 'Unix milliseconds UTC when the cooldown expires',
+  PRIMARY KEY (`character_id`, `cooldown_type`, `cooldown_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Running skill / tag cooldowns, restored on login';
+
+
 CREATE TABLE IF NOT EXISTS `characters` (
   `id` int unsigned NOT NULL,
   `account_id` int unsigned NOT NULL,
