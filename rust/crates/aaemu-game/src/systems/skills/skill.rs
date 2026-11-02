@@ -239,26 +239,26 @@ fn start_skill_cooldown(server: &GameServer, skill: &SkillRun, caster: &WorldObj
         return;
     }
     let tag = skill.template.cooldown_tag_id.max(0) as u32;
-    let packet = caster
-        .with_unit(|u| {
-            let cooldowns = &mut u.unit_mut().cooldowns;
-            cooldowns.add_cooldown(skill.template.id, duration, now);
-            cooldowns.add_tag_cooldown(tag, duration, now);
-            if tag == 0 {
-                return None;
-            }
-            // Native 1.2 397B2350 keeps these lists separate; 3989A290 takes
-            // max(individual, tag). Never manufacture individual entries for other members.
-            let mut affected = UnitCooldowns::default();
-            affected
-                .cooldowns
-                .insert(skill.template.id, cooldowns.cooldowns[&skill.template.id]);
+    let packet = caster.with_unit(|u| {
+        let cooldowns = &mut u.unit_mut().cooldowns;
+        cooldowns.add_cooldown(skill.template.id, duration, now);
+        cooldowns.add_tag_cooldown(tag, duration, now);
+        // Native 1.2 397B2350 keeps these lists separate; 3989A290 takes
+        // max(individual, tag). Never manufacture individual entries for other members.
+        // The individual entry is sent even without a tag: an untagged skill (Recall,
+        // Escape, most consumables) still has its own timer, and OnCooldowns is the only
+        // packet that starts a server-driven countdown in the client's manager.
+        let mut affected = UnitCooldowns::default();
+        affected
+            .cooldowns
+            .insert(skill.template.id, cooldowns.cooldowns[&skill.template.id]);
+        if tag != 0 {
             affected
                 .tag_cooldowns
                 .insert(tag, cooldowns.tag_cooldowns[&tag]);
-            Some(SCCooldownsPacket::from_cooldowns(&affected, now))
-        })
-        .flatten();
+        }
+        SCCooldownsPacket::from_cooldowns(&affected, now)
+    });
     if let Some(packet) = packet.filter(|p| !p.is_empty()) {
         // OnCooldowns (native 391D43C0) addresses the local character's manager;
         // unlike SkillCooldownReset, the packet has no subject object ID. A mate's

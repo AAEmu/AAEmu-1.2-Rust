@@ -3022,7 +3022,7 @@ The Bevy 1.2 client (`AABevy1.2`) is the main client; its reverse-engineering no
 | M9 | A missing trial reporter name is written as an empty string (the C# omitted the length) | per Bevy RE notes (string always has its `u16` length) |
 | M10 | Bounty rows write `notGuilty` before `guilty` | verified: row reader `397bebf0` reads `notGuilty` (`+0xc8`) then `guilty` (`+0xcc`) |
 | M14 | `SCUnitState` of a character sets flag bit3 (`0x0008`) while force attack is on, so late observers see Bloodlust | verified: the client chain is `397c9480` -> `398a1f90` -> unit+0x3bbc (the force-attack byte) for bit3 of the `u16` flags |
-| M15 | `SCCooldowns` has a full writer (`i32` count + `[id, total, remaining]` u32 triples, skills then tags, 150 per list) and is sent after `SCCharacterState` when the character has running skill cooldowns. The server keeps only the end time of a skill cooldown and no tags, so `total` equals `remaining` | verified: `397b64d0` -> `397b2350`; entries are appended, an empty list is no reset. Cooldowns are not persisted, so a freshly loaded character normally has none |
+| M15 | `SCCooldowns` has a full writer (`i32` count + `[id, total, remaining]` u32 triples, skills then tags, 150 per list). It is sent after `SCCharacterState` for restored cooldowns, after an accepted cast for the started skill (and its shared tag when it has one, including an untagged skill's individual timer), and by the `Cooldown` special effect. Only the end time of each skill / tag cooldown is stored, so `total` equals `remaining` | verified: `397b64d0` -> `397b2350`; `OnCooldowns` `391d43c0` -> `39899d40` appends entries and is what `GetActionCooldown` (`3943f310` -> `3989a3e0`/`3989a290`) reads, so an untagged cast that sent nothing had no countdown. Cooldowns are persisted in `character_cooldowns` (absolute Unix-ms expiries) and restored by `Character.Load`; the C# kept them in memory only |
 | M24 | Slave-equipment items (`item_impl` 28, e.g. item 29725 on slave template 21) are written as detail type 0 (`Invalid`) with no detail body; the server no longer sends `ItemDetailType.SlaveEquipment` (10, 12 opaque bytes), which desynced every field after the item (the Bevy client rejected `SCUnitStatePacket` 0x069 and the original 1.2 client misparsed it) | verified: the 1.2 item detail reader `3961edf0` has cases only for tags 1..9 (bodies `0x38, 0x1e, 7, 10, 0x19, 0x11, 0x11, 9, 5` minus the type byte) and no case 10, so tag 10 reads no body; the C# 1.2 `ItemDetailType` numbering has no 10 either |
 | M25 | `SCUnitState` `Inventory_Equip` for slaves writes full items in slots 19..25 (the C# wrote only the template id for every unit type). A hull part there (Harpoon Clipper, template 14, part 29742 in slot 23) made the original 1.2 client read the following bytes as item fields and run off the packet (`sc error; cur=105 prev=97`, `Packet Error !!!`); Housing (3), Mate (5) and Character (0) keep template-only body parts, Npc (1) keeps `templateId, id, grade` outside 19..25 with a full-item Cosplay slot (27), Transfer/Shipyard write only 19..25 | verified: the client equipment reader `3961fa20` reads 19..25 as a template-only `u32` only when `baseUnitType != 2`; for a slave every slot goes through the full item reader `3961f500` |
 | CS | The client CS table entries missing from `opcodes::cs` were added: `0x11f CSRequestSetBountyMoney`, `0x120 CSSendBountyUpdate`, `0x130 CSRankSnapshot` (already handled through a local const, now the table entry), `0x133 CSChangeAutoUseAAPoint` | the Bevy `opcodes.rs` (client table); 0x130 additionally by the RE notes in `ranking_packets.rs`. `0x11f`/`0x120` are logged no-ops (the bounty ledger is not wired to the wallet, TODO); `0x133` sets `Character.auto_use_aa_point` and answers with `SCItemTaskSuccess` (`ItemTaskType` 110 carrying the one-byte `ChangeAutoUseAAPoint` task, action 18); the 1.2 C# had the task class but no 0x133 handler, so this reply is inferred, not observed on a live client |
@@ -3685,3 +3685,26 @@ consumer was not located; the 1.2 ordering/result is therefore not proven there.
   client's item-name lookup (`x2game.dll.c:742315`) always finds a template. The doodad gate runs
   after `gathering::allows_skill` (a disallowed skill keeps `INVALID_TARGET`) and is skipped for
   Mount casters, whose effect caster is the slave.
+
+## Cooldown display and persistence (2026-11-02)
+
+The C# `SCCooldownsPacket` was a stub that was never sent, and `UnitCooldowns` lived only in
+memory; the port's writer was already correct but only reported a cast when the skill had an
+authored `cooldown_tag_id`. Recall (14849 / 21586), Escape (20297) and most consumables have no
+tag, so their casts sent no `SCCooldownsPacket` at all. Native `OnCooldowns`
+(`x2game.dll.c:363574`, handler `391d43c0` -> `39899d40`) is the only server path that appends an
+entry to the client's cooldown manager (the cast handlers `3939a810` / `3939b010` do not start
+one), and the action bar reads that manager through `GetActionCooldown` (`3943f310` ->
+`3989a3e0` -> `3989a290`). The individual entry is therefore sent on every accepted cast, with
+the shared tag entry only when the skill has one; the client picks the longer timer with
+`3989a290`.
+
+Persistence: `character_cooldowns` (`character_id`, `cooldown_type` 0 = skill id / 1 =
+`cooldown_tag_id`, `cooldown_id`, `expires_at_ms` BIGINT Unix ms) is rewritten by every
+`Character.Save` with the unexpired entries and read by `Character.Load`
+(`db_character::fetch_character_cooldowns` -> `apply_cooldown_rows`). The select sync
+(`world::session::send_running_cooldowns`) sends the restored list, and the same map backs
+`UnitCooldowns::check_skill_cooldown`, so a cast before the restored expiry is refused with
+`COOLDOWN_TIME`. **Deviation:** the C# had no persistence and no real cooldown packet; this port
+adds both. The `Cooldown` special effect (40) also sends its update now (no 1.2 skill references
+the effect) and ignores non-positive durations instead of wrapping them to `u32`.

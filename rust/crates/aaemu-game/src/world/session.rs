@@ -420,6 +420,17 @@ pub async fn select_character(
     Ok(())
 }
 
+/// Login sync of the character's running skill / shared-tag cooldowns. Native `OnCooldowns`
+/// (`391d43c0` -> `39899d40`) appends the entries to the local character's cooldown manager, so
+/// this is what makes a cooldown that survived a relog visible (and counted down) again. An
+/// empty list is not sent: it is a no-op, not a reset.
+pub fn send_running_cooldowns(conn: &mut GameConnection, c: &Character, now_ms: i64) {
+    let cooldowns = SCCooldownsPacket::from_cooldowns(&c.unit.cooldowns, now_ms);
+    if !cooldowns.is_empty() {
+        conn.send(&cooldowns);
+    }
+}
+
 /// The rest of `CSSelectCharacterPacket.Read` once `Character.Load()` is done (no MySQL access).
 pub fn select_loaded(
     server: &GameServer,
@@ -613,12 +624,8 @@ pub fn select_loaded(
             end_time: conflict.next_state_time,
         });
     }
-    // Running skill cooldowns (the client appends them to its cooldown manager; an empty list
-    // would change nothing, so it is not sent).
-    let cooldowns = SCCooldownsPacket::from_cooldowns(&snapshot.unit.cooldowns, now_ms());
-    if !cooldowns.is_empty() {
-        conn.send(&cooldowns);
-    }
+    // Running skill / tag cooldowns restored from `character_cooldowns`.
+    send_running_cooldowns(conn, &snapshot, now_ms());
     // FactionManager.SendFactions / SendRelations
     if data.factions.factions.is_empty() {
         conn.send(&SCFactionListEmptyPacket);
