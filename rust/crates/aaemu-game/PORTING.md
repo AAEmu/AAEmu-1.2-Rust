@@ -2300,6 +2300,19 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   sent again. A settlement whose mail is refused `MAX_SETTLEMENT_RETRIES` (720, one hour of 5 s
   ticks) times, e.g. for a deleted receiver, is logged at error level and dropped, and its lot
   is then removed.
+* systems::economy (mail templates, 2026-11-02): the 1.2 client reads `title('…')` /
+  `body(…,'…')` in two stages and the C# wrote the item names unescaped (the cash shop escaped
+  only `'`). Stage A (native, `sub_3948E4C0` / `sub_3948C420`, only `CHARGED` mails on en_us / de /
+  fr clients) runs `sscanf("title(%[^)])")` and `sscanf("body(%[^,],%[^,],%[^)])%s")`, which stop at
+  the first raw `)` and know no escapes, so `Resplendent Armor Regrade Scroll (100)` showed as
+  `…(100` and its body as raw text. Stage B (every sender starting with `.`) is `GetMailText`'s Lua
+  `loadstring`, which decodes `\'`, `\\` and the Lua 5.1 `\ddd` decimal escape. Rust therefore
+  writes every quoted template argument through `mail_template::quote_arg` (`\` -> `\\`, `'` ->
+  `\'`, `(` -> `\040`, `)` -> `\041`): stage A sees no `)` and Lua restores the name. `|` is not
+  escaped (the client splits names on it; no 1.2 item name has one). **Deviation:** `load_rows`
+  repairs stored `CHARGED` mails written before this (raw parentheses inside the `title('…')`
+  argument and the third `body(…)` argument, nothing else touched, idempotent) and marks them
+  dirty so the next save persists the fix.
 
 ### Ranking boards (Rust only)
 

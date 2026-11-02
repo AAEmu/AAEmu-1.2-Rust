@@ -17,6 +17,7 @@ use super::mail::{
     self, mail_status, mail_type, BaseMail, COST_EXPRESS, COST_EXPRESS_ATTACHMENT,
     COST_FREE_ATTACHMENT_COUNT, COST_NORMAL, COST_NORMAL_ATTACHMENT, ITEM_COINS,
 };
+use super::mail_template::quote_arg;
 
 /// `LocalizationManager.Get("items", "name", templateId, fallback)`.
 pub fn item_name(server: &GameServer, template_id: u32, fallback: &str) -> String {
@@ -841,7 +842,10 @@ impl CommercialMail {
                 None => server.items.add_loose(item),
             }
         }
-        let title = self.purchased_item_title.replace('\'', "\\'");
+        // The client parses these as `title('…')` / `body(…)` in two stages that both need the
+        // quoted arguments escaped (parentheses included), see `mail_template`. The C# wrote the
+        // title with only `'` escaped.
+        let title = quote_arg(&self.purchased_item_title);
         self.mail.title = format!("title('{title}')");
         self.mail.open_date = 946_684_800; // 2000-01-01, always in the past
         let is_present = if self.is_gift && !self.sender_name.is_empty() {
@@ -850,9 +854,9 @@ impl CommercialMail {
             "false"
         };
         let gifter_name = if self.is_gift {
-            self.sender_name.as_str()
+            quote_arg(&self.sender_name)
         } else {
-            ""
+            String::new()
         };
         let gift_string = if self.is_gift { "1" } else { "0" };
         let refund_string = if self.is_refund { "1" } else { "0" };
