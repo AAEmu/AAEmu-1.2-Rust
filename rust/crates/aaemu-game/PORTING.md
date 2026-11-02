@@ -2416,7 +2416,7 @@ and in NPC wandering / buff remaining times.
   a member joining an existing team never joins the party / raid
   chat (but can still talk into it); `IsMarked` compares mark object ids with character ids;
   `ExpeditionManager.ChangeOwner` does not update `OwnerName`; `ReplyInvite` does not check an
-  existing guild; `ChangeExpeditionRolePolicy` requires the Expel right; disbanded guilds stay in
+  existing guild; disbanded guilds stay in
   the list; family invitations always carry family id 1; hard disconnects keep the family member's
   character set; `GetTrialChat` throws when the faction has no court and the player is in no trial;
   `CSAddFriend` accepts yourself.
@@ -3158,6 +3158,15 @@ Deviations from the 1.2 C# `ExpeditionManager` / `TeamManager`, which trusted ev
 - `ChangeLootingRule` accepted any character id as loot master. It must now be 0 or a member of the
   team; otherwise only that field is ignored (logged). Over-head markers are unchanged: their
   target is any unit or object, not a team member.
+- `ChangeExpeditionRolePolicy` required the editor's `Expel` flag and copied only `Name`, `Invite`,
+  `JoinSiege`, `Promote` and `Expel`, so an edit silently dropped `DominionDeclare`, `Dismiss`,
+  `Chat`, `ManagerChat` and `SiegeMaster` from the stored policy and the broadcast (the 1.2 packet
+  carries all nine flags). The Rust stores the whole policy and follows the 1.2 client's
+  role-policy tab instead of the C# right: `expedition_management.alb` decorates each policy with
+  `SET_POLICY = (role == 255)`, and `expedition_management_role_policy_tab.alb`'s
+  `CanChangePolicy` requires that flag plus a lower target role. Only the owner may edit, and the
+  owner's own policy is not editable. **Capture-pending:** the rule comes from the client UI, not
+  from a 1.2 server capture; the C# `Expel` check is not mirrored.
 
 ## Client skill cast authority (2026-10-20)
 
