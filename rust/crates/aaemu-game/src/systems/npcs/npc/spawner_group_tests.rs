@@ -9,10 +9,12 @@ use crate::models::npc::Npc;
 use crate::server::GameServer;
 use crate::systems::npcs::doodad::spawner::{NpcSpawnerDef, SpawnerBase};
 use crate::systems::npcs::npc::group_data::{NpcGroup, NpcGroupData, NpcGroupMember};
-use crate::systems::npcs::npc::spawner_data::{NpcSpawnerData, NpcSpawnerNpc, NpcSpawnerTemplate};
+use crate::systems::npcs::npc::spawner_data::{
+    npc_spawner_category, NpcSpawnerData, NpcSpawnerNpc, NpcSpawnerTemplate,
+};
 use crate::systems::npcs::spawn_manager::backend::TestBackend;
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient, TEST_ZONE};
-use crate::world::{DoodadRef, Entity, NpcRef, WorldInstance};
+use crate::world::{DoodadRef, Entity, NpcRef, WorldInstance, WorldObject};
 
 use super::{NpcSpawner, NpcSpawnerInit, NpcSpawnerShared};
 
@@ -272,51 +274,141 @@ async fn unknown_group_is_a_retryable_empty_pass_not_a_wrong_npc() {
     assert!(server.world.world(0).unwrap().all_npcs().is_empty());
 }
 
-/// Registers a spawner through `SpawnManager::add_npc_spawner` the way a world placement does:
-/// `UnitId` is a group member NPC, so the member index must select the group's spawner template
-/// instead of generating a single-NPC fallback.
-#[tokio::test]
-async fn world_placement_of_a_group_member_selects_the_group_spawner() {
+/// The real data shape: every group member NPC also has an ordinary (mostly AUTOCREATED)
+/// member row, and the world places the members individually. The group sibling must not change
+/// which spawner a placement selects, even when the group spawner has a time window.
+fn ghost_army_data(group_window: Option<(f32, f32)>) -> GameData {
     let mut data = GameData::empty();
-    data.systems.npcs.npc_groups = sea_worm_group();
-    let spawners = NpcSpawnerData::from_parts(
-        vec![template(9571, Vec::new())],
-        vec![group_member_row(10075, 9571, 50)],
+    data.systems.npcs.npc_groups = NpcGroupData::from_parts(
+        vec![NpcGroup {
+            id: 142,
+            name: "ghost army".into(),
+            aggro_rule_id: 1,
+            enable_respawn: false,
+        }],
+        vec![
+            member(498, 142, 12728, 0.0, 0.0, 0.0),
+            member(499, 142, 12729, 3.0, 0.0, 0.0),
+        ],
+    );
+    let mut single = template(14135, Vec::new());
+    single.npc_spawner_category_id = npc_spawner_category::AUTOCREATED;
+    let mut group_spawner = template(14133, Vec::new());
+    if let Some((start, end)) = group_window {
+        group_spawner.start_time = start;
+        group_spawner.end_time = end;
+    }
+    data.systems.npcs.npc_spawners = NpcSpawnerData::from_parts(
+        vec![single, group_spawner],
+        vec![
+            plain_member_row(15217, 14135, 12728),
+            group_member_row(15345, 14133, 142),
+        ],
     )
     .unwrap();
-    spawners.index_npc_groups(&data.systems.npcs.npc_groups);
-    data.systems.npcs.npc_spawners = spawners;
+    data
+}
+
+#[tokio::test]
+async fn placements_keep_selecting_the_autocreated_single_member() {
+    for (label, window) in [
+        ("without a group schedule", None),
+        ("outside the group's time window", Some((0.1, 1.0))),
+    ] {
+        let server = Arc::new(test_server_with(ghost_army_data(window)));
+        server.set_self();
+        *server.systems.npcs.spawns.test_backend.lock().unwrap() = Some(Arc::new(Backend));
+        // 12:00 is outside the ghost army's authored 00:06-01:00 window.
+        server.time.set(12.0);
+        let world = server.world.world(0).unwrap();
+        let manager = server.systems.npcs.spawns.get_or_create(&world);
+        let mut def = NpcSpawnerDef {
+            base: SpawnerBase {
+                unit_id: 12728,
+                ..SpawnerBase::default()
+            },
+            count: 1,
+            npc_spawner_ids: Vec::new(),
+        };
+        def.base.position = position(100.0, 100.0);
+        assert_eq!(manager.add_npc_spawner(&server, def), Ok(1), "{label}");
+        let spawner = manager
+            .get_all_spawners()
+            .values()
+            .flatten()
+            .next()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            spawner.spawner_id, 14135,
+            "{label}: the AUTOCREATED single member spawner"
+        );
+
+        spawner.update(&server);
+
+        let mut templates: Vec<u32> = spawner
+            .spawned_npcs()
+            .values()
+            .flatten()
+            .map(|n| n.data().unit.template_id)
+            .collect();
+        templates.sort_unstable();
+        assert_eq!(
+            templates,
+            vec![12728],
+            "{label}: exactly one member, not the whole group 142"
+        );
+    }
+}
+
+#[tokio::test]
+async fn summon_effect_does_not_rewrite_a_group_template() {
+    let mut data = GameData::empty();
+    data.systems.npcs.npc_groups = sea_worm_group();
+    data.systems.npcs.npc_spawners = NpcSpawnerData::from_parts(
+        vec![template(9571, Vec::new())],
+        vec![
+            plain_member_row(10074, 9571, 9000),
+            group_member_row(10075, 9571, 50),
+        ],
+    )
+    .unwrap();
     let server = Arc::new(test_server_with(data));
     server.set_self();
     *server.systems.npcs.spawns.test_backend.lock().unwrap() = Some(Arc::new(Backend));
     let world = server.world.world(0).unwrap();
     let manager = server.systems.npcs.spawns.get_or_create(&world);
-    let mut def = NpcSpawnerDef {
-        base: SpawnerBase {
-            unit_id: 8564,
-            ..SpawnerBase::default()
-        },
-        count: 1,
-        npc_spawner_ids: Vec::new(),
-    };
-    def.base.position = position(100.0, 100.0);
-    assert_eq!(manager.add_npc_spawner(&server, def), Ok(1));
-    let spawner = manager
-        .get_all_spawners()
-        .values()
-        .flatten()
-        .next()
-        .unwrap()
-        .clone();
-    assert_eq!(spawner.spawner_id, 9571, "the authored group spawner");
+    let client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(&server, &client, test_character(1, "P", 100.0, 100.0), 5000);
 
-    spawner.do_spawn(&server);
-    let mut templates: Vec<u32> = spawner
-        .spawned_npcs()
-        .values()
-        .flatten()
-        .map(|n| n.data().unit.template_id)
-        .collect();
-    templates.sort_unstable();
-    assert_eq!(templates, vec![8564, 8566, 8566]);
+    // The summoned unit id equals the group id of a template that also has a plain row: the
+    // C# rewrite would replace the group template with the plain row retargeted to id 50.
+    let spawner = manager
+        .get_npc_spawner_at(&server, 50, &WorldObject::from(&player))
+        .expect("summon spawner");
+    let template = spawner.template().expect("template");
+    assert_ne!(template.id, 9571, "the group template is not retargeted");
+    assert_eq!(template.npcs.len(), 1);
+    assert_eq!(template.npcs[0].member_id, 50);
+    assert_eq!(
+        template.npcs[0].member_type, "Npc",
+        "a generated single-NPC template"
+    );
+
+    let stored = server
+        .game_data
+        .systems
+        .npcs
+        .npc_spawners
+        .get_npc_spawner_template(9571)
+        .unwrap();
+    assert_eq!(stored.npcs.len(), 2, "the group template keeps its rows");
+    assert!(
+        stored
+            .npcs
+            .iter()
+            .any(|n| n.member_type == "NpcGroup" && n.member_id == 50),
+        "the group row is intact: {:?}",
+        stored.npcs
+    );
 }

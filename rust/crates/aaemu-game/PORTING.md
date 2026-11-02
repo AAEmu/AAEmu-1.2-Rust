@@ -900,16 +900,25 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   deviates: a `"NpcGroup"` member spawns every `npc_group_members.npc_id` of `MemberId`'s group
   at the spawner position plus that member's `formation_offset_x/y/z`, each with the ordinary
   spawner link, population registration and respawn bookkeeping. The member -> spawner template
-  index (`GetSpawnerIds`) also maps the group's member NPC ids to the group's spawner template;
-  the C# index only knew the raw group id, so a world placement (whose `UnitId` is a member
-  NPC) never selected the group template. The group batch is one authored encounter: it spawns
-  whole even when fewer population slots remain (a `max_population` of 1 with a 3-member group
-  yields 3 units), while ordinary `"Npc"` members keep the hard per-unit cap. The population
-  target still counts individual NPCs, so a partially killed group may not schedule a
-  per-member respawn while enough members live; it refills when the spawner empties.
-  `get_npc_spawner_at` (`SpawnEffect`) now rewrites only an ordinary `"Npc"` member row; a unit
-  reachable only through a group keeps the generated single-NPC fallback instead of corrupting
-  the shared group template. Capture-pending: `formation_offset_*` are applied as authored
+  index (`GetSpawnerIds`) is unchanged: it is keyed by `npc_spawner_npcs.member_id` only. The
+  shipped main_world data places every group member NPC individually under its NPC id, and each
+  of those ids has an ordinary (mostly AUTOCREATED) member row, so those placements keep
+  selecting the ordinary single-NPC spawner and never the group template. A group template is
+  selected by a placement only where the authored `UnitId` is the group id itself: groups 32,
+  42, 44, 45, 79 and 80 in main_world (21 placements), which are exactly the rows that
+  previously spawned the colliding NPC template (group 32 "Juggernaut slave overseer" was
+  placed as NPC 32 "porter"). GM `/spawn` of an NPC template id that equals a group id
+  resolves the group template the same way; event spawners and `SpawnEffect` build/select
+  ordinary `"Npc"` templates and do not reach groups. The group batch is one authored
+  encounter: it spawns whole even when fewer population slots remain (group 44: 9 members at
+  `max_population` 1; group 80: 5 at 1), so it can exceed the spawner cap and the per-tick
+  activation budget; ordinary `"Npc"` members keep the hard per-unit cap. This is a documented
+  deviation, not fixed. The population target still counts individual NPCs, so a partially
+  killed group may not schedule a per-member respawn while enough members live; it refills
+  when the spawner empties. `get_npc_spawner_at` (`SpawnEffect`) now rewrites only an ordinary
+  `"Npc"` member row; a summoned unit whose id equals a group id keeps the generated single-NPC
+  fallback instead of replacing the shared group template's rows. Capture-pending:
+  `formation_offset_*` are applied as authored
   world-axis deltas, not rotated by the spawner yaw (the 1.2 client `game_pak` only exposes
   runtime AI formation strings such as `FORMATION_POINT` / `FormationManager`, no placement
   rule). `aggro_rule_id` (group aggro), `is_leader` / `is_move_leader` (leader following),

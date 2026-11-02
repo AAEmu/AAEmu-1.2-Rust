@@ -188,6 +188,7 @@ impl NpcGroupData {
 mod tests {
     use super::*;
     use crate::systems::npcs::npc::spawner_data::NpcSpawnerData;
+    use rusqlite::OpenFlags;
 
     fn in_memory() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -238,53 +239,14 @@ mod tests {
     }
 
     #[test]
-    fn expanded_spawner_index_maps_group_member_npcs_to_the_group_spawner() {
-        let conn = in_memory();
-        conn.execute_batch(
-            r#"
-            CREATE TABLE npc_spawners (
-                id INT, npc_spawner_category_id INT, name TEXT, comment TEXT,
-                maxPopulation INT, startTime REAL, endTime REAL, destroyTime REAL,
-                spawn_delay_min REAL, activation_state NUM, save_indun NUM,
-                min_population INT, test_radius_npc REAL, test_radius_pc REAL,
-                suspend_spawn_count INT, spawn_delay_max REAL
-            );
-            CREATE TABLE npc_spawner_npcs (
-                id INT, npc_spawner_id INT, member_id INT, member_type TEXT, weight REAL
-            );
-            CREATE TABLE transfers (id INT);
-            CREATE TABLE slaves (id INT);
-            INSERT INTO npc_spawners VALUES
-                (9571, 0, 'sea worms', '', 1, 0, 0, 0, 5, 'f', 'f', 0, 3, 0, 0, 10);
-            INSERT INTO npc_spawner_npcs VALUES
-                (10075, 9571, 50, 'NpcGroup', 1.0),
-                (10076, 9571, 8564, 'Npc', 1.0);
-            "#,
-        )
-        .unwrap();
-        let groups = NpcGroupData::load_from(&conn).unwrap();
-        let spawners = NpcSpawnerData::load_from(&conn).unwrap();
-        spawners.index_npc_groups(&groups);
-        let ids = spawners.get_spawner_ids(8566).expect("group member index");
-        assert_eq!(ids, vec![9571]);
-        assert_eq!(
-            spawners.get_spawner_ids(8564),
-            Some(vec![9571]),
-            "a direct member row and a group member map to the same spawner once"
-        );
-        assert_eq!(spawners.get_spawner_ids(9999), None);
-    }
-
-    #[test]
     #[ignore = "needs AAEMU_COMPACT_DB"]
     fn real_compact_db_npc_groups() {
         let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
             return;
         };
-        let conn = Connection::open(path).unwrap();
+        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let groups = NpcGroupData::load_from(&conn).unwrap();
         let spawners = NpcSpawnerData::load_from(&conn).unwrap();
-        spawners.index_npc_groups(&groups);
 
         let mut group_rows = 0usize;
         let mut member_rows = 0usize;
@@ -316,13 +278,6 @@ mod tests {
                     exists,
                     "spawner row {}: group {} member npc {} does not exist",
                     nsn.id, group.id, member.npc_id
-                );
-                let ids = spawners.get_spawner_ids(member.npc_id).unwrap_or_default();
-                assert!(
-                    ids.contains(&nsn.npc_spawner_template_id),
-                    "group member npc {} does not resolve spawner {}: {ids:?}",
-                    member.npc_id,
-                    nsn.npc_spawner_template_id
                 );
             }
         }

@@ -89,11 +89,6 @@ impl Data {
         let npc = npc::data::NpcData::load(ctx)?;
         let npc_groups = npc::group_data::NpcGroupData::load(ctx)?;
         let npc_spawners = npc::spawner_data::NpcSpawnerData::load(ctx)?;
-        // An `NpcGroup` spawner member is keyed by the group id in `npc_spawner_npcs`; a world
-        // placement names one of the group's member NPCs in `UnitId`, so the member index must
-        // also map those NPCs to the group's spawner template (otherwise the placement gets a
-        // generated single-NPC fallback and never reaches the group row).
-        npc_spawners.index_npc_groups(&npc_groups);
         Ok(Self {
             npc,
             npc_spawners,
