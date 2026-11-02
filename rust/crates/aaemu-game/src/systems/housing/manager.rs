@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::models::house::{housing_permission, House};
 use crate::models::item::UnixTime;
 use crate::server::GameServer;
+use crate::systems::economy::mail_template::quote_arg;
 use crate::world::{DoodadRef, Entity, HouseRef, PlayerRef, WorldInstance, WorldObject};
 
 use super::data::{HousingBindingDoodad, HousingTemplate};
@@ -940,7 +941,7 @@ pub fn tax_mail_update(server: &GameServer, house: &HouseRef) -> TaxMailUpdate {
     let tax = template.tax_or_zero();
     let text = format!(
         "body('{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}')",
-        h.unit.name,
+        quote_arg(&h.unit.name),
         unix_or_zero(h.place_date),
         unix_or_zero(h.protection_end_date),
         unix_or_zero(deadline),

@@ -278,7 +278,9 @@ impl MailForAuction {
         };
         self.mail.body.text = format!(
             "body('{}', {}, {})",
-            self.item_name, count, self.item_buyout_price
+            quote_arg(&self.item_name),
+            count,
+            self.item_buyout_price
         );
         self.attach_item(server, self.buyer_id);
         self.mail.is_dirty = true;
@@ -308,7 +310,7 @@ impl MailForAuction {
         };
         self.mail.body.text = format!(
             "body('{}', {}, {}, {}, {}, {})",
-            self.item_name,
+            quote_arg(&self.item_name),
             count,
             self.seller_share,
             self.item_buyout_price,
@@ -352,7 +354,7 @@ impl MailForAuction {
             tracing::error!("MailForAuction.{sender}: NullReferenceException (_item)");
             return false;
         };
-        self.mail.body.text = format!("body('{}', {})", self.item_name, count);
+        self.mail.body.text = format!("body('{}', {})", quote_arg(&self.item_name), count);
         self.attach_item(server, self.seller_id);
         self.mail.is_dirty = true;
         true
@@ -374,7 +376,7 @@ impl MailForAuction {
         self.mail.receiver_name = name_buyer;
         self.mail.mail_type = mail_type::AUC_OFF_FAIL;
         self.mail.title = TITLE_BID_LOST.to_string();
-        self.mail.body.text = format!("body('{}')", self.item_name);
+        self.mail.body.text = format!("body('{}')", quote_arg(&self.item_name));
         self.mail.attach_money(previous_bid, 0, 0);
         true
     }
@@ -523,7 +525,7 @@ impl MailForSpeciality {
             self.mail.attach_money(self.item_count_seller, 0, 0);
             self.mail.body.text = format!(
                 "body('{}', {}, {}, {}, {}, {}, {}, {}, {}, {})",
-                self.trade_pack_name,
+                quote_arg(&self.trade_pack_name),
                 self.traded_rate,
                 payout,
                 if self.seller_is_crafter {
@@ -546,7 +548,7 @@ impl MailForSpeciality {
             // For item delivery, the client will calculate the total for you depending on receiverCase
             self.mail.body.text = format!(
                 "body('{}', {}, {}, {}, {}, {}, {}, {}, {}, {})",
-                self.trade_pack_name,
+                quote_arg(&self.trade_pack_name),
                 self.traded_rate,
                 0,
                 0,
@@ -588,7 +590,7 @@ impl MailForSpeciality {
             self.mail.attach_money(self.item_count_crafter, 0, 0);
             self.mail.body.text = format!(
                 "body('{}', {}, {}, {}, {}, {}, {}, {}, {}, {})",
-                self.trade_pack_name,
+                quote_arg(&self.trade_pack_name),
                 self.traded_rate,
                 payout,
                 self.item_count_base,
@@ -605,7 +607,7 @@ impl MailForSpeciality {
             }
             self.mail.body.text = format!(
                 "body('{}', {}, {}, {}, {}, {}, {}, {}, {}, {})",
-                self.trade_pack_name,
+                quote_arg(&self.trade_pack_name),
                 self.traded_rate,
                 0,
                 0,
@@ -717,7 +719,7 @@ impl MailForTax {
         }
         mail.body.text = format!(
             "body('{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}')",
-            house.name,
+            quote_arg(&house.name),
             house.place_date.max(0),
             house.protection_end_date.max(0),
             payment_dead_line.max(0),

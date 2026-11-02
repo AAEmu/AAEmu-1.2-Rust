@@ -7,6 +7,7 @@
 use crate::models::house::{housing_permission, House};
 use crate::models::transform::PositionAndRotation;
 use crate::server::GameServer;
+use crate::systems::economy::mail_template::quote_arg;
 use crate::systems::social::achievement::char_record_kind;
 use crate::systems::social::achievement_hooks::{AchievementInput, RecordMatch};
 use crate::world::{HouseRef, PlayerRef, WorldObject};
@@ -1159,8 +1160,15 @@ pub fn cancel_for_sale(server: &GameServer, house: &HouseRef, return_certificate
             receiver_id: h.unit.owner_id,
             sender_name: ".houseSellCancel".into(),
             receiver_name: server.names.get_character_name(h.unit.owner_id),
-            title: format!("title({},'{}')", zone_group_text(server, &h), h.unit.name),
-            text: format!("body('{}', {APPRAISAL_CERTIFICATE}, {cert})", h.unit.name),
+            title: format!(
+                "title({},'{}')",
+                zone_group_text(server, &h),
+                quote_arg(&h.unit.name)
+            ),
+            text: format!(
+                "body('{}', {APPRAISAL_CERTIFICATE}, {cert})",
+                quote_arg(&h.unit.name)
+            ),
             send_date_ms: now_ms,
             recv_date_ms: now_ms + 1,
             ..HouseMail::default()
@@ -1314,10 +1322,16 @@ pub fn buy_house(server: &GameServer, tl: u16, money: u32, player: &PlayerRef) -
             receiver_id: char_id,
             sender_name: ".houseBought".into(),
             receiver_name: Some(char_name.clone()),
-            title: format!("title({},'{}')", zone_group_text(server, &h), h.unit.name),
+            title: format!(
+                "title({},'{}')",
+                zone_group_text(server, &h),
+                quote_arg(&h.unit.name)
+            ),
             text: format!(
-                "body('{prev_name_text}', '{}', {})",
-                h.unit.name, h.sell_price
+                "body('{}', '{}', {})",
+                quote_arg(&prev_name_text),
+                quote_arg(&h.unit.name),
+                h.sell_price
             ),
             send_date_ms: now_ms,
             recv_date_ms: now_ms + 1,
@@ -1328,8 +1342,17 @@ pub fn buy_house(server: &GameServer, tl: u16, money: u32, player: &PlayerRef) -
             receiver_id: previous_owner,
             sender_name: ".houseSold".into(),
             receiver_name: previous_owner_name,
-            title: format!("title('{char_name}','{}')", h.unit.name),
-            text: format!("body('{char_name}', '{}', {})", h.unit.name, h.sell_price),
+            title: format!(
+                "title('{}','{}')",
+                quote_arg(&char_name),
+                quote_arg(&h.unit.name)
+            ),
+            text: format!(
+                "body('{}', '{}', {})",
+                quote_arg(&char_name),
+                quote_arg(&h.unit.name),
+                h.sell_price
+            ),
             copper_coins: sale_price,
             send_date_ms: now_ms,
             recv_date_ms: now_ms + 1,

@@ -2080,6 +2080,25 @@ async fn load_rows_restore_mails() {
     assert_eq!(mail::get_current_mail_list_for(&w.server, 2), vec![5]);
 }
 
+/// The other system mail templates quote item names too; an apostrophe (3793 of the 31987 en_us
+/// item names have one) or a backslash would otherwise break the client's `loadstring` call.
+#[tokio::test]
+async fn auction_mail_escapes_item_names() {
+    let w = mail_world_with(|d| {
+        d.systems
+            .economy
+            .mail
+            .item_names
+            .insert(SINGLE, "Norrick's Burning Sword (Rare)".into());
+    });
+    let mut fail = MailForAuction::new_from_template(&w.server, SINGLE, 1, 400, 0);
+    assert!(fail.finalize_for_bid_fail(&w.server, 2, 250));
+    assert_eq!(
+        fail.mail.body.text,
+        "body('Norrick\\'s Burning Sword \\040Rare\\041')"
+    );
+}
+
 /// A marketplace purchase of an item whose name carries parentheses: the client cuts a raw
 /// `title('… (100)')` at the first `)`, so the name goes out with `\040` / `\041`.
 #[tokio::test]

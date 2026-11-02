@@ -1101,6 +1101,55 @@ async fn sale_and_purchase() {
 }
 
 #[tokio::test]
+async fn sale_mails_escape_house_names() {
+    // `change_house_name` has no character policy, so a house name can hold quotes, backslashes
+    // and parentheses; the sale mails are `loadstring`ed by the receiver's client.
+    let fx = fixture(false);
+    fx.pb.data().money = 3_000_000;
+    let house = place_house(&fx, DESIGN, &fx.pa, 120.0, 100.0, -1);
+    let tl = house.data().unit.tl_id;
+    house.data().unit.name = "Bob's Villa (2)".into();
+    fx.eco
+        .item_counts
+        .lock()
+        .unwrap()
+        .insert(manager::APPRAISAL_CERTIFICATE, 3);
+    assert!(ops::set_for_sale_by_tl(
+        &fx.server,
+        tl,
+        2_500_000,
+        0,
+        Some(&fx.pa)
+    ));
+    fx.eco.calls();
+    fx.eco.mails();
+    assert!(ops::buy_house(&fx.server, tl, 2_500_000, &fx.pb));
+    let mails = fx.eco.mails();
+    assert_eq!(mails.len(), 2);
+    assert_eq!(mails[0].sender_name, ".houseBought");
+    assert_eq!(mails[0].title, "title(25,'Bob\\'s Villa \\0402\\041')");
+    assert_eq!(
+        mails[0].text,
+        "body('Alpha', 'Bob\\'s Villa \\0402\\041', 2500000)"
+    );
+    assert_eq!(mails[1].sender_name, ".houseSold");
+    assert_eq!(mails[1].title, "title('Beta','Bob\\'s Villa \\0402\\041')");
+    assert_eq!(
+        mails[1].text,
+        "body('Beta', 'Bob\\'s Villa \\0402\\041', 2500000)"
+    );
+
+    // The certificates mailed back when a sale is cancelled.
+    assert!(ops::set_for_sale_by_tl(&fx.server, tl, 100, 0, None));
+    fx.eco.calls();
+    assert!(ops::cancel_for_sale_by_tl(&fx.server, tl, true));
+    let m = &fx.eco.mails()[0];
+    assert_eq!(m.sender_name, ".houseSellCancel");
+    assert_eq!(m.title, "title(25,'Bob\\'s Villa \\0402\\041')");
+    assert_eq!(m.text, "body('Bob\\'s Villa \\0402\\041', 28085, 1)");
+}
+
+#[tokio::test]
 async fn permissions_name_and_recover() {
     let mut fx = fixture(false);
     let house = place_house(&fx, DESIGN, &fx.pa, 120.0, 100.0, -1);

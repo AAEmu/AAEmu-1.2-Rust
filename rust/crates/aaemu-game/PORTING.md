@@ -2309,7 +2309,10 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `loadstring`, which decodes `\'`, `\\` and the Lua 5.1 `\ddd` decimal escape. Rust therefore
   writes every quoted template argument through `mail_template::quote_arg` (`\` -> `\\`, `'` ->
   `\'`, `(` -> `\040`, `)` -> `\041`): stage A sees no `)` and Lua restores the name. `|` is not
-  escaped (the client splits names on it; no 1.2 item name has one). **Deviation:** `load_rows`
+  escaped (the client splits names on it; no 1.2 item name has one). The auction, trade pack,
+  house sale and house tax mails (stage B only) quote item / house / character names through the
+  same helper: house names are player-set without any character policy (`change_house_name`), so
+  an unescaped `'` let a name break out of the receiver's `loadstring` call. **Deviation:** `load_rows`
   repairs stored `CHARGED` mails written before this (raw parentheses inside the `title('…')`
   argument and the third `body(…)` argument, nothing else touched, idempotent) and marks them
   dirty so the next save persists the fix.
