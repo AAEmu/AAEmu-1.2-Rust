@@ -1954,10 +1954,13 @@ async fn crime_report_through_hooks() {
 /// `CheckWantedThreshold` -> `Character.SetFaction(Pirate)` through the real crime report path:
 /// the nearby witness receives `SCUnitFactionChanged` exactly once (the 1.2 client turns it into
 /// "$1 became pirate.", x2game `sub_396A1C20`), and the house / guild / party effects of
-/// `Character.SetFaction` run. A repeated `SetFaction(Pirate)` is then a no-op.
+/// `Character.SetFaction` run: an ordinary guild member (no `Expel` policy, unlike the C#
+/// `ExpeditionManager.Kick` path) leaves the guild. A repeated `SetFaction(Pirate)` is then a
+/// no-op.
 #[tokio::test]
 async fn infamy_threshold_sets_the_pirate_faction_with_its_side_effects() {
     use crate::systems::social::expedition::{self, Expedition};
+    use crate::systems::social::packets::expedition::SCUnitExpeditionChangedPacket;
     use crate::systems::social::packets::faction::SCUnitFactionChangedPacket;
 
     let server = justice_server();
@@ -1985,9 +1988,9 @@ async fn infamy_threshold_sets_the_pirate_faction_with_its_side_effects() {
     );
     assert!(criminal.p.data().in_party && reporter.p.data().in_party);
 
-    // The criminal is the general of a Nuian guild: `Character.SetFaction` kicks it when the
-    // faction changes to Pirate (the general's policy has Expel, as in the C# `Kick`).
-    let members = [(&criminal.p, 255u8), (&reporter.p, 0u8)]
+    // The witness owns a Nuian guild; the criminal is an ordinary member, whose role policy has
+    // no Expel (the C# `Kick` path would leave such a member in the guild).
+    let members = [(&criminal.p, 0u8), (&reporter.p, 255u8)]
         .into_iter()
         .map(|(p, role)| {
             p.data().unit.expedition_id = 77;
@@ -2000,8 +2003,8 @@ async fn infamy_threshold_sets_the_pirate_faction_with_its_side_effects() {
         faction: SystemFaction {
             id: 77,
             name: "Knights".into(),
-            owner_id: criminal.p.character_id,
-            owner_name: "Crook".into(),
+            owner_id: reporter.p.character_id,
+            owner_name: "Witness".into(),
             mother_id: NUIA,
             ..Default::default()
         },
@@ -2040,8 +2043,9 @@ async fn infamy_threshold_sets_the_pirate_faction_with_its_side_effects() {
         vec![body(&expected)],
         "the nearby witness sees exactly one faction change"
     );
+    let criminal_frames = criminal.client.drain();
     assert_eq!(
-        find(&criminal.client.drain(), sc::SCUnitFactionChangedPacket),
+        find(&criminal_frames, sc::SCUnitFactionChangedPacket),
         vec![body(&expected)],
         "the new pirate sees it too"
     );
@@ -2052,14 +2056,111 @@ async fn infamy_threshold_sets_the_pirate_faction_with_its_side_effects() {
         0,
         "removed from the guild"
     );
-    assert!(server
-        .expeditions
-        .get(77)
-        .is_some_and(|e| e.member(criminal.p.character_id).is_none()
-            && e.member(reporter.p.character_id).is_some()));
+    // The guild keeps its owner and spells the ordinary member's removal as a normal leave.
+    let guild = server.expeditions.get(77).expect("guild survives");
+    assert!(!guild.is_disbanded);
+    assert_eq!(guild.faction.owner_id, reporter.p.character_id);
+    assert!(guild.member(criminal.p.character_id).is_none());
+    assert!(guild.member(reporter.p.character_id).is_some());
+    let leave = SCUnitExpeditionChangedPacket {
+        obj_id: criminal.p.obj_id,
+        character_id: criminal.p.character_id,
+        kicker: String::new(),
+        unit_name: "Crook".into(),
+        id: 77,
+        expedition_id: 0,
+        expel: false,
+    };
+    assert!(
+        find(&frames, sc::SCUnitExpeditionChangedPacket).contains(&body(&leave)),
+        "the guild sees the member leave"
+    );
+    assert!(find(&criminal_frames, sc::SCUnitExpeditionChangedPacket).contains(&body(&leave)));
 
     // A later SetFaction(Pirate) is consistent: old == new, so no second broadcast.
     crate::systems::social::faction::set_faction(&server, &criminal.p, 161).await;
     assert!(find(&reporter.client.drain(), sc::SCUnitFactionChangedPacket).is_empty());
     assert_eq!(criminal.p.data().unit.faction_id, 161);
+}
+
+/// A guild owner who becomes a pirate cannot leave (`expedition_owner_cannot_leave`, 1.2 error
+/// 310) and the owner's only way out is dismiss: the forced change dismisses the guild instead
+/// of leaving a leaderless one (capture-pending PIRATE-1, no retail capture of this case).
+#[tokio::test]
+async fn a_guild_owner_becoming_pirate_dismisses_the_guild() {
+    use crate::systems::social::expedition::{self, Expedition};
+    use crate::systems::social::packets::expedition::SCExpeditionDismissedPacket;
+
+    let server = justice_server();
+    server
+        .systems
+        .social
+        .hooks
+        .install(Arc::new(FakeHooks::default()));
+    let mut criminal = player(&server, 1, "Crook", |c| c.infamy_point = 2_990);
+    let mut reporter = player(&server, 2, "Witness", |_| {});
+    let victim = player(&server, 3, "Victim", |_| {});
+
+    // The criminal owns the guild; the witness is an ordinary member.
+    let members = [(&criminal.p, 255u8), (&reporter.p, 0u8)]
+        .into_iter()
+        .map(|(p, role)| {
+            p.data().unit.expedition_id = 77;
+            let mut m = expedition::member_from_character(&server, 77, p, false);
+            m.role = role;
+            m
+        })
+        .collect();
+    server.expeditions.add(Expedition {
+        faction: SystemFaction {
+            id: 77,
+            name: "Knights".into(),
+            owner_id: criminal.p.character_id,
+            owner_name: "Crook".into(),
+            mother_id: NUIA,
+            ..Default::default()
+        },
+        members,
+        policies: expedition::default_policies(&server, 77),
+        removed_members: Vec::new(),
+        is_disbanded: false,
+    });
+    criminal.client.drain();
+    reporter.client.drain();
+
+    let mut d = Doodad::new(878);
+    d.owner_type = doodad_owner_type::CHARACTER;
+    d.owner_id = criminal.p.character_id;
+    d.data = victim.p.character_id as i32;
+    let evidence = Entity::new(0x900, d);
+    let event = server
+        .systems
+        .social
+        .crimes
+        .report_crime(&server, &reporter.p, &evidence, 1, 0, 0, "seen")
+        .await;
+    assert!(event.is_some());
+
+    let dismissed = SCExpeditionDismissedPacket {
+        id: 77,
+        success: true,
+    };
+    assert!(
+        find(&reporter.client.drain(), sc::SCExpeditionDismissedPacket).contains(&body(&dismissed)),
+        "the other member is told the guild was dismissed"
+    );
+    assert_eq!(criminal.p.data().unit.faction_id, 161);
+    assert_eq!(criminal.p.data().unit.expedition_id, 0);
+    assert_eq!(reporter.p.data().unit.expedition_id, 0);
+    let guild = server.expeditions.get(77).expect("retired guild row");
+    assert!(guild.is_disbanded);
+    assert_eq!(guild.faction.owner_id, 0);
+    assert_eq!(guild.faction.name, "$deleted-guild-77");
+    assert!(guild.members.is_empty());
+
+    // A later SetFaction(Pirate) is consistent: no second faction or dismissal packet.
+    crate::systems::social::faction::set_faction(&server, &criminal.p, 161).await;
+    let frames = reporter.client.drain();
+    assert!(find(&frames, sc::SCUnitFactionChangedPacket).is_empty());
+    assert!(find(&frames, sc::SCExpeditionDismissedPacket).is_empty());
 }

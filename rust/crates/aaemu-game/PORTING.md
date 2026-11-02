@@ -1200,11 +1200,17 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   checks, where there is no player to notify). The change thus broadcasts
   `SCUnitFactionChangedPacket` once (the 1.2 client turns it into "$1 became pirate.", x2game
   `sub_396A1C20` with faction 161) and runs the ported `Character.SetFaction` side effects:
-  house faction sync, guild kick and party removal. Deviation: the C#
+  house faction sync, guild removal and party removal. Deviation: the C#
   `ExpeditionManager.Kick(this.Connection, ...)` throws on the null lobby connection and aborts
-  `CSListCharacter`; the Rust applies the change at select where the connection exists, and a
-  self-kick (guild removal) is allowed past the Rust rank guard (C# also checks only the
-  caller's `Expel` policy).
+  `CSListCharacter`; the Rust applies the change at select where the connection exists. The
+  guild removal is a dedicated server-side path (`expedition::remove_member_for_faction_change`),
+  not the client `Kick` handler: the C# `Kick` only acts on roles whose policy has `Expel`, so
+  ordinary members stayed in the guild after becoming pirates, and it removed an owner like
+  anyone else, leaving `OwnerId` on a non-member. The Rust removes an ordinary member as a
+  normal leave (same packets as `Leave`) and dismisses the guild when the member is its owner:
+  the 1.2 client refuses an owner's leave (`expedition_owner_cannot_leave`, error 310) and only
+  offers the owner's dismiss path (`expedition_owner_dismiss`, 301). **Capture-pending PIRATE-1:**
+  no retail capture of a guild owner's forced faction change; the dismissal is the chosen rule.
 * `CheckForDeletedCharactersDeletion`: the rename / `deleted = 1` / packets are done;
   `DeleteCharacterAssets` (houses, guild, family, mail returns) is a later phase.
 * `GameConnection.OnDisconnect` → `UpdateLoginTime(0)` for connections that never entered (inserts
@@ -3369,9 +3375,10 @@ Deviations from the 1.2 C# `ExpeditionManager` / `TeamManager`, which trusted ev
   match it, is consumed by any answer, and a character already in a guild cannot join another.
 - `Kick` and `ChangeMemberRole` only checked the caller's policy flag (and `role > new_role`). Both
   now also require the caller's role to be strictly higher than the target's current role, so the
-  leader (255) can neither be expelled nor demoted, and equals cannot act on each other. A
-  self-kick is exempt: `Character.SetFaction` uses it to leave the guild on a faction change, and
-  the C# `Kick` checks only the caller's `Expel` policy (so commanders / generals leave).
+  leader (255) can neither be expelled nor demoted, and equals cannot act on each other. The
+  client `Kick` packet keeps this guard; `Character.SetFaction`'s guild removal does not go
+  through it (see `remove_member_for_faction_change` above), so an owner can still leave on a
+  faction change without allowing a client self-kick.
 - `ChangeLootingRule` accepted any character id as loot master. It must now be 0 or a member of the
   team; otherwise only that field is ignored (logged). Over-head markers are unchanged: their
   target is any unit or object, not a team member.
