@@ -1412,22 +1412,42 @@ fn box_gap(
     sum.sqrt()
 }
 
+/// The per-model bounds cache. A model id is loaded once, including a negative (no geometry)
+/// result, so a second bind does not re-read and re-parse the prefab library and a model
+/// without geometry does not repeat its failed lookups. Two racing first binds may both load;
+/// the value is immutable, so the last insert is equally correct.
+pub(super) fn cached_vehicle_bounds(
+    cache: &dashmap::DashMap<u32, Option<aaemu_physics::geometry::primitives::BoxPrim>>,
+    model_id: u32,
+    load: impl FnOnce() -> Option<aaemu_physics::geometry::primitives::BoxPrim>,
+) -> Option<aaemu_physics::geometry::primitives::BoxPrim> {
+    if let Some(bounds) = cache.get(&model_id) {
+        return *bounds;
+    }
+    let bounds = load();
+    cache.insert(model_id, bounds);
+    bounds
+}
+
 /// A land vehicle's collision bounds (the union of its prefab body collision proxies, see
 /// [`crate::systems::ai::physics::cry::model_bounds_including_bodies`]). `None` when the
-/// client assets or the `vehicle_models.normal` reference are unavailable.
+/// client assets or the `vehicle_models.normal` reference are unavailable. The model geometry
+/// is immutable, so the result is cached per model id.
 fn vehicle_model_bounds(
     server: &GameServer,
     model_id: u32,
 ) -> Option<aaemu_physics::geometry::primitives::BoxPrim> {
-    let reference = server
-        .game_data
-        .systems
-        .vehicles
-        .vehicle_model_refs
-        .get(&model_id)?;
-    let files = crate::systems::ai::collision::files(server)?;
-    let models = crate::systems::ai::collision::model_cache(server, &files);
-    crate::systems::ai::physics::cry::model_bounds_including_bodies(&files, &models, reference)
+    cached_vehicle_bounds(&server.systems.vehicles.vehicle_bounds, model_id, || {
+        let reference = server
+            .game_data
+            .systems
+            .vehicles
+            .vehicle_model_refs
+            .get(&model_id)?;
+        let files = crate::systems::ai::collision::files(server)?;
+        let models = crate::systems::ai::collision::model_cache(server, &files);
+        crate::systems::ai::physics::cry::model_bounds_including_bodies(&files, &models, reference)
+    })
 }
 
 /// Surface gap for a slave bind reach. The client measures the distance from the character's

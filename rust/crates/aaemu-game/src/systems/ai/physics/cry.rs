@@ -173,20 +173,21 @@ fn body_model(
 /// The collision bounds of a model reference including a prefab's static `AnimObject`
 /// bodies, which [`model_collision_bounds`] does not resolve (it reads `Brush` objects only).
 /// This is the box the 1.2 client's bind reach measures to for land vehicles: the union of
-/// the body's collision proxies in the model frame. `None` when no geometry is available.
+/// every collision proxy in the model frame, brushes and bodies together. `None` when no
+/// geometry is available.
 pub fn model_bounds_including_bodies(
     files: &Files,
     models: &ModelCache,
     reference: &str,
 ) -> Option<BoxPrim> {
-    if let Some(bounds) = model_collision_bounds(files, models, reference) {
-        return Some(bounds);
-    }
     let objects::ModelRef::Prefab { library, name } = objects::parse_model_ref(reference) else {
-        return None;
+        return model_collision_bounds(files, models, reference);
     };
     let bytes = files.read(&library)?;
     let xml = crate::data::client_files::decode_text(&bytes);
+    // `prefab_house_geometry` returns the Brush objects and the static physicalized AnimObject
+    // bodies of the prefab together. Keep both: a cart prefab can carry a small physicalised
+    // brush (crate, lamp) next to its body, and the body must widen the union.
     let mut shape = objects::ColliderShape::default();
     for (path, pos, q, scale) in objects::prefab_house_geometry(&xml, &name) {
         let Some(model) = body_model(models, &path) else {
@@ -928,6 +929,64 @@ mod tests {
             model_collision_bounds(&files, &cache, "prefab://prefabs/test.xml/boats.missing")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn prefab_body_bounds_merge_with_brush_bounds() {
+        use aaemu_physics::geometry::shapes::stream::{save_phys_geometry, PhysGeomHeader};
+        use aaemu_physics::geometry::shapes::BoxGeom;
+        let cgf = |half: PVec3| {
+            let geometry = BoxGeom::new(&BoxPrim::aligned(PVec3::ZERO, half));
+            let mut blob = Vec::new();
+            save_phys_geometry(
+                &PhysGeomHeader {
+                    inertia: PVec3::new(1.0, 1.0, 1.0),
+                    q: PQuat::IDENTITY,
+                    origin: PVec3::ZERO,
+                    volume: 8.0,
+                    unk52: 1,
+                    surface_idx: 0,
+                },
+                &geometry,
+                &mut blob,
+            );
+            crate::systems::ai::collision::cgf::tests::synthetic_cgf(&blob)
+        };
+        let mut map = HashMap::new();
+        map.insert(
+            "game/objects/test/crate.cgf".to_string(),
+            cgf(PVec3::new(0.2, 0.2, 0.2)),
+        );
+        // The physicalized AnimObject body names a .chr; its same-named .cgf holds the proxies.
+        map.insert(
+            "game/objects/test/body.cgf".to_string(),
+            cgf(PVec3::new(1.0, 3.0, 1.0)),
+        );
+        map.insert(
+            "game/prefabs/test.xml".to_string(),
+            br#"<PrefabsLibrary><Prefab Name="cart.body"><Objects>
+              <Object Type="Brush" Name="crate" Prefab="objects/test/crate.cgf" Pos="5,0,0"/>
+              <Object Type="Entity" Name="body" EntityClass="AnimObject">
+                <Properties object_Model="game/objects/test/body.chr">
+                  <Physics bPhysicalize="1" bArticulated="0" Mass="-1" Density="-1" bRigidBody="1"/>
+                </Properties>
+              </Object>
+            </Objects></Prefab></PrefabsLibrary>"#
+                .to_vec(),
+        );
+        let map = Arc::new(map);
+        let files = Files::Map(map.clone());
+        let cache = ModelCache::new(map);
+        let reference = "prefab://prefabs/test.xml/cart.body";
+        let brush_only = model_collision_bounds(&files, &cache, reference).unwrap();
+        assert!((brush_only.size.x - 0.2).abs() < 1e-5, "{brush_only:?}");
+        let bounds = model_bounds_including_bodies(&files, &cache, reference).unwrap();
+        // Crate x [4.8, 5.2] + body x [-1, 1]: center 2.1, half 3.1. The old early return
+        // stopped at the 0.2 m brush and refused binds beside the body.
+        assert!((bounds.center.x - 2.1).abs() < 1e-5, "{bounds:?}");
+        assert!((bounds.size.x - 3.1).abs() < 1e-5, "{bounds:?}");
+        assert!((bounds.size.y - 3.0).abs() < 1e-5, "{bounds:?}");
+        assert!((bounds.size.z - 1.0).abs() < 1e-5, "{bounds:?}");
     }
 
     #[test]

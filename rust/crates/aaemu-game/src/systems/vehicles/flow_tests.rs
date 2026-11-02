@@ -2519,6 +2519,49 @@ fn hauler_geometry_files() -> HashMap<String, Vec<u8>> {
     files
 }
 
+/// Bounds are cached per model id, including a negative result: a second bind of the same
+/// model must not re-read and re-parse the prefab library, and a model without geometry must
+/// not repeat its failed model lookups.
+#[test]
+fn vehicle_bounds_cache_keeps_both_hits_and_misses() {
+    use aaemu_physics::geometry::primitives::BoxPrim;
+    use aaemu_physics::math::Vec3;
+
+    let cache = dashmap::DashMap::new();
+    let mut loads = 0;
+    assert!(slaves::cached_vehicle_bounds(&cache, 1553, || {
+        loads += 1;
+        None
+    })
+    .is_none());
+    assert!(
+        slaves::cached_vehicle_bounds(&cache, 1553, || {
+            loads += 1;
+            Some(BoxPrim::aligned(Vec3::ZERO, Vec3::splat(1.0)))
+        })
+        .is_none(),
+        "a cached miss is not reloaded"
+    );
+    assert_eq!(loads, 1);
+    let bounds = BoxPrim::aligned(Vec3::new(1.0, 2.0, 3.0), Vec3::new(1.0, 2.0, 3.0));
+    assert_eq!(
+        slaves::cached_vehicle_bounds(&cache, 511, || {
+            loads += 1;
+            Some(bounds)
+        }),
+        Some(bounds)
+    );
+    assert_eq!(
+        slaves::cached_vehicle_bounds(&cache, 511, || {
+            loads += 1;
+            None
+        }),
+        Some(bounds),
+        "a cached hit is not reloaded"
+    );
+    assert_eq!(loads, 2);
+}
+
 /// The 2026-11-02 01:43-01:44 capture: the client offers the driver bind beside the Red Farm
 /// Hauler's cab and the server refused with `TOO_FAR_AWAY` because the only located attach
 /// points are the rear cannons. The client measures to the body's collision geometry
@@ -2614,6 +2657,15 @@ async fn land_vehicle_bind_measures_the_body_bounds_not_the_rear_attach_points()
         vec![(attach_point::DRIVER, PA)]
     );
     assert!(error_codes(&a.drain()).is_empty());
+    assert!(
+        server
+            .systems
+            .vehicles
+            .vehicle_bounds
+            .get(&1553)
+            .is_some_and(|bounds| bounds.is_some()),
+        "the bind loaded and cached the model bounds"
+    );
 
     let cast = |client: &mut TestClient, caster: u32, target: u32| {
         start_skill(
