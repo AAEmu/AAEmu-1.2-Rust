@@ -79,6 +79,8 @@ pub struct Data {
     pub achievements: achievement::AchievementGameData,
     /// `ranks` / `rank_scopes` / `rank_rewards` and their links (`RankingGameData.Load`).
     pub ranking: ranking_data::RankingGameData,
+    /// `content_configs` 46 / 50 / 51 / 54 (nation diplomacy periods and the treaty cost).
+    pub nation: nation::NationSettings,
 }
 
 impl Data {
@@ -88,6 +90,7 @@ impl Data {
             relations: faction::FactionRelations::load(ctx)?,
             achievements: achievement::AchievementGameData::load(ctx.conn)?,
             ranking: ranking_data::RankingGameData::load(ctx)?,
+            nation: nation::NationSettings::load(ctx.conn)?,
         })
     }
 }
@@ -127,6 +130,10 @@ impl System {
             .load(&server.db)
             .await
             .context("NationManager")?;
+        nation::rebuild_treaty_mail_tracking(server)
+            .await
+            .context("Nation treaty mail tracking")?;
+        nation::start_tick(server);
         server
             .systems
             .social

@@ -76,6 +76,9 @@ pub struct SystemFaction {
     pub unit_owner_type: i8,
     pub political_system: u8,
     pub diplomacy_target: bool,
+    /// `diplomacy_link_id`: the alliance whose relation a nation guard / front faction follows
+    /// (134 -> 149, 135 -> 148, 167 -> 148, ...; stage 3, NATION-16).
+    pub diplomacy_link_id: u32,
     pub aggro_link: bool,
     pub guard_help: bool,
     pub allow_change_name: u8,
@@ -128,6 +131,7 @@ impl FactionData {
                 aggro_link: r.bool_str("aggro_link")?,
                 guard_help: r.bool_str("guard_help")?,
                 diplomacy_target: r.bool_str("is_diplomacy_tgt")?,
+                diplomacy_link_id: r.u32("diplomacy_link_id")?,
                 allow_change_name: 0,
                 created: 0,
             });

@@ -72,6 +72,9 @@
 //! nreply <nation> <nonce> <0|1>      CSFactionImmigrationInviteReply without an invitation
 //! norigin                            CSFactionImmigrateToOrigin
 //! nkick <name>                       CSFactionKickToOrigin
+//! nhostile <faction>                 CSFactionDeclareHostile (nation king)
+//! nattack <skill> [name]             target the peer and cast at it; fail unless SCSkillStarted
+//!                                    arrives without SCErrorMsg
 //! sync <token> [count]              suite barrier: wait until `count` bots (default: all) are here
 //! expectpkt <PacketName> [secs]     fail unless the packet arrives within `secs` (default 5)
 //! expectnopkt <PacketName> [secs]   fail if the packet arrives within `secs` (default 5)
@@ -1743,6 +1746,43 @@ async fn run_lines(
                     .drain(Duration::from_millis(800), Duration::from_secs(3))
                     .await?;
                 show(&got);
+            }
+            "nhostile" => {
+                // No drain: the caller asserts the result / relation packets.
+                let faction: u32 = num(&parts, 0)?;
+                let mut b = aaemu_commons::PacketStream::new();
+                b.write_u32(faction);
+                game.send_cs(cs::CSFactionDeclareHostilePacket, &b.into_bytes())
+                    .await?;
+                println!("    hostile declaration sent");
+            }
+            "nattack" => {
+                let skill: u32 = num(&parts, 0)?;
+                let target = peer(game, parts.get(1).copied())?;
+                clock += 1500;
+                game.move_to((target.pos.0 + 1.0, target.pos.1, target.pos.2), clock)
+                    .await?;
+                game.change_target(target.obj_id).await?;
+                game.start_skill(skill, target.obj_id).await?;
+                let got = game
+                    .drain(Duration::from_millis(1500), Duration::from_secs(8))
+                    .await?;
+                let refused = got.iter().find(|p| p.is_sc(sc::SCErrorMsgPacket)).map(|p| {
+                    let mut s = p.stream();
+                    s.read_i16().unwrap_or_default()
+                });
+                show(&got);
+                if let Some(code) = refused {
+                    bail!("attack at the peer was refused (error {code})");
+                }
+                ensure!(
+                    got.iter().any(|p| p.is_sc(sc::SCSkillStartedPacket)
+                        || p.is_sc(sc::SCSkillFiredPacket)
+                        || p.is_sc(sc::SCSkillEndedPacket)
+                        || p.is_sc(sc::SCUnitDamagedPacket)),
+                    "the attack did not start"
+                );
+                println!("    attack started");
             }
             other => bail!("unknown script command '{other}' at line {}", n + 1),
         }
