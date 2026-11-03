@@ -22,6 +22,7 @@ pub(crate) struct FinancialSnapshot {
     pub(crate) mails: crate::systems::economy::mail::MailSaveBatch,
     pub(crate) auctions: crate::systems::economy::auction::AuctionSaveBatch,
     pub(crate) items: super::item::ItemSaveBatch,
+    pub(crate) shop_purchases: Vec<crate::systems::economy::shop_limits::ShopPurchaseRow>,
     pub(crate) schedule_items:
         crate::systems::npcs::schedule_item_persistence::PreparedScheduleSave,
     pub(crate) characters: Vec<(PlayerRef, Character)>,
@@ -62,6 +63,8 @@ pub(crate) fn capture_financial_snapshot(server: &GameServer) -> FinancialSnapsh
         mails: server.systems.economy.mail.prepare_save(),
         auctions: server.systems.economy.auction.prepare_save(server),
         items: server.items.prepare_save(),
+        // Captured under `ops_lock` with the wallet / item snapshot it belongs to.
+        shop_purchases: server.systems.economy.shop_limits.prepare_save(),
         // Captured under the same `ops_lock` as the granted items / mails of a take.
         schedule_items: server.systems.npcs.schedule_items.prepare_save(),
         characters: players
@@ -206,6 +209,8 @@ pub(crate) async fn write_financial_snapshot(
         .await?;
     systems += updated + deleted;
     let (items, deleted, containers) = server.items.write_prepared(tx, snapshot.items).await?;
+    systems +=
+        crate::systems::economy::shop_limits::write_prepared(tx, snapshot.shop_purchases).await?;
     let (auction_updated, auction_deleted) = server
         .systems
         .economy
