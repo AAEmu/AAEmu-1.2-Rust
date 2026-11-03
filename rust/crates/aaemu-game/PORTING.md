@@ -110,7 +110,7 @@ systems::{skills, npcs, economy, social, quests}: Data (tables), System (manager
 | `Core/Managers/FeaturesManager`, `Models/Game/Features` | `data/features.rs` | done | |
 | `Core/Managers/ExperienceManager` (+ `SqliteExperienceLevelTemplateLoader`) | `data/experience.rs` | partial | Loader validation, level caps, GetExpForLevel, GetLevelFromExp (both overloads), GetSkillPointsForLevel. Mate/exp-loss helpers todo. |
 | `Core/Managers/Id/*` (`IdManager`, `BitSet`, `PrimeFinder`) | `managers/id.rs` | done | Every C# id manager (incl. `distinct` for FamilyIdManager) with the C# allocation algorithm and DB seeding; `UccIdManager` in `stream/ucc.rs`. The static `SkillTlIdManager` is the skills subsystem's. |
-| `Core/Managers/NameManager` | `managers/name.rs` | done | Load, ValidateCharacterName (regex from `CharacterNameRegex`), Add/Remove, NormalizeName. |
+| `Core/Managers/NameManager` | `managers/name.rs` | done | Load, ValidateCharacterName (`CharacterNameRegex` plus the 1.2 `allowed_name_chars` whitelist and `blocked_texts` `check_name` rules), Add/Remove, NormalizeName. See "Character names" below. |
 | `Core/Managers/ItemManager` (templates + user items) | `data/items.rs`, `managers/item.rs`, `models/item.rs`, `models/container.rs` | done | See `systems::economy`. |
 | `Models/Game/Items/Containers` (ItemContainer, EquipmentContainer, MateEquipmentContainer, CofferContainer, LootingContainer) | `models/container.rs`, `systems/economy/looting.rs` | done | See `systems::economy`. |
 | `Core/Managers/UnitManagers/CharacterManager` | `data/character_templates.rs`, `managers/character.rs`, `db_character.rs` | partial | Load (templates, body parts, buffs, supplies, equip packs, appellations, actabilities, expert limits, CharTemplates.json), Create, SetDeleteCharacter, SetRestoreCharacter, CheckForDeletedCharacters(+Deletion) with the delete task, IsCharacterPendingDeletion, LoadCharacters. Bag expands, beauty salon, rolls, online tracking todo. |
@@ -475,7 +475,7 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 | `ExpeditionManager`, `Models/Game/Expeditions` | `systems/social/expedition.rs`, `packets/expedition.rs` (`managers::expedition` re-exports) | done | Load, create (party checks, cost, `SCItemTaskSuccessPacket` money-only form), invite / reply, leave, kick, member role, owner, role policy, disband (stays listed as `$deleted-guild-<id>`), `Expedition.Save` per change, offline leave for character deletion. Guild rename: see "Guild rename" below. Sponsor is still log-only / not in 1.2 as in C#. |
 | `FamilyManager`, `Models/Game/Family` | `systems/social/family.rs`, `packets/family.rs` | done | Load, invite / reply / create, leave, kick (offline existence check), title, steward, login / logout, disband, save, offline leave for character deletion. |
 | `FriendMananger`, `CharacterFriends`, `CharacterBlocked` | `systems/social/friend.rs`, `packets/friend.rs` (`managers::friend` re-exports) | done | Add / remove friends (online or by DB name lookup), block / unblock (online or by `NameManager` for offline names), status changes incl. `InParty`. The blocked list is enforced on every direct delivery path (whisper, team / area / expedition / family invite, friend add, trade and duel request); see the block-list deviation. |
-| `ChatManager`, `Models/Game/Chat` | `systems/social/chat.rs`, `session.rs` (`managers::chat` re-exports) | done | All channel kinds incl. party / raid / court, CleanUpChannels, party / raid / raid-leader / judge routing. User channels (`CSJoinUserChatChannel`) are log-only as in C#. |
+| `ChatManager`, `Models/Game/Chat` | `systems/social/chat.rs`, `session.rs` (`managers::chat` re-exports) | done | All channel kinds incl. party / raid / court, CleanUpChannels, party / raid / raid-leader / judge routing, per-channel spam delays (`SCChatSpamDelayPacket` + server-side enforcement, see "Chat spam" below). User channels (`CSJoinUserChatChannel`) are log-only as in C#. |
 | `FactionManager` relations, `SystemFaction.GetRelationState`, `Unit/Character.SetFaction` | `systems/social/faction.rs`, `packets/faction.rs` | done | Relation table validated against compact.sqlite3 (gated test). Faction CS packets are log-only as in C#; every SCFaction* struct ported. `relation_state_live` overlays the runtime nations on the static table for the combat, team, party and AI paths. |
 | Player nations (`nations`, `nation_relations`, independence, immigration, diplomacy) | `systems/social/nation.rs`, `commands/scripts/nation.rs` | stages 1-3 | Skill 18540 special effect 71 creates a nation from the caster's expedition (owner + dominion, CASTLE_CLAIM backpack); ids come from the expedition allocator; `SCFactionIndependence` + relation rows + `SCUnitFactionChanged`; online members use `set_faction`, offline `characters.faction_id` moves with `expeditions.mother` in the save transaction; login sends nation factions and relations. Stage 2 adds the invite / reply / return-to-origin / kick packets with the client's error order, persisted factions and offline kicks. Stage 3 adds `CSFactionDeclareHostile` 0x019, the type-25 friendly treaty mail (charge paid through `CSPayChargeMoney` 0x0a0) and the periodic relation expiry. See "Player nations" below. |
 | `GameData/AchievementGameData` (`achievements`, `achievement_objectives`, `pre_completed_achievements`, `char_records`), `Models/Game/Achievement` | `systems/social/achievement.rs` (`server.game_data.systems.social.achievements`) | done | Loader + port of `AchievementGameDataTests`; gated real-DB test `achievement_game_data_real_compact_db`. The C# 1.2 tree has no manager; the Rust achievement manager / runtime / hooks / rewards (`achievement_*.rs`) read them (see "Achievement producers" below). |
@@ -1731,6 +1731,31 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   sender faction stays in the sender block. Channel copies substitute the actual `ChatChannel` sub
   type / faction while keeping the requested chat type (zone Shout / Trade / LFG and raid /
   raid-leader included).
+* systems::social: **Chat spam.** The 1.2 client applies the delays of
+  `SCChatSpamDelayPacket` itself (native `FUN_393C2540`: chat types `0..=14` map to a group and a
+  message inside the group's delay is refused with localized message `0x108`). The server now
+  sends the configured groups/delays (`Configurations/Chat.json`, `ChatConfig`) and enforces the
+  same limits before routing a message, answering with `SCErrorMsgPacket(0x108)`, the code the
+  client's own throttle displays. Whisper (`-3`) and user channels (`15`) stay unlimited, as in
+  the client. The retail delay values are not in `compact.sqlite3` and were not captured: the
+  shipped `Chat.json` delays (Say 1 s; Shout / Trade / LFG / Region 3 s; party and private
+  channels off) are emulator defaults, **capture-pending (CHAT-SPAM-1)**.
+* systems::social: **Words.** `blocked_texts` is applied to character names only (`check_name`);
+  the client's chat masking (`check_chat`, `ignore_texts`) happens in the 1.2 client before the
+  message is sent (`FUN_393C76B0` / `FUN_393C78E0` / `FUN_393C7A10`), and `replace_chats` /
+  `replace_chat_keys` / `replace_chat_texts` are the client's local expression easter eggs
+  (`FUN_39375920` called from the Say path). No 1.2 server-side handling is evidenced, so the
+  server does not rewrite or mask chat text. The `chat_spam_rules` keyword chain is loaded by
+  the client but never read in 1.2 (only its loader touches the tables), and the C# server never
+  read it either: it stays unused, **capture-pending (CHAT-SPAM-2)**.
+* systems::social: **Character names.** Retail 1.2 validates a character name against
+  `allowed_name_chars` (2352 rows: lowercase Latin and 2326 Hangul syllables; native
+  `FUN_39572620` / `FUN_395728B0`): a one-byte ASCII letter or space always passes, every other
+  character must be listed, so digits and Cyrillic are refused. The server loads the table into
+  `CharacterData.allowed_name_chars` and applies it in addition to `CharacterNameRegex`
+  (`NameManager::set_allowed_name_chars`); an empty/missing table keeps the regex-only rule.
+  `blocked_texts` with `check_name` already refused forbidden words. Guild creation uses only
+  `XlIsValidName` in the client (`FUN_392FA240`), so `Expedition.NameRegex` stays its only rule.
 
 * systems::social: justice repairs intentionally differ from C#: crime/infamy accumulation and
   sentence durations saturate instead of wrapping; a live evidence doodad can be reported once.
