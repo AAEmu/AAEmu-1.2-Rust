@@ -357,7 +357,7 @@ connected by `systems::economy::wiring`).
 | `ItemContainer`, `EquipmentContainer`, `MateEquipmentContainer`, `CofferContainer` | `models/container.rs` | done | `AddOrMoveExistingItem` (new / moved / same container), `RemoveItem`, `ConsumeItem`, `AcquireDefaultItem(Ex)` (timers, charges, crafter), `SpaceLeftForItem`, `ApplyBindRules`, `Wipe`, `ReNumberSlots`, coffer `CanAccept`, `OnEnter/LeaveContainer` events. |
 | `Inventory` (SplitOrMoveItem(Ex), 2H weapon handling, backpacks, ExpandSlot, coffers, ConsumeItem, counts), `Character` money / game points / labor / `ItemUse` / `SendErrorMessage`, `ErrorMessageType` | `systems/economy/inventory.rs`, `error_message.rs` | done | `ChangeLabor`'s `AddExp` is a hook (`ProgressionHooks`). |
 | Core item C2G (`CSSwapItems`, `CSSplitBagItem`, `CSDestroyItem`, `CSExpandSlots`, `CSDeposit/WithdrawMoney`, `CSSplit/SwapCofferItem(s)`, `CSItem(Un)Secure`, `CSEquipments(Un)Secure`, `CSThisTimeUnpackItem`) | `systems/economy/item_handlers.rs` | done | Deposit / withdraw require a positive amount and a banker NPC (the `banker` template flag) within 5 m of the current interaction object (the C# did neither). |
-| `ItemManager` (all templates / tables, user items, `Create`, timers, `UnwrapItem`, auction search helpers, loot convert fish), `ItemGameData`, `ItemConversionGameData`, `FishDetailsGameData`, item model stats (durability, repair cost, attributes, DPS, armor), procs | `data/items.rs`, `managers/item.rs`, `models/item.rs`, `systems/economy/{items_data,item_timers}.rs` | done | `ItemManager` lists are leaf locks (snapshot before locking containers). |
+| `ItemManager` (all templates / tables, user items, `Create`, timers, `UnwrapItem`, auction search helpers, loot convert fish), `ItemGameData`, `ItemConversionGameData`, `FishDetailsGameData`, item model stats (durability, repair cost, attributes, DPS, armor), procs | `data/items.rs`, `managers/item.rs`, `models/item.rs`, `systems/economy/{items_data,item_timers,procs}.rs` | done | `ItemManager` lists are leaf locks (snapshot before locking containers). Procs are a new feature (the C# never fired one; see the item-procs deviation). |
 | `LootGameData`, `Models/Game/Items/Loots/**`, `LootingContainer`, loot packets | `systems/economy/{loot_data,loot,looting,loot_packets}.rs` | done | NPC death / despawn / team rules through `LootNpcHooks`, `LootTeamHooks`, `LootQuestHooks`. |
 | Repair (`Character.DoRepair`, `CSRepairSingleEquipment`, `CSRepairAllEquipments`), durability loss | `systems/economy/repair.rs` | done | Combat calls `on_damage_taken` / `on_death`. |
 | `CraftManager`, `Models/Game/Crafts`, `CharacterCraft`, `CraftTask`, `CSExecuteCraft`, `SCCraftFailed` | `systems/economy/{craft,craft_data}.rs` | done | Cast through `CraftHooks::start_craft_cast`; skills call `craft::end_craft`. |
@@ -945,9 +945,10 @@ Deviations of the wiring:
   (taking it under a character lock could deadlock with an operation waiting for that
   character).
 * `AcceptQuestEffect` approximates the C# `ImplId` lookup by the effect's quest id.
-* Item procs of equip item set bonuses are not registered: `UnitProcs.RollProcsForKind` skips
-  every proc whose cooldown has elapsed and `LastProc` starts at `DateTime.MinValue`, so no proc
-  ever fires in the C#.
+* Item procs are implemented by `systems::economy::procs` (set, item binding and holdable
+  sources) and rolled from the damage pipeline; the C# never fired one (inverted cooldown,
+  sources never registered at runtime, off-by-one roll). The capture-pending choices are listed
+  under "Known deviations from the C#" (`systems::economy (item procs)`).
 * `ItemSkillHooks::create_sheet_music` and `TimedRewardsManager.DoDailyAccountLogin` run their DB
   work as tasks (the C# blocks).
 * AStar GM commands read the NPC's `PathNode` only when its AI is not in the middle of a step
@@ -1215,6 +1216,38 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * systems::economy: item operations are serialised by the economy operation lock (`ItemTxn`) and
   their packets / quest events are flushed after the container locks are released, in the C#
   order; character packets sent during an operation go through the same queue (`Out`).
+* systems::economy (item procs, 2026-11): procs fire where the C# never did. Sources, rebuilt
+  by the gear-bonus pass (`apply_gear_buffs` -> `procs::refresh`, so equip / unequip, login,
+  repair, gear break and gem changes all refresh them): set
+  `equip_item_set_bonuses.proc_id` when the piece count reaches `num_pieces` (destroyed pieces
+  still count, like the set buffs), `item_proc_bindings` of every equipped non-destroyed item
+  (the C# never loaded the table), and `holdables.item_proc_id` of every equipped
+  non-destroyed weapon (the C# never read the column). Deduplicated by proc id per unit.
+  Deviations from the C#: the roll is `rng in [0, 100) < chance_rate` (the C# passed at
+  `rate + 1` percent; `item_level_based_chance_bonus` is ignored, **CAPTURE-PENDING
+  item-procs-1**); the cooldown blocks until `cooldown_sec` after the proc last fired and the
+  stamp is per unit / proc id, surviving a re-equip in the session (not persisted; a refused
+  cast puts the old stamp back), where the C# checked it inverted and never stamped; kinds 1-8
+  roll on the attacker for a landed melee / magic / ranged / siege hit, 9-16 on the victim
+  (`SkillHitType` supplies the crit filter), kinds 17-20 have no 1.2 data and are not rolled.
+  The proc skill is cast by the owner, bypassing the GCD; a self-targeted skill (75 of the 92
+  proc skills) targets the owner, any other targets the other unit of the damage event
+  (**CAPTURE-PENDING item-procs-2**); the cloned template has `casting_time` / `mana_cost`
+  zeroed (two proc skills carry a 2.0 / 2.67 s cast time; 14921 also has mana 100). The rest
+  of `use_skill` still runs (**CAPTURE-PENDING item-procs-3**): a proc is refused while the
+  owner is casting or channeling (and can stop a channel for a skill with
+  `stop_channeling_on_start_skill`), it resets the owner's `skill_cancelled` /
+  `condition_chance` mid-skill, a unit requirement failure warns per hit, and an NPC
+  `NO_TARGET` pokes its AI.
+  A proc skill's own synchronous damage does not roll procs again (thread-local cast guard);
+  its projectile / `effect_delay` / `effect_speed` / plot effects and the DoTs it applies fire
+  later, outside the guard, and can roll procs again (bounded by the item-proc and skill
+  cooldowns; **CAPTURE-PENDING item-procs-4**). A proc skill's hit therefore does not roll the
+  victim's take-damage kinds (**CAPTURE-PENDING item-procs-5**). DoT ticks and Heal damage
+  effects do roll procs in this implementation. The proc packets are broadcast before the
+  triggering `SCUnitDamaged`. The hot path allocates the per-kind id lists and takes up to six
+  unit locks per hit; left as is. The active procs and cooldowns live on
+  `UnitBase.item_procs`; death does not clear them (the C# has no reference either).
 * systems::economy (account attributes): the C# `AccountAttributeManager.Apply` saved synchronously;
   the Rust applies the effect to the cache and persists in a background task (skill effects are
   synchronous), serialised per account by the account lock. Each save takes the cache snapshot
@@ -2612,8 +2645,9 @@ and in NPC wandering / buff remaining times.
   a mail container (no source container) raises no consumed event.
 * systems::economy: `ExpandExpert` adds the vocation cost; craft / backpack / weapon booleans read as numbers are
   false for `'t'` texts; `Specialty.VendorExist` reads the `id` column.
-* systems::economy: `ItemProc` `ignoreRoll` never procs; `HDps` uses the magic DPS grade value;
-  fish conversion only uses the first pack.
+* systems::economy: `HDps` uses the magic DPS grade value; fish conversion only uses the first
+  pack. (`ItemProc` no longer mirrors the C# non-firing behaviour; see the item-procs deviation
+  above.)
 * systems::economy: auction — original cancellation-copy and missing balance checks
   are corrected in the quest/mail audit below.
 * systems::economy: `ItemManager.LoadUserItems` deletes the row of a loaded stack that was merged
