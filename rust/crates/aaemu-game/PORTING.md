@@ -378,7 +378,7 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 | `FriendMananger`, `CharacterFriends`, `CharacterBlocked` | `systems/social/friend.rs`, `packets/friend.rs` (`managers::friend` re-exports) | done | Add / remove friends (online or by DB name lookup), block / unblock (online or by `NameManager` for offline names), status changes incl. `InParty`. The blocked list is enforced on every direct delivery path (whisper, team / area / expedition / family invite, friend add, trade and duel request); see the block-list deviation. |
 | `ChatManager`, `Models/Game/Chat` | `systems/social/chat.rs`, `session.rs` (`managers::chat` re-exports) | done | All channel kinds incl. party / raid / court, CleanUpChannels, party / raid / raid-leader / judge routing. User channels (`CSJoinUserChatChannel`) are log-only as in C#. |
 | `FactionManager` relations, `SystemFaction.GetRelationState`, `Unit/Character.SetFaction` | `systems/social/faction.rs`, `packets/faction.rs` | done | Relation table validated against compact.sqlite3 (gated test). Faction CS packets are log-only as in C#; every SCFaction* struct ported. `relation_state_live` overlays the runtime nations on the static table for the combat, team, party and AI paths. |
-| Player nations (`nations`, `nation_relations`, independence, immigration) | `systems/social/nation.rs`, `commands/scripts/nation.rs` | stages 1-2 | Skill 18540 special effect 71 creates a nation from the caster's expedition (owner + dominion, CASTLE_CLAIM backpack); ids come from the expedition allocator; `SCFactionIndependence` + relation rows + `SCUnitFactionChanged`; online members use `set_faction`, offline `characters.faction_id` moves with `expeditions.mother` in the save transaction; login sends nation factions and relations. Stage 2 adds the invite / reply / return-to-origin / kick packets with the client's error order, persisted factions and offline kicks. See "Player nations" below. |
+| Player nations (`nations`, `nation_relations`, independence, immigration, diplomacy) | `systems/social/nation.rs`, `commands/scripts/nation.rs` | stages 1-3 | Skill 18540 special effect 71 creates a nation from the caster's expedition (owner + dominion, CASTLE_CLAIM backpack); ids come from the expedition allocator; `SCFactionIndependence` + relation rows + `SCUnitFactionChanged`; online members use `set_faction`, offline `characters.faction_id` moves with `expeditions.mother` in the save transaction; login sends nation factions and relations. Stage 2 adds the invite / reply / return-to-origin / kick packets with the client's error order, persisted factions and offline kicks. Stage 3 adds `CSFactionDeclareHostile` 0x019, the type-25 friendly treaty mail (charge paid through `CSPayChargeMoney` 0x0a0) and the periodic relation expiry. See "Player nations" below. |
 | `GameData/AchievementGameData` (`achievements`, `achievement_objectives`, `pre_completed_achievements`, `char_records`), `Models/Game/Achievement` | `systems/social/achievement.rs` (`server.game_data.systems.social.achievements`) | done | Loader + port of `AchievementGameDataTests`; gated real-DB test `achievement_game_data_real_compact_db`. The C# 1.2 tree has no manager; the Rust achievement manager / runtime / hooks / rewards (`achievement_*.rs`) read them (see "Achievement producers" below). |
 | `DuelManager`, `Models/Game/Duels`, duel tasks | `systems/social/duel.rs`, `packets/duel.rs` | done | Request / accept (flag via hook) / start / stop / cancel, distance + HP checks, end timer (tokio tasks; `set_delays` test hook). |
 | `CrimeManager`, `TrialManager`, `Models/Game/Crime`, `TrialUpdateTask` | `systems/social/{crime,trial}.rs`, `packets/trial.rs` | done | Crime table load / save (`AfterItems`), report / evidence (hooks), bot reports, trial / jury flow with 5 s tick, audience, bounty placement / arrest payout (`systems/social/{bounty,bounty_runtime}.rs`, `bounty_pledges`; see "Wanted-player bounty"). The board is still the empty list (BOUNTY-board). Arrests, authenticated jury choices, guilty pleas, acquittals, court cleanup and reconnect jail enforcement have packet-flow regressions; prisoner buffs persist remaining online time. |
@@ -492,8 +492,66 @@ refuses a duplicate faction id (`FUN_398a5280`), so `EXPEDITION_ID` also extract
   origin is `character_templates.faction_id` (the same data as the client's
   `FUN_398a2660(race)`).
 * The national tax CS packet is 0x013 (`FUN_392f42f0`; owner-approved exception to the
-  never-edit `opcodes.rs` rule); a log-only handler is registered. The real tax handler,
-  relation expiry, rename and monument stay for stages 3-4.
+  never-edit `opcodes.rs` rule); a log-only handler is registered. The real tax handler, rename
+  and monument stay for stage 4.
+* **NATION-15 (friendly treaty; accept path found, mail fields INFERRED):** the 1.2 client's
+  `read_mail.alb` `acceptNationFriendButton` calls `X2Mail.PayCurrentMailChargeMoney`, the same
+  charge-money button as the house-tax bill, so the accept CS opcode is the existing
+  `CSPayChargeMoneyPacket` 0x0a0 (not a new opcode). The server sends mail type 25
+  `MAIL_NATION_REQUEST_FRIEND` to the king with `billing_amount` = `content_configs` 51
+  (2,000,000 copper); paying it debits that cost, deletes the mail and moves the relation to
+  friendly for `content_configs` 46 (168 h) with hostile as the next state. The target faction id
+  is carried in the mail's free `extra` tag (the house tax uses it for its zone group / house id);
+  that carrier and the exact 1.2 period/next-state values are INFERRED because no 1.2 server code
+  or capture shows them. The mail body is plain text (the client's `FillNationRequestFriend*`
+  functions render the fields it receives). Treaty mails are sent 48 h (`content_configs` 54)
+  before a friendly period ends and once after a declared hostile window really ended; the
+  faction-166 template rows (`next_state` 0) are never offered. A per-(nation, target) last
+  offer time (table `nation_relation_offers`, monotonic `GREATEST` update) enforces a cooldown of
+  at least `content_configs` 54, so a deleted or declined mail is not re-sent every tick and the
+  cooldown survives a restart. At startup `rebuild_treaty_mail_tracking` re-reads the stored
+  type-25 mails (king, `extra` target, live relation window), re-creates the tracking and
+  deletes stale ones; removing a tracking entry (accept, hostile declaration, expiry) deletes
+  its mail. Auto-deletion of an unaccepted treaty mail after its deadline is not implemented
+  (capture-pending).
+* **NATION-16 (hostile declaration; client validator mirrored):** `CSFactionDeclareHostile`
+  0x019 runs the checks of `FUN_392f9430`: `FUN_398a4750` first (king / faction rights -> 32
+  `FACTION_RIGHTS`, else an invalid subject -> 718), then `FUN_398a3660` (already hostile -> 718
+  `FACTION_DIPLOMACY_INVALID_SUBJECT`). Only `system_factions.is_diplomacy_tgt` rows are
+  subjects (148 and 149 in 1.2). The 1.2 `ui_texts` ids 523/527 exist, but the client's own
+  pre-send path never reaches them (the button is hidden for an already hostile subject); the
+  server therefore mirrors 718 and leaves 523/527 capture-pending. Success writes
+  `(state, expire_at, next_state)` immediately (the periodic save writes the row again) and
+  sends `SCFactionDeclareHostileResult` to the king plus
+  `SCFactionSetRelationState` to the online members of both sides (the client refreshes its
+  nation UI only when the relation involves its own nation, `FUN_392f9540`; members of both
+  sides is INFERRED as the useful target set). `diplomacy_link_id` is loaded into
+  `SystemFaction`; a nation's relation to a linked guard / front faction is resolved through the
+  linked alliance before the nation's stored row (compact links: 134 -> 149, 135 -> 148,
+  157 -> 149, 167 -> 148, 168 -> 149, 171 -> 148, 173 -> 149), so a treaty with 149 turns the
+  Haranya guards (134/157/168/173) friendly even though the faction-166 template stores
+  explicit HOSTILE rows for them (INFERRED; verified by a real-template test).
+* **NATION-17 (relation expiry; period units INFERRED):** a 60 s subscriber on the existing
+  `services::tick::TickManager` (started by social's `System::start`) moves every relation whose
+  `expire_at` is due to `next_state` (0 keeps the current state), clears the expiry, persists
+  the row (immediate `UPDATE` on the tick plus the periodic save), and sends
+  `SCFactionSetRelationState` then `SCFactionRelationExpired` (only when the state actually
+  changed) to both sides. Hostile declarations set `expire_at` = now + `content_configs` 50
+  (21) and `next_state` = hostile: the period is the no-treaty window, and the relation stays
+  hostile until a treaty (the dialog text `hostile_setting_dlg` says so); the unit is UNKNOWN and
+  INFERRED as hours. When that window ends the row keeps `next_state = hostile` as the
+  "window ended" marker (the template rows keep 0 and are never offered); a friendly expiry
+  deletes the 48 h lead mail and waits a fresh lead period before another offer. Friendly
+  treaties use 46 (168 h) and 54 (48 h before the end), also INFERRED hours: the 1.2 client
+  does not read 46 / 50 / 54, only 49 (immigration level) and 51 (cost). A GM-only
+  `nation relation` command shortens an expiry for live checks.
+* **Stage 3 known deviations (not fixed, < 5):** the debit, mail deletion and relation write
+  are not one transaction; a crash between them can leave a charged mail or a payable treaty.
+  Per-change `tokio::spawn` persistence can reorder relation writes (offers use `GREATEST` and
+  are monotonic). The treaty pay path keeps `pay_charge_money`'s lock order (economy op -> mail
+  store -> character), while `store_quest_rewards_locked` takes character -> mail store. The
+  live `nattack` step proves the positive attack; the unit tests cover the refusal before the
+  declaration (relation overlay).
 
 #### Guild rename (expedition)
 
