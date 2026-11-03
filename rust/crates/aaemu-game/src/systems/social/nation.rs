@@ -1,10 +1,12 @@
 //! Player nations: a top-level user faction (`mother_id == 0`) created from an expedition by
 //! the 1.2 "declare independence" skill (18540, special effect 71).
 //!
-//! Evidence and unknowns are recorded in `PORTING.md` (NATION-1..): the client creates the
+//! Evidence and unknowns are recorded in `PORTING.md` (NATION-1..17): the client creates the
 //! new faction from `SCFactionIndependence` (`FUN_392fb2d0`), so the server keeps the nation
 //! record, the founding expedition's `mother` and the members' `faction_id` in sync; the
 //! nation name carrier is unknown and the founding expedition's name is used (NATION-1).
+//! Stage 3 adds `CSFactionDeclareHostile` 0x019, the type-25 friendly treaty mail paid through
+//! the client's charge-money button, and the periodic relation expiry on the shared ticker.
 //!
 //! Nation ids come from the expedition id manager: the 1.2 client keeps a single faction map
 //! and `FUN_398a5280` refuses a duplicate id (`managers/id.rs`, `EXPEDITION_ID` also extracts
@@ -13,25 +15,31 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, PoisonError, RwLock};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use sqlx::{MySql, MySqlPool, Row, Transaction};
 
 use crate::data::items::{backpack_type, TemplateKind};
 use crate::data::world_data::{FactionRelation, SystemFaction};
 use crate::error::Result;
 use crate::models::container::equip_slot;
+use crate::models::item_task::task_type;
 use crate::packets::world::{SCFactionListPacket, SCFactionRelationListPacket};
 use crate::server::GameServer;
 use crate::systems::economy::error_message;
+use crate::systems::economy::inventory::{self, ItemTxn};
+use crate::systems::economy::mail::{self, mail_status, mail_type, BaseMail};
+use crate::systems::economy::mail_character;
+use crate::systems::economy::mail_packets::{SCChargeMoneyPaidPacket, SCMailDeletedPacket};
 use crate::systems::skills::effects::EffectArgs;
 use crate::systems::skills::types::{CastAction, SkillCaster};
 use crate::world::PlayerRef;
 
 use super::faction;
 use super::packets::faction::{
-    SCFactionImmigrateInvitePacket, SCFactionImmigrateInviteResultPacket,
-    SCFactionImmigrateToOriginResultPacket, SCFactionIndependencePacket,
-    SCFactionKickToOriginResultPacket,
+    SCFactionDeclareHostileResultPacket, SCFactionImmigrateInvitePacket,
+    SCFactionImmigrateInviteResultPacket, SCFactionImmigrateToOriginResultPacket,
+    SCFactionIndependencePacket, SCFactionKickToOriginResultPacket, SCFactionRelationExpiredPacket,
+    SCFactionSetRelationStatePacket,
 };
 use super::util::{now_ms, send_error};
 
@@ -55,6 +63,80 @@ pub const INVITE_TIMEOUT_MS: i64 = 60_000;
 /// Upper bound of the pending-invite list so it cannot grow without bound (NATION-11).
 pub const MAX_PENDING_INVITES: usize = 1024;
 
+/// Upper bound of the open treaty-request mails (one per nation and diplomacy target).
+pub const MAX_PENDING_TREATIES: usize = 1024;
+
+/// Nation diplomacy settings from `content_configs` (kind 19, NATION-17).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NationSettings {
+    /// `content_configs` 46: the friendly treaty period. The real 1.2 value is 168; the client
+    /// does not read it, so the unit is INFERRED as hours (NATION-17).
+    pub friend_period_hours: u32,
+    /// `content_configs` 50: the no-treaty window after declaring hostility. The real value is
+    /// 21; its meaning and unit are UNKNOWN (INFERRED hours, NATION-17).
+    pub hostile_period_hours: u32,
+    /// `content_configs` 54: how long a treaty request stays acceptable before the applied
+    /// period ends (48 in 1.2; INFERRED hours, matching the mail tip's "2 days").
+    pub treaty_lead_hours: u32,
+    /// `content_configs` 51 `NationDiplomacyFriendCost` (2,000,000 copper in 1.2), read by the
+    /// client in `FUN_3906cc00`.
+    pub friend_cost_copper: i64,
+}
+
+impl Default for NationSettings {
+    fn default() -> Self {
+        Self {
+            friend_period_hours: 168,
+            hostile_period_hours: 21,
+            treaty_lead_hours: 48,
+            friend_cost_copper: 2_000_000,
+        }
+    }
+}
+
+impl NationSettings {
+    /// Loads ids 46 / 50 / 51 / 54; a missing or non-positive row keeps the default (the
+    /// client's value array is zero-initialised, so it also reads 0; NATION-17).
+    pub fn load(conn: &rusqlite::Connection) -> rusqlite::Result<Self> {
+        use crate::systems::skills::data::misc::load_content_config;
+        let mut settings = Self::default();
+        let load = |id: u32, slot: &mut u32| -> rusqlite::Result<()> {
+            let value = load_content_config(conn, id)?;
+            if value > 0 {
+                *slot = value as u32;
+            }
+            Ok(())
+        };
+        load(46, &mut settings.friend_period_hours)?;
+        load(50, &mut settings.hostile_period_hours)?;
+        load(54, &mut settings.treaty_lead_hours)?;
+        let cost = load_content_config(conn, 51)?;
+        if cost > 0 {
+            settings.friend_cost_copper = i64::from(cost);
+        }
+        Ok(settings)
+    }
+}
+
+/// An open treaty-request mail (in memory; the mail itself is authoritative and is loaded by
+/// the mail manager, NATION-15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingTreatyMail {
+    pub nation_id: u32,
+    pub other_faction_id: u32,
+    pub mail_id: i64,
+    pub deadline: i64,
+}
+
+/// One relation that reached its `expire_at` on the periodic tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelationExpiry {
+    pub nation_id: u32,
+    pub other_faction_id: u32,
+    pub prev_state: u8,
+    pub state: u8,
+}
+
 /// A pending immigration invitation: the king invited `invitee_character_id` to
 /// `nation_id`. Memory only (PORTING.md, NATION-11).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,7 +154,7 @@ impl PendingInvite {
 }
 
 /// One relation row of a nation. `other_faction_id` is always the other side (the stored rows
-/// are normalised); `expire_at` / `next_state` are reserved for the stage-3 relation expiry.
+/// are normalised); `expire_at` / `next_state` drive the stage-3 relation expiry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NationRelation {
     pub other_faction_id: u32,
@@ -127,6 +209,7 @@ impl Nation {
             unit_owner_type: 0,
             political_system: 1,
             diplomacy_target: true,
+            diplomacy_link_id: 0,
             aggro_link: false,
             guard_help: false,
             allow_change_name: self.allow_change_name,
@@ -146,6 +229,7 @@ impl Nation {
 pub struct NationManager {
     nations: RwLock<Vec<Nation>>,
     invites: Mutex<Vec<PendingInvite>>,
+    treaties: Mutex<Vec<PendingTreatyMail>>,
 }
 
 impl NationManager {
@@ -356,6 +440,119 @@ impl NationManager {
         None
     }
 
+    /// The stored relation row of `nation_id` toward `other` (the caller's lock is released
+    /// before returning).
+    pub fn relation_row(&self, nation_id: u32, other: u32) -> Option<NationRelation> {
+        self.read()
+            .iter()
+            .find(|n| n.id == nation_id)?
+            .relations
+            .iter()
+            .find(|r| r.other_faction_id == other)
+            .copied()
+    }
+
+    /// Sets a relation row (creating it for an id the template does not name). One lock covers
+    /// the lookup and the write (NATION-15).
+    pub fn set_relation(
+        &self,
+        nation_id: u32,
+        other: u32,
+        state: u8,
+        expire_at: i64,
+        next_state: u8,
+    ) -> bool {
+        let mut nations = self.write();
+        let Some(nation) = nations.iter_mut().find(|n| n.id == nation_id) else {
+            return false;
+        };
+        match nation
+            .relations
+            .iter_mut()
+            .find(|r| r.other_faction_id == other)
+        {
+            Some(row) => {
+                row.state = state;
+                row.expire_at = expire_at;
+                row.next_state = next_state;
+            }
+            None => nation.relations.push(NationRelation {
+                other_faction_id: other,
+                state,
+                expire_at,
+                next_state,
+            }),
+        }
+        true
+    }
+
+    /// Moves every due relation to its `next_state` (a `next_state` of 0 keeps the current
+    /// state: the hostile no-treaty window ends but the relation stays hostile, NATION-17).
+    /// The returned events are sent after the lock is released.
+    pub fn expire_relations(&self, now: i64) -> Vec<RelationExpiry> {
+        let mut out = Vec::new();
+        for nation in self.write().iter_mut() {
+            for relation in nation
+                .relations
+                .iter_mut()
+                .filter(|r| r.expire_at > 0 && r.expire_at <= now)
+            {
+                let prev_state = relation.state;
+                let state = if relation.next_state == 0 {
+                    prev_state
+                } else {
+                    relation.next_state
+                };
+                relation.state = state;
+                relation.expire_at = 0;
+                relation.next_state = 0;
+                out.push(RelationExpiry {
+                    nation_id: nation.id,
+                    other_faction_id: relation.other_faction_id,
+                    prev_state,
+                    state,
+                });
+            }
+        }
+        out
+    }
+
+    /// Whether a treaty-request mail for `(nation, other)` is still tracked as open.
+    pub fn has_open_treaty(&self, nation_id: u32, other: u32) -> bool {
+        self.treaties
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .any(|p| p.nation_id == nation_id && p.other_faction_id == other)
+    }
+
+    /// Tracks a treaty-request mail for a later accept / expiry. Expired entries are dropped and
+    /// the list is capped so it cannot grow without bound (NATION-15).
+    pub fn add_treaty(&self, pending: PendingTreatyMail, now: i64) {
+        let mut treaties = self.treaties.lock().unwrap_or_else(PoisonError::into_inner);
+        treaties.retain(|p| (p.deadline == 0 || p.deadline > now) && p.mail_id != pending.mail_id);
+        if treaties.len() >= MAX_PENDING_TREATIES {
+            treaties.remove(0);
+        }
+        treaties.push(pending);
+    }
+
+    /// Forgets the treaty mail of `(nation, other)` (accepted, declined or gone).
+    pub fn remove_treaty(&self, nation_id: u32, other: u32) {
+        self.treaties
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|p| p.nation_id != nation_id || p.other_faction_id != other);
+    }
+
+    /// Forgets every treaty mail of a nation (the relation moved on).
+    pub fn remove_treaties(&self, nation_id: u32) {
+        self.treaties
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|p| p.nation_id != nation_id);
+    }
+
     /// The relation rows of every nation in wire form, for the login `SCFactionRelationList`.
     pub fn relation_rows(&self) -> Vec<FactionRelation> {
         self.read()
@@ -538,6 +735,25 @@ pub fn faction_exists(server: &GameServer, id: u32) -> bool {
 pub fn relation_between(server: &GameServer, a: u32, b: u32) -> Option<u8> {
     if let Some(state) = server.systems.social.nations.relation(a, b) {
         return Some(state);
+    }
+    // `diplomacy_link_id` mirroring: a nation's relation toward a guard / front faction follows
+    // its relation to the linked alliance (134 / 157 / 167 / 171 -> 149, 135 / 168 / 173 -> 148,
+    // INFERRED; NATION-16). The faction-166 template already stores explicit rows for all of
+    // them, so this only answers when the nation has no row of its own.
+    let nations = &server.systems.social.nations;
+    if let Some(other) = server.game_data.factions.get(b) {
+        if nations.is_nation(a) && other.diplomacy_link_id != 0 {
+            if let Some(state) = nations.relation(a, other.diplomacy_link_id) {
+                return Some(state);
+            }
+        }
+    }
+    if let Some(other) = server.game_data.factions.get(a) {
+        if nations.is_nation(b) && other.diplomacy_link_id != 0 {
+            if let Some(state) = nations.relation(b, other.diplomacy_link_id) {
+                return Some(state);
+            }
+        }
     }
     if let Some(state) = server.game_data.systems.social.relations.get(a, b) {
         return Some(state);
@@ -770,6 +986,451 @@ pub fn declare_independence_effect(server: &GameServer, args: &EffectArgs<'_>) {
         }
         Err(error) => send_error(player, error),
     }
+}
+
+// ---- Diplomacy (stage 3): declare hostility, friendly treaty mails, relation expiry ----
+
+fn hours_to_secs(hours: u32) -> i64 {
+    i64::from(hours) * 3600
+}
+
+fn utc(secs: i64) -> DateTime<Utc> {
+    DateTime::from_timestamp(secs, 0).unwrap_or(DateTime::<Utc>::MIN_UTC)
+}
+
+/// The online players of `faction`'s top-level side (a nation, or an alliance such as 148 /
+/// 149 whose race factions and guilds belong to it). Duplicates are removed.
+fn side_members(server: &GameServer, faction: u32) -> Vec<PlayerRef> {
+    let mut seen = HashSet::new();
+    server
+        .world
+        .all_characters()
+        .into_iter()
+        .filter(|p| {
+            let saved = crate::db_character::persisted_faction(&p.data());
+            top_level_faction(server, saved) == Some(faction) && seen.insert(p.character_id)
+        })
+        .collect()
+}
+
+fn send_relation_state(
+    server: &GameServer,
+    nation_id: u32,
+    other_faction_id: u32,
+    state: u8,
+    expire_at: i64,
+    next_state: u8,
+) {
+    let packet = SCFactionSetRelationStatePacket {
+        id: nation_id,
+        id2: other_faction_id,
+        state,
+        expire_time: utc(expire_at),
+        next_state,
+    };
+    for member in side_members(server, nation_id) {
+        member.send(packet.clone());
+    }
+    for member in side_members(server, other_faction_id) {
+        member.send(packet.clone());
+    }
+}
+
+/// Sends the expired notification (prev -> curr) and the new relation state to both sides.
+/// The order is SetRelationState first so the client stores the new state before its message
+/// (`FUN_392fcae0` shows `hostile_nation_msg` / `friendly_nation_msg` for `curr`, NATION-17).
+fn notify_relation_expiry(server: &GameServer, event: &RelationExpiry) {
+    send_relation_state(
+        server,
+        event.nation_id,
+        event.other_faction_id,
+        event.state,
+        0,
+        0,
+    );
+    if event.prev_state != event.state {
+        let packet = SCFactionRelationExpiredPacket {
+            id: event.nation_id,
+            id2: event.other_faction_id,
+            prev_state: event.prev_state,
+            curr_state: event.state,
+        };
+        for member in side_members(server, event.nation_id) {
+            member.send(packet.clone());
+        }
+        for member in side_members(server, event.other_faction_id) {
+            member.send(packet.clone());
+        }
+    }
+}
+
+/// `CSFactionDeclareHostile` (0x019): the nation king declares hostility toward a diplomacy
+/// target. The checks mirror the 1.2 client's pre-send validator (`FUN_392f9430` ->
+/// `FUN_398a4750` / `FUN_398a3660`): not the king -> 32 `FACTION_RIGHTS`; anything that is not
+/// an `is_diplomacy_tgt` system faction (or is already hostile) -> 718
+/// `FACTION_DIPLOMACY_INVALID_SUBJECT` (NATION-16). Success sends the result to the king and
+/// the new state to both sides.
+pub fn declare_hostile(
+    server: &GameServer,
+    king: &PlayerRef,
+    target: u32,
+) -> std::result::Result<(), i16> {
+    let Some(nation) = server.systems.social.nations.owned_by(king.character_id) else {
+        return Err(error_message::FACTION_RIGHTS);
+    };
+    let Some(target_faction) = server.game_data.factions.get(target).cloned() else {
+        return Err(error_message::FACTION_DIPLOMACY_INVALID_SUBJECT);
+    };
+    if !target_faction.diplomacy_target || target_faction.id == nation.id {
+        return Err(error_message::FACTION_DIPLOMACY_INVALID_SUBJECT);
+    }
+    let nations = &server.systems.social.nations;
+    if nations.relation(nation.id, target) == Some(faction::relation_state::HOSTILE) {
+        return Err(error_message::FACTION_DIPLOMACY_INVALID_SUBJECT);
+    }
+    let settings = server.game_data.systems.social.nation;
+    let now = Utc::now().timestamp();
+    let expire_at = now + hours_to_secs(settings.hostile_period_hours);
+    // The no-treaty window ends at `expire_at`; the relation stays hostile until a treaty is
+    // accepted, so `next_state` is hostile again (NATION-17).
+    if !nations.set_relation(
+        nation.id,
+        target,
+        faction::relation_state::HOSTILE,
+        expire_at,
+        faction::relation_state::HOSTILE,
+    ) {
+        return Err(error_message::FACTION_DIPLOMACY_INVALID_SUBJECT);
+    }
+    nations.remove_treaty(nation.id, target);
+    king.send(SCFactionDeclareHostileResultPacket {
+        result: true,
+        id: nation.id,
+        id2: target,
+    });
+    send_relation_state(
+        server,
+        nation.id,
+        target,
+        faction::relation_state::HOSTILE,
+        expire_at,
+        faction::relation_state::HOSTILE,
+    );
+    Ok(())
+}
+
+/// `content_configs` values for a target faction's relation (`None` = not a diplomacy target).
+fn diplomacy_target(server: &GameServer, id: u32) -> Option<SystemFaction> {
+    server
+        .game_data
+        .factions
+        .get(id)
+        .filter(|f| f.diplomacy_target)
+        .cloned()
+}
+
+/// The treaty-request mail (type 25, `MAIL_NATION_REQUEST_FRIEND`) to the king, with the cost
+/// `content_configs` 51 as its charge. Returns the mail id.
+fn send_friend_treaty_mail(
+    server: &GameServer,
+    nation: &Nation,
+    target: &SystemFaction,
+    now: i64,
+) -> Option<i64> {
+    let receiver_name = server.names.get_character_name(nation.owner_character_id)?;
+    let settings = server.game_data.systems.social.nation;
+    let cost = i32::try_from(settings.friend_cost_copper).unwrap_or(i32::MAX);
+    let mut mail = BaseMail {
+        mail_type: mail_type::NATION_REQUEST_FRIEND,
+        title: "Relation treaty request".into(),
+        receiver_name,
+        ..BaseMail::default()
+    };
+    mail.header.sender_id = 0;
+    mail.header.sender_name = target.name.clone();
+    mail.header.receiver_id = nation.owner_character_id;
+    mail.header.status = mail_status::UNPAID;
+    // The target faction is not a mail column; `extra` is the free tag (the house tax uses it
+    // for its zone group / house id). INFERRED carrier, NATION-15.
+    mail.header.extra = i64::from(target.id);
+    mail.body.text = format!(
+        "Make friendly relations with {}? Accepting pays {} copper.",
+        target.name, settings.friend_cost_copper
+    );
+    mail.body.billing_amount = cost;
+    mail.body.send_date = now;
+    mail.body.recv_date = now;
+    mail.open_date = now;
+    mail.is_dirty = true;
+    let mut txn = ItemTxn::begin(server);
+    mail::send_mail(&mut txn, mail)
+}
+
+/// Sends one treaty-request mail now (the GM test hook; the periodic scheduler is
+/// [`send_due_treaty_mails`]). Returns the mail id.
+pub fn send_treaty_mail(server: &GameServer, nation_id: u32, target_id: u32) -> Option<i64> {
+    let nation = server.systems.social.nations.get(nation_id)?;
+    let target = diplomacy_target(server, target_id)?;
+    let now = Utc::now().timestamp();
+    let mail_id = send_friend_treaty_mail(server, &nation, &target, now)?;
+    server.systems.social.nations.add_treaty(
+        PendingTreatyMail {
+            nation_id,
+            other_faction_id: target_id,
+            mail_id,
+            deadline: 0,
+        },
+        now,
+    );
+    Some(mail_id)
+}
+
+/// Sends the treaty-request mails that became due: `treaty_lead_hours` before a friendly
+/// relation expires, and once the hostile no-treaty window has ended. One open mail per
+/// (nation, target) is tracked in memory (NATION-15).
+pub fn send_due_treaty_mails(server: &GameServer, now: i64) -> usize {
+    let nations = &server.systems.social.nations;
+    {
+        let mut treaties = nations
+            .treaties
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let stale: Vec<i64> = treaties
+            .iter()
+            .filter(|p| {
+                server
+                    .systems
+                    .economy
+                    .mail
+                    .get_mail_by_id(p.mail_id)
+                    .is_none()
+            })
+            .map(|p| p.mail_id)
+            .collect();
+        treaties.retain(|p| !stale.contains(&p.mail_id));
+    }
+    let settings = server.game_data.systems.social.nation;
+    let lead = hours_to_secs(settings.treaty_lead_hours);
+    let mut sent = 0;
+    for nation in nations.all() {
+        for relation in &nation.relations {
+            let Some(target) = diplomacy_target(server, relation.other_faction_id) else {
+                continue;
+            };
+            let due = match relation.state {
+                faction::relation_state::FRIENDLY => {
+                    relation.expire_at > now && relation.expire_at - lead <= now
+                }
+                // The no-treaty window has ended; the relation stays hostile (NATION-17).
+                faction::relation_state::HOSTILE => relation.expire_at == 0,
+                _ => false,
+            };
+            if !due || nations.has_open_treaty(nation.id, target.id) {
+                continue;
+            }
+            let Some(mail_id) = send_friend_treaty_mail(server, &nation, &target, now) else {
+                continue;
+            };
+            nations.add_treaty(
+                PendingTreatyMail {
+                    nation_id: nation.id,
+                    other_faction_id: target.id,
+                    mail_id,
+                    // A friendly mail is valid until the applied period ends; a hostile-side
+                    // offer has no applied period yet (the mail's own deadline is the lead).
+                    deadline: if relation.state == faction::relation_state::FRIENDLY {
+                        relation.expire_at
+                    } else {
+                        now + lead
+                    },
+                },
+                now,
+            );
+            sent += 1;
+        }
+    }
+    sent
+}
+
+/// Pays a nation treaty-request mail (`CSPayChargeMoney` 0x0a0, the button's
+/// `X2Mail.PayCurrentMailChargeMoney` in the 1.2 `read_mail.alb`): debits the cost, deletes the
+/// mail and moves the relation friendly for `friend_period_hours`, with the hostile state as
+/// the next state. The mail fields beyond the charge (target tag in `extra`) are INFERRED
+/// (NATION-15).
+pub fn pay_friend_treaty(server: &GameServer, payer: &PlayerRef, mail_id: i64) -> bool {
+    let mails = &server.systems.economy.mail;
+    let Some(mail) = mails.get_mail_by_id(mail_id) else {
+        send_error(payer, error_message::MAIL_INVALID);
+        return false;
+    };
+    let now = Utc::now().timestamp();
+    if mail.mail_type != mail_type::NATION_REQUEST_FRIEND
+        || mail.header.sender_id != 0
+        || mail.header.receiver_id != payer.character_id
+        || mail.header.status != mail_status::UNPAID
+        || mail.body.billing_amount < 0
+        || mail.body.recv_date > now
+    {
+        send_error(payer, error_message::MAIL_INVALID);
+        return false;
+    }
+    let Some(target_id) = u32::try_from(mail.header.extra).ok().filter(|id| *id != 0) else {
+        send_error(payer, error_message::MAIL_INVALID);
+        return false;
+    };
+    let Some(nation) = server.systems.social.nations.owned_by(payer.character_id) else {
+        send_error(payer, error_message::FACTION_RIGHTS);
+        return false;
+    };
+    if diplomacy_target(server, target_id).is_none() {
+        send_error(payer, error_message::FACTION_DIPLOMACY_INVALID_SUBJECT);
+        return false;
+    }
+    let nations = &server.systems.social.nations;
+    let mut txn = ItemTxn::begin(server);
+    let mut st = mails.state();
+    let Some(current) = st.all.get(mail_id) else {
+        drop(st);
+        send_error(payer, error_message::MAIL_INVALID);
+        return false;
+    };
+    if current.header.status != mail_status::UNPAID
+        || current.header.receiver_id != payer.character_id
+        || current.body.billing_amount != mail.body.billing_amount
+    {
+        drop(st);
+        send_error(payer, error_message::MAIL_INVALID);
+        return false;
+    }
+    // INVENTORY -> NONE checks and debits under the character lock (the `subtract_money`
+    // helper's NONE -> INVENTORY form does not check the balance, NATION-15).
+    if !inventory::change_money(
+        &mut txn.out(),
+        payer,
+        crate::models::container::slot_type::INVENTORY,
+        crate::models::container::slot_type::NONE,
+        mail.body.billing_amount,
+        task_type::DEPOSIT_MONEY,
+    ) {
+        drop(st);
+        return false;
+    }
+    let settings = server.game_data.systems.social.nation;
+    let expire_at = now + hours_to_secs(settings.friend_period_hours);
+    if !nations.set_relation(
+        nation.id,
+        target_id,
+        faction::relation_state::FRIENDLY,
+        expire_at,
+        faction::relation_state::HOSTILE,
+    ) {
+        drop(st);
+        send_error(payer, error_message::FACTION_DIPLOMACY_INVALID_SUBJECT);
+        return false;
+    }
+    nations.remove_treaty(nation.id, target_id);
+    let count = {
+        let mut character = payer.data();
+        if st
+            .all
+            .get(mail_id)
+            .is_some_and(|m| m.header.status != mail_status::READ)
+        {
+            character
+                .unread_mail
+                .update_received(mail_type::NATION_REQUEST_FRIEND, -1);
+        }
+        if let Some(m) = st.all.get_mut(mail_id) {
+            m.header.status = mail_status::READ;
+        }
+        character.unread_mail
+    };
+    txn.env
+        .fx
+        .send(payer.character_id, SCChargeMoneyPaidPacket { mail_id });
+    txn.env.fx.send(
+        payer.character_id,
+        SCMailDeletedPacket {
+            is_sent: false,
+            mail_id,
+            is_unread_mail_count_modified: false,
+            count,
+        },
+    );
+    mail::delete_mail_in(server, &mut st, mail_id);
+    drop(st);
+    mail_character::send_unread_mail_count(&mut txn.env.fx, payer);
+    send_relation_state(
+        server,
+        nation.id,
+        target_id,
+        faction::relation_state::FRIENDLY,
+        expire_at,
+        faction::relation_state::HOSTILE,
+    );
+    true
+}
+
+/// The periodic nation tick (subscribed to the existing `TickManager`, NATION-17): applies due
+/// relation expiries, persists them, and sends the treaty-request mails that became due.
+pub fn run_periodic(server: &GameServer) {
+    let now = Utc::now().timestamp();
+    let expiries = server.systems.social.nations.expire_relations(now);
+    for event in &expiries {
+        notify_relation_expiry(server, event);
+        server
+            .systems
+            .social
+            .nations
+            .remove_treaty(event.nation_id, event.other_faction_id);
+    }
+    if !expiries.is_empty() {
+        if let Some(server) = server.self_arc() {
+            tokio::spawn(async move {
+                if let Err(error) = persist_expiries(&server, &expiries).await {
+                    tracing::error!("Persisting nation relation expiries failed: {error}");
+                }
+            });
+        }
+    }
+    let sent = send_due_treaty_mails(server, now);
+    if sent > 0 {
+        tracing::info!("Nation: sent {sent} treaty request mail(s)");
+    }
+}
+
+/// Writes the expired relation rows immediately (the periodic save writes them again).
+async fn persist_expiries(server: &GameServer, expiries: &[RelationExpiry]) -> Result<()> {
+    let _save = server.save.transaction_lock().await;
+    let mut tx = server.db.begin().await?;
+    for event in expiries {
+        sqlx::query(
+            "UPDATE nation_relations SET state = ?, expire_at = 0, next_state = 0 \
+             WHERE nation_id = ? AND other_faction_id = ?",
+        )
+        .bind(event.state)
+        .bind(event.nation_id)
+        .bind(event.other_faction_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Subscribes the nation periodic check to the shared `TickManager` (60 s; NATION-17).
+pub fn start_tick(server: &std::sync::Arc<GameServer>) {
+    let weak = std::sync::Arc::downgrade(server);
+    server.systems.services.tick.on_tick.subscribe(
+        move |_delta| {
+            let Some(server) = weak.upgrade() else {
+                return;
+            };
+            run_periodic(&server);
+        },
+        std::time::Duration::from_secs(60),
+        true,
+    );
 }
 
 // ---- Immigration (stage 2): invite / reply / return to origin / kick ----

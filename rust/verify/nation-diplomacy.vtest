@@ -1,0 +1,52 @@
+# Nation diplomacy (stage 3, systems/social/nation.rs):
+#   a fresh nation copies the faction-166 template, which is already hostile to both alliances
+#   (NATION-2); the suite therefore sets 149 friendly with the GM relation hook first, then the
+#   king declares it hostile through CS 0x019. Both sides receive SCFactionSetRelationState and
+#   can attack each other. A GM-shortened expiry (1 min) moves the relation to its next state and
+#   both sides receive SCFactionSetRelationState + SCFactionRelationExpired.
+#
+# Bots:
+#   king      GM: party leader, creates the guild and the nation, declares hostile, attacks
+#   haranya   GM: faction 109 (Haranya side), receives the relation and attacks back
+
+suite nation-diplomacy
+bot king gm
+bot haranya gm
+
+[king]
+waitpeer 120 ${haranya}
+partyinvite ${haranya}
+await TeamJoined 30
+gcreate NationDiplomacy
+gm nation create force
+sync nation 2
+# The template starts hostile to 149; make it friendly so the declaration is a real change.
+gm nation relation 149 3 240 1
+sync friendly 2
+nhostile 149
+expectpkt SCFactionDeclareHostileResultPacket 10
+expectpkt SCFactionSetRelationStatePacket 10
+sync hostile 2
+nattack 2 ${haranya}
+sync king_attacked 2
+sync attacked 2
+gm nation relation 149 1 1 2
+sync expiring 2
+expectpkt SCFactionRelationExpiredPacket 120
+sync expired 2
+
+[haranya]
+waitpeer 120 ${king}
+partyaccept
+sync nation 2
+targetself
+gm setfaction 109
+sync friendly 2
+expectpkt SCFactionSetRelationStatePacket 15
+sync hostile 2
+sync king_attacked 2
+nattack 2 ${king}
+sync attacked 2
+sync expiring 2
+expectpkt SCFactionRelationExpiredPacket 120
+sync expired 2

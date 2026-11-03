@@ -691,7 +691,21 @@ impl CSPayChargeMoneyPacket {
             self.mail_id,
             self.auto_use_aa_point
         );
-        if !mail::pay_housing_tax(server, &p, self.mail_id, self.auto_use_aa_point) {
+        // A nation treaty request (`MAIL_NATION_REQUEST_FRIEND`) is paid through the same
+        // charge-money button (`X2Mail.PayCurrentMailChargeMoney` in the 1.2 `read_mail.alb`);
+        // every other charge mail is the house tax bill (NATION-15).
+        let is_treaty = server
+            .systems
+            .economy
+            .mail
+            .get_mail_by_id(self.mail_id)
+            .is_some_and(|m| m.mail_type == mail::mail_type::NATION_REQUEST_FRIEND);
+        let paid = if is_treaty {
+            crate::systems::social::nation::pay_friend_treaty(server, &p, self.mail_id)
+        } else {
+            mail::pay_housing_tax(server, &p, self.mail_id, self.auto_use_aa_point)
+        };
+        if !paid {
             tracing::warn!(
                 "PayChargeMoney failed, mailId: {}, autoUseAAPoint: {}",
                 self.mail_id,
