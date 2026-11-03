@@ -109,6 +109,8 @@ pub struct System {
     pub sus: sus::SusManager,
     /// 1.2 second password state, storage and hashing (`SecondPassword`).
     pub second_password: second_password::SecondPasswordManager,
+    /// Account payment persistence (WP-B); MySQL when nothing is installed.
+    pub premium_store: HookSlot<dyn premium::PremiumStore>,
     /// `WebApiService`.
     pub webapi: webapi::WebApiService,
     /// `DiscordBotService`.

@@ -3229,7 +3229,12 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   permanent `AccountPayment` default (Premium, 0 .. 2030-01-01) in five places. Rust stores
   `pay_method`, `pay_location`, `pay_start`, `pay_end` (unix seconds) and `premium_point` on
   `aaemu_game.accounts`; `pay_method = 0` means `Account:DefaultPayment` (owner decision
-  2026-11-03: `premium` by default, configurable to `none` / `demo`). The premium grade is the
+  2026-11-03: `premium` by default, configurable to `none` / `demo`). **Owner decision
+  2026-11-03: the configured default premium is permanent** (`pay_end = 0` means no end date in
+  `AccountPayment::premium_state`); the C# placeholder end 2030-01-01 is no longer inherited.
+  GM grants always carry their own end date. A MySQL error while loading the state at login
+  keeps the session on the configured default (the login is not refused and the error is
+  logged). The premium grade is the
   client's own `premium_grades` lookup (`FUN_397a7d10`: highest `grade_id` with `point <= p`,
   default 1; the 1.2 rows are grade 1 at 0 and grade 2 at 1). `premium_configs` supplies
   `connect_point` (granted on connect), `disconnect_point` (on disconnect) and
@@ -3239,15 +3244,22 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   startup mismatch logs a warning (they agree in the shipped data: 5/0/2000 and 10/5/5000). The
   only `pcbang_buffs` row with `active = 't'` is 8000001 -> buff 8000011 (grade 2); the Korean
   PC-bang rows are inactive, the client has no PC-bang membership flag, and `pc_bang` in the
-  schedule-item eligibility therefore stays false. Buff 8000011 is no longer in
+  schedule-item eligibility therefore stays false. **Owner decision 2026-11-03:** default
+  premium accounts are grade 2, so the grade-2 VIP schedule reward row 8000001 is now listed
+  (on existing servers too; it was never listed while the old default had no grade) - a
+  deliberate behaviour change. Buff 8000011 is no longer in
   `UNIT_STATE_FORCED_BUFFS`: it is applied for premium grade 2 on login / grade change and removed
   on logout / grade change (it is display-only: no `buff_modifiers`, `duration = 0`, never saved).
   `SCAccountInfo` (i32 method, i32 location, i64 start, i64 end, i64 realPayTime = 0;
   `FUN_397aeb90`) is sent at the two C# moments with the real state; `SCUpdatePremiumPoint`
   (i32 point, u8 oldPg, u8 pg; `FUN_397b8b00`) is sent at `FinishState(7)` with the real point and
   grade (old == new on the initial sync), and with old/new grades on GM / expiry changes.
-  Deviation: the C# hard-coded `(1, 1, 1)` at `FinishState(7)`. GM `/premium <account|name|self>
-  <on|off|days> [days]` (Rust only, access 100) is the grant path until the premium shop (WP-C).
+  Deviation: the C# hard-coded `(1, 1, 1)` at `FinishState(7)` and a literal `1` in the
+  `SCUnitStatePacket` premium field; Rust writes the real flag (0 for a normal account).
+  GM `/premium <account|name|self> <on|off|days> [days]` (Rust only, access 100) is the grant
+  path until the premium shop (WP-C). The grant/removal upserts the `accounts` row (an account
+  with only a login row gets one) and answers an error instead of "granted" when the write
+  fails.
 * systems::services (second password, 2026-11-03): the 1.2 second-password protocol is ported in
   `systems::services::second_password`. The client sends four shuffled permutations of
   `0-9a-zA-Z` keyed by a server key id (`FUN_3907a370` / `FUN_3907a430`) and the server decodes

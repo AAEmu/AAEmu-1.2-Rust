@@ -186,8 +186,10 @@ pub async fn update_login_time(
 }
 
 /// `accounts.pay_method` / `pay_location` / `pay_start` / `pay_end` / `premium_point` in one
-/// write (a GM grant / removal, or the connect / disconnect transition). Callers hold the
-/// account lock (`AccountManager::lock_of`). Errors are logged, as in the C# account updates.
+/// upsert (a GM grant / removal). The GM may target an account that has no game row yet (only a
+/// login account exists), so the row is inserted when missing instead of silently affecting
+/// zero rows. Callers hold the account lock (`AccountManager::lock_of`) and report the error to
+/// the GM; `set_payment` does not apply the in-memory change when this fails.
 pub async fn update_account_payment(
     pool: &MySqlPool,
     account_id: u32,
@@ -196,22 +198,26 @@ pub async fn update_account_payment(
     pay_start: i64,
     pay_end: i64,
     premium_point: i32,
-) {
-    if let Err(e) = sqlx::query(
-        "UPDATE accounts SET pay_method = ?, pay_location = ?, pay_start = ?, pay_end = ?, \
-         premium_point = ? WHERE account_id = ?",
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO accounts (account_id, pay_method, pay_location, pay_start, pay_end, premium_point) \
+         VALUES (?, ?, ?, ?, ?, ?) \
+         ON DUPLICATE KEY UPDATE pay_method = VALUES(pay_method), pay_location = VALUES(pay_location), \
+         pay_start = VALUES(pay_start), pay_end = VALUES(pay_end), premium_point = VALUES(premium_point)",
     )
+    .bind(account_id)
     .bind(pay_method)
     .bind(pay_location)
     .bind(pay_start)
     .bind(pay_end)
     .bind(premium_point)
-    .bind(account_id)
     .execute(pool)
     .await
-    {
+    .map_err(|e| {
         tracing::error!("update_account_payment({account_id}): {e}");
-    }
+        crate::GameError::from(e)
+    })?;
+    Ok(())
 }
 
 /// Writes only `accounts.premium_point` (the connect / expiry / disconnect transitions keep the

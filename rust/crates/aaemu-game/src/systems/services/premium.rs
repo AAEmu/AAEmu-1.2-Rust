@@ -33,7 +33,10 @@
 //! The C# never loaded these tables (premium state was the permanent `AccountPayment` default);
 //! this is a Rust addition, recorded in `PORTING.md`.
 
+use std::sync::Arc;
+
 use chrono::Utc;
+use futures::future::BoxFuture;
 use rusqlite::Connection;
 
 use crate::config::DefaultPayment;
@@ -48,9 +51,6 @@ use crate::packets::g2c::{SCAccountInfoPacket, SCUpdatePremiumPointPacket};
 use crate::server::GameServer;
 use crate::world::{now_ms, PlayerRef, WorldObject};
 
-/// `PremiumMethodType.Premium` end used by the C# default (`new DateTime(2030, 1, 1)`), unix
-/// seconds.
-pub const DEFAULT_PREMIUM_END: i64 = 1_893_456_000;
 /// Fallback `TimedRewardsManager.MaxLabor` when `premium_benefits` is empty.
 pub const FALLBACK_MAX_LABOR: i16 = 2000;
 /// Fallback `TimedRewardsManager.MaxLaborPremium` when `premium_benefits` is empty.
@@ -223,6 +223,50 @@ pub fn data(server: &GameServer) -> &PremiumData {
     &server.game_data.systems.services.premium
 }
 
+/// Persistence of the account payment columns; the MySQL implementation unless a test installs
+/// an in-memory one (`systems::services::System::premium_store`).
+pub trait PremiumStore: Send + Sync {
+    fn update_payment<'a>(
+        &'a self,
+        server: &'a GameServer,
+        account_id: u32,
+        payment: AccountPayment,
+        premium_point: i32,
+    ) -> BoxFuture<'a, crate::Result<()>>;
+}
+
+/// The production store (`db::update_account_payment`, an upsert).
+pub struct MySqlPremiumStore;
+
+impl PremiumStore for MySqlPremiumStore {
+    fn update_payment<'a>(
+        &'a self,
+        server: &'a GameServer,
+        account_id: u32,
+        payment: AccountPayment,
+        premium_point: i32,
+    ) -> BoxFuture<'a, crate::Result<()>> {
+        Box::pin(crate::db::update_account_payment(
+            &server.db,
+            account_id,
+            payment.method as i32,
+            payment.location,
+            payment.start_time,
+            payment.end_time,
+            premium_point,
+        ))
+    }
+}
+
+fn store(server: &GameServer) -> Arc<dyn PremiumStore> {
+    server
+        .systems
+        .services
+        .premium_store
+        .get()
+        .unwrap_or_else(|| Arc::new(MySqlPremiumStore))
+}
+
 /// `Account:DefaultPayment` as the C# default `AccountPayment`.
 pub fn default_payment(default: DefaultPayment) -> AccountPayment {
     match default {
@@ -230,7 +274,9 @@ pub fn default_payment(default: DefaultPayment) -> AccountPayment {
             method: PaymentMethodType::Premium,
             location: 1,
             start_time: 0,
-            end_time: DEFAULT_PREMIUM_END,
+            // Owner decision 2026-11-03: the configured default premium is permanent; the C#
+            // placeholder end (2030-01-01) is not inherited. GM grants keep their own end.
+            end_time: 0,
         },
         DefaultPayment::Demo => AccountPayment {
             method: PaymentMethodType::Demo,
@@ -440,6 +486,7 @@ pub fn apply_login_buffs(server: &GameServer, c: &mut Character) {
     let now = Utc::now().timestamp();
     let premium = state.payment.premium_state(now);
     let grade = grade_of_state(server, &state, now);
+    c.premium = premium;
     if !premium {
         return;
     }
@@ -460,9 +507,21 @@ pub fn apply_login_buffs(server: &GameServer, c: &mut Character) {
     }
 }
 
-/// Removes the old grade buffs and applies the new grade's (grade change / expiry).
-pub fn sync_grade(server: &GameServer, account_id: u32, new_grade: u8) {
+/// Caches the account's premium flag on every online character of the account (the
+/// `SCUnitStatePacket` premium field of later observers and instance reloads).
+pub fn set_online_premium(server: &GameServer, account_id: u32, premium: bool) {
     for player in online_players(server, account_id) {
+        player.data().premium = premium;
+    }
+}
+
+/// Removes the old grade buffs and applies the new grade's (grade change / expiry), and updates
+/// the cached premium flag.
+pub fn sync_grade(server: &GameServer, account_id: u32, new_grade: u8) {
+    let state = crate::systems::services::accounts::state(server, account_id);
+    let premium = state.payment.premium_state(Utc::now().timestamp());
+    for player in online_players(server, account_id) {
+        player.data().premium = premium;
         remove_grade_buffs(server, &player);
         apply_grade_buffs(server, &player, new_grade);
     }
@@ -475,7 +534,7 @@ pub async fn set_payment(
     account_id: u32,
     payment: AccountPayment,
     premium_point: i32,
-) -> AccountState {
+) -> crate::Result<AccountState> {
     let now = Utc::now().timestamp();
     let old = crate::systems::services::accounts::state(server, account_id);
     let old_grade = grade_of_state(server, &old, now);
@@ -483,16 +542,9 @@ pub async fn set_payment(
     let premium_point = premium_point.clamp(0, cfg.max_point.max(0));
     let lock = server.accounts.lock_of(account_id);
     let guard = lock.lock().await;
-    crate::db::update_account_payment(
-        &server.db,
-        account_id,
-        payment.method as i32,
-        payment.location,
-        payment.start_time,
-        payment.end_time,
-        premium_point,
-    )
-    .await;
+    store(server)
+        .update_payment(server, account_id, payment.clone(), premium_point)
+        .await?;
     let state = AccountState {
         payment,
         premium_point,
@@ -503,12 +555,19 @@ pub async fn set_payment(
     notify_account(server, account_id, &state, old_grade, new_grade);
     if old_grade != new_grade {
         sync_grade(server, account_id, new_grade);
+    } else {
+        set_online_premium(server, account_id, state.payment.premium_state(now));
     }
-    state
+    Ok(state)
 }
 
 /// Grants premium until `end` (unix seconds) with the configured connect point.
-pub async fn grant(server: &GameServer, account_id: u32, start: i64, end: i64) -> AccountState {
+pub async fn grant(
+    server: &GameServer,
+    account_id: u32,
+    start: i64,
+    end: i64,
+) -> crate::Result<AccountState> {
     let point = data(server).config.connect_point;
     set_payment(
         server,
@@ -525,7 +584,7 @@ pub async fn grant(server: &GameServer, account_id: u32, start: i64, end: i64) -
 }
 
 /// Ends premium explicitly (GM `/premium off`): method `None`, deactivate point, no end time.
-pub async fn remove(server: &GameServer, account_id: u32) -> AccountState {
+pub async fn remove(server: &GameServer, account_id: u32) -> crate::Result<AccountState> {
     let point = data(server).config.deactivate_point;
     set_payment(
         server,
@@ -620,8 +679,9 @@ mod tests {
     fn default_payment_premium_and_none() {
         let premium = default_payment(DefaultPayment::Premium);
         assert_eq!(premium.method, PaymentMethodType::Premium);
-        assert_eq!(premium.end_time, DEFAULT_PREMIUM_END);
+        assert_eq!(premium.end_time, 0, "the default premium has no end date");
         assert!(premium.premium_state(1_800_000_000));
+        assert!(premium.premium_state(4_000_000_000), "permanent");
         let none = default_payment(DefaultPayment::None);
         assert_eq!(none.method, PaymentMethodType::None);
         assert!(!none.premium_state(1_800_000_000));

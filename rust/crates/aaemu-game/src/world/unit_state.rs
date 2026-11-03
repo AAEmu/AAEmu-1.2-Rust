@@ -203,7 +203,9 @@ fn write_unit_state(c: &mut Character, data: &GameData, now_ms: i64, s: &mut Pac
         );
         return;
     };
-    s.write_i32(1); // premium
+    // `premium` (`1` / `0`): the account payment state cached on the character (WP-B). The C#
+    // wrote a literal 1 for every character.
+    s.write_i32(i32::from(c.premium));
     for _ in 0..6 {
         s.write_i32(0); // pStat
     }
@@ -780,6 +782,14 @@ mod tests {
             p.body.len(),
             head + mid + piscs + abilities + 6 + 4 + 4 + 24
         );
+        // The premium i32 is the first of the final 28 bytes (then the six pStat i32s); it now
+        // carries the account payment state instead of the C# literal 1.
+        let at = p.body.len() - 28;
+        assert_eq!(p.body[at..at + 4], [0, 0, 0, 0]);
+        c.premium = true;
+        let premium = unit_state(&mut c, &data, 0);
+        let at = premium.body.len() - 28;
+        assert_eq!(premium.body[at..at + 4], [1, 0, 0, 0]);
         let cs = character_state(&c, 0);
         assert_eq!(cs.body[4..6], [16, 0]);
         assert_eq!(cs.body[6..22], c.guid);

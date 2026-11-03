@@ -846,5 +846,28 @@ async fn select_applies_the_premium_grade_buff_only_for_premium_accounts() {
             premium,
             "account {account}"
         );
+
+        if premium {
+            // Relog: the leave removes the session buff, the next select applies it again.
+            session::leave_world_task(
+                &server,
+                None,
+                session::leave_target::CHARACTER_SELECT,
+                Some(player.clone()),
+            )
+            .await;
+            assert!(
+                !player.data().unit.buffs.check_buff(8_000_011),
+                "leave must remove the premium grade buff"
+            );
+            let again = test_character(account - 1000, "Tester2", 120.0, 120.0);
+            session::select_loaded(&server, &mut client.conn, again, SelectDbData::default())
+                .expect("select after leave");
+            let relogged = client.conn.active_char.clone().expect("active char");
+            assert!(
+                relogged.data().unit.buffs.check_buff(8_000_011),
+                "select must re-apply the premium grade buff"
+            );
+        }
     }
 }

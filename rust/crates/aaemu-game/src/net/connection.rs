@@ -48,22 +48,29 @@ impl PaymentMethodType {
     }
 }
 
-/// `AccountPayment` with the C# defaults (the Rust server loads the real payment from
-/// `aaemu_game.accounts`; see `systems::services::premium`).
+/// `AccountPayment` (the Rust server loads the real payment from `aaemu_game.accounts`; see
+/// `systems::services::premium`). The default is the owner decision of 2026-11-03: premium with
+/// no end date.
 #[derive(Debug, Clone)]
 pub struct AccountPayment {
     pub method: PaymentMethodType,
     pub location: i32,
     /// `DateTime.MinValue` -> 0.
     pub start_time: UnixTime,
-    /// `new DateTime(2030, 1, 1)`.
+    /// Unix seconds; `0` = no end date (permanent), as for the default premium plan. GM grants
+    /// always carry their own end.
     pub end_time: UnixTime,
 }
 
 impl AccountPayment {
-    /// `PremiumState`: premium method and `now` inside `[StartTime, EndTime]` (unix seconds).
+    /// `PremiumState`: premium method and `now` inside `[StartTime, EndTime]` (unix seconds),
+    /// where `EndTime == 0` means permanent. The C# used `new DateTime(2030, 1, 1)` as a
+    /// placeholder end for all accounts; the owner decided on 2026-11-03 that the configured
+    /// default premium is permanent.
     pub fn premium_state(&self, now: UnixTime) -> bool {
-        self.method == PaymentMethodType::Premium && now >= self.start_time && now <= self.end_time
+        self.method == PaymentMethodType::Premium
+            && now >= self.start_time
+            && (self.end_time == 0 || now <= self.end_time)
     }
 }
 
@@ -73,7 +80,7 @@ impl Default for AccountPayment {
             method: PaymentMethodType::Premium,
             location: 1,
             start_time: 0,
-            end_time: 1_893_456_000,
+            end_time: 0,
         }
     }
 }

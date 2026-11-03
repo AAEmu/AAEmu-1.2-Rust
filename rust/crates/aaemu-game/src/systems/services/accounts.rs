@@ -276,11 +276,15 @@ pub async fn expire_lazily(server: &GameServer, account_id: u32) -> AccountState
 }
 
 /// The end of an account session (`AccountManager.Remove`): the premium point drops to
-/// `premium_configs.disconnect_point`. Returns `true` when this connection owned the account.
+/// `premium_configs.disconnect_point`. The account lock is taken **before** the registry removal
+/// so this transition serialises with `refresh_state` / `expire_lazily` like every other account
+/// write.
 pub async fn end_session(server: &GameServer, account_id: u32, connection_id: u32) {
     if account_id == 0 {
         return;
     }
+    let lock = server.accounts.lock_of(account_id);
+    let guard = lock.lock().await;
     let state = server.accounts.state(account_id);
     if !server.accounts.remove_if_owned(account_id, connection_id) {
         return;
@@ -295,8 +299,6 @@ pub async fn end_session(server: &GameServer, account_id: u32, connection_id: u3
     if point == state.premium_point {
         return;
     }
-    let lock = server.accounts.lock_of(account_id);
-    let guard = lock.lock().await;
     db::update_premium_point(&server.db, account_id, point).await;
     drop(guard);
 }
@@ -305,9 +307,12 @@ pub async fn end_session(server: &GameServer, account_id: u32, connection_id: u3
 mod tests {
     use super::*;
     use crate::config::{AppConfig, DefaultPayment};
+    use crate::data::skills::{BuffKind, BuffTemplate};
     use crate::data::GameData;
     use crate::net::connection::{AccountPayment, PaymentMethodType};
-    use crate::systems::services::premium::{PremiumBenefit, PremiumConfig, PremiumGrade};
+    use crate::systems::services::premium::{
+        PcBangBuff, PremiumBenefit, PremiumConfig, PremiumGrade,
+    };
     use crate::test_support::{test_server, test_server_with_config, TestClient};
 
     /// `premium_grades` (grade 2 at point 1) and the two benefit rows.
@@ -344,6 +349,25 @@ mod tests {
             },
         ];
         data.systems.services.premium.config = PremiumConfig::default();
+        data.systems.services.premium.pcbang_buffs = vec![PcBangBuff {
+            id: 8_000_001,
+            buff_id: 8_000_011,
+            active: true,
+            kind_id: 3,
+            premium_grade_id: 2,
+        }];
+        data.skills
+            .buffs
+            .insert(8_000_011, BuffTemplate::simple(8_000_011, BuffKind::Good));
+        let full = crate::systems::skills::data::templates::BuffTemplate {
+            id: 8_000_011,
+            kind: 1,
+            ..Default::default()
+        };
+        data.systems
+            .skills
+            .buffs
+            .insert(8_000_011, std::sync::Arc::new(full));
         data
     }
 
@@ -371,7 +395,9 @@ mod tests {
         let server = test_server_with_config(premium_data(), AppConfig::default());
         let mut client = TestClient::new(&server, 1, 1001);
         let character = crate::test_support::test_character(1, "Expired", 100.0, 100.0);
-        crate::test_support::spawn_player(&server, &client, character, 0x101);
+        let player = crate::test_support::spawn_player(&server, &client, character, 0x101);
+        crate::systems::services::premium::apply_grade_buffs(&server, &player, 2);
+        assert!(player.data().unit.buffs.check_buff(8_000_011));
         let now = Utc::now().timestamp();
         server.accounts.set_state(
             1001,
@@ -397,6 +423,10 @@ mod tests {
         // [point i32 = 0][oldPg u8 = 2][pg u8 = 1]
         assert_eq!(update.1, [0, 0, 0, 0, 2, 1]);
         assert!(frames.iter().any(|(op, _)| *op == sc::SCAccountInfoPacket));
+        assert!(
+            !player.data().unit.buffs.check_buff(8_000_011),
+            "expiry must remove the grade buff"
+        );
         // A second pass is a no-op (the point already sits at `deactivate_point`).
         let again = expire_lazily(&server, 1001).await;
         assert_eq!(again.premium_point, 0);
@@ -484,7 +514,9 @@ mod tests {
             (1, 2, 100, 200, 1)
         );
 
-        crate::db::update_account_payment(&pool, 777, 1, 1, 1_700_000_000, 1_900_000_000, 1).await;
+        crate::db::update_account_payment(&pool, 777, 1, 1, 1_700_000_000, 1_900_000_000, 1)
+            .await
+            .unwrap();
         let mut server = test_server_with_config(premium_data(), AppConfig::default());
         server.db = pool.clone();
         let state = refresh_state(&server, 777).await;
@@ -498,6 +530,24 @@ mod tests {
             .await
             .expect("details");
         assert_eq!(details.premium_point, 0);
+
+        // A GM grant may target an account without a game row: the upsert inserts it.
+        crate::db::update_account_payment(&pool, 888, 1, 3, 1_700_000_000, 1_900_000_000, 1)
+            .await
+            .expect("insert a missing account row");
+        let details = crate::db::try_get_account_details(&pool, &config, 888)
+            .await
+            .expect("details");
+        assert_eq!(
+            (
+                details.pay_method,
+                details.pay_location,
+                details.pay_start,
+                details.pay_end,
+                details.premium_point
+            ),
+            (1, 3, 1_700_000_000, 1_900_000_000, 1)
+        );
         pool.close().await;
     }
 

@@ -81,15 +81,21 @@ impl Command for Premium {
             };
             let now = Utc::now().timestamp();
             match action.as_str() {
-                "off" | "none" => {
-                    premium::remove(server, account_id).await;
-                    tracing::info!("premium: account {account_id} removed by GM command");
-                    CommandManager::send_normal_text(
+                "off" | "none" => match premium::remove(server, account_id).await {
+                    Ok(_) => {
+                        tracing::info!("premium: account {account_id} removed by GM command");
+                        CommandManager::send_normal_text(
+                            self,
+                            out,
+                            &format!("Premium of account {account_id} removed"),
+                        );
+                    }
+                    Err(e) => CommandManager::send_error_text(
                         self,
                         out,
-                        &format!("Premium of account {account_id} removed"),
-                    );
-                }
+                        &format!("Could not remove premium of account {account_id}: {e}"),
+                    ),
+                },
                 "on" | "premium" | "grant" => {
                     let days = match args.get(2) {
                         Some(text) => match try_parse::<u32>(text) {
@@ -146,7 +152,14 @@ impl Premium {
             return Ok(());
         }
         let end = now.saturating_add(i64::from(days) * 86_400);
-        premium::grant(server, account_id, now, end).await;
+        if let Err(e) = premium::grant(server, account_id, now, end).await {
+            CommandManager::send_error_text(
+                self,
+                out,
+                &format!("Could not grant premium to account {account_id}: {e}"),
+            );
+            return Ok(());
+        }
         let until = chrono::DateTime::from_timestamp(end, 0)
             .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
             .unwrap_or_else(|| end.to_string());
@@ -162,10 +175,50 @@ impl Premium {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use futures::future::BoxFuture;
+
     use crate::data::skills::{BuffKind, BuffTemplate};
     use crate::data::GameData;
+    use crate::server::GameServer;
     use crate::systems::services::commands::scripts::harness;
-    use crate::systems::services::premium::{PcBangBuff, PremiumBenefit, PremiumGrade};
+    use crate::systems::services::premium::{
+        PcBangBuff, PremiumBenefit, PremiumGrade, PremiumStore,
+    };
+
+    /// An in-memory store for the command flow (the harness DB is closed); `fail` simulates a
+    /// persistence error.
+    #[derive(Default)]
+    struct MemoryStore {
+        fail: AtomicBool,
+    }
+
+    impl PremiumStore for MemoryStore {
+        fn update_payment<'a>(
+            &'a self,
+            _server: &'a GameServer,
+            _account_id: u32,
+            _payment: crate::net::connection::AccountPayment,
+            _premium_point: i32,
+        ) -> BoxFuture<'a, crate::Result<()>> {
+            let fail = self.fail.load(Ordering::Relaxed);
+            Box::pin(async move {
+                if fail {
+                    Err(crate::GameError::Protocol("database down".into()))
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
+
+    fn install_store(server: &GameServer) -> Arc<MemoryStore> {
+        let store = Arc::new(MemoryStore::default());
+        server.systems.services.premium_store.install(store.clone());
+        store
+    }
 
     /// `premium_grades` (1 -> 0, 2 -> 1), the benefit rows and the active VIP buff row.
     fn premium_data() -> GameData {
@@ -232,6 +285,7 @@ mod tests {
         use crate::opcodes::sc;
 
         let server = harness::server_with(premium_data());
+        install_store(&server);
         let mut gm = harness::pc(&server, 1, "Gm", 100.0, 100.0);
         // The configured default (premium) is grade 2; apply its buff as the login path would.
         crate::systems::services::premium::apply_grade_buffs(&server, &gm.p, 2);
@@ -271,10 +325,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn premium_grant_failure_is_reported_and_not_applied() {
+        // The harness database points at a closed port: the upsert fails, so the command must
+        // not answer "granted" and must leave the runtime state untouched.
+        let server = harness::server_with(premium_data());
+        let store = install_store(&server);
+        store.fail.store(true, Ordering::Relaxed);
+        let mut gm = harness::pc(&server, 1, "Gm", 100.0, 100.0);
+        gm.client.drain();
+        let (handled, out) = harness::run(&server, &gm.p, "premium self 2").await;
+        assert!(handled);
+        assert!(out[0].contains("Could not grant"), "{out:?}");
+        let state = crate::systems::services::accounts::state(&server, 1001);
+        assert_eq!(
+            state.payment.method,
+            crate::net::connection::PaymentMethodType::Premium
+        );
+        assert_eq!(state.payment.end_time, 0, "the default stays permanent");
+        assert_eq!(state.premium_point, 1);
+        assert!(
+            gm.packets().is_empty(),
+            "a failed grant must not push account packets"
+        );
+    }
+
+    #[tokio::test]
     async fn premium_on_grants_days_and_grade_two() {
         use crate::opcodes::sc;
 
         let server = harness::server_with(premium_data());
+        install_store(&server);
         let mut gm = harness::pc(&server, 1, "Gm", 100.0, 100.0);
         let _ = harness::run(&server, &gm.p, "premium self off").await;
         gm.client.drain();

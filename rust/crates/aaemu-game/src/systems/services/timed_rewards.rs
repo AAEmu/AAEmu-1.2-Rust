@@ -286,10 +286,10 @@ mod tests {
     }
 
     #[test]
-    fn default_payment_is_premium_until_2030() {
+    fn default_payment_is_permanent_premium() {
         let p = crate::net::connection::AccountPayment::default();
         assert!(p.premium_state(1_800_000_000));
-        assert!(!p.premium_state(1_900_000_000));
+        assert!(p.premium_state(4_000_000_000), "no end date");
     }
 
     /// A spawned non-premium player with `labor` memory labor on account 1001 (the account the
@@ -363,7 +363,7 @@ mod tests {
             c.credits.tick_minutes = 0;
             c.loyalty.tick_minutes = 0;
         });
-        let (_client, p) = labor_player(&server, 1995);
+        let (_client, p) = labor_player(&server, 1998);
         server.accounts.set_state(
             1001,
             AccountState {
@@ -380,7 +380,7 @@ mod tests {
         assert_eq!(
             p.data().labor_power,
             2000,
-            "a normal account is capped at the non-premium max labor"
+            "a normal account is capped at the non-premium max labor (1998 + 5 would be 2003)"
         );
 
         p.data().labor_power = 4995;
