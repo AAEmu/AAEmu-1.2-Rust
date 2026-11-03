@@ -37,7 +37,7 @@
 //! icast <skill> <item template> <npc template|self|peer|player:NAME> [metres [max secs]]
 //!                                    cast from the remembered item stack
 //! waitpeer [secs] [name]             read packets until another player is in sight (60 s default)
-//! rawcs <opcode hex> [<body hex>]    send any client packet (`SELF` / `PEER` / `ITEM:<template>`
+//! rawcs <opcode hex> [<body hex>]    send any client packet (`SELF` / `PEER` / `ITEM(<template>)`
 //!                                    in the body hex)
 //! rawcsend <opcode hex> <body hex>   send it without draining (the caller asserts the reply)
 //! rawcswait <opcode hex> <body hex> <PacketName> [secs]
@@ -1387,13 +1387,12 @@ async fn run_lines(
                 let mut hex = raw
                     .replace("SELF", &bc(game.state.self_obj))
                     .replace("PEER", &peer_bc);
-                // `ITEM:<template>` expands to the stack id remembered by `item <template>`,
-                // little-endian, so a packet can carry the real item instance id.
-                while let Some(start) = hex.find("ITEM:") {
+                // `ITEM(<template>)` expands to the stack id remembered by
+                // `item <template>`, little-endian, so a packet can carry the real item
+                // instance id.
+                while let Some(start) = hex.find("ITEM(") {
                     let rest = &hex[start + 5..];
-                    let end = rest
-                        .find(|c: char| !c.is_ascii_digit())
-                        .unwrap_or(rest.len());
+                    let end = rest.find(')').context("ITEM( needs a closing )")?;
                     let template: u32 = rest[..end].parse()?;
                     let id = *items.get(&template).with_context(|| {
                         format!("item {template} not added with `item`")
@@ -1403,7 +1402,7 @@ async fn run_lines(
                         .iter()
                         .map(|byte| format!("{byte:02x}"))
                         .collect();
-                    hex.replace_range(start..start + 5 + end, &bytes);
+                    hex.replace_range(start..start + 5 + end + 1, &bytes);
                 }
                 anyhow::ensure!(
                     hex.len() % 2 == 0 && hex.is_ascii(),
