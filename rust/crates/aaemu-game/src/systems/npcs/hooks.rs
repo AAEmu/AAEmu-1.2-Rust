@@ -311,6 +311,30 @@ pub trait EconomyBridge: Send + Sync {
         false
     }
 
+    /// Checks and reserves `count` copies of `template_id` from the character's per-character
+    /// shop purchase allowance (`items.limited_sale_count` / `items.one_time_sale`); returns
+    /// false when the purchase would cross the limit. Call before consuming the price, and
+    /// [`Self::release_shop_purchase`] if the purchase still fails after the claim.
+    fn try_claim_shop_purchase(
+        &self,
+        _server: &GameServer,
+        _player: &PlayerRef,
+        _template_id: u32,
+        _count: i32,
+    ) -> bool {
+        true
+    }
+
+    /// Gives back a claim taken by [`Self::try_claim_shop_purchase`] whose purchase failed.
+    fn release_shop_purchase(
+        &self,
+        _server: &GameServer,
+        _player: &PlayerRef,
+        _template_id: u32,
+        _count: i32,
+    ) {
+    }
+
     /// `npc.LootingContainer != null && npc.LootingContainer.Items.Count > 0` (the
     /// `NpcSpawner.DoDespawn` despawn-time extension by `LootDespawnExtensionTime`).
     fn npc_has_loot_items(&self, _server: &GameServer, _npc: &NpcRef) -> bool {

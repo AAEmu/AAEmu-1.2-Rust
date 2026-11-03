@@ -372,6 +372,28 @@ connected by `systems::economy::wiring`).
 | Item skill-effect bodies (grade enchant, socketing, conversion, cap scale, UCC imprint, ...), mate / slave equipment packets | `systems/economy/item_effects*.rs` | done | Called by the skills subsystem's effects. UCC imprint / cleanup require owned source and target items; client UCC casts require the actual source item's configured use skill, preserving the unrelated legacy bound-item portal exception. Dyeing checks the loaded `dyeable_items` allowlist. Invalid UCC / dye effects cancel deferred reagent consumption. |
 | Item skill-effect stubs given data-derived bodies (`GainItemWithPosImprint` 32, `RechargeItemBuff` 95, `ExpToItem` 96) | `systems/economy/item_effects.rs` | done (data-derived) | The C# `Execute` bodies were `// TODO` stubs, so the behaviour comes from `special_effects` 405 / 546 / 547 / 548 (32: create `value1` x1 with `SkillEffectGainItemWithPos`), 12446 / 17017 (95) and 12462 (96: `value1` XP -> `value2` x1 with `SkillEffectExpToItem`) plus the tool skills that cast them. `GainItemWithPosImprint` stores no position imprint: the 1.2 item details have no such field. `ExpToItem` subtracts the experience directly instead of through `AddExp` (which recomputes the level and could level the character down), sends `SCExpChangedPacket(-value1)`, checks bag room before spending the XP, and cancels so the reagent is kept. `RechargeItemBuff` takes the cast's item target, resets `charge_start_time` (and `charge_count` when the template has one) and re-applies the equipped item's gear buff through `apply_gear_buffs` with the item both removed and added, so the recharge buff is not stacked; the 1 s item timers read the new charge window on their next tick, so nothing is re-scheduled. |
 
+#### Limited-sale purchase limits (2026-11-03)
+
+`items.limited_sale_count` and `items.one_time_sale` are now read and enforced as per-character
+purchase limits (`systems/economy/shop_limits.rs`, table `character_shop_purchases`). The 1.2
+client loads both columns with the item template (`SELECT ... limited_sale_count ... one_time_sale
+... FROM items`) but never reads them: the NPC store UI has no remaining-count field, and the only
+sale-limit error in its table is `store_one_time_sale` (752, `0x2f0`). Its GM command list on the
+same build carries `limited_sale_add` / `limited_sale_reset` / `one_time_sale_add` /
+`one_time_sale_reset`, so the counters are per character and reset by an administrator. The reset
+period itself is not available for 1.2 (capture-pending **SHOP-1**): the implementation keeps the
+counter per character, never resets it, and does not share it with the account or the server.
+`one_time_sale` is a limit of one and the smaller column wins when both are set.
+
+Enforcement is one atomic check-and-claim, before the price or the item moves: `CSBuyItemsPacket`
+claims the sum of all lines of one template after the checkout is staged (a refused checkout sends
+752 and changes nothing), and `DoodadFuncPurchase` claims before consuming the coin and gives the
+claim back if the consumption or the grant then fails (debit first, refund on failure). Selling,
+selling back and buying back do not change a counter; GM give, quests, loot, crafting and the cash
+shop are not the vendor purchase path and stay unlimited (the cash shop has its own
+`ics_shop_items.limited_type` / `limited_stock_max`). Not in the C# port (it never read either
+column).
+
 #### Cargo escrow and stale rack references (2026-10-25)
 
 Merchant-ship rack deposits now revalidate the exact equipped pack and a vacant
