@@ -137,6 +137,8 @@ pub struct SkillTemplate {
     pub custom_gcd: i32,
     pub cancel_ongoing_buffs: bool,
     pub cancel_ongoing_buff_exception_tag_id: u32,
+    /// Loaded but not enforced: the C# never read it, and "walk" is the client's walk mode, which
+    /// the move packets do not carry (`PORTING.md`, "`source_cannot_use_while_walk`").
     pub source_cannot_use_while_walk: bool,
     pub source_mount_mate: bool,
     pub check_terrain: bool,

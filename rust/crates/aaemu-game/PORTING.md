@@ -717,7 +717,7 @@ live acceptance remain pending.
 | `TaskManager2`, `Models/Tasks/Task` | `systems/services/tasks.rs` | done | Delayed / repeating / cron tasks (NCrontab subset of `systems::npcs::schedule`), ids, cancel, `RemoveTasks`, `GetQueueCount`. Port of `TaskManagerTests`. |
 | `AccountManager` remainder | `systems/services/accounts.rs`, `db.rs` | done | |
 | `TimedRewardsManager`, `TimedRewardsTask` | `systems/services/timed_rewards.rs` | done | |
-| `CharacterManager` remainder (`GetEffectiveAccessLevel`, `PlayerRoll` + `CSRollDicePacket` / `SCDiceValuePacket`, `StartOnlineTracking` / `CharacterOnlineTrackingTask`, `AddOfflineCrimePoints`, `ApplyBeautySalon` + `CSEnter/ExitBeautySalonPacket`, `CSBeautyshopDataPacket`, `SCCharacterGenderAndModelModifiedPacket`) | `systems/services/{character,beauty_salon}.rs` | done | Beauty salon item work through `BEAUTY_SALON_ITEMS` (economy). |
+| `CharacterManager` remainder (`GetEffectiveAccessLevel`, `PlayerRoll` + `CSRollDicePacket` / `SCDiceValuePacket`, `StartOnlineTracking` / `CharacterOnlineTrackingTask`, `AddOfflineCrimePoints`, `ApplyBeautySalon` + `CSEnter/ExitBeautySalonPacket`, `CSBeautyshopDataPacket`, `SCCharacterGenderAndModelModifiedPacket`) | `systems/services/{character,beauty_salon}.rs` | done | Beauty salon item work through `BEAUTY_SALON_ITEMS` (economy). **Deviation (`CharacterOnlineTrackingTask`):** the C# read and rewrote the account's divine clock per character (`GetDivineClock` + `UpdateDivineClock`, 2 round trips and a commit each, every 5 s). The Rust collects the per-account seconds during the pass and writes them after it with one atomic `UPDATE accounts SET divine_clock_time = LEAST(divine_clock_time + ?, 4294967295) WHERE account_id IN (...)` per distinct non-zero delta (500 ids per statement, `db::add_divine_clock_time`), so it can no longer overwrite the 0 that `timed_rewards::do_daily_account_login` stores in between. The column is `INT UNSIGNED`; the sum saturates at `u32::MAX` where the C# `uint` wrapped. |
 | Character packets: `CSActiveWeaponChangedPacket`, `CSBroadcastVisualOptionPacket`, `CSChangeAppellationPacket` (`CharacterAppellations.Change`), `CSIdleStatusPacket`, `CSRefreshInCharacterListPacket`, `CSRequestUIDataPacket`, `CSSaveUIDataPacket`, `CSUpdateActionSlotPacket`, `CSRestrictCheckPacket`, `CSSetLpManageCharacterPacket` and the log-only `CSCharDetailPacket`, `CSCleanupLogicLinkPacket`, `CSConsoleCmdUsedPacket`, `CSCriminalLockedPacket`, `CSEditorGameModePacket`, `CSRankCharacterPacket`, `CSRequestCharBriefPacket`, `CSRequestSecondPasswordKeyTablesPacket`, `CSSetupSecondPassword`, `CSResturnAddrsPacket` (+ `SCActiveWeaponChangedPacket`, `SCUnitVisualOptionsPacket`, `SCAppellationChangedPacket`, `SCUnitIdleStatusPacket`, `SCRefreshInCharacterListPacket`, `SCResultRestrictCheckPacket`, `SCLpManagedPacket`) | `systems/services/character_packets.rs` | done | Byte-exact tests. `CSHangPacket` / `CSUnhangPacket` are `systems/vehicles/harpoon.rs` (sticky parents, rope break); `CSResurrectCharacterPacket` is `systems/skills/resurrect.rs`. |
 | `CharacterManager` `bag_expands` / `expand_expert_limits`, `Inventory.ExpandSlot`, `CharacterActability.Regrade` / `ExpandExpert`, `CSExpandSlotsPacket`, `CSExpandExpertPacket`, `CSUpgrade/DowngradeExpertLimitPacket` (+ `SCInvenExpandedPacket`, `SCExpertLimitModifiedPacket`, `SCExpertExpandedPacket`) | `systems/services/expands.rs` | done | Item checks / consumption through `CHARACTER_ITEM_OPS` (economy). |
 | `CommandManager`, `AccessLevelManager`, `Models/Game/ICommand`, `Utils/Scripts/**` | `systems/services/commands/` | done (infra) | Ports of `SubCommandBaseTests`, `NumericSubCommandParameterTests`, `AccessLevelManagerTests`, `DoodadChainSubCommandTests`. AStar sub commands need `ASTAR_HOOKS` (AI path finding). `Scripts/SubCommands/Doodads/DoodadSetAgeCommand` is ported (`commands/doodads.rs`, port of `DoodadSetAgeCommandTests` through a test root with the `DoodadCmd` aliases); the `DoodadCmd` root itself is the scripts phase. |
@@ -2795,6 +2795,22 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   sent again. A settlement whose mail is refused `MAX_SETTLEMENT_RETRIES` (720, one hour of 5 s
   ticks) times, e.g. for a deleted receiver, is logged at error level and dropped, and its lot
   is then removed.
+* systems::economy (mail templates, 2026-11-02): the 1.2 client reads `title('…')` /
+  `body(…,'…')` in two stages and the C# wrote the item names unescaped (the cash shop escaped
+  only `'`). Stage A (native, `sub_3948E4C0` / `sub_3948C420`, only `CHARGED` mails on en_us / de /
+  fr clients) runs `sscanf("title(%[^)])")` and `sscanf("body(%[^,],%[^,],%[^)])%s")`, which stop at
+  the first raw `)` and know no escapes, so `Resplendent Armor Regrade Scroll (100)` showed as
+  `…(100` and its body as raw text. Stage B (every sender starting with `.`) is `GetMailText`'s Lua
+  `loadstring`, which decodes `\'`, `\\` and the Lua 5.1 `\ddd` decimal escape. Rust therefore
+  writes every quoted template argument through `mail_template::quote_arg` (`\` -> `\\`, `'` ->
+  `\'`, `(` -> `\040`, `)` -> `\041`): stage A sees no `)` and Lua restores the name. `|` is not
+  escaped (the client splits names on it; no 1.2 item name has one). The auction, trade pack,
+  house sale and house tax mails (stage B only) quote item / house / character names through the
+  same helper: house names are player-set without any character policy (`change_house_name`), so
+  an unescaped `'` let a name break out of the receiver's `loadstring` call. **Deviation:** `load_rows`
+  repairs stored `CHARGED` mails written before this (raw parentheses inside the `title('…')`
+  argument and the third `body(…)` argument, nothing else touched, idempotent) and marks them
+  dirty so the next save persists the fix.
 
 ### Ranking boards (Rust only)
 
@@ -4289,11 +4305,32 @@ consumer was not located; the 1.2 ordering/result is therefore not proven there.
   requirements that used to fail only after the slave cast now stop the press. Examples: horse
   archery 11018 / 11019 / 17156 need a bow, and torpedo 25538 -> 23123 needs target NPC 13680.
   The same applies to buff requirements and to the rider's own cooldown.
+- **`source_cannot_use_while_walk` is not enforced.** The C# loaded the column
+  (`SourceCannotUseWhileWalk`) but never read it. The Rust `validation::check` (batch commit
+  668e4196b) refused a cast with `skill_cannot_cast_while_walking` (20) whenever the caster's last
+  own move had a velocity. That is not the client's walk mode (the move packets carry no walk
+  bit), and 60 of the 70 flagged 1.2 skills are mount bar skills or their rider skills (Run!,
+  Dash, Overrun, Breakthrough, Skydash, Charge, ...), pressed while running. A mounted rider
+  never refreshes the flag (its mate's moves go to the mate), so once the rider pre-check above
+  checked the linked rider skill, Stormdarter Run! 17092 (rider 18228) and Keep Running! 17526
+  (rider 12815) were refused with result 20 and no visible error after the rider had walked up
+  to the mount. The check and `UnitSkillState.moving` are removed; the template field stays
+  loaded. Walk mode is client state.
 - ConsumeChanger refusals now carry the first accepted `doodad_func_consume_changer_items` id and
   BuyFish carries the func's fish item id as the `NEED_REAGENT` value (they were 0), so the 1.2
   client's item-name lookup (`x2game.dll.c:742315`) always finds a template. The doodad gate runs
   after `gathering::allows_skill` (a disallowed skill keeps `INVALID_TARGET`) and is skipped for
   Mount casters, whose effect caster is the slave.
+- **Departure saves write only the departing and financially dirty characters.** C# `Character.Save`
+  at logout saved the departing character only; the Rust departure save also commits the global
+  property sets (items, mail, auction, houses) so money moved by a counterpart never splits from
+  its character row. It used to rewrite every online character per logout (O(N) per logout, O(N^2)
+  in a logout wave, all under `transaction_lock`). `SnapshotScope::Departure` now captures the
+  pending departures plus online characters whose `(money, money2)` differ from the value last
+  committed/loaded (`SaveManager::committed_money`, seeded on enter-world, set by the commit ack,
+  dropped on final departure; no entry = dirty) or that hold `labor_power_unsaved != 0`. Autosave
+  and shutdown still capture everyone. Money is the only character-row field another character's
+  operation changes. The "Saved N active buff(s)" log is `debug!`.
 
 ## Cooldown display and persistence (2026-11-02)
 
