@@ -5018,6 +5018,11 @@ pub fn repair_slave_items(server: &GameServer, player: &PlayerRef, npc_obj_id: u
             task_type::DEPOSIT_MONEY,
         );
     }
+    if tasks.is_empty() {
+        // Every scanned item vanished before the update: only the refund goes out, no empty
+        // RepairSlaves task and no "repaired" message.
+        return;
+    }
     let mut out = txn.out();
     out.send(
         player,

@@ -183,10 +183,12 @@ pub fn transfer_tick(server: &GameServer) {
 /// `FUN_393bf310` checks `FUN_39093860(player, target, DAT_39ac79fc, 0)`; `FUN_39093860`
 /// (`x2game.dll.c:129683`) compares the measured distance with `SQRT(param_3)`, so
 /// `DAT_39ac79fc` = 9.0 is the squared 3 m and the use-range variant `DAT_39ac7a00` = 12.25 is
-/// 3.5 m. `FUN_3989bf90` measures to the target's bounds, which is the server's edge-to-edge
-/// `skills::geometry::distance_to` (subtracts the unit model radii). A client that did not
-/// pass that check never sends the packet, so the server repeats the 3 m edge check for a
-/// forged or stale request.
+/// 3.5 m. `FUN_3989bf90` measures to the target's bounds. Transfer models are `VehicleModel`s with
+/// no `ActorModel` radius, so the server measures to the requested seat's world position
+/// (bench doodad / the C# Passenger0/1 local offsets) with a 3 m 2D range; an unresolved seat
+/// falls back to 3 m plus the model half extent from `ship_models`, else 9 m. A client that
+/// did not pass that check never sends the packet, so the server repeats it for a forged or
+/// stale request.
 pub const BOARDING_RANGE: f32 = 3.0;
 
 /// The transfers of `world` whose tl id is `tl` (the motor and its boarding part share it).
@@ -197,6 +199,63 @@ fn transfers_with_tl(world: &WorldInstance, tl: u16) -> Vec<TransferRef> {
         .filter_map(|o| o.as_transfer().cloned())
         .filter(|t| t.data().unit.tl_id == tl)
         .collect()
+}
+
+/// Local offset of the boarding part's bench doodads for the two seats the C# spawns
+/// (`TransferManager.Create`: `Passenger0` / `Passenger1`); used when the doodad itself is not
+/// in the world (tests, a part spawned without its benches).
+fn seat_local_offset(ap: u8) -> Option<[f32; 3]> {
+    match ap {
+        attach_point::PASSENGER0 => Some([0.005_374_76, 5.7852, 1.36648]),
+        attach_point::PASSENGER1 => Some([0.005_374_76, 1.63614, 1.36648]),
+        _ => None,
+    }
+}
+
+/// World position of the requested seat: the bench doodad spawned for `ap` when there is one,
+/// else the C# local bench offset composed with the transfer's world transform.
+fn seat_world_pos(
+    world: &WorldInstance,
+    transfer: &TransferRef,
+    ap: u8,
+) -> Option<crate::models::transform::PositionAndRotation> {
+    for d in world.all_doodads() {
+        let g = d.data();
+        if g.parent_obj_id == transfer.obj_id && g.data == i32::from(ap) {
+            return Some(world.world_pos_rot(&WorldObject::from(&d)));
+        }
+    }
+    let local = seat_local_offset(ap)?;
+    let obj = WorldObject::from(transfer);
+    let tw = world.world_pos_rot(&obj);
+    let offset = crate::models::transform::PositionAndRotation::new(
+        local[0], local[1], local[2], 0.0, 0.0, 0.0,
+    );
+    Some(crate::models::transform::PositionAndRotation::compose(
+        &tw,
+        obj.scale(),
+        &offset,
+    ))
+}
+
+/// Anti-forgery limit when the seat position cannot be resolved: the model's half extent from
+/// `ship_models.mass_box_size` (the only model size the 1.2 data carries) plus the 3 m range,
+/// else the previous lenient 9 m.
+fn unresolved_seat_limit(server: &GameServer, transfer: &TransferRef) -> f32 {
+    let model_id = transfer.data().unit.model_id;
+    server
+        .game_data
+        .systems
+        .vehicles
+        .ship_models
+        .get(&model_id)
+        .map_or(9.0, |m| {
+            3.0 + m
+                .mass_box_size_x
+                .max(m.mass_box_size_y)
+                .max(m.mass_box_size_z)
+                * 0.5
+        })
 }
 
 /// `CSBoardingTransferPacket(tl, ap)`.
@@ -272,12 +331,24 @@ pub fn board(server: &GameServer, player: &PlayerRef, tl: u16, ap: u8) {
         );
         return;
     };
-    let distance = crate::systems::skills::geometry::distance_to(
-        server,
-        &crate::systems::skills::geometry::Target::Obj(me.clone()),
-        &crate::systems::skills::geometry::Target::Obj(WorldObject::from(&transfer)),
-        false,
-    );
+    let player_pos = world.world_pos_rot(&me);
+    // `FUN_3989bf90` measures to the target's bounds; the transfer models are VehicleModels
+    // with no ActorModel radius, so `skills::geometry::distance_to` would use the origin.
+    // Measure to the requested seat itself instead; if it cannot be resolved, use the lenient
+    // anti-forgery limit (3 m + the model half extent, else the old 9 m).
+    let distance = match seat_world_pos(&world, &transfer, ap) {
+        Some(seat) => player_pos.distance_to(&seat, false),
+        None => {
+            let transfer_pos = world.world_pos_rot(&WorldObject::from(&transfer));
+            let gap = player_pos.distance_to(&transfer_pos, false);
+            let limit = unresolved_seat_limit(server, &transfer);
+            if gap > limit {
+                super::bind_error(player, crate::systems::economy::error_message::TOO_FAR_AWAY);
+                return;
+            }
+            gap.min(BOARDING_RANGE)
+        }
+    };
     // Snapshot, then check the seat and reserve it under the transfer's one lock: two boards
     // racing for the same point cannot both pass.
     let refusal = {
@@ -330,6 +401,18 @@ pub fn board(server: &GameServer, player: &PlayerRef, tl: u16, ap: u8) {
         // `Transform.Parent = transfer.Transform` (the doodad BoardTransfer path keeps the
         // world position; the sticky parent marks the seat for `IsBoardedOnTransfer`).
         world.set_sticky_parent(&me, Some(&WorldObject::from(&transfer)));
+    } else {
+        // The seat was released between the reservation and this re-check (unboard / despawn):
+        // undo the attach the broadcast just announced so clients do not show a phantom rider.
+        broadcast(
+            server,
+            &me,
+            &SCUnitDetachedPacket {
+                obj_id: player.obj_id,
+                reason: attach_reason::BOARD_TRANSFER,
+            },
+            true,
+        );
     }
 }
 
@@ -417,9 +500,16 @@ fn detach_passenger(
     let sticky_is_transfer = world
         .sticky_parent(&me)
         .is_some_and(|p| p.obj_id() == transfer.obj_id);
-    if sticky_is_transfer && me.transform().parent_obj_id == transfer.obj_id {
-        world.set_sticky_parent(&me, None);
-    } else if me.transform().parent_obj_id == transfer.obj_id {
+    if sticky_is_transfer {
+        if me.transform().parent_obj_id == transfer.obj_id {
+            world.set_sticky_parent(&me, None);
+        } else {
+            // A different path (mount / slave) now owns the parent: drop the stale sticky link
+            // without detaching that parent.
+            me.core().set_sticky_parent_id(0);
+        }
+    }
+    if me.transform().parent_obj_id == transfer.obj_id {
         world.detach_child(&me);
     }
     {

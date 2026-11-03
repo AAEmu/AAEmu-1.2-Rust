@@ -8642,7 +8642,7 @@ async fn board_transfer(
 async fn boarding_a_transfer_seats_the_player_on_the_boarding_part() {
     let server = transfer_server();
     let mut a = TestClient::new(&server, 1, 1);
-    let pa = spawn_live_player(&server, &a, 1, PA, (100.0, 100.0));
+    let pa = spawn_live_player(&server, &a, 1, PA, (100.0, 105.0));
     a.conn.active_char = Some(pa.clone());
     // Same tl id on both parts, as `TransferManager.Create` sets them: only the boarding part
     // (653) declares the passenger seats.
@@ -8687,7 +8687,7 @@ async fn boarding_a_transfer_seats_the_player_on_the_boarding_part() {
 
     // A second player: the taken seat is refused, the free one works.
     let mut b = TestClient::new(&server, 2, 2);
-    let pb = spawn_live_player(&server, &b, 2, PB, (101.0, 100.0));
+    let pb = spawn_live_player(&server, &b, 2, PB, (101.0, 105.0));
     b.conn.active_char = Some(pb.clone());
     b.drain();
     board_transfer(&server, &mut b.conn, TRANSFER_TL, 2).await;
@@ -8707,7 +8707,7 @@ async fn boarding_a_transfer_seats_the_player_on_the_boarding_part() {
 async fn boarding_a_transfer_refuses_an_undeclared_seat_and_an_out_of_range_request() {
     let server = transfer_server();
     let mut a = TestClient::new(&server, 1, 1);
-    let pa = spawn_live_player(&server, &a, 1, PA, (100.0, 100.0));
+    let pa = spawn_live_player(&server, &a, 1, PA, (100.0, 105.0));
     a.conn.active_char = Some(pa.clone());
     spawn_test_transfer(&server, 0x500, 653);
     a.drain();
@@ -8730,8 +8730,8 @@ async fn boarding_a_transfer_refuses_an_undeclared_seat_and_an_out_of_range_requ
     assert!(!ops(&f).contains(&sc::SCUnitAttachedPacket));
     assert_eq!(pa.data().attached_point, 0);
 
-    // Inside 3 m (2.5 m) the same seat is accepted.
-    pa.data().unit.transform.set_xyz(102.5, 101.0, 100.0);
+    // Inside 3 m of the seat itself the same seat is accepted.
+    pa.data().unit.transform.set_xyz(100.0, 104.5, 100.0);
     board_transfer(&server, &mut a.conn, TRANSFER_TL, 2).await;
     let f = a.drain();
     assert!(ops(&f).contains(&sc::SCUnitAttachedPacket));
@@ -8739,10 +8739,97 @@ async fn boarding_a_transfer_refuses_an_undeclared_seat_and_an_out_of_range_requ
 }
 
 #[tokio::test]
+async fn boarding_measures_to_the_seat_not_the_transfer_origin() {
+    let server = transfer_server();
+    let mut a = TestClient::new(&server, 1, 1);
+    // 2.29 m from Passenger0 at (100.005, 106.785, 101.366) but 3.5 m from the part origin.
+    let pa = spawn_live_player(&server, &a, 1, PA, (100.0, 104.5));
+    a.conn.active_char = Some(pa.clone());
+    let part = spawn_test_transfer(&server, 0x500, 653);
+    a.drain();
+    board_transfer(&server, &mut a.conn, TRANSFER_TL, 2).await;
+    assert_eq!(pa.data().attached_point, 2);
+    assert_eq!(part.data().attached_characters, vec![(2, PA)]);
+
+    // 4.0 m from the seat: refused although the origin is only 7.8 m away (the old 9 m origin
+    // limit would have accepted it).
+    let mut b = TestClient::new(&server, 2, 2);
+    let pb = spawn_live_player(&server, &b, 2, PB, (100.0, 108.8));
+    b.conn.active_char = Some(pb.clone());
+    b.drain();
+    board_transfer(&server, &mut b.conn, TRANSFER_TL, 3).await;
+    let f = b.drain();
+    assert_eq!(error_codes(&f), vec![error_message::TOO_FAR_AWAY]);
+    assert_eq!(pb.data().attached_point, 0);
+}
+
+#[tokio::test]
+async fn a_same_world_teleport_ended_frees_the_seat() {
+    // Every same-world SCTeleportUnit sender (the same-instance portal branch, the NPC
+    // teleporter, dominion / instant-game / GM move-all / nudge / sphere teleports) ends in
+    // `CSTeleportEndedPacket`; the sink must release the transfer seat.
+    let (server, mut a, pa, part) = boarded_transfer().await;
+    pa.data().set_disabled_set_position(true);
+    use crate::net::registry::ClientPacket;
+    crate::systems::npcs::portal::packets::CSTeleportEndedPacket {
+        x: 110.0,
+        y: 100.0,
+        z: 100.0,
+        ori: [0; 16],
+    }
+    .handle(&server, &mut a.conn)
+    .await
+    .unwrap();
+    let f = a.drain();
+    assert_unboarded(&pa, &part, &f);
+}
+
+#[tokio::test]
+async fn unboarding_clears_a_stale_sticky_parent_without_detaching_another_parent() {
+    let (server, mut a, pa, part) = boarded_transfer().await;
+    let world = server.world.world(0).unwrap();
+    let other = crate::world::Entity::new(0x702, crate::models::doodad::Doodad::new(1));
+    world.spawn(&other, &server.view_ctx());
+    let me = WorldObject::from(&pa);
+    world.attach_child(&WorldObject::from(&other), &me);
+    transfers::unboard(
+        &server,
+        &pa,
+        TRANSFER_TL,
+        slaves::attach_reason::BOARD_TRANSFER,
+    );
+    a.drain();
+    assert!(part.data().attached_characters.is_empty());
+    assert_eq!(me.transform().parent_obj_id, other.obj_id);
+    assert!(world.sticky_parent(&me).is_none());
+}
+
+#[tokio::test]
+async fn a_boarded_passenger_cannot_take_a_doodad_bench() {
+    let (server, _a, pa, _part) = boarded_transfer().await;
+    let world = server.world.world(0).unwrap();
+    let doodad = crate::world::Entity::new(0x701, crate::models::doodad::Doodad::new(5890));
+    world.spawn(&doodad, &server.view_ctx());
+    let ctx = crate::systems::npcs::doodad::runtime::DoodadCtx::new(
+        &server,
+        world.clone(),
+        doodad.clone(),
+    );
+    let f = crate::systems::npcs::doodad::templates::DoodadFuncAttachment {
+        id: 1,
+        attach_point_id: 2,
+        space: 1,
+        bond_kind_id: 2,
+    };
+    crate::systems::npcs::doodad::funcs::world::attachment(&f, &ctx, Some(&WorldObject::from(&pa)));
+    assert!(pa.data().bonding.is_none());
+}
+
+#[tokio::test]
 async fn unboarding_a_transfer_detaches_the_passenger_and_is_idempotent() {
     let server = transfer_server();
     let mut a = TestClient::new(&server, 1, 1);
-    let pa = spawn_live_player(&server, &a, 1, PA, (100.0, 100.0));
+    let pa = spawn_live_player(&server, &a, 1, PA, (100.0, 105.0));
     a.conn.active_char = Some(pa.clone());
     let part = spawn_test_transfer(&server, 0x500, 653);
     a.drain();
@@ -8777,7 +8864,7 @@ async fn unboarding_a_transfer_detaches_the_passenger_and_is_idempotent() {
 async fn a_late_viewer_receives_the_transfer_passenger_seat() {
     let server = transfer_server();
     let mut a = TestClient::new(&server, 1, 1);
-    let pa = spawn_live_player(&server, &a, 1, PA, (100.0, 100.0));
+    let pa = spawn_live_player(&server, &a, 1, PA, (100.0, 105.0));
     a.conn.active_char = Some(pa.clone());
     spawn_test_transfer(&server, 0x500, 653);
     a.drain();
@@ -8785,7 +8872,7 @@ async fn a_late_viewer_receives_the_transfer_passenger_seat() {
     a.drain();
 
     let mut b = TestClient::new(&server, 2, 2);
-    spawn_live_player(&server, &b, 2, PB, (101.0, 100.0));
+    spawn_live_player(&server, &b, 2, PB, (101.0, 105.0));
     let f = b.drain();
     let mut expect = PacketStream::new();
     expect.write_bc(PA).write_u8(2).write_bc(0x500).write_u8(0);
@@ -9060,7 +9147,7 @@ async fn boarded_transfer() -> (
 ) {
     let server = transfer_server();
     let mut a = TestClient::new(&server, 1, 1);
-    let pa = spawn_live_player(&server, &a, 1, PA, (100.0, 100.0));
+    let pa = spawn_live_player(&server, &a, 1, PA, (100.0, 105.0));
     a.conn.active_char = Some(pa.clone());
     let part = spawn_test_transfer(&server, 0x500, 653);
     a.drain();
@@ -9188,7 +9275,7 @@ async fn a_boarded_passenger_cannot_mount_a_mate_or_bind_a_slave() {
 async fn a_bonded_bench_seat_refuses_transfer_boarding() {
     let server = transfer_server();
     let mut a = TestClient::new(&server, 1, 1);
-    let pa = spawn_live_player(&server, &a, 1, PA, (100.0, 100.0));
+    let pa = spawn_live_player(&server, &a, 1, PA, (100.0, 105.0));
     a.conn.active_char = Some(pa.clone());
     let part = spawn_test_transfer(&server, 0x500, 653);
     a.drain();

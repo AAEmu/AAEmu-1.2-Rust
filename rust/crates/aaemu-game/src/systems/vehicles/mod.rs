@@ -341,10 +341,16 @@ pub fn set_unit_position(
 
 /// `Character.ForceDismount(reason)`: off any mate seat, off any slave, out of a doodad seat,
 /// `Transform.DetachAll()`. `true` when a mate / slave dismount happened.
+/// `Character.ForceDismount`: releases a mate mount, a slave seat, a doodad bond and a transfer
+/// passenger seat before a server-side move. Returns `true` when a mate / slave / transfer
+/// attachment was released (a plain doodad bond is unbound but does not set the flag).
+///
+/// Not every same-world `SCTeleportUnit` sender calls this; `world::session::teleport_ended`
+/// releases a remaining transfer seat once for those paths as well.
 pub fn force_dismount(server: &GameServer, player: &PlayerRef, reason: u8) -> bool {
     let mut res = false;
-    // A transfer seat has no mate / slave record, so release it here too: every server
-    // teleport goes through this function (`teleport_character`, zone entry, GM teleport).
+    // A transfer seat has no mate / slave record, so release it here too: the instance-change
+    // and command teleports call this before moving the character.
     res |= transfers::unboard_all(server, player, reason);
     let instance = player.data().unit.transform.instance_id;
     if let Some((mate, point)) = server

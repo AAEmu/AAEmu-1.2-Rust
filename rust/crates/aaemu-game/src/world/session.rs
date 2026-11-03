@@ -330,6 +330,14 @@ pub fn resurrect_at(server: &GameServer, p: &PlayerRef, destination: Transform) 
 /// (a ship deck, a moving gimmick) is detached first; otherwise the new world position would be
 /// composed with the old parent and land in the parent's region / zone.
 pub fn teleport_ended(server: &GameServer, p: &PlayerRef, x: f32, y: f32, z: f32) {
+    // Every `SCTeleportUnit` path ends here. Some same-world senders (the same-instance portal
+    // branch, the NPC teleporter, dominion headquarters, instant games, GM `/move all` / nudge /
+    // test height / spheres) do not call `force_dismount`, so release a transfer seat here too.
+    crate::systems::vehicles::transfers::unboard_all(
+        server,
+        p,
+        crate::systems::vehicles::slaves::attach_reason::PREFAB_CHANGED,
+    );
     let Some((filed_instance, _, _)) = p.region() else {
         // An instance load is pending: `instance_loaded` files the arrival.
         return;
