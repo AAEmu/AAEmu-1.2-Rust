@@ -10,7 +10,7 @@ use super::unit_reqs::skill_result_for_key;
 use crate::systems::economy::inventory::Inv;
 
 /// Extra range for a doodad target, covering the distance from its origin to its edge.
-const DOODAD_RANGE_ALLOWANCE: f64 = 15.0;
+pub(crate) const DOODAD_RANGE_ALLOWANCE: f64 = 15.0;
 /// Extra range for a slave target (large ships are centred far from their hull edge).
 const SLAVE_RANGE_ALLOWANCE: f64 = 40.0;
 /// How far above the source and the destination the obstacle ray is cast. This was the Rust/C#-era

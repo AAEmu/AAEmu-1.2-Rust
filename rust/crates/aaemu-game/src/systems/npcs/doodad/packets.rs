@@ -234,40 +234,138 @@ impl ClientPacket for CSChangeDoodadDataPacket {
     }
 }
 
-/// `CSChangeDoodadPhasePacket` (logged only, as in C#).
+/// `CSChangeDoodadPhasePacket`: sent by the 1.2 client when it finishes a
+/// `DoodadFuncBubble` (0x3f) or `DoodadFuncOpenPaper` (0x46) whose func row has
+/// `next_phase > 0` (`FUN_393b8240` / `FUN_393b8450`; builder `FUN_397ac8d0`, writer
+/// `FUN_397bbbb0`). Body: `bc objId`, `u32 skill`, `u32 nextPhase`, `u32 funcId`
+/// (`doodad_funcs.id`).
+///
+/// The C# only logged it, so the phase never advanced. The handler accepts the client's
+/// phase change only when `funcId` is a Bubble / OpenPaper func of the doodad's current
+/// phase group whose `next_phase` is exactly `nextPhase`; the movement itself is the normal
+/// phase machinery (`DoChangePhase`: phase funcs, then `SCDoodadPhaseChangedPacket`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CSChangeDoodadPhasePacket {
     pub obj_id: u32,
-    pub unk_id: u32,
-    pub unk2_id: u32,
-    pub unk3_id: u32,
+    /// The skill that ran the func (the client's first argument to the builder).
+    pub skill: u32,
+    pub next_phase: u32,
+    /// `doodad_funcs.id` (`FuncKey`) of the Bubble / OpenPaper func.
+    pub func_id: u32,
 }
 impl ClientPacket for CSChangeDoodadPhasePacket {
     const NAME: &'static str = "CSChangeDoodadPhasePacket";
     fn read(s: &mut PacketStream) -> Result<Self> {
         Ok(Self {
             obj_id: s.read_bc()?,
-            unk_id: s.read_u32()?,
-            unk2_id: s.read_u32()?,
-            unk3_id: s.read_u32()?,
+            skill: s.read_u32()?,
+            next_phase: s.read_u32()?,
+            func_id: s.read_u32()?,
         })
     }
     fn handle<'a>(
         self,
-        _server: &'a GameServer,
-        _conn: &'a mut GameConnection,
+        server: &'a GameServer,
+        conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            tracing::warn!(
-                "ChangeDoodadPhase, ObjId: {}, Id: {}, {}, {}",
-                self.obj_id,
-                self.unk_id,
-                self.unk2_id,
-                self.unk3_id
+            let Some(me) = conn.active_char.clone() else {
+                return Ok(());
+            };
+            let Some(world) = server.world.world_of(&WorldObject::from(&me)) else {
+                return Ok(());
+            };
+            let Some(doodad) = world.doodad(self.obj_id) else {
+                tracing::debug!(
+                    "ChangeDoodadPhase, no doodad objId: {}, funcId: {}",
+                    self.obj_id,
+                    self.func_id
+                );
+                return Ok(());
+            };
+            // Check the current phase and move it under the same operation reservation.
+            let Some(_operation) = super::phase::Operation::enter(&doodad) else {
+                return Ok(());
+            };
+            let data = &server.game_data.systems.npcs.doodad;
+            let Some(func) = data.func(self.func_id) else {
+                tracing::debug!(
+                    "ChangeDoodadPhase, no doodadFunc objId: {}, funcId: {}",
+                    self.obj_id,
+                    self.func_id
+                );
+                return Ok(());
+            };
+            let group = doodad.data().func_group_id;
+            let expected = i32::try_from(self.next_phase).unwrap_or(i32::MAX);
+            if func.group_id != group
+                || !matches!(
+                    func.func_type.as_str(),
+                    "DoodadFuncBubble" | "DoodadFuncOpenPaper"
+                )
+                || func.next_phase != expected
+                || func.next_phase <= 0
+            {
+                tracing::debug!(
+                    "ChangeDoodadPhase, func not usable: objId: {}, funcId: {}, group: {} (current {}), nextPhase: {}, requested {}",
+                    self.obj_id,
+                    self.func_id,
+                    func.group_id,
+                    group,
+                    func.next_phase,
+                    self.next_phase
+                );
+                return Ok(());
+            }
+            let skill_id = if func.skill_id != 0 {
+                func.skill_id
+            } else {
+                self.skill
+            };
+            if !in_skill_reach(server, &me, &doodad, skill_id) {
+                tracing::debug!(
+                    "ChangeDoodadPhase, out of range: objId: {}, funcId: {}, skill: {}",
+                    self.obj_id,
+                    self.func_id,
+                    skill_id
+                );
+                return Ok(());
+            }
+            super::manager::do_change_phase(
+                server,
+                &world,
+                &doodad,
+                Some(&WorldObject::from(&me)),
+                func.next_phase,
             );
             Ok(())
         })
     }
+}
+
+/// `distance <= skill.maxRange` with the same doodad allowance the cast target check uses
+/// (`skills::validation`). An unknown skill or a zero range does not bound the interaction.
+fn in_skill_reach(
+    server: &GameServer,
+    player: &crate::world::PlayerRef,
+    doodad: &crate::world::DoodadRef,
+    skill_id: u32,
+) -> bool {
+    use crate::systems::skills::geometry::{distance_to, Target};
+    let Some(skill) = server.game_data.systems.skills.skill(skill_id) else {
+        return true;
+    };
+    if skill.max_range <= 0 {
+        return true;
+    }
+    let distance = distance_to(
+        server,
+        &Target::Obj(WorldObject::from(player)),
+        &Target::Obj(WorldObject::from(doodad)),
+        true,
+    );
+    f64::from(distance)
+        <= f64::from(skill.max_range) + crate::systems::skills::validation::DOODAD_RANGE_ALLOWANCE
 }
 
 /// `CSSetLogicDoodadPacket`: provider and subscriber object IDs.
@@ -517,15 +615,15 @@ mod tests {
             }
         );
         let mut s = stream(|s| {
-            s.write_bc(5).write_u32(1).write_u32(2).write_u32(3);
+            s.write_bc(5).write_u32(13356).write_u32(2).write_u32(3);
         });
         assert_eq!(
             CSChangeDoodadPhasePacket::read(&mut s).unwrap(),
             CSChangeDoodadPhasePacket {
                 obj_id: 5,
-                unk_id: 1,
-                unk2_id: 2,
-                unk3_id: 3
+                skill: 13356,
+                next_phase: 2,
+                func_id: 3
             }
         );
         let mut s = stream(|s| {
