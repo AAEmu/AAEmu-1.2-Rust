@@ -2,7 +2,8 @@
 //! log-only packets the 1.2 C# defines but never registers (opcode 0xfff, commented out in
 //! `GameNetwork`): `CSResetQuestContextPacket`, `CSAcceptCheatQuestContextPacket`,
 //! `CSSearchListPacket`, `CSChangeExpeditionSponsorPacket`, `CSChangeSlaveTargetPacket`,
-//! `CSSetTeamOfficerPacket`, `CSUpdateNationalTaxRatePacket`.
+//! `CSSetTeamOfficerPacket`. `CSUpdateNationalTaxRatePacket` is the native 1.2 CS 0x013
+//! (`FUN_392f42f0`); its log-only handler is registered until the stage-4 national tax work.
 //!
 //! `CSTurretStatePacket` is decoded here but handled by the vehicles subsystem: the 1.2 client's
 //! aim producers (`39425490` / `39425580`) send the controlled unit's slave object id with the
@@ -142,17 +143,20 @@ log_only_packet!(
 );
 
 log_only_packet!(
-    /// `CSUpdateNationalTaxRatePacket` (not registered in 1.2).
+    /// `CSUpdateNationalTaxRatePacket` (0x013, 1.2 client `FUN_392f42f0`; the log-only handler
+    /// is registered until the stage-4 national tax work).
     CSUpdateNationalTaxRatePacket, debug, "UpdateNationalTaxRate, Id: {}, TaxRate: {}" {
         id: u16 => read_u16,
         tax_rate: i32 => read_i32,
     }
 );
 
-/// Registers the packets of this module that the 1.2 `GameNetwork` registers.
+/// Registers the packets of this module that the 1.2 `GameNetwork` registers, plus the native
+/// national tax opcode (0x013) whose real handler belongs to the stage-4 nation work.
 pub fn register(r: &mut PacketRegistry) {
     r.register::<CSEditCharacterPacket>(LEVEL_PLAIN, cs::CSEditCharacterPacket)
-        .register::<CSTurretStatePacket>(LEVEL_PLAIN, cs::CSTurretStatePacket);
+        .register::<CSTurretStatePacket>(LEVEL_PLAIN, cs::CSTurretStatePacket)
+        .register::<CSUpdateNationalTaxRatePacket>(LEVEL_PLAIN, cs::CSUpdateNationalTaxRatePacket);
 }
 
 #[cfg(test)]
