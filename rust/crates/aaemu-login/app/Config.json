@@ -7,6 +7,11 @@
 	},
 	"SecretKey": "test",
 	"AutoAccount": true,
+	"Login": {
+		"MaxCharactersPerAccount": 6,
+		"AdditionalCharactersPerServer": 0,
+		"PreSelectCharacterPeriod": false
+	},
 	"SkipHostResolve": false,
 	"InternalNetwork": {
 		"Host": "127.0.0.1",

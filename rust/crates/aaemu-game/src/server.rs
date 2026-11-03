@@ -61,6 +61,10 @@ pub struct GameServer {
 
 impl GameServer {
     pub fn new(config: AppConfig, db: MySqlPool, game_data: GameData) -> Self {
+        tracing::info!(
+            "Character slots: base {} per account (purchased extra_character_slots are added); the login server's Login:MaxCharactersPerAccount must match",
+            config.characters.max_per_account
+        );
         let ids = Arc::new(IdManagers::default());
         let world = Arc::new(WorldManager::default());
         let reply_delay = ReplyDelay::resolve(&config.debug.reply_delay);

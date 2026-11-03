@@ -1,4 +1,7 @@
 ﻿{
+	"Characters": {
+		"MaxPerAccount": 6 // base slots; must equal the login server's Login:MaxCharactersPerAccount
+	},
 	"Account": {
 		"AccessLevelDefault": 0,
 		"AccessLevelFirstAccount": 100,
