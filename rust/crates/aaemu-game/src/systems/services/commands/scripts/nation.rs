@@ -140,6 +140,98 @@ impl Command for Nation {
                         }
                     }
                 }
+                "hostile" if args.len() == 2 => {
+                    let target: u32 = match args[1].parse() {
+                        Ok(id) => id,
+                        Err(_) => {
+                            CommandManager::send_default_help_text(self, out);
+                            return Ok(());
+                        }
+                    };
+                    let player = ctx.player()?;
+                    match nation::declare_hostile(server, &player, target) {
+                        Ok(()) => CommandManager::send_normal_text(
+                            self,
+                            out,
+                            &format!("Declared hostile to faction {target}"),
+                        ),
+                        Err(code) => {
+                            crate::systems::social::util::send_error(&player, code);
+                            CommandManager::send_error_text(
+                                self,
+                                out,
+                                &format!("Hostile declaration failed (error {code})"),
+                            );
+                        }
+                    }
+                    Ok(())
+                }
+                // Test hook, not a 1.2 command: force a relation with an expiry so a live run
+                // can observe the stage-3 expiry without waiting hours (NATION-17).
+                "relation" if args.len() == 5 => {
+                    let (Ok(target), Ok(state), Ok(minutes), Ok(next)) = (
+                        args[1].parse::<u32>(),
+                        args[2].parse::<u8>(),
+                        args[3].parse::<i64>(),
+                        args[4].parse::<u8>(),
+                    ) else {
+                        CommandManager::send_default_help_text(self, out);
+                        return Ok(());
+                    };
+                    let player = ctx.player()?;
+                    let Some(nation) = server.systems.social.nations.owned_by(player.character_id)
+                    else {
+                        CommandManager::send_error_text(self, out, "You are not a nation king");
+                        return Ok(());
+                    };
+                    let expire_at = chrono::Utc::now().timestamp() + minutes * 60;
+                    if !server
+                        .systems
+                        .social
+                        .nations
+                        .set_relation(nation.id, target, state, expire_at, next)
+                    {
+                        CommandManager::send_error_text(self, out, "Unknown nation");
+                        return Ok(());
+                    }
+                    CommandManager::send_normal_text(
+                        self,
+                        out,
+                        &format!(
+                            "Relation {nation_id} <-> {target}: state {state}, expires in {minutes} min, next {next}",
+                            nation_id = nation.id
+                        ),
+                    );
+                    Ok(())
+                }
+                "treaty" if args.len() == 2 => {
+                    let target: u32 = match args[1].parse() {
+                        Ok(id) => id,
+                        Err(_) => {
+                            CommandManager::send_default_help_text(self, out);
+                            return Ok(());
+                        }
+                    };
+                    let player = ctx.player()?;
+                    let Some(nation) = server.systems.social.nations.owned_by(player.character_id)
+                    else {
+                        CommandManager::send_error_text(self, out, "You are not a nation king");
+                        return Ok(());
+                    };
+                    match nation::send_treaty_mail(server, nation.id, target) {
+                        Some(mail_id) => CommandManager::send_normal_text(
+                            self,
+                            out,
+                            &format!("Treaty request mail {mail_id} sent"),
+                        ),
+                        None => CommandManager::send_error_text(
+                            self,
+                            out,
+                            "Treaty request mail not sent (unknown king name or target)",
+                        ),
+                    }
+                    Ok(())
+                }
                 _ => {
                     CommandManager::send_default_help_text(self, out);
                     Ok(())
@@ -149,10 +241,10 @@ impl Command for Nation {
     }
 
     fn get_command_line_help(&self) -> String {
-        "[info|create [force]]".into()
+        "[info|create [force]|hostile <faction>|relation <faction> <state> <minutes> <next>|treaty <faction>]".into()
     }
 
     fn get_command_help_text(&self) -> String {
-        "Lists player nations, or creates one from your expedition as its king. The expedition must own a dominion; create force skips that check for tests.".into()
+        "Lists player nations, or creates one from your expedition as its king. The expedition must own a dominion; create force skips that check for tests. hostile declares a diplomacy target hostile; relation and treaty are test hooks for the expiry and mail flows.".into()
     }
 }

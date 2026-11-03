@@ -181,11 +181,16 @@ cs_packet!(
 );
 
 cs_packet!(
-    /// `CSFactionDeclareHostilePacket` (logged only, as in C#).
+    /// `CSFactionDeclareHostilePacket` (0x019, `FUN_390537b0` / `FUN_392f9430`): the nation
+    /// king declares a diplomacy target hostile.
     CSFactionDeclareHostilePacket { id: u32 }
     read |s| { Ok(Self { id: s.read_u32()? }) }
     handle |self, server, conn| {
         tracing::debug!("FactionDeclareHostile, Id: {}", self.id);
+        let p = active_char!(conn);
+        if let Err(code) = nation::declare_hostile(server, &p, self.id) {
+            crate::systems::social::util::send_error(&p, code);
+        }
         Ok(())
     }
 );
@@ -258,6 +263,15 @@ mod tests {
         )
         .expect("kick");
         assert_eq!(packet.name, "Citizen");
+
+        // 0x019 `{id u32}` (`FUN_390537b0` / `FUN_397ab550`).
+        let mut s = aaemu_commons::PacketStream::new();
+        s.write_u32(149);
+        let packet = CSFactionDeclareHostilePacket::read(
+            &mut aaemu_commons::PacketStream::from_bytes(s.into_bytes()),
+        )
+        .expect("hostile");
+        assert_eq!(packet.id, 149);
     }
 
     #[test]
