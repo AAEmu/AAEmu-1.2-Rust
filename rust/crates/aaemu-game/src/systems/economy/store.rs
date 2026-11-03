@@ -359,6 +359,27 @@ impl CSBuyItemsPacket {
             }
         }
 
+        // A `DoodadFuncPurchase` dialog writes the func's `doodad_funcs` row id into the
+        // packet's `unkId` (`FUN_393b8040` / `FUN_397ac3f0` at `x2game.dll.c`), and its money
+        // price is the item template's, paid through this packet like a shop line. The coin
+        // form of the same func arrives as `CSBuyCoinItemPacket`.
+        let purchase = if self.doodad_obj_id != 0 && self.unk_id != 0 {
+            doodad.as_ref().and_then(|d| {
+                let data = &server.game_data.systems.npcs.doodad;
+                let group = d.data().func_group_id;
+                data.func(self.unk_id)
+                    .filter(|f| f.group_id == group && f.func_type == "DoodadFuncPurchase")
+                    .and_then(|f| match data.func_template(f.func_id, &f.func_type) {
+                        Some(crate::systems::npcs::doodad::templates::FuncTemplate::Purchase(
+                            p,
+                        )) => Some(p),
+                        _ => None,
+                    })
+            })
+        } else {
+            None
+        };
+
         // If a Doodad was provided, check if we're near it and whether it is a shop. The C#
         // only checked the distance and sold any template (TODO "validate doodad shop").
         if self.doodad_obj_id != 0 {
@@ -374,10 +395,11 @@ impl CSBuyItemsPacket {
             }
         }
 
-        // Only goods of the interacting shop's catalog can be bought. Without one (no NPC, no
-        // `DoodadFuncStoreUi` doodad) every template would be buyable, so refuse the purchase
-        // (buy-back needs no catalog and stays allowed).
-        if !self.buy.is_empty() && pack_id.is_none() {
+        // Only goods of the interacting shop's catalog or of the named money-priced
+        // `DoodadFuncPurchase` can be bought. Without one (no NPC, no `DoodadFuncStoreUi`, no
+        // purchase func) every template would be buyable, so refuse the purchase (buy-back
+        // needs no catalog and stays allowed).
+        if !self.buy.is_empty() && pack_id.is_none() && purchase.is_none() {
             tracing::warn!(
                 "{}: rejected BuyItems of {} item(s) without a merchant catalog (npc {}, doodad {})",
                 p.data().unit.name,
@@ -411,7 +433,14 @@ impl CSBuyItemsPacket {
                 (Some(pack), Some(h)) => h.merchant_sells(server, pack, e.item_id, e.grade),
                 _ => false,
             };
-            if !sells {
+            // The purchase func sells its own item at the template price; a coin-item priced
+            // func only checks out through `CSBuyCoinItemPacket` (and is refused here).
+            let purchase_sells = purchase.is_some_and(|f| {
+                f.coin_item_id == 0
+                    && f.item_id == e.item_id
+                    && f.currency_id == u32::from(e.currency)
+            });
+            if !sells && !purchase_sells {
                 continue;
             }
             let Some(template) = server.game_data.items.template(e.item_id) else {
@@ -897,7 +926,9 @@ impl CSBuyPriestBuffPacket {
 }
 sync_client_packet!(CSBuyPriestBuffPacket);
 
-/// `CSBuyCoinItemPacket`.
+/// `CSBuyCoinItemPacket`: `bc objId`, `u32 funcId` (`doodad_funcs.id`). The 1.2 client sends
+/// it from a `DoodadFuncPurchase` dialog priced in a coin item (`FUN_393b80d0`, coin dialog
+/// `FUN_393bac20`); the npcs hook validates the func, phase and range before the purchase runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSBuyCoinItemPacket {
     pub obj_id: u32,

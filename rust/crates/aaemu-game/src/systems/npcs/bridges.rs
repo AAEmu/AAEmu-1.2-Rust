@@ -1218,20 +1218,65 @@ impl crate::systems::economy::hooks::NpcEconomyHooks for NpcsForEconomy {
         doodad: &crate::world::DoodadRef,
         id: u32,
     ) {
-        // DoodadManager.GetFunc(id) + GetFuncTemplate(func.FuncId, func.FuncType) +
-        // funcTemplate.Use(character, doodad, 0)
+        // `CSBuyCoinItemPacket` names a `doodad_funcs` row. Only a `DoodadFuncPurchase` of the
+        // doodad's *current* phase that is priced in a coin item may run: the same packet with
+        // any other func id (loot, use, a func of another phase) must not execute that func.
+        use super::doodad::templates::FuncTemplate;
+        // Serialize the current-phase check and the purchase with the phase machine, so the
+        // phase cannot move between them.
+        let Some(_operation) = super::doodad::phase::Operation::enter(doodad) else {
+            return;
+        };
         let data = &server.game_data.systems.npcs.doodad;
-        let template = data
-            .func(id)
-            .and_then(|f| data.func_template(f.func_id, &f.func_type));
-        let (Some(template), Some(ctx)) = (
-            template,
-            super::doodad::runtime::DoodadCtx::of(server, doodad),
-        ) else {
-            tracing::warn!(
+        let group = doodad.data().func_group_id;
+        let Some(func) = data.func(id) else {
+            tracing::debug!(
                 "BuyCoinItem, no doodadFunc for objId: {}, id: {id}",
                 doodad.obj_id
             );
+            return;
+        };
+        if func.group_id != group || func.func_type != "DoodadFuncPurchase" {
+            tracing::debug!(
+                "BuyCoinItem, func {id} is not a purchase of doodad {} phase {group}",
+                doodad.obj_id
+            );
+            return;
+        }
+        let Some(template) = data.func_template(func.func_id, &func.func_type) else {
+            tracing::warn!(
+                "BuyCoinItem, no purchase template for objId: {}, id: {id}",
+                doodad.obj_id
+            );
+            return;
+        };
+        let FuncTemplate::Purchase(purchase) = template else {
+            return;
+        };
+        if purchase.coin_item_id == 0 || purchase.coin_count < 1 {
+            tracing::debug!(
+                "BuyCoinItem, func {id} is not priced in a coin item (coin item {}, count {})",
+                purchase.coin_item_id,
+                purchase.coin_count
+            );
+            return;
+        }
+        // The doodad store checkout distance (`CSBuyItems`: 3 m).
+        let Some(world) = crate::systems::economy::store::parent_world(server, player) else {
+            return;
+        };
+        if crate::systems::economy::store::world_distance(
+            &world,
+            &WorldObject::from(player),
+            &WorldObject::from(doodad),
+        ) > crate::systems::economy::store::SHOP_RANGE
+        {
+            player.send(super::doodad::packets::error_msg(
+                super::doodad::packets::error_message::TOO_FAR_AWAY,
+            ));
+            return;
+        }
+        let Some(ctx) = super::doodad::runtime::DoodadCtx::of(server, doodad) else {
             return;
         };
         let caster = WorldObject::from(player);

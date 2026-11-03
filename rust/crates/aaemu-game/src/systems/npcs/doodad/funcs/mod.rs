@@ -49,6 +49,9 @@ pub mod error_message {
     pub const INTERACTION_RECOVER_PARENT: i16 = 14;
     pub const BAG_FULL: i16 = 25;
     pub const NOT_ENOUGH_ITEM: i16 = 27;
+    /// The 1.2 client's own message for a coin-item purchase it cannot afford
+    /// (`FUN_393bac20` sends `SCErrorMsg(0x1e3)` = `not_enough_coin`).
+    pub const NOT_ENOUGH_COIN: i16 = 483;
     pub const STORE_INVALID_ITEM: i16 = 87;
     pub const BAG_INVALID_ITEM: i16 = 181;
     pub const FAILED_TO_USE_ITEM: i16 = 207;
