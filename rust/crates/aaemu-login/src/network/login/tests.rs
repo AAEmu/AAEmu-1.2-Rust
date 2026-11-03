@@ -182,10 +182,11 @@ async fn auth_success_advertises_configured_character_limits() {
         crate::test_support::opcode_of(&packets[0]),
         l2c_op::AC_JOIN_RESPONSE
     );
-    // [reason u16 = 0][afs u64: slots 8 | pre-select bit 0x100 | additional 2 << 32]
+    // [reason u16 = 0][afs u64, client layout: byte0 slots 8 | byte1 additional 2 |
+    // byte2 bit0 pre-select]
     assert_eq!(
         &packets[0][2..],
-        &[0, 0, 0x08, 0x01, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00]
+        &[0, 0, 0x08, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]
     );
     assert_eq!(
         crate::test_support::opcode_of(&packets[1]),

@@ -101,15 +101,17 @@ pub struct LoginConfig {
     /// `Characters:MaxPerAccount`, which enforces it.
     #[serde(rename = "maxcharactersperaccount", deserialize_with = "lenient_u8")]
     pub max_characters_per_account: u8,
-    /// `ACJoinResponse.afs` "additional characters per server when using the slot increase item"
-    /// (the client's expandable limit).
+    /// `ACJoinResponse.afs` byte 1: "additional characters per server when using the slot
+    /// increase item" (the client's expandable limit).
     #[serde(
         rename = "additionalcharactersperserver",
-        deserialize_with = "lenient_u32"
+        deserialize_with = "lenient_u8"
     )]
-    pub additional_characters_per_server: u32,
+    pub additional_characters_per_server: u8,
     /// Whether the client is told it is in the character pre-select period (character edit at
-    /// character select). The game server's `Characters:PreSelectCharacterPeriod` must match.
+    /// character select). Requires the lobby edit packet (WP-E2), so it is refused until that
+    /// lands: with the flag on, the client's Start button sends `CSEditCharacter` instead of
+    /// entering the world, and the game server has no handler for it.
     #[serde(rename = "preselectcharacterperiod", deserialize_with = "lenient_bool")]
     pub pre_select_character_period: bool,
 }
@@ -362,6 +364,12 @@ impl AppConfig {
         if self.reconnect.max_tokens_per_account < 1 {
             return Err(ConfigError::Validation(
                 "Reconnect:MaxTokensPerAccount must be >= 1".into(),
+            ));
+        }
+        if self.login.pre_select_character_period {
+            return Err(ConfigError::Validation(
+                "Login:PreSelectCharacterPeriod requires lobby character editing (WP-E2), which is not implemented yet: with the flag on the client sends CSEditCharacter and cannot enter the world. Keep it false."
+                    .into(),
             ));
         }
         for (name, n) in [
@@ -633,7 +641,6 @@ macro_rules! lenient_int {
 
 lenient_int!(lenient_u8, u8);
 lenient_int!(lenient_u16, u16);
-lenient_int!(lenient_u32, u32);
 lenient_int!(lenient_i32, i32);
 
 fn timespan<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
@@ -679,6 +686,37 @@ mod tests {
         assert_eq!(cfg.network.port, 1237);
         assert_eq!(cfg.enter_world_timeout, Duration::from_secs(10));
         assert_eq!(cfg.korea_auth.rounds, 100_000);
+    }
+
+    #[test]
+    fn login_slot_config_binds_and_refuses_the_pre_select_flag() {
+        let mut root = base();
+        merge(
+            &mut root,
+            lowercase_keys(json!({
+                "Connections": { "MySQLProvider": { "Port": "3306" } },
+                "Login": {
+                    "MaxCharactersPerAccount": "8",
+                    "AdditionalCharactersPerServer": "2",
+                    "PreSelectCharacterPeriod": "false"
+                }
+            })),
+        );
+        let cfg = AppConfig::from_value(root).unwrap();
+        assert_eq!(cfg.login.max_characters_per_account, 8);
+        assert_eq!(cfg.login.additional_characters_per_server, 2);
+        assert!(!cfg.login.pre_select_character_period);
+
+        let mut root = base();
+        merge(
+            &mut root,
+            lowercase_keys(json!({
+                "Connections": { "MySQLProvider": { "Port": "3306" } },
+                "Login": { "PreSelectCharacterPeriod": true }
+            })),
+        );
+        let err = AppConfig::from_value(root).unwrap_err();
+        assert!(err.to_string().contains("WP-E2"), "unexpected error: {err}");
     }
 
     #[test]

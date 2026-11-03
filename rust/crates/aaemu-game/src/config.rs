@@ -75,7 +75,7 @@ pub struct AppConfig {
     pub access_level: Vec<(String, i32)>,
     #[serde(rename = "account")]
     pub account: AccountConfig,
-    /// `Characters` (Rust only: lobby character-slot limits and the pre-select period).
+    /// `Characters` (Rust only: the lobby character-slot limit).
     #[serde(rename = "characters")]
     pub characters: CharactersConfig,
     #[serde(rename = "labor")]
@@ -299,27 +299,22 @@ impl Default for AccountConfig {
     }
 }
 
-/// `Characters` (Rust only): the lobby character-slot limit and the pre-select period.
+/// `Characters` (Rust only): the lobby character-slot limit.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct CharactersConfig {
     /// Base character slots of every account, before the purchased
     /// `accounts.extra_character_slots` are added. Must equal the login server's
     /// `Login:MaxCharactersPerAccount`; the login server advertises it, this server enforces it.
+    /// There is no cross-process check of the two values.
     #[serde(rename = "maxperaccount", deserialize_with = "lenient")]
     pub max_per_account: u8,
-    /// Whether character editing is allowed at character select. The login server advertises the
-    /// same value as `Login:PreSelectCharacterPeriod`; the client only opens the edit UI in that
-    /// period.
-    #[serde(rename = "preselectcharacterperiod", deserialize_with = "lenient")]
-    pub pre_select_character_period: bool,
 }
 
 impl Default for CharactersConfig {
     fn default() -> Self {
         Self {
             max_per_account: aaemu_commons::character_slots::DEFAULT_MAX_CHARACTERS_PER_ACCOUNT,
-            pre_select_character_period: false,
         }
     }
 }
@@ -1216,16 +1211,13 @@ mod tests {
     }
 
     #[test]
-    fn characters_config_binds_slots_and_pre_select_period() {
+    fn characters_config_binds_the_base_slot_count() {
         let cfg = AppConfig::from_value(json!({
-            "Characters": { "MaxPerAccount": "8", "PreSelectCharacterPeriod": "true" }
+            "Characters": { "MaxPerAccount": "8" }
         }))
         .unwrap();
         assert_eq!(cfg.characters.max_per_account, 8);
-        assert!(cfg.characters.pre_select_character_period);
-        let default = AppConfig::default();
-        assert_eq!(default.characters.max_per_account, 6);
-        assert!(!default.characters.pre_select_character_period);
+        assert_eq!(AppConfig::default().characters.max_per_account, 6);
     }
 
     #[test]

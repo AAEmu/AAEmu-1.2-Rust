@@ -32,10 +32,17 @@ use crate::world::unit_state::create_character_response;
 
 /// The number of characters this account can create. The client is told the same two parts:
 /// the login server advertises the base slots (`ACJoinResponse.afs` / `ACAuthResponse.slot_count`)
-/// and `CSListCharacterPacket` sends the purchased (`accounts.extra_character_slots`) count in
-/// `SCGetSlotCount`, so creation must stop at their sum.
+/// and `CSListCharacterPacket` sends only the purchased (`accounts.extra_character_slots`) count
+/// in `SCGetSlotCount`; the client adds them (`FUN_394ccef0`), so creation must stop at their sum.
 pub fn character_slot_limit(base: u8, extra_slots: u8) -> u8 {
     aaemu_commons::character_slots::character_slot_limit(base, extra_slots)
+}
+
+/// Whether an account with `count` undeleted characters may create one more. The limit is the
+/// configured base plus the account's purchased slots; a failed extra-slots read returns 0
+/// (`db::extra_character_slots`), so the decision falls back to the base.
+pub fn may_create_character(base: u8, extra_slots: u8, count: i64) -> bool {
+    count < i64::from(character_slot_limit(base, extra_slots))
 }
 
 // Native 1.2 x2game12.c:391136-391163 (HandleErrorMessage, lobby errors).
@@ -525,11 +532,8 @@ pub async fn create(
     // Use persisted rows, not a connection's stale/empty lobby list. Pending deletions still
     // occupy slots until deleted=1. Keep the save lock through the subsequent commit; the next
     // create sees this one, and a failed create leaves neither a slot nor an inventory behind.
+    let base = server.config.characters.max_per_account;
     let extra_slots = crate::db::extra_character_slots(&server.db, conn.account_id()).await;
-    let limit = i64::from(character_slot_limit(
-        server.config.characters.max_per_account,
-        extra_slots,
-    ));
     let slots = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM characters WHERE account_id = ? AND deleted = 0",
     )
@@ -537,7 +541,7 @@ pub async fn create(
     .fetch_one(&server.db)
     .await;
     match slots {
-        Ok(count) if count >= limit => {
+        Ok(count) if !may_create_character(base, extra_slots, count) => {
             conn.send(&SCCharacterCreationFailedPacket {
                 reason: CharacterCreateError::WorldLimit as u8,
             });

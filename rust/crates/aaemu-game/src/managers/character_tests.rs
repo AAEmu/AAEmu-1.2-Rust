@@ -13,7 +13,10 @@ use crate::models::char_data::{read_action_slots, ActionSlot, ActionSlotType, MA
 use crate::models::character::Character;
 use crate::test_support::{test_server_with, test_server_with_config};
 
-use super::{character_slot_limit, create, initialize_starting_skills, CreateCharacterRequest};
+use super::{
+    character_slot_limit, create, initialize_starting_skills, may_create_character,
+    CreateCharacterRequest,
+};
 
 const STARTERS: [(u8, u32); 10] = [
     (1, 18132),
@@ -1243,6 +1246,19 @@ fn character_slot_limit_is_base_plus_purchased_slots() {
     assert_eq!(character_slot_limit(6, 2), 8);
     assert_eq!(character_slot_limit(8, 2), 10);
     assert_eq!(character_slot_limit(255, 1), 255);
+}
+
+#[test]
+fn create_cap_is_base_plus_purchased_slots() {
+    // Base only: six full, and a seventh refused.
+    assert!(may_create_character(6, 0, 5));
+    assert!(!may_create_character(6, 0, 6));
+    // Purchased slots extend the same limit up to the advertised total.
+    assert!(may_create_character(6, 2, 6));
+    assert!(may_create_character(6, 2, 7));
+    assert!(!may_create_character(6, 2, 8));
+    // A DB error on the extra-slots read gives 0, i.e. the base fallback.
+    assert!(!may_create_character(6, 0, 6));
 }
 
 /// `Characters:MaxPerAccount` sets the base; `accounts.extra_character_slots` adds to it, and the

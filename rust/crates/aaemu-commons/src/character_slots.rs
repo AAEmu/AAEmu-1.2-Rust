@@ -1,9 +1,9 @@
 //! Character-slot arithmetic shared by the login and game servers.
 //!
 //! The client is told an account's slots in two parts: the login server advertises the base
-//! slots (`ACJoinResponse.afs` and `ACAuthResponse.slot_count`), and the game server sends the
-//! purchased slots in `SCGetSlotCount` when the character list is requested. The game server
-//! enforces the same sum when a character is created.
+//! slots (`ACJoinResponse.afs` and `ACAuthResponse.slot_count`), and the game server sends only
+//! the purchased slots in `SCGetSlotCount` when the character list is requested. The client adds
+//! them; the game server enforces the same sum when a character is created.
 
 /// The default base character slots of an account (`Login:MaxCharactersPerAccount` in
 /// aaemu-login, `Characters:MaxPerAccount` in aaemu-game).

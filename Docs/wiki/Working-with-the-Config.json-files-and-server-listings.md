@@ -81,13 +81,20 @@ The login server tells the client how many characters an account has:
 - `AdditionalCharactersPerServer` (default `0`): the expandable limit the client
   shows for slot-increase items.
 - `PreSelectCharacterPeriod` (default `false`): tells the client it may edit
-  characters at character select. The game server's
-  `Characters:PreSelectCharacterPeriod` must be the same value.
+  characters at character select. It requires the lobby character-edit packet
+  (WP-E2), which is not implemented yet: with the flag on, the client's Start
+  button sends `CSEditCharacter` instead of entering the world, so the login
+  server refuses a config with `PreSelectCharacterPeriod = true`.
 
 Purchased character slots (`accounts.extra_character_slots`, from the slot
-increase item) are added to the base by both the game server's
-`SCGetSlotCount` and its create check, so an account can create up to
-`MaxCharactersPerAccount + extra_character_slots` characters.
+increase item) are sent by the game server's `SCGetSlotCount` as the purchased
+count only; the client adds them to the login base. The game server's create
+check enforces the same sum, so an account can create up to
+`MaxCharactersPerAccount + extra_character_slots` characters. Nothing
+cross-checks the two servers' configs: set both base values equally and confirm
+the effective values in the `Character slots: base ...` startup log line of each
+server. If the game server cannot read `extra_character_slots` from MySQL, it
+logs the error and falls back to the base alone.
 
 ### Environment variable mapping (login)
 
@@ -123,27 +130,26 @@ values to `Config.Local.json` or environment variables.)
 
 ### Game character settings (`Characters`)
 
-The game server's `Configurations/CharacterSettings.json` carries the mirror of
-the login character settings:
+The game server's `Configurations/CharacterSettings.json` carries the base slot
+count the login server advertises:
 
 ```json
 {
   "Characters": {
-    "MaxPerAccount": 6,
-    "PreSelectCharacterPeriod": false
+    "MaxPerAccount": 6
   }
 }
 ```
 
 - `MaxPerAccount` (default `6`): must equal the login server's
-  `Login:MaxCharactersPerAccount`; character creation is refused once the
-  account already has `MaxPerAccount + extra_character_slots` characters.
-- `PreSelectCharacterPeriod` (default `false`): must equal the login server's
-  `Login:PreSelectCharacterPeriod`.
+  `Login:MaxCharactersPerAccount`. The two values are not cross-checked across
+  processes; the startup log prints the effective value on each server.
+  Character creation is refused once the account already has
+  `MaxPerAccount + extra_character_slots` characters (a MySQL read error on the
+  extra slots falls back to the base).
 
-Both keys can also be overridden in the game's `Config.Local.json` or with
-environment variables (`Characters__MaxPerAccount`,
-`Characters__PreSelectCharacterPeriod`).
+It can also be overridden in the game's `Config.Local.json` or with the
+environment variable `Characters__MaxPerAccount`.
 
 ## Web API authentication and migration
 
