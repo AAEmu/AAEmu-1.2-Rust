@@ -111,6 +111,14 @@ sc_packet!(
 );
 
 sc_packet!(
+    /// `SCNationShowRenameUIPacket()` (0x010, empty body). `FUN_391d2380` reads nothing and
+    /// calls `FUN_392f8e80(0)`, which opens the nation rename dialog only when the player owns
+    /// a user faction. Never sent by the 1.2 C#; the production trigger is capture-pending
+    /// (RENAME-7).
+    SCNationShowRenameUIPacket {} |self, s| {}
+);
+
+sc_packet!(
     /// `SCFactionSetRelationStatePacket(id, id2, state, expireTime, nextState)` (not sent by the
     /// 1.2 C#).
     SCFactionSetRelationStatePacket {

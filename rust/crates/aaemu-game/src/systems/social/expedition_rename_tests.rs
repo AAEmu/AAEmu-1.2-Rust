@@ -211,7 +211,9 @@ async fn rename_requires_the_owner_and_a_show_rename_ui_offer() {
     assert_eq!(i16::from_le_bytes([errors[0][0], errors[0][1]]), 807);
     assert!(!server.expeditions.has_rename_offer(2, id));
 
-    // The nation half (`is_expedition = false`) is still refused and keeps the offer usable.
+    // The nation half (`is_expedition = false`) belongs to the nation rename service
+    // (RENAME-7). Without a nation rename offer it is refused with 748 and does not touch
+    // either the guild name or the outstanding guild offer.
     expedition::offer_expedition_rename_ui(&server, &owner.p).expect("offer");
     assert_eq!(
         owner
@@ -229,7 +231,13 @@ async fn rename_requires_the_owner_and_a_show_rename_ui_offer() {
         )
         .await;
     assert_eq!(server.expeditions.get(id).unwrap().faction.name, "Knights");
-    assert!(owner.frames().is_empty());
+    let frames = owner.frames();
+    let errors = find(&frames, sc::SCErrorMsgPacket);
+    assert_eq!(errors.len(), 1);
+    assert_eq!(
+        i16::from_le_bytes([errors[0][0], errors[0][1]]),
+        crate::systems::economy::error_message::ONLY_NATION_OWNER
+    );
     assert!(server.expeditions.has_rename_offer(1, id));
     owner
         .send(

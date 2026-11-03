@@ -116,10 +116,19 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCNationalMonumentChangedPacket(id, type, x, y, z)` (not sent by the 1.2 C#).
-    SCNationalMonumentChangedPacket { id: u16, monument_type: i64, x: f32, y: f32, z: f32 } |self, s| {
+    /// `SCNationalMonumentChangedPacket(zone, nationalMonumentDbId, x, y, z)` (0x022; the 1.2
+    /// client handler `FUN_392f35f0` stores `dbId` and the three coordinates in the dominion
+    /// record; never sent by the 1.2 C#). `dbId` is the persistent doodad row id of the
+    /// territory statue (`siege_zones.monument_doodad_id`).
+    SCNationalMonumentChangedPacket {
+        id: u16,
+        national_monument_db_id: i64,
+        x: f32,
+        y: f32,
+        z: f32
+    } |self, s| {
         s.write_u16(self.id)
-            .write_i64(self.monument_type)
+            .write_i64(self.national_monument_db_id)
             .write_i64(convert_coord_to_long(self.x))
             .write_i64(convert_coord_to_long(self.y))
             .write_f32(self.z);
@@ -127,8 +136,9 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCNationalTaxRatePacket(id, taxRate, prevTaxRate, changedTime)` (not sent by the 1.2
-    /// C#).
+    /// `SCNationalTaxRatePacket(zone, taxRate, prevTaxRate, changedTime)` (0x021; the 1.2
+    /// client handler `FUN_392f39b0` stores the rate and time in the dominion record and shows
+    /// ui_texts 5675; never sent by the 1.2 C#). The rate is permille/10 (0-1000).
     SCNationalTaxRatePacket { id: u16, tax_rate: i32, prev_tax_rate: i32, changed_time: DateTime<Utc> } |self, s| {
         s.write_u16(self.id)
             .write_i32(self.tax_rate)
@@ -138,14 +148,30 @@ sc_packet!(
 );
 
 cs_packet!(
-    /// `CSUpdateDominionTaxRatePacket`. The national tax packet is the separate CS 0x013
-    /// (`opcodes::cs::CSUpdateNationalTaxRatePacket`); its real handler belongs to the stage-4
-    /// nation work (today `packets/c2g_misc.rs` registers a log-only handler).
+    /// `CSUpdateDominionTaxRatePacket` (0x012): the expedition leader sets the territory tax.
     CSUpdateDominionTaxRatePacket { id: u16, tax_rate: i32 }
     read |s| { Ok(Self { id: s.read_u16()?, tax_rate: s.read_i32()? }) }
     handle |self, server, conn| {
         let player = active_char!(conn);
         crate::systems::social::dominion::update_tax_rate(server, &player, self.id, self.tax_rate);
+        Ok(())
+    }
+);
+
+cs_packet!(
+    /// `CSUpdateNationalTaxRatePacket` (0x013): `{zoneGroup u16, rate u32}` (1.2 client
+    /// `FUN_392f42f0` -> `FUN_397ab4d0`; the client validates `rate <= 1000`). The C# left the
+    /// opcode at 0xfff and only logged it.
+    CSUpdateNationalTaxRatePacket { id: u16, tax_rate: u32 }
+    read |s| { Ok(Self { id: s.read_u16()?, tax_rate: s.read_u32()? }) }
+    handle |self, server, conn| {
+        let player = active_char!(conn);
+        crate::systems::social::dominion::update_national_tax_rate(
+            server,
+            &player,
+            self.id,
+            self.tax_rate,
+        );
         Ok(())
     }
 );
@@ -307,7 +333,8 @@ impl SCAchievementResetedPacket {
 }
 
 pub fn register(reg: &mut PacketRegistry) {
-    reg.register::<CSUpdateDominionTaxRatePacket>(LEVEL_PLAIN, cs::CSUpdateDominionTaxRatePacket);
+    reg.register::<CSUpdateDominionTaxRatePacket>(LEVEL_PLAIN, cs::CSUpdateDominionTaxRatePacket)
+        .register::<CSUpdateNationalTaxRatePacket>(LEVEL_PLAIN, cs::CSUpdateNationalTaxRatePacket);
 }
 
 #[cfg(test)]
@@ -503,7 +530,7 @@ mod tests {
         assert_eq!(
             body(&SCNationalMonumentChangedPacket {
                 id: 1,
-                monument_type: 2,
+                national_monument_db_id: 2,
                 x: 10.5,
                 y: 20.0,
                 z: 30.0
@@ -702,6 +729,15 @@ mod tests {
             CSUpdateDominionTaxRatePacket {
                 id: 0x0102,
                 tax_rate: 10
+            }
+        );
+        // CS 0x013 `{zoneGroup u16, rate u32}` (client `FUN_392f42f0`; rate is 0..=1000).
+        let mut s = PacketStream::from_bytes(vec![2, 1, 0xE8, 3, 0, 0]);
+        assert_eq!(
+            CSUpdateNationalTaxRatePacket::read(&mut s).unwrap(),
+            CSUpdateNationalTaxRatePacket {
+                id: 0x0102,
+                tax_rate: 1000
             }
         );
     }
