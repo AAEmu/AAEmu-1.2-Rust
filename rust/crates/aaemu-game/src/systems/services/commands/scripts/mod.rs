@@ -100,6 +100,7 @@ pub mod test_slave;
 pub mod test_tracker;
 pub mod test_transfer;
 pub mod test_zone_state;
+pub mod testguild;
 pub mod tick_doodad;
 pub mod tower_def;
 pub mod use_skill;
@@ -479,6 +480,8 @@ pub fn all_commands(env: &ScriptEnv) -> Vec<(&'static [&'static str], Arc<dyn Co
             &["zonestate", "zone_state"],
             Arc::new(test_zone_state::TestZoneState::new(env)),
         ),
+        // TestGuild (Rust test hook; no C# command file)
+        (&["testguild"], Arc::new(testguild::TestGuild::new(env))),
         // TickDoodad.cs
         (
             &["tickdoodad", "tick_doodad"],

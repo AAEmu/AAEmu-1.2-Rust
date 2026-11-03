@@ -6,6 +6,7 @@
 //!
 //! ```text
 //! gm <command line>                  GM chat command (without the leading slash)
+//! gmraw <command line>               same, without draining (the caller asserts the reply)
 //! tp <x> <y> <z>                     /move there, acknowledge the teleport, wait for the area
 //! pump <secs>                        just read packets
 //! units [<npc template>...]          NPCs in sight (all within 60 m when no template given)
@@ -49,6 +50,10 @@
 //! ginvite [name]                     CSInviteToExpedition to the peer
 //! gaccept                            wait for the guild invitation and join
 //! greply <faction id> <0|1>          CSReplyExpeditionInvitation without waiting for an invite
+//! grename <name>                     CSRenameExpedition for our tracked guild id (is_expedition)
+//! gexpectrenamed <name>              fail unless SCFactionRenamed carries that name
+//! gexpectretry <error>               fail unless SCFactionRetryRename re-opens the expedition dialog
+//!                                    with that error code
 //! ninvite [name]                     CSFactionImmigrationInvite to the peer (nation king)
 //! nlevel [name] <level>              `/level <peer> <level>` (GM)
 //! naccept [0|1]                      wait for SCFactionImmigrateInvite and answer it
@@ -453,6 +458,9 @@ async fn run_lines(
             "gm" => {
                 let reply = gm_command(game, rest).await?;
                 show(&reply);
+            }
+            "gmraw" => {
+                game.chat(0, &format!("/{rest}")).await?;
             }
             "tp" => {
                 let (x, y, z): (f32, f32, f32) =
@@ -1304,6 +1312,57 @@ async fn run_lines(
                     .await?;
                 show(&got);
             }
+
+            "grename" => {
+                let name = rest.trim();
+                ensure!(!name.is_empty(), "grename <name>");
+                let id = game.state.self_expedition;
+                ensure!(
+                    id != 0,
+                    "grename: no expedition id tracked (SCUnitExpeditionChangedPacket not seen)"
+                );
+                let (op, body) = social::rename_expedition(id, name);
+                // No drain: the caller asserts SCFactionRenamed / Retry / SCErrorMsg.
+                game.send_cs(op, &body).await?;
+            }
+            "gexpectrenamed" => {
+                let name = rest.trim();
+                ensure!(!name.is_empty(), "gexpectrenamed <name>");
+                let SocialEvent::FactionRenamed {
+                    id,
+                    name: got,
+                    by_gm,
+                } = await_event(game, &mut consumed, "FactionRenamed", 60).await?
+                else {
+                    bail!("not a faction rename");
+                };
+                ensure!(
+                    got == *name,
+                    "expected the guild to be renamed to {name:?}, got {got:?} (id {id}, byGm {by_gm})"
+                );
+                println!("    guild {id} renamed to {got}");
+            }
+            "gexpectretry" => {
+                let code: i16 = num(&parts, 0)?;
+                let SocialEvent::FactionRetryRename {
+                    is_expedition,
+                    error_message,
+                    name,
+                } = await_event(game, &mut consumed, "FactionRetryRename", 60).await?
+                else {
+                    bail!("not a faction rename retry");
+                };
+                ensure!(
+                    is_expedition,
+                    "retry packet for a nation (xpdt false), expected the expedition dialog"
+                );
+                ensure!(
+                    error_message == code,
+                    "expected rename retry error {code}, got {error_message} (name {name:?})"
+                );
+                println!("    rename retry {error_message} with name {name:?}");
+            }
+
             "ninvite" => {
                 // The character name differs in case from the account name: use the peer's.
                 let target = peer(game, parts.first().copied())?;
