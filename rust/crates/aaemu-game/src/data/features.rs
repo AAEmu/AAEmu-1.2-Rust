@@ -69,7 +69,7 @@ impl FeatureSet {
         f.set(Feature::SensitiveOperation, false);
         f.set(Feature::Secondpass, false);
         f.set(Feature::IngameshopSecondpass, false);
-        f.set(Feature::ItemSecure, false);
+        f.set(Feature::ItemSecure, true);
         f.set(Feature::CustomUiButton, true);
         f
     }
@@ -160,13 +160,13 @@ mod tests {
         let f = FeatureSet::initialized(55, 50);
         // byte0 0x11 | houseSale(bit3) | nations(bit6) | allowFamilyChanges(bit1) = 0x5B
         // byte4 0x79 | customUiButton(bit7) = 0xF9
-        // byte5 0x69 & ~itemSecure(bit5) & ~secondpass(bit6) = 0x09
+        // byte5 0x69 & ~secondpass(bit6) = 0x29 (itemSecure(bit5) is on)
         // byte6 0xb3 & ~ingameshopSecondpass(bit7) = 0x33
         // byte7 0x8d & ~sensitiveOperation(bit2) = 0x89
         // byte9 0x0c & ~dwarfWarborn(bit2) = 0x08
         assert_eq!(
             f.bytes(),
-            &[0x5B, 55, 0x0F, 0x0F, 0xF9, 0x09, 0x33, 0x89, 50, 0x08, 0x1a]
+            &[0x5B, 55, 0x0F, 0x0F, 0xF9, 0x29, 0x33, 0x89, 50, 0x08, 0x1a]
         );
     }
 }

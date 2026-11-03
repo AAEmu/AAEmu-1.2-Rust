@@ -323,6 +323,10 @@ pub fn add_item(server: &GameServer, character: &PlayerRef, st: u8, slot: u8, am
         cancel_locked(server, &mut trades, character.obj_id, 0, trade_id); // TODO (C#) - Reason
         return;
     }
+    if super::item_security::refuse_if_locked(character, &item) {
+        cancel_locked(server, &mut trades, character.obj_id, 0, trade_id);
+        return;
+    }
     // Only unbound bag items may be put up (as for mail and auction).
     if item.slot_type != slot_type::INVENTORY
         || item.flags & crate::models::item::ITEM_FLAG_SOUL_BOUND != 0

@@ -1165,6 +1165,9 @@ pub fn item_conversion(
     let Some(template) = data.template(target.template_id) else {
         return Outcome::Cancelled;
     };
+    if super::item_security::refuse_if_locked(player, &target) {
+        return Outcome::Cancelled;
+    }
     if !template.disenchantable {
         return Outcome::Cancelled;
     }
