@@ -44,6 +44,10 @@
 //! await <Event> [secs]               wait (60 s default) for a party/guild event and consume it
 //! partyinvite <name>                 CSInviteToTeam (party) by character name
 //! partyaccept                        wait for SCAskToJoinTeam and accept it
+//! areainvite [team] [party|raid]     CSInviteAreaToTeam (team 0 = the current team); the
+//!                                    answer is left for expectpkt (SCTeamAreaInvitedPacket)
+//! partyacceptarea                    wait for SCAskToJoinTeamArea and accept it (isArea=1);
+//!                                    the join packets are left for expectpkt
 //! gcreate <name>                     CSCreateExpedition
 //! ginvite [name]                     CSInviteToExpedition to the peer
 //! gaccept                            wait for the guild invitation and join
@@ -1433,6 +1437,31 @@ async fn run_lines(
                     .drain(Duration::from_millis(1500), Duration::from_secs(6))
                     .await?;
                 show(&got);
+            }
+            "areainvite" => {
+                let team_id: u32 = parts.first().and_then(|x| x.parse().ok()).unwrap_or(0);
+                let is_party = !parts.get(1).is_some_and(|x| x.eq_ignore_ascii_case("raid"));
+                let (op, body) = social::invite_area_to_team(team_id, is_party);
+                game.send_cs(op, &body).await?;
+            }
+            "partyacceptarea" => {
+                let SocialEvent::TeamAskArea {
+                    team_id,
+                    sender_id,
+                    is_party,
+                    ..
+                } = await_event(game, &mut consumed, "TeamAskArea", 60).await?
+                else {
+                    bail!("not an area team invitation");
+                };
+                let (op, body) = social::reply_area_to_join_team(
+                    team_id,
+                    is_party,
+                    sender_id,
+                    false,
+                    &cfg.character,
+                );
+                game.send_cs(op, &body).await?;
             }
             "gcreate" => {
                 let (op, body) = social::create_expedition(rest.trim());
