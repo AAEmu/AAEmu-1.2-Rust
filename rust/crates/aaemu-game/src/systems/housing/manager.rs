@@ -313,9 +313,9 @@ pub fn refresh_expedition(server: &GameServer, house: &HouseRef) {
     house.data().unit.expedition_id = guild;
 }
 
-/// `FactionManager.GetFaction(id)?.Id` (0 = null).
+/// `FactionManager.GetFaction(id)?.Id` (0 = null), including the runtime player nations.
 fn faction_or_null(server: &GameServer, faction_id: u32) -> u32 {
-    if server.game_data.factions.get(faction_id).is_some() {
+    if crate::systems::social::nation::faction_exists(server, faction_id) {
         faction_id
     } else {
         0

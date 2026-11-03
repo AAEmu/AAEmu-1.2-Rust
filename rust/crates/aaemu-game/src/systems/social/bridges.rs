@@ -150,6 +150,7 @@ impl SocialSkillHooks for SocialForSkills {
         match special_type {
             50 => super::dominion::declare_effect(server, args),
             65 => crate::systems::housing::dominion::headquarters::teleport_effect(server, args),
+            71 => super::nation::declare_independence_effect(server, args),
             85 => crate::systems::housing::dominion::runtime::complete_effect(server, args),
             110 => crate::systems::housing::dominion::peace::start_effect(server, args, values[0]),
             _ => return false,

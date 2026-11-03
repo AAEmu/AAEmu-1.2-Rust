@@ -612,7 +612,7 @@ impl CrimeManager {
             },
         };
         // `victim?.Faction?.Id`, `victim?.Expedition?.Id`: unknown objects are null.
-        let victim_faction = if server.game_data.factions.get(faction).is_some() {
+        let victim_faction = if crate::systems::social::nation::faction_exists(server, faction) {
             faction
         } else {
             0

@@ -377,7 +377,8 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 | `FamilyManager`, `Models/Game/Family` | `systems/social/family.rs`, `packets/family.rs` | done | Load, invite / reply / create, leave, kick (offline existence check), title, steward, login / logout, disband, save, offline leave for character deletion. |
 | `FriendMananger`, `CharacterFriends`, `CharacterBlocked` | `systems/social/friend.rs`, `packets/friend.rs` (`managers::friend` re-exports) | done | Add / remove friends (online or by DB name lookup), block / unblock (online or by `NameManager` for offline names), status changes incl. `InParty`. The blocked list is enforced on every direct delivery path (whisper, team / area / expedition / family invite, friend add, trade and duel request); see the block-list deviation. |
 | `ChatManager`, `Models/Game/Chat` | `systems/social/chat.rs`, `session.rs` (`managers::chat` re-exports) | done | All channel kinds incl. party / raid / court, CleanUpChannels, party / raid / raid-leader / judge routing. User channels (`CSJoinUserChatChannel`) are log-only as in C#. |
-| `FactionManager` relations, `SystemFaction.GetRelationState`, `Unit/Character.SetFaction` | `systems/social/faction.rs`, `packets/faction.rs` | done | Relation table validated against compact.sqlite3 (gated test). Faction CS packets are log-only as in C#; every SCFaction* struct ported. |
+| `FactionManager` relations, `SystemFaction.GetRelationState`, `Unit/Character.SetFaction` | `systems/social/faction.rs`, `packets/faction.rs` | done | Relation table validated against compact.sqlite3 (gated test). Faction CS packets are log-only as in C#; every SCFaction* struct ported. `relation_state_live` overlays the runtime nations on the static table for the combat, team, party and AI paths. |
+| Player nations (`nations`, `nation_relations`, independence) | `systems/social/nation.rs`, `commands/scripts/nation.rs` | stage 1 | Skill 18540 special effect 71 creates a nation from the caster's expedition (owner + dominion, CASTLE_CLAIM backpack); ids come from the expedition allocator; `SCFactionIndependence` + relation rows + `SCUnitFactionChanged`; online members use `set_faction`, offline `characters.faction_id` moves with `expeditions.mother` in the save transaction; login sends nation factions and relations. See "Player nations" below. |
 | `GameData/AchievementGameData` (`achievements`, `achievement_objectives`, `pre_completed_achievements`, `char_records`), `Models/Game/Achievement` | `systems/social/achievement.rs` (`server.game_data.systems.social.achievements`) | done | Loader + port of `AchievementGameDataTests`; gated real-DB test `achievement_game_data_real_compact_db`. The C# 1.2 tree has no manager; the Rust achievement manager / runtime / hooks / rewards (`achievement_*.rs`) read them (see "Achievement producers" below). |
 | `DuelManager`, `Models/Game/Duels`, duel tasks | `systems/social/duel.rs`, `packets/duel.rs` | done | Request / accept (flag via hook) / start / stop / cancel, distance + HP checks, end timer (tokio tasks; `set_delays` test hook). |
 | `CrimeManager`, `TrialManager`, `Models/Game/Crime`, `TrialUpdateTask` | `systems/social/{crime,trial}.rs`, `packets/trial.rs` | done | Crime table load / save (`AfterItems`), report / evidence (hooks), bot reports, trial / jury flow with 5 s tick, audience, bounty placement / arrest payout (`systems/social/{bounty,bounty_runtime}.rs`, `bounty_pledges`; see "Wanted-player bounty"). The board is still the empty list (BOUNTY-board). Arrests, authenticated jury choices, guilty pleas, acquittals, court cleanup and reconnect jail enforcement have packet-flow regressions; prisoner buffs persist remaining online time. |
@@ -386,6 +387,60 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 | `RadarManager` | – | not social | Telescope / fish school registration from buff templates: skills / npcs. |
 
 Cross-subsystem calls: wired in phase 3b (see "Phase 3b wiring": trial court doodads / NPCs after the spawns, `SocialHooks` by social itself, crime evidence / arrests / team and duel queries from skills, loot rules from economy, court checks in portals and instances, `force_dismount` through vehicles). Still open: teleports -> `session::on_moved` (C# `Character.SetPosition` -> `TeamManager.UpdatePosition`; plain movement does not call it in C# either).
+
+#### Player nations (stage 1, NATION-1..4)
+
+`systems::social::nation` implements the 1.2 "declare independence" slice: a nation is a
+top-level user faction (`mother_id == 0`, `owner_type` 0, owner = the founding expedition's
+owner), and the founding expedition becomes its child (`expeditions.mother`). The client side
+is `FUN_392fb2d0` (`SCFactionIndependence` 0x026: it clones the founding expedition record,
+sets mother 0 / name / created time / `diplomacy_target = 1`, then re-factions the expedition's
+units). Ids come from the same `ExpeditionIdManager` as expedition faction ids; the 1.2 client
+refuses a duplicate faction id (`FUN_398a5280`), so `EXPEDITION_ID` also extracts `nations.id`.
+
+* **NATION-1 (capture-pending):** the packet that carries the chosen nation name was not found
+  in the 1.2 client (research section 2.1.1: the Lua `X2Nation.DeclareIndependence(name)` only
+  validates it locally). The server uses the founding expedition's name, which is what the GM
+  command and the independence effect also send.
+* **NATION-2 (INFERRED):** a new nation copies all 46 `system_faction_relations` rows that name
+  faction 166 "default faction setup for independence", replacing 166 with the nation id. The
+  real compact database has 46 rows (33 `(X, 166)`, 13 `(166, X)`); the copy rule is inferred
+  from their contents, not from a decompiled server. `real_compact_db_relation_template_is_faction_166`
+  pins the count and the hostile/neutral/friendly samples.
+* **NATION-3 (capture-pending):** the nation `SystemFaction` record mirrors the founding
+  expedition clone (`allow_change_name` 0, `political_system` 1) with `diplomacy_target` 1 as
+  `FUN_392fb2d0` sets it. Whether the live 1.2 server allows a rename from this record is not
+  established (stage 4).
+* **NATION-4 (capture-pending):** no 1.2 error id is known for the "owns no dominion"
+  prerequisite: the special effect and the GM command send/use 40
+  `FACTION_SEPARATE_RIGHTS`. The GM command's `nation create force` skips only that check for
+  test fixtures. The skill's CASTLE_CLAIM backpack (type 1, slot 26) is checked in the effect
+  after the authored `unit_reqs` slot requirement.
+* **NATION-5 (stage 2 scope):** when the founding expedition disbands, the nation stays as a
+  kingless nation (`dismiss_expedition` clears its `expedition_id`; the next save writes 0).
+  Load clears a stored id whose `expeditions` row is missing or whose `mother` is not the
+  nation, so a guild that later reuses the freed id is neither captured nor refused
+  independence. Offline members' stored houses move in the creation transaction, and the
+  housing / crime faction lookups use the live nation table. Nation destruction / succession is
+  stage 2 (capture-pending).
+* **NATION-6 (hot path, documented):** relation lookups take the nations `RwLock` and scan
+  linearly. `faction_pair` / `is_nation` avoid cloning and have empty fast paths, but there is
+  no id index; the expected nation count makes this acceptable.
+* **NATION-7:** a nation member's mother is 0, so nation chat shares `faction_chat(0)` and
+  cross-nation whispers are allowed. A real nation channel is stage 2+ work.
+* **NATION-8:** a member already in the enter-world path when independence runs can keep the
+  race faction (the offline set comes from one world snapshot); the next login loads the saved
+  nation faction.
+* **NATION-9:** `save_creation` takes `SaveManager::transaction_lock` around its transaction;
+  the periodic save runs inside `DoSave`. The GM command and the skill both call the same
+  synchronous service, so a concurrent duplicate call is refused by the in-memory check.
+* **NATION-10:** a client already in the login burst when independence broadcasts can miss
+  `SCFactionIndependence`; it receives the nation record and relations on the next login.
+  Expedition records with `mother = N` are sent before N's own record in the login burst; the
+  1.2 client's tolerance for that order is unverified (the client stores records independently).
+* The national tax CS packet is 0x013 (`FUN_392f42f0`; owner-approved exception to the
+  never-edit `opcodes.rs` rule); a log-only handler is registered. The real tax handler,
+  relation expiry, immigration / kick, rename and monument stay for stages 2-4.
 
 ### systems::housing
 
@@ -1101,8 +1156,8 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   anyone else, leaving `OwnerId` on a non-member. The Rust removes an ordinary member as a
   normal leave (same packets as `Leave`) and dismisses the guild when the member is its owner:
   the 1.2 client refuses an owner's leave (`expedition_owner_cannot_leave`, error 310) and only
-  offers the owner's dismiss path (`expedition_owner_dismiss`, 301). **Capture-pending PIRATE-1:**
-  no retail capture of a guild owner's forced faction change; the dismissal is the chosen rule.
+  offers the owner's dismiss path (`expedition_owner_dismiss`, 301). **Owner decision
+  (2026-11-03, PIRATE-1):** a guild owner's forced faction change dismisses the guild.
 * `CheckForDeletedCharactersDeletion`: the rename / `deleted = 1` / packets are done;
   `DeleteCharacterAssets` (houses, guild, family, mail returns) is a later phase.
 * `GameConnection.OnDisconnect` → `UpdateLoginTime(0)` for connections that never entered (inserts

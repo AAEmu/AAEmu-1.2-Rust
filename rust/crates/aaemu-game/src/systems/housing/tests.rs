@@ -1311,6 +1311,39 @@ async fn faction_sync_and_character_deletion() {
 }
 
 #[tokio::test]
+async fn nation_faction_survives_house_updates_and_reload() {
+    use crate::systems::social::nation::Nation;
+
+    let fx = fixture(false);
+    let nation_id = 9_000;
+    fx.server.systems.social.nations.add(Nation {
+        id: nation_id,
+        expedition_id: 0,
+        owner_character_id: 1,
+        owner_name: "King".into(),
+        name: "Kingdom".into(),
+        created_at: 1,
+        allow_change_name: 0,
+        relations: Vec::new(),
+        offline_members: Vec::new(),
+    });
+    let house = place_house(&fx, DESIGN, &fx.pa, 120.0, 100.0, -1);
+    super::on_character_loaded(&fx.server, 1, nation_id);
+    assert_eq!(house.data().unit.faction_id, nation_id);
+    let row = manager::save_row(&house).expect("dirty house row");
+    assert_eq!(row.faction_id, nation_id);
+
+    // A reload of the stored row resolves the nation again instead of storing 0.
+    let world = fx.server.world.world(0).unwrap();
+    let mut reload = row.clone();
+    reload.id = 56;
+    reload.x = 220.0;
+    reload.y = 200.0;
+    let loaded = manager::load_house_row(&fx.server, &world, &reload).unwrap();
+    assert_eq!(loaded.data().unit.faction_id, nation_id);
+}
+
+#[tokio::test]
 async fn save_rows_and_weekly_tax() {
     let fx = fixture(false);
     let house = place_house(&fx, DESIGN, &fx.pa, 120.0, 100.0, -1);
