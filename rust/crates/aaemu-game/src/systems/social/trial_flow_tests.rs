@@ -2083,13 +2083,80 @@ async fn infamy_threshold_sets_the_pirate_faction_with_its_side_effects() {
     assert_eq!(criminal.p.data().unit.faction_id, 161);
 }
 
-/// A guild owner who becomes a pirate cannot leave (`expedition_owner_cannot_leave`, 1.2 error
-/// 310) and the owner's only way out is dismiss: the forced change dismisses the guild instead
-/// of leaving a leaderless one (capture-pending PIRATE-1, no retail capture of this case).
+/// A dominion owned by a guild, with a scheduled siege (attacker 88, defender 77).
+fn guild_dominion() -> crate::systems::housing::dominion::state::DominionState {
+    use crate::systems::housing::dominion::state::{
+        DominionState, SiegeOutcome, SiegeState, SiegeStatus, TowerIdentity,
+    };
+    DominionState {
+        zone_group_id: 25,
+        tower: TowerIdentity {
+            house_id: 61,
+            instance_id: 0,
+            guard_tower_setting_id: 7,
+        },
+        owner_expedition_id: 77,
+        ownership_generation: 1,
+        reign_start_at: 100,
+        last_siege_end_at: 0,
+        tax_rate: 0,
+        national_tax_rate: 0,
+        last_paid_at: 0,
+        last_tax_rate_changed_at: 0,
+        last_national_tax_rate_changed_at: 0,
+        non_pvp_start_at: 0,
+        non_pvp_duration_min: 0,
+        treasury: Default::default(),
+        tower_destroyed: false,
+        tower_hp: None,
+        last_siege_id: 1,
+        siege: Some(SiegeState {
+            siege_id: 1,
+            attacker_expedition_id: 88,
+            defender_expedition_id: 77,
+            ownership_generation: 1,
+            status: SiegeStatus::Scheduled,
+            outcome: SiegeOutcome::Pending,
+            scheduled_at: 100,
+            starts_at: 200,
+            ends_at: 300,
+            ended_at: 0,
+            participants: Default::default(),
+        }),
+    }
+}
+
+/// A nation founded by expedition 77, whose king is character 1.
+fn guild_nation() -> crate::systems::social::nation::Nation {
+    use crate::systems::social::nation::Nation;
+    Nation {
+        id: 170,
+        expedition_id: 77,
+        owner_character_id: 1,
+        owner_name: "Owner".into(),
+        name: "Test Nation".into(),
+        created_at: 0,
+        allow_change_name: 0,
+        relations: Vec::new(),
+        offline_members: Vec::new(),
+    }
+}
+
+/// PIRATE-1 (owner decision 2026-11-03): a guild owner who becomes a pirate is removed like any
+/// member. The leadership first passes to the remaining member with the highest role, then the
+/// longest membership stand-in (the lowest character id), through the normal `ChangeOwner`
+/// packets; the guild keeps its territory, siege registration and nation, and the nation's king
+/// moves to the new owner.
 #[tokio::test]
-async fn a_guild_owner_becoming_pirate_dismisses_the_guild() {
+async fn a_pirate_guild_owner_hands_the_guild_to_the_next_member() {
     use crate::systems::social::expedition::{self, Expedition};
-    use crate::systems::social::packets::expedition::SCExpeditionDismissedPacket;
+    use crate::systems::social::packets::expedition::{
+        SCExpeditionOwnerChangedPacket, SCExpeditionRoleChangedPacket,
+        SCUnitExpeditionChangedPacket,
+    };
+    use crate::systems::social::packets::faction::{
+        SCFactionOwnerChangedPacket, SCUnitFactionChangedPacket,
+    };
 
     let server = justice_server();
     server
@@ -2097,12 +2164,199 @@ async fn a_guild_owner_becoming_pirate_dismisses_the_guild() {
         .social
         .hooks
         .install(Arc::new(FakeHooks::default()));
-    let mut criminal = player(&server, 1, "Crook", |c| c.infamy_point = 2_990);
-    let mut reporter = player(&server, 2, "Witness", |_| {});
-    let victim = player(&server, 3, "Victim", |_| {});
+    let mut owner = player(&server, 1, "Owner", |c| c.infamy_point = 2_990);
+    let mut cmdr_old = player(&server, 2, "CmdrOld", |_| {});
+    let mut cmdr_new = player(&server, 3, "CmdrNew", |_| {});
+    let veteran = player(&server, 4, "Veteran", |_| {});
+    let victim = player(&server, 5, "Victim", |_| {});
 
-    // The criminal owns the guild; the witness is an ordinary member.
-    let members = [(&criminal.p, 255u8), (&reporter.p, 0u8)]
+    // Highest role wins first: CmdrOld (character 2) is the lower id commander and must beat
+    // CmdrNew (3); the lowest id overall (Owner, role 255) is excluded and the role-0 Veteran
+    // must not win over a commander. `last_world_leave_time` is deliberately reversed so the
+    // test proves the stable character-id stand-in is used, not the login-refreshed activity
+    // timestamp.
+    let members = [
+        (&owner.p, 255u8, 0i64),
+        (&cmdr_old.p, 3, 50),
+        (&cmdr_new.p, 3, 10),
+        (&veteran.p, 0, 0),
+    ]
+    .into_iter()
+    .map(|(p, role, last_leave)| {
+        p.data().unit.expedition_id = 77;
+        let mut m = expedition::member_from_character(&server, 77, p, false);
+        m.role = role;
+        m.last_world_leave_time = last_leave;
+        m
+    })
+    .collect();
+    server.expeditions.add(Expedition {
+        faction: SystemFaction {
+            id: 77,
+            name: "Knights".into(),
+            owner_id: owner.p.character_id,
+            owner_name: "Owner".into(),
+            // Guild mother = the creator's faction (101, as `create_expedition` stores it).
+            mother_id: 101,
+            ..Default::default()
+        },
+        members,
+        policies: expedition::default_policies(&server, 77),
+        removed_members: Vec::new(),
+        is_disbanded: false,
+    });
+    server
+        .systems
+        .housing
+        .dominions
+        .restore(vec![guild_dominion()])
+        .expect("test dominion");
+    server.systems.social.nations.add(guild_nation());
+    owner.client.drain();
+    cmdr_old.client.drain();
+    cmdr_new.client.drain();
+
+    let mut d = Doodad::new(878);
+    d.owner_type = doodad_owner_type::CHARACTER;
+    d.owner_id = owner.p.character_id;
+    d.data = victim.p.character_id as i32;
+    let evidence = Entity::new(0x900, d);
+    let event = server
+        .systems
+        .social
+        .crimes
+        .report_crime(&server, &cmdr_old.p, &evidence, 1, 0, 0, "seen")
+        .await;
+    assert!(event.is_some());
+
+    // The owner is kicked like any member and the leadership moves to CmdrOld.
+    assert_eq!(owner.p.data().unit.faction_id, 161);
+    assert_eq!(owner.p.data().unit.expedition_id, 0);
+    let guild = server.expeditions.get(77).expect("the guild survives");
+    assert!(!guild.is_disbanded);
+    assert_eq!(guild.faction.owner_id, cmdr_old.p.character_id);
+    assert_eq!(guild.faction.owner_name, "CmdrOld");
+    assert!(guild.member(owner.p.character_id).is_none());
+    assert_eq!(guild.member(cmdr_old.p.character_id).unwrap().role, 255);
+    assert_eq!(guild.member(cmdr_new.p.character_id).unwrap().role, 3);
+    assert_eq!(guild.member(veteran.p.character_id).unwrap().role, 0);
+    assert_eq!(
+        cmdr_old.p.data().unit.expedition_id,
+        77,
+        "the new owner keeps the guild"
+    );
+    assert_eq!(cmdr_new.p.data().unit.expedition_id, 77);
+    assert_eq!(veteran.p.data().unit.expedition_id, 77);
+
+    // Territory, siege registration and the nation stay with the guild; the king follows.
+    let dominion = server
+        .systems
+        .housing
+        .dominions
+        .get(25)
+        .expect("territory kept");
+    assert_eq!(dominion.owner_expedition_id, 77);
+    assert_eq!(
+        dominion.siege.as_ref().unwrap().status,
+        crate::systems::housing::dominion::state::SiegeStatus::Scheduled
+    );
+    let nation = server.systems.social.nations.get(170).expect("nation kept");
+    assert_eq!(nation.expedition_id, 77);
+    assert_eq!(nation.owner_character_id, cmdr_old.p.character_id);
+    assert_eq!(nation.owner_name, "CmdrOld");
+
+    // The normal ChangeOwner transition is broadcast to the members, then the owner's leave.
+    let frames = cmdr_old.client.drain();
+    assert!(
+        find(&frames, sc::SCExpeditionOwnerChangedPacket).contains(&body(
+            &SCExpeditionOwnerChangedPacket {
+                id: owner.p.character_id,
+                id2: cmdr_old.p.character_id,
+                char_name: "CmdrOld".into(),
+            }
+        )),
+        "the members see the owner change"
+    );
+    assert!(
+        find(&frames, sc::SCExpeditionRoleChangedPacket).contains(&body(
+            &SCExpeditionRoleChangedPacket {
+                id: owner.p.character_id,
+                role: 0,
+                char_name: "Owner".into(),
+            }
+        ))
+    );
+    assert!(
+        find(&frames, sc::SCExpeditionRoleChangedPacket).contains(&body(
+            &SCExpeditionRoleChangedPacket {
+                id: cmdr_old.p.character_id,
+                role: 255,
+                char_name: "CmdrOld".into(),
+            }
+        ))
+    );
+    let leave = SCUnitExpeditionChangedPacket {
+        obj_id: owner.p.obj_id,
+        character_id: owner.p.character_id,
+        kicker: String::new(),
+        unit_name: "Owner".into(),
+        id: 77,
+        expedition_id: 0,
+        expel: false,
+    };
+    assert!(
+        find(&frames, sc::SCUnitExpeditionChangedPacket).contains(&body(&leave)),
+        "the members see the old owner leave"
+    );
+    assert!(
+        find(&frames, sc::SCUnitFactionChangedPacket).contains(&body(
+            &SCUnitFactionChangedPacket {
+                obj_id: owner.p.obj_id,
+                unit_name: "Owner".into(),
+                id: 101,
+                id2: 161,
+                temp: false,
+            }
+        ))
+    );
+    assert!(
+        find(&frames, sc::SCFactionOwnerChangedPacket).contains(&body(
+            &SCFactionOwnerChangedPacket {
+                id: 170,
+                id2: cmdr_old.p.character_id,
+                new_owner_name: "CmdrOld".into(),
+            }
+        )),
+        "the nation's new king is broadcast with the runtime faction-owner packet"
+    );
+    let owner_frames = owner.client.drain();
+    assert!(find(&owner_frames, sc::SCUnitExpeditionChangedPacket).contains(&body(&leave)));
+    assert!(
+        find(&owner_frames, sc::SCExpeditionOwnerChangedPacket).contains(&body(
+            &SCExpeditionOwnerChangedPacket {
+                id: owner.p.character_id,
+                id2: cmdr_old.p.character_id,
+                char_name: "CmdrOld".into(),
+            }
+        )),
+        "the old owner sees who inherited the guild"
+    );
+}
+
+/// The owner and the successor turn pirate together. The hand-over and the old owner's removal
+/// share one expedition write section, and a member whose live faction is not the guild mother
+/// cannot inherit, so the guild keeps a live member as owner instead of ending with an absent
+/// owner (the old two-step transfer handed it back to the already-pirate owner, whose own leave
+/// then removed it from the member list).
+#[tokio::test]
+async fn simultaneous_owner_and_successor_pirate_changes_leave_a_consistent_guild() {
+    use crate::systems::social::expedition::{self, Expedition};
+
+    let server = justice_server();
+    let owner = player(&server, 1, "Owner", |c| c.unit.faction_id = 101);
+    let heir = player(&server, 2, "Heir", |c| c.unit.faction_id = 101);
+    let member = player(&server, 3, "Member", |c| c.unit.faction_id = 101);
+    let members = [(&owner.p, 255u8), (&heir.p, 0u8), (&member.p, 0u8)]
         .into_iter()
         .map(|(p, role)| {
             p.data().unit.expedition_id = 77;
@@ -2115,9 +2369,9 @@ async fn a_guild_owner_becoming_pirate_dismisses_the_guild() {
         faction: SystemFaction {
             id: 77,
             name: "Knights".into(),
-            owner_id: criminal.p.character_id,
-            owner_name: "Crook".into(),
-            mother_id: NUIA,
+            owner_id: owner.p.character_id,
+            owner_name: "Owner".into(),
+            mother_id: 101,
             ..Default::default()
         },
         members,
@@ -2125,12 +2379,90 @@ async fn a_guild_owner_becoming_pirate_dismisses_the_guild() {
         removed_members: Vec::new(),
         is_disbanded: false,
     });
-    criminal.client.drain();
-    reporter.client.drain();
+
+    let _ = tokio::join!(
+        crate::systems::social::faction::set_faction(&server, &owner.p, 161),
+        crate::systems::social::faction::set_faction(&server, &heir.p, 161),
+    );
+
+    assert_eq!(owner.p.data().unit.faction_id, 161);
+    assert_eq!(heir.p.data().unit.faction_id, 161);
+    assert_eq!(owner.p.data().unit.expedition_id, 0);
+    assert_eq!(heir.p.data().unit.expedition_id, 0);
+    let guild = server.expeditions.get(77).expect("guild row");
+    assert!(!guild.is_disbanded, "a valid member remained");
+    let new_owner = guild.faction.owner_id;
+    let owner_member = guild
+        .member(new_owner)
+        .expect("the guild owner is still a member");
+    assert_eq!(owner_member.role, 255);
+    assert_eq!(
+        new_owner, member.p.character_id,
+        "the non-pirate member inherits, not the old pirate owner"
+    );
+    assert_eq!(member.p.data().unit.faction_id, 101);
+    assert_eq!(member.p.data().unit.expedition_id, 77);
+    assert!(guild.member(owner.p.character_id).is_none());
+    assert!(guild.member(heir.p.character_id).is_none());
+}
+
+/// Only an owner who was the last member dismisses the guild. The voluntary disband guard (301 /
+/// 469) cannot apply: no member would be left to hold the territory, so the forced path releases
+/// the dominion and cancels its siege under the same `housing.operation_lock`, then dismisses.
+#[tokio::test]
+async fn a_pirate_guild_owner_who_was_the_last_member_dismisses_and_releases_the_dominion() {
+    use crate::systems::social::expedition::{self, Expedition};
+    use crate::systems::social::packets::expedition::SCExpeditionDismissedPacket;
+    use crate::systems::social::packets::faction::SCFactionOwnerChangedPacket;
+
+    let server = justice_server();
+    server
+        .systems
+        .social
+        .hooks
+        .install(Arc::new(FakeHooks::default()));
+    let mut owner = player(&server, 1, "Crook", |c| c.infamy_point = 2_990);
+    let reporter = player(&server, 2, "Witness", |_| {});
+    let victim = player(&server, 3, "Victim", |_| {});
+
+    // The owner is the only member.
+    owner.p.data().unit.expedition_id = 77;
+    let mut member = expedition::member_from_character(&server, 77, &owner.p, true);
+    member.role = 255;
+    server.expeditions.add(Expedition {
+        faction: SystemFaction {
+            id: 77,
+            name: "Knights".into(),
+            owner_id: owner.p.character_id,
+            owner_name: "Crook".into(),
+            mother_id: NUIA,
+            ..Default::default()
+        },
+        members: vec![member],
+        policies: expedition::default_policies(&server, 77),
+        removed_members: Vec::new(),
+        is_disbanded: false,
+    });
+    server
+        .systems
+        .housing
+        .dominions
+        .restore(vec![guild_dominion()])
+        .expect("test dominion");
+    server.systems.social.nations.add(guild_nation());
+    owner.client.drain();
+
+    // The voluntary disband refuses a territory / siege holder.
+    assert!(
+        !expedition::disband(&server, &owner.p).await,
+        "the voluntary guard still refuses"
+    );
+    assert!(!server.expeditions.get(77).unwrap().is_disbanded);
+    owner.client.drain();
 
     let mut d = Doodad::new(878);
     d.owner_type = doodad_owner_type::CHARACTER;
-    d.owner_id = criminal.p.character_id;
+    d.owner_id = owner.p.character_id;
     d.data = victim.p.character_id as i32;
     let evidence = Entity::new(0x900, d);
     let event = server
@@ -2145,22 +2477,240 @@ async fn a_guild_owner_becoming_pirate_dismisses_the_guild() {
         id: 77,
         success: true,
     };
+    let frames = owner.client.drain();
     assert!(
-        find(&reporter.client.drain(), sc::SCExpeditionDismissedPacket).contains(&body(&dismissed)),
-        "the other member is told the guild was dismissed"
+        find(&frames, sc::SCExpeditionDismissedPacket).contains(&body(&dismissed)),
+        "the last member is told the guild was dismissed"
     );
-    assert_eq!(criminal.p.data().unit.faction_id, 161);
-    assert_eq!(criminal.p.data().unit.expedition_id, 0);
-    assert_eq!(reporter.p.data().unit.expedition_id, 0);
+    assert!(
+        find(&frames, sc::SCFactionOwnerChangedPacket).contains(&body(
+            &SCFactionOwnerChangedPacket {
+                id: 170,
+                id2: 0,
+                new_owner_name: String::new(),
+            }
+        )),
+        "the client is told the nation lost its king"
+    );
+    assert_eq!(owner.p.data().unit.faction_id, 161);
+    assert_eq!(owner.p.data().unit.expedition_id, 0);
     let guild = server.expeditions.get(77).expect("retired guild row");
     assert!(guild.is_disbanded);
     assert_eq!(guild.faction.owner_id, 0);
     assert_eq!(guild.faction.name, "$deleted-guild-77");
     assert!(guild.members.is_empty());
 
-    // A later SetFaction(Pirate) is consistent: no second faction or dismissal packet.
-    crate::systems::social::faction::set_faction(&server, &criminal.p, 161).await;
-    let frames = reporter.client.drain();
-    assert!(find(&frames, sc::SCUnitFactionChangedPacket).is_empty());
-    assert!(find(&frames, sc::SCExpeditionDismissedPacket).is_empty());
+    // The disbanded guild's dominion is released and its unfinished siege cancelled.
+    let dominion = server
+        .systems
+        .housing
+        .dominions
+        .get(25)
+        .expect("territory kept as unowned");
+    assert_eq!(dominion.owner_expedition_id, 0);
+    assert_eq!(dominion.reign_start_at, 0);
+    let siege = dominion.siege.expect("siege kept as history");
+    assert_eq!(
+        siege.status,
+        crate::systems::housing::dominion::state::SiegeStatus::Finished
+    );
+    assert_eq!(
+        siege.outcome,
+        crate::systems::housing::dominion::state::SiegeOutcome::Cancelled
+    );
+    assert!(siege.ended_at >= siege.scheduled_at);
+    let nation = server.systems.social.nations.get(170).unwrap();
+    assert_eq!(
+        nation.expedition_id, 0,
+        "the nation becomes kingless as on the normal disband"
+    );
+    assert_eq!(
+        nation.owner_character_id, 0,
+        "the pirate owner is no longer the king"
+    );
+    assert!(nation.owner_name.is_empty());
+    assert!(
+        server
+            .systems
+            .social
+            .nations
+            .owned_by(owner.p.character_id)
+            .is_none(),
+        "a pirate must not keep the king's invite / kick rights"
+    );
+}
+
+/// A pirate guild (its mother faction is the pirate faction) keeps its members: the faction
+/// change only removes a member when the guild's mother differs from the new faction.
+#[tokio::test]
+async fn a_pirate_guild_keeps_a_member_who_becomes_a_pirate() {
+    use crate::systems::social::expedition::{self, Expedition};
+
+    let server = justice_server();
+    server
+        .systems
+        .social
+        .hooks
+        .install(Arc::new(FakeHooks::default()));
+    let mut criminal = player(&server, 1, "Crook", |c| {
+        c.infamy_point = 2_990;
+        c.unit.faction_id = 101; // about to become a pirate
+    });
+    let reporter = player(&server, 2, "Owner", |c| c.unit.faction_id = 161);
+    let victim = player(&server, 3, "Victim", |_| {});
+
+    let members = [(&criminal.p, 0u8), (&reporter.p, 255u8)]
+        .into_iter()
+        .map(|(p, role)| {
+            p.data().unit.expedition_id = 77;
+            let mut m = expedition::member_from_character(&server, 77, p, false);
+            m.role = role;
+            m
+        })
+        .collect();
+    server.expeditions.add(Expedition {
+        faction: SystemFaction {
+            id: 77,
+            name: "Pirate Guild".into(),
+            owner_id: reporter.p.character_id,
+            owner_name: "Owner".into(),
+            mother_id: 161,
+            ..Default::default()
+        },
+        members,
+        policies: expedition::default_policies(&server, 77),
+        removed_members: Vec::new(),
+        is_disbanded: false,
+    });
+    criminal.client.drain();
+
+    let mut d = Doodad::new(878);
+    d.owner_type = doodad_owner_type::CHARACTER;
+    d.owner_id = criminal.p.character_id;
+    d.data = victim.p.character_id as i32;
+    let evidence = Entity::new(0x900, d);
+    let event = server
+        .systems
+        .social
+        .crimes
+        .report_crime(&server, &reporter.p, &evidence, 1, 0, 0, "seen")
+        .await;
+    assert!(event.is_some());
+
+    assert_eq!(criminal.p.data().unit.faction_id, 161);
+    assert_eq!(
+        criminal.p.data().unit.expedition_id,
+        77,
+        "a pirate guild keeps its pirate member"
+    );
+    let guild = server.expeditions.get(77).expect("pirate guild survives");
+    assert!(!guild.is_disbanded);
+    assert!(guild.member(criminal.p.character_id).is_some());
+    assert_eq!(guild.faction.owner_id, reporter.p.character_id);
+    assert_eq!(guild.member(reporter.p.character_id).unwrap().role, 255);
+}
+
+/// A pirate who is duelling shows the temporary Red / Blue team faction. The infamy threshold
+/// must use the saved faction: the old live-faction check re-fired `SetFaction(Pirate)`, which
+/// ended the temporary faction (breaking the duel) and removed the pirate from the party.
+#[tokio::test]
+async fn a_duelling_pirates_crime_report_keeps_the_duel_and_the_party() {
+    let server = justice_server();
+    server
+        .systems
+        .social
+        .hooks
+        .install(Arc::new(FakeHooks::default()));
+    let mut pirate = player(&server, 1, "Pirate", |c| {
+        c.infamy_point = 2_990;
+        c.unit.faction_id = 161;
+        c.unit.hp = 1_000;
+    });
+    let mut rival = player(&server, 2, "Rival", |c| {
+        c.unit.faction_id = 161;
+        c.unit.hp = 1_000;
+    });
+    let victim = player(&server, 3, "Victim", |_| {});
+
+    let teams = &server.systems.social.teams;
+    teams.ask_to_join(&server, &pirate.p, "", 0, true, Some(&rival.p));
+    teams.reply_to_join_team(
+        &server,
+        &rival.p,
+        0,
+        true,
+        pirate.p.character_id,
+        false,
+        "",
+        false,
+    );
+    assert!(pirate.p.data().in_party && rival.p.data().in_party);
+
+    let duels = &server.systems.social.duels;
+    duels.duel_request(&server, &pirate.p, rival.p.character_id);
+    duels
+        .duel_accepted(&server, &rival.p, pirate.p.character_id)
+        .await;
+    assert!(pirate.p.data().unit.faction_temporary);
+    let duel_faction = pirate.p.data().unit.faction_id;
+    assert_ne!(duel_faction, 161);
+    pirate.client.drain();
+    rival.client.drain();
+
+    // The rival reports the pirate's crime; +25 infamy crosses 3000 while the saved faction is
+    // already Pirate.
+    let mut d = Doodad::new(878);
+    d.owner_type = doodad_owner_type::CHARACTER;
+    d.owner_id = pirate.p.character_id;
+    d.data = victim.p.character_id as i32;
+    let evidence = Entity::new(0x900, d);
+    let event = server
+        .systems
+        .social
+        .crimes
+        .report_crime(&server, &rival.p, &evidence, 1, 0, 0, "seen")
+        .await;
+    assert!(event.is_some());
+
+    assert_eq!(
+        pirate.p.data().unit.faction_id,
+        duel_faction,
+        "the duel's temporary faction is untouched"
+    );
+    assert!(pirate.p.data().unit.faction_temporary);
+    assert!(pirate.p.data().in_party, "the pirate stays in the party");
+    assert!(
+        duels.duel_of(pirate.p.character_id).is_some(),
+        "the duel is still running"
+    );
+    assert!(
+        find(&rival.client.drain(), sc::SCUnitFactionChangedPacket).is_empty(),
+        "no second SetFaction(Pirate) broadcast"
+    );
+}
+
+/// The guilty verdict runs while the trial mutex is held; its `SetFaction(Pirate)` is collected
+/// as an `Effect` and runs after the lock is released (trial.rs module rule). The deferral is
+/// observable: the defendant still has the old faction when `result_is_guilty` returns.
+#[tokio::test]
+async fn the_guilty_verdict_defers_the_pirate_faction_until_the_trial_lock_is_released() {
+    let (server, d, _jury, tid) = summoned_trial(1).await;
+    d.p.data().infamy_point = crate::systems::social::crime::PIRATE_CRIME_POINT_THRESHOLD;
+    server
+        .systems
+        .social
+        .trials
+        .result_is_guilty(&server, &d.p, tid, true, util::now_ms());
+    assert_eq!(
+        d.p.data().unit.faction_id,
+        101,
+        "SetFaction waits until the trial lock is released"
+    );
+    for _ in 0..50 {
+        if d.p.data().unit.faction_id == 161 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(d.p.data().unit.faction_id, 161);
 }

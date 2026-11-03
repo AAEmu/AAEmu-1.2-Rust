@@ -299,6 +299,15 @@ pub fn broadcast_phase_change(server: &GameServer, state: &DominionState) {
     });
 }
 
+/// Applies a forced release (`DominionManager::release_expedition`) the way the GM cancel
+/// command does: remove the old siege roster, refresh the tower runtime state, then announce
+/// the finished phase so clients drop the cancelled siege.
+pub fn apply_released(server: &GameServer, previous: &DominionState, released: &DominionState) {
+    broadcast_participant_changes(server, previous, released);
+    apply_tower_state(server, released);
+    broadcast_phase_change(server, released);
+}
+
 /// Ownership delta followed by the authoritative snapshot: the native delta resets national
 /// tax to 500 independently, which must not replace the server's persisted value.
 pub fn broadcast_owner_change(server: &GameServer, state: &DominionState) {

@@ -1490,26 +1490,73 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   (its AI busy on another thread), `DeadBehavior`'s `ClearAllAggro` sent the corpse home and
   `ReturnState` restored its hp, so town guards kept fighting the mob they had killed (gray hp
   bar in the client). Test: `ai::flow_tests::guard_kill_while_the_mob_ai_is_busy_keeps_the_mob_dead`.
-* `Character.CheckWantedThreshold` (InfamyPoint >= 3000): the Wanted / Contemptuous buffs are
-  added under the character's data lock, but the faction is no longer assigned there. The check
-  returns a "became a pirate" signal and every caller that has a live player runs
+* `Character.CheckWantedThreshold` (InfamyPoint >= 3000) / PIRATE-1: the Wanted / Contemptuous
+  buffs are added under the character's data lock, but the faction is no longer assigned there.
+  The check returns a "became a pirate" signal and every caller that has a live player runs
   `Character.SetFaction(Pirate)` after releasing the lock: the crime report / GM crime-points
   paths, the quest `AddCrime` path and `CSSelectCharacter` (for infamy that crossed while the
   character was offline; `Character.Load` itself is also used for the lobby list and deletion
-  checks, where there is no player to notify). The change thus broadcasts
-  `SCUnitFactionChangedPacket` once (the 1.2 client turns it into "$1 became pirate.", x2game
-  `sub_396A1C20` with faction 161) and runs the ported `Character.SetFaction` side effects:
-  house faction sync, guild removal and party removal. Deviation: the C#
-  `ExpeditionManager.Kick(this.Connection, ...)` throws on the null lobby connection and aborts
-  `CSListCharacter`; the Rust applies the change at select where the connection exists. The
-  guild removal is a dedicated server-side path (`expedition::remove_member_for_faction_change`),
-  not the client `Kick` handler: the C# `Kick` only acts on roles whose policy has `Expel`, so
-  ordinary members stayed in the guild after becoming pirates, and it removed an owner like
-  anyone else, leaving `OwnerId` on a non-member. The Rust removes an ordinary member as a
-  normal leave (same packets as `Leave`) and dismisses the guild when the member is its owner:
-  the 1.2 client refuses an owner's leave (`expedition_owner_cannot_leave`, error 310) and only
-  offers the owner's dismiss path (`expedition_owner_dismiss`, 301). **Owner decision
-  (2026-11-03, PIRATE-1):** a guild owner's forced faction change dismisses the guild.
+  checks, where there is no player to notify). The offline quest `AddCrime` writes only the
+  points, like `add_offline_crime_points`; it no longer writes `characters.faction_id`, so the
+  login conversion still gets the live player, the broadcast and the house / guild / party side
+  effects. The check compares the **saved** faction (`persisted_faction`), not the live one: a
+  duelling / battlefield pirate shows a temporary Red / Blue / corps faction, and the live check
+  re-fired `SetFaction(Pirate)`, ended the temporary faction and removed the pirate from the
+  party. The trial verdict collects its `SetFaction` as an `Effect` like the other re-entrant
+  calls (the trial mutex is held); a direct call there broke the module's lock rule.
+  The change broadcasts `SCUnitFactionChangedPacket` once (the 1.2 client turns it into
+  "$1 became pirate.", x2game `sub_396A1C20` with faction 161) and runs the ported
+  `Character.SetFaction` side effects: house faction sync, guild removal and party removal.
+  Deviation: the C# `ExpeditionManager.Kick(this.Connection, ...)` throws on the null lobby
+  connection and aborts `CSListCharacter`; the Rust applies the change at select where the
+  connection exists. The party removal looks the team up by membership instead of `InParty`:
+  the select conversion runs before `CSNotifyInGamePacket` -> `TeamManager.UpdateAtLogin`, which
+  would otherwise re-join the new pirate, and an ordinary member could not satisfy the owner
+  check of the client kick path.
+  The guild removal is a dedicated server-side path
+  (`expedition::remove_member_for_faction_change`), not the client `Kick` handler: the C# `Kick`
+  only acts on roles whose policy has `Expel`, so ordinary members stayed in the guild after
+  becoming pirates. Evidence for the kick itself: the 1.2 loading tips `ui_texts` 2833
+  (`tips_of_day_84`) and 2848 (`tips_of_day_99`) say a guild member who becomes a pirate is
+  forcibly removed ("If you belong to a guild and become a pirate, you'll be kicked out of your
+  guild"), with no owner exception; the C# implementation matches for ordinary roles but never
+  handled the owner (`Kick` removed an owner like anyone, leaving `OwnerId` on a non-member).
+  A guild whose mother faction already is the new faction is left alone, so a pirate guild keeps
+  its pirates (C# `Expedition.MotherId != factionId`; `ui_texts` 2847 allows pirate guilds).
+  **Owner decision (2026-11-03, PIRATE-1, replaces the earlier dismissal rule):** a guild owner
+  who becomes a pirate is removed too, but the leadership first passes automatically to a
+  remaining member. The successor is chosen by the highest `role`, then the longest membership.
+  `ExpeditionMember` stores no join timestamp: `last_world_leave_time` is the last world leave
+  (set at join and refreshed on login / logout), so it measures activity, not tenure. The
+  lowest `character_id` is the stable stand-in (ids are allocated in creation order, so the
+  first-created character wins); this is an approximation. The forced hand-over and the old
+  owner's removal happen in **one** expedition write section (the client `ChangeOwner` path
+  keeps its own function), so a concurrent forced removal cannot see the already-pirate old
+  owner as an ordinary member and hand the guild back. A candidate whose faction (live for an
+  online member, saved `characters.faction_id` for an offline one) is not the guild mother is
+  skipped: a pirate heir would immediately undo the hand-over. The hand-over emits the normal
+  `SCExpeditionOwnerChanged` / role packets and saves like a client transfer. The 1.2 error 568
+  (`expedition_owner_cannot_change_during_siege`) is absent from both the C# and this port's
+  voluntary `ChangeOwner`; the forced path therefore bypasses it (if a 568 guard is added, only
+  the client path may apply it). The guild keeps its territory, siege registrations and nation;
+  the nation's king (`nations.owner_character_id` / `owner_name`, taken from the founding
+  expedition's owner) moves to the new owner. The king is written in the same transaction as
+  the expedition save (no window with king = pirate and owner = successor) and broadcast with
+  `SCFactionOwnerChangedPacket`; the 1.2 client's handler `FUN_391d2570` -> `FUN_392f82a0`
+  copies the faction record, sets the owner id / name and applies it (`OnFactionOwnerChanged`).
+  Only an owner who was the **last** eligible member dismisses the guild. That path takes the
+  same `housing.operation_lock` and territory / siege check as the voluntary disband
+  (`expedition.rs`) and re-checks the member count under the lock, but cannot refuse (error 301
+  / 469) with no member left to hold the dominion: it releases the territory
+  (`DominionManager::release_expedition`: owner cleared, unfinished siege cancelled), applies
+  the same tower runtime and participant / phase broadcasts as the GM cancel, persists the
+  released dominion with the dismissal, and clears the nation's king (`owner_character_id` /
+  `owner_name`) so a pirate cannot keep the invite / kick rights of `owned_by`. The release is
+  INFERRED (the rules only forbid a disbanded guild from keeping a dominion; no retail capture
+  of this path). **Capture-pending: PIRATE-1** (no 1.2 capture of an owner turning pirate, a
+  last-member dismissal, or the release).
+  Known, not fixed: the login conversion's spawned guild removal can run after the login guild
+  info was already sent (the client then shows the guild until the next refresh; score 2).
 * `CheckForDeletedCharactersDeletion`: the rename / `deleted = 1` / packets are done;
   `DeleteCharacterAssets` (houses, guild, family, mail returns) is a later phase.
 * `GameConnection.OnDisconnect` → `UpdateLoginTime(0)` for connections that never entered (inserts
