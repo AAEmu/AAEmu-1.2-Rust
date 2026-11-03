@@ -611,6 +611,9 @@ pub fn select_loaded(
             player.character_id
         )));
     }
+    // The wallet just loaded from the database is the committed one (departure saves skip a
+    // character whose wallet still equals it).
+    server.save.seed_committed_money(&player);
     conn.active_char = Some(player.clone());
     crate::systems::quests::on_character_selected(server, &player);
     // Mates of every instance despawned, pending vehicle despawn task aborted.

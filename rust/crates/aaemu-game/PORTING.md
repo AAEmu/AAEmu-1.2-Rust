@@ -471,7 +471,7 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 
 | Area (C#) | Rust | Status | Notes |
 |---|---|---|---|
-| `TeamManager`, `Models/Game/Team` | `systems/social/team.rs`, `packets/team.rs` | done | Invitations (single / area, 60 s timeout), create, AskRiskyTeam (leave / kick / dismiss + auto-disband), owner / role / marker / looting rule / ping / move, raid conversion, SetOffline / MemberRemoveFromTeam / UpdateAtLogin / UpdatePosition, 500 ms remote-member sync (delta cache, 5 s forced resync, upper-triangle pairs), zombie-team disband (5 min), loot winner helpers. Events (OnTeamJoin/Leave) are quest-side: not called. |
+| `TeamManager`, `Models/Game/Team` | `systems/social/team.rs`, `packets/team.rs` | done | Invitations (single / area with `SCAskToJoinTeamArea` / `SCTeamAreaInvited`, 30 s area cooldown, 60 s timeout, 500 ms sweep, 10k cap, stale-reply and owner-rights guards), invitation error replies, create, AskRiskyTeam (leave / kick / dismiss + auto-disband), owner / role / marker / looting rule / ping / move, raid conversion, SetOffline / MemberRemoveFromTeam / UpdateAtLogin / UpdatePosition, 500 ms remote-member sync (delta cache, 5 s forced resync, upper-triangle pairs), zombie-team disband (5 min), loot winner helpers. Events (OnTeamJoin/Leave) are quest-side: not called. See "Area team invitations and invitation error replies". |
 | `ExpeditionManager`, `Models/Game/Expeditions` | `systems/social/expedition.rs`, `packets/expedition.rs` (`managers::expedition` re-exports) | done | Load, create (party checks, cost, `SCItemTaskSuccessPacket` money-only form), invite / reply, leave, kick, member role, owner, role policy, disband (stays listed as `$deleted-guild-<id>`), `Expedition.Save` per change, offline leave for character deletion. Rename / sponsor are log-only / not in 1.2 as in C#. |
 | `FamilyManager`, `Models/Game/Family` | `systems/social/family.rs`, `packets/family.rs` | done | Load, invite / reply / create, leave, kick (offline existence check), title, steward, login / logout, disband, save, offline leave for character deletion. |
 | `FriendMananger`, `CharacterFriends`, `CharacterBlocked` | `systems/social/friend.rs`, `packets/friend.rs` (`managers::friend` re-exports) | done | Add / remove friends (online or by DB name lookup), block / unblock (online or by `NameManager` for offline names), status changes incl. `InParty`. The blocked list is enforced on every direct delivery path (whisper, team / area / expedition / family invite, friend add, trade and duel request); see the block-list deviation. |
@@ -718,7 +718,7 @@ live acceptance remain pending.
 | `TaskManager2`, `Models/Tasks/Task` | `systems/services/tasks.rs` | done | Delayed / repeating / cron tasks (NCrontab subset of `systems::npcs::schedule`), ids, cancel, `RemoveTasks`, `GetQueueCount`. Port of `TaskManagerTests`. |
 | `AccountManager` remainder | `systems/services/accounts.rs`, `db.rs` | done | |
 | `TimedRewardsManager`, `TimedRewardsTask` | `systems/services/timed_rewards.rs` | done | |
-| `CharacterManager` remainder (`GetEffectiveAccessLevel`, `PlayerRoll` + `CSRollDicePacket` / `SCDiceValuePacket`, `StartOnlineTracking` / `CharacterOnlineTrackingTask`, `AddOfflineCrimePoints`, `ApplyBeautySalon` + `CSEnter/ExitBeautySalonPacket`, `CSBeautyshopDataPacket`, `SCCharacterGenderAndModelModifiedPacket`) | `systems/services/{character,beauty_salon}.rs` | done | Beauty salon item work through `BEAUTY_SALON_ITEMS` (economy). |
+| `CharacterManager` remainder (`GetEffectiveAccessLevel`, `PlayerRoll` + `CSRollDicePacket` / `SCDiceValuePacket`, `StartOnlineTracking` / `CharacterOnlineTrackingTask`, `AddOfflineCrimePoints`, `ApplyBeautySalon` + `CSEnter/ExitBeautySalonPacket`, `CSBeautyshopDataPacket`, `SCCharacterGenderAndModelModifiedPacket`) | `systems/services/{character,beauty_salon}.rs` | done | Beauty salon item work through `BEAUTY_SALON_ITEMS` (economy). **Deviation (`CharacterOnlineTrackingTask`):** the C# read and rewrote the account's divine clock per character (`GetDivineClock` + `UpdateDivineClock`, 2 round trips and a commit each, every 5 s). The Rust collects the per-account seconds during the pass and writes them after it with one atomic `UPDATE accounts SET divine_clock_time = LEAST(divine_clock_time + ?, 4294967295) WHERE account_id IN (...)` per distinct non-zero delta (500 ids per statement, `db::add_divine_clock_time`), so it can no longer overwrite the 0 that `timed_rewards::do_daily_account_login` stores in between. The column is `INT UNSIGNED`; the sum saturates at `u32::MAX` where the C# `uint` wrapped. |
 | Character packets: `CSActiveWeaponChangedPacket`, `CSBroadcastVisualOptionPacket`, `CSChangeAppellationPacket` (`CharacterAppellations.Change`), `CSIdleStatusPacket`, `CSRefreshInCharacterListPacket`, `CSRequestUIDataPacket`, `CSSaveUIDataPacket`, `CSUpdateActionSlotPacket`, `CSRestrictCheckPacket`, `CSSetLpManageCharacterPacket` and the log-only `CSCharDetailPacket`, `CSCleanupLogicLinkPacket`, `CSConsoleCmdUsedPacket`, `CSCriminalLockedPacket`, `CSEditorGameModePacket`, `CSRankCharacterPacket`, `CSRequestCharBriefPacket`, `CSRequestSecondPasswordKeyTablesPacket`, `CSSetupSecondPassword`, `CSResturnAddrsPacket` (+ `SCActiveWeaponChangedPacket`, `SCUnitVisualOptionsPacket`, `SCAppellationChangedPacket`, `SCUnitIdleStatusPacket`, `SCRefreshInCharacterListPacket`, `SCResultRestrictCheckPacket`, `SCLpManagedPacket`) | `systems/services/character_packets.rs` | done | Byte-exact tests. `CSHangPacket` / `CSUnhangPacket` are `systems/vehicles/harpoon.rs` (sticky parents, rope break); `CSResurrectCharacterPacket` is `systems/skills/resurrect.rs`. |
 | `CharacterManager` `bag_expands` / `expand_expert_limits`, `Inventory.ExpandSlot`, `CharacterActability.Regrade` / `ExpandExpert`, `CSExpandSlotsPacket`, `CSExpandExpertPacket`, `CSUpgrade/DowngradeExpertLimitPacket` (+ `SCInvenExpandedPacket`, `SCExpertLimitModifiedPacket`, `SCExpertExpandedPacket`) | `systems/services/expands.rs` | done | Item checks / consumption through `CHARACTER_ITEM_OPS` (economy). |
 | `CommandManager`, `AccessLevelManager`, `Models/Game/ICommand`, `Utils/Scripts/**` | `systems/services/commands/` | done (infra) | Ports of `SubCommandBaseTests`, `NumericSubCommandParameterTests`, `AccessLevelManagerTests`, `DoodadChainSubCommandTests`. AStar sub commands need `ASTAR_HOOKS` (AI path finding). `Scripts/SubCommands/Doodads/DoodadSetAgeCommand` is ported (`commands/doodads.rs`, port of `DoodadSetAgeCommandTests` through a test root with the `DoodadCmd` aliases); the `DoodadCmd` root itself is the scripts phase. |
@@ -2796,6 +2796,22 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   sent again. A settlement whose mail is refused `MAX_SETTLEMENT_RETRIES` (720, one hour of 5 s
   ticks) times, e.g. for a deleted receiver, is logged at error level and dropped, and its lot
   is then removed.
+* systems::economy (mail templates, 2026-11-02): the 1.2 client reads `title('…')` /
+  `body(…,'…')` in two stages and the C# wrote the item names unescaped (the cash shop escaped
+  only `'`). Stage A (native, `sub_3948E4C0` / `sub_3948C420`, only `CHARGED` mails on en_us / de /
+  fr clients) runs `sscanf("title(%[^)])")` and `sscanf("body(%[^,],%[^,],%[^)])%s")`, which stop at
+  the first raw `)` and know no escapes, so `Resplendent Armor Regrade Scroll (100)` showed as
+  `…(100` and its body as raw text. Stage B (every sender starting with `.`) is `GetMailText`'s Lua
+  `loadstring`, which decodes `\'`, `\\` and the Lua 5.1 `\ddd` decimal escape. Rust therefore
+  writes every quoted template argument through `mail_template::quote_arg` (`\` -> `\\`, `'` ->
+  `\'`, `(` -> `\040`, `)` -> `\041`): stage A sees no `)` and Lua restores the name. `|` is not
+  escaped (the client splits names on it; no 1.2 item name has one). The auction, trade pack,
+  house sale and house tax mails (stage B only) quote item / house / character names through the
+  same helper: house names are player-set without any character policy (`change_house_name`), so
+  an unescaped `'` let a name break out of the receiver's `loadstring` call. **Deviation:** `load_rows`
+  repairs stored `CHARGED` mails written before this (raw parentheses inside the `title('…')`
+  argument and the third `body(…)` argument, nothing else touched, idempotent) and marks them
+  dirty so the next save persists the fix.
 
 ### Ranking boards (Rust only)
 
@@ -3747,6 +3763,71 @@ Deviations from the 1.2 C# `ExpeditionManager` / `TeamManager`, which trusted ev
   owner's own policy is not editable. **Capture-pending:** the rule comes from the client UI, not
   from a 1.2 server capture; the C# `Expel` check is not mirrored.
 
+## Area team invitations and invitation error replies (2026-11-03)
+
+The 1.2 client has a separate area-invitation flow: `X2Team.InviteArea` sends
+`CSInviteAreaToTeamPacket` (`FUN_393053a0`, 0x7b), the server answers each nearby player with
+`SCAskToJoinTeamAreaPacket` and the inviter with `SCTeamAreaInvitedPacket(r, s)`, and the
+client's `OnAskToJoinTeamArea` handler carries `isArea=1` through the popup so the accept /
+decline answer is `CSReplyToJoinTeamPacket` with `isArea=1` (`FUN_391d8060`, `FUN_391d8800`,
+`FUN_39308ec0`; `FUN_393075a0` writes 0x7c with the stored `isArea` flag). The client message says "now inviting characters
+into raidteam in range of 100 meters". The C# `TeamManager` never sent either SC packet and
+dropped an `isArea` answer in `ReplyToJoinTeam` (`// TODO`).
+
+Deviations from the C# (the server side has no capture; the rules come from the client
+decompile and the error-code research in `D:/aaemu-audits/gap-audit-2026-11-02/research/area-invite.md`):
+
+- `InviteAreaToTeam` sends `SCAskToJoinTeamArea` to every eligible player and
+  `SCTeamAreaInvited { r: 0, s: true }` to the inviter. The C# called `AskToJoin(..., false, ...)`,
+  so the area packet was never used. The `isParty` flag in both the invitation and the SC packet
+  is the inviter team's actual `IsParty` (the request's flag when the inviter is not in a team);
+  the C# stored the team's flag in the invitation but sent the hardcoded `false`.
+- Eligibility: within 100 m (2D, strictly less, as `Region.GetList`/`GetAround`), not in a team,
+  friendly or neutral relation, not blocked, not hostile. The C# checked the first two only;
+  the block list was already enforced by the Rust `AskToJoin`.
+- An `isArea` reply goes through the normal join path. The C# removed the invitation and
+  returned (nobody joined).
+- **Area cooldown (EVIDENCED in the client, INFERRED server-side):** the client's button is
+  gated for 30000 ms (`FUN_39304ef0`, constant 30000.0) and the locale text says
+  "(30 sec cooldown)". The server keeps the same per-inviter cooldown and answers a request
+  inside it with `SCTeamAreaInvited { r: remaining_ms, s: false }`; the client formats
+  `r * 0.001` as "Can use area invite after %.1f seconds". With `s = true` the client ignores
+  `r` (the earlier port sent a count there; it is not displayed). `r` is not a count.
+- The invitation is keyed by the target: a new named or area invitation replaces a pending
+  **area** invitation (a refused/ignored area invite must not block a real invite for 60 s); a
+  new area invitation skips a target with a pending **named** invitation silently (the C#
+  answered `SCRejectedTeam` with the empty area target name).
+- Pending invitations are swept every 500 ms after their 60 s timeout and capped at 10,000. The
+  C# removed an invitation only when the target answered, so an expired one blocked every later
+  invitation to that target. The inviter's pending invitations are also dropped when the
+  inviter logs out / leaves the world (the invitation holds its `PlayerRef`).
+- The inviter's team always comes from the team manager's current membership (the client-sent
+  `teamId` is ignored; a crafted `0` used to bypass `TEAM_NO_RIGHTS`). On accept the inviter's
+  current team must still be the invitation's team (when non-zero) and the inviter must still
+  have the right to invite. A reply must name the invitation's owner, and its team id when
+  non-zero, so a stale popup cannot consume or reject someone else's invitation.
+- The client's "refuse area invitation" option is client-local: `X2Team.SetRefuseAreaInvitation`
+  writes the `DAT_39d44ed8` flag and no packet ever carries it; `OnAskToJoinTeamArea` drops the
+  popup while the flag is set. The server cannot know it and always sends the invitation; a
+  refusing client shows nothing. The live check therefore models refusal by not answering.
+
+Error codes (all to the invitee unless noted; ids are the 1.2 `ErrorMessageType`/locale keys,
+`x2game.dll.c:1135910-1135948`):
+
+| Case | Code | Evidence |
+|---|---|---|
+| Inviter may not invite (not owner; party member; unmarked raid member), at invite time | 72 `TEAM_NO_RIGHTS` to the **inviter** | EVIDENCED as the client's own check (`FUN_39428370(0x48)` in `FUN_393053a0`); sending it from the server is INFERRED |
+| Invitee already in a team, at invite time | 77 `TEAM_INVITEE_IN_TEAM` to the **inviter** | INFERRED: the locale text is inviter-facing ("You can't invite anyone in another group.") |
+| Invitee already in a team, at accept | 82 `TEAM_JOIN_ALONE` to the invitee | INFERRED: the client's own accept check sends 82 for this state (`FUN_393075a0` -> `FUN_39428370(0x52)`, `x2game.dll.c:626269`) |
+| Inviter's team gone, or the inviter moved to another team, at reply | 79 `TEAM_INVITOR_MOVED` to the invitee | INFERRED from the Korean locale text ("the inviter moved to another group"); the English text mistranslates it as "the player you invited" |
+| Inviter offline at reply | 78 `TEAM_INVITOR_OFFLINE` to the invitee | INFERRED from the Korean text; a logout drops the invitation, so this is a race guard |
+| Accept or reject with no pending invitation | silent | UNKNOWN: no client or server evidence; 80 ("Invite declined") reads as if the inviter refused, and factions' "no invite exists" code has no team equivalent |
+| Hostile target | 80 `TEAM_INVITE_REFUSED` to the inviter | from the 1.2 C# `TeamInviteRefused` (capture-pending) |
+
+The C# TODO codes 71 (`TEAM_LOADING`) and 77-to-the-invitee are no longer used. The 10.x
+community server (a reimplementation, not an oracle) sends 79 to the invitee when the inviter is
+in another team and 82/77 in the same split, which agrees with the inferred mapping.
+
 ## Client skill cast authority (2026-10-20)
 
 `CSStartSkillPacket` trusted its caster, its target distance and its skill id more than the C#
@@ -4314,11 +4395,32 @@ consumer was not located; the 1.2 ordering/result is therefore not proven there.
   requirements that used to fail only after the slave cast now stop the press. Examples: horse
   archery 11018 / 11019 / 17156 need a bow, and torpedo 25538 -> 23123 needs target NPC 13680.
   The same applies to buff requirements and to the rider's own cooldown.
+- **`source_cannot_use_while_walk` is not enforced.** The C# loaded the column
+  (`SourceCannotUseWhileWalk`) but never read it. The Rust `validation::check` (batch commit
+  668e4196b) refused a cast with `skill_cannot_cast_while_walking` (20) whenever the caster's last
+  own move had a velocity. That is not the client's walk mode (the move packets carry no walk
+  bit), and 60 of the 70 flagged 1.2 skills are mount bar skills or their rider skills (Run!,
+  Dash, Overrun, Breakthrough, Skydash, Charge, ...), pressed while running. A mounted rider
+  never refreshes the flag (its mate's moves go to the mate), so once the rider pre-check above
+  checked the linked rider skill, Stormdarter Run! 17092 (rider 18228) and Keep Running! 17526
+  (rider 12815) were refused with result 20 and no visible error after the rider had walked up
+  to the mount. The check and `UnitSkillState.moving` are removed; the template field stays
+  loaded. Walk mode is client state.
 - ConsumeChanger refusals now carry the first accepted `doodad_func_consume_changer_items` id and
   BuyFish carries the func's fish item id as the `NEED_REAGENT` value (they were 0), so the 1.2
   client's item-name lookup (`x2game.dll.c:742315`) always finds a template. The doodad gate runs
   after `gathering::allows_skill` (a disallowed skill keeps `INVALID_TARGET`) and is skipped for
   Mount casters, whose effect caster is the slave.
+- **Departure saves write only the departing and financially dirty characters.** C# `Character.Save`
+  at logout saved the departing character only; the Rust departure save also commits the global
+  property sets (items, mail, auction, houses) so money moved by a counterpart never splits from
+  its character row. It used to rewrite every online character per logout (O(N) per logout, O(N^2)
+  in a logout wave, all under `transaction_lock`). `SnapshotScope::Departure` now captures the
+  pending departures plus online characters whose `(money, money2)` differ from the value last
+  committed/loaded (`SaveManager::committed_money`, seeded on enter-world, set by the commit ack,
+  dropped on final departure; no entry = dirty) or that hold `labor_power_unsaved != 0`. Autosave
+  and shutdown still capture everyone. Money is the only character-row field another character's
+  operation changes. The "Saved N active buff(s)" log is `debug!`.
 
 ## Cooldown display and persistence (2026-11-02)
 
