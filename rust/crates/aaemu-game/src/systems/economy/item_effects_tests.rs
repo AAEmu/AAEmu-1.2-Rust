@@ -13,7 +13,7 @@ use crate::data::items::{
 use crate::data::GameData;
 use crate::managers::chat::chat_type;
 use crate::models::container::{equip_slot, slot_type};
-use crate::models::item::Item;
+use crate::models::item::{Item, ITEM_FLAG_SECURE};
 use crate::models::item_task::{task_type, ItemTask};
 use crate::models::mate::Mate;
 use crate::net::registry::ClientPacket;
@@ -52,6 +52,12 @@ const PACK: u32 = 5510; // a trade pack (back slot)
 const GLIDER_HI: u32 = 5520; // another glider template
 const RECHARGEABLE: u32 = 5700;
 const TL: u16 = 0x77;
+
+/// Sets `ItemFlag.Secure` on a bag item without going through the packet handler.
+fn set_locked(w: &World, id: u64) {
+    let c = Inv::of(&w.pa).bag();
+    c.lock().unwrap().get_item_by_id_mut(id).unwrap().flags |= ITEM_FLAG_SECURE;
+}
 
 /// Clears the new-item dirty flag so an effect's own marking is what the save selection sees.
 fn mark_clean(w: &World, id: u64) {
@@ -645,6 +651,22 @@ async fn grade_enchant_refusals() {
     assert!(w.b.drain().is_empty());
 }
 
+#[tokio::test]
+async fn grade_enchant_refuses_a_locked_target() {
+    let mut w = world();
+    let id = give(&w, &w.pa.clone(), slot_type::INVENTORY, ARMOR, 1, 0);
+    give(&w, &w.pa.clone(), slot_type::INVENTORY, SCROLL, 1, 1);
+    set_locked(&w, id);
+    w.pa.data().money = 1000;
+    enchant(&w, id, None, false, &[0, 0, 0, 0]);
+    assert_eq!(
+        w.a.drain(),
+        vec![error(error_message::ITEM_SECURE_CONDITION)]
+    );
+    assert_eq!(item(&w, id).unwrap().grade, 0);
+    assert_eq!(w.pa.data().money, 1000);
+}
+
 #[test]
 fn charm_chance_math() {
     assert_eq!(charm_chance(5000, 100, 1000), 5000 + 100 + 50000);
@@ -944,6 +966,24 @@ async fn socketing_enforces_the_num_socket_limit() {
     socketing_effect(&w, gem, GEM, target);
     assert_eq!(w.a.drain(), vec![error(error_message::ITEM_SOCKETS_FULL)]);
     assert_eq!(item(&w, target).unwrap().details.gem_ids[2], 0);
+    assert!(w.pa.data().skill_char.skill_cancelled);
+}
+
+#[tokio::test]
+async fn socketing_refuses_a_locked_target() {
+    let mut w = world();
+    super::bridges::install(&w.server);
+    let target = give(&w, &w.pa.clone(), slot_type::INVENTORY, SOCKET_ARMOR, 1, 0);
+    let gem = give(&w, &w.pa.clone(), slot_type::INVENTORY, GEM, 1, 1);
+    set_locked(&w, target);
+    w.pa.data().skill_char.skill_cancelled = false;
+    socketing_effect(&w, gem, GEM, target);
+    assert_eq!(
+        w.a.drain(),
+        vec![error(error_message::ITEM_SECURE_CONDITION)]
+    );
+    assert_eq!(item(&w, target).unwrap().details.gem_ids, [0; 7]);
+    assert!(item(&w, gem).is_some());
     assert!(w.pa.data().skill_char.skill_cancelled);
 }
 

@@ -42,6 +42,8 @@ pub const MAIL_STATUS_UNPAID: u8 = 2;
 pub enum HouseConstructionError {
     InvalidDesign,
     InsufficientPayment,
+    /// The design item is locked (`ItemFlag.Secure`).
+    ItemLocked,
 }
 
 pub fn construction_certificates(total: i32) -> i32 {
@@ -60,6 +62,8 @@ pub struct HouseItem {
     pub max_count: i32,
     /// `ItemFlags.HasFlag(ItemFlag.SoulBound)`.
     pub soul_bound: bool,
+    /// `ItemFlags.HasFlag(ItemFlag.Secure)`.
+    pub secure: bool,
     /// `SlotType` ([`slot_type`]).
     pub slot_type: u8,
     /// `UccId` (`UccManager.GetUccFromItem` resolves it).

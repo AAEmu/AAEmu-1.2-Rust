@@ -308,9 +308,42 @@ impl Inv {
         (ids, units)
     }
 
+    /// [`all_items_by_template`](Self::all_items_by_template) without secured stacks.
+    pub fn all_items_by_template_unlocked(
+        &self,
+        types: Option<&[u8]>,
+        template_id: u32,
+        grade: i32,
+    ) -> (Vec<u64>, i32) {
+        let default = [slot_type::INVENTORY, slot_type::EQUIPMENT, slot_type::BANK];
+        let types = match types {
+            Some(t) if !t.is_empty() => t,
+            _ => &default,
+        };
+        let mut ids = Vec::new();
+        let mut units = 0;
+        for st in types {
+            if let Some(c) = self.get(*st) {
+                let (i, u) = c
+                    .lock()
+                    .expect("container poisoned")
+                    .items_by_template_unlocked(template_id, grade);
+                ids.extend(i);
+                units += u;
+            }
+        }
+        (ids, units)
+    }
+
     /// `GetItemsCount(templateId, grade)` (Inventory + Equipment + Bank).
     pub fn items_count(&self, template_id: u32, grade: i32) -> i32 {
         self.all_items_by_template(None, template_id, grade).1
+    }
+
+    /// [`items_count`](Self::items_count) without secured stacks: a locked item cannot pay.
+    pub fn items_count_unlocked(&self, template_id: u32, grade: i32) -> i32 {
+        self.all_items_by_template_unlocked(None, template_id, grade)
+            .1
     }
 
     /// `GetItemsCount(slotType, templateId, grade)`.
@@ -319,12 +352,18 @@ impl Inv {
             .1
     }
 
-    /// `CheckItems(slotType, templateId, count)`.
+    /// [`items_count_in`](Self::items_count_in) without secured stacks.
+    pub fn items_count_in_unlocked(&self, st: u8, template_id: u32, grade: i32) -> i32 {
+        self.all_items_by_template_unlocked(Some(&[st]), template_id, grade)
+            .1
+    }
+
+    /// `CheckItems(slotType, templateId, count)`: locked stacks cannot satisfy a requirement.
     pub fn check_items(&self, st: u8, template_id: u32, count: i32) -> bool {
         let total = self.get(st).map_or(0, |c| {
             c.lock()
                 .expect("container poisoned")
-                .items_by_template(template_id, -1)
+                .items_by_template_unlocked(template_id, -1)
                 .1
         });
         total >= count
@@ -866,6 +905,18 @@ pub fn split_or_move_item_ex(
         }
         if target_item.is_none() {
             target_item = dref.get_item_by_slot(i32::from(to_slot)).cloned();
+        }
+        // A locked item cannot be split, merged, moved or swapped (the 1.2 client refuses every
+        // drag that touches it with `item_secure_condition`; `FUN_390455d0`, `FUN_39045850`).
+        // The packet handlers report 664 before reaching this core guard.
+        if from_item
+            .as_ref()
+            .is_some_and(super::item_security::is_locked)
+            || target_item
+                .as_ref()
+                .is_some_and(super::item_security::is_locked)
+        {
+            return false;
         }
         // Check if containers can accept the items
         if let Some(f) = &from_item {

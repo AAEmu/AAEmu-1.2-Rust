@@ -360,7 +360,7 @@ connected by `systems::economy::wiring`).
 | `Models/Game/Items/Actions/*` (every `ItemTask`, `ItemAction`, `ItemTaskType`), `SCItemTaskSuccessPacket`, `SCSyncItemLifespanPacket`, `SCUnitEquipmentsChangedPacket`, `SCInvenExpandedPacket`, `SCGamePointChangedPacket`, `SCCharacterLaborPowerChangedPacket` | `models/item_task.rs`, `systems/economy/item_packets.rs` | done | Tasks snapshot the item when created (the C# encodes on `SendPacket`). |
 | `ItemContainer`, `EquipmentContainer`, `MateEquipmentContainer`, `CofferContainer` | `models/container.rs` | done | `AddOrMoveExistingItem` (new / moved / same container), `RemoveItem`, `ConsumeItem`, `AcquireDefaultItem(Ex)` (timers, charges, crafter), `SpaceLeftForItem`, `ApplyBindRules`, `Wipe`, `ReNumberSlots`, coffer `CanAccept`, `OnEnter/LeaveContainer` events. |
 | `Inventory` (SplitOrMoveItem(Ex), 2H weapon handling, backpacks, ExpandSlot, coffers, ConsumeItem, counts), `Character` money / game points / labor / `ItemUse` / `SendErrorMessage`, `ErrorMessageType` | `systems/economy/inventory.rs`, `error_message.rs` | done | `ChangeLabor`'s `AddExp` is a hook (`ProgressionHooks`). |
-| Core item C2G (`CSSwapItems`, `CSSplitBagItem`, `CSDestroyItem`, `CSExpandSlots`, `CSDeposit/WithdrawMoney`, `CSSplit/SwapCofferItem(s)`, `CSItem(Un)Secure`, `CSEquipments(Un)Secure`, `CSThisTimeUnpackItem`) | `systems/economy/item_handlers.rs` | done | Deposit / withdraw require a positive amount and a banker NPC (the `banker` template flag) within 5 m of the current interaction object (the C# did neither). |
+| Core item C2G (`CSSwapItems`, `CSSplitBagItem`, `CSDestroyItem`, `CSExpandSlots`, `CSDeposit/WithdrawMoney`, `CSSplit/SwapCofferItem(s)`, `CSItem(Un)Secure`, `CSEquipments(Un)Secure`, `CSThisTimeUnpackItem`) | `systems/economy/{item_handlers,item_security}.rs` | done | Deposit / withdraw require a positive amount and a banker NPC (the `banker` template flag) within 5 m of the current interaction object (the C# did neither). The four secure packets are implemented from the 1.2 client (the C# only logged them); see the item-lock deviation. |
 | `ItemManager` (all templates / tables, user items, `Create`, timers, `UnwrapItem`, auction search helpers, loot convert fish), `ItemGameData`, `ItemConversionGameData`, `FishDetailsGameData`, item model stats (durability, repair cost, attributes, DPS, armor), procs | `data/items.rs`, `managers/item.rs`, `models/item.rs`, `systems/economy/{items_data,item_timers,procs}.rs` | done | `ItemManager` lists are leaf locks (snapshot before locking containers). Procs are a new feature (the C# never fired one; see the item-procs deviation). |
 | `LootGameData`, `Models/Game/Items/Loots/**`, `LootingContainer`, loot packets | `systems/economy/{loot_data,loot,looting,loot_packets}.rs` | done | NPC death / despawn / team rules through `LootNpcHooks`, `LootTeamHooks`, `LootQuestHooks`. |
 | Repair (`Character.DoRepair`, `CSRepairSingleEquipment`, `CSRepairAllEquipments`), durability loss | `systems/economy/repair.rs` | done | Combat calls `on_damage_taken` / `on_death`. |
@@ -1359,6 +1359,33 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * systems::economy: item operations are serialised by the economy operation lock (`ItemTxn`) and
   their packets / quest events are flushed after the container locks are released, in the C#
   order; character packets sent during an operation go through the same queue (`Out`).
+* systems::economy (item lock, 2026-11-03): the C# only logged `CSItemSecure`, `CSItemUnsecure`,
+  `CSEquipmentsSecure` and `CSEquipmentsUnsecure`; Rust implements them from the 1.2 client. The
+  client sends `CSItemSecure`/`CSItemUnsecure` for one bag item and the equipment pair for the
+  whole equipped set (`FUN_394ea660`, `FUN_394ea730`, `FUN_394e5dd0`, `FUN_394e5ea0`). Only
+  items in an `item_categories.secure` category and not listed in `item_secure_exceptions` can be
+  locked (`FUN_394df4a0`; the 1.2 DB has 135 secure categories and the single exception row
+  3006, an item absent from the 1.2 `items` table). Locking sets `ItemFlag.Secure`; unlocking
+  sets `unsecure_time = now + content_configs[43] * 60` (the client's
+  `X2Item.GetSecurityUnlockDelayTime` reads `FUN_395720e0(0x2b)`; its dialogs divide the value
+  by 60 to print hours, so the 1.2 value 4320 is 4320 minutes = 72 hours) and keeps the flag, so
+  the item stays locked until `UpdateItemTimers` clears it and sends `ITEM_UNLOCK_EXCESS`. The reply task is `SCItemTaskSuccessPacket` with `ItemUpdateSecurity`;
+  the `isUnsecureExcess` / `isUnSecureSet` / `isUnpack` combination is inferred from the client's
+  userdata field names and the `ITEM_LOCK` / `ITEM_UNLOCK` / `ITEM_UNLOCK_EXCESS` task types
+  (**CAPTURE-PENDING**, case item-lock-flow: no 1.2 capture of these server replies exists yet).
+  A locked item is refused by the NPC store sale, specialty-pack sale, player trade put-up and
+  completion, mail attachment (mail result `ITEM_LOCKED` 26), auction put-up, destroy, item-look
+  conversion, disenchant, split/merge/move/swap (the client's drag validation returns 664 for
+  either side, `FUN_390455d0`/`FUN_39045850`), coffer moves, locked design/furniture placement,
+  regrade and lunagem targets, and putting down or dropping a locked trade pack, with
+  `item_secure_condition` (664; the 10.x zone server uses 664 for the same item operations).
+  `ItemContainer::ConsumeItem` skips locked stacks; crafting, quest hand-ins and reagent checks
+  no longer count them, and a cast whose only reagent stacks are locked is refused with the
+  client's `SkillResult.ItemLocked` (0x25). `CSEquipmentsSecure` locks every equipment slot
+  including slot 26: the client's `FUN_394e5dd0` loops that slot too (the special `0x1a` entry),
+  and it checks the flag rather than the item category, so the server mirrors that. The lock
+  handlers send their error after the bag lock is released. Equip/unequip of a locked item is
+  refused by the same move guard (the client's drag check covers it).
 * systems::economy (item procs, 2026-11): procs fire where the C# never did. Sources, rebuilt
   by the gear-bonus pass (`apply_gear_buffs` -> `procs::refresh`, so equip / unequip, login,
   repair, gear break and gem changes all refresh them): set
