@@ -56,6 +56,9 @@ mod cinema_mate_tests;
 #[path = "deck_standing_tests.rs"]
 mod deck_standing_tests;
 
+#[path = "mate_dash_skill_tests.rs"]
+mod mate_dash_skill_tests;
+
 #[path = "pr38_regression_tests.rs"]
 mod pr38_regression_tests;
 
