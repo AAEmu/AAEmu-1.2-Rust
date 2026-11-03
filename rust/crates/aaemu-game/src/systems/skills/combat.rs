@@ -383,8 +383,12 @@ fn do_die_after_claim(
     let mut wait = 0;
     if let Some(p) = victim.as_player() {
         // Escalating respawn timer — runs BEFORE base.DoDie sends SCUnitDeathPacket
-        compute_death_wait_time(p, now_ms());
-        (lost_exp, durability_loss) = character_death_losses(server, p);
+        compute_death_wait_time(server, p, now_ms());
+        // `no_penalty` NPCs (guards, siege cannons, battlefield pets): the 1.2 column the
+        // port never read. The killing blow's attribution is the killer object (a skill / DoT
+        // passes its original caster), so a lethal DoT of such an NPC counts.
+        (lost_exp, durability_loss) =
+            character_death_losses(server, p, !killer_is_no_penalty(server, killer));
         wait = p.data().rez_wait_duration;
     }
     if let Some(n) = victim.as_npc() {
@@ -427,14 +431,49 @@ fn do_die_after_claim(
     }
 }
 
-/// `DeathWaitTimesSeconds`: escalating death respawn wait times; resets after
-/// `DeathCountResetMinutes` (5) without dying.
-const DEATH_WAIT_TIMES_SECONDS: [i32; 9] = [15, 30, 60, 90, 120, 150, 180, 210, 240];
-const DEATH_COUNT_RESET_MS: i64 = 5 * 60_000;
+/// `DeathWaitTimesSeconds`: the C# port's hard-coded escalation (15..240 s) and its 5-minute
+/// reset. The 1.2 `resurrection_waiting_times` table replaces it; these values are only the
+/// fallback when a compact database has no rows (the C# behaviour), so an old database does not
+/// start granting instant resurrections.
+const LEGACY_DEATH_WAIT_TIMES_SECONDS: [i32; 9] = [15, 30, 60, 90, 120, 150, 180, 210, 240];
+const LEGACY_DEATH_COUNT_RESET_MS: i64 = 5 * 60_000;
 /// `PvpAssistWindowSeconds`.
 const PVP_ASSIST_WINDOW_MS: i64 = 30_000;
 /// `WarZoneHonorLoss` (clamped to the victim's current honor).
 const WAR_ZONE_HONOR_LOSS: i32 = 10;
+
+/// True when the killing object is an NPC whose template has `no_penalty` (guards, siege
+/// cannons, battlefield pets, alliance NPCs). Killer attribution passes the original caster for
+/// skill / DoT hits, so the flag follows the source the death packet names.
+fn killer_is_no_penalty(server: &GameServer, killer: Option<&WorldObject>) -> bool {
+    let Some(npc) = killer.and_then(WorldObject::as_npc) else {
+        return false;
+    };
+    let template_id = npc.data().unit.template_id;
+    server
+        .game_data
+        .systems
+        .npcs
+        .npc
+        .template(template_id)
+        .is_some_and(|t| t.no_penalty)
+}
+
+/// The player's zone is a zone group whose dominion siege is running (`SiegeState::active_at`).
+fn player_died_in_active_siege(server: &GameServer, zone_key: u32, now: i64) -> bool {
+    let group = server
+        .game_data
+        .zones
+        .zone_by_key(zone_key)
+        .map_or(0, |z| z.group_id);
+    server
+        .systems
+        .housing
+        .dominions
+        .get(group)
+        .and_then(|state| state.siege)
+        .is_some_and(|siege| siege.active_at(now.div_euclid(1000)))
+}
 
 /// `RecordPvpDamageFrom(attacker)`.
 pub fn record_pvp_damage_from(victim: &PlayerRef, attacker_id: u32) {
@@ -462,24 +501,55 @@ fn record_at(history: &mut Vec<(u32, i64)>, id: u32, now: i64) {
 }
 
 /// `ComputeDeathWaitTime()`: stores the escalating wait in `RezWaitDuration` and `DeadTime`.
-pub fn compute_death_wait_time(p: &PlayerRef, now: i64) {
+///
+/// The 1.2 `resurrection_waiting_times` rows drive it (see
+/// [`crate::systems::skills::data::ResurrectionWaitingTime`]): the 1-based consecutive-death
+/// step selects the row, `penalty_duration` is the window that keeps the step alive, and the
+/// zone's active dominion siege selects `siege_waiting_time` over `waiting_time`. With no rows
+/// (an old or fixture database) the port's old hard-coded table is kept.
+pub fn compute_death_wait_time(server: &GameServer, p: &PlayerRef, now: i64) {
+    let zone_key = p.data().unit.transform.zone_id;
+    let siege = player_died_in_active_siege(server, zone_key, now);
+    let data = &server.game_data.systems.skills;
     let mut c = p.data();
     let s = &mut c.skill_char;
-    if s.last_death_time_ms != 0 && now - s.last_death_time_ms >= DEATH_COUNT_RESET_MS {
+    // The window belongs to the step the previous death reached (row 1 before the first
+    // death); every real row carries the same 600 s.
+    let prev_step = u32::try_from(s.consecutive_death_count.max(1)).unwrap_or(u32::MAX);
+    let penalty_ms = data
+        .resurrection_waiting_time(prev_step)
+        .map_or(LEGACY_DEATH_COUNT_RESET_MS, |row| {
+            i64::from(row.penalty_duration) * 1000
+        });
+    if s.last_death_time_ms != 0 && now - s.last_death_time_ms >= penalty_ms {
         s.consecutive_death_count = 0;
     }
-    let index = s
-        .consecutive_death_count
-        .min(DEATH_WAIT_TIMES_SECONDS.len() - 1);
-    let wait_seconds = DEATH_WAIT_TIMES_SECONDS[index];
+    let step = u32::try_from(s.consecutive_death_count.saturating_add(1)).unwrap_or(u32::MAX);
+    let wait_ms = match data.resurrection_waiting_time(step) {
+        Some(row) => {
+            let seconds = if siege {
+                row.siege_waiting_time
+            } else {
+                row.waiting_time
+            };
+            i64::from(seconds) * 1000
+        }
+        None => {
+            let index = s
+                .consecutive_death_count
+                .min(LEGACY_DEATH_WAIT_TIMES_SECONDS.len() - 1);
+            i64::from(LEGACY_DEATH_WAIT_TIMES_SECONDS[index]) * 1000
+        }
+    };
     s.consecutive_death_count += 1;
     s.last_death_time_ms = now;
     let count = s.consecutive_death_count;
-    c.rez_wait_duration = wait_seconds * 1000;
+    c.rez_wait_duration = i32::try_from(wait_ms).unwrap_or(i32::MAX);
     c.dead_time = now.div_euclid(1000);
     tracing::debug!(
-        "Death #{count} for {}: respawn wait = {wait_seconds}s",
-        c.unit.name
+        "Death #{count} for {}: respawn wait = {} ms (siege: {siege})",
+        c.unit.name,
+        c.rez_wait_duration
     );
 }
 
@@ -488,7 +558,15 @@ pub fn compute_death_wait_time(p: &PlayerRef, now: i64) {
 /// the main world, `LastExpLoss` (`GetExpLoss(level, ExpLossRateAtDeath)` capped to the exp of
 /// the current level, 80 % of it recoverable; a free resurrection offer below
 /// `MinimumExpLossLevel`). Returns `(LastExpLoss, LastDurabilityLoss)`.
-pub(super) fn character_death_losses(server: &GameServer, p: &PlayerRef) -> (i32, u8) {
+///
+/// `penalty == false` for a kill by a `no_penalty` NPC: exp and durability are not touched, but
+/// the stale resurrection offer is still cleared and the free resurrection below the minimum
+/// level is still offered.
+pub(super) fn character_death_losses(
+    server: &GameServer,
+    p: &PlayerRef,
+    penalty: bool,
+) -> (i32, u8) {
     let world = &server.config.get().world;
     let exp_table = &server.game_data.experience;
     let (level, experience, instance_id) = {
@@ -496,7 +574,7 @@ pub(super) fn character_death_losses(server: &GameServer, p: &PlayerRef) -> (i32
         (c.unit.level, c.experience, c.unit.transform.instance_id)
     };
     let qualifies = i32::from(level) >= world.minimum_exp_loss_level;
-    let durability_loss = if qualifies {
+    let durability_loss = if qualifies && penalty {
         server.game_data.items.config.death_durability_loss_ratio
     } else {
         0
@@ -510,15 +588,17 @@ pub(super) fn character_death_losses(server: &GameServer, p: &PlayerRef) -> (i32
         && instance_id == crate::models::character::DEFAULT_INSTANCE_ID
     {
         if qualifies {
-            // ExperienceManager.GetExpLoss(level, rate)
-            let this_level = exp_table.exp_for_level(level, false);
-            let next_level = exp_table.exp_for_level(level.saturating_add(1), false);
-            let loss = (f64::from(next_level - this_level)
-                * f64::from(world.exp_loss_rate_at_death))
-            .floor() as i32;
-            lost_exp = loss.min(experience - this_level);
-            recoverable = (lost_exp as f32 * 0.80f32).round() as i32;
-            p.data().recoverable_exp = recoverable;
+            if penalty {
+                // ExperienceManager.GetExpLoss(level, rate)
+                let this_level = exp_table.exp_for_level(level, false);
+                let next_level = exp_table.exp_for_level(level.saturating_add(1), false);
+                let loss = (f64::from(next_level - this_level)
+                    * f64::from(world.exp_loss_rate_at_death))
+                .floor() as i32;
+                lost_exp = loss.min(experience - this_level);
+                recoverable = (lost_exp as f32 * 0.80f32).round() as i32;
+                p.data().recoverable_exp = recoverable;
+            }
         } else {
             // Free resurrect below level 10
             p.send(super::packets_special::SCNotifyResurrectionPacket {
@@ -527,7 +607,7 @@ pub(super) fn character_death_losses(server: &GameServer, p: &PlayerRef) -> (i32
             p.data().skill_char.resurrect_offer = true;
         }
     }
-    if lost_exp > 0 || recoverable > 0 {
+    if penalty && (lost_exp > 0 || recoverable > 0) {
         p.data().experience -= lost_exp;
         p.send(super::progress::SCRecoverableExpPacket {
             obj_id: p.obj_id,
