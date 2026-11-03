@@ -73,6 +73,14 @@ pub fn attachment(f: &DoodadFuncAttachment, ctx: &DoodadCtx<'_>, caster: Option<
     let Some(player) = DoodadCtx::as_player(caster) else {
         return;
     };
+    // A transfer passenger must leave the carriage before taking a bench / ship seat.
+    if crate::systems::vehicles::transfers::is_boarded(ctx.server, player) {
+        crate::systems::vehicles::bind_error(
+            player,
+            crate::systems::economy::error_message::SLAVE_UNBIND_FIRST,
+        );
+        return;
+    }
     if f.bond_kind_id > bond_kind::BOND_INVALID {
         let character_id = player.data().id;
         // ask for a free meta number for landing

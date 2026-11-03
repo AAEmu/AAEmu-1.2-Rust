@@ -15,9 +15,11 @@ pub struct Transfer {
     pub attach_point_id: u8,
     /// `Bounded?.ObjId ?? 0`.
     pub bounded_obj_id: u32,
-    /// `AttachedDoodads` / `AttachedCharacters` (obj ids).
+    /// `AttachedDoodads` / `AttachedCharacters`. The C# `AttachedCharacters` is a
+    /// `List<Character>` with no seat; the 1.2 client needs the attach point to seat a
+    /// passenger (`SCUnitAttachedPacket`), so this keeps `(point, obj id)` like `Slave`.
     pub attached_doodads: Vec<u32>,
-    pub attached_characters: Vec<u32>,
+    pub attached_characters: Vec<(u8, u32)>,
     pub spawner_id: u32,
     pub path_point_index: i32,
     pub speed: f32,
