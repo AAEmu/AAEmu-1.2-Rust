@@ -412,6 +412,14 @@ pub fn purchase(f: &DoodadFuncPurchase, ctx: &DoodadCtx<'_>, caster: Option<&Wor
         send_error(player, err::BAG_FULL);
         return;
     }
+    // Only the coin-item form buys here. The money form is the client's purchase dialog
+    // (`CSBuyItems`; `CSBuyCoinItemPacket` is the coin form) and must not grant the item for
+    // free when the doodad is used directly. The C# consumed template 0 and answered
+    // `NotEnoughItem`.
+    if f.coin_item_id == 0 || f.coin_count < 1 {
+        send_error(player, err::NOT_ENOUGH_ITEM);
+        return;
+    }
     // Per-character purchase allowance (`items.limited_sale_count` / `items.one_time_sale`).
     // Reserved before the coin is spent; given back below when the purchase still fails.
     if !eco.try_claim_shop_purchase(server, player, f.item_id, f.count) {
@@ -427,9 +435,21 @@ pub fn purchase(f: &DoodadFuncPurchase, ctx: &DoodadCtx<'_>, caster: Option<&Wor
     ) <= 0
     {
         eco.release_shop_purchase(server, player, f.item_id, f.count);
-        send_error(player, err::NOT_ENOUGH_ITEM);
+        send_error(player, err::NOT_ENOUGH_COIN);
         return;
     }
+    // The coin is already spent: a failed grant gives it back (the stack just left the bag, so
+    // the refund fits) and releases the claim.
+    let refund_coin = || {
+        eco.acquire_item(
+            server,
+            player,
+            item_task::DOODAD_INTERACTION,
+            f.coin_item_id,
+            f.coin_count,
+            -1,
+        );
+    };
     let name = player.data().unit.name.clone();
     if eco.is_auto_equip_trade_pack(server, f.item_id) {
         if !eco.try_equip_new_backpack(
@@ -440,6 +460,7 @@ pub fn purchase(f: &DoodadFuncPurchase, ctx: &DoodadCtx<'_>, caster: Option<&Wor
             f.count,
         ) {
             eco.release_shop_purchase(server, player, f.item_id, f.count);
+            refund_coin();
             tracing::error!(
                 "DoodadFuncPurchase: Failed to auto-equip backpack item {} for player {}",
                 f.item_id,
@@ -456,6 +477,7 @@ pub fn purchase(f: &DoodadFuncPurchase, ctx: &DoodadCtx<'_>, caster: Option<&Wor
         -1,
     ) {
         eco.release_shop_purchase(server, player, f.item_id, f.count);
+        refund_coin();
         tracing::error!(
             "DoodadFuncPurchase: Failed to create item {} for player {}",
             f.item_id,
