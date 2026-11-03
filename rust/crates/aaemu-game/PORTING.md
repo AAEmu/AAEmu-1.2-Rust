@@ -2062,6 +2062,16 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   old behavior except for the client's `item_sockets_empty` rejection. Existing items with more
   gems than the current limit are left untouched at load, and regrade keeps their gems unchanged
   (as the C# did; the client only warns that a downgrade can lose them).
+* systems::economy (grade enchanting, 2026-11): the C# `GradeEnchant.Execute` never read
+  `items.grade_enchantable`, so it regraded any item. Rust loads the column into
+  `ItemTemplate.grade_enchantable` and refuses a non-enchantable target with error 18
+  (`invalid_target`) and `skill_cancelled` (the socketing refusal pattern), before the regrade
+  roll, the gold debit or the charm take; cancelling refunds the scroll, which the cast debits
+  as its `UseSkillAsReagent` source item. This follows the 1.2 client's own check: its
+  `GradeEnchant` special-effect validation (`FUN_393a0130`, case 0x5c) returns SkillResult
+  `INVALID_TARGET` (0x22) when the target template's `grade_enchantable` is false. Only
+  `GradeEnchant` uses the flag; 1.2 has no awakening/evolving upgrade path. Real data: 4 564
+  `'t'` rows (all equipment) and 16 918 `'f'` rows.
 * systems::economy / npcs / skills (lunafrost, 2026-10): the C# `InteractionEffect` passed the
   `SkillItem` caster and `SkillCastItemTarget` to `MagicalEnchant.Execute`; the Rust bridge dropped
   them, so a lunafrost never applied. They are forwarded now. `MagicalEnchant` also looks the item up
