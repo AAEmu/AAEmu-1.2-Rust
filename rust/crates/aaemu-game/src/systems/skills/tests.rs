@@ -1412,3 +1412,6 @@ async fn pvp_kill_advances_a_conflict_zone_that_returned_to_tension() {
 
 #[path = "music_started_tests.rs"]
 mod music_started_tests;
+
+#[path = "stealth_tests.rs"]
+mod stealth_tests;

@@ -593,7 +593,7 @@ live acceptance remain pending.
 | `LocalizationManager` | `systems/services/localization.rs` | done | 263 635 rows / 8 locales on the real DB. |
 | `ModelManager`, `Models/Game/Models/*` | `systems/services/models.rs` | done | Counts checked against compact.sqlite3 (gated test). |
 | `MusicManager`, `SongData`, music packets (`CSSaveUserMusicNotesPacket`, `CSSendUserMusicPacket`, `CSRequestMusicNotesPacket`, `CSEndMusicPacket`, `SCUserNoteLoadedPacket`) | `systems/services/music.rs` | done | `CreateSheetMusic` item work through `SheetMusicInventory` (economy; its `ItemSkillHooks::midi_cache` / `create_sheet_music` call this manager). |
-| `RadarManager`, `TelescopeRegistrationEntry`, telescope / fish finder packets | `systems/services/radar.rs` | done | Registered from `BuffTemplate.Start` / `Dispel` (skills), unregistered on leave. Ship lists through `RadarShipHooks` (vehicles). |
+| `RadarManager`, `TelescopeRegistrationEntry`, telescope / fish finder packets | `systems/services/radar.rs` | done | Registered from `BuffTemplate.Start` / `Dispel` (skills), unregistered on leave. Ship lists through `RadarShipHooks` (vehicles). The radar / telescope feature is ported, not missing (gap-audit 2026-11-02 research `stealth.md` §0.1). Open items, none of them a port gap: shipyards are not sent in `SCTelescopeUnits` (`radar.rs` `TODO (C#): Add Shipyards`, ~:327; the record slot is UNKNOWN); the GM access-level range hack is still in place (`radar.rs` ~:341, `TODO (C#): Make a proper GM flag`); `evade_telescope` (buffs 4887 / 4950, "free from the telescope's gaze") is not consumed, as in the C# (which unit carries the buff is UNKNOWN). |
 | `Models/Tasks/ShutdownTask`, `SCNoticeMessagePacket` | `systems/services/shutdown.rs` | done | Count-down notices, final save, process exit; held in `server.systems.services.shutdown_task` (`SaveManager.ShutdownTask`). Buy-back wipe through `BUYBACK_WIPE` (economy). **Deviation:** the C# saved and exited without telling the clients (every client showed a disconnect error and quit). At T-0 the Rust task first broadcasts "The server is shutting down for maintenance.", refuses world entries (`GameServer::is_shutting_down`: `X2EnterWorld` / `CSSelectCharacter` / `CSSpawnCharacter` get `SCKicked(2)` + close), sends every connection `ConnCommand::ReturnToWorldList` (in-world: `LeaveWorldTask` to character select with no timer, i.e. save + `SCLeaveWorldGranted(1)` + `ChangeState(0)`; the client stays on its game connection and loads the lobby, so the world list request follows 2 s later: `GLPlayerReconnect` -> `LGPlayerReconnect` -> `SCReconnectAuth`, the `CSLeaveWorld(ServerSelect)` path, re-sent every 2 s to every connection still there, new ones included), waits up to 10 s for the clients to disconnect, kicks the rest with `SCKicked(2, "Server maintenance")`, then does the final save (3 tries), `shutdown::stop_server` (shared with the Ctrl+C path in `main.rs`) and the exit. A failed final save aborts the shutdown (as before: no exit) and reopens world entry; `/scripts shutdown cancel` is refused once T-0 passed. `/scripts forcedshutdown` still exits at once. |
 | `SusManager` | `systems/services/sus.rs` | done | `audit_char_sus` log + speed analysis; the 5 s `FinalizeTransform` caller and the social / npcs log calls are not wired yet (see deviations). |
 | `GameData/Framework` (`GameDataManager`, `IGameDataLoader`, `GameDataAttribute`) | `data/mod.rs`, `systems::SystemsData::load` | done (by design) | The reflection-driven loader list is the explicit `GameData::load` + per-subsystem `Data::load`; `Load` / `PostLoad` order is the call order there. |
@@ -1529,7 +1529,22 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   restore-mana effects read the amount; the Charge `SpecialEffect` rows are left unchanged.
 * systems::skills: `CompressedGamePackets` (DD04) are written with stored (uncompressed) deflate
   blocks; the client accepts any valid deflate stream.
-* systems::skills: the radar scans of `SkillTargetingUtil` are not ported.
+* systems::skills (stealth, 2026-11): the C# stealth predicate was buff tag 100
+  (`TagsEnum.Stealth`), but the 1.2 client hides a unit from the `buffs.stealth` column
+  (`ClientUnit::ApplyStealth` / `CanDetect`, x2game `FUN_3935c270` / `FUN_3935a2b0`; the client
+  ships the same buff table). The column differs from tag 100 in 40 rows: 71 stealth buffs, of
+  which 30 lack tag 100 (255, 719, 1078, 1080, 1371, 1432, 1443, 1502, 1514, 1573, 2284, 2341,
+  2345, 2486, 2554, 2979, 3155, 3527, 3594, 3752, 3772, 3866, 4099, 4566, 4631, 4648, 5205, 6058,
+  6474, 7003), and 10 tag-100 buffs that are not stealth (557, 1678, 1899, 1941, 1966, 3637, 5901,
+  6260, 6380, 7164). `buffs::has_stealth` uses the column for the AI `CanSeeTarget` and plot
+  conditions 15/16 (deviation from C#). `skills.keep_stealth` (33 skills, 30 with
+  `cancel_ongoing_buffs`) was loaded by the C# but never consumed: a keep_stealth skill now skips
+  its active stealth buffs in its own start/use cancel loop (`trigger_remove_on_keep_stealth`) and
+  in its `SkillUse` (special 33) chain, while attacking / taking damage still break stealth
+  through the buff's own remove flags. The real-DB test lists the 71 / 51 / 33 rows. Still open:
+  detection range / angle (formulas 4 / 10, unit attribute 94) is not evaluated, so NPC AI treats
+  a stealthed unit as invisible at any range outside the C# `< 1.0` / `< 0.5` fallbacks, and the
+  `detect_stealth` / `anti_stealth` columns are not consumed (research `stealth.md`, task B).
 * systems::skills: `SpecialEffect` repeats are scheduled tasks instead of `Thread.Sleep` loops.
 * systems::skills (cuboid AoE): `AreaShape.ComputeCuboid` tested the triangles (v0,v1,v2) and
   (v1,v2,v3) of a rectangle whose vertices run around it, so the two overlapped and the wedge at
@@ -4045,3 +4060,16 @@ Persistence: `character_cooldowns` (`character_id`, `cooldown_type` 0 = skill id
 `UnitCooldowns::check_skill_cooldown`, so a cast before the restored expiry is refused with
 `COOLDOWN_TIME`. **Deviation:** the C# had no persistence and no real cooldown packet; this port
 adds both.
+
+## Stealth capture-pending (2026-11)
+
+* **STEALTH-C** `SCUnitState` character flag bit 5 (`0x0020`, GM invisible). The C#
+  `SCUnitStatePacket.Write` set bit 5 from `character.Invisible`, but the 1.2 client side is
+  unproven: `OnUnitState` (`FUN_391d4c30`) applies the parsed state through `FUN_391b90a0`,
+  which is a thunk in the x2game decompile, and no reader of the flags byte's bit 5 was located.
+  Bit 3 (force attack) is verified (`397c9480` -> `398a1f90` -> unit+0x3bbc); `SetInvisible`
+  writes unit+0x3bbb, but nothing in the decompile shows it coming from the state flags. The Rust
+  keeps writing only bit 3 (`world/unit_state.rs`), so a late observer of a GM who toggled
+  `/invisible` still sees the GM until the next `SCUnitInvisible` broadcast, and `unit.invisible`
+  is not persisted across a relog. Capture with the original client (GM `/invisible`, second
+  client enters view / relogs) before setting bit 5.
