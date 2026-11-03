@@ -668,3 +668,111 @@ async fn select_applies_the_pirate_faction_at_the_threshold_once() {
     assert!(find(&observer_client.drain()).is_empty());
     assert_eq!(observer.data().unit.faction_id, 101);
 }
+
+/// A character whose offline infamy crossed the threshold is converted at select, before
+/// `CSNotifyInGamePacket` runs `TeamManager.UpdateAtLogin`; the party removal must therefore
+/// find the team by membership instead of relying on `InParty` (still false at that point),
+/// otherwise `UpdateAtLogin` re-joins the new pirate to the team.
+#[tokio::test]
+async fn select_releases_a_converted_pirate_from_its_team() {
+    use crate::data::skills::{BuffKind, BuffTemplate};
+    use crate::data::world_data::SystemFaction;
+    use crate::data::GameData;
+    use crate::test_support::test_server_with;
+
+    let mut data = GameData::empty();
+    for id in [3710u32, 4832] {
+        data.skills
+            .buffs
+            .insert(id, BuffTemplate::simple(id, BuffKind::Good));
+    }
+    for (id, mother) in [(101u32, 0u32), (161, 0)] {
+        data.factions.add(SystemFaction {
+            id,
+            mother_id: mother,
+            ..Default::default()
+        });
+    }
+    let server = test_server_with(data);
+    let mut owner_client = TestClient::new(&server, 8, 1008);
+    let owner = spawn_player(
+        &server,
+        &owner_client,
+        test_character(8, "Owner", 105.0, 100.0),
+        0x108,
+    );
+    let mut other_client = TestClient::new(&server, 9, 1009);
+    let other = spawn_player(
+        &server,
+        &other_client,
+        test_character(9, "Other", 106.0, 100.0),
+        0x109,
+    );
+    let mut member_client = TestClient::new(&server, 7, 1007);
+    let member = spawn_player(
+        &server,
+        &member_client,
+        test_character(7, "Crook", 100.0, 100.0),
+        0x107,
+    );
+    for p in [&owner, &other, &member] {
+        p.data().is_online = true;
+    }
+    let teams = &server.systems.social.teams;
+    teams.ask_to_join(&server, &owner, "", 0, true, Some(&member));
+    teams.reply_to_join_team(
+        &server,
+        &member,
+        0,
+        true,
+        owner.character_id,
+        false,
+        "",
+        false,
+    );
+    teams.ask_to_join(&server, &owner, "", 0, true, Some(&other));
+    teams.reply_to_join_team(
+        &server,
+        &other,
+        0,
+        true,
+        owner.character_id,
+        false,
+        "",
+        false,
+    );
+    assert!(member.data().in_party && owner.data().in_party && other.data().in_party);
+    assert!(teams.active_team_by_unit(member.character_id).is_some());
+
+    // End the old session without the team / world cleanup, then select the character again
+    // with the infamy that crossed the threshold while it was away.
+    server.world.try_remove_character(member.obj_id);
+    let mut character = test_character(7, "Crook", 100.0, 100.0);
+    character.infamy_point = 3_000;
+    session::select_loaded(
+        &server,
+        &mut member_client.conn,
+        character,
+        SelectDbData::default(),
+    )
+    .expect("select");
+    let player = member_client.conn.active_char.clone().expect("selected");
+    assert_eq!(player.data().unit.faction_id, 161);
+    assert!(
+        teams.active_team_by_unit(player.character_id).is_none(),
+        "the new pirate is not in the team after select"
+    );
+    assert!(!player.data().in_party);
+
+    // `UpdateAtLogin` must not bring the pirate back into the other faction's team.
+    crate::systems::social::session::on_notify_in_game_team(&server, &player);
+    assert!(teams.active_team_by_unit(player.character_id).is_none());
+    assert!(!player.data().in_party);
+    let team = teams
+        .active_team_by_unit(owner.character_id)
+        .expect("the remaining party survives");
+    assert_eq!(team.members_count(), 2);
+    assert!(team.is_member(owner.character_id) && team.is_member(other.character_id));
+    owner_client.drain();
+    other_client.drain();
+}

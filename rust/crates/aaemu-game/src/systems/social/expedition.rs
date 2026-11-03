@@ -1134,7 +1134,13 @@ pub async fn change_member_role(server: &GameServer, p: &PlayerRef, new_role: u8
 }
 
 /// `ExpeditionManager.ChangeOwner(connection, newOwnerId)`: keep the persistent owner id,
-/// name and roles consistent; transferring to oneself is a no-op.
+/// name and roles consistent; transferring to oneself is a no-op. A nation founded by this
+/// guild moves its king (`owner_character_id`) with the guild owner.
+///
+/// There is no siege / territory refusal here: the 1.2 error `expedition_owner_cannot_change_
+/// during_siege` (568) exists as a constant, but neither the C# nor this port checks it on the
+/// voluntary path, and the forced pirate-owner transfer must not be blocked by a siege. If a
+/// 568 guard is ever added it belongs to the client path only (PORTING.md, PIRATE-1).
 pub async fn change_owner(server: &GameServer, owner: &PlayerRef, new_owner_id: u32) {
     if new_owner_id == owner.character_id {
         return;
@@ -1165,6 +1171,11 @@ pub async fn change_owner(server: &GameServer, owner: &PlayerRef, new_owner_id: 
     let Some((old, new, members)) = res else {
         return;
     };
+    server
+        .systems
+        .social
+        .nations
+        .on_expedition_owner_changed(id, new.0, &new.2);
     send_to_members(
         server,
         &members,
@@ -1195,6 +1206,19 @@ pub async fn change_owner(server: &GameServer, owner: &PlayerRef, new_owner_id: 
     save(server, id).await;
 }
 
+/// Whether the guild owns a dominion or has a scheduled / active siege registration: the
+/// voluntary `Disband` refusal (1.2 errors 301 `expedition_owner_dismiss` and 469
+/// `expedition_dismiss_in_siege`).
+fn owns_territory_or_siege(server: &GameServer, id: u32) -> bool {
+    server.systems.housing.dominions.all().iter().any(|d| {
+        d.owner_expedition_id == id
+            || d.siege.as_ref().is_some_and(|siege| {
+                siege.status != crate::systems::housing::dominion::SiegeStatus::Finished
+                    && (siege.attacker_expedition_id == id || siege.defender_expedition_id == id)
+            })
+    })
+}
+
 /// `ExpeditionManager.Disband(owner)`. The guild stays in the list (renamed
 /// `$deleted-guild-<id>`, owner 0) as in C#.
 pub async fn disband(server: &GameServer, owner: &PlayerRef) -> bool {
@@ -1214,14 +1238,7 @@ pub async fn disband(server: &GameServer, owner: &PlayerRef) -> bool {
             return false;
         }
         let id = e.id();
-        if server.systems.housing.dominions.all().iter().any(|d| {
-            d.owner_expedition_id == id
-                || d.siege.as_ref().is_some_and(|siege| {
-                    siege.status != crate::systems::housing::dominion::SiegeStatus::Finished
-                        && (siege.attacker_expedition_id == id
-                            || siege.defender_expedition_id == id)
-                })
-        }) {
+        if owns_territory_or_siege(server, id) {
             crate::world::session::send_message(
                 owner,
                 crate::systems::social::chat::chat_type::SYSTEM,
@@ -1264,15 +1281,39 @@ fn dismiss_expedition(server: &GameServer, id: u32) {
     server.systems.social.nations.on_expedition_disbanded(id);
 }
 
+/// The member who inherits leadership when a forced change removes the owner: the highest
+/// `role` first, then the longest membership. `ExpeditionMember` has no join timestamp;
+/// `last_world_leave_time` is the only per-member time (set when the member joins and refreshed
+/// on login / logout), so its smallest value is the available stand-in for the longest
+/// membership; the character id breaks a remaining tie (ids are allocated in creation order).
+fn successor_owner(e: &Expedition, exclude: u32) -> Option<u32> {
+    e.members
+        .iter()
+        .filter(|m| m.character_id != exclude)
+        .min_by_key(|m| {
+            (
+                std::cmp::Reverse(m.role),
+                m.last_world_leave_time,
+                m.character_id,
+            )
+        })
+        .map(|m| m.character_id)
+}
+
 /// `Character.SetFaction`'s guild removal, run after the character's data lock is released.
 ///
-/// The C# calls `ExpeditionManager.Kick(this.Connection, this.Id)`, which acts only on roles
-/// whose policy has `Expel` (ordinary members stay in the guild) and removes an owner like any
-/// other member, leaving `OwnerId` pointing at a non-member. The 1.2 client refuses an owner's
-/// leave (`expedition_owner_cannot_leave`, error 310) and offers only the dismiss path
-/// (`expedition_owner_dismiss`, 301), so the forced change removes an ordinary member as a
-/// normal leave and dismisses the guild when the member is its owner. Owner decision
-/// (2026-11-03, PIRATE-1): a guild owner's forced faction change dismisses the guild.
+/// The 1.2 tips 2833 / 2848 say a member who becomes a pirate is kicked from the guild, with no
+/// owner exception, and the C# `Character.SetFaction` called `ExpeditionManager.Kick`, which
+/// acted only on roles whose policy has `Expel` (so ordinary members stayed). Owner decision
+/// (2026-11-03, PIRATE-1): an ordinary member leaves as a normal `Leave`; an owner is removed
+/// too, but first hands the leadership to the remaining member chosen by [`successor_owner`]
+/// through the normal [`change_owner`] path (same `SCExpeditionOwnerChanged` / role packets and
+/// save, and without the 568 siege refusal, which this port does not implement). Only an owner
+/// who was the last member dismisses the guild.
+///
+/// The guild's territory, siege registrations and nation stay with the transferred guild; only
+/// the last-member dismissal releases a dominion / cancels its siege (the voluntary 301 / 469
+/// refusal cannot apply: there is no guild left to hold it).
 pub async fn remove_member_for_faction_change(server: &GameServer, p: &PlayerRef) {
     let Some(e) = expedition_of(server, p) else {
         return;
@@ -1281,11 +1322,33 @@ pub async fn remove_member_for_faction_change(server: &GameServer, p: &PlayerRef
     if e.member(p.character_id).is_none() {
         return;
     }
-    if e.faction.owner_id == p.character_id {
-        dismiss_expedition(server, id);
-        save(server, id).await;
-    } else {
+    if e.faction.owner_id != p.character_id {
         leave(server, p).await;
+        return;
+    }
+    match successor_owner(&e, p.character_id) {
+        Some(new_owner_id) => {
+            change_owner(server, p, new_owner_id).await;
+            leave(server, p).await;
+        }
+        None => {
+            // The same housing.operation_lock as the voluntary disband; the guild cannot keep a
+            // dominion without members, so release it instead of refusing (see the doc above).
+            let _housing_operation = server
+                .systems
+                .housing
+                .operation_lock
+                .lock()
+                .expect("housing poisoned");
+            server
+                .systems
+                .housing
+                .dominions
+                .release_expedition(id, util::now_secs());
+            dismiss_expedition(server, id);
+            drop(_housing_operation);
+            save(server, id).await;
+        }
     }
 }
 

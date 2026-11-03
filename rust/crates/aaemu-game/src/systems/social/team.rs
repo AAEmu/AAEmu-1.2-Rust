@@ -1001,6 +1001,23 @@ impl TeamManager {
         target_id: u32,
         risky_action: u8,
     ) {
+        self.ask_risky_team_locked_from(server, st, unit, team_id, target_id, risky_action, false);
+    }
+
+    /// [`ask_risky_team_locked`](Self::ask_risky_team_locked) with the server-forced variant:
+    /// `server_forced` lifts the owner requirement for a self-removal (`Character.SetFaction`'s
+    /// `MemberRemoveFromTeam(this, this, Kick)`), which is not a client chooseable action.
+    #[allow(clippy::too_many_arguments)]
+    fn ask_risky_team_locked_from(
+        &self,
+        server: &GameServer,
+        st: &mut State,
+        unit: &PlayerRef,
+        team_id: u32,
+        target_id: u32,
+        risky_action: u8,
+        server_forced: bool,
+    ) {
         let Some(team) = (team_id != 0).then(|| st.teams.get_mut(&team_id)).flatten() else {
             return;
         };
@@ -1009,7 +1026,8 @@ impl TeamManager {
             risky_action::LEAVE | risky_action::KICK | risky_action::DISMISS
         ) || !team.is_member(unit.character_id)
             || (matches!(risky_action, risky_action::KICK | risky_action::DISMISS)
-                && team.owner_id != unit.character_id)
+                && team.owner_id != unit.character_id
+                && !(server_forced && unit.character_id == target_id))
             || (risky_action == risky_action::LEAVE && unit.character_id != target_id)
             || (risky_action != risky_action::DISMISS && !team.is_member(target_id))
         {
@@ -1388,6 +1406,27 @@ impl TeamManager {
             team.all_offline_since_ms = Some(util::now_ms());
         }
         clear_sync_state(&mut st, unit.character_id);
+    }
+
+    /// `Character.SetFaction`'s party removal (`MemberRemoveFromTeam(this, this, Kick)`),
+    /// looked up by membership instead of `InParty`: `CSSelectCharacter` applies an offline
+    /// infamy conversion before `CSNotifyInGamePacket` runs `UpdateAtLogin` (which would
+    /// otherwise re-join the new pirate), and an ordinary member could never satisfy the owner
+    /// check of the client kick path.
+    pub fn member_remove_for_faction_change(&self, server: &GameServer, unit: &PlayerRef) {
+        let mut st = self.lock();
+        let Some(team_id) = Self::team_id_by_unit(&st, unit.character_id) else {
+            return;
+        };
+        self.ask_risky_team_locked_from(
+            server,
+            &mut st,
+            unit,
+            team_id,
+            unit.character_id,
+            risky_action::KICK,
+            true,
+        );
     }
 
     /// `MemberRemoveFromTeam(unit, source, leaveType)`.

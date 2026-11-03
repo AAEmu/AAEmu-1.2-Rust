@@ -306,6 +306,34 @@ impl NationManager {
             .any(|i| i.invitee_character_id == invitee_character_id && i.is_valid_at(now_ms))
     }
 
+    /// The founding expedition handed its leadership to `character_id`: the nation's king
+    /// (`owner_character_id`, the faction record's `owner_id`) follows the guild owner. Called
+    /// from `expedition::change_owner`, both for the client transfer and for the forced one when
+    /// a pirate owner is removed (owner decision 2026-11-03, PIRATE-1). The nation, its
+    /// relations and the founding guild stay unchanged; the periodic save persists the new
+    /// king. Returns whether a nation was updated.
+    pub fn on_expedition_owner_changed(
+        &self,
+        expedition_id: u32,
+        character_id: u32,
+        name: &str,
+    ) -> bool {
+        if expedition_id == 0 || character_id == 0 {
+            return false;
+        }
+        let mut changed = false;
+        for nation in self
+            .write()
+            .iter_mut()
+            .filter(|n| n.expedition_id == expedition_id)
+        {
+            nation.owner_character_id = character_id;
+            nation.owner_name = name.to_string();
+            changed = true;
+        }
+        changed
+    }
+
     /// The founding expedition disbanded: the nation stays as a kingless nation (NATION-5),
     /// but its stale expedition id must not capture a guild that later reuses the id.
     pub fn on_expedition_disbanded(&self, expedition_id: u32) {

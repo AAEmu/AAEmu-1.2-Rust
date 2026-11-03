@@ -502,10 +502,11 @@ impl QuestHooks for GameQuestHooks {
                 }
                 crate::systems::dispatch_buff_events(s, &WorldObject::from(&p))
             });
-        } else if became_pirate {
-            // No live player to notify (offline quest reward / tests): only the saved field.
-            c.unit.faction_id = crate::data::world_data::factions::PIRATE;
         }
+        // Offline (a quest reward stored while the character is away): the crime points are
+        // saved; the faction is left for `CSSelectCharacter` like the offline crime path
+        // (`add_offline_crime_points`), so the conversion gets the live player, the broadcast
+        // and the guild / party side effects.
     }
 
     fn acquire_default_item(

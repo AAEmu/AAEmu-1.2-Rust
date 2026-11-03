@@ -1110,6 +1110,67 @@ impl DominionManager {
         Ok(state)
     }
 
+    /// Releases every territory owned by `expedition_id` and cancels an unfinished siege it
+    /// defends or attacks (the tower identity and history stay). Used when a forced guild
+    /// dismissal leaves no member to hold the dominion; the 1.2 rules only forbid a disbanded
+    /// guild from keeping one, and there is no retail capture of this path (PORTING.md,
+    /// PIRATE-1). The released state has no owner (`owner_expedition_id = 0`), so it is valid
+    /// for the next load and can be declared again.
+    pub fn release_expedition(&self, expedition_id: u32, now_seconds: i64) -> Vec<DominionState> {
+        if expedition_id == 0 || now_seconds < 0 {
+            return Vec::new();
+        }
+        let mut inner = self.lock();
+        let zones: Vec<u32> = inner
+            .states
+            .iter()
+            .filter(|(_, entry)| {
+                let state = &entry.state;
+                state.owner_expedition_id == expedition_id
+                    || state.siege.as_ref().is_some_and(|siege| {
+                        siege.status != SiegeStatus::Finished
+                            && (siege.attacker_expedition_id == expedition_id
+                                || siege.defender_expedition_id == expedition_id)
+                    })
+            })
+            .map(|(zone, _)| *zone)
+            .collect();
+        let mut released = Vec::new();
+        for zone in zones {
+            let Ok(revision) = next_revision(&inner) else {
+                break;
+            };
+            let Some(entry) = inner.states.get(&zone) else {
+                continue;
+            };
+            let mut state = entry.state.clone();
+            if state.owner_expedition_id == expedition_id {
+                state.owner_expedition_id = 0;
+                state.reign_start_at = 0;
+            }
+            let cancels_siege = state.siege.as_ref().is_some_and(|siege| {
+                siege.status != SiegeStatus::Finished
+                    && (siege.attacker_expedition_id == expedition_id
+                        || siege.defender_expedition_id == expedition_id)
+            });
+            if cancels_siege {
+                let siege = state.siege.as_mut().expect("checked");
+                siege.status = SiegeStatus::Finished;
+                siege.outcome = SiegeOutcome::Cancelled;
+                siege.ended_at = now_seconds.max(siege.scheduled_at);
+                state.last_siege_end_at = siege.ended_at;
+                state.tower_destroyed = false;
+                state.tower_hp = None;
+                inner
+                    .channels
+                    .retain(|(channel_zone, _), _| *channel_zone != zone);
+            }
+            replace(&mut inner, state.clone(), revision);
+            released.push(state);
+        }
+        released
+    }
+
     pub fn set_tax_rate(
         &self,
         zone_group_id: u32,
