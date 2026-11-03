@@ -472,7 +472,7 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 | Area (C#) | Rust | Status | Notes |
 |---|---|---|---|
 | `TeamManager`, `Models/Game/Team` | `systems/social/team.rs`, `packets/team.rs` | done | Invitations (single / area with `SCAskToJoinTeamArea` / `SCTeamAreaInvited`, 30 s area cooldown, 60 s timeout, 500 ms sweep, 10k cap, stale-reply and owner-rights guards), invitation error replies, create, AskRiskyTeam (leave / kick / dismiss + auto-disband), owner / role / marker / looting rule / ping / move, raid conversion, SetOffline / MemberRemoveFromTeam / UpdateAtLogin / UpdatePosition, 500 ms remote-member sync (delta cache, 5 s forced resync, upper-triangle pairs), zombie-team disband (5 min), loot winner helpers. Events (OnTeamJoin/Leave) are quest-side: not called. See "Area team invitations and invitation error replies". |
-| `ExpeditionManager`, `Models/Game/Expeditions` | `systems/social/expedition.rs`, `packets/expedition.rs` (`managers::expedition` re-exports) | done | Load, create (party checks, cost, `SCItemTaskSuccessPacket` money-only form), invite / reply, leave, kick, member role, owner, role policy, disband (stays listed as `$deleted-guild-<id>`), `Expedition.Save` per change, offline leave for character deletion. Rename / sponsor are log-only / not in 1.2 as in C#. |
+| `ExpeditionManager`, `Models/Game/Expeditions` | `systems/social/expedition.rs`, `packets/expedition.rs` (`managers::expedition` re-exports) | done | Load, create (party checks, cost, `SCItemTaskSuccessPacket` money-only form), invite / reply, leave, kick, member role, owner, role policy, disband (stays listed as `$deleted-guild-<id>`), `Expedition.Save` per change, offline leave for character deletion. Guild rename: see "Guild rename" below. Sponsor is still log-only / not in 1.2 as in C#. |
 | `FamilyManager`, `Models/Game/Family` | `systems/social/family.rs`, `packets/family.rs` | done | Load, invite / reply / create, leave, kick (offline existence check), title, steward, login / logout, disband, save, offline leave for character deletion. |
 | `FriendMananger`, `CharacterFriends`, `CharacterBlocked` | `systems/social/friend.rs`, `packets/friend.rs` (`managers::friend` re-exports) | done | Add / remove friends (online or by DB name lookup), block / unblock (online or by `NameManager` for offline names), status changes incl. `InParty`. The blocked list is enforced on every direct delivery path (whisper, team / area / expedition / family invite, friend add, trade and duel request); see the block-list deviation. |
 | `ChatManager`, `Models/Game/Chat` | `systems/social/chat.rs`, `session.rs` (`managers::chat` re-exports) | done | All channel kinds incl. party / raid / court, CleanUpChannels, party / raid / raid-leader / judge routing. User channels (`CSJoinUserChatChannel`) are log-only as in C#. |
@@ -594,6 +594,80 @@ refuses a duplicate faction id (`FUN_398a5280`), so `EXPEDITION_ID` also extract
   never-edit `opcodes.rs` rule); a log-only handler is registered. The real tax handler,
   relation expiry, rename and monument stay for stages 3-4.
 
+#### Guild rename (expedition)
+
+`CSRenameExpeditionPacket` (0x009, `{ id, name, is_expedition }`) now renames a guild when
+`is_expedition` is true; the nation half (`false`) stays log-only for the nation stage.
+
+Evidence (1.2 client):
+
+* The rename dialog has no client-side opener. `SCExpeditionShowRenameUI` (0x00f, empty body)
+  is handled by `FUN_391d2310`, which calls `FUN_392f8db0(0)`; that looks up the player's
+  expedition and pre-fills the current name, and `FUN_398a36e0` rejects a player who is not
+  the faction owner. The dialog's OK handler (`dialog_handler.alb` proto 25.0) calls
+  `X2Faction.RenameExpedition(newName)`; the native side (`FUN_39472d70` -> `FUN_392f8f50` ->
+  `FUN_397ab420`) fills `{ id = my expedition id, name, is_expedition = 1 }`.
+* `SCFactionRenamedPacket` (0x011, `{ id, name, byGm }`) is handled by `FUN_391d23f0` ->
+  `FUN_392fdce0`: it replaces the cached faction name, posts the `change_expedition_name`
+  chat notice, and clears the cached `allow_change_name` when `byGm` is false.
+* `SCFactionRetryRenamePacket` (0x012, `{ xpdt, errorMessage, name }`) is handled by
+  `FUN_391e5520`: `xpdt` non-zero re-opens the expedition dialog with `name` pre-filled
+  (`FUN_392f8db0`), zero the nation dialog. The handler does not read `errorMessage` in the
+  decompile, so the code is informational for 1.2; the re-opened dialog is the visible result.
+* The error codes are the creation ones (compact/client error table `FUN_3956b860`):
+  296 `expedition_name_character`, 297 `expedition_name_length`, 299 `expedition_name_exist`.
+  The creation path and rename share `systems::social::rename::validate_faction_name`.
+* The 1.2 compact database has no rename item, skill, special effect or `content_configs`
+  entry; the only 1.2 client trigger is the server packet. The GM hook `/testguild rename`
+  sends it (the access-level entry `testguild: 100` already existed without a C# command).
+
+Rules and deviations:
+
+* **Owner only.** The client's own pre-check and the server both require the guild owner
+  (`faction.owner_id` plus membership, checked under the expedition write lock together with
+  the name uniqueness test and the write).
+* **Offer required and bound to the guild.** `rename_expedition` requires the one-shot offer
+  created when the server sent `SCExpeditionShowRenameUI`; the offer stores
+  `character -> expedition id`, so a request for another guild is refused even when the
+  character holds one. A forged CS without it is refused with error 307. The offer survives an
+  invalid / taken name so the retry dialog can correct it, is consumed on success, and is
+  dropped on leave-world (`world::session::leave_world_task`), on guild disband
+  (`dismiss_expedition`) and on an owner change. The map is capped (`MAX_RENAME_OFFERS`).
+  This is a server-side addition: the 1.2 C# only logged the packet.
+* **Uniqueness matches creation.** The create path compares exactly (`name.Equals(exp.Name)`
+  in C#), so rename does the same; it is **not** case-insensitive despite the MySQL column's
+  `utf8_general_ci` collation. Excluding the guild itself makes re-submitting the current name
+  a no-op rename.
+* **Broadcast scope.** `SCFactionRenamed` goes to every online player
+  (`WorldManager.broadcast_to_server`), because the faction list (`SCFactionListPacket`) and
+  `SCFactionCreatedPacket` are server-wide too; sending it only to members would leave every
+  other client's guild list stale.
+* **Persistence** is the existing `Expedition.Save` (`REPLACE INTO expeditions`), awaited
+  before the broadcast.
+* **capture-pending (RENAME-1):** the production trigger (item / merge collision / quest) is
+  not established for 1.2; only the GM hook is wired. The nation rename reuses the shared
+  validation / retry / broadcast helpers but is not part of this stage.
+* **Known, not fixed (RENAME-2..6):**
+  * **RENAME-2:** a failed save still broadcasts. `save()` only logs the error (and restores
+    the pending removals); the in-memory name is broadcast as if persisted, and there is no
+    periodic expedition save to retry it (`systems::social::System::save` covers ranking /
+    nations / bounties / crime, not expeditions). The C# call site was synchronous too.
+  * **RENAME-3:** guild names are not checked against nation names or static faction names.
+    Creation, rename and independence all keep their own namespace, so a guild can share a
+    name with a nation or a static faction.
+  * **RENAME-4:** uniqueness is an exact string comparison, so case, space and Cyrillic
+    look-alikes are distinct (`Knights` / `knights` / `K nights` / homoglyphs). This mirrors
+    the C# `CreateExpedition` check; the MySQL column's `utf8_general_ci` collation does not
+    make the in-memory check case-insensitive.
+  * **RENAME-5 (capture-pending):** the `SCFactionRetryRenamePacket.errorMessage` field width
+    is unverified. The C# writes `i16`; the decompiled handler reads the name at `+0x14`,
+    which suggests four bytes of error/padding, and it does not read the field at all. The
+    C# layout is kept until a capture or server decompile settles it.
+  * **RENAME-6:** create vs rename has a uniqueness race. `create_expedition` checks
+    `server.expeditions.all()` (a snapshot) and calls `add` later, so a concurrent rename can
+    take the name between the check and the insert; only the rename path checks and writes
+    under one lock.
+
 ### systems::housing
 
 | Area (C#) | Rust | Status | Notes |
@@ -614,6 +688,9 @@ Economy hooks (`server.systems.housing.hooks`): installed by `economy::bridges::
 | `QuestManager.Load` (contexts, components, base acts, all 64 `quest_act_*` detail tables, supplies, item / NPC groups, `UpdateQuestComponentActs`) | `systems/quests/data.rs`, `templates.rs` | done | Same table order (act order inside a component = objective indices), first-base-act linking, tutorial category skipped. Validated against compact.sqlite3 (`real_compact_db_quest_tables`: 4775 quests, 17720 components, 19047 acts, per-type counts). Exhaustive record accounting and outstanding gameplay failures: `Docs/wiki/Quest-Audit.md`, `rust/tools/quest_audit/audit.py`; port coverage does not certify every quest as playable. |
 | `Models/Game/Quests` (`Quest`, `NewQuestCode`, `QuestStep`, `QuestComponent`, `QuestAct`, all `Acts/*` + `UnusedActs/*`) | `state.rs`, `engine.rs`, `acts.rs` | done | Live quests on `Character::quest_state` (handles + act paths instead of object references); `c.quests` rows re-derived after every operation. Step machine, objective status / percent, rewards, drop / cleanup, event subscriptions in invocation-list order (`-=` removes the last occurrence). |
 | `CharacterQuests` (AddQuest*, DropQuest, completed flags, reset / daily reset, LetItDone, item destroy, `GetActiveActsWithUseItem`, Load) | `engine.rs`, `events.rs` | done | Save = existing `Character.Save` rows. |
+| Quest failure (`FailQuest` from `CheckTimer` expiry and `CheckGuard` NPC death) | `engine.rs` (`fail_quest`), `acts.rs` (`CheckGuard`, `CheckTimer` deadline check) | added | The C# `FailQuest` only set `Step = Fail` (no status, no packet). The Rust sets `Status = Failed` and sends `SCQuestContextUpdatedPacket` with that status: the 1.2 client learns a failure from the status, not from 0x146 (`SCQuestContextUpdatedPacket` -> `OnQuestContextUpdated` `FUN_391dbe50` -> `FUN_3937bdf0`, whose status-2 branch raises the quest condition event and logs "failed"; `ui_texts` category 6 `condition_fail_msg`). 0x146 stays the answer to a refused client report. A failed quest stays failed and droppable. During `CharacterQuests.Load` (`st.loaded == false`) the update is skipped because the following `SCQuestsPacket` already carries the Failed row. `CheckTimer` ignores a queued `TimerExpired` while the live deadline (`q.time_ms`) is still in the future, so a stale task cannot fail a restarted run. |
+| `CSRestartMainQuestPacket` (0x0fd) | `packets.rs` (`CSRestartMainQuestPacket`), `engine.rs` (`try_restart_quest`, `restart_quest`, `install_quest`) | added | The 1.2 client sends it when the player asks to restart a main quest: `X2Quest.QuestContextRestart` -> `FUN_3949b780` -> `FUN_3937b200` / `FUN_3937a8d0`, gated to an active quest whose status is not 5 (Completed), `detail_id == 2` and its own 3 s / labor checks; the reply is a normal `SCQuestContextStartedPacket`, which `FUN_3937b5b0` turns into `QUEST_CHAT_RESTART` (`ui_texts` 391). The server mirrors the active/status and `detail_id == 2` gates, adds a 3 s per-character throttle, and gates on `restart_on_fail` (**INFERRED**: the client never reads the flag; 211 of the 222 flagged quests are `detail_id` 2). The restart discards the run (items, subscriptions, timer, quest id; the Start-component `ConAcceptItem` acceptor items are kept) and installs a fresh quest object. A refused request only logs and changes nothing. The original server's exact reply sequence is **QUEST-1 (capture-pending)**. |
+| `quest_contexts.successive` | `templates.rs` (`QuestTemplate.successive`) | done (client display only) | 37 rows. The 1.2 client reads it in the quest objective text functions `FUN_394a3b60` / `FUN_394a3f20`: when set, the tracker lists only the current Progress component's objectives (status "successive"), otherwise every unfinished Progress objective; Ready/Failed show their status. No packet or server logic: **QUEST-2 resolved**. |
 | `Quest.DistributeRewards` exp / copper pool | `engine.rs` (`distribute_rewards`), `acts.rs` (`SupplyExp` / `SupplyCopper`) | deviation | **Deviation:** a Reward component `QuestActSupplyExp` / `QuestActSupplyCopper` act replaces the level-based `quest_supplies` exp / copper instead of being added on top of it (the C# added both). 1.2 client oracle + 2014 data, details in the deviations list. |
 | `QuestManagerEvents` + other C# entry points (OnItemUse, OnKill, cinema, mate level) | `events.rs` | done | Public event API; nested calls from hooks are queued. |
 | `QuestManager` evaluation queue / timers / daily reset task | `mod.rs` | done | `QuestManagerRunQueueTask` as a 1 ms tokio task; timers as tokio tasks; daily reset at 00:00 UTC. |
@@ -1661,6 +1738,26 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   reporting, per-quest NPC/doodad reporting, doodad reward selection/finalization, and OR
   requirement evaluation. Timed saved deadlines, aggro credit, CheckSphere, and authored
   content gaps remain tracked in `Docs/wiki/Quest-Audit.md`.
+* systems::quests (quest restart, 2026-11-03): the C# `FailQuest` only set `Step = Fail`
+  (no status, no packet), so a timed-out or escort-failed quest stayed `Progress` on the wire
+  and in the journal. `fail_quest` now sets `Status = Failed` and sends
+  `SCQuestContextUpdated` with it; the 1.2 `OnQuestContextUpdated` status-2 branch is what
+  shows the failure. There is **no automatic restart**: the 1.2 client never reads
+  `restart_on_fail`, and restart is the player's `CSRestartMainQuestPacket` (0x0fd) request.
+  The server implements that packet, gated on an active non-completed quest with
+  `detail_id == 2` and `restart_on_fail` (**QUEST-1 INFERRED gate**; the original server's
+  exact reply sequence is capture-pending), and answers with `SCQuestContextStarted`. A
+  failed quest is not restarted on its own. `successive` is client display only
+  (**QUEST-2 resolved**).
+* systems::quests (restart follow-ups, known and not fixed, score < 5):
+  - A restart discards and reinstalls the quest, so the Start component's skills run again on
+    every accepted 0x0fd (7 restartable quests cast Start skills, some with
+    `NpcSpawnerSpawnEffect`). No shipped 1.2 UI sends the packet; the 3 s throttle bounds a
+    crafted client.
+  - Supply items that were mailed or moved out of the bag are issued again on restart. The
+    restartable supplies are category 64 items priced 0 (low value).
+  - If the fresh install fails after the old run was discarded, the quest is lost (WARN only);
+    no 1.2 data quest is known to reach that path.
 * systems::quests (engine fixes, quest-audit 2026-10-17):
   - `TryCompleteQuestAsLetItDone` (C# only set `Step = Reward`): the quest also gets the
     `Completed` status, and a quest without a Reward step is finished at once (C# hung there:

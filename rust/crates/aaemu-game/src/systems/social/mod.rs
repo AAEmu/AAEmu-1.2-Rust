@@ -38,6 +38,7 @@ pub mod ranking_manager;
 pub mod ranking_packets;
 pub mod ranking_persistence;
 pub mod ranking_runtime;
+pub mod rename;
 pub mod session;
 pub mod team;
 pub mod trial;
@@ -50,6 +51,8 @@ pub(crate) mod achievement_flow_tests;
 mod achievement_game_data_tests;
 #[cfg(test)]
 mod bounty_flow_tests;
+#[cfg(test)]
+mod expedition_rename_tests;
 #[cfg(test)]
 mod flow_tests;
 #[cfg(test)]
