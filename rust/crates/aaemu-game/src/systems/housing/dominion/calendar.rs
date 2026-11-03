@@ -18,18 +18,13 @@
 //! the retail zone of those wall-clock columns is UNKNOWN. Weekday 0 = Sunday is INFERRED from
 //! the `siege_plans` week starts, which are all Sundays.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Mutex, MutexGuard};
-
 use chrono::{
     DateTime, Datelike, Days, FixedOffset, Local, LocalResult, NaiveDate, NaiveDateTime, TimeZone,
 };
+use std::collections::BTreeMap;
 
-use crate::server::GameServer;
 use crate::systems::housing::config::HousingConfig;
 use crate::systems::housing::data::{CastleReferenceData, SiegeRotation, SiegeZone};
-
-use super::state::{DominionState, SiegeStatus};
 
 pub const PERIOD_NONE: u8 = 0;
 pub const PERIOD_AUCTION: u8 = 1;
@@ -370,128 +365,6 @@ impl SiegeCalendar {
             }
         }
         None
-    }
-}
-
-/// A calendar period change for one zone. The caller rebroadcasts the state snapshot.
-#[derive(Debug, Clone)]
-pub struct CalendarTransition {
-    pub state: DominionState,
-    pub previous_period: u8,
-    pub period: u8,
-}
-
-/// Runtime state of the calendar: the optional GM test clock and the last announced period per
-/// zone. Neither is persisted: after a restart clients receive the current snapshot at world
-/// entry, and a later change is announced normally.
-#[derive(Debug, Default)]
-pub struct CalendarRuntime {
-    clock: Mutex<Option<i64>>,
-    periods: Mutex<BTreeMap<u32, u8>>,
-}
-
-impl CalendarRuntime {
-    fn lock_clock(&self) -> MutexGuard<'_, Option<i64>> {
-        self.clock.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn lock_periods(&self) -> MutexGuard<'_, BTreeMap<u32, u8>> {
-        self.periods.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// GM test clock (Unix seconds); `None` restores the real clock.
-    pub fn set_clock(&self, now: Option<i64>) {
-        *self.lock_clock() = now;
-    }
-
-    pub fn clock(&self) -> Option<i64> {
-        *self.lock_clock()
-    }
-
-    pub fn now(&self) -> i64 {
-        self.clock()
-            .unwrap_or_else(|| chrono::Utc::now().timestamp())
-    }
-
-    pub fn last_period(&self, zone_group_id: u32) -> Option<u8> {
-        self.lock_periods().get(&zone_group_id).copied()
-    }
-
-    /// Compare every owned territory's calendar period with the last announced one. The first
-    /// observation of a zone is silent (a client at world entry gets the snapshot instead).
-    /// An unfinished explicit siege (the GM override) owns that zone's timer, so the calendar
-    /// records its phase without announcing a calendar change.
-    pub fn tick(&self, server: &GameServer, now: i64) -> Vec<CalendarTransition> {
-        self.tick_excluding(server, now, &BTreeSet::new())
-    }
-
-    /// [`CalendarRuntime::tick`] while the explicit tick already announced `announced` zones;
-    /// their new period is recorded without a second `SCSiegeState`.
-    pub fn tick_excluding(
-        &self,
-        server: &GameServer,
-        now: i64,
-        announced: &BTreeSet<u32>,
-    ) -> Vec<CalendarTransition> {
-        if now < 0 {
-            return Vec::new();
-        }
-        let settings = CalendarSettings::from_config(&server.config.housing);
-        if !settings.enabled {
-            self.lock_periods().clear();
-            return Vec::new();
-        }
-        let calendar = SiegeCalendar::from_castles(&server.game_data.systems.housing.castles);
-        if calendar.is_empty() {
-            self.lock_periods().clear();
-            return Vec::new();
-        }
-        let states = server.systems.housing.dominions.all();
-        let mut periods = self.lock_periods();
-        let mut transitions = Vec::new();
-        let mut seen = BTreeSet::new();
-        for state in states {
-            let zone = state.zone_group_id;
-            seen.insert(zone);
-            if state.owner_expedition_id == 0 {
-                periods.remove(&zone);
-                continue;
-            }
-            let explicit = state
-                .siege
-                .as_ref()
-                .filter(|siege| siege.status != SiegeStatus::Finished && now < siege.ends_at);
-            let period = if let Some(siege) = explicit {
-                if siege.active_at(now) {
-                    PERIOD_SIEGE
-                } else {
-                    PERIOD_WARMUP
-                }
-            } else {
-                let Some(view) = calendar.view_at(zone, now, &settings.timezone, false) else {
-                    continue;
-                };
-                view.period
-            };
-            match periods.get(&zone).copied() {
-                None => {
-                    periods.insert(zone, period);
-                }
-                Some(previous) if previous == period => {}
-                Some(previous) => {
-                    periods.insert(zone, period);
-                    if !announced.contains(&zone) {
-                        transitions.push(CalendarTransition {
-                            state,
-                            previous_period: previous,
-                            period,
-                        });
-                    }
-                }
-            }
-        }
-        periods.retain(|zone, _| seen.contains(zone));
-        transitions
     }
 }
 

@@ -64,7 +64,7 @@ pub struct System {
     pub engraving_runtime: dominion::runtime::EngravingRuntime,
     pub headquarters: dominion::headquarters::Headquarters,
     /// The weekly siege calendar clock and last announced periods (WP-S1).
-    pub calendar: dominion::calendar::CalendarRuntime,
+    pub calendar: dominion::runtime::CalendarRuntime,
     /// Items / money / mail (installed by the economy subsystem).
     pub hooks: hooks::HousingHookSlot,
 }
