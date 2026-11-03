@@ -15,6 +15,12 @@ pub const ENGRAVING_MIN_DURATION_MS: i64 = 5 * 60 * 1000;
 pub const MAX_PARTICIPANTS_PER_SIDE: usize = 100;
 /// Original 1.2 TAXRATE_CHANGE_LATER limits territory rate changes to once per hour.
 pub const TAX_RATE_CHANGE_COOLDOWN_SECONDS: i64 = 60 * 60;
+/// The 1.2 client's national tax confirm validator (`FUN_392f4820`) allows one change per
+/// 86400 s (the wire rate is permille/10, 0-1000).
+pub const NATIONAL_TAX_RATE_CHANGE_COOLDOWN_SECONDS: i64 = 86_400;
+/// The largest national tax rate the 1.2 client sends (`FUN_392f4820`: `1000 < rate` is
+/// `dominion_national_tax_invalid_rate`).
+pub const MAX_NATIONAL_TAX_RATE: u16 = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TowerIdentity {
@@ -118,7 +124,7 @@ impl SiegeState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DominionState {
     pub zone_group_id: u32,
     pub tower: TowerIdentity,
@@ -131,6 +137,11 @@ pub struct DominionState {
     pub last_paid_at: i64,
     pub last_tax_rate_changed_at: i64,
     pub last_national_tax_rate_changed_at: i64,
+    /// Persistent doodad row id of the nation monument (0 = none), and its position.
+    pub national_monument_db_id: i64,
+    pub national_monument_x: f32,
+    pub national_monument_y: f32,
+    pub national_monument_z: f32,
     /// Start of the current peace declaration (Unix seconds; 0 = none).
     pub non_pvp_start_at: i64,
     /// Authored peace duration in minutes (special effect 110 `value1`).
@@ -159,6 +170,10 @@ impl DominionState {
             last_paid_at: 0,
             last_tax_rate_changed_at: 0,
             last_national_tax_rate_changed_at: 0,
+            national_monument_db_id: 0,
+            national_monument_x: 0.0,
+            national_monument_y: 0.0,
+            national_monument_z: 0.0,
             non_pvp_start_at: 0,
             non_pvp_duration_min: 0,
             treasury: Treasury::default(),
@@ -176,6 +191,22 @@ impl DominionState {
         }
         if self.tower_hp.is_some_and(|hp| hp < 0)
             || (self.tower_destroyed && self.tower_hp != Some(0))
+            || self.national_tax_rate > MAX_NATIONAL_TAX_RATE
+            || self.national_monument_db_id < 0
+            || ![
+                self.national_monument_x,
+                self.national_monument_y,
+                self.national_monument_z,
+            ]
+            .iter()
+            .all(|v| v.is_finite())
+        {
+            return Err(DominionError::InvalidState);
+        }
+        if self.national_monument_db_id == 0
+            && (self.national_monument_x != 0.0
+                || self.national_monument_y != 0.0
+                || self.national_monument_z != 0.0)
         {
             return Err(DominionError::InvalidState);
         }
@@ -290,6 +321,14 @@ pub enum DominionError {
     InvalidTreasury,
     #[error("territory tax rate cannot change before its one-hour cooldown expires")]
     TaxRateChangeLater,
+    #[error("the national tax rate is outside 0..=1000")]
+    InvalidNationalTaxRate,
+    #[error("the national tax rate cannot change before its 24-hour cooldown expires")]
+    NationalTaxRateChangeLater,
+    #[error("this dominion already has a nation monument")]
+    NoMoreNationalMonument,
+    #[error("a nation monument cannot be placed during a siege period")]
+    NationalMonumentDuringSiege,
     #[error("the territory is already in its non-PvP peace duration")]
     NonPvpActive,
     #[error("property tax quote no longer matches the territory owner or rate")]
@@ -1209,6 +1248,122 @@ impl DominionManager {
         let revision = next_revision(&inner)?;
         state.tax_rate = tax_rate;
         state.last_tax_rate_changed_at = now_seconds;
+        replace(&mut inner, state.clone(), revision);
+        Ok(state)
+    }
+
+    /// Sets the national tax rate (permille/10, 0-1000) of a territory owned by
+    /// `owner_expedition_id`. Mirrors the 1.2 client's 86400 s cooldown (`FUN_392f4820`) so a
+    /// forged packet cannot bypass it. The caller has already checked that the player is the
+    /// king of the owner expedition's top-level faction.
+    pub fn set_national_tax_rate(
+        &self,
+        zone_group_id: u32,
+        owner_expedition_id: u32,
+        tax_rate: u16,
+        now_seconds: i64,
+    ) -> Result<DominionState, DominionError> {
+        if tax_rate > MAX_NATIONAL_TAX_RATE {
+            return Err(DominionError::InvalidNationalTaxRate);
+        }
+        if now_seconds < 0 {
+            return Err(DominionError::InvalidSchedule);
+        }
+        let mut inner = self.lock();
+        let mut state = inner
+            .states
+            .get(&zone_group_id)
+            .ok_or(DominionError::Missing)?
+            .state
+            .clone();
+        if owner_expedition_id == 0 || state.owner_expedition_id != owner_expedition_id {
+            return Err(DominionError::WrongOwner);
+        }
+        if state.national_tax_rate == tax_rate {
+            return Ok(state);
+        }
+        if state.last_national_tax_rate_changed_at > 0
+            && now_seconds.saturating_sub(state.last_national_tax_rate_changed_at)
+                < NATIONAL_TAX_RATE_CHANGE_COOLDOWN_SECONDS
+        {
+            return Err(DominionError::NationalTaxRateChangeLater);
+        }
+        let revision = next_revision(&inner)?;
+        state.national_tax_rate = tax_rate;
+        state.last_national_tax_rate_changed_at = now_seconds;
+        replace(&mut inner, state.clone(), revision);
+        Ok(state)
+    }
+
+    /// Places the national monument: one persistent doodad per territory, never during a
+    /// siege period. The caller spawns the statue, passes its doodad row id and broadcasts
+    /// `SCNationalMonumentChanged` (RENAME-9).
+    pub fn place_national_monument(
+        &self,
+        zone_group_id: u32,
+        owner_expedition_id: u32,
+        db_id: u32,
+        x: f32,
+        y: f32,
+        z: f32,
+    ) -> Result<DominionState, DominionError> {
+        if db_id == 0 || ![x, y, z].iter().all(|v| v.is_finite()) {
+            return Err(DominionError::InvalidState);
+        }
+        let mut inner = self.lock();
+        let mut state = inner
+            .states
+            .get(&zone_group_id)
+            .ok_or(DominionError::Missing)?
+            .state
+            .clone();
+        if owner_expedition_id == 0 || state.owner_expedition_id != owner_expedition_id {
+            return Err(DominionError::WrongOwner);
+        }
+        if state.national_monument_db_id != 0 {
+            return Err(DominionError::NoMoreNationalMonument);
+        }
+        if state
+            .siege
+            .as_ref()
+            .is_some_and(|siege| siege.status != SiegeStatus::Finished)
+        {
+            return Err(DominionError::NationalMonumentDuringSiege);
+        }
+        let revision = next_revision(&inner)?;
+        state.national_monument_db_id = i64::from(db_id);
+        state.national_monument_x = x;
+        state.national_monument_y = y;
+        state.national_monument_z = z;
+        replace(&mut inner, state.clone(), revision);
+        Ok(state)
+    }
+
+    /// Removes the national monument fields from a territory. The caller deletes the doodad
+    /// row and broadcasts the empty `SCNationalMonumentChanged`. Returns the new state.
+    pub fn clear_national_monument(
+        &self,
+        zone_group_id: u32,
+        owner_expedition_id: u32,
+    ) -> Result<DominionState, DominionError> {
+        let mut inner = self.lock();
+        let mut state = inner
+            .states
+            .get(&zone_group_id)
+            .ok_or(DominionError::Missing)?
+            .state
+            .clone();
+        if owner_expedition_id == 0 || state.owner_expedition_id != owner_expedition_id {
+            return Err(DominionError::WrongOwner);
+        }
+        if state.national_monument_db_id == 0 {
+            return Ok(state);
+        }
+        let revision = next_revision(&inner)?;
+        state.national_monument_db_id = 0;
+        state.national_monument_x = 0.0;
+        state.national_monument_y = 0.0;
+        state.national_monument_z = 0.0;
         replace(&mut inner, state.clone(), revision);
         Ok(state)
     }

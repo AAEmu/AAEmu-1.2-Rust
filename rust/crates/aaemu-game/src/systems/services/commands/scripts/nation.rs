@@ -204,6 +204,123 @@ impl Command for Nation {
                     );
                     Ok(())
                 }
+                // Rename hook (RENAME-7): no 1.2 server packet opens the nation dialog; the
+                // optional name runs the same service the dialog's CS packet reaches.
+                "rename" => {
+                    let player = ctx.player()?;
+                    match nation::offer_nation_rename_ui(server, &player) {
+                        Ok(()) => {}
+                        Err(code) => {
+                            crate::systems::social::util::send_error(&player, code);
+                            CommandManager::send_error_text(
+                                self,
+                                out,
+                                &format!("Cannot offer a nation rename (error {code})"),
+                            );
+                            return Ok(());
+                        }
+                    }
+                    if args.len() == 1 {
+                        CommandManager::send_normal_text(
+                            self,
+                            out,
+                            "Nation rename dialog sent; enter the new name in the client.",
+                        );
+                        return Ok(());
+                    }
+                    let name = args[1..].join(" ");
+                    let Some(nation) = server.systems.social.nations.owned_by(player.character_id)
+                    else {
+                        CommandManager::send_error_text(self, out, "You are not a nation king");
+                        return Ok(());
+                    };
+                    nation::rename_nation(server, &player, nation.id, &name).await;
+                    CommandManager::send_normal_text(
+                        self,
+                        out,
+                        &format!("Nation rename requested: {name}"),
+                    );
+                    Ok(())
+                }
+                // National tax hook (RENAME-8): the client's CS 0x013 confirm path.
+                "tax" if args.len() == 3 => {
+                    let (Ok(zone), Ok(rate)) = (args[1].parse::<u16>(), args[2].parse::<u32>())
+                    else {
+                        CommandManager::send_default_help_text(self, out);
+                        return Ok(());
+                    };
+                    let player = ctx.player()?;
+                    crate::systems::social::dominion::update_national_tax_rate(
+                        server, &player, zone, rate,
+                    );
+                    CommandManager::send_normal_text(
+                        self,
+                        out,
+                        &format!("National tax rate {rate} requested for zone {zone}"),
+                    );
+                    Ok(())
+                }
+                // Nation monument hook (RENAME-9): the placement skill trigger is
+                // capture-pending; this runs the same service with the king at the point.
+                "monument" if args.len() >= 2 => {
+                    let player = ctx.player()?;
+                    let Some(zone) = args[1].parse::<u16>().ok() else {
+                        CommandManager::send_default_help_text(self, out);
+                        return Ok(());
+                    };
+                    let action = args[0].as_str();
+                    let result = match action {
+                        "place" if args.len() == 2 => {
+                            let object = crate::world::WorldObject::from(&player);
+                            let Some(world) = server.world.world_of(&object) else {
+                                CommandManager::send_error_text(
+                                    self,
+                                    out,
+                                    "You are not in a world",
+                                );
+                                return Ok(());
+                            };
+                            let pos = world.world_pos_rot(&object);
+                            nation::place_national_monument(
+                                server, &player, zone, pos.x, pos.y, pos.z,
+                            )
+                        }
+                        "place" if args.len() == 5 => {
+                            let (Ok(x), Ok(y), Ok(z)) = (
+                                args[2].parse::<f32>(),
+                                args[3].parse::<f32>(),
+                                args[4].parse::<f32>(),
+                            ) else {
+                                CommandManager::send_default_help_text(self, out);
+                                return Ok(());
+                            };
+                            nation::place_national_monument(server, &player, zone, x, y, z)
+                        }
+                        "remove" if args.len() == 2 => {
+                            nation::remove_national_monument(server, &player, zone)
+                        }
+                        _ => {
+                            CommandManager::send_default_help_text(self, out);
+                            return Ok(());
+                        }
+                    };
+                    match result {
+                        Ok(()) => CommandManager::send_normal_text(
+                            self,
+                            out,
+                            &format!("Nation monument {action} ok for zone {zone}"),
+                        ),
+                        Err(code) => {
+                            crate::systems::social::util::send_error(&player, code);
+                            CommandManager::send_error_text(
+                                self,
+                                out,
+                                &format!("Nation monument {action} failed (error {code})"),
+                            );
+                        }
+                    }
+                    Ok(())
+                }
                 "treaty" if args.len() == 2 => {
                     let target: u32 = match args[1].parse() {
                         Ok(id) => id,
@@ -241,10 +358,10 @@ impl Command for Nation {
     }
 
     fn get_command_line_help(&self) -> String {
-        "[info|create [force]|hostile <faction>|relation <faction> <state> <minutes> <next>|treaty <faction>]".into()
+        "[info|create [force]|hostile <faction>|relation <faction> <state> <minutes> <next>|treaty <faction>|rename [name]|tax <zone> <rate>|monument place <zone> [x y z]|monument remove <zone>]".into()
     }
 
     fn get_command_help_text(&self) -> String {
-        "Lists player nations, or creates one from your expedition as its king. The expedition must own a dominion; create force skips that check for tests. hostile declares a diplomacy target hostile; relation and treaty are test hooks for the expiry and mail flows.".into()
+        "Lists player nations, or creates one from your expedition as its king. The expedition must own a dominion; create force skips that check for tests. hostile declares a diplomacy target hostile; relation and treaty are test hooks for the expiry and mail flows. rename offers the nation rename dialog (or applies a name), tax sets the national tax rate, and monument places or removes the territory statue at your position.".into()
     }
 }

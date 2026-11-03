@@ -32,7 +32,7 @@ use crate::systems::economy::mail_character;
 use crate::systems::economy::mail_packets::{SCChargeMoneyPaidPacket, SCMailDeletedPacket};
 use crate::systems::skills::effects::EffectArgs;
 use crate::systems::skills::types::{CastAction, SkillCaster};
-use crate::world::PlayerRef;
+use crate::world::{PlayerRef, WorldObject};
 
 use super::faction;
 use super::packets::faction::{
@@ -65,6 +65,10 @@ pub const MAX_PENDING_INVITES: usize = 1024;
 
 /// Upper bound of the open treaty-request mails (one per nation and diplomacy target).
 pub const MAX_PENDING_TREATIES: usize = 1024;
+
+/// Upper bound of pending nation rename offers; a full set is cleared so it cannot grow
+/// without bound when characters leave without a logout packet (mirrors the guild offers).
+const MAX_NATION_RENAME_OFFERS: usize = 256;
 
 /// Nation diplomacy settings from `content_configs` (kind 19, NATION-17).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,6 +239,21 @@ pub struct NationManager {
     treaties: Mutex<Vec<PendingTreatyMail>>,
     /// Last type-25 treaty offer per `(nation, target)` (persisted, NATION-15).
     offers: Mutex<HashMap<(u32, u32), i64>>,
+    /// Characters the server offered a nation rename to (`SCNationShowRenameUI`), and the
+    /// nation the offer belongs to. The 1.2 client can only send the nation half of
+    /// `CSRenameExpedition` from that dialog (RENAME-7).
+    rename_offers: Mutex<HashMap<u32, u32>>,
+}
+
+/// Why a nation rename was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NationRenameFailure {
+    /// The faction id is not a loaded nation.
+    Missing,
+    /// The requester is not the nation's king.
+    NotKing,
+    /// Another faction (nation, expedition or static faction) already carries the name.
+    NameExists,
 }
 
 impl NationManager {
@@ -363,6 +382,75 @@ impl NationManager {
             .cloned()
     }
 
+    /// Grants `character_id` the right to answer the nation rename dialog
+    /// (`SCNationShowRenameUI` was sent to it), bound to `nation_id`.
+    pub fn offer_rename(&self, character_id: u32, nation_id: u32) {
+        let mut offers = self
+            .rename_offers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if offers.len() >= MAX_NATION_RENAME_OFFERS {
+            offers.clear();
+        }
+        offers.insert(character_id, nation_id);
+    }
+
+    /// Whether `SCNationShowRenameUI` is outstanding for `character_id` *for `nation_id`*.
+    pub fn has_rename_offer(&self, character_id: u32, nation_id: u32) -> bool {
+        self.rename_offers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&character_id)
+            .is_some_and(|id| *id == nation_id)
+    }
+
+    /// Consumes the rename offer after a successful rename.
+    pub fn take_rename_offer(&self, character_id: u32) {
+        self.rename_offers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&character_id);
+    }
+
+    /// Drops the rename offer (logout, refusal, or a character that can no longer rename).
+    pub fn clear_rename_offer(&self, character_id: u32) {
+        self.take_rename_offer(character_id);
+    }
+
+    /// Drops every offer made for `nation_id` (king change, disband).
+    pub fn clear_rename_offers_for(&self, nation_id: u32) {
+        self.rename_offers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|_, id| *id != nation_id);
+    }
+
+    /// Renames nation `id` to `name` when `character_id` is its king and no other nation
+    /// carries the name. The king check, the nation-name check and the write share one lock;
+    /// the caller checks the expedition / static namespace under [`super::rename::lock_names`]
+    /// and validates the name shape first. Returns whether the nation exists and the caller
+    /// may rename.
+    pub fn rename(
+        &self,
+        id: u32,
+        character_id: u32,
+        name: &str,
+    ) -> std::result::Result<(), NationRenameFailure> {
+        let mut nations = self.write();
+        let index = nations
+            .iter()
+            .position(|n| n.id == id)
+            .ok_or(NationRenameFailure::Missing)?;
+        if nations[index].owner_character_id != character_id {
+            return Err(NationRenameFailure::NotKing);
+        }
+        if nations.iter().any(|n| n.id != id && n.name == name) {
+            return Err(NationRenameFailure::NameExists);
+        }
+        nations[index].name = name.to_string();
+        Ok(())
+    }
+
     /// Stores a pending invite, replacing an earlier one for the same invitee (the 1.2 client
     /// shows one reply dialog). Expired entries are dropped and the list is capped
     /// (NATION-11).
@@ -436,6 +524,9 @@ impl NationManager {
             nation.owner_name = name.to_string();
             changed.push(nation.clone());
         }
+        for nation in &changed {
+            self.clear_rename_offers_for(nation.id);
+        }
         changed
     }
 
@@ -460,6 +551,9 @@ impl NationManager {
             nation.owner_character_id = 0;
             nation.owner_name.clear();
             changed.push(nation.clone());
+        }
+        for nation in &changed {
+            self.clear_rename_offers_for(nation.id);
         }
         changed
     }
@@ -710,6 +804,24 @@ impl NationManager {
             Some(slot) => *slot = nation,
             None => nations.push(nation),
         }
+    }
+
+    /// Inserts a nation when no other nation already carries the name. The check and the
+    /// insert share the write lock, so two concurrent creations cannot take one name
+    /// (RENAME-3). Returns false when the name is taken.
+    pub fn add_if_name_free(&self, nation: Nation) -> bool {
+        let mut nations = self.write();
+        if nations
+            .iter()
+            .any(|n| n.id != nation.id && n.name == nation.name)
+        {
+            return false;
+        }
+        match nations.iter_mut().find(|n| n.id == nation.id) {
+            Some(slot) => *slot = nation,
+            None => nations.push(nation),
+        }
+        true
     }
 
     /// After the creation write committed, the offline members need no further rewrites (their
@@ -978,19 +1090,11 @@ pub fn declare_independence(
         return Err(error_message::FACTION_SEPARATE_RIGHTS);
     }
     if name.is_empty()
-        || server
-            .game_data
-            .factions
-            .factions
-            .iter()
-            .any(|f| f.name == name)
-        || server
-            .systems
-            .social
-            .nations
-            .all()
-            .iter()
-            .any(|n| n.name == name)
+        || super::rename::faction_name_in_use(
+            server,
+            name,
+            Some(super::rename::NameOwner::Expedition(expedition_id)),
+        )
     {
         return Err(error_message::FACTION_DUPLICATE_NAME);
     }
@@ -1031,7 +1135,23 @@ pub fn declare_independence(
             .filter(|id| !online.contains(id))
             .collect(),
     };
-    server.systems.social.nations.add(nation.clone());
+    {
+        // Guild / nation / static names share one namespace; the lock keeps the final check
+        // and the insert together (RENAME-3 / RENAME-6).
+        let _names = super::rename::lock_names(server);
+        if super::rename::faction_name_in_use(
+            server,
+            name,
+            Some(super::rename::NameOwner::Expedition(expedition_id)),
+        ) || !server
+            .systems
+            .social
+            .nations
+            .add_if_name_free(nation.clone())
+        {
+            return Err(error_message::FACTION_DUPLICATE_NAME);
+        }
+    }
     // The client's handler rewrites the founding expedition's mother; the server must do the
     // same before re-factioning its members or `set_faction` sees a mother mismatch and kicks.
     server
@@ -1118,6 +1238,327 @@ pub fn declare_independence_effect(server: &GameServer, args: &EffectArgs<'_>) {
         }
         Err(error) => send_error(player, error),
     }
+}
+
+// ---- Rename (stage 4) ----
+
+/// Asks the server to offer the king a nation rename: `SCNationShowRenameUI` (0x010, empty
+/// body) plus the one-shot offer that [`rename_nation`] requires. The 1.2 handler
+/// (`FUN_391d2380` -> `FUN_392f8e80(0)`) opens the dialog only when the player owns a user
+/// faction. The production trigger is unknown (RENAME-7); the GM hook and tests call this.
+pub fn offer_nation_rename_ui(server: &GameServer, p: &PlayerRef) -> std::result::Result<(), i16> {
+    let Some(nation) = server.systems.social.nations.owned_by(p.character_id) else {
+        return Err(error_message::ONLY_NATION_OWNER);
+    };
+    server
+        .systems
+        .social
+        .nations
+        .offer_rename(p.character_id, nation.id);
+    super::rename::send_nation_rename_ui(p);
+    Ok(())
+}
+
+/// `CSRenameExpeditionPacket` with `is_expedition == false`: the king renames the nation from
+/// the `SCNationShowRenameUI` dialog. The offer binds the request to the nation the dialog was
+/// opened for. The name shape and the shared guild / nation / static-faction namespace are
+/// checked before anything changes; a rejected name re-opens the dialog via
+/// `SCFactionRetryRename` (xpdt false) and keeps the offer usable (RENAME-7).
+pub async fn rename_nation(server: &GameServer, p: &PlayerRef, id: u32, name: &str) {
+    let nations = &server.systems.social.nations;
+    if !nations.has_rename_offer(p.character_id, id) {
+        tracing::warn!(
+            "RenameNation {} by {} without a ShowRenameUI offer refused",
+            id,
+            p.character_id
+        );
+        send_error(p, error_message::ONLY_NATION_OWNER);
+        return;
+    }
+    if let Err(code) = super::rename::validate_faction_name(server, name) {
+        super::rename::send_retry(p, false, code, name);
+        return;
+    }
+    // Re-submitting the current name is a no-op; the nation and its founding guild may share
+    // the name (NATION-1), so the shared namespace check would otherwise see the guild.
+    if nations.get(id).is_some_and(|nation| nation.name == name) {
+        nations.take_rename_offer(p.character_id);
+        return;
+    }
+    let result = {
+        // The nation and expedition stores have separate locks; the shared name lock keeps
+        // the cross-store check and the write together (RENAME-3 / RENAME-6).
+        let _names = super::rename::lock_names(server);
+        if super::rename::faction_name_in_use(
+            server,
+            name,
+            Some(super::rename::NameOwner::Nation(id)),
+        ) {
+            Err(NationRenameFailure::NameExists)
+        } else {
+            nations.rename(id, p.character_id, name)
+        }
+    };
+    match result {
+        Ok(()) => {
+            nations.take_rename_offer(p.character_id);
+            persist_nation_name(server, id, name).await;
+            super::rename::broadcast_renamed(server, id, name, false);
+        }
+        Err(NationRenameFailure::NameExists) => {
+            super::rename::send_retry(p, false, error_message::EXPEDITION_NAME_EXIST, name);
+        }
+        Err(NationRenameFailure::NotKing) => {
+            nations.clear_rename_offer(p.character_id);
+            send_error(p, error_message::ONLY_NATION_OWNER);
+        }
+        Err(NationRenameFailure::Missing) => {
+            nations.clear_rename_offer(p.character_id);
+            send_error(p, error_message::FACTION_RIGHTS);
+        }
+    }
+}
+
+/// Writes the new name immediately; the periodic nation save writes the same row again, so a
+/// failed write is retried (RENAME-2 covers the guild path, which has no periodic save).
+async fn persist_nation_name(server: &GameServer, id: u32, name: &str) {
+    let _save = server.save.transaction_lock().await;
+    if let Err(error) = sqlx::query("UPDATE nations SET name = ? WHERE id = ?")
+        .bind(name)
+        .bind(id)
+        .execute(&server.db)
+        .await
+    {
+        tracing::error!("Persisting the name of nation {id} failed: {error}");
+    }
+}
+
+// ---- National monument (stage 4) ----
+
+/// The 1.2 territory-statue skills 23681..23688 / 23682 carry `max_range` 20 (compact
+/// `skills`); the placement skill's exact server rule is capture-pending (RENAME-9).
+pub const NATIONAL_MONUMENT_RANGE: f32 = 20.0;
+
+fn monument_distance(a: (f32, f32, f32), b: (f32, f32, f32)) -> f32 {
+    let (dx, dy, dz) = (a.0 - b.0, a.1 - b.1, a.2 - b.2);
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+fn monument_error(error: crate::systems::housing::dominion::state::DominionError) -> i16 {
+    use crate::systems::housing::dominion::state::DominionError;
+    match error {
+        DominionError::NoMoreNationalMonument => error_message::NO_MORE_NATIONAL_MONUMENT,
+        DominionError::NationalMonumentDuringSiege => {
+            error_message::CANT_PUT_UP_NATIONAL_MONUMENT_DURING_SIEGE_PERIOD
+        }
+        _ => error_message::ONLY_NATION_OWNER,
+    }
+}
+
+fn broadcast_monument(
+    server: &GameServer,
+    state: &crate::systems::housing::dominion::state::DominionState,
+) {
+    let Ok(zone) = u16::try_from(state.zone_group_id) else {
+        return;
+    };
+    server
+        .world
+        .broadcast_to_server(&super::packets::misc::SCNationalMonumentChangedPacket {
+            id: zone,
+            national_monument_db_id: state.national_monument_db_id,
+            x: state.national_monument_x,
+            y: state.national_monument_y,
+            z: state.national_monument_z,
+        });
+}
+
+/// The king of a dominion's nation places its national monument: the territory statue doodad
+/// named by `siege_zones.monument_doodad_id` (7229..7234 for the six 1.2 castle zone groups;
+/// the doodad names match the territory-statue skills). The gates use the client's own error
+/// ids: 748 not a nation king, 757 not the king of this dominion or not at the point, 750 the
+/// dominion already has one / has no statue template, 751 while a siege is scheduled or
+/// active. The placement trigger (skills 23681..23688) and its cost are capture-pending, so
+/// the GM hook and tests call this service (RENAME-9).
+pub fn place_national_monument(
+    server: &GameServer,
+    king: &PlayerRef,
+    zone: u16,
+    x: f32,
+    y: f32,
+    z: f32,
+) -> std::result::Result<(), i16> {
+    if ![x, y, z].iter().all(|v| v.is_finite()) {
+        return Err(error_message::ONLY_NATION_OWNER);
+    }
+    let _items = server.systems.economy.operation_scope();
+    let _operation = server
+        .systems
+        .housing
+        .operation_lock
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let Some(state) = server.systems.housing.dominions.get(u32::from(zone)) else {
+        return Err(error_message::ONLY_NATION_OWNER);
+    };
+    let Some(nation) = server.systems.social.nations.owned_by(king.character_id) else {
+        return Err(error_message::ONLY_NATION_OWNER);
+    };
+    if state.owner_expedition_id == 0 {
+        return Err(error_message::ONLY_NATION_OWNER);
+    }
+    if expedition_top_level_faction(server, state.owner_expedition_id) != Some(nation.id) {
+        return Err(error_message::NATION_OWNER_AT_POS_ONLY);
+    }
+    if state.national_monument_db_id != 0 {
+        return Err(error_message::NO_MORE_NATIONAL_MONUMENT);
+    }
+    if state.siege.as_ref().is_some_and(|siege| {
+        siege.status != crate::systems::housing::dominion::state::SiegeStatus::Finished
+    }) {
+        return Err(error_message::CANT_PUT_UP_NATIONAL_MONUMENT_DURING_SIEGE_PERIOD);
+    }
+    let Some(world) = server.world.world(state.tower.instance_id) else {
+        return Err(error_message::NATION_OWNER_AT_POS_ONLY);
+    };
+    let player = WorldObject::from(king);
+    if server.world.world_of(&player).map(|w| w.id) != Some(world.id) {
+        return Err(error_message::NATION_OWNER_AT_POS_ONLY);
+    }
+    let here = world.world_pos_rot(&player);
+    if monument_distance((here.x, here.y, here.z), (x, y, z)) > NATIONAL_MONUMENT_RANGE {
+        return Err(error_message::NATION_OWNER_AT_POS_ONLY);
+    }
+    let zone_key = world.template.zone_id_at(x, y);
+    if server
+        .game_data
+        .zones
+        .zone_by_key(zone_key)
+        .map(|zone| zone.group_id)
+        != Some(state.zone_group_id)
+    {
+        return Err(error_message::NATION_OWNER_AT_POS_ONLY);
+    }
+    let Some(siege_zone) = server
+        .game_data
+        .systems
+        .housing
+        .castles
+        .siege_zones
+        .get(&u32::from(zone))
+    else {
+        return Err(error_message::NO_MORE_NATIONAL_MONUMENT);
+    };
+    if siege_zone.monument_doodad_id == 0 {
+        return Err(error_message::NO_MORE_NATIONAL_MONUMENT);
+    }
+    let Some(doodad) = crate::systems::npcs::doodad::manager::create(
+        server,
+        &world,
+        0,
+        siege_zone.monument_doodad_id,
+        None,
+        false,
+    ) else {
+        return Err(error_message::FACTION_CREATE);
+    };
+    {
+        let mut data = doodad.data();
+        data.transform.set_position(x, y, z, 0.0, 0.0, 0.0);
+        data.transform.zone_id = zone_key;
+        data.is_persistent = true;
+    }
+    crate::systems::npcs::doodad::manager::spawn(server, &world, &doodad);
+    crate::systems::npcs::doodad::db::save(server, &doodad);
+    let db_id = doodad.data().db_id;
+    if db_id == 0 {
+        crate::systems::npcs::doodad::manager::delete(server, &world, &doodad);
+        return Err(error_message::FACTION_CREATE);
+    }
+    let state = match server.systems.housing.dominions.place_national_monument(
+        u32::from(zone),
+        state.owner_expedition_id,
+        db_id,
+        x,
+        y,
+        z,
+    ) {
+        Ok(state) => state,
+        Err(error) => {
+            crate::systems::npcs::doodad::manager::delete(server, &world, &doodad);
+            return Err(monument_error(error));
+        }
+    };
+    broadcast_monument(server, &state);
+    Ok(())
+}
+
+/// Removes the dominion's national monument (skill 23682 "statue removal"): the kingdom's king
+/// must stand at the statue; the doodad row and the stored fields are cleared and every client
+/// receives `SCNationalMonumentChanged` with db id 0. Removing the same monument twice is a
+/// no-op. Siege state does not block removal (only placement has 751).
+pub fn remove_national_monument(
+    server: &GameServer,
+    king: &PlayerRef,
+    zone: u16,
+) -> std::result::Result<(), i16> {
+    let _items = server.systems.economy.operation_scope();
+    let _operation = server
+        .systems
+        .housing
+        .operation_lock
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let Some(state) = server.systems.housing.dominions.get(u32::from(zone)) else {
+        return Err(error_message::ONLY_NATION_OWNER);
+    };
+    let Some(nation) = server.systems.social.nations.owned_by(king.character_id) else {
+        return Err(error_message::ONLY_NATION_OWNER);
+    };
+    if state.owner_expedition_id == 0
+        || expedition_top_level_faction(server, state.owner_expedition_id) != Some(nation.id)
+    {
+        return Err(error_message::NATION_OWNER_AT_POS_ONLY);
+    }
+    if state.national_monument_db_id == 0 {
+        return Ok(());
+    }
+    let Some(world) = server.world.world(state.tower.instance_id) else {
+        return Err(error_message::NATION_OWNER_AT_POS_ONLY);
+    };
+    let player = WorldObject::from(king);
+    if server.world.world_of(&player).map(|w| w.id) != Some(world.id) {
+        return Err(error_message::NATION_OWNER_AT_POS_ONLY);
+    }
+    let here = world.world_pos_rot(&player);
+    if monument_distance(
+        (here.x, here.y, here.z),
+        (
+            state.national_monument_x,
+            state.national_monument_y,
+            state.national_monument_z,
+        ),
+    ) > NATIONAL_MONUMENT_RANGE
+    {
+        return Err(error_message::NATION_OWNER_AT_POS_ONLY);
+    }
+    let old_db_id = u32::try_from(state.national_monument_db_id.max(0)).unwrap_or(0);
+    let state = match server
+        .systems
+        .housing
+        .dominions
+        .clear_national_monument(u32::from(zone), state.owner_expedition_id)
+    {
+        Ok(state) => state,
+        Err(error) => return Err(monument_error(error)),
+    };
+    if let Some(doodad) = world.doodad_by_db_id(old_db_id) {
+        crate::systems::npcs::doodad::manager::delete(server, &world, &doodad);
+    } else {
+        crate::systems::npcs::doodad::db::delete_row(server, old_db_id);
+    }
+    broadcast_monument(server, &state);
+    Ok(())
 }
 
 // ---- Diplomacy (stage 3): declare hostility, friendly treaty mails, relation expiry ----
@@ -1921,6 +2362,18 @@ pub fn top_level_faction(server: &GameServer, id: u32) -> Option<u32> {
         current = mother;
     }
     Some(current)
+}
+
+/// The top-level faction of an expedition: a guild founded inside a nation resolves to that
+/// nation, a guild of a race faction to its alliance. This is the client's
+/// `FUN_392f8180(owner expedition)` used by the national tax / monument checks (RENAME-8/9).
+pub fn expedition_top_level_faction(server: &GameServer, expedition_id: u32) -> Option<u32> {
+    let mother = server
+        .expeditions
+        .get(expedition_id)
+        .map(|e| e.faction.mother_id)
+        .unwrap_or(expedition_id);
+    top_level_faction(server, mother)
 }
 
 /// The client's "I own my own user faction" scan (`FUN_398a2f40`): a top-level user faction

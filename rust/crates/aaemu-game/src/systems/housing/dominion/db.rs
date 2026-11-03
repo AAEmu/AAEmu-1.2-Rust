@@ -161,6 +161,10 @@ pub async fn load_rows(pool: &MySqlPool) -> anyhow::Result<Vec<DominionState>> {
             last_paid_at: row.try_get("last_paid_at")?,
             last_tax_rate_changed_at: row.try_get("last_tax_rate_changed_at")?,
             last_national_tax_rate_changed_at: row.try_get("last_national_tax_rate_changed_at")?,
+            national_monument_db_id: row.try_get("national_monument_db_id")?,
+            national_monument_x: row.try_get("national_monument_x")?,
+            national_monument_y: row.try_get("national_monument_y")?,
+            national_monument_z: row.try_get("national_monument_z")?,
             non_pvp_start_at: row.try_get("non_pvp_start_at")?,
             non_pvp_duration_min: row.try_get("non_pvp_duration_min")?,
             treasury: Treasury {
@@ -263,17 +267,20 @@ async fn write_row(tx: &mut Transaction<'_, MySql>, state: &DominionState) -> sq
         "REPLACE INTO dominions (zone_group_id,tower_house_id,instance_id,guard_tower_setting_id,\
          owner_expedition_id,ownership_generation,reign_start_at,last_siege_end_at,tax_rate,\
          national_tax_rate,last_paid_at,last_tax_rate_changed_at,last_national_tax_rate_changed_at,\
+         national_monument_db_id,national_monument_x,national_monument_y,national_monument_z,\
          cur_house_tax_money,cur_hunt_tax_money,peace_tax_money,cur_house_tax_aa_point,peace_tax_aa_point,\
          tower_destroyed,tower_hp,last_siege_id,siege_id,attacker_expedition_id,defender_expedition_id,\
          siege_ownership_generation,siege_status,siege_outcome,siege_scheduled_at,siege_starts_at,\
          siege_ends_at,siege_ended_at,non_pvp_start_at,non_pvp_duration_min) \
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
     )
     .bind(state.zone_group_id).bind(state.tower.house_id).bind(state.tower.instance_id)
     .bind(state.tower.guard_tower_setting_id).bind(state.owner_expedition_id)
     .bind(state.ownership_generation).bind(state.reign_start_at).bind(state.last_siege_end_at)
     .bind(state.tax_rate).bind(state.national_tax_rate).bind(state.last_paid_at)
     .bind(state.last_tax_rate_changed_at).bind(state.last_national_tax_rate_changed_at)
+    .bind(state.national_monument_db_id).bind(state.national_monument_x)
+    .bind(state.national_monument_y).bind(state.national_monument_z)
     .bind(state.treasury.cur_house_tax_money).bind(state.treasury.cur_hunt_tax_money)
     .bind(state.treasury.peace_tax_money).bind(state.treasury.cur_house_tax_aa_point)
     .bind(state.treasury.peace_tax_aa_point).bind(state.tower_destroyed).bind(state.tower_hp).bind(state.last_siege_id)

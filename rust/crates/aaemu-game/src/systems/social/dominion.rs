@@ -19,7 +19,8 @@ use crate::world::{PlayerRef, WorldObject};
 
 use super::packets::misc::{
     SCDominionDataPacket, SCDominionOwnerChangedPacket, SCDominionTaxRatePacket,
-    SCSiegeAlertPacket, SCSiegeDeclaredPacket, SCSiegeMemberPacket, SCSiegeStatePacket,
+    SCNationalTaxRatePacket, SCSiegeAlertPacket, SCSiegeDeclaredPacket, SCSiegeMemberPacket,
+    SCSiegeStatePacket,
 };
 
 const DECLARATION_SKILL: u32 = 13_661;
@@ -256,6 +257,10 @@ pub fn snapshot(server: &GameServer, state: &DominionState, now: i64) -> Option<
             0,
         )?,
         national_tax_rate: state.national_tax_rate,
+        national_monument_db_id: state.national_monument_db_id,
+        national_monument_x: state.national_monument_x,
+        national_monument_y: state.national_monument_y,
+        national_monument_z: state.national_monument_z,
         obj_id: house.obj_id,
         territory_data: DominionTerritoryData {
             id: setting.id,
@@ -270,7 +275,6 @@ pub fn snapshot(server: &GameServer, state: &DominionState, now: i64) -> Option<
         siege_timers: timers,
         non_pvp_start: DateTime::from_timestamp(state.non_pvp_start_at, 0)?,
         non_pvp_duration: state.non_pvp_duration_min,
-        ..Default::default()
     })
 }
 
@@ -418,6 +422,91 @@ pub fn update_tax_rate(server: &GameServer, player: &PlayerRef, zone: u16, tax_r
         .broadcast_to_server(&SCDominionTaxRatePacket { id: zone, tax_rate });
     crate::systems::housing::dominion::tax::refresh_bills(server, u32::from(zone));
     broadcast_snapshot(server, &state, false);
+}
+
+/// `CSUpdateNationalTaxRatePacket` (0x013): the nation king sets the national tax rate of a
+/// dominion owned by an expedition inside the kingdom. The checks mirror the 1.2 client's
+/// confirm validator (`FUN_392f4820`): `rate > 1000` -> 684; an unknown / unowned dominion or
+/// a caller who is not the king of the dominion's top-level faction -> 685; the same rate is
+/// ignored (`equal_tax_rate_warning`); a change within 86400 s -> 725. Success broadcasts
+/// `SCNationalTaxRate` (0x021; handler `FUN_392f39b0` and notice ui_texts 5675) to every
+/// client, because the dominion record is server-wide, and leaves the row dirty for the
+/// periodic dominion save. The rate is permille/10 (0-1000); applying it to collected tax and
+/// the weekly receipt mail (type 24) are capture-pending (RENAME-8).
+pub fn update_national_tax_rate(server: &GameServer, player: &PlayerRef, zone: u16, rate: u32) {
+    let _items = server.systems.economy.operation_scope();
+    let _operation = server
+        .systems
+        .housing
+        .operation_lock
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if rate > 1000 {
+        super::util::send_error(
+            player,
+            crate::systems::economy::error_message::DOMINION_NATIONAL_TAX_INVALID_RATE,
+        );
+        return;
+    }
+    let Some(state) = server.systems.housing.dominions.get(u32::from(zone)) else {
+        super::util::send_error(
+            player,
+            crate::systems::economy::error_message::DOMINION_NATIONAL_TAX_NO_PERMISSION,
+        );
+        return;
+    };
+    let Some(nation) = server.systems.social.nations.owned_by(player.character_id) else {
+        super::util::send_error(
+            player,
+            crate::systems::economy::error_message::DOMINION_NATIONAL_TAX_NO_PERMISSION,
+        );
+        return;
+    };
+    if state.owner_expedition_id == 0
+        || super::nation::expedition_top_level_faction(server, state.owner_expedition_id)
+            != Some(nation.id)
+    {
+        super::util::send_error(
+            player,
+            crate::systems::economy::error_message::DOMINION_NATIONAL_TAX_NO_PERMISSION,
+        );
+        return;
+    }
+    if state.national_tax_rate == rate as u16 {
+        return;
+    }
+    let prev = state.national_tax_rate;
+    let now = Utc::now().timestamp();
+    let state = match server.systems.housing.dominions.set_national_tax_rate(
+        u32::from(zone),
+        state.owner_expedition_id,
+        rate as u16,
+        now,
+    ) {
+        Ok(state) => state,
+        Err(DominionError::NationalTaxRateChangeLater) => {
+            super::util::send_error(
+                player,
+                crate::systems::economy::error_message::DOMINION_NATIONAL_TAX_LATER,
+            );
+            return;
+        }
+        Err(DominionError::InvalidNationalTaxRate) => {
+            super::util::send_error(
+                player,
+                crate::systems::economy::error_message::DOMINION_NATIONAL_TAX_INVALID_RATE,
+            );
+            return;
+        }
+        Err(_) => return,
+    };
+    server.world.broadcast_to_server(&SCNationalTaxRatePacket {
+        id: zone,
+        tax_rate: i32::from(state.national_tax_rate),
+        prev_tax_rate: i32::from(prev),
+        changed_time: DateTime::from_timestamp(state.last_national_tax_rate_changed_at, 0)
+            .unwrap_or(DateTime::<Utc>::MIN_UTC),
+    });
 }
 
 /// Initial unowned claim, only from the accepted original 20-second skill and exact carried
@@ -1123,10 +1212,23 @@ mod authority_tests {
     async fn snapshot_uses_live_tower_authored_limits_and_native_timer_seconds() {
         let f = fixture();
         let mut state = owned(&f);
+        state.national_monument_db_id = 77;
+        state.national_monument_x = 10.5;
+        state.national_monument_y = 20.0;
+        state.national_monument_z = 30.0;
         let data = snapshot(&f.server, &state, 100).unwrap();
         assert_eq!(
             (data.zone_id, data.expedition_id, data.house, data.obj_id),
             (25, 77, 13, 0x200)
+        );
+        assert_eq!(
+            (
+                data.national_monument_db_id,
+                data.national_monument_x,
+                data.national_monument_y,
+                data.national_monument_z
+            ),
+            (77, 10.5, 20.0, 30.0)
         );
         assert_eq!((data.x, data.y, data.z), (105.0, 100.0, 100.0));
         assert_eq!(
