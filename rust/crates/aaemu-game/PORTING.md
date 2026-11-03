@@ -3623,7 +3623,13 @@ and in NPC wandering / buff remaining times.
   `claim_gate_errors_follow_the_documented_order`,
   `a_fresh_claim_has_no_siege_cycle_during_the_authored_delay`,
   `claim_window_uses_the_authored_open_weekday_hour_and_duration`,
-  `fresh_claim_protection_refuses_cycles_until_the_delay_expires`.
+  `fresh_claim_protection_refuses_cycles_until_the_delay_expires`. Live (lane stack, headless
+  `aaemu-testclient` on the seeded Archeum Lodestones): claiming the open zone group 33
+  succeeded (`SCHouseBuildProgress`, `SCDominionData`); the never-open zone group 54 refused
+  with 662 and kept the pack; a pirate guild (mother 161) in the open zone group 33 refused
+  with 351; a fresh claim in zone group 34 reported period 5 with `started` about 45 days out
+  (the first rotation cycle after reign + 30 days). The recurring 582 case needs a narrow
+  `open_*` window and was not live-driven because all four shipped open rows are 168 h.
   Any registered current attacker may
   engrave; initial claim requires the current guild leader and exact Purified Archeum pack.
   Capture transfers the nine independently itemized fort designs to the new guild leader,
