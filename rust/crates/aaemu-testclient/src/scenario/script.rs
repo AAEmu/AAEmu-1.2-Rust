@@ -82,7 +82,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use aaemu_game::opcodes::{cs, sc};
-use anyhow::{bail, Context};
+use anyhow::{bail, ensure, Context};
 
 use super::questitem::{chat_text, gm_command, quest_state, stack_id, stack_location};
 use super::{pump, skill_response_result, Runner};
