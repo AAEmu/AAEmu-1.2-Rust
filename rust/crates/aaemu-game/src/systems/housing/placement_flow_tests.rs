@@ -278,6 +278,29 @@ async fn area_338_captured_spot_is_refused_and_the_fitting_spot_is_accepted() {
 }
 
 #[tokio::test]
+async fn a_mounted_builder_at_the_ghost_is_in_range() {
+    let f = fixture(data());
+    let mut mate = crate::models::mate::Mate::new(1, 1);
+    mate.unit.owner_id = f.player.character_id;
+    mate.owner_obj_id = f.player.obj_id;
+    mate.unit.transform.set_xyz(ACCEPTED.0, ACCEPTED.1, 100.0);
+    let mate = crate::world::Entity::new(f.server.ids.object.get_next_id().unwrap(), mate);
+    let world = f.server.world.world(0).unwrap();
+    world.spawn(&mate, &f.server.view_ctx());
+    world.attach_child(
+        &crate::world::WorldObject::from(&mate),
+        &crate::world::WorldObject::from(&f.player),
+    );
+    f.player
+        .data()
+        .unit
+        .transform
+        .set_position(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    ops::build(&f.server, &f.player, 1001, &packet(ACCEPTED.0, ACCEPTED.1));
+    assert_eq!(f.server.systems.housing.manager.count(), 1);
+}
+
+#[tokio::test]
 async fn a_unit_inside_the_footprint_is_refused_with_overlap_unit() {
     let mut f = fixture(data());
     install_unit_collider(&f.server, 500);
