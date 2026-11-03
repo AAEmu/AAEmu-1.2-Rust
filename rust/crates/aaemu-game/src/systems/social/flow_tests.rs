@@ -3074,3 +3074,313 @@ async fn loot_master_must_be_a_team_member() {
         .await;
     assert_eq!(master(), 2);
 }
+
+/// PIRATE-1 persistence: the forced owner transfer writes the new owner / role, clears the old
+/// owner's `characters.expedition_id` and writes the nation's new king in the same transaction
+/// (no later nation save). One connection-local temporary table per touched table, so shared
+/// MySQL3317 keeps no rows.
+#[tokio::test]
+#[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses connection-local temporary tables"]
+async fn private_mysql_pirate_owner_transfer_persists_the_new_owner_and_nation_king() {
+    use crate::data::world_data::SystemFaction;
+    use crate::systems::social::achievement_persistence::temporary_shadow_definition;
+    use crate::systems::social::expedition::{self, Expedition};
+    use crate::systems::social::nation::Nation;
+    use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+    use std::str::FromStr;
+    let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+        return;
+    };
+    let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+    assert_eq!(
+        options.get_port(),
+        3317,
+        "Only private MySQL3317 is allowed"
+    );
+    let pool = MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    for table in [
+        "expeditions",
+        "expedition_members",
+        "expedition_role_policies",
+        "characters",
+        "nations",
+    ] {
+        let (_, ddl): (String, String) = sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query(&temporary_shadow_definition(&ddl))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let mut server = test_server();
+    server.db = pool.clone();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    settle(&mut [&mut a, &mut b]);
+    a.p.data().unit.expedition_id = 77;
+    b.p.data().unit.expedition_id = 77;
+    let members = [(&a.p, 255u8), (&b.p, 3u8)]
+        .into_iter()
+        .map(|(p, role)| {
+            let mut m = expedition::member_from_character(&server, 77, p, false);
+            m.role = role;
+            m
+        })
+        .collect();
+    server.expeditions.add(Expedition {
+        faction: SystemFaction {
+            id: 77,
+            name: "Knights".into(),
+            owner_id: 1,
+            owner_name: "Al".into(),
+            mother_id: 101,
+            ..Default::default()
+        },
+        members,
+        policies: expedition::default_policies(&server, 77),
+        removed_members: Vec::new(),
+        is_disbanded: false,
+    });
+    server.systems.social.nations.add(Nation {
+        id: 170,
+        expedition_id: 77,
+        owner_character_id: 1,
+        owner_name: "Al".into(),
+        name: "Test Nation".into(),
+        created_at: 0,
+        allow_change_name: 0,
+        relations: Vec::new(),
+        offline_members: Vec::new(),
+    });
+    // The production row exists from the independence save; seed the shadow so the immediate
+    // owner write has a row to update.
+    sqlx::query(
+        "REPLACE INTO nations(`id`,`expedition_id`,`owner_character_id`,`owner_name`,`name`,\
+         `created_at`,`allow_change_name`) VALUES (170,77,1,'Al','Test Nation',0,0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    expedition::remove_member_for_faction_change(&server, &a.p).await;
+
+    let saved: (i64, String) =
+        sqlx::query_as("SELECT CAST(owner AS SIGNED),owner_name FROM expeditions WHERE id=77")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(saved, (2, "Bob".into()));
+    let roles: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT CAST(character_id AS SIGNED),CAST(role AS SIGNED) FROM expedition_members ORDER BY character_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(roles, vec![(2, 255)]);
+    let king: (i64, String) = sqlx::query_as(
+        "SELECT CAST(owner_character_id AS SIGNED),owner_name FROM nations WHERE id=170",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(king, (2, "Bob".into()));
+
+    for table in [
+        "nations",
+        "characters",
+        "expedition_role_policies",
+        "expedition_members",
+        "expeditions",
+    ] {
+        sqlx::query(&format!("DROP TEMPORARY TABLE {table}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    pool.close().await;
+}
+
+/// PIRATE-1 persistence for the last member: the dismissal deletes the guild row, clears the
+/// nation king and writes the released dominion (owner 0, cancelled siege) in the same
+/// transaction. One connection-local temporary table per touched table.
+#[tokio::test]
+#[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses connection-local temporary tables"]
+async fn private_mysql_pirate_last_member_dismissal_persists_nation_and_dominion() {
+    use crate::data::world_data::SystemFaction;
+    use crate::systems::housing::dominion::state::{
+        DominionState, SiegeOutcome, SiegeState, SiegeStatus, TowerIdentity,
+    };
+    use crate::systems::social::achievement_persistence::temporary_shadow_definition;
+    use crate::systems::social::expedition::{self, Expedition};
+    use crate::systems::social::nation::Nation;
+    use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+    use std::str::FromStr;
+    let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+        return;
+    };
+    let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+    assert_eq!(
+        options.get_port(),
+        3317,
+        "Only private MySQL3317 is allowed"
+    );
+    let pool = MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    for table in [
+        "expeditions",
+        "expedition_members",
+        "expedition_role_policies",
+        "characters",
+        "nations",
+        "dominions",
+        "dominion_siege_participants",
+    ] {
+        let (_, ddl): (String, String) = sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query(&temporary_shadow_definition(&ddl))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let mut server = test_server();
+    server.db = pool.clone();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    settle(&mut [&mut a]);
+    a.p.data().unit.expedition_id = 77;
+    let mut member = expedition::member_from_character(&server, 77, &a.p, false);
+    member.role = 255;
+    server.expeditions.add(Expedition {
+        faction: SystemFaction {
+            id: 77,
+            name: "Knights".into(),
+            owner_id: 1,
+            owner_name: "Al".into(),
+            mother_id: 101,
+            ..Default::default()
+        },
+        members: vec![member],
+        policies: expedition::default_policies(&server, 77),
+        removed_members: Vec::new(),
+        is_disbanded: false,
+    });
+    server.systems.social.nations.add(Nation {
+        id: 170,
+        expedition_id: 77,
+        owner_character_id: 1,
+        owner_name: "Al".into(),
+        name: "Test Nation".into(),
+        created_at: 0,
+        allow_change_name: 0,
+        relations: Vec::new(),
+        offline_members: Vec::new(),
+    });
+    sqlx::query(
+        "REPLACE INTO nations(`id`,`expedition_id`,`owner_character_id`,`owner_name`,`name`,\
+         `created_at`,`allow_change_name`) VALUES (170,77,1,'Al','Test Nation',0,0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    server
+        .systems
+        .housing
+        .dominions
+        .restore(vec![DominionState {
+            zone_group_id: 25,
+            tower: TowerIdentity {
+                house_id: 61,
+                instance_id: 0,
+                guard_tower_setting_id: 7,
+            },
+            owner_expedition_id: 77,
+            ownership_generation: 1,
+            reign_start_at: 100,
+            last_siege_end_at: 0,
+            tax_rate: 0,
+            national_tax_rate: 0,
+            last_paid_at: 0,
+            last_tax_rate_changed_at: 0,
+            last_national_tax_rate_changed_at: 0,
+            non_pvp_start_at: 0,
+            non_pvp_duration_min: 0,
+            treasury: Default::default(),
+            tower_destroyed: false,
+            tower_hp: None,
+            last_siege_id: 1,
+            siege: Some(SiegeState {
+                siege_id: 1,
+                attacker_expedition_id: 88,
+                defender_expedition_id: 77,
+                ownership_generation: 1,
+                status: SiegeStatus::Scheduled,
+                outcome: SiegeOutcome::Pending,
+                scheduled_at: 100,
+                starts_at: 200,
+                ends_at: 300,
+                ended_at: 0,
+                participants: Default::default(),
+            }),
+        }])
+        .expect("test dominion");
+
+    expedition::remove_member_for_faction_change(&server, &a.p).await;
+
+    let guilds: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM expeditions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(guilds, 0, "the dismissed guild row is deleted");
+    let members: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM expedition_members")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(members, 0);
+    let king: (i64, String) = sqlx::query_as(
+        "SELECT CAST(owner_character_id AS SIGNED),owner_name FROM nations WHERE id=170",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(king, (0, String::new()));
+    let dominion: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT CAST(owner_expedition_id AS SIGNED),CAST(siege_status AS SIGNED),\
+         CAST(siege_outcome AS SIGNED),CAST(tower_hp IS NULL AS SIGNED) FROM dominions \
+         WHERE zone_group_id=25",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(dominion, (0, 2, 3, 1));
+    let participants: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dominion_siege_participants")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(participants, 0);
+
+    for table in [
+        "dominion_siege_participants",
+        "dominions",
+        "nations",
+        "characters",
+        "expedition_role_policies",
+        "expedition_members",
+        "expeditions",
+    ] {
+        sqlx::query(&format!("DROP TEMPORARY TABLE {table}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    pool.close().await;
+}

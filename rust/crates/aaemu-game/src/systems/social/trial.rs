@@ -33,7 +33,6 @@ use crate::systems::social::crime::{
     self, add_own_buff, buff, crime_state, fmt_vec3, set_crime_point, set_infamy_point,
     set_jury_point, sus_log, world_pos_rot, CrimeEvent,
 };
-use crate::systems::social::faction;
 use crate::systems::social::packets::trial::*;
 use crate::systems::social::util::{self, error, send_error};
 use crate::world::{broadcast, DoodadRef, PlayerRef, WorldObject};
@@ -963,7 +962,9 @@ fn result_is_guilty(
     };
     defendant.send(pkt);
     if became_pirate {
-        faction::set_faction_persistent(server, defendant, factions::PIRATE);
+        // Deferred like every other `SetFaction` here: the trial mutex is still held (module
+        // rule, lines 5-13), and `set_faction` re-enters the world / guild / team subsystems.
+        fx.push(Effect::SetFaction(defendant.clone(), factions::PIRATE));
     }
     // Prisoner buff (minimum 10 s: 0 would use the default 30 minutes).
     let jail_time_ms = t.jail_time.saturating_mul(60_000).max(10_000);
@@ -1038,7 +1039,8 @@ fn result_is_not_guilty(
     };
     defendant.send(pkt);
     if became_pirate {
-        faction::set_faction_persistent(server, defendant, factions::PIRATE);
+        // Deferred: the trial mutex is still held (module rule, lines 5-13).
+        fx.push(Effect::SetFaction(defendant.clone(), factions::PIRATE));
     }
     fx.push(Effect::RemoveBuffsByTag(
         defendant.clone(),

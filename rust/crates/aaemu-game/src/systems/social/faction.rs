@@ -188,14 +188,11 @@ pub async fn set_faction(server: &GameServer, p: &PlayerRef, faction_id: u32) {
             }
         }
     }
-    if p.data().in_party {
-        server.systems.social.teams.member_remove_from_team(
-            server,
-            p,
-            p,
-            crate::systems::social::team::risky_action::KICK,
-        );
-    }
+    server
+        .systems
+        .social
+        .teams
+        .member_remove_for_faction_change(server, p);
 }
 
 /// `Character.SetFaction` for a synchronous caller (the GM `/setfaction`): a **persistent**
@@ -214,10 +211,7 @@ pub fn set_faction_persistent(server: &GameServer, p: &PlayerRef, faction_id: u3
     let obj = crate::world::WorldObject::from(p);
     crate::systems::skills::combat::set_faction_with_temp(server, &obj, faction_id, false);
     crate::systems::dispatch_buff_events(server, &obj);
-    let (expedition, in_party) = {
-        let c = p.data();
-        (c.unit.expedition_id, c.in_party)
-    };
+    let expedition = p.data().unit.expedition_id;
     server
         .systems
         .social
@@ -239,14 +233,11 @@ pub fn set_faction_persistent(server: &GameServer, p: &PlayerRef, faction_id: u3
             }
         }
     }
-    if in_party {
-        server.systems.social.teams.member_remove_from_team(
-            server,
-            p,
-            p,
-            crate::systems::social::team::risky_action::KICK,
-        );
-    }
+    server
+        .systems
+        .social
+        .teams
+        .member_remove_for_faction_change(server, p);
 }
 
 /// A temporary faction change (duel Red / Blue team, battlefield corps) that is **not**

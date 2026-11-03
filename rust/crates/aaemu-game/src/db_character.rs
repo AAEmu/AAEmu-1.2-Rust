@@ -70,6 +70,11 @@ impl Character {
     /// `set_faction_persistent`) **after** releasing the character's data lock, because the
     /// change broadcasts and touches houses / guild / party. The faction field is deliberately
     /// left unchanged here.
+    ///
+    /// The decision uses the saved faction ([`persisted_faction`]), not the live one: a duel /
+    /// battlefield corps shows a temporary Red / Blue / corps faction, and testing that would
+    /// re-fire `SetFaction(Pirate)` for a character who is already a pirate (ending the
+    /// temporary faction and kicking the party).
     #[must_use = "run SetFaction(Pirate) after releasing the character's data lock"]
     pub fn check_wanted_threshold(&mut self, server: &GameServer, now_ms: i64) -> bool {
         let add = |c: &mut Character, id: u32| {
@@ -92,7 +97,7 @@ impl Character {
         if self.infamy_point >= PIRATE_CRIME_POINT_THRESHOLD {
             add(self, BUFF_WANTED);
             add(self, BUFF_CONTEMPTUOUS);
-            if self.unit.faction_id != FACTION_PIRATE {
+            if persisted_faction(self) != FACTION_PIRATE {
                 tracing::warn!(
                     "Character {} ({}) has {} infamy: SetFaction(Pirate)",
                     self.id,
@@ -1541,6 +1546,40 @@ mod tests {
                 .await
                 .unwrap();
         }
+    }
+
+    /// A duelling / battlefield pirate keeps the saved faction 161 while showing Red / Blue /
+    /// corps. The infamy threshold must read the saved faction: testing the live one would
+    /// re-fire `SetFaction(Pirate)` (end the temporary faction and kick the party / duel).
+    #[tokio::test]
+    async fn a_temporary_faction_does_not_rearm_the_pirate_change() {
+        use crate::data::skills::{BuffKind, BuffTemplate};
+        use crate::data::GameData;
+        use crate::test_support::test_server_with;
+
+        let mut data = GameData::empty();
+        for id in [BUFF_WANTED, BUFF_CONTEMPTUOUS] {
+            data.skills
+                .buffs
+                .insert(id, BuffTemplate::simple(id, BuffKind::Good));
+        }
+        let server = test_server_with(data);
+        let mut duellist = Character::new(1, 1, UnitCustomModelParams::default());
+        duellist.unit.faction_id = 160; // Red team while the saved faction is Pirate.
+        duellist.unit.origin_faction_id = FACTION_PIRATE;
+        duellist.unit.faction_temporary = true;
+        duellist.infamy_point = PIRATE_CRIME_POINT_THRESHOLD;
+        assert!(
+            !duellist.check_wanted_threshold(&server, 0),
+            "a saved pirate in a temporary faction is not converted again"
+        );
+        assert_eq!(duellist.unit.faction_id, 160);
+
+        // A plain non-pirate at the threshold still converts.
+        let mut criminal = Character::new(2, 1, UnitCustomModelParams::default());
+        criminal.unit.faction_id = 101;
+        criminal.infamy_point = PIRATE_CRIME_POINT_THRESHOLD;
+        assert!(criminal.check_wanted_threshold(&server, 0));
     }
 
     #[test]
