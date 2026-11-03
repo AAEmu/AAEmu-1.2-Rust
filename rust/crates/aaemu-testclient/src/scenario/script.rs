@@ -36,8 +36,16 @@
 //! moveitem <id> <ftype> <fslot> <ttype> <tslot>  CSSwapItemsPacket with an explicit item id
 //! icast <skill> <item template> <npc template|self|peer|player:NAME> [metres [max secs]]
 //!                                    cast from the remembered item stack
+//! icastitem <skill> <scroll template> <target item template> error <code>|ok
+//!                                    item-on-item cast (`GradeEnchant` scroll on the target
+//!                                    item); fails unless the expected error (and no result) or
+//!                                    an `SCGradeEnchantResult` arrives.
 //! waitpeer [secs] [name]             read packets until another player is in sight (60 s default)
-//! rawcs <opcode hex> [<body hex>]    send any client packet (`SELF` / `PEER` in the body hex)
+//! rawcs <opcode hex> [<body hex>]    send any client packet (`SELF` / `PEER` / `ITEM(<template>)`
+//!                                    in the body hex)
+//! rawcsend <opcode hex> <body hex>   send it without draining (the caller asserts the reply)
+//! rawcswait <opcode hex> <body hex> <PacketName> [secs]
+//!                                    send it and fail unless that packet answers (default 5 s)
 //! pkill [name]                       `/kill` with the peer targeted (GM)
 //! await <Event> [secs]               wait (60 s default) for a party/guild event and consume it
 //! partyinvite <name>                 CSInviteToTeam (party) by character name
@@ -79,7 +87,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use aaemu_game::opcodes::{cs, sc};
-use anyhow::{bail, Context};
+use anyhow::{bail, ensure, Context};
 
 use super::questitem::{chat_text, gm_command, quest_state, stack_id, stack_location};
 use super::{pump, skill_response_result, Runner};
@@ -1055,6 +1063,50 @@ async fn run_lines(
                 }
                 show(&got);
             }
+            "icastitem" => {
+                let skill: u32 = num(&parts, 0)?;
+                let scroll_tpl: u32 = num(&parts, 1)?;
+                let target_tpl: u32 = num(&parts, 2)?;
+                let expect = parts.get(3).copied().unwrap_or("ok");
+                let scroll = *items
+                    .get(&scroll_tpl)
+                    .with_context(|| format!("item {scroll_tpl} not added with `item`"))?;
+                let target = *items
+                    .get(&target_tpl)
+                    .with_context(|| format!("item {target_tpl} not added with `item`"))?;
+                game.start_item_skill_on_item(skill, scroll, scroll_tpl, target)
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(2000), Duration::from_secs(10))
+                    .await?;
+                show(&got);
+                let errors: Vec<i16> = got
+                    .iter()
+                    .filter(|p| p.is_sc(sc::SCErrorMsgPacket))
+                    .filter_map(|p| p.stream().read_i16().ok())
+                    .collect();
+                let regraded = got.iter().any(|p| p.is_sc(sc::SCGradeEnchantResultPacket));
+                println!(
+                    "    item cast {skill} from {scroll_tpl} on {target_tpl}: errors {errors:?}, \
+                     regrade result {regraded}"
+                );
+                match expect {
+                    "ok" => ensure!(
+                        regraded && errors.is_empty(),
+                        "item cast {skill} on {target_tpl}: expected SCGradeEnchantResult and no \
+                         error, got errors {errors:?}"
+                    ),
+                    "error" => {
+                        let code: i16 = num(&parts, 4)?;
+                        ensure!(
+                            errors.contains(&code) && !regraded,
+                            "item cast {skill} on {target_tpl}: expected error {code} and no \
+                             regrade result, got errors {errors:?}"
+                        );
+                    }
+                    other => bail!("unknown icastitem expectation '{other}' (error <code>|ok)"),
+                }
+            }
             "walk" => {
                 // Steps of 4 m every 800 ms (5 m/s).
                 let to: (f32, f32, f32) = (num(&parts, 0)?, num(&parts, 1)?, num(&parts, 2)?);
@@ -1366,7 +1418,7 @@ async fn run_lines(
                 let got = gm_command(game, "kill").await?;
                 show(&got);
             }
-            "rawcs" => {
+            "rawcs" | "rawcswait" | "rawcsend" => {
                 let opcode = u16::from_str_radix(parts.first().context("opcode")?, 16)?;
                 // `SELF` / `PEER` stand for our own / the first other player's object id in
                 // the packet's `bc` encoding.
@@ -1386,9 +1438,26 @@ async fn run_lines(
                 } else {
                     String::new()
                 };
-                let hex = raw
+                let mut hex = raw
                     .replace("SELF", &bc(game.state.self_obj))
                     .replace("PEER", &peer_bc);
+                // `ITEM(<template>)` expands to the stack id remembered by
+                // `item <template>`, little-endian, so a packet can carry the real item
+                // instance id.
+                while let Some(start) = hex.find("ITEM(") {
+                    let rest = &hex[start + 5..];
+                    let end = rest.find(')').context("ITEM( needs a closing )")?;
+                    let template: u32 = rest[..end].parse()?;
+                    let id = *items
+                        .get(&template)
+                        .with_context(|| format!("item {template} not added with `item`"))?;
+                    let bytes: String = id
+                        .to_le_bytes()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect();
+                    hex.replace_range(start..start + 5 + end + 1, &bytes);
+                }
                 anyhow::ensure!(
                     hex.len() % 2 == 0 && hex.is_ascii(),
                     "rawcs body hex must be an even number of hex digits"
@@ -1397,10 +1466,21 @@ async fn run_lines(
                     .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16))
                     .collect::<Result<_, _>>()?;
                 game.send_cs(opcode, &body).await?;
-                let got = game
-                    .drain(Duration::from_millis(1200), Duration::from_secs(6))
-                    .await?;
-                show(&got);
+                if cmd == "rawcswait" {
+                    // The answer is asserted, not drained away (`rawcs` prints it instead).
+                    let want = parts
+                        .get(2)
+                        .context("rawcswait needs <PacketName> after the body")?;
+                    let secs: u64 = parts.get(3).and_then(|x| x.parse().ok()).unwrap_or(5);
+                    expect_packet(game, want, secs).await?;
+                } else if cmd == "rawcsend" {
+                    // Leave the reply for a following `expecterror` / `expectpkt`.
+                } else {
+                    let got = game
+                        .drain(Duration::from_millis(1200), Duration::from_secs(6))
+                        .await?;
+                    show(&got);
+                }
             }
             "partyinvite" => {
                 let target = parts.first().context("name")?;

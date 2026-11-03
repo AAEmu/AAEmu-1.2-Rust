@@ -1757,8 +1757,45 @@ enum Claim {
     Taken,
 }
 
+/// Whether `owner` carries an active buff whose 1.2 template is a stealth effect
+/// (`buffs.stealth`). The 1.2 client hides a unit by this column (`ClientUnit::ApplyStealth` /
+/// `CanDetect`, x2game `FUN_3935c270` / `FUN_3935a2b0`), not by buff tag 100 (`TagsEnum.Stealth`);
+/// 30 of the 71 stealth buffs lack tag 100 and 10 tag-100 buffs are not stealth.
+pub fn has_stealth(server: &GameServer, owner: &WorldObject) -> bool {
+    let data = &server.game_data.systems.skills;
+    owner.with_base_unit(|b| {
+        b.buffs()
+            .effects
+            .iter()
+            .any(|e| data.buff(e.template.id).is_some_and(|t| t.stealth))
+    })
+}
+
 /// `Buffs.TriggerRemoveOn(on, value)`.
 pub fn trigger_remove_on(server: &GameServer, owner: &WorldObject, on: BuffRemoveOn, value: u32) {
+    trigger_remove_on_inner(server, owner, on, value, false)
+}
+
+/// `Buffs.TriggerRemoveOn` from a skill whose template keeps stealth (`skills.keep_stealth`):
+/// the skill-start / skill-use triggers do not remove the owner's active stealth buffs.
+/// Without this a stealth skill (10082 "Stealth", 10496 "Shadow Strike", the stealth potions)
+/// removed the stealth buff it was meant to keep through its own `cancel_ongoing_buffs` loop.
+pub fn trigger_remove_on_keep_stealth(
+    server: &GameServer,
+    owner: &WorldObject,
+    on: BuffRemoveOn,
+    value: u32,
+) {
+    trigger_remove_on_inner(server, owner, on, value, true)
+}
+
+fn trigger_remove_on_inner(
+    server: &GameServer,
+    owner: &WorldObject,
+    on: BuffRemoveOn,
+    value: u32,
+    keep_stealth: bool,
+) {
     let data = &server.game_data.systems.skills;
     let effects: Vec<(u32, u32, u32)> = owner.with_base_unit(|b| {
         b.buffs()
@@ -1808,6 +1845,12 @@ pub fn trigger_remove_on(server: &GameServer, owner: &WorldObject, on: BuffRemov
                 fire_buff_trigger(server, owner, index, event);
             }
             exit(server, owner, index, false);
+            continue;
+        }
+        // `skills.keep_stealth`: the skill keeps the caster's stealth buffs through its own
+        // start/use cancel loop (only these two triggers; attacking and damage still break
+        // stealth through the buff's own remove flags).
+        if keep_stealth && t.stealth && matches!(on, R::StartSkill | R::UseSkill) {
             continue;
         }
         if t.remove_on_start_skill && on == R::StartSkill {

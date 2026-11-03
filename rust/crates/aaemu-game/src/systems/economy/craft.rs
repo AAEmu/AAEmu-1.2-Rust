@@ -431,14 +431,22 @@ pub fn craft(server: &GameServer, player: &PlayerRef, craft_id: u32, count: i32,
         || craft
             .craft_materials
             .iter()
-            .all(|m| inv.items_count_in(slot_type::INVENTORY, m.item_id, -1) >= m.amount);
+            .all(|m| inv.items_count_in_unlocked(slot_type::INVENTORY, m.item_id, -1) >= m.amount);
     if !has_materials {
         // TODO not verified
+        let locked_only = craft.craft_materials.iter().any(|m| {
+            inv.items_count_in_unlocked(slot_type::INVENTORY, m.item_id, -1) < m.amount
+                && inv.items_count_in(slot_type::INVENTORY, m.item_id, -1) >= m.amount
+        });
         error2(
             &mut out,
             player,
             error_message::CRAFT_CANT_ACT_ANY_MORE,
-            error_message::NOT_ENOUGH_REQUIRED_ITEM,
+            if locked_only {
+                error_message::ITEM_SECURE_CONDITION
+            } else {
+                error_message::NOT_ENOUGH_REQUIRED_ITEM
+            },
             0,
             false,
         );
@@ -718,7 +726,7 @@ fn hand_out_products(server: &GameServer, player: &PlayerRef, inv: &Inv, craft: 
         let have = bag
             .lock()
             .expect("container poisoned")
-            .items_by_template(m.item_id, -1)
+            .items_by_template_unlocked(m.item_id, -1)
             .1;
         have >= m.amount
     });
@@ -728,11 +736,28 @@ fn hand_out_products(server: &GameServer, player: &PlayerRef, inv: &Inv, craft: 
             player.data().unit.name,
             craft.id
         );
+        let locked_only = craft.craft_materials.iter().any(|m| {
+            bag.lock()
+                .expect("container poisoned")
+                .items_by_template_unlocked(m.item_id, -1)
+                .1
+                < m.amount
+                && bag
+                    .lock()
+                    .expect("container poisoned")
+                    .items_by_template(m.item_id, -1)
+                    .1
+                    >= m.amount
+        });
         error2(
             &mut Out::Direct,
             player,
             error_message::CRAFT_CANT_ACT_ANY_MORE,
-            error_message::NOT_ENOUGH_REQUIRED_ITEM,
+            if locked_only {
+                error_message::ITEM_SECURE_CONDITION
+            } else {
+                error_message::NOT_ENOUGH_REQUIRED_ITEM
+            },
             0,
             false,
         );

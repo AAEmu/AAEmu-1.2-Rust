@@ -305,10 +305,7 @@ cs_packet!(
         match ops::decorate_house(server, &player, &self) {
             Ok(true) => {}
             Ok(false) => {
-                super::manager::send_error(
-                    &player,
-                    super::manager::error_message::HOUSE_CANNOT_DECORATE,
-                );
+                // The decode sent the 1.2 refusal code (122/123/124/126/199/289/629).
                 tracing::warn!(
                     "DecorateHouse, FAILED with houseId: {}, designId: {}, x: {}, y: {}, z: {}, rot {:?}, objId: {}, itemId: {}",
                     self.house_tl, self.design_id, self.x, self.y, self.z, self.quat, self.parent_obj_id, self.item_id

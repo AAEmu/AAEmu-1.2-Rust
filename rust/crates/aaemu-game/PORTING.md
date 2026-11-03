@@ -360,7 +360,7 @@ connected by `systems::economy::wiring`).
 | `Models/Game/Items/Actions/*` (every `ItemTask`, `ItemAction`, `ItemTaskType`), `SCItemTaskSuccessPacket`, `SCSyncItemLifespanPacket`, `SCUnitEquipmentsChangedPacket`, `SCInvenExpandedPacket`, `SCGamePointChangedPacket`, `SCCharacterLaborPowerChangedPacket` | `models/item_task.rs`, `systems/economy/item_packets.rs` | done | Tasks snapshot the item when created (the C# encodes on `SendPacket`). |
 | `ItemContainer`, `EquipmentContainer`, `MateEquipmentContainer`, `CofferContainer` | `models/container.rs` | done | `AddOrMoveExistingItem` (new / moved / same container), `RemoveItem`, `ConsumeItem`, `AcquireDefaultItem(Ex)` (timers, charges, crafter), `SpaceLeftForItem`, `ApplyBindRules`, `Wipe`, `ReNumberSlots`, coffer `CanAccept`, `OnEnter/LeaveContainer` events. |
 | `Inventory` (SplitOrMoveItem(Ex), 2H weapon handling, backpacks, ExpandSlot, coffers, ConsumeItem, counts), `Character` money / game points / labor / `ItemUse` / `SendErrorMessage`, `ErrorMessageType` | `systems/economy/inventory.rs`, `error_message.rs` | done | `ChangeLabor`'s `AddExp` is a hook (`ProgressionHooks`). |
-| Core item C2G (`CSSwapItems`, `CSSplitBagItem`, `CSDestroyItem`, `CSExpandSlots`, `CSDeposit/WithdrawMoney`, `CSSplit/SwapCofferItem(s)`, `CSItem(Un)Secure`, `CSEquipments(Un)Secure`, `CSThisTimeUnpackItem`) | `systems/economy/item_handlers.rs` | done | Deposit / withdraw require a positive amount and a banker NPC (the `banker` template flag) within 5 m of the current interaction object (the C# did neither). |
+| Core item C2G (`CSSwapItems`, `CSSplitBagItem`, `CSDestroyItem`, `CSExpandSlots`, `CSDeposit/WithdrawMoney`, `CSSplit/SwapCofferItem(s)`, `CSItem(Un)Secure`, `CSEquipments(Un)Secure`, `CSThisTimeUnpackItem`) | `systems/economy/{item_handlers,item_security}.rs` | done | Deposit / withdraw require a positive amount and a banker NPC (the `banker` template flag) within 5 m of the current interaction object (the C# did neither). The four secure packets are implemented from the 1.2 client (the C# only logged them); see the item-lock deviation. |
 | `ItemManager` (all templates / tables, user items, `Create`, timers, `UnwrapItem`, auction search helpers, loot convert fish), `ItemGameData`, `ItemConversionGameData`, `FishDetailsGameData`, item model stats (durability, repair cost, attributes, DPS, armor), procs | `data/items.rs`, `managers/item.rs`, `models/item.rs`, `systems/economy/{items_data,item_timers,procs}.rs` | done | `ItemManager` lists are leaf locks (snapshot before locking containers). Procs are a new feature (the C# never fired one; see the item-procs deviation). |
 | `LootGameData`, `Models/Game/Items/Loots/**`, `LootingContainer`, loot packets | `systems/economy/{loot_data,loot,looting,loot_packets}.rs` | done | NPC death / despawn / team rules through `LootNpcHooks`, `LootTeamHooks`, `LootQuestHooks`. |
 | Repair (`Character.DoRepair`, `CSRepairSingleEquipment`, `CSRepairAllEquipments`), durability loss | `systems/economy/repair.rs` | done | Combat calls `on_damage_taken` / `on_death`. |
@@ -368,7 +368,7 @@ connected by `systems::economy::wiring`).
 | Stores (`CSBuyItems`, `CSSellItems`, buy-back, `CSListSoldItem`, `CSBuyPriestBuff`, `CSBuyCoinItem`, `CSSellBackpackGoods`), `SpecialtyManager`, `TaxationsManager`, `ExpandExpert`, item look conversion | `systems/economy/{store,store_data,specialty}.rs` | done | Merchant packs / NPC flags through `NpcEconomyHooks`. Checkout validates currency, checked totals and each balance, then stages complete goods / buy-back delivery before committing payment. Vocation charges the configured price displayed by the 1.2 shop, without earnings bonuses. Rejected checkout preserves items and balances. Purchases need an NPC merchant pack or a doodad `DoodadFuncStoreUi` pack and filter the goods by it; selling needs a merchant within 3 m, lists each item once and pays only for items moved to buy-back. |
 | `MailManager`, `Models/Game/Mails/**`, `CharacterMails`, mail packets | `systems/economy/{mail,mail_character,mail_kinds,mail_packets,mail_data}.rs` | done | Saved in `SaveStage::BeforeItems`; housing tax through `MailHousingHooks`. |
 | `AuctionManager`, `Models/Game/Auction/**`, auction packets | `systems/economy/{auction,auction_data,auction_packets}.rs` | done | Saved in `SaveStage::AfterItems`; results mailed through `wiring`. Requests require an auctioneer NPC (the `auctioneer` template flag) named by the packet or the current interaction object within 5 m (the C# ignored the ids). |
-| `TradeManager`, trade packets | `systems/economy/trade.rs` | done | |
+| `TradeManager`, trade packets | `systems/economy/trade.rs` | done | The C# `CanStartTrade` TODO ("Check faction and others") is implemented from the 1.2 client's own checks: a request and its acceptance refuse a dead player, a hostile faction relation and a distance `>= sqrt(25) = 5` m, and a trade across instances; see the trade validation deviation. |
 | `CashShopManager`, `Models/Game/CashShop/**`, ICS / premium packets | `systems/economy/cash_shop.rs` | done | Gifts by `CommercialMail` (`wiring`); account credits SQL behind `CashShopDb`. |
 | Item skill-effect bodies (grade enchant, socketing, conversion, cap scale, UCC imprint, ...), mate / slave equipment packets | `systems/economy/item_effects*.rs` | done | Called by the skills subsystem's effects. UCC imprint / cleanup require owned source and target items; client UCC casts require the actual source item's configured use skill, preserving the unrelated legacy bound-item portal exception. Dyeing checks the loaded `dyeable_items` allowlist. Invalid UCC / dye effects cancel deferred reagent consumption. |
 | Item skill-effect stubs given data-derived bodies (`GainItemWithPosImprint` 32, `RechargeItemBuff` 95, `ExpToItem` 96) | `systems/economy/item_effects.rs` | done (data-derived) | The C# `Execute` bodies were `// TODO` stubs, so the behaviour comes from `special_effects` 405 / 546 / 547 / 548 (32: create `value1` x1 with `SkillEffectGainItemWithPos`), 12446 / 17017 (95) and 12462 (96: `value1` XP -> `value2` x1 with `SkillEffectExpToItem`) plus the tool skills that cast them. `GainItemWithPosImprint` stores no position imprint: the 1.2 item details have no such field. `ExpToItem` subtracts the experience directly instead of through `AddExp` (which recomputes the level and could level the character down), sends `SCExpChangedPacket(-value1)`, checks bag room before spending the XP, and cancels so the reagent is kept. `RechargeItemBuff` takes the cast's item target, resets `charge_start_time` (and `charge_count` when the template has one) and re-applies the equipped item's gear buff through `apply_gear_buffs` with the item both removed and added, so the recharge buff is not stacked; the 1 s item timers read the new charge window on their next tick, so nothing is re-scheduled. |
@@ -724,7 +724,7 @@ live acceptance remain pending.
 | `LocalizationManager` | `systems/services/localization.rs` | done | 263 635 rows / 8 locales on the real DB. |
 | `ModelManager`, `Models/Game/Models/*` | `systems/services/models.rs` | done | Counts checked against compact.sqlite3 (gated test). |
 | `MusicManager`, `SongData`, music packets (`CSSaveUserMusicNotesPacket`, `CSSendUserMusicPacket`, `CSRequestMusicNotesPacket`, `CSEndMusicPacket`, `SCUserNoteLoadedPacket`) | `systems/services/music.rs` | done | `CreateSheetMusic` item work through `SheetMusicInventory` (economy; its `ItemSkillHooks::midi_cache` / `create_sheet_music` call this manager). |
-| `RadarManager`, `TelescopeRegistrationEntry`, telescope / fish finder packets | `systems/services/radar.rs` | done | Registered from `BuffTemplate.Start` / `Dispel` (skills), unregistered on leave. Ship lists through `RadarShipHooks` (vehicles). |
+| `RadarManager`, `TelescopeRegistrationEntry`, telescope / fish finder packets | `systems/services/radar.rs` | done | Registered from `BuffTemplate.Start` / `Dispel` (skills), unregistered on leave. Ship lists through `RadarShipHooks` (vehicles). The radar / telescope feature is ported, not missing (gap-audit 2026-11-02 research `stealth.md` §0.1). Open items, none of them a port gap: shipyards are not sent in `SCTelescopeUnits` (`radar.rs` `TODO (C#): Add Shipyards`, ~:327; the record slot is UNKNOWN); the GM access-level range hack is still in place (`radar.rs` ~:341, `TODO (C#): Make a proper GM flag`); `evade_telescope` (buffs 4887 / 4950, "free from the telescope's gaze") is not consumed, as in the C# (which unit carries the buff is UNKNOWN). |
 | `Models/Tasks/ShutdownTask`, `SCNoticeMessagePacket` | `systems/services/shutdown.rs` | done | Count-down notices, final save, process exit; held in `server.systems.services.shutdown_task` (`SaveManager.ShutdownTask`). Buy-back wipe through `BUYBACK_WIPE` (economy). **Deviation:** the C# saved and exited without telling the clients (every client showed a disconnect error and quit). At T-0 the Rust task first broadcasts "The server is shutting down for maintenance.", refuses world entries (`GameServer::is_shutting_down`: `X2EnterWorld` / `CSSelectCharacter` / `CSSpawnCharacter` get `SCKicked(2)` + close), sends every connection `ConnCommand::ReturnToWorldList` (in-world: `LeaveWorldTask` to character select with no timer, i.e. save + `SCLeaveWorldGranted(1)` + `ChangeState(0)`; the client stays on its game connection and loads the lobby, so the world list request follows 2 s later: `GLPlayerReconnect` -> `LGPlayerReconnect` -> `SCReconnectAuth`, the `CSLeaveWorld(ServerSelect)` path, re-sent every 2 s to every connection still there, new ones included), waits up to 10 s for the clients to disconnect, kicks the rest with `SCKicked(2, "Server maintenance")`, then does the final save (3 tries), `shutdown::stop_server` (shared with the Ctrl+C path in `main.rs`) and the exit. A failed final save aborts the shutdown (as before: no exit) and reopens world entry; `/scripts shutdown cancel` is refused once T-0 passed. `/scripts forcedshutdown` still exits at once. |
 | `SusManager` | `systems/services/sus.rs` | done | `audit_char_sus` log + speed analysis; the 5 s `FinalizeTransform` caller and the social / npcs log calls are not wired yet (see deviations). |
 | `GameData/Framework` (`GameDataManager`, `IGameDataLoader`, `GameDataAttribute`) | `data/mod.rs`, `systems::SystemsData::load` | done (by design) | The reflection-driven loader list is the explicit `GameData::load` + per-subsystem `Data::load`; `Load` / `PostLoad` order is the call order there. |
@@ -1412,6 +1412,33 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * systems::economy: item operations are serialised by the economy operation lock (`ItemTxn`) and
   their packets / quest events are flushed after the container locks are released, in the C#
   order; character packets sent during an operation go through the same queue (`Out`).
+* systems::economy (item lock, 2026-11-03): the C# only logged `CSItemSecure`, `CSItemUnsecure`,
+  `CSEquipmentsSecure` and `CSEquipmentsUnsecure`; Rust implements them from the 1.2 client. The
+  client sends `CSItemSecure`/`CSItemUnsecure` for one bag item and the equipment pair for the
+  whole equipped set (`FUN_394ea660`, `FUN_394ea730`, `FUN_394e5dd0`, `FUN_394e5ea0`). Only
+  items in an `item_categories.secure` category and not listed in `item_secure_exceptions` can be
+  locked (`FUN_394df4a0`; the 1.2 DB has 135 secure categories and the single exception row
+  3006, an item absent from the 1.2 `items` table). Locking sets `ItemFlag.Secure`; unlocking
+  sets `unsecure_time = now + content_configs[43] * 60` (the client's
+  `X2Item.GetSecurityUnlockDelayTime` reads `FUN_395720e0(0x2b)`; its dialogs divide the value
+  by 60 to print hours, so the 1.2 value 4320 is 4320 minutes = 72 hours) and keeps the flag, so
+  the item stays locked until `UpdateItemTimers` clears it and sends `ITEM_UNLOCK_EXCESS`. The reply task is `SCItemTaskSuccessPacket` with `ItemUpdateSecurity`;
+  the `isUnsecureExcess` / `isUnSecureSet` / `isUnpack` combination is inferred from the client's
+  userdata field names and the `ITEM_LOCK` / `ITEM_UNLOCK` / `ITEM_UNLOCK_EXCESS` task types
+  (**CAPTURE-PENDING**, case item-lock-flow: no 1.2 capture of these server replies exists yet).
+  A locked item is refused by the NPC store sale, specialty-pack sale, player trade put-up and
+  completion, mail attachment (mail result `ITEM_LOCKED` 26), auction put-up, destroy, item-look
+  conversion, disenchant, split/merge/move/swap (the client's drag validation returns 664 for
+  either side, `FUN_390455d0`/`FUN_39045850`), coffer moves, locked design/furniture placement,
+  regrade and lunagem targets, and putting down or dropping a locked trade pack, with
+  `item_secure_condition` (664; the 10.x zone server uses 664 for the same item operations).
+  `ItemContainer::ConsumeItem` skips locked stacks; crafting, quest hand-ins and reagent checks
+  no longer count them, and a cast whose only reagent stacks are locked is refused with the
+  client's `SkillResult.ItemLocked` (0x25). `CSEquipmentsSecure` locks every equipment slot
+  including slot 26: the client's `FUN_394e5dd0` loops that slot too (the special `0x1a` entry),
+  and it checks the flag rather than the item category, so the server mirrors that. The lock
+  handlers send their error after the bag lock is released. Equip/unequip of a locked item is
+  refused by the same move guard (the client's drag check covers it).
 * systems::economy (item procs, 2026-11): procs fire where the C# never did. Sources, rebuilt
   by the gear-bonus pass (`apply_gear_buffs` -> `procs::refresh`, so equip / unequip, login,
   repair, gear break and gem changes all refresh them): set
@@ -1697,7 +1724,22 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   restore-mana effects read the amount; the Charge `SpecialEffect` rows are left unchanged.
 * systems::skills: `CompressedGamePackets` (DD04) are written with stored (uncompressed) deflate
   blocks; the client accepts any valid deflate stream.
-* systems::skills: the radar scans of `SkillTargetingUtil` are not ported.
+* systems::skills (stealth, 2026-11): the C# stealth predicate was buff tag 100
+  (`TagsEnum.Stealth`), but the 1.2 client hides a unit from the `buffs.stealth` column
+  (`ClientUnit::ApplyStealth` / `CanDetect`, x2game `FUN_3935c270` / `FUN_3935a2b0`; the client
+  ships the same buff table). The column differs from tag 100 in 40 rows: 71 stealth buffs, of
+  which 30 lack tag 100 (255, 719, 1078, 1080, 1371, 1432, 1443, 1502, 1514, 1573, 2284, 2341,
+  2345, 2486, 2554, 2979, 3155, 3527, 3594, 3752, 3772, 3866, 4099, 4566, 4631, 4648, 5205, 6058,
+  6474, 7003), and 10 tag-100 buffs that are not stealth (557, 1678, 1899, 1941, 1966, 3637, 5901,
+  6260, 6380, 7164). `buffs::has_stealth` uses the column for the AI `CanSeeTarget` and plot
+  conditions 15/16 (deviation from C#). `skills.keep_stealth` (33 skills, 30 with
+  `cancel_ongoing_buffs`) was loaded by the C# but never consumed: a keep_stealth skill now skips
+  its active stealth buffs in its own start/use cancel loop (`trigger_remove_on_keep_stealth`) and
+  in its `SkillUse` (special 33) chain, while attacking / taking damage still break stealth
+  through the buff's own remove flags. The real-DB test lists the 71 / 51 / 33 rows. Still open:
+  detection range / angle (formulas 4 / 10, unit attribute 94) is not evaluated, so NPC AI treats
+  a stealthed unit as invisible at any range outside the C# `< 1.0` / `< 0.5` fallbacks, and the
+  `detect_stealth` / `anti_stealth` columns are not consumed (research `stealth.md`, task B).
 * systems::skills: `SpecialEffect` repeats are scheduled tasks instead of `Thread.Sleep` loops.
 * systems::skills (cuboid AoE): `AreaShape.ComputeCuboid` tested the triangles (v0,v1,v2) and
   (v1,v2,v3) of a rectangle whose vertices run around it, so the two overlapped and the wedge at
@@ -2067,6 +2109,16 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   old behavior except for the client's `item_sockets_empty` rejection. Existing items with more
   gems than the current limit are left untouched at load, and regrade keeps their gems unchanged
   (as the C# did; the client only warns that a downgrade can lose them).
+* systems::economy (grade enchanting, 2026-11): the C# `GradeEnchant.Execute` never read
+  `items.grade_enchantable`, so it regraded any item. Rust loads the column into
+  `ItemTemplate.grade_enchantable` and refuses a non-enchantable target with error 18
+  (`invalid_target`) and `skill_cancelled` (the socketing refusal pattern), before the regrade
+  roll, the gold debit or the charm take; cancelling refunds the scroll, which the cast debits
+  as its `UseSkillAsReagent` source item. This follows the 1.2 client's own check: its
+  `GradeEnchant` special-effect validation (`FUN_393a0130`, case 0x5c) returns SkillResult
+  `INVALID_TARGET` (0x22) when the target template's `grade_enchantable` is false. Only
+  `GradeEnchant` uses the flag; 1.2 has no awakening/evolving upgrade path. Real data: 4 564
+  `'t'` rows (all equipment) and 16 918 `'f'` rows.
 * systems::economy / npcs / skills (lunafrost, 2026-10): the C# `InteractionEffect` passed the
   `SkillItem` caster and `SkillCastItemTarget` to `MagicalEnchant.Execute`; the Rust bridge dropped
   them, so a lunafrost never applied. They are forwarded now. `MagicalEnchant` also looks the item up
@@ -2634,6 +2686,29 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `ItemContainer::add_or_move_inner` pushes it for the source owner when the item moves between two
   characters' bags (trade), so the objective is recounted when items leave.
 
+* systems::economy (trade validation, 2026-11-03): `TradeManager.CanStartTrade` and
+  `StartTrade` only checked the running-trade state (C# TODO "Check faction and others"); the
+  block list was added earlier. The 1.2 client (`x2game.dll` `X2Trade:RequestTrade`
+  `FUN_394fddf0`, `X2Trade:StartTrade` `FUN_394fe180`) refuses a request/acceptance itself while
+  either player is dead (`X2Unit:IsDead`, `unit + 0x3c26`, silently), while the target is not
+  within the trade range (`FUN_39093860` with the constant `25.0` at `0x39ac9b84`:
+  `>= sqrt(25) = 5` m edge-to-edge, error 154 `too_far_away`), and it never offers "Request
+  Trade" on a hostile target (`popup_menu_proc.alb` proto 48 skips `requestTrade` when
+  `GetTargetFactionRelationship() == 1`; `FUN_394bb930` maps 1 to `hostile`). The server now
+  applies the same checks before forwarding a request and again when the invitation is accepted
+  (the invitation can be 60 s old). Refusals: dead is silent (the client shows nothing), a
+  hostile relation sends `SCCannotStartTradePacket(reason = 0)`, which the 1.2 client's
+  `OnCannotStartTrade` (`FUN_394ff1b0`) displays as error 538 `trade_target_is_not_possible_state`
+  and a distance refusal sends error 154, the code the client uses for the same check. A
+  different instance is refused with error 539 `cant_trade_with_other_view` (the client's own
+  "other view" check, `FUN_390476a0() + 8`, is not identified). The exact 1.2 **server** answers
+  are unknown (the checks above are client-side): individual packet codes are capture-pending,
+  cases `TRADE-1` (dead), `TRADE-2` (hostile), `TRADE-3` (other view) and `TRADE-4` (distance).
+  Tests: `trade_tests::{hostile_players_cannot_trade_but_the_same_faction_can,
+  a_faction_change_between_request_and_accept_refuses_the_trade,
+  out_of_range_trade_request_and_accept_are_refused,
+  dead_player_cannot_request_or_accept_a_trade}` (each fails with its check removed).
+
 * systems::economy (trade safety, 2026-10-19): a trade is made only when both sides locked and
   both confirmed (`OkTrade` previously accepted a confirmation with one side locked). Only the
   put-up amount changes hands: a larger stack is split at finish, the receiver's
@@ -2961,6 +3036,59 @@ and in NPC wandering / buff remaining times.
   `..a_rotated_house_uses_the_clients_snapped_axis_aligned_box`,
   `..two_house_builds_at_the_same_spot_race_and_one_wins`; the real 1.2 polygon and
   `max_construct_count` row are checked by the gated test above.
+* systems::housing (2026-11-03, build / decoration / purchase guards): the C# `Build`,
+  `DecorateHouse`, `SetForSale` and `BuyHouse` had no range, height, tax or buyer eligibility
+  checks (the C# TODOs "validate house by range", "validation position and some range",
+  "check tax due maybe ?"). Each player entry path now applies the 1.2 checks that exist:
+  - `CSCreateHouse` / `CSConstructHouseTax`: the caster must be within the placed house's
+    `garden_radius + 30 m` (3-D) of the target (`FUN_39333d40`; the 1.2 constant
+    `_DAT_399cf898` at `0x399cf898` is 30.0) -> `TOO_FAR_AWAY` 154. The Z must be within
+    100 m of the heightmap (`WorldInstance.GetHeight`); above/below -> `house_cannot_locate_
+    terrain_too_high` 115 / `..._too_low` 116. The game data has no vertical tolerance, so
+    the 100 m guard only refuses clearly impossible forged packets (sea farms and the
+    client's auto-Z pass). With no heightmaps installed the check is skipped. **Capture-
+    pending HOUSE-2:** the client's real slope rule samples the turned ghost model box
+    (`FUN_39332180` / `FUN_39337fb0`, 6 m spread) and cannot be reproduced without render-
+    model bounds; **HOUSE-1:** `FUN_39333d40` adds the radius at desc `+0x40`, the server uses
+    `garden_radius` (never smaller in the shipped data).
+  - `CSDecorateHouse`: 30 m from the caster to the house-local target (`FUN_393a8fa0`
+    refuses only `900.0 < d²`, i.e. exactly 30 m is allowed; the 1.2 table has
+    `too_far_to_decorate_house` 199) -> 199; the target must stay in the house's garden
+    square used by `GetHouseAtLocation` (`|x|,|y| <= garden_radius`) -> `house_cannot_
+    decorate_out_of_garden` 289; the overall `deco_limit` / `absolute_deco_limit` cap ->
+    `house_too_many_decorations` 124 and the `housing_deco_limit_elems` act-ability group
+    cap -> `acatbility_deco_arrang_fail` 629 (the codes of the client's own
+    `CanDecorateHouse`); a house still under construction / another instance ->
+    `house_not_decoratable_state` 123; malformed pose / wrong parent / denied interaction ->
+    `house_cannot_decorate` 122. **Capture-pending HOUSE-6:** decoration surface/overlap and
+    the vertical floor/ceiling window are not checked (the client's checkers are not
+    decoded); the server is permissive there.
+  - `CSBuyHouse`: the buyer must be within 30 m of the house (the sale window comes from the
+    name plaque; 154). **Capture-pending HOUSE-5:** the exact 1.2 interaction range (the
+    10.x house list uses 18 m). The buyer must pass the same account group/category rules as
+    a builder (`validate_groups`: `houseless` 615, `existing_category_id` 616,
+    `max_construct_count` 766), so buying cannot bypass a construction limit; the house's
+    present area/group is used. **Capture-pending HOUSE-3:** retail purchase eligibility and
+    faction/dominion rules (the C# had none; the client table has no purchase-specific
+    eligibility text, so the construction codes are reused) and **HOUSE-4:** a buy-specific
+    overdue-tax answer (none exists in the 1.2 table; the seller's is 645).
+  - `CSSetHouseForSale`: a player seller is refused when not the owner (642), while the
+    house is under construction (668), when the tax bill is already due (645), when the
+    template is not sellable (644), for an unknown designated buyer (648), for a zero price
+    (650), and when a *different* listing is already active (646; the same price/buyer stays
+    idempotent). GM calls with `seller == None` (`/test_house sale`, `/test_house cancel`)
+    keep the old checks and bypass the new ones; `/build_house` uses `manager::create`
+    directly and bypasses placement, as do forts, preset and DB-loaded houses.
+  - Tests (each mutation-checked by reverting the guard): `placement_flow_tests::
+    a_build_request_from_far_away_is_refused_with_too_far_away`,
+    `..a_house_z_far_above_or_below_the_terrain_is_refused`,
+    `..a_purchase_from_far_away_is_refused_with_too_far_away`,
+    `..a_purchase_that_would_exceed_the_accounts_group_limit_is_refused`;
+    `access_tests::decoration_from_far_away_is_refused_with_too_far_to_decorate_house`,
+    `..decoration_outside_the_garden_is_refused`,
+    `..decoration_over_the_house_limit_reports_too_many_decorations`,
+    `..delayed_tax_blocks_sale_listing`, `..an_under_construction_house_cannot_be_listed`,
+    `..a_listed_house_cannot_be_relisted_at_another_price`.
 * systems::housing: abandoned-house removal buff 2250 now applies its original effect
   1876 through the normal damage path. C# rejected the house attacking itself, so the
   building never decayed. Only the active server-owned removal tick on that same unowned
@@ -4309,6 +4437,17 @@ Policy decisions / capture-pending (each also a case id in the code):
   C# comment records that a filled list broke the 1.2 client Lua and the cause was never found.
   The handler keeps answering the empty `(0, 0)` list; a non-empty list must be tested on the
   original client first.
+
+* **STEALTH-C** `SCUnitState` character flag bit 5 (`0x0020`, GM invisible). The C#
+  `SCUnitStatePacket.Write` set bit 5 from `character.Invisible`, but the 1.2 client side is
+  unproven: `OnUnitState` (`FUN_391d4c30`) applies the parsed state through `FUN_391b90a0`,
+  which is a thunk in the x2game decompile, and no reader of the flags byte's bit 5 was located.
+  Bit 3 (force attack) is verified (`397c9480` -> `398a1f90` -> unit+0x3bbc); `SetInvisible`
+  writes unit+0x3bbb, but nothing in the decompile shows it coming from the state flags. The Rust
+  keeps writing only bit 3 (`world/unit_state.rs`), so a late observer of a GM who toggled
+  `/invisible` still sees the GM until the next `SCUnitInvisible` broadcast, and `unit.invisible`
+  is not persisted across a relog. Capture with the original client (GM `/invisible`, second
+  client enters view / relogs) before setting bit 5.
 
 Deviation from the removed C# history: C# never placed, settled or persisted a bounty, so there
 is no C# behaviour to mirror. The pre-existing `bounty_runtime.rs` design invented a 24-hour

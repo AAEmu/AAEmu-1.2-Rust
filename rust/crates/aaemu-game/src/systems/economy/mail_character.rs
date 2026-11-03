@@ -170,6 +170,9 @@ pub fn send_mail_to_player(
         if item.flags & crate::models::item::ITEM_FLAG_SOUL_BOUND != 0 {
             return mail_result::BOUND_ITEM;
         }
+        if super::item_security::is_locked(&item) {
+            return mail_result::ITEM_LOCKED;
+        }
     }
 
     let mut mail = MailPlayerToPlayer::new(server, player, receiver_name);
