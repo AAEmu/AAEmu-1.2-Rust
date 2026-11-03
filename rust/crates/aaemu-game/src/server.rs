@@ -72,8 +72,10 @@ impl GameServer {
                 crate::models::character::DEFAULT_INSTANCE_ID,
             );
         }
+        let names = NameManager::new(config.character_name_regex.as_deref());
+        names.set_allowed_name_chars(game_data.characters.allowed_name_chars.iter().copied());
         Self {
-            names: Arc::new(NameManager::new(config.character_name_regex.as_deref())),
+            names: Arc::new(names),
             chat: ChatManager::new(&ids.chat),
             ids,
             items: Arc::new(ItemManager::default()),

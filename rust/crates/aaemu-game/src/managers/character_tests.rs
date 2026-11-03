@@ -564,6 +564,33 @@ async fn lobby_create_filters_invalid_blocked_and_case_variant_names() {
     }
 }
 
+#[tokio::test]
+async fn lobby_create_filters_names_outside_allowed_name_chars() {
+    let mut data = creation_data();
+    // Shipped 1.2 data: lowercase Latin and Hangul syllables, no digits/Cyrillic.
+    data.characters.allowed_name_chars = vec!['a', 'b', '가', '나'];
+    let server = test_server_with(data);
+    server.db.close().await;
+    let mut client = crate::test_support::TestClient::new(&server, 1, 1007);
+    for name in ["Name1", "1", "Павел", "힣", "Name!"] {
+        lobby_create(&server, &mut client, creation_request(name))
+            .await
+            .unwrap();
+        assert_creation_failure(&mut client, 5); // sub_391D3330: forbidden name
+        assert!(server.names.no_names_registered());
+        assert!(server.items.all_containers().is_empty());
+    }
+    for name in ["Name", "가나", "aB"] {
+        lobby_create(&server, &mut client, creation_request(name))
+            .await
+            .unwrap();
+        // Reaches the closed DB, rather than being refused by the name filter.
+        assert_creation_failure(&mut client, 2);
+        assert!(server.names.no_names_registered());
+        assert!(server.items.all_containers().is_empty());
+    }
+}
+
 fn lobby_character(client: &mut crate::test_support::TestClient, id: u32) {
     let mut c = Character::new(id, client.conn.account_id(), Default::default());
     c.unit.name = "Deletable".into();

@@ -107,6 +107,10 @@ pub struct CharacterData {
     pub expert_limits: Vec<ExpertLimit>,
     /// `blocked_texts` rows with `check_name`; independent of the configured name regex.
     pub blocked_names: Vec<BlockedName>,
+    /// `allowed_name_chars`: the one-character rows the 1.2 client accepts in a character name
+    /// (ASCII letters are always accepted). Empty when the table is missing, which disables the
+    /// whitelist.
+    pub allowed_name_chars: Vec<char>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,6 +190,7 @@ impl CharacterData {
             )?),
             p_stat_limits: super::attribute_limits::CharacterPStatLimits::load(conn)?,
             blocked_names: load_blocked_names(conn)?,
+            allowed_name_chars: load_allowed_name_chars(conn)?,
             ..CharacterData::default()
         };
         let mut temp: HashMap<u32, u8> = HashMap::new();
@@ -408,6 +413,22 @@ impl CharacterData {
     }
 }
 
+/// `allowed_name_chars` (native 1.2 `FUN_39572620`): one character per row. A malformed row is
+/// skipped instead of failing the catalog.
+fn load_allowed_name_chars(conn: &Connection) -> Result<Vec<char>, GameDataError> {
+    let mut chars = Vec::new();
+    for_each_row(conn, "SELECT * FROM allowed_name_chars", [], |r| {
+        let text = r.string("char")?;
+        let mut it = text.chars();
+        match (it.next(), it.next()) {
+            (Some(ch), None) => chars.push(ch),
+            _ => tracing::warn!("allowed_name_chars: skipping {text:?} (not one character)"),
+        }
+        Ok(())
+    })?;
+    Ok(chars)
+}
+
 fn load_blocked_names(conn: &Connection) -> Result<Vec<BlockedName>, GameDataError> {
     let mut names = Vec::new();
     for_each_row(conn, "SELECT * FROM blocked_texts", [], |r| {
@@ -452,6 +473,21 @@ mod tests {
     }
 
     #[test]
+    fn allowed_name_chars_load_one_character_rows_and_skip_malformed_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE allowed_name_chars (id INT, char TEXT, bytes INT);
+             INSERT INTO allowed_name_chars VALUES
+                (1, 'a', 1), (2, '가', 3), (3, 'ab', 2), (4, '', 0), (5, 'Z', 1);",
+        )
+        .unwrap();
+        assert_eq!(
+            load_allowed_name_chars(&conn).unwrap(),
+            vec!['a', '가', 'Z']
+        );
+    }
+
+    #[test]
     #[ignore = "needs AAEMU_COMPACT_DB (read-only)"]
     fn lobby_rules_real_compact_db() {
         let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
@@ -475,5 +511,10 @@ mod tests {
             .blocked_names
             .iter()
             .any(|n| n.text == "GM" && !n.partial_match));
+        // Shipped 1.2 data: lowercase Latin and Hangul syllables, no digits.
+        assert!(data.allowed_name_chars.contains(&'a'));
+        assert!(data.allowed_name_chars.contains(&'가'));
+        assert!(!data.allowed_name_chars.contains(&'1'));
+        assert!(!data.allowed_name_chars.contains(&'А'));
     }
 }

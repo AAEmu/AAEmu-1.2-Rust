@@ -1,7 +1,7 @@
 //! Port of `Core/Managers/NameManager` and `StringExtensions.NormalizeName`.
 
-use std::collections::HashMap;
-use std::sync::RwLock;
+use std::collections::{HashMap, HashSet};
+use std::sync::{OnceLock, RwLock};
 
 use regex::Regex;
 use sqlx::mysql::MySqlPool;
@@ -23,8 +23,10 @@ pub enum CharacterCreateError {
     WorldLimit = 9,
 }
 
-/// `NameManager.DefaultCharacterNameRegexPattern`.
-pub const DEFAULT_CHARACTER_NAME_REGEX: &str = "^[a-zA-Z0-9а-яА-Я]{1,18}$";
+/// `NameManager.DefaultCharacterNameRegexPattern`. The `allowed_name_chars` whitelist is applied
+/// in addition to this pattern; the Hangul range keeps the shipped pattern from rejecting names
+/// the 1.2 data allows.
+pub const DEFAULT_CHARACTER_NAME_REGEX: &str = "^[a-zA-Z0-9а-яА-Я가-힣]{1,18}$";
 
 /// `string.NormalizeName()`: trim, first char upper case, the rest lower case. A blank input is
 /// returned unchanged. (C# uses `char.ToUpper` / current-culture `ToLower` per UTF-16 unit; Rust
@@ -53,6 +55,10 @@ struct Names {
 #[derive(Debug)]
 pub struct NameManager {
     regex: Regex,
+    /// `allowed_name_chars` (native 1.2 `sub_395728B0`): ASCII letters always pass; every other
+    /// character must be listed. `None` when the table was not loaded (keeps the regex-only
+    /// behaviour for tests and old data).
+    allowed_chars: OnceLock<HashSet<char>>,
     inner: RwLock<Names>,
 }
 
@@ -76,8 +82,30 @@ impl NameManager {
             .unwrap_or_else(|| Regex::new(DEFAULT_CHARACTER_NAME_REGEX).expect("valid regex"));
         Self {
             regex,
+            allowed_chars: OnceLock::new(),
             inner: RwLock::new(Names::default()),
         }
+    }
+
+    /// Installs the `allowed_name_chars` whitelist (native 1.2 `FUN_39572620`). An empty slice
+    /// leaves the whitelist disabled, so a compact without the table keeps the regex-only rules.
+    pub fn set_allowed_name_chars(&self, chars: impl IntoIterator<Item = char>) {
+        let set: HashSet<char> = chars.into_iter().collect();
+        if set.is_empty() {
+            return;
+        }
+        // The whitelist is fixed for the life of the server.
+        let _ = self.allowed_chars.set(set);
+    }
+
+    /// `sub_395728B0`: a one-byte alphabetic character or space is accepted directly; every
+    /// other character must be in `allowed_name_chars`.
+    fn name_chars_allowed(&self, name: &str) -> bool {
+        let Some(allowed) = self.allowed_chars.get() else {
+            return true;
+        };
+        name.chars()
+            .all(|ch| ch == ' ' || ch.is_ascii_alphabetic() || allowed.contains(&ch))
     }
 
     /// `Load()`: `SELECT id, name, account_id, deleted FROM characters`. Deleted names keep their
@@ -162,7 +190,7 @@ impl NameManager {
             }
             return CharacterCreateError::NameAlreadyExists;
         }
-        if name.trim().is_empty() || !self.regex.is_match(name) {
+        if name.trim().is_empty() || !self.regex.is_match(name) || !self.name_chars_allowed(name) {
             return CharacterCreateError::InvalidCharacters;
         }
         CharacterCreateError::Ok
