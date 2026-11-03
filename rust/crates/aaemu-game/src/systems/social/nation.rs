@@ -98,7 +98,17 @@ impl NationSettings {
     /// Loads ids 46 / 50 / 51 / 54; a missing or non-positive row keeps the default (the
     /// client's value array is zero-initialised, so it also reads 0; NATION-17).
     pub fn load(conn: &rusqlite::Connection) -> rusqlite::Result<Self> {
-        use crate::systems::skills::data::misc::load_content_config;
+        // `content_configs.value` by id (0 when the row is missing).
+        let load_content_config = |conn: &rusqlite::Connection, id: u32| -> rusqlite::Result<i32> {
+            use rusqlite::OptionalExtension;
+            conn.query_row(
+                "SELECT value FROM content_configs WHERE id = ?1",
+                [id],
+                |r| r.get::<_, i32>(0),
+            )
+            .optional()
+            .map(|v| v.unwrap_or(0))
+        };
         let mut settings = Self::default();
         let load = |id: u32, slot: &mut u32| -> rusqlite::Result<()> {
             let value = load_content_config(conn, id)?;
