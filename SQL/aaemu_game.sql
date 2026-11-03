@@ -837,3 +837,18 @@ CREATE TABLE IF NOT EXISTS `character_shop_purchases` (
   `purchase_count` int NOT NULL DEFAULT 0 COMMENT 'Copies bought so far',
   PRIMARY KEY (`character_id`, `item_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Per-character purchases of limited-sale item templates';
+
+-- Wanted-player bounty pledges (`systems::social::bounty`): one row per placement, kept after
+-- payout as the record of who paid. `amount` is copper already debited from the payer's purse;
+-- `paid` means the whole accumulated total was credited to the arresting player. Timestamps are
+-- UTC Unix seconds. No foreign key to `characters`.
+CREATE TABLE IF NOT EXISTS `bounty_pledges` (
+  `id`        bigint unsigned NOT NULL COMMENT 'BountyLedger pledge id',
+  `payer_id`  int unsigned NOT NULL COMMENT 'characters.id of the payer',
+  `target_id` int unsigned NOT NULL COMMENT 'characters.id of the wanted target',
+  `amount`    bigint NOT NULL COMMENT 'Escrowed copper',
+  `created`   bigint NOT NULL COMMENT 'Unix seconds UTC',
+  `paid`      tinyint unsigned NOT NULL DEFAULT 0 COMMENT 'Paid to the arresting player',
+  PRIMARY KEY (`id`),
+  KEY `target_id` (`target_id`, `paid`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Wanted-player bounty pledges (escrowed copper)';
