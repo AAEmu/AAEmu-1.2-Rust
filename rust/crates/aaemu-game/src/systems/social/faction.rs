@@ -75,29 +75,58 @@ impl FactionRelations {
 }
 
 /// `SystemFaction.GetRelationState(otherFaction)` for two faction ids (`None` = unknown faction,
-/// i.e. a null `Faction`).
+/// i.e. a null `Faction`). The pure table form; live code uses [`relation_state_live`], which
+/// knows the runtime nations.
 pub fn relation_state(
     factions_data: &FactionData,
     relations: &FactionRelations,
     me: u32,
     other: u32,
 ) -> u8 {
-    let Some(me) = factions_data.get(me) else {
+    let me_pair = factions_data.get(me).map(|f| (f.id, f.mother_id));
+    let other_pair = factions_data.get(other).map(|f| (f.id, f.mother_id));
+    let mother_exists =
+        me_pair.is_some_and(|(_, mother)| mother != 0 && factions_data.get(mother).is_some());
+    relation_state_from(me_pair, other_pair, mother_exists, |a, b| {
+        relations.get(a, b)
+    })
+}
+
+/// `SystemFaction.GetRelationState(otherFaction)` with the runtime nations overlaid on the
+/// static `system_factions` table. This is the one implementation the combat, team and AI
+/// paths use; a nation id (or an expedition whose mother is a nation) resolves through the
+/// nation relation rows instead of falling back to `Neutral`.
+pub fn relation_state_live(server: &GameServer, me: u32, other: u32) -> u8 {
+    let me_pair = super::nation::faction_of_id(server, me);
+    let other_pair = super::nation::faction_of_id(server, other);
+    let mother_exists = me_pair
+        .is_some_and(|(_, mother)| mother != 0 && super::nation::faction_exists(server, mother));
+    relation_state_from(me_pair, other_pair, mother_exists, |a, b| {
+        super::nation::relation_between(server, a, b)
+    })
+}
+
+/// The common `GetRelationState` body. `me` / `other` are `(id, mother_id)` pairs (`None` =
+/// a null `Faction`); `mother_exists` is the C# `GetFaction(MotherId) != null` check.
+fn relation_state_from(
+    me: Option<(u32, u32)>,
+    other: Option<(u32, u32)>,
+    mother_exists: bool,
+    relation: impl Fn(u32, u32) -> Option<u8>,
+) -> u8 {
+    let (Some((me_id, me_mother)), Some((other_id, other_mother))) = (me, other) else {
         // `this.Faction?.GetRelationState(..) ?? Neutral`.
         return relation_state::NEUTRAL;
     };
-    let Some(other) = factions_data.get(other) else {
-        return relation_state::NEUTRAL;
-    };
-    let faction_id = if me.mother_id != factions::INVALID {
-        me.mother_id
+    let faction_id = if me_mother != factions::INVALID {
+        me_mother
     } else {
-        me.id
+        me_id
     };
-    let other_id = if other.mother_id != 0 {
-        other.mother_id
+    let other_id = if other_mother != 0 {
+        other_mother
     } else {
-        other.id
+        other_id
     };
     for id in [faction_id, other_id] {
         match id {
@@ -110,27 +139,18 @@ pub fn relation_state(
     if faction_id == other_id {
         return relation_state::FRIENDLY;
     }
-    if me.mother_id != 0 && factions_data.get(me.mother_id).is_some() {
+    if me_mother != 0 && mother_exists {
         // TODO (C#): not found, so enemy (id = [1, 2, 3])?
-        return relations
-            .get(me.mother_id, other_id)
-            .unwrap_or(relation_state::FRIENDLY);
+        return relation(me_mother, other_id).unwrap_or(relation_state::FRIENDLY);
     }
-    relations
-        .get(me.id, other_id)
-        .unwrap_or(relation_state::NEUTRAL)
+    relation(me_id, other_id).unwrap_or(relation_state::NEUTRAL)
 }
 
 /// `BaseUnit.GetRelationStateTo(unit)` for two players.
 pub fn player_relation(server: &GameServer, me: &PlayerRef, other: &PlayerRef) -> u8 {
     let a = me.data().unit.faction_id;
     let b = other.data().unit.faction_id;
-    relation_state(
-        &server.game_data.factions,
-        &server.game_data.systems.social.relations,
-        a,
-        b,
-    )
+    relation_state_live(server, a, b)
 }
 
 /// `Character.SetFaction(factionId)` (+ `Unit.SetFaction`): broadcasts

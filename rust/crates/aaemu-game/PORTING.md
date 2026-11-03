@@ -165,6 +165,7 @@ Each subsystem records its status here, in its own section only (see `CONTRIBUTI
 | `buffs` damage reflection (`reflection_chance`, `reflection_type_id`, `reflection_ratio`, `reflection_target_ratio`) | `systems/skills/{buffs,effects/combat}.rs` (`reflection_effects`, `apply_reflection`) | added | The C# loaded the columns and never read them (`BuffAttribute.ReflectionTargetRatio` is unused and no `buff_modifiers` row uses attribute 1). The 36 1.2 rows (`reflection_chance > 0`) and their localized tooltips establish the core: `reflection_type_id` is the incoming hit's `DamageType` (1 Melee, 2 Magic, 3 Siege, 4 Ranged; 4407/5646 "Melee", 177/3563 "Magic", 4408/5404 "Ranged", Fire Armor 5531-5534 one buff per type), `reflection_chance` is a percent chance (177 47, 1035 50, the rest 100), and `reflection_target_ratio` is the percent of the received damage returned (386 50 "Reflects 50%", 5646 6, 7132 50, 100 "all damage"). A landed hit's victim rolls its matching live buffs in buff order and the first success returns `floor(value * target_ratio / 100)` to the attacker through `reduce_current_hp` (normal HP/death path, kill credit, durability); the attacker must still be a living unit in the world (the incoming hit already passed `can_attack`), plus an ordinary `SCUnitDamagedPacket` cast from the buff. **REFLECT-1 / REFLECT-2 / REFLECT-3 (capture-pending):** `reflection_ratio` is ignored (the reflector takes the full hit: 100 for 28 rows, 10 for 4366/4407/4408, 50 for 7132; the best guess "share still taken" is not proven); several matching buffs are not added up (the first successful roll wins, so two "reflects all damage" buffs cannot return more than the hit); the reflected hit is an ordinary damage packet whose `SkillHitType` is the hit category's normal value (1.2 has no reflect hit type, so the client cannot select the `REFLECT` combat-text key). Reflected damage rolls no item procs, no combat buffs and no `Attacked`/`Damaged`/`Damage` events of either side, and it never re-enters `damage_with_aoe`, so two reflectors cannot ping-pong. All skill / plot / DoT-tick / NPC / PvP / buff-trigger damage goes through `damage_with_aoe`; fall damage, regen, physics collision, GM commands, item capture and shipyard damage do not, and therefore never reflect. Real-DB test `real_compact_reflection_and_use_damage_amount_catalogs` (36 rows, per-type columns). |
 | `buff_triggers.use_damage_amount`, `DamageBuffTrigger` (event 3) / `DamagedBuffTrigger` (event 4) amounts | `systems/skills/{buffs,effects/combat}.rs` (`execute_trigger`, `restore_mana`, `heal`), `effects/mod.rs` (`EffectSource`) | fixed | The C# ignored `use_damage_amount` and the `Damage` event never set `IsTrigger`, so the fixed values were never scaled. `RestoreManaEffect` now scales a fixed roll by the event amount when the trigger row sets `use_damage_amount` (`value = value / 1000 * amount`, the same unit `HealEffect` already used) and skips the `percent` maximum-mana scaling (753 "Converts 3% of received damage to mana": fixed 30, 200 damage -> 6; before it restored 3% of max mana). The `Damage` event (kind 3, damage dealt by the owner) now carries the real amount into `EffectSource` for 806 Baleful Recharge ("of the damage inflicted"), 4257 Executor's Cruelty and the other event-3 trigger rows, so their heal/mana effects scale too; its target stays the owner as in the C# `DamageBuffTrigger` (`OnDamageArgs.Attacker` is the damage caster itself). Only `HealEffect`/`RestoreManaEffect` read the amount; the 23 `SpecialEffect` (Charge) rows carrying the flag have no formula and are left unchanged (rating 3 in the research). The data has 95 restore-mana triggers with the flag (94 Damaged, 1 Damage), all `use_fixed_value` and `percent` 't'. Real-DB assertions in `real_compact_reflection_and_use_damage_amount_catalogs`. |
 | `Units/Unit` combat (`ReduceCurrentHp`, `DoDie`, aggro / tagging, `SetInBattle`, criminal / force attack, invisibility, `DoFallDamage`), `BaseUnit.CanAttack` / relations, regen, `UpdateGearBonuses`, all `Character` stat getters | `systems/skills/{combat,relation,stats,regen}.rs` | done | MaxHp / MaxMp etc. with buffs, passives and gear (`GearStats` hook). NPC death side effects through `NpcSkillHooks`. |
+| `Character.ComputeDeathWaitTime` (C# hard-coded `DeathWaitTimesSeconds` / 5-minute reset) and `npcs.no_penalty` | `systems/skills/{combat,data}.rs`, `systems/npcs/npc/data.rs` | added | The 1.2 `resurrection_waiting_times` rows drive the escalating respawn wait and the active-siege variant; a killer NPC with `npcs.no_penalty` (88 rows) skips the exp / durability death penalty. The C# read neither table; see the deviations bullet for DEATH-1..3 and the fallback. |
 | Taunt buffs (`buffs.taunt` / `buffs.taunt_with_top_aggro`) | `systems/skills/{combat,buffs,state}.rs`, `systems/ai/{behaviors,combat}.rs`, `systems/quests/bridges.rs`, `systems/skills/effects/special/unit_actions.rs` | added (10x-only) | The 1.2 client and the C# have no taunt logic; the mechanic is derived from the 10.x zone server `NpcAggroTable::TauntedBy` / `CancelTauntedBy` / `CopyTopAggro`, and the 1.2 data agrees (134 `taunt='t'` buffs, 97 also `taunt_with_top_aggro`; buff 171, buff 502 "highest threat", skill 17300). On the generic buff-start path (`on_started`, so trigger- and script-applied buffs are covered too) an NPC holder gets `taunted_by(caster, taunt_with_top_aggro)`: refused when the caster is the holder or explicitly friendly to it (10x refuses a `CanAttack`-false caster; the 1.2 PvE monsters are faction-neutral to players and attack through AI aggression, so `CanAttack` would refuse every taunt on them; this is recorded as a deviation from the 10x check); the aggro entry is created through `AddUnitAggro` (zero threat), stamped with the server clock (non-zero), and with `taunt_with_top_aggro` its total is raised to the current highest total of the table (one-off copy, never above). `sorted_abusers` sorts any stamped entry above every unstamped one and the latest stamp first; `aggro_rating_in_percent` and `aggro_rating_percent` mirror that order. On buff end (expiry, dispel, death, explicit removal) `cancel_taunted_by` clears the stamp only while no other taunt buff of that caster remains; threat is not reduced, so a top-aggro copy persists. `aggro_copy` drops the stamp and `aggro_reset` clears it. **Capture-pending:** re-stamping on refresh (TAUNT-1) and the copy/reset stamp behaviour (TAUNT-2) are chosen, the 10x decompile does not show them. 10x also refuses members of the NPC's own group; Rust has no runtime NPC group membership (`npc_groups` is not loaded), so none is checked. Tests: `taunt_*`, `refreshing_the_taunt_buff_restamps_the_table`, `aggro_copy_drops_and_reset_clears_the_taunt_stamp`, gated `real_compact_taunt_buffs_and_the_skills_that_apply_them`. |
 | Aura buffs (`aura_radius`, `aura_relation_id`, `aura_slave_buff_id`, `aura_child_only`) and crowd buffs (`crowd_buff_id`, `crowd_radius`, `crowd_number`, `crowd_friendly`, `crowd_hostile`) | `systems/skills/aura.rs` | data-inferred / capture-pending | The 1.2 client only reads the columns and has no runtime; no 1.2 zone binary exists, so the rules come from the localized descriptions. A 1 s enter/leave driver (the area-trigger update pattern) grants the slave buff to units in `aura_radius` passing `aura_relation_id` (the owner too for Any/Friendly/Party/Raid), removes only the copy with caster = aura owner, and grants `crowd_buff_id` while `crowd_number` *other* carriers of the source buff are in `crowd_radius` and match `crowd_friendly` / `crowd_hostile`. The dangling slave 6668 -> 6669, the self-reference 1224 and the 15 aura rows without a slave buff are skipped with one load warning. Case ids AURA-1..8 / CROWD-1..4; update period, slave caster identity, owner counting, child attach scope and dead-owner behaviour are UNKNOWN. |
 | Learning / progression (`LearnSkill`, `LearnBuff`, `ResetSkills`, `SwapAbility`, `AddExp`, labor, game points) | `systems/skills/progress.rs` | done | Labor accrual uses zero-based actability steps into ordered `expert_limits`, matching inventory / regrade; step 4 caps at 50,000 (row id 5), avoiding the former row-id lookup that reduced it to 40,000. Capped gains and packet deltas have regression coverage. `SwapAbility` follows the 1.2 client: activating an empty slot (`old = None`, the level-10 `LearnAbility` path) is free; changing an active ability costs `content_configs[39] * level` copper, requires exactly three active abilities and a non-active target, and the debit and swap share one character lock. |
@@ -367,10 +368,32 @@ connected by `systems::economy::wiring`).
 | Stores (`CSBuyItems`, `CSSellItems`, buy-back, `CSListSoldItem`, `CSBuyPriestBuff`, `CSBuyCoinItem`, `CSSellBackpackGoods`), `SpecialtyManager`, `TaxationsManager`, `ExpandExpert`, item look conversion | `systems/economy/{store,store_data,specialty}.rs` | done | Merchant packs / NPC flags through `NpcEconomyHooks`. Checkout validates currency, checked totals and each balance, then stages complete goods / buy-back delivery before committing payment. Vocation charges the configured price displayed by the 1.2 shop, without earnings bonuses. Rejected checkout preserves items and balances. Purchases need an NPC merchant pack or a doodad `DoodadFuncStoreUi` pack and filter the goods by it; selling needs a merchant within 3 m, lists each item once and pays only for items moved to buy-back. |
 | `MailManager`, `Models/Game/Mails/**`, `CharacterMails`, mail packets | `systems/economy/{mail,mail_character,mail_kinds,mail_packets,mail_data}.rs` | done | Saved in `SaveStage::BeforeItems`; housing tax through `MailHousingHooks`. |
 | `AuctionManager`, `Models/Game/Auction/**`, auction packets | `systems/economy/{auction,auction_data,auction_packets}.rs` | done | Saved in `SaveStage::AfterItems`; results mailed through `wiring`. Requests require an auctioneer NPC (the `auctioneer` template flag) named by the packet or the current interaction object within 5 m (the C# ignored the ids). |
-| `TradeManager`, trade packets | `systems/economy/trade.rs` | done | |
+| `TradeManager`, trade packets | `systems/economy/trade.rs` | done | The C# `CanStartTrade` TODO ("Check faction and others") is implemented from the 1.2 client's own checks: a request and its acceptance refuse a dead player, a hostile faction relation and a distance `>= sqrt(25) = 5` m, and a trade across instances; see the trade validation deviation. |
 | `CashShopManager`, `Models/Game/CashShop/**`, ICS / premium packets | `systems/economy/cash_shop.rs` | done | Gifts by `CommercialMail` (`wiring`); account credits SQL behind `CashShopDb`. |
 | Item skill-effect bodies (grade enchant, socketing, conversion, cap scale, UCC imprint, ...), mate / slave equipment packets | `systems/economy/item_effects*.rs` | done | Called by the skills subsystem's effects. UCC imprint / cleanup require owned source and target items; client UCC casts require the actual source item's configured use skill, preserving the unrelated legacy bound-item portal exception. Dyeing checks the loaded `dyeable_items` allowlist. Invalid UCC / dye effects cancel deferred reagent consumption. |
 | Item skill-effect stubs given data-derived bodies (`GainItemWithPosImprint` 32, `RechargeItemBuff` 95, `ExpToItem` 96) | `systems/economy/item_effects.rs` | done (data-derived) | The C# `Execute` bodies were `// TODO` stubs, so the behaviour comes from `special_effects` 405 / 546 / 547 / 548 (32: create `value1` x1 with `SkillEffectGainItemWithPos`), 12446 / 17017 (95) and 12462 (96: `value1` XP -> `value2` x1 with `SkillEffectExpToItem`) plus the tool skills that cast them. `GainItemWithPosImprint` stores no position imprint: the 1.2 item details have no such field. `ExpToItem` subtracts the experience directly instead of through `AddExp` (which recomputes the level and could level the character down), sends `SCExpChangedPacket(-value1)`, checks bag room before spending the XP, and cancels so the reagent is kept. `RechargeItemBuff` takes the cast's item target, resets `charge_start_time` (and `charge_count` when the template has one) and re-applies the equipped item's gear buff through `apply_gear_buffs` with the item both removed and added, so the recharge buff is not stacked; the 1 s item timers read the new charge window on their next tick, so nothing is re-scheduled. |
+
+#### Limited-sale purchase limits (2026-11-03)
+
+`items.limited_sale_count` and `items.one_time_sale` are now read and enforced as per-character
+purchase limits (`systems/economy/shop_limits.rs`, table `character_shop_purchases`). The 1.2
+client loads both columns with the item template (`SELECT ... limited_sale_count ... one_time_sale
+... FROM items`) but never reads them: the NPC store UI has no remaining-count field, and the only
+sale-limit error in its table is `store_one_time_sale` (752, `0x2f0`). Its GM command list on the
+same build carries `limited_sale_add` / `limited_sale_reset` / `one_time_sale_add` /
+`one_time_sale_reset`, so the counters are per character and reset by an administrator. The reset
+period itself is not available for 1.2 (capture-pending **SHOP-1**): the implementation keeps the
+counter per character, never resets it, and does not share it with the account or the server.
+`one_time_sale` is a limit of one and the smaller column wins when both are set.
+
+Enforcement is one atomic check-and-claim, before the price or the item moves: `CSBuyItemsPacket`
+claims the sum of all lines of one template after the checkout is staged (a refused checkout sends
+752 and changes nothing), and `DoodadFuncPurchase` claims before consuming the coin and gives the
+claim back if the consumption or the grant then fails (debit first, refund on failure). Selling,
+selling back and buying back do not change a counter; GM give, quests, loot, crafting and the cash
+shop are not the vendor purchase path and stay unlimited (the cash shop has its own
+`ics_shop_items.limited_type` / `limited_stock_max`). Not in the C# port (it never read either
+column).
 
 #### Cargo escrow and stale rack references (2026-10-25)
 
@@ -453,7 +476,8 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 | `FamilyManager`, `Models/Game/Family` | `systems/social/family.rs`, `packets/family.rs` | done | Load, invite / reply / create, leave, kick (offline existence check), title, steward, login / logout, disband, save, offline leave for character deletion. |
 | `FriendMananger`, `CharacterFriends`, `CharacterBlocked` | `systems/social/friend.rs`, `packets/friend.rs` (`managers::friend` re-exports) | done | Add / remove friends (online or by DB name lookup), block / unblock (online or by `NameManager` for offline names), status changes incl. `InParty`. The blocked list is enforced on every direct delivery path (whisper, team / area / expedition / family invite, friend add, trade and duel request); see the block-list deviation. |
 | `ChatManager`, `Models/Game/Chat` | `systems/social/chat.rs`, `session.rs` (`managers::chat` re-exports) | done | All channel kinds incl. party / raid / court, CleanUpChannels, party / raid / raid-leader / judge routing. User channels (`CSJoinUserChatChannel`) are log-only as in C#. |
-| `FactionManager` relations, `SystemFaction.GetRelationState`, `Unit/Character.SetFaction` | `systems/social/faction.rs`, `packets/faction.rs` | done | Relation table validated against compact.sqlite3 (gated test). Faction CS packets are log-only as in C#; every SCFaction* struct ported. |
+| `FactionManager` relations, `SystemFaction.GetRelationState`, `Unit/Character.SetFaction` | `systems/social/faction.rs`, `packets/faction.rs` | done | Relation table validated against compact.sqlite3 (gated test). Faction CS packets are log-only as in C#; every SCFaction* struct ported. `relation_state_live` overlays the runtime nations on the static table for the combat, team, party and AI paths. |
+| Player nations (`nations`, `nation_relations`, independence) | `systems/social/nation.rs`, `commands/scripts/nation.rs` | stage 1 | Skill 18540 special effect 71 creates a nation from the caster's expedition (owner + dominion, CASTLE_CLAIM backpack); ids come from the expedition allocator; `SCFactionIndependence` + relation rows + `SCUnitFactionChanged`; online members use `set_faction`, offline `characters.faction_id` moves with `expeditions.mother` in the save transaction; login sends nation factions and relations. See "Player nations" below. |
 | `GameData/AchievementGameData` (`achievements`, `achievement_objectives`, `pre_completed_achievements`, `char_records`), `Models/Game/Achievement` | `systems/social/achievement.rs` (`server.game_data.systems.social.achievements`) | done | Loader + port of `AchievementGameDataTests`; gated real-DB test `achievement_game_data_real_compact_db`. The C# 1.2 tree has no manager; the Rust achievement manager / runtime / hooks / rewards (`achievement_*.rs`) read them (see "Achievement producers" below). |
 | `DuelManager`, `Models/Game/Duels`, duel tasks | `systems/social/duel.rs`, `packets/duel.rs` | done | Request / accept (flag via hook) / start / stop / cancel, distance + HP checks, end timer (tokio tasks; `set_delays` test hook). |
 | `CrimeManager`, `TrialManager`, `Models/Game/Crime`, `TrialUpdateTask` | `systems/social/{crime,trial}.rs`, `packets/trial.rs` | done | Crime table load / save (`AfterItems`), report / evidence (hooks), bot reports, trial / jury flow with 5 s tick, audience, bounty placement / arrest payout (`systems/social/{bounty,bounty_runtime}.rs`, `bounty_pledges`; see "Wanted-player bounty"). The board is still the empty list (BOUNTY-board). Arrests, authenticated jury choices, guilty pleas, acquittals, court cleanup and reconnect jail enforcement have packet-flow regressions; prisoner buffs persist remaining online time. |
@@ -462,6 +486,60 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 | `RadarManager` | – | not social | Telescope / fish school registration from buff templates: skills / npcs. |
 
 Cross-subsystem calls: wired in phase 3b (see "Phase 3b wiring": trial court doodads / NPCs after the spawns, `SocialHooks` by social itself, crime evidence / arrests / team and duel queries from skills, loot rules from economy, court checks in portals and instances, `force_dismount` through vehicles). Still open: teleports -> `session::on_moved` (C# `Character.SetPosition` -> `TeamManager.UpdatePosition`; plain movement does not call it in C# either).
+
+#### Player nations (stage 1, NATION-1..4)
+
+`systems::social::nation` implements the 1.2 "declare independence" slice: a nation is a
+top-level user faction (`mother_id == 0`, `owner_type` 0, owner = the founding expedition's
+owner), and the founding expedition becomes its child (`expeditions.mother`). The client side
+is `FUN_392fb2d0` (`SCFactionIndependence` 0x026: it clones the founding expedition record,
+sets mother 0 / name / created time / `diplomacy_target = 1`, then re-factions the expedition's
+units). Ids come from the same `ExpeditionIdManager` as expedition faction ids; the 1.2 client
+refuses a duplicate faction id (`FUN_398a5280`), so `EXPEDITION_ID` also extracts `nations.id`.
+
+* **NATION-1 (capture-pending):** the packet that carries the chosen nation name was not found
+  in the 1.2 client (research section 2.1.1: the Lua `X2Nation.DeclareIndependence(name)` only
+  validates it locally). The server uses the founding expedition's name, which is what the GM
+  command and the independence effect also send.
+* **NATION-2 (INFERRED):** a new nation copies all 46 `system_faction_relations` rows that name
+  faction 166 "default faction setup for independence", replacing 166 with the nation id. The
+  real compact database has 46 rows (33 `(X, 166)`, 13 `(166, X)`); the copy rule is inferred
+  from their contents, not from a decompiled server. `real_compact_db_relation_template_is_faction_166`
+  pins the count and the hostile/neutral/friendly samples.
+* **NATION-3 (capture-pending):** the nation `SystemFaction` record mirrors the founding
+  expedition clone (`allow_change_name` 0, `political_system` 1) with `diplomacy_target` 1 as
+  `FUN_392fb2d0` sets it. Whether the live 1.2 server allows a rename from this record is not
+  established (stage 4).
+* **NATION-4 (capture-pending):** no 1.2 error id is known for the "owns no dominion"
+  prerequisite: the special effect and the GM command send/use 40
+  `FACTION_SEPARATE_RIGHTS`. The GM command's `nation create force` skips only that check for
+  test fixtures. The skill's CASTLE_CLAIM backpack (type 1, slot 26) is checked in the effect
+  after the authored `unit_reqs` slot requirement.
+* **NATION-5 (stage 2 scope):** when the founding expedition disbands, the nation stays as a
+  kingless nation (`dismiss_expedition` clears its `expedition_id`; the next save writes 0).
+  Load clears a stored id whose `expeditions` row is missing or whose `mother` is not the
+  nation, so a guild that later reuses the freed id is neither captured nor refused
+  independence. Offline members' stored houses move in the creation transaction, and the
+  housing / crime faction lookups use the live nation table. Nation destruction / succession is
+  stage 2 (capture-pending).
+* **NATION-6 (hot path, documented):** relation lookups take the nations `RwLock` and scan
+  linearly. `faction_pair` / `is_nation` avoid cloning and have empty fast paths, but there is
+  no id index; the expected nation count makes this acceptable.
+* **NATION-7:** a nation member's mother is 0, so nation chat shares `faction_chat(0)` and
+  cross-nation whispers are allowed. A real nation channel is stage 2+ work.
+* **NATION-8:** a member already in the enter-world path when independence runs can keep the
+  race faction (the offline set comes from one world snapshot); the next login loads the saved
+  nation faction.
+* **NATION-9:** `save_creation` takes `SaveManager::transaction_lock` around its transaction;
+  the periodic save runs inside `DoSave`. The GM command and the skill both call the same
+  synchronous service, so a concurrent duplicate call is refused by the in-memory check.
+* **NATION-10:** a client already in the login burst when independence broadcasts can miss
+  `SCFactionIndependence`; it receives the nation record and relations on the next login.
+  Expedition records with `mother = N` are sent before N's own record in the login burst; the
+  1.2 client's tolerance for that order is unverified (the client stores records independently).
+* The national tax CS packet is 0x013 (`FUN_392f42f0`; owner-approved exception to the
+  never-edit `opcodes.rs` rule); a log-only handler is registered. The real tax handler,
+  relation expiry, immigration / kick, rename and monument stay for stages 2-4.
 
 ### systems::housing
 
@@ -1146,6 +1224,10 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   despawned without dying still leaves its summons, as in the 1.2 C# (the later 10.x C# only
   forwards the flag to the native Zone: `WorldIntegration.cs` `PublishNpcSpawn` /
   `WZNpcSpawnerEventPacket`).
+* systems::npcs (`no_penalty`): the 1.2 C# never loaded `npcs.no_penalty` (the 1.2 client's
+  `npcs` query does). Rust loads it as `NpcTemplate.no_penalty` for the death path in
+  `systems::skills::combat`; see the systems::skills death-penalty bullet for the behaviour and
+  the capture-pending items.
 
 * systems::services / systems::vehicles (mount speed analysis): `SusManager` samples the
   driver's (or owner's) `teleport_seq` and `disabled_set_position` for mates, and successful
@@ -1236,8 +1318,8 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   anyone else, leaving `OwnerId` on a non-member. The Rust removes an ordinary member as a
   normal leave (same packets as `Leave`) and dismisses the guild when the member is its owner:
   the 1.2 client refuses an owner's leave (`expedition_owner_cannot_leave`, error 310) and only
-  offers the owner's dismiss path (`expedition_owner_dismiss`, 301). **Capture-pending PIRATE-1:**
-  no retail capture of a guild owner's forced faction change; the dismissal is the chosen rule.
+  offers the owner's dismiss path (`expedition_owner_dismiss`, 301). **Owner decision
+  (2026-11-03, PIRATE-1):** a guild owner's forced faction change dismisses the guild.
 * `CheckForDeletedCharactersDeletion`: the rename / `deleted = 1` / packets are done;
   `DeleteCharacterAssets` (houses, guild, family, mail returns) is a later phase.
 * `GameConnection.OnDisconnect` → `UpdateLoginTime(0)` for connections that never entered (inserts
@@ -1675,6 +1757,24 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * systems::skills: `Character.DoDie` is complete (exp / durability loss, escalating respawn timer,
   PvP honor / assists / kill counts, War-zone honor loss, `DropTradePackToFloor`). The PvP
   damage / heal histories are lists of (character id, unix ms) in `skill_char`.
+* systems::skills (death penalty and respawn wait, 2026-11-03): `Character.DoDie` now reads the
+  two 1.2 tables the port ignored. `npcs.no_penalty` (88 rows: guards, siege cannons, battlefield
+  pets, alliance NPCs; the 1.2 client loads the column in its `npcs` query) suppresses the exp
+  and death-durability loss when the killing attribution (skill / DoT caster) is such an NPC;
+  the respawn timer still runs. `resurrection_waiting_times` replaces the port's hard-coded
+  `[15, 30, ... 240]` s table and its 5-minute reset: the 1-based consecutive-death step selects
+  the row, `penalty_duration` (600 s on every 1.2 row) keeps the step alive, and an active
+  dominion siege in the death zone selects `siege_waiting_time` (20/15/10/5/0 s) over
+  `waiting_time` (0/5/45/90/180 s). The client loads the same table but only displays the
+  `resurrectWaitTime` the server sends in `SCUnitDeathPacket`, so the server values drive the
+  countdown. **Deviation:** the C# table (15..240 s, 5-minute reset) has no 1.2 source and is
+  kept only as the fallback for a database without rows. **Capture-pending DEATH-1:** the
+  row-is-the-death-step mapping and the seconds unit are inferred from the table values (normal
+  waits rising to the documented 180 s, siege waits falling to 0) and the client load; no 1.2
+  server binary exists. **DEATH-2:** whether the revival debuff (`Weakened Body`) is also
+  suppressed by `no_penalty` is unknown; only exp / durability are skipped, as the column name
+  and the guard rows establish no more. **DEATH-3:** the first step's 0 s wait and the 600 s
+  window replacing the C# 5-minute reset are data-driven, not captured.
 * systems::skills: skill controllers and NPC displacements snap to the ground through the npcs
   heightmaps (`geo_data_height`); the wandering (fear) speed is the 7 m/s fallback (actor model
   stances not loaded); `Npc.StopMovement` writes the C# default stance / alertness; `OnMovement`
@@ -2495,6 +2595,29 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   (`item_handlers::CSDestroyItemPacket`) pushes `ItemFx::Consumed` for the destroyed units and
   `ItemContainer::add_or_move_inner` pushes it for the source owner when the item moves between two
   characters' bags (trade), so the objective is recounted when items leave.
+
+* systems::economy (trade validation, 2026-11-03): `TradeManager.CanStartTrade` and
+  `StartTrade` only checked the running-trade state (C# TODO "Check faction and others"); the
+  block list was added earlier. The 1.2 client (`x2game.dll` `X2Trade:RequestTrade`
+  `FUN_394fddf0`, `X2Trade:StartTrade` `FUN_394fe180`) refuses a request/acceptance itself while
+  either player is dead (`X2Unit:IsDead`, `unit + 0x3c26`, silently), while the target is not
+  within the trade range (`FUN_39093860` with the constant `25.0` at `0x39ac9b84`:
+  `>= sqrt(25) = 5` m edge-to-edge, error 154 `too_far_away`), and it never offers "Request
+  Trade" on a hostile target (`popup_menu_proc.alb` proto 48 skips `requestTrade` when
+  `GetTargetFactionRelationship() == 1`; `FUN_394bb930` maps 1 to `hostile`). The server now
+  applies the same checks before forwarding a request and again when the invitation is accepted
+  (the invitation can be 60 s old). Refusals: dead is silent (the client shows nothing), a
+  hostile relation sends `SCCannotStartTradePacket(reason = 0)`, which the 1.2 client's
+  `OnCannotStartTrade` (`FUN_394ff1b0`) displays as error 538 `trade_target_is_not_possible_state`
+  and a distance refusal sends error 154, the code the client uses for the same check. A
+  different instance is refused with error 539 `cant_trade_with_other_view` (the client's own
+  "other view" check, `FUN_390476a0() + 8`, is not identified). The exact 1.2 **server** answers
+  are unknown (the checks above are client-side): individual packet codes are capture-pending,
+  cases `TRADE-1` (dead), `TRADE-2` (hostile), `TRADE-3` (other view) and `TRADE-4` (distance).
+  Tests: `trade_tests::{hostile_players_cannot_trade_but_the_same_faction_can,
+  a_faction_change_between_request_and_accept_refuses_the_trade,
+  out_of_range_trade_request_and_accept_are_refused,
+  dead_player_cannot_request_or_accept_a_trade}` (each fails with its check removed).
 
 * systems::economy (trade safety, 2026-10-19): a trade is made only when both sides locked and
   both confirmed (`OkTrade` previously accepted a confirmation with one side locked). Only the

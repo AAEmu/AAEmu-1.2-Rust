@@ -115,12 +115,25 @@ pub struct World {
 
 /// Two players next to each other (char ids 1 / 2).
 pub fn world() -> World {
-    let server = Arc::new(test_server_with(test_data()));
+    world_with(test_data())
+}
+
+/// [`world`] on a caller-supplied `GameData` (e.g. with faction relations).
+pub fn world_with(data: GameData) -> World {
+    let server = Arc::new(test_server_with(data));
     server.set_self();
     let mut a = TestClient::new(&server, 1, 1001);
     let mut b = TestClient::new(&server, 2, 1002);
-    let pa = spawn_player(&server, &a, test_character(1, "Alice", 100.0, 100.0), 0x100);
-    let pb = spawn_player(&server, &b, test_character(2, "Bob", 101.0, 100.0), 0x101);
+    // `UnitBase` defaults to `hp = 0`, which is also what a dead unit has (`IsDead`, used by the
+    // trade state check): the fixtures' players are alive.
+    let mut alice = test_character(1, "Alice", 100.0, 100.0);
+    alice.unit.hp = 100;
+    alice.unit.max_hp = 100;
+    let mut bob = test_character(2, "Bob", 101.0, 100.0);
+    bob.unit.hp = 100;
+    bob.unit.max_hp = 100;
+    let pa = spawn_player(&server, &a, alice, 0x100);
+    let pb = spawn_player(&server, &b, bob, 0x101);
     a.conn.active_char = Some(pa.clone());
     b.conn.active_char = Some(pb.clone());
     a.drain();

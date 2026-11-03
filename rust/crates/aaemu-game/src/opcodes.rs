@@ -269,7 +269,10 @@ pub mod cs {
     pub const CSPremiumServiceMsgPacket: u16 = 0x13c;
     pub const CSUnknownInstancePacket: u16 = 0x13e;
     pub const CSSetupSecondPassword: u16 = 0x140;
-    pub const CSUpdateNationalTaxRatePacket: u16 = 0xfff;
+    /// National tax change `(u16 zoneGroup, u32 rate)`; the 1.2 client builder is
+    /// `FUN_392f42f0` (`local_14 = 0x13`), setter `FUN_397ab4d0`. The C# table had no
+    /// 1.2 opcode (0xfff). Owner-approved exception to "never edit opcodes.rs".
+    pub const CSUpdateNationalTaxRatePacket: u16 = 0x013;
     pub const CSSetCraftingPayPacket: u16 = 0xfff;
 
     /// `(opcode, name)` pairs, for logging unknown / not-yet-ported packets.
@@ -289,6 +292,7 @@ pub mod cs {
         (0x00e, "CSLeaveExpeditionPacket"),
         (0x00f, "CSKickFromExpeditionPacket"),
         (0x012, "CSUpdateDominionTaxRatePacket"),
+        (0x013, "CSUpdateNationalTaxRatePacket"),
         (0x015, "CSFactionImmigrationInvitePacket"),
         (0x016, "CSFactionImmigrationInviteReplyPacket"),
         (0x017, "CSFactionImmigrateToOriginPacket"),
@@ -535,7 +539,6 @@ pub mod cs {
         (0x13c, "CSPremiumServiceMsgPacket"),
         (0x13e, "CSUnknownInstancePacket"),
         (0x140, "CSSetupSecondPassword"),
-        (0xfff, "CSUpdateNationalTaxRatePacket"),
         (0xfff, "CSSetCraftingPayPacket"),
     ];
 }
