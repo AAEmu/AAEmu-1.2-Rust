@@ -207,6 +207,10 @@ pub struct Aggro {
     pub damage_aggro: i32,
     pub heal_aggro: i32,
     pub etc_aggro: i32,
+    /// Taunt stamp (unix ms, 0 = not taunted). A stamped entry sorts above every unstamped
+    /// entry and the latest stamp wins (`systems::ai::behaviors::sorted_abusers`). 10.x-only
+    /// (`NpcAggroTable` entry `+24`): the 1.2 client and the C# have no taunt logic.
+    pub taunt_time: u32,
 }
 
 impl Aggro {
