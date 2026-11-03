@@ -2946,6 +2946,59 @@ and in NPC wandering / buff remaining times.
   `..a_rotated_house_uses_the_clients_snapped_axis_aligned_box`,
   `..two_house_builds_at_the_same_spot_race_and_one_wins`; the real 1.2 polygon and
   `max_construct_count` row are checked by the gated test above.
+* systems::housing (2026-11-03, build / decoration / purchase guards): the C# `Build`,
+  `DecorateHouse`, `SetForSale` and `BuyHouse` had no range, height, tax or buyer eligibility
+  checks (the C# TODOs "validate house by range", "validation position and some range",
+  "check tax due maybe ?"). Each player entry path now applies the 1.2 checks that exist:
+  - `CSCreateHouse` / `CSConstructHouseTax`: the caster must be within the placed house's
+    `garden_radius + 30 m` (3-D) of the target (`FUN_39333d40`; the 1.2 constant
+    `_DAT_399cf898` at `0x399cf898` is 30.0) -> `TOO_FAR_AWAY` 154. The Z must be within
+    100 m of the heightmap (`WorldInstance.GetHeight`); above/below -> `house_cannot_locate_
+    terrain_too_high` 115 / `..._too_low` 116. The game data has no vertical tolerance, so
+    the 100 m guard only refuses clearly impossible forged packets (sea farms and the
+    client's auto-Z pass). With no heightmaps installed the check is skipped. **Capture-
+    pending HOUSE-2:** the client's real slope rule samples the turned ghost model box
+    (`FUN_39332180` / `FUN_39337fb0`, 6 m spread) and cannot be reproduced without render-
+    model bounds; **HOUSE-1:** `FUN_39333d40` adds the radius at desc `+0x40`, the server uses
+    `garden_radius` (never smaller in the shipped data).
+  - `CSDecorateHouse`: 30 m from the caster to the house-local target (`FUN_393a8fa0`
+    refuses only `900.0 < d²`, i.e. exactly 30 m is allowed; the 1.2 table has
+    `too_far_to_decorate_house` 199) -> 199; the target must stay in the house's garden
+    square used by `GetHouseAtLocation` (`|x|,|y| <= garden_radius`) -> `house_cannot_
+    decorate_out_of_garden` 289; the overall `deco_limit` / `absolute_deco_limit` cap ->
+    `house_too_many_decorations` 124 and the `housing_deco_limit_elems` act-ability group
+    cap -> `acatbility_deco_arrang_fail` 629 (the codes of the client's own
+    `CanDecorateHouse`); a house still under construction / another instance ->
+    `house_not_decoratable_state` 123; malformed pose / wrong parent / denied interaction ->
+    `house_cannot_decorate` 122. **Capture-pending HOUSE-6:** decoration surface/overlap and
+    the vertical floor/ceiling window are not checked (the client's checkers are not
+    decoded); the server is permissive there.
+  - `CSBuyHouse`: the buyer must be within 30 m of the house (the sale window comes from the
+    name plaque; 154). **Capture-pending HOUSE-5:** the exact 1.2 interaction range (the
+    10.x house list uses 18 m). The buyer must pass the same account group/category rules as
+    a builder (`validate_groups`: `houseless` 615, `existing_category_id` 616,
+    `max_construct_count` 766), so buying cannot bypass a construction limit; the house's
+    present area/group is used. **Capture-pending HOUSE-3:** retail purchase eligibility and
+    faction/dominion rules (the C# had none; the client table has no purchase-specific
+    eligibility text, so the construction codes are reused) and **HOUSE-4:** a buy-specific
+    overdue-tax answer (none exists in the 1.2 table; the seller's is 645).
+  - `CSSetHouseForSale`: a player seller is refused when not the owner (642), while the
+    house is under construction (668), when the tax bill is already due (645), when the
+    template is not sellable (644), for an unknown designated buyer (648), for a zero price
+    (650), and when a *different* listing is already active (646; the same price/buyer stays
+    idempotent). GM calls with `seller == None` (`/test_house sale`, `/test_house cancel`)
+    keep the old checks and bypass the new ones; `/build_house` uses `manager::create`
+    directly and bypasses placement, as do forts, preset and DB-loaded houses.
+  - Tests (each mutation-checked by reverting the guard): `placement_flow_tests::
+    a_build_request_from_far_away_is_refused_with_too_far_away`,
+    `..a_house_z_far_above_or_below_the_terrain_is_refused`,
+    `..a_purchase_from_far_away_is_refused_with_too_far_away`,
+    `..a_purchase_that_would_exceed_the_accounts_group_limit_is_refused`;
+    `access_tests::decoration_from_far_away_is_refused_with_too_far_to_decorate_house`,
+    `..decoration_outside_the_garden_is_refused`,
+    `..decoration_over_the_house_limit_reports_too_many_decorations`,
+    `..delayed_tax_blocks_sale_listing`, `..an_under_construction_house_cannot_be_listed`,
+    `..a_listed_house_cannot_be_relisted_at_another_price`.
 * systems::housing: abandoned-house removal buff 2250 now applies its original effect
   1876 through the normal damage path. C# rejected the house attacking itself, so the
   building never decayed. Only the active server-owned removal tick on that same unowned
