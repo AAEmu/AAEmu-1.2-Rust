@@ -32,6 +32,9 @@ CREATE TABLE IF NOT EXISTS `accounts` (
   `divine_clock_time` INT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Time that has been passed already',
   `divine_clock_taken` INT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Number of clicks taken today',
   `extra_character_slots` TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Purchased character slots beyond the base account slots',
+  `second_password_hash` TEXT NULL DEFAULT NULL COMMENT 'PBKDF2 (ASP.NET Identity V3) hash of the 1.2 second password; NULL = not set',
+  `second_password_failed` TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Consecutive failed second-password checks',
+  `second_password_locked_until` BIGINT NOT NULL DEFAULT 0 COMMENT 'Unix seconds until second-password checks are refused; 0 = not locked',
   PRIMARY KEY (`account_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='Account specific values not related to login';
 

@@ -89,6 +89,8 @@ pub struct ConnectionHandle {
     account_id: Arc<AtomicU32>,
     /// `LastPing` as unix milliseconds (`i64::MIN` = `DateTime.MinValue`, never pinged).
     last_ping_ms: Arc<AtomicI64>,
+    /// The random token handed to the login server for `SCReconnectAuth` (`0` = none).
+    reconnect_token: Arc<AtomicU32>,
     tx: mpsc::UnboundedSender<ConnCommand>,
     writer: Outbox,
     /// `Debug:ReplyDelay` (`None` = off).
@@ -106,6 +108,7 @@ impl ConnectionHandle {
             ip,
             account_id: Arc::new(AtomicU32::new(account_id)),
             last_ping_ms: Arc::new(AtomicI64::new(i64::MIN)),
+            reconnect_token: Arc::new(AtomicU32::new(0)),
             tx,
             writer,
             delay: None,
@@ -114,6 +117,11 @@ impl ConnectionHandle {
 
     pub fn account_id(&self) -> u32 {
         self.account_id.load(Ordering::Relaxed)
+    }
+
+    /// The random reconnect token last issued to this connection (`0` = none).
+    pub fn reconnect_token(&self) -> u32 {
+        self.reconnect_token.load(Ordering::Relaxed)
     }
 
     /// `LastPing` (`None` = `DateTime.MinValue`: no `PingPacket` received yet).
@@ -258,6 +266,17 @@ impl ConnectionTable {
     pub fn is_empty(&self) -> bool {
         self.connections.is_empty()
     }
+
+    /// The connection that currently owns `token`, for the `LGPlayerReconnect` acknowledgement.
+    pub fn get_by_reconnect_token(&self, token: u32) -> Option<ConnectionHandle> {
+        if token == 0 {
+            return None;
+        }
+        self.connections
+            .iter()
+            .find(|h| h.reconnect_token() == token)
+            .map(|h| h.clone())
+    }
 }
 
 /// `GameConnection`.
@@ -268,6 +287,10 @@ pub struct GameConnection {
     last_ping_ms: Arc<AtomicI64>,
     pub state: GameState,
     pub payment: AccountPayment,
+    /// The 1.2 second password of this connection (`systems::services::second_password`):
+    /// the one-shot virtual-keyboard tables, the per-connection `passed` flag and the cached
+    /// account state pushed by `SCSecondPassSetted`.
+    pub second_password: crate::systems::services::second_password::ConnectionState,
     /// `Characters.Values` in insertion (load) order.
     pub characters: Vec<Character>,
     /// `ActiveChar`.
@@ -275,6 +298,8 @@ pub struct GameConnection {
     /// `LeaveTask` (+ its `CancelTokenSource`): the pending logout timer.
     pub leave_task: Option<tokio::task::JoinHandle<()>>,
     pub last_ping: Instant,
+    /// The random token handed to the login server for this session's reconnect (`0` = none).
+    reconnect_token: Arc<AtomicU32>,
     writer: Outbox,
     commands: mpsc::UnboundedSender<ConnCommand>,
     closing: bool,
@@ -307,11 +332,13 @@ impl GameConnection {
     ) -> (Self, ConnectionHandle) {
         let account_id = Arc::new(AtomicU32::new(0));
         let last_ping_ms = Arc::new(AtomicI64::new(i64::MIN));
+        let reconnect_token = Arc::new(AtomicU32::new(0));
         let handle = ConnectionHandle {
             id,
             ip,
             account_id: account_id.clone(),
             last_ping_ms: last_ping_ms.clone(),
+            reconnect_token: reconnect_token.clone(),
             tx: commands.clone(),
             writer: writer.clone(),
             delay: None,
@@ -321,8 +348,10 @@ impl GameConnection {
             ip,
             account_id,
             last_ping_ms,
+            reconnect_token,
             state: GameState::Lobby,
             payment: AccountPayment::default(),
+            second_password: Default::default(),
             characters: Vec::new(),
             active_char: None,
             leave_task: None,
@@ -349,6 +378,11 @@ impl GameConnection {
 
     pub fn account_id(&self) -> u32 {
         self.account_id.load(Ordering::Relaxed)
+    }
+
+    /// Issues a fresh random reconnect token for this session (`0` clears it).
+    pub fn set_reconnect_token(&mut self, token: u32) {
+        self.reconnect_token.store(token, Ordering::Relaxed);
     }
 
     pub fn set_account_id(&mut self, id: u32) {
@@ -395,6 +429,7 @@ impl GameConnection {
             ip: self.ip,
             account_id: self.account_id.clone(),
             last_ping_ms: self.last_ping_ms.clone(),
+            reconnect_token: self.reconnect_token.clone(),
             tx: self.commands.clone(),
             writer: self.writer.clone(),
             delay: self.delay.clone(),

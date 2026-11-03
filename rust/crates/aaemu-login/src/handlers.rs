@@ -11,7 +11,7 @@ use crate::auth::{
 };
 use crate::models::{GameServerId, GsRegisterResult};
 use crate::network::internal::InternalConnection;
-use crate::network::login::LoginConnection;
+use crate::network::login::{LoginConnection, LoginState};
 use crate::packets::c2l::C2lPacket;
 use crate::packets::g2l::G2lPacket;
 use crate::packets::l2g::LgRegisterGameServer;
@@ -39,6 +39,16 @@ pub async fn handle_c2l(
         }
         C2lPacket::EnterWorld(p) => conn.initiate_enter_world(server, p.gs_id).await,
         C2lPacket::ListWorld(_) => {
+            // The world list is only for a fully authenticated session; during a pending 2FA
+            // step the client must still be on the login prompt.
+            if conn.state() != LoginState::Authenticated {
+                tracing::warn!(
+                    "CAListWorld ignored: connection {} is {:?}, not Authenticated",
+                    conn.id(),
+                    conn.state()
+                );
+                return Ok(());
+            }
             let list = server.games.get_world_list(conn).await?;
             let worlds = list.game_servers.iter().map(|g| g.world_info()).collect();
             conn.send_world_list(worlds, list.characters)?;
@@ -83,6 +93,7 @@ pub async fn handle_c2l(
                 gs_id: p.gs_id,
                 account_id: p.account_id,
                 token: p.cookie,
+                client_ip: conn.ip(),
             };
             conn.authenticate(server, AuthFlow::Reconnect(flow)).await
         }
@@ -125,7 +136,8 @@ pub async fn handle_g2l(
             authorize_game_server(server, conn, Some(p.gs_id))?;
             server
                 .logins
-                .add_reconnection_token(conn, p.gs_id, p.account_id, p.token);
+                .add_reconnection_token(conn, p.gs_id, p.account_id, p.token)
+                .await?;
             Ok(())
         }
         G2lPacket::RegisterGameServer(p) => {

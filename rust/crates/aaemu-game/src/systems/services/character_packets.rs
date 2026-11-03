@@ -275,14 +275,6 @@ impl ClientPacket for CSRankCharacterPacket {
         })
     }
 }
-log_only_packet!(CSRequestSecondPasswordKeyTablesPacket, debug, |s| {
-    let _ = s;
-    String::new()
-});
-log_only_packet!(CSSetupSecondPassword, debug, |s| {
-    let _ = s;
-    String::new()
-});
 log_only_packet!(CSResturnAddrsPacket, warn, |s| {
     let code_base = s.read_u32()?;
     let code_size = s.read_u32()?;
@@ -847,11 +839,6 @@ pub fn register(reg: &mut PacketRegistry) {
     reg.register::<CSEditorGameModePacket>(LEVEL_PLAIN, cs::CSEditorGameModePacket);
     reg.register::<CSRankCharacterPacket>(LEVEL_PLAIN, cs::CSRankCharacterPacket);
     reg.register::<CSRequestCharBriefPacket>(LEVEL_PLAIN, cs::CSRequestCharBriefPacket);
-    reg.register::<CSRequestSecondPasswordKeyTablesPacket>(
-        LEVEL_PLAIN,
-        cs::CSRequestSecondPasswordKeyTablesPacket,
-    );
-    reg.register::<CSSetupSecondPassword>(LEVEL_PLAIN, cs::CSSetupSecondPassword);
     reg.register::<CSResturnAddrsPacket>(LEVEL_PLAIN, cs::CSResturnAddrsPacket);
 }
 
