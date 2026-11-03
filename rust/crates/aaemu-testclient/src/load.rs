@@ -51,8 +51,18 @@ impl LoadReport {
                 mean
             ));
         }
-        for e in self.errors.iter().take(20) {
-            s.push_str(&format!("error: {e}\n"));
+        // Identical errors (the text after "user: ") are grouped with the bots they hit.
+        let mut groups: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for e in &self.errors {
+            let (user, msg) = e.split_once(": ").unwrap_or(("", e));
+            groups.entry(msg).or_default().push(user);
+        }
+        let mut groups: Vec<_> = groups.into_iter().collect();
+        groups.sort_by_key(|(_, users)| std::cmp::Reverse(users.len()));
+        for (msg, users) in groups.iter().take(20) {
+            let who = users.iter().take(5).copied().collect::<Vec<_>>().join(", ");
+            let more = if users.len() > 5 { ", ..." } else { "" };
+            s.push_str(&format!("error x{} ({who}{more}): {msg}\n", users.len()));
         }
         s
     }

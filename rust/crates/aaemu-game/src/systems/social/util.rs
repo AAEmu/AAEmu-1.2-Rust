@@ -7,8 +7,13 @@ use crate::world::{PlayerRef, WorldObject};
 
 /// `ErrorMessageType` values used by the social subsystem.
 pub mod error {
+    pub const TEAM_NO_RIGHTS: i16 = 72;
     pub const TEAM_FULL: i16 = 73;
+    pub const TEAM_INVITEE_IN_TEAM: i16 = 77;
+    pub const TEAM_INVITOR_OFFLINE: i16 = 78;
+    pub const TEAM_INVITOR_MOVED: i16 = 79;
     pub const TEAM_INVITE_REFUSED: i16 = 80;
+    pub const TEAM_JOIN_ALONE: i16 = 82;
     pub const EXPEDITION_CREATE_LEVEL: i16 = 293;
     pub const EXPEDITION_CREATE_MEMBER: i16 = 294;
     pub const EXPEDITION_CREATE_MONEY: i16 = 295;

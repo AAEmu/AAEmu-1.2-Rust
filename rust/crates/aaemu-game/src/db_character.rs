@@ -1326,7 +1326,7 @@ async fn save_active_buffs(tx: &mut Transaction<'_, MySql>, c: &Character) {
     }
     .await;
     match res {
-        Ok(n) if n > 0 => tracing::info!("Saved {n} active buff(s) for character {}", c.id),
+        Ok(n) if n > 0 => tracing::debug!("Saved {n} active buff(s) for character {}", c.id),
         Ok(_) => {}
         Err(e) => tracing::error!("Failed to save active buffs for character {}: {e}", c.id),
     }

@@ -169,11 +169,19 @@ pub async fn update_divine_clock(server: &GameServer, account_id: u32, time: u32
     db::update_divine_clock(&server.db, account_id, time, taken).await;
 }
 
-/// `GetDivineClock(accountId)`.
-pub async fn get_divine_clock(server: &GameServer, account_id: u32) -> (u32, u32) {
-    let lock = server.accounts.lock_of(account_id);
-    let _g = lock.lock().await;
-    db::get_divine_clock(&server.db, account_id).await
+/// Batched online-tracking write: adds `delta` seconds to each account's divine clock, holding
+/// the per-account locks (sorted order, so no lock-order cycle) so it cannot interleave with
+/// `update_divine_clock`.
+pub async fn add_divine_clock_time(server: &GameServer, account_ids: &[u32], delta: u32) {
+    let locks: Vec<_> = account_ids
+        .iter()
+        .map(|id| server.accounts.lock_of(*id))
+        .collect();
+    let mut guards = Vec::with_capacity(locks.len());
+    for l in &locks {
+        guards.push(l.lock().await);
+    }
+    db::add_divine_clock_time(&server.db, account_ids, delta).await;
 }
 
 /// The payment of a connection reached through its handle: `AccountPayment` is never changed

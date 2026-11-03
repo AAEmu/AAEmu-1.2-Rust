@@ -288,7 +288,7 @@ pub(super) fn check(
             return Err((refusal.result, refusal.value));
         }
     }
-    let (hp, buff_ids, moving) = caster
+    let (hp, buff_ids) = caster
         .with_unit(|u| {
             let unit = u.unit();
             (
@@ -299,7 +299,6 @@ pub(super) fn check(
                     .filter(|b| !b.is_ended())
                     .map(|b| b.template.id)
                     .collect::<Vec<_>>(),
-                unit.skill_state.moving,
             )
         })
         .ok_or((skill_result_for_key("skill_invalid_source"), 0))?;
@@ -311,9 +310,6 @@ pub(super) fn check(
     }
     if template.source_not_swim && source_in_water(server, caster) {
         return fail("skill_cannot_cast_in_swimming");
-    }
-    if template.source_cannot_use_while_walk && moving {
-        return fail("skill_cannot_cast_while_walking");
     }
     for id in buff_ids {
         let Some(buff) = server.game_data.systems.skills.buff(id) else {

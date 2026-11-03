@@ -2080,6 +2080,147 @@ async fn load_rows_restore_mails() {
     assert_eq!(mail::get_current_mail_list_for(&w.server, 2), vec![5]);
 }
 
+/// The other system mail templates quote item names too; an apostrophe (3793 of the 31987 en_us
+/// item names have one) or a backslash would otherwise break the client's `loadstring` call.
+#[tokio::test]
+async fn auction_mail_escapes_item_names() {
+    let w = mail_world_with(|d| {
+        d.systems
+            .economy
+            .mail
+            .item_names
+            .insert(SINGLE, "Norrick's Burning Sword (Rare)".into());
+    });
+    let mut fail = MailForAuction::new_from_template(&w.server, SINGLE, 1, 400, 0);
+    assert!(fail.finalize_for_bid_fail(&w.server, 2, 250));
+    assert_eq!(
+        fail.mail.body.text,
+        "body('Norrick\\'s Burning Sword \\040Rare\\041')"
+    );
+}
+
+/// A marketplace purchase of an item whose name carries parentheses: the client cuts a raw
+/// `title('… (100)')` at the first `)`, so the name goes out with `\040` / `\041`.
+#[tokio::test]
+async fn commercial_mail_escapes_parentheses_in_title_and_body() {
+    let w = mail_world();
+    let mut txn = ItemTxn::begin(&w.server);
+
+    let mut buy = CommercialMail::new(
+        2,
+        "Bob",
+        "Alice",
+        vec![],
+        false,
+        true,
+        "Resplendent Armor Regrade Scroll (100)",
+    );
+    buy.finalize_mail(&mut txn);
+    assert_eq!(
+        buy.mail.title,
+        "title('Resplendent Armor Regrade Scroll \\040100\\041')"
+    );
+    assert_eq!(
+        buy.mail.body.text,
+        "body(false,'','Resplendent Armor Regrade Scroll \\040100\\041')|gift:0;|refund:1;|limit:2100,12,31,00,00,00;"
+    );
+
+    let mut gift = CommercialMail::new(
+        2,
+        "Bob",
+        "Alice",
+        vec![],
+        true,
+        false,
+        "Norrick's Burning Sword (Gift)",
+    );
+    gift.finalize_mail(&mut txn);
+    assert_eq!(
+        gift.mail.title,
+        "title('Norrick\\'s Burning Sword \\040Gift\\041')"
+    );
+    assert_eq!(
+        gift.mail.body.text,
+        "body(true,'Alice','Norrick\\'s Burning Sword \\040Gift\\041')|gift:1;|refund:0;|limit:2100,12,31,00,00,00;"
+    );
+}
+
+/// `load_rows` rewrites marketplace mails stored with raw parentheses and marks only those
+/// dirty; other mail types and unfamiliar text stay as stored.
+#[tokio::test]
+async fn load_rows_repairs_legacy_charged_mails() {
+    const LIMIT: &str = "|gift:0;|refund:0;|limit:2100,12,31,00,00,00;";
+    let w = mail_world();
+    let legacy_title = "title('Resplendent Armor Regrade Scroll (100)')";
+    let legacy_text = format!("body(false,'','Resplendent Armor Regrade Scroll (100)'){LIMIT}");
+    let fixed_title = "title('Resplendent Armor Regrade Scroll \\040100\\041')";
+    let fixed_text =
+        format!("body(false,'','Resplendent Armor Regrade Scroll \\040100\\041'){LIMIT}");
+    let row = |id: i64, ty: u8, title: &str, text: &str| MailRow {
+        id,
+        mail_type: i64::from(ty),
+        title: title.into(),
+        text: text.into(),
+        receiver_id: 2,
+        receiver_name: "Bob".into(),
+        received_date: mail::now() - 1,
+        ..MailRow::default()
+    };
+    let rows = || {
+        vec![
+            row(1, mail_type::CHARGED, legacy_title, &legacy_text),
+            // Same text, but not a marketplace mail.
+            row(2, mail_type::PROMOTION, legacy_title, &legacy_text),
+            row(3, mail_type::NORMAL, "Hi (there)", "Call me (maybe)"),
+            // Marketplace mail of a newer server (already escaped) and one of a foreign shape.
+            row(4, mail_type::CHARGED, fixed_title, &fixed_text),
+            row(
+                5,
+                mail_type::CHARGED,
+                "title(25,'Villa (1)')",
+                "body('Villa (1)', 2, 3)",
+            ),
+        ]
+    };
+    let mails = &w.server.systems.economy.mail;
+    mails.load_rows(&w.server, rows(), mail::now());
+
+    let m = mails.get_mail_by_id(1).unwrap();
+    assert_eq!(
+        (m.title.as_str(), m.body.text.as_str()),
+        (fixed_title, fixed_text.as_str())
+    );
+    assert!(m.is_dirty);
+    for (id, title, text) in [
+        (2, legacy_title, legacy_text.as_str()),
+        (3, "Hi (there)", "Call me (maybe)"),
+        (4, fixed_title, fixed_text.as_str()),
+        (5, "title(25,'Villa (1)')", "body('Villa (1)', 2, 3)"),
+    ] {
+        let m = mails.get_mail_by_id(id).unwrap();
+        assert_eq!(
+            (m.title.as_str(), m.body.text.as_str()),
+            (title, text),
+            "mail {id}"
+        );
+        assert!(!m.is_dirty, "mail {id}");
+    }
+
+    // Idempotent: loading what was just repaired changes nothing.
+    let stored = mails.get_mail_by_id(1).unwrap();
+    mails.load_rows(
+        &w.server,
+        vec![row(1, mail_type::CHARGED, &stored.title, &stored.body.text)],
+        mail::now(),
+    );
+    let m = mails.get_mail_by_id(1).unwrap();
+    assert_eq!(
+        (m.title.as_str(), m.body.text.as_str()),
+        (fixed_title, fixed_text.as_str())
+    );
+    assert!(!m.is_dirty);
+}
+
 #[test]
 #[ignore = "needs AAEMU_COMPACT_DB"]
 fn real_compact_db_mail_localization() {
