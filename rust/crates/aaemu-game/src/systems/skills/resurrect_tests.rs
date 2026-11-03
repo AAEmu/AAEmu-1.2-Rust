@@ -72,6 +72,6 @@ async fn a_new_death_clears_a_stale_offer_above_the_free_resurrection_level() {
     let (_client, player) = dead_player(&server);
     offer_resurrection(&player);
     player.data().unit.level = 20;
-    super::combat::character_death_losses(&server, &player);
+    super::combat::character_death_losses(&server, &player, true);
     assert!(!player.data().skill_char.resurrect_offer);
 }

@@ -40,7 +40,7 @@ const MODEL_POSTURE_NONE: u8 = 0;
 pub const UNIT_STATE_FORCED_BUFFS: [u32; 2] = [8_000_011, 8_000_012];
 
 /// `SCCharacterStatePacket(character)`.
-pub fn character_state(c: &Character) -> SCCharacterStatePacket {
+pub fn character_state(c: &Character, bounty_money: i64) -> SCCharacterStatePacket {
     let mut s = PacketStream::new();
     s.write_u32(c.unit.transform.instance_id) // instanceId
         .write_u16(16) // Guid: Write(byte[], appendSize: true)
@@ -71,7 +71,7 @@ pub fn character_state(c: &Character) -> SCCharacterStatePacket {
         .write_bool(c.auto_use_aa_point)
         .write_i32(c.jury_point)
         .write_i32(0) // jailSeconds
-        .write_i64(0) // bountyMoney
+        .write_i64(bounty_money)
         .write_i64(0) // bountyTime
         .write_i32(c.reported_as_bot_count)
         .write_i32(0) // suspectedNo
@@ -775,7 +775,7 @@ mod tests {
             p.body.len(),
             head + mid + piscs + abilities + 6 + 4 + 4 + 24
         );
-        let cs = character_state(&c);
+        let cs = character_state(&c, 0);
         assert_eq!(cs.body[4..6], [16, 0]);
         assert_eq!(cs.body[6..22], c.guid);
     }

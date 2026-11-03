@@ -165,6 +165,7 @@ Each subsystem records its status here, in its own section only (see `CONTRIBUTI
 | `buffs` damage reflection (`reflection_chance`, `reflection_type_id`, `reflection_ratio`, `reflection_target_ratio`) | `systems/skills/{buffs,effects/combat}.rs` (`reflection_effects`, `apply_reflection`) | added | The C# loaded the columns and never read them (`BuffAttribute.ReflectionTargetRatio` is unused and no `buff_modifiers` row uses attribute 1). The 36 1.2 rows (`reflection_chance > 0`) and their localized tooltips establish the core: `reflection_type_id` is the incoming hit's `DamageType` (1 Melee, 2 Magic, 3 Siege, 4 Ranged; 4407/5646 "Melee", 177/3563 "Magic", 4408/5404 "Ranged", Fire Armor 5531-5534 one buff per type), `reflection_chance` is a percent chance (177 47, 1035 50, the rest 100), and `reflection_target_ratio` is the percent of the received damage returned (386 50 "Reflects 50%", 5646 6, 7132 50, 100 "all damage"). A landed hit's victim rolls its matching live buffs in buff order and the first success returns `floor(value * target_ratio / 100)` to the attacker through `reduce_current_hp` (normal HP/death path, kill credit, durability); the attacker must still be a living unit in the world (the incoming hit already passed `can_attack`), plus an ordinary `SCUnitDamagedPacket` cast from the buff. **REFLECT-1 / REFLECT-2 / REFLECT-3 (capture-pending):** `reflection_ratio` is ignored (the reflector takes the full hit: 100 for 28 rows, 10 for 4366/4407/4408, 50 for 7132; the best guess "share still taken" is not proven); several matching buffs are not added up (the first successful roll wins, so two "reflects all damage" buffs cannot return more than the hit); the reflected hit is an ordinary damage packet whose `SkillHitType` is the hit category's normal value (1.2 has no reflect hit type, so the client cannot select the `REFLECT` combat-text key). Reflected damage rolls no item procs, no combat buffs and no `Attacked`/`Damaged`/`Damage` events of either side, and it never re-enters `damage_with_aoe`, so two reflectors cannot ping-pong. All skill / plot / DoT-tick / NPC / PvP / buff-trigger damage goes through `damage_with_aoe`; fall damage, regen, physics collision, GM commands, item capture and shipyard damage do not, and therefore never reflect. Real-DB test `real_compact_reflection_and_use_damage_amount_catalogs` (36 rows, per-type columns). |
 | `buff_triggers.use_damage_amount`, `DamageBuffTrigger` (event 3) / `DamagedBuffTrigger` (event 4) amounts | `systems/skills/{buffs,effects/combat}.rs` (`execute_trigger`, `restore_mana`, `heal`), `effects/mod.rs` (`EffectSource`) | fixed | The C# ignored `use_damage_amount` and the `Damage` event never set `IsTrigger`, so the fixed values were never scaled. `RestoreManaEffect` now scales a fixed roll by the event amount when the trigger row sets `use_damage_amount` (`value = value / 1000 * amount`, the same unit `HealEffect` already used) and skips the `percent` maximum-mana scaling (753 "Converts 3% of received damage to mana": fixed 30, 200 damage -> 6; before it restored 3% of max mana). The `Damage` event (kind 3, damage dealt by the owner) now carries the real amount into `EffectSource` for 806 Baleful Recharge ("of the damage inflicted"), 4257 Executor's Cruelty and the other event-3 trigger rows, so their heal/mana effects scale too; its target stays the owner as in the C# `DamageBuffTrigger` (`OnDamageArgs.Attacker` is the damage caster itself). Only `HealEffect`/`RestoreManaEffect` read the amount; the 23 `SpecialEffect` (Charge) rows carrying the flag have no formula and are left unchanged (rating 3 in the research). The data has 95 restore-mana triggers with the flag (94 Damaged, 1 Damage), all `use_fixed_value` and `percent` 't'. Real-DB assertions in `real_compact_reflection_and_use_damage_amount_catalogs`. |
 | `Units/Unit` combat (`ReduceCurrentHp`, `DoDie`, aggro / tagging, `SetInBattle`, criminal / force attack, invisibility, `DoFallDamage`), `BaseUnit.CanAttack` / relations, regen, `UpdateGearBonuses`, all `Character` stat getters | `systems/skills/{combat,relation,stats,regen}.rs` | done | MaxHp / MaxMp etc. with buffs, passives and gear (`GearStats` hook). NPC death side effects through `NpcSkillHooks`. |
+| `Character.ComputeDeathWaitTime` (C# hard-coded `DeathWaitTimesSeconds` / 5-minute reset) and `npcs.no_penalty` | `systems/skills/{combat,data}.rs`, `systems/npcs/npc/data.rs` | added | The 1.2 `resurrection_waiting_times` rows drive the escalating respawn wait and the active-siege variant; a killer NPC with `npcs.no_penalty` (88 rows) skips the exp / durability death penalty. The C# read neither table; see the deviations bullet for DEATH-1..3 and the fallback. |
 | Taunt buffs (`buffs.taunt` / `buffs.taunt_with_top_aggro`) | `systems/skills/{combat,buffs,state}.rs`, `systems/ai/{behaviors,combat}.rs`, `systems/quests/bridges.rs`, `systems/skills/effects/special/unit_actions.rs` | added (10x-only) | The 1.2 client and the C# have no taunt logic; the mechanic is derived from the 10.x zone server `NpcAggroTable::TauntedBy` / `CancelTauntedBy` / `CopyTopAggro`, and the 1.2 data agrees (134 `taunt='t'` buffs, 97 also `taunt_with_top_aggro`; buff 171, buff 502 "highest threat", skill 17300). On the generic buff-start path (`on_started`, so trigger- and script-applied buffs are covered too) an NPC holder gets `taunted_by(caster, taunt_with_top_aggro)`: refused when the caster is the holder or explicitly friendly to it (10x refuses a `CanAttack`-false caster; the 1.2 PvE monsters are faction-neutral to players and attack through AI aggression, so `CanAttack` would refuse every taunt on them; this is recorded as a deviation from the 10x check); the aggro entry is created through `AddUnitAggro` (zero threat), stamped with the server clock (non-zero), and with `taunt_with_top_aggro` its total is raised to the current highest total of the table (one-off copy, never above). `sorted_abusers` sorts any stamped entry above every unstamped one and the latest stamp first; `aggro_rating_in_percent` and `aggro_rating_percent` mirror that order. On buff end (expiry, dispel, death, explicit removal) `cancel_taunted_by` clears the stamp only while no other taunt buff of that caster remains; threat is not reduced, so a top-aggro copy persists. `aggro_copy` drops the stamp and `aggro_reset` clears it. **Capture-pending:** re-stamping on refresh (TAUNT-1) and the copy/reset stamp behaviour (TAUNT-2) are chosen, the 10x decompile does not show them. 10x also refuses members of the NPC's own group; Rust has no runtime NPC group membership (`npc_groups` is not loaded), so none is checked. Tests: `taunt_*`, `refreshing_the_taunt_buff_restamps_the_table`, `aggro_copy_drops_and_reset_clears_the_taunt_stamp`, gated `real_compact_taunt_buffs_and_the_skills_that_apply_them`. |
 | Aura buffs (`aura_radius`, `aura_relation_id`, `aura_slave_buff_id`, `aura_child_only`) and crowd buffs (`crowd_buff_id`, `crowd_radius`, `crowd_number`, `crowd_friendly`, `crowd_hostile`) | `systems/skills/aura.rs` | data-inferred / capture-pending | The 1.2 client only reads the columns and has no runtime; no 1.2 zone binary exists, so the rules come from the localized descriptions. A 1 s enter/leave driver (the area-trigger update pattern) grants the slave buff to units in `aura_radius` passing `aura_relation_id` (the owner too for Any/Friendly/Party/Raid), removes only the copy with caster = aura owner, and grants `crowd_buff_id` while `crowd_number` *other* carriers of the source buff are in `crowd_radius` and match `crowd_friendly` / `crowd_hostile`. The dangling slave 6668 -> 6669, the self-reference 1224 and the 15 aura rows without a slave buff are skipped with one load warning. Case ids AURA-1..8 / CROWD-1..4; update period, slave caster identity, owner counting, child attach scope and dead-owner behaviour are UNKNOWN. |
 | Learning / progression (`LearnSkill`, `LearnBuff`, `ResetSkills`, `SwapAbility`, `AddExp`, labor, game points) | `systems/skills/progress.rs` | done | Labor accrual uses zero-based actability steps into ordered `expert_limits`, matching inventory / regrade; step 4 caps at 50,000 (row id 5), avoiding the former row-id lookup that reduced it to 40,000. Capped gains and packet deltas have regression coverage. `SwapAbility` follows the 1.2 client: activating an empty slot (`old = None`, the level-10 `LearnAbility` path) is free; changing an active ability costs `content_configs[39] * level` copper, requires exactly three active abilities and a non-active target, and the debit and swap share one character lock. |
@@ -372,6 +373,28 @@ connected by `systems::economy::wiring`).
 | Item skill-effect bodies (grade enchant, socketing, conversion, cap scale, UCC imprint, ...), mate / slave equipment packets | `systems/economy/item_effects*.rs` | done | Called by the skills subsystem's effects. UCC imprint / cleanup require owned source and target items; client UCC casts require the actual source item's configured use skill, preserving the unrelated legacy bound-item portal exception. Dyeing checks the loaded `dyeable_items` allowlist. Invalid UCC / dye effects cancel deferred reagent consumption. |
 | Item skill-effect stubs given data-derived bodies (`GainItemWithPosImprint` 32, `RechargeItemBuff` 95, `ExpToItem` 96) | `systems/economy/item_effects.rs` | done (data-derived) | The C# `Execute` bodies were `// TODO` stubs, so the behaviour comes from `special_effects` 405 / 546 / 547 / 548 (32: create `value1` x1 with `SkillEffectGainItemWithPos`), 12446 / 17017 (95) and 12462 (96: `value1` XP -> `value2` x1 with `SkillEffectExpToItem`) plus the tool skills that cast them. `GainItemWithPosImprint` stores no position imprint: the 1.2 item details have no such field. `ExpToItem` subtracts the experience directly instead of through `AddExp` (which recomputes the level and could level the character down), sends `SCExpChangedPacket(-value1)`, checks bag room before spending the XP, and cancels so the reagent is kept. `RechargeItemBuff` takes the cast's item target, resets `charge_start_time` (and `charge_count` when the template has one) and re-applies the equipped item's gear buff through `apply_gear_buffs` with the item both removed and added, so the recharge buff is not stacked; the 1 s item timers read the new charge window on their next tick, so nothing is re-scheduled. |
 
+#### Limited-sale purchase limits (2026-11-03)
+
+`items.limited_sale_count` and `items.one_time_sale` are now read and enforced as per-character
+purchase limits (`systems/economy/shop_limits.rs`, table `character_shop_purchases`). The 1.2
+client loads both columns with the item template (`SELECT ... limited_sale_count ... one_time_sale
+... FROM items`) but never reads them: the NPC store UI has no remaining-count field, and the only
+sale-limit error in its table is `store_one_time_sale` (752, `0x2f0`). Its GM command list on the
+same build carries `limited_sale_add` / `limited_sale_reset` / `one_time_sale_add` /
+`one_time_sale_reset`, so the counters are per character and reset by an administrator. The reset
+period itself is not available for 1.2 (capture-pending **SHOP-1**): the implementation keeps the
+counter per character, never resets it, and does not share it with the account or the server.
+`one_time_sale` is a limit of one and the smaller column wins when both are set.
+
+Enforcement is one atomic check-and-claim, before the price or the item moves: `CSBuyItemsPacket`
+claims the sum of all lines of one template after the checkout is staged (a refused checkout sends
+752 and changes nothing), and `DoodadFuncPurchase` claims before consuming the coin and gives the
+claim back if the consumption or the grant then fails (debit first, refund on failure). Selling,
+selling back and buying back do not change a counter; GM give, quests, loot, crafting and the cash
+shop are not the vendor purchase path and stay unlimited (the cash shop has its own
+`ics_shop_items.limited_type` / `limited_stock_max`). Not in the C# port (it never read either
+column).
+
 #### Cargo escrow and stale rack references (2026-10-25)
 
 Merchant-ship rack deposits now revalidate the exact equipped pack and a vacant
@@ -457,7 +480,7 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 | Player nations (`nations`, `nation_relations`, independence) | `systems/social/nation.rs`, `commands/scripts/nation.rs` | stage 1 | Skill 18540 special effect 71 creates a nation from the caster's expedition (owner + dominion, CASTLE_CLAIM backpack); ids come from the expedition allocator; `SCFactionIndependence` + relation rows + `SCUnitFactionChanged`; online members use `set_faction`, offline `characters.faction_id` moves with `expeditions.mother` in the save transaction; login sends nation factions and relations. See "Player nations" below. |
 | `GameData/AchievementGameData` (`achievements`, `achievement_objectives`, `pre_completed_achievements`, `char_records`), `Models/Game/Achievement` | `systems/social/achievement.rs` (`server.game_data.systems.social.achievements`) | done | Loader + port of `AchievementGameDataTests`; gated real-DB test `achievement_game_data_real_compact_db`. The C# 1.2 tree has no manager; the Rust achievement manager / runtime / hooks / rewards (`achievement_*.rs`) read them (see "Achievement producers" below). |
 | `DuelManager`, `Models/Game/Duels`, duel tasks | `systems/social/duel.rs`, `packets/duel.rs` | done | Request / accept (flag via hook) / start / stop / cancel, distance + HP checks, end timer (tokio tasks; `set_delays` test hook). |
-| `CrimeManager`, `TrialManager`, `Models/Game/Crime`, `TrialUpdateTask` | `systems/social/{crime,trial}.rs`, `packets/trial.rs` | done | Crime table load / save (`AfterItems`), report / evidence (hooks), bot reports, trial / jury flow with 5 s tick, audience, bounty board (empty list as C#). Arrests, authenticated jury choices, guilty pleas, acquittals, court cleanup and reconnect jail enforcement have packet-flow regressions; prisoner buffs persist remaining online time. |
+| `CrimeManager`, `TrialManager`, `Models/Game/Crime`, `TrialUpdateTask` | `systems/social/{crime,trial}.rs`, `packets/trial.rs` | done | Crime table load / save (`AfterItems`), report / evidence (hooks), bot reports, trial / jury flow with 5 s tick, audience, bounty placement / arrest payout (`systems/social/{bounty,bounty_runtime}.rs`, `bounty_pledges`; see "Wanted-player bounty"). The board is still the empty list (BOUNTY-board). Arrests, authenticated jury choices, guilty pleas, acquittals, court cleanup and reconnect jail enforcement have packet-flow regressions; prisoner buffs persist remaining online time. |
 | `DominionData`, `Models/Game/Achievement`, rename / chat bubble / NPC chat / spam packets | `systems/social/{dominion,achievement}.rs`, `packets/misc.rs` | done (data + packets) | No C# manager drives them in 1.2. |
 | `RankingGameData` (later C# history), 1.2 ranking packets | `systems/social/ranking_{data,packets,runtime,manager,persistence}.rs` | done (arena + fishing boards) | Not in the 1.2 C#; Rust only. Request path, MySQL persistence (`character_rank_scores`, `rank_period_payouts`), score hooks and period-close reward letters: see "Ranking boards" under Known deviations. |
 | `RadarManager` | – | not social | Telescope / fish school registration from buff templates: skills / npcs. |
@@ -580,7 +603,7 @@ Cross-subsystem: mates are despawned on dungeon entry and `PlayerCanEnter` check
 |---|---|---|---|
 | `MateGameData`, `SlaveGameData` (templates, unit modifiers, initial items / buffs, passive buffs, doodad / healing point / slave bindings, drop doodads, mount skills, repairable slaves, `slave_equip_slots`, `item_slave_equipments`, `allow_to_equip_slaves` / `allow_to_equip_slots`, `model_bindings` (model -> declared attach points), `slave_attach_points*.json`), `TransferGameData` (templates, bindings, binding doodads, paths, client `transfer_path.xml` roads + `GetOwnerPaths`), `ShipyardManager.Load`, `TaxationsManager` table, `ModelManager` vehicle / ship models | `systems/vehicles/data.rs` | done | Gated test `real_compact_db_vehicle_tables` checks the row counts; `real_transfer_follows_its_client_route` loads the roads from the game_pak. |
 | Mount rider / operator skill lookup (`GetMountAttachedSkills` -> `mount_attached_skills`) | `systems/skills/handlers.rs`, `systems/skills/mount_authority.rs`, `systems/vehicles/{data,mod}.rs` | deviation | **Deviation:** the C# `MateGameData.GetMountAttachedSkills` scanned `mount_skills` for the *skill id*, so a skill with two rows always resolved to the first one in table (rowid) order. The 1.2 data has such duplicates: 15546 is both 226 '물 퍼올리기(견본)' (rowid 132) and 59 '물 퍼올리기' (rowid 316); the C# scan picked 226 -> rider 15548 (the display-only "견본" skill, no effects) instead of 59 -> 21505 (`GainLootPackItemEffect` 29504 -> loot pack 7732, 10 x item 15694 Water), so the Red Farm Hauler's Create Water produced no water (live owner run 2026-11-01 14:53:16/14:53:28: `SCSkillStarted`, `SCUnitPoints`, `SCSkillFired`, `SCSkillEnded` for the mount cast plus the instant 15548, no item). The Rust uses the `mount_skills` row the client names in `CSStartSkillPacket` (`SkillCasterMount.MountSkillTemplateId`; the real 1.2 client sends the row id: 59 for 15546, 16 for 10473, 201 for 20704, 369 for 27032 in the owner captures) and requires that row to be on the vehicle's bar (its own `slave_mount_skills` / mate `skills` entries or an active `buff_mount_skills` grant) and to cast the pressed skill. The rider is scheduled exactly as in the C#: `Character.UseSkill(rider)` right after the mount skill is accepted, so the mount cast and the rider's own cast (15546 and 21505 are both 5000 ms) run together and the item is granted once at the end of the rider cast. The same duplicate-skill-id rows (15450 -> 56 '물 뿌리기' vs 225, 16650 (4 rows), 17097, 17649, 20291, 20249, 11017, 15580) now resolve by the pressed row; the datas' 20 `mount_attached_skills` rows whose mount skill is on no slave/mate/buff bar are untouched (unreachable through the bar, not resolved by skill id either). Tests: `water_rider_follows_the_mount_skill_row_the_client_pressed`, `water_rider_needs_the_driver_attach_point`, `watering_rider_follows_the_mount_skill_row_and_consumes_ten_water`, and the gated `real_farm_hauler_driver_gets_ten_water_from_skill_15546`. |
-| `MateManager` (per instance), `CharacterMates` (load / save / spawn / despawn), `Mate` (`AddExp`, `MateXpUpdateTask`, `RegenTick`, `DoFallDamage`, `OnZoneChange`, stats) | `systems/vehicles/mates.rs`, `stats.rs` | done | Mount / dismount (`SCUnitAttached` / `SCUnitDetached`, rider becomes a transform child), rename, target, user state, mate equipment packet (item move through `VehicleItemHooks`), kill exp, stun / unmount skills, death despawn. |
+| `MateManager` (per instance), `CharacterMates` (load / save / spawn / despawn), `Mate` (`AddExp`, `MateXpUpdateTask`, `RegenTick`, `DoFallDamage`, `OnZoneChange`, stats) | `systems/vehicles/mates.rs`, `stats.rs` | done | Mount / dismount (`SCUnitAttached` / `SCUnitDetached`, rider becomes a transform child), rename, target, user state, mate equipment packet (item move through `VehicleItemHooks`), kill exp, stun / unmount skills, death despawn. **Deviation (one summoned mate):** the 1.2 client has one player pet (`X2Mate:IsPlayerPetExists` / `DismissPet` operate on the one mate the client's `playerpet` resolves to, the pet frame and action bar are single, and `SCMateSpawnedPacket` carries no slot or kind), and the C# `CharacterMates.SpawnMount` despawned the active mate(s) and returned, i.e. using the summon item of the mate that is out dismisses it. The Rust keeps that toggle for the same summon item (same item id / `mates` row) and, unlike the C#, a different mate's item despawns the old mate and spawns the new one (the C# returned with nothing, so a different summon left the player with no pet). The despawn runs only after the item / template / dead-mate checks, so a refused summon keeps the current mate (the C# despawned it first). **Deviation (seats):** the passengers are the attach points the mate's model declares in `model_bindings`, the list the 1.2 client's seat test scans (`FUN_390c9f70`; the client mate object has five attach slots, `FUN_3933ac10`): horse 2, cow 1, elephant 5, battle pets none. The C# hard-coded driver + passenger0 for every mate. Tests: `second_use_of_the_same_summon_item_dismisses_the_mate`, `a_second_whistle_of_the_same_template_replaces_the_mate`, `a_second_mate_of_another_kind_replaces_the_first_and_spawns`, `a_refused_summon_keeps_the_current_mate`, `mate_passenger_seats_come_from_the_models_attach_points`. |
 | `SlaveManager` (per instance), `SlaveSpawner`, `SummonSlave` details, `Slave` (`DoDie`, `DoHpChangeTrigger` / repair points, `RegenTick`, `Save`, `OnZoneChange`, stats) | `systems/vehicles/slaves.rs` | done | Create (saved slave / persistent doodads / saved child slaves from MySQL, position, boats on the water surface, doodad and slave bindings at the model attach points), bind / unbind (the seat check - a non-driver point must be declared by the slave's model in `model_bindings` - client reach and reservation run under the slave's one lock; a missing or taken seat is silent as in the C#, an already-seated character is refused with `slave_unbind_first` 0x66, a cannon refuses the passenger seat with `slave_cannot_bind` 0x60, and the owners-mark driver refusal keeps 0x61), delete with portal-time despawn, Rider's Escape, repair cooldown, `RepairSlaveEffect`, `SendMySlaveTask`, logout (+10 min) / disconnect despawn task, `slaves` table (`AfterCharacters`). |
 | `TransferManager` (per instance, 100 ms tick), `TransferSpawner`, `Transfer` route following (`GoToPath`, `MoveTo`, `NextPoint`) | `systems/vehicles/transfers.rs` | done | Carriage motor + boarding part + bench doodads, `SCOneUnitMovementPacket` (transfer move type) for both parts. Spawned from `SpawnManager.SpawnAll`. |
 | `ShipyardManager` runtime, `Shipyard` build steps, `CraftEffect` shipyard branches, `ShipyardTickTask`, `ShipyardCompleteTask` | `systems/vehicles/shipyards.rs`, `effects.rs` | done | Requirements via the skills item hooks + money (`SCItemTaskSuccess` money form). |
@@ -1201,6 +1224,10 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   despawned without dying still leaves its summons, as in the 1.2 C# (the later 10.x C# only
   forwards the flag to the native Zone: `WorldIntegration.cs` `PublishNpcSpawn` /
   `WZNpcSpawnerEventPacket`).
+* systems::npcs (`no_penalty`): the 1.2 C# never loaded `npcs.no_penalty` (the 1.2 client's
+  `npcs` query does). Rust loads it as `NpcTemplate.no_penalty` for the death path in
+  `systems::skills::combat`; see the systems::skills death-penalty bullet for the behaviour and
+  the capture-pending items.
 
 * systems::services / systems::vehicles (mount speed analysis): `SusManager` samples the
   driver's (or owner's) `teleport_seq` and `disabled_set_position` for mates, and successful
@@ -1715,6 +1742,24 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * systems::skills: `Character.DoDie` is complete (exp / durability loss, escalating respawn timer,
   PvP honor / assists / kill counts, War-zone honor loss, `DropTradePackToFloor`). The PvP
   damage / heal histories are lists of (character id, unix ms) in `skill_char`.
+* systems::skills (death penalty and respawn wait, 2026-11-03): `Character.DoDie` now reads the
+  two 1.2 tables the port ignored. `npcs.no_penalty` (88 rows: guards, siege cannons, battlefield
+  pets, alliance NPCs; the 1.2 client loads the column in its `npcs` query) suppresses the exp
+  and death-durability loss when the killing attribution (skill / DoT caster) is such an NPC;
+  the respawn timer still runs. `resurrection_waiting_times` replaces the port's hard-coded
+  `[15, 30, ... 240]` s table and its 5-minute reset: the 1-based consecutive-death step selects
+  the row, `penalty_duration` (600 s on every 1.2 row) keeps the step alive, and an active
+  dominion siege in the death zone selects `siege_waiting_time` (20/15/10/5/0 s) over
+  `waiting_time` (0/5/45/90/180 s). The client loads the same table but only displays the
+  `resurrectWaitTime` the server sends in `SCUnitDeathPacket`, so the server values drive the
+  countdown. **Deviation:** the C# table (15..240 s, 5-minute reset) has no 1.2 source and is
+  kept only as the fallback for a database without rows. **Capture-pending DEATH-1:** the
+  row-is-the-death-step mapping and the seconds unit are inferred from the table values (normal
+  waits rising to the documented 180 s, siege waits falling to 0) and the client load; no 1.2
+  server binary exists. **DEATH-2:** whether the revival debuff (`Weakened Body`) is also
+  suppressed by `no_penalty` is unknown; only exp / durability are skipped, as the column name
+  and the guard rows establish no more. **DEATH-3:** the first step's 0 s wait and the 600 s
+  window replacing the C# 5-minute reset are data-driven, not captured.
 * systems::skills: skill controllers and NPC displacements snap to the ground through the npcs
   heightmaps (`geo_data_height`); the wandering (fear) speed is the 7 m/s fallback (actor model
   stances not loaded); `Npc.StopMovement` writes the C# default stance / alertness; `OnMovement`
@@ -3395,7 +3440,7 @@ The Bevy 1.2 client (`AABevy1.2`) is the main client; its reverse-engineering no
 | M15 | `SCCooldowns` has a full writer (`i32` count + `[id, total, remaining]` u32 triples, skills then tags, 150 per list). It is sent after `SCCharacterState` for restored cooldowns and after a cast only where the client cannot start the timer itself (a `plot_only` cast with a plot, which sends no `SCSkillFired`, or a `timing_id == 0` skill), with the shared tag entry when the skill has one. The client starts ordinary skills (`toggle_buff_id == 0 && timing_id != 0`) on `SCSkillFired` and toggle skills on `OnBuffRemoved`; the `Cooldown` special effect is client-applied. Only end times are stored, so `total` equals `remaining` | verified: `397b64d0` -> `397b2350`; `OnCooldowns` `391d43c0` -> `39899d40` appends without de-duplication and caps at 150, and is what `GetActionCooldown` (`3943f310` -> `3989a3e0`/`3989a290`) reads. Template `+0x1bc` = `timing_id`, `+0x1c0` = `toggle_buff_id` (loader columns 0x87/0x88), `DAT_3a17770c` = 0. Cooldowns are persisted in `character_cooldowns` (absolute Unix-ms expiries) and restored by `Character.Load`; the C# kept them in memory only |
 | M24 | Slave-equipment items (`item_impl` 28, e.g. item 29725 on slave template 21) are written as detail type 0 (`Invalid`) with no detail body; the server no longer sends `ItemDetailType.SlaveEquipment` (10, 12 opaque bytes), which desynced every field after the item (the Bevy client rejected `SCUnitStatePacket` 0x069 and the original 1.2 client misparsed it) | verified: the 1.2 item detail reader `3961edf0` has cases only for tags 1..9 (bodies `0x38, 0x1e, 7, 10, 0x19, 0x11, 0x11, 9, 5` minus the type byte) and no case 10, so tag 10 reads no body; the C# 1.2 `ItemDetailType` numbering has no 10 either |
 | M25 | `SCUnitState` `Inventory_Equip` for slaves writes full items in slots 19..25 (the C# wrote only the template id for every unit type). A hull part there (Harpoon Clipper, template 14, part 29742 in slot 23) made the original 1.2 client read the following bytes as item fields and run off the packet (`sc error; cur=105 prev=97`, `Packet Error !!!`); Housing (3), Mate (5) and Character (0) keep template-only body parts, Npc (1) keeps `templateId, id, grade` outside 19..25 with a full-item Cosplay slot (27), Transfer/Shipyard write only 19..25 | verified: the client equipment reader `3961fa20` reads 19..25 as a template-only `u32` only when `baseUnitType != 2`; for a slave every slot goes through the full item reader `3961f500` |
-| CS | The client CS table entries missing from `opcodes::cs` were added: `0x11f CSRequestSetBountyMoney`, `0x120 CSSendBountyUpdate`, `0x130 CSRankSnapshot` (already handled through a local const, now the table entry), `0x133 CSChangeAutoUseAAPoint` | the Bevy `opcodes.rs` (client table); 0x130 additionally by the RE notes in `ranking_packets.rs`. `0x11f`/`0x120` are logged no-ops (the bounty ledger is not wired to the wallet, TODO); `0x133` sets `Character.auto_use_aa_point` and answers with `SCItemTaskSuccess` (`ItemTaskType` 110 carrying the one-byte `ChangeAutoUseAAPoint` task, action 18); the 1.2 C# had the task class but no 0x133 handler, so this reply is inferred, not observed on a live client |
+| CS | The client CS table entries missing from `opcodes::cs` were added: `0x11f CSRequestSetBountyMoney`, `0x120 CSSendBountyUpdate`, `0x130 CSRankSnapshot` (already handled through a local const, now the table entry), `0x133 CSChangeAutoUseAAPoint` | the Bevy `opcodes.rs` (client table); 0x130 additionally by the RE notes in `ranking_packets.rs`. `0x11f`/`0x120` now answer with `SCSetBountyPermitted` / `SCSetBountyDone` and place the pledge (see "Wanted-player bounty"); `0x133` sets `Character.auto_use_aa_point` and answers with `SCItemTaskSuccess` (`ItemTaskType` 110 carrying the one-byte `ChangeAutoUseAAPoint` task, action 18); the 1.2 C# had the task class but no 0x133 handler, so this reply is inferred, not observed on a live client |
 
 Doc-only items:
 
@@ -4130,3 +4175,89 @@ Persistence: `character_cooldowns` (`character_id`, `cooldown_type` 0 = skill id
 `UnitCooldowns::check_skill_cooldown`, so a cast before the restored expiry is refused with
 `COOLDOWN_TIME`. **Deviation:** the C# had no persistence and no real cooldown packet; this port
 adds both.
+
+## Wanted-player bounty (2026-11-02)
+
+The 1.2 C# tree only had the packet shells: `CSRequestSetBountyMoney` / `CSSendBountyUpdate`
+were logged no-ops and `CSNaviOpenBounty` answered an empty list (the comment there records that
+real rows broke the client Lua). This port implements placement and payout from the client
+evidence; none of it is recovered 1.2 server logic.
+
+Flow (`systems/social/packets/trial.rs`, readers `397b13a0` / `397bc6b0` /
+`397c6fc0` / `397c7080` / `397c7180`):
+
+* `CSRequestSetBountyMoney(name)` resolves an **online** character a player can name and answers
+  `SCSetBountyPermitted(targetId, name, curTotal, allowed)`. Only the wanted buff tag allows the
+  placement (`check_buff_tag(.., tags::WANTED)`, the same predicate as the arrest); `allowed ==
+  false` is the client's error **584** (`FUN_3907dee0`, `0x248`). An unknown name gets
+  `SCSetBountyDone(targetId 0, name, 0, 585)`; a refused self-target gets 586.
+* `CSSendBountyUpdate(targetId, name, amount)` requires the matching permit from the request,
+  checks the id/name again and must still find the target online and wanted. It debits exactly
+  `amount` copper through `change_money(Inventory -> None, ..., ItemTaskType.SET_BOUNTY_MONEY =
+  87)`, which checks and debits under one character lock, and answers
+  `SCSetBountyDone(targetId, name, newTotal, 0)`. Every refusal is error **585** (no such online
+  target) or **586** (everything else) through that packet; the client shows the id.
+* Pledges **stack** per target (several payers, and several placements per payer) and have **no
+  fee** (`SET_BOUNTY_MONEY` task, amount = pledge). `amount` is the client's signed `i32`, so
+  `0 < amount <= payer's purse`; the funds refusal is 586 (see BOUNTY-1).
+* The delay between the two packets is a server-side permit, `PERMIT_TTL_MS` = 5 minutes, replaced
+  by the next request and consumed only by a successful placement. A second
+  `CSSendBountyUpdate` without a new request gets 586.
+
+Payout (`systems/skills/combat.rs`, inside the arrest decision of `character_death_tail`): the
+arresting player receives the whole accumulated total with `ItemTaskType.PAY_BOUNTY_MONEY = 88`
+and `SCBountyPaid(hunter, arrested, total)`; the pledges become paid and the target's total
+resets to 0. The hook is inside the `if arrest` branch and pays only when
+`arrest_criminal(..)` answered `Some`: an NPC, guard or mob kill (no `arrestor`), a pirate killed
+where the arrest is skipped, and a region with no court room or no jail all pay nothing and keep
+the pledges (BOUNTY-4). A repeated settlement pays nothing, and a self kill is never paid.
+
+Persistence (`systems/social/bounty.rs`, `SQL/updates/2026-11-02_aaemu_game_bounty.sql` and
+`SQL/aaemu_game.sql`): `bounty_pledges(id, payer_id, target_id, amount, created, paid)`. Paid rows
+stay in the table as the record of who contributed, but are dropped from memory once their paid
+state is committed; `id` continues above the highest saved id on load (unpaid rows only). The
+dirty rows (new or newly paid) are captured under the economy operation lock together with the
+character wallet snapshot (`managers/save::capture_financial_snapshot` -> `BountyManager::
+prepare_save`) and written by `social::System::save(AfterCharacters)` in the same transaction as
+`Character.Save`; `commit_financial_snapshot` clears the dirty set only after the transaction
+commits, so a rolled-back save is retried instead of losing the pledge. A save with no dirty rows
+writes nothing. `CharacterLoad` sends the character's own active total in the verified
+`SCCharacterState.bountyMoney` field (X2G 1302074-1302079); `SCUnitBountyMoney` is not sent
+(BOUNTY-3).
+
+Policy decisions / capture-pending (each also a case id in the code):
+
+* **BOUNTY-1** amount bounds and the 585/586 split. The client has error strings only for 584
+  ("not wanted", `SCSetBountyPermitted.allowed == false`), 585 ("no such name") and 586
+  (generic); the decompile gives no server predicate. Chosen: `0 < amount <= purse`, no fee,
+  self-target refused with 586, insufficient funds 586. Needs an original-server capture.
+* **BOUNTY-2** offline targets, permit TTL, no expiry. A target must be online to be bountied
+  (the client's name comes from a live unit menu); the pledge survives the target's or the
+  payer's logout and a restart, and is paid whenever the target is arrested later. Whether 1.2
+  allowed an offline target, and whether `bountyTime` (`SCCharacterState`, still 0) means an
+  expiry, is unknown; the permit TTL is our bounded-map policy, not client behaviour.
+* **BOUNTY-3** `SCUnitBountyMoney` (`0x0bb`). The handler `FUN_391d6680` and its `+0xc` id /
+  `+0x10` i64 offsets are known, but the packet **writer** was not located, so the wire layout is
+  unconfirmed. Nothing is sent (not even on a total change or on visibility) rather than guessing
+  a layout; a live capture of a 1.2 server is needed.
+* **BOUNTY-4** `SCBountyPaid` recipients and the no-arrest case. The client's chat text
+  (`ui_text` 4764) names the hunter, the arrested and the amount; the recipient scope (hunter /
+  zone / faction) is unknown. It is sent to the arresting player only. Whether a pirate killed in
+  a desperado zone (where `arrest` is false) should pay is also unknown; the arrest text ties the
+  payout to an arrest, so it does not pay.
+* **BOUNTY-5** settlement edge cases. The arrester must still be online when the death tail runs;
+  otherwise nothing settles and the pledges stay (the copper must reach a live character). The
+  death tail may also run while the non-reentrant economy ops lock is held (an item or skill
+  effect killed the victim); settlement then logs and keeps the pledges instead of deadlocking.
+  A deleted character's pledges are never refunded and stay in the table for its id. Arena and
+  instance deaths use the ordinary PvP death tail, so they pay like any other arrest. None of
+  these have 1.2 evidence; they are safe defaults.
+* **BOUNTY-board** `CSNaviOpenBounty` / `SCBountyList`. The row layout is verified (M10), but the
+  C# comment records that a filled list broke the 1.2 client Lua and the cause was never found.
+  The handler keeps answering the empty `(0, 0)` list; a non-empty list must be tested on the
+  original client first.
+
+Deviation from the removed C# history: C# never placed, settled or persisted a bounty, so there
+is no C# behaviour to mirror. The pre-existing `bounty_runtime.rs` design invented a 24-hour
+expiry, a placement fee and a same-account refusal; all three are gone in favour of the
+client-evidenced rules above.

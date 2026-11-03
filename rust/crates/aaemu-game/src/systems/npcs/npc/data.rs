@@ -139,6 +139,11 @@ pub struct NpcTemplate {
     pub show_name_tag: bool,
     pub visible_to_creator_only: bool,
     pub no_exp: bool,
+    /// `no_penalty`: a player this NPC kills gets no death penalty (exp / durability). The
+    /// 1.2 client loads the column too (`npcs` SELECT in `x2game.dll.c` 0x39A01098) but the
+    /// only behaviour evidence is the column name and the rows (guards, siege cannons,
+    /// battlefield pets, alliance NPCs).
+    pub no_penalty: bool,
     pub pet_item_id: u32,
     pub base_skill_id: i32,
     pub track_friendship: bool,
@@ -234,6 +239,7 @@ impl Default for NpcTemplate {
             show_name_tag: false,
             visible_to_creator_only: false,
             no_exp: false,
+            no_penalty: false,
             pet_item_id: 0,
             base_skill_id: 0,
             track_friendship: false,
@@ -791,6 +797,7 @@ impl NpcData {
                 show_name_tag: r.bool_str("show_name_tag")?,
                 visible_to_creator_only: r.bool_str("visible_to_creator_only")?,
                 no_exp: r.bool_str("no_exp")?,
+                no_penalty: r.bool_str("no_penalty")?,
                 pet_item_id: r.u32_or("pet_item_id", 0)?,
                 base_skill_id: r.i32("base_skill_id")?,
                 track_friendship: r.bool_str("track_friendship")?,
@@ -1332,17 +1339,17 @@ mod tests {
             no_apply_total_custom NUM, base_skill_strafe NUM, base_skill_delay REAL,
             npc_interaction_set_id INT, use_abuser_list NUM,
             return_when_enter_housing_area NUM, look_converter NUM,
-            use_ddcms_mount_skill NUM, crowd_effect NUM);
+            use_ddcms_mount_skill NUM, crowd_effect NUM, no_penalty NUM);
         INSERT INTO npcs VALUES (100, 'Guard', 1, 1, 1, 50, 9, NULL, 3, 4, 1, 101, 't', 0, 'f',
             0, 'f', 't', 'f', 'f', NULL, 0, 'f', 'f', NULL, 'f', 'f', 1.0, 'f', 1.0, 1.0, 1.0,
             NULL, 1.0, 'f', 1.0, 0, 'f', 'f', 0, 0.0, 0, 'f', 'f', 0, 0.0, 'f', 'f', 0, 'f',
             'f', 'f', 0.0, 'f', 'f', 'f', NULL, 'f', 6, NULL, NULL, NULL, 5, 'f', 'f', 0.0,
-            NULL, 'f', 'f', 'f', 'f', 'f');
+            NULL, 'f', 'f', 'f', 'f', 'f', 't');
         INSERT INTO npcs VALUES (101, 'Wolf', 0, 2, 2, 10, 9, NULL, NULL, NULL, 2, 3, 'f', 1,
             'f', 0, 'f', 't', 'f', 'f', NULL, 0, 'f', 'f', NULL, 'f', 'f', 1.0, 'f', 1.5, 1.0,
             1.0, NULL, 1.0, 't', 1.0, 0, 'f', 'f', 0, 0.0, 0, 'f', 'f', 0, 0.0, 'f', 'f', 0,
             'f', 'f', 'f', 0.0, 'f', 'f', 'f', NULL, 'f', 0, NULL, NULL, NULL, NULL, 'f', 'f',
-            0.0, NULL, 'f', 'f', 'f', 'f', 'f');
+            0.0, NULL, 'f', 'f', 'f', 'f', 'f', 'f');
         CREATE TABLE equip_pack_body_parts (id INT, name TEXT, model_id INT, hair_color_id INT,
             face_id INT, hair_id INT, beard_id INT, skin_color_id INT, body_diffuse_map_id INT);
         INSERT INTO equip_pack_body_parts VALUES (1, 'p', 1, 0, 0, 0, 0, 0, 0);
@@ -1592,6 +1599,16 @@ mod tests {
             .values()
             .filter(|t| t.merchant_pack_id > 0)
             .count();
+        // `npcs.no_penalty`: guards, siege cannons and battlefield pets are the 88 rows.
+        let no_penalty = d.templates.values().filter(|t| t.no_penalty).count();
+        assert_eq!(
+            no_penalty,
+            count("SELECT COUNT(*) FROM npcs WHERE no_penalty='t'")
+        );
+        assert_eq!(no_penalty, 88);
+        assert!(d.template(1067).expect("guard").no_penalty);
+        assert!(d.template(12411).expect("red dragon").no_penalty);
+        assert!(!d.template(100).expect("ordinary npc").no_penalty);
         assert_eq!(
             buffs,
             count("SELECT COUNT(*) FROM npc_initial_buffs WHERE npc_id IN (SELECT id FROM npcs)")

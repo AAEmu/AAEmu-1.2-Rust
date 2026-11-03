@@ -851,3 +851,29 @@ CREATE TABLE IF NOT EXISTS `shipyards` (
   `spawned`      bigint NOT NULL COMMENT 'Unix seconds UTC',
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Shipyards (drydocks), restored at server start';
+
+-- Per-character purchases of item templates limited by `items.limited_sale_count` /
+-- `items.one_time_sale` (`systems::economy::shop_limits`). The counters are rewritten with the
+-- wallet / items in the save transaction and loaded at server start; they are per character and
+-- never expire (the 1.2 data has no reset period).
+CREATE TABLE IF NOT EXISTS `character_shop_purchases` (
+  `character_id`   int unsigned NOT NULL COMMENT 'characters.id',
+  `item_id`        int unsigned NOT NULL COMMENT 'items.id (the template, not an item instance)',
+  `purchase_count` int NOT NULL DEFAULT 0 COMMENT 'Copies bought so far',
+  PRIMARY KEY (`character_id`, `item_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Per-character purchases of limited-sale item templates';
+
+-- Wanted-player bounty pledges (`systems::social::bounty`): one row per placement, kept after
+-- payout as the record of who paid. `amount` is copper already debited from the payer's purse;
+-- `paid` means the whole accumulated total was credited to the arresting player. Timestamps are
+-- UTC Unix seconds. No foreign key to `characters`.
+CREATE TABLE IF NOT EXISTS `bounty_pledges` (
+  `id`        bigint unsigned NOT NULL COMMENT 'BountyLedger pledge id',
+  `payer_id`  int unsigned NOT NULL COMMENT 'characters.id of the payer',
+  `target_id` int unsigned NOT NULL COMMENT 'characters.id of the wanted target',
+  `amount`    bigint NOT NULL COMMENT 'Escrowed copper',
+  `created`   bigint NOT NULL COMMENT 'Unix seconds UTC',
+  `paid`      tinyint unsigned NOT NULL DEFAULT 0 COMMENT 'Paid to the arresting player',
+  PRIMARY KEY (`id`),
+  KEY `target_id` (`target_id`, `paid`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Wanted-player bounty pledges (escrowed copper)';

@@ -412,6 +412,12 @@ pub fn purchase(f: &DoodadFuncPurchase, ctx: &DoodadCtx<'_>, caster: Option<&Wor
         send_error(player, err::BAG_FULL);
         return;
     }
+    // Per-character purchase allowance (`items.limited_sale_count` / `items.one_time_sale`).
+    // Reserved before the coin is spent; given back below when the purchase still fails.
+    if !eco.try_claim_shop_purchase(server, player, f.item_id, f.count) {
+        send_error(player, err::STORE_ONE_TIME_SALE);
+        return;
+    }
     if eco.bag_consume_item(
         server,
         player,
@@ -420,6 +426,7 @@ pub fn purchase(f: &DoodadFuncPurchase, ctx: &DoodadCtx<'_>, caster: Option<&Wor
         f.coin_count,
     ) <= 0
     {
+        eco.release_shop_purchase(server, player, f.item_id, f.count);
         send_error(player, err::NOT_ENOUGH_ITEM);
         return;
     }
@@ -432,6 +439,7 @@ pub fn purchase(f: &DoodadFuncPurchase, ctx: &DoodadCtx<'_>, caster: Option<&Wor
             f.item_id,
             f.count,
         ) {
+            eco.release_shop_purchase(server, player, f.item_id, f.count);
             tracing::error!(
                 "DoodadFuncPurchase: Failed to auto-equip backpack item {} for player {}",
                 f.item_id,
@@ -447,6 +455,7 @@ pub fn purchase(f: &DoodadFuncPurchase, ctx: &DoodadCtx<'_>, caster: Option<&Wor
         f.count,
         -1,
     ) {
+        eco.release_shop_purchase(server, player, f.item_id, f.count);
         tracing::error!(
             "DoodadFuncPurchase: Failed to create item {} for player {}",
             f.item_id,
