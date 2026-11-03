@@ -97,6 +97,9 @@ pub enum Kind {
     #[serde(rename = "craft")]
     Craft,
     /// Ad-hoc live checks driven by the command file `$AAEMU_SCRIPT` (see `scenario/script.rs`).
+    /// Server-select reconnect round trip (game `SCReconnectAuth` -> login `CARequestReconnect`).
+    #[serde(rename = "reconnect")]
+    Reconnect,
     /// GM account.
     #[serde(rename = "script")]
     Script,
@@ -127,6 +130,7 @@ impl std::str::FromStr for Kind {
             "portal" => Self::Portal,
             "socket" => Self::Socket,
             "craft" => Self::Craft,
+            "reconnect" => Self::Reconnect,
             "script" => Self::Script,
             "busy" => Self::Busy,
             _ => bail!(
@@ -852,9 +856,31 @@ async fn run_inner(
     r: &mut Runner<'_>,
     script_input: Option<&ScriptInput<'_>>,
 ) -> anyhow::Result<()> {
-    let Some((mut game, stream, _login)) = open_lobby(kind, cfg, r).await? else {
+    let Some((mut game, stream, login)) = open_lobby(kind, cfg, r).await? else {
         return Ok(());
     };
+
+    if kind == Kind::Reconnect {
+        let s = r.begin("login.reconnect");
+        let account_id = login.account_id;
+        // At the server list, the client asks the game server for a reconnect token.
+        game.leave_world(2).await?;
+        let packet = game.wait_sc(sc::SCReconnectAuthPacket).await?;
+        let token = packet.stream().read_u32()?;
+        ensure!(token != 0, "empty reconnect token");
+        // The client then presents it to the login server on a fresh connection.
+        let mut reconnect_login = LoginClient::connect(&cfg.login, r.rec.clone()).await?;
+        let reconnected = reconnect_login
+            .auth_reconnect(account_id, cfg.game_server_id, token)
+            .await?;
+        ensure!(
+            reconnected == account_id,
+            "reconnect authenticated account {reconnected}, expected {account_id}"
+        );
+        r.var("reconnect_token", u64::from(token));
+        r.end(s, format!("token {token:#010x}, account {reconnected}"));
+        return Ok(());
+    }
 
     let s = r.begin("game.create");
     let created = if cfg.create_new_character || game.state.characters.is_empty() {
