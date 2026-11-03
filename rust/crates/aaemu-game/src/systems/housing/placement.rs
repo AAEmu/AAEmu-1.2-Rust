@@ -8,7 +8,7 @@ use crate::server::GameServer;
 use crate::systems::ai::collision::world::{ObjKind, Owner};
 use crate::systems::economy::error_message as err;
 use crate::systems::npcs::subzone::{self, Area};
-use crate::world::{PlayerRef, WorldInstance};
+use crate::world::{PlayerRef, WorldInstance, WorldObject};
 
 /// `FUN_393312a0` / `FUN_398971c0`: the placement cells are 4 m squares.
 const FOOTPRINT_CELL: f32 = 4.0;
@@ -230,8 +230,22 @@ fn validate_unit_overlap(
 }
 
 /// `FUN_39333d40`: true when `(x, y, z)` is within `radius + 30 m` of the caster.
-pub fn caster_in_range(player: &PlayerRef, x: f32, y: f32, z: f32, radius: f32) -> bool {
-    let pos = player.data().unit.transform.local();
+/// A rider, a seated player or a passenger has a parent-relative (seat) local transform, so the
+/// distance must use the composed world position (`Transform.World`).
+pub fn caster_in_range(
+    server: &GameServer,
+    player: &PlayerRef,
+    x: f32,
+    y: f32,
+    z: f32,
+    radius: f32,
+) -> bool {
+    let me = WorldObject::from(player);
+    let pos = server
+        .world
+        .world_of(&me)
+        .map(|world| world.world_pos_rot(&me))
+        .unwrap_or_else(|| player.data().unit.transform.local());
     let dx = pos.x - x;
     let dy = pos.y - y;
     let dz = pos.z - z;
@@ -241,13 +255,14 @@ pub fn caster_in_range(player: &PlayerRef, x: f32, y: f32, z: f32, radius: f32) 
 
 /// `FUN_39333d40`: the house builder's own distance check (error 0x9a `TOO_FAR_AWAY`).
 pub fn validate_placement_range(
+    server: &GameServer,
     player: &PlayerRef,
     x: f32,
     y: f32,
     z: f32,
     garden_radius: f32,
 ) -> Result<(), i16> {
-    if caster_in_range(player, x, y, z, garden_radius.max(0.0)) {
+    if caster_in_range(server, player, x, y, z, garden_radius.max(0.0)) {
         Ok(())
     } else {
         Err(err::TOO_FAR_AWAY)
@@ -364,13 +379,13 @@ pub fn purchase_allowed(
     player: &PlayerRef,
     house: &crate::world::HouseRef,
 ) -> Result<(), i16> {
-    let (instance, position, template_id, account) = {
+    let account = player.data().account_id;
+    let (instance, position, template_id) = {
         let h = house.data();
         (
             h.unit.transform.instance_id,
             h.unit.transform.local(),
             h.unit.template_id,
-            player.data().account_id,
         )
     };
     let data = &server.game_data.systems.housing;
@@ -419,7 +434,7 @@ pub fn validate_house(
     if ![x, y, z].into_iter().all(f32::is_finite) {
         return Err(err::HOUSE_CANNOT_LOCATE_INVALID_AREA);
     }
-    validate_placement_range(player, x, y, z, template.garden_radius)?;
+    validate_placement_range(server, player, x, y, z, template.garden_radius)?;
     let (instance, account) = {
         let c = player.data();
         (c.unit.transform.instance_id, c.account_id)
