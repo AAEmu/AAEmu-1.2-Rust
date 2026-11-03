@@ -114,8 +114,8 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCAskToJoinTeamAreaPacket(teamId, senderId, senderName, isParty)` (never sent by the
-    /// 1.2 C#).
+    /// `SCAskToJoinTeamAreaPacket(teamId, senderId, senderName, isParty)`: sent for area
+    /// invitations (the 1.2 C# never sent it).
     SCAskToJoinTeamAreaPacket { team_id: u32, sender_id: u32, sender_name: String, is_party: bool } |self, s| {
         s.write_u32(self.team_id)
             .write_u32(self.sender_id)
@@ -185,7 +185,8 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCTeamAreaInvitedPacket(r, s)` (never sent by the 1.2 C#).
+    /// `SCTeamAreaInvitedPacket(r, s)`: sent to the inviter with the invitation count (the 1.2
+    /// C# never sent it).
     SCTeamAreaInvitedPacket { r: u32, s: bool } |self, st| {
         st.write_u32(self.r).write_bool(self.s);
     }
