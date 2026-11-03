@@ -631,13 +631,21 @@ pub async fn create_expedition(server: &GameServer, owner: &PlayerRef, name: &st
     };
     // `m.Character.Faction.MotherId != owner.Faction.MotherId`, with the runtime nations
     // overlaid: a nation's top-level faction is itself, so two citizens of different nations
-    // are not grouped like two factions of one alliance (PORTING.md, NATION-13).
-    let owner_top = super::nation::top_level_faction(server, owner.data().unit.faction_id);
+    // are not grouped like two factions of one alliance (PORTING.md, NATION-13). The saved
+    // faction is compared, not a temporary duel / battlefield team faction (NATION-14).
+    let owner_top = super::nation::top_level_faction(
+        server,
+        crate::db_character::persisted_faction(&owner.data()),
+    );
     let mut valid: Vec<PlayerRef> = Vec::new();
     for m in team_members {
         let (level, exp, faction) = {
             let c = m.data();
-            (c.unit.level, c.unit.expedition_id, c.unit.faction_id)
+            (
+                c.unit.level,
+                c.unit.expedition_id,
+                crate::db_character::persisted_faction(&c),
+            )
         };
         if level < cfg.create.level {
             send_error(owner, error::EXPEDITION_CREATE_LEVEL);
@@ -681,7 +689,11 @@ pub async fn create_expedition(server: &GameServer, owner: &PlayerRef, name: &st
     };
     let (owner_faction, owner_name, owner_obj) = {
         let c = owner.data();
-        (c.unit.faction_id, c.unit.name.clone(), owner.obj_id)
+        (
+            crate::db_character::persisted_faction(&c),
+            c.unit.name.clone(),
+            owner.obj_id,
+        )
     };
     let expedition = Expedition {
         faction: SystemFaction {
@@ -797,7 +809,7 @@ pub fn invite(server: &GameServer, inviter: &PlayerRef, invited_name: &str) {
     // The guild belongs to its mother's top-level faction (`Character.SetFaction` expels a
     // member of another mother). A nation citizen can therefore only join a guild of that
     // nation; the C# checked this at creation only (PORTING.md, NATION-13).
-    let invited_faction = invited.data().unit.faction_id;
+    let invited_faction = crate::db_character::persisted_faction(&invited.data());
     if super::nation::top_level_faction(server, e.faction.mother_id)
         != super::nation::top_level_faction(server, invited_faction)
     {
@@ -875,7 +887,10 @@ pub async fn reply_invite(
     // (PORTING.md, NATION-13).
     let guild_mother = server.expeditions.get(id1).map(|e| e.faction.mother_id);
     if super::nation::top_level_faction(server, guild_mother.unwrap_or(0))
-        != super::nation::top_level_faction(server, invited.data().unit.faction_id)
+        != super::nation::top_level_faction(
+            server,
+            crate::db_character::persisted_faction(&invited.data()),
+        )
     {
         tracing::warn!(
             "ReplyExpeditionInvitation: character {} may not join expedition {id1} of another top-level faction",

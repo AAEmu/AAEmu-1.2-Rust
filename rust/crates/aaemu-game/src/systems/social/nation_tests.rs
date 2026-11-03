@@ -25,7 +25,10 @@ use crate::systems::skills::effects::{special, EffectArgs, EffectSource};
 use crate::systems::skills::geometry::Target;
 use crate::systems::skills::state::SkillRun;
 use crate::systems::skills::types::{CastAction, SkillCastTarget, SkillCaster, SkillObject};
+use crate::systems::social::duel::{FACTION_BLUE_TEAM, FACTION_RED_TEAM};
 use crate::systems::social::expedition::{self, Expedition};
+use crate::systems::social::packets::duel::{CSChallengeDuelPacket, CSStartDuelPacket};
+use crate::systems::social::packets::expedition::CSCreateExpeditionPacket;
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
 use crate::world::{HouseRef, PlayerRef, WorldObject};
 
@@ -42,6 +45,7 @@ fn data() -> GameData {
         (2, 0),
         (3, 0),
         (101, 148),
+        (102, 148),
         (148, 0),
         (149, 0),
         (161, 0),
@@ -642,8 +646,11 @@ async fn private_mysql_nation_persistence_round_trip_and_offline_member() {
     ] {
         sqlx::query(statement).execute(&pool).await.unwrap();
     }
-    let mut server = test_server_with(GameData::empty());
+    let mut server = test_server_with(data());
     server.db = pool.clone();
+    // The offline member's house is loaded in the manager too (all `housings` rows load at
+    // startup); it must move with the offline member, not only its DB row.
+    let offline_house = character_house(&server, 42);
     let nation = Nation {
         id: 1001,
         expedition_id: 1000,
@@ -660,6 +667,8 @@ async fn private_mysql_nation_persistence_round_trip_and_offline_member() {
         }],
         offline_members: vec![42],
     };
+    // Production adds the nation before saving it (the housing faction check resolves it).
+    server.systems.social.nations.add(nation.clone());
     nation::save_creation(&server, &nation).await.unwrap();
     let (mother, faction, house): (i64, i64, i64) = sqlx::query_as(
         "SELECT CAST(e.mother AS SIGNED), CAST(c.faction_id AS SIGNED),          CAST(h.faction_id AS SIGNED) FROM expeditions e, characters c, housings h          WHERE e.id = 1000 AND c.id = 42 AND h.id = 13",
@@ -668,6 +677,11 @@ async fn private_mysql_nation_persistence_round_trip_and_offline_member() {
     .await
     .unwrap();
     assert_eq!((mother, faction, house), (1001, 1001, 1001));
+    assert_eq!(
+        offline_house.data().unit.faction_id,
+        1001,
+        "the loaded HouseRef must move with the offline member"
+    );
 
     let loaded = NationManager::default();
     loaded.load(&pool).await.unwrap();
@@ -808,15 +822,15 @@ fn spawn_candidate(
     spawn_player(server, client, character, obj_id)
 }
 
-fn citizen_house(server: &GameServer, citizen: &PlayerRef) -> HouseRef {
+fn character_house(server: &GameServer, character_id: u32) -> HouseRef {
     let world = server.world.world(0).expect("instance 0");
     let house = crate::systems::housing::manager::create(server, 300, 101, &world, 0, 0)
         .expect("house template");
     {
         let mut h = house.data();
-        h.id = 900;
-        h.account_id = 900;
-        h.unit.owner_id = citizen.character_id;
+        h.id = 900 + character_id;
+        h.account_id = 900 + character_id;
+        h.unit.owner_id = character_id;
         h.unit.name = "Cottage".into();
     }
     assert!(server.systems.housing.manager.insert(&house));
@@ -862,7 +876,7 @@ async fn invite_accept_moves_the_citizen_and_the_house() {
     let nation = declare(&f);
     let mut candidate_client = TestClient::new(&f.server, 3, 1003);
     let candidate = spawn_candidate(&f.server, &candidate_client, 3, "Citizen", 0x102);
-    let house = citizen_house(&f.server, &candidate);
+    let house = character_house(&f.server, candidate.character_id);
     f.leader_client.conn.active_char = Some(f.leader.clone());
     candidate_client.conn.active_char = Some(candidate.clone());
     f.leader_client.drain();
@@ -1006,7 +1020,7 @@ async fn invite_permission_self_offline_and_forged_or_expired_replies() {
 
     // The king cannot invite himself -> 736; an offline name -> 50.
     f.leader_client.conn.active_char = Some(f.leader.clone());
-    for (name, expected) in [("King", 736), ("Nobody", 50)] {
+    for (name, expected) in [("King", 736), ("kInG", 736), ("Nobody", 50)] {
         f.leader_client.drain();
         CSFactionImmigrationInvitePacket {
             invitee: name.into(),
@@ -1073,6 +1087,55 @@ async fn invite_permission_self_offline_and_forged_or_expired_replies() {
     .await
     .unwrap();
     assert_eq!(error_code(&candidate_client.drain()), Some(693));
+
+    // A king on the invitee's block list is dropped silently (BLOCK-LIST-1).
+    candidate
+        .data()
+        .blocked
+        .push((candidate.character_id, f.leader.character_id));
+    f.leader_client.drain();
+    CSFactionImmigrationInvitePacket {
+        invitee: "Citizen".into(),
+    }
+    .handle(&f.server, &mut f.leader_client.conn)
+    .await
+    .unwrap();
+    assert!(error_code(&f.leader_client.drain()).is_none());
+    assert!(frames_with(
+        &candidate_client.drain(),
+        sc::SCFactionImmigrateInvitePacket
+    )
+    .is_empty());
+    candidate.data().blocked.clear();
+
+    // A repeated invite while one is pending is dropped, not sent again.
+    f.leader_client.drain();
+    CSFactionImmigrationInvitePacket {
+        invitee: "Citizen".into(),
+    }
+    .handle(&f.server, &mut f.leader_client.conn)
+    .await
+    .unwrap();
+    assert_eq!(
+        frames_with(
+            &candidate_client.drain(),
+            sc::SCFactionImmigrateInvitePacket
+        )
+        .len(),
+        1
+    );
+    f.leader_client.drain();
+    CSFactionImmigrationInvitePacket {
+        invitee: "Citizen".into(),
+    }
+    .handle(&f.server, &mut f.leader_client.conn)
+    .await
+    .unwrap();
+    assert!(frames_with(
+        &candidate_client.drain(),
+        sc::SCFactionImmigrateInvitePacket
+    )
+    .is_empty());
 
     // The real invitation works once; the replayed reply is refused.
     f.leader_client.drain();
@@ -1190,7 +1253,7 @@ async fn return_to_origin_moves_the_citizen_and_the_house() {
     let nation = declare(&f);
     let mut candidate_client = TestClient::new(&f.server, 3, 1003);
     let candidate = spawn_candidate(&f.server, &candidate_client, 3, "Citizen", 0x102);
-    let house = citizen_house(&f.server, &candidate);
+    let house = character_house(&f.server, candidate.character_id);
     faction::set_faction(&f.server, &candidate, nation.id).await;
     assert_eq!(house.data().unit.faction_id, nation.id);
     candidate_client.conn.active_char = Some(candidate.clone());
@@ -1298,7 +1361,7 @@ async fn kick_moves_an_online_citizen_back_to_the_origin() {
     let nation = declare(&f);
     let mut candidate_client = TestClient::new(&f.server, 3, 1003);
     let candidate = spawn_candidate(&f.server, &candidate_client, 3, "Citizen", 0x102);
-    let house = citizen_house(&f.server, &candidate);
+    let house = character_house(&f.server, candidate.character_id);
     faction::set_faction(&f.server, &candidate, nation.id).await;
     candidate_client.conn.active_char = Some(candidate.clone());
     f.leader_client.conn.active_char = Some(f.leader.clone());
@@ -1448,7 +1511,7 @@ async fn private_mysql_immigration_persists_and_kicks_offline() {
     for statement in [
         "CREATE TEMPORARY TABLE characters (id INT UNSIGNED NOT NULL, name VARCHAR(128) NOT \
          NULL, faction_id INT UNSIGNED NOT NULL, expedition_id INT UNSIGNED NOT NULL, race \
-         TINYINT UNSIGNED NOT NULL, gender TINYINT UNSIGNED NOT NULL, PRIMARY KEY (id))",
+         TINYINT UNSIGNED NOT NULL, gender TINYINT UNSIGNED NOT NULL, deleted TINYINT UNSIGNED NOT NULL DEFAULT 0, PRIMARY KEY (id))",
         "CREATE TEMPORARY TABLE housings (id INT UNSIGNED NOT NULL, owner INT UNSIGNED NOT \
          NULL, faction_id INT UNSIGNED NOT NULL, PRIMARY KEY (id))",
     ] {
@@ -1511,6 +1574,9 @@ async fn private_mysql_immigration_persists_and_kicks_offline() {
         .execute(&pool)
         .await
         .unwrap();
+    // Every `housings` row is loaded at startup, so the offline owner has a live HouseRef.
+    let offline_house = character_house(&f.server, 4242);
+    offline_house.data().unit.faction_id = nation.id;
     f.leader_client.drain();
     CSFactionKickToOriginPacket {
         name: "Offline".into(),
@@ -1528,6 +1594,350 @@ async fn private_mysql_immigration_persists_and_kicks_offline() {
     .await
     .unwrap();
     assert_eq!((faction, house), (101, 101));
+    assert_eq!(
+        offline_house.data().unit.faction_id,
+        101,
+        "the loaded HouseRef must move with the offline kick, not only the DB row"
+    );
     assert!(f.server.world.character_by_name("Offline").is_none());
+
+    // A deleted row is not a kick target.
+    sqlx::query(
+        "INSERT INTO characters (id, name, faction_id, expedition_id, race, gender, deleted)          VALUES (4343, 'Deleted', ?, 0, 1, 1, 1)",
+    )
+    .bind(nation.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    f.leader_client.drain();
+    CSFactionKickToOriginPacket {
+        name: "Deleted".into(),
+    }
+    .handle(&f.server, &mut f.leader_client.conn)
+    .await
+    .unwrap();
+    assert_eq!(
+        kick_result_error(&f.leader_client.drain()),
+        Some(704),
+        "a deleted character is not a target"
+    );
+
+    // The login race: a target that is in the world is reported back for the online path.
+    let online_client = TestClient::new(&f.server, 6, 1006);
+    let online = spawn_candidate(&f.server, &online_client, 6, "Online", 0x105);
+    assert!(matches!(
+        nation::kick_offline(&f.server, online.character_id, nation.id, 101).await,
+        Ok(nation::OfflineKick::TargetOnline)
+    ));
+    // A stored faction that is no longer the nation is not overwritten.
+    sqlx::query(
+        "INSERT INTO characters (id, name, faction_id, expedition_id, race, gender, deleted)          VALUES (4444, 'Changed', 101, 0, 1, 1, 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(matches!(
+        nation::kick_offline(&f.server, 4444, nation.id, 101).await,
+        Ok(nation::OfflineKick::FactionChanged)
+    ));
+    let changed: i64 =
+        sqlx::query_scalar("SELECT CAST(faction_id AS SIGNED) FROM characters WHERE id = 4444")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(changed, 101);
     pool.close().await;
+}
+
+#[tokio::test]
+async fn temporary_duel_factions_cannot_immigrate_or_leave_the_nation() {
+    let mut f = Fixture::new(false);
+    let nation = declare(&f);
+    let mut challenger_client = TestClient::new(&f.server, 3, 1003);
+    let challenger = spawn_candidate(&f.server, &challenger_client, 3, "Pirate", 0x102);
+    challenger.data().unit.faction_id = crate::db_character::FACTION_PIRATE;
+    let mut challenged_client = TestClient::new(&f.server, 4, 1004);
+    let challenged = spawn_candidate(&f.server, &challenged_client, 4, "Civilian", 0x103);
+    for p in [&challenger, &challenged] {
+        p.data().unit.hp = 1000;
+    }
+    challenger_client.conn.active_char = Some(challenger.clone());
+    challenged_client.conn.active_char = Some(challenged.clone());
+    f.leader_client.conn.active_char = Some(f.leader.clone());
+    challenger_client.drain();
+    challenged_client.drain();
+    f.leader_client.drain();
+
+    // Drive the real duel accept: both participants get a temporary team faction.
+    CSChallengeDuelPacket {
+        challenged_id: challenged.character_id,
+    }
+    .handle(&f.server, &mut challenger_client.conn)
+    .await
+    .unwrap();
+    CSStartDuelPacket {
+        challenger_id: challenger.character_id,
+        error_message: 0,
+    }
+    .handle(&f.server, &mut challenged_client.conn)
+    .await
+    .unwrap();
+    assert_eq!(challenger.data().unit.faction_id, FACTION_RED_TEAM);
+    assert!(challenger.data().unit.faction_temporary);
+    assert_eq!(challenged.data().unit.faction_id, FACTION_BLUE_TEAM);
+    assert!(challenged.data().unit.faction_temporary);
+
+    // The pirate is still a pirate: return to origin and a king's invite are refused with the
+    // pirate code, and the temporary faction stays.
+    challenger_client.drain();
+    CSFactionImmigrateToOriginPacket {}
+        .handle(&f.server, &mut challenger_client.conn)
+        .await
+        .unwrap();
+    assert_eq!(error_code(&challenger_client.drain()), Some(694));
+    assert_eq!(challenger.data().unit.faction_id, FACTION_RED_TEAM);
+    assert!(challenger.data().unit.faction_temporary);
+    f.leader_client.drain();
+    CSFactionImmigrationInvitePacket {
+        invitee: "Pirate".into(),
+    }
+    .handle(&f.server, &mut f.leader_client.conn)
+    .await
+    .unwrap();
+    assert_eq!(error_code(&f.leader_client.drain()), Some(694));
+    assert!(frames_with(
+        &challenger_client.drain(),
+        sc::SCFactionImmigrateInvitePacket
+    )
+    .is_empty());
+
+    // A non-nation player in a duel cannot "return to origin": the general refusal wins and
+    // the duel team faction is untouched (the pirate escape / duel break are closed).
+    challenged_client.drain();
+    CSFactionImmigrateToOriginPacket {}
+        .handle(&f.server, &mut challenged_client.conn)
+        .await
+        .unwrap();
+    assert_eq!(error_code(&challenged_client.drain()), Some(693));
+    assert_eq!(challenged.data().unit.faction_id, FACTION_BLUE_TEAM);
+    assert!(challenged.data().unit.faction_temporary);
+
+    // The guild rule reads the saved faction: the duelling civilian (saved 101) may still join
+    // a guild of the Nuia alliance, while the duelling pirate (saved 161) may not.
+    let mut owner_client = TestClient::new(&f.server, 5, 1005);
+    let owner = spawn_player(
+        &f.server,
+        &owner_client,
+        test_character(5, "Owner", 100.0, 100.0),
+        0x104,
+    );
+    let faction = SystemFaction {
+        id: 7_000,
+        mother_id: 101,
+        name: "NuiaGuild".into(),
+        owner_id: owner.character_id,
+        owner_name: "Owner".into(),
+        unit_owner_type: 0,
+        political_system: 1,
+        created: 0,
+        ..SystemFaction::default()
+    };
+    f.server.expeditions.add(Expedition {
+        faction,
+        members: vec![expedition::member_from_character(
+            &f.server, 7_000, &owner, true,
+        )],
+        policies: expedition::default_policies(&f.server, 7_000),
+        removed_members: Vec::new(),
+        is_disbanded: false,
+    });
+    owner.data().unit.expedition_id = 7_000;
+    owner_client.drain();
+    challenger_client.drain();
+    challenged_client.drain();
+
+    expedition::invite(&f.server, &owner, "Pirate");
+    assert!(
+        frames_with(&challenger_client.drain(), sc::SCExpeditionInvitationPacket).is_empty(),
+        "a duelling pirate may not join a non-pirate guild"
+    );
+    expedition::invite(&f.server, &owner, "Civilian");
+    assert_eq!(
+        frames_with(&challenged_client.drain(), sc::SCExpeditionInvitationPacket).len(),
+        1,
+        "a duelling Nuian may join a Nuian guild by their saved faction"
+    );
+    expedition::reply_invite(&f.server, &challenged, 7_000, 0, true).await;
+    assert_eq!(challenged.data().unit.expedition_id, 7_000);
+    assert_eq!(f.server.expeditions.get(7_000).unwrap().members.len(), 2);
+    let _ = nation;
+}
+
+#[tokio::test]
+async fn guild_membership_uses_the_saved_top_level_faction() {
+    let server = test_server_with(data());
+    crate::systems::social::install_hooks(&server);
+    let mut owner_client = TestClient::new(&server, 30, 1030);
+    let owner = spawn_player(
+        &server,
+        &owner_client,
+        test_character(30, "Owner", 100.0, 100.0),
+        0x300,
+    );
+    let faction = SystemFaction {
+        id: 7_000,
+        mother_id: 101,
+        name: "NuiaGuild".into(),
+        owner_id: owner.character_id,
+        owner_name: "Owner".into(),
+        unit_owner_type: 0,
+        political_system: 1,
+        created: 0,
+        ..SystemFaction::default()
+    };
+    server.expeditions.add(Expedition {
+        faction,
+        members: vec![expedition::member_from_character(
+            &server, 7_000, &owner, true,
+        )],
+        policies: expedition::default_policies(&server, 7_000),
+        removed_members: Vec::new(),
+        is_disbanded: false,
+    });
+    owner.data().unit.expedition_id = 7_000;
+
+    // Race 102 is the same alliance as 101: still invited and accepted.
+    let mut ally_client = TestClient::new(&server, 31, 1031);
+    let ally = spawn_player(
+        &server,
+        &ally_client,
+        test_character(31, "Ally", 120.0, 100.0),
+        0x301,
+    );
+    ally.data().unit.faction_id = 102;
+    owner_client.drain();
+    ally_client.drain();
+    expedition::invite(&server, &owner, "Ally");
+    assert_eq!(
+        frames_with(&ally_client.drain(), sc::SCExpeditionInvitationPacket).len(),
+        1,
+        "a faction-102 player belongs to the guild's Nuia alliance"
+    );
+    expedition::reply_invite(&server, &ally, 7_000, 0, true).await;
+    assert_eq!(ally.data().unit.expedition_id, 7_000);
+    assert_eq!(server.expeditions.get(7_000).unwrap().members.len(), 2);
+
+    // A pirate belongs to no alliance and is refused by the non-pirate guild (silently: there
+    // is no 1.2 error for it, NATION-13).
+    let mut pirate_client = TestClient::new(&server, 32, 1032);
+    let pirate = spawn_player(
+        &server,
+        &pirate_client,
+        test_character(32, "Pirate", 140.0, 100.0),
+        0x302,
+    );
+    pirate.data().unit.faction_id = crate::db_character::FACTION_PIRATE;
+    pirate_client.drain();
+    expedition::invite(&server, &owner, "Pirate");
+    assert!(frames_with(&pirate_client.drain(), sc::SCExpeditionInvitationPacket).is_empty());
+    assert_eq!(pirate.data().unit.expedition_id, 0);
+}
+
+/// Five level-10 characters with the given factions, joined into one party (the create
+/// requirements are level 5, a party of 5 and 10 000 money paid by the caller).
+fn spawn_party(
+    server: &GameServer,
+    first_id: u32,
+    factions: &[u32],
+) -> (Vec<TestClient>, Vec<PlayerRef>) {
+    let mut clients = Vec::new();
+    let mut players = Vec::new();
+    for (i, faction) in factions.iter().enumerate() {
+        let id = first_id + i as u32;
+        let mut client = TestClient::new(server, id, 1_000 + id);
+        let p = spawn_player(
+            server,
+            &client,
+            test_character(id, &format!("Party{id}"), 100.0 + i as f32, 100.0),
+            0x100 + id,
+        );
+        p.data().unit.faction_id = *faction;
+        client.drain();
+        clients.push(client);
+        players.push(p);
+    }
+    for i in 1..players.len() {
+        let name = players[i].data().unit.name.clone();
+        server
+            .systems
+            .social
+            .teams
+            .ask_to_join(server, &players[0], &name, 0, true, None);
+        server.systems.social.teams.reply_to_join_team(
+            server,
+            &players[i],
+            0,
+            true,
+            players[0].character_id,
+            false,
+            "",
+            false,
+        );
+    }
+    assert_eq!(
+        server
+            .systems
+            .social
+            .teams
+            .team_characters_of(players[0].character_id)
+            .map(|m| m.len()),
+        Some(factions.len())
+    );
+    (clients, players)
+}
+
+#[tokio::test]
+async fn guild_creation_requires_one_top_level_faction() {
+    let server = test_server_with(data());
+    crate::systems::social::install_hooks(&server);
+    // Owner 101 + members 102/101/102/101: one Nuia guild.
+    let (mut clients, players) = spawn_party(&server, 40, &[101, 102, 101, 102, 101]);
+    let owner = players[0].clone();
+    owner.data().money = 20_000;
+    clients[0].conn.active_char = Some(owner.clone());
+    CSCreateExpeditionPacket {
+        name: "SameAlliance".into(),
+        id: 0,
+    }
+    .handle(&server, &mut clients[0].conn)
+    .await
+    .unwrap();
+    let created = server
+        .expeditions
+        .all()
+        .into_iter()
+        .find(|e| e.faction.name == "SameAlliance")
+        .expect("the same-alliance guild is created");
+    assert_eq!(created.faction.mother_id, 101);
+    assert_eq!(created.members.len(), 5);
+
+    // One friend (165) is not Nuia: the creation is refused with 321 and no guild is created.
+    let (mut clients, players) = spawn_party(&server, 50, &[101, 101, 101, 101, 165]);
+    let owner = players[0].clone();
+    owner.data().money = 20_000;
+    clients[0].conn.active_char = Some(owner.clone());
+    clients[0].drain();
+    CSCreateExpeditionPacket {
+        name: "OtherAlliance".into(),
+        id: 0,
+    }
+    .handle(&server, &mut clients[0].conn)
+    .await
+    .unwrap();
+    assert_eq!(error_code(&clients[0].drain()), Some(321));
+    assert!(!server
+        .expeditions
+        .all()
+        .iter()
+        .any(|e| e.faction.name == "OtherAlliance"));
 }

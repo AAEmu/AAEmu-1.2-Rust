@@ -296,6 +296,16 @@ impl NationManager {
             .len()
     }
 
+    /// Whether a valid invite to `invitee_character_id` is already pending. A repeated invite
+    /// is dropped instead of spamming the reply dialog (NATION-11).
+    pub fn has_pending_invite(&self, invitee_character_id: u32, now_ms: i64) -> bool {
+        self.invites
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .any(|i| i.invitee_character_id == invitee_character_id && i.is_valid_at(now_ms))
+    }
+
     /// The founding expedition disbanded: the nation stays as a kingless nation (NATION-5),
     /// but its stale expedition id must not capture a guild that later reuses the id.
     pub fn on_expedition_disbanded(&self, expedition_id: u32) {
@@ -400,7 +410,7 @@ impl NationManager {
             .collect();
         let mut written = 0;
         for nation in &nations {
-            written += write_nation(tx, nation, &online).await?;
+            written += write_nation(server, tx, nation, &online).await?;
         }
         Ok(written)
     }
@@ -419,7 +429,7 @@ pub async fn save_creation(server: &GameServer, nation: &Nation) -> Result<()> {
     // only the creation transaction writes the founding guild's mother.
     let _save = server.save.transaction_lock().await;
     let mut tx = server.db.begin().await?;
-    write_nation(&mut tx, nation, &online).await?;
+    write_nation(server, &mut tx, nation, &online).await?;
     if nation.expedition_id != 0 {
         sqlx::query("UPDATE expeditions SET mother = ? WHERE id = ?")
             .bind(nation.id)
@@ -440,6 +450,7 @@ pub async fn save_creation(server: &GameServer, nation: &Nation) -> Result<()> {
 /// members' `characters.faction_id`. Called inside the caller's transaction so the membership
 /// pointers move together.
 async fn write_nation(
+    server: &GameServer,
     tx: &mut Transaction<'_, MySql>,
     nation: &Nation,
     online: &HashSet<u32>,
@@ -492,14 +503,18 @@ async fn write_nation(
         .bind(nation.id)
         .execute(&mut **tx)
         .await?;
-        // Offline members' houses are not in the housing manager; move their stored faction in
-        // the same transaction (NATION-5 review follow-up).
         sqlx::query(&format!(
             "UPDATE housings SET faction_id = ? WHERE owner IN ({list})"
         ))
         .bind(nation.id)
         .execute(&mut **tx)
         .await?;
+        // Every `housings` row is also loaded into the housing manager at startup, so an
+        // offline owner has live HouseRefs that must move too; otherwise the next house save
+        // writes the old faction back (NATION-5 review follow-up).
+        for member in &offline {
+            crate::systems::housing::update_owned_housing_faction(server, *member, nation.id);
+        }
     }
     Ok(1 + nation.relations.len() + offline.len())
 }
@@ -815,11 +830,14 @@ fn immigration_error(
     p: &PlayerRef,
     nation_id: u32,
 ) -> std::result::Result<(), i16> {
-    let (in_battle, faction, expedition, level, character_id) = {
+    // Every faction check uses the saved faction (RPA-09): a duel / battlefield team faction is
+    // temporary and is never what the player really is (PORTING.md, NATION-14).
+    let (in_battle, temporary, faction, expedition, level, character_id) = {
         let c = p.data();
         (
             c.unit.is_in_battle,
-            c.unit.faction_id,
+            c.unit.faction_temporary,
+            crate::db_character::persisted_faction(&c),
             c.unit.expedition_id,
             c.unit.level,
             c.id,
@@ -830,6 +848,11 @@ fn immigration_error(
     }
     if faction == crate::db_character::FACTION_PIRATE {
         return Err(error_message::FACTION_CANNOT_IMMIGRATE_AS_PIRATE);
+    }
+    if temporary {
+        // No 1.2 code exists for "in a duel / battlefield": the general refusal is used
+        // (NATION-14). The client's other checks below still run on the saved faction.
+        return Err(error_message::FACTION_CANNOT_IMMIGRATE_AS_GENERAL);
     }
     let Some(my_top) = top_level_faction(server, faction) else {
         return Err(error_message::FACTION_CANNOT_IMMIGRATE_AS_GENERAL);
@@ -856,11 +879,14 @@ fn immigration_error(
 /// pirate 694, unknown 693, already at the origin 733, owns a user faction 734, in an
 /// expedition 735. Returns the race's start faction.
 fn origin_error(server: &GameServer, p: &PlayerRef) -> std::result::Result<u32, i16> {
-    let (in_battle, faction, expedition, race, gender, character_id) = {
+    // The saved faction is the real one (RPA-09); a temporary team faction must not make a
+    // pirate look like 160 or a civilian look like a nation (PORTING.md, NATION-14).
+    let (in_battle, temporary, faction, expedition, race, gender, character_id) = {
         let c = p.data();
         (
             c.unit.is_in_battle,
-            c.unit.faction_id,
+            c.unit.faction_temporary,
+            crate::db_character::persisted_faction(&c),
             c.unit.expedition_id,
             c.race,
             c.gender,
@@ -872,6 +898,9 @@ fn origin_error(server: &GameServer, p: &PlayerRef) -> std::result::Result<u32, 
     }
     if faction == crate::db_character::FACTION_PIRATE {
         return Err(error_message::FACTION_CANNOT_IMMIGRATE_AS_PIRATE);
+    }
+    if temporary {
+        return Err(error_message::FACTION_CANNOT_IMMIGRATE_AS_GENERAL);
     }
     let Some(my_top) = top_level_faction(server, faction) else {
         return Err(error_message::FACTION_CANNOT_IMMIGRATE_AS_GENERAL);
@@ -940,7 +969,8 @@ pub fn invite_citizen(server: &GameServer, king: &PlayerRef, invitee_name: &str)
         return;
     };
     let king_name = king.data().unit.name.clone();
-    if king_name == invitee_name {
+    // `character_by_name` is case-insensitive; the client's self check must be too.
+    if king_name.to_lowercase() == invitee_name.to_lowercase() {
         send_error(king, error_message::FACTION_CANNOT_IMMIGRATION_AS_ONESELF);
         return;
     }
@@ -948,11 +978,27 @@ pub fn invite_citizen(server: &GameServer, king: &PlayerRef, invitee_name: &str)
         send_error(king, error_message::FACTION_INVITE_OFFLINE);
         return;
     };
+    // A blocked inviter gets no invitation, as in the expedition / team / family invites
+    // (capture-pending for the missing 1.2 sender-side reply, case `BLOCK-LIST-1`).
+    // A blocked inviter gets no invitation, as in the expedition / team / family invites
+    // (capture-pending for the missing 1.2 sender-side reply, case `BLOCK-LIST-1`).
+    if super::friend::is_blocked_by(&invitee, king.character_id) {
+        return;
+    }
+    let now = now_ms();
+    if server
+        .systems
+        .social
+        .nations
+        .has_pending_invite(invitee.character_id, now)
+    {
+        // The reply dialog is already open; do not send a second copy (NATION-11).
+        return;
+    }
     if let Err(code) = immigration_error(server, &invitee, nation.id) {
         send_error(king, code);
         return;
     }
-    let now = now_ms();
     server.systems.social.nations.add_invite(
         PendingInvite {
             nation_id: nation.id,
@@ -1075,7 +1121,8 @@ async fn offline_target_by_name(
     let row = sqlx::query(
         "SELECT CAST(id AS SIGNED) AS id, name, CAST(faction_id AS SIGNED) AS faction_id, \
          CAST(expedition_id AS SIGNED) AS expedition_id, CAST(race AS SIGNED) AS race, \
-         CAST(gender AS SIGNED) AS gender FROM characters WHERE name = ? LIMIT 1",
+         CAST(gender AS SIGNED) AS gender FROM characters \
+         WHERE name = ? AND deleted = 0 LIMIT 1",
     )
     .bind(name)
     .fetch_optional(&server.db)
@@ -1090,26 +1137,53 @@ async fn offline_target_by_name(
     }))
 }
 
-/// The offline half of a kick: `characters.faction_id` and the owner's stored houses move in
-/// one transaction (the online path uses `set_faction`, which updates the live houses).
-async fn kick_offline(
+/// What [`kick_offline`] did when it held the save lock.
+pub(super) enum OfflineKick {
+    /// The stored faction and houses were moved.
+    Done,
+    /// The target logged in between the offline lookup and the save lock.
+    TargetOnline,
+    /// The stored faction is no longer the nation (another writer changed it).
+    FactionChanged,
+}
+
+/// The offline half of a kick: `characters.faction_id` (guarded by the expected nation) and
+/// the owner's stored houses move in one transaction. The owner's houses are loaded in the
+/// housing manager too, so their live copies move under the same save lock (a later save would
+/// otherwise write the old faction back). A target that logged in in the meantime is reported
+/// so the caller runs the online path instead of clobbering the session.
+pub(super) async fn kick_offline(
     server: &GameServer,
     character_id: u32,
+    nation_id: u32,
     origin: u32,
-) -> std::result::Result<(), sqlx::Error> {
+) -> std::result::Result<OfflineKick, sqlx::Error> {
     let _save = server.save.transaction_lock().await;
+    if server.world.character_by_id(character_id).is_some() {
+        return Ok(OfflineKick::TargetOnline);
+    }
     let mut tx = server.db.begin().await?;
-    sqlx::query("UPDATE characters SET faction_id = ? WHERE id = ?")
-        .bind(origin)
-        .bind(character_id)
-        .execute(&mut *tx)
-        .await?;
+    let updated =
+        sqlx::query("UPDATE characters SET faction_id = ? WHERE id = ? AND faction_id = ?")
+            .bind(origin)
+            .bind(character_id)
+            .bind(nation_id)
+            .execute(&mut *tx)
+            .await?;
+    if updated.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Ok(OfflineKick::FactionChanged);
+    }
     sqlx::query("UPDATE housings SET faction_id = ? WHERE owner = ?")
         .bind(origin)
         .bind(character_id)
         .execute(&mut *tx)
         .await?;
-    tx.commit().await
+    tx.commit().await?;
+    // The offline owner keeps its loaded HouseRefs; move them while the save lock is still
+    // held, so no concurrent save writes the old faction back (NATION-5 follow-up).
+    crate::systems::housing::update_owned_housing_faction(server, character_id, origin);
+    Ok(OfflineKick::Done)
 }
 
 /// Persists one character's faction immediately, serialised with `SaveManager` so an
@@ -1138,7 +1212,7 @@ pub async fn kick_to_origin(server: &GameServer, king: &PlayerRef, target_name: 
         return;
     };
     let king_name = king.data().unit.name.clone();
-    if king_name == target_name {
+    if king_name.to_lowercase() == target_name.to_lowercase() {
         send_kick_result(
             king,
             0,
@@ -1148,59 +1222,147 @@ pub async fn kick_to_origin(server: &GameServer, king: &PlayerRef, target_name: 
         );
         return;
     }
-    let (target_id, target_display_name, faction, expedition, race, gender, online) =
-        match server.world.character_by_name(target_name) {
-            Some(p) => {
-                let c = p.data();
-                (
-                    c.id,
-                    c.unit.name.clone(),
-                    c.unit.faction_id,
-                    c.unit.expedition_id,
-                    c.race,
-                    c.gender,
-                    Some(p.clone()),
-                )
-            }
-            None => match offline_target_by_name(server, target_name).await {
-                Ok(Some(target)) => (
+    if let Some(target) = server.world.character_by_name(target_name) {
+        kick_online_target(server, king, &target, nation.id).await;
+        return;
+    }
+    let target = match offline_target_by_name(server, target_name).await {
+        Ok(Some(target)) => target,
+        Ok(None) => {
+            send_kick_result(
+                king,
+                0,
+                target_name,
+                nation.id,
+                error_message::FACTION_KICK_TARGET_NOT_FOUND,
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::error!("KickToOrigin: looking up {target_name} failed: {error}");
+            send_kick_result(
+                king,
+                0,
+                target_name,
+                nation.id,
+                error_message::FACTION_KICK_TARGET_NOT_FOUND,
+            );
+            return;
+        }
+    };
+    if target.character_id == king.character_id {
+        send_kick_result(
+            king,
+            target.character_id,
+            &target.name,
+            nation.id,
+            error_message::FACTION_KICK_SELF,
+        );
+        return;
+    }
+    if target.expedition_id != 0 {
+        send_kick_result(
+            king,
+            target.character_id,
+            &target.name,
+            nation.id,
+            error_message::FACTION_KICK_EXPEDITION_MEMBER,
+        );
+        return;
+    }
+    if target.faction_id != nation.id {
+        send_kick_result(
+            king,
+            target.character_id,
+            &target.name,
+            nation.id,
+            error_message::FACTION_KICK_OTHER_FACTION,
+        );
+        return;
+    }
+    let Some(origin) = start_faction(server, target.race, target.gender) else {
+        tracing::error!(
+            "KickToOrigin: character {} ({}) has no start faction",
+            target.character_id,
+            target.name
+        );
+        send_kick_result(
+            king,
+            target.character_id,
+            &target.name,
+            nation.id,
+            error_message::FACTION_KICK,
+        );
+        return;
+    };
+    match kick_offline(server, target.character_id, nation.id, origin).await {
+        Ok(OfflineKick::Done) => {
+            send_kick_result(king, target.character_id, &target.name, nation.id, 0);
+        }
+        Ok(OfflineKick::TargetOnline) => {
+            // The target logged in after the lookup: run the online path on the live session.
+            if let Some(target) = server.world.character_by_id(target.character_id) {
+                kick_online_target(server, king, &target, nation.id).await;
+            } else {
+                send_kick_result(
+                    king,
                     target.character_id,
-                    target.name,
-                    target.faction_id,
-                    target.expedition_id,
-                    target.race,
-                    target.gender,
-                    None,
-                ),
-                Ok(None) => {
-                    send_kick_result(
-                        king,
-                        0,
-                        target_name,
-                        nation.id,
-                        error_message::FACTION_KICK_TARGET_NOT_FOUND,
-                    );
-                    return;
-                }
-                Err(error) => {
-                    tracing::error!("KickToOrigin: looking up {target_name} failed: {error}");
-                    send_kick_result(
-                        king,
-                        0,
-                        target_name,
-                        nation.id,
-                        error_message::FACTION_KICK_TARGET_NOT_FOUND,
-                    );
-                    return;
-                }
-            },
-        };
+                    &target.name,
+                    nation.id,
+                    error_message::FACTION_KICK_TARGET_NOT_FOUND,
+                );
+            }
+        }
+        Ok(OfflineKick::FactionChanged) => {
+            send_kick_result(
+                king,
+                target.character_id,
+                &target.name,
+                nation.id,
+                error_message::FACTION_KICK_OTHER_FACTION,
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                "KickToOrigin: moving offline character {} failed: {error}",
+                target.character_id
+            );
+            send_kick_result(
+                king,
+                target.character_id,
+                &target.name,
+                nation.id,
+                error_message::FACTION_KICK,
+            );
+        }
+    }
+}
+
+/// The online half of a kick: re-reads the live character, applies the same refusals and moves
+/// it through `faction::set_faction` (houses, party side effects) and the faction save.
+async fn kick_online_target(
+    server: &GameServer,
+    king: &PlayerRef,
+    target: &PlayerRef,
+    nation_id: u32,
+) {
+    let (target_id, name, faction, expedition, race, gender) = {
+        let c = target.data();
+        (
+            c.id,
+            c.unit.name.clone(),
+            c.unit.faction_id,
+            c.unit.expedition_id,
+            c.race,
+            c.gender,
+        )
+    };
     if target_id == king.character_id {
         send_kick_result(
             king,
             target_id,
-            &target_display_name,
-            nation.id,
+            &name,
+            nation_id,
             error_message::FACTION_KICK_SELF,
         );
         return;
@@ -1209,63 +1371,42 @@ pub async fn kick_to_origin(server: &GameServer, king: &PlayerRef, target_name: 
         send_kick_result(
             king,
             target_id,
-            &target_display_name,
-            nation.id,
+            &name,
+            nation_id,
             error_message::FACTION_KICK_EXPEDITION_MEMBER,
         );
         return;
     }
-    if faction != nation.id {
+    if faction != nation_id {
         send_kick_result(
             king,
             target_id,
-            &target_display_name,
-            nation.id,
+            &name,
+            nation_id,
             error_message::FACTION_KICK_OTHER_FACTION,
         );
         return;
     }
     let Some(origin) = start_faction(server, race, gender) else {
-        tracing::error!(
-            "KickToOrigin: character {target_id} ({target_display_name}) has no start faction"
-        );
+        tracing::error!("KickToOrigin: character {target_id} ({name}) has no start faction");
         send_kick_result(
             king,
             target_id,
-            &target_display_name,
-            nation.id,
+            &name,
+            nation_id,
             error_message::FACTION_KICK,
         );
         return;
     };
+    faction::set_faction(server, target, origin).await;
+    persist_faction(server, target_id, origin).await;
     let result = SCFactionKickToOriginResultPacket {
-        tgt_name: target_display_name.clone(),
+        tgt_name: name,
         id: target_id,
-        id2: nation.id,
+        id2: nation_id,
         error_message: 0,
     };
-    match online {
-        Some(target) => {
-            faction::set_faction(server, &target, origin).await;
-            persist_faction(server, target_id, origin).await;
-            target.send(result.clone());
-        }
-        None => {
-            if let Err(error) = kick_offline(server, target_id, origin).await {
-                tracing::error!(
-                    "KickToOrigin: moving offline character {target_id} failed: {error}"
-                );
-                send_kick_result(
-                    king,
-                    target_id,
-                    &target_display_name,
-                    nation.id,
-                    error_message::FACTION_KICK,
-                );
-                return;
-            }
-        }
-    }
+    target.send(result.clone());
     king.send(result);
 }
 

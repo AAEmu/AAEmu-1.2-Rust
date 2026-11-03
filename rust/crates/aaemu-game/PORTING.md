@@ -543,7 +543,9 @@ refuses a duplicate faction id (`FUN_398a5280`), so `EXPEDITION_ID` also extract
   reply must name the nation, the nonce and a pending invite, so a forged or replayed reply is
   refused with 693. The client has no visible invite timer; pending invites expire after 60 s
   (the same timeout as the port's team / expedition invitations) and the list is capped at
-  1024, replacing an earlier invite for the same character. The reply checks follow the
+  1024; a repeated invite while one is pending is dropped instead of re-sent, and an invite
+  from a king on the invitee's block list is dropped silently (`BLOCK-LIST-1`). The reply
+  checks follow the
   client's own order (`FUN_398a44d0`: 770 combat, 694 pirate, 693 unknown, 730 already a
   member, 731 owns a user faction, 732 expedition member, 728 below `content_configs` 49 =
   50); the invite re-runs them on the invitee and answers the king with the same codes, after
@@ -557,11 +559,22 @@ refuses a duplicate faction id (`FUN_398a5280`), so `EXPEDITION_ID` also extract
 * **NATION-13 (INFERRED):** a guild belongs to its mother's top-level faction. The C# checked
   a member's mother only at creation; with runtime nations a nation is top-level
   (`mother_id == 0`) and must count as itself. `expedition::create`, `invite` and
-  `reply_invite` compare live top-level factions (`nation::top_level_faction`), so two citizens
-  of different nations cannot found or share a guild; a citizen of another nation is not
-  invited and a forged reply does not join. Evidence: the C# `CreateExpedition` mother check,
-  the client's top-level scan (`FUN_398a2f40`) and `Character.SetFaction`'s mother mismatch
-  kick.
+  `reply_invite` compare top-level factions (`nation::top_level_faction`), so two citizens of
+  different nations cannot found or share a guild; a citizen of another nation is not invited
+  and a forged reply does not join. The check applies to every player, not only nation
+  citizens: a faction-102 player still joins a faction-101 guild (one alliance) and a pirate
+  cannot join a non-pirate guild; the refusal is silent (no 1.2 error id for it; the C# had no
+  check, and `Character.SetFaction` already expels on a mother mismatch). Evidence: the C#
+  `CreateExpedition` mother check, the client's top-level scan (`FUN_398a2f40`) and
+  `Character.SetFaction`'s mother mismatch kick.
+* **NATION-14 (temporary factions):** every immigration check uses
+  `db_character::persisted_faction` and refuses a `faction_temporary` character with 693: a
+  duel / battlefield Red-Blue team faction is not the player's real faction, so a guildless
+  pirate in an accepted duel cannot "return to origin" (the pirate check sees the saved 161)
+  and a non-nation player in a duel cannot leave a nation that is not theirs. The same saved
+  faction is compared by the guild create / invite / reply rule, so a duel does not refuse a
+  legitimate guild join. The client has no code for "temporary faction"; the general
+  immigration refusal is used (documented here).
 * **Immigration, return and kick (stage 2):** `CSFactionImmigrationInvite` (0x015),
   `CSFactionImmigrationInviteReply` (0x016), `CSFactionImmigrateToOrigin` (empty, 0x017) and
   `CSFactionKickToOrigin` (0x018) now run the verified flows. An accepted invite and a
@@ -569,8 +582,12 @@ refuses a duplicate faction id (`FUN_398a5280`), so `EXPEDITION_ID` also extract
   effects) and immediately persist `characters.faction_id` under `SaveManager`'s transaction
   lock; the periodic save writes the same column. Return refuses the nation owner (734) and
   expedition members (735) with the client's order (770, 694, 693, 733, 734, 735). Kick
-  resolves the target online or from `characters` by name; an offline citizen's
-  `characters.faction_id` and stored `housings.faction_id` move in one transaction. The
+  resolves the target online or from `characters` by name (deleted rows excluded); an offline
+  citizen's `characters.faction_id` (guarded by the expected nation) and stored
+  `housings.faction_id` move in one transaction, and the owner's loaded houses move with them
+  under the save lock. A target that logs in between the lookup and the write is kicked
+  through the online path instead. The same in-memory house move now happens for offline
+  members at independence. The
   origin is `character_templates.faction_id` (the same data as the client's
   `FUN_398a2660(race)`).
 * The national tax CS packet is 0x013 (`FUN_392f42f0`; owner-approved exception to the
