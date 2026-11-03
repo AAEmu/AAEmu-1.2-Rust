@@ -36,6 +36,8 @@
 //!                                    cast from the remembered item stack
 //! waitpeer [secs] [name]             read packets until another player is in sight (60 s default)
 //! rawcs <opcode hex> [<body hex>]    send any client packet (`SELF` / `PEER` in the body hex)
+//! rawcswait <opcode hex> <body hex> <PacketName> [secs]
+//!                                    send it and fail unless that packet answers (default 5 s)
 //! pkill [name]                       `/kill` with the peer targeted (GM)
 //! await <Event> [secs]               wait (60 s default) for a party/guild event and consume it
 //! partyinvite <name>                 CSInviteToTeam (party) by character name
@@ -1265,7 +1267,7 @@ async fn run_lines(
                 let got = gm_command(game, "kill").await?;
                 show(&got);
             }
-            "rawcs" => {
+            "rawcs" | "rawcswait" => {
                 let opcode = u16::from_str_radix(parts.first().context("opcode")?, 16)?;
                 // `SELF` / `PEER` stand for our own / the first other player's object id in
                 // the packet's `bc` encoding.
@@ -1296,10 +1298,19 @@ async fn run_lines(
                     .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16))
                     .collect::<Result<_, _>>()?;
                 game.send_cs(opcode, &body).await?;
-                let got = game
-                    .drain(Duration::from_millis(1200), Duration::from_secs(6))
-                    .await?;
-                show(&got);
+                if cmd == "rawcswait" {
+                    // The answer is asserted, not drained away (`rawcs` prints it instead).
+                    let want = parts
+                        .get(2)
+                        .context("rawcswait needs <PacketName> after the body")?;
+                    let secs: u64 = parts.get(3).and_then(|x| x.parse().ok()).unwrap_or(5);
+                    expect_packet(game, want, secs).await?;
+                } else {
+                    let got = game
+                        .drain(Duration::from_millis(1200), Duration::from_secs(6))
+                        .await?;
+                    show(&got);
+                }
             }
             "partyinvite" => {
                 let target = parts.first().context("name")?;
