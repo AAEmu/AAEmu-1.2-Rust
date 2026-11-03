@@ -331,6 +331,26 @@ fn task_packet(action: u8, tasks: Vec<ItemTask>) -> SCItemTaskSuccessPacket {
 // GradeEnchant
 // ---------------------------------------------------------------------------------------------
 
+/// The 1.2 client's highest regrade target grade (`FUN_393a0130`: `item.grade == 0xb`).
+const GRADE_ENCHANT_MAX_GRADE: u8 = 11;
+
+/// The item class `FUN_393a0130` compares with the scroll's `special_effects.value3`
+/// (`X2ItemDesc` `+0x48`): 1 weapon, 2 armor, 24 accessory, anything else 0.
+fn grade_enchant_kind(kind: &TemplateKind) -> i32 {
+    match kind {
+        TemplateKind::Weapon(_) => 1,
+        TemplateKind::Armor(_) => 2,
+        TemplateKind::Accessory(_) => 24,
+        _ => 0,
+    }
+}
+
+/// Refuses the effect but keeps the cast's source item: `skill_cancelled` makes
+/// `apply_effects` drop the `CastSourceDebit` and refund the scroll.
+fn cancel_grade_enchant(player: &PlayerRef) {
+    player.data().skill_char.skill_cancelled = true;
+}
+
 /// `GradeEnchant.Execute` (special effect `GradeEnchant`; regrade scrolls). `value1 != 0` =
 /// lucky scroll (great success possible), `value3` = item kind (1 weapon, 2 armor, 24
 /// accessory). `support_item_id` = `SkillObjectItemGradeEnchantingSupport.SupportItemId`.
@@ -353,6 +373,8 @@ pub fn grade_enchant(
     );
     let Some(scroll) = scroll else { return };
     let Some(target_id) = target_item_id else {
+        // A malformed cast still took the scroll; refund it.
+        cancel_grade_enchant(player);
         return;
     };
     let use_charm = support_item_id.is_some_and(|id| id != 0);
@@ -362,9 +384,11 @@ pub fn grade_enchant(
     let mut txn = ItemTxn::begin(server);
     let inv = Inv::of(player);
     let Some(holder) = inv.holder_of(target_id) else {
-        return; // Invalid item
+        cancel_grade_enchant(player); // Invalid item
+        return;
     };
     let Some(item) = lock(&holder).get_item_by_id(target_id).cloned() else {
+        cancel_grade_enchant(player);
         return;
     };
     // 1.2 client `FUN_393a0130` (the `GradeEnchant` special effect's target check, switch case
@@ -374,31 +398,62 @@ pub fn grade_enchant(
     // item, `use_skill_as_reagent`) is refunded and no gold or charm is taken.
     let Some(template) = data.template(item.template_id) else {
         tracing::error!("GradeEnchant: unknown item template {}", item.template_id);
+        cancel_grade_enchant(player);
         return;
     };
     if !template.grade_enchantable {
         send_error_message_to(&mut txn.out(), player, error_message::INVALID_TARGET);
         drop(txn);
-        player.data().skill_char.skill_cancelled = true;
+        cancel_grade_enchant(player);
+        return;
+    }
+    // `FUN_393a0130`: the target's `level_requirement` (`+0x54`) must reach the scroll's
+    // `special_effects.value2`; the client answers SkillResult INVALID_TARGET (0x22) with
+    // error 0x206 (`level_low_to_use`).
+    if template.level_requirement < value2 {
+        send_error_message_to(&mut txn.out(), player, error_message::LEVEL_LOW_TO_USE);
+        drop(txn);
+        cancel_grade_enchant(player);
+        return;
+    }
+    // `FUN_393a0130`: the target's item class (`+0x48`) must equal the scroll's
+    // `special_effects.value3` (1 weapon, 2 armor, 24 accessory; -1 = any), else
+    // INVALID_TARGET (0x22).
+    if value3 != -1 && grade_enchant_kind(&template.kind) != value3 {
+        send_error_message_to(&mut txn.out(), player, error_message::INVALID_TARGET);
+        drop(txn);
+        cancel_grade_enchant(player);
         return;
     }
     if super::item_security::refuse_if_locked(player, &item) {
+        cancel_grade_enchant(player);
         return;
     }
     let initial_grade = item.grade;
+    // `FUN_393a0130`: a grade-11 target is refused with `grade_enchant_max` (0x299).
+    if initial_grade == GRADE_ENCHANT_MAX_GRADE {
+        send_error_message_to(&mut txn.out(), player, error_message::GRADE_ENCHANT_MAX);
+        drop(txn);
+        cancel_grade_enchant(player);
+        return;
+    }
     let Some(grade_template) = data.full_grade(i32::from(item.grade)).cloned() else {
         // C#: NullReferenceException in GoldCost.
         tracing::error!("GradeEnchant: no grade template for grade {}", item.grade);
+        cancel_grade_enchant(player);
         return;
     };
     let Some(cost) = gold_cost(server, &grade_template, &item, value3) else {
+        cancel_grade_enchant(player);
         return;
     };
     if cost == -1 {
-        return; // No gold on template, invalid ?
+        cancel_grade_enchant(player); // No gold on template, invalid ?
+        return;
     }
     if player.data().money < i64::from(cost) {
         send_error_message_to(&mut txn.out(), player, error_message::NOT_ENOUGH_MONEY);
+        cancel_grade_enchant(player);
         return;
     }
     let has_scroll = match scroll_item {
@@ -412,11 +467,13 @@ pub fn grade_enchant(
             player,
             error_message::NOT_ENOUGH_REQUIRED_ITEM,
         );
+        cancel_grade_enchant(player);
         return;
     }
     let mut charm: Option<(Item, ItemGradeEnchantingSupport)> = None;
     if use_charm {
         let Some(charm_item) = inv.item_by_id(support_item_id.unwrap_or(0)) else {
+            cancel_grade_enchant(player);
             return;
         };
         let Some(info) = data.enchanting_support(charm_item.template_id).copied() else {
@@ -425,6 +482,7 @@ pub fn grade_enchant(
                 "GradeEnchant: item {} is not a grade enchanting support",
                 charm_item.template_id
             );
+            cancel_grade_enchant(player);
             return;
         };
         if info.require_grade_min != -1 && i32::from(item.grade) < info.require_grade_min {
@@ -433,10 +491,12 @@ pub fn grade_enchant(
                 player,
                 error_message::NOT_ENOUGH_REQUIRED_ITEM,
             );
+            cancel_grade_enchant(player);
             return;
         }
         if info.require_grade_max != -1 && i32::from(item.grade) > info.require_grade_max {
             send_error_message_to(&mut txn.out(), player, error_message::GRADE_ENCHANT_MAX);
+            cancel_grade_enchant(player);
             return;
         }
         charm = Some((charm_item, info));
@@ -450,6 +510,7 @@ pub fn grade_enchant(
         charm.as_ref().map(|c| &c.1),
         rng,
     ) else {
+        cancel_grade_enchant(player);
         return;
     };
     let after = if result == grade_enchant_result::BREAK {

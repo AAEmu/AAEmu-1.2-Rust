@@ -93,7 +93,7 @@ pub fn construct_house_tax(
         return;
     };
     if let Err(error) =
-        super::placement::validate_placement_range(player, x, y, z, template.garden_radius)
+        super::placement::validate_placement_range(server, player, x, y, z, template.garden_radius)
     {
         send_error(player, error);
         return;
@@ -1359,7 +1359,7 @@ pub fn buy_house(server: &GameServer, tl: u16, money: u32, player: &PlayerRef) -
         let t = h.unit.transform;
         (t.x, t.y, t.z)
     };
-    if !super::placement::caster_in_range(player, hx, hy, hz, 0.0) {
+    if !super::placement::caster_in_range(server, player, hx, hy, hz, 0.0) {
         send_error(player, err::TOO_FAR_AWAY);
         return false;
     }
@@ -1509,6 +1509,7 @@ pub fn decorate_house(
     let Some(item) = hooks.inventory_item(server, player, p.item_id).filter(|i| {
         i.owner_id == u64::from(char_id) && i.slot_type == slot_type::INVENTORY && i.count > 0
     }) else {
+        send_error(player, err::HOUSE_CANNOT_DECORATE);
         return Ok(false);
     };
     if item.secure {
@@ -1576,6 +1577,7 @@ pub fn decorate_house(
         return Ok(false);
     }
     let Some(template) = template_of(server, &house) else {
+        send_error(player, err::HOUSE_CANNOT_DECORATE);
         return Ok(false);
     };
     // The 1.2 client refuses the decoration item when the player is farther than 30 m from
@@ -1592,7 +1594,7 @@ pub fn decorate_house(
         hy + p.x * sin + p.y * cos,
         hz + p.z,
     );
-    if !super::placement::caster_in_range(player, target.0, target.1, target.2, 0.0) {
+    if !super::placement::caster_in_range(server, player, target.0, target.1, target.2, 0.0) {
         send_error(player, err::TOO_FAR_TO_DECORATE_HOUSE);
         return Ok(false);
     }
@@ -1703,6 +1705,7 @@ pub fn decorate_house(
     };
     if !paid {
         server.ids.object.release_id(doodad.obj_id);
+        send_error(player, err::HOUSE_CANNOT_DECORATE);
         return Ok(false);
     }
     world.attach_child(&house_obj, &WorldObject::from(&doodad));
