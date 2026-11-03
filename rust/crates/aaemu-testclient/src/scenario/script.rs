@@ -30,6 +30,7 @@
 //! expecterror <code>                fail unless SCErrorMsg with that code
 //! dcast <skill> <doodad template>    doodad-target CSStartSkill
 //! buycoin <doodad template> <func>   CSBuyCoinItemPacket (DoodadFuncPurchase) and print the reply
+//! buycoinraw <doodad template> <func>  same without draining (the caller asserts the reply)
 //! item <template> <count>            `/item add self` and remember the stack id / slot
 //! equip <template> <slot>            move the remembered stack to equipment slot `slot` (26 = back)
 //! moveitem <id> <ftype> <fslot> <ttype> <tslot>  CSSwapItemsPacket with an explicit item id
@@ -909,7 +910,7 @@ async fn run_lines(
                 let args = split_quoted(rest)?;
                 super::music::command(game, &mut music, c, &args).await?;
             }
-            "buycoin" => {
+            "buycoin" | "buycoinraw" => {
                 let tpl: u32 = num(&parts, 0)?;
                 let func: u32 = num(&parts, 1)?;
                 let me = game.state.self_pos;
@@ -930,6 +931,9 @@ async fn run_lines(
                 b.write_bc(d.obj_id).write_u32(func);
                 game.send_cs(aaemu_game::opcodes::cs::CSBuyCoinItemPacket, b.as_bytes())
                     .await?;
+                if cmd == "buycoinraw" {
+                    continue;
+                }
                 let got = game
                     .drain(Duration::from_millis(1500), Duration::from_secs(8))
                     .await?;
