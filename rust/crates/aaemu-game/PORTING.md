@@ -4401,3 +4401,36 @@ Deviation from the removed C# history: C# never placed, settled or persisted a b
 is no C# behaviour to mirror. The pre-existing `bounty_runtime.rs` design invented a 24-hour
 expiry, a placement fee and a same-account refusal; all three are gone in favour of the
 client-evidenced rules above.
+
+## Water-only skill targets (2026-11-03)
+
+`target_only_water` casts (fishing rods) are admitted against the water surface the 1.2 client
+actually sends. The client aims `target_water` / `target_only_water` casts at the water surface
+(`FUN_3942b060`, `x2game.dll.c:872033`; `FUN_394322f0`, `:877530`: both pass the surface flag to
+the target picker when either water flag is set). Its own admission check `FUN_390b43b0`
+(`x2game.dll.c:148796`) probes `(x, y, z - 0.1)` (`DAT_3999ccf0`), requires the water level
+there at or above the probe (`probe.z <= level`), and then requires a floor at least 1 m below
+the level (`floor <= level - 1.0`, `DAT_3999c488`). That floor query is I3DEngine vt+0x108
+taking `(Vec3*, float)` - likely `GetBottomLevel`, a downward ray that includes statics and
+answers -1e9 when nothing is hit, which passes the depth test.
+
+The Rust port had probed `(x, y, z + 0.1)` since 668e4196 (`systems/skills/validation.rs`), so a
+surface point (the only point the client sends) landed above the water and every rod cast was
+refused with `skill_invalid_location` (0x23). `validation::target_in_water` now probes 0.1 m
+below, uses `collision::water_level` for the surface and `collision::terrain_height` for the
+floor (skipped when the collision service is off and no height is known). The server's floor is
+terrain only, so the rule is more lenient than the client's ray when static geometry lies under
+the point. Tests:
+`systems::skills::cast_validation_tests::water_only_targets_probe_below_the_surface_and_need_one_metre_of_water`.
+
+`source_not_swim` keeps its own probe 0.1 m **above** the caster (`validation::source_in_water`).
+That is the port's previous behaviour, not client evidence: applying the target rule to the
+source newly allowed a caster wading in water less than 1 m deep.
+
+Not ported: with `target_fishing` (target+0x194) set, `FUN_390b43b0` also refuses with 0x23 a
+type-8 water entity whose flag bit 1 is set (`vt+0x150 & 1`, likely a NoFishing volume)
+(`x2game.dll.c:148821-148834`); the server does not resolve or test that entity.
+
+Deviation from the removed C#: `SkillTemplate.TargetOnlyWater` was parsed
+(`AAEmu.Game/Core/Managers/SkillManager.cs:423`) but never read, so the C# had no water-target
+check at all; this follows only the 1.2 client.
