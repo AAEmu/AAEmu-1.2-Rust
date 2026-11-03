@@ -164,6 +164,9 @@ impl SCCharacterListPacket {
 pub struct SCInitialConfigPacket {
     /// `FeaturesManager.Fsets`.
     pub fsets: FeatureSet,
+    /// `SecondPassword:MaxFailCount` (0 when the feature is disabled). The client compares it
+    /// with the failed count from `SCSecondPassSetted` before it requests key tables.
+    pub second_password_max_fail_count: u8,
 }
 packet_def!(
     SCInitialConfigPacket,
@@ -186,7 +189,7 @@ impl Marshal for SCInitialConfigPacket {
             s.write_bool(true);
         }
         s.write_u8(2) // secondPriceType (2 = na loyalty token)
-            .write_u8(0) // secondPasswordMaxFailCount
+            .write_u8(self.second_password_max_fail_count) // secondPasswordMaxFailCount
             .write_u16(0); // idleKickTime
     }
 }
@@ -448,7 +451,10 @@ mod tests {
     #[test]
     fn initial_config_layout() {
         let f = FeatureSet::initialized(55, 50);
-        let b = encode(&SCInitialConfigPacket { fsets: f.clone() });
+        let b = encode(&SCInitialConfigPacket {
+            fsets: f.clone(),
+            second_password_max_fail_count: 0,
+        });
         let mut want = hex("DD 01 00 00 06 00");
         want.extend_from_slice(&hex("0B 00"));
         want.extend_from_slice(b"aaemu.local");
@@ -458,6 +464,21 @@ mod tests {
             "00 00 00 00  32 00 00 00  01 01 01 01 01 01 01  02  00  00 00",
         ));
         assert_eq!(b, want);
+    }
+
+    #[test]
+    fn initial_config_carries_second_password_max_fail_count() {
+        let b = encode(&SCInitialConfigPacket {
+            fsets: FeatureSet::initialized(0, 0),
+            second_password_max_fail_count: 5,
+        });
+        // Tail: secondPriceType 2, secondPasswordMaxFailCount, idleKickTime u16.
+        assert_eq!(&b[b.len() - 4..], &[2, 5, 0, 0]);
+        let zero = encode(&SCInitialConfigPacket {
+            fsets: FeatureSet::initialized(0, 0),
+            second_password_max_fail_count: 0,
+        });
+        assert_eq!(&zero[zero.len() - 4..], &[2, 0, 0, 0]);
     }
 
     #[test]

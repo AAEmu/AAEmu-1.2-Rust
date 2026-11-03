@@ -257,6 +257,14 @@ pub mod cs {
     pub const CSEnterBeautySalonPacket: u16 = 0x12e;
     pub const CSRankCharacterPacket: u16 = 0x12f;
     pub const CSRequestSecondPasswordKeyTablesPacket: u16 = 0x125;
+    /// 1.2 client `0x126`, serializer `FUN_397b14d0` (`u32 keyId`, `u8 tableIndex`, string pass).
+    pub const CSCreateSecondPasswordPacket: u16 = 0x126;
+    /// 1.2 client `0x127`, serializer `FUN_397b1560` (`u32 keyId`, old/new table index, two strings).
+    pub const CSChangeSecondPasswordPacket: u16 = 0x127;
+    /// 1.2 client `0x128`, serializer `FUN_397b1650` (`u32 keyId`, `u8 tableIndex`, string pass).
+    pub const CSClearSecondPasswordPacket: u16 = 0x128;
+    /// 1.2 client `0x129`, serializer `FUN_397b16e0` (`u32 keyId`, `u8 tableIndex`, string pass).
+    pub const CSCheckSecondPasswordPacket: u16 = 0x129;
     pub const CSRankSnapshotPacket: u16 = 0x130;
     pub const CSRequestSpecialtyCurrentPacket: u16 = 0x131;
     pub const CSIdleStatusPacket: u16 = 0x132;
@@ -264,6 +272,8 @@ pub mod cs {
     pub const CSThisTimeUnpackItemPacket: u16 = 0x134;
     pub const CSPremiumServiceBuyPacket: u16 = 0x135;
     pub const CSPremiumServiceListPacket: u16 = 0x136;
+    /// 1.2 client `0x137` (serializer `FUN_397b17f0`, `i32 cashMoney`); WP-D implements it.
+    pub const CSICSBuyAAPointPacket: u16 = 0x137;
     pub const CSTakeAllAttachmentItemPacket: u16 = 0x139;
     pub const CSTakeScheduleItemPacket: u16 = 0x13b;
     pub const CSPremiumServiceMsgPacket: u16 = 0x13c;
@@ -527,6 +537,10 @@ pub mod cs {
         (0x12e, "CSEnterBeautySalonPacket"),
         (0x12f, "CSRankCharacterPacket"),
         (0x125, "CSRequestSecondPasswordKeyTablesPacket"),
+        (0x126, "CSCreateSecondPasswordPacket"),
+        (0x127, "CSChangeSecondPasswordPacket"),
+        (0x128, "CSClearSecondPasswordPacket"),
+        (0x129, "CSCheckSecondPasswordPacket"),
         (0x130, "CSRankSnapshotPacket"),
         (0x131, "CSRequestSpecialtyCurrentPacket"),
         (0x132, "CSIdleStatusPacket"),
@@ -534,6 +548,7 @@ pub mod cs {
         (0x134, "CSThisTimeUnpackItemPacket"),
         (0x135, "CSPremiumServiceBuyPacket"),
         (0x136, "CSPremiumServiceListPacket"),
+        (0x137, "CSICSBuyAAPointPacket"),
         (0x139, "CSTakeAllAttachmentItemPacket"),
         (0x13b, "CSTakeScheduleItemPacket"),
         (0x13c, "CSPremiumServiceMsgPacket"),

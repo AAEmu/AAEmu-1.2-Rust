@@ -201,7 +201,7 @@ impl GameServer {
                 raw.opcode,
                 name,
                 raw.body.unread().len(),
-                crate::net::body_hex(raw.body.unread())
+                crate::net::trace_body(raw.level, raw.opcode, raw.body.unread())
             );
         }
         match self.registry.get(raw.level, raw.opcode) {
