@@ -231,10 +231,18 @@ impl CaChallengeResponse2 {
     }
 }
 
-/// `CAOtpNumberPacket`: OTP second factor for the Korea flow.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// `CAOtpNumberPacket`: OTP second factor. Its `Debug` redacts the code.
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct CaOtpNumber {
     pub otp_number: String,
+}
+
+impl std::fmt::Debug for CaOtpNumber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CaOtpNumber")
+            .field("otp_number", &"<redacted>")
+            .finish()
+    }
 }
 
 impl CaOtpNumber {
@@ -245,10 +253,18 @@ impl CaOtpNumber {
     }
 }
 
-/// `CAPcCertNumberPacket`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// `CAPcCertNumberPacket`. Its `Debug` redacts the PIN.
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct CaPcCertNumber {
     pub cert_number: String,
+}
+
+impl std::fmt::Debug for CaPcCertNumber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CaPcCertNumber")
+            .field("cert_number", &"<redacted>")
+            .finish()
+    }
 }
 
 impl CaPcCertNumber {
@@ -595,6 +611,24 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn otp_and_cert_debug_redact_secrets() {
+        let otp = format!(
+            "{:?}",
+            CaOtpNumber {
+                otp_number: "12345678".into()
+            }
+        );
+        assert!(otp.contains("<redacted>") && !otp.contains("12345678"));
+        let cert = format!(
+            "{:?}",
+            CaPcCertNumber {
+                cert_number: "87654321".into()
+            }
+        );
+        assert!(cert.contains("<redacted>") && !cert.contains("87654321"));
     }
 
     #[test]

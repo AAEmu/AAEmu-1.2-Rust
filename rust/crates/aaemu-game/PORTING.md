@@ -3385,8 +3385,36 @@ and in NPC wandering / buff remaining times.
   `/joinsiege [zoneGroupId]` and `/leavesiege [zoneGroupId]`. The zone defaults to the caller's
   province; the scheduled guilds determine the side, and the current guild rank's JoinSiege
   policy controls enrollment. All shipped ranks allow it. Players cannot enroll another
-  character or change the schedule; leaving also cancels the caller's engraving. GM scheduling
-  with player registration is the chosen server policy rather than historical auction calendars.
+  character or change the schedule; leaving also cancels the caller's engraving.
+  `systems/housing/dominion/calendar.rs` adds the weekly period calendar from the 1.2 tables
+  behind `Housing.SiegeCalendar` (default off, so the explicit GM path and its tests are
+  unchanged) and `Housing.SiegeCalendarTimezone` (empty/`local` = server local; the retail
+  timezone is UNKNOWN, INFERRED). Period ids/order, boundary arithmetic, the five wire
+  durations and the peace `started` = next auction start are EVIDENCED by the client
+  (`FUN_3956fc70`, `FUN_3946ba60`, `FUN_39838ff0`/`FUN_39839040`, `FUN_39839740`,
+  `FUN_3946be90`); weekday 0 = Sunday is INFERRED from the Sunday `siege_plans` weeks. The
+  plan-week -> siege-Sunday mapping is also INFERRED: a plan week starts on Sunday and the
+  authored warmup/siege weekday 0 is the Sunday that ends that week (a lower weekday rolls
+  forward), the only reading that keeps the authored order auction Wed -> declare Fri ->
+  warmup/siege Sun; reading the same weekday 0 as the plan-week Sunday would move every siege
+  one week earlier. The calendar runs auction -> declare and, without a declared attacker,
+  declare -> peace
+  (client "unearned_win", `FUN_392f7db0`); a declared siege follows 2 -> 3 -> 4 -> 5. Only
+  the week's rotating zone pair gets a cycle; other weeks stay in peace with the next cycle's
+  auction start. The plan rotation is deduplicated from `siege_plans` and, after the 2014
+  table, extended by the three-week modulo policy measured from 2014-01-05 (INFERRED server
+  policy; the retail recurrence is UNKNOWN). Explicit GM schedules keep their own timers and
+  override the calendar for that territory. `/dominion clock <unixSeconds|off>` sets a
+  non-persistent test clock for live verification of every period; it only drives the weekly
+  calendar view. Explicit siege deadlines/tick transitions and the persisted state always use
+  the real clock, and the command is refused while `Housing.SiegeCalendar` is disabled.
+  GM scheduling with player registration is the chosen server policy for actually running a
+  siege; the automatic auction *lots* and bidding remain unimplemented. Known, not fixed:
+  the calendar is rebuilt from the tables on every tick/snapshot (cache later); an authored
+  time inside a DST gap makes that zone's view return None instead of shifting it (the shipped
+  20:30..22:30 times never hit one); `view_at` returns None for the whole zone when its next
+  rotation cycle cannot be built; and without WP-S2 (declaration) the calendar never enters
+  warmup/siege on its own, so periods 3/4 exist only through an explicit GM schedule.
   Any registered current attacker may
   engrave; initial claim requires the current guild leader and exact Purified Archeum pack.
   Capture transfers the nine independently itemized fort designs to the new guild leader,
@@ -3398,8 +3426,8 @@ and in NPC wandering / buff remaining times.
   retained original doodads for the current siege and require explicit GM rebind after restart;
   registered dead participants can revive there. The SiegePeriod doodad predicate fails closed
   because its transition semantics are unresolved; phase cycles are bounded for all groups.
-  Historical automatic auctions, reinforcement/commander eligibility and payout calendars are
-  not inferred. Building HP persists through restart and lodestone collisions follow the native
+  Reinforcement/commander eligibility and payout calendars are not inferred. Building HP
+  persists through restart and lodestone collisions follow the native
   CGA/ANM root curves and settled static damage proxies. Absolute render/collider animation
   phase synchronization remains unverified. Property, authority, mail, items and wallets use
   one short prepared snapshot before SQL awaits; logout and shutdown serialize the same saves.
