@@ -30,9 +30,11 @@ pub const LOAD_INTERVAL: Duration = Duration::from_secs(60);
 /// tick (the first tick fires immediately after registration) and right after an account leaves
 /// the game, so the login queue head moves without waiting for the next tick.
 pub fn report_load(server: &GameServer) {
+    let (sequence, online) = server.next_occupancy();
     server.login.send(&GLGameServerLoadPacket {
         load: server.load_level(),
-        online: server.world_occupancy(),
+        online,
+        sequence,
     });
 }
 
@@ -165,11 +167,13 @@ pub(crate) async fn handle(server: &Arc<GameServer>, payload: &[u8]) -> bool {
                             server.accounts.connection_of(account_id).unwrap_or(0)
                         );
                     }
+                    let (sequence, online) = server.next_occupancy();
                     server.login.send(&GLPlayerEnterPacket {
                         connection_id,
                         gs_id: server.config.id,
                         result,
-                        online: server.world_occupancy(),
+                        online,
+                        sequence,
                     });
                 }
                 // C#: `_accounts.Add` throws ArgumentException inside LGPlayerEnterPacket.Read
@@ -180,11 +184,13 @@ pub(crate) async fn handle(server: &Arc<GameServer>, payload: &[u8]) -> bool {
                     tracing::warn!(
                         "LGPlayerEnter: connection id {connection_id} was still pending for account {stale_account} (never entered); replaced by account {account_id}"
                     );
+                    let (sequence, online) = server.next_occupancy();
                     server.login.send(&GLPlayerEnterPacket {
                         connection_id,
                         gs_id: server.config.id,
                         result: 0,
-                        online: server.world_occupancy(),
+                        online,
+                        sequence,
                     });
                 }
             }
