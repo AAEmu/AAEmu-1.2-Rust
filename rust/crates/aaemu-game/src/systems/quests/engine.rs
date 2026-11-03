@@ -860,6 +860,33 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Whether `quest_id` can be handed in at the doodad of template `doodad_id`: the quest
+    /// is active, one of its `QuestActConReportDoodad` acts names that doodad, and the
+    /// objectives meet the report act's threshold (the same check `ReportDoodad` runs).
+    /// A ready quest is reported to the client with `SCDoodadCompleteQuestPacket` instead of
+    /// being completed server-side.
+    pub fn report_doodad_ready(&self, quest_id: u32, doodad_id: u32) -> bool {
+        let Some(h) = self.st.active_handle(quest_id) else {
+            return false;
+        };
+        let Some(q) = self.st.quest(h) else {
+            return false;
+        };
+        let Some(si) = q.step_index(kind::READY) else {
+            return false;
+        };
+        let data = self.data;
+        let targets = self.step_paths(h, si).into_iter().any(|p| {
+            self.act_ref(h, p).is_some_and(|a| {
+                matches!(
+                    data.acts[a].kind,
+                    ActKind::ConReportDoodad { doodad_id: d, .. } if d == doodad_id
+                )
+            })
+        });
+        targets && self.report_ready(h, quest_id)
+    }
+
     /// `GetQuestObjectivePercent`.
     pub fn objective_percent(&self, h: QuestHandle) -> f32 {
         let data = self.data;

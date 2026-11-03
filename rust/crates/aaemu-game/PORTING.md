@@ -477,7 +477,7 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 | `FriendMananger`, `CharacterFriends`, `CharacterBlocked` | `systems/social/friend.rs`, `packets/friend.rs` (`managers::friend` re-exports) | done | Add / remove friends (online or by DB name lookup), block / unblock (online or by `NameManager` for offline names), status changes incl. `InParty`. The blocked list is enforced on every direct delivery path (whisper, team / area / expedition / family invite, friend add, trade and duel request); see the block-list deviation. |
 | `ChatManager`, `Models/Game/Chat` | `systems/social/chat.rs`, `session.rs` (`managers::chat` re-exports) | done | All channel kinds incl. party / raid / court, CleanUpChannels, party / raid / raid-leader / judge routing. User channels (`CSJoinUserChatChannel`) are log-only as in C#. |
 | `FactionManager` relations, `SystemFaction.GetRelationState`, `Unit/Character.SetFaction` | `systems/social/faction.rs`, `packets/faction.rs` | done | Relation table validated against compact.sqlite3 (gated test). Faction CS packets are log-only as in C#; every SCFaction* struct ported. `relation_state_live` overlays the runtime nations on the static table for the combat, team, party and AI paths. |
-| Player nations (`nations`, `nation_relations`, independence) | `systems/social/nation.rs`, `commands/scripts/nation.rs` | stage 1 | Skill 18540 special effect 71 creates a nation from the caster's expedition (owner + dominion, CASTLE_CLAIM backpack); ids come from the expedition allocator; `SCFactionIndependence` + relation rows + `SCUnitFactionChanged`; online members use `set_faction`, offline `characters.faction_id` moves with `expeditions.mother` in the save transaction; login sends nation factions and relations. See "Player nations" below. |
+| Player nations (`nations`, `nation_relations`, independence, immigration) | `systems/social/nation.rs`, `commands/scripts/nation.rs` | stages 1-2 | Skill 18540 special effect 71 creates a nation from the caster's expedition (owner + dominion, CASTLE_CLAIM backpack); ids come from the expedition allocator; `SCFactionIndependence` + relation rows + `SCUnitFactionChanged`; online members use `set_faction`, offline `characters.faction_id` moves with `expeditions.mother` in the save transaction; login sends nation factions and relations. Stage 2 adds the invite / reply / return-to-origin / kick packets with the client's error order, persisted factions and offline kicks. See "Player nations" below. |
 | `GameData/AchievementGameData` (`achievements`, `achievement_objectives`, `pre_completed_achievements`, `char_records`), `Models/Game/Achievement` | `systems/social/achievement.rs` (`server.game_data.systems.social.achievements`) | done | Loader + port of `AchievementGameDataTests`; gated real-DB test `achievement_game_data_real_compact_db`. The C# 1.2 tree has no manager; the Rust achievement manager / runtime / hooks / rewards (`achievement_*.rs`) read them (see "Achievement producers" below). |
 | `DuelManager`, `Models/Game/Duels`, duel tasks | `systems/social/duel.rs`, `packets/duel.rs` | done | Request / accept (flag via hook) / start / stop / cancel, distance + HP checks, end timer (tokio tasks; `set_delays` test hook). |
 | `CrimeManager`, `TrialManager`, `Models/Game/Crime`, `TrialUpdateTask` | `systems/social/{crime,trial}.rs`, `packets/trial.rs` | done | Crime table load / save (`AfterItems`), report / evidence (hooks), bot reports, trial / jury flow with 5 s tick, audience, bounty placement / arrest payout (`systems/social/{bounty,bounty_runtime}.rs`, `bounty_pledges`; see "Wanted-player bounty"). The board is still the empty list (BOUNTY-board). Arrests, authenticated jury choices, guilty pleas, acquittals, court cleanup and reconnect jail enforcement have packet-flow regressions; prisoner buffs persist remaining online time. |
@@ -487,7 +487,7 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 
 Cross-subsystem calls: wired in phase 3b (see "Phase 3b wiring": trial court doodads / NPCs after the spawns, `SocialHooks` by social itself, crime evidence / arrests / team and duel queries from skills, loot rules from economy, court checks in portals and instances, `force_dismount` through vehicles). Still open: teleports -> `session::on_moved` (C# `Character.SetPosition` -> `TeamManager.UpdatePosition`; plain movement does not call it in C# either).
 
-#### Player nations (stage 1, NATION-1..4)
+#### Player nations (stages 1-2, NATION-1..13)
 
 `systems::social::nation` implements the 1.2 "declare independence" slice: a nation is a
 top-level user faction (`mother_id == 0`, `owner_type` 0, owner = the founding expedition's
@@ -537,9 +537,62 @@ refuses a duplicate faction id (`FUN_398a5280`), so `EXPEDITION_ID` also extract
   `SCFactionIndependence`; it receives the nation record and relations on the next login.
   Expedition records with `mother = N` are sent before N's own record in the login burst; the
   1.2 client's tolerance for that order is unverified (the client stores records independently).
+* **NATION-11 (id2 UNKNOWN; timeout chosen):** the 1.2 client passes `id2` from
+  `SCFactionImmigrateInvite` (0x027) back unchanged in `CSFactionImmigrationInviteReply`
+  (0x016) but never interprets it. The server uses the invitee character id as a nonce: the
+  reply must name the nation, the nonce and a pending invite, so a forged or replayed reply is
+  refused with 693. The client has no visible invite timer; pending invites expire after 60 s
+  (the same timeout as the port's team / expedition invitations) and the list is capped at
+  1024; a repeated invite while one is pending is dropped instead of re-sent, and an invite
+  from a king on the invitee's block list is dropped silently (`BLOCK-LIST-1`). The reply
+  checks follow the
+  client's own order (`FUN_398a44d0`: 770 combat, 694 pirate, 693 unknown, 730 already a
+  member, 731 owns a user faction, 732 expedition member, 728 below `content_configs` 49 =
+  50); the invite re-runs them on the invitee and answers the king with the same codes, after
+  its own client checks 697 (not the king) and 736 (oneself) and the online check 50.
+* **NATION-12 (capture-pending):** `SCFactionKickToOriginResult` (0x02a) writes
+  `(tgtName, id, id2, errorMessage)`; the decompiled handler reserves a 4-byte error slot but
+  its read width is not visible, so the C#-derived `i16` is kept. Every outcome (64 not the
+  king, 65 oneself, 704 unknown target, 726 expedition member, 705 other faction, success) is
+  answered with this packet and its error field, as the client shows a message box for a
+  non-zero error (`FUN_392fe6c0`).
+* **NATION-13 (INFERRED):** a guild belongs to its mother's top-level faction. The C# checked
+  a member's mother only at creation; with runtime nations a nation is top-level
+  (`mother_id == 0`) and must count as itself. `expedition::create`, `invite` and
+  `reply_invite` compare top-level factions (`nation::top_level_faction`), so two citizens of
+  different nations cannot found or share a guild; a citizen of another nation is not invited
+  and a forged reply does not join. The check applies to every player, not only nation
+  citizens: a faction-102 player still joins a faction-101 guild (one alliance) and a pirate
+  cannot join a non-pirate guild; the refusal is silent (no 1.2 error id for it; the C# had no
+  check, and `Character.SetFaction` already expels on a mother mismatch). Evidence: the C#
+  `CreateExpedition` mother check, the client's top-level scan (`FUN_398a2f40`) and
+  `Character.SetFaction`'s mother mismatch kick.
+* **NATION-14 (temporary factions):** every immigration check uses
+  `db_character::persisted_faction` and refuses a `faction_temporary` character with 693: a
+  duel / battlefield Red-Blue team faction is not the player's real faction, so a guildless
+  pirate in an accepted duel cannot "return to origin" (the pirate check sees the saved 161)
+  and a non-nation player in a duel cannot leave a nation that is not theirs. The same saved
+  faction is compared by the guild create / invite / reply rule, so a duel does not refuse a
+  legitimate guild join. The client has no code for "temporary faction"; the general
+  immigration refusal is used (documented here).
+* **Immigration, return and kick (stage 2):** `CSFactionImmigrationInvite` (0x015),
+  `CSFactionImmigrationInviteReply` (0x016), `CSFactionImmigrateToOrigin` (empty, 0x017) and
+  `CSFactionKickToOrigin` (0x018) now run the verified flows. An accepted invite and a
+  successful return use `faction::set_faction` (broadcast, houses, guild and party side
+  effects) and immediately persist `characters.faction_id` under `SaveManager`'s transaction
+  lock; the periodic save writes the same column. Return refuses the nation owner (734) and
+  expedition members (735) with the client's order (770, 694, 693, 733, 734, 735). Kick
+  resolves the target online or from `characters` by name (deleted rows excluded); an offline
+  citizen's `characters.faction_id` (guarded by the expected nation) and stored
+  `housings.faction_id` move in one transaction, and the owner's loaded houses move with them
+  under the save lock. A target that logs in between the lookup and the write is kicked
+  through the online path instead. The same in-memory house move now happens for offline
+  members at independence. The
+  origin is `character_templates.faction_id` (the same data as the client's
+  `FUN_398a2660(race)`).
 * The national tax CS packet is 0x013 (`FUN_392f42f0`; owner-approved exception to the
   never-edit `opcodes.rs` rule); a log-only handler is registered. The real tax handler,
-  relation expiry, immigration / kick, rename and monument stay for stages 2-4.
+  relation expiry, rename and monument stay for stages 3-4.
 
 ### systems::housing
 
@@ -576,7 +629,8 @@ Economy hooks (`server.systems.housing.hooks`): installed by `economy::bridges::
 | `QuestActConAcceptItemGain` start | `systems/quests/events.rs` (`on_items_acquired`), `engine.rs` (`start_quests_from_item_gain`), `data.rs` (`item_gain_starters`) | deviation | **Deviation:** gaining an item starts every quest with a `ConAcceptItemGain` on its Start component (not active, not completed unless repeatable, count in the bag reached, unit requirements met) with the item as acceptor. The C# never did: `Inventory.cs` has the `OnItemGather` call commented out and `RunAct` only compared the acceptor, so the Blue Salt Brotherhood letters (4881-4888), 5450, 6160 and the level 1 "Today's To-do" quests (1955-1961, 2140-2146) could not be started. Inferred from the data (those items have no `item_accept_quests` row); the retail trigger is not verified. The 15 "starter item without `starter_quests` entry" simulator notes were all of this kind: the quests have no `item_accept_quests` binding at all, so there was no mapping to fix. |
 | Sphere state across logout | `systems/quests/spheres.rs` (`forget_character`), `mod.rs` (`on_leave_world`) | deviation | **Deviation:** leaving the world drops the character's sphere triggers and its last starter-sphere position. The C# kept both, so a re-login inside a quest sphere compared against the position from the previous session and never raised the enter event (stuck sphere quests). The tick also prunes positions of characters that are no longer in the world. |
 | `with_quests` panic safety | `systems/quests/events.rs` | deviation | **Deviation:** a panic in a quest operation (or a queued one) is caught around the locked section, the quest state is put back, the thread-local active entry removed and the panic resumed. Without it the character's later quest events on that thread were queued forever. |
-| Quest packets (CS: StartQuestContext, CompleteQuestContext, DropQuestContext, QuestTalkMade, QuestStartWith, TryQuestCompleteAsLetItDone, RestartMainQuest, SaveTutorial, RequestPermissionToPlayCinemaForDirectingMode, StartedCinema, CompletedCinema; SC: QuestContextStarted/Updated/Completed/Reset, QuestContextFailed, QuestRewardedByMail, DoodadQuestAccept, TutorialSaved, AppellationGained) | `packets.rs` | done | Byte-exact tests. `SCQuestsPacket` now writes `Quest.Id` as `long`. `SCQuestContextFailedPacket` (0x146) is `u32 questId + u8 err`; the client reader `FUN_397b5c90` (class registered with opcode 0x146, vtable `399b3a5c`) reads the fields `type` and `err`, and `OnQuestContextFailed` (`FUN_391dbcd0`) raises `QUEST_ERROR_INFO`, which ends quest directing mode. |
+| Quest packets (CS: StartQuestContext, CompleteQuestContext, DropQuestContext, QuestTalkMade, QuestStartWith, TryQuestCompleteAsLetItDone, RestartMainQuest, SaveTutorial, RequestPermissionToPlayCinemaForDirectingMode, StartedCinema, CompletedCinema; SC: QuestContextStarted/Updated/Completed/Reset, QuestContextFailed, QuestRewardedByMail, DoodadQuestAccept, DoodadCompleteQuest, TutorialSaved, AppellationGained) | `packets.rs` | done | Byte-exact tests. `SCQuestsPacket` now writes `Quest.Id` as `long`. `SCQuestContextFailedPacket` (0x146) is `u32 questId + u8 err`; the client reader `FUN_397b5c90` (class registered with opcode 0x146, vtable `399b3a5c`) reads the fields `type` and `err`, and `OnQuestContextFailed` (`FUN_391dbcd0`) raises `QUEST_ERROR_INFO`, which ends quest directing mode. |
+| Doodad report hand-in (`SCDoodadCompleteQuestPacket` 0x14d) | `packets.rs`, `engine.rs` (`report_doodad_ready`), `events.rs` (`on_server_report`) | added | The C# had the opcode (`SCOffsets.cs` 0x14d) but never sent it; `DoodadFuncQuest.Use` reported a doodad server-side (`QuestManager.DoReportEvents` -> `QuestActConReportDoodad.OnReportDoodad`). The 1.2 client reader `FUN_397b5e50` takes the doodad object id as a 3-byte `bc` then the u32 quest id; `OnDoodadCompleteQuest` (`FUN_391dc050` -> `FUN_393773a0`, event 241 `COMPLETE_QUEST_CONTEXT_DOODAD`; `quest_context.alb` proto 19) makes the client answer with `CSCompleteQuestContext` naming that doodad. Rust deviates: a server-side report (`DoodadFuncQuest`) whose quest is ready at that doodad (`QuestActConReportDoodad` names the doodad template and the objectives meet the act threshold) now sends 0x14d and leaves the report to that client request instead of completing it server-side; every other server-side report still only logs refusals. All 15 live 1.2 `QuestActConReportDoodad` acts are on Ready components and their doodads carry `DoodadFuncQuest` (`real_compact_db_report_doodads_are_ready_doodad_func_quests`). |
 | Refused quest reports | `packets.rs` (`quest_error`, `SCQuestContextFailedPacket`), `engine.rs` (`send_report_refused`, `finish_report`), `acts.rs`, `events.rs` | done | Every refused `CSCompleteQuestContext` report and `TryCompleteAsLetItDone` is answered once with 0x146, independent of the WARN repeat dedupe. A server-side report (`DoodadFuncQuest`, a doodad used on an owned quest: `events::on_server_report`) is only logged: the client did not enter quest directing mode, and a 0x146 there would show a quest error on every early click. The client error table `locale.questContext.errors` is built 1-based (`x2ui/baselib/locale_helper.alb`, `SETLIST` at instruction 654: `already_have`, `invalid_quest`, ...); the `QUEST_ERROR_INFO` handler `quest_context.alb` proto 22 indexes it directly with its first argument, and the client's local pre-checks use the same numbers (`FUN_3937a2d0`: 2 for an invalid quest, 0x14 after its can-interact check fails). Reason mapping (inferred from the client key names and those local codes, not captured from a 1.2 server): objectives not ready / wrong status -> 12 `invalid_quest_status`, wrong or missing NPC -> 7 `invalid_npc_or_quest`, wrong or missing doodad -> 19 `invalid_doodad`, quest not active -> 2 `invalid_quest`. |
 | `QuestCommandUtil` / `QuestCmd` (GM) | `systems/services/commands/scripts/quest_cmd.rs` | done | `quests::events::send_quests` / `send_completed_quests` added. |
 
@@ -4411,3 +4465,36 @@ Deviation from the removed C# history: C# never placed, settled or persisted a b
 is no C# behaviour to mirror. The pre-existing `bounty_runtime.rs` design invented a 24-hour
 expiry, a placement fee and a same-account refusal; all three are gone in favour of the
 client-evidenced rules above.
+
+## Water-only skill targets (2026-11-03)
+
+`target_only_water` casts (fishing rods) are admitted against the water surface the 1.2 client
+actually sends. The client aims `target_water` / `target_only_water` casts at the water surface
+(`FUN_3942b060`, `x2game.dll.c:872033`; `FUN_394322f0`, `:877530`: both pass the surface flag to
+the target picker when either water flag is set). Its own admission check `FUN_390b43b0`
+(`x2game.dll.c:148796`) probes `(x, y, z - 0.1)` (`DAT_3999ccf0`), requires the water level
+there at or above the probe (`probe.z <= level`), and then requires a floor at least 1 m below
+the level (`floor <= level - 1.0`, `DAT_3999c488`). That floor query is I3DEngine vt+0x108
+taking `(Vec3*, float)` - likely `GetBottomLevel`, a downward ray that includes statics and
+answers -1e9 when nothing is hit, which passes the depth test.
+
+The Rust port had probed `(x, y, z + 0.1)` since 668e4196 (`systems/skills/validation.rs`), so a
+surface point (the only point the client sends) landed above the water and every rod cast was
+refused with `skill_invalid_location` (0x23). `validation::target_in_water` now probes 0.1 m
+below, uses `collision::water_level` for the surface and `collision::terrain_height` for the
+floor (skipped when the collision service is off and no height is known). The server's floor is
+terrain only, so the rule is more lenient than the client's ray when static geometry lies under
+the point. Tests:
+`systems::skills::cast_validation_tests::water_only_targets_probe_below_the_surface_and_need_one_metre_of_water`.
+
+`source_not_swim` keeps its own probe 0.1 m **above** the caster (`validation::source_in_water`).
+That is the port's previous behaviour, not client evidence: applying the target rule to the
+source newly allowed a caster wading in water less than 1 m deep.
+
+Not ported: with `target_fishing` (target+0x194) set, `FUN_390b43b0` also refuses with 0x23 a
+type-8 water entity whose flag bit 1 is set (`vt+0x150 & 1`, likely a NoFishing volume)
+(`x2game.dll.c:148821-148834`); the server does not resolve or test that entity.
+
+Deviation from the removed C#: `SkillTemplate.TargetOnlyWater` was parsed
+(`AAEmu.Game/Core/Managers/SkillManager.cs:423`) but never read, so the C# had no water-target
+check at all; this follows only the 1.2 client.

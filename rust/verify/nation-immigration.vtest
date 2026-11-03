@@ -1,0 +1,62 @@
+# Nation immigration (stage 2, systems/social/nation.rs):
+#   invite -> accept moves a level-50 non-guild player into the nation and persists it;
+#   return to origin moves them back; a second invite + kick moves them back again.
+#
+# The suite creates a two-member guild (Scripts/verify.sh lowers Expedition.Create to Cost 0 /
+# Level 1 / PartyMemberCount 2 in the lane's runtime config only) and declares a nation with
+# the GM command `nation create force` (the dominion prerequisite is skipped).
+#
+# Bots:
+#   king      GM: party leader, creates the guild and the nation, invites and kicks
+#   partner   party member and founding guild member (keeps the guild alive)
+#   citizen   level 50, no guild: accepts, returns to origin, accepts again, is kicked
+
+suite nation-immigration
+bot king gm
+bot partner
+bot citizen
+
+[king]
+waitpeer 120 ${partner}
+partyinvite ${partner}
+await TeamJoined 30
+gcreate NationVerify
+expectdb "SELECT COUNT(*) FROM expedition_members WHERE name='${partner}'" 1 20
+gm nation create force
+expectdb "SELECT COUNT(*) FROM nations WHERE name='NationVerify'" 1 20
+nlevel ${citizen} 50
+ninvite ${citizen}
+sync invited 2
+expectdb "SELECT COUNT(*) FROM nations n JOIN characters c ON c.faction_id = n.id WHERE c.name='${citizen}'" 1 20
+sync joined 2
+sync origin 2
+ninvite ${citizen}
+sync invited2 2
+expectdb "SELECT COUNT(*) FROM nations n JOIN characters c ON c.faction_id = n.id WHERE c.name='${citizen}'" 1 20
+sync joined2 2
+nkick ${citizen}
+expectdb "SELECT CAST(faction_id AS SIGNED) FROM characters WHERE name='${citizen}'" 101 20
+sync done 3
+
+[citizen]
+waitpeer 120 ${king}
+naccept
+sync invited 2
+expectdb "SELECT COUNT(*) FROM nations n JOIN characters c ON c.faction_id = n.id WHERE c.name='${citizen}'" 1 20
+sync joined 2
+norigin
+expectdb "SELECT CAST(faction_id AS SIGNED) FROM characters WHERE name='${citizen}'" 101 20
+sync origin 2
+naccept
+sync invited2 2
+expectdb "SELECT COUNT(*) FROM nations n JOIN characters c ON c.faction_id = n.id WHERE c.name='${citizen}'" 1 20
+sync joined2 2
+pump 2
+expectdb "SELECT CAST(faction_id AS SIGNED) FROM characters WHERE name='${citizen}'" 101 20
+sync done 3
+
+[partner]
+waitpeer 120 ${king}
+partyaccept
+expectdb "SELECT COUNT(*) FROM expedition_members WHERE name='${partner}'" 1 20
+sync done 3

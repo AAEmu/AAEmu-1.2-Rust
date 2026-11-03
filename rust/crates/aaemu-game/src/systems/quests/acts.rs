@@ -1335,7 +1335,7 @@ impl Ctx<'_> {
     }
 
     /// The "is the quest ready to be turned in" check of the report acts.
-    fn report_ready(&self, h: QuestHandle, quest_template: u32) -> bool {
+    pub(crate) fn report_ready(&self, h: QuestHandle, quest_template: u32) -> bool {
         let let_it_done = self
             .data
             .template(quest_template)
