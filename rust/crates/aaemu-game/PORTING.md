@@ -291,7 +291,7 @@ connected by `systems::economy::wiring`).
 | Stores (`CSBuyItems`, `CSSellItems`, buy-back, `CSListSoldItem`, `CSBuyPriestBuff`, `CSBuyCoinItem`, `CSSellBackpackGoods`), `SpecialtyManager`, `TaxationsManager`, `ExpandExpert`, item look conversion | `systems/economy/{store,store_data,specialty}.rs` | done | Merchant packs / NPC flags through `NpcEconomyHooks`. Checkout validates currency, checked totals and each balance, then stages complete goods / buy-back delivery before committing payment. Vocation charges the configured price displayed by the 1.2 shop, without earnings bonuses. Rejected checkout preserves items and balances. Purchases need an NPC merchant pack or a doodad `DoodadFuncStoreUi` pack and filter the goods by it; selling needs a merchant within 3 m, lists each item once and pays only for items moved to buy-back. |
 | `MailManager`, `Models/Game/Mails/**`, `CharacterMails`, mail packets | `systems/economy/{mail,mail_character,mail_kinds,mail_packets,mail_data}.rs` | done | Saved in `SaveStage::BeforeItems`; housing tax through `MailHousingHooks`. |
 | `AuctionManager`, `Models/Game/Auction/**`, auction packets | `systems/economy/{auction,auction_data,auction_packets}.rs` | done | Saved in `SaveStage::AfterItems`; results mailed through `wiring`. Requests require an auctioneer NPC (the `auctioneer` template flag) named by the packet or the current interaction object within 5 m (the C# ignored the ids). |
-| `TradeManager`, trade packets | `systems/economy/trade.rs` | done | |
+| `TradeManager`, trade packets | `systems/economy/trade.rs` | done | The C# `CanStartTrade` TODO ("Check faction and others") is implemented from the 1.2 client's own checks: a request and its acceptance refuse a dead player, a hostile faction relation and a distance `>= sqrt(25) = 5` m, and a trade across instances; see the trade validation deviation. |
 | `CashShopManager`, `Models/Game/CashShop/**`, ICS / premium packets | `systems/economy/cash_shop.rs` | done | Gifts by `CommercialMail` (`wiring`); account credits SQL behind `CashShopDb`. |
 | Item skill-effect bodies (grade enchant, socketing, conversion, cap scale, UCC imprint, ...), mate / slave equipment packets | `systems/economy/item_effects*.rs` | done | Called by the skills subsystem's effects. UCC imprint / cleanup require owned source and target items; client UCC casts require the actual source item's configured use skill, preserving the unrelated legacy bound-item portal exception. Dyeing checks the loaded `dyeable_items` allowlist. Invalid UCC / dye effects cancel deferred reagent consumption. |
 | Item skill-effect stubs given data-derived bodies (`GainItemWithPosImprint` 32, `RechargeItemBuff` 95, `ExpToItem` 96) | `systems/economy/item_effects.rs` | done (data-derived) | The C# `Execute` bodies were `// TODO` stubs, so the behaviour comes from `special_effects` 405 / 546 / 547 / 548 (32: create `value1` x1 with `SkillEffectGainItemWithPos`), 12446 / 17017 (95) and 12462 (96: `value1` XP -> `value2` x1 with `SkillEffectExpToItem`) plus the tool skills that cast them. `GainItemWithPosImprint` stores no position imprint: the 1.2 item details have no such field. `ExpToItem` subtracts the experience directly instead of through `AddExp` (which recomputes the level and could level the character down), sends `SCExpChangedPacket(-value1)`, checks bag room before spending the XP, and cancels so the reagent is kept. `RechargeItemBuff` takes the cast's item target, resets `charge_start_time` (and `charge_count` when the template has one) and re-applies the equipped item's gear buff through `apply_gear_buffs` with the item both removed and added, so the recharge buff is not stacked; the 1 s item timers read the new charge window on their next tick, so nothing is re-scheduled. |
@@ -2325,6 +2325,29 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   (`item_handlers::CSDestroyItemPacket`) pushes `ItemFx::Consumed` for the destroyed units and
   `ItemContainer::add_or_move_inner` pushes it for the source owner when the item moves between two
   characters' bags (trade), so the objective is recounted when items leave.
+
+* systems::economy (trade validation, 2026-11-03): `TradeManager.CanStartTrade` and
+  `StartTrade` only checked the running-trade state (C# TODO "Check faction and others"); the
+  block list was added earlier. The 1.2 client (`x2game.dll` `X2Trade:RequestTrade`
+  `FUN_394fddf0`, `X2Trade:StartTrade` `FUN_394fe180`) refuses a request/acceptance itself while
+  either player is dead (`X2Unit:IsDead`, `unit + 0x3c26`, silently), while the target is not
+  within the trade range (`FUN_39093860` with the constant `25.0` at `0x39ac9b84`:
+  `>= sqrt(25) = 5` m edge-to-edge, error 154 `too_far_away`), and it never offers "Request
+  Trade" on a hostile target (`popup_menu_proc.alb` proto 48 skips `requestTrade` when
+  `GetTargetFactionRelationship() == 1`; `FUN_394bb930` maps 1 to `hostile`). The server now
+  applies the same checks before forwarding a request and again when the invitation is accepted
+  (the invitation can be 60 s old). Refusals: dead is silent (the client shows nothing), a
+  hostile relation sends `SCCannotStartTradePacket(reason = 0)`, which the 1.2 client's
+  `OnCannotStartTrade` (`FUN_394ff1b0`) displays as error 538 `trade_target_is_not_possible_state`
+  and a distance refusal sends error 154, the code the client uses for the same check. A
+  different instance is refused with error 539 `cant_trade_with_other_view` (the client's own
+  "other view" check, `FUN_390476a0() + 8`, is not identified). The exact 1.2 **server** answers
+  are unknown (the checks above are client-side): individual packet codes are capture-pending,
+  cases `TRADE-1` (dead), `TRADE-2` (hostile), `TRADE-3` (other view) and `TRADE-4` (distance).
+  Tests: `trade_tests::{hostile_players_cannot_trade_but_the_same_faction_can,
+  a_faction_change_between_request_and_accept_refuses_the_trade,
+  out_of_range_trade_request_and_accept_are_refused,
+  dead_player_cannot_request_or_accept_a_trade}` (each fails with its check removed).
 
 * systems::economy (trade safety, 2026-10-19): a trade is made only when both sides locked and
   both confirmed (`OkTrade` previously accepted a confirmation with one side locked). Only the
