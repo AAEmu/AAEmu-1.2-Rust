@@ -270,7 +270,7 @@ impl LoginConnection {
                 None
             } else {
                 match s.current_flow.take() {
-                    Some(AuthFlow::Korea(flow)) => Some(flow),
+                    Some(flow) if flow.awaits_continuation() => Some(flow),
                     other => {
                         tracing::warn!(
                             "Auth flow type mismatch: expected {}, got {} for connection {}",
@@ -294,11 +294,11 @@ impl LoginConnection {
             Ok(r) => r,
             Err(e) => {
                 // C#: the exception leaves the flow in place and the state unchanged.
-                self.session.lock().unwrap().current_flow = Some(AuthFlow::Korea(flow));
+                self.session.lock().unwrap().current_flow = Some(flow);
                 return Err(e);
             }
         };
-        self.process_auth_result(&result, AuthFlow::Korea(flow));
+        self.process_auth_result(&result, flow);
         self.send_auth_result(&result)?;
         Ok(())
     }

@@ -141,6 +141,17 @@ SQL updates it binds the internal listener, then the client listener, and runs b
   (→ `Disconnected`). Authentication flows (`CARequestAuth*`, challenges, OTP / PC certificate /
   ARS prompts) live in `src/auth/`; the 1.2 Trion client logs in with `CARequestAuthTrion`, the
   XML ticket that `aaemu-launcher` hands to the client.
+- The account's `user_2fa` factors are enforced on **every** password login (Trion ticket,
+  Mail.Ru and plain password), not only on the Korea challenge flow. After the password check the
+  shared `SecondFactorFlow` sends the same `ACEnterOtpPacket` (0x005) / `ACEnterPcCertPacket`
+  (0x007) / `ACShowArsPacket` (0x006) prompts the Korea flow uses; the 1.2 client answers with
+  `CAOtpNumberPacket` (0x008) / `CAPcCertNumberPacket` (0x00a). Accounts without a `user_2fa` row
+  are unaffected. Configure it with `TwoFactor:EnforceOnPasswordLogin` (default `true`),
+  `TwoFactor:MaxOtpFailures` (default 5, `0` disables the lock) and
+  `TwoFactor:OtpLockoutMinutes` (default 15). OTP failures are counted per account (not per
+  connection) and an accepted TOTP time step is remembered, so it cannot be replayed. ARS phone
+  calls go through the `ArsPhoneProvider` trait; the default implementation is disabled and makes
+  no external call.
 - `dispatch_messages` decodes each frame into `C2lPacket` and awaits `handlers::handle_c2l`
   sequentially.
 - The writer task flushes packets that were queued before a close (for example a final

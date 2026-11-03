@@ -21,10 +21,13 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::LazyLock;
 
-use aaemu_login::config::KoreaAuthOptions;
+use aaemu_login::config::{KoreaAuthOptions, TwoFactorOptions};
 use aaemu_login::controllers::login::LoginController;
 use aaemu_login::models::{AccountId, LoginDeniedReason};
 use aaemu_login::services::password::{Password, PasswordService};
+use aaemu_login::services::two_factor::{
+    self, OtpPolicy, OtpService, OtpValidation, TwoFactorRepository, TwoFactorService,
+};
 use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
 use sqlx::MySqlPool;
 
@@ -80,11 +83,14 @@ async fn setup() -> Option<MySqlPool> {
 }
 
 fn create_controller(pool: &MySqlPool, auto_account: bool) -> LoginController {
+    let two_factor = TwoFactorService::new(TwoFactorRepository::new(pool.clone()));
     LoginController::new(
         pool.clone(),
         passwords(),
         auto_account,
         KoreaAuthOptions::default(),
+        two_factor,
+        TwoFactorOptions::default(),
     )
 }
 
@@ -94,7 +100,7 @@ async fn insert_user(
     password: &str,
     banned: bool,
     ban_reason: i32,
-) {
+) -> u64 {
     let hash = passwords()
         .hash_for_storage(&Password::from_plaintext(password))
         .unwrap();
@@ -109,6 +115,11 @@ async fn insert_user(
     .execute(pool)
     .await
     .expect("insert user");
+    sqlx::query_scalar("SELECT CAST(id AS UNSIGNED) FROM users WHERE username = ?")
+        .bind(username)
+        .fetch_one(pool)
+        .await
+        .expect("user id")
 }
 
 #[tokio::test]
@@ -243,5 +254,135 @@ async fn login_updates_last_login_and_ip() {
     assert!(
         updated_at > 0,
         "updated_at should be updated to a non-zero timestamp"
+    );
+}
+
+async fn insert_two_factor(pool: &MySqlPool, account_id: u64, otp_secret: &str) {
+    sqlx::query(
+        "INSERT INTO user_2fa (user_id, enabled_methods, otp_secret, otp_verified, created_at, updated_at) \
+         VALUES (?, 1, ?, 1, 0, 0)",
+    )
+    .bind(account_id)
+    .bind(otp_secret)
+    .execute(pool)
+    .await
+    .expect("insert user_2fa");
+}
+
+const OTP_SECRET: &str = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+
+fn now_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+fn current_code() -> String {
+    let secret = two_factor::base32::decode(OTP_SECRET).unwrap();
+    two_factor::totp::code_at(&secret, now_seconds())
+}
+
+/// A code guaranteed to differ from `valid` (same length, one digit changed).
+fn wrong_code(valid: &str, digit: usize) -> String {
+    let mut bytes = valid.as_bytes().to_vec();
+    let i = digit.min(bytes.len() - 1);
+    bytes[i] = if bytes[i] == b'0' { b'1' } else { b'0' };
+    String::from_utf8(bytes).unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires MySQL: set AAEMU_TEST_MYSQL=mysql://user:pass@host:port/db"]
+async fn login_two_factor_account_reports_the_requirements_and_defers_the_ban() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let id = insert_user(&pool, "otp_banned", "pass", true, 5).await;
+    insert_two_factor(&pool, id, OTP_SECRET).await;
+    let controller = create_controller(&pool, false);
+
+    let result = controller
+        .login(
+            "otp_banned",
+            &Password::from_plaintext("pass"),
+            ip_address(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        result.success,
+        "the ban must not be reported before the 2FA"
+    );
+    assert!(result.two_factor.requires_otp);
+    assert_eq!(result.account_id, AccountId(id as u32));
+}
+
+#[tokio::test]
+#[ignore = "requires MySQL: set AAEMU_TEST_MYSQL=mysql://user:pass@host:port/db"]
+async fn login_without_two_factor_has_no_requirements() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    insert_user(&pool, "no_otp", "pass", false, 0).await;
+    let controller = create_controller(&pool, false);
+
+    let result = controller
+        .login("no_otp", &Password::from_plaintext("pass"), ip_address())
+        .await
+        .unwrap();
+
+    assert!(result.success);
+    assert!(!result.two_factor.any_required());
+}
+
+#[tokio::test]
+#[ignore = "requires MySQL: set AAEMU_TEST_MYSQL=mysql://user:pass@host:port/db"]
+async fn otp_failures_lock_the_account_and_ignore_a_later_valid_code() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let id = insert_user(&pool, "otp_limited", "pass", false, 0).await;
+    insert_two_factor(&pool, id, OTP_SECRET).await;
+    let policy = OtpPolicy::from_options(&TwoFactorOptions {
+        max_otp_failures: 3,
+        ..TwoFactorOptions::default()
+    });
+    let sut = OtpService::new(TwoFactorRepository::new(pool.clone()), policy);
+    let account = AccountId(id as u32);
+    let valid = current_code();
+
+    let first = sut.validate(account, &wrong_code(&valid, 0)).await.unwrap();
+    let second = sut.validate(account, &wrong_code(&valid, 1)).await.unwrap();
+    let third = sut.validate(account, &wrong_code(&valid, 2)).await.unwrap();
+    assert_eq!(first, OtpValidation::Invalid);
+    assert_eq!(second, OtpValidation::Invalid);
+    assert_eq!(third, OtpValidation::Locked);
+    // The valid code is not even checked while the account is locked.
+    assert_eq!(
+        sut.validate(account, &valid).await.unwrap(),
+        OtpValidation::Locked
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MySQL: set AAEMU_TEST_MYSQL=mysql://user:pass@host:port/db"]
+async fn otp_time_step_cannot_be_replayed_against_the_database() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let id = insert_user(&pool, "otp_replay", "pass", false, 0).await;
+    insert_two_factor(&pool, id, OTP_SECRET).await;
+    let sut = OtpService::new(
+        TwoFactorRepository::new(pool.clone()),
+        OtpPolicy::from_options(&TwoFactorOptions::default()),
+    );
+    let account = AccountId(id as u32);
+    let valid = current_code();
+
+    assert_eq!(
+        sut.validate(account, &valid).await.unwrap(),
+        OtpValidation::Valid
+    );
+    assert_eq!(
+        sut.validate(account, &valid).await.unwrap(),
+        OtpValidation::Invalid,
+        "a used TOTP time step must not be accepted twice"
     );
 }

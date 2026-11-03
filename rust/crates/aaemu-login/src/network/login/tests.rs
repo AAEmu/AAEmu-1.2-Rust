@@ -21,14 +21,15 @@ use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::auth::{KoreaAuthFlow, PasswordAuthFlow};
-use crate::models::{KoreaAuthInfo, LoginResult};
+use crate::models::{KoreaAuthInfo, LoginResult, TwoFactorRequirements};
 use crate::network::internal::InternalConnection;
 use crate::packets::c2l::{
-    C2lPacket, CaOtpNumber, CaPcCertNumber, CaRequestAuth, CaRequestAuthTrion,
+    C2lPacket, CaOtpNumber, CaPcCertNumber, CaRequestAuth, CaRequestAuthMailRu, CaRequestAuthTrion,
 };
 use crate::packets::l2c::opcodes as l2c_op;
 use crate::services::password::{Password, PasswordKind};
 use crate::services::sha256_crypt;
+use crate::services::two_factor::OtpValidation;
 use crate::test_support::{
     test_config, test_connection, test_server, LoginBehavior, MockBackend, PacketLog,
 };
@@ -754,4 +755,111 @@ async fn ca_request_auth_trion_handler_execute_calls_authenticate_async() {
     assert_eq!(calls[0].1.kind, PasswordKind::Sha256Hex);
     assert_eq!(calls[0].2, TEST_IP);
     assert_eq!(f.conn.state(), LoginState::Authenticated);
+}
+
+// ---- 2FA on the password (Trion / Mail.Ru) path -------------------------------------------
+
+fn otp_requirements() -> TwoFactorRequirements {
+    TwoFactorRequirements {
+        requires_otp: true,
+        ..TwoFactorRequirements::NONE
+    }
+}
+
+fn login_with_otp(f: &Fixture) {
+    f.backend
+        .set_login(LoginBehavior::Result(LoginResult::ok_with_two_factor(
+            TEST_ACCOUNT_ID,
+            otp_requirements(),
+        )));
+}
+
+#[tokio::test]
+async fn ca_request_auth_trion_handler_two_factor_account_requires_the_otp() {
+    let mut f = fixture();
+    login_with_otp(&f);
+    let packet = C2lPacket::RequestAuthTrion(CaRequestAuthTrion {
+        username: Some("testuser".into()),
+        password: Some("testpass".into()),
+        ..Default::default()
+    });
+
+    crate::handlers::handle_c2l(&f.server, &f.conn, packet)
+        .await
+        .unwrap();
+
+    // No ACJoinResponse/ACAuthResponse before the factor: only the OTP prompt.
+    assert_eq!(f.sent.opcodes(), vec![l2c_op::AC_ENTER_OTP]);
+    assert_eq!(f.conn.state(), LoginState::Authenticating);
+    assert_eq!(f.conn.account_id(), AccountId::default());
+
+    // The same client connection answers the prompt with a valid code.
+    f.backend.set_otp(OtpValidation::Valid);
+    f.backend.set_ban(false, LoginDeniedReason::default());
+    crate::handlers::handle_c2l(
+        &f.server,
+        &f.conn,
+        C2lPacket::OtpNumber(CaOtpNumber {
+            otp_number: "12345678".into(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        f.sent.opcodes(),
+        vec![l2c_op::AC_JOIN_RESPONSE, l2c_op::AC_AUTH_RESPONSE]
+    );
+    assert_eq!(f.conn.state(), LoginState::Authenticated);
+    assert_eq!(f.conn.account_id(), TEST_ACCOUNT_ID);
+}
+
+#[tokio::test]
+async fn ca_request_auth_trion_handler_two_factor_account_wrong_otp_does_not_authenticate() {
+    let mut f = fixture();
+    login_with_otp(&f);
+    let packet = C2lPacket::RequestAuthTrion(CaRequestAuthTrion {
+        username: Some("testuser".into()),
+        password: Some("testpass".into()),
+        ..Default::default()
+    });
+    crate::handlers::handle_c2l(&f.server, &f.conn, packet)
+        .await
+        .unwrap();
+    assert_eq!(f.sent.opcodes(), vec![l2c_op::AC_ENTER_OTP]);
+
+    f.backend.set_otp(OtpValidation::Invalid);
+    crate::handlers::handle_c2l(
+        &f.server,
+        &f.conn,
+        C2lPacket::OtpNumber(CaOtpNumber {
+            otp_number: "00000000".into(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    // A retry prompt, not a login.
+    assert_eq!(f.sent.opcodes(), vec![l2c_op::AC_ENTER_OTP]);
+    assert_eq!(f.conn.state(), LoginState::Authenticating);
+    assert_eq!(f.conn.account_id(), AccountId::default());
+}
+
+#[tokio::test]
+async fn ca_request_auth_mail_ru_handler_two_factor_account_requires_the_otp() {
+    let mut f = fixture();
+    login_with_otp(&f);
+    let packet = C2lPacket::RequestAuthMailRu(CaRequestAuthMailRu {
+        id: "testuser".into(),
+        token: vec![0u8; 32],
+        ..Default::default()
+    });
+
+    crate::handlers::handle_c2l(&f.server, &f.conn, packet)
+        .await
+        .unwrap();
+
+    assert_eq!(f.sent.opcodes(), vec![l2c_op::AC_ENTER_OTP]);
+    assert_eq!(f.conn.state(), LoginState::Authenticating);
+    assert_eq!(f.conn.account_id(), AccountId::default());
 }

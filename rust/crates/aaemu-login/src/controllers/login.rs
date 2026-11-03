@@ -9,15 +9,17 @@ use regex::Regex;
 use sqlx::MySqlPool;
 
 use super::game::GameController;
-use crate::config::KoreaAuthOptions;
+use crate::config::{KoreaAuthOptions, TwoFactorOptions};
 use crate::models::{
-    AccountId, GameServerId, KoreaAuthInfo, LoginDeniedReason, LoginResult, ReconnectResult,
+    AccountId, GameServerId, KoreaAuthInfo, LoginDeniedReason, LoginResult, ReconnectFailure,
+    ReconnectResult, TwoFactorRequirements,
 };
 use crate::network::internal::InternalConnection;
 use crate::packets::l2g::LgPlayerReconnect;
 use crate::services::password::{
     Password, PasswordKind, PasswordService, PasswordVerificationResult,
 };
+use crate::services::two_factor::TwoFactorService;
 use crate::services::{korea, sha256_crypt};
 
 /// Allows Unicode letters and digits (any script), plus `_ . - @`.
@@ -52,6 +54,10 @@ pub struct LoginController {
     passwords: PasswordService,
     auto_account: bool,
     korea: KoreaAuthOptions,
+    two_factor: TwoFactorService,
+    /// `TwoFactor:EnforceOnPasswordLogin`: when true, the account's 2FA is enforced after a
+    /// successful password check and the ban check is deferred until after the factors.
+    enforce_two_factor_on_password_login: bool,
     /// gsId -> (token -> accountId)
     tokens: DashMap<GameServerId, Arc<DashMap<u32, AccountId>>>,
 }
@@ -62,12 +68,16 @@ impl LoginController {
         passwords: PasswordService,
         auto_account: bool,
         korea: KoreaAuthOptions,
+        two_factor: TwoFactorService,
+        two_factor_options: TwoFactorOptions,
     ) -> Self {
         Self {
             pool,
             passwords,
             auto_account,
             korea,
+            two_factor,
+            enforce_two_factor_on_password_login: two_factor_options.enforce_on_password_login,
             tokens: DashMap::new(),
         }
     }
@@ -123,11 +133,19 @@ impl LoginController {
             return Ok(LoginResult::denied(LoginDeniedReason::BAD_ACCOUNT));
         }
 
-        if banned != 0 {
+        let account_id = AccountId(id as u32);
+        // With `TwoFactor:EnforceOnPasswordLogin` the account's factors are checked by the
+        // authentication flow; the ban check then happens after them, like the Korea flow, so a
+        // password holder who lacks the second factor learns nothing about the account.
+        let two_factor = if self.enforce_two_factor_on_password_login {
+            self.two_factor.get_requirements(account_id).await?
+        } else {
+            TwoFactorRequirements::NONE
+        };
+        if banned != 0 && !two_factor.any_required() {
             return Ok(LoginResult::denied(LoginDeniedReason(ban_reason as u8)));
         }
 
-        let account_id = AccountId(id as u32);
         let now = unix_now();
         tracing::info!("{} connected.", log_safe(username));
 
@@ -196,7 +214,7 @@ impl LoginController {
             );
         }
 
-        Ok(LoginResult::ok(account_id))
+        Ok(LoginResult::ok_with_two_factor(account_id, two_factor))
     }
 
     /// The Korea challenge-response material for `username`, or `None` if the account does not
@@ -329,15 +347,15 @@ impl LoginController {
         account_id: AccountId,
         token: u32,
     ) -> anyhow::Result<ReconnectResult> {
-        let fail = ReconnectResult {
-            success: false,
-            account_id: AccountId::default(),
-        };
         let mut gs_id = gs_id;
         if !self.tokens.contains_key(&gs_id) {
             match games.try_get_parent_id(gs_id) {
                 Some(parent) => gs_id = parent,
-                None => return Ok(fail), // TODO ...
+                None => {
+                    return Ok(ReconnectResult::failed(
+                        ReconnectFailure::GameServerUnavailable,
+                    ))
+                }
             }
         }
         let tokens = self
@@ -348,11 +366,9 @@ impl LoginController {
                 format!("The given key '{gs_id}' was not present in the dictionary.")
             })?;
         Ok(match tokens.get(&token).map(|v| *v) {
-            Some(v) if v == account_id => ReconnectResult {
-                success: true,
-                account_id,
-            },
-            _ => fail, // TODO ...
+            Some(v) if v == account_id => ReconnectResult::success(account_id),
+            Some(_) => ReconnectResult::failed(ReconnectFailure::AccountMismatch),
+            None => ReconnectResult::failed(ReconnectFailure::InvalidToken),
         })
     }
 }

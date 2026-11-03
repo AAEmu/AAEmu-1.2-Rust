@@ -26,5 +26,10 @@
 			"User": "%db_user%"
 		}
 	},
+	"TwoFactor": {
+		"EnforceOnPasswordLogin": true,
+		"MaxOtpFailures": 5,
+		"OtpLockoutMinutes": 15
+	},
 	"GameServers": []
 }

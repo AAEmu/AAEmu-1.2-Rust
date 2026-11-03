@@ -70,6 +70,9 @@ pub struct AppConfig {
     /// `KoreaAuth` section.
     #[serde(rename = "koreaauth", default)]
     pub korea_auth: KoreaAuthOptions,
+    /// `TwoFactor` section: enforcement and OTP attempt limits.
+    #[serde(rename = "twofactor", default)]
+    pub two_factor: TwoFactorOptions,
     /// `ConnectionStrings` section (`ConnectionStrings:MySqlConnection` overrides `Connections`).
     #[serde(rename = "connectionstrings", default)]
     pub connection_strings: HashMap<String, String>,
@@ -186,6 +189,60 @@ pub struct KoreaAuthOptions {
     pub ars_timeout: Duration,
 }
 
+/// `TwoFactorOptions`: two-factor authentication policy.
+///
+/// The account's `user_2fa` row always decides which factors are required. These options only
+/// control *where* they are enforced and how OTP failures are limited.
+#[derive(Clone, Debug, Deserialize)]
+pub struct TwoFactorOptions {
+    /// Enforce the account's 2FA after a successful username/password authentication (the Trion
+    /// ticket and Mail.Ru/password paths). Default `true`: an account that enabled 2FA must always
+    /// present it. `false` restores the historical behaviour where only the Korea challenge flow
+    /// asked for the second factor.
+    #[serde(
+        rename = "enforceonpasswordlogin",
+        default = "default_true",
+        deserialize_with = "lenient_bool"
+    )]
+    pub enforce_on_password_login: bool,
+    /// Failed OTP submissions allowed per account before it is locked. `0` disables locking.
+    #[serde(
+        rename = "maxotpfailures",
+        default = "default_max_otp_failures",
+        deserialize_with = "lenient_i32"
+    )]
+    pub max_otp_failures: i32,
+    /// How long an account stays locked after too many failed OTP submissions.
+    #[serde(
+        rename = "otplockoutminutes",
+        default = "default_otp_lockout_minutes",
+        deserialize_with = "lenient_i32"
+    )]
+    pub otp_lockout_minutes: i32,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_max_otp_failures() -> i32 {
+    5
+}
+
+fn default_otp_lockout_minutes() -> i32 {
+    15
+}
+
+impl Default for TwoFactorOptions {
+    fn default() -> Self {
+        Self {
+            enforce_on_password_login: default_true(),
+            max_otp_failures: default_max_otp_failures(),
+            otp_lockout_minutes: default_otp_lockout_minutes(),
+        }
+    }
+}
+
 fn default_rounds() -> i32 {
     100_000
 }
@@ -223,6 +280,16 @@ impl AppConfig {
         if k.max_otp_attempts < 1 || k.max_cert_attempts < 1 {
             return Err(ConfigError::Validation(
                 "KoreaAuth:MaxOtpAttempts/MaxCertAttempts must be >= 1".into(),
+            ));
+        }
+        if self.two_factor.max_otp_failures < 0 {
+            return Err(ConfigError::Validation(
+                "TwoFactor:MaxOtpFailures must be >= 0 (0 disables locking)".into(),
+            ));
+        }
+        if self.two_factor.max_otp_failures > 0 && self.two_factor.otp_lockout_minutes < 1 {
+            return Err(ConfigError::Validation(
+                "TwoFactor:OtpLockoutMinutes must be >= 1 when MaxOtpFailures is > 0".into(),
             ));
         }
         for (name, n) in [
@@ -358,7 +425,7 @@ pub fn set_path(root: &mut Value, path: &str, value: &str) {
     *node = Value::String(value.to_string());
 }
 
-const TOP_LEVEL_KEYS: [&str; 11] = [
+const TOP_LEVEL_KEYS: [&str; 12] = [
     "secretkey",
     "autoaccount",
     "skiphostresolve",
@@ -368,6 +435,7 @@ const TOP_LEVEL_KEYS: [&str; 11] = [
     "internalnetwork",
     "connections",
     "koreaauth",
+    "twofactor",
     "connectionstrings",
     "urls",
 ];
@@ -654,6 +722,49 @@ mod tests {
             parse_timespan("00:00:02.25"),
             Some(Duration::new(2, 250_000_000))
         );
+    }
+
+    #[test]
+    fn two_factor_defaults_enforce_and_lock() {
+        let mut root = base();
+        set_path(&mut root, "Connections:MySQLProvider:Port", "3306");
+        let cfg = AppConfig::from_value(root).unwrap();
+        assert!(cfg.two_factor.enforce_on_password_login);
+        assert_eq!(cfg.two_factor.max_otp_failures, 5);
+        assert_eq!(cfg.two_factor.otp_lockout_minutes, 15);
+    }
+
+    #[test]
+    fn two_factor_parses_env_style_overrides() {
+        let mut root = base();
+        set_path(&mut root, "Connections:MySQLProvider:Port", "3306");
+        apply_env(
+            &mut root,
+            vec![
+                (
+                    "TwoFactor__EnforceOnPasswordLogin".to_string(),
+                    "False".to_string(),
+                ),
+                ("TwoFactor__MaxOtpFailures".to_string(), "3".to_string()),
+                ("TwoFactor__OtpLockoutMinutes".to_string(), "7".to_string()),
+            ],
+        );
+        let cfg = AppConfig::from_value(root).unwrap();
+        assert!(!cfg.two_factor.enforce_on_password_login);
+        assert_eq!(cfg.two_factor.max_otp_failures, 3);
+        assert_eq!(cfg.two_factor.otp_lockout_minutes, 7);
+    }
+
+    #[test]
+    fn two_factor_rejects_a_lock_without_a_duration() {
+        let mut root = base();
+        set_path(&mut root, "Connections:MySQLProvider:Port", "3306");
+        set_path(&mut root, "TwoFactor:MaxOtpFailures", "5");
+        set_path(&mut root, "TwoFactor:OtpLockoutMinutes", "0");
+        assert!(matches!(
+            AppConfig::from_value(root),
+            Err(ConfigError::Validation(_))
+        ));
     }
 
     #[test]

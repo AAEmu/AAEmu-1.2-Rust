@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 
 use super::*;
 use crate::auth::{AuthFlowResult, ReconnectAuthFlow};
-use crate::models::{AccountId, GameServerId, GsLoad, LoginCharacterInfo, LoginDeniedReason};
+use crate::models::{AccountId, GameServerId, GsLoad, LoginCharacterInfo, ReconnectFailure};
 use crate::packets::g2l::{
     GlGameServerLoad, GlPlayerEnter, GlPlayerReconnect, GlRegisterGameServer, GlRequestInfo,
 };
@@ -97,7 +97,8 @@ async fn assert_unauthorized_token_rejected(secret: Option<&str>) {
     assert!(
         matches!(
             reconnect_result(&server, WORLD, 777).await,
-            AuthFlowResult::Denied(LoginDeniedReason::BAD_RESPONSE)
+            AuthFlowResult::Denied(reason)
+                if reason == ReconnectFailure::GameServerUnavailable.reason()
         ),
         "unauthenticated internal peer seeded a usable reconnect token"
     );
@@ -155,7 +156,8 @@ async fn registered_connection_cannot_seed_an_unrelated_world_token() {
     assert!(
         matches!(
             reconnect_result(&server, OTHER_WORLD, 777).await,
-            AuthFlowResult::Denied(LoginDeniedReason::BAD_RESPONSE)
+            AuthFlowResult::Denied(reason)
+                if reason == ReconnectFailure::GameServerUnavailable.reason()
         ),
         "server A seeded a usable reconnect token for server B"
     );

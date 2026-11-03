@@ -17,7 +17,7 @@ use crate::models::{
 };
 use crate::services::password::Password;
 use crate::services::two_factor::{
-    ArsService, ArsSession, OtpService, PcCertService, TwoFactorService,
+    ArsService, ArsSession, OtpService, OtpValidation, PcCertService, TwoFactorService,
 };
 
 /// Account and two-factor operations used by the authentication flows. Dyn-compatible (futures
@@ -49,12 +49,12 @@ pub trait AuthBackend: Send + Sync {
         account_id: AccountId,
     ) -> BoxFuture<'_, anyhow::Result<TwoFactorRequirements>>;
 
-    /// `IOtpService.ValidateAsync`.
+    /// `IOtpService.ValidateAsync`, including the per-account failure limiter and replay check.
     fn validate_otp<'a>(
         &'a self,
         account_id: AccountId,
         code: &'a str,
-    ) -> BoxFuture<'a, anyhow::Result<bool>>;
+    ) -> BoxFuture<'a, anyhow::Result<OtpValidation>>;
 
     /// `IPcCertService.ValidateAsync`.
     fn validate_pc_cert<'a>(
@@ -63,8 +63,12 @@ pub trait AuthBackend: Send + Sync {
         pin: &'a str,
     ) -> BoxFuture<'a, anyhow::Result<bool>>;
 
-    /// `IArsService.CreateSessionAsync`.
-    fn create_ars_session(&self, account_id: AccountId, timeout_seconds: i32) -> ArsSession;
+    /// `IArsService.CreateSessionAsync`: creates the session and asks the phone provider to call.
+    fn create_ars_session(
+        &self,
+        account_id: AccountId,
+        timeout_seconds: i32,
+    ) -> BoxFuture<'_, anyhow::Result<ArsSession>>;
 }
 
 /// The production [`AuthBackend`]: the MySQL-backed controllers and services.
@@ -111,7 +115,7 @@ impl AuthBackend for DbAuthBackend {
         &'a self,
         account_id: AccountId,
         code: &'a str,
-    ) -> BoxFuture<'a, anyhow::Result<bool>> {
+    ) -> BoxFuture<'a, anyhow::Result<OtpValidation>> {
         async move { Ok(self.otp.validate(account_id, code).await?) }.boxed()
     }
 
@@ -123,7 +127,22 @@ impl AuthBackend for DbAuthBackend {
         async move { Ok(self.pc_cert.validate(account_id, pin).await?) }.boxed()
     }
 
-    fn create_ars_session(&self, account_id: AccountId, timeout_seconds: i32) -> ArsSession {
-        self.ars.create_session(account_id, timeout_seconds)
+    fn create_ars_session(
+        &self,
+        account_id: AccountId,
+        timeout_seconds: i32,
+    ) -> BoxFuture<'_, anyhow::Result<ArsSession>> {
+        async move {
+            let phone_number = self
+                .two_factor
+                .get_config(account_id)
+                .await?
+                .and_then(|c| c.ars_phone_number)
+                .unwrap_or_default();
+            self.ars
+                .create_session(account_id, &phone_number, timeout_seconds)
+                .await
+        }
+        .boxed()
     }
 }

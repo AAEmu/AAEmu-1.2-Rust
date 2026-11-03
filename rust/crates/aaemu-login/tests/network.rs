@@ -362,7 +362,13 @@ async fn unauthorized_internal_tokens_are_rejected_over_sockets() {
             l2c::opcodes::AC_LOGIN_DENIED,
             "unauthorized internal token authenticated a client"
         );
-        assert_eq!(body.as_bytes()[2], 2); // BadResponse
+        // No token table exists for the world, so the typed reason is "game server unavailable".
+        assert_eq!(
+            body.as_bytes()[2],
+            aaemu_login::models::ReconnectFailure::GameServerUnavailable
+                .reason()
+                .0
+        );
         assert!(!token_acknowledged, "unauthorized token was acknowledged");
     }
     shutdown.cancel();

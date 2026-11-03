@@ -64,6 +64,56 @@ The configuration structure is as follows:
 
 ```
 
+### Two-factor authentication
+
+The account's methods are stored in `aaemu_login.user_2fa` (`enabled_methods`: bit 1 = OTP,
+2 = PC certificate, 4 = ARS). The verified methods are enforced on **every** password login —
+the Trion ticket that `aaemu-launcher` uses, the Mail.Ru token and the plain password — as well as
+after the Korea challenge. The prompts and answers are the 1.2 client's own packets:
+
+| Step | Server → client | Client → server |
+| --- | --- | --- |
+| OTP | `ACEnterOtpPacket` 0x005 (`FUN_393d0c20`: two `i32` tries) | `CAOtpNumberPacket` 0x008 (one string, exactly 8 chars in the client, `FUN_39440c50` / `FUN_393d0a00`) |
+| PC certificate | `ACEnterPcCertPacket` 0x007 (`FUN_393d0cd0`) | `CAPcCertNumberPacket` 0x00a (one string, exactly 8 chars, `FUN_39440cc0` / `FUN_393d0a60`) |
+| ARS | `ACShowArsPacket` 0x006 (`FUN_393d0c60`: number + timeout ms) | phone callback (provider seam, below) |
+
+The client's login UI listens for `OPEN_OTP` / `OPEN_PCCERT` and calls `X2.SendOtpNumber` /
+`X2.SendPcCertNumber` (`ui/game/scriptsbin/x2ui/loginstage/login/login.alb`), so the prompts work
+on the Trion path too.
+
+Configuration (`TwoFactor` section; all settings optional):
+
+```json
+"TwoFactor": {
+    "EnforceOnPasswordLogin": true,
+    "MaxOtpFailures": 5,
+    "OtpLockoutMinutes": 15
+}
+```
+
+- `EnforceOnPasswordLogin` (default `true`): an account that enabled 2FA must present it after a
+  correct password. `false` restores the old behaviour where only the Korea flow asked for it.
+- `MaxOtpFailures` (default 5) and `OtpLockoutMinutes` (default 15): the OTP failure counter is
+  **per account**, shared by all connections, so reconnecting cannot reset it; the failure that
+  reaches the limit locks the account until the lockout expires. `0` disables the lock.
+- A replayed TOTP code is refused: the last accepted 30-second time step is recorded per account.
+  Replays are not counted as failures (someone who saw one code could otherwise lock the account).
+
+Never log OTP or ARS codes; the server logs account ids, outcomes and masked phone numbers only.
+
+To enrol an account, insert its Base32 TOTP secret (`OtpService::generate_secret` produces a
+160-bit secret) and mark it verified:
+
+```sql
+INSERT INTO user_2fa (user_id, enabled_methods, otp_secret, otp_verified, created_at, updated_at)
+VALUES (<users.id>, 1, '<BASE32_SECRET>', 1, UNIX_TIMESTAMP(), UNIX_TIMESTAMP())
+ON DUPLICATE KEY UPDATE enabled_methods = 1, otp_secret = VALUES(otp_secret), otp_verified = 1;
+```
+
+The ARS phone call is a seam: `ArsPhoneProvider` (`src/services/two_factor.rs`) with a disabled
+default (`DisabledArsPhoneProvider`) that places no call. An operator integration supplies the
+trait implementation; the session code itself must never be logged.
+
 ### Create Configuration File
 
 1. Create a file named `Config.Local.json` next to `Config.json` in the application directory
