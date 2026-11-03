@@ -58,6 +58,7 @@ pub mod error_message {
     pub const BACKPACK_OCCUPIED: i16 = 315;
     pub const COFFER_IN_USE: i16 = 329;
     pub const STORE_BACKPACK_NOGOODS: i16 = 361;
+    pub const STORE_ONE_TIME_SALE: i16 = 752;
 }
 
 /// `Item.Coins` (`DoodadFuncLootItem.ItemId == 500` gives money).

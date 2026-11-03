@@ -29,6 +29,8 @@
 //! expectattach <point>              fail unless SCUnitAttached for us at that point
 //! expecterror <code>                fail unless SCErrorMsg with that code
 //! dcast <skill> <doodad template>    doodad-target CSStartSkill
+//! buycoin <doodad template> <func>   CSBuyCoinItemPacket (DoodadFuncPurchase) and print the reply
+//! buycoinraw <doodad template> <func>  same without draining (the caller asserts the reply)
 //! item <template> <count>            `/item add self` and remember the stack id / slot
 //! equip <template> <slot>            move the remembered stack to equipment slot `slot` (26 = back)
 //! moveitem <id> <ftype> <fslot> <ttype> <tslot>  CSSwapItemsPacket with an explicit item id
@@ -911,6 +913,35 @@ async fn run_lines(
             c if c.starts_with('m') && super::music::is_command(c) => {
                 let args = split_quoted(rest)?;
                 super::music::command(game, &mut music, c, &args).await?;
+            }
+            "buycoin" | "buycoinraw" => {
+                let tpl: u32 = num(&parts, 0)?;
+                let func: u32 = num(&parts, 1)?;
+                let me = game.state.self_pos;
+                let d = game
+                    .state
+                    .doodads
+                    .values()
+                    .filter(|d| d.template_id == tpl)
+                    .min_by(|a, b| dist(a.pos, me).total_cmp(&dist(b.pos, me)))
+                    .cloned()
+                    .with_context(|| format!("doodad {tpl} not in sight"))?;
+                if d.parent_obj_id == 0 {
+                    clock += 1500;
+                    game.move_to((d.pos.0 + 1.0, d.pos.1, d.pos.2), clock)
+                        .await?;
+                }
+                let mut b = aaemu_commons::PacketStream::new();
+                b.write_bc(d.obj_id).write_u32(func);
+                game.send_cs(aaemu_game::opcodes::cs::CSBuyCoinItemPacket, b.as_bytes())
+                    .await?;
+                if cmd == "buycoinraw" {
+                    continue;
+                }
+                let got = game
+                    .drain(Duration::from_millis(1500), Duration::from_secs(8))
+                    .await?;
+                show(&got);
             }
             "item" => {
                 let tpl: u32 = num(&parts, 0)?;
