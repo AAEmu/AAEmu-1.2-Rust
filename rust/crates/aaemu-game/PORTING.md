@@ -360,7 +360,7 @@ connected by `systems::economy::wiring`).
 | `Models/Game/Items/Actions/*` (every `ItemTask`, `ItemAction`, `ItemTaskType`), `SCItemTaskSuccessPacket`, `SCSyncItemLifespanPacket`, `SCUnitEquipmentsChangedPacket`, `SCInvenExpandedPacket`, `SCGamePointChangedPacket`, `SCCharacterLaborPowerChangedPacket` | `models/item_task.rs`, `systems/economy/item_packets.rs` | done | Tasks snapshot the item when created (the C# encodes on `SendPacket`). |
 | `ItemContainer`, `EquipmentContainer`, `MateEquipmentContainer`, `CofferContainer` | `models/container.rs` | done | `AddOrMoveExistingItem` (new / moved / same container), `RemoveItem`, `ConsumeItem`, `AcquireDefaultItem(Ex)` (timers, charges, crafter), `SpaceLeftForItem`, `ApplyBindRules`, `Wipe`, `ReNumberSlots`, coffer `CanAccept`, `OnEnter/LeaveContainer` events. |
 | `Inventory` (SplitOrMoveItem(Ex), 2H weapon handling, backpacks, ExpandSlot, coffers, ConsumeItem, counts), `Character` money / game points / labor / `ItemUse` / `SendErrorMessage`, `ErrorMessageType` | `systems/economy/inventory.rs`, `error_message.rs` | done | `ChangeLabor`'s `AddExp` is a hook (`ProgressionHooks`). |
-| Core item C2G (`CSSwapItems`, `CSSplitBagItem`, `CSDestroyItem`, `CSExpandSlots`, `CSDeposit/WithdrawMoney`, `CSSplit/SwapCofferItem(s)`, `CSItem(Un)Secure`, `CSEquipments(Un)Secure`, `CSThisTimeUnpackItem`) | `systems/economy/item_handlers.rs` | done | Deposit / withdraw require a positive amount and a banker NPC (the `banker` template flag) within 5 m of the current interaction object (the C# did neither). |
+| Core item C2G (`CSSwapItems`, `CSSplitBagItem`, `CSDestroyItem`, `CSExpandSlots`, `CSDeposit/WithdrawMoney`, `CSSplit/SwapCofferItem(s)`, `CSItem(Un)Secure`, `CSEquipments(Un)Secure`, `CSThisTimeUnpackItem`) | `systems/economy/{item_handlers,item_security}.rs` | done | Deposit / withdraw require a positive amount and a banker NPC (the `banker` template flag) within 5 m of the current interaction object (the C# did neither). The four secure packets are implemented from the 1.2 client (the C# only logged them); see the item-lock deviation. |
 | `ItemManager` (all templates / tables, user items, `Create`, timers, `UnwrapItem`, auction search helpers, loot convert fish), `ItemGameData`, `ItemConversionGameData`, `FishDetailsGameData`, item model stats (durability, repair cost, attributes, DPS, armor), procs | `data/items.rs`, `managers/item.rs`, `models/item.rs`, `systems/economy/{items_data,item_timers,procs}.rs` | done | `ItemManager` lists are leaf locks (snapshot before locking containers). Procs are a new feature (the C# never fired one; see the item-procs deviation). |
 | `LootGameData`, `Models/Game/Items/Loots/**`, `LootingContainer`, loot packets | `systems/economy/{loot_data,loot,looting,loot_packets}.rs` | done | NPC death / despawn / team rules through `LootNpcHooks`, `LootTeamHooks`, `LootQuestHooks`. |
 | Repair (`Character.DoRepair`, `CSRepairSingleEquipment`, `CSRepairAllEquipments`), durability loss | `systems/economy/repair.rs` | done | Combat calls `on_damage_taken` / `on_death`. |
@@ -1359,6 +1359,33 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * systems::economy: item operations are serialised by the economy operation lock (`ItemTxn`) and
   their packets / quest events are flushed after the container locks are released, in the C#
   order; character packets sent during an operation go through the same queue (`Out`).
+* systems::economy (item lock, 2026-11-03): the C# only logged `CSItemSecure`, `CSItemUnsecure`,
+  `CSEquipmentsSecure` and `CSEquipmentsUnsecure`; Rust implements them from the 1.2 client. The
+  client sends `CSItemSecure`/`CSItemUnsecure` for one bag item and the equipment pair for the
+  whole equipped set (`FUN_394ea660`, `FUN_394ea730`, `FUN_394e5dd0`, `FUN_394e5ea0`). Only
+  items in an `item_categories.secure` category and not listed in `item_secure_exceptions` can be
+  locked (`FUN_394df4a0`; the 1.2 DB has 135 secure categories and the single exception row
+  3006, an item absent from the 1.2 `items` table). Locking sets `ItemFlag.Secure`; unlocking
+  sets `unsecure_time = now + content_configs[43] * 60` (the client's
+  `X2Item.GetSecurityUnlockDelayTime` reads `FUN_395720e0(0x2b)`; its dialogs divide the value
+  by 60 to print hours, so the 1.2 value 4320 is 4320 minutes = 72 hours) and keeps the flag, so
+  the item stays locked until `UpdateItemTimers` clears it and sends `ITEM_UNLOCK_EXCESS`. The reply task is `SCItemTaskSuccessPacket` with `ItemUpdateSecurity`;
+  the `isUnsecureExcess` / `isUnSecureSet` / `isUnpack` combination is inferred from the client's
+  userdata field names and the `ITEM_LOCK` / `ITEM_UNLOCK` / `ITEM_UNLOCK_EXCESS` task types
+  (**CAPTURE-PENDING**, case item-lock-flow: no 1.2 capture of these server replies exists yet).
+  A locked item is refused by the NPC store sale, specialty-pack sale, player trade put-up and
+  completion, mail attachment (mail result `ITEM_LOCKED` 26), auction put-up, destroy, item-look
+  conversion, disenchant, split/merge/move/swap (the client's drag validation returns 664 for
+  either side, `FUN_390455d0`/`FUN_39045850`), coffer moves, locked design/furniture placement,
+  regrade and lunagem targets, and putting down or dropping a locked trade pack, with
+  `item_secure_condition` (664; the 10.x zone server uses 664 for the same item operations).
+  `ItemContainer::ConsumeItem` skips locked stacks; crafting, quest hand-ins and reagent checks
+  no longer count them, and a cast whose only reagent stacks are locked is refused with the
+  client's `SkillResult.ItemLocked` (0x25). `CSEquipmentsSecure` locks every equipment slot
+  including slot 26: the client's `FUN_394e5dd0` loops that slot too (the special `0x1a` entry),
+  and it checks the flag rather than the item category, so the server mirrors that. The lock
+  handlers send their error after the bag lock is released. Equip/unequip of a locked item is
+  refused by the same move guard (the client's drag check covers it).
 * systems::economy (item procs, 2026-11): procs fire where the C# never did. Sources, rebuilt
   by the gear-bonus pass (`apply_gear_buffs` -> `procs::refresh`, so equip / unequip, login,
   repair, gear break and gem changes all refresh them): set
@@ -2956,6 +2983,59 @@ and in NPC wandering / buff remaining times.
   `..a_rotated_house_uses_the_clients_snapped_axis_aligned_box`,
   `..two_house_builds_at_the_same_spot_race_and_one_wins`; the real 1.2 polygon and
   `max_construct_count` row are checked by the gated test above.
+* systems::housing (2026-11-03, build / decoration / purchase guards): the C# `Build`,
+  `DecorateHouse`, `SetForSale` and `BuyHouse` had no range, height, tax or buyer eligibility
+  checks (the C# TODOs "validate house by range", "validation position and some range",
+  "check tax due maybe ?"). Each player entry path now applies the 1.2 checks that exist:
+  - `CSCreateHouse` / `CSConstructHouseTax`: the caster must be within the placed house's
+    `garden_radius + 30 m` (3-D) of the target (`FUN_39333d40`; the 1.2 constant
+    `_DAT_399cf898` at `0x399cf898` is 30.0) -> `TOO_FAR_AWAY` 154. The Z must be within
+    100 m of the heightmap (`WorldInstance.GetHeight`); above/below -> `house_cannot_locate_
+    terrain_too_high` 115 / `..._too_low` 116. The game data has no vertical tolerance, so
+    the 100 m guard only refuses clearly impossible forged packets (sea farms and the
+    client's auto-Z pass). With no heightmaps installed the check is skipped. **Capture-
+    pending HOUSE-2:** the client's real slope rule samples the turned ghost model box
+    (`FUN_39332180` / `FUN_39337fb0`, 6 m spread) and cannot be reproduced without render-
+    model bounds; **HOUSE-1:** `FUN_39333d40` adds the radius at desc `+0x40`, the server uses
+    `garden_radius` (never smaller in the shipped data).
+  - `CSDecorateHouse`: 30 m from the caster to the house-local target (`FUN_393a8fa0`
+    refuses only `900.0 < d²`, i.e. exactly 30 m is allowed; the 1.2 table has
+    `too_far_to_decorate_house` 199) -> 199; the target must stay in the house's garden
+    square used by `GetHouseAtLocation` (`|x|,|y| <= garden_radius`) -> `house_cannot_
+    decorate_out_of_garden` 289; the overall `deco_limit` / `absolute_deco_limit` cap ->
+    `house_too_many_decorations` 124 and the `housing_deco_limit_elems` act-ability group
+    cap -> `acatbility_deco_arrang_fail` 629 (the codes of the client's own
+    `CanDecorateHouse`); a house still under construction / another instance ->
+    `house_not_decoratable_state` 123; malformed pose / wrong parent / denied interaction ->
+    `house_cannot_decorate` 122. **Capture-pending HOUSE-6:** decoration surface/overlap and
+    the vertical floor/ceiling window are not checked (the client's checkers are not
+    decoded); the server is permissive there.
+  - `CSBuyHouse`: the buyer must be within 30 m of the house (the sale window comes from the
+    name plaque; 154). **Capture-pending HOUSE-5:** the exact 1.2 interaction range (the
+    10.x house list uses 18 m). The buyer must pass the same account group/category rules as
+    a builder (`validate_groups`: `houseless` 615, `existing_category_id` 616,
+    `max_construct_count` 766), so buying cannot bypass a construction limit; the house's
+    present area/group is used. **Capture-pending HOUSE-3:** retail purchase eligibility and
+    faction/dominion rules (the C# had none; the client table has no purchase-specific
+    eligibility text, so the construction codes are reused) and **HOUSE-4:** a buy-specific
+    overdue-tax answer (none exists in the 1.2 table; the seller's is 645).
+  - `CSSetHouseForSale`: a player seller is refused when not the owner (642), while the
+    house is under construction (668), when the tax bill is already due (645), when the
+    template is not sellable (644), for an unknown designated buyer (648), for a zero price
+    (650), and when a *different* listing is already active (646; the same price/buyer stays
+    idempotent). GM calls with `seller == None` (`/test_house sale`, `/test_house cancel`)
+    keep the old checks and bypass the new ones; `/build_house` uses `manager::create`
+    directly and bypasses placement, as do forts, preset and DB-loaded houses.
+  - Tests (each mutation-checked by reverting the guard): `placement_flow_tests::
+    a_build_request_from_far_away_is_refused_with_too_far_away`,
+    `..a_house_z_far_above_or_below_the_terrain_is_refused`,
+    `..a_purchase_from_far_away_is_refused_with_too_far_away`,
+    `..a_purchase_that_would_exceed_the_accounts_group_limit_is_refused`;
+    `access_tests::decoration_from_far_away_is_refused_with_too_far_to_decorate_house`,
+    `..decoration_outside_the_garden_is_refused`,
+    `..decoration_over_the_house_limit_reports_too_many_decorations`,
+    `..delayed_tax_blocks_sale_listing`, `..an_under_construction_house_cannot_be_listed`,
+    `..a_listed_house_cannot_be_relisted_at_another_price`.
 * systems::housing: abandoned-house removal buff 2250 now applies its original effect
   1876 through the normal damage path. C# rejected the house attacking itself, so the
   building never decayed. Only the active server-owned removal tick on that same unowned

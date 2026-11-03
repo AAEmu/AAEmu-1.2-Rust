@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use crate::data::items::{backpack_type, bind_type, ItemData, ItemTemplate, TemplateKind};
 use crate::managers::id::IdManager;
 use crate::managers::item::ItemManager;
-use crate::models::item::{Item, UnixTime, ITEM_FLAG_SOUL_BOUND};
+use crate::models::item::{Item, UnixTime, ITEM_FLAG_SECURE, ITEM_FLAG_SOUL_BOUND};
 use crate::models::item_task::{task_type, ItemFx, ItemFxList, ItemTask};
 
 /// `SlotType`.
@@ -279,10 +279,28 @@ impl ItemContainer {
 
     /// `GetAllItemsByTemplate` -> (items, units).
     pub fn items_by_template(&self, template_id: u32, grade: i32) -> (Vec<u64>, i32) {
+        self.items_by_template_filtered(template_id, grade, false)
+    }
+
+    /// [`items_by_template`](Self::items_by_template) without the secured stacks: locked items
+    /// cannot pay a consumption, hand-in or reagent (`ItemFlag.Secure`).
+    pub fn items_by_template_unlocked(&self, template_id: u32, grade: i32) -> (Vec<u64>, i32) {
+        self.items_by_template_filtered(template_id, grade, true)
+    }
+
+    fn items_by_template_filtered(
+        &self,
+        template_id: u32,
+        grade: i32,
+        unlocked_only: bool,
+    ) -> (Vec<u64>, i32) {
         let mut ids = Vec::new();
         let mut units = 0;
         for i in &self.items {
-            if i.template_id == template_id && (grade < 0 || grade == i32::from(i.grade)) {
+            if i.template_id == template_id
+                && (grade < 0 || grade == i32::from(i.grade))
+                && !(unlocked_only && i.has_flag(ITEM_FLAG_SECURE))
+            {
                 ids.push(i.id);
                 units += i.count;
             }
@@ -811,16 +829,16 @@ impl ItemContainer {
         preferred_item: Option<u64>,
         env: &mut ItemEnv<'_>,
     ) -> i32 {
-        let (mut found, _) = self.items_by_template(template_id, -1);
+        let (mut found, _) = self.items_by_template_unlocked(template_id, -1);
         if found.is_empty() {
             return 0; // Nothing found
         }
         let mut total = 0;
         let mut tasks = Vec::new();
         if let Some(pid) = preferred_item {
-            // Preferred item template did not match / is not in this container
+            // Preferred item template did not match / is not in this container, or it is locked.
             match self.get_item_by_id(pid) {
-                Some(p) if p.template_id == template_id => {}
+                Some(p) if p.template_id == template_id && !p.has_flag(ITEM_FLAG_SECURE) => {}
                 _ => return 0,
             }
             if amount > 0 {

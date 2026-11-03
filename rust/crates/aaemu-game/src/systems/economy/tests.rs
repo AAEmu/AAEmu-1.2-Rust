@@ -150,6 +150,7 @@ pub fn world_with(data: GameData) -> World {
 /// NPC templates of the bank / auction service tests.
 pub const BANKER_TEMPLATE: u32 = 7001;
 pub const AUCTIONEER_TEMPLATE: u32 = 7002;
+pub const MERCHANT_TEMPLATE: u32 = 7003;
 
 struct ServiceNpcs;
 impl crate::systems::economy::hooks::NpcEconomyHooks for ServiceNpcs {
@@ -162,6 +163,7 @@ impl crate::systems::economy::hooks::NpcEconomyHooks for ServiceNpcs {
         Some(crate::systems::economy::hooks::NpcShopInfo {
             banker: t == BANKER_TEMPLATE,
             auctioneer: t == AUCTIONEER_TEMPLATE,
+            merchant: t == MERCHANT_TEMPLATE,
             ..Default::default()
         })
     }

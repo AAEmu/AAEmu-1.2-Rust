@@ -9,7 +9,7 @@ use std::time::Duration;
 use crate::data::items::bind_type;
 use crate::models::container::{expire_item, slot_type, ContainerRef, MIN_DATE_TIME};
 use crate::models::item::{Item, ITEM_FLAG_UNPACKED};
-use crate::models::item_task::task_type;
+use crate::models::item_task::{task_type, ItemFx};
 use crate::server::GameServer;
 use crate::world::{PlayerRef, WorldObject};
 
@@ -153,6 +153,17 @@ pub fn update_item_container_timers(
                     .fx
                     .push(expire_item(item).with_owner(player.character_id));
                 c.remove_item_task(task_type::LIFESPAN_EXPIRATION, id, true, &mut txn.env);
+                continue;
+            }
+            // A pending unlock whose delay has elapsed: clear the lock and tell the client
+            // (`ITEM_UNLOCK_EXCESS`).
+            if let Some(task) = super::item_security::finalize_expired(item, now) {
+                txn.env.fx.push(ItemFx::Tasks {
+                    owner: player.character_id,
+                    task: task_type::ITEM_UNLOCK_EXCESS,
+                    tasks: vec![task],
+                    force_remove: Vec::new(),
+                });
             }
         }
         let _ = owner;

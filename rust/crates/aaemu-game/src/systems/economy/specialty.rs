@@ -309,6 +309,9 @@ pub fn sell_specialty(server: &GameServer, p: &PlayerRef, npc_obj_id: u32) -> i3
         inventory::send_error_message(p, error_message::STORE_BACKPACK_NOGOODS, 0, true);
         return base_price;
     };
+    if super::item_security::refuse_if_locked(p, &backpack) {
+        return base_price;
+    }
     let Some(npc) = parent_world(server, p).and_then(|w| w.npc(npc_obj_id)) else {
         return base_price;
     };

@@ -41,7 +41,9 @@
 //!                                    item); fails unless the expected error (and no result) or
 //!                                    an `SCGradeEnchantResult` arrives.
 //! waitpeer [secs] [name]             read packets until another player is in sight (60 s default)
-//! rawcs <opcode hex> [<body hex>]    send any client packet (`SELF` / `PEER` in the body hex)
+//! rawcs <opcode hex> [<body hex>]    send any client packet (`SELF` / `PEER` / `ITEM(<template>)`
+//!                                    in the body hex)
+//! rawcsend <opcode hex> <body hex>   send it without draining (the caller asserts the reply)
 //! rawcswait <opcode hex> <body hex> <PacketName> [secs]
 //!                                    send it and fail unless that packet answers (default 5 s)
 //! pkill [name]                       `/kill` with the peer targeted (GM)
@@ -1410,7 +1412,7 @@ async fn run_lines(
                 let got = gm_command(game, "kill").await?;
                 show(&got);
             }
-            "rawcs" | "rawcswait" => {
+            "rawcs" | "rawcswait" | "rawcsend" => {
                 let opcode = u16::from_str_radix(parts.first().context("opcode")?, 16)?;
                 // `SELF` / `PEER` stand for our own / the first other player's object id in
                 // the packet's `bc` encoding.
@@ -1430,9 +1432,26 @@ async fn run_lines(
                 } else {
                     String::new()
                 };
-                let hex = raw
+                let mut hex = raw
                     .replace("SELF", &bc(game.state.self_obj))
                     .replace("PEER", &peer_bc);
+                // `ITEM(<template>)` expands to the stack id remembered by
+                // `item <template>`, little-endian, so a packet can carry the real item
+                // instance id.
+                while let Some(start) = hex.find("ITEM(") {
+                    let rest = &hex[start + 5..];
+                    let end = rest.find(')').context("ITEM( needs a closing )")?;
+                    let template: u32 = rest[..end].parse()?;
+                    let id = *items
+                        .get(&template)
+                        .with_context(|| format!("item {template} not added with `item`"))?;
+                    let bytes: String = id
+                        .to_le_bytes()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect();
+                    hex.replace_range(start..start + 5 + end + 1, &bytes);
+                }
                 anyhow::ensure!(
                     hex.len() % 2 == 0 && hex.is_ascii(),
                     "rawcs body hex must be an even number of hex digits"
@@ -1448,6 +1467,8 @@ async fn run_lines(
                         .context("rawcswait needs <PacketName> after the body")?;
                     let secs: u64 = parts.get(3).and_then(|x| x.parse().ok()).unwrap_or(5);
                     expect_packet(game, want, secs).await?;
+                } else if cmd == "rawcsend" {
+                    // Leave the reply for a following `expecterror` / `expectpkt`.
                 } else {
                     let got = game
                         .drain(Duration::from_millis(1200), Duration::from_secs(6))
