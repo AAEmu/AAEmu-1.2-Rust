@@ -72,8 +72,23 @@ impl GameServer {
                 crate::models::character::DEFAULT_INSTANCE_ID,
             );
         }
+        let names = NameManager::new(config.character_name_regex.as_deref());
+        if config.character_name_use_allowed_chars {
+            if game_data.characters.allowed_name_chars.is_empty() {
+                tracing::warn!(
+                    "CharacterNameUseAllowedChars is enabled but compact.sqlite3 has no allowed_name_chars rows; keeping the regex-only rule"
+                );
+            } else {
+                tracing::info!(
+                    "CharacterNameUseAllowedChars is enabled: the 1.2 allowed_name_chars whitelist overrides CharacterNameRegex for names it does not list (digits, Cyrillic)"
+                );
+                names.set_allowed_name_chars(
+                    game_data.characters.allowed_name_chars.iter().copied(),
+                );
+            }
+        }
         Self {
-            names: Arc::new(NameManager::new(config.character_name_regex.as_deref())),
+            names: Arc::new(names),
             chat: ChatManager::new(&ids.chat),
             ids,
             items: Arc::new(ItemManager::default()),
@@ -130,6 +145,18 @@ impl GameServer {
     /// Session ids. C# uses `RemoteEndPoint.GetHashCode()`; any unique u32 serves the same purpose.
     pub fn next_connection_id(&self) -> u32 {
         self.next_connection_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// A random nonzero reconnect token that no live session currently owns. It is handed to the
+    /// login server and the client (`SCReconnectAuth`); the login server binds it to the account
+    /// and client IP and accepts it once.
+    pub fn new_reconnect_token(&self) -> u32 {
+        loop {
+            let token = rand::random::<u32>();
+            if token != 0 && self.connections.get_by_reconnect_token(token).is_none() {
+                return token;
+            }
+        }
     }
 
     /// `LoadTask.Execute`: 0 = LOW, 1 = MIDDLE, 2 = HIGH.

@@ -214,9 +214,16 @@ impl Marshal for SCTrionConfigPacket {
     }
 }
 
-/// `SCChatSpamDelayPacket()`: an all-zero spam configuration.
+/// `SCChatSpamDelayPacket(byte version, byte[15] chatTypeGroup, float[15] chatGroupDelay,
+/// string applyConfig, string detectConfig)`. The defaults are the C# all-zero body.
 #[derive(Debug, Clone, Default)]
-pub struct SCChatSpamDelayPacket;
+pub struct SCChatSpamDelayPacket {
+    pub version: u8,
+    pub chat_type_groups: [u8; 15],
+    pub chat_group_delays: [f32; 15],
+    pub apply_config: String,
+    pub detect_config: String,
+}
 packet_def!(
     SCChatSpamDelayPacket,
     level = LEVEL_PLAIN,
@@ -225,15 +232,15 @@ packet_def!(
 
 impl Marshal for SCChatSpamDelayPacket {
     fn write(&self, s: &mut PacketStream) {
-        s.write_u8(0); // version
-        for _ in 0..15 {
-            s.write_u8(0); // chatTypeGroup
+        s.write_u8(self.version);
+        for group in self.chat_type_groups {
+            s.write_u8(group); // chatTypeGroup
         }
-        for _ in 0..15 {
-            s.write_f32(0.0); // chatGroupDelay
+        for delay in self.chat_group_delays {
+            s.write_f32(delay); // chatGroupDelay
         }
-        s.write_str("") // applyConfig
-            .write_str(""); // detectConfig
+        s.write_str(&self.apply_config) // applyConfig
+            .write_str(&self.detect_config); // detectConfig
     }
 }
 
@@ -401,7 +408,27 @@ mod tests {
     fn chat_spam_delay_layout() {
         let mut want = hex("DD 01 00 00 D3 00");
         want.extend_from_slice(&[0; 1 + 15 + 15 * 4 + 2 + 2]);
-        assert_eq!(encode(&SCChatSpamDelayPacket), want);
+        assert_eq!(encode(&SCChatSpamDelayPacket::default()), want);
+
+        // A configured packet: version 0, groups 0..14, 0.5 s / 3 s delays, two config strings.
+        let mut packet = SCChatSpamDelayPacket {
+            apply_config: "ab".into(),
+            detect_config: "c".into(),
+            ..Default::default()
+        };
+        for (i, group) in packet.chat_type_groups.iter_mut().enumerate() {
+            *group = i as u8;
+        }
+        packet.chat_group_delays[0] = 0.5;
+        packet.chat_group_delays[1] = 3.0;
+        let mut want = hex("DD 01 00 00 D3 00 00 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E");
+        let mut delays = Vec::new();
+        for delay in packet.chat_group_delays {
+            delays.extend_from_slice(&delay.to_le_bytes());
+        }
+        want.extend_from_slice(&delays);
+        want.extend_from_slice(&hex("02 00 61 62 01 00 63"));
+        assert_eq!(encode(&packet), want);
     }
 
     #[test]

@@ -560,6 +560,9 @@ impl DominionManager {
             .ok_or(DominionError::Overflow)?;
         state.owner_expedition_id = expedition_id;
         state.reign_start_at = now_seconds;
+        // A row restored while unowned must not hand a stale peace window to the new owner.
+        state.non_pvp_start_at = 0;
+        state.non_pvp_duration_min = 0;
         if !consume() {
             return Err(DominionError::Resources);
         }
@@ -1153,6 +1156,11 @@ impl DominionManager {
             if state.owner_expedition_id == expedition_id {
                 state.owner_expedition_id = 0;
                 state.reign_start_at = 0;
+                // The peace window belongs to the owner that started it; a released record
+                // is dropped on the client (0x01e), so no 0x025 is sent and a later owner
+                // must not inherit the stale window.
+                state.non_pvp_start_at = 0;
+                state.non_pvp_duration_min = 0;
             }
             let cancels_siege = state.siege.as_ref().is_some_and(|siege| {
                 siege.status != SiegeStatus::Finished

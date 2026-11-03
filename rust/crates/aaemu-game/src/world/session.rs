@@ -1235,6 +1235,22 @@ pub async fn send_chat_message(
             return;
         }
     }
+    // The 1.2 client throttles itself from `SCChatSpamDelayPacket` (`FUN_393C2540`) and shows
+    // localized message 0x108 when a message is too fast. Enforce the same limits here so a
+    // modified client cannot bypass them.
+    if !crate::systems::social::chat::chat_spam_allows(
+        &server.config.chat,
+        &mut conn.chat_spam_last,
+        chat,
+        std::time::Instant::now(),
+    ) {
+        conn.send(&SCErrorMsgPacket::new(
+            crate::systems::social::chat::CHAT_SPAM_DELAY_ERROR,
+            0,
+            true,
+        ));
+        return;
+    }
     let sender = {
         let c = me.data();
         chat_sender(&c, me.obj_id)
@@ -1553,12 +1569,14 @@ pub async fn return_to_world_list(server: &GameServer, conn: &mut GameConnection
     }
     if conn.account_id() != 0 {
         tracing::info!("Shutdown: session {} is asked for the world list", conn.id);
+        let token = server.new_reconnect_token();
+        conn.set_reconnect_token(token);
         server
             .login
             .send(&crate::login::packets::GLPlayerReconnectPacket {
                 gs_id: server.config.id,
                 account_id: conn.account_id(),
-                connection_id: conn.id,
+                token,
             });
     }
     false

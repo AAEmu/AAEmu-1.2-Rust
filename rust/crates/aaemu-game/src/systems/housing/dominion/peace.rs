@@ -58,6 +58,8 @@ pub fn start_effect(server: &GameServer, args: &EffectArgs<'_>, duration_min: i3
         state.zone_group_id,
         state.owner_expedition_id,
         duration,
+        // Wall-clock deadline shared with the client's cached end; the calendar test clock
+        // is restricted to the calendar phases, so peace windows use the real clock.
         chrono::Utc::now().timestamp(),
     ) {
         Ok(state) => {

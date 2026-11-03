@@ -117,6 +117,22 @@ fn non_pvp_expiry_clears_the_window_once_at_its_authored_end() {
 }
 
 #[test]
+fn reclaim_does_not_inherit_a_restored_non_pvp_window() {
+    let manager = DominionManager::default();
+    let mut state = DominionState::unowned(ZONE, tower());
+    state.non_pvp_start_at = 1000;
+    state.non_pvp_duration_min = 120;
+    manager.restore(vec![state]).unwrap();
+    let claimed = manager
+        .declare_unowned_with(ZONE, tower(), DEFENDER, 2000, || true)
+        .unwrap();
+    assert_eq!(
+        (claimed.non_pvp_start_at, claimed.non_pvp_duration_min),
+        (0, 0)
+    );
+}
+
+#[test]
 fn siege_requires_explicit_schedule_membership_tower_instance_and_destruction() {
     let manager = siege();
     assert!(!manager.registered_attacker(ZONE, tower(), 11, ATTACKER, 1999));

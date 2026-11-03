@@ -20,9 +20,12 @@ use crate::record::{Channel, Dir, Recorder};
 /// C2L opcodes.
 pub mod ca {
     pub const REQUEST_AUTH_TRION: u16 = 0x004;
+    pub const OTP_NUMBER: u16 = 0x008;
+    pub const PC_CERT_NUMBER: u16 = 0x00a;
     pub const LIST_WORLD: u16 = 0x00b;
     pub const ENTER_WORLD: u16 = 0x00c;
     pub const CANCEL_ENTER_WORLD: u16 = 0x00d;
+    pub const REQUEST_RECONNECT: u16 = 0x00e;
 }
 
 /// L2C opcodes.
@@ -64,9 +67,12 @@ pub fn ac_name(op: u16) -> &'static str {
 pub fn ca_name(op: u16) -> &'static str {
     match op {
         ca::REQUEST_AUTH_TRION => "CARequestAuthTrionPacket",
+        ca::OTP_NUMBER => "CAOtpNumberPacket",
+        ca::PC_CERT_NUMBER => "CAPcCertNumberPacket",
         ca::LIST_WORLD => "CAListWorldPacket",
         ca::ENTER_WORLD => "CAEnterWorldPacket",
         ca::CANCEL_ENTER_WORLD => "CACancelEnterWorldPacket",
+        ca::REQUEST_RECONNECT => "CARequestReconnectPacket",
         _ => "CAUnknown",
     }
 }
@@ -183,8 +189,35 @@ impl LoginClient {
         Ok(s)
     }
 
+    /// `CAOtpNumberPacket`: answers `ACEnterOtpPacket` with the 8-digit code.
+    pub async fn submit_otp(&mut self, code: &str) -> anyhow::Result<()> {
+        let mut s = PacketStream::new();
+        s.write_str(code);
+        self.send(ca::OTP_NUMBER, s.as_bytes()).await
+    }
+
+    /// `CAPcCertNumberPacket`: answers `ACEnterPcCertPacket` with the 8-digit PIN.
+    pub async fn submit_pc_cert(&mut self, pin: &str) -> anyhow::Result<()> {
+        let mut s = PacketStream::new();
+        s.write_str(pin);
+        self.send(ca::PC_CERT_NUMBER, s.as_bytes()).await
+    }
+
     /// `CARequestAuthTrionPacket` -> `ACJoinResponsePacket` + `ACAuthResponsePacket`.
     pub async fn auth_trion(&mut self, user: &str, password: &str) -> anyhow::Result<u32> {
+        self.auth_trion_with_otp(user, password, None).await
+    }
+
+    /// Trion login, answering an `ACEnterOtpPacket` prompt with `otp`.
+    ///
+    /// Without `otp`, an account that requires the second factor stops here with a clear error
+    /// (the server never sends the auth success).
+    pub async fn auth_trion_with_otp(
+        &mut self,
+        user: &str,
+        password: &str,
+        otp: Option<&str>,
+    ) -> anyhow::Result<u32> {
         let mut s = PacketStream::new();
         s.write_u32(0) // pFrom
             .write_u32(0) // pTo
@@ -194,6 +227,72 @@ impl LoginClient {
             .write_str("") // signature
             .write_bool(true); // isLast
         self.send(ca::REQUEST_AUTH_TRION, s.as_bytes()).await?;
+
+        let (mut op, mut packet) = self.recv().await?;
+        match op {
+            ac::ENTER_OTP => {
+                let Some(otp) = otp else {
+                    bail!("login server requested an OTP (2FA); pass --otp <code>");
+                };
+                self.submit_otp(otp).await?;
+                (op, packet) = self.recv().await?;
+            }
+            ac::ENTER_PC_CERT => {
+                bail!(
+                    "login server requested a PC certificate PIN; the testclient supports OTP only"
+                )
+            }
+            ac::SHOW_ARS => {
+                bail!("login server requested ARS phone verification; the testclient supports OTP only")
+            }
+            ac::LOGIN_DENIED => {
+                bail!("login denied (reason {})", packet.read_u8().unwrap_or(0));
+            }
+            ac::JOIN_RESPONSE => {}
+            other => bail!(
+                "expected {} but got {} (0x{other:03x})",
+                ac_name(ac::JOIN_RESPONSE),
+                ac_name(other)
+            ),
+        }
+        if op == ac::LOGIN_DENIED {
+            bail!(
+                "login denied after the OTP (reason {})",
+                packet.read_u8().unwrap_or(0)
+            );
+        }
+        if op != ac::JOIN_RESPONSE {
+            bail!(
+                "expected {} after the OTP but got {} (0x{op:03x})",
+                ac_name(ac::JOIN_RESPONSE),
+                ac_name(op)
+            );
+        }
+        let mut join = packet;
+        let reason = join.read_u16()?;
+        if reason != 0 {
+            bail!("ACJoinResponse reason {reason}");
+        }
+        let mut auth = self.expect(ac::AUTH_RESPONSE).await?;
+        self.account_id = auth.read_u32()?;
+        Ok(self.account_id)
+    }
+
+    /// `CARequestReconnectPacket` -> `ACJoinResponsePacket` + `ACAuthResponsePacket`.
+    pub async fn auth_reconnect(
+        &mut self,
+        account_id: u32,
+        gs_id: u8,
+        cookie: u32,
+    ) -> anyhow::Result<u32> {
+        let mut s = PacketStream::new();
+        s.write_u32(0) // pFrom
+            .write_u32(0) // pTo
+            .write_u32(account_id)
+            .write_u8(gs_id)
+            .write_u32(cookie)
+            .write_u16(0); // mac
+        self.send(ca::REQUEST_RECONNECT, s.as_bytes()).await?;
         let mut join = self.expect(ac::JOIN_RESPONSE).await?;
         let reason = join.read_u16()?;
         if reason != 0 {

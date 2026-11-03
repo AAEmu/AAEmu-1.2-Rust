@@ -1,7 +1,9 @@
 //! Persisted territory authority. The 1.2 calendar tables are static reference data;
-//! scheduling a siege is an explicit administrative operation, never a calendar inference.
+//! [`calendar`] derives the weekly periods from them, while scheduling a siege explicitly
+//! (GM override) remains a separate administrative operation.
 
 pub mod brief;
+pub mod calendar;
 pub mod db;
 pub mod fort;
 pub mod headquarters;

@@ -4,7 +4,6 @@
 //! database and to inspect the packets a connection sent.
 
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -26,7 +25,7 @@ use crate::packets::l2c::WorldInfo;
 use crate::packets::PacketError;
 use crate::server::LoginServer;
 use crate::services::password::Password;
-use crate::services::two_factor::{ArsService, ArsSession};
+use crate::services::two_factor::{ArsService, ArsSession, FactorValidation};
 
 /// What [`MockBackend::login`] returns.
 pub(crate) enum LoginBehavior {
@@ -44,8 +43,9 @@ pub(crate) struct MockBackend {
     pub korea_calls: Mutex<Vec<String>>,
     pub ban: Mutex<(bool, LoginDeniedReason)>,
     pub requirements: Mutex<TwoFactorRequirements>,
-    pub otp_valid: AtomicBool,
-    pub cert_valid: AtomicBool,
+    pub otp: Mutex<FactorValidation>,
+    pub cert: Mutex<FactorValidation>,
+    pub recorded_logins: Mutex<Vec<(AccountId, String, IpAddr)>>,
     pub ars: ArsService,
 }
 
@@ -60,8 +60,9 @@ impl Default for MockBackend {
             korea_calls: Mutex::default(),
             ban: Mutex::default(),
             requirements: Mutex::default(),
-            otp_valid: AtomicBool::new(false),
-            cert_valid: AtomicBool::new(false),
+            otp: Mutex::new(FactorValidation::Invalid),
+            cert: Mutex::new(FactorValidation::Invalid),
+            recorded_logins: Mutex::default(),
             ars: ArsService::default(),
         }
     }
@@ -78,6 +79,14 @@ impl MockBackend {
 
     pub fn set_ban(&self, banned: bool, reason: LoginDeniedReason) {
         *self.ban.lock().unwrap() = (banned, reason);
+    }
+
+    pub fn set_otp(&self, result: FactorValidation) {
+        *self.otp.lock().unwrap() = result;
+    }
+
+    pub fn set_cert(&self, result: FactorValidation) {
+        *self.cert.lock().unwrap() = result;
     }
 }
 
@@ -128,8 +137,8 @@ impl AuthBackend for MockBackend {
         &'a self,
         _account_id: AccountId,
         _code: &'a str,
-    ) -> BoxFuture<'a, anyhow::Result<bool>> {
-        let v = self.otp_valid.load(Ordering::SeqCst);
+    ) -> BoxFuture<'a, anyhow::Result<FactorValidation>> {
+        let v = *self.otp.lock().unwrap();
         async move { Ok(v) }.boxed()
     }
 
@@ -137,13 +146,35 @@ impl AuthBackend for MockBackend {
         &'a self,
         _account_id: AccountId,
         _pin: &'a str,
-    ) -> BoxFuture<'a, anyhow::Result<bool>> {
-        let v = self.cert_valid.load(Ordering::SeqCst);
+    ) -> BoxFuture<'a, anyhow::Result<FactorValidation>> {
+        let v = *self.cert.lock().unwrap();
         async move { Ok(v) }.boxed()
     }
 
-    fn create_ars_session(&self, account_id: AccountId, timeout_seconds: i32) -> ArsSession {
-        self.ars.create_session(account_id, timeout_seconds)
+    fn record_login<'a>(
+        &'a self,
+        account_id: AccountId,
+        username: &'a str,
+        ip: IpAddr,
+    ) -> BoxFuture<'a, anyhow::Result<()>> {
+        self.recorded_logins
+            .lock()
+            .unwrap()
+            .push((account_id, username.to_string(), ip));
+        async move { Ok(()) }.boxed()
+    }
+
+    fn create_ars_session(
+        &self,
+        account_id: AccountId,
+        timeout_seconds: i32,
+    ) -> BoxFuture<'_, anyhow::Result<ArsSession>> {
+        async move {
+            self.ars
+                .create_session(account_id, "01012345678", timeout_seconds)
+                .await
+        }
+        .boxed()
     }
 }
 
