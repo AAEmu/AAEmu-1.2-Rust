@@ -224,6 +224,84 @@ impl Default for JusticeConfig {
     }
 }
 
+/// The 1.2 chat-spam delay configuration (`Configurations/Chat.json`).
+///
+/// `SCChatSpamDelayPacket` carries 15 chat-type groups (one byte per client chat type) and one
+/// delay per group. The client caches them and refuses a message while the previous one's delay
+/// has not elapsed (native `FUN_393C2540`, localized message `0x108`). The server enforces the
+/// same values, so a modified client cannot bypass the limit.
+///
+/// The retail values are not present in `compact.sqlite3` and were not captured, so the shipped
+/// `Chat.json` keeps every delay at 0 (the previous C# behaviour, **capture-pending** case
+/// `CHAT-SPAM-1`). Set `ChatGroupDelays[i]` in milliseconds to enable the limit for group `i`;
+/// `ChatTypeGroups` maps the client's chat types `0..=14` to those groups. The server refuses a
+/// message earlier than the group delay (minus the jitter grace) with `SCErrorMsgPacket(0x108)`,
+/// the code the client's own throttle displays.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ChatConfig {
+    /// Group index for each chat type `0..=14` (default: one group per type).
+    #[serde(rename = "chattypegroups")]
+    pub chat_type_groups: Vec<u8>,
+    /// Milliseconds between two messages of a group.
+    #[serde(rename = "chatgroupdelays")]
+    pub chat_group_delays_ms: Vec<u32>,
+    /// `SCChatSpamDelayPacket.applyConfig` (retail contents unknown).
+    #[serde(rename = "applyconfig")]
+    pub apply_config: String,
+    /// `SCChatSpamDelayPacket.detectConfig` (retail contents unknown).
+    #[serde(rename = "detectconfig")]
+    pub detect_config: String,
+}
+
+impl Default for ChatConfig {
+    fn default() -> Self {
+        Self {
+            // The C# packet sent every chat type in group 0; tests use these defaults. The
+            // shipped Chat.json assigns one group per type.
+            chat_type_groups: vec![0; 15],
+            // Flow tests use the defaults: keep the limit off unless the shipped Chat.json is
+            // loaded. The file enables the public-channel delays.
+            chat_group_delays_ms: vec![0; 15],
+            apply_config: String::new(),
+            detect_config: String::new(),
+        }
+    }
+}
+
+impl ChatConfig {
+    /// Group of a client chat type (`0..=14`); out-of-range groups fall back to 0.
+    pub fn type_group(&self, chat_type: usize) -> usize {
+        self.chat_type_groups
+            .get(chat_type)
+            .map_or(chat_type, |&g| usize::from(g))
+            .min(14)
+    }
+
+    /// Delay of a group; missing entries mean "no limit".
+    pub fn delay_ms(&self, group: usize) -> u32 {
+        self.chat_group_delays_ms.get(group).copied().unwrap_or(0)
+    }
+
+    /// The 15 group bytes written by `SCChatSpamDelayPacket`.
+    pub fn packet_groups(&self) -> [u8; 15] {
+        let mut out = [0u8; 15];
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = self.type_group(i) as u8;
+        }
+        out
+    }
+
+    /// The 15 delays (seconds) written by `SCChatSpamDelayPacket`.
+    pub fn packet_delays(&self) -> [f32; 15] {
+        let mut out = [0.0f32; 15];
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = self.delay_ms(i) as f32 / 1000.0;
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::config::AppConfig;
@@ -235,6 +313,7 @@ mod tests {
         for f in [
             "Configurations/Expedition.json",
             "Configurations/Justice.json",
+            "Configurations/Chat.json",
         ] {
             let text = std::fs::read_to_string(root.join(f)).expect("config file");
             let v: serde_json::Value = serde_json::from_str(&crate::config::relax_json(
@@ -272,5 +351,24 @@ mod tests {
         assert_eq!(j.jails[1].pos.y, 9566.0);
         assert!(j.keep_history && j.allow_jury_escape);
         assert_eq!(j.bot_report_prime_suspect_count, 5);
+        let c = &cfg.chat;
+        assert_eq!(c.packet_groups(), std::array::from_fn(|i| i as u8));
+        // The shipped limits are off: the retail delays are not evidenced (CHAT-SPAM-1).
+        assert!(c.chat_group_delays_ms.iter().all(|&ms| ms == 0));
+        assert!(c.packet_delays().iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    fn chat_groups_and_delays_clamp_and_fall_back() {
+        let c = super::ChatConfig {
+            chat_type_groups: vec![9, 99],
+            chat_group_delays_ms: vec![500],
+            ..Default::default()
+        };
+        assert_eq!(c.type_group(0), 9);
+        assert_eq!(c.type_group(1), 14); // clamped
+        assert_eq!(c.type_group(7), 7); // missing entry = identity
+        assert_eq!(c.delay_ms(9), 0); // missing delay = off
+        assert_eq!(c.packet_groups()[1], 14);
     }
 }
