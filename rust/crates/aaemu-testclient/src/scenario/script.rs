@@ -1394,9 +1394,9 @@ async fn run_lines(
                     let rest = &hex[start + 5..];
                     let end = rest.find(')').context("ITEM( needs a closing )")?;
                     let template: u32 = rest[..end].parse()?;
-                    let id = *items.get(&template).with_context(|| {
-                        format!("item {template} not added with `item`")
-                    })?;
+                    let id = *items
+                        .get(&template)
+                        .with_context(|| format!("item {template} not added with `item`"))?;
                     let bytes: String = id
                         .to_le_bytes()
                         .iter()
