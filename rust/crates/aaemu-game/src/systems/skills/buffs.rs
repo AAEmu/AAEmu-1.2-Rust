@@ -756,6 +756,7 @@ fn on_started(server: &GameServer, owner: &WorldObject, b: &Buff) {
         });
         start(server, owner, b.index);
     }
+    super::aura::on_buff_started(server, owner, &b);
     let tags = data.buff_tags(template.id);
     if (tags.contains(&tags::NO_FIGHT) || tags.contains(&tags::RETURNING)) && owner.is_unit() {
         combat::clear_all_aggro(server, owner);
@@ -831,6 +832,9 @@ fn remove_modifiers(server: &GameServer, owner: &WorldObject, buff_id: u32) {
 }
 
 fn on_removed(server: &GameServer, owner: &WorldObject, b: &Buff) {
+    // An aura / crowd source unregisters and strips what it applied before the rest of the
+    // removal behaviour runs (AURA-3 / AURA-6 / CROWD-4).
+    super::aura::on_buff_removed(server, owner, b);
     let template = full_template(server, &b.template);
     let caster = find_obj(server, b.caster_obj_id);
     if b.state == effect_state::FINISHED {

@@ -1,0 +1,43 @@
+# Aura buffs end to end: Fierce War Cry (buff 3730, radius 20 m, relation Friendly) is self-cast
+# by the GM bot; the party partner receives its slave buff 3731 (SCBuffCreated), loses it when it
+# teleports 60 m away (SCBuffRemoved), gets it back on return, and loses it when the aura ends.
+# Both bots are GM only for `/buff` and `/move`.
+suite aura buffs
+bot aura gm
+bot tester gm
+
+[aura]
+waitpeer 120 ${tester}
+partyinvite ${tester}
+await TeamJoined 30
+sync in-party 2
+targetself
+gm buff 3730
+pump 4
+sync near 2
+pump 6
+sync away 2
+pump 8
+sync back 2
+# Give the partner time to start waiting for the removal before the aura ends.
+pump 2
+gm buff -3730
+pump 2
+sync ended 2
+
+[tester]
+waitpeer 120 ${aura}
+partyaccept
+# The characters keep their last position between runs; meet the aura bot first.
+gopeer ${aura}
+sync in-party 2
+expectbuff 3731 self 15
+sync near 2
+moverel 60 0 0
+expectbuffremoved 3731 self 10
+sync away 2
+moverel -60 0 0
+expectbuff 3731 self 15
+sync back 2
+expectbuffremoved 3731 self 20
+sync ended 2

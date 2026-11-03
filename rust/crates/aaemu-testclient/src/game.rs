@@ -585,6 +585,8 @@ pub struct GameState {
     pub unit_points: HashMap<u32, (i32, i32)>,
     /// Units announced dead by `SCUnitDeathPacket` (and not removed since).
     pub dead_units: HashSet<u32>,
+    /// Buff indices per `(owner obj id, buff template id)` from `SCBuffCreated` / `SCBuffRemoved`.
+    pub buffs: HashMap<(u32, u32), HashSet<u32>>,
     /// Last `SCMateSpawnedPacket`.
     pub mate_spawned: Option<MateSpawn>,
     /// Number of `SCMateSpawnedPacket`s seen so far.
@@ -635,6 +637,24 @@ impl GameState {
             let id = s.read_u32()?;
             let name = s.read_string()?;
             st.characters.push(CharInfo { id, name });
+        } else if p.is_sc(sc::SCBuffCreatedPacket) {
+            use aaemu_game::systems::skills::types::SkillCaster;
+            let kind = s.read_u8()?;
+            SkillCaster::read(kind, &mut s)?;
+            s.read_u32()?; // caster id
+            let owner = s.read_bc()?;
+            let index = s.read_u32()?;
+            let buff = s.read_u32()?;
+            st.buffs.entry((owner, buff)).or_default().insert(index);
+        } else if p.is_sc(sc::SCBuffRemovedPacket) {
+            let owner = s.read_bc()?;
+            let index = s.read_u32()?;
+            st.buffs.retain(|(o, _), indices| {
+                if *o == owner {
+                    indices.remove(&index);
+                }
+                !indices.is_empty()
+            });
         } else if p.is_sc(sc::SCUnitStatePacket) {
             let obj_id = s.read_bc()?;
             let name = s.read_string()?;
