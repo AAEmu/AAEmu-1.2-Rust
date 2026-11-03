@@ -72,8 +72,23 @@ impl GameServer {
                 crate::models::character::DEFAULT_INSTANCE_ID,
             );
         }
+        let names = NameManager::new(config.character_name_regex.as_deref());
+        if config.character_name_use_allowed_chars {
+            if game_data.characters.allowed_name_chars.is_empty() {
+                tracing::warn!(
+                    "CharacterNameUseAllowedChars is enabled but compact.sqlite3 has no allowed_name_chars rows; keeping the regex-only rule"
+                );
+            } else {
+                tracing::info!(
+                    "CharacterNameUseAllowedChars is enabled: the 1.2 allowed_name_chars whitelist overrides CharacterNameRegex for names it does not list (digits, Cyrillic)"
+                );
+                names.set_allowed_name_chars(
+                    game_data.characters.allowed_name_chars.iter().copied(),
+                );
+            }
+        }
         Self {
-            names: Arc::new(NameManager::new(config.character_name_regex.as_deref())),
+            names: Arc::new(names),
             chat: ChatManager::new(&ids.chat),
             ids,
             items: Arc::new(ItemManager::default()),

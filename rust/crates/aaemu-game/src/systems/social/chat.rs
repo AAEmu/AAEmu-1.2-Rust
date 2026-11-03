@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::data::world_data::factions;
 use crate::managers::id::IdManager;
@@ -11,6 +12,7 @@ use crate::net::packet::ServerPacket;
 use crate::packets::world::{
     ChatSender, SCChatMessagePacket, SCJoinedChatChannelPacket, SCLeavedChatChannelPacket,
 };
+use crate::systems::social::config::ChatConfig;
 use crate::world::PlayerRef;
 
 /// `ChatType`.
@@ -33,6 +35,42 @@ pub mod chat_type {
     pub const JUDGE: i16 = 11;
     pub const ALLY: i16 = 14;
     pub const USER: i16 = 15;
+}
+
+/// `SCChatSpamDelayPacket`'s error: the 1.2 client passes localized message `0x108` when its own
+/// `FUN_393C2540` throttle refuses a message.
+pub const CHAT_SPAM_DELAY_ERROR: i16 = 0x108;
+
+/// The client's `FUN_393C2540` rate limit: chats `0..=14` map to a group, and a message is
+/// refused while the previous one's delay has not elapsed. Negative chat types (whispers) and
+/// user channels (`>= 15`) are not limited. The server keeps the same per-session `last_send`
+/// array so a modified client cannot bypass the limit.
+///
+/// The client stamps `last_send` when it sends; the server stamps it when the message arrives, so
+/// network jitter can make a stock client's message at the delay arrive early. A small grace
+/// (`min(250 ms, delay / 4)`) absorbs that without moving the boundary for a real flood.
+pub fn chat_spam_allows(
+    config: &ChatConfig,
+    last_send: &mut [Option<Instant>; 15],
+    chat_type: i16,
+    now: Instant,
+) -> bool {
+    let Ok(chat_type) = usize::try_from(chat_type) else {
+        return true;
+    };
+    if chat_type > 14 {
+        return true;
+    }
+    let group = config.type_group(chat_type);
+    let delay_ms = config.delay_ms(group);
+    let grace = Duration::from_millis(u64::from((delay_ms / 4).min(250)));
+    if let Some(last) = last_send[group] {
+        if now + grace < last {
+            return false;
+        }
+    }
+    last_send[group] = Some(now + Duration::from_millis(u64::from(delay_ms)));
+    true
 }
 
 /// `CourtRoomRegion`.
@@ -843,5 +881,107 @@ mod tests {
         assert_eq!(server.chat.user_channels.lock().unwrap().len(), 1);
         server.chat.leave_user_channels(&player, &server.ids.chat);
         assert!(server.chat.user_channels.lock().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod spam_tests {
+    use super::*;
+
+    fn config() -> ChatConfig {
+        ChatConfig {
+            chat_type_groups: vec![0, 0, 1, 1, 2, 2, 1, 2, 2, 2, 2, 2, 2, 2, 2],
+            chat_group_delays_ms: vec![1000, 3000, 0],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn chat_spam_limits_follow_the_group_delay() {
+        let cfg = config();
+        let t0 = Instant::now();
+        let mut last = [None; 15];
+        // Say (group 0): allowed, then refused inside the delay and allowed at its boundary.
+        assert!(chat_spam_allows(&cfg, &mut last, chat_type::WHITE, t0));
+        assert!(!chat_spam_allows(
+            &cfg,
+            &mut last,
+            chat_type::WHITE,
+            t0 + Duration::from_millis(500)
+        ));
+        assert!(chat_spam_allows(
+            &cfg,
+            &mut last,
+            chat_type::WHITE,
+            t0 + Duration::from_millis(1000)
+        ));
+    }
+
+    #[test]
+    fn chat_spam_grace_absorbs_network_jitter_but_not_a_flood() {
+        let cfg = config();
+        let t0 = Instant::now();
+        let mut last = [None; 15];
+        assert!(chat_spam_allows(&cfg, &mut last, chat_type::WHITE, t0));
+        // 80 ms before the 1 s delay: inside `min(250 ms, delay / 4)`.
+        assert!(chat_spam_allows(
+            &cfg,
+            &mut last,
+            chat_type::WHITE,
+            t0 + Duration::from_millis(920)
+        ));
+        // Clearly early: half the delay.
+        let t1 = Instant::now() + Duration::from_secs(10);
+        let mut last = [None; 15];
+        assert!(chat_spam_allows(&cfg, &mut last, chat_type::WHITE, t1));
+        assert!(!chat_spam_allows(
+            &cfg,
+            &mut last,
+            chat_type::WHITE,
+            t1 + Duration::from_millis(500)
+        ));
+    }
+
+    #[test]
+    fn chat_spam_keeps_groups_and_unlimited_types() {
+        let cfg = config();
+        let t0 = Instant::now();
+        let mut last = [None; 15];
+        assert!(chat_spam_allows(&cfg, &mut last, chat_type::WHITE, t0));
+        // Shout shares group 0 with say; trade (group 1) has its own window.
+        assert!(!chat_spam_allows(
+            &cfg,
+            &mut last,
+            chat_type::SHOUT,
+            t0 + Duration::from_millis(500)
+        ));
+        assert!(chat_spam_allows(
+            &cfg,
+            &mut last,
+            chat_type::TRADE,
+            t0 + Duration::from_millis(500)
+        ));
+        // Party (group 2) has no delay at all.
+        assert!(chat_spam_allows(
+            &cfg,
+            &mut last,
+            chat_type::PARTY,
+            t0 + Duration::from_millis(500)
+        ));
+        assert!(chat_spam_allows(
+            &cfg,
+            &mut last,
+            chat_type::PARTY,
+            t0 + Duration::from_millis(900)
+        ));
+        // Whisper and user channels are outside the client's limited range.
+        let slow = ChatConfig {
+            chat_group_delays_ms: vec![60_000; 15],
+            ..Default::default()
+        };
+        assert!(chat_spam_allows(&slow, &mut last, chat_type::WHISPER, t0));
+        assert!(chat_spam_allows(&slow, &mut last, chat_type::WHISPER, t0));
+        assert!(chat_spam_allows(&slow, &mut last, chat_type::USER, t0));
+        assert!(chat_spam_allows(&slow, &mut last, chat_type::USER, t0));
     }
 }
