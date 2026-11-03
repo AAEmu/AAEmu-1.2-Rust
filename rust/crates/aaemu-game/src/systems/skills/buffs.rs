@@ -620,17 +620,21 @@ pub fn buff_ab_level(
 /// `UnitHooks.on_buff_event`: the inline C# behaviour around `_effects` changes.
 pub fn on_buff_event(server: &GameServer, owner: &WorldObject, event: &BuffEvent) {
     match event {
-        BuffEvent::Started(b) | BuffEvent::Refreshed(b) => {
+        BuffEvent::Started(b) => {
             // An earlier event in the same batch can already have removed this effect.
-            if current_buff(owner, b).is_none() {
-                return;
-            }
-            if matches!(event, BuffEvent::Started(_)) {
+            if current_buff(owner, b).is_some() {
                 on_started(server, owner, b);
-            } else {
-                on_refreshed(server, owner, b);
+                remove_broken_buffs(server, owner);
             }
-            remove_broken_buffs(server, owner);
+        }
+        BuffEvent::Refreshed {
+            buff,
+            previous_caster_obj_id,
+        } => {
+            if current_buff(owner, buff).is_some() {
+                on_refreshed(server, owner, buff, *previous_caster_obj_id);
+                remove_broken_buffs(server, owner);
+            }
         }
         BuffEvent::Removed(b) => on_removed(server, owner, b),
     }
@@ -779,15 +783,16 @@ fn resume_started_buff(server: &GameServer, owner: &WorldObject, b: &Buff) -> Op
     Some(live)
 }
 
-fn on_refreshed(server: &GameServer, owner: &WorldObject, b: &Buff) {
+fn on_refreshed(server: &GameServer, owner: &WorldObject, b: &Buff, previous_caster_obj_id: u32) {
     // SetInUse(true, true) -> UpdateEffect
     let template = full_template(server, &b.template);
     start(server, owner, b.index);
     if !current_buff(owner, b).is_some_and(|live| !live.is_ended()) {
         return;
     }
-    // Re-stamp the taunt on refresh (TAUNT-1: the 10x refresh path is unknown).
-    combat::on_taunt_buff_applied(server, owner, b);
+    // Re-stamp the taunt on refresh (TAUNT-1: the 10x refresh path is unknown); a refresh by a
+    // different caster also releases the previous caster's stamp.
+    combat::on_taunt_buff_refreshed(server, owner, b, previous_caster_obj_id);
     let now = now_ms();
     let Some(gen) = set_buff(owner, b.index, |e| {
         if e.duration == 0 {
