@@ -118,6 +118,7 @@ fn bot_config_with(
         ("skill", "skill_id"),
         ("quest", "quest_id"),
         ("gs", "game_server_id"),
+        ("reconnect-cookie", "reconnect_cookie"),
     ] {
         if let Some(x) = args.get(flag) {
             obj.insert(key.into(), x.parse::<u64>()?.into());

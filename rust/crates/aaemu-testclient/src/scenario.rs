@@ -150,6 +150,9 @@ pub struct BotConfig {
     /// OTP for an account with two-factor authentication (`ACEnterOtpPacket`).
     #[serde(default)]
     pub otp: Option<String>,
+    /// `reconnect` scenario: present this cookie instead of the real token and expect a denial.
+    #[serde(default)]
+    pub reconnect_cookie: Option<u32>,
     /// Character name used when the account has none.
     pub character: String,
     /// Require creation of `character`, even if the account already has other characters.
@@ -870,6 +873,18 @@ async fn run_inner(
         ensure!(token != 0, "empty reconnect token");
         // The client then presents it to the login server on a fresh connection.
         let mut reconnect_login = LoginClient::connect(&cfg.login, r.rec.clone()).await?;
+        if let Some(forged) = cfg.reconnect_cookie {
+            match reconnect_login
+                .auth_reconnect(account_id, cfg.game_server_id, forged)
+                .await
+            {
+                Ok(_) => bail!("forged reconnect cookie {forged} was accepted"),
+                Err(_) => {
+                    r.end(s, format!("forged cookie {forged} refused"));
+                    return Ok(());
+                }
+            }
+        }
         let reconnected = reconnect_login
             .auth_reconnect(account_id, cfg.game_server_id, token)
             .await?;
