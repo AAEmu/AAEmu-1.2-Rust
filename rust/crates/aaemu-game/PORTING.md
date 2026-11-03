@@ -4401,3 +4401,24 @@ Deviation from the removed C# history: C# never placed, settled or persisted a b
 is no C# behaviour to mirror. The pre-existing `bounty_runtime.rs` design invented a 24-hour
 expiry, a placement fee and a same-account refusal; all three are gone in favour of the
 client-evidenced rules above.
+
+## Water-only skill targets (2026-11-03)
+
+`target_only_water` casts (fishing rods) are admitted against the water surface the 1.2 client
+actually sends. The client aims `target_water` / `target_only_water` casts at the water surface
+(`FUN_3942b060`, `x2game.dll.c:872033`; `FUN_394322f0`, `:877530`: both pass the surface flag to
+the target picker when either water flag is set). Its own admission check `FUN_390b43b0`
+(`x2game.dll.c:148796`) probes `(x, y, z - 0.1)` (`DAT_3999ccf0`), requires the water level
+there at or above the probe, and then requires the terrain floor under it to be at least 1 m
+below the level (`floor <= level - 1.0`, `DAT_3999c488`).
+
+The Rust port had probed `(x, y, z + 0.1)` since 668e4196 (`systems/skills/validation.rs`), so a
+surface point (the only point the client sends) landed above the water and every rod cast was
+refused with `skill_invalid_location` (0x23). `validation::in_water` now probes 0.1 m below,
+uses `collision::water_level` for the surface and `collision::terrain_height` for the floor
+(the floor rule is skipped when the collision service is off and no height is known). Tests:
+`systems::skills::cast_validation_tests::water_only_targets_probe_below_the_surface_and_need_one_metre_of_water`.
+
+Deviation from the removed C#: `SkillTemplate.TargetOnlyWater` was parsed
+(`AAEmu.Game/Core/Managers/SkillManager.cs:423`) but never read, so the C# had no water-target
+check at all; this follows only the 1.2 client.
