@@ -1324,3 +1324,432 @@ async fn private_mysql_create_limit_is_config_base_plus_purchased_slots() {
     assert_eq!(persisted_lobby_count(&pool, 1010).await, 4);
     pool.close().await;
 }
+
+// ---- lobby character edit (CSEditCharacter, pre-select period) ----
+
+fn edit_data() -> GameData {
+    use crate::data::character_templates::AbilitySupplyItem;
+    let mut data = creation_data();
+    // A second creatable race, so a forged race change reaches the equality check.
+    let mut other = data.characters.template(1, 1).unwrap().clone();
+    other.race = 3;
+    data.characters.templates.insert(19, other);
+    // Ability 1's starting kit differs from ability 7's, so a rebuild is visible.
+    data.characters.ability_items.insert(
+        1,
+        crate::data::character_templates::AbilityItems {
+            supplies: vec![AbilitySupplyItem {
+                id: 2003,
+                amount: 1,
+                grade: 0,
+            }],
+            ..Default::default()
+        },
+    );
+    data.items
+        .templates
+        .insert(2003, crate::data::items::ItemTemplate::plain(2003, 1000));
+    data
+}
+
+fn edit_ai_config() -> AppConfig {
+    let mut config = AppConfig {
+        id: 1,
+        ..AppConfig::default()
+    };
+    config.characters.pre_select_period = true;
+    config
+}
+
+fn appearance_params() -> crate::models::unit_model::UnitCustomModelParams {
+    use crate::models::unit_model::{FaceModel, UnitCustomModelParams, UnitCustomModelType};
+    UnitCustomModelParams {
+        kind: UnitCustomModelType::FACE,
+        hair_color_id: 7,
+        skin_color_id: 3,
+        model_id: 9,
+        face: Some(FaceModel::default()),
+    }
+}
+
+async fn lobby_edit(
+    server: &crate::GameServer,
+    client: &mut crate::test_support::TestClient,
+    character_id: u32,
+    request: CreateCharacterRequest,
+) -> crate::Result<()> {
+    use crate::net::registry::ClientPacket;
+    crate::packets::c2g_world::CSEditCharacterPacket {
+        character_id,
+        request,
+    }
+    .handle(server, &mut client.conn)
+    .await
+}
+
+/// The leading fields and the customizing blob of an `SCEditCharacterResponsePacket` body,
+/// spelled out from the 1.2 `Character.Write` layout (`FUN_39620030`).
+fn edit_response_appearance(body: &[u8]) -> (u32, String, u8, u8, u8, (u8, u32, u32, u32)) {
+    let mut s = aaemu_commons::PacketStream::from_bytes(body.to_vec());
+    let id = s.read_u32().unwrap();
+    let name = s.read_string().unwrap();
+    let race = s.read_u8().unwrap();
+    let gender = s.read_u8().unwrap();
+    let level = s.read_u8().unwrap();
+    s.read_i32().unwrap(); // hp
+    s.read_i32().unwrap(); // mp
+    s.read_u32().unwrap(); // zone
+    s.read_u32().unwrap(); // faction
+    let _ = s.read_string().unwrap(); // faction name
+    s.read_u32().unwrap(); // expedition
+    s.read_u32().unwrap(); // family
+    for _ in 0..28 {
+        s.read_i32().unwrap(); // equipment
+    }
+    s.read_bytes(3).unwrap(); // abilities
+    s.read_i64().unwrap(); // x
+    s.read_i64().unwrap(); // y
+    s.read_f32().unwrap(); // z
+    let kind = s.read_u8().unwrap();
+    let mut appearance = (kind, 0, 0, 0);
+    if kind >= 1 {
+        appearance.1 = s.read_u32().unwrap();
+    }
+    if kind >= 2 {
+        appearance.2 = s.read_u32().unwrap();
+        appearance.3 = s.read_u32().unwrap();
+    }
+    (id, name, race, gender, level, appearance)
+}
+
+#[tokio::test]
+#[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; temporary tables only"]
+async fn private_mysql_lobby_edit_rebuilds_and_persists_the_appearance_name_and_ability() {
+    use crate::test_support::TestClient;
+    let Some(pool) = private_lobby_pool().await else {
+        return;
+    };
+    let mut server = test_server_with_config(edit_data(), edit_ai_config());
+    server.db = pool.clone();
+    sqlx::query("INSERT INTO accounts (account_id, labor) VALUES (1007, 1000)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut client = TestClient::new(&server, 1, 1007);
+    lobby_create(&server, &mut client, creation_request("Editable"))
+        .await
+        .unwrap();
+    client.drain();
+    let id = client.conn.characters[0].id;
+    let old_items: Vec<u64> = sqlx::query_scalar("SELECT CAST(id AS UNSIGNED) FROM items")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(old_items.len(), 3, "head armor + two supplies");
+
+    let mut req = creation_request("Renamed");
+    req.model_params = appearance_params();
+    req.ability1 = 1;
+    lobby_edit(&server, &mut client, id, req).await.unwrap();
+    let frames = client.drain();
+    assert_eq!(frames.len(), 1, "exactly one response: {frames:?}");
+    assert_eq!(
+        frames[0].0,
+        crate::opcodes::sc::SCEditCharacterResponsePacket
+    );
+    let (rid, name, race, gender, level, appearance) = edit_response_appearance(&frames[0].1);
+    assert_eq!((rid, name.as_str()), (id, "Renamed"));
+    assert_eq!((race, gender, level), (1, 1, 1));
+    assert_eq!(appearance, (3, 7, 3, 9));
+
+    // Persisted: the row, the name manager and the rebuilt starting kit.
+    let (db_name, db_hair, db_ability, db_level): (String, i64, i64, i64) = sqlx::query_as(
+        "SELECT name, ORD(SUBSTRING(unit_model_params, 2, 1)), CAST(ability1 AS SIGNED), CAST(level AS SIGNED) \
+         FROM characters WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (db_name.as_str(), db_hair, db_ability, db_level),
+        ("Renamed", 7, 1, 1)
+    );
+    assert_eq!(server.names.get_character_id("Renamed"), id);
+    assert!(!server.names.name_exists("Editable"));
+    let templates: Vec<u32> = sqlx::query_scalar(
+        "SELECT CAST(i.template_id AS UNSIGNED) FROM items i JOIN item_containers ic \
+         ON ic.container_id = i.container_id WHERE ic.owner_id = ? ORDER BY i.template_id",
+    )
+    .bind(id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        templates,
+        vec![2002, 2003],
+        "ability 1's kit plus the general supplies replaced ability 7's"
+    );
+    for old in &old_items {
+        let remaining_old: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items WHERE id = ?")
+            .bind(old)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining_old, 0, "the old item row {old} is gone");
+    }
+    let skills: Vec<u32> =
+        sqlx::query_scalar("SELECT CAST(id AS UNSIGNED) FROM skills WHERE owner = ?")
+            .bind(id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(skills.contains(&18132), "ability 1's starter: {skills:?}");
+    assert!(!skills.contains(&10752), "ability 7's starter: {skills:?}");
+
+    // The lobby copy is updated, so a relist carries the edit.
+    use crate::net::registry::ClientPacket;
+    crate::packets::c2g::CSListCharacterPacket {
+        size: 0,
+        data: Vec::new(),
+    }
+    .handle(&server, &mut client.conn)
+    .await
+    .unwrap();
+    let listed = client
+        .drain()
+        .into_iter()
+        .find(|(op, _)| *op == crate::opcodes::sc::SCCharacterListPacket)
+        .expect("SCCharacterListPacket");
+    assert!(listed.1.windows(7).any(|w| w == b"Renamed"));
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; temporary tables only"]
+async fn private_mysql_lobby_edit_is_refused_outside_the_pre_select_period() {
+    use crate::test_support::TestClient;
+    let Some(pool) = private_lobby_pool().await else {
+        return;
+    };
+    let mut config = edit_ai_config();
+    config.characters.pre_select_period = false;
+    let mut server = test_server_with_config(edit_data(), config);
+    server.db = pool.clone();
+    sqlx::query("INSERT INTO accounts (account_id, labor) VALUES (1007, 1000)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut client = TestClient::new(&server, 1, 1007);
+    lobby_create(&server, &mut client, creation_request("Periodic"))
+        .await
+        .unwrap();
+    client.drain();
+    let id = client.conn.characters[0].id;
+
+    let mut req = creation_request("Periodic");
+    req.model_params = appearance_params();
+    lobby_edit(&server, &mut client, id, req).await.unwrap();
+    assert_eq!(client.drain(), vec![], "no reply outside the period");
+    let (name, hair): (String, i64) = sqlx::query_as(
+        "SELECT name, ORD(SUBSTRING(unit_model_params, 2, 1)) FROM characters WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((name.as_str(), hair), ("Periodic", 0));
+    assert_eq!(client.conn.characters[0].unit.name, "Periodic");
+    assert_eq!(client.conn.characters[0].unit.model_params.kind.0, 0);
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; temporary tables only"]
+async fn private_mysql_lobby_edit_refuses_a_character_of_another_account() {
+    use crate::test_support::TestClient;
+    let Some(pool) = private_lobby_pool().await else {
+        return;
+    };
+    let mut server = test_server_with_config(edit_data(), edit_ai_config());
+    server.db = pool.clone();
+    sqlx::query("INSERT INTO accounts (account_id, labor) VALUES (1007, 1000), (1008, 1000)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut owner = TestClient::new(&server, 1, 1007);
+    lobby_create(&server, &mut owner, creation_request("Owned"))
+        .await
+        .unwrap();
+    owner.drain();
+    let id = owner.conn.characters[0].id;
+
+    // A second account's connection with a stale/forged copy of the foreign character in its
+    // own lobby list must not be able to edit it (the copy keeps account_id 1007).
+    let mut other = TestClient::new(&server, 2, 1008);
+    other.conn.characters.push(owner.conn.characters[0].clone());
+    let mut req = creation_request("Owned");
+    req.model_params = appearance_params();
+    lobby_edit(&server, &mut other, id, req).await.unwrap();
+    assert_eq!(other.drain(), vec![], "no reply for a foreign character");
+    let (name, hair): (String, i64) = sqlx::query_as(
+        "SELECT name, ORD(SUBSTRING(unit_model_params, 2, 1)) FROM characters WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((name.as_str(), hair), ("Owned", 0));
+    assert_eq!(other.conn.characters[0].unit.model_params.kind.0, 0);
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; temporary tables only"]
+async fn private_mysql_lobby_edit_refuses_deleted_played_and_pending_deletion_characters() {
+    use crate::test_support::TestClient;
+    let Some(pool) = private_lobby_pool().await else {
+        return;
+    };
+    let mut server = test_server_with_config(edit_data(), edit_ai_config());
+    server.db = pool.clone();
+    sqlx::query("INSERT INTO accounts (account_id, labor) VALUES (1007, 1000)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut client = TestClient::new(&server, 1, 1007);
+    lobby_create(&server, &mut client, creation_request("Played"))
+        .await
+        .unwrap();
+    client.drain();
+    let id = client.conn.characters[0].id;
+    async fn assert_unchanged(
+        pool: &sqlx::MySqlPool,
+        client: &mut crate::test_support::TestClient,
+        id: u32,
+    ) {
+        let (name, hair): (String, i64) = sqlx::query_as(
+            "SELECT name, ORD(SUBSTRING(unit_model_params, 2, 1)) FROM characters WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!((name.as_str(), hair), ("Played", 0));
+        assert!(
+            client.drain().is_empty(),
+            "no reply for a refused lobby edit"
+        );
+    }
+
+    // Not in the account's lobby list (a deleted character is not listed).
+    let mut req = creation_request("Played");
+    req.model_params = appearance_params();
+    let removed = client.conn.characters.remove(0);
+    lobby_edit(&server, &mut client, id, req.clone())
+        .await
+        .unwrap();
+    assert_unchanged(&pool, &mut client, id).await;
+    client.conn.characters.push(removed);
+    assert_eq!(client.conn.characters[0].unit.name, "Played");
+
+    // Pending deletion occupies the list until deleted=1 but cannot be edited.
+    client.conn.characters[0].delete_request_time = 1_700_000_000;
+    lobby_edit(&server, &mut client, id, req.clone())
+        .await
+        .unwrap();
+    assert_unchanged(&pool, &mut client, id).await;
+    client.conn.characters[0].delete_request_time = 0;
+
+    // A character that has entered the world keeps its progress.
+    client.conn.characters[0].online_time = 5;
+    lobby_edit(&server, &mut client, id, req.clone())
+        .await
+        .unwrap();
+    assert_unchanged(&pool, &mut client, id).await;
+    client.conn.characters[0].online_time = 0;
+    client.conn.characters[0].leave_time = 1_700_000_000;
+    lobby_edit(&server, &mut client, id, req.clone())
+        .await
+        .unwrap();
+    assert_unchanged(&pool, &mut client, id).await;
+    client.conn.characters[0].leave_time = 0;
+
+    // Control: the same edit now succeeds.
+    lobby_edit(&server, &mut client, id, req).await.unwrap();
+    let frames = client.drain();
+    assert_eq!(frames.len(), 1);
+    assert_eq!(
+        frames[0].0,
+        crate::opcodes::sc::SCEditCharacterResponsePacket
+    );
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; temporary tables only"]
+async fn private_mysql_lobby_edit_refuses_a_race_change_invalid_names_and_taken_names() {
+    use crate::test_support::TestClient;
+    let Some(pool) = private_lobby_pool().await else {
+        return;
+    };
+    let mut server = test_server_with_config(edit_data(), edit_ai_config());
+    server.db = pool.clone();
+    sqlx::query("INSERT INTO accounts (account_id, labor) VALUES (1007, 1000)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut client = TestClient::new(&server, 1, 1007);
+    lobby_create(&server, &mut client, creation_request("Edited"))
+        .await
+        .unwrap();
+    client.drain();
+    let id = client.conn.characters[0].id;
+    lobby_create(&server, &mut client, creation_request("Taken"))
+        .await
+        .unwrap();
+    client.drain();
+    let taken_id = client.conn.characters[1].id;
+
+    // Race is fixed in the edit UI; a forged race change is refused even for a creatable race.
+    let mut req = creation_request("Edited");
+    req.race = 3;
+    lobby_edit(&server, &mut client, id, req).await.unwrap();
+    assert!(client.drain().is_empty());
+    let race: i64 = sqlx::query_scalar("SELECT CAST(race AS SIGNED) FROM characters WHERE id = ?")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(race, 1);
+
+    // Names: create's rules apply, including another character's name.
+    for name in ["bad name", "Taken"] {
+        let mut req = creation_request(name);
+        req.model_params = appearance_params();
+        lobby_edit(&server, &mut client, id, req).await.unwrap();
+        assert!(client.drain().is_empty(), "name {name:?} must be refused");
+        let stored: String = sqlx::query_scalar("SELECT name FROM characters WHERE id = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, "Edited");
+    }
+    assert_eq!(server.names.get_character_id("Taken"), taken_id);
+    assert_eq!(server.names.get_character_id("Edited"), id);
+
+    // Control: a valid new name is applied and swaps the name manager entries.
+    let mut req = creation_request("Fresh");
+    req.model_params = appearance_params();
+    lobby_edit(&server, &mut client, id, req).await.unwrap();
+    let frames = client.drain();
+    assert_eq!(frames.len(), 1);
+    assert_eq!(
+        frames[0].0,
+        crate::opcodes::sc::SCEditCharacterResponsePacket
+    );
+    assert_eq!(server.names.get_character_id("Fresh"), id);
+    assert!(!server.names.name_exists("Edited"));
+    pool.close().await;
+}

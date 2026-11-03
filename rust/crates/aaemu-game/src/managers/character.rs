@@ -8,12 +8,12 @@ use std::time::Duration;
 
 use chrono::Utc;
 
-use crate::data::character_templates::EquipItemsTemplate;
+use crate::data::character_templates::{CharacterTemplate, EquipItemsTemplate};
 use crate::data::items::{bind_type, ItemTemplate};
 use crate::db::get_account_details;
 use crate::db_character::{
-    check_for_deleted_characters, is_character_pending_deletion, save_new_character_locked,
-    set_delete_times,
+    check_for_deleted_characters, is_character_pending_deletion, save_edited_character_locked,
+    save_new_character_locked, set_delete_times,
 };
 use crate::error::{GameError, Result};
 use crate::managers::name::{normalize_name, CharacterCreateError};
@@ -28,7 +28,7 @@ use crate::packets::world::{
     SCDeleteCharacterResponsePacket, SCErrorMsgPacket,
 };
 use crate::server::GameServer;
-use crate::world::unit_state::create_character_response;
+use crate::world::unit_state::{create_character_response, edit_character_response};
 
 /// The number of characters this account can create. The client is told the same two parts:
 /// the login server advertises the base slots (`ACJoinResponse.afs` / `ACAuthResponse.slot_count`)
@@ -318,6 +318,180 @@ impl Drop for NewCharacter<'_> {
     }
 }
 
+/// The inputs shared by `CharacterManager.Create` and the lobby character edit. Both build the
+/// character from a `CSCreateCharacterPacket` body, so every create-time rule (race/gender
+/// template, abilities, starting kit, skills) applies to the edit too.
+struct BuildInputs<'a> {
+    server: &'a GameServer,
+    /// Already validated and normalized by the caller.
+    name: &'a str,
+    request: &'a CreateCharacterRequest,
+    template: &'a CharacterTemplate,
+    id: u32,
+    account_id: u32,
+    connection_id: u32,
+    ip: std::net::SocketAddr,
+    access_level: i32,
+    /// The create request carries the level; the edit keeps the stored one.
+    level: u8,
+    /// `None` takes the build time (create); an edit keeps the character's creation time.
+    created: Option<i64>,
+    labor_power: i16,
+    labor_power_modified: i64,
+    /// `Inventory::new` (create, the persistent containers) or `Inventory::standalone` (edit,
+    /// so a rejected edit leaves the persistent containers untouched).
+    inventory: Inventory,
+}
+
+/// Builds a lobby character exactly as `CharacterManager.Create` does: position/faction from the
+/// race/gender template, the ability's starting gear, the body items, the supplies, the
+/// actabilities and the starting skills, with the gear buffs applied.
+fn build_lobby_character(
+    inputs: BuildInputs<'_>,
+    created_items: &mut Vec<(u64, bool)>,
+) -> Result<Character> {
+    let BuildInputs {
+        server,
+        name,
+        request,
+        template,
+        id,
+        account_id,
+        connection_id,
+        ip,
+        access_level,
+        level,
+        created,
+        labor_power,
+        labor_power_modified,
+        inventory,
+    } = inputs;
+    let data = &server.game_data;
+    let mut c = Character::new(id, account_id, request.model_params.clone());
+    c.unit.name = name.to_string();
+    c.race = request.race;
+    c.gender = request.gender;
+    let sp = template.spawn_position;
+    c.unit.transform = Transform {
+        instance_id: crate::models::character::DEFAULT_INSTANCE_ID,
+        world_id: data.worlds.default_world_template_id(),
+        zone_id: sp.zone_id,
+        x: sp.x,
+        y: sp.y,
+        z: sp.z,
+        rot_x: sp.roll,
+        rot_y: sp.pitch,
+        rot_z: sp.yaw,
+        parent_obj_id: 0,
+    };
+    c.unit.level = level;
+    c.unit.faction_id = template.faction_id;
+    c.faction_name = String::new();
+    c.access_level = access_level;
+    c.labor_power = labor_power;
+    c.labor_power_modified = labor_power_modified;
+    c.num_inventory_slots = template.num_inventory_slot;
+    c.num_bank_slots = template.num_bank_slot;
+    c.inventory = inventory;
+    let now = Utc::now().timestamp();
+    c.created = created.unwrap_or(now);
+    c.updated = now;
+    c.ability1 = request.ability1;
+    c.ability2 = request.ability2;
+    c.ability3 = request.ability3;
+    c.return_district_id = template.return_district_id;
+    c.resurrection_district_id = template.resurrection_district_id;
+
+    let items = data
+        .characters
+        .ability_items
+        .get(&request.ability1)
+        .cloned()
+        .ok_or_else(|| GameError::Protocol(format!("no ability items for {}", request.ability1)))?;
+    // Every equipped piece fires `EquipmentContainer.OnEnterContainer` ->
+    // `UpdateGearBonuses(item, null)` (gear bonuses and buffs: weapon wield, armor grade, item
+    // sets). C# keeps this `Character` object, buffs and buff index counter included, in
+    // `Connection.Characters` until it is selected, so the gear buffs exist before the client
+    // ever sees the character and are not announced again on select.
+    let inv = c.inventory.clone();
+    let detached =
+        crate::net::connection::ConnectionHandle::detached(connection_id, ip, account_id);
+    let player = crate::world::Player::new(c, detached.clone());
+    let mut gear = |item: &Item| {
+        crate::systems::skills::stats::update_gear_bonuses(server, &player, Some(item), None);
+    };
+    equip_pack(server, &inv, &items.items, &mut gear, created_items);
+    for (i, &body) in request.body_items.iter().enumerate() {
+        let item = if body == 0 && template.items[i] > 0 {
+            template.items[i]
+        } else {
+            body
+        };
+        if let Some(item) =
+            set_equip_item_template(server, &inv, item, i as i32 + 19, 0, created_items)
+        {
+            gear(&item);
+        }
+    }
+    let mut c = player.data().clone();
+    drop(player);
+    // Nobody is in the world to receive these (`Character.Connection` is null in C#).
+    let _ = c.unit.buffs.take_events();
+
+    let mut slot = 10usize;
+    let bag = c.inventory.bag().clone();
+    for s in &items.supplies {
+        acquire_default_item_recorded(
+            server,
+            &bag,
+            s.id,
+            s.amount,
+            i32::from(s.grade),
+            created_items,
+        )?;
+        c.set_action(slot, ActionSlotType::ItemType, u64::from(s.id));
+        slot += 1;
+    }
+    let general = data
+        .characters
+        .ability_items
+        .get(&0)
+        .cloned()
+        .ok_or_else(|| GameError::Protocol("no ability items for ability 0".into()))?;
+    for s in &general.supplies {
+        acquire_default_item_recorded(
+            server,
+            &bag,
+            s.id,
+            s.amount,
+            i32::from(s.grade),
+            created_items,
+        )?;
+        c.set_action(slot, ActionSlotType::ItemType, u64::from(s.id));
+        slot += 1;
+    }
+
+    c.abilities = CharacterAbilities::default();
+    c.abilities.set_ability(c.ability1, 0);
+    c.actability = CharacterActability::for_new_character(&data.characters);
+
+    initialize_starting_skills(server, &mut c)?;
+
+    // character.Hp = character.MaxHp (the getters include the gear bonuses and buffs).
+    let player = crate::world::Player::new(c, detached);
+    crate::systems::skills::stats::refresh_cached_stats(
+        server,
+        &crate::world::WorldObject::from(&player),
+    );
+    let mut c = player.data().clone();
+    drop(player);
+    let _ = c.unit.buffs.take_events();
+    c.unit.hp = c.unit.max_hp;
+    c.unit.mp = c.unit.max_mp;
+    c.restore_saved_hp_mp();
+    Ok(c)
+}
+
 /// `CharacterManager.Create`.
 pub async fn create(
     server: &GameServer,
@@ -389,145 +563,32 @@ pub async fn create(
         committed: false,
     };
     server.names.add_character(id, &name, conn.account_id());
-    let mut c = Character::new(id, conn.account_id(), req.model_params.clone());
-    c.unit.name = name.clone();
-    c.race = req.race;
-    c.gender = req.gender;
-    let sp = template.spawn_position;
-    c.unit.transform = Transform {
-        instance_id: crate::models::character::DEFAULT_INSTANCE_ID,
-        world_id: data.worlds.default_world_template_id(),
-        zone_id: sp.zone_id,
-        x: sp.x,
-        y: sp.y,
-        z: sp.z,
-        rot_x: sp.roll,
-        rot_y: sp.pitch,
-        rot_z: sp.yaw,
-        parent_obj_id: 0,
-    };
-    c.unit.level = req.level;
-    c.unit.faction_id = template.faction_id;
-    c.faction_name = String::new();
-    c.access_level = access_level;
-    c.labor_power = account.labor;
-    c.labor_power_modified = crate::db::unix(account.last_updated);
-    c.num_inventory_slots = template.num_inventory_slot;
-    c.num_bank_slots = template.num_bank_slot;
-    c.inventory = Inventory::new(
+    let inventory = Inventory::new(
         id,
-        c.num_inventory_slots,
-        c.num_bank_slots,
+        template.num_inventory_slot,
+        template.num_bank_slot,
         &server.items,
         &server.ids.container,
     );
-    let now = Utc::now().timestamp();
-    c.created = now;
-    c.updated = now;
-    c.ability1 = req.ability1;
-    c.ability2 = req.ability2;
-    c.ability3 = req.ability3;
-    c.return_district_id = template.return_district_id;
-    c.resurrection_district_id = template.resurrection_district_id;
-
-    let items = data
-        .characters
-        .ability_items
-        .get(&req.ability1)
-        .cloned()
-        .ok_or_else(|| GameError::Protocol(format!("no ability items for {}", req.ability1)))?;
-    // Every equipped piece fires `EquipmentContainer.OnEnterContainer` ->
-    // `UpdateGearBonuses(item, null)` (gear bonuses and buffs: weapon wield, armor grade, item
-    // sets). C# keeps this `Character` object, buffs and buff index counter included, in
-    // `Connection.Characters` until it is selected, so the gear buffs exist before the client
-    // ever sees the character and are not announced again on select.
-    let inv = c.inventory.clone();
-    let detached =
-        crate::net::connection::ConnectionHandle::detached(conn.id, conn.ip, conn.account_id());
-    let player = crate::world::Player::new(c, detached.clone());
-    let mut gear = |item: &Item| {
-        crate::systems::skills::stats::update_gear_bonuses(server, &player, Some(item), None);
-    };
-    equip_pack(
-        server,
-        &inv,
-        &items.items,
-        &mut gear,
+    let mut c = build_lobby_character(
+        BuildInputs {
+            server,
+            name: &name,
+            request: &req,
+            template: &template,
+            id,
+            account_id: conn.account_id(),
+            connection_id: conn.id,
+            ip: conn.ip,
+            access_level,
+            level: req.level,
+            created: None,
+            labor_power: account.labor,
+            labor_power_modified: crate::db::unix(account.last_updated),
+            inventory,
+        },
         &mut creation.created_items,
-    );
-    for (i, &body) in req.body_items.iter().enumerate() {
-        let item = if body == 0 && template.items[i] > 0 {
-            template.items[i]
-        } else {
-            body
-        };
-        if let Some(item) = set_equip_item_template(
-            server,
-            &inv,
-            item,
-            i as i32 + 19,
-            0,
-            &mut creation.created_items,
-        ) {
-            gear(&item);
-        }
-    }
-    let mut c = player.data().clone();
-    drop(player);
-    // Nobody is in the world to receive these (`Character.Connection` is null in C#).
-    let _ = c.unit.buffs.take_events();
-
-    let mut slot = 10usize;
-    let bag = c.inventory.bag().clone();
-    for s in &items.supplies {
-        acquire_default_item_recorded(
-            server,
-            &bag,
-            s.id,
-            s.amount,
-            i32::from(s.grade),
-            &mut creation.created_items,
-        )?;
-        c.set_action(slot, ActionSlotType::ItemType, u64::from(s.id));
-        slot += 1;
-    }
-    let general = data
-        .characters
-        .ability_items
-        .get(&0)
-        .cloned()
-        .ok_or_else(|| GameError::Protocol("no ability items for ability 0".into()))?;
-    for s in &general.supplies {
-        acquire_default_item_recorded(
-            server,
-            &bag,
-            s.id,
-            s.amount,
-            i32::from(s.grade),
-            &mut creation.created_items,
-        )?;
-        c.set_action(slot, ActionSlotType::ItemType, u64::from(s.id));
-        slot += 1;
-    }
-
-    c.abilities = CharacterAbilities::default();
-    c.abilities.set_ability(c.ability1, 0);
-    c.actability = CharacterActability::for_new_character(&data.characters);
-
-    initialize_starting_skills(server, &mut c)?;
-
-    // character.Hp = character.MaxHp (the getters include the gear bonuses and buffs).
-    let player = crate::world::Player::new(c, detached);
-    crate::systems::skills::stats::refresh_cached_stats(
-        server,
-        &crate::world::WorldObject::from(&player),
-    );
-    let mut c = player.data().clone();
-    drop(player);
-    let _ = c.unit.buffs.take_events();
-    c.unit.hp = c.unit.max_hp;
-    c.unit.mp = c.unit.max_mp;
-    c.restore_saved_hp_mp();
+    )?;
 
     // Use persisted rows, not a connection's stale/empty lobby list. Pending deletions still
     // occupy slots until deleted=1. Keep the save lock through the subsequent commit; the next
@@ -570,6 +631,206 @@ pub async fn create(
             reason: CharacterCreateError::Failed as u8,
         });
     }
+    Ok(())
+}
+
+/// Releases the item ids an edit built until the edit commits. Unlike [`NewCharacter`] it never
+/// touches the character id, the name or the (already existing) persistent containers.
+struct EditedCharacter<'a> {
+    server: &'a GameServer,
+    created_items: Vec<(u64, bool)>,
+    committed: bool,
+}
+
+impl Drop for EditedCharacter<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.server
+                .items
+                .discard_created_items(&self.created_items, &self.server.ids.item);
+        }
+    }
+}
+
+/// `CSEditCharacter` (0x023): the lobby character edit of the pre-select period.
+///
+/// The 1.2 client sends the create body with a leading character id while the login server
+/// advertises the pre-select period (`ACJoinResponse.afs` bit 16, UI gate in
+/// `character_select.alb` and `character_create*.alb`). The edit UI fixes race and gender (only
+/// the character's own race button is enabled, `character_create_step1_view.alb`), sends the
+/// edited name from the name field, the customizing blob and the body items of the preview unit,
+/// and the ability the player picked. The build therefore re-runs character creation for the
+/// same identity: only a character that never entered the world can be edited, because the
+/// rebuild replaces its starting kit, skills and action slots.
+pub async fn edit(
+    server: &GameServer,
+    conn: &mut GameConnection,
+    character_id: u32,
+    req: CreateCharacterRequest,
+) -> Result<()> {
+    // The client only offers the edit during the period; a forged packet outside it is refused.
+    // The failure reply is UNKNOWN (the 1.2 handler `FUN_391eb910` has a success path only, and
+    // a zero character id is its only no-op), so nothing is sent (capture-pending).
+    if !server.config.characters.pre_select_period {
+        tracing::warn!(
+            "CSEditCharacter for {character_id} ignored: the pre-select period is off (Characters:PreSelectPeriod)"
+        );
+        return Ok(());
+    }
+    let data = &server.game_data;
+    let Some(template) = data
+        .characters
+        .template(req.race, req.gender)
+        .filter(|t| t.creatable)
+        .cloned()
+    else {
+        tracing::warn!(
+            "CSEditCharacter for {character_id} ignored: race {} gender {} is not a creatable pair",
+            req.race,
+            req.gender
+        );
+        return Ok(());
+    };
+    // Same lock as create: name checks, the rebuilt starting kit and the SQL commit are one
+    // critical section, so no create can take the edited name or race between the check and the
+    // write.
+    let _transaction = server.save.transaction_lock().await;
+    let Some(index) = conn
+        .characters
+        .iter()
+        .position(|c| c.id == character_id && c.account_id == conn.account_id())
+    else {
+        tracing::warn!(
+            "CSEditCharacter for {character_id} ignored: not an undeleted character of account {}",
+            conn.account_id()
+        );
+        return Ok(());
+    };
+    let stored = &conn.characters[index];
+    let stored_race = stored.race;
+    let stored_gender = stored.gender;
+    let stored_level = stored.unit.level;
+    let old_name = stored.unit.name.clone();
+    let access_level = stored.access_level;
+    let created = stored.created;
+    let labor_power = stored.labor_power;
+    let labor_power_modified = stored.labor_power_modified;
+    // Deleted and pending-deletion characters are out of the lobby list; re-check the copy the
+    // client is acting on, and treat a character that ever entered the world as played.
+    if stored.delete_request_time != 0 || stored.delete_time != 0 {
+        tracing::warn!(
+            "CSEditCharacter for {character_id} ignored: the character is being deleted"
+        );
+        return Ok(());
+    }
+    if stored.online_time != 0 || stored.leave_time != 0 {
+        tracing::warn!(
+            "CSEditCharacter for {character_id} ignored: the character has entered the world (play time {}, last leave {})",
+            stored.online_time,
+            stored.leave_time
+        );
+        return Ok(());
+    }
+    // The edit UI cannot change race or gender (`GetEditUnitRace/Gender` seed read-only buttons
+    // and only the character's own race stays enabled), so a different pair is a forged or
+    // stale packet; applying it would be a race change.
+    if req.race != stored_race || req.gender != stored_gender {
+        tracing::warn!(
+            "CSEditCharacter for {character_id} ignored: race/gender {} {} differs from the stored {} {}",
+            req.race,
+            req.gender,
+            stored_race,
+            stored_gender
+        );
+        return Ok(());
+    }
+    // The name may change: the edit UI pre-fills the existing name in the editable field and the
+    // client validates it (`XlIsValidName` in the 1.2 edit builder). Re-run create's rules when
+    // it does; an unchanged name is already registered to this character.
+    let name = normalize_name(&req.name);
+    if name != normalize_name(&old_name) {
+        let pending = if server.names.name_exists(&name) {
+            is_character_pending_deletion(&server.db, &name).await?
+        } else {
+            false
+        };
+        let code = server.names.validate_character_name_with_blocks(
+            &name,
+            &data.characters.blocked_names,
+            || pending,
+        );
+        if code != CharacterCreateError::Ok {
+            tracing::warn!(
+                "CSEditCharacter for {character_id} ignored: name {name:?} refused with reason {}",
+                code as u8
+            );
+            return Ok(());
+        }
+    }
+
+    // Build the replacement with a standalone inventory so a rejected or failed edit leaves the
+    // character's persistent containers (and their rows) as they are until the commit.
+    let mut edited = EditedCharacter {
+        server,
+        created_items: Vec::new(),
+        committed: false,
+    };
+    let inventory = Inventory::standalone(
+        character_id,
+        template.num_inventory_slot,
+        template.num_bank_slot,
+    );
+    let mut c = build_lobby_character(
+        BuildInputs {
+            server,
+            name: &name,
+            request: &req,
+            template: &template,
+            id: character_id,
+            account_id: conn.account_id(),
+            connection_id: conn.id,
+            ip: conn.ip,
+            access_level,
+            // The client sends level 1 for both create and edit; the stored level is what the
+            // row must keep (a never-played character is level 1).
+            level: stored_level,
+            created: Some(created),
+            labor_power,
+            labor_power_modified,
+            inventory,
+        },
+        &mut edited.created_items,
+    )?;
+
+    // The persistent containers the character keeps; the save writes the rebuilt items into
+    // their ids and the commit replaces the in-memory contents.
+    let persistent = Inventory::new(
+        character_id,
+        c.num_inventory_slots,
+        c.num_bank_slots,
+        &server.items,
+        &server.ids.container,
+    );
+    let batch = server
+        .items
+        .prepare_rebuilt_batch(&c.inventory, &persistent);
+    if !save_edited_character_locked(server, &mut c, batch).await {
+        // The transaction rolled back; the guard releases the rebuilt item ids. Nothing was
+        // sent (capture-pending failure reply).
+        tracing::error!("CSEditCharacter for {character_id} failed: the database save failed");
+        return Ok(());
+    }
+    edited.committed = true;
+    if name != normalize_name(&old_name) {
+        server.names.rename_character(character_id, &name);
+    }
+    server
+        .items
+        .commit_rebuilt_containers(&c.inventory, &persistent);
+    c.inventory = persistent;
+    let resp = edit_character_response(&c);
+    conn.characters[index] = c;
+    conn.send(&resp);
     Ok(())
 }
 

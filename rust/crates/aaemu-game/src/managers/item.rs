@@ -206,13 +206,86 @@ impl ItemManager {
             c.items.clear();
             container_ids.release_id(c.container_id as u32);
         }
+        self.discard_created_items(created_items, item_ids);
+    }
+
+    /// Releases the item ids a rejected lobby edit allocated. The items live in standalone
+    /// containers that were never registered, so only the ids are freed; a deletion the
+    /// allocation cancelled is restored first (another owner can queue/release an id during
+    /// setup).
+    pub(crate) fn discard_created_items(
+        &self,
+        created_items: &[(u64, bool)],
+        item_ids: &IdManager,
+    ) {
         for &(id, canceled_deletion) in created_items {
-            // Captured at allocation: another owner can queue/release an ID during setup.
-            // Restore its canceled deletion before freeing the ID for another operation.
             if canceled_deletion {
                 self.mark_for_db_deletion(id);
             }
             item_ids.release_id(id as u32);
+        }
+    }
+
+    /// The save batch of a lobby edit: the items the rebuild created, written into the
+    /// character's persistent container ids. The edit's transaction deletes the old rows first
+    /// (`save_edited_character_locked`), and the caller installs the same items in memory with
+    /// [`Self::commit_rebuilt_containers`] after the commit.
+    pub(crate) fn prepare_rebuilt_batch(
+        &self,
+        built: &crate::models::character::Inventory,
+        persistent: &crate::models::character::Inventory,
+    ) -> ItemSaveBatch {
+        let mut batch = ItemSaveBatch::default();
+        for (_, container) in &persistent.containers {
+            let snapshot = container.lock().expect("container poisoned").clone();
+            if snapshot.slot_type != slot_type::NONE && snapshot.container_id > 0 {
+                batch
+                    .containers
+                    .push((container.clone(), ContainerSaveRow::of(&snapshot)));
+            }
+        }
+        for (slot, source) in &built.containers {
+            let Some((_, target)) = persistent.containers.iter().find(|(s, _)| s == slot) else {
+                continue;
+            };
+            let container_id = target.lock().expect("container poisoned").container_id;
+            if container_id == 0 {
+                continue;
+            }
+            let items = source.lock().expect("container poisoned").items.clone();
+            for item in items {
+                batch.items.push((None, container_id, item));
+            }
+        }
+        batch
+    }
+
+    /// Replaces the in-memory contents of the character's persistent containers with the
+    /// rebuilt ones (the edit's transaction wrote exactly these rows and deleted the old items).
+    pub(crate) fn commit_rebuilt_containers(
+        &self,
+        built: &crate::models::character::Inventory,
+        persistent: &crate::models::character::Inventory,
+    ) {
+        for (slot, target) in &persistent.containers {
+            let items = built
+                .containers
+                .iter()
+                .find(|(s, _)| s == slot)
+                .map(|(_, c)| {
+                    let mut c = c.lock().expect("container poisoned");
+                    std::mem::take(&mut c.items)
+                })
+                .unwrap_or_default();
+            let mut target = target.lock().expect("container poisoned");
+            target.items.clear();
+            for mut item in items {
+                item.dirty = false;
+                target.items.push(item);
+            }
+            // The container row itself did not change; only its items were replaced.
+            target.dirty = false;
+            target.update_free_slot_count();
         }
     }
 

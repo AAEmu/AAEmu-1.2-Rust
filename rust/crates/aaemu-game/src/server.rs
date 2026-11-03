@@ -65,6 +65,14 @@ impl GameServer {
             "Character slots: base {} per account (purchased extra_character_slots are added); the login server's Login:MaxCharactersPerAccount must match",
             config.characters.max_per_account
         );
+        tracing::info!(
+            "Character pre-select period {}; the login server's Login:PreSelectCharacterPeriod must match",
+            if config.characters.pre_select_period {
+                "on"
+            } else {
+                "off"
+            }
+        );
         let ids = Arc::new(IdManagers::default());
         let world = Arc::new(WorldManager::default());
         let reply_delay = ReplyDelay::resolve(&config.debug.reply_delay);

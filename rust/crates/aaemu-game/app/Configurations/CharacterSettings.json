@@ -1,6 +1,7 @@
 ﻿{
 	"Characters": {
-		"MaxPerAccount": 6 // base slots; must equal the login server's Login:MaxCharactersPerAccount
+		"MaxPerAccount": 6, // base slots; must equal the login server's Login:MaxCharactersPerAccount
+		"PreSelectPeriod": false // lobby CSEditCharacter; must equal the login server's Login:PreSelectCharacterPeriod
 	},
 	"Account": {
 		"AccessLevelDefault": 0,

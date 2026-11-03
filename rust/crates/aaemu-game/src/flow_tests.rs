@@ -493,12 +493,17 @@ async fn dispatch_edge_cases() {
         .unwrap();
     assert_eq!(c.drain(), vec![l2(pp::FastPongPacket, &[9, 0, 0, 0])]);
 
-    // A packet whose C# `Read` only logs an error: the connection stays up.
+    // A packet whose C# `Read` only logs: the connection stays up.
     server
-        .handle_frame(&mut c.conn, &c2s_l1(cs::CSEditCharacterPacket, &[1, 2, 3]))
+        .handle_frame(&mut c.conn, &c2s_l1(cs::CSSearchListPacket, &[1, 2]))
         .await
         .unwrap();
     assert!(!c.conn.is_closing());
+    // `CSEditCharacterPacket` is a real reader now; its body must decode.
+    assert!(server
+        .handle_frame(&mut c.conn, &c2s_l1(cs::CSEditCharacterPacket, &[1, 2, 3]))
+        .await
+        .is_err());
     // Levels other than 1 and 2 have no table (C# KeyNotFoundException -> Shutdown).
     for level in [0u8, 3, 4, 5] {
         assert!(server
