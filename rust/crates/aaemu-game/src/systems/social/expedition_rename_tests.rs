@@ -129,7 +129,7 @@ async fn owner_rename_is_broadcast_to_everyone_with_the_exact_wire_body() {
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].0, sc::SCExpeditionShowRenameUIPacket);
     assert_eq!(frames[0].1, Vec::<u8>::new());
-    assert!(server.expeditions.has_rename_offer(1));
+    assert!(server.expeditions.has_rename_offer(1, id));
 
     owner
         .send(
@@ -140,7 +140,7 @@ async fn owner_rename_is_broadcast_to_everyone_with_the_exact_wire_body() {
         .await;
 
     assert_eq!(server.expeditions.get(id).unwrap().faction.name, "Renamed");
-    assert!(!server.expeditions.has_rename_offer(1));
+    assert!(!server.expeditions.has_rename_offer(1, id));
     for x in [&mut owner, &mut member, &mut outsider] {
         let frames = x.frames();
         let renamed = find(&frames, sc::SCFactionRenamedPacket);
@@ -196,7 +196,7 @@ async fn rename_requires_the_owner_and_a_show_rename_ui_offer() {
         Err(807)
     );
     // A (forged) member request with the offer forced on is refused by the owner check.
-    server.expeditions.offer_rename(2);
+    server.expeditions.offer_rename(2, id);
     member
         .send(
             &server,
@@ -209,7 +209,7 @@ async fn rename_requires_the_owner_and_a_show_rename_ui_offer() {
     assert_eq!(find(&frames, sc::SCFactionRenamedPacket).len(), 0);
     let errors = find(&frames, sc::SCErrorMsgPacket);
     assert_eq!(i16::from_le_bytes([errors[0][0], errors[0][1]]), 807);
-    assert!(!server.expeditions.has_rename_offer(2));
+    assert!(!server.expeditions.has_rename_offer(2, id));
 
     // The nation half (`is_expedition = false`) is still refused and keeps the offer usable.
     expedition::offer_expedition_rename_ui(&server, &owner.p).expect("offer");
@@ -230,7 +230,7 @@ async fn rename_requires_the_owner_and_a_show_rename_ui_offer() {
         .await;
     assert_eq!(server.expeditions.get(id).unwrap().faction.name, "Knights");
     assert!(owner.frames().is_empty());
-    assert!(server.expeditions.has_rename_offer(1));
+    assert!(server.expeditions.has_rename_offer(1, id));
     owner
         .send(
             &server,
@@ -294,7 +294,7 @@ async fn invalid_and_taken_names_retry_without_changing_and_keep_the_offer() {
         assert_eq!(retry.len(), 1, "{name:?} must answer with a retry dialog");
         assert_eq!(decode_retry(retry[0]), (true, code, name.to_string()));
         assert_eq!(server.expeditions.get(id).unwrap().faction.name, "Knights");
-        assert!(server.expeditions.has_rename_offer(1));
+        assert!(server.expeditions.has_rename_offer(1, id));
     }
 
     // The retry dialog is the same offer: correcting the name now succeeds.
@@ -306,7 +306,7 @@ async fn invalid_and_taken_names_retry_without_changing_and_keep_the_offer() {
         )
         .await;
     assert_eq!(server.expeditions.get(id).unwrap().faction.name, "Fine");
-    assert!(!server.expeditions.has_rename_offer(1));
+    assert!(!server.expeditions.has_rename_offer(1, id));
 }
 
 #[test]
@@ -385,4 +385,172 @@ async fn private_mysql_guild_rename_is_persisted() {
         .await
         .unwrap();
     assert_eq!(saved, "Renamed");
+}
+
+#[tokio::test]
+async fn logout_clears_the_rename_offer() {
+    let server = test_server();
+    let mut owner = pc(&server, 1, "Owner", 100.0);
+    let id = 7;
+    owner.p.data().unit.expedition_id = id;
+    let members = vec![wire_member(&server, id, &owner.p, true)];
+    server
+        .expeditions
+        .add(guild(id, "Knights", 1, "Owner", members));
+    settle(&mut [&mut owner]);
+
+    expedition::offer_expedition_rename_ui(&server, &owner.p).expect("offer");
+    assert!(server.expeditions.has_rename_offer(1, id));
+
+    // The real leave-world path (world::session), not a helper only tests call.
+    crate::world::session::leave_world_task(&server, None, 0, Some(owner.p.clone())).await;
+    assert!(
+        !server.expeditions.has_rename_offer(1, id),
+        "a departed character must not keep a rename dialog offer"
+    );
+}
+
+#[tokio::test]
+async fn disband_clears_the_offer_and_a_new_guild_needs_a_new_one() {
+    let server = test_server();
+    let mut owner = pc(&server, 1, "Owner", 100.0);
+    let id = 7;
+    owner.p.data().unit.expedition_id = id;
+    let members = vec![wire_member(&server, id, &owner.p, true)];
+    server
+        .expeditions
+        .add(guild(id, "Knights", 1, "Owner", members));
+    settle(&mut [&mut owner]);
+
+    expedition::offer_expedition_rename_ui(&server, &owner.p).expect("offer");
+    assert!(server.expeditions.has_rename_offer(1, id));
+    assert!(expedition::disband(&server, &owner.p).await);
+    assert!(
+        !server.expeditions.has_rename_offer(1, id),
+        "the disbanded guild's offer must be dropped"
+    );
+    owner.frames();
+
+    // A guild created afterwards must not inherit the old offer.
+    let new_id = 8;
+    owner.p.data().unit.expedition_id = new_id;
+    let members = vec![wire_member(&server, new_id, &owner.p, true)];
+    server
+        .expeditions
+        .add(guild(new_id, "New Guild", 1, "Owner", members));
+    settle(&mut [&mut owner]);
+    owner
+        .send(
+            &server,
+            cs::CSRenameExpeditionPacket,
+            rename_body(new_id, "Inherited", true),
+        )
+        .await;
+    assert_eq!(
+        server.expeditions.get(new_id).unwrap().faction.name,
+        "New Guild"
+    );
+    let frames = owner.frames();
+    let errors = find(&frames, sc::SCErrorMsgPacket);
+    assert_eq!(i16::from_le_bytes([errors[0][0], errors[0][1]]), 307);
+    assert!(find(&frames, sc::SCFactionRenamedPacket).is_empty());
+}
+
+#[tokio::test]
+async fn owner_change_clears_the_rename_offer() {
+    let server = test_server();
+    let mut owner = pc(&server, 1, "Owner", 100.0);
+    let mut member = pc(&server, 2, "Member", 101.0);
+    let id = 7;
+    owner.p.data().unit.expedition_id = id;
+    member.p.data().unit.expedition_id = id;
+    let members = vec![
+        wire_member(&server, id, &owner.p, true),
+        wire_member(&server, id, &member.p, false),
+    ];
+    server
+        .expeditions
+        .add(guild(id, "Knights", 1, "Owner", members));
+    settle(&mut [&mut owner, &mut member]);
+
+    expedition::offer_expedition_rename_ui(&server, &owner.p).expect("offer");
+    assert!(server.expeditions.has_rename_offer(1, id));
+    expedition::change_owner(&server, &owner.p, 2).await;
+    assert_eq!(server.expeditions.get(id).unwrap().faction.owner_id, 2);
+    assert!(
+        !server.expeditions.has_rename_offer(1, id),
+        "the outgoing owner's offer must not survive the hand-over"
+    );
+    owner.frames();
+
+    owner
+        .send(
+            &server,
+            cs::CSRenameExpeditionPacket,
+            rename_body(id, "ExOwner", true),
+        )
+        .await;
+    assert_eq!(server.expeditions.get(id).unwrap().faction.name, "Knights");
+    let frames = owner.frames();
+    let errors = find(&frames, sc::SCErrorMsgPacket);
+    assert_eq!(i16::from_le_bytes([errors[0][0], errors[0][1]]), 307);
+    assert!(find(&frames, sc::SCFactionRenamedPacket).is_empty());
+}
+
+#[tokio::test]
+async fn an_offer_is_bound_to_its_guild() {
+    let server = test_server();
+    let mut owner = pc(&server, 1, "Owner", 100.0);
+    let id = 7;
+    let other = 8;
+    owner.p.data().unit.expedition_id = id;
+    server.expeditions.add(guild(
+        id,
+        "Knights",
+        1,
+        "Owner",
+        vec![wire_member(&server, id, &owner.p, true)],
+    ));
+    server.expeditions.add(guild(
+        other,
+        "Other Guild",
+        1,
+        "Owner",
+        vec![wire_member(&server, other, &owner.p, true)],
+    ));
+    settle(&mut [&mut owner]);
+
+    expedition::offer_expedition_rename_ui(&server, &owner.p).expect("offer");
+    assert!(server.expeditions.has_rename_offer(1, id));
+    assert!(!server.expeditions.has_rename_offer(1, other));
+
+    // The offer was made for guild 7; a request for guild 8 is refused even though the same
+    // character owns it in this fixture.
+    owner
+        .send(
+            &server,
+            cs::CSRenameExpeditionPacket,
+            rename_body(other, "Stolen Offer", true),
+        )
+        .await;
+    assert_eq!(
+        server.expeditions.get(other).unwrap().faction.name,
+        "Other Guild"
+    );
+    let frames = owner.frames();
+    let errors = find(&frames, sc::SCErrorMsgPacket);
+    assert_eq!(i16::from_le_bytes([errors[0][0], errors[0][1]]), 307);
+
+    owner
+        .send(
+            &server,
+            cs::CSRenameExpeditionPacket,
+            rename_body(id, "Knights Renamed", true),
+        )
+        .await;
+    assert_eq!(
+        server.expeditions.get(id).unwrap().faction.name,
+        "Knights Renamed"
+    );
+    assert!(!server.expeditions.has_rename_offer(1, id));
 }

@@ -626,10 +626,13 @@ Rules and deviations:
 * **Owner only.** The client's own pre-check and the server both require the guild owner
   (`faction.owner_id` plus membership, checked under the expedition write lock together with
   the name uniqueness test and the write).
-* **Offer required.** `rename_expedition` requires the one-shot offer created when the server
-  sent `SCExpeditionShowRenameUI`; a forged CS without it is refused with error 307. The offer
-  survives an invalid / taken name so the retry dialog can correct it, is consumed on success,
-  and is dropped on logout or a failed owner check. The set is capped (`MAX_RENAME_OFFERS`).
+* **Offer required and bound to the guild.** `rename_expedition` requires the one-shot offer
+  created when the server sent `SCExpeditionShowRenameUI`; the offer stores
+  `character -> expedition id`, so a request for another guild is refused even when the
+  character holds one. A forged CS without it is refused with error 307. The offer survives an
+  invalid / taken name so the retry dialog can correct it, is consumed on success, and is
+  dropped on leave-world (`world::session::leave_world_task`), on guild disband
+  (`dismiss_expedition`) and on an owner change. The map is capped (`MAX_RENAME_OFFERS`).
   This is a server-side addition: the 1.2 C# only logged the packet.
 * **Uniqueness matches creation.** The create path compares exactly (`name.Equals(exp.Name)`
   in C#), so rename does the same; it is **not** case-insensitive despite the MySQL column's
@@ -644,6 +647,26 @@ Rules and deviations:
 * **capture-pending (RENAME-1):** the production trigger (item / merge collision / quest) is
   not established for 1.2; only the GM hook is wired. The nation rename reuses the shared
   validation / retry / broadcast helpers but is not part of this stage.
+* **Known, not fixed (RENAME-2..6):**
+  * **RENAME-2:** a failed save still broadcasts. `save()` only logs the error (and restores
+    the pending removals); the in-memory name is broadcast as if persisted, and there is no
+    periodic expedition save to retry it (`systems::social::System::save` covers ranking /
+    nations / bounties / crime, not expeditions). The C# call site was synchronous too.
+  * **RENAME-3:** guild names are not checked against nation names or static faction names.
+    Creation, rename and independence all keep their own namespace, so a guild can share a
+    name with a nation or a static faction.
+  * **RENAME-4:** uniqueness is an exact string comparison, so case, space and Cyrillic
+    look-alikes are distinct (`Knights` / `knights` / `K nights` / homoglyphs). This mirrors
+    the C# `CreateExpedition` check; the MySQL column's `utf8_general_ci` collation does not
+    make the in-memory check case-insensitive.
+  * **RENAME-5 (capture-pending):** the `SCFactionRetryRenamePacket.errorMessage` field width
+    is unverified. The C# writes `i16`; the decompiled handler reads the name at `+0x14`,
+    which suggests four bytes of error/padding, and it does not read the field at all. The
+    C# layout is kept until a capture or server decompile settles it.
+  * **RENAME-6:** create vs rename has a uniqueness race. `create_expedition` checks
+    `server.expeditions.all()` (a snapshot) and calls `add` later, so a concurrent rename can
+    take the name between the check and the insert; only the rename path checks and writes
+    under one lock.
 
 ### systems::housing
 

@@ -5,7 +5,7 @@
 //! `Expedition.Save` persistence. (Moved here from `managers::expedition`, which re-exports
 //! this module.)
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError, RwLock};
 
 use aaemu_commons::{Marshal, PacketStream};
@@ -193,10 +193,11 @@ pub struct ExpeditionManager {
     /// Pending guild invitations by invited character id. Deviation from the C# manager, which
     /// kept none and let any client join any guild (see PORTING.md).
     pub(crate) invitations: Mutex<HashMap<u32, PendingInvite>>,
-    /// Characters the server has offered a guild rename to (`SCExpeditionShowRenameUI`). The
-    /// 1.2 client can only send `CSRenameExpeditionPacket` from that dialog, so an offer is the
-    /// server-side proof that the rename came through the intended flow.
-    rename_offers: Mutex<HashSet<u32>>,
+    /// Characters the server has offered a guild rename to (`SCExpeditionShowRenameUI`), and
+    /// the guild the offer belongs to. The 1.2 client can only send
+    /// `CSRenameExpeditionPacket` from that dialog, so an offer is the server-side proof that
+    /// the rename came through the intended flow (and cannot outlive the guild it was made for).
+    rename_offers: Mutex<HashMap<u32, u32>>,
 }
 
 /// How long a guild invitation can be answered (same as the party / raid invitations).
@@ -353,8 +354,9 @@ impl ExpeditionManager {
     }
 
     /// Grants `character_id` the right to answer the rename dialog
-    /// (`SCExpeditionShowRenameUI` was sent to it).
-    pub fn offer_rename(&self, character_id: u32) {
+    /// (`SCExpeditionShowRenameUI` was sent to it), bound to the guild the dialog was opened
+    /// for.
+    pub fn offer_rename(&self, character_id: u32, expedition_id: u32) {
         let mut offers = self
             .rename_offers
             .lock()
@@ -362,15 +364,16 @@ impl ExpeditionManager {
         if offers.len() >= MAX_RENAME_OFFERS {
             offers.clear();
         }
-        offers.insert(character_id);
+        offers.insert(character_id, expedition_id);
     }
 
-    /// Whether `SCExpeditionShowRenameUI` is outstanding for `character_id`.
-    pub fn has_rename_offer(&self, character_id: u32) -> bool {
+    /// Whether `SCExpeditionShowRenameUI` is outstanding for `character_id` *for `expedition_id`*.
+    pub fn has_rename_offer(&self, character_id: u32, expedition_id: u32) -> bool {
         self.rename_offers
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .contains(&character_id)
+            .get(&character_id)
+            .is_some_and(|id| *id == expedition_id)
     }
 
     /// Consumes the rename offer after a successful rename.
@@ -384,6 +387,14 @@ impl ExpeditionManager {
     /// Drops the rename offer (logout, refusal, or a character that can no longer rename).
     pub fn clear_rename_offer(&self, character_id: u32) {
         self.take_rename_offer(character_id);
+    }
+
+    /// Drops every offer made for guild `expedition_id` (disband, owner change).
+    pub fn clear_rename_offers_for(&self, expedition_id: u32) {
+        self.rename_offers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|_, id| *id != expedition_id);
     }
 
     /// Renames guild `id` to `name` when `character_id` owns it and no other guild has the
@@ -633,25 +644,6 @@ pub fn on_character_login(server: &GameServer, p: &PlayerRef, expedition_id: u32
     }
 }
 
-/// `Expedition.OnCharacterLogout(character)`.
-pub fn on_character_logout(server: &GameServer, p: &PlayerRef, expedition_id: u32) {
-    server.expeditions.clear_rename_offer(p.character_id);
-    if let Some((member, members)) =
-        server
-            .expeditions
-            .logout_member(expedition_id, p.character_id, util::now_secs())
-    {
-        send_to_members(
-            server,
-            &members,
-            &SCExpeditionMemberStatusChangedPacket { member, flag: 0 },
-        );
-    }
-    if let Some(e) = server.expeditions.get(expedition_id) {
-        guild_chat(server, e.id(), &e.faction.name).leave(p);
-    }
-}
-
 /// `Character.Expedition` (the id when the guild exists, as `GetExpedition` would return null).
 fn expedition_of(server: &GameServer, p: &PlayerRef) -> Option<Expedition> {
     let id = p.data().unit.expedition_id;
@@ -869,7 +861,7 @@ pub fn offer_expedition_rename_ui(
     if e.faction.owner_id != p.character_id {
         return Err(error::ONLY_EXPEDITION_OWNER);
     }
-    server.expeditions.offer_rename(p.character_id);
+    server.expeditions.offer_rename(p.character_id, id);
     rename::send_expedition_rename_ui(p);
     Ok(())
 }
@@ -878,7 +870,7 @@ pub fn offer_expedition_rename_ui(
 /// sends this from the dialog opened by `SCExpeditionShowRenameUI`, so the offer is required;
 /// the owner, name shape and uniqueness are checked before anything changes.
 pub async fn rename_expedition(server: &GameServer, p: &PlayerRef, id: u32, name: &str) {
-    if !server.expeditions.has_rename_offer(p.character_id) {
+    if !server.expeditions.has_rename_offer(p.character_id, id) {
         tracing::warn!(
             "RenameExpedition {} by {} without a ShowRenameUI offer refused",
             id,
@@ -1299,6 +1291,8 @@ pub async fn change_owner(server: &GameServer, owner: &PlayerRef, new_owner_id: 
     let Some((old, new, members)) = res else {
         return;
     };
+    // The old owner's dialog offer must not survive the hand-over.
+    server.expeditions.clear_rename_offers_for(id);
     send_to_members(
         server,
         &members,
@@ -1375,6 +1369,8 @@ pub async fn disband(server: &GameServer, owner: &PlayerRef) -> bool {
 /// (`$deleted-guild-<id>`, owner 0, `isDisbanded`). Also used for the forced removal of an
 /// owner on a faction change (no voluntary eligibility checks there).
 fn dismiss_expedition(server: &GameServer, id: u32) {
+    // A dialog offer made for this guild dies with it (a later guild id must not inherit it).
+    server.expeditions.clear_rename_offers_for(id);
     let Some(e) = server.expeditions.get(id) else {
         return;
     };
