@@ -5,7 +5,9 @@ use crate::world::WorldObject;
 
 use super::geometry::{world_pos, Target};
 use super::state::SkillRun;
+use super::types::skill_result;
 use super::unit_reqs::skill_result_for_key;
+use crate::systems::economy::inventory::Inv;
 
 /// Extra range for a doodad target, covering the distance from its origin to its edge.
 const DOODAD_RANGE_ALLOWANCE: f64 = 15.0;
@@ -124,7 +126,7 @@ pub(super) fn check_resources(
 /// caster without any one of the required items gets `NEED_REAGENT` with the missing item's
 /// template id as the value: the 1.2 client's result handler (`FUN_39390900`, 0x24) puts an
 /// item name into the text from that value.
-pub(super) fn check_reagents(
+pub(crate) fn check_reagents(
     server: &GameServer,
     template: &super::data::SkillTemplate,
     caster: &WorldObject,
@@ -152,6 +154,14 @@ pub(super) fn check_reagents(
         .iter()
         .find(|r| !enough(r))
         .map_or(0, |r| r.item_id);
+    // The reagent exists but every stack of it is locked (`ItemFlag.Secure`): the 1.2 client
+    // has a dedicated `SkillResult.ItemLocked` for this, instead of "need reagent".
+    let locked_only = reagents
+        .iter()
+        .any(|r| !enough(r) && Inv::of(player).items_count(r.item_id, -1) >= i32::from(r.amount));
+    if locked_only {
+        return Err((skill_result::ITEM_LOCKED, missing));
+    }
     Err((skill_result_for_key("skill_need_reagent"), missing))
 }
 

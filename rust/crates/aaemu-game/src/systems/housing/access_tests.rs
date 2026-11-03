@@ -9,8 +9,10 @@ use super::{manager, ops};
 use crate::data::GameData;
 use crate::models::doodad::doodad_owner_type;
 use crate::models::house::housing_permission;
+use crate::models::item::ITEM_FLAG_SECURE;
 use crate::net::registry::ClientPacket;
 use crate::opcodes::sc;
+use crate::systems::economy::inventory::Inv;
 use crate::systems::npcs::doodad::funcs;
 use crate::systems::npcs::doodad::interactions::{self, world_interaction_type as wi};
 use crate::systems::npcs::doodad::runtime::DoodadCtx;
@@ -697,6 +699,32 @@ async fn production_listing_preserves_insufficient_certificates_and_consumes_com
     assert_eq!(
         inv.items_count_in(slot_type::INVENTORY, manager::APPRAISAL_CERTIFICATE, -1),
         0
+    );
+}
+
+#[tokio::test]
+async fn locked_decoration_is_refused() {
+    let mut fx = fixture(false);
+    production_economy(&fx);
+    let id = give(&fx, CHAIR_ITEM, 1);
+    Inv::of(&fx.owner)
+        .bag()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(id)
+        .unwrap()
+        .flags |= ITEM_FLAG_SECURE;
+    let mut p = decoration(&fx);
+    p.item_id = id;
+    fx.owner_client.drain();
+    assert_eq!(ops::decorate_house(&fx.server, &fx.owner, &p), Ok(false));
+    let frames = fx.owner_client.drain();
+    assert!(frames
+        .iter()
+        .any(|(op, _)| { *op == crate::opcodes::sc::SCErrorMsgPacket }));
+    assert_eq!(
+        fx.server.items.item_by_id(id).unwrap().slot_type,
+        slot_type::INVENTORY
     );
 }
 

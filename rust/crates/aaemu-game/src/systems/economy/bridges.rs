@@ -987,7 +987,7 @@ impl ItemSkillHooks for EconomyForSkills {
     }
 
     fn item_count(&self, _server: &GameServer, player: &PlayerRef, template_id: u32) -> i32 {
-        Inv::of(player).items_count(template_id, -1)
+        Inv::of(player).items_count_unlocked(template_id, -1)
     }
 
     fn owned_item(
@@ -2008,7 +2008,7 @@ pub struct EconomyForServices;
 
 impl crate::systems::services::item_ops::CharacterItemOps for EconomyForServices {
     fn items_count(&self, _server: &GameServer, player: &PlayerRef, template_id: u32) -> i32 {
-        Inv::of(player).items_count_in(slot_type::INVENTORY, template_id, -1)
+        Inv::of(player).items_count_in_unlocked(slot_type::INVENTORY, template_id, -1)
     }
 
     fn consume_item(
@@ -2348,7 +2348,7 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
     }
 
     fn item_count(&self, _server: &GameServer, player: &PlayerRef, template_id: u32) -> i32 {
-        Inv::of(player).items_count(template_id, -1)
+        Inv::of(player).items_count_unlocked(template_id, -1)
     }
 
     fn give_loot_pack(&self, server: &GameServer, player: &PlayerRef, loot_pack_id: u32) -> bool {
@@ -3572,6 +3572,7 @@ fn house_item(server: &GameServer, item: &Item) -> crate::systems::housing::hook
             .template(item.template_id)
             .map_or(1, |t| t.max_count),
         soul_bound: item.has_flag(crate::models::item::ITEM_FLAG_SOUL_BOUND),
+        secure: item.has_flag(crate::models::item::ITEM_FLAG_SECURE),
         slot_type: item.slot_type,
         ucc_id: item.ucc_id,
         big_fish: (item.class == ItemClass::BigFish)
@@ -3673,6 +3674,9 @@ impl crate::systems::housing::hooks::HousingEconomyHooks for EconomyForHousing {
             {
                 return Err(HouseConstructionError::InvalidDesign);
             }
+            if item.has_flag(crate::models::item::ITEM_FLAG_SECURE) {
+                return Err(HouseConstructionError::ItemLocked);
+            }
             let bound = bag.items_by_template(BOUND_TAX_CERTIFICATE, -1).1.max(0);
             let unbound = bag.items_by_template(TAX_CERTIFICATE, -1).1.max(0);
             (bound, unbound)
@@ -3761,7 +3765,7 @@ impl crate::systems::housing::hooks::HousingEconomyHooks for EconomyForHousing {
         player: &PlayerRef,
         template_id: u32,
     ) -> i32 {
-        Inv::of(player).items_count_in(slot_type::INVENTORY, template_id, -1)
+        Inv::of(player).items_count_in_unlocked(slot_type::INVENTORY, template_id, -1)
     }
 
     fn bag_consume_item(
