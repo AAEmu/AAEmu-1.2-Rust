@@ -271,16 +271,28 @@ pub fn send_error(player: &PlayerRef, error: i16) {
 /// `ErrorMessageType` values housing sends.
 pub mod error_message {
     pub const HOUSE_CANNOT_DECORATE: i16 = 122;
+    pub const HOUSE_NOT_DECORATABLE_STATE: i16 = 123;
+    pub const HOUSE_TOO_MANY_DECORATIONS: i16 = 124;
+    pub const TOO_FAR_AWAY: i16 = 154;
     pub const BAG_INVALID_ITEM: i16 = 181;
+    pub const TOO_FAR_TO_DECORATE_HOUSE: i16 = 199;
+    pub const HOUSE_CANNOT_DECORATE_OUT_OF_GARDEN: i16 = 289;
     pub const MAIL_NOT_ENOUGH_MONEY_TO_PAY_TAXES: i16 = 481;
     pub const INVALID_HOUSE_INFO: i16 = 614;
+    pub const ACATBILITY_DECO_ARRANG_FAIL: i16 = 629;
+    pub const HOUSE_CANNOT_SELL_AS_NOT_OWNER: i16 = 642;
+    pub const HOUSE_CANNOT_SELL_AS_TYPE: i16 = 644;
+    pub const HOUSE_CANNOT_SELL_AS_DELAYED_TAX: i16 = 645;
+    pub const HOUSE_CANNOT_SELL_AS_ALREADY_FOR_SALE: i16 = 646;
     pub const HOUSE_CANNOT_SELL_AS_NOT_ENOUGH_SEAL: i16 = 647;
     pub const HOUSE_CANNOT_SELL_AS_DESIGNATED_BUYER_NOT_FOUND: i16 = 648;
+    pub const HOUSE_CANNOT_SELL_AS_TOO_LOW_PRICE: i16 = 650;
     pub const HOUSE_CANNOT_BUY_AS_NOT_FOR_SALE: i16 = 654;
     pub const HOUSE_CANNOT_BUY_AS_OWNER: i16 = 655;
     pub const HOUSE_CANNOT_BUY_AS_NOT_DESIGNATED_BUYER: i16 = 656;
     pub const HOUSE_CANNOT_BUY_AS_NOT_ENOUGH_MONEY: i16 = 657;
     pub const HOUSE_CANNOT_BUY_AS_SALE_INFO_CHANGED: i16 = 658;
+    pub const HOUSE_CANNOT_SELL_AS_UNDER_CONSTRUCTION: i16 = 668;
 }
 
 /// The `Permission` setter (always-public templates force `Public`).
@@ -312,9 +324,9 @@ pub fn refresh_expedition(server: &GameServer, house: &HouseRef) {
     house.data().unit.expedition_id = guild;
 }
 
-/// `FactionManager.GetFaction(id)?.Id` (0 = null).
+/// `FactionManager.GetFaction(id)?.Id` (0 = null), including the runtime player nations.
 fn faction_or_null(server: &GameServer, faction_id: u32) -> u32 {
-    if server.game_data.factions.get(faction_id).is_some() {
+    if crate::systems::social::nation::faction_exists(server, faction_id) {
         faction_id
     } else {
         0

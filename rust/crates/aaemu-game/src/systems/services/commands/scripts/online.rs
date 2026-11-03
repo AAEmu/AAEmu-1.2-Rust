@@ -1,7 +1,7 @@
 //! `Scripts/Commands/Online.cs`.
 
 use super::prelude::*;
-use crate::systems::social::faction::{relation_state, relation_state as rs};
+use crate::systems::social::faction::{relation_state as rs, relation_state_live};
 
 /// `Online`.
 pub struct Online;
@@ -52,12 +52,7 @@ impl Command for Online {
             if !final_message.trim().is_empty() {
                 final_message += ", ";
             }
-            let mut faction_color = match relation_state(
-                &server.game_data.factions,
-                &server.game_data.systems.social.relations,
-                my_faction,
-                faction,
-            ) {
+            let mut faction_color = match relation_state_live(server, my_faction, faction) {
                 rs::HOSTILE => "FFFF4444",
                 rs::NEUTRAL => "FF888888",
                 rs::FRIENDLY => "FF4444FF",

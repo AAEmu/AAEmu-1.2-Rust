@@ -2116,8 +2116,11 @@ async fn friends_and_blocked_users() {
 async fn blocked_sender_is_silently_dropped_on_every_direct_path() {
     let server = test_server();
     let mut a = pc(&server, 1, "Al", 100.0, 100.0);
-    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
-    a.p.data().unit.hp = 100; // a dead challenge target is refused before the block check
+    // Within the 5 m trade range the unblocked trade request needs (`TradeManager` range check).
+    let mut b = pc(&server, 2, "Bob", 102.0, 100.0);
+    // A dead target is refused before the block check (duel and trade alike).
+    a.p.data().unit.hp = 100;
+    b.p.data().unit.hp = 100;
     settle(&mut [&mut a, &mut b]);
 
     a.send(&server, cs::CSAddBlockedUserPacket, name_body("Bob"))

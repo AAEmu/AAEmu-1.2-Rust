@@ -344,6 +344,7 @@ pub(crate) fn give(f: &Fixture, template: u32, count: i32, slot: i32) -> u64 {
 
 pub(crate) fn place(f: &Fixture, design: u32, item: u32, x: f32, slot: i32) -> HouseRef {
     let item_id = give(f, item, 1, slot);
+    f.payer.data().unit.transform.set_xyz(x, 100.0, 100.0);
     ops::build(
         &f.server,
         &f.payer,
