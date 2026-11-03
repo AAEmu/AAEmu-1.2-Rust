@@ -31,7 +31,11 @@ use crate::systems::economy::items_data::{ItemConversionProduct, ItemConversionR
 use crate::systems::economy::loot::ScriptedRng;
 use crate::systems::economy::mate_equipment::*;
 use crate::systems::economy::tests::{give, item_at, test_data, World, STACK};
+use crate::systems::skills::data::effects::SpecialEffect;
+use crate::systems::skills::data::{EffectKind, EffectTemplate, SkillEffect, SkillTemplate};
+use crate::systems::skills::handlers::CSStartSkillPacket;
 use crate::systems::skills::packets::SCExpChangedPacket;
+use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
 use crate::world::{Entity, PlayerRef};
 
@@ -679,10 +683,13 @@ async fn grade_enchant_refusals() {
     let stack = give(&w, &w.pa.clone(), slot_type::INVENTORY, STACK, 1, 3);
     enchant(&w, stack, None, false, &[0, 0, 0, 0]);
     assert_eq!(w.a.drain(), vec![error(error_message::INVALID_TARGET)]);
-    // Wrong item kind for value3 (2 = armor; a weapon is no armor): InvalidCast -> nothing
+    // Wrong item kind for value3 (2 = armor; a weapon is no armor): the client's
+    // `FUN_393a0130` kind check refuses with INVALID_TARGET and refunds the scroll.
     let weapon = give(&w, &w.pa.clone(), slot_type::INVENTORY, WEAPON, 1, 4);
+    w.pa.data().skill_char.skill_cancelled = false;
     enchant(&w, weapon, None, false, &[0, 0, 0, 0]);
-    assert!(w.a.drain().is_empty());
+    assert_eq!(w.a.drain(), vec![error(error_message::INVALID_TARGET)]);
+    assert!(w.pa.data().skill_char.skill_cancelled);
     assert_eq!(w.pa.data().money, 1000);
     assert!(w.b.drain().is_empty());
 }
@@ -800,6 +807,281 @@ async fn grade_enchant_refuses_a_locked_target() {
     );
     assert_eq!(item(&w, id).unwrap().grade, 0);
     assert_eq!(w.pa.data().money, 1000);
+}
+
+// ---------------------------------------------------------------------------------------------
+// GradeEnchant through the real cast path (the scroll is debited and must be refunded)
+// ---------------------------------------------------------------------------------------------
+
+const GRADE_SKILL: u32 = 22520;
+const GRADE_EFFECT: u32 = 12421;
+const CHARM_MIN: u32 = 5101;
+const CHARM_MAX: u32 = 5102;
+
+fn grade_effect(value2: i32, value3: i32) -> SpecialEffect {
+    SpecialEffect {
+        id: GRADE_EFFECT,
+        special_effect_type_id: 92,
+        value1: 0,
+        value2,
+        value3,
+        value4: 0,
+    }
+}
+
+fn add_charm_support(data: &mut GameData, id: u32, min: i32, max: i32) {
+    data.items.templates.insert(id, ItemTemplate::plain(id, 10));
+    data.items.enchanting_supports.insert(
+        id,
+        ItemGradeEnchantingSupport {
+            id,
+            item_id: id,
+            require_grade_min: min,
+            require_grade_max: max,
+            ..ItemGradeEnchantingSupport::default()
+        },
+    );
+}
+
+/// The server `systems::start_all` wires for a real item cast: skill hooks + the economy's
+/// special-effect routing.
+fn grade_cast_world(mut data: GameData, effect: SpecialEffect) -> World {
+    {
+        let scroll = data
+            .items
+            .templates
+            .get_mut(&SCROLL)
+            .expect("scroll template");
+        scroll.use_skill_id = GRADE_SKILL;
+        scroll.use_skill_as_reagent = true;
+    }
+    data.systems.skills.add_effect(
+        EffectKind::SpecialEffect,
+        EffectTemplate::Special(effect),
+        GRADE_EFFECT,
+    );
+    data.systems.skills.add_skill(SkillTemplate {
+        id: GRADE_SKILL,
+        target_type: 9,
+        max_range: 4,
+        effects: vec![SkillEffect {
+            effect_id: GRADE_EFFECT,
+            template: Some((EffectKind::SpecialEffect, GRADE_EFFECT)),
+            weight: 0,
+            start_level: 0,
+            end_level: 255,
+            friendly: true,
+            non_friendly: true,
+            target_buff_tag_id: 0,
+            target_no_buff_tag_id: 0,
+            source_buff_tag_id: 0,
+            source_no_buff_tag_id: 0,
+            chance: 100,
+            front: false,
+            back: false,
+            target_npc_tag_id: 0,
+            application_method: 1,
+            consume_source_item: false,
+            consume_item_id: 0,
+            consume_item_count: 1,
+            always_hit: true,
+            item_set_id: 0,
+            interaction_success_hit: false,
+        }],
+        ..SkillTemplate::default()
+    });
+    let w = world_with_data(data);
+    crate::systems::skills::bind(&w.server);
+    super::bridges::install(&w.server);
+    w
+}
+
+async fn cast_grade(w: &mut World, scroll: u64, target: u64, charm: Option<u64>) {
+    CSStartSkillPacket {
+        skill_id: GRADE_SKILL,
+        caster: SkillCaster::Item {
+            obj_id: w.pa.obj_id,
+            item_id: scroll,
+            item_template_id: SCROLL,
+            type1: 0,
+            type2: 0,
+        },
+        target: SkillCastTarget::Item {
+            obj_id: w.pa.obj_id,
+            id: target,
+            type1: 0,
+            type2: 0,
+        },
+        flag: 0,
+        skill_object: match charm {
+            Some(support_item_id) => SkillObject::ItemGradeEnchantingSupport {
+                id: 0,
+                support_item_id,
+                auto_use_aa_point: false,
+            },
+            None => SkillObject::None,
+        },
+    }
+    .handle(&w.server, &mut w.a.conn)
+    .await
+    .unwrap();
+}
+
+/// The scroll was taken as the cast's source item; every refusal must refund it. The cast
+/// clears `skill_cancelled` when it accepts, so a true value here was set by this cast's own
+/// effect (proof the effect ran rather than the handler refusing the cast).
+fn assert_scroll_refunded(w: &World, scroll: u64) {
+    assert!(
+        w.pa.data().skill_char.skill_cancelled,
+        "the refusal must cancel the cast"
+    );
+    assert_eq!(
+        item(w, scroll).expect("the scroll is back").count,
+        2,
+        "a refused regrade must refund the cast's source scroll"
+    );
+}
+
+#[tokio::test]
+async fn grade_enchant_cast_consumes_the_scroll_on_success() {
+    let mut data = data();
+    {
+        let grade = data.items.full_grades.get_mut(&0).expect("grade 0");
+        grade.enchant_success_ratio = 10_000;
+        grade.enchant_great_success_ratio = 0;
+        grade.enchant_break_ratio = 0;
+        grade.enchant_downgrade_ratio = 0;
+    }
+    let mut w = grade_cast_world(data, grade_effect(0, 2));
+    let scroll = give(&w, &w.pa.clone(), slot_type::INVENTORY, SCROLL, 2, 0);
+    let target = give(&w, &w.pa.clone(), slot_type::INVENTORY, ARMOR, 1, 1);
+    w.pa.data().money = 1000;
+    cast_grade(&mut w, scroll, target, None).await;
+    assert!(
+        !w.pa.data().skill_char.skill_cancelled,
+        "an accepted regrade must not cancel the cast"
+    );
+    assert_eq!(item(&w, scroll).unwrap().count, 1);
+    assert_eq!(item(&w, target).unwrap().grade, 1);
+}
+
+#[tokio::test]
+async fn grade_enchant_cast_refunds_the_scroll_when_the_target_is_locked() {
+    let mut w = grade_cast_world(data(), grade_effect(0, 2));
+    let scroll = give(&w, &w.pa.clone(), slot_type::INVENTORY, SCROLL, 2, 0);
+    let target = give(&w, &w.pa.clone(), slot_type::INVENTORY, ARMOR, 1, 1);
+    set_locked(&w, target);
+    w.pa.data().money = 1000;
+    cast_grade(&mut w, scroll, target, None).await;
+    assert_scroll_refunded(&w, scroll);
+    assert!(w.a.drain_ops().contains(&sc::SCErrorMsgPacket));
+    assert_eq!(item(&w, target).unwrap().grade, 0);
+    assert_eq!(w.pa.data().money, 1000);
+}
+
+#[tokio::test]
+async fn grade_enchant_cast_refunds_the_scroll_when_money_is_missing() {
+    let mut w = grade_cast_world(data(), grade_effect(0, 2));
+    let scroll = give(&w, &w.pa.clone(), slot_type::INVENTORY, SCROLL, 2, 0);
+    let target = give(&w, &w.pa.clone(), slot_type::INVENTORY, ARMOR, 1, 1);
+    w.pa.data().money = 0;
+    cast_grade(&mut w, scroll, target, None).await;
+    assert_scroll_refunded(&w, scroll);
+    assert!(w.a.drain_ops().contains(&sc::SCErrorMsgPacket));
+    assert_eq!(item(&w, target).unwrap().grade, 0);
+}
+
+#[tokio::test]
+async fn grade_enchant_cast_refunds_the_scroll_when_the_kind_does_not_match_value3() {
+    let mut w = grade_cast_world(data(), grade_effect(0, 1));
+    let scroll = give(&w, &w.pa.clone(), slot_type::INVENTORY, SCROLL, 2, 0);
+    let target = give(&w, &w.pa.clone(), slot_type::INVENTORY, ARMOR, 1, 1);
+    w.pa.data().money = 1000;
+    cast_grade(&mut w, scroll, target, None).await;
+    assert_scroll_refunded(&w, scroll);
+    assert!(w.a.drain_ops().contains(&sc::SCErrorMsgPacket));
+    assert_eq!(item(&w, target).unwrap().grade, 0);
+}
+
+#[tokio::test]
+async fn grade_enchant_cast_refunds_the_scroll_below_the_scrolls_level_requirement() {
+    let mut data = data();
+    data.items
+        .templates
+        .get_mut(&ARMOR)
+        .unwrap()
+        .level_requirement = 10;
+    let mut w = grade_cast_world(data, grade_effect(50, 2));
+    let scroll = give(&w, &w.pa.clone(), slot_type::INVENTORY, SCROLL, 2, 0);
+    let target = give(&w, &w.pa.clone(), slot_type::INVENTORY, ARMOR, 1, 1);
+    w.pa.data().money = 1000;
+    cast_grade(&mut w, scroll, target, None).await;
+    assert_scroll_refunded(&w, scroll);
+    assert!(w.a.drain_ops().contains(&sc::SCErrorMsgPacket));
+    assert_eq!(item(&w, target).unwrap().grade, 0);
+}
+
+#[tokio::test]
+async fn grade_enchant_cast_refunds_the_scroll_at_the_max_grade() {
+    let mut w = grade_cast_world(data(), grade_effect(0, 2));
+    let scroll = give(&w, &w.pa.clone(), slot_type::INVENTORY, SCROLL, 2, 0);
+    let target = give(&w, &w.pa.clone(), slot_type::INVENTORY, ARMOR, 1, 1);
+    set_grade(&w, target, 11);
+    w.pa.data().money = 1000;
+    cast_grade(&mut w, scroll, target, None).await;
+    assert_scroll_refunded(&w, scroll);
+    assert!(w.a.drain_ops().contains(&sc::SCErrorMsgPacket));
+    assert_eq!(item(&w, target).unwrap().grade, 11);
+}
+
+#[tokio::test]
+async fn grade_enchant_cast_refunds_the_scroll_below_the_charms_min_grade() {
+    let mut data = data();
+    add_charm_support(&mut data, CHARM_MIN, 5, -1);
+    let mut w = grade_cast_world(data, grade_effect(0, 2));
+    let scroll = give(&w, &w.pa.clone(), slot_type::INVENTORY, SCROLL, 2, 0);
+    let target = give(&w, &w.pa.clone(), slot_type::INVENTORY, ARMOR, 1, 1);
+    let charm = give(&w, &w.pa.clone(), slot_type::INVENTORY, CHARM_MIN, 1, 2);
+    set_grade(&w, target, 2);
+    w.pa.data().money = 1000;
+    cast_grade(&mut w, scroll, target, Some(charm)).await;
+    assert_scroll_refunded(&w, scroll);
+    assert!(w.a.drain_ops().contains(&sc::SCErrorMsgPacket));
+    assert_eq!(item(&w, charm).unwrap().count, 1);
+}
+
+#[tokio::test]
+async fn grade_enchant_cast_refunds_the_scroll_above_the_charms_max_grade() {
+    let mut data = data();
+    add_charm_support(&mut data, CHARM_MAX, -1, 6);
+    let mut w = grade_cast_world(data, grade_effect(0, 2));
+    let scroll = give(&w, &w.pa.clone(), slot_type::INVENTORY, SCROLL, 2, 0);
+    let target = give(&w, &w.pa.clone(), slot_type::INVENTORY, ARMOR, 1, 1);
+    let charm = give(&w, &w.pa.clone(), slot_type::INVENTORY, CHARM_MAX, 1, 2);
+    set_grade(&w, target, 7);
+    w.pa.data().money = 10_000;
+    cast_grade(&mut w, scroll, target, Some(charm)).await;
+    assert_scroll_refunded(&w, scroll);
+    assert!(w.a.drain_ops().contains(&sc::SCErrorMsgPacket));
+    assert_eq!(item(&w, charm).unwrap().count, 1);
+}
+
+#[tokio::test]
+async fn grade_enchant_cast_refunds_the_scroll_when_the_target_template_is_unknown() {
+    let mut w = grade_cast_world(data(), grade_effect(0, 2));
+    let scroll = give(&w, &w.pa.clone(), slot_type::INVENTORY, SCROLL, 2, 0);
+    let target = give(&w, &w.pa.clone(), slot_type::INVENTORY, ARMOR, 1, 1);
+    Inv::of(&w.pa)
+        .bag()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(target)
+        .unwrap()
+        .template_id = 999_999;
+    w.pa.data().money = 1000;
+    cast_grade(&mut w, scroll, target, None).await;
+    assert_scroll_refunded(&w, scroll);
+    assert_eq!(item(&w, target).unwrap().grade, 0);
 }
 
 #[test]

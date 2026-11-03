@@ -603,7 +603,7 @@ refuses a duplicate faction id (`FUN_398a5280`), so `EXPEDITION_ID` also extract
 | Housing packets (11 CS, 14 SC incl. `SCLoginCharInfoHouse`, `SCMyHouse`) | `systems/housing/packets.rs` | done | Byte-exact tests. `CSChangeHousePayPacket` has opcode 0xfff in 1.2 (not registered). `SCHouseOwnerNameChangedPacket` is social's (`packets/misc.rs`). |
 | `CraftEffect` (`WorldInteractionGroup.Building`) | `systems/housing/mod.rs::apply_effect` | done | Routed first by `skills::ext::ExtHooks::route_effect`; quest `DoDoodadInteractionEvents` after it. |
 | `SpawnManager.Load` / `SpawnPersistentDoodads` housing parts, `LoadAccount` / `CSListCharacter` / `CSSelectCharacter` / `Character.Load` / `DeleteCharacterAssets` housing parts | `npcs/spawn_manager.rs`, `packets/c2g.rs`, `world/session.rs`, `db_character.rs` (one call each) | done | `LoadPlayerHousing` + `SpawnAll` before the persistent doodads, house parenting + bound doodads, `ReconcileBoundDoodads` (`UsePersistentHouseDoodads`). |
-| Placement validation | `systems/housing/placement.rs`, `systems/npcs/subzone.rs` | done | Original 1.2 housing XML `value1` tags resolve `housing_areas`/groups/categories; finite world positions, the whole `4n` footprint grid (`FUN_39331f70`/`FUN_39331ba0`), snapped-box house overlap (`FUN_39331f30`/`FUN_393349e0`), unit/doodad overlap with house-attached doodads skipped (`FUN_39335860`), authored `max_construct_count`, account eligibility, and nonrenewable beginner plots are checked server-side under the world placement guard. Terrain and mode-1 (n=0) model-box checks are omitted because the server has no render-model bounds (never stricter than the client). World-scoped land checks also guard planting and housing crafting benches. Real-data test: `placement::tests::real_area_338_footprint_accepts_only_the_fitting_spot`. |
+| Placement validation | `systems/housing/placement.rs`, `systems/npcs/subzone.rs` | done | Original 1.2 housing XML `value1` tags resolve `housing_areas`/groups/categories; finite world positions, the whole `4n` footprint grid (`FUN_39331f70`/`FUN_39331ba0`), snapped-box house overlap (`FUN_39331f30`/`FUN_393349e0`), unit/doodad overlap with house-attached doodads skipped (`FUN_39335860`), authored `max_construct_count`, account eligibility, and nonrenewable beginner plots are checked server-side under the world placement guard. The placement / purchase / decoration range uses the caster's composed world position, so a mounted rider, a seated player or a ship passenger is measured at their world location instead of the parent-relative seat local. Terrain and mode-1 (n=0) model-box checks are omitted because the server has no render-model bounds (never stricter than the client). World-scoped land checks also guard planting and housing crafting benches. Real-data test: `placement::tests::real_area_338_footprint_accepts_only_the_fitting_spot`. |
 
 Economy hooks (`server.systems.housing.hooks`): installed by `economy::bridges::EconomyForHousing`. Housing API for others: `housing::{house_by_id, house_at_location, allowed_to_interact(_by_id), pay_weekly_tax (MailManager tax payment), act_ability_bonus_at (CharacterCraft), update_owned_housing_faction, demolish_by_player}`.
 
@@ -2142,7 +2142,16 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `GradeEnchant` special-effect validation (`FUN_393a0130`, case 0x5c) returns SkillResult
   `INVALID_TARGET` (0x22) when the target template's `grade_enchantable` is false. Only
   `GradeEnchant` uses the flag; 1.2 has no awakening/evolving upgrade path. Real data: 4 564
-  `'t'` rows (all equipment) and 16 918 `'f'` rows.
+  `'t'` rows (all equipment) and 16 918 `'f'` rows. The rest of that client target check is
+  ported too: the target's `level_requirement` below the scroll's `special_effects.value2`
+  answers `LEVEL_LOW_TO_USE` (518, client sub-code 0x206), an item class other than
+  `value3` (1 weapon, 2 armor, 24 accessory; -1 = any) answers `INVALID_TARGET` (18), and a
+  grade-11 target answers `GRADE_ENCHANT_MAX` (665, client sub-code 0x299). Every refusal
+  (including a locked target, missing money, an unknown template, the charm grade windows
+  and the invalid gold-cost kind) now sets `skill_cancelled`, so the cast refunds its
+  debited scroll; before, the scroll was lost. The cast-path tests
+  (`grade_enchant_cast_refunds_the_scroll_*`) drive `CSStartSkillPacket` and assert the
+  scroll count.
 * systems::economy / npcs / skills (lunafrost, 2026-10): the C# `InteractionEffect` passed the
   `SkillItem` caster and `SkillCastItemTarget` to `MagicalEnchant.Execute`; the Rust bridge dropped
   them, so a lunafrost never applied. They are forwarded now. `MagicalEnchant` also looks the item up
@@ -2834,6 +2843,27 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   repairs stored `CHARGED` mails written before this (raw parentheses inside the `title('…')`
   argument and the third `body(…)` argument, nothing else touched, idempotent) and marks them
   dirty so the next save persists the fix.
+
+* systems::economy (shop limits, 2026-11-03): the `DoodadFuncPurchase` path claims the purchase
+  limit, debits the coins and grants the item as three separate steps; they share the economy
+  operation scope but not one `ItemTxn`, so a crash between them can lose the coin and the
+  claimed copy. The claim is released on a failed debit or grant (debit first, refund on
+  failure), but a process exit cannot run that release. Known, not fixed.
+* systems::economy (shop limits, 2026-11-03): `ShopLimits::release` changes the in-memory count
+  only. `prepare_save` omits zero counts and `write_prepared` is an upsert without a delete, so
+  a released claim that returns a template to zero stays in `character_shop_purchases` and is
+  loaded again after a restart (the limit is then one copy too strict). Known, not fixed.
+* systems::economy (lunagem socketing, 2026-11-03): the 1.2 socket rules read their minimum
+  item level from `content_configs` id 0xf8 (248) in the client; the server still uses the
+  constant 20 from `content_configs` id 62 (`ITEM_SOCKET_MIN_ITEM_LEVEL`). The 1.2 compact row
+  248 is not confirmed to match, so the config read is not ported. Known, not fixed.
+* systems::vehicles (mate summon, 2026-11-03): a different mate's summon item despawns the old
+  mate before the new one is allocated; a failed allocation after that leaves the player with
+  no mate. The item / template / dead-mate checks run first, so only an allocation failure
+  after the despawn can lose the old mate. Known, not fixed.
+* systems::vehicles (mate summon, 2026-11-03): a dead mate's summon item carries the corpse flag
+  and `spawn_mount` refuses it with `MATE_CANNOT_SPAWN_WHILE_CORPSE`; because the same item is
+  the dismiss toggle, the corpse flag also blocks dismissing the corpse. Known, not fixed.
 
 ### Ranking boards (Rust only)
 
