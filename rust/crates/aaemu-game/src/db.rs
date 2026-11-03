@@ -319,6 +319,26 @@ pub async fn update_divine_clock(
     }
 }
 
+/// Adds `delta` seconds to the divine clock of every account in `account_ids` with one atomic
+/// statement. `divine_clock_time` is `INT UNSIGNED`: the sum saturates at `u32::MAX` instead of
+/// wrapping like the C# `uint` (a strict-mode overflow would otherwise fail the whole batch).
+pub async fn add_divine_clock_time(pool: &MySqlPool, account_ids: &[u32], delta: u32) {
+    if account_ids.is_empty() || delta == 0 {
+        return;
+    }
+    let marks = vec!["?"; account_ids.len()].join(",");
+    let sql = format!(
+        "UPDATE accounts SET divine_clock_time = LEAST(CAST(divine_clock_time AS UNSIGNED) + ?, 4294967295) WHERE account_id IN ({marks})"
+    );
+    let mut q = sqlx::query(&sql).bind(u64::from(delta));
+    for id in account_ids {
+        q = q.bind(*id);
+    }
+    if let Err(e) = q.execute(pool).await {
+        tracing::error!("{e}");
+    }
+}
+
 /// `AccountManager.GetDivineClock`: `(divine_clock_time, divine_clock_taken)`, `(0, 0)` when the
 /// account does not exist or the query fails.
 pub async fn get_divine_clock(pool: &MySqlPool, account_id: u32) -> (u32, u32) {
