@@ -313,12 +313,8 @@ pub fn can_start_trade(server: &GameServer, owner: &PlayerRef, target: &PlayerRe
     if crate::systems::social::friend::is_blocked_by(target, owner.character_id) {
         return;
     }
-    let mut trades = manager(server).lock();
-    if is_trading(server, &mut trades, owner.obj_id)
-        || is_trading(server, &mut trades, target.obj_id)
-    {
-        return;
-    }
+    // The state check takes player data locks and reads the world; keep it outside the trade
+    // table lock (which protects none of that state).
     if let Some(refusal) = trade_state_refusal(server, owner, target) {
         tracing::info!(
             "{}({}) cannot trade with {}({}): {refusal:?}.",
@@ -328,6 +324,12 @@ pub fn can_start_trade(server: &GameServer, owner: &PlayerRef, target: &PlayerRe
             target.obj_id
         );
         refusal.send(owner, target);
+        return;
+    }
+    let mut trades = manager(server).lock();
+    if is_trading(server, &mut trades, owner.obj_id)
+        || is_trading(server, &mut trades, target.obj_id)
+    {
         return;
     }
     tracing::info!(
@@ -347,12 +349,7 @@ pub fn can_start_trade(server: &GameServer, owner: &PlayerRef, target: &PlayerRe
 /// invitation was issued when the request was made; either player may have died, left the
 /// instance, moved out of range or changed faction since.
 pub fn start_trade(server: &GameServer, owner: &PlayerRef, target: &PlayerRef) {
-    let mut trades = manager(server).lock();
-    if is_trading(server, &mut trades, owner.obj_id)
-        || is_trading(server, &mut trades, target.obj_id)
-    {
-        return;
-    }
+    // Player data / world first, trade table lock second (see `can_start_trade`).
     if let Some(refusal) = trade_state_refusal(server, owner, target) {
         tracing::info!(
             "Trade acceptance of {}({}) by {}({}) refused: {refusal:?}.",
@@ -362,6 +359,12 @@ pub fn start_trade(server: &GameServer, owner: &PlayerRef, target: &PlayerRef) {
             target.obj_id
         );
         refusal.send(owner, target);
+        return;
+    }
+    let mut trades = manager(server).lock();
+    if is_trading(server, &mut trades, owner.obj_id)
+        || is_trading(server, &mut trades, target.obj_id)
+    {
         return;
     }
     let next_id = match server.ids.trade.get_next_id() {
