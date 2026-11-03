@@ -593,6 +593,23 @@ impl DoodadData {
                 }))
             },
         )?;
+        // The only authored row is a `doodad_funcs` row (3304 group 7622, skill 15067, next
+        // phase 7627). The C# registered the class in `_phaseFuncTemplates` only, so
+        // `GetFuncTemplate` never found it and the row was dead. Register the same template for
+        // the regular func lookup as well; `DoodadFuncDeclareSiege` is the one class in both
+        // tables.
+        d.func_templates
+            .insert("DoodadFuncDeclareSiege", HashMap::new());
+        load_templates(
+            conn,
+            &mut d.func_templates,
+            "SELECT * FROM doodad_func_declare_sieges",
+            |r| {
+                Ok(FuncTemplate::DeclareSiege(DoodadFuncDeclareSiege {
+                    id: r.u32("id")?,
+                }))
+            },
+        )?;
         load_templates(
             conn,
             &mut d.func_templates,

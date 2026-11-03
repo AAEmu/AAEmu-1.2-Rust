@@ -318,9 +318,11 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
         FuncTemplate::CraftDirect(f) => override_if_character(ctx, caster, f.next_phase),
         FuncTemplate::Hunger(f) => override_if_character(ctx, caster, f.next_phase),
         FuncTemplate::PuzzleOut(f) => override_if_character(ctx, caster, f.next_phase),
-        // The original period enter/leave predicate is not yet verified. Following every
-        // authored destination on a character caster loops 3410's phase-only 8173/8238
-        // groups. Explicit GM HQ phases/bindings remain usable without guessing a calendar.
+        // A wait, not an action: stay in this phase until period `siege_period_id` ends, then
+        // move to `next_phase` (-1 = gone). The boundary is an external event, so the func is
+        // passive when the phase is entered; `super::siege_phase` applies the change when the
+        // zone's period changes. 3410's unknown `period 0` rule and the `defense` flag are
+        // documented there (capture-pending).
         FuncTemplate::SiegePeriod(_) => false,
         FuncTemplate::SpawnGimmick(f) => {
             if crate::systems::npcs::gimmick::manager::spawn_from_doodad(

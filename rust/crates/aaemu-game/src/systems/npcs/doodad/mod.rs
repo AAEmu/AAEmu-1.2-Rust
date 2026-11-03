@@ -17,6 +17,7 @@ pub mod phase;
 pub mod phase_funcs;
 pub mod placement;
 pub mod runtime;
+pub mod siege_phase;
 pub mod spawner;
 pub mod tasks;
 pub mod templates;
@@ -37,6 +38,7 @@ pub async fn start(server: &Arc<GameServer>) -> anyhow::Result<()> {
         .set_growth_rate(server.config.world.growth_rate);
     manager::load_climate_elems(server);
     manager::start_tod_watch(server);
+    siege_phase::start(server);
     Ok(())
 }
 

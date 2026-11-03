@@ -495,6 +495,45 @@ pub fn despawn_or_delete(ctx: &DoodadCtx<'_>) {
     }
 }
 
+/// An externally driven phase change (a period boundary, WP-S3): only while the doodad is
+/// still in `expected_group`, checked and applied under one phase-operation reservation.
+/// Returns whether the phase change ran.
+pub(crate) fn do_change_phase_if_group(
+    ctx: &DoodadCtx<'_>,
+    caster: Option<&WorldObject>,
+    expected_group: u32,
+    next_phase: i32,
+) -> bool {
+    let Some(_operation) = Operation::enter(&ctx.doodad) else {
+        return false;
+    };
+    {
+        let d = ctx.doodad.data();
+        if d.phase.deleted || d.func_group_id != expected_group {
+            return false;
+        }
+    }
+    // A nested `Operation::enter` on this thread is allowed.
+    do_change_phase(ctx, caster, next_phase);
+    true
+}
+
+/// [`despawn_or_delete`] for an externally driven final phase, under the same expected-group
+/// check. Returns whether the doodad was still in `expected_group` and got despawned/deleted.
+pub(crate) fn despawn_or_delete_if_group(ctx: &DoodadCtx<'_>, expected_group: u32) -> bool {
+    let Some(_operation) = Operation::enter(&ctx.doodad) else {
+        return false;
+    };
+    {
+        let d = ctx.doodad.data();
+        if d.phase.deleted || d.func_group_id != expected_group {
+            return false;
+        }
+    }
+    despawn_or_delete(ctx);
+    true
+}
+
 /// `DoPhaseFuncs(caster, ref nextPhase)`: `true` = the phase did not pass (abort).
 fn do_phase_funcs(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, next_phase: &mut i32) -> bool {
     if *next_phase <= 0 {
