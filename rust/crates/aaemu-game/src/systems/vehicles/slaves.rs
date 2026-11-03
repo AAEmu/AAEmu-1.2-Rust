@@ -1623,6 +1623,18 @@ pub fn bind_slave(
         super::bind_error(character, error::SLAVE_UNBIND_FIRST);
         return;
     }
+    // A transfer passenger must unboard first; otherwise the slave seat and the transfer
+    // seat would both claim the character (and an unboard would drop the slave attachment).
+    if super::transfers::is_boarded(server, character) {
+        tracing::debug!(
+            "BindSlave: character {} is on a transfer; refusing seat {} of {}",
+            character.obj_id,
+            point,
+            obj_id
+        );
+        super::bind_error(character, error::SLAVE_UNBIND_FIRST);
+        return;
+    }
     let me = WorldObject::from(character);
     // The caller decides the reach: 12076 passes 4.0, 13863 the passenger reach, and the
     // doodad BoardTransfer path passes `None` because its own doodad func already checked the
@@ -4884,6 +4896,178 @@ fn mark_summoning_item_as_destroyed(server: &GameServer, slave: &SlaveRef) {
     }
 }
 
+/// `CSRepairSlaveItemsPacket`: a repairman restores the destroyed slave summon items in the
+/// player's bag.
+///
+/// The 1.2 client's cost preview `GetTotalRepairsForSlaveItems` (`FUN_39447c20`) scans
+/// `items.impl_id = 8` (`ItemImplEnum.SummonSlave`, the mate variant scans impl 11), requires
+/// the item's destroyed flag, resolves the slave through `item_summon_slaves` and adds the
+/// slave template's `cost` (the client's `slaves` query selects `id, cost, ...` in that order;
+/// `FUN_39696380(slaveId)` +4). It then keeps only the slots whose owning container is the
+/// player's bag: `FUN_390457b0(location)` looks the slot's container up and the preview
+/// compares it with `*(inventory + 0xc34c)` (the bag container id). The bank slots
+/// `FUN_397d3130` also yields (key high byte 0x300) therefore never count, so the service is
+/// bag-only too. The 1.2 C# never implemented the handler. The reply follows
+/// the `RepairSlaveEffect` kit path: `SCItemTaskSuccess(ItemTaskType.RepairSlaves)` with one
+/// `ItemUpdate` per repaired item, then `ErrorMessageType.SlaveRepaired` (the client locale has
+/// `slave_repaired` / `slave_cannot_repair_already_spawned` for this service).
+pub fn repair_slave_items(server: &GameServer, player: &PlayerRef, npc_obj_id: u32) {
+    use crate::data::items::TemplateKind;
+    use crate::systems::economy::error_message;
+    use crate::systems::economy::inventory::send_error_message_to;
+
+    if npc_obj_id == 0 || player.data().unit.current_interaction_object != npc_obj_id {
+        return;
+    }
+    let Some(world) = player_world(server, player) else {
+        return;
+    };
+    let Some(npc) = world.npc(npc_obj_id) else {
+        return;
+    };
+    let repairman = server
+        .systems
+        .economy
+        .hooks
+        .npcs
+        .get()
+        .and_then(|h| h.shop_info(server, &npc))
+        .is_some_and(|i| i.repairman);
+    if !repairman {
+        tracing::warn!(
+            "Attempting to repair slave items while not at a repairman, NPC: {}",
+            npc.obj_id
+        );
+        return;
+    }
+    let me = world.world_pos_rot(&WorldObject::from(player));
+    let them = world.world_pos_rot(&WorldObject::from(&npc));
+    if me.distance_to(&them, false) > 5.0 {
+        error(player, error_message::TOO_FAR_AWAY);
+        return;
+    }
+    let inv = Inv::of(player);
+    let containers: Vec<_> = [slot_type::INVENTORY]
+        .into_iter()
+        .filter_map(|t| inv.get(t))
+        .collect();
+    // (item id, slave db id, price). Skip rows whose template/slave data is missing instead of
+    // failing the whole request.
+    let mut destroyed: Vec<(u64, u32, i32)> = Vec::new();
+    for c in &containers {
+        let c = c.lock().expect("container poisoned");
+        for i in &c.items {
+            if i.class != ItemClass::SummonSlave || i.details.slave_is_destroyed == 0 {
+                continue;
+            }
+            let Some(template) = server.game_data.items.template(i.template_id) else {
+                continue;
+            };
+            let TemplateKind::SummonSlave { slave_id } = &template.kind else {
+                continue;
+            };
+            let Some(slave_template) = server.game_data.systems.vehicles.slave_template(*slave_id)
+            else {
+                continue;
+            };
+            destroyed.push((i.id, i.details.slave_db_id, slave_template.cost.max(0)));
+        }
+    }
+    if destroyed.is_empty() {
+        tracing::debug!(
+            "RepairSlaveItems: no destroyed slave item, NPC: {}",
+            npc.obj_id
+        );
+        return;
+    }
+    // A vehicle that is currently out cannot be repaired (`SLAVE_CANNOT_REPAIR_ALREADY_SPAWNED`).
+    if destroyed
+        .iter()
+        .any(|(_, db_id, _)| *db_id != 0 && get_slave_by_db_id(&world, *db_id).is_some())
+    {
+        error(player, error_message::SLAVE_CANNOT_REPAIR_ALREADY_SPAWNED);
+        return;
+    }
+    let total: i64 = destroyed.iter().map(|(_, _, cost)| i64::from(*cost)).sum();
+    let Ok(cost) = i32::try_from(total) else {
+        return;
+    };
+    let mut txn = ItemTxn::begin(server);
+    // Debit first (check and subtract under the character's one lock), refund what could not
+    // be repaired below: an item traded away between the scan and the update must not be paid.
+    if cost > 0
+        && !inventory::change_money(
+            &mut txn.out(),
+            player,
+            slot_type::INVENTORY,
+            slot_type::NONE,
+            cost,
+            task_type::DEPOSIT_MONEY,
+        )
+    {
+        return;
+    }
+    let (tasks, refund) = repair_destroyed_slave_items(&containers, &destroyed);
+    if refund > 0 {
+        inventory::change_money(
+            &mut txn.out(),
+            player,
+            slot_type::NONE,
+            slot_type::INVENTORY,
+            refund,
+            task_type::DEPOSIT_MONEY,
+        );
+    }
+    if tasks.is_empty() {
+        // Every scanned item vanished before the update: only the refund goes out, no empty
+        // RepairSlaves task and no "repaired" message.
+        return;
+    }
+    let mut out = txn.out();
+    out.send(
+        player,
+        SCItemTaskSuccessPacket {
+            action: item_task_type::REPAIR_SLAVES,
+            tasks,
+            force_remove: Vec::new(),
+        },
+    );
+    send_error_message_to(&mut out, player, error_message::SLAVE_REPAIRED);
+}
+
+/// Applies the repair to the destroyed items that are still in `containers` (the player's own
+/// bag), returning the update tasks and the price of the items that vanished or were already
+/// repaired. No global item store is consulted: an item traded or mailed away is only refunded.
+fn repair_destroyed_slave_items(
+    containers: &[ContainerRef],
+    destroyed: &[(u64, u32, i32)],
+) -> (Vec<ItemTask>, i32) {
+    let mut tasks = Vec::new();
+    let mut refund = 0i32;
+    for (item_id, _, price) in destroyed {
+        let mut task = None;
+        for c in containers {
+            let mut c = c.lock().expect("container poisoned");
+            let Some(i) = c.get_item_by_id_mut(*item_id) else {
+                continue;
+            };
+            if i.class == ItemClass::SummonSlave && i.details.slave_is_destroyed != 0 {
+                // The NPC service completes at once: unlike a repair kit, no 10 minute timer.
+                i.details.slave_is_destroyed = 0;
+                i.details.slave_repair_start_time = 0;
+                i.dirty = true;
+                task = Some(super::packets::item_update(i));
+            }
+            break;
+        }
+        match task {
+            Some(task) => tasks.push(task),
+            None => refund = refund.saturating_add(*price),
+        }
+    }
+    (tasks, refund)
+}
+
 /// `Slave.RegenTick(delta)`.
 pub fn regen_tick(server: &GameServer, slave: &SlaveRef) {
     flush_pending_turret_state(server, slave);
@@ -7511,3 +7695,7 @@ fn refund_summon_cooldown(owner: &PlayerRef, cooldown: Option<SummonCooldownToke
         );
     }
 }
+
+#[cfg(test)]
+#[path = "slave_repair_tests.rs"]
+mod slave_repair_tests;

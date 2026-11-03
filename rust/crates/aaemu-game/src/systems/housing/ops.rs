@@ -7,6 +7,7 @@
 use crate::models::house::{housing_permission, House};
 use crate::models::transform::PositionAndRotation;
 use crate::server::GameServer;
+use crate::systems::economy::mail_template::quote_arg;
 use crate::systems::social::achievement::char_record_kind;
 use crate::systems::social::achievement_hooks::{AchievementInput, RecordMatch};
 use crate::world::{HouseRef, PlayerRef, WorldObject};
@@ -92,7 +93,7 @@ pub fn construct_house_tax(
         return;
     };
     if let Err(error) =
-        super::placement::validate_placement_range(player, x, y, z, template.garden_radius)
+        super::placement::validate_placement_range(server, player, x, y, z, template.garden_radius)
     {
         send_error(player, error);
         return;
@@ -1206,8 +1207,15 @@ pub fn cancel_for_sale(server: &GameServer, house: &HouseRef, return_certificate
             receiver_id: h.unit.owner_id,
             sender_name: ".houseSellCancel".into(),
             receiver_name: server.names.get_character_name(h.unit.owner_id),
-            title: format!("title({},'{}')", zone_group_text(server, &h), h.unit.name),
-            text: format!("body('{}', {APPRAISAL_CERTIFICATE}, {cert})", h.unit.name),
+            title: format!(
+                "title({},'{}')",
+                zone_group_text(server, &h),
+                quote_arg(&h.unit.name)
+            ),
+            text: format!(
+                "body('{}', {APPRAISAL_CERTIFICATE}, {cert})",
+                quote_arg(&h.unit.name)
+            ),
             send_date_ms: now_ms,
             recv_date_ms: now_ms + 1,
             ..HouseMail::default()
@@ -1351,7 +1359,7 @@ pub fn buy_house(server: &GameServer, tl: u16, money: u32, player: &PlayerRef) -
         let t = h.unit.transform;
         (t.x, t.y, t.z)
     };
-    if !super::placement::caster_in_range(player, hx, hy, hz, 0.0) {
+    if !super::placement::caster_in_range(server, player, hx, hy, hz, 0.0) {
         send_error(player, err::TOO_FAR_AWAY);
         return false;
     }
@@ -1380,10 +1388,16 @@ pub fn buy_house(server: &GameServer, tl: u16, money: u32, player: &PlayerRef) -
             receiver_id: char_id,
             sender_name: ".houseBought".into(),
             receiver_name: Some(char_name.clone()),
-            title: format!("title({},'{}')", zone_group_text(server, &h), h.unit.name),
+            title: format!(
+                "title({},'{}')",
+                zone_group_text(server, &h),
+                quote_arg(&h.unit.name)
+            ),
             text: format!(
-                "body('{prev_name_text}', '{}', {})",
-                h.unit.name, h.sell_price
+                "body('{}', '{}', {})",
+                quote_arg(&prev_name_text),
+                quote_arg(&h.unit.name),
+                h.sell_price
             ),
             send_date_ms: now_ms,
             recv_date_ms: now_ms + 1,
@@ -1394,8 +1408,17 @@ pub fn buy_house(server: &GameServer, tl: u16, money: u32, player: &PlayerRef) -
             receiver_id: previous_owner,
             sender_name: ".houseSold".into(),
             receiver_name: previous_owner_name,
-            title: format!("title('{char_name}','{}')", h.unit.name),
-            text: format!("body('{char_name}', '{}', {})", h.unit.name, h.sell_price),
+            title: format!(
+                "title('{}','{}')",
+                quote_arg(&char_name),
+                quote_arg(&h.unit.name)
+            ),
+            text: format!(
+                "body('{}', '{}', {})",
+                quote_arg(&char_name),
+                quote_arg(&h.unit.name),
+                h.sell_price
+            ),
             copper_coins: sale_price,
             send_date_ms: now_ms,
             recv_date_ms: now_ms + 1,
@@ -1486,6 +1509,7 @@ pub fn decorate_house(
     let Some(item) = hooks.inventory_item(server, player, p.item_id).filter(|i| {
         i.owner_id == u64::from(char_id) && i.slot_type == slot_type::INVENTORY && i.count > 0
     }) else {
+        send_error(player, err::HOUSE_CANNOT_DECORATE);
         return Ok(false);
     };
     if item.secure {
@@ -1553,6 +1577,7 @@ pub fn decorate_house(
         return Ok(false);
     }
     let Some(template) = template_of(server, &house) else {
+        send_error(player, err::HOUSE_CANNOT_DECORATE);
         return Ok(false);
     };
     // The 1.2 client refuses the decoration item when the player is farther than 30 m from
@@ -1569,7 +1594,7 @@ pub fn decorate_house(
         hy + p.x * sin + p.y * cos,
         hz + p.z,
     );
-    if !super::placement::caster_in_range(player, target.0, target.1, target.2, 0.0) {
+    if !super::placement::caster_in_range(server, player, target.0, target.1, target.2, 0.0) {
         send_error(player, err::TOO_FAR_TO_DECORATE_HOUSE);
         return Ok(false);
     }
@@ -1680,6 +1705,7 @@ pub fn decorate_house(
     };
     if !paid {
         server.ids.object.release_id(doodad.obj_id);
+        send_error(player, err::HOUSE_CANNOT_DECORATE);
         return Ok(false);
     }
     world.attach_child(&house_obj, &WorldObject::from(&doodad));

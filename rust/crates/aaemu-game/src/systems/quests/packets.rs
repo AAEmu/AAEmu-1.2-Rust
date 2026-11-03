@@ -519,7 +519,8 @@ impl ClientPacket for CSTryQuestCompleteAsLetItDonePacket {
     }
 }
 
-/// `CSRestartMainQuestPacket` (logged only).
+/// `CSRestartMainQuestPacket` (0x0fd): the player asked to restart quest `id` (the template
+/// id). Handled by [`Ctx::try_restart_quest`](super::engine::Ctx::try_restart_quest).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSRestartMainQuestPacket {
     pub id: u32,
@@ -534,11 +535,20 @@ impl ClientPacket for CSRestartMainQuestPacket {
 
     fn handle<'a>(
         self,
-        _server: &'a GameServer,
-        _conn: &'a mut GameConnection,
+        server: &'a GameServer,
+        conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            tracing::warn!("RestartMainQuest, Id: {}", self.id);
+            if let Some(p) = active(conn) {
+                tracing::info!(
+                    "RestartMainQuest, {} ({}), Quest {}",
+                    p.data().unit.name,
+                    p.character_id,
+                    self.id
+                );
+                let id = self.id;
+                events::with_quests(server, &p, None, move |ctx| ctx.try_restart_quest(id));
+            }
             Ok(())
         })
     }

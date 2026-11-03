@@ -20,6 +20,15 @@ pub enum SocialEvent {
         sender_name: String,
         is_party: bool,
     },
+    /// `SCAskToJoinTeamAreaPacket` (the 1.2 area invitation popup).
+    TeamAskArea {
+        team_id: u32,
+        sender_id: u32,
+        sender_name: String,
+        is_party: bool,
+    },
+    /// `SCTeamAreaInvitedPacket` (`r` = remaining cooldown ms when `s` is false).
+    AreaInvited { r: u32, s: bool },
     /// `SCJoinedTeamPacket` (head only).
     TeamJoined {
         team_id: u32,
@@ -32,6 +41,14 @@ pub enum SocialEvent {
         invitor_name: String,
         faction_id: u32,
         faction_name: String,
+    },
+    /// `SCFactionRenamedPacket` (guild / nation rename result).
+    FactionRenamed { id: u32, name: String, by_gm: bool },
+    /// `SCFactionRetryRenamePacket`: the rename dialog is re-opened with this name.
+    FactionRetryRename {
+        is_expedition: bool,
+        error_message: i16,
+        name: String,
     },
 }
 
@@ -52,6 +69,16 @@ fn decode_inner(p: &Packet) -> anyhow::Result<Option<SocialEvent>> {
             sender_name: s.read_string()?,
             is_party: s.read_bool()?,
         },
+        sc::SCAskToJoinTeamAreaPacket => SocialEvent::TeamAskArea {
+            team_id: s.read_u32()?,
+            sender_id: s.read_u32()?,
+            sender_name: s.read_string()?,
+            is_party: s.read_bool()?,
+        },
+        sc::SCTeamAreaInvitedPacket => SocialEvent::AreaInvited {
+            r: s.read_u32()?,
+            s: s.read_bool()?,
+        },
         sc::SCJoinedTeamPacket => SocialEvent::TeamJoined {
             team_id: s.read_u32()?,
             owner_id: s.read_u32()?,
@@ -63,6 +90,16 @@ fn decode_inner(p: &Packet) -> anyhow::Result<Option<SocialEvent>> {
             faction_id: s.read_u32()?,
             faction_name: s.read_string()?,
         },
+        sc::SCFactionRenamedPacket => SocialEvent::FactionRenamed {
+            id: s.read_u32()?,
+            name: s.read_string()?,
+            by_gm: s.read_bool()?,
+        },
+        sc::SCFactionRetryRenamePacket => SocialEvent::FactionRetryRename {
+            is_expedition: s.read_bool()?,
+            error_message: s.read_i16()?,
+            name: s.read_string()?,
+        },
         _ => return Ok(None),
     };
     Ok(Some(ev))
@@ -73,6 +110,13 @@ pub fn invite_to_team(team_id: u32, is_party: bool, target: &str) -> (u16, Vec<u
     let mut b = PacketStream::new();
     b.write_u32(team_id).write_bool(is_party).write_str(target);
     (cs::CSInviteToTeamPacket, b.into_bytes())
+}
+
+/// `CSInviteAreaToTeamPacket` (`team_id` 0 = the inviter's current team).
+pub fn invite_area_to_team(team_id: u32, is_party: bool) -> (u16, Vec<u8>) {
+    let mut b = PacketStream::new();
+    b.write_u32(team_id).write_bool(is_party);
+    (cs::CSInviteAreaToTeamPacket, b.into_bytes())
 }
 
 /// `CSReplyToJoinTeamPacket`.
@@ -93,6 +137,24 @@ pub fn reply_to_join_team(
     (cs::CSReplyToJoinTeamPacket, b.into_bytes())
 }
 
+/// `CSReplyToJoinTeamPacket` answering `SCAskToJoinTeamAreaPacket` (`isArea = true`).
+pub fn reply_area_to_join_team(
+    team_id: u32,
+    is_party: bool,
+    owner_id: u32,
+    reject: bool,
+    char_name: &str,
+) -> (u16, Vec<u8>) {
+    let mut b = PacketStream::new();
+    b.write_u32(team_id)
+        .write_bool(is_party)
+        .write_u32(owner_id)
+        .write_bool(reject)
+        .write_str(char_name)
+        .write_bool(true);
+    (cs::CSReplyToJoinTeamPacket, b.into_bytes())
+}
+
 /// `CSCreateExpeditionPacket` (guild).
 pub fn create_expedition(name: &str) -> (u16, Vec<u8>) {
     let mut b = PacketStream::new();
@@ -105,6 +167,13 @@ pub fn invite_to_expedition(name: &str) -> (u16, Vec<u8>) {
     let mut b = PacketStream::new();
     b.write_str(name);
     (cs::CSInviteToExpeditionPacket, b.into_bytes())
+}
+
+/// `CSRenameExpeditionPacket` (`id` = the caller's guild; `is_expedition` = true).
+pub fn rename_expedition(id: u32, name: &str) -> (u16, Vec<u8>) {
+    let mut b = PacketStream::new();
+    b.write_u32(id).write_str(name).write_bool(true);
+    (cs::CSRenameExpeditionPacket, b.into_bytes())
 }
 
 /// `CSReplyExpeditionInvitationPacket` (`id` = the faction id of the invitation).
@@ -143,6 +212,17 @@ mod tests {
             )
         );
         assert_eq!(
+            invite_area_to_team(5, true),
+            (cs::CSInviteAreaToTeamPacket, vec![5, 0, 0, 0, 1])
+        );
+        assert_eq!(
+            reply_area_to_join_team(3, true, 7, false, "Al"),
+            (
+                cs::CSReplyToJoinTeamPacket,
+                vec![3, 0, 0, 0, 1, 7, 0, 0, 0, 0, 2, 0, b'A', b'l', 1]
+            )
+        );
+        assert_eq!(
             create_expedition("Ab"),
             (
                 cs::CSCreateExpeditionPacket,
@@ -160,13 +240,20 @@ mod tests {
                 vec![7, 0, 0, 0, 1, 0, 0, 0, 1]
             )
         );
+        assert_eq!(
+            rename_expedition(7, "Ab"),
+            (
+                cs::CSRenameExpeditionPacket,
+                vec![7, 0, 0, 0, 2, 0, b'A', b'b', 1]
+            )
+        );
     }
 
     #[test]
     fn encoders_round_trip_through_the_server_readers() {
         use aaemu_game::net::registry::ClientPacket;
         use aaemu_game::systems::social::packets::team::{
-            CSInviteToTeamPacket, CSReplyToJoinTeamPacket,
+            CSInviteAreaToTeamPacket, CSInviteToTeamPacket, CSReplyToJoinTeamPacket,
         };
         let mut s = PacketStream::from_bytes(invite_to_team(0, true, "Bo").1);
         let i = CSInviteToTeamPacket::read(&mut s).unwrap();
@@ -180,6 +267,13 @@ mod tests {
             (r.team_id, r.owner_id, r.is_reject, r.char_name.as_str()),
             (3, 7, true, "Al")
         );
+        let mut s = PacketStream::from_bytes(invite_area_to_team(5, false).1);
+        let i = CSInviteAreaToTeamPacket::read(&mut s).unwrap();
+        assert_eq!((i.team_id, i.is_party), (5, false));
+        let mut s = PacketStream::from_bytes(reply_area_to_join_team(3, false, 7, false, "").1);
+        let r = CSReplyToJoinTeamPacket::read(&mut s).unwrap();
+        assert!(r.is_area);
+        assert_eq!((r.team_id, r.owner_id), (3, 7));
     }
 
     #[test]
@@ -199,6 +293,32 @@ mod tests {
     }
 
     #[test]
+    fn faction_rename_events_decode() {
+        assert_eq!(
+            decode(&pkt(
+                sc::SCFactionRenamedPacket,
+                vec![7, 0, 0, 0, 5, 0, b'T', b'a', b'k', b'e', b'n', 0]
+            )),
+            Some(SocialEvent::FactionRenamed {
+                id: 7,
+                name: "Taken".into(),
+                by_gm: false
+            })
+        );
+        assert_eq!(
+            decode(&pkt(
+                sc::SCFactionRetryRenamePacket,
+                vec![1, 0x2b, 0x01, 3, 0, b'A', b'b', b'c']
+            )),
+            Some(SocialEvent::FactionRetryRename {
+                is_expedition: true,
+                error_message: 299,
+                name: "Abc".into()
+            })
+        );
+    }
+
+    #[test]
     fn team_events_decode() {
         let mut b = PacketStream::new();
         b.write_u32(3).write_u32(7).write_str("Al").write_bool(true);
@@ -209,6 +329,29 @@ mod tests {
                 sender_id: 7,
                 sender_name: "Al".into(),
                 is_party: true
+            })
+        );
+        let mut b = PacketStream::new();
+        b.write_u32(3)
+            .write_u32(7)
+            .write_str("Al")
+            .write_bool(false);
+        assert_eq!(
+            decode(&pkt(sc::SCAskToJoinTeamAreaPacket, b.into_bytes())),
+            Some(SocialEvent::TeamAskArea {
+                team_id: 3,
+                sender_id: 7,
+                sender_name: "Al".into(),
+                is_party: false
+            })
+        );
+        let mut b = PacketStream::new();
+        b.write_u32(15_000).write_bool(false);
+        assert_eq!(
+            decode(&pkt(sc::SCTeamAreaInvitedPacket, b.into_bytes())),
+            Some(SocialEvent::AreaInvited {
+                r: 15_000,
+                s: false
             })
         );
         let mut b = PacketStream::new();

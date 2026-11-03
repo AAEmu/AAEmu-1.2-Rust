@@ -1139,6 +1139,111 @@ async fn decoration_from_far_away_is_refused_with_too_far_to_decorate_house() {
     assert_eq!(fx.eco.debit_calls.load(Ordering::SeqCst), 0);
 }
 
+/// Mounts `player` on a spawned mate at `(x, y, z)` and gives it the seat-local transform
+/// `mates::mount_mate` writes for a rider (the parent-relative origin).
+fn mount_at(fx: &Fx, player: &PlayerRef, x: f32, y: f32, z: f32) {
+    let mut mate = crate::models::mate::Mate::new(1, 1);
+    mate.unit.owner_id = player.character_id;
+    mate.owner_obj_id = player.obj_id;
+    mate.unit.transform.set_xyz(x, y, z);
+    let mate = crate::world::Entity::new(fx.server.ids.object.get_next_id().unwrap(), mate);
+    let world = fx.server.world.world(0).unwrap();
+    world.spawn(&mate, &fx.server.view_ctx());
+    world.attach_child(&WorldObject::from(&mate), &WorldObject::from(player));
+    player
+        .data()
+        .unit
+        .transform
+        .set_position(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+}
+
+/// Seats `player` on a spawned chair doodad at `(x, y, z)` (a parent-relative seat transform).
+fn seat_at(fx: &Fx, player: &PlayerRef, x: f32, y: f32, z: f32) {
+    let world = fx.server.world.world(0).unwrap();
+    let seat =
+        crate::systems::npcs::doodad::manager::create(&fx.server, &world, 0, CHAIR, None, true)
+            .expect("chair doodad");
+    seat.data().transform.set_xyz(x, y, z);
+    world.spawn(&seat, &fx.server.view_ctx());
+    world.attach_child(&WorldObject::from(&seat), &WorldObject::from(player));
+    player
+        .data()
+        .unit
+        .transform
+        .set_position(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+}
+
+#[tokio::test]
+async fn a_mounted_buyer_at_the_house_is_in_range() {
+    let fx = fixture(false);
+    assert!(ops::set_for_sale(&fx.server, &fx.house, 100, 0, None));
+    mount_at(&fx, &fx.guest, 105.0, 100.0, 100.0);
+    let tl = fx.house.data().unit.tl_id;
+    assert!(ops::buy_house(&fx.server, tl, 100, &fx.guest));
+    assert_eq!(fx.house.data().unit.owner_id, 2);
+    assert_eq!(fx.guest.data().money, 9900);
+}
+
+#[tokio::test]
+async fn a_mounted_buyer_far_away_is_still_refused() {
+    let mut fx = fixture(false);
+    assert!(ops::set_for_sale(&fx.server, &fx.house, 100, 0, None));
+    mount_at(&fx, &fx.guest, 400.0, 400.0, 100.0);
+    let tl = fx.house.data().unit.tl_id;
+    assert!(!ops::buy_house(&fx.server, tl, 100, &fx.guest));
+    assert_eq!(
+        error_codes(&mut fx.guest_client),
+        vec![manager::error_message::TOO_FAR_AWAY]
+    );
+    assert_eq!(fx.house.data().unit.owner_id, 1);
+}
+
+#[tokio::test]
+async fn a_seated_decorator_at_the_house_is_in_range() {
+    let fx = fixture(false);
+    seat_at(&fx, &fx.owner, 105.0, 100.0, 100.0);
+    assert_eq!(
+        ops::decorate_house(&fx.server, &fx.owner, &decoration(&fx)),
+        Ok(true)
+    );
+    assert_eq!(furniture(&fx).len(), 1);
+}
+
+#[tokio::test]
+async fn decoration_refusals_answer_house_cannot_decorate() {
+    let mut fx = fixture(false);
+    // The item is not in the owner's bag (or not owned).
+    let mut p = decoration(&fx);
+    p.item_id = 999;
+    assert_eq!(ops::decorate_house(&fx.server, &fx.owner, &p), Ok(false));
+    assert_eq!(
+        error_codes(&mut fx.owner_client),
+        vec![manager::error_message::HOUSE_CANNOT_DECORATE]
+    );
+    // The house has no loaded template.
+    fx.house.data().unit.template_id = 999_999;
+    assert_eq!(
+        ops::decorate_house(&fx.server, &fx.owner, &decoration(&fx)),
+        Ok(false)
+    );
+    assert_eq!(
+        error_codes(&mut fx.owner_client),
+        vec![manager::error_message::HOUSE_CANNOT_DECORATE]
+    );
+    fx.house.data().unit.template_id = HOUSE;
+    // The item payment fails after the doodad was created.
+    fx.eco.debit_ok.store(false, Ordering::SeqCst);
+    assert_eq!(
+        ops::decorate_house(&fx.server, &fx.owner, &decoration(&fx)),
+        Ok(false)
+    );
+    assert_eq!(
+        error_codes(&mut fx.owner_client),
+        vec![manager::error_message::HOUSE_CANNOT_DECORATE]
+    );
+    assert!(furniture(&fx).is_empty());
+}
+
 #[tokio::test]
 async fn decoration_outside_the_garden_is_refused() {
     let mut fx = fixture(false);

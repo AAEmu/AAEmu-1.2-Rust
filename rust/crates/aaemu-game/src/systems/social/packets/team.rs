@@ -114,8 +114,8 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCAskToJoinTeamAreaPacket(teamId, senderId, senderName, isParty)` (never sent by the
-    /// 1.2 C#).
+    /// `SCAskToJoinTeamAreaPacket(teamId, senderId, senderName, isParty)`: sent for area
+    /// invitations (the 1.2 C# never sent it).
     SCAskToJoinTeamAreaPacket { team_id: u32, sender_id: u32, sender_name: String, is_party: bool } |self, s| {
         s.write_u32(self.team_id)
             .write_u32(self.sender_id)
@@ -185,7 +185,9 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCTeamAreaInvitedPacket(r, s)` (never sent by the 1.2 C#).
+    /// `SCTeamAreaInvitedPacket(r, s)`: `s = true` acknowledges an area invitation (`r` is
+    /// ignored by the client); `s = false` carries the remaining cooldown in milliseconds
+    /// (`r * 0.001` seconds). The 1.2 C# never sent it.
     SCTeamAreaInvitedPacket { r: u32, s: bool } |self, st| {
         st.write_u32(self.r).write_bool(self.s);
     }
@@ -684,6 +686,23 @@ mod tests {
                 ins_id: 9
             }),
             vec![1, 0, 0, 0x80, 0x3F, 0, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0]
+        );
+        // `SCAskToJoinTeamAreaPacket`: the same writer as `SCAskToJoinTeamPacket` (team id,
+        // sender id, sender name, isParty), checked against the client handler's parsed
+        // `(teamId, senderId, senderName, isParty)` fields.
+        assert_eq!(
+            body(&SCAskToJoinTeamAreaPacket {
+                team_id: 5,
+                sender_id: 7,
+                sender_name: "Al".into(),
+                is_party: true
+            }),
+            vec![5, 0, 0, 0, 7, 0, 0, 0, 2, 0, b'A', b'l', 1]
+        );
+        // `SCTeamAreaInvitedPacket(r, s)`: the client reads a u32 and a bool.
+        assert_eq!(
+            body(&SCTeamAreaInvitedPacket { r: 3, s: true }),
+            vec![3, 0, 0, 0, 1]
         );
         assert_eq!(
             body(&SCTeamLootingRuleChangedPacket {
