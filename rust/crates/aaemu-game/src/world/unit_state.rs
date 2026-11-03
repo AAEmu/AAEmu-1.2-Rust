@@ -35,9 +35,12 @@ const BASE_UNIT_TYPE_CHARACTER: u8 = 0;
 const ATTACH_POINT_SYSTEM: u8 = 255;
 /// `ModelPostureType.None`.
 const MODEL_POSTURE_NONE: u8 = 0;
-/// The patron / auction-license buffs `SCUnitStatePacket` force-adds to characters
-/// ("TODO Wrong place" in C#).
-pub const UNIT_STATE_FORCED_BUFFS: [u32; 2] = [8_000_011, 8_000_012];
+/// The buffs `SCUnitStatePacket` still force-adds to characters ("TODO Wrong place" in C#).
+/// 8000012 is the auction-license buff (see `systems::economy::account_attributes`). The VIP
+/// buff 8000011 is no longer forced on everyone: since WP-B it is the `active = 't'`
+/// `pcbang_buffs` row of premium grade 2 and is applied by
+/// `systems::services::premium::apply_login_buffs` / `apply_grade_buffs`.
+pub const UNIT_STATE_FORCED_BUFFS: [u32; 1] = [8_000_012];
 
 /// `SCCharacterStatePacket(character)`.
 pub fn character_state(c: &Character, bounty_money: i64) -> SCCharacterStatePacket {

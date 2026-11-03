@@ -36,7 +36,20 @@ pub enum PaymentMethodType {
     None = 5,
 }
 
-/// `AccountPayment` with its C# defaults (TODO in C#: load real payment info).
+impl PaymentMethodType {
+    /// The 1.2 `SCAccountInfo.payMethod` value (`FUN_397aeb90`); `None` for an unknown one.
+    pub fn from_wire(value: i32) -> Option<Self> {
+        match value {
+            1 => Some(Self::Premium),
+            3 => Some(Self::Demo),
+            5 => Some(Self::None),
+            _ => None,
+        }
+    }
+}
+
+/// `AccountPayment` with the C# defaults (the Rust server loads the real payment from
+/// `aaemu_game.accounts`; see `systems::services::premium`).
 #[derive(Debug, Clone)]
 pub struct AccountPayment {
     pub method: PaymentMethodType,
@@ -286,6 +299,8 @@ pub struct GameConnection {
     account_id: Arc<AtomicU32>,
     last_ping_ms: Arc<AtomicI64>,
     pub state: GameState,
+    /// Cached copy of `AccountManager::state` (`systems::services::accounts`); the registry / MySQL
+    /// is the source of truth, refreshed at login and on every `CSListCharacter`.
     pub payment: AccountPayment,
     /// The 1.2 second password of this connection (`systems::services::second_password`):
     /// the one-shot virtual-keyboard tables, the per-connection `passed` flag and the cached

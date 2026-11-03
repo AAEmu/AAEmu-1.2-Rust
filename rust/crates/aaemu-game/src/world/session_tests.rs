@@ -4,10 +4,17 @@
 
 use std::sync::{Arc, Barrier};
 
+use crate::data::skills::{BuffKind, BuffTemplate};
+use crate::data::GameData;
+use crate::managers::account::AccountState;
 use crate::managers::save::capture_financial_snapshot;
 use crate::net::connection::GameState;
+use crate::net::connection::{AccountPayment, PaymentMethodType};
+use crate::systems::services::premium::{PcBangBuff, PremiumGrade};
 use crate::systems::vehicles::mates::MateDb;
-use crate::test_support::{spawn_player, test_character, test_server, TestClient};
+use crate::test_support::{
+    spawn_player, test_character, test_server, test_server_with, TestClient,
+};
 use crate::world::session::{self, SelectDbData};
 
 async fn assert_select_preserves_live_session(selected_id: u32) {
@@ -775,4 +782,69 @@ async fn select_releases_a_converted_pirate_from_its_team() {
     assert!(team.is_member(owner.character_id) && team.is_member(other.character_id));
     owner_client.drain();
     other_client.drain();
+}
+
+/// WP-B: character selection applies the `pcbang_buffs` rows of the account's premium grade;
+/// the VIP buff 8000011 is no longer force-added to every character.
+#[tokio::test]
+async fn select_applies_the_premium_grade_buff_only_for_premium_accounts() {
+    let mut data = GameData::empty();
+    data.systems.services.premium.grades = vec![
+        PremiumGrade {
+            id: 1,
+            grade_id: 1,
+            point: 0,
+        },
+        PremiumGrade {
+            id: 2,
+            grade_id: 2,
+            point: 1,
+        },
+    ];
+    data.systems.services.premium.pcbang_buffs = vec![PcBangBuff {
+        id: 8_000_001,
+        buff_id: 8_000_011,
+        active: true,
+        kind_id: 3,
+        premium_grade_id: 2,
+    }];
+    data.skills
+        .buffs
+        .insert(8_000_011, BuffTemplate::simple(8_000_011, BuffKind::Good));
+    let server = test_server_with(data);
+    let now = chrono::Utc::now().timestamp();
+
+    for (account, premium) in [(1007u32, true), (1008u32, false)] {
+        let mut client = TestClient::new(&server, account - 1000, account);
+        server.accounts.set_state(
+            account,
+            AccountState {
+                payment: AccountPayment {
+                    method: if premium {
+                        PaymentMethodType::Premium
+                    } else {
+                        PaymentMethodType::None
+                    },
+                    location: 1,
+                    start_time: 0,
+                    end_time: if premium { now + 3_600 } else { 0 },
+                },
+                premium_point: i32::from(premium),
+            },
+        );
+        let character = test_character(account - 1000, "Tester", 100.0, 100.0);
+        session::select_loaded(
+            &server,
+            &mut client.conn,
+            character,
+            SelectDbData::default(),
+        )
+        .expect("select");
+        let player = client.conn.active_char.clone().expect("active char");
+        assert_eq!(
+            player.data().unit.buffs.check_buff(8_000_011),
+            premium,
+            "account {account}"
+        );
+    }
 }
