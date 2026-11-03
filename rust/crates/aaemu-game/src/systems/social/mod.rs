@@ -31,6 +31,7 @@ pub mod faction;
 pub mod family;
 pub mod friend;
 pub mod hooks;
+pub mod nation;
 pub mod packets;
 pub mod ranking_data;
 pub mod ranking_manager;
@@ -53,6 +54,8 @@ mod bounty_flow_tests;
 mod flow_tests;
 #[cfg(test)]
 mod manager_tests;
+#[cfg(test)]
+mod nation_tests;
 #[cfg(test)]
 pub(crate) mod ranking_flow_tests;
 #[cfg(test)]
@@ -91,6 +94,8 @@ impl Data {
 pub struct System {
     pub teams: team::TeamManager,
     pub families: family::FamilyManager,
+    /// Runtime player nations (`nations` / `nation_relations`).
+    pub nations: nation::NationManager,
     pub duels: duel::DuelManager,
     pub crimes: crime::CrimeManager,
     pub trials: trial::TrialManager,
@@ -111,6 +116,14 @@ impl System {
         install_hooks(server);
         // ZoneManager.Load: SetState(Conflict) of the open zones schedules their timers.
         zone_conflict::ZoneConflictManager::start(server);
+        // Player nations and their relation overlay.
+        server
+            .systems
+            .social
+            .nations
+            .load(&server.db)
+            .await
+            .context("NationManager")?;
         server
             .systems
             .social
@@ -146,12 +159,13 @@ impl System {
     /// number of rows written.
     pub async fn save(
         &self,
-        _server: &GameServer,
+        server: &GameServer,
         tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
         stage: SaveStage,
     ) -> crate::Result<usize> {
         if matches!(stage, SaveStage::AfterCharacters) {
             let mut written = self.ranking.save(tx).await?;
+            written += self.nations.save(server, tx).await?;
             written += self.bounties.save(tx).await?;
             return Ok(written);
         }

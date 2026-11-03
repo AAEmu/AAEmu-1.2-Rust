@@ -71,7 +71,7 @@ mod tests {
             .iter()
             .filter(|(opcode, _)| *opcode != 0xfff)
             .collect();
-        assert_eq!(supported.len(), 249);
+        assert_eq!(supported.len(), 250);
         for (opcode, name) in supported {
             assert!(
                 registry
@@ -88,7 +88,7 @@ mod tests {
         assert!(r.duplicates().is_empty(), "{:?}", r.duplicates());
         let mut systems = crate::net::registry::PacketRegistry::new();
         crate::systems::register_packets(&mut systems);
-        assert_eq!(r.len(), 13 + 22 + 2 + systems.len());
+        assert_eq!(r.len(), 13 + 22 + 3 + systems.len());
     }
 
     /// Every `RegisterPacket` call of the C# `GameNetwork()` constructor is registered in Rust
@@ -144,7 +144,10 @@ mod tests {
             // `CSSendBountyUpdatePacket` (0x120) and `CSChangeAutoUseAAPointPacket` (0x133) are not
             // named by the C# 1.2 opcode tables and the C#
             // never handled them; the real client sends them (client CS table, PORTING.md).
+            // `CSUpdateNationalTaxRatePacket` is the owner-approved native 1.2 0x013
+            // (`FUN_392f42f0`); the C# left it at 0xfff (opcodes.rs comment).
             let rust_only = opcode == crate::opcodes::cs::CSTakeScheduleItemPacket
+                || opcode == crate::opcodes::cs::CSUpdateNationalTaxRatePacket
                 || matches!(opcode, 0x11f | 0x120 | 0x130 | 0x133);
             if !expected.contains_key(&(level, opcode)) && opcode != 0xfff && !rust_only {
                 missing.push(format!(

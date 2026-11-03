@@ -377,7 +377,8 @@ pub fn execute(server: &GameServer, kind: i32, args: &EffectArgs<'_>, values: [i
         // `CombatDice` (67) is a marker for the plot combat-dice condition (`plots.rs`,
         // condition 9) and `Combo` (48) is the client-driven combo chain (`value1` next skill,
         // `value2` window in ms): neither needs a server action, so both only log.
-        // NotifyQuest (70) already fires in plots::finish_item_plot; DeclareIndependence (71) has no faction ownership runtime, so both stay log-only.
+        // NotifyQuest (70) already fires in plots::finish_item_plot. DeclareIndependence (71)
+        // is routed to the social subsystem (`SocialForSkills::apply_special_effect`).
         // Every other class only logs (`if (caster is Character) Logger.Debug(...)`).
         _ => match special_type_name(kind) {
             Some("Unk9") | None => {

@@ -50,6 +50,9 @@ pub const ITEM_SALON_CERTIFICATE: u32 = 30811;
 
 /// `BackpackType` values `ItemContainer.CanAccept` allows in player containers.
 pub mod backpack_type {
+    /// The castle-claim packs skill 18540 (declare independence) requires
+    /// (`skills.link_backpack_type_id = 1`; `item_backpacks.backpack_type_id` 1).
+    pub const CASTLE_CLAIM: u32 = 1;
     pub const GLIDER: u32 = 2;
     pub const TOY_FLAG: u32 = 7;
 }
