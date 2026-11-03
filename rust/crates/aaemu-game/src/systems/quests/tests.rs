@@ -3631,6 +3631,41 @@ async fn real_compact_db_quest_tables() {
 
 #[tokio::test]
 #[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_compact_db_restart_on_fail_and_successive_flags() {
+    let Some(conn) = real_db() else {
+        return;
+    };
+    let d = real_data(&conn);
+    let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(
+        count("SELECT COUNT(*) FROM quest_contexts WHERE restart_on_fail='t'"),
+        222
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM quest_contexts WHERE successive='t'"),
+        37
+    );
+    assert_eq!(
+        d.templates.values().filter(|t| t.restart_on_fail).count(),
+        222
+    );
+    assert_eq!(d.templates.values().filter(|t| t.successive).count(), 37);
+    assert!(d.template(213).unwrap().restart_on_fail);
+    assert!(d.template(80).unwrap().successive);
+    // Quest 64 is the level-3 timed quest used by the live check.
+    assert!(!d.template(64).unwrap().restart_on_fail);
+    // QUEST-1 (capture-pending): none of the real restart_on_fail quests can fail
+    // server-side, so the restart itself has no in-data failure path to prove it.
+    assert_eq!(
+        count(
+            "SELECT COUNT(DISTINCT q.id) FROM quest_contexts q              JOIN quest_components c ON c.quest_context_id=q.id              JOIN quest_acts a ON a.quest_component_id=c.id              WHERE q.restart_on_fail='t' AND (a.act_detail_type IN              ('QuestActCheckTimer','QuestActCheckGuard','QuestActConFail')              OR c.component_kind_id=5)"
+        ),
+        0
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
 async fn real_compact_db_reward_acts_replace_level_supplies() {
     let Some(conn) = real_db() else {
         return;

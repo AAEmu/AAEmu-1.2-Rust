@@ -17,7 +17,11 @@ pub struct QuestTemplate {
     pub repeatable: bool,
     pub level: u8,
     pub selective: bool,
+    /// `quest_contexts.successive` (37 rows): loaded, but no 1.2 client or C# consumer was
+    /// found. Left unused; QUEST-2 (capture-pending) in `PORTING.md`.
     pub successive: bool,
+    /// `quest_contexts.restart_on_fail` (222 rows): a server-side failure restarts the quest
+    /// (`engine::Ctx::fail_quest`) instead of leaving it failed.
     pub restart_on_fail: bool,
     pub chapter_idx: u32,
     pub quest_idx: u32,
