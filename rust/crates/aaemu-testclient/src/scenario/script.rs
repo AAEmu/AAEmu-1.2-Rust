@@ -52,6 +52,12 @@
 //! await <Event> [secs]               wait (60 s default) for a party/guild event and consume it
 //! partyinvite <name>                 CSInviteToTeam (party) by character name
 //! partyaccept                        wait for SCAskToJoinTeam and accept it
+//! areainvite [team] [party|raid]     CSInviteAreaToTeam (team 0 = the current team); the
+//!                                    answer is left for expectpkt (SCTeamAreaInvitedPacket)
+//! expectareacool [secs]              fail unless SCTeamAreaInvited arrives with s=false and a
+//!                                    positive remaining cooldown in r
+//! partyacceptarea                    wait for SCAskToJoinTeamArea and accept it (isArea=1);
+//!                                    the join packets are left for expectpkt
 //! gcreate <name>                     CSCreateExpedition
 //! ginvite [name]                     CSInviteToExpedition to the peer
 //! gaccept                            wait for the guild invitation and join
@@ -60,6 +66,12 @@
 //! gexpectrenamed <name>              fail unless SCFactionRenamed carries that name
 //! gexpectretry <error>               fail unless SCFactionRetryRename re-opens the expedition dialog
 //!                                    with that error code
+//! ninvite [name]                     CSFactionImmigrationInvite to the peer (nation king)
+//! nlevel [name] <level>              `/level <peer> <level>` (GM)
+//! naccept [0|1]                      wait for SCFactionImmigrateInvite and answer it
+//! nreply <nation> <nonce> <0|1>      CSFactionImmigrationInviteReply without an invitation
+//! norigin                            CSFactionImmigrateToOrigin
+//! nkick <name>                       CSFactionKickToOrigin
 //! sync <token> [count]              suite barrier: wait until `count` bots (default: all) are here
 //! expectpkt <PacketName> [secs]     fail unless the packet arrives within `secs` (default 5)
 //! expectnopkt <PacketName> [secs]   fail if the packet arrives within `secs` (default 5)
@@ -1534,6 +1546,50 @@ async fn run_lines(
                     .await?;
                 show(&got);
             }
+            "areainvite" => {
+                let team_id: u32 = parts.first().and_then(|x| x.parse().ok()).unwrap_or(0);
+                let is_party = !parts.get(1).is_some_and(|x| x.eq_ignore_ascii_case("raid"));
+                let (op, body) = social::invite_area_to_team(team_id, is_party);
+                game.send_cs(op, &body).await?;
+            }
+            "expectareacool" => {
+                let secs: u64 = parts.first().and_then(|x| x.parse().ok()).unwrap_or(5);
+                loop {
+                    match await_event(game, &mut consumed, "AreaInvited", secs).await? {
+                        SocialEvent::AreaInvited { r, s: false } => {
+                            anyhow::ensure!(
+                                r > 0 && r <= 30_000,
+                                "area cooldown reply has r={r} (want 1..=30000 ms)"
+                            );
+                            println!("    area invite on cooldown: {r} ms left");
+                            break;
+                        }
+                        SocialEvent::AreaInvited { r, s: true } => {
+                            println!("    skipped success area invite (r={r})");
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            "partyacceptarea" => {
+                let SocialEvent::TeamAskArea {
+                    team_id,
+                    sender_id,
+                    is_party,
+                    ..
+                } = await_event(game, &mut consumed, "TeamAskArea", 60).await?
+                else {
+                    bail!("not an area team invitation");
+                };
+                let (op, body) = social::reply_area_to_join_team(
+                    team_id,
+                    is_party,
+                    sender_id,
+                    false,
+                    &cfg.character,
+                );
+                game.send_cs(op, &body).await?;
+            }
             "gcreate" => {
                 let (op, body) = social::create_expedition(rest.trim());
                 game.send_cs(op, &body).await?;
@@ -1569,6 +1625,7 @@ async fn run_lines(
                     .await?;
                 show(&got);
             }
+
             "grename" => {
                 let name = rest.trim();
                 ensure!(!name.is_empty(), "grename <name>");
@@ -1617,6 +1674,75 @@ async fn run_lines(
                     "expected rename retry error {code}, got {error_message} (name {name:?})"
                 );
                 println!("    rename retry {error_message} with name {name:?}");
+            }
+
+            "ninvite" => {
+                // The character name differs in case from the account name: use the peer's.
+                let target = peer(game, parts.first().copied())?;
+                let mut b = aaemu_commons::PacketStream::new();
+                b.write_str(&target.name);
+                game.send_cs(cs::CSFactionImmigrationInvitePacket, &b.into_bytes())
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(800), Duration::from_secs(3))
+                    .await?;
+                show(&got);
+            }
+            "naccept" => {
+                // The reply echoes the invitation's (nation id, nonce) (PORTING.md, NATION-11).
+                let join = parts.first().map(|v| *v != "0").unwrap_or(true);
+                let invitation = game.wait_sc(sc::SCFactionImmigrateInvitePacket).await?;
+                let mut s = invitation.stream();
+                let nation = s.read_u32()?;
+                let nonce = s.read_u32()?;
+                let mut b = aaemu_commons::PacketStream::new();
+                b.write_u32(nation).write_u32(nonce).write_bool(join);
+                game.send_cs(cs::CSFactionImmigrationInviteReplyPacket, &b.into_bytes())
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(800), Duration::from_secs(3))
+                    .await?;
+                show(&got);
+            }
+            "nreply" => {
+                // Answer an invitation that was never received (forged / replayed reply).
+                let nation: u32 = num(&parts, 0)?;
+                let nonce: u32 = num(&parts, 1)?;
+                let join = num::<u8>(&parts, 2)? != 0;
+                let mut b = aaemu_commons::PacketStream::new();
+                b.write_u32(nation).write_u32(nonce).write_bool(join);
+                game.send_cs(cs::CSFactionImmigrationInviteReplyPacket, &b.into_bytes())
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(800), Duration::from_secs(3))
+                    .await?;
+                show(&got);
+            }
+            "nlevel" => {
+                // `/level <name> <level>`: the GM command's name match is exact.
+                let target = peer(game, parts.first().copied())?;
+                let level: u8 = num(&parts, 1)?;
+                let got = gm_command(game, &format!("level {} {level}", target.name)).await?;
+                show(&got);
+            }
+            "norigin" => {
+                game.send_cs(cs::CSFactionImmigrateToOriginPacket, &[])
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(800), Duration::from_secs(3))
+                    .await?;
+                show(&got);
+            }
+            "nkick" => {
+                let target = peer(game, parts.first().copied())?;
+                let mut b = aaemu_commons::PacketStream::new();
+                b.write_str(&target.name);
+                game.send_cs(cs::CSFactionKickToOriginPacket, &b.into_bytes())
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(800), Duration::from_secs(3))
+                    .await?;
+                show(&got);
             }
             other => bail!("unknown script command '{other}' at line {}", n + 1),
         }
