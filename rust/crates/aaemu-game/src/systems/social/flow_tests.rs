@@ -3391,3 +3391,65 @@ async fn private_mysql_pirate_last_member_dismissal_persists_nation_and_dominion
     }
     pool.close().await;
 }
+
+#[tokio::test]
+async fn chat_spam_delay_refuses_messages_inside_the_channel_window() {
+    use crate::packets::world::SCErrorMsgPacket;
+    use crate::systems::social::chat::CHAT_SPAM_DELAY_ERROR;
+    let server = test_server();
+    // Say is limited to one message per minute; shout and trade keep their own groups.
+    server.config.update(|c| {
+        c.chat.chat_type_groups = (0..15).collect();
+        let mut delays = vec![0u32; 15];
+        delays[chat_type::WHITE as usize] = 60_000;
+        c.chat.chat_group_delays_ms = delays;
+    });
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    a.c.drain();
+
+    a.send(
+        &server,
+        cs::CSSendChatMessagePacket,
+        chat(chat_type::WHITE, "one"),
+    )
+    .await;
+    assert_eq!(a.ops(), vec![sc::SCChatMessagePacket]);
+
+    a.send(
+        &server,
+        cs::CSSendChatMessagePacket,
+        chat(chat_type::WHITE, "two"),
+    )
+    .await;
+    assert_eq!(
+        a.frames(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            crate::systems::social::packets::body(&SCErrorMsgPacket::new(
+                CHAT_SPAM_DELAY_ERROR,
+                0,
+                true,
+            ))
+        )]
+    );
+
+    // Whisper (-3) is outside the client's limited `0..=14` range and still reaches its normal
+    // error path.
+    a.send(
+        &server,
+        cs::CSSendChatMessagePacket,
+        whisper("Nobody", "hi"),
+    )
+    .await;
+    assert_eq!(
+        a.frames(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            crate::systems::social::packets::body(&SCErrorMsgPacket::new(
+                crate::packets::world::error_message::WHISPER_NO_TARGET,
+                0,
+                true,
+            ))
+        )]
+    );
+}

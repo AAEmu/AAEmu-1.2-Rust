@@ -102,6 +102,11 @@ pub struct AppConfig {
     /// `CharacterNameRegex` (`None` = NameManager's default pattern).
     #[serde(rename = "characternameregex")]
     pub character_name_regex: Option<String>,
+    /// Enables the 1.2 `allowed_name_chars` whitelist for character names. The stock client
+    /// enforces the table itself, and the whitelist overrides `CharacterNameRegex` where the two
+    /// disagree (digits/Cyrillic), so it is opt-in.
+    #[serde(rename = "characternameuseallowedchars", deserialize_with = "lenient")]
+    pub character_name_use_allowed_chars: bool,
     #[serde(rename = "defaultlanguage")]
     pub default_language: String,
     #[serde(rename = "debuginfo", deserialize_with = "lenient")]
@@ -111,11 +116,14 @@ pub struct AppConfig {
     /// `Debug` (Rust only: opt-in capture aids, off by default).
     #[serde(rename = "debug")]
     pub debug: DebugConfig,
-    /// `Expedition` / `Justice` (`systems::social::config`).
+    /// `Expedition` / `Justice` / `Chat` (`systems::social::config`).
     #[serde(rename = "expedition")]
     pub expedition: crate::systems::social::config::ExpeditionConfig,
     #[serde(rename = "justice")]
     pub justice: crate::systems::social::config::JusticeConfig,
+    /// Chat spam delays sent to the client and enforced by the server (`Configurations/Chat.json`).
+    #[serde(rename = "chat")]
+    pub chat: crate::systems::social::config::ChatConfig,
     /// `Dungeons` (`systems::instances::config`).
     #[serde(rename = "dungeons")]
     pub dungeons: crate::systems::instances::config::DungeonsConfig,
@@ -156,12 +164,14 @@ impl Default for AppConfig {
             scripts: ScriptsConfig::default(),
             events: EventsConfig::default(),
             character_name_regex: None,
+            character_name_use_allowed_chars: false,
             default_language: "en_us".into(),
             debug_info: true,
             debug_info_level: 100,
             debug: DebugConfig::default(),
             expedition: Default::default(),
             justice: Default::default(),
+            chat: Default::default(),
             dungeons: Default::default(),
             heightmaps_enable: false,
             physics: Default::default(),

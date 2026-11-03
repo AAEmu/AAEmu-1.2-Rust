@@ -166,7 +166,14 @@ impl ClientPacket for FinishStatePacket {
                         pay_start: p.start_time,
                         pay_end: p.end_time,
                     });
-                    conn.send(&SCChatSpamDelayPacket);
+                    let spam = &server.config.chat;
+                    conn.send(&SCChatSpamDelayPacket {
+                        version: 0,
+                        chat_type_groups: spam.packet_groups(),
+                        chat_group_delays: spam.packet_delays(),
+                        apply_config: spam.apply_config.clone(),
+                        detect_config: spam.detect_config.clone(),
+                    });
                     conn.send(&SCAccountAttributeConfigPacket {
                         used: Self::ACCOUNT_INIT,
                     });
