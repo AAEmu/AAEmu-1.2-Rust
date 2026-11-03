@@ -585,6 +585,10 @@ pub struct GameState {
     pub unit_points: HashMap<u32, (i32, i32)>,
     /// Units announced dead by `SCUnitDeathPacket` (and not removed since).
     pub dead_units: HashSet<u32>,
+    /// Last `SCUnitDeathPacket` for our own unit: (kill reason, resurrect wait ms, lost exp,
+    /// durability loss rate); `self_death_seq` counts them.
+    pub self_death: Option<(u8, i32, i32, u8)>,
+    pub self_death_seq: u64,
     /// Buff indices per `(owner obj id, buff template id)` from `SCBuffCreated` / `SCBuffRemoved`.
     pub buffs: HashMap<(u32, u32), HashSet<u32>>,
     /// Last `SCMateSpawnedPacket`.
@@ -773,7 +777,16 @@ impl GameState {
             let mp = s.read_i32()? / 100;
             st.unit_points.insert(obj_id, (hp, mp));
         } else if p.is_sc(sc::SCUnitDeathPacket) {
-            st.dead_units.insert(s.read_bc()?);
+            let obj = s.read_bc()?;
+            let reason = s.read_u8()?;
+            let wait_ms = s.read_i32()?;
+            let lost_exp = s.read_i32()?;
+            let durability = s.read_u8()?;
+            if obj == st.self_obj {
+                st.self_death = Some((reason, wait_ms, lost_exp, durability));
+                st.self_death_seq += 1;
+            }
+            st.dead_units.insert(obj);
         } else if p.is_sc(sc::SCErrorMsgPacket) {
             st.events.push(GameEvent::ErrorMsg(s.read_i16()?));
         } else if p.is_sc(sc::SCItemTaskSuccessPacket) {

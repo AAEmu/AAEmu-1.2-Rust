@@ -59,6 +59,9 @@
 //!                                   (AAEMU_VERIFY_MYSQL; re-checked for `secs` when given)
 //! rezexpect inplace|temple ok|refused  CSResurrectCharacter, then fail unless SCCharacterResurrected
 //!                                    for our own unit did (ok) / did not (refused) arrive
+//! deathwait <wait_ms> <lost|*> <dur|*> [secs]
+//!                                    wait for our own SCUnitDeathPacket and check the resurrect
+//!                                    wait, lost exp (`>0` = any loss) and durability loss
 //! lootexpect took|failed [npc obj]  like `loot`, then fail unless SCLootItemTook (took) / SCLootItemFailed
 //!                                    (failed) was among the replies; `took` first walks to 2 m of
 //!                                    the corpse, as the real client does
@@ -545,6 +548,7 @@ async fn run_lines(
     let mut music = super::music::Music::default();
     let mut clock = 40_000u32;
     let mut last_npc = 0u32;
+    let mut last_death_seq = 0u64;
     let mut consumed: HashSet<usize> = HashSet::new();
     let mut mate: Option<(u32, u16)> = None;
     for (n, raw) in text.lines().enumerate() {
@@ -1216,6 +1220,66 @@ async fn run_lines(
                     bail!("FAIL rezexpect: resurrected={revived}, expected {want_ok}");
                 }
                 println!("    rezexpect ok (resurrected={revived})");
+            }
+            "deathwait" => {
+                let wait_ms: i32 =
+                    num(&parts, 0).context("deathwait <wait_ms> <lost|*> <dur|*>")?;
+                let lost = parts.get(1).copied().unwrap_or("*");
+                let durability = parts.get(2).copied().unwrap_or("*");
+                let secs: u64 = parts.get(3).and_then(|x| x.parse().ok()).unwrap_or(30);
+                // A `gm` command drains its own packets, so a death that happened during the
+                // previous command is taken from the observed state; otherwise wait for the
+                // next one.
+                let reported = last_death_seq;
+                let mut death = if game.state.self_death_seq > reported {
+                    game.state.self_death
+                } else {
+                    None
+                };
+                let deadline = Instant::now() + Duration::from_secs(secs);
+                while death.is_none() && Instant::now() < deadline {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    game.recv_within(left.min(Duration::from_millis(500)))
+                        .await?;
+                    if game.state.self_death_seq > reported {
+                        death = game.state.self_death;
+                    }
+                }
+                last_death_seq = game.state.self_death_seq;
+                let Some((reason, got_wait, got_lost, got_dur)) = death else {
+                    bail!("FAIL deathwait: no SCUnitDeathPacket for self within {secs}s");
+                };
+                println!(
+                    "    deathwait: kill reason {reason}, wait {got_wait} ms, lost exp {got_lost}, \
+                     durability {got_dur}"
+                );
+                anyhow::ensure!(
+                    got_wait == wait_ms,
+                    "FAIL deathwait: resurrect_wait_time {got_wait}, expected {wait_ms}"
+                );
+                if lost != "*" {
+                    if let Some(want) = lost.strip_prefix('>') {
+                        let want: i32 = want.parse().context("deathwait lost exp >N")?;
+                        anyhow::ensure!(
+                            got_lost > want,
+                            "FAIL deathwait: lost exp {got_lost}, expected > {want}"
+                        );
+                    } else {
+                        let want: i32 = lost.parse().context("deathwait lost exp")?;
+                        anyhow::ensure!(
+                            got_lost == want,
+                            "FAIL deathwait: lost exp {got_lost}, expected {want}"
+                        );
+                    }
+                }
+                if durability != "*" {
+                    let want: u8 = durability.parse().context("deathwait durability")?;
+                    anyhow::ensure!(
+                        got_dur == want,
+                        "FAIL deathwait: durability {got_dur}, expected {want}"
+                    );
+                }
+                println!("    deathwait ok");
             }
             "lootexpect" => {
                 let want_took = match parts.first().copied() {
