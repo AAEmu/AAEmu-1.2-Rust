@@ -1235,6 +1235,22 @@ pub async fn send_chat_message(
             return;
         }
     }
+    // The 1.2 client throttles itself from `SCChatSpamDelayPacket` (`FUN_393C2540`) and shows
+    // localized message 0x108 when a message is too fast. Enforce the same limits here so a
+    // modified client cannot bypass them.
+    if !crate::systems::social::chat::chat_spam_allows(
+        &server.config.chat,
+        &mut conn.chat_spam_last_ms,
+        chat,
+        now_ms(),
+    ) {
+        conn.send(&SCErrorMsgPacket::new(
+            crate::systems::social::chat::CHAT_SPAM_DELAY_ERROR,
+            0,
+            true,
+        ));
+        return;
+    }
     let sender = {
         let c = me.data();
         chat_sender(&c, me.obj_id)

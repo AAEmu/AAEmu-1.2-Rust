@@ -111,11 +111,14 @@ pub struct AppConfig {
     /// `Debug` (Rust only: opt-in capture aids, off by default).
     #[serde(rename = "debug")]
     pub debug: DebugConfig,
-    /// `Expedition` / `Justice` (`systems::social::config`).
+    /// `Expedition` / `Justice` / `Chat` (`systems::social::config`).
     #[serde(rename = "expedition")]
     pub expedition: crate::systems::social::config::ExpeditionConfig,
     #[serde(rename = "justice")]
     pub justice: crate::systems::social::config::JusticeConfig,
+    /// Chat spam delays sent to the client and enforced by the server (`Configurations/Chat.json`).
+    #[serde(rename = "chat")]
+    pub chat: crate::systems::social::config::ChatConfig,
     /// `Dungeons` (`systems::instances::config`).
     #[serde(rename = "dungeons")]
     pub dungeons: crate::systems::instances::config::DungeonsConfig,
@@ -162,6 +165,7 @@ impl Default for AppConfig {
             debug: DebugConfig::default(),
             expedition: Default::default(),
             justice: Default::default(),
+            chat: Default::default(),
             dungeons: Default::default(),
             heightmaps_enable: false,
             physics: Default::default(),
