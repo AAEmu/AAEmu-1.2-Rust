@@ -25,6 +25,9 @@ areainvite 0 party
 expectpkt SCTeamAreaInvitedPacket 10
 sync invites 3
 expectpkt SCTeamMemberJoinedPacket 20
+# A second request inside the 30 s server cooldown: s = false, r = remaining milliseconds.
+areainvite 0 party
+expectareacool 5
 
 [joiner]
 waitpeer 120 ${inviter}

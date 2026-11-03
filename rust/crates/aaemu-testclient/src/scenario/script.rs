@@ -53,6 +53,8 @@
 //! partyaccept                        wait for SCAskToJoinTeam and accept it
 //! areainvite [team] [party|raid]     CSInviteAreaToTeam (team 0 = the current team); the
 //!                                    answer is left for expectpkt (SCTeamAreaInvitedPacket)
+//! expectareacool [secs]              fail unless SCTeamAreaInvited arrives with s=false and a
+//!                                    positive remaining cooldown in r
 //! partyacceptarea                    wait for SCAskToJoinTeamArea and accept it (isArea=1);
 //!                                    the join packets are left for expectpkt
 //! gcreate <name>                     CSCreateExpedition
@@ -1541,6 +1543,25 @@ async fn run_lines(
                 let is_party = !parts.get(1).is_some_and(|x| x.eq_ignore_ascii_case("raid"));
                 let (op, body) = social::invite_area_to_team(team_id, is_party);
                 game.send_cs(op, &body).await?;
+            }
+            "expectareacool" => {
+                let secs: u64 = parts.first().and_then(|x| x.parse().ok()).unwrap_or(5);
+                loop {
+                    match await_event(game, &mut consumed, "AreaInvited", secs).await? {
+                        SocialEvent::AreaInvited { r, s: false } => {
+                            anyhow::ensure!(
+                                r > 0 && r <= 30_000,
+                                "area cooldown reply has r={r} (want 1..=30000 ms)"
+                            );
+                            println!("    area invite on cooldown: {r} ms left");
+                            break;
+                        }
+                        SocialEvent::AreaInvited { r, s: true } => {
+                            println!("    skipped success area invite (r={r})");
+                        }
+                        _ => unreachable!(),
+                    }
+                }
             }
             "partyacceptarea" => {
                 let SocialEvent::TeamAskArea {

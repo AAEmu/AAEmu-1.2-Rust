@@ -27,6 +27,8 @@ pub enum SocialEvent {
         sender_name: String,
         is_party: bool,
     },
+    /// `SCTeamAreaInvitedPacket` (`r` = remaining cooldown ms when `s` is false).
+    AreaInvited { r: u32, s: bool },
     /// `SCJoinedTeamPacket` (head only).
     TeamJoined {
         team_id: u32,
@@ -64,6 +66,10 @@ fn decode_inner(p: &Packet) -> anyhow::Result<Option<SocialEvent>> {
             sender_id: s.read_u32()?,
             sender_name: s.read_string()?,
             is_party: s.read_bool()?,
+        },
+        sc::SCTeamAreaInvitedPacket => SocialEvent::AreaInvited {
+            r: s.read_u32()?,
+            s: s.read_bool()?,
         },
         sc::SCJoinedTeamPacket => SocialEvent::TeamJoined {
             team_id: s.read_u32()?,
@@ -279,6 +285,15 @@ mod tests {
                 sender_id: 7,
                 sender_name: "Al".into(),
                 is_party: false
+            })
+        );
+        let mut b = PacketStream::new();
+        b.write_u32(15_000).write_bool(false);
+        assert_eq!(
+            decode(&pkt(sc::SCTeamAreaInvitedPacket, b.into_bytes())),
+            Some(SocialEvent::AreaInvited {
+                r: 15_000,
+                s: false
             })
         );
         let mut b = PacketStream::new();
