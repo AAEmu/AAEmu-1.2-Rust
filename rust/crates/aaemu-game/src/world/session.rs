@@ -788,6 +788,8 @@ pub fn select_loaded(
     for chunk in server.expeditions.faction_chunks() {
         conn.send(&SCFactionListPacket { factions: chunk });
     }
+    // Player nations: their faction records and relation rows (NationManager).
+    crate::systems::social::nation::send_login_lists(server, conn);
     conn.send(&SCExpeditionRolePolicyListPacket {
         policies: Vec::new(),
     });

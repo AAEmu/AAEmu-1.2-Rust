@@ -138,8 +138,9 @@ sc_packet!(
 );
 
 cs_packet!(
-    /// `CSUpdateDominionTaxRatePacket`. `CSUpdateNationalTaxRatePacket`
-    /// has no 1.2 opcode (0xfff) and is not registered.
+    /// `CSUpdateDominionTaxRatePacket`. The national tax packet is the separate CS 0x013
+    /// (`opcodes::cs::CSUpdateNationalTaxRatePacket`); its handler belongs to the stage-4
+    /// nation work and is not registered today.
     CSUpdateDominionTaxRatePacket { id: u16, tax_rate: i32 }
     read |s| { Ok(Self { id: s.read_u16()?, tax_rate: s.read_i32()? }) }
     handle |self, server, conn| {

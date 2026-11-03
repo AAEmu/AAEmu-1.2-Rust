@@ -457,7 +457,9 @@ pub const EXPEDITION_ID: IdManagerSpec = IdManagerSpec {
     name: "ExpeditionIdManager",
     first_id: 0x0000_03E8,
     last_id: 0xFFFF_FFFF,
-    obj_tables: &[("expeditions", "id")],
+    // Nations live in the same faction id space as expeditions (the 1.2 client refuses a
+    // duplicate faction id, `FUN_398a5280`).
+    obj_tables: &[("expeditions", "id"), ("nations", "id")],
     distinct: false,
     exclude: &[],
 };

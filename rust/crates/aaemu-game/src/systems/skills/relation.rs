@@ -3,15 +3,14 @@
 //! `SkillTargetingUtil.FilterWithRelation` / `IsRelationValid`.
 
 use crate::server::GameServer;
+use crate::systems::social::nation;
 use crate::world::{now_ms, PlayerRef, WorldObject};
 
 use super::geometry::Target;
 use super::types::{buff_constants, RelationState, SkillTargetRelation};
 
 /// `FactionsEnum` root factions.
-const FACTION_FRIENDLY: u32 = 1;
 const FACTION_NEUTRAL: u32 = 2;
-const FACTION_HOSTILE: u32 = 3;
 
 /// `WorldManager.DefaultCombatTimeout` (seconds).
 pub const DEFAULT_COMBAT_TIMEOUT_MS: i64 = 15_000;
@@ -20,55 +19,12 @@ fn relation_from_raw(v: u8) -> RelationState {
     RelationState::from_raw(i64::from(v)).unwrap_or(RelationState::Neutral)
 }
 
-/// The stored relation between two factions (`faction.Relations[other]`).
-fn stored_relation(server: &GameServer, a: u32, b: u32) -> Option<RelationState> {
-    server
-        .game_data
-        .factions
-        .relations
-        .iter()
-        .find(|r| (r.id == a && r.id2 == b) || (r.id == b && r.id2 == a))
-        .map(|r| relation_from_raw(r.state))
-}
-
 /// `SystemFaction.GetRelationState(other)` for faction ids (0 / unknown ids = null factions).
+/// Runtime nations are resolved by the social subsystem's shared implementation.
 pub fn faction_relation(server: &GameServer, own: u32, other: u32) -> RelationState {
-    let factions = &server.game_data.factions;
-    let Some(me) = factions.get(own) else {
-        return RelationState::Neutral; // this.Faction == null -> GetRelationStateTo: Neutral
-    };
-    let Some(them) = factions.get(other) else {
-        return RelationState::Neutral;
-    };
-    let faction_id = if me.mother_id != 0 {
-        me.mother_id
-    } else {
-        me.id
-    };
-    let other_id = if them.mother_id != 0 {
-        them.mother_id
-    } else {
-        them.id
-    };
-    match faction_id {
-        FACTION_NEUTRAL => return RelationState::Neutral,
-        FACTION_FRIENDLY => return RelationState::Friendly,
-        FACTION_HOSTILE => return RelationState::Hostile,
-        _ => {}
-    }
-    match other_id {
-        FACTION_NEUTRAL => return RelationState::Neutral,
-        FACTION_FRIENDLY => return RelationState::Friendly,
-        FACTION_HOSTILE => return RelationState::Hostile,
-        _ => {}
-    }
-    if faction_id == other_id {
-        return RelationState::Friendly;
-    }
-    if me.mother_id != 0 && factions.get(me.mother_id).is_some() {
-        return stored_relation(server, me.mother_id, other_id).unwrap_or(RelationState::Friendly);
-    }
-    stored_relation(server, me.id, other_id).unwrap_or(RelationState::Neutral)
+    relation_from_raw(crate::systems::social::faction::relation_state_live(
+        server, own, other,
+    ))
 }
 
 /// The faction id of a target (0 for position units / no faction).
@@ -131,7 +87,9 @@ pub fn can_attack(server: &GameServer, me: &Target, target: &Target) -> bool {
     let my_faction = faction_of(me);
     let target_faction = faction_of(target);
     let factions = &server.game_data.factions;
-    if factions.get(my_faction).is_none() || factions.get(target_faction).is_none() {
+    if !nation::faction_exists(server, my_faction)
+        || !nation::faction_exists(server, target_faction)
+    {
         return true; // this.Faction == null || target.Faction == null
     }
     if me.obj_id() == target.obj_id() {
@@ -154,7 +112,7 @@ pub fn can_attack(server: &GameServer, me: &Target, target: &Target) -> bool {
     let zone_faction = factions
         .get(zone_faction_id)
         .or_else(|| factions.get(FACTION_NEUTRAL));
-    let target_mother = factions.get(target_faction).map_or(0, |f| f.mother_id);
+    let target_mother = nation::faction_of_id(server, target_faction).map_or(0, |f| f.1);
     if me_char.is_some() && target_mother != 0 {
         if let Some(z) = zone_faction {
             if target_mother == z.mother_id || target_mother == z.id {
@@ -172,7 +130,7 @@ pub fn can_attack(server: &GameServer, me: &Target, target: &Target) -> bool {
             .unit
             .buffs
             .check_buff(buff_constants::RETRIBUTION);
-        let owner_mother = factions.get(owner_faction).map_or(0, |f| f.mother_id);
+        let owner_mother = nation::faction_of_id(server, owner_faction).map_or(0, |f| f.1);
         if owner_mother != 0
             && owner_mother == zone_faction_id
             && !is_actively_hostile(me_c, owner_obj)

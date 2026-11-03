@@ -61,6 +61,7 @@ pub mod kit;
 pub mod move_all;
 pub mod move_cmd;
 pub mod move_to;
+pub mod nation;
 pub mod nudge;
 pub mod nwrite;
 pub mod object_position;
@@ -311,6 +312,8 @@ pub fn all_commands(env: &ScriptEnv) -> Vec<(&'static [&'static str], Arc<dyn Co
         ),
         // MoveTo.cs
         (&["moveto"], Arc::new(move_to::MoveTo::new(env))),
+        // Nation.cs
+        (&["nation", "nations"], Arc::new(nation::Nation::new(env))),
         // NpcCmd.cs
         (&["npc"], Arc::new(sub::npcs::npc_cmd())),
         // Nudge.cs
