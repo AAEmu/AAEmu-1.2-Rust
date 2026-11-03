@@ -627,7 +627,8 @@ Economy hooks (`server.systems.housing.hooks`): installed by `economy::bridges::
 | `QuestActConAcceptItemGain` start | `systems/quests/events.rs` (`on_items_acquired`), `engine.rs` (`start_quests_from_item_gain`), `data.rs` (`item_gain_starters`) | deviation | **Deviation:** gaining an item starts every quest with a `ConAcceptItemGain` on its Start component (not active, not completed unless repeatable, count in the bag reached, unit requirements met) with the item as acceptor. The C# never did: `Inventory.cs` has the `OnItemGather` call commented out and `RunAct` only compared the acceptor, so the Blue Salt Brotherhood letters (4881-4888), 5450, 6160 and the level 1 "Today's To-do" quests (1955-1961, 2140-2146) could not be started. Inferred from the data (those items have no `item_accept_quests` row); the retail trigger is not verified. The 15 "starter item without `starter_quests` entry" simulator notes were all of this kind: the quests have no `item_accept_quests` binding at all, so there was no mapping to fix. |
 | Sphere state across logout | `systems/quests/spheres.rs` (`forget_character`), `mod.rs` (`on_leave_world`) | deviation | **Deviation:** leaving the world drops the character's sphere triggers and its last starter-sphere position. The C# kept both, so a re-login inside a quest sphere compared against the position from the previous session and never raised the enter event (stuck sphere quests). The tick also prunes positions of characters that are no longer in the world. |
 | `with_quests` panic safety | `systems/quests/events.rs` | deviation | **Deviation:** a panic in a quest operation (or a queued one) is caught around the locked section, the quest state is put back, the thread-local active entry removed and the panic resumed. Without it the character's later quest events on that thread were queued forever. |
-| Quest packets (CS: StartQuestContext, CompleteQuestContext, DropQuestContext, QuestTalkMade, QuestStartWith, TryQuestCompleteAsLetItDone, RestartMainQuest, SaveTutorial, RequestPermissionToPlayCinemaForDirectingMode, StartedCinema, CompletedCinema; SC: QuestContextStarted/Updated/Completed/Reset, QuestContextFailed, QuestRewardedByMail, DoodadQuestAccept, TutorialSaved, AppellationGained) | `packets.rs` | done | Byte-exact tests. `SCQuestsPacket` now writes `Quest.Id` as `long`. `SCQuestContextFailedPacket` (0x146) is `u32 questId + u8 err`; the client reader `FUN_397b5c90` (class registered with opcode 0x146, vtable `399b3a5c`) reads the fields `type` and `err`, and `OnQuestContextFailed` (`FUN_391dbcd0`) raises `QUEST_ERROR_INFO`, which ends quest directing mode. |
+| Quest packets (CS: StartQuestContext, CompleteQuestContext, DropQuestContext, QuestTalkMade, QuestStartWith, TryQuestCompleteAsLetItDone, RestartMainQuest, SaveTutorial, RequestPermissionToPlayCinemaForDirectingMode, StartedCinema, CompletedCinema; SC: QuestContextStarted/Updated/Completed/Reset, QuestContextFailed, QuestRewardedByMail, DoodadQuestAccept, DoodadCompleteQuest, TutorialSaved, AppellationGained) | `packets.rs` | done | Byte-exact tests. `SCQuestsPacket` now writes `Quest.Id` as `long`. `SCQuestContextFailedPacket` (0x146) is `u32 questId + u8 err`; the client reader `FUN_397b5c90` (class registered with opcode 0x146, vtable `399b3a5c`) reads the fields `type` and `err`, and `OnQuestContextFailed` (`FUN_391dbcd0`) raises `QUEST_ERROR_INFO`, which ends quest directing mode. |
+| Doodad report hand-in (`SCDoodadCompleteQuestPacket` 0x14d) | `packets.rs`, `engine.rs` (`report_doodad_ready`), `events.rs` (`on_server_report`) | added | The C# had the opcode (`SCOffsets.cs` 0x14d) but never sent it; `DoodadFuncQuest.Use` reported a doodad server-side (`QuestManager.DoReportEvents` -> `QuestActConReportDoodad.OnReportDoodad`). The 1.2 client reader `FUN_397b5e50` takes the doodad object id as a 3-byte `bc` then the u32 quest id; `OnDoodadCompleteQuest` (`FUN_391dc050` -> `FUN_393773a0`, event 241 `COMPLETE_QUEST_CONTEXT_DOODAD`; `quest_context.alb` proto 19) makes the client answer with `CSCompleteQuestContext` naming that doodad. Rust deviates: a server-side report (`DoodadFuncQuest`) whose quest is ready at that doodad (`QuestActConReportDoodad` names the doodad template and the objectives meet the act threshold) now sends 0x14d and leaves the report to that client request instead of completing it server-side; every other server-side report still only logs refusals. All 15 live 1.2 `QuestActConReportDoodad` acts are on Ready components and their doodads carry `DoodadFuncQuest` (`real_compact_db_report_doodads_are_ready_doodad_func_quests`). |
 | Refused quest reports | `packets.rs` (`quest_error`, `SCQuestContextFailedPacket`), `engine.rs` (`send_report_refused`, `finish_report`), `acts.rs`, `events.rs` | done | Every refused `CSCompleteQuestContext` report and `TryCompleteAsLetItDone` is answered once with 0x146, independent of the WARN repeat dedupe. A server-side report (`DoodadFuncQuest`, a doodad used on an owned quest: `events::on_server_report`) is only logged: the client did not enter quest directing mode, and a 0x146 there would show a quest error on every early click. The client error table `locale.questContext.errors` is built 1-based (`x2ui/baselib/locale_helper.alb`, `SETLIST` at instruction 654: `already_have`, `invalid_quest`, ...); the `QUEST_ERROR_INFO` handler `quest_context.alb` proto 22 indexes it directly with its first argument, and the client's local pre-checks use the same numbers (`FUN_3937a2d0`: 2 for an invalid quest, 0x14 after its can-interact check fails). Reason mapping (inferred from the client key names and those local codes, not captured from a 1.2 server): objectives not ready / wrong status -> 12 `invalid_quest_status`, wrong or missing NPC -> 7 `invalid_npc_or_quest`, wrong or missing doodad -> 19 `invalid_doodad`, quest not active -> 2 `invalid_quest`. |
 | `QuestCommandUtil` / `QuestCmd` (GM) | `systems/services/commands/scripts/quest_cmd.rs` | done | `quests::events::send_quests` / `send_completed_quests` added. |
 
@@ -4453,3 +4454,36 @@ Deviation from the removed C# history: C# never placed, settled or persisted a b
 is no C# behaviour to mirror. The pre-existing `bounty_runtime.rs` design invented a 24-hour
 expiry, a placement fee and a same-account refusal; all three are gone in favour of the
 client-evidenced rules above.
+
+## Water-only skill targets (2026-11-03)
+
+`target_only_water` casts (fishing rods) are admitted against the water surface the 1.2 client
+actually sends. The client aims `target_water` / `target_only_water` casts at the water surface
+(`FUN_3942b060`, `x2game.dll.c:872033`; `FUN_394322f0`, `:877530`: both pass the surface flag to
+the target picker when either water flag is set). Its own admission check `FUN_390b43b0`
+(`x2game.dll.c:148796`) probes `(x, y, z - 0.1)` (`DAT_3999ccf0`), requires the water level
+there at or above the probe (`probe.z <= level`), and then requires a floor at least 1 m below
+the level (`floor <= level - 1.0`, `DAT_3999c488`). That floor query is I3DEngine vt+0x108
+taking `(Vec3*, float)` - likely `GetBottomLevel`, a downward ray that includes statics and
+answers -1e9 when nothing is hit, which passes the depth test.
+
+The Rust port had probed `(x, y, z + 0.1)` since 668e4196 (`systems/skills/validation.rs`), so a
+surface point (the only point the client sends) landed above the water and every rod cast was
+refused with `skill_invalid_location` (0x23). `validation::target_in_water` now probes 0.1 m
+below, uses `collision::water_level` for the surface and `collision::terrain_height` for the
+floor (skipped when the collision service is off and no height is known). The server's floor is
+terrain only, so the rule is more lenient than the client's ray when static geometry lies under
+the point. Tests:
+`systems::skills::cast_validation_tests::water_only_targets_probe_below_the_surface_and_need_one_metre_of_water`.
+
+`source_not_swim` keeps its own probe 0.1 m **above** the caster (`validation::source_in_water`).
+That is the port's previous behaviour, not client evidence: applying the target rule to the
+source newly allowed a caster wading in water less than 1 m deep.
+
+Not ported: with `target_fishing` (target+0x194) set, `FUN_390b43b0` also refuses with 0x23 a
+type-8 water entity whose flag bit 1 is set (`vt+0x150 & 1`, likely a NoFishing volume)
+(`x2game.dll.c:148821-148834`); the server does not resolve or test that entity.
+
+Deviation from the removed C#: `SkillTemplate.TargetOnlyWater` was parsed
+(`AAEmu.Game/Core/Managers/SkillManager.cs:423`) but never read, so the C# had no water-target
+check at all; this follows only the 1.2 client.
