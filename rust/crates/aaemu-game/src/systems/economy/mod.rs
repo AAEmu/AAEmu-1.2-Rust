@@ -66,6 +66,9 @@ pub mod procs;
 #[cfg(test)]
 mod procs_tests;
 pub mod repair;
+pub mod shop_limits;
+#[cfg(test)]
+mod shop_limits_tests;
 pub mod specialty;
 pub mod store;
 pub mod store_data;
@@ -112,6 +115,8 @@ pub struct System {
     pub craft: craft::CraftManager,
     /// Store state (`Character.BuyBackItems`) and its hooks.
     pub store: store::StoreManager,
+    /// Per-character purchases of `items.limited_sale_count` / `items.one_time_sale` templates.
+    pub shop_limits: shop_limits::ShopLimits,
     /// `SpecialtyManager` (trade pack ratios).
     pub specialty: specialty::SpecialtyManager,
     /// `MailManager`.
@@ -213,6 +218,8 @@ impl System {
         }
         tracing::debug!("economy: loading cash shop");
         cash_shop::load(server).await?;
+        tracing::debug!("economy: loading shop purchase limits");
+        shop_limits::load(server).await?;
         tracing::debug!("economy: initializing specialty");
         specialty::initialize(server);
         tracing::debug!("economy: loading mails");
