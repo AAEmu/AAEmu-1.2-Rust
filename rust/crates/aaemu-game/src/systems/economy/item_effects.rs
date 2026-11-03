@@ -367,6 +367,21 @@ pub fn grade_enchant(
     let Some(item) = lock(&holder).get_item_by_id(target_id).cloned() else {
         return;
     };
+    // 1.2 client `FUN_393a0130` (the `GradeEnchant` special effect's target check, switch case
+    // 0x5c): an item whose `items.grade_enchantable` is false is refused with SkillResult
+    // INVALID_TARGET (0x22) before any roll. The C# never read the column, so it regraded
+    // anything. Cancel the cast like `item_socketing` does, so the scroll (the cast's source
+    // item, `use_skill_as_reagent`) is refunded and no gold or charm is taken.
+    let Some(template) = data.template(item.template_id) else {
+        tracing::error!("GradeEnchant: unknown item template {}", item.template_id);
+        return;
+    };
+    if !template.grade_enchantable {
+        send_error_message_to(&mut txn.out(), player, error_message::INVALID_TARGET);
+        drop(txn);
+        player.data().skill_char.skill_cancelled = true;
+        return;
+    }
     let initial_grade = item.grade;
     let Some(grade_template) = data.full_grade(i32::from(item.grade)).cloned() else {
         // C#: NullReferenceException in GoldCost.
