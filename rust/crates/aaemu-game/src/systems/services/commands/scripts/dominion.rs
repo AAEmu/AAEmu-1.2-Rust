@@ -285,16 +285,27 @@ impl Command for Dominion {
         let server = ctx.server()?;
         let manager = &server.systems.housing.dominions;
         if args.is_empty() || args[0] == "info" {
+            let now = crate::systems::social::dominion::now_seconds(server);
             for state in manager.all() {
+                let calendar = crate::systems::social::dominion::snapshot(server, &state, now)
+                    .map(|data| {
+                        (
+                            data.siege_timers.siege_period,
+                            data.siege_timers.started.timestamp(),
+                        )
+                    })
+                    .unwrap_or((0, 0));
                 CommandManager::send_normal_text(
                     self,
                     out,
                     &format!(
-                        "Zone {}: expedition {}, tower {}, tax {}%, siege {:?}",
+                        "Zone {}: expedition {}, tower {}, tax {}%, period {} from {}, siege {:?}",
                         state.zone_group_id,
                         state.owner_expedition_id,
                         state.tower.house_id,
                         state.tax_rate,
+                        calendar.0,
+                        calendar.1,
                         state.siege.as_ref().map(|s| (
                             s.siege_id,
                             s.status,
@@ -304,6 +315,32 @@ impl Command for Dominion {
                     ),
                 );
             }
+            return Ok(());
+        }
+        if args[0] == "clock" {
+            let value = match args.get(1).map(String::as_str) {
+                Some(value) if value.eq_ignore_ascii_case("off") || value == "0" => None,
+                Some(value) => match try_parse::<i64>(value) {
+                    Some(now) if now >= 0 => Some(now),
+                    _ => {
+                        CommandManager::send_default_help_text(self, out);
+                        return Ok(());
+                    }
+                },
+                None => {
+                    CommandManager::send_default_help_text(self, out);
+                    return Ok(());
+                }
+            };
+            server.systems.housing.calendar.set_clock(value);
+            CommandManager::send_normal_text(
+                self,
+                out,
+                &format!(
+                    "Siege calendar clock: {}",
+                    value.map_or_else(|| "real time".to_string(), |now| now.to_string())
+                ),
+            );
             return Ok(());
         }
         let Some(zone) = args.get(1).and_then(|v| try_parse::<u32>(v)) else {
@@ -474,10 +511,10 @@ impl Command for Dominion {
     }
 
     fn get_command_line_help(&self) -> String {
-        "info | collect <zoneGroupId> | schedule <zoneGroupId> <attackerExpeditionId> <startDelaySeconds> | register <zoneGroupId> <character> attacker|defender | unregister <zoneGroupId> <character> | headquarters <zoneGroupId> attacker|defender <doodadObjectId> | cancel <zoneGroupId>".into()
+        "info | clock <unixSeconds|off> | collect <zoneGroupId> | schedule <zoneGroupId> <attackerExpeditionId> <startDelaySeconds> | register <zoneGroupId> <character> attacker|defender | unregister <zoneGroupId> <character> | headquarters <zoneGroupId> attacker|defender <doodadObjectId> | cancel <zoneGroupId>".into()
     }
     fn get_command_help_text(&self) -> String {
-        "Manage explicit siege schedules and participants using the original zone duration. Collect actual property tax revenue as the current guild leader. Bind an authored headquarters in its current siege phase; bindings must be restored after server restart.".into()
+        "Manage explicit siege schedules and participants using the original zone duration. Set a non-persistent test clock for the weekly siege calendar, or restore real time with 'off'. Collect actual property tax revenue as the current guild leader. Bind an authored headquarters in its current siege phase; bindings must be restored after server restart.".into()
     }
 }
 

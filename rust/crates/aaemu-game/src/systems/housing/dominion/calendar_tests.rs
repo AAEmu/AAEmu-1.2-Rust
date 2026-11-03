@@ -1,0 +1,283 @@
+use super::*;
+use crate::systems::housing::data::{CastleReferenceData, SiegePlan, SiegeZone};
+
+const ZONE: u32 = 33;
+
+fn timezone() -> CalendarTimeZone {
+    CalendarTimeZone::Fixed(FixedOffset::east_opt(9 * 3600).unwrap())
+}
+
+fn date(year: i32, month: u32, day: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(year, month, day).unwrap()
+}
+
+fn epoch(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {
+    timezone()
+        .timestamp(date(year, month, day).and_hms_opt(hour, minute, 0).unwrap())
+        .unwrap()
+}
+
+/// The shipped `siege_zones` row for zone group 33 (all six rows share these columns).
+fn schedule() -> SiegeZone {
+    SiegeZone {
+        id: 4,
+        zone_group_id: ZONE,
+        start_siege_weekday: 0,
+        start_siege_hour: 21,
+        start_siege_min: 0,
+        siege_days: 0,
+        siege_hours: 1,
+        siege_mins: 30,
+        start_auction_weekday: 3,
+        start_auction_hour: 22,
+        start_auction_min: 30,
+        start_declare_weekday: 5,
+        start_declare_hour: 22,
+        start_declare_min: 30,
+        start_warmup_weekday: 0,
+        start_warmup_hour: 20,
+        start_warmup_min: 30,
+        pay_weekday: 0,
+        pay_hour: 23,
+        pay_min: 55,
+        reinforce_defense_delay_mins: 20,
+        open_weekday: 0,
+        open_hour: 0,
+        open_duration_hours: 168,
+        ..Default::default()
+    }
+}
+
+fn calendar(weeks: &[NaiveDate]) -> SiegeCalendar {
+    let mut castles = CastleReferenceData::default();
+    castles.siege_zones.insert(ZONE, schedule());
+    let rows = castles.siege_plans.entry(ZONE).or_default();
+    for (id, week) in weeks.iter().enumerate() {
+        // Duplicate rows are part of the shipped table shape.
+        for copy in 0..2 {
+            rows.push(SiegePlan {
+                id: id as u32 * 10 + copy,
+                zone_group_id: ZONE,
+                week_start: week.and_hms_opt(0, 0, 0).unwrap(),
+            });
+        }
+    }
+    SiegeCalendar::from_castles(&castles)
+}
+
+/// A zone in all three rotation slots runs a cycle every week.
+fn weekly_calendar() -> SiegeCalendar {
+    calendar(&[date(2014, 1, 5), date(2014, 1, 12), date(2014, 1, 19)])
+}
+
+fn view(calendar: &SiegeCalendar, now: i64, declared: bool) -> PeriodView {
+    calendar
+        .view_at(ZONE, now, &timezone(), declared)
+        .expect("period view")
+}
+
+#[test]
+fn timezone_parses_offsets_and_defaults_to_server_local() {
+    assert_eq!(CalendarTimeZone::parse(""), Some(CalendarTimeZone::Local));
+    assert_eq!(
+        CalendarTimeZone::parse("local"),
+        Some(CalendarTimeZone::Local)
+    );
+    assert_eq!(
+        CalendarTimeZone::parse("UTC"),
+        Some(CalendarTimeZone::Fixed(FixedOffset::east_opt(0).unwrap()))
+    );
+    assert_eq!(
+        CalendarTimeZone::parse("+09:00"),
+        Some(CalendarTimeZone::Fixed(
+            FixedOffset::east_opt(9 * 3600).unwrap()
+        ))
+    );
+    assert_eq!(
+        CalendarTimeZone::parse("-0530"),
+        Some(CalendarTimeZone::Fixed(
+            FixedOffset::east_opt(-(5 * 3600 + 30 * 60)).unwrap()
+        ))
+    );
+    assert_eq!(
+        CalendarTimeZone::parse("+9"),
+        Some(CalendarTimeZone::Fixed(
+            FixedOffset::east_opt(9 * 3600).unwrap()
+        ))
+    );
+    assert_eq!(CalendarTimeZone::parse("Asia/Seoul"), None);
+    assert_eq!(CalendarTimeZone::parse("+24:00"), None);
+    assert_eq!(CalendarTimeZone::parse("+09:60"), None);
+    assert_eq!(CalendarTimeZone::parse("nonsense"), None);
+}
+
+#[test]
+fn weekly_cycle_crosses_every_period_boundary_and_the_week_boundary() {
+    let calendar = weekly_calendar();
+    let auction = epoch(2014, 1, 8, 22, 30);
+    let declare = epoch(2014, 1, 10, 22, 30);
+    let warmup = epoch(2014, 1, 12, 20, 30);
+    let siege = epoch(2014, 1, 12, 21, 0);
+    let siege_end = epoch(2014, 1, 12, 22, 30);
+    let next_auction = epoch(2014, 1, 15, 22, 30);
+    let durations = [48 * 3600, 46 * 3600, 30 * 60, 90 * 60, 72 * 3600];
+
+    let cycle = calendar
+        .cycle_for_week(ZONE, date(2014, 1, 5), &timezone())
+        .unwrap();
+    assert_eq!(cycle.auction_start, auction);
+    assert_eq!(cycle.declare_start, declare);
+    assert_eq!(cycle.warmup_start, warmup);
+    assert_eq!(cycle.siege_start, siege);
+    assert_eq!(cycle.siege_end, siege_end);
+    assert_eq!(cycle.peace_end, next_auction);
+    assert_eq!(cycle.durations, durations);
+    // The five durations add up to the weekly plan period.
+    assert_eq!(durations.iter().sum::<i32>(), 7 * 86_400);
+
+    // Peace of the previous cycle ends exactly at the auction start.
+    let before = view(&calendar, auction - 1, false);
+    assert_eq!((before.period, before.started), (PERIOD_PEACE, auction));
+    let auction_view = view(&calendar, auction, false);
+    assert_eq!((auction_view.period, auction_view.started), (1, auction));
+    assert_eq!(auction_view.durations, durations);
+    assert_eq!(view(&calendar, declare - 1, false).period, 1);
+    assert_eq!(view(&calendar, declare, false).period, 2);
+    // No declaration: the declare period ends directly in peace (client "unearned_win").
+    let undeclared = view(&calendar, warmup, false);
+    assert_eq!(undeclared.period, PERIOD_PEACE);
+    assert_eq!(undeclared.started, next_auction);
+    assert_eq!(undeclared.durations, durations);
+    assert_eq!(view(&calendar, warmup - 1, true).period, 2);
+    assert_eq!(view(&calendar, warmup, true).period, 3);
+    assert_eq!(view(&calendar, siege - 1, true).period, 3);
+    assert_eq!(view(&calendar, siege, true).period, 4);
+    assert_eq!(view(&calendar, siege_end - 1, true).period, 4);
+    // Peace carries the next cycle's auction start and durations.
+    let peace = view(&calendar, siege_end, true);
+    assert_eq!(peace.period, PERIOD_PEACE);
+    assert_eq!(peace.started, next_auction);
+    assert_eq!(peace.durations, durations);
+    assert_eq!(
+        view(&calendar, next_auction - 1, false).started,
+        next_auction
+    );
+    let next = view(&calendar, next_auction, false);
+    assert_eq!((next.period, next.started), (1, next_auction));
+}
+
+#[test]
+fn peace_waits_for_the_next_rotation_week_and_uses_its_timers() {
+    // Zone 33 is listed in the first and fourth week only (the three-week rotation).
+    let calendar = calendar(&[date(2014, 1, 5), date(2014, 1, 26)]);
+    let first_end = epoch(2014, 1, 12, 22, 30);
+    let next_auction = epoch(2014, 1, 29, 22, 30);
+    let peace = view(&calendar, first_end + 60, false);
+    assert_eq!(peace.period, PERIOD_PEACE);
+    assert_eq!(peace.started, next_auction);
+    // Three weeks of plan time: the next cycle's peace runs until the one after it.
+    assert_eq!(
+        peace.durations.iter().map(|d| i64::from(*d)).sum::<i64>(),
+        21 * 86_400
+    );
+    // A week later this zone has no cycle of its own: still peace, same next start.
+    let idle = view(&calendar, epoch(2014, 1, 19, 12, 0), false);
+    assert_eq!(idle.period, PERIOD_PEACE);
+    assert_eq!(idle.started, next_auction);
+    assert_eq!(idle.durations, peace.durations);
+    // The next rotation week starts a real cycle.
+    let started = view(&calendar, next_auction, false);
+    assert_eq!(
+        (started.period, started.started),
+        (PERIOD_AUCTION, next_auction)
+    );
+}
+
+#[test]
+fn plan_rotation_dedupes_duplicate_rows_and_wraps_after_the_table_ends() {
+    let mut castles = CastleReferenceData::default();
+    for zone in [33, 43, 54] {
+        castles.siege_zones.insert(
+            zone,
+            SiegeZone {
+                zone_group_id: zone,
+                ..schedule()
+            },
+        );
+    }
+    let rows = [
+        (33, date(2014, 1, 5)),
+        (43, date(2014, 1, 12)),
+        (54, date(2014, 1, 19)),
+    ];
+    let mut id = 1;
+    for (zone, week) in rows {
+        // Every listed week carries each zone twice in the shipped table.
+        for _ in 0..2 {
+            castles
+                .siege_plans
+                .entry(zone)
+                .or_default()
+                .push(SiegePlan {
+                    id,
+                    zone_group_id: zone,
+                    week_start: week.and_hms_opt(0, 0, 0).unwrap(),
+                });
+            id += 1;
+        }
+    }
+    let rotation = castles.siege_rotation();
+    assert!(rotation.has_cycle(33, date(2014, 1, 5)));
+    assert!(!rotation.has_cycle(43, date(2014, 1, 5)));
+    assert!(rotation.has_cycle(43, date(2014, 1, 12)));
+    assert!(rotation.has_cycle(54, date(2014, 1, 19)));
+    assert!(rotation.has_cycle(33, date(2014, 1, 26)));
+    assert_eq!(rotation.week(date(2014, 1, 5)).unwrap().len(), 1);
+    // Week 52 wraps the three-week rotation past the 2014 table.
+    assert!(rotation.has_cycle(33, date(2014, 12, 28)));
+    assert!(rotation.has_cycle(43, date(2015, 1, 4)));
+    assert!(rotation.has_cycle(54, date(2015, 1, 11)));
+    assert!(rotation.has_cycle(33, date(2015, 1, 18)));
+    assert!(!rotation.has_cycle(33, date(2014, 1, 12)));
+}
+
+#[test]
+fn disabled_calendar_is_reported_by_the_settings_and_invalid_schedules_are_rejected() {
+    let empty = SiegeCalendar::default();
+    assert!(empty.is_empty());
+    assert!(empty.view_at(ZONE, 0, &timezone(), false).is_none());
+
+    let mut castles = CastleReferenceData::default();
+    castles.siege_zones.insert(
+        ZONE,
+        SiegeZone {
+            siege_days: 0,
+            siege_hours: 0,
+            siege_mins: 0,
+            ..schedule()
+        },
+    );
+    castles
+        .siege_plans
+        .entry(ZONE)
+        .or_default()
+        .push(SiegePlan {
+            id: 1,
+            zone_group_id: ZONE,
+            week_start: date(2014, 1, 5).and_hms_opt(0, 0, 0).unwrap(),
+        });
+    let invalid = SiegeCalendar::from_castles(&castles);
+    // A zero-length siege is malformed data, not a schedule to guess around.
+    assert!(invalid
+        .cycle_for_week(ZONE, date(2014, 1, 5), &timezone())
+        .is_none());
+
+    let settings = CalendarSettings::from_config(&HousingConfig {
+        siege_calendar: true,
+        siege_calendar_timezone: "+09:00".into(),
+        ..Default::default()
+    });
+    assert!(settings.enabled);
+    assert_eq!(settings.timezone, timezone());
+    assert!(!CalendarSettings::from_config(&HousingConfig::default()).enabled);
+}

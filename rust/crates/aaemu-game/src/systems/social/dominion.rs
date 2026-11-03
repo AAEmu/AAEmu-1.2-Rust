@@ -8,6 +8,7 @@ use crate::models::container::{equip_slot, slot_type};
 use crate::models::item_task::task_type;
 use crate::server::GameServer;
 use crate::systems::economy::inventory::{Inv, ItemTxn};
+use crate::systems::housing::dominion::calendar;
 use crate::systems::housing::dominion::runtime::is_live_object;
 use crate::systems::housing::dominion::runtime::{apply_tower_state, tower_identity};
 use crate::systems::housing::dominion::state::{
@@ -24,6 +25,30 @@ use super::packets::misc::{
 
 const DECLARATION_SKILL: u32 = 13_661;
 const PURIFYING_ARCHEUM: u32 = 16_493;
+
+/// The siege clock used by snapshots and the dominion tick. A GM test clock overrides it;
+/// otherwise this is the real time.
+pub fn now_seconds(server: &GameServer) -> i64 {
+    server.systems.housing.calendar.now()
+}
+
+/// The configured weekly calendar period of a territory, when the calendar is enabled.
+fn calendar_view(
+    server: &GameServer,
+    zone_group_id: u32,
+    now: i64,
+) -> Option<calendar::PeriodView> {
+    let settings = calendar::CalendarSettings::from_config(&server.config.housing);
+    if !settings.enabled {
+        return None;
+    }
+    calendar::SiegeCalendar::from_castles(&server.game_data.systems.housing.castles).view_at(
+        zone_group_id,
+        now,
+        &settings.timezone,
+        false,
+    )
+}
 
 /// Original stock DominionGuardTowerStateNoticeKey indices, not fortification/model stages.
 pub mod tower_alert {
@@ -47,7 +72,7 @@ pub fn broadcast_participant_changes(
     if old.zone_group_id != new.zone_group_id || old.tower != new.tower {
         return;
     }
-    let Some(data) = snapshot(server, new, Utc::now().timestamp()) else {
+    let Some(data) = snapshot(server, new, now_seconds(server)) else {
         return;
     };
     let empty = std::collections::BTreeMap::new();
@@ -79,7 +104,7 @@ pub fn broadcast_participant_changes(
 
 /// The offense declaration notification for a newly accepted explicit siege schedule.
 pub fn broadcast_siege_declared(server: &GameServer, state: &DominionState) {
-    let Some(data) = snapshot(server, state, Utc::now().timestamp()) else {
+    let Some(data) = snapshot(server, state, now_seconds(server)) else {
         return;
     };
     if data.siege_timers.unk2_data.id == 0 {
@@ -100,7 +125,7 @@ pub fn send_tower_alert(
     actor: Option<&PlayerRef>,
 ) {
     if alert > tower_alert::ENGRAVING_SUCCEEDED
-        || snapshot(server, state, Utc::now().timestamp()).is_none()
+        || snapshot(server, state, now_seconds(server)).is_none()
     {
         return;
     }
@@ -185,8 +210,8 @@ pub fn snapshot(server: &GameServer, state: &DominionState, now: i64) -> Option<
         .as_ref()
         .filter(|s| s.status != SiegeStatus::Finished && now < s.ends_at)
     {
-        // The five native duration slots are auction, declare, warmup, siege and peace,
-        // in seconds. This first version has an explicit GM schedule and no auction.
+        // An explicit GM schedule overrides the calendar for this territory. The five native
+        // duration slots are auction, declare, warmup, siege and peace, in seconds.
         timers.durations = [
             0,
             0,
@@ -233,6 +258,29 @@ pub fn snapshot(server: &GameServer, state: &DominionState, now: i64) -> Option<
         if timers.unk_data.unk_ids.len() > 100 || timers.unk2_data.unk_ids.len() > 100 {
             return None;
         }
+    } else if state.owner_expedition_id != 0 {
+        // The weekly calendar (`FUN_3956fc70`, `FUN_39838ff0`/`FUN_3946be90`): real period and
+        // timers in every phase; in peace `started` is the next cycle's auction start.
+        if let Some(view) = calendar_view(server, state.zone_group_id, now) {
+            timers.durations = view.durations;
+            timers.started = DateTime::from_timestamp(view.started, 0)?;
+            timers.siege_period = view.period;
+            // The defender owns the territory; the attacker team stays zero until a
+            // declaration exists (a zero attacker is the client's "nobody declared" state).
+            timers.unk_data.id = state.owner_expedition_id;
+            if let Some(hq) =
+                server
+                    .systems
+                    .housing
+                    .headquarters
+                    .snapshot(server, state, SiegeSide::Defender)
+            {
+                timers.unk_data.obj_id = hq.obj_id;
+                timers.unk_data.x = hq.position.x;
+                timers.unk_data.y = hq.position.y;
+                timers.unk_data.z = hq.position.z;
+            }
+        }
     }
     Some(DominionData {
         zone_id: u16::try_from(zone).ok()?,
@@ -275,7 +323,7 @@ pub fn snapshot(server: &GameServer, state: &DominionState, now: i64) -> Option<
 }
 
 pub fn broadcast_snapshot(server: &GameServer, state: &DominionState, newly_declared: bool) {
-    if let Some(dominion) = snapshot(server, state, Utc::now().timestamp()) {
+    if let Some(dominion) = snapshot(server, state, now_seconds(server)) {
         server.world.broadcast_to_server(&SCDominionDataPacket {
             dominion,
             newly_declared,
@@ -288,9 +336,16 @@ pub fn broadcast_snapshot(server: &GameServer, state: &DominionState, newly_decl
 /// OnSiegeState emits its phase event even for unchanged phases, so roster and tax updates
 /// must use broadcast_snapshot instead.
 pub fn broadcast_phase_change(server: &GameServer, state: &DominionState) {
-    let Some(dominion) = snapshot(server, state, Utc::now().timestamp()) else {
+    let Some(dominion) = snapshot(server, state, now_seconds(server)) else {
         return;
     };
+    tracing::debug!(
+        "Dominion {} siege state: period {} started {} durations {:?}",
+        dominion.zone_id,
+        dominion.siege_timers.siege_period,
+        dominion.siege_timers.started.timestamp(),
+        dominion.siege_timers.durations
+    );
     broadcast_siege_state(server, &dominion, 0);
     server.world.broadcast_to_server(&SCDominionDataPacket {
         dominion,
@@ -311,7 +366,7 @@ pub fn apply_released(server: &GameServer, previous: &DominionState, released: &
 /// Ownership delta followed by the authoritative snapshot: the native delta resets national
 /// tax to 500 independently, which must not replace the server's persisted value.
 pub fn broadcast_owner_change(server: &GameServer, state: &DominionState) {
-    let Some(dominion) = snapshot(server, state, Utc::now().timestamp()) else {
+    let Some(dominion) = snapshot(server, state, now_seconds(server)) else {
         return;
     };
     // Native OnSiegeState needs the preceding cached phase (4 at capture) and copies the
@@ -344,7 +399,7 @@ fn broadcast_siege_state(server: &GameServer, dominion: &DominionData, new_owner
 
 /// 1.2 has no request-dominion-data opcode; resend the persistent cache at world entry.
 pub fn send_snapshots(server: &GameServer, player: &PlayerRef) {
-    let now = Utc::now().timestamp();
+    let now = now_seconds(server);
     let snapshots: Vec<_> = server
         .systems
         .housing
@@ -893,7 +948,9 @@ mod authority_tests {
     use crate::models::item::Item;
     use crate::net::registry::ClientPacket;
     use crate::opcodes::sc;
-    use crate::systems::housing::data::{GuardTowerSetting, HousingBuildStep, HousingTemplate};
+    use crate::systems::housing::data::{
+        GuardTowerSetting, HousingBuildStep, HousingTemplate, SiegePlan, SiegeZone,
+    };
     use crate::systems::housing::dominion::state::{SiegeOutcome, SiegeParticipant, SiegeState};
     use crate::systems::skills::data::SkillTemplate;
     use crate::systems::skills::effects::EffectSource;
@@ -975,6 +1032,52 @@ mod authority_tests {
                 ..Default::default()
             },
         );
+        // The shipped zone schedule: auction Wed 22:30, declare Fri 22:30, warmup Sun
+        // 20:30, siege Sun 21:00 for 90 minutes. The plan rotation lists the zone in the
+        // week of 2014-01-05 and three weeks later.
+        data.systems.housing.castles.siege_zones.insert(
+            ZONE,
+            SiegeZone {
+                id: 4,
+                zone_group_id: ZONE,
+                start_siege_weekday: 0,
+                start_siege_hour: 21,
+                start_siege_min: 0,
+                siege_days: 0,
+                siege_hours: 1,
+                siege_mins: 30,
+                pay_weekday: 0,
+                pay_hour: 23,
+                pay_min: 55,
+                start_auction_weekday: 3,
+                start_auction_hour: 22,
+                start_auction_min: 30,
+                start_declare_weekday: 5,
+                start_declare_hour: 22,
+                start_declare_min: 30,
+                start_warmup_weekday: 0,
+                start_warmup_hour: 20,
+                start_warmup_min: 30,
+                ..Default::default()
+            },
+        );
+        for (id, week) in [(1, "2014-01-05"), (2, "2014-01-26")] {
+            data.systems
+                .housing
+                .castles
+                .siege_plans
+                .entry(ZONE)
+                .or_default()
+                .push(SiegePlan {
+                    id,
+                    zone_group_id: ZONE,
+                    week_start: chrono::NaiveDateTime::parse_from_str(
+                        &format!("{week} 00:00:00"),
+                        "%Y-%m-%d %H:%M:%S",
+                    )
+                    .unwrap(),
+                });
+        }
         data.systems.skills.add_skill(SkillTemplate {
             id: DECLARATION_SKILL,
             max_range: 10,
@@ -1776,5 +1879,194 @@ mod authority_tests {
         let mut expected = PacketStream::new();
         expected.write(&data).write_bool(false).write_bool(true);
         assert_eq!(packets[2].1, expected.into_bytes());
+    }
+
+    fn kst(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {
+        use chrono::TimeZone as _;
+        chrono::FixedOffset::east_opt(9 * 3600)
+            .unwrap()
+            .with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .unwrap()
+            .timestamp()
+    }
+
+    fn enable_calendar(f: &Fixture) {
+        f.server.config.update(|config| {
+            config.housing.siege_calendar = true;
+            config.housing.siege_calendar_timezone = "+09:00".into();
+        });
+    }
+
+    /// The exact `SCSiegeState` body for the calendar snapshot of this fixture.
+    fn expected_state_bytes(period: u8, started: i64, durations: [i32; 5]) -> Vec<u8> {
+        let mut expected = PacketStream::new();
+        expected
+            .write_u16(ZONE as u16)
+            .write_u32(SETTING)
+            .write_u32(4771)
+            .write_u8(2)
+            .write_u8(100)
+            .write_i16(450)
+            .write_u16(200)
+            .write_i16(120)
+            .write_i16(450);
+        for duration in durations {
+            expected.write_i32(duration);
+        }
+        expected
+            .write_i64(started)
+            .write_i64(0)
+            .write_i32(0)
+            .write_u8(period);
+        expected
+            .write_u32(EXPEDITION)
+            .write_bc(0)
+            .write_i64(0)
+            .write_i64(0)
+            .write_f32(0.0)
+            .write_raw(&[0, 0, 0, 0]);
+        expected
+            .write_u32(0)
+            .write_bc(0)
+            .write_i64(0)
+            .write_i64(0)
+            .write_f32(0.0)
+            .write_raw(&[0, 0, 0, 0])
+            .write_u32(0);
+        expected.into_bytes()
+    }
+
+    #[tokio::test]
+    async fn calendar_snapshot_has_real_timers_and_exact_bytes_in_auction_declare_peace() {
+        let f = fixture();
+        enable_calendar(&f);
+        let state = owned(&f);
+        let auction = kst(2014, 1, 8, 22, 30);
+        let declare = kst(2014, 1, 10, 22, 30);
+        let warmup = kst(2014, 1, 12, 20, 30);
+        let siege_end = kst(2014, 1, 12, 22, 30);
+        let next_auction = kst(2014, 1, 29, 22, 30);
+        let durations = [
+            48 * 3600,
+            46 * 3600,
+            30 * 60,
+            90 * 60,
+            i32::try_from(next_auction - siege_end).unwrap(),
+        ];
+        assert_eq!(
+            durations.iter().map(|d| i64::from(*d)).sum::<i64>(),
+            21 * 86_400
+        );
+        for (now, period, started) in [
+            (auction + 60, 1, auction),
+            (declare + 60, 2, auction),
+            // No declaration: the declare period ends in peace with the next cycle's timers.
+            (warmup, 5, next_auction),
+            (siege_end + 60, 5, next_auction),
+        ] {
+            let data = snapshot(&f.server, &state, now).unwrap();
+            let timers = &data.siege_timers;
+            assert_eq!(timers.siege_period, period, "period at {now}");
+            assert_eq!(timers.started.timestamp(), started);
+            assert_eq!(timers.durations, durations);
+            assert_eq!(timers.unk_data.id, EXPEDITION);
+            assert_eq!(timers.unk2_data.id, 0);
+            let packet = crate::systems::social::packets::misc::SCSiegeStatePacket {
+                id: data.zone_id,
+                territory_data: data.territory_data,
+                siege_timers: timers.clone(),
+                new_owner: 0,
+                reign_start_time: data.reign_start_time,
+            };
+            let bytes = crate::systems::social::packets::body(&packet);
+            assert_eq!(bytes, expected_state_bytes(period, started, durations));
+        }
+    }
+
+    #[tokio::test]
+    async fn calendar_tick_announces_declare_to_peace_once_and_skips_warmup_and_siege() {
+        let mut f = fixture();
+        enable_calendar(&f);
+        owned(&f);
+        f.client.drain();
+        let declare = kst(2014, 1, 10, 22, 30);
+        let warmup = kst(2014, 1, 12, 20, 30);
+        let next_auction = kst(2014, 1, 29, 22, 30);
+        let calendar = &f.server.systems.housing.calendar;
+
+        // The first observation is silent; repeating it must not emit anything either.
+        calendar.set_clock(Some(declare + 60));
+        crate::systems::housing::dominion::runtime::tick_once(&f.server, declare + 60);
+        assert_eq!(calendar.last_period(ZONE), Some(2));
+        crate::systems::housing::dominion::runtime::tick_once(&f.server, warmup - 1);
+        assert!(f.client.drain().is_empty());
+
+        // Declare ends with no attacker: one SCSiegeState (period 5) and one snapshot.
+        calendar.set_clock(Some(warmup));
+        crate::systems::housing::dominion::runtime::tick_once(&f.server, warmup);
+        let packets = f.client.drain();
+        assert_eq!(
+            packets.iter().map(|packet| packet.0).collect::<Vec<_>>(),
+            vec![sc::SCSiegeStatePacket, sc::SCDominionDataPacket]
+        );
+        let state_bytes = &packets[0].1;
+        assert_eq!(state_bytes[60], 5);
+        assert_eq!(
+            i64::from_le_bytes(state_bytes[40..48].try_into().unwrap()),
+            next_auction
+        );
+        assert_eq!(calendar.last_period(ZONE), Some(5));
+
+        calendar.set_clock(Some(warmup + 1));
+        crate::systems::housing::dominion::runtime::tick_once(&f.server, warmup + 1);
+        assert!(f.client.drain().is_empty());
+    }
+
+    #[tokio::test]
+    async fn calendar_enabled_keeps_an_explicit_gm_schedule_as_the_override() {
+        let f = fixture();
+        enable_calendar(&f);
+        owned(&f);
+        let now = kst(2014, 1, 9, 12, 0); // calendar period 1 (auction)
+        let state = f
+            .server
+            .systems
+            .housing
+            .dominions
+            .schedule_siege(ZONE, 88, now + 300, now + 900, now)
+            .unwrap();
+        let data = snapshot(&f.server, &state, now).unwrap();
+        assert_eq!(data.siege_timers.siege_period, 3);
+        assert_eq!(data.siege_timers.started.timestamp(), now);
+        assert_eq!(data.siege_timers.durations, [0, 0, 300, 600, 0]);
+        assert_eq!(data.siege_timers.unk_data.id, EXPEDITION);
+        assert_eq!(data.siege_timers.unk2_data.id, 88);
+        // The explicit schedule also wins over the calendar for the tick's transition memory.
+        let calendar = &f.server.systems.housing.calendar;
+        calendar.set_clock(Some(now));
+        crate::systems::housing::dominion::runtime::tick_once(&f.server, now);
+        assert_eq!(calendar.last_period(ZONE), Some(3));
+
+        // The explicit end announces itself once; the calendar must not repeat the transition.
+        let mut client = f.client;
+        client.drain();
+        calendar.set_clock(Some(now + 900));
+        crate::systems::housing::dominion::runtime::tick_once(&f.server, now + 900);
+        let packets = client.drain();
+        assert_eq!(
+            packets
+                .iter()
+                .filter(|packet| packet.0 == sc::SCSiegeStatePacket)
+                .count(),
+            1
+        );
+        assert_eq!(
+            packets
+                .iter()
+                .filter(|packet| packet.0 == sc::SCDominionDataPacket)
+                .count(),
+            1
+        );
+        assert_eq!(calendar.last_period(ZONE), Some(1));
     }
 }

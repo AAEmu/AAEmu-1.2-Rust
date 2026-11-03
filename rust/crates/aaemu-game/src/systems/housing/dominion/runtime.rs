@@ -700,6 +700,49 @@ pub fn apply_tower_state(server: &GameServer, state: &DominionState) {
     send_points(server, &house);
 }
 
+/// One dominion tick: explicit siege transitions first, then the weekly calendar periods.
+/// The caller serializes it with the housing operations (the spawned loop or a test).
+pub fn tick_once(server: &GameServer, now: i64) {
+    let _items = server.systems.economy.operation_scope();
+    let _operation = server
+        .systems
+        .housing
+        .operation_lock
+        .lock()
+        .expect("housing poisoned");
+    let mut announced = std::collections::BTreeSet::new();
+    for state in server
+        .systems
+        .housing
+        .dominions
+        .tick(now)
+        .unwrap_or_else(|e| {
+            tracing::error!("Dominion tick: {e}");
+            Vec::new()
+        })
+    {
+        announced.insert(state.zone_group_id);
+        apply_tower_state(server, &state);
+        crate::systems::social::dominion::broadcast_phase_change(server, &state);
+    }
+    // The weekly calendar reports period changes only; explicit GM schedules (unfinished
+    // sieges) own their territory's timers and announce themselves.
+    for transition in server
+        .systems
+        .housing
+        .calendar
+        .tick_excluding(server, now, &announced)
+    {
+        tracing::debug!(
+            "Dominion {} siege period {} -> {}",
+            transition.state.zone_group_id,
+            transition.previous_period,
+            transition.period
+        );
+        crate::systems::social::dominion::broadcast_phase_change(server, &transition.state);
+    }
+}
+
 pub fn start_tick(server: &Arc<GameServer>) {
     let server = server.clone();
     tokio::spawn(async move {
@@ -727,28 +770,8 @@ pub fn start_tick(server: &Arc<GameServer>) {
                     abort_character(&server, id);
                 }
             }
-            {
-                let _items = server.systems.economy.operation_scope();
-                let _operation = server
-                    .systems
-                    .housing
-                    .operation_lock
-                    .lock()
-                    .expect("housing poisoned");
-                for state in server
-                    .systems
-                    .housing
-                    .dominions
-                    .tick(chrono::Utc::now().timestamp())
-                    .unwrap_or_else(|e| {
-                        tracing::error!("Dominion tick: {e}");
-                        Vec::new()
-                    })
-                {
-                    apply_tower_state(&server, &state);
-                    crate::systems::social::dominion::broadcast_phase_change(&server, &state);
-                }
-            }
+            let now = crate::systems::social::dominion::now_seconds(&server);
+            tick_once(&server, now);
         }
     });
 }
