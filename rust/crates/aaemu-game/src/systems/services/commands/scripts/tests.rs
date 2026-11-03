@@ -342,6 +342,7 @@ fn registered_commands_match_the_csharp_scripts() {
                     | ["dungeon"]
                     | ["nation", "nations"]
                     | ["testguild"]
+                    | ["secondpassword", "secondpass", "clearsecondpassword"]
             )
         })
         .collect();
@@ -391,7 +392,7 @@ fn load_resolves_collisions_like_csharp() {
     assert!(super::load(&m, &ScriptEnv::default()));
     let keys = m.get_command_keys();
     // Original commands plus Dominion administration, collection and player registration.
-    assert_eq!(keys.len(), 98);
+    assert_eq!(keys.len(), 99);
     // `GoldCmd` (registered after `AddGold`) owns `gold`, and `AddGold`'s aliases lead to it.
     for alias in ["gold", "addgold", "add_gold"] {
         let c = m.get_command_interface_by_name(alias).expect(alias);

@@ -78,6 +78,9 @@ pub struct AppConfig {
     /// `Characters` (Rust only: the lobby character-slot limit).
     #[serde(rename = "characters")]
     pub characters: CharactersConfig,
+    /// `SecondPassword` (1.2 second password and its account lock).
+    #[serde(rename = "secondpassword")]
+    pub second_password: SecondPasswordConfig,
     #[serde(rename = "labor")]
     pub labor: CurrencyValuesConfig,
     /// `LaborOffline` (labor granted per offline tick on login).
@@ -157,6 +160,7 @@ impl Default for AppConfig {
             access_level: Vec::new(),
             account: AccountConfig::default(),
             characters: CharactersConfig::default(),
+            second_password: SecondPasswordConfig::default(),
             labor: CurrencyValuesConfig::default(),
             labor_offline: CurrencyValuesConfig::default(),
             credits: CurrencyValuesConfig::default(),
@@ -315,6 +319,32 @@ impl Default for CharactersConfig {
     fn default() -> Self {
         Self {
             max_per_account: aaemu_commons::character_slots::DEFAULT_MAX_CHARACTERS_PER_ACCOUNT,
+        }
+    }
+}
+
+/// `SecondPassword` (Rust only: the 1.2 virtual-keyboard second password, WP-A).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct SecondPasswordConfig {
+    /// Enables the feature and its `Feature::Secondpass` / `IngameshopSecondpass` bits.
+    #[serde(rename = "enabled", deserialize_with = "lenient")]
+    pub enabled: bool,
+    /// Consecutive failed checks before the account is locked. `0` is refused at load: the
+    /// feature cannot run without a lock (owner decision, 2026-11-03).
+    #[serde(rename = "maxfailcount", deserialize_with = "lenient")]
+    pub max_fail_count: u8,
+    /// How long a locked account refuses checks (minutes, at least 1: `0` is refused at load).
+    #[serde(rename = "lockminutes", deserialize_with = "lenient")]
+    pub lock_minutes: u32,
+}
+
+impl Default for SecondPasswordConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_fail_count: 5,
+            lock_minutes: 10,
         }
     }
 }
@@ -676,7 +706,7 @@ pub const USER_SECRETS_ID: &str = "426ad5c3-9a72-44e9-88f5-4b5940b98c28";
 
 /// The top-level `AppConfiguration` members (environment variables are only applied below
 /// these keys; anything else could never bind).
-const TOP_LEVEL_KEYS: [&str; 32] = [
+const TOP_LEVEL_KEYS: [&str; 33] = [
     "physics",
     "id",
     "additionalesid",
@@ -696,6 +726,7 @@ const TOP_LEVEL_KEYS: [&str; 32] = [
     "accesslevel",
     "account",
     "characters",
+    "secondpassword",
     "labor",
     "laboroffline",
     "credits",
@@ -761,6 +792,17 @@ impl AppConfig {
         let access_level = access_levels(&value)?;
         let mut cfg: Self =
             serde_json::from_value(lowercase_keys(value)).map_err(ConfigError::Bind)?;
+        if cfg.second_password.max_fail_count == 0 {
+            return Err(ConfigError::Bind(de::Error::custom(
+                "SecondPassword:MaxFailCount must be at least 1: a second password without a \
+                 lock cannot protect the account",
+            )));
+        }
+        if cfg.second_password.lock_minutes == 0 {
+            return Err(ConfigError::Bind(de::Error::custom(
+                "SecondPassword:LockMinutes must be at least 1: a second password without a lock cannot protect the account",
+            )));
+        }
         cfg.access_level = access_level;
         Ok(cfg)
     }

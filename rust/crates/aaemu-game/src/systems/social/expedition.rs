@@ -680,12 +680,7 @@ pub async fn create_expedition(server: &GameServer, owner: &PlayerRef, name: &st
         send_error(owner, code);
         return;
     }
-    if server
-        .expeditions
-        .all()
-        .iter()
-        .any(|e| e.faction.name == name)
-    {
+    if rename::faction_name_in_use(server, name, None) {
         send_error(owner, error::EXPEDITION_NAME_EXIST);
         return;
     }
@@ -787,7 +782,21 @@ pub async fn create_expedition(server: &GameServer, owner: &PlayerRef, name: &st
         removed_members: Vec::new(),
         is_disbanded: false,
     };
-    server.expeditions.add(expedition.clone());
+    {
+        // The early check above can be overtaken by a concurrent rename; the name lock makes
+        // the final check and the insert one step (RENAME-6).
+        let _names = rename::lock_names(server);
+        if rename::faction_name_in_use(server, name, None) {
+            owner.data().money += cost;
+            owner.send(item_task_money_packet(
+                ITEM_TASK_EXPEDITION_CREATION,
+                cfg.create.cost,
+            ));
+            send_error(owner, error::EXPEDITION_NAME_EXIST);
+            return;
+        }
+        server.expeditions.add(expedition.clone());
+    }
     owner.data().unit.expedition_id = id;
     // ENROLL_GUILD (queued: runs once the packet is handled).
     crate::systems::refresh_achievements_later(server, owner);
@@ -887,7 +896,17 @@ pub async fn rename_expedition(server: &GameServer, p: &PlayerRef, id: u32, name
         rename::send_retry(p, true, code, name);
         return;
     }
-    match server.expeditions.rename(id, p.character_id, name) {
+    let result = {
+        // Guilds, nations and static factions share one namespace; the lock keeps the check
+        // and the write together (RENAME-3 / RENAME-6).
+        let _names = rename::lock_names(server);
+        if rename::faction_name_in_use(server, name, Some(rename::NameOwner::Expedition(id))) {
+            Err(RenameFailure::NameExists)
+        } else {
+            server.expeditions.rename(id, p.character_id, name)
+        }
+    };
+    match result {
         Ok(()) => {
             server.expeditions.take_rename_offer(p.character_id);
             save(server, id).await;
