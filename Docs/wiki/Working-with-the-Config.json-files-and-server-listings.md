@@ -93,6 +93,33 @@ from the C# version is still read between `Config.Local.json` and the
 environment variables, but it can no longer be managed with a tool; move those
 values to `Config.Local.json` or environment variables.)
 
+## Account payment and premium (`Account:DefaultPayment`)
+
+The game server loads each account's payment state from `aaemu_game.accounts`
+(`pay_method`, `pay_location`, `pay_start`, `pay_end`, `premium_point`). A row
+whose `pay_method` is still `0` uses the configured default:
+
+```json
+{
+  "Account": {
+    "DefaultPayment": "premium"
+  }
+}
+```
+
+`premium` (default) keeps the old C# behaviour: the account is premium until
+2030-01-01, gets the premium grade from the premium point (`premium_grades`,
+grade 2 at point 1) and the premium max labor from `premium_benefits`
+(5000 instead of 2000). `none` makes new and unset accounts normal; `demo` is
+the third 1.2 payment method. The numeric values are the client's
+`SCAccountInfo.payMethod`: 1 Premium, 3 Demo, 5 None.
+
+Server owners can grant or remove premium in game with
+`/premium <account id|character name|self> <on|off|days> [days]` (access level
+100): `on` grants 30 days, a number grants that many days, `off` removes it.
+The grant writes the account row and pushes `SCAccountInfo` and
+`SCUpdatePremiumPoint` to the account.
+
 ## Web API authentication and migration
 
 The game Web API now defaults to `127.0.0.1:1280`. Only `GET /status` is
