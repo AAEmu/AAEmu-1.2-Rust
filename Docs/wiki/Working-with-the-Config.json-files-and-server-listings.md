@@ -61,6 +61,41 @@ Field meanings:
 - `Port`: client connection port.
 - `Hidden`: whether to hide this entry from listing.
 
+### Character slots and the pre-select period
+
+The login server tells the client how many characters an account has:
+
+```json
+{
+  "Login": {
+    "MaxCharactersPerAccount": 6,
+    "AdditionalCharactersPerServer": 0,
+    "PreSelectCharacterPeriod": false
+  }
+}
+```
+
+- `MaxCharactersPerAccount` (default `6`): base character slots of every account,
+  sent in `ACJoinResponse` and `ACAuthResponse`. The game server's
+  `Characters:MaxPerAccount` must be the same value; it enforces the limit.
+- `AdditionalCharactersPerServer` (default `0`): the expandable limit the client
+  shows for slot-increase items.
+- `PreSelectCharacterPeriod` (default `false`): tells the client it may edit
+  characters at character select. It requires the lobby character-edit packet
+  (WP-E2), which is not implemented yet: with the flag on, the client's Start
+  button sends `CSEditCharacter` instead of entering the world, so the login
+  server refuses a config with `PreSelectCharacterPeriod = true`.
+
+Purchased character slots (`accounts.extra_character_slots`, from the slot
+increase item) are sent by the game server's `SCGetSlotCount` as the purchased
+count only; the client adds them to the login base. The game server's create
+check enforces the same sum, so an account can create up to
+`MaxCharactersPerAccount + extra_character_slots` characters. Nothing
+cross-checks the two servers' configs: set both base values equally and confirm
+the effective values in the `Character slots: base ...` startup log line of each
+server. If the game server cannot read `extra_character_slots` from MySQL, it
+logs the error and falls back to the base alone.
+
 ### Environment variable mapping (login)
 
 You can define server entries via environment variables:
@@ -93,6 +128,29 @@ from the C# version is still read between `Config.Local.json` and the
 environment variables, but it can no longer be managed with a tool; move those
 values to `Config.Local.json` or environment variables.)
 
+### Game character settings (`Characters`)
+
+The game server's `Configurations/CharacterSettings.json` carries the base slot
+count the login server advertises:
+
+```json
+{
+  "Characters": {
+    "MaxPerAccount": 6
+  }
+}
+```
+
+- `MaxPerAccount` (default `6`): must equal the login server's
+  `Login:MaxCharactersPerAccount`. The two values are not cross-checked across
+  processes; the startup log prints the effective value on each server.
+  Character creation is refused once the account already has
+  `MaxPerAccount + extra_character_slots` characters (a MySQL read error on the
+  extra slots falls back to the base).
+
+It can also be overridden in the game's `Config.Local.json` or with the
+environment variable `Characters__MaxPerAccount`.
+
 ## Account payment and premium (`Account:DefaultPayment`)
 
 The game server loads each account's payment state from `aaemu_game.accounts`
@@ -107,18 +165,19 @@ whose `pay_method` is still `0` uses the configured default:
 }
 ```
 
-`premium` (default) keeps the old C# behaviour: the account is premium until
-2030-01-01, gets the premium grade from the premium point (`premium_grades`,
-grade 2 at point 1) and the premium max labor from `premium_benefits`
-(5000 instead of 2000). `none` makes new and unset accounts normal; `demo` is
-the third 1.2 payment method. The numeric values are the client's
-`SCAccountInfo.payMethod`: 1 Premium, 3 Demo, 5 None.
+`premium` (default) keeps the old C# behaviour: the account is permanently
+premium (no end date), gets the premium grade from the premium point
+(`premium_grades`, grade 2 at point 1) and the premium max labor from
+`premium_benefits` (5000 instead of 2000). `none` makes new and unset accounts
+normal; `demo` is the third 1.2 payment method. The numeric values are the
+client's `SCAccountInfo.payMethod`: 1 Premium, 3 Demo, 5 None.
 
 Server owners can grant or remove premium in game with
 `/premium <account id|character name|self> <on|off|days> [days]` (access level
 100): `on` grants 30 days, a number grants that many days, `off` removes it.
-The grant writes the account row and pushes `SCAccountInfo` and
-`SCUpdatePremiumPoint` to the account.
+The grant has its own end date; the configured default does not. The grant
+writes the account row and pushes `SCAccountInfo` and `SCUpdatePremiumPoint`
+to the account.
 
 ## Web API authentication and migration
 

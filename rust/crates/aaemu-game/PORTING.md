@@ -302,7 +302,7 @@ These `SpecialType` bodies were TODO stubs that only logged in the C# (`git show
 | `SpecialEffects/GenderTransfer` (special 107) | `systems/skills/effects/special/misc.rs` (`gender_transfer`) | added | Data: skill 23469 `성별 전환하기` (beauty-salon NPC interaction, `target_type` any unit, selection target). Flips the affected player (`target` if a player, else the caster) with `new = 3 - old` (1 male <-> 2 female), refuses when an equipped item template has `char_gender` set to a third value with `GENDER_TRANSFER_AS_GENDER_EQUIPMENT` (744), rebuilds `unit.model_id` from the race/gender `characters` template and broadcasts `SCCharacterGenderAndModelModifiedPacket` (existing beauty-salon packet) to the player and observers. `Character.Save` persists the new `gender` with the next save. |
 | `SpecialEffects/MateMakeGetUp` (special 51) | `systems/vehicles/mates.rs` (`revive_mate`), `systems/skills/effects/special/misc.rs` | added | Data: skill 13719 `일으켜세우기` (revive an injured summoned mate, self-target, friendly); the former C# body only logged. Resolves the target/caster mate or, for a player caster, the active mate; only acts while `hp <= 0`. Reuses the stablehand revive values: `mates.hp/mp = MATE_FULL_POOL`, clears the summon item's `mate_dead` flag with a `RepairPets` item task and broadcasts `SCUnitPointsPacket`; the live mate is restored to `max_hp` / `max_mp`. |
 | `AccountAttributeEffect` + `SpecialEffects/AuctionPostAuthority` (special 117) | `systems/economy/account_attributes.rs`, `bridges.rs`, `world/session.rs` | added | Data: `account_attribute_effects` has 3 rows, all `kind_id = 1` (auction posting authority): item 8000027 `경매장 등록권` adds it account-wide (`is_add`, `count` 0, `time` 0, `bind_world` false) and two `is_add = false` rows remove it (VIP buff trigger, removal ticket item 8000058). Special 117 on buffs 7149 / 11034 / 8000012 grants kind 1 permanently. New `account_attributes` table (PK account/kind/world, nullable `end_time`, `world_id` 0 = not world bound), loaded on character select into `server.systems.economy.account_attributes` and persisted on every change. `is_add` upserts, otherwise every grant of the kind is deleted; `time == 0` is permanent, else `now + time` **seconds (unit inferred: all 1.2 values are 0)**. `has_account_attribute(account_id, kind)` is ready for gating; **the auction is deliberately not gated yet** (every character currently gets buff 8000012 from `UNIT_STATE_FORCED_BUFFS`, so a gate would need that decision first). |
-| `SpecialEffects/AddCharacterSlot` (special 91) | `systems/economy/character_slots.rs`, `db.rs`, `packets/c2g.rs` | added | Data: item 8000002 `캐릭터 슬롯확장 주문서` -> skill 8000002. Adds one `accounts.extra_character_slots` (`TINYINT UNSIGNED`, saturating at 255) for the caster's account, persists it and sends `SCGetSlotCountPacket` with the new value; `CSListCharacterPacket` sends that count instead of the old hard-coded 0. Found limits: the game server's `CharacterManager.Create` has **no** per-account character-count check, while `aaemu-login` hard-codes `MAX_CHARACTERS_PER_ACCOUNT = 6` (and `AcAuthResponse.slot_count = 6`); the advertised cap is therefore unchanged by this effect (a login-side read of the game DB would be needed). |
+| `SpecialEffects/AddCharacterSlot` (special 91) | `systems/economy/character_slots.rs`, `db.rs`, `packets/c2g.rs`, `managers/character.rs` | added | Data: item 8000002 `캐릭터 슬롯확장 주문서` -> skill 8000002. Adds one `accounts.extra_character_slots` (`TINYINT UNSIGNED`, saturating at 255) for the caster's account, persists it and sends `SCGetSlotCountPacket` with the new value; `CSListCharacterPacket` sends that count instead of the old hard-coded 0. The character creation limit is the login-advertised base plus those purchased slots: aaemu-login sends `Login:MaxCharactersPerAccount` (default 6) in `ACJoinResponse`/`ACAuthResponse`, and `CharacterManager.Create` re-reads the account's slots inside the save lock and refuses with `CharacterCreateError::WorldLimit` (9) at `aaemu_commons::character_slots::character_slot_limit(base, extra)`; a MySQL error on that read falls back to the base alone. **Deviation (C#):** the C# `CharacterManager.Create` had no per-account character-count check and aaemu-login hard-coded 6 in both packets, so purchased slots could never be used. `Login:AdditionalCharactersPerServer` (the expandable limit) and `Login:PreSelectCharacterPeriod` (advertised in `ACJoinResponse.afs`) are Rust-only; the pre-select flag is refused at login config load until lobby character editing (WP-E2) exists, and the game's `Characters:MaxPerAccount` must equal `Login:MaxCharactersPerAccount` (documented pair, no cross-process check; each server logs its effective value at startup). |
 
 ### systems::npcs
 
@@ -481,7 +481,7 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 | `GameData/AchievementGameData` (`achievements`, `achievement_objectives`, `pre_completed_achievements`, `char_records`), `Models/Game/Achievement` | `systems/social/achievement.rs` (`server.game_data.systems.social.achievements`) | done | Loader + port of `AchievementGameDataTests`; gated real-DB test `achievement_game_data_real_compact_db`. The C# 1.2 tree has no manager; the Rust achievement manager / runtime / hooks / rewards (`achievement_*.rs`) read them (see "Achievement producers" below). |
 | `DuelManager`, `Models/Game/Duels`, duel tasks | `systems/social/duel.rs`, `packets/duel.rs` | done | Request / accept (flag via hook) / start / stop / cancel, distance + HP checks, end timer (tokio tasks; `set_delays` test hook). |
 | `CrimeManager`, `TrialManager`, `Models/Game/Crime`, `TrialUpdateTask` | `systems/social/{crime,trial}.rs`, `packets/trial.rs` | done | Crime table load / save (`AfterItems`), report / evidence (hooks), bot reports, trial / jury flow with 5 s tick, audience, bounty placement / arrest payout (`systems/social/{bounty,bounty_runtime}.rs`, `bounty_pledges`; see "Wanted-player bounty"). The board is still the empty list (BOUNTY-board). Arrests, authenticated jury choices, guilty pleas, acquittals, court cleanup and reconnect jail enforcement have packet-flow regressions; prisoner buffs persist remaining online time. |
-| `DominionData`, `Models/Game/Achievement`, rename / chat bubble / NPC chat / spam packets | `systems/social/{dominion,achievement}.rs`, `packets/misc.rs` | done (data + packets) | No C# manager drives them in 1.2. |
+| `DominionData`, `Models/Game/Achievement`, rename / chat bubble / NPC chat / spam packets | `systems/social/{dominion,achievement}.rs`, `packets/misc.rs` | done (data + packets) | No C# manager drives them in 1.2. The dominion `SCDominionDeleted` / `TaxBalanced` / `NonPvPStarted` / `NonPvPStopped` notifications now have senders (see the `systems::housing / systems::social` notification bullet under Phase 3). |
 | `RankingGameData` (later C# history), 1.2 ranking packets | `systems/social/ranking_{data,packets,runtime,manager,persistence}.rs` | done (arena + fishing boards) | Not in the 1.2 C#; Rust only. Request path, MySQL persistence (`character_rank_scores`, `rank_period_payouts`), score hooks and period-close reward letters: see "Ranking boards" under Known deviations. |
 | `RadarManager` | – | not social | Telescope / fish school registration from buff templates: skills / npcs. |
 
@@ -1472,6 +1472,43 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   handler requires the live owned territory at the caster and its current expedition leader;
   a second cast while the window is active sends `ALREADY_IN_NON_PVP_DURATION` (759). The
   skill's 4-hour reuse cooldown and five reagent crystals remain the skill system's job.
+  A successful start also sends `SCDominionNonPvPStarted` (0x024; the opcode table still names
+  the constant `CDominionStartUnkPacket`; native `OnDominionNonPvPStarted`, Deserialize
+  `0x397B7BB0`: zone group, DateTime start, u16 minutes). `SCDominionData`'s `nonPvPDuration`
+  is **seconds**, not the authored minutes: the native record serializer
+  (`0x3983A470`, ~1835164-1835174) stores `start + duration` with no scale factor (its writer
+  sends `end - start`), so the snapshot sends `duration_min * 60` as a u16 and drops the
+  snapshot when that does not fit; the 0x024 packet keeps the minutes. The dominion tick clears
+  every window whose `start + duration_min*60` has passed and sends `SCDominionNonPvPStopped`
+  (0x025; opcode table `SCDominionEndUnkPacket`; Deserialize `0x397B7C00`: zone group) once.
+  The client derives the same end from the start packet, but keeps its cached end until the
+  stop packet and its peace-skill precheck (`FUN_398391c0` -> error 0x2f7) refuses while it is
+  set, so natural expiry is the only 0x025 edge; early termination by a siege declaration is
+  UNKNOWN and is not invented. Peace windows use the real wall clock in both the cast and
+  `runtime::tick_once`'s expiry: the calendar's test clock is restricted to the calendar
+  phases. A forced release that clears the owner and a fresh claim (`release_expedition`,
+  `declare_unowned_with`) clear the persisted window, because the released record is dropped
+  on the client (0x01e, no 0x025) and a later owner must not inherit it. All four dominion
+  notifications below go to every online player: the client stores one cached record per zone,
+  fed by the server-wide `SCDominionData`, and none of the handlers filters by owner or zone
+  (the client only refreshes the territory window when the player is in that zone,
+  `FUN_392f4d30`).
+* systems::housing / systems::social (dominion notifications 0x01e / 0x023): a forced release
+  that clears the owner (`DominionManager::release_expedition` -> `apply_released`, the pirate
+  last-member dismissal path) sends `SCDominionDeleted` (0x01e; Deserialize `0x397B79F0`: zone
+  group) after the phase snapshot, so the client drops its cached record; a release that only
+  cancels a siege keeps the owner and sends nothing. A successful property-tax collection
+  (`/collectdominion <zoneGroupId>` -> `tax::collect_locked`, the only existing settlement
+  path) sends `SCDominionTaxBalanced` (0x023; Deserialize `0x397B7B60`: zone group, peace-fund
+  money, peace-fund AA points) with the current peace-fund values and no accrual. Peace Fund
+  rates, sources, the AA-point split and the historical automatic payout remain UNKNOWN (see
+  the property-tax bullet above). Known, not fixed: 0x023 has no sender after a weekly
+  settlement because no settlement hook exists yet (the calendar changes periods only);
+  `tax::collect_locked` reads `authority_for_zone` before the collection call, so the
+  tower/owner/generation re-check inside `collect_property_tax_with` is the only guard against
+  a capture between the two reads (the leader/fort gate is not re-read under the manager lock);
+  the tests cover the collection sender, the forced release and the natural expiry, but not a
+  full weekly settlement or a siege-caused early termination (UNKNOWN).
 * systems::vehicles (`DestroyAndSpawnSlave` special effect 72): row 8224 (values 0) is the only
   row, on skill 19165, carried by slave template 125's mount skill. A spawner-backed slave is
   removed through its `SlaveSpawner` (`Despawn` broadcasts the removal and releases the slot)

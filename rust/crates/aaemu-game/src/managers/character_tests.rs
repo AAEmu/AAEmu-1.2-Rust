@@ -5,6 +5,7 @@
 //! free functions taking the server), so the port checks that construction has no side
 //! effects: a new `CharacterData` is empty.
 
+use crate::config::AppConfig;
 use crate::data::character_templates::CharacterData;
 use crate::data::skills::{DefaultSkill, SkillTemplate};
 use crate::data::GameData;
@@ -12,7 +13,10 @@ use crate::models::char_data::{read_action_slots, ActionSlot, ActionSlotType, MA
 use crate::models::character::Character;
 use crate::test_support::{test_server_with, test_server_with_config};
 
-use super::{create, initialize_starting_skills, CreateCharacterRequest};
+use super::{
+    character_slot_limit, create, initialize_starting_skills, may_create_character,
+    CreateCharacterRequest,
+};
 
 const STARTERS: [(u8, u32); 10] = [
     (1, 18132),
@@ -1234,4 +1238,89 @@ async fn starting_hotbar_real_compact_db() {
         assert_eq!(c.slots[1].action_id, u64::from(skill_id));
         assert_eq!(c.skills.skills[0].id, skill_id);
     }
+}
+
+#[test]
+fn character_slot_limit_is_base_plus_purchased_slots() {
+    assert_eq!(character_slot_limit(6, 0), 6);
+    assert_eq!(character_slot_limit(6, 2), 8);
+    assert_eq!(character_slot_limit(8, 2), 10);
+    assert_eq!(character_slot_limit(255, 1), 255);
+}
+
+#[test]
+fn create_cap_is_base_plus_purchased_slots() {
+    // Base only: six full, and a seventh refused.
+    assert!(may_create_character(6, 0, 5));
+    assert!(!may_create_character(6, 0, 6));
+    // Purchased slots extend the same limit up to the advertised total.
+    assert!(may_create_character(6, 2, 6));
+    assert!(may_create_character(6, 2, 7));
+    assert!(!may_create_character(6, 2, 8));
+    // A DB error on the extra-slots read gives 0, i.e. the base fallback.
+    assert!(!may_create_character(6, 0, 6));
+}
+
+/// `Characters:MaxPerAccount` sets the base; `accounts.extra_character_slots` adds to it, and the
+/// real create handler refuses the character past the advertised limit with native error 9.
+#[tokio::test]
+#[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; temporary tables only"]
+async fn private_mysql_create_limit_is_config_base_plus_purchased_slots() {
+    use crate::test_support::TestClient;
+    let Some(pool) = private_lobby_pool().await else {
+        return;
+    };
+    let mut config = AppConfig {
+        id: 1,
+        ..AppConfig::default()
+    };
+    config.characters.max_per_account = 2;
+    let mut server = test_server_with_config(creation_data(), config);
+    server.db = pool.clone();
+    sqlx::query("INSERT INTO accounts (account_id, labor) VALUES (1010, 1000)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut client = TestClient::new(&server, 1, 1010);
+
+    for index in 0..2 {
+        lobby_create(
+            &server,
+            &mut client,
+            creation_request(&format!("Base{index}")),
+        )
+        .await
+        .unwrap();
+        assert!(client
+            .drain_ops()
+            .contains(&crate::opcodes::sc::SCCreateCharacterResponsePacket));
+    }
+    lobby_create(&server, &mut client, creation_request("RefusedBase"))
+        .await
+        .unwrap();
+    assert_creation_failure(&mut client, 9);
+
+    sqlx::query("UPDATE accounts SET extra_character_slots = 2 WHERE account_id = 1010")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for index in 0..2 {
+        lobby_create(
+            &server,
+            &mut client,
+            creation_request(&format!("Paid{index}")),
+        )
+        .await
+        .unwrap();
+        assert!(client
+            .drain_ops()
+            .contains(&crate::opcodes::sc::SCCreateCharacterResponsePacket));
+    }
+    lobby_create(&server, &mut client, creation_request("RefusedPaid"))
+        .await
+        .unwrap();
+    assert_creation_failure(&mut client, 9);
+
+    assert_eq!(persisted_lobby_count(&pool, 1010).await, 4);
+    pool.close().await;
 }

@@ -75,6 +75,9 @@ pub struct AppConfig {
     pub access_level: Vec<(String, i32)>,
     #[serde(rename = "account")]
     pub account: AccountConfig,
+    /// `Characters` (Rust only: the lobby character-slot limit).
+    #[serde(rename = "characters")]
+    pub characters: CharactersConfig,
     /// `SecondPassword` (1.2 second password and its account lock).
     #[serde(rename = "secondpassword")]
     pub second_password: SecondPasswordConfig,
@@ -156,6 +159,7 @@ impl Default for AppConfig {
             discord_token: None,
             access_level: Vec::new(),
             account: AccountConfig::default(),
+            characters: CharactersConfig::default(),
             second_password: SecondPasswordConfig::default(),
             labor: CurrencyValuesConfig::default(),
             labor_offline: CurrencyValuesConfig::default(),
@@ -317,6 +321,26 @@ pub enum DefaultPayment {
 }
 
 impl_config_enum!(DefaultPayment { Premium = 1, Demo = 3, None = 5 });
+
+/// `Characters` (Rust only): the lobby character-slot limit.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct CharactersConfig {
+    /// Base character slots of every account, before the purchased
+    /// `accounts.extra_character_slots` are added. Must equal the login server's
+    /// `Login:MaxCharactersPerAccount`; the login server advertises it, this server enforces it.
+    /// There is no cross-process check of the two values.
+    #[serde(rename = "maxperaccount", deserialize_with = "lenient")]
+    pub max_per_account: u8,
+}
+
+impl Default for CharactersConfig {
+    fn default() -> Self {
+        Self {
+            max_per_account: aaemu_commons::character_slots::DEFAULT_MAX_CHARACTERS_PER_ACCOUNT,
+        }
+    }
+}
 
 /// `SecondPassword` (Rust only: the 1.2 virtual-keyboard second password, WP-A).
 #[derive(Debug, Clone, Deserialize)]
@@ -701,7 +725,7 @@ pub const USER_SECRETS_ID: &str = "426ad5c3-9a72-44e9-88f5-4b5940b98c28";
 
 /// The top-level `AppConfiguration` members (environment variables are only applied below
 /// these keys; anything else could never bind).
-const TOP_LEVEL_KEYS: [&str; 32] = [
+const TOP_LEVEL_KEYS: [&str; 33] = [
     "physics",
     "id",
     "additionalesid",
@@ -720,6 +744,7 @@ const TOP_LEVEL_KEYS: [&str; 32] = [
     "dungeons",
     "accesslevel",
     "account",
+    "characters",
     "secondpassword",
     "labor",
     "laboroffline",
@@ -1244,6 +1269,16 @@ mod tests {
         assert_eq!(cfg.login_network.port, 1234);
         assert!(cfg.account.delete_release_name);
         assert_eq!(cfg.account.access_level_first_account, 100);
+    }
+
+    #[test]
+    fn characters_config_binds_the_base_slot_count() {
+        let cfg = AppConfig::from_value(json!({
+            "Characters": { "MaxPerAccount": "8" }
+        }))
+        .unwrap();
+        assert_eq!(cfg.characters.max_per_account, 8);
+        assert_eq!(AppConfig::default().characters.max_per_account, 6);
     }
 
     #[test]
