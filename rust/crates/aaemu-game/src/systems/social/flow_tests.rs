@@ -8,7 +8,7 @@ use crate::server::GameServer;
 use crate::systems::social::chat::chat_type;
 use crate::systems::social::packets::body;
 use crate::systems::social::packets::team::*;
-use crate::systems::social::team::risky_action;
+use crate::systems::social::team::{risky_action, INVITATION_TIMEOUT_MS};
 use crate::test_support::{spawn_player, test_character, test_server, TestClient};
 use crate::world::PlayerRef;
 
@@ -66,13 +66,23 @@ fn invite(team_id: u32, name: &str) -> PacketStream {
 }
 
 fn reply(team_id: u32, owner: u32, reject: bool) -> PacketStream {
+    reply_full(team_id, owner, reject, false)
+}
+
+/// `CSReplyToJoinTeamPacket` with the `isArea` flag set (the answer to
+/// `SCAskToJoinTeamArea`).
+fn reply_area(team_id: u32, owner: u32, reject: bool) -> PacketStream {
+    reply_full(team_id, owner, reject, true)
+}
+
+fn reply_full(team_id: u32, owner: u32, reject: bool, is_area: bool) -> PacketStream {
     let mut s = PacketStream::new();
     s.write_u32(team_id)
         .write_bool(true)
         .write_u32(owner)
         .write_bool(reject)
         .write_str("")
-        .write_bool(false);
+        .write_bool(is_area);
     s
 }
 
@@ -2239,19 +2249,267 @@ async fn blocking_an_offline_character_uses_the_name_manager() {
 }
 
 #[tokio::test]
-async fn invite_area_skips_party_members_and_hostiles() {
+async fn team_area_invite_sends_the_area_packet_to_eligible_players_only() {
+    use crate::data::world_data::SystemFaction;
+    use crate::data::GameData;
+    use crate::systems::social::faction::{self, relation_state, FactionRelations};
+    use crate::test_support::test_server_with;
+
+    // Faction 101 (mother 148) vs 102 (mother 149) are hostile; the default test faction 101
+    // is friendly to itself.
+    let mut data = GameData::empty();
+    for (id, mother) in [(101, 148), (102, 149), (148, 0), (149, 0)] {
+        data.factions.add(SystemFaction {
+            id,
+            mother_id: mother,
+            ..Default::default()
+        });
+    }
+    data.systems.social.relations =
+        FactionRelations::from_rows(&[(148, 149, 1)]).expect("relations");
+    let server = test_server_with(data);
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    let mut c = pc(&server, 3, "Cy", 150.0, 100.0);
+    let mut d = pc(&server, 4, "Di", 90.0, 90.0);
+    let mut far = pc(&server, 5, "Far", 300.0, 100.0);
+    let mut hostile = pc(&server, 6, "Hos", 120.0, 100.0);
+    let mut blocked = pc(&server, 7, "Blk", 130.0, 100.0);
+    hostile.p.data().unit.faction_id = 102;
+    assert_eq!(
+        faction::player_relation(&server, &a.p, &hostile.p),
+        relation_state::HOSTILE
+    );
+    blocked.p.data().blocked.push((7, 1));
+    settle(&mut [
+        &mut a,
+        &mut b,
+        &mut c,
+        &mut d,
+        &mut far,
+        &mut hostile,
+        &mut blocked,
+    ]);
+
+    // A and B form a party; B is already in a team and cannot be area-invited.
+    let team_id = form_party(&server, &mut a, &mut b).await;
+    settle(&mut [
+        &mut a,
+        &mut b,
+        &mut c,
+        &mut d,
+        &mut far,
+        &mut hostile,
+        &mut blocked,
+    ]);
+
+    let mut s = PacketStream::new();
+    s.write_u32(team_id).write_bool(true);
+    a.send(&server, cs::CSInviteAreaToTeamPacket, s).await;
+
+    let area = body(&SCAskToJoinTeamAreaPacket {
+        team_id,
+        sender_id: 1,
+        sender_name: "Al".into(),
+        is_party: true,
+    });
+    for x in [&mut c, &mut d] {
+        assert_eq!(
+            x.frames(),
+            vec![(sc::SCAskToJoinTeamAreaPacket, area.clone())]
+        );
+    }
+    // In the party, 200 m away, hostile and blocked: no invitation.
+    for x in [&mut b, &mut far, &mut hostile, &mut blocked] {
+        assert!(x.ops().is_empty(), "{:?}", x.ops());
+    }
+    // The inviter gets the count of invitations actually sent.
+    assert_eq!(
+        a.frames(),
+        vec![(
+            sc::SCTeamAreaInvitedPacket,
+            body(&SCTeamAreaInvitedPacket { r: 2, s: true })
+        )]
+    );
+
+    // Accepting an area invitation runs the normal join path.
+    c.send(
+        &server,
+        cs::CSReplyToJoinTeamPacket,
+        reply_area(team_id, 1, false),
+    )
+    .await;
+    assert!(c.p.data().in_party);
+    let team = server
+        .systems
+        .social
+        .teams
+        .active_team(team_id)
+        .expect("team");
+    assert_eq!(team.members_count(), 3);
+    assert!(team.is_member(3));
+    assert!(c.ops().contains(&sc::SCJoinedTeamPacket));
+    a.ops();
+    b.ops();
+
+    // D declines; the owner sees the rejection with the target's name.
+    d.send(
+        &server,
+        cs::CSReplyToJoinTeamPacket,
+        reply_area(team_id, 1, true),
+    )
+    .await;
+    assert_eq!(
+        a.frames(),
+        vec![(
+            sc::SCRejectedTeamPacket,
+            body(&SCRejectedTeamPacket {
+                name: "Di".into(),
+                party: true
+            })
+        )]
+    );
+}
+
+#[tokio::test]
+async fn team_area_invite_in_a_raid_sends_the_raid_flag() {
     let server = test_server();
     let mut a = pc(&server, 1, "Al", 100.0, 100.0);
-    let mut b = pc(&server, 2, "Bob", 150.0, 100.0);
-    let mut far = pc(&server, 3, "Far", 300.0, 100.0);
-    settle(&mut [&mut a, &mut b, &mut far]);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    let mut c = pc(&server, 3, "Cy", 150.0, 100.0);
+    settle(&mut [&mut a, &mut b, &mut c]);
+    let team_id = form_party(&server, &mut a, &mut b).await;
     let mut s = PacketStream::new();
-    s.write_u32(0).write_bool(true);
+    s.write_u32(team_id);
+    a.send(&server, cs::CSConvertToRaidTeamPacket, s).await;
+    settle(&mut [&mut a, &mut b, &mut c]);
+
+    // The request says party, but the team is a raid: the invitation carries the team's flag.
+    let mut s = PacketStream::new();
+    s.write_u32(team_id).write_bool(true);
     a.send(&server, cs::CSInviteAreaToTeamPacket, s).await;
+    assert_eq!(
+        c.frames(),
+        vec![(
+            sc::SCAskToJoinTeamAreaPacket,
+            body(&SCAskToJoinTeamAreaPacket {
+                team_id,
+                sender_id: 1,
+                sender_name: "Al".into(),
+                is_party: false,
+            })
+        )]
+    );
+    assert_eq!(
+        a.frames(),
+        vec![(
+            sc::SCTeamAreaInvitedPacket,
+            body(&SCTeamAreaInvitedPacket { r: 1, s: true })
+        )]
+    );
+}
+
+#[tokio::test]
+async fn team_todo_paths_send_their_error_codes() {
+    use crate::systems::social::util::error;
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    let mut c = pc(&server, 3, "Cy", 100.0, 100.0);
+    let mut d = pc(&server, 4, "Di", 120.0, 100.0);
+    settle(&mut [&mut a, &mut b, &mut c, &mut d]);
+    let team_id = form_party(&server, &mut a, &mut b).await;
+    settle(&mut [&mut a, &mut b, &mut c, &mut d]);
+
+    // Not the owner and not a marked raid member: TEAM_NO_RIGHTS (72), direct and area.
+    c.send(&server, cs::CSInviteToTeamPacket, invite(team_id, "Di"))
+        .await;
+    expect_chat_error(&mut c, error::TEAM_NO_RIGHTS);
+    assert!(d.ops().is_empty());
+    let mut s = PacketStream::new();
+    s.write_u32(team_id).write_bool(true);
+    c.send(&server, cs::CSInviteAreaToTeamPacket, s).await;
+    expect_chat_error(&mut c, error::TEAM_NO_RIGHTS);
+    assert!(d.ops().is_empty());
+
+    // A reply with no active invitation: TEAM_INVITE_REFUSED (80).
+    d.send(
+        &server,
+        cs::CSReplyToJoinTeamPacket,
+        reply_area(team_id, 1, false),
+    )
+    .await;
+    expect_chat_error(&mut d, error::TEAM_INVITE_REFUSED);
+
+    // The inviter's team is gone when the target answers: TEAM_INVITOR_OFFLINE (78).
+    a.send(&server, cs::CSInviteToTeamPacket, invite(team_id, "Di"))
+        .await;
+    d.ops();
+    a.send(
+        &server,
+        cs::CSAskRiskyTeamActionPacket,
+        risky(team_id, 0, risky_action::DISMISS),
+    )
+    .await;
+    settle(&mut [&mut a, &mut b, &mut c, &mut d]);
+    d.send(
+        &server,
+        cs::CSReplyToJoinTeamPacket,
+        reply_area(team_id, 1, false),
+    )
+    .await;
+    expect_chat_error(&mut d, error::TEAM_INVITOR_OFFLINE);
+
+    // The target joins another team before answering: TEAM_INVITEE_IN_TEAM (77).
+    c.send(&server, cs::CSInviteToTeamPacket, invite(0, "Di"))
+        .await;
+    d.ops();
+    server
+        .systems
+        .social
+        .teams
+        .create_solo_team(&server, &d.p, true);
+    d.ops();
+    d.send(&server, cs::CSReplyToJoinTeamPacket, reply(0, 3, false))
+        .await;
+    expect_chat_error(&mut d, error::TEAM_INVITEE_IN_TEAM);
+
+    // A solo team cannot be created on top of an existing one.
+    server
+        .systems
+        .social
+        .teams
+        .create_solo_team(&server, &d.p, true);
+    expect_chat_error(&mut d, error::TEAM_INVITEE_IN_TEAM);
+}
+
+#[tokio::test]
+async fn expired_team_invitations_are_swept() {
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    settle(&mut [&mut a, &mut b]);
+    let teams = &server.systems.social.teams;
+
+    a.send(&server, cs::CSInviteToTeamPacket, invite(0, "Bob"))
+        .await;
     assert_eq!(b.ops(), vec![sc::SCAskToJoinTeamPacket]);
-    // 200 m away: outside the 100 m radius.
-    assert!(far.ops().is_empty());
-    let _ = a.ops();
+
+    // After 60 s the 500 ms tick drops the pending invitation, so a new one is accepted.
+    let expired_at = crate::systems::social::util::now_ms() + INVITATION_TIMEOUT_MS + 1;
+    teams.update_all_teams(&server, expired_at);
+    a.send(&server, cs::CSInviteToTeamPacket, invite(0, "Bob"))
+        .await;
+    assert_eq!(b.ops(), vec![sc::SCAskToJoinTeamPacket]);
+
+    // A reply once the invitation has been swept is answered with the "no invitation" error.
+    teams.update_all_teams(&server, expired_at);
+    b.send(&server, cs::CSReplyToJoinTeamPacket, reply(0, 1, false))
+        .await;
+    expect_chat_error(
+        &mut b,
+        crate::systems::social::util::error::TEAM_INVITE_REFUSED,
+    );
 }
 
 /// Guild invitations must be pending and unexpired, a member cannot join a second guild, and

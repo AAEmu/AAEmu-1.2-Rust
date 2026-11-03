@@ -685,6 +685,23 @@ mod tests {
             }),
             vec![1, 0, 0, 0x80, 0x3F, 0, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0]
         );
+        // `SCAskToJoinTeamAreaPacket`: the same writer as `SCAskToJoinTeamPacket` (team id,
+        // sender id, sender name, isParty), checked against the client handler's parsed
+        // `(teamId, senderId, senderName, isParty)` fields.
+        assert_eq!(
+            body(&SCAskToJoinTeamAreaPacket {
+                team_id: 5,
+                sender_id: 7,
+                sender_name: "Al".into(),
+                is_party: true
+            }),
+            vec![5, 0, 0, 0, 7, 0, 0, 0, 2, 0, b'A', b'l', 1]
+        );
+        // `SCTeamAreaInvitedPacket(r, s)`: the client reads a u32 and a bool.
+        assert_eq!(
+            body(&SCTeamAreaInvitedPacket { r: 3, s: true }),
+            vec![3, 0, 0, 0, 1]
+        );
         assert_eq!(
             body(&SCTeamLootingRuleChangedPacket {
                 team_id: 1,

@@ -471,7 +471,7 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 
 | Area (C#) | Rust | Status | Notes |
 |---|---|---|---|
-| `TeamManager`, `Models/Game/Team` | `systems/social/team.rs`, `packets/team.rs` | done | Invitations (single / area, 60 s timeout), create, AskRiskyTeam (leave / kick / dismiss + auto-disband), owner / role / marker / looting rule / ping / move, raid conversion, SetOffline / MemberRemoveFromTeam / UpdateAtLogin / UpdatePosition, 500 ms remote-member sync (delta cache, 5 s forced resync, upper-triangle pairs), zombie-team disband (5 min), loot winner helpers. Events (OnTeamJoin/Leave) are quest-side: not called. |
+| `TeamManager`, `Models/Game/Team` | `systems/social/team.rs`, `packets/team.rs` | done | Invitations (single / area with `SCAskToJoinTeamArea` / `SCTeamAreaInvited`, 60 s timeout, 500 ms sweep, 10k cap), invitation error replies, create, AskRiskyTeam (leave / kick / dismiss + auto-disband), owner / role / marker / looting rule / ping / move, raid conversion, SetOffline / MemberRemoveFromTeam / UpdateAtLogin / UpdatePosition, 500 ms remote-member sync (delta cache, 5 s forced resync, upper-triangle pairs), zombie-team disband (5 min), loot winner helpers. Events (OnTeamJoin/Leave) are quest-side: not called. See "Area team invitations and invitation error replies". |
 | `ExpeditionManager`, `Models/Game/Expeditions` | `systems/social/expedition.rs`, `packets/expedition.rs` (`managers::expedition` re-exports) | done | Load, create (party checks, cost, `SCItemTaskSuccessPacket` money-only form), invite / reply, leave, kick, member role, owner, role policy, disband (stays listed as `$deleted-guild-<id>`), `Expedition.Save` per change, offline leave for character deletion. Rename / sponsor are log-only / not in 1.2 as in C#. |
 | `FamilyManager`, `Models/Game/Family` | `systems/social/family.rs`, `packets/family.rs` | done | Load, invite / reply / create, leave, kick (offline existence check), title, steward, login / logout, disband, save, offline leave for character deletion. |
 | `FriendMananger`, `CharacterFriends`, `CharacterBlocked` | `systems/social/friend.rs`, `packets/friend.rs` (`managers::friend` re-exports) | done | Add / remove friends (online or by DB name lookup), block / unblock (online or by `NameManager` for offline names), status changes incl. `InParty`. The blocked list is enforced on every direct delivery path (whisper, team / area / expedition / family invite, friend add, trade and duel request); see the block-list deviation. |
@@ -3577,6 +3577,45 @@ Deviations from the 1.2 C# `ExpeditionManager` / `TeamManager`, which trusted ev
   `CanChangePolicy` requires that flag plus a lower target role. Only the owner may edit, and the
   owner's own policy is not editable. **Capture-pending:** the rule comes from the client UI, not
   from a 1.2 server capture; the C# `Expel` check is not mirrored.
+
+## Area team invitations and invitation error replies (2026-11-03)
+
+The 1.2 client has a separate area-invitation flow: `X2Team.InviteArea` sends
+`CSInviteAreaToTeamPacket` (`FUN_393053a0`, 0x7b), the server answers each nearby player with
+`SCAskToJoinTeamAreaPacket` and the inviter with `SCTeamAreaInvitedPacket(r, s)`, and the
+client's `OnAskToJoinTeamArea` handler carries `isArea=1` through the popup so the accept /
+decline answer is `CSReplyToJoinTeamPacket` with `isArea=1` (`FUN_391d8060`, `FUN_391d8800`,
+`FUN_39308ec0`; `FUN_393075a0` writes 0x7c with the stored `isArea` flag). The client message says "now inviting characters
+into raidteam in range of 100 meters". The C# `TeamManager` never sent either SC packet and
+dropped an `isArea` answer in `ReplyToJoinTeam` (`// TODO`).
+
+Deviations from the C# (the server side has no capture; the rules come from the client
+decompile):
+
+- `InviteAreaToTeam` now sends `SCAskToJoinTeamArea` to every eligible player and
+  `SCTeamAreaInvited(invited, true)` to the inviter. The C# called `AskToJoin(..., false, ...)`,
+  so the area packet was never used. The `isParty` flag in both the invitation and the SC packet
+  is the team's actual `IsParty` (the request's flag when the inviter is not in a team); the C#
+  stored the team's flag in the invitation but sent the hardcoded `false`.
+- Eligibility: within 100 m (2D, strictly less, as `Region.GetList`/`GetAround`), not in a team,
+  friendly or neutral relation, not blocked, not hostile. The C# checked the first two only;
+  the block list was already enforced by the Rust `AskToJoin`.
+- An `isArea` reply now goes through the normal join path. The C# removed the invitation and
+  returned (nobody joined).
+- The error TODOs now send the client's `team_*` error: `TEAM_NO_RIGHTS` (72) when the inviter
+  may not invite (direct and area, once for an area request), `TEAM_INVITE_REFUSED` (80) for a
+  reply with no pending invitation, `TEAM_INVITOR_OFFLINE` (78) when the inviter's team is gone,
+  `TEAM_INVITEE_IN_TEAM` (77) when the target already joined a team (also `create_solo_team`),
+  and `TEAM_LOADING` (71) on the defensive owner-already-in-team branch of `CreateNewTeam`.
+  **Capture-pending:** the C# TODOs named no codes; the ids are the 1.2 `ErrorMessageType`
+  `team_*` values.
+- Pending invitations are swept every 500 ms after their 60 s timeout and capped at 10,000. The
+  C# removed an invitation only when the target answered, so an expired one blocked every later
+  invitation to that target.
+- The client's "refuse area invitation" option is client-local: `X2Team.SetRefuseAreaInvitation`
+  writes the `DAT_39d44ed8` flag and no packet ever carries it; `OnAskToJoinTeamArea` drops the
+  popup while the flag is set. The server cannot know it and always sends the invitation; a
+  refusing client shows nothing. The live check therefore models refusal by not answering.
 
 ## Client skill cast authority (2026-10-20)
 
