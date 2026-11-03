@@ -180,12 +180,14 @@ pub fn transfer_tick(server: &GameServer) {
 // ---------------------------------------------------------------------------------------------
 
 /// The 1.2 client's transfer boarding range in metres. The board interaction dispatch
-/// `FUN_393bf310` checks `FUN_39093860(player, target, DAT_39ac79fc, 0)` and
-/// `DAT_39ac79fc` = 9.0 (x2game.dll.c:780749; `.data` value at 0x39ac79fc); when the target
-/// carries the use-range modifier it uses `DAT_39ac7a00` = 12.25 instead. A client that did
-/// not pass that check never sends the packet, so the server repeats the plain 9.0 m check for
-/// a forged or stale request.
-pub const BOARDING_RANGE: f32 = 9.0;
+/// `FUN_393bf310` checks `FUN_39093860(player, target, DAT_39ac79fc, 0)`; `FUN_39093860`
+/// (`x2game.dll.c:129683`) compares the measured distance with `SQRT(param_3)`, so
+/// `DAT_39ac79fc` = 9.0 is the squared 3 m and the use-range variant `DAT_39ac7a00` = 12.25 is
+/// 3.5 m. `FUN_3989bf90` measures to the target's bounds, which is the server's edge-to-edge
+/// `skills::geometry::distance_to` (subtracts the unit model radii). A client that did not
+/// pass that check never sends the packet, so the server repeats the 3 m edge check for a
+/// forged or stale request.
+pub const BOARDING_RANGE: f32 = 3.0;
 
 /// The transfers of `world` whose tl id is `tl` (the motor and its boarding part share it).
 fn transfers_with_tl(world: &WorldInstance, tl: u16) -> Vec<TransferRef> {
@@ -225,7 +227,7 @@ pub fn board(server: &GameServer, player: &PlayerRef, tl: u16, ap: u8) {
         let c = player.data();
         (
             c.unit.is_dead(),
-            c.attached_point != attach_point::NONE || c.is_riding,
+            c.attached_point != attach_point::NONE || c.is_riding || c.bonding.is_some(),
         )
     };
     if dead {
@@ -270,9 +272,12 @@ pub fn board(server: &GameServer, player: &PlayerRef, tl: u16, ap: u8) {
         );
         return;
     };
-    let player_pos = world.world_pos_rot(&me);
-    let transfer_pos = world.world_pos_rot(&WorldObject::from(&transfer));
-    let distance = player_pos.distance_to(&transfer_pos, false);
+    let distance = crate::systems::skills::geometry::distance_to(
+        server,
+        &crate::systems::skills::geometry::Target::Obj(me.clone()),
+        &crate::systems::skills::geometry::Target::Obj(WorldObject::from(&transfer)),
+        false,
+    );
     // Snapshot, then check the seat and reserve it under the transfer's one lock: two boards
     // racing for the same point cannot both pass.
     let refusal = {
@@ -311,10 +316,40 @@ pub fn board(server: &GameServer, player: &PlayerRef, tl: u16, ap: u8) {
         },
         true,
     );
-    player.data().attached_point = ap;
-    // `Transform.Parent = transfer.Transform` (the doodad BoardTransfer path keeps the world
-    // position; the sticky parent marks the seat for `IsBoardedOnTransfer`).
-    world.set_sticky_parent(&me, Some(&WorldObject::from(&transfer)));
+    // The broadcast can race an unboard / despawn of the seat: only adopt the attachment
+    // state while the seat is still reserved. A detach that ran after the reservation also
+    // resets `attached_point` (guarded in `detach_passenger`), so this re-check decides.
+    let still_reserved = {
+        let d = transfer.data();
+        d.attached_characters
+            .iter()
+            .any(|(point, id)| *point == ap && *id == player.obj_id)
+    };
+    if still_reserved {
+        player.data().attached_point = ap;
+        // `Transform.Parent = transfer.Transform` (the doodad BoardTransfer path keeps the
+        // world position; the sticky parent marks the seat for `IsBoardedOnTransfer`).
+        world.set_sticky_parent(&me, Some(&WorldObject::from(&transfer)));
+    }
+}
+
+/// Whether `player` currently holds a seat in any transfer of its world. Used to refuse a
+/// mate mount / slave bind that would replace the transfer attachment.
+pub fn is_boarded(server: &GameServer, player: &PlayerRef) -> bool {
+    let me = WorldObject::from(player);
+    let Some(world) = super::world_of(server, &me) else {
+        return false;
+    };
+    world
+        .all_of_kind(crate::world::ObjectKind::Transfer)
+        .iter()
+        .filter_map(|o| o.as_transfer())
+        .any(|t| {
+            t.data()
+                .attached_characters
+                .iter()
+                .any(|(_, id)| *id == player.obj_id)
+        })
 }
 
 /// Leaves the transfer named by `tl` (or any transfer the player is seated on when `tl` is
@@ -332,11 +367,12 @@ pub fn unboard(server: &GameServer, player: &PlayerRef, tl: u16, reason: u8) {
     }
 }
 
-/// Removes the player from every transfer passenger list (death / logout / despawn cleanup).
-pub fn unboard_all(server: &GameServer, player: &PlayerRef, reason: u8) {
+/// Removes the player from every transfer passenger list (death / logout / teleport /
+/// despawn cleanup). Returns `true` when a seat was released.
+pub fn unboard_all(server: &GameServer, player: &PlayerRef, reason: u8) -> bool {
     let me = WorldObject::from(player);
     let Some(world) = super::world_of(server, &me) else {
-        return;
+        return false;
     };
     let transfers: Vec<TransferRef> = world
         .all_of_kind(crate::world::ObjectKind::Transfer)
@@ -349,9 +385,11 @@ pub fn unboard_all(server: &GameServer, player: &PlayerRef, reason: u8) {
                 .any(|(_, id)| *id == player.obj_id)
         })
         .collect();
+    let mut detached = false;
     for transfer in transfers {
-        detach_passenger(server, &world, &transfer, player, reason);
+        detached |= detach_passenger(server, &world, &transfer, player, reason);
     }
+    detached
 }
 
 /// Detaches everybody aboard `transfer` (called before the transfer is deleted). Returns true
@@ -370,12 +408,26 @@ fn detach_passenger(
             .position(|(_, id)| *id == player.obj_id)
             .map(|i| d.attached_characters.remove(i))
     };
-    if removed.is_none() {
+    let Some((point, _)) = removed else {
         return false;
-    }
+    };
     let me = WorldObject::from(player);
-    world.set_sticky_parent(&me, None);
-    player.data().attached_point = attach_point::NONE;
+    // Only release the state that belongs to this seat: a mount / slave that replaced it
+    // keeps its own attachment (`attached_point` and parent) intact.
+    let sticky_is_transfer = world
+        .sticky_parent(&me)
+        .is_some_and(|p| p.obj_id() == transfer.obj_id);
+    if sticky_is_transfer && me.transform().parent_obj_id == transfer.obj_id {
+        world.set_sticky_parent(&me, None);
+    } else if me.transform().parent_obj_id == transfer.obj_id {
+        world.detach_child(&me);
+    }
+    {
+        let mut c = player.data();
+        if c.attached_point == point {
+            c.attached_point = attach_point::NONE;
+        }
+    }
     broadcast(
         server,
         &me,

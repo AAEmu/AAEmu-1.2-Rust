@@ -8718,13 +8718,21 @@ async fn boarding_a_transfer_refuses_an_undeclared_seat_and_an_out_of_range_requ
     }
     assert_eq!(pa.data().attached_point, 0);
 
-    // Past the client's 9 m board range (`FUN_393bf310` -> `FUN_39093860(..., 9.0, 0)`).
-    pa.data().unit.transform.set_xyz(120.0, 101.0, 100.0);
+    // Past the client's 3 m edge range (`FUN_393bf310` -> `FUN_39093860(..., 9.0, 0)`,
+    // where 9.0 is the squared range the function compares with `SQRT(param)`).
+    pa.data().unit.transform.set_xyz(104.5, 101.0, 100.0);
     board_transfer(&server, &mut a.conn, TRANSFER_TL, 2).await;
     let f = a.drain();
     assert_eq!(error_codes(&f), vec![error_message::TOO_FAR_AWAY]);
     assert!(!ops(&f).contains(&sc::SCUnitAttachedPacket));
     assert_eq!(pa.data().attached_point, 0);
+
+    // Inside 3 m (2.5 m) the same seat is accepted.
+    pa.data().unit.transform.set_xyz(102.5, 101.0, 100.0);
+    board_transfer(&server, &mut a.conn, TRANSFER_TL, 2).await;
+    let f = a.drain();
+    assert!(ops(&f).contains(&sc::SCUnitAttachedPacket));
+    assert_eq!(pa.data().attached_point, 2);
 }
 
 #[tokio::test]
@@ -8943,6 +8951,48 @@ async fn slave_repair_is_refused_without_gold_and_leaves_the_item_destroyed() {
 }
 
 #[tokio::test]
+async fn slave_repair_is_bag_only_and_ignores_the_bank() {
+    let mut t = repair_slave(50);
+    // A second destroyed summon item in the bank: the client's preview keeps only slots whose
+    // container is the bag, so it must stay destroyed and not be charged.
+    let bank = t
+        .player
+        .data()
+        .inventory
+        .get(slot_type::BANK)
+        .cloned()
+        .expect("bank");
+    let template = t
+        .server
+        .game_data
+        .items
+        .template(SLAVE_ITEM)
+        .unwrap()
+        .clone();
+    let mut bank_item = Item::create(0x9100, &template, 1, 0, 1, &t.server.game_data.items, 0);
+    bank_item.owner_id = u64::from(t.player.data().id);
+    bank_item.slot_type = slot_type::BANK;
+    bank_item.slot = 0;
+    bank_item.details.slave_is_destroyed = 1;
+    bank.lock().unwrap().items.push(bank_item);
+    t.player.data().unit.current_interaction_object = t.npc.obj_id;
+
+    let frames = t.repair_at(REPAIRMAN_OBJ).await;
+    assert_eq!(t.player.data().money, 12_000 - 50);
+    assert_eq!(t.item().details.slave_is_destroyed, 0);
+    let bank = bank.lock().unwrap();
+    assert_eq!(
+        bank.get_item_by_id(0x9100)
+            .unwrap()
+            .details
+            .slave_is_destroyed,
+        1
+    );
+    let tasks: Vec<u8> = task_actions(&frames);
+    assert!(tasks.contains(&REPAIR_SLAVES_TASK));
+}
+
+#[tokio::test]
 async fn a_spawned_slave_cannot_be_repaired_and_nothing_is_charged() {
     let mut t = repair_slave(50);
     t.player.data().unit.current_interaction_object = t.npc.obj_id;
@@ -8993,4 +9043,161 @@ async fn a_repairman_service_requires_the_interaction_the_role_and_the_range() {
     assert_eq!(error_codes(&frames), vec![error_message::TOO_FAR_AWAY]);
     assert_eq!(t.player.data().money, 12_000);
     assert_eq!(t.item().details.slave_is_destroyed, 1);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Transfer seat ownership against the other attachment paths (review follow-up)
+// ---------------------------------------------------------------------------------------------
+
+async fn boarded_transfer() -> (
+    Arc<GameServer>,
+    TestClient,
+    PlayerRef,
+    crate::world::TransferRef,
+) {
+    let server = transfer_server();
+    let mut a = TestClient::new(&server, 1, 1);
+    let pa = spawn_live_player(&server, &a, 1, PA, (100.0, 100.0));
+    a.conn.active_char = Some(pa.clone());
+    let part = spawn_test_transfer(&server, 0x500, 653);
+    a.drain();
+    board_transfer(&server, &mut a.conn, TRANSFER_TL, 2).await;
+    a.drain();
+    assert_eq!(part.data().attached_characters, vec![(2, PA)]);
+    (server, a, pa, part)
+}
+
+fn assert_unboarded(pa: &PlayerRef, part: &crate::world::TransferRef, frames: &[(u16, Vec<u8>)]) {
+    assert!(part.data().attached_characters.is_empty());
+    let c = pa.data();
+    assert_eq!(c.attached_point, 0);
+    assert_eq!(c.unit.transform.parent_obj_id, 0);
+    assert!(
+        frames.iter().any(|f| f.0 == sc::SCUnitDetachedPacket),
+        "{:x?}",
+        ops(frames)
+    );
+}
+
+#[tokio::test]
+async fn a_server_teleport_frees_the_transfer_seat() {
+    let (server, mut a, pa, part) = boarded_transfer().await;
+    let mut destination = pa.data().unit.transform;
+    destination.set_xyz(110.0, 100.0, 100.0);
+    assert!(crate::world::session::teleport_character(
+        &server,
+        &pa,
+        destination
+    ));
+    let f = a.drain();
+    assert_unboarded(&pa, &part, &f);
+}
+
+#[tokio::test]
+async fn logout_and_disconnect_free_the_transfer_seat() {
+    let (server, mut a, pa, part) = boarded_transfer().await;
+    super::on_leave_world(&server, &pa);
+    let f = a.drain();
+    assert_unboarded(&pa, &part, &f);
+
+    let (server, mut a, pa, part) = boarded_transfer().await;
+    super::on_disconnect(&server, &pa);
+    let f = a.drain();
+    assert_unboarded(&pa, &part, &f);
+}
+
+#[tokio::test]
+async fn death_frees_the_transfer_seat() {
+    let (server, mut a, pa, part) = boarded_transfer().await;
+    super::on_death_event(&server, &WorldObject::from(&pa));
+    let f = a.drain();
+    assert_unboarded(&pa, &part, &f);
+}
+
+#[tokio::test]
+async fn a_transfer_despawn_frees_the_passenger() {
+    let (server, mut a, pa, part) = boarded_transfer().await;
+    transfers::unboard_passengers(&server, &part);
+    let f = a.drain();
+    assert_unboarded(&pa, &part, &f);
+    assert!(!transfers::is_boarded(&server, &pa));
+}
+
+#[tokio::test]
+async fn a_boarded_passenger_cannot_mount_a_mate_or_bind_a_slave() {
+    let (server, mut a, pa, part) = boarded_transfer().await;
+    let mate_item = give_item(&server, &pa, 0x9001, MATE_ITEM);
+    mates::spawn_mount(&server, &pa, mate_item);
+    let mate = mates::first_active_mate(&server, &pa).expect("active mate");
+    a.drain();
+    let tl = u32::from(mate.data().unit.tl_id);
+    mates::mount_mate(&server, &pa, tl, attach_point::DRIVER, 1);
+    let f = a.drain();
+    assert_eq!(error_codes(&f), vec![error_message::SLAVE_UNBIND_FIRST]);
+    assert!(!pa.data().is_riding);
+    assert!(mate
+        .data()
+        .passenger(attach_point::DRIVER)
+        .is_none_or(|p| p.obj_id == 0));
+    assert_eq!(part.data().attached_characters, vec![(2, PA)]);
+
+    let world = server.world.world(0).unwrap();
+    let mut model = crate::models::slave::Slave::new(0, SLAVE_TEMPLATE);
+    model.unit.model_id = 300;
+    model.unit.hp = 100;
+    model.unit.max_hp = 100;
+    let slave = crate::world::Entity::new(0x610, model);
+    world.spawn(&slave, &server.view_ctx());
+    a.drain();
+    slaves::bind_slave(
+        &server,
+        &pa,
+        slave.obj_id,
+        attach_point::PASSENGER0,
+        7,
+        Some(100.0),
+    );
+    let f = a.drain();
+    assert_eq!(error_codes(&f), vec![error_message::SLAVE_UNBIND_FIRST]);
+    assert!(slave.data().attached_characters.is_empty());
+    assert_eq!(pa.data().attached_point, 2);
+    assert_eq!(part.data().attached_characters, vec![(2, PA)]);
+}
+
+#[tokio::test]
+async fn a_bonded_bench_seat_refuses_transfer_boarding() {
+    let server = transfer_server();
+    let mut a = TestClient::new(&server, 1, 1);
+    let pa = spawn_live_player(&server, &a, 1, PA, (100.0, 100.0));
+    a.conn.active_char = Some(pa.clone());
+    let part = spawn_test_transfer(&server, 0x500, 653);
+    a.drain();
+    pa.data().bonding = Some(crate::models::doodad::BondDoodad {
+        owner_obj_id: 0x700,
+        ..Default::default()
+    });
+    board_transfer(&server, &mut a.conn, TRANSFER_TL, 2).await;
+    let f = a.drain();
+    assert_eq!(error_codes(&f), vec![error_message::SLAVE_UNBIND_FIRST]);
+    assert!(!ops(&f).contains(&sc::SCUnitAttachedPacket));
+    assert!(part.data().attached_characters.is_empty());
+    assert_eq!(pa.data().attached_point, 0);
+}
+
+#[tokio::test]
+async fn unboarding_keeps_a_different_attachment_point() {
+    let (server, mut a, pa, part) = boarded_transfer().await;
+    // Another path moved the character to point 5 after the transfer reservation: the
+    // unboard must not reset that state.
+    pa.data().attached_point = 5;
+    transfers::unboard(
+        &server,
+        &pa,
+        TRANSFER_TL,
+        slaves::attach_reason::BOARD_TRANSFER,
+    );
+    let f = a.drain();
+    assert!(part.data().attached_characters.is_empty());
+    assert_eq!(pa.data().attached_point, 5);
+    assert!(f.iter().any(|x| x.0 == sc::SCUnitDetachedPacket));
 }

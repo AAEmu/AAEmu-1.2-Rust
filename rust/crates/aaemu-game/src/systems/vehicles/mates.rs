@@ -317,6 +317,17 @@ pub(super) fn reset_rider_transform(transform: &mut Transform) {
 
 /// `MountMate(connection, tlId, attachPoint, reason)`.
 pub fn mount_mate(server: &GameServer, character: &PlayerRef, tl_id: u32, point: u8, reason: u8) {
+    // A transfer passenger must leave the carriage first; the mount would otherwise replace
+    // the sticky parent / attached point and the seat would keep blocking it.
+    if super::transfers::is_boarded(server, character) {
+        tracing::debug!(
+            "MountMate: character {} is on a transfer; refusing mount {}",
+            character.obj_id,
+            tl_id
+        );
+        super::bind_error(character, error_message::SLAVE_UNBIND_FIRST);
+        return;
+    }
     let Some(mate) = manager_of(server, character).get_active_mate_by_tl_id(tl_id) else {
         return;
     };

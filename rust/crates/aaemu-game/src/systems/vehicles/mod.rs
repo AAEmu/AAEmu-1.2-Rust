@@ -343,6 +343,9 @@ pub fn set_unit_position(
 /// `Transform.DetachAll()`. `true` when a mate / slave dismount happened.
 pub fn force_dismount(server: &GameServer, player: &PlayerRef, reason: u8) -> bool {
     let mut res = false;
+    // A transfer seat has no mate / slave record, so release it here too: every server
+    // teleport goes through this function (`teleport_character`, zone entry, GM teleport).
+    res |= transfers::unboard_all(server, player, reason);
     let instance = player.data().unit.transform.instance_id;
     if let Some((mate, point)) = server
         .systems
