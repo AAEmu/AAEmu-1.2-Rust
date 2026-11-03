@@ -33,6 +33,7 @@ use crate::systems::social::crime::{
     self, add_own_buff, buff, crime_state, fmt_vec3, set_crime_point, set_infamy_point,
     set_jury_point, sus_log, world_pos_rot, CrimeEvent,
 };
+use crate::systems::social::faction;
 use crate::systems::social::packets::trial::*;
 use crate::systems::social::util::{self, error, send_error};
 use crate::world::{broadcast, DoodadRef, PlayerRef, WorldObject};
@@ -936,7 +937,7 @@ fn result_is_guilty(
     t.send_state(now_ms);
     room.leave_chat(defendant);
     archive_trial_evidence(server, t, now_ms);
-    let pkt = {
+    let (pkt, became_pirate) = {
         let mut c = defendant.data();
         let crime_count = c.crime_point;
         c.unit.buffs.remove_buff(buff::FORCIBLY_AWAITING_TRIAL);
@@ -944,20 +945,26 @@ fn result_is_guilty(
         c.offline_guilty_time = 0;
         c.offline_guilty_region = i32::from(court_room_region::INVALID);
         let v = c.crime_point.wrapping_sub(crime_count);
-        set_crime_point(server, &mut c, v, now_ms);
+        let became_pirate = set_crime_point(server, &mut c, v, now_ms);
         if plead_guilty {
             c.accept_guilty_count += 1;
         } else {
             c.guilty_count += 1;
         }
-        SCCrimeChangedPacket {
-            points: i32::from(crime_count),
-            crime_points: c.crime_point,
-            infamy_points: c.infamy_point,
-            crime_state: crime_state(&c),
-        }
+        (
+            SCCrimeChangedPacket {
+                points: i32::from(crime_count),
+                crime_points: c.crime_point,
+                infamy_points: c.infamy_point,
+                crime_state: crime_state(&c),
+            },
+            became_pirate,
+        )
     };
     defendant.send(pkt);
+    if became_pirate {
+        faction::set_faction_persistent(server, defendant, factions::PIRATE);
+    }
     // Prisoner buff (minimum 10 s: 0 would use the default 30 minutes).
     let jail_time_ms = t.jail_time.saturating_mul(60_000).max(10_000);
     {
@@ -1003,7 +1010,7 @@ fn result_is_not_guilty(
     t.current_step_end_ms = now_ms + END_TRIAL_SECONDS * SECOND_MS;
     t.send_state(now_ms);
     archive_trial_evidence(server, t, now_ms);
-    let (pkt, infamy, faction, race, gender) = {
+    let (pkt, infamy, faction, race, gender, became_pirate) = {
         let mut c = defendant.data();
         let crime_count = c.crime_point;
         c.unit.buffs.remove_buff(buff::FORCIBLY_AWAITING_TRIAL);
@@ -1012,9 +1019,9 @@ fn result_is_not_guilty(
         c.offline_guilty_region = i32::from(court_room_region::INVALID);
         c.not_guilty_count += 1;
         let v = c.crime_point.wrapping_sub(crime_count);
-        set_crime_point(server, &mut c, v, now_ms);
+        let mut became_pirate = set_crime_point(server, &mut c, v, now_ms);
         let v = c.infamy_point.wrapping_sub(i32::from(crime_count));
-        set_infamy_point(server, &mut c, v, now_ms);
+        became_pirate |= set_infamy_point(server, &mut c, v, now_ms);
         (
             SCCrimeChangedPacket {
                 points: i32::from(crime_count),
@@ -1026,9 +1033,13 @@ fn result_is_not_guilty(
             c.unit.faction_id,
             c.race,
             c.gender,
+            became_pirate,
         )
     };
     defendant.send(pkt);
+    if became_pirate {
+        faction::set_faction_persistent(server, defendant, factions::PIRATE);
+    }
     fx.push(Effect::RemoveBuffsByTag(
         defendant.clone(),
         BuffKind::Good,

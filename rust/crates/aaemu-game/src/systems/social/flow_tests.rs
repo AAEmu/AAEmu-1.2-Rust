@@ -2399,6 +2399,15 @@ async fn guild_invite_and_rank_guards() {
     assert_eq!(off.p.data().unit.expedition_id, 0);
     assert_eq!(server.expeditions.get(77).unwrap().members.len(), 4);
 
+    // The leader cannot kick itself through the client packet either: the strict-rank guard is
+    // only lifted for the server-side faction change (`remove_member_for_faction_change`).
+    leader
+        .send(&server, cs::CSKickFromExpeditionPacket, kick(1))
+        .await;
+    assert_eq!(server.expeditions.get(77).unwrap().members.len(), 4);
+    assert_eq!(leader.p.data().unit.expedition_id, 77);
+    assert!(!server.expeditions.get(77).unwrap().is_disbanded);
+
     // Role changes: not on the leader or an equal rank; a lower rank is fine.
     let role = |new_role: u8, id: u32| {
         let mut s = PacketStream::new();
