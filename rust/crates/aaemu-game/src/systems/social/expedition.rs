@@ -1185,25 +1185,61 @@ pub async fn disband(server: &GameServer, owner: &PlayerRef) -> bool {
             );
             return false;
         }
-        for m in e.members.iter().rev() {
-            if let Some(c) = server.world.character_by_id(m.character_id) {
-                let online = c.data().is_online;
-                if online {
-                    c.send(SCExpeditionDismissedPacket { id, success: true });
-                }
-                c.data().unit.expedition_id = 0;
-            }
-            remove_member(server, id, m.character_id);
-        }
-        server.expeditions.with_mut(id, |e| {
-            e.faction.name = format!("$deleted-guild-{id}");
-            e.faction.owner_id = 0;
-            e.is_disbanded = true;
-        });
+        dismiss_expedition(server, id);
         id
     };
     save(server, id).await;
     true
+}
+
+/// The `Disband` body after its eligibility checks: every member gets
+/// `SCExpeditionDismissedPacket`, loses the guild, and the guild row is retired
+/// (`$deleted-guild-<id>`, owner 0, `isDisbanded`). Also used for the forced removal of an
+/// owner on a faction change (no voluntary eligibility checks there).
+fn dismiss_expedition(server: &GameServer, id: u32) {
+    let Some(e) = server.expeditions.get(id) else {
+        return;
+    };
+    for m in e.members.iter().rev() {
+        if let Some(c) = server.world.character_by_id(m.character_id) {
+            let online = c.data().is_online;
+            if online {
+                c.send(SCExpeditionDismissedPacket { id, success: true });
+            }
+            c.data().unit.expedition_id = 0;
+        }
+        remove_member(server, id, m.character_id);
+    }
+    server.expeditions.with_mut(id, |e| {
+        e.faction.name = format!("$deleted-guild-{id}");
+        e.faction.owner_id = 0;
+        e.is_disbanded = true;
+    });
+}
+
+/// `Character.SetFaction`'s guild removal, run after the character's data lock is released.
+///
+/// The C# calls `ExpeditionManager.Kick(this.Connection, this.Id)`, which acts only on roles
+/// whose policy has `Expel` (ordinary members stay in the guild) and removes an owner like any
+/// other member, leaving `OwnerId` pointing at a non-member. The 1.2 client refuses an owner's
+/// leave (`expedition_owner_cannot_leave`, error 310) and offers only the dismiss path
+/// (`expedition_owner_dismiss`, 301), so the forced change removes an ordinary member as a
+/// normal leave and dismisses the guild when the member is its owner. Capture-pending PIRATE-1:
+/// no retail capture of a guild owner's faction change.
+pub async fn remove_member_for_faction_change(server: &GameServer, p: &PlayerRef) {
+    let Some(e) = expedition_of(server, p) else {
+        return;
+    };
+    let id = e.id();
+    if e.member(p.character_id).is_none() {
+        return;
+    }
+    if e.faction.owner_id == p.character_id {
+        dismiss_expedition(server, id);
+        save(server, id).await;
+    } else {
+        leave(server, p).await;
+    }
 }
 
 /// `ExpeditionManager.Save(expedition)` (`Expedition.Save` in its own transaction).

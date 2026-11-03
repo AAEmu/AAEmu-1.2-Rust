@@ -836,13 +836,24 @@ pub fn select_loaded(
             }
         }
     }
-    {
+    let became_pirate = {
         let mut live = player.data();
         apply_active_buffs(server, &mut live, &db.saved_buffs, now_ms());
-        live.check_wanted_threshold(server, now_ms());
+        let became_pirate = live.check_wanted_threshold(server, now_ms());
         // UpdateGearBonuses(null, null): gear bonuses are a later phase.
         live.restore_saved_hp_mp();
         live.breath = 60_000; // LungCapacity
+        became_pirate
+    };
+    if became_pirate {
+        // `Character.CheckWantedThreshold` -> `Character.SetFaction(Pirate)`: the DB load only
+        // restored the wanted buffs; the faction change itself needs the live player and runs
+        // here, after the data lock is released (broadcast, houses, guild / party).
+        crate::systems::social::faction::set_faction_persistent(
+            server,
+            &player,
+            crate::data::world_data::factions::PIRATE,
+        );
     }
     crate::systems::skills::on_character_loaded(server, &player); // buffs, gear bonuses, exact MaxHp/MaxMp
     let zone = player.data().unit.transform.zone_id;
