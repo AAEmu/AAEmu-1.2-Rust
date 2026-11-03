@@ -151,6 +151,11 @@ impl AuthFlow {
                     *self = Self::SecondFactor(Box::new(second_factor));
                     return Ok(result);
                 }
+                // No factors: the login is complete. Record it only now, like the factor path.
+                server
+                    .auth
+                    .record_login(r.account_id, &username, client_ip)
+                    .await?;
                 Ok(AuthFlowResult::Success {
                     account_id: r.account_id,
                     username: Some(username),

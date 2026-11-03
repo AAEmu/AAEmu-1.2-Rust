@@ -478,6 +478,10 @@ async fn password_start_async_successful_login_returns_success_with_username() {
             username: Some("testuser".to_string()),
         }
     );
+    assert_eq!(
+        *f.backend.recorded_logins.lock().unwrap(),
+        vec![(account_id, "testuser".to_string(), LOOPBACK)]
+    );
 }
 
 #[tokio::test]
@@ -566,6 +570,10 @@ async fn password_two_factor_account_completes_after_a_valid_otp() {
     f.backend.set_ban(false, LoginDeniedReason::default());
     let mut flow = password_flow("otpuser", "testpass");
     flow.start(&f.server, &f.client).await.unwrap();
+    assert!(
+        f.backend.recorded_logins.lock().unwrap().is_empty(),
+        "the login was recorded before the OTP"
+    );
     f.backend.set_otp(FactorValidation::Valid);
 
     let result = flow
@@ -579,6 +587,10 @@ async fn password_two_factor_account_completes_after_a_valid_otp() {
             account_id,
             username: Some("otpuser".to_string()),
         }
+    );
+    assert_eq!(
+        *f.backend.recorded_logins.lock().unwrap(),
+        vec![(account_id, "otpuser".to_string(), LOOPBACK)]
     );
 }
 
