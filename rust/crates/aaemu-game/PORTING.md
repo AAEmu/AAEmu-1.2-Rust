@@ -407,6 +407,9 @@ Economy hooks (`server.systems.housing.hooks`): installed by `economy::bridges::
 | `QuestManager.Load` (contexts, components, base acts, all 64 `quest_act_*` detail tables, supplies, item / NPC groups, `UpdateQuestComponentActs`) | `systems/quests/data.rs`, `templates.rs` | done | Same table order (act order inside a component = objective indices), first-base-act linking, tutorial category skipped. Validated against compact.sqlite3 (`real_compact_db_quest_tables`: 4775 quests, 17720 components, 19047 acts, per-type counts). Exhaustive record accounting and outstanding gameplay failures: `Docs/wiki/Quest-Audit.md`, `rust/tools/quest_audit/audit.py`; port coverage does not certify every quest as playable. |
 | `Models/Game/Quests` (`Quest`, `NewQuestCode`, `QuestStep`, `QuestComponent`, `QuestAct`, all `Acts/*` + `UnusedActs/*`) | `state.rs`, `engine.rs`, `acts.rs` | done | Live quests on `Character::quest_state` (handles + act paths instead of object references); `c.quests` rows re-derived after every operation. Step machine, objective status / percent, rewards, drop / cleanup, event subscriptions in invocation-list order (`-=` removes the last occurrence). |
 | `CharacterQuests` (AddQuest*, DropQuest, completed flags, reset / daily reset, LetItDone, item destroy, `GetActiveActsWithUseItem`, Load) | `engine.rs`, `events.rs` | done | Save = existing `Character.Save` rows. |
+| Quest failure (`FailQuest` from `CheckTimer` expiry and `CheckGuard` NPC death) | `engine.rs` (`fail_quest`), `acts.rs` (`CheckGuard`, `CheckTimer` deadline check) | added | The C# `FailQuest` only set `Step = Fail` (no status, no packet). The Rust sets `Status = Failed` and sends `SCQuestContextUpdatedPacket` with that status: the 1.2 client learns a failure from the status, not from 0x146 (`SCQuestContextUpdatedPacket` -> `OnQuestContextUpdated` `FUN_391dbe50` -> `FUN_3937bdf0`, whose status-2 branch raises the quest condition event and logs "failed"; `ui_texts` category 6 `condition_fail_msg`). 0x146 stays the answer to a refused client report. A failed quest stays failed and droppable. During `CharacterQuests.Load` (`st.loaded == false`) the update is skipped because the following `SCQuestsPacket` already carries the Failed row. `CheckTimer` ignores a queued `TimerExpired` while the live deadline (`q.time_ms`) is still in the future, so a stale task cannot fail a restarted run. |
+| `CSRestartMainQuestPacket` (0x0fd) | `packets.rs` (`CSRestartMainQuestPacket`), `engine.rs` (`try_restart_quest`, `restart_quest`, `install_quest`) | added | The 1.2 client sends it when the player asks to restart a main quest: `X2Quest.QuestContextRestart` -> `FUN_3949b780` -> `FUN_3937b200` / `FUN_3937a8d0`, gated to an active quest whose status is not 5 (Completed), `detail_id == 2` and its own 3 s / labor checks; the reply is a normal `SCQuestContextStartedPacket`, which `FUN_3937b5b0` turns into `QUEST_CHAT_RESTART` (`ui_texts` 391). The server mirrors the active/status and `detail_id == 2` gates, adds a 3 s per-character throttle, and gates on `restart_on_fail` (**INFERRED**: the client never reads the flag; 211 of the 222 flagged quests are `detail_id` 2). The restart discards the run (items, subscriptions, timer, quest id; the Start-component `ConAcceptItem` acceptor items are kept) and installs a fresh quest object. A refused request only logs and changes nothing. The original server's exact reply sequence is **QUEST-1 (capture-pending)**. |
+| `quest_contexts.successive` | `templates.rs` (`QuestTemplate.successive`) | done (client display only) | 37 rows. The 1.2 client reads it in the quest objective text functions `FUN_394a3b60` / `FUN_394a3f20`: when set, the tracker lists only the current Progress component's objectives (status "successive"), otherwise every unfinished Progress objective; Ready/Failed show their status. No packet or server logic: **QUEST-2 resolved**. |
 | `Quest.DistributeRewards` exp / copper pool | `engine.rs` (`distribute_rewards`), `acts.rs` (`SupplyExp` / `SupplyCopper`) | deviation | **Deviation:** a Reward component `QuestActSupplyExp` / `QuestActSupplyCopper` act replaces the level-based `quest_supplies` exp / copper instead of being added on top of it (the C# added both). 1.2 client oracle + 2014 data, details in the deviations list. |
 | `QuestManagerEvents` + other C# entry points (OnItemUse, OnKill, cinema, mate level) | `events.rs` | done | Public event API; nested calls from hooks are queued. |
 | `QuestManager` evaluation queue / timers / daily reset task | `mod.rs` | done | `QuestManagerRunQueueTask` as a 1 ms tokio task; timers as tokio tasks; daily reset at 00:00 UTC. |
@@ -1298,6 +1301,26 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   reporting, per-quest NPC/doodad reporting, doodad reward selection/finalization, and OR
   requirement evaluation. Timed saved deadlines, aggro credit, CheckSphere, and authored
   content gaps remain tracked in `Docs/wiki/Quest-Audit.md`.
+* systems::quests (quest restart, 2026-11-03): the C# `FailQuest` only set `Step = Fail`
+  (no status, no packet), so a timed-out or escort-failed quest stayed `Progress` on the wire
+  and in the journal. `fail_quest` now sets `Status = Failed` and sends
+  `SCQuestContextUpdated` with it; the 1.2 `OnQuestContextUpdated` status-2 branch is what
+  shows the failure. There is **no automatic restart**: the 1.2 client never reads
+  `restart_on_fail`, and restart is the player's `CSRestartMainQuestPacket` (0x0fd) request.
+  The server implements that packet, gated on an active non-completed quest with
+  `detail_id == 2` and `restart_on_fail` (**QUEST-1 INFERRED gate**; the original server's
+  exact reply sequence is capture-pending), and answers with `SCQuestContextStarted`. A
+  failed quest is not restarted on its own. `successive` is client display only
+  (**QUEST-2 resolved**).
+* systems::quests (restart follow-ups, known and not fixed, score < 5):
+  - A restart discards and reinstalls the quest, so the Start component's skills run again on
+    every accepted 0x0fd (7 restartable quests cast Start skills, some with
+    `NpcSpawnerSpawnEffect`). No shipped 1.2 UI sends the packet; the 3 s throttle bounds a
+    crafted client.
+  - Supply items that were mailed or moved out of the bag are issued again on restart. The
+    restartable supplies are category 64 items priced 0 (low value).
+  - If the fresh install fails after the old run was discarded, the quest is lost (WARN only);
+    no 1.2 data quest is known to reach that path.
 * systems::quests (engine fixes, quest-audit 2026-10-17):
   - `TryCompleteQuestAsLetItDone` (C# only set `Step = Reward`): the quest also gets the
     `Completed` status, and a quest without a Reward step is finished at once (C# hung there:

@@ -119,6 +119,9 @@ pub enum QuestEvent {
     },
     TimerExpired {
         quest_id: u32,
+        /// Runtime quest id of the run the timer was armed for. A timer task that fires after
+        /// the quest was restarted must not fail the fresh run.
+        run_id: u32,
     },
     QuestStepChanged {
         quest_id: u32,
@@ -1063,9 +1066,9 @@ pub fn on_exit_sphere(server: &GameServer, player: &PlayerRef, sphere: SphereQue
 }
 
 /// `QuestManager.OnTimerExpired(owner, questId)` (`QuestTimeoutTask`).
-pub fn on_timer_expired(server: &GameServer, player: &PlayerRef, quest_id: u32) {
+pub fn on_timer_expired(server: &GameServer, player: &PlayerRef, quest_id: u32, run_id: u32) {
     run_or_queue(server, player, move |ctx| {
-        dispatch_logged(ctx, &QuestEvent::TimerExpired { quest_id });
+        dispatch_logged(ctx, &QuestEvent::TimerExpired { quest_id, run_id });
     });
 }
 
