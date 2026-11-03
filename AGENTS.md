@@ -261,7 +261,7 @@ Read [`rust/crates/aaemu-game/CONTRIBUTING-PORT.md`](rust/crates/aaemu-game/CONT
 - `SecretKey` must match between Login and Game.
 - `ClientData.Sources` should include the 1.2 `game_pak` (absolute path under `.client_files/` is fine).
 - `compact.sqlite3` → `rust/crates/aaemu-game/app/Data/` (or `Data/` of the published / Docker game folder; required for game data).
-- Logging: `RUST_LOG` (default `info`), output on stdout; `NO_COLOR=1` disables colors.
+- Logging: `RUST_LOG` (default `info`), output on stdout; `NO_COLOR=1` disables colors; `AAEMU_LOG_MS=1` writes the time as `HH:MM:SS.ffffff`.
 
 Details: [`Docs/wiki/Working-with-the-Config.json-files-and-server-listings.md`](Docs/wiki/Working-with-the-Config.json-files-and-server-listings.md).
 
