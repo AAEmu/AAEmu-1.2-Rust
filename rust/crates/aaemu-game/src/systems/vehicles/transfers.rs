@@ -220,8 +220,12 @@ fn seat_world_pos(
     ap: u8,
 ) -> Option<crate::models::transform::PositionAndRotation> {
     for d in world.all_doodads() {
-        let g = d.data();
-        if g.parent_obj_id == transfer.obj_id && g.data == i32::from(ap) {
+        // Copy the two fields and release the doodad lock before calling into the world.
+        let is_seat = {
+            let g = d.data();
+            g.parent_obj_id == transfer.obj_id && g.data == i32::from(ap)
+        };
+        if is_seat {
             return Some(world.world_pos_rot(&WorldObject::from(&d)));
         }
     }
