@@ -90,6 +90,9 @@ pub struct NpcShopInfo {
     pub specialty: bool,
     pub stabler: bool,
     pub priest: bool,
+    /// `npc_templates.repairman`: the NPC repairs destroyed slave summon items
+    /// (`CSRepairSlaveItemsPacket`; the client's `IsRepairmanNpc` reads this flag).
+    pub repairman: bool,
 }
 
 /// NPC data (`systems::npcs`: `NpcTemplate`, `NpcManager.GetGoods`).

@@ -93,14 +93,18 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCFactionRenamedPacket(id, name, byGm)` (not sent by the 1.2 C#).
+    /// `SCFactionRenamedPacket(id, name, byGm)`. Never sent by the 1.2 C#; the 1.2 client's
+    /// `OnFactionRenamed` updates the cached part and shows the "expedition name ... changed"
+    /// notice (`FUN_392fdce0`). `byGm` false also clears `allow_change_name` client-side.
     SCFactionRenamedPacket { id: u32, name: String, by_gm: bool } |self, s| {
         s.write_u32(self.id).write_str(&self.name).write_bool(self.by_gm);
     }
 );
 
 sc_packet!(
-    /// `SCFactionRetryRenamePacket(xpdt, errorMessage, name)` (not sent by the 1.2 C#).
+    /// `SCFactionRetryRenamePacket(xpdt, errorMessage, name)`. Never sent by the 1.2 C#; the
+    /// 1.2 client's `OnFactionRetryRename` re-opens the rename dialog with `name` pre-filled
+    /// (`FUN_391e5520`), `xpdt` non-zero selecting the expedition dialog.
     SCFactionRetryRenamePacket { xpdt: bool, error_message: i16, name: String } |self, s| {
         s.write_bool(self.xpdt).write_i16(self.error_message).write_str(&self.name);
     }

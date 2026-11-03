@@ -1182,6 +1182,7 @@ impl crate::systems::economy::hooks::NpcEconomyHooks for NpcsForEconomy {
             specialty: t.specialty,
             stabler: t.stabler,
             priest: t.priest,
+            repairman: t.repairman,
         })
     }
 
