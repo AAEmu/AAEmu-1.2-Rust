@@ -2630,7 +2630,7 @@ pub fn items_by_template(c: &Character, containers: &[u8], template_id: u32) -> 
             let (ids, n) = cont
                 .lock()
                 .expect("container poisoned")
-                .items_by_template(template_id, -1);
+                .items_by_template_unlocked(template_id, -1);
             found |= !ids.is_empty();
             units = units.wrapping_add(n);
         }

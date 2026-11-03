@@ -7,11 +7,11 @@ use std::sync::Arc;
 use aaemu_commons::{Marshal, PacketStream};
 
 use crate::data::GameData;
-use crate::models::container::{equip_slot, slot_type};
+use crate::models::container::{equip_slot, slot_type, ContainerKind, ItemContainer};
 use crate::models::item::{Item, ITEM_FLAG_SECURE};
 use crate::models::item_task::{task_type, ItemTask};
 use crate::systems::economy::error_message;
-use crate::systems::economy::inventory::{Inv, ItemTxn};
+use crate::systems::economy::inventory::{self, Inv, ItemTxn};
 use crate::systems::economy::item_effects::{self, Outcome};
 use crate::systems::economy::item_handlers::*;
 use crate::systems::economy::item_security;
@@ -20,8 +20,8 @@ use crate::systems::economy::loot::SharedRandom;
 use crate::systems::economy::mail::{mail_result, mail_type};
 use crate::systems::economy::mail_character;
 use crate::systems::economy::tests::{
-    give, run, spawn_service_npc, task_body, test_data, World, ARMOR, MERCHANT_TEMPLATE, SINGLE,
-    STACK,
+    give, item_at, run, spawn_service_npc, task_body, test_data, World, ARMOR, MERCHANT_TEMPLATE,
+    SINGLE, STACK,
 };
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
 
@@ -34,7 +34,7 @@ fn security_data() -> GameData {
         .items
         .secure_categories
         .insert(SECURE_CATEGORY);
-    d.systems.economy.items.security_unlock_delay_secs = 60;
+    d.systems.economy.items.security_unlock_delay_minutes = 1;
     for t in d.items.templates.values_mut() {
         t.category_id = SECURE_CATEGORY;
     }
@@ -164,6 +164,12 @@ async fn unsecure_keeps_the_item_locked_until_the_delay_elapses() {
     );
     assert!(it.unsecure_time > 0);
     let unsecure_time = it.unsecure_time;
+    // content_configs[43] is minutes: the fixture's 1 means a 60 s deadline.
+    let now = chrono::Utc::now().timestamp();
+    assert!(
+        (unsecure_time - now - 60).abs() <= 1,
+        "deadline {unsecure_time} is not now+60 s (now {now})"
+    );
     let frames = w.a.drain();
     assert_eq!(
         frames[0].1,
@@ -376,6 +382,139 @@ async fn disenchant_refuses_a_locked_item() {
     assert!(item(&w, id).is_some());
     let frames = w.a.drain();
     assert_eq!(frames[0].0, crate::opcodes::sc::SCErrorMsgPacket);
+}
+
+#[tokio::test]
+async fn split_and_merge_refuse_a_locked_stack() {
+    let mut w = world();
+    let source = give(&w, &w.pa, slot_type::INVENTORY, STACK, 10, 0);
+    lock(&mut w, 0, 0, source);
+    w.a.drain();
+
+    let mut s = PacketStream::new();
+    s.write_u64(source)
+        .write_u64(0)
+        .write_u8(slot_type::INVENTORY)
+        .write_u8(0)
+        .write_u8(slot_type::INVENTORY)
+        .write_u8(1)
+        .write_i32(3);
+    run::<CSSplitBagItemPacket>(&mut w, 0, s.as_bytes());
+    let frames = w.a.drain();
+    assert_eq!(frames[0].0, crate::opcodes::sc::SCErrorMsgPacket);
+    assert_eq!(
+        frames[0].1,
+        error_frame(error_message::ITEM_SECURE_CONDITION)
+    );
+    assert_eq!(item(&w, source).unwrap().count, 10);
+    assert!(item_at(&w.pa, slot_type::INVENTORY, 1).is_none());
+
+    let target = give(&w, &w.pa, slot_type::INVENTORY, STACK, 5, 2);
+    let mut s = PacketStream::new();
+    s.write_u64(source)
+        .write_u64(target)
+        .write_u8(slot_type::INVENTORY)
+        .write_u8(0)
+        .write_u8(slot_type::INVENTORY)
+        .write_u8(2);
+    run::<CSSwapItemsPacket>(&mut w, 0, s.as_bytes());
+    let frames = w.a.drain();
+    assert!(frames
+        .iter()
+        .any(|(op, body)| *op == crate::opcodes::sc::SCErrorMsgPacket
+            && *body == error_frame(error_message::ITEM_SECURE_CONDITION)));
+    assert_eq!(item(&w, source).unwrap().count, 10);
+    assert_eq!(item(&w, target).unwrap().count, 5);
+}
+
+#[tokio::test]
+async fn coffer_move_refuses_a_locked_stack() {
+    let w = world();
+    let id = give(&w, &w.pa, slot_type::INVENTORY, STACK, 5, 0);
+    item_security::secure_item(&w.server, &w.pa, slot_type::INVENTORY, 0, id);
+    let coffer = ItemContainer::new(ContainerKind::Coffer, 1, slot_type::TRADE, 999).into_ref();
+    let inv = Inv::of(&w.pa);
+    let mut txn = ItemTxn::begin(&w.server);
+    assert!(!inventory::split_or_move_item_ex(
+        &mut txn,
+        &inv,
+        task_type::SWAP_COFFER_ITEMS,
+        Some(inv.bag()),
+        Some(coffer.clone()),
+        id,
+        slot_type::INVENTORY,
+        0,
+        0,
+        slot_type::TRADE,
+        0,
+        1,
+    ));
+    drop(txn);
+    assert!(item(&w, id).is_some());
+    assert!(coffer.lock().expect("coffer").items.is_empty());
+}
+
+#[tokio::test]
+async fn consume_item_skips_a_locked_stack() {
+    let w = world();
+    let id = give(&w, &w.pa, slot_type::INVENTORY, STACK, 5, 0);
+    item_security::secure_item(&w.server, &w.pa, slot_type::INVENTORY, 0, id);
+    let inv = Inv::of(&w.pa);
+    {
+        let mut txn = ItemTxn::begin(&w.server);
+        let used = inv.bag().lock().expect("bag").consume_item(
+            task_type::SKILL_REAGENTS,
+            STACK,
+            3,
+            None,
+            &mut txn.env,
+        );
+        assert_eq!(used, 0);
+    }
+    assert_eq!(item(&w, id).unwrap().count, 5);
+
+    item_security::unsecure_item(&w.server, &w.pa, slot_type::INVENTORY, 0, id);
+    let expiry = item(&w, id).unwrap().unsecure_time;
+    item_timers::update_item_timers(&w.server, expiry * 1000);
+    {
+        let mut txn = ItemTxn::begin(&w.server);
+        let used = inv.bag().lock().expect("bag").consume_item(
+            task_type::SKILL_REAGENTS,
+            STACK,
+            3,
+            None,
+            &mut txn.env,
+        );
+        assert_eq!(used, 3);
+    }
+    assert_eq!(item(&w, id).unwrap().count, 2);
+}
+
+#[tokio::test]
+async fn locked_reagent_reports_item_locked() {
+    let mut d = security_data();
+    d.systems.skills.skill_reagents = vec![crate::systems::skills::data::SkillItemAmount {
+        id: 1,
+        skill_id: 100,
+        item_id: STACK,
+        amount: 1,
+    }];
+    let w = world_with(d);
+    let id = give(&w, &w.pa, slot_type::INVENTORY, STACK, 1, 0);
+    item_security::secure_item(&w.server, &w.pa, slot_type::INVENTORY, 0, id);
+    let template = crate::systems::skills::tests::skill_template(100);
+    let result = crate::systems::skills::validation::check_reagents(
+        &w.server,
+        &template,
+        &crate::world::WorldObject::from(&w.pa),
+    );
+    assert_eq!(
+        result,
+        Err((
+            crate::systems::skills::types::skill_result::ITEM_LOCKED,
+            STACK
+        ))
+    );
 }
 
 /// Byte-exact `ItemUpdateSecurity` body (`SCItemTaskSuccessPacket`), checked against the

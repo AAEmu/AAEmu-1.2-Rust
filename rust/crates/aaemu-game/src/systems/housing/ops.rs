@@ -304,6 +304,9 @@ pub fn build(server: &GameServer, player: &PlayerRef, account_id: u32, p: &CSCre
                 Some(HouseConstructionError::InsufficientPayment) => {
                     err::MAIL_NOT_ENOUGH_MONEY_TO_PAY_TAXES
                 }
+                Some(HouseConstructionError::ItemLocked) => {
+                    crate::systems::economy::error_message::ITEM_SECURE_CONDITION
+                }
                 None => crate::systems::economy::error_message::INVALID_TAXATION,
             },
         );
@@ -1422,6 +1425,13 @@ pub fn decorate_house(
     }) else {
         return Ok(false);
     };
+    if item.secure {
+        send_error(
+            player,
+            crate::systems::economy::error_message::ITEM_SECURE_CONDITION,
+        );
+        return Ok(false);
+    }
     // Check House
     let Some(house) = server
         .systems

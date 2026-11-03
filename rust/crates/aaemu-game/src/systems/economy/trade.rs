@@ -841,8 +841,11 @@ fn preflight_items(
             .ok_or_else(|| format!("item {item_id} is no longer in the owner's containers"))?;
         if item.slot_type != slot_type::INVENTORY
             || item.flags & crate::models::item::ITEM_FLAG_SOUL_BOUND != 0
+            || super::item_security::is_locked(&item)
         {
-            return Err(format!("item {item_id} left the bag or became bound"));
+            return Err(format!(
+                "item {item_id} left the bag, became bound or was locked"
+            ));
         }
         let total = totals.entry(item_id).or_insert(0);
         *total += i64::from(amount);

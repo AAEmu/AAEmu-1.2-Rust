@@ -124,8 +124,8 @@ pub struct ItemsData {
     /// `item_secure_exceptions.item_id`: items that are never lockable even when their
     /// category is secure (the 1.2 client's `FUN_394df4a0`).
     pub secure_exceptions: HashSet<u32>,
-    /// `content_configs` id 43 (`X2Item.GetSecurityUnlockDelayTime`), in seconds.
-    pub security_unlock_delay_secs: i64,
+    /// `content_configs` id 43 (`X2Item.GetSecurityUnlockDelayTime`), in minutes.
+    pub security_unlock_delay_minutes: i64,
 }
 
 impl ItemsData {
@@ -280,8 +280,9 @@ impl ItemsData {
             },
         )?;
         // The client reads the unlock delay as the raw `content_configs` value of id 43
-        // (`X2Item.GetSecurityUnlockDelayTime` -> `FUN_395720e0(0x2b)`).
-        d.security_unlock_delay_secs = conn
+        // (`X2Item.GetSecurityUnlockDelayTime` -> `FUN_395720e0(0x2b)`); the dialogs divide it
+        // by 60 to print hours, so the value is minutes.
+        d.security_unlock_delay_minutes = conn
             .query_row("SELECT value FROM content_configs WHERE id = 43", [], |r| {
                 r.get::<_, i64>(0)
             })

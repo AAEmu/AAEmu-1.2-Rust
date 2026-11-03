@@ -1306,18 +1306,26 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   items in an `item_categories.secure` category and not listed in `item_secure_exceptions` can be
   locked (`FUN_394df4a0`; the 1.2 DB has 135 secure categories and the single exception row
   3006, an item absent from the 1.2 `items` table). Locking sets `ItemFlag.Secure`; unlocking
-  sets `unsecure_time = now + content_configs[43]` (the client's
-  `X2Item.GetSecurityUnlockDelayTime` reads `FUN_395720e0(0x2b)`; the 1.2 value is 4320 s) and
-  keeps the flag, so the item stays locked until `UpdateItemTimers` clears it and sends
-  `ITEM_UNLOCK_EXCESS`. The reply task is `SCItemTaskSuccessPacket` with `ItemUpdateSecurity`;
+  sets `unsecure_time = now + content_configs[43] * 60` (the client's
+  `X2Item.GetSecurityUnlockDelayTime` reads `FUN_395720e0(0x2b)`; its dialogs divide the value
+  by 60 to print hours, so the 1.2 value 4320 is 4320 minutes = 72 hours) and keeps the flag, so
+  the item stays locked until `UpdateItemTimers` clears it and sends `ITEM_UNLOCK_EXCESS`. The reply task is `SCItemTaskSuccessPacket` with `ItemUpdateSecurity`;
   the `isUnsecureExcess` / `isUnSecureSet` / `isUnpack` combination is inferred from the client's
   userdata field names and the `ITEM_LOCK` / `ITEM_UNLOCK` / `ITEM_UNLOCK_EXCESS` task types
   (**CAPTURE-PENDING**, case item-lock-flow: no 1.2 capture of these server replies exists yet).
-  A locked item is refused by the NPC store sale, specialty-pack sale, player trade put-up, mail
-  attachment (mail result `ITEM_LOCKED` 26), auction put-up, destroy, item-look conversion and
-  disenchant with `item_secure_condition` (664; the 10.x zone server uses 664 for the same item
-  operations). Equip/unequip, enchant target selection and skill reagent consumption are not
-  gated yet (the client UI hides such actions; capture-pending).
+  A locked item is refused by the NPC store sale, specialty-pack sale, player trade put-up and
+  completion, mail attachment (mail result `ITEM_LOCKED` 26), auction put-up, destroy, item-look
+  conversion, disenchant, split/merge/move/swap (the client's drag validation returns 664 for
+  either side, `FUN_390455d0`/`FUN_39045850`), coffer moves, locked design/furniture placement,
+  regrade and lunagem targets, and putting down or dropping a locked trade pack, with
+  `item_secure_condition` (664; the 10.x zone server uses 664 for the same item operations).
+  `ItemContainer::ConsumeItem` skips locked stacks; crafting, quest hand-ins and reagent checks
+  no longer count them, and a cast whose only reagent stacks are locked is refused with the
+  client's `SkillResult.ItemLocked` (0x25). `CSEquipmentsSecure` locks every equipment slot
+  including slot 26: the client's `FUN_394e5dd0` loops that slot too (the special `0x1a` entry),
+  and it checks the flag rather than the item category, so the server mirrors that. The lock
+  handlers send their error after the bag lock is released. Equip/unequip of a locked item is
+  refused by the same move guard (the client's drag check covers it).
 * systems::economy (item procs, 2026-11): procs fire where the C# never did. Sources, rebuilt
   by the gear-bonus pass (`apply_gear_buffs` -> `procs::refresh`, so equip / unequip, login,
   repair, gear break and gem changes all refresh them): set

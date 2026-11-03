@@ -145,6 +145,9 @@ impl CSSwapItemsPacket {
             return;
         }
         let inv = Inv::of(&p);
+        if item_security::refuse_move_if_locked(server, &p, a.from_item_id, a.to_item_id) {
+            return;
+        }
         let ok = {
             let mut txn = ItemTxn::begin(server);
             inventory::split_or_move_item(
@@ -195,6 +198,9 @@ impl CSSplitBagItemPacket {
             return;
         }
         let inv = Inv::of(&p);
+        if item_security::refuse_move_if_locked(server, &p, a.from_item_id, a.to_item_id) {
+            return;
+        }
         let mut txn = ItemTxn::begin(server);
         inventory::split_or_move_item(
             &mut txn,
@@ -439,6 +445,9 @@ impl CSSplitCofferItemPacket {
         let Some(p) = active(conn) else { return };
         let a = self.args;
         let inv = Inv::of(&p);
+        if item_security::refuse_move_if_locked(server, &p, a.from_item_id, a.to_item_id) {
+            return;
+        }
         let ok = {
             let mut txn = ItemTxn::begin(server);
             inventory::coffer_items(
@@ -487,6 +496,9 @@ impl CSSwapCofferItemsPacket {
         let Some(p) = active(conn) else { return };
         let a = self.args;
         let inv = Inv::of(&p);
+        if item_security::refuse_move_if_locked(server, &p, a.from_item_id, a.to_item_id) {
+            return;
+        }
         let ok = {
             let mut txn = ItemTxn::begin(server);
             inventory::coffer_items(

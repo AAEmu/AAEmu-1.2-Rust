@@ -310,7 +310,7 @@ pub fn sell_specialty(server: &GameServer, p: &PlayerRef, npc_obj_id: u32) -> i3
         return base_price;
     };
     if super::item_security::refuse_if_locked(p, &backpack) {
-        return 0;
+        return base_price;
     }
     let Some(npc) = parent_world(server, p).and_then(|w| w.npc(npc_obj_id)) else {
         return base_price;

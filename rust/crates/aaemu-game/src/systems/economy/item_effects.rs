@@ -24,7 +24,7 @@ use crate::data::items::{
 use crate::data::sqlite::for_each_row;
 use crate::managers::chat::chat_type;
 use crate::models::container::{equip_slot, slot_type, ContainerRef};
-use crate::models::item::{Item, ItemClass};
+use crate::models::item::{Item, ItemClass, ITEM_FLAG_SECURE};
 use crate::models::item_task::{task_type, ItemFx, ItemTask};
 use crate::net::packet::ServerPacket;
 use crate::packets::world::SCChatMessagePacket;
@@ -367,6 +367,9 @@ pub fn grade_enchant(
     let Some(item) = lock(&holder).get_item_by_id(target_id).cloned() else {
         return;
     };
+    if super::item_security::refuse_if_locked(player, &item) {
+        return;
+    }
     let initial_grade = item.grade;
     let Some(grade_template) = data.full_grade(i32::from(item.grade)).cloned() else {
         // C#: NullReferenceException in GoldCost.
@@ -751,6 +754,12 @@ pub fn item_socketing(
         player.data().skill_char.skill_cancelled = true;
         return;
     };
+    if equip.has_flag(ITEM_FLAG_SECURE) {
+        drop(g);
+        send_error_message_to(&mut txn.out(), player, error_message::ITEM_SECURE_CONDITION);
+        player.data().skill_char.skill_cancelled = true;
+        return;
+    }
     if !equip.is_equip() {
         tracing::warn!("Special effects: ItemSocketing targetItem {target_id} was not a EquipItem");
         drop(g);
@@ -1733,6 +1742,9 @@ pub fn put_down_backpack(
     let Some(item) = lock(&equipment).get_item_by_id(pack_item.item_id).cloned() else {
         return;
     };
+    if super::item_security::refuse_if_locked(player, &item) {
+        return;
+    }
     if hooks.in_public_farm(server, player) {
         let mut txn = ItemTxn::begin(server);
         send_error_message_to(
@@ -1815,6 +1827,9 @@ pub fn drop_trade_pack_to_floor(server: &GameServer, player: &PlayerRef) {
     let Some(item) = inv.equipped(equip_slot::BACKPACK) else {
         return;
     };
+    if super::item_security::is_locked(&item) {
+        return;
+    }
     let use_skill_id = match server.game_data.items.template(item.template_id) {
         Some(t) => match t.kind {
             TemplateKind::Backpack { backpack_type }
