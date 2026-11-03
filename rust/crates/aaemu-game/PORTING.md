@@ -3617,18 +3617,32 @@ and in NPC wandering / buff remaining times.
   observed group, under one phase-operation reservation. The view mirrors the snapshot: an
   unfinished explicit GM schedule uses the real clock (warmup/siege), otherwise an owned
   territory uses the weekly calendar (GM test clock); owned without either source is peace and
-  unowned is period 0. `DoodadFuncDeclareSiege` (the one `doodad_func_declare_sieges` row, a
-  regular `doodad_funcs` row of 3304 group 7622, skill 15067, next phase 7627) is now reachable
-  through `GetFuncTemplate` as well and advances to `NextPhase` when its bound skill is used;
-  the C# registered the class only in `_phaseFuncTemplates`, so the row was dead. The
-  declaration checks and broadcasts belong to WP-S2. Direct write targets are the phase
-  machine's `do_change_phase_if_group` / `despawn_or_delete_if_group`, so a period event cannot
-  move a doodad that changed phase in between. UNKNOWN (capture-pending): 3410's period-0
-  func (safe default: `down -> up` when the warmup begins; the `defense` flag is unused),
-  4307's authored 10-minute lifetime vs the 90-minute siege (the phase chain wins), whether
-  the skipped periods 3/4 of an undeclared declare->peace jump should also end their chains
-  (currently only the observed previous period fires), and catching up a persisted mid-cycle
-  phase after restart (the first observation of a zone is silent).
+  unowned is period 0. The watcher starts only at the end of `housing::System::start`, after
+  the dominion rows are loaded (`npcs::doodad::start` runs earlier), and the first observation
+  of a zone is silent, so a boot never records the empty period 0: a later `0 -> owned` change
+  cannot fire the 3410 period-0 func. That func now fires only when the target period is warmup
+  (3), never for `previous == 0` alone. The watcher keeps an index of the doodads whose current
+  phase has a `SiegePeriod` func (updated on create / func-group change / delete) instead of
+  scanning every world object every 2 s, and skips a tick while neither the calendar nor an
+  unfinished explicit schedule can change a period. A transition that finds a doodad busy with
+  another phase operation is left unrecorded and retried on the next tick (the expected-group
+  check makes the retry idempotent); the periods skipped between two observations are walked
+  in calendar order (2 -> 4 ends 2 and 3), so a missed poll cannot strand 10582. A func-group
+  change also removes the area triggers the old group created: the C# kept a duration-0
+  `DoodadFuncClout` until the doodad was deleted, so the 3410 `safezone_up` revive zone never
+  went away and accumulated one trigger per warmup. `DoodadFuncDeclareSiege` (the one
+  `doodad_func_declare_sieges` row, a regular `doodad_funcs` row of 3304 group 7622, skill
+  15067, next phase 7627) stays inert: the C# registers the class only in
+  `_phaseFuncTemplates`, so `GetFuncTemplate` does not find the row and nothing advances it.
+  The declaration validation, broadcast and the `7622 -> 7627` entry belong to WP-S2; wiring
+  this row early would let any backpack user strand the item in 7631. Direct write targets are
+  the phase machine's `do_change_phase_if_group` / `despawn_or_delete_if_group`, so a period
+  event cannot move a doodad that changed phase in between. UNKNOWN (capture-pending): 3410's
+  period-0 func (safe default as above; the `defense` flag is unused), 4307's authored
+  10-minute lifetime vs the 90-minute siege (the phase chain wins), whether a skipped period's
+  chain should really end when the calendar jumps over it (the current walk does), and
+  catching up a persisted mid-cycle phase after restart (the first observation of a zone is
+  silent).
 * systems::housing: sale buyer names retain the original case-sensitive lookup. The housing
   audit fixes the first-house tax/deposit omission, reversed paid flag (confirmed against the
   1.2 housing UI bytecode), overdue counter, finished-house construction, duplicate signs,

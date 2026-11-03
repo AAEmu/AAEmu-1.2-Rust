@@ -206,6 +206,13 @@ pub fn create(
         _ => {}
     }
     let doodad = Entity::new(obj_id, d);
+    // WP-S3: the period watcher indexes only the phases with a SiegePeriod function.
+    server
+        .systems
+        .npcs
+        .doodads
+        .siege_phase
+        .refresh(server, &doodad);
     if !skip_phase_init {
         // Task.Run(() => doodad.InitDoodad())
         match (server.self_arc(), tokio::runtime::Handle::try_current()) {
@@ -244,6 +251,12 @@ pub fn delete(server: &GameServer, world: &Arc<WorldInstance>, doodad: &DoodadRe
         d.phase.deleted = true;
         d.phase.func_task = 0; // deviation: cancel the FuncTask (see the module docs)
     }
+    server
+        .systems
+        .npcs
+        .doodads
+        .siege_phase
+        .untrack(doodad.obj_id);
     super::natural::forget(server, doodad); // drop the saved growth state of a world doodad
     super::logic::clear_links(&DoodadCtx::new(server, world.clone(), doodad.clone()));
     world.delete(doodad);

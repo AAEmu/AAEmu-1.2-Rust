@@ -1,4 +1,4 @@
-//! WP-S3: `DoodadFuncSiegePeriod` / `DoodadFuncDeclareSiege` behaviour.
+//! WP-S3: `DoodadFuncSiegePeriod` behaviour (the `DeclareSiege` row stays inert until WP-S2).
 //!
 //! The fixtures mirror the authored 1.2 rows (template ids, phase-only groups, func periods and
 //! destinations); the real compact database is checked by the `#[ignore]` test at the bottom.
@@ -14,8 +14,10 @@ use crate::server::GameServer;
 use crate::systems::housing::data::{SiegePlan, SiegeZone};
 use crate::systems::housing::dominion::period;
 use crate::systems::housing::dominion::state::TowerIdentity;
+use crate::systems::npcs::area_trigger::{AreaShape, AREA_SHAPE_SPHERE};
 use crate::systems::npcs::doodad::data::DoodadData;
 use crate::systems::npcs::doodad::manager;
+use crate::systems::npcs::doodad::phase::Operation;
 use crate::systems::npcs::doodad::templates::*;
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient, TEST_ZONE};
 use crate::world::{DoodadRef, PlayerRef, WorldInstance, WorldObject};
@@ -107,20 +109,25 @@ impl Fixture {
         )
     }
 
-    /// A normal `doodad_funcs` row plus its template (the `DeclareSiege` row of 3304).
-    fn func(mut self, group: u32, template: FuncTemplate, next_phase: i32, skill_id: u32) -> Self {
-        let (class, id) = (template.func_type(), template.id());
+    /// The 3304 `DeclareSiege` row exactly as the loader builds it: the class is registered as
+    /// a `DoodadPhaseFuncTemplate`, while the only authored row is a normal `doodad_funcs` row.
+    /// `GetFuncTemplate` therefore does not find it, so the row is inert (WP-S2 owns the
+    /// declaration).
+    fn declare_siege_row(mut self, group: u32, next_phase: i32, skill_id: u32) -> Self {
         self.data
-            .func_templates
-            .entry(class)
+            .phase_func_templates
+            .entry("DoodadFuncDeclareSiege")
             .or_default()
-            .insert(id, template);
+            .insert(
+                1,
+                FuncTemplate::DeclareSiege(DoodadFuncDeclareSiege { id: 1 }),
+            );
         let key = self.data.funcs_by_id.len() as u32 + 1;
         let func = DoodadFunc {
             group_id: group,
-            func_id: id,
+            func_id: 1,
             func_key: key,
-            func_type: class.into(),
+            func_type: "DoodadFuncDeclareSiege".into(),
             next_phase,
             skill_id,
             ..DoodadFunc::default()
@@ -132,6 +139,29 @@ impl Fixture {
             .or_default()
             .push(func);
         self
+    }
+
+    /// A duration-0 `DoodadFuncClout` with the authored 3410 safe-zone row's shape / buff /
+    /// no-buff tag (720: sphere 443, buff 2221, no-buff tag 810, UseOriginSource).
+    fn safe_zone_clout(self, group: u32) -> Self {
+        self.phase_func(
+            group,
+            FuncTemplate::Clout(DoodadFuncClout {
+                id: 720,
+                duration: 0,
+                tick: 0,
+                target_relation: 0,
+                buff_id: 2221,
+                projectile_id: 0,
+                show_to_friendly_only: false,
+                next_phase: -1,
+                aoe_shape_id: 443,
+                target_buff_tag_id: 0,
+                target_no_buff_tag_id: 810,
+                use_origin_source: true,
+                effects: Vec::new(),
+            }),
+        )
     }
 }
 
@@ -162,12 +192,7 @@ fn backpack() -> Fixture {
                 (7631, doodad_func_group_kind::NORMAL),
             ],
         )
-        .func(
-            7622,
-            FuncTemplate::DeclareSiege(DoodadFuncDeclareSiege { id: 1 }),
-            7627,
-            DECLARE_SKILL,
-        )
+        .declare_siege_row(7622, 7627, DECLARE_SKILL)
         .siege_period(7627, 1, 2, 7631, false)
         .siege_period(7631, 2, 3, -1, false)
         .play_flow_graph(7631, 8)
@@ -186,6 +211,7 @@ fn defense_hq() -> Fixture {
         .play_flow_graph(8173, 6)
         .siege_period(8238, 5, 3, 8173, true)
         .play_flow_graph(8238, 7)
+        .safe_zone_clout(8238)
 }
 
 /// The shipped zone 34 schedule and two 2014 plan weeks (UTC, calendar timezone `+00:00`).
@@ -197,6 +223,17 @@ fn calendar_data() -> GameData {
             zone_key: TEST_ZONE,
             group_id: ZONE,
             ..Default::default()
+        },
+    );
+    // The authored 3410 `safezone_up` Clout 720 uses sphere 443.
+    data.systems.npcs.area_trigger.shapes.insert(
+        443,
+        AreaShape {
+            id: 443,
+            kind: AREA_SHAPE_SPHERE,
+            value1: 20.0,
+            value2: 0.0,
+            value3: 0.0,
         },
     );
     data.systems.housing.castles.siege_zones.insert(
@@ -356,8 +393,15 @@ async fn siege_period_stays_in_its_phase_until_the_period_ends() {
     assert_eq!(tick(&f.server), 0);
     assert_eq!(f.group(&doodad), 10581);
 
-    // Period 2 ends (no declaration: peace follows): the authored next phase is applied once.
-    f.clock(utc(2014, 1, 12, 20, 31));
+    // Period 2 ends and warmup begins (an explicit schedule): the authored next phase is
+    // applied once.
+    let real = Utc::now().timestamp();
+    f.server
+        .systems
+        .housing
+        .dominions
+        .schedule_siege(ZONE, 88, real + 3600, real + 7200, real)
+        .unwrap();
     assert_eq!(tick(&f.server), 1);
     assert_eq!(f.group(&doodad), 10582);
 
@@ -372,37 +416,50 @@ async fn authored_4307_chain_walks_period_2_to_5_and_disappears() {
     let doodad = f.doodad(CAMP);
     assert_eq!(f.group(&doodad), 10581);
 
-    assert_eq!(apply_period_change(&f.server, ZONE, 2, 3), 1);
+    assert_eq!(apply_period_change(&f.server, ZONE, 2, 3).changed, 1);
     assert_eq!(f.group(&doodad), 10582);
-    assert_eq!(apply_period_change(&f.server, ZONE, 3, 4), 1);
+    assert_eq!(apply_period_change(&f.server, ZONE, 3, 4).changed, 1);
     assert_eq!(f.group(&doodad), 10779);
-    assert_eq!(apply_period_change(&f.server, ZONE, 4, 5), 1);
+    assert_eq!(apply_period_change(&f.server, ZONE, 4, 5).changed, 1);
     assert!(doodad.data().phase.deleted);
     assert!(f.world.object(doodad.obj_id).is_none());
 
     // The remaining boundaries of the cycle are no-ops.
     for (previous, current) in [(5, 1), (1, 2)] {
-        assert_eq!(apply_period_change(&f.server, ZONE, previous, current), 0);
+        assert_eq!(
+            apply_period_change(&f.server, ZONE, previous, current).changed,
+            0
+        );
     }
 }
 
 #[tokio::test]
-async fn authored_3304_chain_advances_on_its_bound_skill_then_walks_the_periods() {
+async fn authored_3304_chain_waits_for_wp_s2_then_walks_the_periods() {
     let f = world(backpack());
     let doodad = f.doodad(BACKPACK);
     assert_eq!(f.group(&doodad), 7622);
 
-    // A different skill does not declare (the row is bound to 15067).
+    // The declaration row is inert until WP-S2: the class lives only in the phase-template
+    // dictionary, so a `doodad_funcs` row of that class never resolves through
+    // `GetFuncTemplate` (the C# had the same dead row).
+    f.use_(&doodad, DECLARE_SKILL);
+    assert_eq!(f.group(&doodad), 7622, "no skill may declare before WP-S2");
     f.use_(&doodad, 15062);
     assert_eq!(f.group(&doodad), 7622);
 
-    // The authored row's action: advance to the declare phase.
-    f.use_(&doodad, DECLARE_SKILL);
+    // WP-S2 will validate the declaration and enter 7627; from there the period chain runs.
+    manager::do_change_phase(
+        &f.server,
+        &f.world,
+        &doodad,
+        Some(&WorldObject::from(&f.player)),
+        7627,
+    );
     assert_eq!(f.group(&doodad), 7627);
 
-    assert_eq!(apply_period_change(&f.server, ZONE, 2, 3), 1);
+    assert_eq!(apply_period_change(&f.server, ZONE, 2, 3).changed, 1);
     assert_eq!(f.group(&doodad), 7631);
-    assert_eq!(apply_period_change(&f.server, ZONE, 3, 4), 1);
+    assert_eq!(apply_period_change(&f.server, ZONE, 3, 4).changed, 1);
     assert!(doodad.data().phase.deleted);
 }
 
@@ -413,7 +470,7 @@ async fn defender_hq_safe_zone_toggles_once_per_boundary_and_never_loops() {
     assert_eq!(f.group(&doodad), 8173);
 
     // Period 0 (UNKNOWN) safe default: up when the warmup begins.
-    assert_eq!(apply_period_change(&f.server, ZONE, 2, 3), 1);
+    assert_eq!(apply_period_change(&f.server, ZONE, 2, 3).changed, 1);
     assert_eq!(f.group(&doodad), 8238);
     // Reinitializing the retained object runs the phase funcs again; they must stay passive.
     manager::init_doodad(&f.server, &f.world, &doodad);
@@ -421,7 +478,7 @@ async fn defender_hq_safe_zone_toggles_once_per_boundary_and_never_loops() {
     assert!(!doodad.data().phase.deleted);
 
     // Warmup ends: down for the siege (func 5).
-    assert_eq!(apply_period_change(&f.server, ZONE, 3, 4), 1);
+    assert_eq!(apply_period_change(&f.server, ZONE, 3, 4).changed, 1);
     assert_eq!(f.group(&doodad), 8173);
     manager::init_doodad(&f.server, &f.world, &doodad);
     assert_eq!(f.group(&doodad), 8173);
@@ -429,13 +486,16 @@ async fn defender_hq_safe_zone_toggles_once_per_boundary_and_never_loops() {
 
     // Peace and the next auction/declare never bounce the object.
     for (previous, current) in [(4, 5), (5, 1), (1, 2)] {
-        assert_eq!(apply_period_change(&f.server, ZONE, previous, current), 0);
+        assert_eq!(
+            apply_period_change(&f.server, ZONE, previous, current).changed,
+            0
+        );
         assert_eq!(f.group(&doodad), 8173);
         assert!(!doodad.data().phase.deleted);
     }
 
     // The next warmup brings the safe zone back once.
-    assert_eq!(apply_period_change(&f.server, ZONE, 2, 3), 1);
+    assert_eq!(apply_period_change(&f.server, ZONE, 2, 3).changed, 1);
     assert_eq!(f.group(&doodad), 8238);
 }
 
@@ -499,8 +559,9 @@ async fn real_authored_siege_period_rows_walk_the_chains() {
             "authored SiegePeriod row {id}"
         );
     }
-    // The 3304 declaration row is reachable through the regular func lookup as well.
-    assert!(data.func_template(1, "DoodadFuncDeclareSiege").is_some());
+    // The 3304 declaration row stays dead until WP-S2: the loader registers the class as a
+    // phase template only, so the regular `doodad_funcs` row is not found.
+    assert!(data.func_template(1, "DoodadFuncDeclareSiege").is_none());
     assert!(data
         .phase_func_template(1, "DoodadFuncDeclareSiege")
         .is_some());
@@ -511,27 +572,156 @@ async fn real_authored_siege_period_rows_walk_the_chains() {
 
     let camp = f.doodad(CAMP);
     assert_eq!(f.group(&camp), 10581);
-    assert_eq!(apply_period_change(&f.server, ZONE, 2, 3), 1);
+    assert_eq!(apply_period_change(&f.server, ZONE, 2, 3).changed, 1);
     assert_eq!(f.group(&camp), 10582);
-    assert_eq!(apply_period_change(&f.server, ZONE, 3, 4), 1);
+    assert_eq!(apply_period_change(&f.server, ZONE, 3, 4).changed, 1);
     assert_eq!(f.group(&camp), 10779);
-    assert_eq!(apply_period_change(&f.server, ZONE, 4, 5), 1);
+    assert_eq!(apply_period_change(&f.server, ZONE, 4, 5).changed, 1);
     assert!(camp.data().phase.deleted);
 
     let backpack = f.doodad(BACKPACK);
     f.use_(&backpack, DECLARE_SKILL);
+    assert_eq!(f.group(&backpack), 7622);
+    manager::do_change_phase(&f.server, &f.world, &backpack, None, 7627);
     assert_eq!(f.group(&backpack), 7627);
-    assert_eq!(apply_period_change(&f.server, ZONE, 2, 3), 1);
+    assert_eq!(apply_period_change(&f.server, ZONE, 2, 3).changed, 1);
     assert_eq!(f.group(&backpack), 7631);
-    assert_eq!(apply_period_change(&f.server, ZONE, 3, 4), 1);
+    assert_eq!(apply_period_change(&f.server, ZONE, 3, 4).changed, 1);
     assert!(backpack.data().phase.deleted);
 
     let hq = f.doodad(DEFENSE_HQ);
     assert_eq!(f.group(&hq), 8173);
-    assert_eq!(apply_period_change(&f.server, ZONE, 2, 3), 1);
+    assert_eq!(apply_period_change(&f.server, ZONE, 2, 3).changed, 1);
     assert_eq!(f.group(&hq), 8238);
     manager::init_doodad(&f.server, &f.world, &hq);
     assert_eq!(f.group(&hq), 8238);
-    assert_eq!(apply_period_change(&f.server, ZONE, 3, 4), 1);
+    assert_eq!(apply_period_change(&f.server, ZONE, 3, 4).changed, 1);
     assert_eq!(f.group(&hq), 8173);
+}
+
+#[tokio::test]
+async fn a_boot_never_fires_the_safe_zone_period_zero_default() {
+    let f = world(defense_hq());
+    let doodad = f.doodad(DEFENSE_HQ);
+    assert_eq!(f.group(&doodad), 8173);
+
+    // The first observation of a territory whose dominion rows are not loaded yet is period 0
+    // and is silent.
+    assert_eq!(tick(&f.server), 0);
+    assert_eq!(
+        f.server.systems.npcs.doodads.siege_phase.observed(ZONE),
+        Some(0)
+    );
+
+    // Ownership (0 -> declare 2) moves nothing: period 0 ending is not a warmup start.
+    f.own();
+    f.clock(utc(2014, 1, 10, 23, 0));
+    assert_eq!(tick(&f.server), 0);
+    assert_eq!(f.group(&doodad), 8173);
+
+    // Declare -> peace (2 -> 5) also moves nothing.
+    f.clock(utc(2014, 1, 12, 20, 31));
+    assert_eq!(tick(&f.server), 0);
+    assert_eq!(f.group(&doodad), 8173);
+
+    // An explicit schedule enters warmup (5 -> 3): the documented period-0 default fires once.
+    let real = Utc::now().timestamp();
+    f.server
+        .systems
+        .housing
+        .dominions
+        .schedule_siege(ZONE, 88, real + 3600, real + 7200, real)
+        .unwrap();
+    assert_eq!(tick(&f.server), 1);
+    assert_eq!(f.group(&doodad), 8238);
+}
+
+#[tokio::test]
+async fn skipped_periods_are_walked_in_calendar_order() {
+    let f = world(camp());
+    let doodad = f.doodad(CAMP);
+
+    // A missed observation (2 -> 4) still ends periods 2 and 3, so the chain reaches 10779.
+    let outcome = apply_period_change(&f.server, ZONE, 2, 4);
+    assert_eq!(
+        outcome,
+        PeriodChange {
+            changed: 2,
+            busy: false
+        }
+    );
+    assert_eq!(f.group(&doodad), 10779);
+}
+
+#[tokio::test]
+async fn a_busy_transition_is_retried_on_the_next_tick() {
+    let f = world(camp());
+    f.own();
+    let doodad = f.doodad(CAMP);
+    f.clock(utc(2014, 1, 10, 23, 0));
+    assert_eq!(tick(&f.server), 0); // the first observation records declare (2) silently
+    assert_eq!(
+        f.server.systems.npcs.doodads.siege_phase.observed(ZONE),
+        Some(2)
+    );
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let held = doodad.clone();
+    let holder = std::thread::spawn(move || {
+        let _operation = Operation::enter(&held).expect("phase operation");
+        entered_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    entered_rx.recv().unwrap();
+
+    let real = Utc::now().timestamp();
+    f.server
+        .systems
+        .housing
+        .dominions
+        .schedule_siege(ZONE, 88, real + 3600, real + 7200, real)
+        .unwrap();
+    assert_eq!(tick(&f.server), 0); // busy: nothing moved and the period is not recorded
+    assert_eq!(f.group(&doodad), 10581);
+    assert_eq!(
+        f.server.systems.npcs.doodads.siege_phase.observed(ZONE),
+        Some(2)
+    );
+
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    assert_eq!(tick(&f.server), 1);
+    assert_eq!(f.group(&doodad), 10582);
+    assert_eq!(
+        f.server.systems.npcs.doodads.siege_phase.observed(ZONE),
+        Some(3)
+    );
+}
+
+#[tokio::test]
+async fn the_safe_zone_clout_is_removed_when_its_group_ends() {
+    let f = world(defense_hq());
+    let doodad = f.doodad(DEFENSE_HQ);
+    let attached = || {
+        f.server
+            .systems
+            .npcs
+            .area_triggers
+            .attached_to(doodad.obj_id)
+    };
+    assert!(attached().is_empty());
+
+    assert_eq!(apply_period_change(&f.server, ZONE, 2, 3).changed, 1);
+    assert_eq!(f.group(&doodad), 8238);
+    assert_eq!(attached().len(), 1, "safezone_up adds its revive zone");
+
+    assert_eq!(apply_period_change(&f.server, ZONE, 3, 4).changed, 1);
+    assert_eq!(f.group(&doodad), 8173);
+    assert!(attached().is_empty(), "safezone_down drops the revive zone");
+
+    // A second warmup adds exactly one, not a second copy of the first.
+    assert_eq!(apply_period_change(&f.server, ZONE, 2, 3).changed, 1);
+    assert_eq!(f.group(&doodad), 8238);
+    assert_eq!(attached().len(), 1);
 }

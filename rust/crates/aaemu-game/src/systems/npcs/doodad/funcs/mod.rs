@@ -190,13 +190,6 @@ pub fn use_func(
             tracing::trace!("DoodadFuncPuzzleRoll");
             set_to_next_phase(ctx, true);
         }
-        // `DoodadFuncDeclareSiege` (`doodad_func_declare_sieges` id 1) is authored as a normal
-        // `doodad_funcs` row of the 3304 declaration backpack (group 7622, skill 15067, next
-        // phase 7627) although the C# class derives from `DoodadPhaseFuncTemplate`. The C#
-        // `GetFuncTemplate` therefore never found it and the row did nothing. The declaration
-        // itself belongs to WP-S2; the authored action of this row is only the phase gate, so
-        // advance to the row's `NextPhase` when the bound skill is used.
-        F::DeclareSiege(_) => set_to_next_phase(ctx, true),
         // --- C# stubs (logging only) ---
         F::EvidenceItemLoot(_) => tracing::warn!("DoodadFuncEvidenceItemLoot"),
         F::TreeByProductsCollect(_) => tracing::trace!("DoodadFuncTreeByproductsCollect"),

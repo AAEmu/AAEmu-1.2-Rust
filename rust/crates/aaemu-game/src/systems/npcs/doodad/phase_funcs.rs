@@ -517,10 +517,12 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
         .buffs
         .contains_key(&f.buff_id)
         .then_some(f.buff_id);
+    let func_group_id = ctx.doodad.data().func_group_id;
     let mut trigger = AreaTrigger::default();
     trigger.shape = shape;
     trigger.owner = Some(owner.clone());
     trigger.caster = Some(trigger_caster.clone());
+    trigger.func_group_id = func_group_id;
     trigger.target_relation = f.target_relation;
     trigger.inside_buff_id = inside_buff_id;
     trigger.effects_per_buff = HashMap::from([(f.buff_id, f.effects.clone())]);
