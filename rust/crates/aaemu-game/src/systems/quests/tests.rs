@@ -4581,7 +4581,11 @@ async fn restart_request_requires_restart_on_fail_and_main_detail() {
     });
     let mut c = character();
     with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
-        for id in [93, 94] {
+        for (i, id) in [93, 94].into_iter().enumerate() {
+            // The previous refused attempt consumed the per-character throttle window.
+            if i > 0 {
+                ctx.now_ms += 3_001;
+            }
             let h = start(ctx, id);
             ctx.st.quest_mut(h).unwrap().objectives[0] = 1;
             assert!(!ctx.try_restart_quest(id), "quest {id} must be refused");
@@ -4628,7 +4632,7 @@ async fn restart_keeps_the_con_accept_item_of_the_start_component() {
             991,
             991,
             991,
-            0,
+            1,
             ActKind::ConAcceptItem {
                 item_id: ITEM,
                 cleanup: false,
