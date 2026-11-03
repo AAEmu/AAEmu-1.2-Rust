@@ -4,7 +4,6 @@
 //! `ILoginClient` is a [`RecordingClient`].
 
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use aes::cipher::block_padding::NoPadding;
@@ -13,12 +12,21 @@ use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use super::*;
 use crate::models::{KoreaAuthInfo, LoginResult, TwoFactorRequirements};
 use crate::services::sha256_crypt;
-use crate::services::two_factor::OtpValidation;
+use crate::services::two_factor::FactorValidation;
 use crate::test_support::{
     test_config, test_server, ClientCall, LoginBehavior, MockBackend, RecordingClient,
 };
 
 const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+#[test]
+fn auth_step_debug_redacts_codes() {
+    let otp = format!("{:?}", KoreaStep::Otp("12345678".into()));
+    assert!(otp.contains("<redacted>") && !otp.contains("12345678"));
+    let cert = format!("{:?}", KoreaStep::Cert("87654321".into()));
+    assert!(cert.contains("<redacted>") && !cert.contains("87654321"));
+    assert_eq!(format!("{:?}", KoreaStep::Ars(true)), "Ars(true)");
+}
 
 // ---- KoreaAuthFlowTests -------------------------------------------------------------------
 
@@ -32,12 +40,11 @@ struct Fixture {
 /// `new KoreaAuthOptions { ... }`); `None` means `new KoreaAuthOptions { Enabled = true }`.
 fn fixture(options: Option<serde_json::Value>) -> Fixture {
     let options = options.unwrap_or_else(|| serde_json::json!({ "Enabled": true }));
-    fixture_with_config(serde_json::json!({ "KoreaAuth": options }))
-}
-
-fn fixture_with_config(config: serde_json::Value) -> Fixture {
     let backend = Arc::new(MockBackend::default());
-    let server = test_server(test_config(config), backend.clone());
+    let server = test_server(
+        test_config(serde_json::json!({ "KoreaAuth": options })),
+        backend.clone(),
+    );
     Fixture {
         backend,
         server,
@@ -66,7 +73,7 @@ fn second_factor_awaiting(step: SecondFactorStep, account_id: AccountId) -> Seco
         },
         _ => TwoFactorRequirements::NONE,
     };
-    SecondFactorFlow::new(account_id, "testuser", requirements).with_step(step)
+    SecondFactorFlow::new(account_id, "testuser", LOOPBACK, requirements).with_step(step)
 }
 
 /// `MakeKoreaAuthInfo`: a real sha256_crypt hash for `password` with fast (1000) rounds.
@@ -285,7 +292,7 @@ async fn submit_otp_async_when_not_awaiting_otp_returns_denied() {
 #[tokio::test]
 async fn submit_otp_async_invalid_otp_sends_retry_packet_returns_pending() {
     let f = fixture(Some(serde_json::json!({ "MaxOtpAttempts": 3 })));
-    f.backend.set_otp(OtpValidation::Invalid);
+    f.backend.set_otp(FactorValidation::Invalid);
     let mut flow = create_flow("testuser");
     flow.set_second_factor(second_factor_awaiting(
         SecondFactorStep::AwaitingOtp,
@@ -304,7 +311,7 @@ async fn submit_otp_async_invalid_otp_sends_retry_packet_returns_pending() {
 #[tokio::test]
 async fn submit_otp_async_max_attempts_exceeded_returns_denied() {
     let f = fixture(Some(serde_json::json!({ "MaxOtpAttempts": 2 })));
-    f.backend.set_otp(OtpValidation::Invalid);
+    f.backend.set_otp(FactorValidation::Invalid);
     let mut flow = create_flow("testuser");
     flow.set_second_factor(second_factor_awaiting(
         SecondFactorStep::AwaitingOtp,
@@ -346,7 +353,7 @@ async fn submit_cert_async_when_not_awaiting_cert_returns_denied() {
 #[tokio::test]
 async fn submit_cert_async_invalid_cert_sends_retry_packet_returns_pending() {
     let f = fixture(Some(serde_json::json!({ "MaxCertAttempts": 3 })));
-    f.backend.cert_valid.store(false, Ordering::SeqCst);
+    f.backend.set_cert(FactorValidation::Invalid);
     let mut flow = create_flow("testuser");
     flow.set_second_factor(second_factor_awaiting(
         SecondFactorStep::AwaitingCert,
@@ -365,7 +372,7 @@ async fn submit_cert_async_invalid_cert_sends_retry_packet_returns_pending() {
 #[tokio::test]
 async fn submit_cert_async_max_attempts_exceeded_returns_denied() {
     let f = fixture(Some(serde_json::json!({ "MaxCertAttempts": 2 })));
-    f.backend.cert_valid.store(false, Ordering::SeqCst);
+    f.backend.set_cert(FactorValidation::Invalid);
     let mut flow = create_flow("testuser");
     flow.set_second_factor(second_factor_awaiting(
         SecondFactorStep::AwaitingCert,
@@ -559,7 +566,7 @@ async fn password_two_factor_account_completes_after_a_valid_otp() {
     f.backend.set_ban(false, LoginDeniedReason::default());
     let mut flow = password_flow("otpuser", "testpass");
     flow.start(&f.server, &f.client).await.unwrap();
-    f.backend.set_otp(OtpValidation::Valid);
+    f.backend.set_otp(FactorValidation::Valid);
 
     let result = flow
         .step(&f.server, &f.client, KoreaStep::Otp("12345678".into()))
@@ -583,7 +590,7 @@ async fn password_two_factor_account_cannot_finish_with_a_wrong_otp() {
             AccountId(324),
             otp_requirements(),
         )));
-    f.backend.set_otp(OtpValidation::Invalid);
+    f.backend.set_otp(FactorValidation::Invalid);
     let mut flow = password_flow("otpuser", "testpass");
     flow.start(&f.server, &f.client).await.unwrap();
 
@@ -607,7 +614,7 @@ async fn password_two_factor_account_locked_otp_is_denied() {
             AccountId(325),
             otp_requirements(),
         )));
-    f.backend.set_otp(OtpValidation::Locked);
+    f.backend.set_otp(FactorValidation::Locked);
     let mut flow = password_flow("otpuser", "testpass");
     flow.start(&f.server, &f.client).await.unwrap();
 
@@ -632,7 +639,7 @@ async fn password_two_factor_ban_check_happens_after_the_factors() {
         )));
     f.backend
         .set_ban(true, LoginDeniedReason::TRY_TRADE_CASH_TEMPORAL);
-    f.backend.set_otp(OtpValidation::Valid);
+    f.backend.set_otp(FactorValidation::Valid);
     let mut flow = password_flow("otpuser", "testpass");
 
     // The password step must not reveal the ban; it only prompts for the factor.
@@ -650,30 +657,4 @@ async fn password_two_factor_ban_check_happens_after_the_factors() {
         result,
         AuthFlowResult::Denied(LoginDeniedReason::TRY_TRADE_CASH_TEMPORAL)
     );
-}
-
-#[tokio::test]
-async fn password_two_factor_disabled_in_config_logs_in_without_the_factor() {
-    let f = fixture_with_config(serde_json::json!({
-        "KoreaAuth": { "Enabled": true },
-        "TwoFactor": { "EnforceOnPasswordLogin": false }
-    }));
-    let account_id = AccountId(327);
-    f.backend
-        .set_login(LoginBehavior::Result(LoginResult::ok_with_two_factor(
-            account_id,
-            otp_requirements(),
-        )));
-    let mut flow = password_flow("otpuser", "testpass");
-
-    let result = flow.start(&f.server, &f.client).await.unwrap();
-
-    assert_eq!(
-        result,
-        AuthFlowResult::Success {
-            account_id,
-            username: Some("otpuser".to_string()),
-        }
-    );
-    assert!(f.client.calls().is_empty());
 }

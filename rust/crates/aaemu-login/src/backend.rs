@@ -17,7 +17,7 @@ use crate::models::{
 };
 use crate::services::password::Password;
 use crate::services::two_factor::{
-    ArsService, ArsSession, OtpService, OtpValidation, PcCertService, TwoFactorService,
+    ArsService, ArsSession, FactorValidation, OtpService, PcCertService, TwoFactorService,
 };
 
 /// Account and two-factor operations used by the authentication flows. Dyn-compatible (futures
@@ -54,14 +54,23 @@ pub trait AuthBackend: Send + Sync {
         &'a self,
         account_id: AccountId,
         code: &'a str,
-    ) -> BoxFuture<'a, anyhow::Result<OtpValidation>>;
+    ) -> BoxFuture<'a, anyhow::Result<FactorValidation>>;
 
-    /// `IPcCertService.ValidateAsync`.
+    /// `IPcCertService.ValidateAsync`, including the per-account failure limiter.
     fn validate_pc_cert<'a>(
         &'a self,
         account_id: AccountId,
         pin: &'a str,
-    ) -> BoxFuture<'a, anyhow::Result<bool>>;
+    ) -> BoxFuture<'a, anyhow::Result<FactorValidation>>;
+
+    /// Records a fully authenticated login (`users.last_ip`, `last_login`, `updated_at`) and the
+    /// "connected" log line. Called only after every required factor has passed.
+    fn record_login<'a>(
+        &'a self,
+        account_id: AccountId,
+        username: &'a str,
+        ip: IpAddr,
+    ) -> BoxFuture<'a, anyhow::Result<()>>;
 
     /// `IArsService.CreateSessionAsync`: creates the session and asks the phone provider to call.
     fn create_ars_session(
@@ -115,7 +124,7 @@ impl AuthBackend for DbAuthBackend {
         &'a self,
         account_id: AccountId,
         code: &'a str,
-    ) -> BoxFuture<'a, anyhow::Result<OtpValidation>> {
+    ) -> BoxFuture<'a, anyhow::Result<FactorValidation>> {
         async move { Ok(self.otp.validate(account_id, code).await?) }.boxed()
     }
 
@@ -123,8 +132,17 @@ impl AuthBackend for DbAuthBackend {
         &'a self,
         account_id: AccountId,
         pin: &'a str,
-    ) -> BoxFuture<'a, anyhow::Result<bool>> {
+    ) -> BoxFuture<'a, anyhow::Result<FactorValidation>> {
         async move { Ok(self.pc_cert.validate(account_id, pin).await?) }.boxed()
+    }
+
+    fn record_login<'a>(
+        &'a self,
+        account_id: AccountId,
+        username: &'a str,
+        ip: IpAddr,
+    ) -> BoxFuture<'a, anyhow::Result<()>> {
+        self.logins.record_login(account_id, username, ip).boxed()
     }
 
     fn create_ars_session(

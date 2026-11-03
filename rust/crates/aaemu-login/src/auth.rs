@@ -19,7 +19,7 @@ use crate::packets::PacketError;
 use crate::server::LoginServer;
 use crate::services::korea;
 use crate::services::password::Password;
-use crate::services::two_factor::OtpValidation;
+use crate::services::two_factor::FactorValidation;
 
 /// The result of an authentication flow step.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,6 +73,9 @@ pub struct ReconnectAuthFlow {
     pub gs_id: GameServerId,
     pub account_id: AccountId,
     pub token: u32,
+    /// The IP of the connection presenting the token; must match the login the token was issued
+    /// for.
+    pub client_ip: IpAddr,
 }
 
 /// Any authentication flow.
@@ -102,6 +105,12 @@ impl AuthFlow {
     /// are never stored.
     pub fn awaits_continuation(&self) -> bool {
         matches!(self, Self::Korea(_) | Self::SecondFactor(_))
+    }
+
+    /// A denied reconnect closes the connection: its token is consumed on the attempt, so the
+    /// same socket must not be able to keep guessing.
+    pub fn denial_closes_connection(&self) -> bool {
+        matches!(self, Self::Reconnect(_))
     }
 
     /// `IAuthenticationFlow.StartAsync`. An `Err` corresponds to an exception escaping the C#
@@ -135,10 +144,9 @@ impl AuthFlow {
                 // Enforce the account's 2FA on every password path (Trion ticket, Mail.Ru and
                 // plain password). The password is verified; the factors and the final ban check
                 // happen in the shared state machine.
-                if server.config.two_factor.enforce_on_password_login && r.two_factor.any_required()
-                {
+                if r.two_factor.any_required() {
                     let mut second_factor =
-                        SecondFactorFlow::new(r.account_id, username, r.two_factor);
+                        SecondFactorFlow::new(r.account_id, username, client_ip, r.two_factor);
                     let result = second_factor.start(server, client).await?;
                     *self = Self::SecondFactor(Box::new(second_factor));
                     return Ok(result);
@@ -149,15 +157,14 @@ impl AuthFlow {
                 })
             }
             Self::Reconnect(f) => {
-                let r = server
-                    .logins
-                    .reconnect(&server.games, f.gs_id, f.account_id, f.token)?;
-                Ok(if r.success {
-                    AuthFlowResult::Success {
-                        account_id: r.account_id,
-                        username: None,
-                    }
-                } else {
+                let r = server.logins.reconnect(
+                    &server.games,
+                    f.gs_id,
+                    f.account_id,
+                    f.token,
+                    f.client_ip,
+                )?;
+                if !r.success {
                     let failure = r.failure;
                     if let Some(failure) = failure {
                         tracing::debug!(
@@ -166,10 +173,19 @@ impl AuthFlow {
                             f.gs_id,
                             failure
                         );
-                        AuthFlowResult::Denied(failure.reason())
-                    } else {
-                        AuthFlowResult::Denied(LoginDeniedReason::BAD_RESPONSE)
+                        return Ok(AuthFlowResult::Denied(failure.reason()));
                     }
+                    return Ok(AuthFlowResult::Denied(LoginDeniedReason::BAD_RESPONSE));
+                }
+                // The token is only issued by the game after a fully authenticated session, but
+                // the account may have been banned since; do not skip the ban check.
+                let (banned, reason) = server.auth.check_ban_status(r.account_id).await?;
+                if banned {
+                    return Ok(AuthFlowResult::Denied(reason));
+                }
+                Ok(AuthFlowResult::Success {
+                    account_id: r.account_id,
+                    username: None,
                 })
             }
             Self::Korea(f) => f.start(server, client).await,
@@ -193,8 +209,9 @@ impl AuthFlow {
     }
 }
 
-/// A continuation of the Korea flow, triggered by a client packet (or the ARS callback).
-#[derive(Clone, Debug)]
+/// A continuation of a multi-step flow, triggered by a client packet (or the ARS callback).
+/// `Debug` redacts OTP codes and PC-certificate PINs.
+#[derive(Clone)]
 pub enum KoreaStep {
     /// `IChallengeAuthFlow.ContinueAsync` (`CAChallengeResponsePacket`).
     ChallengeV1 { ch: [u32; 4], pw: Vec<u8> },
@@ -206,6 +223,22 @@ pub enum KoreaStep {
     Cert(String),
     /// `IArsAuthFlow.CompleteArsAsync` (external phone system callback).
     Ars(bool),
+}
+
+impl std::fmt::Debug for KoreaStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ChallengeV1 { ch, pw } => f
+                .debug_struct("ChallengeV1")
+                .field("ch", ch)
+                .field("pw", &format!("<redacted {} bytes>", pw.len()))
+                .finish(),
+            Self::ChallengeV2 { ch } => f.debug_struct("ChallengeV2").field("ch", ch).finish(),
+            Self::Otp(_) => f.debug_tuple("Otp").field(&"<redacted>").finish(),
+            Self::Cert(_) => f.debug_tuple("Cert").field(&"<redacted>").finish(),
+            Self::Ars(success) => f.debug_tuple("Ars").field(success).finish(),
+        }
+    }
 }
 
 impl KoreaStep {
@@ -245,6 +278,8 @@ pub enum SecondFactorStep {
 pub struct SecondFactorFlow {
     account_id: AccountId,
     username: String,
+    /// The client IP, recorded with the login once every factor passed.
+    client_ip: IpAddr,
     requirements: TwoFactorRequirements,
     step: SecondFactorStep,
     otp_attempts: i32,
@@ -266,11 +301,13 @@ impl SecondFactorFlow {
     pub fn new(
         account_id: AccountId,
         username: impl Into<String>,
+        client_ip: IpAddr,
         requirements: TwoFactorRequirements,
     ) -> Self {
         Self {
             account_id,
             username: username.into(),
+            client_ip,
             requirements,
             step: SecondFactorStep::NotStarted,
             otp_attempts: 0,
@@ -321,15 +358,15 @@ impl SecondFactorFlow {
         }
         self.otp_attempts += 1;
         match server.auth.validate_otp(self.account_id, code).await? {
-            OtpValidation::Valid => self.advance(server, client).await,
-            OtpValidation::Locked => {
+            FactorValidation::Valid => self.advance(server, client).await,
+            FactorValidation::Locked => {
                 tracing::warn!(
                     "OTP login refused for account {}: too many failed attempts",
                     self.account_id
                 );
                 Ok(AuthFlowResult::Denied(LoginDeniedReason::BAD_RESPONSE))
             }
-            OtpValidation::Invalid => {
+            FactorValidation::Invalid => {
                 let max = server.config.korea_auth.max_otp_attempts;
                 if self.otp_attempts >= max {
                     return Ok(AuthFlowResult::Denied(LoginDeniedReason::BAD_RESPONSE));
@@ -351,16 +388,25 @@ impl SecondFactorFlow {
             return Ok(AuthFlowResult::Denied(LoginDeniedReason::BAD_RESPONSE));
         }
         self.cert_attempts += 1;
-        if !server.auth.validate_pc_cert(self.account_id, pin).await? {
-            let max = server.config.korea_auth.max_cert_attempts;
-            if self.cert_attempts >= max {
-                return Ok(AuthFlowResult::Denied(LoginDeniedReason::BAD_RESPONSE));
+        match server.auth.validate_pc_cert(self.account_id, pin).await? {
+            FactorValidation::Valid => self.advance(server, client).await,
+            FactorValidation::Locked => {
+                tracing::warn!(
+                    "PC certificate login refused for account {}: too many failed attempts",
+                    self.account_id
+                );
+                Ok(AuthFlowResult::Denied(LoginDeniedReason::BAD_RESPONSE))
             }
-            // Send retry packet
-            client.send_cert_prompt(max, self.cert_attempts + 1)?;
-            return Ok(AuthFlowResult::Pending);
+            FactorValidation::Invalid => {
+                let max = server.config.korea_auth.max_cert_attempts;
+                if self.cert_attempts >= max {
+                    return Ok(AuthFlowResult::Denied(LoginDeniedReason::BAD_RESPONSE));
+                }
+                // Send retry packet
+                client.send_cert_prompt(max, self.cert_attempts + 1)?;
+                Ok(AuthFlowResult::Pending)
+            }
         }
-        self.advance(server, client).await
     }
 
     async fn complete_ars(
@@ -403,12 +449,16 @@ impl SecondFactorFlow {
             client.send_ars_prompt(&session.session_code, timeout)?;
             return Ok(AuthFlowResult::Pending);
         }
-        // All steps complete. Check ban status before issuing success
+        // All steps complete. Check ban status before issuing success, then record the login.
         self.step = SecondFactorStep::Completed;
         let (banned, reason) = server.auth.check_ban_status(self.account_id).await?;
         if banned {
             return Ok(AuthFlowResult::Denied(reason));
         }
+        server
+            .auth
+            .record_login(self.account_id, &self.username, self.client_ip)
+            .await?;
         Ok(AuthFlowResult::Success {
             account_id: self.account_id,
             username: Some(self.username.clone()),
@@ -420,8 +470,6 @@ impl SecondFactorFlow {
 /// certificate and ARS verification as required by the account (`user_2fa`).
 pub struct KoreaAuthFlow {
     username: String,
-    /// Unused, as in the C# flow.
-    #[allow(dead_code)]
     client_ip: IpAddr,
     state: KoreaState,
     account_id: AccountId,
@@ -547,8 +595,12 @@ impl KoreaAuthFlow {
             .auth
             .get_two_factor_requirements(self.account_id)
             .await?;
-        let mut second_factor =
-            SecondFactorFlow::new(self.account_id, self.username.clone(), requirements);
+        let mut second_factor = SecondFactorFlow::new(
+            self.account_id,
+            self.username.clone(),
+            self.client_ip,
+            requirements,
+        );
         let result = second_factor.start(server, client).await?;
         self.state = KoreaState::AwaitingSecondFactor;
         self.second_factor = Some(second_factor);

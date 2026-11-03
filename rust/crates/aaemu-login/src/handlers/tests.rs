@@ -31,6 +31,10 @@ async fn fixture() -> Arc<LoginServer> {
     }));
     let server = test_server(config, Arc::new(MockBackend::default()));
     server.games.load(&server.config).await;
+    // A completed login from the loopback address, so reconnect tokens can be bound.
+    server
+        .logins
+        .set_last_login_ip_for_test(ACCOUNT, IpAddr::V4(Ipv4Addr::LOCALHOST));
     server
 }
 
@@ -71,6 +75,7 @@ async fn reconnect_result(server: &LoginServer, gs_id: GameServerId, token: u32)
         gs_id,
         account_id: ACCOUNT,
         token,
+        client_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
     })
     .start(server, &RecordingClient::default())
     .await
@@ -186,15 +191,9 @@ async fn registered_parent_and_mirror_can_seed_reconnect_tokens() {
         let (op, mut s) = split_opcode(rx.try_recv().unwrap()).unwrap();
         assert_eq!(op, l2g_op::LG_PLAYER_RECONNECT);
         assert_eq!(LgPlayerReconnect::read(&mut s).unwrap().token, token);
-        assert_eq!(
-            reconnect_result(&server, gs_id, token).await,
-            AuthFlowResult::Success {
-                account_id: ACCOUNT,
-                username: None
-            }
-        );
         if gs_id == WORLD {
-            // A parent's token is still accepted for its mirror before a mirror token table exists.
+            // A parent's token is still accepted for its mirror before a mirror token table
+            // exists, and that use consumes it (single-use).
             assert_eq!(
                 reconnect_result(&server, OTHER_WORLD, token).await,
                 AuthFlowResult::Success {
@@ -202,7 +201,33 @@ async fn registered_parent_and_mirror_can_seed_reconnect_tokens() {
                     username: None
                 }
             );
+            // The consumed token left the parent's table empty, so this is the "unavailable"
+            // denial; either way it is not a success.
+            assert_eq!(
+                reconnect_result(&server, WORLD, token).await,
+                AuthFlowResult::Denied(ReconnectFailure::GameServerUnavailable.reason())
+            );
+            // Re-seed the parent token for the normal parent check below.
+            handle_g2l(
+                &server,
+                &conn,
+                G2lPacket::PlayerReconnect(GlPlayerReconnect {
+                    gs_id,
+                    account_id: ACCOUNT,
+                    token,
+                }),
+            )
+            .await
+            .unwrap();
+            rx.try_recv().unwrap();
         }
+        assert_eq!(
+            reconnect_result(&server, gs_id, token).await,
+            AuthFlowResult::Success {
+                account_id: ACCOUNT,
+                username: None
+            }
+        );
     }
 }
 
@@ -276,6 +301,7 @@ async fn unauthorized_enter_response_cannot_complete_pending_world_entry() {
                 gs_id: OTHER_WORLD,
                 account_id: ACCOUNT,
                 token: 777,
+                client_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
             }),
         )
         .await

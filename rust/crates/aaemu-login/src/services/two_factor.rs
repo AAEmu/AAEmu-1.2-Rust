@@ -220,36 +220,37 @@ pub mod totp {
 /// A source of the current time (the C# `TimeProvider`).
 pub type Clock = Arc<dyn Fn() -> SystemTime + Send + Sync>;
 
-/// The result of one OTP submission after the per-account limiter.
+/// The result of one OTP / PC-certificate submission after the per-account limiter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OtpValidation {
+pub enum FactorValidation {
     Valid,
-    /// The code was wrong (or replayed). The failure has been counted.
+    /// The code or PIN was wrong (or a TOTP step was replayed). The failure has been counted.
     Invalid,
-    /// The account is locked after too many failures; no code was checked.
+    /// The account is locked after too many failures; nothing was checked.
     Locked,
 }
 
-impl OtpValidation {
+impl FactorValidation {
     pub fn is_valid(self) -> bool {
         self == Self::Valid
     }
 }
 
-/// Per-account OTP policy (`TwoFactor:MaxOtpFailures` / `OtpLockoutMinutes`).
+/// Per-account factor policy (`TwoFactor:MaxOtpFailures` / `OtpLockoutMinutes`), shared by the
+/// OTP and PC-certificate checks (each service owns its own counter).
 #[derive(Clone)]
-pub struct OtpPolicy {
-    /// Failures allowed before locking. `0` disables the limiter.
+pub struct FactorPolicy {
+    /// Failures allowed before locking (config validation enforces >= 1).
     pub max_failures: u32,
     pub lockout: Duration,
     pub clock: Clock,
 }
 
-impl OtpPolicy {
+impl FactorPolicy {
     pub fn from_options(options: &TwoFactorOptions) -> Self {
         Self {
-            max_failures: options.max_otp_failures.max(0) as u32,
-            lockout: Duration::from_secs(options.otp_lockout_minutes.max(0) as u64 * 60),
+            max_failures: options.max_otp_failures.max(1) as u32,
+            lockout: Duration::from_secs(options.otp_lockout_minutes.max(1) as u64 * 60),
             clock: Arc::new(SystemTime::now),
         }
     }
@@ -263,15 +264,15 @@ impl OtpPolicy {
     }
 }
 
-impl Default for OtpPolicy {
+impl Default for FactorPolicy {
     fn default() -> Self {
         Self::from_options(&TwoFactorOptions::default())
     }
 }
 
-impl std::fmt::Debug for OtpPolicy {
+impl std::fmt::Debug for FactorPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OtpPolicy")
+        f.debug_struct("FactorPolicy")
             .field("max_failures", &self.max_failures)
             .field("lockout", &self.lockout)
             .finish_non_exhaustive()
@@ -279,31 +280,32 @@ impl std::fmt::Debug for OtpPolicy {
 }
 
 #[derive(Clone, Debug, Default)]
-struct OtpAttemptEntry {
+struct FactorAttemptEntry {
     failures: u32,
     locked_until: Option<SystemTime>,
     /// Highest accepted TOTP time step, for replay protection.
     last_accepted_step: Option<u64>,
 }
 
-/// Per-account OTP failure counting, locking and TOTP replay protection.
+/// Per-account factor failure counting and locking (OTP and PC certificate); the OTP service also
+/// uses it for TOTP replay protection.
 ///
 /// The state is shared by every connection, so reconnecting (or opening parallel connections)
 /// cannot reset the counter. Each account has one async gate held across the whole
 /// check-and-record sequence, so two concurrent submissions cannot both pass the limit.
 #[derive(Clone)]
-pub struct OtpAttemptLimiter {
+pub struct FactorAttemptLimiter {
     max_failures: u32,
     lockout: Duration,
     clock: Clock,
-    attempts: Arc<DashMap<AccountId, OtpAttemptEntry>>,
-    /// One gate per account; bounded by the number of accounts that submit an OTP.
+    attempts: Arc<DashMap<AccountId, FactorAttemptEntry>>,
+    /// One gate per account; bounded by the number of accounts that submit a factor.
     gates: Arc<DashMap<AccountId, Arc<AsyncMutex<()>>>>,
 }
 
-impl std::fmt::Debug for OtpAttemptLimiter {
+impl std::fmt::Debug for FactorAttemptLimiter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OtpAttemptLimiter")
+        f.debug_struct("FactorAttemptLimiter")
             .field("max_failures", &self.max_failures)
             .field("lockout", &self.lockout)
             .field("attempts", &self.attempts.len())
@@ -311,8 +313,8 @@ impl std::fmt::Debug for OtpAttemptLimiter {
     }
 }
 
-impl OtpAttemptLimiter {
-    pub fn new(policy: OtpPolicy) -> Self {
+impl FactorAttemptLimiter {
+    pub fn new(policy: FactorPolicy) -> Self {
         Self {
             max_failures: policy.max_failures,
             lockout: policy.lockout,
@@ -344,28 +346,35 @@ impl OtpAttemptLimiter {
             .is_some_and(|e| e.locked_until.is_some_and(|until| now < until))
     }
 
+    /// Records a successful factor check and clears the failure counter.
+    fn record_success(&self, account_id: AccountId) {
+        let mut entry = self.attempts.entry(account_id).or_default();
+        entry.failures = 0;
+        entry.locked_until = None;
+    }
+
     /// Counts one failure; returns the resulting outcome (the lock is set on the failure that
     /// reaches the configured maximum).
-    fn record_failure(&self, account_id: AccountId) -> OtpValidation {
+    fn record_failure(&self, account_id: AccountId) -> FactorValidation {
         let now = (self.clock)();
         let mut entry = self.attempts.entry(account_id).or_default();
         entry.failures = entry.failures.saturating_add(1);
         if self.max_failures > 0 && entry.failures >= self.max_failures {
             entry.locked_until = Some(now + self.lockout);
             tracing::warn!(
-                "OTP account {} locked after {} failed attempts for {:?}",
+                "factor attempts for account {} locked after {} failures for {:?}",
                 account_id,
                 entry.failures,
                 self.lockout
             );
-            OtpValidation::Locked
+            FactorValidation::Locked
         } else {
             tracing::debug!(
-                "OTP validation failed for account {} (attempt {})",
+                "factor validation failed for account {} (attempt {})",
                 account_id,
                 entry.failures
             );
-            OtpValidation::Invalid
+            FactorValidation::Invalid
         }
     }
 
@@ -389,10 +398,10 @@ impl OtpAttemptLimiter {
         account_id: AccountId,
         secret: Option<&[u8]>,
         code: &str,
-    ) -> OtpValidation {
+    ) -> FactorValidation {
         let now = (self.clock)();
         if !self.ready(account_id, now) {
-            return OtpValidation::Locked;
+            return FactorValidation::Locked;
         }
         let Some(secret) = secret else {
             tracing::warn!(
@@ -414,13 +423,13 @@ impl OtpAttemptLimiter {
                     account_id,
                     step
                 );
-                return OtpValidation::Invalid;
+                return FactorValidation::Invalid;
             }
             entry.last_accepted_step = Some(step);
             entry.failures = 0;
             entry.locked_until = None;
         }
-        OtpValidation::Valid
+        FactorValidation::Valid
     }
 }
 
@@ -437,27 +446,31 @@ fn otp_secret_bytes(config: Option<&TwoFactorConfig>) -> Option<Vec<u8>> {
 #[derive(Clone, Debug)]
 pub struct OtpService {
     repository: TwoFactorRepository,
-    limiter: OtpAttemptLimiter,
+    limiter: FactorAttemptLimiter,
 }
 
 impl OtpService {
     /// 160 bits, standard for TOTP.
     const SECRET_LENGTH: usize = 20;
 
-    pub fn new(repository: TwoFactorRepository, policy: OtpPolicy) -> Self {
+    pub fn new(repository: TwoFactorRepository, policy: FactorPolicy) -> Self {
         Self {
             repository,
-            limiter: OtpAttemptLimiter::new(policy),
+            limiter: FactorAttemptLimiter::new(policy),
         }
     }
 
     /// Validates a TOTP code for an account. The OTP lock is checked before the database read.
-    pub async fn validate(&self, account_id: AccountId, code: &str) -> sqlx::Result<OtpValidation> {
+    pub async fn validate(
+        &self,
+        account_id: AccountId,
+        code: &str,
+    ) -> sqlx::Result<FactorValidation> {
         let gate = self.limiter.gate(account_id);
         let _guard = gate.lock().await;
         if self.limiter.is_locked(account_id) {
             tracing::warn!("OTP validation refused for locked account {}", account_id);
-            return Ok(OtpValidation::Locked);
+            return Ok(FactorValidation::Locked);
         }
         let config = self.repository.get_config(account_id).await?;
         Ok(self.limiter.check_locked(
@@ -474,7 +487,7 @@ impl OtpService {
         config: Option<&TwoFactorConfig>,
         account_id: AccountId,
         code: &str,
-    ) -> OtpValidation {
+    ) -> FactorValidation {
         let gate = self.limiter.gate(account_id);
         let _guard = gate.lock().await;
         self.limiter
@@ -490,33 +503,72 @@ impl OtpService {
 }
 
 /// `PcCertService`: PC certificate PIN verification (PINs are hashed like passwords).
+///
+/// PIN guesses are serialised per account and counted under the same lockout policy as OTP:
+/// PBKDF2 is expensive, so a locked account is refused before the hash or the database is
+/// touched.
 #[derive(Clone, Debug)]
 pub struct PcCertService {
     repository: TwoFactorRepository,
     passwords: PasswordService,
+    limiter: FactorAttemptLimiter,
 }
 
 impl PcCertService {
-    pub fn new(repository: TwoFactorRepository, passwords: PasswordService) -> Self {
+    pub fn new(
+        repository: TwoFactorRepository,
+        passwords: PasswordService,
+        policy: FactorPolicy,
+    ) -> Self {
         Self {
             repository,
             passwords,
+            limiter: FactorAttemptLimiter::new(policy),
         }
     }
 
-    pub async fn validate(&self, account_id: AccountId, pin: &str) -> sqlx::Result<bool> {
+    pub async fn validate(
+        &self,
+        account_id: AccountId,
+        pin: &str,
+    ) -> sqlx::Result<FactorValidation> {
+        let gate = self.limiter.gate(account_id);
+        let _guard = gate.lock().await;
+        if self.limiter.is_locked(account_id) {
+            tracing::warn!(
+                "PcCert validation refused for locked account {}",
+                account_id
+            );
+            return Ok(FactorValidation::Locked);
+        }
         let config = self.repository.get_config(account_id).await?;
-        Ok(self.validate_config(config, account_id, pin).await)
+        Ok(self.validate_locked(config, account_id, pin).await)
     }
 
     /// Validates `pin` against an already loaded 2FA configuration (the part of
-    /// [`Self::validate`] after the `ITwoFactorRepository.GetConfigAsync` lookup).
+    /// [`Self::validate`] after the `ITwoFactorRepository.GetConfigAsync` lookup). The limiter
+    /// is shared by every clone of the service.
     pub async fn validate_config(
         &self,
         config: Option<TwoFactorConfig>,
         account_id: AccountId,
         pin: &str,
-    ) -> bool {
+    ) -> FactorValidation {
+        let gate = self.limiter.gate(account_id);
+        let _guard = gate.lock().await;
+        self.validate_locked(config, account_id, pin).await
+    }
+
+    async fn validate_locked(
+        &self,
+        config: Option<TwoFactorConfig>,
+        account_id: AccountId,
+        pin: &str,
+    ) -> FactorValidation {
+        let now = (self.limiter.clock)();
+        if !self.limiter.ready(account_id, now) {
+            return FactorValidation::Locked;
+        }
         let Some(hash) = config
             .and_then(|c| c.cert_pin_hash)
             .filter(|s| !s.is_empty())
@@ -525,7 +577,7 @@ impl PcCertService {
                 "PcCert validation attempted for account {} with no PIN configured",
                 account_id
             );
-            return false;
+            return self.limiter.record_failure(account_id);
         };
         // Reuse the password service for PIN verification - same hashing approach
         let passwords = self.passwords.clone();
@@ -533,11 +585,13 @@ impl PcCertService {
         let result = tokio::task::spawn_blocking(move || passwords.verify_password(&hash, &pin))
             .await
             .unwrap_or(PasswordVerificationResult::Failed);
-        let valid = result != PasswordVerificationResult::Failed;
-        if !valid {
+        if result == PasswordVerificationResult::Failed {
             tracing::debug!("PcCert PIN validation failed for account {}", account_id);
+            self.limiter.record_failure(account_id)
+        } else {
+            self.limiter.record_success(account_id);
+            FactorValidation::Valid
         }
-        valid
     }
 }
 
@@ -575,12 +629,12 @@ impl ArsPhoneProvider for DisabledArsPhoneProvider {
         _code: &'a str,
     ) -> BoxFuture<'a, anyhow::Result<()>> {
         async move {
-            tracing::info!(
-                "ARS phone provider is disabled; no call placed for account {} (phone {})",
+            tracing::warn!(
+                "ARS phone provider is disabled; refusing the login for account {} (phone {})",
                 account_id,
                 mask_phone(phone_number)
             );
-            Ok(())
+            anyhow::bail!("ARS phone provider is disabled")
         }
         .boxed()
     }
@@ -745,7 +799,7 @@ mod tests {
 
     #[tokio::test]
     async fn ars_sessions() {
-        let ars = ArsService::default();
+        let ars = accepting_ars(Arc::new(SystemTime::now));
         let s = ars
             .create_session(AccountId(1), "01012345678", 60)
             .await
@@ -757,6 +811,16 @@ mod tests {
         let s = ars.create_session(AccountId(2), "", 0).await.unwrap();
         std::thread::sleep(Duration::from_millis(5));
         assert!(!ars.complete_session(AccountId(2), &s.session_code));
+    }
+
+    #[tokio::test]
+    async fn disabled_ars_provider_refuses_to_create_a_session() {
+        let ars = ArsService::default();
+        assert!(ars
+            .create_session(AccountId(1), "01012345678", 60)
+            .await
+            .is_err());
+        assert!(!ars.complete_session(AccountId(1), "0000"));
     }
 
     #[test]
@@ -796,10 +860,29 @@ mod tests {
     const ARS_ACCOUNT: AccountId = AccountId(7);
     const ARS_OTHER_ACCOUNT: AccountId = AccountId(99);
 
+    /// A provider that accepts the call; the default one is deliberately disabled.
+    #[derive(Clone, Debug, Default)]
+    struct AcceptingArsProvider;
+
+    impl ArsPhoneProvider for AcceptingArsProvider {
+        fn call<'a>(
+            &'a self,
+            _account_id: AccountId,
+            _phone_number: &'a str,
+            _code: &'a str,
+        ) -> BoxFuture<'a, anyhow::Result<()>> {
+            async move { Ok(()) }.boxed()
+        }
+    }
+
+    fn accepting_ars(clock: Clock) -> ArsService {
+        ArsService::with_provider(clock, Arc::new(AcceptingArsProvider))
+    }
+
     #[tokio::test]
     async fn ars_create_session_returns_session_with_four_digit_code() {
         let time = FakeTime::new();
-        let session = ArsService::with_clock(time.clock())
+        let session = accepting_ars(time.clock())
             .create_session(ARS_ACCOUNT, "01012345678", 60)
             .await
             .unwrap();
@@ -814,7 +897,7 @@ mod tests {
         let time = FakeTime::new();
         let expected_expiry = time.now() + Duration::from_secs(120);
 
-        let session = ArsService::with_clock(time.clock())
+        let session = accepting_ars(time.clock())
             .create_session(ARS_ACCOUNT, "01012345678", 120)
             .await
             .unwrap();
@@ -825,7 +908,7 @@ mod tests {
     #[tokio::test]
     async fn ars_create_session_replaces_existing_session() {
         let time = FakeTime::new();
-        let sut = ArsService::with_clock(time.clock());
+        let sut = accepting_ars(time.clock());
         sut.create_session(ARS_ACCOUNT, "01012345678", 60)
             .await
             .unwrap();
@@ -841,13 +924,13 @@ mod tests {
     #[tokio::test]
     async fn ars_complete_session_no_active_session_returns_false() {
         let time = FakeTime::new();
-        assert!(!ArsService::with_clock(time.clock()).complete_session(ARS_ACCOUNT, "1234"));
+        assert!(!accepting_ars(time.clock()).complete_session(ARS_ACCOUNT, "1234"));
     }
 
     #[tokio::test]
     async fn ars_complete_session_expired_session_returns_false() {
         let time = FakeTime::new();
-        let sut = ArsService::with_clock(time.clock());
+        let sut = accepting_ars(time.clock());
         let session = sut
             .create_session(ARS_ACCOUNT, "01012345678", 60)
             .await
@@ -860,7 +943,7 @@ mod tests {
     #[tokio::test]
     async fn ars_complete_session_wrong_code_returns_false() {
         let time = FakeTime::new();
-        let sut = ArsService::with_clock(time.clock());
+        let sut = accepting_ars(time.clock());
         let session = sut
             .create_session(ARS_ACCOUNT, "01012345678", 60)
             .await
@@ -877,7 +960,7 @@ mod tests {
     #[tokio::test]
     async fn ars_complete_session_correct_code_returns_true() {
         let time = FakeTime::new();
-        let sut = ArsService::with_clock(time.clock());
+        let sut = accepting_ars(time.clock());
         let session = sut
             .create_session(ARS_ACCOUNT, "01012345678", 60)
             .await
@@ -889,7 +972,7 @@ mod tests {
     #[tokio::test]
     async fn ars_complete_session_after_success_session_consumed() {
         let time = FakeTime::new();
-        let sut = ArsService::with_clock(time.clock());
+        let sut = accepting_ars(time.clock());
         let session = sut
             .create_session(ARS_ACCOUNT, "01012345678", 60)
             .await
@@ -902,7 +985,7 @@ mod tests {
     #[tokio::test]
     async fn ars_complete_session_different_account_returns_false() {
         let time = FakeTime::new();
-        let sut = ArsService::with_clock(time.clock());
+        let sut = accepting_ars(time.clock());
         let session = sut
             .create_session(ARS_ACCOUNT, "01012345678", 60)
             .await
@@ -914,7 +997,7 @@ mod tests {
     #[tokio::test]
     async fn ars_complete_session_at_exact_expiry_returns_false() {
         let time = FakeTime::new();
-        let sut = ArsService::with_clock(time.clock());
+        let sut = accepting_ars(time.clock());
         let session = sut
             .create_session(ARS_ACCOUNT, "01012345678", 60)
             .await
@@ -952,13 +1035,12 @@ mod tests {
         let options = TwoFactorOptions {
             max_otp_failures: max_failures,
             otp_lockout_minutes: 15,
-            ..TwoFactorOptions::default()
         };
         let repo = TwoFactorRepository::new(
             sqlx::mysql::MySqlPoolOptions::new()
                 .connect_lazy_with(sqlx::mysql::MySqlConnectOptions::new()),
         );
-        OtpService::new(repo, OtpPolicy::with_clock(&options, clock.clock()))
+        OtpService::new(repo, FactorPolicy::with_clock(&options, clock.clock()))
     }
 
     fn otp_at(time: &FakeTime) -> String {
@@ -979,18 +1061,18 @@ mod tests {
         assert_eq!(
             sut.validate_config(Some(&cfg), OTP_ACCOUNT, "00000000")
                 .await,
-            OtpValidation::Invalid
+            FactorValidation::Invalid
         );
         assert_eq!(
             other_connection
                 .validate_config(Some(&cfg), OTP_ACCOUNT, "11111111")
                 .await,
-            OtpValidation::Invalid
+            FactorValidation::Invalid
         );
         assert_eq!(
             sut.validate_config(Some(&cfg), OTP_ACCOUNT, "22222222")
                 .await,
-            OtpValidation::Locked,
+            FactorValidation::Locked,
             "the third failure must lock the account"
         );
 
@@ -999,7 +1081,7 @@ mod tests {
             other_connection
                 .validate_config(Some(&cfg), OTP_ACCOUNT, &otp_at(&time))
                 .await,
-            OtpValidation::Locked
+            FactorValidation::Locked
         );
         // Another account is unaffected.
         let mut other_cfg = otp_cfg();
@@ -1007,7 +1089,29 @@ mod tests {
         assert_eq!(
             sut.validate_config(Some(&other_cfg), OTP_OTHER_ACCOUNT, &otp_at(&time))
                 .await,
-            OtpValidation::Valid
+            FactorValidation::Valid
+        );
+    }
+
+    /// A denied login does not reset the account counter: the next login starts from the
+    /// failures already recorded, so the second connection locks the account.
+    #[tokio::test]
+    async fn otp_denied_login_does_not_reset_the_account_counter() {
+        let time = FakeTime::new();
+        let sut = otp_sut(&time, 2);
+        let cfg = otp_cfg();
+
+        assert_eq!(
+            sut.validate_config(Some(&cfg), OTP_ACCOUNT, "00000000")
+                .await,
+            FactorValidation::Invalid
+        );
+        // Re-login on a new connection (same service, shared state).
+        assert_eq!(
+            sut.clone()
+                .validate_config(Some(&cfg), OTP_ACCOUNT, "11111111")
+                .await,
+            FactorValidation::Locked
         );
     }
 
@@ -1020,18 +1124,18 @@ mod tests {
         assert_eq!(
             sut.validate_config(Some(&cfg), OTP_ACCOUNT, "00000000")
                 .await,
-            OtpValidation::Invalid
+            FactorValidation::Invalid
         );
         assert_eq!(
             sut.validate_config(Some(&cfg), OTP_ACCOUNT, "00000000")
                 .await,
-            OtpValidation::Locked
+            FactorValidation::Locked
         );
         time.advance(Duration::from_secs(15 * 60));
         assert_eq!(
             sut.validate_config(Some(&cfg), OTP_ACCOUNT, &otp_at(&time))
                 .await,
-            OtpValidation::Valid
+            FactorValidation::Valid
         );
     }
 
@@ -1044,31 +1148,31 @@ mod tests {
 
         assert_eq!(
             sut.validate_config(Some(&cfg), OTP_ACCOUNT, &code).await,
-            OtpValidation::Valid
+            FactorValidation::Valid
         );
         // The same step is refused on a second connection sharing the service.
         assert_eq!(
             sut.clone()
                 .validate_config(Some(&cfg), OTP_ACCOUNT, &code)
                 .await,
-            OtpValidation::Invalid
+            FactorValidation::Invalid
         );
         // Still inside the drift window, and after it, the used step stays refused.
         time.advance(Duration::from_secs(30));
         assert_eq!(
             sut.validate_config(Some(&cfg), OTP_ACCOUNT, &code).await,
-            OtpValidation::Invalid
+            FactorValidation::Invalid
         );
         time.advance(Duration::from_secs(60));
         assert_eq!(
             sut.validate_config(Some(&cfg), OTP_ACCOUNT, &code).await,
-            OtpValidation::Invalid
+            FactorValidation::Invalid
         );
         // The next step's code works.
         assert_eq!(
             sut.validate_config(Some(&cfg), OTP_ACCOUNT, &otp_at(&time))
                 .await,
-            OtpValidation::Valid
+            FactorValidation::Valid
         );
     }
 
@@ -1082,13 +1186,13 @@ mod tests {
             assert_eq!(
                 sut.validate_config(Some(&cfg), OTP_ACCOUNT, "00000000")
                     .await,
-                OtpValidation::Invalid
+                FactorValidation::Invalid
             );
         }
         assert_eq!(
             sut.validate_config(Some(&cfg), OTP_ACCOUNT, &otp_at(&time))
                 .await,
-            OtpValidation::Valid
+            FactorValidation::Valid
         );
         time.advance(Duration::from_secs(30));
         // Two more failures must not lock: the success reset the counter.
@@ -1096,33 +1200,33 @@ mod tests {
             assert_eq!(
                 sut.validate_config(Some(&cfg), OTP_ACCOUNT, "00000000")
                     .await,
-                OtpValidation::Invalid
+                FactorValidation::Invalid
             );
         }
         assert_eq!(
             sut.validate_config(Some(&cfg), OTP_ACCOUNT, &otp_at(&time))
                 .await,
-            OtpValidation::Valid
+            FactorValidation::Valid
         );
     }
 
+    /// With the minimum accepted limit (1), the first wrong code locks the account. A limit of
+    /// 0 is refused by config validation, not treated as "unlimited".
     #[tokio::test]
-    async fn otp_zero_max_failures_disables_locking() {
+    async fn otp_max_failures_one_locks_after_one_failure() {
         let time = FakeTime::new();
-        let sut = otp_sut(&time, 0);
+        let sut = otp_sut(&time, 1);
         let cfg = otp_cfg();
 
-        for _ in 0..20 {
-            assert_eq!(
-                sut.validate_config(Some(&cfg), OTP_ACCOUNT, "00000000")
-                    .await,
-                OtpValidation::Invalid
-            );
-        }
+        assert_eq!(
+            sut.validate_config(Some(&cfg), OTP_ACCOUNT, "00000000")
+                .await,
+            FactorValidation::Locked
+        );
         assert_eq!(
             sut.validate_config(Some(&cfg), OTP_ACCOUNT, &otp_at(&time))
                 .await,
-            OtpValidation::Valid
+            FactorValidation::Locked
         );
     }
 
@@ -1136,12 +1240,27 @@ mod tests {
     const TEST_PIN: &str = "12345678";
 
     fn pc_cert_sut() -> (PcCertService, PasswordService) {
+        pc_cert_sut_with_max(TwoFactorOptions::default().max_otp_failures)
+    }
+
+    fn pc_cert_sut_with_max(max_failures: i32) -> (PcCertService, PasswordService) {
         let passwords = PasswordService { iterations: 1000 };
         let repo = TwoFactorRepository::new(
             sqlx::mysql::MySqlPoolOptions::new()
                 .connect_lazy_with(sqlx::mysql::MySqlConnectOptions::new()),
         );
-        (PcCertService::new(repo, passwords.clone()), passwords)
+        let options = TwoFactorOptions {
+            max_otp_failures: max_failures,
+            otp_lockout_minutes: 15,
+        };
+        (
+            PcCertService::new(
+                repo,
+                passwords.clone(),
+                FactorPolicy::from_options(&options),
+            ),
+            passwords,
+        )
     }
 
     fn make_config(cert_pin_hash: Option<&str>) -> TwoFactorConfig {
@@ -1161,25 +1280,28 @@ mod tests {
     #[tokio::test]
     async fn pc_cert_validate_no_config_returns_false() {
         let (sut, _) = pc_cert_sut();
-        assert!(!sut.validate_config(None, PC_ACCOUNT, TEST_PIN).await);
+        assert!(!sut
+            .validate_config(None, PC_ACCOUNT, TEST_PIN)
+            .await
+            .is_valid());
     }
 
     #[tokio::test]
     async fn pc_cert_validate_config_with_null_hash_returns_false() {
         let (sut, _) = pc_cert_sut();
-        assert!(
-            !sut.validate_config(Some(make_config(None)), PC_ACCOUNT, TEST_PIN)
-                .await
-        );
+        assert!(!sut
+            .validate_config(Some(make_config(None)), PC_ACCOUNT, TEST_PIN)
+            .await
+            .is_valid());
     }
 
     #[tokio::test]
     async fn pc_cert_validate_config_with_empty_hash_returns_false() {
         let (sut, _) = pc_cert_sut();
-        assert!(
-            !sut.validate_config(Some(make_config(Some(""))), PC_ACCOUNT, TEST_PIN)
-                .await
-        );
+        assert!(!sut
+            .validate_config(Some(make_config(Some(""))), PC_ACCOUNT, TEST_PIN)
+            .await
+            .is_valid());
     }
 
     #[tokio::test]
@@ -1193,10 +1315,10 @@ mod tests {
             PasswordVerificationResult::Success
         );
 
-        assert!(
-            sut.validate_config(Some(make_config(Some(&hash))), PC_ACCOUNT, TEST_PIN)
-                .await
-        );
+        assert!(sut
+            .validate_config(Some(make_config(Some(&hash))), PC_ACCOUNT, TEST_PIN)
+            .await
+            .is_valid());
     }
 
     #[tokio::test]
@@ -1211,10 +1333,10 @@ mod tests {
             PasswordVerificationResult::SuccessRehashNeeded
         );
 
-        assert!(
-            sut.validate_config(Some(make_config(Some(&hash))), PC_ACCOUNT, TEST_PIN)
-                .await
-        );
+        assert!(sut
+            .validate_config(Some(make_config(Some(&hash))), PC_ACCOUNT, TEST_PIN)
+            .await
+            .is_valid());
     }
 
     #[tokio::test]
@@ -1224,9 +1346,40 @@ mod tests {
             .hash_for_storage(&Password::from_plaintext("87654321"))
             .unwrap();
 
-        assert!(
-            !sut.validate_config(Some(make_config(Some(&hash))), PC_ACCOUNT, TEST_PIN)
-                .await
+        assert!(!sut
+            .validate_config(Some(make_config(Some(&hash))), PC_ACCOUNT, TEST_PIN)
+            .await
+            .is_valid());
+    }
+
+    /// PIN guesses are limited per account, across service clones (login connections). The
+    /// second wrong PIN reaches the limit, and even the correct PIN is then refused.
+    #[tokio::test]
+    async fn pc_cert_wrong_pins_lock_the_account_across_connections() {
+        let (sut, passwords) = pc_cert_sut_with_max(2);
+        let hash = passwords
+            .hash_for_storage(&Password::from_plaintext(TEST_PIN))
+            .unwrap();
+        let config = make_config(Some(&hash));
+        let other_connection = sut.clone();
+
+        assert_eq!(
+            sut.validate_config(Some(config.clone()), PC_ACCOUNT, "00000000")
+                .await,
+            FactorValidation::Invalid
+        );
+        assert_eq!(
+            other_connection
+                .validate_config(Some(config.clone()), PC_ACCOUNT, "11111111")
+                .await,
+            FactorValidation::Locked,
+            "the second wrong PIN must lock the account"
+        );
+        assert_eq!(
+            sut.validate_config(Some(config), PC_ACCOUNT, TEST_PIN)
+                .await,
+            FactorValidation::Locked,
+            "a correct PIN must not bypass the lock"
         );
     }
 }

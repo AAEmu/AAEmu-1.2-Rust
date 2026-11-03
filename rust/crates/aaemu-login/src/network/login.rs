@@ -250,9 +250,25 @@ impl LoginConnection {
             self.send_auth_result(&AuthFlowResult::Denied(LoginDeniedReason::BAD_RESPONSE))?;
             return Ok(());
         }
-        let result = flow.start(server, self).await?;
+        let closes_on_denial = flow.denial_closes_connection();
+        let result = match flow.start(server, self).await {
+            Ok(result) => result,
+            Err(e) => {
+                if closes_on_denial {
+                    self.session.lock().unwrap().state = LoginState::Disconnected;
+                    self.shutdown();
+                }
+                return Err(e);
+            }
+        };
         self.process_auth_result(&result, flow);
         self.send_auth_result(&result)?;
+        if closes_on_denial && matches!(result, AuthFlowResult::Denied(_)) {
+            // Queue the denial (the writer flushes it), then close: a reconnect token is
+            // single-use, so the same socket must not retry.
+            self.session.lock().unwrap().state = LoginState::Disconnected;
+            self.shutdown();
+        }
         Ok(())
     }
 

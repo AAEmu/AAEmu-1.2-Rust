@@ -15,7 +15,7 @@ use crate::network::internal::{self, InternalConnectionTable};
 use crate::network::login::{self, LoginConnectionTable};
 use crate::services::password::PasswordService;
 use crate::services::two_factor::{
-    ArsService, OtpPolicy, OtpService, PcCertService, TwoFactorRepository, TwoFactorService,
+    ArsService, FactorPolicy, OtpService, PcCertService, TwoFactorRepository, TwoFactorService,
 };
 use crate::{db, health};
 
@@ -60,8 +60,9 @@ impl LoginServer {
         let connections = Arc::new(LoginConnectionTable::default());
         let repo = TwoFactorRepository::new(pool.clone());
         let two_factor = TwoFactorService::new(repo.clone());
-        let otp = OtpService::new(repo.clone(), OtpPolicy::from_options(&config.two_factor));
-        let pc_cert = PcCertService::new(repo, passwords.clone());
+        let factor_policy = FactorPolicy::from_options(&config.two_factor);
+        let otp = OtpService::new(repo.clone(), factor_policy.clone());
+        let pc_cert = PcCertService::new(repo, passwords.clone(), factor_policy);
         let ars = Arc::new(ArsService::default());
         let logins = Arc::new(LoginController::new(
             pool.clone(),
@@ -69,7 +70,7 @@ impl LoginServer {
             config.auto_account,
             config.korea_auth.clone(),
             two_factor.clone(),
-            config.two_factor.clone(),
+            config.reconnect.clone(),
         ));
         let auth = auth.unwrap_or_else(|| {
             Arc::new(DbAuthBackend {

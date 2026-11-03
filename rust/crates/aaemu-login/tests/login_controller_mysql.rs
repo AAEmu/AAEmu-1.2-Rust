@@ -21,12 +21,12 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::LazyLock;
 
-use aaemu_login::config::{KoreaAuthOptions, TwoFactorOptions};
+use aaemu_login::config::{KoreaAuthOptions, ReconnectOptions, TwoFactorOptions};
 use aaemu_login::controllers::login::LoginController;
 use aaemu_login::models::{AccountId, LoginDeniedReason};
 use aaemu_login::services::password::{Password, PasswordService};
 use aaemu_login::services::two_factor::{
-    self, OtpPolicy, OtpService, OtpValidation, TwoFactorRepository, TwoFactorService,
+    self, FactorPolicy, FactorValidation, OtpService, TwoFactorRepository, TwoFactorService,
 };
 use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
 use sqlx::MySqlPool;
@@ -90,7 +90,7 @@ fn create_controller(pool: &MySqlPool, auto_account: bool) -> LoginController {
         auto_account,
         KoreaAuthOptions::default(),
         two_factor,
-        TwoFactorOptions::default(),
+        ReconnectOptions::default(),
     )
 }
 
@@ -236,6 +236,10 @@ async fn login_updates_last_login_and_ip() {
         .await
         .unwrap();
     assert!(result.success);
+    controller
+        .record_login(result.account_id, "tracker", ip_address())
+        .await
+        .unwrap();
 
     // Verify the DB was updated
     let (last_ip, last_login, updated_at): (String, i64, i64) = sqlx::query_as(
@@ -341,7 +345,7 @@ async fn otp_failures_lock_the_account_and_ignore_a_later_valid_code() {
     let Some(pool) = setup().await else { return };
     let id = insert_user(&pool, "otp_limited", "pass", false, 0).await;
     insert_two_factor(&pool, id, OTP_SECRET).await;
-    let policy = OtpPolicy::from_options(&TwoFactorOptions {
+    let policy = FactorPolicy::from_options(&TwoFactorOptions {
         max_otp_failures: 3,
         ..TwoFactorOptions::default()
     });
@@ -352,13 +356,13 @@ async fn otp_failures_lock_the_account_and_ignore_a_later_valid_code() {
     let first = sut.validate(account, &wrong_code(&valid, 0)).await.unwrap();
     let second = sut.validate(account, &wrong_code(&valid, 1)).await.unwrap();
     let third = sut.validate(account, &wrong_code(&valid, 2)).await.unwrap();
-    assert_eq!(first, OtpValidation::Invalid);
-    assert_eq!(second, OtpValidation::Invalid);
-    assert_eq!(third, OtpValidation::Locked);
+    assert_eq!(first, FactorValidation::Invalid);
+    assert_eq!(second, FactorValidation::Invalid);
+    assert_eq!(third, FactorValidation::Locked);
     // The valid code is not even checked while the account is locked.
     assert_eq!(
         sut.validate(account, &valid).await.unwrap(),
-        OtpValidation::Locked
+        FactorValidation::Locked
     );
 }
 
@@ -371,18 +375,61 @@ async fn otp_time_step_cannot_be_replayed_against_the_database() {
     insert_two_factor(&pool, id, OTP_SECRET).await;
     let sut = OtpService::new(
         TwoFactorRepository::new(pool.clone()),
-        OtpPolicy::from_options(&TwoFactorOptions::default()),
+        FactorPolicy::from_options(&TwoFactorOptions::default()),
     );
     let account = AccountId(id as u32);
     let valid = current_code();
 
     assert_eq!(
         sut.validate(account, &valid).await.unwrap(),
-        OtpValidation::Valid
+        FactorValidation::Valid
     );
     assert_eq!(
         sut.validate(account, &valid).await.unwrap(),
-        OtpValidation::Invalid,
+        FactorValidation::Invalid,
         "a used TOTP time step must not be accepted twice"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires MySQL: set AAEMU_TEST_MYSQL=mysql://user:pass@host:port/db"]
+async fn login_records_last_ip_and_time_only_after_the_factors() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(pool) = setup().await else { return };
+    let id = insert_user(&pool, "otp_record", "pass", false, 0).await;
+    insert_two_factor(&pool, id, OTP_SECRET).await;
+    let controller = create_controller(&pool, false);
+
+    let result = controller
+        .login(
+            "otp_record",
+            &Password::from_plaintext("pass"),
+            ip_address(),
+        )
+        .await
+        .unwrap();
+    assert!(result.success && result.two_factor.requires_otp);
+
+    let (last_ip, last_login): (String, i64) =
+        sqlx::query_as("SELECT last_ip, CAST(last_login AS SIGNED) FROM users WHERE id = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(last_ip, "", "a pending 2FA login updated last_ip");
+    assert_eq!(last_login, 0, "a pending 2FA login updated last_login");
+
+    // The flow calls this only after every factor passed.
+    controller
+        .record_login(result.account_id, "otp_record", ip_address())
+        .await
+        .unwrap();
+    let (last_ip, last_login): (String, i64) =
+        sqlx::query_as("SELECT last_ip, CAST(last_login AS SIGNED) FROM users WHERE id = ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(last_ip.parse::<IpAddr>().unwrap(), ip_address());
+    assert!(last_login > 0);
 }

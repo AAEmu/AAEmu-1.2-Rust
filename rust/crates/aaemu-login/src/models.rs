@@ -250,10 +250,14 @@ pub enum ReconnectFailure {
     /// The game server (and its parent, for a mirror) has no token table: it is not registered
     /// or has just restarted.
     GameServerUnavailable,
-    /// The token was never issued by the game server.
+    /// The token was never issued by the game server, or was already used.
     InvalidToken,
+    /// The token was issued longer than `Reconnect:TokenTtl` ago.
+    ExpiredToken,
     /// The token belongs to a different account.
     AccountMismatch,
+    /// The token was issued for a login from a different client IP.
+    IpMismatch,
 }
 
 impl ReconnectFailure {
@@ -263,7 +267,9 @@ impl ReconnectFailure {
             // "The game is unavailable right now (e.g. under service/maintenance)."
             Self::GameServerUnavailable => LoginDeniedReason::SERVICE_TIME,
             // A reconnect token must be indistinguishable from any other failed authentication.
-            Self::InvalidToken | Self::AccountMismatch => LoginDeniedReason::BAD_RESPONSE,
+            Self::InvalidToken | Self::ExpiredToken | Self::AccountMismatch | Self::IpMismatch => {
+                LoginDeniedReason::BAD_RESPONSE
+            }
         }
     }
 }
