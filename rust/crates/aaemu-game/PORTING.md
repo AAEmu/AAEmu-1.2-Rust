@@ -773,6 +773,9 @@ Success stores the rate (permille/10, 0-1000) and `last_national_tax_rate_change
   dominion starts at 0; the C# set 500 on claim, which is not 1.2 evidence.
 * 684/685/725 are the client's own error ids (`error_message.rs`), so a forged packet gets
   the same answer the client would have produced locally.
+* Test hook: GM `nation dominion <zone>` seeds a real `DominionState` for the caller's guild
+  with a placeholder tower identity (no live castle tower is needed for the tax handler); the
+  live suite uses it because a castle cannot be claimed headlessly.
 
 #### National monument (RENAME-9)
 

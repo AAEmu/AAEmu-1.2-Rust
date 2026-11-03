@@ -507,6 +507,31 @@ pub fn update_national_tax_rate(server: &GameServer, player: &PlayerRef, zone: u
         changed_time: DateTime::from_timestamp(state.last_national_tax_rate_changed_at, 0)
             .unwrap_or(DateTime::<Utc>::MIN_UTC),
     });
+    schedule_persist_authority(server);
+}
+
+/// Writes the dominion authority now (the periodic world save writes it again). The national
+/// tax and monument changes are user-visible immediately, so their rows should survive a crash
+/// before the next autosave. Serialised with `SaveManager` through the transaction lock.
+async fn persist_authority(server: &GameServer) -> sqlx::Result<()> {
+    let _save = server.save.transaction_lock().await;
+    let mut tx = server.db.begin().await?;
+    server.systems.housing.dominions.save(&mut tx).await?;
+    tx.commit().await?;
+    server.systems.housing.dominions.commit_save();
+    Ok(())
+}
+
+/// Spawns [`persist_authority`] (no-op in unit tests without a server handle).
+pub(crate) fn schedule_persist_authority(server: &GameServer) {
+    let Some(server) = server.self_arc() else {
+        return;
+    };
+    tokio::spawn(async move {
+        if let Err(error) = persist_authority(&server).await {
+            tracing::error!("Persisting the dominion authority failed: {error}");
+        }
+    });
 }
 
 /// Initial unowned claim, only from the accepted original 20-second skill and exact carried

@@ -260,6 +260,54 @@ impl Command for Nation {
                     );
                     Ok(())
                 }
+                // Test hook, not a 1.2 command: seed a fake dominion for the caller's guild so
+                // the national tax / monument paths can be driven without a castle tower. The
+                // authority row is real; the tower identity is a placeholder (the snapshot
+                // needs a live tower and is skipped here).
+                "dominion" if args.len() == 2 => {
+                    let Ok(zone) = args[1].parse::<u16>() else {
+                        CommandManager::send_default_help_text(self, out);
+                        return Ok(());
+                    };
+                    let player = ctx.player()?;
+                    let expedition_id = player.data().unit.expedition_id;
+                    if expedition_id == 0 {
+                        CommandManager::send_error_text(self, out, "You must be in an expedition");
+                        return Ok(());
+                    }
+                    let instance_id = player.data().unit.transform.instance_id;
+                    let tower = crate::systems::housing::dominion::state::TowerIdentity {
+                        house_id: 500 + u32::from(zone),
+                        instance_id,
+                        guard_tower_setting_id: 6,
+                    };
+                    let now = chrono::Utc::now().timestamp();
+                    match server.systems.housing.dominions.declare_unowned_with(
+                        u32::from(zone),
+                        tower,
+                        expedition_id,
+                        now,
+                        || true,
+                    ) {
+                        Ok(state) => {
+                            crate::systems::social::dominion::schedule_persist_authority(server);
+                            CommandManager::send_normal_text(
+                                self,
+                                out,
+                                &format!(
+                                    "Dominion {} is owned by expedition {}",
+                                    state.zone_group_id, expedition_id
+                                ),
+                            )
+                        }
+                        Err(error) => CommandManager::send_error_text(
+                            self,
+                            out,
+                            &format!("Dominion {zone} not seeded: {error}"),
+                        ),
+                    }
+                    Ok(())
+                }
                 // Nation monument hook (RENAME-9): the placement skill trigger is
                 // capture-pending; this runs the same service with the king at the point.
                 "monument" if args.len() >= 2 => {
@@ -358,10 +406,10 @@ impl Command for Nation {
     }
 
     fn get_command_line_help(&self) -> String {
-        "[info|create [force]|hostile <faction>|relation <faction> <state> <minutes> <next>|treaty <faction>|rename [name]|tax <zone> <rate>|monument place <zone> [x y z]|monument remove <zone>]".into()
+        "[info|create [force]|hostile <faction>|relation <faction> <state> <minutes> <next>|treaty <faction>|rename [name]|tax <zone> <rate>|monument place <zone> [x y z]|monument remove <zone>|dominion <zone>]".into()
     }
 
     fn get_command_help_text(&self) -> String {
-        "Lists player nations, or creates one from your expedition as its king. The expedition must own a dominion; create force skips that check for tests. hostile declares a diplomacy target hostile; relation and treaty are test hooks for the expiry and mail flows. rename offers the nation rename dialog (or applies a name), tax sets the national tax rate, and monument places or removes the territory statue at your position.".into()
+        "Lists player nations, or creates one from your expedition as its king. The expedition must own a dominion; create force skips that check for tests. hostile declares a diplomacy target hostile; relation and treaty are test hooks for the expiry and mail flows. rename offers the nation rename dialog (or applies a name), tax sets the national tax rate, monument places or removes the territory statue at your position, and dominion seeds a test dominion for the caller's guild.".into()
     }
 }

@@ -1490,6 +1490,7 @@ pub fn place_national_monument(
         }
     };
     broadcast_monument(server, &state);
+    super::dominion::schedule_persist_authority(server);
     Ok(())
 }
 
@@ -1558,6 +1559,7 @@ pub fn remove_national_monument(
         crate::systems::npcs::doodad::db::delete_row(server, old_db_id);
     }
     broadcast_monument(server, &state);
+    super::dominion::schedule_persist_authority(server);
     Ok(())
 }
 
