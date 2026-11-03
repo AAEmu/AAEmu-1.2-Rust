@@ -139,8 +139,8 @@ sc_packet!(
 
 cs_packet!(
     /// `CSUpdateDominionTaxRatePacket`. The national tax packet is the separate CS 0x013
-    /// (`opcodes::cs::CSUpdateNationalTaxRatePacket`); its handler belongs to the stage-4
-    /// nation work and is not registered today.
+    /// (`opcodes::cs::CSUpdateNationalTaxRatePacket`); its real handler belongs to the stage-4
+    /// nation work (today `packets/c2g_misc.rs` registers a log-only handler).
     CSUpdateDominionTaxRatePacket { id: u16, tax_rate: i32 }
     read |s| { Ok(Self { id: s.read_u16()?, tax_rate: s.read_i32()? }) }
     handle |self, server, conn| {

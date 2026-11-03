@@ -143,8 +143,8 @@ log_only_packet!(
 );
 
 log_only_packet!(
-    /// `CSUpdateNationalTaxRatePacket` (0x013, 1.2 client `FUN_392f42f0`; not registered yet,
-    /// the national tax handler belongs to the stage-4 nation work).
+    /// `CSUpdateNationalTaxRatePacket` (0x013, 1.2 client `FUN_392f42f0`; the log-only handler
+    /// is registered until the stage-4 national tax work).
     CSUpdateNationalTaxRatePacket, debug, "UpdateNationalTaxRate, Id: {}, TaxRate: {}" {
         id: u16 => read_u16,
         tax_rate: i32 => read_i32,
