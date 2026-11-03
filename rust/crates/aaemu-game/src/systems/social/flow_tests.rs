@@ -2851,7 +2851,10 @@ async fn expired_team_invitations_are_swept() {
         .await;
     assert_eq!(b.ops(), vec![sc::SCAskToJoinTeamPacket]);
 
-    // A reply once the invitation has been swept is silent (no pending invitation).
+    // A reply once the invitation has been swept is silent (no pending invitation). The
+    // second invitation was issued after `expired_at` was computed, so sweep past its own
+    // deadline.
+    let expired_at = crate::systems::social::util::now_ms() + INVITATION_TIMEOUT_MS + 1;
     teams.update_all_teams(&server, expired_at);
     b.send(&server, cs::CSReplyToJoinTeamPacket, reply(0, 1, false))
         .await;
