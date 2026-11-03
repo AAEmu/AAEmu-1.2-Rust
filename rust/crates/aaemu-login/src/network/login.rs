@@ -430,8 +430,8 @@ impl LoginConnection {
         };
 
         match (decision, pending) {
-            (Admission::Direct { reserved }, Some((rx, cancel))) => {
-                self.start_enter_world_request(server, gs_id, rx, cancel, reserved);
+            (Admission::Direct { reservation }, Some((rx, cancel))) => {
+                self.start_enter_world_request(server, gs_id, rx, cancel, reservation);
             }
             (Admission::Queued, _) => {
                 tracing::debug!("World {} is full: connection {} queued", gs_id, self.id());
@@ -459,6 +459,7 @@ impl LoginConnection {
         self: &Arc<Self>,
         server: &Arc<LoginServer>,
         gs_id: GameServerId,
+        generation: u64,
     ) -> bool {
         let (rx, cancel) = {
             let mut s = self.session.lock().unwrap();
@@ -480,7 +481,7 @@ impl LoginConnection {
             gs_id,
             self.id()
         );
-        self.start_enter_world_request(server, gs_id, rx, cancel, true);
+        self.start_enter_world_request(server, gs_id, rx, cancel, Some(generation));
         true
     }
 
@@ -490,7 +491,7 @@ impl LoginConnection {
         gs_id: GameServerId,
         rx: oneshot::Receiver<EnterWorldResult>,
         cancel: CancellationToken,
-        reserved: bool,
+        reservation: Option<u64>,
     ) {
         server
             .games
@@ -504,15 +505,18 @@ impl LoginConnection {
         ));
         self.session.lock().unwrap().background = Some(handle);
 
-        if reserved {
+        if let Some(generation) = reservation {
             // A game response normally releases this reservation (with the occupancy that
-            // includes the pending cookie); this is the fallback for a lost response.
+            // includes the pending cookie); this is the fallback for a lost response. Only this
+            // generation is released: the connection id may be reused for a newer admission.
             let server = server.clone();
             let connection_id = self.id();
             let timeout = server.config.enter_world_timeout.max(RESERVATION_TIMEOUT);
             tokio::spawn(async move {
                 tokio::time::sleep(timeout).await;
-                server.games.release_reservation(gs_id, connection_id);
+                server
+                    .games
+                    .release_reservation(gs_id, connection_id, generation);
                 server.games.drain_queues(&server).await;
             });
         }
@@ -577,7 +581,12 @@ impl LoginConnection {
             return;
         }
         let pending_gs = s.enter_world.as_ref().map(|p| p.gs_id);
-        if pending_gs != Some(gs_id) {
+        // The game link answers with the game server's own id. A client that selected a mirror
+        // gets the mirror's id back from here, so accept the parent id for a mirror request.
+        let is_mirror_response = pending_gs.is_some_and(|pending| {
+            pending != gs_id && games.try_get_parent_id(pending) == Some(gs_id)
+        });
+        if pending_gs != Some(gs_id) && !is_mirror_response {
             tracing::warn!(
                 "CompleteEnterWorldRequest ignored: gsId mismatch (expected {:?}, got {}) for connection {}",
                 pending_gs,
@@ -587,8 +596,12 @@ impl LoginConnection {
             return;
         }
         let success = result == 0;
+        // The world cookie must point at the world the client selected (the mirror's configured
+        // address), not at the id the game happens to answer with.
         let server = if success {
-            games.get_game_server(gs_id)
+            pending_gs
+                .and_then(|pending| games.get_game_server(pending))
+                .or_else(|| games.get_game_server(gs_id))
         } else {
             None
         };

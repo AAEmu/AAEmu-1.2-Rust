@@ -66,18 +66,22 @@ impl OutgoingPacket for GlRegisterGameServer {
 }
 
 /// `GLPlayerEnterPacket`: result of an `LGPlayerEnterPacket`.
-/// Body: `[u32 connectionId][u8 gsId][u8 result][u32 online]` (result 0 = success).
+/// Body: `[u32 connectionId][u8 gsId][u8 result][u32 online][u32 occupancySequence]`
+/// (result 0 = success).
 ///
-/// `online` is the Rust-only extension: the game server's current slot occupancy (accounts in
-/// the lobby/world plus pending world cookies) right after the request was handled. It lets the
-/// login server release the queue slot reservation for this request exactly. A game server that
-/// does not send it (or a truncated body) reads as 0, which disables the queue gate (fail-open).
+/// The trailing fields are a Rust-only extension: the game server's current slot occupancy
+/// (accounts in the lobby/world plus pending world cookies) right after the request was handled,
+/// and a monotonic report sequence so an older concurrent report cannot overwrite a newer one.
+/// A game server that does not send them (`has_online == false`; a mixed-version link) reads as
+/// occupancy 0, which disables the queue gate (fail-open).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GlPlayerEnter {
     pub connection_id: ConnectionId,
     pub gs_id: GameServerId,
     pub result: u8,
     pub online: u32,
+    pub sequence: u32,
+    pub has_online: bool,
 }
 
 impl GlPlayerEnter {
@@ -85,12 +89,20 @@ impl GlPlayerEnter {
         let connection_id = ConnectionId(s.l_u32());
         let gs_id = GameServerId(s.l_u8());
         let result = s.l_u8();
-        let online = if s.unread().len() >= 4 { s.l_u32() } else { 0 };
+        let has_online = s.unread().len() >= 4;
+        let online = if has_online { s.l_u32() } else { 0 };
+        let sequence = if has_online && s.unread().len() >= 4 {
+            s.l_u32()
+        } else {
+            0
+        };
         Self {
             connection_id,
             gs_id,
             result,
             online,
+            sequence,
+            has_online,
         }
     }
 }
@@ -101,7 +113,8 @@ impl OutgoingPacket for GlPlayerEnter {
         s.write_u32(self.connection_id.0)
             .write_u8(self.gs_id.0)
             .write_u8(self.result)
-            .write_u32(self.online);
+            .write_u32(self.online)
+            .write_u32(self.sequence);
         Ok(())
     }
 }
@@ -196,30 +209,48 @@ impl OutgoingPacket for GlRequestInfo {
     }
 }
 
-/// `GLGameServerLoadPacket`: the game server's current load. Body: `[u8 load][u32 online]`.
+/// `GLGameServerLoadPacket`: the game server's current load.
+/// Body: `[u8 load][u32 online][u32 occupancySequence]`.
 ///
-/// `online` is the Rust-only extension (the C# body is one byte): the game server's current slot
-/// occupancy (accounts in the lobby/world plus pending world cookies). The login server's world
-/// queue uses it as the authoritative capacity count; a body without it reads as 0, which means
-/// "no queue gate" (fail-open).
+/// The trailing fields are a Rust-only extension (the C# body is one byte): the game server's
+/// current slot occupancy (accounts in the lobby/world plus pending world cookies) and the
+/// monotonic report sequence. The login server's world queue uses the occupancy as the
+/// authoritative capacity count and ignores reports older than the last applied sequence; a body
+/// without the extension (`has_online == false`) reads as 0, which means "no queue gate"
+/// (fail-open).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GlGameServerLoad {
     pub load: GsLoad,
     pub online: u32,
+    pub sequence: u32,
+    pub has_online: bool,
 }
 
 impl GlGameServerLoad {
     pub fn read(s: &mut PacketStream) -> Self {
         let load = GsLoad(s.l_u8());
-        let online = if s.unread().len() >= 4 { s.l_u32() } else { 0 };
-        Self { load, online }
+        let has_online = s.unread().len() >= 4;
+        let online = if has_online { s.l_u32() } else { 0 };
+        let sequence = if has_online && s.unread().len() >= 4 {
+            s.l_u32()
+        } else {
+            0
+        };
+        Self {
+            load,
+            online,
+            sequence,
+            has_online,
+        }
     }
 }
 
 impl OutgoingPacket for GlGameServerLoad {
     const OPCODE: u16 = opcodes::GL_GAME_SERVER_LOAD;
     fn write_body(&self, s: &mut PacketStream) -> Result<(), PacketError> {
-        s.write_u8(self.load.0).write_u32(self.online);
+        s.write_u8(self.load.0)
+            .write_u32(self.online)
+            .write_u32(self.sequence);
         Ok(())
     }
 }
@@ -445,7 +476,9 @@ mod tests {
                 connection_id: ConnectionId(9),
                 gs_id: GameServerId(1),
                 result: 2,
-                online: 0
+                online: 0,
+                sequence: 0,
+                has_online: false
             })
         );
         assert_eq!(
@@ -460,7 +493,9 @@ mod tests {
             decode(hex_bytes("040002")),
             G2lPacket::GameServerLoad(GlGameServerLoad {
                 load: GsLoad::HIGH,
-                online: 0
+                online: 0,
+                sequence: 0,
+                has_online: false
             })
         );
     }
@@ -471,19 +506,23 @@ mod tests {
     #[test]
     fn occupancy_extension_and_old_bodies() {
         assert_eq!(
-            decode(hex_bytes("01000900000001000a000000")),
+            decode(hex_bytes("01000900000001000a00000005000000")),
             G2lPacket::PlayerEnter(GlPlayerEnter {
                 connection_id: ConnectionId(9),
                 gs_id: GameServerId(1),
                 result: 0,
-                online: 10
+                online: 10,
+                sequence: 5,
+                has_online: true
             })
         );
         assert_eq!(
-            decode(hex_bytes("04000207000000")),
+            decode(hex_bytes("0400020700000006000000")),
             G2lPacket::GameServerLoad(GlGameServerLoad {
                 load: GsLoad::HIGH,
-                online: 7
+                online: 7,
+                sequence: 6,
+                has_online: true
             })
         );
     }

@@ -244,6 +244,8 @@ async fn replaced_connection_cannot_mutate_internal_state() {
         G2lPacket::GameServerLoad(GlGameServerLoad {
             load: GsLoad::HIGH,
             online: 0,
+            sequence: 0,
+            has_online: true,
         }),
         G2lPacket::PlayerReconnect(GlPlayerReconnect {
             gs_id: WORLD,
@@ -255,6 +257,8 @@ async fn replaced_connection_cannot_mutate_internal_state() {
             gs_id: WORLD,
             result: 0,
             online: 0,
+            sequence: 0,
+            has_online: true,
         }),
         G2lPacket::RequestInfo(GlRequestInfo {
             connection_id: crate::models::ConnectionId(1),
@@ -325,6 +329,8 @@ async fn unauthorized_enter_response_cannot_complete_pending_world_entry() {
         gs_id: OTHER_WORLD,
         result: 0,
         online: 0,
+        sequence: 0,
+        has_online: true,
     });
     for attacker in [&unregistered, &unrelated] {
         assert!(handle_g2l(&server, attacker, response.clone())

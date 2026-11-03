@@ -124,17 +124,23 @@ pub async fn handle_g2l(
         G2lPacket::GameServerLoad(p) => {
             let gs_id = authorize_game_server(server, conn, None)?;
             server.games.set_load(gs_id, p.load)?;
-            server.games.note_online(gs_id, p.online);
+            if !p.has_online {
+                server.games.warn_missing_occupancy(gs_id);
+            }
+            server.games.note_online(gs_id, p.online, p.sequence);
             server.games.drain_queues(server).await;
             Ok(())
         }
         G2lPacket::PlayerEnter(p) => {
             authorize_game_server(server, conn, Some(p.gs_id))?;
+            if !p.has_online {
+                server.games.warn_missing_occupancy(p.gs_id);
+            }
             // Release the queue reservation even when the client connection is already gone;
             // the answer still reflects the game's occupancy after handling the request.
             server
                 .games
-                .note_enter_world_result(p.gs_id, p.connection_id, p.online);
+                .note_enter_world_result(p.gs_id, p.connection_id, p.online, p.sequence);
             server
                 .games
                 .route_enter_world_response(p.connection_id, p.gs_id, p.result);
