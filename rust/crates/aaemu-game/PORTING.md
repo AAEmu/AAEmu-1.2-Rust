@@ -472,7 +472,7 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 | Area (C#) | Rust | Status | Notes |
 |---|---|---|---|
 | `TeamManager`, `Models/Game/Team` | `systems/social/team.rs`, `packets/team.rs` | done | Invitations (single / area, 60 s timeout), create, AskRiskyTeam (leave / kick / dismiss + auto-disband), owner / role / marker / looting rule / ping / move, raid conversion, SetOffline / MemberRemoveFromTeam / UpdateAtLogin / UpdatePosition, 500 ms remote-member sync (delta cache, 5 s forced resync, upper-triangle pairs), zombie-team disband (5 min), loot winner helpers. Events (OnTeamJoin/Leave) are quest-side: not called. |
-| `ExpeditionManager`, `Models/Game/Expeditions` | `systems/social/expedition.rs`, `packets/expedition.rs` (`managers::expedition` re-exports) | done | Load, create (party checks, cost, `SCItemTaskSuccessPacket` money-only form), invite / reply, leave, kick, member role, owner, role policy, disband (stays listed as `$deleted-guild-<id>`), `Expedition.Save` per change, offline leave for character deletion. Rename / sponsor are log-only / not in 1.2 as in C#. |
+| `ExpeditionManager`, `Models/Game/Expeditions` | `systems/social/expedition.rs`, `packets/expedition.rs` (`managers::expedition` re-exports) | done | Load, create (party checks, cost, `SCItemTaskSuccessPacket` money-only form), invite / reply, leave, kick, member role, owner, role policy, disband (stays listed as `$deleted-guild-<id>`), `Expedition.Save` per change, offline leave for character deletion. Guild rename: see "Guild rename" below. Sponsor is still log-only / not in 1.2 as in C#. |
 | `FamilyManager`, `Models/Game/Family` | `systems/social/family.rs`, `packets/family.rs` | done | Load, invite / reply / create, leave, kick (offline existence check), title, steward, login / logout, disband, save, offline leave for character deletion. |
 | `FriendMananger`, `CharacterFriends`, `CharacterBlocked` | `systems/social/friend.rs`, `packets/friend.rs` (`managers::friend` re-exports) | done | Add / remove friends (online or by DB name lookup), block / unblock (online or by `NameManager` for offline names), status changes incl. `InParty`. The blocked list is enforced on every direct delivery path (whisper, team / area / expedition / family invite, friend add, trade and duel request); see the block-list deviation. |
 | `ChatManager`, `Models/Game/Chat` | `systems/social/chat.rs`, `session.rs` (`managers::chat` re-exports) | done | All channel kinds incl. party / raid / court, CleanUpChannels, party / raid / raid-leader / judge routing. User channels (`CSJoinUserChatChannel`) are log-only as in C#. |
@@ -540,6 +540,57 @@ refuses a duplicate faction id (`FUN_398a5280`), so `EXPEDITION_ID` also extract
 * The national tax CS packet is 0x013 (`FUN_392f42f0`; owner-approved exception to the
   never-edit `opcodes.rs` rule); a log-only handler is registered. The real tax handler,
   relation expiry, immigration / kick, rename and monument stay for stages 2-4.
+
+#### Guild rename (expedition)
+
+`CSRenameExpeditionPacket` (0x009, `{ id, name, is_expedition }`) now renames a guild when
+`is_expedition` is true; the nation half (`false`) stays log-only for the nation stage.
+
+Evidence (1.2 client):
+
+* The rename dialog has no client-side opener. `SCExpeditionShowRenameUI` (0x00f, empty body)
+  is handled by `FUN_391d2310`, which calls `FUN_392f8db0(0)`; that looks up the player's
+  expedition and pre-fills the current name, and `FUN_398a36e0` rejects a player who is not
+  the faction owner. The dialog's OK handler (`dialog_handler.alb` proto 25.0) calls
+  `X2Faction.RenameExpedition(newName)`; the native side (`FUN_39472d70` -> `FUN_392f8f50` ->
+  `FUN_397ab420`) fills `{ id = my expedition id, name, is_expedition = 1 }`.
+* `SCFactionRenamedPacket` (0x011, `{ id, name, byGm }`) is handled by `FUN_391d23f0` ->
+  `FUN_392fdce0`: it replaces the cached faction name, posts the `change_expedition_name`
+  chat notice, and clears the cached `allow_change_name` when `byGm` is false.
+* `SCFactionRetryRenamePacket` (0x012, `{ xpdt, errorMessage, name }`) is handled by
+  `FUN_391e5520`: `xpdt` non-zero re-opens the expedition dialog with `name` pre-filled
+  (`FUN_392f8db0`), zero the nation dialog. The handler does not read `errorMessage` in the
+  decompile, so the code is informational for 1.2; the re-opened dialog is the visible result.
+* The error codes are the creation ones (compact/client error table `FUN_3956b860`):
+  296 `expedition_name_character`, 297 `expedition_name_length`, 299 `expedition_name_exist`.
+  The creation path and rename share `systems::social::rename::validate_faction_name`.
+* The 1.2 compact database has no rename item, skill, special effect or `content_configs`
+  entry; the only 1.2 client trigger is the server packet. The GM hook `/testguild rename`
+  sends it (the access-level entry `testguild: 100` already existed without a C# command).
+
+Rules and deviations:
+
+* **Owner only.** The client's own pre-check and the server both require the guild owner
+  (`faction.owner_id` plus membership, checked under the expedition write lock together with
+  the name uniqueness test and the write).
+* **Offer required.** `rename_expedition` requires the one-shot offer created when the server
+  sent `SCExpeditionShowRenameUI`; a forged CS without it is refused with error 307. The offer
+  survives an invalid / taken name so the retry dialog can correct it, is consumed on success,
+  and is dropped on logout or a failed owner check. The set is capped (`MAX_RENAME_OFFERS`).
+  This is a server-side addition: the 1.2 C# only logged the packet.
+* **Uniqueness matches creation.** The create path compares exactly (`name.Equals(exp.Name)`
+  in C#), so rename does the same; it is **not** case-insensitive despite the MySQL column's
+  `utf8_general_ci` collation. Excluding the guild itself makes re-submitting the current name
+  a no-op rename.
+* **Broadcast scope.** `SCFactionRenamed` goes to every online player
+  (`WorldManager.broadcast_to_server`), because the faction list (`SCFactionListPacket`) and
+  `SCFactionCreatedPacket` are server-wide too; sending it only to members would leave every
+  other client's guild list stale.
+* **Persistence** is the existing `Expedition.Save` (`REPLACE INTO expeditions`), awaited
+  before the broadcast.
+* **capture-pending (RENAME-1):** the production trigger (item / merge collision / quest) is
+  not established for 1.2; only the GM hook is wired. The nation rename reuses the shared
+  validation / retry / broadcast helpers but is not part of this stage.
 
 ### systems::housing
 

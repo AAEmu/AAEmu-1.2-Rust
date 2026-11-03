@@ -5,8 +5,8 @@
 //! `Expedition.Save` persistence. (Moved here from `managers::expedition`, which re-exports
 //! this module.)
 
-use std::collections::HashMap;
-use std::sync::{Mutex, RwLock};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, PoisonError, RwLock};
 
 use aaemu_commons::{Marshal, PacketStream};
 use sqlx::mysql::MySqlPool;
@@ -23,6 +23,7 @@ use crate::packets::world::{
 };
 use crate::server::GameServer;
 use crate::systems::social::packets::expedition::*;
+use crate::systems::social::rename;
 use crate::systems::social::util::{self, error, send_error};
 use crate::world::{broadcast, PlayerRef};
 
@@ -192,10 +193,29 @@ pub struct ExpeditionManager {
     /// Pending guild invitations by invited character id. Deviation from the C# manager, which
     /// kept none and let any client join any guild (see PORTING.md).
     pub(crate) invitations: Mutex<HashMap<u32, PendingInvite>>,
+    /// Characters the server has offered a guild rename to (`SCExpeditionShowRenameUI`). The
+    /// 1.2 client can only send `CSRenameExpeditionPacket` from that dialog, so an offer is the
+    /// server-side proof that the rename came through the intended flow.
+    rename_offers: Mutex<HashSet<u32>>,
 }
 
 /// How long a guild invitation can be answered (same as the party / raid invitations).
 const INVITATION_TIMEOUT_MS: i64 = 60_000;
+
+/// Upper bound of pending rename offers (GM-triggered); a full set is cleared so it never grows
+/// without bound when characters leave without a logout packet.
+const MAX_RENAME_OFFERS: usize = 256;
+
+/// Why `ExpeditionManager.Rename` refused a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameFailure {
+    /// The faction id is not a loaded guild.
+    Missing,
+    /// The requester is not the guild's owner.
+    NotOwner,
+    /// Another guild already carries the name.
+    NameExists,
+}
 
 /// An unanswered `SCExpeditionInvitationPacket`.
 #[derive(Debug, Clone, Copy)]
@@ -330,6 +350,73 @@ impl ExpeditionManager {
     pub fn with_mut<R>(&self, id: u32, f: impl FnOnce(&mut Expedition) -> R) -> Option<R> {
         let mut list = self.expeditions.write().expect("expeditions poisoned");
         list.iter_mut().find(|e| e.faction.id == id).map(f)
+    }
+
+    /// Grants `character_id` the right to answer the rename dialog
+    /// (`SCExpeditionShowRenameUI` was sent to it).
+    pub fn offer_rename(&self, character_id: u32) {
+        let mut offers = self
+            .rename_offers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if offers.len() >= MAX_RENAME_OFFERS {
+            offers.clear();
+        }
+        offers.insert(character_id);
+    }
+
+    /// Whether `SCExpeditionShowRenameUI` is outstanding for `character_id`.
+    pub fn has_rename_offer(&self, character_id: u32) -> bool {
+        self.rename_offers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&character_id)
+    }
+
+    /// Consumes the rename offer after a successful rename.
+    pub fn take_rename_offer(&self, character_id: u32) {
+        self.rename_offers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&character_id);
+    }
+
+    /// Drops the rename offer (logout, refusal, or a character that can no longer rename).
+    pub fn clear_rename_offer(&self, character_id: u32) {
+        self.take_rename_offer(character_id);
+    }
+
+    /// Renames guild `id` to `name` when `character_id` owns it and no other guild has the
+    /// name. The ownership, uniqueness and name write happen under one lock, so a concurrent
+    /// owner change cannot slip between the check and the act. The caller validates the name
+    /// shape first; the comparison matches the creation path (`name.Equals(exp.Name)`).
+    pub fn rename(
+        &self,
+        id: u32,
+        character_id: u32,
+        name: &str,
+    ) -> std::result::Result<(), RenameFailure> {
+        let mut list = self.expeditions.write().expect("expeditions poisoned");
+        let index = list
+            .iter()
+            .position(|e| e.faction.id == id)
+            .ok_or(RenameFailure::Missing)?;
+        if list[index].faction.owner_id != character_id
+            || !list[index]
+                .members
+                .iter()
+                .any(|m| m.character_id == character_id)
+        {
+            return Err(RenameFailure::NotOwner);
+        }
+        if list
+            .iter()
+            .any(|e| e.faction.id != id && e.faction.name == name)
+        {
+            return Err(RenameFailure::NameExists);
+        }
+        list[index].faction.name = name.to_string();
+        Ok(())
     }
 
     /// Every expedition (a copy, insertion order).
@@ -548,6 +635,7 @@ pub fn on_character_login(server: &GameServer, p: &PlayerRef, expedition_id: u32
 
 /// `Expedition.OnCharacterLogout(character)`.
 pub fn on_character_logout(server: &GameServer, p: &PlayerRef, expedition_id: u32) {
+    server.expeditions.clear_rename_offer(p.character_id);
     if let Some((member, members)) =
         server
             .expeditions
@@ -594,19 +682,8 @@ pub async fn create_expedition(server: &GameServer, owner: &PlayerRef, name: &st
         send_error(owner, error::EXPEDITION_ALREADY_MEMBER);
         return;
     }
-    if name.encode_utf16().count() > 32 {
-        send_error(owner, error::EXPEDITION_NAME_LENGTH);
-        return;
-    }
-    let matches = match regex::Regex::new(&cfg.name_regex) {
-        Ok(r) => r.is_match(name),
-        Err(e) => {
-            tracing::error!("Expedition.NameRegex: {e}");
-            false
-        }
-    };
-    if !matches {
-        send_error(owner, error::EXPEDITION_NAME_CHARACTER);
+    if let Err(code) = rename::validate_faction_name(server, name) {
+        send_error(owner, code);
         return;
     }
     if server
@@ -761,6 +838,63 @@ pub async fn create_expedition(server: &GameServer, owner: &PlayerRef, name: &st
         on_character_login(server, &m, id);
     }
     save(server, id).await;
+}
+
+/// Asks the server to offer the guild owner a rename: `SCExpeditionShowRenameUI` (empty body)
+/// plus the one-shot offer that `rename_expedition` requires. Used by the GM test hook; a
+/// future item / merge trigger calls the same function.
+pub fn offer_expedition_rename_ui(
+    server: &GameServer,
+    p: &PlayerRef,
+) -> std::result::Result<(), i16> {
+    let id = p.data().unit.expedition_id;
+    let Some(e) = server.expeditions.get(id) else {
+        return Err(error::ONLY_EXPEDITION_MEMBER);
+    };
+    if e.faction.owner_id != p.character_id {
+        return Err(error::ONLY_EXPEDITION_OWNER);
+    }
+    server.expeditions.offer_rename(p.character_id);
+    rename::send_expedition_rename_ui(p);
+    Ok(())
+}
+
+/// `CSRenameExpeditionPacket` for an expedition (`is_expedition == true`). The 1.2 client only
+/// sends this from the dialog opened by `SCExpeditionShowRenameUI`, so the offer is required;
+/// the owner, name shape and uniqueness are checked before anything changes.
+pub async fn rename_expedition(server: &GameServer, p: &PlayerRef, id: u32, name: &str) {
+    if !server.expeditions.has_rename_offer(p.character_id) {
+        tracing::warn!(
+            "RenameExpedition {} by {} without a ShowRenameUI offer refused",
+            id,
+            p.character_id
+        );
+        send_error(p, error::EXPEDITION_BAD_STATUS);
+        return;
+    }
+    if let Err(code) = rename::validate_faction_name(server, name) {
+        // The client re-opens the dialog with the rejected name; the offer stays usable.
+        rename::send_retry(p, true, code, name);
+        return;
+    }
+    match server.expeditions.rename(id, p.character_id, name) {
+        Ok(()) => {
+            server.expeditions.take_rename_offer(p.character_id);
+            save(server, id).await;
+            rename::broadcast_renamed(server, id, name, false);
+        }
+        Err(RenameFailure::NameExists) => {
+            rename::send_retry(p, true, error::EXPEDITION_NAME_EXIST, name);
+        }
+        Err(RenameFailure::NotOwner) => {
+            server.expeditions.clear_rename_offer(p.character_id);
+            send_error(p, error::ONLY_EXPEDITION_OWNER);
+        }
+        Err(RenameFailure::Missing) => {
+            server.expeditions.clear_rename_offer(p.character_id);
+            send_error(p, error::EXPEDITION_BAD_STATUS);
+        }
+    }
 }
 
 /// `ExpeditionManager.Invite(connection, invitedName)`.

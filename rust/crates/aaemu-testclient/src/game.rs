@@ -570,6 +570,8 @@ pub struct GameState {
     pub char_list_done: bool,
     pub selected_char: u32,
     pub self_obj: u32,
+    /// The guild (`expedition`) id from our last `SCUnitExpeditionChangedPacket` (0 = none).
+    pub self_expedition: u32,
     pub self_pos: (f32, f32, f32),
     /// Last position actually received from the server, independent of local movement sends.
     pub observed_self_pos: Option<(f32, f32, f32)>,
@@ -661,6 +663,17 @@ impl GameState {
                 }
                 !indices.is_empty()
             });
+        } else if p.is_sc(sc::SCUnitExpeditionChangedPacket) {
+            let _obj_id = s.read_bc()?;
+            let character_id = s.read_u32()?;
+            let _kicker = s.read_string()?;
+            let _unit_name = s.read_string()?;
+            let _id = s.read_u32()?;
+            let expedition_id = s.read_u32()?;
+            let _expel = s.read_bool()?;
+            if character_id == st.selected_char {
+                st.self_expedition = expedition_id;
+            }
         } else if p.is_sc(sc::SCUnitStatePacket) {
             let obj_id = s.read_bc()?;
             let name = s.read_string()?;

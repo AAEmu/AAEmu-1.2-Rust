@@ -15,6 +15,7 @@ pub mod error {
     pub const EXPEDITION_NAME_CHARACTER: i16 = 296;
     pub const EXPEDITION_NAME_LENGTH: i16 = 297;
     pub const EXPEDITION_NAME_EXIST: i16 = 299;
+    pub const EXPEDITION_BAD_STATUS: i16 = 307;
     pub const CHAT_NOT_IN_EXPEDITION: i16 = 311;
     pub const EXPEDITION_CREATE_FACTION: i16 = 321;
     pub const EXPEDITION_CREATE_MEMBER_EXPEDITION: i16 = 330;
