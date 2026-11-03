@@ -19,6 +19,8 @@
 //      'T' <lua>   run in the third state (gEnv+40, lua_handle 2) when present
 //      'B' <t><lua> run through the engine's own IScriptSystem::ExecuteBuffer
 //                  (t = 'S'/'U'/'T'; no result value, only ok / failed)
+//      'R' <cmd>   skill trace: "start [kinds]" | "stop" | "drain" | "status" (skilltrace.cpp)
+//      'M' <cmd>   video: "start<LF>fps<LF>ffmpeg<LF>path" | "stop" | "status" (video.cpp)
 //      'P'         ping: driver / client info
 //      'X'         unhook and unload the driver
 //    response: status (1 byte: '0' ok, '1' Lua error, '2' driver error) + UTF-8 text
@@ -40,6 +42,8 @@
 #include "visuals.h"
 #include "input.h"
 #include "audio.h"
+#include "skilltrace.h"
+#include "video.h"
 #endif
 
 // ---- client build constants (CryScriptSystem.dll, preferred base 0x35500000) -----------
@@ -436,7 +440,7 @@ static std::string pingInfo() {
                 env ? *(void**)(env + OFF_gEnv_SSystem) : NULL,
                 env ? *(void**)(env + OFF_gEnv_SSUI) : NULL,
                 env ? *(void**)(env + OFF_gEnv_SSThird) : NULL, g_hooked, g_mainTid);
-    return std::string(buf) + visuals::info() + startup::info() + virtualpak::info() +
+    return std::string(buf) + visuals::info() + skilltrace::info() + video::info() + startup::info() + virtualpak::info() +
         " fast=" + (g_fastApplied ? "1" : "0") + " silent=" + (g_silent ? "1" : "0") +
         " auction_ui=" + (g_auctionUiApplied ? "1" : "0");
 }
@@ -466,6 +470,8 @@ static DWORD WINAPI unloadThread(LPVOID) {
     submit('I', 0, "release", 30000);
     InterlockedExchange(&g_unloading, 1);
     removeHook();
+    video::remove();
+    skilltrace::remove();
     visuals::remove();
     pakio::remove();
     startup::remove();
@@ -530,6 +536,8 @@ static DWORD WINAPI serverThread(LPVOID) {
             case 'P': reply = pingInfo(); break;
             case 'I': reply = submit('I', 0, req.substr(1), 30000); break;
             case 'V': reply = visuals::profile(req.substr(1)); break;
+            case 'R': reply = skilltrace::control(req.substr(1)); break;
+            case 'M': reply = video::control(req.substr(1)); break;
             case 'S': case 'U': case 'T': reply = submit(op, 0, req.substr(1), 30000); break;
             case 'B':
                 reply = req.size() < 2 ? std::string("2missing target") : submit('B', req[1], req.substr(2), 30000);

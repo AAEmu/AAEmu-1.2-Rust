@@ -8,7 +8,8 @@
 //! Wire format, both directions: `u32 LE length` + `length` bytes.
 //! * request: one op byte + payload (`S`/`U`/`T` + Lua = run in the System / UI / third state,
 //!   `B` + target + Lua = the engine's own `ExecuteBuffer`, `P` = ping, `X` = detach,
-//!   `C` = capture, `Whide`/`Wshow` = window visibility, `F` + action = pak I/O);
+//!   `C` = capture, `Whide`/`Wshow` = window visibility, `F` + action = pak I/O,
+//!   `R` + command = skill trace, `M` + command = video capture);
 //! * response: one status byte (`0` ok, `1` Lua error, `2` driver error) + UTF-8 text,
 //!   except successful capture replies, which contain binary PNG bytes.
 //!
@@ -62,6 +63,10 @@ pub enum Request {
     Input(String),
     /// Controls bounded DXGI frame interval recording.
     FrameProfile(String),
+    /// Skill trace: `start [kinds]`, `drain`, `stop` or `status` (the replies are JSON, drain's is JSONL).
+    Trace(String),
+    /// Video capture: `start\nfps\nffmpeg\npath`, `stop` or `status`; the replies are JSON.
+    Video(String),
     /// Detaches hooks; the native module stays mapped until the client exits.
     Unload,
 }
@@ -85,6 +90,8 @@ impl Request {
             Request::PakIo(action) => [b"F".as_slice(), action.as_bytes()].concat(),
             Request::Input(action) => [b"I".as_slice(), action.as_bytes()].concat(),
             Request::FrameProfile(action) => [b"V".as_slice(), action.as_bytes()].concat(),
+            Request::Trace(command) => [b"R".as_slice(), command.as_bytes()].concat(),
+            Request::Video(command) => [b"M".as_slice(), command.as_bytes()].concat(),
         }
     }
 }
@@ -259,6 +266,16 @@ mod tests {
         assert_eq!(Request::PakIo("profile".into()).payload(), b"Fprofile");
         assert_eq!(Request::Input("w 1000".into()).payload(), b"Iw 1000");
         assert_eq!(Request::FrameProfile("off".into()).payload(), b"Voff");
+        assert_eq!(
+            Request::Trace("start anim,fx".into()).payload(),
+            b"Rstart anim,fx"
+        );
+        assert_eq!(Request::Trace("drain".into()).payload(), b"Rdrain");
+        assert_eq!(
+            Request::Video("start\n30\n\nD:\\a.mp4".into()).payload(),
+            b"Mstart\n30\n\nD:\\a.mp4"
+        );
+        assert_eq!(Request::Video("stop".into()).payload(), b"Mstop");
     }
 
     #[test]
