@@ -763,7 +763,9 @@ expedition's top-level faction (or an unknown / unowned dominion) -> 685
 `DOMINION_NATIONAL_TAX_NO_PERMISSION`; the same rate is ignored
 (`equal_tax_rate_warning`); a change within 86400 s -> 725 `DOMINION_NATIONAL_TAX_LATER`.
 Success stores the rate (permille/10, 0-1000) and `last_national_tax_rate_changed_at` on the
-`dominions` row (the periodic world save writes it) and broadcasts `SCNationalTaxRate` 0x021
+`dominions` row (a targeted `UPDATE` of those two columns only; the full row, including the
+treasury, stays with the periodic financial save, which is the only path allowed to commit
+treasury changes with houses / mail / wallets) and broadcasts `SCNationalTaxRate` 0x021
 `{zone, taxRate, prevTaxRate, changedTime}` to every client, because the client handler
 `FUN_392f39b0` updates a server-wide dominion record and shows ui_texts 5675.
 
@@ -773,9 +775,11 @@ Success stores the rate (permille/10, 0-1000) and `last_national_tax_rate_change
   dominion starts at 0; the C# set 500 on claim, which is not 1.2 evidence.
 * 684/685/725 are the client's own error ids (`error_message.rs`), so a forged packet gets
   the same answer the client would have produced locally.
-* Test hook: GM `nation dominion <zone>` seeds a real `DominionState` for the caller's guild
-  with a placeholder tower identity (no live castle tower is needed for the tax handler); the
-  live suite uses it because a castle cannot be claimed headlessly.
+* Test hook: GM `nation dominion <zone>` seeds an **in-memory-only** `DominionState` for the
+  caller's guild with a placeholder tower identity (no live castle tower is needed for the tax
+  handler). The state is marked `ephemeral`, so `prepare_save` never writes the placeholder
+  tower (which would fail `validate_loaded_identity` on the next startup); the live suite uses
+  it because a castle cannot be claimed headlessly.
 
 #### National monument (RENAME-9)
 
@@ -784,11 +788,15 @@ Success stores the rate (permille/10, 0-1000) and `last_national_tax_rate_change
 fields are in `DominionData`). The monument is the territory-statue doodad named by
 `siege_zones.monument_doodad_id`: the six 1.2 castle zone groups map to doodads 7229-7234
 ("Territory Statue: Akrites/Calleil/Ezi/Gon/Hora/Nui"), matching the placement skills
-23681..23688 and the removal skill 23682 by name. Placement spawns that persistent doodad,
-stores its `doodads` row id and world position on the `dominions` row
-(`national_monument_db_id`, `_x`, `_y`, `_z`), broadcasts 0x022 and leaves the row dirty for
-the periodic save; `DominionData` at world entry carries the same values. Removal deletes the
-doodad row/object, clears the fields and broadcasts db id 0.
+23681..23688 and the removal skill 23682 by name. Placement spawns that persistent doodad and
+writes its `doodads` row with `save_now` *before* storing the db id and world position on the
+`dominions` row (`national_monument_db_id`, `_x`, `_y`, `_z`); a crash leaves an orphan statue,
+never a dominion pointing at a missing one. The reference is written with a targeted `UPDATE`
+of the four monument columns; the full row stays with the periodic financial save.
+`DominionData` at world entry carries the same values. Removal zeroes the dominion columns
+before deleting the doodad row/object and broadcasts db id 0. A change of owner (settlement
+claim, siege capture, forced release) clears the fields, broadcasts db id 0 and deletes the old
+owner's statue through the same ordered path.
 
 * **Gates (client error ids, text in `ui_texts`).** 748 `ONLY_NATION_OWNER` for a caller who
   is not a nation king; 757 `NATION_OWNER_AT_POS_ONLY` for the king of another dominion or
@@ -804,6 +812,20 @@ doodad row/object, clears the fields and broadcasts db id 0.
   id 0 (implemented as an inferred clear).
 * The migration `SQL/updates/2026-11-03_aaemu_game_dominion_monument.sql` adds the four
   columns and the base `SQL/aaemu_game.sql` carries them.
+* **Stage 4 known, not fixed:**
+  * **Expedition id leak:** `create_expedition` and `declare_independence` allocate the
+    expedition id before the final shared-name re-check under `rename::lock_names`; if that
+    re-check fails, the id is not released (an allocator gap, not a duplicate). The early
+    check makes it unlikely; no test covers the race.
+  * **NATION-1 shared-name edge cases:** a nation created with its founding guild's name
+    cannot later rename back to that name (the shared check excludes the nation but sees the
+    guild); re-submitting the current name is an early no-op that consumes the one-shot
+    offer without sending `SCFactionRenamed`. The 1.2 client's behavior for these cases is
+    unverified.
+  * **Test gaps:** the temporary `nation-stage4` live suite is not committed (fixed names and
+    the memory-only dominion hook); a castle capture / forced release with a live statue is
+    covered by unit tests and the ordered DB path, not by a live siege. The MySQL-gated tests
+    use connection-local temporary tables.
 
 ### systems::housing
 

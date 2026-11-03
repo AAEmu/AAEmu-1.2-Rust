@@ -154,6 +154,9 @@ pub struct DominionState {
     /// Last explicit siege generation; retained when no siege is currently present.
     pub last_siege_id: u64,
     pub siege: Option<SiegeState>,
+    /// A test-only authority row that must never reach `dominions` (the GM `nation dominion`
+    /// hook uses a placeholder tower that would fail startup validation). Never persisted.
+    pub ephemeral: bool,
 }
 
 impl DominionState {
@@ -181,7 +184,17 @@ impl DominionState {
             tower_hp: None,
             last_siege_id: 0,
             siege: None,
+            ephemeral: false,
         }
+    }
+
+    /// Drops the national monument reference. The caller deletes the doodad row and announces
+    /// the clear (the authority cannot reach the world / doodad manager).
+    fn clear_national_monument_fields(&mut self) {
+        self.national_monument_db_id = 0;
+        self.national_monument_x = 0.0;
+        self.national_monument_y = 0.0;
+        self.national_monument_z = 0.0;
     }
 
     pub fn validate(&self) -> Result<(), DominionError> {
@@ -599,11 +612,20 @@ impl DominionManager {
             .ok_or(DominionError::Overflow)?;
         state.owner_expedition_id = expedition_id;
         state.reign_start_at = now_seconds;
+        state.clear_national_monument_fields();
         if !consume() {
             return Err(DominionError::Resources);
         }
         replace(&mut inner, state.clone(), revision);
         Ok(state)
+    }
+
+    /// Marks a test-only state as never persisted (see [`DominionState::ephemeral`]).
+    pub fn mark_ephemeral(&self, zone_group_id: u32) {
+        let mut inner = self.lock();
+        if let Some(entry) = inner.states.get_mut(&zone_group_id) {
+            entry.state.ephemeral = true;
+        }
     }
 
     pub fn remove_tower(
@@ -1062,6 +1084,7 @@ impl DominionManager {
         siege.status = SiegeStatus::Finished;
         siege.outcome = SiegeOutcome::AttackerCaptured;
         siege.ended_at = now_ms / 1000;
+        state.clear_national_monument_fields();
         inner
             .channels
             .retain(|(zone, _), _| *zone != handle.zone_group_id);
@@ -1192,6 +1215,7 @@ impl DominionManager {
             if state.owner_expedition_id == expedition_id {
                 state.owner_expedition_id = 0;
                 state.reign_start_at = 0;
+                state.clear_national_monument_fields();
             }
             let cancels_siege = state.siege.as_ref().is_some_and(|siege| {
                 siege.status != SiegeStatus::Finished
@@ -1553,7 +1577,7 @@ impl DominionManager {
             rows: inner
                 .states
                 .values()
-                .filter(|e| e.dirty)
+                .filter(|e| e.dirty && !e.state.ephemeral)
                 .map(|e| SavedRow {
                     revision: e.revision,
                     state: e.state.clone(),

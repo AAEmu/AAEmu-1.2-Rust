@@ -601,7 +601,9 @@ async fn monument_place_remove_spawns_the_territory_statue_and_broadcasts() {
     f.give_dominion(EXPEDITION);
     let (x, y, z) = (100.0, 100.0, 100.0);
 
-    nation::place_national_monument(&f.server, &f.king, ZONE as u16, x, y, z).expect("placement");
+    nation::place_national_monument(&f.server, &f.king, ZONE as u16, x, y, z)
+        .await
+        .expect("placement");
     let saved = f.state();
     assert!(saved.national_monument_db_id > 0);
     assert_eq!(
@@ -630,6 +632,7 @@ async fn monument_place_remove_spawns_the_territory_statue_and_broadcasts() {
 
     // One statue per dominion -> 750.
     let error = nation::place_national_monument(&f.server, &f.king, ZONE as u16, x, y, z)
+        .await
         .expect_err("already placed");
     assert_eq!(
         error,
@@ -637,7 +640,9 @@ async fn monument_place_remove_spawns_the_territory_statue_and_broadcasts() {
     );
 
     // Removal clears the state, deletes the doodad and broadcasts db id 0.
-    nation::remove_national_monument(&f.server, &f.king, ZONE as u16).expect("removal");
+    nation::remove_national_monument(&f.server, &f.king, ZONE as u16)
+        .await
+        .expect("removal");
     let saved = f.state();
     assert_eq!(saved.national_monument_db_id, 0);
     assert!(world.doodad_by_db_id(doodad.data().db_id).is_none());
@@ -649,7 +654,9 @@ async fn monument_place_remove_spawns_the_territory_statue_and_broadcasts() {
         assert_eq!((zone, db_id), (ZONE as u16, 0));
     }
     // A second removal is a no-op.
-    nation::remove_national_monument(&f.server, &f.king, ZONE as u16).expect("idempotent");
+    nation::remove_national_monument(&f.server, &f.king, ZONE as u16)
+        .await
+        .expect("idempotent");
     assert!(f.king_client.drain().is_empty());
 }
 
@@ -661,6 +668,7 @@ async fn monument_gates_king_dominion_position_and_siege_period() {
 
     // Not a nation king -> 748.
     let error = nation::place_national_monument(&f.server, &f.subject, ZONE as u16, x, y, z)
+        .await
         .expect_err("not the king");
     assert_eq!(
         error,
@@ -669,6 +677,7 @@ async fn monument_gates_king_dominion_position_and_siege_period() {
 
     // The king must be at the point (skill max_range 20).
     let error = nation::place_national_monument(&f.server, &f.king, ZONE as u16, 121.0, y, z)
+        .await
         .expect_err("too far");
     assert_eq!(
         error,
@@ -709,6 +718,7 @@ async fn monument_gates_king_dominion_position_and_siege_period() {
         is_disbanded: false,
     });
     let error = nation::place_national_monument(&f.server, &f.king, ZONE as u16, x, y, z)
+        .await
         .expect_err("another kingdom's dominion");
     assert_eq!(
         error,
@@ -725,6 +735,7 @@ async fn monument_gates_king_dominion_position_and_siege_period() {
         .schedule_siege(ZONE, OTHER_EXPEDITION, now + 60, now + 600, now)
         .expect("siege");
     let error = nation::place_national_monument(&f.server, &f.king, ZONE as u16, x, y, z)
+        .await
         .expect_err("siege period");
     assert_eq!(
         error,
@@ -887,4 +898,250 @@ async fn private_mysql_dominion_tax_and_monument_round_trip() {
     assert_eq!(row.national_monument_x, 10.5);
     assert_eq!(row.national_monument_y, 20.0);
     assert_eq!(row.national_monument_z, 30.0);
+}
+
+#[tokio::test]
+async fn releasing_the_owner_clears_the_monument_and_deletes_the_statue() {
+    let mut f = Fixture::new();
+    f.give_dominion(EXPEDITION);
+    let (x, y, z) = (100.0, 100.0, 100.0);
+    nation::place_national_monument(&f.server, &f.king, ZONE as u16, x, y, z)
+        .await
+        .expect("placement");
+    let previous = f.state();
+    let db_id = previous.national_monument_db_id;
+    assert!(db_id > 0);
+    let world = f.server.world.world(0).expect("world");
+    assert!(world.doodad_by_db_id(db_id as u32).is_some());
+    f.king_client.drain();
+    f.subject_client.drain();
+
+    let released = f
+        .server
+        .systems
+        .housing
+        .dominions
+        .release_expedition(EXPEDITION, Utc::now().timestamp());
+    assert_eq!(released.len(), 1);
+    assert_eq!(released[0].0.national_monument_db_id, db_id);
+    assert_eq!(released[0].1.national_monument_db_id, 0);
+    super::dominion::apply_released(&f.server, &released[0].0, &released[0].1);
+
+    let saved = f.state();
+    assert_eq!(saved.owner_expedition_id, 0);
+    assert_eq!(saved.national_monument_db_id, 0);
+    assert!(world.doodad_by_db_id(db_id as u32).is_none());
+    for client in [&mut f.king_client, &mut f.subject_client] {
+        let frames = client.drain();
+        let monuments = frames_of(&frames, sc::SCNationalMonumentChangedPacket);
+        assert_eq!(monuments.len(), 1);
+        let (zone, cleared, px, py, pz) = parse_monument(&monuments[0]);
+        assert_eq!((zone, cleared), (ZONE as u16, 0));
+        assert_eq!((px, py, pz), (0.0, 0.0, 0.0));
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses connection-local temporary tables"]
+async fn private_mysql_national_tax_update_leaves_a_dirty_treasury_alone() {
+    use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+    use std::str::FromStr;
+
+    let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+        return;
+    };
+    let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+    assert_eq!(
+        options.get_port(),
+        3317,
+        "Only private MySQL3317 is allowed"
+    );
+    let pool = MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TEMPORARY TABLE dominions (\
+         zone_group_id int unsigned NOT NULL PRIMARY KEY,\
+         national_tax_rate smallint unsigned NOT NULL DEFAULT 0,\
+         last_national_tax_rate_changed_at bigint NOT NULL DEFAULT 0,\
+         national_monument_db_id bigint NOT NULL DEFAULT 0,\
+         national_monument_x float NOT NULL DEFAULT 0,\
+         national_monument_y float NOT NULL DEFAULT 0,\
+         national_monument_z float NOT NULL DEFAULT 0,\
+         cur_house_tax_money int NOT NULL DEFAULT 0) ENGINE=InnoDB",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO dominions (zone_group_id) VALUES (25), (26)")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut f = Fixture::new();
+    f.server.db = pool.clone();
+    let tower = |house_id: u32| TowerIdentity {
+        house_id,
+        instance_id: 0,
+        guard_tower_setting_id: 6,
+    };
+    let state = |zone: u32, house_id: u32| {
+        let mut state = DominionState::unowned(zone, tower(house_id));
+        state.owner_expedition_id = EXPEDITION;
+        state.ownership_generation = 1;
+        state.reign_start_at = 1_000;
+        state
+    };
+    f.server
+        .systems
+        .housing
+        .dominions
+        .restore(vec![state(25, 525), state(26, 526)])
+        .expect("states");
+    f.server
+        .systems
+        .housing
+        .dominions
+        .credit_treasury(
+            26,
+            crate::systems::housing::dominion::state::Treasury {
+                cur_house_tax_money: 1_234,
+                ..Default::default()
+            },
+        )
+        .expect("dirty treasury");
+    f.server
+        .systems
+        .housing
+        .dominions
+        .set_national_tax_rate(25, EXPEDITION, 750, 1_700_000_000)
+        .expect("tax");
+
+    super::dominion::persist_national_tax(&f.server, 25, 750, 1_700_000_000)
+        .await
+        .expect("targeted tax update");
+
+    let tax: u16 =
+        sqlx::query_scalar("SELECT national_tax_rate FROM dominions WHERE zone_group_id = 25")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(tax, 750);
+    let treasury: i32 =
+        sqlx::query_scalar("SELECT cur_house_tax_money FROM dominions WHERE zone_group_id = 26")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        treasury, 0,
+        "a tax-rate write must not commit another zone's treasury"
+    );
+    assert_eq!(
+        f.server
+            .systems
+            .housing
+            .dominions
+            .prepare_save()
+            .changed_count(),
+        2,
+        "both in-memory rows stay dirty for the periodic financial save"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses connection-local temporary tables"]
+async fn private_mysql_monument_row_is_written_before_the_dominion_reference() {
+    use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+    use std::str::FromStr;
+
+    let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+        return;
+    };
+    let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+    assert_eq!(
+        options.get_port(),
+        3317,
+        "Only private MySQL3317 is allowed"
+    );
+    let pool = MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    // The doodad writer takes this pool's single connection; the temp table is visible there.
+    sqlx::query(
+        "CREATE TEMPORARY TABLE doodads (\
+         id int unsigned NOT NULL AUTO_INCREMENT, owner_id int DEFAULT NULL,\
+         owner_type tinyint unsigned DEFAULT 255, attach_point int unsigned NULL DEFAULT 0,\
+         template_id int NOT NULL, current_phase_id int NOT NULL, plant_time datetime NOT NULL,\
+         growth_time datetime NOT NULL, phase_time datetime NOT NULL, x float NOT NULL,\
+         y float NOT NULL, z float NOT NULL, roll float NOT NULL, pitch float NOT NULL,\
+         yaw float NOT NULL, scale float NOT NULL DEFAULT 1, item_id bigint unsigned NOT NULL DEFAULT 0,\
+         house_id int unsigned NOT NULL DEFAULT 0, parent_doodad int unsigned NOT NULL DEFAULT 0,\
+         item_template_id int unsigned NOT NULL DEFAULT 0,\
+         item_container_id bigint unsigned NOT NULL DEFAULT 0, data int NOT NULL DEFAULT 0,\
+         farm_type int NOT NULL DEFAULT 0, interaction_counts text NULL, PRIMARY KEY (id)) ENGINE=InnoDB",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TEMPORARY TABLE dominions (\
+         zone_group_id int unsigned NOT NULL PRIMARY KEY,\
+         national_monument_db_id bigint NOT NULL DEFAULT 0,\
+         national_monument_x float NOT NULL DEFAULT 0,\
+         national_monument_y float NOT NULL DEFAULT 0,\
+         national_monument_z float NOT NULL DEFAULT 0) ENGINE=InnoDB",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO dominions (zone_group_id) VALUES (25)")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let f = Fixture::new();
+    let mut server = f.server;
+    server.db = pool.clone();
+    let mut state = DominionState::unowned(
+        ZONE,
+        TowerIdentity {
+            house_id: 500,
+            instance_id: 0,
+            guard_tower_setting_id: 6,
+        },
+    );
+    state.owner_expedition_id = EXPEDITION;
+    state.ownership_generation = 1;
+    state.reign_start_at = 1_000;
+    server
+        .systems
+        .housing
+        .dominions
+        .restore(vec![state])
+        .expect("dominion fixture");
+    let server = std::sync::Arc::new(server);
+    server.set_self();
+
+    nation::place_national_monument(&server, &f.king, ZONE as u16, 100.0, 100.0, 100.0)
+        .await
+        .expect("placement");
+    let state = server.systems.housing.dominions.get(ZONE).expect("state");
+    assert!(state.national_monument_db_id > 0);
+    let doodads: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM doodads WHERE id = ?")
+        .bind(state.national_monument_db_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(doodads, 1, "the statue row must exist");
+    let reference: i64 = sqlx::query_scalar(
+        "SELECT national_monument_db_id FROM dominions WHERE zone_group_id = 25",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(reference, state.national_monument_db_id);
 }

@@ -424,6 +424,11 @@ pub fn complete_effect(server: &GameServer, args: &EffectArgs<'_>) {
     let expedition = server
         .expeditions
         .expedition_of_character(player.character_id);
+    let previous = server
+        .systems
+        .housing
+        .dominions
+        .get(channel.handle.zone_group_id);
     let Ok(state) = server.systems.housing.dominions.complete_engraving(
         &channel.handle,
         expedition,
@@ -440,6 +445,11 @@ pub fn complete_effect(server: &GameServer, args: &EffectArgs<'_>) {
         .expect("engraving poisoned")
         .remove(&player.character_id);
     apply_tower_state(server, &state);
+    if let Some(previous) = previous {
+        crate::systems::social::dominion::clear_national_monument_on_owner_change(
+            server, &previous, &state,
+        );
+    }
     crate::systems::social::dominion::broadcast_owner_change(server, &state);
     crate::systems::social::dominion::send_tower_alert(
         server,

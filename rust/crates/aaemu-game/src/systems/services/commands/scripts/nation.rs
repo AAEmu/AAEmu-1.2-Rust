@@ -260,10 +260,10 @@ impl Command for Nation {
                     );
                     Ok(())
                 }
-                // Test hook, not a 1.2 command: seed a fake dominion for the caller's guild so
-                // the national tax / monument paths can be driven without a castle tower. The
-                // authority row is real; the tower identity is a placeholder (the snapshot
-                // needs a live tower and is skipped here).
+                // Test hook, not a 1.2 command: seed an in-memory-only dominion for the
+                // caller's guild so the national tax / monument paths can be driven without a
+                // castle tower. The placeholder tower identity would fail startup validation,
+                // so the state is marked ephemeral and never reaches the `dominions` table.
                 "dominion" if args.len() == 2 => {
                     let Ok(zone) = args[1].parse::<u16>() else {
                         CommandManager::send_default_help_text(self, out);
@@ -290,12 +290,16 @@ impl Command for Nation {
                         || true,
                     ) {
                         Ok(state) => {
-                            crate::systems::social::dominion::schedule_persist_authority(server);
+                            server
+                                .systems
+                                .housing
+                                .dominions
+                                .mark_ephemeral(u32::from(zone));
                             CommandManager::send_normal_text(
                                 self,
                                 out,
                                 &format!(
-                                    "Dominion {} is owned by expedition {}",
+                                    "Dominion {} is owned by expedition {} (in memory only)",
                                     state.zone_group_id, expedition_id
                                 ),
                             )
@@ -332,6 +336,7 @@ impl Command for Nation {
                             nation::place_national_monument(
                                 server, &player, zone, pos.x, pos.y, pos.z,
                             )
+                            .await
                         }
                         "place" if args.len() == 5 => {
                             let (Ok(x), Ok(y), Ok(z)) = (
@@ -342,10 +347,10 @@ impl Command for Nation {
                                 CommandManager::send_default_help_text(self, out);
                                 return Ok(());
                             };
-                            nation::place_national_monument(server, &player, zone, x, y, z)
+                            nation::place_national_monument(server, &player, zone, x, y, z).await
                         }
                         "remove" if args.len() == 2 => {
-                            nation::remove_national_monument(server, &player, zone)
+                            nation::remove_national_monument(server, &player, zone).await
                         }
                         _ => {
                             CommandManager::send_default_help_text(self, out);

@@ -3319,6 +3319,7 @@ async fn private_mysql_pirate_last_member_dismissal_persists_nation_and_dominion
             national_monument_x: 0.0,
             national_monument_y: 0.0,
             national_monument_z: 0.0,
+            ephemeral: false,
             non_pvp_start_at: 0,
             non_pvp_duration_min: 0,
             treasury: Default::default(),

@@ -178,6 +178,7 @@ pub async fn load_rows(pool: &MySqlPool) -> anyhow::Result<Vec<DominionState>> {
             tower_hp: row.try_get("tower_hp")?,
             last_siege_id: row.try_get("last_siege_id")?,
             siege,
+            ephemeral: false,
         };
         if states.insert(state.zone_group_id, state).is_some() {
             anyhow::bail!("duplicate dominion zone group");
@@ -259,6 +260,51 @@ pub async fn write_batch(
         }
     }
     Ok(batch.changed_count())
+}
+
+/// Writes only the national tax columns of one territory. The full row (including the
+/// treasury) stays with the periodic financial save, which is the only path allowed to commit
+/// treasury changes with houses / mail / wallets (managers/save.rs). The in-memory row keeps
+/// its dirty flag, so the next financial save writes the same values again.
+pub async fn write_national_tax_rate(
+    pool: &MySqlPool,
+    zone_group_id: u32,
+    rate: u16,
+    changed_at: i64,
+) -> sqlx::Result<u64> {
+    Ok(sqlx::query(
+        "UPDATE dominions SET national_tax_rate = ?, last_national_tax_rate_changed_at = ?          WHERE zone_group_id = ?",
+    )
+    .bind(rate)
+    .bind(changed_at)
+    .bind(zone_group_id)
+    .execute(pool)
+    .await?
+    .rows_affected())
+}
+
+/// Writes only the national monument columns of one territory (zeroes clear it). The full
+/// row stays with the periodic financial save; a missing row (a test-only ephemeral territory)
+/// affects no rows.
+pub async fn write_national_monument(
+    pool: &MySqlPool,
+    zone_group_id: u32,
+    db_id: i64,
+    x: f32,
+    y: f32,
+    z: f32,
+) -> sqlx::Result<u64> {
+    Ok(sqlx::query(
+        "UPDATE dominions SET national_monument_db_id = ?, national_monument_x = ?,          national_monument_y = ?, national_monument_z = ? WHERE zone_group_id = ?",
+    )
+    .bind(db_id)
+    .bind(x)
+    .bind(y)
+    .bind(z)
+    .bind(zone_group_id)
+    .execute(pool)
+    .await?
+    .rows_affected())
 }
 
 async fn write_row(tx: &mut Transaction<'_, MySql>, state: &DominionState) -> sqlx::Result<()> {
