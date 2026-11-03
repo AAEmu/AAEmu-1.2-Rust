@@ -34,6 +34,9 @@ client --CSCreateCharacter------->  NameManager.Validate -> SCCharacterCreationF
                                     |   SaveDirectlyToDatabase -> SCCreateCharacterResponse | SCCharacterCreationFailed(3)
 client --CSDeleteCharacter------->  SetDeleteCharacter -> SCDeleteCharacterResponse(2|0) | SCErrorMsg; CharacterDeleteTask
 client --CSCancelCharacterDelete->  SetRestoreCharacter -> SCCancelCharacterDeleteResponse(3|4)
+client --CSEditCharacter--------->  (Characters:PreSelectPeriod on) CharacterManager.Edit: own, undeleted,
+                                    never-played character -> create rules re-run, rebuilt starting kit,
+                                    SCEditCharacterResponse | ignored (failure reply capture-pending)
 
 enter world:
 client --CSSelectCharacter------->  Character.Load() (abilities, actabilities, skills, appellations, portals,
@@ -68,6 +71,45 @@ disconnect                    ---> OnDisconnect: offline status, SaveAndRemoveFr
 
 server: SaveManager every World.AutoSaveInterval minutes (items + online characters), final save on shutdown.
 ```
+
+### Lobby character edit (`CSEditCharacter` 0x023 / `SCEditCharacterResponse` 0x03a)
+
+The pre-select period is a login-advertised flag (`ACJoinResponse.afs` bit 16,
+`Login:PreSelectCharacterPeriod`); the client's Start button then calls
+`X2LoginCharacter.EditCharacter` instead of entering the world (`character_select.alb`), and its
+edit window reuses the character-create UI. The game server takes the same flag from
+`Characters:PreSelectPeriod` (must equal the login value; there is no cross-process check) and
+otherwise ignores the packet. Request layout from the 1.2 serializer `FUN_397c4da0` (writer
+`FUN_397ae360`): `u32 characterId`, then the `CSCreateCharacterPacket` body (name, race, gender,
+7 body items, the `UnitCustomModelParams` blob, 3 abilities, level) **without** the create's
+trailing `i32 introZoneId`. Response: the character-info block shared with the create response
+and the character list (serializer `FUN_397ab170` -> `FUN_39620030`) under opcode 0x03a.
+
+Rules (from the 1.2 UI and the create path; the 1.2 server behaviour itself is not observable):
+
+* Only the account's own, undeleted, not-pending-deletion character in the connection's lobby
+  list, and only while it never entered the world (`online_time`/`leave_time` are 0): the edit
+  re-runs creation, so an already played character would lose its kit, skills and slots.
+* Race and gender are fixed in the edit UI (`GetEditUnitRace/Gender` seed the read-only step-1
+  buttons and only the character's own race stays enabled, `character_create_step1_view.alb`),
+  so a different pair is refused. The stored level is kept (the client sends 1 for both create
+  and edit; its edit UI has no level control).
+* Name changes are allowed: the edit UI pre-fills the existing name in the editable field and the
+  1.2 edit builder re-validates it (`XlIsValidName`, `FUN_391a4640`). An unchanged name is left
+  alone; a changed one re-runs create's rules (`NameManager.ValidateCharacterName` + blocked
+  names) under the create save lock, and the name manager swap happens after the commit.
+* The rebuild reuses every create step (race/gender template, ability starting kit, body items,
+  supplies, actabilities, starting skills, gear buffs). Old item/container rows and the
+  create-time ability/actability/appellation/skill rows are deleted and the new ones written in
+  one transaction, so a failed save leaves the character untouched.
+* Gated by `systems::services::second_password::allow_lobby_action`, like the other lobby
+  actions (`CSEditCharacter` was the packet that call was reserved for).
+* **Failure reply: UNKNOWN / capture-pending** (`EDITCHAR-FAIL-1`). The 1.2 handler
+  `FUN_391eb910` only has a success path (a zero character id is its only no-op), so a refused
+  edit sends nothing and logs the reason; the client leaves its create window open.
+* Not ported / not validated: create itself accepts any item template as a body item
+  (`SetEquipItemTemplate`) without checking `item_body_parts`; the edit inherits that rule
+  rather than tightening it (`EDITCHAR-BODYITEM-1`, capture-pending).
 
 Framing: level 1 = `[dd 01][hash][count][u16 op][body]` (server writes 0/0 and never verifies the
 client's bytes, as in C#), level 2 = `[dd 02][u16 op][body]`. Any other level has no packet table:
@@ -302,7 +344,7 @@ These `SpecialType` bodies were TODO stubs that only logged in the C# (`git show
 | `SpecialEffects/GenderTransfer` (special 107) | `systems/skills/effects/special/misc.rs` (`gender_transfer`) | added | Data: skill 23469 `성별 전환하기` (beauty-salon NPC interaction, `target_type` any unit, selection target). Flips the affected player (`target` if a player, else the caster) with `new = 3 - old` (1 male <-> 2 female), refuses when an equipped item template has `char_gender` set to a third value with `GENDER_TRANSFER_AS_GENDER_EQUIPMENT` (744), rebuilds `unit.model_id` from the race/gender `characters` template and broadcasts `SCCharacterGenderAndModelModifiedPacket` (existing beauty-salon packet) to the player and observers. `Character.Save` persists the new `gender` with the next save. |
 | `SpecialEffects/MateMakeGetUp` (special 51) | `systems/vehicles/mates.rs` (`revive_mate`), `systems/skills/effects/special/misc.rs` | added | Data: skill 13719 `일으켜세우기` (revive an injured summoned mate, self-target, friendly); the former C# body only logged. Resolves the target/caster mate or, for a player caster, the active mate; only acts while `hp <= 0`. Reuses the stablehand revive values: `mates.hp/mp = MATE_FULL_POOL`, clears the summon item's `mate_dead` flag with a `RepairPets` item task and broadcasts `SCUnitPointsPacket`; the live mate is restored to `max_hp` / `max_mp`. |
 | `AccountAttributeEffect` + `SpecialEffects/AuctionPostAuthority` (special 117) | `systems/economy/account_attributes.rs`, `bridges.rs`, `world/session.rs` | added | Data: `account_attribute_effects` has 3 rows, all `kind_id = 1` (auction posting authority): item 8000027 `경매장 등록권` adds it account-wide (`is_add`, `count` 0, `time` 0, `bind_world` false) and two `is_add = false` rows remove it (VIP buff trigger, removal ticket item 8000058). Special 117 on buffs 7149 / 11034 / 8000012 grants kind 1 permanently. New `account_attributes` table (PK account/kind/world, nullable `end_time`, `world_id` 0 = not world bound), loaded on character select into `server.systems.economy.account_attributes` and persisted on every change. `is_add` upserts, otherwise every grant of the kind is deleted; `time == 0` is permanent, else `now + time` **seconds (unit inferred: all 1.2 values are 0)**. `has_account_attribute(account_id, kind)` is ready for gating; **the auction is deliberately not gated yet** (every character currently gets buff 8000012 from `UNIT_STATE_FORCED_BUFFS`, so a gate would need that decision first). |
-| `SpecialEffects/AddCharacterSlot` (special 91) | `systems/economy/character_slots.rs`, `db.rs`, `packets/c2g.rs`, `managers/character.rs` | added | Data: item 8000002 `캐릭터 슬롯확장 주문서` -> skill 8000002. Adds one `accounts.extra_character_slots` (`TINYINT UNSIGNED`, saturating at 255) for the caster's account, persists it and sends `SCGetSlotCountPacket` with the new value; `CSListCharacterPacket` sends that count instead of the old hard-coded 0. The character creation limit is the login-advertised base plus those purchased slots: aaemu-login sends `Login:MaxCharactersPerAccount` (default 6) in `ACJoinResponse`/`ACAuthResponse`, and `CharacterManager.Create` re-reads the account's slots inside the save lock and refuses with `CharacterCreateError::WorldLimit` (9) at `aaemu_commons::character_slots::character_slot_limit(base, extra)`; a MySQL error on that read falls back to the base alone. **Deviation (C#):** the C# `CharacterManager.Create` had no per-account character-count check and aaemu-login hard-coded 6 in both packets, so purchased slots could never be used. `Login:AdditionalCharactersPerServer` (the expandable limit) and `Login:PreSelectCharacterPeriod` (advertised in `ACJoinResponse.afs`) are Rust-only; the pre-select flag is refused at login config load until lobby character editing (WP-E2) exists, and the game's `Characters:MaxPerAccount` must equal `Login:MaxCharactersPerAccount` (documented pair, no cross-process check; each server logs its effective value at startup). |
+| `SpecialEffects/AddCharacterSlot` (special 91) | `systems/economy/character_slots.rs`, `db.rs`, `packets/c2g.rs`, `managers/character.rs` | added | Data: item 8000002 `캐릭터 슬롯확장 주문서` -> skill 8000002. Adds one `accounts.extra_character_slots` (`TINYINT UNSIGNED`, saturating at 255) for the caster's account, persists it and sends `SCGetSlotCountPacket` with the new value; `CSListCharacterPacket` sends that count instead of the old hard-coded 0. The character creation limit is the login-advertised base plus those purchased slots: aaemu-login sends `Login:MaxCharactersPerAccount` (default 6) in `ACJoinResponse`/`ACAuthResponse`, and `CharacterManager.Create` re-reads the account's slots inside the save lock and refuses with `CharacterCreateError::WorldLimit` (9) at `aaemu_commons::character_slots::character_slot_limit(base, extra)`; a MySQL error on that read falls back to the base alone. **Deviation (C#):** the C# `CharacterManager.Create` had no per-account character-count check and aaemu-login hard-coded 6 in both packets, so purchased slots could never be used. `Login:AdditionalCharactersPerServer` (the expandable limit) and `Login:PreSelectCharacterPeriod` (advertised in `ACJoinResponse.afs`) are Rust-only; the pre-select flag is accepted now and enables the lobby edit, and the game's `Characters:MaxPerAccount` / `Characters:PreSelectPeriod` must equal `Login:MaxCharactersPerAccount` / `Login:PreSelectCharacterPeriod` (documented pairs, no cross-process check; each server logs its effective values at startup). |
 
 ### systems::npcs
 
@@ -3242,7 +3284,7 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   **Known, not fixed:** there is no per-connection rate limit on the 0x126..=0x129 handlers, and
   the PBKDF2 verification runs while the shared per-account lock is held, so a burst of checks
   can occupy the blocking pool and stall the batch tick (score 3); `CSSetLpManageCharacterPacket`
-  is not gated (WP-E2's `CSEditCharacter` must call `allow_lobby_action`); the lock time is
+  is not gated (`CSEditCharacter` now calls `allow_lobby_action`); the lock time is
   wall-clock unix seconds; and the attempt that observes an expired lock is swallowed (the
   server resets the counter and answers `SCSecondPassAccountLocked(0)` instead of checking it).
   Store errors fail closed: a load that cannot be decoded, or a failure counter that cannot be

@@ -493,9 +493,12 @@ async fn dispatch_edge_cases() {
         .unwrap();
     assert_eq!(c.drain(), vec![l2(pp::FastPongPacket, &[9, 0, 0, 0])]);
 
-    // A packet whose C# `Read` only logs: the connection stays up.
+    // A registered packet whose handler only logs: the connection stays up.
     server
-        .handle_frame(&mut c.conn, &c2s_l1(cs::CSSearchListPacket, &[1, 2]))
+        .handle_frame(
+            &mut c.conn,
+            &c2s_l1(cs::CSCriminalLockedPacket, &[1, 0, 0, 0]),
+        )
         .await
         .unwrap();
     assert!(!c.conn.is_closing());
