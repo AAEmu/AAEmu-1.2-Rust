@@ -209,8 +209,12 @@ pub enum BuffEvent {
     /// sleep -> `InterruptSkills`, then `SetInUse(true)` or `Template.Start`).
     Started(Buff),
     /// An existing effect was replaced by a stack rule (`last.OverwriteWith(buff)`); carries
-    /// the new state (old index kept).
-    Refreshed(Buff),
+    /// the new state (old index kept) and the caster the effect had before the overwrite, so
+    /// hooks can release state that belonged to the previous caster.
+    Refreshed {
+        buff: Buff,
+        previous_caster_obj_id: u32,
+    },
     /// An effect left `_effects` (C#: `Template.Dispel`, `SetInUse(false)`, `RemoveModifiers`,
     /// `CombatBuffs.RemoveCombatBuff`, gliding -> `TriggerRemoveOn(Land)`).
     Removed(Buff),
@@ -413,6 +417,7 @@ impl Buffs {
             // skill, template, passive flag) stays.
             Some(i) => {
                 let e = &mut self.effects[i];
+                let previous_caster_obj_id = e.caster_obj_id;
                 let remaining = e.time_left(now_ms);
                 e.charge = buff.charge;
                 e.ab_level = buff.ab_level;
@@ -428,8 +433,10 @@ impl Buffs {
                     buff.duration
                 };
                 e.in_use = true;
-                self.events
-                    .push(BuffEvent::Refreshed(self.effects[i].clone()));
+                self.events.push(BuffEvent::Refreshed {
+                    buff: self.effects[i].clone(),
+                    previous_caster_obj_id,
+                });
             }
             None => {
                 buff.instance_id = NEXT_BUFF_INSTANCE.fetch_add(1, Ordering::Relaxed);
@@ -538,7 +545,7 @@ mod tests {
         assert_eq!((g.len(), bad.len(), h.len()), (1, 0, 0));
         let ev = b.take_events();
         assert!(
-            matches!(&ev[..], [BuffEvent::Started(s), BuffEvent::Refreshed(r)]
+            matches!(&ev[..], [BuffEvent::Started(s), BuffEvent::Refreshed { buff: r, .. }]
             if s.index == 2 && r.start_time_ms == 500)
         );
         assert!(!b.has_events());
