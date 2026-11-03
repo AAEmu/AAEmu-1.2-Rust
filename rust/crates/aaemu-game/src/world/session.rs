@@ -1569,12 +1569,14 @@ pub async fn return_to_world_list(server: &GameServer, conn: &mut GameConnection
     }
     if conn.account_id() != 0 {
         tracing::info!("Shutdown: session {} is asked for the world list", conn.id);
+        let token = server.new_reconnect_token();
+        conn.set_reconnect_token(token);
         server
             .login
             .send(&crate::login::packets::GLPlayerReconnectPacket {
                 gs_id: server.config.id,
                 account_id: conn.account_id(),
-                connection_id: conn.id,
+                token,
             });
     }
     false

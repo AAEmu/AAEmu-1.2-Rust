@@ -26,5 +26,13 @@
 			"User": "%db_user%"
 		}
 	},
+	"TwoFactor": {
+		"MaxOtpFailures": 5,
+		"OtpLockoutMinutes": 15
+	},
+	"Reconnect": {
+		"TokenTtl": "00:01:00",
+		"MaxTokensPerAccount": 5
+	},
 	"GameServers": []
 }
