@@ -1,10 +1,10 @@
 //! Pet / vehicle gear: `CSChangeMateEquipmentPacket` (moves between the bag and a mate's
 //! `MateEquipmentContainer`), the `MateEquipmentContainer.OnEnter/LeaveContainer` packets
 //! (`SCMateEquipmentChangedPacket`), the base `EquipmentContainer` events of a mate (the default
-//! [`SummonItemHooks::on_mate_equipment_changed`]), the slave repair packet that only logs in
-//! the 1.2 C# (`CSRepairSlaveItemsPacket`), and the stablehand mate revive packet
-//! (`CSRepairPetItemsPacket`, handled in `vehicles::mates`). The slave equipment move packet
-//! lives in `vehicles::packets` with the other slave packets.
+//! [`SummonItemHooks::on_mate_equipment_changed`]), the repairman's slave summon item repair
+//! (`CSRepairSlaveItemsPacket`, handled in `vehicles::slaves`), and the stablehand mate revive
+//! packet (`CSRepairPetItemsPacket`, handled in `vehicles::mates`). The slave equipment move
+//! packet lives in `vehicles::packets` with the other slave packets.
 
 use std::sync::Arc;
 
@@ -423,7 +423,8 @@ impl CSRepairPetItemsPacket {
 }
 sync_client_packet!(CSRepairPetItemsPacket);
 
-/// `CSRepairSlaveItemsPacket` (only logs in 1.2).
+/// `CSRepairSlaveItemsPacket`: the repairman restores destroyed slave summon items (log only
+/// in the 1.2 C#; the client's cost preview and locale strings define the service).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CSRepairSlaveItemsPacket {
     pub npc_id: u32,
@@ -436,8 +437,12 @@ impl CSRepairSlaveItemsPacket {
         })
     }
 
-    fn run(self, _server: &GameServer, _conn: &mut GameConnection) {
+    fn run(self, server: &GameServer, conn: &mut GameConnection) {
+        let Some(character) = active(conn) else {
+            return;
+        };
         tracing::debug!("RepairSlaveItems, NpcId: {}", self.npc_id);
+        crate::systems::vehicles::slaves::repair_slave_items(server, &character, self.npc_id);
     }
 }
 sync_client_packet!(CSRepairSlaveItemsPacket);

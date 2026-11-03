@@ -406,7 +406,11 @@ pub fn on_death_event(server: &GameServer, victim: &WorldObject) {
     match victim {
         WorldObject::Shipyard(s) => shipyards::on_death(server, s),
         WorldObject::Mate(m) => mates::on_death(server, m),
-        WorldObject::Player(p) => slaves::on_character_death(server, p),
+        WorldObject::Player(p) => {
+            slaves::on_character_death(server, p);
+            // A dead passenger leaves the carriage too; the C# had no transfer boarding at all.
+            transfers::unboard_all(server, p, slaves::attach_reason::NONE);
+        }
         _ => {}
     }
 }
@@ -502,6 +506,7 @@ pub fn leave_extra_logout_ms(server: &GameServer, player: &PlayerRef) -> i32 {
 /// closes coffers and calls [`force_dismount`], as the C# order).
 pub fn on_leave_world(server: &GameServer, player: &PlayerRef) {
     let _items = server.systems.economy.operation_scope();
+    transfers::unboard_all(server, player, slaves::attach_reason::NONE);
     let Some(_departure) = server
         .systems
         .vehicles
@@ -525,6 +530,7 @@ pub fn on_leave_world(server: &GameServer, player: &PlayerRef) {
 /// now, the active vehicle 10 minutes later unless the character logs in again).
 pub fn on_disconnect(server: &GameServer, player: &PlayerRef) {
     let _items = server.systems.economy.operation_scope();
+    transfers::unboard_all(server, player, slaves::attach_reason::NONE);
     let Some(_departure) = server
         .systems
         .vehicles

@@ -3579,10 +3579,10 @@ async fn client_motion_and_despawn_cannot_control_other_players_or_slaves() {
 
     let server = server_with(GameData::empty());
     let mut a = TestClient::new(&server, 1, 1);
-    let pa = spawn_player(&server, &a, test_character(1, "A", 100.0, 100.0), PA);
+    let pa = spawn_live_player(&server, &a, 1, PA, (100.0, 100.0));
     a.conn.active_char = Some(pa.clone());
     let b = TestClient::new(&server, 2, 2);
-    let pb = spawn_player(&server, &b, test_character(2, "B", 101.0, 100.0), PB);
+    let pb = spawn_live_player(&server, &b, 2, PB, (101.0, 100.0));
     let world = server.world.world(0).unwrap();
     let mut pet = Mate::new(1, 1);
     pet.owner_obj_id = PB;
@@ -5760,7 +5760,7 @@ async fn hang_and_unhang_packets_only_mutate_the_authenticated_character() {
     let server = server_with(data());
     let mut a = TestClient::new(&server, 1, 1);
     let mut b = TestClient::new(&server, 2, 2);
-    let pa = spawn_player(&server, &a, test_character(1, "A", 100.0, 100.0), PA);
+    let pa = spawn_live_player(&server, &a, 1, PA, (100.0, 100.0));
     let pb = spawn_player(&server, &b, test_character(2, "B", 103.0, 100.0), PB);
     a.conn.active_char = Some(pa.clone());
     b.conn.active_char = Some(pb.clone());
@@ -8564,4 +8564,433 @@ async fn real_farm_hauler_driver_gets_ten_water_from_skill_15546() {
     }
     client.drain();
     assert_eq!(water_count(&pa), WATER_COUNT, "10 x item 15694 (Water)");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Transfer boarding (`CSBoardingTransferPacket`) and the repairman's slave item repair
+// (`CSRepairSlaveItemsPacket`)
+// ---------------------------------------------------------------------------------------------
+
+const TRANSFER_TL: u16 = 4242;
+
+/// The synthetic carriage pair: the boarding part model 653 declares the two passenger seats
+/// the real `model_bindings` row has; the motor model 654 only the system point 30.
+fn transfer_server() -> Arc<GameServer> {
+    let mut d = data();
+    d.systems.vehicles.model_bindings.insert(653, vec![2, 3]);
+    d.systems.vehicles.model_bindings.insert(654, vec![30]);
+    server_with(d)
+}
+
+fn spawn_test_transfer(
+    server: &GameServer,
+    obj_id: u32,
+    model_id: u32,
+) -> crate::world::TransferRef {
+    let world = server.world.world(0).unwrap();
+    let mut t = crate::models::transfer::Transfer::new(model_id);
+    t.unit.model_id = model_id;
+    t.unit.tl_id = TRANSFER_TL;
+    t.unit.level = 1;
+    t.unit.max_hp = 1000;
+    t.unit.hp = 1000;
+    t.unit.transform.instance_id = 0;
+    t.unit.transform.set_xyz(100.0, 101.0, 100.0);
+    let t = crate::world::Entity::new(obj_id, t);
+    world.spawn(&t, &server.view_ctx());
+    t
+}
+
+fn spawn_live_player(
+    server: &GameServer,
+    client: &TestClient,
+    id: u32,
+    obj_id: u32,
+    at: (f32, f32),
+) -> PlayerRef {
+    let p = spawn_player(
+        server,
+        client,
+        test_character(id, &format!("P{id}"), at.0, at.1),
+        obj_id,
+    );
+    {
+        let mut d = p.data();
+        d.unit.hp = 1000;
+        d.unit.max_hp = 1000;
+    }
+    p
+}
+
+async fn board_transfer(
+    server: &GameServer,
+    conn: &mut crate::net::connection::GameConnection,
+    tl: u16,
+    ap: u8,
+) {
+    use crate::net::registry::ClientPacket;
+    super::packets::CSBoardingTransferPacket { tl, ap }
+        .handle(server, conn)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn boarding_a_transfer_seats_the_player_on_the_boarding_part() {
+    let server = transfer_server();
+    let mut a = TestClient::new(&server, 1, 1);
+    let pa = spawn_live_player(&server, &a, 1, PA, (100.0, 100.0));
+    a.conn.active_char = Some(pa.clone());
+    // Same tl id on both parts, as `TransferManager.Create` sets them: only the boarding part
+    // (653) declares the passenger seats.
+    let part = spawn_test_transfer(&server, 0x500, 653);
+    let motor = spawn_test_transfer(&server, 0x501, 654);
+    a.drain();
+    assert_eq!(
+        server
+            .world
+            .world(0)
+            .unwrap()
+            .all_of_kind(crate::world::ObjectKind::Transfer)
+            .len(),
+        2
+    );
+    assert!(server
+        .game_data
+        .systems
+        .vehicles
+        .model_has_attach_point(653, 2));
+    board_transfer(&server, &mut a.conn, TRANSFER_TL, 2).await;
+    let frames = a.drain();
+    let mut expect = PacketStream::new();
+    expect
+        .write_bc(PA)
+        .write_u8(2)
+        .write_bc(part.obj_id)
+        .write_u8(slaves::attach_reason::BOARD_TRANSFER);
+    assert_eq!(
+        body(&frames, sc::SCUnitAttachedPacket),
+        expect.into_bytes(),
+        "{:x?}",
+        ops(&frames)
+    );
+    {
+        let p = pa.data();
+        assert_eq!(p.attached_point, 2);
+        assert_eq!(p.unit.transform.parent_obj_id, part.obj_id);
+    }
+    assert_eq!(part.data().attached_characters, vec![(2, PA)]);
+    assert!(motor.data().attached_characters.is_empty());
+
+    // A second player: the taken seat is refused, the free one works.
+    let mut b = TestClient::new(&server, 2, 2);
+    let pb = spawn_live_player(&server, &b, 2, PB, (101.0, 100.0));
+    b.conn.active_char = Some(pb.clone());
+    b.drain();
+    board_transfer(&server, &mut b.conn, TRANSFER_TL, 2).await;
+    let f = b.drain();
+    assert_eq!(error_codes(&f), vec![97]); // SLAVE_ALREADY_HAS_MASTER clears the request
+    assert!(!ops(&f).contains(&sc::SCUnitAttachedPacket));
+    assert_eq!(pb.data().attached_point, 0);
+
+    board_transfer(&server, &mut b.conn, TRANSFER_TL, 3).await;
+    let f = b.drain();
+    assert!(ops(&f).contains(&sc::SCUnitAttachedPacket));
+    assert_eq!(pb.data().attached_point, 3);
+    assert_eq!(part.data().attached_characters, vec![(2, PA), (3, PB)]);
+}
+
+#[tokio::test]
+async fn boarding_a_transfer_refuses_an_undeclared_seat_and_an_out_of_range_request() {
+    let server = transfer_server();
+    let mut a = TestClient::new(&server, 1, 1);
+    let pa = spawn_live_player(&server, &a, 1, PA, (100.0, 100.0));
+    a.conn.active_char = Some(pa.clone());
+    spawn_test_transfer(&server, 0x500, 653);
+    a.drain();
+
+    // 653 declares only 2 and 3; the client's scan starts at 2, so 1 is never offered either.
+    for ap in [1, 4] {
+        board_transfer(&server, &mut a.conn, TRANSFER_TL, ap).await;
+        let f = a.drain();
+        assert_eq!(error_codes(&f), vec![96], "seat {ap}"); // SLAVE_CANNOT_BIND
+        assert!(!ops(&f).contains(&sc::SCUnitAttachedPacket));
+    }
+    assert_eq!(pa.data().attached_point, 0);
+
+    // Past the client's 9 m board range (`FUN_393bf310` -> `FUN_39093860(..., 9.0, 0)`).
+    pa.data().unit.transform.set_xyz(120.0, 101.0, 100.0);
+    board_transfer(&server, &mut a.conn, TRANSFER_TL, 2).await;
+    let f = a.drain();
+    assert_eq!(error_codes(&f), vec![error_message::TOO_FAR_AWAY]);
+    assert!(!ops(&f).contains(&sc::SCUnitAttachedPacket));
+    assert_eq!(pa.data().attached_point, 0);
+}
+
+#[tokio::test]
+async fn unboarding_a_transfer_detaches_the_passenger_and_is_idempotent() {
+    let server = transfer_server();
+    let mut a = TestClient::new(&server, 1, 1);
+    let pa = spawn_live_player(&server, &a, 1, PA, (100.0, 100.0));
+    a.conn.active_char = Some(pa.clone());
+    let part = spawn_test_transfer(&server, 0x500, 653);
+    a.drain();
+    board_transfer(&server, &mut a.conn, TRANSFER_TL, 2).await;
+    a.drain();
+
+    board_transfer(&server, &mut a.conn, TRANSFER_TL, 0).await;
+    let frames = a.drain();
+    let mut expect = PacketStream::new();
+    expect
+        .write_bc(PA)
+        .write_u8(slaves::attach_reason::BOARD_TRANSFER);
+    assert_eq!(
+        body(&frames, sc::SCUnitDetachedPacket),
+        expect.into_bytes(),
+        "{:x?}",
+        ops(&frames)
+    );
+    {
+        let p = pa.data();
+        assert_eq!(p.attached_point, 0);
+        assert_eq!(p.unit.transform.parent_obj_id, 0);
+    }
+    assert!(part.data().attached_characters.is_empty());
+
+    // A repeated request (the client's `FUN_39362170` sender is periodic) sends nothing.
+    board_transfer(&server, &mut a.conn, TRANSFER_TL, 0).await;
+    assert!(a.drain().is_empty());
+}
+
+#[tokio::test]
+async fn a_late_viewer_receives_the_transfer_passenger_seat() {
+    let server = transfer_server();
+    let mut a = TestClient::new(&server, 1, 1);
+    let pa = spawn_live_player(&server, &a, 1, PA, (100.0, 100.0));
+    a.conn.active_char = Some(pa.clone());
+    spawn_test_transfer(&server, 0x500, 653);
+    a.drain();
+    board_transfer(&server, &mut a.conn, TRANSFER_TL, 2).await;
+    a.drain();
+
+    let mut b = TestClient::new(&server, 2, 2);
+    spawn_live_player(&server, &b, 2, PB, (101.0, 100.0));
+    let f = b.drain();
+    let mut expect = PacketStream::new();
+    expect.write_bc(PA).write_u8(2).write_bc(0x500).write_u8(0);
+    assert_eq!(
+        body(&f, sc::SCUnitAttachedPacket),
+        expect.into_bytes(),
+        "{:x?}",
+        ops(&f)
+    );
+}
+
+const REPAIRMAN_NPC: u32 = 904;
+const REPAIRMAN_OBJ: u32 = 0x301;
+const REPAIR_SLAVES_TASK: u8 = 74;
+
+struct RepairmanHook;
+
+impl crate::systems::economy::hooks::NpcEconomyHooks for RepairmanHook {
+    fn shop_info(
+        &self,
+        _: &GameServer,
+        npc: &NpcRef,
+    ) -> Option<crate::systems::economy::hooks::NpcShopInfo> {
+        Some(crate::systems::economy::hooks::NpcShopInfo {
+            repairman: npc.data().unit.template_id == REPAIRMAN_NPC,
+            ..Default::default()
+        })
+    }
+}
+
+/// A destroyed slave summon item (`slave_is_destroyed`, from `MarkSummoningItemAsDestroyed`)
+/// and a repairman 2 m away that is not yet the interaction object.
+struct RepairSlave {
+    server: Arc<GameServer>,
+    client: TestClient,
+    player: PlayerRef,
+    item_id: u64,
+    npc: NpcRef,
+}
+
+fn repair_slave(cost: i32) -> RepairSlave {
+    let mut d = data();
+    d.systems.npcs.npc.templates.insert(
+        REPAIRMAN_NPC,
+        NpcTemplate {
+            id: REPAIRMAN_NPC,
+            name: "Repairman".into(),
+            level: 1,
+            repairman: true,
+            ..NpcTemplate::default()
+        },
+    );
+    d.systems
+        .vehicles
+        .slave_templates
+        .get_mut(&SLAVE_TEMPLATE)
+        .unwrap()
+        .cost = cost;
+    let server = server_with(d);
+    server
+        .systems
+        .economy
+        .hooks
+        .npcs
+        .install(Arc::new(RepairmanHook));
+    let mut client = TestClient::new(&server, 1, 1);
+    let (player, item_id) = player_with_item(&server, &client, 1, PA, (100.0, 100.0), SLAVE_ITEM);
+    {
+        let mut c = player.data();
+        c.money = 12_000;
+        c.unit.hp = 1000;
+        c.unit.max_hp = 1000;
+    }
+    client.conn.active_char = Some(player.clone());
+    mates::update_owned_item(&server, Some(&player), item_id, |i| {
+        i.details.slave_is_destroyed = 1;
+        i.details.slave_repair_start_time = chrono::Utc::now().timestamp();
+        i.dirty = true;
+    });
+    let npc = spawn_npc_at(&server, REPAIRMAN_OBJ, REPAIRMAN_NPC, 102.0, 100.0);
+    client.drain();
+    RepairSlave {
+        server,
+        client,
+        player,
+        item_id,
+        npc,
+    }
+}
+
+impl RepairSlave {
+    fn item(&self) -> Item {
+        mates::owned_item(&self.server, &self.player, self.item_id).unwrap()
+    }
+
+    async fn repair_at(&mut self, npc_obj_id: u32) -> Vec<(u16, Vec<u8>)> {
+        use crate::net::registry::ClientPacket;
+        crate::systems::economy::mate_equipment::CSRepairSlaveItemsPacket { npc_id: npc_obj_id }
+            .handle(&self.server, &mut self.client.conn)
+            .await
+            .unwrap();
+        self.client.drain()
+    }
+}
+
+#[tokio::test]
+async fn a_repairman_repairs_destroyed_slave_items_for_the_slave_cost() {
+    let mut t = repair_slave(50);
+    t.player.data().unit.current_interaction_object = t.npc.obj_id;
+    let frames = t.repair_at(REPAIRMAN_OBJ).await;
+    // Money task (-50), then the ItemUpdate as RepairSlaves (74), then SlaveRepaired (382).
+    assert_eq!(t.player.data().money, 12_000 - 50);
+    let item = t.item();
+    assert_eq!(item.details.slave_is_destroyed, 0);
+    assert_eq!(item.details.slave_repair_start_time, 0);
+    assert!(item.dirty);
+    let mut expect = PacketStream::new();
+    aaemu_commons::Marshal::write(
+        &crate::systems::economy::item_packets::SCItemTaskSuccessPacket {
+            action: REPAIR_SLAVES_TASK,
+            tasks: vec![crate::models::item_task::ItemTask::update(&item)],
+            force_remove: Vec::new(),
+        },
+        &mut expect,
+    );
+    assert_eq!(
+        ops(&frames),
+        vec![
+            sc::SCItemTaskSuccessPacket,
+            sc::SCItemTaskSuccessPacket,
+            sc::SCErrorMsgPacket
+        ]
+    );
+    assert_eq!(frames[1].1, expect.as_bytes());
+    assert_eq!(error_codes(&frames), vec![error_message::SLAVE_REPAIRED]);
+
+    // The vehicle can be summoned again (the destroyed flag is gone).
+    let world = t.server.world.world(0).unwrap();
+    t.server.systems.npcs.spawns.get_or_create(&world);
+    let item = t.item();
+    assert!(slaves::create_core(
+        &t.server,
+        &world,
+        Some(&t.player),
+        None,
+        SLAVE_TEMPLATE,
+        Some(item),
+        false,
+        None,
+        None,
+    )
+    .is_some());
+}
+
+#[tokio::test]
+async fn slave_repair_is_refused_without_gold_and_leaves_the_item_destroyed() {
+    let mut t = repair_slave(50);
+    t.player.data().money = 10;
+    t.player.data().unit.current_interaction_object = t.npc.obj_id;
+    let frames = t.repair_at(REPAIRMAN_OBJ).await;
+    assert_eq!(t.player.data().money, 10);
+    let item = t.item();
+    assert_eq!(item.details.slave_is_destroyed, 1);
+    assert!(!task_actions(&frames).contains(&REPAIR_SLAVES_TASK));
+    assert_eq!(error_codes(&frames), vec![error_message::NOT_ENOUGH_MONEY]);
+}
+
+#[tokio::test]
+async fn a_spawned_slave_cannot_be_repaired_and_nothing_is_charged() {
+    let mut t = repair_slave(50);
+    t.player.data().unit.current_interaction_object = t.npc.obj_id;
+    mates::update_owned_item(&t.server, Some(&t.player), t.item_id, |i| {
+        i.details.slave_db_id = 4321;
+    });
+    let world = t.server.world.world(0).unwrap();
+    let mut slave = crate::models::slave::Slave::new(4321, SLAVE_TEMPLATE);
+    slave.unit.tl_id = 7;
+    slave.summoner_obj_id = PA;
+    let slave = crate::world::Entity::new(0x600, slave);
+    world.spawn(&slave, &t.server.view_ctx());
+    t.client.drain();
+
+    let frames = t.repair_at(REPAIRMAN_OBJ).await;
+    assert_eq!(t.player.data().money, 12_000);
+    assert_eq!(t.item().details.slave_is_destroyed, 1);
+    assert!(!task_actions(&frames).contains(&REPAIR_SLAVES_TASK));
+    assert_eq!(
+        error_codes(&frames),
+        vec![error_message::SLAVE_CANNOT_REPAIR_ALREADY_SPAWNED]
+    );
+}
+
+#[tokio::test]
+async fn a_repairman_service_requires_the_interaction_the_role_and_the_range() {
+    // No interaction object: the 1.2 client only sends the packet at a repairman it talks to.
+    let mut t = repair_slave(50);
+    let before = t.player.data().money;
+    assert!(t.repair_at(REPAIRMAN_OBJ).await.is_empty());
+    assert_eq!(t.player.data().money, before);
+    assert_eq!(t.item().details.slave_is_destroyed, 1);
+
+    // A plain NPC with the same talk is not a repairman.
+    let mut t = repair_slave(50);
+    let plain = spawn_npc_at(&t.server, 0x302, MATE_NPC, 102.0, 100.0);
+    t.client.drain();
+    t.player.data().unit.current_interaction_object = plain.obj_id;
+    assert!(t.repair_at(plain.obj_id).await.is_empty());
+    assert_eq!(t.player.data().money, 12_000);
+    assert_eq!(t.item().details.slave_is_destroyed, 1);
+
+    // A repairman further than the 5 m the other repair services use.
+    let mut t = repair_slave(50);
+    t.player.data().unit.current_interaction_object = t.npc.obj_id;
+    t.player.data().unit.transform.set_xyz(120.0, 100.0, 100.0);
+    let frames = t.repair_at(REPAIRMAN_OBJ).await;
+    assert_eq!(error_codes(&frames), vec![error_message::TOO_FAR_AWAY]);
+    assert_eq!(t.player.data().money, 12_000);
+    assert_eq!(t.item().details.slave_is_destroyed, 1);
 }
