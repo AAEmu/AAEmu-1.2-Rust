@@ -10,7 +10,7 @@ use crate::data::skills::{DefaultSkill, SkillTemplate};
 use crate::data::GameData;
 use crate::models::char_data::{read_action_slots, ActionSlot, ActionSlotType, MAX_ACTION_SLOTS};
 use crate::models::character::Character;
-use crate::test_support::test_server_with;
+use crate::test_support::{test_server_with, test_server_with_config};
 
 use super::{create, initialize_starting_skills, CreateCharacterRequest};
 
@@ -565,14 +565,42 @@ async fn lobby_create_filters_invalid_blocked_and_case_variant_names() {
 }
 
 #[tokio::test]
-async fn lobby_create_filters_names_outside_allowed_name_chars() {
-    let mut data = creation_data();
-    // Shipped 1.2 data: lowercase Latin and Hangul syllables, no digits/Cyrillic.
-    data.characters.allowed_name_chars = vec!['a', 'b', '가', '나'];
-    let server = test_server_with(data);
+async fn lobby_create_allowed_name_chars_whitelist_is_opt_in() {
+    let data = || {
+        let mut d = creation_data();
+        // Shipped 1.2 data: lowercase Latin and Hangul syllables, no digits/Cyrillic.
+        d.characters.allowed_name_chars = vec!['a', 'b', '가', '나'];
+        d
+    };
+
+    // Flag off (default): the shipped CharacterNameRegex decides, digits and Cyrillic pass it.
+    let server = test_server_with(data());
     server.db.close().await;
     let mut client = crate::test_support::TestClient::new(&server, 1, 1007);
-    for name in ["Name1", "1", "Павел", "힣", "Name!"] {
+    for name in ["Name1", "1", "Павел"] {
+        lobby_create(&server, &mut client, creation_request(name))
+            .await
+            .unwrap();
+        // Reaches the closed DB, rather than being refused by the name filter.
+        assert_creation_failure(&mut client, 2);
+        assert!(server.names.no_names_registered());
+        assert!(server.items.all_containers().is_empty());
+    }
+    lobby_create(&server, &mut client, creation_request("Name!"))
+        .await
+        .unwrap();
+    assert_creation_failure(&mut client, 5); // the regex still rejects it
+
+    // Flag on: the allowed_name_chars whitelist overrides the regex and rejects them.
+    let config = crate::config::AppConfig {
+        id: 1,
+        character_name_use_allowed_chars: true,
+        ..Default::default()
+    };
+    let server = test_server_with_config(data(), config);
+    server.db.close().await;
+    let mut client = crate::test_support::TestClient::new(&server, 1, 1007);
+    for name in ["Name1", "1", "Павел", "Name!", "힣"] {
         lobby_create(&server, &mut client, creation_request(name))
             .await
             .unwrap();
@@ -580,11 +608,10 @@ async fn lobby_create_filters_names_outside_allowed_name_chars() {
         assert!(server.names.no_names_registered());
         assert!(server.items.all_containers().is_empty());
     }
-    for name in ["Name", "가나", "aB"] {
+    for name in ["Name", "aB"] {
         lobby_create(&server, &mut client, creation_request(name))
             .await
             .unwrap();
-        // Reaches the closed DB, rather than being refused by the name filter.
         assert_creation_failure(&mut client, 2);
         assert!(server.names.no_names_registered());
         assert!(server.items.all_containers().is_empty());

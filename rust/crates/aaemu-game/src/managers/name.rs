@@ -23,10 +23,8 @@ pub enum CharacterCreateError {
     WorldLimit = 9,
 }
 
-/// `NameManager.DefaultCharacterNameRegexPattern`. The `allowed_name_chars` whitelist is applied
-/// in addition to this pattern; the Hangul range keeps the shipped pattern from rejecting names
-/// the 1.2 data allows.
-pub const DEFAULT_CHARACTER_NAME_REGEX: &str = "^[a-zA-Z0-9а-яА-Я가-힣]{1,18}$";
+/// `NameManager.DefaultCharacterNameRegexPattern`.
+pub const DEFAULT_CHARACTER_NAME_REGEX: &str = "^[a-zA-Z0-9а-яА-Я]{1,18}$";
 
 /// `string.NormalizeName()`: trim, first char upper case, the rest lower case. A blank input is
 /// returned unchanged. (C# uses `char.ToUpper` / current-culture `ToLower` per UTF-16 unit; Rust

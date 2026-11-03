@@ -30,7 +30,8 @@
             "Database": "aaemu_game"
         }
     },
-    "CharacterNameRegex": "^[a-zA-Z0-9а-яА-Я가-힣]{1,18}$",
+    "CharacterNameRegex": "^[a-zA-Z0-9а-яА-Я]{1,18}$",
+    "CharacterNameUseAllowedChars": false,
     "MaxConcurencyThreadPool": 8,
     "HeightMapsEnable": true,
     "DebugInfo": true,

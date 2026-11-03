@@ -413,12 +413,20 @@ impl CharacterData {
     }
 }
 
-/// `allowed_name_chars` (native 1.2 `FUN_39572620`): one character per row. A malformed row is
-/// skipped instead of failing the catalog.
+/// `allowed_name_chars` (native 1.2 `FUN_39572620`): one character per row. A missing table or a
+/// malformed / NULL row is skipped instead of failing the catalog; the whitelist then stays off.
 fn load_allowed_name_chars(conn: &Connection) -> Result<Vec<char>, GameDataError> {
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='allowed_name_chars'",
+        [],
+        |r| r.get(0),
+    )?;
+    if exists == 0 {
+        return Ok(Vec::new());
+    }
     let mut chars = Vec::new();
     for_each_row(conn, "SELECT * FROM allowed_name_chars", [], |r| {
-        let text = r.string("char")?;
+        let text = r.string_or("char", "")?;
         let mut it = text.chars();
         match (it.next(), it.next()) {
             (Some(ch), None) => chars.push(ch),
@@ -478,13 +486,20 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE allowed_name_chars (id INT, char TEXT, bytes INT);
              INSERT INTO allowed_name_chars VALUES
-                (1, 'a', 1), (2, '가', 3), (3, 'ab', 2), (4, '', 0), (5, 'Z', 1);",
+                (1, 'a', 1), (2, '가', 3), (3, 'ab', 2), (4, '', 0), (5, 'Z', 1),
+                (6, NULL, 0);",
         )
         .unwrap();
         assert_eq!(
             load_allowed_name_chars(&conn).unwrap(),
             vec!['a', '가', 'Z']
         );
+    }
+
+    #[test]
+    fn allowed_name_chars_missing_table_is_not_fatal() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(load_allowed_name_chars(&conn).unwrap().is_empty());
     }
 
     #[test]

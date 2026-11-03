@@ -102,6 +102,11 @@ pub struct AppConfig {
     /// `CharacterNameRegex` (`None` = NameManager's default pattern).
     #[serde(rename = "characternameregex")]
     pub character_name_regex: Option<String>,
+    /// Enables the 1.2 `allowed_name_chars` whitelist for character names. The stock client
+    /// enforces the table itself, and the whitelist overrides `CharacterNameRegex` where the two
+    /// disagree (digits/Cyrillic), so it is opt-in.
+    #[serde(rename = "characternameuseallowedchars", deserialize_with = "lenient")]
+    pub character_name_use_allowed_chars: bool,
     #[serde(rename = "defaultlanguage")]
     pub default_language: String,
     #[serde(rename = "debuginfo", deserialize_with = "lenient")]
@@ -159,6 +164,7 @@ impl Default for AppConfig {
             scripts: ScriptsConfig::default(),
             events: EventsConfig::default(),
             character_name_regex: None,
+            character_name_use_allowed_chars: false,
             default_language: "en_us".into(),
             debug_info: true,
             debug_info_level: 100,
