@@ -378,7 +378,7 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 | `FriendMananger`, `CharacterFriends`, `CharacterBlocked` | `systems/social/friend.rs`, `packets/friend.rs` (`managers::friend` re-exports) | done | Add / remove friends (online or by DB name lookup), block / unblock (online or by `NameManager` for offline names), status changes incl. `InParty`. The blocked list is enforced on every direct delivery path (whisper, team / area / expedition / family invite, friend add, trade and duel request); see the block-list deviation. |
 | `ChatManager`, `Models/Game/Chat` | `systems/social/chat.rs`, `session.rs` (`managers::chat` re-exports) | done | All channel kinds incl. party / raid / court, CleanUpChannels, party / raid / raid-leader / judge routing. User channels (`CSJoinUserChatChannel`) are log-only as in C#. |
 | `FactionManager` relations, `SystemFaction.GetRelationState`, `Unit/Character.SetFaction` | `systems/social/faction.rs`, `packets/faction.rs` | done | Relation table validated against compact.sqlite3 (gated test). Faction CS packets are log-only as in C#; every SCFaction* struct ported. `relation_state_live` overlays the runtime nations on the static table for the combat, team, party and AI paths. |
-| Player nations (`nations`, `nation_relations`, independence) | `systems/social/nation.rs`, `commands/scripts/nation.rs` | stage 1 | Skill 18540 special effect 71 creates a nation from the caster's expedition (owner + dominion, CASTLE_CLAIM backpack); ids come from the expedition allocator; `SCFactionIndependence` + relation rows + `SCUnitFactionChanged`; online members use `set_faction`, offline `characters.faction_id` moves with `expeditions.mother` in the save transaction; login sends nation factions and relations. See "Player nations" below. |
+| Player nations (`nations`, `nation_relations`, independence, immigration) | `systems/social/nation.rs`, `commands/scripts/nation.rs` | stages 1-2 | Skill 18540 special effect 71 creates a nation from the caster's expedition (owner + dominion, CASTLE_CLAIM backpack); ids come from the expedition allocator; `SCFactionIndependence` + relation rows + `SCUnitFactionChanged`; online members use `set_faction`, offline `characters.faction_id` moves with `expeditions.mother` in the save transaction; login sends nation factions and relations. Stage 2 adds the invite / reply / return-to-origin / kick packets with the client's error order, persisted factions and offline kicks. See "Player nations" below. |
 | `GameData/AchievementGameData` (`achievements`, `achievement_objectives`, `pre_completed_achievements`, `char_records`), `Models/Game/Achievement` | `systems/social/achievement.rs` (`server.game_data.systems.social.achievements`) | done | Loader + port of `AchievementGameDataTests`; gated real-DB test `achievement_game_data_real_compact_db`. The C# 1.2 tree has no manager; the Rust achievement manager / runtime / hooks / rewards (`achievement_*.rs`) read them (see "Achievement producers" below). |
 | `DuelManager`, `Models/Game/Duels`, duel tasks | `systems/social/duel.rs`, `packets/duel.rs` | done | Request / accept (flag via hook) / start / stop / cancel, distance + HP checks, end timer (tokio tasks; `set_delays` test hook). |
 | `CrimeManager`, `TrialManager`, `Models/Game/Crime`, `TrialUpdateTask` | `systems/social/{crime,trial}.rs`, `packets/trial.rs` | done | Crime table load / save (`AfterItems`), report / evidence (hooks), bot reports, trial / jury flow with 5 s tick, audience, bounty placement / arrest payout (`systems/social/{bounty,bounty_runtime}.rs`, `bounty_pledges`; see "Wanted-player bounty"). The board is still the empty list (BOUNTY-board). Arrests, authenticated jury choices, guilty pleas, acquittals, court cleanup and reconnect jail enforcement have packet-flow regressions; prisoner buffs persist remaining online time. |
@@ -388,7 +388,7 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 
 Cross-subsystem calls: wired in phase 3b (see "Phase 3b wiring": trial court doodads / NPCs after the spawns, `SocialHooks` by social itself, crime evidence / arrests / team and duel queries from skills, loot rules from economy, court checks in portals and instances, `force_dismount` through vehicles). Still open: teleports -> `session::on_moved` (C# `Character.SetPosition` -> `TeamManager.UpdatePosition`; plain movement does not call it in C# either).
 
-#### Player nations (stage 1, NATION-1..4)
+#### Player nations (stages 1-2, NATION-1..13)
 
 `systems::social::nation` implements the 1.2 "declare independence" slice: a nation is a
 top-level user faction (`mother_id == 0`, `owner_type` 0, owner = the founding expedition's
@@ -438,9 +438,62 @@ refuses a duplicate faction id (`FUN_398a5280`), so `EXPEDITION_ID` also extract
   `SCFactionIndependence`; it receives the nation record and relations on the next login.
   Expedition records with `mother = N` are sent before N's own record in the login burst; the
   1.2 client's tolerance for that order is unverified (the client stores records independently).
+* **NATION-11 (id2 UNKNOWN; timeout chosen):** the 1.2 client passes `id2` from
+  `SCFactionImmigrateInvite` (0x027) back unchanged in `CSFactionImmigrationInviteReply`
+  (0x016) but never interprets it. The server uses the invitee character id as a nonce: the
+  reply must name the nation, the nonce and a pending invite, so a forged or replayed reply is
+  refused with 693. The client has no visible invite timer; pending invites expire after 60 s
+  (the same timeout as the port's team / expedition invitations) and the list is capped at
+  1024; a repeated invite while one is pending is dropped instead of re-sent, and an invite
+  from a king on the invitee's block list is dropped silently (`BLOCK-LIST-1`). The reply
+  checks follow the
+  client's own order (`FUN_398a44d0`: 770 combat, 694 pirate, 693 unknown, 730 already a
+  member, 731 owns a user faction, 732 expedition member, 728 below `content_configs` 49 =
+  50); the invite re-runs them on the invitee and answers the king with the same codes, after
+  its own client checks 697 (not the king) and 736 (oneself) and the online check 50.
+* **NATION-12 (capture-pending):** `SCFactionKickToOriginResult` (0x02a) writes
+  `(tgtName, id, id2, errorMessage)`; the decompiled handler reserves a 4-byte error slot but
+  its read width is not visible, so the C#-derived `i16` is kept. Every outcome (64 not the
+  king, 65 oneself, 704 unknown target, 726 expedition member, 705 other faction, success) is
+  answered with this packet and its error field, as the client shows a message box for a
+  non-zero error (`FUN_392fe6c0`).
+* **NATION-13 (INFERRED):** a guild belongs to its mother's top-level faction. The C# checked
+  a member's mother only at creation; with runtime nations a nation is top-level
+  (`mother_id == 0`) and must count as itself. `expedition::create`, `invite` and
+  `reply_invite` compare top-level factions (`nation::top_level_faction`), so two citizens of
+  different nations cannot found or share a guild; a citizen of another nation is not invited
+  and a forged reply does not join. The check applies to every player, not only nation
+  citizens: a faction-102 player still joins a faction-101 guild (one alliance) and a pirate
+  cannot join a non-pirate guild; the refusal is silent (no 1.2 error id for it; the C# had no
+  check, and `Character.SetFaction` already expels on a mother mismatch). Evidence: the C#
+  `CreateExpedition` mother check, the client's top-level scan (`FUN_398a2f40`) and
+  `Character.SetFaction`'s mother mismatch kick.
+* **NATION-14 (temporary factions):** every immigration check uses
+  `db_character::persisted_faction` and refuses a `faction_temporary` character with 693: a
+  duel / battlefield Red-Blue team faction is not the player's real faction, so a guildless
+  pirate in an accepted duel cannot "return to origin" (the pirate check sees the saved 161)
+  and a non-nation player in a duel cannot leave a nation that is not theirs. The same saved
+  faction is compared by the guild create / invite / reply rule, so a duel does not refuse a
+  legitimate guild join. The client has no code for "temporary faction"; the general
+  immigration refusal is used (documented here).
+* **Immigration, return and kick (stage 2):** `CSFactionImmigrationInvite` (0x015),
+  `CSFactionImmigrationInviteReply` (0x016), `CSFactionImmigrateToOrigin` (empty, 0x017) and
+  `CSFactionKickToOrigin` (0x018) now run the verified flows. An accepted invite and a
+  successful return use `faction::set_faction` (broadcast, houses, guild and party side
+  effects) and immediately persist `characters.faction_id` under `SaveManager`'s transaction
+  lock; the periodic save writes the same column. Return refuses the nation owner (734) and
+  expedition members (735) with the client's order (770, 694, 693, 733, 734, 735). Kick
+  resolves the target online or from `characters` by name (deleted rows excluded); an offline
+  citizen's `characters.faction_id` (guarded by the expected nation) and stored
+  `housings.faction_id` move in one transaction, and the owner's loaded houses move with them
+  under the save lock. A target that logs in between the lookup and the write is kicked
+  through the online path instead. The same in-memory house move now happens for offline
+  members at independence. The
+  origin is `character_templates.faction_id` (the same data as the client's
+  `FUN_398a2660(race)`).
 * The national tax CS packet is 0x013 (`FUN_392f42f0`; owner-approved exception to the
   never-edit `opcodes.rs` rule); a log-only handler is registered. The real tax handler,
-  relation expiry, immigration / kick, rename and monument stay for stages 2-4.
+  relation expiry, rename and monument stay for stages 3-4.
 
 ### systems::housing
 
