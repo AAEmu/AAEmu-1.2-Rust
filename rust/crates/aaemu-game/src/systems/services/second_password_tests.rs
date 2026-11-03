@@ -136,7 +136,7 @@ impl SecondPasswordHasher for CountingHasher {
     }
 }
 
-fn server_with(store: Arc<MemoryStore>, hasher: Arc<CountingHasher>) -> GameServer {
+fn server_with(store: Arc<dyn SecondPasswordStore>, hasher: Arc<CountingHasher>) -> GameServer {
     let server = test_server();
     server.config.update(|config| {
         config.second_password.enabled = true;
@@ -637,6 +637,12 @@ fn zero_max_fail_count_is_refused_at_config_load() {
     assert_eq!(config.second_password.max_fail_count, 7);
     assert_eq!(config.second_password.lock_minutes, 3);
 
+    let zero_lock = crate::config::AppConfig::from_value(serde_json::json!({
+        "SecondPassword": { "Enabled": true, "MaxFailCount": 5, "LockMinutes": 0 }
+    }))
+    .expect_err("LockMinutes 0 must be refused");
+    assert!(zero_lock.to_string().contains("LockMinutes"), "{zero_lock}");
+
     let defaults = crate::config::AppConfig::default();
     assert_eq!(defaults.second_password.max_fail_count, 5);
     assert_eq!(defaults.second_password.lock_minutes, 10);
@@ -758,4 +764,391 @@ async fn private_mysql_second_password_store_round_trip() {
         store.load(&server, 777).await,
         Some(AccountSecondPassword::default())
     );
+}
+
+#[derive(Debug)]
+struct FailingLoadStore;
+
+impl SecondPasswordStore for FailingLoadStore {
+    fn load<'a>(
+        &'a self,
+        _server: &'a GameServer,
+        _account_id: u32,
+    ) -> BoxFuture<'a, Option<AccountSecondPassword>> {
+        Box::pin(async { None })
+    }
+
+    fn set_hash<'a>(
+        &'a self,
+        _server: &'a GameServer,
+        _account_id: u32,
+        _hash: String,
+    ) -> BoxFuture<'a, bool> {
+        Box::pin(async { false })
+    }
+
+    fn set_failed<'a>(
+        &'a self,
+        _server: &'a GameServer,
+        _account_id: u32,
+        _failed: u8,
+        _locked_until: i64,
+    ) -> BoxFuture<'a, bool> {
+        Box::pin(async { false })
+    }
+
+    fn clear<'a>(&'a self, _server: &'a GameServer, _account_id: u32) -> BoxFuture<'a, bool> {
+        Box::pin(async { false })
+    }
+}
+
+#[derive(Debug)]
+struct FailingWriteStore {
+    inner: Arc<MemoryStore>,
+}
+
+impl SecondPasswordStore for FailingWriteStore {
+    fn load<'a>(
+        &'a self,
+        server: &'a GameServer,
+        account_id: u32,
+    ) -> BoxFuture<'a, Option<AccountSecondPassword>> {
+        self.inner.load(server, account_id)
+    }
+
+    fn set_hash<'a>(
+        &'a self,
+        server: &'a GameServer,
+        account_id: u32,
+        hash: String,
+    ) -> BoxFuture<'a, bool> {
+        self.inner.set_hash(server, account_id, hash)
+    }
+
+    fn set_failed<'a>(
+        &'a self,
+        _server: &'a GameServer,
+        _account_id: u32,
+        _failed: u8,
+        _locked_until: i64,
+    ) -> BoxFuture<'a, bool> {
+        Box::pin(async { false })
+    }
+
+    fn clear<'a>(&'a self, server: &'a GameServer, account_id: u32) -> BoxFuture<'a, bool> {
+        self.inner.clear(server, account_id)
+    }
+}
+
+#[tokio::test]
+async fn a_failed_store_load_fails_closed() {
+    let hasher = Arc::new(CountingHasher::new());
+    let server = server_with(Arc::new(FailingLoadStore), hasher.clone());
+    let mut client = TestClient::new(&server, 1, 42);
+    let tables = request_tables(&server, &mut client, 4).await;
+    send_check(&server, &mut client, &tables, 0, "1234abcd").await;
+    let frames = client.drain();
+    assert_eq!(checked(&frames), Some((false, 0)), "{frames:?}");
+    assert_eq!(
+        hasher.verifies(),
+        0,
+        "a failed load never reaches the hasher"
+    );
+    assert!(!client.conn.second_password.passed);
+    assert!(!allow_lobby_action(&server, &mut client.conn)
+        .await
+        .expect("gate"));
+}
+
+#[tokio::test]
+async fn a_failure_that_cannot_be_recorded_refuses_further_attempts() {
+    let inner = Arc::new(MemoryStore::default());
+    let hasher = Arc::new(CountingHasher::new());
+    let hash = hasher.hash("1234abcd").expect("hash");
+    inner.set_row(
+        42,
+        AccountSecondPassword {
+            hash: Some(hash),
+            failed: 0,
+            locked_until: 0,
+        },
+    );
+    let server = server_with(
+        Arc::new(FailingWriteStore {
+            inner: inner.clone(),
+        }),
+        hasher.clone(),
+    );
+    let mut client = TestClient::new(&server, 1, 42);
+
+    let tables = request_tables(&server, &mut client, 4).await;
+    send_check(&server, &mut client, &tables, 0, "wrongpass").await;
+    let frames = client.drain();
+    assert_eq!(
+        checked(&frames),
+        Some((false, 1)),
+        "the failed write still answers the failure: {frames:?}"
+    );
+    assert!(client.conn.second_password.fail_closed);
+    assert!(!client.conn.second_password.passed);
+    assert_eq!(inner.row(42).failed, 0, "nothing was persisted");
+
+    // Every later attempt on the connection fails without hashing or touching the store.
+    let before = hasher.verifies();
+    let mut body = PacketStream::new();
+    body.write_u32(0).write_u8(0).write_str("1234abcd");
+    let packet: CSCheckSecondPasswordPacket = read_packet(body.into_bytes());
+    packet
+        .handle(&server, &mut client.conn)
+        .await
+        .expect("check");
+    assert_eq!(checked(&client.drain()), Some((false, 0)));
+    assert_eq!(hasher.verifies(), before);
+
+    let key_request: CSRequestSecondPasswordKeyTablesPacket = read_packet(vec![4]);
+    key_request
+        .handle(&server, &mut client.conn)
+        .await
+        .expect("key tables");
+    assert!(client.drain().is_empty(), "no tables after a store failure");
+
+    let create = CSCreateSecondPasswordPacket {
+        key_id: 1,
+        table_index: 0,
+        pass: "x".into(),
+    };
+    create
+        .handle(&server, &mut client.conn)
+        .await
+        .expect("create");
+    assert_eq!(created(&client.drain()), Some(false));
+
+    assert!(!allow_lobby_action(&server, &mut client.conn)
+        .await
+        .expect("gate"));
+}
+
+#[test]
+fn debug_output_redacts_tables_and_passwords() {
+    let tables = KeyTables {
+        key_id: 7,
+        tables: [
+            "table-secret-0".into(),
+            "table-secret-1".into(),
+            "table-secret-2".into(),
+            "table-secret-3".into(),
+        ],
+    };
+    let debug = format!("{tables:?}");
+    assert!(!debug.contains("table-secret"), "{debug}");
+    assert!(debug.contains("redacted"), "{debug}");
+
+    let packet = SCSecondPassKeyTablesPacket {
+        key_type: 1,
+        key_id: 7,
+        tables: tables.tables.clone(),
+    };
+    let debug = format!("{packet:?}");
+    assert!(!debug.contains("table-secret"), "{debug}");
+    assert!(debug.contains("redacted"), "{debug}");
+
+    let pending = PendingKeyTables {
+        action: SecondPasswordAction::Create,
+        key_tables: tables.clone(),
+    };
+    let state = ConnectionState {
+        pending: Some(pending),
+        passed: true,
+        has_password: true,
+        loaded: true,
+        fail_closed: false,
+    };
+    let debug = format!("{state:?}");
+    assert!(!debug.contains("table-secret"), "{debug}");
+
+    let pass = "hunter2-secret";
+    let create = CSCreateSecondPasswordPacket {
+        key_id: 1,
+        table_index: 0,
+        pass: pass.into(),
+    };
+    let change = CSChangeSecondPasswordPacket {
+        key_id: 1,
+        old_pass_table_index: 0,
+        new_pass_table_index: 1,
+        old_pass: pass.into(),
+        new_pass: pass.into(),
+    };
+    let clear = CSClearSecondPasswordPacket {
+        key_id: 1,
+        table_index: 0,
+        pass: pass.into(),
+    };
+    let check = CSCheckSecondPasswordPacket {
+        key_id: 1,
+        table_index: 0,
+        pass: pass.into(),
+    };
+    for debug in [
+        format!("{create:?}"),
+        format!("{change:?}"),
+        format!("{clear:?}"),
+        format!("{check:?}"),
+    ] {
+        assert!(!debug.contains(pass), "{debug}");
+        assert!(debug.contains("redacted"), "{debug}");
+    }
+
+    let row = AccountSecondPassword {
+        hash: Some("stored-hash-secret".into()),
+        failed: 5,
+        locked_until: 1_900_000_000,
+    };
+    let debug = format!("{row:?}");
+    assert!(!debug.contains("stored-hash-secret"), "{debug}");
+    assert!(debug.contains("redacted"), "{debug}");
+}
+
+#[tokio::test]
+async fn gm_command_clears_the_second_password() {
+    use crate::config::AppConfig;
+    use crate::systems::services::commands::scripts::harness;
+
+    let app = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("app");
+    if !app.join("Config.json").exists() {
+        return;
+    }
+    let args: Vec<String> = [
+        "--LoginNetwork:Port=1234",
+        "/Connections:MySQLProvider:Port",
+        "3306",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let config = AppConfig::load_from(&app, None, Vec::new(), &args).unwrap();
+
+    let store = Arc::new(MemoryStore::default());
+    store.set_row(
+        1001,
+        AccountSecondPassword {
+            hash: Some("stored-hash".into()),
+            failed: 5,
+            locked_until: 1_900_000_000,
+        },
+    );
+    let server = harness::server();
+    server
+        .systems
+        .services
+        .second_password
+        .store
+        .install(store.clone());
+    server
+        .systems
+        .services
+        .commands
+        .access_levels
+        .load(&config.access_level);
+    let gm = harness::pc(&server, 1, "Gm", 100.0, 100.0);
+
+    let (handled, out) = harness::run_at(&server, &gm.p, "secondpassword 1001", 50).await;
+    assert!(handled);
+    assert_eq!(out, ["|cFFFF0000Insufficient privileges.|r"]);
+    assert_eq!(store.row(1001).hash.as_deref(), Some("stored-hash"));
+
+    let (handled, out) = harness::run_at(&server, &gm.p, "secondpassword 1001", 100).await;
+    assert!(handled);
+    assert_eq!(
+        out,
+        [harness::normal(
+            "secondpassword",
+            "Second password of account 1001 cleared"
+        )]
+    );
+    assert_eq!(store.row(1001), AccountSecondPassword::default());
+}
+
+#[tokio::test]
+async fn enter_world_login_resets_the_second_password_session() {
+    let server = test_server();
+    let mut client = TestClient::new(&server, 5, 0);
+    client.conn.second_password.passed = true;
+    client.conn.second_password.has_password = true;
+    client.conn.second_password.loaded = true;
+    client.conn.second_password.fail_closed = true;
+    server.enter_world.add_account(42, 5, false);
+    crate::packets::c2g::enter_world_login(&server, &mut client.conn, 42, 5)
+        .await
+        .expect("enter world");
+    assert_eq!(client.conn.account_id(), 42);
+    assert!(!client.conn.second_password.passed);
+    assert!(!client.conn.second_password.has_password);
+    assert!(!client.conn.second_password.loaded);
+    assert!(!client.conn.second_password.fail_closed);
+}
+
+#[tokio::test]
+async fn protocol_errors_report_the_stored_failed_count() {
+    let store = Arc::new(MemoryStore::default());
+    let hasher = Arc::new(CountingHasher::new());
+    let hash = hasher.hash("1234abcd").expect("hash");
+    store.set_row(
+        42,
+        AccountSecondPassword {
+            hash: Some(hash),
+            failed: 3,
+            locked_until: 0,
+        },
+    );
+    let server = server_with(store.clone(), hasher.clone());
+    let mut client = TestClient::new(&server, 1, 42);
+
+    let tables = request_tables(&server, &mut client, 4).await;
+    let mut wrong = tables.clone();
+    wrong.key_id = wrong.key_id.wrapping_add(1);
+    send_check(&server, &mut client, &wrong, 0, "1234abcd").await;
+    assert_eq!(checked(&client.drain()), Some((false, 3)));
+
+    let tables = request_tables(&server, &mut client, 4).await;
+    let mut body = PacketStream::new();
+    body.write_u32(tables.key_id).write_u8(0).write_str("!!");
+    let packet: CSCheckSecondPasswordPacket = read_packet(body.into_bytes());
+    packet
+        .handle(&server, &mut client.conn)
+        .await
+        .expect("check");
+    assert_eq!(checked(&client.drain()), Some((false, 3)));
+
+    let tables = request_tables(&server, &mut client, 2).await;
+    let mut wrong = tables.clone();
+    wrong.key_id = wrong.key_id.wrapping_add(1);
+    send_change(&server, &mut client, &wrong, 0, "1234abcd", 1, "5678wxyz").await;
+    assert_eq!(changed(&client.drain()), Some((changed_result::FAILED, 3)));
+
+    let tables = request_tables(&server, &mut client, 2).await;
+    let mut body = PacketStream::new();
+    body.write_u32(tables.key_id)
+        .write_u8(0)
+        .write_u8(1)
+        .write_str("!!")
+        .write_str("!!");
+    let packet: CSChangeSecondPasswordPacket = read_packet(body.into_bytes());
+    packet
+        .handle(&server, &mut client.conn)
+        .await
+        .expect("change");
+    assert_eq!(
+        changed(&client.drain()),
+        Some((changed_result::OLD_PASSWORD_FAILED, 3))
+    );
+
+    let tables = request_tables(&server, &mut client, 3).await;
+    let mut wrong = tables.clone();
+    wrong.key_id = wrong.key_id.wrapping_add(1);
+    send_clear(&server, &mut client, &wrong, 0, "1234abcd").await;
+    assert_eq!(cleared(&client.drain()), Some((false, 3)));
+
+    assert_eq!(store.row(42).failed, 3, "protocol errors do not count");
+    assert_eq!(hasher.verifies(), 0, "no hashing on protocol errors");
 }

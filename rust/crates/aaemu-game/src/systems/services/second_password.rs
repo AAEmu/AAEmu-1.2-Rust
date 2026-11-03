@@ -86,10 +86,19 @@ impl SecondPasswordAction {
 }
 
 /// The four virtual-keyboard permutations and the key id they were sent with.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct KeyTables {
     pub key_id: u32,
     pub tables: [String; TABLE_COUNT],
+}
+
+impl std::fmt::Debug for KeyTables {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeyTables")
+            .field("key_id", &self.key_id)
+            .field("tables", &"[redacted]")
+            .finish()
+    }
 }
 
 impl KeyTables {
@@ -144,14 +153,23 @@ pub fn valid_password(plain: &str) -> bool {
 }
 
 /// The pending tables of a connection: only the last pushed set is valid and only once.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct PendingKeyTables {
     action: SecondPasswordAction,
     key_tables: KeyTables,
 }
 
+impl std::fmt::Debug for PendingKeyTables {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingKeyTables")
+            .field("action", &self.action)
+            .field("key_tables", &self.key_tables)
+            .finish()
+    }
+}
+
 /// Per-connection second password state (`GameConnection::second_password`).
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct ConnectionState {
     pending: Option<PendingKeyTables>,
     /// The 1.2 `passed` flag: per connection, reset on reconnect.
@@ -161,10 +179,35 @@ pub struct ConnectionState {
     pub has_password: bool,
     /// `has_password` / `passed` are known from the database.
     pub loaded: bool,
+    /// A store read/write failed: this connection refuses further second-password attempts
+    /// instead of running without a working failure counter or lock.
+    pub fail_closed: bool,
+}
+
+impl std::fmt::Debug for ConnectionState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionState")
+            .field("passed", &self.passed)
+            .field("has_password", &self.has_password)
+            .field("loaded", &self.loaded)
+            .field("fail_closed", &self.fail_closed)
+            .field("pending", &self.pending)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for AccountSecondPassword {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccountSecondPassword")
+            .field("hash", &self.hash.as_ref().map(|_| "[redacted]"))
+            .field("failed", &self.failed)
+            .field("locked_until", &self.locked_until)
+            .finish()
+    }
 }
 
 /// The persistent per-account values (`accounts.second_password_*`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct AccountSecondPassword {
     pub hash: Option<String>,
     pub failed: u8,
@@ -216,16 +259,29 @@ impl SecondPasswordStore for MySqlSecondPasswordStore {
             .fetch_optional(&server.db)
             .await;
             match row {
-                Ok(Some(row)) => Some(AccountSecondPassword {
-                    hash: row
-                        .try_get::<Option<String>, _>("second_password_hash")
-                        .ok()
-                        .flatten(),
-                    failed: row
-                        .try_get::<i64, _>("failed")
-                        .map_or(0, |v| v.clamp(0, i64::from(u8::MAX)) as u8),
-                    locked_until: row.try_get::<i64, _>("locked_until").unwrap_or(0),
-                }),
+                Ok(Some(row)) => {
+                    let decoded = (|| {
+                        let hash = row
+                            .try_get::<Option<String>, _>("second_password_hash")?
+                            .filter(|hash| !hash.is_empty());
+                        let failed = row.try_get::<i64, _>("failed")?;
+                        let locked_until = row.try_get::<i64, _>("locked_until")?;
+                        Ok::<_, sqlx::Error>(AccountSecondPassword {
+                            hash,
+                            failed: failed.clamp(0, i64::from(u8::MAX)) as u8,
+                            locked_until,
+                        })
+                    })();
+                    match decoded {
+                        Ok(row) => Some(row),
+                        Err(error) => {
+                            tracing::error!(
+                                "second password: decode account {account_id}: {error}"
+                            );
+                            None
+                        }
+                    }
+                }
                 // The accounts row is created on login; a missing one has no second password.
                 Ok(None) => Some(AccountSecondPassword::default()),
                 Err(error) => {
@@ -427,6 +483,13 @@ pub fn handle_key_tables_request(
         tracing::debug!("second password: key tables requested while the feature is disabled");
         return Ok(());
     }
+    if conn.second_password.fail_closed {
+        tracing::warn!(
+            "second password: session {} refuses key tables after a store failure",
+            conn.id
+        );
+        return Ok(());
+    }
     let Some(action) = SecondPasswordAction::from_wire(wire_type) else {
         tracing::warn!("second password: key tables requested with unknown type {wire_type}");
         return Ok(());
@@ -472,6 +535,13 @@ async fn push_state(server: &GameServer, conn: &mut GameConnection) -> Result<()
     if !enabled(server) || conn.account_id() == 0 {
         return Ok(());
     }
+    if conn.second_password.fail_closed {
+        tracing::warn!(
+            "second password: session {} refuses a state push after a store failure",
+            conn.id
+        );
+        return Ok(());
+    }
     let Some(row) = manager(server)
         .store()
         .load(server, conn.account_id())
@@ -510,11 +580,26 @@ pub async fn handle_setup(server: &GameServer, conn: &mut GameConnection) -> Res
     push_state(server, conn).await
 }
 
+/// Admin recovery (GM command): clears the hash, the failure counter and the lock under the
+/// account lock, so an operator can unlock an account whose password was lost.
+pub async fn clear_account(server: &GameServer, account_id: u32) -> bool {
+    let account_lock = server.accounts.lock_of(account_id);
+    let _lock = account_lock.lock().await;
+    manager(server).store().clear(server, account_id).await
+}
+
 /// Gate for the lobby actions that must wait until `passed` (or no password exists). On refusal
 /// the server pushes `SCSecondPassKeyTables(type = 4)`; the client never requests type 4 itself.
 pub async fn allow_lobby_action(server: &GameServer, conn: &mut GameConnection) -> Result<bool> {
     if !enabled(server) || conn.account_id() == 0 {
         return Ok(true);
+    }
+    if conn.second_password.fail_closed {
+        tracing::warn!(
+            "second password: session {} refuses a lobby action after a store failure",
+            conn.id
+        );
+        return Ok(false);
     }
     if !conn.second_password.loaded {
         let Some(row) = manager(server)
@@ -568,6 +653,47 @@ enum FailureReply {
     Checked,
 }
 
+fn send_failure(conn: &mut GameConnection, reply: FailureReply, failed_count: u8) {
+    match reply {
+        FailureReply::Changed => conn.send(&SCSecondPassChangedPacket {
+            result: changed_result::OLD_PASSWORD_FAILED,
+            failed_count,
+        }),
+        FailureReply::Cleared => conn.send(&SCSecondPassClearedPacket {
+            success: false,
+            failed_count,
+        }),
+        FailureReply::Checked => conn.send(&SCSecondPassCheckedPacket {
+            success: false,
+            failed_count,
+        }),
+    }
+}
+
+/// Reads the stored failed count for a protocol-error reply. A failed read closes the
+/// connection's second-password handling (fail closed), like every other store error.
+async fn stored_failed_count(server: &GameServer, conn: &mut GameConnection) -> u8 {
+    let account_id = conn.account_id();
+    if account_id == 0 {
+        return 0;
+    }
+    let store = manager(server).store();
+    let account_lock = server.accounts.lock_of(account_id);
+    let _lock = account_lock.lock().await;
+    match store.load(server, account_id).await {
+        Some(row) => row.failed,
+        None => {
+            conn.second_password.passed = false;
+            conn.second_password.fail_closed = true;
+            tracing::error!(
+                "second password: account {account_id}: stored failure count unavailable; refusing further attempts on session {}",
+                conn.id
+            );
+            0
+        }
+    }
+}
+
 /// Counts one failed verification and answers under the account lock. Reaching
 /// `SecondPassword:MaxFailCount` locks the account for `LockMinutes` and sends
 /// `SCSecondPassCheckOverFailed`; otherwise the action's own `failedCount` reply is sent.
@@ -583,10 +709,26 @@ async fn record_failure(
     let config = &server.config.second_password;
     let next = failed.saturating_add(1);
     conn.second_password.passed = false;
-    if next >= config.max_fail_count {
+    let locked = next >= config.max_fail_count;
+    let unlock = if locked {
         let lock_secs = i64::from(config.lock_minutes) * 60;
-        let unlock = now.saturating_add(lock_secs);
-        store.set_failed(server, account_id, next, unlock).await;
+        now.saturating_add(lock_secs)
+    } else {
+        0
+    };
+    if !store.set_failed(server, account_id, next, unlock).await {
+        // The failure counter is the real control behind the weak 4-character passwords: if
+        // it cannot be recorded, this connection must not keep checking (and must not be
+        // allowed any lobby action that needs `passed`).
+        conn.second_password.fail_closed = true;
+        tracing::error!(
+            "second password: account {account_id}: failure could not be recorded; refusing further attempts on session {}",
+            conn.id
+        );
+        send_failure(conn, reply, next);
+        return;
+    }
+    if locked {
         tracing::warn!(
             "second password: account {account_id} locked until {unlock} after {next} failed checks"
         );
@@ -594,25 +736,11 @@ async fn record_failure(
             account_unlock_time: unlock,
         });
     } else {
-        store.set_failed(server, account_id, next, 0).await;
         tracing::info!(
             "second password: account {account_id} failed check ({next}/{})",
             config.max_fail_count
         );
-        match reply {
-            FailureReply::Changed => conn.send(&SCSecondPassChangedPacket {
-                result: changed_result::OLD_PASSWORD_FAILED,
-                failed_count: next,
-            }),
-            FailureReply::Cleared => conn.send(&SCSecondPassClearedPacket {
-                success: false,
-                failed_count: next,
-            }),
-            FailureReply::Checked => conn.send(&SCSecondPassCheckedPacket {
-                success: false,
-                failed_count: next,
-            }),
-        }
+        send_failure(conn, reply, next);
     }
 }
 
@@ -623,6 +751,10 @@ pub async fn handle_create(
     packet: &CSCreateSecondPasswordPacket,
 ) -> Result<()> {
     if !enabled(server) {
+        return Ok(());
+    }
+    if conn.second_password.fail_closed {
+        conn.send(&SCSecondPassCreatedPacket { success: false });
         return Ok(());
     }
     let Some(key_tables) = take_pending(conn, SecondPasswordAction::Create, packet.key_id) else {
@@ -685,26 +817,36 @@ pub async fn handle_change(
     if !enabled(server) {
         return Ok(());
     }
-    let Some(key_tables) = take_pending(conn, SecondPasswordAction::Change, packet.key_id) else {
+    if conn.second_password.fail_closed {
         conn.send(&SCSecondPassChangedPacket {
             result: changed_result::FAILED,
             failed_count: 0,
         });
         return Ok(());
+    }
+    let Some(key_tables) = take_pending(conn, SecondPasswordAction::Change, packet.key_id) else {
+        let failed = stored_failed_count(server, conn).await;
+        conn.send(&SCSecondPassChangedPacket {
+            result: changed_result::FAILED,
+            failed_count: failed,
+        });
+        return Ok(());
     };
     let Some(old_plain) = key_tables.decode(packet.old_pass_table_index, &packet.old_pass) else {
+        let failed = stored_failed_count(server, conn).await;
         conn.send(&SCSecondPassChangedPacket {
             result: changed_result::OLD_PASSWORD_FAILED,
-            failed_count: 0,
+            failed_count: failed,
         });
         return Ok(());
     };
     let new_plain = match key_tables.decode(packet.new_pass_table_index, &packet.new_pass) {
         Some(plain) if valid_password(&plain) => plain,
         _ => {
+            let failed = stored_failed_count(server, conn).await;
             conn.send(&SCSecondPassChangedPacket {
                 result: changed_result::NEW_PASSWORD_FAILED,
-                failed_count: 0,
+                failed_count: failed,
             });
             return Ok(());
         }
@@ -810,17 +952,26 @@ pub async fn handle_clear(
     if !enabled(server) {
         return Ok(());
     }
-    let Some(key_tables) = take_pending(conn, SecondPasswordAction::Clear, packet.key_id) else {
+    if conn.second_password.fail_closed {
         conn.send(&SCSecondPassClearedPacket {
             success: false,
             failed_count: 0,
         });
         return Ok(());
-    };
-    let Some(plain) = key_tables.decode(packet.table_index, &packet.pass) else {
+    }
+    let Some(key_tables) = take_pending(conn, SecondPasswordAction::Clear, packet.key_id) else {
+        let failed = stored_failed_count(server, conn).await;
         conn.send(&SCSecondPassClearedPacket {
             success: false,
-            failed_count: 0,
+            failed_count: failed,
+        });
+        return Ok(());
+    };
+    let Some(plain) = key_tables.decode(packet.table_index, &packet.pass) else {
+        let failed = stored_failed_count(server, conn).await;
+        conn.send(&SCSecondPassClearedPacket {
+            success: false,
+            failed_count: failed,
         });
         return Ok(());
     };
@@ -907,17 +1058,26 @@ pub async fn handle_check(
     if !enabled(server) {
         return Ok(());
     }
-    let Some(key_tables) = take_pending(conn, SecondPasswordAction::Check, packet.key_id) else {
+    if conn.second_password.fail_closed {
         conn.send(&SCSecondPassCheckedPacket {
             success: false,
             failed_count: 0,
         });
         return Ok(());
-    };
-    let Some(plain) = key_tables.decode(packet.table_index, &packet.pass) else {
+    }
+    let Some(key_tables) = take_pending(conn, SecondPasswordAction::Check, packet.key_id) else {
+        let failed = stored_failed_count(server, conn).await;
         conn.send(&SCSecondPassCheckedPacket {
             success: false,
-            failed_count: 0,
+            failed_count: failed,
+        });
+        return Ok(());
+    };
+    let Some(plain) = key_tables.decode(packet.table_index, &packet.pass) else {
+        let failed = stored_failed_count(server, conn).await;
+        conn.send(&SCSecondPassCheckedPacket {
+            success: false,
+            failed_count: failed,
         });
         return Ok(());
     };
@@ -1015,7 +1175,7 @@ impl Marshal for SCSecondPassSettedPacket {
 }
 
 /// `SCSecondPassKeyTablesPacket(byte type, uint keyId, string[4] tables)`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SCSecondPassKeyTablesPacket {
     pub key_type: u8,
     pub key_id: u32,
@@ -1026,6 +1186,16 @@ packet_def!(
     level = LEVEL_PLAIN,
     opcode = sc::SCSecondPassKeyTablesPacket
 );
+
+impl std::fmt::Debug for SCSecondPassKeyTablesPacket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SCSecondPassKeyTablesPacket")
+            .field("key_type", &self.key_type)
+            .field("key_id", &self.key_id)
+            .field("tables", &"[redacted]")
+            .finish()
+    }
+}
 
 impl Marshal for SCSecondPassKeyTablesPacket {
     fn write(&self, s: &mut PacketStream) {
@@ -1186,11 +1356,21 @@ impl ClientPacket for CSSetupSecondPassword {
 }
 
 /// `CSCreateSecondPasswordPacket(uint keyId, byte tableIndex, string pass)`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CSCreateSecondPasswordPacket {
     pub key_id: u32,
     pub table_index: u8,
     pub pass: String,
+}
+
+impl std::fmt::Debug for CSCreateSecondPasswordPacket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CSCreateSecondPasswordPacket")
+            .field("key_id", &self.key_id)
+            .field("table_index", &self.table_index)
+            .field("pass", &"[redacted]")
+            .finish()
+    }
 }
 
 impl ClientPacket for CSCreateSecondPasswordPacket {
@@ -1215,13 +1395,25 @@ impl ClientPacket for CSCreateSecondPasswordPacket {
 
 /// `CSChangeSecondPasswordPacket(uint keyId, byte oldPassTableIndex, byte newPassTableIndex,
 /// string oldPass, string newPass)`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CSChangeSecondPasswordPacket {
     pub key_id: u32,
     pub old_pass_table_index: u8,
     pub new_pass_table_index: u8,
     pub old_pass: String,
     pub new_pass: String,
+}
+
+impl std::fmt::Debug for CSChangeSecondPasswordPacket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CSChangeSecondPasswordPacket")
+            .field("key_id", &self.key_id)
+            .field("old_pass_table_index", &self.old_pass_table_index)
+            .field("new_pass_table_index", &self.new_pass_table_index)
+            .field("old_pass", &"[redacted]")
+            .field("new_pass", &"[redacted]")
+            .finish()
+    }
 }
 
 impl ClientPacket for CSChangeSecondPasswordPacket {
@@ -1247,11 +1439,21 @@ impl ClientPacket for CSChangeSecondPasswordPacket {
 }
 
 /// `CSClearSecondPasswordPacket(uint keyId, byte tableIndex, string pass)`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CSClearSecondPasswordPacket {
     pub key_id: u32,
     pub table_index: u8,
     pub pass: String,
+}
+
+impl std::fmt::Debug for CSClearSecondPasswordPacket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CSClearSecondPasswordPacket")
+            .field("key_id", &self.key_id)
+            .field("table_index", &self.table_index)
+            .field("pass", &"[redacted]")
+            .finish()
+    }
 }
 
 impl ClientPacket for CSClearSecondPasswordPacket {
@@ -1275,11 +1477,21 @@ impl ClientPacket for CSClearSecondPasswordPacket {
 }
 
 /// `CSCheckSecondPasswordPacket(uint keyId, byte tableIndex, string pass)`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CSCheckSecondPasswordPacket {
     pub key_id: u32,
     pub table_index: u8,
     pub pass: String,
+}
+
+impl std::fmt::Debug for CSCheckSecondPasswordPacket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CSCheckSecondPasswordPacket")
+            .field("key_id", &self.key_id)
+            .field("table_index", &self.table_index)
+            .field("pass", &"[redacted]")
+            .finish()
+    }
 }
 
 impl ClientPacket for CSCheckSecondPasswordPacket {

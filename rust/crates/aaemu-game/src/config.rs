@@ -310,7 +310,7 @@ pub struct SecondPasswordConfig {
     /// feature cannot run without a lock (owner decision, 2026-11-03).
     #[serde(rename = "maxfailcount", deserialize_with = "lenient")]
     pub max_fail_count: u8,
-    /// How long a locked account refuses checks (`0` = the lock ends immediately).
+    /// How long a locked account refuses checks (minutes, at least 1: `0` is refused at load).
     #[serde(rename = "lockminutes", deserialize_with = "lenient")]
     pub lock_minutes: u32,
 }
@@ -771,6 +771,11 @@ impl AppConfig {
             return Err(ConfigError::Bind(de::Error::custom(
                 "SecondPassword:MaxFailCount must be at least 1: a second password without a \
                  lock cannot protect the account",
+            )));
+        }
+        if cfg.second_password.lock_minutes == 0 {
+            return Err(ConfigError::Bind(de::Error::custom(
+                "SecondPassword:LockMinutes must be at least 1: a second password without a lock cannot protect the account",
             )));
         }
         cfg.access_level = access_level;

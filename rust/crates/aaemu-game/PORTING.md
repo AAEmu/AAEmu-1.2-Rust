@@ -3101,6 +3101,16 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `CSCancelCharacterDelete` / `CSCreateCharacter` until passed and push
   `SCSecondPassKeyTables(type = 4)`) is inferred from the client's locked branch
   (`SECONDPASS-GATE-1`). The real-client virtual-keyboard UI path cannot be driven headlessly.
+  **Known, not fixed:** there is no per-connection rate limit on the 0x126..=0x129 handlers, and
+  the PBKDF2 verification runs while the shared per-account lock is held, so a burst of checks
+  can occupy the blocking pool and stall the batch tick (score 3); `CSSetLpManageCharacterPacket`
+  is not gated (WP-E2's `CSEditCharacter` must call `allow_lobby_action`); the lock time is
+  wall-clock unix seconds; and the attempt that observes an expired lock is swallowed (the
+  server resets the counter and answers `SCSecondPassAccountLocked(0)` instead of checking it).
+  Store errors fail closed: a load that cannot be decoded, or a failure counter that cannot be
+  written, refuses the action and (for the counter) every further attempt on that connection.
+  The GM command `/secondpassword <account id|character name|self>` clears the hash, counter and
+  lock under the account lock (`AccessLevels.json`, level 100) for admin recovery.
 
 ### Ranking boards (Rust only)
 

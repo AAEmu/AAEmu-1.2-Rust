@@ -86,6 +86,9 @@ pub async fn enter_world_login(
 
     conn.set_account_id(account_id);
     conn.state = GameState::Lobby;
+    // A world login starts a new second-password session: nothing is passed yet and any
+    // tables of a previous session on this connection are gone.
+    conn.second_password = Default::default();
 
     // `AccountManager.Add` refuses an account that is already registered (C# `Add` returns
     // early). `EnterWorldManager.AddAccount` normally catches this when the login server asks
