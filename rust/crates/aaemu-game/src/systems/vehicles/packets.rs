@@ -12,7 +12,7 @@ use crate::packets::packet_def;
 use crate::systems::economy::mate_equipment::read_wire_item;
 pub use crate::systems::economy::mate_equipment::WireItem;
 
-use super::{mates, shipyards, slaves};
+use super::{mates, shipyards, slaves, transfers};
 
 macro_rules! cs_packet {
     ($(#[$m:meta])* $name:ident { $($(#[$fm:meta])* $f:ident : $t:ty),* $(,)? }
@@ -422,11 +422,14 @@ cs_packet!(
 );
 
 cs_packet!(
-    /// `CSBoardingTransferPacket` (log only in C#).
+    /// `CSBoardingTransferPacket` (log only in C#): paperdoll board (`ap` = seat 2..7) and
+    /// unboard (`ap = 0`, `UnBoardingTransfer`).
     CSBoardingTransferPacket { tl: u16, ap: u8 }
     read |s| { Ok(Self { tl: s.read_u16()?, ap: s.read_u8()? }) }
     handle |self, server, conn| {
-        tracing::warn!("BoardingTransfer, Tl: {}, Ap: {}", self.tl, self.ap);
+        tracing::debug!("BoardingTransfer, Tl: {}, Ap: {}", self.tl, self.ap);
+        let p = active_char!(conn);
+        transfers::board(server, &p, self.tl, self.ap);
         Ok(())
     }
 );

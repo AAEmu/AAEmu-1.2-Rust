@@ -183,7 +183,12 @@ pub fn is_boarded_on_transfer(world: &WorldInstance, unit: &WorldObject) -> bool
     world
         .sticky_parent(unit)
         .and_then(|s| s.as_transfer().cloned())
-        .is_some_and(|t| t.data().attached_characters.contains(&unit.obj_id()))
+        .is_some_and(|t| {
+            t.data()
+                .attached_characters
+                .iter()
+                .any(|(_, id)| *id == unit.obj_id())
+        })
 }
 
 /// Parents the moving unit to its supporting object, or detaches it. The actor's

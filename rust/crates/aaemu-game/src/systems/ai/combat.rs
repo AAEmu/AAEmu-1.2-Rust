@@ -137,7 +137,7 @@ pub fn on_damage_received(c: &mut AiCtx<'_>, attacker: &WorldObject, amount: i32
 
 /// `Npc.GetAggroRatingInPercent(objId)`: 0 = most aggro ... 100 = not in the table.
 pub fn aggro_rating_in_percent(npc_obj: &WorldObject, obj_id: u32) -> f32 {
-    let mut sorted: Vec<(u32, i32, u32)> = npc_obj
+    let mut sorted: Vec<(u32, i32, u64)> = npc_obj
         .with_unit(|u| {
             u.unit()
                 .skill_state

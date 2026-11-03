@@ -53,6 +53,11 @@ impl Command for Move {
                 ));
             }
 
+            crate::systems::vehicles::force_dismount(
+                server,
+                &target_player,
+                crate::systems::vehicles::slaves::attach_reason::PREFAB_CHANGED,
+            );
             teleport_player(&target_player, 0, my_x, my_y, my_z, 0.0);
             CommandManager::send_normal_text(
                 self,
@@ -70,6 +75,11 @@ impl Command for Move {
             let target_x = t.x;
             let target_y = t.y;
             let target_z = t.z + 2.0; // drop me slightly above them to avoid weird collision stuff
+            crate::systems::vehicles::force_dismount(
+                server,
+                &character,
+                crate::systems::vehicles::slaves::attach_reason::PREFAB_CHANGED,
+            );
             teleport_player(&character, 0, target_x, target_y, target_z, 0.0);
             CommandManager::send_normal_text(
                 self,
@@ -100,6 +110,11 @@ impl Command for Move {
                 ));
             }
 
+            crate::systems::vehicles::force_dismount(
+                server,
+                &target_player,
+                crate::systems::vehicles::slaves::attach_reason::PREFAB_CHANGED,
+            );
             teleport_player(&target_player, 0, new_x, new_y, new_z, 0.0);
             CommandManager::send_normal_text(
                 self,
