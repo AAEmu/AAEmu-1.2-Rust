@@ -735,11 +735,12 @@ pub fn start_tick(server: &Arc<GameServer>) {
                     .operation_lock
                     .lock()
                     .expect("housing poisoned");
+                let now = chrono::Utc::now().timestamp();
                 for state in server
                     .systems
                     .housing
                     .dominions
-                    .tick(chrono::Utc::now().timestamp())
+                    .tick(now)
                     .unwrap_or_else(|e| {
                         tracing::error!("Dominion tick: {e}");
                         Vec::new()
@@ -748,6 +749,7 @@ pub fn start_tick(server: &Arc<GameServer>) {
                     apply_tower_state(&server, &state);
                     crate::systems::social::dominion::broadcast_phase_change(&server, &state);
                 }
+                crate::systems::social::dominion_notifications::expire_non_pvp(&server, now);
             }
         }
     });

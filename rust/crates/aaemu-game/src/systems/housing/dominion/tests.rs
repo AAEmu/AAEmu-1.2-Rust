@@ -101,6 +101,22 @@ fn concurrent_claims_consume_only_the_winning_expediton_pack() {
 }
 
 #[test]
+fn non_pvp_expiry_clears_the_window_once_at_its_authored_end() {
+    let manager = owned();
+    manager.start_non_pvp(ZONE, DEFENDER, 120, 1000).unwrap();
+    let end = 1000 + 120 * 60;
+    assert_eq!(manager.expire_non_pvp(end - 1), Ok(Vec::new()));
+    assert_eq!(manager.expire_non_pvp(end), Ok(vec![ZONE]));
+    let state = manager.state(ZONE).unwrap();
+    assert_eq!((state.non_pvp_start_at, state.non_pvp_duration_min), (0, 0));
+    assert_eq!(manager.expire_non_pvp(end), Ok(Vec::new()));
+    // A cleared window can be started again; a stale duration would make the client's
+    // cached end nonzero and its peace-skill precheck would keep refusing.
+    manager.start_non_pvp(ZONE, DEFENDER, 120, end).unwrap();
+    assert_eq!(manager.state(ZONE).unwrap().non_pvp_start_at, end);
+}
+
+#[test]
 fn siege_requires_explicit_schedule_membership_tower_instance_and_destruction() {
     let manager = siege();
     assert!(!manager.registered_attacker(ZONE, tower(), 11, ATTACKER, 1999));

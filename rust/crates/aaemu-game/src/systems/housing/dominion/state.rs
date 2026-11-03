@@ -1249,6 +1249,44 @@ impl DominionManager {
         Ok(state)
     }
 
+    /// Clears every non-PvP window whose authored end (`start + duration_min*60`) has passed.
+    /// The client derives the same end from the start packet but keeps its cached end until
+    /// `OnDominionNonPvPStopped` arrives (its peace-skill precheck refuses while it is set), so
+    /// this is the natural-expiry edge. Early termination is UNKNOWN in 1.2. Returns the zone
+    /// groups that ended; a second call at the same time returns none.
+    pub fn expire_non_pvp(&self, now_seconds: i64) -> Result<Vec<u32>, DominionError> {
+        if now_seconds < 0 {
+            return Err(DominionError::InvalidSchedule);
+        }
+        let mut inner = self.lock();
+        let expired: Vec<u32> = inner
+            .states
+            .iter()
+            .filter(|(_, entry)| {
+                let state = &entry.state;
+                state.non_pvp_start_at > 0
+                    && now_seconds
+                        >= state.non_pvp_start_at.saturating_add(
+                            i64::from(state.non_pvp_duration_min).saturating_mul(60),
+                        )
+            })
+            .map(|(zone, _)| *zone)
+            .collect();
+        let mut ended = Vec::with_capacity(expired.len());
+        for zone in expired {
+            let revision = next_revision(&inner)?;
+            let Some(entry) = inner.states.get(&zone) else {
+                continue;
+            };
+            let mut state = entry.state.clone();
+            state.non_pvp_start_at = 0;
+            state.non_pvp_duration_min = 0;
+            replace(&mut inner, state, revision);
+            ended.push(zone);
+        }
+        Ok(ended)
+    }
+
     /// Only real collected revenue should reach this entry point; no fabricated allowances.
     pub fn credit_treasury(
         &self,

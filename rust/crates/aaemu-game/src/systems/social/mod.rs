@@ -25,6 +25,7 @@ pub mod chat;
 pub mod config;
 pub mod crime;
 pub mod dominion;
+pub mod dominion_notifications;
 pub mod duel;
 pub mod expedition;
 pub mod faction;

@@ -2,18 +2,20 @@
 //! reports and achievements. Most of them have no sender in the 1.2 C# (noted on each); they
 //! exist so the owning features can be ported against them.
 
+use aaemu_commons::helpers::convert_coord_to_long;
+use aaemu_commons::{Marshal, PacketStream};
 use chrono::{DateTime, Utc};
 
 use super::{active_char, cs_packet, sc_packet};
 use crate::models::char_data::CountUnreadMail;
 use crate::net::packet::LEVEL_PLAIN;
 use crate::net::registry::PacketRegistry;
-use crate::opcodes::cs;
+use crate::opcodes::{cs, sc};
+use crate::packets::packet_def;
 use crate::systems::social::achievement::AchievementInfo;
 use crate::systems::social::dominion::{
     DominionData, DominionSiegeTimers, DominionTerritoryData, DominionUnkData,
 };
-use aaemu_commons::helpers::convert_coord_to_long;
 
 // ---- Dominion ----
 
@@ -81,7 +83,8 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCDominionDeletedPacket(id)` (not sent by the 1.2 C#).
+    /// Native 1.2 `OnDominionDeleted` (opcode 0x01e). Deserializer `FUN_397b79f0` reads the
+    /// zone group; the client drops its cached dominion record and fires the deleted alarm.
     SCDominionDeletedPacket { id: u16 } |self, s| {
         s.write_u16(self.id);
     }
@@ -99,14 +102,60 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCDominionTaxBalancedPacket(id, peaceTaxMoney, peaceTaxAaPoint)` (not sent by the 1.2
-    /// C#).
+    /// Native 1.2 `OnDominionTaxBalanced` (opcode 0x023). Deserializer `FUN_397b7b60` reads the
+    /// zone group, the peace-fund money and the peace-fund AA points; the client clears its
+    /// cached current house/hunt tax and stores the two peace values.
     SCDominionTaxBalancedPacket { id: u16, peace_tax_money: i32, peace_tax_aa_point: i32 } |self, s| {
         s.write_u16(self.id)
             .write_i32(self.peace_tax_money)
             .write_i32(self.peace_tax_aa_point);
     }
 );
+
+/// Native 1.2 `OnDominionNonPvPStarted` (opcode 0x024; the 1.2 opcode table still names the
+/// constant `CDominionStartUnkPacket`). Deserializer `FUN_397b7bb0` reads a u16 zone group, a
+/// DateTime start and a u16 duration in minutes; the client caches `start + minutes*60` as the
+/// window end and fires `DOMINION_NON_PVP_STATE`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SCDominionNonPvPStartedPacket {
+    pub id: u16,
+    pub start: DateTime<Utc>,
+    pub minutes: u16,
+}
+
+packet_def!(
+    SCDominionNonPvPStartedPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::CDominionStartUnkPacket
+);
+
+impl Marshal for SCDominionNonPvPStartedPacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_u16(self.id)
+            .write_date_time(self.start)
+            .write_u16(self.minutes);
+    }
+}
+
+/// Native 1.2 `OnDominionNonPvPStopped` (opcode 0x025; the 1.2 opcode table still names the
+/// constant `SCDominionEndUnkPacket`). Deserializer `FUN_397b7c00` reads the zone group; the
+/// client clears its cached window end and fires the `non_pvp_duration_ended` state event.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SCDominionNonPvPStoppedPacket {
+    pub id: u16,
+}
+
+packet_def!(
+    SCDominionNonPvPStoppedPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCDominionEndUnkPacket
+);
+
+impl Marshal for SCDominionNonPvPStoppedPacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_u16(self.id);
+    }
+}
 
 sc_packet!(
     /// `SCDominionTaxRatePacket(id, taxRate)` (not sent by the 1.2 C#).
@@ -313,6 +362,7 @@ pub fn register(reg: &mut PacketRegistry) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::packet::PacketDef;
     use crate::net::registry::ClientPacket;
     use crate::systems::social::dominion;
     use crate::systems::social::packets::body;
@@ -467,6 +517,7 @@ mod tests {
             }),
             e
         );
+        assert_eq!(SCDominionDeletedPacket::OPCODE, sc::SCDominionDeletedPacket);
         assert_eq!(body(&SCDominionDeletedPacket { id: 0x0102 }), vec![2, 1]);
         let mut e = PacketStream::new();
         e.write_u16(3).write_u32(4).write_u64(5).write_bool(true);
@@ -480,12 +531,40 @@ mod tests {
             e.into_bytes()
         );
         assert_eq!(
+            SCDominionTaxBalancedPacket::OPCODE,
+            sc::SCDominionTaxBalancedPacket
+        );
+        assert_eq!(
             body(&SCDominionTaxBalancedPacket {
                 id: 1,
                 peace_tax_money: 2,
                 peace_tax_aa_point: -1
             }),
             vec![1, 0, 2, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF]
+        );
+        // Native Deserialize 0x397B7BB0: u16 zone group, DateTime start, u16 minutes.
+        assert_eq!(
+            SCDominionNonPvPStartedPacket::OPCODE,
+            sc::CDominionStartUnkPacket
+        );
+        let mut e = PacketStream::new();
+        e.write_u16(25).write_i64(1000).write_u16(120);
+        assert_eq!(
+            body(&SCDominionNonPvPStartedPacket {
+                id: 25,
+                start: t(1000),
+                minutes: 120
+            }),
+            e.into_bytes()
+        );
+        // Native Deserialize 0x397B7C00: only the zone group.
+        assert_eq!(
+            SCDominionNonPvPStoppedPacket::OPCODE,
+            sc::SCDominionEndUnkPacket
+        );
+        assert_eq!(
+            body(&SCDominionNonPvPStoppedPacket { id: 0x0102 }),
+            vec![2, 1]
         );
         assert_eq!(
             body(&SCDominionTaxRatePacket {

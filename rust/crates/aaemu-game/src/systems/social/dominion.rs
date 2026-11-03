@@ -306,6 +306,11 @@ pub fn apply_released(server: &GameServer, previous: &DominionState, released: &
     broadcast_participant_changes(server, previous, released);
     apply_tower_state(server, released);
     broadcast_phase_change(server, released);
+    // The released territory has no owner any more: the client drops its cached record. A
+    // release that only cancels a siege keeps the owner and its record.
+    if previous.owner_expedition_id != 0 && released.owner_expedition_id == 0 {
+        super::dominion_notifications::broadcast_deleted(server, released.zone_group_id);
+    }
 }
 
 /// Ownership delta followed by the authoritative snapshot: the native delta resets national
@@ -1246,6 +1251,113 @@ mod authority_tests {
             errors,
             vec![crate::systems::economy::error_message::ALREADY_IN_NON_PVP_DURATION]
         );
+    }
+
+    #[tokio::test]
+    async fn peace_cast_emits_one_native_non_pvp_started_notification() {
+        let mut f = fixture();
+        owned(&f);
+        f.client.drain();
+        let object = SkillObject::None;
+        crate::systems::housing::dominion::peace::start_effect(&f.server, &args(&f, &object), 120);
+        let state = f.server.systems.housing.dominions.get(ZONE).unwrap();
+        let started: Vec<_> = f
+            .client
+            .drain()
+            .into_iter()
+            .filter(|(op, _)| *op == sc::CDominionStartUnkPacket)
+            .collect();
+        assert_eq!(started.len(), 1);
+        // Native Deserialize 0x397B7BB0: u16 zone group, DateTime start, u16 minutes.
+        let mut expected = PacketStream::new();
+        expected
+            .write_u16(ZONE as u16)
+            .write_i64(state.non_pvp_start_at)
+            .write_u16(120);
+        assert_eq!(started[0].1, expected.into_bytes());
+        crate::systems::housing::dominion::peace::start_effect(&f.server, &args(&f, &object), 120);
+        assert!(!f.client.drain_ops().contains(&sc::CDominionStartUnkPacket));
+    }
+
+    #[tokio::test]
+    async fn forced_release_emits_one_deleted_notification_only_when_the_owner_is_cleared() {
+        let mut f = fixture();
+        owned(&f);
+        f.client.drain();
+        let released = f
+            .server
+            .systems
+            .housing
+            .dominions
+            .release_expedition(EXPEDITION, Utc::now().timestamp());
+        assert_eq!(released.len(), 1);
+        let (previous, state) = &released[0];
+        assert_eq!(
+            (previous.owner_expedition_id, state.owner_expedition_id),
+            (EXPEDITION, 0)
+        );
+        apply_released(&f.server, previous, state);
+        let deleted: Vec<_> = f
+            .client
+            .drain()
+            .into_iter()
+            .filter(|(op, _)| *op == sc::SCDominionDeletedPacket)
+            .collect();
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(deleted[0].1, (ZONE as u16).to_le_bytes().to_vec());
+
+        // Releasing an expedition that is only the attacker of another guild's siege cancels
+        // that siege but keeps the owner's cached record.
+        owned(&f);
+        let now = Utc::now().timestamp();
+        f.server
+            .systems
+            .housing
+            .dominions
+            .schedule_siege(ZONE, 88, now + 100, now + 200, now)
+            .unwrap();
+        f.client.drain();
+        let released = f
+            .server
+            .systems
+            .housing
+            .dominions
+            .release_expedition(88, now);
+        assert_eq!(released.len(), 1);
+        let (previous, state) = &released[0];
+        assert_eq!(
+            (previous.owner_expedition_id, state.owner_expedition_id),
+            (EXPEDITION, EXPEDITION)
+        );
+        apply_released(&f.server, previous, state);
+        assert!(!f.client.drain_ops().contains(&sc::SCDominionDeletedPacket));
+    }
+
+    #[tokio::test]
+    async fn natural_non_pvp_expiry_emits_one_stopped_notification_and_is_idempotent() {
+        let mut f = fixture();
+        owned(&f);
+        let end = Utc::now().timestamp();
+        f.server
+            .systems
+            .housing
+            .dominions
+            .start_non_pvp(ZONE, EXPEDITION, 120, end - 120 * 60)
+            .unwrap();
+        f.client.drain();
+        crate::systems::social::dominion_notifications::expire_non_pvp(&f.server, end);
+        let stopped: Vec<_> = f
+            .client
+            .drain()
+            .into_iter()
+            .filter(|(op, _)| *op == sc::SCDominionEndUnkPacket)
+            .collect();
+        assert_eq!(stopped.len(), 1);
+        assert_eq!(stopped[0].1, (ZONE as u16).to_le_bytes().to_vec());
+        let state = f.server.systems.housing.dominions.get(ZONE).unwrap();
+        assert_eq!((state.non_pvp_start_at, state.non_pvp_duration_min), (0, 0));
+        crate::systems::social::dominion_notifications::expire_non_pvp(&f.server, end);
+        assert!(!f.client.drain_ops().contains(&sc::SCDominionEndUnkPacket));
     }
 
     #[tokio::test]

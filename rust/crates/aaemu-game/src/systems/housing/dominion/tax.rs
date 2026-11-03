@@ -188,11 +188,11 @@ pub fn collect_locked(
         .names
         .get_character_name(player.character_id)
         .ok_or(DominionError::WrongOwner)?;
-    server
-        .systems
-        .housing
-        .dominions
-        .collect_property_tax_with(&state, now, |amount, start| {
+    let collected = state.treasury.cur_house_tax_money != 0;
+    let state = server.systems.housing.dominions.collect_property_tax_with(
+        &state,
+        now,
+        |amount, start| {
             server.systems.housing.hooks.get().send_return_mails(
                 server,
                 vec![HouseMail {
@@ -213,7 +213,12 @@ pub fn collect_locked(
                 }],
                 None,
             )
-        })
+        },
+    )?;
+    if collected {
+        crate::systems::social::dominion_notifications::broadcast_tax_balanced(server, &state);
+    }
+    Ok(state)
 }
 
 /// Call after ownership/rate changes while the operation lock is held. Existing property
