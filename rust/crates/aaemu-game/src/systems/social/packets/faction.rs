@@ -3,10 +3,11 @@
 
 use chrono::{DateTime, Utc};
 
-use super::{cs_packet, sc_packet};
+use super::{active_char, cs_packet, sc_packet};
 use crate::net::packet::LEVEL_PLAIN;
 use crate::net::registry::PacketRegistry;
 use crate::opcodes::cs;
+use crate::systems::social::nation;
 
 sc_packet!(
     /// `SCUnitFactionChangedPacket(unitId, unitName, id, id2, temp)`.
@@ -19,7 +20,8 @@ sc_packet!(
     }
 );
 
-// ---- Faction (nation / guild) results. None of these is sent by the 1.2 C# (no caller). ----
+// ---- Faction (nation / guild) results. The 1.2 client registers a handler for each; the
+// C# server had no nation manager and never sent them. ----
 
 sc_packet!(
     /// `SCFactionDeclareHostileResultPacket(result, id, id2)` (not sent by the 1.2 C#).
@@ -29,21 +31,22 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCFactionImmigrateInvitePacket(id, id2)` (not sent by the 1.2 C#).
+    /// `SCFactionImmigrateInvitePacket(id, id2)` (`FUN_392fe4f0`; `id` = nation faction, `id2` =
+    /// the invite nonce, NATION-11).
     SCFactionImmigrateInvitePacket { id: u32, id2: u32 } |self, s| {
         s.write_u32(self.id).write_u32(self.id2);
     }
 );
 
 sc_packet!(
-    /// `SCFactionImmigrateInviteResultPacket(id, charName, answer)` (not sent by the 1.2 C#).
+    /// `SCFactionImmigrateInviteResultPacket(id, charName, answer)` (`FUN_392fe5b0`).
     SCFactionImmigrateInviteResultPacket { id: u32, char_name: String, answer: bool } |self, s| {
         s.write_u32(self.id).write_str(&self.char_name).write_bool(self.answer);
     }
 );
 
 sc_packet!(
-    /// `SCFactionImmigrateToOriginResultPacket(charName, id)` (not sent by the 1.2 C#).
+    /// `SCFactionImmigrateToOriginResultPacket(charName, id)` (`FUN_392fe650`).
     SCFactionImmigrateToOriginResultPacket { char_name: String, id: u32 } |self, s| {
         s.write_str(&self.char_name).write_u32(self.id);
     }
@@ -61,8 +64,9 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCFactionKickToOriginResultPacket(tgtName, id, id2, errorMessage)` (not sent by the 1.2
-    /// C#).
+    /// `SCFactionKickToOriginResultPacket(tgtName, id, id2, errorMessage)` (`FUN_392fe6c0`).
+    /// The client's error slot is 4 bytes wide in the decompiled handler, but its read width is
+    /// not visible there; this keeps the C#-derived `i16` (NATION-12).
     SCFactionKickToOriginResultPacket { tgt_name: String, id: u32, id2: u32, error_message: i16 } |self, s| {
         s.write_str(&self.tgt_name)
             .write_u32(self.id)
@@ -121,41 +125,53 @@ sc_packet!(
 );
 
 cs_packet!(
-    /// `CSFactionImmigrationInvitePacket` (logged only, as in C#).
+    /// `CSFactionImmigrationInvitePacket`: the nation king invites a candidate
+    /// (`X2Nation.InviteToFaction` -> `FUN_392fdff0`, `{name: string}`).
     CSFactionImmigrationInvitePacket { invitee: String }
     read |s| { Ok(Self { invitee: s.read_string()? }) }
     handle |self, server, conn| {
         tracing::debug!("FactionImmigrationInvite, {}", self.invitee);
+        let p = active_char!(conn);
+        nation::invite_citizen(server, &p, &self.invitee);
         Ok(())
     }
 );
 
 cs_packet!(
-    /// `CSFactionImmigrationInviteReplyPacket` (logged only, as in C#).
-    CSFactionImmigrationInviteReplyPacket { unk_id: u32, unk2_id: u32, answer: bool }
-    read |s| { Ok(Self { unk_id: s.read_u32()?, unk2_id: s.read_u32()?, answer: s.read_bool()? }) }
+    /// `CSFactionImmigrationInviteReplyPacket`: the invitee answers (`FUN_397ab510`,
+    /// `{id: u32 nation, id2: u32 nonce, answer: u8}`; NATION-11).
+    CSFactionImmigrationInviteReplyPacket { id: u32, id2: u32, answer: bool }
+    read |s| { Ok(Self { id: s.read_u32()?, id2: s.read_u32()?, answer: s.read_bool()? }) }
     handle |self, server, conn| {
-        tracing::debug!("FactionImmigrationInviteReply, Id: {}, Id2: {}, Answer: {}", self.unk_id, self.unk2_id, self.answer);
+        tracing::debug!("FactionImmigrationInviteReply, Id: {}, Id2: {}, Answer: {}", self.id, self.id2, self.answer);
+        let p = active_char!(conn);
+        nation::reply_invite(server, &p, self.id, self.id2, self.answer).await;
         Ok(())
     }
 );
 
 cs_packet!(
-    /// `CSFactionImmigrateToOriginPacket` (empty struct, logged only).
+    /// `CSFactionImmigrateToOriginPacket` (empty body): a citizen withdraws to the race's
+    /// start faction (`FUN_392f92f0`).
     CSFactionImmigrateToOriginPacket {}
     read |s| { Ok(Self {}) }
     handle |self, server, conn| {
         tracing::debug!("FactionImmigrateToOrigin");
+        let p = active_char!(conn);
+        nation::immigrate_to_origin(server, &p).await;
         Ok(())
     }
 );
 
 cs_packet!(
-    /// `CSFactionKickToOriginPacket` (logged only, as in C#).
+    /// `CSFactionKickToOriginPacket`: the king kicks a citizen (`FUN_392f9380`,
+    /// `{name: string}`).
     CSFactionKickToOriginPacket { name: String }
     read |s| { Ok(Self { name: s.read_string()? }) }
     handle |self, server, conn| {
         tracing::debug!("FactionKickToOrigin, Name: {}", self.name);
+        let p = active_char!(conn);
+        nation::kick_to_origin(server, &p, &self.name).await;
         Ok(())
     }
 );
@@ -204,6 +220,40 @@ mod tests {
             }),
             vec![0x10, 0, 0, 1, 0, b'A', 101, 0, 0, 0, 161, 0, 0, 0, 0]
         );
+    }
+
+    #[test]
+    fn immigration_cs_packets_read_the_client_layout() {
+        use crate::net::registry::ClientPacket;
+        let mut s = aaemu_commons::PacketStream::new();
+        s.write_str("Citizen");
+        let packet = CSFactionImmigrationInvitePacket::read(
+            &mut aaemu_commons::PacketStream::from_bytes(s.into_bytes()),
+        )
+        .expect("invite");
+        assert_eq!(packet.invitee, "Citizen");
+
+        let mut s = aaemu_commons::PacketStream::new();
+        s.write_u32(1001).write_u32(7).write_u8(1);
+        let packet = CSFactionImmigrationInviteReplyPacket::read(
+            &mut aaemu_commons::PacketStream::from_bytes(s.into_bytes()),
+        )
+        .expect("reply");
+        assert_eq!((packet.id, packet.id2, packet.answer), (1001, 7, true));
+
+        // 0x017 has an empty body.
+        assert!(CSFactionImmigrateToOriginPacket::read(
+            &mut aaemu_commons::PacketStream::from_bytes(Vec::new())
+        )
+        .is_ok());
+
+        let mut s = aaemu_commons::PacketStream::new();
+        s.write_str("Citizen");
+        let packet = CSFactionKickToOriginPacket::read(
+            &mut aaemu_commons::PacketStream::from_bytes(s.into_bytes()),
+        )
+        .expect("kick");
+        assert_eq!(packet.name, "Citizen");
     }
 
     #[test]

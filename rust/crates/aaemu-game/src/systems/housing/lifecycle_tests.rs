@@ -16,7 +16,7 @@ use crate::data::items::ItemTemplate;
 use crate::data::GameData;
 use crate::models::container::slot_type;
 use crate::models::doodad::Doodad;
-use crate::models::item::Item;
+use crate::models::item::{Item, ITEM_FLAG_SECURE};
 use crate::opcodes::sc;
 use crate::server::GameServer;
 use crate::systems::economy::bridges::EconomyForHousing;
@@ -684,6 +684,39 @@ async fn construction_zero_step_design_is_finished_at_placement_without_a_build_
         ops::craft_building_paid(&f.server, &f.player, &house, BUILD_SKILL, LUMBER, 1),
         Err(ops::BuildActionError::Rejected)
     );
+}
+
+#[tokio::test]
+async fn locked_design_is_refused() {
+    let mut f = fixture(false, 400_000);
+    let design = give(&f, slot_type::INVENTORY, DESIGN_ITEM, 1, 0);
+    Inv::of(&f.player)
+        .bag()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(design)
+        .unwrap()
+        .flags |= ITEM_FLAG_SECURE;
+    f.client.drain();
+    ops::build(&f.server, &f.player, 1001, &packet(design));
+    let frames = f.client.drain();
+    assert!(frames.iter().any(|(op, body)| {
+        *op == sc::SCErrorMsgPacket
+            && *body == {
+                let mut s = aaemu_commons::PacketStream::new();
+                aaemu_commons::Marshal::write(
+                    &crate::packets::world::SCErrorMsgPacket::new(
+                        crate::systems::economy::error_message::ITEM_SECURE_CONDITION,
+                        0,
+                        true,
+                    ),
+                    &mut s,
+                );
+                s.into_bytes()
+            }
+    }));
+    assert!(f.server.systems.housing.manager.all().is_empty());
+    assert!(Inv::of(&f.player).item_by_id(design).is_some());
 }
 
 fn packet(item_id: u64) -> CSCreateHousePacket {

@@ -780,7 +780,6 @@ pub mod buff_constants {
 
 /// `TagsEnum` values used by the skill code.
 pub mod tags {
-    pub const STEALTH: u32 = 100;
     pub const RETURNING: u32 = 148;
     pub const NO_FIGHT: u32 = 345;
     /// `BuffConstants.TagWanted`.

@@ -169,7 +169,18 @@ pub fn skill_use(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
     };
     let skill = SkillRun::new(template, 1);
     let target_caster = SkillCastTarget::Unit(args.target.obj_id());
-    buffs::trigger_remove_on(server, caster, BuffRemoveOn::UseSkill, 0);
+    // `skills.keep_stealth` on the skill that carries this effect: chained stealth skills
+    // (13202 pickpocket, 12522 scout magic) must not drop the caster's stealth buffs.
+    let keep_stealth = args
+        .source
+        .skill
+        .as_ref()
+        .is_some_and(|s| s.template.keep_stealth);
+    if keep_stealth {
+        buffs::trigger_remove_on_keep_stealth(server, caster, BuffRemoveOn::UseSkill, 0);
+    } else {
+        buffs::trigger_remove_on(server, caster, BuffRemoveOn::UseSkill, 0);
+    }
     let caster = caster.clone();
     let target = args.target.as_obj().cloned();
     let originating_cast = args

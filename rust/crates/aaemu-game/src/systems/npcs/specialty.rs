@@ -677,6 +677,13 @@ pub fn sell_specialty(server: &GameServer, player: &PlayerRef, npc_obj_id: u32) 
         send_error(player, error_message::STORE_BACKPACK_NOGOODS);
         return base_price;
     };
+    if let Some(pack) =
+        crate::systems::economy::inventory::Inv::of(player).equipped(equip_slot::BACKPACK)
+    {
+        if crate::systems::economy::item_security::refuse_if_locked(player, &pack) {
+            return base_price;
+        }
+    }
     let instance = player.data().unit.transform.instance_id;
     let Some(npc) = server.world.world(instance).and_then(|w| w.npc(npc_obj_id)) else {
         return base_price;

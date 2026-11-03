@@ -1448,6 +1448,11 @@ fn real_compact_db_items_and_loot() {
             .sum::<usize>(),
         3084
     );
+    // Item security: 135 `item_categories.secure`, one exception, 4320 minute (72 h) delay.
+    assert_eq!(econ.secure_categories.len(), 135);
+    assert_eq!(econ.secure_exceptions.len(), 1);
+    assert!(econ.secure_exceptions.contains(&3006));
+    assert_eq!(econ.security_unlock_delay_minutes, 4320);
     assert_eq!(econ.conversion.reagents.len(), 1324);
     assert_eq!(econ.conversion.conversions.len(), 317);
     assert_eq!(econ.conversion.products.len(), 305);

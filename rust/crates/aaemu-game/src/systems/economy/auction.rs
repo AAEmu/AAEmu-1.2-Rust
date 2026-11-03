@@ -1262,6 +1262,9 @@ impl AuctionManager {
             let c = player.data();
             (c.id, c.unit.name.clone())
         };
+        if super::item_security::refuse_if_locked(player, &item) {
+            return;
+        }
         if item.owner_id != u64::from(player_id)
             || item.slot_type != slot_type::INVENTORY
             || item.flags & crate::models::item::ITEM_FLAG_SOUL_BOUND != 0
