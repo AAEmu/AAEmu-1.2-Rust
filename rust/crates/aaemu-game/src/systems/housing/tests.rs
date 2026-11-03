@@ -630,6 +630,7 @@ async fn build_and_build_steps_flow() {
     assert!(!ops::craft_building(&fx.server, &fx.pa, &house, 11001));
 
     // Second house of the account: the heavy-tax formula applies (base + deposit).
+    fx.pa.data().unit.transform.set_xyz(300.0, 100.0, 100.0);
     fx.eco.items.lock().unwrap()[0].item_id = 78;
     fx.eco.item_counts.lock().unwrap().insert(DESIGN_ITEM, 1);
     let mut p2 = create_packet(0.0);
@@ -683,7 +684,7 @@ async fn tax_info_and_construct_tax_packets() {
     let mut fx = fixture(false);
     let house = place_house(&fx, DESIGN, &fx.pa, 300.0, 300.0, -1);
     fx.a.drain();
-    ops::construct_house_tax(&fx.server, &fx.pa, DESIGN, 0.0, 0.0, 0.0);
+    ops::construct_house_tax(&fx.server, &fx.pa, DESIGN, 100.0, 100.0, 100.0);
     let expected = SCConstructHouseTaxPacket {
         design_id: DESIGN,
         heavy_tax_house_count: 2,
