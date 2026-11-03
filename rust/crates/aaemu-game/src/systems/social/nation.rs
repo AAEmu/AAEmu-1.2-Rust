@@ -11,7 +11,7 @@
 //! `nations.id`). A new nation copies faction 166's `system_faction_relations` rows (NATION-2).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{PoisonError, RwLock};
+use std::sync::{Mutex, PoisonError, RwLock};
 
 use chrono::Utc;
 use sqlx::{MySql, MySqlPool, Row, Transaction};
@@ -28,8 +28,12 @@ use crate::systems::skills::types::{CastAction, SkillCaster};
 use crate::world::PlayerRef;
 
 use super::faction;
-use super::packets::faction::SCFactionIndependencePacket;
-use super::util::send_error;
+use super::packets::faction::{
+    SCFactionImmigrateInvitePacket, SCFactionImmigrateInviteResultPacket,
+    SCFactionImmigrateToOriginResultPacket, SCFactionIndependencePacket,
+    SCFactionKickToOriginResultPacket,
+};
+use super::util::{now_ms, send_error};
 
 /// Skill "국가 독립" (declare independence), 20 s cast, CASTLE_CLAIM backpack (equip slot 26).
 pub const DECLARE_INDEPENDENCE_SKILL: u32 = 18_540;
@@ -39,6 +43,33 @@ pub const INDEPENDENCE_TEMPLATE_FACTION: u32 = 166;
 /// `item_backpacks.backpack_type_id` of the CASTLE_CLAIM backpacks (skill 18540's
 /// `link_backpack_type_id`).
 pub const CASTLE_CLAIM_BACKPACK_TYPE: u32 = backpack_type::CASTLE_CLAIM;
+
+/// `content_configs` 49 `NationImmigrateLevelMin` (the client reads it in `FUN_3906cb80`;
+/// the 1.2 database value is 50).
+pub const IMMIGRATE_MIN_LEVEL: u8 = 50;
+
+/// Pending nation invite lifetime. The 1.2 client has no visible invite timer (UNKNOWN);
+/// this mirrors the 60 s of the port's expedition / team invitations (NATION-11).
+pub const INVITE_TIMEOUT_MS: i64 = 60_000;
+
+/// Upper bound of the pending-invite list so it cannot grow without bound (NATION-11).
+pub const MAX_PENDING_INVITES: usize = 1024;
+
+/// A pending immigration invitation: the king invited `invitee_character_id` to
+/// `nation_id`. Memory only (PORTING.md, NATION-11).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingInvite {
+    pub nation_id: u32,
+    pub inviter_character_id: u32,
+    pub invitee_character_id: u32,
+    pub expires_at_ms: i64,
+}
+
+impl PendingInvite {
+    fn is_valid_at(&self, now_ms: i64) -> bool {
+        self.expires_at_ms >= now_ms
+    }
+}
 
 /// One relation row of a nation. `other_faction_id` is always the other side (the stored rows
 /// are normalised); `expire_at` / `next_state` are reserved for the stage-3 relation expiry.
@@ -109,10 +140,12 @@ impl Nation {
     }
 }
 
-/// `NationManager`: the runtime nations and their relation overlay.
+/// `NationManager`: the runtime nations, their relation overlay and the pending immigration
+/// invitations.
 #[derive(Debug, Default)]
 pub struct NationManager {
     nations: RwLock<Vec<Nation>>,
+    invites: Mutex<Vec<PendingInvite>>,
 }
 
 impl NationManager {
@@ -211,6 +244,56 @@ impl NationManager {
             .iter()
             .find(|n| n.expedition_id == expedition_id)
             .cloned()
+    }
+
+    /// The nation `character_id` is the king of (the 1.2 client's "is nation owner" scan:
+    /// `owner_id == characterId` on a top-level user faction).
+    pub fn owned_by(&self, character_id: u32) -> Option<Nation> {
+        if character_id == 0 {
+            return None;
+        }
+        self.read()
+            .iter()
+            .find(|n| n.owner_character_id == character_id)
+            .cloned()
+    }
+
+    /// Stores a pending invite, replacing an earlier one for the same invitee (the 1.2 client
+    /// shows one reply dialog). Expired entries are dropped and the list is capped
+    /// (NATION-11).
+    pub fn add_invite(&self, pending: PendingInvite, now_ms: i64) {
+        let mut invites = self.invites.lock().unwrap_or_else(PoisonError::into_inner);
+        invites.retain(|i| {
+            i.is_valid_at(now_ms) && i.invitee_character_id != pending.invitee_character_id
+        });
+        if invites.len() >= MAX_PENDING_INVITES {
+            // Drop the oldest entry; the list is chronological (insertion at the end).
+            invites.remove(0);
+        }
+        invites.push(pending);
+    }
+
+    /// Consumes the pending invite of `invitee_character_id`. `None` when there is none, it has
+    /// expired, or it names another nation (a forged / replayed reply, NATION-11).
+    pub fn take_invite(
+        &self,
+        nation_id: u32,
+        invitee_character_id: u32,
+        now_ms: i64,
+    ) -> Option<PendingInvite> {
+        let mut invites = self.invites.lock().unwrap_or_else(PoisonError::into_inner);
+        let index = invites
+            .iter()
+            .position(|i| i.invitee_character_id == invitee_character_id)?;
+        let pending = invites.remove(index);
+        (pending.nation_id == nation_id && pending.is_valid_at(now_ms)).then_some(pending)
+    }
+
+    pub fn pending_invite_count(&self) -> usize {
+        self.invites
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 
     /// The founding expedition disbanded: the nation stays as a kingless nation (NATION-5),
@@ -672,6 +755,518 @@ pub fn declare_independence_effect(server: &GameServer, args: &EffectArgs<'_>) {
         }
         Err(error) => send_error(player, error),
     }
+}
+
+// ---- Immigration (stage 2): invite / reply / return to origin / kick ----
+
+/// The race's start faction (`character_templates.faction_id`, the same data the client's
+/// `FUN_398a2660(race)` returns).
+fn start_faction(server: &GameServer, race: u8, gender: u8) -> Option<u32> {
+    server
+        .game_data
+        .characters
+        .template(race, gender)
+        .map(|t| t.faction_id)
+        .filter(|id| *id != 0)
+}
+
+/// The top-level faction of a static faction or a runtime nation (`None` = unknown id).
+/// A nation is top-level (`mother_id == 0`), so the client's "top-level faction" comparison
+/// (`FUN_398a44d0` / `FUN_398a4620`) resolves a nation id to itself.
+pub fn top_level_faction(server: &GameServer, id: u32) -> Option<u32> {
+    let mut current = id;
+    for _ in 0..8 {
+        let (faction, mother) = faction_of_id(server, current)?;
+        if mother == 0 {
+            return Some(faction);
+        }
+        current = mother;
+    }
+    Some(current)
+}
+
+/// The client's "I own my own user faction" scan (`FUN_398a2f40`): a top-level user faction
+/// whose owner is this character. Only runtime nations qualify in this server.
+fn owns_user_faction(server: &GameServer, character_id: u32) -> bool {
+    server
+        .systems
+        .social
+        .nations
+        .owned_by(character_id)
+        .is_some()
+}
+
+/// Online citizens of a nation.
+fn online_nation_members(server: &GameServer, nation_id: u32) -> Vec<u32> {
+    server
+        .world
+        .all_characters()
+        .iter()
+        .filter(|p| p.data().unit.faction_id == nation_id)
+        .map(|p| p.character_id)
+        .collect()
+}
+
+/// The client's reply checks in its own order (`FUN_398a44d0`): combat 770, pirate 694,
+/// unknown 693, already a member 730, owns a user faction 731, in an expedition 732, level
+/// below `content_configs` 49 728.
+fn immigration_error(
+    server: &GameServer,
+    p: &PlayerRef,
+    nation_id: u32,
+) -> std::result::Result<(), i16> {
+    let (in_battle, faction, expedition, level, character_id) = {
+        let c = p.data();
+        (
+            c.unit.is_in_battle,
+            c.unit.faction_id,
+            c.unit.expedition_id,
+            c.unit.level,
+            c.id,
+        )
+    };
+    if in_battle {
+        return Err(error_message::FACTION_CANNOT_IMMIGRATE_AS_COMBAT);
+    }
+    if faction == crate::db_character::FACTION_PIRATE {
+        return Err(error_message::FACTION_CANNOT_IMMIGRATE_AS_PIRATE);
+    }
+    let Some(my_top) = top_level_faction(server, faction) else {
+        return Err(error_message::FACTION_CANNOT_IMMIGRATE_AS_GENERAL);
+    };
+    if server.systems.social.nations.get(nation_id).is_none() {
+        return Err(error_message::FACTION_CANNOT_IMMIGRATE_AS_GENERAL);
+    }
+    if my_top == nation_id {
+        return Err(error_message::FACTION_CANNOT_IMMIGRATE_TO_USER_AS_ALREADY_MEMBER);
+    }
+    if owns_user_faction(server, character_id) {
+        return Err(error_message::FACTION_CANNOT_IMMIGRATE_TO_USER_AS_FACTION_OWNER);
+    }
+    if expedition != 0 {
+        return Err(error_message::FACTION_CANNOT_IMMIGRATE_TO_USER_AS_EXPEDITION_MEMBER);
+    }
+    if level < IMMIGRATE_MIN_LEVEL {
+        return Err(error_message::FACTION_CANNOT_IMMIGRATE_AS_LEVEL_LOW);
+    }
+    Ok(())
+}
+
+/// The client's return-to-origin checks in its own order (`FUN_398a4620`): combat 770,
+/// pirate 694, unknown 693, already at the origin 733, owns a user faction 734, in an
+/// expedition 735. Returns the race's start faction.
+fn origin_error(server: &GameServer, p: &PlayerRef) -> std::result::Result<u32, i16> {
+    let (in_battle, faction, expedition, race, gender, character_id) = {
+        let c = p.data();
+        (
+            c.unit.is_in_battle,
+            c.unit.faction_id,
+            c.unit.expedition_id,
+            c.race,
+            c.gender,
+            c.id,
+        )
+    };
+    if in_battle {
+        return Err(error_message::FACTION_CANNOT_IMMIGRATE_AS_COMBAT);
+    }
+    if faction == crate::db_character::FACTION_PIRATE {
+        return Err(error_message::FACTION_CANNOT_IMMIGRATE_AS_PIRATE);
+    }
+    let Some(my_top) = top_level_faction(server, faction) else {
+        return Err(error_message::FACTION_CANNOT_IMMIGRATE_AS_GENERAL);
+    };
+    let Some(origin) = start_faction(server, race, gender) else {
+        return Err(error_message::FACTION_CANNOT_IMMIGRATE_AS_GENERAL);
+    };
+    let Some(origin_top) = top_level_faction(server, origin) else {
+        return Err(error_message::FACTION_CANNOT_IMMIGRATE_AS_GENERAL);
+    };
+    if my_top == origin_top {
+        return Err(error_message::FACTION_CANNOT_IMMIGRATE_TO_ORIG_AS_ALREADY_MEMBER);
+    }
+    if owns_user_faction(server, character_id) {
+        return Err(error_message::FACTION_CANNOT_IMMIGRATE_TO_ORIG_AS_FACTION_OWNER);
+    }
+    if expedition != 0 {
+        return Err(error_message::FACTION_CANNOT_IMMIGRATE_TO_ORIG_AS_EXPEDITION_MEMBER);
+    }
+    Ok(origin)
+}
+
+fn send_invite_result(
+    server: &GameServer,
+    pending: &PendingInvite,
+    invitee_name: &str,
+    answer: bool,
+) {
+    let packet = SCFactionImmigrateInviteResultPacket {
+        id: pending.nation_id,
+        char_name: invitee_name.to_string(),
+        answer,
+    };
+    if let Some(inviter) = server.world.character_by_id(pending.inviter_character_id) {
+        inviter.send(packet.clone());
+    }
+    if let Some(invitee) = server.world.character_by_id(pending.invitee_character_id) {
+        invitee.send(packet);
+    }
+}
+
+fn send_kick_result(
+    requester: &PlayerRef,
+    target_id: u32,
+    target_name: &str,
+    nation_id: u32,
+    error: i16,
+) {
+    requester.send(SCFactionKickToOriginResultPacket {
+        tgt_name: target_name.to_string(),
+        id: target_id,
+        id2: nation_id,
+        error_message: error,
+    });
+}
+
+/// `CSFactionImmigrationInvite` (0x015): the nation king invites a candidate. The client's
+/// pre-send checks are 697 (not the king) and 736 (oneself); the server re-runs the reply
+/// checks on the invitee (`FUN_398a44d0`) and answers the king with the same codes.
+pub fn invite_citizen(server: &GameServer, king: &PlayerRef, invitee_name: &str) {
+    let Some(nation) = server.systems.social.nations.owned_by(king.character_id) else {
+        send_error(
+            king,
+            error_message::FACTION_CANNOT_INVITE_IMMIGRATION_AS_NO_PERMISSION,
+        );
+        return;
+    };
+    let king_name = king.data().unit.name.clone();
+    if king_name == invitee_name {
+        send_error(king, error_message::FACTION_CANNOT_IMMIGRATION_AS_ONESELF);
+        return;
+    }
+    let Some(invitee) = server.world.character_by_name(invitee_name) else {
+        send_error(king, error_message::FACTION_INVITE_OFFLINE);
+        return;
+    };
+    if let Err(code) = immigration_error(server, &invitee, nation.id) {
+        send_error(king, code);
+        return;
+    }
+    let now = now_ms();
+    server.systems.social.nations.add_invite(
+        PendingInvite {
+            nation_id: nation.id,
+            inviter_character_id: king.character_id,
+            invitee_character_id: invitee.character_id,
+            expires_at_ms: now + INVITE_TIMEOUT_MS,
+        },
+        now,
+    );
+    // `id2` is UNKNOWN in the 1.2 client (PORTING.md, NATION-11): the invitee character id is
+    // used as a nonce the reply must echo.
+    invitee.send(SCFactionImmigrateInvitePacket {
+        id: nation.id,
+        id2: invitee.character_id,
+    });
+}
+
+/// `CSFactionImmigrationInviteReply` (0x016): the invitee answers a pending invite. A decline
+/// needs no eligibility check; an accept re-runs the client's reply checks and, on success,
+/// moves the player to the nation through `faction::set_faction` and persists the faction.
+pub async fn reply_invite(
+    server: &GameServer,
+    invitee: &PlayerRef,
+    nation_id: u32,
+    nonce: u32,
+    answer: bool,
+) {
+    let now = now_ms();
+    let Some(pending) =
+        server
+            .systems
+            .social
+            .nations
+            .take_invite(nation_id, invitee.character_id, now)
+    else {
+        // No pending invite, an expired one, or one naming another nation.
+        send_error(invitee, error_message::FACTION_CANNOT_IMMIGRATE_AS_GENERAL);
+        return;
+    };
+    if nonce != invitee.character_id {
+        send_error(invitee, error_message::FACTION_CANNOT_IMMIGRATE_AS_GENERAL);
+        return;
+    }
+    let Some(nation) = server.systems.social.nations.get(nation_id) else {
+        send_error(invitee, error_message::FACTION_CANNOT_IMMIGRATE_AS_GENERAL);
+        return;
+    };
+    if nation.owner_character_id != pending.inviter_character_id {
+        // The inviter is no longer the king; the old invitation is void.
+        send_error(invitee, error_message::FACTION_CANNOT_IMMIGRATE_AS_GENERAL);
+        return;
+    }
+    let invitee_name = invitee.data().unit.name.clone();
+    if !answer {
+        send_invite_result(server, &pending, &invitee_name, false);
+        return;
+    }
+    if let Err(code) = immigration_error(server, invitee, nation_id) {
+        send_error(invitee, code);
+        return;
+    }
+    faction::set_faction(server, invitee, nation_id).await;
+    persist_faction(server, invitee.character_id, nation_id).await;
+    send_invite_result(server, &pending, &invitee_name, true);
+}
+
+/// `CSFactionImmigrateToOrigin` (0x017, empty body): a citizen returns to their race's start
+/// faction. The result goes to the leaver and the nation's online members.
+pub async fn immigrate_to_origin(server: &GameServer, p: &PlayerRef) {
+    let origin = match origin_error(server, p) {
+        Ok(origin) => origin,
+        Err(code) => {
+            send_error(p, code);
+            return;
+        }
+    };
+    let (faction, name, character_id) = {
+        let c = p.data();
+        (c.unit.faction_id, c.unit.name.clone(), c.id)
+    };
+    let nation_id = server
+        .systems
+        .social
+        .nations
+        .get(faction)
+        .map(|n| n.id)
+        .or_else(|| top_level_faction(server, faction));
+    let members = if server.systems.social.nations.is_nation(faction) {
+        online_nation_members(server, faction)
+    } else {
+        vec![character_id]
+    };
+    faction::set_faction(server, p, origin).await;
+    persist_faction(server, character_id, origin).await;
+    let packet = SCFactionImmigrateToOriginResultPacket {
+        char_name: name,
+        id: nation_id.unwrap_or(faction),
+    };
+    for member in members {
+        if let Some(member) = server.world.character_by_id(member) {
+            member.send(packet.clone());
+        }
+    }
+}
+
+/// An offline kick target read from `characters`.
+struct OfflineTarget {
+    character_id: u32,
+    name: String,
+    faction_id: u32,
+    expedition_id: u32,
+    race: u8,
+    gender: u8,
+}
+
+async fn offline_target_by_name(
+    server: &GameServer,
+    name: &str,
+) -> std::result::Result<Option<OfflineTarget>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT CAST(id AS SIGNED) AS id, name, CAST(faction_id AS SIGNED) AS faction_id, \
+         CAST(expedition_id AS SIGNED) AS expedition_id, CAST(race AS SIGNED) AS race, \
+         CAST(gender AS SIGNED) AS gender FROM characters WHERE name = ? LIMIT 1",
+    )
+    .bind(name)
+    .fetch_optional(&server.db)
+    .await?;
+    Ok(row.map(|r| OfflineTarget {
+        character_id: r.get::<i64, _>("id") as u32,
+        name: r.get("name"),
+        faction_id: r.get::<i64, _>("faction_id") as u32,
+        expedition_id: r.get::<i64, _>("expedition_id") as u32,
+        race: r.get::<i64, _>("race") as u8,
+        gender: r.get::<i64, _>("gender") as u8,
+    }))
+}
+
+/// The offline half of a kick: `characters.faction_id` and the owner's stored houses move in
+/// one transaction (the online path uses `set_faction`, which updates the live houses).
+async fn kick_offline(
+    server: &GameServer,
+    character_id: u32,
+    origin: u32,
+) -> std::result::Result<(), sqlx::Error> {
+    let _save = server.save.transaction_lock().await;
+    let mut tx = server.db.begin().await?;
+    sqlx::query("UPDATE characters SET faction_id = ? WHERE id = ?")
+        .bind(origin)
+        .bind(character_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE housings SET faction_id = ? WHERE owner = ?")
+        .bind(origin)
+        .bind(character_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await
+}
+
+/// Persists one character's faction immediately, serialised with `SaveManager` so an
+/// in-flight save cannot write the old value afterwards. Best effort: the periodic save
+/// writes the same column again.
+pub async fn persist_faction(server: &GameServer, character_id: u32, faction_id: u32) {
+    let _save = server.save.transaction_lock().await;
+    if let Err(error) = sqlx::query("UPDATE characters SET faction_id = ? WHERE id = ?")
+        .bind(faction_id)
+        .bind(character_id)
+        .execute(&server.db)
+        .await
+    {
+        tracing::warn!("Persisting the faction of character {character_id} failed: {error}");
+    }
+}
+
+/// `CSFactionKickToOrigin` (0x018): the king sends a citizen back to their race's start
+/// faction. The client's pre-send checks are 64 (not the king) and 65 (oneself); server-only
+/// refusals are 704 (unknown target), 726 (expedition member) and 705 (other faction). The
+/// result packet carries the error (`FUN_392fe6c0` shows a message box when it is set), so
+/// every outcome is answered with it.
+pub async fn kick_to_origin(server: &GameServer, king: &PlayerRef, target_name: &str) {
+    let Some(nation) = server.systems.social.nations.owned_by(king.character_id) else {
+        send_kick_result(king, 0, target_name, 0, error_message::FACTION_KICK_RIGHTS);
+        return;
+    };
+    let king_name = king.data().unit.name.clone();
+    if king_name == target_name {
+        send_kick_result(
+            king,
+            0,
+            target_name,
+            nation.id,
+            error_message::FACTION_KICK_SELF,
+        );
+        return;
+    }
+    let (target_id, target_display_name, faction, expedition, race, gender, online) =
+        match server.world.character_by_name(target_name) {
+            Some(p) => {
+                let c = p.data();
+                (
+                    c.id,
+                    c.unit.name.clone(),
+                    c.unit.faction_id,
+                    c.unit.expedition_id,
+                    c.race,
+                    c.gender,
+                    Some(p.clone()),
+                )
+            }
+            None => match offline_target_by_name(server, target_name).await {
+                Ok(Some(target)) => (
+                    target.character_id,
+                    target.name,
+                    target.faction_id,
+                    target.expedition_id,
+                    target.race,
+                    target.gender,
+                    None,
+                ),
+                Ok(None) => {
+                    send_kick_result(
+                        king,
+                        0,
+                        target_name,
+                        nation.id,
+                        error_message::FACTION_KICK_TARGET_NOT_FOUND,
+                    );
+                    return;
+                }
+                Err(error) => {
+                    tracing::error!("KickToOrigin: looking up {target_name} failed: {error}");
+                    send_kick_result(
+                        king,
+                        0,
+                        target_name,
+                        nation.id,
+                        error_message::FACTION_KICK_TARGET_NOT_FOUND,
+                    );
+                    return;
+                }
+            },
+        };
+    if target_id == king.character_id {
+        send_kick_result(
+            king,
+            target_id,
+            &target_display_name,
+            nation.id,
+            error_message::FACTION_KICK_SELF,
+        );
+        return;
+    }
+    if expedition != 0 {
+        send_kick_result(
+            king,
+            target_id,
+            &target_display_name,
+            nation.id,
+            error_message::FACTION_KICK_EXPEDITION_MEMBER,
+        );
+        return;
+    }
+    if faction != nation.id {
+        send_kick_result(
+            king,
+            target_id,
+            &target_display_name,
+            nation.id,
+            error_message::FACTION_KICK_OTHER_FACTION,
+        );
+        return;
+    }
+    let Some(origin) = start_faction(server, race, gender) else {
+        tracing::error!(
+            "KickToOrigin: character {target_id} ({target_display_name}) has no start faction"
+        );
+        send_kick_result(
+            king,
+            target_id,
+            &target_display_name,
+            nation.id,
+            error_message::FACTION_KICK,
+        );
+        return;
+    };
+    let result = SCFactionKickToOriginResultPacket {
+        tgt_name: target_display_name.clone(),
+        id: target_id,
+        id2: nation.id,
+        error_message: 0,
+    };
+    match online {
+        Some(target) => {
+            faction::set_faction(server, &target, origin).await;
+            persist_faction(server, target_id, origin).await;
+            target.send(result.clone());
+        }
+        None => {
+            if let Err(error) = kick_offline(server, target_id, origin).await {
+                tracing::error!(
+                    "KickToOrigin: moving offline character {target_id} failed: {error}"
+                );
+                send_kick_result(
+                    king,
+                    target_id,
+                    &target_display_name,
+                    nation.id,
+                    error_message::FACTION_KICK,
+                );
+                return;
+            }
+        }
+    }
+    king.send(result);
 }
 
 /// The skill's CASTLE_CLAIM backpack (type 1 in the equip slot 26). Skill 18540's `unit_reqs`

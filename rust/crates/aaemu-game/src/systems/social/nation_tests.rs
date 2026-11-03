@@ -1,13 +1,21 @@
 //! Player nations: independence, relation consumers, id allocation, persistence and the GM
 //! command (PORTING.md, NATION-1..4).
 
+use aaemu_commons::PacketStream;
+
 use super::faction;
-use super::nation::{self, Nation, NationManager, NationRelation};
+use super::nation::{self, Nation, NationManager, NationRelation, PendingInvite};
+use super::packets::faction::{
+    CSFactionImmigrateToOriginPacket, CSFactionImmigrationInvitePacket,
+    CSFactionImmigrationInviteReplyPacket, CSFactionKickToOriginPacket,
+};
+use crate::data::character_templates::CharacterTemplate;
 use crate::data::items::{backpack_type, ItemTemplate, TemplateKind};
 use crate::data::world_data::{FactionRelation, SystemFaction};
 use crate::data::GameData;
 use crate::models::container::equip_slot;
 use crate::models::item::Item;
+use crate::net::registry::ClientPacket;
 use crate::opcodes::sc;
 use crate::server::GameServer;
 use crate::systems::economy::inventory::Inv;
@@ -19,7 +27,7 @@ use crate::systems::skills::state::SkillRun;
 use crate::systems::skills::types::{CastAction, SkillCastTarget, SkillCaster, SkillObject};
 use crate::systems::social::expedition::{self, Expedition};
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
-use crate::world::{PlayerRef, WorldObject};
+use crate::world::{HouseRef, PlayerRef, WorldObject};
 
 const EXPEDITION: u32 = 1000;
 const ZONE_GROUP: u32 = 25;
@@ -67,6 +75,25 @@ fn data() -> GameData {
         id: nation::DECLARE_INDEPENDENCE_SKILL,
         ..SkillTemplate::default()
     });
+    // The race-1 start faction (`test_character` uses race 1 / gender 1), the origin of every
+    // return / kick (PORTING.md, NATION-2 is unrelated: this is `character_templates`).
+    data.characters.templates.insert(
+        16 + 1,
+        CharacterTemplate {
+            race: 1,
+            gender: 1,
+            faction_id: 101,
+            ..CharacterTemplate::default()
+        },
+    );
+    // One house template so the housing-faction hook can be exercised.
+    data.systems
+        .housing
+        .add_template(crate::systems::housing::data::HousingTemplate {
+            id: 300,
+            hp: 100,
+            ..Default::default()
+        });
     data.items.templates.insert(
         CASTLE_CLAIM_PACK,
         ItemTemplate {
@@ -758,4 +785,749 @@ fn nation_relation_chunks_carry_the_copied_rows() {
     let rows = manager.relation_rows();
     assert_eq!(rows.len(), 1);
     assert_eq!((rows[0].id, rows[0].id2, rows[0].state), (1001, 148, 1));
+}
+
+// ---- Immigration (stage 2): invite / reply / return to origin / kick ----
+
+/// Declares the fixture's expedition independent (no dominion: `require_dominion = false`).
+fn declare(f: &Fixture) -> Nation {
+    nation::declare_independence(&f.server, &f.leader, EXPEDITION, "Kingdom", false)
+        .expect("declaration")
+}
+
+/// A level-50 candidate at the origin faction (race 1 -> 101), as `test_character` builds one.
+fn spawn_candidate(
+    server: &GameServer,
+    client: &TestClient,
+    id: u32,
+    name: &str,
+    obj_id: u32,
+) -> PlayerRef {
+    let mut character = test_character(id, name, 160.0, 100.0);
+    character.unit.level = nation::IMMIGRATE_MIN_LEVEL;
+    spawn_player(server, client, character, obj_id)
+}
+
+fn citizen_house(server: &GameServer, citizen: &PlayerRef) -> HouseRef {
+    let world = server.world.world(0).expect("instance 0");
+    let house = crate::systems::housing::manager::create(server, 300, 101, &world, 0, 0)
+        .expect("house template");
+    {
+        let mut h = house.data();
+        h.id = 900;
+        h.account_id = 900;
+        h.unit.owner_id = citizen.character_id;
+        h.unit.name = "Cottage".into();
+    }
+    assert!(server.systems.housing.manager.insert(&house));
+    house
+}
+
+fn error_code(frames: &[(u16, Vec<u8>)]) -> Option<i16> {
+    frames.iter().find_map(|(op, body)| {
+        (*op == sc::SCErrorMsgPacket).then(|| i16::from_le_bytes([body[0], body[1]]))
+    })
+}
+
+fn frames_with(frames: &[(u16, Vec<u8>)], opcode: u16) -> Vec<Vec<u8>> {
+    frames
+        .iter()
+        .filter(|(op, _)| *op == opcode)
+        .map(|(_, body)| body.clone())
+        .collect()
+}
+
+/// Invites "Citizen" through the packet handler with `configure` applied first; returns the
+/// error code the king received.
+async fn invite_error(configure: impl FnOnce(&GameServer, &PlayerRef, u32)) -> i16 {
+    let mut f = Fixture::new(false);
+    let nation = declare(&f);
+    let candidate_client = TestClient::new(&f.server, 3, 1003);
+    let candidate = spawn_candidate(&f.server, &candidate_client, 3, "Citizen", 0x102);
+    configure(&f.server, &candidate, nation.id);
+    f.leader_client.conn.active_char = Some(f.leader.clone());
+    f.leader_client.drain();
+    CSFactionImmigrationInvitePacket {
+        invitee: "Citizen".into(),
+    }
+    .handle(&f.server, &mut f.leader_client.conn)
+    .await
+    .unwrap();
+    error_code(&f.leader_client.drain()).expect("an error to the king")
+}
+
+#[tokio::test]
+async fn invite_accept_moves_the_citizen_and_the_house() {
+    let mut f = Fixture::new(false);
+    let nation = declare(&f);
+    let mut candidate_client = TestClient::new(&f.server, 3, 1003);
+    let candidate = spawn_candidate(&f.server, &candidate_client, 3, "Citizen", 0x102);
+    let house = citizen_house(&f.server, &candidate);
+    f.leader_client.conn.active_char = Some(f.leader.clone());
+    candidate_client.conn.active_char = Some(candidate.clone());
+    f.leader_client.drain();
+    candidate_client.drain();
+
+    CSFactionImmigrationInvitePacket {
+        invitee: "Citizen".into(),
+    }
+    .handle(&f.server, &mut f.leader_client.conn)
+    .await
+    .unwrap();
+    let frames = candidate_client.drain();
+    let invites = frames_with(&frames, sc::SCFactionImmigrateInvitePacket);
+    assert_eq!(invites.len(), 1, "the invitee must receive the invitation");
+    let mut body = PacketStream::from_bytes(invites[0].clone());
+    assert_eq!(body.read_u32().unwrap(), nation.id);
+    assert_eq!(
+        body.read_u32().unwrap(),
+        candidate.character_id,
+        "id2 is the invitee-id nonce (NATION-11)"
+    );
+    assert!(error_code(&f.leader_client.drain()).is_none());
+
+    CSFactionImmigrationInviteReplyPacket {
+        id: nation.id,
+        id2: candidate.character_id,
+        answer: true,
+    }
+    .handle(&f.server, &mut candidate_client.conn)
+    .await
+    .unwrap();
+
+    assert_eq!(candidate.data().unit.faction_id, nation.id);
+    assert_eq!(house.data().unit.faction_id, nation.id);
+    let frames = candidate_client.drain();
+    let results = frames_with(&frames, sc::SCFactionImmigrateInviteResultPacket);
+    assert_eq!(results.len(), 1);
+    let mut body = PacketStream::from_bytes(results[0].clone());
+    assert_eq!(body.read_u32().unwrap(), nation.id);
+    assert_eq!(body.read_string().unwrap(), "Citizen");
+    assert!(body.read_bool().unwrap());
+    let frames = f.leader_client.drain();
+    let results = frames_with(&frames, sc::SCFactionImmigrateInviteResultPacket);
+    assert_eq!(results.len(), 1, "the inviter receives the same result");
+    let mut body = PacketStream::from_bytes(results[0].clone());
+    assert_eq!(body.read_u32().unwrap(), nation.id);
+    assert_eq!(body.read_string().unwrap(), "Citizen");
+    assert!(body.read_bool().unwrap());
+}
+
+#[tokio::test]
+async fn immigration_refusals_follow_the_client_check_order() {
+    // 1. in combat (also pirate and level 1: combat wins).
+    let code = invite_error(|_server, p, _nation| {
+        p.data().unit.is_in_battle = true;
+        p.data().unit.faction_id = crate::db_character::FACTION_PIRATE;
+        p.data().unit.level = 1;
+    })
+    .await;
+    assert_eq!(code, 770);
+
+    // 2. pirate (also an expedition and level 1: the pirate check wins).
+    let code = invite_error(|_server, p, _nation| {
+        p.data().unit.faction_id = crate::db_character::FACTION_PIRATE;
+        p.data().unit.expedition_id = 12345;
+        p.data().unit.level = 1;
+    })
+    .await;
+    assert_eq!(code, 694);
+
+    // 3. unknown faction (also an expedition and level 1).
+    let code = invite_error(|_server, p, _nation| {
+        p.data().unit.faction_id = 9_999;
+        p.data().unit.expedition_id = 12345;
+        p.data().unit.level = 1;
+    })
+    .await;
+    assert_eq!(code, 693);
+
+    // 4. already a citizen (also an expedition and level 1).
+    let code = invite_error(|_server, p, nation_id| {
+        p.data().unit.faction_id = nation_id;
+        p.data().unit.expedition_id = 12345;
+        p.data().unit.level = 1;
+    })
+    .await;
+    assert_eq!(code, 730);
+
+    // 5. owns a user faction (also an expedition and level 1).
+    let code = invite_error(|server, p, _nation| {
+        server.systems.social.nations.add(Nation {
+            id: 5_000,
+            expedition_id: 0,
+            owner_character_id: p.character_id,
+            owner_name: "Citizen".into(),
+            name: "Other".into(),
+            created_at: 1,
+            allow_change_name: 0,
+            relations: Vec::new(),
+            offline_members: Vec::new(),
+        });
+        p.data().unit.expedition_id = 12345;
+        p.data().unit.level = 1;
+    })
+    .await;
+    assert_eq!(code, 731);
+
+    // 6. in an expedition (also level 1).
+    let code = invite_error(|_server, p, _nation| {
+        p.data().unit.expedition_id = 12345;
+        p.data().unit.level = 1;
+    })
+    .await;
+    assert_eq!(code, 732);
+
+    // 7. level below content_configs 49.
+    let code = invite_error(|_server, p, _nation| {
+        p.data().unit.level = nation::IMMIGRATE_MIN_LEVEL - 1;
+    })
+    .await;
+    assert_eq!(code, 728);
+}
+
+#[tokio::test]
+async fn invite_permission_self_offline_and_forged_or_expired_replies() {
+    let mut f = Fixture::new(false);
+    let nation = declare(&f);
+    let mut candidate_client = TestClient::new(&f.server, 3, 1003);
+    let candidate = spawn_candidate(&f.server, &candidate_client, 3, "Citizen", 0x102);
+
+    // Not the king -> 697.
+    f.member_client.conn.active_char = Some(f.member.clone());
+    f.member_client.drain();
+    CSFactionImmigrationInvitePacket {
+        invitee: "Citizen".into(),
+    }
+    .handle(&f.server, &mut f.member_client.conn)
+    .await
+    .unwrap();
+    assert_eq!(error_code(&f.member_client.drain()), Some(697));
+
+    // The king cannot invite himself -> 736; an offline name -> 50.
+    f.leader_client.conn.active_char = Some(f.leader.clone());
+    for (name, expected) in [("King", 736), ("Nobody", 50)] {
+        f.leader_client.drain();
+        CSFactionImmigrationInvitePacket {
+            invitee: name.into(),
+        }
+        .handle(&f.server, &mut f.leader_client.conn)
+        .await
+        .unwrap();
+        assert_eq!(error_code(&f.leader_client.drain()), Some(expected));
+    }
+
+    candidate_client.conn.active_char = Some(candidate.clone());
+    // A reply without an invitation is refused (no pending) and changes nothing.
+    candidate_client.drain();
+    CSFactionImmigrationInviteReplyPacket {
+        id: nation.id,
+        id2: candidate.character_id,
+        answer: true,
+    }
+    .handle(&f.server, &mut candidate_client.conn)
+    .await
+    .unwrap();
+    assert_eq!(error_code(&candidate_client.drain()), Some(693));
+    assert_ne!(candidate.data().unit.faction_id, nation.id);
+
+    // An expired pending invite is refused.
+    let now = super::util::now_ms();
+    f.server.systems.social.nations.add_invite(
+        PendingInvite {
+            nation_id: nation.id,
+            inviter_character_id: f.leader.character_id,
+            invitee_character_id: candidate.character_id,
+            expires_at_ms: now - 1,
+        },
+        now,
+    );
+    candidate_client.drain();
+    CSFactionImmigrationInviteReplyPacket {
+        id: nation.id,
+        id2: candidate.character_id,
+        answer: true,
+    }
+    .handle(&f.server, &mut candidate_client.conn)
+    .await
+    .unwrap();
+    assert_eq!(error_code(&candidate_client.drain()), Some(693));
+
+    // A wrong nonce is refused.
+    f.server.systems.social.nations.add_invite(
+        PendingInvite {
+            nation_id: nation.id,
+            inviter_character_id: f.leader.character_id,
+            invitee_character_id: candidate.character_id,
+            expires_at_ms: now + nation::INVITE_TIMEOUT_MS,
+        },
+        now,
+    );
+    candidate_client.drain();
+    CSFactionImmigrationInviteReplyPacket {
+        id: nation.id,
+        id2: candidate.character_id + 1,
+        answer: true,
+    }
+    .handle(&f.server, &mut candidate_client.conn)
+    .await
+    .unwrap();
+    assert_eq!(error_code(&candidate_client.drain()), Some(693));
+
+    // The real invitation works once; the replayed reply is refused.
+    f.leader_client.drain();
+    CSFactionImmigrationInvitePacket {
+        invitee: "Citizen".into(),
+    }
+    .handle(&f.server, &mut f.leader_client.conn)
+    .await
+    .unwrap();
+    candidate_client.drain();
+    for expected_ok in [true, false] {
+        candidate_client.drain();
+        CSFactionImmigrationInviteReplyPacket {
+            id: nation.id,
+            id2: candidate.character_id,
+            answer: true,
+        }
+        .handle(&f.server, &mut candidate_client.conn)
+        .await
+        .unwrap();
+        assert_eq!(
+            error_code(&candidate_client.drain()),
+            if expected_ok { None } else { Some(693) }
+        );
+    }
+    assert_eq!(candidate.data().unit.faction_id, nation.id);
+    assert_eq!(f.server.systems.social.nations.pending_invite_count(), 0);
+}
+
+#[tokio::test]
+async fn pending_invites_are_bounded() {
+    let f = Fixture::new(false);
+    let nation = declare(&f);
+    let now = super::util::now_ms();
+    for id in 1..=(nation::MAX_PENDING_INVITES as u32 + 25) {
+        f.server.systems.social.nations.add_invite(
+            PendingInvite {
+                nation_id: nation.id,
+                inviter_character_id: f.leader.character_id,
+                invitee_character_id: 10_000 + id,
+                expires_at_ms: now + nation::INVITE_TIMEOUT_MS,
+            },
+            now,
+        );
+    }
+    assert_eq!(
+        f.server.systems.social.nations.pending_invite_count(),
+        nation::MAX_PENDING_INVITES
+    );
+}
+
+#[tokio::test]
+async fn return_to_origin_refusals_follow_the_client_check_order() {
+    let mut f = Fixture::new(false);
+    let nation = declare(&f);
+    let mut candidate_client = TestClient::new(&f.server, 3, 1003);
+    let candidate = spawn_candidate(&f.server, &candidate_client, 3, "Citizen", 0x102);
+    faction::set_faction(&f.server, &candidate, nation.id).await;
+    candidate_client.conn.active_char = Some(candidate.clone());
+
+    // 1. combat wins over the expedition check.
+    candidate.data().unit.is_in_battle = true;
+    candidate.data().unit.expedition_id = 12345;
+    candidate_client.drain();
+    CSFactionImmigrateToOriginPacket {}
+        .handle(&f.server, &mut candidate_client.conn)
+        .await
+        .unwrap();
+    assert_eq!(error_code(&candidate_client.drain()), Some(770));
+    candidate.data().unit.is_in_battle = false;
+
+    // 2. pirate wins over the expedition check.
+    candidate.data().unit.faction_id = crate::db_character::FACTION_PIRATE;
+    candidate_client.drain();
+    CSFactionImmigrateToOriginPacket {}
+        .handle(&f.server, &mut candidate_client.conn)
+        .await
+        .unwrap();
+    assert_eq!(error_code(&candidate_client.drain()), Some(694));
+    candidate.data().unit.faction_id = nation.id;
+
+    // 3. a player still at the race origin is already a member -> 733.
+    let mut origin_client = TestClient::new(&f.server, 4, 1004);
+    let origin = spawn_candidate(&f.server, &origin_client, 4, "Origin", 0x103);
+    origin_client.conn.active_char = Some(origin.clone());
+    origin_client.drain();
+    CSFactionImmigrateToOriginPacket {}
+        .handle(&f.server, &mut origin_client.conn)
+        .await
+        .unwrap();
+    assert_eq!(error_code(&origin_client.drain()), Some(733));
+
+    // 4. the nation king cannot leave -> 734.
+    f.leader_client.conn.active_char = Some(f.leader.clone());
+    f.leader_client.drain();
+    CSFactionImmigrateToOriginPacket {}
+        .handle(&f.server, &mut f.leader_client.conn)
+        .await
+        .unwrap();
+    assert_eq!(error_code(&f.leader_client.drain()), Some(734));
+
+    // 5. an expedition member cannot leave -> 735.
+    candidate.data().unit.expedition_id = 12345;
+    candidate_client.drain();
+    CSFactionImmigrateToOriginPacket {}
+        .handle(&f.server, &mut candidate_client.conn)
+        .await
+        .unwrap();
+    assert_eq!(error_code(&candidate_client.drain()), Some(735));
+}
+
+#[tokio::test]
+async fn return_to_origin_moves_the_citizen_and_the_house() {
+    let mut f = Fixture::new(false);
+    let nation = declare(&f);
+    let mut candidate_client = TestClient::new(&f.server, 3, 1003);
+    let candidate = spawn_candidate(&f.server, &candidate_client, 3, "Citizen", 0x102);
+    let house = citizen_house(&f.server, &candidate);
+    faction::set_faction(&f.server, &candidate, nation.id).await;
+    assert_eq!(house.data().unit.faction_id, nation.id);
+    candidate_client.conn.active_char = Some(candidate.clone());
+    candidate_client.drain();
+    f.leader_client.drain();
+
+    CSFactionImmigrateToOriginPacket {}
+        .handle(&f.server, &mut candidate_client.conn)
+        .await
+        .unwrap();
+    assert_eq!(candidate.data().unit.faction_id, 101);
+    assert_eq!(house.data().unit.faction_id, 101);
+    let frames = candidate_client.drain();
+    let results = frames_with(&frames, sc::SCFactionImmigrateToOriginResultPacket);
+    assert_eq!(results.len(), 1);
+    let mut body = PacketStream::from_bytes(results[0].clone());
+    assert_eq!(body.read_string().unwrap(), "Citizen");
+    assert_eq!(body.read_u32().unwrap(), nation.id);
+    // The remaining nation members see the leave too.
+    let frames = f.leader_client.drain();
+    assert_eq!(
+        frames_with(&frames, sc::SCFactionImmigrateToOriginResultPacket).len(),
+        1
+    );
+}
+
+fn kick_result_error(frames: &[(u16, Vec<u8>)]) -> Option<i16> {
+    let bodies = frames_with(frames, sc::SCFactionKickToOriginResultPacket);
+    let body = bodies.first()?;
+    let mut s = PacketStream::from_bytes(body.clone());
+    s.read_string().ok()?;
+    s.read_u32().ok()?;
+    s.read_u32().ok()?;
+    s.read_i16().ok()
+}
+
+#[tokio::test]
+async fn kick_refusals_follow_the_client_check_order() {
+    let mut f = Fixture::new(false);
+    let nation = declare(&f);
+    let candidate_client = TestClient::new(&f.server, 3, 1003);
+    let candidate = spawn_candidate(&f.server, &candidate_client, 3, "Citizen", 0x102);
+    faction::set_faction(&f.server, &candidate, nation.id).await;
+    let outsider_client = TestClient::new(&f.server, 4, 1004);
+    let outsider = spawn_candidate(&f.server, &outsider_client, 4, "Outsider", 0x103);
+
+    // A non-king -> 64.
+    f.member_client.conn.active_char = Some(f.member.clone());
+    f.member_client.drain();
+    CSFactionKickToOriginPacket {
+        name: "Citizen".into(),
+    }
+    .handle(&f.server, &mut f.member_client.conn)
+    .await
+    .unwrap();
+    assert_eq!(kick_result_error(&f.member_client.drain()), Some(64));
+
+    // The king cannot kick himself -> 65.
+    f.leader_client.conn.active_char = Some(f.leader.clone());
+    f.leader_client.drain();
+    CSFactionKickToOriginPacket {
+        name: "King".into(),
+    }
+    .handle(&f.server, &mut f.leader_client.conn)
+    .await
+    .unwrap();
+    assert_eq!(kick_result_error(&f.leader_client.drain()), Some(65));
+
+    // Unknown target -> 704.
+    f.leader_client.drain();
+    CSFactionKickToOriginPacket {
+        name: "Nobody".into(),
+    }
+    .handle(&f.server, &mut f.leader_client.conn)
+    .await
+    .unwrap();
+    assert_eq!(kick_result_error(&f.leader_client.drain()), Some(704));
+
+    // The founding guild's member is an expedition member -> 726.
+    f.leader_client.drain();
+    CSFactionKickToOriginPacket {
+        name: "Member".into(),
+    }
+    .handle(&f.server, &mut f.leader_client.conn)
+    .await
+    .unwrap();
+    assert_eq!(kick_result_error(&f.leader_client.drain()), Some(726));
+
+    // A player of another faction -> 705, and nothing changes.
+    f.leader_client.drain();
+    CSFactionKickToOriginPacket {
+        name: "Outsider".into(),
+    }
+    .handle(&f.server, &mut f.leader_client.conn)
+    .await
+    .unwrap();
+    assert_eq!(kick_result_error(&f.leader_client.drain()), Some(705));
+    assert_eq!(outsider.data().unit.faction_id, 101);
+    assert_eq!(candidate.data().unit.faction_id, nation.id);
+}
+
+#[tokio::test]
+async fn kick_moves_an_online_citizen_back_to_the_origin() {
+    let mut f = Fixture::new(false);
+    let nation = declare(&f);
+    let mut candidate_client = TestClient::new(&f.server, 3, 1003);
+    let candidate = spawn_candidate(&f.server, &candidate_client, 3, "Citizen", 0x102);
+    let house = citizen_house(&f.server, &candidate);
+    faction::set_faction(&f.server, &candidate, nation.id).await;
+    candidate_client.conn.active_char = Some(candidate.clone());
+    f.leader_client.conn.active_char = Some(f.leader.clone());
+    f.leader_client.drain();
+    candidate_client.drain();
+
+    CSFactionKickToOriginPacket {
+        name: "Citizen".into(),
+    }
+    .handle(&f.server, &mut f.leader_client.conn)
+    .await
+    .unwrap();
+    assert_eq!(candidate.data().unit.faction_id, 101);
+    assert_eq!(house.data().unit.faction_id, 101);
+    let frames = f.leader_client.drain();
+    let results = frames_with(&frames, sc::SCFactionKickToOriginResultPacket);
+    assert_eq!(results.len(), 1);
+    let mut body = PacketStream::from_bytes(results[0].clone());
+    assert_eq!(body.read_string().unwrap(), "Citizen");
+    assert_eq!(body.read_u32().unwrap(), candidate.character_id);
+    assert_eq!(body.read_u32().unwrap(), nation.id);
+    assert_eq!(body.read_i16().unwrap(), 0);
+    // The kicked player sees `id == my char id` -> kicked_expel.
+    let frames = candidate_client.drain();
+    let results = frames_with(&frames, sc::SCFactionKickToOriginResultPacket);
+    assert_eq!(results.len(), 1);
+    let mut body = PacketStream::from_bytes(results[0].clone());
+    assert_eq!(body.read_string().unwrap(), "Citizen");
+    assert_eq!(body.read_u32().unwrap(), candidate.character_id);
+    assert_eq!(body.read_u32().unwrap(), nation.id);
+    assert_eq!(body.read_i16().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn a_citizen_cannot_join_a_guild_of_another_mother() {
+    let server = test_server_with(data());
+    crate::systems::social::install_hooks(&server);
+    let mut owner_client = TestClient::new(&server, 30, 1030);
+    let owner = spawn_player(
+        &server,
+        &owner_client,
+        test_character(30, "Owner", 100.0, 100.0),
+        0x300,
+    );
+    let mut citizen_client = TestClient::new(&server, 31, 1031);
+    let citizen = spawn_candidate(&server, &citizen_client, 31, "Citizen", 0x301);
+    // A guild whose mother is the Nuia race faction 101 (top-level 148).
+    let faction = SystemFaction {
+        id: 7_000,
+        mother_id: 101,
+        name: "NuiaGuild".into(),
+        owner_id: owner.character_id,
+        owner_name: "Owner".into(),
+        unit_owner_type: 0,
+        political_system: 1,
+        created: 0,
+        ..SystemFaction::default()
+    };
+    server.expeditions.add(Expedition {
+        faction,
+        members: vec![expedition::member_from_character(
+            &server, 7_000, &owner, true,
+        )],
+        policies: expedition::default_policies(&server, 7_000),
+        removed_members: Vec::new(),
+        is_disbanded: false,
+    });
+    owner.data().unit.expedition_id = 7_000;
+    // The citizen belongs to nation 5_000.
+    server.systems.social.nations.add(Nation {
+        id: 5_000,
+        expedition_id: 0,
+        owner_character_id: 999,
+        owner_name: "King".into(),
+        name: "Kingdom".into(),
+        created_at: 1,
+        allow_change_name: 0,
+        relations: Vec::new(),
+        offline_members: Vec::new(),
+    });
+    owner_client.drain();
+    citizen_client.drain();
+
+    // A citizen of another nation is not invited.
+    citizen.data().unit.faction_id = 5_000;
+    expedition::invite(&server, &owner, "Citizen");
+    assert!(
+        frames_with(&citizen_client.drain(), sc::SCExpeditionInvitationPacket).is_empty(),
+        "a citizen of another nation must not be invited"
+    );
+
+    // Even an invitation obtained while still at the origin faction cannot be accepted after
+    // the citizen joins a nation.
+    citizen.data().unit.faction_id = 101;
+    expedition::invite(&server, &owner, "Citizen");
+    assert_eq!(
+        frames_with(&citizen_client.drain(), sc::SCExpeditionInvitationPacket).len(),
+        1
+    );
+    citizen.data().unit.faction_id = 5_000;
+    expedition::reply_invite(&server, &citizen, 7_000, 0, true).await;
+    assert_eq!(citizen.data().unit.expedition_id, 0);
+    assert_eq!(server.expeditions.get(7_000).unwrap().members.len(), 1);
+
+    // Two citizens of different nations cannot found a guild together either (the create path
+    // compares the live top-level factions, NATION-13).
+    let second_client = TestClient::new(&server, 32, 1032);
+    let second = spawn_candidate(&server, &second_client, 32, "Second", 0x302);
+    server.systems.social.nations.add(Nation {
+        id: 5_001,
+        expedition_id: 0,
+        owner_character_id: 999,
+        owner_name: "King".into(),
+        name: "OtherKingdom".into(),
+        created_at: 1,
+        allow_change_name: 0,
+        relations: Vec::new(),
+        offline_members: Vec::new(),
+    });
+    second.data().unit.faction_id = 5_001;
+    assert_ne!(
+        nation::top_level_faction(&server, 5_000),
+        nation::top_level_faction(&server, 5_001)
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; temporary tables only"]
+async fn private_mysql_immigration_persists_and_kicks_offline() {
+    use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+    use std::str::FromStr;
+    let Ok(url) = std::env::var("AAEMU_TEST_MYSQL") else {
+        return;
+    };
+    let options = MySqlConnectOptions::from_str(&url).expect("valid private MySQL URL");
+    assert_eq!(
+        options.get_port(),
+        3317,
+        "only private MySQL3317 is allowed"
+    );
+    assert!(matches!(options.get_host(), "127.0.0.1" | "localhost"));
+    let pool = MySqlPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .expect("private MySQL");
+    for statement in [
+        "CREATE TEMPORARY TABLE characters (id INT UNSIGNED NOT NULL, name VARCHAR(128) NOT \
+         NULL, faction_id INT UNSIGNED NOT NULL, expedition_id INT UNSIGNED NOT NULL, race \
+         TINYINT UNSIGNED NOT NULL, gender TINYINT UNSIGNED NOT NULL, PRIMARY KEY (id))",
+        "CREATE TEMPORARY TABLE housings (id INT UNSIGNED NOT NULL, owner INT UNSIGNED NOT \
+         NULL, faction_id INT UNSIGNED NOT NULL, PRIMARY KEY (id))",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+
+    let mut f = Fixture::new(false);
+    f.server.db = pool.clone();
+    let nation = declare(&f);
+    let mut candidate_client = TestClient::new(&f.server, 3, 1003);
+    let candidate = spawn_candidate(&f.server, &candidate_client, 3, "Citizen", 0x102);
+    sqlx::query(
+        "INSERT INTO characters (id, name, faction_id, expedition_id, race, gender) \
+         VALUES (?, 'Citizen', 101, 0, 1, 1)",
+    )
+    .bind(candidate.character_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Invite -> accept persists `characters.faction_id`.
+    f.leader_client.conn.active_char = Some(f.leader.clone());
+    candidate_client.conn.active_char = Some(candidate.clone());
+    f.leader_client.drain();
+    candidate_client.drain();
+    CSFactionImmigrationInvitePacket {
+        invitee: "Citizen".into(),
+    }
+    .handle(&f.server, &mut f.leader_client.conn)
+    .await
+    .unwrap();
+    candidate_client.drain();
+    CSFactionImmigrationInviteReplyPacket {
+        id: nation.id,
+        id2: candidate.character_id,
+        answer: true,
+    }
+    .handle(&f.server, &mut candidate_client.conn)
+    .await
+    .unwrap();
+    let saved: i64 =
+        sqlx::query_scalar("SELECT CAST(faction_id AS SIGNED) FROM characters WHERE id = ?")
+            .bind(candidate.character_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(saved, i64::from(nation.id));
+
+    // An offline citizen is kicked by name: characters + houses move together.
+    sqlx::query(
+        "INSERT INTO characters (id, name, faction_id, expedition_id, race, gender) \
+         VALUES (4242, 'Offline', ?, 0, 1, 1)",
+    )
+    .bind(nation.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO housings (id, owner, faction_id) VALUES (13, 4242, ?)")
+        .bind(nation.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    f.leader_client.drain();
+    CSFactionKickToOriginPacket {
+        name: "Offline".into(),
+    }
+    .handle(&f.server, &mut f.leader_client.conn)
+    .await
+    .unwrap();
+    let frames = f.leader_client.drain();
+    assert_eq!(kick_result_error(&frames), Some(0));
+    let (faction, house): (i64, i64) = sqlx::query_as(
+        "SELECT CAST(c.faction_id AS SIGNED), CAST(h.faction_id AS SIGNED) \
+         FROM characters c, housings h WHERE c.id = 4242 AND h.id = 13",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((faction, house), (101, 101));
+    assert!(f.server.world.character_by_name("Offline").is_none());
+    pool.close().await;
 }
