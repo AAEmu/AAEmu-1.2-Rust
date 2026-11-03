@@ -51,8 +51,16 @@ fn world_with(data: GameData) -> World {
     server.set_self();
     let mut a = TestClient::new(&server, 1, 1001);
     let mut b = TestClient::new(&server, 2, 1002);
-    let pa = spawn_player(&server, &a, test_character(1, "Alice", 100.0, 100.0), 0x100);
-    let pb = spawn_player(&server, &b, test_character(2, "Bob", 101.0, 100.0), 0x101);
+    // `UnitBase` defaults to `hp = 0` (dead, and the trade state check refuses a dead player):
+    // the fixture players are alive, as in `economy::tests::world_with`.
+    let mut alice = test_character(1, "Alice", 100.0, 100.0);
+    alice.unit.hp = 100;
+    alice.unit.max_hp = 100;
+    let mut bob = test_character(2, "Bob", 101.0, 100.0);
+    bob.unit.hp = 100;
+    bob.unit.max_hp = 100;
+    let pa = spawn_player(&server, &a, alice, 0x100);
+    let pb = spawn_player(&server, &b, bob, 0x101);
     for p in [&pa, &pb] {
         for (_, c) in Inv::of(p).containers {
             server.items.add_container(c);
@@ -275,6 +283,11 @@ async fn trade_refuses_a_locked_item() {
     run::<crate::systems::economy::trade::CSStartTradePacket>(&mut w, 1, s.as_bytes());
     w.a.drain();
     w.b.drain();
+    assert_eq!(
+        w.server.systems.economy.trade.trades().len(),
+        1,
+        "the trade did not start; the put-up assertion below would be vacuous"
+    );
 
     let mut s = PacketStream::new();
     s.write_u8(slot_type::INVENTORY).write_u8(0).write_i32(1);
