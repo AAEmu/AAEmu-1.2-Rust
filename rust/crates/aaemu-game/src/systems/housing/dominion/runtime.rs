@@ -11,7 +11,11 @@ use crate::systems::skills::state::SkillRef;
 use crate::systems::skills::types::{CastAction, SkillCaster};
 use crate::world::{HouseRef, WorldObject};
 
-use super::calendar::{CalendarSettings, SiegeCalendar, PERIOD_SIEGE, PERIOD_WARMUP};
+use crate::systems::housing::config::HousingConfig;
+
+use super::calendar::{
+    CalendarSettings, CalendarTimeZone, SiegeCalendar, PERIOD_SIEGE, PERIOD_WARMUP,
+};
 use super::state::{DominionState, EngravingHandle, SiegeStatus, TowerIdentity};
 
 pub(crate) fn is_live_object(server: &GameServer, object: &WorldObject) -> bool {
@@ -709,13 +713,16 @@ pub struct CalendarTransition {
     pub period: u8,
 }
 
-/// Runtime state of the calendar: the optional GM test clock and the last announced period per
-/// zone. Neither is persisted: after a restart clients receive the current snapshot at world
-/// entry, and a later change is announced normally.
+/// Runtime state of the calendar: the optional GM test clock, the last period actually
+/// broadcast per zone and the last invalid timezone that was reported. None is persisted:
+/// after a restart clients receive the current snapshot at world entry, and a later change is
+/// announced normally. The clock only drives the calendar; the persisted siege deadlines use
+/// the real clock.
 #[derive(Debug, Default)]
 pub struct CalendarRuntime {
     clock: Mutex<Option<i64>>,
     periods: Mutex<BTreeMap<u32, u8>>,
+    warned_timezone: Mutex<Option<String>>,
 }
 
 impl CalendarRuntime {
@@ -725,6 +732,12 @@ impl CalendarRuntime {
 
     fn lock_periods(&self) -> MutexGuard<'_, BTreeMap<u32, u8>> {
         self.periods.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn lock_warned_timezone(&self) -> MutexGuard<'_, Option<String>> {
+        self.warned_timezone
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// GM test clock (Unix seconds); `None` restores the real clock.
@@ -741,30 +754,50 @@ impl CalendarRuntime {
             .unwrap_or_else(|| chrono::Utc::now().timestamp())
     }
 
+    /// The configured settings, warning once per invalid timezone value instead of silently
+    /// falling back to server local time. A repaired value resets the warning.
+    pub fn settings(&self, config: &HousingConfig) -> CalendarSettings {
+        let parsed = CalendarTimeZone::parse(&config.siege_calendar_timezone);
+        let mut warned = self.lock_warned_timezone();
+        if parsed.is_none() && !config.siege_calendar_timezone.trim().is_empty() {
+            if warned.as_deref() != Some(config.siege_calendar_timezone.as_str()) {
+                tracing::warn!(
+                    "Housing.SiegeCalendarTimezone {:?} is not a valid UTC offset; the siege calendar uses server local time",
+                    config.siege_calendar_timezone
+                );
+                *warned = Some(config.siege_calendar_timezone.clone());
+            }
+        } else {
+            *warned = None;
+        }
+        CalendarSettings {
+            enabled: config.siege_calendar,
+            timezone: parsed.unwrap_or_default(),
+        }
+    }
+
     pub fn last_period(&self, zone_group_id: u32) -> Option<u8> {
         self.lock_periods().get(&zone_group_id).copied()
     }
 
-    /// Compare every owned territory's calendar period with the last announced one. The first
-    /// observation of a zone is silent (a client at world entry gets the snapshot instead).
-    /// An unfinished explicit siege (the GM override) owns that zone's timer, so the calendar
-    /// records its phase without announcing a calendar change.
-    pub fn tick(&self, server: &GameServer, now: i64) -> Vec<CalendarTransition> {
-        self.tick_excluding(server, now, &BTreeSet::new())
+    /// Record the period carried by a phase snapshot that was actually broadcast. Every
+    /// `broadcast_phase_change` / `broadcast_owner_change` calls this, so announcements made
+    /// outside the tick (`/dominion schedule`, `/dominion cancel`, capture, release) are not
+    /// repeated by the next calendar tick.
+    pub fn record(&self, zone_group_id: u32, period: u8) {
+        self.lock_periods().insert(zone_group_id, period);
     }
 
-    /// [`CalendarRuntime::tick`] while the explicit tick already announced `announced` zones;
-    /// their new period is recorded without a second `SCSiegeState`.
-    pub fn tick_excluding(
-        &self,
-        server: &GameServer,
-        now: i64,
-        announced: &BTreeSet<u32>,
-    ) -> Vec<CalendarTransition> {
+    /// Compare every owned territory's calendar period with the last broadcast one. The first
+    /// observation of a zone is silent (a client at world entry gets the snapshot instead).
+    /// An unfinished explicit siege (the GM override) owns that zone's timer, so the calendar
+    /// records its phase without announcing a calendar change. The explicit siege's phase is
+    /// always computed from the real clock, never from the GM test clock.
+    pub fn tick(&self, server: &GameServer, now: i64) -> Vec<CalendarTransition> {
         if now < 0 {
             return Vec::new();
         }
-        let settings = CalendarSettings::from_config(&server.config.housing);
+        let settings = self.settings(&server.config.housing);
         if !settings.enabled {
             self.lock_periods().clear();
             return Vec::new();
@@ -774,6 +807,7 @@ impl CalendarRuntime {
             self.lock_periods().clear();
             return Vec::new();
         }
+        let real_now = chrono::Utc::now().timestamp();
         let states = server.systems.housing.dominions.all();
         let mut periods = self.lock_periods();
         let mut transitions = Vec::new();
@@ -788,9 +822,9 @@ impl CalendarRuntime {
             let explicit = state
                 .siege
                 .as_ref()
-                .filter(|siege| siege.status != SiegeStatus::Finished && now < siege.ends_at);
+                .filter(|siege| siege.status != SiegeStatus::Finished && real_now < siege.ends_at);
             let period = if let Some(siege) = explicit {
-                if siege.active_at(now) {
+                if siege.active_at(real_now) {
                     PERIOD_SIEGE
                 } else {
                     PERIOD_WARMUP
@@ -808,13 +842,11 @@ impl CalendarRuntime {
                 Some(previous) if previous == period => {}
                 Some(previous) => {
                     periods.insert(zone, period);
-                    if !announced.contains(&zone) {
-                        transitions.push(CalendarTransition {
-                            state,
-                            previous_period: previous,
-                            period,
-                        });
-                    }
+                    transitions.push(CalendarTransition {
+                        state,
+                        previous_period: previous,
+                        period,
+                    });
                 }
             }
         }
@@ -823,9 +855,10 @@ impl CalendarRuntime {
     }
 }
 
-/// One dominion tick: explicit siege transitions first, then the weekly calendar periods.
-/// The caller serializes it with the housing operations (the spawned loop or a test).
-pub fn tick_once(server: &GameServer, now: i64) {
+/// One dominion tick: explicit siege transitions and deadline expiry use the real clock; the
+/// weekly calendar phases use the GM test clock when one is set. The caller serializes it with
+/// the housing operations (the spawned loop or a test).
+pub fn tick_once(server: &GameServer) {
     let _items = server.systems.economy.operation_scope();
     let _operation = server
         .systems
@@ -833,29 +866,24 @@ pub fn tick_once(server: &GameServer, now: i64) {
         .operation_lock
         .lock()
         .expect("housing poisoned");
-    let mut announced = std::collections::BTreeSet::new();
+    let real_now = chrono::Utc::now().timestamp();
     for state in server
         .systems
         .housing
         .dominions
-        .tick(now)
+        .tick(real_now)
         .unwrap_or_else(|e| {
             tracing::error!("Dominion tick: {e}");
             Vec::new()
         })
     {
-        announced.insert(state.zone_group_id);
         apply_tower_state(server, &state);
         crate::systems::social::dominion::broadcast_phase_change(server, &state);
     }
-    // The weekly calendar reports period changes only; explicit GM schedules (unfinished
-    // sieges) own their territory's timers and announce themselves.
-    for transition in server
-        .systems
-        .housing
-        .calendar
-        .tick_excluding(server, now, &announced)
-    {
+    // Calendar phases. Broadcasts above (and those outside the tick) record the period they
+    // sent, so only a period that was not announced yet produces a transition here.
+    let calendar_now = server.systems.housing.calendar.now();
+    for transition in server.systems.housing.calendar.tick(server, calendar_now) {
         tracing::debug!(
             "Dominion {} siege period {} -> {}",
             transition.state.zone_group_id,
@@ -893,8 +921,7 @@ pub fn start_tick(server: &Arc<GameServer>) {
                     abort_character(&server, id);
                 }
             }
-            let now = crate::systems::social::dominion::now_seconds(&server);
-            tick_once(&server, now);
+            tick_once(&server);
         }
     });
 }

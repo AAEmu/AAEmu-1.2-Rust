@@ -285,7 +285,7 @@ impl Command for Dominion {
         let server = ctx.server()?;
         let manager = &server.systems.housing.dominions;
         if args.is_empty() || args[0] == "info" {
-            let now = crate::systems::social::dominion::now_seconds(server);
+            let now = chrono::Utc::now().timestamp();
             for state in manager.all() {
                 let calendar = crate::systems::social::dominion::snapshot(server, &state, now)
                     .map(|data| {
@@ -318,6 +318,22 @@ impl Command for Dominion {
             return Ok(());
         }
         if args[0] == "clock" {
+            // The test clock only drives the calendar; without the calendar it could only
+            // make the persisted siege deadlines disagree with what the client shows.
+            if !server
+                .systems
+                .housing
+                .calendar
+                .settings(&server.config.housing)
+                .enabled
+            {
+                CommandManager::send_error_text(
+                    self,
+                    out,
+                    "The siege calendar is disabled (Housing.SiegeCalendar)",
+                );
+                return Ok(());
+            }
             let value = match args.get(1).map(String::as_str) {
                 Some(value) if value.eq_ignore_ascii_case("off") || value == "0" => None,
                 Some(value) => match try_parse::<i64>(value) {
@@ -973,5 +989,35 @@ mod tests {
         world.remove_object(replacement.obj_id);
         harness::run_at(&f.server, &replacement, "joinsiege 25", 0).await;
         assert_eq!(state(&f), empty);
+    }
+
+    #[tokio::test]
+    async fn test_clock_requires_the_calendar_and_only_moves_the_calendar() {
+        let f = fixture();
+        let (_, out) = harness::run(&f.server, &f.attacker.p, "dominion clock 2000000000").await;
+        assert_eq!(
+            out,
+            [harness::error(
+                "dominion",
+                "The siege calendar is disabled (Housing.SiegeCalendar)"
+            )]
+        );
+        assert_eq!(f.server.systems.housing.calendar.clock(), None);
+
+        f.server
+            .config
+            .update(|config| config.housing.siege_calendar = true);
+        let (_, out) = harness::run(&f.server, &f.attacker.p, "dominion clock 2000000000").await;
+        assert_eq!(
+            out,
+            [harness::normal(
+                "dominion",
+                "Siege calendar clock: 2000000000"
+            )]
+        );
+        assert_eq!(
+            f.server.systems.housing.calendar.clock(),
+            Some(2_000_000_000)
+        );
     }
 }

@@ -105,6 +105,18 @@ fn timezone_parses_offsets_and_defaults_to_server_local() {
             FixedOffset::east_opt(9 * 3600).unwrap()
         ))
     );
+    assert_eq!(
+        CalendarTimeZone::parse("+9:30"),
+        Some(CalendarTimeZone::Fixed(
+            FixedOffset::east_opt(9 * 3600 + 30 * 60).unwrap()
+        ))
+    );
+    assert_eq!(
+        CalendarTimeZone::parse("-5:30"),
+        Some(CalendarTimeZone::Fixed(
+            FixedOffset::east_opt(-(5 * 3600 + 30 * 60)).unwrap()
+        ))
+    );
     assert_eq!(CalendarTimeZone::parse("Asia/Seoul"), None);
     assert_eq!(CalendarTimeZone::parse("+24:00"), None);
     assert_eq!(CalendarTimeZone::parse("+09:60"), None);

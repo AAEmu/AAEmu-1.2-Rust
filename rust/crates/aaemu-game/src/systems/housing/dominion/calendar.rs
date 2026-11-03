@@ -62,14 +62,17 @@ impl CalendarTimeZone {
             Some(b'-') => -1,
             _ => return None,
         };
-        let rest = value[1..].replace(':', "");
-        let (hours, minutes) = match rest.len() {
-            1 | 2 => (rest.parse::<i32>().ok()?, 0),
-            4 => (
-                rest[..2].parse::<i32>().ok()?,
-                rest[2..].parse::<i32>().ok()?,
-            ),
-            _ => return None,
+        let body = &value[1..];
+        let (hours, minutes) = match body.split_once(':') {
+            Some((hours, minutes)) => (hours.parse::<i32>().ok()?, minutes.parse::<i32>().ok()?),
+            None => match body.len() {
+                1 | 2 => (body.parse::<i32>().ok()?, 0),
+                4 => (
+                    body[..2].parse::<i32>().ok()?,
+                    body[2..].parse::<i32>().ok()?,
+                ),
+                _ => return None,
+            },
         };
         if hours > 23 || minutes > 59 {
             return None;
@@ -202,9 +205,11 @@ impl SiegeCalendar {
         if !self.rotation.has_cycle(zone_group_id, week) {
             return None;
         }
-        // The plan week starts on Sunday. The authored warmup/siege/pay weekdays are the
-        // Sunday that ends that plan week, so a lower weekday rolls into the next week; keep
-        // the authored order auction < declare < warmup < siege.
+        // INFERRED: the plan week starts on Sunday, and the authored warmup/siege weekday 0
+        // is the Sunday that *ends* that plan week (a lower weekday rolls into the next week),
+        // keeping the authored order auction Wed -> declare Fri -> warmup/siege Sun. The other
+        // reading (same-day Sunday) would move every siege one week earlier and put warmup
+        // before the auction; the shipped schedule only fits the roll-forward reading.
         let mut stamps = [
             timezone.at(
                 week,
@@ -300,6 +305,12 @@ impl SiegeCalendar {
     /// warmup and siege periods; with one the authored order 2 -> 3 -> 4 -> 5 applies. The
     /// explicit GM/declaration siege record owns its own timers, so this module is called
     /// with `declared = false` and the caller's explicit siege path covers the other case.
+    ///
+    /// Known limits: the schedule is rebuilt from the data on every call (cache later); a
+    /// returned `None` means the whole zone has no usable view (a missing next cycle in a
+    /// rotation, or an authored time that does not exist in a DST gap — the shipped
+    /// 20:30..22:30 times never hit one); and without a declared attacker the calendar never
+    /// enters warmup/siege on its own.
     pub fn view_at(
         &self,
         zone_group_id: u32,
