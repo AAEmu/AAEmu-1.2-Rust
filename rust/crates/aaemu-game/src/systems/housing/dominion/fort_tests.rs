@@ -242,6 +242,7 @@ fn give(f: &Fixture, template: u32, slot: i32) -> u64 {
 
 fn place(f: &Fixture, template: u32, item: u32, x: f32, slot: i32) -> Option<HouseRef> {
     let id = give(f, item, slot);
+    f.builder.data().unit.transform.set_xyz(x, 100.0, 100.0);
     let p = CSCreateHousePacket {
         design_id: template,
         item_id: id,

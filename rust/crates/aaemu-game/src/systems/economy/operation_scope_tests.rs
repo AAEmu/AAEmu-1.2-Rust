@@ -251,7 +251,7 @@ fn sale_house(server: &GameServer, player: &PlayerRef) -> HouseRef {
     {
         let mut h = house.data();
         h.unit.owner_id = player.character_id;
-        h.protection_end_date = housing::manager::now() + 3600;
+        h.protection_end_date = housing::manager::now() + 14 * 24 * 3600;
         h.current_step = -1;
     }
     house

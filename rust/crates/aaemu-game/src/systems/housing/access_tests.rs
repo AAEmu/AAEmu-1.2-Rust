@@ -391,7 +391,7 @@ fn fixture_with_limits(always_public: bool, overall_limit: u32, group_limit: Opt
         h.account_id = 1001;
         h.unit.transform.set_xyz(105.0, 100.0, 100.0);
         h.unit.transform.zone_id = TEST_ZONE;
-        h.protection_end_date = manager::now() + 7 * 86400;
+        h.protection_end_date = manager::now() + 14 * 86400;
     }
     manager::set_current_step(&server, &house, -1, false);
     assert!(server.systems.housing.manager.insert(&house));
@@ -1084,4 +1084,124 @@ async fn house_bench_permissions_are_rechecked_before_products_are_created() {
         .economy
         .craft
         .is_crafting(fx.guest.character_id));
+}
+
+fn error_codes(client: &mut TestClient) -> Vec<i16> {
+    client
+        .drain()
+        .into_iter()
+        .filter(|(op, _)| *op == sc::SCErrorMsgPacket)
+        .map(|(_, body)| i16::from_le_bytes([body[0], body[1]]))
+        .collect()
+}
+
+#[tokio::test]
+async fn decoration_from_far_away_is_refused_with_too_far_to_decorate_house() {
+    let mut fx = fixture(false);
+    fx.owner.data().unit.transform.set_xyz(300.0, 300.0, 100.0);
+    assert_eq!(
+        ops::decorate_house(&fx.server, &fx.owner, &decoration(&fx)),
+        Ok(false)
+    );
+    assert_eq!(
+        error_codes(&mut fx.owner_client),
+        vec![manager::error_message::TOO_FAR_TO_DECORATE_HOUSE]
+    );
+    assert!(furniture(&fx).is_empty());
+    assert_eq!(fx.eco.debit_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn decoration_outside_the_garden_is_refused() {
+    let mut fx = fixture(false);
+    let mut p = decoration(&fx);
+    p.x = 9.0; // the fixture garden radius is 8 m
+    assert_eq!(ops::decorate_house(&fx.server, &fx.owner, &p), Ok(false));
+    assert_eq!(
+        error_codes(&mut fx.owner_client),
+        vec![manager::error_message::HOUSE_CANNOT_DECORATE_OUT_OF_GARDEN]
+    );
+    assert!(furniture(&fx).is_empty());
+    assert_eq!(fx.eco.debit_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn decoration_over_the_house_limit_reports_too_many_decorations() {
+    let mut fx = fixture_with_limits(false, 1, None);
+    {
+        let mut item = fx.eco.item.lock().unwrap();
+        item.max_count = 10;
+        item.count = 10;
+    }
+    assert_eq!(
+        ops::decorate_house(&fx.server, &fx.owner, &decoration(&fx)),
+        Ok(true)
+    );
+    fx.owner_client.drain();
+    assert_eq!(
+        ops::decorate_house(&fx.server, &fx.owner, &decoration(&fx)),
+        Ok(false)
+    );
+    assert_eq!(
+        error_codes(&mut fx.owner_client),
+        vec![manager::error_message::HOUSE_TOO_MANY_DECORATIONS]
+    );
+    assert_eq!(furniture(&fx).len(), 1);
+}
+
+#[tokio::test]
+async fn delayed_tax_blocks_sale_listing() {
+    let mut fx = fixture(false);
+    fx.house.data().protection_end_date = manager::now() + 3 * 86400;
+    assert!(!ops::set_for_sale(
+        &fx.server,
+        &fx.house,
+        100,
+        0,
+        Some(&fx.owner)
+    ));
+    assert_eq!(
+        error_codes(&mut fx.owner_client),
+        vec![manager::error_message::HOUSE_CANNOT_SELL_AS_DELAYED_TAX]
+    );
+    assert_eq!(fx.house.data().sell_price, 0);
+    assert_eq!(fx.eco.consumed_certificates.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn an_under_construction_house_cannot_be_listed() {
+    let mut fx = fixture(false);
+    fx.house.data().current_step = 0;
+    assert!(!ops::set_for_sale(
+        &fx.server,
+        &fx.house,
+        100,
+        0,
+        Some(&fx.owner)
+    ));
+    assert_eq!(
+        error_codes(&mut fx.owner_client),
+        vec![manager::error_message::HOUSE_CANNOT_SELL_AS_UNDER_CONSTRUCTION]
+    );
+    assert_eq!(fx.house.data().sell_price, 0);
+    assert_eq!(fx.eco.consumed_certificates.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_listed_house_cannot_be_relisted_at_another_price() {
+    let mut fx = fixture(false);
+    assert!(ops::set_for_sale(&fx.server, &fx.house, 100, 0, None));
+    assert!(!ops::set_for_sale(
+        &fx.server,
+        &fx.house,
+        200,
+        0,
+        Some(&fx.owner)
+    ));
+    assert_eq!(
+        error_codes(&mut fx.owner_client),
+        vec![manager::error_message::HOUSE_CANNOT_SELL_AS_ALREADY_FOR_SALE]
+    );
+    assert_eq!(fx.house.data().sell_price, 100);
+    assert_eq!(fx.eco.consumed_certificates.load(Ordering::SeqCst), 0);
 }
