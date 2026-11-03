@@ -52,6 +52,9 @@ const FORCED_RESYNC_INTERVAL_MS: i64 = 5000;
 pub const OFFLINE_TEAM_DISBAND_GRACE_MS: i64 = 5 * 60 * 1000;
 /// Invitation timeout (`activeInvitation.Time.AddSeconds(60)`).
 pub(crate) const INVITATION_TIMEOUT_MS: i64 = 60_000;
+/// Server-side area-invite cooldown. The 1.2 client gates its own button for 30000 ms
+/// (`FUN_39304ef0`, constant 30000.0) and the locale text says "(30 sec cooldown)".
+pub(crate) const AREA_INVITE_COOLDOWN_MS: i64 = 30_000;
 /// Hard cap on pending invitations. One invitation per target and the 60 s sweep keep the map
 /// bounded by the online players; the cap is the defensive limit for a server that never ticks.
 const MAX_PENDING_INVITATIONS: usize = 10_000;
@@ -297,6 +300,9 @@ struct Invitation {
     target: PlayerRef,
     time_ms: i64,
     is_party: bool,
+    /// `SCAskToJoinTeamArea` was sent (an area invitation is replaced by a later invitation and
+    /// skipped silently by the area loop).
+    is_area: bool,
 }
 
 /// `MemberSyncState`.
@@ -338,6 +344,8 @@ struct State {
     invitations: HashMap<u32, Invitation>,
     /// `_lastSyncState`.
     last_sync: HashMap<(u32, u32), MemberSyncState>,
+    /// Area-invite cooldown deadline (unix ms) per inviter (`FUN_39304ef0` client 30 s gate).
+    area_invite_until: HashMap<u32, i64>,
 }
 
 /// A member snapshot for `TeamMember.Write` / `WritePerson`.
@@ -537,7 +545,12 @@ impl TeamManager {
     /// `InviteAreaToTeam(owner, teamId, isParty)`: every player within 100 m that is not in a
     /// team, is not blocked and is not hostile gets `SCAskToJoinTeamArea` (the 1.2 client log:
     /// "now inviting characters into raidteam in range of 100 meters"). The inviter gets
-    /// `SCTeamAreaInvited` with the number of invitations actually sent.
+    /// `SCTeamAreaInvited`.
+    ///
+    /// The client gates its own button for 30 s; the server keeps the same per-inviter cooldown
+    /// and answers a second request with `SCTeamAreaInvited { r: remaining_ms, s: false }`
+    /// (the client shows "Can use area invite after %.1f seconds" using `r * 0.001`). With
+    /// `s = true` the client ignores `r`, so the success reply carries 0.
     ///
     /// The 1.2 "refuse area invitation" option is client-local (`X2Team.SetRefuseAreaInvitation`
     /// only stores a flag; `OnAskToJoinTeamArea` drops the popup when it is set), so it cannot
@@ -546,7 +559,7 @@ impl TeamManager {
         &self,
         server: &GameServer,
         owner: &PlayerRef,
-        team_id: u32,
+        _team_id: u32,
         is_party: bool,
     ) {
         let Some(world) = server.world.world(owner.data().unit.transform.instance_id) else {
@@ -563,11 +576,23 @@ impl TeamManager {
                 dx * dx + dy * dy < 100.0 * 100.0
             })
             .collect();
+        let now = util::now_ms();
         let mut st = self.lock();
-        prune_expired_invitations(&mut st, util::now_ms());
-        let team = (team_id != 0)
-            .then(|| st.teams.get(&team_id))
-            .flatten()
+        prune_expired_invitations(&mut st, now);
+        st.area_invite_until.retain(|_, until| *until > now);
+        if let Some(until) = st.area_invite_until.get(&owner.character_id) {
+            let remaining = (*until - now).clamp(0, i64::from(u32::MAX)) as u32;
+            drop(st);
+            owner.send(SCTeamAreaInvitedPacket {
+                r: remaining,
+                s: false,
+            });
+            return;
+        }
+        // The team is the inviter's current team, never the client-sent id (a crafted id = 0
+        // used to bypass the permission check).
+        let team = Self::team_id_by_unit(&st, owner.character_id)
+            .and_then(|id| st.teams.get(&id))
             .map(|t| {
                 (
                     t.id,
@@ -585,24 +610,35 @@ impl TeamManager {
             }
         }
         let invite_is_party = team.map_or(is_party, |t| t.1);
+        st.area_invite_until
+            .insert(owner.character_id, now + AREA_INVITE_COOLDOWN_MS);
         let mut invited = 0u32;
         for c in around {
-            let (in_party, rel) = {
+            let (in_party, in_team, rel) = {
                 let rel = faction::player_relation(server, owner, &c);
-                (c.data().in_party, rel)
+                (
+                    c.data().in_party,
+                    Self::team_id_by_unit(&st, c.character_id).is_some(),
+                    rel,
+                )
             };
-            if in_party || !matches!(rel, relation_state::FRIENDLY | relation_state::NEUTRAL) {
+            if in_party
+                || in_team
+                || !matches!(rel, relation_state::FRIENDLY | relation_state::NEUTRAL)
+            {
                 continue;
             }
             if self.invite_locked(server, &mut st, owner, "", team, invite_is_party, &c, true) {
                 invited += 1;
             }
         }
+        tracing::debug!(
+            "Area invitation from {} reached {} player(s)",
+            owner.character_id,
+            invited
+        );
         drop(st);
-        owner.send(SCTeamAreaInvitedPacket {
-            r: invited,
-            s: true,
-        });
+        owner.send(SCTeamAreaInvitedPacket { r: 0, s: true });
     }
 
     /// `AskToJoin(owner, targetName, teamId, isParty, targetObj)`.
@@ -611,7 +647,7 @@ impl TeamManager {
         server: &GameServer,
         owner: &PlayerRef,
         target_name: &str,
-        team_id: u32,
+        _team_id: u32,
         is_party: bool,
         target_obj: Option<&PlayerRef>,
     ) {
@@ -624,9 +660,10 @@ impl TeamManager {
         };
         let mut st = self.lock();
         prune_expired_invitations(&mut st, util::now_ms());
-        let team = (team_id != 0)
-            .then(|| st.teams.get(&team_id))
-            .flatten()
+        // The invitation belongs to the inviter's current team; the client-sent team id is
+        // ignored so a stale/crafted id cannot invite into someone else's team.
+        let team = Self::team_id_by_unit(&st, owner.character_id)
+            .and_then(|id| st.teams.get(&id))
             .map(|t| {
                 (
                     t.id,
@@ -648,8 +685,10 @@ impl TeamManager {
     }
 
     /// The invitation body of `AskToJoin` (the caller holds the manager lock): block list,
-    /// hostility, the pending-invitation slot, the team permission and the invitation insert.
-    /// Sends `SCAskToJoinTeamArea` for an area invitation and `SCAskToJoinTeam` otherwise.
+    /// hostility, the invitee's team, the pending-invitation slot, the team permission and the
+    /// invitation insert. Sends `SCAskToJoinTeamArea` for an area invitation and
+    /// `SCAskToJoinTeam` otherwise. A new invitation replaces a pending area invitation; an
+    /// area invitation skips an already-pending target silently.
     #[allow(clippy::too_many_arguments)]
     fn invite_locked(
         &self,
@@ -673,12 +712,28 @@ impl TeamManager {
             send_error(owner, error::TEAM_INVITE_REFUSED);
             return false;
         }
-        if st.invitations.contains_key(&target.character_id) {
-            owner.send(SCRejectedTeamPacket {
-                name: target_name.to_string(),
-                party: is_party,
-            });
+        // `TEAM_INVITEE_IN_TEAM` is the inviter-facing code for a target already in a group
+        // (the area loop filters these out, so only a named invite answers).
+        if Self::team_id_by_unit(st, target.character_id).is_some() {
+            if !is_area {
+                send_error(owner, error::TEAM_INVITEE_IN_TEAM);
+            }
             return false;
+        }
+        if let Some(existing) = st.invitations.get(&target.character_id) {
+            if existing.is_area {
+                // A refused/ignored area invitation must not block a real invitation.
+                st.invitations.remove(&target.character_id);
+            } else if is_area {
+                // The area loop must not spam the inviter with empty-name rejections.
+                return false;
+            } else {
+                owner.send(SCRejectedTeamPacket {
+                    name: target_name.to_string(),
+                    party: is_party,
+                });
+                return false;
+            }
         }
         if let Some((_, team_is_party, team_owner, marked)) = team {
             let allowed = team_owner == owner.character_id || (!team_is_party && marked);
@@ -702,6 +757,7 @@ impl TeamManager {
                 owner: owner.clone(),
                 target: target.clone(),
                 is_party: inv_team_is_party,
+                is_area,
                 time_ms: util::now_ms(),
                 team_id: inv_team_id,
             },
@@ -731,19 +787,26 @@ impl TeamManager {
         &self,
         server: &GameServer,
         target: &PlayerRef,
-        _team_id: u32,
+        team_id: u32,
         _is_party: bool,
-        _owner_id: u32,
+        owner_id: u32,
         is_reject: bool,
         _char_name: &str,
         _is_area: bool,
     ) {
         let mut st = self.lock();
         let Some(inv) = st.invitations.get(&target.character_id).cloned() else {
-            // No active invitation (already consumed, expired and swept, or never issued).
-            send_error(target, error::TEAM_INVITE_REFUSED);
+            // A reject or an accept without a pending invitation is silent (the client
+            // already validates its own popup; no team error fits this case).
             return;
         };
+        // A stale popup from another inviter must not consume (or reject) this invitation.
+        if owner_id != inv.owner.character_id {
+            return;
+        }
+        if team_id != 0 && team_id != inv.team_id {
+            return;
+        }
         if is_reject || inv.time_ms + INVITATION_TIMEOUT_MS < util::now_ms() {
             let name = inv.target.data().unit.name.clone();
             inv.owner.send(SCRejectedTeamPacket {
@@ -753,17 +816,42 @@ impl TeamManager {
             st.invitations.remove(&target.character_id);
             return;
         }
+        // The client's own accept check (`FUN_393075a0` -> `FUN_39428370(0x52)`): an invitee
+        // already in a group gets `TEAM_JOIN_ALONE`.
+        if Self::team_id_by_unit(&st, target.character_id).is_some() {
+            send_error(target, error::TEAM_JOIN_ALONE);
+            st.invitations.remove(&target.character_id);
+            return;
+        }
+        // The inviter must still be online and (when the invitation named a team) still in
+        // that same team with the rights to invite.
+        if !inv.owner.data().is_online {
+            send_error(target, error::TEAM_INVITOR_OFFLINE);
+            st.invitations.remove(&target.character_id);
+            return;
+        }
+        let owner_team = Self::team_id_by_unit(&st, inv.owner.character_id);
+        if inv.team_id != 0 && owner_team != Some(inv.team_id) {
+            send_error(target, error::TEAM_INVITOR_MOVED);
+            st.invitations.remove(&target.character_id);
+            return;
+        }
+        if let Some(tid) = owner_team {
+            let team = st.teams.get(&tid).expect("team");
+            let allowed = team.owner_id == inv.owner.character_id
+                || (!team.is_party && team.is_marked(inv.owner.character_id));
+            if !allowed {
+                send_error(&inv.owner, error::TEAM_NO_RIGHTS);
+                st.invitations.remove(&target.character_id);
+                return;
+            }
+        }
         // An area invitation is answered like a named one; the invitation carries the team.
-        match Self::team_id_by_unit(&st, inv.owner.character_id) {
+        match owner_team {
             None => {
-                if inv.team_id == 0 {
-                    self.create_new_team(server, &mut st, &inv);
-                } else {
-                    st.invitations.remove(&target.character_id);
-                    // The inviter's team is gone since the invitation was issued.
-                    send_error(target, error::TEAM_INVITOR_OFFLINE);
-                    return;
-                }
+                // `inv.team_id == 0` here: the inviter had no team when the invitation was
+                // issued and still has none.
+                self.create_new_team(server, &mut st, &inv);
             }
             Some(team_id) => {
                 let team = st.teams.get_mut(&team_id).expect("team");
@@ -798,16 +886,17 @@ impl TeamManager {
         st.invitations.remove(&inv.target.character_id);
     }
 
-    /// `CreateNewTeam(activeInvitation)`.
+    /// `CreateNewTeam(activeInvitation)` (the caller checked both members under the same lock).
     fn create_new_team(&self, server: &GameServer, st: &mut State, inv: &Invitation) {
-        if Self::team_id_by_unit(st, inv.target.character_id).is_some() {
-            send_error(&inv.target, error::TEAM_INVITEE_IN_TEAM);
-            return;
-        }
-        // Defensive: the caller looked the owner up under the same lock, so this only fires
-        // for a direct caller of `CreateNewTeam`.
-        if Self::team_id_by_unit(st, inv.owner.character_id).is_some() {
-            send_error(&inv.owner, error::TEAM_LOADING);
+        if Self::team_id_by_unit(st, inv.owner.character_id).is_some()
+            || Self::team_id_by_unit(st, inv.target.character_id).is_some()
+        {
+            // Unreachable from `reply_to_join_team` (it checks both under this lock).
+            tracing::warn!(
+                "CreateNewTeam: {} or {} already has a team",
+                inv.owner.character_id,
+                inv.target.character_id
+            );
             return;
         }
         let id = match server.ids.team.get_next_id() {
@@ -852,7 +941,7 @@ impl TeamManager {
     pub fn create_solo_team(&self, server: &GameServer, p: &PlayerRef, as_party: bool) {
         let mut st = self.lock();
         if Self::team_id_by_unit(&st, p.character_id).is_some() {
-            send_error(p, error::TEAM_INVITEE_IN_TEAM);
+            send_error(p, error::TEAM_JOIN_ALONE);
             return;
         }
         let id = match server.ids.team.get_next_id() {
@@ -1248,6 +1337,11 @@ impl TeamManager {
     /// `SetOffline(unit)` (from the `Character.IsOnline` setter, after the flag is cleared).
     pub fn set_offline(&self, server: &GameServer, unit: &PlayerRef) {
         let mut st = self.lock();
+        // An invitation holds the inviter's `PlayerRef`; drop the ones this character issued
+        // and its area-invite cooldown when it leaves the world.
+        st.invitations
+            .retain(|_, inv| inv.owner.character_id != unit.character_id);
+        st.area_invite_until.remove(&unit.character_id);
         let Some(team_id) = Self::team_id_by_unit(&st, unit.character_id) else {
             return;
         };
@@ -1409,6 +1503,7 @@ impl TeamManager {
         // Pending invitations expire after 60 s; the 500 ms tick sweeps them so a target that
         // never answers cannot hold its slot (and the map stays bounded).
         prune_expired_invitations(&mut st, now_ms);
+        st.area_invite_until.retain(|_, until| *until > now_ms);
         if st.teams.is_empty() {
             return;
         }

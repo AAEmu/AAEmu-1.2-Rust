@@ -185,8 +185,9 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCTeamAreaInvitedPacket(r, s)`: sent to the inviter with the invitation count (the 1.2
-    /// C# never sent it).
+    /// `SCTeamAreaInvitedPacket(r, s)`: `s = true` acknowledges an area invitation (`r` is
+    /// ignored by the client); `s = false` carries the remaining cooldown in milliseconds
+    /// (`r * 0.001` seconds). The 1.2 C# never sent it.
     SCTeamAreaInvitedPacket { r: u32, s: bool } |self, st| {
         st.write_u32(self.r).write_bool(self.s);
     }

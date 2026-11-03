@@ -1862,6 +1862,7 @@ fn spawn_party(
             0x100 + id,
         );
         p.data().unit.faction_id = *faction;
+        p.data().is_online = true;
         client.drain();
         clients.push(client);
         players.push(p);
