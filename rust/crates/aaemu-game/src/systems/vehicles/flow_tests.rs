@@ -9094,6 +9094,23 @@ async fn a_server_teleport_frees_the_transfer_seat() {
 }
 
 #[tokio::test]
+async fn a_gm_move_frees_the_transfer_seat() {
+    let (server, mut a, pa, part) = boarded_transfer().await;
+    let commands = &server.systems.services.commands;
+    crate::systems::services::commands::scripts::install(
+        commands,
+        crate::systems::services::commands::scripts::ScriptEnv::default(),
+    );
+    assert!(commands.reload());
+    let (handled, _) =
+        crate::systems::services::commands::scripts::harness::run(&server, &pa, "move 120 100 100")
+            .await;
+    assert!(handled);
+    let f = a.drain();
+    assert_unboarded(&pa, &part, &f);
+}
+
+#[tokio::test]
 async fn logout_and_disconnect_free_the_transfer_seat() {
     let (server, mut a, pa, part) = boarded_transfer().await;
     super::on_leave_world(&server, &pa);
