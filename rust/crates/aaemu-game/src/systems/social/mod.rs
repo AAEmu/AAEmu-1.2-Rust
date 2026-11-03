@@ -59,6 +59,8 @@ mod flow_tests;
 #[cfg(test)]
 mod manager_tests;
 #[cfg(test)]
+mod nation_stage4_tests;
+#[cfg(test)]
 mod nation_tests;
 #[cfg(test)]
 pub(crate) mod ranking_flow_tests;
@@ -99,6 +101,9 @@ impl Data {
 /// Managers of this subsystem (`server.systems.social`).
 #[derive(Debug, Default)]
 pub struct System {
+    /// Serialises every faction-name change across the expedition and nation stores
+    /// (`rename::lock_names`, RENAME-6).
+    pub(crate) name_lock: std::sync::Mutex<()>,
     pub teams: team::TeamManager,
     pub families: family::FamilyManager,
     /// Runtime player nations (`nations` / `nation_relations`).

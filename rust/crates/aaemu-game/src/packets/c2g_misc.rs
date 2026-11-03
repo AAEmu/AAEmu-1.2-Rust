@@ -2,8 +2,7 @@
 //! log-only packets the 1.2 C# defines but never registers (opcode 0xfff, commented out in
 //! `GameNetwork`): `CSResetQuestContextPacket`, `CSAcceptCheatQuestContextPacket`,
 //! `CSSearchListPacket`, `CSChangeExpeditionSponsorPacket`, `CSChangeSlaveTargetPacket`,
-//! `CSSetTeamOfficerPacket`. `CSUpdateNationalTaxRatePacket` is the native 1.2 CS 0x013
-//! (`FUN_392f42f0`); its log-only handler is registered until the stage-4 national tax work.
+//! `CSSetTeamOfficerPacket`.
 //!
 //! `CSTurretStatePacket` is decoded here but handled by the vehicles subsystem: the 1.2 client's
 //! aim producers (`39425490` / `39425580`) send the controlled unit's slave object id with the
@@ -142,21 +141,11 @@ log_only_packet!(
     }
 );
 
-log_only_packet!(
-    /// `CSUpdateNationalTaxRatePacket` (0x013, 1.2 client `FUN_392f42f0`; the log-only handler
-    /// is registered until the stage-4 national tax work).
-    CSUpdateNationalTaxRatePacket, debug, "UpdateNationalTaxRate, Id: {}, TaxRate: {}" {
-        id: u16 => read_u16,
-        tax_rate: i32 => read_i32,
-    }
-);
-
-/// Registers the packets of this module that the 1.2 `GameNetwork` registers, plus the native
-/// national tax opcode (0x013) whose real handler belongs to the stage-4 nation work.
+/// Registers the packets of this module that the 1.2 `GameNetwork` registers. The native 1.2
+/// national tax opcode (0x013) lives in `systems::social::packets::misc`.
 pub fn register(r: &mut PacketRegistry) {
     r.register::<CSEditCharacterPacket>(LEVEL_PLAIN, cs::CSEditCharacterPacket)
-        .register::<CSTurretStatePacket>(LEVEL_PLAIN, cs::CSTurretStatePacket)
-        .register::<CSUpdateNationalTaxRatePacket>(LEVEL_PLAIN, cs::CSUpdateNationalTaxRatePacket);
+        .register::<CSTurretStatePacket>(LEVEL_PLAIN, cs::CSTurretStatePacket);
 }
 
 #[cfg(test)]
@@ -227,16 +216,6 @@ mod tests {
                 team_id: 1,
                 member_id: 2,
                 promote: true
-            }
-        );
-        let mut s = stream(|s| {
-            s.write_u16(3).write_i32(-4);
-        });
-        assert_eq!(
-            CSUpdateNationalTaxRatePacket::read(&mut s).unwrap(),
-            CSUpdateNationalTaxRatePacket {
-                id: 3,
-                tax_rate: -4
             }
         );
         let mut s = stream(|s| {

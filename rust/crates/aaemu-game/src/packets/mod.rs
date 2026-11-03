@@ -69,9 +69,13 @@ mod tests {
         let registry = super::build_registry();
         let supported: Vec<_> = crate::opcodes::cs::NAMES
             .iter()
-            .filter(|(opcode, _)| *opcode != 0xfff)
+            // `CSICSBuyAAPointPacket` (0x137) is a known 1.2 client opcode added for WP-D
+            // (AA-point wallet); no handler exists until that feature lands.
+            .filter(|(opcode, _)| {
+                *opcode != 0xfff && *opcode != crate::opcodes::cs::CSICSBuyAAPointPacket
+            })
             .collect();
-        assert_eq!(supported.len(), 250);
+        assert_eq!(supported.len(), 254);
         for (opcode, name) in supported {
             assert!(
                 registry
@@ -88,7 +92,9 @@ mod tests {
         assert!(r.duplicates().is_empty(), "{:?}", r.duplicates());
         let mut systems = crate::net::registry::PacketRegistry::new();
         crate::systems::register_packets(&mut systems);
-        assert_eq!(r.len(), 13 + 22 + 3 + systems.len());
+        // 13 `c2g`, 22 `c2g_world`, 2 `c2g_misc` (the native national tax 0x013 moved to
+        // `systems::social::packets::misc` in stage 4) plus every subsystem registration.
+        assert_eq!(r.len(), 13 + 22 + 2 + systems.len());
     }
 
     /// Every `RegisterPacket` call of the C# `GameNetwork()` constructor is registered in Rust
@@ -145,10 +151,17 @@ mod tests {
             // named by the C# 1.2 opcode tables and the C#
             // never handled them; the real client sends them (client CS table, PORTING.md).
             // `CSUpdateNationalTaxRatePacket` is the owner-approved native 1.2 0x013
-            // (`FUN_392f42f0`); the C# left it at 0xfff (opcodes.rs comment).
+            // (`FUN_392f42f0`; handled by `systems::social::packets::misc`); the C# left it at
+            // 0xfff (opcodes.rs comment).
+            // `CSCreate/Change/Clear/CheckSecondPasswordPacket` (0x126..=0x129) are the 1.2
+            // client's second password packets (serializers FUN_397b14d0 / FUN_397b1560 /
+            // FUN_397b1650 / FUN_397b16e0); the C# never registered them.
             let rust_only = opcode == crate::opcodes::cs::CSTakeScheduleItemPacket
                 || opcode == crate::opcodes::cs::CSUpdateNationalTaxRatePacket
-                || matches!(opcode, 0x11f | 0x120 | 0x130 | 0x133);
+                || matches!(
+                    opcode,
+                    0x11f | 0x120 | 0x126 | 0x127 | 0x128 | 0x129 | 0x130 | 0x133
+                );
             if !expected.contains_key(&(level, opcode)) && opcode != 0xfff && !rust_only {
                 missing.push(format!(
                     "0x{opcode:03x}({level}) {} not registered in C#",

@@ -76,6 +76,7 @@ pub mod revive;
 pub mod rotate;
 pub mod run;
 pub mod scripts_cmd;
+pub mod second_password_cmd;
 pub mod send_packet;
 pub mod set_faction;
 pub mod set_trade_pack_mail_delay;
@@ -503,6 +504,11 @@ pub fn all_commands(env: &ScriptEnv) -> Vec<(&'static [&'static str], Arc<dyn Co
         (
             &["waterdebug", "water_debug"],
             Arc::new(water_debug_cmd::WaterDebugCmd::new(env)),
+        ),
+        // SecondPassword (Rust only: admin recovery for the 1.2 second password)
+        (
+            &["secondpassword", "secondpass", "clearsecondpassword"],
+            Arc::new(second_password_cmd::SecondPassword::new(env)),
         ),
         // WorldCmd.cs
         (&["world"], Arc::new(roots::world_cmd())),

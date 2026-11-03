@@ -750,3 +750,62 @@ async fn private_mysql_dominion_rollback_failure_retry_and_restart_preserve_auth
     }
     pool.close().await;
 }
+
+#[test]
+fn ephemeral_test_territory_is_never_prepared_for_the_financial_save() {
+    let manager = owned();
+    manager.mark_ephemeral(ZONE);
+    assert_eq!(
+        manager.prepare_save().changed_count(),
+        0,
+        "a test-only territory with a placeholder tower must not reach the dominions table"
+    );
+    let persisted = owned();
+    assert_eq!(persisted.prepare_save().changed_count(), 1);
+}
+
+#[test]
+fn owner_change_and_release_clear_the_national_monument_reference() {
+    let manager = owned();
+    manager
+        .place_national_monument(ZONE, DEFENDER, 77, 1.0, 2.0, 3.0)
+        .unwrap();
+    let released = manager.release_expedition(DEFENDER, 2000);
+    assert_eq!(released.len(), 1);
+    assert_eq!(released[0].1.national_monument_db_id, 0);
+    assert_eq!(released[0].1.national_monument_x, 0.0);
+
+    // A stale monument on an unowned row is dropped by the next claim.
+    let manager = DominionManager::default();
+    let mut stale = DominionState::unowned(ZONE, tower());
+    stale.national_monument_db_id = 77;
+    stale.national_monument_x = 1.0;
+    stale.national_monument_y = 2.0;
+    stale.national_monument_z = 3.0;
+    manager.restore(vec![stale]).unwrap();
+    let claimed = manager
+        .declare_unowned_with(ZONE, tower(), DEFENDER, 1000, || true)
+        .unwrap();
+    assert_eq!(claimed.national_monument_db_id, 0);
+
+    // A siege capture drops the previous owner's monument.
+    let manager = owned();
+    manager
+        .place_national_monument(ZONE, DEFENDER, 77, 1.0, 2.0, 3.0)
+        .unwrap();
+    manager
+        .schedule_siege(ZONE, ATTACKER, 2000, 3000, 1500)
+        .unwrap();
+    manager
+        .register_participant(ZONE, 11, ATTACKER, SiegeSide::Attacker, 1500)
+        .unwrap();
+    manager.mark_tower_destroyed(ZONE, tower(), 2000).unwrap();
+    let handle = manager
+        .begin_engraving(ZONE, tower(), 11, ATTACKER, 2_000_123)
+        .unwrap();
+    let captured = manager
+        .complete_engraving(&handle, ATTACKER, 2_300_123)
+        .unwrap();
+    assert_eq!(captured.owner_expedition_id, ATTACKER);
+    assert_eq!(captured.national_monument_db_id, 0);
+}

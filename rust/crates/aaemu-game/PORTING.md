@@ -302,7 +302,7 @@ These `SpecialType` bodies were TODO stubs that only logged in the C# (`git show
 | `SpecialEffects/GenderTransfer` (special 107) | `systems/skills/effects/special/misc.rs` (`gender_transfer`) | added | Data: skill 23469 `성별 전환하기` (beauty-salon NPC interaction, `target_type` any unit, selection target). Flips the affected player (`target` if a player, else the caster) with `new = 3 - old` (1 male <-> 2 female), refuses when an equipped item template has `char_gender` set to a third value with `GENDER_TRANSFER_AS_GENDER_EQUIPMENT` (744), rebuilds `unit.model_id` from the race/gender `characters` template and broadcasts `SCCharacterGenderAndModelModifiedPacket` (existing beauty-salon packet) to the player and observers. `Character.Save` persists the new `gender` with the next save. |
 | `SpecialEffects/MateMakeGetUp` (special 51) | `systems/vehicles/mates.rs` (`revive_mate`), `systems/skills/effects/special/misc.rs` | added | Data: skill 13719 `일으켜세우기` (revive an injured summoned mate, self-target, friendly); the former C# body only logged. Resolves the target/caster mate or, for a player caster, the active mate; only acts while `hp <= 0`. Reuses the stablehand revive values: `mates.hp/mp = MATE_FULL_POOL`, clears the summon item's `mate_dead` flag with a `RepairPets` item task and broadcasts `SCUnitPointsPacket`; the live mate is restored to `max_hp` / `max_mp`. |
 | `AccountAttributeEffect` + `SpecialEffects/AuctionPostAuthority` (special 117) | `systems/economy/account_attributes.rs`, `bridges.rs`, `world/session.rs` | added | Data: `account_attribute_effects` has 3 rows, all `kind_id = 1` (auction posting authority): item 8000027 `경매장 등록권` adds it account-wide (`is_add`, `count` 0, `time` 0, `bind_world` false) and two `is_add = false` rows remove it (VIP buff trigger, removal ticket item 8000058). Special 117 on buffs 7149 / 11034 / 8000012 grants kind 1 permanently. New `account_attributes` table (PK account/kind/world, nullable `end_time`, `world_id` 0 = not world bound), loaded on character select into `server.systems.economy.account_attributes` and persisted on every change. `is_add` upserts, otherwise every grant of the kind is deleted; `time == 0` is permanent, else `now + time` **seconds (unit inferred: all 1.2 values are 0)**. `has_account_attribute(account_id, kind)` is ready for gating; **the auction is deliberately not gated yet** (every character currently gets buff 8000012 from `UNIT_STATE_FORCED_BUFFS`, so a gate would need that decision first). |
-| `SpecialEffects/AddCharacterSlot` (special 91) | `systems/economy/character_slots.rs`, `db.rs`, `packets/c2g.rs` | added | Data: item 8000002 `캐릭터 슬롯확장 주문서` -> skill 8000002. Adds one `accounts.extra_character_slots` (`TINYINT UNSIGNED`, saturating at 255) for the caster's account, persists it and sends `SCGetSlotCountPacket` with the new value; `CSListCharacterPacket` sends that count instead of the old hard-coded 0. Found limits: the game server's `CharacterManager.Create` has **no** per-account character-count check, while `aaemu-login` hard-codes `MAX_CHARACTERS_PER_ACCOUNT = 6` (and `AcAuthResponse.slot_count = 6`); the advertised cap is therefore unchanged by this effect (a login-side read of the game DB would be needed). |
+| `SpecialEffects/AddCharacterSlot` (special 91) | `systems/economy/character_slots.rs`, `db.rs`, `packets/c2g.rs`, `managers/character.rs` | added | Data: item 8000002 `캐릭터 슬롯확장 주문서` -> skill 8000002. Adds one `accounts.extra_character_slots` (`TINYINT UNSIGNED`, saturating at 255) for the caster's account, persists it and sends `SCGetSlotCountPacket` with the new value; `CSListCharacterPacket` sends that count instead of the old hard-coded 0. The character creation limit is the login-advertised base plus those purchased slots: aaemu-login sends `Login:MaxCharactersPerAccount` (default 6) in `ACJoinResponse`/`ACAuthResponse`, and `CharacterManager.Create` re-reads the account's slots inside the save lock and refuses with `CharacterCreateError::WorldLimit` (9) at `aaemu_commons::character_slots::character_slot_limit(base, extra)`; a MySQL error on that read falls back to the base alone. **Deviation (C#):** the C# `CharacterManager.Create` had no per-account character-count check and aaemu-login hard-coded 6 in both packets, so purchased slots could never be used. `Login:AdditionalCharactersPerServer` (the expandable limit) and `Login:PreSelectCharacterPeriod` (advertised in `ACJoinResponse.afs`) are Rust-only; the pre-select flag is refused at login config load until lobby character editing (WP-E2) exists, and the game's `Characters:MaxPerAccount` must equal `Login:MaxCharactersPerAccount` (documented pair, no cross-process check; each server logs its effective value at startup). |
 
 ### systems::npcs
 
@@ -477,7 +477,7 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 | `FriendMananger`, `CharacterFriends`, `CharacterBlocked` | `systems/social/friend.rs`, `packets/friend.rs` (`managers::friend` re-exports) | done | Add / remove friends (online or by DB name lookup), block / unblock (online or by `NameManager` for offline names), status changes incl. `InParty`. The blocked list is enforced on every direct delivery path (whisper, team / area / expedition / family invite, friend add, trade and duel request); see the block-list deviation. |
 | `ChatManager`, `Models/Game/Chat` | `systems/social/chat.rs`, `session.rs` (`managers::chat` re-exports) | done | All channel kinds incl. party / raid / court, CleanUpChannels, party / raid / raid-leader / judge routing, per-channel spam delays (`SCChatSpamDelayPacket` + server-side enforcement, see "Chat spam" below). User channels (`CSJoinUserChatChannel`) are log-only as in C#. |
 | `FactionManager` relations, `SystemFaction.GetRelationState`, `Unit/Character.SetFaction` | `systems/social/faction.rs`, `packets/faction.rs` | done | Relation table validated against compact.sqlite3 (gated test). Faction CS packets are log-only as in C#; every SCFaction* struct ported. `relation_state_live` overlays the runtime nations on the static table for the combat, team, party and AI paths. |
-| Player nations (`nations`, `nation_relations`, independence, immigration, diplomacy) | `systems/social/nation.rs`, `commands/scripts/nation.rs` | stages 1-3 | Skill 18540 special effect 71 creates a nation from the caster's expedition (owner + dominion, CASTLE_CLAIM backpack); ids come from the expedition allocator; `SCFactionIndependence` + relation rows + `SCUnitFactionChanged`; online members use `set_faction`, offline `characters.faction_id` moves with `expeditions.mother` in the save transaction; login sends nation factions and relations. Stage 2 adds the invite / reply / return-to-origin / kick packets with the client's error order, persisted factions and offline kicks. Stage 3 adds `CSFactionDeclareHostile` 0x019, the type-25 friendly treaty mail (charge paid through `CSPayChargeMoney` 0x0a0) and the periodic relation expiry. See "Player nations" below. |
+| Player nations (`nations`, `nation_relations`, independence, immigration, diplomacy, rename, national tax, monument) | `systems/social/nation.rs`, `commands/scripts/nation.rs` | stages 1-4 | Skill 18540 special effect 71 creates a nation from the caster's expedition (owner + dominion, CASTLE_CLAIM backpack); ids come from the expedition allocator; `SCFactionIndependence` + relation rows + `SCUnitFactionChanged`; online members use `set_faction`, offline `characters.faction_id` moves with `expeditions.mother` in the save transaction; login sends nation factions and relations. Stage 2 adds the invite / reply / return-to-origin / kick packets with the client's error order, persisted factions and offline kicks. Stage 3 adds `CSFactionDeclareHostile` 0x019, the type-25 friendly treaty mail (charge paid through `CSPayChargeMoney` 0x0a0) and the periodic relation expiry. Stage 4 adds the nation rename (`SCNationShowRenameUI` 0x010 + the `CSRenameExpedition` nation half), the national tax (`CSUpdateNationalTaxRate` 0x013 -> `SCNationalTaxRate` 0x021) and the territory-statue monument (`SCNationalMonumentChanged` 0x022). See "Player nations" below. |
 | `GameData/AchievementGameData` (`achievements`, `achievement_objectives`, `pre_completed_achievements`, `char_records`), `Models/Game/Achievement` | `systems/social/achievement.rs` (`server.game_data.systems.social.achievements`) | done | Loader + port of `AchievementGameDataTests`; gated real-DB test `achievement_game_data_real_compact_db`. The C# 1.2 tree has no manager; the Rust achievement manager / runtime / hooks / rewards (`achievement_*.rs`) read them (see "Achievement producers" below). |
 | `DuelManager`, `Models/Game/Duels`, duel tasks | `systems/social/duel.rs`, `packets/duel.rs` | done | Request / accept (flag via hook) / start / stop / cancel, distance + HP checks, end timer (tokio tasks; `set_delays` test hook). |
 | `CrimeManager`, `TrialManager`, `Models/Game/Crime`, `TrialUpdateTask` | `systems/social/{crime,trial}.rs`, `packets/trial.rs` | done | Crime table load / save (`AfterItems`), report / evidence (hooks), bot reports, trial / jury flow with 5 s tick, audience, bounty placement / arrest payout (`systems/social/{bounty,bounty_runtime}.rs`, `bounty_pledges`; see "Wanted-player bounty"). The board is still the empty list (BOUNTY-board). Arrests, authenticated jury choices, guilty pleas, acquittals, court cleanup and reconnect jail enforcement have packet-flow regressions; prisoner buffs persist remaining online time. |
@@ -487,7 +487,7 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 
 Cross-subsystem calls: wired in phase 3b (see "Phase 3b wiring": trial court doodads / NPCs after the spawns, `SocialHooks` by social itself, crime evidence / arrests / team and duel queries from skills, loot rules from economy, court checks in portals and instances, `force_dismount` through vehicles). Still open: teleports -> `session::on_moved` (C# `Character.SetPosition` -> `TeamManager.UpdatePosition`; plain movement does not call it in C# either).
 
-#### Player nations (stages 1-2, NATION-1..13)
+#### Player nations (stages 1-4, NATION-1..17, RENAME-7..9)
 
 `systems::social::nation` implements the 1.2 "declare independence" slice: a nation is a
 top-level user faction (`mother_id == 0`, `owner_type` 0, owner = the founding expedition's
@@ -508,8 +508,9 @@ refuses a duplicate faction id (`FUN_398a5280`), so `EXPEDITION_ID` also extract
   pins the count and the hostile/neutral/friendly samples.
 * **NATION-3 (capture-pending):** the nation `SystemFaction` record mirrors the founding
   expedition clone (`allow_change_name` 0, `political_system` 1) with `diplomacy_target` 1 as
-  `FUN_392fb2d0` sets it. Whether the live 1.2 server allows a rename from this record is not
-  established (stage 4).
+  `FUN_392fb2d0` sets it. Whether the live 1.2 server sends `SCNationShowRenameUI` from a
+  production trigger and what it checks is not established; stage 4 gates the rename on a
+  server-issued offer (RENAME-7).
 * **NATION-4 (capture-pending):** no 1.2 error id is known for the "owns no dominion"
   prerequisite: the special effect and the GM command send/use 40
   `FACTION_SEPARATE_RIGHTS`. The GM command's `nation create force` skips only that check for
@@ -591,8 +592,8 @@ refuses a duplicate faction id (`FUN_398a5280`), so `EXPEDITION_ID` also extract
   origin is `character_templates.faction_id` (the same data as the client's
   `FUN_398a2660(race)`).
 * The national tax CS packet is 0x013 (`FUN_392f42f0`; owner-approved exception to the
-  never-edit `opcodes.rs` rule); a log-only handler is registered. The real tax handler, rename
-  and monument stay for stage 4.
+  never-edit `opcodes.rs` rule). Stage 4 moves it to `systems::social::packets::misc` and runs
+  the real handler (RENAME-8); the rename and monument are RENAME-7 / RENAME-9.
 * **NATION-15 (friendly treaty; accept path found, mail fields INFERRED):** the 1.2 client's
   `read_mail.alb` `acceptNationFriendButton` calls `X2Mail.PayCurrentMailChargeMoney`, the same
   charge-money button as the house-tax bill, so the accept CS opcode is the existing
@@ -654,8 +655,8 @@ refuses a duplicate faction id (`FUN_398a5280`), so `EXPEDITION_ID` also extract
 
 #### Guild rename (expedition)
 
-`CSRenameExpeditionPacket` (0x009, `{ id, name, is_expedition }`) now renames a guild when
-`is_expedition` is true; the nation half (`false`) stays log-only for the nation stage.
+`CSRenameExpeditionPacket` (0x009, `{ id, name, is_expedition }`) renames a guild when
+`is_expedition` is true; the nation half (`false`) is the nation rename (RENAME-7).
 
 Evidence (1.2 client):
 
@@ -695,7 +696,10 @@ Rules and deviations:
 * **Uniqueness matches creation.** The create path compares exactly (`name.Equals(exp.Name)`
   in C#), so rename does the same; it is **not** case-insensitive despite the MySQL column's
   `utf8_general_ci` collation. Excluding the guild itself makes re-submitting the current name
-  a no-op rename.
+  a no-op rename. Since stage 4 all four name-changing paths (guild create, guild rename,
+  independence, nation rename) share `rename::faction_name_in_use`, which also covers nation
+  and static-faction names (RENAME-3); `rename::lock_names` serialises the check and the write
+  across the expedition and nation stores (RENAME-6).
 * **Broadcast scope.** `SCFactionRenamed` goes to every online player
   (`WorldManager.broadcast_to_server`), because the faction list (`SCFactionListPacket`) and
   `SCFactionCreatedPacket` are server-wide too; sending it only to members would leave every
@@ -704,15 +708,13 @@ Rules and deviations:
   before the broadcast.
 * **capture-pending (RENAME-1):** the production trigger (item / merge collision / quest) is
   not established for 1.2; only the GM hook is wired. The nation rename reuses the shared
-  validation / retry / broadcast helpers but is not part of this stage.
-* **Known, not fixed (RENAME-2..6):**
+  validation / retry / broadcast helpers (RENAME-7).
+* **Known, not fixed (RENAME-2, 4, 5):**
   * **RENAME-2:** a failed save still broadcasts. `save()` only logs the error (and restores
     the pending removals); the in-memory name is broadcast as if persisted, and there is no
     periodic expedition save to retry it (`systems::social::System::save` covers ranking /
-    nations / bounties / crime, not expeditions). The C# call site was synchronous too.
-  * **RENAME-3:** guild names are not checked against nation names or static faction names.
-    Creation, rename and independence all keep their own namespace, so a guild can share a
-    name with a nation or a static faction.
+    nations / bounties / crime, not expeditions). The C# call site was synchronous too. A
+    nation rename has a periodic nation save, so its failed immediate write is retried.
   * **RENAME-4:** uniqueness is an exact string comparison, so case, space and Cyrillic
     look-alikes are distinct (`Knights` / `knights` / `K nights` / homoglyphs). This mirrors
     the C# `CreateExpedition` check; the MySQL column's `utf8_general_ci` collation does not
@@ -721,10 +723,109 @@ Rules and deviations:
     is unverified. The C# writes `i16`; the decompiled handler reads the name at `+0x14`,
     which suggests four bytes of error/padding, and it does not read the field at all. The
     C# layout is kept until a capture or server decompile settles it.
-  * **RENAME-6:** create vs rename has a uniqueness race. `create_expedition` checks
-    `server.expeditions.all()` (a snapshot) and calls `add` later, so a concurrent rename can
-    take the name between the check and the insert; only the rename path checks and writes
-    under one lock.
+
+#### Nation rename (RENAME-7)
+
+`CSRenameExpeditionPacket` (0x009) with `is_expedition = false` now renames the caller's
+nation. The 1.2 client's paths are `SCNationShowRenameUIPacket` 0x010 (`FUN_391d2380` reads
+nothing and calls `FUN_392f8e80(0)`, which opens the dialog only when the player owns a user
+faction) and the dialog's OK handler (`X2Faction.RenameNation` -> `FUN_392f8fa0` ->
+`FUN_397ab420` writes `{id = my nation, name, is_expedition = 0}`). `SCFactionRenamed` 0x011
+updates the cached name and `SCFactionRetryRename` 0x012 with `xpdt = 0` re-opens the nation
+dialog with the rejected name (`FUN_391e5520`). Who sends 0x010 in production is UNKNOWN; the
+GM hook `/nation rename` (and the optional name form) and the tests call the same service.
+
+* **King and offer only.** `rename_nation` requires the one-shot offer created when
+  `SCNationShowRenameUI` was sent, bound to `character -> nation id`; a forged request without
+  it is refused with 748 `ONLY_NATION_OWNER`, a non-king with the same code. The offer is
+  consumed on success, survives an invalid / taken name (retry dialog), and is dropped on
+  leave-world and on a king change. The map is capped (`MAX_NATION_RENAME_OFFERS`).
+* **One shared namespace.** The name shape is `rename::validate_faction_name` (the guild
+  config regex and 32 UTF-16 units). `rename::faction_name_in_use` rejects a nation name that
+  an expedition, another nation or a static faction already uses; the founding expedition is
+  excluded so a nation may carry its guild's name (NATION-1). The same check now runs in
+  guild creation, guild rename and independence; `rename::lock_names` makes the check and the
+  write one step across the two stores.
+* **Wire and persistence.** Success writes the in-memory nation name, immediately `UPDATE`s
+  `nations.name` under the save lock (the periodic nation save retries a failed write) and
+  broadcasts `SCFactionRenamed { id, name, byGm = false }` to every client (the faction list
+  is server-wide). An invalid name or a taken one answers `SCFactionRetryRename { xpdt =
+  false, errorMessage, name }` with 296 / 297 / 299; the client does not read the error field
+  in the decompile (RENAME-5), the re-opened dialog is the visible result.
+
+#### National tax (RENAME-8)
+
+`CSUpdateNationalTaxRatePacket` 0x013 `{zoneGroup u16, rate u32}` (`FUN_392f42f0` ->
+`FUN_397ab4d0`) is handled in `systems::social::packets::misc` (moved from the log-only
+`packets/c2g_misc.rs`). The client's confirm validator `FUN_392f4820` is mirrored: `rate >
+1000` -> 684 `DOMINION_NATIONAL_TAX_INVALID_RATE`; not the owner of the dominion-owning
+expedition's top-level faction (or an unknown / unowned dominion) -> 685
+`DOMINION_NATIONAL_TAX_NO_PERMISSION`; the same rate is ignored
+(`equal_tax_rate_warning`); a change within 86400 s -> 725 `DOMINION_NATIONAL_TAX_LATER`.
+Success stores the rate (permille/10, 0-1000) and `last_national_tax_rate_changed_at` on the
+`dominions` row (a targeted `UPDATE` of those two columns only; the full row, including the
+treasury, stays with the periodic financial save, which is the only path allowed to commit
+treasury changes with houses / mail / wallets) and broadcasts `SCNationalTaxRate` 0x021
+`{zone, taxRate, prevTaxRate, changedTime}` to every client, because the client handler
+`FUN_392f39b0` updates a server-wide dominion record and shows ui_texts 5675.
+
+* The rate is a king/lord split of collected tax excluding the peace fund (ui_texts 5536),
+  but the split arithmetic, the weekly receipt mail 24 and mail 23 (`NATIONAL_TAX_RATE`) are
+  not implemented: no 1.2 server code or capture defines them (capture-pending). A new
+  dominion starts at 0; the C# set 500 on claim, which is not 1.2 evidence.
+* 684/685/725 are the client's own error ids (`error_message.rs`), so a forged packet gets
+  the same answer the client would have produced locally.
+* Test hook: GM `nation dominion <zone>` seeds an **in-memory-only** `DominionState` for the
+  caller's guild with a placeholder tower identity (no live castle tower is needed for the tax
+  handler). The state is marked `ephemeral`, so `prepare_save` never writes the placeholder
+  tower (which would fail `validate_loaded_identity` on the next startup); the live suite uses
+  it because a castle cannot be claimed headlessly.
+
+#### National monument (RENAME-9)
+
+`SCNationalMonumentChanged` 0x022 `{zone u16, nationalMonumentDbId i64, x, y, z}` (handler
+`FUN_392f35f0` stores the db id and the three coordinates in the dominion record; the same
+fields are in `DominionData`). The monument is the territory-statue doodad named by
+`siege_zones.monument_doodad_id`: the six 1.2 castle zone groups map to doodads 7229-7234
+("Territory Statue: Akrites/Calleil/Ezi/Gon/Hora/Nui"), matching the placement skills
+23681..23688 and the removal skill 23682 by name. Placement spawns that persistent doodad and
+writes its `doodads` row with `save_now` *before* storing the db id and world position on the
+`dominions` row (`national_monument_db_id`, `_x`, `_y`, `_z`); a crash leaves an orphan statue,
+never a dominion pointing at a missing one. The reference is written with a targeted `UPDATE`
+of the four monument columns; the full row stays with the periodic financial save.
+`DominionData` at world entry carries the same values. Removal zeroes the dominion columns
+before deleting the doodad row/object and broadcasts db id 0. A change of owner (settlement
+claim, siege capture, forced release) clears the fields, broadcasts db id 0 and deletes the old
+owner's statue through the same ordered path.
+
+* **Gates (client error ids, text in `ui_texts`).** 748 `ONLY_NATION_OWNER` for a caller who
+  is not a nation king; 757 `NATION_OWNER_AT_POS_ONLY` for the king of another dominion or
+  more than 20 m from the point (the statue skills' `skills.max_range`; the exact authored
+  rule is capture-pending); 750 `NO_MORE_NATIONAL_MONUMENT` when the dominion already has one
+  or has no statue template; 751
+  `CANT_PUT_UP_NATIONAL_MONUMENT_DURING_SIEGE_PERIOD` while a siege is scheduled or active.
+  Removal is idempotent and not blocked by a siege.
+* **capture-pending:** the real placement trigger (skills 23681..23688 are InteractionEffect
+  rows with no supported server special effect), its cost / item and the authoritative range;
+  whether 750 is per dominion or per nation (implemented per dominion, because the client
+  stores the fields per dominion); and the client's reaction to a removal broadcast with db
+  id 0 (implemented as an inferred clear).
+* The migration `SQL/updates/2026-11-03_aaemu_game_dominion_monument.sql` adds the four
+  columns and the base `SQL/aaemu_game.sql` carries them.
+* **Stage 4 known, not fixed:**
+  * **Expedition id leak:** `create_expedition` and `declare_independence` allocate the
+    expedition id before the final shared-name re-check under `rename::lock_names`; if that
+    re-check fails, the id is not released (an allocator gap, not a duplicate). The early
+    check makes it unlikely; no test covers the race.
+  * **NATION-1 shared-name edge cases:** a nation created with its founding guild's name
+    cannot later rename back to that name (the shared check excludes the nation but sees the
+    guild); re-submitting the current name is an early no-op that consumes the one-shot
+    offer without sending `SCFactionRenamed`. The 1.2 client's behavior for these cases is
+    unverified.
+  * **Test gaps:** the temporary `nation-stage4` live suite is not committed (fixed names and
+    the memory-only dominion hook); a castle capture / forced release with a live statue is
+    covered by unit tests and the ordered DB path, not by a live siege. The MySQL-gated tests
+    use connection-local temporary tables.
 
 ### systems::housing
 
@@ -852,6 +953,7 @@ live acceptance remain pending.
 | `TickManager` (+ `TickEventHandler`) | `systems/services/tick.rs` | done | Thread loop (20 ms), sync / async subscribers, busy skip. Port of `TickManagerTests`. |
 | `TaskManager2`, `Models/Tasks/Task` | `systems/services/tasks.rs` | done | Delayed / repeating / cron tasks (NCrontab subset of `systems::npcs::schedule`), ids, cancel, `RemoveTasks`, `GetQueueCount`. Port of `TaskManagerTests`. |
 | `AccountManager` remainder | `systems/services/accounts.rs`, `db.rs` | done | |
+| Second password (`Create/Change/Clear/CheckSecondPasswordPacket`, `SCSecondPass*`) | `systems/services/second_password.rs` | done | 1.2 virtual-keyboard tables, one-shot key id, shared `PasswordService` hashing, MySQL failure counter + timed lock. See the deviation below. |
 | `TimedRewardsManager`, `TimedRewardsTask` | `systems/services/timed_rewards.rs` | done | |
 | `CharacterManager` remainder (`GetEffectiveAccessLevel`, `PlayerRoll` + `CSRollDicePacket` / `SCDiceValuePacket`, `StartOnlineTracking` / `CharacterOnlineTrackingTask`, `AddOfflineCrimePoints`, `ApplyBeautySalon` + `CSEnter/ExitBeautySalonPacket`, `CSBeautyshopDataPacket`, `SCCharacterGenderAndModelModifiedPacket`) | `systems/services/{character,beauty_salon}.rs` | done | Beauty salon item work through `BEAUTY_SALON_ITEMS` (economy). **Deviation (`CharacterOnlineTrackingTask`):** the C# read and rewrote the account's divine clock per character (`GetDivineClock` + `UpdateDivineClock`, 2 round trips and a commit each, every 5 s). The Rust collects the per-account seconds during the pass and writes them after it with one atomic `UPDATE accounts SET divine_clock_time = LEAST(divine_clock_time + ?, 4294967295) WHERE account_id IN (...)` per distinct non-zero delta (500 ids per statement, `db::add_divine_clock_time`), so it can no longer overwrite the 0 that `timed_rewards::do_daily_account_login` stores in between. The column is `INT UNSIGNED`; the sum saturates at `u32::MAX` where the C# `uint` wrapped. |
 | Character packets: `CSActiveWeaponChangedPacket`, `CSBroadcastVisualOptionPacket`, `CSChangeAppellationPacket` (`CharacterAppellations.Change`), `CSIdleStatusPacket`, `CSRefreshInCharacterListPacket`, `CSRequestUIDataPacket`, `CSSaveUIDataPacket`, `CSUpdateActionSlotPacket`, `CSRestrictCheckPacket`, `CSSetLpManageCharacterPacket` and the log-only `CSCharDetailPacket`, `CSCleanupLogicLinkPacket`, `CSConsoleCmdUsedPacket`, `CSCriminalLockedPacket`, `CSEditorGameModePacket`, `CSRankCharacterPacket`, `CSRequestCharBriefPacket`, `CSRequestSecondPasswordKeyTablesPacket`, `CSSetupSecondPassword`, `CSResturnAddrsPacket` (+ `SCActiveWeaponChangedPacket`, `SCUnitVisualOptionsPacket`, `SCAppellationChangedPacket`, `SCUnitIdleStatusPacket`, `SCRefreshInCharacterListPacket`, `SCResultRestrictCheckPacket`, `SCLpManagedPacket`) | `systems/services/character_packets.rs` | done | Byte-exact tests. `CSHangPacket` / `CSUnhangPacket` are `systems/vehicles/harpoon.rs` (sticky parents, rope break); `CSResurrectCharacterPacket` is `systems/skills/resurrect.rs`. |
@@ -3113,6 +3215,40 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * systems::vehicles (mate summon, 2026-11-03): a dead mate's summon item carries the corpse flag
   and `spawn_mount` refuses it with `MATE_CANNOT_SPAWN_WHILE_CORPSE`; because the same item is
   the dismiss toggle, the corpse flag also blocks dismissing the corpse. Known, not fixed.
+
+* systems::services (second password, 2026-11-03): the 1.2 second-password protocol is ported in
+  `systems::services::second_password`. The client sends four shuffled permutations of
+  `0-9a-zA-Z` keyed by a server key id (`FUN_3907a370` / `FUN_3907a430`) and the server decodes
+  through the inverse table; tables are one-shot per connection and any create/change/clear/check
+  consumes them. Create/change/clear/check hash or verify through the shared
+  `aaemu_commons::password::PasswordService` on `spawn_blocking`; the plaintext and the hash are
+  never logged. The consecutive failure counter and the lock live in
+  `accounts.second_password_hash/failed/locked_until` and every read-modify-write runs under
+  `AccountManager::lock_of`, so reconnects and parallel sessions cannot reset or race them; a
+  locked account answers `SCSecondPassAccountLocked` without hashing. `SecondPassword:Enabled`
+  also flips `Feature::Secondpass` / `IngameshopSecondpass` and supplies
+  `SCInitialConfig.secondPasswordMaxFailCount`; `MaxFailCount = 0` is refused at config load
+  (owner decision 2026-11-03: defaults 5 failures / 10 minutes, both configurable). Deviation
+  from the C# (which has no second-password implementation): the decoded password is re-validated
+  server side (alphabet, 4..=31 characters) before hashing. `SCSecondPassChanged.result` = 1..=5
+  (`R_SUCCESSED` .. `R_PASSWORD_SAME_FAILED`) is read from the compiled `chat_msg_event.alb`
+  constant table (the research note listed it as INFERRED 0..4). Two items stay **capture-pending**:
+  the unlock time is unix seconds like `SCAccountInfo.pay_end`, inferred from the client's
+  server-time comparison (`SECONDPASS-UNLOCK-1`, confirm `GetSecondPasswordUnlockRemainTime`),
+  and the lobby gating (refuse `CSSelectCharacter` / `CSDeleteCharacter` /
+  `CSCancelCharacterDelete` / `CSCreateCharacter` until passed and push
+  `SCSecondPassKeyTables(type = 4)`) is inferred from the client's locked branch
+  (`SECONDPASS-GATE-1`). The real-client virtual-keyboard UI path cannot be driven headlessly.
+  **Known, not fixed:** there is no per-connection rate limit on the 0x126..=0x129 handlers, and
+  the PBKDF2 verification runs while the shared per-account lock is held, so a burst of checks
+  can occupy the blocking pool and stall the batch tick (score 3); `CSSetLpManageCharacterPacket`
+  is not gated (WP-E2's `CSEditCharacter` must call `allow_lobby_action`); the lock time is
+  wall-clock unix seconds; and the attempt that observes an expired lock is swallowed (the
+  server resets the counter and answers `SCSecondPassAccountLocked(0)` instead of checking it).
+  Store errors fail closed: a load that cannot be decoded, or a failure counter that cannot be
+  written, refuses the action and (for the counter) every further attempt on that connection.
+  The GM command `/secondpassword <account id|character name|self>` clears the hash, counter and
+  lock under the account lock (`AccessLevels.json`, level 100) for admin recovery.
 
 ### Ranking boards (Rust only)
 

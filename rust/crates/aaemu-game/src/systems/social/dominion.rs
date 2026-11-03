@@ -20,7 +20,8 @@ use crate::world::{PlayerRef, WorldObject};
 
 use super::packets::misc::{
     SCDominionDataPacket, SCDominionOwnerChangedPacket, SCDominionTaxRatePacket,
-    SCSiegeAlertPacket, SCSiegeDeclaredPacket, SCSiegeMemberPacket, SCSiegeStatePacket,
+    SCNationalTaxRatePacket, SCSiegeAlertPacket, SCSiegeDeclaredPacket, SCSiegeMemberPacket,
+    SCSiegeStatePacket,
 };
 
 const DECLARATION_SKILL: u32 = 13_661;
@@ -301,6 +302,10 @@ pub fn snapshot(server: &GameServer, state: &DominionState, now: i64) -> Option<
             0,
         )?,
         national_tax_rate: state.national_tax_rate,
+        national_monument_db_id: state.national_monument_db_id,
+        national_monument_x: state.national_monument_x,
+        national_monument_y: state.national_monument_y,
+        national_monument_z: state.national_monument_z,
         obj_id: house.obj_id,
         territory_data: DominionTerritoryData {
             id: setting.id,
@@ -319,7 +324,6 @@ pub fn snapshot(server: &GameServer, state: &DominionState, now: i64) -> Option<
         // 0x024 packet carries the authored MINUTES. A value that cannot fit the u16 seconds
         // field drops the whole snapshot instead of truncating the end.
         non_pvp_duration: u16::try_from(i64::from(state.non_pvp_duration_min) * 60).ok()?,
-        ..Default::default()
     })
 }
 
@@ -373,6 +377,7 @@ pub fn apply_released(server: &GameServer, previous: &DominionState, released: &
     if previous.owner_expedition_id != 0 && released.owner_expedition_id == 0 {
         super::dominion_notifications::broadcast_deleted(server, released.zone_group_id);
     }
+    clear_national_monument_on_owner_change(server, previous, released);
 }
 
 /// Ownership delta followed by the authoritative snapshot: the native delta resets national
@@ -491,6 +496,216 @@ pub fn update_tax_rate(server: &GameServer, player: &PlayerRef, zone: u16, tax_r
     broadcast_snapshot(server, &state, false);
 }
 
+/// `CSUpdateNationalTaxRatePacket` (0x013): the nation king sets the national tax rate of a
+/// dominion owned by an expedition inside the kingdom. The checks mirror the 1.2 client's
+/// confirm validator (`FUN_392f4820`): `rate > 1000` -> 684; an unknown / unowned dominion or
+/// a caller who is not the king of the dominion's top-level faction -> 685; the same rate is
+/// ignored (`equal_tax_rate_warning`); a change within 86400 s -> 725. Success broadcasts
+/// `SCNationalTaxRate` (0x021; handler `FUN_392f39b0` and notice ui_texts 5675) to every
+/// client, because the dominion record is server-wide, and leaves the row dirty for the
+/// periodic dominion save. The rate is permille/10 (0-1000); applying it to collected tax and
+/// the weekly receipt mail (type 24) are capture-pending (RENAME-8).
+pub fn update_national_tax_rate(server: &GameServer, player: &PlayerRef, zone: u16, rate: u32) {
+    let _items = server.systems.economy.operation_scope();
+    let _operation = server
+        .systems
+        .housing
+        .operation_lock
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if rate > 1000 {
+        super::util::send_error(
+            player,
+            crate::systems::economy::error_message::DOMINION_NATIONAL_TAX_INVALID_RATE,
+        );
+        return;
+    }
+    let Some(state) = server.systems.housing.dominions.get(u32::from(zone)) else {
+        super::util::send_error(
+            player,
+            crate::systems::economy::error_message::DOMINION_NATIONAL_TAX_NO_PERMISSION,
+        );
+        return;
+    };
+    let Some(nation) = server.systems.social.nations.owned_by(player.character_id) else {
+        super::util::send_error(
+            player,
+            crate::systems::economy::error_message::DOMINION_NATIONAL_TAX_NO_PERMISSION,
+        );
+        return;
+    };
+    if state.owner_expedition_id == 0
+        || super::nation::expedition_top_level_faction(server, state.owner_expedition_id)
+            != Some(nation.id)
+    {
+        super::util::send_error(
+            player,
+            crate::systems::economy::error_message::DOMINION_NATIONAL_TAX_NO_PERMISSION,
+        );
+        return;
+    }
+    if state.national_tax_rate == rate as u16 {
+        return;
+    }
+    let prev = state.national_tax_rate;
+    let now = Utc::now().timestamp();
+    let state = match server.systems.housing.dominions.set_national_tax_rate(
+        u32::from(zone),
+        state.owner_expedition_id,
+        rate as u16,
+        now,
+    ) {
+        Ok(state) => state,
+        Err(DominionError::NationalTaxRateChangeLater) => {
+            super::util::send_error(
+                player,
+                crate::systems::economy::error_message::DOMINION_NATIONAL_TAX_LATER,
+            );
+            return;
+        }
+        Err(DominionError::InvalidNationalTaxRate) => {
+            super::util::send_error(
+                player,
+                crate::systems::economy::error_message::DOMINION_NATIONAL_TAX_INVALID_RATE,
+            );
+            return;
+        }
+        Err(_) => return,
+    };
+    server.world.broadcast_to_server(&SCNationalTaxRatePacket {
+        id: zone,
+        tax_rate: i32::from(state.national_tax_rate),
+        prev_tax_rate: i32::from(prev),
+        changed_time: DateTime::from_timestamp(state.last_national_tax_rate_changed_at, 0)
+            .unwrap_or(DateTime::<Utc>::MIN_UTC),
+    });
+    schedule_persist_national_tax(
+        server,
+        u32::from(zone),
+        state.national_tax_rate,
+        state.last_national_tax_rate_changed_at,
+    );
+}
+
+/// Writes only the national tax columns of one territory. Treasury / siege / other columns
+/// stay with the periodic financial save, which is the only path allowed to commit treasury
+/// changes with houses / mail / wallets (`managers/save.rs`). The in-memory row remains dirty,
+/// so the next financial save writes the same values again.
+pub(crate) async fn persist_national_tax(
+    server: &GameServer,
+    zone_group_id: u32,
+    rate: u16,
+    changed_at: i64,
+) -> sqlx::Result<()> {
+    let _save = server.save.transaction_lock().await;
+    crate::systems::housing::dominion::db::write_national_tax_rate(
+        &server.db,
+        zone_group_id,
+        rate,
+        changed_at,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Spawns [`persist_national_tax`] (no-op in unit tests without a server handle).
+pub(crate) fn schedule_persist_national_tax(
+    server: &GameServer,
+    zone_group_id: u32,
+    rate: u16,
+    changed_at: i64,
+) {
+    let Some(server) = server.self_arc() else {
+        return;
+    };
+    tokio::spawn(async move {
+        if let Err(error) = persist_national_tax(&server, zone_group_id, rate, changed_at).await {
+            tracing::error!("Persisting the national tax of zone {zone_group_id} failed: {error}");
+        }
+    });
+}
+
+/// Writes only the national monument columns of one territory (zeroes clear it). The full row
+/// stays with the periodic financial save.
+pub(crate) async fn persist_national_monument(
+    server: &GameServer,
+    zone_group_id: u32,
+    db_id: i64,
+    x: f32,
+    y: f32,
+    z: f32,
+) -> sqlx::Result<()> {
+    let _save = server.save.transaction_lock().await;
+    crate::systems::housing::dominion::db::write_national_monument(
+        &server.db,
+        zone_group_id,
+        db_id,
+        x,
+        y,
+        z,
+    )
+    .await?;
+    Ok(())
+}
+
+/// A territory changed owner (siege capture, re-claim) or was released: announce that the old
+/// statue is gone, then zero the monument columns and delete the doodad row. The authority
+/// already cleared the in-memory fields. The zero update precedes the doodad delete, so a
+/// crash between them leaves an orphan doodad, not a dominion pointing at a missing one.
+pub(crate) fn clear_national_monument_on_owner_change(
+    server: &GameServer,
+    previous: &DominionState,
+    current: &DominionState,
+) {
+    let old_db_id = previous.national_monument_db_id;
+    if old_db_id == 0 {
+        return;
+    }
+    if let Ok(zone) = u16::try_from(current.zone_group_id) {
+        server
+            .world
+            .broadcast_to_server(&super::packets::misc::SCNationalMonumentChangedPacket {
+                id: zone,
+                national_monument_db_id: 0,
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            });
+    }
+    let instance_id = current.tower.instance_id;
+    let old_db_id = u32::try_from(old_db_id.max(0)).unwrap_or(0);
+    let Some(server) = server.self_arc() else {
+        // Unit tests have no shared handle: remove the visible doodad and let the DB writer
+        // queue its row delete (the state is already cleared in memory).
+        if let Some(world) = server.world.world(instance_id) {
+            if let Some(doodad) = world.doodad_by_db_id(old_db_id) {
+                crate::systems::npcs::doodad::manager::delete(server, &world, &doodad);
+                return;
+            }
+        }
+        crate::systems::npcs::doodad::db::delete_row(server, old_db_id);
+        return;
+    };
+    let zone_group_id = current.zone_group_id;
+    tokio::spawn(async move {
+        if let Err(error) =
+            persist_national_monument(&server, zone_group_id, 0, 0.0, 0.0, 0.0).await
+        {
+            tracing::error!(
+                "Clearing the national monument of zone {zone_group_id} failed: {error}"
+            );
+            return;
+        }
+        if let Some(world) = server.world.world(instance_id) {
+            if let Some(doodad) = world.doodad_by_db_id(old_db_id) {
+                crate::systems::npcs::doodad::manager::delete(&server, &world, &doodad);
+                return;
+            }
+        }
+        crate::systems::npcs::doodad::db::delete_row(&server, old_db_id);
+    });
+}
+
 /// Initial unowned claim, only from the accepted original 20-second skill and exact carried
 /// Purifying Archeum. Ownership assignment and pack consumption share one authority operation.
 pub fn declare_effect(server: &GameServer, args: &EffectArgs<'_>) {
@@ -599,6 +814,7 @@ pub fn declare_effect(server: &GameServer, args: &EffectArgs<'_>) {
         return;
     }
     let mut effects = None;
+    let previous = server.systems.housing.dominions.get(zone);
     let claim = server.systems.housing.dominions.declare_unowned_with(
         zone,
         identity,
@@ -661,6 +877,9 @@ pub fn declare_effect(server: &GameServer, args: &EffectArgs<'_>) {
             crate::systems::npcs::doodad::manager::spawn(server, &world, &doodad);
         }
         broadcast_snapshot(server, &state, true);
+        if let Some(previous) = previous {
+            clear_national_monument_on_owner_change(server, &previous, &state);
+        }
     }
 }
 
@@ -1242,10 +1461,23 @@ mod authority_tests {
     async fn snapshot_uses_live_tower_authored_limits_and_native_timer_seconds() {
         let f = fixture();
         let mut state = owned(&f);
+        state.national_monument_db_id = 77;
+        state.national_monument_x = 10.5;
+        state.national_monument_y = 20.0;
+        state.national_monument_z = 30.0;
         let data = snapshot(&f.server, &state, 100).unwrap();
         assert_eq!(
             (data.zone_id, data.expedition_id, data.house, data.obj_id),
             (25, 77, 13, 0x200)
+        );
+        assert_eq!(
+            (
+                data.national_monument_db_id,
+                data.national_monument_x,
+                data.national_monument_y,
+                data.national_monument_z
+            ),
+            (77, 10.5, 20.0, 30.0)
         );
         assert_eq!((data.x, data.y, data.z), (105.0, 100.0, 100.0));
         assert_eq!(

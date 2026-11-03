@@ -75,6 +75,12 @@ pub struct AppConfig {
     pub access_level: Vec<(String, i32)>,
     #[serde(rename = "account")]
     pub account: AccountConfig,
+    /// `Characters` (Rust only: the lobby character-slot limit).
+    #[serde(rename = "characters")]
+    pub characters: CharactersConfig,
+    /// `SecondPassword` (1.2 second password and its account lock).
+    #[serde(rename = "secondpassword")]
+    pub second_password: SecondPasswordConfig,
     #[serde(rename = "labor")]
     pub labor: CurrencyValuesConfig,
     /// `LaborOffline` (labor granted per offline tick on login).
@@ -153,6 +159,8 @@ impl Default for AppConfig {
             discord_token: None,
             access_level: Vec::new(),
             account: AccountConfig::default(),
+            characters: CharactersConfig::default(),
+            second_password: SecondPasswordConfig::default(),
             labor: CurrencyValuesConfig::default(),
             labor_offline: CurrencyValuesConfig::default(),
             credits: CurrencyValuesConfig::default(),
@@ -291,6 +299,52 @@ impl Default for AccountConfig {
             access_level_first_character: 100,
             delete_release_name: false,
             delete_timings: Vec::new(),
+        }
+    }
+}
+
+/// `Characters` (Rust only): the lobby character-slot limit.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct CharactersConfig {
+    /// Base character slots of every account, before the purchased
+    /// `accounts.extra_character_slots` are added. Must equal the login server's
+    /// `Login:MaxCharactersPerAccount`; the login server advertises it, this server enforces it.
+    /// There is no cross-process check of the two values.
+    #[serde(rename = "maxperaccount", deserialize_with = "lenient")]
+    pub max_per_account: u8,
+}
+
+impl Default for CharactersConfig {
+    fn default() -> Self {
+        Self {
+            max_per_account: aaemu_commons::character_slots::DEFAULT_MAX_CHARACTERS_PER_ACCOUNT,
+        }
+    }
+}
+
+/// `SecondPassword` (Rust only: the 1.2 virtual-keyboard second password, WP-A).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct SecondPasswordConfig {
+    /// Enables the feature and its `Feature::Secondpass` / `IngameshopSecondpass` bits.
+    #[serde(rename = "enabled", deserialize_with = "lenient")]
+    pub enabled: bool,
+    /// Consecutive failed checks before the account is locked. `0` is refused at load: the
+    /// feature cannot run without a lock (owner decision, 2026-11-03).
+    #[serde(rename = "maxfailcount", deserialize_with = "lenient")]
+    pub max_fail_count: u8,
+    /// How long a locked account refuses checks (minutes, at least 1: `0` is refused at load).
+    #[serde(rename = "lockminutes", deserialize_with = "lenient")]
+    pub lock_minutes: u32,
+}
+
+impl Default for SecondPasswordConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_fail_count: 5,
+            lock_minutes: 10,
         }
     }
 }
@@ -652,7 +706,7 @@ pub const USER_SECRETS_ID: &str = "426ad5c3-9a72-44e9-88f5-4b5940b98c28";
 
 /// The top-level `AppConfiguration` members (environment variables are only applied below
 /// these keys; anything else could never bind).
-const TOP_LEVEL_KEYS: [&str; 31] = [
+const TOP_LEVEL_KEYS: [&str; 33] = [
     "physics",
     "id",
     "additionalesid",
@@ -671,6 +725,8 @@ const TOP_LEVEL_KEYS: [&str; 31] = [
     "dungeons",
     "accesslevel",
     "account",
+    "characters",
+    "secondpassword",
     "labor",
     "laboroffline",
     "credits",
@@ -736,6 +792,17 @@ impl AppConfig {
         let access_level = access_levels(&value)?;
         let mut cfg: Self =
             serde_json::from_value(lowercase_keys(value)).map_err(ConfigError::Bind)?;
+        if cfg.second_password.max_fail_count == 0 {
+            return Err(ConfigError::Bind(de::Error::custom(
+                "SecondPassword:MaxFailCount must be at least 1: a second password without a \
+                 lock cannot protect the account",
+            )));
+        }
+        if cfg.second_password.lock_minutes == 0 {
+            return Err(ConfigError::Bind(de::Error::custom(
+                "SecondPassword:LockMinutes must be at least 1: a second password without a lock cannot protect the account",
+            )));
+        }
         cfg.access_level = access_level;
         Ok(cfg)
     }
@@ -1183,6 +1250,16 @@ mod tests {
         assert_eq!(cfg.login_network.port, 1234);
         assert!(cfg.account.delete_release_name);
         assert_eq!(cfg.account.access_level_first_account, 100);
+    }
+
+    #[test]
+    fn characters_config_binds_the_base_slot_count() {
+        let cfg = AppConfig::from_value(json!({
+            "Characters": { "MaxPerAccount": "8" }
+        }))
+        .unwrap();
+        assert_eq!(cfg.characters.max_per_account, 8);
+        assert_eq!(AppConfig::default().characters.max_per_account, 6);
     }
 
     #[test]

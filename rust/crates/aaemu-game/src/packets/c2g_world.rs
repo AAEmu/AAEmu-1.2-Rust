@@ -56,6 +56,9 @@ impl ClientPacket for CSCreateCharacterPacket {
                 conn.shutdown();
                 return Ok(());
             }
+            if !crate::systems::services::second_password::allow_lobby_action(server, conn).await? {
+                return Ok(());
+            }
             character::create(server, conn, self.0).await
         })
     }
@@ -81,9 +84,12 @@ impl ClientPacket for CSDeleteCharacterPacket {
         server: &'a GameServer,
         conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
-        Box::pin(
-            async move { character::set_delete_character(server, conn, self.character_id).await },
-        )
+        Box::pin(async move {
+            if !crate::systems::services::second_password::allow_lobby_action(server, conn).await? {
+                return Ok(());
+            }
+            character::set_delete_character(server, conn, self.character_id).await
+        })
     }
 }
 
@@ -107,9 +113,12 @@ impl ClientPacket for CSCancelCharacterDeletePacket {
         server: &'a GameServer,
         conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
-        Box::pin(
-            async move { character::set_restore_character(server, conn, self.character_id).await },
-        )
+        Box::pin(async move {
+            if !crate::systems::services::second_password::allow_lobby_action(server, conn).await? {
+                return Ok(());
+            }
+            character::set_restore_character(server, conn, self.character_id).await
+        })
     }
 }
 
@@ -137,7 +146,12 @@ impl ClientPacket for CSSelectCharacterPacket {
         server: &'a GameServer,
         conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async move { session::select_character(server, conn, self.character_id).await })
+        Box::pin(async move {
+            if !crate::systems::services::second_password::allow_lobby_action(server, conn).await? {
+                return Ok(());
+            }
+            session::select_character(server, conn, self.character_id).await
+        })
     }
 }
 

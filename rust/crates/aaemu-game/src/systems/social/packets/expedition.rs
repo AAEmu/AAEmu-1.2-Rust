@@ -172,17 +172,19 @@ cs_packet!(
 );
 
 cs_packet!(
-    /// `CSRenameExpeditionPacket`. `is_expedition == false` is the nation half, still log-only
-    /// (the nation rename stage owns it).
+    /// `CSRenameExpeditionPacket` (1.2 `FUN_397ab420`: `{id, name, is_expedition}`). The same
+    /// packet carries the guild rename (`is_expedition = 1`, `SCExpeditionShowRenameUI`) and
+    /// the nation rename (`0`, `SCNationShowRenameUI`; RENAME-7).
     CSRenameExpeditionPacket { id: u32, name: String, is_expedition: bool }
     read |s| { Ok(Self { id: s.read_u32()?, name: s.read_string()?, is_expedition: s.read_bool()? }) }
     handle |self, server, conn| {
         tracing::debug!("RenameExpedition, Id: {}, Name: {}, IsExpedition: {}", self.id, self.name, self.is_expedition);
-        if !self.is_expedition {
-            return Ok(());
-        }
         let p = active_char!(conn);
-        expedition::rename_expedition(server, &p, self.id, &self.name).await;
+        if self.is_expedition {
+            expedition::rename_expedition(server, &p, self.id, &self.name).await;
+        } else {
+            crate::systems::social::nation::rename_nation(server, &p, self.id, &self.name).await;
+        }
         Ok(())
     }
 );
