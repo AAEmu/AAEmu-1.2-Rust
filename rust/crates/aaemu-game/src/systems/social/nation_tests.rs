@@ -2463,10 +2463,50 @@ async fn private_mysql_hostile_relation_persists() {
         .unwrap();
     tx.commit().await.unwrap();
 
+    // The diplomacy action writes its row immediately as well (INSERT ... ON DUPLICATE KEY).
+    nation::persist_relation(&server, 1001, 149, 3, 42, 0)
+        .await
+        .unwrap();
+
     let loaded = NationManager::default();
     loaded.load(&pool).await.unwrap();
     let loaded = loaded.get(1001).expect("loaded nation");
-    assert_eq!(loaded.relations, nation.relations);
+    assert_eq!(
+        loaded
+            .relations
+            .iter()
+            .find(|r| r.other_faction_id == 149)
+            .copied(),
+        Some(NationRelation {
+            other_faction_id: 149,
+            state: 3,
+            expire_at: 42,
+            next_state: 0,
+        })
+    );
+
+    // The expiry tick writes the moved state immediately too.
+    nation::persist_expiries(
+        &server,
+        &[nation::RelationExpiry {
+            nation_id: 1001,
+            other_faction_id: 149,
+            prev_state: 3,
+            state: 2,
+        }],
+    )
+    .await
+    .unwrap();
+    let reloaded = NationManager::default();
+    reloaded.load(&pool).await.unwrap();
+    let row = reloaded
+        .get(1001)
+        .expect("reloaded nation")
+        .relations
+        .into_iter()
+        .find(|r| r.other_faction_id == 149)
+        .expect("relation");
+    assert_eq!((row.state, row.expire_at, row.next_state), (2, 0, 0));
     pool.close().await;
 }
 

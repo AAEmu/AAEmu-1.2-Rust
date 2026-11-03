@@ -614,8 +614,9 @@ refuses a duplicate faction id (`FUN_398a5280`), so `EXPEDITION_ID` also extract
   `FACTION_DIPLOMACY_INVALID_SUBJECT`). Only `system_factions.is_diplomacy_tgt` rows are
   subjects (148 and 149 in 1.2). The 1.2 `ui_texts` ids 523/527 exist, but the client's own
   pre-send path never reaches them (the button is hidden for an already hostile subject); the
-  server therefore mirrors 718 and leaves 523/527 capture-pending. Success persists
-  `(state, expire_at, next_state)` and sends `SCFactionDeclareHostileResult` to the king plus
+  server therefore mirrors 718 and leaves 523/527 capture-pending. Success writes
+  `(state, expire_at, next_state)` immediately (the periodic save writes the row again) and
+  sends `SCFactionDeclareHostileResult` to the king plus
   `SCFactionSetRelationState` to the online members of both sides (the client refreshes its
   nation UI only when the relation involves its own nation, `FUN_392f9540`; members of both
   sides is INFERRED as the useful target set). `diplomacy_link_id` is loaded into

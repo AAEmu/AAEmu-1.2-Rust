@@ -1116,6 +1116,14 @@ pub fn declare_hostile(
         expire_at,
         faction::relation_state::HOSTILE,
     );
+    schedule_persist_relation(
+        server,
+        nation.id,
+        target,
+        faction::relation_state::HOSTILE,
+        expire_at,
+        faction::relation_state::HOSTILE,
+    );
     Ok(())
 }
 
@@ -1368,6 +1376,14 @@ pub fn pay_friend_treaty(server: &GameServer, payer: &PlayerRef, mail_id: i64) -
         expire_at,
         faction::relation_state::HOSTILE,
     );
+    schedule_persist_relation(
+        server,
+        nation.id,
+        target_id,
+        faction::relation_state::FRIENDLY,
+        expire_at,
+        faction::relation_state::HOSTILE,
+    );
     true
 }
 
@@ -1399,8 +1415,68 @@ pub fn run_periodic(server: &GameServer) {
     }
 }
 
+/// Writes one relation row immediately after a diplomacy change (the periodic save writes it
+/// again). The row must already belong to a saved nation; a nation created in the same tick is
+/// written by `save_creation` first.
+pub(crate) async fn persist_relation(
+    server: &GameServer,
+    nation_id: u32,
+    other_faction_id: u32,
+    state: u8,
+    expire_at: i64,
+    next_state: u8,
+) -> Result<()> {
+    let _save = server.save.transaction_lock().await;
+    sqlx::query(
+        "INSERT INTO nation_relations(`nation_id`,`other_faction_id`,`state`,`expire_at`,          `next_state`) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE `state` = ?,          `expire_at` = ?, `next_state` = ?",
+    )
+    .bind(nation_id)
+    .bind(other_faction_id)
+    .bind(state)
+    .bind(expire_at)
+    .bind(next_state)
+    .bind(state)
+    .bind(expire_at)
+    .bind(next_state)
+    .execute(&server.db)
+    .await?;
+    Ok(())
+}
+
+fn schedule_persist_relation(
+    server: &GameServer,
+    nation_id: u32,
+    other_faction_id: u32,
+    state: u8,
+    expire_at: i64,
+    next_state: u8,
+) {
+    let Some(server) = server.self_arc() else {
+        return;
+    };
+    tokio::spawn(async move {
+        if let Err(error) = persist_relation(
+            &server,
+            nation_id,
+            other_faction_id,
+            state,
+            expire_at,
+            next_state,
+        )
+        .await
+        {
+            tracing::error!(
+                "Persisting nation relation {nation_id} -> {other_faction_id} failed: {error}"
+            );
+        }
+    });
+}
+
 /// Writes the expired relation rows immediately (the periodic save writes them again).
-async fn persist_expiries(server: &GameServer, expiries: &[RelationExpiry]) -> Result<()> {
+pub(crate) async fn persist_expiries(
+    server: &GameServer,
+    expiries: &[RelationExpiry],
+) -> Result<()> {
     let _save = server.save.transaction_lock().await;
     let mut tx = server.db.begin().await?;
     for event in expiries {
