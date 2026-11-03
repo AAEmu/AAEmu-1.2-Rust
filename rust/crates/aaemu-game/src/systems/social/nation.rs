@@ -1198,24 +1198,34 @@ pub fn send_treaty_mail(server: &GameServer, nation_id: u32, target_id: u32) -> 
 /// (nation, target) is tracked in memory (NATION-15).
 pub fn send_due_treaty_mails(server: &GameServer, now: i64) -> usize {
     let nations = &server.systems.social.nations;
-    {
-        let mut treaties = nations
+    // Snapshot under the treaty lock, then query the mail store without it: accepting a mail
+    // holds the mail lock and takes the treaty lock, so the reverse order must not happen
+    // (NATION-15).
+    let tracked: Vec<PendingTreatyMail> = nations
+        .treaties
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .copied()
+        .collect();
+    let stale: HashSet<i64> = tracked
+        .iter()
+        .filter(|p| {
+            server
+                .systems
+                .economy
+                .mail
+                .get_mail_by_id(p.mail_id)
+                .is_none()
+        })
+        .map(|p| p.mail_id)
+        .collect();
+    if !stale.is_empty() {
+        nations
             .treaties
             .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let stale: Vec<i64> = treaties
-            .iter()
-            .filter(|p| {
-                server
-                    .systems
-                    .economy
-                    .mail
-                    .get_mail_by_id(p.mail_id)
-                    .is_none()
-            })
-            .map(|p| p.mail_id)
-            .collect();
-        treaties.retain(|p| !stale.contains(&p.mail_id));
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|p| !stale.contains(&p.mail_id));
     }
     let settings = server.game_data.systems.social.nation;
     let lead = hours_to_secs(settings.treaty_lead_hours);
