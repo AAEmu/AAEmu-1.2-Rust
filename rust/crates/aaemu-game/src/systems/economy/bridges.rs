@@ -2386,6 +2386,50 @@ impl crate::systems::npcs::hooks::EconomyBridge for EconomyForNpcs {
         }
     }
 
+    fn try_claim_shop_purchase(
+        &self,
+        server: &GameServer,
+        player: &PlayerRef,
+        template_id: u32,
+        count: i32,
+    ) -> bool {
+        let Some(limit) = super::shop_limits::purchase_limit(server, template_id) else {
+            return true;
+        };
+        let claim = super::shop_limits::ShopClaim {
+            item_id: template_id,
+            count,
+            limit,
+        };
+        server
+            .systems
+            .economy
+            .shop_limits
+            .try_claim(player.character_id, &[claim])
+    }
+
+    fn release_shop_purchase(
+        &self,
+        server: &GameServer,
+        player: &PlayerRef,
+        template_id: u32,
+        count: i32,
+    ) {
+        let Some(limit) = super::shop_limits::purchase_limit(server, template_id) else {
+            return;
+        };
+        let claim = super::shop_limits::ShopClaim {
+            item_id: template_id,
+            count,
+            limit,
+        };
+        server
+            .systems
+            .economy
+            .shop_limits
+            .release(player.character_id, &[claim]);
+    }
+
     fn npc_has_loot_items(&self, server: &GameServer, npc: &NpcRef) -> bool {
         server.systems.economy.loot.item_count(npc.obj_id) > 0
     }

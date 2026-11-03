@@ -791,6 +791,11 @@ pub struct ItemTemplate {
     pub living_point_price: i32,
     pub char_gender: u8,
     pub specialty_zone_id: u32,
+    /// `items.limited_sale_count`: how many of this template one character may buy
+    /// (0 = unlimited).
+    pub limited_sale_count: i32,
+    /// `items.one_time_sale`: one character may buy this template once.
+    pub one_time_sale: bool,
 }
 
 impl ItemTemplate {
@@ -828,6 +833,22 @@ impl ItemTemplate {
             living_point_price: 0,
             char_gender: 0,
             specialty_zone_id: 0,
+            limited_sale_count: 0,
+            one_time_sale: false,
+        }
+    }
+
+    /// The per-character purchase limit of `items.one_time_sale` / `items.limited_sale_count`
+    /// (`None` = unlimited). A one-time sale is a limit of one; when both columns are set the
+    /// smaller limit wins.
+    pub fn purchase_limit(&self) -> Option<i32> {
+        let limited = (self.limited_sale_count > 0).then_some(self.limited_sale_count);
+        let one_time = self.one_time_sale.then_some(1);
+        match (limited, one_time) {
+            (Some(limited), Some(one_time)) => Some(limited.min(one_time)),
+            (Some(limited), None) => Some(limited),
+            (None, Some(one_time)) => Some(one_time),
+            (None, None) => None,
         }
     }
 
@@ -1733,6 +1754,8 @@ impl ItemData {
             t.disenchantable = r.bool_str("disenchantable")?;
             t.living_point_price = r.i32("living_point_price")?;
             t.char_gender = r.u8("char_gender_id")?;
+            t.limited_sale_count = r.i32_or("limited_sale_count", 0)?;
+            t.one_time_sale = r.bool_str("one_time_sale")?;
             Ok(())
         })?;
 

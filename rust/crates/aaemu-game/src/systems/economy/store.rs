@@ -27,6 +27,7 @@ use super::error_message;
 use super::inventory::{self, game_point_kind, lock_pair, Inv, ItemTxn};
 use super::item_handlers::{active, sync_client_packet};
 use super::item_packets::{SCGamePointChangedPacket, SCItemTaskSuccessPacket};
+use super::shop_limits::ShopClaim;
 
 /// Discard a failed staged checkout while releasing only newly allocated IDs.
 fn discard_shop_stage(
@@ -392,6 +393,9 @@ impl CSBuyItemsPacket {
         let mut honor_points = 0i32;
         let mut vocation_badges = 0i32;
         let mut items_buy = Vec::new();
+        // The per-character purchase allowance is per item template: lines of the same item
+        // (whatever grade or currency) add up to one claim.
+        let mut claims: HashMap<u32, ShopClaim> = HashMap::new();
         for e in &self.buy {
             if e.count <= 0
                 || !matches!(
@@ -435,6 +439,14 @@ impl CSBuyItemsPacket {
                 return;
             };
             *total = sum;
+            if let Some(limit) = template.purchase_limit() {
+                let claim = claims.entry(e.item_id).or_insert(ShopClaim {
+                    item_id: e.item_id,
+                    count: 0,
+                    limit,
+                });
+                claim.count = claim.count.saturating_add(e.count);
+            }
             items_buy.push((e.item_id, e.count, e.grade));
         }
 
@@ -537,6 +549,25 @@ impl CSBuyItemsPacket {
         }
         if !succeeded {
             discard_shop_stage(&mut txn, &staged_bag, &bag, &buyback);
+            return;
+        }
+        // Everything is staged; only now take the per-character purchase allowance, so a
+        // refused or failed checkout never has to give a claim back. The economy operation
+        // lock held by the transaction keeps the check and the commit one operation.
+        let mut claims: Vec<ShopClaim> = claims.into_values().collect();
+        claims.sort_unstable_by_key(|c| c.item_id);
+        if !server
+            .systems
+            .economy
+            .shop_limits
+            .try_claim(p.character_id, &claims)
+        {
+            discard_shop_stage(&mut txn, &staged_bag, &bag, &buyback);
+            inventory::send_error_message_to(
+                &mut txn.out(),
+                &p,
+                error_message::STORE_ONE_TIME_SALE,
+            );
             return;
         }
         *bag = staged_bag;
