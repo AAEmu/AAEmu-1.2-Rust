@@ -1623,19 +1623,19 @@ async fn check_timer_registers_and_fails() {
     let mut c = character();
     with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
         let h = start(ctx, 13);
+        let run = ctx.st.quest(h).unwrap().id;
         assert!(server.systems.quests.has_quest_timer(1, 13));
         assert_eq!(ctx.st.quest(h).unwrap().time_ms, 1_000_000 + 60_000);
         // The quest's row carries the time: LeftTime 60000 at "now"
         assert_eq!(ctx.st.quest(h).unwrap().row().left_time(1_000_000), 60_000);
-        // A queued timer event before the quest's own deadline is ignored.
-        ctx.dispatch(&QuestEvent::TimerExpired { quest_id: 13 })
-            .unwrap();
-        assert_eq!(step_of(ctx, h), kind::PROGRESS);
-        assert!(server.systems.quests.has_quest_timer(1, 13));
-        // The timer task fires at or after the deadline.
-        ctx.now_ms = 1_060_000;
-        ctx.dispatch(&QuestEvent::TimerExpired { quest_id: 13 })
-            .unwrap();
+        // The token timer task may fire a little early on the wall clock (it sleeps on the
+        // monotonic clock): the matching run still fails, with no wall-clock guard.
+        ctx.now_ms = 1_060_000 - 1;
+        ctx.dispatch(&QuestEvent::TimerExpired {
+            quest_id: 13,
+            run_id: run,
+        })
+        .unwrap();
         let q = ctx.st.quest(h).unwrap();
         assert_eq!(q.step, kind::FAIL);
         assert_eq!(q.status, status::FAILED);
@@ -1648,20 +1648,27 @@ async fn check_timer_registers_and_fails() {
     // Another quest's end-state step change must not cancel this quest's timer.
     let mut c = character();
     with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
-        start(ctx, 13);
+        let h = start(ctx, 13);
+        let run = ctx.st.quest(h).unwrap().id;
         assert!(server.systems.quests.has_quest_timer(1, 13));
         let other = start(ctx, 14);
+        let other_run = ctx.st.quest(other).unwrap().id;
         ctx.dispatch(&QuestEvent::ItemUse { item_id: 1 }).unwrap();
         drain(ctx);
         assert_eq!(step_of(ctx, other), kind::READY);
         assert!(server.systems.quests.has_quest_timer(1, 13));
-        ctx.dispatch(&QuestEvent::TimerExpired { quest_id: 14 })
-            .unwrap();
+        ctx.dispatch(&QuestEvent::TimerExpired {
+            quest_id: 14,
+            run_id: other_run,
+        })
+        .unwrap();
         assert_eq!(step_of(ctx, active(ctx, 13)), kind::PROGRESS);
         assert!(server.systems.quests.has_quest_timer(1, 13));
-        ctx.now_ms = 1_060_000;
-        ctx.dispatch(&QuestEvent::TimerExpired { quest_id: 13 })
-            .unwrap();
+        ctx.dispatch(&QuestEvent::TimerExpired {
+            quest_id: 13,
+            run_id: run,
+        })
+        .unwrap();
         assert_eq!(step_of(ctx, active(ctx, 13)), kind::FAIL);
         assert!(!server.systems.quests.has_quest_timer(1, 13));
     });
@@ -1788,7 +1795,8 @@ async fn timed_quest_failure_is_told_and_a_restart_request_restarts_it() {
 
     // Timer expiry only fails the quest; the restart is a separate client request.
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    events::on_timer_expired(&server, &player, 96);
+    let run = active_row(&player, 96).id;
+    events::on_timer_expired(&server, &player, 96, run);
     server.systems.quests.run_queued_evaluations(&server);
     let frames = client.drain();
     assert_eq!(
@@ -1872,7 +1880,8 @@ async fn timed_quest_without_restart_on_fail_stays_failed_and_can_be_dropped() {
     let player = accept_timed_quest(&server, &mut client, 97).await;
 
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    events::on_timer_expired(&server, &player, 97);
+    let run = active_row(&player, 97).id;
+    events::on_timer_expired(&server, &player, 97, run);
     server.systems.quests.run_queued_evaluations(&server);
     let frames = client.drain();
     assert_eq!(
@@ -1931,8 +1940,12 @@ async fn restart_on_fail_restart_survives_save_and_reload() {
         // Some progress before the failure, to prove it is cleared by the restart.
         ctx.st.quest_mut(h).unwrap().objectives[0] = 1;
         ctx.now_ms = 1_060_000;
-        ctx.dispatch(&QuestEvent::TimerExpired { quest_id: 98 })
-            .unwrap();
+        let run = ctx.st.quest(h).unwrap().id;
+        ctx.dispatch(&QuestEvent::TimerExpired {
+            quest_id: 98,
+            run_id: run,
+        })
+        .unwrap();
         assert_eq!(ctx.st.quest(h).unwrap().status, status::FAILED);
         let before = ctx.st.quest(h).unwrap().time_ms;
         assert!(ctx.try_restart_quest(98));
@@ -1974,6 +1987,61 @@ async fn restart_on_fail_restart_survives_save_and_reload() {
     });
     assert_eq!(after.quests.active.len(), 1);
     assert_eq!(after.quests.active[0].status, status::PROGRESS);
+}
+
+#[tokio::test]
+async fn stale_timer_event_from_a_discarded_run_is_ignored() {
+    let (server, _) = server_with(|d| timed_restart_quest(d, 94, true, 60_000));
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        assert!(ctx.add_quest(94, false, acceptor::NPC, 500));
+        drain(ctx);
+        let h = active(ctx, 94);
+        let old_run = ctx.st.quest(h).unwrap().id;
+        ctx.st.quest_mut(h).unwrap().objectives[0] = 1;
+        assert!(ctx.try_restart_quest(94));
+        drain(ctx);
+        let h = active(ctx, 94);
+        let new_run = ctx.st.quest(h).unwrap().id;
+        assert_ne!(old_run, new_run);
+        // A timer armed for the discarded run must not fail the fresh one.
+        ctx.dispatch(&QuestEvent::TimerExpired {
+            quest_id: 94,
+            run_id: old_run,
+        })
+        .unwrap();
+        let q = ctx.st.quest(h).unwrap();
+        assert_eq!((q.status, q.step), (status::PROGRESS, kind::PROGRESS));
+        assert_eq!(q.objectives, [0; 5]);
+        assert!(server.systems.quests.has_quest_timer(1, 94));
+        // The fresh run's own timer still fails it.
+        ctx.dispatch(&QuestEvent::TimerExpired {
+            quest_id: 94,
+            run_id: new_run,
+        })
+        .unwrap();
+        assert_eq!(ctx.st.quest(h).unwrap().status, status::FAILED);
+        assert!(!server.systems.quests.has_quest_timer(1, 94));
+    });
+}
+
+#[tokio::test]
+async fn arming_a_saved_deadline_beyond_the_limit_clamps_time_ms_to_the_limit() {
+    let (server, _) = server_with(|d| timed_restart_quest(d, 93, false, 60_000));
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        assert!(ctx.add_quest(93, false, acceptor::NPC, 500));
+        drain(ctx);
+        let h = active(ctx, 93);
+        server.systems.quests.remove_quest_timer(1, 93);
+        ctx.st.quest_mut(h).unwrap().time_ms = 1_600_000;
+        assert!(ctx.add_quest_timer(h, 60_000));
+        assert_eq!(
+            ctx.st.quest(h).unwrap().time_ms,
+            1_060_000,
+            "time_ms must match the clamped remaining time the task sleeps"
+        );
+    });
 }
 
 #[tokio::test]
@@ -2544,13 +2612,15 @@ async fn timed_quest_reload_preserves_remaining_time_and_fails_if_expired_offlin
                 drain(ctx);
                 let h = active(ctx, 90);
                 let q = ctx.st.quest(h).unwrap();
-                assert_eq!(q.time_ms, saved.time_ms);
                 assert_eq!(q.objectives[0], 1);
                 if reconnect_time < saved.time_ms {
+                    assert_eq!(q.time_ms, saved.time_ms);
                     assert_eq!(q.row().left_time(ctx.now_ms), 5000);
                     assert_eq!(q.step, kind::PROGRESS);
                     assert!(server.systems.quests.has_quest_timer(1, 90));
                 } else {
+                    // The expired deadline is clamped to "now" when the timer is re-armed.
+                    assert_eq!(q.time_ms, reconnect_time);
                     assert_eq!(q.step, kind::FAIL);
                     assert_eq!(q.status, status::FAILED);
                     assert!(!server.systems.quests.has_quest_timer(1, 90));

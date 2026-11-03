@@ -1675,6 +1675,15 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   exact reply sequence is capture-pending), and answers with `SCQuestContextStarted`. A
   failed quest is not restarted on its own. `successive` is client display only
   (**QUEST-2 resolved**).
+* systems::quests (restart follow-ups, known and not fixed, score < 5):
+  - A restart discards and reinstalls the quest, so the Start component's skills run again on
+    every accepted 0x0fd (7 restartable quests cast Start skills, some with
+    `NpcSpawnerSpawnEffect`). No shipped 1.2 UI sends the packet; the 3 s throttle bounds a
+    crafted client.
+  - Supply items that were mailed or moved out of the bag are issued again on restart. The
+    restartable supplies are category 64 items priced 0 (low value).
+  - If the fresh install fails after the old run was discarded, the quest is lost (WARN only);
+    no 1.2 data quest is known to reach that path.
 * systems::quests (engine fixes, quest-audit 2026-10-17):
   - `TryCompleteQuestAsLetItDone` (C# only set `Step = Reward`): the quest also gets the
     `Completed` status, and a quest without a Reward step is finished at once (C# hung there:

@@ -1282,16 +1282,16 @@ impl Ctx<'_> {
                     return set(self, 3, *rank3_ratio, *rank3_item);
                 }
             }
-            (CheckTimer { .. }, QuestEvent::TimerExpired { quest_id }) => {
+            (CheckTimer { .. }, QuestEvent::TimerExpired { quest_id, run_id }) => {
                 if *quest_id != quest_template {
                     return Ok(());
                 }
-                // A queued timer task can fire after the quest was restarted. Compare the
-                // live deadline too: a fresh run's deadline is still in the future, so the
-                // stale event is ignored (and its own timer will fire later).
-                if self.st.quest(h).is_none_or(|q| q.time_ms > self.now_ms) {
+                // A queued timer task can fire after the quest was restarted. The event is
+                // tagged with the run it was armed for; only that run may fail. The task
+                // sleeps on the monotonic clock, so no wall-clock comparison is made here.
+                if self.st.quest(h).is_none_or(|q| q.id != *run_id) {
                     tracing::debug!(
-                        "QuestActCheckTimer({}).OnTimerExpired ignored, Quest {quest_template}: the deadline has not passed",
+                        "QuestActCheckTimer({}).OnTimerExpired ignored, Quest {quest_template}: it is a stale run",
                         at.detail_id
                     );
                     return Ok(());

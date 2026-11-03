@@ -2009,13 +2009,18 @@ impl<'a> Ctx<'a> {
             .systems
             .quests
             .remove_quest_timer(self.c.id, quest_id);
-        if let Some(id) = self.quest(h).map(|q| q.id) {
-            self.server.ids.quest.release_id(id);
-        }
+        // Allocate the new run before releasing the old runtime id, so the timer event of
+        // the discarded run cannot accidentally match the fresh one (ids are reused).
+        let old_id = self.quest(h).map(|q| q.id);
         self.st.quests.remove(&h);
         let msg = format!("[Quest] {}, quest {quest_id} restarted.", self.c.unit.name);
         self.send_debug_message(msg);
-        if !self.install_quest(quest_id, true, acceptor_type, acceptor_id, "RestartQuest") {
+        let started =
+            self.install_quest(quest_id, true, acceptor_type, acceptor_id, "RestartQuest");
+        if let Some(id) = old_id {
+            self.server.ids.quest.release_id(id);
+        }
+        if !started {
             tracing::warn!(
                 "RestartQuest could not restart quest {quest_id}, player {} ({})",
                 self.c.unit.name,
@@ -2255,6 +2260,7 @@ impl<'a> Ctx<'a> {
                 {
                     let _ = self.dispatch(&super::events::QuestEvent::TimerExpired {
                         quest_id: row.template_id,
+                        run_id: row.id,
                     });
                 }
             }
@@ -2414,18 +2420,23 @@ impl<'a> Ctx<'a> {
         let remaining = deadline
             .saturating_sub(self.now_ms)
             .clamp(0, i64::from(limit_time.max(0))) as i32;
+        // The task sleeps the clamped remaining time, so the deadline must match that, not a
+        // saved value beyond the limit (a clock step can leave one there).
+        let deadline = self.now_ms.saturating_add(i64::from(remaining));
+        let id = self.quest(h).map_or(0, |q| q.id);
         let ok = match &self.player {
-            Some(player) => {
+            Some(player) => self.server.systems.quests.add_player_quest_timer(
+                player,
+                template_id,
+                id,
+                remaining,
+            ),
+            None => {
                 self.server
                     .systems
                     .quests
-                    .add_player_quest_timer(player, template_id, remaining)
+                    .add_quest_timer(self.c.id, template_id, id, remaining)
             }
-            None => self
-                .server
-                .systems
-                .quests
-                .add_quest_timer(self.c.id, template_id, remaining),
         };
         if !ok {
             return false;
@@ -2433,7 +2444,6 @@ impl<'a> Ctx<'a> {
         if let Some(q) = self.quest_mut(h) {
             q.time_ms = deadline;
         }
-        let id = self.quest(h).map_or(0, |q| q.id);
         self.send_debug_message(format!(
             "[Quest] Quest ({id}) will end in {} minutes.",
             limit_time / 60000
