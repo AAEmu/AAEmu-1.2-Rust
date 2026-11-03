@@ -1471,24 +1471,34 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `ExpeditionMember` stores no join timestamp: `last_world_leave_time` is the last world leave
   (set at join and refreshed on login / logout), so it measures activity, not tenure. The
   lowest `character_id` is the stable stand-in (ids are allocated in creation order, so the
-  first-created character wins); this is an approximation. The handover reuses
-  `expedition::change_owner`, so it emits the normal `SCExpeditionOwnerChanged` / role packets
-  and saves like a client transfer. The 1.2 error 568
+  first-created character wins); this is an approximation. The forced hand-over and the old
+  owner's removal happen in **one** expedition write section (the client `ChangeOwner` path
+  keeps its own function), so a concurrent forced removal cannot see the already-pirate old
+  owner as an ordinary member and hand the guild back. A candidate whose faction (live for an
+  online member, saved `characters.faction_id` for an offline one) is not the guild mother is
+  skipped: a pirate heir would immediately undo the hand-over. The hand-over emits the normal
+  `SCExpeditionOwnerChanged` / role packets and saves like a client transfer. The 1.2 error 568
   (`expedition_owner_cannot_change_during_siege`) is absent from both the C# and this port's
   voluntary `ChangeOwner`; the forced path therefore bypasses it (if a 568 guard is added, only
   the client path may apply it). The guild keeps its territory, siege registrations and nation;
   the nation's king (`nations.owner_character_id` / `owner_name`, taken from the founding
-  expedition's owner) moves to the new owner and is written by the normal nation save. No
-  faction-owner broadcast is sent for the nation: the 1.2 C# does not send
-  `SCFactionOwnerChanged`, and clients read the new king from the faction list at login.
-  Only an owner who was the **last** member dismisses the guild. That path takes the same
-  `housing.operation_lock` and territory / siege check as the voluntary disband
-  (`expedition.rs`), but cannot refuse (error 301 / 469) with no member left to hold the
-  dominion: it releases the territory (`DominionManager::release_expedition`: owner cleared,
-  unfinished siege cancelled) and then dismisses, leaving the nation kingless as on the normal
-  disband. The release is INFERRED (the rules only forbid a disbanded guild from keeping a
-  dominion; no retail capture of this path). **Capture-pending: PIRATE-1** (no 1.2 capture of
-  an owner turning pirate, a last-member dismissal, or the release).
+  expedition's owner) moves to the new owner. The king is written in the same transaction as
+  the expedition save (no window with king = pirate and owner = successor) and broadcast with
+  `SCFactionOwnerChangedPacket`; the 1.2 client's handler `FUN_391d2570` -> `FUN_392f82a0`
+  copies the faction record, sets the owner id / name and applies it (`OnFactionOwnerChanged`).
+  Only an owner who was the **last** eligible member dismisses the guild. That path takes the
+  same `housing.operation_lock` and territory / siege check as the voluntary disband
+  (`expedition.rs`) and re-checks the member count under the lock, but cannot refuse (error 301
+  / 469) with no member left to hold the dominion: it releases the territory
+  (`DominionManager::release_expedition`: owner cleared, unfinished siege cancelled), applies
+  the same tower runtime and participant / phase broadcasts as the GM cancel, persists the
+  released dominion with the dismissal, and clears the nation's king (`owner_character_id` /
+  `owner_name`) so a pirate cannot keep the invite / kick rights of `owned_by`. The release is
+  INFERRED (the rules only forbid a disbanded guild from keeping a dominion; no retail capture
+  of this path). **Capture-pending: PIRATE-1** (no 1.2 capture of an owner turning pirate, a
+  last-member dismissal, or the release).
+  Known, not fixed: the login conversion's spawned guild removal can run after the login guild
+  info was already sent (the client then shows the guild until the next refresh; score 2).
 * `CheckForDeletedCharactersDeletion`: the rename / `deleted = 1` / packets are done;
   `DeleteCharacterAssets` (houses, guild, family, mail returns) is a later phase.
 * `GameConnection.OnDisconnect` → `UpdateLoginTime(0)` for connections that never entered (inserts

@@ -10,7 +10,7 @@ use std::sync::{Mutex, PoisonError, RwLock};
 
 use aaemu_commons::{Marshal, PacketStream};
 use sqlx::mysql::MySqlPool;
-use sqlx::Row;
+use sqlx::{MySql, Row, Transaction};
 
 use crate::data::world_data::SystemFaction;
 use crate::db::{dt, from_unix, int, unix};
@@ -22,6 +22,7 @@ use crate::packets::world::{
     SCExpeditionRolePolicyListPacket, SCFactionListPacket,
 };
 use crate::server::GameServer;
+use crate::systems::social::nation::Nation;
 use crate::systems::social::packets::expedition::*;
 use crate::systems::social::rename;
 use crate::systems::social::util::{self, error, send_error};
@@ -1259,79 +1260,128 @@ pub async fn change_member_role(server: &GameServer, p: &PlayerRef, new_role: u8
     save(server, id).await;
 }
 
+/// The data one owner hand-over changed under the expedition write lock. `members` is the
+/// roster before the old owner's removal (so it still receives the owner / role packets);
+/// `remaining` is the roster after it (the leave packet).
+struct OwnerChange {
+    old: (u32, u8, String),
+    new: (u32, u8, String),
+    members: Vec<u32>,
+    remaining: Vec<u32>,
+}
+
 /// `ExpeditionManager.ChangeOwner(connection, newOwnerId)`: keep the persistent owner id,
 /// name and roles consistent; transferring to oneself is a no-op. A nation founded by this
-/// guild moves its king (`owner_character_id`) with the guild owner.
+/// guild moves its king (`owner_character_id`) with the guild owner. Returns whether the
+/// hand-over happened; a refused transfer must not be treated as a transfer by a caller.
 ///
 /// There is no siege / territory refusal here: the 1.2 error `expedition_owner_cannot_change_
 /// during_siege` (568) exists as a constant, but neither the C# nor this port checks it on the
 /// voluntary path, and the forced pirate-owner transfer must not be blocked by a siege. If a
 /// 568 guard is ever added it belongs to the client path only (PORTING.md, PIRATE-1).
-pub async fn change_owner(server: &GameServer, owner: &PlayerRef, new_owner_id: u32) {
+pub async fn change_owner(server: &GameServer, owner: &PlayerRef, new_owner_id: u32) -> bool {
     if new_owner_id == owner.character_id {
-        return;
+        return false;
     }
     let Some(e) = expedition_of(server, owner) else {
-        return;
+        return false;
     };
     let id = e.id();
-    match e.member(owner.character_id) {
-        Some(m) if m.role == 255 => {}
-        _ => return,
-    }
-    if e.member(new_owner_id).is_none() {
-        return;
-    }
     let res = server.expeditions.with_mut(id, |e| {
+        // Re-check everything under this lock: a separate `get()` snapshot can go stale, and
+        // a panicking `expect` inside the write lock would poison the manager for the server.
+        if e.member(owner.character_id)?.role != 255
+            || e.member(new_owner_id).is_none()
+            || e.faction.owner_id != owner.character_id
+        {
+            return None;
+        }
         let members = e.member_ids();
-        let new = e.member_mut(new_owner_id).expect("checked");
+        let new = e.member_mut(new_owner_id)?;
         new.role = 255;
         let new = (new.character_id, new.role, new.name.clone());
-        let old = e.member_mut(owner.character_id).expect("checked");
+        let old = e.member_mut(owner.character_id)?;
         old.role = 0;
         let old = (old.character_id, old.role, old.name.clone());
         e.faction.owner_id = new_owner_id;
         e.faction.owner_name = new.2.clone();
-        (old, new, members)
+        Some(OwnerChange {
+            old,
+            new,
+            remaining: members.clone(),
+            members,
+        })
     });
-    let Some((old, new, members)) = res else {
-        return;
+    let Some(Some(change)) = res else {
+        return false;
     };
-    server
-        .systems
-        .social
-        .nations
-        .on_expedition_owner_changed(id, new.0, &new.2);
+    apply_owner_change(server, id, change, None).await;
+    true
+}
+
+/// Broadcasts and persists one hand-over. `removed` is the forced path's old owner, whose guild
+/// membership goes in this same write section (no window in which a concurrent faction change
+/// can pick it as successor again).
+async fn apply_owner_change(
+    server: &GameServer,
+    id: u32,
+    change: OwnerChange,
+    removed: Option<&PlayerRef>,
+) {
+    let nations =
+        server
+            .systems
+            .social
+            .nations
+            .on_expedition_owner_changed(id, change.new.0, &change.new.2);
+    for nation in &nations {
+        crate::systems::social::nation::NationManager::broadcast_owner_changed(server, nation);
+    }
     // The old owner's dialog offer must not survive the hand-over.
     server.expeditions.clear_rename_offers_for(id);
     send_to_members(
         server,
-        &members,
+        &change.members,
         &SCExpeditionOwnerChangedPacket {
-            id: old.0,
-            id2: new.0,
-            char_name: new.2.clone(),
+            id: change.old.0,
+            id2: change.new.0,
+            char_name: change.new.2.clone(),
         },
     );
     send_to_members(
         server,
-        &members,
+        &change.members,
         &SCExpeditionRoleChangedPacket {
-            id: old.0,
-            role: old.1,
-            char_name: old.2,
+            id: change.old.0,
+            role: change.old.1,
+            char_name: change.old.2,
         },
     );
     send_to_members(
         server,
-        &members,
+        &change.members,
         &SCExpeditionRoleChangedPacket {
-            id: new.0,
-            role: new.1,
-            char_name: new.2,
+            id: change.new.0,
+            role: change.new.1,
+            char_name: change.new.2,
         },
     );
-    save(server, id).await;
+    if let Some(p) = removed {
+        p.data().unit.expedition_id = 0;
+        let packet = SCUnitExpeditionChangedPacket {
+            obj_id: p.obj_id,
+            character_id: p.character_id,
+            kicker: String::new(),
+            unit_name: p.data().unit.name.clone(),
+            id,
+            expedition_id: 0,
+            expel: false,
+        };
+        broadcast_self(server, p, &packet);
+        send_to_members(server, &change.remaining, &packet);
+    }
+    let nation_ids: Vec<u32> = nations.iter().map(|n| n.id).collect();
+    save_expedition_state(server, id, &nation_ids, None).await;
 }
 
 /// Whether the guild owns a dominion or has a scheduled / active siege registration: the
@@ -1350,7 +1400,7 @@ fn owns_territory_or_siege(server: &GameServer, id: u32) -> bool {
 /// `ExpeditionManager.Disband(owner)`. The guild stays in the list (renamed
 /// `$deleted-guild-<id>`, owner 0) as in C#.
 pub async fn disband(server: &GameServer, owner: &PlayerRef) -> bool {
-    let id = {
+    let (id, nations) = {
         let _housing_operation = server
             .systems
             .housing
@@ -1374,10 +1424,14 @@ pub async fn disband(server: &GameServer, owner: &PlayerRef) -> bool {
             );
             return false;
         }
-        dismiss_expedition(server, id);
-        id
+        let nations = dismiss_expedition(server, id);
+        (id, nations)
     };
-    save(server, id).await;
+    for nation in &nations {
+        crate::systems::social::nation::NationManager::broadcast_owner_changed(server, nation);
+    }
+    let nation_ids: Vec<u32> = nations.iter().map(|n| n.id).collect();
+    save_expedition_state(server, id, &nation_ids, None).await;
     true
 }
 
@@ -1385,11 +1439,11 @@ pub async fn disband(server: &GameServer, owner: &PlayerRef) -> bool {
 /// `SCExpeditionDismissedPacket`, loses the guild, and the guild row is retired
 /// (`$deleted-guild-<id>`, owner 0, `isDisbanded`). Also used for the forced removal of an
 /// owner on a faction change (no voluntary eligibility checks there).
-fn dismiss_expedition(server: &GameServer, id: u32) {
+fn dismiss_expedition(server: &GameServer, id: u32) -> Vec<Nation> {
     // A dialog offer made for this guild dies with it (a later guild id must not inherit it).
     server.expeditions.clear_rename_offers_for(id);
     let Some(e) = server.expeditions.get(id) else {
-        return;
+        return Vec::new();
     };
     for m in e.members.iter().rev() {
         if let Some(c) = server.world.character_by_id(m.character_id) {
@@ -1406,9 +1460,62 @@ fn dismiss_expedition(server: &GameServer, id: u32) {
         e.faction.owner_id = 0;
         e.is_disbanded = true;
     });
-    // A nation founded by this guild stays as a kingless nation, but its stale id must not
-    // capture a guild that later reuses it (NATION-5).
-    server.systems.social.nations.on_expedition_disbanded(id);
+    // A nation founded by this guild stays as a kingless nation (expedition id and king
+    // cleared), but its stale id must not capture a guild that later reuses it (NATION-5).
+    server.systems.social.nations.on_expedition_disbanded(id)
+}
+
+/// One forced-removal decision under the expedition lock.
+enum TransferOutcome {
+    /// No expedition (or it was disbanded meanwhile).
+    Gone,
+    /// The character is no longer the owner.
+    NotOwner,
+    /// The owner is the last eligible member.
+    NoSuccessor,
+    /// Leadership moved and the old owner was removed in the same write section.
+    Transferred(OwnerChange),
+}
+
+/// Faction of every member for successor eligibility: the live faction of an online member and
+/// the saved `characters.faction_id` of an offline one. A failed read keeps those members
+/// eligible; the hand-over and the old owner's removal share one write section, so a stale pick
+/// cannot hand the guild back to the removed owner.
+async fn member_factions(server: &GameServer, e: &Expedition) -> HashMap<u32, u32> {
+    let mut factions = HashMap::new();
+    let mut offline = Vec::new();
+    for m in &e.members {
+        match server.world.character_by_id(m.character_id) {
+            Some(p) => {
+                factions.insert(m.character_id, p.data().unit.faction_id);
+            }
+            None => offline.push(m.character_id),
+        }
+    }
+    if !offline.is_empty() {
+        let list = offline
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let rows: std::result::Result<Vec<(i64, i64)>, sqlx::Error> = sqlx::query_as(&format!(
+            "SELECT CAST(id AS SIGNED), CAST(faction_id AS SIGNED) FROM characters WHERE id IN ({list})"
+        ))
+        .fetch_all(&server.db)
+        .await;
+        match rows {
+            Ok(rows) => {
+                for (id, faction) in rows {
+                    factions.insert(id as u32, faction as u32);
+                }
+            }
+            Err(err) => tracing::warn!(
+                "successor faction lookup for expedition {} failed: {err}",
+                e.id()
+            ),
+        }
+    }
+    factions
 }
 
 /// The member who inherits leadership when a forced change removes the owner: the highest
@@ -1417,10 +1524,22 @@ fn dismiss_expedition(server: &GameServer, id: u32) {
 /// and measures activity, not tenure, so it cannot order members by membership. The lowest
 /// `character_id` is the stable stand-in (ids are allocated in creation order, so the
 /// first-created character wins); documented as an approximation in PORTING.md (PIRATE-1).
-fn successor_owner(e: &Expedition, exclude: u32) -> Option<u32> {
+/// A member whose faction is not the guild mother (a pirate, or another alliance) cannot
+/// inherit: their own forced removal would immediately undo the hand-over.
+fn successor_owner(
+    e: &Expedition,
+    exclude: u32,
+    factions: &HashMap<u32, u32>,
+    mother_id: u32,
+) -> Option<u32> {
     e.members
         .iter()
         .filter(|m| m.character_id != exclude)
+        .filter(|m| {
+            factions
+                .get(&m.character_id)
+                .is_none_or(|&f| f == mother_id)
+        })
         .min_by_key(|m| (std::cmp::Reverse(m.role), m.character_id))
         .map(|m| m.character_id)
 }
@@ -1431,50 +1550,134 @@ fn successor_owner(e: &Expedition, exclude: u32) -> Option<u32> {
 /// owner exception, and the C# `Character.SetFaction` called `ExpeditionManager.Kick`, which
 /// acted only on roles whose policy has `Expel` (so ordinary members stayed). Owner decision
 /// (2026-11-03, PIRATE-1): an ordinary member leaves as a normal `Leave`; an owner is removed
-/// too, but first hands the leadership to the remaining member chosen by [`successor_owner`]
-/// through the normal [`change_owner`] path (same `SCExpeditionOwnerChanged` / role packets and
-/// save, and without the 568 siege refusal, which this port does not implement). Only an owner
-/// who was the last member dismisses the guild.
+/// too, but first hands the leadership to the remaining member chosen by [`successor_owner`].
+/// The hand-over and the old owner's removal happen under **one** expedition write lock, so a
+/// concurrent forced removal cannot pick the old, already-pirate owner back as successor. Only
+/// an owner who was the last eligible member dismisses the guild.
 ///
 /// The guild's territory, siege registrations and nation stay with the transferred guild; only
 /// the last-member dismissal releases a dominion / cancels its siege (the voluntary 301 / 469
 /// refusal cannot apply: there is no guild left to hold it).
 pub async fn remove_member_for_faction_change(server: &GameServer, p: &PlayerRef) {
-    let Some(e) = expedition_of(server, p) else {
+    let Some(id) = expedition_of(server, p).map(|e| e.id()) else {
         return;
     };
-    let id = e.id();
-    if e.member(p.character_id).is_none() {
-        return;
-    }
-    if e.faction.owner_id != p.character_id {
-        leave(server, p).await;
-        return;
-    }
-    match successor_owner(&e, p.character_id) {
-        Some(new_owner_id) => {
-            change_owner(server, p, new_owner_id).await;
-            leave(server, p).await;
+    loop {
+        let Some(e) = expedition_of(server, p) else {
+            return;
+        };
+        if e.member(p.character_id).is_none() {
+            return;
         }
-        None => {
-            // The same housing.operation_lock as the voluntary disband; the guild cannot keep a
-            // dominion without members, so release it instead of refusing (see the doc above).
-            let _housing_operation = server
-                .systems
-                .housing
-                .operation_lock
-                .lock()
-                .expect("housing poisoned");
-            server
-                .systems
-                .housing
-                .dominions
-                .release_expedition(id, util::now_secs());
-            dismiss_expedition(server, id);
-            drop(_housing_operation);
-            save(server, id).await;
+        // Refresh each attempt: a member can join or change faction while we decide.
+        let factions = member_factions(server, &e).await;
+        let outcome = server.expeditions.with_mut(id, |e| {
+            if e.is_disbanded {
+                return TransferOutcome::Gone;
+            }
+            let old_name = match e.member(p.character_id) {
+                Some(m) => m.name.clone(),
+                None => return TransferOutcome::Gone,
+            };
+            if e.faction.owner_id != p.character_id {
+                return TransferOutcome::NotOwner;
+            }
+            let Some(new_owner_id) =
+                successor_owner(e, p.character_id, &factions, e.faction.mother_id)
+            else {
+                return TransferOutcome::NoSuccessor;
+            };
+            let members = e.member_ids();
+            let Some(new) = e.member_mut(new_owner_id) else {
+                return TransferOutcome::NoSuccessor;
+            };
+            new.role = 255;
+            let new = (new.character_id, new.role, new.name.clone());
+            // The old owner goes in this same write section: no window in which a concurrent
+            // faction change sees it as an ordinary member again.
+            e.remove_member(p.character_id);
+            let remaining = e.member_ids();
+            e.faction.owner_id = new_owner_id;
+            e.faction.owner_name = new.2.clone();
+            TransferOutcome::Transferred(OwnerChange {
+                // The hand-over demotes the old owner to 0 before the removal, as the client
+                // transfer does; the packet still names that role.
+                old: (p.character_id, 0, old_name),
+                new,
+                members,
+                remaining,
+            })
+        });
+        match outcome {
+            None | Some(TransferOutcome::Gone) => return,
+            Some(TransferOutcome::NotOwner) => {
+                leave(server, p).await;
+                return;
+            }
+            Some(TransferOutcome::Transferred(change)) => {
+                apply_owner_change(server, id, change, Some(p)).await;
+                return;
+            }
+            Some(TransferOutcome::NoSuccessor) => {
+                if dismiss_if_no_successor(server, id, p, &factions).await {
+                    return;
+                }
+                // A valid member joined (or the owner changed) after the snapshot: retry.
+            }
         }
     }
+}
+
+/// Dismisses the guild when there is still no eligible successor, re-checked under the housing
+/// operation lock (a valid member can join between the successor snapshot and this branch).
+/// Also does the forced release + persistence; `false` means the state changed and the caller
+/// must retry the successor pick.
+async fn dismiss_if_no_successor(
+    server: &GameServer,
+    id: u32,
+    owner: &PlayerRef,
+    factions: &HashMap<u32, u32>,
+) -> bool {
+    let _save = server.save.transaction_lock().await;
+    let prepared = {
+        let _housing_operation = server
+            .systems
+            .housing
+            .operation_lock
+            .lock()
+            .expect("housing poisoned");
+        let still_none = server.expeditions.with_mut(id, |e| {
+            !e.is_disbanded
+                && e.faction.owner_id == owner.character_id
+                && e.member(owner.character_id).is_some()
+                && successor_owner(e, owner.character_id, factions, e.faction.mother_id).is_none()
+        });
+        match still_none {
+            Some(true) => {
+                let released = server
+                    .systems
+                    .housing
+                    .dominions
+                    .release_expedition(id, util::now_secs());
+                let batch = server.systems.housing.dominions.prepare_save();
+                let nations = dismiss_expedition(server, id);
+                Some((released, batch, nations))
+            }
+            _ => None,
+        }
+    };
+    let Some((released, batch, nations)) = prepared else {
+        return false;
+    };
+    for (previous, state) in &released {
+        crate::systems::social::dominion::apply_released(server, previous, state);
+    }
+    for nation in &nations {
+        crate::systems::social::nation::NationManager::broadcast_owner_changed(server, nation);
+    }
+    let nation_ids: Vec<u32> = nations.iter().map(|n| n.id).collect();
+    save_expedition_state(server, id, &nation_ids, Some(batch)).await;
+    true
 }
 
 /// `ExpeditionManager.Save(expedition)` (`Expedition.Save` in its own transaction).
@@ -1497,9 +1700,74 @@ pub async fn save(server: &GameServer, id: u32) {
     }
 }
 
+/// The owner / nation / dominion rows that change together with one forced guild removal, in
+/// one transaction. Snapshots the current expedition and nation rows first, so a concurrent
+/// hand-over is not overwritten with an older king.
+async fn save_expedition_state(
+    server: &GameServer,
+    id: u32,
+    nation_ids: &[u32],
+    dominions: Option<crate::systems::housing::dominion::state::SaveBatch>,
+) {
+    let Some(e) = server.expeditions.with_mut(id, |e| {
+        let snapshot = e.clone();
+        e.removed_members.clear();
+        snapshot
+    }) else {
+        return;
+    };
+    let nations: Vec<Nation> = nation_ids
+        .iter()
+        .filter_map(|n| server.systems.social.nations.get(*n))
+        .collect();
+    let had_dominions = dominions.is_some();
+    let result: Result<()> = async {
+        let mut tx = server.db.begin().await?;
+        write_expedition(&mut tx, &e).await?;
+        for nation in &nations {
+            crate::systems::social::nation::NationManager::write_nation_owner(&mut tx, nation)
+                .await?;
+        }
+        if let Some(batch) = dominions {
+            server
+                .systems
+                .housing
+                .dominions
+                .save_prepared(&mut tx, batch)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+    .await;
+    match result {
+        Ok(()) => {
+            if had_dominions {
+                server.systems.housing.dominions.commit_save();
+            }
+        }
+        Err(err) => {
+            tracing::error!("Expedition {id} save failed: {err}");
+            // Keep the removed member ids for the next save attempt.
+            server.expeditions.with_mut(id, |x| {
+                for r in e.removed_members.iter().rev() {
+                    x.removed_members.insert(0, *r);
+                }
+            });
+        }
+    }
+}
+
 /// `Expedition.Save(connection, transaction)`.
 pub async fn save_expedition(pool: &MySqlPool, e: &Expedition) -> Result<()> {
     let mut tx = pool.begin().await?;
+    write_expedition(&mut tx, e).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// The `Expedition.Save` body inside the caller's transaction.
+async fn write_expedition(tx: &mut Transaction<'_, MySql>, e: &Expedition) -> Result<()> {
     if !e.removed_members.is_empty() {
         let list = e
             .removed_members
@@ -1510,26 +1778,26 @@ pub async fn save_expedition(pool: &MySqlPool, e: &Expedition) -> Result<()> {
         sqlx::query(&format!(
             "DELETE FROM expedition_members WHERE character_id IN ({list})"
         ))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
         sqlx::query(&format!(
             "UPDATE characters SET expedition_id = 0 WHERE `characters`.`id` IN ({list})"
         ))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
     if e.is_disbanded {
         sqlx::query("DELETE FROM expeditions WHERE `id` = ?")
             .bind(e.faction.id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         sqlx::query("DELETE FROM expedition_role_policies WHERE `expedition_id` = ?")
             .bind(e.faction.id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         sqlx::query("DELETE FROM expedition_members WHERE `expedition_id` = ?")
             .bind(e.faction.id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     } else {
         sqlx::query("REPLACE INTO expeditions(`id`,`owner`,`owner_name`,`name`,`mother`,`created_at`) VALUES (?, ?, ?, ?, ?, ?)")
@@ -1539,7 +1807,7 @@ pub async fn save_expedition(pool: &MySqlPool, e: &Expedition) -> Result<()> {
             .bind(&e.faction.name)
             .bind(e.faction.mother_id)
             .bind(from_unix(e.faction.created))
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         for m in &e.members {
             sqlx::query("REPLACE INTO expedition_members(`character_id`,`expedition_id`,`name`,`level`,`role`,`last_leave_time`,`ability1`,`ability2`,`ability3`, `memo`) VALUES (?,?,?,?,?,?,?,?,?,?)")
@@ -1553,7 +1821,7 @@ pub async fn save_expedition(pool: &MySqlPool, e: &Expedition) -> Result<()> {
                 .bind(m.abilities[1])
                 .bind(m.abilities[2])
                 .bind(&m.memo)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
         }
         for p in &e.policies {
@@ -1570,11 +1838,10 @@ pub async fn save_expedition(pool: &MySqlPool, e: &Expedition) -> Result<()> {
                 .bind(p.manager_chat)
                 .bind(p.siege_master)
                 .bind(p.join_siege)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
         }
     }
-    tx.commit().await?;
     Ok(())
 }
 

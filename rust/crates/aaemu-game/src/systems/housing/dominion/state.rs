@@ -1115,8 +1115,13 @@ impl DominionManager {
     /// dismissal leaves no member to hold the dominion; the 1.2 rules only forbid a disbanded
     /// guild from keeping one, and there is no retail capture of this path (PORTING.md,
     /// PIRATE-1). The released state has no owner (`owner_expedition_id = 0`), so it is valid
-    /// for the next load and can be declared again.
-    pub fn release_expedition(&self, expedition_id: u32, now_seconds: i64) -> Vec<DominionState> {
+    /// for the next load and can be declared again. Each pair is `(previous, released)` so the
+    /// caller can emit the same participant / phase broadcasts as the GM cancel.
+    pub fn release_expedition(
+        &self,
+        expedition_id: u32,
+        now_seconds: i64,
+    ) -> Vec<(DominionState, DominionState)> {
         if expedition_id == 0 || now_seconds < 0 {
             return Vec::new();
         }
@@ -1143,7 +1148,8 @@ impl DominionManager {
             let Some(entry) = inner.states.get(&zone) else {
                 continue;
             };
-            let mut state = entry.state.clone();
+            let previous = entry.state.clone();
+            let mut state = previous.clone();
             if state.owner_expedition_id == expedition_id {
                 state.owner_expedition_id = 0;
                 state.reign_start_at = 0;
@@ -1166,7 +1172,7 @@ impl DominionManager {
                     .retain(|(channel_zone, _), _| *channel_zone != zone);
             }
             replace(&mut inner, state.clone(), revision);
-            released.push(state);
+            released.push((previous, state));
         }
         released
     }

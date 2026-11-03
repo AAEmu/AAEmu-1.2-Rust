@@ -31,7 +31,7 @@ use super::faction;
 use super::packets::faction::{
     SCFactionImmigrateInvitePacket, SCFactionImmigrateInviteResultPacket,
     SCFactionImmigrateToOriginResultPacket, SCFactionIndependencePacket,
-    SCFactionKickToOriginResultPacket,
+    SCFactionKickToOriginResultPacket, SCFactionOwnerChangedPacket,
 };
 use super::util::{now_ms, send_error};
 
@@ -310,18 +310,18 @@ impl NationManager {
     /// (`owner_character_id`, the faction record's `owner_id`) follows the guild owner. Called
     /// from `expedition::change_owner`, both for the client transfer and for the forced one when
     /// a pirate owner is removed (owner decision 2026-11-03, PIRATE-1). The nation, its
-    /// relations and the founding guild stay unchanged; the periodic save persists the new
-    /// king. Returns whether a nation was updated.
+    /// relations and the founding guild stay unchanged; the caller broadcasts the returned
+    /// faction and writes it with the expedition save.
     pub fn on_expedition_owner_changed(
         &self,
         expedition_id: u32,
         character_id: u32,
         name: &str,
-    ) -> bool {
+    ) -> Vec<Nation> {
         if expedition_id == 0 || character_id == 0 {
-            return false;
+            return Vec::new();
         }
-        let mut changed = false;
+        let mut changed = Vec::new();
         for nation in self
             .write()
             .iter_mut()
@@ -329,17 +329,19 @@ impl NationManager {
         {
             nation.owner_character_id = character_id;
             nation.owner_name = name.to_string();
-            changed = true;
+            changed.push(nation.clone());
         }
         changed
     }
 
     /// The founding expedition disbanded: the nation stays as a kingless nation (NATION-5),
-    /// but its stale expedition id must not capture a guild that later reuses the id.
-    pub fn on_expedition_disbanded(&self, expedition_id: u32) {
+    /// but its stale expedition id must not capture a guild that later reuses the id, and a
+    /// pirate must not keep the king's invite / kick rights through `owned_by`.
+    pub fn on_expedition_disbanded(&self, expedition_id: u32) -> Vec<Nation> {
         if expedition_id == 0 {
-            return;
+            return Vec::new();
         }
+        let mut changed = Vec::new();
         for nation in self
             .write()
             .iter_mut()
@@ -350,7 +352,48 @@ impl NationManager {
                 nation.id
             );
             nation.expedition_id = 0;
+            nation.owner_character_id = 0;
+            nation.owner_name.clear();
+            changed.push(nation.clone());
         }
+        changed
+    }
+
+    /// The narrow runtime update the 1.2 client applies to a faction owner: `OnFactionOwnerChanged`
+    /// (`x2game.dll.c` handler `FUN_391d2570` -> `FUN_392f82a0`: faction id, owner character id,
+    /// owner name; the login list is `SCFactionList` instead). Broadcasting this avoids resending
+    /// every nation / relation row for one king change.
+    pub fn broadcast_owner_changed(server: &GameServer, nation: &Nation) {
+        server
+            .world
+            .broadcast_to_server(&SCFactionOwnerChangedPacket {
+                id: nation.id,
+                id2: nation.owner_character_id,
+                new_owner_name: nation.owner_name.clone(),
+            });
+    }
+
+    /// Persists only the nation's identity / king row, for the expedition transaction that
+    /// changes the founding guild's owner. Relation rows and offline member rewrites stay with
+    /// the periodic [`NationManager::save`].
+    pub(crate) async fn write_nation_owner(
+        tx: &mut Transaction<'_, MySql>,
+        nation: &Nation,
+    ) -> Result<()> {
+        sqlx::query(
+            "REPLACE INTO nations(`id`,`expedition_id`,`owner_character_id`,`owner_name`,`name`,\
+             `created_at`,`allow_change_name`) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(nation.id)
+        .bind(nation.expedition_id)
+        .bind(nation.owner_character_id)
+        .bind(&nation.owner_name)
+        .bind(&nation.name)
+        .bind(nation.created_at)
+        .bind(nation.allow_change_name)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
     }
 
     /// The `SystemFaction` of a nation id (`None` for every other id).
