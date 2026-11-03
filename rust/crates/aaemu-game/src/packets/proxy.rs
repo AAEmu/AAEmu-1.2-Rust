@@ -150,8 +150,14 @@ impl ClientPacket for FinishStatePacket {
                         checksum: 0,
                         immersive: 1,
                     });
+                    let second_password = &server.config.second_password;
                     conn.send(&SCInitialConfigPacket {
                         fsets: server.systems.services.features(server),
+                        second_password_max_fail_count: if second_password.enabled {
+                            second_password.max_fail_count
+                        } else {
+                            0
+                        },
                     });
                     conn.send(&SCTrionConfigPacket {
                         activate: true,

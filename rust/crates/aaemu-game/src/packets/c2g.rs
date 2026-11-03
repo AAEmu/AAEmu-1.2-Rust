@@ -191,6 +191,8 @@ impl ClientPacket for CSListCharacterPacket {
             conn.send(&SCGetSlotCountPacket { sc: extra_slots });
             send_account_info(conn);
             load_account(server, conn).await?;
+            // The second password state must be known before the client renders the lobby.
+            crate::systems::services::second_password::send_state(server, conn).await?;
             let characters = std::mem::take(&mut conn.characters);
             send_character_list(conn, &characters);
             crate::systems::housing::send_login_houses(server, conn);
