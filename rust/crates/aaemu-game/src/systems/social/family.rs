@@ -324,6 +324,11 @@ pub fn invite_to_family(server: &GameServer, inviter: &PlayerRef, invited_name: 
     let Some(invited) = server.world.character_by_name(invited_name) else {
         return;
     };
+    // Silently drop the invitation when the inviter is blocked (capture-pending, case
+    // `BLOCK-LIST-1`).
+    if crate::systems::social::friend::is_blocked_by(&invited, inviter.character_id) {
+        return;
+    }
     if invited.data().family != 0 {
         return;
     }

@@ -1230,6 +1230,13 @@ pub async fn send_chat_message(
             let target = server.world.character_by_name(target_name);
             match target {
                 Some(t) if t.data().is_online => {
+                    // A blocked sender's whisper is dropped silently: the 1.2 client has no
+                    // "target has blocked you" error and its own whisper display does not
+                    // filter, so only the server can enforce the list (capture-pending, case
+                    // `BLOCK-LIST-1`).
+                    if crate::systems::social::friend::is_blocked_by(&t, me.character_id) {
+                        return;
+                    }
                     let (tf, mf) = (
                         mother_id(server, t.data().unit.faction_id),
                         mother_id(server, sender.faction_id),
