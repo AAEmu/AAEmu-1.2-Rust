@@ -28,7 +28,7 @@ use crate::systems::npcs::npc::data::NpcTemplate;
 use crate::systems::skills::ext::ItemSkillHooks;
 use crate::systems::DataLoadCtx;
 use crate::test_support::*;
-use crate::world::{NpcRef, PlayerRef, SlaveRef, WorldObject};
+use crate::world::{MateRef, NpcRef, PlayerRef, SlaveRef, WorldObject};
 
 use super::data::{
     attach_point, ShipyardStep, ShipyardTemplate, SlaveTemplate, TransferPath, TransferRoad,
@@ -38,6 +38,12 @@ use super::{mates, shipyards, slaves, transfers};
 
 const MATE_NPC: u32 = 900;
 const MATE_ITEM: u32 = 5000;
+/// A battle pet: its model declares no attach points.
+const PET_NPC: u32 = 902;
+const PET_ITEM: u32 = 5002;
+/// A five-seat mount (the elephant's model).
+const ELEPHANT_NPC: u32 = 903;
+const ELEPHANT_ITEM: u32 = 5003;
 const SLAVE_TEMPLATE: u32 = 68;
 const SLAVE_ITEM: u32 = 5001;
 /// Player obj ids outside the range the object id manager hands out in the tests.
@@ -114,6 +120,59 @@ fn data() -> GameData {
             ..ItemTemplate::plain(MATE_ITEM, 1)
         },
     );
+    // The horse model's real seats: driver + passenger0.
+    d.systems
+        .vehicles
+        .model_bindings
+        .insert(77, vec![attach_point::DRIVER, attach_point::PASSENGER0]);
+    d.systems.npcs.npc.templates.insert(
+        PET_NPC,
+        NpcTemplate {
+            id: PET_NPC,
+            name: "Cat".into(),
+            level: 1,
+            model_id: 78,
+            scale: 1.0,
+            ..NpcTemplate::default()
+        },
+    );
+    d.items.templates.insert(
+        PET_ITEM,
+        ItemTemplate {
+            kind: TemplateKind::SummonMate { npc_id: PET_NPC },
+            ..ItemTemplate::plain(PET_ITEM, 1)
+        },
+    );
+    d.systems.npcs.npc.templates.insert(
+        ELEPHANT_NPC,
+        NpcTemplate {
+            id: ELEPHANT_NPC,
+            name: "Elephant".into(),
+            level: 1,
+            model_id: 79,
+            scale: 1.0,
+            ..NpcTemplate::default()
+        },
+    );
+    d.items.templates.insert(
+        ELEPHANT_ITEM,
+        ItemTemplate {
+            kind: TemplateKind::SummonMate {
+                npc_id: ELEPHANT_NPC,
+            },
+            ..ItemTemplate::plain(ELEPHANT_ITEM, 1)
+        },
+    );
+    d.systems.vehicles.model_bindings.insert(
+        79,
+        vec![
+            attach_point::DRIVER,
+            attach_point::PASSENGER0,
+            attach_point::PASSENGER1,
+            attach_point::PASSENGER2,
+            attach_point::PASSENGER3,
+        ],
+    );
     d.items.templates.insert(
         SLAVE_ITEM,
         ItemTemplate {
@@ -180,6 +239,12 @@ fn player_with_item(
         obj_id,
     );
     let item_id = 0x7000 + u64::from(id);
+    give_item(server, &p, item_id, item_template);
+    (p, item_id)
+}
+
+/// Adds another item to `p`'s bag (e.g. a second summon item for the same owner).
+fn give_item(server: &GameServer, p: &PlayerRef, item_id: u64, item_template: u32) -> u64 {
     let t = server
         .game_data
         .items
@@ -187,7 +252,7 @@ fn player_with_item(
         .unwrap()
         .clone();
     let mut item = Item::create(item_id, &t, 1, 0, 1, &server.game_data.items, 0);
-    item.owner_id = u64::from(id);
+    item.owner_id = u64::from(p.data().id);
     item.slot_type = slot_type::INVENTORY;
     item.slot = 0;
     let bag = p
@@ -197,7 +262,7 @@ fn player_with_item(
         .cloned()
         .unwrap();
     bag.lock().unwrap().items.push(item);
-    (p, item_id)
+    item_id
 }
 
 fn ops(frames: &[(u16, Vec<u8>)]) -> Vec<u16> {
@@ -1212,26 +1277,209 @@ async fn mate_revive_is_refused_without_a_stabler_interaction_or_while_the_corps
 }
 
 #[tokio::test]
-async fn second_summon_despawns_and_logout_clears_entry() {
+async fn second_use_of_the_same_summon_item_dismisses_the_mate() {
     let server = server_with(data());
     let mut a = TestClient::new(&server, 1, 1);
     let (pa, item_id) = player_with_item(&server, &a, 1, PA, (100.0, 100.0), MATE_ITEM);
     mates::spawn_mount(&server, &pa, item_id);
     let m = server.systems.vehicles.mates.get(0);
-    assert_eq!(m.get_active_mates(1).len(), 1);
-    // Using the whistle again only despawns the active mate.
-    mates::spawn_mount(&server, &pa, item_id);
-    assert!(m.get_active_mates(1).is_empty());
-    mates::spawn_mount(&server, &pa, item_id);
-    let mate = m.get_active_mates(1).pop().unwrap();
+    let first = m.get_active_mates(1).pop().expect("first mate");
+    let first_obj = first.obj_id;
+    assert!(server.world.world(0).unwrap().mate(first_obj).is_some());
+    // Live state the despawn must save.
+    {
+        let mut d = first.data();
+        d.experience = 4321;
+        d.unit.hp = 42;
+    }
     a.drain();
-    // Logout path: the mate is deleted and the list entry keyed by the character id is removed.
-    mates::remove_and_despawn_all_active_owned_mates(&server, 0, 1);
-    assert!(server.world.world(0).unwrap().mate(mate.obj_id).is_none());
-    assert!(m.get_active_mates(1).is_empty());
-    // The whistle can be reused right away (no stale entry blocks the summon).
+
+    // Using the same summon item again dismisses the mate (the 1.2 toggle): no new
+    // SCMateSpawned, and the row keeps the live state the despawn saved.
     mates::spawn_mount(&server, &pa, item_id);
+    let frames = a.drain();
+    assert!(m.get_active_mates(1).is_empty(), "the mate is dismissed");
+    assert!(first.data().deleted);
+    assert!(server.world.world(0).unwrap().mate(first_obj).is_none());
+    assert!(ops(&frames).contains(&sc::SCUnitsRemovedPacket));
+    assert!(!ops(&frames).contains(&sc::SCMateSpawnedPacket));
+    let row = server
+        .systems
+        .vehicles
+        .mates
+        .character_mates(1)
+        .unwrap()
+        .get(item_id)
+        .cloned()
+        .expect("mate row");
+    assert_eq!((row.xp, row.hp), (4321, 42));
+
+    // A third use summons it again (the toggle back on), and logout still clears the entry.
+    mates::spawn_mount(&server, &pa, item_id);
+    let second = m.get_active_mates(1).pop().expect("re-summoned mate");
+    let (exp, hp) = {
+        let d = second.data();
+        (d.experience, d.unit.hp)
+    };
+    assert_eq!((exp, hp), (4321, 42));
+    assert!(server.world.world(0).unwrap().mate(second.obj_id).is_some());
+    mates::remove_and_despawn_all_active_owned_mates(&server, 0, 1);
+    assert!(server.world.world(0).unwrap().mate(second.obj_id).is_none());
+    assert!(m.get_active_mates(1).is_empty());
+}
+
+/// The toggle is per summon item, not per template: a second whistle (a different item id
+/// bound to the same mate template) is a different mate and replaces the first.
+#[tokio::test]
+async fn a_second_whistle_of_the_same_template_replaces_the_mate() {
+    let server = server_with(data());
+    let mut a = TestClient::new(&server, 1, 1);
+    let (pa, first_item) = player_with_item(&server, &a, 1, PA, (100.0, 100.0), MATE_ITEM);
+    let second_item = give_item(&server, &pa, 0x9003, MATE_ITEM);
+    mates::spawn_mount(&server, &pa, first_item);
+    let m = server.systems.vehicles.mates.get(0);
+    let first = m.get_active_mates(1).pop().expect("first mate");
+    a.drain();
+
+    mates::spawn_mount(&server, &pa, second_item);
+    let frames = a.drain();
+    let active = m.get_active_mates(1);
+    assert_eq!(active.len(), 1);
+    let second = active[0].clone();
+    assert_eq!(second.data().item_id, second_item);
+    assert!(first.data().deleted);
+    assert!(ops(&frames).contains(&sc::SCMateSpawnedPacket));
+    assert!(ops(&frames).contains(&sc::SCUnitsRemovedPacket));
+    let in_world = server
+        .world
+        .world(0)
+        .unwrap()
+        .mate(second.obj_id)
+        .expect("the new whistle's mate is spawned");
+    assert!(Arc::ptr_eq(&in_world, &second));
+}
+
+/// A summon that is refused (a dead mate) keeps the current mate out: the despawn runs only
+/// after the checks.
+#[tokio::test]
+async fn a_refused_summon_keeps_the_current_mate() {
+    let server = server_with(data());
+    let mut a = TestClient::new(&server, 1, 1);
+    let (pa, mount_item) = player_with_item(&server, &a, 1, PA, (100.0, 100.0), MATE_ITEM);
+    let pet_item = give_item(&server, &pa, 0x9004, PET_ITEM);
+    {
+        let bag = pa
+            .data()
+            .inventory
+            .get(slot_type::INVENTORY)
+            .cloned()
+            .unwrap();
+        let mut g = bag.lock().unwrap();
+        g.get_item_by_id_mut(pet_item).unwrap().details.mate_dead = 1;
+    }
+    mates::spawn_mount(&server, &pa, mount_item);
+    let m = server.systems.vehicles.mates.get(0);
+    let mount = m.get_active_mates(1).pop().expect("mount");
+    a.drain();
+
+    mates::spawn_mount(&server, &pa, pet_item);
+    let frames = a.drain();
+    assert_eq!(
+        error_codes(&frames),
+        vec![error_message::MATE_CANNOT_SPAWN_WHILE_CORPSE]
+    );
     assert_eq!(m.get_active_mates(1).len(), 1);
+    assert!(!mount.data().deleted);
+    assert!(server.world.world(0).unwrap().mate(mount.obj_id).is_some());
+}
+
+/// The 1.2 client has one player pet (`X2Mate:IsPlayerPetExists` / `DismissPet`, one pet
+/// frame; `SCMateSpawnedPacket` carries no slot or kind), so a mount and a battle pet cannot be
+/// out together: the second summon replaces the first and the new mate spawns.
+#[tokio::test]
+async fn a_second_mate_of_another_kind_replaces_the_first_and_spawns() {
+    let server = server_with(data());
+    let mut a = TestClient::new(&server, 1, 1);
+    let (pa, mount_item) = player_with_item(&server, &a, 1, PA, (100.0, 100.0), MATE_ITEM);
+    let pet_item = give_item(&server, &pa, 0x9000, PET_ITEM);
+    mates::spawn_mount(&server, &pa, mount_item);
+    let m = server.systems.vehicles.mates.get(0);
+    let mount = m.get_active_mates(1).pop().expect("mount");
+    let mount_obj = mount.obj_id;
+    assert!(server.world.world(0).unwrap().mate(mount_obj).is_some());
+    a.drain();
+
+    mates::spawn_mount(&server, &pa, pet_item);
+    let frames = a.drain();
+    let active = m.get_active_mates(1);
+    assert_eq!(active.len(), 1);
+    let pet = active[0].clone();
+    assert_eq!(pet.data().item_id, pet_item);
+    assert!(!Arc::ptr_eq(&mount, &pet));
+    assert!(mount.data().deleted);
+    let in_world = server
+        .world
+        .world(0)
+        .unwrap()
+        .mate(pet.obj_id)
+        .expect("the pet is spawned");
+    assert!(Arc::ptr_eq(&in_world, &pet));
+    // The client creates the new mate from SCMateSpawned (tl u16, id u32, item u64).
+    let spawned = body(&frames, sc::SCMateSpawnedPacket);
+    assert_eq!(
+        u64::from_le_bytes(spawned[6..14].try_into().unwrap()),
+        pet_item
+    );
+    // The old mount's row was saved before its despawn.
+    let rows = server.systems.vehicles.mates.character_mates(1).unwrap();
+    assert!(rows.get(mount_item).is_some());
+}
+
+/// Seats come from the model's attach points (`model_bindings`), the list the 1.2 client's seat
+/// test scans (`FUN_390c9f70`), not the C#'s hard-coded driver + passenger0.
+#[tokio::test]
+async fn mate_passenger_seats_come_from_the_models_attach_points() {
+    let server = server_with(data());
+    let a = TestClient::new(&server, 1, 1);
+    let (pa, horse_item) = player_with_item(&server, &a, 1, PA, (100.0, 100.0), MATE_ITEM);
+    let pet_item = give_item(&server, &pa, 0x9001, PET_ITEM);
+    let elephant_item = give_item(&server, &pa, 0x9002, ELEPHANT_ITEM);
+    let m = server.systems.vehicles.mates.get(0);
+    let seats =
+        |mate: &MateRef| -> Vec<u8> { mate.data().passengers.iter().map(|(p, _)| *p).collect() };
+
+    mates::spawn_mount(&server, &pa, horse_item);
+    let horse = m.get_active_mates(1).pop().expect("horse");
+    assert_eq!(
+        seats(&horse),
+        vec![attach_point::DRIVER, attach_point::PASSENGER0]
+    );
+
+    // A battle pet's model declares no attach points: it has no seats.
+    mates::spawn_mount(&server, &pa, pet_item);
+    let pet = m.get_active_mates(1).pop().expect("pet");
+    assert!(pet.data().passengers.is_empty());
+    let pet_tl = u32::from(pet.data().unit.tl_id);
+    mates::mount_mate(&server, &pa, pet_tl, attach_point::DRIVER, 1);
+    assert!(!pa.data().is_riding);
+
+    // The elephant model declares driver + four passenger seats.
+    mates::spawn_mount(&server, &pa, elephant_item);
+    let elephant = m.get_active_mates(1).pop().expect("elephant");
+    assert_eq!(
+        seats(&elephant),
+        vec![
+            attach_point::DRIVER,
+            attach_point::PASSENGER0,
+            attach_point::PASSENGER1,
+            attach_point::PASSENGER2,
+            attach_point::PASSENGER3
+        ]
+    );
+    let elephant_tl = u32::from(elephant.data().unit.tl_id);
+    mates::mount_mate(&server, &pa, elephant_tl, attach_point::PASSENGER1, 1);
+    assert!(pa.data().is_riding);
+    assert_eq!(pa.data().attached_point, attach_point::PASSENGER1);
 }
 
 #[tokio::test]

@@ -1718,9 +1718,9 @@ async fn summon_mate(
     item_id: u64,
     previous_obj: Option<u32>,
 ) -> anyhow::Result<MateView> {
-    // `spawn_mount` only despawns a mate that is still active (a leftover of an earlier
-    // aborted run, or a corpse that was never dismissed) and spawns nothing in that case, so
-    // the use is repeated once when no SCMateSpawned follows.
+    // Using the summon item of the mate that is already out dismisses it (the 1.2 toggle), so
+    // a leftover active mate makes the first use spawn nothing; repeat once when no
+    // SCMateSpawned follows.
     let spawned_before = game.state.mate_spawn_count;
     let default_timeout = game.timeout;
     game.timeout = Duration::from_secs(6);
