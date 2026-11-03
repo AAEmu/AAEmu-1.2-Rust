@@ -14,6 +14,7 @@
 //! doodads [<doodad template>...]     doodads in sight (all within 40 m when none given)
 //! sq <quest> <npc template|0>        CSStartQuestContext from the nearest NPC of that template
 //! cq <quest> <npc template|0> [sel]  CSCompleteQuestContext at that NPC
+//! cqd <quest> <doodad obj id> [sel]  CSCompleteQuestContext at that doodad object
 //! target <npc template>              select the nearest NPC of that template
 //! targetself                         select our own unit (e.g. for `/buff` on self)
 //! kill <npc template>                walk next to the nearest NPC, target it, `/kill`
@@ -133,6 +134,13 @@ fn show(packets: &[Packet]) {
             }
         } else if p.is_sc(sc::SCErrorMsgPacket) {
             println!("    SCErrorMsg {:?}", p.stream().read_i16());
+        } else if p.is_sc(sc::SCDoodadCompleteQuestPacket) {
+            let mut s = p.stream();
+            if let (Ok(doodad), Ok(quest)) = (s.read_bc(), s.read_u32()) {
+                println!("    SCDoodadCompleteQuest doodad {doodad} quest {quest}");
+            } else {
+                println!("    SCDoodadCompleteQuest (unreadable)");
+            }
         } else if p.is_sc(sc::SCItemTaskSuccessPacket) {
             let t = parse_item_task(&p.body);
             let items: Vec<String> = t
@@ -219,6 +227,16 @@ fn num<T: std::str::FromStr>(parts: &[&str], i: usize) -> anyhow::Result<T> {
         .with_context(|| format!("missing argument {i}"))?
         .parse()
         .map_err(|_| anyhow::anyhow!("bad number '{}'", parts[i]))
+}
+
+/// `CSCompleteQuestContextPacket(quest, npcObjId, doodadObjId, selected)` body.
+fn complete_quest_body(quest: u32, npc_obj: u32, doodad_obj: u32, selected: i32) -> Vec<u8> {
+    let mut b = aaemu_commons::PacketStream::new();
+    b.write_u32(quest)
+        .write_bc(npc_obj)
+        .write_bc(doodad_obj)
+        .write_i32(selected);
+    b.into_bytes()
 }
 
 /// The other player to target: `name`, else the first other player in sight.
@@ -674,17 +692,22 @@ async fn run_lines(
                     game.start_quest(quest, obj).await?;
                 } else {
                     let selected: i32 = parts.get(2).and_then(|x| x.parse().ok()).unwrap_or(0);
-                    let mut b = aaemu_commons::PacketStream::new();
-                    b.write_u32(quest)
-                        .write_bc(obj)
-                        .write_bc(0)
-                        .write_i32(selected);
-                    game.send_cs(
-                        aaemu_game::opcodes::cs::CSCompleteQuestContextPacket,
-                        b.as_bytes(),
-                    )
-                    .await?;
+                    let body = complete_quest_body(quest, obj, 0, selected);
+                    game.send_cs(aaemu_game::opcodes::cs::CSCompleteQuestContextPacket, &body)
+                        .await?;
                 }
+                let got = game
+                    .drain(Duration::from_millis(1200), Duration::from_secs(6))
+                    .await?;
+                show(&got);
+            }
+            "cqd" => {
+                let quest: u32 = num(&parts, 0)?;
+                let doodad: u32 = num(&parts, 1)?;
+                let selected: i32 = parts.get(2).and_then(|x| x.parse().ok()).unwrap_or(0);
+                let body = complete_quest_body(quest, 0, doodad, selected);
+                game.send_cs(aaemu_game::opcodes::cs::CSCompleteQuestContextPacket, &body)
+                    .await?;
                 let got = game
                     .drain(Duration::from_millis(1200), Duration::from_secs(6))
                     .await?;
@@ -1572,5 +1595,37 @@ mod tests {
             vec![r"object \d+ ignored"]
         );
         assert!(split_quoted("\"unterminated").is_err());
+    }
+
+    #[test]
+    fn complete_quest_body_writes_the_doodad_object_id() {
+        use aaemu_commons::PacketStream;
+        use aaemu_game::net::registry::ClientPacket;
+        use aaemu_game::systems::quests::packets::CSCompleteQuestContextPacket;
+
+        let body = super::complete_quest_body(2563, 0, 0x300, 1);
+        assert_eq!(
+            body,
+            vec![0x03, 0x0a, 0, 0, 0, 0, 0, 0, 0x03, 0, 1, 0, 0, 0]
+        );
+        // The server's reader must see the doodad object id, not an NPC object id.
+        let p = CSCompleteQuestContextPacket::read(&mut PacketStream::from_bytes(body)).unwrap();
+        assert_eq!(
+            p,
+            CSCompleteQuestContextPacket {
+                quest_context_id: 2563,
+                npc_obj_id: 0,
+                doodad_obj_id: 0x300,
+                selected: 1,
+            }
+        );
+
+        let body = super::complete_quest_body(100, 0x200, 0, -1);
+        assert_eq!(
+            body,
+            vec![100, 0, 0, 0, 0x00, 0x02, 0x00, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]
+        );
+        let p = CSCompleteQuestContextPacket::read(&mut PacketStream::from_bytes(body)).unwrap();
+        assert_eq!((p.npc_obj_id, p.doodad_obj_id, p.selected), (0x200, 0, -1));
     }
 }
