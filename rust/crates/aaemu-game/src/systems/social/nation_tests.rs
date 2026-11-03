@@ -228,6 +228,79 @@ async fn independence_creates_the_nation_and_moves_the_members() {
 }
 
 #[tokio::test]
+async fn a_disbanded_founding_guild_does_not_capture_a_reused_id() {
+    let f = Fixture::new(false);
+    let first = nation::declare_independence(&f.server, &f.leader, EXPEDITION, "Kingdom", false)
+        .expect("first declaration");
+    assert_eq!(
+        f.server
+            .systems
+            .social
+            .nations
+            .get(first.id)
+            .unwrap()
+            .expedition_id,
+        EXPEDITION
+    );
+
+    // The founding guild disbands; the nation stays kingless (NATION-5) and drops the id.
+    assert!(expedition::disband(&f.server, &f.leader).await);
+    assert_eq!(
+        f.server
+            .systems
+            .social
+            .nations
+            .get(first.id)
+            .unwrap()
+            .expedition_id,
+        0
+    );
+
+    // The next guild takes the freed id. It must neither be captured by the stale nation nor
+    // be refused independence. The owner name is read in its own statement: a `leader.data()`
+    // temporary inside the nested struct literal would live until the end of the `let`.
+    let owner_name = f.leader.data().unit.name.clone();
+    let faction = SystemFaction {
+        id: EXPEDITION,
+        mother_id: 101,
+        name: "NewGuild".into(),
+        owner_id: f.leader.character_id,
+        owner_name,
+        unit_owner_type: 0,
+        political_system: 1,
+        created: 0,
+        ..SystemFaction::default()
+    };
+    let replacement = Expedition {
+        faction,
+        members: vec![
+            expedition::member_from_character(&f.server, EXPEDITION, &f.leader, true),
+            expedition::member_from_character(&f.server, EXPEDITION, &f.member, false),
+        ],
+        policies: Vec::new(),
+        removed_members: Vec::new(),
+        is_disbanded: false,
+    };
+    f.server
+        .expeditions
+        .with_mut(EXPEDITION, |e| *e = replacement);
+    f.leader.data().unit.expedition_id = EXPEDITION;
+    f.member.data().unit.expedition_id = EXPEDITION;
+    let second = nation::declare_independence(&f.server, &f.leader, EXPEDITION, "NewGuild", false)
+        .expect("a reused guild id is independent again");
+    assert_ne!(second.id, first.id);
+    assert_eq!(second.expedition_id, EXPEDITION);
+    assert_eq!(
+        f.server
+            .expeditions
+            .get(EXPEDITION)
+            .unwrap()
+            .faction
+            .mother_id,
+        second.id
+    );
+}
+#[tokio::test]
 async fn independence_requires_the_owner_and_a_dominion() {
     let f = Fixture::new(true);
     let error = nation::declare_independence(&f.server, &f.member, EXPEDITION, "Kingdom", true)
@@ -535,8 +608,10 @@ async fn private_mysql_nation_persistence_round_trip_and_offline_member() {
          PRIMARY KEY (nation_id, other_faction_id))",
         "CREATE TEMPORARY TABLE expeditions (id INT NOT NULL, mother INT NOT NULL)",
         "CREATE TEMPORARY TABLE characters (id INT NOT NULL, faction_id INT NOT NULL)",
+        "CREATE TEMPORARY TABLE housings (id INT NOT NULL, owner INT NOT NULL, faction_id INT NOT NULL)",
         "INSERT INTO expeditions (id, mother) VALUES (1000, 101)",
         "INSERT INTO characters (id, faction_id) VALUES (42, 101)",
+        "INSERT INTO housings (id, owner, faction_id) VALUES (13, 42, 101)",
     ] {
         sqlx::query(statement).execute(&pool).await.unwrap();
     }
@@ -559,14 +634,13 @@ async fn private_mysql_nation_persistence_round_trip_and_offline_member() {
         offline_members: vec![42],
     };
     nation::save_creation(&server, &nation).await.unwrap();
-    let (mother, faction): (i64, i64) = sqlx::query_as(
-        "SELECT CAST(e.mother AS SIGNED), CAST(c.faction_id AS SIGNED) FROM expeditions e, \
-         characters c WHERE e.id = 1000 AND c.id = 42",
+    let (mother, faction, house): (i64, i64, i64) = sqlx::query_as(
+        "SELECT CAST(e.mother AS SIGNED), CAST(c.faction_id AS SIGNED),          CAST(h.faction_id AS SIGNED) FROM expeditions e, characters c, housings h          WHERE e.id = 1000 AND c.id = 42 AND h.id = 13",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!((mother, faction), (1001, 1001));
+    assert_eq!((mother, faction, house), (1001, 1001, 1001));
 
     let loaded = NationManager::default();
     loaded.load(&pool).await.unwrap();
@@ -592,6 +666,32 @@ async fn private_mysql_nation_persistence_round_trip_and_offline_member() {
     assert_eq!(loaded.relations, nation.relations);
     // The offline list is runtime-only (the characters were already rewritten).
     assert!(loaded.offline_members.is_empty());
+
+    // A new guild reuses the freed id with its own mother. The periodic nation save must not
+    // rewrite it (the old per-save UPDATE captured the new guild).
+    sqlx::query("UPDATE expeditions SET mother = 101 WHERE id = 1000")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let manager = NationManager::default();
+    manager.add(nation.clone());
+    let mut tx = pool.begin().await.unwrap();
+    manager.save(&server, &mut tx).await.unwrap();
+    tx.commit().await.unwrap();
+    let reused: i64 =
+        sqlx::query_scalar("SELECT CAST(mother AS SIGNED) FROM expeditions WHERE id = 1000")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        reused, 101,
+        "the periodic save must not move a reused guild"
+    );
+
+    // Loading reconciles the stale stored id (the nation stays; the reused guild does not).
+    let reloaded = NationManager::default();
+    reloaded.load(&pool).await.unwrap();
+    assert_eq!(reloaded.get(1001).unwrap().expedition_id, 0);
     pool.close().await;
 }
 

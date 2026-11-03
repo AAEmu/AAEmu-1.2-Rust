@@ -129,9 +129,7 @@ impl NationManager {
     pub async fn load(&self, pool: &MySqlPool) -> Result<()> {
         let mut nations = Vec::new();
         for r in sqlx::query(
-            "SELECT CAST(id AS SIGNED) AS id, CAST(expedition_id AS SIGNED) AS expedition_id, \
-             CAST(owner_character_id AS SIGNED) AS owner_character_id, owner_name, name, \
-             created_at, CAST(allow_change_name AS SIGNED) AS allow_change_name FROM nations ORDER BY id",
+            "SELECT CAST(n.id AS SIGNED) AS id,              CAST(CASE WHEN e.id IS NULL OR e.mother <> n.id THEN 0 ELSE n.expedition_id END                   AS SIGNED) AS expedition_id,              CAST(n.owner_character_id AS SIGNED) AS owner_character_id, n.owner_name, n.name,              n.created_at, CAST(n.allow_change_name AS SIGNED) AS allow_change_name              FROM nations n LEFT JOIN expeditions e ON e.id = n.expedition_id ORDER BY n.id",
         )
         .fetch_all(pool)
         .await?
@@ -188,15 +186,50 @@ impl NationManager {
     }
 
     pub fn is_nation(&self, id: u32) -> bool {
-        self.read().iter().any(|n| n.id == id)
+        let nations = self.read();
+        if nations.is_empty() {
+            return false;
+        }
+        nations.iter().any(|n| n.id == id)
     }
 
-    /// The nation founded by `expedition_id`.
+    /// `(id, mother_id)` of a nation without cloning it (the relation hot path).
+    pub fn faction_pair(&self, id: u32) -> Option<(u32, u32)> {
+        let nations = self.read();
+        if nations.is_empty() {
+            return None;
+        }
+        nations.iter().find(|n| n.id == id).map(|n| (n.id, 0))
+    }
+
+    /// The nation founded by `expedition_id` (`0` = none).
     pub fn for_expedition(&self, expedition_id: u32) -> Option<Nation> {
+        if expedition_id == 0 {
+            return None;
+        }
         self.read()
             .iter()
             .find(|n| n.expedition_id == expedition_id)
             .cloned()
+    }
+
+    /// The founding expedition disbanded: the nation stays as a kingless nation (NATION-5),
+    /// but its stale expedition id must not capture a guild that later reuses the id.
+    pub fn on_expedition_disbanded(&self, expedition_id: u32) {
+        if expedition_id == 0 {
+            return;
+        }
+        for nation in self
+            .write()
+            .iter_mut()
+            .filter(|n| n.expedition_id == expedition_id)
+        {
+            tracing::info!(
+                "Nation {} lost its founding expedition {expedition_id}; it stays kingless",
+                nation.id
+            );
+            nation.expedition_id = 0;
+        }
     }
 
     /// The `SystemFaction` of a nation id (`None` for every other id).
@@ -208,6 +241,9 @@ impl NationManager {
     /// mirrored for lookups, the client list stays directional).
     pub fn relation(&self, a: u32, b: u32) -> Option<u8> {
         let nations = self.read();
+        if nations.is_empty() {
+            return None;
+        }
         for nation in nations.iter() {
             if nation.id == a {
                 return nation
@@ -296,8 +332,18 @@ pub async fn save_creation(server: &GameServer, nation: &Nation) -> Result<()> {
         .iter()
         .map(|p| p.character_id)
         .collect();
+    // The periodic save must not touch `expeditions` (a reused guild id would be captured);
+    // only the creation transaction writes the founding guild's mother.
+    let _save = server.save.transaction_lock().await;
     let mut tx = server.db.begin().await?;
     write_nation(&mut tx, nation, &online).await?;
+    if nation.expedition_id != 0 {
+        sqlx::query("UPDATE expeditions SET mother = ? WHERE id = ?")
+            .bind(nation.id)
+            .bind(nation.expedition_id)
+            .execute(&mut *tx)
+            .await?;
+    }
     tx.commit().await?;
     server
         .systems
@@ -345,13 +391,6 @@ async fn write_nation(
         .execute(&mut **tx)
         .await?;
     }
-    // The founding expedition's mother is the nation; keep both membership pointers in the
-    // same transaction (the expedition save writes the same value).
-    sqlx::query("UPDATE expeditions SET mother = ? WHERE id = ?")
-        .bind(nation.id)
-        .bind(nation.expedition_id)
-        .execute(&mut **tx)
-        .await?;
     let offline: Vec<u32> = nation
         .offline_members
         .iter()
@@ -370,8 +409,16 @@ async fn write_nation(
         .bind(nation.id)
         .execute(&mut **tx)
         .await?;
+        // Offline members' houses are not in the housing manager; move their stored faction in
+        // the same transaction (NATION-5 review follow-up).
+        sqlx::query(&format!(
+            "UPDATE housings SET faction_id = ? WHERE owner IN ({list})"
+        ))
+        .bind(nation.id)
+        .execute(&mut **tx)
+        .await?;
     }
-    Ok(2 + nation.relations.len() + offline.len())
+    Ok(1 + nation.relations.len() + offline.len())
 }
 
 /// `(id, mother_id)` of a static faction or a runtime nation (`None` = an unknown faction).
@@ -379,12 +426,7 @@ pub fn faction_of_id(server: &GameServer, id: u32) -> Option<(u32, u32)> {
     if let Some(f) = server.game_data.factions.get(id) {
         return Some((f.id, f.mother_id));
     }
-    server
-        .systems
-        .social
-        .nations
-        .get(id)
-        .map(|nation| (nation.id, 0))
+    server.systems.social.nations.faction_pair(id)
 }
 
 /// Whether `id` is a static faction or a runtime nation.

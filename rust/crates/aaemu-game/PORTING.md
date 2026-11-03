@@ -492,9 +492,31 @@ refuses a duplicate faction id (`FUN_398a5280`), so `EXPEDITION_ID` also extract
   `FACTION_SEPARATE_RIGHTS`. The GM command's `nation create force` skips only that check for
   test fixtures. The skill's CASTLE_CLAIM backpack (type 1, slot 26) is checked in the effect
   after the authored `unit_reqs` slot requirement.
+* **NATION-5 (stage 2 scope):** when the founding expedition disbands, the nation stays as a
+  kingless nation (`dismiss_expedition` clears its `expedition_id`; the next save writes 0).
+  Load clears a stored id whose `expeditions` row is missing or whose `mother` is not the
+  nation, so a guild that later reuses the freed id is neither captured nor refused
+  independence. Offline members' stored houses move in the creation transaction, and the
+  housing / crime faction lookups use the live nation table. Nation destruction / succession is
+  stage 2 (capture-pending).
+* **NATION-6 (hot path, documented):** relation lookups take the nations `RwLock` and scan
+  linearly. `faction_pair` / `is_nation` avoid cloning and have empty fast paths, but there is
+  no id index; the expected nation count makes this acceptable.
+* **NATION-7:** a nation member's mother is 0, so nation chat shares `faction_chat(0)` and
+  cross-nation whispers are allowed. A real nation channel is stage 2+ work.
+* **NATION-8:** a member already in the enter-world path when independence runs can keep the
+  race faction (the offline set comes from one world snapshot); the next login loads the saved
+  nation faction.
+* **NATION-9:** `save_creation` takes `SaveManager::transaction_lock` around its transaction;
+  the periodic save runs inside `DoSave`. The GM command and the skill both call the same
+  synchronous service, so a concurrent duplicate call is refused by the in-memory check.
+* **NATION-10:** a client already in the login burst when independence broadcasts can miss
+  `SCFactionIndependence`; it receives the nation record and relations on the next login.
+  Expedition records with `mother = N` are sent before N's own record in the login burst; the
+  1.2 client's tolerance for that order is unverified (the client stores records independently).
 * The national tax CS packet is 0x013 (`FUN_392f42f0`; owner-approved exception to the
-  never-edit `opcodes.rs` rule); its handler, relation expiry, immigration / kick, rename and
-  monument stay for stages 2-4 and the packet is not registered yet.
+  never-edit `opcodes.rs` rule); a log-only handler is registered. The real tax handler,
+  relation expiry, immigration / kick, rename and monument stay for stages 2-4.
 
 ### systems::housing
 
@@ -1269,8 +1291,8 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   anyone else, leaving `OwnerId` on a non-member. The Rust removes an ordinary member as a
   normal leave (same packets as `Leave`) and dismisses the guild when the member is its owner:
   the 1.2 client refuses an owner's leave (`expedition_owner_cannot_leave`, error 310) and only
-  offers the owner's dismiss path (`expedition_owner_dismiss`, 301). **Capture-pending PIRATE-1:**
-  no retail capture of a guild owner's forced faction change; the dismissal is the chosen rule.
+  offers the owner's dismiss path (`expedition_owner_dismiss`, 301). **Owner decision
+  (2026-11-03, PIRATE-1):** a guild owner's forced faction change dismisses the guild.
 * `CheckForDeletedCharactersDeletion`: the rename / `deleted = 1` / packets are done;
   `DeleteCharacterAssets` (houses, guild, family, mail returns) is a later phase.
 * `GameConnection.OnDisconnect` → `UpdateLoginTime(0)` for connections that never entered (inserts

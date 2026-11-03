@@ -1215,6 +1215,9 @@ fn dismiss_expedition(server: &GameServer, id: u32) {
         e.faction.owner_id = 0;
         e.is_disbanded = true;
     });
+    // A nation founded by this guild stays as a kingless nation, but its stale id must not
+    // capture a guild that later reuses it (NATION-5).
+    server.systems.social.nations.on_expedition_disbanded(id);
 }
 
 /// `Character.SetFaction`'s guild removal, run after the character's data lock is released.
@@ -1224,8 +1227,8 @@ fn dismiss_expedition(server: &GameServer, id: u32) {
 /// other member, leaving `OwnerId` pointing at a non-member. The 1.2 client refuses an owner's
 /// leave (`expedition_owner_cannot_leave`, error 310) and offers only the dismiss path
 /// (`expedition_owner_dismiss`, 301), so the forced change removes an ordinary member as a
-/// normal leave and dismisses the guild when the member is its owner. Capture-pending PIRATE-1:
-/// no retail capture of a guild owner's faction change.
+/// normal leave and dismisses the guild when the member is its owner. Owner decision
+/// (2026-11-03, PIRATE-1): a guild owner's forced faction change dismisses the guild.
 pub async fn remove_member_for_faction_change(server: &GameServer, p: &PlayerRef) {
     let Some(e) = expedition_of(server, p) else {
         return;
