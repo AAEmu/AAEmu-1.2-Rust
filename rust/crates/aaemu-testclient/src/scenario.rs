@@ -143,6 +143,9 @@ pub struct BotConfig {
     pub login: String,
     pub user: String,
     pub password: String,
+    /// OTP for an account with two-factor authentication (`ACEnterOtpPacket`).
+    #[serde(default)]
+    pub otp: Option<String>,
     /// Character name used when the account has none.
     pub character: String,
     /// Require creation of `character`, even if the account already has other characters.
@@ -502,7 +505,9 @@ async fn open_lobby(
     // ---- login server ----
     let s = r.begin("login.auth");
     let mut login = LoginClient::connect(&cfg.login, r.rec.clone()).await?;
-    let account_id = login.auth_trion(&cfg.user, &cfg.password).await?;
+    let account_id = login
+        .auth_trion_with_otp(&cfg.user, &cfg.password, cfg.otp.as_deref())
+        .await?;
     ensure!(account_id != 0, "account id 0");
     r.var("account_id", account_id);
     r.end(s, format!("account {account_id}"));

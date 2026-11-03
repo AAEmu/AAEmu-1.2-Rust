@@ -1,7 +1,7 @@
 //! `aaemu-testclient` — headless 1.2 client bot.
 //!
 //! ```text
-//! aaemu-testclient run    [--config F] [--login H:P] [--user U] [--password P] [--character C]
+//! aaemu-testclient run    [--config F] [--login H:P] [--user U] [--password P] [--otp CODE] [--character C]
 //!                         [--scenario login|lobby|full|combat|npc-return|mate-revive|questitem|doodad|plant|cometsboon|stonethrow|ghost|lunafrost|portal|socket|craft|busy|load]
 //!                         [--out capture.jsonl]
 //!                         [--npc-return-distance M] [--npc-return-away-secs S]
@@ -107,6 +107,7 @@ fn bot_config_with(
         ("login", "login"),
         ("user", "user"),
         ("password", "password"),
+        ("otp", "otp"),
         ("character", "character"),
     ] {
         if let Some(x) = args.get(flag) {
