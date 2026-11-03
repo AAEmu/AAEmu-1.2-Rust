@@ -75,6 +75,9 @@ pub struct AppConfig {
     pub access_level: Vec<(String, i32)>,
     #[serde(rename = "account")]
     pub account: AccountConfig,
+    /// `Characters` (Rust only: lobby character-slot limits and the pre-select period).
+    #[serde(rename = "characters")]
+    pub characters: CharactersConfig,
     #[serde(rename = "labor")]
     pub labor: CurrencyValuesConfig,
     /// `LaborOffline` (labor granted per offline tick on login).
@@ -153,6 +156,7 @@ impl Default for AppConfig {
             discord_token: None,
             access_level: Vec::new(),
             account: AccountConfig::default(),
+            characters: CharactersConfig::default(),
             labor: CurrencyValuesConfig::default(),
             labor_offline: CurrencyValuesConfig::default(),
             credits: CurrencyValuesConfig::default(),
@@ -291,6 +295,31 @@ impl Default for AccountConfig {
             access_level_first_character: 100,
             delete_release_name: false,
             delete_timings: Vec::new(),
+        }
+    }
+}
+
+/// `Characters` (Rust only): the lobby character-slot limit and the pre-select period.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct CharactersConfig {
+    /// Base character slots of every account, before the purchased
+    /// `accounts.extra_character_slots` are added. Must equal the login server's
+    /// `Login:MaxCharactersPerAccount`; the login server advertises it, this server enforces it.
+    #[serde(rename = "maxperaccount", deserialize_with = "lenient")]
+    pub max_per_account: u8,
+    /// Whether character editing is allowed at character select. The login server advertises the
+    /// same value as `Login:PreSelectCharacterPeriod`; the client only opens the edit UI in that
+    /// period.
+    #[serde(rename = "preselectcharacterperiod", deserialize_with = "lenient")]
+    pub pre_select_character_period: bool,
+}
+
+impl Default for CharactersConfig {
+    fn default() -> Self {
+        Self {
+            max_per_account: aaemu_commons::character_slots::DEFAULT_MAX_CHARACTERS_PER_ACCOUNT,
+            pre_select_character_period: false,
         }
     }
 }
@@ -652,7 +681,7 @@ pub const USER_SECRETS_ID: &str = "426ad5c3-9a72-44e9-88f5-4b5940b98c28";
 
 /// The top-level `AppConfiguration` members (environment variables are only applied below
 /// these keys; anything else could never bind).
-const TOP_LEVEL_KEYS: [&str; 31] = [
+const TOP_LEVEL_KEYS: [&str; 32] = [
     "physics",
     "id",
     "additionalesid",
@@ -671,6 +700,7 @@ const TOP_LEVEL_KEYS: [&str; 31] = [
     "dungeons",
     "accesslevel",
     "account",
+    "characters",
     "labor",
     "laboroffline",
     "credits",
@@ -1183,6 +1213,19 @@ mod tests {
         assert_eq!(cfg.login_network.port, 1234);
         assert!(cfg.account.delete_release_name);
         assert_eq!(cfg.account.access_level_first_account, 100);
+    }
+
+    #[test]
+    fn characters_config_binds_slots_and_pre_select_period() {
+        let cfg = AppConfig::from_value(json!({
+            "Characters": { "MaxPerAccount": "8", "PreSelectCharacterPeriod": "true" }
+        }))
+        .unwrap();
+        assert_eq!(cfg.characters.max_per_account, 8);
+        assert!(cfg.characters.pre_select_character_period);
+        let default = AppConfig::default();
+        assert_eq!(default.characters.max_per_account, 6);
+        assert!(!default.characters.pre_select_character_period);
     }
 
     #[test]

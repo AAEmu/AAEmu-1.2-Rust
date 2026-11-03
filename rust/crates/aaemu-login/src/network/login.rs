@@ -15,6 +15,7 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 use tokio_util::sync::CancellationToken;
 
 use crate::auth::{AuthFlow, AuthFlowResult, KoreaStep, LoginClient};
+use crate::config::LoginConfig;
 use crate::controllers::game::{GameController, GameServer};
 use crate::handlers;
 use crate::id_manager::{ConnectionIdLease, IdError, SimpleIdManager};
@@ -79,6 +80,8 @@ pub struct LoginConnection {
     closed: CancellationToken,
     data: Mutex<AccountData>,
     session: Mutex<SessionState>,
+    /// The character-slot and pre-select values `send_auth_success` advertises.
+    limits: LoginConfig,
 }
 
 impl std::fmt::Debug for LoginConnection {
@@ -96,6 +99,7 @@ impl LoginConnection {
         ip: IpAddr,
         is_locally_connected: bool,
         tx: mpsc::UnboundedSender<Vec<u8>>,
+        limits: LoginConfig,
     ) -> Self {
         Self {
             lease,
@@ -110,6 +114,7 @@ impl LoginConnection {
                 enter_world: None,
                 background: None,
             }),
+            limits,
         }
     }
 
@@ -121,10 +126,11 @@ impl LoginConnection {
         local_ip: Option<IpAddr>,
         remote_ip: IpAddr,
         tx: mpsc::UnboundedSender<Vec<u8>>,
+        limits: LoginConfig,
     ) -> Result<Self, IdError> {
         let lease = ConnectionIdLease::rent(ids)?;
         let is_local = local_ip == Some(remote_ip);
-        Ok(Self::new(lease, remote_ip, is_local, tx))
+        Ok(Self::new(lease, remote_ip, is_local, tx, limits))
     }
 
     pub fn id(&self) -> ConnectionId {
@@ -523,21 +529,17 @@ async fn run_enter_world_background(
 
 impl LoginClient for LoginConnection {
     fn send_auth_success(&self, account_id: AccountId) -> Result<(), PacketError> {
-        const MAX_CHARACTERS_PER_ACCOUNT: u8 = 6; // TODO: Make configurable
-        const ADDITIONAL_CHARACTERS_PER_SERVER: u32 = 0; // TODO: Make configurable
-        const IS_PRE_SELECT_CHARACTER_PERIOD: bool = false; // TODO: Make configurable
-
         self.send_packet(&AcJoinResponse::new(
             JoinResponseReason::Success,
             AfsValue {
-                max_characters_per_account: MAX_CHARACTERS_PER_ACCOUNT,
-                additional_characters_per_server: ADDITIONAL_CHARACTERS_PER_SERVER,
-                is_pre_select_character_period: IS_PRE_SELECT_CHARACTER_PERIOD,
+                max_characters_per_account: self.limits.max_characters_per_account,
+                additional_characters_per_server: self.limits.additional_characters_per_server,
+                is_pre_select_character_period: self.limits.pre_select_character_period,
             },
         ))?;
         self.send_packet(&AcAuthResponse {
             account_id,
-            slot_count: 6,
+            slot_count: self.limits.max_characters_per_account,
         })
     }
 
@@ -678,7 +680,13 @@ async fn handle_connection(
     // checks if a connection is from the same machine
     let local_ip = stream.local_addr().ok().map(|l| l.ip());
     let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let conn = match LoginConnection::create(&server.connection_ids, local_ip, addr.ip(), tx) {
+    let conn = match LoginConnection::create(
+        &server.connection_ids,
+        local_ip,
+        addr.ip(),
+        tx,
+        server.config.login,
+    ) {
         Ok(c) => Arc::new(c),
         Err(e) => {
             tracing::error!("Error on connection from {}: {}", addr, e);

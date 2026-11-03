@@ -70,6 +70,10 @@ pub struct AppConfig {
     /// `KoreaAuth` section.
     #[serde(rename = "koreaauth", default)]
     pub korea_auth: KoreaAuthOptions,
+    /// `Login` section (Rust only: the character slots and pre-select period advertised to the
+    /// client).
+    #[serde(rename = "login", default)]
+    pub login: LoginConfig,
     /// `ConnectionStrings` section (`ConnectionStrings:MySqlConnection` overrides `Connections`).
     #[serde(rename = "connectionstrings", default)]
     pub connection_strings: HashMap<String, String>,
@@ -80,6 +84,39 @@ pub struct AppConfig {
 
 fn default_enter_world_timeout() -> Duration {
     Duration::from_secs(10)
+}
+
+/// `Login`: the account character slots and pre-select period advertised in `ACJoinResponse` and
+/// `ACAuthResponse` (base slots) and `SCGetSlotCount` (the game server sends the purchased slots).
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default)]
+pub struct LoginConfig {
+    /// Base character slots of every account. Must equal the game server's
+    /// `Characters:MaxPerAccount`, which enforces it.
+    #[serde(rename = "maxcharactersperaccount", deserialize_with = "lenient_u8")]
+    pub max_characters_per_account: u8,
+    /// `ACJoinResponse.afs` "additional characters per server when using the slot increase item"
+    /// (the client's expandable limit).
+    #[serde(
+        rename = "additionalcharactersperserver",
+        deserialize_with = "lenient_u32"
+    )]
+    pub additional_characters_per_server: u32,
+    /// Whether the client is told it is in the character pre-select period (character edit at
+    /// character select). The game server's `Characters:PreSelectCharacterPeriod` must match.
+    #[serde(rename = "preselectcharacterperiod", deserialize_with = "lenient_bool")]
+    pub pre_select_character_period: bool,
+}
+
+impl Default for LoginConfig {
+    fn default() -> Self {
+        Self {
+            max_characters_per_account:
+                aaemu_commons::character_slots::DEFAULT_MAX_CHARACTERS_PER_ACCOUNT,
+            additional_characters_per_server: 0,
+            pre_select_character_period: false,
+        }
+    }
 }
 
 /// Configuration of a single game server.
@@ -358,7 +395,7 @@ pub fn set_path(root: &mut Value, path: &str, value: &str) {
     *node = Value::String(value.to_string());
 }
 
-const TOP_LEVEL_KEYS: [&str; 11] = [
+const TOP_LEVEL_KEYS: [&str; 12] = [
     "secretkey",
     "autoaccount",
     "skiphostresolve",
@@ -368,6 +405,7 @@ const TOP_LEVEL_KEYS: [&str; 11] = [
     "internalnetwork",
     "connections",
     "koreaauth",
+    "login",
     "connectionstrings",
     "urls",
 ];
@@ -491,6 +529,7 @@ macro_rules! lenient_int {
 
 lenient_int!(lenient_u8, u8);
 lenient_int!(lenient_u16, u16);
+lenient_int!(lenient_u32, u32);
 lenient_int!(lenient_i32, i32);
 
 fn timespan<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {

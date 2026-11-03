@@ -30,8 +30,13 @@ use crate::packets::world::{
 use crate::server::GameServer;
 use crate::world::unit_state::create_character_response;
 
-/// Matches `AcAuthResponse.slot_count` in aaemu-login (base slots, without paid slots).
-pub const MAX_CHARACTERS_PER_ACCOUNT: i64 = 6;
+/// The number of characters this account can create. The client is told the same two parts:
+/// the login server advertises the base slots (`ACJoinResponse.afs` / `ACAuthResponse.slot_count`)
+/// and `CSListCharacterPacket` sends the purchased (`accounts.extra_character_slots`) count in
+/// `SCGetSlotCount`, so creation must stop at their sum.
+pub fn character_slot_limit(base: u8, extra_slots: u8) -> u8 {
+    aaemu_commons::character_slots::character_slot_limit(base, extra_slots)
+}
 
 // Native 1.2 x2game12.c:391136-391163 (HandleErrorMessage, lobby errors).
 const ERROR_CHARACTER_EXPEDITION_OWNER: i16 = 333;
@@ -520,6 +525,11 @@ pub async fn create(
     // Use persisted rows, not a connection's stale/empty lobby list. Pending deletions still
     // occupy slots until deleted=1. Keep the save lock through the subsequent commit; the next
     // create sees this one, and a failed create leaves neither a slot nor an inventory behind.
+    let extra_slots = crate::db::extra_character_slots(&server.db, conn.account_id()).await;
+    let limit = i64::from(character_slot_limit(
+        server.config.characters.max_per_account,
+        extra_slots,
+    ));
     let slots = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM characters WHERE account_id = ? AND deleted = 0",
     )
@@ -527,7 +537,7 @@ pub async fn create(
     .fetch_one(&server.db)
     .await;
     match slots {
-        Ok(count) if count >= MAX_CHARACTERS_PER_ACCOUNT => {
+        Ok(count) if count >= limit => {
             conn.send(&SCCharacterCreationFailedPacket {
                 reason: CharacterCreateError::WorldLimit as u8,
             });

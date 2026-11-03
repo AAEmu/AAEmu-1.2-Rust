@@ -61,6 +61,34 @@ Field meanings:
 - `Port`: client connection port.
 - `Hidden`: whether to hide this entry from listing.
 
+### Character slots and the pre-select period
+
+The login server tells the client how many characters an account has:
+
+```json
+{
+  "Login": {
+    "MaxCharactersPerAccount": 6,
+    "AdditionalCharactersPerServer": 0,
+    "PreSelectCharacterPeriod": false
+  }
+}
+```
+
+- `MaxCharactersPerAccount` (default `6`): base character slots of every account,
+  sent in `ACJoinResponse` and `ACAuthResponse`. The game server's
+  `Characters:MaxPerAccount` must be the same value; it enforces the limit.
+- `AdditionalCharactersPerServer` (default `0`): the expandable limit the client
+  shows for slot-increase items.
+- `PreSelectCharacterPeriod` (default `false`): tells the client it may edit
+  characters at character select. The game server's
+  `Characters:PreSelectCharacterPeriod` must be the same value.
+
+Purchased character slots (`accounts.extra_character_slots`, from the slot
+increase item) are added to the base by both the game server's
+`SCGetSlotCount` and its create check, so an account can create up to
+`MaxCharactersPerAccount + extra_character_slots` characters.
+
 ### Environment variable mapping (login)
 
 You can define server entries via environment variables:
@@ -92,6 +120,30 @@ place for passwords you do not want in a file. (A user-secrets file left over
 from the C# version is still read between `Config.Local.json` and the
 environment variables, but it can no longer be managed with a tool; move those
 values to `Config.Local.json` or environment variables.)
+
+### Game character settings (`Characters`)
+
+The game server's `Configurations/CharacterSettings.json` carries the mirror of
+the login character settings:
+
+```json
+{
+  "Characters": {
+    "MaxPerAccount": 6,
+    "PreSelectCharacterPeriod": false
+  }
+}
+```
+
+- `MaxPerAccount` (default `6`): must equal the login server's
+  `Login:MaxCharactersPerAccount`; character creation is refused once the
+  account already has `MaxPerAccount + extra_character_slots` characters.
+- `PreSelectCharacterPeriod` (default `false`): must equal the login server's
+  `Login:PreSelectCharacterPeriod`.
+
+Both keys can also be overridden in the game's `Config.Local.json` or with
+environment variables (`Characters__MaxPerAccount`,
+`Characters__PreSelectCharacterPeriod`).
 
 ## Web API authentication and migration
 
