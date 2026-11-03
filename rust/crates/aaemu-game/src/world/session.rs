@@ -1240,9 +1240,9 @@ pub async fn send_chat_message(
     // modified client cannot bypass them.
     if !crate::systems::social::chat::chat_spam_allows(
         &server.config.chat,
-        &mut conn.chat_spam_last_ms,
+        &mut conn.chat_spam_last,
         chat,
-        now_ms(),
+        std::time::Instant::now(),
     ) {
         conn.send(&SCErrorMsgPacket::new(
             crate::systems::social::chat::CHAT_SPAM_DELAY_ERROR,

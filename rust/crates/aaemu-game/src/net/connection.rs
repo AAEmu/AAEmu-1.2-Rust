@@ -281,7 +281,7 @@ pub struct GameConnection {
     /// `Debug:ReplyDelay` (`None` = off).
     delay: Option<Arc<ReplyDelayConn>>,
     /// Last allowed chat time per chat-spam group (`FUN_393C2540`'s `lastSend` array).
-    pub chat_spam_last_ms: [i64; 15],
+    pub chat_spam_last: [Option<std::time::Instant>; 15],
 }
 
 impl std::fmt::Debug for GameConnection {
@@ -331,7 +331,7 @@ impl GameConnection {
             commands,
             closing: false,
             delay: None,
-            chat_spam_last_ms: [i64::MIN; 15],
+            chat_spam_last: [None; 15],
         };
         (conn, handle)
     }

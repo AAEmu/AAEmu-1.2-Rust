@@ -231,9 +231,12 @@ impl Default for JusticeConfig {
 /// has not elapsed (native `FUN_393C2540`, localized message `0x108`). The server enforces the
 /// same values, so a modified client cannot bypass the limit.
 ///
-/// The retail values are not present in `compact.sqlite3` and were not captured; the shipped
-/// delays are emulator defaults and are **capture-pending** (case `CHAT-SPAM-1`). An all-zero
-/// list disables the limit.
+/// The retail values are not present in `compact.sqlite3` and were not captured, so the shipped
+/// `Chat.json` keeps every delay at 0 (the previous C# behaviour, **capture-pending** case
+/// `CHAT-SPAM-1`). Set `ChatGroupDelays[i]` in milliseconds to enable the limit for group `i`;
+/// `ChatTypeGroups` maps the client's chat types `0..=14` to those groups. The server refuses a
+/// message earlier than the group delay (minus the jitter grace) with `SCErrorMsgPacket(0x108)`,
+/// the code the client's own throttle displays.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ChatConfig {
@@ -350,10 +353,9 @@ mod tests {
         assert_eq!(j.bot_report_prime_suspect_count, 5);
         let c = &cfg.chat;
         assert_eq!(c.packet_groups(), std::array::from_fn(|i| i as u8));
-        assert_eq!(c.delay_ms(0), 1000);
-        assert_eq!(c.delay_ms(1), 3000);
-        assert_eq!(c.delay_ms(4), 0);
-        assert_eq!(c.packet_delays()[1], 3.0);
+        // The shipped limits are off: the retail delays are not evidenced (CHAT-SPAM-1).
+        assert!(c.chat_group_delays_ms.iter().all(|&ms| ms == 0));
+        assert!(c.packet_delays().iter().all(|&s| s == 0.0));
     }
 
     #[test]

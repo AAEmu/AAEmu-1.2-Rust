@@ -1737,9 +1737,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   sends the configured groups/delays (`Configurations/Chat.json`, `ChatConfig`) and enforces the
   same limits before routing a message, answering with `SCErrorMsgPacket(0x108)`, the code the
   client's own throttle displays. Whisper (`-3`) and user channels (`15`) stay unlimited, as in
-  the client. The retail delay values are not in `compact.sqlite3` and were not captured: the
-  shipped `Chat.json` delays (Say 1 s; Shout / Trade / LFG / Region 3 s; party and private
-  channels off) are emulator defaults, **capture-pending (CHAT-SPAM-1)**.
+  the client. The client stamps its `last_send` when it sends, the server when the message
+  arrives, so a stock client's message at the delay can arrive early under jitter; the server
+  grants `min(250 ms, delay / 4)` of grace and uses a monotonic clock. The retail delay values
+  are not in `compact.sqlite3` and were not captured, so the shipped `Chat.json` keeps every
+  delay at 0 (the previous C# behaviour, **capture-pending CHAT-SPAM-1**). To enable the limit,
+  set `Chat.ChatGroupDelays[i]` (milliseconds) and optionally `Chat.ChatTypeGroups` in
+  `Configurations/Chat.json`; the same values are sent to the client and enforced by the server.
 * systems::social: **Words.** `blocked_texts` is applied to character names only (`check_name`);
   the client's chat masking (`check_chat`, `ignore_texts`) happens in the 1.2 client before the
   message is sent (`FUN_393C76B0` / `FUN_393C78E0` / `FUN_393C7A10`), and `replace_chats` /
@@ -1752,10 +1756,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `allowed_name_chars` (2352 rows: lowercase Latin and 2326 Hangul syllables; native
   `FUN_39572620` / `FUN_395728B0`): a one-byte ASCII letter or space always passes, every other
   character must be listed, so digits and Cyrillic are refused. The server loads the table into
-  `CharacterData.allowed_name_chars` and applies it in addition to `CharacterNameRegex`
-  (`NameManager::set_allowed_name_chars`); an empty/missing table keeps the regex-only rule.
-  `blocked_texts` with `check_name` already refused forbidden words. Guild creation uses only
-  `XlIsValidName` in the client (`FUN_392FA240`), so `Expedition.NameRegex` stays its only rule.
+  `CharacterData.allowed_name_chars`, but installing it into `NameManager` is **opt-in**:
+  `CharacterNameUseAllowedChars` (default false) avoids breaking the stock regex (digits,
+  Cyrillic) and the test client's generated names; when enabled, one startup log says the
+  whitelist overrides `CharacterNameRegex` for names it does not list. A missing table or a
+  NULL/malformed row is skipped, not fatal. `blocked_texts` with `check_name` already refused
+  forbidden words. Guild creation uses only `XlIsValidName` in the client (`FUN_392FA240`), so
+  `Expedition.NameRegex` stays its only rule.
 
 * systems::social: justice repairs intentionally differ from C#: crime/infamy accumulation and
   sentence durations saturate instead of wrapping; a live evidence doodad can be reported once.
@@ -4906,3 +4913,15 @@ changed; each one is a real behaviour difference, not a deliberate deviation.
   `LearnAbility` entry point gates the activation by level, but `CSSwapAbilityPacket` with
   `old = NONE` reaches this function without that check, so a character of any level can
   activate a class ability into an empty slot.
+* **`ChatConfig` vectors are not lenient for env / CLI overrides (score 3).**
+  `systems/social/config.rs` declares `ChatTypeGroups` / `ChatGroupDelays` as plain `Vec`s, so
+  `Character__ChatGroupDelays` / `--Chat:ChatGroupDelays=...` style overrides cannot express the
+  array (the generic scalar `lenient` helper is not used for sequences). Configure the arrays in
+  `Configurations/Chat.json` or `Config.Local.json` instead. Known, not fixed.
+* **A configuration reload does not re-send `SCChatSpamDelayPacket` (score 3).**
+  `ReloadConfiguration` swaps the config cell, but the client keeps the delays sent during
+  `FinishState(0)`; changing `Chat` requires a reconnect (or relog) before the client's own
+  throttle matches the server's new limit. Known, not fixed.
+* **Chat / name test shortcuts (score 1).** The chat-spam flow test edits the live `ConfigCell`
+  with `update` instead of going through a reload, and the name opt-in test builds two servers
+  instead of reloading one; both prove the gates, not the reload path. Known, not fixed.
