@@ -14,6 +14,7 @@
 //! doodads [<doodad template>...]     doodads in sight (all within 40 m when none given)
 //! sq <quest> <npc template|0>        CSStartQuestContext from the nearest NPC of that template
 //! cq <quest> <npc template|0> [sel]  CSCompleteQuestContext at that NPC
+//! cqd <quest> <doodad obj id> [sel]  CSCompleteQuestContext at that doodad object
 //! target <npc template>              select the nearest NPC of that template
 //! targetself                         select our own unit (e.g. for `/buff` on self)
 //! kill <npc template>                walk next to the nearest NPC, target it, `/kill`
@@ -36,8 +37,14 @@
 //! moveitem <id> <ftype> <fslot> <ttype> <tslot>  CSSwapItemsPacket with an explicit item id
 //! icast <skill> <item template> <npc template|self|peer|player:NAME> [metres [max secs]]
 //!                                    cast from the remembered item stack
+//! icastitem <skill> <scroll template> <target item template> error <code>|ok
+//!                                    item-on-item cast (`GradeEnchant` scroll on the target
+//!                                    item); fails unless the expected error (and no result) or
+//!                                    an `SCGradeEnchantResult` arrives.
 //! waitpeer [secs] [name]             read packets until another player is in sight (60 s default)
-//! rawcs <opcode hex> [<body hex>]    send any client packet (`SELF` / `PEER` in the body hex)
+//! rawcs <opcode hex> [<body hex>]    send any client packet (`SELF` / `PEER` / `ITEM(<template>)`
+//!                                    in the body hex)
+//! rawcsend <opcode hex> <body hex>   send it without draining (the caller asserts the reply)
 //! rawcswait <opcode hex> <body hex> <PacketName> [secs]
 //!                                    send it and fail unless that packet answers (default 5 s)
 //! pkill [name]                       `/kill` with the peer targeted (GM)
@@ -52,6 +59,12 @@
 //! ginvite [name]                     CSInviteToExpedition to the peer
 //! gaccept                            wait for the guild invitation and join
 //! greply <faction id> <0|1>          CSReplyExpeditionInvitation without waiting for an invite
+//! ninvite [name]                     CSFactionImmigrationInvite to the peer (nation king)
+//! nlevel [name] <level>              `/level <peer> <level>` (GM)
+//! naccept [0|1]                      wait for SCFactionImmigrateInvite and answer it
+//! nreply <nation> <nonce> <0|1>      CSFactionImmigrationInviteReply without an invitation
+//! norigin                            CSFactionImmigrateToOrigin
+//! nkick <name>                       CSFactionKickToOrigin
 //! sync <token> [count]              suite barrier: wait until `count` bots (default: all) are here
 //! expectpkt <PacketName> [secs]     fail unless the packet arrives within `secs` (default 5)
 //! expectnopkt <PacketName> [secs]   fail if the packet arrives within `secs` (default 5)
@@ -79,7 +92,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use aaemu_game::opcodes::{cs, sc};
-use anyhow::{bail, Context};
+use anyhow::{bail, ensure, Context};
 
 use super::questitem::{chat_text, gm_command, quest_state, stack_id, stack_location};
 use super::{pump, skill_response_result, Runner};
@@ -131,6 +144,13 @@ fn show(packets: &[Packet]) {
             }
         } else if p.is_sc(sc::SCErrorMsgPacket) {
             println!("    SCErrorMsg {:?}", p.stream().read_i16());
+        } else if p.is_sc(sc::SCDoodadCompleteQuestPacket) {
+            let mut s = p.stream();
+            if let (Ok(doodad), Ok(quest)) = (s.read_bc(), s.read_u32()) {
+                println!("    SCDoodadCompleteQuest doodad {doodad} quest {quest}");
+            } else {
+                println!("    SCDoodadCompleteQuest (unreadable)");
+            }
         } else if p.is_sc(sc::SCItemTaskSuccessPacket) {
             let t = parse_item_task(&p.body);
             let items: Vec<String> = t
@@ -217,6 +237,16 @@ fn num<T: std::str::FromStr>(parts: &[&str], i: usize) -> anyhow::Result<T> {
         .with_context(|| format!("missing argument {i}"))?
         .parse()
         .map_err(|_| anyhow::anyhow!("bad number '{}'", parts[i]))
+}
+
+/// `CSCompleteQuestContextPacket(quest, npcObjId, doodadObjId, selected)` body.
+fn complete_quest_body(quest: u32, npc_obj: u32, doodad_obj: u32, selected: i32) -> Vec<u8> {
+    let mut b = aaemu_commons::PacketStream::new();
+    b.write_u32(quest)
+        .write_bc(npc_obj)
+        .write_bc(doodad_obj)
+        .write_i32(selected);
+    b.into_bytes()
 }
 
 /// The other player to target: `name`, else the first other player in sight.
@@ -672,17 +702,22 @@ async fn run_lines(
                     game.start_quest(quest, obj).await?;
                 } else {
                     let selected: i32 = parts.get(2).and_then(|x| x.parse().ok()).unwrap_or(0);
-                    let mut b = aaemu_commons::PacketStream::new();
-                    b.write_u32(quest)
-                        .write_bc(obj)
-                        .write_bc(0)
-                        .write_i32(selected);
-                    game.send_cs(
-                        aaemu_game::opcodes::cs::CSCompleteQuestContextPacket,
-                        b.as_bytes(),
-                    )
-                    .await?;
+                    let body = complete_quest_body(quest, obj, 0, selected);
+                    game.send_cs(aaemu_game::opcodes::cs::CSCompleteQuestContextPacket, &body)
+                        .await?;
                 }
+                let got = game
+                    .drain(Duration::from_millis(1200), Duration::from_secs(6))
+                    .await?;
+                show(&got);
+            }
+            "cqd" => {
+                let quest: u32 = num(&parts, 0)?;
+                let doodad: u32 = num(&parts, 1)?;
+                let selected: i32 = parts.get(2).and_then(|x| x.parse().ok()).unwrap_or(0);
+                let body = complete_quest_body(quest, 0, doodad, selected);
+                game.send_cs(aaemu_game::opcodes::cs::CSCompleteQuestContextPacket, &body)
+                    .await?;
                 let got = game
                     .drain(Duration::from_millis(1200), Duration::from_secs(6))
                     .await?;
@@ -1055,6 +1090,50 @@ async fn run_lines(
                 }
                 show(&got);
             }
+            "icastitem" => {
+                let skill: u32 = num(&parts, 0)?;
+                let scroll_tpl: u32 = num(&parts, 1)?;
+                let target_tpl: u32 = num(&parts, 2)?;
+                let expect = parts.get(3).copied().unwrap_or("ok");
+                let scroll = *items
+                    .get(&scroll_tpl)
+                    .with_context(|| format!("item {scroll_tpl} not added with `item`"))?;
+                let target = *items
+                    .get(&target_tpl)
+                    .with_context(|| format!("item {target_tpl} not added with `item`"))?;
+                game.start_item_skill_on_item(skill, scroll, scroll_tpl, target)
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(2000), Duration::from_secs(10))
+                    .await?;
+                show(&got);
+                let errors: Vec<i16> = got
+                    .iter()
+                    .filter(|p| p.is_sc(sc::SCErrorMsgPacket))
+                    .filter_map(|p| p.stream().read_i16().ok())
+                    .collect();
+                let regraded = got.iter().any(|p| p.is_sc(sc::SCGradeEnchantResultPacket));
+                println!(
+                    "    item cast {skill} from {scroll_tpl} on {target_tpl}: errors {errors:?}, \
+                     regrade result {regraded}"
+                );
+                match expect {
+                    "ok" => ensure!(
+                        regraded && errors.is_empty(),
+                        "item cast {skill} on {target_tpl}: expected SCGradeEnchantResult and no \
+                         error, got errors {errors:?}"
+                    ),
+                    "error" => {
+                        let code: i16 = num(&parts, 4)?;
+                        ensure!(
+                            errors.contains(&code) && !regraded,
+                            "item cast {skill} on {target_tpl}: expected error {code} and no \
+                             regrade result, got errors {errors:?}"
+                        );
+                    }
+                    other => bail!("unknown icastitem expectation '{other}' (error <code>|ok)"),
+                }
+            }
             "walk" => {
                 // Steps of 4 m every 800 ms (5 m/s).
                 let to: (f32, f32, f32) = (num(&parts, 0)?, num(&parts, 1)?, num(&parts, 2)?);
@@ -1366,7 +1445,7 @@ async fn run_lines(
                 let got = gm_command(game, "kill").await?;
                 show(&got);
             }
-            "rawcs" | "rawcswait" => {
+            "rawcs" | "rawcswait" | "rawcsend" => {
                 let opcode = u16::from_str_radix(parts.first().context("opcode")?, 16)?;
                 // `SELF` / `PEER` stand for our own / the first other player's object id in
                 // the packet's `bc` encoding.
@@ -1386,9 +1465,26 @@ async fn run_lines(
                 } else {
                     String::new()
                 };
-                let hex = raw
+                let mut hex = raw
                     .replace("SELF", &bc(game.state.self_obj))
                     .replace("PEER", &peer_bc);
+                // `ITEM(<template>)` expands to the stack id remembered by
+                // `item <template>`, little-endian, so a packet can carry the real item
+                // instance id.
+                while let Some(start) = hex.find("ITEM(") {
+                    let rest = &hex[start + 5..];
+                    let end = rest.find(')').context("ITEM( needs a closing )")?;
+                    let template: u32 = rest[..end].parse()?;
+                    let id = *items
+                        .get(&template)
+                        .with_context(|| format!("item {template} not added with `item`"))?;
+                    let bytes: String = id
+                        .to_le_bytes()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect();
+                    hex.replace_range(start..start + 5 + end + 1, &bytes);
+                }
                 anyhow::ensure!(
                     hex.len() % 2 == 0 && hex.is_ascii(),
                     "rawcs body hex must be an even number of hex digits"
@@ -1404,6 +1500,8 @@ async fn run_lines(
                         .context("rawcswait needs <PacketName> after the body")?;
                     let secs: u64 = parts.get(3).and_then(|x| x.parse().ok()).unwrap_or(5);
                     expect_packet(game, want, secs).await?;
+                } else if cmd == "rawcsend" {
+                    // Leave the reply for a following `expecterror` / `expectpkt`.
                 } else {
                     let got = game
                         .drain(Duration::from_millis(1200), Duration::from_secs(6))
@@ -1498,6 +1596,74 @@ async fn run_lines(
                     .await?;
                 show(&got);
             }
+            "ninvite" => {
+                // The character name differs in case from the account name: use the peer's.
+                let target = peer(game, parts.first().copied())?;
+                let mut b = aaemu_commons::PacketStream::new();
+                b.write_str(&target.name);
+                game.send_cs(cs::CSFactionImmigrationInvitePacket, &b.into_bytes())
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(800), Duration::from_secs(3))
+                    .await?;
+                show(&got);
+            }
+            "naccept" => {
+                // The reply echoes the invitation's (nation id, nonce) (PORTING.md, NATION-11).
+                let join = parts.first().map(|v| *v != "0").unwrap_or(true);
+                let invitation = game.wait_sc(sc::SCFactionImmigrateInvitePacket).await?;
+                let mut s = invitation.stream();
+                let nation = s.read_u32()?;
+                let nonce = s.read_u32()?;
+                let mut b = aaemu_commons::PacketStream::new();
+                b.write_u32(nation).write_u32(nonce).write_bool(join);
+                game.send_cs(cs::CSFactionImmigrationInviteReplyPacket, &b.into_bytes())
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(800), Duration::from_secs(3))
+                    .await?;
+                show(&got);
+            }
+            "nreply" => {
+                // Answer an invitation that was never received (forged / replayed reply).
+                let nation: u32 = num(&parts, 0)?;
+                let nonce: u32 = num(&parts, 1)?;
+                let join = num::<u8>(&parts, 2)? != 0;
+                let mut b = aaemu_commons::PacketStream::new();
+                b.write_u32(nation).write_u32(nonce).write_bool(join);
+                game.send_cs(cs::CSFactionImmigrationInviteReplyPacket, &b.into_bytes())
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(800), Duration::from_secs(3))
+                    .await?;
+                show(&got);
+            }
+            "nlevel" => {
+                // `/level <name> <level>`: the GM command's name match is exact.
+                let target = peer(game, parts.first().copied())?;
+                let level: u8 = num(&parts, 1)?;
+                let got = gm_command(game, &format!("level {} {level}", target.name)).await?;
+                show(&got);
+            }
+            "norigin" => {
+                game.send_cs(cs::CSFactionImmigrateToOriginPacket, &[])
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(800), Duration::from_secs(3))
+                    .await?;
+                show(&got);
+            }
+            "nkick" => {
+                let target = peer(game, parts.first().copied())?;
+                let mut b = aaemu_commons::PacketStream::new();
+                b.write_str(&target.name);
+                game.send_cs(cs::CSFactionKickToOriginPacket, &b.into_bytes())
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(800), Duration::from_secs(3))
+                    .await?;
+                show(&got);
+            }
             other => bail!("unknown script command '{other}' at line {}", n + 1),
         }
     }
@@ -1532,5 +1698,37 @@ mod tests {
             vec![r"object \d+ ignored"]
         );
         assert!(split_quoted("\"unterminated").is_err());
+    }
+
+    #[test]
+    fn complete_quest_body_writes_the_doodad_object_id() {
+        use aaemu_commons::PacketStream;
+        use aaemu_game::net::registry::ClientPacket;
+        use aaemu_game::systems::quests::packets::CSCompleteQuestContextPacket;
+
+        let body = super::complete_quest_body(2563, 0, 0x300, 1);
+        assert_eq!(
+            body,
+            vec![0x03, 0x0a, 0, 0, 0, 0, 0, 0, 0x03, 0, 1, 0, 0, 0]
+        );
+        // The server's reader must see the doodad object id, not an NPC object id.
+        let p = CSCompleteQuestContextPacket::read(&mut PacketStream::from_bytes(body)).unwrap();
+        assert_eq!(
+            p,
+            CSCompleteQuestContextPacket {
+                quest_context_id: 2563,
+                npc_obj_id: 0,
+                doodad_obj_id: 0x300,
+                selected: 1,
+            }
+        );
+
+        let body = super::complete_quest_body(100, 0x200, 0, -1);
+        assert_eq!(
+            body,
+            vec![100, 0, 0, 0, 0x00, 0x02, 0x00, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]
+        );
+        let p = CSCompleteQuestContextPacket::read(&mut PacketStream::from_bytes(body)).unwrap();
+        assert_eq!((p.npc_obj_id, p.doodad_obj_id, p.selected), (0x200, 0, -1));
     }
 }

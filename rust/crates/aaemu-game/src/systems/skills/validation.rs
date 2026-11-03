@@ -5,7 +5,9 @@ use crate::world::WorldObject;
 
 use super::geometry::{world_pos, Target};
 use super::state::SkillRun;
+use super::types::skill_result;
 use super::unit_reqs::skill_result_for_key;
+use crate::systems::economy::inventory::Inv;
 
 /// Extra range for a doodad target, covering the distance from its origin to its edge.
 const DOODAD_RANGE_ALLOWANCE: f64 = 15.0;
@@ -60,7 +62,42 @@ fn collision_kind(obj: &WorldObject) -> crate::systems::ai::collision::world::Ob
     }
 }
 
-fn in_water(server: &GameServer, target: &Target) -> bool {
+/// The pre-existing `source_not_swim` probe: 0.1 m above the caster. Kept apart from the
+/// client-mirrored target rule below; the client's source behaviour for a wading caster is not
+/// evidenced, and the target rule (0.1 m below plus a 1 m floor) newly allowed it.
+const SOURCE_WATER_PROBE_HEIGHT: f32 = 0.1;
+
+fn source_in_water(server: &GameServer, caster: &WorldObject) -> bool {
+    if caster
+        .with_unit(|u| u.unit().is_under_water)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    let pos = world_pos(server, &Target::Obj(caster.clone()));
+    crate::systems::ai::physics::is_water(
+        server,
+        caster.transform().instance_id,
+        super::controllers::Vec3::new(pos.x, pos.y, pos.z + SOURCE_WATER_PROBE_HEIGHT),
+    )
+    .is_some()
+}
+
+/// The 1.2 client's water-only target check (`FUN_390b43b0`, `x2game.dll.c:148796`) probes
+/// 0.1 m below the point (`DAT_3999ccf0`), requires water there (`probe.z <= level`) and then
+/// queries the floor with I3DEngine vt+0x108 `(Vec3*, float)` - likely `GetBottomLevel`, a
+/// downward ray that includes statics and answers -1e9 when nothing is hit, which passes the
+/// `floor <= level - 1.0` test (`DAT_3999c488`). The server approximates that floor with the
+/// terrain height only, so it is more lenient around static geometry. The client aims these
+/// casts at the water surface (`FUN_3942b060` / `FUN_394322f0`, `x2game.dll.c:872033` /
+/// `:877530`). Not ported: with `target_fishing` (target+0x194) set, a type-8 water entity
+/// with flag bit 1 (`vt+0x150 & 1`, likely a NoFishing volume) is refused with 0x23
+/// (`FUN_390b43b0`, `x2game.dll.c:148821-148834`).
+const WATER_PROBE_DEPTH: f32 = 0.1;
+/// `FUN_390b43b0`: `floor <= waterLevel - 1.0`.
+const MIN_WATER_DEPTH: f32 = 1.0;
+
+fn target_in_water(server: &GameServer, target: &Target) -> bool {
     if target
         .as_obj()
         .and_then(|o| o.with_unit(|u| u.unit().is_under_water))
@@ -73,12 +110,24 @@ fn in_water(server: &GameServer, target: &Target) -> bool {
         Target::Obj(obj) => obj.transform().instance_id,
         Target::Pos(pos) => pos.instance_id,
     };
-    crate::systems::ai::physics::is_water(
-        server,
-        instance,
-        super::controllers::Vec3::new(pos.x, pos.y, pos.z + 0.1),
-    )
-    .is_some()
+    let probe = super::controllers::Vec3::new(pos.x, pos.y, pos.z - WATER_PROBE_DEPTH);
+    if crate::systems::ai::physics::is_water(server, instance, probe).is_none() {
+        return false;
+    }
+    let Some(level) =
+        crate::systems::ai::collision::water_level(server, instance, probe.x, probe.y, probe.z)
+    else {
+        return true;
+    };
+    // The client compares the probe against the water level: a level below the probe is not
+    // water at that point, even when `is_water` matched another overlapping volume.
+    if probe.z > level {
+        return false;
+    }
+    // The terrain floor is unknown without the collision service; the water probe alone then
+    // decides, as before the client check was mirrored.
+    crate::systems::ai::collision::terrain_height(server, instance, probe.x, probe.y)
+        .is_none_or(|floor| floor <= level - MIN_WATER_DEPTH)
 }
 
 pub(super) fn labor_cost(skill: &SkillRun, player: &crate::world::PlayerRef) -> i32 {
@@ -124,7 +173,7 @@ pub(super) fn check_resources(
 /// caster without any one of the required items gets `NEED_REAGENT` with the missing item's
 /// template id as the value: the 1.2 client's result handler (`FUN_39390900`, 0x24) puts an
 /// item name into the text from that value.
-pub(super) fn check_reagents(
+pub(crate) fn check_reagents(
     server: &GameServer,
     template: &super::data::SkillTemplate,
     caster: &WorldObject,
@@ -152,6 +201,14 @@ pub(super) fn check_reagents(
         .iter()
         .find(|r| !enough(r))
         .map_or(0, |r| r.item_id);
+    // The reagent exists but every stack of it is locked (`ItemFlag.Secure`): the 1.2 client
+    // has a dedicated `SkillResult.ItemLocked` for this, instead of "need reagent".
+    let locked_only = reagents
+        .iter()
+        .any(|r| !enough(r) && Inv::of(player).items_count(r.item_id, -1) >= i32::from(r.amount));
+    if locked_only {
+        return Err((skill_result::ITEM_LOCKED, missing));
+    }
     Err((skill_result_for_key("skill_need_reagent"), missing))
 }
 
@@ -252,7 +309,7 @@ pub(super) fn check(
     if hp > 0 && template.source_dead && !template.source_alive {
         return fail("skill_source_alive");
     }
-    if template.source_not_swim && in_water(server, &Target::Obj(caster.clone())) {
+    if template.source_not_swim && source_in_water(server, caster) {
         return fail("skill_cannot_cast_in_swimming");
     }
     if template.source_cannot_use_while_walk && moving {
@@ -277,7 +334,7 @@ pub(super) fn check(
             return fail("skill_target_alive");
         }
     }
-    if template.target_only_water && !in_water(server, target) {
+    if template.target_only_water && !target_in_water(server, target) {
         return fail("skill_invalid_location");
     }
     let source = world_pos(server, &Target::Obj(caster.clone()));

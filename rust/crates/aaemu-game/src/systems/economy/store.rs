@@ -697,6 +697,13 @@ impl CSSellItemsPacket {
             }
         }
 
+        if items
+            .iter()
+            .any(|item| super::item_security::refuse_if_locked(&p, item))
+        {
+            return;
+        }
+
         let buyback = server.systems.economy.store.buyback(p.character_id);
         let containers = [inv.equipment(), inv.bag()];
         let mut txn = ItemTxn::begin(server);
@@ -1111,6 +1118,11 @@ pub fn convert_item_look(server: &GameServer, p: &PlayerRef, base_id: u64, look_
         inventory::send_error_message(p, error_message::FAILED_TO_USE_ITEM, 0, true);
         return;
     };
+    if super::item_security::refuse_if_locked(p, &to_image)
+        || super::item_security::refuse_if_locked(p, &image_item)
+    {
+        return;
+    }
     if !to_image.class.is_equip() {
         inventory::send_error_message(
             p,

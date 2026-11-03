@@ -21,6 +21,7 @@ use crate::world::PlayerRef;
 use super::error_message;
 use super::inventory::{self, Inv, ItemTxn};
 use super::item_packets::{SCItemTaskSuccessPacket, SCSyncItemLifespanPacket};
+use super::item_security;
 
 /// `ItemFlag.Secure`.
 pub const ITEM_FLAG_SECURE: u8 = 0x04;
@@ -144,6 +145,9 @@ impl CSSwapItemsPacket {
             return;
         }
         let inv = Inv::of(&p);
+        if item_security::refuse_move_if_locked(server, &p, a.from_item_id, a.to_item_id) {
+            return;
+        }
         let ok = {
             let mut txn = ItemTxn::begin(server);
             inventory::split_or_move_item(
@@ -194,6 +198,9 @@ impl CSSplitBagItemPacket {
             return;
         }
         let inv = Inv::of(&p);
+        if item_security::refuse_move_if_locked(server, &p, a.from_item_id, a.to_item_id) {
+            return;
+        }
         let mut txn = ItemTxn::begin(server);
         inventory::split_or_move_item(
             &mut txn,
@@ -256,6 +263,9 @@ impl CSDestroyItemPacket {
                     item.id
                 );
                 count = item.count;
+            }
+            if item_security::refuse_if_locked(&p, &item) {
+                return;
             }
             let Some(container) = inv.get(self.slot_type) else {
                 return;
@@ -435,6 +445,9 @@ impl CSSplitCofferItemPacket {
         let Some(p) = active(conn) else { return };
         let a = self.args;
         let inv = Inv::of(&p);
+        if item_security::refuse_move_if_locked(server, &p, a.from_item_id, a.to_item_id) {
+            return;
+        }
         let ok = {
             let mut txn = ItemTxn::begin(server);
             inventory::coffer_items(
@@ -483,6 +496,9 @@ impl CSSwapCofferItemsPacket {
         let Some(p) = active(conn) else { return };
         let a = self.args;
         let inv = Inv::of(&p);
+        if item_security::refuse_move_if_locked(server, &p, a.from_item_id, a.to_item_id) {
+            return;
+        }
         let ok = {
             let mut txn = ItemTxn::begin(server);
             inventory::coffer_items(
@@ -511,7 +527,7 @@ impl CSSwapCofferItemsPacket {
 }
 sync_client_packet!(CSSwapCofferItemsPacket);
 
-/// `CSItemSecurePacket` / `CSItemUnsecurePacket` (both only log in C#).
+/// `CSItemSecurePacket` / `CSItemUnsecurePacket` (both only logged in C#; implemented here).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSItemSecurePacket {
     pub slot_type: u8,
@@ -532,13 +548,9 @@ impl CSItemSecurePacket {
         })
     }
 
-    fn run(self, _server: &GameServer, _conn: &mut GameConnection) {
-        tracing::warn!(
-            "ItemSecure, ItemId: {}, SlotType: {}, Slot: {}",
-            self.item_id,
-            self.slot_type,
-            self.slot
-        );
+    fn run(self, server: &GameServer, conn: &mut GameConnection) {
+        let Some(p) = active(conn) else { return };
+        item_security::secure_item(server, &p, self.slot_type, self.slot, self.item_id);
     }
 }
 sync_client_packet!(CSItemSecurePacket);
@@ -552,18 +564,14 @@ impl CSItemUnsecurePacket {
         Ok(Self(CSItemSecurePacket::read_body(s)?))
     }
 
-    fn run(self, _server: &GameServer, _conn: &mut GameConnection) {
-        tracing::warn!(
-            "ItemUnsecure, ItemId: {}, SlotType: {}, Slot: {}",
-            self.0.item_id,
-            self.0.slot_type,
-            self.0.slot
-        );
+    fn run(self, server: &GameServer, conn: &mut GameConnection) {
+        let Some(p) = active(conn) else { return };
+        item_security::unsecure_item(server, &p, self.0.slot_type, self.0.slot, self.0.item_id);
     }
 }
 sync_client_packet!(CSItemUnsecurePacket);
 
-/// `CSEquipmentsSecurePacket` (empty).
+/// `CSEquipmentsSecurePacket` (empty body; locks every equipped item).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSEquipmentsSecurePacket;
 
@@ -572,13 +580,14 @@ impl CSEquipmentsSecurePacket {
         Ok(Self)
     }
 
-    fn run(self, _server: &GameServer, _conn: &mut GameConnection) {
-        tracing::warn!("EquipmentsSecure");
+    fn run(self, server: &GameServer, conn: &mut GameConnection) {
+        let Some(p) = active(conn) else { return };
+        item_security::secure_equipments(server, &p);
     }
 }
 sync_client_packet!(CSEquipmentsSecurePacket);
 
-/// `CSEquipmentsUnsecurePacket` (empty).
+/// `CSEquipmentsUnsecurePacket` (empty body; starts the unlock delay of every equipped item).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSEquipmentsUnsecurePacket;
 
@@ -587,8 +596,9 @@ impl CSEquipmentsUnsecurePacket {
         Ok(Self)
     }
 
-    fn run(self, _server: &GameServer, _conn: &mut GameConnection) {
-        tracing::warn!("EquipmentsUnsecure");
+    fn run(self, server: &GameServer, conn: &mut GameConnection) {
+        let Some(p) = active(conn) else { return };
+        item_security::unsecure_equipments(server, &p);
     }
 }
 sync_client_packet!(CSEquipmentsUnsecurePacket);

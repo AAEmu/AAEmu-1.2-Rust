@@ -508,6 +508,14 @@ fn sc_small_quest_packets_bytes() {
     };
     assert_eq!(body(&p), vec![1, 2, 3, 7, 0, 0, 0]);
     assert_eq!(p.opcode(), sc::SCDoodadQuestAcceptPacket);
+    // Reader FUN_397b5e50: 3-byte bc doodad object id, then the u32 quest id.
+    let p = SCDoodadCompleteQuestPacket {
+        doodad_obj_id: 0x030201,
+        quest_id: 7,
+    };
+    assert_eq!(body(&p), vec![1, 2, 3, 7, 0, 0, 0]);
+    assert_eq!(p.opcode(), sc::SCDoodadCompleteQuestPacket);
+    assert_eq!(p.opcode(), 0x14d);
     let p = SCTutorialSavedPacket {
         id: 5,
         body: [0x20, 0, 0, 0, 0, 0, 0, 0],
@@ -1921,6 +1929,121 @@ async fn reporting_only_completes_the_requested_quest_and_preserves_reward_selec
             assert_eq!(step_of(ctx, second), kind::READY);
         });
     }
+}
+
+#[tokio::test]
+async fn ready_report_doodad_sends_the_doodad_complete_packet() {
+    use crate::systems::npcs::doodad::funcs::use_func;
+    use crate::systems::npcs::doodad::runtime::DoodadCtx;
+    use crate::systems::npcs::doodad::templates::{DoodadFuncQuest, FuncTemplate};
+
+    let (server, _rec) = server_with(|d| {
+        report_quest(
+            d,
+            100,
+            Some(ActKind::ConReportDoodad {
+                doodad_id: 700,
+                use_alias: false,
+                alias_id: 0,
+            }),
+        );
+    });
+    // Drive the real `DoodadFuncQuest.Use` -> `QuestsBridge` -> `on_server_report` path.
+    server
+        .systems
+        .npcs
+        .hooks
+        .quests
+        .install(Arc::new(super::bridges::QuestsForNpcs));
+    let mut client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(&server, &client, character(), 0x100);
+    client.conn.active_char = Some(player.clone());
+    let world = server.world.world(0).unwrap();
+    let spawn = |obj_id: u32, template_id: u32| {
+        let mut d = crate::models::doodad::Doodad::new(template_id);
+        d.transform.set_xyz(105.0, 105.0, 100.0);
+        let d = Entity::new(obj_id, d);
+        world.spawn(&d, &server.view_ctx());
+        d
+    };
+    let report_doodad = spawn(0x300, 700);
+    let other_doodad = spawn(0x302, 701);
+    events::add_quest(&server, &player, 100, false);
+    server.systems.quests.run_queued_evaluations(&server);
+    client.drain();
+
+    let use_quest = |doodad: &crate::world::DoodadRef| {
+        let ctx = DoodadCtx::of(&server, doodad).expect("doodad world");
+        let caster = WorldObject::from(&player);
+        use_func(
+            &FuncTemplate::Quest(DoodadFuncQuest {
+                id: 1,
+                quest_kind_id: 2,
+                quest_id: 100,
+            }),
+            &ctx,
+            Some(&caster),
+            0,
+            0,
+        );
+    };
+
+    // Objectives still open: the doodad is not a hand-in yet, nothing is sent.
+    use_quest(&report_doodad);
+    server.systems.quests.run_queued_evaluations(&server);
+    assert!(!client
+        .drain_ops()
+        .contains(&sc::SCDoodadCompleteQuestPacket));
+
+    // Finish the hunt objective: Progress -> Ready.
+    events::with_quests(&server, &player, None, |ctx| {
+        for _ in 0..2 {
+            ctx.dispatch(&QuestEvent::MonsterHunt {
+                npc_id: 600,
+                count: 1,
+            })
+            .unwrap();
+        }
+    })
+    .expect("not nested");
+    server.systems.quests.run_queued_evaluations(&server);
+    assert_eq!(player.data().quests.active[0].step, kind::READY);
+    client.drain();
+
+    // A doodad that is not this quest's report target sends nothing.
+    use_quest(&other_doodad);
+    server.systems.quests.run_queued_evaluations(&server);
+    assert!(!client
+        .drain_ops()
+        .contains(&sc::SCDoodadCompleteQuestPacket));
+
+    // The report doodad sends the hand-in packet (0x14d): bc object id, then u32 quest id.
+    use_quest(&report_doodad);
+    let frames = client.drain();
+    let complete = frames
+        .iter()
+        .find(|(op, _)| *op == sc::SCDoodadCompleteQuestPacket)
+        .expect("SCDoodadCompleteQuestPacket");
+    let mut body = PacketStream::new();
+    body.write_bc(0x300).write_u32(100);
+    assert_eq!(complete.1, body.into_bytes());
+    // The report is left to the client's completion request.
+    assert_eq!(player.data().quests.active[0].step, kind::READY);
+
+    // The client's CSCompleteQuestContext with the doodad id finishes the quest.
+    let request = CSCompleteQuestContextPacket {
+        quest_context_id: 100,
+        npc_obj_id: 0,
+        doodad_obj_id: 0x300,
+        selected: 0,
+    };
+    request.handle(&server, &mut client.conn).await.unwrap();
+    server.systems.quests.run_queued_evaluations(&server);
+    assert!(!events::has_quest(&player, 100));
+    assert!(events::has_quest_completed_in(&player.data(), 100));
+    assert!(client
+        .drain_ops()
+        .contains(&sc::SCQuestContextCompletedPacket));
 }
 
 #[tokio::test]
@@ -3390,6 +3513,49 @@ async fn real_compact_db_quest_tables() {
         });
     }
     eprintln!("quests with a Start step: {started}");
+}
+
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_compact_db_report_doodads_are_ready_doodad_func_quests() {
+    let Some(conn) = real_db() else {
+        return;
+    };
+    let d = real_data(&conn);
+    let mut checked = 0;
+    for a in &d.acts {
+        let ActKind::ConReportDoodad { doodad_id, .. } = a.kind else {
+            continue;
+        };
+        // Every live report doodad act of 1.2 sits on the Ready step.
+        assert_eq!(
+            a.component_kind,
+            kind::READY,
+            "quest {} act {}: the report doodad is not on the Ready step",
+            a.quest_id,
+            a.act_id
+        );
+        // The doodad offers the quest through `DoodadFuncQuest`; that use is the one
+        // `SCDoodadCompleteQuestPacket` is sent from.
+        let funcs: i64 = conn
+            .query_row(
+                r"SELECT COUNT(*) FROM doodad_funcs f
+                  JOIN doodad_func_groups g ON g.id = f.doodad_func_group_id
+                  JOIN doodad_func_quests q ON q.id = f.actual_func_id
+                  WHERE g.doodad_almighty_id = ?1
+                    AND f.actual_func_type = 'DoodadFuncQuest' AND q.quest_id = ?2",
+                [doodad_id, a.quest_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            funcs > 0,
+            "quest {}: doodad {doodad_id} has no DoodadFuncQuest",
+            a.quest_id
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 15, "live QuestActConReportDoodad acts");
 }
 
 #[tokio::test]
