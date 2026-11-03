@@ -6,9 +6,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::data::formulas::FormulaManager;
 use crate::data::GameData;
 use crate::models::movement::GameStanceType;
 use crate::models::npc::Npc;
+use crate::models::unit::{Bonus, BonusTemplate, UnitAttribute, UnitModifierType};
 use crate::opcodes::sc;
 use crate::server::GameServer;
 use crate::systems::npcs::npc::data::NpcTemplate;
@@ -149,8 +151,24 @@ fn stance(
 
 /// An aggressive hold-position NPC template whose base skill hits for 40 within 4 m, a passive
 /// helper template, the actor model with run / walk / sprint speeds, and the NpcReturn buff.
+fn stealth_formulas() -> FormulaManager {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE unit_formulas (id INTEGER, formula TEXT, kind_id INTEGER, owner_type_id INTEGER);
+         CREATE TABLE unit_formula_variables (id INTEGER, unit_formula_id INTEGER, variable_kind_id INTEGER, key INTEGER, value REAL);
+         CREATE TABLE wearable_formulas (id INTEGER, kind_id INTEGER, formula TEXT);
+         CREATE TABLE formulas (id INTEGER, formula TEXT);
+         INSERT INTO formulas VALUES
+           (4, 'min(40, 12 * (1 + (source_level - target_level) / 50) / (1 + stealth_level / 50))'),
+           (10, '0.5');",
+    )
+    .unwrap();
+    FormulaManager::load(&conn).unwrap()
+}
+
 fn data() -> GameData {
     let mut data = GameData::empty();
+    data.formulas = stealth_formulas();
     let s = &mut data.systems.skills;
     s.add_effect(
         EffectKind::DamageEffect,
@@ -176,6 +194,22 @@ fn data() -> GameData {
         stack_rule: 1,
         ..BuffTemplate::default()
     });
+    for (id, stealth, detect_stealth, anti_stealth) in [
+        (STEALTH_COLUMN_BUFF, true, false, false),
+        (DETECT_STEALTH_BUFF, false, true, false),
+        (ANTI_STEALTH_BUFF, false, false, true),
+    ] {
+        s.add_buff(BuffTemplate {
+            id,
+            kind: 1,
+            duration: 60_000,
+            stack_rule: 1,
+            stealth,
+            detect_stealth,
+            anti_stealth,
+            ..BuffTemplate::default()
+        });
+    }
     let base = NpcTemplate {
         id: NPC_TEMPLATE,
         model_id: MODEL,
@@ -303,6 +337,18 @@ fn spawn_npc(
     n.unit.scale = 1.0;
     n.unit.transform.set_xyz(x, y, 100.0);
     n.unit.transform.zone_id = TEST_ZONE;
+    // `NpcManager.Create` adds the template's `unit_modifiers` (`owner_type='Npc'`).
+    if let Some(t) = server.game_data.systems.npcs.npc.template(template) {
+        for bt in &t.bonuses {
+            n.unit.bonuses.add_bonus(
+                0,
+                Bonus {
+                    template: bt.clone(),
+                    value: bt.value,
+                },
+            );
+        }
+    }
     let npc = Entity::new(obj_id, n);
     server.systems.ai.ais.add_ai(&npc, kind);
     let world = server.world.world(0).expect("world");
@@ -2231,9 +2277,11 @@ async fn stealth_column_buff_without_tag_100_hides_the_player_from_aggro() {
     let f = fixture_with_data(data, 115.0);
     let server = f.server.clone();
     let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
     crate::systems::skills::buffs::add_buff_by_id(&server, &me, STEALTH_COLUMN_BUFF, &me, 0);
+    assert!(crate::systems::skills::buffs::has_stealth(&server, &me));
     assert!(
-        !super::npc::can_see_target(&server, &me),
+        !super::npc::can_see_target(&server, &npc, &me),
         "the stealth column must mark the player stealthed for the AI"
     );
 
@@ -2265,9 +2313,10 @@ async fn tag_100_buff_without_the_stealth_column_does_not_hide_the_player_from_a
     let f = fixture_with_data(data, 115.0);
     let server = f.server.clone();
     let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
     crate::systems::skills::buffs::add_buff_by_id(&server, &me, TAG_100_ONLY_BUFF, &me, 0);
     assert!(
-        super::npc::can_see_target(&server, &me),
+        super::npc::can_see_target(&server, &npc, &me),
         "tag 100 alone must not hide the player"
     );
 
@@ -2286,4 +2335,235 @@ async fn tag_100_buff_without_the_stealth_column_does_not_hide_the_player_from_a
         .skill_state
         .aggro_table
         .contains_key(&PLAYER_OBJ));
+}
+
+const DETECT_STEALTH_BUFF: u32 = 7_102;
+const ANTI_STEALTH_BUFF: u32 = 7_103;
+
+/// [`fixture_with_data`] with a free player position and NPC facing (`rot_z`, the `MathUtil.
+/// IsFront` yaw: -PI/2 faces +x).
+fn stealth_fixture(data: GameData, player_x: f32, player_y: f32, npc_rot_z: f32) -> Fixture {
+    let server = server_with_data(data);
+    let client = TestClient::new(&server, 1, 1);
+    let mut c = test_character(1, "Runner", player_x, player_y);
+    c.unit.hp = 1000;
+    c.unit.max_hp = 1000;
+    let player = spawn_player(&server, &client, c, PLAYER_OBJ);
+    let npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        NPC_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    npc.data().unit.transform.rot_z = npc_rot_z;
+    Fixture {
+        server,
+        client,
+        player,
+        npc,
+    }
+}
+
+fn apply(server: &GameServer, owner: &WorldObject, buff_id: u32) {
+    crate::systems::skills::buffs::add_buff_by_id(server, owner, buff_id, owner, 0);
+}
+
+/// Walks straight at the player: true once the NPC's behavior is `Attack`.
+async fn aggros(server: &Arc<GameServer>, ticks: usize) -> bool {
+    tick_until(server, 100, 20, ticks, || {
+        behavior(server, NPC_OBJ) == Some(B::Attack)
+    })
+    .await
+}
+
+const FACE_PLUS_X: f32 = -std::f32::consts::FRAC_PI_2;
+
+/// Formula 4 (`DetectStealthRangeFront`, 12 m at equal levels) is evaluated: an 11 m stealthed
+/// player in front is detected (the old predicate hid every stealthed unit outside 1 m).
+#[tokio::test]
+async fn stealth_detection_front_formula_detects_inside_range() {
+    let f = stealth_fixture(data(), 111.0, 100.0, FACE_PLUS_X);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
+    apply(&server, &me, STEALTH_COLUMN_BUFF);
+    assert!(
+        super::npc::can_see_target(&server, &npc, &me),
+        "11 m in front is inside formula 4"
+    );
+    assert!(aggros(&server, 60).await, "the NPC never aggroed at 11 m");
+    assert!(f
+        .npc
+        .data()
+        .unit
+        .skill_state
+        .aggro_table
+        .contains_key(&PLAYER_OBJ));
+}
+
+/// Formula 4's range is real: 13 m in front is outside it.
+#[tokio::test]
+async fn stealth_detection_front_formula_misses_outside_range() {
+    let f = stealth_fixture(data(), 113.0, 100.0, FACE_PLUS_X);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
+    apply(&server, &me, STEALTH_COLUMN_BUFF);
+    assert!(
+        !super::npc::can_see_target(&server, &npc, &me),
+        "13 m in front is outside formula 4"
+    );
+    assert!(!aggros(&server, 40).await, "the NPC aggroed at 13 m");
+}
+
+/// Formula 10 (`DetectStealthRangeBack`, 0.5 m) applies when the target is behind the observer.
+#[tokio::test]
+async fn stealth_detection_back_formula_detects_close_behind() {
+    let f = stealth_fixture(data(), 99.6, 100.0, FACE_PLUS_X);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
+    apply(&server, &me, STEALTH_COLUMN_BUFF);
+    assert!(
+        super::npc::can_see_target(&server, &npc, &me),
+        "0.4 m behind is inside formula 10"
+    );
+    assert!(aggros(&server, 60).await, "the NPC never aggroed at 0.4 m");
+}
+
+/// The old C# `< 1.0` / `< 0.5` fallbacks no longer decide: 1.5 m behind is outside formula 10.
+#[tokio::test]
+async fn stealth_detection_back_formula_misses_far_behind() {
+    let f = stealth_fixture(data(), 98.5, 100.0, FACE_PLUS_X);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
+    apply(&server, &me, STEALTH_COLUMN_BUFF);
+    assert!(
+        !super::npc::can_see_target(&server, &npc, &me),
+        "1.5 m behind is outside formula 10"
+    );
+    assert!(
+        !aggros(&server, 40).await,
+        "the NPC aggroed at 1.5 m behind"
+    );
+}
+
+/// `UnitAttribute.DetectStealthRangeMul` (94) is applied: -100 turns the range to 0, so even a
+/// 0.3 m target is not detected (the C# `< 1.0` fallback used to make it visible).
+#[tokio::test]
+async fn stealth_detection_old_front_fallback_no_longer_decides() {
+    let mut data = data();
+    data.systems
+        .npcs
+        .npc
+        .templates
+        .get_mut(&NPC_TEMPLATE)
+        .expect("template")
+        .bonuses
+        .push(BonusTemplate {
+            attribute: UnitAttribute::DetectStealthRangeMul,
+            modifier_type: UnitModifierType::Value,
+            value: -100,
+            linear_level_bonus: 0,
+        });
+    let f = stealth_fixture(data, 100.3, 100.0, FACE_PLUS_X);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
+    apply(&server, &me, STEALTH_COLUMN_BUFF);
+    assert!(
+        !super::npc::can_see_target(&server, &npc, &me),
+        "attribute 94 -100 must zero the detection range"
+    );
+    assert!(
+        !aggros(&server, 40).await,
+        "the NPC aggroed a stealthed player at 0.3 m with range 0"
+    );
+}
+
+/// `buffs.detect_stealth` on the observer reveals stealthed units at any distance.
+#[tokio::test]
+async fn detect_stealth_buff_reveals_at_long_range() {
+    let f = stealth_fixture(data(), 115.0, 100.0, FACE_PLUS_X);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
+    apply(&server, &me, STEALTH_COLUMN_BUFF);
+    apply(&server, &npc, DETECT_STEALTH_BUFF);
+    assert!(
+        super::npc::can_see_target(&server, &npc, &me),
+        "a detect_stealth observer must see the stealthed player"
+    );
+    assert!(aggros(&server, 60).await, "the NPC never aggroed at 15 m");
+}
+
+/// `buffs.anti_stealth` on the target (the client's "cannot hide" state) makes it visible.
+#[tokio::test]
+async fn anti_stealth_buff_reveals_at_long_range() {
+    let f = stealth_fixture(data(), 115.0, 100.0, FACE_PLUS_X);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
+    apply(&server, &me, STEALTH_COLUMN_BUFF);
+    apply(&server, &me, ANTI_STEALTH_BUFF);
+    assert!(
+        super::npc::can_see_target(&server, &npc, &me),
+        "an anti_stealth target must be visible"
+    );
+    assert!(aggros(&server, 60).await, "the NPC never aggroed at 15 m");
+}
+
+/// `stealth_level` is the highest `ab_level` of the active stealth buffs (the client's
+/// `ClientBuffMan` +4): level 50 halves formula 4 (12 m -> 6 m), so 7 m is outside it.
+#[tokio::test]
+async fn stealth_level_from_the_buff_ab_level_shrinks_the_range() {
+    let f = stealth_fixture(data(), 107.0, 100.0, FACE_PLUS_X);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
+    apply(&server, &me, STEALTH_COLUMN_BUFF);
+    me.with_base_unit(|b| {
+        b.buffs_mut()
+            .effects
+            .last_mut()
+            .expect("stealth buff")
+            .ab_level = 50;
+    });
+    assert!(
+        !super::npc::can_see_target(&server, &npc, &me),
+        "stealth level 50 halves the 12 m front range"
+    );
+    assert!(!aggros(&server, 40).await, "the NPC aggroed at 7 m");
+}
+
+/// A positive `DetectStealthRangeMul` widens the range: +100 doubles 11.76 m to 23.5 m.
+#[tokio::test]
+async fn detect_stealth_range_mul_widens_the_range() {
+    let mut data = data();
+    data.systems
+        .npcs
+        .npc
+        .templates
+        .get_mut(&NPC_TEMPLATE)
+        .expect("template")
+        .bonuses
+        .push(BonusTemplate {
+            attribute: UnitAttribute::DetectStealthRangeMul,
+            modifier_type: UnitModifierType::Value,
+            value: 100,
+            linear_level_bonus: 0,
+        });
+    let f = stealth_fixture(data, 115.0, 100.0, FACE_PLUS_X);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
+    apply(&server, &me, STEALTH_COLUMN_BUFF);
+    assert!(
+        super::npc::can_see_target(&server, &npc, &me),
+        "attribute 94 +100 widens formula 4 to 23.5 m"
+    );
+    assert!(aggros(&server, 60).await, "the NPC never aggroed at 15 m");
 }

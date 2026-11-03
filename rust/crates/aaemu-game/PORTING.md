@@ -2111,10 +2111,27 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `cancel_ongoing_buffs`) was loaded by the C# but never consumed: a keep_stealth skill now skips
   its active stealth buffs in its own start/use cancel loop (`trigger_remove_on_keep_stealth`) and
   in its `SkillUse` (special 33) chain, while attacking / taking damage still break stealth
-  through the buff's own remove flags. The real-DB test lists the 71 / 51 / 33 rows. Still open:
-  detection range / angle (formulas 4 / 10, unit attribute 94) is not evaluated, so NPC AI treats
-  a stealthed unit as invisible at any range outside the C# `< 1.0` / `< 0.5` fallbacks, and the
-  `detect_stealth` / `anti_stealth` columns are not consumed (research `stealth.md`, task B).
+  through the buff's own remove flags. The real-DB test lists the 71 / 51 / 33 rows.
+  Detection range / angle (2026-11, research `stealth.md` task B): `ai::npc::can_detect` mirrors
+  the client's `ClientUnit::CanDetect` (`FUN_3935a2b0`). A stealthed unit is visible only inside
+  `(100 + unit attribute 94) / 100 * formula` metres: formula 4 `DetectStealthRangeFront` when it
+  is in front of the observer (the client's local-Y dot, i.e. the ±90° facing sector) and formula
+  10 `DetectStealthRangeBack` behind (`DAT_3999cf90` = 0.01). The variables are the unit levels
+  (`source_level` / `target_level`) and `stealth_level` = the highest `ab_level` of the target's
+  active `buffs.stealth` effects, which is what the client caches in `ClientBuffMan` +4
+  (`FUN_3989f230` reads the buff instance word +0x2E, the `sourceAbLevel` of `SCBuffCreated`).
+  `buffs.anti_stealth` on the target sets the client's "cannot hide" byte (`ClientBuffMan` +8),
+  so such a target is always visible. `buffs.detect_stealth` on the observer reveals stealthed
+  units at any distance; the client's `CanDetect` never reads that column, so this is the server
+  applying the column's documented meaning (deviation; the C# consumed neither column either).
+  Party / raid members that are not hostile are visible (the client's `FUN_39308ca0` /
+  `FUN_39358ab0` rule), as are the observer's owner-linked mate / slave. The C# `< 1.0` /
+  `< 0.5` fallbacks in `Behavior.CheckAggression` are gone, so they no longer decide. Deviations:
+  the client measures collider distance, the server the planar centre distance; the client's
+  party lookup is the local player's slot list, the server asks the team manager (players only).
+  Open: no 1.2 data row applies the `anti_stealth` buff 5212 (a script would have to), and a
+  capture of the original client at 5/10/20/40 m front/back has not been made (the formula,
+  attribute and constant are from the decompile and the shipped data).
 * systems::skills: `SpecialEffect` repeats are scheduled tasks instead of `Thread.Sleep` loops.
 * systems::skills (cuboid AoE): `AreaShape.ComputeCuboid` tested the triangles (v0,v1,v2) and
   (v1,v2,v3) of a rectangle whose vertices run around it, so the two overlapped and the wedge at

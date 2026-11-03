@@ -1762,17 +1762,62 @@ enum Claim {
     Taken,
 }
 
+/// The stealth state the 1.2 client caches per unit (`ClientBuffMan` +4 / +8, recomputed by
+/// `ClientBuffMan::UpdateCache` and its per-buff callback, x2game `FUN_39387e00` /
+/// `FUN_3989f230`): `stealthed` and `level` from the active `buffs.stealth` effects, and
+/// `anti_stealth` from the active `buffs.anti_stealth` effects.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StealthState {
+    /// Any active effect whose template has `buffs.stealth`.
+    pub stealthed: bool,
+    /// Highest `ab_level` among those effects (the client's `stealth_level` = the instance
+    /// word at +0x2E, the `sourceAbLevel` of `SCBuffCreated`).
+    pub level: u32,
+    /// Any active effect whose template has `buffs.anti_stealth` (the client's "cannot hide"
+    /// byte at +8 that `CanDetect` reads).
+    pub anti_stealth: bool,
+}
+
+/// The cached stealth state of `owner` (see [`StealthState`]).
+pub fn stealth_state(server: &GameServer, owner: &WorldObject) -> StealthState {
+    let data = &server.game_data.systems.skills;
+    owner.with_base_unit(|b| {
+        let mut state = StealthState::default();
+        for e in &b.buffs().effects {
+            let Some(t) = data.buff(e.template.id) else {
+                continue;
+            };
+            if t.stealth {
+                state.stealthed = true;
+                // The client stores `sourceAbLevel` as a 16-bit word (+0x2E).
+                state.level = state.level.max(u32::from(e.ab_level as u16));
+            }
+            if t.anti_stealth {
+                state.anti_stealth = true;
+            }
+        }
+        state
+    })
+}
+
 /// Whether `owner` carries an active buff whose 1.2 template is a stealth effect
 /// (`buffs.stealth`). The 1.2 client hides a unit by this column (`ClientUnit::ApplyStealth` /
 /// `CanDetect`, x2game `FUN_3935c270` / `FUN_3935a2b0`), not by buff tag 100 (`TagsEnum.Stealth`);
 /// 30 of the 71 stealth buffs lack tag 100 and 10 tag-100 buffs are not stealth.
 pub fn has_stealth(server: &GameServer, owner: &WorldObject) -> bool {
+    stealth_state(server, owner).stealthed
+}
+
+/// Whether `owner` carries an active `buffs.detect_stealth` effect. The column's rows say the
+/// holder detects stealth ("stealth detection", 2232 / 2233), but the 1.2 client's `CanDetect`
+/// does not read it; the server applies it as a reveal (see PORTING.md).
+pub fn has_detect_stealth(server: &GameServer, owner: &WorldObject) -> bool {
     let data = &server.game_data.systems.skills;
     owner.with_base_unit(|b| {
         b.buffs()
             .effects
             .iter()
-            .any(|e| data.buff(e.template.id).is_some_and(|t| t.stealth))
+            .any(|e| data.buff(e.template.id).is_some_and(|t| t.detect_stealth))
     })
 }
 
