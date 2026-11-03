@@ -1319,9 +1319,10 @@ fn add_aggro_amounts(
 /// `CreateAggro` when the NPC cannot attack the caster; in the 1.2 data most PvE monsters are
 /// faction-neutral to players and attack through AI aggression instead, so `CanAttack` alone
 /// would refuse every taunt on them. Rust therefore refuses only an explicitly friendly caster
-/// (plus the holder itself above). 10x additionally refuses members of the NPC's own group, but
-/// Rust has no runtime NPC group membership (`npc_groups` is not loaded), so there is nothing to
-/// check. Creates the entry with the same side effects as a zero-threat `AddUnitAggro`, stamps
+/// (plus the holder itself above). 10x additionally refuses members of the NPC's own group;
+/// `npc_groups` is loaded by `npc/group_data.rs` for spawner expansion, but no runtime
+/// membership links a spawned NPC back to its group, so there is nothing to check. Creates the
+/// entry with the same side effects as a zero-threat `AddUnitAggro`, stamps
 /// it, and with `copy_top` raises its total to the current highest total of the table (a one-off
 /// copy, never above it).
 pub fn taunted_by(server: &GameServer, npc: &WorldObject, caster: &WorldObject, copy_top: bool) {
@@ -1338,8 +1339,10 @@ pub fn taunted_by(server: &GameServer, npc: &WorldObject, caster: &WorldObject, 
     }
     add_unit_aggro(server, npc, AggroKind::Etc, caster, 0);
     let caster_id = caster.obj_id();
-    // 10x uses its server clock. A stamp of 0 means "no taunt", so keep it non-zero.
-    let stamp = now_ms().max(1) as u32;
+    // 10x uses its server clock. A stamp of 0 means "no taunt", so keep it non-zero; the
+    // 64-bit unix-ms value never wraps (a `u32` stamp wrapped every ~49.7 days and broke the
+    // latest-stamp order across the wrap).
+    let stamp = now_ms().max(1) as u64;
     let stamped = npc
         .with_unit(|u| {
             let table = &mut u.unit_mut().skill_state.aggro_table;
@@ -1414,9 +1417,9 @@ pub fn cancel_taunted_by(server: &GameServer, npc: &WorldObject, caster_obj_id: 
     }
 }
 
-/// The generic buff-start hook of a taunt buff (`on_started` / `on_refreshed`): 10.x runs
-/// `TauntedBy` when the buff is created on an NPC. Re-stamping a refresh is capture-pending
-/// (TAUNT-1; the 10x refresh path is unknown).
+/// The generic buff-start hook of a taunt buff: 10.x runs `TauntedBy` when the buff is created
+/// on an NPC. Re-stamping a refresh is capture-pending (TAUNT-1; the 10x refresh path is
+/// unknown).
 pub fn on_taunt_buff_applied(server: &GameServer, owner: &WorldObject, b: &Buff) {
     let Some(template) = server.game_data.systems.skills.buff(b.template.id) else {
         return;
@@ -1428,6 +1431,29 @@ pub fn on_taunt_buff_applied(server: &GameServer, owner: &WorldObject, b: &Buff)
         return;
     };
     taunted_by(server, owner, &caster, template.taunt_with_top_aggro);
+}
+
+/// The refresh hook of a taunt buff. The stack-rule overwrite replaces the effect's caster, so
+/// a refresh by a second taunter would otherwise leave the previous caster's stamp on the NPC
+/// for good: its buff is gone, and `on_removed` only cancels the current (new) caster. Release
+/// the previous caster first (their other live taunt buffs, if any, keep the stamp), then stamp
+/// the new caster like a fresh application.
+pub fn on_taunt_buff_refreshed(
+    server: &GameServer,
+    owner: &WorldObject,
+    b: &Buff,
+    previous_caster_obj_id: u32,
+) {
+    let Some(template) = server.game_data.systems.skills.buff(b.template.id) else {
+        return;
+    };
+    if !template.taunt {
+        return;
+    }
+    if previous_caster_obj_id != 0 && previous_caster_obj_id != b.caster_obj_id {
+        cancel_taunted_by(server, owner, previous_caster_obj_id);
+    }
+    on_taunt_buff_applied(server, owner, b);
 }
 
 /// `Unit.ClearAggroOfUnit(unit)` on `owner`.
