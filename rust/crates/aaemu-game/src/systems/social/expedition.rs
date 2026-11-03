@@ -1282,21 +1282,16 @@ fn dismiss_expedition(server: &GameServer, id: u32) {
 }
 
 /// The member who inherits leadership when a forced change removes the owner: the highest
-/// `role` first, then the longest membership. `ExpeditionMember` has no join timestamp;
-/// `last_world_leave_time` is the only per-member time (set when the member joins and refreshed
-/// on login / logout), so its smallest value is the available stand-in for the longest
-/// membership; the character id breaks a remaining tie (ids are allocated in creation order).
+/// `role` first, then the longest membership. `ExpeditionMember` stores no join timestamp:
+/// `last_world_leave_time` is the last world leave (set at join, refreshed on login / logout)
+/// and measures activity, not tenure, so it cannot order members by membership. The lowest
+/// `character_id` is the stable stand-in (ids are allocated in creation order, so the
+/// first-created character wins); documented as an approximation in PORTING.md (PIRATE-1).
 fn successor_owner(e: &Expedition, exclude: u32) -> Option<u32> {
     e.members
         .iter()
         .filter(|m| m.character_id != exclude)
-        .min_by_key(|m| {
-            (
-                std::cmp::Reverse(m.role),
-                m.last_world_leave_time,
-                m.character_id,
-            )
-        })
+        .min_by_key(|m| (std::cmp::Reverse(m.role), m.character_id))
         .map(|m| m.character_id)
 }
 

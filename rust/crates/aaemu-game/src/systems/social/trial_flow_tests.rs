@@ -2144,7 +2144,7 @@ fn guild_nation() -> crate::systems::social::nation::Nation {
 
 /// PIRATE-1 (owner decision 2026-11-03): a guild owner who becomes a pirate is removed like any
 /// member. The leadership first passes to the remaining member with the highest role, then the
-/// longest membership stand-in (`last_world_leave_time`), through the normal `ChangeOwner`
+/// longest membership stand-in (the lowest character id), through the normal `ChangeOwner`
 /// packets; the guild keeps its territory, siege registration and nation, and the nation's king
 /// moves to the new owner.
 #[tokio::test]
@@ -2168,20 +2168,23 @@ async fn a_pirate_guild_owner_hands_the_guild_to_the_next_member() {
     let veteran = player(&server, 4, "Veteran", |_| {});
     let victim = player(&server, 5, "Victim", |_| {});
 
-    // Highest role wins first: CmdrOld is the older commander and must beat CmdrNew; the
-    // oldest member overall (Veteran, role 0) must not win over a commander.
+    // Highest role wins first: CmdrOld (character 2) is the lower id commander and must beat
+    // CmdrNew (3); the lowest id overall (Owner, role 255) is excluded and the role-0 Veteran
+    // must not win over a commander. `last_world_leave_time` is deliberately reversed so the
+    // test proves the stable character-id stand-in is used, not the login-refreshed activity
+    // timestamp.
     let members = [
-        (&owner.p, 255u8, 50i64),
-        (&cmdr_old.p, 3, 10),
-        (&cmdr_new.p, 3, 20),
+        (&owner.p, 255u8, 0i64),
+        (&cmdr_old.p, 3, 50),
+        (&cmdr_new.p, 3, 10),
         (&veteran.p, 0, 0),
     ]
     .into_iter()
-    .map(|(p, role, joined)| {
+    .map(|(p, role, last_leave)| {
         p.data().unit.expedition_id = 77;
         let mut m = expedition::member_from_character(&server, 77, p, false);
         m.role = role;
-        m.last_world_leave_time = joined;
+        m.last_world_leave_time = last_leave;
         m
     })
     .collect();

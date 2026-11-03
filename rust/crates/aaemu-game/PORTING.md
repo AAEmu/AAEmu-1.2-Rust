@@ -1390,9 +1390,10 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   **Owner decision (2026-11-03, PIRATE-1, replaces the earlier dismissal rule):** a guild owner
   who becomes a pirate is removed too, but the leadership first passes automatically to a
   remaining member. The successor is chosen by the highest `role`, then the longest membership.
-  `ExpeditionMember` has no join timestamp; `last_world_leave_time` is the only per-member time
-  (set at join and refreshed on login / logout), so its smallest value is used as the longest
-  membership stand-in, with the character id as the final tie-break. The handover reuses
+  `ExpeditionMember` stores no join timestamp: `last_world_leave_time` is the last world leave
+  (set at join and refreshed on login / logout), so it measures activity, not tenure. The
+  lowest `character_id` is the stable stand-in (ids are allocated in creation order, so the
+  first-created character wins); this is an approximation. The handover reuses
   `expedition::change_owner`, so it emits the normal `SCExpeditionOwnerChanged` / role packets
   and saves like a client transfer. The 1.2 error 568
   (`expedition_owner_cannot_change_during_siege`) is absent from both the C# and this port's
