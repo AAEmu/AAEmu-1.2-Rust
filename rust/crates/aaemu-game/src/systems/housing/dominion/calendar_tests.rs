@@ -293,3 +293,119 @@ fn disabled_calendar_is_reported_by_the_settings_and_invalid_schedules_are_rejec
     assert_eq!(settings.timezone, timezone());
     assert!(!CalendarSettings::from_config(&HousingConfig::default()).enabled);
 }
+
+#[test]
+fn claim_window_uses_the_authored_open_weekday_hour_and_duration() {
+    let weekly = weekly_calendar();
+    // The shipped row is Sunday 00:00 for 168 h, so every instant is inside the window.
+    for now in [
+        epoch(2014, 1, 5, 0, 0),
+        epoch(2014, 1, 8, 12, 0),
+        epoch(2014, 1, 11, 23, 59),
+    ] {
+        assert_eq!(
+            weekly.claim_window_at(ZONE, now, &timezone()),
+            ClaimWindow::Open
+        );
+    }
+
+    let mut castles = CastleReferenceData::default();
+    castles.siege_zones.insert(
+        ZONE,
+        SiegeZone {
+            open_weekday: 4,
+            open_hour: 0,
+            open_duration_hours: 1,
+            ..schedule()
+        },
+    );
+    let narrow = SiegeCalendar::from_castles(&castles);
+    assert_eq!(
+        narrow.claim_window_at(ZONE, epoch(2014, 1, 9, 0, 30), &timezone()),
+        ClaimWindow::Open
+    );
+    assert_eq!(
+        narrow.claim_window_at(ZONE, epoch(2014, 1, 8, 23, 59), &timezone()),
+        ClaimWindow::NotOpen
+    );
+    assert_eq!(
+        narrow.claim_window_at(ZONE, epoch(2014, 1, 9, 1, 0), &timezone()),
+        ClaimWindow::NotOpen
+    );
+    // Exactly at the opening boundary is open; exactly at the closing boundary is not.
+    assert_eq!(
+        narrow.claim_window_at(ZONE, epoch(2014, 1, 9, 0, 0), &timezone()),
+        ClaimWindow::Open
+    );
+
+    let mut castles = CastleReferenceData::default();
+    castles.siege_zones.insert(
+        ZONE,
+        SiegeZone {
+            open_duration_hours: 0,
+            ..schedule()
+        },
+    );
+    let closed = SiegeCalendar::from_castles(&castles);
+    assert_eq!(
+        closed.claim_window_at(ZONE, epoch(2014, 1, 5, 0, 0), &timezone()),
+        ClaimWindow::Closed
+    );
+    assert_eq!(
+        closed.claim_window_at(999, epoch(2014, 1, 5, 0, 0), &timezone()),
+        ClaimWindow::Closed
+    );
+}
+
+#[test]
+fn fresh_claim_protection_refuses_cycles_until_the_delay_expires() {
+    // Zone 33 runs every three weeks: auctions on Jan 8, Jan 29 and Feb 19 2014.
+    let calendar = calendar(&[date(2014, 1, 5), date(2014, 1, 26)]);
+    let claim = epoch(2014, 1, 8, 23, 0);
+    let not_before = claim + 30 * 86_400;
+    let first_after = epoch(2014, 2, 19, 22, 30);
+
+    // Without protection this is the auction period of the current cycle.
+    assert_eq!(
+        calendar
+            .view_at(ZONE, claim + 3_600, &timezone(), false)
+            .unwrap()
+            .period,
+        PERIOD_AUCTION
+    );
+
+    // During the delay the territory stays in peace, and its next period start is the first
+    // rotation auction at or after the delay.
+    for now in [claim, claim + 3_600, not_before - 1] {
+        let view = calendar
+            .view_at_protected(ZONE, now, &timezone(), false, not_before)
+            .unwrap();
+        assert_eq!(view.period, PERIOD_PEACE);
+        assert_eq!(view.started, first_after);
+        assert_eq!(
+            view.durations,
+            calendar
+                .view_at(ZONE, first_after, &timezone(), false)
+                .unwrap()
+                .durations
+        );
+    }
+
+    // The delay ends exactly at `not_before`; this is still the Feb 19 auction.
+    let ended = calendar
+        .view_at_protected(ZONE, not_before, &timezone(), false, not_before)
+        .unwrap();
+    assert_eq!((ended.period, ended.started), (PERIOD_PEACE, first_after));
+    let auction = calendar
+        .view_at_protected(ZONE, first_after, &timezone(), false, not_before)
+        .unwrap();
+    assert_eq!(
+        (auction.period, auction.started),
+        (PERIOD_AUCTION, first_after)
+    );
+
+    // A delay longer than the bounded search drops the view instead of claiming a cycle.
+    assert!(calendar
+        .view_at_protected(ZONE, claim, &timezone(), false, claim + 400 * 86_400)
+        .is_none());
+}

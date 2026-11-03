@@ -166,11 +166,27 @@ pub struct PeriodView {
     pub cycle: Option<Cycle>,
 }
 
+/// The authored `siege_zones.open_*` claim window at one point in time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimWindow {
+    /// No schedule row, or `open_duration_hours == 0`: the territory never opens. 1.2 ships
+    /// zero-hour rows for zone groups 54 and 56; `DOMINION_CLOSED` (662) describes them
+    /// ("not yet a region where a territory can be proclaimed", ui_texts 5165).
+    Closed,
+    /// The recurring window exists but is not active at this instant. `DOMINION_NOT_DECLARE_TIME`
+    /// (582) is the matching client text, parameterized by the window columns
+    /// ("$1: you can proclaim a territory from $2 weekday $3 o'clock for $4 hours",
+    /// ui_texts 4662).
+    NotOpen,
+    Open,
+}
+
 /// The loaded schedules plus the deduplicated plan rotation.
 #[derive(Debug, Clone, Default)]
 pub struct SiegeCalendar {
     zones: BTreeMap<u32, SiegeZone>,
     rotation: SiegeRotation,
+    siege_delay_after_claim_days: i64,
 }
 
 impl SiegeCalendar {
@@ -182,6 +198,7 @@ impl SiegeCalendar {
                 .map(|(zone, schedule)| (*zone, *schedule))
                 .collect(),
             rotation: castles.siege_rotation(),
+            siege_delay_after_claim_days: castles.siege_delay_after_claim_days,
         }
     }
 
@@ -189,9 +206,62 @@ impl SiegeCalendar {
         self.zones.is_empty() || self.rotation.is_empty()
     }
 
+    /// `world_var_defaults.var_delay_siege_x_days_after_dominion_declare` (0 = no protection).
+    pub fn siege_delay_after_claim_days(&self) -> i64 {
+        self.siege_delay_after_claim_days
+    }
+
     /// Whether this zone has a cycle in the week starting on `week`.
     pub fn has_cycle(&self, zone_group_id: u32, week: NaiveDate) -> bool {
         self.rotation.has_cycle(zone_group_id, week)
+    }
+
+    /// Whether an unowned territory may be claimed at `now` according to
+    /// `siege_zones.open_weekday/open_hour/open_duration_hours`.
+    ///
+    /// The 1.2 client has no claim validator; it only maps the server's error id to text, and
+    /// the text for 582 is parameterized by exactly these columns (`FUN_3956b860` case
+    /// `0x246` in `x2game.dll.c`), so the columns are the claim window. Weekday 0 = Sunday is
+    /// the same INFERRED convention as the rest of the table (`siege_plans` weeks start on
+    /// Sunday). A window longer than a week is supported by scanning back the weeks it
+    /// covers. The window is independent of [`CalendarSettings::enabled`]: the switch drives
+    /// the inferred weekly siege cycle, not the authored claim-availability columns.
+    pub fn claim_window_at(
+        &self,
+        zone_group_id: u32,
+        now: i64,
+        timezone: &CalendarTimeZone,
+    ) -> ClaimWindow {
+        let Some(zone) = self.zones.get(&zone_group_id) else {
+            return ClaimWindow::Closed;
+        };
+        if zone.open_duration_hours == 0 {
+            return ClaimWindow::Closed;
+        }
+        let Some(week) = timezone.week_start_of(now) else {
+            return ClaimWindow::Closed;
+        };
+        let duration = i64::from(zone.open_duration_hours) * 3_600;
+        // Whole weeks the window can reach back; 168 h -> the current and previous week.
+        let weeks_back = duration / (7 * 86_400) + 1;
+        for back in 0..=weeks_back {
+            let Ok(days) = u64::try_from(back * 7) else {
+                continue;
+            };
+            let Some(candidate) = week.checked_sub_days(Days::new(days)) else {
+                continue;
+            };
+            let Some(start) = timezone
+                .at(candidate, zone.open_weekday, zone.open_hour, 0)
+                .and_then(|start| timezone.timestamp(start))
+            else {
+                continue;
+            };
+            if now >= start && now < start.saturating_add(duration) {
+                return ClaimWindow::Open;
+            }
+        }
+        ClaimWindow::NotOpen
     }
 
     /// The cycle anchored on `week`, or `None` when the zone is not in that rotation week.
@@ -318,6 +388,28 @@ impl SiegeCalendar {
         timezone: &CalendarTimeZone,
         declared: bool,
     ) -> Option<PeriodView> {
+        self.view_at_protected(zone_group_id, now, timezone, declared, 0)
+    }
+
+    /// [`view_at`] with the fresh-claim siege delay
+    /// (`world_var_defaults.var_delay_siege_x_days_after_dominion_declare`).
+    ///
+    /// While `now < siege_not_before` the territory gets no cycle at all: the view is peace and
+    /// its next period start is the first rotation cycle whose auction starts at or after
+    /// `siege_not_before` (INFERRED: a freshly claimed dominion cannot be sieged for 30 days).
+    /// `0` disables the protection. The forward search is bounded like the normal next-cycle
+    /// search, so a delay longer than the search window drops the view instead of lying.
+    pub fn view_at_protected(
+        &self,
+        zone_group_id: u32,
+        now: i64,
+        timezone: &CalendarTimeZone,
+        declared: bool,
+        siege_not_before: i64,
+    ) -> Option<PeriodView> {
+        if siege_not_before > now {
+            return self.protected_view(zone_group_id, now, timezone, siege_not_before);
+        }
         let week = timezone.week_start_of(now)?;
         // The most recent cycle still running (its peace may span several rotation weeks).
         for back in 0..=MAX_SEARCH_WEEKS {
@@ -367,6 +459,32 @@ impl SiegeCalendar {
                 continue;
             };
             if cycle.auction_start > now {
+                return Some(PeriodView {
+                    period: PERIOD_PEACE,
+                    started: cycle.auction_start,
+                    durations: cycle.durations,
+                    cycle: None,
+                });
+            }
+        }
+        None
+    }
+
+    /// Peace until the first rotation cycle at or after `siege_not_before`.
+    fn protected_view(
+        &self,
+        zone_group_id: u32,
+        now: i64,
+        timezone: &CalendarTimeZone,
+        siege_not_before: i64,
+    ) -> Option<PeriodView> {
+        let week = timezone.week_start_of(now)?;
+        for forward in 0..=MAX_SEARCH_WEEKS {
+            let candidate = week.checked_add_days(Days::new(u64::try_from(forward * 7).ok()?))?;
+            let Some(cycle) = self.cycle_for_week(zone_group_id, candidate, timezone) else {
+                continue;
+            };
+            if cycle.auction_start >= siege_not_before {
                 return Some(PeriodView {
                     period: PERIOD_PEACE,
                     started: cycle.auction_start,

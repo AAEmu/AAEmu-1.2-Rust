@@ -300,6 +300,8 @@ pub enum DominionError {
     WrongTower,
     #[error("territory is already owned")]
     AlreadyOwned,
+    #[error("expedition has reached the configured owned-dominion limit")]
+    TooManyOwned,
     #[error("invalid persisted territory authority")]
     InvalidState,
     #[error("invalid siege state")]
@@ -585,6 +587,28 @@ impl DominionManager {
         now_seconds: i64,
         consume: impl FnOnce() -> bool,
     ) -> Result<DominionState, DominionError> {
+        self.declare_unowned_with_limit(
+            zone_group_id,
+            tower,
+            expedition_id,
+            now_seconds,
+            u32::MAX,
+            consume,
+        )
+    }
+
+    /// [`declare_unowned_with`] with the expedition's owned-territory limit applied under the
+    /// same authority lock as the claim, so two claims cannot both pass the check. The count
+    /// is taken over current owners (an unowned record does not count).
+    pub fn declare_unowned_with_limit(
+        &self,
+        zone_group_id: u32,
+        tower: TowerIdentity,
+        expedition_id: u32,
+        now_seconds: i64,
+        limit: u32,
+        consume: impl FnOnce() -> bool,
+    ) -> Result<DominionState, DominionError> {
         validate_identity(zone_group_id, tower)?;
         if expedition_id == 0 || now_seconds < 0 {
             return Err(DominionError::InvalidIdentity);
@@ -604,6 +628,14 @@ impl DominionManager {
         }
         if state.owner_expedition_id != 0 {
             return Err(DominionError::AlreadyOwned);
+        }
+        let owned = inner
+            .states
+            .values()
+            .filter(|e| e.state.owner_expedition_id == expedition_id)
+            .count();
+        if u64::try_from(owned).unwrap_or(u64::MAX) >= u64::from(limit) {
+            return Err(DominionError::TooManyOwned);
         }
         let revision = next_revision(&inner)?;
         state.ownership_generation = state

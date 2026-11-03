@@ -3588,6 +3588,42 @@ and in NPC wandering / buff remaining times.
   20:30..22:30 times never hit one); `view_at` returns None for the whole zone when its next
   rotation cycle cannot be built; and without WP-S2 (declaration) the calendar never enters
   warmup/siege on its own, so periods 3/4 exist only through an explicit GM schedule.
+* systems::housing / systems::social (WP-S6 claim gating): the existing lodestone claim
+  (`social/dominion.rs::declare_effect`) now applies the authored `siege_zones` claim window,
+  the pirate refusal, the owned-dominion limit and the fresh-claim siege delay. The 1.2 client
+  has **no claim validator**: it only maps the server's error id to a text (`FUN_3956b860`),
+  so the ids are EVIDENCED but the check order is this server's policy. Window: a zone with no
+  `siege_zones` row or `open_duration_hours == 0` is `DOMINION_CLOSED` 662 (client case `0x296`;
+  ui_texts 5165 "not yet a region where a territory can be proclaimed", the shipped zero rows
+  are zone groups 54/56); outside the recurring `open_weekday/open_hour/open_duration_hours`
+  window it is `DOMINION_NOT_DECLARE_TIME` 582 (case `0x246`; ui_texts 4662, whose `$2 weekday
+  $3 o'clock $4 hours` parameters are exactly those columns). The window is computed by
+  `dominion::calendar::claim_window_at` (weekday 0 = Sunday INFERRED as everywhere else,
+  windows longer than a week supported) and applies **regardless of `Housing.SiegeCalendar`**:
+  that switch drives the inferred weekly cycle, not the authored claim columns. Pirates are
+  refused with `DOMINION_NOT_AVAILABLE_FOR_PIRATES` 351 (case `0x15f`; ui_texts 2298 "Pirates
+  cannot proclaim a territory") when the expedition's mother faction is the pirate faction 161
+  or the leader's own faction is; this is EVIDENCED text, and the pirate-guild research
+  (PIRATE-1) is the authority for the expedition test. The owned-territory limit is
+  `TOO_MANY_OWNED_DOMINIONS` 441 (case `0x1b9`; ui_texts 2500) from the new configurable
+  `Housing.DominionClaimLimit` (default 10, from `siege_settings` rows 0..=10; the retail limit
+  is UNKNOWN). The count is taken inside `DominionManager::declare_unowned_with_limit` under
+  the same lock as the claim, so concurrent claims cannot both pass, and the pack is consumed
+  only after it. Order: window (662 before 582) -> pirate 351 -> limit 441. The
+  `world_var_defaults.var_delay_siege_x_days_after_dominion_declare` = 30 delay is EVIDENCED
+  data with INFERRED meaning: a freshly claimed dominion gets no cycle for 30 days, so
+  `view_at_protected` keeps it in peace and names the first rotation cycle at or after
+  `reign_start_at + 30 days` (the calendar and snapshot paths pass it; an explicit GM schedule
+  still overrides). The delay does **not** refuse a claim and has no client error id (UNKNOWN
+  in the research), so no claim error is invented for it. GM `/dominion` commands are
+  unchanged. Tests: `a_claim_outside_the_authored_open_window_is_refused`,
+  `a_claim_in_a_zone_whose_window_never_opens_is_refused_as_closed`,
+  `a_pirate_expedition_cannot_claim_a_dominion`, `a_pirate_leader_cannot_claim_a_dominion`,
+  `a_claim_over_the_owned_dominion_limit_is_refused`,
+  `claim_gate_errors_follow_the_documented_order`,
+  `a_fresh_claim_has_no_siege_cycle_during_the_authored_delay`,
+  `claim_window_uses_the_authored_open_weekday_hour_and_duration`,
+  `fresh_claim_protection_refuses_cycles_until_the_delay_expires`.
   Any registered current attacker may
   engrave; initial claim requires the current guild leader and exact Purified Archeum pack.
   Capture transfers the nine independently itemized fort designs to the new guild leader,

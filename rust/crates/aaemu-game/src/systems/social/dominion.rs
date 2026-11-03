@@ -30,8 +30,11 @@ const PURIFYING_ARCHEUM: u32 = 16_493;
 /// The configured weekly calendar period of a territory, when the calendar is enabled.
 ///
 /// Only this calendar view uses the GM test clock. The explicit (persisted) siege branch of
-/// [`snapshot`] always receives the real clock from its caller.
-fn calendar_view(server: &GameServer, zone_group_id: u32) -> Option<calendar::PeriodView> {
+/// [`snapshot`] always receives the real clock from its caller. A claim younger than
+/// `world_var_defaults.var_delay_siege_x_days_after_dominion_declare` gets no cycle: its view
+/// stays peace until the first rotation cycle after the protection ends (INFERRED; the 1.2
+/// value is 30 days).
+fn calendar_view(server: &GameServer, state: &DominionState) -> Option<calendar::PeriodView> {
     let settings = server
         .systems
         .housing
@@ -40,12 +43,27 @@ fn calendar_view(server: &GameServer, zone_group_id: u32) -> Option<calendar::Pe
     if !settings.enabled {
         return None;
     }
-    calendar::SiegeCalendar::from_castles(&server.game_data.systems.housing.castles).view_at(
-        zone_group_id,
-        server.systems.housing.calendar.now(),
-        &settings.timezone,
-        false,
-    )
+    let delay = server
+        .game_data
+        .systems
+        .housing
+        .castles
+        .siege_delay_after_claim_days;
+    let siege_not_before = if state.reign_start_at > 0 && delay > 0 {
+        state
+            .reign_start_at
+            .saturating_add(delay.saturating_mul(86_400))
+    } else {
+        0
+    };
+    calendar::SiegeCalendar::from_castles(&server.game_data.systems.housing.castles)
+        .view_at_protected(
+            state.zone_group_id,
+            server.systems.housing.calendar.now(),
+            &settings.timezone,
+            false,
+            siege_not_before,
+        )
 }
 
 /// Original stock DominionGuardTowerStateNoticeKey indices, not fortification/model stages.
@@ -259,7 +277,7 @@ pub fn snapshot(server: &GameServer, state: &DominionState, now: i64) -> Option<
     } else if state.owner_expedition_id != 0 {
         // The weekly calendar (`FUN_3956fc70`, `FUN_39838ff0`/`FUN_3946be90`): real period and
         // timers in every phase; in peace `started` is the next cycle's auction start.
-        if let Some(view) = calendar_view(server, state.zone_group_id) {
+        if let Some(view) = calendar_view(server, state) {
             timers.durations = view.durations;
             timers.started = DateTime::from_timestamp(view.started, 0)?;
             timers.siege_period = view.period;
@@ -813,13 +831,63 @@ pub fn declare_effect(server: &GameServer, args: &EffectArgs<'_>) {
     if !distance2.is_finite() || !range.is_finite() || range <= 0.0 || distance2 > range * range {
         return;
     }
+    // WP-S6 claim gates. The 1.2 client has no claim validator; it only renders the server's
+    // error id, so the ids below are its error table (FUN_3956b860 in x2game.dll.c) and the
+    // order is this server policy. The authored `open_*` window applies regardless of
+    // `Housing.SiegeCalendar` (that switch only drives the inferred weekly cycle), and
+    // `CalendarRuntime::now` lets the GM test clock drive claims in live verification.
+    let settings = server
+        .systems
+        .housing
+        .calendar
+        .settings(&server.config.housing);
+    let window = calendar::SiegeCalendar::from_castles(&server.game_data.systems.housing.castles)
+        .claim_window_at(
+            zone,
+            server.systems.housing.calendar.now(),
+            &settings.timezone,
+        );
+    match window {
+        calendar::ClaimWindow::Closed => {
+            // 662 DOMINION_CLOSED: "not yet a region where a territory can be proclaimed".
+            super::util::send_error(
+                player,
+                crate::systems::economy::error_message::DOMINION_CLOSED,
+            );
+            return;
+        }
+        calendar::ClaimWindow::NotOpen => {
+            // 582 DOMINION_NOT_DECLARE_TIME: the window text is parameterized by open_*.
+            super::util::send_error(
+                player,
+                crate::systems::economy::error_message::DOMINION_NOT_DECLARE_TIME,
+            );
+            return;
+        }
+        calendar::ClaimWindow::Open => {}
+    }
+    let pirate = server
+        .expeditions
+        .get(expedition)
+        .is_some_and(|e| e.faction.mother_id == crate::data::world_data::factions::PIRATE)
+        || player.data().unit.faction_id == crate::data::world_data::factions::PIRATE;
+    if pirate {
+        // 351 DOMINION_NOT_AVAILABLE_FOR_PIRATES: "Pirates cannot proclaim a territory".
+        super::util::send_error(
+            player,
+            crate::systems::economy::error_message::DOMINION_NOT_AVAILABLE_FOR_PIRATES,
+        );
+        return;
+    }
+    let claim_limit = server.config.housing.dominion_claim_limit;
     let mut effects = None;
     let previous = server.systems.housing.dominions.get(zone);
-    let claim = server.systems.housing.dominions.declare_unowned_with(
+    let claim = server.systems.housing.dominions.declare_unowned_with_limit(
         zone,
         identity,
         expedition,
         Utc::now().timestamp(),
+        claim_limit,
         || {
             let mut txn = ItemTxn::begin(server);
             let inv = Inv::of(player);
@@ -856,6 +924,14 @@ pub fn declare_effect(server: &GameServer, args: &EffectArgs<'_>) {
         crate::systems::housing::manager::add_build_action(server, tower);
     }
     drop(operation);
+    if let Err(DominionError::TooManyOwned) = &claim {
+        // 441 TOO_MANY_OWNED_DOMINIONS: the pack was not consumed (checked under the
+        // authority lock before the callback).
+        super::util::send_error(
+            player,
+            crate::systems::economy::error_message::TOO_MANY_OWNED_DOMINIONS,
+        );
+    }
     if let Some(effects) = effects {
         crate::systems::economy::fx::flush(server, effects);
     }
@@ -1179,6 +1255,7 @@ mod authority_tests {
     use crate::data::items::{ItemTemplate, TemplateKind};
     use crate::data::world_data::{SystemFaction, Zone};
     use crate::data::GameData;
+    use crate::data::WorldTemplate;
     use crate::models::house::House;
     use crate::models::item::Item;
     use crate::net::registry::ClientPacket;
@@ -1195,7 +1272,7 @@ mod authority_tests {
     use crate::systems::social::expedition::{self, Expedition};
     use crate::systems::social::packets::misc::CSUpdateDominionTaxRatePacket;
     use crate::test_support::{
-        spawn_player, test_character, test_server_with, TestClient, TEST_ZONE,
+        spawn_player, test_character, test_server_with_world, TestClient, TEST_ZONE,
     };
     use crate::world::{Entity, HouseRef};
 
@@ -1293,9 +1370,14 @@ mod authority_tests {
                 start_warmup_weekday: 0,
                 start_warmup_hour: 20,
                 start_warmup_min: 30,
+                // The shipped claim window: Sunday 00:00 for 168 h, i.e. always open.
+                open_weekday: 0,
+                open_hour: 0,
+                open_duration_hours: 168,
                 ..Default::default()
             },
         );
+        data.systems.housing.castles.siege_delay_after_claim_days = 30;
         for (id, week) in [(1, "2014-01-05"), (2, "2014-01-26")] {
             data.systems
                 .housing
@@ -1328,7 +1410,10 @@ mod authority_tests {
                 },
             );
         }
-        let server = test_server_with(data);
+        let mut world = WorldTemplate::synthetic(0, "main_world", 2, 2, TEST_ZONE);
+        world.zone_keys.push(TEST_ZONE + 1);
+        assert!(world.set_zone_key_at(1, 0, TEST_ZONE + 1));
+        let server = test_server_with_world(data, world);
         let mut client = TestClient::new(&server, 1, 1001);
         let leader = spawn_player(
             &server,
@@ -1410,18 +1495,97 @@ mod authority_tests {
     }
 
     fn args<'a>(f: &Fixture, object: &'a SkillObject) -> EffectArgs<'a> {
+        args_for(f, object, &f.house, &f.skill)
+    }
+
+    fn args_for<'a>(
+        f: &Fixture,
+        object: &'a SkillObject,
+        tower: &HouseRef,
+        skill: &SkillRef,
+    ) -> EffectArgs<'a> {
         EffectArgs {
             caster: Some(WorldObject::from(&f.leader)),
             caster_caster: SkillCaster::Unit(f.leader.obj_id),
-            target: Target::Obj(WorldObject::from(&f.house)),
-            target_caster: SkillCastTarget::Unit(f.house.obj_id),
+            target: Target::Obj(WorldObject::from(tower)),
+            target_caster: SkillCastTarget::Unit(tower.obj_id),
             cast: CastAction::Skill {
                 skill_id: DECLARATION_SKILL,
                 tl_id: 5,
             },
-            source: EffectSource::from_skill(f.skill.clone()),
+            source: EffectSource::from_skill(skill.clone()),
             skill_object: object,
         }
+    }
+
+    /// A second unowned lodestone in its own zone group, for the owned-territory limit.
+    fn second_tower(f: &mut Fixture) -> (HouseRef, SkillRef) {
+        let f = &mut *f;
+        data_mut(f).systems.housing.castles.siege_zones.insert(
+            ZONE + 1,
+            SiegeZone {
+                id: 5,
+                zone_group_id: ZONE + 1,
+                open_weekday: 0,
+                open_hour: 0,
+                open_duration_hours: 168,
+                ..Default::default()
+            },
+        );
+        let mut h = House::new(14, DESIGN);
+        h.current_step = 0;
+        h.build_step_count = 1;
+        h.all_action = 1;
+        h.unit.model_id = 893;
+        h.unit.hp = 1000;
+        h.unit.max_hp = 1000;
+        h.unit.tl_id = 13;
+        h.unit.transform.set_xyz(100.0, 32.0, 100.0);
+        h.unit.transform.zone_id = TEST_ZONE + 1;
+        let house = Entity::new(0x201, h);
+        assert!(f.server.systems.housing.manager.insert(&house));
+        crate::systems::housing::manager::spawn_house(&f.server, &house);
+        let (_, identity) = tower_identity(&f.server, &house).unwrap();
+        f.server
+            .systems
+            .housing
+            .dominions
+            .register_tower(ZONE + 1, identity)
+            .unwrap();
+        let skill = SkillRun::new(
+            f.server
+                .game_data
+                .systems
+                .skills
+                .skill(DECLARATION_SKILL)
+                .unwrap()
+                .clone(),
+            1,
+        );
+        skill.state().generation = 1;
+        skill.state().initial_target = house.obj_id;
+        skill.state().tl_id = 5;
+        (house, skill)
+    }
+
+    fn data_mut(f: &mut Fixture) -> &mut GameData {
+        Arc::get_mut(&mut f.server.game_data).expect("game data is uniquely owned")
+    }
+
+    fn errors(client: &mut TestClient) -> Vec<i16> {
+        client
+            .drain()
+            .into_iter()
+            .filter(|(op, _)| *op == crate::opcodes::sc::SCErrorMsgPacket)
+            .map(|(_, body)| i16::from_le_bytes([body[0], body[1]]))
+            .collect()
+    }
+
+    fn set_clock(f: &Fixture, now: i64) {
+        f.server.systems.housing.calendar.set_clock(Some(now));
+        f.server
+            .config
+            .update(|c| c.housing.siege_calendar_timezone = "+00:00".into());
     }
 
     fn give_pack(f: &Fixture, id: u64, template_id: u32) {
@@ -1987,6 +2151,250 @@ mod authority_tests {
                 .owner_expedition_id,
             0
         );
+    }
+
+    fn unix_utc(text: &str) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(text)
+            .unwrap()
+            .timestamp()
+    }
+
+    fn pack_id(player: &PlayerRef) -> Option<u64> {
+        Inv::of(player)
+            .equipped(equip_slot::BACKPACK)
+            .map(|item| item.id)
+    }
+
+    #[tokio::test]
+    async fn a_claim_outside_the_authored_open_window_is_refused() {
+        let mut f = fixture();
+        give_pack(&f, 100, PURIFYING_ARCHEUM);
+        // Wednesday 12:00 UTC; the authored window opens Thursday 00:00 for one hour.
+        let now = unix_utc("2024-01-03T12:00:00Z");
+        set_clock(&f, now);
+        {
+            let zone = data_mut(&mut f)
+                .systems
+                .housing
+                .castles
+                .siege_zones
+                .get_mut(&ZONE)
+                .unwrap();
+            zone.open_weekday = 4;
+            zone.open_hour = 0;
+            zone.open_duration_hours = 1;
+        }
+        let object = SkillObject::None;
+        declare_effect(&f.server, &args(&f, &object));
+        assert_eq!(
+            errors(&mut f.client),
+            vec![crate::systems::economy::error_message::DOMINION_NOT_DECLARE_TIME]
+        );
+        assert_eq!(pack_id(&f.leader), Some(100));
+        assert_eq!(
+            f.server
+                .systems
+                .housing
+                .dominions
+                .get(ZONE)
+                .unwrap()
+                .owner_expedition_id,
+            0
+        );
+        assert_eq!(f.house.data().current_step, 0);
+    }
+
+    #[tokio::test]
+    async fn a_claim_in_a_zone_whose_window_never_opens_is_refused_as_closed() {
+        let mut f = fixture();
+        give_pack(&f, 100, PURIFYING_ARCHEUM);
+        set_clock(&f, unix_utc("2024-01-03T12:00:00Z"));
+        data_mut(&mut f)
+            .systems
+            .housing
+            .castles
+            .siege_zones
+            .get_mut(&ZONE)
+            .unwrap()
+            .open_duration_hours = 0;
+        let object = SkillObject::None;
+        declare_effect(&f.server, &args(&f, &object));
+        assert_eq!(
+            errors(&mut f.client),
+            vec![crate::systems::economy::error_message::DOMINION_CLOSED]
+        );
+        assert_eq!(pack_id(&f.leader), Some(100));
+        assert_eq!(
+            f.server
+                .systems
+                .housing
+                .dominions
+                .get(ZONE)
+                .unwrap()
+                .owner_expedition_id,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pirate_expedition_cannot_claim_a_dominion() {
+        let mut f = fixture();
+        give_pack(&f, 100, PURIFYING_ARCHEUM);
+        f.server
+            .expeditions
+            .with_mut(EXPEDITION, |e| {
+                e.faction.mother_id = crate::data::world_data::factions::PIRATE;
+            })
+            .unwrap();
+        let object = SkillObject::None;
+        declare_effect(&f.server, &args(&f, &object));
+        assert_eq!(
+            errors(&mut f.client),
+            vec![crate::systems::economy::error_message::DOMINION_NOT_AVAILABLE_FOR_PIRATES]
+        );
+        assert_eq!(pack_id(&f.leader), Some(100));
+        assert_eq!(
+            f.server
+                .systems
+                .housing
+                .dominions
+                .get(ZONE)
+                .unwrap()
+                .owner_expedition_id,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pirate_leader_cannot_claim_a_dominion() {
+        let mut f = fixture();
+        give_pack(&f, 100, PURIFYING_ARCHEUM);
+        f.leader.data().unit.faction_id = crate::data::world_data::factions::PIRATE;
+        let object = SkillObject::None;
+        declare_effect(&f.server, &args(&f, &object));
+        assert_eq!(
+            errors(&mut f.client),
+            vec![crate::systems::economy::error_message::DOMINION_NOT_AVAILABLE_FOR_PIRATES]
+        );
+        assert_eq!(pack_id(&f.leader), Some(100));
+    }
+
+    #[tokio::test]
+    async fn a_claim_over_the_owned_dominion_limit_is_refused() {
+        let mut f = fixture();
+        f.server
+            .config
+            .update(|c| c.housing.dominion_claim_limit = 1);
+        let object = SkillObject::None;
+        give_pack(&f, 100, PURIFYING_ARCHEUM);
+        declare_effect(&f.server, &args(&f, &object));
+        assert_eq!(
+            f.server
+                .systems
+                .housing
+                .dominions
+                .get(ZONE)
+                .unwrap()
+                .owner_expedition_id,
+            EXPEDITION
+        );
+        f.client.drain();
+        let (second, skill) = second_tower(&mut f);
+        f.leader.data().unit.transform.set_xyz(95.0, 32.0, 100.0);
+        give_pack(&f, 101, PURIFYING_ARCHEUM);
+        declare_effect(&f.server, &args_for(&f, &object, &second, &skill));
+        assert_eq!(
+            errors(&mut f.client),
+            vec![crate::systems::economy::error_message::TOO_MANY_OWNED_DOMINIONS]
+        );
+        assert_eq!(pack_id(&f.leader), Some(101));
+        assert_eq!(
+            f.server
+                .systems
+                .housing
+                .dominions
+                .get(ZONE + 1)
+                .unwrap()
+                .owner_expedition_id,
+            0
+        );
+        assert_eq!(second.data().current_step, 0);
+    }
+
+    #[tokio::test]
+    async fn claim_gate_errors_follow_the_documented_order() {
+        let object = SkillObject::None;
+        // A closed zone wins over the pirate and limit refusals.
+        let mut f = fixture();
+        give_pack(&f, 100, PURIFYING_ARCHEUM);
+        f.server
+            .config
+            .update(|c| c.housing.dominion_claim_limit = 0);
+        data_mut(&mut f)
+            .systems
+            .housing
+            .castles
+            .siege_zones
+            .get_mut(&ZONE)
+            .unwrap()
+            .open_duration_hours = 0;
+        f.leader.data().unit.faction_id = crate::data::world_data::factions::PIRATE;
+        declare_effect(&f.server, &args(&f, &object));
+        assert_eq!(
+            errors(&mut f.client),
+            vec![crate::systems::economy::error_message::DOMINION_CLOSED]
+        );
+
+        // An open window still refuses a pirate before the owned-territory limit.
+        let mut f = fixture();
+        give_pack(&f, 100, PURIFYING_ARCHEUM);
+        f.server
+            .config
+            .update(|c| c.housing.dominion_claim_limit = 0);
+        f.leader.data().unit.faction_id = crate::data::world_data::factions::PIRATE;
+        declare_effect(&f.server, &args(&f, &object));
+        assert_eq!(
+            errors(&mut f.client),
+            vec![crate::systems::economy::error_message::DOMINION_NOT_AVAILABLE_FOR_PIRATES]
+        );
+
+        // A non-pirate in an open window reaches the limit refusal.
+        let mut f = fixture();
+        give_pack(&f, 100, PURIFYING_ARCHEUM);
+        f.server
+            .config
+            .update(|c| c.housing.dominion_claim_limit = 0);
+        declare_effect(&f.server, &args(&f, &object));
+        assert_eq!(
+            errors(&mut f.client),
+            vec![crate::systems::economy::error_message::TOO_MANY_OWNED_DOMINIONS]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fresh_claim_has_no_siege_cycle_during_the_authored_delay() {
+        let f = fixture();
+        f.server.config.update(|c| c.housing.siege_calendar = true);
+        let object = SkillObject::None;
+        give_pack(&f, 100, PURIFYING_ARCHEUM);
+        declare_effect(&f.server, &args(&f, &object));
+        let state = f.server.systems.housing.dominions.get(ZONE).unwrap();
+        let reign = state.reign_start_at;
+        assert!(reign > 0);
+
+        // One hour after the claim the weekly cycle would be running for an older owner.
+        set_clock(&f, reign + 3_600);
+        let protected = snapshot(&f.server, &state, reign + 3_600).unwrap();
+        let protected_started = protected.siege_timers.started.timestamp();
+        assert_eq!(protected.siege_timers.siege_period, 5);
+        assert!(protected_started >= reign + 30 * 86_400);
+        assert!(protected_started > reign + 3_600);
+
+        // The protected view names the first cycle after the delay; that cycle starts.
+        set_clock(&f, protected_started);
+        let started = snapshot(&f.server, &state, protected_started).unwrap();
+        assert_eq!(started.siege_timers.siege_period, 1);
+        assert_eq!(started.siege_timers.started.timestamp(), protected_started);
     }
 
     #[tokio::test]
