@@ -55,6 +55,12 @@
 //! ginvite [name]                     CSInviteToExpedition to the peer
 //! gaccept                            wait for the guild invitation and join
 //! greply <faction id> <0|1>          CSReplyExpeditionInvitation without waiting for an invite
+//! ninvite [name]                     CSFactionImmigrationInvite to the peer (nation king)
+//! nlevel [name] <level>              `/level <peer> <level>` (GM)
+//! naccept [0|1]                      wait for SCFactionImmigrateInvite and answer it
+//! nreply <nation> <nonce> <0|1>      CSFactionImmigrationInviteReply without an invitation
+//! norigin                            CSFactionImmigrateToOrigin
+//! nkick <name>                       CSFactionKickToOrigin
 //! sync <token> [count]              suite barrier: wait until `count` bots (default: all) are here
 //! expectpkt <PacketName> [secs]     fail unless the packet arrives within `secs` (default 5)
 //! expectnopkt <PacketName> [secs]   fail if the packet arrives within `secs` (default 5)
@@ -1556,6 +1562,74 @@ async fn run_lines(
                 let join = num::<u8>(&parts, 1)? != 0;
                 let (op, body) = social::reply_expedition_invitation(id, join);
                 game.send_cs(op, &body).await?;
+                let got = game
+                    .drain(Duration::from_millis(800), Duration::from_secs(3))
+                    .await?;
+                show(&got);
+            }
+            "ninvite" => {
+                // The character name differs in case from the account name: use the peer's.
+                let target = peer(game, parts.first().copied())?;
+                let mut b = aaemu_commons::PacketStream::new();
+                b.write_str(&target.name);
+                game.send_cs(cs::CSFactionImmigrationInvitePacket, &b.into_bytes())
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(800), Duration::from_secs(3))
+                    .await?;
+                show(&got);
+            }
+            "naccept" => {
+                // The reply echoes the invitation's (nation id, nonce) (PORTING.md, NATION-11).
+                let join = parts.first().map(|v| *v != "0").unwrap_or(true);
+                let invitation = game.wait_sc(sc::SCFactionImmigrateInvitePacket).await?;
+                let mut s = invitation.stream();
+                let nation = s.read_u32()?;
+                let nonce = s.read_u32()?;
+                let mut b = aaemu_commons::PacketStream::new();
+                b.write_u32(nation).write_u32(nonce).write_bool(join);
+                game.send_cs(cs::CSFactionImmigrationInviteReplyPacket, &b.into_bytes())
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(800), Duration::from_secs(3))
+                    .await?;
+                show(&got);
+            }
+            "nreply" => {
+                // Answer an invitation that was never received (forged / replayed reply).
+                let nation: u32 = num(&parts, 0)?;
+                let nonce: u32 = num(&parts, 1)?;
+                let join = num::<u8>(&parts, 2)? != 0;
+                let mut b = aaemu_commons::PacketStream::new();
+                b.write_u32(nation).write_u32(nonce).write_bool(join);
+                game.send_cs(cs::CSFactionImmigrationInviteReplyPacket, &b.into_bytes())
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(800), Duration::from_secs(3))
+                    .await?;
+                show(&got);
+            }
+            "nlevel" => {
+                // `/level <name> <level>`: the GM command's name match is exact.
+                let target = peer(game, parts.first().copied())?;
+                let level: u8 = num(&parts, 1)?;
+                let got = gm_command(game, &format!("level {} {level}", target.name)).await?;
+                show(&got);
+            }
+            "norigin" => {
+                game.send_cs(cs::CSFactionImmigrateToOriginPacket, &[])
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(800), Duration::from_secs(3))
+                    .await?;
+                show(&got);
+            }
+            "nkick" => {
+                let target = peer(game, parts.first().copied())?;
+                let mut b = aaemu_commons::PacketStream::new();
+                b.write_str(&target.name);
+                game.send_cs(cs::CSFactionKickToOriginPacket, &b.into_bytes())
+                    .await?;
                 let got = game
                     .drain(Duration::from_millis(800), Duration::from_secs(3))
                     .await?;
