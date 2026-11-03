@@ -783,6 +783,8 @@ async fn grade_enchant_effect_refuses_a_non_enchantable_target() {
     );
     assert_eq!(item(&w, target).unwrap().grade, 3);
     assert_eq!(item(&w, scroll).unwrap().count, 1);
+    assert_eq!(w.pa.data().money, 1000);
+}
 
 #[tokio::test]
 async fn grade_enchant_refuses_a_locked_target() {
