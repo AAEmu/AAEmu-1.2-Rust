@@ -36,6 +36,8 @@ use crate::test_support::{spawn_player, test_character, test_server_with, TestCl
 use crate::world::{Entity, PlayerRef};
 
 const ARMOR: u32 = 2100; // chest, no binding, level 10
+const NON_ENCHANTABLE_ARMOR: u32 = 2101; // chest, `grade_enchantable` false
+const WEAPON: u32 = 2102; // one-hand weapon, `grade_enchantable` true
 const SOCKET_ARMOR: u32 = 2110; // chest, level 20, level requirement 50
 const LOW_ARMOR: u32 = 2111; // chest, level 20, level requirement 40
 const SCROLL: u32 = 5000;
@@ -114,8 +116,38 @@ fn data() -> GameData {
     armor.max_count = 1;
     armor.level = 10;
     armor.disenchantable = true;
+    armor.grade_enchantable = true;
     armor.impl_id = 3;
     d.items.templates.insert(ARMOR, armor);
+    // The real data has 16 918 `grade_enchantable = 'f'` items, most of them NPC gear.
+    let mut non_enchantable = ItemTemplate::new(
+        NON_ENCHANTABLE_ARMOR,
+        TemplateKind::Armor(EquipTemplate {
+            slot_type_id: 3,
+            coverage: 10,
+            durability_ratio: 1.0,
+            durability_multiplier: 100,
+            ..EquipTemplate::default()
+        }),
+    );
+    non_enchantable.max_count = 1;
+    non_enchantable.level = 10;
+    d.items
+        .templates
+        .insert(NON_ENCHANTABLE_ARMOR, non_enchantable);
+    let mut weapon = ItemTemplate::new(
+        WEAPON,
+        TemplateKind::Weapon(EquipTemplate {
+            slot_type_id: 2,
+            durability_ratio: 1.0,
+            durability_multiplier: 100,
+            ..EquipTemplate::default()
+        }),
+    );
+    weapon.max_count = 1;
+    weapon.level = 10;
+    weapon.grade_enchantable = true;
+    d.items.templates.insert(WEAPON, weapon);
     for (template, level_requirement) in [(SOCKET_ARMOR, 50), (LOW_ARMOR, 40)] {
         let mut socket_armor = ItemTemplate::new(
             template,
@@ -643,12 +675,115 @@ async fn grade_enchant_refusals() {
     set_grade(&w, id, 7);
     enchant(&w, id, Some(charm), false, &[0, 0, 0, 0]);
     assert_eq!(w.a.drain(), vec![error(error_message::GRADE_ENCHANT_MAX)]);
-    // Wrong item kind for value3 (2 = armor; a stack is no armor): InvalidCast -> nothing
+    // Non-enchantable stack: the grade_enchantable gate refuses it before the kind check.
     let stack = give(&w, &w.pa.clone(), slot_type::INVENTORY, STACK, 1, 3);
     enchant(&w, stack, None, false, &[0, 0, 0, 0]);
+    assert_eq!(w.a.drain(), vec![error(error_message::INVALID_TARGET)]);
+    // Wrong item kind for value3 (2 = armor; a weapon is no armor): InvalidCast -> nothing
+    let weapon = give(&w, &w.pa.clone(), slot_type::INVENTORY, WEAPON, 1, 4);
+    enchant(&w, weapon, None, false, &[0, 0, 0, 0]);
     assert!(w.a.drain().is_empty());
     assert_eq!(w.pa.data().money, 1000);
     assert!(w.b.drain().is_empty());
+}
+
+/// The 1.2 client refuses a non-`grade_enchantable` target before it sends the cast
+/// (`FUN_393a0130`, switch case 0x5c -> SkillResult INVALID_TARGET 0x22). The server must refuse
+/// it too, with the client's item error, before any roll, gold, charm or scroll.
+#[tokio::test]
+async fn grade_enchant_refuses_a_non_enchantable_target() {
+    let mut w = world();
+    let id = give(
+        &w,
+        &w.pa.clone(),
+        slot_type::INVENTORY,
+        NON_ENCHANTABLE_ARMOR,
+        1,
+        0,
+    );
+    let scroll = give(&w, &w.pa.clone(), slot_type::INVENTORY, SCROLL, 1, 1);
+    let charm = give(&w, &w.pa.clone(), slot_type::INVENTORY, CHARM, 1, 2);
+    set_grade(&w, id, 3);
+    w.pa.data().money = 1000;
+    w.pa.data().skill_char.skill_cancelled = false;
+    let rng = enchant(&w, id, Some(charm), true, &[0, 0, 0, 0]);
+    assert!(rng.int_calls.is_empty(), "a refused target must not roll");
+    assert_eq!(w.a.drain(), vec![error(error_message::INVALID_TARGET)]);
+    assert!(
+        w.pa.data().skill_char.skill_cancelled,
+        "a refused regrade must cancel the cast so the scroll is refunded"
+    );
+    assert_eq!(item(&w, id).unwrap().grade, 3);
+    assert_eq!(item(&w, scroll).unwrap().count, 1);
+    assert_eq!(item(&w, charm).unwrap().count, 1);
+    assert_eq!(w.pa.data().money, 1000);
+    assert!(w.b.drain_ops().is_empty());
+}
+
+/// Runs the real `GradeEnchant` special effect: `special::execute` routes to the installed
+/// economy hook, which calls `item_effects::grade_enchant`.
+fn grade_enchant_effect(w: &World, scroll_item_id: u64, target_item_id: u64) {
+    use crate::systems::skills::effects::{EffectArgs, EffectSource};
+    use crate::systems::skills::geometry::Target;
+    use crate::systems::skills::state::SkillRun;
+    use crate::systems::skills::types::{CastAction, SkillCastTarget, SkillCaster, SkillObject};
+    use crate::world::WorldObject;
+
+    let skill = SkillRun::new(
+        Arc::new(crate::systems::skills::tests::skill_template(22520)),
+        1,
+    );
+    let args = EffectArgs {
+        caster: Some(WorldObject::from(&w.pa)),
+        caster_caster: SkillCaster::Item {
+            obj_id: w.pa.obj_id,
+            item_id: scroll_item_id,
+            item_template_id: SCROLL,
+            type1: 0,
+            type2: 0,
+        },
+        target: Target::Obj(WorldObject::from(&w.pa)),
+        target_caster: SkillCastTarget::Item {
+            obj_id: w.pa.obj_id,
+            id: target_item_id,
+            type1: 0,
+            type2: 0,
+        },
+        cast: CastAction::Skill {
+            skill_id: 22520,
+            tl_id: 1,
+        },
+        source: EffectSource::from_skill(skill),
+        skill_object: &SkillObject::None,
+    };
+    crate::systems::skills::effects::special::execute(&w.server, 92, &args, [0, 0, 2, 0]);
+}
+
+#[tokio::test]
+async fn grade_enchant_effect_refuses_a_non_enchantable_target() {
+    let mut w = world();
+    super::bridges::install(&w.server);
+    let target = give(
+        &w,
+        &w.pa.clone(),
+        slot_type::INVENTORY,
+        NON_ENCHANTABLE_ARMOR,
+        1,
+        0,
+    );
+    let scroll = give(&w, &w.pa.clone(), slot_type::INVENTORY, SCROLL, 1, 1);
+    set_grade(&w, target, 3);
+    w.pa.data().money = 1000;
+    w.pa.data().skill_char.skill_cancelled = false;
+    grade_enchant_effect(&w, scroll, target);
+    assert_eq!(w.a.drain(), vec![error(error_message::INVALID_TARGET)]);
+    assert!(
+        w.pa.data().skill_char.skill_cancelled,
+        "a refused regrade must cancel the cast so the scroll is refunded"
+    );
+    assert_eq!(item(&w, target).unwrap().grade, 3);
+    assert_eq!(item(&w, scroll).unwrap().count, 1);
+    assert_eq!(w.pa.data().money, 1000);
 }
 
 #[tokio::test]

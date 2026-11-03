@@ -36,6 +36,10 @@
 //! moveitem <id> <ftype> <fslot> <ttype> <tslot>  CSSwapItemsPacket with an explicit item id
 //! icast <skill> <item template> <npc template|self|peer|player:NAME> [metres [max secs]]
 //!                                    cast from the remembered item stack
+//! icastitem <skill> <scroll template> <target item template> error <code>|ok
+//!                                    item-on-item cast (`GradeEnchant` scroll on the target
+//!                                    item); fails unless the expected error (and no result) or
+//!                                    an `SCGradeEnchantResult` arrives.
 //! waitpeer [secs] [name]             read packets until another player is in sight (60 s default)
 //! rawcs <opcode hex> [<body hex>]    send any client packet (`SELF` / `PEER` / `ITEM(<template>)`
 //!                                    in the body hex)
@@ -77,7 +81,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use aaemu_game::opcodes::{cs, sc};
-use anyhow::{bail, Context};
+use anyhow::{bail, ensure, Context};
 
 use super::questitem::{chat_text, gm_command, quest_state, stack_id, stack_location};
 use super::{pump, skill_response_result, Runner};
@@ -1052,6 +1056,50 @@ async fn run_lines(
                     }
                 }
                 show(&got);
+            }
+            "icastitem" => {
+                let skill: u32 = num(&parts, 0)?;
+                let scroll_tpl: u32 = num(&parts, 1)?;
+                let target_tpl: u32 = num(&parts, 2)?;
+                let expect = parts.get(3).copied().unwrap_or("ok");
+                let scroll = *items
+                    .get(&scroll_tpl)
+                    .with_context(|| format!("item {scroll_tpl} not added with `item`"))?;
+                let target = *items
+                    .get(&target_tpl)
+                    .with_context(|| format!("item {target_tpl} not added with `item`"))?;
+                game.start_item_skill_on_item(skill, scroll, scroll_tpl, target)
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(2000), Duration::from_secs(10))
+                    .await?;
+                show(&got);
+                let errors: Vec<i16> = got
+                    .iter()
+                    .filter(|p| p.is_sc(sc::SCErrorMsgPacket))
+                    .filter_map(|p| p.stream().read_i16().ok())
+                    .collect();
+                let regraded = got.iter().any(|p| p.is_sc(sc::SCGradeEnchantResultPacket));
+                println!(
+                    "    item cast {skill} from {scroll_tpl} on {target_tpl}: errors {errors:?}, \
+                     regrade result {regraded}"
+                );
+                match expect {
+                    "ok" => ensure!(
+                        regraded && errors.is_empty(),
+                        "item cast {skill} on {target_tpl}: expected SCGradeEnchantResult and no \
+                         error, got errors {errors:?}"
+                    ),
+                    "error" => {
+                        let code: i16 = num(&parts, 4)?;
+                        ensure!(
+                            errors.contains(&code) && !regraded,
+                            "item cast {skill} on {target_tpl}: expected error {code} and no \
+                             regrade result, got errors {errors:?}"
+                        );
+                    }
+                    other => bail!("unknown icastitem expectation '{other}' (error <code>|ok)"),
+                }
             }
             "walk" => {
                 // Steps of 4 m every 800 ms (5 m/s).
