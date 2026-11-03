@@ -1447,6 +1447,8 @@ pub async fn leave_world_task(
             .lock()
             .expect("expedition invitations poisoned")
             .remove(&p.character_id);
+        // A guild rename offer dies with the session too.
+        server.expeditions.clear_rename_offer(p.character_id);
         let (exp, id) = {
             let c = p.data();
             (c.unit.expedition_id, c.id)

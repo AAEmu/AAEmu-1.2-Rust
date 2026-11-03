@@ -362,7 +362,7 @@ impl QuestsBridge for QuestsForNpcs {
 /// sorted by descending total aggro, expressed as a percentile (best contributor = 0).
 /// Authored quest rank thresholds are percentages; 100 means absent from the table.
 pub fn aggro_rating_percent(npc: &NpcRef, obj_id: u32) -> f32 {
-    let mut sorted: Vec<(u32, i32, u32)> = npc
+    let mut sorted: Vec<(u32, i32, u64)> = npc
         .data()
         .unit
         .skill_state

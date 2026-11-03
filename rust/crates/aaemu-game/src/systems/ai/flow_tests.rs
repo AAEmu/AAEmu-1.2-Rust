@@ -1734,21 +1734,24 @@ const TAUNT_BUFF: u32 = 5000;
 const TAUNT_BUFF_2: u32 = 5001;
 const TAUNT_TOP_BUFF: u32 = 5002;
 const TAUNT_TRIGGER_BUFF: u32 = 5003;
+const TAUNT_EXPIRY_BUFF: u32 = 5004;
 const TAUNTER_OBJ: u32 = 0x101;
 const TAUNTER2_OBJ: u32 = 0x102;
 
 fn taunt_data() -> GameData {
     let mut data = data();
     let s = &mut data.systems.skills;
-    for (id, copy_top) in [
-        (TAUNT_BUFF, false),
-        (TAUNT_BUFF_2, false),
-        (TAUNT_TOP_BUFF, true),
+    for (id, copy_top, duration) in [
+        (TAUNT_BUFF, false, 4000),
+        (TAUNT_BUFF_2, false, 4000),
+        (TAUNT_TOP_BUFF, true, 4000),
+        // Short enough to let the test wait for the real expiry timer.
+        (TAUNT_EXPIRY_BUFF, false, 200),
     ] {
         s.add_buff(BuffTemplate {
             id,
             kind: 2,
-            duration: 4000,
+            duration,
             stack_rule: crate::data::skills::stack_rule::REFRESH,
             taunt: true,
             taunt_with_top_aggro: copy_top,
@@ -2080,6 +2083,49 @@ async fn refreshing_the_taunt_buff_restamps_the_table() {
     );
     tick_all(&f.server, 100);
     assert_eq!(f.npc.data().unit.current_target, TAUNTER_OBJ);
+}
+
+#[tokio::test]
+async fn taunt_refresh_by_a_second_caster_releases_the_first_stamp_on_expiry() {
+    let f = taunt_fixture();
+    settle(&f).await;
+    add_threat(&f, &f.player_a, 100);
+    tick_all(&f.server, 100);
+    assert_eq!(f.npc.data().unit.current_target, PLAYER_OBJ);
+
+    apply_taunt(&f, TAUNT_EXPIRY_BUFF, &f.player_b);
+    tick_all(&f.server, 100);
+    assert_eq!(f.npc.data().unit.current_target, TAUNTER_OBJ);
+    assert_ne!(aggro_entry(&f, TAUNTER_OBJ).taunt_time, 0);
+
+    // A second taunter uses the same buff: the REFRESH rule replaces the effect and its
+    // caster, so the first taunter's stamp must go with their buff instead of pinning the
+    // NPC above the table until an aggro reset.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    apply_taunt(&f, TAUNT_EXPIRY_BUFF, &f.player_c);
+    tick_all(&f.server, 100);
+    assert_eq!(
+        aggro_entry(&f, TAUNTER_OBJ).taunt_time,
+        0,
+        "the previous caster's stamp must be cleared when their buff is replaced"
+    );
+    assert_ne!(aggro_entry(&f, TAUNTER2_OBJ).taunt_time, 0);
+    assert_eq!(f.npc.data().unit.current_target, TAUNTER2_OBJ);
+
+    // Let the last taunt expire through its timer, not an explicit removal.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    tick_all(&f.server, 100);
+    assert!(
+        !f.npc.data().unit.buffs.check_buff(TAUNT_EXPIRY_BUFF),
+        "the taunt buff must have expired by its timer"
+    );
+    assert_eq!(aggro_entry(&f, TAUNTER2_OBJ).taunt_time, 0);
+    assert_eq!(aggro_entry(&f, TAUNTER_OBJ).taunt_time, 0);
+    assert_eq!(
+        f.npc.data().unit.current_target,
+        PLAYER_OBJ,
+        "with both stamps gone the threat order returns"
+    );
 }
 
 /// The 1.2 data `buffs.taunt` / `taunt_with_top_aggro` rows and the skills that apply them.

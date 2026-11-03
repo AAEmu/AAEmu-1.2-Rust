@@ -858,7 +858,7 @@ fn update_target(c: &mut AiCtx<'_>) -> bool {
 /// taunt stamp sorts above every unstamped entry and the latest stamp wins. Unstamped entries
 /// keep the total order; the stable sort keeps the table (obj id) order on ties.
 fn sorted_abusers(c: &AiCtx<'_>) -> Vec<Option<WorldObject>> {
-    let mut entries: Vec<(u32, i32, u32)> = c
+    let mut entries: Vec<(u32, i32, u64)> = c
         .npc
         .data()
         .unit
