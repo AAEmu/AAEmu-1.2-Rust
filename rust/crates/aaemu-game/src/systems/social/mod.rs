@@ -18,6 +18,8 @@ pub mod achievement_manager;
 pub mod achievement_persistence;
 pub mod achievement_rewards;
 pub mod achievement_runtime;
+pub mod bounty;
+pub mod bounty_runtime;
 pub mod bridges;
 pub mod chat;
 pub mod config;
@@ -45,6 +47,8 @@ pub mod zone_conflict;
 pub(crate) mod achievement_flow_tests;
 #[cfg(test)]
 mod achievement_game_data_tests;
+#[cfg(test)]
+mod bounty_flow_tests;
 #[cfg(test)]
 mod flow_tests;
 #[cfg(test)]
@@ -90,6 +94,8 @@ pub struct System {
     pub duels: duel::DuelManager,
     pub crimes: crime::CrimeManager,
     pub trials: trial::TrialManager,
+    /// The wanted-player bounty ledger, its placement permits and its persistence.
+    pub bounties: bounty::BountyManager,
     /// `ZoneManager.GetConflicts()` runtime state (`ZoneConflict`).
     pub conflicts: zone_conflict::ZoneConflictManager,
     /// The ranking boards' score store (`ranking_manager`).
@@ -115,6 +121,13 @@ impl System {
         team::TeamManager::start_tick(server);
         // CrimeManager.Load, TrialManager.Load (court rooms + the 5 s TrialUpdateTask).
         server.systems.social.crimes.load(server).await?;
+        server
+            .systems
+            .social
+            .bounties
+            .load(&server.db)
+            .await
+            .context("BountyManager")?;
         server.systems.social.trials.load(server);
         trial::TrialManager::start_tick(server);
         // Ranking scores (`character_rank_scores`) and the closed-period payout ledger.
@@ -138,7 +151,9 @@ impl System {
         stage: SaveStage,
     ) -> crate::Result<usize> {
         if matches!(stage, SaveStage::AfterCharacters) {
-            return self.ranking.save(tx).await;
+            let mut written = self.ranking.save(tx).await?;
+            written += self.bounties.save(tx).await?;
+            return Ok(written);
         }
         if matches!(stage, SaveStage::AfterItems) {
             // SaveManager.DoSave: `CrimeManager.Instance.Save(connection, transaction)`.

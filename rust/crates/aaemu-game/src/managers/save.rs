@@ -60,6 +60,9 @@ pub(crate) fn capture_financial_snapshot_for(
     let houses = crate::systems::housing::manager::prepare_save(server);
     let dominions = server.systems.housing.dominions.prepare_save();
     let _economy = server.systems.economy.ops_lock();
+    // Captured with the wallets: `System::save(AfterCharacters)` writes these rows in the same
+    // transaction, so a pledge and its debit commit or roll back together.
+    server.systems.social.bounties.prepare_save();
     let mut players = server.world.all_characters();
     if scope == SnapshotScope::Departure {
         // Money moves between characters (trade, mail, auction, houses, treasury): a wallet
@@ -355,6 +358,7 @@ pub(crate) fn commit_financial_snapshot(server: &GameServer, receipt: FinancialS
     server.systems.housing.dominions.commit_save();
     server.systems.economy.mail.commit_save();
     server.systems.economy.auction.commit_save();
+    server.systems.social.bounties.commit_save();
     server.items.commit_save();
     server
         .systems
