@@ -546,6 +546,7 @@ async fn run_lines(
     let mut music = super::music::Music::default();
     let mut clock = 40_000u32;
     let mut last_npc = 0u32;
+    let mut last_death_seq = 0u64;
     let mut consumed: HashSet<usize> = HashSet::new();
     let mut mate: Option<(u32, u16)> = None;
     for (n, raw) in text.lines().enumerate() {
@@ -1195,31 +1196,25 @@ async fn run_lines(
                 let lost = parts.get(1).copied().unwrap_or("*");
                 let durability = parts.get(2).copied().unwrap_or("*");
                 let secs: u64 = parts.get(3).and_then(|x| x.parse().ok()).unwrap_or(30);
-                let me = game.state.self_obj;
+                // A `gm` command drains its own packets, so a death that happened during the
+                // previous command is taken from the observed state; otherwise wait for the
+                // next one.
+                let reported = last_death_seq;
+                let mut death = if game.state.self_death_seq > reported {
+                    game.state.self_death
+                } else {
+                    None
+                };
                 let deadline = Instant::now() + Duration::from_secs(secs);
-                let mut death = None;
-                while Instant::now() < deadline {
+                while death.is_none() && Instant::now() < deadline {
                     let left = deadline.saturating_duration_since(Instant::now());
-                    let Some(p) = game
-                        .recv_within(left.min(Duration::from_millis(500)))
-                        .await?
-                    else {
-                        continue;
-                    };
-                    if !p.is_sc(sc::SCUnitDeathPacket) {
-                        continue;
-                    }
-                    let mut s = p.stream();
-                    let obj = s.read_bc()?;
-                    let reason = s.read_u8()?;
-                    let got_wait = s.read_i32()?;
-                    let got_lost = s.read_i32()?;
-                    let got_dur = s.read_u8()?;
-                    if obj == me {
-                        death = Some((reason, got_wait, got_lost, got_dur));
-                        break;
+                    game.recv_within(left.min(Duration::from_millis(500)))
+                        .await?;
+                    if game.state.self_death_seq > reported {
+                        death = game.state.self_death;
                     }
                 }
+                last_death_seq = game.state.self_death_seq;
                 let Some((reason, got_wait, got_lost, got_dur)) = death else {
                     bail!("FAIL deathwait: no SCUnitDeathPacket for self within {secs}s");
                 };
