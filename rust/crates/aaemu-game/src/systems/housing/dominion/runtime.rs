@@ -902,6 +902,9 @@ pub fn tick_once(server: &GameServer) {
         );
         crate::systems::social::dominion::broadcast_phase_change(server, &transition.state);
     }
+    // Non-PvP windows use the real clock (unlike the calendar test clock): the client's
+    // cached end and the server's authored `start + minutes*60` are wall-clock deadlines.
+    crate::systems::social::dominion_notifications::expire_non_pvp(server, real_now);
 }
 
 pub fn start_tick(server: &Arc<GameServer>) {

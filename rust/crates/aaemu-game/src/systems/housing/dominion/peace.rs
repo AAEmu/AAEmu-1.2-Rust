@@ -58,9 +58,16 @@ pub fn start_effect(server: &GameServer, args: &EffectArgs<'_>, duration_min: i3
         state.zone_group_id,
         state.owner_expedition_id,
         duration,
+        // Wall-clock deadline shared with the client's cached end; the calendar test clock
+        // is restricted to the calendar phases, so peace windows use the real clock.
         chrono::Utc::now().timestamp(),
     ) {
-        Ok(state) => broadcast_snapshot(server, &state, false),
+        Ok(state) => {
+            crate::systems::social::dominion_notifications::broadcast_non_pvp_started(
+                server, &state,
+            );
+            broadcast_snapshot(server, &state, false);
+        }
         Err(DominionError::NonPvpActive) => send_error(&player, ALREADY_IN_NON_PVP_DURATION),
         Err(error) => tracing::warn!(
             "Special effects: StartDominionNonPvpDuration failed for zone group {}: {error}",
