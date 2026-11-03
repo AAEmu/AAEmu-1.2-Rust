@@ -13,7 +13,9 @@
             "Host": "127.0.0.1",
             "Id": 1,
             "Name": "AAEmu",
-            "Port": 1239
+            "Port": 1239,
+            "MaxConcurrent": 0,
+            "QueueLimit": 100
         }
     ]
 }

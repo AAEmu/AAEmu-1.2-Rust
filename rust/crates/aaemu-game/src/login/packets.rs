@@ -46,12 +46,15 @@ impl Marshal for GLRegisterGameServerPacket {
     }
 }
 
-/// `GLPlayerEnterPacket` (0x001).
+/// `GLPlayerEnterPacket` (0x001). The trailing `online` is a Rust-only extension (the C# packet
+/// ends after `result`): the world's slot occupancy after this request, used by the login
+/// server's world queue to release the matching slot reservation.
 #[derive(Debug, Clone)]
 pub struct GLPlayerEnterPacket {
     pub connection_id: u32,
     pub gs_id: u8,
     pub result: u8,
+    pub online: u32,
 }
 
 impl LoginOutPacket for GLPlayerEnterPacket {
@@ -63,7 +66,8 @@ impl Marshal for GLPlayerEnterPacket {
     fn write(&self, s: &mut PacketStream) {
         s.write_u32(self.connection_id)
             .write_u8(self.gs_id)
-            .write_u8(self.result);
+            .write_u8(self.result)
+            .write_u32(self.online);
     }
 }
 
@@ -121,10 +125,13 @@ impl Marshal for GLRequestInfoPacket {
     }
 }
 
-/// `GLGameServerLoadPacket` (0x004).
+/// `GLGameServerLoadPacket` (0x004). The trailing `online` is a Rust-only extension (the C# body
+/// is one byte): the world's slot occupancy, used by the login server's world queue capacity
+/// gate. It is also sent right after an account leaves so the queue head moves promptly.
 #[derive(Debug, Clone)]
 pub struct GLGameServerLoadPacket {
     pub load: u8,
+    pub online: u32,
 }
 
 impl LoginOutPacket for GLGameServerLoadPacket {
@@ -134,7 +141,7 @@ impl LoginOutPacket for GLGameServerLoadPacket {
 
 impl Marshal for GLGameServerLoadPacket {
     fn write(&self, s: &mut PacketStream) {
-        s.write_u8(self.load);
+        s.write_u8(self.load).write_u32(self.online);
     }
 }
 
@@ -217,9 +224,10 @@ mod tests {
             encode(&GLPlayerEnterPacket {
                 connection_id: 0x01020304,
                 gs_id: 1,
-                result: 0
+                result: 0,
+                online: 0x0A0B0C0D
             }),
-            vec![1, 0, 4, 3, 2, 1, 1, 0]
+            vec![1, 0, 4, 3, 2, 1, 1, 0, 0x0D, 0x0C, 0x0B, 0x0A]
         );
         assert_eq!(
             encode(&GLPlayerReconnectPacket {
@@ -247,7 +255,10 @@ mod tests {
                 b'b', 1, 2
             ]
         );
-        assert_eq!(encode(&GLGameServerLoadPacket { load: 2 }), vec![4, 0, 2]);
+        assert_eq!(
+            encode(&GLGameServerLoadPacket { load: 2, online: 7 }),
+            vec![4, 0, 2, 7, 0, 0, 0]
+        );
     }
 
     #[test]

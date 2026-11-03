@@ -108,10 +108,25 @@ pub struct WorldCookie {
     pub port: u16,
 }
 
+/// One `ACWorldQueuePacket` received while entering a world.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorldQueueUpdate {
+    pub world_id: u8,
+    pub is_premium: bool,
+    /// 1-based position; 0 ends the wait.
+    pub my_turn: u16,
+    pub normal_length: u16,
+    pub premium_length: u16,
+}
+
 pub struct LoginClient {
     framed: Framed<TcpStream, FrameCodec>,
     rec: Recorder,
     pub timeout: Duration,
+    /// How long a queued client waits for the world cookie after `ACWorldQueuePacket`.
+    pub queue_timeout: Duration,
+    /// Every queue update seen by [`Self::enter_world`], in arrival order.
+    pub queue_updates: Vec<WorldQueueUpdate>,
     pub account_id: u32,
 }
 
@@ -135,6 +150,8 @@ impl LoginClient {
             framed: Framed::new(sock, FrameCodec),
             rec,
             timeout: Duration::from_secs(15),
+            queue_timeout: Duration::from_secs(600),
+            queue_updates: Vec::new(),
             account_id: 0,
         })
     }
@@ -339,28 +356,54 @@ impl LoginClient {
         Ok(out)
     }
 
-    /// `CAEnterWorldPacket` -> `ACWorldCookiePacket`.
+    /// `CAEnterWorldPacket` -> `ACWorldQueuePacket`* -> `ACWorldCookiePacket` (or
+    /// `ACEnterWorldDeniedPacket`). A full world queues the client; this waits for the world
+    /// cookie, recording every queue update and printing its position.
     pub async fn enter_world(&mut self, gs_id: u8) -> anyhow::Result<WorldCookie> {
         let mut s = PacketStream::new();
         s.write_u64(0).write_u8(gs_id);
         self.send(ca::ENTER_WORLD, s.as_bytes()).await?;
-        let (op, mut r) = self.recv().await?;
-        if op == ac::ENTER_WORLD_DENIED {
-            let reason = r.read_u8().unwrap_or(0);
-            bail!("enter world denied (reason {reason})");
+        loop {
+            let (op, mut r) = self.recv().await?;
+            match op {
+                ac::WORLD_QUEUE => {
+                    let update = WorldQueueUpdate {
+                        world_id: r.read_u8()?,
+                        is_premium: r.read_bool()?,
+                        my_turn: r.read_u16()?,
+                        normal_length: r.read_u16()?,
+                        premium_length: r.read_u16()?,
+                    };
+                    println!(
+                        "world queue: world {} position {}/{} (premium {} {})",
+                        update.world_id,
+                        update.my_turn,
+                        update.normal_length,
+                        update.is_premium,
+                        update.premium_length
+                    );
+                    self.queue_updates.push(update);
+                    // A queued client may wait minutes; the 15 s default is for the handshake.
+                    self.timeout = self.timeout.max(self.queue_timeout);
+                }
+                ac::ENTER_WORLD_DENIED => {
+                    let reason = r.read_u8().unwrap_or(0);
+                    bail!("enter world denied (reason {reason})");
+                }
+                ac::WORLD_COOKIE => {
+                    let cookie = r.read_u32()?;
+                    let ip = r.read_bytes(4)?;
+                    let port = r.read_u16()?;
+                    return Ok(WorldCookie {
+                        cookie,
+                        // The address is written with its octets reversed.
+                        ip: Ipv4Addr::new(ip[3], ip[2], ip[1], ip[0]),
+                        port,
+                    });
+                }
+                other => bail!("expected ACWorldCookiePacket, got {}", ac_name(other)),
+            }
         }
-        if op != ac::WORLD_COOKIE {
-            bail!("expected ACWorldCookiePacket, got {}", ac_name(op));
-        }
-        let cookie = r.read_u32()?;
-        let ip = r.read_bytes(4)?;
-        let port = r.read_u16()?;
-        Ok(WorldCookie {
-            cookie,
-            // The address is written with its octets reversed.
-            ip: Ipv4Addr::new(ip[3], ip[2], ip[1], ip[0]),
-            port,
-        })
     }
 }
 

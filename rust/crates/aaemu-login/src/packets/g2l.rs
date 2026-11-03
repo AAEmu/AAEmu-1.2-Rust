@@ -66,20 +66,31 @@ impl OutgoingPacket for GlRegisterGameServer {
 }
 
 /// `GLPlayerEnterPacket`: result of an `LGPlayerEnterPacket`.
-/// Body: `[u32 connectionId][u8 gsId][u8 result]` (result 0 = success).
+/// Body: `[u32 connectionId][u8 gsId][u8 result][u32 online]` (result 0 = success).
+///
+/// `online` is the Rust-only extension: the game server's current slot occupancy (accounts in
+/// the lobby/world plus pending world cookies) right after the request was handled. It lets the
+/// login server release the queue slot reservation for this request exactly. A game server that
+/// does not send it (or a truncated body) reads as 0, which disables the queue gate (fail-open).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GlPlayerEnter {
     pub connection_id: ConnectionId,
     pub gs_id: GameServerId,
     pub result: u8,
+    pub online: u32,
 }
 
 impl GlPlayerEnter {
     pub fn read(s: &mut PacketStream) -> Self {
+        let connection_id = ConnectionId(s.l_u32());
+        let gs_id = GameServerId(s.l_u8());
+        let result = s.l_u8();
+        let online = if s.unread().len() >= 4 { s.l_u32() } else { 0 };
         Self {
-            connection_id: ConnectionId(s.l_u32()),
-            gs_id: GameServerId(s.l_u8()),
-            result: s.l_u8(),
+            connection_id,
+            gs_id,
+            result,
+            online,
         }
     }
 }
@@ -89,7 +100,8 @@ impl OutgoingPacket for GlPlayerEnter {
     fn write_body(&self, s: &mut PacketStream) -> Result<(), PacketError> {
         s.write_u32(self.connection_id.0)
             .write_u8(self.gs_id.0)
-            .write_u8(self.result);
+            .write_u8(self.result)
+            .write_u32(self.online);
         Ok(())
     }
 }
@@ -184,24 +196,30 @@ impl OutgoingPacket for GlRequestInfo {
     }
 }
 
-/// `GLGameServerLoadPacket`: the game server's current load. Body: `[u8 load]`.
+/// `GLGameServerLoadPacket`: the game server's current load. Body: `[u8 load][u32 online]`.
+///
+/// `online` is the Rust-only extension (the C# body is one byte): the game server's current slot
+/// occupancy (accounts in the lobby/world plus pending world cookies). The login server's world
+/// queue uses it as the authoritative capacity count; a body without it reads as 0, which means
+/// "no queue gate" (fail-open).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GlGameServerLoad {
     pub load: GsLoad,
+    pub online: u32,
 }
 
 impl GlGameServerLoad {
     pub fn read(s: &mut PacketStream) -> Self {
-        Self {
-            load: GsLoad(s.l_u8()),
-        }
+        let load = GsLoad(s.l_u8());
+        let online = if s.unread().len() >= 4 { s.l_u32() } else { 0 };
+        Self { load, online }
     }
 }
 
 impl OutgoingPacket for GlGameServerLoad {
     const OPCODE: u16 = opcodes::GL_GAME_SERVER_LOAD;
     fn write_body(&self, s: &mut PacketStream) -> Result<(), PacketError> {
-        s.write_u8(self.load.0);
+        s.write_u8(self.load.0).write_u32(self.online);
         Ok(())
     }
 }
@@ -426,7 +444,8 @@ mod tests {
             G2lPacket::PlayerEnter(GlPlayerEnter {
                 connection_id: ConnectionId(9),
                 gs_id: GameServerId(1),
-                result: 2
+                result: 2,
+                online: 0
             })
         );
         assert_eq!(
@@ -439,7 +458,33 @@ mod tests {
         );
         assert_eq!(
             decode(hex_bytes("040002")),
-            G2lPacket::GameServerLoad(GlGameServerLoad { load: GsLoad::HIGH })
+            G2lPacket::GameServerLoad(GlGameServerLoad {
+                load: GsLoad::HIGH,
+                online: 0
+            })
+        );
+    }
+
+    /// The login server's queue gate reads the Rust-only `online` extension. The old one-byte
+    /// load body and the old six-byte player-enter body stay readable (as 0 = no queue gate), so
+    /// a mixed-version link never blocks entry.
+    #[test]
+    fn occupancy_extension_and_old_bodies() {
+        assert_eq!(
+            decode(hex_bytes("01000900000001000a000000")),
+            G2lPacket::PlayerEnter(GlPlayerEnter {
+                connection_id: ConnectionId(9),
+                gs_id: GameServerId(1),
+                result: 0,
+                online: 10
+            })
+        );
+        assert_eq!(
+            decode(hex_bytes("04000207000000")),
+            G2lPacket::GameServerLoad(GlGameServerLoad {
+                load: GsLoad::HIGH,
+                online: 7
+            })
         );
     }
 

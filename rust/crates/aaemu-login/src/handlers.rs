@@ -26,7 +26,7 @@ pub async fn handle_c2l(
 ) -> anyhow::Result<()> {
     match packet {
         C2lPacket::CancelEnterWorld(_) => {
-            conn.cancel_enter_world();
+            conn.cancel_enter_world(server).await;
             Ok(())
         }
         C2lPacket::ChallengeResponse2(p) => {
@@ -123,13 +123,22 @@ pub async fn handle_g2l(
     match packet {
         G2lPacket::GameServerLoad(p) => {
             let gs_id = authorize_game_server(server, conn, None)?;
-            server.games.set_load(gs_id, p.load)
+            server.games.set_load(gs_id, p.load)?;
+            server.games.note_online(gs_id, p.online);
+            server.games.drain_queues(server).await;
+            Ok(())
         }
         G2lPacket::PlayerEnter(p) => {
             authorize_game_server(server, conn, Some(p.gs_id))?;
+            // Release the queue reservation even when the client connection is already gone;
+            // the answer still reflects the game's occupancy after handling the request.
+            server
+                .games
+                .note_enter_world_result(p.gs_id, p.connection_id, p.online);
             server
                 .games
                 .route_enter_world_response(p.connection_id, p.gs_id, p.result);
+            server.games.drain_queues(server).await;
             Ok(())
         }
         G2lPacket::PlayerReconnect(p) => {

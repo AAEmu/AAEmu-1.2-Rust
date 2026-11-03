@@ -319,6 +319,27 @@ pub(crate) fn test_connection_with(
     )
 }
 
+/// A [`LoginConnection`] on the server's own connection-id pool. Use this whenever a test has
+/// more than one connection: [`test_connection`] uses a fresh pool and therefore hands every
+/// connection id 1.
+pub(crate) fn test_connection_on(
+    server: &Arc<LoginServer>,
+    ip: IpAddr,
+) -> (Arc<LoginConnection>, PacketLog) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let lease = ConnectionIdLease::rent(&server.connection_ids).unwrap();
+    (
+        Arc::new(LoginConnection::new(
+            lease,
+            ip,
+            false,
+            tx,
+            server.config.login,
+        )),
+        PacketLog { rx },
+    )
+}
+
 /// The packets a test connection sent (`_sentPackets` in the C# tests).
 pub(crate) struct PacketLog {
     pub rx: mpsc::UnboundedReceiver<Vec<u8>>,

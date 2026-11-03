@@ -4,6 +4,18 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// How long a world cookie waits for the client to connect to the game server before it stops
+/// counting as an occupied slot. A client connects immediately after `ACWorldCookie`; the expiry
+/// only keeps a cookie whose client vanished from blocking the login queue for ever.
+pub const PENDING_TOKEN_LIFETIME: Duration = Duration::from_secs(60);
+
+#[derive(Debug)]
+struct PendingToken {
+    account_id: u32,
+    created: Instant,
+}
 
 /// Outcome of [`EnterWorldManager::login`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,15 +41,46 @@ pub enum AddAccountResult {
     ReplacedStale { stale_account: u32 },
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct EnterWorldManager {
-    /// `_accounts`: login-server connection id (the client's cookie / token) -> account id.
-    accounts: Mutex<HashMap<u32, u32>>,
+    /// `_accounts`: login-server connection id (the client's cookie / token) -> pending account.
+    accounts: Mutex<HashMap<u32, PendingToken>>,
     /// character id -> game connection id. The session that is entering or playing the character;
     /// taken before the select's MySQL load and kept until the departure save has finished, so a
     /// second connection can neither enter the same character twice nor load its row while the
     /// previous session is still saving it.
     characters: Mutex<HashMap<u32, u32>>,
+    /// Rust addition for the login queue: how long an unconsumed world cookie counts as a slot.
+    token_lifetime: Duration,
+}
+
+impl Default for EnterWorldManager {
+    fn default() -> Self {
+        Self {
+            accounts: Mutex::new(HashMap::new()),
+            characters: Mutex::new(HashMap::new()),
+            token_lifetime: PENDING_TOKEN_LIFETIME,
+        }
+    }
+}
+
+impl EnterWorldManager {
+    fn prune_expired(accounts: &mut HashMap<u32, PendingToken>, lifetime: Duration) {
+        let now = Instant::now();
+        accounts.retain(|_, token| now.saturating_duration_since(token.created) < lifetime);
+    }
+
+    /// Number of world cookies that have not been consumed yet (and have not expired). Together
+    /// with `AccountManager::count` this is the world's slot occupancy reported to the login
+    /// server for its queue.
+    pub fn pending_count(&self) -> usize {
+        let mut accounts = self
+            .accounts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self::prune_expired(&mut accounts, self.token_lifetime);
+        accounts.len()
+    }
 }
 
 impl EnterWorldManager {
@@ -53,17 +96,31 @@ impl EnterWorldManager {
         if already_connected {
             return AddAccountResult::Reply(1);
         }
-        let mut accounts = self.accounts.lock().expect("enter world state poisoned");
-        match accounts.insert(connection_id, account_id) {
-            Some(stale_account) => AddAccountResult::ReplacedStale { stale_account },
+        let mut accounts = self
+            .accounts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self::prune_expired(&mut accounts, self.token_lifetime);
+        let pending = PendingToken {
+            account_id,
+            created: Instant::now(),
+        };
+        match accounts.insert(connection_id, pending) {
+            Some(stale) => AddAccountResult::ReplacedStale {
+                stale_account: stale.account_id,
+            },
             None => AddAccountResult::Reply(0),
         }
     }
 
     /// The token check of `Login(connection, accountId, token)`.
     pub fn login(&self, account_id: u32, token: u32) -> LoginDecision {
-        let mut accounts = self.accounts.lock().expect("enter world state poisoned");
-        match accounts.get(&token).copied() {
+        let mut accounts = self
+            .accounts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self::prune_expired(&mut accounts, self.token_lifetime);
+        match accounts.get(&token).map(|token| token.account_id) {
             Some(a) if a == account_id => {
                 accounts.remove(&token);
                 LoginDecision::Accepted
@@ -168,6 +225,23 @@ mod tests {
         // Consumed: a second connection with the same token is refused.
         assert_eq!(m.login(10, 111), LoginDecision::InvalidToken);
         assert_eq!(m.login(10, 0), LoginDecision::InvalidToken);
+    }
+
+    #[test]
+    fn world_queue_slot_occupancy_counts_pending_cookies() {
+        let m = EnterWorldManager::default();
+        m.add_account(10, 111, false);
+        m.add_account(10, 112, false);
+        assert_eq!(m.pending_count(), 2);
+        assert_eq!(m.login(10, 111), LoginDecision::Accepted);
+        assert_eq!(m.pending_count(), 1);
+        // The slot is freed even if the client never connects (login queue report).
+        let expired = EnterWorldManager {
+            token_lifetime: Duration::ZERO,
+            ..Default::default()
+        };
+        expired.add_account(10, 113, false);
+        assert_eq!(expired.pending_count(), 0);
     }
 
     #[test]

@@ -175,6 +175,15 @@ impl GameServer {
         }
     }
 
+    /// Slot occupancy reported to the login server's world queue: accounts in the lobby or world
+    /// plus world cookies the client has not consumed yet (they expire, see
+    /// `EnterWorldManager::PENDING_TOKEN_LIFETIME`).
+    pub fn world_occupancy(&self) -> u32 {
+        let accounts = u32::try_from(self.accounts.count()).unwrap_or(u32::MAX);
+        let pending = u32::try_from(self.enter_world.pending_count()).unwrap_or(u32::MAX);
+        accounts.saturating_add(pending)
+    }
+
     /// Decodes and dispatches one frame payload for `conn`.
     ///
     /// The C# handler only creates packet tables for levels 1 and 2 ("For 1.2 client we only have

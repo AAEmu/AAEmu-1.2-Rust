@@ -271,6 +271,9 @@ pub async fn on_disconnect(server: &Arc<GameServer>, conn: &mut GameConnection) 
     server.accounts.remove_if_owned(account_id, conn.id);
     server.streams.remove_token(conn.id);
     server.connections.remove(conn.id);
+    // A slot just freed: tell the login server so its world queue admits the head now instead
+    // of at the next periodic load tick.
+    crate::login::report_load(server);
     // AccountManager.UpdateLoginTime(AccountId, UtcNow), fire and forget. Deviation: C# also runs
     // it for connections that never entered (AccountId 0), which inserts an `accounts` row with
     // id 0 via GetAccountDetailsInternal; that is skipped here.
