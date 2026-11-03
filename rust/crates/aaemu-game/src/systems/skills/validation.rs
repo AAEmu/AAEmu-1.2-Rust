@@ -60,6 +60,16 @@ fn collision_kind(obj: &WorldObject) -> crate::systems::ai::collision::world::Ob
     }
 }
 
+/// The 1.2 client's water-only target check (`FUN_390b43b0`, `x2game.dll.c:148796`) probes
+/// 0.1 m below the point (`DAT_3999ccf0`) and requires water there, with the terrain floor
+/// under it at least 1 m below the water level (`DAT_3999c488`). The client aims
+/// `target_water` / `target_only_water` casts at the water surface (`FUN_3942b060` /
+/// `FUN_394322f0`, `x2game.dll.c:872033` / `:877530`), so probing above the surface refused
+/// every real cast.
+const WATER_PROBE_DEPTH: f32 = 0.1;
+/// `FUN_390b43b0`: `floor <= waterLevel - 1.0`.
+const MIN_WATER_DEPTH: f32 = 1.0;
+
 fn in_water(server: &GameServer, target: &Target) -> bool {
     if target
         .as_obj()
@@ -73,12 +83,19 @@ fn in_water(server: &GameServer, target: &Target) -> bool {
         Target::Obj(obj) => obj.transform().instance_id,
         Target::Pos(pos) => pos.instance_id,
     };
-    crate::systems::ai::physics::is_water(
-        server,
-        instance,
-        super::controllers::Vec3::new(pos.x, pos.y, pos.z + 0.1),
-    )
-    .is_some()
+    let probe = super::controllers::Vec3::new(pos.x, pos.y, pos.z - WATER_PROBE_DEPTH);
+    if crate::systems::ai::physics::is_water(server, instance, probe).is_none() {
+        return false;
+    }
+    let Some(level) =
+        crate::systems::ai::collision::water_level(server, instance, probe.x, probe.y, probe.z)
+    else {
+        return true;
+    };
+    // The terrain floor is unknown without the collision service; the water probe alone then
+    // decides, as before the client check was mirrored.
+    crate::systems::ai::collision::terrain_height(server, instance, probe.x, probe.y)
+        .is_none_or(|floor| floor <= level - MIN_WATER_DEPTH)
 }
 
 pub(super) fn labor_cost(skill: &SkillRun, player: &crate::world::PlayerRef) -> i32 {

@@ -119,6 +119,11 @@ async fn rejected_source_and_target_states_do_not_mutate_cast_resources() {
         if dead_target {
             npc.data().unit.hp = 0;
         }
+        if only_water {
+            // A surface point is accepted now that the check probes 0.1 m below it, so use a
+            // dry target to keep this a rejection case.
+            npc.data().unit.transform.set_xyz(100.0, 105.0, 110.0);
+        }
         player.data().unit.is_under_water = swimming;
         let skill = SkillRun::new(Arc::new(template), 1);
         assert_eq!(
@@ -132,6 +137,95 @@ async fn rejected_source_and_target_states_do_not_mutate_cast_resources() {
         assert!(p.unit.skill_state.skill_task.is_none());
         assert_eq!(skill.tl_id(), 0);
     }
+}
+
+/// 1.2 client `FUN_390b43b0` (`x2game.dll.c:148796`): a water-only target is accepted when
+/// water exists 0.1 m below the point and the terrain floor under it is at least 1 m below
+/// the surface. The client casts these skills at the surface (`FUN_3942b060`,
+/// `x2game.dll.c:872033`); the old `z + 0.1` probe landed above it and refused every cast.
+#[tokio::test]
+async fn water_only_targets_probe_below_the_surface_and_need_one_metre_of_water() {
+    struct Flat(f32);
+    impl crate::systems::ai::collision::terrain::TerrainSource for Flat {
+        fn sample(&self, _x: i32, _y: i32) -> f32 {
+            self.0
+        }
+        fn size(&self) -> (i32, i32) {
+            (1024, 1024)
+        }
+    }
+
+    fn check(floor: Option<f32>, z: f32) -> (u8, u32) {
+        let (server, _client, player, _npc) = fixture(GameData::empty());
+        if let Some(floor) = floor {
+            server
+                .systems
+                .ai
+                .collision
+                .test_files
+                .set(Arc::new(std::collections::HashMap::new()))
+                .unwrap();
+            server
+                .systems
+                .ai
+                .collision
+                .test_terrain
+                .set(Arc::new(Flat(floor)))
+                .unwrap_or_else(|_| panic!("terrain"));
+        }
+        let mut target = SkillCastTarget::Position {
+            obj_id: 0,
+            x: 100.0,
+            y: 100.0,
+            z,
+            rot: 0.0,
+            obj_id1: 0,
+            obj_id2: 0,
+        };
+        let skill = SkillRun::new(
+            Arc::new(SkillTemplate {
+                target_type: super::types::SkillTargetType::Pos as i32,
+                target_only_water: true,
+                ..super::tests::skill_template(1)
+            }),
+            1,
+        );
+        use_skill(
+            &server,
+            &skill,
+            &WorldObject::from(&player),
+            SkillCaster::Unit(player.obj_id),
+            &mut target,
+            Some(SkillObject::None),
+            true,
+        )
+    }
+
+    let invalid = (
+        super::unit_reqs::skill_result_for_key("skill_invalid_location"),
+        0,
+    );
+    // The synthetic world's ocean surface is 100; 2 m of water under the surface.
+    assert_eq!(check(Some(98.0), 100.0), (0, 0), "a surface point is water");
+    assert_eq!(
+        check(Some(98.0), 100.05),
+        (0, 0),
+        "0.05 m above the surface still probes 0.05 m below it"
+    );
+    assert_eq!(check(Some(98.0), 100.11), invalid, "a dry point");
+    assert_eq!(
+        check(Some(99.5), 100.0),
+        invalid,
+        "0.5 m of water is too shallow"
+    );
+    assert_eq!(
+        check(Some(99.0), 100.0),
+        (0, 0),
+        "exactly 1 m of water is enough"
+    );
+    // Without the collision service the floor is unknown and only the water probe applies.
+    assert_eq!(check(None, 100.0), (0, 0));
+    assert_eq!(check(None, 105.0), invalid);
 }
 
 #[tokio::test]
