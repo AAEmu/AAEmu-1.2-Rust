@@ -55,6 +55,16 @@ impl LoginServer {
     }
 
     fn build(config: AppConfig, pool: MySqlPool, auth: Option<Arc<dyn AuthBackend>>) -> Arc<Self> {
+        tracing::info!(
+            "Character slots: base {} per account, additional {} per server, pre-select period {}; the game server's Characters:MaxPerAccount must match",
+            config.login.max_characters_per_account,
+            config.login.additional_characters_per_server,
+            if config.login.pre_select_character_period {
+                "on"
+            } else {
+                "off"
+            }
+        );
         let passwords = PasswordService::default();
         let requests = Arc::new(RequestController::new());
         let connections = Arc::new(LoginConnectionTable::default());

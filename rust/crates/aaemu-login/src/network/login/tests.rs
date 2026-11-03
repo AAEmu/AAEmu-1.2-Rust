@@ -32,7 +32,8 @@ use crate::services::password::{Password, PasswordKind};
 use crate::services::sha256_crypt;
 use crate::services::two_factor::FactorValidation;
 use crate::test_support::{
-    test_config, test_connection, test_server, LoginBehavior, MockBackend, PacketLog,
+    test_config, test_connection, test_connection_with, test_server, LoginBehavior, MockBackend,
+    PacketLog,
 };
 
 const TEST_ACCOUNT_ID: AccountId = AccountId(100);
@@ -149,6 +150,51 @@ async fn authenticate_async_success_sends_join_then_auth_response() {
         vec![l2c_op::AC_JOIN_RESPONSE, l2c_op::AC_AUTH_RESPONSE]
     );
     assert_eq!(f.conn.state(), LoginState::Authenticated);
+}
+
+/// `Login:MaxCharactersPerAccount` / `AdditionalCharactersPerServer` /
+/// `PreSelectCharacterPeriod` reach `ACJoinResponse`, and the same base slot count reaches
+/// `ACAuthResponse` (the game server enforces base + its `SCGetSlotCount`).
+#[tokio::test]
+async fn auth_success_advertises_configured_character_limits() {
+    let backend = Arc::new(MockBackend::default());
+    let server = test_server(test_config(serde_json::json!({})), backend.clone());
+    backend.set_login(LoginBehavior::Result(LoginResult::ok(TEST_ACCOUNT_ID)));
+    let (conn, mut sent) = test_connection_with(
+        TEST_IP,
+        crate::config::LoginConfig {
+            max_characters_per_account: 8,
+            additional_characters_per_server: 2,
+            pre_select_character_period: true,
+        },
+    );
+
+    let flow = AuthFlow::Password(PasswordAuthFlow {
+        username: Some("testuser".to_string()),
+        password: Some(Password::from_plaintext("pw")),
+        client_ip: TEST_IP,
+    });
+    conn.authenticate(&server, flow).await.unwrap();
+
+    let packets = sent.drain();
+    assert_eq!(packets.len(), 2);
+    assert_eq!(
+        crate::test_support::opcode_of(&packets[0]),
+        l2c_op::AC_JOIN_RESPONSE
+    );
+    // [reason u16 = 0][afs u64, client layout: byte0 slots 8 | byte1 additional 2 |
+    // byte2 bit0 pre-select]
+    assert_eq!(
+        &packets[0][2..],
+        &[0, 0, 0x08, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]
+    );
+    assert_eq!(
+        crate::test_support::opcode_of(&packets[1]),
+        l2c_op::AC_AUTH_RESPONSE
+    );
+    // [accountId u32][wsk u16 length + 32 bytes][slotCount u8]
+    assert_eq!(packets[1].len(), 2 + 4 + 2 + 32 + 1);
+    assert_eq!(packets[1].last(), Some(&8));
 }
 
 #[tokio::test]
@@ -479,7 +525,14 @@ fn loopback(port: u16) -> SocketAddr {
 
 fn create(ids: &Arc<SimpleIdManager>, local: SocketAddr, remote: SocketAddr) -> LoginConnection {
     let (tx, _rx) = mpsc::unbounded_channel();
-    LoginConnection::create(ids, Some(local.ip()), remote.ip(), tx).unwrap()
+    LoginConnection::create(
+        ids,
+        Some(local.ip()),
+        remote.ip(),
+        tx,
+        crate::config::LoginConfig::default(),
+    )
+    .unwrap()
 }
 
 #[test]
