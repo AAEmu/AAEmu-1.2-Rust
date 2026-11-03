@@ -841,8 +841,7 @@ impl Ctx<'_> {
         match (&at.kind, ev) {
             (CheckGuard { npc_id }, QuestEvent::GuardNpcDied { npc_id: dead }) => {
                 if dead == npc_id {
-                    self.set_status(h, super::model::status::FAILED);
-                    self.set_step(h, kind::FAIL);
+                    self.fail_quest(quest_template);
                 }
             }
 

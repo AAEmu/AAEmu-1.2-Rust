@@ -1731,6 +1731,29 @@ impl<'a> Ctx<'a> {
             }
         }
 
+        if self.install_quest(quest_id, forcibly, acceptor_type, acceptor_id, "AddQuest") {
+            let msg = format!("[Quest] {}, quest {quest_id} added.", self.c.unit.name);
+            self.send_debug_message(msg);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The object part of `AddQuest` (the object initializer runs after the constructor): a new
+    /// quest object, its id, the first `SCQuestContextStartedPacket` and the first step. The
+    /// caller has already checked whether the quest may start; the checks of `StartQuest`
+    /// itself only remain for a non-forced quest. A failed restart of a `restart_on_fail`
+    /// quest comes through here too, so it cannot be refused by a requirement that no longer
+    /// holds (the quest already ran once).
+    fn install_quest(
+        &mut self,
+        quest_id: u32,
+        forcibly: bool,
+        acceptor_type: u8,
+        acceptor_id: u32,
+        what: &str,
+    ) -> bool {
         // Create new Quest Object (the object initializer runs after the constructor)
         let h = self.new_quest(quest_id, 0);
         let id = match self.server.ids.quest.get_next_id() {
@@ -1759,7 +1782,7 @@ impl<'a> Ctx<'a> {
         // Actually start the quest by setting step to Start and send the quest start packets
         if !self.start_quest(h) {
             self.log_refusal(
-                "AddQuest",
+                what,
                 quest_id,
                 &format!(
                     "the start step does not accept acceptor type {acceptor_type} id {acceptor_id}"
@@ -1773,8 +1796,6 @@ impl<'a> Ctx<'a> {
 
         // Add it to the Active Quests
         self.st.active.add(quest_id, h);
-        let msg = format!("[Quest] {}, quest {quest_id} added.", self.c.unit.name);
-        self.send_debug_message(msg);
 
         // Execute the first Step
         self.run_current_step(h);
@@ -1845,7 +1866,14 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// `FailQuest(owner, questId)`.
+    /// `FailQuest(owner, questId)`: a server-side failure (`CheckTimer` expiry, `CheckGuard`
+    /// death). The client learns it from the status in `SCQuestContextUpdatedPacket` (status
+    /// `Failed`, `OnQuestContextUpdated` `FUN_3937bdf0` raises the quest condition event and
+    /// shows the failure message); `SCQuestContextFailedPacket` (0x146) stays reserved for a
+    /// refused client report. A `restart_on_fail` quest (222 rows in 1.2) starts over from the
+    /// beginning instead of staying failed: its progress and quest items are dropped and a
+    /// fresh quest object runs the first step again (timer, objectives and supplied items
+    /// restart).
     pub fn fail_quest(&mut self, quest_id: u32) {
         let Some(h) = self.st.active_handle(quest_id) else {
             tracing::warn!(
@@ -1855,9 +1883,57 @@ impl<'a> Ctx<'a> {
             );
             return;
         };
+        let restart_on_fail = self
+            .data
+            .template(quest_id)
+            .is_some_and(|t| t.restart_on_fail);
+        let (acceptor_type, acceptor_id) = self
+            .quest(h)
+            .map_or((0, 0), |q| (q.acceptor_type, q.acceptor_id));
         self.set_status(h, status::FAILED);
         self.set_step(h, kind::FAIL);
+        if let Some(row) = self.quest(h).map(Quest::row) {
+            let now = self.now_ms;
+            self.send(SCQuestContextUpdatedPacket::new(row, 0, now));
+        }
         tracing::debug!("[Quest] {}, quest {quest_id} failed.", self.c.unit.name);
+        if !restart_on_fail {
+            return;
+        }
+        // Discard the failed run the way a drop does (quest items with `destroy_when_drop`,
+        // act finalization, timer and quest id), but without `Quest.Drop`'s Ready/Reward skill
+        // and buff effects: it is a restart, not a give-up. The old object is removed so a
+        // dispatch that is still iterating its subscribers cannot act on it.
+        let data = self.data;
+        if let Some(t) = data.template(quest_id) {
+            for cid in &t.components {
+                if let Some(c) = data.component(*cid) {
+                    for &a in &c.acts {
+                        self.act_quest_dropped(h, a);
+                    }
+                }
+            }
+        }
+        self.finalize_quest_acts(h);
+        self.st.active.remove(quest_id);
+        self.c.quests.removed.push(quest_id);
+        self.server
+            .systems
+            .quests
+            .remove_quest_timer(self.c.id, quest_id);
+        if let Some(id) = self.quest(h).map(|q| q.id) {
+            self.server.ids.quest.release_id(id);
+        }
+        self.st.quests.remove(&h);
+        let msg = format!("[Quest] {}, quest {quest_id} restarted.", self.c.unit.name);
+        self.send_debug_message(msg);
+        if !self.install_quest(quest_id, true, acceptor_type, acceptor_id, "RestartQuest") {
+            tracing::warn!(
+                "RestartQuest could not restart quest {quest_id}, player {} ({})",
+                self.c.unit.name,
+                self.c.id
+            );
+        }
     }
 
     /// `SetStep(questContextId, step, selectedReward)` (GM helper).
