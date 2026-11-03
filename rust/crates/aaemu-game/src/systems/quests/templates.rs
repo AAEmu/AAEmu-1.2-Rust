@@ -17,11 +17,12 @@ pub struct QuestTemplate {
     pub repeatable: bool,
     pub level: u8,
     pub selective: bool,
-    /// `quest_contexts.successive` (37 rows): loaded, but no 1.2 client or C# consumer was
-    /// found. Left unused; QUEST-2 (capture-pending) in `PORTING.md`.
+    /// `quest_contexts.successive` (37 rows): 1.2 objective display only (the tracker shows
+    /// just the current Progress component's objectives). No server logic; QUEST-2 resolved.
     pub successive: bool,
-    /// `quest_contexts.restart_on_fail` (222 rows): a server-side failure restarts the quest
-    /// (`engine::Ctx::fail_quest`) instead of leaving it failed.
+    /// `quest_contexts.restart_on_fail` (222 rows): the inferred gate for the client's
+    /// `CSRestartMainQuestPacket` restart request (`engine::Ctx::try_restart_quest`); the
+    /// client never reads it itself (QUEST-1).
     pub restart_on_fail: bool,
     pub chapter_idx: u32,
     pub quest_idx: u32,

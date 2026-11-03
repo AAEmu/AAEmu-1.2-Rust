@@ -760,8 +760,9 @@ impl Ctx<'_> {
         self.get_objective(h, a).min(max)
     }
 
-    /// `QuestDropped(quest)`.
-    pub(crate) fn act_quest_dropped(&mut self, h: QuestHandle, a: usize) {
+    /// `QuestDropped(quest)`. `restart` keeps the Start-component `ConAcceptItem` acceptor
+    /// items: a quest started from such an item must still find it when the new run starts.
+    pub(crate) fn act_quest_dropped(&mut self, h: QuestHandle, a: usize, restart: bool) {
         let data = self.data;
         let at = &data.acts[a];
         let hooks = self.hooks.clone();
@@ -771,7 +772,7 @@ impl Ctx<'_> {
                 item_id,
                 destroy_when_drop,
                 ..
-            } if *destroy_when_drop => (*item_id, at.count),
+            } if *destroy_when_drop && !restart => (*item_id, at.count),
             ActKind::ObjItemGather {
                 item_id,
                 destroy_when_drop,
@@ -1283,6 +1284,16 @@ impl Ctx<'_> {
             }
             (CheckTimer { .. }, QuestEvent::TimerExpired { quest_id }) => {
                 if *quest_id != quest_template {
+                    return Ok(());
+                }
+                // A queued timer task can fire after the quest was restarted. Compare the
+                // live deadline too: a fresh run's deadline is still in the future, so the
+                // stale event is ignored (and its own timer will fire later).
+                if self.st.quest(h).is_none_or(|q| q.time_ms > self.now_ms) {
+                    tracing::debug!(
+                        "QuestActCheckTimer({}).OnTimerExpired ignored, Quest {quest_template}: the deadline has not passed",
+                        at.detail_id
+                    );
                     return Ok(());
                 }
                 tracing::debug!(

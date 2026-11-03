@@ -1627,6 +1627,13 @@ async fn check_timer_registers_and_fails() {
         assert_eq!(ctx.st.quest(h).unwrap().time_ms, 1_000_000 + 60_000);
         // The quest's row carries the time: LeftTime 60000 at "now"
         assert_eq!(ctx.st.quest(h).unwrap().row().left_time(1_000_000), 60_000);
+        // A queued timer event before the quest's own deadline is ignored.
+        ctx.dispatch(&QuestEvent::TimerExpired { quest_id: 13 })
+            .unwrap();
+        assert_eq!(step_of(ctx, h), kind::PROGRESS);
+        assert!(server.systems.quests.has_quest_timer(1, 13));
+        // The timer task fires at or after the deadline.
+        ctx.now_ms = 1_060_000;
         ctx.dispatch(&QuestEvent::TimerExpired { quest_id: 13 })
             .unwrap();
         let q = ctx.st.quest(h).unwrap();
@@ -1652,6 +1659,7 @@ async fn check_timer_registers_and_fails() {
             .unwrap();
         assert_eq!(step_of(ctx, active(ctx, 13)), kind::PROGRESS);
         assert!(server.systems.quests.has_quest_timer(1, 13));
+        ctx.now_ms = 1_060_000;
         ctx.dispatch(&QuestEvent::TimerExpired { quest_id: 13 })
             .unwrap();
         assert_eq!(step_of(ctx, active(ctx, 13)), kind::FAIL);
@@ -1660,10 +1668,15 @@ async fn check_timer_registers_and_fails() {
 }
 
 /// Start (accept from NPC 500 + `CheckTimer`) -> Progress (hunt NPC 600 x2) -> Ready (report
-/// to NPC 500). `restart_on_fail` is the only difference between the two runs.
+/// to NPC 500). A flagged quest gets `detail_id` 2, the client's restart gate.
 fn timed_restart_quest(d: &mut QuestData, id: u32, restart_on_fail: bool, limit_ms: i32) {
     d.add_template(QuestTemplate {
         restart_on_fail,
+        detail_id: if restart_on_fail {
+            detail::MAIN
+        } else {
+            detail::NORMAL
+        },
         ..quest(id)
     });
     d.add_component(component(id * 10 + 1, id, kind::START));
@@ -1758,7 +1771,7 @@ fn active_row(player: &PlayerRef, quest_id: u32) -> ActiveQuest {
 }
 
 #[tokio::test]
-async fn restart_on_fail_timed_quest_restarts_on_expiry_and_tells_the_client() {
+async fn timed_quest_failure_is_told_and_a_restart_request_restarts_it() {
     let (server, _) = server_with(|d| timed_restart_quest(d, 96, true, 100));
     let mut client = TestClient::new(&server, 1, 1001);
     let player = accept_timed_quest(&server, &mut client, 96).await;
@@ -1767,49 +1780,89 @@ async fn restart_on_fail_timed_quest_restarts_on_expiry_and_tells_the_client() {
         (before.status, before.step),
         (status::PROGRESS, kind::PROGRESS)
     );
-    assert!(server
-        .systems
-        .quests
-        .has_quest_timer(player.character_id, 96));
+    // Real progress: one of the two hunted NPCs.
+    events::on_npc_killed(&server, &player, &timed_hunt_victim(&server));
+    server.systems.quests.run_queued_evaluations(&server);
+    client.drain();
+    assert_eq!(active_row(&player, 96).objectives[0], 1);
 
-    // The quest timer task fires this event when the `CheckTimer` deadline passes.
+    // Timer expiry only fails the quest; the restart is a separate client request.
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     events::on_timer_expired(&server, &player, 96);
     server.systems.quests.run_queued_evaluations(&server);
     let frames = client.drain();
-    let statuses = updated_statuses(&frames);
     assert_eq!(
-        statuses.first(),
+        updated_statuses(&frames).first(),
         Some(&status::FAILED),
-        "the client must be told about the failure first: {frames:?}"
+        "the client is told about the failure: {frames:?}"
     );
     assert!(
-        frames
+        !frames
             .iter()
             .any(|f| f.0 == sc::SCQuestContextStartedPacket),
-        "the restarted quest is sent as a start: {frames:?}"
+        "server-side failure no longer restarts the quest: {frames:?}"
     );
     assert!(
         !frames.iter().any(|f| f.0 == sc::SCQuestContextFailedPacket),
         "a server-side failure is not a refused report: {frames:?}"
     );
+    let failed = active_row(&player, 96);
+    assert_eq!((failed.status, failed.step), (status::FAILED, kind::FAIL));
+    assert_eq!(failed.objectives[0], 1);
+    assert!(!server
+        .systems
+        .quests
+        .has_quest_timer(player.character_id, 96));
 
+    // The client's own restart request (status 2 is not Completed, detail_id 2).
+    use crate::net::registry::ClientPacket;
+    CSRestartMainQuestPacket { id: 96 }
+        .handle(&server, &mut client.conn)
+        .await
+        .unwrap();
+    server.systems.quests.run_queued_evaluations(&server);
+    let frames = client.drain();
+    assert!(
+        frames
+            .iter()
+            .any(|f| f.0 == sc::SCQuestContextStartedPacket),
+        "the restart is a normal start: {frames:?}"
+    );
+    assert!(
+        updated_statuses(&frames).contains(&status::PROGRESS),
+        "the restarted quest runs again: {frames:?}"
+    );
+    assert!(
+        !frames.iter().any(|f| f.0 == sc::SCQuestContextFailedPacket),
+        "a restart is not a refused report: {frames:?}"
+    );
     let after = active_row(&player, 96);
     assert_eq!(
         (after.status, after.step),
-        (status::PROGRESS, kind::PROGRESS),
-        "a restart_on_fail quest is running again, not failed"
+        (status::PROGRESS, kind::PROGRESS)
     );
     assert_eq!(after.objectives, [0; 5], "progress is cleared");
     assert!(
-        after.time_ms >= before.time_ms,
+        after.time_ms > failed.time_ms,
         "the timer restarted: {} -> {}",
-        before.time_ms,
+        failed.time_ms,
         after.time_ms
     );
     assert!(server
         .systems
         .quests
         .has_quest_timer(player.character_id, 96));
+    assert!(player.data().quests.removed.contains(&96));
+}
+
+/// The NPC 600 the timed test quest hunts.
+fn timed_hunt_victim(server: &GameServer) -> crate::world::NpcRef {
+    let world = server.world.world(0).unwrap();
+    let mut npc = crate::models::npc::Npc::new(600);
+    npc.unit.transform.set_xyz(105.0, 105.0, 100.0);
+    let npc = Entity::new(0x201, npc);
+    world.spawn(&npc, &server.view_ctx());
+    npc
 }
 
 #[tokio::test]
@@ -1818,6 +1871,7 @@ async fn timed_quest_without_restart_on_fail_stays_failed_and_can_be_dropped() {
     let mut client = TestClient::new(&server, 1, 1001);
     let player = accept_timed_quest(&server, &mut client, 97).await;
 
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     events::on_timer_expired(&server, &player, 97);
     server.systems.quests.run_queued_evaluations(&server);
     let frames = client.drain();
@@ -1835,8 +1889,22 @@ async fn timed_quest_without_restart_on_fail_stays_failed_and_can_be_dropped() {
     let failed = active_row(&player, 97);
     assert_eq!((failed.status, failed.step), (status::FAILED, kind::FAIL));
 
-    // It stays a normal active quest, so the player can drop it.
+    // A restart request is refused without the flag, with no state change and no packet.
     use crate::net::registry::ClientPacket;
+    CSRestartMainQuestPacket { id: 97 }
+        .handle(&server, &mut client.conn)
+        .await
+        .unwrap();
+    server.systems.quests.run_queued_evaluations(&server);
+    let frames = client.drain();
+    assert!(
+        frames.is_empty(),
+        "a refused restart changes nothing: {frames:?}"
+    );
+    let still = active_row(&player, 97);
+    assert_eq!((still.status, still.step), (status::FAILED, kind::FAIL));
+
+    // It stays a normal active quest, so the player can drop it.
     CSDropQuestContextPacket { quest_id: 97 }
         .handle(&server, &mut client.conn)
         .await
@@ -1862,15 +1930,21 @@ async fn restart_on_fail_restart_survives_save_and_reload() {
         let h = active(ctx, 98);
         // Some progress before the failure, to prove it is cleared by the restart.
         ctx.st.quest_mut(h).unwrap().objectives[0] = 1;
+        ctx.now_ms = 1_060_000;
         ctx.dispatch(&QuestEvent::TimerExpired { quest_id: 98 })
             .unwrap();
+        assert_eq!(ctx.st.quest(h).unwrap().status, status::FAILED);
+        let before = ctx.st.quest(h).unwrap().time_ms;
+        assert!(ctx.try_restart_quest(98));
         drain(ctx);
         let h = active(ctx, 98);
         let q = ctx.st.quest(h).unwrap();
         assert_eq!((q.status, q.step), (status::PROGRESS, kind::PROGRESS));
         assert_eq!(q.objectives, [0; 5]);
+        assert!(q.time_ms > before, "the deadline restarted");
         assert!(server.systems.quests.has_quest_timer(1, 98));
     });
+    assert!(c.quests.removed.contains(&98));
     let saved = c.quests.active.clone();
     assert_eq!(saved.len(), 1);
     assert_eq!(saved[0].template_id, 98);
@@ -1879,12 +1953,18 @@ async fn restart_on_fail_restart_survives_save_and_reload() {
         (status::PROGRESS, kind::PROGRESS)
     );
 
-    // Relogin: the saved restarted row is loaded and the timer resumes from its deadline.
+    // Relogin: one saved row, and the timer resumes from its deadline.
     server.systems.quests.remove_quest_timer(1, 0);
     let mut after = character();
     after.quests.active = saved;
     with_ctx(&server, &mut after, QuestEnv::default(), |ctx| {
+        ctx.st.loaded = false;
         ctx.load_from_rows();
+        let sent = std::mem::take(&mut ctx.sent);
+        assert!(
+            sent.is_empty(),
+            "a load sends no quest update before SCQuestsPacket: {sent:?}"
+        );
         drain(ctx);
         let h = active(ctx, 98);
         let q = ctx.st.quest(h).unwrap();
@@ -2454,7 +2534,13 @@ async fn timed_quest_reload_preserves_remaining_time_and_fails_if_expired_offlin
             after.quests.active.push(saved.clone());
             with_ctx(&server, &mut after, QuestEnv::default(), |ctx| {
                 ctx.now_ms = reconnect_time;
+                ctx.st.loaded = false;
                 ctx.load_from_rows();
+                let sent = std::mem::take(&mut ctx.sent);
+                assert!(
+                    sent.is_empty(),
+                    "a load sends no quest update before SCQuestsPacket: {sent:?}"
+                );
                 drain(ctx);
                 let h = active(ctx, 90);
                 let q = ctx.st.quest(h).unwrap();
@@ -3834,7 +3920,6 @@ async fn real_compact_db_report_doodads_are_ready_doodad_func_quests() {
     assert_eq!(checked, 15, "live QuestActConReportDoodad acts");
 }
 
-
 #[tokio::test]
 #[ignore = "needs AAEMU_COMPACT_DB"]
 async fn real_compact_db_reward_acts_replace_level_supplies() {
@@ -4404,10 +4489,11 @@ async fn escort_failure_only_follows_the_guarded_npc_death() {
 }
 
 #[tokio::test]
-async fn restart_on_fail_guard_death_restarts_the_quest() {
+async fn guard_death_fails_without_restart_or_sc_quest_context_failed() {
     let (server, _) = server_with(|d| {
         d.add_template(QuestTemplate {
             restart_on_fail: true,
+            detail_id: detail::MAIN,
             ..quest(92)
         });
         d.add_component(component(921, 92, kind::START));
@@ -4432,8 +4518,9 @@ async fn restart_on_fail_guard_death_restarts_the_quest() {
     });
     let mut c = character();
     with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
-        let old = start(ctx, 92);
-        ctx.st.quest_mut(old).unwrap().objectives[0] = 1;
+        let h = start(ctx, 92);
+        let _ = std::mem::take(&mut ctx.sent);
+        ctx.st.quest_mut(h).unwrap().objectives[0] = 1;
         ctx.dispatch(&QuestEvent::GuardNpcDied { npc_id: 700 })
             .unwrap();
         drain(ctx);
@@ -4444,14 +4531,155 @@ async fn restart_on_fail_guard_death_restarts_the_quest() {
             "the failure is sent: {sent:?}"
         );
         assert!(
-            sent.iter().any(|p| p.0 == sc::SCQuestContextStartedPacket),
-            "the restart is sent: {sent:?}"
+            !sent.iter().any(|p| p.0 == sc::SCQuestContextStartedPacket),
+            "a server-side failure does not restart: {sent:?}"
         );
-        assert!(ctx.st.quest(old).is_none(), "the failed object is gone");
-        let h = active(ctx, 92);
+        assert!(
+            !sent.iter().any(|p| p.0 == sc::SCQuestContextFailedPacket),
+            "a server-side failure is not a refused report: {sent:?}"
+        );
+        let q = ctx.st.quest(h).unwrap();
+        assert_eq!((q.status, q.step), (status::FAILED, kind::FAIL));
+        assert_eq!(q.objectives[0], 1, "the failed run keeps its progress");
+    });
+}
+
+#[tokio::test]
+async fn restart_request_requires_restart_on_fail_and_main_detail() {
+    let (server, _) = server_with(|d| {
+        for (id, restart_on_fail, detail_id) in
+            [(93u32, true, detail::NORMAL), (94, false, detail::MAIN)]
+        {
+            d.add_template(QuestTemplate {
+                restart_on_fail,
+                detail_id,
+                ..quest(id)
+            });
+            d.add_component(component(id * 10 + 1, id, kind::START));
+            d.add_act(
+                id * 10 + 1,
+                id * 10 + 1,
+                id * 10 + 1,
+                0,
+                ActKind::ConAutoComplete,
+            );
+            d.add_component(component(id * 10 + 2, id, kind::PROGRESS));
+            d.add_act(
+                id * 10 + 2,
+                id * 10 + 2,
+                id * 10 + 2,
+                2,
+                ActKind::ObjMonsterHunt {
+                    npc_id: 600,
+                    use_alias: false,
+                    alias_id: 0,
+                    highlight_doodad_id: 0,
+                    highlight_doodad_phase: -1,
+                },
+            );
+        }
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        for id in [93, 94] {
+            let h = start(ctx, id);
+            ctx.st.quest_mut(h).unwrap().objectives[0] = 1;
+            assert!(!ctx.try_restart_quest(id), "quest {id} must be refused");
+            let q = ctx.st.quest(h).unwrap();
+            assert_eq!(q.objectives[0], 1, "a refused restart changes nothing");
+        }
+    });
+}
+
+#[tokio::test]
+async fn restart_request_is_throttled_per_character() {
+    let (server, _) = server_with(|d| timed_restart_quest(d, 95, true, 60_000));
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        assert!(ctx.add_quest(95, false, acceptor::NPC, 500));
+        drain(ctx);
+        let h = active(ctx, 95);
+        ctx.st.quest_mut(h).unwrap().objectives[0] = 1;
+        assert!(ctx.try_restart_quest(95));
+        assert!(
+            !ctx.try_restart_quest(95),
+            "within 3 s the request is throttled"
+        );
+        ctx.now_ms += 3_001;
+        assert!(ctx.try_restart_quest(95), "after 3 s it is accepted again");
+        let h = active(ctx, 95);
         let q = ctx.st.quest(h).unwrap();
         assert_eq!((q.status, q.step), (status::PROGRESS, kind::PROGRESS));
         assert_eq!(q.objectives, [0; 5]);
+    });
+}
+
+#[tokio::test]
+async fn restart_keeps_the_con_accept_item_of_the_start_component() {
+    const ITEM: u32 = 7000;
+    let (server, _) = server_with(|d| {
+        d.add_template(QuestTemplate {
+            restart_on_fail: true,
+            detail_id: detail::MAIN,
+            ..quest(99)
+        });
+        d.add_component(component(991, 99, kind::START));
+        d.add_act(
+            991,
+            991,
+            991,
+            0,
+            ActKind::ConAcceptItem {
+                item_id: ITEM,
+                cleanup: false,
+                drop_when_destroy: false,
+                destroy_when_drop: true,
+            },
+        );
+        d.add_component(component(992, 99, kind::PROGRESS));
+        d.add_act(
+            992,
+            992,
+            992,
+            2,
+            ActKind::ObjMonsterHunt {
+                npc_id: 600,
+                use_alias: false,
+                alias_id: 0,
+                highlight_doodad_id: 0,
+                highlight_doodad_phase: -1,
+            },
+        );
+        d.add_component(component(993, 99, kind::READY));
+        d.add_act(993, 993, 993, 0, ActKind::ConAutoComplete);
+    });
+    let mut c = character();
+    give_item(&mut c, ITEM, 1);
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        assert!(ctx.add_quest(99, false, acceptor::ITEM, ITEM));
+        drain(ctx);
+        let h = active(ctx, 99);
+        assert_eq!(step_of(ctx, h), kind::PROGRESS);
+        assert!(ctx.try_restart_quest(99));
+        drain(ctx);
+        let h = active(ctx, 99);
+        assert_eq!(
+            step_of(ctx, h),
+            kind::PROGRESS,
+            "the restarted quest must not stop at Start with the acceptor item gone"
+        );
+        let count: i32 = ctx
+            .c
+            .inventory
+            .bag()
+            .lock()
+            .unwrap()
+            .items
+            .iter()
+            .filter(|i| i.template_id == ITEM)
+            .map(|i| i.count)
+            .sum();
+        assert_eq!(count, 1, "the ConAcceptItem acceptor item is kept");
     });
 }
 

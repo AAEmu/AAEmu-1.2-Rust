@@ -1219,7 +1219,7 @@ impl<'a> Ctx<'a> {
             for cid in &t.components {
                 if let Some(c) = data.component(*cid) {
                     for &a in &c.acts {
-                        self.act_quest_dropped(h, a);
+                        self.act_quest_dropped(h, a, false);
                     }
                 }
             }
@@ -1897,10 +1897,8 @@ impl<'a> Ctx<'a> {
     /// death). The client learns it from the status in `SCQuestContextUpdatedPacket` (status
     /// `Failed`, `OnQuestContextUpdated` `FUN_3937bdf0` raises the quest condition event and
     /// shows the failure message); `SCQuestContextFailedPacket` (0x146) stays reserved for a
-    /// refused client report. A `restart_on_fail` quest (222 rows in 1.2) starts over from the
-    /// beginning instead of staying failed: its progress and quest items are dropped and a
-    /// fresh quest object runs the first step again (timer, objectives and supplied items
-    /// restart).
+    /// refused client report. A failed quest stays failed and droppable; restarting it is the
+    /// client's `CSRestartMainQuestPacket` request ([`Ctx::try_restart_quest`]).
     pub fn fail_quest(&mut self, quest_id: u32) {
         let Some(h) = self.st.active_handle(quest_id) else {
             tracing::warn!(
@@ -1910,33 +1908,96 @@ impl<'a> Ctx<'a> {
             );
             return;
         };
-        let restart_on_fail = self
-            .data
-            .template(quest_id)
-            .is_some_and(|t| t.restart_on_fail);
+        self.set_status(h, status::FAILED);
+        self.set_step(h, kind::FAIL);
+        // During `CharacterQuests.Load` the `SCQuestsPacket` that follows already carries the
+        // Failed row; an update sent before it would be out of order.
+        if self.st.loaded {
+            if let Some(row) = self.quest(h).map(Quest::row) {
+                let now = self.now_ms;
+                self.send(SCQuestContextUpdatedPacket::new(row, 0, now));
+            }
+        }
+        tracing::debug!("[Quest] {}, quest {quest_id} failed.", self.c.unit.name);
+    }
+
+    /// `CSRestartMainQuestPacket` (0x0fd): the player asked to restart a main quest. The 1.2
+    /// client only sends it for an active quest whose status is not `Completed` and whose
+    /// template `detail_id` is 2 (`FUN_3937b200` / `FUN_3937a8d0`), after its own 3 s
+    /// throttle. `restart_on_fail` is never read by the client; it is the inferred server gate
+    /// (QUEST-1 in `PORTING.md`). The reply is a normal `SCQuestContextStartedPacket`, which
+    /// the client turns into the `QUEST_CHAT_RESTART` bubble.
+    pub fn try_restart_quest(&mut self, quest_id: u32) -> bool {
+        const RESTART_THROTTLE_MS: i64 = 3_000;
+        if self.now_ms.saturating_sub(self.st.restart_request_at) < RESTART_THROTTLE_MS {
+            tracing::debug!(
+                "RestartQuest throttled, Quest:{quest_id}, Player:{} ({})",
+                self.c.unit.name,
+                self.c.id
+            );
+            return false;
+        }
+        self.st.restart_request_at = self.now_ms;
+        let Some(h) = self.st.active_handle(quest_id) else {
+            tracing::debug!(
+                "RestartQuest refused, Quest:{quest_id}, Player:{} ({}): the quest is not active",
+                self.c.unit.name,
+                self.c.id
+            );
+            return false;
+        };
+        let Some(template) = self.data.template(quest_id) else {
+            return false;
+        };
+        let (restart_on_fail, detail_id) = (template.restart_on_fail, template.detail_id);
+        if !restart_on_fail || detail_id != detail::MAIN {
+            tracing::debug!(
+                "RestartQuest refused, Quest:{quest_id}, Player:{} ({}): restart_on_fail {restart_on_fail}, detail_id {detail_id}",
+                self.c.unit.name,
+                self.c.id
+            );
+            return false;
+        }
+        if self
+            .quest(h)
+            .is_some_and(|q| matches!(q.status, status::COMPLETED | status::DAILY_COMPLETED))
+        {
+            tracing::debug!(
+                "RestartQuest refused, Quest:{quest_id}, Player:{} ({}): the quest is completed",
+                self.c.unit.name,
+                self.c.id
+            );
+            return false;
+        }
         let (acceptor_type, acceptor_id) = self
             .quest(h)
             .map_or((0, 0), |q| (q.acceptor_type, q.acceptor_id));
-        self.set_status(h, status::FAILED);
-        self.set_step(h, kind::FAIL);
-        if let Some(row) = self.quest(h).map(Quest::row) {
-            let now = self.now_ms;
-            self.send(SCQuestContextUpdatedPacket::new(row, 0, now));
+        self.restart_quest(h, quest_id, acceptor_type, acceptor_id)
+    }
+
+    /// Discards the current run and installs a fresh one from its first step. Unlike a
+    /// give-up drop, it keeps the Start-component `ConAcceptItem` acceptor items (otherwise
+    /// the new run stops at Start with the item gone) and skips `Quest.Drop`'s Ready/Reward
+    /// skill and buff effects. The old object is removed so a dispatch that is still
+    /// iterating its subscribers cannot act on it.
+    fn restart_quest(
+        &mut self,
+        h: QuestHandle,
+        quest_id: u32,
+        acceptor_type: u8,
+        acceptor_id: u32,
+    ) -> bool {
+        // Sphere triggers are keyed by (character, template): finalize the live step before
+        // the act cleanup so a restart cannot leave a second set behind.
+        if let Some(si) = self.quest(h).and_then(|q| q.step_index(q.step)) {
+            self.finalize_step(h, si);
         }
-        tracing::debug!("[Quest] {}, quest {quest_id} failed.", self.c.unit.name);
-        if !restart_on_fail {
-            return;
-        }
-        // Discard the failed run the way a drop does (quest items with `destroy_when_drop`,
-        // act finalization, timer and quest id), but without `Quest.Drop`'s Ready/Reward skill
-        // and buff effects: it is a restart, not a give-up. The old object is removed so a
-        // dispatch that is still iterating its subscribers cannot act on it.
         let data = self.data;
         if let Some(t) = data.template(quest_id) {
             for cid in &t.components {
                 if let Some(c) = data.component(*cid) {
                     for &a in &c.acts {
-                        self.act_quest_dropped(h, a);
+                        self.act_quest_dropped(h, a, true);
                     }
                 }
             }
@@ -1960,7 +2021,9 @@ impl<'a> Ctx<'a> {
                 self.c.unit.name,
                 self.c.id
             );
+            return false;
         }
+        true
     }
 
     /// `SetStep(questContextId, step, selectedReward)` (GM helper).
