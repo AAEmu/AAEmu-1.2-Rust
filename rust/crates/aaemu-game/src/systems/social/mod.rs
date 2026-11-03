@@ -130,6 +130,9 @@ impl System {
             .load(&server.db)
             .await
             .context("NationManager")?;
+        nation::rebuild_treaty_mail_tracking(server)
+            .await
+            .context("Nation treaty mail tracking")?;
         nation::start_tick(server);
         server
             .systems

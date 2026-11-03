@@ -135,6 +135,9 @@ pub struct RelationExpiry {
     pub other_faction_id: u32,
     pub prev_state: u8,
     pub state: u8,
+    /// The row's post-expiry `next_state` (hostile is kept as the "offer window ended"
+    /// marker, NATION-17).
+    pub next_state: u8,
 }
 
 /// A pending immigration invitation: the king invited `invitee_character_id` to
@@ -230,6 +233,8 @@ pub struct NationManager {
     nations: RwLock<Vec<Nation>>,
     invites: Mutex<Vec<PendingInvite>>,
     treaties: Mutex<Vec<PendingTreatyMail>>,
+    /// Last type-25 treaty offer per `(nation, target)` (persisted, NATION-15).
+    offers: Mutex<HashMap<(u32, u32), i64>>,
 }
 
 impl NationManager {
@@ -288,6 +293,22 @@ impl NationManager {
                 next_state: r.try_get::<i64, _>("next_state")? as u8,
             });
         }
+        let mut offers = HashMap::new();
+        for r in sqlx::query(
+            "SELECT CAST(nation_id AS SIGNED) AS nation_id, \
+             CAST(other_faction_id AS SIGNED) AS other_faction_id, last_offer_at \
+             FROM nation_relation_offers",
+        )
+        .fetch_all(pool)
+        .await?
+        {
+            let nation_id = r.try_get::<i64, _>("nation_id")? as u32;
+            let other = r.try_get::<i64, _>("other_faction_id")? as u32;
+            if index.contains_key(&nation_id) {
+                offers.insert((nation_id, other), r.try_get("last_offer_at")?);
+            }
+        }
+        *self.offers.lock().unwrap_or_else(PoisonError::into_inner) = offers;
         let count = nations.len();
         *self.write() = nations;
         tracing::info!("Loaded {count} nations");
@@ -498,59 +519,98 @@ impl NationManager {
                 .filter(|r| r.expire_at > 0 && r.expire_at <= now)
             {
                 let prev_state = relation.state;
-                let state = if relation.next_state == 0 {
+                let planned_next = relation.next_state;
+                let state = if planned_next == 0 {
                     prev_state
                 } else {
-                    relation.next_state
+                    planned_next
                 };
                 relation.state = state;
                 relation.expire_at = 0;
-                relation.next_state = 0;
+                // A row that explicitly named hostile as its next state keeps that marker: it
+                // means "the declaration window ended" and makes the hostile side eligible for
+                // a treaty request (the faction-166 template rows keep next_state 0 and are
+                // never offered, NATION-17).
+                relation.next_state =
+                    if planned_next == state && state == faction::relation_state::HOSTILE {
+                        faction::relation_state::HOSTILE
+                    } else {
+                        0
+                    };
                 out.push(RelationExpiry {
                     nation_id: nation.id,
                     other_faction_id: relation.other_faction_id,
                     prev_state,
                     state,
+                    next_state: relation.next_state,
                 });
             }
         }
         out
     }
 
-    /// Whether a treaty-request mail for `(nation, other)` is still tracked as open.
-    pub fn has_open_treaty(&self, nation_id: u32, other: u32) -> bool {
+    /// The tracked treaty-request mail of `(nation, other)`.
+    pub fn treaty(&self, nation_id: u32, other: u32) -> Option<PendingTreatyMail> {
         self.treaties
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
-            .any(|p| p.nation_id == nation_id && p.other_faction_id == other)
+            .find(|p| p.nation_id == nation_id && p.other_faction_id == other)
+            .copied()
     }
 
-    /// Tracks a treaty-request mail for a later accept / expiry. Expired entries are dropped and
-    /// the list is capped so it cannot grow without bound (NATION-15).
+    /// Removes and returns the tracked treaty-request mail of `(nation, other)` (the caller
+    /// deletes the mail itself, NATION-15).
+    pub fn take_treaty(&self, nation_id: u32, other: u32) -> Option<PendingTreatyMail> {
+        let mut treaties = self.treaties.lock().unwrap_or_else(PoisonError::into_inner);
+        let index = treaties
+            .iter()
+            .position(|p| p.nation_id == nation_id && p.other_faction_id == other)?;
+        Some(treaties.remove(index))
+    }
+
+    /// Tracks a treaty-request mail for a later accept / expiry (replace an existing entry of
+    /// the pair: the caller deletes the old mail first). Expired entries are dropped and the
+    /// list is capped so it cannot grow without bound (NATION-15).
     pub fn add_treaty(&self, pending: PendingTreatyMail, now: i64) {
         let mut treaties = self.treaties.lock().unwrap_or_else(PoisonError::into_inner);
-        treaties.retain(|p| (p.deadline == 0 || p.deadline > now) && p.mail_id != pending.mail_id);
+        treaties.retain(|p| {
+            (p.nation_id != pending.nation_id || p.other_faction_id != pending.other_faction_id)
+                && (p.deadline == 0 || p.deadline > now)
+                && p.mail_id != pending.mail_id
+        });
         if treaties.len() >= MAX_PENDING_TREATIES {
             treaties.remove(0);
         }
         treaties.push(pending);
     }
 
-    /// Forgets the treaty mail of `(nation, other)` (accepted, declined or gone).
-    pub fn remove_treaty(&self, nation_id: u32, other: u32) {
-        self.treaties
+    /// The last type-25 offer of `(nation, other)` (unix seconds), persisted.
+    pub fn last_offer_at(&self, nation_id: u32, other: u32) -> Option<i64> {
+        self.offers
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .retain(|p| p.nation_id != nation_id || p.other_faction_id != other);
+            .get(&(nation_id, other))
+            .copied()
     }
 
-    /// Forgets every treaty mail of a nation (the relation moved on).
-    pub fn remove_treaties(&self, nation_id: u32) {
-        self.treaties
+    /// Records an offer; the value only moves forward so a delayed persistence task cannot
+    /// walk it back.
+    pub fn set_offer_at(&self, nation_id: u32, other: u32, at: i64) {
+        let mut offers = self.offers.lock().unwrap_or_else(PoisonError::into_inner);
+        let slot = offers.entry((nation_id, other)).or_insert(at);
+        if *slot < at {
+            *slot = at;
+        }
+    }
+
+    pub fn offers_snapshot(&self) -> Vec<((u32, u32), i64)> {
+        self.offers
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .retain(|p| p.nation_id != nation_id);
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect()
     }
 
     /// The relation rows of every nation in wire form, for the login `SCFactionRelationList`.
@@ -733,14 +793,12 @@ pub fn faction_exists(server: &GameServer, id: u32) -> bool {
 /// Both loaded forms of the static table are consulted (the social manager's map and the raw
 /// `FactionData` rows), because fixtures and loaders fill one or the other.
 pub fn relation_between(server: &GameServer, a: u32, b: u32) -> Option<u8> {
-    if let Some(state) = server.systems.social.nations.relation(a, b) {
-        return Some(state);
-    }
-    // `diplomacy_link_id` mirroring: a nation's relation toward a guard / front faction follows
-    // its relation to the linked alliance (134 / 157 / 167 / 171 -> 149, 135 / 168 / 173 -> 148,
-    // INFERRED; NATION-16). The faction-166 template already stores explicit rows for all of
-    // them, so this only answers when the nation has no row of its own.
     let nations = &server.systems.social.nations;
+    // `diplomacy_link_id` mirroring comes first, before the nation's stored row: the
+    // faction-166 template stores explicit HOSTILE rows for the guard / front factions
+    // (134 -> 149, 135 -> 148, 157 -> 149, 167 -> 148, 168 -> 149, 171 -> 148, 173 -> 149 in the
+    // 1.2 compact database), and those must follow a later treaty with their alliance
+    // (INFERRED; NATION-16).
     if let Some(other) = server.game_data.factions.get(b) {
         if nations.is_nation(a) && other.diplomacy_link_id != 0 {
             if let Some(state) = nations.relation(a, other.diplomacy_link_id) {
@@ -754,6 +812,9 @@ pub fn relation_between(server: &GameServer, a: u32, b: u32) -> Option<u8> {
                 return Some(state);
             }
         }
+    }
+    if let Some(state) = nations.relation(a, b) {
+        return Some(state);
     }
     if let Some(state) = server.game_data.systems.social.relations.get(a, b) {
         return Some(state);
@@ -1046,7 +1107,7 @@ fn notify_relation_expiry(server: &GameServer, event: &RelationExpiry) {
         event.other_faction_id,
         event.state,
         0,
-        0,
+        event.next_state,
     );
     if event.prev_state != event.state {
         let packet = SCFactionRelationExpiredPacket {
@@ -1102,7 +1163,11 @@ pub fn declare_hostile(
     ) {
         return Err(error_message::FACTION_DIPLOMACY_INVALID_SUBJECT);
     }
-    nations.remove_treaty(nation.id, target);
+    if let Some(old) = nations.take_treaty(nation.id, target) {
+        server.systems.economy.mail.delete_mail(server, old.mail_id);
+    }
+    nations.set_offer_at(nation.id, target, now);
+    schedule_persist_offer(server, nation.id, target, now);
     king.send(SCFactionDeclareHostileResultPacket {
         result: true,
         id: nation.id,
@@ -1180,27 +1245,46 @@ pub fn send_treaty_mail(server: &GameServer, nation_id: u32, target_id: u32) -> 
     let nation = server.systems.social.nations.get(nation_id)?;
     let target = diplomacy_target(server, target_id)?;
     let now = Utc::now().timestamp();
+    if let Some(old) = server
+        .systems
+        .social
+        .nations
+        .take_treaty(nation_id, target_id)
+    {
+        server.systems.economy.mail.delete_mail(server, old.mail_id);
+    }
     let mail_id = send_friend_treaty_mail(server, &nation, &target, now)?;
     server.systems.social.nations.add_treaty(
         PendingTreatyMail {
             nation_id,
             other_faction_id: target_id,
             mail_id,
-            deadline: 0,
+            deadline: now + hours_to_secs(server.game_data.systems.social.nation.treaty_lead_hours),
         },
         now,
     );
+    server
+        .systems
+        .social
+        .nations
+        .set_offer_at(nation_id, target_id, now);
+    schedule_persist_offer(server, nation_id, target_id, now);
     Some(mail_id)
 }
 
 /// Sends the treaty-request mails that became due: `treaty_lead_hours` before a friendly
-/// relation expires, and once the hostile no-treaty window has ended. One open mail per
-/// (nation, target) is tracked in memory (NATION-15).
+/// relation expires, and once a declared hostile window has really ended (a hostile row with
+/// the hostile `next_state` marker). The faction-166 template rows (`next_state` 0) are never
+/// offered. A per-(nation, target) offer cooldown of at least `treaty_lead_hours` (persisted)
+/// stops a deleted / declined mail from being re-sent every tick (NATION-15).
 pub fn send_due_treaty_mails(server: &GameServer, now: i64) -> usize {
     let nations = &server.systems.social.nations;
-    // Snapshot under the treaty lock, then query the mail store without it: accepting a mail
-    // holds the mail lock and takes the treaty lock, so the reverse order must not happen
-    // (NATION-15).
+    let mails = &server.systems.economy.mail;
+    let settings = server.game_data.systems.social.nation;
+    let lead = hours_to_secs(settings.treaty_lead_hours);
+
+    // Snapshot the tracking, then query the mail store without the treaty lock (accepting a
+    // mail holds the mail lock and takes the treaty lock).
     let tracked: Vec<PendingTreatyMail> = nations
         .treaties
         .lock()
@@ -1208,27 +1292,46 @@ pub fn send_due_treaty_mails(server: &GameServer, now: i64) -> usize {
         .iter()
         .copied()
         .collect();
-    let stale: HashSet<i64> = tracked
-        .iter()
-        .filter(|p| {
-            server
-                .systems
-                .economy
-                .mail
-                .get_mail_by_id(p.mail_id)
-                .is_none()
-        })
-        .map(|p| p.mail_id)
-        .collect();
-    if !stale.is_empty() {
-        nations
-            .treaties
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .retain(|p| !stale.contains(&p.mail_id));
+    let mut stale = Vec::new();
+    for entry in &tracked {
+        let Some(mail) = mails.get_mail_by_id(entry.mail_id) else {
+            stale.push(*entry);
+            continue;
+        };
+        let receiver_ok = nations
+            .get(entry.nation_id)
+            .is_some_and(|n| n.owner_character_id == mail.header.receiver_id);
+        if mail.mail_type != mail_type::NATION_REQUEST_FRIEND
+            || mail.header.sender_id != 0
+            || mail.header.extra != i64::from(entry.other_faction_id)
+            || !receiver_ok
+            || (entry.deadline > 0 && entry.deadline <= now)
+        {
+            stale.push(*entry);
+            continue;
+        }
+        // A tracked mail id can be reused by a different mail after a reload.
+        if mail.id != entry.mail_id {
+            stale.push(*entry);
+        }
     }
-    let settings = server.game_data.systems.social.nation;
-    let lead = hours_to_secs(settings.treaty_lead_hours);
+    if !stale.is_empty() {
+        {
+            let mut treaties = nations
+                .treaties
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            treaties.retain(|p| {
+                !stale
+                    .iter()
+                    .any(|s| s.nation_id == p.nation_id && s.other_faction_id == p.other_faction_id)
+            });
+        }
+        for entry in &stale {
+            mails.delete_mail(server, entry.mail_id);
+        }
+    }
+
     let mut sent = 0;
     for nation in nations.all() {
         for relation in &nation.relations {
@@ -1239,12 +1342,21 @@ pub fn send_due_treaty_mails(server: &GameServer, now: i64) -> usize {
                 faction::relation_state::FRIENDLY => {
                     relation.expire_at > now && relation.expire_at - lead <= now
                 }
-                // The no-treaty window has ended; the relation stays hostile (NATION-17).
-                faction::relation_state::HOSTILE => relation.expire_at == 0,
+                // Only a relation whose declaration window ended carries this marker; the
+                // faction-166 template rows do not (NATION-17).
+                faction::relation_state::HOSTILE => {
+                    relation.expire_at == 0
+                        && relation.next_state == faction::relation_state::HOSTILE
+                }
                 _ => false,
             };
-            if !due || nations.has_open_treaty(nation.id, target.id) {
+            if !due || nations.treaty(nation.id, target.id).is_some() {
                 continue;
+            }
+            if let Some(last) = nations.last_offer_at(nation.id, target.id) {
+                if now < last + lead {
+                    continue;
+                }
             }
             let Some(mail_id) = send_friend_treaty_mail(server, &nation, &target, now) else {
                 continue;
@@ -1255,7 +1367,7 @@ pub fn send_due_treaty_mails(server: &GameServer, now: i64) -> usize {
                     other_faction_id: target.id,
                     mail_id,
                     // A friendly mail is valid until the applied period ends; a hostile-side
-                    // offer has no applied period yet (the mail's own deadline is the lead).
+                    // offer is valid for one lead period.
                     deadline: if relation.state == faction::relation_state::FRIENDLY {
                         relation.expire_at
                     } else {
@@ -1264,6 +1376,8 @@ pub fn send_due_treaty_mails(server: &GameServer, now: i64) -> usize {
                 },
                 now,
             );
+            nations.set_offer_at(nation.id, target.id, now);
+            schedule_persist_offer(server, nation.id, target.id, now);
             sent += 1;
         }
     }
@@ -1273,8 +1387,9 @@ pub fn send_due_treaty_mails(server: &GameServer, now: i64) -> usize {
 /// Pays a nation treaty-request mail (`CSPayChargeMoney` 0x0a0, the button's
 /// `X2Mail.PayCurrentMailChargeMoney` in the 1.2 `read_mail.alb`): debits the cost, deletes the
 /// mail and moves the relation friendly for `friend_period_hours`, with the hostile state as
-/// the next state. The mail fields beyond the charge (target tag in `extra`) are INFERRED
-/// (NATION-15).
+/// the next state. Only a live tracked request can be paid: a stale mail (old lead mail after a
+/// hostile declaration, expired offer, reused mail id, wrong owner) is deleted and refused. The
+/// mail fields beyond the charge (target tag in `extra`) are INFERRED (NATION-15).
 pub fn pay_friend_treaty(server: &GameServer, payer: &PlayerRef, mail_id: i64) -> bool {
     let mails = &server.systems.economy.mail;
     let Some(mail) = mails.get_mail_by_id(mail_id) else {
@@ -1305,18 +1420,48 @@ pub fn pay_friend_treaty(server: &GameServer, payer: &PlayerRef, mail_id: i64) -
         return false;
     }
     let nations = &server.systems.social.nations;
+
+    // An offer sent before a hostile declaration must not skip the no-treaty window.
+    if let Some(relation) = nations.relation_row(nation.id, target_id) {
+        if relation.state == faction::relation_state::HOSTILE && relation.expire_at > now {
+            nations.take_treaty(nation.id, target_id);
+            mails.delete_mail(server, mail_id);
+            send_error(payer, error_message::FACTION_DIPLOMACY_INVALID_SUBJECT);
+            return false;
+        }
+    }
+
+    // A paid mail must still be the tracked offer for this nation / target.
+    let Some(tracked) = nations.treaty(nation.id, target_id) else {
+        mails.delete_mail(server, mail_id);
+        send_error(payer, error_message::MAIL_INVALID);
+        return false;
+    };
+    if tracked.mail_id != mail_id || tracked.deadline == 0 || tracked.deadline <= now {
+        nations.take_treaty(nation.id, target_id);
+        mails.delete_mail(server, mail_id);
+        send_error(payer, error_message::MAIL_INVALID);
+        return false;
+    }
+
     let mut txn = ItemTxn::begin(server);
     let mut st = mails.state();
     let Some(current) = st.all.get(mail_id) else {
         drop(st);
+        nations.take_treaty(nation.id, target_id);
         send_error(payer, error_message::MAIL_INVALID);
         return false;
     };
-    if current.header.status != mail_status::UNPAID
+    if current.mail_type != mail_type::NATION_REQUEST_FRIEND
+        || current.header.sender_id != 0
+        || current.header.status != mail_status::UNPAID
         || current.header.receiver_id != payer.character_id
+        || current.header.extra != i64::from(target_id)
         || current.body.billing_amount != mail.body.billing_amount
     {
         drop(st);
+        nations.take_treaty(nation.id, target_id);
+        mails.delete_mail(server, mail_id);
         send_error(payer, error_message::MAIL_INVALID);
         return false;
     }
@@ -1342,11 +1487,19 @@ pub fn pay_friend_treaty(server: &GameServer, payer: &PlayerRef, mail_id: i64) -
         expire_at,
         faction::relation_state::HOSTILE,
     ) {
+        // The nation vanished between the checks: refund and keep the mail payable.
+        inventory::add_money(
+            &mut txn.out(),
+            payer,
+            crate::models::container::slot_type::INVENTORY,
+            mail.body.billing_amount,
+            task_type::DEPOSIT_MONEY,
+        );
         drop(st);
         send_error(payer, error_message::FACTION_DIPLOMACY_INVALID_SUBJECT);
         return false;
     }
-    nations.remove_treaty(nation.id, target_id);
+    nations.take_treaty(nation.id, target_id);
     let count = {
         let mut character = payer.data();
         if st
@@ -1404,11 +1557,14 @@ pub fn run_periodic(server: &GameServer) {
     let expiries = server.systems.social.nations.expire_relations(now);
     for event in &expiries {
         notify_relation_expiry(server, event);
-        server
-            .systems
-            .social
-            .nations
-            .remove_treaty(event.nation_id, event.other_faction_id);
+        let nations = &server.systems.social.nations;
+        if let Some(old) = nations.take_treaty(event.nation_id, event.other_faction_id) {
+            server.systems.economy.mail.delete_mail(server, old.mail_id);
+        }
+        // The lead mail (if any) is gone with the period; a fresh offer must wait another
+        // full lead period (NATION-15).
+        nations.set_offer_at(event.nation_id, event.other_faction_id, now);
+        schedule_persist_offer(server, event.nation_id, event.other_faction_id, now);
     }
     if !expiries.is_empty() {
         if let Some(server) = server.self_arc() {
@@ -1423,6 +1579,98 @@ pub fn run_periodic(server: &GameServer) {
     if sent > 0 {
         tracing::info!("Nation: sent {sent} treaty request mail(s)");
     }
+}
+
+/// Rebuilds the type-25 treaty-mail tracking from the mail store after a restart: entries are
+/// live only when the stored mail still matches the king, the target tag and the relation's
+/// current offer window. Stale mails are deleted and their send date still seeds the offer
+/// cooldown (NATION-15).
+pub async fn rebuild_treaty_mail_tracking(server: &GameServer) -> Result<()> {
+    let mut mails: Vec<BaseMail> = server
+        .systems
+        .economy
+        .mail
+        .state()
+        .all
+        .iter()
+        .filter(|(_, m)| m.mail_type == mail_type::NATION_REQUEST_FRIEND)
+        .map(|(_, m)| m.clone())
+        .collect();
+    // Newest first: an old duplicate of the same (nation, target) is deleted, not tracked.
+    mails.sort_by_key(|m| std::cmp::Reverse((m.body.send_date, m.id)));
+    let now = Utc::now().timestamp();
+    let lead = hours_to_secs(server.game_data.systems.social.nation.treaty_lead_hours);
+    let nations = &server.systems.social.nations;
+    let mut stale = Vec::new();
+    for mail in mails {
+        let Some(target_id) = u32::try_from(mail.header.extra).ok().filter(|id| *id != 0) else {
+            stale.push(mail.id);
+            continue;
+        };
+        let Some(nation) = nations.owned_by(mail.header.receiver_id) else {
+            stale.push(mail.id);
+            continue;
+        };
+        if mail.header.sender_id != 0
+            || mail.header.status != mail_status::UNPAID
+            || diplomacy_target(server, target_id).is_none()
+        {
+            stale.push(mail.id);
+            continue;
+        }
+        let sent = mail
+            .body
+            .send_date
+            .max(mail.body.recv_date)
+            .max(mail.open_date)
+            .max(0);
+        if sent > 0 {
+            nations.set_offer_at(nation.id, target_id, sent);
+        }
+        if nations.treaty(nation.id, target_id).is_some() {
+            stale.push(mail.id);
+            continue;
+        }
+        let deadline = match nations.relation_row(nation.id, target_id) {
+            Some(relation)
+                if relation.state == faction::relation_state::FRIENDLY
+                    && relation.expire_at > now
+                    && sent > 0
+                    && sent >= relation.expire_at - lead =>
+            {
+                relation.expire_at
+            }
+            Some(relation)
+                if relation.state == faction::relation_state::HOSTILE
+                    && relation.expire_at == 0
+                    && relation.next_state == faction::relation_state::HOSTILE
+                    && sent > 0
+                    && sent + lead > now =>
+            {
+                sent + lead
+            }
+            _ => {
+                stale.push(mail.id);
+                continue;
+            }
+        };
+        nations.add_treaty(
+            PendingTreatyMail {
+                nation_id: nation.id,
+                other_faction_id: target_id,
+                mail_id: mail.id,
+                deadline,
+            },
+            now,
+        );
+    }
+    for id in stale {
+        server.systems.economy.mail.delete_mail(server, id);
+    }
+    if let Some(server) = server.self_arc() {
+        persist_offers(&server).await?;
+    }
+    Ok(())
 }
 
 /// Writes one relation row immediately after a diplomacy change (the periodic save writes it
@@ -1451,6 +1699,63 @@ pub(crate) async fn persist_relation(
     .execute(&server.db)
     .await?;
     Ok(())
+}
+
+pub(crate) async fn persist_offer(
+    server: &GameServer,
+    nation_id: u32,
+    other_faction_id: u32,
+    at: i64,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO nation_relation_offers(`nation_id`,`other_faction_id`,`last_offer_at`) \
+         VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE `last_offer_at` = \
+         GREATEST(`last_offer_at`, ?)",
+    )
+    .bind(nation_id)
+    .bind(other_faction_id)
+    .bind(at)
+    .bind(at)
+    .execute(&server.db)
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn persist_offers(server: &GameServer) -> Result<()> {
+    let offers = server.systems.social.nations.offers_snapshot();
+    if offers.is_empty() {
+        return Ok(());
+    }
+    let _save = server.save.transaction_lock().await;
+    let mut tx = server.db.begin().await?;
+    for ((nation_id, other), at) in offers {
+        sqlx::query(
+            "INSERT INTO nation_relation_offers(`nation_id`,`other_faction_id`,`last_offer_at`) \
+             VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE `last_offer_at` = \
+             GREATEST(`last_offer_at`, ?)",
+        )
+        .bind(nation_id)
+        .bind(other)
+        .bind(at)
+        .bind(at)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+fn schedule_persist_offer(server: &GameServer, nation_id: u32, other_faction_id: u32, at: i64) {
+    let Some(server) = server.self_arc() else {
+        return;
+    };
+    tokio::spawn(async move {
+        if let Err(error) = persist_offer(&server, nation_id, other_faction_id, at).await {
+            tracing::error!(
+                "Persisting nation offer {nation_id} -> {other_faction_id} failed: {error}"
+            );
+        }
+    });
 }
 
 fn schedule_persist_relation(

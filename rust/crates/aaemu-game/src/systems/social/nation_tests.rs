@@ -636,6 +636,7 @@ async fn private_mysql_nation_persistence_round_trip_and_offline_member() {
          NOT NULL, owner_character_id INT UNSIGNED NOT NULL, owner_name VARCHAR(128) NOT NULL, \
          name VARCHAR(128) NOT NULL, created_at BIGINT NOT NULL, allow_change_name TINYINT \
          UNSIGNED NOT NULL, PRIMARY KEY (id))",
+        "CREATE TEMPORARY TABLE nation_relation_offers (nation_id INT UNSIGNED NOT NULL, other_faction_id INT UNSIGNED NOT NULL, last_offer_at BIGINT NOT NULL, PRIMARY KEY (nation_id, other_faction_id))",
         "CREATE TEMPORARY TABLE nation_relations (nation_id INT UNSIGNED NOT NULL, \
          other_faction_id INT UNSIGNED NOT NULL, state TINYINT UNSIGNED NOT NULL, expire_at \
          BIGINT NOT NULL, next_state TINYINT UNSIGNED NOT NULL, \
@@ -2130,7 +2131,7 @@ async fn relation_expiry_moves_to_the_next_state_and_notifies_both_sides() {
         .expect("relation row");
     assert_eq!(row.state, faction::relation_state::HOSTILE);
     assert_eq!(row.expire_at, 0);
-    assert_eq!(row.next_state, 0);
+    assert_eq!(row.next_state, faction::relation_state::HOSTILE);
 
     for (name, frames) in [
         ("king", f.leader_client.drain()),
@@ -2140,7 +2141,11 @@ async fn relation_expiry_moves_to_the_next_state_and_notifies_both_sides() {
         let states = relation_states(&frames, nation.id, 149);
         assert_eq!(
             states,
-            vec![(faction::relation_state::HOSTILE, 0, 0)],
+            vec![(
+                faction::relation_state::HOSTILE,
+                0,
+                faction::relation_state::HOSTILE
+            )],
             "{name} must receive the new relation state"
         );
         let expired = frames.iter().any(|(op, body)| {
@@ -2250,7 +2255,7 @@ async fn the_charge_money_packet_pays_the_treaty_mail() {
         149,
         faction::relation_state::HOSTILE,
         0,
-        0,
+        faction::relation_state::HOSTILE,
     );
     f.server.systems.social.nations.set_relation(
         nation.id,
@@ -2313,7 +2318,7 @@ async fn a_treaty_mail_cannot_be_paid_twice_or_without_money() {
         149,
         faction::relation_state::HOSTILE,
         0,
-        0,
+        faction::relation_state::HOSTILE,
     );
     f.server.systems.social.nations.set_relation(
         nation.id,
@@ -2425,6 +2430,7 @@ async fn private_mysql_hostile_relation_persists() {
          NOT NULL, owner_character_id INT UNSIGNED NOT NULL, owner_name VARCHAR(128) NOT NULL, \
          name VARCHAR(128) NOT NULL, created_at BIGINT NOT NULL, allow_change_name TINYINT \
          UNSIGNED NOT NULL, PRIMARY KEY (id))",
+        "CREATE TEMPORARY TABLE nation_relation_offers (nation_id INT UNSIGNED NOT NULL, other_faction_id INT UNSIGNED NOT NULL, last_offer_at BIGINT NOT NULL, PRIMARY KEY (nation_id, other_faction_id))",
         "CREATE TEMPORARY TABLE nation_relations (nation_id INT UNSIGNED NOT NULL, \
          other_faction_id INT UNSIGNED NOT NULL, state TINYINT UNSIGNED NOT NULL, expire_at \
          BIGINT NOT NULL, next_state TINYINT UNSIGNED NOT NULL, \
@@ -2468,9 +2474,13 @@ async fn private_mysql_hostile_relation_persists() {
     nation::persist_relation(&server, 1001, 149, 3, 42, 0)
         .await
         .unwrap();
+    nation::persist_offer(&server, 1001, 149, 12345)
+        .await
+        .unwrap();
 
     let loaded = NationManager::default();
     loaded.load(&pool).await.unwrap();
+    assert_eq!(loaded.last_offer_at(1001, 149), Some(12345));
     let loaded = loaded.get(1001).expect("loaded nation");
     assert_eq!(
         loaded
@@ -2494,6 +2504,7 @@ async fn private_mysql_hostile_relation_persists() {
             other_faction_id: 149,
             prev_state: 3,
             state: 2,
+            next_state: 0,
         }],
     )
     .await
@@ -2524,4 +2535,328 @@ async fn real_compact_db_nation_diplomacy_settings() {
     assert_eq!(settings.hostile_period_hours, 21);
     assert_eq!(settings.treaty_lead_hours, 48);
     assert_eq!(settings.friend_cost_copper, 2_000_000);
+}
+
+// ---- Stage 3 follow-up: offer cooldown, restart tracking, stale payments, linked guards ----
+
+fn type25_mail_ids(server: &GameServer) -> Vec<i64> {
+    server
+        .systems
+        .economy
+        .mail
+        .state()
+        .all
+        .iter()
+        .filter(|(_, m)| {
+            m.mail_type == crate::systems::economy::mail::mail_type::NATION_REQUEST_FRIEND
+        })
+        .map(|(id, _)| id)
+        .collect()
+}
+
+async fn tracked_offer_fixture() -> (Fixture, u32, i64) {
+    let f = Fixture::new(true);
+    let nation = nation::declare_independence(&f.server, &f.leader, EXPEDITION, "Kingdom", true)
+        .expect("declaration");
+    f.server.names.add_character(1, "King", 1001);
+    let now = Utc::now().timestamp();
+    f.server.systems.social.nations.set_relation(
+        nation.id,
+        149,
+        faction::relation_state::HOSTILE,
+        0,
+        faction::relation_state::HOSTILE,
+    );
+    f.server.systems.social.nations.set_relation(
+        nation.id,
+        148,
+        faction::relation_state::HOSTILE,
+        now + 24 * 3600,
+        faction::relation_state::HOSTILE,
+    );
+    assert_eq!(nation::send_due_treaty_mails(&f.server, now), 1);
+    let mail_id = type25_mail_ids(&f.server)[0];
+    (f, nation.id, mail_id)
+}
+
+#[tokio::test]
+async fn template_hostile_rows_do_not_trigger_treaty_mails() {
+    let f = Fixture::new(true);
+    let _nation = nation::declare_independence(&f.server, &f.leader, EXPEDITION, "Kingdom", true)
+        .expect("declaration");
+    f.server.names.add_character(1, "King", 1001);
+    let now = Utc::now().timestamp();
+    assert_eq!(nation::send_due_treaty_mails(&f.server, now), 0);
+    assert!(type25_mail_ids(&f.server).is_empty());
+}
+
+#[tokio::test]
+async fn a_deleted_offer_is_not_resent_within_the_cooldown() {
+    let (f, nation_id, mail_id) = tracked_offer_fixture().await;
+    let now = Utc::now().timestamp();
+    let lead = i64::from(f.server.game_data.systems.social.nation.treaty_lead_hours) * 3600;
+    f.server
+        .systems
+        .economy
+        .mail
+        .delete_mail(&f.server, mail_id);
+    assert_eq!(nation::send_due_treaty_mails(&f.server, now + 60), 0);
+    assert_eq!(nation::send_due_treaty_mails(&f.server, now + lead - 1), 0);
+    assert!(f
+        .server
+        .systems
+        .social
+        .nations
+        .take_treaty(nation_id, 149)
+        .is_none());
+    assert_eq!(
+        nation::send_due_treaty_mails(&f.server, now + lead + 1),
+        1,
+        "a fresh offer is possible after the cooldown"
+    );
+}
+
+#[tokio::test]
+async fn restart_rebuilds_tracking_and_removes_stale_mails() {
+    let (f, nation_id, mail_id) = tracked_offer_fixture().await;
+    let now = Utc::now().timestamp();
+    // Start-up memory is empty; the stored mail must be found again.
+    f.server.systems.social.nations.take_treaty(nation_id, 149);
+    nation::rebuild_treaty_mail_tracking(&f.server)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.server
+            .systems
+            .social
+            .nations
+            .treaty(nation_id, 149)
+            .map(|p| p.mail_id),
+        Some(mail_id)
+    );
+    assert_eq!(nation::send_due_treaty_mails(&f.server, now), 0);
+
+    // A mail left over from before a hostile declaration is stale on restart.
+    f.server.systems.social.nations.take_treaty(nation_id, 149);
+    f.server.systems.social.nations.set_relation(
+        nation_id,
+        149,
+        faction::relation_state::HOSTILE,
+        now + 3600,
+        faction::relation_state::HOSTILE,
+    );
+    nation::rebuild_treaty_mail_tracking(&f.server)
+        .await
+        .unwrap();
+    assert!(f
+        .server
+        .systems
+        .economy
+        .mail
+        .get_mail_by_id(mail_id)
+        .is_none());
+    assert!(f
+        .server
+        .systems
+        .social
+        .nations
+        .treaty(nation_id, 149)
+        .is_none());
+}
+
+#[tokio::test]
+async fn friendly_expiry_does_not_duplicate_the_lead_mail() {
+    let f = Fixture::new(true);
+    let nation = nation::declare_independence(&f.server, &f.leader, EXPEDITION, "Kingdom", true)
+        .expect("declaration");
+    f.server.names.add_character(1, "King", 1001);
+    let now = Utc::now().timestamp();
+    f.server.systems.social.nations.set_relation(
+        nation.id,
+        149,
+        faction::relation_state::FRIENDLY,
+        now + 1,
+        faction::relation_state::HOSTILE,
+    );
+    f.server.systems.social.nations.set_relation(
+        nation.id,
+        148,
+        faction::relation_state::HOSTILE,
+        now + 24 * 3600,
+        faction::relation_state::HOSTILE,
+    );
+    assert_eq!(nation::send_due_treaty_mails(&f.server, now), 1);
+    assert_eq!(type25_mail_ids(&f.server).len(), 1);
+
+    // Let the applied period run out; the tick must delete the lead mail and not replace it
+    // with a second one in the same pass.
+    f.server.systems.social.nations.set_relation(
+        nation.id,
+        149,
+        faction::relation_state::FRIENDLY,
+        now - 1,
+        faction::relation_state::HOSTILE,
+    );
+    nation::run_periodic(&f.server);
+    let row = f
+        .server
+        .systems
+        .social
+        .nations
+        .relation_row(nation.id, 149)
+        .expect("relation");
+    assert_eq!(row.state, faction::relation_state::HOSTILE);
+    assert_eq!(row.next_state, faction::relation_state::HOSTILE);
+    assert!(type25_mail_ids(&f.server).is_empty());
+    assert_eq!(nation::send_due_treaty_mails(&f.server, now + 2), 0);
+}
+
+#[tokio::test]
+async fn stale_or_untracked_treaty_mails_cannot_be_paid() {
+    let (f, nation_id, mail_id) = tracked_offer_fixture().await;
+    let now = Utc::now().timestamp();
+    // A hostile declaration during the offer's life makes it stale.
+    f.server.systems.social.nations.set_relation(
+        nation_id,
+        149,
+        faction::relation_state::HOSTILE,
+        now + 3600,
+        faction::relation_state::HOSTILE,
+    );
+    f.leader.data().money = 2_000_000;
+    assert!(!nation::pay_friend_treaty(&f.server, &f.leader, mail_id));
+    assert_eq!(f.leader.data().money, 2_000_000, "nothing may be charged");
+    assert!(f
+        .server
+        .systems
+        .economy
+        .mail
+        .get_mail_by_id(mail_id)
+        .is_none());
+    assert!(f
+        .server
+        .systems
+        .social
+        .nations
+        .treaty(nation_id, 149)
+        .is_none());
+
+    // An untracked mail (memory lost / forged) is refused and deleted. The hostile window has
+    // ended, so only the tracking check can refuse it.
+    f.server.systems.social.nations.set_relation(
+        nation_id,
+        149,
+        faction::relation_state::HOSTILE,
+        0,
+        faction::relation_state::HOSTILE,
+    );
+    let Some(untracked) = nation::send_treaty_mail(&f.server, nation_id, 149) else {
+        panic!("GM treaty mail");
+    };
+    f.server.systems.social.nations.take_treaty(nation_id, 149);
+    assert!(!nation::pay_friend_treaty(&f.server, &f.leader, untracked));
+    assert_eq!(f.leader.data().money, 2_000_000);
+    assert!(f
+        .server
+        .systems
+        .economy
+        .mail
+        .get_mail_by_id(untracked)
+        .is_none());
+
+    // A non-king cannot pay the king's mail.
+    let Some(king_mail) = nation::send_treaty_mail(&f.server, nation_id, 149) else {
+        panic!("GM treaty mail");
+    };
+    f.member.data().money = 2_000_000;
+    assert!(!nation::pay_friend_treaty(&f.server, &f.member, king_mail));
+    assert_eq!(f.member.data().money, 2_000_000);
+    assert!(f
+        .server
+        .systems
+        .economy
+        .mail
+        .get_mail_by_id(king_mail)
+        .is_some());
+}
+
+#[tokio::test]
+async fn guards_of_the_treaty_alliance_become_friendly() {
+    let mut data = data();
+    for (id, link) in [
+        (134, 149),
+        (135, 148),
+        (157, 149),
+        (167, 148),
+        (168, 149),
+        (171, 148),
+        (173, 149),
+    ] {
+        data.factions.add(SystemFaction {
+            id,
+            name: format!("Guard{id}"),
+            diplomacy_link_id: link,
+            ..SystemFaction::default()
+        });
+    }
+    let server = test_server_with(data);
+    let nation_id = 9_200;
+    let guards = [134, 135, 157, 167, 168, 171, 173];
+    server.systems.social.nations.add(Nation {
+        id: nation_id,
+        expedition_id: 0,
+        owner_character_id: 1,
+        owner_name: "King".into(),
+        name: "Kingdom".into(),
+        created_at: 1,
+        allow_change_name: 0,
+        relations: [
+            vec![
+                NationRelation {
+                    other_faction_id: 148,
+                    state: faction::relation_state::HOSTILE,
+                    expire_at: 0,
+                    next_state: 0,
+                },
+                NationRelation {
+                    other_faction_id: 149,
+                    state: faction::relation_state::FRIENDLY,
+                    expire_at: 0,
+                    next_state: 0,
+                },
+            ],
+            guards
+                .iter()
+                .map(|id| NationRelation {
+                    other_faction_id: *id,
+                    state: faction::relation_state::HOSTILE,
+                    expire_at: 0,
+                    next_state: 0,
+                })
+                .collect(),
+        ]
+        .concat(),
+        offline_members: Vec::new(),
+    });
+    // 134 / 157 / 168 / 173 follow 149 (friendly); 135 / 167 / 171 follow 148 (hostile),
+    // even though the template stored an explicit hostile row for every guard.
+    for id in [134, 157, 168, 173] {
+        assert_eq!(
+            nation::relation_between(&server, nation_id, id),
+            Some(faction::relation_state::FRIENDLY),
+            "guard {id}"
+        );
+        assert_eq!(
+            nation::relation_between(&server, id, nation_id),
+            Some(faction::relation_state::FRIENDLY),
+            "guard {id} reverse"
+        );
+    }
+    for id in [135, 167, 171] {
+        assert_eq!(
+            nation::relation_between(&server, nation_id, id),
+            Some(faction::relation_state::HOSTILE),
+            "guard {id}"
+        );
+    }
 }

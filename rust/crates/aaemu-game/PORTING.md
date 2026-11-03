@@ -604,9 +604,14 @@ refuses a duplicate faction id (`FUN_398a5280`), so `EXPEDITION_ID` also extract
   that carrier and the exact 1.2 period/next-state values are INFERRED because no 1.2 server code
   or capture shows them. The mail body is plain text (the client's `FillNationRequestFriend*`
   functions render the fields it receives). Treaty mails are sent 48 h (`content_configs` 54)
-  before a friendly period ends and once after the hostile no-treaty window; one open mail per
-  (nation, target) is tracked in memory, and a deleted mail is forgotten on the next tick.
-  Auto-deletion of an unaccepted treaty mail after its deadline is not implemented
+  before a friendly period ends and once after a declared hostile window really ended; the
+  faction-166 template rows (`next_state` 0) are never offered. A per-(nation, target) last
+  offer time (table `nation_relation_offers`, monotonic `GREATEST` update) enforces a cooldown of
+  at least `content_configs` 54, so a deleted or declined mail is not re-sent every tick and the
+  cooldown survives a restart. At startup `rebuild_treaty_mail_tracking` re-reads the stored
+  type-25 mails (king, `extra` target, live relation window), re-creates the tracking and
+  deletes stale ones; removing a tracking entry (accept, hostile declaration, expiry) deletes
+  its mail. Auto-deletion of an unaccepted treaty mail after its deadline is not implemented
   (capture-pending).
 * **NATION-16 (hostile declaration; client validator mirrored):** `CSFactionDeclareHostile`
   0x019 runs the checks of `FUN_392f9430`: `FUN_398a4750` first (king / faction rights -> 32
@@ -620,10 +625,11 @@ refuses a duplicate faction id (`FUN_398a5280`), so `EXPEDITION_ID` also extract
   `SCFactionSetRelationState` to the online members of both sides (the client refreshes its
   nation UI only when the relation involves its own nation, `FUN_392f9540`; members of both
   sides is INFERRED as the useful target set). `diplomacy_link_id` is loaded into
-  `SystemFaction`; a nation's relation to a linked guard / front faction falls back to its
-  relation to the linked alliance when the nation has no explicit row (the faction-166 template
-  stores explicit rows for all of them, so the fallback answers only for a custom nation rule;
-  INFERRED).
+  `SystemFaction`; a nation's relation to a linked guard / front faction is resolved through the
+  linked alliance before the nation's stored row (compact links: 134 -> 149, 135 -> 148,
+  157 -> 149, 167 -> 148, 168 -> 149, 171 -> 148, 173 -> 149), so a treaty with 149 turns the
+  Haranya guards (134/157/168/173) friendly even though the faction-166 template stores
+  explicit HOSTILE rows for them (INFERRED; verified by a real-template test).
 * **NATION-17 (relation expiry; period units INFERRED):** a 60 s subscriber on the existing
   `services::tick::TickManager` (started by social's `System::start`) moves every relation whose
   `expire_at` is due to `next_state` (0 keeps the current state), clears the expiry, persists
@@ -632,9 +638,19 @@ refuses a duplicate faction id (`FUN_398a5280`), so `EXPEDITION_ID` also extract
   changed) to both sides. Hostile declarations set `expire_at` = now + `content_configs` 50
   (21) and `next_state` = hostile: the period is the no-treaty window, and the relation stays
   hostile until a treaty (the dialog text `hostile_setting_dlg` says so); the unit is UNKNOWN and
-  INFERRED as hours. Friendly treaties use 46 (168 h) and 54 (48 h before the end), also
-  INFERRED hours: the 1.2 client does not read 46 / 50 / 54, only 49 (immigration level) and 51
-  (cost). A GM-only `nation relation` command shortens an expiry for live checks.
+  INFERRED as hours. When that window ends the row keeps `next_state = hostile` as the
+  "window ended" marker (the template rows keep 0 and are never offered); a friendly expiry
+  deletes the 48 h lead mail and waits a fresh lead period before another offer. Friendly
+  treaties use 46 (168 h) and 54 (48 h before the end), also INFERRED hours: the 1.2 client
+  does not read 46 / 50 / 54, only 49 (immigration level) and 51 (cost). A GM-only
+  `nation relation` command shortens an expiry for live checks.
+* **Stage 3 known deviations (not fixed, < 5):** the debit, mail deletion and relation write
+  are not one transaction; a crash between them can leave a charged mail or a payable treaty.
+  Per-change `tokio::spawn` persistence can reorder relation writes (offers use `GREATEST` and
+  are monotonic). The treaty pay path keeps `pay_charge_money`'s lock order (economy op -> mail
+  store -> character), while `store_quest_rewards_locked` takes character -> mail store. The
+  live `nattack` step proves the positive attack; the unit tests cover the refusal before the
+  declaration (relation overlay).
 
 #### Guild rename (expedition)
 
