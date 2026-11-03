@@ -2141,3 +2141,103 @@ fn real_compact_taunt_buffs_and_the_skills_that_apply_them() {
         .unwrap();
     assert_eq!(initial, 2, "buff 6998 is an NPC initial buff");
 }
+
+const STEALTH_COLUMN_BUFF: u32 = 7_100;
+const TAG_100_ONLY_BUFF: u32 = 7_101;
+
+/// [`fixture`] with the caller's game data.
+fn fixture_with_data(data: GameData, player_x: f32) -> Fixture {
+    let server = server_with_data(data);
+    let client = TestClient::new(&server, 1, 1);
+    let mut c = test_character(1, "Runner", player_x, 100.0);
+    c.unit.hp = 1000;
+    c.unit.max_hp = 1000;
+    let player = spawn_player(&server, &client, c, PLAYER_OBJ);
+    let npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        NPC_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    Fixture {
+        server,
+        client,
+        player,
+        npc,
+    }
+}
+
+/// `buffs.stealth` = 't' without tag 100: the 1.2 client hides the unit, so the AI must not
+/// aggro it either (the C# `CanSeeTarget` only checked tag 100).
+#[tokio::test]
+async fn stealth_column_buff_without_tag_100_hides_the_player_from_aggro() {
+    let mut data = data();
+    data.systems.skills.add_buff(BuffTemplate {
+        id: STEALTH_COLUMN_BUFF,
+        kind: 1,
+        duration: 60_000,
+        stack_rule: 1,
+        stealth: true,
+        ..BuffTemplate::default()
+    });
+    let f = fixture_with_data(data, 115.0);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    crate::systems::skills::buffs::add_buff_by_id(&server, &me, STEALTH_COLUMN_BUFF, &me, 0);
+    assert!(
+        !super::npc::can_see_target(&server, &me),
+        "the stealth column must mark the player stealthed for the AI"
+    );
+
+    let attacked = tick_until(&server, 100, 20, 40, || {
+        behavior(&server, NPC_OBJ) == Some(B::Attack)
+    })
+    .await;
+    assert!(!attacked, "the NPC aggroed a buff.stealth player");
+    assert!(f.npc.data().unit.skill_state.aggro_table.is_empty());
+}
+
+/// Tag 100 without `buffs.stealth`: the 1.2 client shows the unit, so the AI must see it too.
+#[tokio::test]
+async fn tag_100_buff_without_the_stealth_column_does_not_hide_the_player_from_aggro() {
+    let mut data = data();
+    data.systems.skills.add_buff(BuffTemplate {
+        id: TAG_100_ONLY_BUFF,
+        kind: 1,
+        duration: 60_000,
+        stack_rule: 1,
+        stealth: false,
+        ..BuffTemplate::default()
+    });
+    // Tag 100 is the C# stealth marker only; the client does not use it.
+    data.systems
+        .skills
+        .tagged_buffs
+        .insert(100, vec![TAG_100_ONLY_BUFF]);
+    let f = fixture_with_data(data, 115.0);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    crate::systems::skills::buffs::add_buff_by_id(&server, &me, TAG_100_ONLY_BUFF, &me, 0);
+    assert!(
+        super::npc::can_see_target(&server, &me),
+        "tag 100 alone must not hide the player"
+    );
+
+    let attacked = tick_until(&server, 100, 20, 60, || {
+        behavior(&server, NPC_OBJ) == Some(B::Attack)
+    })
+    .await;
+    assert!(
+        attacked,
+        "the NPC never aggroed a tag-100 non-stealth player"
+    );
+    assert!(f
+        .npc
+        .data()
+        .unit
+        .skill_state
+        .aggro_table
+        .contains_key(&PLAYER_OBJ));
+}

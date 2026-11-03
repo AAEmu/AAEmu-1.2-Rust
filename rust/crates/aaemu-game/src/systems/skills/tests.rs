@@ -1426,3 +1426,6 @@ async fn no_penalty_kills_return_no_experience_or_durability_loss() {
 
 #[path = "music_started_tests.rs"]
 mod music_started_tests;
+
+#[path = "stealth_tests.rs"]
+mod stealth_tests;

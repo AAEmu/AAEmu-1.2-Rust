@@ -750,20 +750,29 @@ fn use_skill_impl(
     }
     caster.with_unit(|u| u.unit_mut().skill_state.condition_chance = true);
     if template.cancel_ongoing_buffs {
+        // `skills.keep_stealth`: a stealth skill keeps the caster's stealth buffs through its
+        // own start/use cancel loop (see `buffs::trigger_remove_on_keep_stealth`).
+        let trigger = |on| {
+            if template.keep_stealth {
+                buffs::trigger_remove_on_keep_stealth(
+                    server,
+                    caster,
+                    on,
+                    template.cancel_ongoing_buff_exception_tag_id,
+                );
+            } else {
+                buffs::trigger_remove_on(
+                    server,
+                    caster,
+                    on,
+                    template.cancel_ongoing_buff_exception_tag_id,
+                );
+            }
+        };
         if caster.as_mate().is_some() {
-            buffs::trigger_remove_on(
-                server,
-                caster,
-                BuffRemoveOn::UseSkill,
-                template.cancel_ongoing_buff_exception_tag_id,
-            );
+            trigger(BuffRemoveOn::UseSkill);
         }
-        buffs::trigger_remove_on(
-            server,
-            caster,
-            BuffRemoveOn::StartSkill,
-            template.cancel_ongoing_buff_exception_tag_id,
-        );
+        trigger(BuffRemoveOn::StartSkill);
     }
     let skill_object = skill_object.unwrap_or_default();
     let Some(target) = checked_target
