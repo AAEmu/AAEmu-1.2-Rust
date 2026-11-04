@@ -26,8 +26,7 @@ use crate::systems::economy::item_packets::{
 };
 use crate::systems::economy::specialty::{
     self, CSListSpecialtyGoodsPacket, CSRequestSpecialtyCurrentPacket, CSSpecialtyRatioPacket,
-    SCSpecialtyCurrentPacket, SCSpecialtyGoodsPacket, SCSpecialtyRatioPacket,
-    SCSpecialtyRecordsPacket, SpecialtyGood, SpecialtyRecord,
+    SCSpecialtyCurrentPacket, SCSpecialtyGoodsPacket, SCSpecialtyRatioPacket, SpecialtyGood,
 };
 use crate::systems::economy::store::{self, *};
 use crate::systems::economy::store_data::{
@@ -400,7 +399,7 @@ fn sc_expert_expanded_and_specialty_bytes() {
 }
 
 #[test]
-fn sc_specialty_goods_and_records_bytes() {
+fn sc_specialty_goods_bytes() {
     // 1.2 reader FUN_397aec90 + FUN_398a9e30: i32 count, then 10-byte records
     // (u32 itemId, i32 refund, u8 Currency, u8 unknown).
     let goods = vec![SpecialtyGood {
@@ -416,27 +415,6 @@ fn sc_specialty_goods_and_records_bytes() {
         .write_u8(1)
         .write_u8(7);
     assert_eq!(bytes(&SCSpecialtyGoodsPacket { goods }), want.into_bytes());
-
-    // 1.2 reader FUN_397b3930 + FUN_3961edb0: i32 zoneId, u32 itemId, i32 count,
-    // then (i32 ratio, u64 recorded) records.
-    let records = vec![SpecialtyRecord {
-        ratio: 128,
-        recorded: 1_700_000_000,
-    }];
-    let mut want = PacketStream::new();
-    want.write_i32(22)
-        .write_u32(26488)
-        .write_i32(1)
-        .write_i32(128)
-        .write_u64(1_700_000_000);
-    assert_eq!(
-        bytes(&SCSpecialtyRecordsPacket {
-            zone_id: 22,
-            item_id: 26488,
-            records,
-        }),
-        want.into_bytes()
-    );
 }
 
 #[test]

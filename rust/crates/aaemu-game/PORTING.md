@@ -1932,12 +1932,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
     `FUN_398a9e30` per record: `u32 itemId`, `i32 refund`, 1-byte `Currency`, 1-byte unknown
     (10 bytes on the wire). The list content is not evidenced, so the server sends an empty
     list (count 0) until a capture shows which goods/prices belong there.
-  - `SCSpecialtyRecordsPacket` (0x09b) is **not sent**: its 1.2 reader `FUN_397b3930` is
-    `i32 zoneId`, `u32 itemId`, `i32 count` (capped at 256), then `FUN_3961edb0` records
-    (`i32 ratio`, `u64 recorded`), but the body is discarded (`FUN_394fb300` is an empty stub).
-    Keeping the captured trader-talk sequence exact therefore means no 0x9b on the 0x043
-    answer; the packet type and its reader-layout byte test remain for completeness. No
-    price-history table is kept.
+  - `SCSpecialtyRecordsPacket` (0x09b) is **not implemented or sent**: its 1.2 reader
+    `FUN_397b3930` is `i32 zoneId`, `u32 itemId`, `i32 count` (capped at 256), then
+    `FUN_3961edb0` records (`i32 ratio`, `u64 recorded`), but the body is discarded
+    (`FUN_394fb300` is an empty stub). Keeping the captured trader-talk sequence exact means
+    no 0x9b on the 0x043 answer, and no price-history table is kept.
   - `SCSpecialtyCurrentPacket` (0x1f4) stays in the 1.2 reader's order (`FUN_397b87c0`):
     `i32 count`, `u16 from`, `u16 to`, then (`u32 itemId`, `i32 ratio`) pairs — the same order
     the 1.2 C# used; the earlier "reader order" note in this branch was wrong.

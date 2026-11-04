@@ -38,9 +38,6 @@ pub const ACTABILITY_COMMERCE: i32 = 31;
 /// followed by that many records read by `FUN_398a9e30`.
 pub const MAX_SPECIALTY_GOODS: usize = 20;
 
-/// 1.2 `SCSpecialtyRecordsPacket` reader `FUN_397b3930` caps the record count at 256.
-pub const MAX_SPECIALTY_RECORDS: usize = 256;
-
 /// The ratio/tick part of `AppConfiguration.Specialty` (`SpecialtyConfig`; `initialize` copies
 /// it from `server.config.specialty`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -94,14 +91,6 @@ pub struct SpecialtyGood {
     pub refund: i32,
     pub currency: u8,
     pub unknown: u8,
-}
-
-/// One `SCSpecialtyRecordsPacket` record as read by `FUN_3961edb0`: `ratio` i32,
-/// `recorded` u64.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SpecialtyRecord {
-    pub ratio: i32,
-    pub recorded: u64,
 }
 
 /// `SpecialtyManager` runtime state (`server.systems.economy.specialty`).
@@ -652,8 +641,8 @@ impl CSListSpecialtyGoodsPacket {
 }
 sync_client_packet!(CSListSpecialtyGoodsPacket);
 
-/// `CSSpecialtyRecordLoadPacket` (no 1.2 opcode: not registered, as in C#; the history is sent
-/// with [`SCSpecialtyRecordsPacket`] after `CSSpecialtyRatioPacket`).
+/// `CSSpecialtyRecordLoadPacket` (no 1.2 opcode: not registered, as in C#; its history packet
+/// is not sent either because the 1.2 client discards it).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSSpecialtyRecordLoadPacket {
     pub zone_id: i32,
@@ -771,32 +760,6 @@ impl Marshal for SCSpecialtyGoodsPacket {
                 .write_i32(good.refund)
                 .write_u8(good.currency)
                 .write_u8(good.unknown);
-        }
-    }
-}
-
-/// `SCSpecialtyRecordsPacket` reader `FUN_397b3930`: `i32 zoneId`, `u32 itemId`, `i32 count`
-/// (capped at 256), then records read by `FUN_3961edb0` as `i32 ratio`, `u64 recorded`. The
-/// server does not send it: the 1.2 client discards the body.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SCSpecialtyRecordsPacket {
-    pub zone_id: i32,
-    pub item_id: u32,
-    pub records: Vec<SpecialtyRecord>,
-}
-packet_def!(
-    SCSpecialtyRecordsPacket,
-    level = LEVEL_PLAIN,
-    opcode = sc::SCSpecialtyRecordsPacket
-);
-impl Marshal for SCSpecialtyRecordsPacket {
-    fn write(&self, s: &mut PacketStream) {
-        let count = self.records.len().min(MAX_SPECIALTY_RECORDS);
-        s.write_i32(self.zone_id)
-            .write_u32(self.item_id)
-            .write_i32(count as i32);
-        for record in self.records.iter().take(count) {
-            s.write_i32(record.ratio).write_u64(record.recorded);
         }
     }
 }
