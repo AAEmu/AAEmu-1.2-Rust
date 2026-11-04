@@ -425,7 +425,8 @@ connected by `systems::economy::wiring`).
 | `MailManager`, `Models/Game/Mails/**`, `CharacterMails`, mail packets | `systems/economy/{mail,mail_character,mail_kinds,mail_packets,mail_data}.rs` | done | Saved in `SaveStage::BeforeItems`; housing tax through `MailHousingHooks`. |
 | `AuctionManager`, `Models/Game/Auction/**`, auction packets | `systems/economy/{auction,auction_data,auction_packets}.rs` | done | Saved in `SaveStage::AfterItems`; results mailed through `wiring`. Requests require an auctioneer NPC (the `auctioneer` template flag) named by the packet or the current interaction object within 5 m (the C# ignored the ids). |
 | `TradeManager`, trade packets | `systems/economy/trade.rs` | done | The C# `CanStartTrade` TODO ("Check faction and others") is implemented from the 1.2 client's own checks: a request and its acceptance refuse a dead player, a hostile faction relation and a distance `>= sqrt(25) = 5` m, and a trade across instances; see the trade validation deviation. |
-| `CashShopManager`, `Models/Game/CashShop/**`, ICS / premium packets | `systems/economy/cash_shop.rs` | done | Gifts by `CommercialMail` (`wiring`); account credits SQL behind `CashShopDb`. |
+| `CashShopManager`, `Models/Game/CashShop/**`, ICS packets | `systems/economy/cash_shop.rs` | done | Gifts by `CommercialMail` (`wiring`); account credits SQL behind `CashShopDb`. |
+| Premium service shop (`CSPremiumServiceList` / `Buy` / `Msg`, `SCPremiumServiceList`, `PremiumDetail`) | `systems/economy/premium_service.rs` | done | Rust only: the C# answered the list with a fixed Russian 30-day entry and only logged buy / msg. The catalogue is the empty-by-default operator table `aaemu_game.premium_services`; the purchase is one atomic MySQL transaction. See the WP-C deviation below. |
 | Item skill-effect bodies (grade enchant, socketing, conversion, cap scale, UCC imprint, ...), mate / slave equipment packets | `systems/economy/item_effects*.rs` | done | Called by the skills subsystem's effects. UCC imprint / cleanup require owned source and target items; client UCC casts require the actual source item's configured use skill, preserving the unrelated legacy bound-item portal exception. Dyeing checks the loaded `dyeable_items` allowlist. Invalid UCC / dye effects cancel deferred reagent consumption. |
 | Item skill-effect stubs given data-derived bodies (`GainItemWithPosImprint` 32, `RechargeItemBuff` 95, `ExpToItem` 96) | `systems/economy/item_effects.rs` | done (data-derived) | The C# `Execute` bodies were `// TODO` stubs, so the behaviour comes from `special_effects` 405 / 546 / 547 / 548 (32: create `value1` x1 with `SkillEffectGainItemWithPos`), 12446 / 17017 (95) and 12462 (96: `value1` XP -> `value2` x1 with `SkillEffectExpToItem`) plus the tool skills that cast them. `GainItemWithPosImprint` stores no position imprint: the 1.2 item details have no such field. `ExpToItem` subtracts the experience directly instead of through `AddExp` (which recomputes the level and could level the character down), sends `SCExpChangedPacket(-value1)`, checks bag room before spending the XP, and cancels so the reagent is kept. `RechargeItemBuff` takes the cast's item target, resets `charge_start_time` (and `charge_count` when the template has one) and re-applies the equipped item's gear buff through `apply_gear_buffs` with the item both removed and added, so the recharge buff is not stacked; the 1 s item timers read the new charge window on their next tick, so nothing is re-scheduled. |
 
@@ -3390,10 +3391,40 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   grade (old == new on the initial sync), and with old/new grades on GM / expiry changes.
   Deviation: the C# hard-coded `(1, 1, 1)` at `FinishState(7)` and a literal `1` in the
   `SCUnitStatePacket` premium field; Rust writes the real flag (0 for a normal account).
-  GM `/premium <account|name|self> <on|off|days> [days]` (Rust only, access 100) is the grant
-  path until the premium shop (WP-C). The grant/removal upserts the `accounts` row (an account
-  with only a login row gets one) and answers an error instead of "granted" when the write
-  fails.
+  GM `/premium <account|name|self> <on|off|days> [days]` (Rust only, access 100) and the premium
+  service shop (`systems::economy::premium_service`, WP-C) are the grant paths. The
+  grant/removal upserts the `accounts` row (an account with only a login row gets one) and
+  answers an error instead of "granted" when the write fails.
+* systems::economy (premium service shop, WP-C, 2026-11-04): the C# answered
+  `CSPremiumServiceList` (0x136, empty body, writer `FUN_391877d0`) with one hard-coded Russian
+  30-day entry and only logged `CSPremiumServiceBuy` (0x135, `i32 cId`, serializer
+  `FUN_397b17b0`) and `CSPremiumServiceMsg` (0x13c, `i32 stage`, serializer `FUN_397b17d0`,
+  writer `FUN_39187870`). Rust answers the list from `aaemu_game.premium_services` (column
+  meanings and an example insert in `SQL/updates/2026-11-04_aaemu_game_premium_services.sql`);
+  `compact.sqlite3.premium_points` has no catalogue (0 rows) and the table is empty by default
+  because no 1.2 retail row is evidenced. `SCPremiumServiceList` (0x1d8, serializer
+  `FUN_397c49b0` -> `FUN_397bf920`) carries one detail per packet (`FUN_391e25e0`), so the shop
+  sends one `size = 1` packet per row with `isEnd` only on the last (one `size = 0, isEnd = true`
+  packet for an empty catalogue); `exchangeRatio` has no source and stays 0. A buy validates the
+  row (`is_sell`, positive `hours`, non-negative price) and the currency, then runs the debit and
+  the premium grant in one MySQL transaction under the account row lock and
+  `AccountManager::lock_of`: guarded `credits` / `loyalty` debit (`... >= price`), payment
+  extension (`pay_end = max(now, pay_end) + hours * 3600`, `pay_method = Premium`, permanent
+  `pay_end = 0` stays permanent), `premium_point = premium_configs.connect_point` and an
+  `audit_ics_sales` row, then commit. Only credits and loyalty are debitable atomically with the
+  grant; AA points have no balance carrier yet (WP-D) and are refused with error 775, other
+  currencies with 773. The buy result has no dedicated 1.2 SC: the client's error handler
+  (`FUN_391e5070`) routes error ids 772..775 through `FUN_39055e80` / `FUN_39055a90` to UI event
+  0x266 (`PREMIUM_SERVICE_BUY_RESULT`, PSBFR_NONE/NORMAL/CASH/AA_POINT), so success / failure are
+  `SCErrorMsg` with `PREMIUM_SERVICE_BUY_SUCCESS` 772, `PREMIUM_SERVICE_BUY_FAIL` 773,
+  `PREMIUM_SERVICE_NOT_ENOUGH_AA_CASH` 774 or `PREMIUM_SERVICE_NOT_ENOUGH_AA_POINT` 775. The
+  client handler stores `exchangeRatio` from the `isEnd` packet; the shop's own `SCAccountInfo`,
+  `SCUpdatePremiumPoint` and (credits) `SCICSCashPoint` follow through the WP-B publish path. A
+  real-client purchase capture is still pending (**ACCOUNT-PREMIUM-BUY-1**).
+  `CSPremiumServiceMsg` is a client trigger (stage 1 at character-select init, stage 2 at world
+  entry) and gets no reply; the C# `SCAccountWarned("Premium ...")` is removed. `premium_services.id`
+  (client detail `id`, loaded from `grade`) and `bcount` (`buy_max`) are copied for display only:
+  their 1.2 meanings are UNKNOWN and `buy_max` is not enforced.
 * systems::services (second password, 2026-11-03): the 1.2 second-password protocol is ported in
   `systems::services::second_password`. The client sends four shuffled permutations of
   `0-9a-zA-Z` keyed by a server key id (`FUN_3907a370` / `FUN_3907a430`) and the server decodes
