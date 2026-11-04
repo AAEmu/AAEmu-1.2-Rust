@@ -2098,6 +2098,7 @@ fn guild_dominion() -> crate::systems::housing::dominion::state::DominionState {
         owner_expedition_id: 77,
         ownership_generation: 1,
         reign_start_at: 100,
+        claimed_at: 0,
         last_siege_end_at: 0,
         tax_rate: 0,
         national_tax_rate: 0,

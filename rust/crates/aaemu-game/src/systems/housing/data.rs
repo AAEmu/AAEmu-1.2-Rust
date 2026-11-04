@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use chrono::{NaiveDate, NaiveDateTime};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::Value;
 
 use crate::data::sqlite::{for_each_row, SqlRow};
@@ -198,6 +198,10 @@ pub struct CastleReferenceData {
     pub siege_zones: HashMap<u32, SiegeZone>,
     /// Chronological entries per zone group; duplicate dates are preserved as separate rows.
     pub siege_plans: HashMap<u32, Vec<SiegePlan>>,
+    /// `world_var_defaults.var_delay_siege_x_days_after_dominion_declare`: a freshly claimed
+    /// territory gets no siege cycle for this many days (INFERRED; the 1.2 value is 30).
+    /// Missing row / table = 0, no protection.
+    pub siege_delay_after_claim_days: i64,
 }
 
 impl CastleReferenceData {
@@ -331,6 +335,16 @@ impl CastleReferenceData {
         for plans in data.siege_plans.values_mut() {
             plans.sort_by_key(|p| (p.week_start, p.id));
         }
+        data.siege_delay_after_claim_days = conn
+            .query_row(
+                "SELECT default_value FROM world_var_defaults \
+                 WHERE variable_name = 'var_delay_siege_x_days_after_dominion_declare'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0)
+            .max(0);
         Ok(data)
     }
 }
@@ -1093,6 +1107,8 @@ pub(crate) mod tests {
             start_declare_hour INT, start_declare_min INT, start_warmup_weekday INT,
             start_warmup_hour INT, start_warmup_min INT, open_weekday INT,
             monument_doodad_id INT);
+        CREATE TABLE world_var_defaults (id INT, kind_id INT, variable_name TEXT,
+            default_value INT);
         CREATE TABLE housing_areas (id INT, housing_group_id INT);
         CREATE TABLE housing_groups (id INT, houseless NUM, existing_category_id INT, can_extend NUM);
         CREATE TABLE housing_group_categories (id INT, housing_group_id INT, category_id INT,
@@ -1158,7 +1174,9 @@ pub(crate) mod tests {
              INSERT INTO siege_plans VALUES (29,33,'2014-02-16 00:00:00.000000'),
                 (28,33,'2014-02-02 00:00:00.123456'),
                 (30,54,'2014-02-02 00:00:00'),
-                (31,33,'2014-02-16 00:00:00.000000');",
+                (31,33,'2014-02-16 00:00:00.000000');
+             INSERT INTO world_var_defaults VALUES (1,9,
+                'var_delay_siege_x_days_after_dominion_declare',30);",
         )
         .unwrap();
         c
@@ -1257,6 +1275,7 @@ pub(crate) mod tests {
         assert_eq!(zone.reinforce_defense_delay_mins, 20);
         assert_eq!(zone.monument_doodad_id, 7229);
         assert_eq!(data.siege_zones[&54].open_duration_hours, 0);
+        assert_eq!(data.siege_delay_after_claim_days, 30);
     }
 
     #[test]
@@ -1335,6 +1354,9 @@ pub(crate) mod tests {
             data.siege_plans.values().map(Vec::len).sum::<usize>(),
             count("siege_plans")
         );
+        assert_eq!(data.siege_delay_after_claim_days, 30);
+        assert_eq!(data.siege_zones[&54].open_duration_hours, 0);
+        assert_eq!(data.siege_zones[&33].open_duration_hours, 168);
         let tower = &data.guard_tower_settings[&1];
         assert_eq!(
             tower.steps.keys().copied().collect::<Vec<_>>(),

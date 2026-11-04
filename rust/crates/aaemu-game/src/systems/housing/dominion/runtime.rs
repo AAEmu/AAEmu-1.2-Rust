@@ -817,6 +817,7 @@ impl CalendarRuntime {
             self.lock_periods().clear();
             return Vec::new();
         }
+        let claim_delay = calendar.siege_delay_after_claim_days();
         let real_now = chrono::Utc::now().timestamp();
         let states = server.systems.housing.dominions.all();
         let mut periods = self.lock_periods();
@@ -840,7 +841,20 @@ impl CalendarRuntime {
                     PERIOD_WARMUP
                 }
             } else {
-                let Some(view) = calendar.view_at(zone, now, &settings.timezone, false) else {
+                let siege_not_before = if state.claimed_at > 0 && claim_delay > 0 {
+                    state
+                        .claimed_at
+                        .saturating_add(claim_delay.saturating_mul(86_400))
+                } else {
+                    0
+                };
+                let Some(view) = calendar.view_at_protected(
+                    zone,
+                    now,
+                    &settings.timezone,
+                    false,
+                    siege_not_before,
+                ) else {
                     continue;
                 };
                 view.period
