@@ -126,11 +126,12 @@ fn enter_world_body(account_id: u32, cookie: u32) -> Vec<u8> {
     })
 }
 
-/// SCAccountInfoPacket body for the default `AccountPayment` (Premium, 1, MinValue, 2030-01-01).
+/// SCAccountInfoPacket body for the default `AccountPayment` (Premium, 1, MinValue, no end date;
+/// owner decision 2026-11-03: the configured default premium is permanent).
 fn account_info_frame() -> Vec<u8> {
     l1(
         0x1C2,
-        &hex("01 00 00 00  01 00 00 00  00 00 00 00 00 00 00 00  80 D8 DB 70 00 00 00 00  00 00 00 00 00 00 00 00"),
+        &hex("01 00 00 00  01 00 00 00  00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00"),
     )
 }
 
@@ -140,24 +141,26 @@ async fn lobby_flow_end_to_end() {
     let (login_tx, mut login_rx) = mpsc::unbounded_channel();
     server.login.set(Some(login_tx));
 
-    // ---- L2G: LGPlayerEnter(accountId 1000, connectionId 4242) -> GLPlayerEnter(4242, gs 1, 0)
+    // ---- L2G: LGPlayerEnter(accountId 1000, connectionId 4242) -> GLPlayerEnter(4242, gs 1, 0,
+    // online 1: the pending cookie occupies one slot; the two trailing u32 are the Rust queue
+    // occupancy and report sequence).
     assert!(crate::login::handle(&server, &hex("01 00  E8 03 00 00  92 10 00 00")).await);
     assert_eq!(
         login_rx.try_recv().unwrap(),
-        hex("01 00  92 10 00 00  01  00")
+        hex("01 00  92 10 00 00  01  00  01 00 00 00  01 00 00 00")
     );
     // A second LGPlayerEnter for the same connection id throws in C# (no reply). Here the stale
     // entry (a cookie that was never used) is replaced and answered.
     assert!(crate::login::handle(&server, &hex("01 00  E9 03 00 00  92 10 00 00")).await);
     assert_eq!(
         login_rx.try_recv().unwrap(),
-        hex("01 00  92 10 00 00  01  00")
+        hex("01 00  92 10 00 00  01  00  01 00 00 00  02 00 00 00")
     );
     // ... and back to account 1000 for the rest of the flow.
     assert!(crate::login::handle(&server, &hex("01 00  E8 03 00 00  92 10 00 00")).await);
     assert_eq!(
         login_rx.try_recv().unwrap(),
-        hex("01 00  92 10 00 00  01  00")
+        hex("01 00  92 10 00 00  01  00  01 00 00 00  03 00 00 00")
     );
     assert!(login_rx.try_recv().is_err());
 

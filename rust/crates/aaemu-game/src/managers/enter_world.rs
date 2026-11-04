@@ -4,6 +4,22 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// How long a world cookie waits for the client to connect to the game server before it stops
+/// counting as an occupied slot. A client connects immediately after `ACWorldCookie`; the expiry
+/// only keeps a cookie whose client vanished from blocking the login queue for ever.
+pub const PENDING_TOKEN_LIFETIME: Duration = Duration::from_secs(60);
+
+#[derive(Debug)]
+struct PendingToken {
+    account_id: u32,
+    created: Instant,
+    /// The cookie was accepted by `login()` and the account registration is in flight. It still
+    /// occupies a slot (`AccountManager.count()` does not include the account yet), but a second
+    /// `login()` with the same token must not succeed.
+    consumed: bool,
+}
 
 /// Outcome of [`EnterWorldManager::login`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,15 +45,60 @@ pub enum AddAccountResult {
     ReplacedStale { stale_account: u32 },
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct EnterWorldManager {
-    /// `_accounts`: login-server connection id (the client's cookie / token) -> account id.
-    accounts: Mutex<HashMap<u32, u32>>,
+    /// `_accounts`: login-server connection id (the client's cookie / token) -> pending account.
+    accounts: Mutex<HashMap<u32, PendingToken>>,
     /// character id -> game connection id. The session that is entering or playing the character;
     /// taken before the select's MySQL load and kept until the departure save has finished, so a
     /// second connection can neither enter the same character twice nor load its row while the
     /// previous session is still saving it.
     characters: Mutex<HashMap<u32, u32>>,
+    /// Rust addition for the login queue: how long an unconsumed world cookie counts as a slot.
+    token_lifetime: Duration,
+}
+
+impl Default for EnterWorldManager {
+    fn default() -> Self {
+        Self {
+            accounts: Mutex::new(HashMap::new()),
+            characters: Mutex::new(HashMap::new()),
+            token_lifetime: PENDING_TOKEN_LIFETIME,
+        }
+    }
+}
+
+impl EnterWorldManager {
+    /// Removes unconsumed cookies older than the lifetime. An accepted (consumed) cookie is kept
+    /// until its account registration finishes, so the occupancy never under-counts an in-flight
+    /// login.
+    fn prune_expired(accounts: &mut HashMap<u32, PendingToken>, lifetime: Duration) {
+        let now = Instant::now();
+        accounts.retain(|_, token| {
+            token.consumed || now.saturating_duration_since(token.created) < lifetime
+        });
+    }
+
+    /// Number of world cookies that still occupy a slot: unconsumed ones younger than the
+    /// lifetime, plus accepted cookies whose account registration is in flight. Together with
+    /// `AccountManager::count` this is the world's occupancy reported to the login queue.
+    ///
+    /// Expired entries are only skipped here, never removed: `login()` must keep accepting a
+    /// cookie of any age (with the queue disabled its behaviour is exactly as before the queue
+    /// existed). `add_account` prunes them when a connection id is reused.
+    pub fn pending_count(&self) -> usize {
+        let accounts = self
+            .accounts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let now = Instant::now();
+        accounts
+            .values()
+            .filter(|token| {
+                token.consumed || now.saturating_duration_since(token.created) < self.token_lifetime
+            })
+            .count()
+    }
 }
 
 impl EnterWorldManager {
@@ -53,24 +114,52 @@ impl EnterWorldManager {
         if already_connected {
             return AddAccountResult::Reply(1);
         }
-        let mut accounts = self.accounts.lock().expect("enter world state poisoned");
-        match accounts.insert(connection_id, account_id) {
-            Some(stale_account) => AddAccountResult::ReplacedStale { stale_account },
+        let mut accounts = self
+            .accounts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self::prune_expired(&mut accounts, self.token_lifetime);
+        let pending = PendingToken {
+            account_id,
+            created: Instant::now(),
+            consumed: false,
+        };
+        match accounts.insert(connection_id, pending) {
+            Some(stale) => AddAccountResult::ReplacedStale {
+                stale_account: stale.account_id,
+            },
             None => AddAccountResult::Reply(0),
         }
     }
 
-    /// The token check of `Login(connection, accountId, token)`.
+    /// The token check of `Login(connection, accountId, token)`. The cookie is only marked as
+    /// accepted here (still counted as an occupied slot); [`Self::forget`] removes it once the
+    /// account registration finished. A cookie has no age limit here: with the queue disabled its
+    /// lifetime must behave exactly as before the queue existed.
     pub fn login(&self, account_id: u32, token: u32) -> LoginDecision {
-        let mut accounts = self.accounts.lock().expect("enter world state poisoned");
-        match accounts.get(&token).copied() {
-            Some(a) if a == account_id => {
-                accounts.remove(&token);
+        let mut accounts = self
+            .accounts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match accounts.get_mut(&token) {
+            Some(entry) if entry.consumed => LoginDecision::InvalidToken,
+            Some(entry) if entry.account_id == account_id => {
+                entry.consumed = true;
                 LoginDecision::Accepted
             }
-            Some(expected) => LoginDecision::AccountMismatch { expected },
+            Some(entry) => LoginDecision::AccountMismatch {
+                expected: entry.account_id,
+            },
             None => LoginDecision::InvalidToken,
         }
+    }
+
+    /// Drops an accepted cookie after its account registration finished (success or refusal).
+    pub fn forget(&self, token: u32) {
+        self.accounts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&token);
     }
 
     /// Atomically reserves `character_id` for `connection_id`. `Err(owner)` means another
@@ -168,6 +257,37 @@ mod tests {
         // Consumed: a second connection with the same token is refused.
         assert_eq!(m.login(10, 111), LoginDecision::InvalidToken);
         assert_eq!(m.login(10, 0), LoginDecision::InvalidToken);
+    }
+
+    #[test]
+    fn world_queue_slot_occupancy_counts_accepted_cookies_until_forgotten() {
+        let m = EnterWorldManager::default();
+        m.add_account(10, 111, false);
+        m.add_account(10, 112, false);
+        assert_eq!(m.pending_count(), 2);
+        // Accepted: the account registration is in flight, so the slot is still occupied.
+        assert_eq!(m.login(10, 111), LoginDecision::Accepted);
+        assert_eq!(m.pending_count(), 2);
+        // The same token cannot be used twice.
+        assert_eq!(m.login(10, 111), LoginDecision::InvalidToken);
+        m.forget(111);
+        assert_eq!(m.pending_count(), 1);
+    }
+
+    #[test]
+    fn world_queue_expiry_only_changes_the_occupancy_not_token_acceptance() {
+        let m = EnterWorldManager {
+            token_lifetime: Duration::ZERO,
+            ..Default::default()
+        };
+        m.add_account(10, 111, false);
+        // Not counted as an occupied slot...
+        assert_eq!(m.pending_count(), 0);
+        // ...but a client that connects late still enters, exactly as before the queue existed.
+        assert_eq!(m.login(10, 111), LoginDecision::Accepted);
+        assert_eq!(m.pending_count(), 1);
+        m.forget(111);
+        assert_eq!(m.pending_count(), 0);
     }
 
     #[test]

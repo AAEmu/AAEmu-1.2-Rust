@@ -35,9 +35,12 @@ const BASE_UNIT_TYPE_CHARACTER: u8 = 0;
 const ATTACH_POINT_SYSTEM: u8 = 255;
 /// `ModelPostureType.None`.
 const MODEL_POSTURE_NONE: u8 = 0;
-/// The patron / auction-license buffs `SCUnitStatePacket` force-adds to characters
-/// ("TODO Wrong place" in C#).
-pub const UNIT_STATE_FORCED_BUFFS: [u32; 2] = [8_000_011, 8_000_012];
+/// The buffs `SCUnitStatePacket` still force-adds to characters ("TODO Wrong place" in C#).
+/// 8000012 is the auction-license buff (see `systems::economy::account_attributes`). The VIP
+/// buff 8000011 is no longer forced on everyone: since WP-B it is the `active = 't'`
+/// `pcbang_buffs` row of premium grade 2 and is applied by
+/// `systems::services::premium::apply_login_buffs` / `apply_grade_buffs`.
+pub const UNIT_STATE_FORCED_BUFFS: [u32; 1] = [8_000_012];
 
 /// `SCCharacterStatePacket(character)`.
 pub fn character_state(c: &Character, bounty_money: i64) -> SCCharacterStatePacket {
@@ -200,7 +203,9 @@ fn write_unit_state(c: &mut Character, data: &GameData, now_ms: i64, s: &mut Pac
         );
         return;
     };
-    s.write_i32(1); // premium
+    // `premium` (`1` / `0`): the account payment state cached on the character (WP-B). The C#
+    // wrote a literal 1 for every character.
+    s.write_i32(i32::from(c.premium));
     for _ in 0..6 {
         s.write_i32(0); // pStat
     }
@@ -777,6 +782,14 @@ mod tests {
             p.body.len(),
             head + mid + piscs + abilities + 6 + 4 + 4 + 24
         );
+        // The premium i32 is the first of the final 28 bytes (then the six pStat i32s); it now
+        // carries the account payment state instead of the C# literal 1.
+        let at = p.body.len() - 28;
+        assert_eq!(p.body[at..at + 4], [0, 0, 0, 0]);
+        c.premium = true;
+        let premium = unit_state(&mut c, &data, 0);
+        let at = premium.body.len() - 28;
+        assert_eq!(premium.body[at..at + 4], [1, 0, 0, 0]);
         let cs = character_state(&c, 0);
         assert_eq!(cs.body[4..6], [16, 0]);
         assert_eq!(cs.body[6..22], c.guid);

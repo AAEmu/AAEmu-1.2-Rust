@@ -94,21 +94,34 @@ pub fn refresh_phase_caches(data: &DoodadData, d: &mut Doodad) {
 /// The `FuncGroupId` setter: on a change, `PhaseTime = now`, `Save()` when persistent, and the
 /// current funcs / phase funcs / ToD trigger caches.
 pub fn set_func_group_id(server: &GameServer, doodad: &DoodadRef, value: u32) {
-    let save = {
+    let (save, previous) = {
         let mut d = doodad.data();
         if value == d.func_group_id {
             return;
         }
+        let previous = d.func_group_id;
         d.func_group_id = value;
         d.phase.interaction_counts.clear();
         d.phase_time_ms = now_ms(); // Save PhaseTime at start of new phase (group)
         let persistent = d.is_persistent || d.natural_key.is_some();
         refresh_phase_caches(&server.game_data.systems.npcs.doodad, &mut d);
-        persistent
+        (persistent, previous)
     };
+    // The phase a doodad leaves no longer owns its area triggers. A duration-0
+    // `DoodadFuncClout` (3410 safe zone 720, 4307 clout 992/1008) would otherwise stay until
+    // the doodad is deleted, and every warmup would add another copy.
+    crate::systems::npcs::area_trigger::remove_doodad_func_group_triggers(server, doodad, previous);
     if save {
         db::save(server, doodad);
     }
+    // WP-S3 period phase funcs only look at doodads whose current phase has a SiegePeriod
+    // function; keep that index current without polling every world object.
+    server
+        .systems
+        .npcs
+        .doodads
+        .siege_phase
+        .refresh(server, doodad);
 }
 
 /// The `Data` setter: on a change, `Save()` when persistent (`SetData` is a plain write).
@@ -493,6 +506,58 @@ pub fn despawn_or_delete(ctx: &DoodadCtx<'_>) {
         Some(spawner) => spawner.despawn(ctx.server, &ctx.doodad),
         None => super::manager::delete(ctx.server, &ctx.world, &ctx.doodad),
     }
+}
+
+/// The result of an externally driven phase change (a WP-S3 period boundary).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExternalPhaseChange {
+    /// The doodad was in `expected_group` and the change ran.
+    Applied,
+    /// The doodad is deleted or no longer in `expected_group`: nothing to do.
+    Skipped,
+    /// Another thread holds the phase-operation reservation: retry later.
+    Busy,
+}
+
+/// An externally driven phase change (a period boundary, WP-S3): only while the doodad is
+/// still in `expected_group`, checked and applied under one phase-operation reservation.
+pub(crate) fn do_change_phase_if_group(
+    ctx: &DoodadCtx<'_>,
+    caster: Option<&WorldObject>,
+    expected_group: u32,
+    next_phase: i32,
+) -> ExternalPhaseChange {
+    let Some(_operation) = Operation::enter(&ctx.doodad) else {
+        return ExternalPhaseChange::Busy;
+    };
+    {
+        let d = ctx.doodad.data();
+        if d.phase.deleted || d.func_group_id != expected_group {
+            return ExternalPhaseChange::Skipped;
+        }
+    }
+    // A nested `Operation::enter` on this thread is allowed.
+    do_change_phase(ctx, caster, next_phase);
+    ExternalPhaseChange::Applied
+}
+
+/// [`despawn_or_delete`] for an externally driven final phase, under the same expected-group
+/// check.
+pub(crate) fn despawn_or_delete_if_group(
+    ctx: &DoodadCtx<'_>,
+    expected_group: u32,
+) -> ExternalPhaseChange {
+    let Some(_operation) = Operation::enter(&ctx.doodad) else {
+        return ExternalPhaseChange::Busy;
+    };
+    {
+        let d = ctx.doodad.data();
+        if d.phase.deleted || d.func_group_id != expected_group {
+            return ExternalPhaseChange::Skipped;
+        }
+    }
+    despawn_or_delete(ctx);
+    ExternalPhaseChange::Applied
 }
 
 /// `DoPhaseFuncs(caster, ref nextPhase)`: `true` = the phase did not pass (abort).

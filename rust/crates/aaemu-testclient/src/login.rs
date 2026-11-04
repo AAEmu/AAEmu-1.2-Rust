@@ -108,10 +108,25 @@ pub struct WorldCookie {
     pub port: u16,
 }
 
+/// One `ACWorldQueuePacket` received while entering a world.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorldQueueUpdate {
+    pub world_id: u8,
+    pub is_premium: bool,
+    /// 1-based position; 0 ends the wait.
+    pub my_turn: u16,
+    pub normal_length: u16,
+    pub premium_length: u16,
+}
+
 pub struct LoginClient {
     framed: Framed<TcpStream, FrameCodec>,
     rec: Recorder,
     pub timeout: Duration,
+    /// How long a queued client waits for the world cookie after `ACWorldQueuePacket`.
+    pub queue_timeout: Duration,
+    /// Every queue update seen by [`Self::enter_world`], in arrival order.
+    pub queue_updates: Vec<WorldQueueUpdate>,
     pub account_id: u32,
 }
 
@@ -135,6 +150,8 @@ impl LoginClient {
             framed: Framed::new(sock, FrameCodec),
             rec,
             timeout: Duration::from_secs(15),
+            queue_timeout: Duration::from_secs(600),
+            queue_updates: Vec::new(),
             account_id: 0,
         })
     }
@@ -151,7 +168,16 @@ impl LoginClient {
 
     /// Next L2C packet `(opcode, body)`.
     pub async fn recv(&mut self) -> anyhow::Result<(u16, PacketStream)> {
-        let frame = tokio::time::timeout(self.timeout, self.framed.next())
+        self.recv_with_timeout(self.timeout).await
+    }
+
+    /// [`Self::recv`] with an explicit timeout (the world queue uses its own deadline without
+    /// changing the client's handshake timeout).
+    async fn recv_with_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> anyhow::Result<(u16, PacketStream)> {
+        let frame = tokio::time::timeout(timeout, self.framed.next())
             .await
             .map_err(|_| anyhow!("timed out waiting for a login packet"))?
             .ok_or_else(|| anyhow!("login server closed the connection"))??;
@@ -339,34 +365,192 @@ impl LoginClient {
         Ok(out)
     }
 
-    /// `CAEnterWorldPacket` -> `ACWorldCookiePacket`.
+    /// `CAEnterWorldPacket` -> `ACWorldQueuePacket`* -> `ACWorldCookiePacket` (or
+    /// `ACEnterWorldDeniedPacket`). A full world queues the client; this waits for the world
+    /// cookie, recording every queue update and printing its position.
     pub async fn enter_world(&mut self, gs_id: u8) -> anyhow::Result<WorldCookie> {
         let mut s = PacketStream::new();
         s.write_u64(0).write_u8(gs_id);
         self.send(ca::ENTER_WORLD, s.as_bytes()).await?;
-        let (op, mut r) = self.recv().await?;
-        if op == ac::ENTER_WORLD_DENIED {
-            let reason = r.read_u8().unwrap_or(0);
-            bail!("enter world denied (reason {reason})");
+        self.queue_updates.clear();
+        // A queued client may wait minutes; the handshake timeout is unaffected. The deadline
+        // only starts after the first queue update, so an unqueued enter still uses
+        // `self.timeout` exactly as before.
+        let queue_deadline = tokio::time::Instant::now() + self.queue_timeout;
+        let mut queued = false;
+        loop {
+            let timeout = if queued {
+                queue_deadline.saturating_duration_since(tokio::time::Instant::now())
+            } else {
+                self.timeout
+            };
+            if timeout.is_zero() {
+                bail!("timed out waiting for the world queue");
+            }
+            let (op, mut r) = self.recv_with_timeout(timeout).await?;
+            match op {
+                ac::WORLD_QUEUE => {
+                    let update = WorldQueueUpdate {
+                        world_id: r.read_u8()?,
+                        is_premium: r.read_bool()?,
+                        my_turn: r.read_u16()?,
+                        normal_length: r.read_u16()?,
+                        premium_length: r.read_u16()?,
+                    };
+                    println!(
+                        "world queue: world {} position {}/{} (premium {} {})",
+                        update.world_id,
+                        update.my_turn,
+                        update.normal_length,
+                        update.is_premium,
+                        update.premium_length
+                    );
+                    self.queue_updates.push(update);
+                    queued = true;
+                }
+                ac::ENTER_WORLD_DENIED => {
+                    let reason = r.read_u8().unwrap_or(0);
+                    bail!("enter world denied (reason {reason})");
+                }
+                ac::WORLD_COOKIE => {
+                    let cookie = r.read_u32()?;
+                    let ip = r.read_bytes(4)?;
+                    let port = r.read_u16()?;
+                    return Ok(WorldCookie {
+                        cookie,
+                        // The address is written with its octets reversed.
+                        ip: Ipv4Addr::new(ip[3], ip[2], ip[1], ip[0]),
+                        port,
+                    });
+                }
+                other => bail!("expected ACWorldCookiePacket, got {}", ac_name(other)),
+            }
         }
-        if op != ac::WORLD_COOKIE {
-            bail!("expected ACWorldCookiePacket, got {}", ac_name(op));
-        }
-        let cookie = r.read_u32()?;
-        let ip = r.read_bytes(4)?;
-        let port = r.read_u16()?;
-        Ok(WorldCookie {
-            cookie,
-            // The address is written with its octets reversed.
-            ip: Ipv4Addr::new(ip[3], ip[2], ip[1], ip[0]),
-            port,
-        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    fn queue_frame(world_id: u8, my_turn: u16, normal_length: u16) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.push(world_id);
+        body.push(0); // isPremium
+        body.extend(my_turn.to_le_bytes());
+        body.extend(normal_length.to_le_bytes());
+        body.extend(0u16.to_le_bytes()); // premiumLength
+        let mut frame = Vec::new();
+        frame.extend((body.len() as u16 + 2).to_le_bytes());
+        frame.extend(ac::WORLD_QUEUE.to_le_bytes());
+        frame.extend(body);
+        frame
+    }
+
+    fn cookie_frame(cookie: u32) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend(cookie.to_le_bytes());
+        body.extend([1, 0, 0, 127]); // the client reverses the octets
+        body.extend(1239u16.to_le_bytes());
+        let mut frame = Vec::new();
+        frame.extend((body.len() as u16 + 2).to_le_bytes());
+        frame.extend(ac::WORLD_COOKIE.to_le_bytes());
+        frame.extend(body);
+        frame
+    }
+
+    async fn accept_enter_world(listener: TcpListener) -> tokio::net::TcpStream {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut len = [0u8; 2];
+        sock.read_exact(&mut len).await.unwrap();
+        let mut payload = vec![0u8; u16::from_le_bytes(len) as usize];
+        sock.read_exact(&mut payload).await.unwrap();
+        assert_eq!(
+            u16::from_le_bytes([payload[0], payload[1]]),
+            ca::ENTER_WORLD
+        );
+        sock
+    }
+
+    #[tokio::test]
+    async fn enter_world_records_queue_updates_without_changing_the_handshake_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = tokio::spawn(async move {
+            let mut sock = accept_enter_world(listener).await;
+            sock.write_all(&queue_frame(1, 1, 1)).await.unwrap();
+            sock.write_all(&queue_frame(1, 0, 0)).await.unwrap();
+            sock.write_all(&cookie_frame(42)).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+
+        let mut client = LoginClient::connect(&addr, Recorder::new(true))
+            .await
+            .unwrap();
+        let handshake_timeout = client.timeout;
+        let cookie = client.enter_world(1).await.unwrap();
+        assert_eq!(cookie.cookie, 42);
+        assert_eq!(cookie.ip, Ipv4Addr::new(127, 0, 0, 1));
+        assert_eq!(cookie.port, 1239);
+        assert_eq!(
+            client.timeout, handshake_timeout,
+            "the queue must not rewrite the client's handshake timeout"
+        );
+        assert_eq!(
+            client.queue_updates,
+            vec![
+                WorldQueueUpdate {
+                    world_id: 1,
+                    is_premium: false,
+                    my_turn: 1,
+                    normal_length: 1,
+                    premium_length: 0,
+                },
+                WorldQueueUpdate {
+                    world_id: 1,
+                    is_premium: false,
+                    my_turn: 0,
+                    normal_length: 0,
+                    premium_length: 0,
+                },
+            ]
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn enter_world_uses_the_queue_deadline_only_after_a_queue_update() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = tokio::spawn(async move {
+            let mut sock = accept_enter_world(listener).await;
+            sock.write_all(&queue_frame(1, 1, 1)).await.unwrap();
+            // The world cookie never comes; the client must give up at its queue deadline, not
+            // at the 15 s handshake timeout.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+
+        let mut client = LoginClient::connect(&addr, Recorder::new(true))
+            .await
+            .unwrap();
+        client.queue_timeout = Duration::from_millis(50);
+        let started = std::time::Instant::now();
+        let error = tokio::time::timeout(Duration::from_secs(2), client.enter_world(1))
+            .await
+            .expect("the queue deadline must end the wait before the handshake timeout")
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("timed out waiting for a login packet"),
+            "unexpected error: {error}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(client.queue_updates.len() == 1);
+        server.abort();
+    }
 
     #[test]
     fn ticket_contains_hashed_password() {

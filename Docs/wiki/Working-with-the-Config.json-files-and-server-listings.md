@@ -47,7 +47,9 @@ Use `Config.Local.json` (gitignored) for machine-specific overrides;
       "Name": "AAEmu.Game",
       "Host": "127.0.0.1",
       "Port": 1239,
-      "Hidden": false
+      "Hidden": false,
+      "MaxConcurrent": 0,
+      "QueueLimit": 100
     }
   ]
 }
@@ -60,6 +62,47 @@ Field meanings:
 - `Host`: address reachable by clients.
 - `Port`: client connection port.
 - `Hidden`: whether to hide this entry from listing.
+- `MaxConcurrent` (default `0`): world login queue capacity, in slots (accounts in
+  the game lobby/world plus world cookies the client has not consumed yet). `0`
+  disables the queue and is the behaviour before the queue existed. See
+  "World login queue" below.
+- `QueueLimit` (default `100`): maximum number of clients waiting in that world's
+  queue. When it is reached a new enter-world request is refused with
+  `ACEnterWorldDenied`. `0` means the packet field limit (`65535`); it is ignored
+  while `MaxConcurrent` is `0`.
+
+### World login queue
+
+The login server queues `CAEnterWorld` instead of passing it on when the world is
+at `MaxConcurrent` slots. The game server reports its slot occupancy (accounts in
+the lobby/world plus unconsumed world cookies) in `GL_GAME_SERVER_LOAD` and in
+every `GLPlayerEnter` response, so the login server knows when a slot frees and
+admits the head of the FIFO queue without waiting for a client to retry.
+
+```json
+{ "Id": 1, "Name": "AAEmu.Game", "Host": "127.0.0.1", "Port": 1239,
+  "MaxConcurrent": 200, "QueueLimit": 100 }
+```
+
+- While queued, the client receives `ACWorldQueue` with its 1-based position and
+  the normal-queue length; every queue change sends the new positions.
+- When a slot frees, the head receives `ACWorldQueue` with `myTurn = 0` and then
+  the normal `ACWorldCookie`; the next client moves to position 1.
+- `CACancelEnterWorld` and disconnecting remove the entry. Entries die with their
+  connection.
+- A reconnect token still bypasses the world list/queue path: it is issued by the
+  game server only after a fully authenticated session, as before.
+- Refusals use `ACEnterWorldDenied`. The 1.2 client's handler (`FUN_393d51d0`)
+  ignores the reason byte and shows "error_failed_to_connect_to_server".
+- **Capture-pending (account WP-H):** the premium-entrance bit of
+  `CAEnterWorld.flag` is not identified, and the login server has no premium
+  source in 1.2 data. v1 treats every client as normal: `isPremium = false`,
+  `premiumLength = 0`.
+
+The queue is per configured `GameServers` entry. It starts at occupancy 0 and is
+updated by the game server's first load report (sent when it registers); a mixed
+version game server that does not send the occupancy extension reads as 0, which
+disables the gate (fail-open).
 
 ### Character slots and the pre-select period
 
@@ -106,6 +149,8 @@ GameServers__0__Name=AAEmu.Game
 GameServers__0__Host=127.0.0.1
 GameServers__0__Port=1239
 GameServers__0__Hidden=false
+GameServers__0__MaxConcurrent=200
+GameServers__0__QueueLimit=100
 ```
 
 ## Game server configuration and precedence
@@ -150,6 +195,34 @@ count the login server advertises:
 
 It can also be overridden in the game's `Config.Local.json` or with the
 environment variable `Characters__MaxPerAccount`.
+
+## Account payment and premium (`Account:DefaultPayment`)
+
+The game server loads each account's payment state from `aaemu_game.accounts`
+(`pay_method`, `pay_location`, `pay_start`, `pay_end`, `premium_point`). A row
+whose `pay_method` is still `0` uses the configured default:
+
+```json
+{
+  "Account": {
+    "DefaultPayment": "premium"
+  }
+}
+```
+
+`premium` (default) keeps the old C# behaviour: the account is permanently
+premium (no end date), gets the premium grade from the premium point
+(`premium_grades`, grade 2 at point 1) and the premium max labor from
+`premium_benefits` (5000 instead of 2000). `none` makes new and unset accounts
+normal; `demo` is the third 1.2 payment method. The numeric values are the
+client's `SCAccountInfo.payMethod`: 1 Premium, 3 Demo, 5 None.
+
+Server owners can grant or remove premium in game with
+`/premium <account id|character name|self> <on|off|days> [days]` (access level
+100): `on` grants 30 days, a number grants that many days, `off` removes it.
+The grant has its own end date; the configured default does not. The grant
+writes the account row and pushes `SCAccountInfo` and `SCUpdatePremiumPoint`
+to the account.
 
 ## Web API authentication and migration
 

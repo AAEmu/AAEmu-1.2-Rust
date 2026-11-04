@@ -300,6 +300,10 @@ pub struct AreaTrigger {
     pub shape: Option<AreaShape>,
     pub owner: Option<DoodadRef>,
     pub caster: Option<WorldObject>,
+    /// The scrap of the owner's func group that created this trigger. A phase change removes
+    /// the triggers of the group it left (a duration-0 `DoodadFuncClout` would otherwise stay
+    /// until the doodad is deleted, e.g. the 3410 revive safe zone).
+    pub func_group_id: u32,
     pub skill_id: u32,
     pub tl_id: u32,
     /// `SkillTargetRelation`.
@@ -665,6 +669,29 @@ pub fn remove_area_trigger(server: &GameServer, trigger: &Arc<AreaTrigger>) {
 pub fn remove_doodad_area_triggers(server: &GameServer, doodad_obj_id: u32) {
     let triggers = lock(&server.systems.npcs.area_triggers.attached)
         .remove(&doodad_obj_id)
+        .unwrap_or_default();
+    for t in &triggers {
+        remove_area_trigger(server, t);
+    }
+}
+
+/// Removes the triggers `doodad`'s phase `func_group_id` created when it leaves that group.
+/// The C# kept every `DoodadFuncClout` trigger until the doodad was deleted; a duration-0 clout
+/// therefore stayed active across phase changes (the 3410 `safezone_up` 720 revive zone never
+/// went away and accumulated one trigger per warmup).
+pub fn remove_doodad_func_group_triggers(
+    server: &GameServer,
+    doodad: &DoodadRef,
+    func_group_id: u32,
+) {
+    let triggers: Vec<_> = lock(&server.systems.npcs.area_triggers.attached)
+        .get(&doodad.obj_id)
+        .map(|list| {
+            list.iter()
+                .filter(|t| t.func_group_id == func_group_id)
+                .cloned()
+                .collect()
+        })
         .unwrap_or_default();
     for t in &triggers {
         remove_area_trigger(server, t);
