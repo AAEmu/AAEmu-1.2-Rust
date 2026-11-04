@@ -288,6 +288,11 @@ pub struct AccountConfig {
     pub delete_release_name: bool,
     #[serde(rename = "deletetimings")]
     pub delete_timings: Vec<AccountDeleteDelayTiming>,
+    /// Payment state of accounts whose `accounts.pay_method` is 0 (never written by a GM or the
+    /// (not yet ported) premium shop). Default `premium`: the owner decision of 2026-11-03 keeps
+    /// the C# behaviour for existing databases.
+    #[serde(rename = "defaultpayment", deserialize_with = "lenient_enum")]
+    pub default_payment: DefaultPayment,
 }
 
 impl Default for AccountConfig {
@@ -299,9 +304,23 @@ impl Default for AccountConfig {
             access_level_first_character: 100,
             delete_release_name: false,
             delete_timings: Vec::new(),
+            default_payment: DefaultPayment::Premium,
         }
     }
 }
+
+/// `Account:DefaultPayment` (Rust only, WP-B): the effective payment of an account whose
+/// `accounts.pay_method` is still 0. The numeric values are the 1.2 `PaymentMethodType`
+/// (`Premium = 1`, `Demo = 3`, `None = 5`) the client receives in `SCAccountInfo.payMethod`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DefaultPayment {
+    #[default]
+    Premium,
+    Demo,
+    None,
+}
+
+impl_config_enum!(DefaultPayment { Premium = 1, Demo = 3, None = 5 });
 
 /// `Characters` (Rust only): the lobby character-slot limit and the pre-select period.
 #[derive(Debug, Clone, Deserialize)]

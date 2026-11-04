@@ -4,6 +4,7 @@
 		"PreSelectPeriod": false // lobby CSEditCharacter; must equal the login server's Login:PreSelectCharacterPeriod
 	},
 	"Account": {
+		"DefaultPayment": "premium",
 		"AccessLevelDefault": 0,
 		"AccessLevelFirstAccount": 100,
 		"AccessLevelFirstCharacter": 100,

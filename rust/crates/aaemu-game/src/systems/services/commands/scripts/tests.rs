@@ -342,6 +342,7 @@ fn registered_commands_match_the_csharp_scripts() {
                     | ["dungeon"]
                     | ["nation", "nations"]
                     | ["testguild"]
+                    | ["premium", "setpremium"]
                     | ["secondpassword", "secondpass", "clearsecondpassword"]
             )
         })
@@ -391,8 +392,9 @@ fn load_resolves_collisions_like_csharp() {
     let m = CommandManager::default();
     assert!(super::load(&m, &ScriptEnv::default()));
     let keys = m.get_command_keys();
-    // Original commands plus Dominion administration, collection and player registration.
-    assert_eq!(keys.len(), 99);
+    // Original commands plus Dominion administration, collection and player registration,
+    // and the Rust-only `/premium` / `/secondpassword` admin commands.
+    assert_eq!(keys.len(), 100);
     // `GoldCmd` (registered after `AddGold`) owns `gold`, and `AddGold`'s aliases lead to it.
     for alias in ["gold", "addgold", "add_gold"] {
         let c = m.get_command_interface_by_name(alias).expect(alias);
