@@ -3428,6 +3428,30 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   The GM command `/secondpassword <account id|character name|self>` clears the hash, counter and
   lock under the account lock (`AccessLevels.json`, level 100) for admin recovery.
 
+* systems::services (`SCInitialConfig` account parameters, WP-J, 2026-11-04): the 1.2 client
+  reader `FUN_397b2a00` reads `host`, the 11-byte fset, `count` + entries, `initLp`, the seven
+  `canPlaceHouse` / `canPayTax` / `canUseAuction` / `canTrade` / `canSendMail` / `canUseBank` /
+  `canUseCopper` booleans (`FUN_397b1fb0`), `secondPriceType` and `secondPasswordMaxFailCount` as
+  bytes (stream method `+0x44`, confirmed by the `SCLevelRestriction` reader `FUN_391a5100`) and
+  `idleKickTime` as a `u16` (method `+0x40`; `FUN_39017bf0` masks it with `0xffff`). Rust now
+  sends `Account:Restrictions:<premium|demo|none>` (seven booleans selected by the effective
+  payment method) and `Account:IdleKickTime` (raw `u16`, default 0). Every default keeps the
+  exact bytes the server sent before (seven `true`, idle 0). The per-method restriction source is
+  **INFERRED** (`ACCOUNT-RESTRICT-1`, capture-pending): the client only uses the flags to gate
+  its UI and the server has no restriction store, so the server does not enforce them.
+  `secondPriceType` stays the region constant 2 (NA loyalty token).
+* systems::services (idle kick, WP-J, 2026-11-04): the client kicks itself from
+  `SCInitialConfig.idleKickTime`; the 1.2 `SCIdleKick` reader (`FUN_39184540`) is empty and
+  `SCPlaytime` is a no-op, so the server sends neither and implements no idle kick. The unit of
+  `idleKickTime` is **UNKNOWN** (the `CGame::Update` consumer was not located): the config is
+  the raw wire value, not minutes or seconds. `CSIdleStatus` was already handled (it broadcasts
+  `SCUnitIdleStatus` to observers) and is unchanged.
+* systems::services (`SCRestrictInfo` 0x1c8, WP-J, 2026-11-04): this is a per-character penalty
+  record (`chname`, `index`, `restrictCode`, `duration`, start/end times;
+  `FUN_397c4570`/`FUN_397beb40`), not the seven `canXxx` flags. The server has no restriction
+  store, so no sender is implemented; **capture-pending** for the moderation area
+  (`ACCOUNT-SCRESTRICTINFO-1`).
+
 ### Ranking boards (Rust only)
 
 The 1.2 C# never answered `CSRankCharacterPacket` (empty, log-only) and has no `CSRankSnapshotPacket` (0x130, unnamed in the opcode tables, `ranking_packets.rs`). The Rust server answers both from a global store (`systems::social::ranking_manager`, `server.systems.social.ranking`):
