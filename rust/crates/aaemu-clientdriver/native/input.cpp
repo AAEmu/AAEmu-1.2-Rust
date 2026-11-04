@@ -26,7 +26,10 @@ static const Key keys[] = {{"w",16,0},{"a",29,0},{"s",30,0},{"d",31,0},{"f",32,0
     {"6",6,0},{"7",7,0},{"8",8,0},{"9",9,0},{"0",10,0},
     // CryInput.dll RVA 0x35C1..0x3604: "minus" is registered with ID 11 (VK 0xBD) and
     // "equals" with ID 12 (VK 0xBB), right after "0" (ID 10): action bar slots 11 and 12.
-    {"-",11,0},{"=",12,0}};
+    {"-",11,0},{"=",12,0},
+    // CryInput.dll RVA 0x3EFB..0x3F27: "f11" is registered with ID 82 (VK 0x7A) and "f12" with ID 83
+    // (VK 0x7B). F12 is the screenshot mode (default_binding.g `f12 screenshotmode`): no UI.
+    {"f11",82,0},{"f12",83,0}};
 // Exact r208022 keyboard symbols (3350381A / 335039B9 / 33503B9E):
 // modifier flags include both sides of the native ctrl/shift/alt mask.
 static const Key modifiers[] = {{"lctrl",28,0x11},{"shift",41,0x22},{"alt",55,0x44}};
