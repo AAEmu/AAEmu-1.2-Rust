@@ -14,7 +14,7 @@ use crate::models::npc::Npc;
 use crate::opcodes::sc;
 use crate::packets::world::SCErrorMsgPacket;
 use crate::systems::economy::inventory::Inv;
-use crate::systems::economy::store::{CSBuyItemsPacket, CSSellItemsPacket};
+use crate::systems::economy::store::{CSBuyCoinItemPacket, CSBuyItemsPacket, CSSellItemsPacket};
 use crate::systems::economy::tests::{give, run, test_data, World, STACK};
 use crate::systems::npcs::doodad::templates::{DoodadFunc, DoodadFuncPurchase, FuncTemplate};
 use crate::systems::npcs::npc::data::{MerchantGoods, NpcTemplate};
@@ -24,6 +24,7 @@ use crate::world::{DoodadRef, Entity, NpcRef};
 const MERCHANT_NPC: u32 = 0x500;
 const DOODAD_OBJ: u32 = 0x400;
 const PURCHASE_COIN: u32 = 9000;
+const PURCHASE_BACKPACK: u32 = 9100;
 const PURCHASE_FUNC_KEY: u32 = 1;
 const PURCHASE_TEMPLATE: u32 = 600;
 
@@ -266,23 +267,66 @@ async fn giving_the_item_is_not_a_purchase_and_selling_back_does_not_reset() {
 }
 
 fn purchase_doodad_world(limit: i32, coin_count: i32) -> World {
+    purchase_doodad_world_with(limit, PURCHASE_COIN, coin_count, 500, "DoodadFuncPurchase")
+}
+
+fn purchase_doodad_world_with(
+    limit: i32,
+    coin_item_id: u32,
+    coin_count: i32,
+    group_id: u32,
+    func_type: &'static str,
+) -> World {
+    purchase_doodad_world_full(
+        limit,
+        coin_item_id,
+        coin_count,
+        group_id,
+        func_type,
+        STACK,
+        1,
+        -1,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn purchase_doodad_world_full(
+    limit: i32,
+    coin_item_id: u32,
+    coin_count: i32,
+    group_id: u32,
+    func_type: &'static str,
+    item_id: u32,
+    item_count: i32,
+    next_phase: i32,
+) -> World {
     let mut d = test_data();
-    d.items
-        .templates
-        .get_mut(&STACK)
-        .unwrap()
-        .limited_sale_count = limit;
+    if item_id == PURCHASE_BACKPACK {
+        d.items.templates.insert(
+            PURCHASE_BACKPACK,
+            ItemTemplate {
+                max_count: 1,
+                ..ItemTemplate::new(
+                    PURCHASE_BACKPACK,
+                    crate::data::items::TemplateKind::Backpack { backpack_type: 1 },
+                )
+            },
+        );
+    }
+    if let Some(t) = d.items.templates.get_mut(&item_id) {
+        t.limited_sale_count = limit;
+    }
     d.items
         .templates
         .insert(PURCHASE_COIN, ItemTemplate::plain(PURCHASE_COIN, 1000));
     d.systems.npcs.doodad.funcs_by_id.insert(
         PURCHASE_FUNC_KEY,
         DoodadFunc {
-            group_id: 500,
+            group_id,
             func_id: PURCHASE_TEMPLATE,
             func_key: PURCHASE_FUNC_KEY,
-            func_type: "DoodadFuncPurchase".into(),
-            next_phase: -1,
+            func_type: func_type.into(),
+            next_phase,
             sound_id: 0,
             skill_id: 0,
             perm_id: 0,
@@ -293,15 +337,15 @@ fn purchase_doodad_world(limit: i32, coin_count: i32) -> World {
         .npcs
         .doodad
         .func_templates
-        .entry("DoodadFuncPurchase")
+        .entry(func_type)
         .or_default()
         .insert(
             PURCHASE_TEMPLATE,
             FuncTemplate::Purchase(DoodadFuncPurchase {
                 id: PURCHASE_TEMPLATE,
-                item_id: STACK,
-                count: 1,
-                coin_item_id: PURCHASE_COIN,
+                item_id,
+                count: item_count,
+                coin_item_id,
                 coin_count,
                 currency_id: 0,
             }),
@@ -314,9 +358,13 @@ fn purchase_doodad_world(limit: i32, coin_count: i32) -> World {
 }
 
 fn spawn_doodad(w: &mut World) -> DoodadRef {
+    spawn_doodad_at(w, 500, 100.0)
+}
+
+fn spawn_doodad_at(w: &mut World, group_id: u32, x: f32) -> DoodadRef {
     let mut d = Doodad::new(4321);
-    d.func_group_id = 500;
-    d.transform.set_xyz(100.0, 100.0, 100.0);
+    d.func_group_id = group_id;
+    d.transform.set_xyz(x, 100.0, 100.0);
     let d = Entity::new(DOODAD_OBJ, d);
     let world = w.server.world.world(0).unwrap();
     world.spawn(&d, &w.server.view_ctx());
@@ -327,7 +375,27 @@ fn spawn_doodad(w: &mut World) -> DoodadRef {
 fn buy_coin(w: &mut World) -> i16 {
     let mut s = PacketStream::new();
     s.write_bc(DOODAD_OBJ).write_u32(PURCHASE_FUNC_KEY);
-    run::<crate::systems::economy::store::CSBuyCoinItemPacket>(w, 0, s.as_bytes());
+    run::<CSBuyCoinItemPacket>(w, 0, s.as_bytes());
+    error_code(w, 0).unwrap_or(0)
+}
+
+fn buy_doodad(w: &mut World, unk_id: u32, item_id: u32, count: i32) -> i16 {
+    buy_doodad_at_grade(w, unk_id, item_id, 0, count)
+}
+
+fn buy_doodad_at_grade(w: &mut World, unk_id: u32, item_id: u32, grade: u8, count: i32) -> i16 {
+    let mut s = PacketStream::new();
+    s.write_bc(0)
+        .write_bc(DOODAD_OBJ)
+        .write_u32(unk_id)
+        .write_u8(1)
+        .write_u8(0)
+        .write_u32(item_id)
+        .write_u8(grade)
+        .write_i32(count)
+        .write_u8(0)
+        .write_bool(false);
+    run::<CSBuyItemsPacket>(w, 0, s.as_bytes());
     error_code(w, 0).unwrap_or(0)
 }
 
@@ -355,14 +423,210 @@ async fn a_failed_doodad_purchase_gives_the_claim_back() {
     let mut w = purchase_doodad_world(1, 5);
     let doodad = spawn_doodad(&mut w);
     let _ = doodad;
-    // No coin: the claim is taken and must be released when the consumption fails.
-    assert_eq!(buy_coin(&mut w), 27);
+    // No coin: the claim is taken and must be released when the consumption fails. The 1.2
+    // client's own dialog answers `not_enough_coin` (0x1e3 = 483) for this case.
+    assert_eq!(buy_coin(&mut w), 483);
     assert_eq!(purchased(&w, 1), 0);
     assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 0);
 
     give(&w, &w.pa, slot_type::INVENTORY, PURCHASE_COIN, 5, 0);
     assert_eq!(buy_coin(&mut w), 0);
     assert_eq!(purchased(&w, 1), 1);
+}
+
+#[test]
+fn buy_coin_item_body_is_bc_and_u32() {
+    use crate::net::registry::ClientPacket;
+    let mut s = PacketStream::new();
+    s.write_bc(DOODAD_OBJ).write_u32(PURCHASE_FUNC_KEY);
+    let p =
+        <CSBuyCoinItemPacket as ClientPacket>::read(&mut PacketStream::from_bytes(s.into_bytes()))
+            .unwrap();
+    assert_eq!(
+        p,
+        CSBuyCoinItemPacket {
+            obj_id: DOODAD_OBJ,
+            id: PURCHASE_FUNC_KEY
+        }
+    );
+}
+
+#[tokio::test]
+async fn coin_purchase_requires_the_purchase_func_of_the_current_phase() {
+    let mut w = purchase_doodad_world(0, 5);
+    // Group 501 is the doodad's current phase; the func belongs to 500.
+    let _d = spawn_doodad_at(&mut w, 501, 100.0);
+    give(&w, &w.pa, slot_type::INVENTORY, PURCHASE_COIN, 10, 0);
+    assert_eq!(buy_coin(&mut w), 0);
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 0);
+    assert_eq!(Inv::of(&w.pa).items_count(PURCHASE_COIN, -1), 10);
+}
+
+#[tokio::test]
+async fn coin_purchase_refuses_a_func_that_is_not_a_purchase() {
+    let mut w = purchase_doodad_world_with(0, PURCHASE_COIN, 5, 500, "DoodadFuncUse");
+    let _d = spawn_doodad(&mut w);
+    give(&w, &w.pa, slot_type::INVENTORY, PURCHASE_COIN, 10, 0);
+    assert_eq!(buy_coin(&mut w), 0);
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 0);
+    assert_eq!(Inv::of(&w.pa).items_count(PURCHASE_COIN, -1), 10);
+}
+
+#[tokio::test]
+async fn coin_purchase_refuses_the_money_form_of_the_func() {
+    let mut w = purchase_doodad_world_with(0, 0, 0, 500, "DoodadFuncPurchase");
+    let _d = spawn_doodad(&mut w);
+    assert_eq!(buy_coin(&mut w), 0);
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 0);
+}
+
+#[tokio::test]
+async fn coin_purchase_refuses_out_of_reach() {
+    let mut w = purchase_doodad_world(0, 5);
+    // 10 m away: the doodad store checkout range is 3 m.
+    let _d = spawn_doodad_at(&mut w, 500, 110.0);
+    give(&w, &w.pa, slot_type::INVENTORY, PURCHASE_COIN, 10, 0);
+    assert_eq!(buy_coin(&mut w), 154);
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 0);
+    assert_eq!(Inv::of(&w.pa).items_count(PURCHASE_COIN, -1), 10);
+}
+
+#[tokio::test]
+async fn a_money_priced_purchase_func_checkout_uses_the_func_id_in_unk() {
+    let mut w = purchase_doodad_world_with(0, 0, 0, 500, "DoodadFuncPurchase");
+    let _d = spawn_doodad(&mut w);
+    w.pa.data().money = 100;
+    assert_eq!(buy_doodad(&mut w, PURCHASE_FUNC_KEY, STACK, 1), 0);
+    assert_eq!(w.pa.data().money, 90);
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 1);
+}
+
+#[tokio::test]
+async fn a_money_purchase_func_checkout_refuses_another_item_or_func() {
+    let mut w = purchase_doodad_world_with(0, 0, 0, 500, "DoodadFuncPurchase");
+    let _d = spawn_doodad(&mut w);
+    w.pa.data().money = 100;
+
+    // Another template than the func's item is not sold by it.
+    assert_eq!(buy_doodad(&mut w, PURCHASE_FUNC_KEY, PURCHASE_COIN, 1), 0);
+    // No func id: no merchant catalog and no purchase func, so the checkout is refused.
+    assert_eq!(buy_doodad(&mut w, 0, STACK, 1), 0);
+    assert_eq!(w.pa.data().money, 100);
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 0);
+}
+
+#[tokio::test]
+async fn a_coin_priced_purchase_func_cannot_check_out_through_buy_items() {
+    let mut w = purchase_doodad_world(0, 5);
+    let _d = spawn_doodad(&mut w);
+    w.pa.data().money = 100;
+    assert_eq!(buy_doodad(&mut w, PURCHASE_FUNC_KEY, STACK, 1), 0);
+    assert_eq!(w.pa.data().money, 100);
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 0);
+    assert_eq!(Inv::of(&w.pa).items_count(PURCHASE_COIN, -1), 0);
+}
+
+#[tokio::test]
+async fn a_money_purchase_refuses_a_grade_the_func_does_not_offer() {
+    let mut w = purchase_doodad_world_with(0, 0, 0, 500, "DoodadFuncPurchase");
+    let _d = spawn_doodad(&mut w);
+    w.pa.data().money = 1_000_000;
+    // `STACK` has `fixed_grade = -1` and is not gradable, so the func offers basic (0). A
+    // forged grade-11 line would be bought at the template price and sold back for the grade-11
+    // refund multiplier instead.
+    assert_eq!(
+        buy_doodad_at_grade(&mut w, PURCHASE_FUNC_KEY, STACK, 11, 1),
+        0
+    );
+    assert_eq!(w.pa.data().money, 1_000_000);
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 0);
+
+    assert_eq!(
+        buy_doodad_at_grade(&mut w, PURCHASE_FUNC_KEY, STACK, 0, 1),
+        0
+    );
+    assert_eq!(w.pa.data().money, 999_990);
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 1);
+}
+
+#[tokio::test]
+async fn a_money_purchase_sells_whole_func_bundles() {
+    let mut w = purchase_doodad_world_full(0, 0, 0, 500, "DoodadFuncPurchase", STACK, 2, -1);
+    let _d = spawn_doodad(&mut w);
+    w.pa.data().money = 100;
+    // One item is half a bundle.
+    assert_eq!(buy_doodad(&mut w, PURCHASE_FUNC_KEY, STACK, 1), 0);
+    assert_eq!(w.pa.data().money, 100);
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 0);
+
+    // Two bundles: four items at the per-item template price.
+    assert_eq!(buy_doodad(&mut w, PURCHASE_FUNC_KEY, STACK, 4), 0);
+    assert_eq!(w.pa.data().money, 60);
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 4);
+}
+
+#[tokio::test]
+async fn a_coin_purchase_advances_the_doodad_to_the_func_next_phase() {
+    let mut w = purchase_doodad_world_full(
+        0,
+        PURCHASE_COIN,
+        5,
+        500,
+        "DoodadFuncPurchase",
+        STACK,
+        1,
+        501,
+    );
+    let doodad = spawn_doodad(&mut w);
+
+    // A failed purchase does not move the phase.
+    assert_eq!(buy_coin(&mut w), 483);
+    assert_eq!(doodad.data().func_group_id, 500);
+
+    give(&w, &w.pa, slot_type::INVENTORY, PURCHASE_COIN, 10, 0);
+    assert_eq!(buy_coin(&mut w), 0);
+    assert_eq!(doodad.data().func_group_id, 501);
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 1);
+    assert_eq!(Inv::of(&w.pa).items_count(PURCHASE_COIN, -1), 5);
+
+    // The func belonged to group 500: a replay after the move is refused.
+    assert_eq!(buy_coin(&mut w), 0);
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 1);
+    assert_eq!(Inv::of(&w.pa).items_count(PURCHASE_COIN, -1), 5);
+}
+
+#[tokio::test]
+async fn a_money_purchase_advances_the_doodad_to_the_func_next_phase() {
+    let mut w = purchase_doodad_world_full(0, 0, 0, 500, "DoodadFuncPurchase", STACK, 1, 501);
+    let doodad = spawn_doodad(&mut w);
+    w.pa.data().money = 100;
+    assert_eq!(buy_doodad(&mut w, PURCHASE_FUNC_KEY, STACK, 1), 0);
+    assert_eq!(doodad.data().func_group_id, 501);
+    assert_eq!(w.pa.data().money, 90);
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 1);
+}
+
+#[tokio::test]
+async fn a_failed_grant_after_the_coin_was_taken_gives_the_coin_back() {
+    // The purchased item is a backpack, so the auto-equip branch runs. A two-item bundle cannot
+    // be equipped (one backpack per back slot), so the grant fails after the coin was consumed
+    // and the coin must be refunded (`items.rs` `refund_coin`).
+    let mut w = purchase_doodad_world_full(
+        0,
+        PURCHASE_COIN,
+        5,
+        500,
+        "DoodadFuncPurchase",
+        PURCHASE_BACKPACK,
+        2,
+        -1,
+    );
+    let _d = spawn_doodad(&mut w);
+    give(&w, &w.pa, slot_type::INVENTORY, PURCHASE_COIN, 10, 0);
+    assert_eq!(buy_coin(&mut w), 315);
+    assert_eq!(Inv::of(&w.pa).items_count(PURCHASE_BACKPACK, -1), 0);
+    assert_eq!(Inv::of(&w.pa).items_count(PURCHASE_COIN, -1), 10);
+    assert_eq!(purchased(&w, 1), 0);
 }
 
 #[test]

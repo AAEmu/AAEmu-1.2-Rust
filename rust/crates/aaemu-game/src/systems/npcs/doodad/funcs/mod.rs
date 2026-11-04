@@ -49,6 +49,9 @@ pub mod error_message {
     pub const INTERACTION_RECOVER_PARENT: i16 = 14;
     pub const BAG_FULL: i16 = 25;
     pub const NOT_ENOUGH_ITEM: i16 = 27;
+    /// The 1.2 client's own message for a coin-item purchase it cannot afford
+    /// (`FUN_393bac20` sends `SCErrorMsg(0x1e3)` = `not_enough_coin`).
+    pub const NOT_ENOUGH_COIN: i16 = 483;
     pub const STORE_INVALID_ITEM: i16 = 87;
     pub const BAG_INVALID_ITEM: i16 = 181;
     pub const FAILED_TO_USE_ITEM: i16 = 207;
@@ -66,18 +69,21 @@ pub const ITEM_COINS: u32 = 500;
 
 /// `DoodadFunc.Use(caster, owner, skillId, nextPhase)` → the template's `Use`. Phase func
 /// templates (`is_phase_func`) have no `DoodadFuncTemplate.Use` and are ignored.
+///
+/// Returns `false` only when the func did not run or a `DoodadFuncPurchase` did not grant its
+/// item (the other funcs have no result the caller needs).
 pub fn use_func(
     t: &FuncTemplate,
     ctx: &DoodadCtx<'_>,
     caster: Option<&WorldObject>,
     skill_id: u32,
     next_phase: i32,
-) {
+) -> bool {
     let Some(_operation) = super::phase::Operation::enter(&ctx.doodad) else {
-        return;
+        return false;
     };
     if !super::gathering::allows_template(ctx.server, &ctx.doodad, t, skill_id, caster) {
-        return;
+        return false;
     }
     use FuncTemplate as F;
     match t {
@@ -86,7 +92,7 @@ pub fn use_func(
         F::LootPack(f) => items::loot_pack(f, ctx, caster, skill_id),
         F::RecoverItem(f) => items::recover_item(f, ctx, caster, skill_id, next_phase),
         F::RemoveItem(f) => items::remove_item(f, ctx, caster),
-        F::Purchase(f) => items::purchase(f, ctx, caster),
+        F::Purchase(f) => return items::purchase(f, ctx, caster),
         F::BuyFish(f) => items::buy_fish(f, ctx, caster),
         F::ConvertFish(f) => items::convert_fish_with_id(ctx, caster, f.id),
         F::CleanupLogicLink(_) => {
@@ -244,6 +250,7 @@ pub fn use_func(
             debug_assert!(t.is_phase_func());
         }
     }
+    true
 }
 
 // ---------------------------------------------------------------------------------------------
