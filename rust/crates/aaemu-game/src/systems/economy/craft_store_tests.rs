@@ -388,50 +388,50 @@ fn sc_expert_expanded_and_specialty_bytes() {
         results: vec![(PACK, 130), (GLIDER, 70)],
     };
     let mut want = PacketStream::new();
-    // 1.2 reader FUN_391822b0: from, to, count, then the pairs.
-    want.write_u16(5)
+    // 1.2 reader FUN_397b87c0: i32 count, u16 from, u16 to, then (u32 item, i32 ratio) pairs.
+    want.write_i32(2)
+        .write_u16(5)
         .write_u16(9)
-        .write_i32(2)
         .write_u32(PACK)
-        .write_u32(130)
+        .write_i32(130)
         .write_u32(GLIDER)
-        .write_u32(70);
+        .write_i32(70);
     assert_eq!(bytes(&p), want.into_bytes());
 }
 
 #[test]
 fn sc_specialty_goods_and_records_bytes() {
-    // 1.2 reader FUN_39185ba0: i32 count, then 16-byte `specialty_bundle_items` records
-    // (item_id, profit, ratio, specialty_bundle_id; loader FUN_396cadf0).
+    // 1.2 reader FUN_397aec90 + FUN_398a9e30: i32 count, then 10-byte records
+    // (u32 itemId, i32 refund, u8 Currency, u8 unknown).
     let goods = vec![SpecialtyGood {
         item_id: 26488,
-        profit: 12100,
-        ratio: 3273,
-        specialty_bundle_id: 13,
+        refund: 4321,
+        currency: 1,
+        unknown: 7,
     }];
     let mut want = PacketStream::new();
     want.write_i32(1)
         .write_u32(26488)
-        .write_u32(12100)
-        .write_u32(3273)
-        .write_u32(13);
+        .write_i32(4321)
+        .write_u8(1)
+        .write_u8(7);
     assert_eq!(bytes(&SCSpecialtyGoodsPacket { goods }), want.into_bytes());
 
-    // 1.2 reader FUN_39181ff0 reads the count at +0xc, two leading fields at +0x10/+0x14 and
-    // the records at +0x18 (it discards them; 10.x record layout: i32 ratio, i64 timestamp).
+    // 1.2 reader FUN_397b3930 + FUN_3961edb0: i32 zoneId, u32 itemId, i32 count,
+    // then (i32 ratio, u64 recorded) records.
     let records = vec![SpecialtyRecord {
         ratio: 128,
         recorded: 1_700_000_000,
     }];
     let mut want = PacketStream::new();
-    want.write_i32(1)
-        .write_u16(22)
+    want.write_i32(22)
         .write_u32(26488)
+        .write_i32(1)
         .write_i32(128)
-        .write_i64(1_700_000_000);
+        .write_u64(1_700_000_000);
     assert_eq!(
         bytes(&SCSpecialtyRecordsPacket {
-            zone_group_id: 22,
+            zone_id: 22,
             item_id: 26488,
             records,
         }),
@@ -1933,40 +1933,23 @@ async fn sell_trade_pack_refused_without_mail() {
 }
 
 #[tokio::test]
-async fn list_specialty_goods_answers_with_the_npc_bundle() {
+async fn list_specialty_goods_answers_empty_until_the_content_is_evidenced() {
     let mut w = world();
     spawn_npc(&mut w, TRADER_NPC, 4321, 102.0);
-    let mut s = PacketStream::new();
-    s.write_bc(TRADER_NPC);
-    run::<CSListSpecialtyGoodsPacket>(&mut w, 0, s.as_bytes());
-    let f = w.a.drain();
-    assert_eq!(f.len(), 1);
-    assert_eq!(f[0].0, sc::SCSpecialtyGoodsPacket);
-    assert_eq!(
-        f[0].1,
-        bytes(&SCSpecialtyGoodsPacket {
-            goods: vec![SpecialtyGood {
-                item_id: PACK,
-                profit: 5000,
-                ratio: 1200,
-                specialty_bundle_id: 77,
-            }],
-        })
-    );
-
-    // A non-specialty NPC still gets the (empty) answer.
-    let mut s = PacketStream::new();
-    s.write_bc(0x777777);
-    run::<CSListSpecialtyGoodsPacket>(&mut w, 0, s.as_bytes());
-    let f = w.a.drain();
-    assert_eq!(
-        f,
-        vec![(sc::SCSpecialtyGoodsPacket, 0i32.to_le_bytes().to_vec())]
-    );
+    for obj_id in [TRADER_NPC, 0x777777] {
+        let mut s = PacketStream::new();
+        s.write_bc(obj_id);
+        run::<CSListSpecialtyGoodsPacket>(&mut w, 0, s.as_bytes());
+        let f = w.a.drain();
+        assert_eq!(
+            f,
+            vec![(sc::SCSpecialtyGoodsPacket, 0i32.to_le_bytes().to_vec())]
+        );
+    }
 }
 
 #[tokio::test]
-async fn specialty_ratio_reply_carries_the_sale_record_history() {
+async fn specialty_ratio_reply_does_not_send_the_discarded_records_packet() {
     let mut w = world();
     let mailer = Arc::new(Mailer::default());
     w.server.systems.economy.store.hooks.install(mailer);
@@ -1987,22 +1970,14 @@ async fn specialty_ratio_reply_carries_the_sale_record_history() {
     run::<CSSellBackpackGoodsPacket>(&mut w, 0, s.as_bytes());
     assert_eq!(w.a.drain().len(), 3);
 
-    // The client asks for the equipped pack's rate; the answer now also carries the history.
+    // The trader-talk 0x43 answer is only SCSpecialtyRatio: the 1.2 client discards 0x9b.
     let mut s = PacketStream::new();
     s.write_u32(PACK);
     run::<CSSpecialtyRatioPacket>(&mut w, 0, s.as_bytes());
-    let f = w.a.drain();
-    assert_eq!(f.len(), 2);
-    assert_eq!(f[0].0, sc::SCSpecialtyRatioPacket);
-    assert_eq!(f[0].1, 130i32.to_le_bytes().to_vec());
-    assert_eq!(f[1].0, sc::SCSpecialtyRecordsPacket);
-    let mut s = PacketStream::from_bytes(f[1].1.clone());
-    assert_eq!(s.read_i32().unwrap(), 1);
-    assert_eq!(s.read_u16().unwrap(), 0); // the test world has no zone groups
-    assert_eq!(s.read_u32().unwrap(), PACK);
-    assert_eq!(s.read_i32().unwrap(), 130);
-    assert!(s.read_i64().unwrap() > 0);
-    assert_eq!(s.remaining(), 0);
+    assert_eq!(
+        w.a.drain(),
+        vec![(sc::SCSpecialtyRatioPacket, 130i32.to_le_bytes().to_vec())]
+    );
 }
 
 #[tokio::test]
@@ -2133,6 +2108,20 @@ async fn specialty_sale_sends_the_configured_negotiation_bonus() {
         .drain()
         .iter()
         .any(|(op, body)| *op == sc::SCErrorMsgPacket && *body == err_bytes(626, 626, 0, true)));
+
+    // An out-of-range setting is clamped to 0..100: 100% -> 9100 bonus, total 18655.
+    w.server
+        .config
+        .update(|c| c.specialty.negotiation_bonus_percent = 250.0);
+    pa.data().labor_power = 200;
+    give(&w, &pa, slot_type::EQUIPMENT, PACK, 1, equip_slot::BACKPACK);
+    let mut s = PacketStream::new();
+    s.write_bc(TRADER_NPC);
+    run::<CSSellBackpackGoodsPacket>(&mut w, 0, s.as_bytes());
+    let mails = mailer.0.lock().unwrap().clone();
+    assert_eq!(mails.len(), 2);
+    assert_eq!(mails[1].item_count_bonus, 9100);
+    assert_eq!(mails[1].item_count_for_seller, 18655);
 }
 
 #[tokio::test]

@@ -169,9 +169,9 @@ fn packets_are_byte_exact() {
         128i32.to_le_bytes().to_vec()
     );
     let mut e = Vec::new();
+    e.extend_from_slice(&2i32.to_le_bytes());
     e.extend_from_slice(&22u16.to_le_bytes());
     e.extend_from_slice(&5u16.to_le_bytes());
-    e.extend_from_slice(&2i32.to_le_bytes());
     for v in [PACK, 130, 26489, 99] {
         e.extend_from_slice(&v.to_le_bytes());
     }

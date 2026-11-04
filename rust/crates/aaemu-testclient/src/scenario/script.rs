@@ -1093,11 +1093,11 @@ async fn run_lines(
                 println!("    SCSpecialtyGoods count {count}");
                 for i in 0..count.max(0) {
                     let item = s.read_u32()?;
-                    let profit = s.read_u32()?;
-                    let ratio = s.read_u32()?;
-                    let bundle = s.read_u32()?;
+                    let refund = s.read_i32()?;
+                    let currency = s.read_u8()?;
+                    let unknown = s.read_u8()?;
                     println!(
-                        "      good {i}: item {item} profit {profit} ratio {ratio} bundle {bundle}"
+                        "      good {i}: item {item} refund {refund} currency {currency} unknown {unknown}"
                     );
                 }
             }

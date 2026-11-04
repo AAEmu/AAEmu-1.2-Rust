@@ -421,7 +421,7 @@ connected by `systems::economy::wiring`).
 | `LootGameData`, `Models/Game/Items/Loots/**`, `LootingContainer`, loot packets | `systems/economy/{loot_data,loot,looting,loot_packets}.rs` | done | NPC death / despawn / team rules through `LootNpcHooks`, `LootTeamHooks`, `LootQuestHooks`. |
 | Repair (`Character.DoRepair`, `CSRepairSingleEquipment`, `CSRepairAllEquipments`), durability loss | `systems/economy/repair.rs` | done | Combat calls `on_damage_taken` / `on_death`. |
 | `CraftManager`, `Models/Game/Crafts`, `CharacterCraft`, `CraftTask`, `CSExecuteCraft`, `SCCraftFailed` | `systems/economy/{craft,craft_data}.rs` | done | Cast through `CraftHooks::start_craft_cast`; skills call `craft::end_craft`. |
-| Stores (`CSBuyItems`, `CSSellItems`, buy-back, `CSListSoldItem`, `CSBuyPriestBuff`, `CSBuyCoinItem`, `CSSellBackpackGoods`), `SpecialtyManager`, `TaxationsManager`, `ExpandExpert`, item look conversion | `systems/economy/{store,store_data,specialty}.rs` | done | Merchant packs / NPC flags through `NpcEconomyHooks`. Checkout validates currency, checked totals and each balance, then stages complete goods / buy-back delivery before committing payment. Vocation charges the configured price displayed by the 1.2 shop, without earnings bonuses. Rejected checkout preserves items and balances. Purchases need an NPC merchant pack, a doodad `DoodadFuncStoreUi` pack, or the money form of the doodad's current-phase `DoodadFuncPurchase` (`CSBuyItems.unkId`, the `doodad_funcs` row id the 1.2 client writes there), and filter the goods by it; selling needs a merchant within 3 m, lists each item once and pays only for items moved to buy-back. Specialty: the `CSListSpecialtyGoods` answer, the ratio history policy and the corrected sale values are detailed in the specialty protocol note. |
+| Stores (`CSBuyItems`, `CSSellItems`, buy-back, `CSListSoldItem`, `CSBuyPriestBuff`, `CSBuyCoinItem`, `CSSellBackpackGoods`), `SpecialtyManager`, `TaxationsManager`, `ExpandExpert`, item look conversion | `systems/economy/{store,store_data,specialty}.rs` | done | Merchant packs / NPC flags through `NpcEconomyHooks`. Checkout validates currency, checked totals and each balance, then stages complete goods / buy-back delivery before committing payment. Vocation charges the configured price displayed by the 1.2 shop, without earnings bonuses. Rejected checkout preserves items and balances. Purchases need an NPC merchant pack, a doodad `DoodadFuncStoreUi` pack, or the money form of the doodad's current-phase `DoodadFuncPurchase` (`CSBuyItems.unkId`, the `doodad_funcs` row id the 1.2 client writes there), and filter the goods by it; selling needs a merchant within 3 m, lists each item once and pays only for items moved to buy-back. Specialty: the empty `CSListSpecialtyGoods` answer, the dropped records packet and the corrected sale values are detailed in the specialty protocol note. |
 | `MailManager`, `Models/Game/Mails/**`, `CharacterMails`, mail packets | `systems/economy/{mail,mail_character,mail_kinds,mail_packets,mail_data}.rs` | done | Saved in `SaveStage::BeforeItems`; housing tax through `MailHousingHooks`. |
 | `AuctionManager`, `Models/Game/Auction/**`, auction packets | `systems/economy/{auction,auction_data,auction_packets}.rs` | done | Saved in `SaveStage::AfterItems`; results mailed through `wiring`. Requests require an auctioneer NPC (the `auctioneer` template flag) named by the packet or the current interaction object within 5 m (the C# ignored the ids). |
 | `TradeManager`, trade packets | `systems/economy/trade.rs` | done | The C# `CanStartTrade` TODO ("Check faction and others") is implemented from the 1.2 client's own checks: a request and its acceptance refuse a dead player, a hostile faction relation and a distance `>= sqrt(25) = 5` m, and a trade across instances; see the trade validation deviation. |
@@ -1915,8 +1915,8 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   1.2 client never sends them. The `Specialty` config section is now read at startup (ratios,
   ticks and `TradePackMailDelayInMinutes`), so those values no longer come from the C# defaults
   alone. `CSSpecialtyRecordLoadPacket` is still not registered: the 1.2 client has no request
-  opcode for the history; the server sends `SCSpecialtyRecordsPacket` with the
-  `CSSpecialtyRatioPacket` answer (see the specialty protocol note below).
+  opcode for the history, and the server deliberately sends no `SCSpecialtyRecordsPacket`
+  (the client discards it; see the specialty protocol note below).
 * systems::economy (native 1.2 protocol, 2026-10-25): correction to the preceding ReturnMail
   claim: the Return button (`read_mail.lua:946`) calls `ReturnMailById` (`3948B630` ->
   `393CD290`), which sends opcode `0xa3` with an i64 mail id (`397BA450`). The preserved
@@ -1928,43 +1928,41 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * systems::economy (specialty goods / records / sale values, 2026-11-04):
   - `CSListSpecialtyGoodsPacket` (0x044, sent by the 1.2 client's check-goods skill /
     `FUN_393bf840` with the interacted NPC object id) now answers `SCSpecialtyGoodsPacket`
-    (0x09a). The 1.2 reader `FUN_39185ba0` reads an `i32` count and at most 20 (`0x14`) inline
-    16-byte records, validates each record's first `u32` as an item id, and `FUN_394fcaa0` copies
-    them with a 16-byte stride. The 16-byte record is the client's own
-    `specialty_bundle_items` row (`FUN_396cadf0`: `item_id`, `profit`, `ratio`,
-    `specialty_bundle_id`), so the answer lists the interacted NPC's
-    `specialty_npcs.specialty_bundle_id` rows, ordered by bundle-item id. The 1.2 client stores
-    the vector but no UI reader was found (the goods list is dropped), so this is protocol
-    completeness backed by the parser, not a visible UI.
-  - `SCSpecialtyRecordsPacket` (0x09b) is sent with the `CSSpecialtyRatioPacket` (0x043) answer
-    for the requested pack (falling back to the equipped pack). The 1.2 reader `FUN_39181ff0`
-    reads the count at body +0x0, two leading fields at +0x4/+0x8 and the records at +0x0c, but
-    discards them (`FUN_394fb300` is an empty stub); the wire fields are the 10.x reference's
-    `i32 count`, `u16 zone group`, `u32 item id`, then `i32 ratio` / `i64 UTC` records. Sales
-    append one record per sold pack (the price ratio actually paid) to the new
-    `specialty_market_records` table (loaded at startup, written in `SaveStage::AfterItems`).
-  - `SCSpecialtyCurrentPacket` (0x1f4) order corrected to the 1.2 reader (`FUN_391822b0`):
-    `u16 from`, `u16 to`, `i32 count`, pairs. The C# 1.2 wrote the count first; the client
-    reader wins, and the server and both byte tests use the reader order.
-  - Sale labor now applies the 1.2 `Actability.GetLaborCostMultiplier` table (Commerce step,
+    (0x09a). The 1.2 reader `FUN_397aec90` reads an `i32` count (capped at 20) and calls
+    `FUN_398a9e30` per record: `u32 itemId`, `i32 refund`, 1-byte `Currency`, 1-byte unknown
+    (10 bytes on the wire). The list content is not evidenced, so the server sends an empty
+    list (count 0) until a capture shows which goods/prices belong there.
+  - `SCSpecialtyRecordsPacket` (0x09b) is **not sent**: its 1.2 reader `FUN_397b3930` is
+    `i32 zoneId`, `u32 itemId`, `i32 count` (capped at 256), then `FUN_3961edb0` records
+    (`i32 ratio`, `u64 recorded`), but the body is discarded (`FUN_394fb300` is an empty stub).
+    Keeping the captured trader-talk sequence exact therefore means no 0x9b on the 0x043
+    answer; the packet type and its reader-layout byte test remain for completeness. No
+    price-history table is kept.
+  - `SCSpecialtyCurrentPacket` (0x1f4) stays in the 1.2 reader's order (`FUN_397b87c0`):
+    `i32 count`, `u16 from`, `u16 to`, then (`u32 itemId`, `i32 ratio`) pairs — the same order
+    the 1.2 C# used; the earlier "reader order" note in this branch was wrong.
+  - Sale labor applies the 1.2 `Actability.GetLaborCostMultiplier` table (Commerce step,
     1.00/1.00/0.95/0.90/0.85/0.80/0.77/0.77) to the C# flat 60, never below 1; the generic
-    1.2 skill path applies the same table (`Skill.cs:1394`).
+    1.2 skill path applies the same table (`Skill.cs:1394`). **Capture-pending (LABOR-1):**
+    the 1.2 C# charged the flat 60 for a pack sale, so using the table on this path is a
+    server choice, not a captured retail rule.
   - `BackpackProfitShare` is read from the global runtime `FeaturesManager.Fsets`
     (`server.systems.services.features`), not `FeatureSet::default()`; the 1.2 sell / mail UI
     reads the same bit via `X2Player.GetFeatureSet("backpackProfitShare")`.
   - The crafter id remains the item's `made_unit_id` (the only 1.2 carrier: the craft path
     stores the crafting `character_id` there). The seller and crafter mail titles use the
     1.2 client `ui_texts` keys `sell_backpack_title` / `mail_sell_backpack_title_seller` /
-    `mail_sell_backpack_title_crafter` from `localized_texts`, with the C# English strings as
-    the fallback. A sold pack with a crafter is now covered by a flow test through the real
-    mail bridge (`sold_pack_with_a_crafter_delivers_the_crafter_mail`).
+    `mail_sell_backpack_title_crafter` from `localized_texts`, with the English C# strings as
+    the fallback (never the untranslated `ui_texts.text` column). A sold pack with a crafter
+    is covered by a flow test through the real mail bridge
+    (`sold_pack_with_a_crafter_delivers_the_crafter_mail`).
   - **Capture-pending (NEGOTIATION-1):** the 1.2 client `ui_texts` (`sell_backpack_body2`,
     `bargaining_money`, `SPECIALTY_MARGIN` 626 / `SPECIALTY_COIN_MARGIN` 677) prove a Commerce-
     proficiency bargaining bonus and its notice mails, but no formula, threshold or percentage
     is evidenced in the 1.2 client or data. `Specialty:NegotiationBonusPercent` (default 0,
-    the C# behaviour) applies a configured percentage to the pre-interest sale price; the
-    bonus, its mail field and the 626/677 notices are implemented, the retail numbers are not
-    claimed.
+    clamped to 0..100, the C# behaviour) applies a configured percentage to the pre-interest
+    sale price; the bonus, its mail field and the 626/677 notices are implemented, the retail
+    numbers are not claimed.
 * systems::services: authenticated `CSRequestCharBriefPacket` and `CSCharDetailPacket` requests
   return online character profiles through the existing 1.2 outbound formats (the C# inbound
   handlers only logged). Offline, absent and unauthenticated requests receive no reply; offline

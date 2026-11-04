@@ -46,7 +46,7 @@ impl MailData {
         // `mail_sell_backpack_title_seller` / `_crafter`); `localized_texts` holds the per
         // language text for `tbl_name = 'ui_texts'`, `tbl_column_name = 'text'`.
         let sql = format!(
-            "SELECT t.`key` AS k, COALESCE(NULLIF(l.\"{}\", ''), t.`text`) AS txt \
+            "SELECT t.`key` AS k, l.\"{}\" AS txt \
              FROM `ui_texts` t LEFT JOIN `localized_texts` l \
              ON l.`tbl_name` = 'ui_texts' AND l.`tbl_column_name` = 'text' AND l.`idx` = t.`id`",
             ctx.language.replace('"', "")
@@ -88,5 +88,28 @@ fn get(map: &HashMap<u32, String>, idx: u32, fallback: &str) -> String {
     match map.get(&idx) {
         Some(t) if !t.is_empty() => t.clone(),
         _ => fallback.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MailData;
+
+    #[test]
+    fn empty_or_missing_ui_text_falls_back_to_the_english_string() {
+        let mut d = MailData::default();
+        d.ui_texts
+            .insert("mail_sell_backpack_title_seller".into(), String::new());
+        assert_eq!(
+            d.ui_text(
+                "mail_sell_backpack_title_seller",
+                "Specialty Payment [Delivery]"
+            ),
+            "Specialty Payment [Delivery]"
+        );
+        assert_eq!(
+            d.ui_text("missing_key", "Specialty Payment"),
+            "Specialty Payment"
+        );
     }
 }
