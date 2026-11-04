@@ -3309,6 +3309,7 @@ async fn private_mysql_pirate_last_member_dismissal_persists_nation_and_dominion
             owner_expedition_id: 77,
             ownership_generation: 1,
             reign_start_at: 100,
+            claimed_at: 0,
             last_siege_end_at: 0,
             tax_rate: 0,
             national_tax_rate: 0,
