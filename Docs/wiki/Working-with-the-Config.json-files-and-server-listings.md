@@ -239,6 +239,43 @@ The grant has its own end date; the configured default does not. The grant
 writes the account row and pushes `SCAccountInfo` and `SCUpdatePremiumPoint`
 to the account.
 
+## Account restrictions and idle kick (`Account:Restrictions`, `Account:IdleKickTime`)
+
+`SCInitialConfig` carries seven `canXxx` booleans and an `idleKickTime` value. The 1.2 client
+only uses the booleans to gate its own UI (place house, pay tax, auction, trade, mail, bank,
+copper); the server has no restriction store and does not enforce them. They are configured per
+effective payment method, and every default is `true` (the bytes the server sent before these
+settings existed):
+
+```json
+{
+  "Account": {
+    "Restrictions": {
+      "Premium": { "CanTrade": true },
+      "Demo": {
+        "CanPlaceHouse": false,
+        "CanUseAuction": false,
+        "CanTrade": false,
+        "CanUseCopper": false
+      },
+      "None": {}
+    },
+    "IdleKickTime": 0
+  }
+}
+```
+
+A flag that is not listed keeps its default (`true`). The per-method source is inferred
+(`ACCOUNT-RESTRICT-1`, capture-pending); the client reader only names the flags.
+
+`IdleKickTime` is the raw `u16` sent to the client (`0` = off). Its unit is **UNKNOWN**: the
+client performs the idle kick itself and the `CGame::Update` consumer was not located, so it is
+not documented as minutes or seconds. The server never kicks an idle player and sends no
+`SCIdleKick`. The default `0` keeps the previous bytes.
+
+Both settings can be overridden in `Config.Local.json` or with the environment variables
+`Account__IdleKickTime` and e.g. `Account__Restrictions__Demo__CanTrade`.
+
 ## Web API authentication and migration
 
 The game Web API now defaults to `127.0.0.1:1280`. Only `GET /status` is

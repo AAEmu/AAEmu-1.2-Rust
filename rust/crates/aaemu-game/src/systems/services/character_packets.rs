@@ -758,7 +758,10 @@ impl ClientPacket for CSUpdateActionSlotPacket {
     }
 }
 
-/// `CSRestrictCheckPacket`.
+/// `CSRestrictCheckPacket`. This is the client's generic restriction check (answered with
+/// `SCResultRestrictCheckPacket`); the unrelated `SCRestrictInfo` 0x1c8 is a per-character
+/// penalty record (chat ban etc.) and has no server-side store, so it is not sent (WP-J,
+/// `ACCOUNT-SCRESTRICTINFO-1`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CSRestrictCheckPacket {
     pub character_id: u32,

@@ -1463,6 +1463,86 @@ async fn speciality_coin_text_and_crafter() {
 }
 
 #[tokio::test]
+async fn speciality_mail_titles_use_the_localized_ui_texts() {
+    let server = Arc::new(crate::test_support::test_server_with({
+        let mut d = crate::systems::economy::tests::test_data();
+        d.items.templates.insert(
+            mail::ITEM_COINS,
+            crate::data::items::ItemTemplate::plain(mail::ITEM_COINS, 1_000_000),
+        );
+        d.systems
+            .economy
+            .mail
+            .ui_texts
+            .insert("sell_backpack_title".into(), "Lokale Zahlung".into());
+        d.systems.economy.mail.ui_texts.insert(
+            "mail_sell_backpack_title_seller".into(),
+            "Lokale Lieferung".into(),
+        );
+        d.systems.economy.mail.ui_texts.insert(
+            "mail_sell_backpack_title_crafter".into(),
+            "Lokaler Hersteller".into(),
+        );
+        d
+    }));
+    server.names.add_character(1, "Alice", 1001);
+    server.names.add_character(3, "Carl", 1003);
+    let client = crate::test_support::TestClient::new(&server, 1, 1001);
+    let alice = crate::test_support::spawn_player(
+        &server,
+        &client,
+        crate::test_support::test_character(1, "Alice", 100.0, 100.0),
+        0x100,
+    );
+    let mut txn = ItemTxn::begin(&server);
+    let mut plain = MailForSpeciality::new(
+        &server,
+        &alice,
+        0,
+        9000,
+        130,
+        mail::ITEM_COINS,
+        1000,
+        0,
+        1300,
+        0,
+        5,
+    );
+    assert!(plain.finalize_for_seller(&mut txn));
+    assert_eq!(plain.mail.title, "Lokale Zahlung");
+    let mut seller = MailForSpeciality::new(
+        &server,
+        &alice,
+        3,
+        9000,
+        130,
+        mail::ITEM_COINS,
+        1000,
+        0,
+        900,
+        400,
+        5,
+    );
+    assert!(seller.finalize_for_seller(&mut txn));
+    assert_eq!(seller.mail.title, "Lokale Lieferung");
+    let mut crafter = MailForSpeciality::new(
+        &server,
+        &alice,
+        3,
+        9000,
+        130,
+        mail::ITEM_COINS,
+        1000,
+        0,
+        900,
+        400,
+        5,
+    );
+    assert!(crafter.finalize_for_crafter(&mut txn));
+    assert_eq!(crafter.mail.title, "Lokaler Hersteller");
+}
+
+#[tokio::test]
 async fn quest_reward_mails_split_by_ten() {
     let w = mail_world();
     let defs = [

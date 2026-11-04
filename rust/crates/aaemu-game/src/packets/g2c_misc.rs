@@ -46,7 +46,8 @@ simple_packet!(
 );
 
 simple_packet!(
-    /// `SCIdleKickPacket()` (empty body).
+    /// `SCIdleKickPacket()` (empty body). Never sent: the 1.2 client reader `FUN_39184540` is
+    /// empty and the client kicks itself from `SCInitialConfig.idleKickTime` (WP-J).
     SCIdleKickPacket {}
 );
 
