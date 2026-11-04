@@ -365,7 +365,7 @@ connected by `systems::economy::wiring`).
 | `LootGameData`, `Models/Game/Items/Loots/**`, `LootingContainer`, loot packets | `systems/economy/{loot_data,loot,looting,loot_packets}.rs` | done | NPC death / despawn / team rules through `LootNpcHooks`, `LootTeamHooks`, `LootQuestHooks`. |
 | Repair (`Character.DoRepair`, `CSRepairSingleEquipment`, `CSRepairAllEquipments`), durability loss | `systems/economy/repair.rs` | done | Combat calls `on_damage_taken` / `on_death`. |
 | `CraftManager`, `Models/Game/Crafts`, `CharacterCraft`, `CraftTask`, `CSExecuteCraft`, `SCCraftFailed` | `systems/economy/{craft,craft_data}.rs` | done | Cast through `CraftHooks::start_craft_cast`; skills call `craft::end_craft`. |
-| Stores (`CSBuyItems`, `CSSellItems`, buy-back, `CSListSoldItem`, `CSBuyPriestBuff`, `CSBuyCoinItem`, `CSSellBackpackGoods`), `SpecialtyManager`, `TaxationsManager`, `ExpandExpert`, item look conversion | `systems/economy/{store,store_data,specialty}.rs` | done | Merchant packs / NPC flags through `NpcEconomyHooks`. Checkout validates currency, checked totals and each balance, then stages complete goods / buy-back delivery before committing payment. Vocation charges the configured price displayed by the 1.2 shop, without earnings bonuses. Rejected checkout preserves items and balances. Purchases need an NPC merchant pack or a doodad `DoodadFuncStoreUi` pack and filter the goods by it; selling needs a merchant within 3 m, lists each item once and pays only for items moved to buy-back. |
+| Stores (`CSBuyItems`, `CSSellItems`, buy-back, `CSListSoldItem`, `CSBuyPriestBuff`, `CSBuyCoinItem`, `CSSellBackpackGoods`), `SpecialtyManager`, `TaxationsManager`, `ExpandExpert`, item look conversion | `systems/economy/{store,store_data,specialty}.rs` | done | Merchant packs / NPC flags through `NpcEconomyHooks`. Checkout validates currency, checked totals and each balance, then stages complete goods / buy-back delivery before committing payment. Vocation charges the configured price displayed by the 1.2 shop, without earnings bonuses. Rejected checkout preserves items and balances. Purchases need an NPC merchant pack, a doodad `DoodadFuncStoreUi` pack, or the money form of the doodad's current-phase `DoodadFuncPurchase` (`CSBuyItems.unkId`, the `doodad_funcs` row id the 1.2 client writes there), and filter the goods by it; selling needs a merchant within 3 m, lists each item once and pays only for items moved to buy-back. |
 | `MailManager`, `Models/Game/Mails/**`, `CharacterMails`, mail packets | `systems/economy/{mail,mail_character,mail_kinds,mail_packets,mail_data}.rs` | done | Saved in `SaveStage::BeforeItems`; housing tax through `MailHousingHooks`. |
 | `AuctionManager`, `Models/Game/Auction/**`, auction packets | `systems/economy/{auction,auction_data,auction_packets}.rs` | done | Saved in `SaveStage::AfterItems`; results mailed through `wiring`. Requests require an auctioneer NPC (the `auctioneer` template flag) named by the packet or the current interaction object within 5 m (the C# ignored the ids). |
 | `TradeManager`, trade packets | `systems/economy/trade.rs` | done | The C# `CanStartTrade` TODO ("Check faction and others") is implemented from the 1.2 client's own checks: a request and its acceptance refuse a dead player, a hostile faction relation and a distance `>= sqrt(25) = 5` m, and a trade across instances; see the trade validation deviation. |
@@ -3219,6 +3219,44 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   argument and the third `body(…)` argument, nothing else touched, idempotent) and marks them
   dirty so the next save persists the fix.
 
+* systems::npcs (doodad phase packet, 2026-11-03): the C# `CSChangeDoodadPhasePacket` only
+  logged a warning, so a `DoodadFuncBubble` / `DoodadFuncOpenPaper` never advanced the phase. The
+  1.2 client sends the packet itself once its own bubble / paper UI finishes, with body
+  `bc objId`, `u32 skill`, `u32 nextPhase`, `u32 funcId` (`doodad_funcs.id`; writer
+  `FUN_397bbbb0`, builder `FUN_397ac8d0`, senders `FUN_393b8240` / `FUN_393b8450`, and only
+  when the func row's `next_phase > 0`). Rust accepts it only for a Bubble / OpenPaper func of
+  the doodad's current phase group whose `next_phase` equals the sent value, from a live caster
+  and a doodad not scheduled for despawn, and then runs the normal `DoChangePhase` (phase funcs
+  + `SCDoodadPhaseChangedPacket`). The reach check uses the func's own skill only when that
+  skill is known and has a positive range; a skill-less, unknown or unbounded func gets the
+  5 m doodad interaction distance (`portal::NAVI_USE_RANGE`, also `looting::LOOT_TAKE_RANGE`)
+  plus the doodad allowance the cast target check uses. The packet's client-chosen `skill` is
+  never used (Bubble funcs 6279, 9407 and 9965 carry no skill, and the field is client input).
+  **Deviation:** the C# moved nothing; every refusal is debug-logged and silent (the client
+  sends only after its own successful use).
+* systems::economy (doodad purchase, 2026-11-03): `CSBuyCoinItemPacket` names a `doodad_funcs`
+  row (`bc objId` + `u32 funcId`; writer `FUN_397bae00`) and now only runs a
+  `DoodadFuncPurchase` of the doodad's current phase that is priced in a coin item
+  (`coin_item_id > 0`, `coin_count >= 1`) within the 3 m doodad store range; the phase check and
+  the purchase run under the doodad's phase-operation guard. `FUN_393b80d0`
+  (`x2game.dll.c:774526`) opens a purchase dialog in both branches: the money form (vtable
+  `399d3158`) when the purchase's coin item is the sentinel or its coin count is below one, the
+  coin form (vtable `399d3178`) otherwise; only the coin form sends `CSBuyCoinItemPacket` (0x0af)
+  and it shows `not_enough_coin` (483) when the bag lacks the coins. Rust answers the shortage
+  with 483 (the C# used `NotEnoughItem` 27) and returns the coin if the grant still fails. The
+  money form of the same func (`coin_item_id == 0`) checks out through `CSBuyItemsPacket`, whose
+  `unkId` holds the func id (`FUN_393b8040` / `FUN_397ac3f0`, writer `FUN_397bac90`): Rust sells
+  that func's own `item_id` at its template price, requires the grade the func offers
+  (`fixed_grade` when the template has one, else basic 0) and a count that is a whole multiple
+  of the func row's count, and holds the doodad's phase-operation guard through the checkout.
+  Without the grade rule a forged high-grade line was bought at the template price and sold
+  back at the grade's refund multiplier (item 8661: 64 500 price, 32 250 x 6 refund at grade
+  11). The C# left `unkId` unused, used the client grade unchecked and executed whatever func
+  id `CSBuyCoinItemPacket` named. After a granted purchase both paths advance to the func's
+  `next_phase` through `DoChangePhase` (301 of the 468 purchase rows carry `next_phase > 0`,
+  e.g. `doodad_funcs.id` 10159 -> group 11449); the C# never advanced because
+  `DoodadFuncPurchase.Use` set no `ToNextPhase` and the coin packet called the template
+  directly. **Deviation:** that advance is added behaviour, not a C# port.
 * systems::economy (shop limits, 2026-11-03): the `DoodadFuncPurchase` path claims the purchase
   limit, debits the coins and grants the item as three separate steps; they share the economy
   operation scope but not one `ItemTxn`, so a crash between them can lose the coin and the
