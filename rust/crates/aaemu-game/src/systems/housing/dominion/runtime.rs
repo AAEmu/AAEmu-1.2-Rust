@@ -904,6 +904,10 @@ pub fn tick_once(server: &GameServer) {
         apply_tower_state(server, &state);
         crate::systems::social::dominion::broadcast_phase_change(server, &state);
     }
+    // Defender reinforcement waves (WP-S4): start(siege) + the authored `bdm`, announced once
+    // through `SCSiegeReinforce`. The authority check-and-sets the persisted flag, so a
+    // repeated or restarted tick cannot repeat the packet.
+    super::reinforce::tick(server, real_now);
     // Calendar phases. Broadcasts above (and those outside the tick) record the period they
     // sent, so only a period that was not announced yet produces a transition here.
     let calendar_now = server.systems.housing.calendar.now();

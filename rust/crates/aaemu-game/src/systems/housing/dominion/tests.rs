@@ -40,6 +40,32 @@ fn destroyed_siege() -> DominionManager {
     manager
 }
 
+/// A destroyed siege with non-native frozen limits and the reinforcement wave announced, so a
+/// MySQL round trip proves the persisted `siege_reinforced` bool and `ni`/`nr` columns.
+fn destroyed_reinforced_siege() -> DominionManager {
+    let manager = owned();
+    manager
+        .schedule_siege_with_limits(
+            ZONE,
+            ATTACKER,
+            2000,
+            3000,
+            1500,
+            SiegeLimits { ni: 50, nr: 70 },
+        )
+        .unwrap();
+    manager
+        .register_participant(ZONE, 11, ATTACKER, SiegeSide::Attacker, 1500)
+        .unwrap();
+    manager
+        .register_participant(ZONE, 12, DEFENDER, SiegeSide::Defender, 1500)
+        .unwrap();
+    manager.mark_tower_destroyed(ZONE, tower(), 2000).unwrap();
+    let siege_id = manager.state(ZONE).unwrap().siege.unwrap().siege_id;
+    manager.mark_reinforced(ZONE, siege_id, 2000, 2000).unwrap();
+    manager
+}
+
 #[test]
 fn claim_consumption_is_atomic_and_never_fabricates_treasury_or_schedule() {
     let manager = DominionManager::default();
@@ -697,7 +723,7 @@ async fn private_mysql_dominion_rollback_failure_retry_and_restart_preserve_auth
             .await
             .unwrap();
     }
-    let manager = destroyed_siege();
+    let manager = destroyed_reinforced_siege();
     let old_channel = manager
         .begin_engraving(ZONE, tower(), 11, ATTACKER, 2_000_000)
         .unwrap();
@@ -714,7 +740,10 @@ async fn private_mysql_dominion_rollback_failure_retry_and_restart_preserve_auth
     assert_eq!(manager.prepare_save().changed_count(), 1);
     let rows = super::db::load_rows(&pool).await.unwrap();
     assert_eq!(rows[0].tax_rate, 0);
-    assert_eq!(rows[0].siege.as_ref().unwrap().participants.len(), 2);
+    let siege = rows[0].siege.as_ref().unwrap();
+    assert_eq!(siege.participants.len(), 2);
+    assert!(siege.reinforced);
+    assert_eq!((siege.defender_ni, siege.defender_nr), (50, 70));
     assert_eq!(rows[0].tower_hp, Some(0));
     let restarted = DominionManager::default();
     restarted.restore(rows).unwrap();
