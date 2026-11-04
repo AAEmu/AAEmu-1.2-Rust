@@ -86,13 +86,45 @@ private:
 
 // The ffmpeg command line (without the program path, which the caller quotes in front):
 // raw BGRA frames on stdin, constant frame rate, H.264 for broad playback.
+// The tallest picture the file gets: a taller back buffer is scaled down by ffmpeg (the side-by-side videos are 540 lines
+// high). Encoding 1080p next to a game running at 140 fps kept ffmpeg to about 9 frames a second (skill parity run t1e:
+// 2017 of 2903 output frames repeated); 720p is 2.25 times less work.
+static const int kMaxHeight = 720;
+
+// The size of the file's picture for a back buffer of width x height: even, at most kMaxHeight lines.
+inline void out_size(int width, int height, int* out_w, int* out_h) {
+    if (height > kMaxHeight) {
+        *out_h = kMaxHeight;
+        *out_w = (int)(((long long)width * kMaxHeight / height + 1) / 2 * 2);
+    } else {
+        *out_w = (width + 1) / 2 * 2;
+        *out_h = (height + 1) / 2 * 2;
+    }
+}
+
+// Whether a present at wall_us is copied: only the ones the output grid can show, at least 3/4 of an output frame after the
+// last copy (last_us 0: none yet). A game at 140 fps then costs about 40 copies a second instead of 140.
+inline bool capture_due(int64_t wall_us, int64_t last_us, int fps) {
+    if (last_us == 0) return true;
+    const int64_t period = 1000000 / (fps < 1 ? 1 : fps);
+    return wall_us - last_us >= period * 3 / 4;
+}
+
 inline std::string ffmpeg_args(int width, int height, int fps, const std::string& out_path) {
     char head[256];
     _snprintf_s(head, sizeof(head), _TRUNCATE,
                 " -y -hide_banner -loglevel error -f rawvideo -pix_fmt bgra -s %dx%d -r %d -i -", width, height, fps);
     std::string args = head;
-    // yuv420p needs even dimensions.
-    if ((width & 1) || (height & 1)) args += " -vf pad=ceil(iw/2)*2:ceil(ih/2)*2";
+    if (height > kMaxHeight) {
+        int w = 0, h = 0;
+        out_size(width, height, &w, &h);
+        char scale[96];
+        _snprintf_s(scale, sizeof(scale), _TRUNCATE, " -vf scale=%d:%d:flags=fast_bilinear", w, h);
+        args += scale;
+    } else if ((width & 1) || (height & 1)) {
+        // yuv420p needs even dimensions.
+        args += " -vf pad=ceil(iw/2)*2:ceil(ih/2)*2";
+    }
     args += " -c:v libx264 -preset ultrafast -crf 18 -pix_fmt yuv420p \"";
     args += out_path;
     args += '"';

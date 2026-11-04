@@ -154,8 +154,21 @@ static void test_ffmpeg_args_and_meta() {
           " -y -hide_banner -loglevel error -f rawvideo -pix_fmt bgra -s 1280x720 -r 30 -i -"
           " -c:v libx264 -preset ultrafast -crf 18 -pix_fmt yuv420p \"D:\\caps\\run 1\\video.mp4\"");
     CHECK(videocore::ffmpeg_args(1281, 720, 60, "o.mp4").find(" -vf pad=ceil(iw/2)*2:ceil(ih/2)*2 -c:v libx264") != std::string::npos);
-    CHECK(videocore::ffmpeg_args(1280, 721, 60, "o.mp4").find("-vf pad=") != std::string::npos);
+    CHECK(videocore::ffmpeg_args(1280, 719, 60, "o.mp4").find("-vf pad=") != std::string::npos);
     CHECK(videocore::ffmpeg_args(1280, 720, 60, "o.mp4").find("-vf") == std::string::npos);
+    // a 1080p back buffer is scaled to 720 lines (even width), with no pad
+    CHECK(videocore::ffmpeg_args(1920, 1080, 30, "o.mp4").find(" -vf scale=1280:720:flags=fast_bilinear -c:v libx264") != std::string::npos);
+    CHECK(videocore::ffmpeg_args(1920, 1080, 30, "o.mp4").find("pad=") == std::string::npos);
+    int w = 0, h = 0;
+    videocore::out_size(1920, 1080, &w, &h); CHECK(w == 1280 && h == 720);
+    videocore::out_size(1366, 768, &w, &h); CHECK(w == 1280 && h == 720);
+    videocore::out_size(1281, 721, &w, &h); CHECK(w == 1280 && h == 720);
+    videocore::out_size(1281, 719, &w, &h); CHECK(w == 1282 && h == 720);
+    videocore::out_size(1280, 720, &w, &h); CHECK(w == 1280 && h == 720);
+    // a copy at least 3/4 of an output frame after the last one: 30 fps -> 33333 us * 3/4 = 24999 us
+    CHECK(videocore::capture_due(1000, 0, 30));
+    CHECK(!videocore::capture_due(1000 + 24998, 1000, 30));
+    CHECK(videocore::capture_due(1000 + 24999, 1000, 30));
     // dropped in the sidecar covers cadence drops, queue overflow and GPU misses
     CHECK(videocore::meta_json(1700000000123456LL, 30, 1280, 720, 151, 12, 40, 3, 2, 1, 0) ==
           "{\"t0_wall_us\":1700000000123456,\"fps\":30,\"width\":1280,\"height\":720,\"frames\":151,\"repeated\":12,"

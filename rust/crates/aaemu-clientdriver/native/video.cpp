@@ -192,6 +192,8 @@ struct Session {
     HANDLE writer = NULL, process = NULL, pipe = NULL;
     std::atomic<bool> stop_requested{false}, pipe_failed{false};
     std::atomic<uint64_t> lost_queue{0}, lost_gpu{0}, frames{0}, repeated{0}, dropped_cfr{0}, late{0};
+    std::atomic<uint64_t> skipped{0};            // presents not copied: too close to the last copy (capture_due)
+    int64_t last_copy_us = 0;                     // render thread only
     std::atomic<int64_t> t0{0};
     long exit_code = -1;
 };
@@ -264,6 +266,9 @@ static void deliver(Session* s, int slot, const Mapped& m) {
 
 static void capture(Session* s, IDXGISwapChain* chain, unsigned width, unsigned height) {
     if (width != s->width || height != s->height) { s->resized = true; ++s->lost_gpu; return; }
+    int64_t wall = tracecore::now_unix_us();
+    if (!videocore::capture_due(wall, s->last_copy_us, s->fps)) { ++s->skipped; return; }
+    s->last_copy_us = wall;
     uint64_t n = s->seq++;
     int slot = (int)(n % kSlots);
     if (s->slot_valid[slot]) {                      // defensive: the frame that lived here was never read
@@ -271,7 +276,6 @@ static void capture(Session* s, IDXGISwapChain* chain, unsigned width, unsigned 
         ++s->lost_gpu;
         if (s->next_read + kSlots == n) ++s->next_read;
     }
-    int64_t wall = tracecore::now_unix_us();
     if (s->gpu->copy_in(chain, slot)) { s->slot_t[slot] = wall; s->slot_valid[slot] = true; }
     else ++s->lost_gpu;
     // Read strictly in presentation order, no earlier than two presents after the copy.
@@ -459,7 +463,7 @@ static std::string status_json() {
         out += text;
         out += ",\"frames\":"; append_u64(&out, s->frames);
         out += ",\"repeated\":"; append_u64(&out, s->repeated);
-        out += ",\"dropped\":"; append_u64(&out, s->dropped_cfr + s->lost_queue + s->lost_gpu);
+        out += ",\"dropped\":"; append_u64(&out, s->dropped_cfr + s->skipped + s->lost_queue + s->lost_gpu);
         out += ",\"lost_queue\":"; append_u64(&out, s->lost_queue);
         out += ",\"lost_gpu\":"; append_u64(&out, s->lost_gpu);
         out += ",\"pipe_failed\":"; out += s->pipe_failed ? "true" : "false";
@@ -559,8 +563,10 @@ static std::string stop() {
     s->stop_requested = true;
     SetEvent(s->ready_event);
     bool writer_done = WaitForSingleObject(s->writer, 150000) == WAIT_OBJECT_0;
-    std::string meta = videocore::meta_json(s->t0, s->fps, (int)s->width, (int)s->height, s->frames, s->repeated,
-                                            s->dropped_cfr, s->lost_queue, s->lost_gpu, s->late, s->exit_code);
+    int out_w = 0, out_h = 0;
+    videocore::out_size((int)s->width, (int)s->height, &out_w, &out_h);   // the file's picture, not the back buffer
+    std::string meta = videocore::meta_json(s->t0, s->fps, out_w, out_h, s->frames, s->repeated,
+                                            s->dropped_cfr + s->skipped, s->lost_queue, s->lost_gpu, s->late, s->exit_code);
     std::wstring json_path = s->wpath + L".json";
     HANDLE f = CreateFileW(json_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     std::string note;
