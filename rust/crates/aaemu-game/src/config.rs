@@ -293,6 +293,17 @@ pub struct AccountConfig {
     /// the C# behaviour for existing databases.
     #[serde(rename = "defaultpayment", deserialize_with = "lenient_enum")]
     pub default_payment: DefaultPayment,
+    /// The seven `canXxx` flags of `SCInitialConfig`, per effective payment method (Rust only,
+    /// WP-J). The 1.2 client uses them to gate its own UI; the server has no restriction data,
+    /// so every default is `true` (today's bytes). The per-method source is INFERRED
+    /// (`ACCOUNT-RESTRICT-1`, capture-pending), not client-evidenced.
+    #[serde(rename = "restrictions")]
+    pub restrictions: AccountRestrictionsConfig,
+    /// `SCInitialConfig.idleKickTime` (raw `u16`, `0` = off; Rust only, WP-J). The unit is
+    /// **UNKNOWN** (the 1.2 `CGame::Update` consumer was not located): do not document it as
+    /// minutes or seconds. The client performs the idle kick itself; the server never kicks.
+    #[serde(rename = "idlekicktime", deserialize_with = "lenient")]
+    pub idle_kick_time: u16,
 }
 
 impl Default for AccountConfig {
@@ -305,6 +316,73 @@ impl Default for AccountConfig {
             delete_release_name: false,
             delete_timings: Vec::new(),
             default_payment: DefaultPayment::Premium,
+            restrictions: AccountRestrictionsConfig::default(),
+            idle_kick_time: 0,
+        }
+    }
+}
+
+/// `Account:Restrictions` (Rust only, WP-J): the seven `SCInitialConfig` `canXxx` booleans, keyed
+/// by the account's effective payment method. The 1.2 client only uses them to gate its UI; the
+/// server does not enforce them. INFERRED source (`ACCOUNT-RESTRICT-1`): the 1.2 client reader
+/// (`FUN_397b2a00` -> `FUN_397b1fb0`) names the flags but shows no server-side source.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct AccountRestrictionsConfig {
+    #[serde(rename = "premium")]
+    pub premium: RestrictionFlags,
+    #[serde(rename = "demo")]
+    pub demo: RestrictionFlags,
+    #[serde(rename = "none")]
+    pub none: RestrictionFlags,
+}
+
+impl AccountRestrictionsConfig {
+    /// The flags sent for an effective payment method.
+    pub fn for_payment(
+        &self,
+        method: crate::net::connection::PaymentMethodType,
+    ) -> &RestrictionFlags {
+        use crate::net::connection::PaymentMethodType;
+        match method {
+            PaymentMethodType::Premium => &self.premium,
+            PaymentMethodType::Demo => &self.demo,
+            PaymentMethodType::None => &self.none,
+        }
+    }
+}
+
+/// The seven `SCInitialConfig` `canXxx` booleans in wire order. Every default is `true`, which
+/// keeps the bytes the server sent before WP-J.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct RestrictionFlags {
+    #[serde(rename = "canplacehouse")]
+    pub can_place_house: bool,
+    #[serde(rename = "canpaytax")]
+    pub can_pay_tax: bool,
+    #[serde(rename = "canuseauction")]
+    pub can_use_auction: bool,
+    #[serde(rename = "cantrade")]
+    pub can_trade: bool,
+    #[serde(rename = "cansendmail")]
+    pub can_send_mail: bool,
+    #[serde(rename = "canusebank")]
+    pub can_use_bank: bool,
+    #[serde(rename = "canusecopper")]
+    pub can_use_copper: bool,
+}
+
+impl Default for RestrictionFlags {
+    fn default() -> Self {
+        Self {
+            can_place_house: true,
+            can_pay_tax: true,
+            can_use_auction: true,
+            can_trade: true,
+            can_send_mail: true,
+            can_use_bank: true,
+            can_use_copper: true,
         }
     }
 }
@@ -1314,6 +1392,64 @@ mod tests {
         }))
         .unwrap();
         assert!(!cfg.characters.pre_select_period);
+    }
+
+    #[test]
+    fn account_restrictions_and_idle_kick_bind_from_config() {
+        use crate::net::connection::PaymentMethodType;
+
+        let default = AppConfig::default();
+        assert_eq!(default.account.idle_kick_time, 0);
+        for method in [
+            PaymentMethodType::Premium,
+            PaymentMethodType::Demo,
+            PaymentMethodType::None,
+        ] {
+            let flags = default.account.restrictions.for_payment(method);
+            assert!(flags.can_place_house);
+            assert!(flags.can_pay_tax);
+            assert!(flags.can_use_auction);
+            assert!(flags.can_trade);
+            assert!(flags.can_send_mail);
+            assert!(flags.can_use_bank);
+            assert!(flags.can_use_copper);
+        }
+
+        let cfg = AppConfig::from_value(json!({
+            "Account": {
+                "IdleKickTime": "1800",
+                "Restrictions": {
+                    "Demo": { "CanTrade": false, "CanSendMail": false }
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(cfg.account.idle_kick_time, 1800);
+        let demo = cfg
+            .account
+            .restrictions
+            .for_payment(PaymentMethodType::Demo);
+        assert!(!demo.can_trade);
+        assert!(!demo.can_send_mail);
+        // Missing flags keep the default `true` (only the two listed are off).
+        assert!(demo.can_place_house);
+        assert!(demo.can_pay_tax);
+        assert!(demo.can_use_auction);
+        assert!(demo.can_use_bank);
+        assert!(demo.can_use_copper);
+        // The other methods are unaffected.
+        assert!(
+            cfg.account
+                .restrictions
+                .for_payment(PaymentMethodType::Premium)
+                .can_trade
+        );
+        assert!(
+            cfg.account
+                .restrictions
+                .for_payment(PaymentMethodType::None)
+                .can_trade
+        );
     }
 
     #[test]
