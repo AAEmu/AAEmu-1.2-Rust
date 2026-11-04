@@ -194,8 +194,16 @@ fn read_skill(
         show: r.bool_str("show")?,
         category_id: r.i32("category_id")?,
         fire_anim_id: if anim_exists(fire_anim) { fire_anim } else { 0 },
-        twohand_fire_anim_id: if anim_exists(twohand_fire_anim) { twohand_fire_anim } else { 0 },
-        dual_wield_fire_anim_id: if anim_exists(dual_wield_fire_anim) { dual_wield_fire_anim } else { 0 },
+        twohand_fire_anim_id: if anim_exists(twohand_fire_anim) {
+            twohand_fire_anim
+        } else {
+            0
+        },
+        dual_wield_fire_anim_id: if anim_exists(dual_wield_fire_anim) {
+            dual_wield_fire_anim
+        } else {
+            0
+        },
         ability_id: r.u8("ability_id")?,
         mana_cost: r.i32("mana_cost")?,
         timing_id: r.i32("timing_id")?,

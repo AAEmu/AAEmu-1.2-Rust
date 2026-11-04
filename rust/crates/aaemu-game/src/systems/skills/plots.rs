@@ -1231,10 +1231,20 @@ mod tests {
         let (server, _client, player, npc) = fixture(GameData::empty());
         let (caster, target) = (WorldObject::from(&npc), WorldObject::from(&player));
         let (state, _skill) = plot_state(&server, &caster, &target);
-        let ti = PlotTargetInfo::new(Some(Target::Obj(caster.clone())), Some(Target::Obj(caster.clone())));
+        let ti = PlotTargetInfo::new(
+            Some(Target::Obj(caster.clone())),
+            Some(Target::Obj(caster.clone())),
+        );
         assert!(ti.effected.is_empty());
         let two_handed = |not_condition| super::super::data::plots::PlotEventCondition {
-            condition: super::super::data::plots::PlotCondition { id: 723, not_condition, kind: 6, param1: 2, param2: 0, param3: 0 },
+            condition: super::super::data::plots::PlotCondition {
+                id: 723,
+                not_condition,
+                kind: 6,
+                param1: 2,
+                param2: 0,
+                param3: 0,
+            },
             position: 1,
             source_id: 1,
             target_id: 4,
