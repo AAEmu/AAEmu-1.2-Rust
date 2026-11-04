@@ -3993,9 +3993,8 @@ and in NPC wandering / buff remaining times.
   summoned (the owner's active vehicle is still removed).
 * systems::vehicles: a slave's `TlId` is never released; the transfer spawner's `Despawn` and
   the spawn manager's despawn tick both release the transfer's obj id.
-* systems::vehicles: `SummonSlave.ReadDetails` always fails on `RepairStartTime` (so the repair
-  cooldown does not survive a restart); `DoodadFuncRecoverItem` looks the owning slave up by its
-  DB id as an obj id; `GetActiveMates(...).FirstOrDefault()` decides the `Raid` relation mate.
+* systems::vehicles: `DoodadFuncRecoverItem` looks the owning slave up by its DB id as an
+  obj id; `GetActiveMates(...).FirstOrDefault()` decides the `Raid` relation mate.
 * systems::vehicles: `Unit.DespawnMate` on a mate's own death only despawns when its owner is
   dead. The former `UnitMoveType` driver-detachment bug is fixed (see vehicle test fixes above).
 * systems::vehicles: `SpawnEffect` (slave) writes `PosDistance = 2` back into the template and
@@ -4820,8 +4819,13 @@ the death never started its timer):
   clears the timer (the destroyed flag stays until `RepairSlaveEffect` clears it, as in C#).
 - The C# reset of a loaded 0-HP vehicle to `MaxHp` ("can't summon with 0 HP") is kept, but only
   when the item has no pending repair time. With the timer above, a destroyed vehicle therefore
-  comes back at full HP only after its repair wait, not when it is still on cooldown. (As the
-  mirrored `SummonSlave.ReadDetails` bug above notes, the timer itself is still lost on restart.)
+  comes back at full HP only after its repair wait, not when it is still on cooldown.
+- The C# `SummonSlave.ReadDetails` threw on `RepairStartTime` (`Convert.ToInt32(byte[])`), so a
+  saved repair time was always reset to `MinValue` on load and the 10 minute wait was forgotten
+  on restart. `Item::read_details` now restores it from the `items.details` blob (i64 after the
+  destroyed flag, negative values clamp to 0). Legacy C# rows decode too (unset: i32 0 + five
+  i32 zeros; set: i64 + five i32 zeros), and a blob that stops after the destroyed flag still
+  restores the header.
 
 ## Global cooldown enforcement and plot-only skill cooldowns (2026-10-21)
 
