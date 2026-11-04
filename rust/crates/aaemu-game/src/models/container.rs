@@ -42,6 +42,18 @@ pub mod slot_type {
     ];
 }
 
+/// The character's own containers that character creation fills and the lobby character edit
+/// rebuilds: equipment, bag and bank. Mail, auction, trade and system containers and mate /
+/// slave equipment keep their rows and items untouched - a never-played character can already
+/// own mail attachments, and mate/slave equipment is not part of creation.
+pub fn is_creation_container(slot: u8, mate_id: u32) -> bool {
+    mate_id == 0
+        && matches!(
+            slot,
+            slot_type::EQUIPMENT | slot_type::INVENTORY | slot_type::BANK
+        )
+}
+
 /// `EquipmentItemSlot` indices used by this phase.
 pub mod equip_slot {
     pub const HEAD: i32 = 0;

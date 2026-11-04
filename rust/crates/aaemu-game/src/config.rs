@@ -322,7 +322,7 @@ pub enum DefaultPayment {
 
 impl_config_enum!(DefaultPayment { Premium = 1, Demo = 3, None = 5 });
 
-/// `Characters` (Rust only): the lobby character-slot limit.
+/// `Characters` (Rust only): the lobby character-slot limit and the pre-select period.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct CharactersConfig {
@@ -332,12 +332,19 @@ pub struct CharactersConfig {
     /// There is no cross-process check of the two values.
     #[serde(rename = "maxperaccount", deserialize_with = "lenient")]
     pub max_per_account: u8,
+    /// Whether the lobby accepts `CSEditCharacter` (character edit at character select). Must
+    /// equal the login server's `Login:PreSelectCharacterPeriod`: the login server advertises
+    /// the period in `ACJoinResponse.afs` and the client only sends the edit packet while it is
+    /// set. There is no cross-process check of the two values.
+    #[serde(rename = "preselectperiod", deserialize_with = "lenient")]
+    pub pre_select_period: bool,
 }
 
 impl Default for CharactersConfig {
     fn default() -> Self {
         Self {
             max_per_account: aaemu_commons::character_slots::DEFAULT_MAX_CHARACTERS_PER_ACCOUNT,
+            pre_select_period: false,
         }
     }
 }
@@ -1286,6 +1293,21 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.characters.max_per_account, 8);
         assert_eq!(AppConfig::default().characters.max_per_account, 6);
+    }
+
+    #[test]
+    fn characters_config_binds_the_pre_select_period() {
+        let cfg = AppConfig::from_value(json!({
+            "Characters": { "PreSelectPeriod": "True" }
+        }))
+        .unwrap();
+        assert!(cfg.characters.pre_select_period);
+        assert!(!AppConfig::default().characters.pre_select_period);
+        let cfg = AppConfig::from_value(json!({
+            "Characters": { "PreSelectPeriod": false }
+        }))
+        .unwrap();
+        assert!(!cfg.characters.pre_select_period);
     }
 
     #[test]

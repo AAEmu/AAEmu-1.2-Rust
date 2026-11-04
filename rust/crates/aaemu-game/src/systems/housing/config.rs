@@ -23,7 +23,7 @@ impl crate::config::ConfigEnum for DominionPropertyTaxBase {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct HousingConfig {
     #[serde(
@@ -41,6 +41,31 @@ pub struct HousingConfig {
     /// `Housing.SiegeCalendarTimezone`.
     #[serde(rename = "siegecalendartimezone")]
     pub siege_calendar_timezone: String,
+    /// How many territories one expedition may own before a new claim is refused with
+    /// `TOO_MANY_OWNED_DOMINIONS` (441). The 1.2 limit is UNKNOWN; `siege_settings` has
+    /// reinforcement rows for 0..=10 held castles, so 10 is the non-binding default.
+    /// `Housing.DominionClaimLimit`.
+    #[serde(
+        rename = "dominionclaimlimit",
+        default = "default_dominion_claim_limit",
+        deserialize_with = "crate::config::lenient"
+    )]
+    pub dominion_claim_limit: u32,
+}
+
+fn default_dominion_claim_limit() -> u32 {
+    10
+}
+
+impl Default for HousingConfig {
+    fn default() -> Self {
+        Self {
+            dominion_property_tax_base: DominionPropertyTaxBase::default(),
+            siege_calendar: false,
+            siege_calendar_timezone: String::new(),
+            dominion_claim_limit: default_dominion_claim_limit(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -68,6 +93,19 @@ mod tests {
             "Housing": { "DominionPropertyTaxBase": "unknown" }
         }))
         .is_err());
+    }
+
+    #[test]
+    fn dominion_claim_limit_defaults_to_ten_and_binds_numbers_or_strings() {
+        let default = crate::config::AppConfig::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(default.housing.dominion_claim_limit, 10);
+        for value in [serde_json::json!(1), serde_json::json!("1")] {
+            let config = crate::config::AppConfig::from_value(serde_json::json!({
+                "Housing": { "DominionClaimLimit": value }
+            }))
+            .unwrap();
+            assert_eq!(config.housing.dominion_claim_limit, 1);
+        }
     }
 
     #[test]

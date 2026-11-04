@@ -85,6 +85,9 @@ pub struct GameController {
     /// mirror id -> parent id
     mirrors_id: Mutex<HashMap<GameServerId, GameServerId>>,
     character_requests: DashMap<u32, Arc<CharacterRequest>>,
+    /// `Login:PreSelectCharacterPeriod`, reported to a registering game server so it applies
+    /// the same period the clients are told about.
+    pre_select_character_period: std::sync::atomic::AtomicBool,
     /// One login queue per configured world (`GameServers[].MaxConcurrent`/`QueueLimit`).
     queues: Mutex<HashMap<GameServerId, WorldQueue>>,
 }
@@ -123,6 +126,7 @@ impl GameController {
             game_servers: DashMap::new(),
             mirrors_id: Mutex::new(HashMap::new()),
             character_requests: DashMap::new(),
+            pre_select_character_period: std::sync::atomic::AtomicBool::new(false),
             queues: Mutex::new(HashMap::new()),
         }
     }
@@ -133,12 +137,22 @@ impl GameController {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// `Login:PreSelectCharacterPeriod` (set by [`Self::load`]).
+    pub fn pre_select_character_period(&self) -> bool {
+        self.pre_select_character_period
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn try_get_parent_id(&self, gs_id: GameServerId) -> Option<GameServerId> {
         self.mirrors_id.lock().unwrap().get(&gs_id).copied()
     }
 
     /// Loads the non-hidden game servers from the configuration.
     pub async fn load(&self, config: &AppConfig) {
+        self.pre_select_character_period.store(
+            config.login.pre_select_character_period,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         for gs in config.game_servers.iter().filter(|gs| !gs.hidden) {
             let id = GameServerId(gs.id);
             let host = if config.skip_host_resolve {
@@ -212,6 +226,7 @@ impl GameController {
                     Duration::from_secs(5),
                     LgRegisterGameServer {
                         result: GsRegisterResult::Error,
+                        pre_select_character_period: self.pre_select_character_period(),
                     },
                 );
                 return;
@@ -221,6 +236,7 @@ impl GameController {
             connection.set_game_server(gs_id);
             gs.send_packet(&LgRegisterGameServer {
                 result: GsRegisterResult::Success,
+                pre_select_character_period: self.pre_select_character_period(),
             });
         }
 

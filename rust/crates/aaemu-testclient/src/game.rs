@@ -286,16 +286,27 @@ pub fn packet_name(dir: Dir, level: u8, opcode: u16) -> &'static str {
     name_of(table, opcode).unwrap_or("Unknown")
 }
 
-/// A character of `SCCharacterListPacket` / `SCCreateCharacterResponsePacket`.
+/// A character of `SCCharacterListPacket` / `SCCreateCharacterResponsePacket` /
+/// `SCEditCharacterResponsePacket`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CharInfo {
     pub id: u32,
     pub name: String,
+    pub appearance: Appearance,
+}
+
+/// The customizing ids of a character block (`UnitCustomModelParams`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Appearance {
+    pub kind: u8,
+    pub hair_color_id: u32,
+    pub skin_color_id: u32,
+    pub model_id: u32,
 }
 
 /// Consume one complete native `Character.Write` record. The list has no entry lengths;
 /// stopping after id/name would parse the next character from equipment or model bytes.
-fn read_character(s: &mut PacketStream) -> anyhow::Result<CharInfo> {
+pub(crate) fn read_character(s: &mut PacketStream) -> anyhow::Result<CharInfo> {
     use aaemu_game::models::container::{equip_slot, EQUIPMENT_CONTAINER_SIZE};
     use aaemu_game::models::item::detail_body_len;
     use aaemu_game::models::unit_model::UnitCustomModelParams;
@@ -337,7 +348,13 @@ fn read_character(s: &mut PacketStream) -> anyhow::Result<CharInfo> {
     s.read_i64()?; // x
     s.read_i64()?; // y
     s.read_f32()?; // z
-    let _: UnitCustomModelParams = s.read()?;
+    let appearance: UnitCustomModelParams = s.read()?;
+    let appearance = Appearance {
+        kind: appearance.kind.0,
+        hair_color_id: appearance.hair_color_id,
+        skin_color_id: appearance.skin_color_id,
+        model_id: appearance.model_id,
+    };
     s.read_i16()?; // labor
     s.read_i64()?; // labor modified
     s.read_i16()?; // dead count
@@ -364,7 +381,11 @@ fn read_character(s: &mut PacketStream) -> anyhow::Result<CharInfo> {
     s.read_i32()?; // gift
     s.read_i64()?; // updated
     s.read_u8()?; // force name change
-    Ok(CharInfo { id, name })
+    Ok(CharInfo {
+        id,
+        name,
+        appearance,
+    })
 }
 
 /// A unit seen in `SCUnitStatePacket`.
@@ -641,10 +662,15 @@ impl GameState {
                 }
             }
             st.char_list_done |= last;
-        } else if p.is_sc(sc::SCCreateCharacterResponsePacket) {
-            let id = s.read_u32()?;
-            let name = s.read_string()?;
-            st.characters.push(CharInfo { id, name });
+        } else if p.is_sc(sc::SCCreateCharacterResponsePacket)
+            || p.is_sc(sc::SCEditCharacterResponsePacket)
+        {
+            let character = read_character(&mut s)?;
+            anyhow::ensure!(s.remaining() == 0, "trailing character-response bytes");
+            match st.characters.iter_mut().find(|c| c.id == character.id) {
+                Some(entry) => *entry = character,
+                None => st.characters.push(character),
+            }
         } else if p.is_sc(sc::SCBuffCreatedPacket) {
             use aaemu_game::systems::skills::types::SkillCaster;
             let kind = s.read_u8()?;
@@ -1211,6 +1237,36 @@ impl GameClient {
             .await
     }
 
+    /// `CSEditCharacterPacket` (0x023) for the pre-select lobby edit: the create body with a
+    /// leading character id and no `introZoneId`. Sends the same race/gender/ability/level the
+    /// character was created with and the given customizing colours.
+    pub async fn edit_character(
+        &mut self,
+        id: u32,
+        name: &str,
+        appearance: Appearance,
+    ) -> anyhow::Result<()> {
+        let mut s = PacketStream::new();
+        s.write_u32(id)
+            .write_str(name)
+            .write_u8(1) // race
+            .write_u8(1); // gender
+        for _ in 0..7 {
+            s.write_u32(0); // body items: template defaults
+        }
+        write_custom_model_appearance(
+            &mut s,
+            appearance.hair_color_id,
+            appearance.skin_color_id,
+            appearance.model_id,
+        );
+        s.write_u8(1) // ability1: Fight
+            .write_u8(11) // ability2: None
+            .write_u8(11) // ability3: None
+            .write_u8(1); // level
+        self.send_cs(cs::CSEditCharacterPacket, s.as_bytes()).await
+    }
+
     /// `CSSelectCharacterPacket`.
     pub async fn select_character(&mut self, id: u32) -> anyhow::Result<()> {
         self.state.selected_char = id;
@@ -1729,11 +1785,20 @@ fn facing_direction(pos: (f32, f32, f32), target: (f32, f32, f32)) -> i8 {
 
 /// `UnitCustomModelParams` with a full face block (type 3), all defaults.
 fn write_custom_model(s: &mut PacketStream) {
+    write_custom_model_appearance(s, 0, 0, 0);
+}
+
+fn write_custom_model_appearance(
+    s: &mut PacketStream,
+    hair_color_id: u32,
+    skin_color_id: u32,
+    model_id: u32,
+) {
     s.write_u8(3) // UnitCustomModelType.Face
-        .write_u32(0) // hair color
-        .write_u32(0) // skin color
-        .write_u32(0); // model id
-                       // UnitCustomFace
+        .write_u32(hair_color_id)
+        .write_u32(skin_color_id)
+        .write_u32(model_id);
+    // UnitCustomFace
     s.write_u32(0)
         .write_f32(0.0)
         .write_f32(0.0)

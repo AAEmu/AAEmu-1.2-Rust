@@ -1,6 +1,6 @@
-//! C->G packets of `Core/Packets/C2G` whose C# `Read` only logs: `CSEditCharacterPacket` and the
-//! log-only packets the 1.2 C# defines but never registers (opcode 0xfff, commented out in
-//! `GameNetwork`): `CSResetQuestContextPacket`, `CSAcceptCheatQuestContextPacket`,
+//! C->G packets of `Core/Packets/C2G` whose C# `Read` only logs: the log-only packets the 1.2 C#
+//! defines but never registers (opcode 0xfff, commented out in `GameNetwork`):
+//! `CSResetQuestContextPacket`, `CSAcceptCheatQuestContextPacket`,
 //! `CSSearchListPacket`, `CSChangeExpeditionSponsorPacket`, `CSChangeSlaveTargetPacket`,
 //! `CSSetTeamOfficerPacket`.
 //!
@@ -46,11 +46,6 @@ macro_rules! log_only_packet {
         }
     };
 }
-
-log_only_packet!(
-    /// `CSEditCharacterPacket` (0x023): `// TODO ... create`, the body is not read.
-    CSEditCharacterPacket, error, "CSEditCharacterPacket is not implemented!" {}
-);
 
 /// `CSTurretStatePacket` (0x036): `bc unitId, f32 pitch, f32 yaw` (1.2 client writer
 /// `397c7640`). The unit is the slave the client controls, and the aim is in that model's frame.
@@ -144,8 +139,7 @@ log_only_packet!(
 /// Registers the packets of this module that the 1.2 `GameNetwork` registers. The native 1.2
 /// national tax opcode (0x013) lives in `systems::social::packets::misc`.
 pub fn register(r: &mut PacketRegistry) {
-    r.register::<CSEditCharacterPacket>(LEVEL_PLAIN, cs::CSEditCharacterPacket)
-        .register::<CSTurretStatePacket>(LEVEL_PLAIN, cs::CSTurretStatePacket);
+    r.register::<CSTurretStatePacket>(LEVEL_PLAIN, cs::CSTurretStatePacket);
 }
 
 #[cfg(test)]
@@ -227,14 +221,6 @@ mod tests {
                 unk_id: 7,
                 unk2_id: 8
             }
-        );
-        // CSEditCharacterPacket reads nothing.
-        let mut s = stream(|s| {
-            s.write_u8(9);
-        });
-        assert_eq!(
-            CSEditCharacterPacket::read(&mut s).unwrap(),
-            CSEditCharacterPacket {}
         );
     }
 }

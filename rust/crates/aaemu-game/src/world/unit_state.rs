@@ -22,7 +22,8 @@ use crate::models::transfer::Transfer;
 use crate::models::unit::{attach_point, BaseUnitType, ModelPostureType, UnitBase, UnitData};
 use crate::models::unit_model::UnitCustomModelType;
 use crate::packets::world::{
-    SCCharacterStatePacket, SCCreateCharacterResponsePacket, SCUnitStatePacket,
+    SCCharacterStatePacket, SCCreateCharacterResponsePacket, SCEditCharacterResponsePacket,
+    SCUnitStatePacket,
 };
 
 /// `SCUnitState` character flags bit3: force attack (Bloodlust). 1.2 client chain: `397c9480`
@@ -91,6 +92,17 @@ pub fn create_character_response(c: &Character) -> SCCreateCharacterResponsePack
     let mut s = PacketStream::new();
     c.write(&mut s);
     SCCreateCharacterResponsePacket {
+        body: s.into_bytes(),
+    }
+}
+
+/// `SCEditCharacterResponsePacket(character)`: the same character-info block as
+/// `SCCreateCharacterResponsePacket` (1.2 client serializer `FUN_397ab170` -> `FUN_39620030`,
+/// read by `FUN_391eb910`), with the 0x03a opcode.
+pub fn edit_character_response(c: &Character) -> SCEditCharacterResponsePacket {
+    let mut s = PacketStream::new();
+    c.write(&mut s);
+    SCEditCharacterResponsePacket {
         body: s.into_bytes(),
     }
 }

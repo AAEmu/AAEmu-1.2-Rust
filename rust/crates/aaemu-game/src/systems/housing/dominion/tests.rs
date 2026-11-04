@@ -53,7 +53,7 @@ fn claim_consumption_is_atomic_and_never_fabricates_treasury_or_schedule() {
         .unwrap();
     assert_eq!(claimed.owner_expedition_id, DEFENDER);
     assert_eq!(claimed.ownership_generation, 1);
-    assert_eq!(claimed.reign_start_at, 1000);
+    assert_eq!((claimed.reign_start_at, claimed.claimed_at), (1000, 1000));
     assert_eq!(claimed.treasury, Treasury::default());
     assert_eq!(
         (
@@ -72,6 +72,16 @@ fn claim_consumption_is_atomic_and_never_fabricates_treasury_or_schedule() {
     );
     assert!(manager.tick(1_791_900_000).unwrap().is_empty());
     assert_eq!(manager.state(ZONE).unwrap(), claimed);
+}
+
+#[test]
+fn a_claim_records_claimed_at_and_restart_keeps_it() {
+    let manager = owned();
+    let claimed = manager.state(ZONE).unwrap();
+    assert_eq!((claimed.reign_start_at, claimed.claimed_at), (1000, 1000));
+    let restarted = DominionManager::default();
+    restarted.restore(manager.snapshots()).unwrap();
+    assert_eq!(restarted.state(ZONE).unwrap().claimed_at, 1000);
 }
 
 #[test]
@@ -276,10 +286,11 @@ fn capture_requires_full_five_minutes_and_invalidates_competing_and_replayed_han
     assert_eq!(
         (
             captured.reign_start_at,
+            captured.claimed_at,
             captured.last_siege_end_at,
             captured.ownership_generation
         ),
-        (2300, 2300, 2)
+        (2300, 0, 2300, 2)
     );
     assert!(!captured.tower_destroyed);
     assert_eq!(captured.tower_hp, None);

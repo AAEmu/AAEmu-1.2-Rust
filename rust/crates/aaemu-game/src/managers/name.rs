@@ -251,6 +251,21 @@ impl NameManager {
         }
     }
 
+    /// Renames a registered character (the lobby edit's name change). One write lock swaps the
+    /// name mapping; the id and account registrations stay.
+    pub fn rename_character(&self, id: u32, new_name: &str) {
+        let normalized = normalize_name(new_name);
+        let mut n = self.inner.write().expect("names poisoned");
+        if let Some(old) = n.ids.get(&id).cloned() {
+            if old != normalized {
+                n.names.remove(&old);
+                tracing::info!("AddCharacterName, renamed {old} to {normalized} ({id})");
+            }
+        }
+        n.ids.insert(id, normalized.clone());
+        n.names.insert(normalized, id);
+    }
+
     /// `RemoveCharacterId`.
     pub fn remove_character_id(&self, id: u32) {
         let mut n = self.inner.write().expect("names poisoned");

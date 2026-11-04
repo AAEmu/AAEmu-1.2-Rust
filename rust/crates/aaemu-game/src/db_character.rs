@@ -1342,7 +1342,7 @@ async fn save_active_buffs(tx: &mut Transaction<'_, MySql>, c: &Character) {
 /// the state it had before the call (`save_character` advances `updated` and clears the removed
 /// lists while it works, so it runs on a clone that is applied only after the commit).
 pub async fn save_directly_to_database(pool: &MySqlPool, c: &mut Character) -> bool {
-    save_directly(pool, c, None).await
+    save_directly(pool, c, None, None).await
 }
 
 /// Character creation: [`save_directly_to_database`] plus the new character's containers and
@@ -1353,7 +1353,61 @@ pub async fn save_directly_to_database(pool: &MySqlPool, c: &mut Character) -> b
 /// until commit or cleanup, excluding world snapshots of a partially created character.
 pub(crate) async fn save_new_character_locked(server: &GameServer, c: &mut Character) -> bool {
     let batch = server.items.prepare_save_for_owner(c.id);
-    save_directly(&server.db, c, Some((&server.items, batch))).await
+    save_directly(&server.db, c, Some((&server.items, batch)), None).await
+}
+
+/// The lobby character edit: the rebuilt starting kit replaces everything the creation-time save
+/// wrote for this character. In one transaction the old item/container rows and the create-time
+/// ability/skill rows are deleted, then the `characters` row and the rebuilt items are written.
+/// The caller holds `server.save.transaction_lock()`.
+pub(crate) async fn save_edited_character_locked(
+    server: &GameServer,
+    c: &mut Character,
+    batch: crate::managers::item::ItemSaveBatch,
+) -> bool {
+    save_directly(&server.db, c, Some((&server.items, batch)), Some(c.id)).await
+}
+
+/// Deletes the rows a lobby edit rebuilds. Only for a never-played character, and only the
+/// creation containers (equipment, bag, bank; `mate_id = 0`): a never-played character can
+/// already own mail attachments, auction/trade/system items and mate/slave equipment, whose
+/// container and item rows must survive the rebuild.
+async fn clear_rebuilt_character_rows(tx: &mut Transaction<'_, MySql>, owner: u32) -> Result<()> {
+    use crate::models::container::slot_type;
+    let creation_slots = format!(
+        "{}, {}, {}",
+        slot_type::EQUIPMENT,
+        slot_type::INVENTORY,
+        slot_type::BANK
+    );
+    sqlx::query(&format!(
+        concat!(
+            "DELETE i FROM `items` i JOIN `item_containers` ic ",
+            "ON ic.container_id = i.container_id ",
+            "WHERE ic.owner_id = ? AND ic.mate_id = 0 AND ic.slot_type IN ({})"
+        ),
+        creation_slots
+    ))
+    .bind(owner)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(&format!(
+        concat!(
+            "DELETE FROM `item_containers` ",
+            "WHERE `owner_id` = ? AND `mate_id` = 0 AND `slot_type` IN ({})"
+        ),
+        creation_slots
+    ))
+    .bind(owner)
+    .execute(&mut **tx)
+    .await?;
+    for table in ["skills", "abilities", "actabilities", "appellations"] {
+        sqlx::query(&format!("DELETE FROM `{table}` WHERE `owner` = ?"))
+            .bind(owner)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
 }
 
 async fn save_directly(
@@ -1363,6 +1417,7 @@ async fn save_directly(
         &crate::managers::item::ItemManager,
         crate::managers::item::ItemSaveBatch,
     )>,
+    rebuild_owner: Option<u32>,
 ) -> bool {
     let mut saved = c.clone();
     let manager = items.as_ref().map(|(manager, _)| *manager);
@@ -1370,6 +1425,9 @@ async fn save_directly(
         let mut tx = pool.begin().await?;
         let now = Utc::now().timestamp();
         let written = async {
+            if let Some(owner) = rebuild_owner {
+                clear_rebuilt_character_rows(&mut tx, owner).await?;
+            }
             save_character(&mut tx, &mut saved, now).await?;
             if let Some((manager, batch)) = items {
                 manager.write_prepared(&mut tx, batch).await?;

@@ -523,14 +523,12 @@ fn scan_for_enemy(
         if npc::is_front(c.server, &c.obj, &unit, f64::from(t.sight_fov_scale))
             && (my_z - uz).abs() < max_height_gap
         {
-            if can_attack(c.server, &c.obj, &unit)
-                && (range < 1.0 || npc::can_see_target(c.server, &unit))
-            {
+            if can_attack(c.server, &c.obj, &unit) && npc::can_see_target(c.server, &c.obj, &unit) {
                 return Some(unit);
             }
         } else if range < near_mul * t.sight_range_scale
             && can_attack(c.server, &c.obj, &unit)
-            && (range < 0.5 || npc::can_see_target(c.server, &unit))
+            && npc::can_see_target(c.server, &c.obj, &unit)
         {
             return Some(unit);
         }
@@ -638,7 +636,7 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
         let template_helps = if ot.aggression && ot.aggro_link_special_rule_id == 0 {
             true
         } else {
-            if !(ot.aggro_link_sight_check && npc::can_see_target(c.server, abuser)) {
+            if !(ot.aggro_link_sight_check && npc::can_see_target(c.server, &other, abuser)) {
                 false
             } else {
                 let relation = || {
@@ -659,8 +657,8 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
             }
         };
         // Link path (AGGROLINK-1): the sight check applies only when the helper enables it.
-        let link_helps =
-            same_group && (!ot.aggro_link_sight_check || npc::can_see_target(c.server, abuser));
+        let link_helps = same_group
+            && (!ot.aggro_link_sight_check || npc::can_see_target(c.server, &other, abuser));
         if !template_helps && !link_helps {
             continue;
         }
