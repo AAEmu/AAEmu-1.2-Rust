@@ -566,24 +566,37 @@ pub(crate) async fn purchase_sql_with_tables(
         .all(|c| c.is_ascii_alphanumeric() || c == '_'));
     let account_id = request.account_id;
     let mut tx = pool.begin().await?;
-    // The login already creates the row; insert it here as well so a purchase cannot fail on an
-    // account whose lobby `GetAccountDetails` never ran.
-    sqlx::query(&format!(
-        "INSERT IGNORE INTO {accounts_table} (account_id) VALUES (?)"
-    ))
-    .bind(account_id)
-    .execute(&mut *tx)
-    .await?;
-    let row = sqlx::query(&format!(
+    // The login already creates the row. Lock it first: an unconditional `INSERT IGNORE` takes a
+    // shared duplicate-check lock on an existing row, and four concurrent purchases deadlocked
+    // while upgrading it to the row lock (MySQL 1213). Only a missing row is inserted, with an
+    // exclusive `ON DUPLICATE KEY UPDATE` for the race against another first purchase.
+    let select_sql = format!(
         "SELECT CAST(credits AS SIGNED) AS credits, CAST(loyalty AS SIGNED) AS loyalty, \
          CAST(pay_method AS SIGNED) AS pay_method, CAST(pay_location AS SIGNED) AS pay_location, \
          CAST(pay_start AS SIGNED) AS pay_start, CAST(pay_end AS SIGNED) AS pay_end, \
          CAST(premium_point AS SIGNED) AS premium_point \
          FROM {accounts_table} WHERE account_id = ? FOR UPDATE"
-    ))
-    .bind(account_id)
-    .fetch_one(&mut *tx)
-    .await?;
+    );
+    let row = match sqlx::query(&select_sql)
+        .bind(account_id)
+        .fetch_optional(&mut *tx)
+        .await?
+    {
+        Some(row) => row,
+        None => {
+            sqlx::query(&format!(
+                "INSERT INTO {accounts_table} (account_id) VALUES (?) \
+                 ON DUPLICATE KEY UPDATE account_id = account_id"
+            ))
+            .bind(account_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(&select_sql)
+                .bind(account_id)
+                .fetch_one(&mut *tx)
+                .await?
+        }
+    };
     let details = AccountDetails {
         account_id: account_id as i32,
         credits: db::int(&row, "credits")? as i32,
