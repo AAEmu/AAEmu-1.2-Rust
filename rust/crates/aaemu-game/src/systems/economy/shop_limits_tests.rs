@@ -24,6 +24,7 @@ use crate::world::{DoodadRef, Entity, NpcRef};
 const MERCHANT_NPC: u32 = 0x500;
 const DOODAD_OBJ: u32 = 0x400;
 const PURCHASE_COIN: u32 = 9000;
+const PURCHASE_BACKPACK: u32 = 9100;
 const PURCHASE_FUNC_KEY: u32 = 1;
 const PURCHASE_TEMPLATE: u32 = 600;
 
@@ -276,12 +277,45 @@ fn purchase_doodad_world_with(
     group_id: u32,
     func_type: &'static str,
 ) -> World {
+    purchase_doodad_world_full(
+        limit,
+        coin_item_id,
+        coin_count,
+        group_id,
+        func_type,
+        STACK,
+        1,
+        -1,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn purchase_doodad_world_full(
+    limit: i32,
+    coin_item_id: u32,
+    coin_count: i32,
+    group_id: u32,
+    func_type: &'static str,
+    item_id: u32,
+    item_count: i32,
+    next_phase: i32,
+) -> World {
     let mut d = test_data();
-    d.items
-        .templates
-        .get_mut(&STACK)
-        .unwrap()
-        .limited_sale_count = limit;
+    if item_id == PURCHASE_BACKPACK {
+        d.items.templates.insert(
+            PURCHASE_BACKPACK,
+            ItemTemplate {
+                max_count: 1,
+                ..ItemTemplate::new(
+                    PURCHASE_BACKPACK,
+                    crate::data::items::TemplateKind::Backpack { backpack_type: 1 },
+                )
+            },
+        );
+    }
+    if let Some(t) = d.items.templates.get_mut(&item_id) {
+        t.limited_sale_count = limit;
+    }
     d.items
         .templates
         .insert(PURCHASE_COIN, ItemTemplate::plain(PURCHASE_COIN, 1000));
@@ -292,7 +326,7 @@ fn purchase_doodad_world_with(
             func_id: PURCHASE_TEMPLATE,
             func_key: PURCHASE_FUNC_KEY,
             func_type: func_type.into(),
-            next_phase: -1,
+            next_phase,
             sound_id: 0,
             skill_id: 0,
             perm_id: 0,
@@ -309,8 +343,8 @@ fn purchase_doodad_world_with(
             PURCHASE_TEMPLATE,
             FuncTemplate::Purchase(DoodadFuncPurchase {
                 id: PURCHASE_TEMPLATE,
-                item_id: STACK,
-                count: 1,
+                item_id,
+                count: item_count,
                 coin_item_id,
                 coin_count,
                 currency_id: 0,
@@ -346,6 +380,10 @@ fn buy_coin(w: &mut World) -> i16 {
 }
 
 fn buy_doodad(w: &mut World, unk_id: u32, item_id: u32, count: i32) -> i16 {
+    buy_doodad_at_grade(w, unk_id, item_id, 0, count)
+}
+
+fn buy_doodad_at_grade(w: &mut World, unk_id: u32, item_id: u32, grade: u8, count: i32) -> i16 {
     let mut s = PacketStream::new();
     s.write_bc(0)
         .write_bc(DOODAD_OBJ)
@@ -353,7 +391,7 @@ fn buy_doodad(w: &mut World, unk_id: u32, item_id: u32, count: i32) -> i16 {
         .write_u8(1)
         .write_u8(0)
         .write_u32(item_id)
-        .write_u8(0)
+        .write_u8(grade)
         .write_i32(count)
         .write_u8(0)
         .write_bool(false);
@@ -486,6 +524,45 @@ async fn a_coin_priced_purchase_func_cannot_check_out_through_buy_items() {
     assert_eq!(w.pa.data().money, 100);
     assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 0);
     assert_eq!(Inv::of(&w.pa).items_count(PURCHASE_COIN, -1), 0);
+}
+
+#[tokio::test]
+async fn a_money_purchase_refuses_a_grade_the_func_does_not_offer() {
+    let mut w = purchase_doodad_world_with(0, 0, 0, 500, "DoodadFuncPurchase");
+    let _d = spawn_doodad(&mut w);
+    w.pa.data().money = 1_000_000;
+    // `STACK` has `fixed_grade = -1` and is not gradable, so the func offers basic (0). A
+    // forged grade-11 line would be bought at the template price and sold back for the grade-11
+    // refund multiplier instead.
+    assert_eq!(
+        buy_doodad_at_grade(&mut w, PURCHASE_FUNC_KEY, STACK, 11, 1),
+        0
+    );
+    assert_eq!(w.pa.data().money, 1_000_000);
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 0);
+
+    assert_eq!(
+        buy_doodad_at_grade(&mut w, PURCHASE_FUNC_KEY, STACK, 0, 1),
+        0
+    );
+    assert_eq!(w.pa.data().money, 999_990);
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 1);
+}
+
+#[tokio::test]
+async fn a_money_purchase_sells_whole_func_bundles() {
+    let mut w = purchase_doodad_world_full(0, 0, 0, 500, "DoodadFuncPurchase", STACK, 2, -1);
+    let _d = spawn_doodad(&mut w);
+    w.pa.data().money = 100;
+    // One item is half a bundle.
+    assert_eq!(buy_doodad(&mut w, PURCHASE_FUNC_KEY, STACK, 1), 0);
+    assert_eq!(w.pa.data().money, 100);
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 0);
+
+    // Two bundles: four items at the per-item template price.
+    assert_eq!(buy_doodad(&mut w, PURCHASE_FUNC_KEY, STACK, 4), 0);
+    assert_eq!(w.pa.data().money, 60);
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 4);
 }
 
 #[test]
