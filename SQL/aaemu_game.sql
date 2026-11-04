@@ -685,6 +685,25 @@ ENGINE=InnoDB
 ;
 
 
+CREATE TABLE IF NOT EXISTS `premium_services` (
+    `c_id` INT NOT NULL COMMENT 'CSPremiumServiceBuy.cId and SCPremiumServiceList.cId',
+    `name` VARCHAR(400) NOT NULL DEFAULT '' COMMENT 'SCPremiumServiceList.cname (client max 400 bytes)',
+    `premium_id` SMALLINT UNSIGNED NOT NULL DEFAULT '0' COMMENT 'SCPremiumServiceList.pId',
+    `hours` INT NOT NULL DEFAULT '0' COMMENT 'Premium hours granted by a purchase (SCPremiumServiceList.ptime)',
+    `price_type` TINYINT UNSIGNED NOT NULL DEFAULT '0' COMMENT 'Credits(0), AAPoints(1), Loyalty(2), Coins(3)',
+    `price` INT NOT NULL DEFAULT '0' COMMENT 'Price in price_type units',
+    `grade` TINYINT UNSIGNED NOT NULL DEFAULT '0' COMMENT 'Copied to SCPremiumServiceList.id; meaning UNKNOWN, display only',
+    `is_sell` TINYINT(1) NOT NULL DEFAULT '0' COMMENT 'Buy allowed (1 = for sale)',
+    `is_hidden` TINYINT(1) NOT NULL DEFAULT '0' COMMENT 'SCPremiumServiceList.isHidden',
+    `buy_max` INT NOT NULL DEFAULT '0' COMMENT 'Copied to SCPremiumServiceList.bcount; not enforced (meaning UNKNOWN)',
+    PRIMARY KEY (`c_id`) USING BTREE
+)
+COMMENT='Premium service shop catalogue (WP-C)'
+COLLATE='utf8mb4_general_ci'
+ENGINE=InnoDB
+;
+
+
 CREATE TABLE IF NOT EXISTS `audit_char_sus` (
 	`id` BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
 	`sus_date` DATETIME NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Time of incident',

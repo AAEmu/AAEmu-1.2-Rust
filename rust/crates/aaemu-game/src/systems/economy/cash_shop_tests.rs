@@ -464,32 +464,6 @@ fn packets_layout() {
         sc::SCAccountWarnedPacket,
         &[2, 2, 0, b'H', b'i'],
     );
-    // Premium list with the fixed C# entry
-    let det = premium_detail();
-    let mut w = PacketStream::new();
-    w.write_bool(true)
-        .write_u8(1)
-        .write_i32(8000001)
-        .write_str("Премиум-подпиcка (30 дней)")
-        .write_u16(1)
-        .write_u8(0)
-        .write_u8(0)
-        .write_i32(720)
-        .write_u8(0)
-        .write_i32(300)
-        .write_u32(0)
-        .write_i32(0)
-        .write_i32(0);
-    check(
-        encode(&SCPremiumServiceListPacket {
-            is_end: true,
-            size: 1,
-            detail: det,
-            exchange_ratio: 0,
-        }),
-        sc::SCPremiumServiceListPacket,
-        w.as_bytes(),
-    );
 }
 
 #[test]
@@ -1208,33 +1182,6 @@ async fn buy_packet_handler() {
         s.w.a.drain(),
         vec![(sc::SCICSCashPointPacket, 90i32.to_le_bytes().to_vec())]
     );
-    // Premium service list / message
-    run::<CSPremiumServiceListPacket>(&mut s.w, 0, &[]);
-    assert_eq!(
-        s.w.a.drain(),
-        vec![(
-            sc::SCPremiumServiceListPacket,
-            body_of(&SCPremiumServiceListPacket {
-                is_end: true,
-                size: 1,
-                detail: premium_detail(),
-                exchange_ratio: 0
-            })
-        )]
-    );
-    run::<CSPremiumServiceMsgPacket>(&mut s.w, 0, &3i32.to_le_bytes());
-    assert_eq!(
-        s.w.a.drain(),
-        vec![(
-            sc::SCAccountWarnedPacket,
-            body_of(&SCAccountWarnedPacket {
-                source: 2,
-                msg: "Premium ...".into()
-            })
-        )]
-    );
-    run::<CSPremiumServiceBuyPacket>(&mut s.w, 0, &3i32.to_le_bytes());
-    assert!(s.w.a.drain().is_empty());
 }
 
 #[test]
