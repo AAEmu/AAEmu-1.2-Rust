@@ -252,6 +252,10 @@ pub struct Character {
     pub is_riding: bool,
     /// `AttachedPoint` (`AttachPointKind` of the mate / slave seat, 0 = None).
     pub attached_point: u8,
+    // ---- phase 3 / services: add this subsystem's Character fields below ----
+    /// `Connection.Payment.PremiumState` cached for the `SCUnitStatePacket` premium field
+    /// (set on select / grade change, WP-B).
+    pub premium: bool,
 }
 
 /// `Guid.NewGuid().ToByteArray()` (random, version 4 / variant 1).
@@ -383,6 +387,8 @@ impl Character {
             // ---- phase 3 / vehicles ----
             is_riding: false,
             attached_point: 0,
+            // ---- phase 3 / services ----
+            premium: false,
         }
     }
 

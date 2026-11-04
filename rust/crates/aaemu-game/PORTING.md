@@ -952,9 +952,10 @@ live acceptance remain pending.
 | `GameService`, `Program.UpTime`, `ManagerOrchestrator` | `systems/services/game_service.rs`, `main.rs` | done | Port of `GameServiceTests` and `ManagerOrchestratorTests`. |
 | `TickManager` (+ `TickEventHandler`) | `systems/services/tick.rs` | done | Thread loop (20 ms), sync / async subscribers, busy skip. Port of `TickManagerTests`. |
 | `TaskManager2`, `Models/Tasks/Task` | `systems/services/tasks.rs` | done | Delayed / repeating / cron tasks (NCrontab subset of `systems::npcs::schedule`), ids, cancel, `RemoveTasks`, `GetQueueCount`. Port of `TaskManagerTests`. |
-| `AccountManager` remainder | `systems/services/accounts.rs`, `db.rs` | done | |
+| `AccountManager` remainder | `systems/services/accounts.rs`, `db.rs` | done | Since WP-B the per-account runtime state also holds the payment and premium point (`AccountManager::state`), loaded from `aaemu_game.accounts` under `lock_of` and refreshed at `Add` / `CSListCharacter`; the disconnect drops the point to `premium_configs.disconnect_point`. |
 | Second password (`Create/Change/Clear/CheckSecondPasswordPacket`, `SCSecondPass*`) | `systems/services/second_password.rs` | done | 1.2 virtual-keyboard tables, one-shot key id, shared `PasswordService` hashing, MySQL failure counter + timed lock. See the deviation below. |
-| `TimedRewardsManager`, `TimedRewardsTask` | `systems/services/timed_rewards.rs` | done | |
+| `TimedRewardsManager`, `TimedRewardsTask` | `systems/services/timed_rewards.rs` | done | The tick reads the account payment / premium grade from `AccountManager` (WP-B) instead of the C# connection default; `max_labor` is `premium_benefits.max_labor`. |
+| Account payment / premium (`premium_grades`, `premium_benefits`, `premium_configs`, `pcbang_buffs`, `SCAccountInfo`, `SCUpdatePremiumPoint`) | `systems/services/premium.rs`, `systems/services/accounts.rs`, `packets/{c2g,proxy,g2c}.rs` | done | Rust only: the C# never loaded these tables and sent the permanent `AccountPayment` default (`SCUpdatePremiumPoint(1,1,1)` hard-coded at `FinishState(7)`). See the deviations below. |
 | `CharacterManager` remainder (`GetEffectiveAccessLevel`, `PlayerRoll` + `CSRollDicePacket` / `SCDiceValuePacket`, `StartOnlineTracking` / `CharacterOnlineTrackingTask`, `AddOfflineCrimePoints`, `ApplyBeautySalon` + `CSEnter/ExitBeautySalonPacket`, `CSBeautyshopDataPacket`, `SCCharacterGenderAndModelModifiedPacket`) | `systems/services/{character,beauty_salon}.rs` | done | Beauty salon item work through `BEAUTY_SALON_ITEMS` (economy). **Deviation (`CharacterOnlineTrackingTask`):** the C# read and rewrote the account's divine clock per character (`GetDivineClock` + `UpdateDivineClock`, 2 round trips and a commit each, every 5 s). The Rust collects the per-account seconds during the pass and writes them after it with one atomic `UPDATE accounts SET divine_clock_time = LEAST(divine_clock_time + ?, 4294967295) WHERE account_id IN (...)` per distinct non-zero delta (500 ids per statement, `db::add_divine_clock_time`), so it can no longer overwrite the 0 that `timed_rewards::do_daily_account_login` stores in between. The column is `INT UNSIGNED`; the sum saturates at `u32::MAX` where the C# `uint` wrapped. |
 | Character packets: `CSActiveWeaponChangedPacket`, `CSBroadcastVisualOptionPacket`, `CSChangeAppellationPacket` (`CharacterAppellations.Change`), `CSIdleStatusPacket`, `CSRefreshInCharacterListPacket`, `CSRequestUIDataPacket`, `CSSaveUIDataPacket`, `CSUpdateActionSlotPacket`, `CSRestrictCheckPacket`, `CSSetLpManageCharacterPacket` and the log-only `CSCharDetailPacket`, `CSCleanupLogicLinkPacket`, `CSConsoleCmdUsedPacket`, `CSCriminalLockedPacket`, `CSEditorGameModePacket`, `CSRankCharacterPacket`, `CSRequestCharBriefPacket`, `CSRequestSecondPasswordKeyTablesPacket`, `CSSetupSecondPassword`, `CSResturnAddrsPacket` (+ `SCActiveWeaponChangedPacket`, `SCUnitVisualOptionsPacket`, `SCAppellationChangedPacket`, `SCUnitIdleStatusPacket`, `SCRefreshInCharacterListPacket`, `SCResultRestrictCheckPacket`, `SCLpManagedPacket`) | `systems/services/character_packets.rs` | done | Byte-exact tests. `CSHangPacket` / `CSUnhangPacket` are `systems/vehicles/harpoon.rs` (sticky parents, rope break); `CSResurrectCharacterPacket` is `systems/skills/resurrect.rs`. |
 | `CharacterManager` `bag_expands` / `expand_expert_limits`, `Inventory.ExpandSlot`, `CharacterActability.Regrade` / `ExpandExpert`, `CSExpandSlotsPacket`, `CSExpandExpertPacket`, `CSUpgrade/DowngradeExpertLimitPacket` (+ `SCInvenExpandedPacket`, `SCExpertLimitModifiedPacket`, `SCExpertExpandedPacket`) | `systems/services/expands.rs` | done | Item checks / consumption through `CHARACTER_ITEM_OPS` (economy). |
@@ -1940,8 +1941,10 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   lock is released instead of inline; item hooks that raise quest events are queued to the
   end of the running operation.
 * systems::quests: model sizes are 0 (no model data) in `GetAround` / distance checks; buff tags
-  are not loaded (`CheckBuffTag` false); `EquipShield` unit req is false; labor margin uses the
-  non-premium cap 5000; debug messages use the character access level only.
+  are not loaded (`CheckBuffTag` false); `EquipShield` unit req is false; debug messages use the
+  character access level only. The labor margin reads the account's real payment / premium grade
+  (`unit_reqs::max_labor` -> `premium_benefits.max_labor`, WP-B); the old note said "non-premium
+  cap 5000".
 * systems::quests: C# exceptions inside quest code are modelled where reachable with the 1.2
   data (`SetObjective` on a non-objective act, `MaxObjective` division by zero, the timer step
   switch): they abort the event invocation list / sphere tick. Out-of-range objective reads
@@ -2217,8 +2220,10 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   sent, every one a hit on plain terrain on a gentle slope (skill 11918, `check_terrain`, hit
   normals within 0.17 of straight up). The height the 1.2 client really uses is not verified; 1 m
   is the former Rust/C# value. NPC casters use the same rule.
-* systems::skills: the labor margin requirement uses `GetMaxLabor(Payment.PremiumState)`; every
-  connection has the default C# `AccountPayment` (premium until 2030), so the cap is 5000.
+* systems::skills: the labor margin requirement uses `GetMaxLabor(Payment.PremiumState)` with the
+  account's real payment and premium grade from `systems::services::premium` (`premium_benefits`
+  `max_labor`: 2000 / 5000), loaded from `aaemu_game.accounts` (WP-B). The C# had the permanent
+  default `AccountPayment` (premium until 2030), so its cap was always 5000.
 * systems::skills (in-place resurrection, 2026-10-20): `CSResurrectCharacterPacket(in_place =
   true)` requires a pending `SCNotifyResurrectionPacket` offer (`skill_char.resurrect_offer`, set
   by the `Resurrection` special effect and the free resurrection below
@@ -2539,8 +2544,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * systems::services: `TaskManager.GetQueueCount` (WebApi `/status`) only counts the tasks of
   this queue; the other subsystems run their timers as Tokio tasks.
 * systems::services: `TimedRewardsManager.DoTick` skips connections without an account (C#
-  `GetAccountDetails(0)` inserts an `accounts` row 0); the payment of a connection reached from
-  the tick is the default `AccountPayment` (it is never changed in C# either).
+  `GetAccountDetails(0)` inserts an `accounts` row 0). The payment comes from
+  `AccountManager::state` (WP-B), not a default. `AccountState` lives in the account registry
+  because the tick only has a `ConnectionHandle`; a lazy expiry check at the start of the labour
+  tick deactivates an expired premium account (`deactivate_point`, `SCAccountInfo` +
+  `SCUpdatePremiumPoint` + grade-buff removal).
 * systems::services: `AppConfiguration.Instance` mutations (World set commands,
   `ReloadConfiguration`) replace the `ConfigCell` snapshot; subsystems that copied values at
   start (skills config, doodad growth rate) are updated by the World set commands only.
@@ -2747,10 +2755,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `SCScheduleItemSentPacket` (0x151: `u32` schedule id, `u8` by-mail), followed by a fresh list.
   Deviations / unverified: the take packet's body width is inferred (the serializer writes the
   field through a generic stream call whose width was not traced; it matches the 5.0 C#);
-  eligibility is `paid_patron` = the connection payment state (premium for every account) with no
-  premium grade and no PC-bang, so rows needing a specific grade or a PC-bang are never listed;
-  the progress is loaded at startup (`ScheduleItemManager::restore`) and saved inside the
-  financial snapshot transaction (`SaveManager`), not by the C# per-account saves.
+  eligibility is `paid_patron` + the real premium grade from the account state (WP-B), so rows
+  needing a grade are listed for the matching tier; the 1.2 client has no PC-bang membership flag,
+  so `pc_bang` stays false and PC-bang rows stay unlisted; the progress is loaded at startup
+  (`ScheduleItemManager::restore`) and saved inside the financial snapshot transaction
+  (`SaveManager`), not by the C# per-account saves.
 
 * systems::npcs (2026-10-14): a `DoodadFuncRatioRespawn` replacement initializes the new doodad
   synchronously (`Spawn` -> `InitDoodad` -> `DoPhaseFuncs`), so a cyclic definition recursed
@@ -3231,6 +3240,41 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   and `spawn_mount` refuses it with `MATE_CANNOT_SPAWN_WHILE_CORPSE`; because the same item is
   the dismiss toggle, the corpse flag also blocks dismissing the corpse. Known, not fixed.
 
+* systems::services (account payment / premium, WP-B, 2026-11-03): the C# read the payment from a
+  permanent `AccountPayment` default (Premium, 0 .. 2030-01-01) in five places. Rust stores
+  `pay_method`, `pay_location`, `pay_start`, `pay_end` (unix seconds) and `premium_point` on
+  `aaemu_game.accounts`; `pay_method = 0` means `Account:DefaultPayment` (owner decision
+  2026-11-03: `premium` by default, configurable to `none` / `demo`). **Owner decision
+  2026-11-03: the configured default premium is permanent** (`pay_end = 0` means no end date in
+  `AccountPayment::premium_state`); the C# placeholder end 2030-01-01 is no longer inherited.
+  GM grants always carry their own end date. A MySQL error while loading the state at login
+  keeps the session on the configured default (the login is not refused and the error is
+  logged). The premium grade is the
+  client's own `premium_grades` lookup (`FUN_397a7d10`: highest `grade_id` with `point <= p`,
+  default 1; the 1.2 rows are grade 1 at 0 and grade 2 at 1). `premium_configs` supplies
+  `connect_point` (granted on connect), `disconnect_point` (on disconnect) and
+  `deactivate_point` (when premium ends), capped at `max_point`; its `max_grade` has no 1.2
+  consumer and its meaning is UNKNOWN, so it is loaded but unused. `premium_benefits.max_labor`
+  drives `GetMaxLabor`; the online / offline tick amounts stay in `CharacterSettings.json` and a
+  startup mismatch logs a warning (they agree in the shipped data: 5/0/2000 and 10/5/5000). The
+  only `pcbang_buffs` row with `active = 't'` is 8000001 -> buff 8000011 (grade 2); the Korean
+  PC-bang rows are inactive, the client has no PC-bang membership flag, and `pc_bang` in the
+  schedule-item eligibility therefore stays false. **Owner decision 2026-11-03:** default
+  premium accounts are grade 2, so the grade-2 VIP schedule reward row 8000001 is now listed
+  (on existing servers too; it was never listed while the old default had no grade) - a
+  deliberate behaviour change. Buff 8000011 is no longer in
+  `UNIT_STATE_FORCED_BUFFS`: it is applied for premium grade 2 on login / grade change and removed
+  on logout / grade change (it is display-only: no `buff_modifiers`, `duration = 0`, never saved).
+  `SCAccountInfo` (i32 method, i32 location, i64 start, i64 end, i64 realPayTime = 0;
+  `FUN_397aeb90`) is sent at the two C# moments with the real state; `SCUpdatePremiumPoint`
+  (i32 point, u8 oldPg, u8 pg; `FUN_397b8b00`) is sent at `FinishState(7)` with the real point and
+  grade (old == new on the initial sync), and with old/new grades on GM / expiry changes.
+  Deviation: the C# hard-coded `(1, 1, 1)` at `FinishState(7)` and a literal `1` in the
+  `SCUnitStatePacket` premium field; Rust writes the real flag (0 for a normal account).
+  GM `/premium <account|name|self> <on|off|days> [days]` (Rust only, access 100) is the grant
+  path until the premium shop (WP-C). The grant/removal upserts the `accounts` row (an account
+  with only a login row gets one) and answers an error instead of "granted" when the write
+  fails.
 * systems::services (second password, 2026-11-03): the 1.2 second-password protocol is ported in
   `systems::services::second_password`. The client sends four shuffled permutations of
   `0-9a-zA-Z` keyed by a server key id (`FUN_3907a370` / `FUN_3907a430`) and the server decodes
@@ -3612,13 +3656,52 @@ and in NPC wandering / buff remaining times.
   binary rules. Native wall slope/mirror variant selection remains unverified.
   Participant buffs grant the original headquarters teleport skills. Headquarters bind to
   retained original doodads for the current siege and require explicit GM rebind after restart;
-  registered dead participants can revive there. The SiegePeriod doodad predicate fails closed
-  because its transition semantics are unresolved; phase cycles are bounded for all groups.
+  registered dead participants can revive there. The SiegePeriod doodad phase funcs are
+  implemented in WP-S3 (see the deviation below); phase cycles are bounded for all groups.
   Reinforcement/commander eligibility and payout calendars are not inferred. Building HP
   persists through restart and lodestone collisions follow the native
   CGA/ANM root curves and settled static damage proxies. Absolute render/collider animation
   phase synchronization remains unverified. Property, authority, mail, items and wallets use
   one short prepared snapshot before SQL awaits; logout and shutdown serialize the same saves.
+* systems::housing / systems::npcs (2026-11-03, WP-S3 doodad siege-period phase funcs):
+  `DoodadFuncSiegePeriod` now waits until the territory period named by `siege_period_id`
+  ends and then applies `next_phase` (`-1` = despawn/delete) instead of the C# "apply the
+  destination on any character use". Evidence: the authored rows and chains in
+  `doodad_func_siege_periods` / `doodad_phase_funcs` — 4307 `10581 (period 2) -> 10582 (3) ->
+  10779 (4) -> -1`, 3304 `7627 (2) -> 7631 (3) -> -1`, 3410 `8173 (period 0) -> 8238 (3)`;
+  a "when period 2 starts" reading would fire the declare-period camp chains immediately,
+  while "until period 2 ends" walks declaration -> siege position -> gone. The watcher
+  `npcs/doodad/siege_phase.rs` polls the read-only `housing/dominion/period.rs` view every 2 s
+  (the calendar tick is unchanged) and applies a change only while the doodad is still in the
+  observed group, under one phase-operation reservation. The view mirrors the snapshot: an
+  unfinished explicit GM schedule uses the real clock (warmup/siege), otherwise an owned
+  territory uses the weekly calendar (GM test clock); owned without either source is peace and
+  unowned is period 0. The watcher starts only at the end of `housing::System::start`, after
+  the dominion rows are loaded (`npcs::doodad::start` runs earlier), and the first observation
+  of a zone is silent, so a boot never records the empty period 0: a later `0 -> owned` change
+  cannot fire the 3410 period-0 func. That func now fires only when the target period is warmup
+  (3), never for `previous == 0` alone. The watcher keeps an index of the doodads whose current
+  phase has a `SiegePeriod` func (updated on create / func-group change / delete) instead of
+  scanning every world object every 2 s, and skips a tick while neither the calendar nor an
+  unfinished explicit schedule can change a period. A transition that finds a doodad busy with
+  another phase operation is left unrecorded and retried on the next tick (the expected-group
+  check makes the retry idempotent); the periods skipped between two observations are walked
+  in calendar order (2 -> 4 ends 2 and 3), so a missed poll cannot strand 10582. A func-group
+  change also removes the area triggers the old group created: the C# kept a duration-0
+  `DoodadFuncClout` until the doodad was deleted, so the 3410 `safezone_up` revive zone never
+  went away and accumulated one trigger per warmup. `DoodadFuncDeclareSiege` (the one
+  `doodad_func_declare_sieges` row, a regular `doodad_funcs` row of 3304 group 7622, skill
+  15067, next phase 7627) stays inert: the C# registers the class only in
+  `_phaseFuncTemplates`, so `GetFuncTemplate` does not find the row and nothing advances it.
+  The declaration validation, broadcast and the `7622 -> 7627` entry belong to WP-S2; wiring
+  this row early would let any backpack user strand the item in 7631. Direct write targets are
+  the phase machine's `do_change_phase_if_group` / `despawn_or_delete_if_group`, so a period
+  event cannot move a doodad that changed phase in between. UNKNOWN (capture-pending): 3410's
+  period-0 func (safe default as above; the `defense` flag is unused), 4307's authored
+  10-minute lifetime vs the 90-minute siege (the phase chain wins), whether a skipped period's
+  chain should really end when the calendar jumps over it (the current walk does), and
+  catching up a persisted mid-cycle phase after restart (the first observation of a zone is
+  silent).
 * systems::housing: sale buyer names retain the original case-sensitive lookup. The housing
   audit fixes the first-house tax/deposit omission, reversed paid flag (confirmed against the
   1.2 housing UI bytecode), overdue counter, finished-house construction, duplicate signs,

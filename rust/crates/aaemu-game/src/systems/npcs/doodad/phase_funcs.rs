@@ -318,9 +318,11 @@ pub fn use_phase_func(t: &FuncTemplate, ctx: &DoodadCtx<'_>, caster: Option<&Wor
         FuncTemplate::CraftDirect(f) => override_if_character(ctx, caster, f.next_phase),
         FuncTemplate::Hunger(f) => override_if_character(ctx, caster, f.next_phase),
         FuncTemplate::PuzzleOut(f) => override_if_character(ctx, caster, f.next_phase),
-        // The original period enter/leave predicate is not yet verified. Following every
-        // authored destination on a character caster loops 3410's phase-only 8173/8238
-        // groups. Explicit GM HQ phases/bindings remain usable without guessing a calendar.
+        // A wait, not an action: stay in this phase until period `siege_period_id` ends, then
+        // move to `next_phase` (-1 = gone). The boundary is an external event, so the func is
+        // passive when the phase is entered; `super::siege_phase` applies the change when the
+        // zone's period changes. 3410's unknown `period 0` rule and the `defense` flag are
+        // documented there (capture-pending).
         FuncTemplate::SiegePeriod(_) => false,
         FuncTemplate::SpawnGimmick(f) => {
             if crate::systems::npcs::gimmick::manager::spawn_from_doodad(
@@ -515,10 +517,12 @@ fn use_clout(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>, f: &DoodadFuncCl
         .buffs
         .contains_key(&f.buff_id)
         .then_some(f.buff_id);
+    let func_group_id = ctx.doodad.data().func_group_id;
     let mut trigger = AreaTrigger::default();
     trigger.shape = shape;
     trigger.owner = Some(owner.clone());
     trigger.caster = Some(trigger_caster.clone());
+    trigger.func_group_id = func_group_id;
     trigger.target_relation = f.target_relation;
     trigger.inside_buff_id = inside_buff_id;
     trigger.effects_per_buff = HashMap::from([(f.buff_id, f.effects.clone())]);
