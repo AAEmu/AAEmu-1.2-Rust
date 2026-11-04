@@ -360,7 +360,12 @@ impl MailForAuction {
         true
     }
 
-    /// `FinalizeForBidFail(previousBuyerId, previousBid)` (C# uses `MailType.AucOffFail`).
+    /// `FinalizeForBidFail(previousBuyerId, previousBid)`.
+    ///
+    /// Deviation from C# (`MailType.AucOffFail`): the 1.2 client's own mail-type table has a
+    /// distinct `AUCITON_BID_FAIL = 17` next to `AUCTION_OFF_FAIL = 15`
+    /// (`mailbox/mail/common.alb`, referenced by `SetMailLabelColorByType`), so the outbid
+    /// refund is type 17.
     pub fn finalize_for_bid_fail(
         &mut self,
         server: &GameServer,
@@ -374,7 +379,7 @@ impl MailForAuction {
         self.mail.header.sender_name = ".auctionBidFail".to_string();
         self.mail.header.receiver_id = self.buyer_id;
         self.mail.receiver_name = name_buyer;
-        self.mail.mail_type = mail_type::AUC_OFF_FAIL;
+        self.mail.mail_type = mail_type::AUC_BID_FAIL;
         self.mail.title = TITLE_BID_LOST.to_string();
         self.mail.body.text = format!("body('{}')", quote_arg(&self.item_name));
         self.mail.attach_money(previous_bid, 0, 0);

@@ -423,7 +423,7 @@ connected by `systems::economy::wiring`).
 | `CraftManager`, `Models/Game/Crafts`, `CharacterCraft`, `CraftTask`, `CSExecuteCraft`, `SCCraftFailed` | `systems/economy/{craft,craft_data}.rs` | done | Cast through `CraftHooks::start_craft_cast`; skills call `craft::end_craft`. |
 | Stores (`CSBuyItems`, `CSSellItems`, buy-back, `CSListSoldItem`, `CSBuyPriestBuff`, `CSBuyCoinItem`, `CSSellBackpackGoods`), `SpecialtyManager`, `TaxationsManager`, `ExpandExpert`, item look conversion | `systems/economy/{store,store_data,specialty}.rs` | done | Merchant packs / NPC flags through `NpcEconomyHooks`. Checkout validates currency, checked totals and each balance, then stages complete goods / buy-back delivery before committing payment. Vocation charges the configured price displayed by the 1.2 shop, without earnings bonuses. Rejected checkout preserves items and balances. Purchases need an NPC merchant pack, a doodad `DoodadFuncStoreUi` pack, or the money form of the doodad's current-phase `DoodadFuncPurchase` (`CSBuyItems.unkId`, the `doodad_funcs` row id the 1.2 client writes there), and filter the goods by it; selling needs a merchant within 3 m, lists each item once and pays only for items moved to buy-back. Specialty: the empty `CSListSpecialtyGoods` answer, the dropped records packet and the corrected sale values are detailed in the specialty protocol note. |
 | `MailManager`, `Models/Game/Mails/**`, `CharacterMails`, mail packets | `systems/economy/{mail,mail_character,mail_kinds,mail_packets,mail_data}.rs` | done | Saved in `SaveStage::BeforeItems`; housing tax through `MailHousingHooks`. |
-| `AuctionManager`, `Models/Game/Auction/**`, auction packets | `systems/economy/{auction,auction_data,auction_packets}.rs` | done | Saved in `SaveStage::AfterItems`; results mailed through `wiring`. Requests require an auctioneer NPC (the `auctioneer` template flag) named by the packet or the current interaction object within 5 m (the C# ignored the ids). |
+| `AuctionManager`, `Models/Game/Auction/**`, auction packets | `systems/economy/{auction,auction_data,auction_packets}.rs` | done | Saved in `SaveStage::AfterItems`; results mailed through `wiring`, and an online seller also gets `SCAuctionMessagePacket` for accepted bids and sales (the C# sent neither; see the auction-messages deviation). Requests require an auctioneer NPC (the `auctioneer` template flag) named by the packet or the current interaction object within 5 m (the C# ignored the ids). |
 | `TradeManager`, trade packets | `systems/economy/trade.rs` | done | The C# `CanStartTrade` TODO ("Check faction and others") is implemented from the 1.2 client's own checks: a request and its acceptance refuse a dead player, a hostile faction relation and a distance `>= sqrt(25) = 5` m, and a trade across instances; see the trade validation deviation. |
 | `CashShopManager`, `Models/Game/CashShop/**`, ICS packets | `systems/economy/cash_shop.rs` | done | Gifts by `CommercialMail` (`wiring`); account credits SQL behind `CashShopDb`. |
 | Premium service shop (`CSPremiumServiceList` / `Buy` / `Msg`, `SCPremiumServiceList`, `PremiumDetail`) | `systems/economy/premium_service.rs` | done | Rust only: the C# answered the list with a fixed Russian 30-day entry and only logged buy / msg. The catalogue is the empty-by-default operator table `aaemu_game.premium_services`; the purchase is one atomic MySQL transaction. See the WP-C deviation below. |
@@ -1896,6 +1896,15 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * systems::economy: auction lots are enumerated in id order (`ConcurrentDictionary` order in C#),
   search / cheapest lot skip lots whose item or template is missing; mails are kept in a map that
   reproduces the C# `Dictionary` enumeration order; mail dates are whole unix seconds.
+* systems::economy (auction messages, 2026-11-04): `SCAuctionMessagePacket` (0x133) is sent to an
+  online seller when a bid is accepted (`msgType` 0, `AUCTION_BIDDEN`) and when a lot sells
+  (`msgType` 1, `AUCTION_BOUGHT_BY_SOMEONE`; both the buy-now and the timed-winner path), with
+  the item template id and the money. Offline sellers get only the result mail. The C# never
+  sent this packet. Layout from the 1.2 client reader `FUN_397b56f0` (u8, u32, i32); the msgType
+  meaning from the handler `FUN_394cf660` (events 0x1fc/0x1fd) and the seller-side ui texts
+  3047/3048. Deviation: the outbid refund uses `MailType.AucBidFail` (17, the client's
+  `AUCITON_BID_FAIL`) instead of the C# `AucOffFail` (15), so its mailbox label is the
+  bid-failure one.
 * systems::economy (money guards, 2026-10-20): `CSDepositMoney` / `CSWithdrawMoney` refuse
   non-positive amounts and require a banker NPC (`banker` template flag) within 5 m of the current
   interaction object; `CSBuyItems` accepts goods only from the interacting NPC's merchant pack or
