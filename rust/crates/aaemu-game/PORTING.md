@@ -3837,7 +3837,8 @@ and in NPC wandering / buff remaining times.
   retained original doodads for the current siege and require explicit GM rebind after restart;
   registered dead participants can revive there. The SiegePeriod doodad phase funcs are
   implemented in WP-S3 (see the deviation below); phase cycles are bounded for all groups.
-  Reinforcement/commander eligibility and payout calendars are not inferred. Building HP
+  Commander eligibility and payout calendars are not inferred; roster caps and the
+  defender reinforcement wave are implemented in WP-S4 (see the deviation above). Building HP
   persists through restart and lodestone collisions follow the native
   CGA/ANM root curves and settled static damage proxies. Absolute render/collider animation
   phase synchronization remains unverified. Property, authority, mail, items and wallets use
@@ -3881,6 +3882,51 @@ and in NPC wandering / buff remaining times.
   chain should really end when the calendar jumps over it (the current walk does), and
   catching up a persisted mid-cycle phase after restart (the first observation of a zone is
   silent).
+* systems::housing / systems::social (2026-11-04, WP-S4 roster caps and reinforcements):
+  `siege_settings` is now loaded (`CastleReferenceData::siege_settings`, keyed by
+  `total_castles`) and the explicit siege snapshot carries the authored team limits and
+  reinforcement delay instead of the hard-coded 100/100/100. Evidence (1.2 client): a team is
+  `id, obj_id, x, y, z, ni, nr, limit, count, ids[]` (`FUN_39839c80`, `FUN_39839c10`);
+  `IsReinforceArrived` (`FUN_3946c500`) is period 4 and `defender.limit == defender.nr`;
+  `GetReinforceRemainDate` (`FUN_3946c3f0`) is 0 when `ni == nr`, `limit == nr` or past
+  `start(siege) + bdm` (`FUN_398390a0`); `SCSiegeReinforce` 0x0eb sets the defender
+  `limit = nr` (clamped to 100, `FUN_392f3670`/`FUN_39839320`). Encoding: `ni =
+  num_defenders`, `nr = num_defenders + num_reinforcements`; before the wave the defender is
+  `ni/ni`, after it `ni/nr`; no reinforcements means `ni == nr` and no packet. `bdm` is the
+  zone's `reinforce_defense_delay_mins * 60` (the shipped rows all author 20 minutes).
+  `total_castles` is INFERRED to be the number of dominions the defending expedition holds;
+  more than 10 clamps to the last shipped row. The wave is announced once, from the real
+  clock, by `runtime::tick_once -> reinforce::tick` when `now >= starts_at + bdm`; the
+  `dominions.siege_reinforced` flag (new column) is check-and-set under the authority lock
+  before the broadcast, so repeated ticks and restarts do not repeat the packet. The packet
+  goes to every client through `broadcast_to_server`, like every other dominion record; the
+  1.2 client keeps all dominion records server-wide (the retail audience is
+  capture-pending). Roster joins (`/joinsiege` and GM `/dominion register`) now pass the
+  data cap into `DominionManager::register_participant_with_cap`, which checks and inserts
+  under one lock: a defender before the wave is refused with `SIEGE_BLOCK_DEFENSE_REINFORCE`
+  457, a full roster with `SIEGE_PARTICIPANT_FULL` 445 (sent as `SCErrorMsgPacket` on the
+  player path; the GM path reports text only). Missing `siege_settings` rows fall back to the
+  native 100-character array rather than inventing a cap. UNKNOWN (capture-pending): the
+  attacker cap (the same evidenced total is used for `ni/nr/limit`), whether
+  `total_castles` is global or per defender, and ticket-holder membership (a wave only raises
+  the cap; no member is enrolled automatically). Tests:
+  `missing_or_oversized_settings_do_not_invent_native_capacity`,
+  `held_castle_count_selects_the_authored_settings_row`,
+  `bdm_is_the_authored_reinforce_delay_in_seconds`,
+  `the_defender_cap_waits_for_the_wave_and_the_attacker_uses_the_total`,
+  `a_missing_settings_row_keeps_the_native_cap_for_every_side`,
+  `snapshot_carries_data_driven_team_limits_and_reinforcement_delay`,
+  `siege_state_body_carries_bdm_and_team_limits_at_native_offsets`,
+  `reinforcement_wave_is_announced_once_at_start_plus_bdm_through_the_tick`,
+  `joinsiege_enforces_the_data_caps_with_the_clients_error_ids`. A test-only ephemeral
+  dominion (`/nation dominion`) still counts as the defender's held castle for the
+  `siege_settings` row; the flag only keeps it out of the database and out of the WP-S6 claim
+  gate. Live (lane stack, headless `aaemu-testclient`): a GM-seeded ephemeral dominion on a
+  live guard tower in zone group 33 was scheduled against a seeded second expedition; both
+  bots received `SCSiegeState` immediately (its body's bdm and 50/70/50 defender limits are
+  fixed by the byte test) and exactly one `SCSiegeReinforce` about 21 minutes later
+  (`starts_at` + the authored 20-minute `bdm`), with `expectnopkt` confirming no repeat. The
+  real client's reinforcement countdown UI is not covered headlessly.
 * systems::housing: sale buyer names retain the original case-sensitive lookup. The housing
   audit fixes the first-house tax/deposit omission, reversed paid flag (confirmed against the
   1.2 housing UI bytecode), overdue counter, finished-house construction, duplicate signs,
