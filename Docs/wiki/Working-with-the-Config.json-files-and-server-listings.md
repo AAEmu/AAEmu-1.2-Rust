@@ -232,7 +232,8 @@ the target 1.2 client before exposing it to players.
 Logging is not configured in `Config.json`. Both servers log to stdout; the
 level is set with the `RUST_LOG` environment variable (default `info`, for
 example `RUST_LOG=debug` or `RUST_LOG=aaemu_game=debug,info`). `NO_COLOR=1`
-disables colored output.
+disables colored output. `AAEMU_LOG_MS=1` adds six fractional digits to the time of every
+line (`HH:MM:SS.ffffff`); without it the format stays `HH:MM:SS`.
 
 ## `game_pak` configuration
 

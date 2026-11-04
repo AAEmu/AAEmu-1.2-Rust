@@ -7,6 +7,8 @@ use anyhow::{bail, Context};
 use serde_json::{json, Value};
 #[path = "client_actions.rs"]
 mod actions;
+#[path = "client_capture.rs"]
+mod capture;
 
 const VERSION: &str = "2025-11-25";
 const MAX_MESSAGE: u64 = 1 << 20;
@@ -41,7 +43,8 @@ pub fn tools() -> Vec<Value> {
             json!({"user":{"type":"string","minLength":1,"maxLength":32},"password_file":{"type":"string","minLength":1,"maxLength":32767},"pak_manifest":{"type":"string","minLength":1,"maxLength":32767},"fast_start":{"type":"boolean"},"fast_pak":{"type":"boolean"},"smooth_start":{"type":"boolean"},"hidden":{"type":"boolean"},"sound":{"type":"boolean","default":false}}), &[], false),
         tool("client_stop", "Stop a client launched by this MCP session. Existing user clients cannot be stopped by this tool.", json!({"pid":pid}), &["pid"], false),
     ];
-    result.extend(actions::tools(pid));
+    result.extend(actions::tools(pid.clone()));
+    result.extend(capture::tools(pid));
     result
 }
 
@@ -185,7 +188,7 @@ impl Session {
                     };
                 json!({"protocolVersion":version,"capabilities":{"tools":{}},
                     "serverInfo":{"name":"aaemu-client","version":env!("CARGO_PKG_VERSION")},
-                    "instructions":"Controls the local ArcheAge 1.2 r208022 client. Use client_status and screenshots to verify Lua actions; client_launch defaults to silent audio, fast hidden rendering, normal-priority CPU calibration and 64 KB pak read-ahead. Set sound=true to enable client sound and music. For multiplayer, launch distinct user accounts and target actions with each returned PID; passwords come only from password_file or the configured file. Use client_pak for read profiling and byte verification. A hidden real client still needs Windows and a GPU. client_stop only stops this session's launches."})
+                    "instructions":"Controls the local ArcheAge 1.2 r208022 client. Use client_status and screenshots to verify Lua actions; client_launch defaults to silent audio, fast hidden rendering, normal-priority CPU calibration and 64 KB pak read-ahead. Set sound=true to enable client sound and music. For multiplayer, launch distinct user accounts and target actions with each returned PID; passwords come only from password_file or the configured file. Use client_pak for read profiling and byte verification. client_trace records the original client's animation, particle, sound and key-press events as skillparity/v1 JSONL, and client_video records a constant-frame-rate mp4 with a <path>.json sidecar. A hidden real client still needs Windows and a GPU. client_stop only stops this session's launches."})
             }
             "ping" => json!({}),
             _ if !self.ready => return Some(error(id, -32000, "initialize the session first")),
@@ -386,6 +389,33 @@ mod backend {
                         .into_result()?;
                     let value: Value =
                         serde_json::from_str(&response).context("invalid frame profile")?;
+                    Ok(
+                        json!({"content":[{"type":"text","text":response}],"structuredContent":value,"isError":false}),
+                    )
+                }
+                "client_trace" => {
+                    let command = capture::trace_command(args)?;
+                    let drain = args["action"] == "drain";
+                    let response = driver.send(&Request::Trace(command))?.into_result()?;
+                    let value: Value = if drain {
+                        let rows = response.lines().filter(|line| !line.is_empty()).count();
+                        json!({"rows":rows,"bytes":response.len()})
+                    } else {
+                        serde_json::from_str(&response).context("invalid trace status")?
+                    };
+                    Ok(
+                        json!({"content":[{"type":"text","text":response}],"structuredContent":value,"isError":false}),
+                    )
+                }
+                "client_video" => {
+                    let (command, path) = capture::video_command(args, &std::env::current_dir()?)?;
+                    if let Some(parent) = path.as_deref().and_then(std::path::Path::parent) {
+                        std::fs::create_dir_all(parent)
+                            .with_context(|| format!("creating {}", parent.display()))?;
+                    }
+                    let response = driver.send(&Request::Video(command))?.into_result()?;
+                    let value: Value =
+                        serde_json::from_str(&response).context("invalid video status")?;
                     Ok(
                         json!({"content":[{"type":"text","text":response}],"structuredContent":value,"isError":false}),
                     )
@@ -624,12 +654,19 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0]["result"]["protocolVersion"], VERSION);
         assert_eq!(results[1]["id"], "list");
-        assert_eq!(results[1]["result"]["tools"].as_array().unwrap().len(), 23);
+        assert_eq!(results[1]["result"]["tools"].as_array().unwrap().len(), 25);
         assert!(results[1]["result"]["tools"]
             .as_array()
             .unwrap()
             .iter()
             .any(|tool| tool["name"] == "client_target"));
+        for name in ["client_trace", "client_video"] {
+            assert!(results[1]["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == name));
+        }
     }
     #[test]
     fn schema_errors_are_distinct_from_execution_errors() {
