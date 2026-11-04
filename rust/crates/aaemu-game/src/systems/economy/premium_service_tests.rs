@@ -631,6 +631,45 @@ async fn private_mysql_purchase_is_atomic_and_persistent() {
         .unwrap();
     assert_eq!(count, 2);
 
+    // Loyalty buys debit the loyalty column, not credits, through the same transaction.
+    sqlx::query(&format!(
+        "UPDATE {accounts} SET loyalty = 60 WHERE account_id = 1"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut loyalty = request();
+    loyalty.service.price_type = currency::LOYALTY;
+    loyalty.service.price = 60;
+    loyalty.service.hours = 1;
+    loyalty.now = 1_800_000_000 + 30;
+    assert!(matches!(
+        purchase_sql_with_tables(&pool, &loyalty, accounts, sales)
+            .await
+            .unwrap(),
+        PurchaseOutcome::Purchased { credits: None, .. }
+    ));
+    let row = sqlx::query(&format!(
+        "SELECT CAST(credits AS SIGNED) AS credits, CAST(loyalty AS SIGNED) AS loyalty, \
+         CAST(pay_end AS SIGNED) AS pay_end FROM {accounts} WHERE account_id = 1"
+    ))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(db::int(&row, "credits").unwrap(), 50);
+    assert_eq!(db::int(&row, "loyalty").unwrap(), 0);
+    assert_eq!(
+        db::int(&row, "pay_end").unwrap(),
+        1_800_000_000 + 24 * 3600 + 3600 + 3600
+    );
+    let count: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM {sales} WHERE sale_currency = 2"
+    ))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1, "the loyalty sale is audited with its currency");
+
     sqlx::query(&format!("DROP TABLE {sales}"))
         .execute(&pool)
         .await
