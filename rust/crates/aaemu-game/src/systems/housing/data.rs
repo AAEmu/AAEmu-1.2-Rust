@@ -189,6 +189,18 @@ pub struct SiegeZone {
     pub monument_doodad_id: u32,
 }
 
+/// Authored roster entitlements (`siege_settings`), keyed by `total_castles`.
+///
+/// `total_castles` is INFERRED to be the number of dominions the defending expedition holds
+/// (the table covers 0..=10); the defender may register `num_defenders` characters before the
+/// reinforcement wave and `num_defenders + num_reinforcements` afterwards.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SiegeSettings {
+    pub total_castles: u32,
+    pub num_defenders: u32,
+    pub num_reinforcements: u32,
+}
+
 /// Static castle references. Territory ownership, participants, and siege outcomes belong
 /// to runtime state, not these templates.
 #[derive(Debug, Clone, Default)]
@@ -198,6 +210,8 @@ pub struct CastleReferenceData {
     pub siege_zones: HashMap<u32, SiegeZone>,
     /// Chronological entries per zone group; duplicate dates are preserved as separate rows.
     pub siege_plans: HashMap<u32, Vec<SiegePlan>>,
+    /// Roster entitlements keyed by `total_castles`.
+    pub siege_settings: BTreeMap<u32, SiegeSettings>,
     /// `world_var_defaults.var_delay_siege_x_days_after_dominion_declare`: a freshly claimed
     /// territory gets no siege cycle for this many days (INFERRED; the 1.2 value is 30).
     /// Missing row / table = 0, no protection.
@@ -335,6 +349,21 @@ impl CastleReferenceData {
         for plans in data.siege_plans.values_mut() {
             plans.sort_by_key(|p| (p.week_start, p.id));
         }
+        for_each_row(conn, "SELECT * FROM siege_settings", [], |r| {
+            let settings = SiegeSettings {
+                total_castles: castle_u32(r, "total_castles")?,
+                num_defenders: castle_u32(r, "num_defenders")?,
+                num_reinforcements: castle_u32(r, "num_reinforcements")?,
+            };
+            if data
+                .siege_settings
+                .insert(settings.total_castles, settings)
+                .is_some()
+            {
+                return Err(dup("siege_settings", settings.total_castles));
+            }
+            Ok(())
+        })?;
         data.siege_delay_after_claim_days = conn
             .query_row(
                 "SELECT default_value FROM world_var_defaults \
@@ -1097,6 +1126,8 @@ pub(crate) mod tests {
         CREATE TABLE guard_tower_steps (id INT, guard_tower_setting_id INT, step INT,
             num_gates INT, num_walls INT, buff_id INT);
         CREATE TABLE siege_plans (id INT, zone_group_id INT, week_start NUM);
+        CREATE TABLE siege_settings (total_castles INT, num_defenders INT,
+            num_reinforcements INT);
         CREATE TABLE siege_zones (id INT, start_siege_weekday INT, start_siege_hour INT,
             start_siege_min INT, siege_days INT, siege_hours INT, siege_mins INT,
             zone_group_id INT, pay_weekday INT, pay_hour INT, pay_min INT, declare_item_id INT,
@@ -1175,6 +1206,7 @@ pub(crate) mod tests {
                 (28,33,'2014-02-02 00:00:00.123456'),
                 (30,54,'2014-02-02 00:00:00'),
                 (31,33,'2014-02-16 00:00:00.000000');
+             INSERT INTO siege_settings VALUES (0,70,0),(1,50,20),(2,45,25),(3,40,30);
              INSERT INTO world_var_defaults VALUES (1,9,
                 'var_delay_siege_x_days_after_dominion_declare',30);",
         )
@@ -1275,6 +1307,22 @@ pub(crate) mod tests {
         assert_eq!(zone.reinforce_defense_delay_mins, 20);
         assert_eq!(zone.monument_doodad_id, 7229);
         assert_eq!(data.siege_zones[&54].open_duration_hours, 0);
+        assert_eq!(
+            data.siege_settings[&0],
+            SiegeSettings {
+                total_castles: 0,
+                num_defenders: 70,
+                num_reinforcements: 0,
+            }
+        );
+        assert_eq!(
+            data.siege_settings[&2],
+            SiegeSettings {
+                total_castles: 2,
+                num_defenders: 45,
+                num_reinforcements: 25,
+            }
+        );
         assert_eq!(data.siege_delay_after_claim_days, 30);
     }
 
@@ -1297,6 +1345,8 @@ pub(crate) mod tests {
                 open_weekday,monument_doodad_id FROM siege_zones WHERE id=4;",
             "INSERT INTO siege_plans VALUES (28,33,'2014-03-02 00:00:00');",
             "INSERT INTO siege_plans VALUES (32,99,'2014-03-02 00:00:00');",
+            "INSERT INTO siege_settings SELECT * FROM siege_settings WHERE total_castles=1;",
+            "INSERT INTO siege_settings VALUES (4,-1,30);",
         ] {
             let c = castle_sample();
             c.execute_batch(sql).unwrap();
@@ -1353,6 +1403,36 @@ pub(crate) mod tests {
         assert_eq!(
             data.siege_plans.values().map(Vec::len).sum::<usize>(),
             count("siege_plans")
+        );
+        assert_eq!(data.siege_settings.len(), count("siege_settings"));
+        assert_eq!(
+            data.siege_settings[&0],
+            SiegeSettings {
+                total_castles: 0,
+                num_defenders: 70,
+                num_reinforcements: 0,
+            }
+        );
+        assert_eq!(
+            (
+                data.siege_settings[&1].num_defenders,
+                data.siege_settings[&1].num_reinforcements
+            ),
+            (50, 20)
+        );
+        assert_eq!(
+            (
+                data.siege_settings[&2].num_defenders,
+                data.siege_settings[&2].num_reinforcements
+            ),
+            (45, 25)
+        );
+        assert_eq!(
+            (
+                data.siege_settings[&10].num_defenders,
+                data.siege_settings[&10].num_reinforcements
+            ),
+            (40, 30)
         );
         assert_eq!(data.siege_delay_after_claim_days, 30);
         assert_eq!(data.siege_zones[&54].open_duration_hours, 0);

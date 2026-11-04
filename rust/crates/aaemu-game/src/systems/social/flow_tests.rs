@@ -3338,6 +3338,9 @@ async fn private_mysql_pirate_last_member_dismissal_persists_nation_and_dominion
                 starts_at: 200,
                 ends_at: 300,
                 ended_at: 0,
+                reinforced: false,
+                defender_ni: 100,
+                defender_nr: 100,
                 participants: Default::default(),
             }),
         }])

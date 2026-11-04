@@ -919,7 +919,7 @@ Economy hooks (`server.systems.housing.hooks`): installed by `economy::bridges::
 | `QuestActConAcceptItemGain` start | `systems/quests/events.rs` (`on_items_acquired`), `engine.rs` (`start_quests_from_item_gain`), `data.rs` (`item_gain_starters`) | deviation | **Deviation:** gaining an item starts every quest with a `ConAcceptItemGain` on its Start component (not active, not completed unless repeatable, count in the bag reached, unit requirements met) with the item as acceptor. The C# never did: `Inventory.cs` has the `OnItemGather` call commented out and `RunAct` only compared the acceptor, so the Blue Salt Brotherhood letters (4881-4888), 5450, 6160 and the level 1 "Today's To-do" quests (1955-1961, 2140-2146) could not be started. Inferred from the data (those items have no `item_accept_quests` row); the retail trigger is not verified. The 15 "starter item without `starter_quests` entry" simulator notes were all of this kind: the quests have no `item_accept_quests` binding at all, so there was no mapping to fix. |
 | Sphere state across logout | `systems/quests/spheres.rs` (`forget_character`), `mod.rs` (`on_leave_world`) | deviation | **Deviation:** leaving the world drops the character's sphere triggers and its last starter-sphere position. The C# kept both, so a re-login inside a quest sphere compared against the position from the previous session and never raised the enter event (stuck sphere quests). The tick also prunes positions of characters that are no longer in the world. |
 | `with_quests` panic safety | `systems/quests/events.rs` | deviation | **Deviation:** a panic in a quest operation (or a queued one) is caught around the locked section, the quest state is put back, the thread-local active entry removed and the panic resumed. Without it the character's later quest events on that thread were queued forever. |
-| Quest packets (CS: StartQuestContext, CompleteQuestContext, DropQuestContext, QuestTalkMade, QuestStartWith, TryQuestCompleteAsLetItDone, RestartMainQuest, SaveTutorial, RequestPermissionToPlayCinemaForDirectingMode, StartedCinema, CompletedCinema; SC: QuestContextStarted/Updated/Completed/Reset, QuestContextFailed, QuestRewardedByMail, DoodadQuestAccept, DoodadCompleteQuest, TutorialSaved, AppellationGained) | `packets.rs` | done | Byte-exact tests. `SCQuestsPacket` now writes `Quest.Id` as `long`. `SCQuestContextFailedPacket` (0x146) is `u32 questId + u8 err`; the client reader `FUN_397b5c90` (class registered with opcode 0x146, vtable `399b3a5c`) reads the fields `type` and `err`, and `OnQuestContextFailed` (`FUN_391dbcd0`) raises `QUEST_ERROR_INFO`, which ends quest directing mode. |
+| Quest packets (CS: StartQuestContext, CompleteQuestContext, DropQuestContext, QuestTalkMade, QuestStartWith, TryQuestCompleteAsLetItDone, RestartMainQuest, SaveTutorial, RequestPermissionToPlayCinemaForDirectingMode, StartedCinema, CompletedCinema; SC: QuestContextStarted/Updated/Completed/Reset, QuestContextFailed, QuestRewardedByMail, DoodadQuestAccept, DoodadCompleteQuest, TutorialSaved, AppellationGained) | `packets.rs` | done | Byte-exact tests. `SCQuestsPacket` now writes `Quest.Id` as `long`. `SCQuestContextFailedPacket` (0x146) is `u32 questId + u8 err`; the client reader `FUN_397b5c90` (class registered with opcode 0x146, vtable `399b3a5c`) reads the fields `type` and `err`, and `OnQuestContextFailed` (`FUN_391dbcd0`) raises `QUEST_ERROR_INFO`, which ends quest directing mode. `SCQuestRewardedByMailPacket` (0x14e) is `bool success + u32 questId`: the client reader `FUN_397b5ec0` (class registered with opcode 0x14e, vtable `399b3aa4`) reads `success` through the named bool reader (slot `0x78`) at `+0xc` and the quest id as a `u32` (slot `0x3c`) at `+0x10`; `OnQuestRewardMailSent` (`FUN_391dc150` -> `FUN_3937a520`) looks the quest up and raises `QUEST_REWARDED_BY_MAIL`, or quest error 0xb (`cant_supply_rewards`) when the flag is false. **Deviation:** the C# `SCQuestRewardedByMailPacket` wrote `u8 count + u32[]` (a list) and the port copied it; the 1.2 client's class holds a single quest, so one packet per quest is sent, with `success = true` (the packet is only sent after every reward mail was stored; a failed mail still sends `MAIL_UNKNOWN_FAILURE` and no packet, as before). |
 | Doodad report hand-in (`SCDoodadCompleteQuestPacket` 0x14d) | `packets.rs`, `engine.rs` (`report_doodad_ready`), `events.rs` (`on_server_report`) | added | The C# had the opcode (`SCOffsets.cs` 0x14d) but never sent it; `DoodadFuncQuest.Use` reported a doodad server-side (`QuestManager.DoReportEvents` -> `QuestActConReportDoodad.OnReportDoodad`). The 1.2 client reader `FUN_397b5e50` takes the doodad object id as a 3-byte `bc` then the u32 quest id; `OnDoodadCompleteQuest` (`FUN_391dc050` -> `FUN_393773a0`, event 241 `COMPLETE_QUEST_CONTEXT_DOODAD`; `quest_context.alb` proto 19) makes the client answer with `CSCompleteQuestContext` naming that doodad. Rust deviates: a server-side report (`DoodadFuncQuest`) whose quest is ready at that doodad (`QuestActConReportDoodad` names the doodad template and the objectives meet the act threshold) now sends 0x14d and leaves the report to that client request instead of completing it server-side; every other server-side report still only logs refusals. All 15 live 1.2 `QuestActConReportDoodad` acts are on Ready components and their doodads carry `DoodadFuncQuest` (`real_compact_db_report_doodads_are_ready_doodad_func_quests`). |
 | Refused quest reports | `packets.rs` (`quest_error`, `SCQuestContextFailedPacket`), `engine.rs` (`send_report_refused`, `finish_report`), `acts.rs`, `events.rs` | done | Every refused `CSCompleteQuestContext` report and `TryCompleteAsLetItDone` is answered once with 0x146, independent of the WARN repeat dedupe. A server-side report (`DoodadFuncQuest`, a doodad used on an owned quest: `events::on_server_report`) is only logged: the client did not enter quest directing mode, and a 0x146 there would show a quest error on every early click. The client error table `locale.questContext.errors` is built 1-based (`x2ui/baselib/locale_helper.alb`, `SETLIST` at instruction 654: `already_have`, `invalid_quest`, ...); the `QUEST_ERROR_INFO` handler `quest_context.alb` proto 22 indexes it directly with its first argument, and the client's local pre-checks use the same numbers (`FUN_3937a2d0`: 2 for an invalid quest, 0x14 after its can-interact check fails). Reason mapping (inferred from the client key names and those local codes, not captured from a 1.2 server): objectives not ready / wrong status -> 12 `invalid_quest_status`, wrong or missing NPC -> 7 `invalid_npc_or_quest`, wrong or missing doodad -> 19 `invalid_doodad`, quest not active -> 2 `invalid_quest`. |
 | `QuestCommandUtil` / `QuestCmd` (GM) | `systems/services/commands/scripts/quest_cmd.rs` | done | `quests::events::send_quests` / `send_completed_quests` added. |
@@ -3904,7 +3904,8 @@ and in NPC wandering / buff remaining times.
   retained original doodads for the current siege and require explicit GM rebind after restart;
   registered dead participants can revive there. The SiegePeriod doodad phase funcs are
   implemented in WP-S3 (see the deviation below); phase cycles are bounded for all groups.
-  Reinforcement/commander eligibility and payout calendars are not inferred. Building HP
+  Commander eligibility and payout calendars are not inferred; roster caps and the
+  defender reinforcement wave are implemented in WP-S4 (see the deviation above). Building HP
   persists through restart and lodestone collisions follow the native
   CGA/ANM root curves and settled static damage proxies. Absolute render/collider animation
   phase synchronization remains unverified. Property, authority, mail, items and wallets use
@@ -3948,6 +3949,66 @@ and in NPC wandering / buff remaining times.
   chain should really end when the calendar jumps over it (the current walk does), and
   catching up a persisted mid-cycle phase after restart (the first observation of a zone is
   silent).
+* systems::housing / systems::social (2026-11-04, WP-S4 roster caps and reinforcements):
+  `siege_settings` is now loaded (`CastleReferenceData::siege_settings`, keyed by
+  `total_castles`) and the explicit siege snapshot carries team limits frozen at scheduling
+  and the authored reinforcement delay instead of the hard-coded 100/100/100. Evidence (1.2 client): a team is
+  `id, obj_id, x, y, z, ni, nr, limit, count, ids[]` (`FUN_39839c80`, `FUN_39839c10`);
+  `IsReinforceArrived` (`FUN_3946c500`) is period 4 and `defender.limit == defender.nr`;
+  `GetReinforceRemainDate` (`FUN_3946c3f0`) is 0 when `ni == nr`, `limit == nr` or past
+  `start(siege) + bdm` (`FUN_398390a0`); `SCSiegeReinforce` 0x0eb sets the defender
+  `limit = nr` (clamped to 100, `FUN_392f3670`/`FUN_39839320`). Encoding: `ni =
+  num_defenders`, `nr = num_defenders + num_reinforcements`; before the wave the defender is
+  `ni/ni`, after it `ni/nr`; no reinforcements means `ni == nr` and no packet. `bdm` is the
+  zone's `reinforce_defense_delay_mins * 60` (the shipped rows all author 20 minutes).
+  `total_castles` is INFERRED to be the number of dominions the defending expedition holds;
+  more than 10 clamps to the last shipped row. Chosen reading: the count includes the
+  territory being defended, so it is always >= 1 during a siege and row 0 (`70/0`) is
+  unreachable; the alternative reading (count of *other* castles) would give a one-castle
+  defender the 70 total at once. The data does not disambiguate the two (capture-pending).
+  The caps are frozen into the persisted `SiegeState.defender_ni`/`defender_nr` columns, so a
+  mid-siege change in the defender's castle count (or a test-only ephemeral GM dominion lost
+  on restart) cannot move them. Existing participants above a frozen cap are not evicted:
+  there is no evidence for it, and the authority checks only on join. An out-of-range
+  authored `bdm` saturates to `i32::MAX` instead of dropping the territory's whole snapshot.
+  The wave is announced once, from the real clock, by
+  `runtime::tick_once -> reinforce::tick` when `now >= starts_at + bdm`; the
+  `dominions.siege_reinforced` flag (new column) is check-and-set under the authority lock
+  before the broadcast, so repeated ticks and restarts do not normally repeat the packet. A
+  crash between the broadcast and the periodic save can still repeat it once on the next
+  boot; the client just sets `limit = nr` again. The packet
+  goes to every client through `broadcast_to_server`, like every other dominion record; the
+  1.2 client keeps all dominion records server-wide (the retail audience is
+  capture-pending). Roster joins (`/joinsiege` and GM `/dominion register`) now pass the
+  data cap into `DominionManager::register_participant_with_cap`, which checks and inserts
+  under one lock: a defender before the wave is refused with `SIEGE_BLOCK_DEFENSE_REINFORCE`
+  457, a full roster with `SIEGE_PARTICIPANT_FULL` 445 (sent as `SCErrorMsgPacket` on the
+  player path; the GM path reports text only). Missing `siege_settings` rows fall back to the
+  native 100-character array rather than inventing a cap. UNKNOWN (capture-pending): the
+  attacker cap (the same evidenced total is used for `ni/nr/limit`), whether
+  `total_castles` is global or per defender, and ticket-holder membership (a wave only raises
+  the cap; no member is enrolled automatically). Tests:
+  `missing_or_oversized_settings_do_not_invent_native_capacity`,
+  `held_castle_count_selects_the_authored_settings_row`,
+  `bdm_is_the_authored_reinforce_delay_in_seconds`,
+  `the_defender_cap_waits_for_the_wave_and_the_attacker_uses_the_total`,
+  `frozen_siege_limits_do_not_follow_the_live_castle_count`,
+  `a_missing_settings_row_keeps_the_native_cap_for_every_side`,
+  `out_of_range_reinforcement_delay_is_clamped_instead_of_dropping_the_snapshot`,
+  `private_mysql_dominion_rollback_failure_retry_and_restart_preserve_authority` (round
+  trips `siege_reinforced` and the frozen `50/70` limits through MySQL),
+  `snapshot_carries_data_driven_team_limits_and_reinforcement_delay`,
+  `siege_state_body_carries_bdm_and_team_limits_at_native_offsets`,
+  `reinforcement_wave_is_announced_once_at_start_plus_bdm_through_the_tick`,
+  `joinsiege_enforces_the_data_caps_with_the_clients_error_ids`. A test-only ephemeral
+  dominion (`/nation dominion`) still counts as the defender's held castle for the
+  `siege_settings` row; the flag only keeps it out of the database and out of the WP-S6 claim
+  gate. Live (lane stack, headless `aaemu-testclient`): a GM-seeded ephemeral dominion on a
+  live guard tower in zone group 33 was scheduled against a seeded second expedition; both
+  bots received `SCSiegeState` immediately (its body's bdm and 50/70/50 defender limits are
+  fixed by the byte test) and exactly one `SCSiegeReinforce` about 21 minutes later
+  (`starts_at` + the authored 20-minute `bdm`), with `expectnopkt` confirming no repeat. The
+  real client's reinforcement countdown UI is not covered headlessly.
 * systems::housing: sale buyer names retain the original case-sensitive lookup. The housing
   audit fixes the first-house tax/deposit omission, reversed paid flag (confirmed against the
   1.2 housing UI bytecode), overdue counter, finished-house construction, duplicate signs,
@@ -3993,9 +4054,8 @@ and in NPC wandering / buff remaining times.
   summoned (the owner's active vehicle is still removed).
 * systems::vehicles: a slave's `TlId` is never released; the transfer spawner's `Despawn` and
   the spawn manager's despawn tick both release the transfer's obj id.
-* systems::vehicles: `SummonSlave.ReadDetails` always fails on `RepairStartTime` (so the repair
-  cooldown does not survive a restart); `DoodadFuncRecoverItem` looks the owning slave up by its
-  DB id as an obj id; `GetActiveMates(...).FirstOrDefault()` decides the `Raid` relation mate.
+* systems::vehicles: `DoodadFuncRecoverItem` looks the owning slave up by its DB id as an
+  obj id; `GetActiveMates(...).FirstOrDefault()` decides the `Raid` relation mate.
 * systems::vehicles: `Unit.DespawnMate` on a mate's own death only despawns when its owner is
   dead. The former `UnitMoveType` driver-detachment bug is fixed (see vehicle test fixes above).
 * systems::vehicles: `SpawnEffect` (slave) writes `PosDistance = 2` back into the template and
@@ -4820,8 +4880,13 @@ the death never started its timer):
   clears the timer (the destroyed flag stays until `RepairSlaveEffect` clears it, as in C#).
 - The C# reset of a loaded 0-HP vehicle to `MaxHp` ("can't summon with 0 HP") is kept, but only
   when the item has no pending repair time. With the timer above, a destroyed vehicle therefore
-  comes back at full HP only after its repair wait, not when it is still on cooldown. (As the
-  mirrored `SummonSlave.ReadDetails` bug above notes, the timer itself is still lost on restart.)
+  comes back at full HP only after its repair wait, not when it is still on cooldown.
+- The C# `SummonSlave.ReadDetails` threw on `RepairStartTime` (`Convert.ToInt32(byte[])`), so a
+  saved repair time was always reset to `MinValue` on load and the 10 minute wait was forgotten
+  on restart. `Item::read_details` now restores it from the `items.details` blob (i64 after the
+  destroyed flag, negative values clamp to 0). Legacy C# rows decode too (unset: i32 0 + five
+  i32 zeros; set: i64 + five i32 zeros), and a blob that stops after the destroyed flag still
+  restores the header.
 
 ## Global cooldown enforcement and plot-only skill cooldowns (2026-10-21)
 
