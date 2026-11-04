@@ -198,8 +198,8 @@ pub struct ItemDetails {
     pub slave_type: u8,
     pub slave_db_id: u32,
     pub slave_is_destroyed: u8,
-    /// `SummonSlave.RepairStartTime` (unix seconds, 0 = `DateTime.MinValue`). Never restored
-    /// from the DB (the C# `ReadDetails` always falls back to `MinValue`).
+    /// `SummonSlave.RepairStartTime` (unix seconds, 0 = `DateTime.MinValue`). Restored from the
+    /// `items.details` blob by `read_details`; negative stored values clamp to 0.
     pub slave_repair_start_time: UnixTime,
     // TreasureMap
     pub map_position_x: i64,
@@ -531,7 +531,11 @@ impl Item {
     /// The subclass `ReadDetails` overrides, applied to the `details` blob.
     fn read_details(&mut self, blob: &[u8]) {
         let need = self.class.detail_bytes_length();
-        if need == 0 || blob.len() < need {
+        // A `SummonSlave` blob that stops after the destroyed flag (an old/hand-written row
+        // without the repair field) still restores its 5-byte header; every other class keeps
+        // the C# `ReadDetails` rule of skipping a blob shorter than `DetailBytesLength`.
+        let short_summon_slave = self.class == ItemClass::SummonSlave && blob.len() >= 5;
+        if need == 0 || (blob.len() < need && !short_summon_slave) {
             // Base Item.ReadDetails with DetailType Invalid reads nothing; subclasses bail out
             // when `LeftBytes < DetailBytesLength`.
             return;
@@ -577,8 +581,22 @@ impl Item {
                     d.slave_type = s.read_u8()?;
                     d.slave_db_id = s.read_bc()?;
                     d.slave_is_destroyed = s.read_u8()?;
-                    // C#: `Convert.ToInt32(byte[])` always throws InvalidCastException, so
-                    // RepairStartTime ends up DateTime.MinValue and the rest is skipped.
+                    // The C# `ReadDetails` threw on the time (`Convert.ToInt32(byte[])`) and
+                    // never stored `RepairStartTime`, so the 10 minute repair-kit timer was
+                    // lost on every load. `write_details` emits it right after the destroyed
+                    // flag as an i64 (0 when unset); restore it, clamping garbage to unset.
+                    // Legacy C# blobs decode too: unset was i32 0 followed by five i32 zeros,
+                    // set was an i64 followed by five i32 zeros.
+                    if s.remaining() >= 8 {
+                        d.slave_repair_start_time = s.read_i64()?.max(0);
+                    }
+                    // Four unused i32 filler fields follow the time (always written as 0).
+                    for _ in 0..4 {
+                        if s.remaining() < 4 {
+                            break;
+                        }
+                        s.read_i32()?;
+                    }
                 }
                 ItemClass::TreasureMap => {
                     let _ = s.read_i64()?;
