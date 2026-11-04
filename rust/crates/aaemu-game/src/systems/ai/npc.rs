@@ -8,6 +8,7 @@
 //! before calling into the world (broadcasts, visibility) or into another object.
 
 use std::collections::HashMap;
+use std::sync::Once;
 
 use crate::data::formulas::FormulaKind;
 use crate::models::movement::{
@@ -282,8 +283,9 @@ fn same_team(server: &GameServer, observer: &WorldObject, target: &WorldObject) 
         .any(|m| m.character.obj_id == target_id)
 }
 
-/// `Faction.GetRelationState` between the two units is not hostile (the `FUN_39358ab0` half of
-/// the client's party rule).
+/// The `FUN_39358ab0` half of the client's party rule is not resolved: it compares the +0x24 /
+/// +0x2c fields of the block at unit +0x3c28 (capture-pending), not a faction relation. The
+/// server approximates it with the faction relation not being hostile.
 fn not_hostile(server: &GameServer, observer: &WorldObject, target: &WorldObject) -> bool {
     let faction = |o: &WorldObject| o.with_unit(|u| u.unit().faction_id).unwrap_or(0);
     crate::systems::social::faction::relation_state_live(server, faction(observer), faction(target))
@@ -321,13 +323,16 @@ fn detect_stealth_range_mul(obj: &WorldObject) -> f64 {
 ///    `buffs.stealth` effects, scaled by `(100 + DetectStealthRangeMul) / 100`
 ///    (`DAT_3999cf90` = 0.01).
 ///
-/// Deviation: the client measures the distance between the two colliders; the server compares
-/// the planar centre distance.
+/// Deviation: the client compares the range with the distance between the two colliders; the
+/// server uses `BaseUnit.GetDistanceTo` (planar centre distance with both model radii
+/// subtracted).
 pub fn can_detect(server: &GameServer, observer: &WorldObject, target: &WorldObject) -> bool {
     let (observer_id, target_id) = (observer.obj_id(), target.obj_id());
     if observer_id == target_id {
         return true;
     }
+    // The client checks only `observer.Owner == target`; the server also accepts the reverse
+    // (the observer is the target's owner), so a stealthed mate / slave is visible to its owner.
     if owner_obj_id(observer) == Some(target_id) || owner_obj_id(target) == Some(observer_id) {
         return true;
     }
@@ -348,16 +353,35 @@ pub fn can_detect(server: &GameServer, observer: &WorldObject, target: &WorldObj
         FormulaKind::DetectStealthRangeBack
     };
     let Some(formula) = server.game_data.formulas.get_formula_by_kind(kind) else {
-        // The 1.2 data always has formulas 4 and 10; without them, do not blind the AI.
+        stealth_formula_unavailable(kind);
+        return true;
+    };
+    let Some(expression) = formula.expression() else {
+        stealth_formula_unavailable(kind);
         return true;
     };
     let mut params = HashMap::new();
     params.insert("source_level", f64::from(unit_level(observer)));
     params.insert("target_level", f64::from(unit_level(target)));
     params.insert("stealth_level", f64::from(state.level));
-    let range = (detect_stealth_range_mul(observer) + 100.0) * 0.01 * formula.evaluate(&params);
-    let distance = f64::from(distance_raw(server, observer, target, false));
+    let Ok(base) = expression.evaluate(&params) else {
+        stealth_formula_unavailable(kind);
+        return true;
+    };
+    let range = (detect_stealth_range_mul(observer) + 100.0) * 0.01 * base;
+    let distance = f64::from(distance_to(server, observer, target, false));
     distance < range
+}
+
+/// A missing or broken stealth formula must not blind the AI, and a failed evaluation must not
+/// log on every tick: both use the visible fallback and report once per process.
+fn stealth_formula_unavailable(kind: FormulaKind) {
+    static WARNED: Once = Once::new();
+    WARNED.call_once(|| {
+        tracing::error!(
+            "stealth detection: formula {kind:?} is missing or failed to evaluate;              stealthed units stay visible"
+        );
+    });
 }
 
 /// `BaseUnit.CanSeeTarget(target)`: visible and detectable (see [`can_detect`]).

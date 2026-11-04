@@ -2125,13 +2125,21 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   (`FUN_3989f230` reads the buff instance word +0x2E, the `sourceAbLevel` of `SCBuffCreated`).
   `buffs.anti_stealth` on the target sets the client's "cannot hide" byte (`ClientBuffMan` +8),
   so such a target is always visible. `buffs.detect_stealth` on the observer reveals stealthed
-  units at any distance; the client's `CanDetect` never reads that column, so this is the server
-  applying the column's documented meaning (deviation; the C# consumed neither column either).
-  Party / raid members that are not hostile are visible (the client's `FUN_39308ca0` /
-  `FUN_39358ab0` rule), as are the observer's owner-linked mate / slave. The C# `< 1.0` /
-  `< 0.5` fallbacks in `Behavior.CheckAggression` are gone, so they no longer decide. Deviations:
-  the client measures collider distance, the server the planar centre distance; the client's
-  party lookup is the local player's slot list, the server asks the team manager (players only).
+  units at any range (server rule; the client's `CanDetect` never reads that column, so this is
+  the server applying the column's documented meaning; the C# consumed neither column either).
+  A missing formula or a formula that fails to evaluate leaves stealthed units visible and logs
+  once per process, instead of blinding the AI (`FormulaKind::DetectStealthRangeFront` / `Back`
+  are the only formulas the predicate needs).
+  Party / raid members that are not hostile are visible (the client's `FUN_39308ca0` rule and
+  its `FUN_39358ab0` relation check, which the server approximates with the faction relation;
+  `FUN_39358ab0` actually compares fields +0x24 / +0x2c of the +0x3c28 block, capture-pending),
+  as are the observer's owner-linked mate / slave (the client only checks the observer's owner;
+  the server also accepts the reverse link). The C# `< 1.0` / `< 0.5` fallbacks in
+  `Behavior.CheckAggression` are gone, so they no longer decide. Deviations: the client compares
+  the range against the collider distance, the server uses `BaseUnit.GetDistanceTo` (planar
+  centre distance with both model radii subtracted); the client's party lookup is the local
+  player's slot list, the server asks the team manager (players only). The AI greeting
+  (`players_in_range`) and `npc_faction_set` paths still ignore stealth, as in the C# (parity).
   Open: no 1.2 data row applies the `anti_stealth` buff 5212 (a script would have to), and a
   capture of the original client at 5/10/20/40 m front/back has not been made (the formula,
   attribute and constant are from the decompile and the shipped data).

@@ -166,6 +166,23 @@ fn stealth_formulas() -> FormulaManager {
     FormulaManager::load(&conn).unwrap()
 }
 
+/// [`stealth_formulas`] with formula 4 referring to a variable the predicate never sets: a
+/// prepared formula whose evaluation fails.
+fn broken_stealth_formulas() -> FormulaManager {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE unit_formulas (id INTEGER, formula TEXT, kind_id INTEGER, owner_type_id INTEGER);
+         CREATE TABLE unit_formula_variables (id INTEGER, unit_formula_id INTEGER, variable_kind_id INTEGER, key INTEGER, value REAL);
+         CREATE TABLE wearable_formulas (id INTEGER, kind_id INTEGER, formula TEXT);
+         CREATE TABLE formulas (id INTEGER, formula TEXT);
+         INSERT INTO formulas VALUES
+           (4, 'unknown_variable + 1'),
+           (10, '0.5');",
+    )
+    .unwrap();
+    FormulaManager::load(&conn).unwrap()
+}
+
 fn data() -> GameData {
     let mut data = GameData::empty();
     data.formulas = stealth_formulas();
@@ -2341,7 +2358,8 @@ const DETECT_STEALTH_BUFF: u32 = 7_102;
 const ANTI_STEALTH_BUFF: u32 = 7_103;
 
 /// [`fixture_with_data`] with a free player position and NPC facing (`rot_z`, the `MathUtil.
-/// IsFront` yaw: -PI/2 faces +x).
+/// IsFront` yaw: -PI/2 faces +x). `distance_to` subtracts the model radii (the NPC's 0.5 m
+/// here), and the fixture stealth buff has `ab_level` 1, so formula 4 is 12 / 1.02 = 11.76 m.
 fn stealth_fixture(data: GameData, player_x: f32, player_y: f32, npc_rot_z: f32) -> Fixture {
     let server = server_with_data(data);
     let client = TestClient::new(&server, 1, 1);
@@ -2418,19 +2436,21 @@ async fn stealth_detection_front_formula_misses_outside_range() {
     assert!(!aggros(&server, 40).await, "the NPC aggroed at 13 m");
 }
 
-/// Formula 10 (`DetectStealthRangeBack`, 0.5 m) applies when the target is behind the observer.
+/// Formula 10 (`DetectStealthRangeBack`, 0.5 m) applies when the target is behind the observer:
+/// 0.9 m centre to centre becomes 0.4 m after `distance_to` subtracts the NPC's 0.5 m model
+/// radius, so it is inside the 0.5 m back range.
 #[tokio::test]
 async fn stealth_detection_back_formula_detects_close_behind() {
-    let f = stealth_fixture(data(), 99.6, 100.0, FACE_PLUS_X);
+    let f = stealth_fixture(data(), 99.1, 100.0, FACE_PLUS_X);
     let server = f.server.clone();
     let me = WorldObject::from(&f.player);
     let npc = WorldObject::from(&f.npc);
     apply(&server, &me, STEALTH_COLUMN_BUFF);
     assert!(
         super::npc::can_see_target(&server, &npc, &me),
-        "0.4 m behind is inside formula 10"
+        "0.4 m behind after the model radii is inside formula 10"
     );
-    assert!(aggros(&server, 60).await, "the NPC never aggroed at 0.4 m");
+    assert!(aggros(&server, 60).await, "the NPC never aggroed at 0.9 m");
 }
 
 /// The old C# `< 1.0` / `< 0.5` fallbacks no longer decide: 1.5 m behind is outside formula 10.
@@ -2564,6 +2584,141 @@ async fn detect_stealth_range_mul_widens_the_range() {
     assert!(
         super::npc::can_see_target(&server, &npc, &me),
         "attribute 94 +100 widens formula 4 to 23.5 m"
+    );
+    assert!(aggros(&server, 60).await, "the NPC never aggroed at 15 m");
+}
+
+/// [`data`] with a helper template whose aggro-link sight check is enabled and whose special
+/// rule 1 (same faction) requires the helper itself to see the abuser.
+fn help_sight_data() -> GameData {
+    let mut data = data();
+    let helper = data
+        .systems
+        .npcs
+        .npc
+        .templates
+        .get_mut(&HELPER_TEMPLATE)
+        .expect("helper template");
+    helper.accept_aggro_link = true;
+    helper.aggro_link_sight_check = true;
+    helper.aggro_link_special_rule_id = 1;
+    helper.aggro_link_help_dist = 30.0;
+    data
+}
+
+/// A primary hold-position NPC at (125, 100) (15 m from the helper, outside its own 11.76 m
+/// front range) and a helper at (110, 100) facing +y; the player is at the caller's position.
+fn help_fixture(data: GameData, player_x: f32, player_y: f32) -> (Fixture, NpcRef) {
+    let server = server_with_data(data);
+    let client = TestClient::new(&server, 1, 1);
+    let mut c = test_character(1, "Runner", player_x, player_y);
+    c.unit.hp = 1000;
+    c.unit.max_hp = 1000;
+    let player = spawn_player(&server, &client, c, PLAYER_OBJ);
+    let primary = spawn_npc(
+        &server,
+        NPC_OBJ,
+        NPC_TEMPLATE,
+        125.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    primary.data().unit.transform.rot_z = -std::f32::consts::FRAC_PI_2;
+    let helper = spawn_npc(
+        &server,
+        HELPER_OBJ,
+        HELPER_TEMPLATE,
+        110.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    helper.data().unit.transform.rot_z = 0.0; // faces +y
+    (
+        Fixture {
+            server,
+            client,
+            player,
+            npc: primary,
+        },
+        helper,
+    )
+}
+
+/// `UpdateAggroHelp` asks the *helper* `CanSeeTarget(abuser)`, not the primary NPC: the stealthed
+/// abuser 5 m in front of the helper is seen, while the primary 15.8 m away is outside its own
+/// 11.76 m front range. The fixture's stealth buff has `ab_level` 1, so formula 4 is
+/// 12 / 1.02 = 11.76 m.
+#[tokio::test]
+async fn aggro_help_uses_the_helper_npcs_stealth_detection_front() {
+    let (f, helper) = help_fixture(help_sight_data(), 110.0, 105.0);
+    let server = f.server.clone();
+    let abuser = WorldObject::from(&f.player);
+    apply(&server, &abuser, STEALTH_COLUMN_BUFF);
+    post(&server, NPC_OBJ, move |c| {
+        super::behaviors::update_aggro_help(c, &abuser, 200.0);
+    });
+    tick_all(&server, 100);
+    assert!(
+        helper
+            .data()
+            .unit
+            .skill_state
+            .aggro_table
+            .contains_key(&PLAYER_OBJ),
+        "the helper did not join although it can see the stealthed abuser"
+    );
+}
+
+/// The same call with the abuser 5 m behind the helper: formula 10 is 0.5 m, so the helper does
+/// not see it and does not join.
+#[tokio::test]
+async fn aggro_help_uses_the_helper_npcs_stealth_detection_behind() {
+    let (f, helper) = help_fixture(help_sight_data(), 110.0, 95.0);
+    let server = f.server.clone();
+    let abuser = WorldObject::from(&f.player);
+    apply(&server, &abuser, STEALTH_COLUMN_BUFF);
+    post(&server, NPC_OBJ, move |c| {
+        super::behaviors::update_aggro_help(c, &abuser, 200.0);
+    });
+    tick_all(&server, 100);
+    assert!(
+        helper.data().unit.skill_state.aggro_table.is_empty(),
+        "the helper joined although the stealthed abuser is behind it"
+    );
+}
+
+/// A missing formula row uses the same visible fallback as a broken one: a stealthed target
+/// must not become permanently invisible just because the data is absent.
+#[tokio::test]
+async fn stealth_detection_missing_formula_keeps_target_visible() {
+    let mut data = data();
+    data.formulas = FormulaManager::empty();
+    let f = stealth_fixture(data, 115.0, 100.0, FACE_PLUS_X);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
+    apply(&server, &me, STEALTH_COLUMN_BUFF);
+    assert!(
+        super::npc::can_see_target(&server, &npc, &me),
+        "a missing formula must leave stealthed units visible"
+    );
+    assert!(aggros(&server, 60).await, "the NPC never aggroed at 15 m");
+}
+
+/// A formula that fails to evaluate (here: an undefined variable) also uses the visible
+/// fallback and must not be re-evaluated with an `error!` log on every scan.
+#[tokio::test]
+async fn stealth_detection_broken_formula_keeps_target_visible() {
+    let mut data = data();
+    data.formulas = broken_stealth_formulas();
+    let f = stealth_fixture(data, 115.0, 100.0, FACE_PLUS_X);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    let npc = WorldObject::from(&f.npc);
+    apply(&server, &me, STEALTH_COLUMN_BUFF);
+    assert!(
+        super::npc::can_see_target(&server, &npc, &me),
+        "a formula that fails to evaluate must leave stealthed units visible"
     );
     assert!(aggros(&server, 60).await, "the NPC never aggroed at 15 m");
 }
