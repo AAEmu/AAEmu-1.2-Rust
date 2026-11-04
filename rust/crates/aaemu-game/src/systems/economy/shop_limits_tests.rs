@@ -606,6 +606,29 @@ async fn a_money_purchase_advances_the_doodad_to_the_func_next_phase() {
     assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 1);
 }
 
+#[tokio::test]
+async fn a_failed_grant_after_the_coin_was_taken_gives_the_coin_back() {
+    // The purchased item is a backpack, so the auto-equip branch runs. A two-item bundle cannot
+    // be equipped (one backpack per back slot), so the grant fails after the coin was consumed
+    // and the coin must be refunded (`items.rs` `refund_coin`).
+    let mut w = purchase_doodad_world_full(
+        0,
+        PURCHASE_COIN,
+        5,
+        500,
+        "DoodadFuncPurchase",
+        PURCHASE_BACKPACK,
+        2,
+        -1,
+    );
+    let _d = spawn_doodad(&mut w);
+    give(&w, &w.pa, slot_type::INVENTORY, PURCHASE_COIN, 10, 0);
+    assert_eq!(buy_coin(&mut w), 315);
+    assert_eq!(Inv::of(&w.pa).items_count(PURCHASE_BACKPACK, -1), 0);
+    assert_eq!(Inv::of(&w.pa).items_count(PURCHASE_COIN, -1), 10);
+    assert_eq!(purchased(&w, 1), 0);
+}
+
 #[test]
 #[ignore = "needs AAEMU_COMPACT_DB"]
 fn real_compact_db_lists_limited_items_and_their_sellers() {
