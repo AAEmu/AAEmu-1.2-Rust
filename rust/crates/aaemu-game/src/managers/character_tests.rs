@@ -1699,6 +1699,28 @@ async fn private_mysql_lobby_edit_refuses_deleted_played_and_pending_deletion_ch
         .await
         .unwrap();
 
+    // A session that is in the world (or past the lobby state) cannot edit its own row.
+    let player = crate::world::Player::new(
+        client.conn.characters[0].clone(),
+        crate::net::connection::ConnectionHandle::detached(
+            98,
+            "127.0.0.1:50002".parse().unwrap(),
+            1007,
+        ),
+    );
+    client.conn.active_char = Some(player);
+    lobby_edit(&server, &mut client, id, req.clone())
+        .await
+        .unwrap();
+    assert_unchanged(&pool, &mut client, id).await;
+    client.conn.active_char = None;
+    client.conn.state = crate::net::connection::GameState::World;
+    lobby_edit(&server, &mut client, id, req.clone())
+        .await
+        .unwrap();
+    assert_unchanged(&pool, &mut client, id).await;
+    client.conn.state = crate::net::connection::GameState::Lobby;
+
     // A select/enter in flight owns the character.
     assert_eq!(server.enter_world.reserve_character(id, 99), Ok(true));
     lobby_edit(&server, &mut client, id, req.clone())
@@ -1915,37 +1937,19 @@ async fn lobby_edit_rebuild_keeps_mail_and_mate_containers_without_mysql() {
     assert!(server.items.item_by_id(built_id).is_some());
 }
 
-/// The edit is a lobby action: a session that is in the world (or past the lobby state) must
-/// not rewrite its own row. A database that cannot be read refuses the edit without closing
-/// the connection.
+/// A database that cannot be read refuses the edit without closing the connection (the
+/// lobby copy stays untouched). The in-world, state and stale-cache guards are mutation-checked
+/// by the MySQL test below, which needs a reachable row to tell a refusal from a failed read.
 #[tokio::test]
-async fn lobby_edit_is_refused_in_the_world_and_survives_an_unavailable_database() {
-    use crate::net::connection::GameState;
-
+async fn lobby_edit_survives_an_unavailable_database() {
     let server = test_server_with_config(edit_data(), edit_ai_config());
     server.db.close().await;
     let mut client = crate::test_support::TestClient::new(&server, 1, 1007);
     let mut character = crate::test_support::test_character(7, "Lobby", 1.0, 2.0);
     character.account_id = 1007;
-    client.conn.characters.push(character.clone());
+    client.conn.characters.push(character);
     let request = creation_request("Lobby");
 
-    let player = crate::test_support::spawn_player(&server, &client, character, 700);
-    client.conn.active_char = Some(player);
-    lobby_edit(&server, &mut client, 7, request.clone())
-        .await
-        .unwrap();
-    assert!(client.drain().is_empty(), "in-world edit refused");
-    assert!(!client.conn.is_closing());
-
-    client.conn.active_char = None;
-    client.conn.state = GameState::World;
-    lobby_edit(&server, &mut client, 7, request.clone())
-        .await
-        .unwrap();
-    assert!(client.drain().is_empty(), "non-lobby edit refused");
-
-    client.conn.state = GameState::Lobby;
     lobby_edit(&server, &mut client, 7, request).await.unwrap();
     assert!(
         client.drain().is_empty(),
@@ -1953,6 +1957,10 @@ async fn lobby_edit_is_refused_in_the_world_and_survives_an_unavailable_database
     );
     assert!(!client.conn.is_closing());
     assert_eq!(client.conn.characters[0].unit.name, "Lobby");
+    assert_eq!(
+        client.conn.characters[0].unit.model_params.kind.0, 0,
+        "the lobby copy is untouched"
+    );
 }
 
 /// A never-played character can already own mail attachments and mate equipment. The edit

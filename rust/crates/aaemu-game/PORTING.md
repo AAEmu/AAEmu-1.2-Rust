@@ -78,18 +78,26 @@ The pre-select period is a login-advertised flag (`ACJoinResponse.afs` bit 16,
 `Login:PreSelectCharacterPeriod`); the client's Start button then calls
 `X2LoginCharacter.EditCharacter` instead of entering the world (`character_select.alb`), and its
 edit window reuses the character-create UI. The game server takes the same flag from
-`Characters:PreSelectPeriod` (must equal the login value; there is no cross-process check) and
-otherwise ignores the packet. Request layout from the 1.2 serializer `FUN_397c4da0` (writer
-`FUN_397ae360`): `u32 characterId`, then the `CSCreateCharacterPacket` body (name, race, gender,
-7 body items, the `UnitCustomModelParams` blob, 3 abilities, level) **without** the create's
-trailing `i32 introZoneId`. Response: the character-info block shared with the create response
-and the character list (serializer `FUN_397ab170` -> `FUN_39620030`) under opcode 0x03a.
+`Characters:PreSelectPeriod` and, at registration, from the Rust-only tail of
+`LGRegisterGameServer` (`[u8 result][u8 preSelectCharacterPeriod]`): the login value is applied
+(the local value is only used when the login does not send the byte, e.g. an older login), so
+the two servers cannot disagree. While the period is on, `CSSelectCharacter` is refused as well:
+the client does not offer world entry and a forged select must not bypass the period. Request
+layout from the 1.2 serializer `FUN_397c4da0` (writer `FUN_397ae360`): `u32 characterId`, then
+the `CSCreateCharacterPacket` body (name, race, gender, 7 body items, the
+`UnitCustomModelParams` blob, 3 abilities, level) **without** the create's trailing
+`i32 introZoneId`. Response: the character-info block shared with the create response and the
+character list (serializer `FUN_397ab170` -> `FUN_39620030`) under opcode 0x03a.
 
 Rules (from the 1.2 UI and the create path; the 1.2 server behaviour itself is not observable):
 
 * Only the account's own, undeleted, not-pending-deletion character in the connection's lobby
-  list, and only while it never entered the world (`online_time`/`leave_time` are 0): the edit
-  re-runs creation, so an already played character would lose its kit, skills and slots.
+  list, and only while it never entered the world: the edit re-runs creation, so an already
+  played character would lose its kit, skills and slots. The decision uses the persisted row
+  (`online_time`, `leave_time`, `delete_request_time`, `delete_time`, `deleted`) re-read under
+  the save transaction lock, not the lobby copy; the edit is also refused when the session is
+  not in the lobby (`state`, `active_char`), while a select/enter holds the character
+  (`EnterWorldManager`) and while a departure save is pending (`SaveManager`).
 * Race and gender are fixed in the edit UI (`GetEditUnitRace/Gender` seed the read-only step-1
   buttons and only the character's own race stays enabled, `character_create_step1_view.alb`),
   so a different pair is refused. The stored level is kept (the client sends 1 for both create
@@ -99,17 +107,23 @@ Rules (from the 1.2 UI and the create path; the 1.2 server behaviour itself is n
   alone; a changed one re-runs create's rules (`NameManager.ValidateCharacterName` + blocked
   names) under the create save lock, and the name manager swap happens after the commit.
 * The rebuild reuses every create step (race/gender template, ability starting kit, body items,
-  supplies, actabilities, starting skills, gear buffs). Old item/container rows and the
+  supplies, actabilities, starting skills, gear buffs). Only the containers creation fills are
+  rebuilt (equipment, bag, bank; `mate_id = 0`): their old item/container rows and the
   create-time ability/actability/appellation/skill rows are deleted and the new ones written in
-  one transaction, so a failed save leaves the character untouched.
+  one transaction, and the replaced item ids are freed after the commit. A failed save leaves
+  the character untouched. Mail/auction/trade/system containers and mate/slave equipment keep
+  their rows and items: a never-played character can already own mail attachments delivered
+  while it was offline (`systems/economy/mail.rs` creates the MAIL container by character id).
 * Gated by `systems::services::second_password::allow_lobby_action`, like the other lobby
   actions (`CSEditCharacter` was the packet that call was reserved for).
 * **Failure reply: UNKNOWN / capture-pending** (`EDITCHAR-FAIL-1`). The 1.2 handler
   `FUN_391eb910` only has a success path (a zero character id is its only no-op), so a refused
   edit sends nothing and logs the reason; the client leaves its create window open.
-* Not ported / not validated: create itself accepts any item template as a body item
-  (`SetEquipItemTemplate`) without checking `item_body_parts`; the edit inherits that rule
-  rather than tightening it (`EDITCHAR-BODYITEM-1`, capture-pending).
+* Not ported / not validated (**known, not fixed**): create itself accepts any item template as
+  a body item (`SetEquipItemTemplate`) without checking `item_body_parts`; the edit inherits
+  that rule rather than tightening it (`EDITCHAR-BODYITEM-1`, capture-pending). A forged packet
+  can also persist arbitrary `ability2`/`ability3` bytes (create only logs the anomaly; the
+  client sends 2 and 3, and only `ability1` selects the starting tree).
 
 Framing: level 1 = `[dd 01][hash][count][u16 op][body]` (server writes 0/0 and never verifies the
 client's bytes, as in C#), level 2 = `[dd 02][u16 op][body]`. Any other level has no packet table:

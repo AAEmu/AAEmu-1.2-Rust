@@ -84,10 +84,11 @@ The login server tells the client how many characters an account has:
   period. When on, the client's Start button opens the character-edit window
   instead of entering the world (`CSEditCharacter`), so the player can still
   change a freshly created character's name, appearance, body items and ability
-  before playing. The game server accepts that packet only while its own
-  `Characters:PreSelectPeriod` is on, so set both values equally. Only the
-  account's own, not-deleted character that never entered the world can be
-  edited; the second-password gate applies. Leave both off for normal play.
+  before playing; world entry (`CSSelectCharacter`) is refused until the period
+  ends. The login reports this value to the game server when it registers, and
+  the game applies it, so the two servers cannot disagree. Only the account's
+  own, not-deleted character that never entered the world can be edited; the
+  second-password gate applies. Leave it off for normal play.
 
 Purchased character slots (`accounts.extra_character_slots`, from the slot
 increase item) are sent by the game server's `SCGetSlotCount` as the purchased
@@ -151,13 +152,16 @@ count the login server advertises and the pre-select period:
   Character creation is refused once the account already has
   `MaxPerAccount + extra_character_slots` characters (a MySQL read error on the
   extra slots falls back to the base).
-- `PreSelectPeriod` (default `false`): must equal the login server's
-  `Login:PreSelectCharacterPeriod`. While it is on, `CSEditCharacter` is applied
-  for the account's own, undeleted character that never entered the world; it
-  re-runs character creation with the edited name, appearance, body items and
-  ability. The startup log prints `Character pre-select period on/off`. A
-  refused edit sends no reply (the 1.2 client has no failure path for it) and
-  logs the reason.
+- `PreSelectPeriod` (default `false`): fallback for the login server's
+  `Login:PreSelectCharacterPeriod`. The game learns the effective value from the
+  login's game-server registration reply and applies it (a mismatch is logged as
+  a warning); this local value is only used when the login does not report it
+  (an older login). While the period is on, `CSEditCharacter` is applied for the
+  account's own, undeleted character that never entered the world, and world
+  entry is refused. The edit re-runs character creation with the edited name,
+  appearance, body items and ability. The startup log prints `Character
+  pre-select period on/off`. A refused edit sends no reply (the 1.2 client has
+  no failure path for it) and logs the reason.
 
 Both can also be overridden in the game's `Config.Local.json` or with the
 environment variables `Characters__MaxPerAccount` and `Characters__PreSelectPeriod`.

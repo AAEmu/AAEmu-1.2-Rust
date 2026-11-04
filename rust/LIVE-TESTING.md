@@ -207,7 +207,8 @@ $TC load   --config testclient.local.json --login 127.0.0.1:21237 --bots 50 --pr
 Scenarios: `login` (login server only), `lobby` (+ game lobby, stream join, character
 creation, quit), `edit` (lobby create, `CSEditCharacter` of the appearance, checks
 `SCEditCharacterResponse`, relists and checks the changed entry, quit; needs
-`Login:PreSelectCharacterPeriod` and `Characters:PreSelectPeriod` on), `full` (everything above),
+`Login:PreSelectCharacterPeriod` on - the game applies it at registration - and while the period
+is on world entry is refused, so only this scenario runs on that stack), `full` (everything above),
 `combat` (`full` + three melee hits on a Solzreed fox, which fights back; logout then takes the
 5-minute in-combat timer), `load` (login, create, select, spawn, move, chat, leave). `parity`
 exits with 2 when there are findings, `load` when a bot failed.
