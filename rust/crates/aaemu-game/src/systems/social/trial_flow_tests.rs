@@ -2128,6 +2128,8 @@ fn guild_dominion() -> crate::systems::housing::dominion::state::DominionState {
             ends_at: 300,
             ended_at: 0,
             reinforced: false,
+            defender_ni: 100,
+            defender_nr: 100,
             participants: Default::default(),
         }),
     }

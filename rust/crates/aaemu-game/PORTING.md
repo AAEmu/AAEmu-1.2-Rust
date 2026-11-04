@@ -3951,8 +3951,8 @@ and in NPC wandering / buff remaining times.
   silent).
 * systems::housing / systems::social (2026-11-04, WP-S4 roster caps and reinforcements):
   `siege_settings` is now loaded (`CastleReferenceData::siege_settings`, keyed by
-  `total_castles`) and the explicit siege snapshot carries the authored team limits and
-  reinforcement delay instead of the hard-coded 100/100/100. Evidence (1.2 client): a team is
+  `total_castles`) and the explicit siege snapshot carries team limits frozen at scheduling
+  and the authored reinforcement delay instead of the hard-coded 100/100/100. Evidence (1.2 client): a team is
   `id, obj_id, x, y, z, ni, nr, limit, count, ids[]` (`FUN_39839c80`, `FUN_39839c10`);
   `IsReinforceArrived` (`FUN_3946c500`) is period 4 and `defender.limit == defender.nr`;
   `GetReinforceRemainDate` (`FUN_3946c3f0`) is 0 when `ni == nr`, `limit == nr` or past
@@ -3962,10 +3962,21 @@ and in NPC wandering / buff remaining times.
   `ni/ni`, after it `ni/nr`; no reinforcements means `ni == nr` and no packet. `bdm` is the
   zone's `reinforce_defense_delay_mins * 60` (the shipped rows all author 20 minutes).
   `total_castles` is INFERRED to be the number of dominions the defending expedition holds;
-  more than 10 clamps to the last shipped row. The wave is announced once, from the real
-  clock, by `runtime::tick_once -> reinforce::tick` when `now >= starts_at + bdm`; the
+  more than 10 clamps to the last shipped row. Chosen reading: the count includes the
+  territory being defended, so it is always >= 1 during a siege and row 0 (`70/0`) is
+  unreachable; the alternative reading (count of *other* castles) would give a one-castle
+  defender the 70 total at once. The data does not disambiguate the two (capture-pending).
+  The caps are frozen into the persisted `SiegeState.defender_ni`/`defender_nr` columns, so a
+  mid-siege change in the defender's castle count (or a test-only ephemeral GM dominion lost
+  on restart) cannot move them. Existing participants above a frozen cap are not evicted:
+  there is no evidence for it, and the authority checks only on join. An out-of-range
+  authored `bdm` saturates to `i32::MAX` instead of dropping the territory's whole snapshot.
+  The wave is announced once, from the real clock, by
+  `runtime::tick_once -> reinforce::tick` when `now >= starts_at + bdm`; the
   `dominions.siege_reinforced` flag (new column) is check-and-set under the authority lock
-  before the broadcast, so repeated ticks and restarts do not repeat the packet. The packet
+  before the broadcast, so repeated ticks and restarts do not normally repeat the packet. A
+  crash between the broadcast and the periodic save can still repeat it once on the next
+  boot; the client just sets `limit = nr` again. The packet
   goes to every client through `broadcast_to_server`, like every other dominion record; the
   1.2 client keeps all dominion records server-wide (the retail audience is
   capture-pending). Roster joins (`/joinsiege` and GM `/dominion register`) now pass the
@@ -3981,7 +3992,11 @@ and in NPC wandering / buff remaining times.
   `held_castle_count_selects_the_authored_settings_row`,
   `bdm_is_the_authored_reinforce_delay_in_seconds`,
   `the_defender_cap_waits_for_the_wave_and_the_attacker_uses_the_total`,
+  `frozen_siege_limits_do_not_follow_the_live_castle_count`,
   `a_missing_settings_row_keeps_the_native_cap_for_every_side`,
+  `out_of_range_reinforcement_delay_is_clamped_instead_of_dropping_the_snapshot`,
+  `private_mysql_dominion_rollback_failure_retry_and_restart_preserve_authority` (round
+  trips `siege_reinforced` and the frozen `50/70` limits through MySQL),
   `snapshot_carries_data_driven_team_limits_and_reinforcement_delay`,
   `siege_state_body_carries_bdm_and_team_limits_at_native_offsets`,
   `reinforcement_wave_is_announced_once_at_start_plus_bdm_through_the_tick`,

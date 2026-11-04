@@ -241,8 +241,9 @@ pub fn snapshot(server: &GameServer, state: &DominionState, now: i64) -> Option<
         timers.started = DateTime::from_timestamp(siege.scheduled_at, 0)?;
         // `bdm` is the authored reinforcement delay; the client computes the wave arrival as
         // start(4) + bdm, i.e. `siege.starts_at + this delay` (`FUN_398390a0`).
-        timers.bdm =
-            i32::try_from(reinforce::reinforcement_delay(server, state.zone_group_id)).ok()?;
+        // An out-of-range authored delay clamps instead of dropping the whole snapshot.
+        timers.bdm = i32::try_from(reinforce::reinforcement_delay(server, state.zone_group_id))
+            .unwrap_or(i32::MAX);
         timers.siege_period = if siege.active_at(now) { 4 } else { 3 };
         // The native owner setter and team getters identify these records by expedition.
         timers.unk_data.id = siege.defender_expedition_id;
@@ -270,27 +271,22 @@ pub fn snapshot(server: &GameServer, state: &DominionState, now: i64) -> Option<
             };
             team.unk_ids.push(participant.character_id);
         }
-        // Data-driven roster entitlements (WP-S4). The defender starts at `ni` and the client
-        // shows the reinforcement countdown until 0x0eb raises `limit` to `nr`; with no
-        // reinforcements `ni == nr` and no wave is pending. The attacker cap is UNKNOWN, so
-        // it uses the same evidenced total (see `reinforce`).
-        if let Some(limits) = reinforce::limits(server, siege.defender_expedition_id) {
-            let pending = limits.pending() && !siege.reinforced;
-            timers.unk_data.ni = limits.ni;
-            timers.unk_data.nr = limits.nr;
-            timers.unk_data.limit = if pending { limits.ni } else { limits.nr };
-            timers.unk2_data.ni = limits.nr;
-            timers.unk2_data.nr = limits.nr;
-            timers.unk2_data.limit = limits.nr;
+        // Roster entitlements frozen at scheduling (WP-S4). The defender starts at `ni` and
+        // the client shows the reinforcement countdown until 0x0eb raises `limit` to `nr`;
+        // with no reinforcements `ni == nr` and no wave is pending. The attacker cap is
+        // UNKNOWN, so it uses the same evidenced total (see `reinforce`). A mid-siege change
+        // in the defender's castle count cannot move these values.
+        let pending = siege.defender_nr > siege.defender_ni && !siege.reinforced;
+        timers.unk_data.ni = siege.defender_ni;
+        timers.unk_data.nr = siege.defender_nr;
+        timers.unk_data.limit = if pending {
+            siege.defender_ni
         } else {
-            // No `siege_settings` row: keep the native array capacity rather than inventing
-            // a smaller entitlement.
-            for team in [&mut timers.unk_data, &mut timers.unk2_data] {
-                team.ni = 100;
-                team.nr = 100;
-                team.limit = 100;
-            }
-        }
+            siege.defender_nr
+        };
+        timers.unk2_data.ni = siege.defender_nr;
+        timers.unk2_data.nr = siege.defender_nr;
+        timers.unk2_data.limit = siege.defender_nr;
         if timers.unk_data.unk_ids.len() > 100 || timers.unk2_data.unk_ids.len() > 100 {
             return None;
         }
@@ -300,8 +296,9 @@ pub fn snapshot(server: &GameServer, state: &DominionState, now: i64) -> Option<
         if let Some(view) = calendar_view(server, state) {
             timers.durations = view.durations;
             timers.started = DateTime::from_timestamp(view.started, 0)?;
-            timers.bdm =
-                i32::try_from(reinforce::reinforcement_delay(server, state.zone_group_id)).ok()?;
+            // An out-of-range authored delay clamps instead of dropping the whole snapshot.
+            timers.bdm = i32::try_from(reinforce::reinforcement_delay(server, state.zone_group_id))
+                .unwrap_or(i32::MAX);
             timers.siege_period = view.period;
             // The defender owns the territory; the attacker team stays zero until a
             // declaration exists (a zero attacker is the client's "nobody declared" state).
@@ -1284,7 +1281,9 @@ mod authority_tests {
     use crate::systems::housing::data::{
         GuardTowerSetting, HousingBuildStep, HousingTemplate, SiegePlan, SiegeSettings, SiegeZone,
     };
-    use crate::systems::housing::dominion::state::{SiegeOutcome, SiegeParticipant, SiegeState};
+    use crate::systems::housing::dominion::state::{
+        SiegeLimits, SiegeOutcome, SiegeParticipant, SiegeState,
+    };
     use crate::systems::skills::data::SkillTemplate;
     use crate::systems::skills::effects::EffectSource;
     use crate::systems::skills::geometry::Target;
@@ -1708,6 +1707,8 @@ mod authority_tests {
             ends_at: 420,
             ended_at: 0,
             reinforced: false,
+            defender_ni: 100,
+            defender_nr: 100,
             participants: BTreeMap::from([
                 (
                     1,
@@ -1778,7 +1779,14 @@ mod authority_tests {
             .systems
             .housing
             .dominions
-            .schedule_siege(ZONE, 88, now + 300, now + 900, now)
+            .schedule_siege_with_limits(
+                ZONE,
+                88,
+                now + 300,
+                now + 900,
+                now,
+                SiegeLimits { ni: 50, nr: 70 },
+            )
             .unwrap();
         let timers = snapshot(&f.server, &state, now).unwrap().siege_timers;
         // The fixture's `siege_zones` row authors a 20-minute reinforcement delay.
@@ -1828,7 +1836,14 @@ mod authority_tests {
             .systems
             .housing
             .dominions
-            .schedule_siege(ZONE, 88, now, now + 900, now)
+            .schedule_siege_with_limits(
+                ZONE,
+                88,
+                now,
+                now + 900,
+                now,
+                SiegeLimits { ni: 50, nr: 70 },
+            )
             .unwrap();
         let data = snapshot(&f.server, &state, now).unwrap();
         let bytes = crate::systems::social::packets::body(
@@ -1848,6 +1863,39 @@ mod authority_tests {
         assert_eq!(&bytes[88..91], &[50, 70, 50]);
         assert_eq!(&bytes[119..122], &[70, 70, 70]);
         assert_eq!(bytes.len(), 127);
+    }
+
+    #[tokio::test]
+    async fn out_of_range_reinforcement_delay_is_clamped_instead_of_dropping_the_snapshot() {
+        let mut f = fixture();
+        owned(&f);
+        data_mut(&mut f)
+            .systems
+            .housing
+            .castles
+            .siege_zones
+            .get_mut(&ZONE)
+            .unwrap()
+            .reinforce_defense_delay_mins = u32::MAX;
+        let now = Utc::now().timestamp();
+        let state = f
+            .server
+            .systems
+            .housing
+            .dominions
+            .schedule_siege_with_limits(
+                ZONE,
+                88,
+                now,
+                now + 900,
+                now,
+                SiegeLimits { ni: 50, nr: 70 },
+            )
+            .unwrap();
+        // The authored minutes do not fit the signed wire field; the territory's snapshot is
+        // still valid and carries the saturated value.
+        let timers = snapshot(&f.server, &state, now).unwrap().siege_timers;
+        assert_eq!(timers.bdm, i32::MAX);
     }
 
     #[tokio::test]
@@ -1873,7 +1921,14 @@ mod authority_tests {
             .systems
             .housing
             .dominions
-            .schedule_siege(ZONE, 88, now, now + 3_600, now)
+            .schedule_siege_with_limits(
+                ZONE,
+                88,
+                now,
+                now + 3_600,
+                now,
+                SiegeLimits { ni: 50, nr: 70 },
+            )
             .unwrap();
         f.client.drain();
         crate::systems::housing::dominion::runtime::tick_once(&f.server);
@@ -1927,8 +1982,8 @@ mod authority_tests {
                 .reinforced
         );
 
-        // Exactly once: a repeated tick (and a restart, which loads the same flag) sends no
-        // second packet.
+        // Exactly once: a repeated tick sends no second packet. The persisted flag itself is
+        // covered by the MySQL round-trip test (`private_mysql_dominion_...`).
         crate::systems::housing::dominion::runtime::tick_once(&f.server);
         assert!(!f.client.drain_ops().contains(&sc::SCSiegeReinforcePacket));
     }

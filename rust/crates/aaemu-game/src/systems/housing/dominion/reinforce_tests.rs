@@ -1,7 +1,7 @@
 use super::*;
 use crate::data::GameData;
 use crate::systems::housing::data::{SiegeSettings, SiegeZone};
-use crate::systems::housing::dominion::state::{DominionState, TowerIdentity};
+use crate::systems::housing::dominion::state::{DominionState, SiegeLimits, TowerIdentity};
 use crate::test_support::test_server_with;
 
 fn settings_row(total: u32, defenders: u32, reinforcements: u32) -> SiegeSettings {
@@ -65,13 +65,13 @@ fn owned(zone: u32, expedition: u32) -> DominionState {
 async fn held_castle_count_selects_the_authored_settings_row() {
     let server = server();
     for (held, expect) in [
-        (0, Limits { ni: 70, nr: 70 }),
-        (1, Limits { ni: 50, nr: 70 }),
-        (2, Limits { ni: 45, nr: 70 }),
-        (3, Limits { ni: 40, nr: 70 }),
-        (10, Limits { ni: 40, nr: 70 }),
+        (0, SiegeLimits { ni: 70, nr: 70 }),
+        (1, SiegeLimits { ni: 50, nr: 70 }),
+        (2, SiegeLimits { ni: 45, nr: 70 }),
+        (3, SiegeLimits { ni: 40, nr: 70 }),
+        (10, SiegeLimits { ni: 40, nr: 70 }),
         // More castles than the table has rows clamp to the last row.
-        (11, Limits { ni: 40, nr: 70 }),
+        (11, SiegeLimits { ni: 40, nr: 70 }),
     ] {
         let states = (1..=held).map(|zone| owned(zone, 20)).collect();
         server.systems.housing.dominions.restore(states).unwrap();
@@ -85,7 +85,7 @@ async fn held_castle_count_selects_the_authored_settings_row() {
         .dominions
         .restore(Vec::new())
         .unwrap();
-    assert_eq!(limits(&server, 20), Some(Limits { ni: 70, nr: 70 }));
+    assert_eq!(limits(&server, 20), Some(SiegeLimits { ni: 70, nr: 70 }));
     assert_eq!(limits(&server, 0), None);
 
     // The GM `nation dominion` test hook is ephemeral but still the defender's held castle,
@@ -97,7 +97,7 @@ async fn held_castle_count_selects_the_authored_settings_row() {
         .restore(vec![owned(1, 20)])
         .unwrap();
     server.systems.housing.dominions.mark_ephemeral(1);
-    assert_eq!(limits(&server, 20), Some(Limits { ni: 50, nr: 70 }));
+    assert_eq!(limits(&server, 20), Some(SiegeLimits { ni: 50, nr: 70 }));
 }
 
 #[tokio::test]
@@ -109,7 +109,7 @@ async fn missing_or_oversized_settings_do_not_invent_native_capacity() {
         .dominions
         .restore(Vec::new())
         .unwrap();
-    assert_eq!(limits(&server, 77), Some(Limits { ni: 70, nr: 70 }));
+    assert_eq!(limits(&server, 77), Some(SiegeLimits { ni: 70, nr: 70 }));
 
     let mut data = GameData::empty();
     data.systems
@@ -118,7 +118,7 @@ async fn missing_or_oversized_settings_do_not_invent_native_capacity() {
         .siege_settings
         .insert(0, settings_row(0, u32::MAX, u32::MAX));
     let server = test_server_with(data);
-    assert_eq!(limits(&server, 20), Some(Limits { ni: 100, nr: 100 }));
+    assert_eq!(limits(&server, 20), Some(SiegeLimits { ni: 100, nr: 100 }));
 
     let server = test_server_with(GameData::empty());
     assert_eq!(limits(&server, 20), None);
@@ -144,17 +144,17 @@ async fn the_defender_cap_waits_for_the_wave_and_the_attacker_uses_the_total() {
         .systems
         .housing
         .dominions
-        .schedule_siege(1, 30, 2_000, 3_000, 1_500)
+        .schedule_siege_with_limits(1, 30, 2_000, 3_000, 1_500, SiegeLimits { ni: 50, nr: 70 })
         .unwrap();
     assert_eq!(
-        participant_cap(&server, &scheduled, SiegeSide::Defender),
+        participant_cap(&scheduled, SiegeSide::Defender),
         ParticipantCap {
             limit: 50,
             awaiting_reinforcements: true,
         }
     );
     assert_eq!(
-        participant_cap(&server, &scheduled, SiegeSide::Attacker),
+        participant_cap(&scheduled, SiegeSide::Attacker),
         ParticipantCap {
             limit: 70,
             awaiting_reinforcements: false,
@@ -179,7 +179,7 @@ async fn the_defender_cap_waits_for_the_wave_and_the_attacker_uses_the_total() {
         None
     );
     assert_eq!(
-        participant_cap(&server, &reinforced, SiegeSide::Defender),
+        participant_cap(&reinforced, SiegeSide::Defender),
         ParticipantCap {
             limit: 70,
             awaiting_reinforcements: false,
@@ -203,9 +203,51 @@ async fn a_missing_settings_row_keeps_the_native_cap_for_every_side() {
         .schedule_siege(1, 30, 2_000, 3_000, 1_500)
         .unwrap();
     for side in [SiegeSide::Defender, SiegeSide::Attacker] {
-        assert_eq!(
-            participant_cap(&server, &scheduled, side),
-            ParticipantCap::NATIVE
-        );
+        assert_eq!(participant_cap(&scheduled, side), ParticipantCap::NATIVE);
     }
+}
+
+#[tokio::test]
+async fn frozen_siege_limits_do_not_follow_the_live_castle_count() {
+    let server = server();
+    server
+        .systems
+        .housing
+        .dominions
+        .restore(vec![owned(1, 20)])
+        .unwrap();
+    server
+        .systems
+        .housing
+        .dominions
+        .schedule_siege_with_limits(1, 30, 2_000, 3_000, 1_500, SiegeLimits { ni: 50, nr: 70 })
+        .unwrap();
+    assert_eq!(limits(&server, 20), Some(SiegeLimits { ni: 50, nr: 70 }));
+
+    // The defender claims a second castle mid-siege: the authored row becomes 45/25 (total
+    // 70), but the running siege keeps the limits frozen at scheduling.
+    server
+        .systems
+        .housing
+        .dominions
+        .declare_unowned_with(
+            2,
+            TowerIdentity {
+                house_id: 1002,
+                instance_id: 0,
+                guard_tower_setting_id: 1,
+            },
+            20,
+            1_500,
+            || true,
+        )
+        .unwrap();
+    assert_eq!(limits(&server, 20), Some(SiegeLimits { ni: 45, nr: 70 }));
+    let state = server.systems.housing.dominions.get(1).unwrap();
+    assert_eq!(participant_cap(&state, SiegeSide::Defender).limit, 50usize);
+    assert_eq!(participant_cap(&state, SiegeSide::Attacker).limit, 70usize);
+    assert!(state
+        .siege
+        .as_ref()
+        .is_some_and(|siege| { siege.defender_ni == 50 && siege.defender_nr == 70 }));
 }

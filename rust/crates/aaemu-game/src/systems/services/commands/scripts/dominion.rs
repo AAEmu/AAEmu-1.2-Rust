@@ -194,7 +194,7 @@ fn participation(
             );
             return Ok(());
         }
-        let cap = reinforce::participant_cap(server, &previous, side);
+        let cap = reinforce::participant_cap(&previous, side);
         manager.register_participant_with_cap(
             zone,
             player.character_id,
@@ -482,7 +482,13 @@ impl Command for Dominion {
                 let Some(end) = start.checked_add(duration) else {
                     return Ok(());
                 };
-                manager.schedule_siege(zone, attacker, start, end, now)
+                // Freeze the defender's authored roster row into the siege record.
+                let limits = previous
+                    .as_ref()
+                    .and_then(|state| reinforce::limits(server, state.owner_expedition_id));
+                let limits =
+                    limits.unwrap_or(crate::systems::housing::dominion::SiegeLimits::NATIVE);
+                manager.schedule_siege_with_limits(zone, attacker, start, end, now, limits)
             }
             "register" => {
                 let Some(name) = args.get(2) else {
@@ -503,7 +509,7 @@ impl Command for Dominion {
                 };
                 let cap = previous.as_ref().map_or(
                     crate::systems::housing::dominion::ParticipantCap::NATIVE,
-                    |state| reinforce::participant_cap(server, state, side),
+                    |state| reinforce::participant_cap(state, side),
                 );
                 manager.register_participant_with_cap(zone, character, expedition, side, now, cap)
             }
@@ -573,7 +579,7 @@ mod tests {
     use crate::models::house::House;
     use crate::opcodes::sc;
     use crate::systems::housing::data::{GuardTowerSetting, HousingTemplate, SiegeSettings};
-    use crate::systems::housing::dominion::{DominionError, DominionState};
+    use crate::systems::housing::dominion::{DominionError, DominionState, SiegeLimits};
     use crate::systems::skills::data::BuffTemplate;
     use crate::systems::social::expedition::{
         member_from_character, Expedition, ExpeditionRolePolicy,
@@ -949,8 +955,30 @@ mod tests {
             );
         });
         let now = chrono::Utc::now().timestamp();
-        // The authority itself still allows the native 100; the command applies the
-        // authored row (1 held castle: 50 defenders + 20 reinforcements).
+        // The fixture scheduled with the native defaults; replace it with a siege that froze
+        // the authored row (1 held castle: 50 defenders + 20 reinforcements), as the GM
+        // schedule command now does.
+        f.server
+            .systems
+            .housing
+            .dominions
+            .cancel_siege(ZONE, now)
+            .unwrap();
+        f.server
+            .systems
+            .housing
+            .dominions
+            .schedule_siege_with_limits(
+                ZONE,
+                20,
+                now,
+                now + 3_600,
+                now,
+                SiegeLimits { ni: 50, nr: 70 },
+            )
+            .unwrap();
+        // The authority itself still allows the native 100; the command applies the frozen
+        // cap.
         for character in 1_000..1_070 {
             f.server
                 .systems

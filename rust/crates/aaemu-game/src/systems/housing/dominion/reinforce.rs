@@ -22,27 +22,12 @@
 
 use crate::server::GameServer;
 use crate::systems::housing::dominion::state::{
-    DominionState, ParticipantCap, SiegeSide, SiegeStatus, MAX_PARTICIPANTS_PER_SIDE,
+    DominionState, ParticipantCap, SiegeLimits, SiegeSide, SiegeStatus, MAX_PARTICIPANTS_PER_SIDE,
 };
 use crate::systems::social::packets::misc::SCSiegeReinforcePacket;
 
 /// `siege_settings` rows cover 0..=10 held castles (INFERRED index meaning).
 pub const MAX_SETTINGS_CASTLES: u32 = 10;
-
-/// Authored roster entitlement of one `siege_settings` row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Limits {
-    /// `ni`: the roster limit before the reinforcement wave.
-    pub ni: u8,
-    /// `nr`: the roster limit after the wave (`num_defenders + num_reinforcements`).
-    pub nr: u8,
-}
-
-impl Limits {
-    pub fn pending(self) -> bool {
-        self.nr > self.ni
-    }
-}
 
 fn clamp_limit(value: u32) -> u8 {
     u8::try_from(value.min(u32::from(u8::MAX)))
@@ -55,7 +40,7 @@ fn clamp_limit(value: u32) -> u8 {
 /// (the caller falls back to the native 100-character capacity). A test-only ephemeral
 /// dominion still represents a held castle here; the flag only keeps it out of the database
 /// and out of the WP-S6 claim gate.
-pub fn limits(server: &GameServer, defender_expedition_id: u32) -> Option<Limits> {
+pub fn limits(server: &GameServer, defender_expedition_id: u32) -> Option<SiegeLimits> {
     if defender_expedition_id == 0 {
         return None;
     }
@@ -76,7 +61,7 @@ pub fn limits(server: &GameServer, defender_expedition_id: u32) -> Option<Limits
         .get(&held.min(MAX_SETTINGS_CASTLES))?;
     let ni = clamp_limit(row.num_defenders);
     let nr = clamp_limit(row.num_defenders.saturating_add(row.num_reinforcements)).max(ni);
-    Some(Limits { ni, nr })
+    Some(SiegeLimits { ni, nr })
 }
 
 /// `siege_zones.reinforce_defense_delay_mins` as `bdm` seconds (0 when the zone has no row).
@@ -96,16 +81,14 @@ pub fn reinforcement_delay(server: &GameServer, zone_group_id: u32) -> i64 {
 /// Before the wave the defender is limited to `ni`; a full roster then reports
 /// [`DominionError::ReinforceBlocked`](super::state::DominionError::ReinforceBlocked). The
 /// attacker uses the total (`nr`) because its own cap is UNKNOWN.
-pub fn participant_cap(
-    server: &GameServer,
-    state: &DominionState,
-    side: SiegeSide,
-) -> ParticipantCap {
+pub fn participant_cap(state: &DominionState, side: SiegeSide) -> ParticipantCap {
     let Some(siege) = state.siege.as_ref() else {
         return ParticipantCap::NATIVE;
     };
-    let Some(limits) = limits(server, siege.defender_expedition_id) else {
-        return ParticipantCap::NATIVE;
+    // The caps were frozen at scheduling; the live castle count cannot move them mid-siege.
+    let limits = SiegeLimits {
+        ni: siege.defender_ni,
+        nr: siege.defender_nr,
     };
     match side {
         SiegeSide::Defender => {
@@ -138,10 +121,7 @@ pub fn tick(server: &GameServer, now: i64) {
         else {
             continue;
         };
-        let Some(limits) = limits(server, siege.defender_expedition_id) else {
-            continue;
-        };
-        if !limits.pending() {
+        if siege.defender_nr <= siege.defender_ni {
             continue;
         }
         let delay = reinforcement_delay(server, state.zone_group_id);

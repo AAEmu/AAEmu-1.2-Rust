@@ -17,8 +17,8 @@ pub mod state;
 pub mod tax;
 
 pub use state::{
-    DominionError, DominionManager, DominionState, EngravingHandle, ParticipantCap, SiegeOutcome,
-    SiegeParticipant, SiegeSide, SiegeState, SiegeStatus, TowerIdentity, Treasury,
+    DominionError, DominionManager, DominionState, EngravingHandle, ParticipantCap, SiegeLimits,
+    SiegeOutcome, SiegeParticipant, SiegeSide, SiegeState, SiegeStatus, TowerIdentity, Treasury,
 };
 
 #[cfg(test)]

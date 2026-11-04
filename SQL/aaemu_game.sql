@@ -769,6 +769,8 @@ CREATE TABLE IF NOT EXISTS `dominions` (
   `siege_ends_at` bigint NOT NULL DEFAULT 0,
   `siege_ended_at` bigint NOT NULL DEFAULT 0,
   `siege_reinforced` tinyint(1) NOT NULL DEFAULT 0,
+  `siege_defender_ni` tinyint unsigned NOT NULL DEFAULT 100,
+  `siege_defender_nr` tinyint unsigned NOT NULL DEFAULT 100,
   `non_pvp_start_at` bigint NOT NULL DEFAULT 0,
   `non_pvp_duration_min` smallint unsigned NOT NULL DEFAULT 0,
   PRIMARY KEY (`zone_group_id`),

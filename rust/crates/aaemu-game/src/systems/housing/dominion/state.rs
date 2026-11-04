@@ -128,6 +128,27 @@ impl Default for ParticipantCap {
     }
 }
 
+/// Roster limits frozen into a siege record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SiegeLimits {
+    /// Defender cap before the reinforcement wave (`ni`).
+    pub ni: u8,
+    /// Defender cap after the wave and the attacker cap (`nr`).
+    pub nr: u8,
+}
+
+impl SiegeLimits {
+    /// The native 100-character array, used when no `siege_settings` row applies.
+    pub const NATIVE: Self = Self {
+        ni: MAX_PARTICIPANTS_PER_SIDE as u8,
+        nr: MAX_PARTICIPANTS_PER_SIDE as u8,
+    };
+
+    pub fn pending(self) -> bool {
+        self.nr > self.ni
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SiegeState {
     pub siege_id: u64,
@@ -141,8 +162,14 @@ pub struct SiegeState {
     pub ends_at: i64,
     pub ended_at: i64,
     /// The defender's reinforcement wave (at `starts_at + bdm`) has been announced. Persisted
-    /// so a restart cannot repeat `SCSiegeReinforce`.
+    /// so a restart does not normally repeat `SCSiegeReinforce` (a crash between the broadcast
+    /// and the periodic save can still repeat it; the client just sets `limit = nr` again).
     pub reinforced: bool,
+    /// Roster limits frozen when the siege was scheduled. `ni` is the defender cap before the
+    /// reinforcement wave, `nr` after it (the attacker uses `nr`); a change in the defender's
+    /// held-castle count mid-siege does not move them.
+    pub defender_ni: u8,
+    pub defender_nr: u8,
     pub participants: BTreeMap<u32, SiegeParticipant>,
 }
 
@@ -286,6 +313,8 @@ impl DominionState {
                 || siege.starts_at < siege.scheduled_at
                 || siege.ends_at <= siege.starts_at
                 || siege.ends_at.checked_mul(1000).is_none()
+                || siege.defender_ni > siege.defender_nr
+                || usize::from(siege.defender_nr) > MAX_PARTICIPANTS_PER_SIDE
                 || (siege.status == SiegeStatus::Finished)
                     != (siege.outcome != SiegeOutcome::Pending)
                 || (siege.status != SiegeStatus::Finished
@@ -727,6 +756,8 @@ impl DominionManager {
         Ok(state)
     }
 
+    /// Schedules with the native 100-character roster limits. Callers that know the authored
+    /// `siege_settings` row use [`Self::schedule_siege_with_limits`].
     pub fn schedule_siege(
         &self,
         zone_group_id: u32,
@@ -735,10 +766,38 @@ impl DominionManager {
         ends_at: i64,
         now_seconds: i64,
     ) -> Result<DominionState, DominionError> {
+        self.schedule_siege_with_limits(
+            zone_group_id,
+            attacker_expedition_id,
+            starts_at,
+            ends_at,
+            now_seconds,
+            SiegeLimits::NATIVE,
+        )
+    }
+
+    /// Schedules with roster limits frozen into the siege record.
+    ///
+    /// `defender_ni` applies before the defender reinforcement wave, `defender_nr` after it;
+    /// the attacker uses `defender_nr` because its own cap is UNKNOWN. Freezing keeps a
+    /// mid-siege change in the defender's castle count (or a lost ephemeral GM dominion)
+    /// from changing the caps under a running siege. Existing participants above a frozen cap
+    /// are not evicted: there is no evidence for it, and the authority only checks on join.
+    pub fn schedule_siege_with_limits(
+        &self,
+        zone_group_id: u32,
+        attacker_expedition_id: u32,
+        starts_at: i64,
+        ends_at: i64,
+        now_seconds: i64,
+        limits: SiegeLimits,
+    ) -> Result<DominionState, DominionError> {
         if now_seconds < 0
             || starts_at < now_seconds
             || ends_at <= starts_at
             || ends_at.checked_mul(1000).is_none()
+            || limits.ni > limits.nr
+            || usize::from(limits.nr) > MAX_PARTICIPANTS_PER_SIDE
         {
             return Err(DominionError::InvalidSchedule);
         }
@@ -786,6 +845,8 @@ impl DominionManager {
             ends_at,
             ended_at: 0,
             reinforced: false,
+            defender_ni: limits.ni,
+            defender_nr: limits.nr,
             participants: BTreeMap::new(),
         });
         inner.channels.retain(|(zone, _), _| *zone != zone_group_id);
