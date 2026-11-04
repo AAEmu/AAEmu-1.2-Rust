@@ -68,6 +68,7 @@ pub mod object_position;
 pub mod object_rotation;
 pub mod online;
 pub mod ping_position;
+pub mod premium_cmd;
 pub mod quest_cmd;
 pub mod reload_auction;
 pub mod reload_configs;
@@ -504,6 +505,11 @@ pub fn all_commands(env: &ScriptEnv) -> Vec<(&'static [&'static str], Arc<dyn Co
         (
             &["waterdebug", "water_debug"],
             Arc::new(water_debug_cmd::WaterDebugCmd::new(env)),
+        ),
+        // Premium (Rust only, WP-B: grant / remove premium with an end time)
+        (
+            &["premium", "setpremium"],
+            Arc::new(premium_cmd::Premium::new(env)),
         ),
         // SecondPassword (Rust only: admin recovery for the 1.2 second password)
         (

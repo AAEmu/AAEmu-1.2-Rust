@@ -17,6 +17,7 @@ pub mod phase;
 pub mod phase_funcs;
 pub mod placement;
 pub mod runtime;
+pub mod siege_phase;
 pub mod spawner;
 pub mod tasks;
 pub mod templates;

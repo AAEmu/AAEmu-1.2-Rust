@@ -35,6 +35,11 @@ CREATE TABLE IF NOT EXISTS `accounts` (
   `second_password_hash` TEXT NULL DEFAULT NULL COMMENT 'PBKDF2 (ASP.NET Identity V3) hash of the 1.2 second password; NULL = not set',
   `second_password_failed` TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Consecutive failed second-password checks',
   `second_password_locked_until` BIGINT NOT NULL DEFAULT 0 COMMENT 'Unix seconds until second-password checks are refused; 0 = not locked',
+  `pay_method` TINYINT NOT NULL DEFAULT 0 COMMENT '1 Premium, 3 Demo, 5 None; 0 = Account:DefaultPayment',
+  `pay_location` INT NOT NULL DEFAULT 1,
+  `pay_start` BIGINT NOT NULL DEFAULT 0 COMMENT 'Unix seconds',
+  `pay_end` BIGINT NOT NULL DEFAULT 0 COMMENT 'Unix seconds',
+  `premium_point` INT NOT NULL DEFAULT 0 COMMENT 'Premium point; grade = premium_grades lookup',
   PRIMARY KEY (`account_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='Account specific values not related to login';
 

@@ -2637,7 +2637,10 @@ impl ReqSubject for OwnerView<'_> {
     }
     fn labor_margin(&self) -> Option<i32> {
         // TimedRewardsManager.GetMaxLabor(Connection.Payment.PremiumState) - LaborPower
-        Some(crate::systems::skills::unit_reqs::max_labor() - i32::from(self.c.labor_power))
+        Some(
+            crate::systems::skills::unit_reqs::max_labor(self.server, self.c.account_id)
+                - i32::from(self.c.labor_power),
+        )
     }
     fn expedition(&self) -> Option<(u32, u32)> {
         (self.c.unit.expedition_id > 0).then_some((self.c.unit.expedition_id, 0))
