@@ -101,6 +101,54 @@ pub struct SiegeParticipant {
     pub side: SiegeSide,
 }
 
+/// Roster size checked by [`DominionManager::register_participant_with_cap`].
+///
+/// The data-driven caps come from `siege_settings`; the authority itself never reads game
+/// data, so every caller supplies the cap under the same lock as the insert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParticipantCap {
+    /// Highest roster size the side may reach right now.
+    pub limit: usize,
+    /// The defender's authored reinforcement wave has not arrived yet, so a full roster is
+    /// `SIEGE_BLOCK_DEFENSE_REINFORCE` rather than `SIEGE_PARTICIPANT_FULL`.
+    pub awaiting_reinforcements: bool,
+}
+
+impl ParticipantCap {
+    /// The native 100-character array, used when no `siege_settings` row applies.
+    pub const NATIVE: Self = Self {
+        limit: MAX_PARTICIPANTS_PER_SIDE,
+        awaiting_reinforcements: false,
+    };
+}
+
+impl Default for ParticipantCap {
+    fn default() -> Self {
+        Self::NATIVE
+    }
+}
+
+/// Roster limits frozen into a siege record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SiegeLimits {
+    /// Defender cap before the reinforcement wave (`ni`).
+    pub ni: u8,
+    /// Defender cap after the wave and the attacker cap (`nr`).
+    pub nr: u8,
+}
+
+impl SiegeLimits {
+    /// The native 100-character array, used when no `siege_settings` row applies.
+    pub const NATIVE: Self = Self {
+        ni: MAX_PARTICIPANTS_PER_SIDE as u8,
+        nr: MAX_PARTICIPANTS_PER_SIDE as u8,
+    };
+
+    pub fn pending(self) -> bool {
+        self.nr > self.ni
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SiegeState {
     pub siege_id: u64,
@@ -113,6 +161,15 @@ pub struct SiegeState {
     pub starts_at: i64,
     pub ends_at: i64,
     pub ended_at: i64,
+    /// The defender's reinforcement wave (at `starts_at + bdm`) has been announced. Persisted
+    /// so a restart does not normally repeat `SCSiegeReinforce` (a crash between the broadcast
+    /// and the periodic save can still repeat it; the client just sets `limit = nr` again).
+    pub reinforced: bool,
+    /// Roster limits frozen when the siege was scheduled. `ni` is the defender cap before the
+    /// reinforcement wave, `nr` after it (the attacker uses `nr`); a change in the defender's
+    /// held-castle count mid-siege does not move them.
+    pub defender_ni: u8,
+    pub defender_nr: u8,
     pub participants: BTreeMap<u32, SiegeParticipant>,
 }
 
@@ -256,6 +313,8 @@ impl DominionState {
                 || siege.starts_at < siege.scheduled_at
                 || siege.ends_at <= siege.starts_at
                 || siege.ends_at.checked_mul(1000).is_none()
+                || siege.defender_ni > siege.defender_nr
+                || usize::from(siege.defender_nr) > MAX_PARTICIPANTS_PER_SIDE
                 || (siege.status == SiegeStatus::Finished)
                     != (siege.outcome != SiegeOutcome::Pending)
                 || (siege.status != SiegeStatus::Finished
@@ -325,8 +384,10 @@ pub enum DominionError {
     NotRegistered,
     #[error("participant side or expedition does not match this siege")]
     WrongSide,
-    #[error("siege side has reached the native 100-character capacity")]
+    #[error("siege side has reached its participant capacity")]
     ParticipantLimit,
+    #[error("defence reinforcements have not arrived yet")]
+    ReinforceBlocked,
     #[error("engraving is already in progress for this character")]
     AlreadyEngraving,
     #[error("engraving cannot finish before the siege deadline")]
@@ -695,6 +756,8 @@ impl DominionManager {
         Ok(state)
     }
 
+    /// Schedules with the native 100-character roster limits. Callers that know the authored
+    /// `siege_settings` row use [`Self::schedule_siege_with_limits`].
     pub fn schedule_siege(
         &self,
         zone_group_id: u32,
@@ -703,10 +766,38 @@ impl DominionManager {
         ends_at: i64,
         now_seconds: i64,
     ) -> Result<DominionState, DominionError> {
+        self.schedule_siege_with_limits(
+            zone_group_id,
+            attacker_expedition_id,
+            starts_at,
+            ends_at,
+            now_seconds,
+            SiegeLimits::NATIVE,
+        )
+    }
+
+    /// Schedules with roster limits frozen into the siege record.
+    ///
+    /// `defender_ni` applies before the defender reinforcement wave, `defender_nr` after it;
+    /// the attacker uses `defender_nr` because its own cap is UNKNOWN. Freezing keeps a
+    /// mid-siege change in the defender's castle count (or a lost ephemeral GM dominion)
+    /// from changing the caps under a running siege. Existing participants above a frozen cap
+    /// are not evicted: there is no evidence for it, and the authority only checks on join.
+    pub fn schedule_siege_with_limits(
+        &self,
+        zone_group_id: u32,
+        attacker_expedition_id: u32,
+        starts_at: i64,
+        ends_at: i64,
+        now_seconds: i64,
+        limits: SiegeLimits,
+    ) -> Result<DominionState, DominionError> {
         if now_seconds < 0
             || starts_at < now_seconds
             || ends_at <= starts_at
             || ends_at.checked_mul(1000).is_none()
+            || limits.ni > limits.nr
+            || usize::from(limits.nr) > MAX_PARTICIPANTS_PER_SIDE
         {
             return Err(DominionError::InvalidSchedule);
         }
@@ -753,6 +844,9 @@ impl DominionManager {
             starts_at,
             ends_at,
             ended_at: 0,
+            reinforced: false,
+            defender_ni: limits.ni,
+            defender_nr: limits.nr,
             participants: BTreeMap::new(),
         });
         inner.channels.retain(|(zone, _), _| *zone != zone_group_id);
@@ -760,6 +854,8 @@ impl DominionManager {
         Ok(state)
     }
 
+    /// Registers against the native 100-character array capacity. Callers that know the
+    /// authored `siege_settings` caps use [`Self::register_participant_with_cap`].
     pub fn register_participant(
         &self,
         zone_group_id: u32,
@@ -767,6 +863,28 @@ impl DominionManager {
         expedition_id: u32,
         side: SiegeSide,
         now_seconds: i64,
+    ) -> Result<DominionState, DominionError> {
+        self.register_participant_with_cap(
+            zone_group_id,
+            character_id,
+            expedition_id,
+            side,
+            now_seconds,
+            ParticipantCap::NATIVE,
+        )
+    }
+
+    /// Inserts a roster entry iff the side is below `cap`. Check and insert happen under the
+    /// same lock; a full defender roster before the reinforcement wave reports
+    /// [`DominionError::ReinforceBlocked`] so the caller can send the client's 457.
+    pub fn register_participant_with_cap(
+        &self,
+        zone_group_id: u32,
+        character_id: u32,
+        expedition_id: u32,
+        side: SiegeSide,
+        now_seconds: i64,
+        cap: ParticipantCap,
     ) -> Result<DominionState, DominionError> {
         if character_id == 0 || expedition_id == 0 || now_seconds < 0 {
             return Err(DominionError::InvalidIdentity);
@@ -802,8 +920,12 @@ impl DominionManager {
             .values()
             .filter(|p| p.side == side && p.character_id != character_id)
             .count();
-        if count >= MAX_PARTICIPANTS_PER_SIDE {
-            return Err(DominionError::ParticipantLimit);
+        if count >= cap.limit {
+            return Err(if cap.awaiting_reinforcements {
+                DominionError::ReinforceBlocked
+            } else {
+                DominionError::ParticipantLimit
+            });
         }
         let revision = next_revision(&inner)?;
         siege.participants.insert(character_id, participant);
@@ -835,6 +957,44 @@ impl DominionManager {
         inner.channels.remove(&(zone_group_id, character_id));
         replace(&mut inner, state, revision);
         Ok(true)
+    }
+
+    /// Marks the defender reinforcement wave as arrived at `deadline` (`start(siege) + bdm`).
+    ///
+    /// The caller passes the authored deadline so the check and the flag change share one
+    /// lock; the method is idempotent and returns `Some` only for the transition. It does not
+    /// send anything: the caller announces `SCSiegeReinforce` exactly once.
+    pub fn mark_reinforced(
+        &self,
+        zone_group_id: u32,
+        siege_id: u64,
+        deadline: i64,
+        now_seconds: i64,
+    ) -> Result<Option<DominionState>, DominionError> {
+        if deadline < 0 || now_seconds < 0 {
+            return Err(DominionError::InvalidSchedule);
+        }
+        let mut inner = self.lock();
+        let mut state = inner
+            .states
+            .get(&zone_group_id)
+            .ok_or(DominionError::Missing)?
+            .state
+            .clone();
+        let Some(siege) = state.siege.as_mut() else {
+            return Ok(None);
+        };
+        if siege.siege_id != siege_id
+            || siege.status == SiegeStatus::Finished
+            || siege.reinforced
+            || now_seconds < deadline
+        {
+            return Ok(None);
+        }
+        let revision = next_revision(&inner)?;
+        siege.reinforced = true;
+        replace(&mut inner, state.clone(), revision);
+        Ok(Some(state))
     }
 
     pub fn allow_engraving(
