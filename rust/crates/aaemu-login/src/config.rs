@@ -145,6 +145,28 @@ pub struct GameServerConfig {
     /// Whether to hide the server from the client's server selection screen.
     #[serde(rename = "hidden", default, deserialize_with = "lenient_bool")]
     pub hidden: bool,
+    /// World login queue: the maximum slot occupancy (accounts in the lobby/world plus pending
+    /// world cookies, as reported by `GL_GAME_SERVER_LOAD`) before `CAEnterWorld` is queued.
+    /// `0` (default) disables the queue: every request goes straight to the game server, which
+    /// is the behaviour before this feature.
+    #[serde(rename = "maxconcurrent", default, deserialize_with = "lenient_u32")]
+    pub max_concurrent: u32,
+    /// Maximum number of clients waiting in this world's queue. When it is reached a new
+    /// `CAEnterWorld` is refused with `ACEnterWorldDenied` instead of being queued. `0` means
+    /// the packet field limit (`u16::MAX`). Ignored while `MaxConcurrent` is 0.
+    #[serde(
+        rename = "queuelimit",
+        default = "default_queue_limit",
+        deserialize_with = "lenient_u16"
+    )]
+    pub queue_limit: u16,
+}
+
+/// Default `GameServers[].QueueLimit`.
+pub const DEFAULT_QUEUE_LIMIT: u16 = 100;
+
+fn default_queue_limit() -> u16 {
+    DEFAULT_QUEUE_LIMIT
 }
 
 /// `NetworkConfig` (`PublicNetworkConfig` / `InternalNetworkConfig`).
@@ -635,6 +657,7 @@ macro_rules! lenient_int {
 
 lenient_int!(lenient_u8, u8);
 lenient_int!(lenient_u16, u16);
+lenient_int!(lenient_u32, u32);
 lenient_int!(lenient_i32, i32);
 
 fn timespan<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
@@ -680,6 +703,55 @@ mod tests {
         assert_eq!(cfg.network.port, 1237);
         assert_eq!(cfg.enter_world_timeout, Duration::from_secs(10));
         assert_eq!(cfg.korea_auth.rounds, 100_000);
+    }
+
+    #[test]
+    fn game_server_queue_config_binds_and_defaults() {
+        let mut root = base();
+        merge(
+            &mut root,
+            lowercase_keys(json!({
+                "Connections": { "MySQLProvider": { "Port": "3306" } },
+                "GameServers": [ {
+                    "Host": "127.0.0.1", "Id": 1, "Name": "AAEmu", "Port": 1239,
+                    "MaxConcurrent": "2", "QueueLimit": "7"
+                } ]
+            })),
+        );
+        let cfg = AppConfig::from_value(root).unwrap();
+        assert_eq!(cfg.game_servers[0].max_concurrent, 2);
+        assert_eq!(cfg.game_servers[0].queue_limit, 7);
+
+        // Absent settings keep the pre-queue behaviour: no capacity gate, default cap.
+        let mut root = base();
+        merge(
+            &mut root,
+            lowercase_keys(json!({
+                "Connections": { "MySQLProvider": { "Port": "3306" } },
+                "GameServers": [ {
+                    "Host": "127.0.0.1", "Id": 1, "Name": "AAEmu", "Port": 1239
+                } ]
+            })),
+        );
+        let cfg = AppConfig::from_value(root).unwrap();
+        assert_eq!(cfg.game_servers[0].max_concurrent, 0);
+        assert_eq!(
+            cfg.game_servers[0].queue_limit,
+            crate::config::DEFAULT_QUEUE_LIMIT
+        );
+
+        let mut root = base();
+        merge(
+            &mut root,
+            lowercase_keys(json!({
+                "Connections": { "MySQLProvider": { "Port": "3306" } },
+                "GameServers": [ {
+                    "Host": "127.0.0.1", "Id": 1, "Name": "AAEmu", "Port": 1239,
+                    "MaxConcurrent": "not-a-number"
+                } ]
+            })),
+        );
+        assert!(AppConfig::from_value(root).is_err());
     }
 
     #[test]

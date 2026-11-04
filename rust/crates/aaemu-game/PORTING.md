@@ -1679,6 +1679,21 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   character from the world and frees the account. Every refusal logs one `WARN` with the
   character name and the reason (`world/session.rs`, `managers/enter_world.rs`,
   `packets/c2g.rs`, `net/listener.rs`).
+* Login world queue (2026-11-03, WP-H): the C# had no queue. The login server may now hold
+  `CAEnterWorld` in a per-world FIFO when `GameServers[].MaxConcurrent` is reached and admit it
+  when a slot frees. To make the game's occupancy authoritative, `GL_GAME_SERVER_LOAD` and
+  `GLPlayerEnter` gain a trailing `u32 online` and `u32 occupancySequence` (the C# bodies end
+  after the load byte / result byte; readers treat a missing extension as 0 = queue gate off).
+  `online` is `AccountManager.count()` plus world cookies, including a cookie whose account
+  registration is in flight (`login()` marks it accepted instead of removing it; `forget()` drops
+  it after the registration). An unconsumed cookie stops counting toward the queue occupancy after
+  `EnterWorldManager::PENDING_TOKEN_LIFETIME` (60 s, Rust-only) so a client that takes its cookie
+  and vanishes cannot block the queue; `login()` still accepts a cookie of any age, so with the
+  queue disabled its behaviour is exactly as before. The game also reports load right after
+  registration and after an account leaves, so the queue head moves promptly. Premium queue lanes
+  are not implemented: the premium-entrance bit of `CAEnterWorld.flag` is capture-pending
+  (account WP-H).
+
 * systems::skills / systems::ai (dead NPC returned and healed): the `DamageEffect` tail
   (`SCAiAggroPacket`, `AddUnitAggro`, `Npc.OnDamageReceived`) is skipped when the hit killed the
   NPC, and `CheckIfEmptyAggroToReturn` never sends a dead NPC to `ReturnState`. In the C# order the
@@ -3688,6 +3703,66 @@ and in NPC wandering / buff remaining times.
   20:30..22:30 times never hit one); `view_at` returns None for the whole zone when its next
   rotation cycle cannot be built; and without WP-S2 (declaration) the calendar never enters
   warmup/siege on its own, so periods 3/4 exist only through an explicit GM schedule.
+* systems::housing / systems::social (WP-S6 claim gating): the existing lodestone claim
+  (`social/dominion.rs::declare_effect`) now applies the authored `siege_zones` claim window,
+  the pirate refusal, the owned-dominion limit and the fresh-claim siege delay. The 1.2 client
+  has **no claim validator**: it only maps the server's error id to a text (`FUN_3956b860`),
+  so the ids are EVIDENCED but the check order is this server's policy. Window: a zone with no
+  `siege_zones` row or `open_duration_hours == 0` is `DOMINION_CLOSED` 662 (client case `0x296`;
+  ui_texts 5165 "not yet a region where a territory can be proclaimed", the shipped zero rows
+  are zone groups 54/56); outside the recurring `open_weekday/open_hour/open_duration_hours`
+  window it is `DOMINION_NOT_DECLARE_TIME` 582 (case `0x246`; ui_texts 4662, whose `$2 weekday
+  $3 o'clock $4 hours` parameters are exactly those columns). The window is computed by
+  `dominion::calendar::claim_window_at` (weekday 0 = Sunday INFERRED as everywhere else) and
+  applies **regardless of `Housing.SiegeCalendar`**: that switch drives the inferred weekly
+  cycle, not the authored claim columns. It uses the **real wall clock**; the GM
+  `/dominion clock` is restricted to the calendar view. `open_duration_hours >= 168` covers the
+  whole week and is always open; shorter windows are local wall-clock intervals whose end is
+  `start + N hours` in local time and then converted, so a DST change inside the window keeps
+  the authored local end, and a start in a spring-forward gap moves to the first valid local
+  instant. Zone groups 54/56 (`open_duration_hours = 0`) are therefore **unclaimable** (662),
+  and a zone group without a `siege_zones` row is also Closed. Pirates are
+  refused with `DOMINION_NOT_AVAILABLE_FOR_PIRATES` 351 (case `0x15f`; ui_texts 2298 "Pirates
+  cannot proclaim a territory") when the expedition's mother faction is the pirate faction 161
+  or the leader's **persisted** faction is (`db_character::persisted_faction`, so a temporary
+  duel / battlefield team faction does not count); this is EVIDENCED text, and the pirate-guild
+  research (PIRATE-1) is the authority for the expedition test. The owned-territory limit is
+  `TOO_MANY_OWNED_DOMINIONS` 441 (case `0x1b9`; ui_texts 2500) from the new configurable
+  `Housing.DominionClaimLimit` (default 10, from `siege_settings` rows 0..=10; the retail limit
+  is UNKNOWN). The count is taken inside `DominionManager::declare_unowned_with_limit` under
+  the same lock as the claim, so concurrent claims cannot both pass, and the pack is consumed
+  only after it. GM-seeded ephemeral dominions (`nation dominion` test hook) do not count.
+  Order: window (662 before 582) -> pirate 351 -> limit 441. The
+  `world_var_defaults.var_delay_siege_x_days_after_dominion_declare` = 30 delay is EVIDENCED
+  data with INFERRED meaning: a freshly **claimed** dominion gets no cycle for 30 days.
+  `DominionState::claimed_at` (new persisted `dominions.claimed_at` column) is set only by
+  `declare_unowned_with_limit`; a siege capture updates `reign_start_at` but clears
+  `claimed_at`, and a forced release clears both, so a captured territory does not inherit or
+  start the protection. `view_at_protected` keeps a claim in peace and names the first rotation
+  cycle at or after `claimed_at + 30 days` (the calendar and snapshot paths pass it; an explicit
+  GM schedule still overrides). The delay does **not** refuse a claim and has no client error id (UNKNOWN
+  in the research), so no claim error is invented for it. GM `/dominion` commands are
+  unchanged. Tests: `a_claim_outside_the_authored_open_window_is_refused`,
+  `the_gm_calendar_clock_does_not_move_the_claim_window` (582 through the data),
+  `a_claim_in_a_zone_whose_window_never_opens_is_refused_as_closed`,
+  `a_pirate_expedition_cannot_claim_a_dominion`, `a_pirate_leader_cannot_claim_a_dominion`,
+  `a_temporary_duel_team_faction_does_not_make_the_leader_a_pirate`,
+  `a_temporary_team_on_a_saved_pirate_leader_is_still_refused`,
+  `a_claim_over_the_owned_dominion_limit_is_refused`,
+  `ephemeral_seeded_dominions_do_not_count_toward_the_claim_limit`,
+  `claim_gate_errors_follow_the_documented_order`,
+  `a_fresh_claim_has_no_siege_cycle_during_the_authored_delay`,
+  `a_captured_territory_does_not_get_the_fresh_claim_protection`,
+  `a_claim_records_claimed_at_and_restart_keeps_it`,
+  `claim_window_uses_the_authored_open_weekday_hour_and_duration`,
+  `claim_window_uses_local_end_and_falls_forward_across_a_dst_change`,
+  `fresh_claim_protection_refuses_cycles_until_the_delay_expires`. Live (lane stack, headless
+  `aaemu-testclient` on the seeded Archeum Lodestones): claiming the open zone group 33
+  succeeded (`SCHouseBuildProgress`, `SCDominionData`); the never-open zone group 54 refused
+  with 662 and kept the pack; a pirate guild (mother 161) in the open zone group 33 refused
+  with 351; a fresh claim in zone group 34 reported period 5 with `started` about 45 days out
+  (the first rotation cycle after reign + 30 days). The recurring 582 case needs a narrow
+  `open_*` window and was not live-driven because all four shipped open rows are 168 h.
   Any registered current attacker may
   engrave; initial claim requires the current guild leader and exact Purified Archeum pack.
   Capture transfers the nine independently itemized fort designs to the new guild leader,
@@ -3697,13 +3772,52 @@ and in NPC wandering / buff remaining times.
   binary rules. Native wall slope/mirror variant selection remains unverified.
   Participant buffs grant the original headquarters teleport skills. Headquarters bind to
   retained original doodads for the current siege and require explicit GM rebind after restart;
-  registered dead participants can revive there. The SiegePeriod doodad predicate fails closed
-  because its transition semantics are unresolved; phase cycles are bounded for all groups.
+  registered dead participants can revive there. The SiegePeriod doodad phase funcs are
+  implemented in WP-S3 (see the deviation below); phase cycles are bounded for all groups.
   Reinforcement/commander eligibility and payout calendars are not inferred. Building HP
   persists through restart and lodestone collisions follow the native
   CGA/ANM root curves and settled static damage proxies. Absolute render/collider animation
   phase synchronization remains unverified. Property, authority, mail, items and wallets use
   one short prepared snapshot before SQL awaits; logout and shutdown serialize the same saves.
+* systems::housing / systems::npcs (2026-11-03, WP-S3 doodad siege-period phase funcs):
+  `DoodadFuncSiegePeriod` now waits until the territory period named by `siege_period_id`
+  ends and then applies `next_phase` (`-1` = despawn/delete) instead of the C# "apply the
+  destination on any character use". Evidence: the authored rows and chains in
+  `doodad_func_siege_periods` / `doodad_phase_funcs` — 4307 `10581 (period 2) -> 10582 (3) ->
+  10779 (4) -> -1`, 3304 `7627 (2) -> 7631 (3) -> -1`, 3410 `8173 (period 0) -> 8238 (3)`;
+  a "when period 2 starts" reading would fire the declare-period camp chains immediately,
+  while "until period 2 ends" walks declaration -> siege position -> gone. The watcher
+  `npcs/doodad/siege_phase.rs` polls the read-only `housing/dominion/period.rs` view every 2 s
+  (the calendar tick is unchanged) and applies a change only while the doodad is still in the
+  observed group, under one phase-operation reservation. The view mirrors the snapshot: an
+  unfinished explicit GM schedule uses the real clock (warmup/siege), otherwise an owned
+  territory uses the weekly calendar (GM test clock); owned without either source is peace and
+  unowned is period 0. The watcher starts only at the end of `housing::System::start`, after
+  the dominion rows are loaded (`npcs::doodad::start` runs earlier), and the first observation
+  of a zone is silent, so a boot never records the empty period 0: a later `0 -> owned` change
+  cannot fire the 3410 period-0 func. That func now fires only when the target period is warmup
+  (3), never for `previous == 0` alone. The watcher keeps an index of the doodads whose current
+  phase has a `SiegePeriod` func (updated on create / func-group change / delete) instead of
+  scanning every world object every 2 s, and skips a tick while neither the calendar nor an
+  unfinished explicit schedule can change a period. A transition that finds a doodad busy with
+  another phase operation is left unrecorded and retried on the next tick (the expected-group
+  check makes the retry idempotent); the periods skipped between two observations are walked
+  in calendar order (2 -> 4 ends 2 and 3), so a missed poll cannot strand 10582. A func-group
+  change also removes the area triggers the old group created: the C# kept a duration-0
+  `DoodadFuncClout` until the doodad was deleted, so the 3410 `safezone_up` revive zone never
+  went away and accumulated one trigger per warmup. `DoodadFuncDeclareSiege` (the one
+  `doodad_func_declare_sieges` row, a regular `doodad_funcs` row of 3304 group 7622, skill
+  15067, next phase 7627) stays inert: the C# registers the class only in
+  `_phaseFuncTemplates`, so `GetFuncTemplate` does not find the row and nothing advances it.
+  The declaration validation, broadcast and the `7622 -> 7627` entry belong to WP-S2; wiring
+  this row early would let any backpack user strand the item in 7631. Direct write targets are
+  the phase machine's `do_change_phase_if_group` / `despawn_or_delete_if_group`, so a period
+  event cannot move a doodad that changed phase in between. UNKNOWN (capture-pending): 3410's
+  period-0 func (safe default as above; the `defense` flag is unused), 4307's authored
+  10-minute lifetime vs the 90-minute siege (the phase chain wins), whether a skipped period's
+  chain should really end when the calendar jumps over it (the current walk does), and
+  catching up a persisted mid-cycle phase after restart (the first observation of a zone is
+  silent).
 * systems::housing: sale buyer names retain the original case-sensitive lookup. The housing
   audit fixes the first-house tax/deposit omission, reversed paid flag (confirmed against the
   1.2 housing UI bytecode), overdue counter, finished-house construction, duplicate signs,

@@ -822,7 +822,7 @@ async fn private_mysql_dominion_tax_and_monument_round_trip() {
          instance_id int unsigned NOT NULL, guard_tower_setting_id int unsigned NOT NULL,\
          owner_expedition_id int unsigned NOT NULL DEFAULT 0,\
          ownership_generation bigint unsigned NOT NULL DEFAULT 0,\
-         reign_start_at bigint NOT NULL DEFAULT 0, last_siege_end_at bigint NOT NULL DEFAULT 0,\
+         reign_start_at bigint NOT NULL DEFAULT 0, claimed_at bigint NOT NULL DEFAULT 0, last_siege_end_at bigint NOT NULL DEFAULT 0,\
          tax_rate int NOT NULL DEFAULT 0, national_tax_rate smallint unsigned NOT NULL DEFAULT 0,\
          last_paid_at bigint NOT NULL DEFAULT 0, last_tax_rate_changed_at bigint NOT NULL DEFAULT 0,\
          last_national_tax_rate_changed_at bigint NOT NULL DEFAULT 0,\
