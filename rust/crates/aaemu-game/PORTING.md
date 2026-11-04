@@ -3446,28 +3446,46 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   meanings and an example insert in `SQL/updates/2026-11-04_aaemu_game_premium_services.sql`);
   `compact.sqlite3.premium_points` has no catalogue (0 rows) and the table is empty by default
   because no 1.2 retail row is evidenced. `SCPremiumServiceList` (0x1d8, serializer
-  `FUN_397c49b0` -> `FUN_397bf920`) carries one detail per packet (`FUN_391e25e0`), so the shop
-  sends one `size = 1` packet per row with `isEnd` only on the last (one `size = 0, isEnd = true`
-  packet for an empty catalogue); `exchangeRatio` has no source and stays 0. A buy validates the
-  row (`is_sell`, positive `hours`, non-negative price) and the currency, then runs the debit and
-  the premium grant in one MySQL transaction under the account row lock and
-  `AccountManager::lock_of`: guarded `credits` / `loyalty` debit (`... >= price`), payment
-  extension (`pay_end = max(now, pay_end) + hours * 3600`, `pay_method = Premium`, permanent
-  `pay_end = 0` stays permanent), `premium_point = premium_configs.connect_point` and an
-  `audit_ics_sales` row, then commit. Only credits and loyalty are debitable atomically with the
+  `FUN_397c49b0` -> `FUN_397bf920`) carries one detail per packet (`FUN_391e25e0`); `size` is the
+  expected **total** row count, not the per-packet count: the handler appends a detail only while
+  `(end - begin) / 0x1b0 < size`, so every packet carries `size = rows` and `isEnd` is set only on
+  the last one. A `size = 0` packet marks the list ready (empty catalogue); it does not clear a
+  list. The catalogue is capped at 255 rows (the `u8` field, logged when truncated);
+  `exchangeRatio` has no source and stays 0. A buy validates the row (`is_sell`, positive
+  `hours`, non-negative price) and the currency, then runs the debit and the premium grant in one
+  MySQL transaction under the account row lock and `AccountManager::lock_of`: guarded `credits` /
+  `loyalty` debit (`... >= price`), payment extension (`pay_end = max(now, pay_end) +
+  hours * 3600`; a GM window that starts in the future is replaced by `now..now + hours`, not
+  extended), an `audit_ics_sales` row, then commit. A permanent premium (`pay_end = 0`,
+  including the configured default) is refused with 773 **before** the debit: there is nothing
+  to extend. A row that still uses `Account:DefaultPayment` keeps `pay_method = 0`; the purchase
+  stores only its window (`pay_start` / `pay_end`), which `resolve_payment` reads back as
+  explicit premium (a `pay_method = 0` row with a stored window is premium, not the default
+  payment). An explicit payment row becomes `Premium`. `premium_point` is
+  `max(details.premium_point, premium_configs.connect_point).clamp(0, max_point)` - a stored
+  higher point is never lowered. Only credits and loyalty are debitable atomically with the
   grant; AA points have no balance carrier yet (WP-D) and are refused with error 775, other
-  currencies with 773. The buy result has no dedicated 1.2 SC: the client's error handler
+  currencies with 773. A loyalty debit also sets the buyer's `bm_point` and sends
+  `SCBmPointPacket`. The buy result has no dedicated 1.2 SC: the client's error handler
   (`FUN_391e5070`) routes error ids 772..775 through `FUN_39055e80` / `FUN_39055a90` to UI event
   0x266 (`PREMIUM_SERVICE_BUY_RESULT`, PSBFR_NONE/NORMAL/CASH/AA_POINT), so success / failure are
   `SCErrorMsg` with `PREMIUM_SERVICE_BUY_SUCCESS` 772, `PREMIUM_SERVICE_BUY_FAIL` 773,
   `PREMIUM_SERVICE_NOT_ENOUGH_AA_CASH` 774 or `PREMIUM_SERVICE_NOT_ENOUGH_AA_POINT` 775. The
   client handler stores `exchangeRatio` from the `isEnd` packet; the shop's own `SCAccountInfo`,
-  `SCUpdatePremiumPoint` and (credits) `SCICSCashPoint` follow through the WP-B publish path. A
-  real-client purchase capture is still pending (**ACCOUNT-PREMIUM-BUY-1**).
+  `SCUpdatePremiumPoint`, `SCICSCashPoint` (credits) / `SCBmPointPacket` (loyalty) follow through
+  the WP-B publish path. A real-client purchase capture is still pending
+  (**ACCOUNT-PREMIUM-BUY-1**).
   `CSPremiumServiceMsg` is a client trigger (stage 1 at character-select init, stage 2 at world
   entry) and gets no reply; the C# `SCAccountWarned("Premium ...")` is removed. `premium_services.id`
   (client detail `id`, loaded from `grade`) and `bcount` (`buy_max`) are copied for display only:
   their 1.2 meanings are UNKNOWN and `buy_max` is not enforced.
+  Known limits: an ambiguous MySQL commit error (for example the connection drops during
+  `COMMIT`) answers 773, and the cached premium state stays stale until the next refresh /
+  login even though the transaction may have committed. The new state is published after the
+  account lock is released, so a concurrent GM `set_payment` can publish in between and the
+  client briefly shows the purchase state until the next `SCAccountInfo`; the database row is
+  whichever transaction wrote last. There is no rate limit on `CSPremiumServiceBuy`: every
+  packet is one charge.
 * systems::services (second password, 2026-11-03): the 1.2 second-password protocol is ported in
   `systems::services::second_password`. The client sends four shuffled permutations of
   `0-9a-zA-Z` keyed by a server key id (`FUN_3907a370` / `FUN_3907a430`) and the server decodes
