@@ -242,8 +242,10 @@ impl ClientPacket for CSChangeDoodadDataPacket {
 ///
 /// The C# only logged it, so the phase never advanced. The handler accepts the client's
 /// phase change only when `funcId` is a Bubble / OpenPaper func of the doodad's current
-/// phase group whose `next_phase` is exactly `nextPhase`; the movement itself is the normal
-/// phase machinery (`DoChangePhase`: phase funcs, then `SCDoodadPhaseChangedPacket`).
+/// phase group whose `next_phase` is exactly `nextPhase`, from a live caster within the func's
+/// own reach (never the packet's `skill`) and a doodad not scheduled for despawn; the movement
+/// itself is the normal phase machinery (`DoChangePhase`: phase funcs, then
+/// `SCDoodadPhaseChangedPacket`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CSChangeDoodadPhasePacket {
     pub obj_id: u32,
@@ -283,6 +285,33 @@ impl ClientPacket for CSChangeDoodadPhasePacket {
                 );
                 return Ok(());
             };
+            // A dead character cannot run a doodad interaction (`Doodad.Use` has no dead check,
+            // but every skill / item path that reaches it does).
+            if me.data().unit.is_dead() {
+                tracing::debug!(
+                    "ChangeDoodadPhase, dead caster {} objId: {}, funcId: {}",
+                    me.data().unit.name,
+                    self.obj_id,
+                    self.func_id
+                );
+                return Ok(());
+            }
+            // Same refusal as `Doodad.Use` (phase.rs): a doodad scheduled for despawn must not
+            // change phase.
+            if server
+                .systems
+                .npcs
+                .spawns
+                .despawn_field(doodad.obj_id)
+                .is_some()
+            {
+                tracing::debug!(
+                    "ChangeDoodadPhase refused: doodad {} is scheduled for despawn",
+                    self.obj_id
+                );
+                me.send(error_msg(error_message::NO_INTERACTION_AVAILABLE));
+                return Ok(());
+            }
             // Check the current phase and move it under the same operation reservation.
             let Some(_operation) = super::phase::Operation::enter(&doodad) else {
                 return Ok(());
@@ -317,17 +346,13 @@ impl ClientPacket for CSChangeDoodadPhasePacket {
                 );
                 return Ok(());
             }
-            let skill_id = if func.skill_id != 0 {
-                func.skill_id
-            } else {
-                self.skill
-            };
-            if !in_skill_reach(server, &me, &doodad, skill_id) {
+            if !in_func_reach(server, &me, &doodad, func.skill_id) {
                 tracing::debug!(
-                    "ChangeDoodadPhase, out of range: objId: {}, funcId: {}, skill: {}",
+                    "ChangeDoodadPhase, out of range: objId: {}, funcId: {}, func skill: {} (client sent {})",
                     self.obj_id,
                     self.func_id,
-                    skill_id
+                    func.skill_id,
+                    self.skill
                 );
                 return Ok(());
             }
@@ -343,29 +368,36 @@ impl ClientPacket for CSChangeDoodadPhasePacket {
     }
 }
 
-/// `distance <= skill.maxRange` with the same doodad allowance the cast target check uses
-/// (`skills::validation`). An unknown skill or a zero range does not bound the interaction.
-fn in_skill_reach(
+/// Reach of a Bubble / OpenPaper func, never using the packet's `skill` (it is client input and
+/// the skill-less funcs carry none). A known positive func skill range uses it plus the doodad
+/// allowance the cast target check adds; a skill-less / unknown / unbounded func gets the 5 m
+/// doodad interaction distance (`portal::NAVI_USE_RANGE`, also `looting::LOOT_TAKE_RANGE`) plus
+/// that allowance.
+fn in_func_reach(
     server: &GameServer,
     player: &crate::world::PlayerRef,
     doodad: &crate::world::DoodadRef,
-    skill_id: u32,
+    func_skill_id: u32,
 ) -> bool {
     use crate::systems::skills::geometry::{distance_to, Target};
-    let Some(skill) = server.game_data.systems.skills.skill(skill_id) else {
-        return true;
-    };
-    if skill.max_range <= 0 {
-        return true;
-    }
+    let allowance = crate::systems::skills::validation::DOODAD_RANGE_ALLOWANCE;
+    let limit = server
+        .game_data
+        .systems
+        .skills
+        .skill(func_skill_id)
+        .filter(|skill| skill.max_range > 0)
+        .map_or_else(
+            || f64::from(crate::systems::npcs::portal::NAVI_USE_RANGE) + allowance,
+            |skill| f64::from(skill.max_range) + allowance,
+        );
     let distance = distance_to(
         server,
         &Target::Obj(WorldObject::from(player)),
         &Target::Obj(WorldObject::from(doodad)),
         true,
     );
-    f64::from(distance)
-        <= f64::from(skill.max_range) + crate::systems::skills::validation::DOODAD_RANGE_ALLOWANCE
+    f64::from(distance) <= limit
 }
 
 /// `CSSetLogicDoodadPacket`: provider and subscriber object IDs.
