@@ -150,14 +150,25 @@ impl ClientPacket for FinishStatePacket {
                         checksum: 0,
                         immersive: 1,
                     });
+                    // WP-B: the account registry is the source of truth; the connection keeps a
+                    // cached copy (set by `AccountManager.Add`). Read it before SCInitialConfig:
+                    // WP-J selects the restriction flags by the effective payment method.
+                    let state =
+                        crate::systems::services::accounts::state(server, conn.account_id());
                     let second_password = &server.config.second_password;
                     conn.send(&SCInitialConfigPacket {
                         fsets: server.systems.services.features(server),
+                        restrictions: *server
+                            .config
+                            .account
+                            .restrictions
+                            .for_payment(state.payment.method),
                         second_password_max_fail_count: if second_password.enabled {
                             second_password.max_fail_count
                         } else {
                             0
                         },
+                        idle_kick_time: server.config.account.idle_kick_time,
                     });
                     conn.send(&SCTrionConfigPacket {
                         activate: true,
@@ -165,10 +176,6 @@ impl ClientPacket for FinishStatePacket {
                         platform_url: Self::PLATFORM_URL.into(),
                         commerce_url: Self::COMMERCE_URL.into(),
                     });
-                    // WP-B: the account registry is the source of truth; the connection keeps a
-                    // cached copy (set by `AccountManager.Add`).
-                    let state =
-                        crate::systems::services::accounts::state(server, conn.account_id());
                     conn.payment = state.payment.clone();
                     let p = state.payment;
                     conn.send(&SCAccountInfoPacket {

@@ -135,6 +135,66 @@ fn account_info_frame() -> Vec<u8> {
     )
 }
 
+/// WP-J: the configured restriction flags (selected by the effective payment method) and the
+/// idle kick time reach `SCInitialConfig` through the real `FinishState(0)` handler. The reader
+/// (`FUN_397b2a00`) takes the seven booleans, then `secondPriceType`, `secondPasswordMaxFailCount`
+/// and `idleKickTime` (`u16`, `FUN_39017bf0` masks with `0xffff`).
+#[tokio::test]
+async fn initial_config_uses_configured_restrictions_and_idle_kick_time() {
+    use crate::config::{DefaultPayment, RestrictionFlags};
+
+    let mut config = AppConfig {
+        id: 1,
+        ..AppConfig::default()
+    };
+    config.stream_network.port = 1250;
+    config.network.num_connections = 10;
+    config.connections.mysql_provider.host = "127.0.0.1".into();
+    config.connections.mysql_provider.port = 1; // nothing listens here
+    config.account.default_payment = DefaultPayment::Demo;
+    config.account.restrictions.demo = RestrictionFlags {
+        can_place_house: false,
+        can_use_auction: false,
+        can_trade: false,
+        can_use_copper: false,
+        ..RestrictionFlags::default()
+    };
+    config.account.idle_kick_time = 0x1234;
+    let db = MySqlPoolOptions::new()
+        .acquire_timeout(Duration::from_millis(300))
+        .connect_lazy_with(config.connections.mysql_provider.connect_options());
+    let server = Arc::new(GameServer::new(config, db, GameData::empty()));
+
+    assert!(crate::login::handle(&server, &hex("01 00  E8 03 00 00  92 10 00 00")).await);
+    let mut c = client(&server, 77);
+    server
+        .handle_frame(
+            &mut c.conn,
+            &c2s_l1(cs::X2EnterWorldPacket, &enter_world_body(1000, 4242)),
+        )
+        .await
+        .unwrap();
+    c.drain();
+
+    // ---- FinishState(0): the lobby configuration burst
+    server
+        .handle_frame(
+            &mut c.conn,
+            &[0xDD, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00],
+        )
+        .await
+        .unwrap();
+    let frames = c.drain();
+    let init = frames
+        .iter()
+        .find(|f| f.len() > 6 && f[..6] == [0xDD, 0x01, 0x00, 0x00, 0x06, 0x00])
+        .expect("SCInitialConfig");
+    assert_eq!(
+        &init[init.len() - 11..],
+        &[0, 1, 0, 0, 1, 1, 0, 2, 0, 0x34, 0x12]
+    );
+}
+
 #[tokio::test]
 async fn lobby_flow_end_to_end() {
     let server = Arc::new(test_server());
