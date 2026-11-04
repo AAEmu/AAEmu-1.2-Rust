@@ -42,6 +42,7 @@ pub mod item_ops;
 pub mod localization;
 pub mod models;
 pub mod music;
+pub mod premium;
 pub mod radar;
 pub mod second_password;
 pub mod shutdown;
@@ -74,6 +75,8 @@ pub struct Data {
     pub models: models::ModelManager,
     /// `CharacterManager` `bag_expands` / `expand_expert_limits`.
     pub expands: expands::ExpandData,
+    /// `premium_grades` / `premium_benefits` / `premium_configs` / `pcbang_buffs` (WP-B).
+    pub premium: premium::PremiumData,
 }
 
 impl Data {
@@ -84,6 +87,7 @@ impl Data {
             localization: localization::LocalizationManager::load(ctx.conn, ctx.language)?,
             models: models::ModelManager::load(ctx.conn)?,
             expands: expands::ExpandData::load(ctx.conn)?,
+            premium: premium::PremiumData::load(ctx.conn)?,
         })
     }
 }
@@ -105,6 +109,8 @@ pub struct System {
     pub sus: sus::SusManager,
     /// 1.2 second password state, storage and hashing (`SecondPassword`).
     pub second_password: second_password::SecondPasswordManager,
+    /// Account payment persistence (WP-B); MySQL when nothing is installed.
+    pub premium_store: HookSlot<dyn premium::PremiumStore>,
     /// `WebApiService`.
     pub webapi: webapi::WebApiService,
     /// `DiscordBotService`.
@@ -141,6 +147,7 @@ impl System {
         s.tasks.initialize();
         accounts::initialize(server);
         timed_rewards::initialize(server);
+        premium::initialize(server);
         second_password::initialize(server);
         radar::RadarManager::initialize(server);
         Ok(())

@@ -852,6 +852,9 @@ pub fn select_loaded(
     let became_pirate = {
         let mut live = player.data();
         apply_active_buffs(server, &mut live, &db.saved_buffs, now_ms());
+        // WP-B: the premium grade buffs (`pcbang_buffs` rows with `active = 't'` for the
+        // account's grade) are part of the login state, like the saved buffs above.
+        crate::systems::services::premium::apply_login_buffs(server, &mut live);
         let became_pirate = live.check_wanted_threshold(server, now_ms());
         // UpdateGearBonuses(null, null): gear bonuses are a later phase.
         live.restore_saved_hp_mp();
@@ -1493,6 +1496,7 @@ pub async fn leave_world_task(
                     .leave(p);
             }
         }
+        crate::systems::services::premium::remove_grade_buffs(server, p);
         delete(server, p);
         // BuyBackItems.Wipe (+ the economy's per-character state)
         crate::systems::economy::on_leave_world(server, p);
@@ -1527,7 +1531,8 @@ pub async fn leave_world_task(
             // frames are flushed first). Deviation from the C#, which kept the connection and
             // the account registered until the client closed the socket or the dead-connection
             // sweep (30-60 s) did, so a prompt relog was refused ("enter world denied, reason 1").
-            server.accounts.remove_if_owned(conn.account_id(), conn.id);
+            crate::systems::services::accounts::end_session(server, conn.account_id(), conn.id)
+                .await;
             conn.shutdown();
         }
     }
@@ -1645,6 +1650,8 @@ pub async fn on_disconnect(server: &GameServer, conn: &mut GameConnection) {
     zone_access::cancel(&p);
     crate::systems::housing::dominion::runtime::abort_character(server, p.character_id);
     crate::systems::housing::dominion::participants::clear_player(server, &p);
+    // WP-B: the premium grade buffs are session state, not saved buffs.
+    crate::systems::services::premium::remove_grade_buffs(server, &p);
     crate::systems::economy::on_disconnect(server, &p);
     server.chat.leave_user_channels(&p, &server.ids.chat);
     if p.data().is_online {
