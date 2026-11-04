@@ -330,14 +330,13 @@ fn server_packets_are_byte_exact() {
         }),
         want.into_bytes()
     );
-    // SCQuestRewardedByMailPacket
-    let mut want = PacketStream::new();
-    want.write_u8(2).write_u32(10).write_u32(20);
+    // SCQuestRewardedByMailPacket: reader FUN_397b5ec0, bool success then the u32 quest id.
     assert_eq!(
         body(&SCQuestRewardedByMailPacket {
-            quests: vec![10, 20]
+            success: true,
+            quest_id: 10
         }),
-        want.into_bytes()
+        vec![1, 10, 0, 0, 0]
     );
     // SCCountUnreadMailPacket (phase 2)
     let mut want = PacketStream::new();
