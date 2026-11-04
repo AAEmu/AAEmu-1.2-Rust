@@ -401,16 +401,16 @@ pub fn remove_item(f: &DoodadFuncRemoveItem, ctx: &DoodadCtx<'_>, caster: Option
     set_to_next_phase(ctx, balance > 0);
 }
 
-/// `DoodadFuncPurchase.Use`.
-pub fn purchase(f: &DoodadFuncPurchase, ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>) {
+/// `DoodadFuncPurchase.Use`; `true` when the item was granted.
+pub fn purchase(f: &DoodadFuncPurchase, ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>) -> bool {
     let Some(player) = DoodadCtx::as_player(caster) else {
-        return;
+        return false;
     };
     let server = ctx.server;
     let eco = economy(server);
     if eco.bag_space_left_for_item(server, player, f.item_id) < f.count {
         send_error(player, err::BAG_FULL);
-        return;
+        return false;
     }
     // Only the coin-item form buys here. The money form is the client's purchase dialog
     // (`CSBuyItems`; `CSBuyCoinItemPacket` is the coin form) and must not grant the item for
@@ -418,13 +418,13 @@ pub fn purchase(f: &DoodadFuncPurchase, ctx: &DoodadCtx<'_>, caster: Option<&Wor
     // `NotEnoughItem`.
     if f.coin_item_id == 0 || f.coin_count < 1 {
         send_error(player, err::NOT_ENOUGH_ITEM);
-        return;
+        return false;
     }
     // Per-character purchase allowance (`items.limited_sale_count` / `items.one_time_sale`).
     // Reserved before the coin is spent; given back below when the purchase still fails.
     if !eco.try_claim_shop_purchase(server, player, f.item_id, f.count) {
         send_error(player, err::STORE_ONE_TIME_SALE);
-        return;
+        return false;
     }
     if eco.bag_consume_item(
         server,
@@ -436,7 +436,7 @@ pub fn purchase(f: &DoodadFuncPurchase, ctx: &DoodadCtx<'_>, caster: Option<&Wor
     {
         eco.release_shop_purchase(server, player, f.item_id, f.count);
         send_error(player, err::NOT_ENOUGH_COIN);
-        return;
+        return false;
     }
     // The coin is already spent: a failed grant gives it back (the stack just left the bag, so
     // the refund fits) and releases the claim.
@@ -467,7 +467,9 @@ pub fn purchase(f: &DoodadFuncPurchase, ctx: &DoodadCtx<'_>, caster: Option<&Wor
                 name
             );
             send_error(player, err::BACKPACK_OCCUPIED);
+            return false;
         }
+        true
     } else if !eco.acquire_item(
         server,
         player,
@@ -483,6 +485,9 @@ pub fn purchase(f: &DoodadFuncPurchase, ctx: &DoodadCtx<'_>, caster: Option<&Wor
             f.item_id,
             name
         );
+        false
+    } else {
+        true
     }
 }
 

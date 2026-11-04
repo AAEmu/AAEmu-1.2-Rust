@@ -565,6 +565,47 @@ async fn a_money_purchase_sells_whole_func_bundles() {
     assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 4);
 }
 
+#[tokio::test]
+async fn a_coin_purchase_advances_the_doodad_to_the_func_next_phase() {
+    let mut w = purchase_doodad_world_full(
+        0,
+        PURCHASE_COIN,
+        5,
+        500,
+        "DoodadFuncPurchase",
+        STACK,
+        1,
+        501,
+    );
+    let doodad = spawn_doodad(&mut w);
+
+    // A failed purchase does not move the phase.
+    assert_eq!(buy_coin(&mut w), 483);
+    assert_eq!(doodad.data().func_group_id, 500);
+
+    give(&w, &w.pa, slot_type::INVENTORY, PURCHASE_COIN, 10, 0);
+    assert_eq!(buy_coin(&mut w), 0);
+    assert_eq!(doodad.data().func_group_id, 501);
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 1);
+    assert_eq!(Inv::of(&w.pa).items_count(PURCHASE_COIN, -1), 5);
+
+    // The func belonged to group 500: a replay after the move is refused.
+    assert_eq!(buy_coin(&mut w), 0);
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 1);
+    assert_eq!(Inv::of(&w.pa).items_count(PURCHASE_COIN, -1), 5);
+}
+
+#[tokio::test]
+async fn a_money_purchase_advances_the_doodad_to_the_func_next_phase() {
+    let mut w = purchase_doodad_world_full(0, 0, 0, 500, "DoodadFuncPurchase", STACK, 1, 501);
+    let doodad = spawn_doodad(&mut w);
+    w.pa.data().money = 100;
+    assert_eq!(buy_doodad(&mut w, PURCHASE_FUNC_KEY, STACK, 1), 0);
+    assert_eq!(doodad.data().func_group_id, 501);
+    assert_eq!(w.pa.data().money, 90);
+    assert_eq!(Inv::of(&w.pa).items_count(STACK, -1), 1);
+}
+
 #[test]
 #[ignore = "needs AAEMU_COMPACT_DB"]
 fn real_compact_db_lists_limited_items_and_their_sellers() {

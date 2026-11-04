@@ -1280,7 +1280,20 @@ impl crate::systems::economy::hooks::NpcEconomyHooks for NpcsForEconomy {
             return;
         };
         let caster = WorldObject::from(player);
-        super::doodad::funcs::use_func(template, &ctx, Some(&caster), 0, 0);
+        // The C# only ran the template (its `CSBuyCoinItemPacket` never advanced the phase);
+        // 301 of the 468 purchase rows carry a `next_phase`, so a granted purchase moves the
+        // doodad through the normal phase machinery (phase funcs + `SCDoodadPhaseChangedPacket`).
+        if super::doodad::funcs::use_func(template, &ctx, Some(&caster), 0, 0)
+            && func.next_phase > 0
+        {
+            super::doodad::manager::do_change_phase(
+                server,
+                &ctx.world,
+                doodad,
+                Some(&caster),
+                func.next_phase,
+            );
+        }
     }
 }
 

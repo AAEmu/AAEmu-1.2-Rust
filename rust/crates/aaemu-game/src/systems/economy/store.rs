@@ -359,6 +359,24 @@ impl CSBuyItemsPacket {
             }
         }
 
+        // A doodad checkout holds the doodad's phase-operation reservation from the
+        // current-phase validation until the phase advance after the commit, so the func group
+        // cannot move between them (the coin path does the same).
+        let _phase_operation = if self.doodad_obj_id != 0 {
+            match &doodad {
+                Some(d) => {
+                    let Some(operation) = crate::systems::npcs::doodad::phase::Operation::enter(d)
+                    else {
+                        return;
+                    };
+                    Some(operation)
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+
         // A `DoodadFuncPurchase` dialog writes the func's `doodad_funcs` row id into the
         // packet's `unkId` (`FUN_393b8040` / `FUN_397ac3f0` at `x2game.dll.c`), and its money
         // price is the item template's, paid through this packet like a shop line. The coin
@@ -415,6 +433,7 @@ impl CSBuyItemsPacket {
         let mut honor_points = 0i32;
         let mut vocation_badges = 0i32;
         let mut items_buy = Vec::new();
+        let mut purchase_used = false;
         // The per-character purchase allowance is per item template: lines of the same item
         // (whatever grade or currency) add up to one claim.
         let mut claims: HashMap<u32, ShopClaim> = HashMap::new();
@@ -466,6 +485,7 @@ impl CSBuyItemsPacket {
             if !sells && !purchase_sells {
                 continue;
             }
+            purchase_used |= purchase_sells;
             let (price, total) = match e.currency {
                 shop_currency_type::MONEY => (template.price, &mut money),
                 shop_currency_type::HONOR => (template.honor_price, &mut honor_points),
@@ -624,43 +644,63 @@ impl CSBuyItemsPacket {
         drop(buyback);
         drop(bag);
         drop(character);
-        let mut out = txn.out();
-        if honor_points > 0 {
-            out.send(
-                &p,
-                SCGamePointChangedPacket {
-                    kind: game_point_kind::HONOR,
-                    amount: -honor_points,
-                },
-            );
-        }
-        if vocation_badges > 0 {
-            out.send(
-                &p,
-                SCGamePointChangedPacket {
-                    kind: game_point_kind::VOCATION,
-                    amount: vocation_change,
-                },
-            );
-        }
-        if money > 0 {
+        {
+            let mut out = txn.out();
+            if honor_points > 0 {
+                out.send(
+                    &p,
+                    SCGamePointChangedPacket {
+                        kind: game_point_kind::HONOR,
+                        amount: -honor_points,
+                    },
+                );
+            }
+            if vocation_badges > 0 {
+                out.send(
+                    &p,
+                    SCGamePointChangedPacket {
+                        kind: game_point_kind::VOCATION,
+                        amount: vocation_change,
+                    },
+                );
+            }
+            if money > 0 {
+                out.send(
+                    &p,
+                    SCItemTaskSuccessPacket {
+                        action: task_type::DEPOSIT_MONEY,
+                        tasks: vec![ItemTask::MoneyChange(-money)],
+                        force_remove: Vec::new(),
+                    },
+                );
+            }
             out.send(
                 &p,
                 SCItemTaskSuccessPacket {
-                    action: task_type::DEPOSIT_MONEY,
-                    tasks: vec![ItemTask::MoneyChange(-money)],
+                    action: task_type::STORE_BUY,
+                    tasks,
                     force_remove: Vec::new(),
                 },
             );
         }
-        out.send(
-            &p,
-            SCItemTaskSuccessPacket {
-                action: task_type::STORE_BUY,
-                tasks,
-                force_remove: Vec::new(),
-            },
-        );
+        // The economy operation ends before the phase funcs (they may start item operations of
+        // their own); the doodad's phase reservation stays held until this function returns.
+        drop(txn);
+        if purchase_used {
+            if let Some((_, next_phase)) = purchase {
+                if next_phase > 0 {
+                    if let Some(d) = &doodad {
+                        crate::systems::npcs::doodad::manager::do_change_phase(
+                            server,
+                            &world,
+                            d,
+                            Some(&WorldObject::from(&p)),
+                            next_phase,
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 sync_client_packet!(CSBuyItemsPacket);
