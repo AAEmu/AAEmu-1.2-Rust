@@ -154,3 +154,30 @@ fn lobby_blocked_names_match_native_partial_and_exact_rules_without_changing_reg
         CharacterCreateError::InvalidCharacters
     );
 }
+
+#[test]
+fn allowed_name_chars_reject_digits_and_unlisted_letters_but_keep_ascii_letters() {
+    let sut = NameManager::new(Some("^.{1,18}$"));
+    sut.set_allowed_name_chars(['가', '나']);
+    for name in ["가나", "Abc", "가a", "a b"] {
+        assert_eq!(
+            sut.validate_character_name(name, || false),
+            CharacterCreateError::Ok,
+            "{name}"
+        );
+    }
+    for name in ["가1", "1", "Павел", "힣", "가!"] {
+        assert_eq!(
+            sut.validate_character_name(name, || false),
+            CharacterCreateError::InvalidCharacters,
+            "{name}"
+        );
+    }
+    // A compact without the table leaves the regex as the only name rule.
+    let legacy = NameManager::default();
+    legacy.set_allowed_name_chars(std::iter::empty());
+    assert_eq!(
+        legacy.validate_character_name("Игрок123", || false),
+        CharacterCreateError::Ok
+    );
+}
