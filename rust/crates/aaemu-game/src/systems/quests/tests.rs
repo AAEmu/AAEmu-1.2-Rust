@@ -497,11 +497,19 @@ fn sc_quest_context_packets_bytes() {
 
 #[test]
 fn sc_small_quest_packets_bytes() {
+    // Reader FUN_397b5ec0: bool "success" (one byte), then the u32 quest id.
     let p = SCQuestRewardedByMailPacket {
-        quests: vec![100, 0x01020304],
+        success: true,
+        quest_id: 100,
     };
-    assert_eq!(body(&p), vec![2, 100, 0, 0, 0, 4, 3, 2, 1]);
+    assert_eq!(body(&p), vec![1, 100, 0, 0, 0]);
     assert_eq!(p.opcode(), sc::SCQuestRewardedByMailPacket);
+    let p = SCQuestRewardedByMailPacket {
+        success: false,
+        quest_id: 0x01020304,
+    };
+    assert_eq!(body(&p), vec![0, 4, 3, 2, 1]);
+    assert_eq!(p.opcode(), 0x14e);
     let p = SCDoodadQuestAcceptPacket {
         doodad_obj_id: 0x030201,
         quest_id: 7,
@@ -2248,8 +2256,10 @@ async fn selective_rewards_and_mail_when_bag_full() {
         ctx.st.quest_mut(h).unwrap().selected_reward_index = 1;
         ops(ctx);
         drain(ctx);
-        let o = ops(ctx);
-        assert!(o.contains(&sc::SCQuestRewardedByMailPacket));
+        let sent = std::mem::take(&mut ctx.sent);
+        assert!(sent.iter().any(|(op, body)| {
+            *op == sc::SCQuestRewardedByMailPacket && body.as_slice() == [1, 40, 0, 0, 0]
+        }));
     });
     assert_eq!(rec.take(), vec!["mail 40 1 0"]);
 }

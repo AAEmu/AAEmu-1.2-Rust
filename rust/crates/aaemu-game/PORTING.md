@@ -421,7 +421,7 @@ connected by `systems::economy::wiring`).
 | `LootGameData`, `Models/Game/Items/Loots/**`, `LootingContainer`, loot packets | `systems/economy/{loot_data,loot,looting,loot_packets}.rs` | done | NPC death / despawn / team rules through `LootNpcHooks`, `LootTeamHooks`, `LootQuestHooks`. |
 | Repair (`Character.DoRepair`, `CSRepairSingleEquipment`, `CSRepairAllEquipments`), durability loss | `systems/economy/repair.rs` | done | Combat calls `on_damage_taken` / `on_death`. |
 | `CraftManager`, `Models/Game/Crafts`, `CharacterCraft`, `CraftTask`, `CSExecuteCraft`, `SCCraftFailed` | `systems/economy/{craft,craft_data}.rs` | done | Cast through `CraftHooks::start_craft_cast`; skills call `craft::end_craft`. |
-| Stores (`CSBuyItems`, `CSSellItems`, buy-back, `CSListSoldItem`, `CSBuyPriestBuff`, `CSBuyCoinItem`, `CSSellBackpackGoods`), `SpecialtyManager`, `TaxationsManager`, `ExpandExpert`, item look conversion | `systems/economy/{store,store_data,specialty}.rs` | done | Merchant packs / NPC flags through `NpcEconomyHooks`. Checkout validates currency, checked totals and each balance, then stages complete goods / buy-back delivery before committing payment. Vocation charges the configured price displayed by the 1.2 shop, without earnings bonuses. Rejected checkout preserves items and balances. Purchases need an NPC merchant pack, a doodad `DoodadFuncStoreUi` pack, or the money form of the doodad's current-phase `DoodadFuncPurchase` (`CSBuyItems.unkId`, the `doodad_funcs` row id the 1.2 client writes there), and filter the goods by it; selling needs a merchant within 3 m, lists each item once and pays only for items moved to buy-back. |
+| Stores (`CSBuyItems`, `CSSellItems`, buy-back, `CSListSoldItem`, `CSBuyPriestBuff`, `CSBuyCoinItem`, `CSSellBackpackGoods`), `SpecialtyManager`, `TaxationsManager`, `ExpandExpert`, item look conversion | `systems/economy/{store,store_data,specialty}.rs` | done | Merchant packs / NPC flags through `NpcEconomyHooks`. Checkout validates currency, checked totals and each balance, then stages complete goods / buy-back delivery before committing payment. Vocation charges the configured price displayed by the 1.2 shop, without earnings bonuses. Rejected checkout preserves items and balances. Purchases need an NPC merchant pack, a doodad `DoodadFuncStoreUi` pack, or the money form of the doodad's current-phase `DoodadFuncPurchase` (`CSBuyItems.unkId`, the `doodad_funcs` row id the 1.2 client writes there), and filter the goods by it; selling needs a merchant within 3 m, lists each item once and pays only for items moved to buy-back. Specialty: the empty `CSListSpecialtyGoods` answer, the dropped records packet and the corrected sale values are detailed in the specialty protocol note. |
 | `MailManager`, `Models/Game/Mails/**`, `CharacterMails`, mail packets | `systems/economy/{mail,mail_character,mail_kinds,mail_packets,mail_data}.rs` | done | Saved in `SaveStage::BeforeItems`; housing tax through `MailHousingHooks`. |
 | `AuctionManager`, `Models/Game/Auction/**`, auction packets | `systems/economy/{auction,auction_data,auction_packets}.rs` | done | Saved in `SaveStage::AfterItems`; results mailed through `wiring`. Requests require an auctioneer NPC (the `auctioneer` template flag) named by the packet or the current interaction object within 5 m (the C# ignored the ids). |
 | `TradeManager`, trade packets | `systems/economy/trade.rs` | done | The C# `CanStartTrade` TODO ("Check faction and others") is implemented from the 1.2 client's own checks: a request and its acceptance refuse a dead player, a hostile faction relation and a distance `>= sqrt(25) = 5` m, and a trade across instances; see the trade validation deviation. |
@@ -920,7 +920,7 @@ Economy hooks (`server.systems.housing.hooks`): installed by `economy::bridges::
 | `QuestActConAcceptItemGain` start | `systems/quests/events.rs` (`on_items_acquired`), `engine.rs` (`start_quests_from_item_gain`), `data.rs` (`item_gain_starters`) | deviation | **Deviation:** gaining an item starts every quest with a `ConAcceptItemGain` on its Start component (not active, not completed unless repeatable, count in the bag reached, unit requirements met) with the item as acceptor. The C# never did: `Inventory.cs` has the `OnItemGather` call commented out and `RunAct` only compared the acceptor, so the Blue Salt Brotherhood letters (4881-4888), 5450, 6160 and the level 1 "Today's To-do" quests (1955-1961, 2140-2146) could not be started. Inferred from the data (those items have no `item_accept_quests` row); the retail trigger is not verified. The 15 "starter item without `starter_quests` entry" simulator notes were all of this kind: the quests have no `item_accept_quests` binding at all, so there was no mapping to fix. |
 | Sphere state across logout | `systems/quests/spheres.rs` (`forget_character`), `mod.rs` (`on_leave_world`) | deviation | **Deviation:** leaving the world drops the character's sphere triggers and its last starter-sphere position. The C# kept both, so a re-login inside a quest sphere compared against the position from the previous session and never raised the enter event (stuck sphere quests). The tick also prunes positions of characters that are no longer in the world. |
 | `with_quests` panic safety | `systems/quests/events.rs` | deviation | **Deviation:** a panic in a quest operation (or a queued one) is caught around the locked section, the quest state is put back, the thread-local active entry removed and the panic resumed. Without it the character's later quest events on that thread were queued forever. |
-| Quest packets (CS: StartQuestContext, CompleteQuestContext, DropQuestContext, QuestTalkMade, QuestStartWith, TryQuestCompleteAsLetItDone, RestartMainQuest, SaveTutorial, RequestPermissionToPlayCinemaForDirectingMode, StartedCinema, CompletedCinema; SC: QuestContextStarted/Updated/Completed/Reset, QuestContextFailed, QuestRewardedByMail, DoodadQuestAccept, DoodadCompleteQuest, TutorialSaved, AppellationGained) | `packets.rs` | done | Byte-exact tests. `SCQuestsPacket` now writes `Quest.Id` as `long`. `SCQuestContextFailedPacket` (0x146) is `u32 questId + u8 err`; the client reader `FUN_397b5c90` (class registered with opcode 0x146, vtable `399b3a5c`) reads the fields `type` and `err`, and `OnQuestContextFailed` (`FUN_391dbcd0`) raises `QUEST_ERROR_INFO`, which ends quest directing mode. |
+| Quest packets (CS: StartQuestContext, CompleteQuestContext, DropQuestContext, QuestTalkMade, QuestStartWith, TryQuestCompleteAsLetItDone, RestartMainQuest, SaveTutorial, RequestPermissionToPlayCinemaForDirectingMode, StartedCinema, CompletedCinema; SC: QuestContextStarted/Updated/Completed/Reset, QuestContextFailed, QuestRewardedByMail, DoodadQuestAccept, DoodadCompleteQuest, TutorialSaved, AppellationGained) | `packets.rs` | done | Byte-exact tests. `SCQuestsPacket` now writes `Quest.Id` as `long`. `SCQuestContextFailedPacket` (0x146) is `u32 questId + u8 err`; the client reader `FUN_397b5c90` (class registered with opcode 0x146, vtable `399b3a5c`) reads the fields `type` and `err`, and `OnQuestContextFailed` (`FUN_391dbcd0`) raises `QUEST_ERROR_INFO`, which ends quest directing mode. `SCQuestRewardedByMailPacket` (0x14e) is `bool success + u32 questId`: the client reader `FUN_397b5ec0` (class registered with opcode 0x14e, vtable `399b3aa4`) reads `success` through the named bool reader (slot `0x78`) at `+0xc` and the quest id as a `u32` (slot `0x3c`) at `+0x10`; `OnQuestRewardMailSent` (`FUN_391dc150` -> `FUN_3937a520`) looks the quest up and raises `QUEST_REWARDED_BY_MAIL`, or quest error 0xb (`cant_supply_rewards`) when the flag is false. **Deviation:** the C# `SCQuestRewardedByMailPacket` wrote `u8 count + u32[]` (a list) and the port copied it; the 1.2 client's class holds a single quest, so one packet per quest is sent, with `success = true` (the packet is only sent after every reward mail was stored; a failed mail still sends `MAIL_UNKNOWN_FAILURE` and no packet, as before). |
 | Doodad report hand-in (`SCDoodadCompleteQuestPacket` 0x14d) | `packets.rs`, `engine.rs` (`report_doodad_ready`), `events.rs` (`on_server_report`) | added | The C# had the opcode (`SCOffsets.cs` 0x14d) but never sent it; `DoodadFuncQuest.Use` reported a doodad server-side (`QuestManager.DoReportEvents` -> `QuestActConReportDoodad.OnReportDoodad`). The 1.2 client reader `FUN_397b5e50` takes the doodad object id as a 3-byte `bc` then the u32 quest id; `OnDoodadCompleteQuest` (`FUN_391dc050` -> `FUN_393773a0`, event 241 `COMPLETE_QUEST_CONTEXT_DOODAD`; `quest_context.alb` proto 19) makes the client answer with `CSCompleteQuestContext` naming that doodad. Rust deviates: a server-side report (`DoodadFuncQuest`) whose quest is ready at that doodad (`QuestActConReportDoodad` names the doodad template and the objectives meet the act threshold) now sends 0x14d and leaves the report to that client request instead of completing it server-side; every other server-side report still only logs refusals. All 15 live 1.2 `QuestActConReportDoodad` acts are on Ready components and their doodads carry `DoodadFuncQuest` (`real_compact_db_report_doodads_are_ready_doodad_func_quests`). |
 | Refused quest reports | `packets.rs` (`quest_error`, `SCQuestContextFailedPacket`), `engine.rs` (`send_report_refused`, `finish_report`), `acts.rs`, `events.rs` | done | Every refused `CSCompleteQuestContext` report and `TryCompleteAsLetItDone` is answered once with 0x146, independent of the WARN repeat dedupe. A server-side report (`DoodadFuncQuest`, a doodad used on an owned quest: `events::on_server_report`) is only logged: the client did not enter quest directing mode, and a 0x146 there would show a quest error on every early click. The client error table `locale.questContext.errors` is built 1-based (`x2ui/baselib/locale_helper.alb`, `SETLIST` at instruction 654: `already_have`, `invalid_quest`, ...); the `QUEST_ERROR_INFO` handler `quest_context.alb` proto 22 indexes it directly with its first argument, and the client's local pre-checks use the same numbers (`FUN_3937a2d0`: 2 for an invalid quest, 0x14 after its can-interact check fails). Reason mapping (inferred from the client key names and those local codes, not captured from a 1.2 server): objectives not ready / wrong status -> 12 `invalid_quest_status`, wrong or missing NPC -> 7 `invalid_npc_or_quest`, wrong or missing doodad -> 19 `invalid_doodad`, quest not active -> 2 `invalid_quest`. |
 | `QuestCommandUtil` / `QuestCmd` (GM) | `systems/services/commands/scripts/quest_cmd.rs` | done | `quests::events::send_quests` / `send_completed_quests` added. |
@@ -1913,8 +1913,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `portal::NAVI_USE_RANGE`). Refusals answer `SCLootItemFailedPacket(TooFarAway)`.
 * systems::economy: `CSSetCraftingPayPacket`, `CSChangeItemLookPacket`, `CSSpecialtyRecordLoadPacket`,
   `CSBuySpecialtyItemPacket`, `CSReturnMailPacket` have no 1.2 opcode (0xfff): decoders exist, the
-  1.2 client never sends them. The specialty / trade-pack mail delay use the C# defaults (no
-  `Specialty` config section yet).
+  1.2 client never sends them. The `Specialty` config section is now read at startup (ratios,
+  ticks and `TradePackMailDelayInMinutes`), so those values no longer come from the C# defaults
+  alone. `CSSpecialtyRecordLoadPacket` is still not registered: the 1.2 client has no request
+  opcode for the history, and the server deliberately sends no `SCSpecialtyRecordsPacket`
+  (the client discards it; see the specialty protocol note below).
 * systems::economy (native 1.2 protocol, 2026-10-25): correction to the preceding ReturnMail
   claim: the Return button (`read_mail.lua:946`) calls `ReturnMailById` (`3948B630` ->
   `393CD290`), which sends opcode `0xa3` with an i64 mail id (`397BA450`). The preserved
@@ -1923,8 +1926,48 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   fixture stays intact with an explicit native correction in its comparison test. Native
   `SCLootItemFailedPacket` reader `397C2F00` consumes `ErrorMessage:i16`, an eight-byte
   lootable and `type:u32` (14 bytes); the C# int error width is no longer mirrored.
-* systems::economy: the localized item names are loaded by four modules (items search, auction,
-  mail, cash shop); a later cleanup can share one cache.
+* systems::economy (specialty goods / records / sale values, 2026-11-04):
+  - `CSListSpecialtyGoodsPacket` (0x044, sent by the 1.2 client's check-goods skill /
+    `FUN_393bf840` with the interacted NPC object id) now answers `SCSpecialtyGoodsPacket`
+    (0x09a). The 1.2 reader `FUN_397aec90` reads an `i32` count (capped at 20) and calls
+    `FUN_398a9e30` per record: `u32 itemId`, `i32 refund`, 1-byte `Currency`, 1-byte unknown
+    (10 bytes on the wire). The list content is not evidenced, so the server sends an empty
+    list (count 0) until a capture shows which goods/prices belong there.
+  - `SCSpecialtyRecordsPacket` (0x09b) is **not implemented or sent**: its 1.2 reader
+    `FUN_397b3930` is `i32 zoneId`, `u32 itemId`, `i32 count` (capped at 256), then
+    `FUN_3961edb0` records (`i32 ratio`, `u64 recorded`), but the body is discarded
+    (`FUN_394fb300` is an empty stub). Keeping the captured trader-talk sequence exact means
+    no 0x9b on the 0x043 answer, and no price-history table is kept.
+  - `CSSpecialtyRatioPacket.id` is the pack template, not a zone: the client's 0x43 writer
+    (`x2game.dll.c:781792`) sends `*puVar3`, where `puVar3 = FUN_39695dc0(character+0x1840)`
+    is the equipped backpack's template. The handler answers for the requested id and falls
+    back to the equipped pack when the id is not a specialty pack.
+  - `SCSpecialtyCurrentPacket` (0x1f4) stays in the 1.2 reader's order (`FUN_397b87c0`):
+    `i32 count`, `u16 from`, `u16 to`, then (`u32 itemId`, `i32 ratio`) pairs — the same order
+    the 1.2 C# used; the earlier "reader order" note in this branch was wrong.
+  - Sale labor is the C# flat 60 by default. `Specialty:ScaleSaleLaborByCommerce` (default
+    false) applies the 1.2 `Actability.GetLaborCostMultiplier` table (Commerce step,
+    1.00/1.00/0.95/0.90/0.85/0.80/0.77/0.77) instead, never below 1; the generic 1.2 skill
+    path applies the same table (`Skill.cs:1394`). **Capture-pending (LABOR-1):** the 1.2 C#
+    charged the flat 60 for a pack sale and skill 25205 has `consume_lp = 0`, so scaling on
+    this path is a server option, not a captured retail rule.
+  - `BackpackProfitShare` is read from the global runtime `FeaturesManager.Fsets`
+    (`server.systems.services.features`), not `FeatureSet::default()`; the 1.2 sell / mail UI
+    reads the same bit via `X2Player.GetFeatureSet("backpackProfitShare")`.
+  - The crafter id remains the item's `made_unit_id` (the only 1.2 carrier: the craft path
+    stores the crafting `character_id` there). The seller and crafter mail titles use the
+    1.2 client `ui_texts` keys `sell_backpack_title` / `mail_sell_backpack_title_seller` /
+    `mail_sell_backpack_title_crafter` from `localized_texts`, with the English C# strings as
+    the fallback (never the untranslated `ui_texts.text` column). A sold pack with a crafter
+    is covered by a flow test through the real mail bridge
+    (`sold_pack_with_a_crafter_delivers_the_crafter_mail`).
+  - **Capture-pending (NEGOTIATION-1):** the 1.2 client `ui_texts` (`sell_backpack_body2`,
+    `bargaining_money`, `SPECIALTY_MARGIN` 626 / `SPECIALTY_COIN_MARGIN` 677) prove a Commerce-
+    proficiency bargaining bonus and its notice mails, but no formula, threshold or percentage
+    is evidenced in the 1.2 client or data. `Specialty:NegotiationBonusPercent` (default 0,
+    clamped to 0..100, the C# behaviour) applies a configured percentage to the pre-interest
+    sale price; the bonus, its mail field and the 626/677 notices are implemented, the retail
+    numbers are not claimed.
 * systems::services: authenticated `CSRequestCharBriefPacket` and `CSCharDetailPacket` requests
   return online character profiles through the existing 1.2 outbound formats (the C# inbound
   handlers only logged). Offline, absent and unauthenticated requests receive no reply; offline
@@ -3892,7 +3935,8 @@ and in NPC wandering / buff remaining times.
   retained original doodads for the current siege and require explicit GM rebind after restart;
   registered dead participants can revive there. The SiegePeriod doodad phase funcs are
   implemented in WP-S3 (see the deviation below); phase cycles are bounded for all groups.
-  Reinforcement/commander eligibility and payout calendars are not inferred. Building HP
+  Commander eligibility and payout calendars are not inferred; roster caps and the
+  defender reinforcement wave are implemented in WP-S4 (see the deviation above). Building HP
   persists through restart and lodestone collisions follow the native
   CGA/ANM root curves and settled static damage proxies. Absolute render/collider animation
   phase synchronization remains unverified. Property, authority, mail, items and wallets use
@@ -3936,6 +3980,66 @@ and in NPC wandering / buff remaining times.
   chain should really end when the calendar jumps over it (the current walk does), and
   catching up a persisted mid-cycle phase after restart (the first observation of a zone is
   silent).
+* systems::housing / systems::social (2026-11-04, WP-S4 roster caps and reinforcements):
+  `siege_settings` is now loaded (`CastleReferenceData::siege_settings`, keyed by
+  `total_castles`) and the explicit siege snapshot carries team limits frozen at scheduling
+  and the authored reinforcement delay instead of the hard-coded 100/100/100. Evidence (1.2 client): a team is
+  `id, obj_id, x, y, z, ni, nr, limit, count, ids[]` (`FUN_39839c80`, `FUN_39839c10`);
+  `IsReinforceArrived` (`FUN_3946c500`) is period 4 and `defender.limit == defender.nr`;
+  `GetReinforceRemainDate` (`FUN_3946c3f0`) is 0 when `ni == nr`, `limit == nr` or past
+  `start(siege) + bdm` (`FUN_398390a0`); `SCSiegeReinforce` 0x0eb sets the defender
+  `limit = nr` (clamped to 100, `FUN_392f3670`/`FUN_39839320`). Encoding: `ni =
+  num_defenders`, `nr = num_defenders + num_reinforcements`; before the wave the defender is
+  `ni/ni`, after it `ni/nr`; no reinforcements means `ni == nr` and no packet. `bdm` is the
+  zone's `reinforce_defense_delay_mins * 60` (the shipped rows all author 20 minutes).
+  `total_castles` is INFERRED to be the number of dominions the defending expedition holds;
+  more than 10 clamps to the last shipped row. Chosen reading: the count includes the
+  territory being defended, so it is always >= 1 during a siege and row 0 (`70/0`) is
+  unreachable; the alternative reading (count of *other* castles) would give a one-castle
+  defender the 70 total at once. The data does not disambiguate the two (capture-pending).
+  The caps are frozen into the persisted `SiegeState.defender_ni`/`defender_nr` columns, so a
+  mid-siege change in the defender's castle count (or a test-only ephemeral GM dominion lost
+  on restart) cannot move them. Existing participants above a frozen cap are not evicted:
+  there is no evidence for it, and the authority checks only on join. An out-of-range
+  authored `bdm` saturates to `i32::MAX` instead of dropping the territory's whole snapshot.
+  The wave is announced once, from the real clock, by
+  `runtime::tick_once -> reinforce::tick` when `now >= starts_at + bdm`; the
+  `dominions.siege_reinforced` flag (new column) is check-and-set under the authority lock
+  before the broadcast, so repeated ticks and restarts do not normally repeat the packet. A
+  crash between the broadcast and the periodic save can still repeat it once on the next
+  boot; the client just sets `limit = nr` again. The packet
+  goes to every client through `broadcast_to_server`, like every other dominion record; the
+  1.2 client keeps all dominion records server-wide (the retail audience is
+  capture-pending). Roster joins (`/joinsiege` and GM `/dominion register`) now pass the
+  data cap into `DominionManager::register_participant_with_cap`, which checks and inserts
+  under one lock: a defender before the wave is refused with `SIEGE_BLOCK_DEFENSE_REINFORCE`
+  457, a full roster with `SIEGE_PARTICIPANT_FULL` 445 (sent as `SCErrorMsgPacket` on the
+  player path; the GM path reports text only). Missing `siege_settings` rows fall back to the
+  native 100-character array rather than inventing a cap. UNKNOWN (capture-pending): the
+  attacker cap (the same evidenced total is used for `ni/nr/limit`), whether
+  `total_castles` is global or per defender, and ticket-holder membership (a wave only raises
+  the cap; no member is enrolled automatically). Tests:
+  `missing_or_oversized_settings_do_not_invent_native_capacity`,
+  `held_castle_count_selects_the_authored_settings_row`,
+  `bdm_is_the_authored_reinforce_delay_in_seconds`,
+  `the_defender_cap_waits_for_the_wave_and_the_attacker_uses_the_total`,
+  `frozen_siege_limits_do_not_follow_the_live_castle_count`,
+  `a_missing_settings_row_keeps_the_native_cap_for_every_side`,
+  `out_of_range_reinforcement_delay_is_clamped_instead_of_dropping_the_snapshot`,
+  `private_mysql_dominion_rollback_failure_retry_and_restart_preserve_authority` (round
+  trips `siege_reinforced` and the frozen `50/70` limits through MySQL),
+  `snapshot_carries_data_driven_team_limits_and_reinforcement_delay`,
+  `siege_state_body_carries_bdm_and_team_limits_at_native_offsets`,
+  `reinforcement_wave_is_announced_once_at_start_plus_bdm_through_the_tick`,
+  `joinsiege_enforces_the_data_caps_with_the_clients_error_ids`. A test-only ephemeral
+  dominion (`/nation dominion`) still counts as the defender's held castle for the
+  `siege_settings` row; the flag only keeps it out of the database and out of the WP-S6 claim
+  gate. Live (lane stack, headless `aaemu-testclient`): a GM-seeded ephemeral dominion on a
+  live guard tower in zone group 33 was scheduled against a seeded second expedition; both
+  bots received `SCSiegeState` immediately (its body's bdm and 50/70/50 defender limits are
+  fixed by the byte test) and exactly one `SCSiegeReinforce` about 21 minutes later
+  (`starts_at` + the authored 20-minute `bdm`), with `expectnopkt` confirming no repeat. The
+  real client's reinforcement countdown UI is not covered headlessly.
 * systems::housing: sale buyer names retain the original case-sensitive lookup. The housing
   audit fixes the first-house tax/deposit omission, reversed paid flag (confirmed against the
   1.2 housing UI bytecode), overdue counter, finished-house construction, duplicate signs,
@@ -3981,9 +4085,8 @@ and in NPC wandering / buff remaining times.
   summoned (the owner's active vehicle is still removed).
 * systems::vehicles: a slave's `TlId` is never released; the transfer spawner's `Despawn` and
   the spawn manager's despawn tick both release the transfer's obj id.
-* systems::vehicles: `SummonSlave.ReadDetails` always fails on `RepairStartTime` (so the repair
-  cooldown does not survive a restart); `DoodadFuncRecoverItem` looks the owning slave up by its
-  DB id as an obj id; `GetActiveMates(...).FirstOrDefault()` decides the `Raid` relation mate.
+* systems::vehicles: `DoodadFuncRecoverItem` looks the owning slave up by its DB id as an
+  obj id; `GetActiveMates(...).FirstOrDefault()` decides the `Raid` relation mate.
 * systems::vehicles: `Unit.DespawnMate` on a mate's own death only despawns when its owner is
   dead. The former `UnitMoveType` driver-detachment bug is fixed (see vehicle test fixes above).
 * systems::vehicles: `SpawnEffect` (slave) writes `PosDistance = 2` back into the template and
@@ -4808,8 +4911,13 @@ the death never started its timer):
   clears the timer (the destroyed flag stays until `RepairSlaveEffect` clears it, as in C#).
 - The C# reset of a loaded 0-HP vehicle to `MaxHp` ("can't summon with 0 HP") is kept, but only
   when the item has no pending repair time. With the timer above, a destroyed vehicle therefore
-  comes back at full HP only after its repair wait, not when it is still on cooldown. (As the
-  mirrored `SummonSlave.ReadDetails` bug above notes, the timer itself is still lost on restart.)
+  comes back at full HP only after its repair wait, not when it is still on cooldown.
+- The C# `SummonSlave.ReadDetails` threw on `RepairStartTime` (`Convert.ToInt32(byte[])`), so a
+  saved repair time was always reset to `MinValue` on load and the 10 minute wait was forgotten
+  on restart. `Item::read_details` now restores it from the `items.details` blob (i64 after the
+  destroyed flag, negative values clamp to 0). Legacy C# rows decode too (unset: i32 0 + five
+  i32 zeros; set: i64 + five i32 zeros), and a blob that stops after the destroyed flag still
+  restores the header.
 
 ## Global cooldown enforcement and plot-only skill cooldowns (2026-10-21)
 

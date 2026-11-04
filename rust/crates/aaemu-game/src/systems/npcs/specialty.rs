@@ -816,33 +816,6 @@ impl ClientPacket for CSSpecialtyRatioPacket {
     }
 }
 
-/// `CSListSpecialtyGoodsPacket` (logged only, as in C#).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CSListSpecialtyGoodsPacket {
-    pub obj_id: u32,
-}
-
-impl ClientPacket for CSListSpecialtyGoodsPacket {
-    const NAME: &'static str = "CSListSpecialtyGoodsPacket";
-
-    fn read(s: &mut PacketStream) -> Result<Self> {
-        Ok(Self {
-            obj_id: s.read_bc()?,
-        })
-    }
-
-    fn handle<'a>(
-        self,
-        _server: &'a GameServer,
-        _conn: &'a mut GameConnection,
-    ) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async move {
-            tracing::warn!("ListSpecialtyGoods, ObjId: {}", self.obj_id);
-            Ok(())
-        })
-    }
-}
-
 /// `CSRequestSpecialtyCurrentPacket`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CSRequestSpecialtyCurrentPacket {
@@ -902,22 +875,6 @@ impl CSBuySpecialtyItemPacket {
             currency: s.read_u8()?,
             kind: s.read_u8()?,
             obj_id: s.read_bc()?,
-        })
-    }
-}
-
-/// `CSSpecialtyRecordLoadPacket` (no 1.2 opcode: not registered, as in C#).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CSSpecialtyRecordLoadPacket {
-    pub zone_id: i32,
-    pub id: u32,
-}
-
-impl CSSpecialtyRecordLoadPacket {
-    pub fn read(s: &mut PacketStream) -> Result<Self> {
-        Ok(Self {
-            zone_id: s.read_i32()?,
-            id: s.read_u32()?,
         })
     }
 }

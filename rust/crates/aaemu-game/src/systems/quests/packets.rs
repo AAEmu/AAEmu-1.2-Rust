@@ -148,10 +148,17 @@ impl Marshal for SCQuestContextFailedPacket {
     }
 }
 
-/// `SCQuestRewardedByMailPacket(questList)`.
+/// `SCQuestRewardedByMailPacket(success, questId)` (`0x14e`): the reward was sent by mail
+/// because it did not fit in the bag. The client reader `FUN_397b5ec0` (class registered with
+/// opcode 0x14e, vtable `399b3aa4`) reads `success` as a bool at body `+0xc` (vtable slot
+/// `0x78`, the named bool reader) and then the quest id as a `u32` at `+0x10` (slot `0x3c`).
+/// `OnQuestRewardMailSent` (`FUN_391dc150`) calls `FUN_3937a520`: on success it looks the
+/// quest up (`FUN_39856420`) and raises `QUEST_REWARDED_BY_MAIL`; when the flag is false it
+/// raises quest error 0xb (`cant_supply_rewards`) instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SCQuestRewardedByMailPacket {
-    pub quests: Vec<u32>,
+    pub success: bool,
+    pub quest_id: u32,
 }
 packet_def!(
     SCQuestRewardedByMailPacket,
@@ -160,10 +167,7 @@ packet_def!(
 );
 impl Marshal for SCQuestRewardedByMailPacket {
     fn write(&self, s: &mut PacketStream) {
-        s.write_u8(self.quests.len() as u8);
-        for q in &self.quests {
-            s.write_u32(*q);
-        }
+        s.write_bool(self.success).write_u32(self.quest_id);
     }
 }
 

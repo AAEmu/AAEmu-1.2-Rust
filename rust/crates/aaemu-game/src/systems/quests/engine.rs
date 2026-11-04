@@ -1048,7 +1048,8 @@ impl<'a> Ctx<'a> {
                     q.reward_coins = 0;
                 }
                 self.send(SCQuestRewardedByMailPacket {
-                    quests: vec![template_id],
+                    success: true,
+                    quest_id: template_id,
                 });
             } else {
                 for item in &pool {
