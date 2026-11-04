@@ -109,9 +109,9 @@ pub struct LoginConfig {
     )]
     pub additional_characters_per_server: u8,
     /// Whether the client is told it is in the character pre-select period (character edit at
-    /// character select). Requires the lobby edit packet (WP-E2), so it is refused until that
-    /// lands: with the flag on, the client's Start button sends `CSEditCharacter` instead of
-    /// entering the world, and the game server has no handler for it.
+    /// character select). The client's Start button then sends `CSEditCharacter` instead of
+    /// entering the world, and the game server applies the edit while its
+    /// `Characters:PreSelectPeriod` is on.
     #[serde(rename = "preselectcharacterperiod", deserialize_with = "lenient_bool")]
     pub pre_select_character_period: bool,
 }
@@ -386,12 +386,6 @@ impl AppConfig {
         if self.reconnect.max_tokens_per_account < 1 {
             return Err(ConfigError::Validation(
                 "Reconnect:MaxTokensPerAccount must be >= 1".into(),
-            ));
-        }
-        if self.login.pre_select_character_period {
-            return Err(ConfigError::Validation(
-                "Login:PreSelectCharacterPeriod requires lobby character editing (WP-E2), which is not implemented yet: with the flag on the client sends CSEditCharacter and cannot enter the world. Keep it false."
-                    .into(),
             ));
         }
         for (name, n) in [
@@ -761,7 +755,7 @@ mod tests {
     }
 
     #[test]
-    fn login_slot_config_binds_and_refuses_the_pre_select_flag() {
+    fn login_slot_config_binds_the_pre_select_flag() {
         let mut root = base();
         merge(
             &mut root,
@@ -787,8 +781,10 @@ mod tests {
                 "Login": { "PreSelectCharacterPeriod": true }
             })),
         );
-        let err = AppConfig::from_value(root).unwrap_err();
-        assert!(err.to_string().contains("WP-E2"), "unexpected error: {err}");
+        let cfg = AppConfig::from_value(root)
+            .expect("the pre-select period is allowed now that the lobby edit packet exists");
+        assert!(cfg.login.pre_select_character_period);
+        assert!(!LoginConfig::default().pre_select_character_period);
     }
 
     #[test]

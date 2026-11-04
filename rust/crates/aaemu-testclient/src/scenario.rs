@@ -11,7 +11,9 @@ use aaemu_game::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObje
 use anyhow::{bail, ensure, Context};
 use serde::{Deserialize, Serialize};
 
-use crate::game::{GameClient, GameEvent, ItemTaskInfo, Packet, UnitInfo, LEVEL_PROXY};
+use crate::game::{
+    read_character, Appearance, GameClient, GameEvent, ItemTaskInfo, Packet, UnitInfo, LEVEL_PROXY,
+};
 use crate::login::LoginClient;
 use crate::record::Recorder;
 use crate::stream::StreamClient;
@@ -38,6 +40,9 @@ pub enum Kind {
     /// Login + game lobby: enter world, FinishState burst, character list, stream join,
     /// character creation, then quit.
     Lobby,
+    /// Lobby character edit (`CSEditCharacter`, pre-select period): create, edit the appearance,
+    /// check `SCEditCharacterResponse`, relist and check the changed entry, then quit.
+    Edit,
     /// Everything: lobby, select + spawn, move, chat, skill on an NPC, inventory move, quest
     /// accept, leave world.
     Full,
@@ -115,6 +120,7 @@ impl std::str::FromStr for Kind {
         Ok(match s {
             "login" => Self::Login,
             "lobby" => Self::Lobby,
+            "edit" => Self::Edit,
             "full" => Self::Full,
             "load" => Self::Load,
             "combat" => Self::Combat,
@@ -134,7 +140,7 @@ impl std::str::FromStr for Kind {
             "script" => Self::Script,
             "busy" => Self::Busy,
             _ => bail!(
-                "unknown scenario '{s}' (login, lobby, full, combat, npc-return, mate-revive, questitem, doodad, \n                 plant, cometsboon, stonethrow, ghost, lunafrost, portal, socket, craft, script, busy, load)"
+                "unknown scenario '{s}' (login, lobby, edit, full, combat, npc-return, mate-revive, questitem, doodad, \n                 plant, cometsboon, stonethrow, ghost, lunafrost, portal, socket, craft, script, busy, load)"
             ),
         })
     }
@@ -486,11 +492,13 @@ mod creation_tests {
         let mut characters = vec![CharInfo {
             id: 1,
             name: "Existing".into(),
+            appearance: Default::default(),
         }];
         assert!(character_to_select(&characters, "Fresh", true).is_err());
         characters.push(CharInfo {
             id: 2,
             name: "Fresh".into(),
+            appearance: Default::default(),
         });
         assert_eq!(
             character_to_select(&characters, "fresh", true).unwrap().id,
@@ -781,10 +789,12 @@ mod control_character_tests {
             CharInfo {
                 id: 10,
                 name: "Unrelated".into(),
+                appearance: Default::default(),
             },
             CharInfo {
                 id: 42,
                 name: "Owner".into(),
+                appearance: Default::default(),
             },
         ];
         assert_eq!(control_character(&characters, "owner", None).unwrap(), 42);
@@ -934,6 +944,85 @@ async fn run_inner(
             format!("existing {} ({})", ch.name, ch.id)
         },
     );
+
+    if kind == Kind::Edit {
+        let s = r.begin("game.edit");
+        let before = game
+            .state
+            .characters
+            .iter()
+            .find(|c| c.id == ch.id)
+            .map(|c| c.appearance)
+            .context("created character missing from the lobby list")?;
+        ensure!(
+            before.hair_color_id == 0,
+            "unexpected starting appearance {before:?}"
+        );
+        let wanted = Appearance {
+            kind: before.kind,
+            hair_color_id: 7,
+            skin_color_id: 3,
+            model_id: before.model_id,
+        };
+        game.edit_character(ch.id, &ch.name, wanted).await?;
+        let packet = game
+            .wait_for("SCEditCharacterResponsePacket", |p| {
+                p.is_sc(sc::SCEditCharacterResponsePacket)
+            })
+            .await?;
+        let mut body = packet.stream();
+        let edited = read_character(&mut body)?;
+        ensure!(body.remaining() == 0, "trailing edit response bytes");
+        ensure!(edited.id == ch.id, "edited id {} != {}", edited.id, ch.id);
+        ensure!(
+            edited.name == ch.name,
+            "edit changed the name to {}",
+            edited.name
+        );
+        ensure!(
+            edited.appearance == wanted,
+            "edit response appearance {:?} != {wanted:?}",
+            edited.appearance
+        );
+        r.var("hair", edited.appearance.hair_color_id);
+        r.end(
+            s,
+            format!(
+                "hair {} skin {}",
+                edited.appearance.hair_color_id, edited.appearance.skin_color_id
+            ),
+        );
+
+        // A relist must carry the edit (the lobby copy the server lists was updated).
+        let s = r.begin("game.relist");
+        game.state.characters.clear();
+        game.state.char_list_done = false;
+        game.list_characters().await?;
+        game.wait_for("last SCCharacterListPacket", |p| {
+            p.is_sc(sc::SCCharacterListPacket) && p.body.first() == Some(&1)
+        })
+        .await?;
+        let relisted = game
+            .state
+            .characters
+            .iter()
+            .find(|c| c.id == ch.id)
+            .context("edited character missing from the relisted lobby")?;
+        ensure!(
+            relisted.appearance == wanted,
+            "relisted appearance {:?} != {wanted:?}",
+            relisted.appearance
+        );
+        r.end(s, format!("hair {}", relisted.appearance.hair_color_id));
+        drop(stream);
+
+        let s = r.begin("game.quit");
+        game.leave_world(0).await?;
+        game.drain(Duration::from_millis(500), Duration::from_secs(2))
+            .await?;
+        r.end(s, "");
+        return Ok(());
+    }
 
     if kind == Kind::Lobby {
         let s = r.begin("game.quit");
@@ -2457,6 +2546,7 @@ mod mate_revive_tests {
         );
         assert_eq!("none".parse::<ReviveMethod>().unwrap(), ReviveMethod::None);
         assert!("x".parse::<ReviveMethod>().is_err());
+        assert_eq!("edit".parse::<Kind>().unwrap(), Kind::Edit);
         assert_eq!("mate-revive".parse::<Kind>().unwrap(), Kind::MateRevive);
         assert_eq!("cometsboon".parse::<Kind>().unwrap(), Kind::CometsBoon);
     }
