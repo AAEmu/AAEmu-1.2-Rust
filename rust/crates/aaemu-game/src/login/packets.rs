@@ -141,9 +141,11 @@ impl Marshal for GLGameServerLoadPacket {
 /// Decoded L2G packets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoginInPacket {
-    /// `LGRegisterGameServerPacket` (0x000): `u8 result` (0 = ok).
+    /// `LGRegisterGameServerPacket` (0x000): `u8 result` (0 = ok), plus the Rust-only
+    /// `u8 preSelectCharacterPeriod` tail (`None` when the login does not send it).
     RegisterGameServer {
         result: u8,
+        pre_select_character_period: Option<bool>,
     },
     /// `LGPlayerEnterPacket` (0x001): `u32 accountId, u32 connectionId`.
     PlayerEnter {
@@ -175,9 +177,18 @@ impl LoginInPacket {
         let mut s = PacketStream::from_bytes(payload.to_vec());
         let opcode = s.read_u16()?;
         Ok(match opcode {
-            lg::LGRegisterGameServerPacket => Self::RegisterGameServer {
-                result: s.read_u8()?,
-            },
+            lg::LGRegisterGameServerPacket => {
+                let result = s.read_u8()?;
+                let pre_select_character_period = if s.remaining() > 0 {
+                    Some(s.read_u8()? != 0)
+                } else {
+                    None
+                };
+                Self::RegisterGameServer {
+                    result,
+                    pre_select_character_period,
+                }
+            }
             lg::LGPlayerEnterPacket => Self::PlayerEnter {
                 account_id: s.read_u32()?,
                 connection_id: s.read_u32()?,
@@ -254,7 +265,24 @@ mod tests {
     fn l2g_decode() {
         assert_eq!(
             LoginInPacket::decode(&[0, 0, 0]).unwrap(),
-            LoginInPacket::RegisterGameServer { result: 0 }
+            LoginInPacket::RegisterGameServer {
+                result: 0,
+                pre_select_character_period: None,
+            }
+        );
+        assert_eq!(
+            LoginInPacket::decode(&[0, 0, 0, 1]).unwrap(),
+            LoginInPacket::RegisterGameServer {
+                result: 0,
+                pre_select_character_period: Some(true),
+            }
+        );
+        assert_eq!(
+            LoginInPacket::decode(&[0, 0, 0, 0]).unwrap(),
+            LoginInPacket::RegisterGameServer {
+                result: 0,
+                pre_select_character_period: Some(false),
+            }
         );
         assert_eq!(
             LoginInPacket::decode(&[1, 0, 5, 0, 0, 0, 6, 0, 0, 0]).unwrap(),

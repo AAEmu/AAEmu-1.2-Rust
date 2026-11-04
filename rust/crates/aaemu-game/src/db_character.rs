@@ -1368,19 +1368,39 @@ pub(crate) async fn save_edited_character_locked(
     save_directly(&server.db, c, Some((&server.items, batch)), Some(c.id)).await
 }
 
-/// Deletes the rows a lobby edit rebuilds. Only for a never-played character, whose rows are the
-/// creation-time ones; the items go through their containers so unrelated item rows stay.
+/// Deletes the rows a lobby edit rebuilds. Only for a never-played character, and only the
+/// creation containers (equipment, bag, bank; `mate_id = 0`): a never-played character can
+/// already own mail attachments, auction/trade/system items and mate/slave equipment, whose
+/// container and item rows must survive the rebuild.
 async fn clear_rebuilt_character_rows(tx: &mut Transaction<'_, MySql>, owner: u32) -> Result<()> {
-    sqlx::query(
-        "DELETE i FROM `items` i JOIN `item_containers` ic ON ic.container_id = i.container_id          WHERE ic.owner_id = ?",
-    )
+    use crate::models::container::slot_type;
+    let creation_slots = format!(
+        "{}, {}, {}",
+        slot_type::EQUIPMENT,
+        slot_type::INVENTORY,
+        slot_type::BANK
+    );
+    sqlx::query(&format!(
+        concat!(
+            "DELETE i FROM `items` i JOIN `item_containers` ic ",
+            "ON ic.container_id = i.container_id ",
+            "WHERE ic.owner_id = ? AND ic.mate_id = 0 AND ic.slot_type IN ({})"
+        ),
+        creation_slots
+    ))
     .bind(owner)
     .execute(&mut **tx)
     .await?;
-    sqlx::query("DELETE FROM `item_containers` WHERE `owner_id` = ?")
-        .bind(owner)
-        .execute(&mut **tx)
-        .await?;
+    sqlx::query(&format!(
+        concat!(
+            "DELETE FROM `item_containers` ",
+            "WHERE `owner_id` = ? AND `mate_id` = 0 AND `slot_type` IN ({})"
+        ),
+        creation_slots
+    ))
+    .bind(owner)
+    .execute(&mut **tx)
+    .await?;
     for table in ["skills", "abilities", "actabilities", "appellations"] {
         sqlx::query(&format!("DELETE FROM `{table}` WHERE `owner` = ?"))
             .bind(owner)

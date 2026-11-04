@@ -472,6 +472,15 @@ pub async fn select_character(
         refuse_during_shutdown(conn);
         return Ok(());
     }
+    // During the pre-select period the client's Start button edits the character instead of
+    // entering the world (character_select.alb); a forged client must not enter either. The
+    // period is temporary and ends when the login stops advertising it.
+    if server.config.characters.pre_select_period {
+        tracing::warn!(
+            "Character select for {character_id} refused: the character pre-select period is on (Characters:PreSelectPeriod)"
+        );
+        return Ok(());
+    }
     let Some(idx) = conn.characters.iter().position(|c| c.id == character_id) else {
         tracing::error!(
             "Character {character_id} not found in list of loaded characters of this account {}",

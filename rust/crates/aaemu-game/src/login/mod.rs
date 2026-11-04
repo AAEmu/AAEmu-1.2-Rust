@@ -125,10 +125,32 @@ pub(crate) async fn handle(server: &Arc<GameServer>, payload: &[u8]) -> bool {
     };
     tracing::debug!("LoginPacket: L->G {:?}", packet);
     match packet {
-        LoginInPacket::RegisterGameServer { result } => {
+        LoginInPacket::RegisterGameServer {
+            result,
+            pre_select_character_period,
+        } => {
             if result != 0 {
                 tracing::error!("Error registering on LoginServer");
                 return false; // TODO (C#): or shutdown?
+            }
+            // The login advertises the pre-select period to the clients (`ACJoinResponse.afs`),
+            // so its value is authoritative here: a mismatch would let the client offer an edit
+            // this server refuses (or refuse a world entry the client still tries).
+            match pre_select_character_period {
+                Some(flag) => {
+                    let configured = server.config.characters.pre_select_period;
+                    if configured != flag {
+                        tracing::warn!(
+                            "Characters:PreSelectPeriod is {configured} but the login server advertises {flag}; using the login value"
+                        );
+                    }
+                    server
+                        .config
+                        .update(|config| config.characters.pre_select_period = flag);
+                }
+                None => tracing::warn!(
+                    "The login server did not report the pre-select period; using Characters:PreSelectPeriod"
+                ),
             }
             tracing::info!("Successfully registered on LoginServer");
         }

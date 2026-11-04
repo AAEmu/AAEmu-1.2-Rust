@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use sqlx::Row;
 
 use crate::data::character_templates::{CharacterTemplate, EquipItemsTemplate};
 use crate::data::items::{bind_type, ItemTemplate};
@@ -677,6 +678,15 @@ pub async fn edit(
         );
         return Ok(());
     }
+    // The client only offers the edit at character select; a session that is in the world (or
+    // leaving it) must not rewrite its own row from under the live character.
+    if conn.state != crate::net::connection::GameState::Lobby || conn.active_char.is_some() {
+        tracing::warn!(
+            "CSEditCharacter for {character_id} ignored: session {} is not in the lobby",
+            conn.id
+        );
+        return Ok(());
+    }
     let data = &server.game_data;
     let Some(template) = data
         .characters
@@ -715,19 +725,63 @@ pub async fn edit(
     let created = stored.created;
     let labor_power = stored.labor_power;
     let labor_power_modified = stored.labor_power_modified;
-    // Deleted and pending-deletion characters are out of the lobby list; re-check the copy the
-    // client is acting on, and treat a character that ever entered the world as played.
-    if stored.delete_request_time != 0 || stored.delete_time != 0 {
+    // A select/enter in flight owns the character and its row must not be rewritten under it; a
+    // previous departure save still has the old row in flight.
+    if server.enter_world.character_owner(character_id).is_some() {
+        tracing::warn!(
+            "CSEditCharacter for {character_id} ignored: the character is selected or entering the world"
+        );
+        return Ok(());
+    }
+    if server.save.pending_departure(character_id).is_some() {
+        tracing::warn!(
+            "CSEditCharacter for {character_id} ignored: the character's departure save is pending"
+        );
+        return Ok(());
+    }
+    // The cached lobby list can predate a select/departure; the persisted row is authoritative
+    // (as `CharacterManager.Select` does for the same fields). Deleted rows are gone, and a
+    // character that entered the world keeps its progress.
+    let row = sqlx::query(concat!(
+        "SELECT CAST(online_time AS SIGNED) AS online_time, ",
+        "CAST(UNIX_TIMESTAMP(leave_time) AS SIGNED) AS leave_time, ",
+        "CAST(UNIX_TIMESTAMP(delete_request_time) AS SIGNED) AS delete_request_time, ",
+        "CAST(UNIX_TIMESTAMP(delete_time) AS SIGNED) AS delete_time ",
+        "FROM characters WHERE id = ? AND account_id = ? AND deleted = 0"
+    ))
+    .bind(character_id)
+    .bind(conn.account_id())
+    .fetch_optional(&server.db)
+    .await;
+    let row = match row {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!("CSEditCharacter for {character_id}: cannot read the row: {e}");
+            return Ok(());
+        }
+    };
+    let Some(row) = row else {
+        tracing::warn!(
+            "CSEditCharacter for {character_id} ignored: no undeleted row for account {}",
+            conn.account_id()
+        );
+        return Ok(());
+    };
+    let online_time: i64 = row.try_get("online_time")?;
+    let leave_time: i64 = row.try_get::<Option<i64>, _>("leave_time")?.unwrap_or(0);
+    let delete_request_time: i64 = row
+        .try_get::<Option<i64>, _>("delete_request_time")?
+        .unwrap_or(0);
+    let delete_time: i64 = row.try_get::<Option<i64>, _>("delete_time")?.unwrap_or(0);
+    if delete_request_time != 0 || delete_time != 0 {
         tracing::warn!(
             "CSEditCharacter for {character_id} ignored: the character is being deleted"
         );
         return Ok(());
     }
-    if stored.online_time != 0 || stored.leave_time != 0 {
+    if online_time != 0 || leave_time != 0 {
         tracing::warn!(
-            "CSEditCharacter for {character_id} ignored: the character has entered the world (play time {}, last leave {})",
-            stored.online_time,
-            stored.leave_time
+            "CSEditCharacter for {character_id} ignored: the character has entered the world (play time {online_time}, last leave {leave_time})"
         );
         return Ok(());
     }
@@ -824,9 +878,13 @@ pub async fn edit(
     if name != normalize_name(&old_name) {
         server.names.rename_character(character_id, &name);
     }
-    server
+    for id in server
         .items
-        .commit_rebuilt_containers(&c.inventory, &persistent);
+        .commit_rebuilt_containers(&c.inventory, &persistent)
+    {
+        // The rebuilt containers' old rows were deleted by the same transaction; free the ids.
+        server.ids.item.release_id(id as u32);
+    }
     c.inventory = persistent;
     let resp = edit_character_response(&c);
     conn.characters[index] = c;

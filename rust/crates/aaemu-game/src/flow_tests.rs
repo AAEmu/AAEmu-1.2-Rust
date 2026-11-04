@@ -322,9 +322,16 @@ async fn lobby_flow_end_to_end() {
         hex("03 00  05 00 00 00  06 00 00 00  00 00 00 00")
     );
 
-    // ---- LGRegisterGameServer: 0 keeps the link, anything else closes it
+    // ---- LGRegisterGameServer: 0 keeps the link, anything else closes it. The Rust-only tail
+    // carries the login's pre-select period, which the game applies.
     assert!(crate::login::handle(&server, &[0x00, 0x00, 0x00]).await);
     assert!(!crate::login::handle(&server, &[0x00, 0x00, 0x01]).await);
+    assert!(!server.config.characters.pre_select_period);
+    assert!(crate::login::handle(&server, &[0x00, 0x00, 0x00, 0x01]).await);
+    assert!(
+        server.config.characters.pre_select_period,
+        "the login's pre-select period is authoritative"
+    );
 }
 
 /// A character with one equipped armor piece in slot 3 (chest).

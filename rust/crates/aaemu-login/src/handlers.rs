@@ -147,10 +147,12 @@ pub async fn handle_g2l(
                 // Reply after the same delay as before, then close: a peer must not keep
                 // guessing the secret on the same connection.
                 let conn = conn.clone();
+                let pre_select_character_period = server.games.pre_select_character_period();
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     conn.send_packet(&LgRegisterGameServer {
                         result: GsRegisterResult::Error,
+                        pre_select_character_period,
                     });
                     tokio::time::sleep(Duration::from_millis(200)).await;
                     conn.close();

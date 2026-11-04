@@ -229,22 +229,30 @@ impl ItemManager {
     /// The save batch of a lobby edit: the items the rebuild created, written into the
     /// character's persistent container ids. The edit's transaction deletes the old rows first
     /// (`save_edited_character_locked`), and the caller installs the same items in memory with
-    /// [`Self::commit_rebuilt_containers`] after the commit.
+    /// [`Self::commit_rebuilt_containers`] after the commit. Only the creation containers
+    /// (equipment, bag and bank) are rebuilt; mail/auction/trade/system containers and mate /
+    /// slave equipment keep their rows and items.
     pub(crate) fn prepare_rebuilt_batch(
         &self,
         built: &crate::models::character::Inventory,
         persistent: &crate::models::character::Inventory,
     ) -> ItemSaveBatch {
+        use crate::models::container::is_creation_container;
         let mut batch = ItemSaveBatch::default();
         for (_, container) in &persistent.containers {
             let snapshot = container.lock().expect("container poisoned").clone();
-            if snapshot.slot_type != slot_type::NONE && snapshot.container_id > 0 {
+            if is_creation_container(snapshot.slot_type, snapshot.mate_id)
+                && snapshot.container_id > 0
+            {
                 batch
                     .containers
                     .push((container.clone(), ContainerSaveRow::of(&snapshot)));
             }
         }
         for (slot, source) in &built.containers {
+            if !is_creation_container(*slot, 0) {
+                continue;
+            }
             let Some((_, target)) = persistent.containers.iter().find(|(s, _)| s == slot) else {
                 continue;
             };
@@ -260,14 +268,24 @@ impl ItemManager {
         batch
     }
 
-    /// Replaces the in-memory contents of the character's persistent containers with the
-    /// rebuilt ones (the edit's transaction wrote exactly these rows and deleted the old items).
+    /// Replaces the in-memory contents of the character's creation containers (equipment, bag
+    /// and bank) with the rebuilt ones (the edit's transaction wrote exactly these rows and
+    /// deleted the old items). Returns the ids of the replaced items so the caller can free
+    /// them; every other container keeps its contents.
     pub(crate) fn commit_rebuilt_containers(
         &self,
         built: &crate::models::character::Inventory,
         persistent: &crate::models::character::Inventory,
-    ) {
+    ) -> Vec<u64> {
+        use crate::models::container::is_creation_container;
+        let mut removed = Vec::new();
         for (slot, target) in &persistent.containers {
+            {
+                let g = target.lock().expect("container poisoned");
+                if !is_creation_container(g.slot_type, g.mate_id) {
+                    continue;
+                }
+            }
             let items = built
                 .containers
                 .iter()
@@ -278,7 +296,7 @@ impl ItemManager {
                 })
                 .unwrap_or_default();
             let mut target = target.lock().expect("container poisoned");
-            target.items.clear();
+            removed.extend(target.items.drain(..).map(|i| i.id).filter(|id| *id != 0));
             for mut item in items {
                 item.dirty = false;
                 target.items.push(item);
@@ -287,6 +305,7 @@ impl ItemManager {
             target.dirty = false;
             target.update_free_slot_count();
         }
+        removed
     }
 
     /// `NewCofferContainer(characterId)`.

@@ -1653,27 +1653,75 @@ async fn private_mysql_lobby_edit_refuses_deleted_played_and_pending_deletion_ch
     client.conn.characters.push(removed);
     assert_eq!(client.conn.characters[0].unit.name, "Played");
 
-    // Pending deletion occupies the list until deleted=1 but cannot be edited.
-    client.conn.characters[0].delete_request_time = 1_700_000_000;
+    // Pending deletion occupies the list until deleted=1 but cannot be edited. The persisted
+    // row is authoritative; the cached lobby copy is not consulted for this.
+    sqlx::query(
+        "UPDATE characters SET delete_request_time = UTC_TIMESTAMP(),          delete_time = DATE_ADD(UTC_TIMESTAMP(), INTERVAL 1 DAY) WHERE id = ?",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
     lobby_edit(&server, &mut client, id, req.clone())
         .await
         .unwrap();
     assert_unchanged(&pool, &mut client, id).await;
-    client.conn.characters[0].delete_request_time = 0;
+    sqlx::query("UPDATE characters SET delete_request_time = '0001-01-01', delete_time = '0001-01-01' WHERE id = ?")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
-    // A character that has entered the world keeps its progress.
-    client.conn.characters[0].online_time = 5;
+    // A character that has entered the world keeps its progress. The cached copy still says
+    // online_time 0, so this only works with the row re-read under the save lock.
+    sqlx::query("UPDATE characters SET online_time = 5 WHERE id = ?")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(client.conn.characters[0].online_time, 0, "stale lobby copy");
     lobby_edit(&server, &mut client, id, req.clone())
         .await
         .unwrap();
     assert_unchanged(&pool, &mut client, id).await;
-    client.conn.characters[0].online_time = 0;
-    client.conn.characters[0].leave_time = 1_700_000_000;
+    sqlx::query("UPDATE characters SET online_time = 0, leave_time = UTC_TIMESTAMP() WHERE id = ?")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
     lobby_edit(&server, &mut client, id, req.clone())
         .await
         .unwrap();
     assert_unchanged(&pool, &mut client, id).await;
-    client.conn.characters[0].leave_time = 0;
+    sqlx::query("UPDATE characters SET leave_time = '0001-01-01' WHERE id = ?")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // A select/enter in flight owns the character.
+    assert_eq!(server.enter_world.reserve_character(id, 99), Ok(true));
+    lobby_edit(&server, &mut client, id, req.clone())
+        .await
+        .unwrap();
+    assert_unchanged(&pool, &mut client, id).await;
+    server.enter_world.release_character(id, 99);
+
+    // A departure save still has the old row in flight.
+    let departing = crate::world::Player::new(
+        client.conn.characters[0].clone(),
+        crate::net::connection::ConnectionHandle::detached(
+            99,
+            "127.0.0.1:50001".parse().unwrap(),
+            1007,
+        ),
+    );
+    server.save.remember_departing(&departing);
+    lobby_edit(&server, &mut client, id, req.clone())
+        .await
+        .unwrap();
+    assert_unchanged(&pool, &mut client, id).await;
+    server.save.forget_departing(id);
 
     // Control: the same edit now succeeds.
     lobby_edit(&server, &mut client, id, req).await.unwrap();
@@ -1751,5 +1799,276 @@ async fn private_mysql_lobby_edit_refuses_a_race_change_invalid_names_and_taken_
     );
     assert_eq!(server.names.get_character_id("Fresh"), id);
     assert!(!server.names.name_exists("Edited"));
+    pool.close().await;
+}
+
+/// The rebuild only touches the containers character creation fills (equipment, bag, bank).
+/// A never-played character can already own mail attachments and mate/slave equipment; their
+/// containers and items must survive an edit that succeeds (MySQL) or fails (this test, no DB).
+#[tokio::test]
+async fn lobby_edit_rebuild_keeps_mail_and_mate_containers_without_mysql() {
+    use crate::models::character::Inventory;
+    use crate::models::container::{slot_type, ContainerRef};
+
+    let server = test_server_with_config(edit_data(), edit_ai_config());
+    server.db.close().await;
+    let owner = 7u32;
+    let now = chrono::Utc::now().timestamp();
+    let add = |slot: u8, mate: u32, template: u32, item_slot: i32| -> (ContainerRef, u64) {
+        let c = server
+            .items
+            .container_for_character(owner, slot, mate, &server.ids.container);
+        let item = server
+            .items
+            .create(
+                template,
+                1,
+                0,
+                1,
+                &server.game_data.items,
+                &server.ids.item,
+                now,
+            )
+            .expect("item template");
+        let id = item.id;
+        c.lock()
+            .expect("container poisoned")
+            .add_new_item(item, item_slot, &server.game_data.items)
+            .unwrap_or_else(|_| panic!("place item {template} in slot {slot}"));
+        (c, id)
+    };
+    let (equipment, old_equipment) = add(slot_type::EQUIPMENT, 0, 2000, 0);
+    let (_, old_bag) = add(slot_type::INVENTORY, 0, 2001, -1);
+    let (_, old_bank) = add(slot_type::BANK, 0, 2001, -1);
+    let (mail, mail_item) = add(slot_type::MAIL, 0, 2002, -1);
+    let (mate_equipment, mate_item) = add(slot_type::EQUIPMENT_MATE, 55, 2000, 0);
+    let (slave_equipment, slave_item) = add(slot_type::EQUIPMENT_SLAVE, 66, 2002, 0);
+
+    let persistent = Inventory::new(owner, 50, 50, &server.items, &server.ids.container);
+    let built = Inventory::standalone(owner, 50, 50);
+    let built_item = server
+        .items
+        .create(
+            2003,
+            1,
+            0,
+            1,
+            &server.game_data.items,
+            &server.ids.item,
+            now,
+        )
+        .expect("built item");
+    let built_id = built_item.id;
+    built
+        .bag()
+        .lock()
+        .expect("container poisoned")
+        .add_new_item(built_item, -1, &server.game_data.items)
+        .expect("place built item");
+
+    let batch = server.items.prepare_rebuilt_batch(&built, &persistent);
+    assert_eq!(
+        batch.container_count(),
+        3,
+        "only equipment, bag and bank are rewritten"
+    );
+    assert_eq!(batch.item_ids(), vec![built_id]);
+
+    let removed = server.items.commit_rebuilt_containers(&built, &persistent);
+    let mut expected = vec![old_equipment, old_bag, old_bank];
+    expected.sort_unstable();
+    let mut actual = removed.clone();
+    actual.sort_unstable();
+    assert_eq!(
+        actual, expected,
+        "only the creation containers' items are replaced"
+    );
+    assert!(!removed.contains(&mail_item));
+    assert!(!removed.contains(&mate_item));
+    assert!(!removed.contains(&slave_item));
+
+    assert!(equipment
+        .lock()
+        .expect("container poisoned")
+        .items
+        .is_empty());
+    assert_eq!(mail.lock().expect("container poisoned").items.len(), 1);
+    assert_eq!(
+        mate_equipment
+            .lock()
+            .expect("container poisoned")
+            .items
+            .len(),
+        1
+    );
+    assert_eq!(
+        slave_equipment
+            .lock()
+            .expect("container poisoned")
+            .items
+            .len(),
+        1
+    );
+    assert!(server.items.item_by_id(mail_item).is_some());
+    assert!(server.items.item_by_id(mate_item).is_some());
+    assert!(server.items.item_by_id(slave_item).is_some());
+    assert!(server.items.item_by_id(built_id).is_some());
+}
+
+/// The edit is a lobby action: a session that is in the world (or past the lobby state) must
+/// not rewrite its own row. A database that cannot be read refuses the edit without closing
+/// the connection.
+#[tokio::test]
+async fn lobby_edit_is_refused_in_the_world_and_survives_an_unavailable_database() {
+    use crate::net::connection::GameState;
+
+    let server = test_server_with_config(edit_data(), edit_ai_config());
+    server.db.close().await;
+    let mut client = crate::test_support::TestClient::new(&server, 1, 1007);
+    let mut character = crate::test_support::test_character(7, "Lobby", 1.0, 2.0);
+    character.account_id = 1007;
+    client.conn.characters.push(character.clone());
+    let request = creation_request("Lobby");
+
+    let player = crate::test_support::spawn_player(&server, &client, character, 700);
+    client.conn.active_char = Some(player);
+    lobby_edit(&server, &mut client, 7, request.clone())
+        .await
+        .unwrap();
+    assert!(client.drain().is_empty(), "in-world edit refused");
+    assert!(!client.conn.is_closing());
+
+    client.conn.active_char = None;
+    client.conn.state = GameState::World;
+    lobby_edit(&server, &mut client, 7, request.clone())
+        .await
+        .unwrap();
+    assert!(client.drain().is_empty(), "non-lobby edit refused");
+
+    client.conn.state = GameState::Lobby;
+    lobby_edit(&server, &mut client, 7, request).await.unwrap();
+    assert!(
+        client.drain().is_empty(),
+        "an unreadable row refuses the edit"
+    );
+    assert!(!client.conn.is_closing());
+    assert_eq!(client.conn.characters[0].unit.name, "Lobby");
+}
+
+/// A never-played character can already own mail attachments and mate equipment. The edit
+/// rebuilds only the equipment/bag/bank rows; the mail and mate-equipment rows must survive.
+#[tokio::test]
+#[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; temporary tables only"]
+async fn private_mysql_lobby_edit_keeps_mail_and_mate_equipment_rows() {
+    use crate::test_support::TestClient;
+    let Some(pool) = private_lobby_pool().await else {
+        return;
+    };
+    let mut server = test_server_with_config(edit_data(), edit_ai_config());
+    server.db = pool.clone();
+    sqlx::query("INSERT INTO accounts (account_id, labor) VALUES (1007, 1000)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut client = TestClient::new(&server, 1, 1007);
+    lobby_create(&server, &mut client, creation_request("Mailed"))
+        .await
+        .unwrap();
+    client.drain();
+    let id = client.conn.characters[0].id;
+
+    // The creation save wrote the character's empty container rows, including MAIL.
+    let mail_container: u64 = sqlx::query_scalar(
+        "SELECT CAST(container_id AS UNSIGNED) FROM item_containers \
+         WHERE owner_id = ? AND slot_type = ? AND mate_id = 0",
+    )
+    .bind(id)
+    .bind(crate::models::container::slot_type::MAIL)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    // A mail delivery to the offline character: the attachment row lives in the MAIL container.
+    sqlx::query(
+        "INSERT INTO items (id, `type`, template_id, container_id, slot_type, slot, count, \
+         lifespan_mins, owner, flags) VALUES (900001, 'Item', 2001, ?, ?, 0, 1, 0, ?, 0)",
+    )
+    .bind(mail_container)
+    .bind(crate::models::container::slot_type::MAIL)
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Mate equipment is not part of creation either; its container and item must survive.
+    sqlx::query(
+        "INSERT INTO item_containers (container_id, container_type, slot_type, container_size, \
+         owner_id, mate_id) VALUES (900010, 'ItemContainer', ?, 28, ?, 55)",
+    )
+    .bind(crate::models::container::slot_type::EQUIPMENT_MATE)
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO items (id, `type`, template_id, container_id, slot_type, slot, count, \
+         lifespan_mins, owner, flags) VALUES (900002, 'Item', 2000, 900010, ?, 0, 1, 0, ?, 0)",
+    )
+    .bind(crate::models::container::slot_type::EQUIPMENT_MATE)
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let mut req = creation_request("Mailed");
+    req.model_params = appearance_params();
+    lobby_edit(&server, &mut client, id, req).await.unwrap();
+    let frames = client.drain();
+    assert_eq!(frames.len(), 1, "{frames:?}");
+    assert_eq!(
+        frames[0].0,
+        crate::opcodes::sc::SCEditCharacterResponsePacket
+    );
+
+    let kept: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM items WHERE CAST(id AS UNSIGNED) IN (900001, 900002)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(kept, 2, "mail attachment and mate equipment survive");
+    let containers: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM item_containers \
+         WHERE CAST(container_id AS UNSIGNED) IN (?, 900010)",
+    )
+    .bind(mail_container)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        containers, 2,
+        "mail and mate-equipment container rows survive"
+    );
+    let creation_containers: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM item_containers WHERE owner_id = ? AND mate_id = 0 \
+         AND slot_type IN (?, ?, ?)",
+    )
+    .bind(id)
+    .bind(crate::models::container::slot_type::EQUIPMENT)
+    .bind(crate::models::container::slot_type::INVENTORY)
+    .bind(crate::models::container::slot_type::BANK)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        creation_containers, 3,
+        "the creation containers were rewritten"
+    );
+    let hair: i64 = sqlx::query_scalar(
+        "SELECT ORD(SUBSTRING(unit_model_params, 2, 1)) FROM characters WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(hair, 7, "the edit itself was applied");
     pool.close().await;
 }
