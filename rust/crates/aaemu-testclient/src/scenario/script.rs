@@ -1173,7 +1173,7 @@ async fn run_lines(
                 let got_from = s.read_u16()?;
                 let got_to = s.read_u16()?;
                 ensure!(
-                    count >= 0 && count <= 0x80,
+                    (0..=0x80).contains(&count),
                     "priceboard: invalid count {count}"
                 );
                 println!("    SCSpecialtyCurrent from {got_from} to {got_to} count {count}");
