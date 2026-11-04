@@ -34,6 +34,9 @@ client --CSCreateCharacter------->  NameManager.Validate -> SCCharacterCreationF
                                     |   SaveDirectlyToDatabase -> SCCreateCharacterResponse | SCCharacterCreationFailed(3)
 client --CSDeleteCharacter------->  SetDeleteCharacter -> SCDeleteCharacterResponse(2|0) | SCErrorMsg; CharacterDeleteTask
 client --CSCancelCharacterDelete->  SetRestoreCharacter -> SCCancelCharacterDeleteResponse(3|4)
+client --CSEditCharacter--------->  (Characters:PreSelectPeriod on) CharacterManager.Edit: own, undeleted,
+                                    never-played character -> create rules re-run, rebuilt starting kit,
+                                    SCEditCharacterResponse | ignored (failure reply capture-pending)
 
 enter world:
 client --CSSelectCharacter------->  Character.Load() (abilities, actabilities, skills, appellations, portals,
@@ -68,6 +71,59 @@ disconnect                    ---> OnDisconnect: offline status, SaveAndRemoveFr
 
 server: SaveManager every World.AutoSaveInterval minutes (items + online characters), final save on shutdown.
 ```
+
+### Lobby character edit (`CSEditCharacter` 0x023 / `SCEditCharacterResponse` 0x03a)
+
+The pre-select period is a login-advertised flag (`ACJoinResponse.afs` bit 16,
+`Login:PreSelectCharacterPeriod`); the client's Start button then calls
+`X2LoginCharacter.EditCharacter` instead of entering the world (`character_select.alb`), and its
+edit window reuses the character-create UI. The game server takes the same flag from
+`Characters:PreSelectPeriod` and, at registration, from the Rust-only tail of
+`LGRegisterGameServer` (`[u8 result][u8 preSelectCharacterPeriod]`): the login value is applied
+(the local value is only used when the login does not send the byte, e.g. an older login), so
+the two servers cannot disagree. While the period is on, `CSSelectCharacter` is refused as well:
+the client does not offer world entry and a forged select must not bypass the period. Request
+layout from the 1.2 serializer `FUN_397c4da0` (writer `FUN_397ae360`): `u32 characterId`, then
+the `CSCreateCharacterPacket` body (name, race, gender, 7 body items, the
+`UnitCustomModelParams` blob, 3 abilities, level) **without** the create's trailing
+`i32 introZoneId`. Response: the character-info block shared with the create response and the
+character list (serializer `FUN_397ab170` -> `FUN_39620030`) under opcode 0x03a.
+
+Rules (from the 1.2 UI and the create path; the 1.2 server behaviour itself is not observable):
+
+* Only the account's own, undeleted, not-pending-deletion character in the connection's lobby
+  list, and only while it never entered the world: the edit re-runs creation, so an already
+  played character would lose its kit, skills and slots. The decision uses the persisted row
+  (`online_time`, `leave_time`, `delete_request_time`, `delete_time`, `deleted`) re-read under
+  the save transaction lock, not the lobby copy; the edit is also refused when the session is
+  not in the lobby (`state`, `active_char`), while a select/enter holds the character
+  (`EnterWorldManager`) and while a departure save is pending (`SaveManager`).
+* Race and gender are fixed in the edit UI (`GetEditUnitRace/Gender` seed the read-only step-1
+  buttons and only the character's own race stays enabled, `character_create_step1_view.alb`),
+  so a different pair is refused. The stored level is kept (the client sends 1 for both create
+  and edit; its edit UI has no level control).
+* Name changes are allowed: the edit UI pre-fills the existing name in the editable field and the
+  1.2 edit builder re-validates it (`XlIsValidName`, `FUN_391a4640`). An unchanged name is left
+  alone; a changed one re-runs create's rules (`NameManager.ValidateCharacterName` + blocked
+  names) under the create save lock, and the name manager swap happens after the commit.
+* The rebuild reuses every create step (race/gender template, ability starting kit, body items,
+  supplies, actabilities, starting skills, gear buffs). Only the containers creation fills are
+  rebuilt (equipment, bag, bank; `mate_id = 0`): their old item/container rows and the
+  create-time ability/actability/appellation/skill rows are deleted and the new ones written in
+  one transaction, and the replaced item ids are freed after the commit. A failed save leaves
+  the character untouched. Mail/auction/trade/system containers and mate/slave equipment keep
+  their rows and items: a never-played character can already own mail attachments delivered
+  while it was offline (`systems/economy/mail.rs` creates the MAIL container by character id).
+* Gated by `systems::services::second_password::allow_lobby_action`, like the other lobby
+  actions (`CSEditCharacter` was the packet that call was reserved for).
+* **Failure reply: UNKNOWN / capture-pending** (`EDITCHAR-FAIL-1`). The 1.2 handler
+  `FUN_391eb910` only has a success path (a zero character id is its only no-op), so a refused
+  edit sends nothing and logs the reason; the client leaves its create window open.
+* Not ported / not validated (**known, not fixed**): create itself accepts any item template as
+  a body item (`SetEquipItemTemplate`) without checking `item_body_parts`; the edit inherits
+  that rule rather than tightening it (`EDITCHAR-BODYITEM-1`, capture-pending). A forged packet
+  can also persist arbitrary `ability2`/`ability3` bytes (create only logs the anomaly; the
+  client sends 2 and 3, and only `ability1` selects the starting tree).
 
 Framing: level 1 = `[dd 01][hash][count][u16 op][body]` (server writes 0/0 and never verifies the
 client's bytes, as in C#), level 2 = `[dd 02][u16 op][body]`. Any other level has no packet table:
@@ -302,7 +358,7 @@ These `SpecialType` bodies were TODO stubs that only logged in the C# (`git show
 | `SpecialEffects/GenderTransfer` (special 107) | `systems/skills/effects/special/misc.rs` (`gender_transfer`) | added | Data: skill 23469 `성별 전환하기` (beauty-salon NPC interaction, `target_type` any unit, selection target). Flips the affected player (`target` if a player, else the caster) with `new = 3 - old` (1 male <-> 2 female), refuses when an equipped item template has `char_gender` set to a third value with `GENDER_TRANSFER_AS_GENDER_EQUIPMENT` (744), rebuilds `unit.model_id` from the race/gender `characters` template and broadcasts `SCCharacterGenderAndModelModifiedPacket` (existing beauty-salon packet) to the player and observers. `Character.Save` persists the new `gender` with the next save. |
 | `SpecialEffects/MateMakeGetUp` (special 51) | `systems/vehicles/mates.rs` (`revive_mate`), `systems/skills/effects/special/misc.rs` | added | Data: skill 13719 `일으켜세우기` (revive an injured summoned mate, self-target, friendly); the former C# body only logged. Resolves the target/caster mate or, for a player caster, the active mate; only acts while `hp <= 0`. Reuses the stablehand revive values: `mates.hp/mp = MATE_FULL_POOL`, clears the summon item's `mate_dead` flag with a `RepairPets` item task and broadcasts `SCUnitPointsPacket`; the live mate is restored to `max_hp` / `max_mp`. |
 | `AccountAttributeEffect` + `SpecialEffects/AuctionPostAuthority` (special 117) | `systems/economy/account_attributes.rs`, `bridges.rs`, `world/session.rs` | added | Data: `account_attribute_effects` has 3 rows, all `kind_id = 1` (auction posting authority): item 8000027 `경매장 등록권` adds it account-wide (`is_add`, `count` 0, `time` 0, `bind_world` false) and two `is_add = false` rows remove it (VIP buff trigger, removal ticket item 8000058). Special 117 on buffs 7149 / 11034 / 8000012 grants kind 1 permanently. New `account_attributes` table (PK account/kind/world, nullable `end_time`, `world_id` 0 = not world bound), loaded on character select into `server.systems.economy.account_attributes` and persisted on every change. `is_add` upserts, otherwise every grant of the kind is deleted; `time == 0` is permanent, else `now + time` **seconds (unit inferred: all 1.2 values are 0)**. `has_account_attribute(account_id, kind)` is ready for gating; **the auction is deliberately not gated yet** (every character currently gets buff 8000012 from `UNIT_STATE_FORCED_BUFFS`, so a gate would need that decision first). |
-| `SpecialEffects/AddCharacterSlot` (special 91) | `systems/economy/character_slots.rs`, `db.rs`, `packets/c2g.rs`, `managers/character.rs` | added | Data: item 8000002 `캐릭터 슬롯확장 주문서` -> skill 8000002. Adds one `accounts.extra_character_slots` (`TINYINT UNSIGNED`, saturating at 255) for the caster's account, persists it and sends `SCGetSlotCountPacket` with the new value; `CSListCharacterPacket` sends that count instead of the old hard-coded 0. The character creation limit is the login-advertised base plus those purchased slots: aaemu-login sends `Login:MaxCharactersPerAccount` (default 6) in `ACJoinResponse`/`ACAuthResponse`, and `CharacterManager.Create` re-reads the account's slots inside the save lock and refuses with `CharacterCreateError::WorldLimit` (9) at `aaemu_commons::character_slots::character_slot_limit(base, extra)`; a MySQL error on that read falls back to the base alone. **Deviation (C#):** the C# `CharacterManager.Create` had no per-account character-count check and aaemu-login hard-coded 6 in both packets, so purchased slots could never be used. `Login:AdditionalCharactersPerServer` (the expandable limit) and `Login:PreSelectCharacterPeriod` (advertised in `ACJoinResponse.afs`) are Rust-only; the pre-select flag is refused at login config load until lobby character editing (WP-E2) exists, and the game's `Characters:MaxPerAccount` must equal `Login:MaxCharactersPerAccount` (documented pair, no cross-process check; each server logs its effective value at startup). |
+| `SpecialEffects/AddCharacterSlot` (special 91) | `systems/economy/character_slots.rs`, `db.rs`, `packets/c2g.rs`, `managers/character.rs` | added | Data: item 8000002 `캐릭터 슬롯확장 주문서` -> skill 8000002. Adds one `accounts.extra_character_slots` (`TINYINT UNSIGNED`, saturating at 255) for the caster's account, persists it and sends `SCGetSlotCountPacket` with the new value; `CSListCharacterPacket` sends that count instead of the old hard-coded 0. The character creation limit is the login-advertised base plus those purchased slots: aaemu-login sends `Login:MaxCharactersPerAccount` (default 6) in `ACJoinResponse`/`ACAuthResponse`, and `CharacterManager.Create` re-reads the account's slots inside the save lock and refuses with `CharacterCreateError::WorldLimit` (9) at `aaemu_commons::character_slots::character_slot_limit(base, extra)`; a MySQL error on that read falls back to the base alone. **Deviation (C#):** the C# `CharacterManager.Create` had no per-account character-count check and aaemu-login hard-coded 6 in both packets, so purchased slots could never be used. `Login:AdditionalCharactersPerServer` (the expandable limit) and `Login:PreSelectCharacterPeriod` (advertised in `ACJoinResponse.afs`) are Rust-only; the pre-select flag is accepted now and enables the lobby edit, and the game's `Characters:MaxPerAccount` / `Characters:PreSelectPeriod` must equal `Login:MaxCharactersPerAccount` / `Login:PreSelectCharacterPeriod` (documented pairs, no cross-process check; each server logs its effective values at startup). |
 
 ### systems::npcs
 
@@ -365,7 +421,7 @@ connected by `systems::economy::wiring`).
 | `LootGameData`, `Models/Game/Items/Loots/**`, `LootingContainer`, loot packets | `systems/economy/{loot_data,loot,looting,loot_packets}.rs` | done | NPC death / despawn / team rules through `LootNpcHooks`, `LootTeamHooks`, `LootQuestHooks`. |
 | Repair (`Character.DoRepair`, `CSRepairSingleEquipment`, `CSRepairAllEquipments`), durability loss | `systems/economy/repair.rs` | done | Combat calls `on_damage_taken` / `on_death`. |
 | `CraftManager`, `Models/Game/Crafts`, `CharacterCraft`, `CraftTask`, `CSExecuteCraft`, `SCCraftFailed` | `systems/economy/{craft,craft_data}.rs` | done | Cast through `CraftHooks::start_craft_cast`; skills call `craft::end_craft`. |
-| Stores (`CSBuyItems`, `CSSellItems`, buy-back, `CSListSoldItem`, `CSBuyPriestBuff`, `CSBuyCoinItem`, `CSSellBackpackGoods`), `SpecialtyManager`, `TaxationsManager`, `ExpandExpert`, item look conversion | `systems/economy/{store,store_data,specialty}.rs` | done | Merchant packs / NPC flags through `NpcEconomyHooks`. Checkout validates currency, checked totals and each balance, then stages complete goods / buy-back delivery before committing payment. Vocation charges the configured price displayed by the 1.2 shop, without earnings bonuses. Rejected checkout preserves items and balances. Purchases need an NPC merchant pack or a doodad `DoodadFuncStoreUi` pack and filter the goods by it; selling needs a merchant within 3 m, lists each item once and pays only for items moved to buy-back. |
+| Stores (`CSBuyItems`, `CSSellItems`, buy-back, `CSListSoldItem`, `CSBuyPriestBuff`, `CSBuyCoinItem`, `CSSellBackpackGoods`), `SpecialtyManager`, `TaxationsManager`, `ExpandExpert`, item look conversion | `systems/economy/{store,store_data,specialty}.rs` | done | Merchant packs / NPC flags through `NpcEconomyHooks`. Checkout validates currency, checked totals and each balance, then stages complete goods / buy-back delivery before committing payment. Vocation charges the configured price displayed by the 1.2 shop, without earnings bonuses. Rejected checkout preserves items and balances. Purchases need an NPC merchant pack, a doodad `DoodadFuncStoreUi` pack, or the money form of the doodad's current-phase `DoodadFuncPurchase` (`CSBuyItems.unkId`, the `doodad_funcs` row id the 1.2 client writes there), and filter the goods by it; selling needs a merchant within 3 m, lists each item once and pays only for items moved to buy-back. |
 | `MailManager`, `Models/Game/Mails/**`, `CharacterMails`, mail packets | `systems/economy/{mail,mail_character,mail_kinds,mail_packets,mail_data}.rs` | done | Saved in `SaveStage::BeforeItems`; housing tax through `MailHousingHooks`. |
 | `AuctionManager`, `Models/Game/Auction/**`, auction packets | `systems/economy/{auction,auction_data,auction_packets}.rs` | done | Saved in `SaveStage::AfterItems`; results mailed through `wiring`. Requests require an auctioneer NPC (the `auctioneer` template flag) named by the packet or the current interaction object within 5 m (the C# ignored the ids). |
 | `TradeManager`, trade packets | `systems/economy/trade.rs` | done | The C# `CanStartTrade` TODO ("Check faction and others") is implemented from the 1.2 client's own checks: a request and its acceptance refuse a dead player, a hostile faction relation and a distance `>= sqrt(25) = 5` m, and a trade across instances; see the trade validation deviation. |
@@ -1623,6 +1679,21 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   character from the world and frees the account. Every refusal logs one `WARN` with the
   character name and the reason (`world/session.rs`, `managers/enter_world.rs`,
   `packets/c2g.rs`, `net/listener.rs`).
+* Login world queue (2026-11-03, WP-H): the C# had no queue. The login server may now hold
+  `CAEnterWorld` in a per-world FIFO when `GameServers[].MaxConcurrent` is reached and admit it
+  when a slot frees. To make the game's occupancy authoritative, `GL_GAME_SERVER_LOAD` and
+  `GLPlayerEnter` gain a trailing `u32 online` and `u32 occupancySequence` (the C# bodies end
+  after the load byte / result byte; readers treat a missing extension as 0 = queue gate off).
+  `online` is `AccountManager.count()` plus world cookies, including a cookie whose account
+  registration is in flight (`login()` marks it accepted instead of removing it; `forget()` drops
+  it after the registration). An unconsumed cookie stops counting toward the queue occupancy after
+  `EnterWorldManager::PENDING_TOKEN_LIFETIME` (60 s, Rust-only) so a client that takes its cookie
+  and vanishes cannot block the queue; `login()` still accepts a cookie of any age, so with the
+  queue disabled its behaviour is exactly as before. The game also reports load right after
+  registration and after an account leaves, so the queue head moves promptly. Premium queue lanes
+  are not implemented: the premium-entrance bit of `CAEnterWorld.flag` is capture-pending
+  (account WP-H).
+
 * systems::skills / systems::ai (dead NPC returned and healed): the `DamageEffect` tail
   (`SCAiAggroPacket`, `AddUnitAggro`, `Npc.OnDamageReceived`) is skipped when the hit killed the
   NPC, and `CheckIfEmptyAggroToReturn` never sends a dead NPC to `ReturnState`. In the C# order the
@@ -3229,6 +3300,44 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   argument and the third `body(…)` argument, nothing else touched, idempotent) and marks them
   dirty so the next save persists the fix.
 
+* systems::npcs (doodad phase packet, 2026-11-03): the C# `CSChangeDoodadPhasePacket` only
+  logged a warning, so a `DoodadFuncBubble` / `DoodadFuncOpenPaper` never advanced the phase. The
+  1.2 client sends the packet itself once its own bubble / paper UI finishes, with body
+  `bc objId`, `u32 skill`, `u32 nextPhase`, `u32 funcId` (`doodad_funcs.id`; writer
+  `FUN_397bbbb0`, builder `FUN_397ac8d0`, senders `FUN_393b8240` / `FUN_393b8450`, and only
+  when the func row's `next_phase > 0`). Rust accepts it only for a Bubble / OpenPaper func of
+  the doodad's current phase group whose `next_phase` equals the sent value, from a live caster
+  and a doodad not scheduled for despawn, and then runs the normal `DoChangePhase` (phase funcs
+  + `SCDoodadPhaseChangedPacket`). The reach check uses the func's own skill only when that
+  skill is known and has a positive range; a skill-less, unknown or unbounded func gets the
+  5 m doodad interaction distance (`portal::NAVI_USE_RANGE`, also `looting::LOOT_TAKE_RANGE`)
+  plus the doodad allowance the cast target check uses. The packet's client-chosen `skill` is
+  never used (Bubble funcs 6279, 9407 and 9965 carry no skill, and the field is client input).
+  **Deviation:** the C# moved nothing; every refusal is debug-logged and silent (the client
+  sends only after its own successful use).
+* systems::economy (doodad purchase, 2026-11-03): `CSBuyCoinItemPacket` names a `doodad_funcs`
+  row (`bc objId` + `u32 funcId`; writer `FUN_397bae00`) and now only runs a
+  `DoodadFuncPurchase` of the doodad's current phase that is priced in a coin item
+  (`coin_item_id > 0`, `coin_count >= 1`) within the 3 m doodad store range; the phase check and
+  the purchase run under the doodad's phase-operation guard. `FUN_393b80d0`
+  (`x2game.dll.c:774526`) opens a purchase dialog in both branches: the money form (vtable
+  `399d3158`) when the purchase's coin item is the sentinel or its coin count is below one, the
+  coin form (vtable `399d3178`) otherwise; only the coin form sends `CSBuyCoinItemPacket` (0x0af)
+  and it shows `not_enough_coin` (483) when the bag lacks the coins. Rust answers the shortage
+  with 483 (the C# used `NotEnoughItem` 27) and returns the coin if the grant still fails. The
+  money form of the same func (`coin_item_id == 0`) checks out through `CSBuyItemsPacket`, whose
+  `unkId` holds the func id (`FUN_393b8040` / `FUN_397ac3f0`, writer `FUN_397bac90`): Rust sells
+  that func's own `item_id` at its template price, requires the grade the func offers
+  (`fixed_grade` when the template has one, else basic 0) and a count that is a whole multiple
+  of the func row's count, and holds the doodad's phase-operation guard through the checkout.
+  Without the grade rule a forged high-grade line was bought at the template price and sold
+  back at the grade's refund multiplier (item 8661: 64 500 price, 32 250 x 6 refund at grade
+  11). The C# left `unkId` unused, used the client grade unchecked and executed whatever func
+  id `CSBuyCoinItemPacket` named. After a granted purchase both paths advance to the func's
+  `next_phase` through `DoChangePhase` (301 of the 468 purchase rows carry `next_phase > 0`,
+  e.g. `doodad_funcs.id` 10159 -> group 11449); the C# never advanced because
+  `DoodadFuncPurchase.Use` set no `ToNextPhase` and the coin packet called the template
+  directly. **Deviation:** that advance is added behaviour, not a C# port.
 * systems::economy (shop limits, 2026-11-03): the `DoodadFuncPurchase` path claims the purchase
   limit, debits the coins and grants the item as three separate steps; they share the economy
   operation scope but not one `ItemTxn`, so a crash between them can lose the coin and the
@@ -3311,7 +3420,7 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   **Known, not fixed:** there is no per-connection rate limit on the 0x126..=0x129 handlers, and
   the PBKDF2 verification runs while the shared per-account lock is held, so a burst of checks
   can occupy the blocking pool and stall the batch tick (score 3); `CSSetLpManageCharacterPacket`
-  is not gated (WP-E2's `CSEditCharacter` must call `allow_lobby_action`); the lock time is
+  is not gated (`CSEditCharacter` now calls `allow_lobby_action`); the lock time is
   wall-clock unix seconds; and the attempt that observes an expired lock is swallowed (the
   server resets the counter and answers `SCSecondPassAccountLocked(0)` instead of checking it).
   Store errors fail closed: a load that cannot be decoded, or a failure counter that cannot be
@@ -3657,6 +3766,66 @@ and in NPC wandering / buff remaining times.
   20:30..22:30 times never hit one); `view_at` returns None for the whole zone when its next
   rotation cycle cannot be built; and without WP-S2 (declaration) the calendar never enters
   warmup/siege on its own, so periods 3/4 exist only through an explicit GM schedule.
+* systems::housing / systems::social (WP-S6 claim gating): the existing lodestone claim
+  (`social/dominion.rs::declare_effect`) now applies the authored `siege_zones` claim window,
+  the pirate refusal, the owned-dominion limit and the fresh-claim siege delay. The 1.2 client
+  has **no claim validator**: it only maps the server's error id to a text (`FUN_3956b860`),
+  so the ids are EVIDENCED but the check order is this server's policy. Window: a zone with no
+  `siege_zones` row or `open_duration_hours == 0` is `DOMINION_CLOSED` 662 (client case `0x296`;
+  ui_texts 5165 "not yet a region where a territory can be proclaimed", the shipped zero rows
+  are zone groups 54/56); outside the recurring `open_weekday/open_hour/open_duration_hours`
+  window it is `DOMINION_NOT_DECLARE_TIME` 582 (case `0x246`; ui_texts 4662, whose `$2 weekday
+  $3 o'clock $4 hours` parameters are exactly those columns). The window is computed by
+  `dominion::calendar::claim_window_at` (weekday 0 = Sunday INFERRED as everywhere else) and
+  applies **regardless of `Housing.SiegeCalendar`**: that switch drives the inferred weekly
+  cycle, not the authored claim columns. It uses the **real wall clock**; the GM
+  `/dominion clock` is restricted to the calendar view. `open_duration_hours >= 168` covers the
+  whole week and is always open; shorter windows are local wall-clock intervals whose end is
+  `start + N hours` in local time and then converted, so a DST change inside the window keeps
+  the authored local end, and a start in a spring-forward gap moves to the first valid local
+  instant. Zone groups 54/56 (`open_duration_hours = 0`) are therefore **unclaimable** (662),
+  and a zone group without a `siege_zones` row is also Closed. Pirates are
+  refused with `DOMINION_NOT_AVAILABLE_FOR_PIRATES` 351 (case `0x15f`; ui_texts 2298 "Pirates
+  cannot proclaim a territory") when the expedition's mother faction is the pirate faction 161
+  or the leader's **persisted** faction is (`db_character::persisted_faction`, so a temporary
+  duel / battlefield team faction does not count); this is EVIDENCED text, and the pirate-guild
+  research (PIRATE-1) is the authority for the expedition test. The owned-territory limit is
+  `TOO_MANY_OWNED_DOMINIONS` 441 (case `0x1b9`; ui_texts 2500) from the new configurable
+  `Housing.DominionClaimLimit` (default 10, from `siege_settings` rows 0..=10; the retail limit
+  is UNKNOWN). The count is taken inside `DominionManager::declare_unowned_with_limit` under
+  the same lock as the claim, so concurrent claims cannot both pass, and the pack is consumed
+  only after it. GM-seeded ephemeral dominions (`nation dominion` test hook) do not count.
+  Order: window (662 before 582) -> pirate 351 -> limit 441. The
+  `world_var_defaults.var_delay_siege_x_days_after_dominion_declare` = 30 delay is EVIDENCED
+  data with INFERRED meaning: a freshly **claimed** dominion gets no cycle for 30 days.
+  `DominionState::claimed_at` (new persisted `dominions.claimed_at` column) is set only by
+  `declare_unowned_with_limit`; a siege capture updates `reign_start_at` but clears
+  `claimed_at`, and a forced release clears both, so a captured territory does not inherit or
+  start the protection. `view_at_protected` keeps a claim in peace and names the first rotation
+  cycle at or after `claimed_at + 30 days` (the calendar and snapshot paths pass it; an explicit
+  GM schedule still overrides). The delay does **not** refuse a claim and has no client error id (UNKNOWN
+  in the research), so no claim error is invented for it. GM `/dominion` commands are
+  unchanged. Tests: `a_claim_outside_the_authored_open_window_is_refused`,
+  `the_gm_calendar_clock_does_not_move_the_claim_window` (582 through the data),
+  `a_claim_in_a_zone_whose_window_never_opens_is_refused_as_closed`,
+  `a_pirate_expedition_cannot_claim_a_dominion`, `a_pirate_leader_cannot_claim_a_dominion`,
+  `a_temporary_duel_team_faction_does_not_make_the_leader_a_pirate`,
+  `a_temporary_team_on_a_saved_pirate_leader_is_still_refused`,
+  `a_claim_over_the_owned_dominion_limit_is_refused`,
+  `ephemeral_seeded_dominions_do_not_count_toward_the_claim_limit`,
+  `claim_gate_errors_follow_the_documented_order`,
+  `a_fresh_claim_has_no_siege_cycle_during_the_authored_delay`,
+  `a_captured_territory_does_not_get_the_fresh_claim_protection`,
+  `a_claim_records_claimed_at_and_restart_keeps_it`,
+  `claim_window_uses_the_authored_open_weekday_hour_and_duration`,
+  `claim_window_uses_local_end_and_falls_forward_across_a_dst_change`,
+  `fresh_claim_protection_refuses_cycles_until_the_delay_expires`. Live (lane stack, headless
+  `aaemu-testclient` on the seeded Archeum Lodestones): claiming the open zone group 33
+  succeeded (`SCHouseBuildProgress`, `SCDominionData`); the never-open zone group 54 refused
+  with 662 and kept the pack; a pirate guild (mother 161) in the open zone group 33 refused
+  with 351; a fresh claim in zone group 34 reported period 5 with `started` about 45 days out
+  (the first rotation cycle after reign + 30 days). The recurring 582 case needs a narrow
+  `open_*` window and was not live-driven because all four shipped open rows are 168 h.
   Any registered current attacker may
   engrave; initial claim requires the current guild leader and exact Purified Archeum pack.
   Capture transfers the nine independently itemized fort designs to the new guild leader,

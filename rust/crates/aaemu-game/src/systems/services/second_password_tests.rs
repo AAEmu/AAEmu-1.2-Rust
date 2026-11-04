@@ -1152,3 +1152,50 @@ async fn protocol_errors_report_the_stored_failed_count() {
     assert_eq!(store.row(42).failed, 3, "protocol errors do not count");
     assert_eq!(hasher.verifies(), 0, "no hashing on protocol errors");
 }
+
+/// `CSEditCharacter` is a lobby action: without the second password it must answer with the
+/// check key tables (type 4) and leave the character untouched, exactly like create/delete.
+#[tokio::test]
+async fn lobby_edit_is_refused_until_the_second_password_is_checked() {
+    let store = Arc::new(MemoryStore::default());
+    let hasher = Arc::new(CountingHasher::new());
+    let server = server_with(store.clone(), hasher.clone());
+    server
+        .config
+        .update(|config| config.characters.pre_select_period = true);
+    let mut first = TestClient::new(&server, 1, 42);
+    create_password(&server, &mut first, 42, "1234abcd").await;
+    first.drain();
+
+    let mut client = TestClient::new(&server, 2, 42);
+    let mut character = crate::test_support::test_character(7, "Edited", 1.0, 2.0);
+    character.account_id = 42;
+    let name = character.unit.name.clone();
+    client.conn.characters.push(character);
+    let packet = crate::packets::c2g_world::CSEditCharacterPacket {
+        character_id: 7,
+        request: crate::managers::character::CreateCharacterRequest {
+            name: "Edited".into(),
+            race: 1,
+            gender: 1,
+            body_items: [0; 7],
+            model_params: Default::default(),
+            ability1: 7,
+            ability2: 11,
+            ability3: 11,
+            level: 1,
+        },
+    };
+    packet
+        .handle(&server, &mut client.conn)
+        .await
+        .expect("edit");
+    let frames = client.drain();
+    assert_eq!(frames.len(), 1, "{frames:?}");
+    assert_eq!(frames[0].0, sc::SCSecondPassKeyTablesPacket);
+    assert_eq!(frames[0].1[0], 4, "the server pushes check tables (type 4)");
+    assert!(!client.conn.second_password.passed);
+    assert_eq!(client.conn.characters.len(), 1);
+    assert_eq!(client.conn.characters[0].unit.name, name);
+    assert_eq!(client.conn.characters[0].unit.model_params.kind.0, 0);
+}

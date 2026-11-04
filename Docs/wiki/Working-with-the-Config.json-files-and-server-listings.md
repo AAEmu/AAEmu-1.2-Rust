@@ -47,7 +47,9 @@ Use `Config.Local.json` (gitignored) for machine-specific overrides;
       "Name": "AAEmu.Game",
       "Host": "127.0.0.1",
       "Port": 1239,
-      "Hidden": false
+      "Hidden": false,
+      "MaxConcurrent": 0,
+      "QueueLimit": 100
     }
   ]
 }
@@ -60,6 +62,47 @@ Field meanings:
 - `Host`: address reachable by clients.
 - `Port`: client connection port.
 - `Hidden`: whether to hide this entry from listing.
+- `MaxConcurrent` (default `0`): world login queue capacity, in slots (accounts in
+  the game lobby/world plus world cookies the client has not consumed yet). `0`
+  disables the queue and is the behaviour before the queue existed. See
+  "World login queue" below.
+- `QueueLimit` (default `100`): maximum number of clients waiting in that world's
+  queue. When it is reached a new enter-world request is refused with
+  `ACEnterWorldDenied`. `0` means the packet field limit (`65535`); it is ignored
+  while `MaxConcurrent` is `0`.
+
+### World login queue
+
+The login server queues `CAEnterWorld` instead of passing it on when the world is
+at `MaxConcurrent` slots. The game server reports its slot occupancy (accounts in
+the lobby/world plus unconsumed world cookies) in `GL_GAME_SERVER_LOAD` and in
+every `GLPlayerEnter` response, so the login server knows when a slot frees and
+admits the head of the FIFO queue without waiting for a client to retry.
+
+```json
+{ "Id": 1, "Name": "AAEmu.Game", "Host": "127.0.0.1", "Port": 1239,
+  "MaxConcurrent": 200, "QueueLimit": 100 }
+```
+
+- While queued, the client receives `ACWorldQueue` with its 1-based position and
+  the normal-queue length; every queue change sends the new positions.
+- When a slot frees, the head receives `ACWorldQueue` with `myTurn = 0` and then
+  the normal `ACWorldCookie`; the next client moves to position 1.
+- `CACancelEnterWorld` and disconnecting remove the entry. Entries die with their
+  connection.
+- A reconnect token still bypasses the world list/queue path: it is issued by the
+  game server only after a fully authenticated session, as before.
+- Refusals use `ACEnterWorldDenied`. The 1.2 client's handler (`FUN_393d51d0`)
+  ignores the reason byte and shows "error_failed_to_connect_to_server".
+- **Capture-pending (account WP-H):** the premium-entrance bit of
+  `CAEnterWorld.flag` is not identified, and the login server has no premium
+  source in 1.2 data. v1 treats every client as normal: `isPremium = false`,
+  `premiumLength = 0`.
+
+The queue is per configured `GameServers` entry. It starts at occupancy 0 and is
+updated by the game server's first load report (sent when it registers); a mixed
+version game server that does not send the occupancy extension reads as 0, which
+disables the gate (fail-open).
 
 ### Character slots and the pre-select period
 
@@ -80,11 +123,15 @@ The login server tells the client how many characters an account has:
   `Characters:MaxPerAccount` must be the same value; it enforces the limit.
 - `AdditionalCharactersPerServer` (default `0`): the expandable limit the client
   shows for slot-increase items.
-- `PreSelectCharacterPeriod` (default `false`): tells the client it may edit
-  characters at character select. It requires the lobby character-edit packet
-  (WP-E2), which is not implemented yet: with the flag on, the client's Start
-  button sends `CSEditCharacter` instead of entering the world, so the login
-  server refuses a config with `PreSelectCharacterPeriod = true`.
+- `PreSelectCharacterPeriod` (default `false`): the character pre-select
+  period. When on, the client's Start button opens the character-edit window
+  instead of entering the world (`CSEditCharacter`), so the player can still
+  change a freshly created character's name, appearance, body items and ability
+  before playing; world entry (`CSSelectCharacter`) is refused until the period
+  ends. The login reports this value to the game server when it registers, and
+  the game applies it, so the two servers cannot disagree. Only the account's
+  own, not-deleted character that never entered the world can be edited; the
+  second-password gate applies. Leave it off for normal play.
 
 Purchased character slots (`accounts.extra_character_slots`, from the slot
 increase item) are sent by the game server's `SCGetSlotCount` as the purchased
@@ -106,6 +153,8 @@ GameServers__0__Name=AAEmu.Game
 GameServers__0__Host=127.0.0.1
 GameServers__0__Port=1239
 GameServers__0__Hidden=false
+GameServers__0__MaxConcurrent=200
+GameServers__0__QueueLimit=100
 ```
 
 ## Game server configuration and precedence
@@ -131,12 +180,13 @@ values to `Config.Local.json` or environment variables.)
 ### Game character settings (`Characters`)
 
 The game server's `Configurations/CharacterSettings.json` carries the base slot
-count the login server advertises:
+count the login server advertises and the pre-select period:
 
 ```json
 {
   "Characters": {
-    "MaxPerAccount": 6
+    "MaxPerAccount": 6,
+    "PreSelectPeriod": false
   }
 }
 ```
@@ -147,9 +197,19 @@ count the login server advertises:
   Character creation is refused once the account already has
   `MaxPerAccount + extra_character_slots` characters (a MySQL read error on the
   extra slots falls back to the base).
+- `PreSelectPeriod` (default `false`): fallback for the login server's
+  `Login:PreSelectCharacterPeriod`. The game learns the effective value from the
+  login's game-server registration reply and applies it (a mismatch is logged as
+  a warning); this local value is only used when the login does not report it
+  (an older login). While the period is on, `CSEditCharacter` is applied for the
+  account's own, undeleted character that never entered the world, and world
+  entry is refused. The edit re-runs character creation with the edited name,
+  appearance, body items and ability. The startup log prints `Character
+  pre-select period on/off`. A refused edit sends no reply (the 1.2 client has
+  no failure path for it) and logs the reason.
 
-It can also be overridden in the game's `Config.Local.json` or with the
-environment variable `Characters__MaxPerAccount`.
+Both can also be overridden in the game's `Config.Local.json` or with the
+environment variables `Characters__MaxPerAccount` and `Characters__PreSelectPeriod`.
 
 ## Account payment and premium (`Account:DefaultPayment`)
 

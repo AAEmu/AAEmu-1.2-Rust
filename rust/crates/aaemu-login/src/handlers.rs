@@ -26,7 +26,7 @@ pub async fn handle_c2l(
 ) -> anyhow::Result<()> {
     match packet {
         C2lPacket::CancelEnterWorld(_) => {
-            conn.cancel_enter_world();
+            conn.cancel_enter_world(server).await;
             Ok(())
         }
         C2lPacket::ChallengeResponse2(p) => {
@@ -123,13 +123,28 @@ pub async fn handle_g2l(
     match packet {
         G2lPacket::GameServerLoad(p) => {
             let gs_id = authorize_game_server(server, conn, None)?;
-            server.games.set_load(gs_id, p.load)
+            server.games.set_load(gs_id, p.load)?;
+            if !p.has_online {
+                server.games.warn_missing_occupancy(gs_id);
+            }
+            server.games.note_online(gs_id, p.online, p.sequence);
+            server.games.drain_queues(server).await;
+            Ok(())
         }
         G2lPacket::PlayerEnter(p) => {
             authorize_game_server(server, conn, Some(p.gs_id))?;
+            if !p.has_online {
+                server.games.warn_missing_occupancy(p.gs_id);
+            }
+            // Release the queue reservation even when the client connection is already gone;
+            // the answer still reflects the game's occupancy after handling the request.
+            server
+                .games
+                .note_enter_world_result(p.gs_id, p.connection_id, p.online, p.sequence);
             server
                 .games
                 .route_enter_world_response(p.connection_id, p.gs_id, p.result);
+            server.games.drain_queues(server).await;
             Ok(())
         }
         G2lPacket::PlayerReconnect(p) => {
@@ -147,10 +162,12 @@ pub async fn handle_g2l(
                 // Reply after the same delay as before, then close: a peer must not keep
                 // guessing the secret on the same connection.
                 let conn = conn.clone();
+                let pre_select_character_period = server.games.pre_select_character_period();
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     conn.send_packet(&LgRegisterGameServer {
                         result: GsRegisterResult::Error,
+                        pre_select_character_period,
                     });
                     tokio::time::sleep(Duration::from_millis(200)).await;
                     conn.close();

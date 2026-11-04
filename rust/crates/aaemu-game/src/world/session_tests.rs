@@ -871,3 +871,27 @@ async fn select_applies_the_premium_grade_buff_only_for_premium_accounts() {
         }
     }
 }
+
+/// During the pre-select period the client's Start button edits the character instead of
+/// entering the world; a forged `CSSelectCharacter` must not enter either.
+#[tokio::test]
+async fn select_is_refused_during_the_pre_select_period() {
+    let mut config = crate::config::AppConfig {
+        id: 1,
+        ..Default::default()
+    };
+    config.characters.pre_select_period = true;
+    let server = crate::test_support::test_server_with_config(GameData::empty(), config);
+    server.db.close().await;
+    let mut client = TestClient::new(&server, 1, 1007);
+    let mut character = test_character(9, "Pre", 1.0, 2.0);
+    character.account_id = 1007;
+    client.conn.characters.push(character);
+    session::select_character(&server, &mut client.conn, 9)
+        .await
+        .expect("refused without entering");
+    assert!(client.conn.active_char.is_none());
+    assert_eq!(client.conn.state, GameState::Lobby);
+    assert_eq!(server.enter_world.character_owner(9), None);
+    assert!(client.drain().is_empty());
+}

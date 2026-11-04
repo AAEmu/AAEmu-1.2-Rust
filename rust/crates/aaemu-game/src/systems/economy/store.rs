@@ -359,6 +359,45 @@ impl CSBuyItemsPacket {
             }
         }
 
+        // A doodad checkout holds the doodad's phase-operation reservation from the
+        // current-phase validation until the phase advance after the commit, so the func group
+        // cannot move between them (the coin path does the same).
+        let _phase_operation = if self.doodad_obj_id != 0 {
+            match &doodad {
+                Some(d) => {
+                    let Some(operation) = crate::systems::npcs::doodad::phase::Operation::enter(d)
+                    else {
+                        return;
+                    };
+                    Some(operation)
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+
+        // A `DoodadFuncPurchase` dialog writes the func's `doodad_funcs` row id into the
+        // packet's `unkId` (`FUN_393b8040` / `FUN_397ac3f0` at `x2game.dll.c`), and its money
+        // price is the item template's, paid through this packet like a shop line. The coin
+        // form of the same func arrives as `CSBuyCoinItemPacket`.
+        let purchase = if self.doodad_obj_id != 0 && self.unk_id != 0 {
+            doodad.as_ref().and_then(|d| {
+                let data = &server.game_data.systems.npcs.doodad;
+                let group = d.data().func_group_id;
+                data.func(self.unk_id)
+                    .filter(|f| f.group_id == group && f.func_type == "DoodadFuncPurchase")
+                    .and_then(|f| match data.func_template(f.func_id, &f.func_type) {
+                        Some(crate::systems::npcs::doodad::templates::FuncTemplate::Purchase(
+                            p,
+                        )) => Some((p, f.next_phase)),
+                        _ => None,
+                    })
+            })
+        } else {
+            None
+        };
+
         // If a Doodad was provided, check if we're near it and whether it is a shop. The C#
         // only checked the distance and sold any template (TODO "validate doodad shop").
         if self.doodad_obj_id != 0 {
@@ -374,10 +413,11 @@ impl CSBuyItemsPacket {
             }
         }
 
-        // Only goods of the interacting shop's catalog can be bought. Without one (no NPC, no
-        // `DoodadFuncStoreUi` doodad) every template would be buyable, so refuse the purchase
-        // (buy-back needs no catalog and stays allowed).
-        if !self.buy.is_empty() && pack_id.is_none() {
+        // Only goods of the interacting shop's catalog or of the named money-priced
+        // `DoodadFuncPurchase` can be bought. Without one (no NPC, no `DoodadFuncStoreUi`, no
+        // purchase func) every template would be buyable, so refuse the purchase (buy-back
+        // needs no catalog and stays allowed).
+        if !self.buy.is_empty() && pack_id.is_none() && purchase.is_none() {
             tracing::warn!(
                 "{}: rejected BuyItems of {} item(s) without a merchant catalog (npc {}, doodad {})",
                 p.data().unit.name,
@@ -393,6 +433,7 @@ impl CSBuyItemsPacket {
         let mut honor_points = 0i32;
         let mut vocation_badges = 0i32;
         let mut items_buy = Vec::new();
+        let mut purchase_used = false;
         // The per-character purchase allowance is per item template: lines of the same item
         // (whatever grade or currency) add up to one claim.
         let mut claims: HashMap<u32, ShopClaim> = HashMap::new();
@@ -411,7 +452,14 @@ impl CSBuyItemsPacket {
                 (Some(pack), Some(h)) => h.merchant_sells(server, pack, e.item_id, e.grade),
                 _ => false,
             };
-            if !sells {
+            // The purchase func sells its own item at the template price; a coin-item priced
+            // func only checks out through `CSBuyCoinItemPacket` (and is refused here).
+            let purchase_line = purchase.filter(|(f, _)| {
+                f.coin_item_id == 0
+                    && f.item_id == e.item_id
+                    && f.currency_id == u32::from(e.currency)
+            });
+            if !sells && purchase_line.is_none() {
                 continue;
             }
             let Some(template) = server.game_data.items.template(e.item_id) else {
@@ -420,6 +468,24 @@ impl CSBuyItemsPacket {
             if template.max_count <= 0 {
                 return;
             }
+            // The func offers one grade only (`fixed_grade` if the template has one, else basic)
+            // and sells whole func bundles. Without the grade rule a forged high-grade line was
+            // bought at the template price and sold back at the grade's refund multiplier
+            // (item 8661: 64 500 price, 32 250 * 6 refund at grade 11).
+            let purchase_sells = purchase_line.is_some_and(|(f, _)| {
+                f.count > 0
+                    && e.count % f.count == 0
+                    && e.grade
+                        == if template.fixed_grade >= 0 {
+                            template.fixed_grade as u8
+                        } else {
+                            0
+                        }
+            });
+            if !sells && !purchase_sells {
+                continue;
+            }
+            purchase_used |= purchase_sells;
             let (price, total) = match e.currency {
                 shop_currency_type::MONEY => (template.price, &mut money),
                 shop_currency_type::HONOR => (template.honor_price, &mut honor_points),
@@ -578,43 +644,63 @@ impl CSBuyItemsPacket {
         drop(buyback);
         drop(bag);
         drop(character);
-        let mut out = txn.out();
-        if honor_points > 0 {
-            out.send(
-                &p,
-                SCGamePointChangedPacket {
-                    kind: game_point_kind::HONOR,
-                    amount: -honor_points,
-                },
-            );
-        }
-        if vocation_badges > 0 {
-            out.send(
-                &p,
-                SCGamePointChangedPacket {
-                    kind: game_point_kind::VOCATION,
-                    amount: vocation_change,
-                },
-            );
-        }
-        if money > 0 {
+        {
+            let mut out = txn.out();
+            if honor_points > 0 {
+                out.send(
+                    &p,
+                    SCGamePointChangedPacket {
+                        kind: game_point_kind::HONOR,
+                        amount: -honor_points,
+                    },
+                );
+            }
+            if vocation_badges > 0 {
+                out.send(
+                    &p,
+                    SCGamePointChangedPacket {
+                        kind: game_point_kind::VOCATION,
+                        amount: vocation_change,
+                    },
+                );
+            }
+            if money > 0 {
+                out.send(
+                    &p,
+                    SCItemTaskSuccessPacket {
+                        action: task_type::DEPOSIT_MONEY,
+                        tasks: vec![ItemTask::MoneyChange(-money)],
+                        force_remove: Vec::new(),
+                    },
+                );
+            }
             out.send(
                 &p,
                 SCItemTaskSuccessPacket {
-                    action: task_type::DEPOSIT_MONEY,
-                    tasks: vec![ItemTask::MoneyChange(-money)],
+                    action: task_type::STORE_BUY,
+                    tasks,
                     force_remove: Vec::new(),
                 },
             );
         }
-        out.send(
-            &p,
-            SCItemTaskSuccessPacket {
-                action: task_type::STORE_BUY,
-                tasks,
-                force_remove: Vec::new(),
-            },
-        );
+        // The economy operation ends before the phase funcs (they may start item operations of
+        // their own); the doodad's phase reservation stays held until this function returns.
+        drop(txn);
+        if purchase_used {
+            if let Some((_, next_phase)) = purchase {
+                if next_phase > 0 {
+                    if let Some(d) = &doodad {
+                        crate::systems::npcs::doodad::manager::do_change_phase(
+                            server,
+                            &world,
+                            d,
+                            Some(&WorldObject::from(&p)),
+                            next_phase,
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 sync_client_packet!(CSBuyItemsPacket);
@@ -897,7 +983,9 @@ impl CSBuyPriestBuffPacket {
 }
 sync_client_packet!(CSBuyPriestBuffPacket);
 
-/// `CSBuyCoinItemPacket`.
+/// `CSBuyCoinItemPacket`: `bc objId`, `u32 funcId` (`doodad_funcs.id`). The 1.2 client sends
+/// it from a `DoodadFuncPurchase` dialog priced in a coin item (`FUN_393b80d0`, coin dialog
+/// `FUN_393bac20`); the npcs hook validates the func, phase and range before the purchase runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSBuyCoinItemPacket {
     pub obj_id: u32,

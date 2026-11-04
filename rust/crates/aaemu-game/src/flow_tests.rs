@@ -141,24 +141,26 @@ async fn lobby_flow_end_to_end() {
     let (login_tx, mut login_rx) = mpsc::unbounded_channel();
     server.login.set(Some(login_tx));
 
-    // ---- L2G: LGPlayerEnter(accountId 1000, connectionId 4242) -> GLPlayerEnter(4242, gs 1, 0)
+    // ---- L2G: LGPlayerEnter(accountId 1000, connectionId 4242) -> GLPlayerEnter(4242, gs 1, 0,
+    // online 1: the pending cookie occupies one slot; the two trailing u32 are the Rust queue
+    // occupancy and report sequence).
     assert!(crate::login::handle(&server, &hex("01 00  E8 03 00 00  92 10 00 00")).await);
     assert_eq!(
         login_rx.try_recv().unwrap(),
-        hex("01 00  92 10 00 00  01  00")
+        hex("01 00  92 10 00 00  01  00  01 00 00 00  01 00 00 00")
     );
     // A second LGPlayerEnter for the same connection id throws in C# (no reply). Here the stale
     // entry (a cookie that was never used) is replaced and answered.
     assert!(crate::login::handle(&server, &hex("01 00  E9 03 00 00  92 10 00 00")).await);
     assert_eq!(
         login_rx.try_recv().unwrap(),
-        hex("01 00  92 10 00 00  01  00")
+        hex("01 00  92 10 00 00  01  00  01 00 00 00  02 00 00 00")
     );
     // ... and back to account 1000 for the rest of the flow.
     assert!(crate::login::handle(&server, &hex("01 00  E8 03 00 00  92 10 00 00")).await);
     assert_eq!(
         login_rx.try_recv().unwrap(),
-        hex("01 00  92 10 00 00  01  00")
+        hex("01 00  92 10 00 00  01  00  01 00 00 00  03 00 00 00")
     );
     assert!(login_rx.try_recv().is_err());
 
@@ -322,9 +324,16 @@ async fn lobby_flow_end_to_end() {
         hex("03 00  05 00 00 00  06 00 00 00  00 00 00 00")
     );
 
-    // ---- LGRegisterGameServer: 0 keeps the link, anything else closes it
+    // ---- LGRegisterGameServer: 0 keeps the link, anything else closes it. The Rust-only tail
+    // carries the login's pre-select period, which the game applies.
     assert!(crate::login::handle(&server, &[0x00, 0x00, 0x00]).await);
     assert!(!crate::login::handle(&server, &[0x00, 0x00, 0x01]).await);
+    assert!(!server.config.characters.pre_select_period);
+    assert!(crate::login::handle(&server, &[0x00, 0x00, 0x00, 0x01]).await);
+    assert!(
+        server.config.characters.pre_select_period,
+        "the login's pre-select period is authoritative"
+    );
 }
 
 /// A character with one equipped armor piece in slot 3 (chest).
@@ -494,12 +503,20 @@ async fn dispatch_edge_cases() {
         .unwrap();
     assert_eq!(c.drain(), vec![l2(pp::FastPongPacket, &[9, 0, 0, 0])]);
 
-    // A packet whose C# `Read` only logs an error: the connection stays up.
+    // A registered packet whose handler only logs: the connection stays up.
     server
-        .handle_frame(&mut c.conn, &c2s_l1(cs::CSEditCharacterPacket, &[1, 2, 3]))
+        .handle_frame(
+            &mut c.conn,
+            &c2s_l1(cs::CSCriminalLockedPacket, &[1, 0, 0, 0]),
+        )
         .await
         .unwrap();
     assert!(!c.conn.is_closing());
+    // `CSEditCharacterPacket` is a real reader now; its body must decode.
+    assert!(server
+        .handle_frame(&mut c.conn, &c2s_l1(cs::CSEditCharacterPacket, &[1, 2, 3]))
+        .await
+        .is_err());
     // Levels other than 1 and 2 have no table (C# KeyNotFoundException -> Shutdown).
     for level in [0u8, 3, 4, 5] {
         assert!(server
