@@ -34,9 +34,9 @@
 //!
 //! # Eligibility
 //!
-//! `paid_patron` is the connection's payment state ([`accounts::connection_payment`], premium for
-//! every account today); the premium grade and PC-bang membership have no 1.2 source, so rows
-//! that need a specific grade or a PC-bang are never listed.
+//! `paid_patron` / `premium_grade_id` come from the account's payment and premium state
+//! ([`accounts::state`], WP-B). The 1.2 client has no PC-bang membership flag and no PC-bang
+//! source exists, so `pc_bang` stays false and rows that need one are never listed.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -84,10 +84,14 @@ pub enum TakeOutcome {
 }
 
 /// What the claim path knows about the account (see the module documentation).
-pub fn eligibility(now: i64) -> ScheduleEligibility {
+pub fn eligibility(server: &GameServer, account_id: u32, now: i64) -> ScheduleEligibility {
+    let state = accounts::state(server, account_id);
     ScheduleEligibility {
-        paid_patron: accounts::connection_payment().premium_state(now),
-        premium_grade_id: 0,
+        paid_patron: state.payment.premium_state(now),
+        premium_grade_id: i32::from(crate::systems::services::premium::grade_of_state(
+            server, &state, now,
+        )),
+        // No 1.2 PC-bang membership source exists (see the module documentation).
         pc_bang: false,
     }
 }
@@ -96,7 +100,7 @@ pub fn eligibility(now: i64) -> ScheduleEligibility {
 pub fn on_enter(server: &GameServer, player: &PlayerRef) {
     let account_id = player.data().account_id;
     let now = Utc::now().timestamp();
-    let evidence = eligibility(now);
+    let evidence = eligibility(server, account_id, now);
     let manager = &server.systems.npcs.schedule_items;
     let rows = {
         let mut map = manager.lock();
@@ -124,7 +128,7 @@ pub fn on_enter(server: &GameServer, player: &PlayerRef) {
 pub fn on_leave(server: &GameServer, player: &PlayerRef) {
     let account_id = player.data().account_id;
     let now = Utc::now().timestamp();
-    let evidence = eligibility(now);
+    let evidence = eligibility(server, account_id, now);
     let manager = &server.systems.npcs.schedule_items;
     {
         let _gate = server.systems.economy.ops_lock();
@@ -147,7 +151,6 @@ pub fn on_leave(server: &GameServer, player: &PlayerRef) {
 /// character whose list changed. Returns how many packets were sent.
 pub fn tick(server: &GameServer) -> usize {
     let now = Utc::now().timestamp();
-    let evidence = eligibility(now);
     let data = &server.game_data.systems.npcs.schedule_items;
     let manager = &server.systems.npcs.schedule_items;
 
@@ -155,11 +158,12 @@ pub fn tick(server: &GameServer) -> usize {
     {
         let _gate = server.systems.economy.ops_lock();
         let mut map = manager.lock();
-        for account in map.values_mut() {
+        for (account_id, account) in map.iter_mut() {
             let online = account.online_character_ids();
             if online.is_empty() {
                 continue;
             }
+            let evidence = eligibility(server, *account_id, now);
             account.tick(now, data, &evidence);
             let rows = account.build_update_rows(data, now, &evidence);
             due.extend(online.into_iter().map(|id| (id, rows.clone())));
@@ -208,7 +212,7 @@ fn send_rows(server: &GameServer, player: &PlayerRef, rows: Vec<ScheduleItem>) {
 /// Re-sends the current list to every online character of `account_id`.
 fn resend_account(server: &GameServer, account_id: u32) {
     let now = Utc::now().timestamp();
-    let evidence = eligibility(now);
+    let evidence = eligibility(server, account_id, now);
     let (online, rows) = {
         let map = server.systems.npcs.schedule_items.lock();
         let Some(account) = map.get(&account_id) else {
@@ -262,7 +266,7 @@ fn deliver(
     schedule_id: i32,
 ) -> TakeOutcome {
     let now = Utc::now().timestamp();
-    let evidence = eligibility(now);
+    let evidence = eligibility(server, account_id, now);
     let data = &server.game_data.systems.npcs.schedule_items;
     let manager = &server.systems.npcs.schedule_items;
 

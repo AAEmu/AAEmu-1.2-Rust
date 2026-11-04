@@ -63,6 +63,16 @@ pub struct AccountDetails {
     pub last_labor_tick: Option<NaiveDateTime>,
     pub last_credits_tick: Option<NaiveDateTime>,
     pub last_loyalty_tick: Option<NaiveDateTime>,
+    /// `accounts.pay_method` (`1` Premium, `3` Demo, `5` None, `0` = unset: use
+    /// `Account:DefaultPayment`).
+    pub pay_method: i32,
+    pub pay_location: i32,
+    /// Unix seconds (`SCAccountInfo.payStart`).
+    pub pay_start: i64,
+    /// Unix seconds (`SCAccountInfo.payEnd`).
+    pub pay_end: i64,
+    /// `accounts.premium_point` (grade = `premium_grades` lookup, client `FUN_397a7d10`).
+    pub premium_point: i32,
 }
 
 /// `AccountManager.GetAccountDetailsInternal`, including the create-on-first-use insert.
@@ -81,7 +91,7 @@ pub async fn get_account_details(
     }
 }
 
-async fn try_get_account_details(
+pub(crate) async fn try_get_account_details(
     pool: &MySqlPool,
     config: &AppConfig,
     account_id: u32,
@@ -89,7 +99,10 @@ async fn try_get_account_details(
     let row = sqlx::query(
         "SELECT CAST(account_id AS SIGNED) AS account_id, CAST(access_level AS SIGNED) AS access_level, \
          CAST(labor AS SIGNED) AS labor, CAST(credits AS SIGNED) AS credits, CAST(loyalty AS SIGNED) AS loyalty, \
-         last_updated, last_login, last_labor_tick, last_credits_tick, last_loyalty_tick \
+         last_updated, last_login, last_labor_tick, last_credits_tick, last_loyalty_tick, \
+         CAST(pay_method AS SIGNED) AS pay_method, CAST(pay_location AS SIGNED) AS pay_location, \
+         CAST(pay_start AS SIGNED) AS pay_start, CAST(pay_end AS SIGNED) AS pay_end, \
+         CAST(premium_point AS SIGNED) AS premium_point \
          FROM accounts WHERE account_id = ?",
     )
     .bind(account_id)
@@ -107,6 +120,11 @@ async fn try_get_account_details(
             last_labor_tick: dt(&row, "last_labor_tick"),
             last_credits_tick: dt(&row, "last_credits_tick"),
             last_loyalty_tick: dt(&row, "last_loyalty_tick"),
+            pay_method: int(&row, "pay_method")? as i32,
+            pay_location: int(&row, "pay_location")? as i32,
+            pay_start: int(&row, "pay_start")?,
+            pay_end: int(&row, "pay_end")?,
+            premium_point: int(&row, "premium_point")? as i32,
         });
     }
 
@@ -165,6 +183,54 @@ pub async fn update_login_time(
         return Some(Utc::now().naive_utc());
     }
     res.last_login
+}
+
+/// `accounts.pay_method` / `pay_location` / `pay_start` / `pay_end` / `premium_point` in one
+/// upsert (a GM grant / removal). The GM may target an account that has no game row yet (only a
+/// login account exists), so the row is inserted when missing instead of silently affecting
+/// zero rows. Callers hold the account lock (`AccountManager::lock_of`) and report the error to
+/// the GM; `set_payment` does not apply the in-memory change when this fails.
+pub async fn update_account_payment(
+    pool: &MySqlPool,
+    account_id: u32,
+    pay_method: i32,
+    pay_location: i32,
+    pay_start: i64,
+    pay_end: i64,
+    premium_point: i32,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO accounts (account_id, pay_method, pay_location, pay_start, pay_end, premium_point) \
+         VALUES (?, ?, ?, ?, ?, ?) \
+         ON DUPLICATE KEY UPDATE pay_method = VALUES(pay_method), pay_location = VALUES(pay_location), \
+         pay_start = VALUES(pay_start), pay_end = VALUES(pay_end), premium_point = VALUES(premium_point)",
+    )
+    .bind(account_id)
+    .bind(pay_method)
+    .bind(pay_location)
+    .bind(pay_start)
+    .bind(pay_end)
+    .bind(premium_point)
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("update_account_payment({account_id}): {e}");
+        crate::GameError::from(e)
+    })?;
+    Ok(())
+}
+
+/// Writes only `accounts.premium_point` (the connect / expiry / disconnect transitions keep the
+/// stored payment method untouched). Callers hold the account lock.
+pub async fn update_premium_point(pool: &MySqlPool, account_id: u32, premium_point: i32) {
+    if let Err(e) = sqlx::query("UPDATE accounts SET premium_point = ? WHERE account_id = ?")
+        .bind(premium_point)
+        .bind(account_id)
+        .execute(pool)
+        .await
+    {
+        tracing::error!("update_premium_point({account_id}): {e}");
+    }
 }
 
 /// `AccountManager.AddCredits` / `AddLoyalty`: `INSERT ... ON DUPLICATE KEY UPDATE col = col +

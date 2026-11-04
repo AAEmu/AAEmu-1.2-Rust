@@ -165,7 +165,12 @@ impl ClientPacket for FinishStatePacket {
                         platform_url: Self::PLATFORM_URL.into(),
                         commerce_url: Self::COMMERCE_URL.into(),
                     });
-                    let p = conn.payment.clone();
+                    // WP-B: the account registry is the source of truth; the connection keeps a
+                    // cached copy (set by `AccountManager.Add`).
+                    let state =
+                        crate::systems::services::accounts::state(server, conn.account_id());
+                    conn.payment = state.payment.clone();
+                    let p = state.payment;
                     conn.send(&SCAccountInfoPacket {
                         pay_method: p.method as i32,
                         pay_location: p.location,
@@ -197,11 +202,27 @@ impl ClientPacket for FinishStatePacket {
                 3..=6 => conn.send(&ChangeStatePacket {
                     state: self.state + 1,
                 }),
-                7 => conn.send(&SCUpdatePremiumPointPacket {
-                    point: 1,
-                    old_pg: 1,
-                    pg: 1,
-                }),
+                7 => {
+                    // The C# sent a hard-coded (1, 1, 1); send the account's real point and
+                    // grade (client handler FUN_39186340 stores the point at player+0x68c and
+                    // only raises the grade-change event when oldPg != pg).
+                    let state = crate::systems::services::accounts::expire_lazily(
+                        server,
+                        conn.account_id(),
+                    )
+                    .await;
+                    let point = crate::systems::services::premium::effective_point(
+                        server,
+                        &state,
+                        chrono::Utc::now().timestamp(),
+                    );
+                    let grade = crate::systems::services::premium::grade_for_point(server, point);
+                    conn.send(&SCUpdatePremiumPointPacket {
+                        point,
+                        old_pg: grade,
+                        pg: grade,
+                    });
+                }
                 s => tracing::info!("Unknown state: {s}"),
             }
             Ok(())
