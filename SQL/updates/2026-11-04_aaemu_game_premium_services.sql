@@ -2,11 +2,13 @@
 -- the list answered by `CSPremiumServiceList` (0x136) comes from this operator table instead of
 -- the C# hard-coded 30-day entry.
 --
--- One row becomes one `SCPremiumServiceList` (0x1d8) detail per packet; the client handler
--- `FUN_391e25e0` consumes exactly one detail per packet (`size == 0` clears the list) and stores
--- `exchangeRatio` only on the `isEnd` packet. `SCPremiumServiceList` field order
--- (`FUN_397c49b0` -> `FUN_397bf920`): isEnd, size, { cId, cname <= 400, pId, isSell, isHidden,
--- ptime, ptype, price, id, bcount }, exchangeRatio.
+-- One row becomes one `SCPremiumServiceList` (0x1d8) detail per packet. `size` is the expected
+-- TOTAL row count, not the count in this packet: the client handler `FUN_391e25e0` appends the
+-- detail only while `(end - begin) / 0x1b0 < size`, so every packet carries `size = rows` and
+-- `isEnd` is set only on the last one. A `size = 0` packet marks the list ready (empty
+-- catalogue); it does not clear a list. The catalogue is capped at 255 rows (the field is a
+-- u8). `SCPremiumServiceList` field order (`FUN_397c49b0` -> `FUN_397bf920`): isEnd, size,
+-- { cId, cname <= 400, pId, isSell, isHidden, ptime, ptype, price, id, bcount }, exchangeRatio.
 --
 -- `price_type` uses the cash shop currency enum (`ics_skus.currency`): 0 credits (AA cash),
 -- 1 AA points, 2 loyalty, 3 coins. The buy path can atomically debit the account columns credits

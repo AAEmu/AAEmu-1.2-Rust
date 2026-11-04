@@ -12,10 +12,12 @@
 //! * `SCPremiumServiceList` 0x1d8 is `bool isEnd, u8 size, detail, i32 exchangeRatio`
 //!   (`FUN_397c49b0` -> `FUN_397bf920`); detail is `i32 cId, string cname (<= 400),
 //!   u16 pId, u8 isSell, u8 isHidden, i32 ptime, u8 ptype, i32 price, u32 id, i32 bcount`.
-//!   The client handler `FUN_391e25e0` consumes **one detail per packet** (`size == 0` clears the
-//!   list) and stores `exchangeRatio` only on the `isEnd` packet, so the list is sent as one
-//!   packet per row with `size = 1` and `isEnd` only on the last one (one `size = 0, isEnd = true`
-//!   packet for an empty catalogue).
+//!   The client handler `FUN_391e25e0` consumes **one detail per packet**; `size` is the expected
+//!   **total** row count, not the count in this packet: it passes the detail to `FUN_39055e50`,
+//!   which appends only while `(end - begin) / 0x1b0 < size`. Every packet therefore carries
+//!   `size = rows.len()` and `isEnd` is set only on the last one. A `size = 0` packet marks the
+//!   list ready (empty catalogue); it does not clear a list. The catalogue is capped at 255 rows
+//!   (the `u8` field, logged when truncated).
 //! * Buy result: the 1.2 SC table has no dedicated premium-buy result packet. The client's error
 //!   handler (`FUN_391e5070`, reached from `OnErrorMsg`) routes error ids 772..775 to
 //!   `FUN_39055e80` / `FUN_39055a90`, which raise UI event 0x266 with `PSBFR_NONE / NORMAL /
@@ -37,7 +39,26 @@
 //! `audit_ics_sales`, then the transaction commits. The whole path runs under
 //! `AccountManager::lock_of` so the cached state and the packets of one account cannot interleave.
 //! Only the account columns `credits` and `loyalty` can be debited atomically with the grant;
-//! AA points have no balance carrier yet (WP-D) and are refused with error 775.
+//! AA points have no balance carrier yet (WP-D) and are refused with error 775. A loyalty debit
+//! also updates the buyer's `bm_point` and sends `SCBmPointPacket` (the ICS loyalty path). A
+//! permanent premium (`pay_end = 0`, including the configured default) is refused with 773
+//! before the debit: there is no end to extend. A row that still uses `Account:DefaultPayment`
+//! keeps `pay_method = 0`; only its purchased window (`pay_start` / `pay_end`) is stored, which
+//! [`premium::resolve_payment`] reads back as explicit premium. The stored premium point is
+//! raised to `premium_configs.connect_point` at most and never lowered (`max(details.premium_point,
+//! connect_point).clamp(0, max_point)`).
+//!
+//! # Known limits
+//!
+//! * An ambiguous MySQL commit error (e.g. the connection drops during `COMMIT`) answers 773;
+//!   the transaction may have committed, but the cached state is only corrected by the next
+//!   refresh / login.
+//! * The state is published after the account lock is released. A concurrent GM `set_payment`
+//!   can publish in between, so the client may briefly show the purchase state after the GM
+//!   write until the next `SCAccountInfo`. The database row is the one that was written last.
+//! * There is no rate limit on `CSPremiumServiceBuy`; every packet is one charge.
+//! * A GM premium window that starts in the future is not premium yet and is replaced by
+//!   `now..now + hours` by a purchase (not extended).
 
 use std::sync::{Arc, Mutex};
 
@@ -61,7 +82,7 @@ use crate::systems::services::premium;
 use crate::systems::HookSlot;
 use crate::world::PlayerRef;
 
-use super::cash_shop::{self, SCICSCashPointPacket};
+use super::cash_shop::{self, SCBmPointPacket, SCICSCashPointPacket};
 use super::error_message;
 use super::inventory;
 use super::item_handlers::{active, sync_client_packet};
@@ -204,10 +225,12 @@ impl CSPremiumServiceListPacket {
             return;
         }
         let last = services.len() - 1;
+        // `size` is the total row count expected by `FUN_391e25e0`, on every packet.
+        let size = services.len() as u8;
         for (index, service) in services.iter().enumerate() {
             conn.send(&SCPremiumServiceListPacket {
                 is_end: index == last,
-                size: 1,
+                size,
                 detail: service.detail(),
                 exchange_ratio: 0,
             });
@@ -267,8 +290,13 @@ pub enum PurchaseOutcome {
         premium_point: i32,
         /// New `accounts.credits` after a credits debit (`None` for other currencies).
         credits: Option<i32>,
+        /// New `accounts.loyalty` after a loyalty debit (`None` for other currencies).
+        loyalty: Option<i32>,
     },
     InsufficientFunds,
+    /// The resolved payment is a permanent premium (`pay_end == 0`): there is nothing to
+    /// extend, so the buy is refused and nothing is written.
+    PermanentPremium,
     /// A validation / database failure: nothing was written.
     Failed,
 }
@@ -411,6 +439,13 @@ pub async fn load(server: &GameServer) -> Result<()> {
         }
     }
     let count = services.len();
+    if count > usize::from(u8::MAX) {
+        tracing::warn!(
+            "premium_services: {count} rows loaded; only the first {} are served",
+            u8::MAX
+        );
+        services.truncate(usize::from(u8::MAX));
+    }
     manager(server).set_services(services);
     tracing::info!("Loaded {count} premium services");
     Ok(())
@@ -509,6 +544,7 @@ pub async fn execute_buy(server: &GameServer, buyer: &PlayerRef, c_id: i32) -> B
             payment,
             premium_point,
             credits,
+            loyalty,
         } => {
             let state = AccountState {
                 payment,
@@ -519,6 +555,15 @@ pub async fn execute_buy(server: &GameServer, buyer: &PlayerRef, c_id: i32) -> B
             premium::publish_state(server, account_id, &state, old_grade);
             if let Some(credits) = credits {
                 buyer.send(SCICSCashPointPacket { point: credits });
+            }
+            if let Some(loyalty) = loyalty {
+                {
+                    let mut c = buyer.data();
+                    c.bm_point = i64::from(loyalty);
+                }
+                buyer.send(SCBmPointPacket {
+                    bm_point: i64::from(loyalty),
+                });
             }
             tracing::info!(
                 "Account {account_id} bought premium service {} ({})",
@@ -537,6 +582,15 @@ pub async fn execute_buy(server: &GameServer, buyer: &PlayerRef, c_id: i32) -> B
             };
             send_error(buyer, error);
             BuyOutcome::InsufficientFunds
+        }
+        PurchaseOutcome::PermanentPremium => {
+            drop(guard);
+            tracing::info!(
+                "Account {account_id}: premium service {} refused, the account is permanently                  premium",
+                service.c_id
+            );
+            send_error(buyer, error_message::PREMIUM_SERVICE_BUY_FAIL);
+            BuyOutcome::Refused
         }
         PurchaseOutcome::Failed => {
             drop(guard);
@@ -608,13 +662,34 @@ pub(crate) async fn purchase_sql_with_tables(
         premium_point: db::int(&row, "premium_point")? as i32,
         ..AccountDetails::default()
     };
-    let (column, credits_balance) = match request.service.price_type {
-        cash_shop::currency::CREDITS => ("credits", true),
-        cash_shop::currency::LOYALTY => ("loyalty", false),
+    let (column, credits_balance, loyalty_balance) = match request.service.price_type {
+        cash_shop::currency::CREDITS => ("credits", true, false),
+        cash_shop::currency::LOYALTY => ("loyalty", false, true),
         _ => {
             tx.rollback().await?;
             return Ok(PurchaseOutcome::Failed);
         }
+    };
+    let current = premium::resolve_payment(request.default_payment, &details);
+    // A permanent premium (pay_end = 0, including the owner-decided default) has no end to
+    // extend. Refuse before the debit so nothing is charged.
+    if current.premium_state(request.now) && current.end_time == 0 {
+        tx.rollback().await?;
+        return Ok(PurchaseOutcome::PermanentPremium);
+    }
+    // A row that still uses `Account:DefaultPayment` keeps pay_method 0; only the purchased
+    // window (pay_start/pay_end) is stored, which `resolve_payment` reads back as explicit
+    // premium. An explicit payment row becomes Premium.
+    let from_default = details.pay_method == 0;
+    let pay_method = if from_default {
+        0
+    } else {
+        PaymentMethodType::Premium as i32
+    };
+    let pay_location = if from_default {
+        details.pay_location
+    } else {
+        1
     };
     let price = request.service.price;
     // Check and take in the same statement: a concurrent second buy matches zero rows.
@@ -631,15 +706,19 @@ pub(crate) async fn purchase_sql_with_tables(
         tx.rollback().await?;
         return Ok(PurchaseOutcome::InsufficientFunds);
     }
-    let current = premium::resolve_payment(request.default_payment, &details);
-    let payment = extend_payment(&current, request.service.hours, request.now);
-    let premium_point = request.connect_point.clamp(0, request.max_point.max(0));
+    let mut payment = extend_payment(&current, request.service.hours, request.now);
+    payment.location = pay_location;
+    // Never lower an existing premium point; the connect point is a floor, capped by max_point.
+    let premium_point = details
+        .premium_point
+        .max(request.connect_point)
+        .clamp(0, request.max_point.max(0));
     sqlx::query(&format!(
         "UPDATE {accounts_table} SET pay_method = ?, pay_location = ?, pay_start = ?, \
          pay_end = ?, premium_point = ? WHERE account_id = ?"
     ))
-    .bind(payment.method as i32)
-    .bind(payment.location)
+    .bind(pay_method)
+    .bind(pay_location)
     .bind(payment.start_time)
     .bind(payment.end_time)
     .bind(premium_point)
@@ -671,10 +750,16 @@ pub(crate) async fn purchase_sql_with_tables(
     } else {
         None
     };
+    let loyalty = if loyalty_balance {
+        Some(details.loyalty.saturating_sub(price))
+    } else {
+        None
+    };
     tx.commit().await?;
     Ok(PurchaseOutcome::Purchased {
         payment,
         premium_point,
         credits,
+        loyalty,
     })
 }

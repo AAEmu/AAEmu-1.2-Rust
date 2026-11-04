@@ -293,9 +293,19 @@ pub fn default_payment(default: DefaultPayment) -> AccountPayment {
     }
 }
 
-/// The effective payment of an account row: `pay_method = 0` means the configured default.
+/// The effective payment of an account row: `pay_method = 0` means the configured default,
+/// unless a premium purchase wrote an explicit window on the row (the shop keeps `pay_method`
+/// at 0 on a default row, so a stored `pay_start` / `pay_end` is a purchased premium window).
 pub fn resolve_payment(default: DefaultPayment, details: &AccountDetails) -> AccountPayment {
     if details.pay_method == 0 {
+        if details.pay_start != 0 || details.pay_end != 0 {
+            return AccountPayment {
+                method: PaymentMethodType::Premium,
+                location: details.pay_location,
+                start_time: details.pay_start,
+                end_time: details.pay_end,
+            };
+        }
         return default_payment(default);
     }
     AccountPayment {
@@ -713,5 +723,24 @@ mod tests {
         assert_eq!(resolved.method, PaymentMethodType::Demo);
         assert_eq!(resolved.location, 2);
         assert_eq!((resolved.start_time, resolved.end_time), (10, 20));
+    }
+
+    #[test]
+    fn default_row_with_a_purchased_window_resolves_to_premium() {
+        let premium = resolve_payment(
+            DefaultPayment::None,
+            &AccountDetails {
+                pay_method: 0,
+                pay_location: 1,
+                pay_start: 100,
+                pay_end: 200,
+                ..AccountDetails::default()
+            },
+        );
+        assert_eq!(premium.method, PaymentMethodType::Premium);
+        assert_eq!((premium.start_time, premium.end_time), (100, 200));
+        // No stored window: the configured default still applies.
+        let none = resolve_payment(DefaultPayment::None, &details(0, 0));
+        assert_eq!(none.method, PaymentMethodType::None);
     }
 }
