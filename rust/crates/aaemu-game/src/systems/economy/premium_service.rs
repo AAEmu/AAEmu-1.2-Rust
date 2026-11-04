@@ -226,7 +226,7 @@ impl CSPremiumServiceListPacket {
         }
         let last = services.len() - 1;
         // `size` is the total row count expected by `FUN_391e25e0`, on every packet.
-        let size = services.len() as u8;
+        let size = services.len().min(usize::from(u8::MAX)) as u8;
         for (index, service) in services.iter().enumerate() {
             conn.send(&SCPremiumServiceListPacket {
                 is_end: index == last,
