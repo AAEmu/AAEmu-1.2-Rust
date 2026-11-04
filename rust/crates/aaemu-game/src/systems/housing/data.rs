@@ -10,10 +10,10 @@
 //! * The localized texts `HousingManager` reads at runtime (`housings.name` without fallback for
 //!   a new house, `items.name` of design items for the untranslated-name fallback in `Build`).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
-use chrono::NaiveDateTime;
+use chrono::{NaiveDate, NaiveDateTime};
 use rusqlite::Connection;
 use serde_json::Value;
 
@@ -85,6 +85,73 @@ pub struct SiegePlan {
     pub week_start: NaiveDateTime,
 }
 
+/// The three-week zone-group rotation of `siege_plans`.
+///
+/// A plan row means "this zone group runs the weekly cycle in that week". The shipped table
+/// covers 2014 only and repeats each zone twice per listed week; rows are deduplicated here.
+/// Weeks before the first plan have no cycle. Weeks after the last plan (and unlisted gaps)
+/// continue the three-week rotation measured from `first_week`, which is a server policy:
+/// the retail recurrence after 2014 is UNKNOWN.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SiegeRotation {
+    first_week: Option<NaiveDate>,
+    listed: BTreeMap<NaiveDate, BTreeSet<u32>>,
+    slots: [BTreeSet<u32>; 3],
+}
+
+impl SiegeRotation {
+    pub fn from_plans(plans: &HashMap<u32, Vec<SiegePlan>>) -> Self {
+        let mut listed: BTreeMap<NaiveDate, BTreeSet<u32>> = BTreeMap::new();
+        for (zone_group_id, rows) in plans {
+            for row in rows {
+                let week = row.week_start.date();
+                if row.zone_group_id == *zone_group_id {
+                    listed.entry(week).or_default().insert(*zone_group_id);
+                }
+            }
+        }
+        let mut slots: [BTreeSet<u32>; 3] = Default::default();
+        let first_week = listed.keys().next().copied();
+        if let Some(first) = first_week {
+            for (week, zones) in &listed {
+                let index = ((*week - first).num_days().div_euclid(7)).rem_euclid(3) as usize;
+                slots[index].extend(zones.iter().copied());
+            }
+        }
+        Self {
+            first_week,
+            listed,
+            slots,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.first_week.is_none()
+    }
+
+    /// The zone groups listed for an exact plan week (duplicates removed).
+    pub fn week(&self, week: NaiveDate) -> Option<&BTreeSet<u32>> {
+        self.listed.get(&week)
+    }
+
+    /// Whether `zone_group_id` runs a cycle in the week that starts on `week` (Sunday).
+    pub fn has_cycle(&self, zone_group_id: u32, week: NaiveDate) -> bool {
+        let Some(first) = self.first_week else {
+            return false;
+        };
+        if week < first {
+            return false;
+        }
+        match self.listed.get(&week) {
+            Some(zones) => zones.contains(&zone_group_id),
+            None => {
+                let index = ((week - first).num_days().div_euclid(7)).rem_euclid(3) as usize;
+                self.slots[index].contains(&zone_group_id)
+            }
+        }
+    }
+}
+
 /// Raw 1.2 siege timings and referenced content (`siege_zones`). Weekday numbers retain the
 /// database convention. Loading these values does not start a siege or authorize a capture.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -134,6 +201,11 @@ pub struct CastleReferenceData {
 }
 
 impl CastleReferenceData {
+    /// The deduplicated three-week rotation of the loaded `siege_plans`.
+    pub fn siege_rotation(&self) -> SiegeRotation {
+        SiegeRotation::from_plans(&self.siege_plans)
+    }
+
     pub fn load(conn: &Connection) -> Result<Self, GameDataError> {
         let mut data = Self::default();
         for_each_row(conn, "SELECT * FROM guard_tower_settings", [], |r| {
