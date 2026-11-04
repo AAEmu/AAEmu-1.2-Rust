@@ -242,6 +242,20 @@ id (`doodads` prints the template and object id of every doodad in sight), and `
 into `GameState::doodad_complete_quests` as `(doodad object id, quest id)` and prints it decoded,
 so a ready report doodad can be checked with `expectpkt SCDoodadCompleteQuestPacket` before `cqd`.
 
+The same script drives crafting, mail and the auction house. The C->S bodies follow the 1.2
+client writer functions (not the server readers), and the S->C replies are decoded from the client
+reader layouts: `cexec <craft> <doodad obj id> <count>` sends `CSExecuteCraft`
+(`FUN_397bbfc0`) and prints `SCCraftItemUnlock` / `SCCraftFailed`; `maillist` sends the empty
+`CSListMail` and decodes every `SCMailList` header (`FUN_398a5a00`) and `SCMailListEnd`;
+`mailread <isSent 0|1> <mailId>` sends `CSReadMail` (`FUN_397ba350`) and decodes `SCMailBody`
+(`FUN_397af2d0` / `FUN_398a5e60`) with its attachments; `aucpost <npc template> <item template>
+<start> <buyout> <duration>` walks to an auctioneer NPC, interacts and sends `CSAuctionPost`
+(`FUN_397bae70`), printing the `SCAuctionPosted` lot id; `aucbid <npc template> <lot id> <money>`
+sends `CSBidAuction` (`FUN_397bb050` / `FUN_398a6880`) and prints `SCAuctionBid` /
+`SCAuctionMessage`. `item <template> <count>` supplies the lot item. A second character is needed
+to bid on a lot (the server refuses the seller's own bid); bidding twice with it produces the
+outbid refund mail, which `maillist` / `mailread` can then read.
+
 `portal` (GM account, same prerequisites as `questitem`) records a book entry with `/add_portal`, deletes it
 with `CSDeletePortal` and requires `SCPortalDeleted`, then teleports next to the Harpa Training Ground Memory Tome
 (doodad 841), casts its binding skill 14602 with a doodad target and requires `SCCharacterReturnDistricts` with the
