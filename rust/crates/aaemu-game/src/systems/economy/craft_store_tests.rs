@@ -25,8 +25,9 @@ use crate::systems::economy::item_packets::{
     SCCharacterLaborPowerChangedPacket, SCGamePointChangedPacket,
 };
 use crate::systems::economy::specialty::{
-    self, CSRequestSpecialtyCurrentPacket, CSSpecialtyRatioPacket, SCSpecialtyCurrentPacket,
-    SCSpecialtyRatioPacket,
+    self, CSListSpecialtyGoodsPacket, CSRequestSpecialtyCurrentPacket, CSSpecialtyRatioPacket,
+    SCSpecialtyCurrentPacket, SCSpecialtyGoodsPacket, SCSpecialtyRatioPacket,
+    SCSpecialtyRecordsPacket, SpecialtyGood, SpecialtyRecord,
 };
 use crate::systems::economy::store::{self, *};
 use crate::systems::economy::store_data::{
@@ -387,14 +388,55 @@ fn sc_expert_expanded_and_specialty_bytes() {
         results: vec![(PACK, 130), (GLIDER, 70)],
     };
     let mut want = PacketStream::new();
-    want.write_i32(2)
-        .write_u16(5)
+    // 1.2 reader FUN_391822b0: from, to, count, then the pairs.
+    want.write_u16(5)
         .write_u16(9)
+        .write_i32(2)
         .write_u32(PACK)
         .write_u32(130)
         .write_u32(GLIDER)
         .write_u32(70);
     assert_eq!(bytes(&p), want.into_bytes());
+}
+
+#[test]
+fn sc_specialty_goods_and_records_bytes() {
+    // 1.2 reader FUN_39185ba0: i32 count, then 16-byte `specialty_bundle_items` records
+    // (item_id, profit, ratio, specialty_bundle_id; loader FUN_396cadf0).
+    let goods = vec![SpecialtyGood {
+        item_id: 26488,
+        profit: 12100,
+        ratio: 3273,
+        specialty_bundle_id: 13,
+    }];
+    let mut want = PacketStream::new();
+    want.write_i32(1)
+        .write_u32(26488)
+        .write_u32(12100)
+        .write_u32(3273)
+        .write_u32(13);
+    assert_eq!(bytes(&SCSpecialtyGoodsPacket { goods }), want.into_bytes());
+
+    // 1.2 reader FUN_39181ff0 reads the count at +0xc, two leading fields at +0x10/+0x14 and
+    // the records at +0x18 (it discards them; 10.x record layout: i32 ratio, i64 timestamp).
+    let records = vec![SpecialtyRecord {
+        ratio: 128,
+        recorded: 1_700_000_000,
+    }];
+    let mut want = PacketStream::new();
+    want.write_i32(1)
+        .write_u16(22)
+        .write_u32(26488)
+        .write_i32(128)
+        .write_i64(1_700_000_000);
+    assert_eq!(
+        bytes(&SCSpecialtyRecordsPacket {
+            zone_group_id: 22,
+            item_id: 26488,
+            records,
+        }),
+        want.into_bytes()
+    );
 }
 
 #[test]
@@ -1888,6 +1930,261 @@ async fn sell_trade_pack_refused_without_mail() {
         vec![(sc::SCErrorMsgPacket, err_bytes(169, 169, 0, true))]
     );
     assert!(Inv::of(&pa).equipped(equip_slot::BACKPACK).is_some());
+}
+
+#[tokio::test]
+async fn list_specialty_goods_answers_with_the_npc_bundle() {
+    let mut w = world();
+    spawn_npc(&mut w, TRADER_NPC, 4321, 102.0);
+    let mut s = PacketStream::new();
+    s.write_bc(TRADER_NPC);
+    run::<CSListSpecialtyGoodsPacket>(&mut w, 0, s.as_bytes());
+    let f = w.a.drain();
+    assert_eq!(f.len(), 1);
+    assert_eq!(f[0].0, sc::SCSpecialtyGoodsPacket);
+    assert_eq!(
+        f[0].1,
+        bytes(&SCSpecialtyGoodsPacket {
+            goods: vec![SpecialtyGood {
+                item_id: PACK,
+                profit: 5000,
+                ratio: 1200,
+                specialty_bundle_id: 77,
+            }],
+        })
+    );
+
+    // A non-specialty NPC still gets the (empty) answer.
+    let mut s = PacketStream::new();
+    s.write_bc(0x777777);
+    run::<CSListSpecialtyGoodsPacket>(&mut w, 0, s.as_bytes());
+    let f = w.a.drain();
+    assert_eq!(
+        f,
+        vec![(sc::SCSpecialtyGoodsPacket, 0i32.to_le_bytes().to_vec())]
+    );
+}
+
+#[tokio::test]
+async fn specialty_ratio_reply_carries_the_sale_record_history() {
+    let mut w = world();
+    let mailer = Arc::new(Mailer::default());
+    w.server.systems.economy.store.hooks.install(mailer);
+    spawn_npc(&mut w, TRADER_NPC, 4321, 102.0);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+    pa.data()
+        .actability
+        .actabilities
+        .push(crate::models::char_data::Actability {
+            id: 31,
+            point: 0,
+            step: 0,
+        });
+    give(&w, &pa, slot_type::EQUIPMENT, PACK, 1, equip_slot::BACKPACK);
+    let mut s = PacketStream::new();
+    s.write_bc(TRADER_NPC);
+    run::<CSSellBackpackGoodsPacket>(&mut w, 0, s.as_bytes());
+    assert_eq!(w.a.drain().len(), 3);
+
+    // The client asks for the equipped pack's rate; the answer now also carries the history.
+    let mut s = PacketStream::new();
+    s.write_u32(PACK);
+    run::<CSSpecialtyRatioPacket>(&mut w, 0, s.as_bytes());
+    let f = w.a.drain();
+    assert_eq!(f.len(), 2);
+    assert_eq!(f[0].0, sc::SCSpecialtyRatioPacket);
+    assert_eq!(f[0].1, 130i32.to_le_bytes().to_vec());
+    assert_eq!(f[1].0, sc::SCSpecialtyRecordsPacket);
+    let mut s = PacketStream::from_bytes(f[1].1.clone());
+    assert_eq!(s.read_i32().unwrap(), 1);
+    assert_eq!(s.read_u16().unwrap(), 0); // the test world has no zone groups
+    assert_eq!(s.read_u32().unwrap(), PACK);
+    assert_eq!(s.read_i32().unwrap(), 130);
+    assert!(s.read_i64().unwrap() > 0);
+    assert_eq!(s.remaining(), 0);
+}
+
+#[tokio::test]
+async fn sell_trade_pack_labor_uses_the_commerce_step_multiplier() {
+    let mut w = world();
+    let mailer = Arc::new(Mailer::default());
+    w.server.systems.economy.store.hooks.install(mailer);
+    spawn_npc(&mut w, TRADER_NPC, 4321, 102.0);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+    pa.data()
+        .actability
+        .actabilities
+        .push(crate::models::char_data::Actability {
+            id: 31,
+            point: 0,
+            step: 4, // Actability.GetLaborCostMultiplier(4) = 0.85 -> 60 * 0.85 = 51
+        });
+    give(&w, &pa, slot_type::EQUIPMENT, PACK, 1, equip_slot::BACKPACK);
+    let mut s = PacketStream::new();
+    s.write_bc(TRADER_NPC);
+    run::<CSSellBackpackGoodsPacket>(&mut w, 0, s.as_bytes());
+    assert_eq!(pa.data().labor_power, 49);
+    let f = w.a.drain();
+    let labor = f
+        .iter()
+        .find(|(op, _)| *op == sc::SCCharacterLaborPowerChangedPacket)
+        .expect("labor packet");
+    assert_eq!(
+        labor.1,
+        bytes(&SCCharacterLaborPowerChangedPacket {
+            amount: -51,
+            action: 31,
+            point: 51,
+            step: 4,
+        })
+    );
+}
+
+#[tokio::test]
+async fn sell_trade_pack_profit_share_follows_the_global_feature_set() {
+    let mut w = world();
+    let mailer = Arc::new(Mailer::default());
+    w.server.systems.economy.store.hooks.install(mailer.clone());
+    spawn_npc(&mut w, TRADER_NPC, 4321, 102.0);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+    pa.data()
+        .actability
+        .actabilities
+        .push(crate::models::char_data::Actability {
+            id: 31,
+            point: 0,
+            step: 0,
+        });
+    // The runtime `FeaturesManager.Fsets` is the global set (a GM command can change it).
+    assert!(w.server.systems.services.set_feature(
+        &w.server,
+        crate::data::Feature::BackpackProfitShare as u8,
+        false
+    ));
+
+    let pack = give(&w, &pa, slot_type::EQUIPMENT, PACK, 1, equip_slot::BACKPACK);
+    Inv::of(&pa)
+        .equipment()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(pack)
+        .unwrap()
+        .made_unit_id = 2;
+    let mut s = PacketStream::new();
+    s.write_bc(TRADER_NPC);
+    run::<CSSellBackpackGoodsPacket>(&mut w, 0, s.as_bytes());
+    assert_eq!(mailer.0.lock().unwrap().len(), 1);
+    w.a.drain();
+
+    assert!(w.server.systems.services.set_feature(
+        &w.server,
+        crate::data::Feature::BackpackProfitShare as u8,
+        true
+    ));
+    pa.data().labor_power = 200;
+    let pack = give(&w, &pa, slot_type::EQUIPMENT, PACK, 1, equip_slot::BACKPACK);
+    Inv::of(&pa)
+        .equipment()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(pack)
+        .unwrap()
+        .made_unit_id = 2;
+    let mut s = PacketStream::new();
+    s.write_bc(TRADER_NPC);
+    run::<CSSellBackpackGoodsPacket>(&mut w, 0, s.as_bytes());
+    assert_eq!(mailer.0.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn specialty_sale_sends_the_configured_negotiation_bonus() {
+    let mut w = world();
+    w.server
+        .config
+        .update(|c| c.specialty.negotiation_bonus_percent = 10.0);
+    let mailer = Arc::new(Mailer::default());
+    w.server.systems.economy.store.hooks.install(mailer.clone());
+    spawn_npc(&mut w, TRADER_NPC, 4321, 102.0);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+    pa.data()
+        .actability
+        .actabilities
+        .push(crate::models::char_data::Actability {
+            id: 31,
+            point: 0,
+            step: 0,
+        });
+    give(&w, &pa, slot_type::EQUIPMENT, PACK, 1, equip_slot::BACKPACK);
+    let mut s = PacketStream::new();
+    s.write_bc(TRADER_NPC);
+    run::<CSSellBackpackGoodsPacket>(&mut w, 0, s.as_bytes());
+    // pre-interest 7000 * 130% = 9100; +10% bargaining = 910; +5% interest 455 -> 10465.
+    let mails = mailer.0.lock().unwrap().clone();
+    assert_eq!(mails.len(), 1);
+    assert_eq!(mails[0].item_count_bonus, 910);
+    assert_eq!(mails[0].item_count_for_seller, 10465);
+    // `SPECIALTY_MARGIN` (626, the notice for a money bonus).
+    assert!(w
+        .a
+        .drain()
+        .iter()
+        .any(|(op, body)| *op == sc::SCErrorMsgPacket && *body == err_bytes(626, 626, 0, true)));
+}
+
+#[tokio::test]
+async fn sold_pack_with_a_crafter_delivers_the_crafter_mail() {
+    let mut d = data();
+    d.items.templates.insert(
+        crate::data::items::ITEM_COINS,
+        ItemTemplate::plain(crate::data::items::ITEM_COINS, 1_000_000),
+    );
+    let mut w = world_with_data(d);
+    crate::systems::economy::wiring::install(&w.server);
+    w.server.names.add_character(1, "Alice", 1001);
+    w.server.names.add_character(2, "Bob", 1002);
+    spawn_npc(&mut w, TRADER_NPC, 4321, 102.0);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+    pa.data()
+        .actability
+        .actabilities
+        .push(crate::models::char_data::Actability {
+            id: 31,
+            point: 0,
+            step: 0,
+        });
+    let pack = give(&w, &pa, slot_type::EQUIPMENT, PACK, 1, equip_slot::BACKPACK);
+    Inv::of(&pa)
+        .equipment()
+        .lock()
+        .unwrap()
+        .get_item_by_id_mut(pack)
+        .unwrap()
+        .made_unit_id = 2;
+    let mut s = PacketStream::new();
+    s.write_bc(TRADER_NPC);
+    run::<CSSellBackpackGoodsPacket>(&mut w, 0, s.as_bytes());
+    let mails: Vec<(u32, String, i32)> = w
+        .server
+        .systems
+        .economy
+        .mail
+        .state()
+        .all
+        .iter()
+        .map(|(_, m)| (m.header.receiver_id, m.title.clone(), m.body.copper_coins))
+        .collect();
+    assert_eq!(mails.len(), 2, "seller and crafter mails: {mails:?}");
+    assert!(mails
+        .iter()
+        .any(|m| m.0 == 1 && m.1 == "Speciality Payment [Delivery]" && m.2 == 7644));
+    assert!(mails
+        .iter()
+        .any(|m| m.0 == 2 && m.1 == "Speciality Payment [Crafter]" && m.2 == 1911));
 }
 
 // ---------------------------------------------------------------------------------------------

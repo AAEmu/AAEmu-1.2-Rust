@@ -553,6 +553,12 @@ pub struct SpecialtyConfig {
     pub ratio_regen_tick_minutes: f64,
     #[serde(rename = "tradepackmaildelayinminutes", deserialize_with = "lenient")]
     pub trade_pack_mail_delay_in_minutes: f64,
+    /// `SpecialtyManager` negotiation ("bargaining") bonus, percent of the pre-interest sale
+    /// price. The 1.2 client shows the bonus (`ui_texts` `sell_backpack_body2`,
+    /// `SPECIALTY_MARGIN` 626, `SPECIALTY_COIN_MARGIN` 677) but no formula or threshold is
+    /// evidenced; 0 keeps the C# 1.2 behaviour.
+    #[serde(rename = "negotiationbonuspercent", deserialize_with = "lenient")]
+    pub negotiation_bonus_percent: f64,
 }
 
 impl Default for SpecialtyConfig {
@@ -566,6 +572,7 @@ impl Default for SpecialtyConfig {
             ratio_decrease_tick_minutes: 1.0,
             ratio_regen_tick_minutes: 60.0,
             trade_pack_mail_delay_in_minutes: 480.0,
+            negotiation_bonus_percent: 0.0,
         }
     }
 }

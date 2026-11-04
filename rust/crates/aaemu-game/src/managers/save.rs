@@ -23,6 +23,7 @@ pub(crate) struct FinancialSnapshot {
     pub(crate) auctions: crate::systems::economy::auction::AuctionSaveBatch,
     pub(crate) items: super::item::ItemSaveBatch,
     pub(crate) shop_purchases: Vec<crate::systems::economy::shop_limits::ShopPurchaseRow>,
+    pub(crate) specialty_records: Vec<crate::systems::economy::specialty::PendingSpecialtyRecord>,
     pub(crate) schedule_items:
         crate::systems::npcs::schedule_item_persistence::PreparedScheduleSave,
     pub(crate) characters: Vec<(PlayerRef, Character)>,
@@ -93,6 +94,7 @@ pub(crate) fn capture_financial_snapshot_for(
         items: server.items.prepare_save(),
         // Captured under `ops_lock` with the wallet / item snapshot it belongs to.
         shop_purchases: server.systems.economy.shop_limits.prepare_save(),
+        specialty_records: server.systems.economy.specialty.prepare_save(),
         // Captured under the same `ops_lock` as the granted items / mails of a take.
         schedule_items: server.systems.npcs.schedule_items.prepare_save(),
         characters: players
@@ -277,6 +279,7 @@ struct CharacterSaveAck {
 
 pub(crate) struct FinancialSaveReceipt {
     counts: (usize, usize, usize, usize, usize),
+    specialty_records: usize,
     schedule_items: crate::systems::npcs::schedule_item_manager::ScheduleSaveToken,
     characters: Vec<CharacterSaveAck>,
 }
@@ -307,6 +310,11 @@ pub(crate) async fn write_financial_snapshot(
     let (items, deleted, containers) = server.items.write_prepared(tx, snapshot.items).await?;
     systems +=
         crate::systems::economy::shop_limits::write_prepared(tx, snapshot.shop_purchases).await?;
+    let specialty_records = crate::systems::economy::specialty::SpecialtyManager::write_prepared(
+        tx,
+        &snapshot.specialty_records,
+    )
+    .await?;
     let (auction_updated, auction_deleted) = server
         .systems
         .economy
@@ -353,6 +361,7 @@ pub(crate) async fn write_financial_snapshot(
     systems += save_stage(server, tx, SaveStage::AfterCharacters).await?;
     Ok(FinancialSaveReceipt {
         counts: (items, deleted, containers, characters.len(), systems),
+        specialty_records,
         schedule_items,
         characters,
     })
@@ -363,6 +372,11 @@ pub(crate) fn commit_financial_snapshot(server: &GameServer, receipt: FinancialS
     server.systems.housing.dominions.commit_save();
     server.systems.economy.mail.commit_save();
     server.systems.economy.auction.commit_save();
+    server
+        .systems
+        .economy
+        .specialty
+        .commit_save(receipt.specialty_records);
     server.systems.social.bounties.commit_save();
     server.items.commit_save();
     server

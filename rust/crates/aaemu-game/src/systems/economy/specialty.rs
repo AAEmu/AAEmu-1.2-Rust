@@ -5,12 +5,13 @@
 //! `CSBuySpecialtyItemPacket`, `SCSpecialtyRatioPacket`, `SCSpecialtyCurrentPacket`).
 //! The tables live in [`super::store_data::StoreData`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use aaemu_commons::{Marshal, PacketStream};
+use sqlx::{MySql, Row, Transaction};
 
-use crate::data::features::{Feature, FeatureSet};
+use crate::data::features::Feature;
 use crate::data::items::ITEM_COINS;
 use crate::error::Result;
 use crate::models::container::equip_slot;
@@ -33,6 +34,16 @@ use super::store::{parent_world, world_distance, SpecialtyMail};
 
 /// `ActabilityType.Commerce`.
 pub const ACTABILITY_COMMERCE: i32 = 31;
+
+/// 1.2 `SCSpecialtyGoodsPacket`: the client reads an `i32` count at body +0x0 and at most 20
+/// (`0x14`) fixed 16-byte records after it (`FUN_39185ba0` -> `FUN_394fcbc0`/`FUN_394fcaa0`).
+pub const MAX_SPECIALTY_GOODS: usize = 20;
+
+/// History kept (and sent) per (zone group, item). The 1.2 client's `0x9b` handler
+/// (`FUN_39181ff0`) drops the body (`FUN_394fb300` returns immediately), so this is a server
+/// limit, matching the 10.x reference's 256.
+pub const MAX_SPECIALTY_RECORDS: usize = 256;
+const MAX_PENDING_RECORDS: usize = 4096;
 
 /// `AppConfiguration.Specialty` (`SpecialtyConfig`; the C# defaults — the Rust configuration
 /// does not have this section yet).
@@ -78,11 +89,42 @@ impl Ratios {
     }
 }
 
+/// One `SCSpecialtyGoodsPacket` record: the client's `specialty_bundle_items` row
+/// (`FUN_396cadf0`) is 16 bytes, `item_id`, `profit`, `ratio`, `specialty_bundle_id`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpecialtyGood {
+    pub item_id: u32,
+    pub profit: u32,
+    pub ratio: u32,
+    pub specialty_bundle_id: u32,
+}
+
+/// One `SCSpecialtyRecordsPacket` record. The 1.2 client discards the body; the `i32` ratio /
+/// `i64` timestamp pair is the 10.x reference (`SpecialtyMarketRecord`, `SCSpecialtyRecordsPacket`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpecialtyRecord {
+    pub ratio: i32,
+    pub recorded: i64,
+}
+
+/// A row waiting for the next `SaveManager.DoSave` (inside its transaction).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingSpecialtyRecord {
+    pub zone_group_id: u32,
+    pub item_id: u32,
+    pub ratio: i32,
+    pub recorded: i64,
+}
+
 /// `SpecialtyManager` runtime state (`server.systems.economy.specialty`).
 #[derive(Debug, Default)]
 pub struct SpecialtyManager {
     ratios: Mutex<Ratios>,
     config: Mutex<SpecialtyConfig>,
+    /// Last [`MAX_SPECIALTY_RECORDS`] sale ratios per (zone group, item).
+    records: Mutex<HashMap<(u32, u32), VecDeque<SpecialtyRecord>>>,
+    /// Rows not yet written by `save`; bounded so a long uptime cannot grow it without bound.
+    pending_records: Mutex<VecDeque<PendingSpecialtyRecord>>,
 }
 
 impl SpecialtyManager {
@@ -166,10 +208,164 @@ impl SpecialtyManager {
             .entry(zone_group_id)
             .or_insert(0) += 1;
     }
+
+    /// Adds one sold-pack record (the ratio shown at the sale) to the history and to the rows
+    /// the next save writes.
+    pub fn record_sale(&self, item_id: u32, zone_group_id: u32, ratio: i32) {
+        self.record_sale_at(
+            item_id,
+            zone_group_id,
+            ratio,
+            chrono::Utc::now().timestamp(),
+        );
+    }
+
+    /// [`Self::record_sale`] with an explicit UTC Unix timestamp (tests / replays).
+    pub fn record_sale_at(&self, item_id: u32, zone_group_id: u32, ratio: i32, recorded: i64) {
+        let record = SpecialtyRecord { ratio, recorded };
+        {
+            let mut map = self.records.lock().unwrap_or_else(|e| e.into_inner());
+            let list = map.entry((zone_group_id, item_id)).or_default();
+            if list.len() >= MAX_SPECIALTY_RECORDS {
+                list.pop_front();
+            }
+            list.push_back(record);
+        }
+        let mut pending = self
+            .pending_records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if pending.len() >= MAX_PENDING_RECORDS {
+            pending.pop_front();
+            // Once per overflow is enough: the DB write is the durable copy we keep losing.
+            if pending.len().is_multiple_of(1024) {
+                tracing::warn!(
+                    "specialty records: pending save queue full, dropping the oldest rows"
+                );
+            }
+        }
+        pending.push_back(PendingSpecialtyRecord {
+            zone_group_id,
+            item_id,
+            ratio,
+            recorded,
+        });
+    }
+
+    /// The records of `item_id` in `zone_group_id`, oldest first.
+    pub fn records(&self, item_id: u32, zone_group_id: u32) -> Vec<SpecialtyRecord> {
+        self.records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(zone_group_id, item_id))
+            .map(|list| list.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Replaces the loaded history (startup) and drops anything still pending.
+    pub fn replace_records(&self, rows: Vec<PendingSpecialtyRecord>) {
+        let mut map = self.records.lock().unwrap_or_else(|e| e.into_inner());
+        map.clear();
+        for row in rows {
+            let list = map.entry((row.zone_group_id, row.item_id)).or_default();
+            if list.len() >= MAX_SPECIALTY_RECORDS {
+                list.pop_front();
+            }
+            list.push_back(SpecialtyRecord {
+                ratio: row.ratio,
+                recorded: row.recorded,
+            });
+        }
+        self.pending_records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
+    /// The rows for the next `SaveManager.DoSave` (captured with the financial snapshot).
+    pub fn prepare_save(&self) -> Vec<PendingSpecialtyRecord> {
+        self.pending_records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .copied()
+            .collect()
+    }
+
+    /// Drops the rows a committed transaction wrote.
+    pub fn commit_save(&self, written: usize) {
+        let mut pending = self
+            .pending_records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for _ in 0..written {
+            pending.pop_front();
+        }
+    }
+
+    /// Writes one captured batch inside the save transaction. The rows stay pending until
+    /// [`Self::commit_save`], so a failed save retries them next time.
+    pub async fn write_prepared(
+        tx: &mut Transaction<'_, MySql>,
+        rows: &[PendingSpecialtyRecord],
+    ) -> crate::Result<usize> {
+        for row in rows {
+            sqlx::query(
+                "INSERT INTO `specialty_market_records` \
+                 (`zone_group_id`, `item_id`, `ratio`, `recorded`) VALUES (?, ?, ?, ?)",
+            )
+            .bind(row.zone_group_id)
+            .bind(row.item_id)
+            .bind(row.ratio)
+            .bind(row.recorded)
+            .execute(&mut **tx)
+            .await?;
+        }
+        Ok(rows.len())
+    }
 }
 
-/// `SpecialtyManager.Initialize()`: the ratio consume / regen timers.
+/// Loads `specialty_market_records` at startup (`System::start`).
+pub async fn load_records(server: &GameServer) -> crate::Result<()> {
+    let rows = sqlx::query(
+        "SELECT `zone_group_id`, `item_id`, `ratio`, `recorded` \
+         FROM `specialty_market_records` ORDER BY `recorded` ASC, `id` ASC",
+    )
+    .fetch_all(&server.db)
+    .await?;
+    let mut loaded = Vec::with_capacity(rows.len());
+    for row in rows {
+        loaded.push(PendingSpecialtyRecord {
+            zone_group_id: row.try_get::<u32, _>("zone_group_id")?,
+            item_id: row.try_get::<u32, _>("item_id")?,
+            ratio: row.try_get::<i32, _>("ratio")?,
+            recorded: row.try_get::<i64, _>("recorded")?,
+        });
+    }
+    server.systems.economy.specialty.replace_records(loaded);
+    Ok(())
+}
+
+/// `SpecialtyManager.Initialize()`: the configuration and the ratio consume / regen timers.
 pub fn initialize(server: &Arc<GameServer>) {
+    let configured = &server.config.specialty;
+    server
+        .systems
+        .economy
+        .specialty
+        .set_config(SpecialtyConfig {
+            max_specialty_ratio: configured.max_specialty_ratio,
+            min_specialty_ratio: configured.min_specialty_ratio,
+            ratio_decrease_per_pack: configured.ratio_decrease_per_pack,
+            ratio_increase_per_tick: configured.ratio_increase_per_tick,
+            ratio_decrease_tick_minutes: configured.ratio_decrease_tick_minutes,
+            ratio_regen_tick_minutes: configured.ratio_regen_tick_minutes,
+        });
+    server
+        .systems
+        .economy
+        .mail
+        .set_trade_pack_mail_delay_minutes(configured.trade_pack_mail_delay_in_minutes);
     let Ok(rt) = tokio::runtime::Handle::try_current() else {
         return;
     };
@@ -236,6 +432,93 @@ pub fn get_ratios_for_target_route(
         .collect()
 }
 
+/// The `specialty_bundle_items` rows offered by the specialty NPC `npc_obj_id`, in bundle-item
+/// id order (the client shows a flat list, `CSListSpecialtyGoods` / `SCSpecialtyGoodsPacket`).
+fn specialty_goods_for_npc(
+    server: &GameServer,
+    p: &PlayerRef,
+    npc_obj_id: u32,
+) -> Vec<SpecialtyGood> {
+    let Some(npc) = parent_world(server, p).and_then(|w| w.npc(npc_obj_id)) else {
+        tracing::warn!("ListSpecialtyGoods, no npc objId: {npc_obj_id}");
+        return Vec::new();
+    };
+    let npc_template_id = npc.data().unit.template_id;
+    let data = &server.game_data.systems.economy.store;
+    let Some(specialty_npc) = data.specialty_npcs.get(&npc_template_id) else {
+        tracing::warn!("ListSpecialtyGoods, npc template {npc_template_id} is not a specialty NPC");
+        return Vec::new();
+    };
+    let mut rows: Vec<&super::store_data::SpecialtyBundleItem> = data
+        .specialty_bundle_items
+        .values()
+        .filter(|item| item.specialty_bundle_id == specialty_npc.specialty_bundle_id)
+        .collect();
+    rows.sort_by_key(|item| item.id);
+    let goods: Vec<SpecialtyGood> = rows
+        .into_iter()
+        .take(MAX_SPECIALTY_GOODS)
+        .map(|item| SpecialtyGood {
+            item_id: item.item_id,
+            profit: item.profit,
+            ratio: item.ratio,
+            specialty_bundle_id: item.specialty_bundle_id,
+        })
+        .collect();
+    goods
+}
+
+/// The pack the client asks about with `CSSpecialtyRatioPacket.id`: the requested template when
+/// it is a specialty pack, else the equipped trade pack.
+fn specialty_ratio_item_id(server: &GameServer, p: &PlayerRef, requested: u32) -> Option<u32> {
+    let is_pack = server
+        .game_data
+        .systems
+        .economy
+        .store
+        .specialty_packs
+        .iter()
+        .any(|(id, _)| *id == requested);
+    if is_pack {
+        return Some(requested);
+    }
+    Inv::of(p)
+        .equipped(equip_slot::BACKPACK)
+        .map(|item| item.template_id)
+}
+
+/// The 1.2 sale labor cost: the C# `SpecialtyManager` charged a flat 60 without applying the
+/// actability multiplier. The 1.2 `Actability.GetLaborCostMultiplier` table
+/// (1.00/1.00/0.95/0.90/0.85/0.80/0.77/0.77 by Commerce step) is the ported 1.2 table and the
+/// generic skill path (`Skill.cs:1394`) applies it; do the same here, never below 1.
+fn labor_cost_for_sale(commerce_step: u8) -> i32 {
+    let cost = f64::from(60.0f32 * inventory::actability_labor_cost_multiplier(commerce_step));
+    (cost.round() as i32).max(1)
+}
+
+/// The Commerce actability step (0 when the character has no Commerce row).
+fn commerce_step(p: &PlayerRef) -> u8 {
+    p.data()
+        .actability
+        .actabilities
+        .iter()
+        .find(|a| a.id == ACTABILITY_COMMERCE as u32)
+        .map_or(0, |a| a.step)
+}
+
+/// Negotiation ("bargaining") bonus. The 1.2 client only displays the server-computed values:
+/// `ui_texts` `sell_backpack_body2` / `bargaining_money` / `SPECIALTY_MARGIN` (626) /
+/// `SPECIALTY_COIN_MARGIN` (677) say a Commerce-proficiency bargaining bonus exists, but no
+/// formula or threshold is evidenced. Keep the C# 0 by default; operators may configure a
+/// percentage, applied to the pre-interest sale price.
+fn negotiation_bonus(server: &GameServer, price_no_interest: f32) -> i32 {
+    let percent = server.config.specialty.negotiation_bonus_percent;
+    if percent <= 0.0 {
+        return 0;
+    }
+    (f64::from(price_no_interest) * percent / 100.0).round_ties_even() as i32
+}
+
 /// `GetBasePriceForSpecialty(player, npcObjId)`.
 fn get_base_price_for_specialty(server: &GameServer, p: &PlayerRef, npc_obj_id: u32) -> i32 {
     // Sanity checks
@@ -293,7 +576,8 @@ fn round_f32(v: f32) -> i32 {
 
 /// `SellSpecialty(player, npcObjId)`: returns the base price.
 pub fn sell_specialty(server: &GameServer, p: &PlayerRef, npc_obj_id: u32) -> i32 {
-    if p.data().labor_power < 60 {
+    let labor_cost = labor_cost_for_sale(commerce_step(p));
+    if p.data().labor_power < labor_cost as i16 {
         inventory::send_error_message(p, error_message::NOT_ENOUGH_LABOR_POWER, 0, true);
         return 0;
     }
@@ -318,7 +602,10 @@ pub fn sell_specialty(server: &GameServer, p: &PlayerRef, npc_obj_id: u32) -> i3
 
     // Our backpack isn't null, we have the NPC, time to calculate the profits
     let player_id = p.character_id;
-    // TODO: Get crafter ID of trade-pack
+    // The only evidenced carrier is the item's `made_unit_id`: the craft path stores the
+    // crafting `character_id` there (`craft.rs` -> `acquire_default_item_ex`), and the item
+    // packet writes it back to the client. Any other field the C# hoped for does not exist in
+    // the 1.2 data.
     let crafter_id = if backpack.made_unit_id != player_id {
         backpack.made_unit_id
     } else {
@@ -329,8 +616,8 @@ pub fn sell_specialty(server: &GameServer, p: &PlayerRef, npc_obj_id: u32) -> i3
 
     let final_price_no_interest = base_price as f32 * (price_ratio as f32 / 100f32);
     let interest = final_price_no_interest * (interest_rate as f32 / 100f32);
-    let amount_bonus = 0; // TODO: negotiation bonus
-    let final_price = final_price_no_interest + interest + amount_bonus as f32;
+    let raw_bonus = negotiation_bonus(server, final_price_no_interest);
+    let final_price = final_price_no_interest + interest + raw_bonus as f32;
 
     let hooks = server.systems.economy.store.hooks();
     let specialty_coin_id = hooks.npc_specialty_coin_id(server, &npc);
@@ -339,6 +626,7 @@ pub fn sell_specialty(server: &GameServer, p: &PlayerRef, npc_obj_id: u32) -> i3
     let mut amount_seller = amount_total;
     let mut amount_crafter = 0;
     let mut amount_base = base_price;
+    let mut amount_bonus = raw_bonus;
 
     if specialty_coin_id != 0 {
         // Items are listed in the DB at the same rate as "amounts of gold" so the value needs
@@ -346,15 +634,16 @@ pub fn sell_specialty(server: &GameServer, p: &PlayerRef, npc_obj_id: u32) -> i3
         amount_total = round_f32(amount_total as f32 / 10000f32);
         amount_seller = round_f32(amount_seller as f32 / 10000f32);
         amount_base = round_f32(base_price as f32 / 10000f32);
+        amount_bonus = round_f32(amount_bonus as f32 / 10000f32);
     } else {
         item_type_to_deliver = ITEM_COINS;
     }
 
-    // TODO: implement a global fsets
-    let fsets = FeatureSet::default();
+    // `FeaturesManager.Fsets` (the global / runtime set), not a fresh default.
+    let fsets = server.systems.services.features(server);
 
     // Split up the profit if needed
-    if crafter_id != 0 && crafter_id != player_id && fsets.check(Feature::BackpackProfitShare) {
+    if crafter_id != 0 && fsets.check(Feature::BackpackProfitShare) {
         amount_seller = round_f32(amount_total as f32 * seller_share);
         amount_crafter = amount_total - amount_seller;
     }
@@ -398,9 +687,25 @@ pub fn sell_specialty(server: &GameServer, p: &PlayerRef, npc_obj_id: u32) -> i3
                 Some(backpack.id),
                 &mut txn.env,
             );
-        // TODO: Calculate proper labor by skill level
         let mut out = txn.out();
-        inventory::change_labor(&mut out, server, p, -60, ACTABILITY_COMMERCE);
+        inventory::change_labor(
+            &mut out,
+            server,
+            p,
+            -(labor_cost as i16),
+            ACTABILITY_COMMERCE,
+        );
+    }
+
+    // The client shows a "bargaining succeeded" notice for a non-zero bonus (`specialty_margin`
+    // 626 for coins, `specialty_coin_margin` 677 for specialty coin items).
+    if amount_bonus > 0 {
+        let message = if item_type_to_deliver == ITEM_COINS {
+            error_message::SPECIALTY_MARGIN
+        } else {
+            error_message::SPECIALTY_COIN_MARGIN
+        };
+        inventory::send_error_message(p, message, 0, true);
     }
 
     // SELL_ITEM: the pack sold (value1) at the destination npc template (value2).
@@ -424,6 +729,12 @@ pub fn sell_specialty(server: &GameServer, p: &PlayerRef, npc_obj_id: u32) -> i3
         .economy
         .specialty
         .add_sold_pack(backpack.template_id, zone_group);
+    // Price history (`SCSpecialtyRecordsPacket`) of the ratio actually paid.
+    server
+        .systems
+        .economy
+        .specialty
+        .record_sale(backpack.template_id, zone_group, price_ratio);
     base_price
 }
 
@@ -454,8 +765,37 @@ impl CSSpecialtyRatioPacket {
 
     fn run(self, server: &GameServer, conn: &mut GameConnection) {
         let Some(p) = active(conn) else { return };
-        let ratio = get_ratio_for_specialty(server, &p);
+        let zone_group = player_zone_group(server, &p);
+        // The client sends the pack's item template id; answer for that pack (falling back to
+        // the equipped one when the id is not a specialty pack, as the 1.2 C# always did).
+        let item_id = specialty_ratio_item_id(server, &p, self.id);
+        let ratio = item_id.map_or(0, |item_id| {
+            server
+                .systems
+                .economy
+                .specialty
+                .ratio(item_id, zone_group)
+                .floor() as i32
+        });
         p.send(SCSpecialtyRatioPacket { ratio });
+        // Answer with the sale-ratio history for that pack in the player's zone group. Its 0x9b
+        // handler discards the body (`FUN_39181ff0` -> `FUN_394fb300`).
+        let Some(item_id) = item_id else {
+            return;
+        };
+        let records = server
+            .systems
+            .economy
+            .specialty
+            .records(item_id, zone_group);
+        if records.is_empty() {
+            return;
+        }
+        p.send(SCSpecialtyRecordsPacket {
+            zone_group_id: u16::try_from(zone_group).unwrap_or(0),
+            item_id,
+            records,
+        });
     }
 }
 sync_client_packet!(CSSpecialtyRatioPacket);
@@ -497,7 +837,7 @@ impl CSRequestSpecialtyCurrentPacket {
 }
 sync_client_packet!(CSRequestSpecialtyCurrentPacket);
 
-/// `CSListSpecialtyGoodsPacket` (only logged in C#).
+/// `CSListSpecialtyGoodsPacket` (`FUN_393bf840`: sends the interacted NPC object id).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSListSpecialtyGoodsPacket {
     pub obj_id: u32,
@@ -510,13 +850,21 @@ impl CSListSpecialtyGoodsPacket {
         })
     }
 
-    fn run(self, _server: &GameServer, _conn: &mut GameConnection) {
-        tracing::warn!("ListSpecialtyGoods, ObjId: {}", self.obj_id);
+    fn run(self, server: &GameServer, conn: &mut GameConnection) {
+        let Some(p) = active(conn) else { return };
+        let goods = specialty_goods_for_npc(server, &p, self.obj_id);
+        tracing::debug!(
+            "ListSpecialtyGoods, ObjId: {} -> {} goods",
+            self.obj_id,
+            goods.len()
+        );
+        p.send(SCSpecialtyGoodsPacket { goods });
     }
 }
 sync_client_packet!(CSListSpecialtyGoodsPacket);
 
-/// `CSSpecialtyRecordLoadPacket` (only logged in C#).
+/// `CSSpecialtyRecordLoadPacket` (no 1.2 opcode: not registered, as in C#; the history is sent
+/// with [`SCSpecialtyRecordsPacket`] after `CSSpecialtyRatioPacket`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSSpecialtyRecordLoadPacket {
     pub zone_id: i32,
@@ -602,11 +950,63 @@ packet_def!(
 );
 impl Marshal for SCSpecialtyCurrentPacket {
     fn write(&self, s: &mut PacketStream) {
-        s.write_i32(self.results.len() as i32)
-            .write_u16(self.from_zone_group)
-            .write_u16(self.to_zone_group);
+        // 1.2 client reader `FUN_391822b0`: `u16 from`, `u16 to` at body +0x0/+0x2, then the
+        // `i32` count (struct +0x10) and (item id, rate) pairs. The C# 1.2 wrote the count
+        // first; the client reader is authoritative here.
+        s.write_u16(self.from_zone_group)
+            .write_u16(self.to_zone_group)
+            .write_i32(self.results.len() as i32);
         for (item_id, rate) in &self.results {
             s.write_u32(*item_id).write_u32(*rate);
+        }
+    }
+}
+
+/// `SCSpecialtyGoodsPacket`: `i32` count and that many 16-byte `specialty_bundle_items` records
+/// (`item_id`, `profit`, `ratio`, `specialty_bundle_id`). The 1.2 client reads the count at body
+/// +0x0 and the records inline at +0x4 (`FUN_39185ba0`), validating each record's item id.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SCSpecialtyGoodsPacket {
+    pub goods: Vec<SpecialtyGood>,
+}
+packet_def!(
+    SCSpecialtyGoodsPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCSpecialtyGoodsPacket
+);
+impl Marshal for SCSpecialtyGoodsPacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_i32(self.goods.len() as i32);
+        for good in &self.goods {
+            s.write_u32(good.item_id)
+                .write_u32(good.profit)
+                .write_u32(good.ratio)
+                .write_u32(good.specialty_bundle_id);
+        }
+    }
+}
+
+/// `SCSpecialtyRecordsPacket`: `i32` count, `u16` zone group, `u32` item id, then `i32` ratio /
+/// `i64` UTC timestamp records (10.x `SpecialtyMarketRecord`; the 1.2 client's handler only
+/// proves the three leading fields' offsets at body +0x0/+0x4/+0x8 and drops the records).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SCSpecialtyRecordsPacket {
+    pub zone_group_id: u16,
+    pub item_id: u32,
+    pub records: Vec<SpecialtyRecord>,
+}
+packet_def!(
+    SCSpecialtyRecordsPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCSpecialtyRecordsPacket
+);
+impl Marshal for SCSpecialtyRecordsPacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_i32(self.records.len() as i32)
+            .write_u16(self.zone_group_id)
+            .write_u32(self.item_id);
+        for record in &self.records {
+            s.write_i32(record.ratio).write_i64(record.recorded);
         }
     }
 }

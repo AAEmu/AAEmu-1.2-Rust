@@ -224,6 +224,8 @@ impl System {
         cash_shop::load(server).await?;
         tracing::debug!("economy: loading shop purchase limits");
         shop_limits::load(server).await?;
+        tracing::debug!("economy: loading specialty price records");
+        specialty::load_records(server).await?;
         tracing::debug!("economy: initializing specialty");
         specialty::initialize(server);
         tracing::debug!("economy: loading mails");
