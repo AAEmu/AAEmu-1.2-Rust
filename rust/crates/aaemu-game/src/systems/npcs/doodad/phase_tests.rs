@@ -182,6 +182,8 @@ fn fx(b: Builder) -> Fx {
         test_character(1, "Alpha", 100.0, 100.0),
         player_obj_id,
     );
+    player.data().unit.max_hp = 1000;
+    player.data().unit.hp = 1000;
     client.conn.active_char = Some(player.clone());
     client.drain();
     let world = server.world.world(0).unwrap();
@@ -2153,6 +2155,66 @@ async fn change_doodad_phase_refuses_out_of_reach() {
     f.client.drain();
 
     run_phase_packet(&mut f, &phase_packet_body(d.obj_id, 7, 20, 1));
+    assert_eq!(group(&d), 10);
+    assert!(f.phase_packets().is_empty());
+}
+
+#[tokio::test]
+async fn change_doodad_phase_never_uses_the_client_skill_for_range() {
+    // The func has no skill (structurally the same as Bubble funcs 6279, 9407, 9965); the
+    // packet's forged skill claims a 1000 m range.
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (20, 1)])
+        .func(10, "DoodadFuncBubble", 20, 0)
+        .skill(FAKE_SKILL, 1000);
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    // 30 m: beyond the 5 m doodad interaction distance + the 15 m allowance.
+    d.data().transform.set_xyz(130.0, 100.0, 100.0);
+    f.client.drain();
+
+    run_phase_packet(&mut f, &phase_packet_body(d.obj_id, FAKE_SKILL, 20, 1));
+    assert_eq!(group(&d), 10);
+    assert!(f.phase_packets().is_empty());
+
+    // 18 m is inside the fixed bound; the forged skill does not widen it.
+    d.data().transform.set_xyz(118.0, 100.0, 100.0);
+    run_phase_packet(&mut f, &phase_packet_body(d.obj_id, FAKE_SKILL, 20, 1));
+    assert_eq!(group(&d), 20);
+}
+
+#[tokio::test]
+async fn change_doodad_phase_refuses_a_doodad_scheduled_for_despawn() {
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (20, 1)])
+        .func(10, "DoodadFuncBubble", 20, 0);
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    d.data().transform.set_xyz(100.0, 100.0, 100.0);
+    f.client.drain();
+    f.server
+        .systems
+        .npcs
+        .spawns
+        .set_despawn_field(d.obj_id, tokio::time::Instant::now());
+
+    run_phase_packet(&mut f, &phase_packet_body(d.obj_id, 0, 20, 1));
+    assert_eq!(group(&d), 10);
+    assert!(f.phase_packets().is_empty());
+}
+
+#[tokio::test]
+async fn change_doodad_phase_refuses_a_dead_caster() {
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (20, 1)])
+        .func(10, "DoodadFuncBubble", 20, 0);
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    d.data().transform.set_xyz(100.0, 100.0, 100.0);
+    f.client.drain();
+    f.player.data().unit.hp = 0;
+
+    run_phase_packet(&mut f, &phase_packet_body(d.obj_id, 0, 20, 1));
     assert_eq!(group(&d), 10);
     assert!(f.phase_packets().is_empty());
 }
