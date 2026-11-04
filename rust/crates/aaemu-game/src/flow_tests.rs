@@ -126,11 +126,12 @@ fn enter_world_body(account_id: u32, cookie: u32) -> Vec<u8> {
     })
 }
 
-/// SCAccountInfoPacket body for the default `AccountPayment` (Premium, 1, MinValue, 2030-01-01).
+/// SCAccountInfoPacket body for the default `AccountPayment` (Premium, 1, MinValue, no end date;
+/// owner decision 2026-11-03: the configured default premium is permanent).
 fn account_info_frame() -> Vec<u8> {
     l1(
         0x1C2,
-        &hex("01 00 00 00  01 00 00 00  00 00 00 00 00 00 00 00  80 D8 DB 70 00 00 00 00  00 00 00 00 00 00 00 00"),
+        &hex("01 00 00 00  01 00 00 00  00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00"),
     )
 }
 
