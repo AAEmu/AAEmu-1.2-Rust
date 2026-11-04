@@ -95,7 +95,11 @@ pub async fn enter_world_login(
     // (`GLPlayerEnter` result 1 -> `ACEnterWorldDenied`), but two cookies can be granted for one
     // account before either client connects. The loser must not get a world entry: it would skip
     // the account registration and let the same characters be played twice.
-    if !account_manager_add(server, conn).await {
+    let added = account_manager_add(server, conn).await;
+    // The cookie was accepted (it still counted as an occupied slot); the account registration
+    // finished, so the login queue's occupancy snapshot can drop it now.
+    server.enter_world.forget(token);
+    if !added {
         let owner = server.accounts.connection_of(account_id).unwrap_or(0);
         tracing::warn!(
             "Enter world refused: account {account_id} is already connected on session {owner} (session {}); the existing session keeps the account",

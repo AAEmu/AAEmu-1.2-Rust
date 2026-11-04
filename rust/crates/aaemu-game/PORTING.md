@@ -1623,6 +1623,21 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   character from the world and frees the account. Every refusal logs one `WARN` with the
   character name and the reason (`world/session.rs`, `managers/enter_world.rs`,
   `packets/c2g.rs`, `net/listener.rs`).
+* Login world queue (2026-11-03, WP-H): the C# had no queue. The login server may now hold
+  `CAEnterWorld` in a per-world FIFO when `GameServers[].MaxConcurrent` is reached and admit it
+  when a slot frees. To make the game's occupancy authoritative, `GL_GAME_SERVER_LOAD` and
+  `GLPlayerEnter` gain a trailing `u32 online` and `u32 occupancySequence` (the C# bodies end
+  after the load byte / result byte; readers treat a missing extension as 0 = queue gate off).
+  `online` is `AccountManager.count()` plus world cookies, including a cookie whose account
+  registration is in flight (`login()` marks it accepted instead of removing it; `forget()` drops
+  it after the registration). An unconsumed cookie stops counting toward the queue occupancy after
+  `EnterWorldManager::PENDING_TOKEN_LIFETIME` (60 s, Rust-only) so a client that takes its cookie
+  and vanishes cannot block the queue; `login()` still accepts a cookie of any age, so with the
+  queue disabled its behaviour is exactly as before. The game also reports load right after
+  registration and after an account leaves, so the queue head moves promptly. Premium queue lanes
+  are not implemented: the premium-entrance bit of `CAEnterWorld.flag` is capture-pending
+  (account WP-H).
+
 * systems::skills / systems::ai (dead NPC returned and healed): the `DamageEffect` tail
   (`SCAiAggroPacket`, `AddUnitAggro`, `Npc.OnDamageReceived`) is skipped when the hit killed the
   NPC, and `CheckIfEmptyAggroToReturn` never sends a dead NPC to `ReturnState`. In the C# order the

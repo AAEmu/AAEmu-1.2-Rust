@@ -419,18 +419,31 @@ impl OutgoingPacket for AcWorldList {
     }
 }
 
-/// `ACWorldQueuePacket`.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct AcWorldQueue;
+/// `ACWorldQueuePacket`: `u8 worldId, bool isPremium, u16 myTurn, u16 normalLength,
+/// u16 premiumLength`.
+///
+/// The client reader is `FUN_393d0da0` (vtable entry for AC opcode 0x009): it reads `worldId` at
+/// packet offset 0x8, `isPremium` at 0x9, then the three `u16` at 0xa, 0xc and 0xe. `myTurn == 0`
+/// ends the wait (client handler `FUN_39406b80`, event 0x4b); any other value is the 1-based
+/// queue position. The game server's `SCWorldQueuePacket` (SC 0x005, client reader
+/// `FUN_397ae880`) has the same body.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AcWorldQueue {
+    pub world_id: u8,
+    pub is_premium: bool,
+    pub my_turn: u16,
+    pub normal_length: u16,
+    pub premium_length: u16,
+}
 
 impl OutgoingPacket for AcWorldQueue {
     const OPCODE: u16 = opcodes::AC_WORLD_QUEUE;
     fn write_body(&self, s: &mut PacketStream) -> Result<(), PacketError> {
-        s.write_u8(0); // diw -> world id
-        s.write_bool(false); // isPremium
-        s.write_u16(0); // myTurn
-        s.write_u16(0); // normalLength
-        s.write_u16(0); // premiumLength
+        s.write_u8(self.world_id);
+        s.write_bool(self.is_premium);
+        s.write_u16(self.my_turn);
+        s.write_u16(self.normal_length);
+        s.write_u16(self.premium_length);
         Ok(())
     }
 }
@@ -579,7 +592,19 @@ mod tests {
             timeout: Duration::from_secs(180),
         };
         assert_eq!(frame(&p), "0c00060004003132333420bf0200");
-        assert_eq!(frame(&AcWorldQueue), "0a0009000000000000000000");
+        // Client reader FUN_393d0da0: u8 worldId, bool isPremium, u16 myTurn, u16 normalLength,
+        // u16 premiumLength.
+        assert_eq!(frame(&AcWorldQueue::default()), "0a0009000000000000000000");
+        assert_eq!(
+            frame(&AcWorldQueue {
+                world_id: 3,
+                is_premium: true,
+                my_turn: 5,
+                normal_length: 9,
+                premium_length: 2,
+            }),
+            "0a0009000301050009000200"
+        );
         assert_eq!(frame(&AcAccountWarned), "05000d00000000");
     }
 

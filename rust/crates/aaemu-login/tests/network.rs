@@ -181,6 +181,9 @@ async fn reconnect_list_world_and_enter_world() {
         &mut gs,
         &GlGameServerLoad {
             load: GsLoad::MEDIUM,
+            online: 0,
+            sequence: 0,
+            has_online: true,
         },
     )
     .await;
@@ -307,6 +310,9 @@ async fn reconnect_list_world_and_enter_world() {
             connection_id,
             gs_id: GameServerId(1),
             result: 0,
+            online: 0,
+            sequence: 0,
+            has_online: true,
         },
     )
     .await;
@@ -329,6 +335,9 @@ async fn reconnect_list_world_and_enter_world() {
             connection_id,
             gs_id: GameServerId(1),
             result: 5,
+            online: 0,
+            sequence: 0,
+            has_online: true,
         },
     )
     .await;
