@@ -36,6 +36,9 @@
 //! goods <npc template>              walk to the NPC, CSListSpecialtyGoods and print SCSpecialtyGoods
 //! sellpack <npc template>           walk to the NPC, CSSellBackpackGoods; fail unless the labor
 //!                                   and item-task answers arrive (the payment mail is delayed)
+//! trader <npc template>             replay the captured trader talk (0x068, 0x065, 0x052 25205,
+//!                                   0x043, 0x065 false, 0x042) and fail if 0x9b comes back
+//! priceboard <from> <to>            CSRequestSpecialtyCurrent (0x131) and print the parsed table
 //! item <template> <count>            `/item add self` and remember the stack id / slot
 //! equip <template> <slot>            move the remembered stack to equipment slot `slot` (26 = back)
 //! moveitem <id> <ftype> <fslot> <ttype> <tslot>  CSSwapItemsPacket with an explicit item id
@@ -1129,6 +1132,56 @@ async fn run_lines(
                     got.iter().any(|p| p.is_sc(sc::SCItemTaskSuccessPacket)),
                     "sellpack: no SCItemTaskSuccess"
                 );
+            }
+            "trader" => {
+                let tpl: u32 = num(&parts, 0)?;
+                let npc = nearest(game, tpl).with_context(|| format!("NPC {tpl} not in sight"))?;
+                clock += 1200;
+                game.move_to((npc.pos.0 + 1.0, npc.pos.1, npc.pos.2), clock)
+                    .await?;
+                game.start_interaction(npc.obj_id).await?;
+                game.interact_npc(npc.obj_id, false).await?;
+                game.start_skill(25205, npc.obj_id).await?;
+                let mut body = aaemu_commons::PacketStream::new();
+                body.write_u32(34159); // the pack template the client checks
+                game.send_cs(cs::CSSpecialtyRatioPacket, body.as_bytes())
+                    .await?;
+                game.interact_npc(npc.obj_id, false).await?;
+                let mut body = aaemu_commons::PacketStream::new();
+                body.write_bc(npc.obj_id);
+                game.send_cs(cs::CSSellBackpackGoodsPacket, body.as_bytes())
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(1500), Duration::from_secs(8))
+                    .await?;
+                show(&got);
+                ensure!(
+                    !got.iter().any(|p| p.is_sc(sc::SCSpecialtyRecordsPacket)),
+                    "trader: the discarded SCSpecialtyRecords must not be sent"
+                );
+            }
+            "priceboard" => {
+                let from: u16 = num(&parts, 0)?;
+                let to: u16 = num(&parts, 1)?;
+                let mut body = aaemu_commons::PacketStream::new();
+                body.write_u16(from).write_u16(to);
+                game.send_cs(cs::CSRequestSpecialtyCurrentPacket, body.as_bytes())
+                    .await?;
+                let packet = game.wait_sc(sc::SCSpecialtyCurrentPacket).await?;
+                let mut s = packet.stream();
+                let count = s.read_i32()?;
+                let got_from = s.read_u16()?;
+                let got_to = s.read_u16()?;
+                ensure!(
+                    count >= 0 && count <= 0x80,
+                    "priceboard: invalid count {count}"
+                );
+                println!("    SCSpecialtyCurrent from {got_from} to {got_to} count {count}");
+                for i in 0..count.min(3) {
+                    let item = s.read_u32()?;
+                    let ratio = s.read_i32()?;
+                    println!("      {i}: item {item} ratio {ratio}");
+                }
             }
             "item" => {
                 let tpl: u32 = num(&parts, 0)?;
