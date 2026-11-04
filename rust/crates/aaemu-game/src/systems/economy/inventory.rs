@@ -15,7 +15,7 @@ use std::sync::{Arc, MutexGuard};
 
 use chrono::Utc;
 
-use crate::data::items::{TemplateKind, EQUIPMENT_ITEM_SLOT_TYPE_BACKPACK};
+use crate::data::items::{ItemTemplate, TemplateKind, EQUIPMENT_ITEM_SLOT_TYPE_BACKPACK};
 use crate::data::ItemData;
 use crate::models::container::{
     equip_slot, slot_type, ContainerRef, ItemContainer, ItemEnv, ItemRules,
@@ -1107,6 +1107,29 @@ pub fn split_or_move_item_ex(
         (action, from_item, target_item, s.slot_type, dref.slot_type)
     };
 
+    // The 1.2 client refuses the equip below the item's actability requirement before the move
+    // is sent (`FUN_394e41f0` -> `FUN_394e1a90`, error 508); the same check guards every other
+    // caller that can put an item into the equipment container. The packet handlers answer 508
+    // themselves; this is the silent last line of defence.
+    let equip_empty = action == SwapAction::DoEquipInEmptySlot;
+    let incoming = if equip_empty && src_type == slot_type::EQUIPMENT {
+        target_item.as_ref()
+    } else if dst_type == slot_type::EQUIPMENT && src_type != slot_type::EQUIPMENT {
+        from_item.as_ref()
+    } else {
+        None
+    };
+    if let (Some(item), Some(player)) =
+        (incoming, txn.server.world.character_by_id(inv.character_id))
+    {
+        if data
+            .template(item.template_id)
+            .is_some_and(|t| !meets_item_actability(txn.server, &player, t))
+        {
+            return false;
+        }
+    }
+
     // ---- Two-handed weapon handling ----
     let mut un_equip_offhand = false;
     let mut un_equip_mainhand = false;
@@ -1875,6 +1898,91 @@ pub(crate) fn item_use_zone_allowed(
         send_error_message(player, error_message::ITEM_CANNOT_USE_HERE, 0, true);
     }
     !banned
+}
+
+/// The 1.2 client's item actability check (`FUN_394e1a90`, called by the use/equip action
+/// `FUN_390447d0` and the equip-drag validation `FUN_394e41f0`): with
+/// `items.actability_requirement` > 0 the character's points in `items.actability_group_id`,
+/// plus the house act-ability bonus (`FUN_390b3a80`), must reach the requirement. The client
+/// shows `actability_not_enough_point` (508) through `FUN_39428370(0x1fc)`.
+pub fn meets_item_actability(
+    server: &GameServer,
+    player: &PlayerRef,
+    template: &ItemTemplate,
+) -> bool {
+    let requirement = i64::from(template.actability_requirement);
+    if requirement <= 0 {
+        return true;
+    }
+    let group_id = template.actability_group_id;
+    let points = {
+        let c = player.data();
+        c.actability
+            .actabilities
+            .iter()
+            .find(|a| a.id == group_id.max(0) as u32)
+            .map_or(0, |a| i64::from(a.point))
+    };
+    let me = WorldObject::from(player);
+    let bonus = server.world.world_of(&me).map_or(0, |world| {
+        let pos = world.world_pos_rot(&me);
+        crate::systems::housing::act_ability_bonus_at_in_world(
+            server, world.id, group_id, pos.x, pos.y,
+        )
+    });
+    points.saturating_add(i64::from(bonus)) >= requirement
+}
+
+/// Refuses the item use / equip with the client's `actability_not_enough_point` (508) and the
+/// actability group as the error `kind` (as `craft.rs` does for crafts). Returns whether the
+/// action was refused; the caller must then leave the item where it is.
+pub fn refuse_item_actability(server: &GameServer, player: &PlayerRef, template_id: u32) -> bool {
+    let Some(template) = server.game_data.items.template(template_id) else {
+        return false;
+    };
+    if meets_item_actability(server, player, template) {
+        return false;
+    }
+    send_error_message(
+        player,
+        error_message::ACTABILITY_NOT_ENOUGH_POINT,
+        template.actability_group_id.max(0) as u32,
+        true,
+    );
+    true
+}
+
+/// The 1.2 client's equip actability gate for a `SplitOrMoveItem` request: resolves the item
+/// that would enter the character's equipment container and refuses it when the actability
+/// requirement is unmet. The client sends an empty equipment slot as the source when equipping
+/// into it (`DoEquipInEmptySlot`), so the incoming item is the target item in that case.
+#[allow(clippy::too_many_arguments)]
+pub fn equip_actability_refused(
+    server: &GameServer,
+    player: &PlayerRef,
+    from_type: u8,
+    from_item_id: u64,
+    to_type: u8,
+    to_item_id: u64,
+    to_slot: u8,
+) -> bool {
+    let inv = Inv::of(player);
+    let template_id = if from_type != slot_type::EQUIPMENT
+        && to_type == slot_type::EQUIPMENT
+        && from_item_id != 0
+    {
+        inv.item_by_id(from_item_id).map(|i| i.template_id)
+    } else if from_type == slot_type::EQUIPMENT
+        && from_item_id == 0
+        && to_type != slot_type::EQUIPMENT
+    {
+        inv.item_by_id(to_item_id)
+            .or_else(|| inv.item_at(to_type, to_slot))
+            .map(|i| i.template_id)
+    } else {
+        None
+    };
+    template_id.is_some_and(|id| refuse_item_actability(server, player, id))
 }
 
 /// `Character.ItemUse(item)` (`Events.OnItemUse` -> quests).

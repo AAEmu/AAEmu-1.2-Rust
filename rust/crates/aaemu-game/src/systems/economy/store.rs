@@ -1077,7 +1077,11 @@ pub fn expand_expert(server: &GameServer, p: &PlayerRef) {
         .expand_expert_limit(expanded)
         .copied()
     else {
-        return; // TODO ... send msg error?
+        // C#: `return; // TODO ... send msg error?` The 1.2 client has `store_unknown_error`
+        // (228) for a store action it cannot complete, and an expansion step with no
+        // `expand_expert_limits` row cannot be completed.
+        inventory::send_error_message(p, error_message::STORE_UNKNOWN_ERROR, 0, true);
+        return;
     };
     if expand.life_point > vocation {
         inventory::send_error_message(p, error_message::NOT_ENOUGH_EXPAND_ITEM_AND_MONEY, 0, true);

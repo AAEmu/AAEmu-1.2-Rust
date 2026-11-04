@@ -44,6 +44,7 @@ const NON_ENCHANTABLE_ARMOR: u32 = 2101; // chest, `grade_enchantable` false
 const WEAPON: u32 = 2102; // one-hand weapon, `grade_enchantable` true
 const SOCKET_ARMOR: u32 = 2110; // chest, level 20, level requirement 50
 const LOW_ARMOR: u32 = 2111; // chest, level 20, level requirement 40
+const FORBIDDEN_SCALE_ARMOR: u32 = 2120; // chest listed in `item_cap_scale_forbids`
 const SCROLL: u32 = 5000;
 const CHARM: u32 = 5100;
 const GEM: u32 = 5200; // chest lunagem, requires a level-50 item
@@ -354,6 +355,20 @@ fn data() -> GameData {
             scale_max: 100,
         },
     );
+    let mut forbidden = ItemTemplate::new(
+        FORBIDDEN_SCALE_ARMOR,
+        TemplateKind::Armor(EquipTemplate {
+            slot_type_id: 3,
+            coverage: 10,
+            durability_ratio: 1.0,
+            durability_multiplier: 100,
+            ..EquipTemplate::default()
+        }),
+    );
+    forbidden.max_count = 1;
+    forbidden.level = 10;
+    d.items.templates.insert(FORBIDDEN_SCALE_ARMOR, forbidden);
+    d.items.item_cap_scale_forbids.insert(FORBIDDEN_SCALE_ARMOR);
     let conv = &mut d.systems.economy.items.conversion;
     conv.reagents.push(ItemConversionReagent {
         conversion_id: 8,
@@ -1604,6 +1619,183 @@ async fn lunastone_cap_scale_and_reset() {
             (sc::SCChatMessagePacket, body(&msg("Tempering reset"))),
         ]
     );
+}
+
+/// `item_cap_scale_forbids` (1.2 client `FUN_395a72d0`, the item's "scalable" property;
+/// the cap-scale target check `FUN_3939dc20` answers SkillResult INVALID_TARGET 0x22): a listed
+/// template cannot be tempered or reset, and the refusal cancels the cast so the source item
+/// (the temper) is refunded.
+const WRAPPED_ROD: u32 = 2740;
+const ROD_SKILL: u32 = 6200;
+const ROD_EFFECT: u32 = 6201;
+
+/// The wrapped fishing rods use an item skill that consumes the wrapped item and gives the
+/// unwrapped rod (effect type 27); the use action is gated by `items.actability_requirement`.
+fn rod_cast_world(mut data: GameData) -> World {
+    let mut rod = ItemTemplate::new(WRAPPED_ROD, TemplateKind::Item);
+    rod.max_count = 1;
+    rod.use_skill_id = ROD_SKILL;
+    rod.actability_group_id = 7;
+    rod.actability_requirement = 10000;
+    data.items.templates.insert(WRAPPED_ROD, rod);
+    data.systems.skills.add_effect(
+        EffectKind::SpecialEffect,
+        EffectTemplate::Special(SpecialEffect {
+            id: ROD_EFFECT,
+            special_effect_type_id: 27,
+            value1: STACK as i32,
+            value2: 0,
+            value3: 0,
+            value4: 0,
+        }),
+        ROD_EFFECT,
+    );
+    data.systems.skills.add_skill(SkillTemplate {
+        id: ROD_SKILL,
+        target_type: 0,
+        effects: vec![SkillEffect {
+            effect_id: ROD_EFFECT,
+            template: Some((EffectKind::SpecialEffect, ROD_EFFECT)),
+            weight: 0,
+            start_level: 0,
+            end_level: 255,
+            friendly: true,
+            non_friendly: true,
+            target_buff_tag_id: 0,
+            target_no_buff_tag_id: 0,
+            source_buff_tag_id: 0,
+            source_no_buff_tag_id: 0,
+            chance: 100,
+            front: false,
+            back: false,
+            target_npc_tag_id: 0,
+            application_method: 1,
+            consume_source_item: true,
+            consume_item_id: 0,
+            consume_item_count: 1,
+            always_hit: true,
+            item_set_id: 0,
+            interaction_success_hit: false,
+        }],
+        ..SkillTemplate::default()
+    });
+    let w = world_with_data(data);
+    crate::systems::skills::bind(&w.server);
+    super::bridges::install(&w.server);
+    w
+}
+
+async fn cast_wrapped_rod(w: &mut World, item_id: u64) {
+    CSStartSkillPacket {
+        skill_id: ROD_SKILL,
+        caster: SkillCaster::Item {
+            obj_id: w.pa.obj_id,
+            item_id,
+            item_template_id: WRAPPED_ROD,
+            type1: 0,
+            type2: 0,
+        },
+        target: SkillCastTarget::Unit(w.pa.obj_id),
+        flag: 0,
+        skill_object: SkillObject::None,
+    }
+    .handle(&w.server, &mut w.a.conn)
+    .await
+    .unwrap();
+}
+
+/// The wrapped rod's use skill is refused below `actability_requirement` (client
+/// `FUN_394e1a90`, error 508) and the wrapped item is kept; at the requirement it is consumed
+/// and the unwrapped item is given.
+#[tokio::test]
+async fn using_a_wrapped_fishing_rod_requires_its_actability_points() {
+    let mut w = rod_cast_world(data());
+    let wrapped = give(&w, &w.pa.clone(), slot_type::INVENTORY, WRAPPED_ROD, 1, 0);
+    w.a.drain();
+    cast_wrapped_rod(&mut w, wrapped).await;
+    let frames = w.a.drain();
+    assert!(
+        frames.iter().any(|(op, _)| *op == sc::SCErrorMsgPacket),
+        "the use below the requirement shows error 508"
+    );
+    assert_eq!(item(&w, wrapped).expect("the wrapped rod is kept").count, 1);
+
+    w.pa.data()
+        .actability
+        .actabilities
+        .push(crate::models::char_data::Actability {
+            id: 7,
+            point: 10000,
+            step: 1,
+        });
+    cast_wrapped_rod(&mut w, wrapped).await;
+    assert!(
+        item(&w, wrapped).is_none(),
+        "the accepted use consumes the wrapped rod"
+    );
+    assert!(
+        Inv::of(&w.pa)
+            .bag()
+            .lock()
+            .unwrap()
+            .items
+            .iter()
+            .any(|i| i.template_id == STACK),
+        "the use gives the unwrapped item"
+    );
+}
+
+#[tokio::test]
+async fn item_cap_scale_refuses_forbidden_targets() {
+    let mut w = world();
+    let id = give(
+        &w,
+        &w.pa.clone(),
+        slot_type::INVENTORY,
+        FORBIDDEN_SCALE_ARMOR,
+        1,
+        0,
+    );
+    let caster = Some(SkillItem {
+        item_id: 1,
+        item_template_id: GEM,
+    });
+    mark_clean(&w, id);
+    w.pa.data().skill_char.skill_cancelled = false;
+    let mut rng = ScriptedRng::new(&[], &[]);
+    item_cap_scale(&w.server, &w.pa, caster, Some(id), 900, [0; 4], &mut rng);
+    assert!(w.pa.data().skill_char.skill_cancelled);
+    assert!(
+        rng.int_calls.is_empty(),
+        "the refusal must happen before the scale roll"
+    );
+    let after = item(&w, id).unwrap();
+    assert_eq!(
+        (after.details.temper_physical, after.details.temper_magical),
+        (0, 0)
+    );
+    assert!(!after.dirty, "a refused temper must not dirty the item");
+    assert_eq!(w.a.drain(), vec![error(error_message::INVALID_TARGET)]);
+
+    // The reset tool is refused by the same set and leaves the existing temper untouched.
+    {
+        let c = Inv::of(&w.pa).bag();
+        let mut c = c.lock().unwrap();
+        let it = c.get_item_by_id_mut(id).unwrap();
+        it.details.temper_physical = 5;
+        it.details.temper_magical = 6;
+        it.dirty = false;
+    }
+    w.pa.data().skill_char.skill_cancelled = false;
+    item_cap_scale_reset(&w.server, &w.pa, caster, Some(id), [0; 4]);
+    assert!(w.pa.data().skill_char.skill_cancelled);
+    let after = item(&w, id).unwrap();
+    assert_eq!(
+        (after.details.temper_physical, after.details.temper_magical),
+        (5, 6)
+    );
+    assert!(!after.dirty);
+    assert_eq!(w.a.drain(), vec![error(error_message::INVALID_TARGET)]);
 }
 
 #[tokio::test]

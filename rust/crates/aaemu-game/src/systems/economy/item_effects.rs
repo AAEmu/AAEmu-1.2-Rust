@@ -1003,6 +1003,20 @@ pub fn item_cap_scale(
         tracing::error!("ItemCapScale: item {target_id} is not an EquipItem"); // InvalidCast
         return;
     }
+    // `item_cap_scale_forbids` (1.2 client `FUN_395a72d0`, the item's "scalable" property;
+    // `FUN_3939dc20` answers the cast with SkillResult INVALID_TARGET 0x22): the target template
+    // cannot be tempered. Cancel the cast so the source item (the temper) is refunded.
+    if server
+        .game_data
+        .items
+        .cap_scale_forbidden(equip.template_id)
+    {
+        drop(g);
+        send_error_message_to(&mut txn.out(), player, error_message::INVALID_TARGET);
+        drop(txn);
+        player.data().skill_char.skill_cancelled = true;
+        return;
+    }
     let Some(scale) = server.game_data.items.item_cap_scale(skill_id).copied() else {
         tracing::error!("ItemCapScale: no item cap scale for skill {skill_id}"); // NRE
         return;
@@ -1054,6 +1068,19 @@ pub fn item_cap_scale_reset(
     };
     if !equip.is_equip() {
         tracing::error!("ItemCapScaleReset: item {target_id} is not an EquipItem");
+        return;
+    }
+    // The reset tool is refused by the same `item_cap_scale_forbids` set as `ItemCapScale`
+    // (`FUN_395a72d0`); cancel the cast so its source item is refunded.
+    if server
+        .game_data
+        .items
+        .cap_scale_forbidden(equip.template_id)
+    {
+        drop(g);
+        send_error_message_to(&mut txn.out(), player, error_message::INVALID_TARGET);
+        drop(txn);
+        player.data().skill_char.skill_cancelled = true;
         return;
     }
     equip.details.temper_physical = 0;
@@ -1738,7 +1765,10 @@ pub fn gain_loot_pack_item(
         return;
     }
     tracing::debug!("GainLootPackItemEffect {}", effect.loot_pack_id);
-    // TODO (C#): Find the related ActAbility
+    // TODO (C#): Find the related ActAbility (items-crafting#9). The 1.2 client only parses
+    // the `GainLootPackItemEffect` descriptor (`FUN_396e91c0`), so which ActAbility supplies
+    // the inherited grade is not derivable from it: capture-pending **ITEM-LOOT-GRADE**. The
+    // cast's source item grade stays the only input.
     let mut inherited_grade = None;
     let mut txn = ItemTxn::begin(server);
     let bag = Inv::of(player).bag();

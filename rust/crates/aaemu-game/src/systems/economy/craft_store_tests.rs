@@ -1646,9 +1646,12 @@ async fn expand_expert_flow() {
             (sc::SCExpertExpandedPacket, vec![1]),
         ]
     );
-    // No further step: silently ignored.
+    // No further step: the C# TODO's silent return now answers `store_unknown_error` (228).
     run::<CSExpandExpertPacket>(&mut w, 0, &[]);
-    assert!(w.a.drain().is_empty());
+    assert_eq!(
+        w.a.drain(),
+        vec![(sc::SCErrorMsgPacket, err_bytes(228, 228, 0, true))]
+    );
 }
 
 #[tokio::test]

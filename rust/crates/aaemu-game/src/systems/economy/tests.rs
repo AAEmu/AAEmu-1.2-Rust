@@ -14,6 +14,7 @@ use crate::net::registry::ClientPacket;
 use crate::opcodes::sc;
 use crate::server::GameServer;
 use crate::systems::economy::data::Expand;
+use crate::systems::economy::error_message;
 use crate::systems::economy::inventory::{self, Inv, ItemTxn};
 use crate::systems::economy::item_handlers::*;
 use crate::systems::economy::item_packets::SCItemTaskSuccessPacket;
@@ -24,6 +25,7 @@ pub const STACK: u32 = 1000; // max 20
 pub const ARMOR: u32 = 2000; // chest, bind on equip
 pub const TIMED: u32 = 3000; // 60 minutes absolute lifetime
 pub const SINGLE: u32 = 4000; // max 1
+pub const ACTABILITY_ROD: u32 = 2730; // mainhand, actability group 7 needs 10000 points
 
 #[tokio::test]
 async fn unpack_rejects_another_characters_item() {
@@ -80,6 +82,19 @@ pub fn test_data() -> GameData {
     d.items
         .templates
         .insert(SINGLE, ItemTemplate::plain(SINGLE, 1));
+    let mut rod = ItemTemplate::new(
+        ACTABILITY_ROD,
+        TemplateKind::Weapon(EquipTemplate {
+            slot_type_id: 14,
+            durability_ratio: 1.0,
+            durability_multiplier: 100,
+            ..EquipTemplate::default()
+        }),
+    );
+    rod.max_count = 1;
+    rod.actability_group_id = 7;
+    rod.actability_requirement = 10000;
+    d.items.templates.insert(ACTABILITY_ROD, rod);
     d.systems.economy.expands.insert(
         0,
         vec![
@@ -277,6 +292,96 @@ fn move_body(from: u64, to: u64, fst: u8, fs: u8, tst: u8, ts: u8) -> PacketStre
         .write_u8(tst)
         .write_u8(ts);
     s
+}
+
+fn error_body(error: i16, kind: u32) -> Vec<u8> {
+    let mut s = PacketStream::new();
+    crate::packets::world::SCErrorMsgPacket::new(error, kind, true).write(&mut s);
+    s.into_bytes()
+}
+
+/// The 1.2 client refuses the use/equip below `items.actability_requirement` of the item's
+/// `actability_group_id` (`FUN_394e1a90` through the equip validation `FUN_394e41f0`) with
+/// `actability_not_enough_point` 508 and keeps the item. The client's own check is authoritative;
+/// the server repeats it for a forged request.
+#[tokio::test]
+async fn equipping_an_item_requires_its_actability_points() {
+    let mut w = world();
+    let rod = give(
+        &w,
+        &w.pa.clone(),
+        slot_type::INVENTORY,
+        ACTABILITY_ROD,
+        1,
+        0,
+    );
+    w.a.drain();
+    let body = move_body(
+        rod,
+        0,
+        slot_type::INVENTORY,
+        0,
+        slot_type::EQUIPMENT,
+        equip_slot::MAINHAND as u8,
+    );
+
+    // No actability rows: 0 < 10000, the rod stays in the bag.
+    run::<CSSwapItemsPacket>(&mut w, 0, body.as_bytes());
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::ACTABILITY_NOT_ENOUGH_POINT, 7),
+        )]
+    );
+    assert!(item_at(&w.pa, slot_type::INVENTORY, 0).is_some());
+    assert!(item_at(&w.pa, slot_type::EQUIPMENT, equip_slot::MAINHAND as u8).is_none());
+
+    // 9999 is still one point short.
+    w.pa.data()
+        .actability
+        .actabilities
+        .push(crate::models::char_data::Actability {
+            id: 7,
+            point: 9999,
+            step: 1,
+        });
+    run::<CSSwapItemsPacket>(&mut w, 0, body.as_bytes());
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::ACTABILITY_NOT_ENOUGH_POINT, 7),
+        )]
+    );
+    assert!(item_at(&w.pa, slot_type::INVENTORY, 0).is_some());
+    assert!(item_at(&w.pa, slot_type::EQUIPMENT, equip_slot::MAINHAND as u8).is_none());
+
+    // Exactly the requirement: the equip goes through.
+    w.pa.data().actability.actabilities[0].point = 10000;
+    run::<CSSwapItemsPacket>(&mut w, 0, body.as_bytes());
+    assert!(item_at(&w.pa, slot_type::INVENTORY, 0).is_none());
+    assert_eq!(
+        item_at(&w.pa, slot_type::EQUIPMENT, equip_slot::MAINHAND as u8)
+            .expect("rod equipped")
+            .template_id,
+        ACTABILITY_ROD
+    );
+    w.a.drain();
+}
+
+#[tokio::test]
+async fn expanding_expert_without_a_limit_row_reports_store_unknown_error() {
+    let mut w = world();
+    w.a.drain();
+    run::<crate::systems::economy::store::CSExpandExpertPacket>(&mut w, 0, &[]);
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::STORE_UNKNOWN_ERROR, 0),
+        )]
+    );
 }
 
 #[tokio::test]
