@@ -38,6 +38,10 @@ pub const ACTABILITY_COMMERCE: i32 = 31;
 /// followed by that many records read by `FUN_398a9e30`.
 pub const MAX_SPECIALTY_GOODS: usize = 20;
 
+/// Upper bound for the configured ratio tick periods (one year) so a bad config value cannot
+/// panic `Duration::from_secs_f64`.
+const MAX_TICK_MINUTES: f64 = 24.0 * 60.0 * 365.0;
+
 /// The ratio/tick part of `AppConfiguration.Specialty` (`SpecialtyConfig`; `initialize` copies
 /// it from `server.config.specialty`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -183,6 +187,17 @@ impl SpecialtyManager {
     }
 }
 
+/// A ratio tick period: at least 1 ms and at most [`MAX_TICK_MINUTES`]. A non-finite value
+/// (bad JSON / arithmetic) uses the maximum instead of panicking in `Duration::from_secs_f64`.
+fn tick_period(minutes: f64) -> std::time::Duration {
+    let seconds = if minutes.is_finite() {
+        (minutes * 60.0).clamp(0.001, MAX_TICK_MINUTES * 60.0)
+    } else {
+        MAX_TICK_MINUTES * 60.0
+    };
+    std::time::Duration::from_secs_f64(seconds)
+}
+
 /// `SpecialtyManager.Initialize()`: the configuration and the ratio consume / regen timers.
 pub fn initialize(server: &Arc<GameServer>) {
     let configured = &server.config.specialty;
@@ -207,7 +222,7 @@ pub fn initialize(server: &Arc<GameServer>) {
         return;
     };
     let cfg = server.systems.economy.specialty.config();
-    let every = |minutes: f64| std::time::Duration::from_secs_f64((minutes * 60.0).max(0.001));
+    let every = |minutes: f64| tick_period(minutes);
     let s = Arc::downgrade(server);
     let consume = every(cfg.ratio_decrease_tick_minutes);
     rt.spawn(async move {
@@ -288,11 +303,14 @@ fn specialty_ratio_item_id(server: &GameServer, p: &PlayerRef, requested: u32) -
         .map(|item| item.template_id)
 }
 
-/// The 1.2 sale labor cost: the C# `SpecialtyManager` charged a flat 60 without applying the
-/// actability multiplier. The 1.2 `Actability.GetLaborCostMultiplier` table
-/// (1.00/1.00/0.95/0.90/0.85/0.80/0.77/0.77 by Commerce step) is the ported 1.2 table and the
-/// generic skill path (`Skill.cs:1394`) applies it; do the same here, never below 1.
-fn labor_cost_for_sale(commerce_step: u8) -> i32 {
+/// The pack-sale labor cost. The 1.2 C# `SpecialtyManager` charged the flat 60 and skill 25205
+/// has `consume_lp = 0`, so the Commerce `GetLaborCostMultiplier` table
+/// (1.00/1.00/0.95/0.90/0.85/0.80/0.77/0.77 by Commerce step) is only applied when
+/// `Specialty:ScaleSaleLaborByCommerce` is enabled (capture-pending LABOR-1), never below 1.
+fn labor_cost_for_sale(commerce_step: u8, scale_by_commerce: bool) -> i32 {
+    if !scale_by_commerce {
+        return 60;
+    }
     let cost = f64::from(60.0f32 * inventory::actability_labor_cost_multiplier(commerce_step));
     (cost.round() as i32).max(1)
 }
@@ -378,7 +396,10 @@ fn round_f32(v: f32) -> i32 {
 
 /// `SellSpecialty(player, npcObjId)`: returns the base price.
 pub fn sell_specialty(server: &GameServer, p: &PlayerRef, npc_obj_id: u32) -> i32 {
-    let labor_cost = labor_cost_for_sale(commerce_step(p));
+    let labor_cost = labor_cost_for_sale(
+        commerce_step(p),
+        server.config.specialty.scale_sale_labor_by_commerce,
+    );
     if p.data().labor_power < labor_cost as i16 {
         inventory::send_error_message(p, error_message::NOT_ENOUGH_LABOR_POWER, 0, true);
         return 0;
@@ -761,5 +782,20 @@ impl Marshal for SCSpecialtyGoodsPacket {
                 .write_u8(good.currency)
                 .write_u8(good.unknown);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{tick_period, MAX_TICK_MINUTES};
+
+    #[test]
+    fn tick_period_is_clamped_and_never_panics() {
+        let max = std::time::Duration::from_secs_f64(MAX_TICK_MINUTES * 60.0);
+        assert_eq!(tick_period(60.0), std::time::Duration::from_secs(3600));
+        assert_eq!(tick_period(-5.0), std::time::Duration::from_secs_f64(0.001));
+        assert_eq!(tick_period(f64::INFINITY), max);
+        assert_eq!(tick_period(f64::NAN), max);
+        assert_eq!(tick_period(1.0e300), max);
     }
 }

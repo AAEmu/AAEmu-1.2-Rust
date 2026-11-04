@@ -1937,14 +1937,19 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
     `FUN_3961edb0` records (`i32 ratio`, `u64 recorded`), but the body is discarded
     (`FUN_394fb300` is an empty stub). Keeping the captured trader-talk sequence exact means
     no 0x9b on the 0x043 answer, and no price-history table is kept.
+  - `CSSpecialtyRatioPacket.id` is the pack template, not a zone: the client's 0x43 writer
+    (`x2game.dll.c:781792`) sends `*puVar3`, where `puVar3 = FUN_39695dc0(character+0x1840)`
+    is the equipped backpack's template. The handler answers for the requested id and falls
+    back to the equipped pack when the id is not a specialty pack.
   - `SCSpecialtyCurrentPacket` (0x1f4) stays in the 1.2 reader's order (`FUN_397b87c0`):
     `i32 count`, `u16 from`, `u16 to`, then (`u32 itemId`, `i32 ratio`) pairs — the same order
     the 1.2 C# used; the earlier "reader order" note in this branch was wrong.
-  - Sale labor applies the 1.2 `Actability.GetLaborCostMultiplier` table (Commerce step,
-    1.00/1.00/0.95/0.90/0.85/0.80/0.77/0.77) to the C# flat 60, never below 1; the generic
-    1.2 skill path applies the same table (`Skill.cs:1394`). **Capture-pending (LABOR-1):**
-    the 1.2 C# charged the flat 60 for a pack sale, so using the table on this path is a
-    server choice, not a captured retail rule.
+  - Sale labor is the C# flat 60 by default. `Specialty:ScaleSaleLaborByCommerce` (default
+    false) applies the 1.2 `Actability.GetLaborCostMultiplier` table (Commerce step,
+    1.00/1.00/0.95/0.90/0.85/0.80/0.77/0.77) instead, never below 1; the generic 1.2 skill
+    path applies the same table (`Skill.cs:1394`). **Capture-pending (LABOR-1):** the 1.2 C#
+    charged the flat 60 for a pack sale and skill 25205 has `consume_lp = 0`, so scaling on
+    this path is a server option, not a captured retail rule.
   - `BackpackProfitShare` is read from the global runtime `FeaturesManager.Fsets`
     (`server.systems.services.features`), not `FeatureSet::default()`; the 1.2 sell / mail UI
     reads the same bit via `X2Player.GetFeatureSet("backpackProfitShare")`.

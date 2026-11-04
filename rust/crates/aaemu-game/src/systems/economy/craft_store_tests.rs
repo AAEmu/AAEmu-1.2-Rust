@@ -1961,6 +1961,9 @@ async fn specialty_ratio_reply_does_not_send_the_discarded_records_packet() {
 #[tokio::test]
 async fn sell_trade_pack_labor_uses_the_commerce_step_multiplier() {
     let mut w = world();
+    w.server
+        .config
+        .update(|c| c.specialty.scale_sale_labor_by_commerce = true);
     let mailer = Arc::new(Mailer::default());
     w.server.systems.economy.store.hooks.install(mailer);
     spawn_npc(&mut w, TRADER_NPC, 4321, 102.0);
@@ -1990,6 +1993,43 @@ async fn sell_trade_pack_labor_uses_the_commerce_step_multiplier() {
             amount: -51,
             action: 31,
             point: 51,
+            step: 4,
+        })
+    );
+}
+
+#[tokio::test]
+async fn sell_trade_pack_labor_defaults_to_the_flat_60() {
+    let mut w = world();
+    let mailer = Arc::new(Mailer::default());
+    w.server.systems.economy.store.hooks.install(mailer);
+    spawn_npc(&mut w, TRADER_NPC, 4321, 102.0);
+    let pa = w.pa.clone();
+    pa.data().labor_power = 100;
+    pa.data()
+        .actability
+        .actabilities
+        .push(crate::models::char_data::Actability {
+            id: 31,
+            point: 0,
+            step: 4,
+        });
+    give(&w, &pa, slot_type::EQUIPMENT, PACK, 1, equip_slot::BACKPACK);
+    let mut s = PacketStream::new();
+    s.write_bc(TRADER_NPC);
+    run::<CSSellBackpackGoodsPacket>(&mut w, 0, s.as_bytes());
+    assert_eq!(pa.data().labor_power, 40);
+    let f = w.a.drain();
+    let labor = f
+        .iter()
+        .find(|(op, _)| *op == sc::SCCharacterLaborPowerChangedPacket)
+        .expect("labor packet");
+    assert_eq!(
+        labor.1,
+        bytes(&SCCharacterLaborPowerChangedPacket {
+            amount: -60,
+            action: 31,
+            point: 60,
             step: 4,
         })
     );

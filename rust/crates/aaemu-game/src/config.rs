@@ -566,6 +566,11 @@ pub struct SpecialtyConfig {
     /// evidenced; 0 keeps the C# 1.2 behaviour.
     #[serde(rename = "negotiationbonuspercent", deserialize_with = "lenient")]
     pub negotiation_bonus_percent: f64,
+    /// Apply the Commerce `GetLaborCostMultiplier` table to the pack-sale labor. The 1.2 C#
+    /// charged the flat 60 and skill 25205 has `consume_lp = 0`, so this stays off by default
+    /// (capture-pending LABOR-1).
+    #[serde(rename = "scalesalelaborbycommerce", deserialize_with = "lenient")]
+    pub scale_sale_labor_by_commerce: bool,
 }
 
 impl Default for SpecialtyConfig {
@@ -580,6 +585,7 @@ impl Default for SpecialtyConfig {
             ratio_regen_tick_minutes: 60.0,
             trade_pack_mail_delay_in_minutes: 480.0,
             negotiation_bonus_percent: 0.0,
+            scale_sale_labor_by_commerce: false,
         }
     }
 }

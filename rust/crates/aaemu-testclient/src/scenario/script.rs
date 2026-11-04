@@ -1140,7 +1140,8 @@ async fn run_lines(
                 game.move_to((npc.pos.0 + 1.0, npc.pos.1, npc.pos.2), clock)
                     .await?;
                 game.start_interaction(npc.obj_id).await?;
-                game.interact_npc(npc.obj_id, false).await?;
+                // The captured first talk has the target-changed flag set; the tail repeat is 00.
+                game.interact_npc(npc.obj_id, true).await?;
                 game.start_skill(25205, npc.obj_id).await?;
                 let mut body = aaemu_commons::PacketStream::new();
                 body.write_u32(34159); // the pack template the client checks
@@ -1155,6 +1156,10 @@ async fn run_lines(
                     .drain(Duration::from_millis(1500), Duration::from_secs(8))
                     .await?;
                 show(&got);
+                ensure!(
+                    got.iter().any(|p| p.is_sc(sc::SCSpecialtyRatioPacket)),
+                    "trader: no SCSpecialtyRatio answer"
+                );
                 ensure!(
                     !got.iter().any(|p| p.is_sc(sc::SCSpecialtyRecordsPacket)),
                     "trader: the discarded SCSpecialtyRecords must not be sent"
