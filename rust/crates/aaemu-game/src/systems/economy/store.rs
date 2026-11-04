@@ -372,7 +372,7 @@ impl CSBuyItemsPacket {
                     .and_then(|f| match data.func_template(f.func_id, &f.func_type) {
                         Some(crate::systems::npcs::doodad::templates::FuncTemplate::Purchase(
                             p,
-                        )) => Some(p),
+                        )) => Some((p, f.next_phase)),
                         _ => None,
                     })
             })
@@ -435,12 +435,12 @@ impl CSBuyItemsPacket {
             };
             // The purchase func sells its own item at the template price; a coin-item priced
             // func only checks out through `CSBuyCoinItemPacket` (and is refused here).
-            let purchase_sells = purchase.is_some_and(|f| {
+            let purchase_line = purchase.filter(|(f, _)| {
                 f.coin_item_id == 0
                     && f.item_id == e.item_id
                     && f.currency_id == u32::from(e.currency)
             });
-            if !sells && !purchase_sells {
+            if !sells && purchase_line.is_none() {
                 continue;
             }
             let Some(template) = server.game_data.items.template(e.item_id) else {
@@ -448,6 +448,23 @@ impl CSBuyItemsPacket {
             };
             if template.max_count <= 0 {
                 return;
+            }
+            // The func offers one grade only (`fixed_grade` if the template has one, else basic)
+            // and sells whole func bundles. Without the grade rule a forged high-grade line was
+            // bought at the template price and sold back at the grade's refund multiplier
+            // (item 8661: 64 500 price, 32 250 * 6 refund at grade 11).
+            let purchase_sells = purchase_line.is_some_and(|(f, _)| {
+                f.count > 0
+                    && e.count % f.count == 0
+                    && e.grade
+                        == if template.fixed_grade >= 0 {
+                            template.fixed_grade as u8
+                        } else {
+                            0
+                        }
+            });
+            if !sells && !purchase_sells {
+                continue;
             }
             let (price, total) = match e.currency {
                 shop_currency_type::MONEY => (template.price, &mut money),
