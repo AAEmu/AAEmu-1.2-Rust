@@ -64,6 +64,33 @@ The configuration structure is as follows:
 
 ```
 
+### World login queue
+
+Each `GameServers` entry may cap its concurrent slots; when the world is full the login server
+queues `CAEnterWorld` instead of refusing it, and the client sees its position in
+`ACWorldQueuePacket`. The game server reports its slot occupancy (accounts in the lobby/world plus
+world cookies the client has not consumed) in `GL_GAME_SERVER_LOAD` and every `GLPlayerEnter`, so
+the head of the FIFO queue is admitted as soon as a slot frees.
+
+```json
+"GameServers": [
+  { "Id": 1, "Name": "AAEmu", "Host": "127.0.0.1", "Port": 1239,
+    "MaxConcurrent": 200, "QueueLimit": 100 }
+]
+```
+
+- `MaxConcurrent` (default `0`): queue when the reported occupancy reaches it. `0` keeps the
+  old behaviour: every enter-world goes straight to the game server.
+- `QueueLimit` (default `100`): refuse new clients with `ACEnterWorldDenied` when this many are
+  already waiting. `0` means the packet field limit (65535); ignored while `MaxConcurrent` is 0.
+- Positions are 1-based; the final update before the world cookie is `myTurn = 0`.
+  `CACancelEnterWorld` and a disconnected client remove the entry. Entries are strictly FIFO.
+- The 1.2 client ignores the `ACEnterWorldDenied` reason byte (it shows
+  "error_failed_to_connect_to_server").
+- **Capture-pending (account WP-H):** the premium-entrance bit of `CAEnterWorld.flag` is unknown
+  and the login server has no 1.2 premium source, so every client is treated as normal
+  (`isPremium = false`, `premiumLength = 0`).
+
 ### Two-factor authentication
 
 The account's methods are stored in `aaemu_login.user_2fa` (`enabled_methods`: bit 1 = OTP,

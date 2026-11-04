@@ -84,6 +84,10 @@ impl System {
         manager::resume_dead_houses(server);
         dominion::runtime::start_tick(server);
         manager::start_tax_task(server);
+        // The WP-S3 doodad period watcher compares the live dominions with the calendar; it
+        // starts only after the territory rows above are loaded, so a boot never records the
+        // empty period 0 and later fires the 3410 `period 0` func for an ownership change.
+        crate::systems::npcs::doodad::siege_phase::start(server);
         Ok(())
     }
 

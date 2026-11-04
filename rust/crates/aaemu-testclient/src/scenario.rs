@@ -540,9 +540,20 @@ async fn open_lobby(
     let cookie = login.enter_world(cfg.game_server_id).await?;
     r.var("cookie", cookie.cookie);
     r.var("game_port", cookie.port);
+    let queue_note = login.queue_updates.last().map_or_else(String::new, |q| {
+        format!(
+            ", {} queue update(s), last position {}/{}",
+            login.queue_updates.len(),
+            q.my_turn,
+            q.normal_length
+        )
+    });
     r.end(
         s,
-        format!("{}:{} cookie {}", cookie.ip, cookie.port, cookie.cookie),
+        format!(
+            "{}:{} cookie {}{queue_note}",
+            cookie.ip, cookie.port, cookie.cookie
+        ),
     );
     if kind == Kind::Login {
         return Ok(None);

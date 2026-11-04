@@ -26,6 +26,18 @@ pub const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 /// `LoadTask` repeat interval.
 pub const LOAD_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Reports the current load level and slot occupancy to the login server. Sent on the periodic
+/// tick (the first tick fires immediately after registration) and right after an account leaves
+/// the game, so the login queue head moves without waiting for the next tick.
+pub fn report_load(server: &GameServer) {
+    let (sequence, online) = server.next_occupancy();
+    server.login.send(&GLGameServerLoadPacket {
+        load: server.load_level(),
+        online,
+        sequence,
+    });
+}
+
 /// Sender side of the login link (`LoginNetwork.Instance.GetConnection()`).
 #[derive(Debug, Default)]
 pub struct LoginLink {
@@ -108,7 +120,7 @@ async fn session(server: &Arc<GameServer>, stream: TcpStream) -> std::io::Result
             },
             _ = load_tick.tick() => {
                 // LoadTask.Execute
-                server.login.send(&GLGameServerLoadPacket { load: server.load_level() });
+                report_load(server);
             }
         }
     }
@@ -131,6 +143,9 @@ pub(crate) async fn handle(server: &Arc<GameServer>, payload: &[u8]) -> bool {
                 return false; // TODO (C#): or shutdown?
             }
             tracing::info!("Successfully registered on LoginServer");
+            // Prime the login server's world-queue occupancy right away (the first periodic
+            // tick would also fire immediately, but this is explicit and independent of it).
+            report_load(server);
         }
         LoginInPacket::PlayerEnter {
             account_id,
@@ -152,10 +167,13 @@ pub(crate) async fn handle(server: &Arc<GameServer>, payload: &[u8]) -> bool {
                             server.accounts.connection_of(account_id).unwrap_or(0)
                         );
                     }
+                    let (sequence, online) = server.next_occupancy();
                     server.login.send(&GLPlayerEnterPacket {
                         connection_id,
                         gs_id: server.config.id,
                         result,
+                        online,
+                        sequence,
                     });
                 }
                 // C#: `_accounts.Add` throws ArgumentException inside LGPlayerEnterPacket.Read
@@ -166,10 +184,13 @@ pub(crate) async fn handle(server: &Arc<GameServer>, payload: &[u8]) -> bool {
                     tracing::warn!(
                         "LGPlayerEnter: connection id {connection_id} was still pending for account {stale_account} (never entered); replaced by account {account_id}"
                     );
+                    let (sequence, online) = server.next_occupancy();
                     server.login.send(&GLPlayerEnterPacket {
                         connection_id,
                         gs_id: server.config.id,
                         result: 0,
+                        online,
+                        sequence,
                     });
                 }
             }
