@@ -33,6 +33,9 @@
 //! dcast <skill> <doodad template>    doodad-target CSStartSkill
 //! buycoin <doodad template> <func>   CSBuyCoinItemPacket (DoodadFuncPurchase) and print the reply
 //! buycoinraw <doodad template> <func>  same without draining (the caller asserts the reply)
+//! goods <npc template>              walk to the NPC, CSListSpecialtyGoods and print SCSpecialtyGoods
+//! sellpack <npc template>           walk to the NPC, CSSellBackpackGoods; fail unless the labor
+//!                                   and item-task answers arrive (the payment mail is delayed)
 //! item <template> <count>            `/item add self` and remember the stack id / slot
 //! equip <template> <slot>            move the remembered stack to equipment slot `slot` (26 = back)
 //! moveitem <id> <ftype> <fslot> <ttype> <tslot>  CSSwapItemsPacket with an explicit item id
@@ -1073,6 +1076,59 @@ async fn run_lines(
                     .drain(Duration::from_millis(1500), Duration::from_secs(8))
                     .await?;
                 show(&got);
+            }
+            "goods" => {
+                let tpl: u32 = num(&parts, 0)?;
+                let npc = nearest(game, tpl).with_context(|| format!("NPC {tpl} not in sight"))?;
+                clock += 1200;
+                game.move_to((npc.pos.0 + 1.0, npc.pos.1, npc.pos.2), clock)
+                    .await?;
+                let mut body = aaemu_commons::PacketStream::new();
+                body.write_bc(npc.obj_id);
+                game.send_cs(cs::CSListSpecialtyGoodsPacket, body.as_bytes())
+                    .await?;
+                let packet = game.wait_sc(sc::SCSpecialtyGoodsPacket).await?;
+                let mut s = packet.stream();
+                let count = s.read_i32()?;
+                println!("    SCSpecialtyGoods count {count}");
+                for i in 0..count.max(0) {
+                    let item = s.read_u32()?;
+                    let profit = s.read_u32()?;
+                    let ratio = s.read_u32()?;
+                    let bundle = s.read_u32()?;
+                    println!(
+                        "      good {i}: item {item} profit {profit} ratio {ratio} bundle {bundle}"
+                    );
+                }
+            }
+            "sellpack" => {
+                let tpl: u32 = num(&parts, 0)?;
+                let npc = nearest(game, tpl).with_context(|| format!("NPC {tpl} not in sight"))?;
+                clock += 1200;
+                game.move_to((npc.pos.0 + 1.0, npc.pos.1, npc.pos.2), clock)
+                    .await?;
+                let mut body = aaemu_commons::PacketStream::new();
+                body.write_bc(npc.obj_id);
+                game.send_cs(cs::CSSellBackpackGoodsPacket, body.as_bytes())
+                    .await?;
+                let got = game
+                    .drain(Duration::from_millis(1500), Duration::from_secs(10))
+                    .await?;
+                show(&got);
+                let labor = got
+                    .iter()
+                    .find(|p| p.is_sc(sc::SCCharacterLaborPowerChangedPacket))
+                    .context("sellpack: no SCCharacterLaborPowerChanged")?;
+                let mut s = labor.stream();
+                let amount = s.read_i32()?;
+                let action = s.read_i32()?;
+                let point = s.read_i32()?;
+                let step = s.read_u8()?;
+                println!("    labor change {amount} action {action} point {point} step {step}");
+                ensure!(
+                    got.iter().any(|p| p.is_sc(sc::SCItemTaskSuccessPacket)),
+                    "sellpack: no SCItemTaskSuccess"
+                );
             }
             "item" => {
                 let tpl: u32 = num(&parts, 0)?;
