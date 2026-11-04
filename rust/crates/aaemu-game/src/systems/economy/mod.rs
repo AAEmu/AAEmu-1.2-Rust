@@ -1,4 +1,4 @@
-//! Phase-3 subsystem: items / craft / loot / mail / auction / trade / cash shop.
+//! Phase-3 subsystem: items / craft / loot / mail / auction / trade / cash shop / premium shop.
 //!
 //! C# scope: item actions / tasks (`Models/Game/Items/Actions`, `SCItemTaskSuccessPacket`),
 //! moving / consuming items between containers (`Inventory`, `ItemContainer`), money / points /
@@ -66,6 +66,9 @@ mod operation_scope;
 mod operation_scope_tests;
 #[cfg(test)]
 mod ported_unit_tests;
+pub mod premium_service;
+#[cfg(test)]
+mod premium_service_tests;
 pub mod procs;
 #[cfg(test)]
 mod procs_tests;
@@ -115,6 +118,8 @@ pub struct System {
     pub trade: trade::TradeManager,
     /// `CashShopManager`.
     pub cash_shop: cash_shop::CashShopManager,
+    /// Premium service shop catalogue and its atomic purchase store (WP-C).
+    pub premium_service: premium_service::PremiumServiceManager,
     /// `CharacterCraft` of every character.
     pub craft: craft::CraftManager,
     /// Store state (`Character.BuyBackItems`) and its hooks.
@@ -222,6 +227,8 @@ impl System {
         }
         tracing::debug!("economy: loading cash shop");
         cash_shop::load(server).await?;
+        tracing::debug!("economy: loading premium services");
+        premium_service::load(server).await?;
         tracing::debug!("economy: loading shop purchase limits");
         shop_limits::load(server).await?;
         tracing::debug!("economy: initializing specialty");

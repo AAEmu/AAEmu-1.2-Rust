@@ -551,14 +551,23 @@ pub async fn set_payment(
     };
     server.accounts.set_state(account_id, state.clone());
     drop(guard);
-    let new_grade = grade_of_state(server, &state, now);
-    notify_account(server, account_id, &state, old_grade, new_grade);
+    publish_state(server, account_id, &state, old_grade);
+    Ok(state)
+}
+
+/// Applies an already-persisted payment state (the caller wrote the row under the account lock,
+/// set it in the registry and dropped the lock): pushes `SCAccountInfo` /
+/// `SCUpdatePremiumPoint` and syncs the grade buffs. `old_grade` is the grade before the change.
+/// This is the WP-B grant path shared by `set_payment` (GM) and the premium service shop.
+pub fn publish_state(server: &GameServer, account_id: u32, state: &AccountState, old_grade: u8) {
+    let now = Utc::now().timestamp();
+    let new_grade = grade_of_state(server, state, now);
+    notify_account(server, account_id, state, old_grade, new_grade);
     if old_grade != new_grade {
         sync_grade(server, account_id, new_grade);
     } else {
         set_online_premium(server, account_id, state.payment.premium_state(now));
     }
-    Ok(state)
 }
 
 /// Grants premium until `end` (unix seconds) with the configured connect point.
