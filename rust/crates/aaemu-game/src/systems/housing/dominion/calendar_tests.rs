@@ -1,5 +1,6 @@
 use super::*;
 use crate::systems::housing::data::{CastleReferenceData, SiegePlan, SiegeZone};
+use chrono::Timelike;
 
 const ZONE: u32 = 33;
 
@@ -408,4 +409,123 @@ fn fresh_claim_protection_refuses_cycles_until_the_delay_expires() {
     assert!(calendar
         .view_at_protected(ZONE, claim, &timezone(), false, claim + 400 * 86_400)
         .is_none());
+}
+
+#[test]
+fn claim_window_uses_local_end_and_falls_forward_across_a_dst_change() {
+    // Locate a spring-forward gap in the host's local zone; zones without DST skip the test.
+    // `chrono::Local` may return a `Single` value for a skipped time (Windows), so validate by
+    // round-tripping the conversion instead of looking for `LocalResult::None`.
+    let valid_local = |naive: NaiveDateTime| -> bool {
+        match Local.from_local_datetime(&naive) {
+            LocalResult::Ambiguous(_, _) => true,
+            LocalResult::None => false,
+            LocalResult::Single(dt) => Local
+                .timestamp_opt(dt.timestamp(), 0)
+                .earliest()
+                .is_some_and(|back| back.naive_local() == naive),
+        }
+    };
+    let mut gap = None;
+    'search: for month in 1..=12 {
+        for day in 1..=31 {
+            let Some(date) = NaiveDate::from_ymd_opt(2026, month, day) else {
+                continue;
+            };
+            for hour in 0..6 {
+                let Some(naive) = date.and_hms_opt(hour, 0, 0) else {
+                    continue;
+                };
+                if !valid_local(naive) {
+                    gap = Some(naive);
+                    break 'search;
+                }
+            }
+        }
+    }
+    let Some(gap) = gap else {
+        eprintln!("claim_window DST test skipped: the host local zone has no spring-forward gap");
+        return;
+    };
+    let local_ts = |naive: NaiveDateTime| -> i64 {
+        let mut candidate = naive;
+        for _ in 0..=180 {
+            match Local.from_local_datetime(&candidate) {
+                LocalResult::Ambiguous(dt, _) => return dt.timestamp(),
+                LocalResult::Single(dt) => {
+                    if Local
+                        .timestamp_opt(dt.timestamp(), 0)
+                        .earliest()
+                        .is_some_and(|back| back.naive_local() == candidate)
+                    {
+                        return dt.timestamp();
+                    }
+                }
+                LocalResult::None => {}
+            }
+            candidate += Duration::minutes(1);
+        }
+        panic!("no valid local instant after {naive}");
+    };
+
+    // 01:00 -> 05:00 local on the gap day is three real hours, not four. The authored local
+    // end wins over "start timestamp + duration seconds".
+    let day = gap.date();
+    let weekday = day.weekday().num_days_from_sunday() as u8;
+    let start = local_ts(day.and_hms_opt(1, 0, 0).unwrap());
+    let end = local_ts(day.and_hms_opt(5, 0, 0).unwrap());
+    assert_eq!(end - start, 3 * 3_600, "spring-forward day loses one hour");
+
+    let mut castles = CastleReferenceData::default();
+    castles.siege_zones.insert(
+        ZONE,
+        SiegeZone {
+            open_weekday: weekday,
+            open_hour: 1,
+            open_duration_hours: 4,
+            ..schedule()
+        },
+    );
+    let calendar = SiegeCalendar::from_castles(&castles);
+    assert_eq!(
+        calendar.claim_window_at(ZONE, start, &CalendarTimeZone::Local),
+        ClaimWindow::Open
+    );
+    assert_eq!(
+        calendar.claim_window_at(ZONE, end - 1, &CalendarTimeZone::Local),
+        ClaimWindow::Open
+    );
+    assert_eq!(
+        calendar.claim_window_at(ZONE, end, &CalendarTimeZone::Local),
+        ClaimWindow::NotOpen
+    );
+
+    // A window that starts inside the skipped hour falls forward to the first valid instant;
+    // a two-hour local window then ends one real hour after that instant.
+    let mut castles = CastleReferenceData::default();
+    castles.siege_zones.insert(
+        ZONE,
+        SiegeZone {
+            open_weekday: weekday,
+            open_hour: gap.hour() as u8,
+            open_duration_hours: 2,
+            ..schedule()
+        },
+    );
+    let calendar = SiegeCalendar::from_castles(&castles);
+    let fall_start = local_ts(gap);
+    let window_end = local_ts(gap + Duration::hours(2));
+    assert_eq!(window_end - fall_start, 3_600);
+    assert_eq!(
+        calendar.claim_window_at(ZONE, fall_start, &CalendarTimeZone::Local),
+        ClaimWindow::Open
+    );
+    assert_eq!(
+        calendar.claim_window_at(ZONE, window_end - 1, &CalendarTimeZone::Local),
+        ClaimWindow::Open
+    );
+    assert_eq!(
+        calendar.claim_window_at(ZONE, window_end, &CalendarTimeZone::Local),
+        ClaimWindow::NotOpen
+    );
 }

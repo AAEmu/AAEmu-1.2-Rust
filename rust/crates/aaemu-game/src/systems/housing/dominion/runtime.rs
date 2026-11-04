@@ -841,9 +841,9 @@ impl CalendarRuntime {
                     PERIOD_WARMUP
                 }
             } else {
-                let siege_not_before = if state.reign_start_at > 0 && claim_delay > 0 {
+                let siege_not_before = if state.claimed_at > 0 && claim_delay > 0 {
                     state
-                        .reign_start_at
+                        .claimed_at
                         .saturating_add(claim_delay.saturating_mul(86_400))
                 } else {
                     0

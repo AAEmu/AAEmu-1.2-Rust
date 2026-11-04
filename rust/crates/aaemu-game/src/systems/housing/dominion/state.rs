@@ -131,6 +131,10 @@ pub struct DominionState {
     pub owner_expedition_id: u32,
     pub ownership_generation: u64,
     pub reign_start_at: i64,
+    /// When the current owner claimed the *unowned* territory (`declare_unowned_with_limit`).
+    /// A siege capture sets `reign_start_at` but not this, so only a claim starts the
+    /// `var_delay_siege_x_days_after_dominion_declare` protection. 0 = not a direct claim.
+    pub claimed_at: i64,
     pub last_siege_end_at: i64,
     pub tax_rate: i32,
     pub national_tax_rate: u16,
@@ -167,6 +171,7 @@ impl DominionState {
             owner_expedition_id: 0,
             ownership_generation: 0,
             reign_start_at: 0,
+            claimed_at: 0,
             last_siege_end_at: 0,
             tax_rate: 0,
             national_tax_rate: 0,
@@ -225,6 +230,7 @@ impl DominionState {
         }
         if [
             self.reign_start_at,
+            self.claimed_at,
             self.last_siege_end_at,
             self.last_paid_at,
             self.last_tax_rate_changed_at,
@@ -233,8 +239,9 @@ impl DominionState {
         ]
         .iter()
         .any(|t| *t < 0)
-            || (self.owner_expedition_id == 0 && self.reign_start_at != 0)
+            || (self.owner_expedition_id == 0 && (self.reign_start_at != 0 || self.claimed_at != 0))
             || (self.owner_expedition_id != 0 && self.ownership_generation == 0)
+            || self.claimed_at > self.reign_start_at
         {
             return Err(DominionError::InvalidState);
         }
@@ -629,10 +636,11 @@ impl DominionManager {
         if state.owner_expedition_id != 0 {
             return Err(DominionError::AlreadyOwned);
         }
+        // GM-seeded test dominions are ephemeral and do not represent a real holding.
         let owned = inner
             .states
             .values()
-            .filter(|e| e.state.owner_expedition_id == expedition_id)
+            .filter(|e| !e.state.ephemeral && e.state.owner_expedition_id == expedition_id)
             .count();
         if u64::try_from(owned).unwrap_or(u64::MAX) >= u64::from(limit) {
             return Err(DominionError::TooManyOwned);
@@ -644,6 +652,7 @@ impl DominionManager {
             .ok_or(DominionError::Overflow)?;
         state.owner_expedition_id = expedition_id;
         state.reign_start_at = now_seconds;
+        state.claimed_at = now_seconds;
         // A row restored while unowned must not hand a stale peace window to the new owner.
         state.non_pvp_start_at = 0;
         state.non_pvp_duration_min = 0;
@@ -1113,6 +1122,8 @@ impl DominionManager {
         state.owner_expedition_id = siege.attacker_expedition_id;
         state.ownership_generation = generation;
         state.reign_start_at = now_ms / 1000;
+        // A capture is not a claim: it must not start the fresh-claim siege delay.
+        state.claimed_at = 0;
         state.last_siege_end_at = now_ms / 1000;
         state.tower_destroyed = false;
         state.tower_hp = None;
@@ -1250,6 +1261,7 @@ impl DominionManager {
             if state.owner_expedition_id == expedition_id {
                 state.owner_expedition_id = 0;
                 state.reign_start_at = 0;
+                state.claimed_at = 0;
                 // The peace window belongs to the owner that started it; a released record
                 // is dropped on the client (0x01e), so no 0x025 is sent and a later owner
                 // must not inherit the stale window.

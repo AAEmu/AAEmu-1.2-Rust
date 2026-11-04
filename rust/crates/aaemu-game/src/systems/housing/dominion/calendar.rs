@@ -19,7 +19,8 @@
 //! the `siege_plans` week starts, which are all Sundays.
 
 use chrono::{
-    DateTime, Datelike, Days, FixedOffset, Local, LocalResult, NaiveDate, NaiveDateTime, TimeZone,
+    DateTime, Datelike, Days, Duration, FixedOffset, Local, LocalResult, NaiveDate, NaiveDateTime,
+    TimeZone,
 };
 use std::collections::BTreeMap;
 
@@ -100,6 +101,40 @@ impl CalendarTimeZone {
                 .from_local_datetime(&naive)
                 .single()
                 .map(|dt| dt.timestamp()),
+        }
+    }
+
+    /// Local wall-clock to Unix seconds for the claim window. A local time that does not exist
+    /// (DST spring-forward gap) falls forward to the first valid minute instead of making the
+    /// window unknown; an ambiguous fall-back time uses the earlier occurrence.
+    fn claim_timestamp(&self, naive: NaiveDateTime) -> Option<i64> {
+        match self {
+            Self::Fixed(offset) => offset
+                .from_local_datetime(&naive)
+                .single()
+                .map(|dt| dt.timestamp()),
+            Self::Local => {
+                // `chrono::Local` returns a `Single` value even for a skipped wall-clock time
+                // on Windows, so validate a `Single` by round-tripping: a valid local instant
+                // converts back to itself. An `Ambiguous` fall-back time is valid and uses the
+                // earlier occurrence. Advance minute by minute through a spring-forward gap to
+                // the first valid instant.
+                let mut candidate = naive;
+                for _ in 0..=180 {
+                    match Local.from_local_datetime(&candidate) {
+                        LocalResult::Ambiguous(dt, _) => return Some(dt.timestamp()),
+                        LocalResult::Single(dt) => {
+                            let back = Local.timestamp_opt(dt.timestamp(), 0).earliest();
+                            if back.is_some_and(|back| back.naive_local() == candidate) {
+                                return Some(dt.timestamp());
+                            }
+                        }
+                        LocalResult::None => {}
+                    }
+                    candidate = candidate.checked_add_signed(Duration::minutes(1))?;
+                }
+                None
+            }
         }
     }
 
@@ -223,9 +258,14 @@ impl SiegeCalendar {
     /// the text for 582 is parameterized by exactly these columns (`FUN_3956b860` case
     /// `0x246` in `x2game.dll.c`), so the columns are the claim window. Weekday 0 = Sunday is
     /// the same INFERRED convention as the rest of the table (`siege_plans` weeks start on
-    /// Sunday). A window longer than a week is supported by scanning back the weeks it
-    /// covers. The window is independent of [`CalendarSettings::enabled`]: the switch drives
+    /// Sunday). The window is independent of [`CalendarSettings::enabled`]: the switch drives
     /// the inferred weekly siege cycle, not the authored claim-availability columns.
+    ///
+    /// `open_duration_hours == 0` never opens (`DOMINION_CLOSED`); 168 h or more covers the
+    /// whole week and is always open. Shorter windows are local wall-clock intervals: the end
+    /// is `start + N hours` in local time and then converted, so a DST change inside the
+    /// window keeps the authored local end. A start that falls into a spring-forward gap moves
+    /// to the first valid local instant.
     pub fn claim_window_at(
         &self,
         zone_group_id: u32,
@@ -235,29 +275,39 @@ impl SiegeCalendar {
         let Some(zone) = self.zones.get(&zone_group_id) else {
             return ClaimWindow::Closed;
         };
-        if zone.open_duration_hours == 0 {
+        let hours = i64::from(zone.open_duration_hours);
+        if hours <= 0 {
             return ClaimWindow::Closed;
+        }
+        // A full week covers every instant; no need to scan weeks or touch DST.
+        if hours >= 168 {
+            return ClaimWindow::Open;
         }
         let Some(week) = timezone.week_start_of(now) else {
             return ClaimWindow::Closed;
         };
-        let duration = i64::from(zone.open_duration_hours) * 3_600;
-        // Whole weeks the window can reach back; 168 h -> the current and previous week.
-        let weeks_back = duration / (7 * 86_400) + 1;
-        for back in 0..=weeks_back {
+        // A window shorter than a week starts in the current or previous local week.
+        for back in 0..=1 {
             let Ok(days) = u64::try_from(back * 7) else {
                 continue;
             };
             let Some(candidate) = week.checked_sub_days(Days::new(days)) else {
                 continue;
             };
-            let Some(start) = timezone
-                .at(candidate, zone.open_weekday, zone.open_hour, 0)
-                .and_then(|start| timezone.timestamp(start))
+            let Some(start_naive) = timezone.at(candidate, zone.open_weekday, zone.open_hour, 0)
             else {
                 continue;
             };
-            if now >= start && now < start.saturating_add(duration) {
+            let Some(end_naive) = start_naive.checked_add_signed(Duration::hours(hours)) else {
+                continue;
+            };
+            let Some(start) = timezone.claim_timestamp(start_naive) else {
+                continue;
+            };
+            let Some(end) = timezone.claim_timestamp(end_naive) else {
+                continue;
+            };
+            if now >= start && now < end {
                 return ClaimWindow::Open;
             }
         }
