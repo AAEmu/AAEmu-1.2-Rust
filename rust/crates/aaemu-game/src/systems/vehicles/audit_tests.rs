@@ -181,6 +181,7 @@ async fn audit_detached_skill_is_pending_before_runtime_polls_it() {
         },
         None,
         0.0,
+        None,
     );
     assert_eq!(
         audit::snapshot(&server, &request())["jobs"][0]["phase"],

@@ -80,6 +80,11 @@ pub const INVITE_TIMEOUT_SECS: u64 = 60;
 /// battlefield Lua names: `BFER_TIMEOVER_COMPARE_KILL_COUNT`).
 pub const ENDING_TIMEOVER_COMPARE_KILL_COUNT: u8 = 1;
 
+/// The C# hard-coded 6 s wait before `OnKill` resurrects the victim. Kept as the fallback for
+/// a rule set that authors no `time_resurrection_delay` (the 1.2 rows author 15 s, or 5 s for
+/// the Gladiator).
+const LEGACY_RESURRECTION_DELAY_SECS: u64 = 6;
+
 /// `Character.ResetAllSkillCooldowns`: `playerSkillsTag`.
 const PLAYER_SKILLS_TAG: u32 = 378;
 
@@ -870,7 +875,7 @@ pub fn send_result(server: &GameServer, game: &Arc<InstantGame>, reason: u8) {
 /// state as sent by `SendResult`, so a game that runs out of time is ranked by its kill-count
 /// verdict (see [`finish_timeover`]), and a game is paid once ([`award_results`]).
 fn pay_awards(server: &GameServer, game: &InstantGame, awards: &[MemberAward]) {
-    use crate::systems::skills::progress::{change_game_points, GAME_POINT_HONOR};
+    use crate::systems::skills::progress::{grant_honor, HonorSource};
     use crate::systems::social::ranking_runtime::RankEvent;
 
     let zone_group_id =
@@ -878,7 +883,7 @@ fn pay_awards(server: &GameServer, game: &InstantGame, awards: &[MemberAward]) {
     let now = chrono::Utc::now();
     for award in awards {
         if award.honor != 0 {
-            change_game_points(server, &award.player, GAME_POINT_HONOR, award.honor);
+            grant_honor(server, &award.player, HonorSource::BattleField, award.honor);
         }
         if award.rank_points != 0 || award.rank_wins != 0 {
             server.systems.social.ranking.record(
@@ -1131,9 +1136,17 @@ pub fn on_kill(
     let Some(s) = server.self_arc() else {
         return;
     };
+    // The rule set of the running instance decides the wait (1.2: 15 s, Gladiator 5 s); a
+    // rule set without one keeps the C# 6 s.
+    let delay_secs = if game.rule_set.time_resurrection_delay > 0 {
+        u64::try_from(game.rule_set.time_resurrection_delay)
+            .unwrap_or(LEGACY_RESURRECTION_DELAY_SECS)
+    } else {
+        LEGACY_RESURRECTION_DELAY_SECS
+    };
     let (g, killer) = (game.clone(), killer.clone());
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(6)).await;
+        tokio::time::sleep(Duration::from_secs(delay_secs)).await;
         respawn_after_kill(&s, &g, &killer, &victim, victim_spawn, killer_spawn);
     });
 }

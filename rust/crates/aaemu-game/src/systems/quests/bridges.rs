@@ -447,6 +447,23 @@ impl QuestHooks for GameQuestHooks {
         }
     }
 
+    fn grant_quest_honor(
+        &self,
+        server: &GameServer,
+        player: Option<&PlayerRef>,
+        c: &mut Character,
+        amount: i32,
+    ) {
+        use crate::systems::skills::progress::{self, HonorSource};
+        // `World.HonorRate`, the same rate `GiveHonorPoint` applies, then the Quest pair.
+        let rate = server.config.get().world.honor_rate;
+        let base = (rate * f64::from(amount)).round_ties_even() as i32;
+        let packet = progress::grant_honor_locked(c, HonorSource::Quest, base);
+        if let (Some(p), Some(packet)) = (player, packet) {
+            p.send(packet);
+        }
+    }
+
     fn change_labor(
         &self,
         server: &GameServer,
