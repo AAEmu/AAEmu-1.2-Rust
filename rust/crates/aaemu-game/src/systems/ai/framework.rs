@@ -266,6 +266,9 @@ pub struct NpcAi {
     pub path_handler: AiPathHandler,
     /// `AiFollowUnitObj`.
     pub follow_unit: Option<WorldObject>,
+    /// The `ai_command_sets` id (whose `can_interact` is `'f'`) that currently makes the NPC
+    /// non-interactable; `None` = interactable. See [`super::interaction`].
+    pub locked_command_set: Option<u32>,
     pub ai_file_name: String,
     pub ai_file_name2: String,
     pub ai_skill_id: u32,
@@ -316,6 +319,7 @@ impl NpcAi {
             current_command_run_time_ms: 0,
             path_handler: AiPathHandler::default(),
             follow_unit: None,
+            locked_command_set: None,
             ai_file_name: String::new(),
             ai_file_name2: String::new(),
             ai_skill_id: 0,
