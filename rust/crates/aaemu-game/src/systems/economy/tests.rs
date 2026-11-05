@@ -1385,6 +1385,180 @@ async fn deposit_and_withdraw_money() {
 }
 
 #[tokio::test]
+async fn aa_point_wallet_takes_under_one_lock_and_refuses_overdraft() {
+    let mut w = world();
+    w.pa.data().aa_point = 100;
+    w.pa.data().bank_aa_point = 30;
+    w.a.drain();
+
+    let mut out = inventory::Out::Direct(&w.server);
+    assert!(inventory::try_take_aa_point(
+        &mut out,
+        &w.pa,
+        40,
+        task_type::BUY_AA_POINT
+    ));
+    assert_eq!(w.pa.data().aa_point, 60);
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            task_body(task_type::BUY_AA_POINT, vec![ItemTask::AaPointUpdate(-40)])
+        )]
+    );
+
+    // One point short: refused, unchanged, and the client gets NOT_ENOUGH_AA_POINT.
+    assert!(!inventory::try_take_aa_point(
+        &mut out,
+        &w.pa,
+        61,
+        task_type::INVALID
+    ));
+    assert_eq!(w.pa.data().aa_point, 60);
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::NOT_ENOUGH_AA_POINT, 0)
+        )]
+    );
+
+    // Bank purse: same rule with its own error.
+    assert!(inventory::try_take_bank_aa_point(
+        &mut out,
+        &w.pa,
+        30,
+        task_type::WITHDRAW_MONEY
+    ));
+    assert_eq!(w.pa.data().bank_aa_point, 0);
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            task_body(
+                task_type::WITHDRAW_MONEY,
+                vec![ItemTask::ChangeBankAaPoint(-30)]
+            )
+        )]
+    );
+    assert!(!inventory::try_take_bank_aa_point(
+        &mut out,
+        &w.pa,
+        1,
+        task_type::INVALID
+    ));
+    assert_eq!(w.pa.data().bank_aa_point, 0);
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::NOT_ENOUGH_BANK_AA_POINT, 0)
+        )]
+    );
+
+    // Grants and absolute sets report their signed delta.
+    assert!(inventory::add_aa_point(
+        &mut out,
+        &w.pa,
+        25,
+        task_type::BUY_AA_POINT
+    ));
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            task_body(task_type::BUY_AA_POINT, vec![ItemTask::AaPointUpdate(25)])
+        )]
+    );
+    assert!(inventory::set_aa_point(
+        &mut out,
+        &w.pa,
+        5,
+        task_type::INVALID
+    ));
+    assert_eq!(w.pa.data().aa_point, 5);
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            task_body(task_type::INVALID, vec![ItemTask::AaPointUpdate(-80)])
+        )]
+    );
+    assert!(inventory::set_bank_aa_point(
+        &mut out,
+        &w.pa,
+        9,
+        task_type::INVALID
+    ));
+    let (aa_point, bank_aa_point) = {
+        let c = w.pa.data();
+        (c.aa_point, c.bank_aa_point)
+    };
+    assert_eq!((aa_point, bank_aa_point), (5, 9));
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCItemTaskSuccessPacket,
+            task_body(task_type::INVALID, vec![ItemTask::ChangeBankAaPoint(9)])
+        )]
+    );
+
+    // Negative amounts never reach the balance.
+    assert!(!inventory::add_aa_point(
+        &mut out,
+        &w.pa,
+        -1,
+        task_type::INVALID
+    ));
+    assert!(!inventory::set_aa_point(
+        &mut out,
+        &w.pa,
+        -1,
+        task_type::INVALID
+    ));
+    let (aa_point, bank_aa_point) = {
+        let c = w.pa.data();
+        (c.aa_point, c.bank_aa_point)
+    };
+    assert_eq!((aa_point, bank_aa_point), (5, 9));
+    assert!(w.a.drain().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_aa_point_takes_never_overdraw() {
+    let server = std::sync::Arc::new(test_server_with(test_data()));
+    server.set_self();
+    let mut client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Alice", 100.0, 100.0),
+        0x100,
+    );
+    player.data().aa_point = 100;
+
+    let take = |server: std::sync::Arc<GameServer>, player: PlayerRef| {
+        tokio::task::spawn_blocking(move || {
+            let mut out = inventory::Out::Direct(&server);
+            inventory::try_take_aa_point(&mut out, &player, 100, task_type::INVALID)
+        })
+    };
+    let (first, second) = tokio::join!(
+        take(server.clone(), player.clone()),
+        take(server.clone(), player.clone())
+    );
+    let results = [first.unwrap(), second.unwrap()];
+    assert_eq!(results.iter().filter(|took| **took).count(), 1);
+    assert_eq!(player.data().aa_point, 0);
+    // Exactly one success packet: the loser sent only its refusal.
+    let mut ops = client.drain_ops();
+    ops.sort_unstable();
+    let mut expected = vec![sc::SCItemTaskSuccessPacket, sc::SCErrorMsgPacket];
+    expected.sort_unstable();
+    assert_eq!(ops, expected);
+}
+
+#[tokio::test]
 async fn bank_refuses_non_positive_amounts_and_missing_banker() {
     let mut w = world();
     w.pa.data().money = 500;

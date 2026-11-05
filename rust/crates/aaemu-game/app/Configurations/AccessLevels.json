@@ -33,6 +33,7 @@
         "coffer": 50,
         
         // Admin
+        "aapoint": 100,
         "addbuff": 100,
         "addgold": 100,
         "additem": 100,
