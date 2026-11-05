@@ -13,6 +13,7 @@ use crate::packets::world::{
     ChatSender, SCChatMessagePacket, SCJoinedChatChannelPacket, SCLeavedChatChannelPacket,
 };
 use crate::systems::social::config::ChatConfig;
+use crate::systems::social::util::ChatFailure;
 use crate::world::PlayerRef;
 
 /// `ChatType`.
@@ -527,7 +528,7 @@ impl ChatManager {
         password: &str,
         create: bool,
         chat_ids: &IdManager,
-    ) -> Result<(), i16> {
+    ) -> Result<(), ChatFailure> {
         use super::util::error;
         if name.is_empty()
             || name.len() > USER_CHANNEL_NAME_BYTES
@@ -535,7 +536,7 @@ impl ChatManager {
             || password.len() > USER_CHANNEL_PASSWORD_BYTES
             || password.chars().any(char::is_control)
         {
-            return Err(error::CHAT_NO_CHANNEL);
+            return Err(ChatFailure::new(error::CHAT_NO_CHANNEL, name));
         }
         let mut channels = self.user_channels.lock().expect("chat poisoned");
         let joined_count = || channels.values().filter(|c| c.channel.contains(p)).count();
@@ -544,19 +545,19 @@ impl ChatManager {
             .find(|c| c.channel.internal_name() == name);
         if let Some(existing) = existing {
             if create {
-                return Err(error::CHAT_CHANNEL_ALREADY_EXISTS);
+                return Err(ChatFailure::new(error::CHAT_CHANNEL_ALREADY_EXISTS, name));
             }
             if existing.channel.contains(p) {
-                return Err(error::CHAT_ALREADY_JOINED_CHANNEL);
+                return Err(ChatFailure::new(error::CHAT_ALREADY_JOINED_CHANNEL, name));
             }
             if !existing.password.is_empty() && password.is_empty() {
-                return Err(error::CHAT_PRIVATE_CHANNEL);
+                return Err(ChatFailure::new(error::CHAT_PRIVATE_CHANNEL, name));
             }
             if existing.password != password {
-                return Err(error::CHAT_WRONG_PASSWORD);
+                return Err(ChatFailure::new(error::CHAT_WRONG_PASSWORD, name));
             }
             if joined_count() >= USER_CHANNELS_PER_SESSION {
-                return Err(error::CHAT_NO_CHANNEL);
+                return Err(ChatFailure::new(error::CHAT_NO_CHANNEL, name));
             }
             existing.channel.join(p);
             return Ok(());
@@ -565,9 +566,11 @@ impl ChatManager {
             || joined_count() >= USER_CHANNELS_PER_SESSION
             || channels.len() >= USER_CHANNELS_TOTAL
         {
-            return Err(error::CHAT_NO_CHANNEL);
+            return Err(ChatFailure::new(error::CHAT_NO_CHANNEL, name));
         }
-        let id = chat_ids.get_next_id().map_err(|_| error::CHAT_NO_CHANNEL)?;
+        let id = chat_ids
+            .get_next_id()
+            .map_err(|_| ChatFailure::new(error::CHAT_NO_CHANNEL, name))?;
         let channel = Arc::new(ChatChannel::new(
             chat_type::USER,
             0,
@@ -593,16 +596,19 @@ impl ChatManager {
         p: &PlayerRef,
         identity: i64,
         chat_ids: &IdManager,
-    ) -> Result<(), i16> {
+    ) -> Result<(), ChatFailure> {
         use super::util::error;
         let mut channels = self.user_channels.lock().expect("chat poisoned");
         let id = (identity as u64 >> 32) as u32;
         let entry = channels
             .get(&id)
             .filter(|c| user_channel_identity(&c.channel) == identity)
-            .ok_or(error::CHAT_NO_CHANNEL)?;
+            .ok_or_else(|| ChatFailure::new(error::CHAT_NO_CHANNEL, ""))?;
         if !entry.channel.leave(p) {
-            return Err(error::CHAT_NOT_JOINED_CHANNEL);
+            return Err(ChatFailure::new(
+                error::CHAT_NOT_JOINED_CHANNEL,
+                entry.channel.internal_name(),
+            ));
         }
         if entry.channel.is_empty() {
             channels.remove(&id);
@@ -618,23 +624,32 @@ impl ChatManager {
         sub_type: i16,
         channel_id: u32,
         message: &SCChatMessagePacket,
-    ) -> Result<usize, i16> {
+    ) -> Result<usize, ChatFailure> {
         use super::util::error;
         let channels = self.user_channels.lock().expect("chat poisoned");
         let entry = channels
             .get(&channel_id)
             .filter(|c| c.channel.sub_type == sub_type)
-            .ok_or(error::CHAT_NO_CHANNEL)?;
+            .ok_or_else(|| ChatFailure::new(error::CHAT_NO_CHANNEL, ""))?;
         if !entry.channel.contains(p) {
-            return Err(error::CHAT_NOT_JOINED_CHANNEL);
+            return Err(ChatFailure::new(
+                error::CHAT_NOT_JOINED_CHANNEL,
+                entry.channel.internal_name(),
+            ));
         }
         if message.message.len() > i16::MAX as usize {
-            return Err(error::CHAT_NO_CHANNEL);
+            return Err(ChatFailure::new(
+                error::CHAT_NO_CHANNEL,
+                entry.channel.internal_name(),
+            ));
         }
         let packet = super::packets::chat::user_message(&entry.channel, message);
         // The six-byte plain packet header is part of the transport's u16 frame length.
         if packet.body.len() + 6 > u16::MAX as usize {
-            return Err(error::CHAT_NO_CHANNEL);
+            return Err(ChatFailure::new(
+                error::CHAT_NO_CHANNEL,
+                entry.channel.internal_name(),
+            ));
         }
         Ok(entry.channel.send_packet(&packet))
     }

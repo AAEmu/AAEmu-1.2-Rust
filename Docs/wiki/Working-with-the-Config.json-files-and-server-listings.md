@@ -556,6 +556,21 @@ original-client run opens the board without a Lua error. Row details and the
 open question are recorded in `rust/crates/aaemu-game/PORTING.md`
 (BOUNTY-board).
 
+## Chat feature switches (`Configurations/Chat.json`)
+
+Rust-only switches for chat whose retail 1.2 behaviour is not fully evidenced.
+They ship in `Configurations/Chat.json` and can be overridden in
+`Config.Local.json` or with `Chat__ChatFailedPacket`.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `ChatFailedPacket` | `false` | Answer channel-bound chat failures with `SCChatFailedPacket(error, channel name)` instead of the `SCErrorMsgPacket` toast: the user-channel join / leave / message errors, and the "not in party / raid / expedition / family" errors. Every other chat failure keeps `SCErrorMsgPacket`. `false` keeps the previous frames. |
+
+**Capture-pending:** which failures retail 1.2 sent as `SCChatFailed` is
+unknown. Keep `ChatFailedPacket` off until a capture of the original server
+shows the form it used. The packet layout and the open question are recorded
+in `rust/crates/aaemu-game/PORTING.md` (CHAT-FAILED-1).
+
 ## Loot announcements (`Configurations/Loot.json`)
 
 Rust-only switch for the party/raid loot chat line. The shipped default keeps

@@ -1,7 +1,7 @@
 //! Chat channel packets (`CSSendChatMessagePacket` itself is registered by `packets::c2g_world`
 //! and routed through [`crate::world::session::send_chat_message`]).
 
-use super::{active_char, cs_packet};
+use super::{active_char, cs_packet, sc_packet};
 use crate::net::packet::LEVEL_PLAIN;
 use crate::net::registry::PacketRegistry;
 use crate::opcodes::{cs, sc};
@@ -9,9 +9,39 @@ use crate::packets::raw_body_packet;
 use crate::packets::world::SCChatMessagePacket;
 use crate::systems::social::{
     chat::{chat_type, ChatChannel},
-    util::send_error,
+    util::send_chat_failure,
 };
 use aaemu_commons::{Marshal, PacketStream};
+
+sc_packet!(
+    /// `SCChatFailedPacket` (S 0x0d1): `i16 ErrorMessage ; string chname (max 10)`.
+    ///
+    /// Reader `FUN_397c2950`; its handler `FUN_391d8de0` raises the client's `CHAT_FAILED(error,
+    /// chname)` Lua event. The chat-event handler in `chat_msg_event.alb` displays the error
+    /// text; the channel name is capped at the 10 bytes the reader accepts.
+    SCChatFailedPacket {
+        error: i16,
+        channel_name: String
+    } |self, s| {
+        s.write_i16(self.error).write_str(&self.channel_name);
+    }
+);
+
+impl SCChatFailedPacket {
+    /// The `chname` length the 1.2 reader accepts (`FUN_397c2950`).
+    pub const MAX_CHANNEL_NAME_BYTES: usize = 10;
+
+    pub fn new(error: i16, channel_name: &str) -> Self {
+        let mut end = channel_name.len().min(Self::MAX_CHANNEL_NAME_BYTES);
+        while !channel_name.is_char_boundary(end) {
+            end -= 1;
+        }
+        Self {
+            error,
+            channel_name: channel_name[..end].to_string(),
+        }
+    }
+}
 
 cs_packet!(
     /// `CSJoinUserChatChannelPacket`: temporary user channel create/join.
@@ -19,8 +49,12 @@ cs_packet!(
     read |s| { Ok(Self { name: s.read_string()?, pwd: s.read_string()?, create: s.read_bool()? }) }
     handle |self, server, conn| {
         let p = active_char!(conn);
-        if let Err(error) = server.chat.join_user_channel(&p, &self.name, &self.pwd, self.create, &server.ids.chat) {
-            send_error(&p, error);
+        if let Err(failure) =
+            server
+                .chat
+                .join_user_channel(&p, &self.name, &self.pwd, self.create, &server.ids.chat)
+        {
+            send_chat_failure(&p, &server.config.chat, failure);
         }
         Ok(())
     }
@@ -32,8 +66,8 @@ cs_packet!(
     read |s| { Ok(Self { chat: s.read_i64()? }) }
     handle |self, server, conn| {
         let p = active_char!(conn);
-        if let Err(error) = server.chat.leave_user_channel(&p, self.chat, &server.ids.chat) {
-            send_error(&p, error);
+        if let Err(failure) = server.chat.leave_user_channel(&p, self.chat, &server.ids.chat) {
+            send_chat_failure(&p, &server.config.chat, failure);
         }
         Ok(())
     }
@@ -104,11 +138,12 @@ pub async fn send_user_chat(
         ability: packet.ability,
         language_type: packet.language_type,
     };
-    if let Err(error) = server
-        .chat
-        .send_user_message(&p, packet.unk1, packet.unk2 as u32, &message)
+    if let Err(failure) =
+        server
+            .chat
+            .send_user_message(&p, packet.unk1, packet.unk2 as u32, &message)
     {
-        send_error(&p, error);
+        send_chat_failure(&p, &server.config.chat, failure);
     }
 }
 
@@ -240,5 +275,27 @@ mod tests {
             body.as_bytes(),
             expected([0xFE, 0xFF, 0, 0, 0, 0, 0, 0], None, "hi", 3)
         );
+    }
+
+    #[test]
+    fn chat_failed_writes_i16_error_then_the_channel_name() {
+        // Reader `FUN_397c2950`: `i16 ErrorMessage ; string chname (max 10)`.
+        let packet = SCChatFailedPacket::new(467, "Party");
+        let mut body = PacketStream::new();
+        packet.write(&mut body);
+        assert_eq!(
+            body.as_bytes(),
+            vec![0xD3, 0x01, 5, 0, b'P', b'a', b'r', b't', b'y']
+        );
+    }
+
+    #[test]
+    fn chat_failed_channel_name_is_capped_at_ten_bytes_on_a_char_boundary() {
+        // The 1.2 reader's `chname` buffer is 10 bytes; a longer name must not overflow it.
+        let packet = SCChatFailedPacket::new(270, "Party 1 of Al");
+        assert_eq!(packet.channel_name, "Party 1 of");
+        // A multi-byte character that would straddle the cap is dropped whole.
+        let packet = SCChatFailedPacket::new(270, "éééééé");
+        assert_eq!(packet.channel_name, "ééééé");
     }
 }
