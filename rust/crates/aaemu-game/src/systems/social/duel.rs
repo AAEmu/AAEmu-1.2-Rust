@@ -78,6 +78,52 @@ pub enum DuelDistance {
     ChallengedFar = 2,
 }
 
+/// Shows the owner's current faction (and temporary flag) on every active mate and owned slave.
+/// Mates and slaves copy the owner's faction when they spawn (`mates::spawn_mount`,
+/// `slaves::create_for_owner`) and `Character.SetFaction` never updates them, so a duellist's
+/// pet / vehicle would otherwise keep the real faction while its owner shows the Red / Blue
+/// team one. Calling this again after the owner's faction is restored also covers mates / slaves
+/// summoned during the duel (they spawned with the team faction).
+fn sync_dependents_faction(server: &GameServer, owner: &PlayerRef) {
+    let (owner_id, instance_id, faction_id, temp) = {
+        let c = owner.data();
+        (
+            c.id,
+            c.unit.transform.instance_id,
+            c.unit.faction_id,
+            c.unit.faction_temporary,
+        )
+    };
+    let mates = server
+        .systems
+        .vehicles
+        .mates
+        .get(instance_id)
+        .get_active_mates(owner_id);
+    for mate in mates {
+        crate::systems::skills::combat::set_faction_with_temp(
+            server,
+            &WorldObject::from(&mate),
+            faction_id,
+            temp,
+        );
+    }
+    for world in server.world.worlds() {
+        for slave in crate::systems::vehicles::slaves::all_slaves(&world) {
+            let summoner_id = slave.data().summoner_id;
+            if summoner_id != owner_id {
+                continue;
+            }
+            crate::systems::skills::combat::set_faction_with_temp(
+                server,
+                &WorldObject::from(&slave),
+                faction_id,
+                temp,
+            );
+        }
+    }
+}
+
 /// A scheduled duel task (`TaskManager.Schedule`); `cancel` = `Task.Cancel()`.
 #[derive(Debug)]
 pub struct DuelTimer {
@@ -503,11 +549,13 @@ impl DuelManager {
     }
 
     /// `SetFaction(owner, factionId)`: remembers the current faction, then sets the temporary
-    /// team faction (no expedition / party / housing side effects, never saved).
+    /// team faction (no expedition / party / housing side effects, never saved) on the owner and
+    /// its active mates / owned slaves.
     async fn set_faction(&self, server: &GameServer, owner: &PlayerRef, faction_id: u32) {
         let current = owner.data().unit.faction_id;
         self.st().save_factions.insert(owner.character_id, current);
         faction::set_temporary_faction(server, owner, faction_id);
+        sync_dependents_faction(server, owner);
     }
 
     /// `RestoreFaction(owner)`. `false` = no saved faction (the C# throws
@@ -518,6 +566,7 @@ impl DuelManager {
         };
         faction::restore_temporary_faction_to(server, owner, saved);
         self.st().save_factions.remove(&owner.character_id);
+        sync_dependents_faction(server, owner);
         true
     }
 
