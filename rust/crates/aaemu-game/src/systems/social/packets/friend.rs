@@ -16,6 +16,22 @@ sc_packet!(
     }
 );
 
+impl SCAddFriendPacket {
+    /// A failed add. The client prints "$1 does not exist." for error 551 using
+    /// `friend.name`; every other id shows the localized error text. The character id is 0
+    /// because no list entry is created (`FriendInfo` otherwise zeroed).
+    pub fn failure(error_message: i16, name: impl Into<String>) -> Self {
+        Self {
+            friend: FriendInfo {
+                name: name.into(),
+                ..FriendInfo::default()
+            },
+            success: false,
+            error_message,
+        }
+    }
+}
+
 sc_packet!(
     /// `SCDeleteFriendPacket(characterId, success, friendName, errorMessage)`.
     SCDeleteFriendPacket {
@@ -30,6 +46,19 @@ sc_packet!(
             .write_i16(self.error_message);
     }
 );
+
+impl SCDeleteFriendPacket {
+    /// A failed remove. Error 551 with a non-empty name prints "$1 does not exist."; 556
+    /// ("not in the friend list") and the rest show the localized text.
+    pub fn failure(error_message: i16, character_id: u32, name: impl Into<String>) -> Self {
+        Self {
+            character_id,
+            success: false,
+            friend_name: name.into(),
+            error_message,
+        }
+    }
+}
 
 sc_packet!(
     /// `SCAddBlockedUserPacket(characterId, characterName, success, errorMessage)`.
@@ -46,6 +75,18 @@ sc_packet!(
     }
 );
 
+impl SCAddBlockedUserPacket {
+    /// A failed block: 551 unknown name, 352 self, 353 already blocked (INFERRED id).
+    pub fn failure(error_message: i16, character_id: u32, name: impl Into<String>) -> Self {
+        Self {
+            character_id,
+            character_name: name.into(),
+            success: false,
+            error_message,
+        }
+    }
+}
+
 sc_packet!(
     /// `SCDeleteBlockedUserPacket(characterId, success, blockedName, errorMessage)`.
     SCDeleteBlockedUserPacket {
@@ -60,6 +101,18 @@ sc_packet!(
             .write_i16(self.error_message);
     }
 );
+
+impl SCDeleteBlockedUserPacket {
+    /// A failed unblock: 551 unknown name, 354 not blocked.
+    pub fn failure(error_message: i16, character_id: u32, name: impl Into<String>) -> Self {
+        Self {
+            character_id,
+            success: false,
+            blocked_name: name.into(),
+            error_message,
+        }
+    }
+}
 
 cs_packet!(
     /// `CSAddFriendPacket`.
@@ -121,6 +174,40 @@ mod tests {
     use super::*;
     use crate::systems::social::packets::body;
     use aaemu_commons::{Marshal, PacketStream};
+
+    #[test]
+    fn friend_failure_packets_are_byte_exact() {
+        // SCAddFriend: FriendInfo with id 0 and only the typed name, then `false` and the i16.
+        assert_eq!(body(&SCAddFriendPacket::failure(551, "Nobody")), {
+            let mut s = PacketStream::new();
+            FriendInfo {
+                name: "Nobody".into(),
+                ..FriendInfo::default()
+            }
+            .write(&mut s);
+            s.write_bool(false).write_i16(551);
+            s.into_bytes()
+        });
+        assert_eq!(
+            body(&SCDeleteFriendPacket::failure(556, 7, "Al")),
+            vec![7, 0, 0, 0, 0, 2, 0, b'A', b'l', 0x2C, 0x02]
+        );
+        assert_eq!(
+            body(&SCAddBlockedUserPacket::failure(353, 7, "Al")),
+            vec![7, 0, 0, 0, 2, 0, b'A', b'l', 0, 0x61, 0x01]
+        );
+        assert_eq!(
+            body(&SCDeleteBlockedUserPacket::failure(354, 0, "Nobody")),
+            {
+                let mut s = PacketStream::new();
+                s.write_u32(0)
+                    .write_bool(false)
+                    .write_str("Nobody")
+                    .write_i16(354);
+                s.into_bytes()
+            }
+        );
+    }
 
     #[test]
     fn friend_packets_are_byte_exact() {

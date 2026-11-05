@@ -2252,9 +2252,16 @@ async fn friends_and_blocked_users() {
     assert_eq!(f[0].0, sc::SCAddFriendPacket);
     assert_eq!(a.p.data().friends.len(), 1);
     assert_eq!(server.friends.owners_of(2), vec![1]);
-    // Adding twice does nothing.
+    // Adding twice is refused with 502 (INFERRED id: the client has no dedicated text).
     a.send(&server, cs::CSAddFriendPacket, name("Bob")).await;
-    assert!(a.ops().is_empty());
+    assert_eq!(
+        a.frames(),
+        vec![(
+            sc::SCAddFriendPacket,
+            body(&crate::systems::social::packets::friend::SCAddFriendPacket::failure(502, "Bob"))
+        )]
+    );
+    assert_eq!(a.p.data().friends.len(), 1);
     // B's status changes reach A.
     crate::world::session::set_online(&server, &b.p, false);
     assert_eq!(a.ops(), vec![sc::SCFriendStatusChangedPacket]);
@@ -2286,10 +2293,20 @@ async fn friends_and_blocked_users() {
         .await;
     assert_eq!(a.ops(), vec![sc::SCDeleteBlockedUserPacket]);
     assert_eq!(a.p.data().removed_blocked, vec![2]);
-    // Unknown names are ignored for blocks.
+    // An unknown name is answered with 551.
     a.send(&server, cs::CSAddBlockedUserPacket, name("Nobody"))
         .await;
-    assert!(a.ops().is_empty());
+    assert_eq!(
+        a.frames(),
+        vec![(
+            sc::SCAddBlockedUserPacket,
+            body(
+                &crate::systems::social::packets::friend::SCAddBlockedUserPacket::failure(
+                    551, 0, "Nobody"
+                )
+            )
+        )]
+    );
     let _ = b.ops();
 }
 
@@ -2416,10 +2433,20 @@ async fn blocking_an_offline_character_uses_the_name_manager() {
     assert!(a.p.data().blocked.is_empty());
     assert_eq!(a.p.data().removed_blocked, vec![9]);
 
-    // An unregistered name is still ignored.
+    // An unregistered name is answered with 551.
     a.send(&server, cs::CSAddBlockedUserPacket, name_body("Nobody"))
         .await;
-    assert!(a.ops().is_empty());
+    assert_eq!(
+        a.frames(),
+        vec![(
+            sc::SCAddBlockedUserPacket,
+            body(
+                &crate::systems::social::packets::friend::SCAddBlockedUserPacket::failure(
+                    551, 0, "Nobody"
+                )
+            )
+        )]
+    );
 }
 
 #[tokio::test]

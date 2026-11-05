@@ -15,8 +15,10 @@
 //!   logout and a server restart (`bounty_pledges`).
 //! * The arresting player receives the whole accumulated total when the arrest is decided, and
 //!   the target's total resets. NPC, guard and mob kills never pay.
-//! * `SCUnitBountyMoney` is not sent: its writer has not been located in the 1.2 client (only
-//!   the handler `391d6680`), so the layout is not confirmed (BOUNTY-3).
+//! * `SCUnitBountyMoney` (`bc objId ; i64 moneyAmount`, writer `FUN_397b3b50`) carries the whole
+//!   total, never a delta: to every viewer after a successful pledge, to a viewer whose client
+//!   just received the target's entry `SCUnitState`, and 0 after the payout (BOUNTY-3).
+//!   When the client draws it is INFERRED (`OnUnitBountyMoney`, handler `FUN_391d6680`).
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
@@ -25,7 +27,7 @@ use sqlx::mysql::MySqlPool;
 use sqlx::{MySql, Transaction};
 
 use super::bounty_runtime::{BountyActor, BountyError, BountyLedger, BountyPledge, BountySnapshot};
-use super::packets::trial::SCBountyPaidPacket;
+use super::packets::trial::{SCBountyPaidPacket, SCUnitBountyMoneyPacket};
 use super::util;
 use crate::db::int;
 use crate::error::Result;
@@ -46,6 +48,62 @@ pub const PERMIT_TTL_MS: i64 = 5 * 60_000;
 pub const CANNOT_SET_BOUNTY_FOR_SUCH_NAME: i16 = 585;
 /// `ErrorMessageType.CANNOT_SET_BOUNTY` (586): any other refusal.
 pub const CANNOT_SET_BOUNTY: i16 = 586;
+
+/// Sends `target`'s whole `total` as `SCUnitBountyMoney` to every viewer of it, and to the
+/// target itself (`include_self`, like `GameObject.BroadcastPacket`). No object or manager lock
+/// may be held: [`on_character_entered`] and [`BountyManager::place`] call this after dropping
+/// theirs.
+fn send_bounty_money(server: &GameServer, target: &PlayerRef, total: i64) {
+    let obj = WorldObject::from(target.clone());
+    let Some(world) = server.world.world_of(&obj) else {
+        return;
+    };
+    crate::world::broadcast(
+        &world,
+        obj,
+        &SCUnitBountyMoneyPacket {
+            obj_id: target.obj_id,
+            money_amount: total,
+        },
+        true,
+    );
+}
+
+/// The `SCUnitBountyMoney` frames a character needs when it enters a world instance: its own
+/// total to the players around it, and the total of every wanted player already around it to
+/// the entering client. Called right after the entry `SCUnitState` exchange in
+/// `world::session::spawn` and `instances::worlds::instance_loaded`. A total of 0 sends nothing.
+pub fn on_character_entered(server: &GameServer, p: &PlayerRef) {
+    let obj = WorldObject::from(p.clone());
+    let Some(world) = server.world.world_of(&obj) else {
+        return;
+    };
+    let own = server.systems.social.bounties.active_total(p.character_id);
+    if own > 0 {
+        crate::world::broadcast(
+            &world,
+            obj.clone(),
+            &SCUnitBountyMoneyPacket {
+                obj_id: p.obj_id,
+                money_amount: own,
+            },
+            true,
+        );
+    }
+    for other in world.players_around(&obj) {
+        let total = server
+            .systems
+            .social
+            .bounties
+            .active_total(other.character_id);
+        if total > 0 {
+            p.send(SCUnitBountyMoneyPacket {
+                obj_id: other.obj_id,
+                money_amount: total,
+            });
+        }
+    }
+}
 
 /// Why [`BountyManager::place`] refused a `SendBountyUpdate`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -390,7 +448,12 @@ impl BountyManager {
         };
         state.permits.remove(&payer.character_id);
         state.dirty.insert(pledge.id);
-        Ok(state.ledger.active_total(target_id))
+        let total = state.ledger.active_total(target_id);
+        // Never send into the world while the ledger lock (or the economy ops lock) is held.
+        drop(state);
+        drop(_ops);
+        send_bounty_money(server, &target, total);
+        Ok(total)
     }
 
     /// The arrest of `target`: pays the whole unpaid total to `arrestor` and resets the target's
@@ -489,6 +552,10 @@ impl BountyManager {
             arrestor.character_id,
             target.character_id
         );
+        // The total reset to 0: every viewer clears the amount it draws (whole value, not a
+        // delta). Drop the economy ops lock before the world send.
+        drop(_ops);
+        send_bounty_money(server, target, 0);
         total
     }
 }

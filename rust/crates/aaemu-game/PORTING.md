@@ -795,7 +795,7 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 | `TeamManager`, `Models/Game/Team` | `systems/social/team.rs`, `packets/team.rs` | done | Invitations (single / area with `SCAskToJoinTeamArea` / `SCTeamAreaInvited`, 30 s area cooldown, 60 s timeout, 500 ms sweep, 10k cap, stale-reply and owner-rights guards), invitation error replies, create, AskRiskyTeam (leave / kick / dismiss + auto-disband; the direct `CSLeaveTeam` / `CSKickTeamMember` / `CSDismissTeam` packets run the same actions), owner / role / marker / looting rule / ping / move, raid conversion, SetOffline / MemberRemoveFromTeam / UpdateAtLogin / UpdatePosition, 500 ms remote-member sync (delta cache, 5 s forced resync, upper-triangle pairs), zombie-team disband (5 min), loot winner helpers. Events (OnTeamJoin/Leave) are quest-side: not called. See "Area team invitations and invitation error replies". |
 | `ExpeditionManager`, `Models/Game/Expeditions` | `systems/social/expedition.rs`, `packets/expedition.rs` (`managers::expedition` re-exports) | done | Load, create (party checks, cost, `SCItemTaskSuccessPacket` money-only form), invite / reply, leave, kick, member role, owner, role policy, disband (stays listed as `$deleted-guild-<id>`), `Expedition.Save` per change, offline leave for character deletion. Guild rename: see "Guild rename" below. Sponsor is still log-only / not in 1.2 as in C#. |
 | `FamilyManager`, `Models/Game/Family` | `systems/social/family.rs`, `packets/family.rs` | done | Load, invite / reply / create, leave, kick (offline existence check), title, steward, login / logout, disband, save, offline leave for character deletion. |
-| `FriendMananger`, `CharacterFriends`, `CharacterBlocked` | `systems/social/friend.rs`, `packets/friend.rs` (`managers::friend` re-exports) | done | Add / remove friends (online or by DB name lookup), block / unblock (online or by `NameManager` for offline names), status changes incl. `InParty`. The blocked list is enforced on every direct delivery path (whisper, team / area / expedition / family invite, friend add, trade and duel request); see the block-list deviation. |
+| `FriendMananger`, `CharacterFriends`, `CharacterBlocked` | `systems/social/friend.rs`, `packets/friend.rs` (`managers::friend` re-exports) | done | Add / remove friends (online or by DB name lookup), block / unblock (online or by `NameManager` for offline names), status changes incl. `InParty`, and the client's failure feedback for every refused add / remove / block / unblock (WP-SL2, see the deviation). The blocked list is enforced on every direct delivery path (whisper, team / area / expedition / family invite, friend add, trade and duel request); see the block-list deviation. |
 | `ChatManager`, `Models/Game/Chat` | `systems/social/chat.rs`, `session.rs` (`managers::chat` re-exports) | done | All channel kinds incl. party / raid / court, CleanUpChannels, party / raid / raid-leader / judge routing, per-channel spam delays (`SCChatSpamDelayPacket` + server-side enforcement, see "Chat spam" below). User channels (`CSJoinUserChatChannel`) are log-only as in C#. |
 | `FactionManager` relations, `SystemFaction.GetRelationState`, `Unit/Character.SetFaction` | `systems/social/faction.rs`, `packets/faction.rs` | done | Relation table validated against compact.sqlite3 (gated test). Faction CS packets are log-only as in C#; every SCFaction* struct ported. `relation_state_live` overlays the runtime nations on the static table for the combat, team, party and AI paths. |
 | Player nations (`nations`, `nation_relations`, independence, immigration, diplomacy, rename, national tax, monument) | `systems/social/nation.rs`, `commands/scripts/nation.rs` | stages 1-4 | Skill 18540 special effect 71 creates a nation from the caster's expedition (owner + dominion, CASTLE_CLAIM backpack); ids come from the expedition allocator; `SCFactionIndependence` + relation rows + `SCUnitFactionChanged`; online members use `set_faction`, offline `characters.faction_id` moves with `expeditions.mother` in the save transaction; login sends nation factions and relations. Stage 2 adds the invite / reply / return-to-origin / kick packets with the client's error order, persisted factions and offline kicks. Stage 3 adds `CSFactionDeclareHostile` 0x019, the type-25 friendly treaty mail (charge paid through `CSPayChargeMoney` 0x0a0) and the periodic relation expiry. Stage 4 adds the nation rename (`SCNationShowRenameUI` 0x010 + the `CSRenameExpedition` nation half), the national tax (`CSUpdateNationalTaxRate` 0x013 -> `SCNationalTaxRate` 0x021) and the territory-statue monument (`SCNationalMonumentChanged` 0x022). See "Player nations" below. |
@@ -1722,8 +1722,10 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   checks the recipient's list under the recipient's own lock
   (`systems::social::friend::is_blocked_by`) and drops the delivery when the sender is on it.
   Blocking / unblocking also resolves offline names through `NameManager` (the C# only accepted
-  online names); unknown names are still ignored without a reply, as in the C#, and the
-  successful `SCAddBlockedUser` / `SCDeleteBlockedUser` replies carry the resolved id / name, so
+  online names); a failed add / remove / block / unblock answers the client's own packet with
+  the error id (551 unknown name, 352 self-block, 354 not blocked; 353 already blocked is
+  INFERRED, see below), and the successful `SCAddBlockedUser` / `SCDeleteBlockedUser` replies
+  carry the resolved id / name, so
   the login `SCBlockedUsers` snapshot and the reply describe the same `blocked` row. The
   sender-side reply is silent: the 1.2 client has no "target blocked you" error, and its
   whisper display (`chat/chat_msg_event.alb`, function 20) has no block-list check; the
@@ -1732,6 +1734,19 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   Friend requests to an **offline** target are not blocked because an offline character's list
   is not loaded (`BLOCK-LIST-2`), and mail is delivered as before: no 1.2 client mail filter or
   error / system text for mail from a blocked player was found (`BLOCK-LIST-3`).
+
+* systems::social (friend / block failure feedback, WP-SL2): the C# `CharacterFriends.AddFriend`
+  / `RemoveFriend` and `CharacterBlocked.AddBlockedUser` / `RemoveBlockedUser` returned silently
+  on every refusal (its own TODOs) and `AddFriend` accepted the owner itself. Every refusal now
+  answers `SCAddFriend` / `SCDeleteFriend` / `SCAddBlockedUser` / `SCDeleteBlockedUser` with
+  `success = false` and the client's error id: 551 unknown name (the client prints
+  "$1 does not exist." from `FriendInfo.name`), 501 self-add, 502 already a friend (INFERRED:
+  the client has no dedicated text), 556 not on the friend list, 352 self-block, 353 already
+  blocked (INFERRED), 354 not blocked. Self-add is therefore a **deviation from the C#** (which
+  accepted it); the client's own 501 text makes the refusal the better-supported behaviour.
+  The already-a-friend and already-blocked ids have no client text and are INFERRED. A friend
+  add whose target blocked the owner stays silent (capture-pending, `BLOCK-LIST-2`). There is
+  no list-size cap: no client constant was found (UNKNOWN).
 
 * systems::npcs (persistent doodads): `SpawnPersistentDoodads` skips the housing lookup for SLAVE-owned rows. In the C# every row with `houseId > 0` was resolved as a house, but for vehicle cargo racks `house_id` holds the hull id, so it logged "can't find it's owning house" (or, if a house with that id existed, parented the rack to it before the slave re-attach).
 
@@ -4150,8 +4165,7 @@ and in NPC wandering / buff remaining times.
   `ExpeditionManager.ChangeOwner` does not update `OwnerName`; `ReplyInvite` does not check an
   existing guild; disbanded guilds stay in
   the list; family invitations always carry family id 1; hard disconnects keep the family member's
-  character set; `GetTrialChat` throws when the faction has no court and the player is in no trial;
-  `CSAddFriend` accepts yourself.
+  character set; `GetTrialChat` throws when the faction has no court and the player is in no trial.
 
 * `WorldManager.RemoveVisibleObject` calls `RemoveFromCharacters` on the object's own region and
   then again for every neighbour, which includes that region: players in the same sector receive
@@ -6005,8 +6019,15 @@ prepare_save`) and written by `social::System::save(AfterCharacters)` in the sam
 `Character.Save`; `commit_financial_snapshot` clears the dirty set only after the transaction
 commits, so a rolled-back save is retried instead of losing the pledge. A save with no dirty rows
 writes nothing. `CharacterLoad` sends the character's own active total in the verified
-`SCCharacterState.bountyMoney` field (X2G 1302074-1302079); `SCUnitBountyMoney` is not sent
-(BOUNTY-3).
+`SCCharacterState.bountyMoney` field (X2G 1302074-1302079).
+
+`SCUnitBountyMoney` (`systems/social/bounty.rs`, `packets/trial.rs`): the writer is located
+(`FUN_397b3b50` -> `bc objId ; i64 moneyAmount`, client handler `FUN_391d6680`), so the packet is
+sent with the **whole** total, never a delta: after a successful pledge to every viewer of the
+target (and the target), to a viewer whose client just received the target's entry `SCUnitState`
+(both entry paths: `world::session::spawn` and `instances::worlds::instance_loaded`), and 0 after
+the payout. A total of 0 sends nothing on entry. When the client draws the value is INFERRED
+(`OnUnitBountyMoney`), so sending it after both entry paths is harmless (BOUNTY-3).
 
 Policy decisions / capture-pending (each also a case id in the code):
 
@@ -6019,10 +6040,12 @@ Policy decisions / capture-pending (each also a case id in the code):
   payer's logout and a restart, and is paid whenever the target is arrested later. Whether 1.2
   allowed an offline target, and whether `bountyTime` (`SCCharacterState`, still 0) means an
   expiry, is unknown; the permit TTL is our bounded-map policy, not client behaviour.
-* **BOUNTY-3** `SCUnitBountyMoney` (`0x0bb`). The handler `FUN_391d6680` and its `+0xc` id /
-  `+0x10` i64 offsets are known, but the packet **writer** was not located, so the wire layout is
-  unconfirmed. Nothing is sent (not even on a total change or on visibility) rather than guessing
-  a layout; a live capture of a 1.2 server is needed.
+* **BOUNTY-3** `SCUnitBountyMoney` (`0x0bb`). No longer open for the layout: the writer
+  `FUN_397b3b50` (`dll.c:375748`) serializes `bc objId ; i64 moneyAmount`, the same bytes our
+  struct writes, and the handler `FUN_391d6680` reads the id at `+0xc` and the i64 at `+0x10`.
+  The senders are the pledge broadcast, the two entry paths and the payout 0 (see above). Which
+  widget uses the value is INFERRED (`OnUnitBountyMoney`); a live capture would confirm when the
+  client displays it, not the wire format.
 * **BOUNTY-4** `SCBountyPaid` recipients and the no-arrest case. The client's chat text
   (`ui_text` 4764) names the hunter, the arrested and the amount; the recipient scope (hunter /
   zone / faction) is unknown. It is sent to the arresting player only. Whether a pirate killed in
