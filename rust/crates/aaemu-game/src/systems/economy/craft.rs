@@ -805,6 +805,17 @@ fn material_payout(inv: &Inv, craft: &Craft, items: &ItemData) -> MaterialPayout
         Some(_) => None,
         None => first_equipment_material_grade(&bag, craft, items),
     };
+    tracing::debug!(
+        craft_id = craft.id,
+        materials = ?craft
+            .craft_materials
+            .iter()
+            .map(|m| (m.item_id, m.amount, m.require_grade, m.main_grade))
+            .collect::<Vec<_>>(),
+        main_grade = ?main_grade,
+        availability = ?availability,
+        "craft material check"
+    );
     MaterialPayout {
         availability,
         main_grade,
