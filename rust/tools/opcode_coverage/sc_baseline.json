@@ -2,7 +2,7 @@
   "counts": {
     "sc_opcodes": 517,
     "typeless": 81,
-    "never_sent": 49
+    "never_sent": 47
   },
   "typeless": [
     "CSQuestAcceptConditionalPacket",
@@ -94,7 +94,6 @@
     "SCAchievementResetedPacket",
     "SCAddActionPointPacket",
     "SCBotSuspectArrestedPacket",
-    "SCChangeJuryVerdictCountPacket",
     "SCCharacterBoundPacket",
     "SCCharacterRenamedPacket",
     "SCCraftFailedPacket",
@@ -128,7 +127,6 @@
     "SCSkillUpgradedPacket",
     "SCSpamReportedPacket",
     "SCSuspectGoingBotTrial",
-    "SCTrialCanceledPacket",
     "SCUnitBountyMoneyPacket",
     "SCUnitGmModeChangedPacket",
     "SCUnitLootingStatePacket",

@@ -481,11 +481,19 @@ cs_packet!(
 );
 
 cs_packet!(
-    /// `CSJurySummonedPacket` (logged only).
+    /// `CSJurySummonedPacket`: the client's acknowledgement after `SCSummonJury`. It changes
+    /// no server state; the handler checks that the sender holds the seat and logs at debug.
     CSJurySummonedPacket { trial: u32, court: i32, jury: i32 }
     read |s| { Ok(Self { trial: s.read_u32()?, court: s.read_i32()?, jury: s.read_i32()? }) }
     handle |self, server, conn| {
-        tracing::warn!("JurySummoned, Trial: {}, Court: {}, Jury: {}", self.trial, self.court, self.jury);
+        let p = active_char!(conn);
+        let seat_holder = server.systems.social.trials.jury_summoned(&p, self.trial, self.jury);
+        tracing::debug!(
+            "JurySummoned, Trial: {}, Court: {}, Jury: {}, seat holder: {seat_holder}",
+            self.trial,
+            self.court,
+            self.jury
+        );
         Ok(())
     }
 );
@@ -1365,6 +1373,29 @@ mod tests {
             format!("{}\u{FFFD}", "a".repeat(199))
         );
         assert_eq!(record_msg(" hi "), " hi ");
+    }
+
+    #[test]
+    fn trial_canceled_and_verdict_count_match_the_1_2_readers() {
+        // SCTrialCanceled (0x183), reader FUN_397afa30: u32 trialId.
+        assert_eq!(
+            body(&SCTrialCanceledPacket {
+                trial_id: 0x0102_0304
+            }),
+            vec![0x04, 0x03, 0x02, 0x01]
+        );
+        // SCChangeJuryVerdictCount (0x17a), reader FUN_397af940: i32 count ; i32 total.
+        assert_eq!(
+            body(&SCChangeJuryVerdictCountPacket { count: 1, total: 2 }),
+            vec![1, 0, 0, 0, 2, 0, 0, 0]
+        );
+        assert_eq!(
+            body(&SCChangeJuryVerdictCountPacket {
+                count: -1,
+                total: 0x0102_0304
+            }),
+            vec![0xFF, 0xFF, 0xFF, 0xFF, 0x04, 0x03, 0x02, 0x01]
+        );
     }
 
     fn decode<P: ClientPacket>(f: impl FnOnce(&mut PacketStream)) -> P {
