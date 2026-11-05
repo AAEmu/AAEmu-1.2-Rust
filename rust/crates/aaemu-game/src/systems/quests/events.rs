@@ -397,6 +397,7 @@ pub fn with_quests<R>(
                 report_reply: None,
                 report_refused: Vec::new(),
                 answer_reports: true,
+                answer_start_refusals: false,
             };
             if !ctx.st.loaded {
                 ctx.load_from_rows();
@@ -1200,6 +1201,28 @@ pub fn on_quest_item_manually_destroyed(
 
 // ----- CharacterQuests entry points used by other subsystems -----
 
+/// `CSStartQuestContextPacket`: the player asked to start `quest_id` at the NPC, doodad or
+/// sphere context (or without one). Only these client requests answer a start-component unit
+/// requirement refusal with `SCQuestUnitReqFailedPacket`; every other starter stays silent.
+pub fn start_quest_context(
+    server: &GameServer,
+    player: &PlayerRef,
+    quest_id: u32,
+    npc_obj_id: u32,
+    doodad_obj_id: u32,
+    sphere_id: u32,
+) {
+    if npc_obj_id > 0 {
+        add_quest_from_npc_impl(server, player, quest_id, npc_obj_id, true);
+    } else if doodad_obj_id > 0 {
+        add_quest_from_doodad_impl(server, player, quest_id, doodad_obj_id, true);
+    } else if sphere_id > 0 {
+        add_quest_from_sphere_impl(server, player, quest_id, sphere_id, true);
+    } else {
+        add_quest_impl(server, player, quest_id, false, acceptor::UNKNOWN, 0, true);
+    }
+}
+
 /// `Quests.AddQuest(questId, forcibly)` (`AcceptQuestEffect`, GM commands). Returns the C#
 /// result; `None` when nested in a quest operation of the same character (queued, result
 /// unknown).
@@ -1209,8 +1232,29 @@ pub fn add_quest(
     quest_id: u32,
     forcibly: bool,
 ) -> Option<bool> {
+    add_quest_impl(
+        server,
+        player,
+        quest_id,
+        forcibly,
+        acceptor::UNKNOWN,
+        0,
+        false,
+    )
+}
+
+fn add_quest_impl(
+    server: &GameServer,
+    player: &PlayerRef,
+    quest_id: u32,
+    forcibly: bool,
+    acceptor_type: u8,
+    acceptor_id: u32,
+    answer_start_refusals: bool,
+) -> Option<bool> {
     with_quests(server, player, None, move |ctx| {
-        ctx.add_quest(quest_id, forcibly, acceptor::UNKNOWN, 0)
+        ctx.answer_start_refusals = answer_start_refusals;
+        ctx.add_quest(quest_id, forcibly, acceptor_type, acceptor_id)
     })
 }
 
@@ -1222,12 +1266,23 @@ pub fn add_quest_from_npc(
     quest_id: u32,
     npc_obj_id: u32,
 ) -> Option<bool> {
+    add_quest_from_npc_impl(server, player, quest_id, npc_obj_id, false)
+}
+
+fn add_quest_from_npc_impl(
+    server: &GameServer,
+    player: &PlayerRef,
+    quest_id: u32,
+    npc_obj_id: u32,
+    answer_start_refusals: bool,
+) -> Option<bool> {
     let me = WorldObject::from(player.clone());
     let npc = server.world.world_of(&me).and_then(|w| w.npc(npc_obj_id));
     let npc_info = npc.as_ref().map(|n| (n.obj_id, n.data().unit.template_id));
     let mut env = capture_env(server, player);
     env.target = npc.map(|n| snapshot(server, &WorldObject::from(n)));
     with_quests(server, player, Some(env), move |ctx| {
+        ctx.answer_start_refusals = answer_start_refusals;
         // Owner.CurrentTarget = npc
         ctx.c.unit.current_target = npc_info.map_or(0, |(o, _)| o);
         match npc_info {
@@ -1248,17 +1303,30 @@ pub fn add_quest_from_doodad(
     quest_id: u32,
     doodad_obj_id: u32,
 ) -> Option<bool> {
+    add_quest_from_doodad_impl(server, player, quest_id, doodad_obj_id, false)
+}
+
+fn add_quest_from_doodad_impl(
+    server: &GameServer,
+    player: &PlayerRef,
+    quest_id: u32,
+    doodad_obj_id: u32,
+    answer_start_refusals: bool,
+) -> Option<bool> {
     let me = WorldObject::from(player.clone());
     let doodad = server
         .world
         .world_of(&me)
         .and_then(|w| w.doodad(doodad_obj_id))
         .map(|d| d.data().template_id);
-    with_quests(server, player, None, move |ctx| match doodad {
-        Some(t) => ctx.add_quest(quest_id, false, acceptor::DOODAD, t),
-        None => {
-            tracing::error!("AddQuestFromDoodad: doodad {doodad_obj_id} not found");
-            false
+    with_quests(server, player, None, move |ctx| {
+        ctx.answer_start_refusals = answer_start_refusals;
+        match doodad {
+            Some(t) => ctx.add_quest(quest_id, false, acceptor::DOODAD, t),
+            None => {
+                tracing::error!("AddQuestFromDoodad: doodad {doodad_obj_id} not found");
+                false
+            }
         }
     })
 }
@@ -1270,7 +1338,18 @@ pub fn add_quest_from_sphere(
     quest_id: u32,
     sphere_id: u32,
 ) -> Option<bool> {
+    add_quest_from_sphere_impl(server, player, quest_id, sphere_id, false)
+}
+
+fn add_quest_from_sphere_impl(
+    server: &GameServer,
+    player: &PlayerRef,
+    quest_id: u32,
+    sphere_id: u32,
+    answer_start_refusals: bool,
+) -> Option<bool> {
     with_quests(server, player, None, move |ctx| {
+        ctx.answer_start_refusals = answer_start_refusals;
         ctx.add_quest(quest_id, false, acceptor::SPHERE, sphere_id)
     })
 }

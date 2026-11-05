@@ -13,14 +13,14 @@ use super::model::{
 use super::packets::{
     quest_error, SCQuestContextCompletedPacket, SCQuestContextFailedPacket,
     SCQuestContextResetPacket, SCQuestContextStartedPacket, SCQuestContextUpdatedPacket,
-    SCQuestRewardedByMailPacket,
+    SCQuestRewardedByMailPacket, SCQuestUnitReqFailedPacket,
 };
 use super::state::{
     ActPath, CinemaMark, Quest, QuestActState, QuestComponentState, QuestHandle, QuestState,
     QuestStepState,
 };
 use super::templates::ActKind;
-use super::unit_reqs::{ReqEnv, ReqSubject};
+use super::unit_reqs::{ReqEnv, ReqSubject, UnitReq};
 use crate::models::buff::{Buff, SkillCaster};
 use crate::models::char_data::CompletedQuest;
 use crate::models::character::Character;
@@ -150,6 +150,11 @@ pub struct Ctx<'a> {
     /// mode. A server-side report (`DoodadFuncQuest`, a doodad click on an owned quest) is
     /// only logged, so a click before the objectives are met shows no quest error.
     pub answer_reports: bool,
+    /// Whether a refused start (`AddQuest` blocked by a start-component unit requirement) is
+    /// answered with [`SCQuestUnitReqFailedPacket`]: only the requests the client made
+    /// (`CSStartQuestContext`, all four context kinds). Automatic starters (level up, item
+    /// gain, sphere entry, ...) stay silent, like [`Ctx::log_refusal`]'s repeat suppression.
+    pub answer_start_refusals: bool,
 }
 
 /// The result of one report event, collected across the quest's report acts: a component may
@@ -1310,6 +1315,40 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// The requirement [`Ctx::can_component_run`] refuses on (same AND / OR order; an OR list
+    /// that fails reports its first row), for `SCQuestUnitReqFailedPacket`.
+    pub fn first_failed_component_req(&self, component_id: u32) -> Option<UnitReq> {
+        let ct = self.data.component(component_id)?;
+        let owner = OwnerView {
+            c: self.c,
+            st: self.st,
+            server: self.server,
+        };
+        let env = EnvView {
+            server: self.server,
+            env: &self.env,
+        };
+        let req = match &self.env.target {
+            Some(t) => self.data.unit_reqs.first_failure(
+                "QuestComponent",
+                component_id,
+                ct.or_unit_reqs,
+                &owner,
+                &TargetView(t, self.server),
+                &env,
+            ),
+            None => self.data.unit_reqs.first_failure(
+                "QuestComponent",
+                component_id,
+                ct.or_unit_reqs,
+                &owner,
+                &owner,
+                &env,
+            ),
+        };
+        req.cloned()
+    }
+
     /// `QuestStep.RunComponents`.
     fn run_components(&mut self, h: QuestHandle, si: usize) -> bool {
         let data = self.data;
@@ -1745,6 +1784,22 @@ impl<'a> Ctx<'a> {
                     quest_id,
                     &format!("unit requirements of the start component {} not met", c.id),
                 );
+                if self.answer_start_refusals {
+                    if let Some(req) = self.first_failed_component_req(c.id) {
+                        // INFERRED (WP-QU1): kind = unit_reqs.kind_id, value = value1, and the
+                        // message id stays 0 (`unit_reqs` has no message column). The client
+                        // reader FUN_397b5d00 / bag FUN_397b1ef0 resolves the text from kind
+                        // and value; case NO_BUFF prints the buff name of value, case
+                        // EXCEPT_COMPLETE_QUEST_CONTEXT the quest name (ui-quests.md 1.1).
+                        self.send(SCQuestUnitReqFailedPacket {
+                            quest_id,
+                            unit_obj_id: self.c.obj_id,
+                            kind: req.kind as u8,
+                            message_id: 0,
+                            value: req.value1,
+                        });
+                    }
+                }
                 return false;
             }
         }

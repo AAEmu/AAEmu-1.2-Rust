@@ -393,7 +393,8 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCUnitBountyMoneyPacket(objId, moneyAmount)`.
+    /// `SCUnitBountyMoneyPacket(objId, moneyAmount)`. Serializer `FUN_397b3b50` (constructor
+    /// `dll.c:375748`): `bc objId ; i64 moneyAmount`; the client handler is `FUN_391d6680`.
     SCUnitBountyMoneyPacket { obj_id: u32, money_amount: i64 }
     |self, s| { s.write_bc(self.obj_id).write_i64(self.money_amount); }
 );

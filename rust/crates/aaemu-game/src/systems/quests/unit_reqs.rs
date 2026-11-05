@@ -316,22 +316,33 @@ impl UnitReqsData {
         target: &dyn ReqSubject,
         env: &dyn ReqEnv,
     ) -> bool {
+        self.first_failure(owner_type, owner_id, or_unit_reqs, owner, target, env)
+            .is_none()
+    }
+
+    /// The requirement [`Self::check_all`] refuses on, for `SCQuestUnitReqFailedPacket`: the
+    /// first row that fails an AND list, and the first row of an OR list when no alternative
+    /// matches (both lists keep `check_all`'s order and empty-list rule).
+    pub fn first_failure<'a>(
+        &'a self,
+        owner_type: &str,
+        owner_id: u32,
+        or_unit_reqs: bool,
+        owner: &dyn ReqSubject,
+        target: &dyn ReqSubject,
+        env: &dyn ReqEnv,
+    ) -> Option<&'a UnitReq> {
         let reqs = self.requirements(owner_type, owner_id);
         if reqs.is_empty() {
-            return true; // No requirements, we're good
+            return None; // No requirements, we're good
         }
-        let mut res = !or_unit_reqs;
-        for req in reqs {
-            let ok = validate(req, owner, target, env);
-            if or_unit_reqs {
-                if ok {
-                    return true;
-                }
-            } else {
-                res &= ok;
+        if or_unit_reqs {
+            if reqs.iter().any(|req| validate(req, owner, target, env)) {
+                return None;
             }
+            return reqs.first();
         }
-        res
+        reqs.iter().find(|req| !validate(req, owner, target, env))
     }
 
     /// `CanComponentRun(questComponent, ownerUnit)`.
