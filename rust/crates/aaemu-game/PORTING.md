@@ -5591,6 +5591,51 @@ Deviation from the removed C#: `SkillTemplate.TargetOnlyWater` was parsed
 (`AAEmu.Game/Core/Managers/SkillManager.cs:423`) but never read, so the C# had no water-target
 check at all; this follows only the 1.2 client.
 
+## Craft material grades and product grade (2026-11-05)
+
+`craft_materials.require_grade`, `craft_materials.main_grade` and `craft_products.use_grade`
+are now honoured at craft execution (WP-I2 A/B; `systems::economy::{craft,craft_data}`).
+
+- **`require_grade` (14 rows in `compact.sqlite3`: crafts 6184-6191 material 30803, crafts
+  6889-6894 material 34275, amount 1).** The client loader reads the column
+  (`LoadCraftMaterialDescs` `0x3982E4D0`, `x2game.dll.c:1825263`). `GetCraftMaterialInfo`
+  (`0x39462600`, `x2game.dll.c:914799`) counts a bag stack only when
+  `require_grade == -1 || require_grade == item.grade`, and `GetExecutableCraftCount`
+  (`0x394d3cc0`, `:1005386`) passes `require_grade` as the grade argument of
+  `FUN_3961fbc0`, which compares `param_3 == item.grade` (`:1301667`). The port therefore uses
+  **exact equality** (`-1` = any), not `>=`: a lower grade does not count and neither does a
+  higher one. Rows that require a grade are counted, checked at cast start and again before the
+  hand-out, and **consumed only from stacks of that grade**
+  (`ItemContainer::consume_item_by_grade`, `models/container.rs`). A refusal sends the client's
+  `not_enough_required_item` (722; error-name case `0x2d2`, `x2game.dll.c:1137158`) after the
+  usual `craft_cant_act_any_more` (148) and changes nothing.
+- **`main_grade` (101 rows).** The flagged material's grade is the inherited product grade
+  (`X2Craft.GetCraftMaterialInfo` emits `mainGrade`/`itemGrade`; the client's
+  `crafting_renewal.alb` proto 9.14 (lines 556-573) takes the `mainGrade` material's
+  `itemGrade`). All 101 rows sit on crafts whose product has `use_grade = 'f'`, so the flag
+  alone drives the inheritance; before this change they went through the C# "first equipment
+  material" heuristic. The inherited grade keeps the C# `FreeRegrade` roll (5 %, `rand(0,20)`).
+  Only the main material is consumed in the inherited grade; its first (lowest-slot) stack is
+  the grade source, matching the consumption order.
+- **`use_grade` (356 products).** Only a product with the flag keeps the 1.2 equipment-material
+  heuristic; an unflagged product now uses `item_grade_id` (or the default `-1`). This is the
+  audit's Scope B reading of the client flag. It stops the old heuristic from inheriting a
+  grade for the 4147 crafts that have an equipment material but neither flag. Deviation from
+  the previous port behaviour (and from the removed C#'s live heuristic); the C# "proper"
+  branch that read these flags was commented out (`CharacterCraft.cs`, `a2ab80abd^`). Open,
+  capture-pending: the client Lua also inherits from a material of the product's item
+  implementation (`info.item_impl`, proto 9.14 lines 561-571); the port keeps the audit's
+  equipment-material fallback until a capture shows the same-impl rule's effect on the result.
+
+Tests: `craft_material_requires_its_grade` (low and high grades refused, exact grade pays and
+only that stack is consumed; refusals keep the stacks), `craft_main_grade_sets_the_product_grade`
+(the flag works on a `use_grade = 'f'` product), `craft_use_grade_gates_the_material_grade_inheritance`
+(flagged product inherits, unflagged does not), `craft_grade_lost_before_the_hand_out_keeps_the_materials`
+(the pre-hand-out re-check refuses and keeps the item), plus the extended real-data
+`real_compact_db_craft_and_store_tables` (14 `require_grade` rows). Each fails on its mutation
+(grade filter `-1`, main-grade branch removed, `use_grade` gate removed, hand-out grade filter
+removed).
+
 ## Review findings (documented, not fixed)
 
 Independent reviews of the combat / reflect / stealth / ability lanes found the issues below.
