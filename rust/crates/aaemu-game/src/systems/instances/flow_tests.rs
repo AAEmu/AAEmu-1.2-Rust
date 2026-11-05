@@ -1594,6 +1594,164 @@ async fn a_lookup_of_a_missing_instance_is_counted_and_logged_once() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Entry refusals answer the client
+// ---------------------------------------------------------------------------------------------
+
+/// One `SCErrorMsgPacket` frame (`isNotify`), as `send_error` sends it.
+fn error_frame(code: i16) -> (u16, Vec<u8>) {
+    (
+        sc::SCErrorMsgPacket,
+        body(&crate::packets::world::SCErrorMsgPacket::new(code, 0, true)),
+    )
+}
+
+fn error_frames(frames: &[(u16, Vec<u8>)]) -> Vec<(u16, Vec<u8>)> {
+    frames
+        .iter()
+        .filter(|(op, _)| *op == sc::SCErrorMsgPacket)
+        .cloned()
+        .collect()
+}
+
+/// The entry limit (`enter_count` entries within 4 hours) answers with the 1.2 client's
+/// `INSTANCE_VISIT_LIMIT` (453, "you have entered this instance too often") and the exact bytes of
+/// the notification; the refused entry leaves no run and no extra entry behind.
+#[tokio::test]
+async fn an_entry_over_the_visit_limit_is_answered_with_the_visit_limit_error() {
+    let mut data = dungeon_data();
+    data.systems
+        .instances
+        .indun
+        .zones
+        .get_mut(&DUNGEON_GROUP)
+        .unwrap()
+        .enter_count = 1;
+    let server = dungeon_server_with(data);
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    use_enter_func(&server, &a.p, DUNGEON_ZONE);
+    let d = server.systems.instances.all_dungeons()[0].clone();
+    await_loader(&d).await;
+    use_exit_func(&server, &a.p);
+    indun::reset_dungeon_instance(&server, &a.p, DUNGEON_ZONE).unwrap();
+    a.frames();
+    // A new run would be a second entry within the 4 hours.
+    use_enter_func(&server, &a.p, DUNGEON_ZONE);
+    let errors = error_frames(&a.frames());
+    assert_eq!(
+        errors,
+        vec![(
+            sc::SCErrorMsgPacket,
+            vec![0xC5, 0x01, 0xC5, 0x01, 0, 0, 0, 0, 1]
+        )]
+    );
+    assert_eq!(
+        errors,
+        vec![error_frame(worlds::error_message::INSTANCE_VISIT_LIMIT)]
+    );
+    assert!(server.systems.instances.all_dungeons().is_empty());
+    assert_eq!(a.instance(), 0);
+    assert_eq!(
+        server.systems.instances.indun.entry_count(1, DUNGEON_GROUP),
+        1
+    );
+}
+
+/// Every refusal of a dungeon request carries an error for the client: unknown zone, a zone that
+/// is no dungeon, a dungeon without zone keys (the server cannot build it), a dungeon that needs a
+/// party, and a full party run.
+#[tokio::test]
+async fn every_refused_dungeon_request_is_answered() {
+    let server = dungeon_server();
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    a.frames();
+    for zone_id in [999, TEST_ZONE] {
+        assert!(!indun::request_dungeon_instance(&server, &a.p, zone_id, 0));
+        assert_eq!(
+            a.frames(),
+            vec![error_frame(
+                worlds::error_message::NO_SERVER_INSTANCE_RESOURCE
+            )],
+            "zone {zone_id}"
+        );
+    }
+
+    // A dungeon whose zone group has no zone keys cannot be created.
+    let mut data = dungeon_data();
+    data.systems
+        .instances
+        .zone_order
+        .zones
+        .retain(|(_, group)| *group != DUNGEON_GROUP);
+    let server = dungeon_server_with(data);
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    a.frames();
+    assert!(!indun::request_dungeon_instance(
+        &server,
+        &a.p,
+        DUNGEON_ZONE,
+        0
+    ));
+    assert_eq!(
+        a.frames(),
+        vec![error_frame(
+            worlds::error_message::NO_SERVER_INSTANCE_RESOURCE
+        )]
+    );
+    assert!(server.systems.instances.all_dungeons().is_empty());
+
+    // A party dungeon without a party, then a full party run (one seat).
+    let mut data = dungeon_data();
+    {
+        let zone = data
+            .systems
+            .instances
+            .indun
+            .zones
+            .get_mut(&DUNGEON_GROUP)
+            .unwrap();
+        zone.party_only = true;
+        zone.max_players = 1;
+    }
+    let server = dungeon_server_with(data);
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    let mut b = Pc::new(&server, 2, "Beta", 100.0, 100.0);
+    a.frames();
+    b.frames();
+    assert!(!indun::request_dungeon_instance(
+        &server,
+        &a.p,
+        DUNGEON_ZONE,
+        0
+    ));
+    assert_eq!(
+        a.frames(),
+        vec![error_frame(worlds::error_message::NEED_PARTY)]
+    );
+    form_party(&server, &a, &b);
+    a.frames();
+    b.frames();
+    assert!(indun::request_dungeon_instance(
+        &server,
+        &a.p,
+        DUNGEON_ZONE,
+        0
+    ));
+    let d = server.systems.instances.all_dungeons()[0].clone();
+    await_loader(&d).await;
+    assert!(!indun::request_dungeon_instance(
+        &server,
+        &b.p,
+        DUNGEON_ZONE,
+        0
+    ));
+    assert_eq!(
+        error_frames(&b.frames()),
+        vec![error_frame(worlds::error_message::INSTANCE_QUOTA)]
+    );
+    dungeon::destroy_dungeon(&server, &d);
+}
+
+// ---------------------------------------------------------------------------------------------
 // Battlefields
 // ---------------------------------------------------------------------------------------------
 

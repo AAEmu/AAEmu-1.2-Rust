@@ -213,6 +213,7 @@ pub fn request_system_instance(
             "Requesting non existing system instance for zone {zone_id}, character {}",
             p.data().unit.name
         );
+        send_error(p, err::NO_SERVER_INSTANCE_RESOURCE, 0);
         return (false, None);
     };
     for d in existing_dungeons_by_zone_key(server, zone.zone_key) {
@@ -251,8 +252,16 @@ pub fn request_dungeon_instance(
         .lock()
         .expect("instance requests poisoned");
     let team = server.systems.social.teams.team_by_obj_id(p.obj_id);
-    // `zone.ZoneKey` on a missing zone is a NullReferenceException in C#.
+    // `zone.ZoneKey` on a missing zone is a NullReferenceException in C#. The C# refused the
+    // data errors below without a word; the character is told, a door that does nothing looks
+    // like a hang.
     let Some(zone) = zone_by_id(server, zone_id) else {
+        tracing::warn!(
+            "Requesting a dungeon of the unknown zone {zone_id}, character {} ({})",
+            p.data().unit.name,
+            p.character_id
+        );
+        send_error(p, err::NO_SERVER_INSTANCE_RESOURCE, 0);
         return false;
     };
     if server
@@ -262,6 +271,12 @@ pub fn request_dungeon_instance(
         .is_none()
     {
         // Non-existing dungeon zone
+        tracing::warn!(
+            "Requesting a dungeon of zone {zone_id} that has no world, character {} ({})",
+            p.data().unit.name,
+            p.character_id
+        );
+        send_error(p, err::NO_SERVER_INSTANCE_RESOURCE, 0);
         return false;
     }
     let Some(dungeon_zone) = server
@@ -273,6 +288,12 @@ pub fn request_dungeon_instance(
         .cloned()
     else {
         // Not a dungeon
+        tracing::warn!(
+            "Requesting a dungeon of zone {zone_id} that is not a dungeon, character {} ({})",
+            p.data().unit.name,
+            p.character_id
+        );
+        send_error(p, err::NO_SERVER_INSTANCE_RESOURCE, 0);
         return false;
     };
     if !verify_dungeon_enter_requirements(server, &dungeon_zone, p, team.as_ref()) {
@@ -545,6 +566,9 @@ pub fn create_system_instance(
         tracing::error!(
             "Requesting invalid system instance: , zoneKey: {zone_key}, character: {who}, channel: {channel_id}, override InstanceId: {ov}"
         );
+        if let Some(p) = character {
+            send_error(p, err::NO_SERVER_INSTANCE_RESOURCE, 0);
+        }
         return None;
     };
     // Check for duplicate system instances

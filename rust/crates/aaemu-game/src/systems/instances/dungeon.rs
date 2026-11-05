@@ -165,9 +165,16 @@ pub fn create(
         .instances
         .zone_order
         .zone_keys_in_group(indun_zone.zone_group_id);
+    // A character that asked for the run is told when the server cannot make one.
+    let no_resource = || {
+        if let Some(c) = character {
+            send_error(c, err::NO_SERVER_INSTANCE_RESOURCE, 0);
+        }
+    };
     match zone_keys.len() {
         0 => {
             tracing::error!("No Zone Keys found for this zone group id.");
+            no_resource();
             return None;
         }
         1 => {}
@@ -182,6 +189,7 @@ pub fn create(
             "GetWorldByZone(): No world template defined for ZoneId {}",
             zone_keys[0]
         );
+        no_resource();
         return None;
     };
     tracing::info!(
@@ -199,6 +207,7 @@ pub fn create(
         Ok(w) => w,
         Err(e) => {
             tracing::error!("[Dungeon] CreateWorldInstance failed: {e}");
+            no_resource();
             return None;
         }
     };

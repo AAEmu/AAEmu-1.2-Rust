@@ -183,6 +183,12 @@ pub fn enter_instance(
         .trials
         .is_player_in_court(player.character_id)
     {
+        // The door must answer: the C# dropped the use without a word.
+        crate::systems::instances::worlds::send_error(
+            player,
+            crate::systems::instances::worlds::error_message::CANNOT_USE_PORTAL_IN_TRIAL,
+            0,
+        );
         return;
     }
     let (has_mwp, instance) = {
