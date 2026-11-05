@@ -12,21 +12,21 @@ use crate::systems::social::team::{risky_action, INVITATION_TIMEOUT_MS};
 use crate::test_support::{spawn_player, test_character, test_server, TestClient};
 use crate::world::PlayerRef;
 
-struct Pc {
-    c: TestClient,
-    p: PlayerRef,
+pub(super) struct Pc {
+    pub(super) c: TestClient,
+    pub(super) p: PlayerRef,
 }
 
 impl Pc {
-    fn ops(&mut self) -> Vec<u16> {
+    pub(super) fn ops(&mut self) -> Vec<u16> {
         self.c.drain_ops()
     }
 
-    fn frames(&mut self) -> Vec<(u16, Vec<u8>)> {
+    pub(super) fn frames(&mut self) -> Vec<(u16, Vec<u8>)> {
         self.c.drain()
     }
 
-    async fn send(&mut self, server: &GameServer, opcode: u16, body: PacketStream) {
+    pub(super) async fn send(&mut self, server: &GameServer, opcode: u16, body: PacketStream) {
         server
             .handle_frame(&mut self.c.conn, &encode_raw(1, opcode, body.as_bytes()))
             .await
@@ -34,10 +34,13 @@ impl Pc {
     }
 }
 
-fn pc(server: &GameServer, id: u32, name: &str, x: f32, y: f32) -> Pc {
+pub(super) fn pc(server: &GameServer, id: u32, name: &str, x: f32, y: f32) -> Pc {
     let c = TestClient::new(server, id, 1000 + id);
     let p = spawn_player(server, &c, test_character(id, name, x, y), 0x100 + id);
     p.data().is_online = true;
+    // Alive (a guild invitation to a dead character is refused).
+    p.data().unit.hp = 100;
+    p.data().unit.max_hp = 100;
     let mut c = c;
     c.conn.active_char = Some(p.clone());
     c.drain();
@@ -45,13 +48,13 @@ fn pc(server: &GameServer, id: u32, name: &str, x: f32, y: f32) -> Pc {
 }
 
 /// Drops the frames produced by spawning (players seeing each other).
-fn settle(pcs: &mut [&mut Pc]) {
+pub(super) fn settle(pcs: &mut [&mut Pc]) {
     for p in pcs.iter_mut() {
         p.c.drain();
     }
 }
 
-fn find(frames: &[(u16, Vec<u8>)], op: u16) -> Vec<Vec<u8>> {
+pub(super) fn find(frames: &[(u16, Vec<u8>)], op: u16) -> Vec<Vec<u8>> {
     frames
         .iter()
         .filter(|(o, _)| *o == op)
@@ -116,7 +119,7 @@ fn whisper(target: &str, msg: &str) -> PacketStream {
     s
 }
 
-fn name_body(name: &str) -> PacketStream {
+pub(super) fn name_body(name: &str) -> PacketStream {
     let mut s = PacketStream::new();
     s.write_str(name);
     s
@@ -1436,8 +1439,21 @@ async fn guild_create_invite_kick_roles_and_disband() {
     }
     let before_transfer = server.expeditions.get(id).unwrap();
     // An outsider, an ordinary member, and a self-transfer cannot change the owner snapshot
-    // or downgrade the current owner's role. Invalid requests send no transition packets.
-    for (actor, target) in [(9, 2), (3, 2), (1, 1)] {
+    // or downgrade the current owner's role. Invalid requests send no transition packets, only
+    // the caller's error.
+    for (actor, target, refused) in [
+        (
+            9,
+            2,
+            crate::systems::social::util::error::ONLY_EXPEDITION_MEMBER,
+        ),
+        (3, 2, crate::systems::social::util::error::FACTION_RIGHTS),
+        (
+            1,
+            1,
+            crate::systems::social::util::error::EXPEDITION_CHANGE_OWNER_SELF,
+        ),
+    ] {
         let mut request = PacketStream::new();
         request.write_u32(target);
         if actor == 9 {
@@ -1450,10 +1466,17 @@ async fn guild_create_invite_kick_roles_and_disband() {
                 .await;
         }
         assert_eq!(server.expeditions.get(id).unwrap(), before_transfer);
-        assert!(outsider.ops().is_empty());
-        for member in pcs.iter_mut() {
-            assert!(member.ops().is_empty());
+        if actor == 9 {
+            assert_eq!(outsider.frames(), vec![error_frame(refused)]);
         }
+        for (i, member) in pcs.iter_mut().enumerate() {
+            if i + 1 == actor as usize {
+                assert_eq!(member.frames(), vec![error_frame(refused)]);
+            } else {
+                assert!(member.ops().is_empty());
+            }
+        }
+        outsider.ops();
     }
     let mut s = PacketStream::new();
     s.write_u32(2);
@@ -1511,12 +1534,14 @@ async fn guild_create_invite_kick_roles_and_disband() {
 
 /// The role-policy packet carries nine permission flags. The 1.2 client only lets the owner
 /// (role 255) edit a lower role (`SET_POLICY = role == 255` in its role-policy tab), so a
-/// Commander's `Expel` right must not help. Every field must reach the stored policy and the
-/// broadcast packet the members receive.
+/// Commander's `Expel` right must not help. The dialog edits the name and the invite / expel /
+/// promote / siege-join flags only; the other four keep their stored value, and the stored
+/// policy is what the members receive.
 #[tokio::test]
-async fn guild_role_policy_change_copies_every_field() {
+async fn guild_role_policy_change_matches_the_dialog_fields() {
     use crate::data::world_data::SystemFaction;
     use crate::systems::social::expedition::{Expedition, ExpeditionMember, ExpeditionRolePolicy};
+    use crate::systems::social::util::error;
 
     let server = test_server();
     let mut owner = pc(&server, 1, "Owner", 100.0, 100.0);
@@ -1591,7 +1616,7 @@ async fn guild_role_policy_change_copies_every_field() {
     };
 
     // Role 3 carries the C# Expel right, but the 1.2 client only enables the check boxes for
-    // the owner: the change must not be stored and nothing is broadcast.
+    // the owner: the change must not be stored, and the officer is told why.
     officer
         .send(
             &server,
@@ -1609,7 +1634,15 @@ async fn guild_role_policy_change_copies_every_field() {
             .name,
         "Apprentice"
     );
-    assert!(officer.ops().is_empty());
+    let frames = officer.frames();
+    assert_eq!(
+        find(&frames, sc::SCErrorMsgPacket),
+        vec![body(&crate::packets::world::SCErrorMsgPacket::new(
+            error::FACTION_CHANGE_MEMBER_ROLE_RIGHTS,
+            0,
+            true
+        ))]
+    );
 
     // The owner cannot edit their own (role 255) policy either.
     owner
@@ -1629,10 +1662,19 @@ async fn guild_role_policy_change_copies_every_field() {
             .name,
         "General"
     );
-    assert!(owner.ops().is_empty());
+    let frames = owner.frames();
+    assert_eq!(
+        find(&frames, sc::SCErrorMsgPacket),
+        vec![body(&crate::packets::world::SCErrorMsgPacket::new(
+            error::FACTION_CHANGE_MEMBER_ROLE_RIGHTS,
+            0,
+            true
+        ))]
+    );
 
-    // The owner edits role 0 with every flag set: all nine fields must be kept in the stored
-    // policy and in the packet broadcast to both members.
+    // The owner edits role 0 with every flag set: the name and the five dialog fields must be
+    // kept in the stored policy and in the packet broadcast to both members; the four flags
+    // the dialog does not edit keep their stored value.
     owner
         .send(
             &server,
@@ -1640,7 +1682,11 @@ async fn guild_role_policy_change_copies_every_field() {
             request(0, "Recruit", true),
         )
         .await;
-    let expected = policy(0, "Recruit", [true; 9]);
+    let expected = policy(
+        0,
+        "Recruit",
+        [false, true, true, true, false, false, false, false, true],
+    );
     assert_eq!(
         server
             .expeditions
@@ -1729,7 +1775,7 @@ async fn private_mysql_expedition_owner_transition_persists_consistent_snapshot(
             name: "Knights".into(),
             owner_id: 1,
             owner_name: "Al".into(),
-            mother_id: 148,
+            mother_id: 101,
             ..Default::default()
         },
         members: vec![
@@ -1803,7 +1849,7 @@ async fn private_mysql_expedition_owner_transition_persists_consistent_snapshot(
 
 #[tokio::test]
 #[ignore = "requires private MySQL3317 via AAEMU_TEST_MYSQL; uses connection-local temporary expedition tables"]
-async fn private_mysql_expedition_role_policy_persists_every_field() {
+async fn private_mysql_expedition_role_policy_persists_the_dialog_fields() {
     use crate::data::world_data::SystemFaction;
     use crate::systems::social::expedition::{self, Expedition, ExpeditionRolePolicy};
     use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
@@ -1897,8 +1943,8 @@ async fn private_mysql_expedition_role_policy_persists_every_field() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(saved, (1, 1, 1, 1, 1, 1, 1, 1, 1, "Recruit".into()));
-    // Reload from the temporary tables: the whole policy round-trips.
+    assert_eq!(saved, (0, 1, 1, 1, 0, 0, 0, 0, 1, "Recruit".into()));
+    // Reload from the temporary tables: the stored policy round-trips.
     server.expeditions.load(&pool).await.unwrap();
     assert_eq!(
         server
@@ -1907,7 +1953,11 @@ async fn private_mysql_expedition_role_policy_persists_every_field() {
             .unwrap()
             .policy_by_role(0)
             .unwrap(),
-        &policy(0, "Recruit", [true; 9])
+        &policy(
+            0,
+            "Recruit",
+            [false, true, true, true, false, false, false, false, true],
+        )
     );
     for table in [
         "expedition_role_policies",
@@ -2928,7 +2978,7 @@ async fn guild_invite_and_rank_guards() {
                 name: name.into(),
                 owner_id: 1,
                 owner_name: "Lead".into(),
-                mother_id: 148,
+                mother_id: 101,
                 ..Default::default()
             },
             members,
@@ -3033,7 +3083,7 @@ async fn guild_invite_and_rank_guards() {
     assert_eq!(server.expeditions.get(77).unwrap().members.len(), 4);
 
     // The leader cannot kick itself through the client packet either: the strict-rank guard is
-    // only lifted for the server-side faction change (`remove_member_for_faction_change`).
+    // only lifted for the server-side faction change (`leave_forced`).
     leader
         .send(&server, cs::CSKickFromExpeditionPacket, kick(1))
         .await;
@@ -3194,7 +3244,7 @@ async fn private_mysql_pirate_owner_transfer_persists_the_new_owner_and_nation_k
     .await
     .unwrap();
 
-    expedition::remove_member_for_faction_change(&server, &a.p).await;
+    expedition::leave_forced(&server, &a.p).await;
 
     let saved: (i64, String) =
         sqlx::query_as("SELECT CAST(owner AS SIGNED),owner_name FROM expeditions WHERE id=77")
@@ -3366,7 +3416,7 @@ async fn private_mysql_pirate_last_member_dismissal_persists_nation_and_dominion
         }])
         .expect("test dominion");
 
-    expedition::remove_member_for_faction_change(&server, &a.p).await;
+    expedition::leave_forced(&server, &a.p).await;
 
     let guilds: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM expeditions")
         .fetch_one(&pool)
@@ -3504,7 +3554,7 @@ async fn invite_area_skips_party_members_and_hostiles() {
 }
 
 /// `SCErrorMsgPacket(error, 0, true)` as the frames of one connection carry it.
-fn error_frame(error: i16) -> (u16, Vec<u8>) {
+pub(super) fn error_frame(error: i16) -> (u16, Vec<u8>) {
     use crate::packets::world::SCErrorMsgPacket;
     (
         sc::SCErrorMsgPacket,
@@ -3514,7 +3564,7 @@ fn error_frame(error: i16) -> (u16, Vec<u8>) {
 
 /// Registers the guild `id` with `members` (character, role); the characters are marked as
 /// members and join the guild chat like a login would.
-fn add_guild(server: &GameServer, id: u32, name: &str, members: &[(&Pc, u8)]) {
+pub(super) fn add_guild(server: &GameServer, id: u32, name: &str, members: &[(&Pc, u8)]) {
     use crate::data::world_data::SystemFaction;
     use crate::systems::social::expedition::{self, Expedition};
     let owner = members
@@ -3538,7 +3588,7 @@ fn add_guild(server: &GameServer, id: u32, name: &str, members: &[(&Pc, u8)]) {
             name: name.into(),
             owner_id: owner,
             owner_name: "Lead".into(),
-            mother_id: 148,
+            mother_id: 101,
             ..Default::default()
         },
         members: list,
@@ -3549,7 +3599,12 @@ fn add_guild(server: &GameServer, id: u32, name: &str, members: &[(&Pc, u8)]) {
 }
 
 /// `owner` invites the player called `name` into its (new or existing) team and they accept.
-async fn join_party(server: &GameServer, owner: &mut Pc, target: &mut Pc, name: &str) -> u32 {
+pub(super) async fn join_party(
+    server: &GameServer,
+    owner: &mut Pc,
+    target: &mut Pc,
+    name: &str,
+) -> u32 {
     let team_id = server
         .systems
         .social

@@ -1,5 +1,4 @@
-//! Shared faction-name rules and rename packets for the guild (`expedition`) and, later, the
-//! nation path.
+//! Rename packets for the guild (`expedition`) and, later, the nation path.
 //!
 //! The 1.2 client opens a rename dialog only when the server sends
 //! `SCExpeditionShowRenameUI` (`FUN_391d2310` -> `FUN_392f8db0`); its confirm button sends
@@ -8,9 +7,10 @@
 //! cached faction name (`FUN_392fdce0`) and `SCFactionRetryRenamePacket` re-opens the dialog
 //! pre-filled with the rejected name (`FUN_391e5520`, `xpdt` != 0 = expedition).
 //!
-//! Validation mirrors the expedition creation path: the same regex and the same 32-UTF-16-unit
-//! limit, with the same `ErrorMessageType` codes (296 / 297), so the create and rename dialogs
-//! reject the same names.
+//! The name rules: guild create / rename use `expedition::validate_name` (shape + block list +
+//! guild uniqueness). The shape-only part (`expedition::validate_name_shape`) is shared with
+//! independence and nation rename, which additionally use the cross-store
+//! [`faction_name_in_use`] namespace check (RENAME-7).
 
 use std::sync::PoisonError;
 
@@ -21,27 +21,13 @@ use super::packets::expedition::SCExpeditionShowRenameUIPacket;
 use super::packets::faction::{
     SCFactionRenamedPacket, SCFactionRetryRenamePacket, SCNationShowRenameUIPacket,
 };
-use super::util::error;
 
-/// Validates a faction (expedition / nation) name with the expedition creation rules
-/// (`ExpeditionManager.CreateExpedition`): at most 32 UTF-16 units, then the configured
-/// `Expedition.NameRegex`. Returns the `ErrorMessageType` to report. Guild creation, guild
-/// rename, independence and nation rename all use this one function (RENAME-7).
+/// Validates a faction (expedition / nation) name with the shape rules of the expedition
+/// creation path (at most 32 UTF-16 units, then the configured `Expedition.NameRegex`).
+/// Independence and nation rename use this; guild create / rename use the fuller
+/// `expedition::validate_name` (shape + block list + guild uniqueness).
 pub fn validate_faction_name(server: &GameServer, name: &str) -> Result<(), i16> {
-    if name.encode_utf16().count() > 32 {
-        return Err(error::EXPEDITION_NAME_LENGTH);
-    }
-    let matches = match regex::Regex::new(&server.config.expedition.name_regex) {
-        Ok(r) => r.is_match(name),
-        Err(e) => {
-            tracing::error!("Expedition.NameRegex: {e}");
-            false
-        }
-    };
-    if !matches {
-        return Err(error::EXPEDITION_NAME_CHARACTER);
-    }
-    Ok(())
+    super::expedition::validate_name_shape(server, name)
 }
 
 /// Which faction currently holds a name, so a rename can exclude itself.

@@ -544,11 +544,23 @@ mod tests {
         }
     }
 
-    fn reconnect_packet(account: u32, conn: u32) -> Vec<u8> {
-        let mut v = vec![0x02, 0x00, 0x01];
-        v.extend_from_slice(&account.to_le_bytes());
-        v.extend_from_slice(&conn.to_le_bytes());
+    /// The random token in a `GLPlayerReconnect` payload (`[opcode u16][gs u8][account u32][token u32]`).
+    fn reconnect_token(packet: &[u8]) -> u32 {
+        u32::from_le_bytes(packet[7..11].try_into().unwrap())
+    }
+
+    fn reconnect_account(packet: &[u8]) -> u32 {
+        u32::from_le_bytes(packet[3..7].try_into().unwrap())
+    }
+
+    fn reconnect_ack(token: u32) -> Vec<u8> {
+        let mut v = vec![0x02, 0x00];
+        v.extend_from_slice(&token.to_le_bytes());
         v
+    }
+
+    fn reconnect_auth(token: u32) -> (u16, Vec<u8>) {
+        (sc::SCReconnectAuthPacket, token.to_le_bytes().to_vec())
     }
 
     fn kicked_body() -> Vec<u8> {
@@ -643,18 +655,18 @@ mod tests {
         }
         // Re-request on the client that left: the world list request to the login server ...
         assert!(!session::return_to_world_list(&server, &mut a.conn).await);
-        assert_eq!(login_rx.try_recv().unwrap(), reconnect_packet(1077, 77));
-        // ... which answers LGPlayerReconnect -> SCReconnectAuth(connection id).
-        assert!(crate::login::handle(&server, &[0x02, 0x00, 77, 0, 0, 0]).await);
-        assert_eq!(
-            a.drain(),
-            vec![(sc::SCReconnectAuthPacket, 77u32.to_le_bytes().to_vec())]
-        );
+        let packet = login_rx.try_recv().unwrap();
+        assert_eq!(reconnect_account(&packet), 1077);
+        let token = reconnect_token(&packet);
+        // ... which answers LGPlayerReconnect -> SCReconnectAuth(same random token).
+        assert!(crate::login::handle(&server, &reconnect_ack(token)).await);
+        assert_eq!(a.drain(), vec![reconnect_auth(token)]);
 
         // Lobby client: no leave, only the world list request.
         assert!(!session::return_to_world_list(&server, &mut lobby.conn).await);
         assert!(lobby.drain().is_empty());
-        assert_eq!(login_rx.try_recv().unwrap(), reconnect_packet(1078, 78));
+        let packet = login_rx.try_recv().unwrap();
+        assert_eq!(reconnect_account(&packet), 1078);
 
         // Unauthenticated connection: nothing to ask the login server.
         assert!(!session::return_to_world_list(&server, &mut anon.conn).await);
@@ -696,12 +708,11 @@ mod tests {
         )
         .await;
         assert_eq!(pump_first(&server, &mut late).await, Some(false));
-        assert_eq!(login_rx.try_recv().unwrap(), reconnect_packet(1090, 90));
-        assert!(crate::login::handle(&server, &[0x02, 0x00, 90, 0, 0, 0]).await);
-        assert_eq!(
-            late.drain(),
-            vec![(sc::SCReconnectAuthPacket, 90u32.to_le_bytes().to_vec())]
-        );
+        let packet = login_rx.try_recv().unwrap();
+        assert_eq!(reconnect_account(&packet), 1090);
+        let token = reconnect_token(&packet);
+        assert!(crate::login::handle(&server, &reconnect_ack(token)).await);
+        assert_eq!(late.drain(), vec![reconnect_auth(token)]);
     }
 
     /// Runs the first queued `ReturnToWorldList` only (the rest are re-requests).
@@ -824,7 +835,9 @@ mod tests {
         assert_eq!(ops.first(), Some(&sc::SCNoticeMessagePacket));
         assert!(ops.contains(&sc::SCLeaveWorldGrantedPacket));
         assert!(!ops.contains(&sc::SCKickedPacket));
-        assert_eq!(login_rx.try_recv().unwrap(), reconnect_packet(1077, 77));
+        let packet = login_rx.try_recv().unwrap();
+        assert_eq!(reconnect_account(&packet), 1077);
+        assert_ne!(reconnect_token(&packet), 0);
         // The final save fails without MySQL: no exit (C# `if (DoSave())`), world entry reopens.
         assert_eq!(*exited.lock().unwrap(), None);
         assert!(!server.is_shutting_down());

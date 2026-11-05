@@ -326,8 +326,14 @@ impl System {
     // ----- quest timers -----
 
     /// `AddQuestTimer` (registry part): false when the quest already has a timer.
-    pub fn add_quest_timer(&self, character_id: u32, quest_id: u32, limit_time_ms: i32) -> bool {
-        self.add_timer(character_id, quest_id, limit_time_ms, None)
+    pub fn add_quest_timer(
+        &self,
+        character_id: u32,
+        quest_id: u32,
+        run_id: u32,
+        limit_time_ms: i32,
+    ) -> bool {
+        self.add_timer(character_id, quest_id, run_id, limit_time_ms, None)
     }
 
     /// A selected character can receive a timeout before it has spawned into the world.
@@ -335,11 +341,13 @@ impl System {
         &self,
         player: &PlayerRef,
         quest_id: u32,
+        run_id: u32,
         limit_time_ms: i32,
     ) -> bool {
         self.add_timer(
             player.character_id,
             quest_id,
+            run_id,
             limit_time_ms,
             Some(Arc::downgrade(player)),
         )
@@ -349,6 +357,7 @@ impl System {
         &self,
         character_id: u32,
         quest_id: u32,
+        run_id: u32,
         limit_time_ms: i32,
         player: Option<Weak<Player>>,
     ) -> bool {
@@ -372,7 +381,7 @@ impl System {
                                 None => server.world.character_by_id(character_id),
                             };
                             if let Some(p) = owner {
-                                events::on_timer_expired(&server, &p, quest_id);
+                                events::on_timer_expired(&server, &p, quest_id, run_id);
                             }
                         }
                     })

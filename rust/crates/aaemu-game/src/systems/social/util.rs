@@ -7,21 +7,18 @@ use crate::world::{PlayerRef, WorldObject};
 
 /// `ErrorMessageType` values used by the social subsystem.
 pub mod error {
-    pub const TEAM_NO_RIGHTS: i16 = 72;
     pub const TEAM_FULL: i16 = 73;
-    pub const TEAM_INVITEE_IN_TEAM: i16 = 77;
-    pub const TEAM_INVITOR_OFFLINE: i16 = 78;
     pub const TEAM_INVITOR_MOVED: i16 = 79;
     pub const TEAM_INVITE_REFUSED: i16 = 80;
-    pub const TEAM_JOIN_ALONE: i16 = 82;
     pub const EXPEDITION_CREATE_LEVEL: i16 = 293;
     pub const EXPEDITION_CREATE_MEMBER: i16 = 294;
     pub const EXPEDITION_CREATE_MONEY: i16 = 295;
     pub const EXPEDITION_NAME_CHARACTER: i16 = 296;
     pub const EXPEDITION_NAME_LENGTH: i16 = 297;
     pub const EXPEDITION_NAME_EXIST: i16 = 299;
-    pub const EXPEDITION_BAD_STATUS: i16 = 307;
     pub const CHAT_NOT_IN_EXPEDITION: i16 = 311;
+    /// 321: "the sponsor faction was chosen wrongly" (the C# used it for a party member of
+    /// another alliance, which is [`EXPEDITION_CREATE_MEMBER_FACTION`] = 320).
     pub const EXPEDITION_CREATE_FACTION: i16 = 321;
     pub const EXPEDITION_CREATE_MEMBER_EXPEDITION: i16 = 330;
     pub const CHAT_NOT_IN_FAMILY: i16 = 412;
@@ -50,11 +47,17 @@ pub mod error {
     // The rest come straight from the generated `ErrorMessageType` table (the 1.2 client's
     // `ui_texts` carry the matching texts), so the values cannot drift.
     pub use crate::systems::economy::error_message::{
-        EXPEDITION_NO_TARGET, EXPEDITION_OTHER_EXPEDITION, EXPEDITION_OTHER_INVITATION,
-        EXPEDITION_OWNER_CANNOT_LEAVE, FACTION_INVITE_OFFLINE, FACTION_INVITE_REJECTED,
-        FACTION_INVITE_RIGHTS, FACTION_INVITE_SAME, FACTION_INVITE_SELF, FACTION_JOIN,
-        FACTION_JOIN_NO_INVITOR, FACTION_KICK_RIGHTS, INVITATION_CANCELED_TIMEOUT,
-        TEAM_INVITEE_MEMBER, TEAM_INVITEE_OFFLINE, TEAM_JOIN, TEAM_YOURSELF,
+        EXPEDITION_BAD_FACTION, EXPEDITION_BAD_STATUS, EXPEDITION_CHANGE_OWNER_MY_EXPEDITION,
+        EXPEDITION_CHANGE_OWNER_SELF, EXPEDITION_CREATE_MEMBER_FACTION,
+        EXPEDITION_DISMISS_IN_SIEGE, EXPEDITION_NAME_BADLIST, EXPEDITION_NO_TARGET,
+        EXPEDITION_OTHER_EXPEDITION, EXPEDITION_OTHER_INVITATION,
+        EXPEDITION_OWNER_CANNOT_CHANGE_DURING_SIEGE, EXPEDITION_OWNER_CANNOT_LEAVE,
+        EXPEDITION_OWNER_DISMISS, FACTION_CHANGE_MEMBER_ROLE_RIGHTS, FACTION_INVITE_BATTLEFIELD,
+        FACTION_INVITE_OFFLINE, FACTION_INVITE_REJECTED, FACTION_INVITE_RIGHTS,
+        FACTION_INVITE_SAME, FACTION_INVITE_SELF, FACTION_JOIN, FACTION_JOIN_NO_INVITOR,
+        FACTION_KICK_RIGHTS, FACTION_RIGHTS, INVITATION_CANCELED_TIMEOUT, TEAM_INVITEE_IN_TEAM,
+        TEAM_INVITEE_MEMBER, TEAM_INVITEE_OFFLINE, TEAM_INVITOR_OFFLINE, TEAM_JOIN,
+        TEAM_JOIN_ALONE, TEAM_NO_RIGHTS, TEAM_YOURSELF,
     };
 }
 
@@ -121,6 +124,15 @@ pub fn mother_id(server: &GameServer, faction_id: u32) -> u32 {
         .factions
         .get(faction_id)
         .map_or(0, |f| f.mother_id)
+}
+
+/// The alliance (nation) of a faction: its `MotherId`, or the faction itself when it has none
+/// (the outlaw faction 114).
+pub fn alliance_id(server: &GameServer, faction_id: u32) -> u32 {
+    match mother_id(server, faction_id) {
+        0 => faction_id,
+        m => m,
+    }
 }
 
 /// Runs `f` with the player's character data locked (one object lock, released afterwards).

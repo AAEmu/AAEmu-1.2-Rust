@@ -411,7 +411,7 @@ async fn guild_creation_and_rename_see_the_nation_namespace() {
     let mut f = Fixture::new();
     // Guild creation checks the shared namespace before the party requirements.
     f.king.data().unit.expedition_id = 0;
-    expedition::create_expedition(&f.server, &f.king, "Kingdom").await;
+    expedition::create_expedition(&f.server, &f.king, "Kingdom", 0).await;
     let frames = f.king_client.drain();
     assert_eq!(
         error_of(&frames, sc::SCErrorMsgPacket),

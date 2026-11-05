@@ -760,8 +760,9 @@ impl Ctx<'_> {
         self.get_objective(h, a).min(max)
     }
 
-    /// `QuestDropped(quest)`.
-    pub(crate) fn act_quest_dropped(&mut self, h: QuestHandle, a: usize) {
+    /// `QuestDropped(quest)`. `restart` keeps the Start-component `ConAcceptItem` acceptor
+    /// items: a quest started from such an item must still find it when the new run starts.
+    pub(crate) fn act_quest_dropped(&mut self, h: QuestHandle, a: usize, restart: bool) {
         let data = self.data;
         let at = &data.acts[a];
         let hooks = self.hooks.clone();
@@ -771,7 +772,7 @@ impl Ctx<'_> {
                 item_id,
                 destroy_when_drop,
                 ..
-            } if *destroy_when_drop => (*item_id, at.count),
+            } if *destroy_when_drop && !restart => (*item_id, at.count),
             ActKind::ObjItemGather {
                 item_id,
                 destroy_when_drop,
@@ -841,8 +842,7 @@ impl Ctx<'_> {
         match (&at.kind, ev) {
             (CheckGuard { npc_id }, QuestEvent::GuardNpcDied { npc_id: dead }) => {
                 if dead == npc_id {
-                    self.set_status(h, super::model::status::FAILED);
-                    self.set_step(h, kind::FAIL);
+                    self.fail_quest(quest_template);
                 }
             }
 
@@ -1282,8 +1282,18 @@ impl Ctx<'_> {
                     return set(self, 3, *rank3_ratio, *rank3_item);
                 }
             }
-            (CheckTimer { .. }, QuestEvent::TimerExpired { quest_id }) => {
+            (CheckTimer { .. }, QuestEvent::TimerExpired { quest_id, run_id }) => {
                 if *quest_id != quest_template {
+                    return Ok(());
+                }
+                // A queued timer task can fire after the quest was restarted. The event is
+                // tagged with the run it was armed for; only that run may fail. The task
+                // sleeps on the monotonic clock, so no wall-clock comparison is made here.
+                if self.st.quest(h).is_none_or(|q| q.id != *run_id) {
+                    tracing::debug!(
+                        "QuestActCheckTimer({}).OnTimerExpired ignored, Quest {quest_template}: it is a stale run",
+                        at.detail_id
+                    );
                     return Ok(());
                 }
                 tracing::debug!(
@@ -1336,7 +1346,7 @@ impl Ctx<'_> {
     }
 
     /// The "is the quest ready to be turned in" check of the report acts.
-    fn report_ready(&self, h: QuestHandle, quest_template: u32) -> bool {
+    pub(crate) fn report_ready(&self, h: QuestHandle, quest_template: u32) -> bool {
         let let_it_done = self
             .data
             .template(quest_template)

@@ -274,9 +274,16 @@ impl NpcSpawnerData {
         self.inner.write().expect("npc spawner data poisoned")
     }
 
-    /// `GetSpawnerIds(memberId)` (`null` = `None`).
+    /// `GetSpawnerIds(memberId)` (`null` = `None`). The index is keyed by
+    /// `npc_spawner_npcs.member_id` only (the C# behaviour): a `"NpcGroup"` row is keyed by its
+    /// group id, while world placements name the individual member NPCs.
     pub fn get_spawner_ids(&self, member_id: u32) -> Option<Vec<u32>> {
         self.read().member_spawners.get(&member_id).cloned()
+    }
+
+    /// Every member row in insertion order (diagnostics / real-data tests).
+    pub fn all_npc_spawner_npcs(&self) -> Vec<NpcSpawnerNpc> {
+        self.read().npcs.clone()
     }
 
     /// `GetNpcSpawnerTemplate(id)`.

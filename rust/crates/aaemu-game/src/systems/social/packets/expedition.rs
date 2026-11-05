@@ -57,8 +57,9 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCExpeditionShowRenameUIPacket()` (empty body; never sent by the 1.2 C#). The 1.2
-    /// client's only path to the guild rename dialog (`FUN_391d2310` -> `FUN_392f8db0`).
+    /// `SCExpeditionShowRenameUIPacket()` (empty body; never sent by the 1.2 C#; sent to a guild
+    /// leader whose guild may be renamed, see `expedition::rename`). The 1.2 client's only path
+    /// to the guild rename dialog (`FUN_391d2310` -> `FUN_392f8db0`).
     SCExpeditionShowRenameUIPacket {} |self, s| {}
 );
 
@@ -130,7 +131,7 @@ cs_packet!(
     handle |self, server, conn| {
         tracing::debug!("CreateExpedition, name: {}, id: {}", self.name, self.id);
         let p = active_char!(conn);
-        expedition::create_expedition(server, &p, &self.name).await;
+        expedition::create_expedition(server, &p, &self.name, self.id).await;
         Ok(())
     }
 );
@@ -173,15 +174,16 @@ cs_packet!(
 
 cs_packet!(
     /// `CSRenameExpeditionPacket` (1.2 `FUN_397ab420`: `{id, name, is_expedition}`). The same
-    /// packet carries the guild rename (`is_expedition = 1`, `SCExpeditionShowRenameUI`) and
-    /// the nation rename (`0`, `SCNationShowRenameUI`; RENAME-7).
+    /// packet carries the guild rename (`is_expedition = 1`, `SCExpeditionShowRenameUI`; see
+    /// `expedition::rename`) and the nation rename (`0`, `SCNationShowRenameUI`; RENAME-7).
+    /// Not handled by the 1.2 C# (logged only).
     CSRenameExpeditionPacket { id: u32, name: String, is_expedition: bool }
     read |s| { Ok(Self { id: s.read_u32()?, name: s.read_string()?, is_expedition: s.read_bool()? }) }
     handle |self, server, conn| {
         tracing::debug!("RenameExpedition, Id: {}, Name: {}, IsExpedition: {}", self.id, self.name, self.is_expedition);
         let p = active_char!(conn);
         if self.is_expedition {
-            expedition::rename_expedition(server, &p, self.id, &self.name).await;
+            expedition::rename(server, &p, self.id, &self.name, true).await;
         } else {
             crate::systems::social::nation::rename_nation(server, &p, self.id, &self.name).await;
         }
