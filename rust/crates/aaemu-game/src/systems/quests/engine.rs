@@ -860,6 +860,33 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Whether `quest_id` can be handed in at the doodad of template `doodad_id`: the quest
+    /// is active, one of its `QuestActConReportDoodad` acts names that doodad, and the
+    /// objectives meet the report act's threshold (the same check `ReportDoodad` runs).
+    /// A ready quest is reported to the client with `SCDoodadCompleteQuestPacket` instead of
+    /// being completed server-side.
+    pub fn report_doodad_ready(&self, quest_id: u32, doodad_id: u32) -> bool {
+        let Some(h) = self.st.active_handle(quest_id) else {
+            return false;
+        };
+        let Some(q) = self.st.quest(h) else {
+            return false;
+        };
+        let Some(si) = q.step_index(kind::READY) else {
+            return false;
+        };
+        let data = self.data;
+        let targets = self.step_paths(h, si).into_iter().any(|p| {
+            self.act_ref(h, p).is_some_and(|a| {
+                matches!(
+                    data.acts[a].kind,
+                    ActKind::ConReportDoodad { doodad_id: d, .. } if d == doodad_id
+                )
+            })
+        });
+        targets && self.report_ready(h, quest_id)
+    }
+
     /// `GetQuestObjectivePercent`.
     pub fn objective_percent(&self, h: QuestHandle) -> f32 {
         let data = self.data;
@@ -1192,7 +1219,7 @@ impl<'a> Ctx<'a> {
             for cid in &t.components {
                 if let Some(c) = data.component(*cid) {
                     for &a in &c.acts {
-                        self.act_quest_dropped(h, a);
+                        self.act_quest_dropped(h, a, false);
                     }
                 }
             }
@@ -1731,6 +1758,29 @@ impl<'a> Ctx<'a> {
             }
         }
 
+        if self.install_quest(quest_id, forcibly, acceptor_type, acceptor_id, "AddQuest") {
+            let msg = format!("[Quest] {}, quest {quest_id} added.", self.c.unit.name);
+            self.send_debug_message(msg);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The object part of `AddQuest` (the object initializer runs after the constructor): a new
+    /// quest object, its id, the first `SCQuestContextStartedPacket` and the first step. The
+    /// caller has already checked whether the quest may start; the checks of `StartQuest`
+    /// itself only remain for a non-forced quest. A failed restart of a `restart_on_fail`
+    /// quest comes through here too, so it cannot be refused by a requirement that no longer
+    /// holds (the quest already ran once).
+    fn install_quest(
+        &mut self,
+        quest_id: u32,
+        forcibly: bool,
+        acceptor_type: u8,
+        acceptor_id: u32,
+        what: &str,
+    ) -> bool {
         // Create new Quest Object (the object initializer runs after the constructor)
         let h = self.new_quest(quest_id, 0);
         let id = match self.server.ids.quest.get_next_id() {
@@ -1759,7 +1809,7 @@ impl<'a> Ctx<'a> {
         // Actually start the quest by setting step to Start and send the quest start packets
         if !self.start_quest(h) {
             self.log_refusal(
-                "AddQuest",
+                what,
                 quest_id,
                 &format!(
                     "the start step does not accept acceptor type {acceptor_type} id {acceptor_id}"
@@ -1773,8 +1823,6 @@ impl<'a> Ctx<'a> {
 
         // Add it to the Active Quests
         self.st.active.add(quest_id, h);
-        let msg = format!("[Quest] {}, quest {quest_id} added.", self.c.unit.name);
-        self.send_debug_message(msg);
 
         // Execute the first Step
         self.run_current_step(h);
@@ -1845,7 +1893,12 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// `FailQuest(owner, questId)`.
+    /// `FailQuest(owner, questId)`: a server-side failure (`CheckTimer` expiry, `CheckGuard`
+    /// death). The client learns it from the status in `SCQuestContextUpdatedPacket` (status
+    /// `Failed`, `OnQuestContextUpdated` `FUN_3937bdf0` raises the quest condition event and
+    /// shows the failure message); `SCQuestContextFailedPacket` (0x146) stays reserved for a
+    /// refused client report. A failed quest stays failed and droppable; restarting it is the
+    /// client's `CSRestartMainQuestPacket` request ([`Ctx::try_restart_quest`]).
     pub fn fail_quest(&mut self, quest_id: u32) {
         let Some(h) = self.st.active_handle(quest_id) else {
             tracing::warn!(
@@ -1857,7 +1910,125 @@ impl<'a> Ctx<'a> {
         };
         self.set_status(h, status::FAILED);
         self.set_step(h, kind::FAIL);
+        // During `CharacterQuests.Load` the `SCQuestsPacket` that follows already carries the
+        // Failed row; an update sent before it would be out of order.
+        if self.st.loaded {
+            if let Some(row) = self.quest(h).map(Quest::row) {
+                let now = self.now_ms;
+                self.send(SCQuestContextUpdatedPacket::new(row, 0, now));
+            }
+        }
         tracing::debug!("[Quest] {}, quest {quest_id} failed.", self.c.unit.name);
+    }
+
+    /// `CSRestartMainQuestPacket` (0x0fd): the player asked to restart a main quest. The 1.2
+    /// client only sends it for an active quest whose status is not `Completed` and whose
+    /// template `detail_id` is 2 (`FUN_3937b200` / `FUN_3937a8d0`), after its own 3 s
+    /// throttle. `restart_on_fail` is never read by the client; it is the inferred server gate
+    /// (QUEST-1 in `PORTING.md`). The reply is a normal `SCQuestContextStartedPacket`, which
+    /// the client turns into the `QUEST_CHAT_RESTART` bubble.
+    pub fn try_restart_quest(&mut self, quest_id: u32) -> bool {
+        const RESTART_THROTTLE_MS: i64 = 3_000;
+        if self.now_ms.saturating_sub(self.st.restart_request_at) < RESTART_THROTTLE_MS {
+            tracing::debug!(
+                "RestartQuest throttled, Quest:{quest_id}, Player:{} ({})",
+                self.c.unit.name,
+                self.c.id
+            );
+            return false;
+        }
+        self.st.restart_request_at = self.now_ms;
+        let Some(h) = self.st.active_handle(quest_id) else {
+            tracing::debug!(
+                "RestartQuest refused, Quest:{quest_id}, Player:{} ({}): the quest is not active",
+                self.c.unit.name,
+                self.c.id
+            );
+            return false;
+        };
+        let Some(template) = self.data.template(quest_id) else {
+            return false;
+        };
+        let (restart_on_fail, detail_id) = (template.restart_on_fail, template.detail_id);
+        if !restart_on_fail || detail_id != detail::MAIN {
+            tracing::debug!(
+                "RestartQuest refused, Quest:{quest_id}, Player:{} ({}): restart_on_fail {restart_on_fail}, detail_id {detail_id}",
+                self.c.unit.name,
+                self.c.id
+            );
+            return false;
+        }
+        if self
+            .quest(h)
+            .is_some_and(|q| matches!(q.status, status::COMPLETED | status::DAILY_COMPLETED))
+        {
+            tracing::debug!(
+                "RestartQuest refused, Quest:{quest_id}, Player:{} ({}): the quest is completed",
+                self.c.unit.name,
+                self.c.id
+            );
+            return false;
+        }
+        let (acceptor_type, acceptor_id) = self
+            .quest(h)
+            .map_or((0, 0), |q| (q.acceptor_type, q.acceptor_id));
+        self.restart_quest(h, quest_id, acceptor_type, acceptor_id)
+    }
+
+    /// Discards the current run and installs a fresh one from its first step. Unlike a
+    /// give-up drop, it keeps the Start-component `ConAcceptItem` acceptor items (otherwise
+    /// the new run stops at Start with the item gone) and skips `Quest.Drop`'s Ready/Reward
+    /// skill and buff effects. The old object is removed so a dispatch that is still
+    /// iterating its subscribers cannot act on it.
+    fn restart_quest(
+        &mut self,
+        h: QuestHandle,
+        quest_id: u32,
+        acceptor_type: u8,
+        acceptor_id: u32,
+    ) -> bool {
+        // Sphere triggers are keyed by (character, template): finalize the live step before
+        // the act cleanup so a restart cannot leave a second set behind.
+        if let Some(si) = self.quest(h).and_then(|q| q.step_index(q.step)) {
+            self.finalize_step(h, si);
+        }
+        let data = self.data;
+        if let Some(t) = data.template(quest_id) {
+            for cid in &t.components {
+                if let Some(c) = data.component(*cid) {
+                    for &a in &c.acts {
+                        self.act_quest_dropped(h, a, true);
+                    }
+                }
+            }
+        }
+        self.finalize_quest_acts(h);
+        self.st.active.remove(quest_id);
+        self.c.quests.removed.push(quest_id);
+        self.server
+            .systems
+            .quests
+            .remove_quest_timer(self.c.id, quest_id);
+        // Allocate the new run before releasing the old runtime id, so the timer event of
+        // the discarded run cannot accidentally match the fresh one (ids are reused).
+        let old_id = self.quest(h).map(|q| q.id);
+        self.st.quests.remove(&h);
+        let msg = format!("[Quest] {}, quest {quest_id} restarted.", self.c.unit.name);
+        self.send_debug_message(msg);
+        let started =
+            self.install_quest(quest_id, true, acceptor_type, acceptor_id, "RestartQuest");
+        if let Some(id) = old_id {
+            self.server.ids.quest.release_id(id);
+        }
+        if !started {
+            tracing::warn!(
+                "RestartQuest could not restart quest {quest_id}, player {} ({})",
+                self.c.unit.name,
+                self.c.id
+            );
+            return false;
+        }
+        true
     }
 
     /// `SetStep(questContextId, step, selectedReward)` (GM helper).
@@ -2089,6 +2260,7 @@ impl<'a> Ctx<'a> {
                 {
                     let _ = self.dispatch(&super::events::QuestEvent::TimerExpired {
                         quest_id: row.template_id,
+                        run_id: row.id,
                     });
                 }
             }
@@ -2248,18 +2420,23 @@ impl<'a> Ctx<'a> {
         let remaining = deadline
             .saturating_sub(self.now_ms)
             .clamp(0, i64::from(limit_time.max(0))) as i32;
+        // The task sleeps the clamped remaining time, so the deadline must match that, not a
+        // saved value beyond the limit (a clock step can leave one there).
+        let deadline = self.now_ms.saturating_add(i64::from(remaining));
+        let id = self.quest(h).map_or(0, |q| q.id);
         let ok = match &self.player {
-            Some(player) => {
+            Some(player) => self.server.systems.quests.add_player_quest_timer(
+                player,
+                template_id,
+                id,
+                remaining,
+            ),
+            None => {
                 self.server
                     .systems
                     .quests
-                    .add_player_quest_timer(player, template_id, remaining)
+                    .add_quest_timer(self.c.id, template_id, id, remaining)
             }
-            None => self
-                .server
-                .systems
-                .quests
-                .add_quest_timer(self.c.id, template_id, remaining),
         };
         if !ok {
             return false;
@@ -2267,7 +2444,6 @@ impl<'a> Ctx<'a> {
         if let Some(q) = self.quest_mut(h) {
             q.time_ms = deadline;
         }
-        let id = self.quest(h).map_or(0, |q| q.id);
         self.send_debug_message(format!(
             "[Quest] Quest ({id}) will end in {} minutes.",
             limit_time / 60000

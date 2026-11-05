@@ -10,6 +10,7 @@ use aaemu_commons::{Marshal, PacketStream};
 use crate::data::formulas::FormulaKind;
 use crate::models::char_data::{ability, Skill};
 use crate::models::character::Character;
+use crate::models::item_task::{task_type, ItemTask};
 use crate::models::unit::UnitAttribute;
 use crate::net::packet::LEVEL_PLAIN;
 use crate::opcodes::sc;
@@ -25,6 +26,7 @@ use super::packets::{
     SCSkillsResetPacket,
 };
 use super::types::SkillCaster;
+use crate::systems::economy::item_packets::SCItemTaskSuccessPacket;
 
 /// `GamePointKind`.
 pub const GAME_POINT_HONOR: u8 = 0;
@@ -570,48 +572,57 @@ pub fn remove_passive_buff(server: &GameServer, p: &PlayerRef, passive_id: u32) 
     }
 }
 
+/// The data part of `CharacterSkills.Reset(abilityId)`, run under the caller's character lock.
+/// Returns the passive buff ids to remove after the lock is released.
+fn reset_skills_locked(
+    skills: &crate::data::skills::SkillData,
+    c: &mut Character,
+    ability_id: u8,
+) -> Vec<u32> {
+    let mut removed = Vec::new();
+    let keep: Vec<Skill> = c
+        .skills
+        .skills
+        .iter()
+        .filter(|s| {
+            let ab = skills.skill(s.id).map_or(0, |t| t.ability_id);
+            if ab == ability_id {
+                removed.push(s.id);
+                false
+            } else {
+                true
+            }
+        })
+        .copied()
+        .collect();
+    c.skills.skills = keep;
+    let mut buffs = Vec::new();
+    let keep_buffs: Vec<u32> = c
+        .skills
+        .passive_buffs
+        .iter()
+        .filter(|b| {
+            let ab = skills.passive_buff(**b).map_or(0, |t| t.ability_id);
+            if ab == ability_id {
+                buffs.push(**b);
+                false
+            } else {
+                true
+            }
+        })
+        .copied()
+        .collect();
+    c.skills.passive_buffs = keep_buffs;
+    c.skills.removed.extend(removed);
+    c.skills.removed.extend(buffs.iter().copied());
+    buffs
+}
+
 /// `CharacterSkills.Reset(abilityId)` (`CSResetSkillsPacket`).
 pub fn reset_skills(server: &GameServer, p: &PlayerRef, ability_id: u8) {
-    let skills = &server.game_data.skills;
-    let removed_buffs: Vec<u32> = {
+    let removed_buffs = {
         let mut c = p.data();
-        let mut removed = Vec::new();
-        let keep: Vec<Skill> = c
-            .skills
-            .skills
-            .iter()
-            .filter(|s| {
-                let ab = skills.skill(s.id).map_or(0, |t| t.ability_id);
-                if ab == ability_id {
-                    removed.push(s.id);
-                    false
-                } else {
-                    true
-                }
-            })
-            .copied()
-            .collect();
-        c.skills.skills = keep;
-        let mut buffs = Vec::new();
-        let keep_buffs: Vec<u32> = c
-            .skills
-            .passive_buffs
-            .iter()
-            .filter(|b| {
-                let ab = skills.passive_buff(**b).map_or(0, |t| t.ability_id);
-                if ab == ability_id {
-                    buffs.push(**b);
-                    false
-                } else {
-                    true
-                }
-            })
-            .copied()
-            .collect();
-        c.skills.passive_buffs = keep_buffs;
-        c.skills.removed.extend(removed);
-        c.skills.removed.extend(buffs.iter().copied());
-        buffs
+        reset_skills_locked(&server.game_data.skills, &mut c, ability_id)
     };
     for b in removed_buffs {
         remove_passive_buff(server, p, b);
@@ -629,10 +640,74 @@ pub fn reset_skills(server: &GameServer, p: &PlayerRef, ability_id: u8) {
 }
 
 /// `CharacterAbilities.Swap(oldAbilityId, abilityId)` (`CSSwapAbilityPacket`).
+///
+/// The 1.2 client prices an ability change as `content_configs[39] * character level` copper
+/// (`X2Ability.GetAbilityChangeCost`, `ability_change.alb` 0.8) and pays in gold
+/// (`GetCurrencyForAbilityChange` -> 0 = `CURRENCY_GOLD`; the 1.2 `currency_configs` table is
+/// empty). `X2Ability.SwapAbility` (`FUN_39386600`) refuses unless exactly three abilities are
+/// active, the old one is active and the new one is not (`FUN_398a1580`, "all active abilities
+/// must be activated" / "the ability is already active" / "the ability is already deactivated").
+/// The level-10 ability activation (`X2Ability.LearnAbility` -> `FUN_39384a20`) instead sends
+/// old = `AbilityType.NONE` and never calls the cost check, so activating an empty slot is free.
+/// Both client paths reach this function; the checks, the debit and the swap share one character
+/// lock, and the packets are sent after it.
 pub fn swap_ability(server: &GameServer, p: &PlayerRef, old: u8, new: u8) {
-    reset_skills(server, p, old);
-    {
+    let (removed_buffs, cost, money) = {
         let mut c = p.data();
+        let actives = [c.ability1, c.ability2, c.ability3];
+        // `FUN_398a1710`: only AbilityType 1..=10 (Fight .. Love) are class abilities.
+        if !(1..=10).contains(&new) {
+            tracing::warn!("SwapAbility: invalid ability id {new} (accepted: 1..=10)");
+            return;
+        }
+        if actives.contains(&new) {
+            tracing::warn!("SwapAbility: ability {new} is already active");
+            return;
+        }
+        if old == ability::NONE {
+            if !actives.contains(&ability::NONE) {
+                tracing::warn!("SwapAbility: no empty ability slot to activate {new}");
+                return;
+            }
+        } else {
+            if !actives.contains(&old) {
+                tracing::warn!("SwapAbility: ability {old} is not active (old {old} -> {new})");
+                return;
+            }
+            if actives.contains(&ability::NONE) {
+                tracing::warn!(
+                    "SwapAbility: not all three abilities are active (old {old} -> {new})"
+                );
+                return;
+            }
+        }
+        // `FUN_398a19d0`: content_configs[39] * level. Filling an empty slot is the free
+        // `LearnAbility` path (no cost call in `FUN_39384a20`).
+        let cost = if old == ability::NONE {
+            0
+        } else {
+            i64::from(server.game_data.systems.skills.ability_change_cost)
+                .saturating_mul(i64::from(c.unit.level))
+                .max(0)
+        };
+        if cost > 0 && c.money < cost {
+            drop(c);
+            tracing::warn!(
+                character = p.character_id,
+                old,
+                new,
+                cost,
+                "SwapAbility: not enough money"
+            );
+            crate::systems::economy::inventory::send_error_message(
+                p,
+                crate::systems::economy::error_message::NOT_ENOUGH_MONEY,
+                0,
+                true,
+            );
+            return;
+        }
+        let removed_buffs = reset_skills_locked(&server.game_data.skills, &mut c, old);
         if c.ability1 == old {
             c.ability1 = new;
             if let Some(a) = c.abilities.get_mut(new) {
@@ -684,8 +759,31 @@ pub fn swap_ability(server: &GameServer, p: &PlayerRef, old: u8, new: u8) {
                 a.order = 255;
             }
         }
+        if cost > 0 {
+            c.money -= cost;
+        }
+        (removed_buffs, cost, c.money)
+    };
+    for b in removed_buffs {
+        remove_passive_buff(server, p, b);
     }
     let obj = WorldObject::from(p);
+    broadcast(
+        server,
+        &obj,
+        &SCSkillsResetPacket {
+            obj_id: p.obj_id,
+            ability: old,
+        },
+        true,
+    );
+    if cost > 0 {
+        p.send(SCItemTaskSuccessPacket {
+            action: task_type::ABILITY_CHANGE,
+            tasks: vec![ItemTask::MoneyChange(-(cost as i32))],
+            force_remove: Vec::new(),
+        });
+    }
     broadcast(
         server,
         &obj,
@@ -695,6 +793,14 @@ pub fn swap_ability(server: &GameServer, p: &PlayerRef, old: u8, new: u8) {
             ability: new,
         },
         true,
+    );
+    tracing::info!(
+        character = p.character_id,
+        old,
+        new,
+        cost,
+        money,
+        "SwapAbility: ability changed"
     );
     crate::systems::report_achievement(
         server,
@@ -712,7 +818,11 @@ mod tests {
     use super::*;
     use crate::data::character_templates::ExpertLimit;
     use crate::data::GameData;
-    use crate::models::char_data::Actability;
+    use crate::models::char_data::{Actability, CharacterAbilities};
+    use crate::models::item_task::item_action;
+    use crate::net::registry::ClientPacket;
+    use crate::systems::economy::error_message;
+    use crate::systems::skills::handlers::CSSwapAbilityPacket;
     use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
 
     #[tokio::test]
@@ -795,5 +905,186 @@ mod tests {
             expected.push(step);
             assert_eq!(crate::net::packet::encode(&packet)[6..], expected);
         }
+    }
+
+    fn swap_fixture(
+        ability_change_cost: i32,
+        level: u8,
+        money: i64,
+        actives: [u8; 3],
+    ) -> (GameServer, TestClient, PlayerRef) {
+        let mut data = GameData::empty();
+        data.systems.skills.ability_change_cost = ability_change_cost;
+        let server = test_server_with(data);
+        let mut client = TestClient::new(&server, 1, 1);
+        let mut character = test_character(1, "Swapper", 100.0, 100.0);
+        character.unit.level = level;
+        character.money = money;
+        [character.ability1, character.ability2, character.ability3] = actives;
+        character.abilities = CharacterAbilities::default();
+        for (order, id) in actives.iter().enumerate() {
+            character.abilities.set_ability(*id, order as u8);
+        }
+        let player = spawn_player(&server, &client, character, 0x100);
+        client.conn.active_char = Some(player.clone());
+        client.drain();
+        (server, client, player)
+    }
+
+    async fn send_swap(server: &GameServer, client: &mut TestClient, old: u8, new: u8) {
+        CSSwapAbilityPacket {
+            obj_id: 0x100,
+            old_ability: old,
+            ability: new,
+            auap: false,
+        }
+        .handle(server, &mut client.conn)
+        .await
+        .expect("swap packet");
+    }
+
+    #[tokio::test]
+    async fn swap_ability_charges_content_config_per_level_and_swaps() {
+        // content_configs 39 = 200, level 10 -> 2000 copper. The client's
+        // `GetAbilityChangeCost` is `FUN_395720E0(0x27) * level` (`FUN_398a19d0`).
+        let (server, mut client, player) = swap_fixture(200, 10, 5_000, [1, 2, 3]);
+        send_swap(&server, &mut client, 3, 4).await;
+
+        {
+            let c = player.data();
+            assert_eq!(c.money, 3_000);
+            assert_eq!(c.ability3, 4);
+            assert_eq!(
+                c.abilities
+                    .abilities
+                    .iter()
+                    .find(|a| a.id == 4)
+                    .unwrap()
+                    .order,
+                2
+            );
+            assert_eq!(
+                c.abilities
+                    .abilities
+                    .iter()
+                    .find(|a| a.id == 3)
+                    .unwrap()
+                    .order,
+                255
+            );
+        }
+        let frames = client.drain();
+        let (_, body) = frames
+            .iter()
+            .find(|(op, _)| *op == sc::SCItemTaskSuccessPacket)
+            .expect("money change task");
+        assert_eq!(body[0], task_type::ABILITY_CHANGE);
+        assert_eq!(body[1], 1);
+        assert_eq!(body[2], item_action::CHANGE_MONEY_AMOUNT);
+        assert_eq!(
+            i32::from_le_bytes(body[3..7].try_into().unwrap()),
+            -2_000,
+            "gold must decrease by content_configs[39] * level"
+        );
+        let (_, swapped) = frames
+            .iter()
+            .find(|(op, _)| *op == sc::SCAbilitySwappedPacket)
+            .expect("swap broadcast");
+        let mut s = PacketStream::from_bytes(swapped.clone());
+        assert_eq!(s.read_bc().unwrap(), 0x100);
+        assert_eq!(s.read_u8().unwrap(), 3);
+        assert_eq!(s.read_u8().unwrap(), 4);
+    }
+
+    #[tokio::test]
+    async fn swap_ability_refuses_insufficient_gold_without_swapping() {
+        let (server, mut client, player) = swap_fixture(200, 10, 1_999, [1, 2, 3]);
+        send_swap(&server, &mut client, 3, 4).await;
+
+        let c = player.data();
+        assert_eq!(c.money, 1_999);
+        assert_eq!(c.ability3, 3);
+        assert_eq!(
+            c.abilities
+                .abilities
+                .iter()
+                .find(|a| a.id == 4)
+                .unwrap()
+                .order,
+            255
+        );
+        drop(c);
+        let frames = client.drain();
+        assert!(!frames
+            .iter()
+            .any(|(op, _)| *op == sc::SCAbilitySwappedPacket));
+        assert!(!frames
+            .iter()
+            .any(|(op, _)| *op == sc::SCItemTaskSuccessPacket));
+        let (_, error) = frames
+            .iter()
+            .find(|(op, _)| *op == sc::SCErrorMsgPacket)
+            .expect("error response");
+        assert_eq!(
+            i16::from_le_bytes([error[0], error[1]]),
+            error_message::NOT_ENOUGH_MONEY
+        );
+    }
+
+    #[tokio::test]
+    async fn swap_ability_refuses_invalid_duplicate_or_inactive_abilities() {
+        let (server, mut client, player) = swap_fixture(200, 10, 5_000, [1, 2, 3]);
+        for (old, new) in [
+            (3, 0),  // General is not a class ability
+            (3, 11), // None is not an ability
+            (3, 12), // outside AbilityType 1..=10
+            (3, 1),  // already active
+            (3, 3),  // old == new, already active
+            (5, 4),  // old is not an active slot
+        ] {
+            send_swap(&server, &mut client, old, new).await;
+            let c = player.data();
+            assert_eq!(c.ability1, 1, "old {old} -> new {new}");
+            assert_eq!(c.ability2, 2, "old {old} -> new {new}");
+            assert_eq!(c.ability3, 3, "old {old} -> new {new}");
+            assert_eq!(c.money, 5_000, "old {old} -> new {new}");
+        }
+        assert!(client
+            .drain()
+            .iter()
+            .all(|(op, _)| *op != sc::SCAbilitySwappedPacket));
+
+        // The ability-change UI requires three active abilities (`FUN_398a1580`).
+        let (server, mut client, player) = swap_fixture(200, 10, 5_000, [1, 2, ability::NONE]);
+        send_swap(&server, &mut client, 1, 4).await;
+        let c = player.data();
+        assert_eq!(c.ability1, 1);
+        assert_eq!(c.ability3, ability::NONE);
+        assert_eq!(c.money, 5_000);
+        assert!(!client
+            .drain()
+            .iter()
+            .any(|(op, _)| *op == sc::SCAbilitySwappedPacket));
+    }
+
+    #[tokio::test]
+    async fn swap_ability_activates_an_empty_slot_for_free() {
+        // Level-10 ability activation: `X2Ability.LearnAbility` -> `FUN_39384a20` sends
+        // old = None and never calls `GetAbilityChangeCost` / `CanBuyAbilityChange`.
+        let (server, mut client, player) =
+            swap_fixture(200, 10, 0, [1, ability::NONE, ability::NONE]);
+        send_swap(&server, &mut client, ability::NONE, 2).await;
+
+        let c = player.data();
+        assert_eq!(c.ability2, 2);
+        assert_eq!(c.money, 0);
+        drop(c);
+        let frames = client.drain();
+        assert!(!frames
+            .iter()
+            .any(|(op, _)| *op == sc::SCItemTaskSuccessPacket));
+        assert!(frames
+            .iter()
+            .any(|(op, _)| *op == sc::SCAbilitySwappedPacket));
     }
 }

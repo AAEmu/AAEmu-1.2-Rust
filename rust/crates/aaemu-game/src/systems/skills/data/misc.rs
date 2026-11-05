@@ -322,6 +322,19 @@ impl BuffGameData {
     }
 }
 
+/// `content_configs.value` for `id` (`LoadContentConfigValueArray`). The client's value array is
+/// zero-initialised, so an absent row reads as 0.
+pub fn load_content_config(conn: &Connection, id: u32) -> rusqlite::Result<i32> {
+    use rusqlite::OptionalExtension;
+    conn.query_row(
+        "SELECT value FROM content_configs WHERE id = ?1",
+        [id],
+        |r| r.get::<_, i32>(0),
+    )
+    .optional()
+    .map(|v| v.unwrap_or(0))
+}
+
 /// `TagsGameData` npc tags: tag id -> npc template ids.
 pub fn load_npc_tags(conn: &Connection) -> rusqlite::Result<HashMap<u32, Vec<u32>>> {
     let mut out: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -365,6 +378,18 @@ mod tests {
         conn.execute("INSERT INTO manual_funcs VALUES (22,'bad')", [])
             .unwrap();
         assert!(load_manual_funcs(&conn).is_err());
+    }
+
+    #[test]
+    fn content_config_reads_by_id_and_defaults_to_zero() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE content_configs(id INT, kind_id INT, value INT);
+            INSERT INTO content_configs VALUES (39,12,200),(42,13,8);",
+        )
+        .unwrap();
+        assert_eq!(load_content_config(&conn, 39).unwrap(), 200);
+        assert_eq!(load_content_config(&conn, 40).unwrap(), 0);
     }
 
     #[test]

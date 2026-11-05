@@ -231,6 +231,14 @@ is the one of the game server's `Connections`). Fields (`quest_item_quest`, `que
 from the level spawn fails the `game.doodad.level_spawn` step. The scenario then interacts with a
 `/spawn doodad 4252` copy, so the cast is still checked, and removes that copy afterwards.
 
+The ad-hoc `script` scenario (`$AAEMU_SCRIPT`; command list in `aaemu-testclient/src/scenario/script.rs`)
+drives quest hand-ins: `cq <quest> <npc template|0> [sel]` sends `CSCompleteQuestContext` at the
+nearest NPC of that template, `cqd <quest> <doodad obj id> [sel]` sends it with that doodad object
+id (`doodads` prints the template and object id of every doodad in sight), and `sq <quest>
+<npc template|0>` starts one from an NPC. The bot decodes `SCDoodadCompleteQuestPacket` (0x14d)
+into `GameState::doodad_complete_quests` as `(doodad object id, quest id)` and prints it decoded,
+so a ready report doodad can be checked with `expectpkt SCDoodadCompleteQuestPacket` before `cqd`.
+
 `portal` (GM account, same prerequisites as `questitem`) records a book entry with `/add_portal`, deletes it
 with `CSDeletePortal` and requires `SCPortalDeleted`, then teleports next to the Harpa Training Ground Memory Tome
 (doodad 841), casts its binding skill 14602 with a doodad target and requires `SCCharacterReturnDistricts` with the

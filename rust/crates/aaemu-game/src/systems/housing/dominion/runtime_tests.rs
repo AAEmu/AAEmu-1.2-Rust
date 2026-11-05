@@ -464,8 +464,7 @@ async fn a_forced_last_member_dismissal_applies_and_broadcasts_the_released_domi
         .expect("restore test dominion");
     f.client.drain();
 
-    crate::systems::social::expedition::remove_member_for_faction_change(&f.server, &f.player)
-        .await;
+    crate::systems::social::expedition::leave_forced(&f.server, &f.player).await;
 
     let guild = f.server.expeditions.get(20).expect("guild row");
     assert!(guild.is_disbanded && guild.members.is_empty());
