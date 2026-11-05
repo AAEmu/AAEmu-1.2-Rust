@@ -181,6 +181,109 @@ async fn online_rename_updates_the_unit_and_reaches_viewers_friends_guild_and_fa
 }
 
 #[tokio::test]
+async fn rename_updates_the_in_memory_mail_nation_auction_and_crime_names() {
+    use crate::systems::economy::auction::AuctionLot;
+    use crate::systems::economy::mail::{BaseMail, MailHeader};
+    use crate::systems::social::crime::{CrimeEvent, VictimInfo};
+    use crate::systems::social::nation::Nation;
+
+    let server = test_server();
+    server.names.add_character(1, "OldName", 1001);
+
+    let mail = BaseMail {
+        id: 11,
+        receiver_name: "OldName".into(),
+        header: MailHeader {
+            sender_id: 1,
+            sender_name: "OldName".into(),
+            receiver_id: 1,
+            ..MailHeader::default()
+        },
+        ..BaseMail::default()
+    };
+    assert!(server.systems.economy.mail.state().all.add(11, mail));
+
+    server.systems.social.nations.add(Nation {
+        id: 77,
+        expedition_id: 0,
+        owner_character_id: 1,
+        owner_name: "OldName".into(),
+        name: "Nation".into(),
+        created_at: 0,
+        allow_change_name: 0,
+        relations: Vec::new(),
+        offline_members: Vec::new(),
+    });
+
+    let now = chrono::Utc::now();
+    server.systems.economy.auction.add_auction_lot(AuctionLot {
+        id: 5,
+        duration: 1,
+        item: None,
+        end_time: now,
+        world_id: 0,
+        client_id: 1,
+        client_name: "OldName".into(),
+        start_money: 1,
+        direct_money: 1,
+        post_date: now,
+        bid_world_id: 0,
+        bidder_id: 1,
+        bidder_name: "OldName".into(),
+        bid_money: 0,
+        extra: 0,
+        dirty: false,
+    });
+    server.systems.social.crimes.set_victim_info(
+        1,
+        VictimInfo {
+            name: "OldName".into(),
+            faction_id: 0,
+            expedition_id: 0,
+        },
+    );
+
+    character_rename::apply_renamed(&server, 1, "OldName", "NewName");
+
+    let mail = server
+        .systems
+        .economy
+        .mail
+        .get_mail_by_id(11)
+        .expect("mail");
+    assert_eq!(mail.header.sender_name, "NewName");
+    assert_eq!(mail.receiver_name, "NewName");
+    assert_eq!(
+        server
+            .systems
+            .social
+            .nations
+            .get(77)
+            .expect("nation")
+            .owner_name,
+        "NewName"
+    );
+    let lot = server.systems.economy.auction.lot(5).expect("lot");
+    assert_eq!(
+        (lot.client_name.as_str(), lot.bidder_name.as_str()),
+        ("NewName", "NewName")
+    );
+    let event = CrimeEvent {
+        victim: 1,
+        ..CrimeEvent::default()
+    };
+    assert_eq!(
+        server
+            .systems
+            .social
+            .crimes
+            .record_entry(&server, &event)
+            .victim_name,
+        "NewName"
+    );
+}
+
+#[tokio::test]
 async fn rename_refuses_invalid_duplicate_and_same_names_through_the_command() {
     use crate::systems::services::commands::scripts::harness;
 
@@ -313,8 +416,12 @@ async fn private_mysql_offline_rename_persists_and_updates_every_name_copy() {
         "expeditions",
         "family_members",
         "nations",
+        "nation_relations",
+        "nation_relation_offers",
         "shipyards",
         "auction_house",
+        "character_rank_scores",
+        "rank_period_payouts",
     ] {
         let (_, definition): (String, String) =
             sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
@@ -331,8 +438,16 @@ async fn private_mysql_offline_rename_persists_and_updates_every_name_copy() {
         .unwrap();
     }
 
-    let mut server = test_server();
+    let mut data = GameData::empty();
+    data.items
+        .templates
+        .insert(1000, crate::data::items::ItemTemplate::plain(1000, 1000));
+    let mut server = crate::test_support::test_server_with(data);
     server.db = pool.clone();
+    let item = server
+        .items
+        .create(1000, 1, 0, 0, &server.game_data.items, &server.ids.item, 0)
+        .expect("auction item");
     let mut offline = Character::new(1, 1, Default::default());
     offline.unit.name = "OldName".into();
     offline.created = chrono::Utc::now().timestamp();
@@ -355,10 +470,40 @@ async fn private_mysql_offline_rename_persists_and_updates_every_name_copy() {
         "INSERT INTO nations (id, expedition_id, owner_character_id, owner_name, name) VALUES (77, 7, 1, 'OldName', 'Nation')",
         "INSERT INTO shipyards (id, template_id, owner_id, owner_name, instance_id, x, y, z, spawned) VALUES (5, 1, 1, 'OldName', 0, 1, 2, 3, 0)",
         "INSERT INTO mails (id, type, status, title, text, sender_id, sender_name, attachment_count, receiver_id, receiver_name, open_date, send_date, received_date, returned, extra, money_amount_1, money_amount_2, money_amount_3) VALUES (11, 1, 0, 'title', 'text', 1, 'OldName', 0, 1, 'OldName', NOW(), NOW(), NOW(), 0, 0, 0, 0, 0)",
-        "INSERT INTO auction_house (duration, item_id, stack_size, world_id, client_id, client_name, start_money, direct_money, bid_world_id, bidder_id, bidder_name, bid_money, extra) VALUES (1, 100, 1, 0, 1, 'OldName', 1, 1, 0, 1, 'OldName', 0, 0)",
+        "INSERT INTO character_rank_scores (rank_id, period_start, character_id, period_end, account_id, account, world_id, v1, v2, updated) VALUES (1, 100, 1, 200, 1001, 'OldName', 1, 10, 0, 0)",
     ] {
         sqlx::query(sql).execute(&pool).await.unwrap();
     }
+    sqlx::query(
+        "INSERT INTO auction_house (duration, item_id, stack_size, world_id, client_id, client_name, start_money, direct_money, bid_world_id, bidder_id, bidder_name, bid_money, extra) VALUES (1, ?, 1, 0, 1, 'OldName', 1, 1, 0, 1, 'OldName', 0, 0)",
+    )
+    .bind(item.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    server
+        .systems
+        .economy
+        .mail
+        .load(&server)
+        .await
+        .expect("mail load");
+    server
+        .systems
+        .social
+        .nations
+        .load(&pool)
+        .await
+        .expect("nation load");
+    assert!(server.systems.economy.auction.load(&server).await);
+    server
+        .systems
+        .social
+        .ranking
+        .load(&pool)
+        .await
+        .expect("ranking load");
 
     let old = character_rename::rename_character(&server, 1, "NewName")
         .await
@@ -407,12 +552,126 @@ async fn private_mysql_offline_rename_persists_and_updates_every_name_copy() {
             "SELECT bidder_name FROM auction_house WHERE bidder_id = 1",
             "auction.bidder_name",
         ),
+        (
+            "SELECT account FROM character_rank_scores WHERE character_id = 1",
+            "character_rank_scores.account",
+        ),
     ] {
         let value: String = sqlx::query_scalar(sql).fetch_one(&pool).await.unwrap();
         assert_eq!(value, new, "{table}");
     }
     assert_eq!(server.names.get_character_id(&new), 1);
     assert_eq!(server.names.get_character_id(&normalize_name("OldName")), 0);
+
+    // The managers loaded these rows at start; the rename must update their cached names too.
+    let mail = server
+        .systems
+        .economy
+        .mail
+        .get_mail_by_id(11)
+        .expect("mail");
+    assert_eq!(
+        (
+            mail.header.sender_name.as_str(),
+            mail.receiver_name.as_str()
+        ),
+        (new.as_str(), new.as_str()),
+        "in-memory mail"
+    );
+    assert_eq!(
+        server
+            .systems
+            .social
+            .nations
+            .get(77)
+            .expect("nation")
+            .owner_name,
+        new,
+        "in-memory nation"
+    );
+    let lot = server.systems.economy.auction.lot(1).expect("auction lot");
+    assert_eq!(
+        (lot.client_name.as_str(), lot.bidder_name.as_str()),
+        (new.as_str(), new.as_str()),
+        "in-memory auction lot"
+    );
+    assert_eq!(
+        server
+            .systems
+            .social
+            .ranking
+            .score_of(1, 1, 100)
+            .expect("ranking score")
+            .account,
+        new,
+        "in-memory ranking score"
+    );
+
+    // A later save of each manager writes its rows from memory; the cached names above must
+    // survive it instead of the old ones being restored.
+    server
+        .systems
+        .economy
+        .mail
+        .with_mail_mut(11, |m| m.is_dirty = true);
+    let mut tx = pool.begin().await.unwrap();
+    server.systems.economy.mail.save(&mut tx).await.unwrap();
+    tx.commit().await.unwrap();
+    server.systems.economy.mail.commit_save();
+    let mut tx = pool.begin().await.unwrap();
+    server
+        .systems
+        .social
+        .nations
+        .save(&server, &mut tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let mut lot = server.systems.economy.auction.lot(1).expect("auction lot");
+    lot.dirty = true;
+    server.systems.economy.auction.set_lot(lot);
+    let mut tx = pool.begin().await.unwrap();
+    server
+        .systems
+        .economy
+        .auction
+        .save(&server, &mut tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    server.systems.economy.auction.commit_save();
+    let mut tx = pool.begin().await.unwrap();
+    server.systems.social.ranking.save(&mut tx).await.unwrap();
+    tx.commit().await.unwrap();
+    for (sql, table) in [
+        (
+            "SELECT sender_name FROM mails WHERE sender_id = 1",
+            "mails.sender_name after save",
+        ),
+        (
+            "SELECT receiver_name FROM mails WHERE receiver_id = 1",
+            "mails.receiver_name after save",
+        ),
+        (
+            "SELECT owner_name FROM nations WHERE owner_character_id = 1",
+            "nations.owner_name after save",
+        ),
+        (
+            "SELECT client_name FROM auction_house WHERE client_id = 1",
+            "auction.client_name after save",
+        ),
+        (
+            "SELECT bidder_name FROM auction_house WHERE bidder_id = 1",
+            "auction.bidder_name after save",
+        ),
+        (
+            "SELECT account FROM character_rank_scores WHERE character_id = 1",
+            "character_rank_scores.account after save",
+        ),
+    ] {
+        let value: String = sqlx::query_scalar(sql).fetch_one(&pool).await.unwrap();
+        assert_eq!(value, new, "{table}");
+    }
 
     let error = character_rename::rename_character(&server, 2, "Other")
         .await
@@ -472,8 +731,12 @@ async fn private_mysql_concurrent_rename_and_create_leave_exactly_one_winner() {
         "expeditions",
         "family_members",
         "nations",
+        "nation_relations",
+        "nation_relation_offers",
         "shipyards",
         "auction_house",
+        "character_rank_scores",
+        "rank_period_payouts",
     ] {
         let (_, definition): (String, String) =
             sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))

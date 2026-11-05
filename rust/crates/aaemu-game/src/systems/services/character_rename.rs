@@ -22,15 +22,24 @@
 //! * `expedition_members.name`, `expeditions.owner_name`, `family_members.name` - loaded at
 //!   server start and shown in the guild / family lists; updated here (the in-memory copies
 //!   too).
-//! * `nations.owner_name` - loaded at server start and shown; updated here.
+//! * `nations.owner_name` - loaded at server start, held in `NationManager` and saved from it;
+//!   updated here in the database and in memory.
 //! * `shipyards.owner_name` - loaded at server start and used to resolve the owner by name
 //!   (`server.world.character_by_name`) when the build completes / decays; updated here, in
 //!   the database and in the live shipyard (its unit name too).
-//! * `auction_house.client_name` / `bidder_name` - loaded at server start and shown in the
-//!   auction list; updated here.
+//! * `auction_house.client_name` / `bidder_name` - loaded into `AuctionManager` and saved from
+//!   its lots; updated here in the database and in memory.
+//! * `character_rank_scores.account` - the character name the client shows where the login
+//!   account is unknown; loaded into `RankingManager` and saved from it; updated here in the
+//!   database and in memory.
 //! * `housings` stores only `owner`; the house owner name is resolved from the name cache
 //!   (`housing/ops.rs`), so no row changes. `friends` / `blocked` store ids only. `mates.name`
 //!   and `slaves.name` are pet / vehicle names, not character names.
+//!
+//! The in-memory copies (mail list, nations, auction lots, ranking scores, guild / family /
+//! shipyard caches) are updated in [`apply_renamed`] before [`rename_character`] releases the
+//! save transaction lock, so no save can capture the old names between the database commit and
+//! the memory swap.
 
 use std::collections::HashSet;
 
@@ -181,6 +190,7 @@ async fn update_name_copies(
         "UPDATE shipyards SET owner_name = ? WHERE owner_id = ?",
         "UPDATE mails SET sender_name = ? WHERE sender_id = ?",
         "UPDATE mails SET receiver_name = ? WHERE receiver_id = ?",
+        "UPDATE character_rank_scores SET account = ? WHERE character_id = ?",
     ] {
         sqlx::query(sql)
             .bind(new_name)
@@ -229,6 +239,38 @@ pub fn apply_renamed(server: &GameServer, character_id: u32, old_name: &str, new
         let mut c = p.data();
         c.unit.name = new_name.to_string();
     }
+    // `rename_character` calls this while it still owns `SaveManager::transaction_lock`, so the
+    // managers' next save cannot snapshot the old names between the commit and these swaps.
+    server
+        .systems
+        .economy
+        .mail
+        .rename_character(character_id, new_name);
+    server
+        .systems
+        .social
+        .nations
+        .rename_character(character_id, new_name);
+    server
+        .systems
+        .economy
+        .auction
+        .rename_character(character_id, new_name);
+    server
+        .systems
+        .social
+        .ranking
+        .rename_character(character_id, new_name);
+    server
+        .systems
+        .social
+        .trials
+        .rename_character(character_id, new_name);
+    server
+        .systems
+        .social
+        .crimes
+        .rename_character(character_id, new_name);
     update_expedition_names(server, character_id, new_name);
     server
         .systems

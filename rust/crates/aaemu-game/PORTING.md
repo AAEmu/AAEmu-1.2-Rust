@@ -1362,15 +1362,21 @@ rename packet is `CSRenameExpedition`, guild / nation), so the trigger is the GM
   to clobber another character's name. The check, the `characters.name` UPDATE and the cache
   swap share `SaveManager::transaction_lock` with character create / the lobby edit, so a
   concurrent create of the new name has exactly one winner.
-* **Persisted copies.** The **authoritative** `characters.name` and the copies the server reads
-  back are updated in the same database transaction: `mails.sender_name` / `receiver_name`,
-  `expedition_members.name`, `expeditions.owner_name`, `family_members.name`,
-  `nations.owner_name`, `shipyards.owner_name` (the completion / decay path resolves the owner
-  with `character_by_name`, so the live shipyard's `owner_name` and unit name are updated too)
-  and `auction_house.client_name` / `bidder_name`. `housings` stores only the owner id and
-  resolves the owner name from the name cache, so no house row changes. `friends` / `blocked`
-  store ids only; `mates.name` and `slaves.name` are pet / vehicle names, not character names.
-  The in-memory guild / family / shipyard copies are updated as well.
+* **Persisted copies and their memory caches.** The **authoritative** `characters.name` and the
+  copies the server reads back are updated in the same database transaction:
+  `mails.sender_name` / `receiver_name`, `expedition_members.name`, `expeditions.owner_name`,
+  `family_members.name`, `nations.owner_name`, `shipyards.owner_name` (the completion / decay
+  path resolves the owner with `character_by_name`, so the live shipyard's `owner_name` and
+  unit name are updated too), `auction_house.client_name` / `bidder_name` and
+  `character_rank_scores.account` (the character name the client shows where the login account
+  is unknown). The managers that loaded these rows and save from memory are updated after the
+  commit while the save transaction lock is still held, so a later save cannot put the old
+  names back: `MailManager`, `NationManager`, `AuctionManager`, `RankingManager`, the guild /
+  family / shipyard caches, and the runtime-only `TrialManager` defendant name and
+  `CrimeManager` offline-victim cache (neither is persisted). `housings` stores only the owner
+  id and resolves the owner name from the name cache, so no house row changes. `friends` /
+  `blocked` store ids only; `mates.name` and `slaves.name` are pet / vehicle names, not
+  character names.
 * **Deviation from the C#.** The C# had the packet definition and the lobby edit's name change
   but no world-rename path; the Rust adds the GM command, the broadcast and the copy updates.
   There is no 1.2 client trigger to capture, so the recipients stay INFERRED.

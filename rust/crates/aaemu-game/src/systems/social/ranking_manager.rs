@@ -162,6 +162,17 @@ impl RankingManager {
         ranking_persistence::write(tx, &scores, &paid).await
     }
 
+    /// Updates the cached character name (`account`) in every stored score of a renamed
+    /// character. The caller owns `SaveManager::transaction_lock`, so the periodic save cannot
+    /// write the old name back after this swap.
+    pub fn rename_character(&self, character_id: u32, new_name: &str) -> usize {
+        let mut store = self.store();
+        let Some(state) = store.states.get_mut(&character_id) else {
+            return 0;
+        };
+        state.rename_holder(new_name)
+    }
+
     /// The stored score of a character on a board in a period.
     pub fn score_of(
         &self,
