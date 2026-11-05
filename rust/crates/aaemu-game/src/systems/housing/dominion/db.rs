@@ -15,7 +15,10 @@ use super::state::{
 };
 
 pub async fn load(server: &GameServer) -> anyhow::Result<()> {
-    let states = load_rows(&server.db).await?;
+    let mut states = load_rows(&server.db).await?;
+    // A declaration describes one weekly cycle. One whose cycle cannot still be running is
+    // discarded on restart instead of waiting for the next tick (WP-SD2a).
+    clear_stale_declarations(&mut states, chrono::Utc::now().timestamp());
     validate_loaded_identity(server, &states)?;
     server
         .systems
@@ -104,8 +107,26 @@ pub fn validate_loaded_identity(
                 "active dominion siege expedition is missing"
             );
         }
+        if let Some(declaration) = state.declaration {
+            anyhow::ensure!(
+                expedition_exists(declaration.attacker_expedition_id),
+                "persisted dominion declaration expedition is missing"
+            );
+        }
     }
     Ok(())
+}
+
+/// A declaration is only meaningful while its weekly cycle can still run. The longest cycle
+/// is a week, so anything older than that is discarded on restart (WP-SD2a).
+pub(crate) fn clear_stale_declarations(states: &mut [DominionState], now: i64) {
+    for state in states {
+        if state.declaration.is_some_and(|declaration| {
+            declaration.cycle_auction_start.saturating_add(7 * 86_400) <= now
+        }) {
+            state.declaration = None;
+        }
+    }
 }
 
 pub async fn load_rows(pool: &MySqlPool) -> anyhow::Result<Vec<DominionState>> {
@@ -146,7 +167,23 @@ pub async fn load_rows(pool: &MySqlPool) -> anyhow::Result<Vec<DominionState>> {
                 defender_ni: row.try_get("siege_defender_ni")?,
                 defender_nr: row.try_get("siege_defender_nr")?,
                 outcome_credited: row.try_get("siege_outcome_credited")?,
+                materialised_from_declaration: false,
+                calendar_cycle: 0,
                 participants: BTreeMap::new(),
+            })
+        };
+        let declaration_attacker: u32 = row.try_get("declaration_attacker")?;
+        let declaration = if declaration_attacker == 0 {
+            None
+        } else {
+            Some(super::state::Declaration {
+                attacker_expedition_id: declaration_attacker,
+                declared_at: row.try_get("declaration_at")?,
+                cycle_auction_start: row.try_get("declaration_cycle")?,
+                hq_obj_id: 0,
+                hq_x: row.try_get("declaration_hq_x")?,
+                hq_y: row.try_get("declaration_hq_y")?,
+                hq_z: row.try_get("declaration_hq_z")?,
             })
         };
         let state = DominionState {
@@ -182,6 +219,7 @@ pub async fn load_rows(pool: &MySqlPool) -> anyhow::Result<Vec<DominionState>> {
             tower_destroyed: row.try_get("tower_destroyed")?,
             tower_hp: row.try_get("tower_hp")?,
             last_siege_id: row.try_get("last_siege_id")?,
+            declaration,
             siege,
             ephemeral: false,
         };
@@ -323,8 +361,10 @@ async fn write_row(tx: &mut Transaction<'_, MySql>, state: &DominionState) -> sq
          tower_destroyed,tower_hp,last_siege_id,siege_id,attacker_expedition_id,defender_expedition_id,\
          siege_ownership_generation,siege_status,siege_outcome,siege_scheduled_at,siege_starts_at,\
          siege_ends_at,siege_ended_at,siege_reinforced,siege_defender_ni,siege_defender_nr,\
-         siege_outcome_credited,non_pvp_start_at,non_pvp_duration_min) \
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+         siege_outcome_credited,non_pvp_start_at,non_pvp_duration_min,\
+         declaration_attacker,declaration_at,declaration_cycle,declaration_hq_x,\
+         declaration_hq_y,declaration_hq_z) \
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
     )
     .bind(state.zone_group_id).bind(state.tower.house_id).bind(state.tower.instance_id)
     .bind(state.tower.guard_tower_setting_id).bind(state.owner_expedition_id)
@@ -346,6 +386,12 @@ async fn write_row(tx: &mut Transaction<'_, MySql>, state: &DominionState) -> sq
     .bind(siege.map_or(0, |s| s.defender_ni)).bind(siege.map_or(0, |s| s.defender_nr))
     .bind(siege.is_some_and(|s| s.outcome_credited))
     .bind(state.non_pvp_start_at).bind(state.non_pvp_duration_min)
+    .bind(state.declaration.map_or(0, |d| d.attacker_expedition_id))
+    .bind(state.declaration.map_or(0, |d| d.declared_at))
+    .bind(state.declaration.map_or(0, |d| d.cycle_auction_start))
+    .bind(state.declaration.map_or(0.0, |d| d.hq_x))
+    .bind(state.declaration.map_or(0.0, |d| d.hq_y))
+    .bind(state.declaration.map_or(0.0, |d| d.hq_z))
     .execute(&mut **tx).await?;
     Ok(())
 }

@@ -175,6 +175,14 @@ pub struct SiegeState {
     /// Persisted so a repeated tick, a capture racing the tick or a restart cannot credit one
     /// siege id twice.
     pub outcome_credited: bool,
+    /// The record was created from the calendar declaration at the cycle's warmup (WP-SD2a),
+    /// not by a GM `/dominion schedule`. The calendar then keeps describing its periods (the
+    /// GM test clock can walk 3 -> 4 -> 5), while a GM schedule keeps owning its own timers.
+    /// Runtime-only: after a restart the persisted real deadlines describe the same cycle.
+    pub materialised_from_declaration: bool,
+    /// `Cycle::auction_start` of the declared cycle a calendar materialisation belongs to
+    /// (0 = GM schedule). Runtime-only, like `materialised_from_declaration`.
+    pub calendar_cycle: i64,
     pub participants: BTreeMap<u32, SiegeParticipant>,
 }
 
@@ -184,6 +192,21 @@ impl SiegeState {
             && self.starts_at <= now_seconds
             && now_seconds < self.ends_at
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Declaration {
+    pub attacker_expedition_id: u32,
+    /// When the camp use was accepted (Unix seconds).
+    pub declared_at: i64,
+    /// `calendar::Cycle::auction_start` of the cycle this declaration belongs to; a
+    /// declaration only describes that one cycle.
+    pub cycle_auction_start: i64,
+    /// The spawned camp doodad; runtime-only, re-bound after a restart (WP-SD2c).
+    pub hq_obj_id: u32,
+    pub hq_x: f32,
+    pub hq_y: f32,
+    pub hq_z: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -219,6 +242,10 @@ pub struct DominionState {
     pub tower_hp: Option<i32>,
     /// Last explicit siege generation; retained when no siege is currently present.
     pub last_siege_id: u64,
+    /// Accepted attacker for one calendar cycle (WP-SD2a). At most one per zone and cycle;
+    /// cleared when the cycle's warmup materialises the siege, on cancel, or on a disband or
+    /// owner change before the warmup.
+    pub declaration: Option<Declaration>,
     pub siege: Option<SiegeState>,
     /// A test-only authority row that must never reach `dominions` (the GM `nation dominion`
     /// hook uses a placeholder tower that would fail startup validation). Never persisted.
@@ -250,9 +277,27 @@ impl DominionState {
             tower_destroyed: false,
             tower_hp: None,
             last_siege_id: 0,
+            declaration: None,
             siege: None,
             ephemeral: false,
         }
+    }
+
+    /// The cycle a declaration (or its calendar-materialised siege) belongs to. A GM
+    /// schedule has none, so the calendar ignores it.
+    pub fn declared_cycle(&self) -> Option<i64> {
+        self.declaration
+            .map(|declaration| declaration.cycle_auction_start)
+            .or_else(|| {
+                self.siege
+                    .as_ref()
+                    .filter(|siege| {
+                        siege.materialised_from_declaration
+                            && siege.status != SiegeStatus::Finished
+                            && siege.calendar_cycle > 0
+                    })
+                    .map(|siege| siege.calendar_cycle)
+            })
     }
 
     /// Drops the national monument reference. The caller deletes the doodad row and announces
@@ -357,6 +402,23 @@ impl DominionState {
         } else if self.tower_destroyed || self.tower_hp.is_some() {
             return Err(DominionError::InvalidSiege);
         }
+        if let Some(declaration) = self.declaration {
+            if self.owner_expedition_id == 0
+                || declaration.attacker_expedition_id == 0
+                || declaration.attacker_expedition_id == self.owner_expedition_id
+                || declaration.declared_at < 0
+                || declaration.cycle_auction_start <= 0
+                || self
+                    .siege
+                    .as_ref()
+                    .is_some_and(|siege| siege.status != SiegeStatus::Finished)
+                || ![declaration.hq_x, declaration.hq_y, declaration.hq_z]
+                    .iter()
+                    .all(|v| v.is_finite())
+            {
+                return Err(DominionError::InvalidState);
+            }
+        }
         Ok(())
     }
 }
@@ -421,6 +483,12 @@ pub enum DominionError {
     NonPvpActive,
     #[error("property tax quote no longer matches the territory owner or rate")]
     StaleTaxQuote,
+    #[error("this territory is already declared by the same expedition")]
+    AlreadyDeclared,
+    #[error("this territory is already declared by another expedition")]
+    DeclaredByOther,
+    #[error("this territory has no siege declaration")]
+    NotDeclared,
     #[error("timestamp or generation overflow")]
     Overflow,
 }
@@ -504,6 +572,73 @@ fn validate_identity(zone_group_id: u32, tower: TowerIdentity) -> Result<(), Dom
 
 fn next_revision(inner: &Inner) -> Result<u64, DominionError> {
     inner.revision.checked_add(1).ok_or(DominionError::Overflow)
+}
+
+/// Creates a siege record on `state`; the caller holds the authority lock and validates the
+/// declaration-specific preconditions. Shared by the GM schedule and the calendar
+/// materialisation (WP-SD2a) so both write the same record.
+fn start_siege(
+    state: &mut DominionState,
+    attacker_expedition_id: u32,
+    starts_at: i64,
+    ends_at: i64,
+    now_seconds: i64,
+    limits: SiegeLimits,
+    declaration_cycle: Option<i64>,
+) -> Result<(), DominionError> {
+    if now_seconds < 0
+        || starts_at < now_seconds
+        || ends_at <= starts_at
+        || ends_at.checked_mul(1000).is_none()
+        || limits.ni > limits.nr
+        || usize::from(limits.nr) > MAX_PARTICIPANTS_PER_SIDE
+    {
+        return Err(DominionError::InvalidSchedule);
+    }
+    if attacker_expedition_id == 0
+        || state.owner_expedition_id == 0
+        || attacker_expedition_id == state.owner_expedition_id
+    {
+        return Err(DominionError::InvalidIdentity);
+    }
+    if state
+        .siege
+        .as_ref()
+        .is_some_and(|s| s.status != SiegeStatus::Finished)
+    {
+        return Err(DominionError::SiegeInProgress);
+    }
+    let siege_id = state
+        .last_siege_id
+        .checked_add(1)
+        .ok_or(DominionError::Overflow)?;
+    state.last_siege_id = siege_id;
+    state.tower_destroyed = false;
+    state.tower_hp = None;
+    state.siege = Some(SiegeState {
+        siege_id,
+        attacker_expedition_id,
+        defender_expedition_id: state.owner_expedition_id,
+        ownership_generation: state.ownership_generation,
+        status: if starts_at == now_seconds {
+            SiegeStatus::Active
+        } else {
+            SiegeStatus::Scheduled
+        },
+        outcome: SiegeOutcome::Pending,
+        scheduled_at: now_seconds,
+        starts_at,
+        ends_at,
+        ended_at: 0,
+        reinforced: false,
+        defender_ni: limits.ni,
+        defender_nr: limits.nr,
+        outcome_credited: false,
+        materialised_from_declaration: declaration_cycle.is_some(),
+        calendar_cycle: declaration_cycle.unwrap_or(0),
+        participants: BTreeMap::new(),
+    });
+    Ok(())
 }
 
 fn replace(inner: &mut Inner, state: DominionState, revision: u64) {
@@ -722,6 +857,7 @@ impl DominionManager {
         // A row restored while unowned must not hand a stale peace window to the new owner.
         state.non_pvp_start_at = 0;
         state.non_pvp_duration_min = 0;
+        state.declaration = None;
         state.clear_national_monument_fields();
         if !consume() {
             return Err(DominionError::Resources);
@@ -797,14 +933,50 @@ impl DominionManager {
         now_seconds: i64,
         limits: SiegeLimits,
     ) -> Result<DominionState, DominionError> {
-        if now_seconds < 0
-            || starts_at < now_seconds
-            || ends_at <= starts_at
-            || ends_at.checked_mul(1000).is_none()
-            || limits.ni > limits.nr
-            || usize::from(limits.nr) > MAX_PARTICIPANTS_PER_SIDE
+        let mut inner = self.lock();
+        let mut state = inner
+            .states
+            .get(&zone_group_id)
+            .ok_or(DominionError::Missing)?
+            .state
+            .clone();
+        let revision = next_revision(&inner)?;
+        start_siege(
+            &mut state,
+            attacker_expedition_id,
+            starts_at,
+            ends_at,
+            now_seconds,
+            limits,
+            None,
+        )?;
+        inner.channels.retain(|(zone, _), _| *zone != zone_group_id);
+        replace(&mut inner, state.clone(), revision);
+        Ok(state)
+    }
+
+    /// Records an accepted siege declaration for one calendar cycle (WP-SD2a). The period,
+    /// range, policy and item checks happen in the caller under the same
+    /// `housing.operation_lock`; this method only enforces the per-zone/cycle uniqueness.
+    /// A second declaration by the same expedition is [`DominionError::AlreadyDeclared`]
+    /// (client 442), by another expedition [`DominionError::DeclaredByOther`] (client 443).
+    pub fn declare(
+        &self,
+        zone_group_id: u32,
+        attacker_expedition_id: u32,
+        cycle_auction_start: i64,
+        declared_at: i64,
+        hq_obj_id: u32,
+        hq: (f32, f32, f32),
+    ) -> Result<DominionState, DominionError> {
+        if attacker_expedition_id == 0
+            || cycle_auction_start <= 0
+            || declared_at < 0
+            || !hq.0.is_finite()
+            || !hq.1.is_finite()
+            || !hq.2.is_finite()
         {
-            return Err(DominionError::InvalidSchedule);
+            return Err(DominionError::InvalidIdentity);
         }
         let mut inner = self.lock();
         let mut state = inner
@@ -813,51 +985,166 @@ impl DominionManager {
             .ok_or(DominionError::Missing)?
             .state
             .clone();
-        if attacker_expedition_id == 0
-            || state.owner_expedition_id == 0
-            || attacker_expedition_id == state.owner_expedition_id
-        {
+        if state.owner_expedition_id == 0 || state.owner_expedition_id == attacker_expedition_id {
             return Err(DominionError::InvalidIdentity);
+        }
+        if let Some(existing) = state.declaration {
+            return Err(
+                if existing.attacker_expedition_id == attacker_expedition_id {
+                    DominionError::AlreadyDeclared
+                } else {
+                    DominionError::DeclaredByOther
+                },
+            );
         }
         if state
             .siege
             .as_ref()
-            .is_some_and(|s| s.status != SiegeStatus::Finished)
+            .is_some_and(|siege| siege.status != SiegeStatus::Finished)
         {
             return Err(DominionError::SiegeInProgress);
         }
-        let siege_id = state
-            .last_siege_id
-            .checked_add(1)
-            .ok_or(DominionError::Overflow)?;
         let revision = next_revision(&inner)?;
-        state.last_siege_id = siege_id;
-        state.tower_destroyed = false;
-        state.tower_hp = None;
-        state.siege = Some(SiegeState {
-            siege_id,
+        state.declaration = Some(Declaration {
             attacker_expedition_id,
-            defender_expedition_id: state.owner_expedition_id,
-            ownership_generation: state.ownership_generation,
-            status: if starts_at == now_seconds {
-                SiegeStatus::Active
-            } else {
-                SiegeStatus::Scheduled
-            },
-            outcome: SiegeOutcome::Pending,
-            scheduled_at: now_seconds,
-            starts_at,
-            ends_at,
-            ended_at: 0,
-            reinforced: false,
-            defender_ni: limits.ni,
-            defender_nr: limits.nr,
-            outcome_credited: false,
-            participants: BTreeMap::new(),
+            declared_at,
+            cycle_auction_start,
+            hq_obj_id,
+            hq_x: hq.0,
+            hq_y: hq.1,
+            hq_z: hq.2,
         });
-        inner.channels.retain(|(zone, _), _| *zone != zone_group_id);
         replace(&mut inner, state.clone(), revision);
         Ok(state)
+    }
+
+    /// Cancels the declaration of `expedition_id`. A declaration of another expedition (or
+    /// none at all) is [`DominionError::NotDeclared`]; the caller has already checked the
+    /// caller's rights.
+    pub fn cancel_declaration(
+        &self,
+        zone_group_id: u32,
+        attacker_expedition_id: u32,
+    ) -> Result<DominionState, DominionError> {
+        if attacker_expedition_id == 0 {
+            return Err(DominionError::InvalidIdentity);
+        }
+        let mut inner = self.lock();
+        let mut state = inner
+            .states
+            .get(&zone_group_id)
+            .ok_or(DominionError::Missing)?
+            .state
+            .clone();
+        let declaration = state.declaration.ok_or(DominionError::NotDeclared)?;
+        if declaration.attacker_expedition_id != attacker_expedition_id {
+            return Err(DominionError::NotDeclared);
+        }
+        let revision = next_revision(&inner)?;
+        state.declaration = None;
+        replace(&mut inner, state.clone(), revision);
+        Ok(state)
+    }
+
+    /// Drops a declaration that can no longer be honoured (disband, owner change, missed
+    /// warmup). Returns the cleared state only when one existed.
+    pub fn drop_declaration(
+        &self,
+        zone_group_id: u32,
+    ) -> Result<Option<DominionState>, DominionError> {
+        let mut inner = self.lock();
+        let Some(entry) = inner.states.get(&zone_group_id) else {
+            return Err(DominionError::Missing);
+        };
+        if entry.state.declaration.is_none() {
+            return Ok(None);
+        }
+        let mut state = entry.state.clone();
+        let revision = next_revision(&inner)?;
+        state.declaration = None;
+        replace(&mut inner, state.clone(), revision);
+        Ok(Some(state))
+    }
+
+    /// Records the real spawned camp doodad on an accepted declaration. Returns the updated
+    /// state, or `None` when no declaration exists anymore (a racing cancel).
+    pub fn bind_declaration_hq(
+        &self,
+        zone_group_id: u32,
+        hq_obj_id: u32,
+        hq: (f32, f32, f32),
+    ) -> Result<Option<DominionState>, DominionError> {
+        if hq_obj_id == 0 || !hq.0.is_finite() || !hq.1.is_finite() || !hq.2.is_finite() {
+            return Err(DominionError::InvalidIdentity);
+        }
+        let mut inner = self.lock();
+        let Some(entry) = inner.states.get(&zone_group_id) else {
+            return Err(DominionError::Missing);
+        };
+        if entry.state.declaration.is_none() {
+            return Ok(None);
+        }
+        let mut state = entry.state.clone();
+        let revision = next_revision(&inner)?;
+        let declaration = state.declaration.as_mut().expect("checked");
+        declaration.hq_obj_id = hq_obj_id;
+        declaration.hq_x = hq.0;
+        declaration.hq_y = hq.1;
+        declaration.hq_z = hq.2;
+        replace(&mut inner, state.clone(), revision);
+        Ok(Some(state))
+    }
+
+    /// Materialises the declaration into an explicit siege record at the cycle's warmup
+    /// start (WP-SD2a). The check that this declaration belongs to `cycle_auction_start` and
+    /// the schedule/clear happen under one lock. A record that already exists (a restart
+    /// between the schedule and the save) keeps it and only clears the declaration.
+    pub fn materialise_declaration(
+        &self,
+        zone_group_id: u32,
+        cycle_auction_start: i64,
+        starts_at: i64,
+        ends_at: i64,
+        now_seconds: i64,
+        limits: SiegeLimits,
+    ) -> Result<Option<DominionState>, DominionError> {
+        let mut inner = self.lock();
+        let mut state = inner
+            .states
+            .get(&zone_group_id)
+            .ok_or(DominionError::Missing)?
+            .state
+            .clone();
+        let Some(declaration) = state.declaration else {
+            return Ok(None);
+        };
+        if declaration.cycle_auction_start != cycle_auction_start {
+            return Ok(None);
+        }
+        let revision = next_revision(&inner)?;
+        let attacker = declaration.attacker_expedition_id;
+        state.declaration = None;
+        match start_siege(
+            &mut state,
+            attacker,
+            starts_at,
+            ends_at,
+            now_seconds,
+            limits,
+            Some(declaration.cycle_auction_start),
+        ) {
+            Ok(()) => {}
+            Err(DominionError::SiegeInProgress) => {
+                if let Some(siege) = state.siege.as_mut() {
+                    siege.materialised_from_declaration = true;
+                    siege.calendar_cycle = declaration.cycle_auction_start;
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        inner.channels.retain(|(zone, _), _| *zone != zone_group_id);
+        replace(&mut inner, state.clone(), revision);
+        Ok(Some(state))
     }
 
     /// Registers against the native 100-character array capacity. Callers that know the
@@ -1327,6 +1614,7 @@ impl DominionManager {
         siege.status = SiegeStatus::Finished;
         siege.outcome = SiegeOutcome::AttackerCaptured;
         siege.ended_at = now_ms / 1000;
+        state.declaration = None;
         state.clear_national_monument_fields();
         inner
             .channels
@@ -1338,7 +1626,20 @@ impl DominionManager {
     /// Explicit schedule transitions only. An expired channel always leaves the defender
     /// in control; neither restart nor a elapsed deadline creates an attacker victory.
     pub fn tick(&self, now_seconds: i64) -> Result<Vec<DominionState>, DominionError> {
-        if now_seconds < 0 {
+        self.tick_dual(now_seconds, now_seconds)
+    }
+
+    /// [`Self::tick`] with a separate clock for calendar-materialised sieges (WP-SD2a).
+    ///
+    /// A GM schedule uses the real clock. A siege materialised from a declaration follows the
+    /// calendar, so the GM test clock that drives its periods also drives its start/end; with
+    /// no test clock both values are the real time.
+    pub fn tick_dual(
+        &self,
+        real_now: i64,
+        calendar_now: i64,
+    ) -> Result<Vec<DominionState>, DominionError> {
+        if real_now < 0 || calendar_now < 0 {
             return Err(DominionError::InvalidSchedule);
         }
         let mut inner = self.lock();
@@ -1351,6 +1652,11 @@ impl DominionManager {
             if siege.status == SiegeStatus::Finished {
                 continue;
             }
+            let now_seconds = if siege.materialised_from_declaration {
+                calendar_now
+            } else {
+                real_now
+            };
             if now_seconds >= siege.ends_at {
                 siege.status = SiegeStatus::Finished;
                 siege.outcome = SiegeOutcome::DefenderHeld;
@@ -1437,6 +1743,9 @@ impl DominionManager {
             .filter(|(_, entry)| {
                 let state = &entry.state;
                 state.owner_expedition_id == expedition_id
+                    || state
+                        .declaration
+                        .is_some_and(|d| d.attacker_expedition_id == expedition_id)
                     || state.siege.as_ref().is_some_and(|siege| {
                         siege.status != SiegeStatus::Finished
                             && (siege.attacker_expedition_id == expedition_id
@@ -1465,6 +1774,14 @@ impl DominionManager {
                 state.non_pvp_start_at = 0;
                 state.non_pvp_duration_min = 0;
                 state.clear_national_monument_fields();
+            }
+            // A disband/forced release invalidates any declaration that involved the guild,
+            // as an attacker or as the owner that accepted it.
+            if state.declaration.is_some_and(|d| {
+                d.attacker_expedition_id == expedition_id
+                    || previous.owner_expedition_id == expedition_id
+            }) {
+                state.declaration = None;
             }
             let cancels_siege = state.siege.as_ref().is_some_and(|siege| {
                 siege.status != SiegeStatus::Finished

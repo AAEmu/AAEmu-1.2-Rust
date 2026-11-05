@@ -180,6 +180,28 @@ fn weekly_cycle_crosses_every_period_boundary_and_the_week_boundary() {
 }
 
 #[test]
+fn a_declaration_of_the_running_cycle_keeps_the_warmup_and_siege_walk() {
+    let calendar = weekly_calendar();
+    let auction = epoch(2014, 1, 8, 22, 30);
+    let warmup = epoch(2014, 1, 12, 20, 30);
+    let siege = epoch(2014, 1, 12, 21, 0);
+    let siege_end = epoch(2014, 1, 12, 22, 30);
+    let declared = Some(auction);
+    let view = |now: i64, cycle: Option<i64>| {
+        calendar
+            .view_for_declaration(ZONE, now, &timezone(), cycle, 0)
+            .expect("period view")
+    };
+    assert_eq!(view(warmup, declared).period, PERIOD_WARMUP);
+    assert_eq!(view(siege, declared).period, PERIOD_SIEGE);
+    assert_eq!(view(siege_end, declared).period, PERIOD_PEACE);
+    // A declaration from another cycle changes nothing: the undeclared walk applies.
+    let stale = Some(auction - 7 * 86_400);
+    assert_eq!(view(warmup, stale).period, PERIOD_PEACE);
+    assert_eq!(view(warmup, None).period, PERIOD_PEACE);
+}
+
+#[test]
 fn peace_waits_for_the_next_rotation_week_and_uses_its_timers() {
     // Zone 33 is listed in the first and fourth week only (the three-week rotation).
     let calendar = calendar(&[date(2014, 1, 5), date(2014, 1, 26)]);

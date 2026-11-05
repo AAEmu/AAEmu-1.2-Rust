@@ -51,6 +51,12 @@ pub struct HousingConfig {
         deserialize_with = "crate::config::lenient"
     )]
     pub dominion_claim_limit: u32,
+    /// World-space offset from the lodestone where the server spawns the defender's HQ
+    /// doodad (3410) at the warmup of a declared siege. The retail rule is UNKNOWN; the
+    /// default `[0, 0, 0]` disables the automatic spawn and keeps the GM-bound HQ behaviour.
+    /// `Housing.DefenseHqOffset`.
+    #[serde(rename = "defensehqoffset")]
+    pub defense_hq_offset: [f32; 3],
 }
 
 fn default_dominion_claim_limit() -> u32 {
@@ -64,6 +70,7 @@ impl Default for HousingConfig {
             siege_calendar: false,
             siege_calendar_timezone: String::new(),
             dominion_claim_limit: default_dominion_claim_limit(),
+            defense_hq_offset: [0.0; 3],
         }
     }
 }
@@ -106,6 +113,17 @@ mod tests {
             .unwrap();
             assert_eq!(config.housing.dominion_claim_limit, 1);
         }
+    }
+
+    #[test]
+    fn defense_hq_offset_defaults_to_disabled_and_binds_three_numbers() {
+        let default = crate::config::AppConfig::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(default.housing.defense_hq_offset, [0.0, 0.0, 0.0]);
+        let config = crate::config::AppConfig::from_value(serde_json::json!({
+            "Housing": { "DefenseHqOffset": [10.5, -4.0, 2.0] }
+        }))
+        .unwrap();
+        assert_eq!(config.housing.defense_hq_offset, [10.5, -4.0, 2.0]);
     }
 
     #[test]

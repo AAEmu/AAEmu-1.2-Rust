@@ -531,6 +531,64 @@ pub fn spawn_doodad(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) {
     };
     let (xx, yy) = add_distance_to_front_deg(1.0, base.x, base.y, rad_to_deg(base.rot_z) + 90.0);
     let pos = PositionAndRotation::new(xx, yy, base.z, base.rot_x, base.rot_y, base.rot_z);
+    // The Siege Camp use (skill 16918) is the declaration route (WP-SD2b). It runs only with
+    // the weekly calendar enabled, so an explicit GM-scheduled siege behaves as before. A
+    // refusal cancels the effect, which makes the cast path refund the camp item.
+    if doodad_id as u32 == crate::systems::housing::dominion::declare::CAMP_DOODAD_TEMPLATE
+        && args.source.skill().is_some_and(|skill| {
+            skill.id == crate::systems::housing::dominion::declare::DECLARE_SKILL
+        })
+        && server
+            .systems
+            .housing
+            .calendar
+            .settings(&server.config.housing)
+            .enabled
+    {
+        let declare =
+            crate::systems::housing::dominion::declare::handle_camp_use(server, args, pos);
+        if declare.is_err() {
+            if let Some(skill) = args.source.skill() {
+                skill.state().cancelled = true;
+                skill.state().effect_cancelled = true;
+            }
+            return;
+        }
+        let group = server
+            .game_data
+            .zones
+            .zone_by_key(zone_id)
+            .map(|zone| zone.group_id);
+        let spawned = server.systems.skills.ext.npcs().spawn_doodad(
+            server,
+            caster,
+            doodad_id as u32,
+            zone_id,
+            pos,
+            delay,
+        );
+        match (spawned, group) {
+            (Some(doodad), Some(group)) => {
+                crate::systems::housing::dominion::declare::attach_spawned_camp(
+                    server, group, &doodad,
+                );
+            }
+            _ => {
+                if let Some(group) = group {
+                    let _ = server.systems.housing.dominions.drop_declaration(group);
+                }
+                // The declaration was rolled back: refund the camp like any refused use.
+                if let Some(skill) = args.source.skill() {
+                    skill.state().cancelled = true;
+                    skill.state().effect_cancelled = true;
+                }
+                tracing::error!(
+                    "Siege Camp declaration could not spawn doodad {doodad_id} in zone {zone_id}"
+                );
+            }
+        }
+        return;
+    }
     server.systems.skills.ext.npcs().spawn_doodad(
         server,
         caster,

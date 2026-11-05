@@ -4521,6 +4521,108 @@ and in NPC wandering / buff remaining times.
   20:30..22:30 times never hit one); `view_at` returns None for the whole zone when its next
   rotation cycle cannot be built; and without WP-S2 (declaration) the calendar never enters
   warmup/siege on its own, so periods 3/4 exist only through an explicit GM schedule.
+* systems::housing / systems::social (WP-SD2a, 2026-11-06): the siege declaration is now
+  persistent state, and the weekly calendar hands it over to the explicit siege record at the
+  cycle's warmup start. `DominionState.declaration` holds the attacker expedition, the
+  accepted time, the cycle's `auction_start` and the camp position; at most one declaration
+  exists per zone and cycle (a second one is `DominionError::AlreadyDeclared` /
+  `DeclaredByOther`, mapped by the caller to client 442/443). It is persisted in the new
+  `dominions.declaration_attacker/at/cycle/hq_x/hq_y/hq_z` columns (the doodad obj id is
+  runtime-only and re-bound after a restart). The declaration is cleared by cancel, by a
+  capture or forced release, and when its cycle's warmup materialises it. The calendar reads
+  `Calendar::view_for_declaration`: a declaration of the running cycle keeps the authored
+  2 -> 3 -> 4 -> 5 walk (`FUN_392f7db0`); a declaration from another cycle changes nothing.
+  At warmup the record is created with the cycle's real `warmup/siege` start and siege end
+  (not `now + delay`), with the defender's authored `siege_settings` limits frozen in; the
+  announcement is `SCSiegeDeclared` (offense team) followed by the phase `SCSiegeState`. A
+  calendar-materialised record stays described by the calendar (the GM test clock walks its
+  periods; the authority tick uses the calendar clock for it, which equals the real clock in
+  production), while a GM `/dominion schedule` keeps its own timers and overrides. A
+  declaration whose expedition disbands, or that is still pending when warmup/siege/peace
+  passes, is dropped and announced with a zero offense team (`SCSiegeDeclared`), the
+  client's "nobody declared" state (INFERRED: the client's cancel path is the zero team,
+  `FUN_392f7cc0`; the disband/owner-change drop is INFERRED, low risk). On restart a
+  declaration older than one cycle (7 days) is discarded. **Assumption (capture-pending):**
+  the attacker `ni/nr/limit` in the declaration snapshot use the only evidenced cap, the
+  defender `siege_settings` row's `num_defenders + num_reinforcements` (siege.md 1.3 says
+  the attacker's values are UNKNOWN). The declaration route (camp use) is WP-SD2b; the
+  cancel trigger's UI and the defense HQ offset are WP-SD2b/SD2c. Tests:
+  `second_declaration_is_refused_for_self_and_other_expeditions`,
+  `cancel_clears_only_the_declaring_expedition`,
+  `materialisation_creates_exactly_one_siege_with_the_cycle_times`,
+  `a_declaration_requires_an_owned_territory_and_never_coexists_with_a_live_siege`,
+  `release_expedition_drops_a_declaration_it_attacked_or_accepted`,
+  `a_declaration_of_the_running_cycle_keeps_the_warmup_and_siege_walk`,
+  `calendar_snapshot_carries_a_matching_declaration_and_zero_team_after_cancel`,
+  `declaration_materialises_at_warmup_and_the_calendar_walks_periods_three_to_five`,
+  `dominion_declaration_round_trips_through_its_row` (MySQL),
+  `a_declaration_that_cannot_belong_to_a_running_cycle_is_discarded_on_restart`.
+* systems::housing / systems::skills (WP-SD2b, 2026-11-06): the Siege Camp item use now runs
+  the declaration. The `SpawnDoodad(4307)` effect of skill 16918 (the six
+  `siege_zones.declare_item_id` items) asks `dominion::declare::handle_camp_use` before it
+  spawns; the check runs under the housing operation lock and only while
+  `Housing.SiegeCalendar` is enabled (with the calendar off, the camp use keeps its old plain
+  spawn, so GM-scheduled sieges are untouched). Rules, in this server's order, with the
+  client's ids: zone has no owned dominion 342; the caster's expedition is the owner 343; the
+  camp item is not this zone's `declare_item_id` 344; not the declare period (2) 386;
+  horizontal distance to the live lodestone below `guard_tower_settings.radius_declare`
+  (250/450 m, the authored value, not the old `OFFENSE_HQ_MIN_DISTANCE` constant) 345; the
+  caster's expedition rank lacks the `SiegeMaster` policy 459; pirate expedition 444; the
+  expedition already has an unfinished siege 639; a declaration already exists 442/443
+  (`DominionError::AlreadyDeclared`/`DeclaredByOther`). On success the declaration is
+  recorded, the camp is spawned and its real obj id/position are bound into the declaration
+  (a second `SCSiegeDeclared`, then the phase `SCSiegeState`, carries the offense team); the
+  source item is consumed by the normal cast debit. Every refusal cancels the effect
+  (`effect_cancelled`), which makes the cast path refund the item — a refused declaration
+  keeps the camp. A spawn failure after acceptance also rolls the declaration back and
+  cancels the effect. Cancelling is `dominion undeclare [zone]` (the GM command), which clears
+  the declaration and broadcasts the zero offense team; the in-game trigger is UNKNOWN
+  (destroying/removing the camp is the candidate), so it is capture-pending.
+  **Capture-pending assumptions:** 459 is used for the missing policy although 581 is the
+  other candidate text; the placement thresholds behind 625 (resurrection point), 633
+  (house), 661 (another zone) and 741 (obstacle), and the "siege too imminent" window behind
+  760, are UNKNOWN and are NOT enforced (no refusal today); the cancellation trigger's UI is
+  UNKNOWN. The check order is this server's policy. Tests:
+  `camp_use_records_a_declaration_consumes_the_item_and_announces_the_team` (real
+  `CSStartSkillPacket` item cast, item consumed once, cancel zero team),
+  `camp_use_refusals_use_the_client_ids_and_keep_the_item` (342/343/344/386/345/459/444/639/
+  442/443, item kept each time).
+* systems::housing (WP-SD2c, 2026-11-06): the headquarters follow the declaration. The camp
+  doodad bound by SD2b is the offense HQ from acceptance: `Headquarters::bind_declaration`
+  stores it against the declaration (no siege record yet) and `bind_materialised` stamps it
+  with the siege when the calendar materialises the record, so the offense teleport (17046)
+  and the `SCSiegeState` team position use the real camp. A restart re-binds the retained
+  4307 nearest the persisted camp position (`restore_declarations`, five metres); the GM
+  bind of a retained doodad still exists for explicit schedules. The defender HQ (3410) is
+  spawned at the warmup at the lodestone plus `Housing.DefenseHqOffset` (three floats); the
+  retail spawn rule is UNKNOWN, so the default `[0, 0, 0]` disables the spawn and keeps the
+  existing GM-bound behaviour. The authored 10-minute camp lifetime stays owned by the WP-S3
+  phase chain, as before. Tests: `declaration_camp_becomes_the_offense_hq_and_survives_a_rebind`,
+  `a_materialised_declaration_keeps_the_offense_hq_and_the_teleport_works` (offense teleport
+  packet at the camp position after materialisation),
+  `defense_hq_spawns_only_with_a_configured_lodestone_offset`.
+* systems::housing / systems::skills (WP-SD3, 2026-11-06): the 13 `siege_items` rows gate item
+  casts in the one client item-cast branch (`skills/handlers.rs`, after the item template is
+  resolved from the owned stack and before `skill::use_skill`, so a refusal keeps the item and
+  answers only `SCErrorMsg` 431). The client loads the table and shows the row's `USAGE` text
+  for 431, so this is defence in depth for forged casts. The mapping is INFERRED from the row
+  shapes: a `true` flag means the situation allows the use; situations are the current period
+  (`period::current_period`: no dominion/declare/peace), `radius_siege` around the lodestone
+  (inside/outside the siege area) and `radius_offense_hq` around the registered side's bound
+  HQ (the defense radius is UNKNOWN and uses the offense value). Rows: 26397/26424/26428 are
+  allowed only inside the siege circle during the siege, 27300/27302 only inside the offense
+  HQ circle during the siege, and the escape/Eanad scrolls 34018/34021/34060-34065 everywhere
+  except the siege/HQ circles during warmup and siege. The gate is active only when
+  `Housing.SiegeCalendar` is on or the zone has an explicit siege; outside every dominion
+  zone the `outside_siege_zone` flag decides (a tank mine is unusable there, an escape scroll
+  is usable). Period 1 (auction) has no authored flag and is not gated. Unlisted items are
+  never refused. The table is loaded beside `SiegeZone` in `housing/data.rs` (a missing table
+  disables the gate); the decisions live in `dominion/siege_items.rs`. Tests:
+  `the_three_authored_classes_allow_exactly_their_situations`,
+  `siege_items_are_refused_outside_their_authored_situations_and_kept` (real item casts in
+  period 2 and 4, inside/outside the circle, item kept on refusal), the loader assertion in
+  `castle_references_preserve_stage_order_dates_and_zero_open_duration`, and the gated
+  `housing_real_compact_db` row-count check (13 rows).
 * systems::housing (siege result achievements, WP-SD6a, 2026-11-05): a finished siege credits
   `char_records` kinds 57/59 to the attacking roster and 58/60 to the defenders with
   `value1 = zone_group_id` (mapping EVIDENCED from the authored records and the Korean

@@ -3813,6 +3813,7 @@ async fn private_mysql_pirate_last_member_dismissal_persists_nation_and_dominion
             tower_destroyed: false,
             tower_hp: None,
             last_siege_id: 1,
+            declaration: None,
             siege: Some(SiegeState {
                 siege_id: 1,
                 attacker_expedition_id: 88,
@@ -3828,6 +3829,8 @@ async fn private_mysql_pirate_last_member_dismissal_persists_nation_and_dominion
                 defender_ni: 100,
                 defender_nr: 100,
                 outcome_credited: false,
+                materialised_from_declaration: false,
+                calendar_cycle: 0,
                 participants: Default::default(),
             }),
         }])
