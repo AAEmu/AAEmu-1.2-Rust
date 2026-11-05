@@ -203,6 +203,7 @@ systems::{skills, npcs, economy, social, quests}: Data (tables), System (manager
 | `Models/AppConfiguration`, `Models/Game/Configurations` + `Program` config loading | `config.rs` | done | Every member (incl. WebApiNetwork, DiscordToken, Dungeons, AccessLevel, LaborOffline, Specialty, Scripts, full World), Config.json + Configurations/** + Config.Local.json + user secrets + environment (`Section__Key`) + command line, enums by name / value, `ConfigCell` (= `AppConfiguration.Instance`, replaceable at runtime). |
 | Other `Models/Game/*` (AI, Auction, Crafts, Crime, DoodadObj, Mails, Mate, NPChar, Quests logic, Slaves, Team, ...) | – | see the subsystems | Ported with their managers (phase 3 / 4 subsystems). `Achievement` has no 1.2 logic. |
 | `Scripts/Commands/**`, `Scripts/SubCommands/**`, `Utils/Scripts`, `Utils/{Quest,Sphere}CommandUtil` | `systems/services/commands/` (+ `scripts/`) | done | Infrastructure (`CommandManager` with async command execution, `AccessLevelManager`, `ICommand`, `IMessageOutput`, `SubCommandBase` + parameters) and every GM command: one module per `Scripts/Commands/*.cs` file in `scripts/`, the `SubCommandBase` roots in `scripts/roots.rs` / `scripts/sub/*` (Crimes, Doodads, Gimmick, Gold, Items, Npcs, Slaves sub commands). `scripts::load` registers them in the C# type order (`ScriptReflector`), so `GoldCmd` owns `gold` (and `AddGold`'s aliases) and `CrimeCmd` registers `crime` with `/doodad` as call prefix. Tests: a harness test per command (`scripts/harness.rs`), the registered set vs the C# sources (`scripts/tests.rs`). |
+| Retail GM command names, tax / crime / social (WP-SL6b) | `systems/services/commands/scripts/{delay_tax_due_date,resend_house_tax_mail,set_bounty_money,clear_crime_status,set_crime_value,set_jury,imprison}.rs` | added | The C# server had no equivalents; the names are the 1.2 client's command table (`siege-social-2.md` 1.5). `delay_tax_due_date <character> [days]`, `resend_house_tax_mail <character>` (console shapes `DelayTaxDueDate(%s)` / `ResendHouseTaxMail(%s)`; the day count is an assumed default of 7), `set_crime_value <character> <value>` (console shape `SetCrimeValue(%s, %d)`), and the assumed positional forms `set_bounty_money <character> <amount>`, `clear_crime_status <character>`, `set_jury <character> <trialId>`, `imprison <character>`. Effects reuse the gameplay paths: `HousingManager` tax dates / `new_tax_mail` (online or offline owners, dominion infrastructure skipped), `CrimePoint` / `InfamyPoint` setters (online only), `BountyManager.place` with the GM as payer (online wanted target), `TrialManager.force_summon_jury` -> `SummonJuryMember` (invitation/queue checks skipped, step/main-world/one-trial checks kept), and the `crime court jail` holding-cell effect (force dismount, `FORCIBLY_AWAITING_TRIAL`, teleport). No new opcodes; admin access 100 in `AccessLevels.json`. |
 | `Services` (WebApi, DiscordBot) | `systems/services/webapi/`, `systems/services/discord.rs` | done | axum transport with the C# regex routing; mail / auction controllers call the economy through `WebApiEconomyHooks`. |
 | `GameService` startup / `ManagerOrchestrator`, `Program` | `main.rs`, `systems/services/game_service.rs` | done | `Program.Main` (initialization log, `compiler-check`, config command line, MySQL / SQLite checks) and `GameService.StartAsync` stages in order (DB updater, client files, holdables check, game data, user items, DB loads, time / task managers, subsystems, save manager, deleted characters, online tracking, networks, "Server started! Took ..."), then WebApi / Discord; shutdown in reverse (Discord, WebApi, final save, task / tick / time managers). `GameService.StartTime` / `TimeSinceStart`, `Program.UpTime`, `ManagerOrchestrator.BuildBatches` ported with their tests. |
 
@@ -2323,6 +2324,20 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   (`declare_siege`, the six Siege Camps). `filter = 0` is unchanged and still lists every lot
   (whether retail also hid the camps from the normal tab is UNKNOWN); any other value is
   treated as 0 and logged once. The C# ignored `filter`.
+* systems::economy (system auction lots, WP-SD1b, 2026-11-05): the retail GM command
+  `auction_post_siege_items` (name in the 1.2 client; arguments UNKNOWN, assumed
+  `[duration] [startPrice] [buyoutPrice]`) posts one lot per distinct
+  `siege_zones.declare_item_id` (the six Siege Camps) with `client_id = 0` and an empty seller
+  name. Defaults: 48 h duration class, the item's own `price` as the start price, no buyout.
+  Each item is created once through `ItemManager::Create` and kept in the auction escrow
+  (loose, `SlotType.Auction`, owner 0) so the normal settlement path can mail it; a failed run
+  discards every item it created. Every settlement path skips the seller leg for
+  `client_id == 0`: the sale mails only the buyer (`AucBidWin`), the money is destroyed (no
+  seller mail or live notice, no `AUCTION_SOLD` record), and an expiry without a bid deletes
+  the item instead of returning it. The optional `auction_cancel <lotId>` command removes an
+  unbid system lot and deletes its item (the lot-id argument and the refusal of player lots /
+  lots with a bid are assumed). `client_id = 0` rows load normally on restart. The C# had
+  neither command and no system-lot path.
 * systems::economy (mail leftovers, WP-I4): `/mail admin <receiver> <title> <text> [money]
   [[itemId count] ...]` is a Rust-only GM command (the C# had no such command); `ADMIN` (5) is
   one of the mail types the 1.2 client lists (`mail/common.alb`). It stores a sender-id-0 system
@@ -4421,7 +4436,9 @@ and in NPC wandering / buff remaining times.
   calendar view. Explicit siege deadlines/tick transitions and the persisted state always use
   the real clock, and the command is refused while `Housing.SiegeCalendar` is disabled.
   GM scheduling with player registration is the chosen server policy for actually running a
-  siege; the automatic auction *lots* and bidding remain unimplemented. Known, not fixed:
+  siege; the camps can be posted as system lots with the GM `auction_post_siege_items` command
+  (WP-SD1b), but automatic posting at the auction period (WP-SD1c) remains unimplemented.
+  Known, not fixed:
   the calendar is rebuilt from the tables on every tick/snapshot (cache later); an authored
   time inside a DST gap makes that zone's view return None instead of shifting it (the shipped
   20:30..22:30 times never hit one); `view_at` returns None for the whole zone when its next
