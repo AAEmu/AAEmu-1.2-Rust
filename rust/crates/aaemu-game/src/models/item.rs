@@ -1019,11 +1019,12 @@ impl Item {
 }
 
 /// `ItemProc` (runtime proc of an equipped item; the skill cast itself is the skills
-/// subsystem's `new Skill(Template.SkillTemplate).Use(owner, unitCaster, doodadTarget)`).
+/// subsystem's `new Skill(Template.SkillTemplate).Use(owner, unitCaster, target)`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ItemProc {
     pub template_id: u32,
-    /// `LastProc` (unix milliseconds, 0 = `DateTime.MinValue`; the C# never updates it).
+    /// `LastProc` (unix milliseconds, 0 = never fired). Set by the owner of the proc set when
+    /// the proc fires; the C# never updated it.
     pub last_proc_ms: i64,
 }
 
@@ -1035,23 +1036,21 @@ impl ItemProc {
         }
     }
 
-    /// The checks of `ItemProc.Apply(owner, ignoreRoll)`: `Some(skill_id)` when the proc skill
-    /// must be used. `roll` = `Random.Shared.Next(0, 100)` (only drawn when `ignore_roll` is
-    /// false). C# quirks mirrored: `ignoreRoll == true` never procs, and `LastProc` is never set.
-    /// `None` too where the C# throws (unknown proc template).
-    pub fn apply(
-        &self,
-        data: &ItemData,
-        now_ms: i64,
-        ignore_roll: bool,
-        roll: impl FnOnce() -> i32,
-    ) -> Option<u32> {
+    /// The cooldown and chance checks of `ItemProc.Apply`: `Some(skill_id)` when the proc skill
+    /// must be used. `roll` = `Random.Next(0, 100)`.
+    ///
+    /// Deviations from the C# (see `PORTING.md`): `chance_rate` is a percentage, so the proc
+    /// fires for `roll < chance_rate` (the C# passed `roll <= rate`, i.e. `rate + 1` percent);
+    /// the cooldown blocks a second fire until `cooldown_sec` after the last one (the C#
+    /// `RollProcsForKind` skipped every proc whose cooldown had elapsed); the caller stamps
+    /// `last_proc_ms` when it fires (the C# never did). `None` where the C# throws (unknown
+    /// proc template).
+    pub fn apply(&self, data: &ItemData, now_ms: i64, roll: impl FnOnce() -> i32) -> Option<u32> {
         let t = data.item_proc(self.template_id)?;
-        // DateTime.MinValue.AddSeconds(cooldown) is always in the past.
         if self.last_proc_ms > 0 && now_ms < self.last_proc_ms + i64::from(t.cooldown_sec) * 1000 {
             return None;
         }
-        if ignore_roll || i64::from(roll()) > i64::from(t.chance_rate) {
+        if roll() >= t.chance_rate as i32 {
             return None;
         }
         Some(t.skill_id)

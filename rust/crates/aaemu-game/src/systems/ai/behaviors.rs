@@ -602,6 +602,8 @@ fn report_npc_without_ai(obj_id: u32) -> bool {
 /// `Behavior.UpdateAggroHelp(abuser, radius)`.
 pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
     let t = template_scalars(c);
+    let my_template_id = c.npc.data().unit.template_id;
+    let link_data = &c.server.game_data.systems.npcs.npc.aggro_links;
     let npcs: Vec<WorldObject> =
         npc::around(c.server, &c.obj, t.attack_start_range_scale * radius, false)
             .into_iter()
@@ -619,35 +621,47 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
             let d = other_npc.data();
             (d.unit.is_in_battle, d.unit.faction_id)
         };
-        if in_battle || !ot.accept_aggro_link {
+        // 1.2 data: the members of an `aggro_links` group help each other even when their own
+        // template (`accept_aggro_link`, `aggression` / `aggro_link_special_rule_id`) would
+        // decline. No consumer was found in the 10.x decompile, so this rule is data-inferred
+        // (capture-pending AGGROLINK-1). Non-members keep the template rules exactly.
+        let same_group = link_data.share_group(my_template_id, ot.id);
+        if in_battle || (!ot.accept_aggro_link && !same_group) {
             continue;
         }
         if npc::distance_to(c.server, &other, &c.obj, false) > ot.aggro_link_help_dist {
             continue;
         }
-        let need_help = if ot.aggression && ot.aggro_link_special_rule_id == 0 {
+        // The template path is the C# `UpdateAggroHelp` (Behavior.cs, `a2ab80abd^`): the
+        // special-rule branch requires `aggro_link_sight_check` to be enabled AND the abuser
+        // visible; a template with sight check off never helps through rules 1..4.
+        let template_helps = if ot.aggression && ot.aggro_link_special_rule_id == 0 {
             true
         } else {
             if !(ot.aggro_link_sight_check && npc::can_see_target(c.server, abuser)) {
-                continue;
-            }
-            let relation = || {
-                crate::systems::skills::relation::relation_to(
-                    c.server,
-                    &crate::systems::skills::geometry::Target::Obj(other.clone()),
-                    &crate::systems::skills::geometry::Target::Obj(c.obj.clone()),
-                )
-            };
-            use crate::systems::skills::types::RelationState as R;
-            match ot.aggro_link_special_rule_id {
-                1 => faction == my_faction,
-                2 => relation() == R::Friendly,
-                3 => relation() == R::Neutral,
-                4 => true,
-                _ => false,
+                false
+            } else {
+                let relation = || {
+                    crate::systems::skills::relation::relation_to(
+                        c.server,
+                        &crate::systems::skills::geometry::Target::Obj(other.clone()),
+                        &crate::systems::skills::geometry::Target::Obj(c.obj.clone()),
+                    )
+                };
+                use crate::systems::skills::types::RelationState as R;
+                match ot.aggro_link_special_rule_id {
+                    1 => faction == my_faction,
+                    2 => relation() == R::Friendly,
+                    3 => relation() == R::Neutral,
+                    4 => true,
+                    _ => false,
+                }
             }
         };
-        if !need_help {
+        // Link path (AGGROLINK-1): the sight check applies only when the helper enables it.
+        let link_helps =
+            same_group && (!ot.aggro_link_sight_check || npc::can_see_target(c.server, abuser));
+        if !template_helps && !link_helps {
             continue;
         }
         // npc.Ai.Owner.AddUnitAggro(...) + npc.Ai.OnAggroTargetChanged(): an NPC without an
@@ -662,7 +676,29 @@ pub fn update_aggro_help(c: &mut AiCtx<'_>, abuser: &WorldObject, radius: f32) {
             }
             continue;
         }
+        let was_engaged = other_npc
+            .data()
+            .unit
+            .skill_state
+            .aggro_table
+            .contains_key(&abuser.obj_id());
         add_unit_aggro(c.server, &other, AggroKind::Damage, abuser, 1);
+        if link_helps && !template_helps && !was_engaged {
+            let engaged = other_npc
+                .data()
+                .unit
+                .skill_state
+                .aggro_table
+                .contains_key(&abuser.obj_id());
+            if engaged {
+                tracing::debug!(
+                    helper = other_npc.obj_id,
+                    leader = c.npc.obj_id,
+                    abuser = abuser.obj_id(),
+                    "aggro link: group member joined the fight"
+                );
+            }
+        }
         super::manager::post(c.server, other_npc.obj_id, |o| o.on_aggro_target_changed());
     }
 }
@@ -818,21 +854,28 @@ fn update_target(c: &mut AiCtx<'_>) -> bool {
 }
 
 /// `AggroTable.Values.OrderByDescending(TotalAggro).Select(Owner)` (missing objects stay as
-/// `None` and are skipped).
+/// `None` and are skipped), extended with the 10.x taunt order (10x-ONLY): an entry with a
+/// taunt stamp sorts above every unstamped entry and the latest stamp wins. Unstamped entries
+/// keep the total order; the stable sort keeps the table (obj id) order on ties.
 fn sorted_abusers(c: &AiCtx<'_>) -> Vec<Option<WorldObject>> {
-    let mut entries: Vec<(u32, i32)> = c
+    let mut entries: Vec<(u32, i32, u64)> = c
         .npc
         .data()
         .unit
         .skill_state
         .aggro_table
         .iter()
-        .map(|(k, a)| (*k, a.total()))
+        .map(|(k, a)| (*k, a.total(), a.taunt_time))
         .collect();
-    entries.sort_by_key(|e| std::cmp::Reverse(e.1));
+    entries.sort_by(|a, b| match (a.2, b.2) {
+        (0, 0) => b.1.cmp(&a.1),
+        (0, _) => std::cmp::Ordering::Greater,
+        (_, 0) => std::cmp::Ordering::Less,
+        (x, y) => y.cmp(&x),
+    });
     entries
         .into_iter()
-        .map(|(id, _)| c.server.world.object(id))
+        .map(|(id, _, _)| c.server.world.object(id))
         .collect()
 }
 
@@ -2786,6 +2829,449 @@ mod tests {
                 .count(),
             1,
             "the AI-less NPC must be reported once, got {lines:?}"
+        );
+    }
+
+    /// An NPC template that refuses template-driven aggro help (the `update_aggro_help` rules).
+    fn link_only_template(
+        id: u32,
+        accept_aggro_link: bool,
+        aggression: bool,
+        aggro_link_help_dist: f32,
+    ) -> crate::systems::npcs::npc::data::NpcTemplate {
+        crate::systems::npcs::npc::data::NpcTemplate {
+            id,
+            aggression,
+            attack_start_range_scale: 1.0,
+            accept_aggro_link,
+            aggro_link_help_dist,
+            ..Default::default()
+        }
+    }
+
+    /// Spawns an NPC with a `HoldPosition` AI at `(x, 100, 100)` so it can receive aggro help.
+    fn spawn_link_npc(
+        server: &Arc<crate::server::GameServer>,
+        obj_id: u32,
+        template_id: u32,
+        x: f32,
+    ) -> crate::world::NpcRef {
+        use super::super::framework::AiKind;
+        use crate::models::npc::Npc;
+        use crate::world::Entity;
+
+        let mut npc = Npc::new(template_id);
+        npc.unit.transform.set_xyz(x, 100.0, 100.0);
+        let npc = Entity::new(obj_id, npc);
+        server.systems.ai.ais.add_ai(&npc, AiKind::HoldPosition);
+        server
+            .world
+            .world(0)
+            .unwrap()
+            .spawn(&npc, &server.view_ctx());
+        npc
+    }
+
+    /// `aggro_links` group membership makes a member help another member of the same group even
+    /// when its own template rules (`accept_aggro_link` false, non-aggressive with rule 0)
+    /// would not; a non-member with the same template rules keeps the old behaviour.
+    #[tokio::test]
+    async fn aggro_link_members_help_each_other_despite_template_rules() {
+        use super::super::framework::{AiKind, NpcAi};
+        use crate::data::GameData;
+        use crate::models::npc::Npc;
+        use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
+        use crate::world::Entity;
+
+        const LEADER: u32 = 0x320;
+        const NO_ACCEPT: u32 = 0x321;
+        const NO_AGGRESSION: u32 = 0x322;
+        const NON_MEMBER: u32 = 0x323;
+        const ABUSER: u32 = 0x324;
+
+        let mut data = GameData::empty();
+        data.systems
+            .npcs
+            .npc
+            .templates
+            .insert(7000, link_only_template(7000, true, true, 30.0));
+        data.systems
+            .npcs
+            .npc
+            .templates
+            .insert(7001, link_only_template(7001, false, true, 30.0));
+        data.systems
+            .npcs
+            .npc
+            .templates
+            .insert(7002, link_only_template(7002, true, false, 30.0));
+        data.systems
+            .npcs
+            .npc
+            .templates
+            .insert(7003, link_only_template(7003, false, true, 30.0));
+        data.systems
+            .npcs
+            .npc
+            .aggro_links
+            .groups
+            .insert(500, "herd".into());
+        for id in [7000u32, 7001, 7002] {
+            data.systems
+                .npcs
+                .npc
+                .aggro_links
+                .groups_by_npc
+                .insert(id, vec![500]);
+        }
+        let server = Arc::new(test_server_with(data));
+        server.set_self();
+        crate::systems::skills::bind(&server);
+        let client = TestClient::new(&server, 1, 1001);
+        let player = spawn_player(
+            &server,
+            &client,
+            test_character(1, "Tank", 98.0, 100.0),
+            ABUSER,
+        );
+
+        // The leader is the NPC that just got the abuser as its target.
+        let mut leader = Npc::new(7000);
+        leader.unit.transform.set_xyz(100.0, 100.0, 100.0);
+        let leader = Entity::new(LEADER, leader);
+        server
+            .world
+            .world(0)
+            .unwrap()
+            .spawn(&leader, &server.view_ctx());
+        let no_accept = spawn_link_npc(&server, NO_ACCEPT, 7001, 105.0);
+        let no_aggression = spawn_link_npc(&server, NO_AGGRESSION, 7002, 110.0);
+        let non_member = spawn_link_npc(&server, NON_MEMBER, 7003, 115.0);
+
+        let abuser = WorldObject::from(&player);
+        let mut ai = NpcAi::new(AiKind::AlmightyNpc, &leader);
+        let mut context = AiCtx {
+            server: &server,
+            npc: leader.clone(),
+            obj: WorldObject::from(&leader),
+            ai: &mut ai,
+        };
+        update_aggro_help(&mut context, &abuser, 200.0);
+
+        let has_aggro = |npc: &crate::world::NpcRef| {
+            npc.data()
+                .unit
+                .skill_state
+                .aggro_table
+                .contains_key(&player.obj_id)
+        };
+        assert!(
+            has_aggro(&no_accept),
+            "a linked member must help even with accept_aggro_link=false"
+        );
+        assert!(
+            has_aggro(&no_aggression),
+            "a linked member must help even when its template rule 0 needs aggression"
+        );
+        assert!(
+            !has_aggro(&non_member),
+            "a non-member with accept_aggro_link=false must keep refusing"
+        );
+        assert!(
+            !has_aggro(&leader),
+            "the linked NPC must not add aggro to itself"
+        );
+    }
+
+    /// The link only bypasses the template rules; the helper's own `aggro_link_help_dist` still
+    /// bounds the distance.
+    #[tokio::test]
+    async fn aggro_link_help_respects_the_helpers_distance() {
+        use super::super::framework::{AiKind, NpcAi};
+        use crate::data::GameData;
+        use crate::models::npc::Npc;
+        use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
+        use crate::world::Entity;
+
+        const LEADER: u32 = 0x330;
+        const NEAR: u32 = 0x331;
+        const FAR: u32 = 0x332;
+        const ABUSER: u32 = 0x333;
+
+        let mut data = GameData::empty();
+        for id in [7100u32, 7101, 7102] {
+            data.systems
+                .npcs
+                .npc
+                .templates
+                .insert(id, link_only_template(id, false, false, 30.0));
+        }
+        data.systems
+            .npcs
+            .npc
+            .aggro_links
+            .groups
+            .insert(501, "guard".into());
+        for id in [7100u32, 7101, 7102] {
+            data.systems
+                .npcs
+                .npc
+                .aggro_links
+                .groups_by_npc
+                .insert(id, vec![501]);
+        }
+        let server = Arc::new(test_server_with(data));
+        server.set_self();
+        crate::systems::skills::bind(&server);
+        let client = TestClient::new(&server, 1, 1001);
+        let player = spawn_player(
+            &server,
+            &client,
+            test_character(1, "Tank", 98.0, 100.0),
+            ABUSER,
+        );
+
+        let mut leader = Npc::new(7100);
+        leader.unit.transform.set_xyz(100.0, 100.0, 100.0);
+        let leader = Entity::new(LEADER, leader);
+        server
+            .world
+            .world(0)
+            .unwrap()
+            .spawn(&leader, &server.view_ctx());
+        let near = spawn_link_npc(&server, NEAR, 7101, 120.0);
+        let far = spawn_link_npc(&server, FAR, 7102, 160.0);
+
+        let abuser = WorldObject::from(&player);
+        let mut ai = NpcAi::new(AiKind::AlmightyNpc, &leader);
+        let mut context = AiCtx {
+            server: &server,
+            npc: leader.clone(),
+            obj: WorldObject::from(&leader),
+            ai: &mut ai,
+        };
+        update_aggro_help(&mut context, &abuser, 200.0);
+
+        let has_aggro = |npc: &crate::world::NpcRef| {
+            npc.data()
+                .unit
+                .skill_state
+                .aggro_table
+                .contains_key(&player.obj_id)
+        };
+        assert!(
+            has_aggro(&near),
+            "a member within the helper distance helps"
+        );
+        assert!(
+            !has_aggro(&far),
+            "a member beyond aggro_link_help_dist must not help"
+        );
+    }
+
+    /// An NPC in two `aggro_links` groups helps a member of either group.
+    #[tokio::test]
+    async fn aggro_link_member_of_two_groups_helps_members_of_both() {
+        use super::super::framework::{AiKind, NpcAi};
+        use crate::data::GameData;
+        use crate::models::npc::Npc;
+        use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
+        use crate::world::Entity;
+
+        const LEADER_A: u32 = 0x340;
+        const LEADER_B: u32 = 0x341;
+        const HELPER: u32 = 0x342;
+        const ABUSER_A: u32 = 0x343;
+        const ABUSER_B: u32 = 0x344;
+
+        let mut data = GameData::empty();
+        for id in [7200u32, 7201, 7202] {
+            data.systems
+                .npcs
+                .npc
+                .templates
+                .insert(id, link_only_template(id, false, false, 50.0));
+        }
+        data.systems
+            .npcs
+            .npc
+            .aggro_links
+            .groups
+            .insert(500, "herd".into());
+        data.systems
+            .npcs
+            .npc
+            .aggro_links
+            .groups
+            .insert(501, "guard".into());
+        data.systems
+            .npcs
+            .npc
+            .aggro_links
+            .groups_by_npc
+            .insert(7200, vec![500]);
+        data.systems
+            .npcs
+            .npc
+            .aggro_links
+            .groups_by_npc
+            .insert(7201, vec![501]);
+        data.systems
+            .npcs
+            .npc
+            .aggro_links
+            .groups_by_npc
+            .insert(7202, vec![500, 501]);
+
+        let server = Arc::new(test_server_with(data));
+        server.set_self();
+        crate::systems::skills::bind(&server);
+        let client_a = TestClient::new(&server, 1, 1001);
+        let client_b = TestClient::new(&server, 2, 1002);
+        let player_a = spawn_player(
+            &server,
+            &client_a,
+            test_character(1, "TankA", 98.0, 100.0),
+            ABUSER_A,
+        );
+        let player_b = spawn_player(
+            &server,
+            &client_b,
+            test_character(2, "TankB", 98.0, 100.0),
+            ABUSER_B,
+        );
+
+        let mut leader_a = Npc::new(7200);
+        leader_a.unit.transform.set_xyz(100.0, 100.0, 100.0);
+        let leader_a = Entity::new(LEADER_A, leader_a);
+        server
+            .world
+            .world(0)
+            .unwrap()
+            .spawn(&leader_a, &server.view_ctx());
+        let mut leader_b = Npc::new(7201);
+        leader_b.unit.transform.set_xyz(100.0, 100.0, 100.0);
+        let leader_b = Entity::new(LEADER_B, leader_b);
+        server
+            .world
+            .world(0)
+            .unwrap()
+            .spawn(&leader_b, &server.view_ctx());
+        let helper = spawn_link_npc(&server, HELPER, 7202, 120.0);
+
+        let mut ai_a = NpcAi::new(AiKind::AlmightyNpc, &leader_a);
+        let mut context_a = AiCtx {
+            server: &server,
+            npc: leader_a.clone(),
+            obj: WorldObject::from(&leader_a),
+            ai: &mut ai_a,
+        };
+        update_aggro_help(&mut context_a, &WorldObject::from(&player_a), 200.0);
+        let mut ai_b = NpcAi::new(AiKind::AlmightyNpc, &leader_b);
+        let mut context_b = AiCtx {
+            server: &server,
+            npc: leader_b.clone(),
+            obj: WorldObject::from(&leader_b),
+            ai: &mut ai_b,
+        };
+        update_aggro_help(&mut context_b, &WorldObject::from(&player_b), 200.0);
+
+        let table = helper.data().unit.skill_state.aggro_table.clone();
+        assert!(
+            table.contains_key(&player_a.obj_id),
+            "the helper must help its group 500 member"
+        );
+        assert!(
+            table.contains_key(&player_b.obj_id),
+            "the helper must help its group 501 member"
+        );
+    }
+
+    /// The link-group path must not relax the template sight gate for non-members. The C#
+    /// `UpdateAggroHelp` special-rule branch needs `aggro_link_sight_check` enabled (Behavior.cs,
+    /// `a2ab80abd^`), so a rule-4 non-member with the flag off does not help; the same template
+    /// with the flag on still does (control). Only the link path may ignore the flag.
+    #[tokio::test]
+    async fn aggro_link_does_not_relax_the_template_sight_gate_for_non_members() {
+        use super::super::framework::{AiKind, NpcAi};
+        use crate::data::GameData;
+        use crate::models::npc::Npc;
+        use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
+        use crate::world::Entity;
+
+        const LEADER: u32 = 0x350;
+        const NO_SIGHT: u32 = 0x351;
+        const WITH_SIGHT: u32 = 0x352;
+        const ABUSER: u32 = 0x353;
+
+        let mut data = GameData::empty();
+        data.systems
+            .npcs
+            .npc
+            .templates
+            .insert(7300, link_only_template(7300, true, true, 30.0));
+        data.systems.npcs.npc.templates.insert(
+            7301,
+            crate::systems::npcs::npc::data::NpcTemplate {
+                aggro_link_special_rule_id: 4,
+                aggro_link_sight_check: false,
+                ..link_only_template(7301, true, true, 30.0)
+            },
+        );
+        data.systems.npcs.npc.templates.insert(
+            7302,
+            crate::systems::npcs::npc::data::NpcTemplate {
+                aggro_link_special_rule_id: 4,
+                aggro_link_sight_check: true,
+                ..link_only_template(7302, true, true, 30.0)
+            },
+        );
+        let server = Arc::new(test_server_with(data));
+        server.set_self();
+        crate::systems::skills::bind(&server);
+        let client = TestClient::new(&server, 1, 1001);
+        let player = spawn_player(
+            &server,
+            &client,
+            test_character(1, "Tank", 98.0, 100.0),
+            ABUSER,
+        );
+
+        let mut leader = Npc::new(7300);
+        leader.unit.transform.set_xyz(100.0, 100.0, 100.0);
+        let leader = Entity::new(LEADER, leader);
+        server
+            .world
+            .world(0)
+            .unwrap()
+            .spawn(&leader, &server.view_ctx());
+        let no_sight = spawn_link_npc(&server, NO_SIGHT, 7301, 105.0);
+        let with_sight = spawn_link_npc(&server, WITH_SIGHT, 7302, 110.0);
+
+        let abuser = WorldObject::from(&player);
+        let mut ai = NpcAi::new(AiKind::AlmightyNpc, &leader);
+        let mut context = AiCtx {
+            server: &server,
+            npc: leader.clone(),
+            obj: WorldObject::from(&leader),
+            ai: &mut ai,
+        };
+        update_aggro_help(&mut context, &abuser, 200.0);
+
+        let has_aggro = |npc: &crate::world::NpcRef| {
+            npc.data()
+                .unit
+                .skill_state
+                .aggro_table
+                .contains_key(&player.obj_id)
+        };
+        assert!(
+            !has_aggro(&no_sight),
+            "a non-member with aggro_link_sight_check off must keep refusing special-rule help"
+        );
+        assert!(
+            has_aggro(&with_sight),
+            "a non-member with the sight check on still helps through rule 4"
         );
     }
 

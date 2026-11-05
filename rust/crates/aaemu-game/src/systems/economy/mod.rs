@@ -63,6 +63,9 @@ mod operation_scope;
 mod operation_scope_tests;
 #[cfg(test)]
 mod ported_unit_tests;
+pub mod procs;
+#[cfg(test)]
+mod procs_tests;
 pub mod repair;
 pub mod specialty;
 pub mod store;

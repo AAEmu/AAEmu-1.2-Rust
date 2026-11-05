@@ -253,10 +253,13 @@ pub fn aggro_copy(server: &GameServer, args: &EffectArgs<'_>, _values: [i32; 4])
         }
     }
     target.with_unit(|unit| unit.unit_mut().skill_state.aggro_table.clear());
-    for (id, entry) in entries {
+    for (id, mut entry) in entries {
         let Some(unit) = server.world.object(id) else {
             continue;
         };
+        // The taunt lock is per NPC and per caster; a copied table must not carry it
+        // (TAUNT-2: the 10x WZAggroCopy behaviour for the stamp is unknown).
+        entry.taunt_time = 0;
         combat::add_unit_aggro(server, target, AggroKind::Etc, &unit, 0);
         target.with_unit(|owner| {
             owner.unit_mut().skill_state.aggro_table.insert(id, entry);
@@ -290,6 +293,9 @@ pub fn aggro_reset(server: &GameServer, args: &EffectArgs<'_>, values: [i32; 4])
         .with_unit(|unit| {
             let table = &mut unit.unit_mut().skill_state.aggro_table;
             for entry in table.values_mut() {
+                // A reset drops the taunt lock with the counters (TAUNT-2: 10x WZAggroReset
+                // does not show whether the stamp survives; Rust clears it).
+                entry.taunt_time = 0;
                 if values[0] != 0 {
                     entry.damage_aggro = values[3];
                 }

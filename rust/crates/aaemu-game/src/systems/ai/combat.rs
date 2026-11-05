@@ -137,19 +137,25 @@ pub fn on_damage_received(c: &mut AiCtx<'_>, attacker: &WorldObject, amount: i32
 
 /// `Npc.GetAggroRatingInPercent(objId)`: 0 = most aggro ... 100 = not in the table.
 pub fn aggro_rating_in_percent(npc_obj: &WorldObject, obj_id: u32) -> f32 {
-    let mut sorted: Vec<(u32, i32)> = npc_obj
+    let mut sorted: Vec<(u32, i32, u64)> = npc_obj
         .with_unit(|u| {
             u.unit()
                 .skill_state
                 .aggro_table
                 .iter()
-                .map(|(k, a)| (*k, a.total()))
+                .map(|(k, a)| (*k, a.total(), a.taunt_time))
                 .collect()
         })
         .unwrap_or_default();
-    // OrderBy (stable, ascending)
-    sorted.sort_by_key(|(_, t)| *t);
-    let Some(pos) = sorted.iter().position(|(k, _)| *k == obj_id) else {
+    // 10.x taunt order first (latest stamp first); the C# OrderBy (stable, ascending total)
+    // stays for the unstamped entries.
+    sorted.sort_by(|a, b| match (a.2, b.2) {
+        (0, 0) => a.1.cmp(&b.1),
+        (0, _) => std::cmp::Ordering::Greater,
+        (_, 0) => std::cmp::Ordering::Less,
+        (x, y) => y.cmp(&x),
+    });
+    let Some(pos) = sorted.iter().position(|(k, _, _)| *k == obj_id) else {
         return 100.0;
     };
     1.0 / sorted.len() as f32 * pos as f32

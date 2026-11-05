@@ -26,7 +26,7 @@ use super::relation::{filter_with_relation, is_relation_valid, relation_to};
 use super::skill::{apply_skill_modifiers, CastCtx};
 use super::state::{PlotStateRef, SkillRef};
 use super::stats::{stat, StatKind};
-use super::types::{tags, CastAction, PlotObject, RelationState, SkillTargetRelation};
+use super::types::{CastAction, PlotObject, RelationState, SkillTargetRelation};
 
 #[cfg(test)]
 #[path = "plot_aoe_tests.rs"]
@@ -723,10 +723,10 @@ pub fn condition_check(
             }),
         15 => target
             .as_obj()
-            .is_some_and(|t| super::buffs::check_buff_tag(server, t, tags::STEALTH)),
-        16 => target.as_obj().is_some_and(|t| {
-            !super::buffs::check_buff_tag(server, t, tags::STEALTH) && t.is_visible()
-        }),
+            .is_some_and(|t| super::buffs::has_stealth(server, t)),
+        16 => target
+            .as_obj()
+            .is_some_and(|t| !super::buffs::has_stealth(server, t) && t.is_visible()),
         17 => caster
             .as_obj()
             .and_then(|c| c.as_player())

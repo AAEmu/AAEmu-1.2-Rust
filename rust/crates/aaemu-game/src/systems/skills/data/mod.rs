@@ -13,7 +13,7 @@ mod buff_game_data_tests;
 #[cfg(test)]
 mod skill_manager_tests;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use rusqlite::Connection;
@@ -55,6 +55,26 @@ pub struct SkillItemAmount {
     pub skill_id: u32,
     pub item_id: u32,
     pub amount: i16,
+}
+
+/// `resurrection_waiting_times`: the escalating respawn waits by consecutive-death step.
+///
+/// The 1.2 client loads the same table (`LoadResurrectionWaitingTimeDescs`, `x2game.dll.c`
+/// 0x39620CE0) and stores `[penalty_duration, siege_waiting_time, waiting_time]` by `id`, but
+/// only displays the `resurrectWaitTime` the server sends in `SCUnitDeathPacket`. The values
+/// are the only server-side evidence: a 600 s `penalty_duration` on every row, the normal
+/// waits rising 0, 5, 45, 90, 180 s (the documented "up to 180 seconds"), and the siege
+/// alternative falling 20, 15, 10, 5, 0 s. `id` is therefore the 1-based death step; a death
+/// while the previous one is within `penalty_duration` advances the step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResurrectionWaitingTime {
+    pub id: u32,
+    /// Seconds a death keeps the step alive (the "penalty duration"); 600 on every 1.2 row.
+    pub penalty_duration: i32,
+    /// Seconds to wait before resurrecting in a normal zone.
+    pub waiting_time: i32,
+    /// Seconds to wait before resurrecting while the death zone's siege is active.
+    pub siege_waiting_time: i32,
 }
 
 /// The skills subsystem's tables.
@@ -112,6 +132,11 @@ pub struct Data {
     pub zone_group_buffs: HashMap<u32, u32>,
     /// Blessings sold through the 1.2 priest interaction.
     pub priest_buffs: HashMap<u32, super::priest::PriestBuff>,
+    /// `content_configs` id 39 (`ability_change_cost`): copper per character level charged by
+    /// the 1.2 ability change UI (`X2Ability.GetAbilityChangeCost`). 0 when the row is absent.
+    pub ability_change_cost: i32,
+    /// `resurrection_waiting_times` by death step (see [`ResurrectionWaitingTime`]).
+    pub resurrection_waiting_times: BTreeMap<u32, ResurrectionWaitingTime>,
 }
 
 fn dup(what: &str, id: u32) -> rusqlite::Error {
@@ -430,6 +455,30 @@ impl Data {
                 Ok(())
             },
         )?;
+        super::aura::warn_catalog(&buffs);
+        // `transform_buff_id` replaces the buff's stacks when they reach `max_stack`. A row
+        // whose target is absent keeps today's refresh-at-cap behaviour; warn once for the
+        // whole catalog.
+        {
+            let mut absent: Vec<(u32, u32)> = buffs
+                .values()
+                .filter(|b| b.transform_buff_id != 0 && !buffs.contains_key(&b.transform_buff_id))
+                .map(|b| (b.id, b.transform_buff_id))
+                .collect();
+            if !absent.is_empty() {
+                absent.sort_unstable();
+                for (id, _) in &absent {
+                    if let Some(b) = buffs.get_mut(id) {
+                        b.transform_buff_id = 0;
+                    }
+                }
+                tracing::warn!(
+                    buffs = absent.len(),
+                    sample = ?&absent[..absent.len().min(5)],
+                    "buffs reference transform buffs absent from the static data; their transform is skipped"
+                );
+            }
+        }
         d.buffs = buffs.into_iter().map(|(k, v)| (k, Arc::new(v))).collect();
         d.area_shapes = misc::load_area_shapes(conn)?;
         d.model_radii = misc::load_actor_model_radii(conn)?;
@@ -439,6 +488,8 @@ impl Data {
         d.npc_tags = misc::load_npc_tags(conn)?;
         d.zone_group_buffs = misc::load_zone_group_buffs(conn)?;
         d.priest_buffs = super::priest::load(conn)?;
+        d.ability_change_cost = misc::load_content_config(conn, 39)?;
+        d.resurrection_waiting_times = load_resurrection_waiting_times(conn)?;
         Ok(d)
     }
 
@@ -452,6 +503,22 @@ impl Data {
     /// `GetBuffTemplate(id)`.
     pub fn buff(&self, id: u32) -> Option<&Arc<BuffTemplate>> {
         self.buffs.get(&id)
+    }
+
+    /// `resurrection_waiting_times` row for a 1-based consecutive-death step. The real rows
+    /// are contiguous; a gap falls back to the highest lower row (below the lowest row, to the
+    /// first one), and a step past the last row uses the last row.
+    pub fn resurrection_waiting_time(&self, step: u32) -> Option<&ResurrectionWaitingTime> {
+        let step = step.max(1);
+        self.resurrection_waiting_times
+            .get(&step)
+            .or_else(|| {
+                self.resurrection_waiting_times
+                    .range(..=step)
+                    .next_back()
+                    .map(|(_, row)| row)
+            })
+            .or_else(|| self.resurrection_waiting_times.values().next())
     }
 
     /// `GetEffectTemplate(id, type)`.
@@ -643,6 +710,40 @@ impl Data {
     }
 }
 
+/// `SELECT id, penalty_duration, waiting_time, siege_waiting_time FROM resurrection_waiting_times`
+/// (the 10.x server query adds `conquest_waiting_time` and `special_waiting_time`). A row with
+/// negative times or a duplicate id is skipped with a warning so one bad row does not abort the
+/// whole catalog.
+pub(super) fn load_resurrection_waiting_times(
+    conn: &Connection,
+) -> rusqlite::Result<BTreeMap<u32, ResurrectionWaitingTime>> {
+    let mut rows = BTreeMap::new();
+    for_each_row(conn, "SELECT * FROM resurrection_waiting_times", [], |r| {
+        let row = ResurrectionWaitingTime {
+            id: r.u32("id")?,
+            penalty_duration: r.i32("penalty_duration")?,
+            waiting_time: r.i32("waiting_time")?,
+            siege_waiting_time: r.i32("siege_waiting_time")?,
+        };
+        if row.id == 0
+            || row.penalty_duration < 0
+            || row.waiting_time < 0
+            || row.siege_waiting_time < 0
+        {
+            tracing::warn!("resurrection_waiting_times row {row:?} is invalid; skipped");
+            return Ok(());
+        }
+        if rows.insert(row.id, row).is_some() {
+            tracing::warn!(
+                "resurrection_waiting_times id {} appears twice; the last row wins",
+                row.id
+            );
+        }
+        Ok(())
+    })?;
+    Ok(rows)
+}
+
 /// The 1.2 loader (`395D17B0`) attaches each breaker tag to its `buff_id`, rather than
 /// treating `buff_id` as the buff to apply. The 10.x loader (`39B41DE0`) uses a set.
 pub(super) fn load_buff_breakers(conn: &Connection) -> rusqlite::Result<HashMap<u32, Vec<u32>>> {
@@ -743,6 +844,31 @@ mod tests {
         assert!(d.skills.len() > 10_000);
         assert!(d.buffs.len() > 5_000);
         assert!(d.plots.trees.len() > 1_000);
+        // `content_configs` 39 (`X2Ability.GetAbilityChangeCost` reads it as `0x27`).
+        assert_eq!(d.ability_change_cost, 200);
+        // `resurrection_waiting_times`: ten 1-based death steps, 600 s penalty window, normal
+        // waits 0/5/45/90/180 s and siege waits 20/15/10/5/0 s.
+        assert_eq!(d.resurrection_waiting_times.len(), 10);
+        assert!(d
+            .resurrection_waiting_times
+            .values()
+            .all(|r| r.penalty_duration == 600));
+        assert_eq!(
+            d.resurrection_waiting_time(1)
+                .map(|r| (r.waiting_time, r.siege_waiting_time)),
+            Some((0, 20))
+        );
+        assert_eq!(
+            d.resurrection_waiting_time(3)
+                .map(|r| (r.waiting_time, r.siege_waiting_time)),
+            Some((45, 10))
+        );
+        assert_eq!(
+            d.resurrection_waiting_time(5)
+                .map(|r| (r.waiting_time, r.siege_waiting_time)),
+            Some((180, 0))
+        );
+        assert_eq!(d.resurrection_waiting_time(99).map(|r| r.id), Some(10));
         // Every skill effect / trigger points at a loaded template.
         for s in d.skills.values() {
             for e in &s.effects {
@@ -787,6 +913,50 @@ mod tests {
                 d.effect(EffectKind::PlayLogEffect, id),
                 Some(EffectTemplate::PlayLog { .. })
             ));
+        }
+    }
+
+    /// The spec's transform rows: all 66 `transform_buff_id` buffs are stack rule 4 with
+    /// `max_stack >= 2`, every target exists, and the two authored chains are present.
+    #[test]
+    #[ignore = "needs AAEMU_COMPACT_DB"]
+    fn skills_real_compact_db_transform_buffs() {
+        let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+            return;
+        };
+        let conn =
+            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let mut files = crate::data::client_files::ClientFileManager::new();
+        if let Ok(pak) = std::env::var("AAEMU_GAME_PAK") {
+            files.add_source(&pak, std::path::Path::new("."));
+        }
+        let d = Data::load_from(&conn, &files).unwrap();
+        let mut rows: Vec<(u32, u32)> = Vec::new();
+        for_each_row(
+            &conn,
+            "SELECT id, transform_buff_id FROM buffs WHERE transform_buff_id != 0",
+            [],
+            |r| {
+                rows.push((r.u32("id")?, r.u32("transform_buff_id")?));
+                Ok(())
+            },
+        )
+        .unwrap();
+        rows.sort_unstable();
+        assert_eq!(rows.len(), 66);
+        for (id, transform_id) in rows {
+            let t = d.buff(id).unwrap_or_else(|| panic!("buff {id} not loaded"));
+            assert_eq!(t.transform_buff_id, transform_id, "buff {id}");
+            assert_eq!(t.stack_rule, 4, "buff {id} stack rule");
+            assert!(t.max_stack >= 2, "buff {id} max_stack {}", t.max_stack);
+            assert!(
+                d.buff(transform_id).is_some(),
+                "buff {id} transform {transform_id} not loaded"
+            );
+        }
+        for (a, b, c) in [(4152, 4752, 4101), (5378, 5379, 5380)] {
+            assert_eq!(d.buff(a).unwrap().transform_buff_id, b);
+            assert_eq!(d.buff(b).unwrap().transform_buff_id, c);
         }
     }
 }

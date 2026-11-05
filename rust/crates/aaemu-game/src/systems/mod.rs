@@ -366,7 +366,7 @@ mod tests {
         fn on_buff_event(&self, _server: &GameServer, owner: &WorldObject, event: &BuffEvent) {
             let what = match event {
                 BuffEvent::Started(b) => format!("start {}", b.template.id),
-                BuffEvent::Refreshed(b) => format!("refresh {}", b.template.id),
+                BuffEvent::Refreshed { buff: b, .. } => format!("refresh {}", b.template.id),
                 BuffEvent::Removed(b) => format!("remove {}", b.template.id),
             };
             self.0.lock().unwrap().push((owner.obj_id(), what));
