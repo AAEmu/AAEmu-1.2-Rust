@@ -460,6 +460,50 @@ async fn damage_pipeline_immune_damage_zero_flag_still_ignores_every_hit() {
     assert_eq!(npc.data().unit.hp, 1000);
 }
 
+/// The real 1.2 rows behind the threshold rule: the six flagged buffs carry a positive
+/// `immune_damage`, and buff 131 (Invincible) is the zero-threshold full immunity.
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only 1.2 compact.sqlite3)"]
+fn real_compact_db_separates_threshold_and_full_damage_immunity() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let buffs = skills::data::templates::load_buffs(&conn).unwrap();
+    let get = |id: u32| buffs.iter().find(|b| b.id == id).unwrap();
+    for (id, melee, spell, ranged, siege, threshold) in [
+        (176, false, true, false, false, 137),
+        (275, true, false, false, false, 50),
+        (276, false, true, false, false, 100),
+        (2071, true, true, true, true, 2000),
+        (3615, true, true, false, false, 1_000_000),
+        (4609, true, true, true, true, 9_999_999),
+    ] {
+        let b = get(id);
+        assert_eq!(
+            (
+                b.melee_immune,
+                b.spell_immune,
+                b.ranged_immune,
+                b.siege_immune,
+                b.immune_damage
+            ),
+            (melee, spell, ranged, siege, threshold),
+            "buff {id}"
+        );
+    }
+    let invincible = get(131);
+    assert_eq!(invincible.immune_damage, 0);
+    assert!(
+        invincible.melee_immune
+            && invincible.spell_immune
+            && invincible.ranged_immune
+            && invincible.siege_immune
+    );
+}
+
 #[tokio::test]
 async fn damage_pipeline_nonunit_sources_and_hostile_target_authority() {
     let (server, mut client, player, npc) = skills::cast_validation_tests::fixture(fixture_data());
