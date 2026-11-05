@@ -1,7 +1,7 @@
 {
   "counts": {
     "sc_opcodes": 517,
-    "typeless": 73,
+    "typeless": 72,
     "never_sent": 51
   },
   "typeless": [
@@ -15,7 +15,6 @@
     "SCDemoCharResetItemPacket",
     "SCDemoCharResetLocPacket",
     "SCDemoResetActionSlotPacket",
-    "SCDoodadPhaseMsgPacket",
     "SCDoodadPuzzleScenePacket",
     "SCDoodadReqBattleFieldPacket",
     "SCDoodadUccDataPacket",

@@ -85,6 +85,28 @@ impl Marshal for SCDoodadPhaseChangedPacket {
     }
 }
 
+/// `SCDoodadPhaseMsgPacket(doodad, funcGroupId)`: the message of a func group that authors a
+/// `phase_msg`. The 1.2 reader `FUN_397b6460` is `bc doodadObjId ; u32 funcGroupId`; the handler
+/// `FUN_391dc720` -> `FUN_3902e0f0` looks the group up in the client's `doodad_func_groups`,
+/// requires the doodad to exist locally unless `is_msg_to_zone` is true, and raises
+/// `DOODAD_PHASE_MSG` (event 0xfd, a chat / center message) when `phase_msg` is not empty.
+/// The C# had only the opcode, no sender.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SCDoodadPhaseMsgPacket {
+    pub doodad_obj_id: u32,
+    pub func_group_id: u32,
+}
+packet_def!(
+    SCDoodadPhaseMsgPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCDoodadPhaseMsgPacket
+);
+impl Marshal for SCDoodadPhaseMsgPacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_bc(self.doodad_obj_id).write_u32(self.func_group_id);
+    }
+}
+
 /// `SCWorldInteractionCanceledPacket(interactedUnitId, interactedDoodadId)`: the 1.2 client
 /// cancels an in-progress doodad world interaction. Reader `FUN_397c6540` (`bc unitObjId`, then
 /// `u32 doodadObjId`; EVIDENCED, content research 1.4). The trigger is capture-pending
@@ -585,6 +607,17 @@ mod tests {
         e.extend((-1i32).to_le_bytes());
         e.extend(27606u32.to_le_bytes());
         assert_eq!(body(&p), e);
+    }
+
+    #[test]
+    fn sc_doodad_phase_msg() {
+        // Reader FUN_397b6460: `bc doodadObjId ; u32 funcGroupId`.
+        let p = SCDoodadPhaseMsgPacket {
+            doodad_obj_id: 0x01_0203,
+            func_group_id: 4699,
+        };
+        assert_eq!(p.opcode(), sc::SCDoodadPhaseMsgPacket);
+        assert_eq!(body(&p), vec![0x03, 0x02, 0x01, 0x5b, 0x12, 0x00, 0x00]);
     }
 
     #[test]
