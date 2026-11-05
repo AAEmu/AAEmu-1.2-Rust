@@ -133,6 +133,9 @@ pub struct AppConfig {
     /// Chat spam delays sent to the client and enforced by the server (`Configurations/Chat.json`).
     #[serde(rename = "chat")]
     pub chat: crate::systems::social::config::ChatConfig,
+    /// `Social` (`systems::social::config`: Rust-only social feature switches).
+    #[serde(rename = "social")]
+    pub social: crate::systems::social::config::SocialConfig,
     /// `Dungeons` (`systems::instances::config`).
     #[serde(rename = "dungeons")]
     pub dungeons: crate::systems::instances::config::DungeonsConfig,
@@ -187,6 +190,7 @@ impl Default for AppConfig {
             expedition: Default::default(),
             justice: Default::default(),
             chat: Default::default(),
+            social: Default::default(),
             dungeons: Default::default(),
             interaction: Default::default(),
             heightmaps_enable: false,
@@ -871,7 +875,7 @@ pub const USER_SECRETS_ID: &str = "426ad5c3-9a72-44e9-88f5-4b5940b98c28";
 
 /// The top-level `AppConfiguration` members (environment variables are only applied below
 /// these keys; anything else could never bind).
-const TOP_LEVEL_KEYS: [&str; 33] = [
+const TOP_LEVEL_KEYS: [&str; 34] = [
     "physics",
     "id",
     "additionalesid",
@@ -901,6 +905,7 @@ const TOP_LEVEL_KEYS: [&str; 33] = [
     "scripts",
     "events",
     "justice",
+    "social",
     "defaultlanguage",
     "debuginfo",
     "debuginfolevel",

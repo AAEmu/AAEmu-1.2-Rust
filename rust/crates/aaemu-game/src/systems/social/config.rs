@@ -302,6 +302,19 @@ impl ChatConfig {
     }
 }
 
+/// The Rust-only `Social` section (`Configurations/Social.json`): feature switches for social
+/// content whose 1.2 behaviour is not fully evidenced yet.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct SocialConfig {
+    /// Fill the `CSNaviOpenBounty` answer from the bounty ledger instead of the empty list.
+    ///
+    /// Default `false`: the C# comment records that a filled board broke the 1.2 client Lua and
+    /// the cause was never confirmed on the original client (`PORTING.md`, BOUNTY-board).
+    #[serde(rename = "bountyboard", deserialize_with = "lenient")]
+    pub bounty_board: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use crate::config::AppConfig;
@@ -314,6 +327,7 @@ mod tests {
             "Configurations/Expedition.json",
             "Configurations/Justice.json",
             "Configurations/Chat.json",
+            "Configurations/Social.json",
         ] {
             let text = std::fs::read_to_string(root.join(f)).expect("config file");
             let v: serde_json::Value = serde_json::from_str(&crate::config::relax_json(
@@ -356,6 +370,8 @@ mod tests {
         // The shipped limits are off: the retail delays are not evidenced (CHAT-SPAM-1).
         assert!(c.chat_group_delays_ms.iter().all(|&ms| ms == 0));
         assert!(c.packet_delays().iter().all(|&s| s == 0.0));
+        // The bounty board stays off until an original-client run passes (BOUNTY-board).
+        assert!(!cfg.social.bounty_board);
     }
 
     #[test]
