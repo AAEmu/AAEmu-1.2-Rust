@@ -1474,6 +1474,126 @@ async fn court_case_blocks_queueing() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Destroyed instances
+// ---------------------------------------------------------------------------------------------
+
+/// One pass of every periodic task that walks a per-instance registry (the ticks the server
+/// runs on its timers), driven by hand.
+fn tick_every_instance_registry(server: &GameServer) {
+    use crate::systems::npcs::gimmick::manager as gimmicks;
+    gimmicks::tick_all(server, Duration::from_millis(50));
+    server.systems.npcs.spheres.tick(server);
+    server.systems.npcs.area_triggers.tick(server);
+    crate::systems::ai::collision::residency::tick(server);
+    crate::systems::ai::manager::tick_all(server, 100);
+    crate::systems::vehicles::transfers::transfer_tick(server);
+    super::tick(server, 30);
+}
+
+/// Registers the per-instance state the game creates while an instance runs (a gimmick registry
+/// is created when an NPC asks for its gimmick or one is spawned, sphere quest triggers when a
+/// quest is accepted in the instance, the vehicle managers when a mate or a transfer is used).
+fn populate_instance_registries(server: &GameServer, world_id: u32) {
+    let npcs = &server.systems.npcs;
+    npcs.gimmicks.for_world(world_id);
+    npcs.spheres.for_world(world_id);
+    server.systems.vehicles.mates.get(world_id);
+    server.systems.vehicles.transfers.get(world_id);
+    server.systems.ai.physics.world_or_create(world_id);
+}
+
+/// Bug: after dungeon instance 100 was destroyed (its players had been disconnected) the log
+/// filled with `GetWorld: No such World Instance 100`, about 17 a second for hours: the gimmick
+/// and sphere quest registries of the instance were never dropped, and their ticks asked for the
+/// gone instance on every pass.
+#[tokio::test]
+async fn a_destroyed_dungeon_leaves_nothing_that_asks_for_its_instance() {
+    let server = dungeon_server();
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    use_enter_func(&server, &a.p, DUNGEON_ZONE);
+    let d = server.systems.instances.all_dungeons()[0].clone();
+    await_loader(&d).await;
+    assert_eq!(a.instance(), 100);
+    populate_instance_registries(&server, 100);
+    a.frames();
+    // While it runs, the ticks find the instance.
+    tick_every_instance_registry(&server);
+    assert!(server.world.all_missing_lookups().is_empty());
+
+    // The player's connection dies inside the dungeon: the disconnect removes the player, and
+    // since the player is in no party the run is given up and the dungeon destroyed.
+    events::fire_disconnect(&server, &a.p);
+    assert!(server.systems.instances.dungeon_of_world(100).is_none());
+    assert!(!server.world.has_world(100));
+
+    for _ in 0..3 {
+        tick_every_instance_registry(&server);
+    }
+    assert_eq!(
+        server.world.all_missing_lookups(),
+        Vec::<(u32, u64)>::new(),
+        "something still asks for the destroyed instance"
+    );
+    let npcs = &server.systems.npcs;
+    assert!(npcs.gimmicks.existing(100).is_none());
+    assert!(!npcs.spheres.remove_world(100));
+    assert!(!npcs.fish_schools.remove_world(100));
+    assert!(!server.systems.vehicles.mates.remove_world(100));
+    assert!(!server.systems.vehicles.transfers.remove_world(100));
+    assert!(server.systems.ai.physics.world(100).is_none());
+    assert!(server.systems.ai.collision.existing(100).is_none());
+}
+
+/// The registries are dropped on every way an instance goes away (`RemoveWorld`), and an
+/// instance id that is handed out again does not inherit the old instance's registries.
+#[tokio::test]
+async fn a_recycled_instance_id_starts_without_the_old_instances_registries() {
+    let server = dungeon_server();
+    let a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    use_enter_func(&server, &a.p, DUNGEON_ZONE);
+    let d = server.systems.instances.all_dungeons()[0].clone();
+    await_loader(&d).await;
+    populate_instance_registries(&server, 100);
+    dungeon::destroy_dungeon(&server, &d);
+    assert!(!server.world.has_world(100));
+
+    use_enter_func(&server, &a.p, DUNGEON_ZONE);
+    let fresh = server.systems.instances.all_dungeons()[0].clone();
+    assert_eq!(fresh.world_id(), Some(100));
+    await_loader(&fresh).await;
+    assert!(server.systems.npcs.gimmicks.existing(100).is_none());
+    assert!(!server.systems.vehicles.mates.remove_world(100));
+    tick_every_instance_registry(&server);
+    assert!(server.world.all_missing_lookups().is_empty());
+    dungeon::destroy_dungeon(&server, &fresh);
+}
+
+/// A lookup of an instance that does not exist is counted, and logged once per instance id (the
+/// miss counter starts again when the id is handed out again).
+#[tokio::test]
+async fn a_lookup_of_a_missing_instance_is_counted_and_logged_once() {
+    let server = dungeon_server();
+    assert!(server.world.world(77).is_none());
+    assert!(server.world.world(77).is_none());
+    assert!(server.world.world(77).is_none());
+    assert_eq!(server.world.missing_lookups(77), 3);
+    assert_eq!(server.world.all_missing_lookups(), vec![(77, 3)]);
+    // A periodic walk does not count as a miss.
+    assert!(server.world.world_if_exists(78).is_none());
+    assert_eq!(server.world.missing_lookups(78), 0);
+    // The id is created: the counter restarts, and a later miss is logged again.
+    let template = server
+        .game_data
+        .worlds
+        .get_world_template_by_name("main_world")
+        .unwrap();
+    server
+        .world
+        .create_world_instance(Arc::new(template.clone()), 77);
+    assert_eq!(server.world.missing_lookups(77), 0);
+}
+
+// ---------------------------------------------------------------------------------------------
 // Battlefields
 // ---------------------------------------------------------------------------------------------
 
@@ -2038,6 +2158,20 @@ async fn real_dungeon_spawns_load_and_leave_returns_to_main_world() {
         .frames()
         .iter()
         .any(|(op, _)| *op == sc::SCLoadInstancePacket));
+    // Destroy the run: with its real spawners, doodads and NPCs gone nothing may keep asking
+    // for the instance (`GetWorld: No such World Instance 100` once per tick for hours).
+    populate_instance_registries(&server, 100);
+    dungeon::destroy_dungeon(&server, &d);
+    assert!(!server.world.has_world(100));
+    for _ in 0..3 {
+        tick_every_instance_registry(&server);
+        crate::systems::npcs::spawn_manager::active_region_tick(&server);
+    }
+    assert_eq!(
+        server.world.all_missing_lookups(),
+        Vec::<(u32, u64)>::new(),
+        "something still asks for the destroyed instance"
+    );
 }
 
 #[tokio::test]
