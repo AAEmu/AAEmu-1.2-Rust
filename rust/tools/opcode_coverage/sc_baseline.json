@@ -1,8 +1,8 @@
 {
   "counts": {
     "sc_opcodes": 517,
-    "typeless": 81,
-    "never_sent": 49
+    "typeless": 76,
+    "never_sent": 52
   },
   "typeless": [
     "CSQuestAcceptConditionalPacket",
@@ -41,16 +41,11 @@
     "SCNotifyUIMessagePacket",
     "SCNpcFriendshipChangedPacket",
     "SCNpcFriendshipListPacket",
-    "SCNpcInteractionEndedByZonePacket",
-    "SCNpcInteractionStatusChangedPacket",
     "SCNpcSpawnerPacket",
     "SCPlaySequencePacket",
     "SCPlotProcessingTimePacket",
     "SCQuestListPacket",
     "SCQuestUnitReqFailedPacket",
-    "SCRaceCondPacket",
-    "SCRacingPacket",
-    "SCRacingResultPacket",
     "SCRestrictInfoPacket",
     "SCScheduledEventEndedPacket",
     "SCScheduledEventStartedPacket",
@@ -123,6 +118,9 @@
     "SCPlaytimePacket",
     "SCPremiumPointChangedPacket",
     "SCQuestMailSentPacket",
+    "SCRaceCondPacket",
+    "SCRacingPacket",
+    "SCRacingResultPacket",
     "SCRankAlarmPacket",
     "SCSearchListPacket",
     "SCSkillUpgradedPacket",
