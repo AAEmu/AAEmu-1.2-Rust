@@ -4488,6 +4488,28 @@ and in NPC wandering / buff remaining times.
   `a_materialised_declaration_keeps_the_offense_hq_and_the_teleport_works` (offense teleport
   packet at the camp position after materialisation),
   `defense_hq_spawns_only_with_a_configured_lodestone_offset`.
+* systems::housing / systems::skills (WP-SD3, 2026-11-06): the 13 `siege_items` rows gate item
+  casts in the one client item-cast branch (`skills/handlers.rs`, after the item template is
+  resolved from the owned stack and before `skill::use_skill`, so a refusal keeps the item and
+  answers only `SCErrorMsg` 431). The client loads the table and shows the row's `USAGE` text
+  for 431, so this is defence in depth for forged casts. The mapping is INFERRED from the row
+  shapes: a `true` flag means the situation allows the use; situations are the current period
+  (`period::current_period`: no dominion/declare/peace), `radius_siege` around the lodestone
+  (inside/outside the siege area) and `radius_offense_hq` around the registered side's bound
+  HQ (the defense radius is UNKNOWN and uses the offense value). Rows: 26397/26424/26428 are
+  allowed only inside the siege circle during the siege, 27300/27302 only inside the offense
+  HQ circle during the siege, and the escape/Eanad scrolls 34018/34021/34060-34065 everywhere
+  except the siege/HQ circles during warmup and siege. The gate is active only when
+  `Housing.SiegeCalendar` is on or the zone has an explicit siege; outside every dominion
+  zone the `outside_siege_zone` flag decides (a tank mine is unusable there, an escape scroll
+  is usable). Period 1 (auction) has no authored flag and is not gated. Unlisted items are
+  never refused. The table is loaded beside `SiegeZone` in `housing/data.rs` (a missing table
+  disables the gate); the decisions live in `dominion/siege_items.rs`. Tests:
+  `the_three_authored_classes_allow_exactly_their_situations`,
+  `siege_items_are_refused_outside_their_authored_situations_and_kept` (real item casts in
+  period 2 and 4, inside/outside the circle, item kept on refusal), the loader assertion in
+  `castle_references_preserve_stage_order_dates_and_zero_open_duration`, and the gated
+  `housing_real_compact_db` row-count check (13 rows).
 * systems::housing (siege result achievements, WP-SD6a, 2026-11-05): a finished siege credits
   `char_records` kinds 57/59 to the attacking roster and 58/60 to the defenders with
   `value1 = zone_group_id` (mapping EVIDENCED from the authored records and the Korean

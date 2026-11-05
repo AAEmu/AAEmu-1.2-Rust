@@ -1756,6 +1756,46 @@ mod authority_tests {
             effects: vec![effect],
             ..Default::default()
         });
+        // WP-SD3 classes: the tank mine (only inside the siege circle during the siege) and an
+        // escape scroll (everything except the siege/HQ areas).
+        data.systems.skills.add_skill(SkillTemplate {
+            id: 20_000,
+            target_type: 0,
+            target_selection: 1,
+            max_range: 4,
+            ..Default::default()
+        });
+        for id in [26_397u32, 34_018] {
+            data.items.templates.insert(
+                id,
+                ItemTemplate {
+                    use_skill_id: 20_000,
+                    ..ItemTemplate::plain(id, 1)
+                },
+            );
+        }
+        use crate::systems::housing::dominion::siege_items::SiegeItem;
+        data.systems.housing.castles.siege_items.insert(
+            26_397,
+            SiegeItem {
+                item_id: 26_397,
+                siege_circle_during_siege: true,
+                ..Default::default()
+            },
+        );
+        data.systems.housing.castles.siege_items.insert(
+            34_018,
+            SiegeItem {
+                item_id: 34_018,
+                outside_siege_zone: true,
+                during_no_dominion: true,
+                during_declare: true,
+                during_peace: true,
+                outside_siege_area_during_warmup: true,
+                outside_siege_area_during_siege: true,
+                ..Default::default()
+            },
+        );
     }
 
     const CAMP_ATTACKER: u32 = 88;
@@ -1851,13 +1891,24 @@ mod authority_tests {
         item_id: u64,
         template: u32,
     ) {
+        cast_item(server, client, player, item_id, template, DECLARE_SKILL_ID);
+    }
+
+    fn cast_item(
+        server: &GameServer,
+        client: &mut TestClient,
+        player: &PlayerRef,
+        item_id: u64,
+        template: u32,
+        skill_id: u32,
+    ) {
         player.data().unit.skill_last_used_ms = 0;
         player.data().unit.global_cooldown_ms = 0;
         crate::systems::skills::handlers::start_skill(
             server,
             &mut client.conn,
             crate::systems::skills::handlers::CSStartSkillPacket {
-                skill_id: DECLARE_SKILL_ID,
+                skill_id,
                 caster: SkillCaster::Item {
                     obj_id: player.obj_id,
                     item_id,
@@ -3808,6 +3859,93 @@ mod authority_tests {
         cast_camp(&f.server, &mut f.client, &f.leader, item, CAMP_ITEM);
         assert!(errors(&mut f.client).contains(&443));
         assert_eq!(item_count(&f, &f.leader, CAMP_ITEM), 1);
+    }
+
+    #[tokio::test]
+    async fn siege_items_are_refused_outside_their_authored_situations_and_kept() {
+        const MINE: u32 = 26_397;
+        const SCROLL: u32 = 34_018;
+        let mut f = camp_fixture();
+        // Decline period: the mine is not usable, the escape scroll is.
+        f.member_client.drain();
+        let mine = give_camp_item(&f, &f.member, MINE);
+        cast_item(
+            &f.server,
+            &mut f.member_client,
+            &f.member,
+            mine,
+            MINE,
+            20_000,
+        );
+        assert!(errors(&mut f.member_client).contains(&431));
+        assert_eq!(item_count(&f, &f.member, MINE), 1, "refusal keeps the item");
+        let scroll = give_camp_item(&f, &f.member, SCROLL);
+        cast_item(
+            &f.server,
+            &mut f.member_client,
+            &f.member,
+            scroll,
+            SCROLL,
+            20_000,
+        );
+        assert!(errors(&mut f.member_client).is_empty());
+
+        // Siege: an explicit schedule owns the real-clock period 4.
+        let now = Utc::now().timestamp();
+        f.server
+            .systems
+            .housing
+            .dominions
+            .schedule_siege(ZONE, CAMP_ATTACKER, now - 60, now + 600, now - 60)
+            .unwrap();
+        // Outside the siege circle: the mine is refused, the scroll is allowed.
+        let mine = give_camp_item(&f, &f.member, MINE);
+        let kept = item_count(&f, &f.member, MINE);
+        cast_item(
+            &f.server,
+            &mut f.member_client,
+            &f.member,
+            mine,
+            MINE,
+            20_000,
+        );
+        assert!(errors(&mut f.member_client).contains(&431));
+        assert_eq!(item_count(&f, &f.member, MINE), kept);
+        let scroll = give_camp_item(&f, &f.member, SCROLL);
+        cast_item(
+            &f.server,
+            &mut f.member_client,
+            &f.member,
+            scroll,
+            SCROLL,
+            20_000,
+        );
+        assert!(errors(&mut f.member_client).is_empty());
+
+        // Inside the circle: the mine is allowed, the scroll is refused.
+        f.member.data().unit.transform.set_xyz(110.0, 100.0, 100.0);
+        let mine = give_camp_item(&f, &f.member, MINE);
+        cast_item(
+            &f.server,
+            &mut f.member_client,
+            &f.member,
+            mine,
+            MINE,
+            20_000,
+        );
+        assert!(errors(&mut f.member_client).is_empty());
+        let scroll = give_camp_item(&f, &f.member, SCROLL);
+        let kept = item_count(&f, &f.member, SCROLL);
+        cast_item(
+            &f.server,
+            &mut f.member_client,
+            &f.member,
+            scroll,
+            SCROLL,
+            20_000,
+        );
+        assert!(errors(&mut f.member_client).contains(&431));
+        assert_eq!(item_count(&f, &f.member, SCROLL), kept);
     }
 
     #[tokio::test]

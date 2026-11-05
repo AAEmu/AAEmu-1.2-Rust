@@ -15,6 +15,7 @@ pub mod period;
 pub mod reinforce;
 pub mod rights;
 pub mod runtime;
+pub mod siege_items;
 pub mod state;
 pub mod tax;
 

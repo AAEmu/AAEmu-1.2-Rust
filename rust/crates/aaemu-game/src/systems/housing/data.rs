@@ -216,6 +216,9 @@ pub struct CastleReferenceData {
     /// territory gets no siege cycle for this many days (INFERRED; the 1.2 value is 30).
     /// Missing row / table = 0, no protection.
     pub siege_delay_after_claim_days: i64,
+    /// `siege_items` usage restrictions keyed by item template id (WP-SD3). A missing table
+    /// means the gate is off (older data).
+    pub siege_items: HashMap<u32, crate::systems::housing::dominion::siege_items::SiegeItem>,
 }
 
 impl CastleReferenceData {
@@ -364,6 +367,31 @@ impl CastleReferenceData {
             }
             Ok(())
         })?;
+        if table_exists(conn, "siege_items")? {
+            for_each_row(conn, "SELECT * FROM siege_items", [], |r| {
+                let flag =
+                    |column: &str| -> rusqlite::Result<bool> { Ok(r.string(column)? == "t") };
+                let item = crate::systems::housing::dominion::siege_items::SiegeItem {
+                    item_id: castle_u32(r, "id")?,
+                    outside_siege_zone: flag("outside_siege_zone")?,
+                    during_no_dominion: flag("during_no_dominion")?,
+                    during_declare: flag("during_declare")?,
+                    during_peace: flag("during_peace")?,
+                    outside_siege_area_during_warmup: flag("outside_siege_area_during_warmup")?,
+                    outside_siege_area_during_siege: flag("outside_siege_area_during_siege")?,
+                    offense_hq_during_warmup: flag("offense_hq_during_warmup")?,
+                    offense_hq_during_siege: flag("offense_hq_during_siege")?,
+                    defense_hq_during_warmup: flag("defense_hq_during_warmup")?,
+                    defense_hq_during_siege: flag("defense_hq_during_siege")?,
+                    siege_circle_during_warmup: flag("siege_circle_during_warmup")?,
+                    siege_circle_during_siege: flag("siege_circle_during_siege")?,
+                };
+                if data.siege_items.insert(item.item_id, item).is_some() {
+                    return Err(dup("siege_items", item.item_id));
+                }
+                Ok(())
+            })?;
+        }
         data.siege_delay_after_claim_days = conn
             .query_row(
                 "SELECT default_value FROM world_var_defaults \
@@ -376,6 +404,14 @@ impl CastleReferenceData {
             .max(0);
         Ok(data)
     }
+}
+
+fn table_exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+        [name],
+        |row| row.get::<_, i64>(0),
+    )? > 0)
 }
 
 fn castle_u32(row: &SqlRow<'_, '_>, column: &str) -> rusqlite::Result<u32> {
@@ -1128,6 +1164,12 @@ pub(crate) mod tests {
         CREATE TABLE siege_plans (id INT, zone_group_id INT, week_start NUM);
         CREATE TABLE siege_settings (total_castles INT, num_defenders INT,
             num_reinforcements INT);
+        CREATE TABLE siege_items (id INT, outside_siege_zone TEXT, during_no_dominion TEXT,
+            during_declare TEXT, during_peace TEXT, outside_siege_area_during_warmup TEXT,
+            outside_siege_area_during_siege TEXT, offense_hq_during_warmup TEXT,
+            offense_hq_during_siege TEXT, defense_hq_during_warmup TEXT,
+            defense_hq_during_siege TEXT, siege_circle_during_warmup TEXT,
+            siege_circle_during_siege TEXT, USAGE TEXT);
         CREATE TABLE siege_zones (id INT, start_siege_weekday INT, start_siege_hour INT,
             start_siege_min INT, siege_days INT, siege_hours INT, siege_mins INT,
             zone_group_id INT, pay_weekday INT, pay_hour INT, pay_min INT, declare_item_id INT,
@@ -1207,6 +1249,8 @@ pub(crate) mod tests {
                 (30,54,'2014-02-02 00:00:00'),
                 (31,33,'2014-02-16 00:00:00.000000');
              INSERT INTO siege_settings VALUES (0,70,0),(1,50,20),(2,45,25),(3,40,30);
+             INSERT INTO siege_items VALUES (26397,'f','f','f','f','f','f','f','f','f','f','f','t','siege area only'),
+                (34018,'t','t','t','t','t','t','f','f','f','f','f','f','escape');
              INSERT INTO world_var_defaults VALUES (1,9,
                 'var_delay_siege_x_days_after_dominion_declare',30);",
         )
@@ -1245,6 +1289,13 @@ pub(crate) mod tests {
         // Separate same-date rows remain intact; the loader does not derive recurrence.
         assert_eq!(plans[1].week_start, plans[2].week_start);
         assert_eq!(data.siege_plans[&54][0].zone_group_id, 54);
+        assert_eq!(data.siege_items.len(), 2);
+        let mine = &data.siege_items[&26_397];
+        assert!(mine.siege_circle_during_siege && !mine.outside_siege_zone);
+        let scroll = &data.siege_items[&34_018];
+        assert!(
+            scroll.outside_siege_zone && scroll.during_declare && !scroll.offense_hq_during_siege
+        );
         let zone = &data.siege_zones[&33];
         assert_eq!(zone.id, 4);
         assert_eq!(
@@ -1446,6 +1497,13 @@ pub(crate) mod tests {
         assert_eq!(tower.steps[&1].num_walls, 33);
         assert_eq!(tower.initial_buff_id, 4771);
         assert_eq!(data.guard_tower_settings[&11].max_walls, 100);
+        assert_eq!(data.siege_items.len(), 2);
+        let mine = &data.siege_items[&26_397];
+        assert!(mine.siege_circle_during_siege && !mine.outside_siege_zone);
+        let scroll = &data.siege_items[&34_018];
+        assert!(
+            scroll.outside_siege_zone && scroll.during_declare && !scroll.offense_hq_during_siege
+        );
         let zone = &data.siege_zones[&33];
         assert_eq!(
             (zone.siege_days, zone.siege_hours, zone.siege_mins),
@@ -1556,6 +1614,8 @@ pub(crate) mod tests {
             rows("item_housing_decorations")
         );
         assert_eq!(d.item_housing_count(), rows("item_housings"));
+        assert_eq!(d.castles.siege_items.len(), rows("siege_items"));
+        assert_eq!(d.castles.siege_items.len(), 13);
         assert_eq!(d.taxations.len(), rows("taxations"));
         assert_eq!(d.areas.len(), rows("housing_areas"));
         assert_eq!(d.groups.len(), rows("housing_groups"));
