@@ -283,7 +283,11 @@ pub mod cs {
     /// `FUN_392f42f0` (`local_14 = 0x13`), setter `FUN_397ab4d0`. The C# table had no
     /// 1.2 opcode (0xfff). Owner-approved exception to "never edit opcodes.rs".
     pub const CSUpdateNationalTaxRatePacket: u16 = 0x013;
-    pub const CSSetCraftingPayPacket: u16 = 0xfff;
+    /// `X2Craft.SetCraftingPay` sends this with `FUN_394d7230` (`local_14 = 0x8d`; the
+    /// doodad obj id at packet `+0xc` and the money at `+0x10` through `FUN_397b0ca0`). The
+    /// C# table had no 1.2 opcode (0xfff). Owner-approved exception to "never edit
+    /// opcodes.rs" (2026-11-05).
+    pub const CSSetCraftingPayPacket: u16 = 0x08d;
 
     /// `(opcode, name)` pairs, for logging unknown / not-yet-ported packets.
     pub const NAMES: &[(u16, &str)] = &[
@@ -554,7 +558,7 @@ pub mod cs {
         (0x13c, "CSPremiumServiceMsgPacket"),
         (0x13e, "CSUnknownInstancePacket"),
         (0x140, "CSSetupSecondPassword"),
-        (0xfff, "CSSetCraftingPayPacket"),
+        (0x08d, "CSSetCraftingPayPacket"),
     ];
 }
 

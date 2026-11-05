@@ -17,6 +17,10 @@ pub struct CraftMaterial {
     pub item_id: u32,
     pub amount: i32,
     pub main_grade: bool,
+    /// Grade the material must have (-1 = any). The 1.2 client counts only items of exactly
+    /// this grade (`GetCraftMaterialInfo` 0x39462600, `GetExecutableCraftCount` 0x394d3cc0 ->
+    /// `FUN_3961fbc0`).
+    pub require_grade: i32,
 }
 
 /// `CraftProduct`.
@@ -140,6 +144,7 @@ impl CraftData {
                 amount: r.i32_or("amount", 1)?, // We always want to cost at least 1 item ?
                 // Native 1.2 LoadCraftMaterialDescs (0x3982E4D0) reads text 't' / '1'.
                 main_grade: r.bool_str("main_grade")?,
+                require_grade: r.i32_or("require_grade", -1)?,
             });
             Ok(())
         })?;

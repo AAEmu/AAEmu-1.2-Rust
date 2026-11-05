@@ -1978,9 +1978,10 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   `LootingContainer.MaxLootingRange` (200 m) only for loot *eligibility* at generation and never
   checked the take; 5 m matches the other NPC service interactions (`store::SERVICE_RANGE`,
   `portal::NAVI_USE_RANGE`). Refusals answer `SCLootItemFailedPacket(TooFarAway)`.
-* systems::economy: `CSSetCraftingPayPacket`, `CSChangeItemLookPacket`, `CSSpecialtyRecordLoadPacket`,
+* systems::economy: `CSChangeItemLookPacket`, `CSSpecialtyRecordLoadPacket`,
   `CSBuySpecialtyItemPacket`, `CSReturnMailPacket` have no 1.2 opcode (0xfff): decoders exist, the
-  1.2 client never sends them. The `Specialty` config section is now read at startup (ratios,
+  1.2 client never sends them. (`CSSetCraftingPayPacket` is not one of these any more: the
+  owner approved its 1.2 opcode `0x8d` on 2026-11-05, see the craft grade section.) The `Specialty` config section is now read at startup (ratios,
   ticks and `TradePackMailDelayInMinutes`), so those values no longer come from the C# defaults
   alone. `CSSpecialtyRecordLoadPacket` is still not registered: the 1.2 client has no request
   opcode for the history, and the server deliberately sends no `SCSpecialtyRecordsPacket`
@@ -5620,6 +5621,66 @@ type-8 water entity whose flag bit 1 is set (`vt+0x150 & 1`, likely a NoFishing 
 Deviation from the removed C#: `SkillTemplate.TargetOnlyWater` was parsed
 (`AAEmu.Game/Core/Managers/SkillManager.cs:423`) but never read, so the C# had no water-target
 check at all; this follows only the 1.2 client.
+
+## Craft material grades and product grade (2026-11-05)
+
+`craft_materials.require_grade`, `craft_materials.main_grade` and `craft_products.use_grade`
+are now honoured at craft execution (WP-I2 A/B; `systems::economy::{craft,craft_data}`).
+
+- **`require_grade` (14 rows in `compact.sqlite3`: crafts 6184-6191 material 30803, crafts
+  6889-6894 material 34275, amount 1).** The client loader reads the column
+  (`LoadCraftMaterialDescs` `0x3982E4D0`, `x2game.dll.c:1825263`). `GetCraftMaterialInfo`
+  (`0x39462600`, `x2game.dll.c:914799`) counts a bag stack only when
+  `require_grade == -1 || require_grade == item.grade`, and `GetExecutableCraftCount`
+  (`0x394d3cc0`, `:1005386`) passes `require_grade` as the grade argument of
+  `FUN_3961fbc0`, which compares `param_3 == item.grade` (`:1301667`). The port therefore uses
+  **exact equality** (`-1` = any), not `>=`: a lower grade does not count and neither does a
+  higher one. Rows that require a grade are counted, checked at cast start and again before the
+  hand-out, and **consumed only from stacks of that grade**
+  (`ItemContainer::consume_item_by_grade`, `models/container.rs`). A refusal sends the client's
+  `not_enough_required_item` (722; error-name case `0x2d2`, `x2game.dll.c:1137158`) after the
+  usual `craft_cant_act_any_more` (148) and changes nothing.
+- **`main_grade` (101 rows).** The flagged material's grade is the inherited product grade
+  (`X2Craft.GetCraftMaterialInfo` emits `mainGrade`/`itemGrade`; the client's
+  `crafting_renewal.alb` proto 9.14 (lines 556-573) takes the `mainGrade` material's
+  `itemGrade`). All 101 rows sit on crafts whose product has `use_grade = 'f'`, so the flag
+  alone drives the inheritance; before this change they went through the C# "first equipment
+  material" heuristic. The inherited grade keeps the C# `FreeRegrade` roll (5 %, `rand(0,20)`).
+  Only the main material is consumed in the inherited grade; its first (lowest-slot) stack is
+  the grade source, matching the consumption order.
+- **`use_grade` (356 products).** The client flag is what the craft window uses to show a
+  material grade, but the port keeps the C# "first equipment material" heuristic for *every*
+  product when no `main_grade` row exists (audit review, 2026-11-05): restricting it to
+  `use_grade` products made ~484 gear-upgrade crafts without grade rows (e.g. 4993, 5285,
+  5086) lose the inherited grade and the `FreeRegrade` roll. Order: `main_grade` ->
+  equipment-material heuristic -> `item_grade_id` -> `-1`. The C# "proper" branch that read
+  these flags was commented out (`CharacterCraft.cs`, `a2ab80abd^`). Open, capture-pending:
+  the client Lua also inherits from a material of the product's item implementation
+  (`info.item_impl`, proto 9.14 lines 561-571); the port keeps the equipment-material fallback
+  until a capture shows the same-impl rule's effect on the result.
+- **Repeated rows.** Rows that name the same item and effective grade share the stacks
+  (9 crafts list one item twice, e.g. craft 370 material 8318 x3 + x1, craft 1200 material
+  8320 x1 twice). The check sums the rows' required units before comparing, so a craft cannot
+  start with 3 units for a 4-unit requirement.
+- **`CSSetCraftingPayPacket` (owner-approved 2026-11-05).** The 1.2 Lua `X2Craft.SetCraftingPay`
+  sends CS `0x8d` (`FUN_394d7230`, `local_14 = 0x8d`; the doodad obj id at packet `+0xc` and
+  the money at `+0x10` through `FUN_397b0ca0`). The opcode table entry is now `0x08d` (was
+  `0xfff`) and the packet is registered; the handler reads `(bc objId, i32 money)`, rejects a
+  negative amount and otherwise logs only. Pay rules are UNKNOWN, so it changes no state
+  (capture-pending).
+
+Tests: `craft_material_requires_its_grade` (low and high grades refused, exact grade pays and
+only that stack is consumed; refusals keep the stacks), `craft_main_grade_sets_the_product_grade`
+(the flag works on a `use_grade = 'f'` product), `craft_equipment_material_grade_inherits_for_any_product`
+and `craft_unflagged_upgrade_inherits_the_equipment_grade` (the restored gear-upgrade
+inheritance), `craft_material_rows_of_one_item_are_summed` (craft 370's 3 + 1 shape),
+`craft_main_material_lowest_slot_decides_and_is_consumed`, `craft_secured_right_grade_material_is_locked_only`
+(`ITEM_SECURE_CONDITION`), `craft_grade_lost_before_the_hand_out_keeps_the_materials`, the
+`CSSetCraftingPayPacket` byte test (`bench_tests::set_crafting_pay_reads_the_client_writer_body`),
+plus the extended real-data `real_compact_db_craft_and_store_tables` (14 `require_grade` rows).
+Each fails on its mutation (grade filter `-1`, main-grade branch removed, equipment fallback
+removed, per-row instead of summed counts, highest instead of lowest slot, `LockedOnly`
+downgraded to `Missing`, hand-out grade filter removed).
 
 ## Recipe learning and the learned-craft gate (2026-11-04)
 
