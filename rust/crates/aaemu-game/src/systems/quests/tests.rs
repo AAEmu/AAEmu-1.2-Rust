@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use aaemu_commons::PacketStream;
 
-use super::data::QuestData;
+use super::data::{DbSphere, QuestData};
 use super::engine::{Ctx, QuestEnv, UnitSnapshot};
 use super::events::{self, QuestEvent};
 use super::hooks::QuestHooks;
@@ -14,7 +14,7 @@ use super::model::{
     acceptor, detail, kind, status, ItemCreationDefinition, ObjectiveStatus, QuestSupplies,
 };
 use super::packets::*;
-use super::spheres::SphereQuest;
+use super::spheres::{load_sphere_areas, SphereArea, SphereQuest};
 use super::state::QuestHandle;
 use super::templates::{ActKind, QuestComponentTemplate, QuestTemplate};
 use crate::data::items::{ItemData, ItemTemplate};
@@ -26,6 +26,7 @@ use crate::net::packet::{encode, ServerPacket};
 use crate::net::registry::ClientPacket;
 use crate::opcodes::sc;
 use crate::server::GameServer;
+use crate::systems::social::packets::duel::SCAreaChatBubblePacket;
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
 use crate::world::{Entity, PlayerRef, WorldObject};
 
@@ -1592,6 +1593,252 @@ async fn check_sphere_tracks_presence_without_using_a_wire_objective_slot() {
         drain(ctx);
         assert_eq!(step_of(ctx, h12), kind::READY);
     });
+}
+
+// ----- imported area spheres (`sphere_area_fill.json`) -----
+
+fn area_sphere(sphere_id: u32, x: f32, y: f32, z: f32, radius: f32) -> SphereArea {
+    SphereArea {
+        world: "main_world".into(),
+        zone: crate::test_support::TEST_ZONE,
+        sphere_id,
+        xyz: (x, y, z),
+        radius,
+    }
+}
+
+fn db_sphere(
+    id: u32,
+    detail_type: &str,
+    detail_id: u32,
+    enter_or_leave: bool,
+    team_msg: &str,
+) -> DbSphere {
+    DbSphere {
+        id,
+        name: format!("sphere {id}"),
+        enter_or_leave,
+        sphere_detail_id: detail_id,
+        sphere_detail_type: detail_type.into(),
+        team_msg: team_msg.into(),
+        is_personal_msg: true,
+        ..DbSphere::default()
+    }
+}
+
+fn area_server(
+    spheres: Vec<DbSphere>,
+    areas: Vec<SphereArea>,
+) -> (GameServer, TestClient, PlayerRef) {
+    let mut d = QuestData::default();
+    for s in spheres {
+        d.spheres.insert(s.id, s);
+    }
+    d.finish();
+    let mut data = GameData::empty();
+    data.systems.quests = d;
+    let server = test_server_with(data);
+    server.systems.quests.spheres.set_areas(areas);
+    let mut client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(&server, &client, character(), 1001);
+    let _ = client.drain(); // the spawn packets
+    (server, client, player)
+}
+
+fn set_position(player: &PlayerRef, x: f32, y: f32, z: f32) {
+    let mut c = player.data();
+    c.unit.transform.set_xyz(x, y, z);
+}
+
+#[test]
+fn sphere_area_packets_are_byte_exact() {
+    // `FUN_397b63b0`: bool enter, u32 sphereId.
+    assert_eq!(
+        body(&SCAreaTeamMessagePacket {
+            enter: true,
+            sphere_id: 0x0102_0304
+        }),
+        vec![1, 4, 3, 2, 1]
+    );
+    assert_eq!(
+        body(&SCAreaTeamMessagePacket {
+            enter: false,
+            sphere_id: 933
+        }),
+        vec![0, 0xA5, 0x03, 0, 0]
+    );
+    // `FUN_397b6330`: bool enter, bc unitObjId, u32 sphereBubbleId.
+    assert_eq!(
+        body(&SCAreaChatBubblePacket {
+            enter: true,
+            unit_obj_id: 0x11,
+            bubble_type: 543
+        }),
+        vec![1, 0x11, 0, 0, 0x1F, 0x02, 0, 0]
+    );
+    assert_eq!(
+        body(&SCAreaChatBubblePacket {
+            enter: false,
+            unit_obj_id: 0xAB_CDEF,
+            bubble_type: 323
+        }),
+        vec![0, 0xEF, 0xCD, 0xAB, 0x43, 0x01, 0, 0]
+    );
+}
+
+#[tokio::test]
+async fn sphere_area_enter_and_leave_send_once() {
+    let (server, mut client, player) = area_server(
+        vec![db_sphere(1001, "SphereBubble", 323, true, "")],
+        vec![area_sphere(1001, 0.0, 0.0, 0.0, 10.0)],
+    );
+    // spawn position (100, 100, 100): outside.
+    server.systems.quests.spheres.tick(&server);
+    assert!(client.drain().is_empty());
+
+    set_position(&player, 0.0, 0.0, 0.0);
+    server.systems.quests.spheres.tick(&server);
+    assert_eq!(
+        client.drain(),
+        vec![(
+            sc::SCAreaChatBubblePacket,
+            vec![1, 0xE9, 0x03, 0, 0x43, 0x01, 0, 0]
+        )]
+    );
+
+    // Staying inside sends nothing more.
+    server.systems.quests.spheres.tick(&server);
+    assert!(client.drain().is_empty());
+
+    set_position(&player, 100.0, 100.0, 100.0);
+    server.systems.quests.spheres.tick(&server);
+    assert_eq!(
+        client.drain(),
+        vec![(
+            sc::SCAreaChatBubblePacket,
+            vec![0, 0xE9, 0x03, 0, 0x43, 0x01, 0, 0]
+        )]
+    );
+    server.systems.quests.spheres.tick(&server);
+    assert!(client.drain().is_empty());
+}
+
+#[tokio::test]
+async fn sphere_area_enter_or_leave_controls_the_leave_packet() {
+    let (server, mut client, player) = area_server(
+        vec![db_sphere(1004, "SphereBubble", 325, false, "")],
+        vec![area_sphere(1004, 0.0, 0.0, 0.0, 10.0)],
+    );
+    set_position(&player, 0.0, 0.0, 0.0);
+    server.systems.quests.spheres.tick(&server);
+    assert_eq!(client.drain().len(), 1);
+
+    set_position(&player, 100.0, 100.0, 100.0);
+    server.systems.quests.spheres.tick(&server);
+    assert!(client.drain().is_empty(), "enter_or_leave = false");
+}
+
+#[tokio::test]
+async fn sphere_area_team_message_is_for_non_blank_team_msg_only() {
+    let (server, mut client, player) = area_server(
+        vec![
+            // A non-bubble type with a team message: message only, no bubble.
+            db_sphere(1002, "SphereSkill", 0, true, "The aura can be felt."),
+            // Blank (whitespace) team message: bubble only.
+            db_sphere(1003, "SphereBubble", 324, true, "   "),
+        ],
+        vec![
+            area_sphere(1002, 0.0, 0.0, 0.0, 10.0),
+            area_sphere(1003, 0.0, 0.0, 0.0, 10.0),
+        ],
+    );
+    set_position(&player, 0.0, 0.0, 0.0);
+    server.systems.quests.spheres.tick(&server);
+    assert_eq!(
+        client.drain(),
+        vec![
+            (sc::SCAreaTeamMessagePacket, vec![1, 0xEA, 0x03, 0, 0]),
+            (
+                sc::SCAreaChatBubblePacket,
+                vec![1, 0xE9, 0x03, 0, 0x44, 0x01, 0, 0]
+            ),
+        ]
+    );
+
+    set_position(&player, 100.0, 100.0, 100.0);
+    server.systems.quests.spheres.tick(&server);
+    assert_eq!(
+        client.drain(),
+        vec![
+            (sc::SCAreaTeamMessagePacket, vec![0, 0xEA, 0x03, 0, 0]),
+            (
+                sc::SCAreaChatBubblePacket,
+                vec![0, 0xE9, 0x03, 0, 0x44, 0x01, 0, 0]
+            ),
+        ]
+    );
+}
+
+#[test]
+fn sphere_area_loader_missing_file_is_empty_and_skips_bad_rows() {
+    let dir = crate::data::pak::test_util::temp_path("sphere_area_load");
+    assert!(load_sphere_areas(&dir, |_| true).is_empty());
+    let world = dir.join("Data").join("Worlds").join("main_world");
+    std::fs::create_dir_all(&world).unwrap();
+    assert!(load_sphere_areas(&dir, |_| true).is_empty());
+
+    std::fs::write(
+        world.join("sphere_area_fill.json"),
+        r#"[
+            {"sphere_id": 7, "zone": 100, "x": 1.0, "y": 2.0, "z": 3.0, "radius": 4.0},
+            {"sphere_id": 8, "zone": 100, "x": 1.0, "y": 2.0, "z": 3.0, "radius": 4.0},
+            {"sphere_id": 9, "zone": 100}
+        ]"#,
+    )
+    .unwrap();
+    let areas = load_sphere_areas(&dir, |id| id == 7);
+    assert_eq!(areas, vec![area_sphere(7, 1.0, 2.0, 3.0, 4.0)]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+fn real_data_sphere_areas_load_the_guarded_1_2_table() {
+    let Some(conn) = real_db() else {
+        return;
+    };
+    let known: std::collections::HashSet<u32> = {
+        let mut stmt = conn.prepare("SELECT id FROM spheres").unwrap();
+        let rows = stmt.query_map([], |r| r.get::<_, i64>(0)).unwrap();
+        rows.map(|r| r.unwrap() as u32).collect()
+    };
+    let mut types = std::collections::HashMap::new();
+    {
+        let mut stmt = conn
+            .prepare("SELECT id, sphere_detail_type FROM spheres")
+            .unwrap();
+        for row in stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .unwrap()
+        {
+            let (id, detail_type) = row.unwrap();
+            types.insert(id as u32, detail_type);
+        }
+    }
+    let app = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("app");
+    let areas = load_sphere_areas(&app, |id| known.contains(&id));
+    assert_eq!(areas.len(), 2113);
+    assert_eq!(
+        areas.iter().filter(|a| a.world == "main_world").count(),
+        1914
+    );
+    assert_eq!(
+        areas
+            .iter()
+            .filter(|a| types.get(&a.sphere_id).map(String::as_str) == Some("SphereBubble"))
+            .count(),
+        430
+    );
 }
 
 #[tokio::test]
