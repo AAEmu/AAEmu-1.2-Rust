@@ -314,7 +314,7 @@ impl ClientPacket for CSCofferInteractionPacket {
         conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            tracing::warn!(
+            tracing::debug!(
                 "CofferInteraction, cofferObjId: {}, opening: {}",
                 self.coffer_obj_id,
                 self.opening

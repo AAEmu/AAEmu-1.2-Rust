@@ -1006,3 +1006,80 @@ async fn real_seed_and_sapling_placements_drive_the_handler() {
     );
     assert_eq!(codes, vec![error_message::DOODAD_SIM_AREA]);
 }
+
+/// Planting is routine (the bots plant hundreds of crops a day): its success path must not log
+/// at `WARN`, nor must a doodad the server places itself (a blood stain on a death).
+#[tokio::test]
+async fn successful_planting_logs_nothing_at_warn() {
+    use tracing::Level;
+    let (server, player, id, mut client) = fixture_with_client();
+    let (codes, events) = crate::test_support::capture_events(|| {
+        send_placement(
+            &mut client,
+            &server,
+            &player,
+            4000,
+            id,
+            (101.0, 100.0, DRY_Z),
+        )
+    });
+    assert!(codes.is_empty(), "{codes:?}");
+    assert_eq!(server.world.world(0).unwrap().all_doodads().len(), 1);
+    let loud: Vec<_> = events.iter().filter(|(l, _)| *l <= Level::WARN).collect();
+    assert!(loud.is_empty(), "{loud:?}");
+    // Still traceable at debug level.
+    for what in ["CreateDoodad, Id: 4000", "is placing a doodad 4000"] {
+        assert!(
+            events
+                .iter()
+                .any(|(l, m)| *l == Level::DEBUG && m.contains(what)),
+            "{what}: {events:?}"
+        );
+    }
+
+    // `Character.DoDie` places the blood stain (878 in the data) for the dead character.
+    let (stain, events) = crate::test_support::capture_events(|| {
+        create_player_doodad_server_spawned(
+            &server,
+            &player,
+            4000,
+            (100.0, 100.0, DRY_Z),
+            0.0,
+            1.0,
+            0,
+            0,
+            0,
+            0,
+            true,
+        )
+    });
+    assert!(stain.is_some());
+    let loud: Vec<_> = events.iter().filter(|(l, _)| *l <= Level::WARN).collect();
+    assert!(loud.is_empty(), "{loud:?}");
+}
+
+/// A refused planting is a real problem (the client checks the rules itself first): it stays
+/// at `WARN`.
+#[tokio::test]
+async fn refused_planting_is_still_logged_at_warn() {
+    use tracing::Level;
+    let (server, player, id, mut client) = fixture_with_client();
+    let (codes, events) = crate::test_support::capture_events(|| {
+        // The wrong doodad for this seed.
+        send_placement(
+            &mut client,
+            &server,
+            &player,
+            4005,
+            id,
+            (101.0, 100.0, DRY_Z),
+        )
+    });
+    assert!(!codes.is_empty());
+    assert!(
+        events
+            .iter()
+            .any(|(l, m)| *l == Level::WARN && m.contains("CreateDoodad")),
+        "{events:?}"
+    );
+}
