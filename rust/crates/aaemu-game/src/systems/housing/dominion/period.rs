@@ -10,9 +10,9 @@
 //! * an owned territory without either source is peace (`5`, the snapshot's default) and an
 //!   unowned one is `0` (no dominion).
 //!
-//! `None` means the period cannot be resolved. As in the snapshot, the calendar view is read
-//! with `declared = false`: without WP-S2 a calendar declare period ends directly in peace.
-//! That is a known limitation, not a period this accessor invents.
+//! `None` means the period cannot be resolved. The calendar view uses the accepted
+//! declaration of the running cycle (WP-SD2a), so a declared territory walks 2 -> 3 -> 4 -> 5;
+//! without one the declare period ends directly in peace.
 
 use chrono::Utc;
 

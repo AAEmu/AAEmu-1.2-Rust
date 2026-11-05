@@ -1679,6 +1679,199 @@ mod authority_tests {
             .update(|c| c.housing.siege_calendar_timezone = "+00:00".into());
     }
 
+    const CAMP_ITEM: u32 = 21_130;
+    const CAMP_ITEM_OTHER: u32 = 21_134;
+    const DECLARE_SKILL_ID: u32 = 16_918;
+
+    fn add_siege_master(f: &Fixture, expedition: u32, policy_siege_master: bool) {
+        f.server.expeditions.with_mut(expedition, |guild| {
+            guild.policies.push(expedition::ExpeditionRolePolicy {
+                expedition_id: expedition,
+                role: 255,
+                name: "master".into(),
+                dominion_declare: true,
+                invite: true,
+                expel: true,
+                promote: true,
+                dismiss: true,
+                chat: true,
+                manager_chat: true,
+                siege_master: policy_siege_master,
+                join_siege: true,
+            });
+        });
+    }
+
+    fn add_camp_use_data(f: &mut Fixture) {
+        let data = data_mut(f);
+        data.systems
+            .housing
+            .castles
+            .siege_zones
+            .get_mut(&ZONE)
+            .unwrap()
+            .declare_item_id = CAMP_ITEM;
+        for id in [CAMP_ITEM, CAMP_ITEM_OTHER] {
+            data.items.templates.insert(
+                id,
+                ItemTemplate {
+                    use_skill_id: DECLARE_SKILL_ID,
+                    ..ItemTemplate::plain(id, 1)
+                },
+            );
+        }
+        data.systems.npcs.doodad.templates.insert(
+            4307,
+            crate::systems::npcs::doodad::templates::DoodadTemplate {
+                id: 4307,
+                ..Default::default()
+            },
+        );
+        data.systems.skills.add_effect(
+            crate::systems::skills::data::EffectKind::SpecialEffect,
+            crate::systems::skills::data::EffectTemplate::Special(
+                crate::systems::skills::data::effects::SpecialEffect {
+                    id: 5564,
+                    special_effect_type_id: 15,
+                    value1: 4307,
+                    value2: 0,
+                    value3: 0,
+                    value4: 0,
+                },
+            ),
+            5564,
+        );
+        let mut effect = crate::systems::skills::tests::skill_effect(
+            1,
+            crate::systems::skills::data::EffectKind::SpecialEffect,
+            5564,
+        );
+        effect.consume_source_item = true;
+        effect.consume_item_count = 1;
+        data.systems.skills.add_skill(SkillTemplate {
+            id: DECLARE_SKILL_ID,
+            target_type: 0,
+            target_selection: 1,
+            max_range: 4,
+            effects: vec![effect],
+            ..Default::default()
+        });
+    }
+
+    const CAMP_ATTACKER: u32 = 88;
+
+    fn add_camp_attacker(f: &mut Fixture) {
+        f.server.expeditions.with_mut(EXPEDITION, |guild| {
+            guild
+                .members
+                .retain(|member| member.character_id != f.member.character_id);
+        });
+        f.server.expeditions.add(Expedition {
+            faction: SystemFaction {
+                id: CAMP_ATTACKER,
+                owner_id: f.member.character_id,
+                name: "Camp".into(),
+                ..Default::default()
+            },
+            members: vec![expedition::member_from_character(
+                &f.server,
+                CAMP_ATTACKER,
+                &f.member,
+                true,
+            )],
+            policies: Vec::new(),
+            removed_members: Vec::new(),
+            is_disbanded: false,
+        });
+        add_siege_master(f, CAMP_ATTACKER, true);
+        f.member.data().unit.expedition_id = CAMP_ATTACKER;
+        f.member.data().is_online = true;
+        f.member.data().unit.transform.set_xyz(600.0, 100.0, 100.0);
+        f.member_client.conn.active_char = Some(f.member.clone());
+    }
+
+    fn camp_fixture() -> Fixture {
+        let mut f = fixture();
+        crate::systems::economy::bridges::install(&f.server);
+        crate::systems::npcs::install_hooks(&f.server);
+        add_camp_use_data(&mut f);
+        enable_calendar(&f);
+        owned(&f);
+        add_siege_master(&f, EXPEDITION, true);
+        add_camp_attacker(&mut f);
+        f.server
+            .systems
+            .housing
+            .calendar
+            .set_clock(Some(kst(2014, 1, 10, 22, 31)));
+        f.leader.data().is_online = true;
+        f.leader.data().unit.transform.set_xyz(600.0, 100.0, 100.0);
+        f
+    }
+
+    fn give_camp_item(f: &Fixture, player: &PlayerRef, template: u32) -> u64 {
+        let id = u64::from(f.server.ids.item.get_next_id().unwrap());
+        let mut item = Item::create(
+            id,
+            f.server.game_data.items.template(template).unwrap(),
+            1,
+            0,
+            1,
+            &f.server.game_data.items,
+            0,
+        );
+        item.owner_id = u64::from(player.character_id);
+        item.slot_type = slot_type::INVENTORY;
+        let container = Inv::of(player).get(slot_type::INVENTORY).unwrap();
+        assert!(
+            container
+                .lock()
+                .unwrap()
+                .add_new_item(item, 0, &f.server.game_data.items)
+                .unwrap(),
+            "camp item placed in the bag"
+        );
+        f.server.items.add_container(container);
+        id
+    }
+
+    fn item_count(f: &Fixture, player: &PlayerRef, template: u32) -> i32 {
+        f.server
+            .systems
+            .skills
+            .ext
+            .items()
+            .item_count(&f.server, player, template)
+    }
+
+    fn cast_camp(
+        server: &GameServer,
+        client: &mut TestClient,
+        player: &PlayerRef,
+        item_id: u64,
+        template: u32,
+    ) {
+        player.data().unit.skill_last_used_ms = 0;
+        player.data().unit.global_cooldown_ms = 0;
+        crate::systems::skills::handlers::start_skill(
+            server,
+            &mut client.conn,
+            crate::systems::skills::handlers::CSStartSkillPacket {
+                skill_id: DECLARE_SKILL_ID,
+                caster: SkillCaster::Item {
+                    obj_id: player.obj_id,
+                    item_id,
+                    item_template_id: template,
+                    type1: 0,
+                    type2: 0,
+                },
+                target: SkillCastTarget::Unit(player.obj_id),
+                flag: 0,
+                skill_object: crate::systems::skills::types::SkillObject::None,
+            },
+        );
+    }
+
     fn give_pack(f: &Fixture, id: u64, template_id: u32) {
         give_pack_for(f, &f.leader, id, template_id);
     }
@@ -3440,6 +3633,181 @@ mod authority_tests {
             assert_eq!(states.len(), 1, "one SCSiegeState at period {period}");
             assert_eq!(states[0].1[60], period);
         }
+    }
+
+    #[tokio::test]
+    async fn camp_use_records_a_declaration_consumes_the_item_and_announces_the_team() {
+        let mut f = camp_fixture();
+        f.member_client.drain();
+        let item = give_camp_item(&f, &f.member, CAMP_ITEM);
+        assert_eq!(item_count(&f, &f.member, CAMP_ITEM), 1, "item given");
+        cast_camp(&f.server, &mut f.member_client, &f.member, item, CAMP_ITEM);
+        let packets_debug = f.member_client.drain();
+        let state = f.server.systems.housing.dominions.get(ZONE).unwrap();
+        let declaration = state.declaration.unwrap_or_else(|| {
+            panic!(
+                "declaration accepted; packets={packets_debug:?} items={}",
+                item_count(&f, &f.member, CAMP_ITEM)
+            )
+        });
+        assert_eq!(declaration.attacker_expedition_id, CAMP_ATTACKER);
+        assert_eq!(item_count(&f, &f.member, CAMP_ITEM), 0);
+        assert_ne!(declaration.hq_obj_id, 0, "the spawned camp is bound");
+        let mut packets = f.member_client.drain();
+        packets.extend(f.client.drain());
+        let declared = packets
+            .iter()
+            .find(|packet| packet.0 == sc::SCSiegeDeclaredPacket)
+            .expect("SCSiegeDeclared");
+        assert_eq!(&declared.1[2..6], &CAMP_ATTACKER.to_le_bytes());
+        assert!(packets
+            .iter()
+            .any(|packet| packet.0 == sc::SCSiegeStatePacket));
+
+        // Cancel (the shipped GM route) announces the zero offense team.
+        f.client.drain();
+        f.member_client.drain();
+        crate::systems::housing::dominion::declare::cancel(&f.server, ZONE).unwrap();
+        let mut packets = f.client.drain();
+        packets.extend(f.member_client.drain());
+        let declared = packets
+            .iter()
+            .find(|packet| packet.0 == sc::SCSiegeDeclaredPacket)
+            .expect("cancel announced");
+        assert_eq!(&declared.1[2..6], &0u32.to_le_bytes());
+    }
+
+    #[tokio::test]
+    async fn camp_use_refusals_use_the_client_ids_and_keep_the_item() {
+        /// Casts once with the prepared fixture and asserts the refusal and the kept item.
+        fn expect_refusal(f: &mut Fixture, template: u32, expected: i16) {
+            f.member_client.drain();
+            let item = give_camp_item(f, &f.member, template);
+            cast_camp(&f.server, &mut f.member_client, &f.member, item, template);
+            assert!(
+                errors(&mut f.member_client).contains(&expected),
+                "expected error {expected}"
+            );
+            assert_eq!(
+                item_count(f, &f.member, template),
+                1,
+                "refusal keeps the item"
+            );
+        }
+
+        // 342: no dominion in the zone the caster stands in.
+        let mut f = camp_fixture();
+        f.member.data().unit.transform.zone_id = TEST_ZONE + 1;
+        expect_refusal(&mut f, CAMP_ITEM, 342);
+
+        // 343: own zone (the caster is in the owning expedition).
+        let mut f = camp_fixture();
+        f.client.drain();
+        let item = give_camp_item(&f, &f.leader, CAMP_ITEM);
+        cast_camp(&f.server, &mut f.client, &f.leader, item, CAMP_ITEM);
+        assert!(errors(&mut f.client).contains(&343));
+        assert_eq!(item_count(&f, &f.leader, CAMP_ITEM), 1);
+
+        // 344: the camp item belongs to another zone.
+        let f = camp_fixture();
+        let mut f = f;
+        expect_refusal(&mut f, CAMP_ITEM_OTHER, 344);
+
+        // 386: not the declaration period.
+        let mut f = camp_fixture();
+        f.server
+            .systems
+            .housing
+            .calendar
+            .set_clock(Some(kst(2014, 1, 8, 23, 0)));
+        expect_refusal(&mut f, CAMP_ITEM, 386);
+
+        // 345: inside the authored radius_declare of the lodestone.
+        let mut f = camp_fixture();
+        f.member.data().unit.transform.set_xyz(105.0, 100.0, 100.0);
+        expect_refusal(&mut f, CAMP_ITEM, 345);
+
+        // 459: the caster's rank lacks the SiegeMaster policy (459 vs 581 is UNKNOWN).
+        let mut f = camp_fixture();
+        f.server.expeditions.with_mut(CAMP_ATTACKER, |guild| {
+            guild.policies[0].siege_master = false
+        });
+        expect_refusal(&mut f, CAMP_ITEM, 459);
+
+        // 444: pirate expedition.
+        let mut f = camp_fixture();
+        f.server.expeditions.with_mut(CAMP_ATTACKER, |guild| {
+            guild.faction.mother_id = crate::data::world_data::factions::PIRATE;
+        });
+        expect_refusal(&mut f, CAMP_ITEM, 444);
+
+        // 639: the expedition already has an unfinished siege.
+        let mut f = camp_fixture();
+        let now = Utc::now().timestamp();
+        f.server
+            .systems
+            .housing
+            .dominions
+            .schedule_siege(ZONE, CAMP_ATTACKER, now + 300, now + 900, now)
+            .unwrap();
+        expect_refusal(&mut f, CAMP_ITEM, 639);
+
+        // 442: the same expedition already declared this cycle.
+        let mut f = camp_fixture();
+        let first = give_camp_item(&f, &f.member, CAMP_ITEM);
+        cast_camp(&f.server, &mut f.member_client, &f.member, first, CAMP_ITEM);
+        f.member_client.drain();
+        expect_refusal(&mut f, CAMP_ITEM, 442);
+
+        // 443: another expedition already declared this cycle.
+        let mut f = camp_fixture();
+        let first = give_camp_item(&f, &f.member, CAMP_ITEM);
+        cast_camp(&f.server, &mut f.member_client, &f.member, first, CAMP_ITEM);
+        f.client.drain();
+        f.server.expeditions.with_mut(EXPEDITION, |guild| {
+            guild.members.retain(|m| m.character_id != 1)
+        });
+        f.server.expeditions.add(Expedition {
+            faction: SystemFaction {
+                id: 99,
+                owner_id: f.leader.character_id,
+                name: "Other".into(),
+                ..Default::default()
+            },
+            members: vec![expedition::member_from_character(
+                &f.server, 99, &f.leader, true,
+            )],
+            policies: Vec::new(),
+            removed_members: Vec::new(),
+            is_disbanded: false,
+        });
+        {
+            use crate::systems::social::expedition::ExpeditionRolePolicy;
+            f.server.expeditions.with_mut(99, |guild| {
+                guild.policies.push(ExpeditionRolePolicy {
+                    expedition_id: 99,
+                    role: 255,
+                    name: "master".into(),
+                    dominion_declare: true,
+                    invite: true,
+                    expel: true,
+                    promote: true,
+                    dismiss: true,
+                    chat: true,
+                    manager_chat: true,
+                    siege_master: true,
+                    join_siege: true,
+                });
+            });
+        }
+        f.leader.data().unit.expedition_id = 99;
+        f.leader.data().unit.transform.set_xyz(600.0, 100.0, 100.0);
+        f.client.conn.active_char = Some(f.leader.clone());
+        f.client.drain();
+        let item = give_camp_item(&f, &f.leader, CAMP_ITEM);
+        cast_camp(&f.server, &mut f.client, &f.leader, item, CAMP_ITEM);
+        assert!(errors(&mut f.client).contains(&443));
+        assert_eq!(item_count(&f, &f.leader, CAMP_ITEM), 1);
     }
 
     #[tokio::test]

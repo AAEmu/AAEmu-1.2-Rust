@@ -4444,6 +4444,36 @@ and in NPC wandering / buff remaining times.
   `declaration_materialises_at_warmup_and_the_calendar_walks_periods_three_to_five`,
   `dominion_declaration_round_trips_through_its_row` (MySQL),
   `a_declaration_that_cannot_belong_to_a_running_cycle_is_discarded_on_restart`.
+* systems::housing / systems::skills (WP-SD2b, 2026-11-06): the Siege Camp item use now runs
+  the declaration. The `SpawnDoodad(4307)` effect of skill 16918 (the six
+  `siege_zones.declare_item_id` items) asks `dominion::declare::handle_camp_use` before it
+  spawns; the check runs under the housing operation lock and only while
+  `Housing.SiegeCalendar` is enabled (with the calendar off, the camp use keeps its old plain
+  spawn, so GM-scheduled sieges are untouched). Rules, in this server's order, with the
+  client's ids: zone has no owned dominion 342; the caster's expedition is the owner 343; the
+  camp item is not this zone's `declare_item_id` 344; not the declare period (2) 386;
+  horizontal distance to the live lodestone below `guard_tower_settings.radius_declare`
+  (250/450 m, the authored value, not the old `OFFENSE_HQ_MIN_DISTANCE` constant) 345; the
+  caster's expedition rank lacks the `SiegeMaster` policy 459; pirate expedition 444; the
+  expedition already has an unfinished siege 639; a declaration already exists 442/443
+  (`DominionError::AlreadyDeclared`/`DeclaredByOther`). On success the declaration is
+  recorded, the camp is spawned and its real obj id/position are bound into the declaration
+  (a second `SCSiegeDeclared`, then the phase `SCSiegeState`, carries the offense team); the
+  source item is consumed by the normal cast debit. Every refusal cancels the effect
+  (`effect_cancelled`), which makes the cast path refund the item — a refused declaration
+  keeps the camp. A spawn failure after acceptance also rolls the declaration back and
+  cancels the effect. Cancelling is `dominion undeclare [zone]` (the GM command), which clears
+  the declaration and broadcasts the zero offense team; the in-game trigger is UNKNOWN
+  (destroying/removing the camp is the candidate), so it is capture-pending.
+  **Capture-pending assumptions:** 459 is used for the missing policy although 581 is the
+  other candidate text; the placement thresholds behind 625 (resurrection point), 633
+  (house), 661 (another zone) and 741 (obstacle), and the "siege too imminent" window behind
+  760, are UNKNOWN and are NOT enforced (no refusal today); the cancellation trigger's UI is
+  UNKNOWN. The check order is this server's policy. Tests:
+  `camp_use_records_a_declaration_consumes_the_item_and_announces_the_team` (real
+  `CSStartSkillPacket` item cast, item consumed once, cancel zero team),
+  `camp_use_refusals_use_the_client_ids_and_keep_the_item` (342/343/344/386/345/459/444/639/
+  442/443, item kept each time).
 * systems::housing (siege result achievements, WP-SD6a, 2026-11-05): a finished siege credits
   `char_records` kinds 57/59 to the attacking roster and 58/60 to the defenders with
   `value1 = zone_group_id` (mapping EVIDENCED from the authored records and the Korean

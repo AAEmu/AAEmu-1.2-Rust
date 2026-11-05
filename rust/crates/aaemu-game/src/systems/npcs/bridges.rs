@@ -21,7 +21,7 @@ use crate::systems::skills::ext::NpcSkillHooks;
 use crate::systems::skills::geometry::{around_radius, Target};
 use crate::systems::skills::stats::StatKind;
 use crate::systems::skills::types::{BuffRemoveOn, SkillCastTarget, SkillCaster, SkillObject};
-use crate::world::{NpcRef, PlayerRef, WorldInstance, WorldObject};
+use crate::world::{DoodadRef, NpcRef, PlayerRef, WorldInstance, WorldObject};
 
 use super::doodad::interactions::world_interaction_type as wi;
 use super::doodad::manager as doodads;
@@ -362,14 +362,12 @@ impl NpcSkillHooks for NpcSkills {
         zone_id: u32,
         pos: PositionAndRotation,
         delay_ms: i32,
-    ) {
-        let Some(world) = server.world.world_of(caster) else {
-            return;
-        };
+    ) -> Option<DoodadRef> {
+        let world = server.world.world_of(caster)?;
         let Some(doodad) = doodads::create(server, &world, 0, template_id, Some(caster), true)
         else {
             tracing::error!("SpawnDoodad: doodad template {template_id} does not exist");
-            return;
+            return None;
         };
         // `GeoData.GetHeight(doodad.Transform.World.Position)` (the caster-based position).
         let base = detached_transform(&world, caster);
@@ -406,6 +404,7 @@ impl NpcSkillHooks for NpcSkills {
             doodads::init_doodad(server, &world, &doodad);
             doodads::spawn(server, &world, &doodad);
         }
+        Some(doodad)
     }
 
     fn npc_pet_item_id(&self, server: &GameServer, npc: &NpcRef) -> u32 {

@@ -1066,6 +1066,35 @@ impl DominionManager {
         Ok(Some(state))
     }
 
+    /// Records the real spawned camp doodad on an accepted declaration. Returns the updated
+    /// state, or `None` when no declaration exists anymore (a racing cancel).
+    pub fn bind_declaration_hq(
+        &self,
+        zone_group_id: u32,
+        hq_obj_id: u32,
+        hq: (f32, f32, f32),
+    ) -> Result<Option<DominionState>, DominionError> {
+        if hq_obj_id == 0 || !hq.0.is_finite() || !hq.1.is_finite() || !hq.2.is_finite() {
+            return Err(DominionError::InvalidIdentity);
+        }
+        let mut inner = self.lock();
+        let Some(entry) = inner.states.get(&zone_group_id) else {
+            return Err(DominionError::Missing);
+        };
+        if entry.state.declaration.is_none() {
+            return Ok(None);
+        }
+        let mut state = entry.state.clone();
+        let revision = next_revision(&inner)?;
+        let declaration = state.declaration.as_mut().expect("checked");
+        declaration.hq_obj_id = hq_obj_id;
+        declaration.hq_x = hq.0;
+        declaration.hq_y = hq.1;
+        declaration.hq_z = hq.2;
+        replace(&mut inner, state.clone(), revision);
+        Ok(Some(state))
+    }
+
     /// Materialises the declaration into an explicit siege record at the cycle's warmup
     /// start (WP-SD2a). The check that this declaration belongs to `cycle_auction_start` and
     /// the schedule/clear happen under one lock. A record that already exists (a restart
