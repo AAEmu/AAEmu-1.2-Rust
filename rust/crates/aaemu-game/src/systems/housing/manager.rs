@@ -28,7 +28,7 @@ pub const FOR_SALE_MARKER_DOODAD_ID: u32 = 6760;
 pub const MAX_HEAVY_TAX_COUNTED: i32 = 10;
 /// `HoursForFailedTaxToReturnHouse`.
 pub const HOURS_FOR_FAILED_TAX_TO_RETURN_HOUSE: i64 = 22;
-/// `CopperPerCertificate`.
+/// `CopperPerCertificate` (fallback when `content_configs` 37 is missing).
 pub const COPPER_PER_CERTIFICATE: f64 = 1_000_000.0;
 /// `BuffConstants.Untouchable`.
 pub const BUFF_UNTOUCHABLE: u32 = 545;
@@ -36,10 +36,36 @@ pub const BUFF_UNTOUCHABLE: u32 = 545;
 pub const BUFF_REMOVAL_DEBUFF: u32 = 2250;
 /// `FactionsEnum.Monstrosity`.
 pub const FACTION_MONSTROSITY: u32 = 115;
-/// `Item.TaxCertificate` / `BoundTaxCertificate` / `AppraisalCertificate`.
+/// `Item.TaxCertificate` / `BoundTaxCertificate` / `AppraisalCertificate` (the appraisal item id
+/// is the fallback for `content_configs` 57).
 pub const TAX_CERTIFICATE: u32 = 31891;
 pub const BOUND_TAX_CERTIFICATE: u32 = 31892;
 pub const APPRAISAL_CERTIFICATE: u32 = 28085;
+
+/// `content_configs` 37: the copper per tax certificate divisor, read by the client in
+/// `FUN_39897100` (`max(1, money / value)`). The shipped 1.2 row is 1,000,000; a missing or
+/// non-positive row keeps [`COPPER_PER_CERTIFICATE`].
+pub fn copper_per_certificate(server: &GameServer) -> f64 {
+    server
+        .game_data
+        .content_configs
+        .content_config(37)
+        .filter(|value| *value > 0)
+        .map_or(COPPER_PER_CERTIFICATE, |value| value as f64)
+}
+
+/// `content_configs` 57: the appraisal certificate item id the client's sale window reads
+/// (`dll.c:657520`, `934215`). The shipped 1.2 row is 28085; a missing / non-item row keeps
+/// [`APPRAISAL_CERTIFICATE`].
+pub fn appraisal_certificate(server: &GameServer) -> u32 {
+    server
+        .game_data
+        .content_configs
+        .content_config(57)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value != 0)
+        .unwrap_or(APPRAISAL_CERTIFICATE)
+}
 
 const DAY: i64 = 24 * 3600;
 /// Existing interval between the tax due date and removal deadline.
@@ -1668,4 +1694,44 @@ pub fn house_doodads(server: &GameServer, house: &HouseRef) -> Vec<DoodadRef> {
     };
     let id = house.data().id;
     world.doodads_by_house_db_id(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::GameData;
+    use crate::test_support::test_server_with;
+
+    fn server_with(rows: &[(u32, i64)]) -> GameServer {
+        let mut data = GameData::empty();
+        for (id, value) in rows {
+            data.content_configs.insert(*id, *value);
+        }
+        test_server_with(data)
+    }
+
+    /// Shipped-data no-op: a missing row keeps the old constants (ids 37 and 57 equal them).
+    #[tokio::test]
+    async fn certificate_config_values_fall_back_to_the_constants() {
+        let server = test_server_with(GameData::empty());
+        assert_eq!(copper_per_certificate(&server), COPPER_PER_CERTIFICATE);
+        assert_eq!(appraisal_certificate(&server), APPRAISAL_CERTIFICATE);
+    }
+
+    /// `content_configs` 37 / 57 drive the sale certificate count and the mailed item.
+    #[tokio::test]
+    async fn certificate_config_values_follow_content_configs() {
+        let server = server_with(&[(37, 500), (57, 9_999)]);
+        assert_eq!(copper_per_certificate(&server), 500.0);
+        assert_eq!(appraisal_certificate(&server), 9_999);
+        // 1001 copper at 500 per certificate -> ceil(2.002) = 3.
+        assert_eq!(
+            crate::systems::housing::ops::calculate_sale_certificates(&server, 1_001),
+            3
+        );
+        // Invalid rows (0 / negative) keep the fallbacks.
+        let server = server_with(&[(37, 0), (57, -4)]);
+        assert_eq!(copper_per_certificate(&server), COPPER_PER_CERTIFICATE);
+        assert_eq!(appraisal_certificate(&server), APPRAISAL_CERTIFICATE);
+    }
 }
