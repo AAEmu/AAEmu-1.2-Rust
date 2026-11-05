@@ -505,6 +505,22 @@ checks use, so a large NPC is not refused at its edge. Override it in
 }
 ```
 
+## Social feature switches (`Configurations/Social.json`)
+
+Rust-only switches for social content whose 1.2 behaviour is not fully
+evidenced. Defaults are shipped in `Configurations/Social.json` and can be
+overridden in `Config.Local.json` or with `Social__BountyBoard`.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `BountyBoard` | `false` | Fill the `CSNaviOpenBounty` answer with the wanted-player board (characters that have an unpaid bounty) instead of the empty list. Rows are capped at the client's 20 entries and online / offline characters are both listed. `false` keeps the C# server's empty list. |
+
+**Capture-pending:** the C# server noted that a filled board broke the 1.2
+client Lua and the cause was never confirmed. Keep `BountyBoard` off until an
+original-client run opens the board without a Lua error. Row details and the
+open question are recorded in `rust/crates/aaemu-game/PORTING.md`
+(BOUNTY-board).
+
 ## Territory property tax
 
 Claimed Dominion provinces apply their current territory tax rate to ordinary taxable housing
