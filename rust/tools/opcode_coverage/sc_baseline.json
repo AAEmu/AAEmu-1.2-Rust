@@ -1,8 +1,8 @@
 {
   "counts": {
     "sc_opcodes": 517,
-    "typeless": 82,
-    "never_sent": 48
+    "typeless": 81,
+    "never_sent": 49
   },
   "typeless": [
     "CSQuestAcceptConditionalPacket",
@@ -47,7 +47,6 @@
     "SCPlaySequencePacket",
     "SCPlotProcessingTimePacket",
     "SCQuestListPacket",
-    "SCQuestMailSentPacket",
     "SCQuestUnitReqFailedPacket",
     "SCRaceCondPacket",
     "SCRacingPacket",
@@ -123,6 +122,7 @@
     "SCMineAmountPacket",
     "SCPlaytimePacket",
     "SCPremiumPointChangedPacket",
+    "SCQuestMailSentPacket",
     "SCRankAlarmPacket",
     "SCSearchListPacket",
     "SCSkillUpgradedPacket",

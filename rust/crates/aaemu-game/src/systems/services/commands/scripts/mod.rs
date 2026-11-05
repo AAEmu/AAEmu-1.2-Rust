@@ -58,6 +58,7 @@ pub mod invisible;
 pub mod kick;
 pub mod kill;
 pub mod kit;
+pub mod mail;
 pub mod move_all;
 pub mod move_cmd;
 pub mod move_to;
@@ -516,6 +517,8 @@ pub fn all_commands(env: &ScriptEnv) -> Vec<(&'static [&'static str], Arc<dyn Co
             &["secondpassword", "secondpass", "clearsecondpassword"],
             Arc::new(second_password_cmd::SecondPassword::new(env)),
         ),
+        // Mail (Rust only: `/mail admin` system letter to an online or offline character)
+        (&["mail"], Arc::new(mail::MailCommand::new(env))),
         // WorldCmd.cs
         (&["world"], Arc::new(roots::world_cmd())),
     ]

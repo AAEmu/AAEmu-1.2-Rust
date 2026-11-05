@@ -1246,7 +1246,12 @@ fn notify_new_mail_at(
     // If unread and ready to deliver
     if m.header.status != mail_status::READ && m.body.recv_date <= time && !m.is_delivered {
         if let Some(player) = server.world.character_by_name(receiver_name) {
-            // TODO: Mia mail stuff
+            // Mia mail (types 11 MIA_SEND / 12 MIA_RECV) is the separate commercial mailbox in
+            // the 1.2 client (`mailbox/comercialmail/*`, `X2MiaMail`, `unreadMiaMail`), fed by
+            // the cash shop path, not by this notifier. The C# branch was empty as well.
+            // Whether this packet should carry `unreadMiaMail` instead of the ordinary count is
+            // capture-pending (case `MIA-MAIL-1`); the existing `update_received` routing
+            // (MIA_RECV -> mia_received, everything else -> received) is therefore unchanged.
             let add_body = m.mail_type == mail_type::CHARGED;
             let count = {
                 let mut c = player.data();
