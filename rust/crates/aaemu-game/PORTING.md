@@ -5493,14 +5493,14 @@ check at all; this follows only the 1.2 client.
 ## Recipe learning and the learned-craft gate (2026-11-04)
 
 `TrainCraftEffect` was trace-only in the C# and in the port, so a recipe item was consumed and
-nothing happened. The 1.2 data: 2,561 `items.impl_id = 12` recipe items carry the generic use
-skill 11144 (2,461) or 10003; skill 11144 -> `skill_effects` 1611 -> effect 1750
+nothing happened. The 1.2 data: of the 2,561 `items.impl_id = 12` recipe items, 2,461 use the
+generic skill 11144, one uses 10003, and 99 have no use skill; skill 11144 -> `skill_effects` 1611 -> effect 1750
 `TrainCraftEffect` (actual_id 305) -> `train_craft_effects` 305 -> craft 169. Because 11144
 teaches the fixed craft 169 for thousands of items, the learned craft comes from
 `item_recipes.item_id` -> `craft_id` for the cast's source item; only a `TrainCraftEffect` with
 no source item (the 131 plain training skills) uses `train_craft_effects.craft_id`. The loader
-is `systems/economy/craft_learning.rs`; it skips the 48 recipe rows and 1 effect row whose craft
-is missing from `crafts` (with one warning) and builds the learn-gated set as the union of both
+is `systems/economy/craft_learning.rs`; it skips the 49 recipe rows (48 distinct crafts) and 1
+effect row whose craft is missing from `crafts` (with one warning) and builds the learn-gated set as the union of both
 tables (2,762 valid crafts of the 7,010 in compact; the other crafts have no learn source, so
 they stay ungated).
 
