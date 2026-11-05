@@ -41,6 +41,9 @@
 //! ginvite [name]                     CSInviteToExpedition to the peer
 //! gaccept                            wait for the guild invitation and join
 //! greply <faction id> <0|1>          CSReplyExpeditionInvitation without waiting for an invite
+//! hangup                            hard disconnect (socket closed, no CSLeaveWorld); ends the script
+//! expectseen <code> [secs]          fail unless an SCErrorMsg with that code arrived since the last
+//!                                   `expectseen` (also one an earlier command already drained)
 //! sync <token> [count]              suite barrier: wait until `count` bots (default: all) are here
 //! expectpkt <PacketName> [secs]     fail unless the packet arrives within `secs` (default 5)
 //! expectnopkt <PacketName> [secs]   fail if the packet arrives within `secs` (default 5)
@@ -425,6 +428,8 @@ async fn run_lines(
     let mut clock = 40_000u32;
     let mut last_npc = 0u32;
     let mut consumed: HashSet<usize> = HashSet::new();
+    // `expectseen`: the `game.state.events` index the next search starts at.
+    let mut errors_from = 0usize;
     let mut mate: Option<(u32, u16)> = None;
     for (n, raw) in text.lines().enumerate() {
         let line = raw.trim();
@@ -1174,6 +1179,36 @@ async fn run_lines(
                     .drain(Duration::from_millis(1200), Duration::from_secs(6))
                     .await?;
                 show(&got);
+            }
+            "expectseen" => {
+                let code: i16 = num(&parts, 0)?;
+                let secs: u64 = parts.get(1).and_then(|x| x.parse().ok()).unwrap_or(5);
+                let deadline = Instant::now() + Duration::from_secs(secs);
+                loop {
+                    let found = game.state.events[errors_from.min(game.state.events.len())..]
+                        .iter()
+                        .position(
+                            |e| matches!(e, crate::game::GameEvent::ErrorMsg(c) if *c == code),
+                        );
+                    if let Some(i) = found {
+                        errors_from = errors_from.min(game.state.events.len()) + i + 1;
+                        println!("    SCErrorMsg {code} seen");
+                        break;
+                    }
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        bail!("no SCErrorMsg {code} within {secs} s");
+                    }
+                    game.recv_within(left.min(Duration::from_millis(250)))
+                        .await?;
+                }
+            }
+            "hangup" => {
+                // A hard disconnect: the socket closes without `CSLeaveWorld` and the script
+                // ends here (the server runs its disconnect cleanup, not the 10 s leave).
+                game.hang_up().await;
+                r.end(s, "hung up");
+                return Ok(());
             }
             "partyinvite" => {
                 let target = parts.first().context("name")?;
