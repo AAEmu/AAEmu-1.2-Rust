@@ -44,11 +44,17 @@ pub struct ActiveCharacter {
 pub const ITEM_CREST_INK: u32 = 17663;
 /// `Item.CrestStamp` template id.
 pub const ITEM_CREST_STAMP: u32 = 17662;
+/// `Item.CrestBrainstorm` template id (the crest printer's custom-upload reagent).
+pub const ITEM_CREST_BRAINSTORM: u32 = 11127;
 
 pub trait StreamWorld: Send + Sync {
     /// `WorldManager.GetWorld(instanceId).GetInCell<Doodad>(x, y)`. `None` = no such world
     /// instance (a `NullReferenceException` in C#, which closes the stream connection).
     fn doodads_in_cell(&self, instance_id: u32, x: i32, y: i32) -> Option<Vec<StreamDoodad>>;
+
+    /// `WorldManager.GetWorld(instanceId)?.GetDoodad(objId)`: a live doodad of the player's
+    /// instance (the crest printer check, WP-U1).
+    fn doodad(&self, instance_id: u32, obj_id: u32) -> Option<StreamDoodad>;
 
     /// `NameManager.GetCharacterName(id)`.
     fn character_name(&self, character_id: u32) -> Option<String>;
@@ -68,6 +74,10 @@ pub struct NullStreamWorld;
 impl StreamWorld for NullStreamWorld {
     fn doodads_in_cell(&self, _instance_id: u32, _x: i32, _y: i32) -> Option<Vec<StreamDoodad>> {
         Some(Vec::new())
+    }
+
+    fn doodad(&self, _instance_id: u32, _obj_id: u32) -> Option<StreamDoodad> {
+        None
     }
 
     fn character_name(&self, _character_id: u32) -> Option<String> {
