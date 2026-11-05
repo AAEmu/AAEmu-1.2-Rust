@@ -229,6 +229,8 @@ cs_packet!(
 
 sc_packet!(
     /// `SCCharacterRenamedPacket(characterId, oldName, newName)` (not sent by the 1.2 C#).
+    /// Client serializer `FUN_397b7820`; handler `FUN_391df6e0`. Sent by
+    /// `systems::services::character_rename` on a GM rename.
     SCCharacterRenamedPacket { character_id: u32, old_name: String, new_name: String } |self, s| {
         s.write_u32(self.character_id)
             .write_str(&self.old_name)

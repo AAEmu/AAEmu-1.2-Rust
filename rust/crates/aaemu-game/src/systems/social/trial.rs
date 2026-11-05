@@ -1274,6 +1274,20 @@ impl TrialManager {
         });
     }
 
+    /// Updates the cached defendant name of an in-progress trial (character rename). Returns the
+    /// number of changed trials. Trials are runtime only; the name is not persisted.
+    pub fn rename_character(&self, character_id: u32, new_name: &str) -> usize {
+        let mut st = self.st();
+        let mut changed = 0;
+        for trial in st.trials.values_mut() {
+            if trial.defendant_id == character_id && trial.defendant_name != new_name {
+                trial.defendant_name = new_name.to_string();
+                changed += 1;
+            }
+        }
+        changed
+    }
+
     /// The configured court rooms (snapshot).
     pub fn court_rooms(&self) -> Vec<CourtRoom> {
         self.st().rooms.clone()
