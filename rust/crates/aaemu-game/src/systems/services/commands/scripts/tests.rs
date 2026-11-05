@@ -345,6 +345,8 @@ fn registered_commands_match_the_csharp_scripts() {
                     | ["premium", "setpremium"]
                     | ["secondpassword", "secondpass", "clearsecondpassword"]
                     | ["mail"]
+                    | ["auction_post_siege_items", "auction_post_siege"]
+                    | ["auction_cancel"]
             )
         })
         .collect();
@@ -394,8 +396,10 @@ fn load_resolves_collisions_like_csharp() {
     assert!(super::load(&m, &ScriptEnv::default()));
     let keys = m.get_command_keys();
     // Original commands plus Dominion administration, collection and player registration,
-    // and the Rust-only `/premium` / `/secondpassword` / `/mail` admin commands.
-    assert_eq!(keys.len(), 101);
+    // and the Rust-only `/premium` / `/secondpassword` / `/mail` admin commands plus the
+    // retail auction GM keys (`/auction_post_siege_items` with alias `/auction_post_siege`,
+    // `/auction_cancel`).
+    assert_eq!(keys.len(), 103);
     // `GoldCmd` (registered after `AddGold`) owns `gold`, and `AddGold`'s aliases lead to it.
     for alias in ["gold", "addgold", "add_gold"] {
         let c = m.get_command_interface_by_name(alias).expect(alias);

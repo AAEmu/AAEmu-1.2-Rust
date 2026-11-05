@@ -234,10 +234,11 @@ mod tests {
         assert_eq!(gm.chat(), ["[Scripts] Using: /scripts <action>"]);
         let (_, out) = harness::run(&server, &gm.p, "scripts reload").await;
         assert_eq!(out, ["[scripts] [Scripts] Reload - Success"]);
-        // +1 for the Rust-only `/premium` command, +1 for `/mail`.
+        // +1 each for the Rust-only `/premium`, `/mail` and the two auction GM keys
+        // (`auction_post_siege` is an alias of `auction_post_siege_items`).
         assert_eq!(
             server.systems.services.commands.get_command_keys().len(),
-            101
+            103
         );
         let (_, out) = harness::run(&server, &gm.p, "scripts what").await;
         assert_eq!(out, [harness::error("scripts", "Undefined action...")]);
