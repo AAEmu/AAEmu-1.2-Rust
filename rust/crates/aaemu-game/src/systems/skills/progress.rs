@@ -431,6 +431,103 @@ pub fn change_game_points(server: &GameServer, p: &PlayerRef, kind: u8, change: 
     }
 }
 
+/// The honor gain that a `UnitAttribute` add / multiplier pair belongs to (`HonorPointGain*`
+/// 126-135). War is the conflict / siege / war PvP kill source, NpcKill the monster hunt
+/// (buff 6442's text: "+1 honor per monster hunted; ... +1 during conflict/siege; +4 during
+/// war"; the numeric mapping comes from the names and that text, INFERRED).
+///
+/// Trial has no grant site in the 1.2 flow; the source exists so the mapping is complete
+/// (UNKNOWN which flow should call it, see PORTING.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HonorSource {
+    NpcKill,
+    Trial,
+    War,
+    Quest,
+    BattleField,
+}
+
+impl HonorSource {
+    fn attributes(self) -> (UnitAttribute, UnitAttribute) {
+        use UnitAttribute::*;
+        match self {
+            HonorSource::NpcKill => (HonorPointGainNpcKill, HonorPointGainNpcKillMul),
+            HonorSource::Trial => (HonorPointGainTrial, HonorPointGainTrialMul),
+            HonorSource::War => (HonorPointGainWar, HonorPointGainWarMul),
+            HonorSource::Quest => (HonorPointGainQuest, HonorPointGainQuestMul),
+            HonorSource::BattleField => (HonorPointGainBattleField, HonorPointGainBattleFieldMul),
+        }
+    }
+}
+
+/// The attribute-modified amount of a positive honor gain: `round(base + add)`, then
+/// `round(change * (mul + 100) / 100)`, clamped at 0 (the `LivingPointGain` pattern above;
+/// buffs 6266/6267 add / multiply by 100). Non-positive changes pass through unchanged: the
+/// spend and death-loss paths do not apply gain attributes.
+pub fn honor_gain(c: &Character, source: HonorSource, base: i32, now: i64) -> i32 {
+    if base <= 0 {
+        return base;
+    }
+    let (add_attr, mul_attr) = source.attributes();
+    let add = c.unit.calculate_with_bonuses(0.0, add_attr, now) as f32;
+    let mul = c.unit.calculate_with_bonuses(0.0, mul_attr, now) as f32;
+    let change = (base as f32 + add).round_ties_even() as i32;
+    let change = (change as f32 * ((mul + 100.0) / 100.0)).round_ties_even() as i32;
+    change.max(0)
+}
+
+/// [`honor_gain`] on a character the caller already holds the lock for (a quest reward act):
+/// the `SCGamePointChanged` packet is for the caller to send.
+pub fn grant_honor_locked(
+    c: &mut Character,
+    source: HonorSource,
+    base: i32,
+) -> Option<SCGamePointChangedPacket> {
+    let change = honor_gain(c, source, base, now_ms());
+    change_game_points_locked(c, GAME_POINT_HONOR, change)
+}
+
+/// `Character.ChangeGamePoints(GAME_POINT_HONOR, ..)` for a positive honor gain: applies the
+/// source attribute pair, then credits and sends `SCGamePointChanged`.
+pub fn grant_honor(server: &GameServer, p: &PlayerRef, source: HonorSource, base: i32) {
+    let packet = {
+        let mut c = p.data();
+        grant_honor_locked(&mut c, source, base)
+    };
+    if let Some(packet) = packet {
+        let amount = packet.amount;
+        p.send(packet);
+        report_life_points_gained(server, p, GAME_POINT_HONOR, amount);
+    }
+}
+
+/// The honor a War-zone death costs: `base` scaled by `HonorPointLoseMul`
+/// (`(mul + 100) / 100`; buff 6303 `-100` means no loss), clamped at 0 and to the character's
+/// current honor. The current honor is read and debited under one character lock; returns the
+/// applied loss.
+pub fn lose_honor_on_death(p: &PlayerRef, base: i32) -> i32 {
+    let (packet, loss) = {
+        let mut c = p.data();
+        let now = now_ms();
+        let mul = c
+            .unit
+            .calculate_with_bonuses(0.0, UnitAttribute::HonorPointLoseMul, now)
+            as f32;
+        let scaled = (base as f32 * ((mul + 100.0) / 100.0)).round_ties_even() as i32;
+        let loss = scaled.max(0).min(c.honor_point);
+        let packet = if loss > 0 {
+            change_game_points_locked(&mut c, GAME_POINT_HONOR, -loss)
+        } else {
+            None
+        };
+        (packet, loss)
+    };
+    if let Some(packet) = packet {
+        p.send(packet);
+    }
+    loss
+}
+
 /// GET_LIFE_POINT achievement credit: vocation (living) points gained. Honor, and every spend,
 /// never credits.
 pub fn report_life_points_gained(server: &GameServer, p: &PlayerRef, kind: u8, amount: i32) {

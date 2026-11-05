@@ -870,7 +870,7 @@ pub fn send_result(server: &GameServer, game: &Arc<InstantGame>, reason: u8) {
 /// state as sent by `SendResult`, so a game that runs out of time is ranked by its kill-count
 /// verdict (see [`finish_timeover`]), and a game is paid once ([`award_results`]).
 fn pay_awards(server: &GameServer, game: &InstantGame, awards: &[MemberAward]) {
-    use crate::systems::skills::progress::{change_game_points, GAME_POINT_HONOR};
+    use crate::systems::skills::progress::{grant_honor, HonorSource};
     use crate::systems::social::ranking_runtime::RankEvent;
 
     let zone_group_id =
@@ -878,7 +878,7 @@ fn pay_awards(server: &GameServer, game: &InstantGame, awards: &[MemberAward]) {
     let now = chrono::Utc::now();
     for award in awards {
         if award.honor != 0 {
-            change_game_points(server, &award.player, GAME_POINT_HONOR, award.honor);
+            grant_honor(server, &award.player, HonorSource::BattleField, award.honor);
         }
         if award.rank_points != 0 || award.rank_wins != 0 {
             server.systems.social.ranking.record(
