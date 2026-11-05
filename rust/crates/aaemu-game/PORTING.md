@@ -2308,6 +2308,12 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   3047/3048. Deviation: the outbid refund uses `MailType.AucBidFail` (17, the client's
   `AUCITON_BID_FAIL`) instead of the C# `AucOffFail` (15), so its mailbox label is the
   bid-failure one.
+* systems::economy (auction declare tab, 2026-11-05): the 1.2 client's declare-siege tab is the
+  normal `CSAuctionSearch` with `filter = 1` (`X2Auction.SearchDeclareSiege`, EVIDENCED in the
+  client decompile): it lists only lots whose item template has `auction_a_category_id = 11`
+  (`declare_siege`, the six Siege Camps). `filter = 0` is unchanged and still lists every lot
+  (whether retail also hid the camps from the normal tab is UNKNOWN); any other value is
+  treated as 0 and logged once. The C# ignored `filter`.
 * systems::economy (mail leftovers, WP-I4): `/mail admin <receiver> <title> <text> [money]
   [[itemId count] ...]` is a Rust-only GM command (the C# had no such command); `ADMIN` (5) is
   one of the mail types the 1.2 client lists (`mail/common.alb`). It stores a sender-id-0 system
@@ -3892,6 +3898,13 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   and `spawn_mount` refuses it with `MATE_CANNOT_SPAWN_WHILE_CORPSE`; because the same item is
   the dismiss toggle, the corpse flag also blocks dismissing the corpse. Known, not fixed.
 
+* systems::vehicles (siege catapult kill, WP-SD6b, 2026-11-05): destroying slave template 2
+  (the siege catapult) during an active siege credits `char_records` kind 26 with `value1 = 2`
+  (the authored row's slave id), `value2 = 1` to the killer when the killer and the catapult's
+  owner are on opposing roster sides (`record` text 상대진영; the `value2 = 1` meaning is
+  INFERRED). Own side, non-participants and a kill outside an active siege credit nothing. The
+  C# had no producer.
+
 * systems::services (account payment / premium, WP-B, 2026-11-03): the C# read the payment from a
   permanent `AccountPayment` default (Premium, 0 .. 2030-01-01) in five places. Rust stores
   `pay_method`, `pay_location`, `pay_start`, `pay_end` (unix seconds) and `premium_point` on
@@ -4379,6 +4392,18 @@ and in NPC wandering / buff remaining times.
   20:30..22:30 times never hit one); `view_at` returns None for the whole zone when its next
   rotation cycle cannot be built; and without WP-S2 (declaration) the calendar never enters
   warmup/siege on its own, so periods 3/4 exist only through an explicit GM schedule.
+* systems::housing (siege result achievements, WP-SD6a, 2026-11-05): a finished siege credits
+  `char_records` kinds 57/59 to the attacking roster and 58/60 to the defenders with
+  `value1 = zone_group_id` (mapping EVIDENCED from the authored records and the Korean
+  achievement texts). `AttackerCaptured` credits 57/60 and `DefenderHeld` 59/58; a
+  `Cancelled` outcome credits nobody. The persisted `dominions.siege_outcome_credited` marker
+  is a check-and-set under the authority lock, so a repeated tick, a capture racing the tick or
+  a restart cannot credit one siege id twice; it is written with the dominion row and an online
+  participant's record values in the same character save transaction. An offline participant's
+  increment is written straight to `character_records` so the next entry snapshot evaluates it
+  (INFERRED: the counter is cumulative; the C# had no producer). That offline write is a
+  separate transaction from the dominion save, so a crash between the two can credit an offline
+  participant twice (undocumented retail policy; low risk).
 * systems::housing / systems::social (WP-S6 claim gating): the existing lodestone claim
   (`social/dominion.rs::declare_effect`) now applies the authored `siege_zones` claim window,
   the pirate refusal, the owned-dominion limit and the fresh-claim siege delay. The 1.2 client
@@ -6194,6 +6219,38 @@ Capture-pending (WP-I1 UNKNOWN-2): no packet tells the client that a craft was l
 writes to the client's `item_recipes` arrays are its own loader (`x2game.dll.c:1478522`) and
 `CRAFT_TRAINED` has no located firing site, so the server sends no announcement; a capture of
 the original client using a recipe item is needed to find the carrier (if any).
+
+## Invitation cancellation (`SCInvitationCanceled`) (2026-11-05)
+
+`SCInvitationCanceled` 0x1dd is one `u8 kind` (`systems/social/packets/misc.rs`; byte test
+`invitation_canceled_is_one_kind_byte`). The 1.2 client reader `FUN_397b8490` and handler
+`FUN_391d6930` -> `FUN_39182930` close **every** popup of the type the kind maps to; there is
+no invitation id on the wire (RE-UI1). Mapping: `1,2 -> type 2` (named / area team), `3 -> 4`
+(family), `4 -> 3` (expedition), `5 -> 9` (duel), `6 -> 6` (jury), `7 -> 0x29` (nation
+immigrate).
+
+Sent by this server when an invitation ends without an answer:
+
+* Team: the 500 ms sweep after the 60 s timeout and `set_offline` when the inviter leaves the
+  world. Kind 1 for a named, kind 2 for an area invitation. The 1-vs-2 split is UNKNOWN: both
+  kinds close the same client popup type and behave identically, so the mapping is INFERRED.
+* Expedition: the 60 s expiry (kind 4). The C# and the previous port pruned the map only on
+  the next invite, which left the popup open; a 1 s sweep now runs on the shared
+  `TickManager` (no extra thread).
+* Duel: the 30 s `request_expired` (kind 5). An accepted challenge never reaches the release
+  path, so it sends nothing.
+* Nation immigrate: the 60 s expiry (kind 7), on its own 1 s `TickManager` subscription (the
+  60 s relation tick would close the popup up to a minute late).
+
+Not sent, because no evidenced trigger exists: kind 3 (family: 1.2 has no server timeout and
+the inviter-offline case is UNKNOWN) and kind 6 (jury: trigger UNKNOWN). An accepted or
+declined invitation consumes its entry, so it sends nothing. The guard for the "closes every
+popup of the type" behaviour is structural: each invitation map holds at most one pending
+invitation per invitee (a second team / expedition / nation invitation is refused or
+replaces), so a cancellation cannot close another invitation of the same popup type.
+
+INFERRED: that the original server sent this packet on these server-side timeouts (the client
+handler is EVIDENCED; the original send sites are not). Capture-pending: none assigned.
 
 ## Review findings (documented, not fixed)
 
