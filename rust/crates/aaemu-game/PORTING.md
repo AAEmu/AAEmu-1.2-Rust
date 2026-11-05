@@ -725,7 +725,7 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 
 | Area (C#) | Rust | Status | Notes |
 |---|---|---|---|
-| `TeamManager`, `Models/Game/Team` | `systems/social/team.rs`, `packets/team.rs` | done | Invitations (single / area with `SCAskToJoinTeamArea` / `SCTeamAreaInvited`, 30 s area cooldown, 60 s timeout, 500 ms sweep, 10k cap, stale-reply and owner-rights guards), invitation error replies, create, AskRiskyTeam (leave / kick / dismiss + auto-disband), owner / role / marker / looting rule / ping / move, raid conversion, SetOffline / MemberRemoveFromTeam / UpdateAtLogin / UpdatePosition, 500 ms remote-member sync (delta cache, 5 s forced resync, upper-triangle pairs), zombie-team disband (5 min), loot winner helpers. Events (OnTeamJoin/Leave) are quest-side: not called. See "Area team invitations and invitation error replies". |
+| `TeamManager`, `Models/Game/Team` | `systems/social/team.rs`, `packets/team.rs` | done | Invitations (single / area with `SCAskToJoinTeamArea` / `SCTeamAreaInvited`, 30 s area cooldown, 60 s timeout, 500 ms sweep, 10k cap, stale-reply and owner-rights guards), invitation error replies, create, AskRiskyTeam (leave / kick / dismiss + auto-disband; the direct `CSLeaveTeam` / `CSKickTeamMember` / `CSDismissTeam` packets run the same actions), owner / role / marker / looting rule / ping / move, raid conversion, SetOffline / MemberRemoveFromTeam / UpdateAtLogin / UpdatePosition, 500 ms remote-member sync (delta cache, 5 s forced resync, upper-triangle pairs), zombie-team disband (5 min), loot winner helpers. Events (OnTeamJoin/Leave) are quest-side: not called. See "Area team invitations and invitation error replies". |
 | `ExpeditionManager`, `Models/Game/Expeditions` | `systems/social/expedition.rs`, `packets/expedition.rs` (`managers::expedition` re-exports) | done | Load, create (party checks, cost, `SCItemTaskSuccessPacket` money-only form), invite / reply, leave, kick, member role, owner, role policy, disband (stays listed as `$deleted-guild-<id>`), `Expedition.Save` per change, offline leave for character deletion. Guild rename: see "Guild rename" below. Sponsor is still log-only / not in 1.2 as in C#. |
 | `FamilyManager`, `Models/Game/Family` | `systems/social/family.rs`, `packets/family.rs` | done | Load, invite / reply / create, leave, kick (offline existence check), title, steward, login / logout, disband, save, offline leave for character deletion. |
 | `FriendMananger`, `CharacterFriends`, `CharacterBlocked` | `systems/social/friend.rs`, `packets/friend.rs` (`managers::friend` re-exports) | done | Add / remove friends (online or by DB name lookup), block / unblock (online or by `NameManager` for offline names), status changes incl. `InParty`. The blocked list is enforced on every direct delivery path (whisper, team / area / expedition / family invite, friend add, trade and duel request); see the block-list deviation. |
@@ -2267,6 +2267,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   sells. The C# kept only the last `merchant_pack_id`, which lost goods on the 38 NPCs with
   several rows (NPC 626 lost all 26 horses of pack 154). Duplicate pack rows (NPC 11413 has pack
   145 twice) are collapsed; pack order does not decide the catalog.
+* systems::social (direct team packets, 2026-11-05): `CSLeaveTeam` (0x7d), `CSKickTeamMember`
+  (0x7e) and `CSDismissTeam` (0x84) are the direct forms the 1.2 client's confirmation callback
+  sends (`FUN_39309670` -> `FUN_393095c0`); they run the same `AskRiskyTeam` action as
+  `CSAskRiskyTeamAction` (same membership / owner checks, target-in-team check and broadcasts).
+  The C# only logged them.
 * systems::social: family title and steward requests require targets in the caller's own family.
   Authorized packet changes call the existing family snapshot save immediately; the C# handlers
   only changed memory. Team risky actions require membership and known actions, with owner
@@ -4943,10 +4948,10 @@ Doc-only items:
 - **M12** list caps (family > 8, achievements > 50, radar > 10, battlefield members > 50, expedition
   chunks of 20): per Bevy RE notes; our senders already chunk at those sizes. Not re-verified.
 - **M17** (f32 vs f64 arithmetic of pet revive/repair cost), **M18** (ranking period: UTC half-open vs
-  local inclusive), **M19** (`SCUnitMovements` unsent), **M20** (party leave/kick log-only; the
-  client uses `CSAskRiskyTeamAction`), **M21** (new factions get `political_system 1`, native
-  rename needs 0), **M23** (actability downgrade clamp): per Bevy RE notes, not re-verified and not
-  changed; each needs a reproduction against the real client before a fix.
+  local inclusive), **M19** (`SCUnitMovements` unsent), **M21** (new factions get
+  `political_system 1`, native rename needs 0), **M23** (actability downgrade clamp): per Bevy RE
+  notes, not re-verified and not changed; each needs a reproduction against the real client before
+  a fix. M20 (party leave/kick log-only) is fixed: the direct packets run `AskRiskyTeam`.
 
 ## Portal use range (2026-10-21)
 
