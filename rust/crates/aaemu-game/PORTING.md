@@ -6107,6 +6107,38 @@ writes to the client's `item_recipes` arrays are its own loader (`x2game.dll.c:1
 `CRAFT_TRAINED` has no located firing site, so the server sends no announcement; a capture of
 the original client using a recipe item is needed to find the carrier (if any).
 
+## Invitation cancellation (`SCInvitationCanceled`) (2026-11-05)
+
+`SCInvitationCanceled` 0x1dd is one `u8 kind` (`systems/social/packets/misc.rs`; byte test
+`invitation_canceled_is_one_kind_byte`). The 1.2 client reader `FUN_397b8490` and handler
+`FUN_391d6930` -> `FUN_39182930` close **every** popup of the type the kind maps to; there is
+no invitation id on the wire (RE-UI1). Mapping: `1,2 -> type 2` (named / area team), `3 -> 4`
+(family), `4 -> 3` (expedition), `5 -> 9` (duel), `6 -> 6` (jury), `7 -> 0x29` (nation
+immigrate).
+
+Sent by this server when an invitation ends without an answer:
+
+* Team: the 500 ms sweep after the 60 s timeout and `set_offline` when the inviter leaves the
+  world. Kind 1 for a named, kind 2 for an area invitation. The 1-vs-2 split is UNKNOWN: both
+  kinds close the same client popup type and behave identically, so the mapping is INFERRED.
+* Expedition: the 60 s expiry (kind 4). The C# and the previous port pruned the map only on
+  the next invite, which left the popup open; a 1 s sweep now runs on the shared
+  `TickManager` (no extra thread).
+* Duel: the 30 s `request_expired` (kind 5). An accepted challenge never reaches the release
+  path, so it sends nothing.
+* Nation immigrate: the 60 s expiry (kind 7), on its own 1 s `TickManager` subscription (the
+  60 s relation tick would close the popup up to a minute late).
+
+Not sent, because no evidenced trigger exists: kind 3 (family: 1.2 has no server timeout and
+the inviter-offline case is UNKNOWN) and kind 6 (jury: trigger UNKNOWN). An accepted or
+declined invitation consumes its entry, so it sends nothing. The guard for the "closes every
+popup of the type" behaviour is structural: each invitation map holds at most one pending
+invitation per invitee (a second team / expedition / nation invitation is refused or
+replaces), so a cancellation cannot close another invitation of the same popup type.
+
+INFERRED: that the original server sent this packet on these server-side timeouts (the client
+handler is EVIDENCED; the original send sites are not). Capture-pending: none assigned.
+
 ## Review findings (documented, not fixed)
 
 Independent reviews of the combat / reflect / stealth / ability lanes found the issues below.
