@@ -802,7 +802,7 @@ Land-vehicle placement keeps the strict check. Real-data check (needs `AAEMU_GAM
 | Player nations (`nations`, `nation_relations`, independence, immigration, diplomacy, rename, national tax, monument) | `systems/social/nation.rs`, `commands/scripts/nation.rs` | stages 1-4 | Skill 18540 special effect 71 creates a nation from the caster's expedition (owner + dominion, CASTLE_CLAIM backpack); ids come from the expedition allocator; `SCFactionIndependence` + relation rows + `SCUnitFactionChanged`; online members use `set_faction`, offline `characters.faction_id` moves with `expeditions.mother` in the save transaction; login sends nation factions and relations. Stage 2 adds the invite / reply / return-to-origin / kick packets with the client's error order, persisted factions and offline kicks. Stage 3 adds `CSFactionDeclareHostile` 0x019, the type-25 friendly treaty mail (charge paid through `CSPayChargeMoney` 0x0a0) and the periodic relation expiry. Stage 4 adds the nation rename (`SCNationShowRenameUI` 0x010 + the `CSRenameExpedition` nation half), the national tax (`CSUpdateNationalTaxRate` 0x013 -> `SCNationalTaxRate` 0x021) and the territory-statue monument (`SCNationalMonumentChanged` 0x022). See "Player nations" below. |
 | `GameData/AchievementGameData` (`achievements`, `achievement_objectives`, `pre_completed_achievements`, `char_records`), `Models/Game/Achievement` | `systems/social/achievement.rs` (`server.game_data.systems.social.achievements`) | done | Loader + port of `AchievementGameDataTests`; gated real-DB test `achievement_game_data_real_compact_db`. The C# 1.2 tree has no manager; the Rust achievement manager / runtime / hooks / rewards (`achievement_*.rs`) read them (see "Achievement producers" below). |
 | `DuelManager`, `Models/Game/Duels`, duel tasks | `systems/social/duel.rs`, `packets/duel.rs` | done | Request / accept (flag via hook) / start / stop / cancel, distance + HP checks, end timer (tokio tasks; `set_delays` test hook). The temporary Red / Blue team faction also goes to each participant's active mates and owned slaves (they copy the owner's faction at spawn and `Character.SetFaction` never updates them) through `combat::set_faction_with_temp`, and is restored with the owner's at the end / disconnect; a mate or slave summoned during the duel is restored as well. Test: `mate_and_slave_follow_the_duel_faction_and_get_it_back`. |
-| `CrimeManager`, `TrialManager`, `Models/Game/Crime`, `TrialUpdateTask` | `systems/social/{crime,trial}.rs`, `packets/trial.rs` | done | Crime table load / save (`AfterItems`), report / evidence (hooks), bot reports, trial / jury flow with 5 s tick, audience, bounty placement / arrest payout (`systems/social/{bounty,bounty_runtime}.rs`, `bounty_pledges`; see "Wanted-player bounty"). The board is still the empty list (BOUNTY-board). Arrests, authenticated jury choices, guilty pleas, acquittals, court cleanup and reconnect jail enforcement have packet-flow regressions; prisoner buffs persist remaining online time. |
+| `CrimeManager`, `TrialManager`, `Models/Game/Crime`, `TrialUpdateTask` | `systems/social/{crime,trial}.rs`, `packets/trial.rs` | done | Crime table load / save (`AfterItems`), report / evidence (hooks), bot reports, trial / jury flow with 5 s tick, audience, bounty placement / arrest payout (`systems/social/{bounty,bounty_runtime}.rs`, `bounty_pledges`; see "Wanted-player bounty"). The board answers the empty list by default and the pledge rows behind `Social.BountyBoard` (BOUNTY-board). Arrests, authenticated jury choices, guilty pleas, acquittals, court cleanup and reconnect jail enforcement have packet-flow regressions; prisoner buffs persist remaining online time. |
 | `DominionData`, `Models/Game/Achievement`, rename / chat bubble / NPC chat / spam packets | `systems/social/{dominion,achievement}.rs`, `packets/misc.rs` | done (data + packets) | No C# manager drives them in 1.2. The dominion `SCDominionDeleted` / `TaxBalanced` / `NonPvPStarted` / `NonPvPStopped` notifications now have senders (see the `systems::housing / systems::social` notification bullet under Phase 3). |
 | `RankingGameData` (later C# history), 1.2 ranking packets | `systems/social/ranking_{data,packets,runtime,manager,persistence}.rs` | done (arena + fishing boards) | Not in the 1.2 C#; Rust only. Request path, MySQL persistence (`character_rank_scores`, `rank_period_payouts`), score hooks and period-close reward letters: see "Ranking boards" under Known deviations. |
 | `RadarManager` | – | not social | Telescope / fish school registration from buff templates: skills / npcs. |
@@ -1326,7 +1326,7 @@ live acceptance remain pending.
 | Second password (`Create/Change/Clear/CheckSecondPasswordPacket`, `SCSecondPass*`) | `systems/services/second_password.rs` | done | 1.2 virtual-keyboard tables, one-shot key id, shared `PasswordService` hashing, MySQL failure counter + timed lock. See the deviation below. |
 | `TimedRewardsManager`, `TimedRewardsTask` | `systems/services/timed_rewards.rs` | done | The tick reads the account payment / premium grade from `AccountManager` (WP-B) instead of the C# connection default; `max_labor` is `premium_benefits.max_labor`. |
 | Account payment / premium (`premium_grades`, `premium_benefits`, `premium_configs`, `pcbang_buffs`, `SCAccountInfo`, `SCUpdatePremiumPoint`) | `systems/services/premium.rs`, `systems/services/accounts.rs`, `packets/{c2g,proxy,g2c}.rs` | done | Rust only: the C# never loaded these tables and sent the permanent `AccountPayment` default (`SCUpdatePremiumPoint(1,1,1)` hard-coded at `FinishState(7)`). See the deviations below. |
-| `CharacterManager` remainder (`GetEffectiveAccessLevel`, `PlayerRoll` + `CSRollDicePacket` / `SCDiceValuePacket`, `StartOnlineTracking` / `CharacterOnlineTrackingTask`, `AddOfflineCrimePoints`, `ApplyBeautySalon` + `CSEnter/ExitBeautySalonPacket`, `CSBeautyshopDataPacket`, `SCCharacterGenderAndModelModifiedPacket`) | `systems/services/{character,beauty_salon}.rs` | done | Beauty salon item work through `BEAUTY_SALON_ITEMS` (economy). **Deviation (`CharacterOnlineTrackingTask`):** the C# read and rewrote the account's divine clock per character (`GetDivineClock` + `UpdateDivineClock`, 2 round trips and a commit each, every 5 s). The Rust collects the per-account seconds during the pass and writes them after it with one atomic `UPDATE accounts SET divine_clock_time = LEAST(divine_clock_time + ?, 4294967295) WHERE account_id IN (...)` per distinct non-zero delta (500 ids per statement, `db::add_divine_clock_time`), so it can no longer overwrite the 0 that `timed_rewards::do_daily_account_login` stores in between. The column is `INT UNSIGNED`; the sum saturates at `u32::MAX` where the C# `uint` wrapped. |
+| `CharacterManager` remainder (`GetEffectiveAccessLevel`, `PlayerRoll` + `CSRollDicePacket` / `SCDiceValuePacket`, `StartOnlineTracking` / `CharacterOnlineTrackingTask`, `AddOfflineCrimePoints`, `ApplyBeautySalon` + `CSEnter/ExitBeautySalonPacket`, `CSBeautyshopDataPacket`, `SCCharacterGenderAndModelModifiedPacket`) | `systems/services/{character,beauty_salon}.rs` | done | Beauty salon item work through `CHARACTER_ITEM_OPS` (economy). **Deviation (hair validation):** `ApplyBeautySalon` only accepts an `item_body_parts` row in the hair slot (`slot_type_id = 24`), not `npc_only`, whose `model_id` is the `characters` template model for the character's race/gender (`beautyshop_only` is allowed; a missing character model does not restrict). A refused request, including the previously silent missing-certificate path, sends `SCErrorMsg` `FAILED_TO_CHANGE_ITEM_LOOK` (the salon-specific id is UNKNOWN) and changes no appearance, item, certificate or money. The C# put any client-supplied template into the hair slot. **Deviation (`CharacterOnlineTrackingTask`):** the C# read and rewrote the account's divine clock per character (`GetDivineClock` + `UpdateDivineClock`, 2 round trips and a commit each, every 5 s). The Rust collects the per-account seconds during the pass and writes them after it with one atomic `UPDATE accounts SET divine_clock_time = LEAST(divine_clock_time + ?, 4294967295) WHERE account_id IN (...)` per distinct non-zero delta (500 ids per statement, `db::add_divine_clock_time`), so it can no longer overwrite the 0 that `timed_rewards::do_daily_account_login` stores in between. The column is `INT UNSIGNED`; the sum saturates at `u32::MAX` where the C# `uint` wrapped. |
 | Character packets: `CSActiveWeaponChangedPacket`, `CSBroadcastVisualOptionPacket`, `CSChangeAppellationPacket` (`CharacterAppellations.Change`), `CSIdleStatusPacket`, `CSRefreshInCharacterListPacket`, `CSRequestUIDataPacket`, `CSSaveUIDataPacket`, `CSUpdateActionSlotPacket`, `CSRestrictCheckPacket`, `CSSetLpManageCharacterPacket` and the log-only `CSCharDetailPacket`, `CSCleanupLogicLinkPacket`, `CSConsoleCmdUsedPacket`, `CSCriminalLockedPacket`, `CSEditorGameModePacket`, `CSRankCharacterPacket`, `CSRequestCharBriefPacket`, `CSRequestSecondPasswordKeyTablesPacket`, `CSSetupSecondPassword`, `CSResturnAddrsPacket` (+ `SCActiveWeaponChangedPacket`, `SCUnitVisualOptionsPacket`, `SCAppellationChangedPacket`, `SCUnitIdleStatusPacket`, `SCRefreshInCharacterListPacket`, `SCResultRestrictCheckPacket`, `SCLpManagedPacket`) | `systems/services/character_packets.rs` | done | Byte-exact tests. `CSHangPacket` / `CSUnhangPacket` are `systems/vehicles/harpoon.rs` (sticky parents, rope break); `CSResurrectCharacterPacket` is `systems/skills/resurrect.rs`. |
 | `CharacterManager` `bag_expands` / `expand_expert_limits`, `Inventory.ExpandSlot`, `CharacterActability.Regrade` / `ExpandExpert`, `CSExpandSlotsPacket`, `CSExpandExpertPacket`, `CSUpgrade/DowngradeExpertLimitPacket` (+ `SCInvenExpandedPacket`, `SCExpertLimitModifiedPacket`, `SCExpertExpandedPacket`) | `systems/services/expands.rs` | done | Item checks / consumption through `CHARACTER_ITEM_OPS` (economy). |
 | `CommandManager`, `AccessLevelManager`, `Models/Game/ICommand`, `Utils/Scripts/**` | `systems/services/commands/` | done (infra) | Ports of `SubCommandBaseTests`, `NumericSubCommandParameterTests`, `AccessLevelManagerTests`, `DoodadChainSubCommandTests`. AStar sub commands need `ASTAR_HOOKS` (AI path finding). `Scripts/SubCommands/Doodads/DoodadSetAgeCommand` is ported (`commands/doodads.rs`, port of `DoodadSetAgeCommandTests` through a test root with the `DoodadCmd` aliases); the `DoodadCmd` root itself is the scripts phase. |
@@ -1883,6 +1883,12 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   the item; receipts still report actual equipment. Hair-creation failure still logs and
   continues with the model update, receipt and certificate consumption, as in C#; failed
   certificate consumption still logs without undoing the already broadcast appearance.
+  The requested template must be a hair body part of the character's own model
+  (`data/items.rs` `body_part`, `characters` template model); an arbitrary template,
+  an `npc_only` hair or another race/gender's hair is refused with `SCErrorMsg`
+  `FAILED_TO_CHANGE_ITEM_LOOK` (generic; the salon-specific id is UNKNOWN) before any
+  change or charge, and the missing-certificate path uses the same error instead of
+  returning silently. The C# accepted any template.
 
 * systems::services (music): 1.2 CS123 has independent `isTooltip` / `showBuffOnly`
   bool bytes (native constructor `397acd70`, serializer `397b1480`). The C# packed
@@ -2317,6 +2323,20 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   (`declare_siege`, the six Siege Camps). `filter = 0` is unchanged and still lists every lot
   (whether retail also hid the camps from the normal tab is UNKNOWN); any other value is
   treated as 0 and logged once. The C# ignored `filter`.
+* systems::economy (system auction lots, WP-SD1b, 2026-11-05): the retail GM command
+  `auction_post_siege_items` (name in the 1.2 client; arguments UNKNOWN, assumed
+  `[duration] [startPrice] [buyoutPrice]`) posts one lot per distinct
+  `siege_zones.declare_item_id` (the six Siege Camps) with `client_id = 0` and an empty seller
+  name. Defaults: 48 h duration class, the item's own `price` as the start price, no buyout.
+  Each item is created once through `ItemManager::Create` and kept in the auction escrow
+  (loose, `SlotType.Auction`, owner 0) so the normal settlement path can mail it; a failed run
+  discards every item it created. Every settlement path skips the seller leg for
+  `client_id == 0`: the sale mails only the buyer (`AucBidWin`), the money is destroyed (no
+  seller mail or live notice, no `AUCTION_SOLD` record), and an expiry without a bid deletes
+  the item instead of returning it. The optional `auction_cancel <lotId>` command removes an
+  unbid system lot and deletes its item (the lot-id argument and the refusal of player lots /
+  lots with a bid are assumed). `client_id = 0` rows load normally on restart. The C# had
+  neither command and no system-lot path.
 * systems::economy (mail leftovers, WP-I4): `/mail admin <receiver> <title> <text> [money]
   [[itemId count] ...]` is a Rust-only GM command (the C# had no such command); `ADMIN` (5) is
   one of the mail types the 1.2 client lists (`mail/common.alb`). It stores a sender-id-0 system
@@ -4403,7 +4423,9 @@ and in NPC wandering / buff remaining times.
   calendar view. Explicit siege deadlines/tick transitions and the persisted state always use
   the real clock, and the command is refused while `Housing.SiegeCalendar` is disabled.
   GM scheduling with player registration is the chosen server policy for actually running a
-  siege; the automatic auction *lots* and bidding remain unimplemented. Known, not fixed:
+  siege; the camps can be posted as system lots with the GM `auction_post_siege_items` command
+  (WP-SD1b), but automatic posting at the auction period (WP-SD1c) remains unimplemented.
+  Known, not fixed:
   the calendar is rebuilt from the tables on every tick/snapshot (cache later); an authored
   time inside a DST gap makes that zone's view return None instead of shifting it (the shipped
   20:30..22:30 times never hit one); `view_at` returns None for the whole zone when its next
@@ -5091,9 +5113,17 @@ The achievement subsystem has no 1.2 C# manager; the behaviour follows `rust/doc
   performs the last build action. **Auction** and **jury** credits go to online characters only.
 * **GET_FACTION** is state-derived (entry back-credit plus the crossing of the infamy threshold in
   `CrimeManager::add_crime_points`); other faction changes do not credit (Q8).
-* **GET_ITEM_TYPE (k29), KILL_SLAVE (k26), MY_DISHONORABLE_POINT (k49), siege results (k57-60)** stay
-  unwired (see the audit for why). `SCAchievementResetedPacket` (0x1ff) has no 1.2 trigger and is
-  deliberately never sent.
+* **GET_ITEM_TYPE (k29)** counts only genuine acquisitions. `ItemFx::Acquired` now carries the
+  `added` unit count and an `AcquiredSource`: a newly created item (loot, craft product, quest
+  reward, shop purchase), new units merged into an owned stack, a mail take, or an item received
+  from another character (trade). Moves between the character's own containers (bag <-> bank, a
+  house coffer, re-slotting) and merges of already owned stacks are tagged `Transfer` and never
+  credit, so warehouse shuffling cannot complete a collection achievement. The report runs from
+  `economy::fx::flush` with the same lock rules as the other producers (queued while the economy
+  lock is held). All 216 authored records use the `-1` any-grade wildcard, so the event carries no
+  grade (a `value2 >= 0` row would need one). `KILL_SLAVE (k26)`,
+  `MY_DISHONORABLE_POINT (k49)` and the siege results (k57-60) stay unwired (see the audit for
+  why). `SCAchievementResetedPacket` (0x1ff) has no 1.2 trigger and is deliberately never sent.
 
 ## PvP duel fixes (duel disconnect, GM faction, quit relog)
 
@@ -6091,10 +6121,23 @@ Policy decisions / capture-pending (each also a case id in the code):
   A deleted character's pledges are never refunded and stay in the table for its id. Arena and
   instance deaths use the ordinary PvP death tail, so they pay like any other arrest. None of
   these have 1.2 evidence; they are safe defaults.
-* **BOUNTY-board** `CSNaviOpenBounty` / `SCBountyList`. The row layout is verified (M10), but the
-  C# comment records that a filled list broke the 1.2 client Lua and the cause was never found.
-  The handler keeps answering the empty `(0, 0)` list; a non-empty list must be tested on the
-  original client first.
+* **BOUNTY-board** `CSNaviOpenBounty` / `SCBountyList`. The empty `(0, 0)` list stays the
+  default: the C# comment records that a filled list broke the 1.2 client Lua, the cause was
+  never found and the row layout was only verified later (M10, reader `FUN_397bebf0`), so the
+  real-client check is **capture-pending**. `Social.BountyBoard` (default `false`, shipped in
+  `Configurations/Social.json`) enables the filled answer:
+  `SCBountyList{total, count, rows}` where `total` is every character with an unpaid pledge and
+  the rows are capped at the client's 20 entries (`0x14`, `MAX_BOUNTY_LIST_ENTRIES`), highest
+  total first (ties by character id; the order is a server policy, not client evidence, and only
+  decides which rows the cap keeps). Online rows read name, level, race, crime point, zone and
+  position from the live character with `is_live = true`; offline rows read the same fields plus
+  the arrest / trial counters from its `characters` row (`deleted = 0`) with `is_live = false`.
+  A missing or unreadable character row is skipped and no longer counted in `total`, so the
+  client can still complete its id-keyed row map. The row's `type` field (`+184` in the reader,
+  meaning UNKNOWN) is `1`, the value of the C# dummy row (C#-only); `seconds` is `0` (no 1.2
+  meaning known, no timer is invented). `total > count` only while more than 20 characters have
+  pledges. The switch must stay `false` until an original-client run (hidden client, bounty
+  board doodad) opens the board without a Lua error.
 
 * **STEALTH-C** `SCUnitState` character flag bit 5 (`0x0020`, GM invisible). The C#
   `SCUnitStatePacket.Write` set bit 5 from `character.Invisible`, but the 1.2 client side is

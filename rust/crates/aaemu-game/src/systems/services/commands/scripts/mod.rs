@@ -30,6 +30,7 @@ pub mod add_xp;
 pub mod announce;
 pub mod appellation;
 pub mod around;
+pub mod auction_siege;
 pub mod build_house;
 pub mod change_level;
 pub mod clear_combat;
@@ -551,6 +552,15 @@ pub fn all_commands(env: &ScriptEnv) -> Vec<(&'static [&'static str], Arc<dyn Co
         ),
         (&["set_jury"], Arc::new(set_jury::SetJury::new(env))),
         (&["imprison"], Arc::new(imprison::Imprison::new(env))),
+        // Retail GM auction commands (names from the 1.2 client; Rust only)
+        (
+            &["auction_post_siege_items", "auction_post_siege"],
+            Arc::new(auction_siege::AuctionPostSiegeItems::new(env)),
+        ),
+        (
+            &["auction_cancel"],
+            Arc::new(auction_siege::AuctionCancel::new(env)),
+        ),
         // WorldCmd.cs
         (&["world"], Arc::new(roots::world_cmd())),
     ]
