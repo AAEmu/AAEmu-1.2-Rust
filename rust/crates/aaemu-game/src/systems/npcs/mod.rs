@@ -23,6 +23,7 @@
 
 pub mod area_trigger;
 pub mod bridges;
+pub mod config;
 pub mod doodad;
 pub mod fish_school;
 pub mod gimmick;

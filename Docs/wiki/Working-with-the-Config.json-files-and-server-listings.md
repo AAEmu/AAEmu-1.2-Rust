@@ -456,6 +456,32 @@ the heightmap. Lower `Geometry` or `LoadRadiusCells` to save memory on small
 machines. Background:
 [`rust/docs/physics/`](https://github.com/AAEmu/AAEmu/tree/develop/rust/docs/physics).
 
+## NPC interaction reach (`Configurations/Interaction.json`)
+
+The 1.2 client opens and keeps an NPC's interaction window only within 3.0 m of
+the target's shape (`FUN_393bef10` / `FUN_3932a3b0`, compared against the
+squared constant 9.0), but it does not gate the `CSStartInteraction` send, so a
+forged request can arrive from any distance. The game server refuses a request
+farther than the reach silently: no 1.2 error message for this case is
+evidenced.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `NpcReachCheck` | `true` | Refuse `CSStartInteraction` farther than the reach; `false` restores the old behaviour (no check) |
+| `NpcReachToleranceMeters` | `2.0` | Extra metres on top of the 3.0 m client reach for movement and latency (**inferred**; the original zone server's answer is not captured) |
+
+The distance is measured with the same model-radius helper the skill range
+checks use, so a large NPC is not refused at its edge. Override it in
+`Config.Local.json`:
+
+```json
+{
+  "Interaction": {
+    "NpcReachToleranceMeters": 1.0
+  }
+}
+```
+
 ## Territory property tax
 
 Claimed Dominion provinces apply their current territory tax rate to ordinary taxable housing
