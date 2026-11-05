@@ -1316,11 +1316,23 @@ fn start_skill_controller(
         ) {
             Some(sc) => sc,
             None => {
-                tracing::warn!(
-                    "BuffTemplate.Start: buff {} SC factory returned null for kind={} — controller class not implemented",
-                    template.id,
-                    sct.kind_id
-                );
+                // WP-9 (combat-ai analysis, 2026-11-05): Rope (5), Anchor (6) and Flowgraph (8)
+                // have no generic controller by design (Rope is handled by the harpoon family,
+                // Flowgraph is test skill 23969 only, Anchor two monster skills), so this is an
+                // expected debug message. Other unimplemented kinds stay warnings.
+                if matches!(sct.kind_id, 5 | 6 | 8) {
+                    tracing::debug!(
+                        "BuffTemplate.Start: buff {} SC factory returned null for kind={} — controller class not implemented",
+                        template.id,
+                        sct.kind_id
+                    );
+                } else {
+                    tracing::warn!(
+                        "BuffTemplate.Start: buff {} SC factory returned null for kind={} — controller class not implemented",
+                        template.id,
+                        sct.kind_id
+                    );
+                }
                 return;
             }
         }
@@ -1677,6 +1689,49 @@ pub fn remove_all_effects(server: &GameServer, owner: &WorldObject) {
     for index in effects {
         exit(server, owner, index, false);
     }
+}
+
+/// Takes the unit's resurrection buff (`buffs.resurrection_health` / `resurrection_mana`; the
+/// only 1.2 row with either column set is 239 "Nui's Favor"). Returns the restore values and
+/// removes the effect ("once").
+///
+/// The select and the claim are one critical section under the owner's data lock: the effect
+/// is moved to `FINISHING` there, so a timer or another removal cannot take it in between.
+/// The buff lifecycle (dispel triggers, `StopEffectTask`, the queued `BuffEvent`s) then ends
+/// through [`exit`] once the lock is released.
+pub fn take_resurrection_buff(
+    server: &GameServer,
+    owner: &WorldObject,
+) -> Option<(i32, i32, bool)> {
+    let data = &server.game_data.systems.skills;
+    let (index, values) = owner.with_base_unit(|b| {
+        let (index, template_id) = b
+            .buffs()
+            .effects
+            .iter()
+            .find(|e| {
+                !e.is_ended()
+                    && data
+                        .buff(e.template.id)
+                        .is_some_and(|t| t.resurrection_health != 0 || t.resurrection_mana != 0)
+            })
+            .map(|e| (e.index, e.template.id))?;
+        let t = data.buff(template_id)?;
+        let values = (
+            t.resurrection_health,
+            t.resurrection_mana,
+            t.resurrection_percent,
+        );
+        for e in b.buffs_mut().effects.iter_mut() {
+            if e.index == index {
+                e.state = effect_state::FINISHING;
+                break;
+            }
+        }
+        Some((index, values))
+    })?;
+    exit(server, owner, index, false);
+    Some(values)
 }
 
 /// `Buffs.RemoveEffectsOnDeath()`.

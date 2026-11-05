@@ -23,7 +23,10 @@ use crate::models::npc::Npc;
 use crate::net::packet::{encode, ServerPacket};
 use crate::opcodes::{cs, sc};
 use crate::systems::npcs::doodad::runtime::DoodadCtx;
-use crate::systems::npcs::doodad::templates::{DoodadFuncEnterInstance, DoodadFuncExitIndun};
+use crate::systems::npcs::doodad::templates::{
+    DoodadFunc, DoodadFuncEnterInstance, DoodadFuncEnterSysInstance, DoodadFuncExitIndun,
+    DoodadFuncGroups, DoodadTemplate, FuncTemplate,
+};
 use crate::systems::npcs::portal::packets::SCLoadInstancePacket;
 use crate::test_support::{test_character, TestClient, TEST_ZONE};
 use crate::world::unit_state::UNIT_STATE_FORCED_BUFFS;
@@ -1004,6 +1007,512 @@ fn use_exit_func(server: &GameServer, p: &PlayerRef) {
         &ctx,
         Some(&WorldObject::from(p)),
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// System-dungeon channel select (SC 0x206 / CS 0x13d / SC 0x207, WP-X1)
+// ---------------------------------------------------------------------------------------------
+
+/// `zones.id` of the library dungeon (the entrance func's `zone_id`).
+const LIB_ZONE: u32 = 209;
+/// `zones.zone_key` (the value `SCLoadInstance` sends).
+const LIB_ZONE_KEY: u32 = 296;
+const LIB_GROUP: u32 = 70;
+const LIB_SPAWN: WorldSpawnPosition = WorldSpawnPosition {
+    world_id: 3,
+    zone_id: LIB_ZONE_KEY,
+    x: 400.0,
+    y: 400.0,
+    z: 10.0,
+    yaw: 90.0,
+    pitch: 0.0,
+    roll: 0.0,
+};
+
+/// A selective (`7457`) and a plain (`7458`) entrance doodad, like the real rows 2-9.
+fn add_sys_entrance(
+    data: &mut GameData,
+    template_id: u32,
+    group_id: u32,
+    func_id: u32,
+    selective: bool,
+) {
+    use crate::systems::npcs::doodad::templates::doodad_func_group_kind;
+    let dd = &mut data.systems.npcs.doodad;
+    dd.templates.insert(
+        template_id,
+        DoodadTemplate {
+            id: template_id,
+            func_groups: vec![DoodadFuncGroups {
+                id: group_id,
+                almighty: template_id,
+                group_kind_id: doodad_func_group_kind::START,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+    dd.func_templates
+        .entry("DoodadFuncEnterSysInstance")
+        .or_default()
+        .insert(
+            func_id,
+            FuncTemplate::EnterSysInstance(DoodadFuncEnterSysInstance {
+                id: func_id,
+                zone_id: LIB_ZONE,
+                faction_id: 0,
+                selective,
+            }),
+        );
+    let func = DoodadFunc {
+        group_id,
+        func_id,
+        func_key: func_id,
+        func_type: "DoodadFuncEnterSysInstance".into(),
+        next_phase: -1,
+        // The real rows 2-9 bind the entrance interaction skills 24354-24373; a skill-bound
+        // func is how `Doodad.Use` dispatches a Phase func (`func_for_skill`).
+        skill_id: 24354,
+        ..Default::default()
+    };
+    dd.funcs_by_groups.insert(group_id, vec![func.clone()]);
+    dd.funcs_by_id.insert(func_id, func);
+}
+
+fn library_data() -> GameData {
+    let mut data = dungeon_data();
+    let lib = zone(LIB_ZONE, LIB_ZONE_KEY, LIB_GROUP);
+    data.zones.zone_id_to_key.insert(lib.id, lib.zone_key);
+    data.zones.groups.entry(lib.group_id).or_insert(ZoneGroup {
+        id: lib.group_id,
+        name: "group_70".into(),
+        ..ZoneGroup::default()
+    });
+    data.zones.zones.insert(lib.zone_key, lib);
+    data.systems
+        .instances
+        .zone_order
+        .zones
+        .push((LIB_ZONE_KEY, LIB_GROUP));
+    data.systems.instances.indun.zones.insert(
+        LIB_GROUP,
+        IndunZone {
+            zone_group_id: LIB_GROUP,
+            name: "library".into(),
+            level_min: 1,
+            level_max: 55,
+            max_players: 190,
+            select_channel: true,
+            ..IndunZone::default()
+        },
+    );
+    add_sys_entrance(&mut data, 7457, 9001, 9002, true);
+    add_sys_entrance(&mut data, 7458, 9003, 9004, false);
+    data
+}
+
+fn library_server(data: GameData) -> Arc<GameServer> {
+    let mirage_spawn = WorldSpawnPosition {
+        world_id: 2,
+        zone_id: MIRAGE_ZONE,
+        x: 300.0,
+        y: 300.0,
+        z: 50.0,
+        yaw: 200.0,
+        ..WorldSpawnPosition::default()
+    };
+    build_server(
+        data,
+        vec![
+            instance_template(1, "instance_test", DUNGEON_ZONE, DUNGEON_SPAWN),
+            instance_template(2, "arche_mall_world", MIRAGE_ZONE, mirage_spawn),
+            instance_template(3, "instance_library_1", LIB_ZONE_KEY, LIB_SPAWN),
+        ],
+        vec![
+            lookup("instance_test", DUNGEON_SPAWN),
+            lookup("arche_mall_world", mirage_spawn),
+            lookup("instance_library_1", LIB_SPAWN),
+        ],
+        None,
+    )
+}
+
+async fn create_library(server: &GameServer, channel: u32) -> Arc<dungeon::Dungeon> {
+    let d = indun::create_system_instance(server, None, LIB_ZONE_KEY, channel, false, 0)
+        .expect("library instance");
+    await_loader(&d).await;
+    d
+}
+
+fn spawn_sys_entrance(
+    server: &GameServer,
+    template_id: u32,
+    group_id: u32,
+    obj_id: u32,
+) -> crate::world::DoodadRef {
+    let mut d = Doodad::new(template_id);
+    d.func_group_id = group_id;
+    d.transform.set_xyz(100.0, 100.0, 100.0);
+    d.transform.zone_id = TEST_ZONE;
+    let d = Entity::new(obj_id, d);
+    let world = server.world.world(0).unwrap();
+    world.spawn(&d, &server.view_ctx());
+    d
+}
+
+fn use_sys_entrance(server: &GameServer, p: &PlayerRef, doodad: &crate::world::DoodadRef) {
+    let world = server.world.world(0).unwrap();
+    crate::systems::npcs::doodad::manager::use_doodad(
+        server,
+        &world,
+        doodad,
+        Some(&WorldObject::from(p)),
+        24354,
+        0,
+    );
+}
+
+fn select_body(inst_id: u32, doodad_obj_id: u32) -> Vec<u8> {
+    let mut s = PacketStream::new();
+    s.write_u32(inst_id).write_bc(doodad_obj_id);
+    s.into_bytes()
+}
+
+#[tokio::test]
+async fn selective_system_entrance_sends_the_live_channel_list() {
+    let server = library_server(library_data());
+    let first = create_library(&server, 0).await;
+    let second = create_library(&server, 1).await;
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    let doodad = spawn_sys_entrance(&server, 7457, 9001, 0xD001);
+    a.frames();
+
+    use_sys_entrance(&server, &a.p, &doodad);
+    let f = a.frames();
+    let expected = body(&SCSystemDungeonStatePacket {
+        zone_key: LIB_ZONE,
+        channels: vec![
+            SystemDungeonChannel {
+                index: 0,
+                instance_id: first.world_id().unwrap(),
+                restrict: 190,
+                current: 0,
+            },
+            SystemDungeonChannel {
+                index: 1,
+                instance_id: second.world_id().unwrap(),
+                restrict: 190,
+                current: 0,
+            },
+        ],
+    });
+    assert!(
+        f.contains(&(sc::SCUnkPacket15, expected)),
+        "0x206 list: {f:?}"
+    );
+    assert!(!f.iter().any(|(op, _)| *op == sc::SCLoadInstancePacket));
+    assert_eq!(a.instance(), 0, "the list alone does not move the player");
+}
+
+#[tokio::test]
+async fn selecting_the_second_channel_loads_the_player_there_and_sends_0x207() {
+    let server = library_server(library_data());
+    let _first = create_library(&server, 0).await;
+    let second = create_library(&server, 1).await;
+    let second_id = second.world_id().unwrap();
+    let mut a = Pc::new(&server, 1, "Alpha", 137.5, 88.0);
+    a.p.data().unit.transform.set_xyz(137.5, 88.0, 100.0);
+    let doodad = spawn_sys_entrance(&server, 7457, 9001, 0xD002);
+    doodad.data().transform.set_xyz(137.5, 88.0, 100.0);
+    use_sys_entrance(&server, &a.p, &doodad);
+    let list = a.frames();
+    assert!(list.iter().any(|(op, _)| *op == sc::SCUnkPacket15));
+    assert!(
+        a.p.data().main_world_position.is_none(),
+        "the dialog alone saves no return point"
+    );
+
+    // CS 0x13d with the second row's instId loads the player into that instance.
+    a.frame(
+        &server,
+        cs::CSSelectSysInstanceChannelPacket,
+        &select_body(second_id, doodad.obj_id),
+    )
+    .await;
+    let f = a.frames();
+    let expected_load = load_instance(
+        second_id,
+        LIB_ZONE_KEY,
+        LIB_SPAWN.x,
+        LIB_SPAWN.y,
+        LIB_SPAWN.z,
+        (0.0, 0.0, worlds::deg_to_rad(LIB_SPAWN.yaw)),
+    );
+    assert!(
+        f.contains(&(sc::SCLoadInstancePacket, expected_load)),
+        "load into the picked channel: {f:?}"
+    );
+    assert_eq!(a.instance(), second_id);
+    let mwp = a.p.data().main_world_position.expect("return point saved");
+    assert_eq!((mwp.instance_id, mwp.zone_id), (0, TEST_ZONE));
+    assert_eq!((mwp.x, mwp.y, mwp.z), (137.5, 88.0, 100.0));
+
+    // The channel was loaded already, so SC 0x207 follows SCLoadInstance directly: the zone
+    // of the load, the instance and the 0-based index.
+    let expected = body(&SCSystemDungeonChannelPacket {
+        zone_id: LIB_ZONE_KEY as i32,
+        instance_id: second_id,
+        instance_index: 1,
+    });
+    assert!(f.contains(&(sc::SCUnkPacket16, expected)), "0x207: {f:?}");
+
+    // It is answered once; the load confirmation does not repeat it.
+    a.frame(&server, cs::CSInstanceLoadedPacket, &[]).await;
+    let f = a.frames();
+    assert!(
+        !f.iter().any(|(op, _)| *op == sc::SCUnkPacket16),
+        "0x207 once: {f:?}"
+    );
+}
+
+#[tokio::test]
+async fn selecting_a_channel_that_is_still_loading_sends_0x207_after_instance_loaded() {
+    let server = library_server(library_data());
+    let _first = create_library(&server, 0).await;
+    let second = indun::create_system_instance(&server, None, LIB_ZONE_KEY, 1, false, 0)
+        .expect("library instance");
+    let second_id = second.world_id().unwrap();
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    let doodad = spawn_sys_entrance(&server, 7457, 9001, 0xD008);
+    use_sys_entrance(&server, &a.p, &doodad);
+    a.frames();
+
+    a.frame(
+        &server,
+        cs::CSSelectSysInstanceChannelPacket,
+        &select_body(second_id, doodad.obj_id),
+    )
+    .await;
+    let f = a.frames();
+    assert!(f
+        .iter()
+        .any(|(op, _)| *op == sc::SCProcessingInstancePacket));
+    assert!(!f.iter().any(|(op, _)| *op == sc::SCUnkPacket16));
+    assert_eq!(a.instance(), 0);
+
+    // The loader moves the player once the channel is ready.
+    await_loader(&second).await;
+    assert_eq!(a.instance(), second_id);
+    a.frame(&server, cs::CSInstanceLoadedPacket, &[]).await;
+    let f = a.frames();
+    let expected = body(&SCSystemDungeonChannelPacket {
+        zone_id: LIB_ZONE_KEY as i32,
+        instance_id: second_id,
+        instance_index: 1,
+    });
+    assert!(
+        f.contains(&(sc::SCUnkPacket16, expected)),
+        "0x207 after load: {f:?}"
+    );
+}
+
+#[tokio::test]
+async fn channel_select_saves_the_main_world_position_only_on_a_successful_pick() {
+    let server = library_server(library_data());
+    let _first = create_library(&server, 0).await;
+    let second = create_library(&server, 1).await;
+    let second_id = second.world_id().unwrap();
+    let mut a = Pc::new(&server, 1, "Alpha", 137.5, 88.0);
+    a.p.data().unit.transform.set_xyz(137.5, 88.0, 100.0);
+    let doodad = spawn_sys_entrance(&server, 7457, 9001, 0xD009);
+    doodad.data().transform.set_xyz(137.5, 88.0, 100.0);
+    // A return point from an earlier visit must survive a refused pick.
+    let sentinel = crate::models::transform::Transform {
+        instance_id: 0,
+        zone_id: TEST_ZONE,
+        x: -1.0,
+        y: -2.0,
+        z: -3.0,
+        ..Default::default()
+    };
+    a.p.data().main_world_position = Some(sentinel);
+    use_sys_entrance(&server, &a.p, &doodad);
+    a.frames();
+    assert_eq!(
+        a.p.data().main_world_position,
+        Some(sentinel),
+        "the dialog saves nothing"
+    );
+
+    // A refused pick (unknown doodad) leaves the saved position untouched.
+    a.frame(
+        &server,
+        cs::CSSelectSysInstanceChannelPacket,
+        &select_body(second_id, 0xDEAD),
+    )
+    .await;
+    a.frames();
+    assert_eq!(a.p.data().main_world_position, Some(sentinel));
+
+    // A successful pick replaces it with the pre-entry position: the player is still in the
+    // default instance, so the direct entrance's save rule applies.
+    a.frame(
+        &server,
+        cs::CSSelectSysInstanceChannelPacket,
+        &select_body(second_id, doodad.obj_id),
+    )
+    .await;
+    a.frames();
+    let mwp = a.p.data().main_world_position.expect("return point saved");
+    assert_eq!((mwp.instance_id, mwp.zone_id), (0, TEST_ZONE));
+    assert_eq!((mwp.x, mwp.y, mwp.z), (137.5, 88.0, 100.0));
+    assert_eq!(a.instance(), second_id);
+}
+
+#[tokio::test]
+async fn selected_channel_full_refuses_with_the_normal_instance_quota_error() {
+    let mut data = library_data();
+    data.systems
+        .instances
+        .indun
+        .zones
+        .get_mut(&LIB_GROUP)
+        .unwrap()
+        .max_players = 1;
+    let server = library_server(data);
+    let b = Pc::new(&server, 2, "Beta", 100.0, 100.0);
+    let full = indun::create_system_instance(&server, Some(&b.p), LIB_ZONE_KEY, 0, false, 0)
+        .expect("library instance");
+    await_loader(&full).await;
+    let full_id = full.world_id().unwrap();
+    assert!(worlds::has_character(
+        &full.world(&server).unwrap(),
+        b.p.character_id
+    ));
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    let doodad = spawn_sys_entrance(&server, 7457, 9001, 0xD003);
+    use_sys_entrance(&server, &a.p, &doodad);
+    a.frames();
+
+    a.frame(
+        &server,
+        cs::CSSelectSysInstanceChannelPacket,
+        &select_body(full_id, doodad.obj_id),
+    )
+    .await;
+    let f = a.frames();
+    let error = body(&crate::packets::world::SCErrorMsgPacket::new(
+        worlds::error_message::INSTANCE_QUOTA,
+        0,
+        true,
+    ));
+    assert!(
+        f.contains(&(sc::SCErrorMsgPacket, error)),
+        "full error: {f:?}"
+    );
+    assert!(!f.iter().any(|(op, _)| *op == sc::SCLoadInstancePacket));
+    assert!(!f.iter().any(|(op, _)| *op == sc::SCUnkPacket16));
+    assert_eq!(a.instance(), 0);
+}
+
+#[tokio::test]
+async fn selection_ignores_a_bad_doodad_out_of_reach_and_a_stale_instance() {
+    let server = library_server(library_data());
+    let _first = create_library(&server, 0).await;
+    let second = create_library(&server, 1).await;
+    let second_id = second.world_id().unwrap();
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    let doodad = spawn_sys_entrance(&server, 7457, 9001, 0xD004);
+    let plain = spawn_sys_entrance(&server, 7458, 9003, 0xD005);
+    use_sys_entrance(&server, &a.p, &doodad);
+    a.frames();
+
+    // Unknown doodad object id.
+    a.frame(
+        &server,
+        cs::CSSelectSysInstanceChannelPacket,
+        &select_body(second_id, 0xDEAD),
+    )
+    .await;
+    // A non-selective entrance of the same zone.
+    a.frame(
+        &server,
+        cs::CSSelectSysInstanceChannelPacket,
+        &select_body(second_id, plain.obj_id),
+    )
+    .await;
+    // A stale / unknown world instance id.
+    a.frame(
+        &server,
+        cs::CSSelectSysInstanceChannelPacket,
+        &select_body(0x00C0_FFEE, doodad.obj_id),
+    )
+    .await;
+    let f = a.frames();
+    assert!(f.is_empty(), "ignored picks send nothing: {f:?}");
+    assert_eq!(a.instance(), 0);
+
+    // Out of reach (> 5 m + 15 m doodad allowance).
+    doodad.data().transform.set_xyz(1000.0, 100.0, 100.0);
+    a.frame(
+        &server,
+        cs::CSSelectSysInstanceChannelPacket,
+        &select_body(second_id, doodad.obj_id),
+    )
+    .await;
+    let f = a.frames();
+    assert!(!f.iter().any(|(op, _)| *op == sc::SCLoadInstancePacket));
+    assert!(!f.iter().any(|(op, _)| *op == sc::SCUnkPacket16));
+    assert_eq!(a.instance(), 0);
+}
+
+#[tokio::test]
+async fn non_selective_entrance_still_enters_channel_zero() {
+    let server = library_server(library_data());
+    let first = create_library(&server, 0).await;
+    let first_id = first.world_id().unwrap();
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    let doodad = spawn_sys_entrance(&server, 7458, 9003, 0xD006);
+    a.frames();
+
+    use_sys_entrance(&server, &a.p, &doodad);
+    let f = a.frames();
+    assert!(
+        !f.iter().any(|(op, _)| *op == sc::SCUnkPacket15),
+        "no channel list: {f:?}"
+    );
+    let expected = load_instance(
+        first_id,
+        LIB_ZONE_KEY,
+        LIB_SPAWN.x,
+        LIB_SPAWN.y,
+        LIB_SPAWN.z,
+        (0.0, 0.0, worlds::deg_to_rad(LIB_SPAWN.yaw)),
+    );
+    assert!(f.contains(&(sc::SCLoadInstancePacket, expected)));
+    assert_eq!(a.instance(), first_id);
+}
+
+#[tokio::test]
+async fn selective_entrance_without_a_live_instance_creates_channel_zero() {
+    let server = library_server(library_data());
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    let doodad = spawn_sys_entrance(&server, 7457, 9001, 0xD007);
+    a.frames();
+
+    use_sys_entrance(&server, &a.p, &doodad);
+    let f = a.frames();
+    assert!(
+        !f.iter().any(|(op, _)| *op == sc::SCUnkPacket15),
+        "no list without a live instance: {f:?}"
+    );
+    assert!(f
+        .iter()
+        .any(|(op, _)| *op == sc::SCProcessingInstancePacket));
+    let dungeons = server.systems.instances.all_dungeons();
+    assert_eq!(dungeons.len(), 1);
+    await_loader(&dungeons[0]).await;
+    assert_eq!(a.instance(), dungeons[0].world_id().unwrap());
 }
 
 /// `CSInstanceLoaded` after `SCLoadInstance` re-files the character in the arrival instance's
