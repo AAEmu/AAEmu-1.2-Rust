@@ -4191,10 +4191,14 @@ impl ItemSkillHooks for ShipItems {
         _server: &GameServer,
         _player: &PlayerRef,
         task_type: u8,
-        _item_id: u64,
+        item_id: u64,
         expected_template_id: u32,
         amount: i32,
     ) -> Option<bool> {
+        // The one named bag item, not just any item of the template.
+        if item_id != DESIGN_ITEM || expected_template_id != 7000 {
+            return Some(false);
+        }
         self.consumed
             .lock()
             .unwrap()
@@ -4969,9 +4973,12 @@ fn real_compact_db_vehicle_tables() {
             .sum::<usize>(),
         85
     );
-    // `item_shipyards` maps the design items to their shipyards; 10 / 11 have no
+    // `item_shipyards` maps the design items to their shipyards; 2-4 and 10 / 11 have no
     // `origin_item_id` and exist only through these rows.
     assert_eq!(d.item_shipyards.len(), 13);
+    assert_eq!(d.item_shipyards.get(&16163), Some(&2));
+    assert_eq!(d.item_shipyards.get(&15687), Some(&3));
+    assert_eq!(d.item_shipyards.get(&15564), Some(&4));
     assert_eq!(d.item_shipyards.get(&18124), Some(&10));
     assert_eq!(d.item_shipyards.get(&18149), Some(&11));
     assert_eq!(d.shipyard_rewards.values().map(Vec::len).sum::<usize>(), 9);

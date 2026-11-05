@@ -15,6 +15,7 @@ use crate::world::{Entity, PlayerRef, ShipyardRef, WorldObject};
 use super::slaves::buff;
 use super::stats::{self, VehicleKind};
 use super::{broadcast, error};
+use crate::systems::npcs::doodad::templates::FuncTemplate;
 
 /// `ItemTaskType` values used by the shipyard.
 mod item_task {
@@ -117,10 +118,14 @@ pub fn create(
         .world(instance)
         .map(|w| w.world_pos_rot(&WorldObject::from(owner)))
         .unwrap_or_default();
-    let obj_id = server.ids.object.get_next_id().ok()?;
-    let ship_id = server.ids.shipyard.get_next_id().ok()?;
     let Some(step_tpl) = template.step(step).copied() else {
         tracing::error!("Shipyard {template_id} has no step {step} (KeyNotFoundException)");
+        return None;
+    };
+    let obj_id = server.ids.object.get_next_id().ok()?;
+    let Some(ship_id) = server.ids.shipyard.get_next_id().ok() else {
+        server.ids.object.release_id(obj_id);
+        tracing::error!("Shipyard {template_id}: no free shipyard id");
         return None;
     };
     let data = ShipyardData {
@@ -132,6 +137,8 @@ pub fn create(
         z_rot,
         money_amount: 0,
         actions: step,
+        // capture-pending: the C# wrote `OriginItemId` (0 for shipyards 2-4, 10, 11); the
+        // 1.2 client's meaning of `ShipyardData.Type` is unproven, so the value is unchanged.
         kind: template.origin_item_id,
         kind2: owner_id,
         owner_name: owner_name.clone(),
@@ -151,9 +158,11 @@ pub fn create(
     );
     let shipyard = Entity::new(obj_id, sy);
 
-    // we will make checks for the availability of money and items to create a shipyard
+    // we will make checks for the availability of money and items to create a shipyard;
+    // `remove_required_items` sends the one refusal error itself.
     if !remove_required_items(server, owner, &template, design_item, design_template_id) {
-        error(owner, error::NOT_ENOUGH_ITEM);
+        server.ids.object.release_id(obj_id);
+        server.ids.shipyard.release_id(ship_id);
         return None;
     }
     spawn_shipyard(server, ship_id, &shipyard);
@@ -276,6 +285,7 @@ fn remove_required_items(
         .taxations
         .get(&(template.taxation_id as u32))
     else {
+        error(character, error::NOT_ENOUGH_ITEM);
         tracing::error!(
             "Shipyard {}: taxation {} missing (KeyNotFoundException)",
             template.id,
@@ -288,6 +298,7 @@ fn remove_required_items(
         return false;
     }
     let Some((use_skill_id, _)) = items.item_use_skill(server, design_id) else {
+        error(character, error::NOT_ENOUGH_ITEM);
         tracing::error!("Could not find Reagents/Products for item template {design_id}");
         return false;
     };
@@ -304,6 +315,7 @@ fn remove_required_items(
             tracing::error!("Not enough reagents Id={}, Amount={}", r.item_id, r.amount);
         }
         if !enough {
+            error(character, error::NOT_ENOUGH_ITEM);
             return false;
         }
     }
@@ -447,7 +459,13 @@ pub fn spawn_rewards(server: &GameServer, shipyard: &ShipyardRef) {
             );
             continue;
         };
-        let lifetime = reward_lifetime_ms(&mut rng, tpl.min_time, tpl.max_time);
+        // Doodad 1330 has its own chain (group 2146 Timer 1159, 300 s -> 2147 LootItem 740
+        // -> 2147 Final 451, 120 s); do not replace its FuncTask with our delete task.
+        // Only a template with no Timer/Final phase func gets the fallback lifetime.
+        let fallback_lifetime = (!has_authored_lifetime(server, reward.doodad_id)).then(|| {
+            reward_lifetime_ms(&mut rng, tpl.min_time, tpl.max_time)
+                .unwrap_or(REWARD_FALLBACK_LIFETIME_MS)
+        });
         let points = reward_points(&mut rng, (x, y), reward.radius, reward.count);
         tracing::debug!(
             "Shipyard {template_id}: spawning {} reward doodads {} within {} m",
@@ -482,9 +500,7 @@ pub fn spawn_rewards(server: &GameServer, shipyard: &ShipyardRef) {
             }
             crate::systems::npcs::doodad::manager::init_doodad(server, &world, &doodad);
             crate::systems::npcs::doodad::manager::spawn(server, &world, &doodad);
-            // The doodad template's own lifetime (`doodad_almighties.min_time` / `max_time`,
-            // 1330: 600-700 s) bounds the debris; the reward row itself has no timer.
-            if let Some(lifetime) = lifetime {
+            if let Some(lifetime) = fallback_lifetime {
                 crate::systems::npcs::doodad::tasks::start_func_task(
                     server,
                     &doodad,
@@ -518,8 +534,29 @@ pub(crate) fn reward_points(
         .collect()
 }
 
-/// Random lifetime in `[min_time, max_time]` ms (`doodad_almighties`), `None` when the template
-/// has no lifetime.
+/// Fallback lifetime for reward doodads whose template has no authored Timer/Final phase
+/// function, and no `doodad_almighties.min_time`-`max_time` values.
+const REWARD_FALLBACK_LIFETIME_MS: u64 = 600_000;
+
+/// Whether the doodad template's own phase chain ends the object (a `DoodadFuncTimer` with a
+/// next phase, or any `DoodadFuncFinal`). Such a template must keep its `FuncTask`, so the
+/// reward spawn adds no delete task for it.
+fn has_authored_lifetime(server: &GameServer, template_id: u32) -> bool {
+    let data = &server.game_data.systems.npcs.doodad;
+    data.doodad_func_groups(template_id).iter().any(|g| {
+        data.phase_funcs(g.id).iter().any(|pf| {
+            match data.phase_func_template(pf.func_id, &pf.func_type) {
+                Some(FuncTemplate::Timer(f)) => f.next_phase > 0,
+                Some(FuncTemplate::Final(_)) => true,
+                _ => false,
+            }
+        })
+    })
+}
+
+/// Fallback lifetime in `[min_time, max_time]` ms (`doodad_almighties`), `None` when the template
+/// has neither. These columns are not the authored lifetime (1330's own chain is the 300 s
+/// Timer -> 120 s Final above); they only bound reward doodads without a phase lifetime.
 fn reward_lifetime_ms(rng: &mut impl rand::Rng, min_time: i32, max_time: i32) -> Option<u64> {
     if max_time <= 0 {
         return None;
@@ -543,12 +580,20 @@ fn reward_ground(
     y: f32,
     fallback_z: f32,
 ) -> f32 {
-    if on_water && super::ship_physics::is_water(server, world, [x, y, fallback_z]) {
-        return super::ship_physics::water_surface(server, world, [x, y, fallback_z]);
+    let ground =
+        crate::systems::ai::collision::ground_height_or(server, world.id, x, y, fallback_z, || {
+            crate::systems::npcs::heightmap::world_height(server, world, x, y).unwrap_or(fallback_z)
+        });
+    if on_water {
+        let surface = super::ship_physics::water_surface(server, world, [x, y, ground]);
+        // Test the water at the seabed, not at the shipyard's (above-surface) z: a strict
+        // `is_water` at the shipyard z is false over deep water, which put the debris on the
+        // seabed.
+        if super::ship_physics::is_water(server, world, [x, y, ground]) || ground < surface {
+            return surface;
+        }
     }
-    crate::systems::ai::collision::ground_height_or(server, world.id, x, y, fallback_z, || {
-        crate::systems::npcs::heightmap::world_height(server, world, x, y).unwrap_or(fallback_z)
-    })
+    ground
 }
 
 /// `BaseUnit.GetDistanceTo`: the shipyard part (`BuildRadius * Scale` instead of the model
