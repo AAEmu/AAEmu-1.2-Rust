@@ -35,7 +35,7 @@ use crate::systems::skills::data::effects::SpecialEffect;
 use crate::systems::skills::data::{EffectKind, EffectTemplate, SkillEffect, SkillTemplate};
 use crate::systems::skills::handlers::CSStartSkillPacket;
 use crate::systems::skills::packets::SCExpChangedPacket;
-use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+use crate::systems::skills::types::{skill_result, SkillCastTarget, SkillCaster, SkillObject};
 use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
 use crate::world::{Entity, PlayerRef};
 
@@ -445,6 +445,39 @@ fn error(e: i16) -> (u16, Vec<u8>) {
         sc::SCErrorMsgPacket,
         body(&SCErrorMsgPacket::new(e, 0, true)),
     )
+}
+
+fn error_with_kind(e: i16, kind: u32) -> (u16, Vec<u8>) {
+    (
+        sc::SCErrorMsgPacket,
+        body(&SCErrorMsgPacket::new(e, kind, true)),
+    )
+}
+
+/// The `SkillResult` byte of the first `SCSkillStartedPacket` in `frames` (`None` when the cast
+/// did not answer with a started packet).
+fn started_skill_result(frames: &[(u16, Vec<u8>)]) -> Option<u8> {
+    let (_, body) = frames
+        .iter()
+        .find(|(op, _)| *op == sc::SCSkillStartedPacket)?;
+    let mut s = PacketStream::from_bytes(body.clone());
+    s.read_u32().ok()?;
+    s.read_u16().ok()?;
+    let caster = s.read_u8().ok()?;
+    SkillCaster::read(caster, &mut s).ok()?;
+    let target = s.read_u8().ok()?;
+    SkillCastTarget::read(target, &mut s).ok()?;
+    let object = s.read_u8().ok()?;
+    SkillObject::read(object, &mut s).ok()?;
+    s.read_u16().ok()?;
+    s.read_u16().ok()?;
+    s.read_u8().ok()?;
+    let flags = s.read_u8().ok()?;
+    if flags & 1 == 0 {
+        Some(0)
+    } else {
+        s.read_u8().ok()
+    }
 }
 
 fn item(w: &World, id: u64) -> Option<Item> {
@@ -1704,6 +1737,144 @@ async fn cast_wrapped_rod(w: &mut World, item_id: u64) {
     .unwrap();
 }
 
+const CAP_SCALE_SKILL: u32 = 900;
+const CAP_SCALE_EFFECT: u32 = 9100;
+
+/// A skill world where `SCROLL` carries the real cap-scale use skill: special effect 112, item
+/// target, source item consumed. `data()` already has the `item_cap_scales` row for skill 900
+/// and `FORBIDDEN_SCALE_ARMOR` in `item_cap_scale_forbids`.
+fn cap_scale_cast_world(mut data: GameData) -> World {
+    {
+        let temper = data
+            .items
+            .templates
+            .get_mut(&SCROLL)
+            .expect("temper template");
+        temper.use_skill_id = CAP_SCALE_SKILL;
+    }
+    data.systems.skills.add_effect(
+        EffectKind::SpecialEffect,
+        EffectTemplate::Special(SpecialEffect {
+            id: CAP_SCALE_EFFECT,
+            special_effect_type_id: 112,
+            value1: 0,
+            value2: 0,
+            value3: 0,
+            value4: 0,
+        }),
+        CAP_SCALE_EFFECT,
+    );
+    data.systems.skills.add_skill(SkillTemplate {
+        id: CAP_SCALE_SKILL,
+        target_type: 9,
+        max_range: 4,
+        effects: vec![SkillEffect {
+            effect_id: CAP_SCALE_EFFECT,
+            template: Some((EffectKind::SpecialEffect, CAP_SCALE_EFFECT)),
+            weight: 0,
+            start_level: 0,
+            end_level: 255,
+            friendly: true,
+            non_friendly: true,
+            target_buff_tag_id: 0,
+            target_no_buff_tag_id: 0,
+            source_buff_tag_id: 0,
+            source_no_buff_tag_id: 0,
+            chance: 100,
+            front: false,
+            back: false,
+            target_npc_tag_id: 0,
+            application_method: 1,
+            consume_source_item: true,
+            consume_item_id: 0,
+            consume_item_count: 1,
+            always_hit: true,
+            item_set_id: 0,
+            interaction_success_hit: false,
+        }],
+        ..SkillTemplate::default()
+    });
+    let w = world_with_data(data);
+    crate::systems::skills::bind(&w.server);
+    super::bridges::install(&w.server);
+    w
+}
+
+async fn cast_cap_scale(w: &mut World, temper: u64, target: u64) {
+    CSStartSkillPacket {
+        skill_id: CAP_SCALE_SKILL,
+        caster: SkillCaster::Item {
+            obj_id: w.pa.obj_id,
+            item_id: temper,
+            item_template_id: SCROLL,
+            type1: 0,
+            type2: 0,
+        },
+        target: SkillCastTarget::Item {
+            obj_id: w.pa.obj_id,
+            id: target,
+            type1: 0,
+            type2: 0,
+        },
+        flag: 0,
+        skill_object: SkillObject::None,
+    }
+    .handle(&w.server, &mut w.a.conn)
+    .await
+    .unwrap();
+}
+
+/// The 1.2 client refuses the cap-scale cast on an `item_cap_scale_forbids` target with
+/// SkillResult INVALID_TARGET 0x22 (`FUN_3939dc20`); the server answers the same result and
+/// keeps the temper item.
+#[tokio::test]
+async fn item_cap_scale_cast_fails_with_invalid_target_for_forbidden_items() {
+    let mut w = cap_scale_cast_world(data());
+    let temper = give(&w, &w.pa.clone(), slot_type::INVENTORY, SCROLL, 2, 0);
+    let target = give(
+        &w,
+        &w.pa.clone(),
+        slot_type::INVENTORY,
+        FORBIDDEN_SCALE_ARMOR,
+        1,
+        1,
+    );
+    mark_clean(&w, target);
+    w.a.drain();
+    cast_cap_scale(&mut w, temper, target).await;
+    let frames = w.a.drain();
+    assert_eq!(
+        started_skill_result(&frames),
+        Some(skill_result::INVALID_TARGET)
+    );
+    assert_eq!(
+        item(&w, temper).expect("the temper is kept").count,
+        2,
+        "a refused cap-scale cast must not consume the temper"
+    );
+    let after = item(&w, target).unwrap();
+    assert_eq!(
+        (after.details.temper_physical, after.details.temper_magical),
+        (0, 0)
+    );
+    assert!(!after.dirty);
+}
+
+#[tokio::test]
+async fn item_cap_scale_cast_tempers_an_allowed_target() {
+    let mut w = cap_scale_cast_world(data());
+    let temper = give(&w, &w.pa.clone(), slot_type::INVENTORY, SCROLL, 2, 0);
+    let target = give(&w, &w.pa.clone(), slot_type::INVENTORY, ARMOR, 1, 1);
+    w.a.drain();
+    cast_cap_scale(&mut w, temper, target).await;
+    assert_eq!(
+        item(&w, temper).expect("temper").count,
+        1,
+        "an accepted cap-scale cast consumes one temper"
+    );
+    assert!(item(&w, target).expect("target").dirty);
+}
+
 /// The wrapped rod's use skill is refused below `actability_requirement` (client
 /// `FUN_394e1a90`, error 508) and the wrapped item is kept; at the requirement it is consumed
 /// and the unwrapped item is given.
@@ -1715,8 +1886,11 @@ async fn using_a_wrapped_fishing_rod_requires_its_actability_points() {
     cast_wrapped_rod(&mut w, wrapped).await;
     let frames = w.a.drain();
     assert!(
-        frames.iter().any(|(op, _)| *op == sc::SCErrorMsgPacket),
-        "the use below the requirement shows error 508"
+        frames.contains(&error_with_kind(
+            error_message::ACTABILITY_NOT_ENOUGH_POINT,
+            7
+        )),
+        "the use below the requirement shows error 508 with the fishing group"
     );
     assert_eq!(item(&w, wrapped).expect("the wrapped rod is kept").count, 1);
 
@@ -1775,7 +1949,10 @@ async fn item_cap_scale_refuses_forbidden_targets() {
         (0, 0)
     );
     assert!(!after.dirty, "a refused temper must not dirty the item");
-    assert_eq!(w.a.drain(), vec![error(error_message::INVALID_TARGET)]);
+    assert!(
+        w.a.drain().is_empty(),
+        "the cast validation is what reports INVALID_TARGET; the direct call is silent"
+    );
 
     // The reset tool is refused by the same set and leaves the existing temper untouched.
     {
@@ -1795,7 +1972,7 @@ async fn item_cap_scale_refuses_forbidden_targets() {
         (5, 6)
     );
     assert!(!after.dirty);
-    assert_eq!(w.a.drain(), vec![error(error_message::INVALID_TARGET)]);
+    assert!(w.a.drain().is_empty());
 }
 
 #[tokio::test]

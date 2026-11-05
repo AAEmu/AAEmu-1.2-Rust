@@ -1004,15 +1004,15 @@ pub fn item_cap_scale(
         return;
     }
     // `item_cap_scale_forbids` (1.2 client `FUN_395a72d0`, the item's "scalable" property;
-    // `FUN_3939dc20` answers the cast with SkillResult INVALID_TARGET 0x22): the target template
-    // cannot be tempered. Cancel the cast so the source item (the temper) is refunded.
+    // `FUN_3939dc20` answers the cast with SkillResult INVALID_TARGET 0x22, refused by the cast
+    // validation before the source item is taken). This is the last line of defence for direct
+    // effect calls: cancel so the source item (the temper) is refunded.
     if server
         .game_data
         .items
         .cap_scale_forbidden(equip.template_id)
     {
         drop(g);
-        send_error_message_to(&mut txn.out(), player, error_message::INVALID_TARGET);
         drop(txn);
         player.data().skill_char.skill_cancelled = true;
         return;
@@ -1071,14 +1071,14 @@ pub fn item_cap_scale_reset(
         return;
     }
     // The reset tool is refused by the same `item_cap_scale_forbids` set as `ItemCapScale`
-    // (`FUN_395a72d0`); cancel the cast so its source item is refunded.
+    // (`FUN_395a72d0`; reset-tool path unverified, see PORTING.md); cancel so its source item is
+    // refunded.
     if server
         .game_data
         .items
         .cap_scale_forbidden(equip.template_id)
     {
         drop(g);
-        send_error_message_to(&mut txn.out(), player, error_message::INVALID_TARGET);
         drop(txn);
         player.data().skill_char.skill_cancelled = true;
         return;

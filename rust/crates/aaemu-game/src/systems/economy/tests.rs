@@ -7,6 +7,7 @@ use aaemu_commons::{Marshal, PacketStream};
 
 use crate::data::items::{bind_type, EquipTemplate, ItemTemplate, TemplateKind};
 use crate::data::GameData;
+use crate::models::char_data::Actability;
 use crate::models::container::{equip_slot, slot_type, ContainerKind, ItemContainer};
 use crate::models::item::{Item, ItemClass, ITEM_FLAG_SOUL_BOUND};
 use crate::models::item_task::{task_type, ItemFx, ItemFxList, ItemTask};
@@ -160,6 +161,62 @@ pub fn world_with(data: GameData) -> World {
         b,
         pb,
     }
+}
+
+/// A world where a finished house at the player's position carries a +1000 act-ability
+/// decoration for fishing (group 7). The client adds this bonus in `FUN_394e1a90`.
+fn world_with_house_bonus() -> World {
+    use crate::models::doodad::{doodad_owner_type, Doodad};
+    use crate::models::unit::attach_point;
+    use crate::systems::housing::data::{HousingDecoration, HousingTemplate};
+    use crate::systems::housing::manager;
+    use crate::systems::npcs::doodad::templates::DoodadTemplate;
+    use crate::world::Entity;
+    let mut data = test_data();
+    data.systems.housing.add_template(HousingTemplate {
+        id: 300,
+        garden_radius: 8.0,
+        main_model_id: 700,
+        ..Default::default()
+    });
+    data.systems.npcs.doodad.templates.insert(
+        4001,
+        DoodadTemplate {
+            id: 4001,
+            ..Default::default()
+        },
+    );
+    data.systems
+        .housing
+        .add_decoration(HousingDecoration {
+            id: 40,
+            doodad_id: 4001,
+            actability_group_id: 7,
+            actability_up: 1000,
+            ..Default::default()
+        })
+        .unwrap();
+    let w = world_with(data);
+    let world = w.server.world.world(0).expect("world 0");
+    let house = manager::create(&w.server, 300, 0, &world, 0, 0).expect("house");
+    {
+        let mut h = house.data();
+        h.id = 1;
+        h.account_id = 1001;
+        h.unit.owner_id = 1;
+        h.unit.transform.set_xyz(100.0, 100.0, 100.0);
+    }
+    assert!(w.server.systems.housing.manager.insert(&house));
+    manager::spawn_house(&w.server, &house);
+    let mut deco = Doodad::new(4001);
+    deco.owner_type = doodad_owner_type::HOUSING;
+    deco.owner_db_id = 1;
+    deco.attach_point = attach_point::NONE;
+    deco.transform.instance_id = 0;
+    deco.transform.set_xyz(100.0, 100.0, 100.0);
+    let deco = Entity::new(0x400, deco);
+    world.spawn(&deco, &w.server.view_ctx());
+    w
 }
 
 /// NPC templates of the bank / auction service tests.
@@ -366,6 +423,347 @@ async fn equipping_an_item_requires_its_actability_points() {
             .expect("rod equipped")
             .template_id,
         ACTABILITY_ROD
+    );
+    w.a.drain();
+}
+
+/// The client's `DoEquipInEmptySlot` form: it sends the empty equipment slot as the source and
+/// the bag item as the target. The target item moves into the equipment slot, so it is gated.
+#[tokio::test]
+async fn equipping_from_the_empty_equipment_slot_checks_the_target_item() {
+    let mut w = world();
+    let rod = give(
+        &w,
+        &w.pa.clone(),
+        slot_type::INVENTORY,
+        ACTABILITY_ROD,
+        1,
+        0,
+    );
+    w.a.drain();
+    let body = move_body(
+        0,
+        rod,
+        slot_type::EQUIPMENT,
+        equip_slot::MAINHAND as u8,
+        slot_type::INVENTORY,
+        0,
+    );
+    run::<CSSwapItemsPacket>(&mut w, 0, body.as_bytes());
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::ACTABILITY_NOT_ENOUGH_POINT, 7),
+        )]
+    );
+    assert!(item_at(&w.pa, slot_type::INVENTORY, 0).is_some());
+    assert!(item_at(&w.pa, slot_type::EQUIPMENT, equip_slot::MAINHAND as u8).is_none());
+}
+
+/// The swap bypass: an equipped item (id != 0) dragged onto an occupied bag / bank slot moves
+/// the target item into the vacated equipment slot. The target item must pass the same gate.
+#[tokio::test]
+async fn swapping_an_equipped_item_onto_an_occupied_slot_checks_the_target_item() {
+    let mut w = world();
+    // Two rods (max_count 1) so the swap is a `DoSwap`, not a merge; the equipped copy is
+    // placed directly and only the target copy that would enter the equipment slot is gated.
+    let equipped = give(
+        &w,
+        &w.pa.clone(),
+        slot_type::EQUIPMENT,
+        ACTABILITY_ROD,
+        1,
+        equip_slot::MAINHAND,
+    );
+    let rod = give(
+        &w,
+        &w.pa.clone(),
+        slot_type::INVENTORY,
+        ACTABILITY_ROD,
+        1,
+        0,
+    );
+    w.a.drain();
+    let body = move_body(
+        equipped,
+        rod,
+        slot_type::EQUIPMENT,
+        equip_slot::MAINHAND as u8,
+        slot_type::INVENTORY,
+        0,
+    );
+    run::<CSSwapItemsPacket>(&mut w, 0, body.as_bytes());
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::ACTABILITY_NOT_ENOUGH_POINT, 7),
+        )]
+    );
+    assert_eq!(
+        item_at(&w.pa, slot_type::EQUIPMENT, equip_slot::MAINHAND as u8)
+            .expect("the old item stays equipped")
+            .id,
+        equipped
+    );
+    assert_eq!(
+        item_at(&w.pa, slot_type::INVENTORY, 0)
+            .expect("the rod stays in the bag")
+            .id,
+        rod
+    );
+}
+
+/// The core move (without the packet pre-check) refuses the same swap direction, so an internal
+/// caller cannot equip the target item around the gate.
+#[tokio::test]
+async fn core_move_refuses_the_equipment_swap_bypass() {
+    let w = world();
+    let equipped = give(
+        &w,
+        &w.pa.clone(),
+        slot_type::EQUIPMENT,
+        ACTABILITY_ROD,
+        1,
+        equip_slot::MAINHAND,
+    );
+    let rod = give(
+        &w,
+        &w.pa.clone(),
+        slot_type::INVENTORY,
+        ACTABILITY_ROD,
+        1,
+        0,
+    );
+    let inv = Inv::of(&w.pa);
+    {
+        let mut txn = ItemTxn::begin(&w.server);
+        assert!(!inventory::split_or_move_item_ex(
+            &mut txn,
+            &inv,
+            task_type::SWAP_ITEMS,
+            Some(inv.equipment()),
+            Some(inv.bag()),
+            equipped,
+            slot_type::EQUIPMENT,
+            equip_slot::MAINHAND as u8,
+            rod,
+            slot_type::INVENTORY,
+            0,
+            0,
+        ));
+    }
+    assert_eq!(
+        item_at(&w.pa, slot_type::EQUIPMENT, equip_slot::MAINHAND as u8)
+            .expect("the equipped item stays")
+            .id,
+        equipped
+    );
+    assert_eq!(
+        item_at(&w.pa, slot_type::INVENTORY, 0)
+            .expect("the rod stays in the bag")
+            .id,
+        rod
+    );
+}
+
+/// Unequipping into an empty slot is not an equip: it is allowed even below the requirement.
+#[tokio::test]
+async fn unequipping_a_rod_into_an_empty_slot_is_allowed() {
+    let mut w = world();
+    let rod = give(
+        &w,
+        &w.pa.clone(),
+        slot_type::EQUIPMENT,
+        ACTABILITY_ROD,
+        1,
+        equip_slot::MAINHAND,
+    );
+    w.a.drain();
+    let body = move_body(
+        rod,
+        0,
+        slot_type::EQUIPMENT,
+        equip_slot::MAINHAND as u8,
+        slot_type::INVENTORY,
+        1,
+    );
+    run::<CSSwapItemsPacket>(&mut w, 0, body.as_bytes());
+    assert!(w
+        .a
+        .drain()
+        .iter()
+        .all(|(op, _)| *op != sc::SCErrorMsgPacket));
+    assert!(item_at(&w.pa, slot_type::EQUIPMENT, equip_slot::MAINHAND as u8).is_none());
+    assert_eq!(
+        item_at(&w.pa, slot_type::INVENTORY, 1)
+            .expect("the rod is back in the bag")
+            .id,
+        rod
+    );
+}
+
+/// A house decoration adds its act-ability bonus (`FUN_390b3a80`) to the check: 8999 points
+/// plus a 1000-point decoration is still short, 9000 + 1000 meets the rod's 10000.
+#[tokio::test]
+async fn house_actability_bonus_counts_towards_the_requirement() {
+    let mut w = world_with_house_bonus();
+    let rod = give(
+        &w,
+        &w.pa.clone(),
+        slot_type::INVENTORY,
+        ACTABILITY_ROD,
+        1,
+        0,
+    );
+    w.pa.data().actability.actabilities.push(Actability {
+        id: 7,
+        point: 8999,
+        step: 1,
+    });
+    w.a.drain();
+    let body = move_body(
+        rod,
+        0,
+        slot_type::INVENTORY,
+        0,
+        slot_type::EQUIPMENT,
+        equip_slot::MAINHAND as u8,
+    );
+    run::<CSSwapItemsPacket>(&mut w, 0, body.as_bytes());
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::ACTABILITY_NOT_ENOUGH_POINT, 7),
+        )]
+    );
+    assert!(item_at(&w.pa, slot_type::EQUIPMENT, equip_slot::MAINHAND as u8).is_none());
+
+    w.pa.data().actability.actabilities[0].point = 9000;
+    run::<CSSwapItemsPacket>(&mut w, 0, body.as_bytes());
+    assert!(
+        item_at(&w.pa, slot_type::EQUIPMENT, equip_slot::MAINHAND as u8).is_some(),
+        "the house bonus covers the 1000-point shortfall"
+    );
+    w.a.drain();
+}
+
+/// A coffer (TRADE) item is not in `Inv`; the handler must resolve it through the server item
+/// manager so the 508 is sent instead of the core silently refusing the move.
+#[tokio::test]
+async fn coffer_item_to_equipment_is_refused_below_actability() {
+    use crate::models::doodad::{Doodad, DoodadCofferState};
+    use crate::models::house::housing_permission;
+    use crate::world::Entity;
+    let mut w = world();
+    w.server.names.add_character(1, "Alice", 1001);
+    let container = w
+        .server
+        .items
+        .new_coffer_container(1, &w.server.ids.container);
+    let container_id = container.lock().unwrap().container_id;
+    let item = Item::create(
+        901,
+        w.server.game_data.items.template(ACTABILITY_ROD).unwrap(),
+        1,
+        0,
+        1,
+        &w.server.game_data.items,
+        0,
+    );
+    container
+        .lock()
+        .unwrap()
+        .add_new_item(item, 0, &w.server.game_data.items)
+        .unwrap();
+    let mut d = Doodad::new(100);
+    d.owner_id = 1;
+    d.data = i32::from(housing_permission::PRIVATE);
+    d.transform.set_xyz(100.0, 100.0, 100.0);
+    d.coffer = Some(DoodadCofferState {
+        container_id,
+        capacity: 10,
+        opened_by: Some(1),
+    });
+    let doodad = Entity::new(0x300, d);
+    w.server
+        .world
+        .world(0)
+        .unwrap()
+        .spawn(&doodad, &w.server.view_ctx());
+    w.a.drain();
+    let mut body = move_body(
+        901,
+        0,
+        slot_type::TRADE,
+        0,
+        slot_type::EQUIPMENT,
+        equip_slot::MAINHAND as u8,
+    );
+    body.write_u64(container_id);
+    run::<CSSwapCofferItemsPacket>(&mut w, 0, body.as_bytes());
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::ACTABILITY_NOT_ENOUGH_POINT, 7),
+        )]
+    );
+    assert!(container.lock().unwrap().get_item_by_id(901).is_some());
+    assert!(item_at(&w.pa, slot_type::EQUIPMENT, equip_slot::MAINHAND as u8).is_none());
+}
+
+/// The equip gate against the real 1.2 row (27309, group 7, requirement 10000).
+#[tokio::test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+async fn real_fishing_rod_row_requires_its_actability_points() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let real = crate::data::items::ItemData::load(&conn).unwrap();
+    let rod = real.template(27309).expect("iron fishing rod").clone();
+    assert_eq!(
+        (rod.actability_group_id, rod.actability_requirement),
+        (7, 10000)
+    );
+    let mut data = test_data();
+    data.items.templates.insert(27309, rod);
+    let mut w = world_with(data);
+    let id = give(&w, &w.pa.clone(), slot_type::INVENTORY, 27309, 1, 0);
+    w.a.drain();
+    let body = move_body(
+        id,
+        0,
+        slot_type::INVENTORY,
+        0,
+        slot_type::EQUIPMENT,
+        equip_slot::MAINHAND as u8,
+    );
+    run::<CSSwapItemsPacket>(&mut w, 0, body.as_bytes());
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCErrorMsgPacket,
+            error_body(error_message::ACTABILITY_NOT_ENOUGH_POINT, 7),
+        )]
+    );
+    assert!(item_at(&w.pa, slot_type::INVENTORY, 0).is_some());
+    w.pa.data().actability.actabilities.push(Actability {
+        id: 7,
+        point: 10000,
+        step: 1,
+    });
+    run::<CSSwapItemsPacket>(&mut w, 0, body.as_bytes());
+    assert_eq!(
+        item_at(&w.pa, slot_type::EQUIPMENT, equip_slot::MAINHAND as u8)
+            .expect("equipped at the real requirement")
+            .template_id,
+        27309
     );
     w.a.drain();
 }

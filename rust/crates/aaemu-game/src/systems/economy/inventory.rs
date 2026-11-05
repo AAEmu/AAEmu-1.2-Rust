@@ -1111,8 +1111,12 @@ pub fn split_or_move_item_ex(
     // is sent (`FUN_394e41f0` -> `FUN_394e1a90`, error 508); the same check guards every other
     // caller that can put an item into the equipment container. The packet handlers answer 508
     // themselves; this is the silent last line of defence.
-    let equip_empty = action == SwapAction::DoEquipInEmptySlot;
-    let incoming = if equip_empty && src_type == slot_type::EQUIPMENT {
+    let incoming = if src_type == slot_type::EQUIPMENT
+        && dst_type != slot_type::EQUIPMENT
+        && matches!(action, SwapAction::DoEquipInEmptySlot | SwapAction::DoSwap)
+    {
+        // Equipping into an empty slot (`DoEquipInEmptySlot`) or swapping an occupied bag
+        // slot: the target item moves into the equipment slot the source leaves.
         target_item.as_ref()
     } else if dst_type == slot_type::EQUIPMENT && src_type != slot_type::EQUIPMENT {
         from_item.as_ref()
@@ -1954,8 +1958,11 @@ pub fn refuse_item_actability(server: &GameServer, player: &PlayerRef, template_
 
 /// The 1.2 client's equip actability gate for a `SplitOrMoveItem` request: resolves the item
 /// that would enter the character's equipment container and refuses it when the actability
-/// requirement is unmet. The client sends an empty equipment slot as the source when equipping
-/// into it (`DoEquipInEmptySlot`), so the incoming item is the target item in that case.
+/// requirement is unmet. Two request shapes put the *target* item into the equipment slot: the
+/// client sends an empty equipment slot as the source (`DoEquipInEmptySlot`), and a swap of an
+/// equipped item onto an occupied bag / bank slot moves that target item into the vacated
+/// equipment slot (`DoSwap`). The source item may live in a coffer (opened through a bank
+/// doodad), which `Inv` does not hold, so item ids also resolve through the server item manager.
 #[allow(clippy::too_many_arguments)]
 pub fn equip_actability_refused(
     server: &GameServer,
@@ -1967,18 +1974,21 @@ pub fn equip_actability_refused(
     to_slot: u8,
 ) -> bool {
     let inv = Inv::of(player);
-    let template_id = if from_type != slot_type::EQUIPMENT
+    let resolve = |id: u64| {
+        inv.item_by_id(id)
+            .or_else(|| server.items.item_by_id(id))
+            .map(|i| i.template_id)
+    };
+    let template_id = if from_type == slot_type::EQUIPMENT && to_type != slot_type::EQUIPMENT {
+        inv.item_by_id(to_item_id)
+            .or_else(|| inv.item_at(to_type, to_slot))
+            .or_else(|| server.items.item_by_id(to_item_id))
+            .map(|i| i.template_id)
+    } else if from_type != slot_type::EQUIPMENT
         && to_type == slot_type::EQUIPMENT
         && from_item_id != 0
     {
-        inv.item_by_id(from_item_id).map(|i| i.template_id)
-    } else if from_type == slot_type::EQUIPMENT
-        && from_item_id == 0
-        && to_type != slot_type::EQUIPMENT
-    {
-        inv.item_by_id(to_item_id)
-            .or_else(|| inv.item_at(to_type, to_slot))
-            .map(|i| i.template_id)
+        resolve(from_item_id)
     } else {
         None
     };

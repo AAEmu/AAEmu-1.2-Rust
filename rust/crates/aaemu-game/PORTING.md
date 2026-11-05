@@ -447,9 +447,10 @@ would put an item into the player equipment container, so the item is never cons
 `item_cap_scale_forbids` is loaded into `ItemData` (1340 rows, 1335 distinct item ids). The 1.2
 client builds the set from `SELECT item_id FROM item_cap_scale_forbids` (`FUN_395ac620`) and
 tests it with `FUN_395a72d0`, which backs the item's `scalable` property and the cap-scale
-target validation `FUN_3939dc20` (SkillResult INVALID_TARGET 0x22). `ItemCapScale` and
-`ItemCapScaleReset` now refuse a listed target with `INVALID_TARGET` before any roll and cancel
-the cast, so the temper item is refunded.
+target validation `FUN_3939dc20` (SkillResult INVALID_TARGET 0x22). `ItemCapScale` now fails the
+cast with SkillResult INVALID_TARGET before any roll, so the temper item is kept. The
+`ItemCapScaleReset` tool uses the same set here, but its client path was not decoded: that part
+is **unverified** until a capture.
 
 `CharacterActability.ExpandExpert` with no next `expand_expert_limits` row answers
 `store_unknown_error` 228 instead of the C# TODO's silent return. `GainLootPackItemEffect`'s
