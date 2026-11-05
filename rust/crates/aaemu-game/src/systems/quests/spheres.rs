@@ -7,12 +7,15 @@
 //! world); only `main_world` exists here, so there is one manager for the server.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 use super::data::{QuestData, RawSignSphere};
 use super::model::sphere_trigger;
+use super::packets::SCAreaTeamMessagePacket;
 use super::templates::ActKind;
 use crate::server::GameServer;
+use crate::systems::social::packets::duel::SCAreaChatBubblePacket;
 use crate::world::{PlayerRef, WorldObject};
 
 /// `SphereQuest` (one `quest_sign_sphere.g` area, world coordinates).
@@ -39,6 +42,90 @@ pub fn distance3(a: (f32, f32, f32), b: (f32, f32, f32)) -> f32 {
     let dy = f64::from(a.1) - f64::from(b.1);
     let dz = f64::from(a.2) - f64::from(b.2);
     (dx * dx + dy * dy + dz * dz).sqrt() as f32
+}
+
+/// One area of `Data/Worlds/<world>/sphere_area_fill.json` (world coordinates).
+///
+/// The file is produced offline from the 10.x `world_server/quest_area_sphere.g` by
+/// `rust/tools/sphere_area_import/sphere_area_import.py`; the converter already dropped blocks
+/// whose world/zone/sphere the 1.2 data does not contain. `stype` is the 1.2 `spheres.id`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SphereArea {
+    pub world: String,
+    pub zone: u32,
+    pub sphere_id: u32,
+    pub xyz: (f32, f32, f32),
+    pub radius: f32,
+}
+
+impl SphereArea {
+    /// 3D distance (computed in double) <= radius, like [`SphereQuest::contains`].
+    pub fn contains(&self, pos: (f32, f32, f32)) -> bool {
+        distance3(self.xyz, pos) <= self.radius
+    }
+}
+
+/// Reads every `<app_path>/Data/Worlds/*/sphere_area_fill.json`; a missing file is empty and a
+/// malformed row is skipped (a bad data file must not fail the catalog). `known_sphere` is the
+/// runtime data-version guard (the 1.2 `spheres` table of this build).
+pub fn load_sphere_areas(app_path: &Path, known_sphere: impl Fn(u32) -> bool) -> Vec<SphereArea> {
+    let dir = app_path.join("Data").join("Worlds");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<_> = entries.flatten().filter(|e| e.path().is_dir()).collect();
+    dirs.sort_by_key(|e| e.file_name());
+    let mut out = Vec::new();
+    let mut files = 0usize;
+    let mut skipped = 0usize;
+    for entry in dirs {
+        let path = entry.path().join("sphere_area_fill.json");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let world = entry.file_name().to_string_lossy().to_string();
+        let rows: Vec<serde_json::Value> = match serde_json::from_str(&text) {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("{}: {e} (ignored)", path.display());
+                continue;
+            }
+        };
+        files += 1;
+        for row in rows {
+            let number = |key: &str| row.get(key).and_then(serde_json::Value::as_f64);
+            let (Some(sphere_id), Some(zone), Some(x), Some(y), Some(z), Some(radius)) = (
+                number("sphere_id"),
+                number("zone"),
+                number("x"),
+                number("y"),
+                number("z"),
+                number("radius"),
+            ) else {
+                skipped += 1;
+                continue;
+            };
+            let (sphere_id, zone) = (sphere_id as u32, zone as u32);
+            if radius <= 0.0 || !known_sphere(sphere_id) {
+                skipped += 1;
+                continue;
+            }
+            out.push(SphereArea {
+                world: world.clone(),
+                zone,
+                sphere_id,
+                xyz: (x as f32, y as f32, z as f32),
+                radius: radius as f32,
+            });
+        }
+    }
+    if files > 0 {
+        tracing::info!(
+            "Loaded {} sphere area triggers from {files} world files ({skipped} skipped)",
+            out.len()
+        );
+    }
+    out
 }
 
 /// `SphereQuestTrigger`.
@@ -91,6 +178,11 @@ pub struct SphereQuestManager {
     triggers: Mutex<Triggers>,
     /// `_questStartingLastPositionChecks` (character id -> position).
     last_positions: Mutex<HashMap<u32, (f32, f32, f32)>>,
+    /// `Data/Worlds/<world>/sphere_area_fill.json` (world coordinates, read-only).
+    areas: OnceLock<Vec<SphereArea>>,
+    /// Area indexes the character was inside at the last tick (character id -> indexes,
+    /// ascending).
+    area_inside: Mutex<HashMap<u32, Vec<usize>>>,
     /// Serializes ticks.
     tick_lock: Mutex<()>,
 }
@@ -162,6 +254,16 @@ impl SphereQuestManager {
 
     fn spheres(&self) -> Option<&Spheres> {
         self.spheres.get()
+    }
+
+    /// Installs the loaded `sphere_area_fill.json` table (once).
+    pub fn set_areas(&self, areas: Vec<SphereArea>) {
+        let _ = self.areas.set(areas);
+    }
+
+    /// Loaded sphere area blocks (tests / diagnostics).
+    pub fn area_count(&self) -> usize {
+        self.areas.get().map_or(0, Vec::len)
     }
 
     /// `GetQuestSpheres(componentId)`.
@@ -291,6 +393,10 @@ impl SphereQuestManager {
             .lock()
             .expect("positions poisoned")
             .remove(&character_id);
+        self.area_inside
+            .lock()
+            .expect("area inside poisoned")
+            .remove(&character_id);
     }
 
     /// `GetSphereQuestTriggers()` (live list).
@@ -302,11 +408,90 @@ impl SphereQuestManager {
             .clone()
     }
 
+    /// Enter / leave of the imported area spheres (`sphere_area_fill.json`).
+    ///
+    /// INFERRED trigger (CAP-UI-7): the 1.2 client only receives `SCAreaChatBubble` for a bubble
+    /// sphere on entering / leaving its area; no 1.2 sender was captured. A `SphereBubble` row
+    /// sends `SCAreaChatBubble(enter, the player's unit, sphere_detail_id)` and any row with a
+    /// non-empty `team_msg` sends `SCAreaTeamMessage(enter, sphere id)` to that player only
+    /// (CAP-UI-6: `is_personal_msg` is true for every shipped `team_msg` row; the non-personal
+    /// audience is UNKNOWN). On leave only a row with `enter_or_leave` set fires. The other
+    /// sphere types (SphereSkill / SphereSound / SphereDoodadInteract / SphereBuff) are loaded
+    /// but have no effect here (a separate content decision).
+    fn tick_area_spheres(&self, server: &GameServer) {
+        let Some(areas) = self.areas.get() else {
+            return;
+        };
+        if areas.is_empty() {
+            return;
+        }
+        let data = &server.game_data.systems.quests;
+        let mut next: HashMap<u32, Vec<usize>> = HashMap::new();
+        let mut events: Vec<(PlayerRef, usize, bool)> = Vec::new();
+        for player in server.world.all_characters() {
+            if player.region().is_none() {
+                continue;
+            }
+            let obj = WorldObject::from(player.clone());
+            let Some(world) = server.world.world_of(&obj) else {
+                continue;
+            };
+            let pos = super::events::world_position(server, &obj);
+            let inside: Vec<usize> = areas
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| a.world == world.template.name && a.contains(pos))
+                .map(|(i, _)| i)
+                .collect();
+            let previous = self
+                .area_inside
+                .lock()
+                .expect("area inside poisoned")
+                .get(&player.character_id)
+                .cloned()
+                .unwrap_or_default();
+            for &i in &inside {
+                if !previous.contains(&i) {
+                    events.push((player.clone(), i, true));
+                }
+            }
+            for &i in &previous {
+                if inside.binary_search(&i).is_err() {
+                    events.push((player.clone(), i, false));
+                }
+            }
+            next.insert(player.character_id, inside);
+        }
+        *self.area_inside.lock().expect("area inside poisoned") = next;
+        for (player, area, enter) in events {
+            let Some(sphere) = data.spheres.get(&areas[area].sphere_id) else {
+                continue;
+            };
+            if !enter && !sphere.enter_or_leave {
+                continue;
+            }
+            if sphere.sphere_detail_type == "SphereBubble" {
+                player.send(SCAreaChatBubblePacket {
+                    enter,
+                    unit_obj_id: player.obj_id,
+                    bubble_type: sphere.sphere_detail_id,
+                });
+            }
+            if !sphere.team_msg.trim().is_empty() {
+                player.send(SCAreaTeamMessagePacket {
+                    enter,
+                    sphere_id: sphere.id,
+                });
+            }
+        }
+    }
+
     /// One `Tick` (every 500 ms). A throwing quest event handler aborts the rest of the tick,
     /// like the C# exception caught around the whole tick.
     pub fn tick(&self, server: &GameServer) {
         let _serial = self.tick_lock.lock().expect("tick poisoned");
         let now = chrono::Utc::now().timestamp_millis();
+        self.tick_area_spheres(server);
         // Add new player specific triggers
         let list = {
             let mut t = self.triggers.lock().expect("triggers poisoned");

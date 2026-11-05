@@ -1,13 +1,12 @@
 {
   "counts": {
     "sc_opcodes": 517,
-    "typeless": 70,
+    "typeless": 69,
     "never_sent": 49
   },
   "typeless": [
     "CSQuestAcceptConditionalPacket",
     "SCAiDebugPacket",
-    "SCAreaTeamMessagePacket",
     "SCBombUpdatedPacket",
     "SCChatFailedPacket",
     "SCChatLocalizedMessagePacket",
