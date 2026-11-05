@@ -626,6 +626,8 @@ pub struct DoodadFuncEnterSysInstance {
     pub zone_id: u32,
     /// `FactionsEnum`.
     pub faction_id: u32,
+    /// `selective`: the entrance opens the channel-select dialog (CS 0x13d picks a channel).
+    pub selective: bool,
 }
 
 /// `DoodadFuncEvidenceItemLoot` (`DoodadFuncTemplate`).

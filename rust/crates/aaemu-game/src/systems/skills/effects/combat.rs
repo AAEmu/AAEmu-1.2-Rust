@@ -1236,11 +1236,25 @@ pub fn skill_controller(server: &GameServer, t: &SkillControllerTemplate, args: 
     }
     match super::super::controllers::create(server, t, caster, &args.target, 0.0, 0.0, 0.0, 0.0) {
         Some(sc) => super::super::controllers::activate(server, &sc),
-        None => tracing::warn!(
-            "SkillControllerTemplate.Apply: factory returned null for sc_id={} kind={} — controller class not implemented",
-            t.id,
-            t.kind_id
-        ),
+        // WP-9 (combat-ai analysis, 2026-11-05): Rope (5), Anchor (6) and Flowgraph (8) have
+        // no generic controller by design (Rope is handled by the harpoon family, Flowgraph is
+        // test skill 23969 only, Anchor two monster skills), so this is an expected debug
+        // message. Other unimplemented kinds stay warnings.
+        None => {
+            if matches!(t.kind_id, 5 | 6 | 8) {
+                tracing::debug!(
+                    "SkillControllerTemplate.Apply: factory returned null for sc_id={} kind={} — controller class not implemented",
+                    t.id,
+                    t.kind_id
+                );
+            } else {
+                tracing::warn!(
+                    "SkillControllerTemplate.Apply: factory returned null for sc_id={} kind={} — controller class not implemented",
+                    t.id,
+                    t.kind_id
+                );
+            }
+        }
     }
 }
 

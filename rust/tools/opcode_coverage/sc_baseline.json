@@ -1,7 +1,7 @@
 {
   "counts": {
     "sc_opcodes": 517,
-    "typeless": 74,
+    "typeless": 72,
     "never_sent": 51
   },
   "typeless": [
@@ -60,8 +60,6 @@
     "SCUnitTrackedPacket",
     "SCUnkCharacterAddStatPacket",
     "SCUnkPacket",
-    "SCUnkPacket15",
-    "SCUnkPacket16",
     "SCUnkPacket17",
     "SCUnkPacket20",
     "SCUnkPacket21",

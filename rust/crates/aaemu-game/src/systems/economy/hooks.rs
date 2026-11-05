@@ -80,10 +80,11 @@ pub trait ProgressionHooks: Send + Sync {
 
 /// The NPC template facts the shops / repair / auction / mail checks read
 /// (`npc.Template.Merchant`, `MerchantPackId`, `Blacksmith`, `Auctioneer`, ...).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NpcShopInfo {
     pub merchant: bool,
-    pub merchant_pack_id: u32,
+    /// Every `merchants` row of the NPC; the 1.2 client unions all of its packs.
+    pub merchant_pack_ids: Vec<u32>,
     pub blacksmith: bool,
     pub auctioneer: bool,
     pub banker: bool,
@@ -102,11 +103,11 @@ pub trait NpcEconomyHooks: Send + Sync {
         None
     }
 
-    /// Whether the catalog offers this item at the grade sent by the 1.2 client.
+    /// Whether any of the NPC's catalogs offers this item at the grade sent by the 1.2 client.
     fn merchant_sells(
         &self,
         _server: &GameServer,
-        _pack_id: u32,
+        _pack_ids: &[u32],
         _item_id: u32,
         _grade: u8,
     ) -> bool {
