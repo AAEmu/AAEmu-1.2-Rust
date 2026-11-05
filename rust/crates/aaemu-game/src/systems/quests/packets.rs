@@ -171,6 +171,26 @@ impl Marshal for SCQuestRewardedByMailPacket {
     }
 }
 
+/// `SCQuestMailSentPacket(id)` (`0x150`): a quest mail was sent to the player. The 1.2 client
+/// reader `FUN_397b5f00` (wrapper `FUN_391b19b0`, which assigns `[1] = 0x150`) reads exactly one
+/// `u32` through vtable slot `0x3c` at body `+0xc`; there is no sentinel field. The meaning of
+/// the value as a `quest_mails.id` is inferred from the table, and no server trigger sends this
+/// packet yet: which quest step mails what is capture-pending (case `QUEST-MAIL-1`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SCQuestMailSentPacket {
+    pub quest_mail_id: u32,
+}
+packet_def!(
+    SCQuestMailSentPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCQuestMailSentPacket
+);
+impl Marshal for SCQuestMailSentPacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_u32(self.quest_mail_id);
+    }
+}
+
 /// `SCDoodadQuestAcceptPacket(doodadObjId, questContextId)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SCDoodadQuestAcceptPacket {

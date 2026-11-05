@@ -169,6 +169,11 @@ pub struct SkillTaskSlot {
     pub kind: SkillTaskKind,
     pub skill: SkillRef,
     pub cancel: CancelToken,
+    /// Extra wait a `Cast` task still owes: a delayed `DisturbCasting` adds to it
+    /// (`skill::delay_cast`). The armed completion timer takes it under the slot lock and
+    /// re-arms for that long, so an extension and the cast's own completion are serialised
+    /// (WP-1). Kept as a wait, not a wall-clock deadline, so it follows the timer clock.
+    pub extend_ms: i64,
 }
 
 impl PartialEq for SkillTaskSlot {

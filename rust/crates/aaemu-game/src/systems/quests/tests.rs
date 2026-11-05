@@ -510,6 +510,20 @@ fn sc_small_quest_packets_bytes() {
     };
     assert_eq!(body(&p), vec![0, 4, 3, 2, 1]);
     assert_eq!(p.opcode(), 0x14e);
+    // SCQuestMailSentPacket: reader FUN_397b5f00 (wrapper FUN_391b19b0, opcode 0x150) reads one
+    // u32 through vtable slot 0x3c; the body is exactly four bytes.
+    let p = SCQuestMailSentPacket { quest_mail_id: 1 };
+    assert_eq!(body(&p), vec![1, 0, 0, 0]);
+    assert_eq!(p.opcode(), sc::SCQuestMailSentPacket);
+    assert_eq!(p.opcode(), 0x150);
+    let p = SCQuestMailSentPacket {
+        quest_mail_id: 0x01020304,
+    };
+    assert_eq!(body(&p), vec![4, 3, 2, 1]);
+    let p = SCQuestMailSentPacket {
+        quest_mail_id: u32::MAX,
+    };
+    assert_eq!(body(&p), vec![0xff, 0xff, 0xff, 0xff]);
     let p = SCDoodadQuestAcceptPacket {
         doodad_obj_id: 0x030201,
         quest_id: 7,

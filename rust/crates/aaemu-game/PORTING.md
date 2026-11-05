@@ -360,6 +360,39 @@ These `SpecialType` bodies were TODO stubs that only logged in the C# (`git show
 | `AccountAttributeEffect` + `SpecialEffects/AuctionPostAuthority` (special 117) | `systems/economy/account_attributes.rs`, `bridges.rs`, `world/session.rs` | added | Data: `account_attribute_effects` has 3 rows, all `kind_id = 1` (auction posting authority): item 8000027 `경매장 등록권` adds it account-wide (`is_add`, `count` 0, `time` 0, `bind_world` false) and two `is_add = false` rows remove it (VIP buff trigger, removal ticket item 8000058). Special 117 on buffs 7149 / 11034 / 8000012 grants kind 1 permanently. New `account_attributes` table (PK account/kind/world, nullable `end_time`, `world_id` 0 = not world bound), loaded on character select into `server.systems.economy.account_attributes` and persisted on every change. `is_add` upserts, otherwise every grant of the kind is deleted; `time == 0` is permanent, else `now + time` **seconds (unit inferred: all 1.2 values are 0)**. `has_account_attribute(account_id, kind)` is ready for gating; **the auction is deliberately not gated yet** (every character currently gets buff 8000012 from `UNIT_STATE_FORCED_BUFFS`, so a gate would need that decision first). |
 | `SpecialEffects/AddCharacterSlot` (special 91) | `systems/economy/character_slots.rs`, `db.rs`, `packets/c2g.rs`, `managers/character.rs` | added | Data: item 8000002 `캐릭터 슬롯확장 주문서` -> skill 8000002. Adds one `accounts.extra_character_slots` (`TINYINT UNSIGNED`, saturating at 255) for the caster's account, persists it and sends `SCGetSlotCountPacket` with the new value; `CSListCharacterPacket` sends that count instead of the old hard-coded 0. The character creation limit is the login-advertised base plus those purchased slots: aaemu-login sends `Login:MaxCharactersPerAccount` (default 6) in `ACJoinResponse`/`ACAuthResponse`, and `CharacterManager.Create` re-reads the account's slots inside the save lock and refuses with `CharacterCreateError::WorldLimit` (9) at `aaemu_commons::character_slots::character_slot_limit(base, extra)`; a MySQL error on that read falls back to the base alone. **Deviation (C#):** the C# `CharacterManager.Create` had no per-account character-count check and aaemu-login hard-coded 6 in both packets, so purchased slots could never be used. `Login:AdditionalCharactersPerServer` (the expandable limit) and `Login:PreSelectCharacterPeriod` (advertised in `ACJoinResponse.afs`) are Rust-only; the pre-select flag is accepted now and enables the lobby edit, and the game's `Characters:MaxPerAccount` / `Characters:PreSelectPeriod` must equal `Login:MaxCharactersPerAccount` / `Login:PreSelectCharacterPeriod` (documented pairs, no cross-process check; each server logs its effective values at startup). |
 
+#### Delayed `DisturbCasting` / `SCCastingDelayed` (2026-11-05)
+
+`systems::skills`: 1.2 packet `SCCastingDelayed` 0x0a6 (S->C, reader `FUN_397ca570`,
+`D:/aa-re/client12/out-x2game/x2game.dll.c`): `u16 skillId (0x40) ; u16 plotId (0x40) ; u32
+delay (0x3c)`. The client handler `FUN_391d5d70` calls `FUN_39395760(skillId, delay)` (adds the
+delay to the running cast of that skill id and rescales its animation) or
+`FUN_3938c520(plotId, delay)` (the same for a plot cast). Special effect 5 (`DisturbCasting`)
+has `value1` chance % and `value2` delay ms: 22 of its 24 rows have delay 0; the delayed rows
+are 997 (10 %, 1000), 11220 (100 %, 100) and 14687 (100 %, 10). Joining `skill_effects ->
+effects.actual_id -> special_effects`, only skill 12390 Low Kick reaches a delayed row (skill
+effect 5134 -> effects 5134 -> special 997).
+
+Rule now implemented: `delay > 0` and the victim runs a direct `Cast` task -> the task's
+pending wait (`SkillTaskSlot.extend_ms`) grows by the delay; the armed cast timer takes it
+under the slot lock and re-arms instead of completing, so the cast ends `delay` ms later.
+`SCCastingDelayed { skillId, 0, delay }` goes to the victim. `delay == 0` keeps the immediate
+interrupt. **Deviation from C#:** the C# `DisturbCasting` only cancelled the plot and never
+sent `SCCastingDelayed`; the delayed interrupt this replaces was Rust-only
+(`git show a2ab80abd^:AAEmu.Game/Models/Game/Skills/Effects/SpecialEffects/DisturbCasting.cs`).
+
+Capture-pending (WP-1): who besides the victim receives `SCCastingDelayed` (the 1.2 handler
+reads only the local cast, so viewers are not sent it; a player-controlled mount / pet cast has
+no connection of its own and is not told); how the real server delays a plot cast (the client
+uses plot id 0 for a direct cast, INFERRED from the two handler branches); and how a delayed
+disturb affects a channel or plot cast. Neither has a 1.2 delay packet, so both keep today's
+behaviour (the old delayed interrupt, with the liveness check), not an immediate interrupt and
+not an extension. A delayed disturb on a unit with no cast, channel or plot now does nothing
+instead of arming an interrupt that could hit a cast started during the delay.
+
+Tests: `systems::skills::tests::cast_delay_tests` (extension, `SCCastingDelayed` and completion
+at the new time, no-delay interrupt, cancelled-after-extension, delayed channel interrupt) and
+`systems::skills::packets::tests::casting_delayed_layout` (independent literal bytes).
+
 ### systems::npcs
 
 | Area (C#) | Rust | Status | Notes |
@@ -422,7 +455,7 @@ connected by `systems::economy::wiring`).
 | Repair (`Character.DoRepair`, `CSRepairSingleEquipment`, `CSRepairAllEquipments`), durability loss | `systems/economy/repair.rs` | done | Combat calls `on_damage_taken` / `on_death`. |
 | `CraftManager`, `Models/Game/Crafts`, `CharacterCraft`, `CraftTask`, `CSExecuteCraft`, `SCCraftFailed`, recipe learning (`item_recipes`, `train_craft_effects`) | `systems/economy/{craft,craft_data,craft_learning}.rs` | done | Cast through `CraftHooks::start_craft_cast`; skills call `craft::end_craft`. `TrainCraftEffect` teaches `item_recipes[source item]` (or the effect's craft without a source item), persisted in `character_crafts`; `Crafting.RequireLearnedRecipes` (default off) gates execution. |
 | Stores (`CSBuyItems`, `CSSellItems`, buy-back, `CSListSoldItem`, `CSBuyPriestBuff`, `CSBuyCoinItem`, `CSSellBackpackGoods`), `SpecialtyManager`, `TaxationsManager`, `ExpandExpert`, item look conversion | `systems/economy/{store,store_data,specialty}.rs` | done | Merchant packs / NPC flags through `NpcEconomyHooks`. Checkout validates currency, checked totals and each balance, then stages complete goods / buy-back delivery before committing payment. Vocation charges the configured price displayed by the 1.2 shop, without earnings bonuses. Rejected checkout preserves items and balances. Purchases need an NPC merchant pack, a doodad `DoodadFuncStoreUi` pack, or the money form of the doodad's current-phase `DoodadFuncPurchase` (`CSBuyItems.unkId`, the `doodad_funcs` row id the 1.2 client writes there), and filter the goods by it; selling needs a merchant within 3 m, lists each item once and pays only for items moved to buy-back. Specialty: the empty `CSListSpecialtyGoods` answer, the dropped records packet and the corrected sale values are detailed in the specialty protocol note. |
-| `MailManager`, `Models/Game/Mails/**`, `CharacterMails`, mail packets | `systems/economy/{mail,mail_character,mail_kinds,mail_packets,mail_data}.rs` | done | Saved in `SaveStage::BeforeItems`; housing tax through `MailHousingHooks`. |
+| `MailManager`, `Models/Game/Mails/**`, `CharacterMails`, mail packets | `systems/economy/{mail,mail_character,mail_kinds,mail_packets,mail_data,mail_system}.rs` | done | Saved in `SaveStage::BeforeItems`; housing tax through `MailHousingHooks`. `/mail admin` sends an `ADMIN` system letter to an online or offline character. `quest_mails` / `quest_mail_attachments` are loaded; `SCQuestMailSentPacket` (0x150) is defined but never sent (trigger capture-pending, see the mail-leftovers deviation). |
 | `AuctionManager`, `Models/Game/Auction/**`, auction packets | `systems/economy/{auction,auction_data,auction_packets}.rs` | done | Saved in `SaveStage::AfterItems`; results mailed through `wiring`, and an online seller also gets `SCAuctionMessagePacket` for accepted bids and sales (the C# sent neither; see the auction-messages deviation). Requests require an auctioneer NPC (the `auctioneer` template flag) named by the packet or the current interaction object within 5 m (the C# ignored the ids). |
 | `TradeManager`, trade packets | `systems/economy/trade.rs` | done | The C# `CanStartTrade` TODO ("Check faction and others") is implemented from the 1.2 client's own checks: a request and its acceptance refuse a dead player, a hostile faction relation and a distance `>= sqrt(25) = 5` m, and a trade across instances; see the trade validation deviation. |
 | `CashShopManager`, `Models/Game/CashShop/**`, ICS packets | `systems/economy/cash_shop.rs` | done | Gifts by `CommercialMail` (`wiring`); account credits SQL behind `CashShopDb`. |
@@ -2038,6 +2071,21 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   3047/3048. Deviation: the outbid refund uses `MailType.AucBidFail` (17, the client's
   `AUCITON_BID_FAIL`) instead of the C# `AucOffFail` (15), so its mailbox label is the
   bid-failure one.
+* systems::economy (mail leftovers, WP-I4): `/mail admin <receiver> <title> <text> [money]
+  [[itemId count] ...]` is a Rust-only GM command (the C# had no such command); `ADMIN` (5) is
+  one of the mail types the 1.2 client lists (`mail/common.alb`). It stores a sender-id-0 system
+  mail through `mail::send_system_mail`, so the receiver (online or offline) gets the same
+  `SCGotMailPacket` / mailbox / attachment behaviour as other system mail; items are created
+  once, up to `MAX_MAIL_ATTACHMENTS`, and discarded again if the store refuses the mail. The
+  sender name is the literal `Admin` (the client has no special case for an `ADMIN` sender).
+  `quest_mails` / `quest_mail_attachments` are loaded read-only into
+  `game_data.systems.economy.quest_mails`; a mail whose non-zero attachment row is missing is
+  skipped. `SCQuestMailSentPacket` (0x150) is defined from the client reader `FUN_397b5f00`
+  (wrapper `FUN_391b19b0`, one `u32` through slot `0x3c`) and is never sent: the trigger and the
+  meaning of the id are capture-pending (**CAPTURE-PENDING QUEST-MAIL-1**). Mia mail (types 11
+  `MIA_SEND` / 12 `MIA_RECV`) is the client's separate commercial mailbox (`comercialmail/*`,
+  `X2MiaMail`, `unreadMiaMail`) fed by the cash-shop path; the C# notifier branch was empty and
+  the existing counter routing is unchanged (**CAPTURE-PENDING MIA-MAIL-1**).
 * systems::economy (money guards, 2026-10-20): `CSDepositMoney` / `CSWithdrawMoney` refuse
   non-positive amounts and require a banker NPC (`banker` template flag) within 5 m of the current
   interaction object; `CSBuyItems` accepts goods only from the interacting NPC's merchant pack or

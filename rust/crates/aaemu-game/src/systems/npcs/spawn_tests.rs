@@ -1714,6 +1714,7 @@ async fn activation_reclaim_protects_activity_and_stale_targets_expire() {
             1,
         ),
         cancel: CancelToken::new(),
+        extend_ms: 0,
     });
     // Persistent escort work (follow target).
     server.systems.ai.ais.add_ai(&escorting, AiKind::Dummy);

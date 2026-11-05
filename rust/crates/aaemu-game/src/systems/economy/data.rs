@@ -34,6 +34,8 @@ pub struct Data {
     pub store: super::store_data::StoreData,
     /// Mail localization lookups.
     pub mail: super::mail_data::MailData,
+    /// `quest_mails` / `quest_mail_attachments` (loaded, not sent: trigger capture-pending).
+    pub quest_mails: super::mail_system::QuestMailData,
     /// `ItemGameData`, `ItemConversionGameData`, `FishDetailsGameData`, localized item names.
     pub items: super::items_data::ItemsData,
     /// `LootGameData`.
@@ -68,6 +70,7 @@ impl Data {
         data.craft_learning = super::craft_learning::CraftRecipes::load(ctx)?;
         data.store = super::store_data::StoreData::load(ctx)?;
         data.mail = super::mail_data::MailData::load(ctx)?;
+        data.quest_mails = super::mail_system::QuestMailData::load(ctx)?;
         data.items = super::items_data::ItemsData::load(ctx.conn, ctx.language)?;
         data.loot = super::loot_data::LootData::load(ctx.conn)?;
         data.item_effects = super::item_effects::ItemEffectsData::load(ctx.conn)?;
