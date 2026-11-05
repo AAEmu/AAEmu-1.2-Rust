@@ -210,6 +210,10 @@ pub struct LoginResult {
     pub success: bool,
     pub account_id: AccountId,
     pub denial_reason: LoginDeniedReason,
+    /// The account's verified 2FA requirements. Non-empty only when the password was correct and
+    /// the account has 2FA configured; the flow must complete these factors before `Success`.
+    /// The ban check is deferred until then.
+    pub two_factor: TwoFactorRequirements,
 }
 
 impl LoginResult {
@@ -218,6 +222,15 @@ impl LoginResult {
             success: true,
             account_id,
             denial_reason: LoginDeniedReason::default(),
+            two_factor: TwoFactorRequirements::NONE,
+        }
+    }
+
+    /// A successful password check for an account whose 2FA must still be completed.
+    pub fn ok_with_two_factor(account_id: AccountId, two_factor: TwoFactorRequirements) -> Self {
+        Self {
+            two_factor,
+            ..Self::ok(account_id)
         }
     }
 
@@ -226,6 +239,37 @@ impl LoginResult {
             success: false,
             account_id: AccountId::default(),
             denial_reason: reason,
+            two_factor: TwoFactorRequirements::NONE,
+        }
+    }
+}
+
+/// Why a reconnection token was refused (the client only receives [`Self::reason`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReconnectFailure {
+    /// The game server (and its parent, for a mirror) has no token table: it is not registered
+    /// or has just restarted.
+    GameServerUnavailable,
+    /// The token was never issued by the game server, or was already used.
+    InvalidToken,
+    /// The token was issued longer than `Reconnect:TokenTtl` ago.
+    ExpiredToken,
+    /// The token belongs to a different account.
+    AccountMismatch,
+    /// The token was issued for a login from a different client IP.
+    IpMismatch,
+}
+
+impl ReconnectFailure {
+    /// The reason sent to the client.
+    pub fn reason(self) -> LoginDeniedReason {
+        match self {
+            // "The game is unavailable right now (e.g. under service/maintenance)."
+            Self::GameServerUnavailable => LoginDeniedReason::SERVICE_TIME,
+            // A reconnect token must be indistinguishable from any other failed authentication.
+            Self::InvalidToken | Self::ExpiredToken | Self::AccountMismatch | Self::IpMismatch => {
+                LoginDeniedReason::BAD_RESPONSE
+            }
         }
     }
 }
@@ -235,4 +279,24 @@ impl LoginResult {
 pub struct ReconnectResult {
     pub success: bool,
     pub account_id: AccountId,
+    /// Set when `success` is false.
+    pub failure: Option<ReconnectFailure>,
+}
+
+impl ReconnectResult {
+    pub fn success(account_id: AccountId) -> Self {
+        Self {
+            success: true,
+            account_id,
+            failure: None,
+        }
+    }
+
+    pub fn failed(failure: ReconnectFailure) -> Self {
+        Self {
+            success: false,
+            account_id: AccountId::default(),
+            failure: Some(failure),
+        }
+    }
 }

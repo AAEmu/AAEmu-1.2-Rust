@@ -175,11 +175,14 @@ pub(crate) async fn handle(server: &Arc<GameServer>, payload: &[u8]) -> bool {
             }
         }
         LoginInPacket::PlayerReconnect { token } => {
-            if let Some(conn) = server.connections.get(token) {
-                tracing::debug!("LGPlayerReconnect: SCReconnectAuth to session {token}");
-                conn.send(SCReconnectAuthPacket { token: conn.id });
+            if let Some(conn) = server.connections.get_by_reconnect_token(token) {
+                tracing::debug!(
+                    "LGPlayerReconnect: SCReconnectAuth to session {} (token {token})",
+                    conn.id
+                );
+                conn.send(SCReconnectAuthPacket { token });
             } else {
-                tracing::warn!("LGPlayerReconnect for session {token}, which is gone");
+                tracing::warn!("LGPlayerReconnect for a token no live session owns: {token}");
             }
         }
         LoginInPacket::RequestInfo {

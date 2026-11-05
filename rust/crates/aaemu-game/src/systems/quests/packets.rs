@@ -184,6 +184,27 @@ impl Marshal for SCDoodadQuestAcceptPacket {
     }
 }
 
+/// `SCDoodadCompleteQuestPacket(doodadObjId, questContextId)` (`0x14d`): the quest can be
+/// handed in at this doodad. The 1.2 client reader `FUN_397b5e50` reads the doodad object id
+/// as a 3-byte `bc` at body `+0xc` and the quest id as a `u32` at `+0x10`;
+/// `OnDoodadCompleteQuest` (`FUN_391dc050`) raises `COMPLETE_QUEST_CONTEXT_DOODAD`, after
+/// which the client sends `CSCompleteQuestContextPacket` with this doodad object id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SCDoodadCompleteQuestPacket {
+    pub doodad_obj_id: u32,
+    pub quest_id: u32,
+}
+packet_def!(
+    SCDoodadCompleteQuestPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCDoodadCompleteQuestPacket
+);
+impl Marshal for SCDoodadCompleteQuestPacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_bc(self.doodad_obj_id).write_u32(self.quest_id);
+    }
+}
+
 /// `SCTutorialSavedPacket(id, body)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SCTutorialSavedPacket {
@@ -498,7 +519,8 @@ impl ClientPacket for CSTryQuestCompleteAsLetItDonePacket {
     }
 }
 
-/// `CSRestartMainQuestPacket` (logged only).
+/// `CSRestartMainQuestPacket` (0x0fd): the player asked to restart quest `id` (the template
+/// id). Handled by [`Ctx::try_restart_quest`](super::engine::Ctx::try_restart_quest).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CSRestartMainQuestPacket {
     pub id: u32,
@@ -513,11 +535,20 @@ impl ClientPacket for CSRestartMainQuestPacket {
 
     fn handle<'a>(
         self,
-        _server: &'a GameServer,
-        _conn: &'a mut GameConnection,
+        server: &'a GameServer,
+        conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            tracing::warn!("RestartMainQuest, Id: {}", self.id);
+            if let Some(p) = active(conn) {
+                tracing::info!(
+                    "RestartMainQuest, {} ({}), Quest {}",
+                    p.data().unit.name,
+                    p.character_id,
+                    self.id
+                );
+                let id = self.id;
+                events::with_quests(server, &p, None, move |ctx| ctx.try_restart_quest(id));
+            }
             Ok(())
         })
     }

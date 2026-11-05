@@ -70,6 +70,12 @@ pub struct AppConfig {
     /// `KoreaAuth` section.
     #[serde(rename = "koreaauth", default)]
     pub korea_auth: KoreaAuthOptions,
+    /// `TwoFactor` section: factor attempt limits.
+    #[serde(rename = "twofactor", default)]
+    pub two_factor: TwoFactorOptions,
+    /// `Reconnect` section: game reconnect token lifetime and per-account cap.
+    #[serde(rename = "reconnect", default)]
+    pub reconnect: ReconnectOptions,
     /// `ConnectionStrings` section (`ConnectionStrings:MySqlConnection` overrides `Connections`).
     #[serde(rename = "connectionstrings", default)]
     pub connection_strings: HashMap<String, String>,
@@ -186,6 +192,82 @@ pub struct KoreaAuthOptions {
     pub ars_timeout: Duration,
 }
 
+/// `TwoFactorOptions`: factor attempt limits.
+///
+/// The account's `user_2fa` row decides which factors are required; an account with a verified
+/// factor always has to present it. These options rate-limit failed OTP and PC-certificate
+/// submissions.
+#[derive(Clone, Debug, Deserialize)]
+pub struct TwoFactorOptions {
+    /// Failed factor submissions allowed per account before it is locked. Must be >= 1.
+    #[serde(
+        rename = "maxotpfailures",
+        default = "default_max_otp_failures",
+        deserialize_with = "lenient_i32"
+    )]
+    pub max_otp_failures: i32,
+    /// How long an account stays locked after too many failed factor submissions. Must be >= 1.
+    #[serde(
+        rename = "otplockoutminutes",
+        default = "default_otp_lockout_minutes",
+        deserialize_with = "lenient_i32"
+    )]
+    pub otp_lockout_minutes: i32,
+}
+
+fn default_max_otp_failures() -> i32 {
+    5
+}
+
+fn default_otp_lockout_minutes() -> i32 {
+    15
+}
+
+impl Default for TwoFactorOptions {
+    fn default() -> Self {
+        Self {
+            max_otp_failures: default_max_otp_failures(),
+            otp_lockout_minutes: default_otp_lockout_minutes(),
+        }
+    }
+}
+
+/// `ReconnectOptions`: game-server reconnect tokens (the `SCReconnectAuth` cookie).
+#[derive(Clone, Debug, Deserialize)]
+pub struct ReconnectOptions {
+    /// How long a token issued by the game server can be used. Tokens are single-use.
+    #[serde(
+        rename = "tokenttl",
+        default = "default_reconnect_ttl",
+        deserialize_with = "timespan"
+    )]
+    pub token_ttl: Duration,
+    /// Maximum unconsumed tokens kept per account; the oldest is evicted beyond this.
+    #[serde(
+        rename = "maxtokensperaccount",
+        default = "default_max_tokens_per_account",
+        deserialize_with = "lenient_i32"
+    )]
+    pub max_tokens_per_account: i32,
+}
+
+fn default_reconnect_ttl() -> Duration {
+    Duration::from_secs(60)
+}
+
+fn default_max_tokens_per_account() -> i32 {
+    5
+}
+
+impl Default for ReconnectOptions {
+    fn default() -> Self {
+        Self {
+            token_ttl: default_reconnect_ttl(),
+            max_tokens_per_account: default_max_tokens_per_account(),
+        }
+    }
+}
+
 fn default_rounds() -> i32 {
     100_000
 }
@@ -223,6 +305,26 @@ impl AppConfig {
         if k.max_otp_attempts < 1 || k.max_cert_attempts < 1 {
             return Err(ConfigError::Validation(
                 "KoreaAuth:MaxOtpAttempts/MaxCertAttempts must be >= 1".into(),
+            ));
+        }
+        if self.two_factor.max_otp_failures < 1 {
+            return Err(ConfigError::Validation(
+                "TwoFactor:MaxOtpFailures must be >= 1".into(),
+            ));
+        }
+        if self.two_factor.otp_lockout_minutes < 1 {
+            return Err(ConfigError::Validation(
+                "TwoFactor:OtpLockoutMinutes must be >= 1".into(),
+            ));
+        }
+        if self.reconnect.token_ttl.is_zero() {
+            return Err(ConfigError::Validation(
+                "Reconnect:TokenTtl must be greater than zero".into(),
+            ));
+        }
+        if self.reconnect.max_tokens_per_account < 1 {
+            return Err(ConfigError::Validation(
+                "Reconnect:MaxTokensPerAccount must be >= 1".into(),
             ));
         }
         for (name, n) in [
@@ -358,7 +460,7 @@ pub fn set_path(root: &mut Value, path: &str, value: &str) {
     *node = Value::String(value.to_string());
 }
 
-const TOP_LEVEL_KEYS: [&str; 11] = [
+const TOP_LEVEL_KEYS: [&str; 13] = [
     "secretkey",
     "autoaccount",
     "skiphostresolve",
@@ -368,6 +470,8 @@ const TOP_LEVEL_KEYS: [&str; 11] = [
     "internalnetwork",
     "connections",
     "koreaauth",
+    "twofactor",
+    "reconnect",
     "connectionstrings",
     "urls",
 ];
@@ -654,6 +758,58 @@ mod tests {
             parse_timespan("00:00:02.25"),
             Some(Duration::new(2, 250_000_000))
         );
+    }
+
+    #[test]
+    fn two_factor_defaults_are_valid() {
+        let mut root = base();
+        set_path(&mut root, "Connections:MySQLProvider:Port", "3306");
+        let cfg = AppConfig::from_value(root).unwrap();
+        assert_eq!(cfg.two_factor.max_otp_failures, 5);
+        assert_eq!(cfg.two_factor.otp_lockout_minutes, 15);
+        assert_eq!(cfg.reconnect.token_ttl, Duration::from_secs(60));
+        assert_eq!(cfg.reconnect.max_tokens_per_account, 5);
+    }
+
+    #[test]
+    fn two_factor_parses_env_style_overrides() {
+        let mut root = base();
+        set_path(&mut root, "Connections:MySQLProvider:Port", "3306");
+        apply_env(
+            &mut root,
+            vec![
+                ("TwoFactor__MaxOtpFailures".to_string(), "3".to_string()),
+                ("TwoFactor__OtpLockoutMinutes".to_string(), "7".to_string()),
+                ("Reconnect__TokenTtl".to_string(), "00:00:30".to_string()),
+                (
+                    "Reconnect__MaxTokensPerAccount".to_string(),
+                    "2".to_string(),
+                ),
+            ],
+        );
+        let cfg = AppConfig::from_value(root).unwrap();
+        assert_eq!(cfg.two_factor.max_otp_failures, 3);
+        assert_eq!(cfg.two_factor.otp_lockout_minutes, 7);
+        assert_eq!(cfg.reconnect.token_ttl, Duration::from_secs(30));
+        assert_eq!(cfg.reconnect.max_tokens_per_account, 2);
+    }
+
+    #[test]
+    fn two_factor_refuses_zero_limits() {
+        for (key, value) in [
+            ("TwoFactor:MaxOtpFailures", "0"),
+            ("TwoFactor:OtpLockoutMinutes", "0"),
+            ("Reconnect:MaxTokensPerAccount", "0"),
+            ("Reconnect:TokenTtl", "00:00:00"),
+        ] {
+            let mut root = base();
+            set_path(&mut root, "Connections:MySQLProvider:Port", "3306");
+            set_path(&mut root, key, value);
+            assert!(
+                matches!(AppConfig::from_value(root), Err(ConfigError::Validation(_))),
+                "{key}={value} was accepted"
+            );
+        }
     }
 
     #[test]

@@ -1,8 +1,8 @@
 //! `aaemu-testclient` — headless 1.2 client bot.
 //!
 //! ```text
-//! aaemu-testclient run    [--config F] [--login H:P] [--user U] [--password P] [--character C]
-//!                         [--scenario login|lobby|full|combat|npc-return|mate-revive|questitem|doodad|plant|cometsboon|stonethrow|ghost|lunafrost|portal|craft|busy|load]
+//! aaemu-testclient run    [--config F] [--login H:P] [--user U] [--password P] [--otp CODE] [--character C]
+//!                         [--scenario login|lobby|full|combat|npc-return|mate-revive|questitem|doodad|plant|cometsboon|stonethrow|ghost|lunafrost|portal|craft|reconnect|busy|load]
 //!                         [--out capture.jsonl]
 //!                         [--npc-return-distance M] [--npc-return-away-secs S]
 //!                         [--revive-method repair|skill|none]   (mate-revive; GM account needed)
@@ -107,6 +107,7 @@ fn bot_config_with(
         ("login", "login"),
         ("user", "user"),
         ("password", "password"),
+        ("otp", "otp"),
         ("character", "character"),
     ] {
         if let Some(x) = args.get(flag) {
@@ -117,6 +118,7 @@ fn bot_config_with(
         ("skill", "skill_id"),
         ("quest", "quest_id"),
         ("gs", "game_server_id"),
+        ("reconnect-cookie", "reconnect_cookie"),
     ] {
         if let Some(x) = args.get(flag) {
             obj.insert(key.into(), x.parse::<u64>()?.into());

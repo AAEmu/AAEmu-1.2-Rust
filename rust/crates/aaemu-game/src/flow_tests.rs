@@ -290,15 +290,15 @@ async fn lobby_flow_end_to_end() {
     assert_eq!(frames[1], list(false, &chars[..2]));
     assert_eq!(frames[2], list(true, &chars[2..]));
 
-    // ---- CSLeaveWorld(ServerSelect) in the lobby -> GLPlayerReconnect(gs 1, account, conn)
+    // ---- CSLeaveWorld(ServerSelect) in the lobby -> GLPlayerReconnect(gs 1, account, token)
     server
         .handle_frame(&mut c.conn, &c2s_l1(cs::CSLeaveWorldPacket, &[2]))
         .await
         .unwrap();
-    assert_eq!(
-        login_rx.try_recv().unwrap(),
-        hex("02 00  01  E8 03 00 00  4D 00 00 00")
-    );
+    let reconnect = login_rx.try_recv().unwrap();
+    assert_eq!(&reconnect[..7], &hex("02 00  01  E8 03 00 00")[..]);
+    assert_eq!(reconnect.len(), 11);
+    let token = u32::from_le_bytes(reconnect[7..11].try_into().unwrap());
     // QuitGame / CharacterSelect in the lobby: nothing happens.
     server
         .handle_frame(&mut c.conn, &c2s_l1(cs::CSLeaveWorldPacket, &[1]))
@@ -306,10 +306,12 @@ async fn lobby_flow_end_to_end() {
         .unwrap();
     assert!(login_rx.try_recv().is_err() && c.drain().is_empty());
 
-    // ---- LGPlayerReconnect(token = connection id) -> SCReconnectAuth(connection id)
-    assert!(crate::login::handle(&server, &hex("02 00  4D 00 00 00")).await);
+    // ---- LGPlayerReconnect(token) -> SCReconnectAuth(token)
+    let mut ack = vec![0x02, 0x00];
+    ack.extend_from_slice(&token.to_le_bytes());
+    assert!(crate::login::handle(&server, &ack).await);
     c.pump_commands();
-    assert_eq!(c.drain(), vec![l1(0x001, &hex("4D 00 00 00"))]);
+    assert_eq!(c.drain(), vec![l1(0x001, &token.to_le_bytes())]);
 
     // ---- LGRequestInfo for account 0 -> GLRequestInfo with no characters (no DB access)
     let req = hex("03 00  05 00 00 00  06 00 00 00  00 00 00 00 00 00 00 00");
