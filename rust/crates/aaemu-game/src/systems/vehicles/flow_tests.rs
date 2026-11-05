@@ -4636,6 +4636,95 @@ async fn spawn_effect_creates_an_ownerless_test_slave() {
     ));
 }
 
+/// `SpawnEffect` (slave) dir ids: pos 1 = relative to the effect target, 2 = relative to the
+/// caster, with `pos_angle`; ori 1 = the target's yaw, 2 = the caster's, plus `ori_angle`.
+#[tokio::test]
+async fn spawn_effect_slave_honours_pos_and_ori_dirs() {
+    use crate::systems::skills::data::effects::SpawnEffect;
+    use crate::systems::skills::data::{EffectKind, EffectTemplate};
+    use crate::systems::skills::geometry::Target;
+    use crate::systems::skills::types::SkillCastTarget;
+
+    let server = server_with(slave_data());
+    let mut a = TestClient::new(&server, 1, 1);
+    let mut b = TestClient::new(&server, 2, 2);
+    let pa = spawn_player(&server, &a, test_character(1, "P1", 100.0, 100.0), PA);
+    let pb = spawn_player(&server, &b, test_character(2, "P2", 140.0, 100.0), PB);
+    let world = server.world.world(0).unwrap();
+    server.systems.npcs.spawns.get_or_create(&world);
+    pa.data().unit.transform.rot_z = 0.0;
+    pb.data().unit.transform.rot_z = std::f32::consts::FRAC_PI_2;
+    a.drain();
+    b.drain();
+    let me = WorldObject::from(&pa);
+    let so = Default::default();
+    let args = effect_args(
+        &me,
+        Target::Obj(WorldObject::from(&pb)),
+        SkillCastTarget::Unit(PB),
+        &so,
+    );
+    let effect = |pos_dir_id, ori_dir_id| {
+        EffectTemplate::Spawn(SpawnEffect {
+            id: 1,
+            owner_type_id: 2,
+            sub_type: SLAVE_TEMPLATE,
+            pos_dir_id,
+            pos_angle: 0.0,
+            pos_distance: 10.0,
+            ori_dir_id,
+            ori_angle: 0.0,
+            use_summoner_faction: false,
+            life_time: 0.0,
+            despawn_on_creator_death: false,
+            use_summoner_aggro_target: false,
+            mate_state_id: 3,
+        })
+    };
+    // Position relative to the target, yaw from the target.
+    assert!(super::effects::apply_effect(
+        &server,
+        EffectKind::SpawnEffect,
+        &effect(1, 1),
+        &args
+    ));
+    // Position relative to the caster, yaw from the caster.
+    assert!(super::effects::apply_effect(
+        &server,
+        EffectKind::SpawnEffect,
+        &effect(2, 2),
+        &args
+    ));
+    let slaves = slaves::all_slaves(&world);
+    let at = |x: f32, y: f32| {
+        slaves
+            .iter()
+            .find(|s| {
+                let t = s.data().unit.transform;
+                (t.x - x).abs() < 1e-4 && (t.y - y).abs() < 1e-4
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "no slave at ({x},{y}): {:?}",
+                    slaves
+                        .iter()
+                        .map(|s| s.data().unit.transform)
+                        .collect::<Vec<_>>()
+                )
+            })
+    };
+    let from_target = at(150.0, 100.0);
+    assert!(
+        (from_target.data().unit.transform.rot_z - std::f32::consts::FRAC_PI_2).abs() < 1e-5,
+        "ori dir 1 uses the target's yaw"
+    );
+    let from_caster = at(110.0, 100.0);
+    assert!(
+        from_caster.data().unit.transform.rot_z.abs() < 1e-5,
+        "ori dir 2 uses the caster's yaw"
+    );
+}
+
 #[tokio::test]
 async fn destroy_and_spawn_slave_replaces_a_spawner_slave_and_destroys_an_orphan() {
     use crate::systems::skills::geometry::Target;
@@ -5071,6 +5160,40 @@ fn real_compact_db_vehicle_tables() {
             points.iter().any(|(p, _)| *p == point),
             "slave {slave} model {model} point {point}"
         );
+    }
+}
+
+/// The 1.2 `spawn_effects` slave rows: only the implemented dir ids 1/2 (position) and 1/2/3
+/// (orientation) occur, and every `sub_type` is a real slave template.
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+fn real_spawn_effect_slave_dirs_and_templates() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("compact db");
+    let mut stmt = conn
+        .prepare("SELECT id, sub_type, pos_dir_id, ori_dir_id FROM spawn_effects WHERE owner_type_id = 2")
+        .unwrap();
+    let rows: Vec<(u32, u32, u32, u32)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(rows.len(), 36);
+    for (id, sub_type, pos_dir, ori_dir) in rows {
+        assert!(matches!(pos_dir, 1 | 2), "effect {id}: PosDirId {pos_dir}");
+        assert!(matches!(ori_dir, 1..=3), "effect {id}: OriDirId {ori_dir}");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM slaves WHERE id = ?1",
+                [sub_type],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "effect {id}: slave {sub_type}");
     }
 }
 
