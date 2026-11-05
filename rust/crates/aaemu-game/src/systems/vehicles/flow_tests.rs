@@ -4708,11 +4708,12 @@ async fn kill_exp_death_despawn_and_force_dismount() {
     let mate = mates::first_active_mate(&server, &pa).unwrap();
     let tl = u32::from(mate.data().unit.tl_id);
     a.drain();
-    // Npc kill exp: every active mate + a message.
+    // Npc kill exp: every active mate gets its own SCExpChanged; the client formats the localized
+    // pet-exp chat line from it, so no server "Pet gained" chat is sent (WP7).
     mates::reward_kill_exp(&server, &pa, 100);
     let f = a.drain();
     assert!(ops(&f).contains(&sc::SCExpChangedPacket));
-    assert!(ops(&f).contains(&sc::SCChatMessagePacket));
+    assert!(!ops(&f).contains(&sc::SCChatMessagePacket));
     assert_eq!(mate.data().experience, 100);
     // Team.IsObjMember helper.
     assert_eq!(
@@ -9307,4 +9308,36 @@ async fn unboarding_keeps_a_different_attachment_point() {
     assert!(part.data().attached_characters.is_empty());
     assert_eq!(pa.data().attached_point, 5);
     assert!(f.iter().any(|x| x.0 == sc::SCUnitDetachedPacket));
+}
+
+/// `ApplySlaveBonuses` stores the flat `unit_modifiers.value`; the C# `LinearLevelBonus` term is
+/// unused. All 452 Slave rows of the shipped data have `linear_level_bonus = 0`, so ignoring it
+/// cannot change a bonus today. This pins that data assumption: a future row with a non-zero
+/// term must be noticed (and the stat code revisited).
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+fn real_slave_unit_modifiers_have_no_linear_level_bonus() {
+    let Ok(db) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("compact db");
+    let total: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM unit_modifiers WHERE owner_type = 'Slave'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("Slave rows");
+    assert_eq!(total, 452);
+    let with_bonus: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM unit_modifiers WHERE owner_type = 'Slave' \
+             AND linear_level_bonus != 0",
+            [],
+            |r| r.get(0),
+        )
+        .expect("Slave linear level bonus rows");
+    assert_eq!(with_bonus, 0);
 }
