@@ -8,7 +8,29 @@ use crate::managers::id::IdManagers;
 use crate::managers::item::ItemManager;
 use crate::managers::name::NameManager;
 use crate::stream::world::{ActiveCharacter, ItemUcc, StreamDoodad, StreamWorld};
-use crate::world::WorldManager;
+use crate::world::{WorldInstance, WorldManager, WorldObject};
+
+/// Snapshot of one live doodad for the stream packets.
+fn stream_doodad(world: &WorldInstance, obj: &WorldObject) -> Option<StreamDoodad> {
+    let pos = world.world_pos_rot(obj);
+    let (roll, pitch, yaw) = pos.roll_pitch_yaw_shorts();
+    let d = obj.as_doodad()?.data();
+    let now = crate::world::now_ms();
+    Some(StreamDoodad {
+        obj_id: obj.obj_id(),
+        template_id: d.template_id,
+        x: pos.x,
+        y: pos.y,
+        z: pos.z,
+        roll,
+        pitch,
+        yaw,
+        scale: d.scale,
+        func_group_id: d.func_group_id,
+        time_left: d.time_left(now),
+        plant_time: d.plant_time,
+    })
+}
 
 /// The game-side lookups of the stream server.
 #[derive(Debug)]
@@ -26,32 +48,18 @@ impl StreamWorld for GameStreamWorld {
     fn doodads_in_cell(&self, instance_id: u32, x: i32, y: i32) -> Option<Vec<StreamDoodad>> {
         // An unknown instance is `None` (C# NRE).
         let world = self.world.world(instance_id)?;
-        let now = crate::world::now_ms();
         let doodads = world
             .objects_in_cell(x, y)
-            .into_iter()
-            .filter(|o| o.as_doodad().is_some())
-            .map(|o| {
-                let pos = world.world_pos_rot(&o);
-                let (roll, pitch, yaw) = pos.roll_pitch_yaw_shorts();
-                let d = o.as_doodad().expect("doodad").data();
-                StreamDoodad {
-                    obj_id: o.obj_id(),
-                    template_id: d.template_id,
-                    x: pos.x,
-                    y: pos.y,
-                    z: pos.z,
-                    roll,
-                    pitch,
-                    yaw,
-                    scale: d.scale,
-                    func_group_id: d.func_group_id,
-                    time_left: d.time_left(now),
-                    plant_time: d.plant_time,
-                }
-            })
+            .iter()
+            .filter_map(|o| stream_doodad(&world, o))
             .collect();
         Some(doodads)
+    }
+
+    fn doodad(&self, instance_id: u32, obj_id: u32) -> Option<StreamDoodad> {
+        let world = self.world.world(instance_id)?;
+        let doodad = world.doodad(obj_id)?;
+        stream_doodad(&world, &WorldObject::from(&doodad))
     }
 
     fn character_name(&self, character_id: u32) -> Option<String> {

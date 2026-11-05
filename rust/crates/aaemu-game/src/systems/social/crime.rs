@@ -398,6 +398,17 @@ impl CrimeManager {
             .collect()
     }
 
+    /// Number of a player's judged (archived) crime records: the `crime` table rows whose
+    /// `judgement_time` was set by `TrialData.ArchiveEvidence` when a trial ends and
+    /// `Justice.KeepHistory` keeps them.
+    pub fn archived_evidence_count(&self, player_id: u32) -> usize {
+        self.st()
+            .events
+            .values()
+            .filter(|e| e.criminal == player_id && e.judgement_time > 0)
+            .count()
+    }
+
     /// A crime event by id.
     pub fn get(&self, id: u32) -> Option<CrimeEvent> {
         self.st().events.get(&id).cloned()

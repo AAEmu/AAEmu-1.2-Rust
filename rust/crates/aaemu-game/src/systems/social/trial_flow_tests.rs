@@ -227,6 +227,36 @@ fn states(frames: &[(u16, Vec<u8>)]) -> Vec<(u8, i32)> {
         .collect()
 }
 
+/// Everything `CSJurySummoned` must leave untouched.
+type SeatState = (
+    u8,
+    i64,
+    Option<u32>,
+    u32,
+    Vec<(i32, Option<u32>, bool, i32)>,
+);
+
+fn trial_seat_state(server: &GameServer, tid: u32) -> SeatState {
+    let t = server.systems.social.trials.get_trial(tid).expect("trial");
+    (
+        t.step,
+        t.current_step_end_ms,
+        t.court_room,
+        t.defendant_id,
+        t.jury
+            .iter()
+            .map(|(seat, j)| {
+                (
+                    *seat,
+                    j.jury_member.as_ref().map(|m| m.character_id),
+                    j.confirm_testimony,
+                    j.selected_sentence,
+                )
+            })
+            .collect(),
+    )
+}
+
 #[tokio::test]
 async fn jury_trial_flow_to_guilty_verdict_and_cleanup() {
     let server = justice_server();
@@ -962,6 +992,7 @@ async fn trial_without_jury_is_cancelled_with_the_default_sentence() {
     assert_eq!(
         ops(&f),
         vec![
+            sc::SCTrialCanceledPacket,
             sc::SCChangeTrialStatePacket,
             sc::SCLeavedChatChannelPacket,
             sc::SCCrimeChangedPacket,
@@ -969,7 +1000,8 @@ async fn trial_without_jury_is_cancelled_with_the_default_sentence() {
             sc::SCRulingClosedPacket,
         ]
     );
-    assert_eq!(&f[0].1[..9], state_bytes(tid, trial_step::END_TRIAL, 0));
+    assert_eq!(f[0].1, body(&SCTrialCanceledPacket { trial_id: tid }));
+    assert_eq!(&f[1].1[..9], state_bytes(tid, trial_step::END_TRIAL, 0));
     // No evidence: 0 minutes -> the 10 s minimum.
     assert_eq!(
         d.p.data()
@@ -981,6 +1013,151 @@ async fn trial_without_jury_is_cancelled_with_the_default_sentence() {
         10_000
     );
     assert!(trials.trial_ids().is_empty());
+}
+
+#[tokio::test]
+async fn defendant_cancel_sends_trial_canceled_before_ruling_closed() {
+    let (server, mut d, mut jury, tid) = summoned_trial(1).await;
+    send(&server, &mut d, cs::CSCancelTrialPacket, |s| {
+        s.write_u32(tid);
+    })
+    .await;
+    let canceled = body(&SCTrialCanceledPacket { trial_id: tid });
+    let mut defendant_frames = trial_frames(&mut d.client);
+    assert_eq!(defendant_frames[0].0, sc::SCTrialCanceledPacket);
+    assert_eq!(defendant_frames[0].1, canceled);
+    assert_eq!(
+        server.systems.social.trials.get_trial(tid).unwrap().step,
+        trial_step::PLEAD_GUILTY
+    );
+    let mut juror_frames = trial_frames(&mut jury[0].client);
+    assert_eq!(
+        find(&juror_frames, sc::SCTrialCanceledPacket),
+        vec![canceled.clone()]
+    );
+
+    // The ruling closes on the next tick, after the cancellation.
+    server
+        .systems
+        .social
+        .trials
+        .update_tick(&server, util::now_ms() + 1)
+        .await;
+    defendant_frames.extend(trial_frames(&mut d.client));
+    juror_frames.extend(trial_frames(&mut jury[0].client));
+    for frames in [&defendant_frames, &juror_frames] {
+        let canceled_at = frames
+            .iter()
+            .position(|f| f.0 == sc::SCTrialCanceledPacket)
+            .expect("SCTrialCanceled");
+        let closed_at = frames
+            .iter()
+            .position(|f| f.0 == sc::SCRulingClosedPacket)
+            .expect("SCRulingClosed");
+        assert!(canceled_at < closed_at);
+    }
+}
+
+#[tokio::test]
+async fn verdict_count_asks_only_the_jurors_who_still_have_to_vote() {
+    let (server, mut d, mut jury, tid) = summoned_trial(2).await;
+    advance_to_verdict(&server, &mut d, &mut jury, tid).await;
+
+    // The verdict step starts with no votes: every seated juror gets 0 of 2.
+    let start = body(&SCChangeJuryVerdictCountPacket { count: 0, total: 2 });
+    for juror in &mut jury {
+        assert_eq!(
+            find(
+                &trial_frames(&mut juror.client),
+                sc::SCChangeJuryVerdictCountPacket
+            ),
+            vec![start.clone()]
+        );
+    }
+    assert!(find(
+        &trial_frames(&mut d.client),
+        sc::SCChangeJuryVerdictCountPacket
+    )
+    .is_empty());
+
+    // The first vote updates the second juror only; the voter keeps getting SCRulingStatus.
+    send(&server, &mut jury[0], cs::CSJuryVerdictPacket, |s| {
+        s.write_u32(tid).write_i32(1).write_u8(5);
+    })
+    .await;
+    let voted = trial_frames(&mut jury[0].client);
+    assert!(find(&voted, sc::SCChangeJuryVerdictCountPacket).is_empty());
+    assert_eq!(
+        find(&voted, sc::SCRulingStatusPacket),
+        vec![body(&SCRulingStatusPacket {
+            count: 1,
+            total: 2,
+            sentence_type: 0,
+            sentence_time: 0,
+        })]
+    );
+    let waiting = trial_frames(&mut jury[1].client);
+    assert_eq!(
+        find(&waiting, sc::SCChangeJuryVerdictCountPacket),
+        vec![body(&SCChangeJuryVerdictCountPacket { count: 1, total: 2 })]
+    );
+    assert!(find(&waiting, sc::SCRulingStatusPacket).is_empty());
+    assert!(find(
+        &trial_frames(&mut d.client),
+        sc::SCChangeJuryVerdictCountPacket
+    )
+    .is_empty());
+
+    // With every seated juror voted there is nobody left to ask.
+    send(&server, &mut jury[1], cs::CSJuryVerdictPacket, |s| {
+        s.write_u32(tid).write_i32(2).write_u8(5);
+    })
+    .await;
+    for juror in &mut jury {
+        assert!(find(
+            &trial_frames(&mut juror.client),
+            sc::SCChangeJuryVerdictCountPacket
+        )
+        .is_empty());
+    }
+    assert!(find(
+        &trial_frames(&mut d.client),
+        sc::SCChangeJuryVerdictCountPacket
+    )
+    .is_empty());
+}
+
+#[tokio::test]
+async fn jury_summoned_requires_the_seat_holder_and_changes_nothing() {
+    let (server, mut d, mut jury, tid) = summoned_trial(2).await;
+    let trials = &server.systems.social.trials;
+    assert!(trials.jury_summoned(&jury[0].p, tid, 1));
+    assert!(trials.jury_summoned(&jury[1].p, tid, 2));
+    assert!(!trials.jury_summoned(&jury[1].p, tid, 1));
+    assert!(!trials.jury_summoned(&jury[0].p, tid, 2));
+    assert!(!trials.jury_summoned(&jury[0].p, tid + 100, 1));
+    assert!(!trials.jury_summoned(&d.p, tid, 1));
+
+    let before = trial_seat_state(&server, tid);
+    // A non-seat-holder, a juror claiming the other seat and the real seat holder: none
+    // changes the trial and none sends a packet.
+    send(&server, &mut d, cs::CSJurySummonedPacket, |s| {
+        s.write_u32(tid).write_i32(1).write_i32(1);
+    })
+    .await;
+    send(&server, &mut jury[0], cs::CSJurySummonedPacket, |s| {
+        s.write_u32(tid).write_i32(1).write_i32(2);
+    })
+    .await;
+    send(&server, &mut jury[0], cs::CSJurySummonedPacket, |s| {
+        s.write_u32(tid).write_i32(1).write_i32(1);
+    })
+    .await;
+    assert_eq!(trial_seat_state(&server, tid), before);
+    assert!(trial_frames(&mut d.client).is_empty());
+    for juror in &mut jury {
+        assert!(trial_frames(&mut juror.client).is_empty());
+    }
 }
 
 #[tokio::test]
@@ -1067,7 +1244,7 @@ async fn summoned_trial(count: u32) -> (Arc<GameServer>, Pc, Vec<Pc>, u32) {
     (server, defendant, jurors, tid)
 }
 
-async fn open_verdict(server: &GameServer, defendant: &mut Pc, jurors: &mut [Pc], tid: u32) {
+async fn advance_to_verdict(server: &GameServer, defendant: &mut Pc, jurors: &mut [Pc], tid: u32) {
     for (i, juror) in jurors.iter_mut().enumerate() {
         send(server, juror, cs::CSJuryEndTestimonyPacket, |s| {
             s.write_u32(tid).write_i32(i as i32 + 1);
@@ -1084,6 +1261,11 @@ async fn open_verdict(server: &GameServer, defendant: &mut Pc, jurors: &mut [Pc]
         s.write_u32(tid);
     })
     .await;
+    // Drop the confirm/closing frames so the verdict-step frames are the only ones left.
+    defendant.client.drain();
+    for juror in jurors.iter_mut() {
+        juror.client.drain();
+    }
     server
         .systems
         .social
@@ -1094,6 +1276,10 @@ async fn open_verdict(server: &GameServer, defendant: &mut Pc, jurors: &mut [Pc]
         server.systems.social.trials.get_trial(tid).unwrap().step,
         trial_step::JURY_VERDICT
     );
+}
+
+async fn open_verdict(server: &GameServer, defendant: &mut Pc, jurors: &mut [Pc], tid: u32) {
+    advance_to_verdict(server, defendant, jurors, tid).await;
     defendant.client.drain();
     for juror in jurors {
         juror.client.drain();

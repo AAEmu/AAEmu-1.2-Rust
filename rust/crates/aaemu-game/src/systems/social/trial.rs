@@ -234,6 +234,30 @@ impl TrialData {
     fn send_state(&self, now_ms: i64) {
         self.send_packets(&self.state_packet(self.active_jury_count(), now_ms));
     }
+
+    /// `SCChangeJuryVerdictCountPacket` to every seated juror who has not voted yet.
+    /// Returns `(votes cast, seated jurors)`. The audience is INFERRED: `verdict.alb`
+    /// registers `VERDICT_COUNT` and prints the remaining count, and the C# sent no such packet.
+    fn send_verdict_count(&self) -> (i32, i32) {
+        let total = self
+            .jury
+            .values()
+            .filter(|j| j.jury_member.is_some())
+            .count() as i32;
+        let count = self
+            .jury
+            .values()
+            .filter(|j| j.jury_member.is_some() && j.selected_sentence >= 0)
+            .count() as i32;
+        for j in self.jury.values() {
+            if j.selected_sentence < 0 {
+                if let Some(m) = &j.jury_member {
+                    m.send(SCChangeJuryVerdictCountPacket { count, total });
+                }
+            }
+        }
+        (count, total)
+    }
 }
 
 /// Work deferred until the trial mutex is released (see the module docs).
@@ -1427,6 +1451,8 @@ impl TrialManager {
                         sentence_type: 0,
                         sentence_time: 0,
                     });
+                    // Every seated juror is still expected to vote: count 0 of `total`.
+                    t.send_verdict_count();
                 }
                 if t.step == step::JURY_VERDICT && t.current_step_end_ms <= now {
                     tracing::debug!("TrialStep.CalculateSentence - {}", t.id);
@@ -1445,6 +1471,10 @@ impl TrialManager {
                     t.current_step_end_ms = TIME_MAX;
                 }
                 if t.step == step::TRIAL_CANCELLED {
+                    // The defendant and the seated jury hear the cancellation before the
+                    // ruling closes. `TRIAL_CANCELED` is registered by `usertrial/trial_status.alb`;
+                    // the C# sent no such packet and the audience is INFERRED from `SendPackets`.
+                    t.send_packets(&SCTrialCanceledPacket { trial_id: t.id });
                     let d = t.defendant.clone();
                     result_is_guilty(server, rooms, &d, t, false, now, fx);
                     t.send_packets(&SCRulingClosedPacket {});
@@ -1941,6 +1971,9 @@ impl TrialManager {
             };
             if Arc::ptr_eq(&t.defendant, p) {
                 if t.step < step::TRIAL_CANCELLED {
+                    // INFERRED audience (see the auto-cancel path): the defendant and the
+                    // seated jury, before the later `SCRulingClosedPacket`.
+                    t.send_packets(&SCTrialCanceledPacket { trial_id: t.id });
                     result_is_guilty(server, rooms, p, t, true, now_ms, &mut fx);
                 }
             } else {
@@ -2096,9 +2129,26 @@ impl TrialManager {
                 }
             }
         }
+        // Tell the jurors who still owe a vote the new `votes cast / seated` count.
+        t.send_verdict_count();
         if t.all_jury_selected_sentence() {
             t.current_step_end_ms = now_ms;
         }
+    }
+
+    /// `CSJurySummonedPacket` acknowledgement: true only for the player holding jury seat
+    /// `jury_id` of the trial. The packet changes no state.
+    pub fn jury_summoned(&self, player: &PlayerRef, trial_id: u32, jury_id: i32) -> bool {
+        let st = self.st();
+        let Some(t) = st.trials.get(&trial_id) else {
+            return false;
+        };
+        t.jury.get(&jury_id).is_some_and(|j| {
+            j.seat_id == jury_id
+                && j.jury_member
+                    .as_ref()
+                    .is_some_and(|m| Arc::ptr_eq(m, player))
+        })
     }
 
     /// `SkipFinalStatementReply(defendant, trial)`.

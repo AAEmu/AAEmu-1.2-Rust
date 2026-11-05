@@ -209,6 +209,13 @@ pub fn execute_interaction_with(
         return false;
     }
     let target_doodad = target.and_then(WorldObject::as_doodad);
+    if let Some(doodad) = target_doodad {
+        if let Some(world) = server.world.world_of(&WorldObject::from(doodad)) {
+            if phase::refuse_blocked_child_doodad(server, &world, doodad, Some(caster)) {
+                return false;
+            }
+        }
+    }
     match wi_type {
         wi::CHECK_GROWTH => check_growth(server, caster, target_doodad, skill_id),
         wi::CROP_HARVEST => crop_harvest(server, caster, target_doodad, skill_id),

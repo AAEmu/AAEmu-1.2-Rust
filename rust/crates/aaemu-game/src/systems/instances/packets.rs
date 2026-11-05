@@ -797,5 +797,89 @@ impl Marshal for SCTowerDefWaveStartPacket {
     }
 }
 
+// ------------------------------------------------------------------------------------------
+// Racing (defined only: nothing sends these yet, see WP-R2 / CAP-RACE-1 in PORTING.md)
+// ------------------------------------------------------------------------------------------
+
+/// Maximum rows the 1.2 client reads from `SCRacingResultPacket`: its reader (`FUN_397b0340`)
+/// loops `min(count, DAT_39a12644)` and the cap is 10.
+pub const RACING_RESULT_MAX_ROWS: usize = 10;
+
+/// `SCRaceCondPacket(rc, type, after)`: a race state change. The 1.2 reader (`FUN_397b88d0`)
+/// reads `u8` rc (stream slot 0x44), `u32` type (0x3c) and `u32` after (0x3c). `type` is
+/// INFERRED to be the race track id (`X2Racing.GetTrackName` takes the same id) and `after`
+/// the milliseconds until the next state (INFERRED from `race_tracks.*_delay`); the client
+/// state constants are 0 WAIT, 1 READY, 2 START, 3 PLAY, 4 CHECK, 5 END (`dll.c:938602`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SCRaceCondPacket {
+    pub rc: u8,
+    pub track_id: u32,
+    pub after_ms: u32,
+}
+packet_def!(
+    SCRaceCondPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCRaceCondPacket
+);
+impl Marshal for SCRaceCondPacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_u8(self.rc)
+            .write_u32(self.track_id)
+            .write_u32(self.after_ms);
+    }
+}
+
+/// `SCRacingPacket(rc, record, v1)`: a checkpoint / split of the local run. The 1.2 reader
+/// (`FUN_397b8950`) reads `u8` rc (0x44), `u32` record (0x3c) and `i32` v1 (0x4c). `record` is
+/// INFERRED to be the elapsed milliseconds and `v1` the checkpoint index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SCRacingPacket {
+    pub rc: u8,
+    pub record_ms: u32,
+    pub v1: i32,
+}
+packet_def!(
+    SCRacingPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCRacingPacket
+);
+impl Marshal for SCRacingPacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_u8(self.rc)
+            .write_u32(self.record_ms)
+            .write_i32(self.v1);
+    }
+}
+
+/// `SCRacingResultPacket(rows)`: the run standings. The 1.2 reader (`FUN_397b0340`) reads
+/// `i32` count, then `min(count, 10)` rows of `{u32 type, u32 record}` (`FUN_397a8870`); a
+/// longer list is truncated here (with a warning) so the client never sees a count it would
+/// not read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SCRacingResultPacket {
+    pub rows: Vec<(u32, u32)>,
+}
+packet_def!(
+    SCRacingResultPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCRacingResultPacket
+);
+impl Marshal for SCRacingResultPacket {
+    fn write(&self, s: &mut PacketStream) {
+        let emitted = self.rows.len().min(RACING_RESULT_MAX_ROWS);
+        if self.rows.len() > emitted {
+            tracing::warn!(
+                rows = self.rows.len(),
+                emitted,
+                "SCRacingResultPacket rows exceed the 1.2 client cap; truncating"
+            );
+        }
+        s.write_i32(emitted as i32);
+        for (kind, record) in &self.rows[..emitted] {
+            s.write_u32(*kind).write_u32(*record);
+        }
+    }
+}
+
 /// `SCSkillCooldownResetPacket`: one definition per opcode (`crate::systems::skills::packets::SCSkillCooldownResetPacket`).
 pub use crate::systems::skills::packets::SCSkillCooldownResetPacket;
