@@ -300,6 +300,9 @@ pub struct QuestState {
     /// When a refusal (quest id, reason) was last logged at WARN (unix ms), so a refusal
     /// repeated by an automatic trigger (level up, sphere entry) does not flood the log.
     pub refusal_log: HashMap<(u32, String), i64>,
+    /// Last `CSRestartMainQuestPacket` attempt (unix ms): the client sends at most one every
+    /// 3 s (`FUN_3937a8d0`); the server applies the same throttle.
+    pub restart_request_at: i64,
 }
 
 impl QuestState {
