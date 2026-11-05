@@ -196,12 +196,19 @@ passes preflight for these identities (`WorldId: 0`):
 | 3, 13 | 20 | 257 |
 | 5, 15 | 17 | 139 |
 | 6 | 56 | 275 |
+| 8, 27 | 63 | 288 |
 | 12 (Hasla) | 23 | 274 |
-| 18, 19, 20 | 22 | 206 |
-| 27 | 63 | 288 |
+| 18 (Golden Plains war), 19, 20 | 22 | 206 |
+| 28, 31 (Oblivion Rift) | 6 | 144 |
+| 29, 32 (Clockwork Rebellion) | 24 | 158 |
 
 Events sharing NPC controllers cannot run together. Select the definitions you
 intend to test; this preflight checks content availability, not live client gameplay.
+Definitions 19 and 20 are the victory follow-ups of the Golden Plains war (18): the
+death of the losing side's relic in its last wave starts them in the same zone, so do not
+put them in `Events` (a configured follow-up is never started by the clock).
+The other definitions of the 1.2 data have no authored positions and stay unavailable:
+4, 14, 16, 17, 21, 23, 24, 25 and 26 (`/towerdef list` names the missing spawner), and
 Mistmerrow's conflict configuration references definition 33, which is absent from
 the shipped compact and still needs its event content restored.
 
@@ -219,11 +226,14 @@ times use real seconds. A configured event matching a conflict zone's
 `tod`. Events do not replay during the same clock crossing or War period.
 
 The runtime supports NPC spawner waves, NPC kill targets and `DoodadAlmighty` waves.
+Wave spawners whose members are NPC groups (the Oblivion Rift, Clockwork Rebellion)
+spawn every group member at the group's sites listed in `npc_spawns.json`.
 Doodad waves use authored doodad positions in the event's zone group and are removed
 according to `despawn_on_next_step` or when the event ends. Missing authored NPC or
 doodad positions are rejected before the event starts. Definition 26 is a developer
 test in the 1.2 compact; its doodad 7297 and NPC controller lack authored positions.
-Victory reward event chains are not implemented. Existing NPC skills, AI and quests
+The only event chain is the Golden Plains victory follow-up described above; no other
+rewards are synthesized. Existing NPC skills, AI and quests
 handle controller behavior and ordinary drops; confirm the event's gameplay with
 the target 1.2 client before exposing it to players.
 

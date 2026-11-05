@@ -1390,6 +1390,86 @@ async fn spawn_effect_spawner_at_unit() {
     assert_eq!(s2.template().unwrap().npcs[0].member_id, 4321);
 }
 
+/// A `SpawnEffect` of a plot "Location" target (a position unit) puts the summon at that
+/// position, not on the caster: the rift summoners cast their wave plots at a landing point
+/// that is not their own.
+#[tokio::test]
+async fn spawn_effect_at_a_position_target_spawns_at_the_position_not_the_caster() {
+    use crate::models::transform::PositionAndRotation;
+    use crate::systems::npcs::bridges::NpcSkills;
+    use crate::systems::skills::data::effects::SpawnEffect;
+    use crate::systems::skills::data::{EffectKind, EffectTemplate};
+    use crate::systems::skills::effects::{EffectArgs, EffectSource};
+    use crate::systems::skills::ext::NpcSkillHooks;
+    use crate::systems::skills::geometry::{PosUnit, Target};
+    use crate::systems::skills::types::{CastAction, SkillCastTarget, SkillCaster, SkillObject};
+
+    let server = server();
+    let m = manager(&server);
+    assert_eq!(m.add_npc_spawner(&server, npc_def(600, 20.0, 20.0)), Ok(2));
+    let world = server.world.world(0).unwrap();
+    let caster = Entity::new(server.ids.object.get_next_id().unwrap(), Npc::new(600));
+    caster.data().unit.transform.set_xyz(30.0, 40.0, 5.0);
+    world.spawn(&caster, &server.view_ctx());
+    let caster_obj = WorldObject::from(&caster);
+    crate::systems::npcs::install_hooks(&server);
+    let effect = SpawnEffect {
+        id: 1,
+        owner_type_id: 1, // BaseUnitType.Npc
+        sub_type: 600,
+        pos_dir_id: 1,
+        pos_angle: 0.0,
+        pos_distance: 0.0,
+        ori_dir_id: 1,
+        ori_angle: 0.0,
+        use_summoner_faction: false,
+        life_time: 0.0,
+        despawn_on_creator_death: false,
+        use_summoner_aggro_target: false,
+        mate_state_id: 0,
+    };
+    let template = EffectTemplate::Spawn(effect);
+    let args = EffectArgs {
+        caster: Some(caster_obj.clone()),
+        caster_caster: SkillCaster::Unit(caster.obj_id),
+        // 500 m above the landing point, like the plots of the rift summoners.
+        target: Target::Pos(PosUnit {
+            instance_id: 0,
+            zone_id: crate::test_support::TEST_ZONE,
+            pos: PositionAndRotation {
+                x: 80.0,
+                y: 90.0,
+                z: 600.0,
+                ..Default::default()
+            },
+        }),
+        target_caster: SkillCastTarget::Unit(caster.obj_id),
+        cast: CastAction::Skill {
+            skill_id: 1,
+            tl_id: 0,
+        },
+        source: EffectSource::default(),
+        skill_object: &SkillObject::None,
+    };
+    assert!(NpcSkills.apply_effect(&server, EffectKind::SpawnEffect, &template, &args,));
+    let summon = world
+        .all_npcs()
+        .into_iter()
+        .find(|n| n.obj_id != caster.obj_id)
+        .expect("the effect must spawn a summon");
+    let p = world.world_pos_rot(&WorldObject::from(&summon));
+    assert_eq!(
+        (p.x, p.y),
+        (80.0, 90.0),
+        "the summon stands at the location"
+    );
+    assert!(
+        p.z <= 600.0,
+        "a walking summon lands on the ground below the location, z={}",
+        p.z
+    );
+}
+
 #[tokio::test]
 async fn spawn_lock_is_reentrant() {
     let server = server();
