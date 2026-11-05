@@ -32,7 +32,6 @@
     "SCGmDumpNpcPacket",
     "SCGmDumpQuestsPacket",
     "SCHSRequestPacket",
-    "SCInvitationCanceledPacket",
     "SCIsUnitInFarmPacket",
     "SCMouldAskedPacket",
     "SCMouldListPacket",

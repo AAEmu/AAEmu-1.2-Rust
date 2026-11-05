@@ -1074,6 +1074,10 @@ async fn stale_request_timeout_after_accept_keeps_the_duel() {
     f.b.drain();
     // The expiry task raced the accept and runs afterwards.
     f.duels().request_expired(&duel, 1);
+    assert!(
+        find(&f.b.drain(), sc::SCInvitationCanceledPacket).is_empty(),
+        "an accepted challenge must not close the popup"
+    );
     assert!(f.duels().duel_of(1).unwrap().started);
     assert!(f.pa.data().unit.is_in_duel && f.pb.data().unit.is_in_duel);
     assert_eq!(f.pa.data().unit.faction_id, FACTION_RED_TEAM);
@@ -1085,6 +1089,25 @@ async fn stale_request_timeout_after_accept_keeps_the_duel() {
         .await;
     assert_eq!(f.pa.data().unit.faction_id, 101);
     assert_eq!(f.pb.data().unit.faction_id, 101);
+    assert!(f.duels().is_empty());
+}
+
+/// An unanswered challenge closes the challenged player's popup with kind 5
+/// (`SCDuelRequested`, popup type 9).
+#[tokio::test]
+async fn request_timeout_closes_the_challenged_popup() {
+    let mut f = Fixture::new(true);
+    f.challenge().await;
+    let duel = f.duel();
+    f.a.drain();
+    f.b.drain();
+    f.duels().request_expired(&duel, 1);
+    let frames = f.b.drain();
+    assert_eq!(
+        find(&frames, sc::SCInvitationCanceledPacket),
+        vec![vec![5]],
+        "the challenged player gets exactly one cancellation"
+    );
     assert!(f.duels().is_empty());
 }
 

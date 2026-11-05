@@ -7,6 +7,7 @@ use crate::opcodes::{cs, sc};
 use crate::server::GameServer;
 use crate::systems::social::chat::chat_type;
 use crate::systems::social::packets::body;
+use crate::systems::social::packets::misc::invitation_canceled_kind;
 use crate::systems::social::packets::team::*;
 use crate::systems::social::team::{risky_action, INVITATION_TIMEOUT_MS};
 use crate::test_support::{spawn_player, test_character, test_server, TestClient};
@@ -2715,6 +2716,13 @@ async fn team_owner_logout_drops_pending_invitations() {
         .await;
     assert_eq!(b.ops(), vec![sc::SCAskToJoinTeamPacket]);
     crate::world::session::set_online(&server, &a.p, false);
+    assert_eq!(
+        b.frames(),
+        vec![(
+            sc::SCInvitationCanceledPacket,
+            vec![invitation_canceled_kind::TEAM]
+        )]
+    );
     b.send(&server, cs::CSReplyToJoinTeamPacket, reply(0, 1, false))
         .await;
     assert!(b.ops().is_empty(), "no invitation, no reply");
@@ -3017,9 +3025,17 @@ async fn expired_team_invitations_are_swept() {
         .await;
     assert_eq!(b.ops(), vec![sc::SCAskToJoinTeamPacket]);
 
-    // After 60 s the 500 ms tick drops the pending invitation, so a new one is accepted.
+    // After 60 s the 500 ms tick drops the pending invitation and closes the popup (kind 1
+    // for a named invitation), so a new one is accepted.
     let expired_at = crate::systems::social::util::now_ms() + INVITATION_TIMEOUT_MS + 1;
     teams.update_all_teams(&server, expired_at);
+    assert_eq!(
+        b.frames(),
+        vec![(
+            sc::SCInvitationCanceledPacket,
+            vec![invitation_canceled_kind::TEAM]
+        )]
+    );
     a.send(&server, cs::CSInviteToTeamPacket, invite(0, "Bob"))
         .await;
     assert_eq!(b.ops(), vec![sc::SCAskToJoinTeamPacket]);
@@ -3029,9 +3045,180 @@ async fn expired_team_invitations_are_swept() {
     // deadline.
     let expired_at = crate::systems::social::util::now_ms() + INVITATION_TIMEOUT_MS + 1;
     teams.update_all_teams(&server, expired_at);
+    assert_eq!(
+        b.frames(),
+        vec![(
+            sc::SCInvitationCanceledPacket,
+            vec![invitation_canceled_kind::TEAM]
+        )]
+    );
     b.send(&server, cs::CSReplyToJoinTeamPacket, reply(0, 1, false))
         .await;
     assert!(b.ops().is_empty());
+}
+
+/// An expired area invitation closes the same popup type with kind 2 (the 1-vs-2 split is
+/// INFERRED; the client closes popup type 2 for both).
+#[tokio::test]
+async fn expired_area_team_invitation_sends_kind_two() {
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    settle(&mut [&mut a, &mut b]);
+
+    let mut s = PacketStream::new();
+    s.write_u32(0).write_bool(true);
+    a.send(&server, cs::CSInviteAreaToTeamPacket, s).await;
+    assert_eq!(b.ops(), vec![sc::SCAskToJoinTeamAreaPacket]);
+    a.ops();
+
+    let expired_at = crate::systems::social::util::now_ms() + INVITATION_TIMEOUT_MS + 1;
+    server
+        .systems
+        .social
+        .teams
+        .update_all_teams(&server, expired_at);
+    assert_eq!(
+        b.frames(),
+        vec![(
+            sc::SCInvitationCanceledPacket,
+            vec![invitation_canceled_kind::TEAM_AREA]
+        )]
+    );
+}
+
+/// An invitation issued by a character that goes offline is dropped and its invitee's popup is
+/// closed.
+#[tokio::test]
+async fn team_invitation_is_canceled_when_the_inviter_goes_offline() {
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    settle(&mut [&mut a, &mut b]);
+
+    a.send(&server, cs::CSInviteToTeamPacket, invite(0, "Bob"))
+        .await;
+    assert_eq!(b.ops(), vec![sc::SCAskToJoinTeamPacket]);
+
+    crate::world::session::set_online(&server, &a.p, false);
+    assert_eq!(
+        b.frames(),
+        vec![(
+            sc::SCInvitationCanceledPacket,
+            vec![invitation_canceled_kind::TEAM]
+        )]
+    );
+}
+
+/// An accepted invitation consumes the pending one, so the later sweep sends nothing.
+#[tokio::test]
+async fn accepted_team_invitation_sends_no_cancellation() {
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    settle(&mut [&mut a, &mut b]);
+
+    a.send(&server, cs::CSInviteToTeamPacket, invite(0, "Bob"))
+        .await;
+    b.ops();
+    b.send(
+        &server,
+        cs::CSReplyToJoinTeamPacket,
+        reply(0, a.p.character_id, false),
+    )
+    .await;
+    assert!(find(&b.frames(), sc::SCInvitationCanceledPacket).is_empty());
+
+    let expired_at = crate::systems::social::util::now_ms() + INVITATION_TIMEOUT_MS + 1;
+    server
+        .systems
+        .social
+        .teams
+        .update_all_teams(&server, expired_at);
+    assert!(find(&b.frames(), sc::SCInvitationCanceledPacket).is_empty());
+}
+
+/// A second invitation to the same invitee is refused while one is pending; nothing closes the
+/// pending popup until that invitation ends.
+#[tokio::test]
+async fn a_second_team_invitation_does_not_cancel_the_pending_one() {
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    let mut c = pc(&server, 3, "Cy", 120.0, 100.0);
+    settle(&mut [&mut a, &mut b, &mut c]);
+
+    a.send(&server, cs::CSInviteToTeamPacket, invite(0, "Bob"))
+        .await;
+    b.ops();
+    c.send(&server, cs::CSInviteToTeamPacket, invite(0, "Bob"))
+        .await;
+    assert_eq!(c.ops(), vec![sc::SCRejectedTeamPacket]);
+    assert!(
+        b.frames().is_empty(),
+        "the second invitation must not touch the pending popup"
+    );
+
+    let expired_at = crate::systems::social::util::now_ms() + INVITATION_TIMEOUT_MS + 1;
+    server
+        .systems
+        .social
+        .teams
+        .update_all_teams(&server, expired_at);
+    assert_eq!(
+        b.frames(),
+        vec![(
+            sc::SCInvitationCanceledPacket,
+            vec![invitation_canceled_kind::TEAM]
+        )],
+        "exactly one cancellation when the last pending invitation ends"
+    );
+}
+
+/// An unanswered guild invitation is swept after 60 s and closes the invitee's popup with
+/// kind 4 (`SCExpeditionInvitation`, popup type 3).
+#[tokio::test]
+async fn expired_expedition_invitation_sends_kind_four() {
+    use crate::data::world_data::SystemFaction;
+    use crate::systems::social::expedition::{self, Expedition};
+
+    let server = test_server();
+    let mut leader = pc(&server, 1, "Lead", 100.0, 100.0);
+    let mut invitee = pc(&server, 2, "Bob", 110.0, 100.0);
+    settle(&mut [&mut leader, &mut invitee]);
+    leader.p.data().unit.expedition_id = 77;
+    let member = expedition::member_from_character(&server, 77, &leader.p, true);
+    server.expeditions.add(Expedition {
+        faction: SystemFaction {
+            id: 77,
+            name: "Knights".into(),
+            owner_id: leader.p.character_id,
+            owner_name: "Lead".into(),
+            mother_id: 148,
+            ..Default::default()
+        },
+        members: vec![member],
+        policies: expedition::default_policies(&server, 77),
+        removed_members: Vec::new(),
+        is_disbanded: false,
+    });
+
+    let mut s = PacketStream::new();
+    s.write_str("Bob");
+    leader
+        .send(&server, cs::CSInviteToExpeditionPacket, s)
+        .await;
+    assert_eq!(invitee.ops(), vec![sc::SCExpeditionInvitationPacket]);
+
+    let expired_at = crate::systems::social::util::now_ms() + expedition::INVITATION_TIMEOUT_MS + 1;
+    server.expeditions.expire_invitations(&server, expired_at);
+    assert_eq!(
+        invitee.frames(),
+        vec![(
+            sc::SCInvitationCanceledPacket,
+            vec![invitation_canceled_kind::EXPEDITION]
+        )]
+    );
 }
 
 /// Guild invitations must be pending and unexpired, a member cannot join a second guild, and
