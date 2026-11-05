@@ -267,6 +267,68 @@ pub fn doodad_has_matching_climate(ctx: &DoodadCtx<'_>) -> bool {
         .contains(&template.climate_id)
 }
 
+/// The buff id from `blocked_child_doodads` that blocks a player's use of `doodad`, if any: the
+/// doodad's parent unit carries an active buff of that template id and its row lists this doodad
+/// template. `Transform.parent_obj_id` is the attach parent (`attach_child`); the doodad's own
+/// `parent_obj_id` is the fallback for paths that only set the wire field.
+pub fn blocking_parent_buff(
+    server: &GameServer,
+    world: &WorldInstance,
+    doodad: &DoodadRef,
+) -> Option<u32> {
+    let (template_id, parent_obj_id) = {
+        let d = doodad.data();
+        let parent = if d.transform.parent_obj_id != 0 {
+            d.transform.parent_obj_id
+        } else {
+            d.parent_obj_id
+        };
+        (d.template_id, parent)
+    };
+    if parent_obj_id == 0 {
+        return None;
+    }
+    let parent = world.object(parent_obj_id)?;
+    let blocked = &server.game_data.systems.skills.blocked_child_doodads;
+    parent
+        .with_unit(|u| {
+            u.unit()
+                .buffs
+                .effects
+                .iter()
+                .map(|b| b.template.id)
+                .find(|&buff_id| blocked.blocks(buff_id, template_id))
+        })
+        .flatten()
+}
+
+/// Refuses a blocked `blocked_child_doodads` child doodad use by a player: the existing
+/// `NO_INTERACTION_AVAILABLE` error (no new packet) and `Character.SkillCancelled`, so the
+/// skills refund the cast's item / labor cost. Returns true when the caller must stop.
+pub fn refuse_blocked_child_doodad(
+    server: &GameServer,
+    world: &WorldInstance,
+    doodad: &DoodadRef,
+    caster: Option<&WorldObject>,
+) -> bool {
+    let Some(player) = caster.and_then(WorldObject::as_player) else {
+        return false;
+    };
+    let Some(buff_id) = blocking_parent_buff(server, world, doodad) else {
+        return false;
+    };
+    let (template_id, obj_id) = {
+        let d = doodad.data();
+        (d.template_id, doodad.obj_id)
+    };
+    tracing::debug!(
+        "Use refused: doodad {obj_id} (template {template_id}) is blocked by buff {buff_id} on its parent"
+    );
+    player.send(error_msg(error_message::NO_INTERACTION_AVAILABLE));
+    funcs::skills_hook(server).cancel_skill(server, player);
+    true
+}
+
 /// `Doodad.Use(caster, startedSkillId, funcGroupId)`.
 pub fn use_doodad(
     ctx: &DoodadCtx<'_>,
@@ -282,6 +344,12 @@ pub fn use_doodad(
     let Some(caster) = caster else {
         return;
     };
+
+    // `blocked_child_doodads` (buff 6064 -> 6560, buff 6245 -> 3446) is a parent-side
+    // interaction block, before any func / phase func runs.
+    if refuse_blocked_child_doodad(server, &ctx.world, &ctx.doodad, Some(caster)) {
+        return;
+    }
 
     // Fix #1443 (defense in depth): refuse interaction with a doodad scheduled for despawn.
     if server
@@ -712,3 +780,7 @@ mod tests;
 #[cfg(test)]
 #[path = "guard_time_tests.rs"]
 mod guard_time_tests;
+
+#[cfg(test)]
+#[path = "blocked_child_tests.rs"]
+mod blocked_child_tests;
