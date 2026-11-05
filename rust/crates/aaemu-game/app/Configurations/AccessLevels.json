@@ -47,6 +47,7 @@
         "dummy": 100,
         "echo": 100,
         "housebindingmove": 100,
+        "mail": 100,
         "move_all": 100,
         "moveto": 100,
         "nloc": 100,

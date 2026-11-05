@@ -422,7 +422,7 @@ connected by `systems::economy::wiring`).
 | Repair (`Character.DoRepair`, `CSRepairSingleEquipment`, `CSRepairAllEquipments`), durability loss | `systems/economy/repair.rs` | done | Combat calls `on_damage_taken` / `on_death`. |
 | `CraftManager`, `Models/Game/Crafts`, `CharacterCraft`, `CraftTask`, `CSExecuteCraft`, `SCCraftFailed`, recipe learning (`item_recipes`, `train_craft_effects`) | `systems/economy/{craft,craft_data,craft_learning}.rs` | done | Cast through `CraftHooks::start_craft_cast`; skills call `craft::end_craft`. `TrainCraftEffect` teaches `item_recipes[source item]` (or the effect's craft without a source item), persisted in `character_crafts`; `Crafting.RequireLearnedRecipes` (default off) gates execution. |
 | Stores (`CSBuyItems`, `CSSellItems`, buy-back, `CSListSoldItem`, `CSBuyPriestBuff`, `CSBuyCoinItem`, `CSSellBackpackGoods`), `SpecialtyManager`, `TaxationsManager`, `ExpandExpert`, item look conversion | `systems/economy/{store,store_data,specialty}.rs` | done | Merchant packs / NPC flags through `NpcEconomyHooks`. Checkout validates currency, checked totals and each balance, then stages complete goods / buy-back delivery before committing payment. Vocation charges the configured price displayed by the 1.2 shop, without earnings bonuses. Rejected checkout preserves items and balances. Purchases need an NPC merchant pack, a doodad `DoodadFuncStoreUi` pack, or the money form of the doodad's current-phase `DoodadFuncPurchase` (`CSBuyItems.unkId`, the `doodad_funcs` row id the 1.2 client writes there), and filter the goods by it; selling needs a merchant within 3 m, lists each item once and pays only for items moved to buy-back. Specialty: the empty `CSListSpecialtyGoods` answer, the dropped records packet and the corrected sale values are detailed in the specialty protocol note. |
-| `MailManager`, `Models/Game/Mails/**`, `CharacterMails`, mail packets | `systems/economy/{mail,mail_character,mail_kinds,mail_packets,mail_data}.rs` | done | Saved in `SaveStage::BeforeItems`; housing tax through `MailHousingHooks`. |
+| `MailManager`, `Models/Game/Mails/**`, `CharacterMails`, mail packets | `systems/economy/{mail,mail_character,mail_kinds,mail_packets,mail_data,mail_system}.rs` | done | Saved in `SaveStage::BeforeItems`; housing tax through `MailHousingHooks`. `/mail admin` sends an `ADMIN` system letter to an online or offline character. `quest_mails` / `quest_mail_attachments` are loaded; `SCQuestMailSentPacket` (0x150) is defined but never sent (trigger capture-pending, see the mail-leftovers deviation). |
 | `AuctionManager`, `Models/Game/Auction/**`, auction packets | `systems/economy/{auction,auction_data,auction_packets}.rs` | done | Saved in `SaveStage::AfterItems`; results mailed through `wiring`, and an online seller also gets `SCAuctionMessagePacket` for accepted bids and sales (the C# sent neither; see the auction-messages deviation). Requests require an auctioneer NPC (the `auctioneer` template flag) named by the packet or the current interaction object within 5 m (the C# ignored the ids). |
 | `TradeManager`, trade packets | `systems/economy/trade.rs` | done | The C# `CanStartTrade` TODO ("Check faction and others") is implemented from the 1.2 client's own checks: a request and its acceptance refuse a dead player, a hostile faction relation and a distance `>= sqrt(25) = 5` m, and a trade across instances; see the trade validation deviation. |
 | `CashShopManager`, `Models/Game/CashShop/**`, ICS packets | `systems/economy/cash_shop.rs` | done | Gifts by `CommercialMail` (`wiring`); account credits SQL behind `CashShopDb`. |
@@ -2008,6 +2008,21 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   3047/3048. Deviation: the outbid refund uses `MailType.AucBidFail` (17, the client's
   `AUCITON_BID_FAIL`) instead of the C# `AucOffFail` (15), so its mailbox label is the
   bid-failure one.
+* systems::economy (mail leftovers, WP-I4): `/mail admin <receiver> <title> <text> [money]
+  [[itemId count] ...]` is a Rust-only GM command (the C# had no such command); `ADMIN` (5) is
+  one of the mail types the 1.2 client lists (`mail/common.alb`). It stores a sender-id-0 system
+  mail through `mail::send_system_mail`, so the receiver (online or offline) gets the same
+  `SCGotMailPacket` / mailbox / attachment behaviour as other system mail; items are created
+  once, up to `MAX_MAIL_ATTACHMENTS`, and discarded again if the store refuses the mail. The
+  sender name is the literal `Admin` (the client has no special case for an `ADMIN` sender).
+  `quest_mails` / `quest_mail_attachments` are loaded read-only into
+  `game_data.systems.economy.quest_mails`; a mail whose non-zero attachment row is missing is
+  skipped. `SCQuestMailSentPacket` (0x150) is defined from the client reader `FUN_397b5f00`
+  (wrapper `FUN_391b19b0`, one `u32` through slot `0x3c`) and is never sent: the trigger and the
+  meaning of the id are capture-pending (**CAPTURE-PENDING QUEST-MAIL-1**). Mia mail (types 11
+  `MIA_SEND` / 12 `MIA_RECV`) is the client's separate commercial mailbox (`comercialmail/*`,
+  `X2MiaMail`, `unreadMiaMail`) fed by the cash-shop path; the C# notifier branch was empty and
+  the existing counter routing is unchanged (**CAPTURE-PENDING MIA-MAIL-1**).
 * systems::economy (money guards, 2026-10-20): `CSDepositMoney` / `CSWithdrawMoney` refuse
   non-positive amounts and require a banker NPC (`banker` template flag) within 5 m of the current
   interaction object; `CSBuyItems` accepts goods only from the interacting NPC's merchant pack or
