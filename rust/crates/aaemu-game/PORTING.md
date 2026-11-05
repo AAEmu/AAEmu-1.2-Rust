@@ -227,7 +227,7 @@ Each subsystem records its status here, in its own section only (see `CONTRIBUTI
 | Aura buffs (`aura_radius`, `aura_relation_id`, `aura_slave_buff_id`, `aura_child_only`) and crowd buffs (`crowd_buff_id`, `crowd_radius`, `crowd_number`, `crowd_friendly`, `crowd_hostile`) | `systems/skills/aura.rs` | data-inferred / capture-pending | The 1.2 client only reads the columns and has no runtime; no 1.2 zone binary exists, so the rules come from the localized descriptions. A 1 s enter/leave driver (the area-trigger update pattern) grants the slave buff to units in `aura_radius` passing `aura_relation_id` (the owner too for Any/Friendly/Party/Raid), removes only the copy with caster = aura owner, and grants `crowd_buff_id` while `crowd_number` *other* carriers of the source buff are in `crowd_radius` and match `crowd_friendly` / `crowd_hostile`. The dangling slave 6668 -> 6669, the self-reference 1224 and the 15 aura rows without a slave buff are skipped with one load warning. Case ids AURA-1..8 / CROWD-1..4; update period, slave caster identity, owner counting, child attach scope and dead-owner behaviour are UNKNOWN. |
 | Learning / progression (`LearnSkill`, `LearnBuff`, `ResetSkills`, `SwapAbility`, `AddExp`, labor, game points) | `systems/skills/progress.rs` | done | Labor accrual uses zero-based actability steps into ordered `expert_limits`, matching inventory / regrade; step 4 caps at 50,000 (row id 5), avoiding the former row-id lookup that reduced it to 40,000. Capped gains and packet deltas have regression coverage. `SwapAbility` follows the 1.2 client: activating an empty slot (`old = None`, the level-10 `LearnAbility` path) is free; changing an active ability costs `content_configs[39] * level` copper, requires exactly three active abilities and a non-active target, and the debit and swap share one character lock. |
 | `Skills/Effects/SpecialEffects/*` (141 named `SpecialType` actions), `BubbleEffect`, `ImpulseEffect`, `PhysicalExplosionEffect` | `systems/skills/effects/{special/*,unit_fx}.rs`, `packets_special.rs` | partial | Ported actions and subsystem hooks are present, but historical logging placeholders do not establish gameplay completeness. Buff stealing, component-selective aggro copy/reset, target loss, NPC despawn, ongoing-buff cancellation and pet recovery now execute. ExplodeBuff, MoveToGround and RedeemBuff now execute (see below). Client visuals use the existing skill/plot notifications. 13 extra S->C packets, byte-exact tests. |
-| `Skills/SkillControllers/{Floating,Wandering,Leap,Dash,Rotate}` | `systems/skills/controllers.rs` | partial | Rotate uses native constructor/tick timing (`0x3924E1D0` / `0x392315C0`) with 1.2 controller7678 regression coverage. Generic Anchor and Flowgraph remain unverified; native 10.x Anchor parameter kinds1001..1039 differ from the 1.2 data kinds1..3. Harpoon ropes have a separate vehicles implementation. |
+| `Skills/SkillControllers/{Floating,Wandering,Leap,Dash,Rotate}` | `systems/skills/controllers.rs` | partial | Rotate uses native constructor/tick timing (`0x3924E1D0` / `0x392315C0`) with 1.2 controller7678 regression coverage. WP-9 verdict (2026-11-05): kinds 5 Rope, 6 Anchor and 8 Flowgraph get no generic controller. Rope (8 rows; the users are hook throw 12093, harpoon launch 13478 / 13749 / 19166 and cut rope 13596 / 13750 / 19168) is handled by `systems/vehicles/harpoon.rs` + `CSSkillControllerState`; Flowgraph (row 7907) is the test skill 23969 only; Anchor (rows 7736 / 7739, monster skills 22268 / 23103 "Land on the ground") is score 2/10 and its parameters are unknown. Native 10.x Anchor parameter kinds 1001..1039 differ from the 1.2 data kinds 1..3. The expected log for these kinds is `debug`; see the WP-9 subsection. |
 | Movement hooks (`CSMoveUnit.RemoveEffects`, `Character.SetPosition` Move removal, fall damage) | `systems/skills/mod.rs` (`on_move_request`, `on_moved`) | done | Called from `world::session::move_unit`. |
 | Cannon fire aim: `BallisticPos` / `ArtilleryPos` targets, `vehicle_models` turret limits | `systems/skills/{skill,validation}.rs`, `systems/vehicles/data.rs` (`VehicleModel::clamp_turret_angles`) | deviation | **Deviation:** the C# `Skill.GetInitialTarget` mapped every `Pos` / `BallisticPos` / `ArtilleryPos` cast target through `SetInitialTarget`, whose non-position arm kept the caster's own position, and it never checked the target cone. The Rust refuses a Unit / Doodad target on `BallisticPos` / `ArtilleryPos` with `NO_TARGET` 0x9 (the 1.2 client's result for a missing target; the Lua bar, path B, sends a Unit target for cannons); a Position target is then held only to the skill's own `target_angle` cone, measured from the cannon's composed world facing (parent ship yaw + attach point). It does **not** refuse on `skills.pitch_angle` or the `vehicle_models` pitch / yaw limits: the client evaluates `CanUse` on the aim before it clamps the turret to those model limits (`FUN_394322f0` steps 7 then 8 -> `FUN_39425490`), and the spliced `CanUse` body shows no `pitch_angle` reader, so the model limits cannot block a shot (the aim preview's ballistic solve also starts at the `item_hand_r` muzzle, which the server does not reproduce). The model limits clamp the stored / relayed `CSTurretState` posture instead (see the `CSTurretStatePacket` row). A refused mount cast now keeps its own result even when a rider / operator skill is linked (the rider only runs after a successful mount skill). |
 | `Skill.EndChanneling` target buff (`ChannelingTargetBuffId`) | `systems/skills/{skill,buffs}.rs` (`end_channeling`, `finish_effect_by_skill`) | deviation | **Deviation:** the C# `Buffs.RemoveEffect(templateId, skillId)` raised the buff's `OnTimeout` triggers on every removal; the Rust removal skips them for explicit removals (dispels, a stopped channel; see the FISH escape in `buff_removal_tests.rs`). Quest item grants hang on that trigger (GainItem on buff 3896 of skill 18449 'Extract Earth Crystal', 4 s channel under a 6 s buff, and the other channeling-target-buff quest skills of the item triage), so a channel that **runs to its end** now ends the target buff the way its own timer would (ACTING -> FINISHED, Timeout triggers, removal). The data pairs a channel with a target buff of the very same length in 18 skills with a Timeout trigger (e.g. 14054 'Insert Anima Into Stopped Machine', buff 1728, 5 s each), so the buff's own timer and the end of the channel reach the Timeout together; taking the buff from ACTING is an atomic claim (`finish_effect_by_skill`, `schedule_effect`), the loser leaves the buff alone, and the Timeout runs once (before, a second `GainItem` or `NpcControlEffect` followed in about one channel in ten: `integration_tests::channel_and_target_buff_ending_together_fire_the_timeout_trigger_once`). A stopped / cancelled channel fires nothing (the C# granted the item then too). The caster-side `ChannelingBuffId` and buffs applied by skill effects (buff 1963 of 'Capture Crayfish') are unchanged: the latter expire on their own timer and fire Timeout already. |
@@ -422,6 +422,40 @@ instead of arming an interrupt that could hit a cast started during the delay.
 Tests: `systems::skills::tests::cast_delay_tests` (extension, `SCCastingDelayed` and completion
 at the new time, no-delay interrupt, cancelled-after-extension, delayed channel interrupt) and
 `systems::skills::packets::tests::casting_delayed_layout` (independent literal bytes).
+
+#### WP-9 decisions and housekeeping (2026-11-05)
+
+Decisions from the 2026-11-02 combat-ai analysis (`WP-9`), no behaviour change:
+
+* **Skill controller kinds 5 Rope, 6 Anchor, 8 Flowgraph.** The 1.2 `skill_controllers` table has
+  8 Rope rows, 2 Anchor rows and 1 Flowgraph row (kind 7 Rotate, 8 rows, is implemented). The
+  Rope rows are used by skills 12093 (hook throw), 13478 / 13749 / 19166 (harpoon launch) and
+  13596 / 13750 / 19168 (cut rope); that family is handled by `systems/vehicles/harpoon.rs` +
+  `CSSkillControllerState` (`skills/handlers.rs`), so the generic Rope controller adds nothing.
+  The Anchor rows 7736 / 7739 belong to monster skills 22268 / 23103 "Land on the ground"
+  (flying monsters, end skill 23437; the `value1..3` parameters are unknown). The Flowgraph row
+  7907 belongs to skill 23969 `test_flowgraph_skillcontroller` (a test). Verdict: Rope done
+  elsewhere, Flowgraph test-only, Anchor two monster skills (score 2/10); the expected
+  "controller class not implemented" log is `debug` for these kinds in `controllers.rs`,
+  `buffs.rs` and `effects/combat.rs`. `CSCreateSkillController` (0x08b) stays client-built and
+  logged only, as in the C#.
+* **Auto-attack flags.** `skills.start_autoattack` (313 rows), `stop_autoattack` (146) and
+  `auto_fire` (26) are not read by the server. The 1.2 client loads `skills` itself and drives
+  auto-attack by re-sending skill ids below 5000, which the server already repeats
+  (`systems/skills/skill.rs`); whether the server must start / stop auto-attack from these
+  flags is UNKNOWN, so this is **capture-pending (WP-9 AUTOATTACK-1)**: it needs a capture of
+  the 1.2 client casting a `start_autoattack` skill (e.g. 10752 "Flower Cluster", `auto_fire`
+  't'). No server rule is added before that.
+* **Log-only special effects.** 63 `CombatText` (20 rows, all `value1..4` 0), 42
+  `OpacityControl` (26 rows) and 76-78 (projectile, 41 rows) are client visuals with no server
+  state; they stay log-only. The bot trio 84/88/89, 19 and 57/20/21 belong to their own work
+  items.
+* **skills-combat#15 leftovers.** `buff_unit_modifiers` (17 rows) is tooltip linkage data
+  (INFERRED): the rows pair "next skill is improved" buffs (357-362, plus slave buffs
+  6280 -> 6281 and 7647) with skill-tag ids, while the numeric changes live in
+  `skill_modifiers` (3 rows for these owners, already loaded). No server rule; do not
+  implement. `skill_synergy_icons` and `tooltip_skill_effects` are client tooltip data, and
+  `pcbang_buffs` is already handled by `systems/services/premium.rs`.
 
 #### Resurrection buffs (WP-2b, 2026-11-05)
 
@@ -2671,8 +2705,10 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   the same 15126 skill IDs and 9816 buff IDs. Both lack 33 unique buff templates referenced by 35
   BuffEffect definitions. The loader warns with both IDs; replacement templates are not
   fabricated. RedeemBuff's second and third value slots (the damage / cap slots of other special
-  actions), recipe/account/cinema placeholders, several other special actions and generic
-  Anchor/Flowgraph still need authoritative behavior or protocol evidence. Passing covered tests does not certify every data-defined skill.
+  actions), recipe/account/cinema placeholders and several other special actions still need
+  authoritative behavior or protocol evidence. The generic Rope / Anchor / Flowgraph controllers
+  are decided in the WP-9 subsection (Rope handled by the harpoon family, Flowgraph test-only,
+  Anchor two monster skills). Passing covered tests does not certify every data-defined skill.
 * systems::skills (2026-10-27, `check_obstacle`): the C# tree had no obstacle check at all
   (`git show a2ab80abd^:AAEmu.Game/Models/Game/Skills/Skill.cs`), but the 1.2 skills data has
   the retail column. The 1.2 client is the oracle (`x2game_unpacked.dll`; Ghidra `aa12u`):
