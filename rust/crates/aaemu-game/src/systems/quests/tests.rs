@@ -353,6 +353,7 @@ pub(super) fn with_ctx<R>(
             report_reply: None,
             report_refused: Vec::new(),
             answer_reports: true,
+            answer_start_refusals: false,
         };
         let r = f(&mut ctx);
         ctx.sync_rows();
@@ -550,6 +551,95 @@ fn sc_small_quest_packets_bytes() {
 }
 
 #[test]
+fn sc_quest_unit_req_failed_writes_the_flag_bag() {
+    // Reader FUN_397b5d00: u32 quest, 3-byte bc unit object id, then the FUN_397b1ef0 bag:
+    // one flag byte and only the set parts, in order kind (u8), message id (u16), value (u32).
+    // Every combination is spelled out as independent literals.
+    let quest = [4, 3, 2, 1]; // 0x01020304
+    let unit = [0x0c, 0x0b, 0x0a]; // bc 0x0a0b0c
+    let head = |flags: &[u8]| -> Vec<u8> {
+        let mut v = quest.to_vec();
+        v.extend_from_slice(&unit);
+        v.extend_from_slice(flags);
+        v
+    };
+
+    let p = SCQuestUnitReqFailedPacket {
+        quest_id: 0x01020304,
+        unit_obj_id: 0x0a0b0c,
+        kind: 0,
+        message_id: 0,
+        value: 0,
+    };
+    assert_eq!(body(&p), head(&[0x00]));
+    assert_eq!(p.opcode(), sc::SCQuestUnitReqFailedPacket);
+    assert_eq!(p.opcode(), 0x148);
+
+    let p = SCQuestUnitReqFailedPacket { kind: 0x16, ..p };
+    let mut expected = head(&[0x01]);
+    expected.push(0x16);
+    assert_eq!(body(&p), expected);
+
+    let p = SCQuestUnitReqFailedPacket {
+        kind: 0,
+        message_id: 0x2233,
+        ..p
+    };
+    let mut expected = head(&[0x02]);
+    expected.extend_from_slice(&[0x33, 0x22]);
+    assert_eq!(body(&p), expected);
+
+    let p = SCQuestUnitReqFailedPacket {
+        message_id: 0,
+        value: 0xaabbccdd,
+        ..p
+    };
+    let mut expected = head(&[0x04]);
+    expected.extend_from_slice(&[0xdd, 0xcc, 0xbb, 0xaa]);
+    assert_eq!(body(&p), expected);
+
+    let p = SCQuestUnitReqFailedPacket {
+        kind: 0x24,
+        message_id: 0x1234,
+        value: 0,
+        ..p
+    };
+    let mut expected = head(&[0x03]);
+    expected.extend_from_slice(&[0x24, 0x34, 0x12]);
+    assert_eq!(body(&p), expected);
+
+    let p = SCQuestUnitReqFailedPacket {
+        kind: 0x01,
+        message_id: 0,
+        value: 0x01020304,
+        ..p
+    };
+    let mut expected = head(&[0x05]);
+    expected.extend_from_slice(&[0x01, 4, 3, 2, 1]);
+    assert_eq!(body(&p), expected);
+
+    let p = SCQuestUnitReqFailedPacket {
+        kind: 0,
+        message_id: 0x0001,
+        value: 0x11223344,
+        ..p
+    };
+    let mut expected = head(&[0x06]);
+    expected.extend_from_slice(&[1, 0, 0x44, 0x33, 0x22, 0x11]);
+    assert_eq!(body(&p), expected);
+
+    let p = SCQuestUnitReqFailedPacket {
+        kind: 0x31,
+        message_id: 0xabcd,
+        value: 0xdeadbeef,
+        ..p
+    };
+    let mut expected = head(&[0x07]);
+    expected.extend_from_slice(&[0x31, 0xcd, 0xab, 0xef, 0xbe, 0xad, 0xde]);
+    assert_eq!(body(&p), expected);
+}
+
+#[test]
 fn sc_quests_packet_writes_long_ids() {
     let now = 1_700_000_000_000;
     let p = crate::packets::world::SCQuestsPacket {
@@ -615,11 +705,46 @@ fn cs_quest_packets_decode() {
     let p = CSSaveTutorialPacket::read(&mut PacketStream::from_bytes(vec![2, 0, 0, 0])).unwrap();
     assert_eq!(p.id, 2);
     let p = CSQuestStartWithPacket::read(&mut PacketStream::from_bytes(vec![
-        1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0,
+        1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 2, 10,
     ]))
     .unwrap();
-    assert_eq!((p.unk_id, p.unk_id2, p.unk_id3), (1, 2, 3));
+    assert_eq!((p.quest, p.component, p.act), (1, 2, 3));
+    assert_eq!((p.kind, p.tail), (2, QuestStartWithTail::Level(10)));
     assert!(CSStartedCinemaPacket::read(&mut PacketStream::new()).is_ok());
+}
+
+#[test]
+fn cs_quest_start_with_reads_each_tail_type() {
+    use crate::net::registry::ClientPacket;
+    let read = |tail: &[u8]| {
+        let mut body = vec![0x2c, 0x01, 0, 0, 0x2d, 0x01, 0, 0, 0x2e, 0x01, 0, 0];
+        body.extend_from_slice(tail);
+        CSQuestStartWithPacket::read(&mut PacketStream::from_bytes(body)).unwrap()
+    };
+
+    // Type 1: six u32.
+    let p = read(&[
+        1, 10, 0, 0, 0, 11, 0, 0, 0, 12, 0, 0, 0, 13, 0, 0, 0, 14, 0, 0, 0, 15, 0, 0, 0,
+    ]);
+    assert_eq!((p.quest, p.component, p.act, p.kind), (300, 301, 302, 1));
+    assert_eq!(p.tail, QuestStartWithTail::SixU32([10, 11, 12, 13, 14, 15]));
+
+    // Type 2: the level the player reached.
+    let p = read(&[2, 10]);
+    assert_eq!((p.quest, p.component, p.act, p.kind), (300, 301, 302, 2));
+    assert_eq!(p.tail, QuestStartWithTail::Level(10));
+
+    // Type 3: two u32.
+    let p = read(&[3, 21, 0, 0, 0, 22, 0, 0, 0]);
+    assert_eq!(p.tail, QuestStartWithTail::TwoU32([21, 22]));
+
+    // Type 4: one u32.
+    let p = read(&[4, 31, 0, 0, 0]);
+    assert_eq!(p.tail, QuestStartWithTail::OneU32(31));
+
+    // An unknown type has no tail (the 1.2 client sends 1-4 only).
+    let p = read(&[9]);
+    assert_eq!((p.kind, p.tail), (9, QuestStartWithTail::Unknown));
 }
 
 // ----- state machine -----
@@ -2496,6 +2621,95 @@ async fn component_and_sphere_or_requirements_need_a_matching_alternative() {
 }
 
 #[tokio::test]
+async fn first_failure_keeps_the_and_or_order_of_check_all() {
+    use super::unit_reqs::{req_kind, UnitReq};
+    let or_rows = || {
+        vec![
+            UnitReq {
+                id: 11,
+                owner_id: 1001,
+                owner_type: "QuestComponent".into(),
+                kind: req_kind::LEVEL,
+                value1: 20,
+                value2: 0,
+            },
+            UnitReq {
+                id: 12,
+                owner_id: 1001,
+                owner_type: "QuestComponent".into(),
+                kind: req_kind::MAX_LEVEL,
+                value1: 5,
+                value2: 0,
+            },
+        ]
+    };
+    let (server, _) = server_with(|d| {
+        main_quest(d);
+        d.components.get_mut(&1001).unwrap().or_unit_reqs = true;
+        d.unit_reqs
+            .by_owner
+            .entry("QuestComponent".into())
+            .or_default()
+            .insert(1001, or_rows());
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        ctx.c.unit.level = 10;
+        assert!(!ctx.can_component_run(1001));
+        assert_eq!(
+            ctx.first_failed_component_req(1001).map(|r| r.id),
+            Some(11),
+            "an OR list reports its first row"
+        );
+        ctx.c.unit.level = 1;
+        assert!(ctx.can_component_run(1001));
+        assert_eq!(ctx.first_failed_component_req(1001), None);
+        ctx.c.unit.level = 30;
+        assert!(ctx.can_component_run(1001));
+        assert_eq!(ctx.first_failed_component_req(1001), None);
+    });
+
+    // AND: the first row that fails in table order.
+    let (server, _) = server_with(|d| {
+        main_quest(d);
+        d.unit_reqs
+            .by_owner
+            .entry("QuestComponent".into())
+            .or_default()
+            .insert(
+                1001,
+                vec![
+                    UnitReq {
+                        id: 21,
+                        owner_id: 1001,
+                        owner_type: "QuestComponent".into(),
+                        kind: req_kind::LEVEL,
+                        value1: 10,
+                        value2: 0,
+                    },
+                    UnitReq {
+                        id: 22,
+                        owner_id: 1001,
+                        owner_type: "QuestComponent".into(),
+                        kind: req_kind::LEVEL,
+                        value1: 20,
+                        value2: 0,
+                    },
+                ],
+            );
+    });
+    let mut c = character();
+    with_ctx(&server, &mut c, QuestEnv::default(), |ctx| {
+        ctx.c.unit.level = 5;
+        assert_eq!(ctx.first_failed_component_req(1001).map(|r| r.id), Some(21));
+        ctx.c.unit.level = 15;
+        assert_eq!(ctx.first_failed_component_req(1001).map(|r| r.id), Some(22));
+        ctx.c.unit.level = 20;
+        assert_eq!(ctx.first_failed_component_req(1001), None);
+    });
+}
+
+#[tokio::test]
 async fn daily_reset_and_item_destroy() {
     let (server, _rec) = server_with(|d| {
         d.add_template(QuestTemplate {
@@ -2991,8 +3205,121 @@ async fn npc_quest_flow_through_packets_and_events() {
     assert_eq!(server.systems.quests.queued_count(), 0);
 }
 
-/// Adds a quest `id` that runs Start -> Progress (hunt NPC 600 x2) -> Ready, with a report
-/// act of `report` (None = no report act) and a small Reward step.
+/// Quest `id` whose Start component accepts anything and needs the owner to be of `level`
+/// (`QuestComponent` `unit_reqs`).
+fn level_gated_start(d: &mut QuestData, id: u32, component_id: u32, level: u32) {
+    use super::unit_reqs::{req_kind, UnitReq};
+    d.add_template(quest(id));
+    d.add_component(component(component_id, id, kind::START));
+    d.add_act(component_id, id, 1, 0, ActKind::ConAutoComplete);
+    d.unit_reqs
+        .by_owner
+        .entry("QuestComponent".into())
+        .or_default()
+        .insert(
+            component_id,
+            vec![UnitReq {
+                id: component_id,
+                owner_id: component_id,
+                owner_type: "QuestComponent".into(),
+                kind: req_kind::LEVEL,
+                value1: level,
+                value2: 0,
+            }],
+        );
+}
+
+#[tokio::test]
+async fn start_quest_context_reports_the_failed_level_requirement() {
+    let (server, _) = server_with(|d| level_gated_start(d, 300, 3001, 10));
+    let mut client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(&server, &client, character(), 0x100);
+    client.conn.active_char = Some(player.clone());
+    player.data().unit.level = 5;
+    let start = CSStartQuestContextPacket {
+        quest_context_id: 300,
+        npc_obj_id: 0,
+        doodad_obj_id: 0,
+        sphere_id: 0,
+    };
+
+    start
+        .clone()
+        .handle(&server, &mut client.conn)
+        .await
+        .unwrap();
+    server.systems.quests.run_queued_evaluations(&server);
+    let frames = client.drain();
+    assert_eq!(
+        decode(frames.clone()),
+        vec![sc::SCQuestUnitReqFailedPacket],
+        "a player-initiated refusal is answered: {frames:?}"
+    );
+    // Reader FUN_397b5d00 / bag FUN_397b1ef0: quest, bc unit object id, flags 0x05 (kind and
+    // value set), then kind LEVEL (1) and the row's value1 (10).
+    let mut expected = PacketStream::new();
+    expected
+        .write_u32(300)
+        .write_bc(0x100)
+        .write_u8(0x05)
+        .write_u8(1)
+        .write_u32(10);
+    assert_eq!(frames[0].1, expected.into_bytes());
+    assert!(!events::has_quest(&player, 300));
+
+    // The same request at the required level starts the quest and sends no failure.
+    player.data().unit.level = 10;
+    client.drain();
+    start.handle(&server, &mut client.conn).await.unwrap();
+    server.systems.quests.run_queued_evaluations(&server);
+    let frames = client.drain();
+    assert!(
+        !frames.iter().any(|f| f.0 == sc::SCQuestUnitReqFailedPacket),
+        "an accepted start must not report a requirement failure: {frames:?}"
+    );
+    assert!(frames
+        .iter()
+        .any(|f| f.0 == sc::SCQuestContextStartedPacket));
+}
+
+#[tokio::test]
+async fn automatic_level_up_start_does_not_report_a_requirement_failure() {
+    use super::unit_reqs::{req_kind, UnitReq};
+    let (server, _) = server_with(|d| {
+        d.add_template(quest(301));
+        d.add_component(component(3011, 301, kind::START));
+        // The level-up act that makes `on_level_up` try the quest at level 10.
+        d.add_act(3011, 301, 1, 0, ActKind::ConAcceptLevelUp { level: 10 });
+        d.unit_reqs
+            .by_owner
+            .entry("QuestComponent".into())
+            .or_default()
+            .insert(
+                3011,
+                vec![UnitReq {
+                    id: 3011,
+                    owner_id: 3011,
+                    owner_type: "QuestComponent".into(),
+                    kind: req_kind::LEVEL,
+                    value1: 20,
+                    value2: 0,
+                }],
+            );
+    });
+    let mut client = TestClient::new(&server, 1, 1001);
+    let player = spawn_player(&server, &client, character(), 0x100);
+    player.data().unit.level = 10;
+    client.conn.active_char = Some(player.clone());
+
+    events::on_level_up(&server, &player);
+    server.systems.quests.run_queued_evaluations(&server);
+    let frames = client.drain();
+    assert!(
+        !frames.iter().any(|f| f.0 == sc::SCQuestUnitReqFailedPacket),
+        "an automatic starter must stay silent: {frames:?}"
+    );
+    assert!(!events::has_quest(&player, 301));
+}
 fn report_quest(d: &mut QuestData, id: u32, report: Option<ActKind>) {
     d.add_template(quest(id));
     d.add_component(component(id * 10 + 1, id, kind::START));

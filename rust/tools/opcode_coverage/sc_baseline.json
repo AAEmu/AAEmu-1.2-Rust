@@ -1,7 +1,7 @@
 {
   "counts": {
     "sc_opcodes": 517,
-    "typeless": 72,
+    "typeless": 70,
     "never_sent": 50
   },
   "typeless": [
@@ -43,7 +43,6 @@
     "SCPlaySequencePacket",
     "SCPlotProcessingTimePacket",
     "SCQuestListPacket",
-    "SCQuestUnitReqFailedPacket",
     "SCRestrictInfoPacket",
     "SCScheduledEventEndedPacket",
     "SCScheduledEventStartedPacket",
