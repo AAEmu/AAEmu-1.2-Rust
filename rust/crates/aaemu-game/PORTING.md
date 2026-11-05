@@ -1656,8 +1656,11 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
     later, and `SCNpcInteractionEndedByZone{npc}` closes a window a player still has open on it
     (the server tracks that as `Unit.CurrentInteractionObject`, so this is not a tracking gap).
     `true` is sent when the set ends or a command of a different `can_interact = 't'` set
-    starts; sets with 't' and NPCs whose commands name no set send nothing and keep the old
-    behaviour. `CSStartInteraction` is refused silently for a non-interactable NPC: no error
+    starts. Leaving the command-set run (`RunCommandSet` / `FollowPath` / `FollowUnit`) for
+    combat, talk or any other behavior abandons the set -- the mirrored state machine never
+    returns to `RunCommandSet` -- so the lock is released there too instead of leaving the NPC
+    non-interactable. Sets with 't' and NPCs whose commands name no set send nothing and keep
+    the old behaviour. `CSStartInteraction` is refused silently for a non-interactable NPC: no error
     message is evidenced (UNKNOWN). Death and despawn also close an open window and release the
     lock (INFERRED from the packet name; the client handler `FUN_391d9000` only closes the
     window, it does not tell the server). The client's default interaction state on spawn is

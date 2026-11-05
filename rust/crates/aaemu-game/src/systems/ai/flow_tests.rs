@@ -3162,3 +3162,123 @@ async fn interactable_command_sets_send_no_interaction_packets() {
         "no interaction packets expected, got {ops:?}"
     );
 }
+
+/// A run interrupted by combat abandons the command set (the state machine never returns to
+/// `RunCommandSet`), so the interaction lock must be released instead of leaving the NPC
+/// non-interactable forever.
+#[tokio::test]
+async fn interrupted_locked_set_releases_the_interaction_status() {
+    let server = server();
+    let mut client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Watcher", 110.0, 100.0),
+        PLAYER_OBJ,
+    );
+    client.conn.active_char = Some(player.clone());
+    let npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        PASSIVE_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    let settled = tick_until(&server, 100, 5, 60, || {
+        behavior(&server, NPC_OBJ) == Some(B::HoldPosition)
+    })
+    .await;
+    assert!(settled, "{:?}", behavior(&server, NPC_OBJ));
+    client.drain();
+
+    post(&server, NPC_OBJ, |c| {
+        c.enqueue_ai_commands(
+            &[set_command(LOCKED_SET, AiCommandCategory::Timeout, 100_000)],
+            false,
+        );
+    });
+    tick_all(&server, 100);
+    assert!(!npc.data().interactable);
+    client.drain();
+
+    // Aggro pulls the NPC out of RunCommandSet; the set is abandoned, not resumed.
+    post(&server, NPC_OBJ, |c| c.go_to_combat());
+    tick_all(&server, 100);
+    assert!(
+        npc.data().interactable,
+        "an abandoned set must not leave the NPC locked: {:?}",
+        behavior(&server, NPC_OBJ)
+    );
+    assert_eq!(
+        drain_op(&mut client, sc::SCNpcInteractionStatusChangedPacket),
+        vec![vec![0x00, 0x02, 0x00, 0x01]]
+    );
+}
+
+/// A different command set that starts while the locked one is still queued replaces the
+/// interaction state: the `can_interact = 't'` set unlocks the NPC before its set ends.
+#[tokio::test]
+async fn replaced_locked_set_unlocks_the_npc() {
+    let server = server();
+    let mut client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Watcher", 110.0, 100.0),
+        PLAYER_OBJ,
+    );
+    client.conn.active_char = Some(player.clone());
+    let npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        PASSIVE_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    let settled = tick_until(&server, 100, 5, 60, || {
+        behavior(&server, NPC_OBJ) == Some(B::HoldPosition)
+    })
+    .await;
+    assert!(settled, "{:?}", behavior(&server, NPC_OBJ));
+    client.drain();
+
+    post(&server, NPC_OBJ, |c| {
+        c.enqueue_ai_commands(
+            &[set_command(LOCKED_SET, AiCommandCategory::Timeout, 0)],
+            false,
+        );
+    });
+    tick_all(&server, 100);
+    assert!(!npc.data().interactable);
+    client.drain();
+
+    // The open set is queued behind the locked command.
+    post(&server, NPC_OBJ, |c| {
+        c.enqueue_ai_commands(
+            &[set_command(OPEN_SET, AiCommandCategory::Timeout, 150)],
+            false,
+        );
+    });
+    // One tick clears the finished locked command, the next starts the open set.
+    tick_all(&server, 100);
+    assert!(
+        !npc.data().interactable,
+        "the locked command is still ending"
+    );
+    tick_all(&server, 100);
+    assert_eq!(
+        behavior(&server, NPC_OBJ),
+        Some(B::RunCommandSet),
+        "the open set must still be running"
+    );
+    assert!(
+        npc.data().interactable,
+        "the replacing 't' set must unlock the NPC"
+    );
+    assert_eq!(
+        drain_op(&mut client, sc::SCNpcInteractionStatusChangedPacket),
+        vec![vec![0x00, 0x02, 0x00, 0x01]]
+    );
+}

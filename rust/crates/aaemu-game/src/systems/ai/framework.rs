@@ -533,6 +533,21 @@ impl<'a> AiCtx<'a> {
             behavior
         );
         if let Some(cur) = self.ai.current {
+            // WP-5b: the command set runs across `RunCommandSet`, `FollowPath` and
+            // `FollowUnit`; leaving them for any other behavior abandons the set (the state
+            // machine never returns to it), so a `can_interact = 'f'` lock is released here
+            // too, not only on the queue-empty path (INFERRED, see PORTING.md).
+            let run = |b: BehaviorKind| {
+                matches!(
+                    b,
+                    BehaviorKind::RunCommandSet
+                        | BehaviorKind::FollowPath
+                        | BehaviorKind::FollowUnit
+                )
+            };
+            if self.ai.locked_command_set.is_some() && run(cur) && !behavior.is_some_and(run) {
+                super::interaction::release(self);
+            }
             behaviors::exit(self, cur);
         }
         self.ai.current = behavior;
