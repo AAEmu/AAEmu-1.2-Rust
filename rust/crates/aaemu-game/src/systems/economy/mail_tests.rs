@@ -1298,7 +1298,7 @@ async fn system_mails_auction_commercial_speciality() {
     assert!(fail.finalize_for_bid_fail(&w.server, 2, 250));
     assert_eq!(fail.mail.body.copper_coins, 250);
     assert_eq!(fail.mail.header.attachments, 1);
-    assert_eq!(fail.mail.mail_type, mail_type::AUC_OFF_FAIL);
+    assert_eq!(fail.mail.mail_type, mail_type::AUC_BID_FAIL);
     // ...the other finalizers need the item (C# NRE).
     let mut cancel = MailForAuction::new_from_template(&w.server, SINGLE, 1, 400, 0);
     assert!(!cancel.finalize_for_cancel(&w.server));

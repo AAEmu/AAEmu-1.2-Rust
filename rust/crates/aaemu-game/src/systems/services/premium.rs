@@ -293,9 +293,19 @@ pub fn default_payment(default: DefaultPayment) -> AccountPayment {
     }
 }
 
-/// The effective payment of an account row: `pay_method = 0` means the configured default.
+/// The effective payment of an account row: `pay_method = 0` means the configured default,
+/// unless a premium purchase wrote an explicit window on the row (the shop keeps `pay_method`
+/// at 0 on a default row, so a stored `pay_start` / `pay_end` is a purchased premium window).
 pub fn resolve_payment(default: DefaultPayment, details: &AccountDetails) -> AccountPayment {
     if details.pay_method == 0 {
+        if details.pay_start != 0 || details.pay_end != 0 {
+            return AccountPayment {
+                method: PaymentMethodType::Premium,
+                location: details.pay_location,
+                start_time: details.pay_start,
+                end_time: details.pay_end,
+            };
+        }
         return default_payment(default);
     }
     AccountPayment {
@@ -551,14 +561,23 @@ pub async fn set_payment(
     };
     server.accounts.set_state(account_id, state.clone());
     drop(guard);
-    let new_grade = grade_of_state(server, &state, now);
-    notify_account(server, account_id, &state, old_grade, new_grade);
+    publish_state(server, account_id, &state, old_grade);
+    Ok(state)
+}
+
+/// Applies an already-persisted payment state (the caller wrote the row under the account lock,
+/// set it in the registry and dropped the lock): pushes `SCAccountInfo` /
+/// `SCUpdatePremiumPoint` and syncs the grade buffs. `old_grade` is the grade before the change.
+/// This is the WP-B grant path shared by `set_payment` (GM) and the premium service shop.
+pub fn publish_state(server: &GameServer, account_id: u32, state: &AccountState, old_grade: u8) {
+    let now = Utc::now().timestamp();
+    let new_grade = grade_of_state(server, state, now);
+    notify_account(server, account_id, state, old_grade, new_grade);
     if old_grade != new_grade {
         sync_grade(server, account_id, new_grade);
     } else {
         set_online_premium(server, account_id, state.payment.premium_state(now));
     }
-    Ok(state)
 }
 
 /// Grants premium until `end` (unix seconds) with the configured connect point.
@@ -704,5 +723,24 @@ mod tests {
         assert_eq!(resolved.method, PaymentMethodType::Demo);
         assert_eq!(resolved.location, 2);
         assert_eq!((resolved.start_time, resolved.end_time), (10, 20));
+    }
+
+    #[test]
+    fn default_row_with_a_purchased_window_resolves_to_premium() {
+        let premium = resolve_payment(
+            DefaultPayment::None,
+            &AccountDetails {
+                pay_method: 0,
+                pay_location: 1,
+                pay_start: 100,
+                pay_end: 200,
+                ..AccountDetails::default()
+            },
+        );
+        assert_eq!(premium.method, PaymentMethodType::Premium);
+        assert_eq!((premium.start_time, premium.end_time), (100, 200));
+        // No stored window: the configured default still applies.
+        let none = resolve_payment(DefaultPayment::None, &details(0, 0));
+        assert_eq!(none.method, PaymentMethodType::None);
     }
 }

@@ -209,6 +209,13 @@ fn bid_packet_body(
     s.into_bytes()
 }
 
+/// `SCAuctionMessagePacket` body: msgType, itemType, moneyAmount.
+fn message_body(msg_type: u8, item_type: u32, money: i32) -> Vec<u8> {
+    let mut s = PacketStream::new();
+    s.write_u8(msg_type).write_u32(item_type).write_i32(money);
+    s.into_bytes()
+}
+
 fn cancel_body(lot_id: u64) -> Vec<u8> {
     let mut s = PacketStream::new();
     s.write_bc(0x200).write_bc(0x200);
@@ -324,6 +331,32 @@ fn sc_auction_posted_and_canceled_are_byte_exact() {
     assert_eq!(SCAuctionSearchedPacket::OPCODE, 0x12f);
     assert_eq!(SCAuctionLowestPricePacket::OPCODE, 0x130);
     assert_eq!(SCAuctionBidPacket::OPCODE, 0x131);
+    assert_eq!(SCAuctionMessagePacket::OPCODE, 0x133);
+}
+
+/// Body layout from the 1.2 client reader `FUN_397b56f0`: u8 msgType, u32 itemType,
+/// i32 moneyAmount (literals, not the writer).
+#[test]
+fn sc_auction_message_is_byte_exact() {
+    let p = SCAuctionMessagePacket {
+        msg_type: 0,
+        item_type: 5001,     // 0x0000_1389
+        money_amount: 12345, // 0x0000_3039
+    };
+    assert_eq!(
+        body(&p),
+        vec![0x00, 0x89, 0x13, 0x00, 0x00, 0x39, 0x30, 0x00, 0x00]
+    );
+
+    let p = SCAuctionMessagePacket {
+        msg_type: 1,
+        item_type: 0x0403_0201,
+        money_amount: 0x0807_0605,
+    };
+    assert_eq!(
+        body(&p),
+        vec![0x01, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
+    );
 }
 
 #[test]
@@ -737,6 +770,14 @@ async fn bid_outbid_buyout_moves_money_and_mails() {
         (2, "Bob", 500, 0)
     );
     assert!(log.take().is_empty());
+    // The online seller is told about the accepted bid (type 0).
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCAuctionMessagePacket,
+            message_body(auction_message::BIDDEN, SWORD, 500)
+        )]
+    );
 
     // A lower bid is ignored.
     run::<CSBidAuctionPacket>(&mut w, 0, &bid_body(lot.id, 400));
@@ -834,6 +875,53 @@ async fn bid_outbid_buyout_moves_money_and_mails() {
     run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 5000));
     assert!(w.b.drain().is_empty());
     assert!(log.take().is_empty());
+}
+
+/// An online seller gets `SCAuctionMessage` type 0 when a bid is accepted and type 1 when the
+/// lot is bought out (the sale path shared with a timed winner); the mail still carries the
+/// result.
+#[tokio::test]
+async fn online_seller_gets_bid_and_sale_messages() {
+    let (mut w, _log) = auction_world();
+    let (_, lot) = post(&mut w, SWORD, 0, 1000, 1);
+    w.a.drain();
+
+    run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 500));
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCAuctionMessagePacket,
+            message_body(auction_message::BIDDEN, SWORD, 500)
+        )]
+    );
+
+    run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 1000));
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCAuctionMessagePacket,
+            message_body(auction_message::BOUGHT_BY_SOMEONE, SWORD, 1000)
+        )]
+    );
+    assert!(w.server.systems.economy.auction.lot(lot.id).is_none());
+}
+
+/// An offline seller gets no live message; the sale mail is delivered as before.
+#[tokio::test]
+async fn offline_seller_gets_no_auction_message_but_the_mails() {
+    let (mut w, log) = auction_world();
+    let (_, lot) = post(&mut w, SWORD, 0, 1000, 1);
+    assert!(w.server.world.try_remove_character(w.pa.obj_id));
+    w.a.drain();
+
+    run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 500));
+    run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 1000));
+    assert!(
+        w.a.drain().is_empty(),
+        "no live notice for an offline seller"
+    );
+    let mails = log.take();
+    assert_eq!(mails.len(), 3, "outbid refund, sale seller, sale buyer");
 }
 
 #[tokio::test]
@@ -982,8 +1070,15 @@ async fn expiry_returns_unsold_and_delivers_won_lots() {
     let mut deleted = ah.deleted_ids();
     deleted.sort_unstable();
     assert_eq!(deleted, vec![unsold.id, won.id]);
-    // Auction ids are released for reuse.
-    assert!(w.a.drain().is_empty());
+    // Auction ids are released for reuse. The seller only hears about the won lot (type 1),
+    // not about the unsold return.
+    assert_eq!(
+        w.a.drain(),
+        vec![(
+            sc::SCAuctionMessagePacket,
+            message_body(auction_message::BOUGHT_BY_SOMEONE, POTION, 700)
+        )]
+    );
 }
 
 /// A failed sale mail must not drop the lot (the seller's money / buyer's item would be lost):
@@ -1332,7 +1427,7 @@ async fn sale_and_win_mails_can_be_taken_all_and_deleted() {
     assert_eq!(ran, 100_000 - 20 + 900);
 }
 
-/// The outbid refund (`AucOffFail` money mail) taken with take-all-and-delete: the exact
+/// The outbid refund (`AucBidFail` money mail) taken with take-all-and-delete: the exact
 /// sequence the Bevy client's live auction test hung on (bid, buyout by someone else, claim the
 /// refund).
 #[tokio::test]

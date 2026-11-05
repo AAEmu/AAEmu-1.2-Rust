@@ -8,7 +8,8 @@
 //!   (`Inventory.AuctionAttachments`); the lot keeps a snapshot of the item and packets use the
 //!   live item (`ItemManager.GetItemByItemId`) when it still exists.
 //! * Results are delivered as `MailForAuction` mails through [`AuctionMailHooks`] (installed by
-//!   the mail port), at the same point as the C# `Send()` calls.
+//!   the mail port), at the same point as the C# `Send()` calls. An online seller additionally
+//!   gets [`SCAuctionMessagePacket`] for an accepted bid and for a sale.
 //! * `AuctionHouseTask` (every 5 s) is [`AuctionManager::start_timer`], started from
 //!   `System::start` after [`AuctionManager::load`].
 
@@ -31,8 +32,8 @@ use crate::systems::HookSlot;
 use crate::world::PlayerRef;
 
 use super::auction_packets::{
-    SCAuctionBidPacket, SCAuctionCanceledPacket, SCAuctionLowestPricePacket, SCAuctionPostedPacket,
-    SCAuctionSearchedPacket,
+    SCAuctionBidPacket, SCAuctionCanceledPacket, SCAuctionLowestPricePacket,
+    SCAuctionMessagePacket, SCAuctionPostedPacket, SCAuctionSearchedPacket,
 };
 use super::error_message;
 use super::inventory::{self, Inv, ItemTxn};
@@ -49,6 +50,13 @@ pub mod auction_duration {
     pub const HOURS_12: u8 = 1;
     pub const HOURS_24: u8 = 2;
     pub const HOURS_48: u8 = 3;
+}
+
+/// `SCAuctionMessagePacket.msgType`: the client raises ui event 0x1fc (`AUCTION_BIDDEN`) for 0
+/// and 0x1fd (`AUCTION_BOUGHT_BY_SOMEONE`) for 1 (`FUN_394cf660`); other values are ignored.
+pub mod auction_message {
+    pub const BIDDEN: u8 = 0;
+    pub const BOUGHT_BY_SOMEONE: u8 = 1;
 }
 
 /// `AuctionSearchSortKind`.
@@ -400,6 +408,18 @@ pub enum AuctionMail {
         previous_buyer_id: u32,
         previous_bid: i32,
     },
+}
+
+/// Sends the live auction notice to the seller when the character is online; an offline seller
+/// gets only the result mail (`AuctionMail::SaleSeller` / `BidFail`).
+fn notify_seller(server: &GameServer, seller_id: u32, msg_type: u8, item_type: u32, money: i32) {
+    if let Some(seller) = server.world.character_by_id(seller_id) {
+        seller.send(SCAuctionMessagePacket {
+            msg_type,
+            item_type,
+            money_amount: money,
+        });
+    }
 }
 
 /// Credits `kind_id` (+1) to the online character `character_id`, if any.
@@ -801,6 +821,13 @@ impl AuctionManager {
         };
         let money_after_fee = f64::from(sold_amount) * 0.9;
         let recalculated_fee = listing_fee(lot.direct_money, lot.duration);
+        notify_seller(
+            server,
+            lot.client_id,
+            auction_message::BOUGHT_BY_SOMEONE,
+            new_item.template_id,
+            sold_amount,
+        );
         let mut mails = Vec::new();
         if !lot.client_name.is_empty() {
             mails.push(AuctionMail::SaleSeller {
@@ -1061,6 +1088,15 @@ impl AuctionManager {
 
             // Updating Data in the AuctionLots List
             self.update_auction_lot_in_list(&lot);
+
+            // The seller sees the bid live; the lot stays listed.
+            notify_seller(
+                server,
+                lot.client_id,
+                auction_message::BIDDEN,
+                lot.item_template_id(),
+                lot.bid_money,
+            );
         }
     }
 

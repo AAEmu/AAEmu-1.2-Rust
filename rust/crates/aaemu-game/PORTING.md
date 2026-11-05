@@ -415,7 +415,7 @@ connected by `systems::economy::wiring`).
 |---|---|---|---|
 | `Models/Game/Items/Actions/*` (every `ItemTask`, `ItemAction`, `ItemTaskType`), `SCItemTaskSuccessPacket`, `SCSyncItemLifespanPacket`, `SCUnitEquipmentsChangedPacket`, `SCInvenExpandedPacket`, `SCGamePointChangedPacket`, `SCCharacterLaborPowerChangedPacket` | `models/item_task.rs`, `systems/economy/item_packets.rs` | done | Tasks snapshot the item when created (the C# encodes on `SendPacket`). |
 | `ItemContainer`, `EquipmentContainer`, `MateEquipmentContainer`, `CofferContainer` | `models/container.rs` | done | `AddOrMoveExistingItem` (new / moved / same container), `RemoveItem`, `ConsumeItem`, `AcquireDefaultItem(Ex)` (timers, charges, crafter), `SpaceLeftForItem`, `ApplyBindRules`, `Wipe`, `ReNumberSlots`, coffer `CanAccept`, `OnEnter/LeaveContainer` events. |
-| `Inventory` (SplitOrMoveItem(Ex), 2H weapon handling, backpacks, ExpandSlot, coffers, ConsumeItem, counts), `Character` money / game points / labor / `ItemUse` / `SendErrorMessage`, `ErrorMessageType` | `systems/economy/inventory.rs`, `error_message.rs` | done | `ChangeLabor`'s `AddExp` is a hook (`ProgressionHooks`). |
+| `Inventory` (SplitOrMoveItem(Ex), 2H weapon handling, backpacks, ExpandSlot, coffers, ConsumeItem, counts), `Character` money / game points / labor / `ItemUse` / `SendErrorMessage`, `ErrorMessageType` | `systems/economy/inventory.rs`, `error_message.rs` | done | `ChangeLabor`'s `AddExp` is a hook (`ProgressionHooks`). Equip and item use apply `items.actability_requirement` (error 508, see "Item use gates from data"). |
 | Core item C2G (`CSSwapItems`, `CSSplitBagItem`, `CSDestroyItem`, `CSExpandSlots`, `CSDeposit/WithdrawMoney`, `CSSplit/SwapCofferItem(s)`, `CSItem(Un)Secure`, `CSEquipments(Un)Secure`, `CSThisTimeUnpackItem`) | `systems/economy/{item_handlers,item_security}.rs` | done | Deposit / withdraw require a positive amount and a banker NPC (the `banker` template flag) within 5 m of the current interaction object (the C# did neither). The four secure packets are implemented from the 1.2 client (the C# only logged them); see the item-lock deviation. |
 | `ItemManager` (all templates / tables, user items, `Create`, timers, `UnwrapItem`, auction search helpers, loot convert fish), `ItemGameData`, `ItemConversionGameData`, `FishDetailsGameData`, item model stats (durability, repair cost, attributes, DPS, armor), procs | `data/items.rs`, `managers/item.rs`, `models/item.rs`, `systems/economy/{items_data,item_timers,procs}.rs` | done | `ItemManager` lists are leaf locks (snapshot before locking containers). Procs are a new feature (the C# never fired one; see the item-procs deviation). |
 | `LootGameData`, `Models/Game/Items/Loots/**`, `LootingContainer`, loot packets | `systems/economy/{loot_data,loot,looting,loot_packets}.rs` | done | NPC death / despawn / team rules through `LootNpcHooks`, `LootTeamHooks`, `LootQuestHooks`. |
@@ -423,11 +423,40 @@ connected by `systems::economy::wiring`).
 | `CraftManager`, `Models/Game/Crafts`, `CharacterCraft`, `CraftTask`, `CSExecuteCraft`, `SCCraftFailed`, recipe learning (`item_recipes`, `train_craft_effects`) | `systems/economy/{craft,craft_data,craft_learning}.rs` | done | Cast through `CraftHooks::start_craft_cast`; skills call `craft::end_craft`. `TrainCraftEffect` teaches `item_recipes[source item]` (or the effect's craft without a source item), persisted in `character_crafts`; `Crafting.RequireLearnedRecipes` (default off) gates execution. |
 | Stores (`CSBuyItems`, `CSSellItems`, buy-back, `CSListSoldItem`, `CSBuyPriestBuff`, `CSBuyCoinItem`, `CSSellBackpackGoods`), `SpecialtyManager`, `TaxationsManager`, `ExpandExpert`, item look conversion | `systems/economy/{store,store_data,specialty}.rs` | done | Merchant packs / NPC flags through `NpcEconomyHooks`. Checkout validates currency, checked totals and each balance, then stages complete goods / buy-back delivery before committing payment. Vocation charges the configured price displayed by the 1.2 shop, without earnings bonuses. Rejected checkout preserves items and balances. Purchases need an NPC merchant pack, a doodad `DoodadFuncStoreUi` pack, or the money form of the doodad's current-phase `DoodadFuncPurchase` (`CSBuyItems.unkId`, the `doodad_funcs` row id the 1.2 client writes there), and filter the goods by it; selling needs a merchant within 3 m, lists each item once and pays only for items moved to buy-back. Specialty: the empty `CSListSpecialtyGoods` answer, the dropped records packet and the corrected sale values are detailed in the specialty protocol note. |
 | `MailManager`, `Models/Game/Mails/**`, `CharacterMails`, mail packets | `systems/economy/{mail,mail_character,mail_kinds,mail_packets,mail_data}.rs` | done | Saved in `SaveStage::BeforeItems`; housing tax through `MailHousingHooks`. |
-| `AuctionManager`, `Models/Game/Auction/**`, auction packets | `systems/economy/{auction,auction_data,auction_packets}.rs` | done | Saved in `SaveStage::AfterItems`; results mailed through `wiring`. Requests require an auctioneer NPC (the `auctioneer` template flag) named by the packet or the current interaction object within 5 m (the C# ignored the ids). |
+| `AuctionManager`, `Models/Game/Auction/**`, auction packets | `systems/economy/{auction,auction_data,auction_packets}.rs` | done | Saved in `SaveStage::AfterItems`; results mailed through `wiring`, and an online seller also gets `SCAuctionMessagePacket` for accepted bids and sales (the C# sent neither; see the auction-messages deviation). Requests require an auctioneer NPC (the `auctioneer` template flag) named by the packet or the current interaction object within 5 m (the C# ignored the ids). |
 | `TradeManager`, trade packets | `systems/economy/trade.rs` | done | The C# `CanStartTrade` TODO ("Check faction and others") is implemented from the 1.2 client's own checks: a request and its acceptance refuse a dead player, a hostile faction relation and a distance `>= sqrt(25) = 5` m, and a trade across instances; see the trade validation deviation. |
-| `CashShopManager`, `Models/Game/CashShop/**`, ICS / premium packets | `systems/economy/cash_shop.rs` | done | Gifts by `CommercialMail` (`wiring`); account credits SQL behind `CashShopDb`. |
-| Item skill-effect bodies (grade enchant, socketing, conversion, cap scale, UCC imprint, ...), mate / slave equipment packets | `systems/economy/item_effects*.rs` | done | Called by the skills subsystem's effects. UCC imprint / cleanup require owned source and target items; client UCC casts require the actual source item's configured use skill, preserving the unrelated legacy bound-item portal exception. Dyeing checks the loaded `dyeable_items` allowlist. Invalid UCC / dye effects cancel deferred reagent consumption. |
+| `CashShopManager`, `Models/Game/CashShop/**`, ICS packets | `systems/economy/cash_shop.rs` | done | Gifts by `CommercialMail` (`wiring`); account credits SQL behind `CashShopDb`. |
+| Premium service shop (`CSPremiumServiceList` / `Buy` / `Msg`, `SCPremiumServiceList`, `PremiumDetail`) | `systems/economy/premium_service.rs` | done | Rust only: the C# answered the list with a fixed Russian 30-day entry and only logged buy / msg. The catalogue is the empty-by-default operator table `aaemu_game.premium_services`; the purchase is one atomic MySQL transaction. See the WP-C deviation below. |
+| Item skill-effect bodies (grade enchant, socketing, conversion, cap scale, UCC imprint, ...), mate / slave equipment packets | `systems/economy/item_effects*.rs` | done | Called by the skills subsystem's effects. UCC imprint / cleanup require owned source and target items; client UCC casts require the actual source item's configured use skill, preserving the unrelated legacy bound-item portal exception. Dyeing checks the loaded `dyeable_items` allowlist. Invalid UCC / dye effects cancel deferred reagent consumption. Cap scale refuses an `item_cap_scale_forbids` target with SkillResult INVALID_TARGET; the reset-tool gate is unverified until a capture. |
 | Item skill-effect stubs given data-derived bodies (`GainItemWithPosImprint` 32, `RechargeItemBuff` 95, `ExpToItem` 96) | `systems/economy/item_effects.rs` | done (data-derived) | The C# `Execute` bodies were `// TODO` stubs, so the behaviour comes from `special_effects` 405 / 546 / 547 / 548 (32: create `value1` x1 with `SkillEffectGainItemWithPos`), 12446 / 17017 (95) and 12462 (96: `value1` XP -> `value2` x1 with `SkillEffectExpToItem`) plus the tool skills that cast them. `GainItemWithPosImprint` stores no position imprint: the 1.2 item details have no such field. `ExpToItem` subtracts the experience directly instead of through `AddExp` (which recomputes the level and could level the character down), sends `SCExpChangedPacket(-value1)`, checks bag room before spending the XP, and cancels so the reagent is kept. `RechargeItemBuff` takes the cast's item target, resets `charge_start_time` (and `charge_count` when the template has one) and re-applies the equipped item's gear buff through `apply_gear_buffs` with the item both removed and added, so the recharge buff is not stacked; the 1 s item timers read the new charge window on their next tick, so nothing is re-scheduled. |
+
+#### Item use gates from data (2026-11-04)
+
+`items.actability_requirement` and `items.actability_group_id` are loaded into `ItemTemplate`
+and enforced on the equip and item-use paths. The 1.2 client's check is `FUN_394e1a90` (called
+by the use action `FUN_390447d0` and the equip-drag validation `FUN_394e41f0`): when the
+requirement is positive, the character's points in the group plus the house act-ability bonus
+(`FUN_390b3a80`) must reach it, else the client shows `actability_not_enough_point` 508 through
+`FUN_39428370(0x1fc)`. The server sends the same error with the group id as `kind` and refuses
+the request from `CSSwapItemsPacket`, `CSSplitBagItemPacket`, the coffer move packets and the
+`CSStartSkill` item-caster branch; the core move additionally refuses any other caller that
+would put an item into the player equipment container, so the item is never consumed. The ten
+1.2 rows are the fishing rods 27309-27312, 27671-27674, 29702 and 30261 (group 7, requirement
+10000..50000); the wrapped rods' use skill runs only at the requirement.
+
+`item_cap_scale_forbids` is loaded into `ItemData` (1340 rows, 1335 distinct item ids). The 1.2
+client builds the set from `SELECT item_id FROM item_cap_scale_forbids` (`FUN_395ac620`) and
+tests it with `FUN_395a72d0`, which backs the item's `scalable` property and the cap-scale
+target validation `FUN_3939dc20` (SkillResult INVALID_TARGET 0x22). `ItemCapScale` now fails the
+cast with SkillResult INVALID_TARGET before any roll, so the temper item is kept. The
+`ItemCapScaleReset` tool uses the same set here, but its client path was not decoded: that part
+is **unverified** until a capture.
+
+`CharacterActability.ExpandExpert` with no next `expand_expert_limits` row answers
+`store_unknown_error` 228 instead of the C# TODO's silent return. `GainLootPackItemEffect`'s
+inherited grade keeps the C# TODO (capture-pending **ITEM-LOOT-GRADE**): the 1.2 client only
+parses the descriptor (`FUN_396e91c0`), not the retail rule. `item_secure_exceptions` was
+already loaded and used by `item_security::is_lockable` (`FUN_394df4a0`); unchanged.
 
 #### Limited-sale purchase limits (2026-11-03)
 
@@ -1895,6 +1924,15 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * systems::economy: auction lots are enumerated in id order (`ConcurrentDictionary` order in C#),
   search / cheapest lot skip lots whose item or template is missing; mails are kept in a map that
   reproduces the C# `Dictionary` enumeration order; mail dates are whole unix seconds.
+* systems::economy (auction messages, 2026-11-04): `SCAuctionMessagePacket` (0x133) is sent to an
+  online seller when a bid is accepted (`msgType` 0, `AUCTION_BIDDEN`) and when a lot sells
+  (`msgType` 1, `AUCTION_BOUGHT_BY_SOMEONE`; both the buy-now and the timed-winner path), with
+  the item template id and the money. Offline sellers get only the result mail. The C# never
+  sent this packet. Layout from the 1.2 client reader `FUN_397b56f0` (u8, u32, i32); the msgType
+  meaning from the handler `FUN_394cf660` (events 0x1fc/0x1fd) and the seller-side ui texts
+  3047/3048. Deviation: the outbid refund uses `MailType.AucBidFail` (17, the client's
+  `AUCITON_BID_FAIL`) instead of the C# `AucOffFail` (15), so its mailbox label is the
+  bid-failure one.
 * systems::economy (money guards, 2026-10-20): `CSDepositMoney` / `CSWithdrawMoney` refuse
   non-positive amounts and require a banker NPC (`banker` template flag) within 5 m of the current
   interaction object; `CSBuyItems` accepts goods only from the interacting NPC's merchant pack or
@@ -3433,10 +3471,58 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   grade (old == new on the initial sync), and with old/new grades on GM / expiry changes.
   Deviation: the C# hard-coded `(1, 1, 1)` at `FinishState(7)` and a literal `1` in the
   `SCUnitStatePacket` premium field; Rust writes the real flag (0 for a normal account).
-  GM `/premium <account|name|self> <on|off|days> [days]` (Rust only, access 100) is the grant
-  path until the premium shop (WP-C). The grant/removal upserts the `accounts` row (an account
-  with only a login row gets one) and answers an error instead of "granted" when the write
-  fails.
+  GM `/premium <account|name|self> <on|off|days> [days]` (Rust only, access 100) and the premium
+  service shop (`systems::economy::premium_service`, WP-C) are the grant paths. The
+  grant/removal upserts the `accounts` row (an account with only a login row gets one) and
+  answers an error instead of "granted" when the write fails.
+* systems::economy (premium service shop, WP-C, 2026-11-04): the C# answered
+  `CSPremiumServiceList` (0x136, empty body, writer `FUN_391877d0`) with one hard-coded Russian
+  30-day entry and only logged `CSPremiumServiceBuy` (0x135, `i32 cId`, serializer
+  `FUN_397b17b0`) and `CSPremiumServiceMsg` (0x13c, `i32 stage`, serializer `FUN_397b17d0`,
+  writer `FUN_39187870`). Rust answers the list from `aaemu_game.premium_services` (column
+  meanings and an example insert in `SQL/updates/2026-11-04_aaemu_game_premium_services.sql`);
+  `compact.sqlite3.premium_points` has no catalogue (0 rows) and the table is empty by default
+  because no 1.2 retail row is evidenced. `SCPremiumServiceList` (0x1d8, serializer
+  `FUN_397c49b0` -> `FUN_397bf920`) carries one detail per packet (`FUN_391e25e0`); `size` is the
+  expected **total** row count, not the per-packet count: the handler appends a detail only while
+  `(end - begin) / 0x1b0 < size`, so every packet carries `size = rows` and `isEnd` is set only on
+  the last one. A `size = 0` packet marks the list ready (empty catalogue); it does not clear a
+  list. The catalogue is capped at 255 rows (the `u8` field, logged when truncated);
+  `exchangeRatio` has no source and stays 0. A buy validates the row (`is_sell`, positive
+  `hours`, non-negative price) and the currency, then runs the debit and the premium grant in one
+  MySQL transaction under the account row lock and `AccountManager::lock_of`: guarded `credits` /
+  `loyalty` debit (`... >= price`), payment extension (`pay_end = max(now, pay_end) +
+  hours * 3600`; a GM window that starts in the future is replaced by `now..now + hours`, not
+  extended), an `audit_ics_sales` row, then commit. A permanent premium (`pay_end = 0`,
+  including the configured default) is refused with 773 **before** the debit: there is nothing
+  to extend. A row that still uses `Account:DefaultPayment` keeps `pay_method = 0`; the purchase
+  stores only its window (`pay_start` / `pay_end`), which `resolve_payment` reads back as
+  explicit premium (a `pay_method = 0` row with a stored window is premium, not the default
+  payment). An explicit payment row becomes `Premium`. `premium_point` is
+  `max(details.premium_point, premium_configs.connect_point).clamp(0, max_point)` - a stored
+  higher point is never lowered. Only credits and loyalty are debitable atomically with the
+  grant; AA points have no balance carrier yet (WP-D) and are refused with error 775, other
+  currencies with 773. A loyalty debit also sets the buyer's `bm_point` and sends
+  `SCBmPointPacket`. The buy result has no dedicated 1.2 SC: the client's error handler
+  (`FUN_391e5070`) routes error ids 772..775 through `FUN_39055e80` / `FUN_39055a90` to UI event
+  0x266 (`PREMIUM_SERVICE_BUY_RESULT`, PSBFR_NONE/NORMAL/CASH/AA_POINT), so success / failure are
+  `SCErrorMsg` with `PREMIUM_SERVICE_BUY_SUCCESS` 772, `PREMIUM_SERVICE_BUY_FAIL` 773,
+  `PREMIUM_SERVICE_NOT_ENOUGH_AA_CASH` 774 or `PREMIUM_SERVICE_NOT_ENOUGH_AA_POINT` 775. The
+  client handler stores `exchangeRatio` from the `isEnd` packet; the shop's own `SCAccountInfo`,
+  `SCUpdatePremiumPoint`, `SCICSCashPoint` (credits) / `SCBmPointPacket` (loyalty) follow through
+  the WP-B publish path. A real-client purchase capture is still pending
+  (**ACCOUNT-PREMIUM-BUY-1**).
+  `CSPremiumServiceMsg` is a client trigger (stage 1 at character-select init, stage 2 at world
+  entry) and gets no reply; the C# `SCAccountWarned("Premium ...")` is removed. `premium_services.id`
+  (client detail `id`, loaded from `grade`) and `bcount` (`buy_max`) are copied for display only:
+  their 1.2 meanings are UNKNOWN and `buy_max` is not enforced.
+  Known limits: an ambiguous MySQL commit error (for example the connection drops during
+  `COMMIT`) answers 773, and the cached premium state stays stale until the next refresh /
+  login even though the transaction may have committed. The new state is published after the
+  account lock is released, so a concurrent GM `set_payment` can publish in between and the
+  client briefly shows the purchase state until the next `SCAccountInfo`; the database row is
+  whichever transaction wrote last. There is no rate limit on `CSPremiumServiceBuy`: every
+  packet is one charge.
 * systems::services (second password, 2026-11-03): the 1.2 second-password protocol is ported in
   `systems::services::second_password`. The client sends four shuffled permutations of
   `0-9a-zA-Z` keyed by a server key id (`FUN_3907a370` / `FUN_3907a430`) and the server decodes

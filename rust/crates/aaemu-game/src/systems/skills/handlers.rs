@@ -532,6 +532,15 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
             }
             return;
         }
+        // `items.actability_requirement` (fishing rods): the 1.2 client refuses the use action
+        // below the actability points of `items.actability_group_id` (`FUN_394e1a90`, shown by
+        // `FUN_39428370(0x1fc)` as `actability_not_enough_point` 508). A forged cast is refused
+        // before the source item is taken, so the item stays with the character.
+        if crate::systems::economy::inventory::refuse_item_actability(server, &player, template_id)
+        {
+            send_cast_refused(&player, skill_id, p.caster, target, p.skill_object);
+            return;
+        }
         // Continue with the server-resolved template: `skill::use_skill` validates and consumes
         // through it (item id, template and count), never through the client's hint.
         p.caster = match p.caster {
