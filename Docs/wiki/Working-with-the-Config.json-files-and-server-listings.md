@@ -556,6 +556,27 @@ original-client run opens the board without a Lua error. Row details and the
 open question are recorded in `rust/crates/aaemu-game/PORTING.md`
 (BOUNTY-board).
 
+## Loot announcements (`Configurations/Loot.json`)
+
+Rust-only switch for the party/raid loot chat line. The shipped default keeps
+the previous behaviour (no announcement):
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `AnnounceToParty` | `false` | When a character picks up loot (corpse / loot bag, loot-all, or party-distributed loot such as a dice win), send `SCItemAcquisition` (kind 1) with the looted item stacks to the other party/raid members within the loot range (200 m), never to the looter. The 1.2 client decides which items appear in the chat line. |
+
+```json
+{
+  "Loot": {
+    "AnnounceToParty": true
+  }
+}
+```
+
+Override it in `Config.Local.json` or with `Loot__AnnounceToParty`. The kind-1
+semantics and the loot sources are INFERRED from the 1.2 client (WP-IT1), not
+evidenced; see `rust/crates/aaemu-game/PORTING.md`.
+
 ## Territory property tax
 
 Claimed Dominion provinces apply their current territory tax rate to ordinary taxable housing

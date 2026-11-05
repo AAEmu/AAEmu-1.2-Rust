@@ -574,7 +574,7 @@ wrote, from the 1.2 client readers only:
   reader `FUN_397c1f80` (`x2game.dll.c:1717976`); the item records use the standard reader
   `FUN_3961f500` (`x2game.dll.c:1301392`), the same record `SCItemTaskSuccessPacket` writes.
   The handler acts only for type 1 (an item link line naming `charName`), which is INFERRED to
-  be a party/raid member announcement.
+  be a party/raid member announcement. WP-IT1 now sends it (see below).
 * `SCItemDetailUpdatedPacket` 0x093: `u64 itemId, u8 x, u8 index, ItemDetail`, reader
   `FUN_397b3840` (`x2game.dll.c:1707583`); `ItemDetail` is the `FUN_3961edf0`
   (`x2game.dll.c:1301101`) `u8 detailType` plus its fixed body. The two zeroed bytes between the
@@ -584,13 +584,31 @@ wrote, from the 1.2 client readers only:
   (`x2game.dll.c:1707572`) followed by the `SCItemTaskSuccessPacket` reader `FUN_397d1d00`
   (`x2game.dll.c:1729938`).
 
-All four are **capture-pending** and deliberately never sent, because no 1.2 zone code or capture
-shows their triggers: **ITEM-NOTIFY-1** (craft unlock: the Rust server never locks craft
-materials), **ITEM-NOTIFY-2** (acquisition: which grades/sources announce is unknown),
+`SCCraftItemUnlockPacket`, `SCItemDetailUpdatedPacket` and `SCItemTaskNotifyPacket` are
+**capture-pending** and deliberately never sent, because no 1.2 zone code or capture shows their
+triggers: **ITEM-NOTIFY-1** (craft unlock: the Rust server never locks craft materials),
 **ITEM-NOTIFY-3** (detail update) and **ITEM-NOTIFY-4** (task notify: probably item tasks for an
-owner other than the viewer). Their byte layouts are test-locked in the module; the types are
-listed in `rust/tools/opcode_coverage/sc_baseline.json` as typed-but-never-sent, and a future
-trigger must remove them from that list.
+owner other than the viewer). Their byte layouts are test-locked in the module and they stay in
+`rust/tools/opcode_coverage/sc_baseline.json` as typed-but-never-sent; a future trigger must
+remove them from that list.
+
+#### Party loot announcement `SCItemAcquisitionPacket` (WP-IT1, 2026-11-06)
+
+`systems/economy/looting.rs` now sends one `SCItemAcquisitionPacket` per loot pickup to the
+other team members: corpse / loot-bag picks (`CSLootItemPacket`, `CSLootOpenBagPacket` loot-all)
+and party-distributed loot (rotate winner / dice / loot master, through `try_distribute`). The
+packet carries kind `1`, the receiving character's name and the looted stacks as they were in the
+container (the client filters which templates announce with `FUN_39695dc0`), capped at the wire's
+`u8` item count. Recipients come from the container's `KillerTeam` (`active_team`, the same team
+`TryLoot` distributes to): every member except the receiver, in the same world instance, within
+`MAX_LOOTING_RANGE` (200 m, `looting.rs:48`, the loot distribution range used by
+`generate_loot_with`). The recipients are collected while the looting container is locked; the
+packets are sent after the container, item-transaction and character locks are released. The
+whole feature is behind `Loot:AnnounceToParty` (`Configurations/Loot.json`, default **false**).
+
+INFERRED, not evidenced: kind `1` as the party-loot line (client handler `FUN_391d5760` acts only
+for 1 and the `ITEM_ACQUISITION_BY_LOOT` event text), the loot sources and the range. The C#
+never sent this packet (it only declared the opcode), so there is no C# behaviour to mirror.
 
 #### Item use gates from data (2026-11-04)
 

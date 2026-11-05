@@ -98,7 +98,6 @@
     "SCICSExchangeRatioPacket",
     "SCIdleKickPacket",
     "SCInstantGameRemainTimePacket",
-    "SCItemAcquisitionPacket",
     "SCItemDetailUpdatedPacket",
     "SCItemTaskNotifyPacket",
     "SCKnockBackUnitPacket",
