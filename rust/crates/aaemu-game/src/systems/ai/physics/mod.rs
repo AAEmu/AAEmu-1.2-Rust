@@ -147,6 +147,12 @@ impl PhysicsSystem {
         self.worlds.get(&instance_id).map(|w| w.clone())
     }
 
+    /// Drops the physics of a removed instance (`false` = it had none). Its thread holds only a
+    /// weak handle and ends on its next pass.
+    pub fn remove_world(&self, instance_id: u32) -> bool {
+        self.worlds.remove(&instance_id).is_some()
+    }
+
     /// Tests: do not start physics threads.
     pub fn set_manual_ticks(&self, v: bool) {
         self.manual_ticks
@@ -699,7 +705,7 @@ impl TickWorld for ServerTickWorld<'_> {
 /// One physics loop iteration of an instance (the thread body; tests call it directly):
 /// the tick under the state lock, then the game-side effects.
 pub fn run_world_tick(server: &GameServer, wp: &WorldPhysics, dt_ms: i64) {
-    let Some(world) = server.world.world(wp.instance_id) else {
+    let Some(world) = server.world.world_if_exists(wp.instance_id) else {
         return;
     };
     let heightmaps = server.systems.npcs.heightmaps.get();

@@ -921,6 +921,12 @@ impl SphereQuestManager {
         lock(&self.worlds).entry(world_id).or_default().clone()
     }
 
+    /// Drops the `SphereQuestManager` of a removed instance (`false` = it had none): its
+    /// triggers and starters are not ticked any more.
+    pub fn remove_world(&self, world_id: u32) -> bool {
+        lock(&self.worlds).remove(&world_id).is_some()
+    }
+
     fn all(&self) -> Vec<(u32, Arc<WorldSpheres>)> {
         let mut v: Vec<_> = lock(&self.worlds)
             .iter()
@@ -943,7 +949,10 @@ impl SphereQuestManager {
     /// Ticks every instance (also links the starters once the quests hook is installed).
     pub fn tick(&self, server: &GameServer) {
         for (world_id, spheres) in self.all() {
-            let Some(world) = server.world.world(world_id) else {
+            let Some(world) = server.world.world_if_exists(world_id) else {
+                // The instance was destroyed (a dungeon): drop its registry instead of asking
+                // for the gone instance on every pass.
+                self.remove_world(world_id);
                 continue;
             };
             if !spheres.linked.load(Ordering::Acquire) {

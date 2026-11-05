@@ -564,6 +564,20 @@ fn event_condition(
         tracing::error!("PlotEventCondition: invalid source {}", c.source_id);
         return false;
     };
+    // A step with no affected unit (aimed at its own caster and filtered out by the skill's target relation) is still
+    // checked once, against its target. Looping over the empty list passed every condition, so both branches of a weapon
+    // split went out (Sunder Earth 5310 one-hand and 5313 two-hand) and the 1.2 client, which does not check conditions
+    // itself, played both.
+    if ti.effected.is_empty() {
+        let Some(t) = ti.target.as_ref() else {
+            return false;
+        };
+        let Some(target) = plot_target(c.target_id, state, ti, t) else {
+            tracing::error!("PlotEventCondition: invalid target {}", c.target_id);
+            return false;
+        };
+        return condition_check(server, &c.condition, &source, &target, state);
+    }
     for t in &ti.effected {
         let Some(target) = plot_target(c.target_id, state, ti, t) else {
             tracing::error!("PlotEventCondition: invalid target {}", c.target_id);
@@ -1208,6 +1222,35 @@ mod tests {
             skill_object: SkillObject::None,
         };
         (PlotState::new(skill.clone(), ctx), skill)
+    }
+
+    /// A step whose affected list is empty still checks its conditions (once, against its target): an NPC caster
+    /// wields no two-handed weapon, so the two-hand branch fails and its negation passes.
+    #[tokio::test]
+    async fn conditions_of_a_step_without_affected_units_are_checked() {
+        let (server, _client, player, npc) = fixture(GameData::empty());
+        let (caster, target) = (WorldObject::from(&npc), WorldObject::from(&player));
+        let (state, _skill) = plot_state(&server, &caster, &target);
+        let ti = PlotTargetInfo::new(
+            Some(Target::Obj(caster.clone())),
+            Some(Target::Obj(caster.clone())),
+        );
+        assert!(ti.effected.is_empty());
+        let two_handed = |not_condition| super::super::data::plots::PlotEventCondition {
+            condition: super::super::data::plots::PlotCondition {
+                id: 723,
+                not_condition,
+                kind: 6,
+                param1: 2,
+                param2: 0,
+                param3: 0,
+            },
+            position: 1,
+            source_id: 1,
+            target_id: 4,
+        };
+        assert!(!event_condition(&server, &two_handed(false), &state, &ti));
+        assert!(event_condition(&server, &two_handed(true), &state, &ti));
     }
 
     /// `end_skill` takes the id first: the plot end that follows releases nothing.

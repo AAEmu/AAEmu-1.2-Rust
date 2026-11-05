@@ -1469,8 +1469,9 @@ pub fn schedule_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         let d = distance_to(server, &Target::Obj(caster.clone()), &ctx.target, false);
         total_delay += (d / t.effect_speed * 1000.0) as i32;
     }
-    if t.fire_anim_id != 0 && t.use_anim_time {
-        if let Some(anim) = data.anims.get(t.fire_anim_id) {
+    let fire_anim_id = fire_anim_for(t, super::plots::weapon_wield_kind(server, caster));
+    if fire_anim_id != 0 && t.use_anim_time {
+        if let Some(anim) = data.anims.get(fire_anim_id) {
             let mul = stat(server, caster, StatKind::GlobalCooldownMul) as f32;
             total_delay += (anim.combat_sync_time as f32 * (mul / 100.0)) as i32;
         }
@@ -1484,7 +1485,7 @@ pub fn schedule_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
         skill_object: ctx.skill_object.clone(),
         computed_delay: total_delay as i16,
         channeling_time: t.channeling_time,
-        fire_anim_id: t.fire_anim_id,
+        fire_anim_id,
     };
     if weapon_anim > 0 {
         fired.fire_anim_id = weapon_anim;
@@ -1543,6 +1544,18 @@ pub fn schedule_effects(server: &GameServer, skill: &SkillRef, ctx: &CastCtx) {
 }
 
 /// `Skill.GetWeaponAttackAnimId(caster)`.
+/// The fire clip for a caster whose weapons are of `wield_kind` (`weapon_wield_kind`: 2 two-handed, 3 two weapons): the skill's
+/// two-handed or dual wield variant when it has one, else `fire_anim_id`. The 1.2 client plays the clip it is sent and picks no
+/// variant itself: sent only `fire_anim_id`, it swung a greatsword with Precision Strike's `onehand_co_sk_weapon_blunt_2`
+/// (skill parity trace, 2026-11-03).
+fn fire_anim_for(t: &SkillTemplate, wield_kind: i32) -> u32 {
+    match wield_kind {
+        2 if t.twohand_fire_anim_id != 0 => t.twohand_fire_anim_id,
+        3 if t.dual_wield_fire_anim_id != 0 => t.dual_wield_fire_anim_id,
+        _ => t.fire_anim_id,
+    }
+}
+
 fn weapon_attack_anim_id(server: &GameServer, skill: &SkillRun, caster: &WorldObject) -> u32 {
     if !matches!(skill.template.id, 2..=4) {
         return 0;
@@ -2937,6 +2950,33 @@ pub fn pos(server: &GameServer, t: &Target) -> PositionAndRotation {
 /// A position unit target (for callers outside the module).
 pub fn pos_target(p: PosUnit) -> Target {
     Target::Pos(p)
+}
+
+#[cfg(test)]
+mod fire_anim_tests {
+    use super::*;
+
+    /// Precision Strike 12026: `onehand_co_sk_weapon_blunt_2` (132), two-handed `twohand_co_sk_weapon_blunt_2` (136); a skill
+    /// without a variant keeps its own clip for every weapon.
+    #[test]
+    fn the_fire_clip_follows_the_weapons_held() {
+        let t = SkillTemplate {
+            fire_anim_id: 132,
+            twohand_fire_anim_id: 136,
+            dual_wield_fire_anim_id: 504,
+            ..Default::default()
+        };
+        assert_eq!(fire_anim_for(&t, 0), 132, "no weapon");
+        assert_eq!(fire_anim_for(&t, 1), 132, "one weapon");
+        assert_eq!(fire_anim_for(&t, 2), 136, "a two-handed weapon");
+        assert_eq!(fire_anim_for(&t, 3), 504, "two weapons");
+        let plain = SkillTemplate {
+            fire_anim_id: 18,
+            ..Default::default()
+        };
+        assert_eq!(fire_anim_for(&plain, 2), 18);
+        assert_eq!(fire_anim_for(&plain, 3), 18);
+    }
 }
 
 #[cfg(test)]

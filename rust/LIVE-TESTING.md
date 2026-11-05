@@ -396,6 +396,10 @@ With 200 concurrent logins the C# login server times out on its MySQL connection
 * `RUST_LOG=info,aaemu_game::net=debug,aaemu_login::network=debug` logs every game packet
   (`GamePacket: C->S ...` / `S->C ...`) and the login connections, which is the server-side trace
   of a client session.
+* `AAEMU_LOG_MS=1` writes every log time as `HH:MM:SS.ffffff` (six fractional digits) instead of
+  `HH:MM:SS`, console and `Server.log` alike; off by default. `Scripts/live-stack.sh start` passes
+  it through to both servers (`AAEMU_LOG_MS=1 Scripts/live-stack.sh start`). The skill-parity audit
+  uses it to align the server's packet log with client traces (`docs/client/LUA-DRIVER.md`).
 * `RUST_LOG=aaemu_game::net::fields=trace` additionally logs every client packet's level, opcode
   name and full hex body (the bytes after the opcode; off unless the target is enabled). Use it to
   compare what the original 1.2 client sends with another client's packets. It dumps everything

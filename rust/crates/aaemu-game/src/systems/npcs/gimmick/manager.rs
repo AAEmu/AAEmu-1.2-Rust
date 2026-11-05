@@ -154,6 +154,26 @@ impl GimmickManager {
             .clone()
     }
 
+    /// The `GimmickManager` of instance `world_id` when it has one (a lookup never creates it,
+    /// so an instance that is gone cannot get a registry back).
+    pub fn existing(&self, world_id: u32) -> Option<Arc<WorldGimmicks>> {
+        self.worlds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&world_id)
+            .cloned()
+    }
+
+    /// Drops the `GimmickManager` of a removed instance (`false` = it had none). Its gimmicks
+    /// are not ticked or despawned any more; the instance cleanup removed their objects.
+    pub fn remove_world(&self, world_id: u32) -> bool {
+        self.worlds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&world_id)
+            .is_some()
+    }
+
     fn all(&self) -> Vec<(u32, Arc<WorldGimmicks>)> {
         let mut v: Vec<_> = self
             .worlds
@@ -460,13 +480,10 @@ pub fn spawn_from_doodad(
 /// `GimmickSpawner.Despawn(gimmick)`: removes it from the manager and the world; releases its
 /// ids unless a respawn is pending.
 pub fn despawn(server: &GameServer, active: &ActiveGimmick) {
-    server
-        .systems
-        .npcs
-        .gimmicks
-        .for_world(active.world_id)
-        .remove(active.gimmick.obj_id);
-    if let Some(world) = server.world.world(active.world_id) {
+    if let Some(gimmicks) = server.systems.npcs.gimmicks.existing(active.world_id) {
+        gimmicks.remove(active.gimmick.obj_id);
+    }
+    if let Some(world) = server.world.world_if_exists(active.world_id) {
         world.delete(&active.gimmick);
     }
     if active.state().respawn_ms == 0 {
@@ -529,7 +546,7 @@ pub fn stop_movement(server: &GameServer, active: &ActiveGimmick) {
     if active.gimmick.data().unit.current_target == 0 {
         return;
     }
-    if let Some(world) = server.world.world(active.world_id) {
+    if let Some(world) = server.world.world_if_exists(active.world_id) {
         let skill = active.template.as_ref().map_or(0, |t| t.skill_id);
         do_gimmick_skill(server, &world, active, skill);
     }
@@ -694,7 +711,10 @@ pub fn gimmick_tick(
 pub fn tick_all(server: &GameServer, delta: Duration) {
     let now = world::now_ms();
     for (world_id, gimmicks) in server.systems.npcs.gimmicks.all() {
-        let Some(world) = server.world.world(world_id) else {
+        let Some(world) = server.world.world_if_exists(world_id) else {
+            // The instance was destroyed (a dungeon): nothing of this registry is alive any
+            // more, and every pass would otherwise ask for the gone instance again.
+            server.systems.npcs.gimmicks.remove_world(world_id);
             continue;
         };
         for g in gimmicks.active() {

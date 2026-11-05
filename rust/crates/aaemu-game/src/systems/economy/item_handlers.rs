@@ -533,7 +533,7 @@ impl CSItemSecurePacket {
     }
 
     fn run(self, _server: &GameServer, _conn: &mut GameConnection) {
-        tracing::warn!(
+        tracing::debug!(
             "ItemSecure, ItemId: {}, SlotType: {}, Slot: {}",
             self.item_id,
             self.slot_type,
@@ -553,7 +553,7 @@ impl CSItemUnsecurePacket {
     }
 
     fn run(self, _server: &GameServer, _conn: &mut GameConnection) {
-        tracing::warn!(
+        tracing::debug!(
             "ItemUnsecure, ItemId: {}, SlotType: {}, Slot: {}",
             self.0.item_id,
             self.0.slot_type,

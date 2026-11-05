@@ -19,6 +19,10 @@
 //! (`RUST_LOG=info,aaemu_game::net=trace` brings the packet log back). File targets are
 //! written by a background thread ([`AsyncFile`]), so logging never blocks a tokio worker on
 //! disk I/O; call [`flush`] before the process exits.
+//!
+//! Opt-in: `AAEMU_LOG_MS=1` writes the time as `HH:mm:ss.ffffff` (six fractional digits) instead
+//! of `HH:mm:ss`, so a server log can be lined up with another client's trace to a fraction of a
+//! frame. The default is unchanged.
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -42,6 +46,36 @@ use tracing_subscriber::Layer;
 /// `maxArchiveFiles`.
 pub const MAX_ARCHIVE_FILES: usize = 9;
 
+/// Environment switch for fractional seconds in every log line (`1` or `true`).
+pub const LOG_MS_ENV: &str = "AAEMU_LOG_MS";
+
+/// The time format of a log line: NLog's `HH:mm:ss`, or with microseconds when `fractional`.
+fn timestamp_format(fractional: bool) -> &'static str {
+    if fractional {
+        "%H:%M:%S%.6f"
+    } else {
+        "%H:%M:%S"
+    }
+}
+
+/// Whether the value of [`LOG_MS_ENV`] asks for fractional seconds.
+fn fractional_requested(value: Option<&str>) -> bool {
+    value.is_some_and(|v| {
+        let v = v.trim();
+        v == "1" || v.eq_ignore_ascii_case("true")
+    })
+}
+
+/// The format in use for this process, read from the environment once.
+fn time_format() -> &'static str {
+    static FORMAT: OnceLock<&'static str> = OnceLock::new();
+    FORMAT.get_or_init(|| {
+        timestamp_format(fractional_requested(
+            std::env::var(LOG_MS_ENV).ok().as_deref(),
+        ))
+    })
+}
+
 /// NLog layout `${date:format=HH\:mm\:ss} [${level:uppercase=true}] ${logger:shortName=true} - ${message}`.
 struct NlogFormat;
 
@@ -62,7 +96,7 @@ where
         write!(
             writer,
             "{} [{}] {} - ",
-            Local::now().format("%H:%M:%S"),
+            Local::now().format(time_format()),
             meta.level().as_str(),
             logger
         )?;
@@ -246,7 +280,7 @@ fn write_loop(file: DailyFile, rx: Receiver<LogMsg>, dropped: Arc<AtomicU64>) {
                 format!(
                     "{} [WARN] logging - {lost} log lines dropped (log queue full)
 ",
-                    Local::now().format("%H:%M:%S")
+                    Local::now().format(time_format())
                 )
                 .as_bytes(),
             );
@@ -350,6 +384,37 @@ pub fn init(base_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn millisecond_timestamps_are_opt_in() {
+        // Default: unchanged.
+        assert_eq!(timestamp_format(false), "%H:%M:%S");
+        assert!(!fractional_requested(None));
+        for off in ["", "0", "false", "no", "2", "on"] {
+            assert!(!fractional_requested(Some(off)), "{off:?}");
+        }
+        for on in ["1", " 1 ", "true", "TRUE", "True"] {
+            assert!(fractional_requested(Some(on)), "{on:?}");
+        }
+        // The two formats on a fixed time of day.
+        let t = chrono::NaiveTime::from_hms_micro_opt(1, 2, 3, 456_789).unwrap();
+        assert_eq!(t.format(timestamp_format(false)).to_string(), "01:02:03");
+        assert_eq!(
+            t.format(timestamp_format(true)).to_string(),
+            "01:02:03.456789"
+        );
+        // Whole seconds still print six digits, so every line has the same width.
+        let whole = chrono::NaiveTime::from_hms_micro_opt(23, 59, 59, 0).unwrap();
+        assert_eq!(
+            whole.format(timestamp_format(true)).to_string(),
+            "23:59:59.000000"
+        );
+        // The process-wide choice follows the environment variable as it was at first use.
+        let expected = timestamp_format(fractional_requested(
+            std::env::var(LOG_MS_ENV).ok().as_deref(),
+        ));
+        assert_eq!(time_format(), expected);
+    }
 
     #[test]
     fn startup_keeps_previous_file_and_roll_keeps_nine_archives() {
