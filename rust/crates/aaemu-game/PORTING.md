@@ -2767,9 +2767,16 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   the `fallVel` and stance it sends when diving from a height. **Open:** the 10.x wire scale
   is `u16 / 65535 * 128` m/s (`D:/aa-re/zone/agent_proto/zone_protocol.md`, 512 per m/s,
   safe up to 10239) against the inferred 505.9 used here (also by the zone cap), unverified for
-  1.2; 185 `buffs` rows carry `fall_damage_immune` (human-cannon shields, ghost form, float-up
-  skills, the "immune to fall damage" buff), loaded into `BuffTemplate` but honoured by neither
-  the C# nor Rust. Tests: `systems::skills::fall_damage_tests`, `collision::fall::tests`,
+  1.2. Fall damage immunity (2026-11-05): 185 `buffs` rows carry `fall_damage_immune` (human-
+  cannon shields, ghost form, float-up skills, the "immune to fall damage" buff, e.g. 1649),
+  loaded into `BuffTemplate` and unused by the C#. The client's own `LoadBuffDescs` selects the
+  column and reads it as a boolean
+  (dll.c:1579862, 1579986), but the consumer of that field was not traced, so the effect (a
+  whole fall negated) is INFERRED from the column name and the rows. Rust's `do_fall_damage`
+  now returns 0 while the unit has a live buff whose full template has the flag: no HP loss, no
+  `FALL_STUN`, no `SCEnvDamagePacket`; dispelling the buff restores the damage on the next fall.
+  The client's per-controller `CSCreateSkillController` flag stays logged only and is not
+  trusted. Tests: `systems::skills::fall_damage_tests`, `collision::fall::tests`,
   `collision::flow_tests::a_landing_in_water_forwards_the_client_value_and_never_heals`.
 * systems::ai: calls into an NPC's AI from outside its tick (skills, aggro, npcs hooks) are queued and run right after the current AI step instead of re-entering it (`manager::post`); the AI tick runs on a blocking thread every ~100 ms; behaviour instances are kept per AI and accessed by kind. `UpdateAggroHelp` reaching a helper NPC without an AI logs and continues (the C# throws a `NullReferenceException` that cuts the whole behaviour tick short). `Npc.OnDamageReceived` on an AI-less NPC does nothing (C# NRE).
 * systems::ai: deletion marks an AI removed without waiting for its state mutex; the current holder detaches its owner and discards queued callbacks. This permits an NPC skill to delete its own caster and avoids the spawn-lock / AI-lock inversion during despawn. The global tick skips an AI whose state mutex is busy and retries on the next tick, so one external AI call cannot freeze movement and combat for every NPC.
