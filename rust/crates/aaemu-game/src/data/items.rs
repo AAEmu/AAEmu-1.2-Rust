@@ -1,7 +1,7 @@
 //! `ItemManager.Load` (item templates and every item table it reads): `item_configs`,
 //! `item_look_convert_*`, `item_grades`, `holdables`, `wearables`, `wearable_kinds`,
 //! `wearable_slots`, `dyeable_items`, `equip_item_attr_modifiers`, `item_procs`,
-//! `equip_item_set_bonuses`, the class tables (`item_armors`, `item_weapons`,
+//! `item_proc_bindings`, `equip_item_set_bonuses`, the class tables (`item_armors`, `item_weapons`,
 //! `item_accessories`, `item_summon_mates`, `item_summon_slaves`, `item_body_parts`,
 //! `item_enchanting_gems`, `item_backpacks`), the hard-coded UCC / music / treasure templates, the
 //! base `items` table, `equip_slot_enchanting_costs`, `item_grade_enchanting_supports`,
@@ -892,6 +892,8 @@ pub struct ItemData {
     pub modifiers: HashMap<u32, AttributeModifiers>,
     /// `_itemProcTemplates`.
     pub item_procs: HashMap<u32, ItemProcTemplate>,
+    /// `item_proc_bindings` grouped by item id (the C# never loaded this table).
+    pub item_proc_bindings: HashMap<u32, Vec<u32>>,
     /// `_equipItemSets`.
     pub equip_item_sets: HashMap<u32, EquipItemSet>,
     /// `_itemLookConverts`, `_holdableItemLookConverts`, `_wearableItemLookConverts`.
@@ -1063,6 +1065,13 @@ impl ItemData {
     /// `GetItemProcTemplate`.
     pub fn item_proc(&self, id: u32) -> Option<&ItemProcTemplate> {
         self.item_procs.get(&id)
+    }
+
+    /// The `item_proc_bindings` proc ids of an item template (the C# never read the table).
+    pub fn item_proc_bindings(&self, item_id: u32) -> &[u32] {
+        self.item_proc_bindings
+            .get(&item_id)
+            .map_or(&[], Vec::as_slice)
     }
 
     /// `GetUnitModifiers(itemId)`.
@@ -1347,6 +1356,17 @@ impl ItemData {
             };
             if data.item_procs.insert(p.id, p).is_some() {
                 return Err(load_err("duplicate item proc (Dictionary.Add)".into()));
+            }
+            Ok(())
+        })?;
+
+        // Not loaded by the C#; the item procs bound to a template (`item_proc_bindings`).
+        for_each_row(conn, "SELECT * FROM item_proc_bindings", [], |r| {
+            let item_id = r.u32("item_id")?;
+            let proc_id = r.u32("proc_id")?;
+            let list = data.item_proc_bindings.entry(item_id).or_default();
+            if !list.contains(&proc_id) {
+                list.push(proc_id);
             }
             Ok(())
         })?;

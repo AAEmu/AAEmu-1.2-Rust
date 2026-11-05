@@ -383,8 +383,12 @@ fn do_die_after_claim(
     let mut wait = 0;
     if let Some(p) = victim.as_player() {
         // Escalating respawn timer — runs BEFORE base.DoDie sends SCUnitDeathPacket
-        compute_death_wait_time(p, now_ms());
-        (lost_exp, durability_loss) = character_death_losses(server, p);
+        compute_death_wait_time(server, p, now_ms());
+        // `no_penalty` NPCs (guards, siege cannons, battlefield pets): the 1.2 column the
+        // port never read. The killing blow's attribution is the killer object (a skill / DoT
+        // passes its original caster), so a lethal DoT of such an NPC counts.
+        (lost_exp, durability_loss) =
+            character_death_losses(server, p, !killer_is_no_penalty(server, killer));
         wait = p.data().rez_wait_duration;
     }
     if let Some(n) = victim.as_npc() {
@@ -427,14 +431,49 @@ fn do_die_after_claim(
     }
 }
 
-/// `DeathWaitTimesSeconds`: escalating death respawn wait times; resets after
-/// `DeathCountResetMinutes` (5) without dying.
-const DEATH_WAIT_TIMES_SECONDS: [i32; 9] = [15, 30, 60, 90, 120, 150, 180, 210, 240];
-const DEATH_COUNT_RESET_MS: i64 = 5 * 60_000;
+/// `DeathWaitTimesSeconds`: the C# port's hard-coded escalation (15..240 s) and its 5-minute
+/// reset. The 1.2 `resurrection_waiting_times` table replaces it; these values are only the
+/// fallback when a compact database has no rows (the C# behaviour), so an old database does not
+/// start granting instant resurrections.
+const LEGACY_DEATH_WAIT_TIMES_SECONDS: [i32; 9] = [15, 30, 60, 90, 120, 150, 180, 210, 240];
+const LEGACY_DEATH_COUNT_RESET_MS: i64 = 5 * 60_000;
 /// `PvpAssistWindowSeconds`.
 const PVP_ASSIST_WINDOW_MS: i64 = 30_000;
 /// `WarZoneHonorLoss` (clamped to the victim's current honor).
 const WAR_ZONE_HONOR_LOSS: i32 = 10;
+
+/// True when the killing object is an NPC whose template has `no_penalty` (guards, siege
+/// cannons, battlefield pets, alliance NPCs). Killer attribution passes the original caster for
+/// skill / DoT hits, so the flag follows the source the death packet names.
+fn killer_is_no_penalty(server: &GameServer, killer: Option<&WorldObject>) -> bool {
+    let Some(npc) = killer.and_then(WorldObject::as_npc) else {
+        return false;
+    };
+    let template_id = npc.data().unit.template_id;
+    server
+        .game_data
+        .systems
+        .npcs
+        .npc
+        .template(template_id)
+        .is_some_and(|t| t.no_penalty)
+}
+
+/// The player's zone is a zone group whose dominion siege is running (`SiegeState::active_at`).
+fn player_died_in_active_siege(server: &GameServer, zone_key: u32, now: i64) -> bool {
+    let group = server
+        .game_data
+        .zones
+        .zone_by_key(zone_key)
+        .map_or(0, |z| z.group_id);
+    server
+        .systems
+        .housing
+        .dominions
+        .get(group)
+        .and_then(|state| state.siege)
+        .is_some_and(|siege| siege.active_at(now.div_euclid(1000)))
+}
 
 /// `RecordPvpDamageFrom(attacker)`.
 pub fn record_pvp_damage_from(victim: &PlayerRef, attacker_id: u32) {
@@ -462,24 +501,55 @@ fn record_at(history: &mut Vec<(u32, i64)>, id: u32, now: i64) {
 }
 
 /// `ComputeDeathWaitTime()`: stores the escalating wait in `RezWaitDuration` and `DeadTime`.
-pub fn compute_death_wait_time(p: &PlayerRef, now: i64) {
+///
+/// The 1.2 `resurrection_waiting_times` rows drive it (see
+/// [`crate::systems::skills::data::ResurrectionWaitingTime`]): the 1-based consecutive-death
+/// step selects the row, `penalty_duration` is the window that keeps the step alive, and the
+/// zone's active dominion siege selects `siege_waiting_time` over `waiting_time`. With no rows
+/// (an old or fixture database) the port's old hard-coded table is kept.
+pub fn compute_death_wait_time(server: &GameServer, p: &PlayerRef, now: i64) {
+    let zone_key = p.data().unit.transform.zone_id;
+    let siege = player_died_in_active_siege(server, zone_key, now);
+    let data = &server.game_data.systems.skills;
     let mut c = p.data();
     let s = &mut c.skill_char;
-    if s.last_death_time_ms != 0 && now - s.last_death_time_ms >= DEATH_COUNT_RESET_MS {
+    // The window belongs to the step the previous death reached (row 1 before the first
+    // death); every real row carries the same 600 s.
+    let prev_step = u32::try_from(s.consecutive_death_count.max(1)).unwrap_or(u32::MAX);
+    let penalty_ms = data
+        .resurrection_waiting_time(prev_step)
+        .map_or(LEGACY_DEATH_COUNT_RESET_MS, |row| {
+            i64::from(row.penalty_duration) * 1000
+        });
+    if s.last_death_time_ms != 0 && now - s.last_death_time_ms >= penalty_ms {
         s.consecutive_death_count = 0;
     }
-    let index = s
-        .consecutive_death_count
-        .min(DEATH_WAIT_TIMES_SECONDS.len() - 1);
-    let wait_seconds = DEATH_WAIT_TIMES_SECONDS[index];
+    let step = u32::try_from(s.consecutive_death_count.saturating_add(1)).unwrap_or(u32::MAX);
+    let wait_ms = match data.resurrection_waiting_time(step) {
+        Some(row) => {
+            let seconds = if siege {
+                row.siege_waiting_time
+            } else {
+                row.waiting_time
+            };
+            i64::from(seconds) * 1000
+        }
+        None => {
+            let index = s
+                .consecutive_death_count
+                .min(LEGACY_DEATH_WAIT_TIMES_SECONDS.len() - 1);
+            i64::from(LEGACY_DEATH_WAIT_TIMES_SECONDS[index]) * 1000
+        }
+    };
     s.consecutive_death_count += 1;
     s.last_death_time_ms = now;
     let count = s.consecutive_death_count;
-    c.rez_wait_duration = wait_seconds * 1000;
+    c.rez_wait_duration = i32::try_from(wait_ms).unwrap_or(i32::MAX);
     c.dead_time = now.div_euclid(1000);
     tracing::debug!(
-        "Death #{count} for {}: respawn wait = {wait_seconds}s",
-        c.unit.name
+        "Death #{count} for {}: respawn wait = {} ms (siege: {siege})",
+        c.unit.name,
+        c.rez_wait_duration
     );
 }
 
@@ -488,7 +558,15 @@ pub fn compute_death_wait_time(p: &PlayerRef, now: i64) {
 /// the main world, `LastExpLoss` (`GetExpLoss(level, ExpLossRateAtDeath)` capped to the exp of
 /// the current level, 80 % of it recoverable; a free resurrection offer below
 /// `MinimumExpLossLevel`). Returns `(LastExpLoss, LastDurabilityLoss)`.
-pub(super) fn character_death_losses(server: &GameServer, p: &PlayerRef) -> (i32, u8) {
+///
+/// `penalty == false` for a kill by a `no_penalty` NPC: exp and durability are not touched, but
+/// the stale resurrection offer is still cleared and the free resurrection below the minimum
+/// level is still offered.
+pub(super) fn character_death_losses(
+    server: &GameServer,
+    p: &PlayerRef,
+    penalty: bool,
+) -> (i32, u8) {
     let world = &server.config.get().world;
     let exp_table = &server.game_data.experience;
     let (level, experience, instance_id) = {
@@ -496,7 +574,7 @@ pub(super) fn character_death_losses(server: &GameServer, p: &PlayerRef) -> (i32
         (c.unit.level, c.experience, c.unit.transform.instance_id)
     };
     let qualifies = i32::from(level) >= world.minimum_exp_loss_level;
-    let durability_loss = if qualifies {
+    let durability_loss = if qualifies && penalty {
         server.game_data.items.config.death_durability_loss_ratio
     } else {
         0
@@ -510,15 +588,17 @@ pub(super) fn character_death_losses(server: &GameServer, p: &PlayerRef) -> (i32
         && instance_id == crate::models::character::DEFAULT_INSTANCE_ID
     {
         if qualifies {
-            // ExperienceManager.GetExpLoss(level, rate)
-            let this_level = exp_table.exp_for_level(level, false);
-            let next_level = exp_table.exp_for_level(level.saturating_add(1), false);
-            let loss = (f64::from(next_level - this_level)
-                * f64::from(world.exp_loss_rate_at_death))
-            .floor() as i32;
-            lost_exp = loss.min(experience - this_level);
-            recoverable = (lost_exp as f32 * 0.80f32).round() as i32;
-            p.data().recoverable_exp = recoverable;
+            if penalty {
+                // ExperienceManager.GetExpLoss(level, rate)
+                let this_level = exp_table.exp_for_level(level, false);
+                let next_level = exp_table.exp_for_level(level.saturating_add(1), false);
+                let loss = (f64::from(next_level - this_level)
+                    * f64::from(world.exp_loss_rate_at_death))
+                .floor() as i32;
+                lost_exp = loss.min(experience - this_level);
+                recoverable = (lost_exp as f32 * 0.80f32).round() as i32;
+                p.data().recoverable_exp = recoverable;
+            }
         } else {
             // Free resurrect below level 10
             p.send(super::packets_special::SCNotifyResurrectionPacket {
@@ -527,7 +607,7 @@ pub(super) fn character_death_losses(server: &GameServer, p: &PlayerRef) -> (i32
             p.data().skill_char.resurrect_offer = true;
         }
     }
-    if lost_exp > 0 || recoverable > 0 {
+    if penalty && (lost_exp > 0 || recoverable > 0) {
         p.data().experience -= lost_exp;
         p.send(super::progress::SCRecoverableExpPacket {
             obj_id: p.obj_id,
@@ -1230,6 +1310,150 @@ fn add_aggro_amounts(
             .on_aggro(server, &player, n);
     }
     existed
+}
+
+/// `NpcAggroTable::TauntedBy(caster, copyTop)` of the 10.x zone server (10x-ONLY; the 1.2
+/// client and the C# have no taunt logic, but buffs 171 / 502 and skill 17300 describe it).
+///
+/// Only an NPC holder has a stamped table (10x checks the victim's unit kind). 10x refuses
+/// `CreateAggro` when the NPC cannot attack the caster; in the 1.2 data most PvE monsters are
+/// faction-neutral to players and attack through AI aggression instead, so `CanAttack` alone
+/// would refuse every taunt on them. Rust therefore refuses only an explicitly friendly caster
+/// (plus the holder itself above). 10x additionally refuses members of the NPC's own group;
+/// `npc_groups` is loaded by `npc/group_data.rs` for spawner expansion, but no runtime
+/// membership links a spawned NPC back to its group, so there is nothing to check. Creates the
+/// entry with the same side effects as a zero-threat `AddUnitAggro`, stamps
+/// it, and with `copy_top` raises its total to the current highest total of the table (a one-off
+/// copy, never above it).
+pub fn taunted_by(server: &GameServer, npc: &WorldObject, caster: &WorldObject, copy_top: bool) {
+    if npc.as_npc().is_none() || !caster.is_unit() || npc.same(caster) {
+        return;
+    }
+    if super::relation::relation_to(
+        server,
+        &Target::Obj(npc.clone()),
+        &Target::Obj(caster.clone()),
+    ) == super::types::RelationState::Friendly
+    {
+        return;
+    }
+    add_unit_aggro(server, npc, AggroKind::Etc, caster, 0);
+    let caster_id = caster.obj_id();
+    // 10x uses its server clock. A stamp of 0 means "no taunt", so keep it non-zero; the
+    // 64-bit unix-ms value never wraps (a `u32` stamp wrapped every ~49.7 days and broke the
+    // latest-stamp order across the wrap).
+    let stamp = now_ms().max(1) as u64;
+    let stamped = npc
+        .with_unit(|u| {
+            let table = &mut u.unit_mut().skill_state.aggro_table;
+            let top = if copy_top {
+                table.values().map(Aggro::total).max().unwrap_or(0)
+            } else {
+                0
+            };
+            let Some(entry) = table.get_mut(&caster_id) else {
+                return false;
+            };
+            entry.taunt_time = stamp;
+            if copy_top {
+                let total = entry.total();
+                if top > total {
+                    entry.etc_aggro = entry.etc_aggro.wrapping_add(top - total);
+                }
+            }
+            true
+        })
+        .unwrap_or(false);
+    if stamped {
+        tracing::debug!(
+            "taunt: npc {} locked on caster {} (copy_top = {copy_top})",
+            npc.obj_id(),
+            caster_id
+        );
+        crate::systems::ai::manager::post(server, npc.obj_id(), |c| c.on_aggro_target_changed());
+    }
+}
+
+/// `NpcAggroTable::CancelTauntedBy(caster)` (10x-ONLY): clears the caster's stamp only when no
+/// other taunt buff from that caster remains on the NPC. Threat is not reduced.
+pub fn cancel_taunted_by(server: &GameServer, npc: &WorldObject, caster_obj_id: u32) {
+    if npc.as_npc().is_none() || caster_obj_id == 0 {
+        return;
+    }
+    let remaining = npc.with_base_unit(|b| {
+        b.buffs().effects.iter().any(|e| {
+            e.caster_obj_id == caster_obj_id
+                && server
+                    .game_data
+                    .systems
+                    .skills
+                    .buff(e.template.id)
+                    .is_some_and(|t| t.taunt)
+        })
+    });
+    if remaining {
+        return;
+    }
+    let cleared = npc
+        .with_unit(|u| {
+            u.unit_mut()
+                .skill_state
+                .aggro_table
+                .get_mut(&caster_obj_id)
+                .map(|e| {
+                    let stamped = e.taunt_time != 0;
+                    e.taunt_time = 0;
+                    stamped
+                })
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    if cleared {
+        tracing::debug!(
+            "taunt: npc {} released caster {caster_obj_id}",
+            npc.obj_id()
+        );
+        crate::systems::ai::manager::post(server, npc.obj_id(), |c| c.on_aggro_target_changed());
+    }
+}
+
+/// The generic buff-start hook of a taunt buff: 10.x runs `TauntedBy` when the buff is created
+/// on an NPC. Re-stamping a refresh is capture-pending (TAUNT-1; the 10x refresh path is
+/// unknown).
+pub fn on_taunt_buff_applied(server: &GameServer, owner: &WorldObject, b: &Buff) {
+    let Some(template) = server.game_data.systems.skills.buff(b.template.id) else {
+        return;
+    };
+    if !template.taunt || b.caster_obj_id == 0 {
+        return;
+    }
+    let Some(caster) = buffs::find_obj(server, b.caster_obj_id) else {
+        return;
+    };
+    taunted_by(server, owner, &caster, template.taunt_with_top_aggro);
+}
+
+/// The refresh hook of a taunt buff. The stack-rule overwrite replaces the effect's caster, so
+/// a refresh by a second taunter would otherwise leave the previous caster's stamp on the NPC
+/// for good: its buff is gone, and `on_removed` only cancels the current (new) caster. Release
+/// the previous caster first (their other live taunt buffs, if any, keep the stamp), then stamp
+/// the new caster like a fresh application.
+pub fn on_taunt_buff_refreshed(
+    server: &GameServer,
+    owner: &WorldObject,
+    b: &Buff,
+    previous_caster_obj_id: u32,
+) {
+    let Some(template) = server.game_data.systems.skills.buff(b.template.id) else {
+        return;
+    };
+    if !template.taunt {
+        return;
+    }
+    if previous_caster_obj_id != 0 && previous_caster_obj_id != b.caster_obj_id {
+        cancel_taunted_by(server, owner, previous_caster_obj_id);
+    }
+    on_taunt_buff_applied(server, owner, b);
 }
 
 /// `Unit.ClearAggroOfUnit(unit)` on `owner`.

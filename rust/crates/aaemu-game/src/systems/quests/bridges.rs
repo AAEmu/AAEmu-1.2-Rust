@@ -362,16 +362,22 @@ impl QuestsBridge for QuestsForNpcs {
 /// sorted by descending total aggro, expressed as a percentile (best contributor = 0).
 /// Authored quest rank thresholds are percentages; 100 means absent from the table.
 pub fn aggro_rating_percent(npc: &NpcRef, obj_id: u32) -> f32 {
-    let mut sorted: Vec<(u32, i32)> = npc
+    let mut sorted: Vec<(u32, i32, u64)> = npc
         .data()
         .unit
         .skill_state
         .aggro_table
         .iter()
-        .map(|(id, a)| (*id, a.total()))
+        .map(|(id, a)| (*id, a.total(), a.taunt_time))
         .collect();
-    sorted.sort_by_key(|&(id, total)| (std::cmp::Reverse(total), id));
-    match sorted.iter().position(|(id, _)| *id == obj_id) {
+    // 10.x taunt order first (latest stamp first); the total order stays for unstamped entries.
+    sorted.sort_by(|a, b| match (a.2, b.2) {
+        (0, 0) => b.1.cmp(&a.1).then(a.0.cmp(&b.0)),
+        (0, _) => std::cmp::Ordering::Greater,
+        (_, 0) => std::cmp::Ordering::Less,
+        (x, y) => y.cmp(&x).then(a.0.cmp(&b.0)),
+    });
+    match sorted.iter().position(|(id, _, _)| *id == obj_id) {
         Some(pos) => 100.0 / sorted.len() as f32 * pos as f32,
         None => 100.0,
     }

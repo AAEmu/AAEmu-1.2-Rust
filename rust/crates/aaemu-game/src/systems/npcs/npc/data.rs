@@ -139,6 +139,11 @@ pub struct NpcTemplate {
     pub show_name_tag: bool,
     pub visible_to_creator_only: bool,
     pub no_exp: bool,
+    /// `no_penalty`: a player this NPC kills gets no death penalty (exp / durability). The
+    /// 1.2 client loads the column too (`npcs` SELECT in `x2game.dll.c` 0x39A01098) but the
+    /// only behaviour evidence is the column name and the rows (guards, siege cannons,
+    /// battlefield pets, alliance NPCs).
+    pub no_penalty: bool,
     pub pet_item_id: u32,
     pub base_skill_id: i32,
     pub track_friendship: bool,
@@ -234,6 +239,7 @@ impl Default for NpcTemplate {
             show_name_tag: false,
             visible_to_creator_only: false,
             no_exp: false,
+            no_penalty: false,
             pet_item_id: 0,
             base_skill_id: 0,
             track_friendship: false,
@@ -491,6 +497,40 @@ pub struct WeaponDpsTemplate {
     pub formula_mdps: Formula,
 }
 
+/// `aggro_links` / `npc_aggro_links`: named groups of NPC templates that help each other.
+///
+/// The 10.x zone server loads both tables but no consumer was found in its decompile, so the
+/// runtime rule is inferred from the 1.2 data: members of the same group help each other (see
+/// `systems::ai::behaviors::update_aggro_help`). Capture-pending (`AGGROLINK-1`).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct AggroLinkData {
+    /// `aggro_links`: group id -> name (kept for reference / diagnostics).
+    pub groups: HashMap<u32, String>,
+    /// `npc_aggro_links`: NPC template id -> its group ids (deduplicated, load order).
+    pub groups_by_npc: HashMap<u32, Vec<u32>>,
+}
+
+impl AggroLinkData {
+    /// The group ids of one NPC template.
+    pub fn groups_of(&self, npc_template_id: u32) -> &[u32] {
+        self.groups_by_npc
+            .get(&npc_template_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Whether both NPC templates belong to at least one common `aggro_link` group.
+    pub fn share_group(&self, npc_a: u32, npc_b: u32) -> bool {
+        match (
+            self.groups_by_npc.get(&npc_a),
+            self.groups_by_npc.get(&npc_b),
+        ) {
+            (Some(a), Some(b)) => a.iter().any(|group| b.contains(group)),
+            _ => false,
+        }
+    }
+}
+
 /// `NpcManager` tables.
 #[derive(Debug, Default)]
 pub struct NpcData {
@@ -519,6 +559,8 @@ pub struct NpcData {
     /// `npc_interactions` (`npc_interaction_set_id` -> `skills.id` in table order): what the client's talk offers
     /// an NPC that has no function flag (the beauty salon helper offers "Enter the beauty salon").
     pub interactions: HashMap<i32, Vec<u32>>,
+    /// `aggro_links` / `npc_aggro_links` (template-id groups that help each other).
+    pub aggro_links: AggroLinkData,
 }
 
 fn dup(what: &str, id: u32) -> crate::data::GameDataError {
@@ -755,6 +797,7 @@ impl NpcData {
                 show_name_tag: r.bool_str("show_name_tag")?,
                 visible_to_creator_only: r.bool_str("visible_to_creator_only")?,
                 no_exp: r.bool_str("no_exp")?,
+                no_penalty: r.bool_str("no_penalty")?,
                 pet_item_id: r.u32_or("pet_item_id", 0)?,
                 base_skill_id: r.i32("base_skill_id")?,
                 track_friendship: r.bool_str("track_friendship")?,
@@ -961,7 +1004,70 @@ impl NpcData {
         d.load_weapons(conn)?;
         d.load_localized_names(conn, language)?;
         d.load_interactions(conn)?;
+        d.load_aggro_links(conn)?;
         Ok(d)
+    }
+
+    /// `aggro_links` + `npc_aggro_links` (loaded only when the template exists).
+    ///
+    /// A row that names an unknown NPC template or group is skipped with a warning rather than
+    /// aborting the catalog; duplicate `(npc, group)` rows are collapsed.
+    fn load_aggro_links(&mut self, conn: &Connection) -> rusqlite::Result<()> {
+        for_each_row(conn, "SELECT id, name FROM aggro_links", [], |r| {
+            let id = match r.u32("id") {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::warn!("aggro_links: bad row skipped: {e}");
+                    return Ok(());
+                }
+            };
+            let name = match r.string_or("name", "") {
+                Ok(name) => name,
+                Err(e) => {
+                    tracing::warn!("aggro_links: bad name skipped: {e}");
+                    return Ok(());
+                }
+            };
+            self.aggro_links.groups.insert(id, name);
+            Ok(())
+        })?;
+        for_each_row(
+            conn,
+            "SELECT npc_id, aggro_link_id FROM npc_aggro_links",
+            [],
+            |r| {
+                let (npc_id, group_id) = match (r.u32("npc_id"), r.u32("aggro_link_id")) {
+                    (Ok(npc_id), Ok(group_id)) => (npc_id, group_id),
+                    (Err(e), _) | (_, Err(e)) => {
+                        tracing::warn!("npc_aggro_links: bad row skipped: {e}");
+                        return Ok(());
+                    }
+                };
+                if !self.templates.contains_key(&npc_id) {
+                    tracing::warn!("npc_aggro_links: unknown npc template {npc_id}, row skipped");
+                    return Ok(());
+                }
+                if !self.aggro_links.groups.contains_key(&group_id) {
+                    tracing::warn!("npc_aggro_links: unknown aggro link {group_id}, row skipped");
+                    return Ok(());
+                }
+                let groups = self.aggro_links.groups_by_npc.entry(npc_id).or_default();
+                if !groups.contains(&group_id) {
+                    groups.push(group_id);
+                }
+                Ok(())
+            },
+        )?;
+        tracing::info!(
+            "Loaded {} aggro link groups, {} npc memberships",
+            self.aggro_links.groups.len(),
+            self.aggro_links
+                .groups_by_npc
+                .values()
+                .map(Vec::len)
+                .sum::<usize>()
+        );
+        Ok(())
     }
 
     /// `NpcGameData.Load` (`np_skills`, `np_passive_buffs`) + the `PostLoad` binding.
@@ -1233,17 +1339,17 @@ mod tests {
             no_apply_total_custom NUM, base_skill_strafe NUM, base_skill_delay REAL,
             npc_interaction_set_id INT, use_abuser_list NUM,
             return_when_enter_housing_area NUM, look_converter NUM,
-            use_ddcms_mount_skill NUM, crowd_effect NUM);
+            use_ddcms_mount_skill NUM, crowd_effect NUM, no_penalty NUM);
         INSERT INTO npcs VALUES (100, 'Guard', 1, 1, 1, 50, 9, NULL, 3, 4, 1, 101, 't', 0, 'f',
             0, 'f', 't', 'f', 'f', NULL, 0, 'f', 'f', NULL, 'f', 'f', 1.0, 'f', 1.0, 1.0, 1.0,
             NULL, 1.0, 'f', 1.0, 0, 'f', 'f', 0, 0.0, 0, 'f', 'f', 0, 0.0, 'f', 'f', 0, 'f',
             'f', 'f', 0.0, 'f', 'f', 'f', NULL, 'f', 6, NULL, NULL, NULL, 5, 'f', 'f', 0.0,
-            NULL, 'f', 'f', 'f', 'f', 'f');
+            NULL, 'f', 'f', 'f', 'f', 'f', 't');
         INSERT INTO npcs VALUES (101, 'Wolf', 0, 2, 2, 10, 9, NULL, NULL, NULL, 2, 3, 'f', 1,
             'f', 0, 'f', 't', 'f', 'f', NULL, 0, 'f', 'f', NULL, 'f', 'f', 1.0, 'f', 1.5, 1.0,
             1.0, NULL, 1.0, 't', 1.0, 0, 'f', 'f', 0, 0.0, 0, 'f', 'f', 0, 0.0, 'f', 'f', 0,
             'f', 'f', 'f', 0.0, 'f', 'f', 'f', NULL, 'f', 0, NULL, NULL, NULL, NULL, 'f', 'f',
-            0.0, NULL, 'f', 'f', 'f', 'f', 'f');
+            0.0, NULL, 'f', 'f', 'f', 'f', 'f', 'f');
         CREATE TABLE equip_pack_body_parts (id INT, name TEXT, model_id INT, hair_color_id INT,
             face_id INT, hair_id INT, beard_id INT, skin_color_id INT, body_diffuse_map_id INT);
         INSERT INTO equip_pack_body_parts VALUES (1, 'p', 1, 0, 0, 0, 0, 0, 0);
@@ -1279,6 +1385,11 @@ mod tests {
         INSERT INTO items VALUES (601, 20);
         CREATE TABLE npc_interactions (id INT, npc_interaction_set_id INT, skill_id INT);
         INSERT INTO npc_interactions VALUES (1, 12, 22780), (2, 12, 23469), (3, 13, 999);
+        CREATE TABLE aggro_links (id INT, name TEXT, comment TEXT);
+        INSERT INTO aggro_links VALUES (500, 'herd', ''), (501, 'guard', '');
+        CREATE TABLE npc_aggro_links (id INT, npc_id INT, aggro_link_id INT);
+        INSERT INTO npc_aggro_links VALUES (1, 100, 500), (2, 101, 500), (3, 101, 501),
+            (4, 100, 500);
         CREATE TABLE localized_texts (id INT, tbl_name TEXT, tbl_column_name TEXT, idx INT,
             en_us TEXT);
         INSERT INTO localized_texts VALUES (1, 'npcs', 'name', 100, 'Guard'),
@@ -1422,6 +1533,29 @@ mod tests {
         assert_eq!(d.total_character_customs.len(), 1);
         assert_eq!(d.total_character_custom(5).unwrap().modifier.len(), 128);
         assert_eq!(d.equip_pack_body_parts.len(), 1);
+        assert_eq!(d.aggro_links.groups.len(), 2);
+        assert_eq!(d.aggro_links.groups_of(100), [500]);
+        assert_eq!(d.aggro_links.groups_of(101), [500, 501]);
+        assert!(d.aggro_links.share_group(100, 101));
+        assert!(!d.aggro_links.share_group(100, 999));
+    }
+
+    /// A `npc_aggro_links` row that names a missing NPC / group (or is malformed) is skipped
+    /// instead of failing the whole NPC catalog.
+    #[test]
+    fn aggro_links_skip_bad_rows_and_dedupe() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(TEST_SCHEMA).unwrap();
+        c.execute_batch(
+            "INSERT INTO npc_aggro_links VALUES (5, 999, 500), (6, 100, 999), (7, NULL, 500),
+             (8, 100, NULL);",
+        )
+        .unwrap();
+        let d = NpcData::load_conn(&c, "en_us").unwrap();
+        assert_eq!(d.aggro_links.groups.len(), 2);
+        assert_eq!(d.aggro_links.groups_by_npc.len(), 2);
+        assert_eq!(d.aggro_links.groups_of(100), [500]);
+        assert_eq!(d.aggro_links.groups_of(101), [500, 501]);
     }
 
     /// Real `compact.sqlite3` (`AAEMU_COMPACT_DB`).
@@ -1465,6 +1599,16 @@ mod tests {
             .values()
             .filter(|t| t.merchant_pack_id > 0)
             .count();
+        // `npcs.no_penalty`: guards, siege cannons and battlefield pets are the 88 rows.
+        let no_penalty = d.templates.values().filter(|t| t.no_penalty).count();
+        assert_eq!(
+            no_penalty,
+            count("SELECT COUNT(*) FROM npcs WHERE no_penalty='t'")
+        );
+        assert_eq!(no_penalty, 88);
+        assert!(d.template(1067).expect("guard").no_penalty);
+        assert!(d.template(12411).expect("red dragon").no_penalty);
+        assert!(!d.template(100).expect("ordinary npc").no_penalty);
         assert_eq!(
             buffs,
             count("SELECT COUNT(*) FROM npc_initial_buffs WHERE npc_id IN (SELECT id FROM npcs)")
@@ -1491,16 +1635,40 @@ mod tests {
                  (SELECT npc_posture_set_id FROM npc_postures)"
             )
         );
+        assert_eq!(
+            d.aggro_links.groups.len(),
+            count("SELECT COUNT(*) FROM aggro_links")
+        );
+        assert_eq!(
+            d.aggro_links.groups_by_npc.len(),
+            count("SELECT COUNT(DISTINCT npc_id) FROM npc_aggro_links")
+        );
+        assert_eq!(
+            d.aggro_links
+                .groups_by_npc
+                .values()
+                .map(Vec::len)
+                .sum::<usize>(),
+            count(
+                "SELECT COUNT(*) FROM (SELECT DISTINCT npc_id, aggro_link_id \
+                 FROM npc_aggro_links WHERE npc_id IN (SELECT id FROM npcs) \
+                 AND aggro_link_id IN (SELECT id FROM aggro_links))"
+            )
+        );
+        // A real linked pair from `aggro_links` 87 (lioness + roaring lioness).
+        assert!(d.aggro_links.share_group(1007, 1008));
         eprintln!(
             "npc templates {}, customs {}, merchant packs {}, buffs {buffs}, bonuses {bonuses}, \
              skills {skills}, passives {passives}, with postures {with_postures}, merchants \
-             {merchants}, models {}, weapons {}, names {}",
+             {merchants}, models {}, weapons {}, names {}, aggro groups {}, linked npcs {}",
             d.templates.len(),
             d.total_character_customs.len(),
             d.goods.len(),
             d.model_types.len(),
             d.weapons.len(),
-            d.localized_names.len()
+            d.localized_names.len(),
+            d.aggro_links.groups.len(),
+            d.aggro_links.groups_by_npc.len()
         );
         // Every posture list is sorted by start time, descending.
         for t in d.templates.values() {
