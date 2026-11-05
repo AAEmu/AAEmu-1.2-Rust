@@ -538,6 +538,18 @@ fn use_skill_impl(
         return result;
     }
     let template = skill.template.clone();
+    // The client refuses a cap-scale cast on an `item_cap_scale_forbids` target before it is
+    // sent (`FUN_3939dc20` -> SkillResult INVALID_TARGET 0x22); a forged cast is refused here
+    // before the source item is taken, and answers `SCSkillStarted` with result 0x22.
+    if let Err(result) = super::validation::check_cap_scale_target(
+        server,
+        caster,
+        &template,
+        &caster_caster,
+        target_caster,
+    ) {
+        return result;
+    }
     let resolved_target = initial_target(server, skill, caster, &caster_caster, target_caster);
     let Some(target) = &resolved_target else {
         if let Some(npc) = caster.as_npc() {

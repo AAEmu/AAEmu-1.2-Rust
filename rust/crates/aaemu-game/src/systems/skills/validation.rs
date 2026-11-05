@@ -253,6 +253,48 @@ pub(super) fn check_build_materials(
     Ok(())
 }
 
+/// The 1.2 client's cap-scale target check (`FUN_3939dc20`, SkillResult INVALID_TARGET
+/// 0x22): a skill carrying the `ItemCapScale` (special 112) or `ItemCapScaleReset` (111)
+/// effect refuses a target item whose template is in `item_cap_scale_forbids`
+/// (`FUN_395a72d0`, the client's "scalable" property). Runs before the cast takes resources
+/// or the source item, so the temper is kept.
+pub(super) fn check_cap_scale_target(
+    server: &GameServer,
+    caster: &WorldObject,
+    skill: &super::data::SkillTemplate,
+    caster_caster: &super::types::SkillCaster,
+    target_caster: &super::types::SkillCastTarget,
+) -> Result<(), (u8, u32)> {
+    if !matches!(caster_caster, super::types::SkillCaster::Item { .. }) {
+        return Ok(());
+    }
+    let super::types::SkillCastTarget::Item { id, .. } = target_caster else {
+        return Ok(());
+    };
+    let Some(player) = caster.as_player() else {
+        return Ok(());
+    };
+    let cap_scale_effect = skill.effects.iter().any(|e| {
+        e.template.is_some_and(|(kind, effect_id)| {
+            matches!(
+                server.game_data.systems.skills.effect(kind, effect_id),
+                Some(super::data::EffectTemplate::Special(s))
+                    if s.special_effect_type_id == 111 || s.special_effect_type_id == 112
+            )
+        })
+    });
+    if !cap_scale_effect {
+        return Ok(());
+    }
+    let Some(item) = Inv::of(player).item_by_id(*id) else {
+        return Ok(());
+    };
+    if server.game_data.items.cap_scale_forbidden(item.template_id) {
+        return Err((skill_result::INVALID_TARGET, 0));
+    }
+    Ok(())
+}
+
 pub(super) fn check(
     server: &GameServer,
     skill: &SkillRun,

@@ -1,7 +1,7 @@
 //! The auction packets: `CSAuctionPostPacket`, `CSAuctionSearchPacket`, `CSBidAuctionPacket`,
 //! `CSCancelAuctionPacket`, `CSAuctionMyBidListPacket`, `CSAuctionLowestPricePacket`,
 //! `SCAuctionPostedPacket`, `SCAuctionSearchedPacket`, `SCAuctionBidPacket`,
-//! `SCAuctionCanceledPacket`, `SCAuctionLowestPricePacket`.
+//! `SCAuctionCanceledPacket`, `SCAuctionLowestPricePacket`, `SCAuctionMessagePacket`.
 
 use aaemu_commons::{Marshal, PacketStream};
 use chrono::{DateTime, Utc};
@@ -376,6 +376,33 @@ packet_def!(
 impl Marshal for SCAuctionCanceledPacket {
     fn write(&self, s: &mut PacketStream) {
         self.lot.write(s);
+    }
+}
+
+/// `SCAuctionMessagePacket(msgType, itemType, moneyAmount)`.
+///
+/// The 1.2 client reader `FUN_397b56f0` reads `msgType` (u8, stream slot 0x44), `itemType`
+/// (u32, slot 0x3c) and `moneyAmount` (i32, slot 0x4c); its handler `FUN_39182150` passes them
+/// to `FUN_394cf660`, which raises ui event 0x1fc (`AUCTION_BIDDEN`) for `msgType` 0 and 0x1fd
+/// (`AUCTION_BOUGHT_BY_SOMEONE`) for 1, with the item name and the money as arguments. The
+/// client texts are 3047 `bidden_message` and 3048 `bought_by_someone_message`, both addressed
+/// to the seller ("Your listed item was bid on / was sold").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SCAuctionMessagePacket {
+    pub msg_type: u8,
+    pub item_type: u32,
+    pub money_amount: i32,
+}
+packet_def!(
+    SCAuctionMessagePacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCAuctionMessagePacket
+);
+impl Marshal for SCAuctionMessagePacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_u8(self.msg_type)
+            .write_u32(self.item_type)
+            .write_i32(self.money_amount);
     }
 }
 

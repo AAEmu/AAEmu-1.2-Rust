@@ -1363,6 +1363,16 @@ fn real_compact_db_items_and_loot() {
     assert_eq!(d.enchanting_supports.len(), 12);
     assert_eq!(d.socket_chance.len(), 8);
     assert_eq!(d.item_cap_scales.len(), 225);
+    // 1340 rows, 1335 distinct item ids (five ids are listed twice under different names): the
+    // 1.2 client loads them into a set too (`FUN_395a72d0`).
+    assert_eq!(d.item_cap_scale_forbids.len(), 1335);
+    assert!(d.cap_scale_forbidden(2986));
+    assert!(!d.cap_scale_forbidden(27309));
+    let rod = d.template(27309).expect("iron fishing rod");
+    assert_eq!(
+        (rod.actability_group_id, rod.actability_requirement),
+        (7, 10000)
+    );
     assert_eq!(d.grade_distributions.len(), 25);
     assert_eq!(d.loot_pack_dropping_npc.len(), 3988);
     assert_eq!(

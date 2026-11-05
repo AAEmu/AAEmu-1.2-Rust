@@ -148,6 +148,17 @@ impl CSSwapItemsPacket {
         if item_security::refuse_move_if_locked(server, &p, a.from_item_id, a.to_item_id) {
             return;
         }
+        if inventory::equip_actability_refused(
+            server,
+            &p,
+            a.from_slot_type,
+            a.from_item_id,
+            a.to_slot_type,
+            a.to_item_id,
+            a.to_slot,
+        ) {
+            return;
+        }
         let ok = {
             let mut txn = ItemTxn::begin(server);
             inventory::split_or_move_item(
@@ -199,6 +210,17 @@ impl CSSplitBagItemPacket {
         }
         let inv = Inv::of(&p);
         if item_security::refuse_move_if_locked(server, &p, a.from_item_id, a.to_item_id) {
+            return;
+        }
+        if inventory::equip_actability_refused(
+            server,
+            &p,
+            a.from_slot_type,
+            a.from_item_id,
+            a.to_slot_type,
+            a.to_item_id,
+            a.to_slot,
+        ) {
             return;
         }
         let mut txn = ItemTxn::begin(server);
@@ -448,6 +470,17 @@ impl CSSplitCofferItemPacket {
         if item_security::refuse_move_if_locked(server, &p, a.from_item_id, a.to_item_id) {
             return;
         }
+        if inventory::equip_actability_refused(
+            server,
+            &p,
+            a.from_slot_type,
+            a.from_item_id,
+            a.to_slot_type,
+            a.to_item_id,
+            a.to_slot,
+        ) {
+            return;
+        }
         let ok = {
             let mut txn = ItemTxn::begin(server);
             inventory::coffer_items(
@@ -497,6 +530,17 @@ impl CSSwapCofferItemsPacket {
         let a = self.args;
         let inv = Inv::of(&p);
         if item_security::refuse_move_if_locked(server, &p, a.from_item_id, a.to_item_id) {
+            return;
+        }
+        if inventory::equip_actability_refused(
+            server,
+            &p,
+            a.from_slot_type,
+            a.from_item_id,
+            a.to_slot_type,
+            a.to_item_id,
+            a.to_slot,
+        ) {
             return;
         }
         let ok = {
