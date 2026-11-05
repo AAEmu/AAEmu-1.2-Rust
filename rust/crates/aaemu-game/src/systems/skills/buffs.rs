@@ -1316,11 +1316,23 @@ fn start_skill_controller(
         ) {
             Some(sc) => sc,
             None => {
-                tracing::warn!(
-                    "BuffTemplate.Start: buff {} SC factory returned null for kind={} — controller class not implemented",
-                    template.id,
-                    sct.kind_id
-                );
+                // WP-9 (combat-ai analysis, 2026-11-05): Rope (5), Anchor (6) and Flowgraph (8)
+                // have no generic controller by design (Rope is handled by the harpoon family,
+                // Flowgraph is test skill 23969 only, Anchor two monster skills), so this is an
+                // expected debug message. Other unimplemented kinds stay warnings.
+                if matches!(sct.kind_id, 5 | 6 | 8) {
+                    tracing::debug!(
+                        "BuffTemplate.Start: buff {} SC factory returned null for kind={} — controller class not implemented",
+                        template.id,
+                        sct.kind_id
+                    );
+                } else {
+                    tracing::warn!(
+                        "BuffTemplate.Start: buff {} SC factory returned null for kind={} — controller class not implemented",
+                        template.id,
+                        sct.kind_id
+                    );
+                }
                 return;
             }
         }
