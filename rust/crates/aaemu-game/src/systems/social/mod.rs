@@ -57,6 +57,8 @@ mod expedition_rename_tests;
 #[cfg(test)]
 mod flow_tests;
 #[cfg(test)]
+mod friend_flow_tests;
+#[cfg(test)]
 mod manager_tests;
 #[cfg(test)]
 mod nation_stage4_tests;
