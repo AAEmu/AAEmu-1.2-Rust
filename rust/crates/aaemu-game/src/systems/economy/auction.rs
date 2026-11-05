@@ -569,6 +569,25 @@ impl AuctionManager {
         self.lots().get(&id).cloned()
     }
 
+    /// Updates the cached seller / bidder names of a renamed character. Returns the number of
+    /// changed name fields. The caller owns `SaveManager::transaction_lock`, so a dirty lot
+    /// cannot be saved with the old names after this swap.
+    pub fn rename_character(&self, character_id: u32, new_name: &str) -> usize {
+        let mut lots = self.lots();
+        let mut changed = 0;
+        for lot in lots.values_mut() {
+            if lot.client_id == character_id && lot.client_name != new_name {
+                lot.client_name = new_name.to_string();
+                changed += 1;
+            }
+            if lot.bidder_id == character_id && lot.bidder_name != new_name {
+                lot.bidder_name = new_name.to_string();
+                changed += 1;
+            }
+        }
+        changed
+    }
+
     /// Snapshot of `DeletedAuctionItemIds`.
     pub fn deleted_ids(&self) -> Vec<u64> {
         self.deleted

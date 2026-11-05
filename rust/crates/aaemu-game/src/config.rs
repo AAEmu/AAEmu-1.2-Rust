@@ -97,6 +97,9 @@ pub struct AppConfig {
     /// `Crafting` (recipe learning gate).
     #[serde(rename = "crafting")]
     pub crafting: crate::systems::economy::config::CraftingConfig,
+    /// `Loot` (`Configurations/Loot.json`: party loot announcements).
+    #[serde(rename = "loot")]
+    pub loot: crate::systems::economy::config::LootAnnounceConfig,
     #[serde(rename = "clientdata")]
     pub client_data: ClientDataConfig,
     /// `Specialty`.
@@ -177,6 +180,7 @@ impl Default for AppConfig {
             world: WorldConfig::default(),
             housing: Default::default(),
             crafting: Default::default(),
+            loot: Default::default(),
             client_data: ClientDataConfig::default(),
             specialty: SpecialtyConfig::default(),
             scripts: ScriptsConfig::default(),
@@ -314,6 +318,8 @@ pub struct AccountConfig {
     /// `SCInitialConfig.idleKickTime` (raw `u16`, `0` = off; Rust only, WP-J). The unit is
     /// **UNKNOWN** (the 1.2 `CGame::Update` consumer was not located): do not document it as
     /// minutes or seconds. The client performs the idle kick itself; the server never kicks.
+    /// **Needs one real-client run** with `Account:IdleKickTime=1`: about 1 s means seconds,
+    /// about 1 min means minutes. `aaemu-testclient` does not emulate the kick.
     #[serde(rename = "idlekicktime", deserialize_with = "lenient")]
     pub idle_kick_time: u16,
     /// The lobby `SCTrionConfig` values (Rust only, WP-UI4). The defaults are the formerly
@@ -1765,6 +1771,17 @@ mod tests {
         assert_eq!(cfg.world.npc_warm_retention_seconds, 300);
         assert!(!cfg.world.npc_resident_service_npcs);
         assert_eq!(cfg.world.ai_worker_threads, 4);
+    }
+
+    #[test]
+    fn loot_announce_to_party_defaults_false_and_binds_leniently() {
+        let cfg = AppConfig::from_value(json!({})).unwrap();
+        assert!(!cfg.loot.announce_to_party);
+        let cfg = AppConfig::from_value(json!({
+            "Loot": { "AnnounceToParty": "True" }
+        }))
+        .unwrap();
+        assert!(cfg.loot.announce_to_party);
     }
 
     #[test]
