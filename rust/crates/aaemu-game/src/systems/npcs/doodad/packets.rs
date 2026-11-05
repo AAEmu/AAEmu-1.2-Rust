@@ -296,6 +296,16 @@ impl ClientPacket for CSChangeDoodadPhasePacket {
                 );
                 return Ok(());
             }
+            // `blocked_child_doodads`: a player cannot start the child doodad's phase funcs
+            // while its parent unit carries the blocking buff.
+            if super::phase::refuse_blocked_child_doodad(
+                server,
+                &world,
+                &doodad,
+                Some(&WorldObject::from(&me)),
+            ) {
+                return Ok(());
+            }
             // Same refusal as `Doodad.Use` (phase.rs): a doodad scheduled for despawn must not
             // change phase.
             if server
