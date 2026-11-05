@@ -5753,6 +5753,45 @@ Persistence: `character_cooldowns` (`character_id`, `cooldown_type` 0 = skill id
 `COOLDOWN_TIME`. **Deviation:** the C# had no persistence and no real cooldown packet; this port
 adds both.
 
+## Trial cancellation and jury verdict-count packets (2026-11-05)
+
+The 1.2 client registers `TRIAL_CANCELED` in `usertrial/trial_status.alb` and `VERDICT_COUNT`
+in `verdict.alb`; the C# trial flow sent neither packet. Both are now sent from the existing
+trial state machine (`systems/social/trial.rs`); their layouts are read from the client:
+
+* `SCTrialCanceledPacket` 0x183, reader `FUN_397afa30`: `u32 trialId`.
+* `SCChangeJuryVerdictCountPacket` 0x17a, reader `FUN_397af940`: `i32 count ; i32 total`.
+
+Rules and **INFERRED** audiences (no capture of the 1.2 server has these packets yet):
+
+* `SCTrialCanceled` goes out when the trial reaches `TrialStep.TrialCancelled` (the active jury
+  count dropped to 0) and when the defendant sends `CSCancelTrialPacket`, before
+  `SCRulingClosed`. The audience is the `TrialData::send_packets` set (the defendant and every
+  seated jury member), because the C# defined `SendPackets` as the trial audience and sent
+  nothing here.
+* `SCChangeJuryVerdictCount` goes to every seated juror who has not voted yet: once when the
+  `JuryVerdict` step starts (count 0) and after every accepted vote. `count` is the number of
+  votes cast and `total` the number of seated jurors (a seat with a `jury_member`), matching the
+  `SCRulingStatus(count, total)` numbers the same step already sends. The audience is INFERRED
+  from `verdict.alb`'s "remaining" display.
+
+`CSJurySummonedPacket` is the client's acknowledgement after `SCSummonJury`. It changes no
+server state; the handler only checks that the sender holds the seat
+(`trial.jury[jury].jury_member`) and logs the result at debug (the C# logged a warning).
+
+GM `crime points <player>` (the no-change stats branch) now prints the trial history from the
+`characters` table columns (`arrest_count`, `accept_trial_count`, `accept_guilty_count`,
+`guilty_count`, `not_guilty_count`) and the number of the player's judged records in the `crime`
+table (`judgement_time` set by `TrialData.ArchiveEvidence` when `Justice.KeepHistory` is on).
+
+Tests: `trial_canceled_and_verdict_count_match_the_1_2_readers` (byte layouts),
+`defendant_cancel_sends_trial_canceled_before_ruling_closed`,
+`trial_without_jury_is_cancelled_with_the_default_sentence` (empty-jury auto-cancel),
+`verdict_count_asks_only_the_jurors_who_still_have_to_vote`,
+`jury_summoned_requires_the_seat_holder_and_changes_nothing`, and
+`crime_root_help_and_points` (trial/archive counts). The bot suspect/arrest effects 84/88/89
+remain capture-pending and are not implemented.
+
 ## Wanted-player bounty (2026-11-02)
 
 The 1.2 C# tree only had the packet shells: `CSRequestSetBountyMoney` / `CSSendBountyUpdate`
