@@ -1,7 +1,7 @@
 # Working with Config Files and Server Listings
 
 - Audience: Contributors, players, and testers
-- Last verified against: `rust-rewrite` on October 12, 2026
+- Last verified against: `main` on November 6, 2026
 - Prerequisites: Basic JSON editing and AAEmu project structure familiarity
 
 ## Overview
@@ -143,6 +143,25 @@ the effective values in the `Character slots: base ...` startup log line of each
 server. If the game server cannot read `extra_character_slots` from MySQL, it
 logs the error and falls back to the base alone.
 
+### Two-factor authentication (`TwoFactor`)
+
+The login server reads `user_2fa` rows for OTP, PC-certificate PIN and ARS (phone
+callback). OTP works in-tree with a TOTP app:
+
+```json
+{
+  "TwoFactor": {
+    "MaxOtpFailures": 5,
+    "OtpLockoutMinutes": 15
+  }
+}
+```
+
+ARS needs an **operator provider**. The repository has the `ArsPhoneProvider` seam
+and a `DisabledArsPhoneProvider` default that refuses ARS logins with a warning;
+placing the call needs telephone integration, so an operator must supply that
+implementation. It is not a configuration toggle.
+
 ### Environment variable mapping (login)
 
 You can define server entries via environment variables:
@@ -239,6 +258,17 @@ The grant has its own end date; the configured default does not. The grant
 writes the account row and pushes `SCAccountInfo` and `SCUpdatePremiumPoint`
 to the account.
 
+## Cash shop (ICS) content is operator policy
+
+The cash shop reads `aaemu_game.ics_menu`, `ics_shop_items` and `ics_skus`. The base
+schema creates the tables but ships no catalogue, because no 1.2 retail content is
+evidenced; the tabs, SKUs, prices, stock limits and currencies are server-owner
+policy. `SQL/examples/example-ics-default-en.sql` is an optional example catalogue
+(English labels and example prices) that can be imported and edited; it is not part
+of the base schema or the required updates. Check each SKU's `currency` (credits,
+AA points, loyalty or coins) and price before importing. AA-priced SKUs need the
+AA-point wallet.
+
 ## Account restrictions and idle kick (`Account:Restrictions`, `Account:IdleKickTime`)
 
 `SCInitialConfig` carries seven `canXxx` booleans and an `idleKickTime` value. The 1.2 client
@@ -272,6 +302,11 @@ A flag that is not listed keeps its default (`true`). The per-method source is i
 client performs the idle kick itself and the `CGame::Update` consumer was not located, so it is
 not documented as minutes or seconds. The server never kicks an idle player and sends no
 `SCIdleKick`. The default `0` keeps the previous bytes.
+
+The unit needs one real-client run, because the kick is decided by the real client and
+the headless `aaemu-testclient` does not emulate it: set `Account:IdleKickTime` to `1`,
+log in with the 1.2 client and watch how long it stays; about 1 second means seconds,
+about 1 minute means minutes. Until then the value stays raw.
 
 Both settings can be overridden in `Config.Local.json` or with the environment variables
 `Account__IdleKickTime` and e.g. `Account__Restrictions__Demo__CanTrade`.

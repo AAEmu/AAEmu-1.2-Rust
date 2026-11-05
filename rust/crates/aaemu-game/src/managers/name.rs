@@ -251,19 +251,40 @@ impl NameManager {
         }
     }
 
-    /// Renames a registered character (the lobby edit's name change). One write lock swaps the
-    /// name mapping; the id and account registrations stay.
-    pub fn rename_character(&self, id: u32, new_name: &str) {
+    /// Renames a registered character (the lobby edit and the GM rename). One write lock swaps
+    /// the name mapping, so no reader sees the character with neither or with both names; the
+    /// id and account registrations stay. Returns `false` and changes nothing when the id is not
+    /// registered or the name belongs to another character. The caller owns the database write
+    /// under `SaveManager::transaction_lock`, which is the same lock character create uses.
+    pub fn rename_character(&self, id: u32, new_name: &str) -> bool {
         let normalized = normalize_name(new_name);
         let mut n = self.inner.write().expect("names poisoned");
-        if let Some(old) = n.ids.get(&id).cloned() {
-            if old != normalized {
-                n.names.remove(&old);
-                tracing::info!("AddCharacterName, renamed {old} to {normalized} ({id})");
+        let Some(old) = n.ids.get(&id).cloned() else {
+            tracing::error!("AddCharacterName, cannot rename unknown character Id {id}");
+            return false;
+        };
+        if let Some(&owner) = n.names.get(&normalized) {
+            if owner != id {
+                tracing::error!(
+                    "AddCharacterName, cannot rename {old} ({id}) to {normalized}: the name belongs to character {owner}"
+                );
+                return false;
             }
+        }
+        if old != normalized {
+            n.names.remove(&old);
+            tracing::info!("AddCharacterName, renamed {old} to {normalized} ({id})");
         }
         n.ids.insert(id, normalized.clone());
         n.names.insert(normalized, id);
+        true
+    }
+
+    /// Both maps under one read lock (the rename atomicity test).
+    #[cfg(test)]
+    pub(crate) fn snapshot(&self) -> (HashMap<u32, String>, HashMap<String, u32>) {
+        let n = self.inner.read().expect("names poisoned");
+        (n.ids.clone(), n.names.clone())
     }
 
     /// `RemoveCharacterId`.

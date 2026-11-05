@@ -124,6 +124,14 @@ impl AuctionLot {
         self.item.as_ref().map_or(0, |i| i.template_id)
     }
 
+    /// A lot posted by the server itself: no player seller (`client_id = 0`, empty name). The
+    /// 1.2 data posts the six Siege Camps this way (`auction_post_siege_items`). Settlement must
+    /// never mail or pay a seller, and an expiry without bids deletes the item instead of
+    /// returning it (assumed: retail has no seller to return it to).
+    pub fn is_system_lot(&self) -> bool {
+        self.client_id == 0
+    }
+
     /// The lot with `Item` replaced by the live item object (`ItemManager.GetItemByItemId`),
     /// as the C# lot references the item object itself.
     pub fn with_live_item(&self, server: &GameServer) -> AuctionLot {
@@ -561,6 +569,25 @@ impl AuctionManager {
         self.lots().get(&id).cloned()
     }
 
+    /// Updates the cached seller / bidder names of a renamed character. Returns the number of
+    /// changed name fields. The caller owns `SaveManager::transaction_lock`, so a dirty lot
+    /// cannot be saved with the old names after this swap.
+    pub fn rename_character(&self, character_id: u32, new_name: &str) -> usize {
+        let mut lots = self.lots();
+        let mut changed = 0;
+        for lot in lots.values_mut() {
+            if lot.client_id == character_id && lot.client_name != new_name {
+                lot.client_name = new_name.to_string();
+                changed += 1;
+            }
+            if lot.bidder_id == character_id && lot.bidder_name != new_name {
+                lot.bidder_name = new_name.to_string();
+                changed += 1;
+            }
+        }
+        changed
+    }
+
     /// Snapshot of `DeletedAuctionItemIds`.
     pub fn deleted_ids(&self) -> Vec<u64> {
         self.deleted
@@ -649,10 +676,20 @@ impl AuctionManager {
 
     /// `AUCTION_SOLD` / `AUCTION_BUY`: only a party that is online is credited.
     fn report_sale(&self, server: &GameServer, lot: &AuctionLot, buyer_id: u32) {
-        if !lot.client_name.is_empty() {
+        if !lot.is_system_lot() {
             report_auction(server, lot.client_id, char_record_kind::AUCTION_SOLD);
         }
         report_auction(server, buyer_id, char_record_kind::AUCTION_BUY);
+    }
+
+    /// Deletes the item of a lot that has no seller to return it to: the item row is queued for
+    /// deletion and its id released.
+    fn delete_lot_item(&self, server: &GameServer, lot: &AuctionLot) {
+        let Some(item) = &lot.item else { return };
+        if server.items.item_by_id(item.id).is_none() {
+            return;
+        }
+        server.items.release_id(item.id, &server.ids.item);
     }
 
     /// Sends the settlement now; when a mail fails the lot (or refund) stays pending for the
@@ -829,15 +866,17 @@ impl AuctionManager {
         };
         let money_after_fee = f64::from(sold_amount) * 0.9;
         let recalculated_fee = listing_fee(lot.direct_money, lot.duration);
-        notify_seller(
-            server,
-            lot.client_id,
-            auction_message::BOUGHT_BY_SOMEONE,
-            new_item.template_id,
-            sold_amount,
-        );
+        if !lot.is_system_lot() {
+            notify_seller(
+                server,
+                lot.client_id,
+                auction_message::BOUGHT_BY_SOMEONE,
+                new_item.template_id,
+                sold_amount,
+            );
+        }
         let mut mails = Vec::new();
-        if !lot.client_name.is_empty() {
+        if !lot.is_system_lot() {
             mails.push(AuctionMail::SaleSeller {
                 item: new_item.clone(),
                 seller_id: lot.client_id,
@@ -880,6 +919,12 @@ impl AuctionManager {
             self.remove_auction_lot_sold(server, lot, &lot.bidder_name, lot.bid_money);
             return;
         }
+        if lot.is_system_lot() {
+            // No seller to return an unsold system lot to: the item is destroyed with it.
+            self.delete_lot_item(server, lot);
+            self.remove_auction_lot(server, lot.id);
+            return;
+        }
         // Item did not sell by end of the timer.
         let Some(new_item) = lot
             .item
@@ -889,10 +934,6 @@ impl AuctionManager {
             self.remove_auction_lot(server, lot.id);
             return;
         };
-        if lot.client_name.is_empty() {
-            self.remove_auction_lot(server, lot.id);
-            return;
-        }
         let recalculated_fee = listing_fee(lot.direct_money, lot.duration);
         self.queue_settlement(
             server,
@@ -1097,14 +1138,16 @@ impl AuctionManager {
             // Updating Data in the AuctionLots List
             self.update_auction_lot_in_list(&lot);
 
-            // The seller sees the bid live; the lot stays listed.
-            notify_seller(
-                server,
-                lot.client_id,
-                auction_message::BIDDEN,
-                lot.item_template_id(),
-                lot.bid_money,
-            );
+            // The seller sees the bid live; the lot stays listed. A system lot has none.
+            if !lot.is_system_lot() {
+                notify_seller(
+                    server,
+                    lot.client_id,
+                    auction_message::BIDDEN,
+                    lot.item_template_id(),
+                    lot.bid_money,
+                );
+            }
         }
     }
 
@@ -1283,6 +1326,79 @@ impl AuctionManager {
             extra: 0,
             dirty: true,
         })
+    }
+
+    /// Creates a lot sold by the server itself (`client_id = 0`, empty name): the item is
+    /// created once and kept in the auction escrow (loose, `SlotType.Auction`) so the normal
+    /// bid / settlement paths can deliver it. The caller serialises economy operations and adds
+    /// the returned lot; on `None` no item is left behind. The 1.2 client carries the GM command
+    /// `auction_post_siege_items`, which posts the six `siege_zones.declare_item_id` camps.
+    pub fn create_system_lot(
+        server: &GameServer,
+        item_template_id: u32,
+        start_price: i32,
+        buyout_price: i32,
+        duration: u8,
+        now: DateTime<Utc>,
+    ) -> Option<AuctionLot> {
+        let mut item = server.items.create(
+            item_template_id,
+            1,
+            0,
+            1,
+            &server.game_data.items,
+            &server.ids.item,
+            now.timestamp(),
+        )?;
+        item.slot_type = slot_type::AUCTION;
+        item.owner_id = 0;
+        item.dirty = true;
+        match Self::create_auction_lot(
+            server,
+            0,
+            "",
+            item.clone(),
+            start_price,
+            buyout_price,
+            duration,
+            now,
+        ) {
+            Some(lot) => {
+                server.items.add_loose(item);
+                Some(lot)
+            }
+            None => {
+                server.items.release_id(item.id, &server.ids.item);
+                None
+            }
+        }
+    }
+
+    /// GM `auction_cancel`: withdraws an unbid system lot and deletes its item. Player lots are
+    /// untouched (their item belongs to a player) and a lot with a bid is refused, as with the
+    /// seller cancel. The retail command's arguments are UNKNOWN: the lot id is assumed.
+    pub fn cancel_system_lot(
+        &self,
+        server: &GameServer,
+        lot_id: u64,
+    ) -> std::result::Result<AuctionLot, &'static str> {
+        let _items = server.systems.economy.operation_scope();
+        let _op = self.op();
+        let Some(lot) = self.lot(lot_id) else {
+            return Err("no such auction lot");
+        };
+        if !lot.is_system_lot() {
+            return Err("only system lots can be cancelled this way");
+        }
+        if lot.bidder_id != 0 || !lot.bidder_name.is_empty() {
+            return Err("the lot has a bid");
+        }
+        if self.is_settling(lot.id) {
+            return Err("the lot is awaiting its settlement mails");
+        }
+        self.delete_lot_item(server, &lot);
+        self.remove_auction_lot(server, lot.id);
+        Ok(lot)
     }
 
     /// `PostLotOnAuction(player, npcId, npcId2, itemId, startPrice, buyoutPrice, duration)`.

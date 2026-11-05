@@ -83,7 +83,6 @@
     "SCAddActionPointPacket",
     "SCBotSuspectArrestedPacket",
     "SCCharacterBoundPacket",
-    "SCCharacterRenamedPacket",
     "SCCraftFailedPacket",
     "SCCraftItemUnlockPacket",
     "SCCvFCombatRelationshipPacket",

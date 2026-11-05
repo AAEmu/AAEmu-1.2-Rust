@@ -318,6 +318,8 @@ pub struct AccountConfig {
     /// `SCInitialConfig.idleKickTime` (raw `u16`, `0` = off; Rust only, WP-J). The unit is
     /// **UNKNOWN** (the 1.2 `CGame::Update` consumer was not located): do not document it as
     /// minutes or seconds. The client performs the idle kick itself; the server never kicks.
+    /// **Needs one real-client run** with `Account:IdleKickTime=1`: about 1 s means seconds,
+    /// about 1 min means minutes. `aaemu-testclient` does not emulate the kick.
     #[serde(rename = "idlekicktime", deserialize_with = "lenient")]
     pub idle_kick_time: u16,
     /// The lobby `SCTrionConfig` values (Rust only, WP-UI4). The defaults are the formerly
