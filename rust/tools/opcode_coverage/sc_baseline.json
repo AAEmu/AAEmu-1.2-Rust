@@ -1,14 +1,13 @@
 {
   "counts": {
     "sc_opcodes": 517,
-    "typeless": 69,
+    "typeless": 68,
     "never_sent": 48
   },
   "typeless": [
     "CSQuestAcceptConditionalPacket",
     "SCAiDebugPacket",
     "SCBombUpdatedPacket",
-    "SCChatFailedPacket",
     "SCChatLocalizedMessagePacket",
     "SCDelayedTaskOnInGameNotifyPacket",
     "SCDemoCharResetItemPacket",
