@@ -340,15 +340,16 @@ impl CSBuyItemsPacket {
             self.buy_back.len()
         );
 
-        // If a NPC was provided, check if it's valid. Its catalog wins over a doodad's (C#).
-        let mut pack_id = None;
+        // If a NPC was provided, check if it's valid. Its catalogs win over a doodad's (C#);
+        // the 1.2 client unions every `merchants` pack of the NPC, so all of them sell.
+        let mut pack_ids = Vec::new();
         if self.npc_obj_id != 0 {
             let Some(n) = &npc else { return };
             let info = shop_info(server, n);
-            if !info.merchant || info.merchant_pack_id == 0 {
+            if !info.merchant || info.merchant_pack_ids.is_empty() {
                 return;
             }
-            pack_id = Some(info.merchant_pack_id);
+            pack_ids = info.merchant_pack_ids;
         }
         if let Some(n) = &npc {
             let dist = world_distance(&world, &WorldObject::from(&p), &WorldObject::from(n));
@@ -421,8 +422,10 @@ impl CSBuyItemsPacket {
                 inventory::send_error_message(&p, error_message::TOO_FAR_AWAY, 0, true);
                 return;
             }
-            if pack_id.is_none() {
-                pack_id = doodad_shop_pack(server, d);
+            if pack_ids.is_empty() {
+                if let Some(pack_id) = doodad_shop_pack(server, d) {
+                    pack_ids.push(pack_id);
+                }
             }
         }
 
@@ -430,7 +433,7 @@ impl CSBuyItemsPacket {
         // `DoodadFuncPurchase` can be bought. Without one (no NPC, no `DoodadFuncStoreUi`, no
         // purchase func) every template would be buyable, so refuse the purchase (buy-back
         // needs no catalog and stays allowed).
-        if !self.buy.is_empty() && pack_id.is_none() && purchase.is_none() {
+        if !self.buy.is_empty() && pack_ids.is_empty() && purchase.is_none() {
             tracing::warn!(
                 "{}: rejected BuyItems of {} item(s) without a merchant catalog (npc {}, doodad {})",
                 p.data().unit.name,
@@ -461,10 +464,9 @@ impl CSBuyItemsPacket {
             {
                 return;
             }
-            let sells = match (pack_id, &npc_hooks) {
-                (Some(pack), Some(h)) => h.merchant_sells(server, pack, e.item_id, e.grade),
-                _ => false,
-            };
+            let sells = npc_hooks
+                .as_ref()
+                .is_some_and(|h| h.merchant_sells(server, &pack_ids, e.item_id, e.grade));
             // The purchase func sells its own item at the template price; a coin-item priced
             // func only checks out through `CSBuyCoinItemPacket` (and is refused here).
             let purchase_line = purchase.filter(|(f, _)| {

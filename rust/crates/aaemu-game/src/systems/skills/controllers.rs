@@ -804,6 +804,24 @@ pub fn create(
                 elapsed_ms: 0.0,
             }),
         )),
+        // WP-9 (combat-ai analysis, 2026-11-05): kinds 5 Rope, 6 Anchor and 8 Flowgraph have
+        // no generic server controller by design. The Rope rows are used by the hook throw
+        // (12093) and harpoon launch / cut rope skills (13478 / 13749 / 19166 and 13596 /
+        // 13750 / 19168), handled by `systems::vehicles::harpoon` + `CSSkillControllerState`
+        // (skills/handlers.rs). The 2 Anchor rows (7736 / 7739) belong to the monster skills
+        // 22268 / 23103 "Land on the ground" (score 2/10), and the 1 Flowgraph row (7907) to
+        // the test skill 23969. This is expected, so it is logged at debug, not warn.
+        Some(
+            SkillControllerKind::Rope
+            | SkillControllerKind::Anchor
+            | SkillControllerKind::Flowgraph,
+        ) => {
+            tracing::debug!(
+                "SkillController: create defaultSkillController kind={}",
+                template.kind_id
+            );
+            None
+        }
         _ => {
             tracing::trace!(
                 "SkillController: create defaultSkillController kind={}",

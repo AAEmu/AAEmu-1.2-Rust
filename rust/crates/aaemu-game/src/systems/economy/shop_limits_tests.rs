@@ -77,7 +77,7 @@ fn merchant_world(limited_sale_count: i32, one_time_sale: bool) -> World {
         NpcTemplate {
             id: 1234,
             merchant: true,
-            merchant_pack_id: 7,
+            merchant_pack_ids: vec![7],
             ..Default::default()
         },
     );

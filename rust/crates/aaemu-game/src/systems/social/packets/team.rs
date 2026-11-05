@@ -6,7 +6,7 @@ use super::{active_char, cs_packet, sc_packet};
 use crate::net::packet::LEVEL_PLAIN;
 use crate::net::registry::PacketRegistry;
 use crate::opcodes::cs;
-use crate::systems::social::team::LootingRule;
+use crate::systems::social::team::{risky_action, LootingRule};
 
 /// The character fields `TeamMember.Write` / `WritePerson` read (a snapshot).
 #[derive(Debug, Clone, PartialEq)]
@@ -349,32 +349,57 @@ cs_packet!(
 );
 
 cs_packet!(
-    /// `CSLeaveTeamPacket` (logged only, as in C#; leaving goes through
-    /// `CSAskRiskyTeamActionPacket`).
+    /// `CSLeaveTeamPacket`: the direct form of `CSAskRiskyTeamActionPacket` action LEAVE.
+    /// The 1.2 client sends it from the confirmation callback (`FUN_39309670` ->
+    /// `FUN_393095c0`), not from the initial click.
     CSLeaveTeamPacket { team_id: u32 }
     read |s| { Ok(Self { team_id: s.read_u32()? }) }
     handle |self, server, conn| {
-        tracing::warn!("LeaveTeam, TeamId: {}", self.team_id);
+        let p = active_char!(conn);
+        server.systems.social.teams.ask_risky_team(
+            server,
+            &p,
+            self.team_id,
+            p.character_id,
+            risky_action::LEAVE,
+        );
         Ok(())
     }
 );
 
 cs_packet!(
-    /// `CSKickTeamMemberPacket` (logged only, as in C#).
+    /// `CSKickTeamMemberPacket`: the direct form of `CSAskRiskyTeamActionPacket` action KICK
+    /// (the 1.2 client's confirmation callback).
     CSKickTeamMemberPacket { team_id: u32, member_id: u32 }
     read |s| { Ok(Self { team_id: s.read_u32()?, member_id: s.read_u32()? }) }
     handle |self, server, conn| {
-        tracing::warn!("KickTeamMember, TeamId: {}, MemberId: {}", self.team_id, self.member_id);
+        let p = active_char!(conn);
+        server.systems.social.teams.ask_risky_team(
+            server,
+            &p,
+            self.team_id,
+            self.member_id,
+            risky_action::KICK,
+        );
         Ok(())
     }
 );
 
 cs_packet!(
-    /// `CSDismissTeamPacket` (logged only, as in C#).
+    /// `CSDismissTeamPacket`: the direct form of `CSAskRiskyTeamActionPacket` action DISMISS
+    /// (the 1.2 client's confirmation callback sends itself as the target,
+    /// `FUN_39308c10` -> `FUN_397abeb0(team, ownCharacterId, 2)`).
     CSDismissTeamPacket { team_id: u32 }
     read |s| { Ok(Self { team_id: s.read_u32()? }) }
     handle |self, server, conn| {
-        tracing::warn!("DismissTeam, TeamId: {}", self.team_id);
+        let p = active_char!(conn);
+        server.systems.social.teams.ask_risky_team(
+            server,
+            &p,
+            self.team_id,
+            p.character_id,
+            risky_action::DISMISS,
+        );
         Ok(())
     }
 );
