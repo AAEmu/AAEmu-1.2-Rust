@@ -25,7 +25,7 @@ use super::super::types::{
     HealType, KillReason, RelationState, SkillCaster, SkillHitType,
 };
 use super::super::{broadcast, send_to_players};
-use super::{rand_float, rand_int, EffectArgs};
+use super::{chance_succeeds, rand_float, rand_int, EffectArgs};
 
 /// An effect nobody handles yet.
 pub fn unrouted_effect(
@@ -106,6 +106,85 @@ fn level_range(lvl_md: f32, skill_level: i32, va_start: i32, va_end: i32) -> (f3
         lvl_md - level_modifier * lvl_md + 0.5,
         (level_modifier + 1.0) * lvl_md + 0.5,
     )
+}
+
+/// Damage reflection of a landed hit (`buffs.reflection_*`).
+///
+/// Applied through [`unit_combat::reduce_current_hp`] only: the attacker takes the reflected
+/// damage through the ordinary HP/death path (point packet, death, kill credit, durability),
+/// but the reflected hit rolls no item procs and no combat buffs, fires no `Damaged` event, and
+/// never re-enters the damage effect — so two reflectors cannot ping-pong.
+///
+/// REFLECT-1 (capture-pending): `reflection_ratio` is not read; the reflector still takes the
+/// full hit. REFLECT-2 (capture-pending): matching buffs are not added up; each rolls its own
+/// chance in buff order and the first success is applied. REFLECT-3 (capture-pending): the
+/// reflected hit is an ordinary `SCUnitDamagedPacket` cast from the reflecting buff, as the 1.2
+/// client has no reflect `SkillHitType` (the `REFLECT` combat-text key cannot be selected).
+fn apply_reflection(
+    server: &GameServer,
+    reflector: &WorldObject,
+    attacker: &WorldObject,
+    damage_type: Option<DamageType>,
+    value: i32,
+) {
+    let Some(damage_type) = damage_type else {
+        return;
+    };
+    // The attacker must still be a living unit in the world. Attackability is the incoming
+    // hit's own `can_attack` gate: the reflected damage goes back to the same attacker.
+    if !attacker.is_unit() || attacker.same(reflector) {
+        return;
+    }
+    let Some(current) = buffs::find_obj(server, attacker.obj_id()) else {
+        return;
+    };
+    if !current.same(attacker) || !current.with_unit(|u| u.unit().hp > 0).unwrap_or(false) {
+        return;
+    }
+    for r in buffs::reflection_effects(server, reflector, damage_type) {
+        if !chance_succeeds(r.chance) {
+            continue;
+        }
+        let reflected = (i64::from(value) * i64::from(r.target_ratio) / 100)
+            .clamp(0, i64::from(i32::MAX)) as i32;
+        if reflected <= 0 {
+            return;
+        }
+        tracing::debug!(
+            reflector = reflector.obj_id(),
+            attacker = attacker.obj_id(),
+            buff = r.buff_id,
+            damage = value,
+            reflected,
+            "reflection"
+        );
+        unit_combat::reduce_current_hp(
+            server,
+            attacker,
+            Some(reflector),
+            reflected,
+            KillReason::Damage,
+        );
+        let mut p = SCUnitDamagedPacket::new(
+            CastAction::Buff {
+                buff_id: r.buff_id,
+                owner_obj_id: reflector.obj_id(),
+                index: r.index,
+            },
+            SkillCaster::Unit(reflector.obj_id()),
+            reflector.obj_id(),
+            attacker.obj_id(),
+            reflected,
+            0,
+        );
+        p.hit_type = match damage_type {
+            DamageType::Magic => SkillHitType::SpellHit,
+            DamageType::Ranged | DamageType::Siege => SkillHitType::RangedHit,
+            _ => SkillHitType::MeleeHit,
+        };
+        broadcast(server, reflector, &p, true);
+        return;
+    }
 }
 
 /// `DamageEffect.Apply`.
@@ -485,6 +564,13 @@ pub(super) fn damage_with_aoe(
     if !test_drive && !house_removal && !can_attack(server, &caster_t, &trg_t) {
         return;
     }
+    // Reflection is part of the landed hit: it is applied before the victim's own HP change
+    // and uses the pre-absorption amount, like the `Damaged` event below. Internal damage modes
+    // (test drive, abandoned-house removal) and GM damage (which bypasses this function) never
+    // reflect.
+    if !test_drive && !house_removal {
+        apply_reflection(server, &trg, &caster, damage_type, value);
+    }
     unit_combat::reduce_current_hp(server, &trg, Some(&caster), value, KillReason::Damage);
     caster.with_unit(|u| {
         let u = u.unit_mut();
@@ -549,6 +635,9 @@ pub(super) fn damage_with_aoe(
         unit_combat::set_in_battle(server, &caster, was | trg_alive);
         caster.with_unit(|u| u.unit_mut().last_combat_activity_ms = now);
     }
+    // Item procs of the hit (attacker kinds 1-8, victim kinds 9-16), before the combat buffs as
+    // in `DamageEffect.Apply`; a proc skill's own damage is guarded by `procs::proc_casting`.
+    crate::systems::economy::procs::roll_damage(server, &caster, &trg, damage_type, hit_type);
     trigger_combat_buffs(server, &caster, &caster, hit_type, false);
     trigger_combat_buffs(server, &trg, &caster, hit_type, false);
     let mut p = SCUnitDamagedPacket::new(
@@ -962,7 +1051,13 @@ pub fn restore_mana(server: &GameServer, e: &RestoreManaEffect, args: &EffectArg
         );
         return;
     };
-    if e.percent {
+    if args.source.use_damage_amount && args.source.is_trigger {
+        // `buff_triggers.use_damage_amount`: fixed_min/fixed_max are per-mille of the event's
+        // damage amount (1.2 753 "Converts 3% of received damage to mana" = fixed 30). The
+        // trigger rows also carry `percent` 't' as the per-mille marker, so the maximum-mana
+        // scaling below must not run.
+        value = (value as f32 / 1000.0 * args.source.amount as f32) as i32;
+    } else if e.percent {
         let maximum = trg.with_unit(|u| u.unit().max_mp).unwrap_or(0).max(0);
         value = (i64::from(value) * i64::from(maximum) / 1000).clamp(0, i64::from(i32::MAX)) as i32;
     }

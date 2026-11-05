@@ -123,12 +123,14 @@ async fn owner_rename_is_broadcast_to_everyone_with_the_exact_wire_body() {
         .add(guild(id, "Knights", 1, "Owner", members));
     settle(&mut [&mut owner, &mut member, &mut outsider]);
 
-    // Only the server can open the 1.2 rename dialog: an empty SCExpeditionShowRenameUI.
+    // Only the server can open the 1.2 rename dialog: an empty SCExpeditionShowRenameUI (the
+    // offer also grants the right, so the faction record is sent again as well).
     expedition::offer_expedition_rename_ui(&server, &owner.p).expect("offer");
     let frames = owner.frames();
-    assert_eq!(frames.len(), 1);
-    assert_eq!(frames[0].0, sc::SCExpeditionShowRenameUIPacket);
-    assert_eq!(frames[0].1, Vec::<u8>::new());
+    let ui = find(&frames, sc::SCExpeditionShowRenameUIPacket);
+    assert_eq!(ui.len(), 1);
+    assert!(ui[0].is_empty());
+    assert!(!find(&frames, sc::SCFactionListPacket).is_empty());
     assert!(server.expeditions.has_rename_offer(1, id));
 
     owner
@@ -175,7 +177,11 @@ async fn rename_requires_the_owner_and_a_show_rename_ui_offer() {
         .add(guild(id, "Knights", 1, "Owner", members));
     settle(&mut [&mut owner, &mut member]);
 
-    // A forged CS without the dialog that the server opened changes nothing.
+    // A forged CS without the dialog that the server opened changes nothing, even when the
+    // right itself is pending.
+    server
+        .expeditions
+        .with_mut(id, |e| e.faction.allow_change_name = 1);
     owner
         .send(
             &server,
@@ -209,18 +215,13 @@ async fn rename_requires_the_owner_and_a_show_rename_ui_offer() {
     assert_eq!(find(&frames, sc::SCFactionRenamedPacket).len(), 0);
     let errors = find(&frames, sc::SCErrorMsgPacket);
     assert_eq!(i16::from_le_bytes([errors[0][0], errors[0][1]]), 807);
-    assert!(!server.expeditions.has_rename_offer(2, id));
+    // A refused request does not spend the offer; only a successful rename consumes it.
+    assert!(server.expeditions.has_rename_offer(2, id));
 
     // The nation half (`is_expedition = false`) is still refused and keeps the offer usable.
     expedition::offer_expedition_rename_ui(&server, &owner.p).expect("offer");
-    assert_eq!(
-        owner
-            .frames()
-            .into_iter()
-            .map(|(o, _)| o)
-            .collect::<Vec<_>>(),
-        vec![sc::SCExpeditionShowRenameUIPacket]
-    );
+    let frames = owner.frames();
+    assert_eq!(find(&frames, sc::SCExpeditionShowRenameUIPacket).len(), 1);
     owner
         .send(
             &server,
@@ -229,7 +230,12 @@ async fn rename_requires_the_owner_and_a_show_rename_ui_offer() {
         )
         .await;
     assert_eq!(server.expeditions.get(id).unwrap().faction.name, "Knights");
-    assert!(owner.frames().is_empty());
+    // The nation half is refused with the missing-rights code and keeps the offer usable.
+    let frames = owner.frames();
+    assert_eq!(find(&frames, sc::SCFactionRenamedPacket).len(), 0);
+    let errors = find(&frames, sc::SCErrorMsgPacket);
+    assert_eq!(errors.len(), 1);
+    assert_eq!(i16::from_le_bytes([errors[0][0], errors[0][1]]), 32);
     assert!(server.expeditions.has_rename_offer(1, id));
     owner
         .send(
@@ -438,6 +444,9 @@ async fn disband_clears_the_offer_and_a_new_guild_needs_a_new_one() {
     server
         .expeditions
         .add(guild(new_id, "New Guild", 1, "Owner", members));
+    server
+        .expeditions
+        .with_mut(new_id, |e| e.faction.allow_change_name = 1);
     settle(&mut [&mut owner]);
     owner
         .send(
@@ -483,6 +492,7 @@ async fn owner_change_clears_the_rename_offer() {
     );
     owner.frames();
 
+    // The outgoing owner is no longer the owner: the owner check refuses it.
     owner
         .send(
             &server,
@@ -492,6 +502,21 @@ async fn owner_change_clears_the_rename_offer() {
         .await;
     assert_eq!(server.expeditions.get(id).unwrap().faction.name, "Knights");
     let frames = owner.frames();
+    let errors = find(&frames, sc::SCErrorMsgPacket);
+    assert_eq!(i16::from_le_bytes([errors[0][0], errors[0][1]]), 807);
+    assert!(find(&frames, sc::SCFactionRenamedPacket).is_empty());
+
+    // The new owner still holds the granted right, but the hand-over dropped the dialog
+    // offer: a forged request is refused with the bad-status code.
+    member
+        .send(
+            &server,
+            cs::CSRenameExpeditionPacket,
+            rename_body(id, "NewOwner", true),
+        )
+        .await;
+    assert_eq!(server.expeditions.get(id).unwrap().faction.name, "Knights");
+    let frames = member.frames();
     let errors = find(&frames, sc::SCErrorMsgPacket);
     assert_eq!(i16::from_le_bytes([errors[0][0], errors[0][1]]), 307);
     assert!(find(&frames, sc::SCFactionRenamedPacket).is_empty());
@@ -524,8 +549,13 @@ async fn an_offer_is_bound_to_its_guild() {
     assert!(server.expeditions.has_rename_offer(1, id));
     assert!(!server.expeditions.has_rename_offer(1, other));
 
-    // The offer was made for guild 7; a request for guild 8 is refused even though the same
-    // character owns it in this fixture.
+    // The offer was made for guild 7. Move the character into guild 8 (it owns that one too in
+    // this fixture) and grant guild 8 the right without a dialog: the old offer for 7 must not
+    // authorize the request.
+    owner.p.data().unit.expedition_id = other;
+    server
+        .expeditions
+        .with_mut(other, |e| e.faction.allow_change_name = 1);
     owner
         .send(
             &server,
@@ -541,6 +571,8 @@ async fn an_offer_is_bound_to_its_guild() {
     let errors = find(&frames, sc::SCErrorMsgPacket);
     assert_eq!(i16::from_le_bytes([errors[0][0], errors[0][1]]), 307);
 
+    // Back in guild 7 the offer it was made for still works.
+    owner.p.data().unit.expedition_id = id;
     owner
         .send(
             &server,

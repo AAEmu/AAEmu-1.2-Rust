@@ -823,6 +823,9 @@ fn spawn_candidate(
 ) -> PlayerRef {
     let mut character = test_character(id, name, 160.0, 100.0);
     character.unit.level = nation::IMMIGRATE_MIN_LEVEL;
+    // Alive: a guild invitation to a dead character is refused.
+    character.unit.hp = 100;
+    character.unit.max_hp = 100;
     spawn_player(server, client, character, obj_id)
 }
 
@@ -1819,6 +1822,8 @@ async fn guild_membership_uses_the_saved_top_level_faction() {
         0x301,
     );
     ally.data().unit.faction_id = 102;
+    ally.data().unit.hp = 100;
+    ally.data().unit.max_hp = 100;
     owner_client.drain();
     ally_client.drain();
     expedition::invite(&server, &owner, "Ally");
@@ -1926,7 +1931,7 @@ async fn guild_creation_requires_one_top_level_faction() {
     assert_eq!(created.faction.mother_id, 101);
     assert_eq!(created.members.len(), 5);
 
-    // One friend (165) is not Nuia: the creation is refused with 321 and no guild is created.
+    // One friend (165) is not Nuia: the creation is refused with 320 and no guild is created.
     let (mut clients, players) = spawn_party(&server, 50, &[101, 101, 101, 101, 165]);
     let owner = players[0].clone();
     owner.data().money = 20_000;
@@ -1939,7 +1944,7 @@ async fn guild_creation_requires_one_top_level_faction() {
     .handle(&server, &mut clients[0].conn)
     .await
     .unwrap();
-    assert_eq!(error_code(&clients[0].drain()), Some(321));
+    assert_eq!(error_code(&clients[0].drain()), Some(320));
     assert!(!server
         .expeditions
         .all()

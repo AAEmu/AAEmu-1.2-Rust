@@ -1546,11 +1546,11 @@ impl TeamManager {
         clear_sync_state(&mut st, unit.character_id);
     }
 
-    /// `Character.SetFaction`'s party removal (`MemberRemoveFromTeam(this, this, Kick)`),
-    /// looked up by membership instead of `InParty`: `CSSelectCharacter` applies an offline
-    /// infamy conversion before `CSNotifyInGamePacket` runs `UpdateAtLogin` (which would
-    /// otherwise re-join the new pirate), and an ordinary member could never satisfy the owner
-    /// check of the client kick path.
+    /// `Character.SetFaction`'s party removal (`MemberRemoveFromTeam(this, this, Leave)`, as the
+    /// forced leave is not a kick), looked up by membership instead of `InParty`:
+    /// `CSSelectCharacter` applies an offline infamy conversion before `CSNotifyInGamePacket`
+    /// runs `UpdateAtLogin` (which would otherwise re-join the new pirate), and an ordinary
+    /// member could never satisfy the owner check of the client kick path.
     pub fn member_remove_for_faction_change(&self, server: &GameServer, unit: &PlayerRef) {
         let mut st = self.lock();
         let Some(team_id) = Self::team_id_by_unit(&st, unit.character_id) else {
@@ -1562,7 +1562,7 @@ impl TeamManager {
             unit,
             team_id,
             unit.character_id,
-            risky_action::KICK,
+            risky_action::LEAVE,
             true,
         );
     }

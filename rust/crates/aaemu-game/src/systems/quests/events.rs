@@ -10,7 +10,7 @@ use std::cell::RefCell;
 
 use super::engine::{Ctx, Deferred, KillUnitInfo, QuestEnv, UnitSnapshot};
 use super::model::acceptor;
-use super::packets::{quest_error, SCQuestContextFailedPacket};
+use super::packets::{quest_error, SCDoodadCompleteQuestPacket, SCQuestContextFailedPacket};
 use super::spheres::SphereQuest;
 use super::state::{CinemaMark, EventKind};
 use crate::models::character::Character;
@@ -119,6 +119,9 @@ pub enum QuestEvent {
     },
     TimerExpired {
         quest_id: u32,
+        /// Runtime quest id of the run the timer was armed for. A timer task that fires after
+        /// the quest was restarted must not fail the fresh run.
+        run_id: u32,
     },
     QuestStepChanged {
         quest_id: u32,
@@ -596,7 +599,9 @@ pub fn on_report(
 }
 
 /// `DoReportEvents` started by the server (`DoodadFuncQuest`, a doodad used on an owned
-/// quest): the client is not in quest directing mode, so a refusal is only logged.
+/// quest): the client is not in quest directing mode, so a refusal is only logged. A doodad
+/// report that can be handed in sends [`SCDoodadCompleteQuestPacket`] instead (the client
+/// then requests the completion with `CSCompleteQuestContextPacket`).
 pub fn on_server_report(
     server: &GameServer,
     player: &PlayerRef,
@@ -671,6 +676,18 @@ fn report(
         };
         let doodad_id = doodad.data().template_id;
         run_or_queue(server, player, move |ctx| {
+            if !answer && ctx.report_doodad_ready(quest_id, doodad_id) {
+                // `DoodadFuncQuest` on a report doodad that can be handed in: the 1.2
+                // client starts its completion flow from `SCDoodadCompleteQuestPacket`
+                // (`COMPLETE_QUEST_CONTEXT_DOODAD`) and answers with
+                // `CSCompleteQuestContextPacket` for this doodad object id. Do not report
+                // here, or that request would arrive after the quest already completed.
+                ctx.send(SCDoodadCompleteQuestPacket {
+                    doodad_obj_id,
+                    quest_id,
+                });
+                return;
+            }
             let outer = std::mem::replace(&mut ctx.answer_reports, answer);
             let answered = log_unreachable_report(ctx, quest_id, "doodad", doodad_id);
             ctx.report_reply = None;
@@ -1063,9 +1080,9 @@ pub fn on_exit_sphere(server: &GameServer, player: &PlayerRef, sphere: SphereQue
 }
 
 /// `QuestManager.OnTimerExpired(owner, questId)` (`QuestTimeoutTask`).
-pub fn on_timer_expired(server: &GameServer, player: &PlayerRef, quest_id: u32) {
+pub fn on_timer_expired(server: &GameServer, player: &PlayerRef, quest_id: u32, run_id: u32) {
     run_or_queue(server, player, move |ctx| {
-        dispatch_logged(ctx, &QuestEvent::TimerExpired { quest_id });
+        dispatch_logged(ctx, &QuestEvent::TimerExpired { quest_id, run_id });
     });
 }
 

@@ -13,9 +13,12 @@ use crate::opcodes::sc;
 use crate::server::GameServer;
 use crate::systems::npcs::npc::data::NpcTemplate;
 use crate::systems::skills::controllers::Vec3;
-use crate::systems::skills::data::effects::{DamageEffect, EffectTemplate};
-use crate::systems::skills::data::{BuffTemplate, EffectKind, SkillEffect, SkillTemplate};
+use crate::systems::skills::data::effects::{BuffEffect, DamageEffect, EffectTemplate};
+use crate::systems::skills::data::{
+    BuffTemplate, BuffTriggerTemplate, EffectKind, SkillEffect, SkillTemplate,
+};
 use crate::systems::skills::state::AggroKind;
+use crate::systems::skills::types::BuffEventTriggerKind;
 use crate::test_support::*;
 use crate::world::{Entity, NpcRef, PlayerRef, WorldObject};
 
@@ -1804,4 +1807,568 @@ async fn follow_path_effect_arriving_twice_at_once_starts_the_walk_once() {
         not_walking, 0,
         "the walk was toggled off in {not_walking} of 400 double deliveries"
     );
+}
+
+// ------------------------------------------------------- taunt buffs (10x-ONLY)
+//
+// The 1.2 client and the C# have no taunt logic; the mechanic and this ordering come from the
+// 10.x zone server (`NpcAggroTable::TauntedBy` / `CancelTauntedBy`), the 1.2 buff descriptions
+// agree (buff 171, buff 502, skill 17300). See `PORTING.md`.
+
+const TAUNT_BUFF: u32 = 5000;
+const TAUNT_BUFF_2: u32 = 5001;
+const TAUNT_TOP_BUFF: u32 = 5002;
+const TAUNT_TRIGGER_BUFF: u32 = 5003;
+const TAUNT_EXPIRY_BUFF: u32 = 5004;
+const TAUNTER_OBJ: u32 = 0x101;
+const TAUNTER2_OBJ: u32 = 0x102;
+
+fn taunt_data() -> GameData {
+    let mut data = data();
+    let s = &mut data.systems.skills;
+    for (id, copy_top, duration) in [
+        (TAUNT_BUFF, false, 4000),
+        (TAUNT_BUFF_2, false, 4000),
+        (TAUNT_TOP_BUFF, true, 4000),
+        // Short enough to let the test wait for the real expiry timer.
+        (TAUNT_EXPIRY_BUFF, false, 200),
+    ] {
+        s.add_buff(BuffTemplate {
+            id,
+            kind: 2,
+            duration,
+            stack_rule: crate::data::skills::stack_rule::REFRESH,
+            taunt: true,
+            taunt_with_top_aggro: copy_top,
+            ..BuffTemplate::default()
+        });
+    }
+    // A buff whose `Started` trigger applies the taunt buff to its holder with the original
+    // caster (not a skill's BuffEffect).
+    s.add_buff(BuffTemplate {
+        id: TAUNT_TRIGGER_BUFF,
+        kind: 2,
+        duration: 10_000,
+        ..BuffTemplate::default()
+    });
+    s.add_effect(
+        EffectKind::BuffEffect,
+        EffectTemplate::Buff(BuffEffect {
+            id: 1,
+            buff_id: Some(TAUNT_BUFF),
+            chance: 100,
+            stack: 1,
+            ab_level: 0,
+        }),
+        0,
+    );
+    s.buff_triggers.insert(
+        TAUNT_TRIGGER_BUFF,
+        vec![BuffTriggerTemplate {
+            id: 1,
+            kind: BuffEventTriggerKind::Started as u16,
+            effect_on_source: false,
+            effect: (EffectKind::BuffEffect, 1),
+            use_damage_amount: false,
+            use_original_source: true,
+            target_buff_tag_id: 0,
+            target_no_buff_tag_id: 0,
+            synergy: false,
+        }],
+    );
+    // Used only by the non-hostile test: driven units on the same faction are friendly.
+    data.factions.add(crate::data::world_data::SystemFaction {
+        id: 1,
+        ..Default::default()
+    });
+    data
+}
+
+struct TauntFixture {
+    server: Arc<GameServer>,
+    _client_a: TestClient,
+    _client_b: TestClient,
+    _client_c: TestClient,
+    player_a: PlayerRef,
+    player_b: PlayerRef,
+    player_c: PlayerRef,
+    npc: NpcRef,
+    npc_obj: WorldObject,
+}
+
+fn taunt_fixture() -> TauntFixture {
+    let server = server_with_data(taunt_data());
+    let client_a = TestClient::new(&server, 1, 1);
+    let client_b = TestClient::new(&server, 2, 2);
+    let client_c = TestClient::new(&server, 3, 3);
+    let mut a = test_character(1, "Tank", 103.0, 100.0);
+    a.unit.hp = 1000;
+    a.unit.max_hp = 1000;
+    let player_a = spawn_player(&server, &client_a, a, PLAYER_OBJ);
+    // The taunters stay out of the NPC's 4 m melee range, so chasing does not add threat.
+    let mut b = test_character(2, "Taunter", 110.0, 100.0);
+    b.unit.hp = 1000;
+    b.unit.max_hp = 1000;
+    let player_b = spawn_player(&server, &client_b, b, TAUNTER_OBJ);
+    let mut c = test_character(3, "Later", 112.0, 100.0);
+    c.unit.hp = 1000;
+    c.unit.max_hp = 1000;
+    let player_c = spawn_player(&server, &client_c, c, TAUNTER2_OBJ);
+    let npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        PASSIVE_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    let npc_obj = WorldObject::from(&npc);
+    TauntFixture {
+        server,
+        _client_a: client_a,
+        _client_b: client_b,
+        _client_c: client_c,
+        player_a,
+        player_b,
+        player_c,
+        npc,
+        npc_obj,
+    }
+}
+
+/// Lets a freshly spawned NPC reach its default behavior (`HoldPosition`) before it is pulled.
+async fn settle(f: &TauntFixture) {
+    tick_until(&f.server, 100, 120, 10, || false).await;
+}
+
+fn add_threat(f: &TauntFixture, caster: &PlayerRef, threat: i32) {
+    let attacker = WorldObject::from(caster);
+    super::combat::add_unit_aggro(&f.server, &f.npc_obj, AggroKind::Damage, &attacker, threat);
+    f.server
+        .systems
+        .skills
+        .ext
+        .npcs()
+        .npc_damage_received(&f.server, &f.npc, &attacker, threat);
+}
+
+fn apply_taunt(f: &TauntFixture, buff_id: u32, caster: &PlayerRef) {
+    crate::systems::skills::buffs::add_buff_by_id(
+        &f.server,
+        &f.npc_obj,
+        buff_id,
+        &WorldObject::from(caster),
+        0,
+    );
+}
+
+fn aggro_entry(f: &TauntFixture, abuser: u32) -> crate::systems::skills::state::Aggro {
+    f.npc.data().unit.skill_state.aggro_table[&abuser]
+}
+
+#[tokio::test]
+async fn taunt_switches_the_ai_target_over_higher_threat_and_ends_cleanly() {
+    let f = taunt_fixture();
+    settle(&f).await;
+    add_threat(&f, &f.player_a, 100);
+    tick_all(&f.server, 100);
+    assert_eq!(f.npc.data().unit.current_target, PLAYER_OBJ);
+
+    apply_taunt(&f, TAUNT_BUFF, &f.player_b);
+    tick_all(&f.server, 100);
+    assert_eq!(
+        f.npc.data().unit.current_target,
+        TAUNTER_OBJ,
+        "the taunt must outrank A's higher threat"
+    );
+    assert_eq!(aggro_entry(&f, PLAYER_OBJ).total(), 100);
+    assert_eq!(aggro_entry(&f, TAUNTER_OBJ).total(), 0);
+    assert_ne!(aggro_entry(&f, TAUNTER_OBJ).taunt_time, 0);
+    // The client / quest rating follows the same order.
+    assert_eq!(
+        super::combat::aggro_rating_in_percent(&f.npc_obj, TAUNTER_OBJ),
+        0.0
+    );
+    assert_eq!(
+        crate::systems::quests::bridges::aggro_rating_percent(&f.npc, TAUNTER_OBJ),
+        0.0
+    );
+
+    crate::systems::skills::buffs::remove_buff(&f.server, &f.npc_obj, TAUNT_BUFF);
+    tick_all(&f.server, 100);
+    assert_eq!(
+        f.npc.data().unit.current_target,
+        PLAYER_OBJ,
+        "the threat order must return when the last taunt from the caster ends"
+    );
+    assert_eq!(aggro_entry(&f, TAUNTER_OBJ).taunt_time, 0);
+    assert_eq!(
+        aggro_entry(&f, TAUNTER_OBJ).total(),
+        0,
+        "taunt end must not reduce threat"
+    );
+}
+
+#[tokio::test]
+async fn the_latest_taunt_stamp_wins_even_over_higher_threat() {
+    let f = taunt_fixture();
+    settle(&f).await;
+    add_threat(&f, &f.player_b, 100);
+    tick_all(&f.server, 100);
+    assert_eq!(f.npc.data().unit.current_target, TAUNTER_OBJ);
+
+    apply_taunt(&f, TAUNT_BUFF, &f.player_b);
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    apply_taunt(&f, TAUNT_BUFF_2, &f.player_c);
+    tick_all(&f.server, 100);
+    assert_eq!(
+        f.npc.data().unit.current_target,
+        TAUNTER2_OBJ,
+        "the later stamp must win over B's higher threat"
+    );
+    assert!(aggro_entry(&f, TAUNTER2_OBJ).taunt_time > aggro_entry(&f, TAUNTER_OBJ).taunt_time);
+
+    // When the later taunt ends the earlier caster's live stamp takes over.
+    crate::systems::skills::buffs::remove_buff(&f.server, &f.npc_obj, TAUNT_BUFF_2);
+    tick_all(&f.server, 100);
+    assert_eq!(f.npc.data().unit.current_target, TAUNTER_OBJ);
+    assert_eq!(aggro_entry(&f, TAUNTER2_OBJ).taunt_time, 0);
+    assert_ne!(aggro_entry(&f, TAUNTER_OBJ).taunt_time, 0);
+}
+
+#[tokio::test]
+async fn a_second_taunt_buff_from_the_same_caster_keeps_the_lock() {
+    let f = taunt_fixture();
+    settle(&f).await;
+    add_threat(&f, &f.player_a, 100);
+    tick_all(&f.server, 100);
+    assert_eq!(f.npc.data().unit.current_target, PLAYER_OBJ);
+
+    apply_taunt(&f, TAUNT_BUFF, &f.player_b);
+    apply_taunt(&f, TAUNT_BUFF_2, &f.player_b);
+    tick_all(&f.server, 100);
+    assert_eq!(f.npc.data().unit.current_target, TAUNTER_OBJ);
+
+    crate::systems::skills::buffs::remove_buff(&f.server, &f.npc_obj, TAUNT_BUFF);
+    tick_all(&f.server, 100);
+    assert_ne!(
+        aggro_entry(&f, TAUNTER_OBJ).taunt_time,
+        0,
+        "the other taunt buff of the same caster still pins the table"
+    );
+    assert_eq!(f.npc.data().unit.current_target, TAUNTER_OBJ);
+
+    crate::systems::skills::buffs::remove_buff(&f.server, &f.npc_obj, TAUNT_BUFF_2);
+    tick_all(&f.server, 100);
+    assert_eq!(aggro_entry(&f, TAUNTER_OBJ).taunt_time, 0);
+    assert_eq!(f.npc.data().unit.current_target, PLAYER_OBJ);
+}
+
+#[tokio::test]
+async fn taunt_with_top_aggro_copies_the_current_top_total_once() {
+    let f = taunt_fixture();
+    settle(&f).await;
+    add_threat(&f, &f.player_a, 100);
+    tick_all(&f.server, 100);
+    assert_eq!(f.npc.data().unit.current_target, PLAYER_OBJ);
+
+    apply_taunt(&f, TAUNT_TOP_BUFF, &f.player_b);
+    tick_all(&f.server, 100);
+    assert_eq!(f.npc.data().unit.current_target, TAUNTER_OBJ);
+    assert_eq!(
+        aggro_entry(&f, TAUNTER_OBJ).total(),
+        100,
+        "the copy raises B to A's total, not above it"
+    );
+    assert_eq!(aggro_entry(&f, TAUNTER_OBJ).etc_aggro, 100);
+    assert_eq!(aggro_entry(&f, PLAYER_OBJ).total(), 100);
+
+    crate::systems::skills::buffs::remove_buff(&f.server, &f.npc_obj, TAUNT_TOP_BUFF);
+    tick_all(&f.server, 100);
+    assert_eq!(aggro_entry(&f, TAUNTER_OBJ).taunt_time, 0);
+    assert_eq!(
+        aggro_entry(&f, TAUNTER_OBJ).total(),
+        100,
+        "the copied threat persists after the taunt (10x keeps it)"
+    );
+    // Equal totals: the stable table order puts the lower obj id (A) first.
+    assert_eq!(f.npc.data().unit.current_target, PLAYER_OBJ);
+}
+
+#[tokio::test]
+async fn taunt_refuses_self_and_non_hostile_casters_and_players() {
+    let f = taunt_fixture();
+    // Self: no entry, no stamp.
+    crate::systems::skills::buffs::add_buff_by_id(&f.server, &f.npc_obj, TAUNT_BUFF, &f.npc_obj, 0);
+    assert!(f.npc.data().unit.skill_state.aggro_table.is_empty());
+
+    // Non-hostile: the NPC and the caster share faction 1 (friendly).
+    f.npc.data().unit.faction_id = 1;
+    f.player_b.data().unit.faction_id = 1;
+    apply_taunt(&f, TAUNT_BUFF, &f.player_b);
+    assert!(
+        f.npc.data().unit.skill_state.aggro_table.is_empty(),
+        "a friendly caster must not be able to taunt the NPC"
+    );
+
+    // A taunt buff on a player holder does nothing (10x only stamps NPC holders).
+    let b_obj = WorldObject::from(&f.player_b);
+    let c_obj = WorldObject::from(&f.player_c);
+    crate::systems::skills::buffs::add_buff_by_id(&f.server, &b_obj, TAUNT_BUFF, &c_obj, 0);
+    assert!(!f
+        .player_b
+        .data()
+        .unit
+        .skill_state
+        .aggro_table
+        .contains_key(&TAUNTER2_OBJ));
+}
+
+#[tokio::test]
+async fn taunt_from_a_trigger_applied_buff_reaches_the_aggro_table() {
+    let f = taunt_fixture();
+    settle(&f).await;
+    add_threat(&f, &f.player_a, 100);
+    tick_all(&f.server, 100);
+    assert_eq!(f.npc.data().unit.current_target, PLAYER_OBJ);
+
+    apply_taunt(&f, TAUNT_TRIGGER_BUFF, &f.player_b);
+    assert!(
+        f.npc.data().unit.buffs.check_buff(TAUNT_BUFF),
+        "the Started trigger applies the taunt buff to its holder"
+    );
+    tick_all(&f.server, 100);
+    assert_eq!(
+        f.npc.data().unit.current_target,
+        TAUNTER_OBJ,
+        "the generic buff-start hook, not the skill BuffEffect, must stamp the table"
+    );
+    assert_ne!(aggro_entry(&f, TAUNTER_OBJ).taunt_time, 0);
+}
+
+#[tokio::test]
+async fn refreshing_the_taunt_buff_restamps_the_table() {
+    let f = taunt_fixture();
+    settle(&f).await;
+    add_threat(&f, &f.player_a, 100);
+    tick_all(&f.server, 100);
+    assert_eq!(f.npc.data().unit.current_target, PLAYER_OBJ);
+
+    apply_taunt(&f, TAUNT_BUFF, &f.player_b);
+    let first = aggro_entry(&f, TAUNTER_OBJ).taunt_time;
+    assert_ne!(first, 0);
+
+    // Re-applying the same buff refreshes it; the stamp is renewed (TAUNT-1: capture-pending).
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    apply_taunt(&f, TAUNT_BUFF, &f.player_b);
+    let refreshed = aggro_entry(&f, TAUNTER_OBJ).taunt_time;
+    assert!(
+        refreshed > first,
+        "a refresh must re-stamp the taunt ({first} -> {refreshed})"
+    );
+    tick_all(&f.server, 100);
+    assert_eq!(f.npc.data().unit.current_target, TAUNTER_OBJ);
+}
+
+#[tokio::test]
+async fn taunt_refresh_by_a_second_caster_releases_the_first_stamp_on_expiry() {
+    let f = taunt_fixture();
+    settle(&f).await;
+    add_threat(&f, &f.player_a, 100);
+    tick_all(&f.server, 100);
+    assert_eq!(f.npc.data().unit.current_target, PLAYER_OBJ);
+
+    apply_taunt(&f, TAUNT_EXPIRY_BUFF, &f.player_b);
+    tick_all(&f.server, 100);
+    assert_eq!(f.npc.data().unit.current_target, TAUNTER_OBJ);
+    assert_ne!(aggro_entry(&f, TAUNTER_OBJ).taunt_time, 0);
+
+    // A second taunter uses the same buff: the REFRESH rule replaces the effect and its
+    // caster, so the first taunter's stamp must go with their buff instead of pinning the
+    // NPC above the table until an aggro reset.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    apply_taunt(&f, TAUNT_EXPIRY_BUFF, &f.player_c);
+    tick_all(&f.server, 100);
+    assert_eq!(
+        aggro_entry(&f, TAUNTER_OBJ).taunt_time,
+        0,
+        "the previous caster's stamp must be cleared when their buff is replaced"
+    );
+    assert_ne!(aggro_entry(&f, TAUNTER2_OBJ).taunt_time, 0);
+    assert_eq!(f.npc.data().unit.current_target, TAUNTER2_OBJ);
+
+    // Let the last taunt expire through its timer, not an explicit removal.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    tick_all(&f.server, 100);
+    assert!(
+        !f.npc.data().unit.buffs.check_buff(TAUNT_EXPIRY_BUFF),
+        "the taunt buff must have expired by its timer"
+    );
+    assert_eq!(aggro_entry(&f, TAUNTER2_OBJ).taunt_time, 0);
+    assert_eq!(aggro_entry(&f, TAUNTER_OBJ).taunt_time, 0);
+    assert_eq!(
+        f.npc.data().unit.current_target,
+        PLAYER_OBJ,
+        "with both stamps gone the threat order returns"
+    );
+}
+
+/// The 1.2 data `buffs.taunt` / `taunt_with_top_aggro` rows and the skills that apply them.
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+fn real_compact_taunt_buffs_and_the_skills_that_apply_them() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let taunts: Vec<(u32, String)> = conn
+        .prepare("SELECT id, taunt_with_top_aggro FROM buffs WHERE taunt='t' ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(taunts.len(), 134);
+    assert_eq!(taunts.iter().filter(|(_, top)| top == "t").count(), 97);
+    assert!(taunts.iter().any(|(id, top)| *id == 171 && top == "f"));
+    assert!(taunts.iter().any(|(id, top)| *id == 502 && top == "t"));
+    assert!(taunts.iter().any(|(id, top)| *id == 2111 && top == "f"));
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT se.skill_id, be.buff_id
+             FROM skill_effects se
+             JOIN effects e ON e.id = se.effect_id AND e.actual_type = 'BuffEffect'
+             JOIN buff_effects be ON be.id = e.actual_id
+             JOIN buffs b ON b.id = be.buff_id AND b.taunt = 't'
+             ORDER BY se.skill_id, be.buff_id",
+        )
+        .unwrap();
+    let applied: Vec<(u32, u32)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(applied.len(), 97);
+    let applied_buffs: std::collections::BTreeSet<u32> =
+        applied.iter().map(|(_, buff)| *buff).collect();
+    assert_eq!(applied_buffs.len(), 85);
+    assert!(applied.contains(&(12_048, 502)));
+    assert!(applied.contains(&(10_436, 171)));
+    assert!(applied.contains(&(17_300, 3170)));
+    // The other 49 taunts are applied by triggers / npc_initial_buffs / quests / scripts, so
+    // the hook has to live in the generic buff-start path, not in the skill BuffEffect.
+    let taunt_ids: std::collections::BTreeSet<u32> = taunts.iter().map(|(id, _)| *id).collect();
+    assert_eq!(taunt_ids.difference(&applied_buffs).count(), 49);
+    let initial: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM npc_initial_buffs WHERE buff_id IN
+             (SELECT id FROM buffs WHERE taunt='t')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(initial, 2, "buff 6998 is an NPC initial buff");
+}
+
+const STEALTH_COLUMN_BUFF: u32 = 7_100;
+const TAG_100_ONLY_BUFF: u32 = 7_101;
+
+/// [`fixture`] with the caller's game data.
+fn fixture_with_data(data: GameData, player_x: f32) -> Fixture {
+    let server = server_with_data(data);
+    let client = TestClient::new(&server, 1, 1);
+    let mut c = test_character(1, "Runner", player_x, 100.0);
+    c.unit.hp = 1000;
+    c.unit.max_hp = 1000;
+    let player = spawn_player(&server, &client, c, PLAYER_OBJ);
+    let npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        NPC_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    Fixture {
+        server,
+        client,
+        player,
+        npc,
+    }
+}
+
+/// `buffs.stealth` = 't' without tag 100: the 1.2 client hides the unit, so the AI must not
+/// aggro it either (the C# `CanSeeTarget` only checked tag 100).
+#[tokio::test]
+async fn stealth_column_buff_without_tag_100_hides_the_player_from_aggro() {
+    let mut data = data();
+    data.systems.skills.add_buff(BuffTemplate {
+        id: STEALTH_COLUMN_BUFF,
+        kind: 1,
+        duration: 60_000,
+        stack_rule: 1,
+        stealth: true,
+        ..BuffTemplate::default()
+    });
+    let f = fixture_with_data(data, 115.0);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    crate::systems::skills::buffs::add_buff_by_id(&server, &me, STEALTH_COLUMN_BUFF, &me, 0);
+    assert!(
+        !super::npc::can_see_target(&server, &me),
+        "the stealth column must mark the player stealthed for the AI"
+    );
+
+    let attacked = tick_until(&server, 100, 20, 40, || {
+        behavior(&server, NPC_OBJ) == Some(B::Attack)
+    })
+    .await;
+    assert!(!attacked, "the NPC aggroed a buff.stealth player");
+    assert!(f.npc.data().unit.skill_state.aggro_table.is_empty());
+}
+
+/// Tag 100 without `buffs.stealth`: the 1.2 client shows the unit, so the AI must see it too.
+#[tokio::test]
+async fn tag_100_buff_without_the_stealth_column_does_not_hide_the_player_from_aggro() {
+    let mut data = data();
+    data.systems.skills.add_buff(BuffTemplate {
+        id: TAG_100_ONLY_BUFF,
+        kind: 1,
+        duration: 60_000,
+        stack_rule: 1,
+        stealth: false,
+        ..BuffTemplate::default()
+    });
+    // Tag 100 is the C# stealth marker only; the client does not use it.
+    data.systems
+        .skills
+        .tagged_buffs
+        .insert(100, vec![TAG_100_ONLY_BUFF]);
+    let f = fixture_with_data(data, 115.0);
+    let server = f.server.clone();
+    let me = WorldObject::from(&f.player);
+    crate::systems::skills::buffs::add_buff_by_id(&server, &me, TAG_100_ONLY_BUFF, &me, 0);
+    assert!(
+        super::npc::can_see_target(&server, &me),
+        "tag 100 alone must not hide the player"
+    );
+
+    let attacked = tick_until(&server, 100, 20, 60, || {
+        behavior(&server, NPC_OBJ) == Some(B::Attack)
+    })
+    .await;
+    assert!(
+        attacked,
+        "the NPC never aggroed a tag-100 non-stealth player"
+    );
+    assert!(f
+        .npc
+        .data()
+        .unit
+        .skill_state
+        .aggro_table
+        .contains_key(&PLAYER_OBJ));
 }

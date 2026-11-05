@@ -230,6 +230,27 @@ connected client to the world (server) list instead of dropping the socket (play
 leave the world first), kicks whoever is still connected after about 10 seconds, then saves and
 exits. `cancel` only works before the countdown ends; `/scripts forcedshutdown` still exits at once.
 
+## Guilds (expeditions)
+
+A guild is created from a party with the client's founding dialog. The sponsor faction the
+dialog sends must belong to the founder's alliance (Nuia 101, 102, 103, 105, 106, 107; Haranya
+108, 109, 110, 111, 113; outlaws 161) and becomes the guild's faction; a party member of another
+alliance refuses the founding (320), and only online party members join. Guild names follow the
+character-name rules (3 to 32 letters or spaces, not on the block list, unique ignoring case).
+Inviting a member of another alliance, a dead character or a character in a battlefield is
+answered with the client's own message, as are the failed owner, role and role-policy changes
+(only the leader edits role policies, and only those of lower roles). A guild that owns
+territory or is registered for a siege cannot be dismissed, and its leader cannot be changed
+during a siege. A character whose faction changes into another alliance is removed from its guild
+and party; a leader of a guild with other members first hands it to the highest-ranked
+remaining member.
+
+The 1.2 client has a guild rename dialog, but no item or skill that opens it. A GM grants a guild
+the right with `/allowguildrename <guild id | guild name>`: its leader gets the dialog now (or
+at the next login) and may rename the guild once. `/renameguild <guild id> <new name>` renames
+a guild directly and keeps the right. Both are access level 100 (`AccessLevels.json`). The
+`allow_change_name` column of `expeditions` stores the pending right.
+
 ## Architecture note: the Rust port
 
 The login server, game server and tools were ported from C# (.NET) to Rust,

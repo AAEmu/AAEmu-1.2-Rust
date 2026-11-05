@@ -250,10 +250,12 @@ impl ClientPacket for CSLeaveWorldPacket {
                 }
                 LeaveWorldTargetType::ServerSelect => {
                     if conn.state == GameState::Lobby {
+                        let token = server.new_reconnect_token();
+                        conn.set_reconnect_token(token);
                         server.login.send(&GLPlayerReconnectPacket {
                             gs_id: server.config.id,
                             account_id: conn.account_id(),
-                            connection_id: conn.id,
+                            token,
                         });
                     }
                 }

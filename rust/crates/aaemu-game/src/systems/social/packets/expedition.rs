@@ -57,8 +57,9 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCExpeditionShowRenameUIPacket()` (empty body; never sent by the 1.2 C#). The 1.2
-    /// client's only path to the guild rename dialog (`FUN_391d2310` -> `FUN_392f8db0`).
+    /// `SCExpeditionShowRenameUIPacket()` (empty body; never sent by the 1.2 C#; sent to a guild
+    /// leader whose guild may be renamed, see `expedition::rename`). The 1.2 client's only path
+    /// to the guild rename dialog (`FUN_391d2310` -> `FUN_392f8db0`).
     SCExpeditionShowRenameUIPacket {} |self, s| {}
 );
 
@@ -130,7 +131,7 @@ cs_packet!(
     handle |self, server, conn| {
         tracing::debug!("CreateExpedition, name: {}, id: {}", self.name, self.id);
         let p = active_char!(conn);
-        expedition::create_expedition(server, &p, &self.name).await;
+        expedition::create_expedition(server, &p, &self.name, self.id).await;
         Ok(())
     }
 );
@@ -172,17 +173,15 @@ cs_packet!(
 );
 
 cs_packet!(
-    /// `CSRenameExpeditionPacket`. `is_expedition == false` is the nation half, still log-only
-    /// (the nation rename stage owns it).
+    /// `CSRenameExpeditionPacket`: `is_expedition` is false for the nation variant of the
+    /// client's rename dialog (refused with `FACTION_RIGHTS`). Not handled by the 1.2 C#
+    /// (logged only).
     CSRenameExpeditionPacket { id: u32, name: String, is_expedition: bool }
     read |s| { Ok(Self { id: s.read_u32()?, name: s.read_string()?, is_expedition: s.read_bool()? }) }
     handle |self, server, conn| {
         tracing::debug!("RenameExpedition, Id: {}, Name: {}, IsExpedition: {}", self.id, self.name, self.is_expedition);
-        if !self.is_expedition {
-            return Ok(());
-        }
         let p = active_char!(conn);
-        expedition::rename_expedition(server, &p, self.id, &self.name).await;
+        expedition::rename(server, &p, self.id, &self.name, self.is_expedition).await;
         Ok(())
     }
 );
