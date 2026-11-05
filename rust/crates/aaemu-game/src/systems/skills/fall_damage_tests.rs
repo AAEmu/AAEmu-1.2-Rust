@@ -14,7 +14,7 @@ use crate::server::GameServer;
 use crate::systems::ai::collision::fall::{FALL_VEL_UNITS_PER_MPS, SPEED_SAFE};
 use crate::systems::skills::combat::{do_fall_damage, reduce_current_hp};
 use crate::systems::skills::types::KillReason;
-use crate::test_support::{spawn_player, test_character, test_server, TestClient};
+use crate::test_support::{spawn_player, test_character, test_server_with, TestClient};
 use crate::world::{PlayerRef, WorldObject};
 
 const MAX_HP: i32 = 1000;
@@ -23,6 +23,8 @@ const PLAYER_OBJ: u32 = 0x100;
 const LAND_Z: f32 = 150.0;
 /// Below the ocean level: in the water.
 const WATER_Z: f32 = 95.0;
+/// A real 1.2 buff with `buffs.fall_damage_immune = 't'` ("Immune to fall damage").
+const FALL_IMMUNE_BUFF: u32 = 1649;
 
 /// The last client `fallVel` that does not exceed [`SPEED_SAFE`] (10118 with the inferred scale:
 /// 20 m/s is 10118.6 client units, so no integer value lands exactly on it).
@@ -43,7 +45,11 @@ struct Faller {
 
 impl Faller {
     fn new(hp: i32) -> Self {
-        let server = test_server();
+        Self::with_data(hp, crate::data::GameData::empty())
+    }
+
+    fn with_data(hp: i32, data: crate::data::GameData) -> Self {
+        let server = test_server_with(data);
         let client = TestClient::new(&server, 1, 1001);
         let mut c = test_character(1, "Faller", 500.0, 500.0);
         c.unit.hp = hp;
@@ -177,6 +183,84 @@ async fn a_fall_damage_multiplier_below_minus_100_percent_cannot_heal() {
     assert_eq!(f.fall(20000), 0);
     assert_eq!(f.hp(), MAX_HP / 20);
     assert!(!f.client.drain_ops().contains(&sc::SCEnvDamagePacket));
+}
+
+/// A test data set with [`FALL_IMMUNE_BUFF`] registered; `immune` is the template's
+/// `fall_damage_immune` column.
+fn game_data_with_immune_buff(immune: bool) -> crate::data::GameData {
+    let mut data = crate::data::GameData::empty();
+    data.systems
+        .skills
+        .add_buff(crate::systems::skills::data::BuffTemplate {
+            id: FALL_IMMUNE_BUFF,
+            fall_damage_immune: immune,
+            ..Default::default()
+        });
+    data
+}
+
+#[tokio::test]
+async fn a_fall_damage_immune_buff_negates_falls_until_it_is_removed() {
+    let mut f = Faller::with_data(MAX_HP, game_data_with_immune_buff(true));
+    let obj = f.obj();
+    // Without the buff the fall hurts as before.
+    assert_eq!(f.fall(20000), curve(20000));
+    assert_eq!(f.hp(), MAX_HP - curve(20000));
+    f.set_hp(MAX_HP);
+
+    crate::systems::skills::buffs::add_buff_by_id(&f.server, &obj, FALL_IMMUNE_BUFF, &obj, 0);
+    assert!(obj.with_base_unit(|b| b.buffs().check_buff(FALL_IMMUNE_BUFF)));
+    f.client.drain();
+    // The real movement path, the direct call, the 5 % floor and the instant-death branch all
+    // skip HP loss, the stun and `SCEnvDamagePacket` while the buff is active.
+    let ops = f.land(LAND_Z, 20000).await;
+    assert_eq!(f.hp(), MAX_HP);
+    assert!(!ops.contains(&sc::SCEnvDamagePacket), "{ops:x?}");
+    assert_eq!(f.fall(20000), 0);
+    assert_eq!(f.fall(30000), 0);
+    assert_eq!(f.fall(32000), 0);
+    assert_eq!(f.hp(), MAX_HP);
+    assert!(!f.player.data().unit.is_dead());
+    assert!(!f.client.drain_ops().contains(&sc::SCEnvDamagePacket));
+
+    // Dispelling the buff immediately restores the damage.
+    crate::systems::skills::buffs::remove_buff(&f.server, &obj, FALL_IMMUNE_BUFF);
+    assert!(!obj.with_base_unit(|b| b.buffs().check_buff(FALL_IMMUNE_BUFF)));
+    f.client.drain();
+    assert_eq!(f.fall(20000), curve(20000));
+    assert_eq!(f.hp(), MAX_HP - curve(20000));
+    assert!(f.client.drain_ops().contains(&sc::SCEnvDamagePacket));
+}
+
+#[tokio::test]
+async fn a_buff_without_the_fall_damage_immune_flag_keeps_the_damage() {
+    let f = Faller::with_data(MAX_HP, game_data_with_immune_buff(false));
+    let obj = f.obj();
+    crate::systems::skills::buffs::add_buff_by_id(&f.server, &obj, FALL_IMMUNE_BUFF, &obj, 0);
+    assert!(obj.with_base_unit(|b| b.buffs().check_buff(FALL_IMMUNE_BUFF)));
+    assert_eq!(f.fall(20000), curve(20000));
+    assert_eq!(f.hp(), MAX_HP - curve(20000));
+}
+
+/// The real 1.2 data: every row of `buffs.fall_damage_immune` reaches the loader.
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB (read-only)"]
+fn real_compact_db_loads_the_185_fall_damage_immune_buffs() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let buffs = crate::systems::skills::data::templates::load_buffs(&conn).unwrap();
+    let mut immune: Vec<u32> = buffs
+        .iter()
+        .filter(|b| b.fall_damage_immune)
+        .map(|b| b.id)
+        .collect();
+    immune.sort_unstable();
+    assert_eq!(immune.len(), 185, "buffs.fall_damage_immune rows");
+    assert!(immune.contains(&FALL_IMMUNE_BUFF));
 }
 
 #[tokio::test]

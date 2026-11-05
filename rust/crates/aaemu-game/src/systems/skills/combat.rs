@@ -1850,6 +1850,22 @@ pub fn buff_of(unit: &WorldObject, buff_id: u32) -> Option<Buff> {
     unit.with_base_unit(|b| b.buffs().effect_from_buff_id(buff_id).cloned())
 }
 
+/// Whether any live buff of `unit` has the `buffs.fall_damage_immune` flag (the 1.2 client's
+/// `LoadBuffDescs` selects and reads the column, `dll.c:1579862,1579986`; its own consumer was
+/// not traced, so its effect on fall damage is INFERRED from the column and the 185 rows).
+fn has_fall_damage_immune_buff(server: &GameServer, unit: &WorldObject) -> bool {
+    let ids: Vec<u32> =
+        unit.with_base_unit(|b| b.buffs().effects.iter().map(|e| e.template.id).collect());
+    ids.into_iter().any(|id| {
+        server
+            .game_data
+            .systems
+            .skills
+            .buff(id)
+            .is_some_and(|t| t.fall_damage_immune)
+    })
+}
+
 /// `Unit.DoFallDamage(fallVel)` (+ the `Character` override that ignores fall damage from
 /// `IgnoreFallDamageAccessLevel` up). Returns the damage dealt. Called by the movement code.
 ///
@@ -1860,8 +1876,14 @@ pub fn buff_of(unit: &WorldObject, buff_id: u32) -> Option<Buff> {
 ///   threshold of the zone's own fall check) deals no damage and sends no `SCEnvDamagePacket`;
 /// * the damage after `FallDamageMul` is never negative: the buff / item modifiers of that
 ///   attribute run from -25 % to +50 % and stack, so the sum can go below -100 %.
+/// * an active buff whose template has `fall_damage_immune` (185 rows, e.g. buff 1649 "Immune
+///   to fall damage") negates the whole fall: no HP loss, stun or `SCEnvDamagePacket`.
 pub fn do_fall_damage(server: &GameServer, unit: &WorldObject, fall_vel: u16) -> i32 {
     if crate::systems::ai::collision::fall::is_safe_fall_vel(fall_vel) {
+        return 0;
+    }
+    if has_fall_damage_immune_buff(server, unit) {
+        tracing::debug!("FallDamage negated because of a fall-damage-immune buff");
         return 0;
     }
     if let Some(p) = unit.as_player() {

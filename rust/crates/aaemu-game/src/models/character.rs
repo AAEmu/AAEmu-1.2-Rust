@@ -225,6 +225,12 @@ pub struct Character {
     /// `Bonding` (`BondDoodad`: the doodad seat / bed the character is attached to).
     pub bonding: Option<crate::models::doodad::BondDoodad>,
     // ---- phase 3 / economy: add this subsystem's Character fields below ----
+    /// Crafts learned from recipe items / `TrainCraftEffect` (`character_crafts`), gating
+    /// `Crafting.RequireLearnedRecipes` when enabled.
+    pub learned_crafts: std::collections::HashSet<u32>,
+    /// Learned crafts not yet committed by a successful character save; cleared from the live
+    /// character by the save ack.
+    pub learned_crafts_unsaved: std::collections::HashSet<u32>,
 
     // ---- phase 3 / social: add this subsystem's Character fields below ----
     /// `InParty` (set through `systems::social::team::set_in_party`, which notifies friends).
@@ -374,6 +380,8 @@ impl Character {
             zone_access: Default::default(),
             bonding: None,
             // ---- phase 3 / economy ----
+            learned_crafts: std::collections::HashSet::new(),
+            learned_crafts_unsaved: std::collections::HashSet::new(),
 
             // ---- phase 3 / social ----
             in_party: false,
@@ -404,6 +412,16 @@ impl Character {
         self.labor_power = self.labor_power.wrapping_add(change);
         self.labor_power_unsaved += i32::from(change);
         self.labor_power_modified = chrono::Utc::now().timestamp();
+    }
+
+    /// Records a learned craft and marks it for the next character save. `false` when the
+    /// craft was already learned (the caller refuses the source use).
+    pub fn learn_craft(&mut self, craft_id: u32) -> bool {
+        if !self.learned_crafts.insert(craft_id) {
+            return false;
+        }
+        self.learned_crafts_unsaved.insert(craft_id);
+        true
     }
 
     /// `SetAction(slot, type, id)` (C# indexes the array: out of range throws).
