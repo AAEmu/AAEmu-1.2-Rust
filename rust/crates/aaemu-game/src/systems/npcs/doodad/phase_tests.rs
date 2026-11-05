@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::data::world_templates::WorldSpawnPosition;
+use crate::data::world_templates::{WorldSpawnPosition, WorldTemplate, XmlWorldZone};
 use crate::data::GameData;
 use crate::opcodes::sc;
 use crate::server::GameServer;
@@ -121,6 +121,27 @@ impl Builder {
         self
     }
 
+    /// Sets `phase_msg` / `is_msg_to_zone` on func group `group` (template copy and the
+    /// `_allFuncGroups` copy the packet send looks up).
+    fn phase_msg(mut self, group_id: u32, message: &str, to_zone: bool) -> Self {
+        for g in self
+            .data
+            .all_func_groups
+            .iter_mut()
+            .filter(|g| g.id == group_id)
+        {
+            g.phase_msg = message.to_string();
+            g.is_msg_to_zone = to_zone;
+        }
+        for t in self.data.templates.values_mut() {
+            for g in t.func_groups.iter_mut().filter(|g| g.id == group_id) {
+                g.phase_msg = message.to_string();
+                g.is_msg_to_zone = to_zone;
+            }
+        }
+        self
+    }
+
     fn server(self) -> GameServer {
         let mut gd = GameData::empty();
         gd.systems.npcs.doodad = self.data;
@@ -134,6 +155,15 @@ impl Builder {
                 });
         }
         let s = test_server_with(gd);
+        s.systems.npcs.doodads.tasks.set_manual(true);
+        s
+    }
+
+    /// [`Self::server`] with a caller-built world template (e.g. more than one zone key).
+    fn server_with_world(self, world: WorldTemplate) -> GameServer {
+        let mut gd = GameData::empty();
+        gd.systems.npcs.doodad = self.data;
+        let s = test_server_with_world(gd, world);
         s.systems.npcs.doodads.tasks.set_manual(true);
         s
     }
@@ -236,6 +266,20 @@ impl Fx {
             .into_iter()
             .filter(|f| f.0 == sc::SCDoodadPhaseChangedPacket)
             .map(|f| u32::from_le_bytes(f.1[3..7].try_into().unwrap()))
+            .collect()
+    }
+
+    /// `(doodad obj id, func group id)` of the drained `SCDoodadPhaseMsgPacket`s.
+    fn phase_msgs(&mut self) -> Vec<(u32, u32)> {
+        self.client
+            .drain()
+            .into_iter()
+            .filter(|f| f.0 == sc::SCDoodadPhaseMsgPacket)
+            .map(|f| {
+                let doodad = u32::from_le_bytes([f.1[0], f.1[1], f.1[2], 0]);
+                let group = u32::from_le_bytes(f.1[3..7].try_into().unwrap());
+                (doodad, group)
+            })
             .collect()
     }
 }
@@ -2217,6 +2261,167 @@ async fn change_doodad_phase_refuses_a_dead_caster() {
     run_phase_packet(&mut f, &phase_packet_body(d.obj_id, 0, 20, 1));
     assert_eq!(group(&d), 10);
     assert!(f.phase_packets().is_empty());
+}
+
+// ---- `SCDoodadPhaseMsg` (WP-UI1) ----
+
+#[tokio::test]
+async fn phase_msg_is_sent_to_viewers_only() {
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2)])
+        .fake_use(10, 1, 11)
+        .phase_msg(11, "The furnace is overheated!", false);
+    let mut f = fx(b);
+    // Same zone, out of the 5x5 sector neighbourhood of the doodad.
+    let mut far_client = TestClient::new(&f.server, 2, 1002);
+    let _far = spawn_player(
+        &f.server,
+        &far_client,
+        test_character(2, "Beta", 900.0, 900.0),
+        0x811,
+    );
+    let d = f.doodad(TEMPLATE);
+    f.client.drain();
+    far_client.drain();
+
+    f.use_(&d);
+    assert_eq!(f.phase_msgs(), vec![(d.obj_id, 11)]);
+    assert!(far_client
+        .drain()
+        .iter()
+        .all(|p| p.0 != sc::SCDoodadPhaseMsgPacket));
+}
+
+#[tokio::test]
+async fn phase_group_without_a_message_sends_nothing() {
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2)])
+        .fake_use(10, 1, 11);
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    f.client.drain();
+
+    f.use_(&d);
+    assert!(f.phase_msgs().is_empty());
+}
+
+#[tokio::test]
+async fn an_unchanged_func_group_sends_no_phase_msg() {
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2)])
+        .phase_msg(10, "start", false)
+        .phase_msg(11, "normal", false);
+    let mut f = fx(b);
+    let d = f.doodad(TEMPLATE);
+    f.client.drain();
+
+    manager::set_func_group_id(&f.server, &d, 11);
+    assert_eq!(f.phase_msgs(), vec![(d.obj_id, 11)]);
+    manager::set_func_group_id(&f.server, &d, 11);
+    assert!(f.phase_msgs().is_empty());
+}
+
+#[tokio::test]
+async fn spawn_time_initial_group_sends_no_phase_msg() {
+    // The saved-state / spawner phase is assigned before the doodad is spawned; even a
+    // zone-wide message of that group must not announce a transition nobody saw.
+    const OTHER: u32 = 12;
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2), (OTHER, 2)])
+        .phase_msg(11, "saved phase", true)
+        .phase_msg(OTHER, "next phase", true);
+    let mut f = fx(b);
+    let d = manager::create(&f.server, &f.world, 0x500, TEMPLATE, None, true).unwrap();
+    d.data().transform.set_xyz(120.0, 130.0, 100.0);
+    f.client.drain();
+
+    manager::set_func_group_id(&f.server, &d, 11);
+    assert!(f.phase_msgs().is_empty(), "not spawned yet");
+
+    manager::spawn(&f.server, &f.world, &d);
+    manager::init_doodad(&f.server, &f.world, &d);
+    f.client.drain();
+    manager::set_func_group_id(&f.server, &d, OTHER);
+    assert_eq!(f.phase_msgs(), vec![(d.obj_id, OTHER)]);
+}
+
+fn two_zone_world() -> WorldTemplate {
+    const OTHER_ZONE: u32 = 200;
+    let mut t = WorldTemplate::synthetic(0, "main_world", 2, 2, TEST_ZONE);
+    t.xml_world.zones.insert(
+        OTHER_ZONE,
+        XmlWorldZone {
+            zone_key: OTHER_ZONE,
+            name: "other".into(),
+            origin_x: 0,
+            origin_y: 0,
+            cells: Default::default(),
+            spawn_position: Default::default(),
+        },
+    );
+    t.zone_keys.push(OTHER_ZONE);
+    for x in 16..32 {
+        for y in 0..32 {
+            assert!(t.set_zone_key_at(x, y, OTHER_ZONE));
+        }
+    }
+    t
+}
+
+#[tokio::test]
+async fn zone_wide_phase_msg_reaches_the_whole_zone_only() {
+    let b = Builder::default()
+        .template(TEMPLATE, &[(10, 1), (11, 2)])
+        .phase_msg(11, "The school of fish appears.", true);
+    let server = b.server_with_world(two_zone_world());
+    let mut near = TestClient::new(&server, 1, 1001);
+    let _near = spawn_player(
+        &server,
+        &near,
+        test_character(1, "Alpha", 100.0, 100.0),
+        0x810,
+    );
+    let mut same_zone_far = TestClient::new(&server, 2, 1002);
+    let same_far = spawn_player(
+        &server,
+        &same_zone_far,
+        test_character(2, "Beta", 900.0, 900.0),
+        0x811,
+    );
+    let mut other_zone = TestClient::new(&server, 3, 1003);
+    let other = spawn_player(
+        &server,
+        &other_zone,
+        test_character(3, "Gamma", 1200.0, 900.0),
+        0x812,
+    );
+    assert_eq!(same_far.data().unit.transform.zone_id, TEST_ZONE);
+    assert_eq!(other.data().unit.transform.zone_id, 200);
+    let world = server.world.world(0).unwrap();
+    let d = manager::create(&server, &world, 0x500, TEMPLATE, None, true).unwrap();
+    d.data().transform.set_xyz(120.0, 130.0, 100.0);
+    manager::spawn(&server, &world, &d);
+    manager::init_doodad(&server, &world, &d);
+    near.drain();
+    same_zone_far.drain();
+    other_zone.drain();
+
+    manager::set_func_group_id(&server, &d, 11);
+    let msgs = |c: &mut TestClient| -> Vec<(u32, u32)> {
+        c.drain()
+            .into_iter()
+            .filter(|p| p.0 == sc::SCDoodadPhaseMsgPacket)
+            .map(|p| {
+                (
+                    u32::from_le_bytes([p.1[0], p.1[1], p.1[2], 0]),
+                    u32::from_le_bytes(p.1[3..7].try_into().unwrap()),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(msgs(&mut near), vec![(d.obj_id, 11)]);
+    assert_eq!(msgs(&mut same_zone_far), vec![(d.obj_id, 11)]);
+    assert!(msgs(&mut other_zone).is_empty());
 }
 
 // ---- growth state of world-spawned doodads (`natural`) ----

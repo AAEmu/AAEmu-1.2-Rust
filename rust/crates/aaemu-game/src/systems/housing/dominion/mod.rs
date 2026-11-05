@@ -4,6 +4,7 @@
 
 pub mod brief;
 pub mod calendar;
+pub mod credit;
 pub mod db;
 pub mod fort;
 pub mod headquarters;

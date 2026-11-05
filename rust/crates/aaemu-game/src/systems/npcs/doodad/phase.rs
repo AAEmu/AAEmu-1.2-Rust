@@ -12,7 +12,10 @@
 use rand::Rng;
 
 use super::data::DoodadData;
-use super::packets::{error_message, error_msg, SCDoodadPhaseChangedPacket, SCDoodadSoundPacket};
+use super::packets::{
+    error_message, error_msg, SCDoodadPhaseChangedPacket, SCDoodadPhaseMsgPacket,
+    SCDoodadSoundPacket,
+};
 use super::runtime::DoodadCtx;
 use super::templates::{doodad_func_group_kind, DoodadFunc, FuncTemplate};
 use super::{db, funcs, phase_funcs, tasks};
@@ -122,6 +125,47 @@ pub fn set_func_group_id(server: &GameServer, doodad: &DoodadRef, value: u32) {
         .doodads
         .siege_phase
         .refresh(server, doodad);
+    notify_phase_msg(server, doodad, value);
+}
+
+/// `SCDoodadPhaseMsg` for a func group whose `phase_msg` is authored (WP-UI1).
+///
+/// INFERRED trigger (the C# never sent the packet): a real func-group change of a doodad that is
+/// already in the world. The spawn-time initial group (`DoodadManager.Create`'s `GetFuncGroupId`
+/// and the saved-state restore, `FuncGroupId = phaseId`) is set before the doodad is spawned
+/// (`region().is_none()`), so it is not announced. Recipients: every viewer for a normal group
+/// (the same broadcast as `SCDoodadPhaseChanged`); every character whose zone key is the
+/// doodad's for `is_msg_to_zone`, because the client needs no local doodad in that mode
+/// (`FUN_3902e0f0`). INFERRED: "zone" is the doodad's zone key, not the zone group.
+fn notify_phase_msg(server: &GameServer, doodad: &DoodadRef, func_group_id: u32) {
+    let Some(group) = server
+        .game_data
+        .systems
+        .npcs
+        .doodad
+        .func_group(func_group_id)
+    else {
+        return;
+    };
+    // Empty / whitespace-only messages (the data has `' '` rows) send nothing.
+    if group.phase_msg.trim().is_empty() || doodad.region().is_none() {
+        return;
+    }
+    let packet = SCDoodadPhaseMsgPacket {
+        doodad_obj_id: doodad.obj_id,
+        func_group_id,
+    };
+    let obj = WorldObject::from(doodad);
+    let Some(world) = server.world.world_of(&obj) else {
+        return;
+    };
+    if group.is_msg_to_zone {
+        let pos = world.world_pos_rot(&obj);
+        let zone_key = world.template.zone_id_at(pos.x, pos.y);
+        server.world.broadcast_to_zone(zone_key, &packet);
+    } else {
+        crate::world::broadcast(&world, obj, &packet, false);
+    }
 }
 
 /// The `Data` setter: on a change, `Save()` when persistent (`SetData` is a plain write).

@@ -606,6 +606,8 @@ pub struct GameState {
     /// `SCQuestUnitReqFailedPacket` (`0x148`) in arrival order: `(quest id, unit object id,
     /// kind, message id, value)`, with the omitted flag-bag parts decoded as 0.
     pub quest_unit_req_failed: Vec<(u32, u32, u8, u16, u32)>,
+    /// `SCDoodadPhaseMsgPacket` (`0x157`) in arrival order: `(doodad object id, func group id)`.
+    pub doodad_phase_msgs: Vec<(u32, u32)>,
     /// First item of the bag (`SCCharacterInvenContentsPacket`, slot type 2): `(item id, slot)`.
     pub bag_items: Vec<(u64, u8, u32)>,
     pub bag_slots: u8,
@@ -822,6 +824,10 @@ impl GameState {
             let value = if flags & 0x04 != 0 { s.read_u32()? } else { 0 };
             st.quest_unit_req_failed
                 .push((quest_id, unit_obj_id, kind, message_id, value));
+        } else if p.is_sc(sc::SCDoodadPhaseMsgPacket) {
+            let doodad_obj_id = s.read_bc()?;
+            let func_group_id = s.read_u32()?;
+            st.doodad_phase_msgs.push((doodad_obj_id, func_group_id));
         } else if p.is_sc(sc::SCUnitsRemovedPacket) {
             let n = s.read_u16()?;
             for _ in 0..n {
@@ -1842,6 +1848,32 @@ mod quest_unit_req_failed_tests {
             state.quest_unit_req_failed,
             vec![(7, 1, 0x16, 0x1234, 0xaabbccdd), (8, 2, 0, 0, 0),]
         );
+    }
+}
+
+#[cfg(test)]
+mod doodad_phase_msg_tests {
+    use super::*;
+    use aaemu_commons::Marshal;
+    use aaemu_game::systems::npcs::doodad::packets::SCDoodadPhaseMsgPacket;
+
+    #[test]
+    fn observe_records_the_doodad_object_id_and_func_group_id() {
+        let mut state = GameState::default();
+        let mut body = PacketStream::new();
+        SCDoodadPhaseMsgPacket {
+            doodad_obj_id: 0x300,
+            func_group_id: 3333,
+        }
+        .write(&mut body);
+        state
+            .observe(&Packet {
+                level: LEVEL_GAME,
+                opcode: sc::SCDoodadPhaseMsgPacket,
+                body: body.into_bytes(),
+            })
+            .unwrap();
+        assert_eq!(state.doodad_phase_msgs, vec![(0x300, 3333)]);
     }
 }
 

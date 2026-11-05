@@ -1181,7 +1181,7 @@ impl crate::systems::economy::hooks::NpcEconomyHooks for NpcsForEconomy {
         let t = server.game_data.systems.npcs.npc.template(template_id)?;
         Some(crate::systems::economy::hooks::NpcShopInfo {
             merchant: t.merchant,
-            merchant_pack_id: t.merchant_pack_id,
+            merchant_pack_ids: t.merchant_pack_ids.clone(),
             blacksmith: t.blacksmith,
             auctioneer: t.auctioneer,
             banker: t.banker,
@@ -1192,18 +1192,26 @@ impl crate::systems::economy::hooks::NpcEconomyHooks for NpcsForEconomy {
         })
     }
 
-    fn merchant_sells(&self, server: &GameServer, pack_id: u32, item_id: u32, grade: u8) -> bool {
+    fn merchant_sells(
+        &self,
+        server: &GameServer,
+        pack_ids: &[u32],
+        item_id: u32,
+        grade: u8,
+    ) -> bool {
         let Some(template) = server.game_data.items.template(item_id) else {
             return false;
         };
-        server
-            .game_data
-            .systems
-            .npcs
-            .npc
-            .goods
-            .get(&pack_id)
-            .is_some_and(|g| g.sells_item_at_grade(template, grade))
+        pack_ids.iter().any(|pack_id| {
+            server
+                .game_data
+                .systems
+                .npcs
+                .npc
+                .goods
+                .get(pack_id)
+                .is_some_and(|g| g.sells_item_at_grade(template, grade))
+        })
     }
 
     fn specialty_coin_id(&self, server: &GameServer, npc: &NpcRef) -> u32 {

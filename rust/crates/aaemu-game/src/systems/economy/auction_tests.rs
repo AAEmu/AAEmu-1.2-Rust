@@ -25,6 +25,7 @@ use crate::world::PlayerRef;
 
 const SWORD: u32 = 5001; // "Iron Sword", level 20, categories 1/2/3
 const POTION: u32 = 5002; // "Healing Potion", level 5, categories 4/0/0
+const SIEGE_CAMP: u32 = 5003; // "Siege Camp", category 11 (declare_siege)
 
 #[derive(Default)]
 struct MailLog(Mutex<Vec<AuctionMail>>);
@@ -91,6 +92,14 @@ fn auction_world() -> (World, Arc<MailLog>) {
             level: 5,
             auction_category_a: 4,
             ..ItemTemplate::plain(POTION, 20)
+        },
+    );
+    d.items.templates.insert(
+        SIEGE_CAMP,
+        ItemTemplate {
+            level: 1,
+            auction_category_a: 11,
+            ..ItemTemplate::plain(SIEGE_CAMP, 1)
         },
     );
     let mut en = HashMap::new();
@@ -677,6 +686,58 @@ async fn search_filters_sorts_and_pages() {
         ..Default::default()
     };
     assert_eq!(search(&mut w, s), page(-1, &[]));
+}
+
+#[tokio::test]
+async fn declare_siege_filter_lists_only_the_siege_camps() {
+    let (mut w, _log) = auction_world();
+    let (_, camp_one) = post(&mut w, SIEGE_CAMP, 0, 100, 0);
+    let (_, sword) = post(&mut w, SWORD, 1, 100, 0);
+    let (_, camp_two) = post(&mut w, SIEGE_CAMP, 2, 100, 0);
+    w.a.drain();
+
+    let search = |w: &mut World, s: AuctionSearch| -> Vec<u8> {
+        run::<CSAuctionSearchPacket>(w, 1, &search_body(&s));
+        let frames = w.b.drain();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].0, sc::SCAuctionSearchedPacket);
+        let b = frames[0].1.clone();
+        b[..b.len() - 8].to_vec() // without the server time
+    };
+    let page = |p: i32, lots: &[&AuctionLot]| -> Vec<u8> {
+        let mut s = PacketStream::new();
+        s.write_i32(p).write_i32(lots.len() as i32);
+        for l in lots {
+            s.write_raw(&lot_bytes(l));
+        }
+        s.write_i16(0);
+        s.into_bytes()
+    };
+
+    // The declare tab (`filter = 1`) keeps only the category-11 lots.
+    let declare = AuctionSearch {
+        filter: 1,
+        ..Default::default()
+    };
+    assert_eq!(
+        search(&mut w, declare),
+        page(0, &[&camp_one, &camp_two]),
+        "filter 1 must list the two camps and hide the sword"
+    );
+    // The normal tab is unchanged and still lists every lot.
+    assert_eq!(
+        search(&mut w, AuctionSearch::default()),
+        page(0, &[&camp_one, &sword, &camp_two])
+    );
+    // An unknown filter behaves like the normal tab.
+    let unknown = AuctionSearch {
+        filter: 7,
+        ..Default::default()
+    };
+    assert_eq!(
+        search(&mut w, unknown),
+        page(0, &[&camp_one, &sword, &camp_two])
+    );
 }
 
 #[tokio::test]

@@ -26,6 +26,7 @@ use crate::systems::social::achievement::char_record_kind;
 use crate::systems::social::achievement_hooks::{AchievementInput, RecordMatch};
 use crate::systems::social::faction;
 use crate::systems::social::packets::duel::*;
+use crate::systems::social::packets::misc::{invitation_canceled_kind, SCInvitationCanceledPacket};
 use crate::systems::social::util::{self, send_error};
 use crate::world::{DoodadRef, PlayerRef, WorldObject};
 
@@ -443,6 +444,12 @@ impl DuelManager {
         }
         tracing::info!("DuelRequestExpired: challenger={challenger_id} went unanswered");
         send_error(&duel.challenger, util::error::TARGET_REJECTED_DUEL);
+        // The challenged player's popup closes (kind 5 = `SCDuelRequested`, popup type 9).
+        // `duel_request` refuses a second challenge while this one is registered, so no other
+        // duel invitation of the same popup type can be pending for the challenged player.
+        duel.challenged.send(SCInvitationCanceledPacket {
+            kind: invitation_canceled_kind::DUEL,
+        });
         self.duel_clean_up(challenger_id);
     }
 

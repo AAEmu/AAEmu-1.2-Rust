@@ -11,6 +11,7 @@ use super::packets::faction::{
     CSFactionImmigrationInvitePacket, CSFactionImmigrationInviteReplyPacket,
     CSFactionKickToOriginPacket,
 };
+use super::packets::misc::invitation_canceled_kind;
 use crate::data::character_templates::CharacterTemplate;
 use crate::data::items::{backpack_type, ItemTemplate, TemplateKind};
 use crate::data::world_data::{FactionRelation, SystemFaction};
@@ -929,6 +930,49 @@ async fn invite_accept_moves_the_citizen_and_the_house() {
     assert_eq!(body.read_u32().unwrap(), nation.id);
     assert_eq!(body.read_string().unwrap(), "Citizen");
     assert!(body.read_bool().unwrap());
+}
+
+/// An unanswered immigration invitation is swept after 60 s and closes the invitee's popup with
+/// kind 7 (`SCFactionImmigrateInvite`, popup type 0x29).
+#[tokio::test]
+async fn expired_immigration_invite_sends_kind_seven() {
+    let mut f = Fixture::new(false);
+    let _nation = declare(&f);
+    let mut candidate_client = TestClient::new(&f.server, 3, 1003);
+    let candidate = spawn_candidate(&f.server, &candidate_client, 3, "Citizen", 0x102);
+    f.leader_client.conn.active_char = Some(f.leader.clone());
+    candidate_client.conn.active_char = Some(candidate.clone());
+    f.leader_client.drain();
+    candidate_client.drain();
+
+    CSFactionImmigrationInvitePacket {
+        invitee: "Citizen".into(),
+    }
+    .handle(&f.server, &mut f.leader_client.conn)
+    .await
+    .unwrap();
+    assert_eq!(
+        frames_with(
+            &candidate_client.drain(),
+            sc::SCFactionImmigrateInvitePacket
+        )
+        .len(),
+        1
+    );
+
+    nation::sweep_expired_invites(
+        &f.server,
+        super::util::now_ms() + nation::INVITE_TIMEOUT_MS + 1,
+    );
+    assert_eq!(
+        frames_with(&candidate_client.drain(), sc::SCInvitationCanceledPacket),
+        vec![vec![invitation_canceled_kind::NATION]]
+    );
+    assert_eq!(
+        f.server.systems.social.nations.pending_invite_count(),
+        0,
+        "the expired invitation is removed"
+    );
 }
 
 #[tokio::test]

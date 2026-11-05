@@ -2316,6 +2316,7 @@ fn guild_dominion() -> crate::systems::housing::dominion::state::DominionState {
             reinforced: false,
             defender_ni: 100,
             defender_nr: 100,
+            outcome_credited: false,
             participants: Default::default(),
         }),
     }

@@ -57,6 +57,8 @@ mod expedition_rename_tests;
 #[cfg(test)]
 mod flow_tests;
 #[cfg(test)]
+mod friend_flow_tests;
+#[cfg(test)]
 mod manager_tests;
 #[cfg(test)]
 mod nation_stage4_tests;
@@ -148,6 +150,7 @@ impl System {
             .await
             .context("FamilyManager")?;
         team::TeamManager::start_tick(server);
+        expedition::start_tick(server);
         // CrimeManager.Load, TrialManager.Load (court rooms + the 5 s TrialUpdateTask).
         server.systems.social.crimes.load(server).await?;
         server

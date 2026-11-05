@@ -110,6 +110,40 @@ fn player(server: &GameServer, id: u32, name: &str, wanted: bool, money: i64) ->
     Pc { client, p }
 }
 
+/// A player entering the world through the real entry path (`world::session::spawn`), whose
+/// spawn frames are kept for inspection.
+fn enter(server: &GameServer, id: u32, name: &str, x: f32) -> Pc {
+    let mut client = TestClient::new(server, id, 1000 + id);
+    let mut c = test_character(id, name, x, 100.0);
+    c.obj_id = 0x100 + id;
+    c.is_online = true;
+    let p = crate::world::Player::new(c, client.conn.handle());
+    client.conn.active_char = Some(p.clone());
+    server.names.add_character(id, name, 1000 + id);
+    crate::world::session::spawn(server, &p);
+    Pc { client, p }
+}
+
+/// Drops the frames produced by spawning (players seeing each other).
+fn settle(pcs: &mut [&mut Pc]) {
+    for p in pcs.iter_mut() {
+        p.client.drain();
+    }
+}
+
+/// A player whose zone load (`CSInstanceLoaded`) files it into the world; its frames are kept.
+fn zone_load(server: &GameServer, id: u32, name: &str, x: f32) -> Pc {
+    let mut client = TestClient::new(server, id, 1000 + id);
+    let mut c = test_character(id, name, x, 100.0);
+    c.obj_id = 0x100 + id;
+    c.is_online = true;
+    let p = crate::world::Player::new(c, client.conn.handle());
+    client.conn.active_char = Some(p.clone());
+    server.names.add_character(id, name, 1000 + id);
+    crate::systems::instances::worlds::instance_loaded(server, &p);
+    Pc { client, p }
+}
+
 async fn send(server: &GameServer, pc: &mut Pc, opcode: u16, f: impl FnOnce(&mut PacketStream)) {
     let mut s = PacketStream::new();
     f(&mut s);
@@ -148,6 +182,11 @@ fn done(body: &[u8]) -> (u32, String, i64, i16) {
         s.read_i64().unwrap(),
         s.read_i16().unwrap(),
     )
+}
+
+fn bounty_money(body: &[u8]) -> (u32, i64) {
+    let mut s = PacketStream::from_bytes(body.to_vec());
+    (s.read_bc().unwrap(), s.read_i64().unwrap())
 }
 
 fn paid(body: &[u8]) -> (String, String, i64) {
@@ -257,8 +296,12 @@ async fn a_placement_debits_the_purse_and_answers_the_new_total() {
             .active_total(b.p.character_id),
         250
     );
-    // The `SCUnitBountyMoney` writer has not been located in the 1.2 client (BOUNTY-3).
-    assert!(find(&frames, sc::SCUnitBountyMoneyPacket).is_empty());
+    // The payer is a viewer of the target: the whole new total goes out (BOUNTY-3).
+    let moneys: Vec<(u32, i64)> = find(&frames, sc::SCUnitBountyMoneyPacket)
+        .iter()
+        .map(|b| bounty_money(b))
+        .collect();
+    assert_eq!(moneys, vec![(b.p.obj_id, 250)]);
 
     // A second update without a new request is refused and moves nothing.
     update(&server, &mut a, b.p.character_id, "Wanted", 50).await;
@@ -333,6 +376,149 @@ async fn several_payers_stack_into_one_total() {
     );
     assert_eq!(a.p.data().money, 900);
     assert_eq!(c.p.data().money, 750);
+}
+
+#[tokio::test]
+async fn a_pledge_broadcasts_the_whole_new_total_to_every_viewer() {
+    let server = bounty_server();
+    let mut a = player(&server, 1, "PayerA", false, 1000);
+    let mut b = player(&server, 2, "Wanted", true, 0);
+    let mut c = player(&server, 3, "PayerC", false, 1000);
+    settle(&mut [&mut a, &mut b, &mut c]);
+
+    place(&server, &mut a, b.p.character_id, "Wanted", 100).await;
+    let frames = a.client.drain();
+    assert_eq!(
+        find(&frames, sc::SCUnitBountyMoneyPacket)
+            .iter()
+            .map(|body| bounty_money(body))
+            .collect::<Vec<_>>(),
+        vec![(b.p.obj_id, 100)]
+    );
+    a.client.drain();
+    b.client.drain();
+    c.client.drain();
+
+    // A second pledge sends the whole stacked total (150), never the 50 delta.
+    place(&server, &mut c, b.p.character_id, "Wanted", 50).await;
+    let frames = a.client.drain();
+    assert_eq!(
+        find(&frames, sc::SCUnitBountyMoneyPacket)
+            .iter()
+            .map(|body| bounty_money(body))
+            .collect::<Vec<_>>(),
+        vec![(b.p.obj_id, 150)]
+    );
+    let frames = c.client.drain();
+    assert_eq!(
+        find(&frames, sc::SCUnitBountyMoneyPacket)
+            .iter()
+            .map(|body| bounty_money(body))
+            .collect::<Vec<_>>(),
+        vec![(b.p.obj_id, 150)]
+    );
+    // The target itself is a viewer too.
+    let frames = b.client.drain();
+    assert_eq!(
+        find(&frames, sc::SCUnitBountyMoneyPacket)
+            .iter()
+            .map(|body| bounty_money(body))
+            .collect::<Vec<_>>(),
+        vec![(b.p.obj_id, 150)]
+    );
+}
+
+#[tokio::test]
+async fn an_entering_viewer_receives_a_wanted_targets_total_once() {
+    let server = bounty_server();
+    let mut a = player(&server, 1, "Payer", false, 1000);
+    let mut b = player(&server, 2, "Wanted", true, 0);
+    settle(&mut [&mut a, &mut b]);
+    place(&server, &mut a, b.p.character_id, "Wanted", 175).await;
+    a.client.drain();
+
+    // A viewer entering the world later (after the pledge) gets the target's total once.
+    let mut c = enter(&server, 3, "Viewer", 103.0);
+    let frames = c.client.drain();
+    assert_eq!(
+        find(&frames, sc::SCUnitBountyMoneyPacket)
+            .iter()
+            .map(|body| bounty_money(body))
+            .collect::<Vec<_>>(),
+        vec![(b.p.obj_id, 175)]
+    );
+    let _ = b.client.drain();
+}
+
+#[tokio::test]
+async fn a_zone_load_viewer_receives_a_wanted_targets_total_once() {
+    let server = bounty_server();
+    let mut a = player(&server, 1, "Payer", false, 1000);
+    let mut b = player(&server, 2, "Wanted", true, 0);
+    settle(&mut [&mut a, &mut b]);
+    place(&server, &mut a, b.p.character_id, "Wanted", 175).await;
+    a.client.drain();
+
+    // The second entry path (`CSInstanceLoaded`) sends the same frames after the exchange.
+    let mut c = zone_load(&server, 3, "Viewer", 103.0);
+    let frames = c.client.drain();
+    assert_eq!(
+        find(&frames, sc::SCUnitBountyMoneyPacket)
+            .iter()
+            .map(|body| bounty_money(body))
+            .collect::<Vec<_>>(),
+        vec![(b.p.obj_id, 175)]
+    );
+    let _ = b.client.drain();
+}
+
+#[tokio::test]
+async fn an_entering_viewer_gets_no_bounty_frame_when_no_total_is_set() {
+    let server = bounty_server();
+    let mut a = player(&server, 1, "PlainA", false, 0);
+    settle(&mut [&mut a]);
+
+    let mut b = enter(&server, 2, "PlainB", 103.0);
+    let frames = b.client.drain();
+    assert!(find(&frames, sc::SCUnitBountyMoneyPacket).is_empty());
+}
+
+#[tokio::test]
+async fn a_payout_broadcasts_zero_to_the_viewers() {
+    let server = bounty_server();
+    let mut a = player(&server, 1, "Payer", false, 1000);
+    let mut b = player(&server, 2, "Wanted", true, 0);
+    let mut d = player(&server, 4, "Arrestor", false, 0);
+    settle(&mut [&mut a, &mut b, &mut d]);
+
+    place(&server, &mut a, b.p.character_id, "Wanted", 100).await;
+    a.client.drain();
+    b.client.drain();
+    d.client.drain();
+
+    do_die(
+        &server,
+        &WorldObject::from(&b.p),
+        Some(&WorldObject::from(&d.p)),
+        KillReason::Damage,
+    );
+
+    for viewer in [&mut a, &mut d] {
+        let frames = viewer.client.drain();
+        assert_eq!(
+            find(&frames, sc::SCUnitBountyMoneyPacket)
+                .iter()
+                .map(|body| bounty_money(body))
+                .collect::<Vec<_>>(),
+            vec![(b.p.obj_id, 0)]
+        );
+    }
+    assert!(find(&b.client.drain(), sc::SCUnitBountyMoneyPacket)
+        .iter()
+        .map(|body| bounty_money(body))
+        .collect::<Vec<_>>()
+        .iter()
+        .all(|&(id, total)| id == b.p.obj_id && total == 0));
 }
 
 #[tokio::test]

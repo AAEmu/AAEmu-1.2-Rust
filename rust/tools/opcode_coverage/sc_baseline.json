@@ -1,8 +1,8 @@
 {
   "counts": {
     "sc_opcodes": 517,
-    "typeless": 72,
-    "never_sent": 51
+    "typeless": 70,
+    "never_sent": 50
   },
   "typeless": [
     "CSQuestAcceptConditionalPacket",
@@ -15,7 +15,6 @@
     "SCDemoCharResetItemPacket",
     "SCDemoCharResetLocPacket",
     "SCDemoResetActionSlotPacket",
-    "SCDoodadPhaseMsgPacket",
     "SCDoodadPuzzleScenePacket",
     "SCDoodadReqBattleFieldPacket",
     "SCDoodadUccDataPacket",
@@ -33,7 +32,6 @@
     "SCGmDumpNpcPacket",
     "SCGmDumpQuestsPacket",
     "SCHSRequestPacket",
-    "SCInvitationCanceledPacket",
     "SCIsUnitInFarmPacket",
     "SCMouldAskedPacket",
     "SCMouldListPacket",
@@ -121,7 +119,6 @@
     "SCSkillUpgradedPacket",
     "SCSpamReportedPacket",
     "SCSuspectGoingBotTrial",
-    "SCUnitBountyMoneyPacket",
     "SCUnitGmModeChangedPacket",
     "SCUnitLootingStatePacket",
     "SCUnitOfflinePacket",
