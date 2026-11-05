@@ -430,6 +430,36 @@ connected by `systems::economy::wiring`).
 | Item skill-effect bodies (grade enchant, socketing, conversion, cap scale, UCC imprint, ...), mate / slave equipment packets | `systems/economy/item_effects*.rs` | done | Called by the skills subsystem's effects. UCC imprint / cleanup require owned source and target items; client UCC casts require the actual source item's configured use skill, preserving the unrelated legacy bound-item portal exception. Dyeing checks the loaded `dyeable_items` allowlist. Invalid UCC / dye effects cancel deferred reagent consumption. Cap scale refuses an `item_cap_scale_forbids` target with SkillResult INVALID_TARGET; the reset-tool gate is unverified until a capture. |
 | Item skill-effect stubs given data-derived bodies (`GainItemWithPosImprint` 32, `RechargeItemBuff` 95, `ExpToItem` 96) | `systems/economy/item_effects.rs` | done (data-derived) | The C# `Execute` bodies were `// TODO` stubs, so the behaviour comes from `special_effects` 405 / 546 / 547 / 548 (32: create `value1` x1 with `SkillEffectGainItemWithPos`), 12446 / 17017 (95) and 12462 (96: `value1` XP -> `value2` x1 with `SkillEffectExpToItem`) plus the tool skills that cast them. `GainItemWithPosImprint` stores no position imprint: the 1.2 item details have no such field. `ExpToItem` subtracts the experience directly instead of through `AddExp` (which recomputes the level and could level the character down), sends `SCExpChangedPacket(-value1)`, checks bag room before spending the XP, and cancels so the reagent is kept. `RechargeItemBuff` takes the cast's item target, resets `charge_start_time` (and `charge_count` when the template has one) and re-applies the equipped item's gear buff through `apply_gear_buffs` with the item both removed and added, so the recharge buff is not stacked; the 1 s item timers read the new charge window on their next tick, so nothing is re-scheduled. |
 
+#### Item and craft notification packet definitions (2026-11-05)
+
+`systems/economy/item_notify_packets.rs` defines the four S->C packets the former C# port never
+wrote, from the 1.2 client readers only:
+
+* `SCCraftItemUnlockPacket` 0x0f5: two single bytes, reader `FUN_397b4c60`
+  (`x2game.dll.c:1708523`). The handler `FUN_391d9700` packs them into an item-slot reference,
+  so (slot type, slot index) is INFERRED.
+* `SCItemAcquisitionPacket` 0x097: `u8 type, string charName (<=128), u8 count, count x Item`,
+  reader `FUN_397c1f80` (`x2game.dll.c:1717976`); the item records use the standard reader
+  `FUN_3961f500` (`x2game.dll.c:1301392`), the same record `SCItemTaskSuccessPacket` writes.
+  The handler acts only for type 1 (an item link line naming `charName`), which is INFERRED to
+  be a party/raid member announcement.
+* `SCItemDetailUpdatedPacket` 0x093: `u64 itemId, u8 x, u8 index, ItemDetail`, reader
+  `FUN_397b3840` (`x2game.dll.c:1707583`); `ItemDetail` is the `FUN_3961edf0`
+  (`x2game.dll.c:1301101`) `u8 detailType` plus its fixed body. The two zeroed bytes between the
+  fields are not read, hence not written.
+* `SCItemTaskNotifyPacket` 0x091: `u32, u8 action, u8 count, count x ItemTask, u8
+  forceRemoveCount, forceRemoveCount x u64, u32`, reader `FUN_397b3810`
+  (`x2game.dll.c:1707572`) followed by the `SCItemTaskSuccessPacket` reader `FUN_397d1d00`
+  (`x2game.dll.c:1729938`).
+
+All four are **capture-pending** and deliberately never sent, because no 1.2 zone code or capture
+shows their triggers: **ITEM-NOTIFY-1** (craft unlock: the Rust server never locks craft
+materials), **ITEM-NOTIFY-2** (acquisition: which grades/sources announce is unknown),
+**ITEM-NOTIFY-3** (detail update) and **ITEM-NOTIFY-4** (task notify: probably item tasks for an
+owner other than the viewer). Their byte layouts are test-locked in the module; the types are
+listed in `rust/tools/opcode_coverage/sc_baseline.json` as typed-but-never-sent, and a future
+trigger must remove them from that list.
+
 #### Item use gates from data (2026-11-04)
 
 `items.actability_requirement` and `items.actability_group_id` are loaded into `ItemTemplate`
