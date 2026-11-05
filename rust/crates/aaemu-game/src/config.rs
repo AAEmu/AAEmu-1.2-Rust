@@ -312,6 +312,40 @@ pub struct AccountConfig {
     /// minutes or seconds. The client performs the idle kick itself; the server never kicks.
     #[serde(rename = "idlekicktime", deserialize_with = "lenient")]
     pub idle_kick_time: u16,
+    /// The lobby `SCTrionConfig` values (Rust only, WP-UI4). The defaults are the formerly
+    /// hard-coded test URLs. What the client does with `activate: false` is UNKNOWN (CAP-UI-5;
+    /// the 1.2 consumer of the struct was not traced), so the default keeps today's `true`.
+    #[serde(rename = "trion")]
+    pub trion: TrionConfig,
+}
+
+/// `Account:Trion` (Rust only, WP-UI4): `SCTrionConfigPacket` sent in the lobby. The embedded
+/// browser panels (`webbrowser/web_help`, `web_market`, `web_play_diary`, promotion event,
+/// in-game notification) load these URLs; the defaults are the C# test values ("TODO - config
+/// files"). `activate: false` is the way to hide the panels once verified, but the client's
+/// reaction is UNKNOWN (CAP-UI-5).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct TrionConfig {
+    #[serde(rename = "activate", deserialize_with = "lenient")]
+    pub activate: bool,
+    #[serde(rename = "auth_url")]
+    pub auth_url: String,
+    #[serde(rename = "platform_url")]
+    pub platform_url: String,
+    #[serde(rename = "commerce_url")]
+    pub commerce_url: String,
+}
+
+impl Default for TrionConfig {
+    fn default() -> Self {
+        Self {
+            activate: true,
+            auth_url: "http://localhost/aaemu/login".into(),
+            platform_url: "http://localhost/aaemu/platform".into(),
+            commerce_url: "http://localhost/aaemu/shop".into(),
+        }
+    }
 }
 
 impl Default for AccountConfig {
@@ -326,6 +360,7 @@ impl Default for AccountConfig {
             default_payment: DefaultPayment::Premium,
             restrictions: AccountRestrictionsConfig::default(),
             idle_kick_time: 0,
+            trion: TrionConfig::default(),
         }
     }
 }
@@ -1462,6 +1497,46 @@ mod tests {
                 .restrictions
                 .for_payment(PaymentMethodType::None)
                 .can_trade
+        );
+    }
+
+    #[test]
+    fn account_trion_binds_from_config() {
+        let default = AppConfig::default();
+        assert!(default.account.trion.activate);
+        assert_eq!(
+            default.account.trion.auth_url,
+            "http://localhost/aaemu/login"
+        );
+        assert_eq!(
+            default.account.trion.platform_url,
+            "http://localhost/aaemu/platform"
+        );
+        assert_eq!(
+            default.account.trion.commerce_url,
+            "http://localhost/aaemu/shop"
+        );
+
+        let cfg = AppConfig::from_value(json!({
+            "Account": {
+                "Trion": {
+                    "Activate": "False",
+                    "Auth_Url": "https://auth.example.test/l",
+                    "Platform_Url": "https://platform.example.test",
+                    "Commerce_Url": "https://shop.example.test/c"
+                }
+            }
+        }))
+        .unwrap();
+        assert!(!cfg.account.trion.activate);
+        assert_eq!(cfg.account.trion.auth_url, "https://auth.example.test/l");
+        assert_eq!(
+            cfg.account.trion.platform_url,
+            "https://platform.example.test"
+        );
+        assert_eq!(
+            cfg.account.trion.commerce_url,
+            "https://shop.example.test/c"
         );
     }
 

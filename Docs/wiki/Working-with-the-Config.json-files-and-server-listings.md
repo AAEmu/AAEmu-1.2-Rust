@@ -276,6 +276,29 @@ not documented as minutes or seconds. The server never kicks an idle player and 
 Both settings can be overridden in `Config.Local.json` or with the environment variables
 `Account__IdleKickTime` and e.g. `Account__Restrictions__Demo__CanTrade`.
 
+## Trion web URLs (`Account:Trion`)
+
+`SCTrionConfig` (sent in the lobby) carries an `activate` flag and the three URLs the client's
+embedded browser panels load. The defaults are the former hard-coded test URLs:
+
+```json
+{
+  "Account": {
+    "Trion": {
+      "Activate": true,
+      "Auth_Url": "http://localhost/aaemu/login",
+      "Platform_Url": "http://localhost/aaemu/platform",
+      "Commerce_Url": "http://localhost/aaemu/shop"
+    }
+  }
+}
+```
+
+`Activate` is the packet's `activate` flag (`true` keeps the previous bytes).
+`Auth_Url`, `Platform_Url` and `Commerce_Url` are the login, platform and shop folder URLs.
+What the client does with `Activate: false` is **UNKNOWN** (CAP-UI-5: the 1.2 consumer of the
+struct was not traced); it is intended as the way to hide the panels once verified.
+
 ## Web API authentication and migration
 
 The game Web API now defaults to `127.0.0.1:1280`. Only `GET /status` is
