@@ -75,7 +75,8 @@ mod tests {
                 *opcode != 0xfff && *opcode != crate::opcodes::cs::CSICSBuyAAPointPacket
             })
             .collect();
-        assert_eq!(supported.len(), 255);
+        // 256 with the owner-approved native 1.2 CS 0x13d (system-dungeon channel pick).
+        assert_eq!(supported.len(), 256);
         for (opcode, name) in supported {
             assert!(
                 registry
@@ -159,9 +160,12 @@ mod tests {
             // `CSCreate/Change/Clear/CheckSecondPasswordPacket` (0x126..=0x129) are the 1.2
             // client's second password packets (serializers FUN_397b14d0 / FUN_397b1560 /
             // FUN_397b1650 / FUN_397b16e0); the C# never registered them.
+            // `CSSelectSysInstanceChannelPacket` (0x13d) is the 1.2 client's system-dungeon
+            // channel pick (writer FUN_397bca60); the C# never registered it.
             let rust_only = opcode == crate::opcodes::cs::CSTakeScheduleItemPacket
                 || opcode == crate::opcodes::cs::CSUpdateNationalTaxRatePacket
                 || opcode == crate::opcodes::cs::CSSetCraftingPayPacket
+                || opcode == crate::opcodes::cs::CSSelectSysInstanceChannelPacket
                 || matches!(
                     opcode,
                     0x11f | 0x120 | 0x126 | 0x127 | 0x128 | 0x129 | 0x130 | 0x133
