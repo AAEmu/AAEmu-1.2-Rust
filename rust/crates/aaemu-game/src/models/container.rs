@@ -13,7 +13,7 @@ use crate::data::items::{backpack_type, bind_type, ItemData, ItemTemplate, Templ
 use crate::managers::id::IdManager;
 use crate::managers::item::ItemManager;
 use crate::models::item::{Item, UnixTime, ITEM_FLAG_SECURE, ITEM_FLAG_SOUL_BOUND};
-use crate::models::item_task::{task_type, ItemFx, ItemFxList, ItemTask};
+use crate::models::item_task::{task_type, AcquiredSource, ItemFx, ItemFxList, ItemTask};
 
 /// `SlotType`.
 pub mod slot_type {
@@ -561,6 +561,22 @@ impl ItemContainer {
         let source_slot = item.slot as u8;
         let source_slot_type = item.slot_type;
         let from_other = src.is_some();
+        // Where the units came from, for the acquisition achievements (`GET_ITEM_TYPE`): a
+        // freshly created item, new units for a stack, a mail take, another character's
+        // container (trade) or a move between the character's own containers. A coffer is a
+        // `Coffer` container owned by the house: its slot type is `TRADE`, but it is the
+        // character's own storage, so it must not look like a trade.
+        let source_container = src.as_deref().map(|s| (s.owner_id, s.kind));
+        let acquired_source = match (source_container, src_slot_type) {
+            (None, None) => AcquiredSource::NewItem,
+            (Some(_), Some(slot_type::MAIL)) => AcquiredSource::MailTake,
+            (Some((owner_id, kind)), Some(_))
+                if kind != ContainerKind::Coffer && owner_id != self.owner_id =>
+            {
+                AcquiredSource::Trade
+            }
+            _ => AcquiredSource::Transfer,
+        };
         let mut item_tasks = Vec::new();
         let mut source_tasks = Vec::new();
         let template_id = item.template_id;
@@ -651,6 +667,8 @@ impl ItemContainer {
                 owner: self.owner_id,
                 template_id,
                 count: final_count,
+                added: final_count,
+                source: acquired_source,
             });
         } else if source_slot_type == slot_type::MAIL && self.slot_type != slot_type::MAIL {
             // Got attachment from Mail
@@ -658,6 +676,8 @@ impl ItemContainer {
                 owner: self.owner_id,
                 template_id,
                 count: final_count,
+                added: final_count,
+                source: acquired_source,
             });
         } else if src_slot_type.is_some()
             && source_slot_type != slot_type::MAIL
@@ -1014,11 +1034,14 @@ impl ItemContainer {
                     amount -= add;
                     tasks.push(ItemTask::count_update(item, add));
                     res.updated.push(id);
-                    // OnAcquiredItem(i, addAmount, true) -> DoItemsAcquiredEvents(item.Count)
+                    // OnAcquiredItem(i, addAmount, true) -> DoItemsAcquiredEvents(item.Count).
+                    // The achievement credit needs the delta, not the new total.
                     env.fx.push(ItemFx::Acquired {
                         owner: self.owner_id,
                         template_id,
                         count: item.count,
+                        added: add,
+                        source: AcquiredSource::NewUnits,
                     });
                 }
                 if amount < 0 {

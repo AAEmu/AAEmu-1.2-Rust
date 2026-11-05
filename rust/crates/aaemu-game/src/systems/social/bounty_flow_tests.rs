@@ -1,12 +1,14 @@
 //! Bounty placement / arrest flow tests: several connections, C->S packets through
 //! `handle_frame`, the real wallet and the real `combat::do_die` arrest path.
 
+use aaemu_commons::helpers::convert_long_to_coord;
 use aaemu_commons::PacketStream;
 
 use crate::data::skills::{BuffKind, BuffTemplate};
 use crate::data::world_data::SystemFaction;
 use crate::data::GameData;
 use crate::models::npc::Npc;
+use crate::models::transform::convert_long;
 use crate::net::packet::{encode_raw, LEVEL_PLAIN};
 use crate::opcodes::{cs, sc};
 use crate::server::GameServer;
@@ -15,6 +17,7 @@ use crate::systems::skills::types::KillReason;
 use crate::systems::social::bounty::BountyManager;
 use crate::systems::social::config::{CourtRoomConfig, JailConfig, JusticeConfig, SpawnPosition};
 use crate::systems::social::crime::buff as crime_buff;
+use crate::systems::social::crime::BountyDescription;
 use crate::systems::social::util;
 use crate::test_support::*;
 use crate::world::{Entity, PlayerRef, WorldObject};
@@ -196,6 +199,78 @@ fn paid(body: &[u8]) -> (String, String, i64) {
         s.read_string().unwrap(),
         s.read_i64().unwrap(),
     )
+}
+
+/// One `SCBountyList` row as the 1.2 client reads it (`FUN_397bebf0`: id, name, level, zone,
+/// fixed-point x / y, float z, bounty, crime points, live flag, race, type, arrest / trial
+/// counters, seconds; notGuilty before guilty).
+fn read_board_row(s: &mut PacketStream) -> BountyDescription {
+    BountyDescription {
+        player_id: s.read_u32().unwrap(),
+        player_name: s.read_string().unwrap(),
+        player_level: s.read_u8().unwrap(),
+        zone_id: s.read_u32().unwrap(),
+        pos: (
+            convert_long_to_coord(s.read_i64().unwrap()),
+            convert_long_to_coord(s.read_i64().unwrap()),
+            s.read_f32().unwrap(),
+        ),
+        bounty_amount: s.read_u64().unwrap(),
+        crime_points: s.read_i16().unwrap(),
+        is_live: s.read_bool().unwrap(),
+        player_race: s.read_u8().unwrap(),
+        type184: s.read_i32().unwrap(),
+        arrest_count: s.read_i32().unwrap(),
+        accept_guilty_count: s.read_i32().unwrap(),
+        accept_trial_count: s.read_i32().unwrap(),
+        not_guilty_count: s.read_i32().unwrap(),
+        guilty_count: s.read_i32().unwrap(),
+        seconds: s.read_i32().unwrap(),
+    }
+}
+
+/// The bytes of one row for the synthetic test characters (`test_character`: level 10, race 1,
+/// zone [`TEST_ZONE`], no crime points or trial counters).
+fn board_row_bytes(id: u32, name: &str, x: f32, y: f32, z: f32, bounty: u64) -> Vec<u8> {
+    let mut s = PacketStream::new();
+    s.write_u32(id)
+        .write_str(name)
+        .write_u8(10)
+        .write_u32(TEST_ZONE)
+        .write_i64(convert_long(x))
+        .write_i64(convert_long(y))
+        .write_f32(z)
+        .write_u64(bounty)
+        .write_i16(0)
+        .write_bool(true)
+        .write_u8(1)
+        .write_i32(1)
+        .write_i32(0)
+        .write_i32(0)
+        .write_i32(0)
+        .write_i32(0)
+        .write_i32(0)
+        .write_i32(0);
+    s.into_bytes()
+}
+
+fn board_entries(body: &[u8]) -> (i32, u8, Vec<BountyDescription>) {
+    let mut s = PacketStream::from_bytes(body.to_vec());
+    let total = s.read_i32().unwrap();
+    let count = s.read_u8().unwrap();
+    let rows = (0..count).map(|_| read_board_row(&mut s)).collect();
+    (total, count, rows)
+}
+
+async fn open_board(server: &GameServer, pc: &mut Pc) -> Vec<u8> {
+    send(server, pc, cs::CSNaviOpenBountyPacket, |s| {
+        s.write_bc(0x123);
+    })
+    .await;
+    let frames = pc.client.drain();
+    let lists = find(&frames, sc::SCBountyListPacket);
+    assert_eq!(lists.len(), 1, "one SCBountyList answer");
+    lists.into_iter().next().unwrap()
 }
 
 /// `(task type, money change)` of the single money task in an `SCItemTaskSuccess` body.
@@ -685,7 +760,7 @@ async fn npc_kills_and_non_wanted_victims_never_pay() {
 }
 
 #[tokio::test]
-async fn the_board_still_answers_an_empty_list() {
+async fn bounty_board_flag_off_answers_todays_empty_list() {
     let server = bounty_server();
     let mut a = player(&server, 1, "Payer", false, 1000);
     let b = player(&server, 2, "Wanted", true, 0);
@@ -700,6 +775,62 @@ async fn the_board_still_answers_an_empty_list() {
     let lists = find(&frames, sc::SCBountyListPacket);
     assert_eq!(lists.len(), 1);
     assert_eq!(lists[0], vec![0, 0, 0, 0, 0]);
+}
+
+#[tokio::test]
+async fn bounty_board_flag_on_with_no_pledges_is_the_empty_list() {
+    let server = bounty_server();
+    server.config.update(|c| c.social.bounty_board = true);
+    let mut a = player(&server, 1, "Viewer", false, 1000);
+    a.client.drain();
+
+    assert_eq!(open_board(&server, &mut a).await, vec![0, 0, 0, 0, 0]);
+}
+
+#[tokio::test]
+async fn bounty_board_writes_two_rows_highest_total_first() {
+    let server = bounty_server();
+    server.config.update(|c| c.social.bounty_board = true);
+    let mut a = player(&server, 1, "Payer", false, 1_000_000);
+    player(&server, 2, "Bravo", true, 0);
+    player(&server, 3, "Alpha", true, 0);
+    place(&server, &mut a, 2, "Bravo", 500).await;
+    place(&server, &mut a, 3, "Alpha", 900).await;
+    a.client.drain();
+
+    let body = open_board(&server, &mut a).await;
+    let mut expected = 2i32.to_le_bytes().to_vec();
+    expected.push(2);
+    expected.extend(board_row_bytes(3, "Alpha", 103.0, 100.0, 100.0, 900));
+    expected.extend(board_row_bytes(2, "Bravo", 102.0, 100.0, 100.0, 500));
+    assert_eq!(body, expected);
+}
+
+#[tokio::test]
+async fn bounty_board_caps_rows_at_twenty_and_reports_the_full_total() {
+    let server = bounty_server();
+    server.config.update(|c| c.social.bounty_board = true);
+    let mut payer = player(&server, 1, "Payer", false, 1_000_000);
+    let mut targets = Vec::new();
+    for id in 2..=22u32 {
+        let name = format!("Wanted{id}");
+        player(&server, id, &name, true, 0);
+        targets.push((id, name));
+    }
+    for (id, name) in &targets {
+        place(&server, &mut payer, *id, name, 100 + *id as i32).await;
+    }
+    payer.client.drain();
+
+    let body = open_board(&server, &mut payer).await;
+    let (total, count, rows) = board_entries(&body);
+    assert_eq!(total, 21, "total is every character with a pledge");
+    assert_eq!(count, 20, "the client cap");
+    assert_eq!(rows.len(), 20);
+    let ids: Vec<u32> = rows.iter().map(|row| row.player_id).collect();
+    assert_eq!(ids, (3..=22u32).rev().collect::<Vec<_>>());
+    assert_eq!(rows[0].bounty_amount, 122);
+    assert_eq!(rows[19].bounty_amount, 103);
 }
 
 /// The pledges a live server wrote survive a restart: `save` + `load` on a temporary table.
