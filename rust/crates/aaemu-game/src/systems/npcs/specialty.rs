@@ -771,7 +771,7 @@ impl ClientPacket for CSSellBackpackGoodsPacket {
                 return Ok(());
             };
             let base_price = sell_specialty(server, &me, self.obj_id);
-            tracing::warn!(
+            tracing::debug!(
                 "CSSellBackpackGoods, ObjId: {}. BasePrice: {base_price}",
                 self.obj_id
             );
@@ -830,7 +830,7 @@ impl ClientPacket for CSListSpecialtyGoodsPacket {
         _conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            tracing::warn!("ListSpecialtyGoods, ObjId: {}", self.obj_id);
+            tracing::debug!("ListSpecialtyGoods, ObjId: {}", self.obj_id);
             Ok(())
         })
     }

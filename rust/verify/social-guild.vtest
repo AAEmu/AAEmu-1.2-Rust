@@ -1,0 +1,56 @@
+# Guild leader and guild failures (systems/social/expedition.rs):
+#   * the guild leader cannot leave the guild (310 EXPEDITION_OWNER_CANNOT_LEAVE) - it stays the
+#     leader (role 255) - while an ordinary member can leave;
+#   * inviting a member of the same guild is answered (53 FACTION_INVITE_SAME) and a character that
+#     is deciding on another invitation cannot be invited again (308 EXPEDITION_OTHER_INVITATION).
+#
+# The suite creates a two-member guild: Scripts/verify.sh lowers Expedition.Create to
+# Cost 0 / Level 1 / PartyMemberCount 2 in the lane's runtime config only.
+#
+# Bots:
+#   leader    founds the guild with the member, tries to leave, invites the guest twice
+#   member    founding member, leaves after the leader's attempt
+#   guest     receives the invitation and leaves it unanswered
+
+suite social-guild
+bot leader
+bot member
+bot guest
+
+[leader]
+waitpeer 120 ${member}
+waitpeer 120 ${guest}
+partyinvite ${member}
+await TeamJoined 30
+gcreate Leader Guild
+expectdb "SELECT COUNT(*) FROM expedition_members WHERE name = '${member}'" 1 20
+pump 2
+sync guild-ready 3
+rawcs 00e
+expectseen 310 5
+expectdb "SELECT role FROM expedition_members WHERE name = '${leader}'" 255
+ginvite ${member}
+expectseen 53 5
+ginvite ${guest}
+ginvite ${guest}
+expectseen 308 5
+sync leader-tried 3
+expectdb "SELECT COUNT(*) FROM expedition_members WHERE name = '${member}'" 0 15
+expectdb "SELECT role FROM expedition_members WHERE name = '${leader}'" 255
+
+[member]
+waitpeer 120 ${leader}
+partyaccept
+expectdb "SELECT COUNT(*) FROM expedition_members WHERE name = '${member}'" 1 20
+pump 2
+sync guild-ready 3
+sync leader-tried 3
+rawcs 00e
+expectdb "SELECT COUNT(*) FROM expedition_members WHERE name = '${member}'" 0 15
+
+[guest]
+waitpeer 120 ${leader}
+sync guild-ready 3
+await GuildInvite 30
+pump 3
+sync leader-tried 3

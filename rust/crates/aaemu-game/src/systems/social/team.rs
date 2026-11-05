@@ -150,6 +150,11 @@ impl Team {
         self.members.iter().flatten().count()
     }
 
+    /// Whether the team takes no more members (`MembersCount() >= (IsParty ? 5 : 50)`).
+    pub fn is_full(&self) -> bool {
+        self.members_count() >= if self.is_party { 5 } else { 50 }
+    }
+
     /// `MembersOnlineCount`.
     pub fn members_online_count(&self) -> usize {
         self.members
@@ -294,6 +299,13 @@ struct Invitation {
     target: PlayerRef,
     time_ms: i64,
     is_party: bool,
+}
+
+impl Invitation {
+    /// `activeInvitation.Time.AddSeconds(60) < DateTime.UtcNow`.
+    fn expired(&self, now_ms: i64) -> bool {
+        self.time_ms + INVITATION_TIMEOUT_MS < now_ms
+    }
 }
 
 /// `MemberSyncState`.
@@ -531,6 +543,20 @@ impl TeamManager {
         self.lock().teams.len()
     }
 
+    /// Number of pending invitations (tests).
+    #[cfg(test)]
+    pub(crate) fn invitation_count(&self) -> usize {
+        self.lock().invitations.len()
+    }
+
+    /// Makes every pending invitation `ms` older (tests of the invitation timeout).
+    #[cfg(test)]
+    pub(crate) fn age_invitations(&self, ms: i64) {
+        for i in self.lock().invitations.values_mut() {
+            i.time_ms -= ms;
+        }
+    }
+
     /// `InviteAreaToTeam(owner, teamId, isParty)`: players within 100 m that are not in a
     /// party and not hostile get an invitation.
     pub fn invite_area_to_team(
@@ -543,6 +569,14 @@ impl TeamManager {
         let Some(world) = server.world.world(owner.data().unit.transform.instance_id) else {
             return;
         };
+        // A full team refuses once, not once per candidate.
+        if self
+            .active_team_by_unit(owner.character_id)
+            .is_some_and(|t| t.is_full())
+        {
+            send_error(owner, error::TEAM_FULL);
+            return;
+        }
         let me = util::world_position(server, owner);
         let around: Vec<PlayerRef> = world
             .players_around(owner)
@@ -550,7 +584,7 @@ impl TeamManager {
             .filter(|p| {
                 let pos = util::world_position(server, p);
                 let (dx, dy) = (pos.0 - me.0, pos.1 - me.1);
-                dx * dx + dy * dy <= 100.0 * 100.0
+                p.character_id != owner.character_id && dx * dx + dy * dy <= 100.0 * 100.0
             })
             .collect();
         for c in around {
@@ -563,6 +597,13 @@ impl TeamManager {
     }
 
     /// `AskToJoin(owner, targetName, teamId, isParty, targetObj)`.
+    ///
+    /// Deviations from the C# (see PORTING.md): the inviter is told why an invitation fails
+    /// (missing / offline target, yourself, a target that is in a team already, no right to
+    /// invite, a full team) instead of getting nothing; the team is the inviter's own (the C#
+    /// believed the client's team id, so a member could invite without the owner's right by
+    /// sending 0); an invitation that nobody answered within a minute no longer blocks later
+    /// invitations of the same target.
     pub fn ask_to_join(
         &self,
         server: &GameServer,
@@ -576,39 +617,75 @@ impl TeamManager {
             Some(t) => t.clone(),
             None => match server.world.character_by_name(target_name) {
                 Some(t) => t,
-                None => return,
+                None => {
+                    send_error(owner, error::TEAM_INVITEE_OFFLINE);
+                    return;
+                }
             },
         };
+        if target.character_id == owner.character_id {
+            send_error(owner, error::TEAM_YOURSELF);
+            return;
+        }
         // Only hostile players cannot be invited.
         if faction::player_relation(server, owner, &target) == relation_state::HOSTILE {
             send_error(owner, error::TEAM_INVITE_REFUSED);
             return;
         }
         let mut st = self.lock();
-        let team = (team_id != 0)
-            .then(|| st.teams.get(&team_id))
-            .flatten()
-            .map(|t| {
-                (
-                    t.id,
-                    t.is_party,
-                    t.owner_id,
-                    t.is_marked(owner.character_id),
-                )
-            });
-        if st.invitations.contains_key(&target.character_id) {
+        let owner_team = Self::team_id_by_unit(&st, owner.character_id);
+        if let Some(target_team) = Self::team_id_by_unit(&st, target.character_id) {
+            send_error(
+                owner,
+                if owner_team == Some(target_team) {
+                    error::TEAM_INVITEE_MEMBER
+                } else {
+                    error::TEAM_INVITEE_IN_TEAM
+                },
+            );
+            return;
+        }
+        // The team the invitation is for: the inviter's own. A team id naming another existing
+        // team is somebody else's.
+        let team_ref = match owner_team {
+            Some(t) if team_id == 0 || team_id == t => Some(t),
+            None if team_id == 0 || !st.teams.contains_key(&team_id) => None,
+            _ => {
+                send_error(owner, error::TEAM_NO_RIGHTS);
+                return;
+            }
+        };
+        let team = team_ref.and_then(|id| st.teams.get(&id)).map(|t| {
+            (
+                t.id,
+                t.is_party,
+                t.owner_id,
+                t.is_marked(owner.character_id),
+                t.is_full(),
+            )
+        });
+        if let Some((_, team_is_party, team_owner, marked, full)) = team {
+            let allowed = team_owner == owner.character_id || (!team_is_party && marked);
+            if !allowed {
+                send_error(owner, error::TEAM_NO_RIGHTS);
+                return;
+            }
+            if full {
+                send_error(owner, error::TEAM_FULL);
+                return;
+            }
+        }
+        let now = util::now_ms();
+        if st
+            .invitations
+            .get(&target.character_id)
+            .is_some_and(|i| !i.expired(now))
+        {
             owner.send(SCRejectedTeamPacket {
-                name: target_name.to_string(),
+                name: target.data().unit.name.clone(),
                 party: is_party,
             });
             return;
-        }
-        if let Some((_, team_is_party, team_owner, marked)) = team {
-            let allowed = team_owner == owner.character_id || (!team_is_party && marked);
-            if !allowed {
-                // TODO (C#): ERROR NOT ALLOWED TO INVITE
-                return;
-            }
         }
         st.invitations.insert(
             target.character_id,
@@ -616,7 +693,7 @@ impl TeamManager {
                 owner: owner.clone(),
                 target: target.clone(),
                 is_party: team.map_or(is_party, |t| t.1),
-                time_ms: util::now_ms(),
+                time_ms: now,
                 team_id: team.map_or(0, |t| t.0),
             },
         );
@@ -631,6 +708,11 @@ impl TeamManager {
     }
 
     /// `ReplyToJoinTeam(target, teamId, isParty, ownerId, isReject, charName, isArea)`.
+    ///
+    /// Deviations from the C# (see PORTING.md): an acceptance that fails is reported (no / expired
+    /// invitation, the inviter's team is gone or full), a character that is in a team already
+    /// is refused instead of ending up in two teams, and a late joiner joins the team's chat
+    /// channels.
     #[allow(clippy::too_many_arguments)]
     pub fn reply_to_join_team(
         &self,
@@ -645,20 +727,41 @@ impl TeamManager {
     ) {
         let mut st = self.lock();
         let Some(inv) = st.invitations.get(&target.character_id).cloned() else {
-            // TODO (C#): ERROR NO INVITATION
+            // Cancelled (the inviter left, or nobody answered for a minute) or never sent.
+            if !is_reject {
+                send_error(target, error::TEAM_JOIN);
+            }
             return;
         };
-        if is_reject || inv.time_ms + INVITATION_TIMEOUT_MS < util::now_ms() {
+        if is_reject || inv.expired(util::now_ms()) {
             let name = inv.target.data().unit.name.clone();
             inv.owner.send(SCRejectedTeamPacket {
                 name,
                 party: inv.is_party,
             });
+            if !is_reject {
+                send_error(target, error::INVITATION_CANCELED_TIMEOUT);
+            }
             st.invitations.remove(&target.character_id);
             return;
         }
         if is_area {
             // TODO (C#)
+            st.invitations.remove(&target.character_id);
+            return;
+        }
+        // One team at a time: the target may have joined another one since the invitation.
+        if let Some(own) = Self::team_id_by_unit(&st, target.character_id) {
+            let same = Self::team_id_by_unit(&st, inv.owner.character_id) == Some(own);
+            send_error(target, error::TEAM_JOIN_ALONE);
+            send_error(
+                &inv.owner,
+                if same {
+                    error::TEAM_INVITEE_MEMBER
+                } else {
+                    error::TEAM_INVITEE_IN_TEAM
+                },
+            );
             st.invitations.remove(&target.character_id);
             return;
         }
@@ -668,14 +771,16 @@ impl TeamManager {
                     self.create_new_team(server, &mut st, &inv);
                 } else {
                     st.invitations.remove(&target.character_id);
-                    // TODO (C#): ERROR TEAM DO NOT EXISTS ANYMORE
+                    // The inviter's team does not exist anymore.
+                    send_error(target, error::TEAM_JOIN);
                     return;
                 }
             }
             Some(team_id) => {
                 let team = st.teams.get_mut(&team_id).expect("team");
-                if team.members_count() >= if team.is_party { 5 } else { 50 } {
+                if team.is_full() {
                     send_error(target, error::TEAM_FULL);
+                    send_error(&inv.owner, error::TEAM_FULL);
                     st.invitations.remove(&inv.target.character_id);
                     return;
                 }
@@ -697,12 +802,52 @@ impl TeamManager {
                         },
                         target.character_id,
                     );
-                    // Note (C#): the new member does not join the party / raid chat here.
+                    // Deviation (C#: the new member never joined the party / raid chat, so it
+                    // could talk into the channel but not hear it until its next login).
+                    if !team.is_party {
+                        raid_chat(server, team).join(target);
+                    }
+                    party_chat(server, team, target.character_id).join(target);
                     refresh_team_member_obj_ids(team, target, false);
                 }
             }
         }
         st.invitations.remove(&inv.target.character_id);
+    }
+
+    /// Drops the invitations nobody answered within [`INVITATION_TIMEOUT_MS`] (the 500 ms tick
+    /// calls this); the inviter is told that the invitation was cancelled.
+    pub fn expire_invitations(&self, now_ms: i64) {
+        let mut st = self.lock();
+        let expired: Vec<u32> = st
+            .invitations
+            .iter()
+            .filter(|(_, i)| i.expired(now_ms))
+            .map(|(target, _)| *target)
+            .collect();
+        for target in expired {
+            if let Some(inv) = st.invitations.remove(&target) {
+                send_error(&inv.owner, error::INVITATION_CANCELED_TIMEOUT);
+            }
+        }
+    }
+
+    /// Forgets the invitations of a character that went offline: the ones it received, and the
+    /// ones it sent (their targets are told that the inviter is gone).
+    fn drop_invitations(st: &mut State, character_id: u32) {
+        let gone: Vec<u32> = st
+            .invitations
+            .iter()
+            .filter(|(target, i)| **target == character_id || i.owner.character_id == character_id)
+            .map(|(target, _)| *target)
+            .collect();
+        for target in gone {
+            if let Some(inv) = st.invitations.remove(&target) {
+                if inv.owner.character_id == character_id {
+                    send_error(&inv.target, error::TEAM_INVITOR_OFFLINE);
+                }
+            }
+        }
     }
 
     /// `CreateNewTeam(activeInvitation)`.
@@ -830,10 +975,24 @@ impl TeamManager {
             return;
         }
         let mut is_auto_disband = false;
-        if !team.is_party {
-            raid_chat(server, team).leave(unit);
+        // The member that leaves (the acting unit itself for a leave; the kicked member for a
+        // kick) leaves the party / raid chat channels, while the slot still names its party.
+        // Deviation from the C#, whose acting unit left them: the kicker lost its party chat and
+        // the kicked member kept hearing the party (a dismissal leaves everybody below).
+        if matches!(risky_action, risky_action::LEAVE | risky_action::KICK) {
+            let leaving = team
+                .members
+                .iter()
+                .flatten()
+                .find(|m| m.character.character_id == target_id)
+                .map(|m| m.character.clone());
+            if let Some(c) = leaving {
+                if !team.is_party {
+                    raid_chat(server, team).leave(&c);
+                }
+                party_chat(server, team, target_id).leave(&c);
+            }
         }
-        party_chat(server, team, unit.character_id).leave(unit);
 
         let mut cleared = Vec::new();
         if (risky_action == risky_action::LEAVE || risky_action == risky_action::KICK)
@@ -1151,6 +1310,8 @@ impl TeamManager {
     /// `SetOffline(unit)` (from the `Character.IsOnline` setter, after the flag is cleared).
     pub fn set_offline(&self, server: &GameServer, unit: &PlayerRef) {
         let mut st = self.lock();
+        // Deviation: a party invitation does not outlive the session of the inviter or invitee.
+        Self::drop_invitations(&mut st, unit.character_id);
         let Some(team_id) = Self::team_id_by_unit(&st, unit.character_id) else {
             return;
         };
@@ -1478,11 +1639,9 @@ impl TeamManager {
                 let Some(server) = weak.upgrade() else {
                     break;
                 };
-                server
-                    .systems
-                    .social
-                    .teams
-                    .update_all_teams(&server, util::now_ms());
+                let teams = &server.systems.social.teams;
+                teams.expire_invitations(util::now_ms());
+                teams.update_all_teams(&server, util::now_ms());
             }
         });
         tracing::info!("TeamManager loaded with {TEAM_SYNC_INTERVAL_MS}ms remote-sync interval");

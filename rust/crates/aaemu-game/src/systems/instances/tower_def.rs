@@ -99,6 +99,9 @@ struct State {
     day: u64,
     scheduled_days: HashMap<EventKey, u64>,
     war_active: HashSet<EventKey>,
+    /// Victory follow-ups (and the zone of the event that triggered them) waiting for the next
+    /// tick to start.
+    pending_chain: Vec<(EventKey, u32)>,
 }
 
 /// Mutations are serialized with the NPC subsystem's reentrant spawn lock. The state
@@ -129,6 +132,37 @@ fn prog<'a>(server: &'a GameServer, event: &Event) -> Option<&'a TowerDefProg> {
         .checked_sub(1)
         .and_then(|i| event.def.progs.get(i as usize))
         .and_then(|id| server.game_data.systems.instances.tower_defs.progs.get(id))
+}
+
+/// Whether some other definition has `npc` as a kill target of one of its waves.
+fn is_wave_kill_target_elsewhere(server: &GameServer, own_id: u32, npc: u32) -> bool {
+    let data = &server.game_data.systems.instances.tower_defs;
+    data.progs
+        .values()
+        .any(|p| p.tower_def_id != own_id && p.kill_targets.iter().any(|t| t.kill_target_id == npc))
+}
+
+/// A victory follow-up: the definition's `kill_npc_id` is a kill target of another definition's
+/// wave, so it names the NPC whose death in that other event starts this one (the Golden
+/// Plains War, 18, names the two relics; the victory rewards 19 and 20 name the relic of
+/// the side that lost). Every other `kill_npc_id` ends its own event (see [`on_death`]).
+pub fn is_victory_followup(server: &GameServer, def: &TowerDef) -> bool {
+    def.kill_npc_id != 0
+        && def.kill_npc_count > 0
+        && is_wave_kill_target_elsewhere(server, def.id, def.kill_npc_id)
+}
+
+/// The victory follow-ups that start when `npc` (a template) dies in the current wave of `parent`.
+fn followups_of(server: &GameServer, parent: &TowerDef, npc: u32) -> Vec<u32> {
+    let data = &server.game_data.systems.instances.tower_defs;
+    let mut ids: Vec<u32> = data
+        .tower_defs
+        .values()
+        .filter(|d| d.id != parent.id && d.kill_npc_id == npc && is_victory_followup(server, d))
+        .map(|d| d.id)
+        .collect();
+    ids.sort_unstable();
+    ids
 }
 
 fn valid_seconds(seconds: f32) -> bool {
@@ -252,9 +286,9 @@ fn prepare(server: &GameServer, key: EventKey, zone_id: u32) -> anyhow::Result<E
         doodad_plans.insert(id, copies);
     }
     for id in spawn_ids {
-        let sources: Vec<_> = spawns
-            .tower_def_spawners(id)
-            .into_iter()
+        let authored = spawns.tower_def_spawners(id);
+        let sources: Vec<_> = authored
+            .iter()
             .filter(|s| {
                 server
                     .game_data
@@ -262,11 +296,29 @@ fn prepare(server: &GameServer, key: EventKey, zone_id: u32) -> anyhow::Result<E
                     .zone_by_key(s.position().zone_id)
                     .is_some_and(|z| z.group_id == u32::from(key.zone_group_id))
             })
+            .cloned()
             .collect();
         if sources.is_empty() {
+            // Say where the controllers stand (another zone group) or that the data has none.
+            let elsewhere: std::collections::BTreeSet<u32> = authored
+                .iter()
+                .filter_map(|s| server.game_data.zones.zone_by_key(s.position().zone_id))
+                .map(|z| z.group_id)
+                .collect();
+            if elsewhere.is_empty() {
+                bail!(
+                    "Missing NPC spawner {id} positions in zone group {} (the spawn data has none)",
+                    key.zone_group_id
+                );
+            }
             bail!(
-                "Missing NPC spawner {id} positions in zone group {}",
-                key.zone_group_id
+                "Missing NPC spawner {id} positions in zone group {} (authored in zone group {})",
+                key.zone_group_id,
+                elsewhere
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
         }
         let mut copies = Vec::new();
@@ -713,6 +765,58 @@ pub fn on_spawn(server: &GameServer, npc: &NpcRef) {
     }
 }
 
+/// Whether `npc` is a controller (or summon) of a running event. The summoner controllers cast
+/// their wave plot (`np_skills` `OnSpawn`: seconds of projectile steps) while the AI is still
+/// settling into its default behavior; that behavior must not cancel it, or the wave never
+/// appears (the C# `HoldPositionBehavior.Enter` calls `InterruptSkills` and would cancel it too).
+pub fn owns_npc(server: &GameServer, npc: &NpcRef) -> bool {
+    manager(server)
+        .state
+        .lock()
+        .expect("tower defense poisoned")
+        .active
+        .values()
+        .any(|e| {
+            e.owned
+                .get(&npc.obj_id)
+                .is_some_and(|n| Arc::ptr_eq(&n.npc, npc))
+        })
+}
+
+/// Registers `npc` as owned by a bare running event (tests of the subsystems that ask
+/// [`owns_npc`] without starting a whole event).
+#[cfg(test)]
+pub(crate) fn adopt_for_test(server: &GameServer, key: EventKey, npc: &NpcRef) {
+    let now = spawn_manager::now();
+    let mut state = manager(server)
+        .state
+        .lock()
+        .expect("tower defense poisoned");
+    let event = state.active.entry(key).or_insert_with(|| Event {
+        def: TowerDef::default(),
+        zone_id: 0,
+        started: now,
+        wave_started: now,
+        step: 0,
+        plans: BTreeMap::new(),
+        doodad_plans: BTreeMap::new(),
+        doodads: Vec::new(),
+        owned: HashMap::new(),
+        kills: HashMap::new(),
+        end_kills: 0,
+        deaths: HashMap::new(),
+    });
+    event.owned.insert(
+        npc.obj_id,
+        OwnedNpc {
+            npc: npc.clone(),
+            step: 0,
+            despawn_on_next: false,
+            is_target: false,
+        },
+    );
+}
+
 /// SpawnEffect/NpcSpawnerSpawnEffect leave Unit.OwnerId at zero in the 1.2 port. Carry
 /// event ownership explicitly so their NPCs participate in wave/end cleanup as well.
 pub fn on_summoned(server: &GameServer, summoner: &WorldObject, npcs: &[NpcRef]) {
@@ -795,6 +899,7 @@ pub fn on_death(server: &GameServer, victim: &WorldObject) {
         .state
         .lock()
         .expect("tower defense poisoned");
+    let mut chain: Vec<(EventKey, u32)> = Vec::new();
     for (key, e) in &mut state.active {
         if key.world_id != world_id || group != Some(u32::from(key.zone_group_id)) {
             continue;
@@ -811,8 +916,24 @@ pub fn on_death(server: &GameServer, victim: &WorldObject) {
         {
             let kills = e.kills.entry(template).or_default();
             *kills = kills.saturating_add(1);
+            let kills = *kills;
+            // The kill target that is met starts the follow-ups naming it.
+            let met = prog(server, e).is_some_and(|p| {
+                p.kill_targets
+                    .iter()
+                    .any(|t| t.kill_target_id == template && kills >= t.kill_count)
+            });
+            if met {
+                for id in followups_of(server, &e.def, template) {
+                    let follow = EventKey { id, ..*key };
+                    if !chain.iter().any(|(k, _)| *k == follow) {
+                        chain.push((follow, e.zone_id));
+                    }
+                }
+            }
         }
         if e.def.kill_npc_count > 0
+            && !is_victory_followup(server, &e.def)
             && (e.def.kill_npc_id == template
                 || (e.def.kill_npc_id == 0
                     && e.owned
@@ -820,6 +941,11 @@ pub fn on_death(server: &GameServer, victim: &WorldObject) {
                         .is_some_and(|n| n.is_target && Arc::ptr_eq(&n.npc, npc))))
         {
             e.end_kills = e.end_kills.saturating_add(1);
+        }
+    }
+    for (key, zone) in chain {
+        if !state.active.contains_key(&key) && !state.pending_chain.iter().any(|(k, _)| *k == key) {
+            state.pending_chain.push((key, zone));
         }
     }
 }
@@ -891,6 +1017,21 @@ pub fn tick(server: &GameServer) {
             tracing::error!(id = key.id, %error, "Tower defense tick failed");
         }
     }
+    let chain = std::mem::take(
+        &mut manager(server)
+            .state
+            .lock()
+            .expect("tower defense poisoned")
+            .pending_chain,
+    );
+    for (key, zone) in chain {
+        match start(server, key, zone) {
+            Ok(()) => tracing::info!(id = key.id, "Tower defense victory follow-up started"),
+            Err(error) => {
+                tracing::error!(id = key.id, %error, "Starting tower defense follow-up failed")
+            }
+        }
+    }
 }
 
 fn schedule_tick(server: &GameServer) {
@@ -926,6 +1067,10 @@ fn schedule_tick(server: &GameServer) {
             else {
                 continue;
             };
+            if is_victory_followup(server, def) {
+                // Started by the death of the NPC it names, never by a clock.
+                continue;
+            }
             let war = server
                 .game_data
                 .zones

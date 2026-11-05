@@ -1,0 +1,78 @@
+# Party fixes (systems/social/team.rs):
+#   * a member that joins an existing party hears the party chat (it never joined the channel);
+#   * accepting an invitation while in another party is refused (82 TEAM_JOIN_ALONE to the
+#     invitee, 77 TEAM_INVITEE_IN_TEAM to the inviter) instead of ending up in two parties;
+#   * failed invitations are answered (76 TEAM_INVITEE_OFFLINE, 77 TEAM_INVITEE_IN_TEAM).
+#
+# Bots:
+#   leader    invites the others; sends the party chat line at the end
+#   mate      first member of the leader's party
+#   late      joins the existing party later: must hear the chat
+#   other     holds an invitation of the leader, founds a party with other2, then answers it
+#   other2    member of other's party
+
+suite social-party
+bot leader
+bot mate
+bot late
+bot other
+bot other2
+
+[leader]
+waitpeer 120 ${mate}
+waitpeer 120 ${late}
+waitpeer 120 ${other}
+waitpeer 120 ${other2}
+partyinvite Ghostly
+expectseen 76 5
+partyinvite ${other}
+sync invited 5
+sync other-party 5
+sync other-answered 5
+expectseen 77 10
+partyinvite ${other2}
+expectseen 77 5
+partyinvite ${mate}
+await TeamJoined 30
+partyinvite ${late}
+sync late-in 5
+# CSSendChatMessage: party chat (type 4), "hi"
+rawcs 063 04000000000000000000020068690000000000
+pump 3
+
+[mate]
+waitpeer 120 ${leader}
+sync invited 5
+sync other-party 5
+sync other-answered 5
+partyaccept
+sync late-in 5
+expectpkt SCChatMessagePacket 25
+
+[late]
+waitpeer 120 ${leader}
+sync invited 5
+sync other-party 5
+sync other-answered 5
+partyaccept
+pump 1
+sync late-in 5
+expectpkt SCChatMessagePacket 25
+
+[other]
+waitpeer 120 ${leader}
+sync invited 5
+partyinvite ${other2}
+sync other-party 5
+partyaccept
+expectseen 82 5
+sync other-answered 5
+sync late-in 5
+
+[other2]
+waitpeer 120 ${leader}
+sync invited 5
+partyaccept
+sync other-party 5
+sync other-answered 5
+sync late-in 5

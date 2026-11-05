@@ -10,6 +10,13 @@ float mouse_x=0,mouse_y=0;
 #include "input.cpp"
 #include <assert.h>
 #include <stddef.h>
+#include <string>
+#include <utility>
+// The skill trace observer (skilltrace.cpp in the driver): record what the input path reports.
+namespace skilltrace {
+std::vector<std::pair<std::string,int>> presses;
+void on_press(const char* key,int modifier_mask) { presses.push_back(std::make_pair(std::string(key),modifier_mask)); }
+}
 static std::vector<input::Event> events;
 static int attempts=0,fail_at=0,throw_at=0;
 namespace input {
@@ -354,5 +361,33 @@ int main() {
     assert(input::control_at(env,"mouse_right_click 1 2",6700)[0]=='2');
     input::mouse_slots[26]=saved_slot;
     assert(events.empty() && attempts==saved_attempts && !input::mouse_held);
-    puts("input event bytes, synchronous modifier shadow/restoration, shared holds, bounds, rollback and deadline release passed");
+    // Skill trace: every accepted key-down is reported once, at the moment of injection, with
+    // the chord's native modifier bits; refused, mouse and release input reports nothing.
+    skilltrace::presses.clear();
+    input::release(env);
+    input::physical=0;
+    assert(input::control_at(env,"1 100",7000)[0]=='0');
+    assert(input::control_at(env,"-  200",7000)[0]=='0' && input::control_at(env,"= 200",7000)[0]=='0');
+    assert(input::control_at(env,"ctrl+shift+2 100",7000)[0]=='0');
+    assert(skilltrace::presses.size()==4);
+    assert(skilltrace::presses[0]==std::make_pair(std::string("1"),0));
+    assert(skilltrace::presses[1]==std::make_pair(std::string("-"),0));
+    assert(skilltrace::presses[2]==std::make_pair(std::string("="),0));
+    assert(skilltrace::presses[3]==std::make_pair(std::string("2"),0x11|0x22));
+    // "-" and "=" are CryInput IDs 11 and 12 (right after "0" = 10).
+    bool saw_minus=false,saw_equals=false;
+    for(size_t i=0;i<events.size();++i) { if(events[i].id==11) saw_minus=true; if(events[i].id==12) saw_equals=true; }
+    assert(saw_minus && saw_equals);
+    size_t reported=skilltrace::presses.size();
+    assert(input::control_at(env,"1 100",7000)[0]=='2');            // already held
+    assert(input::control_at(env,"escape 100",7000)[0]=='2');       // unsupported key
+    assert(input::control_at(env,"ctrl+ctrl+3 100",7000)[0]=='2');  // invalid chord
+    assert(input::control_at(env,"release",7000)[0]=='0');
+    assert(input::control_at(NULL,"4 100",7000)[0]=='2');           // CryInput unavailable
+    fail_at=attempts+1;                                              // the engine refuses the key-down
+    assert(input::control_at(env,"5 100",7000)[0]=='2');
+    fail_at=0;
+    assert(skilltrace::presses.size()==reported);
+    input::release(env);
+    puts("input event bytes, synchronous modifier shadow/restoration, shared holds, bounds, rollback, deadline release and skill trace press reports passed");
 }

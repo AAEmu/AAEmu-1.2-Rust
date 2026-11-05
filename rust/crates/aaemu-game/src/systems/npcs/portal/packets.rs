@@ -231,7 +231,7 @@ impl ClientPacket for CSTeleportEndedPacket {
             // copy: an unprompted report must not rewrite the position, the region or the zone.
             let pending = me.data().disabled_set_position;
             me.data().set_disabled_set_position(false);
-            tracing::warn!("TeleportEnded, X: {}, Y: {}, Z: {}", self.x, self.y, self.z);
+            tracing::debug!("TeleportEnded, X: {}, Y: {}, Z: {}", self.x, self.y, self.z);
             if pending {
                 // The client reports where it landed: follow it and re-evaluate the region (and
                 // the zone it may have left) before repainting the arrival neighbourhood.

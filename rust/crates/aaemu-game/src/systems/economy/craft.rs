@@ -1038,7 +1038,7 @@ impl CSSetCraftingPayPacket {
     }
 
     fn run(self, _server: &GameServer, _conn: &mut GameConnection) {
-        tracing::warn!(
+        tracing::debug!(
             "SetCraftingPay, ObjId: {}, MoneyAmount: {}",
             self.obj_id,
             self.money_amount

@@ -825,6 +825,9 @@ struct Inner {
     npc_spawners: BTreeMap<u32, Vec<Arc<NpcSpawner>>>,
     npc_event_spawners: BTreeMap<u32, Vec<Arc<NpcSpawner>>>,
     tower_def_spawners: BTreeMap<u32, Vec<Arc<NpcSpawner>>>,
+    /// Entries of NPCs that are members of a tower defense `NpcGroup`, held back from the
+    /// ordinary spawns until [`SpawnManager::resolve_tower_groups`] knows their group sites.
+    tower_group_entries: Vec<NpcSpawnerDef>,
     doodad_spawners: BTreeMap<u32, Arc<DoodadSpawner>>,
     transfer_spawners: BTreeMap<u32, SimpleSpawnerDef>,
     gimmick_spawners: BTreeMap<u32, GimmickSpawner>,
@@ -1044,6 +1047,17 @@ impl SpawnManager {
         server: &GameServer,
         def: NpcSpawnerDef,
     ) -> Result<usize, String> {
+        self.add_npc_spawner_with(server, def, true)
+    }
+
+    /// [`Self::add_npc_spawner`]; `hold_group_members` keeps the entries of tower defense group
+    /// members back for [`Self::resolve_tower_groups`] (false when that releases them).
+    fn add_npc_spawner_with(
+        &self,
+        server: &GameServer,
+        def: NpcSpawnerDef,
+        hold_group_members: bool,
+    ) -> Result<usize, String> {
         let data = &server.game_data.systems.npcs.npc_spawners;
         let spawns = &server.systems.npcs.spawns;
         let mut inner = self.inner();
@@ -1112,6 +1126,21 @@ impl SpawnManager {
                     .or_default()
                     .push(Arc::new(spawner));
             }
+            return Ok(0);
+        }
+        if hold_group_members
+            && ids.is_empty()
+            && server
+                .game_data
+                .systems
+                .instances
+                .tower_defs
+                .group_npcs
+                .contains(&b.unit_id)
+        {
+            // The shipped JSON lists the members of an event's NPC group one entry each at the
+            // group's spawn site. Only the tower defense runtime may spawn them.
+            inner.tower_group_entries.push(def.clone());
             return Ok(0);
         }
         if ids.is_empty() {
@@ -1286,6 +1315,7 @@ impl SpawnManager {
             inner.npc_spawners.clear();
             inner.npc_event_spawners.clear();
             inner.tower_def_spawners.clear();
+            inner.tower_group_entries.clear();
             inner.doodad_spawners.clear();
             inner.transfer_spawners.clear();
             inner.gimmick_spawners.clear();
@@ -1298,6 +1328,7 @@ impl SpawnManager {
         self.reset_activation();
         let mut stats = LoadStats::default();
         self.load_npc_spawns(server, world_path, exists, &mut stats)?;
+        self.resolve_tower_groups(server, &mut stats)?;
         self.load_doodad_spawns(server, world_path, exists, &mut stats)?;
         self.load_simple_spawns(
             server,
@@ -2403,6 +2434,113 @@ impl SpawnManager {
         spawners.len()
     }
 
+    /// Turns the held-back entries of tower defense group members into event spawners.
+    ///
+    /// The JSON has no group entry: every member of an `npc_groups` group is listed (one entry
+    /// each, duplicates included) at the group's spawn site. A site of group `G` is therefore a
+    /// position whose entries are exactly `G`'s members; every spawner template listing `G` as an
+    /// `NpcGroup` member gets one event spawner per member of every site, standing at the
+    /// site plus the member's formation offset. Entries that complete no group are released as
+    /// ordinary spawns.
+    fn resolve_tower_groups(
+        &self,
+        server: &GameServer,
+        stats: &mut LoadStats,
+    ) -> Result<(), String> {
+        let entries = std::mem::take(&mut self.inner().tower_group_entries);
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let td = &server.game_data.systems.instances.tower_defs;
+        let key = |p: &crate::data::world_templates::WorldSpawnPosition| {
+            (
+                (p.x * 100.0).round() as i64,
+                (p.y * 100.0).round() as i64,
+                (p.z * 100.0).round() as i64,
+            )
+        };
+        let mut sites: BTreeMap<(i64, i64, i64), Vec<usize>> = BTreeMap::new();
+        for (i, e) in entries.iter().enumerate() {
+            sites.entry(key(&e.base.position)).or_default().push(i);
+        }
+        let mut used = vec![false; entries.len()];
+        let mut resolved: BTreeMap<u32, Vec<Arc<NpcSpawner>>> = BTreeMap::new();
+        for (&spawner_id, group_ids) in &td.spawner_groups {
+            for group_id in group_ids {
+                let Some(members) = td.groups.get(group_id) else {
+                    continue;
+                };
+                let mut need: BTreeMap<u32, usize> = BTreeMap::new();
+                for m in members {
+                    *need.entry(m.npc_id).or_default() += 1;
+                }
+                for indices in sites.values() {
+                    let mut have: BTreeMap<u32, usize> = BTreeMap::new();
+                    for &i in indices {
+                        *have.entry(entries[i].base.unit_id).or_default() += 1;
+                    }
+                    if have != need {
+                        continue;
+                    }
+                    for &i in indices {
+                        used[i] = true;
+                    }
+                    let site = &entries[indices[0]].base;
+                    for m in members {
+                        let mut position = site.position;
+                        let (sin, cos) = position.yaw.sin_cos();
+                        position.x += m.offset[0] * cos - m.offset[1] * sin;
+                        position.y += m.offset[0] * sin + m.offset[1] * cos;
+                        position.z += m.offset[2];
+                        let shared = NpcSpawnerShared::new(position);
+                        shared.set_management_group(site.spawn_group_id);
+                        let mut template = NpcSpawnerTemplate::with_member(spawner_id, m.npc_id);
+                        template.spawn_delay_min = 0.0;
+                        template.spawn_delay_max = 0.0;
+                        resolved
+                            .entry(spawner_id)
+                            .or_default()
+                            .push(Arc::new(NpcSpawner::new(
+                                NpcSpawnerInit {
+                                    id: spawner_id,
+                                    spawner_id,
+                                    unit_id: m.npc_id,
+                                    follow_path: site.follow_path.clone(),
+                                    follow_npc: site.follow_npc,
+                                    respawn_time: site.respawn_time,
+                                    despawn_time: site.despawn_time,
+                                    special_link: site.special_link.clone(),
+                                    count: 1,
+                                    npc_spawner_ids: vec![spawner_id],
+                                    parent_world: Some(self.world.id),
+                                    spawnable_npcs: Vec::new(),
+                                    template: Some(Arc::new(template)),
+                                },
+                                shared.clone(),
+                            )));
+                    }
+                }
+            }
+        }
+        {
+            let mut inner = self.inner();
+            for (id, list) in resolved {
+                inner.tower_def_spawners.entry(id).or_default().extend(list);
+            }
+        }
+        for (def, used) in entries.into_iter().zip(used) {
+            if !used {
+                // Not part of any complete group: an ordinary spawn after all.
+                let added = self.add_npc_spawner_with(server, def, false)?;
+                if added > 0 {
+                    stats.npc_entries_with_spawners += 1;
+                    stats.npc_spawners += added;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Authored controller positions for a tower defense spawner template.
     pub fn tower_def_spawners(&self, id: u32) -> Vec<Arc<NpcSpawner>> {
         self.inner()
@@ -2502,6 +2640,52 @@ impl SpawnManager {
         unit: &WorldObject,
     ) -> Option<Arc<NpcSpawner>> {
         let _g = self.lock_spawner.lock().expect("poisoned");
+        let (id, template) = Self::effect_template(server, unit_id)?;
+        let world = self.world.world_pos_rot(unit);
+        let t = unit.transform();
+        let position = crate::data::world_templates::WorldSpawnPosition {
+            world_id: t.world_id,
+            zone_id: t.zone_id,
+            x: world.x,
+            y: world.y,
+            z: world.z,
+            yaw: world.rot_z,
+            pitch: 0.0,
+            roll: 0.0,
+        };
+        Some(self.effect_spawner(unit_id, id, template, position))
+    }
+
+    /// [`Self::get_npc_spawner_at`] for a position unit (a plot "Location" target, which has no
+    /// world object): the spawner stands at `pos` in `zone_id` of `world_id`.
+    pub fn get_npc_spawner_at_pos(
+        &self,
+        server: &GameServer,
+        unit_id: u32,
+        world_id: u32,
+        zone_id: u32,
+        pos: &crate::models::transform::PositionAndRotation,
+    ) -> Option<Arc<NpcSpawner>> {
+        let _g = self.lock_spawner.lock().expect("poisoned");
+        let (id, template) = Self::effect_template(server, unit_id)?;
+        let position = crate::data::world_templates::WorldSpawnPosition {
+            world_id,
+            zone_id,
+            x: pos.x,
+            y: pos.y,
+            z: pos.z,
+            yaw: pos.rot_z,
+            pitch: 0.0,
+            roll: 0.0,
+        };
+        Some(self.effect_spawner(unit_id, id, template, position))
+    }
+
+    /// The spawner template `GetNpcSpawner` rewrites for `unit_id`.
+    fn effect_template(
+        server: &GameServer,
+        unit_id: u32,
+    ) -> Option<(u32, Arc<NpcSpawnerTemplate>)> {
         let data = &server.game_data.systems.npcs.npc_spawners;
         // Only a template that lists this NPC as an ordinary member may be rewritten: an
         // `NpcGroup` row is keyed by its group id, and retargeting it would replace the group's
@@ -2519,35 +2703,32 @@ impl SpawnManager {
                 Some((id, nsn))
             })
         });
-        let (id, template) = match picked {
+        match picked {
             None => {
                 let id = server.ids.object.get_next_id().ok()?;
                 let mut t = NpcSpawnerTemplate::with_spawner(id);
                 t.npcs[0].member_id = unit_id;
                 t.npcs[0].unit_id = unit_id;
                 t.npcs[0].member_type = "Npc".into();
-                (id, Arc::new(t))
+                Some((id, Arc::new(t)))
             }
             Some((id, mut nsn)) => {
                 nsn.member_id = unit_id;
                 nsn.unit_id = unit_id;
                 data.replace_template_npcs(id, nsn);
-                (id, data.get_npc_spawner_template(id)?)
+                Some((id, data.get_npc_spawner_template(id)?))
             }
-        };
-        let world = self.world.world_pos_rot(unit);
-        let t = unit.transform();
-        let position = crate::data::world_templates::WorldSpawnPosition {
-            world_id: t.world_id,
-            zone_id: t.zone_id,
-            x: world.x,
-            y: world.y,
-            z: world.z,
-            yaw: world.rot_z,
-            pitch: 0.0,
-            roll: 0.0,
-        };
-        Some(Arc::new(NpcSpawner::new(
+        }
+    }
+
+    fn effect_spawner(
+        &self,
+        unit_id: u32,
+        id: u32,
+        template: Arc<NpcSpawnerTemplate>,
+        position: crate::data::world_templates::WorldSpawnPosition,
+    ) -> Arc<NpcSpawner> {
+        Arc::new(NpcSpawner::new(
             NpcSpawnerInit {
                 id,
                 spawner_id: 0,
@@ -2564,7 +2745,7 @@ impl SpawnManager {
                 spawnable_npcs: Vec::new(),
             },
             NpcSpawnerShared::new(position),
-        )))
+        ))
     }
 
     /// `CloneNpcEventSpawners(from, to)`.

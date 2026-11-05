@@ -8,5 +8,7 @@ void remove();
 std::string capture(); // status byte + PNG bytes (or an error string)
 std::string window(bool visible); // called on the client main thread
 std::string info();
+unsigned frame_count(); // Present calls counted so far (the `frame` of trace rows)
+bool capture_ready(); // the Present hook is installed
 std::string profile(const std::string& action); // bounded DXGI frame interval samples
 }

@@ -1,0 +1,30 @@
+# Hard disconnect (world/session.rs on_disconnect -> social::session::on_leave_world): a guild
+# member whose connection drops without CSLeaveWorld is logged out of its guild like a clean
+# leave, so the other members get its status change (the old disconnect left it shown online).
+#
+# Bots:
+#   leader    founds a two-member guild with the member, waits for the member's disconnect
+#   member    founding member; hangs up (socket closed, no CSLeaveWorld)
+
+suite social-disconnect
+bot leader
+bot member
+
+[leader]
+waitpeer 120 ${member}
+partyinvite ${member}
+await TeamJoined 30
+gcreate Disconnect Guild
+expectdb "SELECT COUNT(*) FROM expedition_members WHERE name = '${member}'" 1 20
+pump 2
+sync guild-ready 2
+expectpkt SCTeamMemberDisconnectedPacket 20
+expectpkt SCExpeditionMemberStatusChangedPacket 20
+
+[member]
+waitpeer 120 ${leader}
+partyaccept
+expectdb "SELECT COUNT(*) FROM expedition_members WHERE name = '${member}'" 1 20
+pump 2
+sync guild-ready 2
+hangup
