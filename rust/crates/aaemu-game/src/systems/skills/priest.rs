@@ -110,7 +110,7 @@ pub fn buy(server: &GameServer, player: &PlayerRef, blessing_id: u32, npc_id: u3
     }
     // The inventory helper checks the balance and subtracts under the same character lock.
     if !inventory::change_money(
-        &mut inventory::Out::Direct,
+        &mut inventory::Out::Direct(server),
         player,
         slot_type::INVENTORY,
         slot_type::NONE,

@@ -391,7 +391,7 @@ pub fn craft(server: &GameServer, player: &PlayerRef, craft_id: u32, count: i32,
         // client is left waiting. Deviation: end the (client side) batch with an error.
         tracing::error!("Craft: unknown craft {craft_id}");
         error2(
-            &mut Out::Direct,
+            &mut Out::Direct(server),
             player,
             error_message::CRAFT_CANT_ACT_ANY_MORE,
             error_message::CRAFT_INVALID_CRAFT_TYPE,
@@ -412,7 +412,7 @@ pub fn craft(server: &GameServer, player: &PlayerRef, craft_id: u32, count: i32,
         // `craft_not_learned` (client error id 0x82 = 130, X2G:1136028) under
         // `CraftCantActAnyMore`; the client resets its batch only on that pair.
         error2(
-            &mut Out::Direct,
+            &mut Out::Direct(server),
             player,
             error_message::CRAFT_CANT_ACT_ANY_MORE,
             error_message::CRAFT_NOT_LEARNED,
@@ -430,7 +430,7 @@ pub fn craft(server: &GameServer, player: &PlayerRef, craft_id: u32, count: i32,
         s.doodad_id = doodad_id;
     });
     let hooks = mgr.hooks();
-    let mut out = Out::Direct;
+    let mut out = Out::Direct(server);
 
     // check if you are equipped with a backpack or glider
     let inv = Inv::of(player);
@@ -617,7 +617,7 @@ pub fn abort_craft(server: &GameServer, player: &PlayerRef, result: u8) {
 pub fn abort_craft_with(server: &GameServer, player: &PlayerRef, reason: i16) {
     debug_assert_ne!(reason, 0);
     error2(
-        &mut Out::Direct,
+        &mut Out::Direct(server),
         player,
         error_message::CRAFT_CANT_ACT_ANY_MORE,
         reason,
@@ -660,7 +660,7 @@ pub fn end_craft(server: &GameServer, player: &PlayerRef) {
     };
     let labor = player.data().labor_power;
     if i32::from(labor) < state.consume_labor_power {
-        let mut out = Out::Direct;
+        let mut out = Out::Direct(server);
         send_debug_message(
             server,
             &mut out,
@@ -700,7 +700,7 @@ pub fn end_craft(server: &GameServer, player: &PlayerRef) {
     if !bench_access(server, player, state.doodad_id, craft, mgr.hooks().as_ref()) {
         drop(operation);
         error2(
-            &mut Out::Direct,
+            &mut Out::Direct(server),
             player,
             error_message::CRAFT_CANT_ACT_ANY_MORE,
             error_message::CRAFT_PERMISSION_DENY,
@@ -881,7 +881,7 @@ fn hand_out_products(server: &GameServer, player: &PlayerRef, inv: &Inv, craft: 
             craft.id
         );
         error2(
-            &mut Out::Direct,
+            &mut Out::Direct(server),
             player,
             error_message::CRAFT_CANT_ACT_ANY_MORE,
             if payout.availability == MaterialAvailability::LockedOnly {

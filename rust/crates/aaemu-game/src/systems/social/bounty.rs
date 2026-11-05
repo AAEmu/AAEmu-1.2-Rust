@@ -422,7 +422,7 @@ impl BountyManager {
         // `subtract_money` reads from `None`, which never checks funds, so a concurrent wallet
         // change could overdraw the payer.
         if !inventory::change_money(
-            &mut Out::Direct,
+            &mut Out::Direct(server),
             payer,
             slot_type::INVENTORY,
             slot_type::NONE,
@@ -437,7 +437,7 @@ impl BountyManager {
                 // Cannot happen under the lock; refund rather than destroying the copper.
                 drop(state);
                 inventory::add_money(
-                    &mut Out::Direct,
+                    &mut Out::Direct(server),
                     payer,
                     slot_type::INVENTORY,
                     amount,
@@ -525,7 +525,7 @@ impl BountyManager {
         while remaining > 0 {
             let chunk = remaining.min(i64::from(i32::MAX)) as i32;
             if !inventory::add_money(
-                &mut Out::Direct,
+                &mut Out::Direct(server),
                 arrestor,
                 slot_type::INVENTORY,
                 chunk,

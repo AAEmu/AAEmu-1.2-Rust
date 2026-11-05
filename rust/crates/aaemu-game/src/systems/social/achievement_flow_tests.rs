@@ -8,10 +8,11 @@ use aaemu_commons::PacketStream;
 use crate::data::items::ItemTemplate;
 use crate::data::GameData;
 use crate::models::container::slot_type;
+use crate::models::item_task::task_type;
 use crate::net::packet::encode_raw;
 use crate::opcodes::{cs, sc};
 use crate::server::GameServer;
-use crate::systems::economy::inventory::Inv;
+use crate::systems::economy::inventory::{add_money, subtract_money, Inv, ItemTxn};
 use crate::systems::skills::progress::{add_exp_world_tail, ExpGain};
 use crate::systems::social::achievement::{
     char_record_kind, AchievementGameData, AchievementObjectives, Achievements, CharRecords,
@@ -264,6 +265,150 @@ async fn an_event_under_the_economy_lock_is_queued_until_the_transaction_ends() 
         ]
     );
     assert_eq!(bag_count(&player), 1);
+}
+
+/// An achievement that asks for `complete_num` gold (kind 14) and the record it watches.
+fn millionaire_content(complete_num: u32) -> AchievementGameData {
+    one_achievement(1, complete_num, 0, 14, char_record_kind::MY_GOLD, 0, 0)
+}
+
+#[tokio::test]
+async fn an_upward_money_change_credits_my_gold_with_the_absolute_total() {
+    let server = server_with_content(millionaire_content(1_000_000));
+    let (mut client, player) = player_of(&server);
+    // 900,000 gold carried; one deposit takes the purse to 1,000,000 gold.
+    player.data().money = 9_000_000_000;
+
+    let mut txn = ItemTxn::begin(&server);
+    {
+        let mut out = txn.out();
+        assert!(add_money(
+            &mut out,
+            &player,
+            slot_type::INVENTORY,
+            1_000_000_000,
+            task_type::DEPOSIT_MONEY,
+        ));
+    }
+    // Under the economy operation lock the report must not run: the record stays untouched.
+    assert!(achievement_ops(client.drain_ops()).is_empty());
+    assert_eq!(player.data().achievement_state.record_value(14), 0);
+    assert_eq!(player.data().money, 10_000_000_000);
+    drop(txn);
+
+    assert_eq!(
+        achievement_ops(client.drain_ops()),
+        [
+            sc::SCAchievementChangedPacket,
+            sc::SCAchievementCompletedPacket
+        ]
+    );
+    assert_eq!(player.data().achievement_state.record_value(14), 1_000_000);
+    assert_eq!(player.data().achievement_state.amount(1), 1_000_000);
+    assert!(player.data().achievement_state.is_complete(1));
+}
+
+#[tokio::test]
+async fn spending_gold_does_not_lower_the_my_gold_record() {
+    let server = server_with_content(millionaire_content(1_000_000));
+    let (mut client, player) = player_of(&server);
+    player.data().money = 9_000_000_000;
+
+    let mut txn = ItemTxn::begin(&server);
+    {
+        let mut out = txn.out();
+        assert!(add_money(
+            &mut out,
+            &player,
+            slot_type::INVENTORY,
+            1_000_000_000,
+            task_type::DEPOSIT_MONEY,
+        ));
+    }
+    drop(txn);
+    assert_eq!(player.data().achievement_state.record_value(14), 1_000_000);
+    client.drain();
+
+    // Spending is a downward change: it neither reports nor lowers the high-water record.
+    let mut txn = ItemTxn::begin(&server);
+    {
+        let mut out = txn.out();
+        assert!(subtract_money(
+            &mut out,
+            &player,
+            slot_type::INVENTORY,
+            1_000_000_000,
+            task_type::DEPOSIT_MONEY,
+        ));
+    }
+    drop(txn);
+    assert!(achievement_ops(client.drain_ops()).is_empty());
+    assert_eq!(player.data().money, 9_000_000_000);
+    assert_eq!(player.data().achievement_state.record_value(14), 1_000_000);
+}
+
+#[tokio::test]
+async fn a_money_change_under_the_economy_lock_reports_after_the_transaction() {
+    // The deadlock regression shape: reporting (and paying a reward) inside the operation lock
+    // would deadlock, so the queued effect waits for the lock release.
+    let server = server_with_content(millionaire_content(1));
+    let (mut client, player) = player_of(&server);
+
+    let mut txn = ItemTxn::begin(&server);
+    {
+        let mut out = txn.out();
+        assert!(add_money(
+            &mut out,
+            &player,
+            slot_type::INVENTORY,
+            20_000,
+            task_type::DEPOSIT_MONEY,
+        ));
+    }
+    assert!(achievement_ops(client.drain_ops()).is_empty());
+    assert_eq!(player.data().achievement_state.record_value(14), 0);
+    drop(txn);
+
+    assert_eq!(
+        achievement_ops(client.drain_ops()),
+        [
+            sc::SCAchievementChangedPacket,
+            sc::SCAchievementCompletedPacket
+        ]
+    );
+    assert_eq!(player.data().achievement_state.record_value(14), 2);
+}
+
+#[tokio::test]
+async fn several_money_changes_in_one_operation_report_once_with_the_final_value() {
+    let server = server_with_content(millionaire_content(1_000_000));
+    let (mut client, player) = player_of(&server);
+
+    let mut txn = ItemTxn::begin(&server);
+    {
+        let mut out = txn.out();
+        // Five deposits of 200,000 gold each: 1,000,000 gold, one report.
+        for _ in 0..5 {
+            assert!(add_money(
+                &mut out,
+                &player,
+                slot_type::INVENTORY,
+                2_000_000_000,
+                task_type::DEPOSIT_MONEY,
+            ));
+        }
+    }
+    drop(txn);
+
+    // One report of the batch's final value (1,000,000 gold), not one per change.
+    assert_eq!(
+        achievement_ops(client.drain_ops()),
+        [
+            sc::SCAchievementChangedPacket,
+            sc::SCAchievementCompletedPacket
+        ]
+    );
+    assert_eq!(player.data().achievement_state.record_value(14), 1_000_000);
 }
 
 #[tokio::test]

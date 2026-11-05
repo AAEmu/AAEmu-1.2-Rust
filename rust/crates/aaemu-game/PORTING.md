@@ -5052,6 +5052,15 @@ The achievement subsystem has no 1.2 C# manager; the behaviour follows `rust/doc
   `ItemTxn`, a quest operation) are queued and flushed when it is released; events raised under the
   team / family / expedition managers' own locks use `refresh_achievements_later` and run when the
   packet handler returns. `economy::OpsGuard` tracks the holding thread.
+* **MY_GOLD (k14)** reports the absolute carried gold (`money / 10000`, high-water) after every
+  upward money change through `inventory::change_money` (the item-operation variant queues
+  `ItemFx::Money`; the `Out::Direct` callers report through the achievement deferral) and through
+  the quest reward deposit and equipped-fish sale. The report runs from `fx::flush` / the packet
+  end, after the character and economy locks are released, and is throttled to one per character
+  per second; a value suppressed by the throttle is kept and reported by a later flush. Money
+  paths that assign `Character::money` directly (player trade, buyback, expedition refunds, GM
+  commands) do not report; the entry snapshot and the next money change still back-credit the
+  high-water value.
 * **Repeatable quests** (kinds 27/28) credit +1 per completed run on top of the entry back-credit of 1
   per distinct quest (audit Q3). Category counts therefore count repeats live.
 * **ENCHANT_FAILURE** credits only a plain FAIL result; BREAK and DOWNGRADE are not proven to be "failures"

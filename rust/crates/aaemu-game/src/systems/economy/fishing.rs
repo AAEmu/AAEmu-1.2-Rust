@@ -147,6 +147,14 @@ pub(crate) fn sell_equipped_fish(
         task_type::DEPOSIT_MONEY,
         vec![ItemTask::MoneyChange(refund)],
     );
+    // The sale credits the carried purse: queue the `MY_GOLD` report behind the item effects,
+    // after this operation's character and container locks are released.
+    if refund > 0 {
+        txn.env.fx.push(ItemFx::Money {
+            owner: inv.character_id,
+            money: balance,
+        });
+    }
     true
 }
 
