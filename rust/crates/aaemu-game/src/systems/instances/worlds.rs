@@ -24,7 +24,7 @@ use crate::server::GameServer;
 use crate::systems::npcs::portal::packets::SCLoadInstancePacket;
 use crate::world::{session, PlayerRef, WorldInstance, WorldObject};
 
-use super::packets::SCProcessingInstancePacket;
+use super::packets::{SCProcessingInstancePacket, SCSystemDungeonChannelPacket};
 
 /// `WorldInstance` members the Rust `world::WorldInstance` does not carry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -391,6 +391,22 @@ pub fn instance_loaded(server: &GameServer, p: &PlayerRef) {
         server.world.leave_other_instance(&obj, world.id);
         let changes = world.add_visible_object(&obj, &server.view_ctx());
         session::handle_zone_changes(server, changes);
+    }
+    // `SC 0x207` after the load: the client only accepts the index when the instance and zone
+    // match the ones the load just set, so it waits for this confirmation.
+    if let Some(pending) = server
+        .systems
+        .instances
+        .indun
+        .take_channel_select(p.character_id)
+    {
+        if pending.instance_id == instance_id {
+            p.send(SCSystemDungeonChannelPacket {
+                zone_id: pending.zone_id,
+                instance_id,
+                instance_index: pending.index,
+            });
+        }
     }
     tracing::debug!("InstanceLoaded.");
 }

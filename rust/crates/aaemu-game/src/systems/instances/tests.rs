@@ -394,6 +394,74 @@ fn tower_def_list_count_and_payload_are_bounded_for_the_1_2_client() {
 }
 
 #[test]
+fn system_dungeon_channel_packets_are_byte_exact() {
+    // SC 0x206 reader FUN_397b8c30: u32 zoneKey ; i32 count ; count x
+    // { i32 index ; u32 instId ; i32 restrict ; i32 current }.
+    let state = SCSystemDungeonStatePacket {
+        zone_key: 209,
+        channels: vec![
+            SystemDungeonChannel {
+                index: 0,
+                instance_id: 0x0001_00C8,
+                restrict: 190,
+                current: 3,
+            },
+            SystemDungeonChannel {
+                index: 1,
+                instance_id: 0x0001_00C9,
+                restrict: 190,
+                current: 0,
+            },
+        ],
+    };
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&209u32.to_le_bytes());
+    expected.extend_from_slice(&2i32.to_le_bytes());
+    expected.extend_from_slice(&0i32.to_le_bytes());
+    expected.extend_from_slice(&0x0001_00C8u32.to_le_bytes());
+    expected.extend_from_slice(&190i32.to_le_bytes());
+    expected.extend_from_slice(&3i32.to_le_bytes());
+    expected.extend_from_slice(&1i32.to_le_bytes());
+    expected.extend_from_slice(&0x0001_00C9u32.to_le_bytes());
+    expected.extend_from_slice(&190i32.to_le_bytes());
+    expected.extend_from_slice(&0i32.to_le_bytes());
+    assert_eq!(body(&state), expected);
+    assert_eq!(state.opcode(), sc::SCUnkPacket15);
+
+    // SC 0x207 reader FUN_397b03b0: i32 zoneId ; u32 instanceId ; i32 instanceIndex.
+    let picked = SCSystemDungeonChannelPacket {
+        zone_id: 296,
+        instance_id: 0x0001_00C8,
+        instance_index: 1,
+    };
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&296i32.to_le_bytes());
+    expected.extend_from_slice(&0x0001_00C8u32.to_le_bytes());
+    expected.extend_from_slice(&1i32.to_le_bytes());
+    assert_eq!(body(&picked), expected);
+    assert_eq!(picked.opcode(), sc::SCUnkPacket16);
+
+    // The reader clamps the count to 0x20, so the writer never sends more rows.
+    let many = SCSystemDungeonStatePacket {
+        zone_key: 1,
+        channels: (0..33)
+            .map(|i| SystemDungeonChannel {
+                index: i,
+                instance_id: i as u32,
+                restrict: 1,
+                current: 0,
+            })
+            .collect(),
+    };
+    let bytes = body(&many);
+    assert_eq!(bytes.len(), 4 + 4 + 32 * 16);
+    assert_eq!(
+        i32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+        32
+    );
+}
+
+#[test]
 fn client_packets_decode() {
     let mut s = PacketStream::from_bytes(vec![7, 0, 0, 0, 2]);
     assert_eq!(
@@ -437,6 +505,18 @@ fn client_packets_decode() {
     assert!(CSInstanceLoadedPacket::read(&mut s).is_ok());
     assert!(CSCancelInstantGamePacket::read(&mut s).is_ok());
     assert!(CSLeaveInstantGamePacket::read(&mut s).is_ok());
+    // CS 0x13d writer FUN_397bca60: u32 instId ; bc doodadObjId.
+    let mut b = Vec::new();
+    b.extend_from_slice(&0x1234u32.to_le_bytes());
+    b.extend_from_slice(&[0xC8, 0x00, 0x01]);
+    let mut s = PacketStream::from_bytes(b);
+    assert_eq!(
+        CSSelectSysInstanceChannelPacket::read(&mut s).unwrap(),
+        CSSelectSysInstanceChannelPacket {
+            inst_id: 0x1234,
+            doodad_obj_id: 0x0001_00C8
+        }
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -722,6 +802,46 @@ fn entry_attempts_are_limited_within_four_hours() {
     // Other players / zone groups are separate.
     assert!(m.check_entry_attempt_count(2, 55, &zone, true));
     assert!(m.check_entry_attempt_count(1, 56, &zone, true));
+}
+
+/// The real entrance rows (`AAEMU_COMPACT_DB=... cargo test -p aaemu-game
+/// real_library_entrances -- --ignored`): rows 2-9 are the selective library entrances
+/// (zones 209/210/211), row 1 (zone 183, the mall) is not; groups 70/71/72 select a channel.
+#[test]
+#[ignore = "needs AAEMU_COMPACT_DB"]
+fn real_library_entrances_are_selective() {
+    let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+        return;
+    };
+    let conn =
+        Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    use crate::systems::npcs::doodad::templates::FuncTemplate;
+    let dd = crate::systems::npcs::doodad::data::DoodadData::load_from(&conn).unwrap();
+    let entrance = |id: u32| match dd.func_template(id, "DoodadFuncEnterSysInstance") {
+        Some(FuncTemplate::EnterSysInstance(f)) => f.clone(),
+        other => panic!("doodad_func_enter_sys_instances row {id}: {other:?}"),
+    };
+    let plain = entrance(1);
+    assert!(!plain.selective);
+    assert_eq!(plain.zone_id, 183);
+    let indun = IndunData::load(&conn, "en_us").unwrap();
+    for (id, zone_id, group) in [
+        (2, 209, 70),
+        (3, 209, 70),
+        (4, 209, 70),
+        (5, 209, 70),
+        (6, 210, 71),
+        (7, 210, 71),
+        (8, 211, 72),
+        (9, 211, 72),
+    ] {
+        let f = entrance(id);
+        assert!(f.selective, "row {id}");
+        assert_eq!(f.zone_id, zone_id, "row {id}");
+        let zone = indun.dungeon_zone(group).unwrap();
+        assert!(zone.select_channel, "zone group {group}");
+        assert_eq!(zone.max_players, 190, "zone group {group}");
+    }
 }
 
 /// The real 1.2 tables (`AAEMU_COMPACT_DB=... cargo test -p aaemu-game real_instances_data --
