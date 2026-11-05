@@ -564,6 +564,24 @@ pub(super) fn damage_with_aoe(
     if !test_drive && !house_removal && !can_attack(server, &caster_t, &trg_t) {
         return;
     }
+    // `buffs.immune_damage` threshold immunity: a flagged buff such as Physical Resist Potion
+    // (275, 50) or Perfect Defense (2071, 2000) ignores only hits at or below its value. The
+    // comparison uses the final post-mitigation hit that `reduce_current_hp` would apply.
+    if buffs::damage_immune_threshold(server, &trg, damage_type)
+        .is_some_and(|limit| i64::from(value) <= limit)
+    {
+        let mut p = SCUnitDamagedPacket::new(
+            args.cast,
+            args.caster_caster,
+            caster.obj_id(),
+            trg.obj_id(),
+            0,
+            0,
+        );
+        p.hit_type = SkillHitType::Immune;
+        broadcast(server, &trg, &p, false);
+        return;
+    }
     // Reflection is part of the landed hit: it is applied before the victim's own HP change
     // and uses the pre-absorption amount, like the `Damaged` event below. Internal damage modes
     // (test drive, abandoned-house removal) and GM damage (which bypasses this function) never
