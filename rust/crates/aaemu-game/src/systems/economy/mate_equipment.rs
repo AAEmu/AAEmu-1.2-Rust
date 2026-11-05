@@ -5,6 +5,11 @@
 //! (`CSRepairSlaveItemsPacket`, handled in `vehicles::slaves`), and the stablehand mate revive
 //! packet (`CSRepairPetItemsPacket`, handled in `vehicles::mates`). The slave equipment move
 //! packet lives in `vehicles::packets` with the other slave packets.
+//!
+//! `change_mate_equipment` enforces the 1.2 client's slot permission (`mate_equip_slot_packs`
+//! through `npcs.mate_equip_slot_pack_id`, see [`super::mate_equipment_data`]); the per-mate item
+//! list from `mate_equip_pack_groups` is INFERRED and only logged (the client's check is gated
+//! on a client flag whose default in `FUN_391edb00` is clear).
 
 use std::sync::Arc;
 
@@ -290,10 +295,13 @@ pub fn change_mate_equipment(
         return;
     };
     // A tl id identifies a visible mate; it does not grant access to its equipment.
-    if p.owning_player_id != character.character_id || mate.data().owner_obj_id != character.obj_id
-    {
-        return;
-    }
+    let (mate_id, mate_template_id) = {
+        let m = mate.data();
+        if p.owning_player_id != character.character_id || m.owner_obj_id != character.obj_id {
+            return;
+        }
+        (m.id, m.unit.template_id)
+    };
     if p.item_count == 0 {
         return;
     }
@@ -301,7 +309,25 @@ pub fn change_mate_equipment(
         tracing::error!("ChangeMateEquipment, mate {} has no equipment", p.mate_tl);
         return;
     };
-    let mate_id = mate.data().id;
+    // `IsMateEquipableSlot` (`FUN_3933a9c0`): the mate's NPC template names a
+    // `mate_equip_slot_packs` row through `mate_equip_slot_pack_id`; a template without a pack
+    // (0 / NULL, e.g. non-pet NPCs) keeps the unrestricted behaviour.
+    let mate_rules = &server.game_data.systems.economy.mate_equipment;
+    let mate_slot_pack = server
+        .game_data
+        .systems
+        .npcs
+        .npc
+        .template(mate_template_id)
+        .and_then(|t| {
+            mate_rules
+                .slot_packs
+                .get(&t.mate_equip_slot_pack_id)
+                .copied()
+        });
+    // INFERRED per-mate item list (`mate_equip_pack_groups` x `mate_equip_pack_items`); see
+    // the note in `mate_equipment_data`. Used for logging only.
+    let mate_pack_items = mate_rules.pack_items.get(&mate_template_id);
     let mut s = PacketStream::from_bytes(p.rest);
     let inv = Inv::of(character);
     let bag = inv.bag();
@@ -356,6 +382,67 @@ pub fn change_mate_equipment(
         let Some(src_item) = &src_loc.item else {
             continue;
         };
+        if is_equip {
+            // The 1.2 client's `IsMateEquipableSlot` (`FUN_3933a9c0`) refuses an item whose
+            // equip slot the mate's `mate_equip_slot_packs` row does not allow; the item stays
+            // in the bag (the refusal is answered like the existing rejected move). Unequipping
+            // into the bag is always allowed.
+            if let Some(pack) = mate_slot_pack {
+                let slot_allowed = server
+                    .game_data
+                    .items
+                    .template(src_item.template_id)
+                    .and_then(|t| t.gear_slot_type())
+                    .and_then(|st| {
+                        crate::models::container::allowed_gear_slots(st)
+                            .first()
+                            .copied()
+                    })
+                    .is_some_and(|slot| pack.allows(slot));
+                if !slot_allowed {
+                    tracing::debug!(
+                        "ChangeMateEquipment: mate {} (template {}) may not wear item template {}",
+                        p.mate_tl,
+                        mate_template_id,
+                        src_item.template_id
+                    );
+                    txn.out().send(
+                        character,
+                        SCMateEquipmentChangedPacket {
+                            item_on_pet: player_loc.clone(),
+                            item_in_bag: mate_loc.clone(),
+                            mate_tl_id: p.mate_tl,
+                            character_id: p.owning_player_id,
+                            passenger_id: p.passenger_player_id,
+                            bts: p.bts,
+                            success: false,
+                        },
+                    );
+                    // The client's slot check reports error `0x22f` (`FUN_394e41f0`,
+                    // `dll.c:1021549`); its text is capture-pending and the server's matching
+                    // type for a refused pet item is `ITEM_NOT_FOR_PET` (see PORTING.md).
+                    inventory::send_error_message_to(
+                        &mut txn.out(),
+                        character,
+                        super::error_message::ITEM_NOT_FOR_PET,
+                    );
+                    continue;
+                }
+            }
+            // INFERRED whitelist: the 1.2 client checks `FUN_395ac760` only while bit 0x4000
+            // of the client flag at `DAT_39b02294 + 0x1c` is set; `FUN_391edb00` initialises
+            // it to 0x32 (bit clear) and no client code that sets it was found, so log an
+            // item outside the mate's packs without refusing it.
+            if let Some(items) = mate_pack_items {
+                if !items.contains(&src_item.template_id) {
+                    tracing::debug!(
+                        "ChangeMateEquipment: item template {} is not in the client's `mate_equip_pack_groups` list for mate template {}; allowing it (the 1.2 client's whitelist gate is off)",
+                        src_item.template_id,
+                        mate_template_id
+                    );
+                }
+            }
+        }
         let start = txn.env.fx.len();
         let res = inventory::split_or_move_item_ex(
             &mut txn,

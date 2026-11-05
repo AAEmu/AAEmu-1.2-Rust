@@ -458,6 +458,43 @@ inherited grade keeps the C# TODO (capture-pending **ITEM-LOOT-GRADE**): the 1.2
 parses the descriptor (`FUN_396e91c0`), not the retail rule. `item_secure_exceptions` was
 already loaded and used by `item_security::is_lockable` (`FUN_394df4a0`); unchanged.
 
+#### Mate equipment rules (2026-11-05)
+
+`CSChangeMateEquipmentPacket` now enforces the mate's slot permission from
+`mate_equip_slot_packs` (`systems/economy/mate_equipment_data.rs`, loaded into
+`server.game_data.systems.economy.mate_equipment`; the mate's NPC template names the row through
+`npcs.mate_equip_slot_pack_id`, NULL/0 = no restriction, keeping the old behaviour for non-pet
+NPCs). EVIDENCED from the 1.2 client: `LoadMateEquipSlotPackDescs` (`FUN_396ce630`,
+`dll.c:1479277`) fills chest `+0`, feet `+1`, head `+2`, waist `+8` from
+`SELECT id, chest, feet, head, name, waist FROM mate_equip_slot_packs`, and `IsMateEquipableSlot`
+(`FUN_3933a9c0`, `dll.c:667569`) allows exactly equip slots head 0 (row `+2`), chest 2 (`+0`),
+waist 3 (`+8`) and feet 6 (`+1`); the equip-drag validation `FUN_394e41f0` calls it with the
+item's slot at `dll.c:1021546`. The server derives the item's slot from
+`ItemTemplate::gear_slot_type` + `allowed_gear_slots` (armor slot type 1 -> head 0, 3 -> chest 2,
+4 -> waist 3, 7 -> feet 6, the same mapping the data uses). A refused item stays in the bag and is
+answered with `SCMateEquipmentChangedPacket{success:false}` plus `ITEM_NOT_FOR_PET` (204);
+unequipping to the bag is always allowed. The client's own slot-check error id is `0x22f` (559)
+but the 1.2 `ErrorMessageType` text at 559 is not the pet-equip message, so the server uses the
+existing pet error (capture-pending **MATE-EQUIP-1** for the exact retail text).
+
+`mate_equip_pack_groups` x `mate_equip_pack_items` (the per-mate item list) is loaded through the
+same join the client runs (`FUN_395fbbc0`, SQL at `0x399f9490`) but is **not** enforced. The
+client's only whitelist consumer is `FUN_395ac760` (`dll.c:1198859`) called from the equip
+validation `FUN_394e41f0` (`dll.c:1021539`), and that call is gated on
+`(*(DAT_39b02294 + 0x1c) & 0x4000)`: the client singleton initialises that field to `0x32` (bit
+clear) in `FUN_391edb00` (`dll.c:383307`) and no code that sets bit `0x4000` was found in the
+1.2 client, so the whitelist is inactive. The real data also joins 4660 group/item rows of which 1058
+name an item whose equip slot the mate's own slot pack forbids (e.g. effect pack 2 on a combat
+mate with a waist item), so rejecting on the list would break legal equips. The server logs an
+item outside the list at `debug` and keeps the move.
+
+Tests: `mate_equipment_riding_pack_allows_head_waist_and_feet`,
+`mate_equipment_riding_pack_refuses_chest_and_keeps_the_item`,
+`mate_equipment_pet_pack_refuses_every_slot_and_keeps_the_items`,
+`mate_equipment_pet_pack_still_unequips_to_the_bag`,
+`mate_equipment_item_outside_the_client_list_is_still_allowed` (flow, real packet handler), the
+loader's in-memory tests and the `AAEMU_COMPACT_DB`-gated `real_compact_db_mate_equipment`.
+
 #### Limited-sale purchase limits (2026-11-03)
 
 `items.limited_sale_count` and `items.one_time_sale` are now read and enforced as per-character
