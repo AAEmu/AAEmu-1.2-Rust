@@ -382,15 +382,15 @@ sent `SCCastingDelayed`; the delayed interrupt this replaces was Rust-only
 
 Capture-pending (WP-1): who besides the victim receives `SCCastingDelayed` (the 1.2 handler
 reads only the local cast, so viewers are not sent it; a player-controlled mount / pet cast has
-no connection of its own and is not told); how the real server delays a plot cast
-(the client uses plot id 0 for a direct cast, INFERRED from the two handler branches); and the
-channel behaviour (`delay > 0` on a channel interrupts immediately because no 1.2 packet
-delays a channel). A delayed disturb on a unit with no cast, channel or plot now does nothing
-instead of arming an interrupt that could hit a cast started during the delay. A plot cast
-keeps the old delayed interrupt until the plot wait can be delayed.
+no connection of its own and is not told); how the real server delays a plot cast (the client
+uses plot id 0 for a direct cast, INFERRED from the two handler branches); and how a delayed
+disturb affects a channel or plot cast. Neither has a 1.2 delay packet, so both keep today's
+behaviour (the old delayed interrupt, with the liveness check), not an immediate interrupt and
+not an extension. A delayed disturb on a unit with no cast, channel or plot now does nothing
+instead of arming an interrupt that could hit a cast started during the delay.
 
 Tests: `systems::skills::tests::cast_delay_tests` (extension, `SCCastingDelayed` and completion
-at the new time, no-delay interrupt, cancelled-after-extension) and
+at the new time, no-delay interrupt, cancelled-after-extension, delayed channel interrupt) and
 `systems::skills::packets::tests::casting_delayed_layout` (independent literal bytes).
 
 ### systems::npcs

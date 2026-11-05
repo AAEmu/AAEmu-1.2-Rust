@@ -31,6 +31,16 @@ fn cast_data(cast_ms: i32) -> GameData {
     d
 }
 
+fn channel_data(channel_ms: i32) -> GameData {
+    let mut d = data();
+    let mut t = (**d.systems.skills.skill(DAMAGE_SKILL).unwrap()).clone();
+    t.id = CAST_SKILL;
+    t.casting_time = 0;
+    t.channeling_time = channel_ms;
+    d.systems.skills.add_skill(t);
+    d
+}
+
 fn disturb_args<'a>(
     caster: &WorldObject,
     target: &WorldObject,
@@ -50,7 +60,7 @@ fn disturb_args<'a>(
     }
 }
 
-fn start_timed_cast(f: &mut Fixture) -> SkillRef {
+fn start_skill_task(f: &mut Fixture) -> super::super::state::SkillTaskSlot {
     f.client.conn.active_char = Some(f.player.clone());
     start_skill(
         &f.server,
@@ -64,9 +74,27 @@ fn start_timed_cast(f: &mut Fixture) -> SkillRef {
         .skill_state
         .skill_task
         .clone()
-        .expect("timed cast task");
-    assert_eq!(task.kind, super::super::state::SkillTaskKind::Cast);
+        .expect("skill task");
     f.client.drain();
+    task
+}
+
+fn start_timed_cast(f: &mut Fixture) -> SkillRef {
+    let task = start_skill_task(f);
+    assert_eq!(task.kind, super::super::state::SkillTaskKind::Cast);
+    task.skill
+}
+
+fn start_channel(f: &mut Fixture) -> SkillRef {
+    let task = start_skill_task(f);
+    assert!(
+        matches!(
+            task.kind,
+            super::super::state::SkillTaskKind::EndChanneling { channel_doodad: 0 }
+        ),
+        "expected a channel task, got {:?}",
+        task.kind
+    );
     task.skill
 }
 
@@ -205,4 +233,42 @@ async fn a_cast_cancelled_after_the_extension_does_not_complete() {
         "the cancelled cast applied its effects at the delayed end"
     );
     assert!(skill.cancelled());
+}
+
+#[tokio::test]
+async fn a_delayed_disturb_interrupts_a_channel_after_the_delay() {
+    // A channel has no `SCCastingDelayed` equivalent, so a delayed disturb keeps today's
+    // behaviour: the old interrupt after the delay (capture-pending in PORTING.md), not an
+    // immediate one and not an extension.
+    let mut f = fixture_with(channel_data(10_000));
+    let skill = start_channel(&mut f);
+
+    let victim = WorldObject::from(&f.player);
+    let disturber = WorldObject::from(&f.npc);
+    let none = SkillObject::None;
+    special::execute(
+        &f.server,
+        5,
+        &disturb_args(&disturber, &victim, &none),
+        [100, DELAY_MS, 0, 0],
+    );
+
+    // Still channeling immediately after the effect: the interrupt is armed, not immediate.
+    assert!(!skill.cancelled());
+    assert!(f.player.data().unit.skill_state.skill_task.is_some());
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while f.player.data().unit.skill_state.skill_task.is_some()
+        && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(skill.cancelled(), "the delayed interrupt did not run");
+    assert!(f.player.data().unit.skill_state.skill_task.is_none());
+    // The channel was not extended: no delay packet for it.
+    let got = frames(&mut f.client);
+    assert!(
+        !got.iter().any(|(op, _)| *op == sc::SCCastingDelayedPacket),
+        "{got:x?}"
+    );
 }

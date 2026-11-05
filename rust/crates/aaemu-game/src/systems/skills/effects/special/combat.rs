@@ -134,14 +134,11 @@ pub fn disturb_casting(server: &GameServer, args: &EffectArgs<'_>, v: [i32; 4]) 
                 )
             })
             .unwrap_or((false, false));
-        if channeling {
-            // No 1.2 packet delays a channel: interrupt it now.
-            super::super::super::skill::interrupt_skills(server, &target);
-        } else if plotting {
-            // How a delayed disturb affects a plot cast is capture-pending; keep the old
-            // delayed interrupt for it.
+        if channeling || plotting {
+            // Neither a channel nor a plot cast has a 1.2 delay packet, so how a delayed
+            // disturb affects them is capture-pending: keep the old delayed interrupt.
             tracing::debug!(
-                "Special effects: DisturbCasting {} ms on a plot cast (the plot cannot be delayed, capture-pending); interrupting after the delay",
+                "Special effects: DisturbCasting {} ms on a channel or plot cast (it cannot be delayed, capture-pending); interrupting after the delay",
                 v[1]
             );
             super::super::super::tasks::schedule(server, i64::from(v[1]), move |server| {
