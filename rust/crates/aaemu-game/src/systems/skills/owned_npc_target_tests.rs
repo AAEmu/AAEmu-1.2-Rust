@@ -189,6 +189,7 @@ async fn flagged_skill_rejects_invalid_targets_before_resources_buffs_gcd_or_cas
             kind: SkillTaskKind::Cast,
             skill: existing,
             cancel: CancelToken::new(),
+            extend_ms: 0,
         };
         {
             let mut p = player.data();
