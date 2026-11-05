@@ -3514,6 +3514,7 @@ async fn private_mysql_pirate_last_member_dismissal_persists_nation_and_dominion
                 reinforced: false,
                 defender_ni: 100,
                 defender_nr: 100,
+                outcome_credited: false,
                 participants: Default::default(),
             }),
         }])

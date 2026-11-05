@@ -145,6 +145,7 @@ pub async fn load_rows(pool: &MySqlPool) -> anyhow::Result<Vec<DominionState>> {
                 reinforced: row.try_get("siege_reinforced")?,
                 defender_ni: row.try_get("siege_defender_ni")?,
                 defender_nr: row.try_get("siege_defender_nr")?,
+                outcome_credited: row.try_get("siege_outcome_credited")?,
                 participants: BTreeMap::new(),
             })
         };
@@ -322,8 +323,8 @@ async fn write_row(tx: &mut Transaction<'_, MySql>, state: &DominionState) -> sq
          tower_destroyed,tower_hp,last_siege_id,siege_id,attacker_expedition_id,defender_expedition_id,\
          siege_ownership_generation,siege_status,siege_outcome,siege_scheduled_at,siege_starts_at,\
          siege_ends_at,siege_ended_at,siege_reinforced,siege_defender_ni,siege_defender_nr,\
-         non_pvp_start_at,non_pvp_duration_min) \
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+         siege_outcome_credited,non_pvp_start_at,non_pvp_duration_min) \
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
     )
     .bind(state.zone_group_id).bind(state.tower.house_id).bind(state.tower.instance_id)
     .bind(state.tower.guard_tower_setting_id).bind(state.owner_expedition_id)
@@ -343,6 +344,7 @@ async fn write_row(tx: &mut Transaction<'_, MySql>, state: &DominionState) -> sq
     .bind(siege.map_or(0, |s| s.ends_at)).bind(siege.map_or(0, |s| s.ended_at))
     .bind(siege.is_some_and(|s| s.reinforced))
     .bind(siege.map_or(0, |s| s.defender_ni)).bind(siege.map_or(0, |s| s.defender_nr))
+    .bind(siege.is_some_and(|s| s.outcome_credited))
     .bind(state.non_pvp_start_at).bind(state.non_pvp_duration_min)
     .execute(&mut **tx).await?;
     Ok(())

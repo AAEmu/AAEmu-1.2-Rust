@@ -1709,6 +1709,7 @@ mod authority_tests {
             reinforced: false,
             defender_ni: 100,
             defender_nr: 100,
+            outcome_credited: false,
             participants: BTreeMap::from([
                 (
                     1,
