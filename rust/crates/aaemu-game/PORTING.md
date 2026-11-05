@@ -1663,7 +1663,9 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
     the old behaviour. `CSStartInteraction` is refused silently for a non-interactable NPC: no error
     message is evidenced (UNKNOWN). Death and despawn also close an open window and release the
     lock (INFERRED from the packet name; the client handler `FUN_391d9000` only closes the
-    window, it does not tell the server). The client's default interaction state on spawn is
+    window, it does not tell the server, so the tracked `CurrentInteractionObject` is cleared
+    too). The despawn path is the `NpcManager.Delete` AI hook, which runs before the object
+    leaves the world. The client's default interaction state on spawn is
     UNKNOWN (`SCNpcInteractionSkillList` writes `1`); this code assumes interactable unless the
     AI says otherwise. Capture-pending WP-5B-1: whether retail also sends these packets for
     command sets, and whether a non-interactable NPC answers with an error.

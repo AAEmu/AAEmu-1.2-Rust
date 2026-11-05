@@ -55,6 +55,18 @@ pub(crate) fn end_open_interactions(c: &AiCtx<'_>, npc_obj_id: u32) {
     end_open_interactions_in(&world, npc_obj_id);
 }
 
+/// [`end_open_interactions`] for the delete path, which has no `AiCtx` (the NPC is still in the
+/// world when `NpcManager::delete` calls the AI hook).
+pub(crate) fn end_open_interactions_for(server: &crate::server::GameServer, npc_obj_id: u32) {
+    let Some(obj) = server.world.object(npc_obj_id) else {
+        return;
+    };
+    let Some(world) = server.world.world_of(&obj) else {
+        return;
+    };
+    end_open_interactions_in(&world, npc_obj_id);
+}
+
 fn set_interactable(c: &mut AiCtx<'_>, interactable: bool) {
     let changed = {
         let mut n = c.npc.data();

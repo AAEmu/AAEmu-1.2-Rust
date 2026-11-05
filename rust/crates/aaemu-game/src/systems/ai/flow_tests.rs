@@ -3282,3 +3282,41 @@ async fn replaced_locked_set_unlocks_the_npc() {
         vec![vec![0x00, 0x02, 0x00, 0x01]]
     );
 }
+
+/// A despawn (`NpcManager.Delete` -> the AI hook) closes the open interaction window, like the
+/// death behavior does (INFERRED, see PORTING.md WP-5b).
+#[tokio::test]
+async fn deleted_npc_closes_the_open_interaction_window() {
+    let server = server();
+    let mut client = TestClient::new(&server, 1, 1);
+    let player = spawn_player(
+        &server,
+        &client,
+        test_character(1, "Talker", 110.0, 100.0),
+        PLAYER_OBJ,
+    );
+    client.conn.active_char = Some(player.clone());
+    let _npc = spawn_npc(
+        &server,
+        NPC_OBJ,
+        PASSIVE_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    client.drain();
+
+    player.data().unit.current_interaction_object = NPC_OBJ;
+    server
+        .systems
+        .hooks
+        .ai
+        .get()
+        .expect("ai hooks")
+        .npc_deleted(&server, NPC_OBJ);
+    assert_eq!(
+        drain_op(&mut client, sc::SCNpcInteractionEndedByZonePacket),
+        vec![vec![0x00, 0x02, 0x00]]
+    );
+    assert_eq!(player.data().unit.current_interaction_object, 0);
+}
