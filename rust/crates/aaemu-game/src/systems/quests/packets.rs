@@ -244,6 +244,27 @@ impl Marshal for SCQuestMailSentPacket {
     }
 }
 
+/// `SCAreaTeamMessagePacket(enter, sphereId)` (`0x155`): a player entered / left an area
+/// sphere; the client shows the sphere's `team_msg`. The 1.2 client reader `FUN_397b63b0`
+/// reads a bool at body `+0xc` and a `u32` at `+0x10`; the handler `FUN_391dc460` looks the
+/// sphere up in its own `spheres` table and raises event `0xfd` with `team_msg`. The trigger
+/// and the audience are inferred (CAP-UI-6 / CAP-UI-7, see `spheres.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SCAreaTeamMessagePacket {
+    pub enter: bool,
+    pub sphere_id: u32,
+}
+packet_def!(
+    SCAreaTeamMessagePacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCAreaTeamMessagePacket
+);
+impl Marshal for SCAreaTeamMessagePacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_bool(self.enter).write_u32(self.sphere_id);
+    }
+}
+
 /// `SCDoodadQuestAcceptPacket(doodadObjId, questContextId)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SCDoodadQuestAcceptPacket {

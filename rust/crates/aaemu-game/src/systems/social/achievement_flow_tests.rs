@@ -177,6 +177,7 @@ async fn a_level_up_progresses_and_completes_an_achievement_and_pays_the_reward(
         exp: 100,
         should_add_ability_exp: false,
         new_level: Some(10),
+        upgraded_skills: Vec::new(),
     };
 
     add_exp_world_tail(&server, &player, &gain);

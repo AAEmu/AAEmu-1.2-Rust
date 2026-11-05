@@ -132,6 +132,12 @@ impl System {
                     .and_then(|w| w.xml_world_zones().get(&zone))
                     .map_or((0, 0), |z| (z.origin_x, z.origin_y))
             });
+        // 10.x-derived area sphere geometry (offline-converted, guarded against this build's
+        // `spheres` table). A missing file leaves the table empty.
+        s.spheres
+            .set_areas(spheres::load_sphere_areas(&server.config.app_path, |id| {
+                data.spheres.contains_key(&id)
+            }));
         // SphereQuestManager.Initialize: TickManager subscription (500 ms)
         let weak = Arc::downgrade(server);
         tokio::spawn(async move {

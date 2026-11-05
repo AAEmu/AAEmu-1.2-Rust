@@ -816,49 +816,19 @@ async fn private_mysql_dominion_tax_and_monument_round_trip() {
         .connect_with(options)
         .await
         .unwrap();
-    sqlx::query(
-        "CREATE TEMPORARY TABLE dominions (\
-         zone_group_id int unsigned NOT NULL, tower_house_id int unsigned NOT NULL,\
-         instance_id int unsigned NOT NULL, guard_tower_setting_id int unsigned NOT NULL,\
-         owner_expedition_id int unsigned NOT NULL DEFAULT 0,\
-         ownership_generation bigint unsigned NOT NULL DEFAULT 0,\
-         reign_start_at bigint NOT NULL DEFAULT 0, claimed_at bigint NOT NULL DEFAULT 0, last_siege_end_at bigint NOT NULL DEFAULT 0,\
-         tax_rate int NOT NULL DEFAULT 0, national_tax_rate smallint unsigned NOT NULL DEFAULT 0,\
-         last_paid_at bigint NOT NULL DEFAULT 0, last_tax_rate_changed_at bigint NOT NULL DEFAULT 0,\
-         last_national_tax_rate_changed_at bigint NOT NULL DEFAULT 0,\
-         national_monument_db_id bigint NOT NULL DEFAULT 0,\
-         national_monument_x float NOT NULL DEFAULT 0,\
-         national_monument_y float NOT NULL DEFAULT 0,\
-         national_monument_z float NOT NULL DEFAULT 0,\
-         cur_house_tax_money int NOT NULL DEFAULT 0, cur_hunt_tax_money int NOT NULL DEFAULT 0,\
-         peace_tax_money int NOT NULL DEFAULT 0, cur_house_tax_aa_point int NOT NULL DEFAULT 0,\
-         peace_tax_aa_point int NOT NULL DEFAULT 0, tower_destroyed tinyint(1) NOT NULL DEFAULT 0,\
-         tower_hp int DEFAULT NULL, last_siege_id bigint unsigned NOT NULL DEFAULT 0,\
-         siege_id bigint unsigned NOT NULL DEFAULT 0,\
-         attacker_expedition_id int unsigned NOT NULL DEFAULT 0,\
-         defender_expedition_id int unsigned NOT NULL DEFAULT 0,\
-         siege_ownership_generation bigint unsigned NOT NULL DEFAULT 0,\
-         siege_status tinyint unsigned NOT NULL DEFAULT 0,\
-         siege_outcome tinyint unsigned NOT NULL DEFAULT 0,\
-         siege_scheduled_at bigint NOT NULL DEFAULT 0, siege_starts_at bigint NOT NULL DEFAULT 0,\
-         siege_ends_at bigint NOT NULL DEFAULT 0, siege_ended_at bigint NOT NULL DEFAULT 0,\
-         non_pvp_start_at bigint NOT NULL DEFAULT 0,\
-         non_pvp_duration_min smallint unsigned NOT NULL DEFAULT 0,\
-         PRIMARY KEY (zone_group_id)) ENGINE=InnoDB",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "CREATE TEMPORARY TABLE dominion_siege_participants (\
-         zone_group_id int unsigned NOT NULL, siege_id bigint unsigned NOT NULL,\
-         character_id int unsigned NOT NULL, expedition_id int unsigned NOT NULL,\
-         side tinyint unsigned NOT NULL,\
-         PRIMARY KEY (zone_group_id, siege_id, character_id)) ENGINE=InnoDB",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
+    // The real base-schema definitions, so a column added to SQL/aaemu_game.sql is picked up
+    // here (the old hand-written DDL was missing siege_reinforced / siege_outcome_credited).
+    let schema = include_str!("../../../../../../SQL/aaemu_game.sql");
+    for table in ["dominions", "dominion_siege_participants"] {
+        let marker = format!("CREATE TABLE IF NOT EXISTS `{table}`");
+        let start = schema
+            .find(&marker)
+            .unwrap_or_else(|| panic!("{table} missing from SQL/aaemu_game.sql"));
+        let end = start + schema[start..].find(';').expect("DDL statement end");
+        let ddl =
+            schema[start..=end].replacen("CREATE TABLE IF NOT EXISTS", "CREATE TEMPORARY TABLE", 1);
+        sqlx::query(&ddl).execute(&pool).await.unwrap();
+    }
 
     let mut f = Fixture::new();
     f.server.db = pool.clone();
