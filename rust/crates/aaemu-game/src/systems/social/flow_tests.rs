@@ -12,21 +12,21 @@ use crate::systems::social::team::risky_action;
 use crate::test_support::{spawn_player, test_character, test_server, TestClient};
 use crate::world::PlayerRef;
 
-struct Pc {
-    c: TestClient,
-    p: PlayerRef,
+pub(super) struct Pc {
+    pub(super) c: TestClient,
+    pub(super) p: PlayerRef,
 }
 
 impl Pc {
-    fn ops(&mut self) -> Vec<u16> {
+    pub(super) fn ops(&mut self) -> Vec<u16> {
         self.c.drain_ops()
     }
 
-    fn frames(&mut self) -> Vec<(u16, Vec<u8>)> {
+    pub(super) fn frames(&mut self) -> Vec<(u16, Vec<u8>)> {
         self.c.drain()
     }
 
-    async fn send(&mut self, server: &GameServer, opcode: u16, body: PacketStream) {
+    pub(super) async fn send(&mut self, server: &GameServer, opcode: u16, body: PacketStream) {
         server
             .handle_frame(&mut self.c.conn, &encode_raw(1, opcode, body.as_bytes()))
             .await
@@ -34,7 +34,7 @@ impl Pc {
     }
 }
 
-fn pc(server: &GameServer, id: u32, name: &str, x: f32, y: f32) -> Pc {
+pub(super) fn pc(server: &GameServer, id: u32, name: &str, x: f32, y: f32) -> Pc {
     let c = TestClient::new(server, id, 1000 + id);
     let p = spawn_player(server, &c, test_character(id, name, x, y), 0x100 + id);
     p.data().is_online = true;
@@ -45,13 +45,13 @@ fn pc(server: &GameServer, id: u32, name: &str, x: f32, y: f32) -> Pc {
 }
 
 /// Drops the frames produced by spawning (players seeing each other).
-fn settle(pcs: &mut [&mut Pc]) {
+pub(super) fn settle(pcs: &mut [&mut Pc]) {
     for p in pcs.iter_mut() {
         p.c.drain();
     }
 }
 
-fn find(frames: &[(u16, Vec<u8>)], op: u16) -> Vec<Vec<u8>> {
+pub(super) fn find(frames: &[(u16, Vec<u8>)], op: u16) -> Vec<Vec<u8>> {
     frames
         .iter()
         .filter(|(o, _)| *o == op)
@@ -2036,7 +2036,7 @@ async fn loot_master_must_be_a_team_member() {
 // ------------------------------------------------------------------------------------------
 
 /// `SCErrorMsgPacket(error, 0, true)` as the frames of one connection carry it.
-fn error_frame(error: i16) -> (u16, Vec<u8>) {
+pub(super) fn error_frame(error: i16) -> (u16, Vec<u8>) {
     use crate::packets::world::SCErrorMsgPacket;
     (
         sc::SCErrorMsgPacket,
@@ -2046,7 +2046,7 @@ fn error_frame(error: i16) -> (u16, Vec<u8>) {
 
 /// Registers the guild `id` with `members` (character, role); the characters are marked as
 /// members and join the guild chat like a login would.
-fn add_guild(server: &GameServer, id: u32, name: &str, members: &[(&Pc, u8)]) {
+pub(super) fn add_guild(server: &GameServer, id: u32, name: &str, members: &[(&Pc, u8)]) {
     use crate::data::world_data::SystemFaction;
     use crate::systems::social::expedition::{self, Expedition};
     let owner = members
@@ -2107,7 +2107,7 @@ async fn join_party(server: &GameServer, owner: &mut Pc, target: &mut Pc, name: 
         .id
 }
 
-fn name_body(n: &str) -> PacketStream {
+pub(super) fn name_body(n: &str) -> PacketStream {
     let mut s = PacketStream::new();
     s.write_str(n);
     s

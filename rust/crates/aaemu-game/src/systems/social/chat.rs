@@ -394,6 +394,19 @@ impl ChatManager {
             .clone()
     }
 
+    /// Renames the channel of a renamed guild (an existing channel keeps the name it was
+    /// created with otherwise).
+    pub fn rename_guild_chat(&self, guild_id: u32, name: &str) {
+        if let Some(c) = self
+            .guild_channels
+            .lock()
+            .expect("chat poisoned")
+            .get(&guild_id)
+        {
+            c.set_internal_name(name.to_string());
+        }
+    }
+
     /// `GetFamilyChat(familyId)`.
     pub fn family_chat(&self, family_id: u32, chat_ids: &IdManager) -> ChannelRef {
         self.family_channels

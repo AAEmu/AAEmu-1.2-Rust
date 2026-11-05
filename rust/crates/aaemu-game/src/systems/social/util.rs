@@ -16,6 +16,8 @@ pub mod error {
     pub const EXPEDITION_NAME_LENGTH: i16 = 297;
     pub const EXPEDITION_NAME_EXIST: i16 = 299;
     pub const CHAT_NOT_IN_EXPEDITION: i16 = 311;
+    /// 321: "the sponsor faction was chosen wrongly" (the C# used it for a party member of
+    /// another alliance, which is [`EXPEDITION_CREATE_MEMBER_FACTION`] = 320).
     pub const EXPEDITION_CREATE_FACTION: i16 = 321;
     pub const EXPEDITION_CREATE_MEMBER_EXPEDITION: i16 = 330;
     pub const CHAT_NOT_IN_FAMILY: i16 = 412;
@@ -44,7 +46,11 @@ pub mod error {
     // The rest come straight from the generated `ErrorMessageType` table (the 1.2 client's
     // `ui_texts` carry the matching texts), so the values cannot drift.
     pub use crate::systems::economy::error_message::{
-        EXPEDITION_NO_TARGET, EXPEDITION_OTHER_EXPEDITION, EXPEDITION_OTHER_INVITATION,
+        EXPEDITION_BAD_FACTION, EXPEDITION_BAD_STATUS, EXPEDITION_CHANGE_OWNER_MY_EXPEDITION,
+        EXPEDITION_CHANGE_OWNER_SELF, EXPEDITION_CREATE_MEMBER_FACTION, EXPEDITION_DISMISS_IN_SIEGE,
+        EXPEDITION_NAME_BADLIST, EXPEDITION_NO_TARGET, EXPEDITION_OWNER_CANNOT_CHANGE_DURING_SIEGE,
+        EXPEDITION_OWNER_DISMISS, FACTION_CHANGE_MEMBER_ROLE_RIGHTS, FACTION_INVITE_BATTLEFIELD,
+        FACTION_RIGHTS, EXPEDITION_OTHER_EXPEDITION, EXPEDITION_OTHER_INVITATION,
         EXPEDITION_OWNER_CANNOT_LEAVE, FACTION_INVITE_OFFLINE, FACTION_INVITE_REJECTED,
         FACTION_INVITE_RIGHTS, FACTION_INVITE_SAME, FACTION_INVITE_SELF, FACTION_JOIN,
         FACTION_JOIN_NO_INVITOR, FACTION_KICK_RIGHTS, INVITATION_CANCELED_TIMEOUT,
@@ -116,6 +122,15 @@ pub fn mother_id(server: &GameServer, faction_id: u32) -> u32 {
         .factions
         .get(faction_id)
         .map_or(0, |f| f.mother_id)
+}
+
+/// The alliance (nation) of a faction: its `MotherId`, or the faction itself when it has none
+/// (the outlaw faction 114).
+pub fn alliance_id(server: &GameServer, faction_id: u32) -> u32 {
+    match mother_id(server, faction_id) {
+        0 => faction_id,
+        m => m,
+    }
 }
 
 /// Runs `f` with the player's character data locked (one object lock, released afterwards).
