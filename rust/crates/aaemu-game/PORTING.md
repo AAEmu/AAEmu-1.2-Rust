@@ -2430,14 +2430,21 @@ and in NPC wandering / buff remaining times.
 * systems::social: `AchievementGameData` reads the `'t'` / `'f'` text booleans of compact.sqlite3 with
   `GetBoolean(column)` (`GetInt64 != 0`), so `is_active`, `is_hidden`, `complete_or` and
   `or_unit_reqs` always load as `false`.
-* systems::social: `AskRiskyTeam` makes the acting unit (the kicker) leave its chat channels;
-  a member joining an existing team never joins the party / raid
-  chat (but can still talk into it); `IsMarked` compares mark object ids with character ids;
-  `ExpeditionManager.ChangeOwner` does not update `OwnerName`; `ReplyInvite` does not check an
-  existing guild; `ChangeExpeditionRolePolicy` requires the Expel right; disbanded guilds stay in
-  the list; family invitations always carry family id 1; hard disconnects keep the family member's
-  character set; `GetTrialChat` throws when the faction has no court and the player is in no trial;
-  `CSAddFriend` accepts yourself.
+* systems::social: `IsMarked` compares mark object ids with character ids;
+  `ExpeditionManager.ChangeOwner` does not update `OwnerName`; `ChangeExpeditionRolePolicy`
+  requires the Expel right; disbanded guilds stay in
+  the list; family invitations always carry family id 1; `GetTrialChat` throws when the faction
+  has no court and the player is in no trial; `CSAddFriend` accepts yourself. (Fixed since:
+  `AskRiskyTeam` making the kicker leave its channels, late team members never joining the
+  party / raid chat, `ReplyInvite` not checking an existing guild, hard disconnects keeping the
+  family member's character set and the guild member online: see "Guild and party fixes
+  (2026-11-04)".)
+* systems::social, noticed while fixing the above and **not** changed: `Character.SetFaction`
+  removes the character from its guild (`ExpeditionManager.Kick(p, p)`) and party
+  (`MemberRemoveFromTeam(p, p, Kick)`) through the *expel* paths, which need the Expel right /
+  the party owner; so an ordinary member is never removed (the Rust rank guard of 2026-10-20
+  made the guild kick a no-op for everybody). A faction change of a guild leader would also
+  leave a leaderless guild if it worked. It needs its own decision (leave vs. expel semantics).
 
 * `WorldManager.RemoveVisibleObject` calls `RemoveFromCharacters` on the object's own region and
   then again for every neighbour, which includes that region: players in the same sector receive
@@ -3176,6 +3183,69 @@ Deviations from the 1.2 C# `ExpeditionManager` / `TeamManager`, which trusted ev
 - `ChangeLootingRule` accepted any character id as loot master. It must now be 0 or a member of the
   team; otherwise only that field is ignored (logged). Over-head markers are unchanged: their
   target is any unit or object, not a team member.
+
+## Guild and party fixes (2026-11-04)
+
+Found by the player bots (`aaemu-playerbots`, guild / party scenarios) and reproduced in flow
+tests (`systems/social/flow_tests.rs`). The 1.2 client's `ui_texts` carry the text of every
+`ErrorMessageType` used below (key = the C# enum name in upper case), which is where "the right
+error" comes from; there is no retail oracle for which code the original server picked, so each
+is the closest text.
+
+- **Hard disconnect = clean leave socially.** The C# `OnDisconnect` never logged the character out
+  of its guild / family: guild members saw it online for ever, `last_leave_time` stayed at the
+  login time, the family kept the dead `Character`, and the dead session stayed in every chat
+  channel (so a party / guild / zone channel never became empty). `world::session::on_disconnect`
+  now runs `social::session::on_leave_world` (chat channels, family logout, pending guild
+  invitation, guild logout with the `SCExpeditionMemberStatusChanged` to the guild, which is also
+  what `leave_world_task` runs) and sets `leave_time`, for a character that still is the live
+  world entry. Kicks and server-side drops end in the same `on_disconnect`.
+  A connection keeps its `active_char` after a leave, so a later disconnect of a session that
+  already left is skipped (the character may be online on a newer session). Friends and the team
+  were already covered by `set_online(false)`. Not covered: the panic fallback
+  `force_release_connection` (only removes the world entry) and the GM `/disconnectme`, which
+  detaches the character on purpose like the C# (it stays in the world as a ghost).
+- **Guild leader cannot leave.** `ExpeditionManager.Leave` had no owner check, so the guild was left
+  without a role-255 member. The leader now gets `EXPEDITION_OWNER_CANNOT_LEAVE` (310, "you can
+  leave after delegating the leader position"); it must hand the guild over (`ChangeOwner`) or
+  dismiss it. A character that is not in a guild gets `ONLY_EXPEDITION_MEMBER`. (Deleting the
+  leader's character was already refused in the lobby.)
+- **Party invitations expire and die with a session.** The 60 s timeout the C# only applied when the
+  *answer* arrived is now also enforced by the 500 ms tick (`TeamManager::expire_invitations`; the
+  inviter gets `INVITATION_CANCELED_TIMEOUT`), an expired invitation no longer blocks a new
+  invitation of the same target, and `TeamManager::set_offline` (every way of going offline)
+  drops the invitations the character sent (their targets get `TEAM_INVITOR_OFFLINE`) and
+  received. Answering an invitation that is gone gets `TEAM_JOIN`; a late answer gets
+  `INVITATION_CANCELED_TIMEOUT` (and the inviter the usual `SCRejectedTeam`).
+- **Team chat on every join / leave path.** A member joining an existing team joins the raid (not
+  a party) and its party chat channel. `AskRiskyTeam` made the *acting unit* leave the channels,
+  so the kicker lost its party chat while the kicked member kept hearing it; the member that
+  leaves / is kicked leaves them now (before it is removed, the slot names its party).
+- **One team at a time.** Accepting an invitation while in a team is refused with `TEAM_JOIN_ALONE`
+  (the invitee) and `TEAM_INVITEE_IN_TEAM` / `TEAM_INVITEE_MEMBER` (the inviter); the invitation
+  itself is refused up front for such targets. The team of an invitation is the inviter's own
+  (the C# trusted the client's team id, so a member sending team id 0 invited without the
+  owner's right, and a stale id could name somebody else's team); a client team id naming another
+  existing team is `TEAM_NO_RIGHTS`.
+- **Feedback instead of silence.** Party: unknown / offline invitee `TEAM_INVITEE_OFFLINE`, yourself
+  `TEAM_YOURSELF`, not the owner (or marker of a raid) `TEAM_NO_RIGHTS`, full team `TEAM_FULL` to
+  the inviter (at the invitation, and again at the answer to both sides; an area invitation says
+  it once). Guild invite: not in a guild `ONLY_EXPEDITION_MEMBER`, role without the Invite right
+  `FACTION_INVITE_RIGHTS`, offline / unknown name `FACTION_INVITE_OFFLINE`, yourself
+  `FACTION_INVITE_SELF`, same guild `FACTION_INVITE_SAME`, another guild
+  `EXPEDITION_OTHER_EXPEDITION`, and a target that is
+  deciding on another invitation `EXPEDITION_OTHER_INVITATION` (the C# overwrote it; a pending
+  guild invitation now blocks a second until it is answered or expires). Guild reply: no / wrong
+  invitation `FACTION_JOIN_NO_INVITOR`, expired `INVITATION_CANCELED_TIMEOUT`, already in a guild
+  `EXPEDITION_ALREADY_MEMBER`, disbanded guild `FACTION_JOIN` (a disbanded guild stays in the
+  list, the C# let the reply join it); a refusal tells the inviter `FACTION_INVITE_REJECTED`.
+  Guild kick: not in a guild `ONLY_EXPEDITION_MEMBER`, no Expel right or not a higher rank
+  `FACTION_KICK_RIGHTS`, not a member `EXPEDITION_NO_TARGET` (a character "kicking" itself, as
+  `Character.SetFaction` does, stays silent).
+- Not changed (silent as in the C#): the other guild management failures (`ChangeOwner`,
+  `ChangeMemberRole`, `ChangeExpeditionRolePolicy`, `Disband` only reports the two it always
+  did), the nation / dead-target checks of a guild invite, and the SetFaction removal described
+  under "C# bugs noticed".
 
 ## Client skill cast authority (2026-10-20)
 

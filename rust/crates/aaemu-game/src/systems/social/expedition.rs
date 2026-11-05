@@ -194,6 +194,9 @@ pub struct ExpeditionManager {
     pub(crate) invitations: Mutex<HashMap<u32, PendingInvite>>,
 }
 
+/// `ExpeditionMember.Role` of the guild leader.
+const LEADER_ROLE: u8 = 255;
+
 /// How long a guild invitation can be answered (same as the party / raid invitations).
 const INVITATION_TIMEOUT_MS: i64 = 60_000;
 
@@ -201,6 +204,8 @@ const INVITATION_TIMEOUT_MS: i64 = 60_000;
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PendingInvite {
     expedition_id: u32,
+    /// The character that sent the invitation (told when it is refused).
+    inviter_id: u32,
     pub(crate) time_ms: i64,
 }
 
@@ -346,6 +351,14 @@ impl ExpeditionManager {
         list.chunks(20)
             .map(|c| c.iter().map(|e| e.faction.clone()).collect())
             .collect()
+    }
+
+    /// Forgets the pending invitation of an invited character (it left the world).
+    pub fn drop_invitation(&self, character_id: u32) {
+        self.invitations
+            .lock()
+            .expect("expedition invitations poisoned")
+            .remove(&character_id);
     }
 
     /// `GetExpeditionOfCharacter(characterId)` (0 = none).
@@ -764,16 +777,25 @@ pub async fn create_expedition(server: &GameServer, owner: &PlayerRef, name: &st
 }
 
 /// `ExpeditionManager.Invite(connection, invitedName)`.
+///
+/// Deviation from the C#, which returned silently on every failure: the inviter is told why
+/// (the 1.2 client has a text for each), and a character that is deciding on another invitation
+/// cannot be invited again until it answers or the invitation expires.
 pub fn invite(server: &GameServer, inviter: &PlayerRef, invited_name: &str) {
     let Some(e) = expedition_of(server, inviter) else {
+        send_error(inviter, error::ONLY_EXPEDITION_MEMBER);
         return;
     };
     let Some(m) = e.member(inviter.character_id) else {
+        send_error(inviter, error::ONLY_EXPEDITION_MEMBER);
         return;
     };
     match e.policy_by_role(m.role) {
         Some(p) if p.invite => {}
-        Some(_) => return,
+        Some(_) => {
+            send_error(inviter, error::FACTION_INVITE_RIGHTS);
+            return;
+        }
         None => {
             // C#: GetPolicyByRole(..).Invite on a null policy throws.
             tracing::error!("Expedition {} has no policy for role {}", e.id(), m.role);
@@ -781,9 +803,22 @@ pub fn invite(server: &GameServer, inviter: &PlayerRef, invited_name: &str) {
         }
     }
     let Some(invited) = server.world.character_by_name(invited_name) else {
+        send_error(inviter, error::FACTION_INVITE_OFFLINE);
         return;
     };
-    if expedition_of(server, &invited).is_some() {
+    if invited.character_id == inviter.character_id {
+        send_error(inviter, error::FACTION_INVITE_SELF);
+        return;
+    }
+    if let Some(other) = expedition_of(server, &invited) {
+        send_error(
+            inviter,
+            if other.id() == e.id() {
+                error::FACTION_INVITE_SAME
+            } else {
+                error::EXPEDITION_OTHER_EXPEDITION
+            },
+        );
         return;
     }
     {
@@ -795,10 +830,16 @@ pub fn invite(server: &GameServer, inviter: &PlayerRef, invited_name: &str) {
         // Drop the invitations nobody answered in time so the map cannot grow without bound.
         let now = util::now_ms();
         invitations.retain(|_, p| p.time_ms + INVITATION_TIMEOUT_MS >= now);
+        if invitations.contains_key(&invited.character_id) {
+            drop(invitations);
+            send_error(inviter, error::EXPEDITION_OTHER_INVITATION);
+            return;
+        }
         invitations.insert(
             invited.character_id,
             PendingInvite {
                 expedition_id: e.id(),
+                inviter_id: inviter.character_id,
                 time_ms: now,
             },
         );
@@ -813,6 +854,10 @@ pub fn invite(server: &GameServer, inviter: &PlayerRef, invited_name: &str) {
 }
 
 /// `ExpeditionManager.ReplyInvite(connection, id1, id2, reply)`.
+///
+/// Deviation from the C# (see PORTING.md): only a pending, unexpired invitation to this very
+/// guild can be accepted, by a character that is not in a guild yet; the character is told why
+/// an acceptance fails and the inviter is told about a refusal.
 pub async fn reply_invite(
     server: &GameServer,
     invited: &PlayerRef,
@@ -828,36 +873,55 @@ pub async fn reply_invite(
         .expect("expedition invitations poisoned")
         .remove(&invited.character_id);
     if !reply {
+        if let Some(inviter) = pending.and_then(|p| server.world.character_by_id(p.inviter_id)) {
+            send_error(&inviter, error::FACTION_INVITE_REJECTED);
+        }
         return;
     }
-    // Deviation from C#: only an unexpired invitation to this very guild can be accepted, and
-    // only by a character that is not in a guild yet.
-    let valid = pending.is_some_and(|p| {
-        p.expedition_id == id1 && p.time_ms + INVITATION_TIMEOUT_MS >= util::now_ms()
-    });
-    if !valid || invited.data().unit.expedition_id != 0 {
+    let refuse = |why: &str, error: i16| {
         tracing::warn!(
-            "ReplyExpeditionInvitation: rejected character {} for expedition {id1} (pending {:?}, in expedition {})",
+            "ReplyExpeditionInvitation: rejected character {} for expedition {id1} ({why}; pending {:?}, in expedition {})",
             invited.character_id,
             pending.map(|p| p.expedition_id),
             invited.data().unit.expedition_id
         );
-        return;
+        send_error(invited, error);
+    };
+    match pending {
+        Some(p) if p.expedition_id == id1 => {
+            if p.time_ms + INVITATION_TIMEOUT_MS < util::now_ms() {
+                refuse("expired", error::INVITATION_CANCELED_TIMEOUT);
+                return;
+            }
+        }
+        _ => {
+            refuse("no such invitation", error::FACTION_JOIN_NO_INVITOR);
+            return;
+        }
     }
-    if !server.expeditions.exists(id1) {
-        // C#: `_expeditions[id1]` throws KeyNotFoundException.
-        tracing::error!("ReplyExpeditionInvitation: no expedition {id1}");
+    if invited.data().unit.expedition_id != 0 {
+        refuse("already in a guild", error::EXPEDITION_ALREADY_MEMBER);
         return;
     }
     let member = member_from_character(server, id1, invited, false);
-    invited.data().unit.expedition_id = id1;
-    crate::systems::refresh_achievements_later(server, invited);
-    let Some(snapshot) = server.expeditions.with_mut(id1, |e| {
-        e.members.push(member);
-        e.clone()
-    }) else {
+    // C#: `_expeditions[id1]` throws KeyNotFoundException; a disbanded guild stays in the list
+    // (see `disband`) but cannot be joined.
+    let Some(snapshot) = server
+        .expeditions
+        .with_mut(id1, |e| {
+            if e.is_disbanded {
+                return None;
+            }
+            e.members.push(member);
+            Some(e.clone())
+        })
+        .flatten()
+    else {
+        refuse("no such guild", error::FACTION_JOIN);
         return;
     };
+    invited.data().unit.expedition_id = id1;
+    crate::systems::refresh_achievements_later(server, invited);
     let unit_name = invited.data().unit.name.clone();
     broadcast_self(
         server,
@@ -924,17 +988,27 @@ pub async fn change_role_policy(server: &GameServer, p: &PlayerRef, policy: Expe
 }
 
 /// `ExpeditionManager.Leave(character)`.
+///
+/// Deviation from the C#, which let the leader leave and so left the guild without one: the
+/// leader must hand the guild over (`ChangeOwner`) or dismiss it first, as the 1.2 client's
+/// `EXPEDITION_OWNER_CANNOT_LEAVE` text ("you can leave after delegating the leader position")
+/// says. Failures are reported to the character.
 pub async fn leave(server: &GameServer, p: &PlayerRef) {
     let Some(e) = expedition_of(server, p) else {
+        send_error(p, error::ONLY_EXPEDITION_MEMBER);
         return;
     };
     let id = e.id();
-    if e.member(p.character_id).is_none() {
+    let Some(me) = e.member(p.character_id) else {
         // C#: RemoveMember(null) throws a NullReferenceException.
         tracing::error!(
             "Leave: {} is not a member of expedition {id}",
             p.character_id
         );
+        return;
+    };
+    if me.role == LEADER_ROLE || e.faction.owner_id == p.character_id {
+        send_error(p, error::EXPEDITION_OWNER_CANNOT_LEAVE);
         return;
     }
     remove_member(server, id, p.character_id);
@@ -960,23 +1034,37 @@ pub async fn leave(server: &GameServer, p: &PlayerRef) {
 }
 
 /// `ExpeditionManager.Kick(connection, kickedId)`.
+///
+/// Failures are reported to the kicker (a deviation from the C#), except for a character
+/// "kicking" itself: `Character.SetFaction` calls this with the character as both parties.
 pub async fn kick(server: &GameServer, kicker: &PlayerRef, kicked_id: u32) {
+    let fail = |error: i16| {
+        if kicker.character_id != kicked_id {
+            send_error(kicker, error);
+        }
+    };
     let Some(e) = expedition_of(server, kicker) else {
+        fail(error::ONLY_EXPEDITION_MEMBER);
         return;
     };
     let id = e.id();
     let Some(me) = e.member(kicker.character_id) else {
+        fail(error::ONLY_EXPEDITION_MEMBER);
         return;
     };
     match e.policy_by_role(me.role) {
         Some(x) if x.expel => {}
-        Some(_) => return,
+        Some(_) => {
+            fail(error::FACTION_KICK_RIGHTS);
+            return;
+        }
         None => {
             tracing::error!("Expedition {id} has no policy for role {}", me.role);
             return;
         }
     }
     let Some(kicked) = e.member(kicked_id).cloned() else {
+        fail(error::EXPEDITION_NO_TARGET);
         return;
     };
     // Deviation from C#: only a strictly higher rank can expel (so the leader never can be).
@@ -987,6 +1075,7 @@ pub async fn kick(server: &GameServer, kicker: &PlayerRef, kicked_id: u32) {
             me.role,
             kicked.role
         );
+        fail(error::FACTION_KICK_RIGHTS);
         return;
     }
     remove_member(server, id, kicked_id);
