@@ -1424,6 +1424,9 @@ async fn no_penalty_kills_return_no_experience_or_durability_loss() {
     assert_eq!((lost, durability), (0, 0));
 }
 
+#[path = "cast_delay_tests.rs"]
+mod cast_delay_tests;
+
 #[path = "music_started_tests.rs"]
 mod music_started_tests;
 
