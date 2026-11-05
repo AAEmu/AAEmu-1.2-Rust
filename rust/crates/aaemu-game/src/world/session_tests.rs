@@ -539,6 +539,7 @@ async fn private_mysql_reentry_loads_the_state_the_departure_save_committed() {
         "accounts",
         "character_records",
         "character_achievements",
+        "character_crafts",
     ] {
         let (_, definition): (String, String) =
             sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))

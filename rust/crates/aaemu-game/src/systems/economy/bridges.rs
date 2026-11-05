@@ -1533,9 +1533,59 @@ impl ItemSkillHooks for EconomyForSkills {
                     world_interaction, ..
                 },
             ) => Self::craft_effect(server, *world_interaction, args),
-            // Trace-only effects in C#.
-            (EffectKind::TrainCraftEffect, _) => {
-                tracing::trace!("TrainCraftEffect");
+            (EffectKind::TrainCraftEffect, EffectTemplate::TrainCraft { craft_id, .. }) => {
+                let Some(player) = player_caster(args) else {
+                    return true;
+                };
+                // An item cast names its template on the caster; the source item may already
+                // have been debited out of its container. Only a non-item cast uses the
+                // effect's own craft.
+                let item_template_id = match args.caster_caster {
+                    SkillCaster::Item {
+                        item_template_id, ..
+                    } => Some(item_template_id),
+                    _ => None,
+                };
+                match super::craft_learning::train_craft(
+                    server,
+                    player,
+                    *craft_id,
+                    item_template_id,
+                ) {
+                    super::craft_learning::TrainOutcome::Learned(crafts) => {
+                        tracing::debug!(
+                            character = player.character_id,
+                            ?crafts,
+                            "TrainCraftEffect: learned craft"
+                        );
+                    }
+                    super::craft_learning::TrainOutcome::AlreadyLearned => {
+                        tracing::debug!(
+                            character = player.character_id,
+                            craft_id,
+                            "TrainCraftEffect: craft already learned, item kept"
+                        );
+                        // `craft_already_learned` (client error id 0x81 = 129, X2G:1136026).
+                        inventory::send_error_message(
+                            player,
+                            error_message::CRAFT_ALREADY_LEARNED,
+                            0,
+                            true,
+                        );
+                        // `Skill.Apply` refunds its pre-debited source item unless the cast is
+                        // cancelled, as the dye path does.
+                        cancel_skill(args);
+                    }
+                    super::craft_learning::TrainOutcome::NoRecipe { item_template_id } => {
+                        tracing::warn!(
+                            character = player.character_id,
+                            ?item_template_id,
+                            effect_craft_id = craft_id,
+                            "TrainCraftEffect: no learnable craft in the data, item kept"
+                        );
+                        cancel_skill(args);
+                    }
+                }
                 true
             }
             (EffectKind::AccountAttributeEffect, EffectTemplate::AccountAttribute(e)) => {

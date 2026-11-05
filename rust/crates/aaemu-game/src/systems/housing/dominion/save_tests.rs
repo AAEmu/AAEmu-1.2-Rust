@@ -208,6 +208,7 @@ async fn private_mysql_property_payment_and_collection_cannot_straddle_financial
         "skills",
         "quests",
         "completed_quests",
+        "character_crafts",
     ];
     for table in tables {
         let (_, ddl): (String, String) = sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
