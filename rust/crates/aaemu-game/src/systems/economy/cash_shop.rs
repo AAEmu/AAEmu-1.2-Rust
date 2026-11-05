@@ -1956,7 +1956,7 @@ impl CSPremiumServiceBuyPacket {
     }
 
     fn run(self, _server: &GameServer, _conn: &mut GameConnection) {
-        tracing::warn!("PremiumServiceBuy, CId: {}", self.c_id);
+        tracing::debug!("PremiumServiceBuy, CId: {}", self.c_id);
     }
 }
 sync_client_packet!(CSPremiumServiceBuyPacket);

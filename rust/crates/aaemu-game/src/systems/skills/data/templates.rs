@@ -45,6 +45,10 @@ pub struct SkillTemplate {
     pub category_id: i32,
     /// `FireAnim?.Id` (the animation must exist in `anims`).
     pub fire_anim_id: u32,
+    /// `twohand_fire_anim_id` / `dual_wield_fire_anim_id`: the fire clip for a caster with a two-handed weapon / two weapons
+    /// (0 when the skill has none or the animation does not exist).
+    pub twohand_fire_anim_id: u32,
+    pub dual_wield_fire_anim_id: u32,
     pub ability_id: u8,
     pub mana_cost: i32,
     pub timing_id: i32,
@@ -176,6 +180,8 @@ fn read_skill(
     anim_exists: &dyn Fn(u32) -> bool,
 ) -> rusqlite::Result<SkillTemplate> {
     let fire_anim = r.u32_or("fire_anim_id", 0)?;
+    let twohand_fire_anim = r.u32_or("twohand_fire_anim_id", 0)?;
+    let dual_wield_fire_anim = r.u32_or("dual_wield_fire_anim_id", 0)?;
     let plot_id = if r.is_null("plot_id")? {
         None
     } else {
@@ -188,6 +194,16 @@ fn read_skill(
         show: r.bool_str("show")?,
         category_id: r.i32("category_id")?,
         fire_anim_id: if anim_exists(fire_anim) { fire_anim } else { 0 },
+        twohand_fire_anim_id: if anim_exists(twohand_fire_anim) {
+            twohand_fire_anim
+        } else {
+            0
+        },
+        dual_wield_fire_anim_id: if anim_exists(dual_wield_fire_anim) {
+            dual_wield_fire_anim
+        } else {
+            0
+        },
         ability_id: r.u8("ability_id")?,
         mana_cost: r.i32("mana_cost")?,
         timing_id: r.i32("timing_id")?,

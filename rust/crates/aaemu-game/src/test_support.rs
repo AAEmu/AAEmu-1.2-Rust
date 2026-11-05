@@ -213,3 +213,91 @@ pub fn finishes_in_time<R: Send + 'static>(
     rx.recv_timeout(Duration::from_secs(10))
         .unwrap_or_else(|_| panic!("{what} did not finish: deadlocked"))
 }
+
+/// One event captured by [`capture_events`].
+pub type CapturedEvent = (tracing::Level, String);
+
+struct EventLog(std::sync::Arc<std::sync::Mutex<Vec<CapturedEvent>>>);
+
+struct MessageOf(String);
+
+impl tracing::field::Visit for MessageOf {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.0 = format!("{value:?}");
+        }
+    }
+}
+
+impl tracing::Subscriber for EventLog {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut message = MessageOf(String::new());
+        event.record(&mut message);
+        self.0
+            .lock()
+            .expect("event log poisoned")
+            .push((*event.metadata().level(), message.0));
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// Never records anything. While it is alive next to a capturing subscriber, `tracing` keeps
+/// every registered subscriber in its interest calculation. With a single registered
+/// subscriber it would work the interest of a call site out from the thread that first hits
+/// it, which in a parallel test run is another test's thread with no subscriber: the call site
+/// then caches "never" and the capturing test misses its events.
+struct Anchor;
+
+impl tracing::Subscriber for Anchor {
+    fn register_callsite(&self, _: &tracing::Metadata<'_>) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::sometimes()
+    }
+
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        false
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, _: &tracing::Event<'_>) {}
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// Runs `f` and returns what it logged on this thread, as `(level, message)` (log level
+/// regression tests: routine actions must not log at `WARN`).
+pub fn capture_events<R>(f: impl FnOnce() -> R) -> (R, Vec<CapturedEvent>) {
+    static ANCHOR: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+    ANCHOR.get_or_init(|| tracing::Dispatch::new(Anchor));
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let result = tracing::subscriber::with_default(EventLog(log.clone()), || {
+        // Call sites another test hit while no subscriber was set cache "never".
+        tracing::callsite::rebuild_interest_cache();
+        f()
+    });
+    let events = std::mem::take(&mut *log.lock().expect("event log poisoned"));
+    (result, events)
+}

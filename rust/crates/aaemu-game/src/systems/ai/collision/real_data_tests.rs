@@ -40,6 +40,11 @@ struct Env {
 }
 
 fn env() -> Option<Env> {
+    env_with(false)
+}
+
+/// [`env`] with `GeoDataMode` (the navmesh heights) on or off in the heightmaps.
+fn env_with(geo_data_mode: bool) -> Option<Env> {
     let pak = std::env::var("AAEMU_GAME_PAK").ok()?;
     let files = Arc::new(ClientFileManager::from_sources(&[pak], &app_path()));
     let worlds = WorldTemplates::load(&files, &app_path()).expect("world templates");
@@ -54,7 +59,7 @@ fn env() -> Option<Env> {
         &worlds,
         HeightmapConfig {
             heightmaps_enable: true,
-            geo_data_mode: false,
+            geo_data_mode,
             pre_load_terrain: false,
         },
     ));
@@ -422,6 +427,11 @@ fn real_collision_doodad_models_resolve() {
 /// A real server: main_world as instance 0 (`WorldManager.CreateStaticInstances`) with the
 /// client heightmaps and the collision service (lazy pool, never used; needs a tokio runtime).
 fn real_server(e: &Env) -> crate::server::GameServer {
+    real_server_with(e, false)
+}
+
+/// [`real_server`] with `World.GeoDataMode` on or off in the configuration.
+fn real_server_with(e: &Env, geo_data_mode: bool) -> crate::server::GameServer {
     let worlds = WorldTemplates::load(&e.files, &app_path()).expect("world templates");
     let mut config = crate::config::AppConfig {
         id: 1,
@@ -429,6 +439,7 @@ fn real_server(e: &Env) -> crate::server::GameServer {
     };
     config.connections.mysql_provider.host = "127.0.0.1".into();
     config.connections.mysql_provider.port = 1;
+    config.world.geo_data_mode = geo_data_mode;
     let db = sqlx::mysql::MySqlPoolOptions::new()
         .acquire_timeout(std::time::Duration::from_millis(200))
         .connect_lazy_with(config.connections.mysql_provider.connect_options());
@@ -732,4 +743,95 @@ fn real_water_no_phantom_water_on_land() {
         }
     }
     assert_eq!(wet, 0, "dry ground samples read as water");
+}
+
+/// The authored `(x, y, z)` of every NPC spawn of one world's `npc_spawns.json`.
+fn world_npc_spawns(world: &str) -> Vec<[f32; 3]> {
+    use crate::systems::npcs::json;
+    let text =
+        std::fs::read_to_string(app_path().join(format!("Data/Worlds/{world}/npc_spawns.json")))
+            .expect("npc_spawns.json");
+    let doc = json::parse(&text).expect("spawns parse");
+    let mut spawns = Vec::new();
+    for entry in json::array(&doc).expect("spawn array") {
+        let Some(o) = entry.as_object() else { continue };
+        let Some(p) = json::prop(o, "Position").and_then(|p| p.as_object()) else {
+            continue;
+        };
+        spawns.push([
+            json::f32_or(p, "X", 0.0).unwrap_or(0.0),
+            json::f32_or(p, "Y", 0.0).unwrap_or(0.0),
+            json::f32_or(p, "Z", 0.0).unwrap_or(0.0),
+        ]);
+    }
+    spawns
+}
+
+/// The instance halls whose floor model is not in the collision world (the dungeon halls are
+/// `object.dat` / `big_object.dat` models): the NPC spawns sit 44-200 m above the terrain, which
+/// is all the ground probe finds. A walker must keep standing where the world authored it (the
+/// navmesh height with `GeoDataMode`, else its level) instead of dropping to that terrain with its
+/// first step (Kroloal Cradle monsters stood 191 m below their spawns, out of reach).
+/// `AAEMU_GAME_PAK=D:\AA1.2\game_pak cargo test -p aaemu-game real_instance_walkers -- --ignored --nocapture`
+#[tokio::test]
+#[ignore = "needs AAEMU_GAME_PAK"]
+async fn real_instance_walkers_keep_the_floor_of_their_hall() {
+    use crate::systems::npcs::heightmap::ReferenceHeightAi;
+    let Some(e) = env_with(true) else { return };
+    let server = std::sync::Arc::new(real_server_with(&e, true));
+    // The navmesh heights, as the server installs them at startup (`GeoDataMode`).
+    crate::systems::ai::geodata::start(&server);
+    for name in [
+        "instance_cradle_of_destruction",
+        "instance_howling_abyss",
+        "instance_cuttingwind_deadmine",
+        "instance_library",
+        "instance_sal_temple",
+        "instance_nachashgar",
+        "instance_burntcastle_armory",
+        "instance_hadir_farm",
+    ] {
+        let template = server
+            .game_data
+            .worlds
+            .get_world_template_by_name(name)
+            .unwrap_or_else(|| panic!("{name}"))
+            .clone();
+        let zone = template.zone_keys.first().copied().unwrap_or(0);
+        server.world.create_world_instance(Arc::new(template), 100);
+        let spawns = world_npc_spawns(name);
+        assert!(!spawns.is_empty(), "{name}");
+        let (mut navmesh, mut kept, mut worst) = (0, 0, 0.0f32);
+        for s in spawns.iter().take(400) {
+            let (x, y, z) = (s[0], s[1], s[2]);
+            let ai = ReferenceHeightAi {
+                can_fly: false,
+                hold_or_idle: false,
+                spawner_z: Some(z),
+                world_z: z,
+            };
+            let resolved =
+                crate::systems::ai::npc::reference_height_in(&server, 100, Some(ai), x, y, z, zone);
+            worst = worst.max(z - resolved);
+            if (resolved - z).abs() < 1e-3 {
+                kept += 1;
+            } else {
+                navmesh += 1;
+            }
+            assert!(
+                z - resolved <= crate::systems::ai::npc::WALKER_MAX_DROP + 1e-3,
+                "{name}: a walker at ({x:.1}, {y:.1}, {z:.1}) was resolved to {resolved:.1}"
+            );
+            assert!(
+                resolved <= z + 2.0 + 1e-3,
+                "{name}: ({x}, {y}, {z}) rose to {resolved}"
+            );
+        }
+        println!(
+            "{name}: {} spawns, kept {kept}, re-resolved {navmesh}, worst drop {worst:.2}",
+            spawns.len().min(400)
+        );
+        server.world.remove_world(100);
+        server.systems.ai.collision.remove(100);
+    }
 }

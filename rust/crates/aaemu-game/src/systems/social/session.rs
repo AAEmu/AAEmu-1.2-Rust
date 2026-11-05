@@ -54,6 +54,34 @@ pub fn on_leave_world_family(server: &GameServer, p: &PlayerRef) {
     }
 }
 
+/// The social logout of a character that leaves the world: every chat channel, the family and
+/// guild member status (`SCExpeditionMemberStatusChanged` to the guild, `last_leave_time`) and a
+/// pending guild invitation. The friend / team status is the `IsOnline` setter's
+/// ([`on_online_changed`]).
+///
+/// Run by `LeaveWorldTask` (clean leave) **and** by a hard disconnect (`world::session::
+/// on_disconnect`, which also covers kicks and server-side drops). Deviation from the C#, whose
+/// disconnect never logged the character out of its guild / family (members kept seeing it
+/// online and the channels kept the dead session). Idempotent.
+pub fn on_leave_world(server: &GameServer, p: &PlayerRef) {
+    server.chat.leave_all_channels(p);
+    // Handle Family
+    on_leave_world_family(server, p);
+    // A pending guild invitation does not outlive the invited character's session.
+    server.expeditions.drop_invitation(p.character_id);
+    // A guild or nation rename offer dies with the session too.
+    server.expeditions.clear_rename_offer(p.character_id);
+    server
+        .systems
+        .social
+        .nations
+        .clear_rename_offer(p.character_id);
+    let exp = p.data().unit.expedition_id;
+    if exp != 0 {
+        crate::systems::social::expedition::on_character_logout(server, p, exp);
+    }
+}
+
 /// `Character.SetPosition` (moved): `TeamManager.UpdatePosition(Id)` when `InParty`.
 pub fn on_moved(server: &GameServer, p: &PlayerRef) {
     if p.data().in_party {

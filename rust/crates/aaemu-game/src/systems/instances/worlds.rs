@@ -181,6 +181,25 @@ pub fn remove_world(server: &GameServer, world_id: u32) {
         tracing::info!("[Dungeon] couldn't remove the dungeon id={world_id}!");
     }
     server.systems.instances.worlds.info.remove(&world_id);
+    forget_instance(server, world_id);
+}
+
+/// Drops what the other subsystems keep per instance id once the instance is gone. In C# these
+/// registries were members of the `WorldInstance` and went with it; here they are keyed by the
+/// instance id, so each one has to be dropped, or its periodic tick keeps asking for the
+/// removed instance (`GetWorld: No such World Instance`, once per tick for as long as the server
+/// ran) and a recycled instance id inherits the old instance's gimmicks, triggers and managers.
+pub fn forget_instance(server: &GameServer, world_id: u32) {
+    let npcs = &server.systems.npcs;
+    npcs.gimmicks.remove_world(world_id);
+    npcs.spheres.remove_world(world_id);
+    npcs.fish_schools.remove_world(world_id);
+    let vehicles = &server.systems.vehicles;
+    vehicles.mates.remove_world(world_id);
+    vehicles.transfers.remove_world(world_id);
+    let ai = &server.systems.ai;
+    ai.physics.remove_world(world_id);
+    ai.collision.remove(world_id);
 }
 
 /// `WorldIdManager.ReleaseId(id)` (ids below the first id log an error, as in C#).

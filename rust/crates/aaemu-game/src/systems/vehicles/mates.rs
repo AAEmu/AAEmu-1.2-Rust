@@ -189,6 +189,11 @@ impl MateManagers {
         self.managers.iter().map(|e| e.value().clone()).collect()
     }
 
+    /// Drops the manager of a removed instance (`false` = it had none).
+    pub fn remove_world(&self, instance_id: u32) -> bool {
+        self.managers.remove(&instance_id).is_some()
+    }
+
     /// `owner.Mates` access.
     pub fn character<R>(&self, char_id: u32, f: impl FnOnce(&mut CharacterMates) -> R) -> R {
         let mut m = self.characters.lock().expect("character mates poisoned");

@@ -774,4 +774,182 @@ mod tests {
         assert_eq!(grade_from_distribution(&d, 3, &mut rng).unwrap(), 0);
         assert!(grade_from_distribution(&d, 9, &mut rng).is_err());
     }
+
+    // ---- the crop harvest packs (potato 6452, cucumber 6453, barley 6472, ...) ----
+    //
+    // Group 1 is the crop itself, group 2 the rare "fine" variant and group 3 the seed. Groups 2
+    // and 3 have a `loot_actability_groups` row (`max_dice` 345 / 355): the seed is NOT a
+    // guaranteed drop, it comes back when the actability roll (0..9999) is at most 355, about
+    // one harvest in 28.
+
+    fn potato_pack() -> LootPack {
+        use crate::systems::economy::loot_data::LootActabilityGroups;
+        let mut p = pack(
+            vec![
+                loot(1, 1, 10, 10_000_000, 2, 4),
+                Loot {
+                    grade_id: 2,
+                    ..loot(2, 2, 11, 10_000_000, 1, 1)
+                },
+                loot(3, 3, 13, 10_000_000, 1, 1),
+            ],
+            vec![],
+        );
+        for (group_id, max_dice) in [(2, 345), (3, 355)] {
+            p.actability_groups.push((
+                group_id,
+                LootActabilityGroups {
+                    id: 100 + group_id,
+                    loot_pack_id: 1,
+                    group_id,
+                    max_dice,
+                    min_dice: max_dice,
+                },
+            ));
+        }
+        p
+    }
+
+    fn harvest(act_dice_fine: i32, act_dice_seed: i32) -> Vec<(u32, i32, u8)> {
+        let mut d = items();
+        d.templates.insert(13, ItemTemplate::plain(13, 10));
+        // Per group: the group roll, the actability roll (groups 2 and 3), and the amount when
+        // something is picked: crop | fine crop | seed.
+        let mut ints = vec![0, 3, 0, act_dice_fine];
+        if act_dice_fine <= 345 {
+            ints.push(1);
+        }
+        ints.extend([0, act_dice_seed, 1]);
+        let mut rng = ScriptedRng::new(&ints, &[]);
+        generate_pack_v2(
+            &potato_pack(),
+            &d,
+            LootConfig::default(),
+            1.0,
+            1.0,
+            None,
+            0,
+            None,
+            &mut rng,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|g| (g.item_id, g.count, g.grade))
+        .collect()
+    }
+
+    #[test]
+    fn harvest_gives_the_seed_back_only_when_its_actability_dice_hit() {
+        // Both dice at their limit: crop, fine crop (grade 2) and seed.
+        assert_eq!(harvest(345, 355), vec![(10, 3, 0), (11, 1, 2), (13, 1, 0)]);
+        // One above the limit: that group is skipped.
+        assert_eq!(harvest(346, 355), vec![(10, 3, 0), (13, 1, 0)]);
+        assert_eq!(harvest(345, 356), vec![(10, 3, 0), (11, 1, 2)]);
+        // The crop alone is the normal outcome.
+        assert_eq!(harvest(9_999, 9_999), vec![(10, 3, 0)]);
+    }
+
+    /// A reproducible `System.Random` (splitmix64).
+    struct Seeded(u64);
+
+    impl Seeded {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+    }
+
+    impl LootRng for Seeded {
+        fn next_i32(&mut self, min: i32, max: i32) -> i32 {
+            if min >= max {
+                return min;
+            }
+            min + (self.next() % (max - min) as u64) as i32
+        }
+
+        fn next_f32(&mut self) -> f32 {
+            (self.next() >> 40) as f32 / (1u64 << 24) as f32
+        }
+    }
+
+    /// The real harvest packs of the three crops the player bots farm: the crop always drops (2-4),
+    /// the fine variant (grade 2) and the seed each with the chance their dice allow (~3.5%).
+    #[test]
+    #[ignore]
+    fn real_compact_db_crop_harvests_return_the_seed_about_once_in_28() {
+        use crate::systems::economy::loot_data::LootData;
+        let Ok(path) = std::env::var("AAEMU_COMPACT_DB") else {
+            return;
+        };
+        let conn = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let data = LootData::load(&conn).unwrap();
+        let items = ItemData::default();
+        const ROLLS: usize = 200_000;
+        let mut rng = Seeded(0xAA11);
+        // potato, cucumber, barley
+        for pack_id in [6452, 6453, 6472] {
+            let pack = data.pack(pack_id).unwrap();
+            let by_group = |g: u32| {
+                pack.loots_by_group_no
+                    .iter()
+                    .find(|(no, _)| *no == g)
+                    .map(|(_, l)| l[0])
+                    .unwrap()
+            };
+            let (crop, fine, seed) = (
+                by_group(1).item_id,
+                by_group(2).item_id,
+                by_group(3).item_id,
+            );
+            let (mut crops, mut fines, mut seeds) = (0usize, 0usize, 0usize);
+            for _ in 0..ROLLS {
+                let got = generate_pack_v2(
+                    pack,
+                    &items,
+                    LootConfig::default(),
+                    1.0,
+                    1.0,
+                    None,
+                    0,
+                    None,
+                    &mut rng,
+                )
+                .unwrap();
+                for g in got {
+                    if g.item_id == crop {
+                        crops += 1;
+                        assert!((2..=4).contains(&g.count), "{g:?}");
+                    } else if g.item_id == fine {
+                        fines += 1;
+                        assert_eq!((g.count, g.grade), (1, 2));
+                    } else if g.item_id == seed {
+                        seeds += 1;
+                        assert_eq!(g.count, 1);
+                    }
+                }
+            }
+            let rate = |n: usize| n as f64 / ROLLS as f64;
+            assert_eq!(crops, ROLLS, "pack {pack_id}: the crop is always there");
+            // The actability roll is 0..9999 and passes at `<= max_dice`.
+            let expected = |group: u32| {
+                (f64::from(pack.actability_group(group).unwrap().max_dice) + 1.0) / 10_000.0
+            };
+            for (what, n, group) in [("seed", seeds, 3), ("fine crop", fines, 2)] {
+                assert!(
+                    (rate(n) - expected(group)).abs() < 0.002,
+                    "pack {pack_id}: {what} rate {} (expected {})",
+                    rate(n),
+                    expected(group)
+                );
+                assert!(rate(n) < 0.05, "never a guaranteed drop");
+            }
+        }
+    }
 }

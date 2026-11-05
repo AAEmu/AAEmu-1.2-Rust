@@ -802,7 +802,7 @@ Economy hooks (`server.systems.housing.hooks`): installed by `economy::bridges::
 | `InstantGameManager`, `InstantGame` (+ `InstantGameEvents`, team members / results) | `instant_game.rs` | done | Queue / matchmaking / invite / join / enter / start / kills / scores / end / leave; `Character.SetFaction` override (housing hook, guild kick, party kick); `ResetAllSkillCooldowns`. |
 | Packets: `CSInstanceLoaded`, `CSUnknownInstance`, `CSApplyToInstantGame`, `CSCancelInstantGame`, `CSJoinInstantGame`, `CSEnteredInstantGameWorld`, `CSLeaveInstantGame`; `SCProcessingInstance`, `SCAppliedToInstantGame`, `SCInviteToInstantGame`, `SCInstantGameJoined/Start/End/AddPoint/Kill/Killstreak`, `SCInstantGameRemainTime` (`SCInstantGameUnkPacket` opcode), `SCTowerDefList/Start/End/WaveStart`, `SCSkillCooldownReset` | `packets.rs` | done | Byte-exact tests. `SCLoadInstancePacket` is the npcs portal one. |
 | Doodad funcs `EnterInstance`, `EnterSysInstance`, `ExitIndun`, `RemoveInstance`; skills hooks `leave_instance` (`ExitArchemall`) / `main_world_position` (`Return`); portal `UsePortal` court check | `npcs/doodad/funcs/world.rs`, `skills/ext.rs` (default bodies), `npcs/portal/mod.rs` | done | |
-| Tower defense runtime, `TowerDefenseAttackerAiCharacter` | `tower_def.rs`, `config.rs`, `scripts/tower_def.rs`, `ai/framework.rs` | extended | Rust adds event start/end, first-wave delay, timed/kill AND/OR progression, NPC controller/summon cleanup preserving normal corpse timers, client lists, GM controls and opt-in game-time/war schedules. The attacker's C# behavior graph already matches `AiKind::TowerDefenseAttacker`. Unsupported target kinds and absent spawn positions fail preflight; rewards/victory event chains are not added. |
+| Tower defense runtime, `TowerDefenseAttackerAiCharacter` | `tower_def.rs`, `config.rs`, `scripts/tower_def.rs`, `ai/framework.rs` | extended | Rust adds event start/end, first-wave delay, timed/kill AND/OR progression, NPC controller/summon cleanup preserving normal corpse timers, client lists, GM controls and opt-in game-time/war schedules; `NpcGroup` wave spawners spawn at the group sites of the spawn JSON, and a wave kill target that is another definition's `kill_npc_id` starts that victory follow-up (Golden Plains War 18 -> 19/20, see the rift entry under Deviations). The attacker's C# behavior graph already matches `AiKind::TowerDefenseAttacker`. Unsupported target kinds and absent spawn positions fail preflight; no other rewards or event chains are added. |
 
 Cross-subsystem: mates are despawned on dungeon entry and `PlayerCanEnter` checks the summoned vehicle (`systems::vehicles`); dungeon entry items use the economy's checked `EconomyBridge::bag_consume_item`; the permanent `Character.SetFaction` updates the owned houses (`SocialHooks::update_owned_housing_faction`, housing). Battlefield corps factions are temporary and skip every side effect (see the RPA-09 deviation below).
 
@@ -2050,9 +2050,20 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
 * systems::instances: the dungeon loader awaits the spawn tasks before registering the indun events again (C# does not await `Task.WhenAll`, a race) and reads the spawn files there instead of in `CreateWorldInstance`; `DestroyInstantGame` cleans the instance up and releases its id right away (C#: the finalizer, later); `Environment.TickCount` is a process-relative monotonic clock; the `World.Template.SpawnPosition` mutation in `MoveCharacterTo*` is a local value; paths that throw in C# (missing action / room / zone / rule set, `_members[x]` of a non-member, a destroyed dungeon's `World`) log and return, keeping the side effects done before the throw; `EndGame().Start()` throwing after a victory is modelled as "the rest of `OnKill` (respawn) does not run"; the cross-instance region switch removes the object from every old neighbour once (no double notification of its own sector).
 * systems::instances (battlefield rules, 2026-10-19): `game_score_rules` is now loaded instead of the hard-coded 30-point kill. A kill uses event 200 (`event_value` 0) and an assist event 204; a corps-bound row wins over the `rule_set_corps = -1` row. Shipped rows: rule set 28 (Gladiator) event 200 -> 30 (id 93); rule sets 8/17/22/26/27 event 200 -> 3 and events 202/203/204 -> 2 (ids 26/53/68/73/76 and 81-92); rule set 2 authors no kill row, so its kills award 0. The assist rows do not distinguish healer / dealer in 1.2, so one 204 row is paid per assist (the three rows carry the same value). `game_rule_events` is loaded (rule set 28: 4 rows; 8/17/22/26/27: 1 each) but has no consumer with defined semantics in the 1.2 C#, in the 10.x zone decompile (loader only) or in the 1.2 client UI, so no behaviour is invented for `condition_id` / `kind_id` / `param1` / `param2`. `battle_field_buffs` is applied at match start (after the reset that clears buffs) with the row's `value` as the buff charge and removed on leave / disconnect: battlefield 7 has 8 rows (6266/100, 7006/1, 7007/2, 7061/3, 7062/4, 8246/1, 8247/1, 8000007/10) and battlefield 11 has 3 (8246/1, 8247/1, 8000007/1); the 3.0 successor `battle_field_honor_buffs.basic_value` repeats the same buff ids and values. Regression: `battlefield_kill_and_assist_scores_come_from_game_score_rules`, `battlefield_buffs_are_granted_at_start_and_removed_on_leave`, `battlefield_data_loads_with_json_quirks` and `real_instances_data`.
 * systems::instances / systems::social (RPA-09 temporary factions): duel Red / Blue team and battlefield corps factions are temporary. `UnitBase::faction_temporary` marks them, `SCUnitFactionChangedPacket.temp` is `true`, and they skip `Character.SetFaction`'s housing update, guild kick and party removal. `db_character::persisted_faction` writes the origin faction, so an autosave, logout or crash during a duel / battlefield never stores the temporary faction; the faction is also restored on duel end, battlefield leave and departure/save (`world::session::save_and_remove_from_world`). Tested by `duel::tests::temporary_team_factions_keep_guild_and_restore`, `disconnect_during_a_duel_restores_the_origin_faction`, `instances::flow_tests::battlefield_entered_requires_actual_instance_and_subscribes_kills_once` and `db_character::tests::a_temporary_faction_is_never_persisted`.
-* systems::instances (tower defense): the C# command only sent packets to its caller and hard-coded zone group 5. The Rust runtime reserves controller positions from the existing NPC JSON by compact spawner membership; these controllers no longer spawn permanently. Manual controls affect the caller's instance/group. Automatic schedules are disabled by default and validate every selected event at startup. Orphan waves/targets no longer truncate later valid rows. Kill notifications use only `DoDie`, deduplicate the NPC handle and retain id-reuse semantics. Timers use monotonic real seconds; `tod` uses the accelerated game clock and day intervals count from scheduler startup. Spawn effects carry explicit event ownership for cleanup even when Unit.OwnerId is zero. Unsupported `DoodadAlmighty` targets, NPC groups without authored controller positions and reward/victory chains remain unavailable rather than being synthesized.
+* systems::instances (tower defense): the C# command only sent packets to its caller and hard-coded zone group 5. The Rust runtime reserves controller positions from the existing NPC JSON by compact spawner membership; these controllers no longer spawn permanently. Manual controls affect the caller's instance/group. Automatic schedules are disabled by default and validate every selected event at startup. Orphan waves/targets no longer truncate later valid rows. Kill notifications use only `DoDie`, deduplicate the NPC handle and retain id-reuse semantics. Timers use monotonic real seconds; `tod` uses the accelerated game clock and day intervals count from scheduler startup. Spawn effects carry explicit event ownership for cleanup even when Unit.OwnerId is zero. Unsupported `DoodadAlmighty` kill targets and spawner templates without authored positions remain unavailable rather than being synthesized (the rift waves, group sites and victory follow-ups are in the next entry).
+* systems::instances (tower defense, rift waves; observed with player bots on Crimson Rift, definition 3): the waves never reached their target and most definitions could not run.
+  * **AI settling cancelled the wave plot.** The rift summoners (`AiKind::Flytrap`, ai file 18) cast their wave plot as their `OnSpawn` skill (every 2 s, 25 tickets, `SpawnEffect` of the wave monsters). The AI walks `Spawning` -> `RunCommandSet` -> `Idle` -> `HoldPosition` within that time and the C# `Idle`/`HoldPosition` `Enter` call `InterruptSkills` (the Rust behaviors mirror them), which cancels the plot before the first tick. `ai/behaviors.rs` `interrupt_unless_event_controller` skips the interrupt for NPCs the running event owns (`tower_def::owns_npc`); every other NPC is interrupted as before.
+  * **`SpawnEffect` at a plot location.** The plots place the wave monsters through a plot `Location` target (`PlotTargetUpdateMethod` RandomArea, 15 m ring, 500 m above the landing point). The C# spawner reads the target's transform; the Rust bridge used the caster as stand-in for a position target, so the monsters appeared on the summoner. `npcs/bridges.rs` `spawn_effect` now spawns at the position (`SpawnManager::get_npc_spawner_at_pos`), on the ground below it for non-flying templates (`ground_level_for`).
+  * **Rift flight speed.** `Data/Path/razlomPPZden1-3.path` (the rifts' fly-in, ai 17) had no `Speed` action, so the path walker used the 1.0 m/s default and a rift needed 14+ minutes for its ~800 m although the first wave starts after 170 s (`tower_defs.first_wave_after`). The three files now start with `Speed|x|y|z|5` (same x/y/z as the first point): about 155-165 s, so the target reaches its stand before wave 1. The retail speed is not in the data; 5 m/s is derived from path length / `first_wave_after`.
+  * **`NpcGroup` wave spawners** (definitions 8, 28, 29, 31, 32, and 14 whose group has no positions: `npc_spawner_npcs.member_type = 'NpcGroup'`). The C# `SpawnNpcGroup` is `SpawnNpc` (the group id used as NPC template id), so nothing spawned; the spawn JSON has no group entry either, it lists every member of the group (one entry each, duplicates included) at the group's spawn site, which would have made the members permanent world NPCs. The loader (`SpawnManager::resolve_tower_groups`, data in `TowerDefData.{groups,spawner_groups,group_npcs}`) holds those entries back, treats a position whose entries are exactly an `npc_group_members` set as a group site, and registers one event spawner per member at site + `formation_offset` (rotated by the site yaw). Entries that complete no group are released as ordinary spawns (none in the shipped data). Group 143 (spawner 14344, definition 14) has no entries.
+  * **Victory follow-ups.** A definition whose `kill_npc_id` is a wave kill target of another definition (19 -> relic 13661, 20 -> relic 13647, both kill targets of wave 105 of the Golden Plains War 18; the other definitions use `kill_npc_id` to end their own event) is a follow-up: the death of that NPC in the running wave (kill count met) starts it in the same world, zone group and zone, the scheduler never starts it by clock, and the same NPC does not end it. Nothing else of a reward is synthesized (the C# had no tower defense runtime at all).
+  * **Still unavailable (no authored positions or content in the 1.2 data):** 4 (test dungeon: spawner 9880/NPC 8854 and wave NPCs 8842/8840/8841 have no position in any world file, a `DoodadAlmighty` kill target 3499), 14 (caravan escort: spawner 14460 and group 143 have no entries), 16 and 17 (fog-of-war notices: spawners 12271/12272), 21 (no target spawner, no waves), 23 (sun field test, spawner 15446), 24 (abyss entrance, spawner 15363), 25 (generic test spawner template 1), 26 (developer test, spawner 15687 and doodad 7297). Definition 33 (Mistmerrow's conflict) is absent from the compact. `/towerdef list` names the missing spawner for each.
 * systems::instances (dungeons/mentoring): replaces the mirrored double entry-item charge and unsafe dungeon destruction below. Each character pays once per run; re-entry is free, capacity counts pending admissions, and creation obeys `World.MaxInstances` including concurrent requests. Empty owner/leader resets remove the whole run binding; destruction cancels its loader and returns occupants before removing their world. Party join grants access without inserting a player into another world's object table. Mentor eligibility is captured at boss death for nearby living party members with complementary active quests, rechecked during interactions, and bound to selected chest participants. Four explicit 1.2 quest/chest bindings are verified by a gated real-data test. Missing reward chests use the authored templates at the boss position (two metres apart for the two-chest dungeons); this placement fallback and qualification policy are emulator extensions, not claimed native-server execution parity. Authored phases grant seal items through existing inventory/quest hooks and daily persistence; Gilda is not issued directly by mentoring.
 * systems::instances (2026-10-21, `CSInstanceLoaded` re-file): the reference 1.2 C# had the same gap - `LeaveDungeonInstance` / `LeaveSystemInstance` changed the transform and sent `SCLoadInstancePacket`, but `CSInstanceLoadedPacket` only sent `SCUnitStatePacket` and the time of day, so the client's emptied world stayed bare until the next move ran `Transform.FinalizeTransform` -> `AddVisibleObject`. Rust's `worlds::instance_loaded` now leaves the old instance's region grid (keeping the stale removal of its objects) and adds the character to the arrival instance's visibility grid, which sends the units / doodads / players in view and shows the character to them at once. A later C# commit (`ef0d41982`) fixed the same gap with `Transform.FinalizeTransform()` plus `ResendVisibleObjectsToCharacter(me, clientDroppedVisibility: true)`; that unconditional repaint could resend states, so Rust re-files through `add_visible_object`, which does nothing when the character is already filed in that region (a repeated `CSInstanceLoaded` or the next move sends nothing new). Tested by `instances::flow_tests::instance_return_refiles_character_and_sends_main_world_objects_without_movement`.
+* systems::instances / world (2026-11-04, destroyed instances): in C# the gimmick, sphere quest, mate and transfer managers, the fish schools and the physics were members of the `WorldInstance` and went away with it. The Rust keeps them in per-instance-id tables, and nothing dropped them when a dungeon was destroyed, so the 50 ms gimmick tick (and the 500 ms sphere tick) kept calling `GetWorld` for the gone instance: `GetWorld: No such World Instance 100` was logged about 17 times a second for 4 hours (160,374 lines) after Sharpwind Mines was destroyed. `ai::gimmick::npc_gimmick` also created the gimmick registry of whatever instance an NPC stood in, even one without gimmicks. **Deviation:** `instances::worlds::remove_world` now ends with `forget_instance`, which drops those tables (gimmicks, spheres, fish schools, mates, transfers, ship physics, collision world); the gimmick and sphere ticks drop a registry whose instance is gone instead of asking for it; `npc_gimmick` and `despawn` only read the registry. `WorldManager::world` (`GetWorld`) counts every miss per instance id (`missing_lookups`) and logs a warning for the first one only (it was an error per call); the counter restarts when the id is created again, and `world_if_exists` is the quiet lookup for periodic walks. Tested by `instances::flow_tests::a_destroyed_dungeon_leaves_nothing_that_asks_for_its_instance`, `a_recycled_instance_id_starts_without_the_old_instances_registries`, `a_lookup_of_a_missing_instance_is_counted_and_logged_once` and (gated by `AAEMU_COMPACT_DB`) `real_dungeon_spawns_load_and_leave_returns_to_main_world`.
+* systems::ai (2026-11-04, instance hall floors): the NPCs of Kroloal Cradle stood about 191 m below their spawns, out of reach of a party (0 kills). The halls of the instance dungeons are models of the cell's `terrain/object.dat` / `big_object.dat` (the collision loader reads `brush.dat` and `vegetation.dat` only, see `rust/docs/physics/ZONE-PHYSICS-USAGE.md` §2.2), so the collision world has no floor there and `ground_height_probe` (2048 m deep) only finds the world template's terrain far below: the NPC spawns of Kroloal Cradle are 191-200 m above it, Howling Abyss up to 86 m, Sharpwind Mines (`instance_cuttingwind_deadmine`) 138 m, the Library 77 m, Sal Temple 50 m, Nachashgar 44 m, the Mirage Island 72 m (Burnt Castle Armory and Hadir Farm, which are terrain floors, stay within 4 m). `reference_height_in` accepted that hit for every walker step (roam, chase, return), so the first step of every walking monster dropped it to the terrain. **Deviation:** a walker's floor must now lie within `ai::npc::WALKER_MAX_DROP` (12 m) below its current level, for the probe and for the navmesh / heightmap fallback alike; a deeper floor is no floor, and the navmesh height (`GeoDataMode`, what the C# `GetReferenceHeight` returns) decides next, else the walker keeps its level. The hall floor model itself is still not part of the collision world: leaps, in-place resurrection (`GetResurrectablePosition`), doodad / plot / housing ground snaps and fall detection in these halls still use `ground_height` and can find the terrain; they are not changed here. Tested by `ai::npc::npc_height_tests::{hall_walker_does_not_drop_to_the_terrain_far_below, walker_steps_down_a_ledge_but_not_to_a_floor_beyond_the_drop_limit, hall_walker_takes_the_navmesh_height_when_the_terrain_is_far_below}` and (gated by `AAEMU_GAME_PAK`) `ai::collision::real_data_tests::real_instance_walkers_keep_the_floor_of_their_hall`, which resolves every NPC spawn of eight instance worlds against the real navmesh.
+* systems::instances (2026-11-04, dungeon request refusals): the C# `RequestDungeonInstance`, `RequestSystemInstance` and `CreateSystemInstance` refused a request for an unknown zone, a zone without a world or a dungeon entry, and a dungeon the server could not build (no zone keys, no world template, `CreateWorldInstance` failing) without sending anything, and `DoodadFuncEnterInstance` dropped the use of a character in a court case the same way; the 1.2 client shows nothing then and the door looks dead. **Deviation:** each of these refusals now sends `SCErrorMsg` (`NO_SERVER_INSTANCE_RESOURCE` 253 for the data and resource cases, `CANNOT_USE_PORTAL_IN_TRIAL` 611 for the court case) and logs a warning. The entry rules already answered: the entry limit (`enter_count` entries per 4 hours) sends `INSTANCE_VISIT_LIMIT` 453 (checked against the 1.2 `ui_texts`), level 470, party 671, capacity 471, the ticket item 632; the notification bytes of 453 are pinned by a test. Tested by `instances::flow_tests::{an_entry_over_the_visit_limit_is_answered_with_the_visit_limit_error, every_refused_dungeon_request_is_answered}`; the court-case answer has no test (a trial cannot be set up from the instances tests).
+* systems::instances (2026-11-04, silent dungeon door): a party member that died, respawned and cast the Kroloal Cradle entrance skill 18701 four times (and again 11 minutes later) produced a `StartSkill` line, never `DoodadFuncEnterInstance`, and no error. The live log of that session is not available here, so the exact trigger could not be reproduced; the silent paths of the entry flow that can produce it were found by reading the flow and are fixed, each with a test. (1) `request_dungeon_instance` step 1 returned `true` without a packet when the dungeon's character table listed the character. The C# calls `Dungeon.AddPlayer` there, which moves the member into the dungeon again ("Most likely an error in logic?"). A registration can outlive the move out of the dungeon (an earlier session of the same character that was not cleaned up, a transform that left the instance without the table following), and then the door never worked again for that character. (2) `Operation::enter` drops a use that meets another thread's reservation of the doodad (the C# `Doodad.Use` waited on its lock); a dropped use of an instance door gave no answer. (3) `DoodadFuncExitIndun` ignored the `false` of `request_leave_instance` (the character is in no instance's table), so the exit door of such a character was dead too. (4) `queue_player` of a dungeon destroyed in between returned `false` unannounced. **Deviation:** a table entry only counts when it is this very character standing in the instance (`rejoin_member`): an entry of another session or one the character's transform no longer backs is dropped and the character goes through a normal admission (no second entry is charged for a run it was admitted to), a character really inside is moved to the entrance again like the C# does (one event subscription per event); a busy instance door answers `TRY_LATER_INSTANCE`; an exit door for a character in no table returns it to the main world when its transform stands in an instance and answers `INVALID_RETURN_POS_INSTANCE` otherwise; a destroyed dungeon answers `TRY_LATER_INSTANCE`. A refused client cast of a doodad is logged at info with the result code (it was a debug line), so the next report shows the reason. Not changed: a cast the skill validation refuses (range, cooldown, a target in another instance) is still answered by the `SCSkillStarted` result code only, as before. Tested by `instances::flow_tests::{a_stale_dungeon_registration_does_not_swallow_the_door, a_member_inside_who_asks_for_the_door_is_moved_in_again_once, the_registration_of_an_earlier_session_does_not_block_the_new_one, an_exit_door_answers_a_character_no_instance_lists, a_busy_instance_door_tells_the_player_to_try_again}`.
 
 * systems::vehicles: supersedes the phase-2 `CSMoveUnit` and `LeaveWorldTask` bullets above:
   slave / vehicle / mate moves, riding, standing on objects, the mate / slave logout handling
@@ -3055,14 +3066,21 @@ and in NPC wandering / buff remaining times.
 * systems::social: `AchievementGameData` reads the `'t'` / `'f'` text booleans of compact.sqlite3 with
   `GetBoolean(column)` (`GetInt64 != 0`), so `is_active`, `is_hidden`, `complete_or` and
   `or_unit_reqs` always load as `false`.
-* systems::social: `AskRiskyTeam` makes the acting unit (the kicker) leave its chat channels;
-  a member joining an existing team never joins the party / raid
-  chat (but can still talk into it); `IsMarked` compares mark object ids with character ids;
-  `ExpeditionManager.ChangeOwner` does not update `OwnerName`; `ReplyInvite` does not check an
-  existing guild; disbanded guilds stay in
-  the list; family invitations always carry family id 1; hard disconnects keep the family member's
-  character set; `GetTrialChat` throws when the faction has no court and the player is in no trial;
-  `CSAddFriend` accepts yourself.
+* systems::social: `IsMarked` compares mark object ids with character ids;
+  `ExpeditionManager.ChangeOwner` does not update `OwnerName`; `ChangeExpeditionRolePolicy`
+  requires the Expel right; disbanded guilds stay in
+  the list; family invitations always carry family id 1; `GetTrialChat` throws when the faction
+  has no court and the player is in no trial; `CSAddFriend` accepts yourself. (Fixed since:
+  `AskRiskyTeam` making the kicker leave its channels, late team members never joining the
+  party / raid chat, `ReplyInvite` not checking an existing guild, hard disconnects keeping the
+  family member's character set and the guild member online: see "Guild and party fixes
+  (2026-11-04)".)
+* systems::social, noticed while fixing the above and **not** changed: `Character.SetFaction`
+  removes the character from its guild (`ExpeditionManager.Kick(p, p)`) and party
+  (`MemberRemoveFromTeam(p, p, Kick)`) through the *expel* paths, which need the Expel right /
+  the party owner; so an ordinary member is never removed (the Rust rank guard of 2026-10-20
+  made the guild kick a no-op for everybody). A faction change of a guild leader would also
+  leave a leaderless guild if it worked. It needs its own decision (leave vs. expel semantics).
 
 * `WorldManager.RemoveVisibleObject` calls `RemoveFromCharacters` on the object's own region and
   then again for every neighbour, which includes that region: players in the same sector receive
@@ -4084,6 +4102,69 @@ The C# TODO codes 71 (`TEAM_LOADING`) and 77-to-the-invitee are no longer used. 
 community server (a reimplementation, not an oracle) sends 79 to the invitee when the inviter is
 in another team and 82/77 in the same split, which agrees with the inferred mapping.
 
+## Guild and party fixes (2026-11-04)
+
+Found by the player bots (`aaemu-playerbots`, guild / party scenarios) and reproduced in flow
+tests (`systems/social/flow_tests.rs`). The 1.2 client's `ui_texts` carry the text of every
+`ErrorMessageType` used below (key = the C# enum name in upper case), which is where "the right
+error" comes from; there is no retail oracle for which code the original server picked, so each
+is the closest text.
+
+- **Hard disconnect = clean leave socially.** The C# `OnDisconnect` never logged the character out
+  of its guild / family: guild members saw it online for ever, `last_leave_time` stayed at the
+  login time, the family kept the dead `Character`, and the dead session stayed in every chat
+  channel (so a party / guild / zone channel never became empty). `world::session::on_disconnect`
+  now runs `social::session::on_leave_world` (chat channels, family logout, pending guild
+  invitation, guild logout with the `SCExpeditionMemberStatusChanged` to the guild, which is also
+  what `leave_world_task` runs) and sets `leave_time`, for a character that still is the live
+  world entry. Kicks and server-side drops end in the same `on_disconnect`.
+  A connection keeps its `active_char` after a leave, so a later disconnect of a session that
+  already left is skipped (the character may be online on a newer session). Friends and the team
+  were already covered by `set_online(false)`. Not covered: the panic fallback
+  `force_release_connection` (only removes the world entry) and the GM `/disconnectme`, which
+  detaches the character on purpose like the C# (it stays in the world as a ghost).
+- **Guild leader cannot leave.** `ExpeditionManager.Leave` had no owner check, so the guild was left
+  without a role-255 member. The leader now gets `EXPEDITION_OWNER_CANNOT_LEAVE` (310, "you can
+  leave after delegating the leader position"); it must hand the guild over (`ChangeOwner`) or
+  dismiss it. A character that is not in a guild gets `ONLY_EXPEDITION_MEMBER`. (Deleting the
+  leader's character was already refused in the lobby.)
+- **Party invitations expire and die with a session.** The 60 s timeout the C# only applied when the
+  *answer* arrived is now also enforced by the 500 ms tick (`TeamManager::expire_invitations`; the
+  inviter gets `INVITATION_CANCELED_TIMEOUT`), an expired invitation no longer blocks a new
+  invitation of the same target, and `TeamManager::set_offline` (every way of going offline)
+  drops the invitations the character sent (their targets get `TEAM_INVITOR_OFFLINE`) and
+  received. Answering an invitation that is gone gets `TEAM_JOIN`; a late answer gets
+  `INVITATION_CANCELED_TIMEOUT` (and the inviter the usual `SCRejectedTeam`).
+- **Team chat on every join / leave path.** A member joining an existing team joins the raid (not
+  a party) and its party chat channel. `AskRiskyTeam` made the *acting unit* leave the channels,
+  so the kicker lost its party chat while the kicked member kept hearing it; the member that
+  leaves / is kicked leaves them now (before it is removed, the slot names its party).
+- **One team at a time.** Accepting an invitation while in a team is refused with `TEAM_JOIN_ALONE`
+  (the invitee) and `TEAM_INVITEE_IN_TEAM` / `TEAM_INVITEE_MEMBER` (the inviter); the invitation
+  itself is refused up front for such targets. The team of an invitation is the inviter's own
+  (the C# trusted the client's team id, so a member sending team id 0 invited without the
+  owner's right, and a stale id could name somebody else's team); a client team id naming another
+  existing team is `TEAM_NO_RIGHTS`.
+- **Feedback instead of silence.** Party: unknown / offline invitee `TEAM_INVITEE_OFFLINE`, yourself
+  `TEAM_YOURSELF`, not the owner (or marker of a raid) `TEAM_NO_RIGHTS`, full team `TEAM_FULL` to
+  the inviter (at the invitation, and again at the answer to both sides; an area invitation says
+  it once). Guild invite: not in a guild `ONLY_EXPEDITION_MEMBER`, role without the Invite right
+  `FACTION_INVITE_RIGHTS`, offline / unknown name `FACTION_INVITE_OFFLINE`, yourself
+  `FACTION_INVITE_SELF`, same guild `FACTION_INVITE_SAME`, another guild
+  `EXPEDITION_OTHER_EXPEDITION`, and a target that is
+  deciding on another invitation `EXPEDITION_OTHER_INVITATION` (the C# overwrote it; a pending
+  guild invitation now blocks a second until it is answered or expires). Guild reply: no / wrong
+  invitation `FACTION_JOIN_NO_INVITOR`, expired `INVITATION_CANCELED_TIMEOUT`, already in a guild
+  `EXPEDITION_ALREADY_MEMBER`, disbanded guild `FACTION_JOIN` (a disbanded guild stays in the
+  list, the C# let the reply join it); a refusal tells the inviter `FACTION_INVITE_REJECTED`.
+  Guild kick: not in a guild `ONLY_EXPEDITION_MEMBER`, no Expel right or not a higher rank
+  `FACTION_KICK_RIGHTS`, not a member `EXPEDITION_NO_TARGET` (a character "kicking" itself, as
+  `Character.SetFaction` does, stays silent).
+- Not changed (silent as in the C#): the other guild management failures (`ChangeOwner`,
+  `ChangeMemberRole`, `ChangeExpeditionRolePolicy`, `Disband` only reports the two it always
+  did), the nation / dead-target checks of a guild invite, and the SetFaction removal described
+  under "C# bugs noticed".
+
 ## Client skill cast authority (2026-10-20)
 
 `CSStartSkillPacket` trusted its caster, its target distance and its skill id more than the C#
@@ -4552,6 +4633,50 @@ container accepts it (the same `can_accept` / `SplitOrMoveItem` path as `CSSwapI
 does the player equipping something else into the back slot. A pack lost while the character is
 dead keeps the record until `resurrect_character`. The explicit `SCUnitEquipmentsChangedPacket`
 broadcast in `put_down_backpack` is gone (the equipment events broadcast leave and re-equip).
+
+## Dropped trade packs, crop seeds, `zonestate` and request logging (2026-11-04)
+
+- **A put-down or dropped trade pack expires and takes the item with it.** The lifetime is data:
+  the backpack doodad of `PutDownBackpackEffect.BackpackDoodadId` has a `DoodadFuncFinal` whose
+  `After` is 518,400,000 ms (6 days) for 254 of the 335 doodads that put-down effects name (the
+  others 1 s to 1 day; templates 3059, 3304, 7000, 7001 and 7002 have none and never expire;
+  seven effects name templates that are not in the data and no item uses them). The final task
+  survives a restart (`phase_time` is saved and `override_phase_time_ms` restores the remaining
+  time, a pack that ran out while the server was down is deleted at startup). What did not work
+  was the cleanup afterwards: the "cargo" retention in `bridges::cleanup_doodad_escrow_item`
+  (kept for the escrow of cargo that is still in use) also kept the item of an expired put-down
+  pack, so every expired pack stayed in the owner's System container for good. The C#
+  (`Doodad.Delete`, "Delete associated item if expired") removed any item whose holding container
+  is none or System. Now a doodad whose template is a put-down backpack doodad
+  (`is_put_down_backpack_doodad`) is not retained, provided the existing escrow checks hold (the
+  item is the unique matching singleton in the owner's System container, not a rack or slave
+  item) and no other live doodad still references the item (`item_referenced_by_live_doodad`).
+  Picking the pack up again (`RECOVER_ITEM`) moves the item out of System first, so it is not
+  deleted. Packs that earlier sessions already orphaned in System containers are not
+  reconciled. If `spawn_backpack_doodad` fails, the pack stays in System, as in the C#.
+- **A crop harvest does not always return the seed (not a bug).** The loot packs of crops
+  (6452, 6453, 6472, ...) give the crop (2 to 4) in group 1 and put the seed and the "fine" crop
+  behind `loot_actability_groups` rows with `max_dice` 355 (seed) and 345 (fine) on a 0..9999
+  roll, so about 3.6 % of harvests return the seed and 3.5 % the fine crop (`LootRate` and
+  `actability_exp_multiplier` are 1.0). `loot::generate_pack_v2` is the C# `GeneratePackNewV2`
+  and agrees with the data; the unit tests pin both the algorithm and, against the real
+  `compact.sqlite3`, the rates.
+- **`zonestate` parses the state case-insensitively and rejects unknown input (deviation).** The
+  C# used `Enum.TryParse(args[0], out ZoneConflictType)`, which is case-sensitive, and an
+  unparsable argument silently left the state at Tension, so `zonestate war` set Tension. Now the
+  name (any case) or the number 0 to 7 is accepted and anything else answers
+  `Unknown zone state '<arg>'. Valid states: Tension (0), Danger (1), ...`.
+- **Routine request traces are `debug`, not `warn`.** The C# logged the receipt of many
+  packets with `Logger.Warn`, which the port copied. The ones for actions that normally succeed
+  are now `debug!`: planting and placing a doodad (`CreateDoodad, Id:`, `<name> is placing a
+  doodad`, so the blood stain of a death is quiet too), `ChangeDoodadData/Phase`,
+  `SaveDoodadUccString`, coffer requests, the auction requests (`Post` was labelled
+  `AuctionMyBidList` through a copy-paste, it is `AuctionPost` now), specialty / store /
+  `SetCraftingPay` / item secure / cash shop requests, `CancelTrade`, `StartInteraction`,
+  `SelectInteractionEx` and `TeleportEnded`. A refused request (not allowed, unknown template, no
+  auctioneer in range, invalid item id, ...) stays at `warn`. `test_support::capture_events` is the
+  capture helper of the regression tests for this.
+  The traces of the instance and quest packets are left to the owners of those areas.
 
 ## Glider deploy gate and the gliding error codes (2026-10-31)
 
