@@ -422,6 +422,39 @@ Tests: `systems::skills::tests::cast_delay_tests` (extension, `SCCastingDelayed`
 at the new time, no-delay interrupt, cancelled-after-extension, delayed channel interrupt) and
 `systems::skills::packets::tests::casting_delayed_layout` (independent literal bytes).
 
+#### Resurrection buffs (WP-2b, 2026-11-05)
+
+`buffs.resurrection_health` / `resurrection_mana` / `resurrection_percent` were loaded but
+never read (the C# also only loaded them). The 1.2 `compact.sqlite3` has exactly one row with
+either column set: buff 239 "Nui's Favor" (`resurrection_health 10`, `resurrection_mana 10`,
+`resurrection_percent 't'`, 30 min, `remove_on_death 't'`), whose description says it
+resurrects the character in place once with 10 % life / vitality for 30 minutes and recovers
+the experience reduced on death (EVIDENCED: `buffs` row + description).
+
+Rule now implemented (`systems::skills::combat::apply_resurrection_buff`,
+`systems::skills::buffs::take_resurrection_buff`): on a PLAYER death after the death losses
+and `DoDie`, an active buff with a non-zero `resurrection_*` is consumed (one critical
+section under the owner's data lock; the effect then exits through the normal buff removal),
+hp / mp are set to the columns (`resurrection_percent 't'`: percent of `max_hp` / `max_mp`;
+`'f'`: absolute values — **INFERRED**, no 1.2 row uses it; both are clamped to the pools),
+this death's experience loss is refunded through the `RecoverExpEffect` packet / `AddExp`
+path with no priest and no labor, and `SCCharacterResurrectedPacket` is broadcast at the
+corpse position followed by `SCUnitPointsPacket`. The death's `recoverable_exp` entry is
+cleared so a priest cannot refund the same loss twice. The one-death-per-life claim is
+unchanged: after the resurrection a second lethal hit without the buff dies normally.
+
+**UNKNOWN / capture-pending:** the timing and animation of the self-resurrection (no 1.2
+capture; no extra delay is added), and whether retail refunds the whole loss or only the
+80 % `RecoverableExp` portion (the description names the decreased experience, so the whole
+this-death loss is refunded; the audit's alternative reading is `RecoverableExp`). The
+`remove_on_death 't'` flag on the buff is handled by consuming it explicitly before
+`RemoveEffectsOnDeath`; a death that takes the C# killer-less path never reaches `DoDie` and
+does not consume it.
+
+Tests: `systems::skills::resurrection_buff_tests` (buff 239 in-place resurrection with hp /
+mp / refund / packet order and buff removal, second death kills normally, death without the
+buff unchanged, absolute-value inference, real-compact loader for the three columns).
+
 ### systems::npcs
 
 | Area (C#) | Rust | Status | Notes |

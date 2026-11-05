@@ -18,6 +18,7 @@ use super::packets::{
     SCAiAggroPacket, SCCombatClearedPacket, SCCombatFirstHitPacket, SCForceAttackSetPacket,
     SCUnitDeathPacket, SCUnitFactionChangedPacket, SCUnitInvisiblePacket,
 };
+use super::packets_special::SCCharacterResurrectedPacket;
 use super::state::{Aggro, AggroKind};
 use super::types::{buff_constants, tags, BuffEventTriggerKind, KillReason, SkillCaster};
 use super::{broadcast, send_to_players};
@@ -376,6 +377,17 @@ fn do_die_after_claim(
     crate::systems::vehicles::on_death_event(server, victim);
     // Abusers that died leave the aggro tables they are in (OnAbuserDied).
     clear_incoming_aggro(server, victim);
+    // A resurrection buff (`buffs.resurrection_health` / `resurrection_mana`; 1.2 buff 239
+    // "Nui's Favor") brings the player back in place. It carries `remove_on_death` too, so it
+    // is consumed here, before `RemoveEffectsOnDeath`; the resurrection itself runs after the
+    // death losses and `DoDie` so it can refund this death's experience. A death without a
+    // killer returns below before `DoDie` (the C# NullReference path), so it does not consume
+    // the buff.
+    let resurrection = if killer.is_some() && victim.as_player().is_some() {
+        buffs::take_resurrection_buff(server, victim)
+    } else {
+        None
+    };
     buffs::remove_effects_on_death(server, victim);
 
     let mut lost_exp = 0;
@@ -428,7 +440,104 @@ fn do_die_after_claim(
             );
         }
         character_death_tail(server, p, victim, killer);
+        if let Some((health, mana, percent)) = resurrection {
+            apply_resurrection_buff(server, p, victim, health, mana, percent, lost_exp);
+        }
     }
+}
+
+/// The in-place self-resurrection of a `resurrection_health` / `resurrection_mana` buff on a
+/// player death, after [`character_death_losses`] and `DoDie`: hp / mp restore, this death's
+/// experience refund through the `RecoverExpEffect` path (no priest, no labor) and
+/// `SCCharacterResurrectedPacket` at the corpse position, so the client leaves the
+/// death-release state.
+///
+/// `percent == true` reads the values as percent of `max_hp` / `max_mp` (buff 239: 10 / 10);
+/// absolute values (`percent == false`) are INFERRED (no 1.2 row uses them) and clamped to
+/// the pools. The buff description says the decreased experience is recovered; the whole loss
+/// of this death is refunded and the death's `recoverable_exp` entry is cleared, so a priest
+/// cannot refund it a second time. The timing / animation of the self-resurrection is
+/// capture-pending (no 1.2 capture): there is no extra delay.
+fn apply_resurrection_buff(
+    server: &GameServer,
+    p: &PlayerRef,
+    victim: &WorldObject,
+    health: i32,
+    mana: i32,
+    percent: bool,
+    lost_exp: i32,
+) {
+    let (hp, mp) = {
+        let mut c = p.data();
+        let max_hp = c.unit.max_hp;
+        let max_mp = c.unit.max_mp;
+        let restore = |value: i32, max: i32| {
+            let value = if percent {
+                (i64::from(max) * i64::from(value) / 100) as i32
+            } else {
+                value
+            };
+            value.clamp(0, max)
+        };
+        c.unit.hp = restore(health, max_hp);
+        c.unit.mp = restore(mana, max_mp);
+        // The flags `ApplyRevivalDebuffs` consumes on a temple resurrection: an in-place
+        // resurrection has no death debuffs, and the next death must start with clean flags.
+        c.died_in_pvp = false;
+        c.died_in_pvp_war_zone = false;
+        (c.unit.hp, c.unit.mp)
+    };
+    if hp <= 0 {
+        // Only buff 239 has either column set in the 1.2 data (10 / 10). A row without
+        // resurrection health cannot make the corpse alive; the buff is spent either way.
+        tracing::warn!(
+            "resurrection buff of {} restored no health (resurrection_health 0); not resurrecting",
+            p.obj_id
+        );
+        return;
+    }
+    if lost_exp > 0 {
+        {
+            // Only this death's entry: `character_death_losses` overwrote the previous one.
+            let mut c = p.data();
+            c.recoverable_exp = 0;
+        }
+        p.send(super::progress::SCRecoverableExpPacket {
+            obj_id: p.obj_id,
+            recoverable_exp: 0,
+            penaltied_exp: 0,
+            reason: 1,
+        });
+        super::progress::add_exp(server, p, lost_exp, false);
+    }
+    let world_pos = match super::geometry::world_of(server, victim) {
+        Some(w) => w.world_pos_rot(victim),
+        None => victim.transform().local(),
+    };
+    broadcast(
+        server,
+        victim,
+        &SCCharacterResurrectedPacket {
+            unit_id: victim.obj_id(),
+            x: world_pos.x,
+            y: world_pos.y,
+            z: world_pos.z,
+            z_rot: world_pos.rot_z,
+        },
+        true,
+    );
+    broadcast(
+        server,
+        victim,
+        &SCUnitPointsPacket {
+            obj_id: victim.obj_id(),
+            hp,
+            mp,
+        },
+        true,
+    );
+    // Clears the death claim of the new life and runs the HP-change hooks of the resurrection.
+    post_update_current_hp(server, victim, Some(victim), 0, hp, KillReason::Unknown);
 }
 
 /// `DeathWaitTimesSeconds`: the C# port's hard-coded escalation (15..240 s) and its 5-minute
