@@ -570,6 +570,8 @@ fn battlefield_data_loads_with_json_quirks() {
     assert_eq!(s.corps1_spawn.unwrap().y, 606.0);
     assert_eq!(s.corps2_spawn.unwrap().rotation_z, -5);
     assert_eq!(arena.rule_set.unwrap().id, 28);
+    // The hand-built schema has no time_resurrection_delay column: 0, not an error.
+    assert_eq!(arena.rule_set.unwrap().time_resurrection_delay, 0);
     // The scoring / rule-event / buff tables are attached to their rule set / battlefield.
     assert_eq!(
         GameScoreRule::resolve(
@@ -615,12 +617,14 @@ fn battlefield_rule_set_loads_kill_conditions() {
     let c = Connection::open_in_memory().unwrap();
     c.execute_batch(
         "CREATE TABLE battle_fields (id INT, name TEXT, zone_key INT);
-         CREATE TABLE game_rule_sets (id INT, corps_size INT, corps1_id INT, corps2_id INT, time_opening INT, time_ending INT, time_playing INT, victory_score INT, battle_field_id INT, victory_kill_count INT, killstreak0_id INT, killstreak9_id INT, killstreak23_id INT, level_min INT, victory_kill_corps1_head INT, victory_kill_corps2_head INT, bonus_winner INT, bonus_loser INT, bonus_no_death INT, bonus_top_enemy_pc_kill INT, bonus_top_enemy_non_pc_kill INT, rank_invalid_point INT, rank_win_point INT, rank_lose_point INT, rank_draw_point INT, time_unearned_win INT);
+         CREATE TABLE game_rule_sets (id INT, corps_size INT, corps1_id INT, corps2_id INT, time_opening INT, time_ending INT, time_playing INT, victory_score INT, battle_field_id INT, victory_kill_count INT, killstreak0_id INT, killstreak9_id INT, killstreak23_id INT, level_min INT, victory_kill_corps1_head INT, victory_kill_corps2_head INT, bonus_winner INT, bonus_loser INT, bonus_no_death INT, bonus_top_enemy_pc_kill INT, bonus_top_enemy_non_pc_kill INT, rank_invalid_point INT, rank_win_point INT, rank_lose_point INT, rank_draw_point INT, time_unearned_win INT, time_resurrection_delay INT);
          CREATE TABLE game_score_rules (id INT, rule_set_id INT, rule_set_corps INT, event_id INT, event_value INT, event_score INT);
          CREATE TABLE game_rule_events (id INT, rule_set_id INT, condition_id INT, kind_id INT, param1 INT, param2 INT);
          CREATE TABLE battle_field_buffs (id INT, battle_field_id INT, buff_id INT, value INT);
          INSERT INTO battle_fields VALUES (6, 'camp1v1', 198);
-         INSERT INTO game_rule_sets VALUES (8, 1, 159, 160, 1, 1, 15, 5000, 6, 50, 22331, 22527, 0, 45, 13353, 13352, 50, 10, 7, 10, 3, 0, 4, 1, 2, 60);",
+         INSERT INTO battle_fields VALUES (12, 'null_delay', 198);
+         INSERT INTO game_rule_sets VALUES (8, 1, 159, 160, 1, 1, 15, 5000, 6, 50, 22331, 22527, 0, 45, 13353, 13352, 50, 10, 7, 10, 3, 0, 4, 1, 2, 60, 15);
+         INSERT INTO game_rule_sets VALUES (99, 1, 159, 160, 1, 1, 15, 5000, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL);",
     )
     .unwrap();
     let d = BattlefieldData::load(&c, Some("[]")).unwrap();
@@ -646,6 +650,10 @@ fn battlefield_rule_set_loads_kill_conditions() {
     assert_eq!(rs.rank_lose_point, 1);
     assert_eq!(rs.rank_draw_point, 2);
     assert_eq!(rs.time_unearned_win, 60);
+    assert_eq!(rs.time_resurrection_delay, 15);
+    // A NULL delay loads as 0 (no authored wait); the caller keeps its fallback.
+    let null_delay = d.battlefield(12).unwrap().rule_set.unwrap();
+    assert_eq!(null_delay.time_resurrection_delay, 0);
 }
 
 #[test]

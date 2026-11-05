@@ -80,6 +80,11 @@ pub const INVITE_TIMEOUT_SECS: u64 = 60;
 /// battlefield Lua names: `BFER_TIMEOVER_COMPARE_KILL_COUNT`).
 pub const ENDING_TIMEOVER_COMPARE_KILL_COUNT: u8 = 1;
 
+/// The C# hard-coded 6 s wait before `OnKill` resurrects the victim. Kept as the fallback for
+/// a rule set that authors no `time_resurrection_delay` (the 1.2 rows author 15 s, or 5 s for
+/// the Gladiator).
+const LEGACY_RESURRECTION_DELAY_SECS: u64 = 6;
+
 /// `Character.ResetAllSkillCooldowns`: `playerSkillsTag`.
 const PLAYER_SKILLS_TAG: u32 = 378;
 
@@ -1131,9 +1136,17 @@ pub fn on_kill(
     let Some(s) = server.self_arc() else {
         return;
     };
+    // The rule set of the running instance decides the wait (1.2: 15 s, Gladiator 5 s); a
+    // rule set without one keeps the C# 6 s.
+    let delay_secs = if game.rule_set.time_resurrection_delay > 0 {
+        u64::try_from(game.rule_set.time_resurrection_delay)
+            .unwrap_or(LEGACY_RESURRECTION_DELAY_SECS)
+    } else {
+        LEGACY_RESURRECTION_DELAY_SECS
+    };
     let (g, killer) = (game.clone(), killer.clone());
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(6)).await;
+        tokio::time::sleep(Duration::from_secs(delay_secs)).await;
         respawn_after_kill(&s, &g, &killer, &victim, victim_spawn, killer_spawn);
     });
 }
