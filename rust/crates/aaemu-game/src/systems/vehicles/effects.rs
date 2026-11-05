@@ -129,22 +129,22 @@ fn spawn_effect_slave(
         t.pos_distance
     };
     if matches!(t.pos_dir_id, 1 | 2) {
-        let (x, y) = crate::systems::skills::effects::special::movement::add_distance_to_front_deg(
-            distance,
+        // The position is relative to the relative unit's facing (`rel.rot_z + pos_angle`), as
+        // the C# slave branch moved along the caster's rotation; the NPC branch's absolute
+        // `PosAngle` does not apply to a slave spawn.
+        transform.set_position(
             p.x,
             p.y,
-            t.pos_angle,
-        );
-        // `Rotate(Rotation with { Z = OriAngle.DegToRad() })` adds the vector to the rotation,
-        // so the roll / pitch double as in the C#.
-        transform.set_position(
-            x,
-            y,
             p.z,
             o.rot_x + o.rot_x,
             o.rot_y + o.rot_y,
-            o.rot_z + crate::systems::skills::effects::special::movement::deg_to_rad(t.ori_angle),
+            o.rot_z + crate::systems::skills::effects::special::movement::deg_to_rad(t.pos_angle),
         );
+        super::slaves::add_distance_to_front(&mut transform, distance);
+        // `Rotate(Rotation with { Z = OriAngle.DegToRad() })` adds the vector to the rotation,
+        // so the roll / pitch double as in the C#.
+        transform.rot_z =
+            o.rot_z + crate::systems::skills::effects::special::movement::deg_to_rad(t.ori_angle);
     } else {
         transform.set_position(p.x, p.y, p.z, o.rot_x, o.rot_y, o.rot_z);
         super::slaves::add_distance_to_front(&mut transform, distance);

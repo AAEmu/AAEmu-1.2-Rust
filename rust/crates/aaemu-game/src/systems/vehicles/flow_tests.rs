@@ -212,7 +212,14 @@ fn data() -> GameData {
 }
 
 fn server_with(d: GameData) -> Arc<GameServer> {
-    let s = Arc::new(test_server_with(d));
+    server_with_world(
+        d,
+        WorldTemplate::synthetic(0, "main_world", 2, 2, TEST_ZONE),
+    )
+}
+
+fn server_with_world(d: GameData, world: WorldTemplate) -> Arc<GameServer> {
+    let s = Arc::new(crate::test_support::test_server_with_world(d, world));
     s.set_self();
     // This synthetic server has no MySQL. Explicitly supply an empty saved-hull store;
     // persistence/error regressions use their own loader or private temporary tables.
@@ -4713,12 +4720,12 @@ async fn spawn_effect_slave_honours_pos_and_ori_dirs() {
                 )
             })
     };
-    let from_target = at(150.0, 100.0);
+    let from_target = at(130.0, 100.0);
     assert!(
         (from_target.data().unit.transform.rot_z - std::f32::consts::FRAC_PI_2).abs() < 1e-5,
         "ori dir 1 uses the target's yaw"
     );
-    let from_caster = at(110.0, 100.0);
+    let from_caster = at(100.0, 110.0);
     assert!(
         from_caster.data().unit.transform.rot_z.abs() < 1e-5,
         "ori dir 2 uses the caster's yaw"
@@ -5997,6 +6004,14 @@ async fn hang_and_unhang_packets_only_mutate_the_authenticated_character() {
 const SUMMON_POS_SKILL: u32 = 58_003;
 const SLAVE_PART: u32 = 5002;
 
+/// A world whose ocean is far below the synthetic terrain fallback, so land placements are not
+/// mistaken for sea-floor spots (the default test world's ocean level is 100).
+fn low_ocean_world() -> WorldTemplate {
+    let mut world = WorldTemplate::synthetic(0, "main_world", 2, 2, TEST_ZONE);
+    world.ocean_level = -1000.0;
+    world
+}
+
 fn summon_pos_data(spawn_range: u32) -> GameData {
     use crate::systems::skills::data::effects::{EffectTemplate, SpecialEffect};
     use crate::systems::skills::data::{EffectKind, SkillTemplate};
@@ -6108,7 +6123,7 @@ async fn wait_for_slave(world: &Arc<crate::world::WorldInstance>) -> crate::worl
 
 #[tokio::test]
 async fn summon_pos_places_the_vehicle_at_the_chosen_spot() {
-    let server = server_with(summon_pos_data(50));
+    let server = server_with_world(summon_pos_data(50), low_ocean_world());
     crate::systems::economy::bridges::install(&server);
     crate::systems::npcs::install_hooks(&server);
     super::install_hooks(&server);
@@ -6132,7 +6147,7 @@ async fn summon_pos_places_the_vehicle_at_the_chosen_spot() {
 
 #[tokio::test]
 async fn summon_pos_outside_the_valid_area_errors_without_spawning() {
-    let server = server_with(summon_pos_data(10));
+    let server = server_with_world(summon_pos_data(10), low_ocean_world());
     crate::systems::economy::bridges::install(&server);
     crate::systems::npcs::install_hooks(&server);
     super::install_hooks(&server);

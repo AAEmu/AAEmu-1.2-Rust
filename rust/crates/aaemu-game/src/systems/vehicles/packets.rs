@@ -422,7 +422,7 @@ cs_packet!(
     handle |self, server, conn| {
         tracing::debug!("SpawnSlave, SlaveId: {}", self.slave_id);
         let p = active_char!(conn);
-        slaves::spawn_from_client(
+        if let Some(cast) = slaves::client_spawn_cast(
             server,
             &p,
             self.slave_id,
@@ -432,8 +432,10 @@ cs_packet!(
             self.z_rot,
             self.item_id,
             self.hide_spawn_effect,
-        )
-        .await;
+        ) {
+            // Same entry as a client item use: every cast gate, the cast time and the cooldown.
+            crate::systems::skills::handlers::start_skill(server, conn, cast);
+        }
         Ok(())
     }
 );
