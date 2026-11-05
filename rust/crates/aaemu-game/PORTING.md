@@ -3646,6 +3646,50 @@ does the player equipping something else into the back slot. A pack lost while t
 dead keeps the record until `resurrect_character`. The explicit `SCUnitEquipmentsChangedPacket`
 broadcast in `put_down_backpack` is gone (the equipment events broadcast leave and re-equip).
 
+## Dropped trade packs, crop seeds, `zonestate` and request logging (2026-11-04)
+
+- **A put-down or dropped trade pack expires and takes the item with it.** The lifetime is data:
+  the backpack doodad of `PutDownBackpackEffect.BackpackDoodadId` has a `DoodadFuncFinal` whose
+  `After` is 518,400,000 ms (6 days) for 254 of the 335 doodads that put-down effects name (the
+  others 1 s to 1 day; templates 3059, 3304, 7000, 7001 and 7002 have none and never expire;
+  seven effects name templates that are not in the data and no item uses them). The final task
+  survives a restart (`phase_time` is saved and `override_phase_time_ms` restores the remaining
+  time, a pack that ran out while the server was down is deleted at startup). What did not work
+  was the cleanup afterwards: the "cargo" retention in `bridges::cleanup_doodad_escrow_item`
+  (kept for the escrow of cargo that is still in use) also kept the item of an expired put-down
+  pack, so every expired pack stayed in the owner's System container for good. The C#
+  (`Doodad.Delete`, "Delete associated item if expired") removed any item whose holding container
+  is none or System. Now a doodad whose template is a put-down backpack doodad
+  (`is_put_down_backpack_doodad`) is not retained, provided the existing escrow checks hold (the
+  item is the unique matching singleton in the owner's System container, not a rack or slave
+  item) and no other live doodad still references the item (`item_referenced_by_live_doodad`).
+  Picking the pack up again (`RECOVER_ITEM`) moves the item out of System first, so it is not
+  deleted. Packs that earlier sessions already orphaned in System containers are not
+  reconciled. If `spawn_backpack_doodad` fails, the pack stays in System, as in the C#.
+- **A crop harvest does not always return the seed (not a bug).** The loot packs of crops
+  (6452, 6453, 6472, ...) give the crop (2 to 4) in group 1 and put the seed and the "fine" crop
+  behind `loot_actability_groups` rows with `max_dice` 355 (seed) and 345 (fine) on a 0..9999
+  roll, so about 3.6 % of harvests return the seed and 3.5 % the fine crop (`LootRate` and
+  `actability_exp_multiplier` are 1.0). `loot::generate_pack_v2` is the C# `GeneratePackNewV2`
+  and agrees with the data; the unit tests pin both the algorithm and, against the real
+  `compact.sqlite3`, the rates.
+- **`zonestate` parses the state case-insensitively and rejects unknown input (deviation).** The
+  C# used `Enum.TryParse(args[0], out ZoneConflictType)`, which is case-sensitive, and an
+  unparsable argument silently left the state at Tension, so `zonestate war` set Tension. Now the
+  name (any case) or the number 0 to 7 is accepted and anything else answers
+  `Unknown zone state '<arg>'. Valid states: Tension (0), Danger (1), ...`.
+- **Routine request traces are `debug`, not `warn`.** The C# logged the receipt of many
+  packets with `Logger.Warn`, which the port copied. The ones for actions that normally succeed
+  are now `debug!`: planting and placing a doodad (`CreateDoodad, Id:`, `<name> is placing a
+  doodad`, so the blood stain of a death is quiet too), `ChangeDoodadData/Phase`,
+  `SaveDoodadUccString`, coffer requests, the auction requests (`Post` was labelled
+  `AuctionMyBidList` through a copy-paste, it is `AuctionPost` now), specialty / store /
+  `SetCraftingPay` / item secure / cash shop requests, `CancelTrade`, `StartInteraction`,
+  `SelectInteractionEx` and `TeleportEnded`. A refused request (not allowed, unknown template, no
+  auctioneer in range, invalid item id, ...) stays at `warn`. `test_support::capture_events` is the
+  capture helper of the regression tests for this.
+  The traces of the instance and quest packets are left to the owners of those areas.
+
 ## Glider deploy gate and the gliding error codes (2026-10-31)
 
 The C# defined `CannotInteractWhileGliding` / `CannotChangeBackpackInGliding` but never raised them
