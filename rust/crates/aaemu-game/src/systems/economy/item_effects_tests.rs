@@ -66,10 +66,12 @@ const TL: u16 = 0x77;
 const HEAD_ARMOR: u32 = 2130;
 const WAIST_ARMOR: u32 = 2131;
 const FEET_ARMOR: u32 = 2132;
-// NPC templates with the 1.2 `mate_equip_slot_packs` ids (1 riding, 2 combat, 3 pet).
+// NPC templates with the 1.2 `mate_equip_slot_packs` ids (1 riding, 2 combat, 3 pet; 0 = a
+// template whose pack is missing, which the client refuses every slot for).
 const MATE_RIDING: u32 = 501;
 const MATE_COMBAT: u32 = 502;
 const MATE_PET: u32 = 503;
+const MATE_NO_PACK: u32 = 504;
 
 /// Sets `ItemFlag.Secure` on a bag item without going through the packet handler.
 fn set_locked(w: &World, id: u64) {
@@ -406,7 +408,7 @@ fn data() -> GameData {
     d
 }
 
-/// [`data`] plus the mate equipment tables: three slot packs and mate templates 501-503, with
+/// [`data`] plus the mate equipment tables: three slot packs and mate templates 501-504, with
 /// the client's per-mate item list naming only [`WAIST_ARMOR`] for the riding mate.
 fn mate_pack_data() -> GameData {
     let mut d = data();
@@ -425,7 +427,12 @@ fn mate_pack_data() -> GameData {
         armor.level = 1;
         d.items.templates.insert(template, armor);
     }
-    for (id, pack_id) in [(MATE_RIDING, 1), (MATE_COMBAT, 2), (MATE_PET, 3)] {
+    for (id, pack_id) in [
+        (MATE_RIDING, 1),
+        (MATE_COMBAT, 2),
+        (MATE_PET, 3),
+        (MATE_NO_PACK, 0),
+    ] {
         d.systems.npcs.npc.templates.insert(
             id,
             NpcTemplate {
@@ -458,6 +465,14 @@ fn mate_pack_data() -> GameData {
     rules
         .pack_items
         .insert(MATE_RIDING, [WAIST_ARMOR].into_iter().collect());
+    d
+}
+
+/// [`mate_pack_data`] with the FeatureSet bit the client gates the mate item list on (78 =
+/// fset byte 9 bit 6, clear in `DEFAULT_FSET`).
+fn mate_pack_data_with_whitelist(enabled: bool) -> GameData {
+    let mut d = mate_pack_data();
+    d.features.set_bit(78, enabled);
     d
 }
 
@@ -3618,12 +3633,12 @@ async fn mate_equipment_pet_pack_still_unequips_to_the_bag() {
         .any(|(op, _)| *op == sc::SCUnitEquipmentsChangedPacket));
 }
 
-/// The per-mate item list is INFERRED and not enforced: the 1.2 client's check is gated on a
-/// client flag whose default (`FUN_391edb00`) leaves it clear. An allowed slot accepts an item
-/// the client list does not name, and that item is only logged.
+/// The per-mate item list is the client's whitelist, gated on FeatureSet bit 78. With the bit
+/// off (`DEFAULT_FSET`) an item the list does not name is accepted and only logged.
 #[tokio::test]
-async fn mate_equipment_item_outside_the_client_list_is_still_allowed() {
+async fn mate_equipment_item_outside_the_client_list_is_still_allowed_when_the_feature_is_off() {
     let mut w = world_with_data(mate_pack_data());
+    assert!(!w.server.systems.services.features(&w.server).check_bit(78));
     let rules = &w.server.game_data.systems.economy.mate_equipment;
     assert!(rules.pack_items[&MATE_RIDING].contains(&WAIST_ARMOR));
     assert!(!rules.pack_items[&MATE_RIDING].contains(&FEET_ARMOR));
@@ -3650,6 +3665,169 @@ async fn mate_equipment_item_outside_the_client_list_is_still_allowed() {
         .drain()
         .iter()
         .any(|(op, _)| *op == sc::SCUnitEquipmentsChangedPacket));
+}
+
+/// With FeatureSet bit 78 on, the client's `mate_equip_pack_groups` list is enforced: the named
+/// item is accepted in an allowed slot, an unnamed one is refused and stays in the bag.
+#[tokio::test]
+async fn mate_equipment_item_outside_the_client_list_is_refused_when_the_feature_is_on() {
+    let mut w = world_with_data(mate_pack_data_with_whitelist(true));
+    assert!(w.server.systems.services.features(&w.server).check_bit(78));
+    let mate = spawn_mate_with(&mut w, MATE_RIDING);
+
+    let waist = give(&w, &w.pa.clone(), slot_type::INVENTORY, WAIST_ARMOR, 1, 3);
+    let waist_wire = item(&w, waist).unwrap();
+    run_mate(
+        &mut w,
+        &mate_body(Some(&waist_wire), None, 3, equip_slot::WAIST as u8),
+    );
+    assert_eq!(
+        mate.data().equipment[equip_slot::WAIST as usize]
+            .as_ref()
+            .map(|i| i.id),
+        Some(waist)
+    );
+    w.a.drain();
+    w.b.drain();
+
+    let feet = give(&w, &w.pa.clone(), slot_type::INVENTORY, FEET_ARMOR, 1, 3);
+    let feet_wire = item(&w, feet).unwrap();
+    run_mate(
+        &mut w,
+        &mate_body(Some(&feet_wire), None, 3, equip_slot::FEET as u8),
+    );
+    assert_eq!(item_at(&w.pa, slot_type::INVENTORY, 3).unwrap().id, feet);
+    assert!(mate.data().equipment[equip_slot::FEET as usize].is_none());
+    let frames = w.a.drain();
+    assert!(frames
+        .iter()
+        .any(|(op, _)| *op == sc::SCMateEquipmentChangedPacket));
+    assert!(frames.contains(&error(error_message::ITEM_NOT_FOR_PET)));
+    assert!(w.b.drain().is_empty());
+}
+
+/// A mate template whose slot pack is 0 / missing refuses every slot (`FUN_3933a9c0` returns 0).
+#[tokio::test]
+async fn mate_equipment_missing_slot_pack_refuses_every_slot() {
+    for (template, slot) in [
+        (HEAD_ARMOR, equip_slot::HEAD),
+        (ARMOR, equip_slot::CHEST),
+        (WAIST_ARMOR, equip_slot::WAIST),
+        (FEET_ARMOR, equip_slot::FEET),
+    ] {
+        let mut w = world_with_data(mate_pack_data());
+        let mate = spawn_mate_with(&mut w, MATE_NO_PACK);
+        let id = give(&w, &w.pa.clone(), slot_type::INVENTORY, template, 1, 3);
+        let wire = item(&w, id).unwrap();
+        w.a.drain();
+        w.b.drain();
+        run_mate(&mut w, &mate_body(Some(&wire), None, 3, slot as u8));
+        assert_eq!(item_at(&w.pa, slot_type::INVENTORY, 3).unwrap().id, id);
+        assert!(mate.data().equipment[slot as usize].is_none());
+        let frames = w.a.drain();
+        assert!(frames
+            .iter()
+            .any(|(op, _)| *op == sc::SCMateEquipmentChangedPacket));
+        assert!(frames.contains(&error(error_message::ITEM_NOT_FOR_PET)));
+        assert!(w.b.drain().is_empty());
+    }
+}
+
+/// Equipping into a slot that already holds a mate item swaps both items.
+#[tokio::test]
+async fn mate_equipment_swap_onto_an_occupied_slot() {
+    let mut w = world_with_data(mate_pack_data());
+    let mate = spawn_mate_with(&mut w, MATE_RIDING);
+    let first = give(&w, &w.pa.clone(), slot_type::INVENTORY, FEET_ARMOR, 1, 3);
+    let first_wire = item(&w, first).unwrap();
+    run_mate(
+        &mut w,
+        &mate_body(Some(&first_wire), None, 3, equip_slot::FEET as u8),
+    );
+    assert_eq!(
+        mate.data().equipment[equip_slot::FEET as usize]
+            .as_ref()
+            .map(|i| i.id),
+        Some(first)
+    );
+    w.a.drain();
+    w.b.drain();
+
+    let second = give(&w, &w.pa.clone(), slot_type::INVENTORY, FEET_ARMOR, 1, 4);
+    let second_wire = item(&w, second).unwrap();
+    run_mate(
+        &mut w,
+        &mate_body(Some(&second_wire), None, 4, equip_slot::FEET as u8),
+    );
+    assert_eq!(
+        mate.data().equipment[equip_slot::FEET as usize]
+            .as_ref()
+            .map(|i| i.id),
+        Some(second)
+    );
+    assert_eq!(item_at(&w.pa, slot_type::INVENTORY, 4).unwrap().id, first);
+    assert!(item_at(&w.pa, slot_type::INVENTORY, 3).is_none());
+}
+
+/// Unequipping into an occupied bag slot swaps the bag item onto the mate; an allowed bag item
+/// swaps through, a disallowed one refuses the whole move and keeps both items in place.
+#[tokio::test]
+async fn mate_equipment_unequip_swap_checks_the_bag_item() {
+    let mut w = world_with_data(mate_pack_data());
+    let mate = spawn_mate_with(&mut w, MATE_RIDING);
+    let worn = give(&w, &w.pa.clone(), slot_type::INVENTORY, FEET_ARMOR, 1, 3);
+    let worn_wire = item(&w, worn).unwrap();
+    run_mate(
+        &mut w,
+        &mate_body(Some(&worn_wire), None, 3, equip_slot::FEET as u8),
+    );
+    assert_eq!(
+        mate.data().equipment[equip_slot::FEET as usize]
+            .as_ref()
+            .map(|i| i.id),
+        Some(worn)
+    );
+    w.a.drain();
+    w.b.drain();
+
+    // Allowed swap: another feet item in bag slot 4 lands on the mate.
+    let allowed = give(&w, &w.pa.clone(), slot_type::INVENTORY, FEET_ARMOR, 1, 4);
+    run_mate(
+        &mut w,
+        &mate_body(None, Some(&worn_wire), 4, equip_slot::FEET as u8),
+    );
+    assert_eq!(
+        mate.data().equipment[equip_slot::FEET as usize]
+            .as_ref()
+            .map(|i| i.id),
+        Some(allowed)
+    );
+    assert_eq!(item_at(&w.pa, slot_type::INVENTORY, 4).unwrap().id, worn);
+    w.a.drain();
+    w.b.drain();
+
+    // Disallowed swap: a chest item in bag slot 5 would land on the mate, so the move is
+    // refused and both items stay where they are.
+    let chest = give(&w, &w.pa.clone(), slot_type::INVENTORY, ARMOR, 1, 5);
+    let chest_wire = item(&w, chest).unwrap();
+    run_mate(
+        &mut w,
+        &mate_body(None, Some(&chest_wire), 5, equip_slot::FEET as u8),
+    );
+    // The wire item only selects the direction; the actual mate item is still `allowed`.
+    assert_eq!(
+        mate.data().equipment[equip_slot::FEET as usize]
+            .as_ref()
+            .map(|i| i.id),
+        Some(allowed)
+    );
+    assert_eq!(item_at(&w.pa, slot_type::INVENTORY, 5).unwrap().id, chest);
+    let frames = w.a.drain();
+    assert!(frames
+        .iter()
+        .any(|(op, _)| *op == sc::SCMateEquipmentChangedPacket));
+    assert!(frames.contains(&error(error_message::ITEM_NOT_FOR_PET)));
+    assert!(w.b.drain().is_empty());
 }
 
 #[test]

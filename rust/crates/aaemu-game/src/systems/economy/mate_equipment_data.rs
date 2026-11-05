@@ -7,15 +7,15 @@
 //! `SELECT id, chest, feet, head, name, waist FROM mate_equip_slot_packs`) and answers exactly
 //! the four 1.2 equip-slot indices head 0, chest 2, waist 3 and feet 6.
 //!
-//! The per-mate item list is INFERRED as a rule and NOT enforced. The client loads the
-//! `(npc_id, item_id)` pairs of `mate_equip_pack_groups` x `mate_equip_pack_items` in
-//! `FUN_395fbbc0` (SQL at `0x399f9490`) and reads them through `FUN_395ac760` from the
-//! item-use / equip validation `FUN_394e41f0` (`dll.c:1021539`), but that call is gated on
-//! `(*(DAT_39b02294 + 0x1c) & 0x4000)`: the client singleton initialises that field to `0x32`
-//! (bit clear) in `FUN_391edb00` and no code that sets the bit was found in the 1.2 client, so
-//! the whitelist is inactive. The real data also contains 1058 group/item rows whose item slot
-//! the mate's own slot pack forbids, so rejecting on the list would break legal equips.
-//! The server only logs an item outside the list (see `super::mate_equipment`).
+//! The per-mate item list is the client's whitelist, enforced only while FeatureSet bit 78 is
+//! set. The client loads the `(npc_id, item_id)` pairs of `mate_equip_pack_groups` x
+//! `mate_equip_pack_items` in `FUN_395fbbc0` (SQL at `0x399f9490`) and reads them through
+//! `FUN_395ac760` from the item-use / equip validation `FUN_394e41f0` (`dll.c:1021538`). The
+//! call is gated on `(*(DAT_39b02294 + 0x1c) & 0x4000)`, which is the client's copy of the
+//! server FeatureSet: fset byte 9 bit 6 = feature 78 (`flag_9_6`). `DEFAULT_FSET[9] = 0x0c`
+//! leaves it clear, so the whitelist is off until the server enables the feature. The real data
+//! also contains 1058 group/item rows whose item slot the mate's own slot pack forbids (see
+//! PORTING.md).
 
 use std::collections::{HashMap, HashSet};
 
@@ -77,8 +77,12 @@ impl MateEquipmentData {
             return Ok(data);
         }
         for_each_row(conn, "SELECT * FROM mate_equip_slot_packs", [], |r| {
+            let id = r.i32_or("id", 0)?;
+            if id == 0 {
+                return Ok(()); // NULL / 0: not a pack id the client can select
+            }
             data.slot_packs.insert(
-                r.i32_or("id", 0)?,
+                id,
                 MateSlotPack {
                     // `'t'` / `'f'` text columns; NULL reads as false like the client.
                     head: r.bool_str("head")?,
@@ -169,7 +173,7 @@ mod tests {
     fn null_columns_and_pairs_are_tolerated() {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(
-            "             CREATE TABLE mate_equip_slot_packs (id, head, chest, waist, feet);
+            "CREATE TABLE mate_equip_slot_packs (id, head, chest, waist, feet);
              INSERT INTO mate_equip_slot_packs VALUES (NULL, NULL, NULL, NULL, NULL);
              CREATE TABLE mate_equip_packs (id);
              INSERT INTO mate_equip_packs VALUES (1);
@@ -182,8 +186,8 @@ mod tests {
         )
         .unwrap();
         let data = MateEquipmentData::load(&c).unwrap();
-        assert_eq!(data.slot_packs[&0], MateSlotPack::default());
-        assert!(!data.slot_packs[&0].allows(2));
+        assert!(data.slot_packs.is_empty());
+        assert!(!data.slot_packs.contains_key(&0));
         assert_eq!(data.pack_items[&500], HashSet::from([100_u32]));
         assert!(!data.pack_items.contains_key(&0));
     }
