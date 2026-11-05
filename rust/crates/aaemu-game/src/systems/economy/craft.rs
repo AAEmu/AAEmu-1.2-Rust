@@ -401,6 +401,27 @@ pub fn craft(server: &GameServer, player: &PlayerRef, craft_id: u32, count: i32,
         cancel_craft(server, player);
         return;
     };
+    // Recipe learning gate (`Crafting.RequireLearnedRecipes`, default off because retail 1.2
+    // enforcement is UNKNOWN): a craft with a learn source must be learned first.
+    if !super::craft_learning::craft_allowed(server, player, craft.id) {
+        tracing::debug!(
+            character = player.character_id,
+            craft_id = craft.id,
+            "craft refused: craft not learned"
+        );
+        // `craft_not_learned` (client error id 0x82 = 130, X2G:1136028) under
+        // `CraftCantActAnyMore`; the client resets its batch only on that pair.
+        error2(
+            &mut Out::Direct,
+            player,
+            error_message::CRAFT_CANT_ACT_ANY_MORE,
+            error_message::CRAFT_NOT_LEARNED,
+            0,
+            false,
+        );
+        cancel_craft(server, player);
+        return;
+    }
     let mgr = &server.systems.economy.craft;
     let char_id = player.character_id;
     mgr.update(char_id, |s| {

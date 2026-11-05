@@ -1762,8 +1762,8 @@ pub fn bind_slave(
         super::ship_physics::set_driver(server, &slave, true);
     }
     world.attach_child(&WorldObject::from(&slave), &me);
-    // TODO (C#): move to attach point's position (done for ship cannons only: their gunner
-    // stands behind the barrel; every other seat keeps the C# origin placement).
+    // Only a manned cannon moves its gunner behind the barrel; every other seat keeps the C#
+    // origin placement.
     let (sx, sy, sz) = if is_manned_cannon(server, &slave) {
         gunner_seat_offset(server, &slave, point)
     } else {
@@ -3543,7 +3543,10 @@ fn apply_slave_bonuses(server: &GameServer, obj: &WorldObject, template: &SlaveT
                 0,
                 Bonus {
                     template: b.clone(),
-                    value: b.value, // TODO (C#): using LinearLevelBonus
+                    // Every 1.2 `unit_modifiers` Slave row has `linear_level_bonus = 0` (pinned
+                    // by `real_slave_unit_modifiers_have_no_linear_level_bonus`), so the linear
+                    // level term cannot change this value with the shipped data.
+                    value: b.value,
                 },
             );
         }

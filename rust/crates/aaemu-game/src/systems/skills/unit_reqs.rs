@@ -261,6 +261,14 @@ pub fn validate(
             "skill_urk_target_combat",
             target_unit.and_then(|t| t.with_unit(|x| x.unit().is_in_battle)) == Some(false),
         ),
+        // `UnitReqsKindType.CanLearnCraft` (0x13): CraftId, must not have learned it. The C#
+        // branch was commented out (`UnitReqs.cs:96`, a2ab80abd^); the 1.2 data has 9 skills
+        // using it, all training skills for a gated craft. Deviation recorded in PORTING.md.
+        0x13 => ret_value(
+            "skill_urk_can_learn_craft",
+            v1,
+            player.is_some_and(|p| !p.data().learned_crafts.contains(&v1)),
+        ),
         0x14 => {
             let range = v2 as f32 / 1000.0;
             let o = super::geometry::Target::Obj(owner.clone());
