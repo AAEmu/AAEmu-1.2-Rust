@@ -1,8 +1,8 @@
 {
   "counts": {
     "sc_opcodes": 517,
-    "typeless": 77,
-    "never_sent": 49
+    "typeless": 73,
+    "never_sent": 51
   },
   "typeless": [
     "CSQuestAcceptConditionalPacket",
@@ -46,9 +46,6 @@
     "SCPlotProcessingTimePacket",
     "SCQuestListPacket",
     "SCQuestUnitReqFailedPacket",
-    "SCRaceCondPacket",
-    "SCRacingPacket",
-    "SCRacingResultPacket",
     "SCRestrictInfoPacket",
     "SCScheduledEventEndedPacket",
     "SCScheduledEventStartedPacket",
@@ -79,7 +76,6 @@
     "SCUnkPacket8",
     "SCWorldAABBPacket",
     "SCWorldAimPointPacket",
-    "SCWorldInteractionCanceledPacket",
     "SCWorldInteractionSkillListPacket",
     "SCWorldRayCastingResultPacket"
   ],
@@ -90,7 +86,6 @@
     "SCAchievementResetedPacket",
     "SCAddActionPointPacket",
     "SCBotSuspectArrestedPacket",
-    "SCChangeJuryVerdictCountPacket",
     "SCCharacterBoundPacket",
     "SCCharacterRenamedPacket",
     "SCCraftFailedPacket",
@@ -119,18 +114,21 @@
     "SCPlaytimePacket",
     "SCPremiumPointChangedPacket",
     "SCQuestMailSentPacket",
+    "SCRaceCondPacket",
+    "SCRacingPacket",
+    "SCRacingResultPacket",
     "SCRankAlarmPacket",
     "SCSearchListPacket",
     "SCSkillUpgradedPacket",
     "SCSpamReportedPacket",
     "SCSuspectGoingBotTrial",
-    "SCTrialCanceledPacket",
     "SCUnitBountyMoneyPacket",
     "SCUnitGmModeChangedPacket",
     "SCUnitLootingStatePacket",
     "SCUnitOfflinePacket",
     "SCUnknownPacket",
     "SCUnlockCurrencySlotPacket",
+    "SCWorldInteractionCanceledPacket",
     "SCWorldMessagePacket",
     "SCWorldQueuePacket"
   ]

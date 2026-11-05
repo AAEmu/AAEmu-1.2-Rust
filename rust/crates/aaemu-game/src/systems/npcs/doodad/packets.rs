@@ -82,6 +82,26 @@ impl Marshal for SCDoodadPhaseChangedPacket {
     }
 }
 
+/// `SCWorldInteractionCanceledPacket(interactedUnitId, interactedDoodadId)`: the 1.2 client
+/// cancels an in-progress doodad world interaction. Reader `FUN_397c6540` (`bc unitObjId`, then
+/// `u32 doodadObjId`; EVIDENCED, content research 1.4). The trigger is capture-pending
+/// (CAP-INT-1): nothing sends it yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SCWorldInteractionCanceledPacket {
+    pub unit_obj_id: u32,
+    pub doodad_obj_id: u32,
+}
+packet_def!(
+    SCWorldInteractionCanceledPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCWorldInteractionCanceledPacket
+);
+impl Marshal for SCWorldInteractionCanceledPacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_bc(self.unit_obj_id).write_u32(self.doodad_obj_id);
+    }
+}
+
 /// `SCDoodadSoundPacket(doodad, soundId)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SCDoodadSoundPacket {
@@ -562,6 +582,16 @@ mod tests {
         e.extend((-1i32).to_le_bytes());
         e.extend(27606u32.to_le_bytes());
         assert_eq!(body(&p), e);
+    }
+
+    #[test]
+    fn sc_world_interaction_canceled_bytes() {
+        let p = SCWorldInteractionCanceledPacket {
+            unit_obj_id: 0x123,
+            doodad_obj_id: 77,
+        };
+        assert_eq!(p.opcode(), sc::SCWorldInteractionCanceledPacket);
+        assert_eq!(body(&p), vec![0x23, 0x01, 0x00, 0x4d, 0x00, 0x00, 0x00]);
     }
 
     #[test]

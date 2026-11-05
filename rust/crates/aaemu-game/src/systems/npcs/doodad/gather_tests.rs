@@ -1108,3 +1108,114 @@ async fn real_compact_thinning_returns_old_trees_to_their_young_phase() {
         }
     }
 }
+
+// --- WP-K1: the authored gather chain of the apple tree (317) -------------------------------
+//
+// Compact shape: start group 90 (`DoodadFuncGrowth` 238 -> 2215), grown tree 2215 with
+// `DoodadFuncTimer` 434 (100 s -> 3277), fruiting tree 3277 (`DoodadFuncFruitPick` 27 ->
+// 3278), and 3278 (`DoodadFuncLootItem` 995, item 8036 x1-3 -> 2215). The old C# only
+// logged FruitPick, so picking an apple tree gave nothing and the phase never left 3277.
+// The fixture keeps the real groups and func ids but skips the start group's growth func
+// (its 30 s timer is covered by the same `DoodadFuncTimer` path the test exercises).
+
+const APPLE_TREE: u32 = 317;
+/// Grown tree, the group the loot returns to (`DoodadFuncTimer` 434 -> 3277).
+const APPLE_GROWN: u32 = 2215;
+/// Fruiting tree (`DoodadFuncFruitPick` 27 -> 3278).
+const APPLE_PICK: u32 = 3277;
+/// `DoodadFuncLootItem` 995 (8036 x1-3) -> 2215.
+const APPLE_LOOT: u32 = 3278;
+const LEMON: u32 = 8036;
+const APPLE_TIMER_MS: i32 = 100_000;
+const FRUIT_PICK_SKILL: u32 = 9102;
+const FRUIT_PICK_EFFECT: u32 = 900_003;
+
+fn fruit_chain_data() -> GameData {
+    let mut d = game_data();
+    d.items
+        .templates
+        .insert(LEMON, ItemTemplate::plain(LEMON, 100));
+
+    let s = &mut d.systems.skills;
+    s.add_effect(
+        EffectKind::InteractionEffect,
+        EffectTemplate::Interaction {
+            id: FRUIT_PICK_EFFECT,
+            world_interaction: 76, // WorldInteractionType.FruitPick
+            doodad_id: 0,
+        },
+        FRUIT_PICK_EFFECT,
+    );
+    let mut pick = crate::systems::skills::tests::skill_template(FRUIT_PICK_SKILL);
+    pick.target_type = SkillTargetType::Doodad as i32;
+    pick.effects
+        .push(crate::systems::skills::tests::skill_effect(
+            FRUIT_PICK_EFFECT,
+            EffectKind::InteractionEffect,
+            FRUIT_PICK_EFFECT,
+        ));
+    s.add_skill(pick);
+
+    let builder = DoodadBuilder {
+        data: std::mem::take(&mut d.systems.npcs.doodad),
+    };
+    d.systems.npcs.doodad = builder
+        .template(
+            APPLE_TREE,
+            &[(APPLE_GROWN, 2), (APPLE_PICK, 2), (APPLE_LOOT, 2)],
+        )
+        .phase_func(
+            APPLE_GROWN,
+            FuncTemplate::Timer(DoodadFuncTimer {
+                id: 434,
+                delay: APPLE_TIMER_MS,
+                next_phase: APPLE_PICK as i32,
+                ..DoodadFuncTimer::default()
+            }),
+        )
+        .func(
+            APPLE_PICK,
+            FuncTemplate::FruitPick(DoodadFuncFruitPick { id: 27 }),
+            APPLE_LOOT as i32,
+        )
+        .func(
+            APPLE_LOOT,
+            FuncTemplate::LootItem(DoodadFuncLootItem {
+                id: 995,
+                item_id: LEMON,
+                count_min: 1,
+                count_max: 3,
+                percent: 10_000,
+                ..DoodadFuncLootItem::default()
+            }),
+            APPLE_GROWN as i32,
+        )
+        .data;
+    d
+}
+
+#[tokio::test]
+async fn fruit_pick_advances_the_apple_tree_to_the_loot_group_and_back() {
+    let mut fx = fx_with(fruit_chain_data());
+    let d = fx.doodad(APPLE_TREE);
+    assert_eq!(d.data().func_group_id, APPLE_GROWN);
+    // The grown tree's authored timer makes it fruit after 100 s.
+    assert_eq!(fx.advance(APPLE_TIMER_MS as u64), 1);
+    assert_eq!(d.data().func_group_id, APPLE_PICK);
+
+    let frames = fx.cast(FRUIT_PICK_SKILL, &d);
+
+    assert!(
+        (1..=3).contains(&fx.count(LEMON)),
+        "no apple loot in {frames:?}"
+    );
+    assert_eq!(d.data().func_group_id, APPLE_GROWN);
+    assert!(
+        frames.iter().any(|f| f.0 == sc::SCDoodadPhaseChangedPacket),
+        "no phase packet in {frames:?}"
+    );
+
+    // The grown tree's timer makes it fruit again.
+    assert_eq!(fx.advance(APPLE_TIMER_MS as u64), 1);
+    assert_eq!(d.data().func_group_id, APPLE_PICK);
+}

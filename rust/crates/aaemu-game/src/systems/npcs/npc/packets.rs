@@ -393,6 +393,30 @@ impl ClientPacket for CSStartInteractionPacket {
                     );
                     return Ok(());
                 }
+                // The 1.2 client opens and keeps the NPC interaction window within 3.0 m of the
+                // target's shape (`FUN_393bef10` / `FUN_3932a3b0`, squared constant 9.0) but
+                // does not gate the send, so the server refuses a forged far interaction. The
+                // client gets nothing: no error message is evidenced.
+                if server.config.interaction.npc_reach_check {
+                    use crate::systems::skills::geometry::{distance_to, Target};
+                    let reach = crate::systems::npcs::config::NPC_INTERACTION_REACH_METERS
+                        + server.config.interaction.npc_reach_tolerance_meters;
+                    let distance = distance_to(
+                        server,
+                        &Target::Obj(WorldObject::from(&me)),
+                        &Target::Obj(WorldObject::from(&npc)),
+                        true,
+                    );
+                    if distance > reach {
+                        tracing::debug!(
+                            "StartInteraction refused: npc {} is {:.2} m away (reach {:.2} m)",
+                            self.npc_obj_id,
+                            distance,
+                            reach
+                        );
+                        return Ok(());
+                    }
+                }
                 // `npc.Template` is never null for a created NPC.
                 let npcs = &server.game_data.systems.npcs.npc;
                 let skills = npcs
@@ -898,6 +922,78 @@ mod tests {
             .unwrap();
         assert_eq!(pa.data().unit.current_interaction_object, 0);
         assert_eq!(pa.data().unit.current_target, 0x200);
+    }
+
+    /// The 1.2 client opens the NPC interaction window only within 3.0 m of the target's shape
+    /// (`FUN_393bef10` / `FUN_3932a3b0`); the server adds the configured tolerance (2.0 m by
+    /// default) and refuses farther requests silently.
+    #[tokio::test]
+    async fn start_interaction_refuses_an_npc_out_of_reach() {
+        use crate::test_support::*;
+        let server = test_server_with(super::super::manager::tests::npc_game_data());
+        let mut a = TestClient::new(&server, 1, 1001);
+        let pa = spawn_player(&server, &a, test_character(1, "Alpha", 100.0, 100.0), 0x100);
+        a.conn.active_char = Some(pa);
+        let npc = super::super::manager::create(&server, 0x200, 100).unwrap();
+        let world = server.world.world(0).unwrap();
+        world.spawn(&npc, &server.view_ctx());
+        a.drain();
+
+        let req = CSStartInteractionPacket {
+            npc_obj_id: 0x200,
+            obj_id: 0x100,
+            extra_info: 0,
+            pick_id: 0,
+            mouse_button: 1,
+            modifier_keys: 0,
+        };
+        for (x, accepted) in [(102.0, true), (104.5, true), (110.0, false)] {
+            npc.data().unit.transform.set_xyz(x, 100.0, 100.0);
+            req.handle(&server, &mut a.conn).await.unwrap();
+            let frames = a.drain();
+            assert_eq!(
+                !frames.is_empty(),
+                accepted,
+                "{x} m: expected accepted={accepted}, got {frames:?}"
+            );
+            assert!(
+                frames.is_empty()
+                    || frames
+                        .iter()
+                        .all(|(op, _)| *op == sc::SCNpcInteractionSkillListPacket),
+                "{x} m: unexpected packets {frames:?}"
+            );
+        }
+    }
+
+    /// `Interaction.NpcReachCheck: false` restores the old behaviour: no distance check.
+    #[tokio::test]
+    async fn start_interaction_reach_check_can_be_disabled() {
+        use crate::test_support::*;
+        let mut config = crate::config::AppConfig::default();
+        config.interaction.npc_reach_check = false;
+        let server = test_server_with_config(super::super::manager::tests::npc_game_data(), config);
+        let mut a = TestClient::new(&server, 1, 1001);
+        let pa = spawn_player(&server, &a, test_character(1, "Alpha", 100.0, 100.0), 0x100);
+        a.conn.active_char = Some(pa);
+        let npc = super::super::manager::create(&server, 0x200, 100).unwrap();
+        npc.data().unit.transform.set_xyz(110.0, 100.0, 100.0);
+        let world = server.world.world(0).unwrap();
+        world.spawn(&npc, &server.view_ctx());
+        a.drain();
+
+        CSStartInteractionPacket {
+            npc_obj_id: 0x200,
+            obj_id: 0x100,
+            extra_info: 0,
+            pick_id: 0,
+            mouse_button: 1,
+            modifier_keys: 0,
+        }
+        .handle(&server, &mut a.conn)
+        .await
+        .unwrap();
+        assert_eq!(a.drain_ops(), vec![sc::SCNpcInteractionSkillListPacket]);
     }
 
     #[tokio::test]
