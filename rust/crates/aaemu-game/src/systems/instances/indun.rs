@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::data::world_data::Zone;
-use crate::models::character::DEFAULT_INSTANCE_ID;
 use crate::server::GameServer;
 use crate::systems::social::team::Team;
 use crate::world::{PlayerRef, WorldInstance};
@@ -267,18 +266,10 @@ pub fn enter_selected_system_instance(
         return false;
     };
     let (world, d) = (live[index].0.clone(), live[index].1.clone());
-    // Set main world when requesting to exit the main world or if it was never set before
-    // (same rule as `DoodadFuncEnterSysInstance.Use`).
-    let (has_mwp, instance) = {
-        let c = p.data();
-        (
-            c.main_world_position.is_some(),
-            c.unit.transform.instance_id,
-        )
-    };
-    if !has_mwp || instance == DEFAULT_INSTANCE_ID {
-        p.data().main_world_position = Some(worlds::clone_detached(server, p));
-    }
+    // The channel pick has to leave the same main-world return point as the direct entrance
+    // (same condition), and it does so only after every check passed: a refused pick saves
+    // nothing.
+    worlds::ensure_main_world_position(server, p);
     let pending = ChannelSelectPending {
         zone_id: d.zone_instance_id.zone_id as i32,
         instance_id: inst_id,

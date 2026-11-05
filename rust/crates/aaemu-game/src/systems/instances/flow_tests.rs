@@ -1220,11 +1220,17 @@ async fn selecting_the_second_channel_loads_the_player_there_and_sends_0x207() {
     let _first = create_library(&server, 0).await;
     let second = create_library(&server, 1).await;
     let second_id = second.world_id().unwrap();
-    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    let mut a = Pc::new(&server, 1, "Alpha", 137.5, 88.0);
+    a.p.data().unit.transform.set_xyz(137.5, 88.0, 100.0);
     let doodad = spawn_sys_entrance(&server, 7457, 9001, 0xD002);
+    doodad.data().transform.set_xyz(137.5, 88.0, 100.0);
     use_sys_entrance(&server, &a.p, &doodad);
     let list = a.frames();
     assert!(list.iter().any(|(op, _)| *op == sc::SCUnkPacket15));
+    assert!(
+        a.p.data().main_world_position.is_none(),
+        "the dialog alone saves no return point"
+    );
 
     // CS 0x13d with the second row's instId loads the player into that instance.
     a.frame(
@@ -1249,6 +1255,7 @@ async fn selecting_the_second_channel_loads_the_player_there_and_sends_0x207() {
     assert_eq!(a.instance(), second_id);
     let mwp = a.p.data().main_world_position.expect("return point saved");
     assert_eq!((mwp.instance_id, mwp.zone_id), (0, TEST_ZONE));
+    assert_eq!((mwp.x, mwp.y, mwp.z), (137.5, 88.0, 100.0));
 
     // The channel was loaded already, so SC 0x207 follows SCLoadInstance directly: the zone
     // of the load, the instance and the 0-based index.
@@ -1307,6 +1314,59 @@ async fn selecting_a_channel_that_is_still_loading_sends_0x207_after_instance_lo
         f.contains(&(sc::SCUnkPacket16, expected)),
         "0x207 after load: {f:?}"
     );
+}
+
+#[tokio::test]
+async fn channel_select_saves_the_main_world_position_only_on_a_successful_pick() {
+    let server = library_server(library_data());
+    let _first = create_library(&server, 0).await;
+    let second = create_library(&server, 1).await;
+    let second_id = second.world_id().unwrap();
+    let mut a = Pc::new(&server, 1, "Alpha", 137.5, 88.0);
+    a.p.data().unit.transform.set_xyz(137.5, 88.0, 100.0);
+    let doodad = spawn_sys_entrance(&server, 7457, 9001, 0xD009);
+    doodad.data().transform.set_xyz(137.5, 88.0, 100.0);
+    // A return point from an earlier visit must survive a refused pick.
+    let sentinel = crate::models::transform::Transform {
+        instance_id: 0,
+        zone_id: TEST_ZONE,
+        x: -1.0,
+        y: -2.0,
+        z: -3.0,
+        ..Default::default()
+    };
+    a.p.data().main_world_position = Some(sentinel);
+    use_sys_entrance(&server, &a.p, &doodad);
+    a.frames();
+    assert_eq!(
+        a.p.data().main_world_position,
+        Some(sentinel),
+        "the dialog saves nothing"
+    );
+
+    // A refused pick (unknown doodad) leaves the saved position untouched.
+    a.frame(
+        &server,
+        cs::CSSelectSysInstanceChannelPacket,
+        &select_body(second_id, 0xDEAD),
+    )
+    .await;
+    a.frames();
+    assert_eq!(a.p.data().main_world_position, Some(sentinel));
+
+    // A successful pick replaces it with the pre-entry position: the player is still in the
+    // default instance, so the direct entrance's save rule applies.
+    a.frame(
+        &server,
+        cs::CSSelectSysInstanceChannelPacket,
+        &select_body(second_id, doodad.obj_id),
+    )
+    .await;
+    a.frames();
+    let mwp = a.p.data().main_world_position.expect("return point saved");
+    assert_eq!((mwp.instance_id, mwp.zone_id), (0, TEST_ZONE));
+    assert_eq!((mwp.x, mwp.y, mwp.z), (137.5, 88.0, 100.0));
+    assert_eq!(a.instance(), second_id);
 }
 
 #[tokio::test]

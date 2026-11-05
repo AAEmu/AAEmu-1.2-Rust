@@ -293,6 +293,23 @@ pub fn clone_detached(server: &GameServer, p: &PlayerRef) -> Transform {
     clone
 }
 
+/// `Character.MainWorldPosition` save of the instance entry paths: `MainWorldPosition =
+/// Transform.CloneDetached(character)` when it was never set or the player is still in the
+/// default instance (the C# rule `DoodadFuncEnterInstance` / `DoodadFuncEnterSysInstance` and
+/// the system-dungeon channel pick share).
+pub fn ensure_main_world_position(server: &GameServer, p: &PlayerRef) {
+    let (has_mwp, instance) = {
+        let c = p.data();
+        (
+            c.main_world_position.is_some(),
+            c.unit.transform.instance_id,
+        )
+    };
+    if !has_mwp || instance == DEFAULT_INSTANCE_ID {
+        p.data().main_world_position = Some(clone_detached(server, p));
+    }
+}
+
 /// `character.Transform.ApplyWorldSpawnPosition(wsp, newInstanceId)`. Note (C#): the rotation
 /// is stored as given (degrees from `world_spawns.json`) and the `ZoneId` setter fires
 /// `OnZoneChange(old, new)`; both mirrored (the zone change, the instance membership and the

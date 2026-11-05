@@ -164,13 +164,6 @@ fn quaternion_inverse(q: Quaternion) -> Quaternion {
     }
 }
 
-/// Saves the return point in the main world (`MainWorldPosition =
-/// Transform.CloneDetached(character)`).
-fn save_main_world_position(server: &crate::server::GameServer, player: &crate::world::PlayerRef) {
-    let t = crate::systems::instances::worlds::clone_detached(server, player);
-    player.data().main_world_position = Some(t);
-}
-
 /// `DoodadFuncEnterInstance.Use`.
 pub fn enter_instance(
     f: &DoodadFuncEnterInstance,
@@ -194,16 +187,7 @@ pub fn enter_instance(
     {
         return;
     }
-    let (has_mwp, instance) = {
-        let c = player.data();
-        (
-            c.main_world_position.is_some(),
-            c.unit.transform.instance_id,
-        )
-    };
-    if !has_mwp || instance == crate::models::character::DEFAULT_INSTANCE_ID {
-        save_main_world_position(server, player);
-    }
+    crate::systems::instances::worlds::ensure_main_world_position(server, player);
     crate::systems::instances::indun::request_dungeon_instance(server, player, f.zone_id, 0);
 }
 
@@ -253,16 +237,7 @@ pub fn enter_sys_instance(
         }
     }
     // Set main world when requesting to exit the main world or if it was never set before
-    let (has_mwp, instance) = {
-        let c = player.data();
-        (
-            c.main_world_position.is_some(),
-            c.unit.transform.instance_id,
-        )
-    };
-    if !has_mwp || instance == crate::models::character::DEFAULT_INSTANCE_ID {
-        save_main_world_position(server, player);
-    }
+    crate::systems::instances::worlds::ensure_main_world_position(server, player);
     let _ = crate::systems::instances::indun::request_system_instance(server, player, f.zone_id, 0);
 }
 

@@ -1173,7 +1173,10 @@ Rules (all **INFERRED** from the client decompile; no 1.2-server capture):
   `select_channel`, and `instId` is a live instance of that zone group (any live instance, also
   one created after the list was sent). Unknown / stale ids are ignored. The player is queued
   into the instance through the normal `QueuePlayer` / `SCLoadInstance` flow, so a full instance
-  answers the normal `INSTANCE_QUOTA` (471) error.
+  answers the normal `INSTANCE_QUOTA` (471) error. Both entrance paths save the same
+  `MainWorldPosition` (`ensure_main_world_position`: when it was never set or the player is still
+  in the default instance); the pick saves it after every check, so a refused pick (bad doodad,
+  out of reach, non-selective, stale id) leaves an existing return point untouched.
 * SC 0x207 `{i32 zoneId, u32 instanceId, i32 instanceIndex}` (reader `FUN_397b03b0`) answers the
   pick with the zone the load sent (`SCLoadInstance.zoneId`, the dungeon zone key), the world
   instance id and the 0-based index. It is sent directly after `SCLoadInstance` when the channel
