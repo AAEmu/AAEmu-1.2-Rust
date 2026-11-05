@@ -55,7 +55,13 @@ pub fn current_period(server: &GameServer, zone_group_id: u32) -> Option<u8> {
     let now = server.systems.housing.calendar.now();
     Some(
         calendar
-            .view_at(zone_group_id, now, &settings.timezone, false)
+            .view_for_declaration(
+                zone_group_id,
+                now,
+                &settings.timezone,
+                state.declared_cycle(),
+                0,
+            )
             .map_or(calendar::PERIOD_PEACE, |view| view.period),
     )
 }

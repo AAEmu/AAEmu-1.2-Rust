@@ -4408,6 +4408,42 @@ and in NPC wandering / buff remaining times.
   20:30..22:30 times never hit one); `view_at` returns None for the whole zone when its next
   rotation cycle cannot be built; and without WP-S2 (declaration) the calendar never enters
   warmup/siege on its own, so periods 3/4 exist only through an explicit GM schedule.
+* systems::housing / systems::social (WP-SD2a, 2026-11-06): the siege declaration is now
+  persistent state, and the weekly calendar hands it over to the explicit siege record at the
+  cycle's warmup start. `DominionState.declaration` holds the attacker expedition, the
+  accepted time, the cycle's `auction_start` and the camp position; at most one declaration
+  exists per zone and cycle (a second one is `DominionError::AlreadyDeclared` /
+  `DeclaredByOther`, mapped by the caller to client 442/443). It is persisted in the new
+  `dominions.declaration_attacker/at/cycle/hq_x/hq_y/hq_z` columns (the doodad obj id is
+  runtime-only and re-bound after a restart). The declaration is cleared by cancel, by a
+  capture or forced release, and when its cycle's warmup materialises it. The calendar reads
+  `Calendar::view_for_declaration`: a declaration of the running cycle keeps the authored
+  2 -> 3 -> 4 -> 5 walk (`FUN_392f7db0`); a declaration from another cycle changes nothing.
+  At warmup the record is created with the cycle's real `warmup/siege` start and siege end
+  (not `now + delay`), with the defender's authored `siege_settings` limits frozen in; the
+  announcement is `SCSiegeDeclared` (offense team) followed by the phase `SCSiegeState`. A
+  calendar-materialised record stays described by the calendar (the GM test clock walks its
+  periods; the authority tick uses the calendar clock for it, which equals the real clock in
+  production), while a GM `/dominion schedule` keeps its own timers and overrides. A
+  declaration whose expedition disbands, or that is still pending when warmup/siege/peace
+  passes, is dropped and announced with a zero offense team (`SCSiegeDeclared`), the
+  client's "nobody declared" state (INFERRED: the client's cancel path is the zero team,
+  `FUN_392f7cc0`; the disband/owner-change drop is INFERRED, low risk). On restart a
+  declaration older than one cycle (7 days) is discarded. **Assumption (capture-pending):**
+  the attacker `ni/nr/limit` in the declaration snapshot use the only evidenced cap, the
+  defender `siege_settings` row's `num_defenders + num_reinforcements` (siege.md 1.3 says
+  the attacker's values are UNKNOWN). The declaration route (camp use) is WP-SD2b; the
+  cancel trigger's UI and the defense HQ offset are WP-SD2b/SD2c. Tests:
+  `second_declaration_is_refused_for_self_and_other_expeditions`,
+  `cancel_clears_only_the_declaring_expedition`,
+  `materialisation_creates_exactly_one_siege_with_the_cycle_times`,
+  `a_declaration_requires_an_owned_territory_and_never_coexists_with_a_live_siege`,
+  `release_expedition_drops_a_declaration_it_attacked_or_accepted`,
+  `a_declaration_of_the_running_cycle_keeps_the_warmup_and_siege_walk`,
+  `calendar_snapshot_carries_a_matching_declaration_and_zero_team_after_cancel`,
+  `declaration_materialises_at_warmup_and_the_calendar_walks_periods_three_to_five`,
+  `dominion_declaration_round_trips_through_its_row` (MySQL),
+  `a_declaration_that_cannot_belong_to_a_running_cycle_is_discarded_on_restart`.
 * systems::housing (siege result achievements, WP-SD6a, 2026-11-05): a finished siege credits
   `char_records` kinds 57/59 to the attacking roster and 58/60 to the defenders with
   `value1 = zone_group_id` (mapping EVIDENCED from the authored records and the Korean

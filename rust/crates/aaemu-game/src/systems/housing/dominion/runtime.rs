@@ -834,10 +834,13 @@ impl CalendarRuntime {
                 periods.remove(&zone);
                 continue;
             }
-            let explicit = state
-                .siege
-                .as_ref()
-                .filter(|siege| siege.status != SiegeStatus::Finished && real_now < siege.ends_at);
+            let explicit = state.siege.as_ref().filter(|siege| {
+                siege.status != SiegeStatus::Finished
+                    && real_now < siege.ends_at
+                    // A calendar declaration keeps describing its cycle; only a GM schedule
+                    // owns its own timers (WP-SD2a).
+                    && !siege.materialised_from_declaration
+            });
             let period = if let Some(siege) = explicit {
                 if siege.active_at(real_now) {
                     PERIOD_SIEGE
@@ -852,11 +855,11 @@ impl CalendarRuntime {
                 } else {
                     0
                 };
-                let Some(view) = calendar.view_at_protected(
+                let Some(view) = calendar.view_for_declaration(
                     zone,
                     now,
                     &settings.timezone,
-                    false,
+                    state.declared_cycle(),
                     siege_not_before,
                 ) else {
                     continue;
@@ -896,12 +899,13 @@ pub fn tick_once(server: &GameServer) {
             .lock()
             .expect("housing poisoned");
         let real_now = chrono::Utc::now().timestamp();
+        let calendar_now = server.systems.housing.calendar.now();
         let mut finished = Vec::new();
         for state in server
             .systems
             .housing
             .dominions
-            .tick(real_now)
+            .tick_dual(real_now, calendar_now)
             .unwrap_or_else(|e| {
                 tracing::error!("Dominion tick: {e}");
                 Vec::new()
@@ -923,7 +927,8 @@ pub fn tick_once(server: &GameServer) {
         super::reinforce::tick(server, real_now);
         // Calendar phases. Broadcasts above (and those outside the tick) record the period they
         // sent, so only a period that was not announced yet produces a transition here.
-        let calendar_now = server.systems.housing.calendar.now();
+        // WP-SD2a: an accepted declaration becomes the cycle's siege at the warmup boundary.
+        super::declare::tick(server, calendar_now);
         for transition in server.systems.housing.calendar.tick(server, calendar_now) {
             tracing::debug!(
                 "Dominion {} siege period {} -> {}",

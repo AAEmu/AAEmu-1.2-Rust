@@ -60,11 +60,11 @@ fn calendar_view(server: &GameServer, state: &DominionState) -> Option<calendar:
         0
     };
     calendar::SiegeCalendar::from_castles(&server.game_data.systems.housing.castles)
-        .view_at_protected(
+        .view_for_declaration(
             state.zone_group_id,
             server.systems.housing.calendar.now(),
             &settings.timezone,
-            false,
+            state.declared_cycle(),
             siege_not_before,
         )
 }
@@ -121,14 +121,12 @@ pub fn broadcast_participant_changes(
     }
 }
 
-/// The offense declaration notification for a newly accepted explicit siege schedule.
+/// The offense declaration notification (a zero team means "nobody declared", the cancel
+/// result the client understands).
 pub fn broadcast_siege_declared(server: &GameServer, state: &DominionState) {
     let Some(data) = snapshot(server, state, Utc::now().timestamp()) else {
         return;
     };
-    if data.siege_timers.unk2_data.id == 0 {
-        return;
-    }
     server.world.broadcast_to_server(&SCSiegeDeclaredPacket {
         id: data.zone_id,
         offense: data.siege_timers.unk2_data,
@@ -224,11 +222,19 @@ pub fn snapshot(server: &GameServer, state: &DominionState, now: i64) -> Option<
         siege_period: if state.owner_expedition_id == 0 { 0 } else { 5 },
         ..Default::default()
     };
-    if let Some(siege) = state
-        .siege
-        .as_ref()
-        .filter(|s| s.status != SiegeStatus::Finished && now < s.ends_at)
-    {
+    let calendar_authoritative = server
+        .systems
+        .housing
+        .calendar
+        .settings(&server.config.housing)
+        .enabled;
+    if let Some(siege) = state.siege.as_ref().filter(|s| {
+        s.status != SiegeStatus::Finished
+            && now < s.ends_at
+            // A calendar declaration keeps describing its cycle; only a GM schedule owns
+            // its own timers (WP-SD2a).
+            && !(s.materialised_from_declaration && calendar_authoritative)
+    }) {
         // An explicit GM schedule overrides the calendar for this territory. The five native
         // duration slots are auction, declare, warmup, siege and peace, in seconds.
         timers.durations = [
@@ -314,6 +320,67 @@ pub fn snapshot(server: &GameServer, state: &DominionState, now: i64) -> Option<
                 timers.unk_data.x = hq.position.x;
                 timers.unk_data.y = hq.position.y;
                 timers.unk_data.z = hq.position.z;
+            }
+            // An accepted declaration of this cycle is the offense team (WP-SD2a). Once the
+            // warmup materialised it, the record carries the same teams and roster.
+            let declaration = state.declaration.filter(|d| {
+                view.cycle
+                    .is_some_and(|c| c.auction_start == d.cycle_auction_start)
+            });
+            let calendar_siege = state.siege.as_ref().filter(|siege| {
+                siege.materialised_from_declaration
+                    && siege.status != SiegeStatus::Finished
+                    && now < siege.ends_at
+            });
+            if let Some(declaration) = declaration {
+                timers.unk2_data.id = declaration.attacker_expedition_id;
+                timers.unk2_data.obj_id = declaration.hq_obj_id;
+                timers.unk2_data.x = declaration.hq_x;
+                timers.unk2_data.y = declaration.hq_y;
+                timers.unk2_data.z = declaration.hq_z;
+                // The attacker cap is UNKNOWN (siege.md 1.3); the only evidenced total is the
+                // defender row's `num_defenders + num_reinforcements`, used for both teams.
+                let limit = reinforce::limits(server, state.owner_expedition_id)
+                    .unwrap_or(crate::systems::housing::dominion::SiegeLimits::NATIVE)
+                    .nr;
+                timers.unk2_data.ni = limit;
+                timers.unk2_data.nr = limit;
+                timers.unk2_data.limit = limit;
+            } else if let Some(siege) = calendar_siege {
+                timers.unk2_data.id = siege.attacker_expedition_id;
+                if let Some(hq) =
+                    server
+                        .systems
+                        .housing
+                        .headquarters
+                        .snapshot(server, state, SiegeSide::Attacker)
+                {
+                    timers.unk2_data.obj_id = hq.obj_id;
+                    timers.unk2_data.x = hq.position.x;
+                    timers.unk2_data.y = hq.position.y;
+                    timers.unk2_data.z = hq.position.z;
+                }
+                let pending = siege.defender_nr > siege.defender_ni && !siege.reinforced;
+                timers.unk_data.ni = siege.defender_ni;
+                timers.unk_data.nr = siege.defender_nr;
+                timers.unk_data.limit = if pending {
+                    siege.defender_ni
+                } else {
+                    siege.defender_nr
+                };
+                timers.unk2_data.ni = siege.defender_nr;
+                timers.unk2_data.nr = siege.defender_nr;
+                timers.unk2_data.limit = siege.defender_nr;
+                for participant in siege.participants.values() {
+                    let team = match participant.side {
+                        SiegeSide::Defender => &mut timers.unk_data,
+                        SiegeSide::Attacker => &mut timers.unk2_data,
+                    };
+                    team.unk_ids.push(participant.character_id);
+                }
+                if timers.unk_data.unk_ids.len() > 100 || timers.unk2_data.unk_ids.len() > 100 {
+                    return None;
+                }
             }
         }
     }
@@ -1710,6 +1777,8 @@ mod authority_tests {
             defender_ni: 100,
             defender_nr: 100,
             outcome_credited: false,
+            materialised_from_declaration: false,
+            calendar_cycle: 0,
             participants: BTreeMap::from([
                 (
                     1,
@@ -3239,6 +3308,138 @@ mod authority_tests {
         calendar.set_clock(Some(warmup + 1));
         crate::systems::housing::dominion::runtime::tick_once(&f.server);
         assert!(f.client.drain().is_empty());
+    }
+
+    #[tokio::test]
+    async fn calendar_snapshot_carries_a_matching_declaration_and_zero_team_after_cancel() {
+        let mut f = fixture();
+        enable_calendar(&f);
+        owned(&f);
+        let auction = kst(2014, 1, 8, 22, 30);
+        let declare = kst(2014, 1, 10, 22, 30);
+        let state = f
+            .server
+            .systems
+            .housing
+            .dominions
+            .declare(ZONE, 88, auction, declare + 60, 0x4321, (10.0, 20.0, 30.0))
+            .unwrap();
+        f.server
+            .systems
+            .housing
+            .calendar
+            .set_clock(Some(declare + 60));
+        let data = snapshot(&f.server, &state, Utc::now().timestamp()).unwrap();
+        assert_eq!(data.siege_timers.siege_period, 2);
+        let offense = &data.siege_timers.unk2_data;
+        assert_eq!(
+            (offense.id, offense.obj_id),
+            (88, 0x4321),
+            "the declaration is the offense team"
+        );
+        assert_eq!((offense.x, offense.y, offense.z), (10.0, 20.0, 30.0));
+        assert_eq!((offense.ni, offense.nr, offense.limit), (100, 100, 100));
+
+        broadcast_siege_declared(&f.server, &state);
+        let packets = f.client.drain();
+        let mut expected = PacketStream::new();
+        expected.write_u16(ZONE as u16);
+        expected.write(&DominionUnkData {
+            id: 88,
+            obj_id: 0x4321,
+            x: 10.0,
+            y: 20.0,
+            z: 30.0,
+            ni: 100,
+            nr: 100,
+            limit: 100,
+            unk_ids: Vec::new(),
+        });
+        assert_eq!(packets[0].0, sc::SCSiegeDeclaredPacket);
+        assert_eq!(packets[0].1, expected.into_bytes());
+
+        // Cancelling announces the zero team the client reads as "nobody declared".
+        let cancelled = f
+            .server
+            .systems
+            .housing
+            .dominions
+            .cancel_declaration(ZONE, 88)
+            .unwrap();
+        assert!(cancelled.declaration.is_none());
+        broadcast_siege_declared(&f.server, &cancelled);
+        let packets = f.client.drain();
+        assert_eq!(packets[0].0, sc::SCSiegeDeclaredPacket);
+        assert_eq!(
+            &packets[0].1[..7],
+            &[ZONE as u8, 0, 0, 0, 0, 0, 0],
+            "a canceled declaration has a zero offense team"
+        );
+    }
+
+    #[tokio::test]
+    async fn declaration_materialises_at_warmup_and_the_calendar_walks_periods_three_to_five() {
+        let mut f = fixture();
+        enable_calendar(&f);
+        owned(&f);
+        let auction = kst(2014, 1, 8, 22, 30);
+        let declare = kst(2014, 1, 10, 22, 30);
+        let warmup = kst(2014, 1, 12, 20, 30);
+        let siege = kst(2014, 1, 12, 21, 0);
+        let siege_end = kst(2014, 1, 12, 22, 30);
+        f.server.expeditions.add(Expedition {
+            faction: SystemFaction {
+                id: 88,
+                ..Default::default()
+            },
+            members: Vec::new(),
+            policies: Vec::new(),
+            removed_members: Vec::new(),
+            is_disbanded: false,
+        });
+        f.server
+            .systems
+            .housing
+            .dominions
+            .declare(ZONE, 88, auction, declare + 60, 0x4321, (10.0, 20.0, 30.0))
+            .unwrap();
+        let calendar = &f.server.systems.housing.calendar;
+        calendar.set_clock(Some(declare + 60));
+        crate::systems::housing::dominion::runtime::tick_once(&f.server);
+        f.client.drain();
+
+        calendar.set_clock(Some(warmup));
+        crate::systems::housing::dominion::runtime::tick_once(&f.server);
+        let materialised = f.server.systems.housing.dominions.get(ZONE).unwrap();
+        let record = materialised.siege.as_ref().expect("siege record");
+        assert_eq!((record.starts_at, record.ends_at), (siege, siege_end));
+        assert!(record.materialised_from_declaration);
+        assert_eq!(record.calendar_cycle, auction);
+        assert_eq!(
+            (record.attacker_expedition_id, record.defender_expedition_id),
+            (88, EXPEDITION)
+        );
+        assert!(materialised.declaration.is_none());
+        let packets = f.client.drain();
+        assert!(packets.iter().any(|p| p.0 == sc::SCSiegeDeclaredPacket));
+        let states: Vec<_> = packets
+            .iter()
+            .filter(|p| p.0 == sc::SCSiegeStatePacket)
+            .collect();
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].1[60], 3);
+
+        for (now, period) in [(siege, 4), (siege_end, 5)] {
+            calendar.set_clock(Some(now));
+            crate::systems::housing::dominion::runtime::tick_once(&f.server);
+            let packets = f.client.drain();
+            let states: Vec<_> = packets
+                .iter()
+                .filter(|p| p.0 == sc::SCSiegeStatePacket)
+                .collect();
+            assert_eq!(states.len(), 1, "one SCSiegeState at period {period}");
+            assert_eq!(states[0].1[60], period);
+        }
     }
 
     #[tokio::test]
