@@ -1548,6 +1548,8 @@ impl DoodadData {
                     almighty: r.u32("doodad_almighty_id")?,
                     group_kind_id: r.u32("doodad_func_group_kind_id")?,
                     sound_id: r.u32_or("sound_id", 0)?,
+                    phase_msg: r.string_or("phase_msg", "")?,
+                    is_msg_to_zone: r.bool_str("is_msg_to_zone")?,
                     model: Some(r.string_or("model", "")?),
                 };
                 if let Some(template) = self.templates.get_mut(&group.almighty) {
@@ -1673,6 +1675,8 @@ impl DoodadData {
                 almighty: r.u32("doodad_almighty_id")?,
                 group_kind_id: r.u32("doodad_func_group_kind_id")?,
                 sound_id: r.u32_or("sound_id", 0)?,
+                phase_msg: r.string_or("phase_msg", "")?,
+                is_msg_to_zone: r.bool_str("is_msg_to_zone")?,
                 model: None,
             };
             if self.all_func_groups_index.contains_key(&group.id) {
@@ -2368,8 +2372,8 @@ mod tests {
     fn partial_load_from_sqlite() {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(
-            "CREATE TABLE doodad_func_groups (id INT, model TEXT, doodad_almighty_id INT, doodad_func_group_kind_id INT, sound_id INT);
-             INSERT INTO doodad_func_groups VALUES (11, 'm', 2, 2, NULL), (10, 'm', 2, 1, 5), (12, 'm', 1, 1, NULL), (10, 'dup', 1, 1, NULL);
+            "CREATE TABLE doodad_func_groups (id INT, model TEXT, doodad_almighty_id INT, doodad_func_group_kind_id INT, sound_id INT, phase_msg TEXT, is_msg_to_zone TEXT);
+             INSERT INTO doodad_func_groups VALUES (11, 'm', 2, 2, NULL, NULL, 'f'), (10, 'm', 2, 1, 5, 'door opened', 't'), (12, 'm', 1, 1, NULL, '  ', NULL), (10, 'dup', 1, 1, NULL, NULL, NULL);
              CREATE TABLE doodad_funcs (id INT, doodad_func_group_id INT, actual_func_id INT, actual_func_type TEXT, next_phase INT, sound_id INT, func_skill_id INT, perm_id INT, act_count INT);
              INSERT INTO doodad_funcs VALUES (2, 10, 9, 'DoodadFuncFakeUse', NULL, NULL, NULL, 1, NULL), (1, 10, 3, 'DoodadFuncCoffer', 11, 4, 77, 0, 2);
              CREATE TABLE doodad_func_coffers (id INT, capacity INT);
@@ -2448,6 +2452,14 @@ mod tests {
         assert_eq!(d.func_groups_ids(2), [11, 10]);
         assert!(d.doodad_func_groups(2).iter().all(|g| g.model.is_none()));
         assert_eq!(d.func_group(10).unwrap().sound_id, 5);
+        // phase_msg / is_msg_to_zone: NULL tolerant, `'t'`/`'f'` decoded like the other text flags.
+        let g10 = d.func_group(10).unwrap();
+        assert_eq!(g10.phase_msg, "door opened");
+        assert!(g10.is_msg_to_zone);
+        assert_eq!(d.func_group(11).unwrap().phase_msg, "");
+        assert!(!d.func_group(11).unwrap().is_msg_to_zone);
+        assert_eq!(d.func_group(12).unwrap().phase_msg, "  ");
+        assert!(!d.func_group(12).unwrap().is_msg_to_zone);
         // Coffer template through doodad_funcs -> phase template.
         let t2 = d.template(2).unwrap();
         assert_eq!(t2.coffer_capacity, Some(150));
@@ -2521,6 +2533,20 @@ mod tests {
         assert!(d.func_templates["DoodadFuncBankUi"].is_empty());
         assert_eq!(d.templates.len(), count(&c, "doodad_almighties"));
         assert_eq!(d.all_func_groups.len(), count(&c, "doodad_func_groups"));
+        // WP-UI1: the authored phase messages (research evidence: 160 groups, 29 of them
+        // zone-wide on 5 templates).
+        let phase_msgs = d
+            .all_func_groups
+            .iter()
+            .filter(|g| !g.phase_msg.trim().is_empty())
+            .count();
+        assert_eq!(phase_msgs, 160);
+        let zone_msgs = d
+            .all_func_groups
+            .iter()
+            .filter(|g| g.is_msg_to_zone && !g.phase_msg.trim().is_empty())
+            .count();
+        assert_eq!(zone_msgs, 29);
         assert_eq!(d.funcs_by_id.len(), count(&c, "doodad_funcs"));
         let n_funcs: usize = d.funcs_by_groups.values().map(Vec::len).sum();
         assert_eq!(n_funcs, count(&c, "doodad_funcs"));

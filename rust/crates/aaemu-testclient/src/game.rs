@@ -603,6 +603,8 @@ pub struct GameState {
     pub doodads: HashMap<u32, DoodadInfo>,
     /// `SCDoodadCompleteQuestPacket` (`0x14d`) in arrival order: `(doodad object id, quest id)`.
     pub doodad_complete_quests: Vec<(u32, u32)>,
+    /// `SCDoodadPhaseMsgPacket` (`0x157`) in arrival order: `(doodad object id, func group id)`.
+    pub doodad_phase_msgs: Vec<(u32, u32)>,
     /// First item of the bag (`SCCharacterInvenContentsPacket`, slot type 2): `(item id, slot)`.
     pub bag_items: Vec<(u64, u8, u32)>,
     pub bag_slots: u8,
@@ -808,6 +810,10 @@ impl GameState {
             let doodad_obj_id = s.read_bc()?;
             let quest_id = s.read_u32()?;
             st.doodad_complete_quests.push((doodad_obj_id, quest_id));
+        } else if p.is_sc(sc::SCDoodadPhaseMsgPacket) {
+            let doodad_obj_id = s.read_bc()?;
+            let func_group_id = s.read_u32()?;
+            st.doodad_phase_msgs.push((doodad_obj_id, func_group_id));
         } else if p.is_sc(sc::SCUnitsRemovedPacket) {
             let n = s.read_u16()?;
             for _ in 0..n {
@@ -1763,6 +1769,32 @@ mod doodad_complete_quest_tests {
             })
             .unwrap();
         assert_eq!(state.doodad_complete_quests, vec![(0x300, 2563)]);
+    }
+}
+
+#[cfg(test)]
+mod doodad_phase_msg_tests {
+    use super::*;
+    use aaemu_commons::Marshal;
+    use aaemu_game::systems::npcs::doodad::packets::SCDoodadPhaseMsgPacket;
+
+    #[test]
+    fn observe_records_the_doodad_object_id_and_func_group_id() {
+        let mut state = GameState::default();
+        let mut body = PacketStream::new();
+        SCDoodadPhaseMsgPacket {
+            doodad_obj_id: 0x300,
+            func_group_id: 3333,
+        }
+        .write(&mut body);
+        state
+            .observe(&Packet {
+                level: LEVEL_GAME,
+                opcode: sc::SCDoodadPhaseMsgPacket,
+                body: body.into_bytes(),
+            })
+            .unwrap();
+        assert_eq!(state.doodad_phase_msgs, vec![(0x300, 3333)]);
     }
 }
 
