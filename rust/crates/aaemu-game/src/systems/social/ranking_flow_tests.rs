@@ -146,7 +146,11 @@ fn pc(server: &GameServer, id: u32, name: &str) -> Pc {
 }
 
 fn fixture() -> (Arc<GameServer>, Pc, Pc, Pc) {
-    let server = Arc::new(test_server_with(game_data()));
+    fixture_with(game_data())
+}
+
+fn fixture_with(data: GameData) -> (Arc<GameServer>, Pc, Pc, Pc) {
+    let server = Arc::new(test_server_with(data));
     server.set_self();
     let a = pc(&server, 1, "Alpha");
     let b = pc(&server, 2, "Bravo");
@@ -209,6 +213,99 @@ async fn an_event_scores_only_the_boards_it_belongs_to() {
     };
     assert_eq!(ranking.record(&server, &a.p, catch, 77, now), 0);
     assert_eq!(ranking.record(&server, &a.p, catch, 49, now), 1);
+}
+
+#[tokio::test]
+async fn board_alarms_go_to_every_online_character_once_per_contest() {
+    // The shipped fishing shape, moved into 2024: Saturday 20:00-22:00, weekly, a start alarm
+    // five minutes before the contest and the end alarm on its end.
+    let mut data = game_data();
+    {
+        let board = data
+            .systems
+            .social
+            .ranking
+            .ranks
+            .iter_mut()
+            .find(|board| board.id == FISH_LENGTH)
+            .expect("fishing board");
+        board.day_of_week_id = day_of_week::SATURDAY;
+        board.start_time = 20;
+        board.end_time = 22;
+        board.start_time_alarm = -5;
+        board.start_time_alarm_msg = "The contest starts soon.".into();
+        board.end_time_alarm_msg = "The contest has ended.".into();
+    }
+    let (server, mut a, mut b, mut c) = fixture_with(data);
+    let ranking = &server.systems.social.ranking;
+
+    // Nothing is due outside the alarm minutes.
+    assert_eq!(
+        ranking.send_due_alarms(
+            &server,
+            ts("2024-01-06 19:00:00"),
+            ts("2024-01-06 19:01:00")
+        ),
+        0
+    );
+    assert!(a.c.drain().is_empty());
+
+    // 19:55 (five minutes before the contest) is crossed: every online character is told with
+    // kind 0.
+    assert_eq!(
+        ranking.send_due_alarms(
+            &server,
+            ts("2024-01-06 19:54:30"),
+            ts("2024-01-06 19:55:00")
+        ),
+        1
+    );
+    let mut start = FISH_LENGTH.to_le_bytes().to_vec();
+    start.push(0);
+    for p in [&mut a, &mut b, &mut c] {
+        let frames = p.c.drain();
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert_eq!(frames[0].0, sc::SCRankAlarmPacket);
+        assert_eq!(frames[0].1, start);
+    }
+
+    // The same crossing reported by a retried tick must not send again.
+    assert_eq!(
+        ranking.send_due_alarms(
+            &server,
+            ts("2024-01-06 19:54:30"),
+            ts("2024-01-06 19:55:00")
+        ),
+        0
+    );
+    assert!(a.c.drain().is_empty());
+
+    // 22:00 is the contest end: kind 1.
+    assert_eq!(
+        ranking.send_due_alarms(
+            &server,
+            ts("2024-01-06 21:59:30"),
+            ts("2024-01-06 22:00:00")
+        ),
+        1
+    );
+    let frames = a.c.drain();
+    assert_eq!(frames.len(), 1, "{frames:?}");
+    assert_eq!(frames[0].0, sc::SCRankAlarmPacket);
+    let mut end = FISH_LENGTH.to_le_bytes().to_vec();
+    end.push(1);
+    assert_eq!(frames[0].1, end);
+
+    // The next Saturday is a new period: the start alarm is due again.
+    assert_eq!(
+        ranking.send_due_alarms(
+            &server,
+            ts("2024-01-13 19:54:30"),
+            ts("2024-01-13 19:55:00")
+        ),
+        1
+    );
+    assert_eq!(a.c.drain().len(), 1);
 }
 
 #[tokio::test]
