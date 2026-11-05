@@ -461,9 +461,15 @@ cs_packet!(
         Ok(Self { id, x, y, z, z_rot, design_item, aabb, auto_use_aa_point })
     }
     handle |self, server, conn| {
-        tracing::warn!(
-            "CreateShipyard, Id: {}, X: {}, Y: {}, Z: {}, DesignItem: {}",
-            self.id, self.x, self.y, self.z, self.design_item
+        tracing::debug!(
+            "CreateShipyard, Id: {}, X: {}, Y: {}, Z: {}, DesignItem: {}, AABB: {:?}, AutoUseAAPoint: {}",
+            self.id,
+            self.x,
+            self.y,
+            self.z,
+            self.design_item,
+            self.aabb,
+            self.auto_use_aa_point
         );
         // `Connection.ActiveChar` null throws in `Create` (only this packet ends).
         let p = active_char!(conn);

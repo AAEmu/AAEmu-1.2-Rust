@@ -195,6 +195,7 @@ async fn private_lobby_pool() -> Option<sqlx::MySqlPool> {
         "accounts",
         "character_records",
         "character_achievements",
+        "character_crafts",
     ] {
         let (_, definition): (String, String) =
             sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
@@ -1003,6 +1004,7 @@ async fn private_mysql_new_character_later_item_failure_cleans_up_before_id_reus
         "accounts",
         "character_records",
         "character_achievements",
+        "character_crafts",
     ] {
         let (_, definition): (String, String) =
             sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))

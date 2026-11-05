@@ -94,6 +94,9 @@ pub struct AppConfig {
     pub world: WorldConfig,
     #[serde(rename = "housing")]
     pub housing: crate::systems::housing::config::HousingConfig,
+    /// `Crafting` (recipe learning gate).
+    #[serde(rename = "crafting")]
+    pub crafting: crate::systems::economy::config::CraftingConfig,
     #[serde(rename = "clientdata")]
     pub client_data: ClientDataConfig,
     /// `Specialty`.
@@ -167,6 +170,7 @@ impl Default for AppConfig {
             loyalty: CurrencyValuesConfig::default(),
             world: WorldConfig::default(),
             housing: Default::default(),
+            crafting: Default::default(),
             client_data: ClientDataConfig::default(),
             specialty: SpecialtyConfig::default(),
             scripts: ScriptsConfig::default(),

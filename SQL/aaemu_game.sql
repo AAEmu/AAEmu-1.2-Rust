@@ -129,6 +129,14 @@ CREATE TABLE IF NOT EXISTS `character_active_buffs` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Stores active buffs across player sessions';
 
 
+CREATE TABLE IF NOT EXISTS `character_crafts` (
+  `character_id` INT UNSIGNED NOT NULL COMMENT 'Character who learned the craft',
+  `craft_id`     INT UNSIGNED NOT NULL COMMENT 'crafts.id from compact.sqlite3',
+  `learned_at`   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'UTC timestamp of the first learn',
+  PRIMARY KEY (`character_id`, `craft_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Crafts learned from recipe items / TrainCraftEffect';
+
+
 CREATE TABLE IF NOT EXISTS `character_cooldowns` (
   `character_id`  INT UNSIGNED NOT NULL COMMENT 'Character who owns this cooldown',
   `cooldown_type` TINYINT UNSIGNED NOT NULL COMMENT '0 = skill id, 1 = shared cooldown tag',
