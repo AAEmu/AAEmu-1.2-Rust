@@ -429,7 +429,7 @@ at the new time, no-delay interrupt, cancelled-after-extension, delayed channel 
 | `NpcManager.Load` (customs, body parts, templates, equip packs, postures, unit modifiers, initial buffs, merchants / goods) | `npc/data.rs` | done | 13 382 templates on the real DB. Creatures.xml names, `LoadAiParams` not ported. Also loads `aggro_links` / `npc_aggro_links` (130 groups, 643 rows, 572 NPC templates, rows with a missing NPC / group skipped) into `NpcData::aggro_links`; the rule that reads them is `systems::ai` (see below). |
 | `NpcManager.Create`, `LoadCustom` (.NET `Random(123456789)` parity), `Npc` stats (Str..KillExp from the unit formulas + template bonuses), `InitializeSpawnBuffs`, `AnimActionId` | `npc/manager.rs`, `npc/stats.rs` | done | Every real template creates without error. The AI is created through `server.systems.hooks.ai` (`systems::ai`). |
 | `Npc.DoDie` | `npc/death.rs` | done | Kill exp (team eligibility, `PlayerExpModifier`, mate exp, TagShare contributors), quest kill events, loot (`LootManager.GenerateLoot` through the economy), aggro / tagger clean-up, spawner despawn, `Ai.GoToDead()` (`systems::ai`). |
-| NPC interaction packets (CSStartInteraction, CSInteractNPC(End), CSSelectInteractionEx; SCNpcInteractionSkillList, SCAiAggro, SCNpcChatMessage, SCUnitModelPostureChanged, SCAggroTargetChanged) | `npc/packets.rs` | done | Byte-exact tests. Merchant / bank / auction UIs are economy's. **Deviation:** `CSStartInteractionPacket` also answers a slave with one seat skill, because the 1.2 client acts on the first list entry (`FUN_393be850` / `FUN_393be280`): 12076 (occupy) while the driver seat is free, else 13863 (passenger seat, `special_effects` 2378 value1 2) while point 2 is free, the slave's model declares point 2 in `model_bindings` and the slave is not a cannon; a slave with both seats taken keeps 12076; the bind then ignores the taken seat silently (C# behaviour). The C# answered only NPCs and mates (12077). |
+| NPC interaction packets (CSStartInteraction, CSInteractNPC(End), CSSelectInteractionEx; SCNpcInteractionSkillList, SCNpcInteractionStatusChanged, SCNpcInteractionEndedByZone, SCAiAggro, SCNpcChatMessage, SCUnitModelPostureChanged, SCAggroTargetChanged) | `npc/packets.rs` | done | Byte-exact tests (the two interaction-state layouts from the 1.2 readers `FUN_397b4b00` / `FUN_397b4aa0`). `CSStartInteractionPacket` is refused silently for an NPC whose `interactable` flag is off (see the WP-5b note under "systems::ai"); the C# had no such guard. Merchant / bank / auction UIs are economy's. **Deviation:** `CSStartInteractionPacket` also answers a slave with one seat skill, because the 1.2 client acts on the first list entry (`FUN_393be850` / `FUN_393be280`): 12076 (occupy) while the driver seat is free, else 13863 (passenger seat, `special_effects` 2378 value1 2) while point 2 is free, the slave's model declares point 2 in `model_bindings` and the slave is not a cannon; a slave with both seats taken keeps 12076; the bind then ignores the taken seat silently (C# behaviour). The C# answered only NPCs and mates (12077). |
 | `NpcGameData` (npc_spawners, npc_spawner_npcs, member index, generated spawners) | `npc/spawner_data.rs` | done | |
 | `NpcGroupGameData` (`npc_groups`, `npc_group_members`) | `npc/group_data.rs` | done | 158 groups / 571 member rows on the real DB; every one of the 147 `NpcGroup` spawner rows resolves to a group whose 531 member NPC templates exist. A `"NpcGroup"` spawner member expands into all group members at the spawner position plus `formation_offset_*` (see deviations). |
 | `NpcSpawner`, `NpcSpawnerNpc`, `DoodadSpawner`, `Spawner<T>` | `npc/spawner.rs`, `doodad/spawner.rs` | done | Schedules / time windows / population caches, respawn + despawn timing, exact-identity reconciliation of direct deletes (see deviations). Ordinary populations keep the authored `Count` / `min_population` baseline (default 1) and per-slot respawn deadlines (see deviations). AI home position / follow path / simulation through `server.systems.hooks.ai` (`systems::ai`). |
@@ -1667,6 +1667,39 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   Live verification drives one GM-spawned pair from group 70; the remaining AGGROLINK cases
   (whether a link may override distance/battle at all, and how it orders against rules 1..4)
   stay open until a retail 1.2 zone server can be recorded.
+
+* systems::ai (2026-11-05, WP-5a FollowUnit / WP-5b `ai_command_sets.can_interact`): these are
+  the first consumers of two C#-era data paths. Evidence: the 1.2 `ai_commands.cmd_id = 1` rows
+  (sets 1 "test_npc", 20 "Q851 fled soldier", 33 "Q1307 bring the lumberjack", all with
+  `param1 = 1`, `param2 = '0'`) and the `ai_command_sets.can_interact` column (302 'f', 23 't').
+  The C# `RunCommandSetBehavior` only logged the FollowUnit command as not implemented, and no
+  consumer of `CanInteract` exists in the C# or the 1.2 decompile, so both behaviours are
+  **INFERRED** here:
+  * FollowUnit follows `Ai.FollowUnitObj` when one is set, else the nearest player within 100 m
+    (the search of `DoFollowNearestNpc`, `framework.rs`), and enters `FollowUnitBehavior`; with
+    no target the command ends and the set continues. `param1 = 1` is ignored and logged at
+    debug because its meaning is UNKNOWN. Sets 20 and 33 are unreachable through
+    `quest_components.ai_command_set_id` (no row names them) and set 1 is a test set, so the
+    shipped quest content does not use this path.
+  * While an `ai_command_sets` row with `can_interact = 'f'` runs, the NPC's
+    `Npc.interactable` flag is false: `SCNpcInteractionStatusChanged{npc, false}` goes to the
+    players around it at set start, the visibility path repeats it to players that enter sight
+    later, and `SCNpcInteractionEndedByZone{npc}` closes a window a player still has open on it
+    (the server tracks that as `Unit.CurrentInteractionObject`, so this is not a tracking gap).
+    `true` is sent when the set ends or a command of a different `can_interact = 't'` set
+    starts. Leaving the command-set run (`RunCommandSet` / `FollowPath` / `FollowUnit`) for
+    combat, talk or any other behavior abandons the set -- the mirrored state machine never
+    returns to `RunCommandSet` -- so the lock is released there too instead of leaving the NPC
+    non-interactable. Sets with 't' and NPCs whose commands name no set send nothing and keep
+    the old behaviour. `CSStartInteraction` is refused silently for a non-interactable NPC: no error
+    message is evidenced (UNKNOWN). Death and despawn also close an open window and release the
+    lock (INFERRED from the packet name; the client handler `FUN_391d9000` only closes the
+    window, it does not tell the server, so the tracked `CurrentInteractionObject` is cleared
+    too). The despawn path is the `NpcManager.Delete` AI hook, which runs before the object
+    leaves the world. The client's default interaction state on spawn is
+    UNKNOWN (`SCNpcInteractionSkillList` writes `1`); this code assumes interactable unless the
+    AI says otherwise. Capture-pending WP-5B-1: whether retail also sends these packets for
+    command sets, and whether a non-interactable NPC answers with an error.
 
 * systems::services (beauty salon): `ApplyBeautySalon` creates the requested hair item when
   the equipment hair slot is empty. The C# guard required an existing hair item, so a paid
