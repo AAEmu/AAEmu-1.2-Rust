@@ -642,6 +642,7 @@ impl DoodadData {
                     id: r.u32("id")?,
                     zone_id: r.u32("zone_id")?,
                     faction_id: r.u32_or("faction_id", 0)?,
+                    selective: r.bool_str("selective")?,
                 }))
             },
         )?;

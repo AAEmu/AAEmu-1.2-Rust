@@ -423,6 +423,39 @@ Tests: `systems::skills::tests::cast_delay_tests` (extension, `SCCastingDelayed`
 at the new time, no-delay interrupt, cancelled-after-extension, delayed channel interrupt) and
 `systems::skills::packets::tests::casting_delayed_layout` (independent literal bytes).
 
+#### Resurrection buffs (WP-2b, 2026-11-05)
+
+`buffs.resurrection_health` / `resurrection_mana` / `resurrection_percent` were loaded but
+never read (the C# also only loaded them). The 1.2 `compact.sqlite3` has exactly one row with
+either column set: buff 239 "Nui's Favor" (`resurrection_health 10`, `resurrection_mana 10`,
+`resurrection_percent 't'`, 30 min, `remove_on_death 't'`), whose description says it
+resurrects the character in place once with 10 % life / vitality for 30 minutes and recovers
+the experience reduced on death (EVIDENCED: `buffs` row + description).
+
+Rule now implemented (`systems::skills::combat::apply_resurrection_buff`,
+`systems::skills::buffs::take_resurrection_buff`): on a PLAYER death after the death losses
+and `DoDie`, an active buff with a non-zero `resurrection_*` is consumed (one critical
+section under the owner's data lock; the effect then exits through the normal buff removal),
+hp / mp are set to the columns (`resurrection_percent 't'`: percent of `max_hp` / `max_mp`;
+`'f'`: absolute values — **INFERRED**, no 1.2 row uses it; both are clamped to the pools),
+this death's experience loss is refunded through the `RecoverExpEffect` packet / `AddExp`
+path with no priest and no labor, and `SCCharacterResurrectedPacket` is broadcast at the
+corpse position followed by `SCUnitPointsPacket`. The death's `recoverable_exp` entry is
+cleared so a priest cannot refund the same loss twice. The one-death-per-life claim is
+unchanged: after the resurrection a second lethal hit without the buff dies normally.
+
+**UNKNOWN / capture-pending:** the timing and animation of the self-resurrection (no 1.2
+capture; no extra delay is added), and whether retail refunds the whole loss or only the
+80 % `RecoverableExp` portion (the description names the decreased experience, so the whole
+this-death loss is refunded; the audit's alternative reading is `RecoverableExp`). The
+`remove_on_death 't'` flag on the buff is handled by consuming it explicitly before
+`RemoveEffectsOnDeath`; a death that takes the C# killer-less path never reaches `DoDie` and
+does not consume it.
+
+Tests: `systems::skills::resurrection_buff_tests` (buff 239 in-place resurrection with hp /
+mp / refund / packet order and buff removal, second death kills normally, death without the
+buff unchanged, absolute-value inference, real-compact loader for the three columns).
+
 ### systems::npcs
 
 | Area (C#) | Rust | Status | Notes |
@@ -1135,11 +1168,55 @@ Economy hooks (`server.systems.housing.hooks`): installed by `economy::bridges::
 | Party dungeon admission/reset and 1.2 mentor/mentee sealed chest quests | `indun.rs`, `dungeon.rs`, `mentoring.rs`, `scripts/dungeon.rs` | extended | Serialized run selection, pending-entry capacity, one charge per character/run, owner/leader-only empty resets, safe destruction; four paired daily quests use actual chest phases/seal items and existing inventory/quest rewards. See `Docs/wiki/Dungeons.md`. |
 | `Models/Game/Indun/Events/*`, `Actions/*`, `WorldInstance.Events` (`OnUnitSpawn`, `OnDoodadSpawn`, `OnUnitKilled`, `OnUnitCombatStart/End`, `OnAreaClear`), `CharacterEvents` (`OnTeamJoin/Leave/Kick`, `OnDungeonLeave`, `OnDisconnect`), `UnitEvents.OnKill` | `events.rs` | done | Raised from `npcs` spawners, `skills::combat` (`PostUpdateCurrentHp` / `DoDie`), `social::team`, `world::session::on_disconnect`. |
 | `InstantGameManager`, `InstantGame` (+ `InstantGameEvents`, team members / results) | `instant_game.rs` | done | Queue / matchmaking / invite / join / enter / start / kills / scores / end / leave; `Character.SetFaction` override (housing hook, guild kick, party kick); `ResetAllSkillCooldowns`. |
-| Packets: `CSInstanceLoaded`, `CSUnknownInstance`, `CSApplyToInstantGame`, `CSCancelInstantGame`, `CSJoinInstantGame`, `CSEnteredInstantGameWorld`, `CSLeaveInstantGame`; `SCProcessingInstance`, `SCAppliedToInstantGame`, `SCInviteToInstantGame`, `SCInstantGameJoined/Start/End/AddPoint/Kill/Killstreak`, `SCInstantGameRemainTime` (`SCInstantGameUnkPacket` opcode), `SCTowerDefList/Start/End/WaveStart`, `SCSkillCooldownReset`; the unsent `SCRaceCond/SCRacing/SCRacingResult` (see the racing bullet below) | `packets.rs` | done | Byte-exact tests. `SCLoadInstancePacket` is the npcs portal one. |
-| Doodad funcs `EnterInstance`, `EnterSysInstance`, `ExitIndun`, `RemoveInstance`; skills hooks `leave_instance` (`ExitArchemall`) / `main_world_position` (`Return`); portal `UsePortal` court check | `npcs/doodad/funcs/world.rs`, `skills/ext.rs` (default bodies), `npcs/portal/mod.rs` | done | |
+| Packets: `CSInstanceLoaded`, `CSUnknownInstance`, `CSSelectSysInstanceChannel` (0x13d), `CSApplyToInstantGame`, `CSCancelInstantGame`, `CSJoinInstantGame`, `CSEnteredInstantGameWorld`, `CSLeaveInstantGame`; `SCProcessingInstance`, `SCSystemDungeonState`/`SCSystemDungeonChannel` (0x206/0x207), `SCAppliedToInstantGame`, `SCInviteToInstantGame`, `SCInstantGameJoined/Start/End/AddPoint/Kill/Killstreak`, `SCInstantGameRemainTime` (`SCInstantGameUnkPacket` opcode), `SCTowerDefList/Start/End/WaveStart`, `SCSkillCooldownReset`, the unsent `SCRaceCond/SCRacing/SCRacingResult` (see the racing bullet below) | `packets.rs` | done | Byte-exact tests. `SCLoadInstancePacket` is the npcs portal one. See "System-dungeon channel select (WP-X1)". |
+| Doodad funcs `EnterInstance`, `EnterSysInstance`, `ExitIndun`, `RemoveInstance`; skills hooks `leave_instance` (`ExitArchemall`) / `main_world_position` (`Return`); portal `UsePortal` court check | `npcs/doodad/funcs/world.rs`, `skills/ext.rs` (default bodies), `npcs/portal/mod.rs` | done | `DoodadFuncEnterSysInstance.selective` drives the channel list; see "System-dungeon channel select (WP-X1)". |
 | Tower defense runtime, `TowerDefenseAttackerAiCharacter` | `tower_def.rs`, `config.rs`, `scripts/tower_def.rs`, `ai/framework.rs` | extended | Rust adds event start/end, first-wave delay, timed/kill AND/OR progression, NPC controller/summon cleanup preserving normal corpse timers, client lists, GM controls and opt-in game-time/war schedules. The attacker's C# behavior graph already matches `AiKind::TowerDefenseAttacker`. Unsupported target kinds and absent spawn positions fail preflight; rewards/victory event chains are not added. |
 
 Cross-subsystem: mates are despawned on dungeon entry and `PlayerCanEnter` checks the summoned vehicle (`systems::vehicles`); dungeon entry items use the economy's checked `EconomyBridge::bag_consume_item`; the permanent `Character.SetFaction` updates the owned houses (`SocialHooks::update_owned_housing_faction`, housing). Battlefield corps factions are temporary and skip every side effect (see the RPA-09 deviation below).
+
+#### System-dungeon channel select (WP-X1)
+
+`systems::instances` / `npcs::doodad::funcs::world` — extended. The C# `DoodadFuncEnterSysInstance`
+always entered channel 0 and had no CS 0x13d handler, no 0x206 list and no 0x207 answer. The 1.2
+client picks the channel with CS 0x13d `{u32 instId, bc doodadObjId}` (writer `FUN_397bca60`,
+x2game.dll.c:1714704), after the server fills the dialog cache with SC 0x206 `{u32 zoneKey,
+i32 count, count x {i32 index, u32 instId, i32 restrict, i32 current}}` (reader `FUN_397b8c30`,
+x2game.dll.c:1711542; the client clamps the count to 0x20). The row `instId` is a world instance
+id and `index` is 0-based (the client shows index+1). CS 0x13e is only the post-load notice of
+the world instance the client is in (writer `FUN_397bcad0`; sender dll.c:379135 after the world
+load when the zone group has `select_channel` and the current instance id is non-zero), not a
+channel pick; it stays read-and-ignore. This corrects content.md WP-X1 section 1.4, as
+`re-indun-interact.md` shows.
+
+Rules (all **INFERRED** from the client decompile; no 1.2-server capture):
+* A selective `DoodadFuncEnterSysInstance` (`doodad_func_enter_sys_instances.selective`, rows
+  2-9 in the 1.2 data, now loaded) of a `select_channel` zone group sends SC 0x206 with the
+  dungeon's live instances (world id order, enumerated 0-based `index`, `restrict =
+  indun_zones.max_players` — 190 for the library, `current` = players inside) and does not move
+  the player. Non-selective entrances and groups without `select_channel` enter channel 0 as
+  before. With no live instance the first player creates channel 0 and enters it as before;
+  what the original server listed for an empty channel is UNKNOWN (only live instances here).
+* The 0x206 `zoneKey` is the entrance func's `zone_id` (`zones.id`, 209/210/211): the client's
+  `GetSystemDungeonName` looks it up in a table keyed by `zones.id` and compares the record's
+  `zone_key` with the current zone (`FUN_397f2140`, x2game.dll.c:1823669/1823723).
+* CS 0x13d is validated like the client's `FUN_3930c420`: the doodad exists, its template's
+  first `DoodadFuncEnterSysInstance` func (client `FUN_3983c230`) is selective, the sender is
+  within the server's doodad interaction reach (`in_func_reach`: the func's skill range, else
+  5 m, plus the 15 m doodad allowance; the client checks 2.1 m itself), its zone group has
+  `select_channel`, and `instId` is a live instance of that zone group (any live instance, also
+  one created after the list was sent). Unknown / stale ids are ignored. The player is queued
+  into the instance through the normal `QueuePlayer` / `SCLoadInstance` flow, so a full instance
+  answers the normal `INSTANCE_QUOTA` (471) error. Both entrance paths save the same
+  `MainWorldPosition` (`ensure_main_world_position`: when it was never set or the player is still
+  in the default instance); the pick saves it after every check, so a refused pick (bad doodad,
+  out of reach, non-selective, stale id) leaves an existing return point untouched.
+* SC 0x207 `{i32 zoneId, u32 instanceId, i32 instanceIndex}` (reader `FUN_397b03b0`) answers the
+  pick with the zone the load sent (`SCLoadInstance.zoneId`, the dungeon zone key), the world
+  instance id and the 0-based index. It is sent directly after `SCLoadInstance` when the channel
+  was already loaded, otherwise after the client's `CSInstanceLoaded`; the client only stores
+  the index when the instance and zone match its current ones. INFERRED: no capture shows the
+  original server's reply to CS 0x13d beyond the load. A pending answer is dropped if a later
+  load targets a different instance id.
 
 ### systems::vehicles
 

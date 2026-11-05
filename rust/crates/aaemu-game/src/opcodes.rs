@@ -277,6 +277,10 @@ pub mod cs {
     pub const CSTakeAllAttachmentItemPacket: u16 = 0x139;
     pub const CSTakeScheduleItemPacket: u16 = 0x13b;
     pub const CSPremiumServiceMsgPacket: u16 = 0x13c;
+    /// System-dungeon channel pick (`X2.EnterSystemDungeon` after the SC 0x206 dialog).
+    /// Name unverified; 1.2 writer `FUN_397bca60` `{u32 instId, bc doodadObjId}`. The C# table
+    /// had no 1.2 opcode. Owner-approved exception to "never edit opcodes.rs".
+    pub const CSSelectSysInstanceChannelPacket: u16 = 0x13d;
     pub const CSUnknownInstancePacket: u16 = 0x13e;
     pub const CSSetupSecondPassword: u16 = 0x140;
     /// National tax change `(u16 zoneGroup, u32 rate)`; the 1.2 client builder is
@@ -556,6 +560,7 @@ pub mod cs {
         (0x139, "CSTakeAllAttachmentItemPacket"),
         (0x13b, "CSTakeScheduleItemPacket"),
         (0x13c, "CSPremiumServiceMsgPacket"),
+        (0x13d, "CSSelectSysInstanceChannelPacket"),
         (0x13e, "CSUnknownInstancePacket"),
         (0x140, "CSSetupSecondPassword"),
         (0x08d, "CSSetCraftingPayPacket"),
