@@ -618,6 +618,10 @@ pub async fn load_character_details(server: &GameServer, c: &mut Character) -> R
     // `systems::report_achievement`, and `CSNotifyInGamePacket` pushes the entry snapshot.
     crate::systems::social::achievement_persistence::load_character_achievements(pool, c).await?;
 
+    // Crafts learned from recipe items / TrainCraftEffect (`character_crafts`).
+    c.learned_crafts =
+        crate::systems::economy::craft_learning::load_character_crafts(pool, id).await?;
+
     // LoadActionSlots(connection)
     if let Ok(Some(r)) =
         sqlx::query("SELECT slots FROM `characters` WHERE `id` = ? AND `account_id` = ?")
@@ -1219,6 +1223,9 @@ pub async fn save_character(
     // Achievements (records + progress). Written after the `characters` REPLACE above, so its
     // ON DELETE CASCADE cannot drop the rows this snapshot re-inserts.
     crate::systems::social::achievement_persistence::save_character_achievements(tx, c).await?;
+    // Learned crafts (`character_crafts`; no FK, `INSERT IGNORE` keeps the first learned_at).
+    crate::systems::economy::craft_learning::save_character_crafts(tx, c.id, &c.learned_crafts)
+        .await?;
     // Later phase: Mates.Save.
     Ok(())
 }
@@ -1586,6 +1593,7 @@ mod tests {
         "completed_quests",
         "character_records",
         "character_achievements",
+        "character_crafts",
     ];
 
     /// Replaces each live table with a connection-local copy of its actual schema, so the test

@@ -25,8 +25,10 @@ pub mod cash_shop;
 #[cfg(test)]
 mod cash_shop_tests;
 pub mod character_slots;
+pub mod config;
 pub mod craft;
 pub mod craft_data;
+pub mod craft_learning;
 #[cfg(test)]
 mod craft_store_tests;
 pub mod data;

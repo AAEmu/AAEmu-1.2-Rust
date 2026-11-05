@@ -28,6 +28,8 @@ pub struct Data {
     pub cash_shop: super::cash_shop::CashShopData,
     /// Crafting tables.
     pub craft: super::craft_data::CraftData,
+    /// Recipe learning data (`item_recipes`, `train_craft_effects`).
+    pub craft_learning: super::craft_learning::CraftRecipes,
     /// Store / specialty / taxation / expert / item-look tables.
     pub store: super::store_data::StoreData,
     /// Mail localization lookups.
@@ -61,6 +63,7 @@ impl Data {
             Ok(())
         })?;
         data.craft = super::craft_data::CraftData::load(ctx)?;
+        data.craft_learning = super::craft_learning::CraftRecipes::load(ctx)?;
         data.store = super::store_data::StoreData::load(ctx)?;
         data.mail = super::mail_data::MailData::load(ctx)?;
         data.items = super::items_data::ItemsData::load(ctx.conn, ctx.language)?;

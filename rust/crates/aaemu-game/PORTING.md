@@ -420,7 +420,7 @@ connected by `systems::economy::wiring`).
 | `ItemManager` (all templates / tables, user items, `Create`, timers, `UnwrapItem`, auction search helpers, loot convert fish), `ItemGameData`, `ItemConversionGameData`, `FishDetailsGameData`, item model stats (durability, repair cost, attributes, DPS, armor), procs | `data/items.rs`, `managers/item.rs`, `models/item.rs`, `systems/economy/{items_data,item_timers,procs}.rs` | done | `ItemManager` lists are leaf locks (snapshot before locking containers). Procs are a new feature (the C# never fired one; see the item-procs deviation). |
 | `LootGameData`, `Models/Game/Items/Loots/**`, `LootingContainer`, loot packets | `systems/economy/{loot_data,loot,looting,loot_packets}.rs` | done | NPC death / despawn / team rules through `LootNpcHooks`, `LootTeamHooks`, `LootQuestHooks`. |
 | Repair (`Character.DoRepair`, `CSRepairSingleEquipment`, `CSRepairAllEquipments`), durability loss | `systems/economy/repair.rs` | done | Combat calls `on_damage_taken` / `on_death`. |
-| `CraftManager`, `Models/Game/Crafts`, `CharacterCraft`, `CraftTask`, `CSExecuteCraft`, `SCCraftFailed` | `systems/economy/{craft,craft_data}.rs` | done | Cast through `CraftHooks::start_craft_cast`; skills call `craft::end_craft`. |
+| `CraftManager`, `Models/Game/Crafts`, `CharacterCraft`, `CraftTask`, `CSExecuteCraft`, `SCCraftFailed`, recipe learning (`item_recipes`, `train_craft_effects`) | `systems/economy/{craft,craft_data,craft_learning}.rs` | done | Cast through `CraftHooks::start_craft_cast`; skills call `craft::end_craft`. `TrainCraftEffect` teaches `item_recipes[source item]` (or the effect's craft without a source item), persisted in `character_crafts`; `Crafting.RequireLearnedRecipes` (default off) gates execution. |
 | Stores (`CSBuyItems`, `CSSellItems`, buy-back, `CSListSoldItem`, `CSBuyPriestBuff`, `CSBuyCoinItem`, `CSSellBackpackGoods`), `SpecialtyManager`, `TaxationsManager`, `ExpandExpert`, item look conversion | `systems/economy/{store,store_data,specialty}.rs` | done | Merchant packs / NPC flags through `NpcEconomyHooks`. Checkout validates currency, checked totals and each balance, then stages complete goods / buy-back delivery before committing payment. Vocation charges the configured price displayed by the 1.2 shop, without earnings bonuses. Rejected checkout preserves items and balances. Purchases need an NPC merchant pack, a doodad `DoodadFuncStoreUi` pack, or the money form of the doodad's current-phase `DoodadFuncPurchase` (`CSBuyItems.unkId`, the `doodad_funcs` row id the 1.2 client writes there), and filter the goods by it; selling needs a merchant within 3 m, lists each item once and pays only for items moved to buy-back. Specialty: the empty `CSListSpecialtyGoods` answer, the dropped records packet and the corrected sale values are detailed in the specialty protocol note. |
 | `MailManager`, `Models/Game/Mails/**`, `CharacterMails`, mail packets | `systems/economy/{mail,mail_character,mail_kinds,mail_packets,mail_data}.rs` | done | Saved in `SaveStage::BeforeItems`; housing tax through `MailHousingHooks`. |
 | `AuctionManager`, `Models/Game/Auction/**`, auction packets | `systems/economy/{auction,auction_data,auction_packets}.rs` | done | Saved in `SaveStage::AfterItems`; results mailed through `wiring`. Requests require an auctioneer NPC (the `auctioneer` template flag) named by the packet or the current interaction object within 5 m (the C# ignored the ids). |
@@ -5489,6 +5489,46 @@ type-8 water entity whose flag bit 1 is set (`vt+0x150 & 1`, likely a NoFishing 
 Deviation from the removed C#: `SkillTemplate.TargetOnlyWater` was parsed
 (`AAEmu.Game/Core/Managers/SkillManager.cs:423`) but never read, so the C# had no water-target
 check at all; this follows only the 1.2 client.
+
+## Recipe learning and the learned-craft gate (2026-11-04)
+
+`TrainCraftEffect` was trace-only in the C# and in the port, so a recipe item was consumed and
+nothing happened. The 1.2 data: 2,561 `items.impl_id = 12` recipe items carry the generic use
+skill 11144 (2,461) or 10003; skill 11144 -> `skill_effects` 1611 -> effect 1750
+`TrainCraftEffect` (actual_id 305) -> `train_craft_effects` 305 -> craft 169. Because 11144
+teaches the fixed craft 169 for thousands of items, the learned craft comes from
+`item_recipes.item_id` -> `craft_id` for the cast's source item; only a `TrainCraftEffect` with
+no source item (the 131 plain training skills) uses `train_craft_effects.craft_id`. The loader
+is `systems/economy/craft_learning.rs`; it skips the 48 recipe rows and 1 effect row whose craft
+is missing from `crafts` (with one warning) and builds the learn-gated set as the union of both
+tables (2,762 valid crafts of the 7,010 in compact; the other crafts have no learn source, so
+they stay ungated).
+
+Learn: the effect inserts the craft into `Character::learned_crafts` under one character lock;
+the skill pipeline consumes the source item as before (`use_skill_as_reagent = 't'` on every
+recipe item). Already learned: the effect sends client error `craft_already_learned` (0x81 = 129;
+client `x2game.dll.c:1136026`, `ui_texts` keys `craft_not_learned` / `craft_already_learned` at
+`strings.txt:12550-12551`) and cancels the cast, so `Skill.Apply` refunds the pre-debited item
+(the same cancel flag the dye path uses). A recipe item whose craft is missing from the data is
+also refused and refunded. `UnitReqsKindType.CanLearnCraft` (0x13) was commented out in the C#
+(`UnitReqs.cs:96`, `a2ab80abd^`); it is now evaluated as "craft not learned" because the 1.2
+data has 9 training skills using it (crafts 3, 4, 6, 8, 9, 10, 11, 169, 182). This is an
+INFERRED rule, recorded as a deviation from the C#.
+
+Persistence: `character_crafts(character_id, craft_id, learned_at)` (SQL update + base schema) is
+loaded in `db_character::load_character_details` and written with `INSERT IGNORE` from
+`save_character` (after the `characters` REPLACE; no FK, so `learned_at` survives saves). The
+gate is `Crafting.RequireLearnedRecipes` (`Configurations/Crafting.json`, default **false**):
+when true, `craft::craft` refuses a gated unlearned craft with
+`CraftCantActAnyMore`/`craft_not_learned` (0x82 = 130; `x2game.dll.c:1136028`). The default is
+false because whether retail 1.2 enforced the gate at all is UNKNOWN (WP-I1 UNKNOWN-1); the
+client carries the two errors, the `CRAFT_TRAINED` / `CRAFT_RECIPE_ADDED` event names
+(`FUN_39214380`, indices 117/118) and the craft book, but no server evidence.
+
+Capture-pending (WP-I1 UNKNOWN-2): no packet tells the client that a craft was learned. The only
+writes to the client's `item_recipes` arrays are its own loader (`x2game.dll.c:1478522`) and
+`CRAFT_TRAINED` has no located firing site, so the server sends no announcement; a capture of
+the original client using a recipe item is needed to find the carrier (if any).
 
 ## Review findings (documented, not fixed)
 

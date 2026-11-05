@@ -2382,6 +2382,7 @@ async fn private_mysql_quest_mail_auction_rollback_retry_and_reconnect() {
         "skills",
         "quests",
         "completed_quests",
+        "character_crafts",
     ] {
         let (_, ddl): (String, String) = sqlx::query_as(&format!("SHOW CREATE TABLE `{table}`"))
             .fetch_one(&pool)

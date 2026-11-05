@@ -225,6 +225,9 @@ pub struct Character {
     /// `Bonding` (`BondDoodad`: the doodad seat / bed the character is attached to).
     pub bonding: Option<crate::models::doodad::BondDoodad>,
     // ---- phase 3 / economy: add this subsystem's Character fields below ----
+    /// Crafts learned from recipe items / `TrainCraftEffect` (`character_crafts`), gating
+    /// `Crafting.RequireLearnedRecipes` when enabled.
+    pub learned_crafts: std::collections::HashSet<u32>,
 
     // ---- phase 3 / social: add this subsystem's Character fields below ----
     /// `InParty` (set through `systems::social::team::set_in_party`, which notifies friends).
@@ -374,6 +377,7 @@ impl Character {
             zone_access: Default::default(),
             bonding: None,
             // ---- phase 3 / economy ----
+            learned_crafts: std::collections::HashSet::new(),
 
             // ---- phase 3 / social ----
             in_party: false,
