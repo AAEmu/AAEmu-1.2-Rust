@@ -135,8 +135,8 @@ pub fn player_relation(server: &GameServer, me: &PlayerRef, other: &PlayerRef) -
 
 /// `Character.SetFaction(factionId)` (+ `Unit.SetFaction`): broadcasts
 /// `SCUnitFactionChangedPacket`, adds / removes the Contemptuous buff, updates owned houses,
-/// kicks the character from a guild of another mother faction (`ExpeditionManager.Kick` with
-/// its own connection) and from its party.
+/// removes the character from a guild of another alliance (`expedition::leave_forced`; the C#
+/// `Kick(p, p)` removed nobody) and from its party.
 pub async fn set_faction(server: &GameServer, p: &PlayerRef, faction_id: u32) {
     let (old, exp) = {
         let c = p.data();
@@ -162,8 +162,10 @@ pub async fn set_faction(server: &GameServer, p: &PlayerRef, faction_id: u32) {
         .update_owned_housing_faction(server, p.character_id, faction_id);
     if exp != 0 {
         if let Some(e) = server.expeditions.get(exp) {
-            if e.faction.mother_id != faction_id {
-                crate::systems::social::expedition::kick(server, p, p.character_id).await;
+            if crate::systems::social::util::alliance_id(server, e.faction.mother_id)
+                != crate::systems::social::util::alliance_id(server, faction_id)
+            {
+                crate::systems::social::expedition::leave_forced(server, p).await;
             }
         }
     }
@@ -172,7 +174,7 @@ pub async fn set_faction(server: &GameServer, p: &PlayerRef, faction_id: u32) {
             server,
             p,
             p,
-            crate::systems::social::team::risky_action::KICK,
+            crate::systems::social::team::risky_action::LEAVE,
         );
     }
 }
@@ -208,11 +210,14 @@ pub fn set_faction_persistent(server: &GameServer, p: &PlayerRef, faction_id: u3
             .expeditions
             .get(expedition)
             .map(|e| e.faction.mother_id);
-        if mother.is_some_and(|m| m != faction_id) {
+        if mother.is_some_and(|m| {
+            crate::systems::social::util::alliance_id(server, m)
+                != crate::systems::social::util::alliance_id(server, faction_id)
+        }) {
             if let Some(s) = server.self_arc() {
                 let p = p.clone();
                 tokio::spawn(async move {
-                    crate::systems::social::expedition::kick(&s, &p, p.character_id).await;
+                    crate::systems::social::expedition::leave_forced(&s, &p).await;
                 });
             }
         }
@@ -222,7 +227,7 @@ pub fn set_faction_persistent(server: &GameServer, p: &PlayerRef, faction_id: u3
             server,
             p,
             p,
-            crate::systems::social::team::risky_action::KICK,
+            crate::systems::social::team::risky_action::LEAVE,
         );
     }
 }

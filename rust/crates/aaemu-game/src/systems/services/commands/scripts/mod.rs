@@ -48,6 +48,7 @@ pub mod fly;
 pub mod get_attribute;
 pub mod get_position;
 pub mod god_mode;
+pub mod guild_rename;
 pub mod heal;
 pub mod height;
 pub mod help;
@@ -433,6 +434,14 @@ pub fn all_commands(env: &ScriptEnv) -> Vec<(&'static [&'static str], Arc<dyn Co
         (
             &["testheightvisualizer", "test_height_visualizer"],
             Arc::new(test_height::TestHeight::new(env)),
+        ),
+        (
+            &["allowguildrename", "allow_guild_rename"],
+            Arc::new(guild_rename::AllowGuildRename::new(env)),
+        ),
+        (
+            &["renameguild", "rename_guild"],
+            Arc::new(guild_rename::RenameGuild::new(env)),
         ),
         (&["dominion"], Arc::new(dominion::Dominion::new(env))),
         (

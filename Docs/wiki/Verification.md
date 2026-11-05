@@ -101,9 +101,9 @@ verification commands are:
 `hangup` closes the bot's socket without `CSLeaveWorld` (a hard disconnect) and ends its script.
 
 Useful companions: `waitpeer [secs] [name]` waits until another player is in sight, `await
-<Event> [secs]` waits for a party / guild event (`TeamJoined`, `GuildInvite`, ...), `rawcs
+<Event> [secs]` waits for a party / guild event (`TeamJoined`, `GuildInvite`, `GuildShowRename`, `GuildRenamed`, `GuildRenameRetry`, ...), `rawcs
 <opcode> <body hex>` sends an arbitrary client packet (`SELF` and `PEER` in the body stand for
-the bot's own and the first other player's object id), and `greply <faction id> <0|1>` answers
+the bot's own and the first other player's object id, `GUILD` for the bot's guild id), `grename <name>` renames the bot's guild, `targetpeer` selects the other player for GM commands, and `greply <faction id> <0|1>` answers
 a guild invitation without waiting for one.
 
 A failed expectation prints a `FAIL` line like
@@ -134,6 +134,7 @@ The seed suites:
 | `guild-guards` | A guild-invitation reply without a pending invite is refused (`systems/social/expedition.rs`); a normal invite + accept joins |
 | `social-disconnect` | A hard disconnect logs the character out of its guild like a clean leave: the other members get the status change (`world/session.rs` `on_disconnect`, `systems/social/session.rs`) |
 | `social-guild` | The guild leader cannot leave (310) while a member can; inviting a guild member (53) and a character that is deciding on another invitation (308) is answered (`systems/social/expedition.rs`) |
+| `guild-funcs` | Failed owner / role / policy changes are answered (328, 309, 70, 296, 32), only the leader edits policies, a GM-granted rename works once (`SCExpeditionShowRenameUI`, `SCFactionRenamed`, 807 for a member, 32 once spent), and a faction change into another alliance hands the guild to the remaining member (`systems/social/expedition.rs`) |
 | `social-party` | A late party member hears the party chat; accepting an invitation while in another party is refused (82 / 77); an unknown invitee is answered (76) (`systems/social/team.rs`) |
 | `social-invite-expiry` | A party invitation nobody answers is cancelled after 60 s (588) and no longer blocks the next invitation (`systems/social/team.rs`) |
 | `authority-guards` | A loot take from 5+ m is refused while a melee-range take works (`systems/economy/looting.rs`); an in-place resurrection without an offer is refused, with a scroll offer (item 18456) it works once, and the resurrection point always works (`systems/skills/resurrect.rs`) |

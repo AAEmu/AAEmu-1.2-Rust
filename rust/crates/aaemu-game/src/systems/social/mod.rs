@@ -48,6 +48,8 @@ mod achievement_game_data_tests;
 #[cfg(test)]
 mod flow_tests;
 #[cfg(test)]
+mod guild_flow_tests;
+#[cfg(test)]
 mod manager_tests;
 #[cfg(test)]
 pub(crate) mod ranking_flow_tests;

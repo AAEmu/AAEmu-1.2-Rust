@@ -12,21 +12,21 @@ use crate::systems::social::team::risky_action;
 use crate::test_support::{spawn_player, test_character, test_server, TestClient};
 use crate::world::PlayerRef;
 
-struct Pc {
-    c: TestClient,
-    p: PlayerRef,
+pub(super) struct Pc {
+    pub(super) c: TestClient,
+    pub(super) p: PlayerRef,
 }
 
 impl Pc {
-    fn ops(&mut self) -> Vec<u16> {
+    pub(super) fn ops(&mut self) -> Vec<u16> {
         self.c.drain_ops()
     }
 
-    fn frames(&mut self) -> Vec<(u16, Vec<u8>)> {
+    pub(super) fn frames(&mut self) -> Vec<(u16, Vec<u8>)> {
         self.c.drain()
     }
 
-    async fn send(&mut self, server: &GameServer, opcode: u16, body: PacketStream) {
+    pub(super) async fn send(&mut self, server: &GameServer, opcode: u16, body: PacketStream) {
         server
             .handle_frame(&mut self.c.conn, &encode_raw(1, opcode, body.as_bytes()))
             .await
@@ -34,10 +34,13 @@ impl Pc {
     }
 }
 
-fn pc(server: &GameServer, id: u32, name: &str, x: f32, y: f32) -> Pc {
+pub(super) fn pc(server: &GameServer, id: u32, name: &str, x: f32, y: f32) -> Pc {
     let c = TestClient::new(server, id, 1000 + id);
     let p = spawn_player(server, &c, test_character(id, name, x, y), 0x100 + id);
     p.data().is_online = true;
+    // Alive (a guild invitation to a dead character is refused).
+    p.data().unit.hp = 100;
+    p.data().unit.max_hp = 100;
     let mut c = c;
     c.conn.active_char = Some(p.clone());
     c.drain();
@@ -45,13 +48,13 @@ fn pc(server: &GameServer, id: u32, name: &str, x: f32, y: f32) -> Pc {
 }
 
 /// Drops the frames produced by spawning (players seeing each other).
-fn settle(pcs: &mut [&mut Pc]) {
+pub(super) fn settle(pcs: &mut [&mut Pc]) {
     for p in pcs.iter_mut() {
         p.c.drain();
     }
 }
 
-fn find(frames: &[(u16, Vec<u8>)], op: u16) -> Vec<Vec<u8>> {
+pub(super) fn find(frames: &[(u16, Vec<u8>)], op: u16) -> Vec<Vec<u8>> {
     frames
         .iter()
         .filter(|(o, _)| *o == op)
@@ -1408,8 +1411,21 @@ async fn guild_create_invite_kick_roles_and_disband() {
     }
     let before_transfer = server.expeditions.get(id).unwrap();
     // An outsider, an ordinary member, and a self-transfer cannot change the owner snapshot
-    // or downgrade the current owner's role. Invalid requests send no transition packets.
-    for (actor, target) in [(9, 2), (3, 2), (1, 1)] {
+    // or downgrade the current owner's role. Invalid requests send no transition packets, only
+    // the caller's error.
+    for (actor, target, refused) in [
+        (
+            9,
+            2,
+            crate::systems::social::util::error::ONLY_EXPEDITION_MEMBER,
+        ),
+        (3, 2, crate::systems::social::util::error::FACTION_RIGHTS),
+        (
+            1,
+            1,
+            crate::systems::social::util::error::EXPEDITION_CHANGE_OWNER_SELF,
+        ),
+    ] {
         let mut request = PacketStream::new();
         request.write_u32(target);
         if actor == 9 {
@@ -1422,10 +1438,17 @@ async fn guild_create_invite_kick_roles_and_disband() {
                 .await;
         }
         assert_eq!(server.expeditions.get(id).unwrap(), before_transfer);
-        assert!(outsider.ops().is_empty());
-        for member in pcs.iter_mut() {
-            assert!(member.ops().is_empty());
+        if actor == 9 {
+            assert_eq!(outsider.frames(), vec![error_frame(refused)]);
         }
+        for (i, member) in pcs.iter_mut().enumerate() {
+            if i + 1 == actor as usize {
+                assert_eq!(member.frames(), vec![error_frame(refused)]);
+            } else {
+                assert!(member.ops().is_empty());
+            }
+        }
+        outsider.ops();
     }
     let mut s = PacketStream::new();
     s.write_u32(2);
@@ -1547,7 +1570,7 @@ async fn private_mysql_expedition_owner_transition_persists_consistent_snapshot(
             name: "Knights".into(),
             owner_id: 1,
             owner_name: "Al".into(),
-            mother_id: 148,
+            mother_id: 101,
             ..Default::default()
         },
         members: vec![
@@ -1882,7 +1905,7 @@ async fn guild_invite_and_rank_guards() {
                 name: name.into(),
                 owner_id: 1,
                 owner_name: "Lead".into(),
-                mother_id: 148,
+                mother_id: 101,
                 ..Default::default()
             },
             members,
@@ -2036,7 +2059,7 @@ async fn loot_master_must_be_a_team_member() {
 // ------------------------------------------------------------------------------------------
 
 /// `SCErrorMsgPacket(error, 0, true)` as the frames of one connection carry it.
-fn error_frame(error: i16) -> (u16, Vec<u8>) {
+pub(super) fn error_frame(error: i16) -> (u16, Vec<u8>) {
     use crate::packets::world::SCErrorMsgPacket;
     (
         sc::SCErrorMsgPacket,
@@ -2046,7 +2069,7 @@ fn error_frame(error: i16) -> (u16, Vec<u8>) {
 
 /// Registers the guild `id` with `members` (character, role); the characters are marked as
 /// members and join the guild chat like a login would.
-fn add_guild(server: &GameServer, id: u32, name: &str, members: &[(&Pc, u8)]) {
+pub(super) fn add_guild(server: &GameServer, id: u32, name: &str, members: &[(&Pc, u8)]) {
     use crate::data::world_data::SystemFaction;
     use crate::systems::social::expedition::{self, Expedition};
     let owner = members
@@ -2070,7 +2093,7 @@ fn add_guild(server: &GameServer, id: u32, name: &str, members: &[(&Pc, u8)]) {
             name: name.into(),
             owner_id: owner,
             owner_name: "Lead".into(),
-            mother_id: 148,
+            mother_id: 101,
             ..Default::default()
         },
         members: list,
@@ -2081,7 +2104,12 @@ fn add_guild(server: &GameServer, id: u32, name: &str, members: &[(&Pc, u8)]) {
 }
 
 /// `owner` invites the player called `name` into its (new or existing) team and they accept.
-async fn join_party(server: &GameServer, owner: &mut Pc, target: &mut Pc, name: &str) -> u32 {
+pub(super) async fn join_party(
+    server: &GameServer,
+    owner: &mut Pc,
+    target: &mut Pc,
+    name: &str,
+) -> u32 {
     let team_id = server
         .systems
         .social
@@ -2107,7 +2135,7 @@ async fn join_party(server: &GameServer, owner: &mut Pc, target: &mut Pc, name: 
         .id
 }
 
-fn name_body(n: &str) -> PacketStream {
+pub(super) fn name_body(n: &str) -> PacketStream {
     let mut s = PacketStream::new();
     s.write_str(n);
     s
