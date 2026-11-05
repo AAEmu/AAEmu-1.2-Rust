@@ -373,7 +373,7 @@ impl ClientPacket for CSChangeDoodadPhasePacket {
 /// allowance the cast target check adds; a skill-less / unknown / unbounded func gets the 5 m
 /// doodad interaction distance (`portal::NAVI_USE_RANGE`, also `looting::LOOT_TAKE_RANGE`) plus
 /// that allowance.
-fn in_func_reach(
+pub(crate) fn in_func_reach(
     server: &GameServer,
     player: &crate::world::PlayerRef,
     doodad: &crate::world::DoodadRef,
