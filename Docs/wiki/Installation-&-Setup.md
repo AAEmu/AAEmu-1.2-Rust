@@ -1,7 +1,7 @@
 # Installation & Setup
 
 - Audience: Contributors, players, and testers
-- Last verified against: `develop` on October 10, 2026
+- Last verified against: `main` on November 6, 2026
 - Prerequisites: stable Rust (rustup), required AAEmu dependencies/downloads,
   and Docker (Track A) or MySQL 8 (Track B)
 
