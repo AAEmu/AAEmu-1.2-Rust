@@ -4474,6 +4474,20 @@ and in NPC wandering / buff remaining times.
   `CSStartSkillPacket` item cast, item consumed once, cancel zero team),
   `camp_use_refusals_use_the_client_ids_and_keep_the_item` (342/343/344/386/345/459/444/639/
   442/443, item kept each time).
+* systems::housing (WP-SD2c, 2026-11-06): the headquarters follow the declaration. The camp
+  doodad bound by SD2b is the offense HQ from acceptance: `Headquarters::bind_declaration`
+  stores it against the declaration (no siege record yet) and `bind_materialised` stamps it
+  with the siege when the calendar materialises the record, so the offense teleport (17046)
+  and the `SCSiegeState` team position use the real camp. A restart re-binds the retained
+  4307 nearest the persisted camp position (`restore_declarations`, five metres); the GM
+  bind of a retained doodad still exists for explicit schedules. The defender HQ (3410) is
+  spawned at the warmup at the lodestone plus `Housing.DefenseHqOffset` (three floats); the
+  retail spawn rule is UNKNOWN, so the default `[0, 0, 0]` disables the spawn and keeps the
+  existing GM-bound behaviour. The authored 10-minute camp lifetime stays owned by the WP-S3
+  phase chain, as before. Tests: `declaration_camp_becomes_the_offense_hq_and_survives_a_rebind`,
+  `a_materialised_declaration_keeps_the_offense_hq_and_the_teleport_works` (offense teleport
+  packet at the camp position after materialisation),
+  `defense_hq_spawns_only_with_a_configured_lodestone_offset`.
 * systems::housing (siege result achievements, WP-SD6a, 2026-11-05): a finished siege credits
   `char_records` kinds 57/59 to the attacking roster and 58/60 to the defenders with
   `value1 = zone_group_id` (mapping EVIDENCED from the authored records and the Korean

@@ -82,6 +82,10 @@ impl System {
             dominion::runtime::apply_tower_state(server, &state);
         }
         manager::resume_dead_houses(server);
+        dominion::headquarters::Headquarters::restore_declarations(
+            &server.systems.housing.headquarters,
+            server,
+        );
         dominion::runtime::start_tick(server);
         manager::start_tax_task(server);
         // The WP-S3 doodad period watcher compares the live dominions with the calendar; it

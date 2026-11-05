@@ -111,6 +111,16 @@ pub fn tick(server: &GameServer, now: i64) {
                         "Dominion {}: declaration materialised into the cycle siege",
                         state.zone_group_id
                     );
+                    server
+                        .systems
+                        .housing
+                        .headquarters
+                        .bind_materialised(server, &state);
+                    let _ = server
+                        .systems
+                        .housing
+                        .headquarters
+                        .spawn_defense_hq(server, &state);
                     crate::systems::social::dominion::broadcast_siege_declared(server, &state);
                     crate::systems::social::dominion::broadcast_phase_change(server, &state);
                 }
@@ -332,6 +342,15 @@ pub fn attach_spawned_camp(server: &GameServer, zone: u32, doodad: &crate::world
         obj_id,
         (position.x, position.y, position.z),
     ) {
+        // The camp is the offense HQ from acceptance (WP-SD2c).
+        if let Err(error) = server
+            .systems
+            .housing
+            .headquarters
+            .bind_declaration(server, zone, doodad)
+        {
+            tracing::warn!("Dominion {zone}: the camp cannot become the offense HQ: {error}");
+        }
         crate::systems::social::dominion::broadcast_siege_declared(server, &state);
         crate::systems::social::dominion::broadcast_phase_change(server, &state);
     }
