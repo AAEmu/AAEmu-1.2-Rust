@@ -3278,6 +3278,23 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   for 4734 and 3 to exercise the authored rock/sheep dispatch and quantities. Ore 1534 uses
   real item 8077. Passing the stand-in cases is not proof of complete live/client content.
 
+* systems::npcs (2026-11-05, WP-K1): the 22 gather / collect funcs (`DoodadFuncButcher`,
+  `Catch`, `CerealHarvest`, `CropHarvest`, `CrystalCollect`, `DairyCollect`, `Dig`,
+  `DigTerrain`, `DyeingredientCollect`, `Feed`, `FiberCollect`, `FruitPick`, `GassExtract`,
+  `MachinePartsCollect`, `MedicalingredientMine`, `Mow`, `PlantCollect`, `SeedCollect`,
+  `SkinOff`, `SoilCollect`, `SpiceCollect`, `TreeByProductsCollect`) were log-only in the C#,
+  so a player harvesting their doodads got nothing and the phase never advanced. Shipped data:
+  each kind has 20-32 funcs whose `NextPhase` group holds the authored `DoodadFuncLootItem` /
+  timer chain (apple tree 317: FruitPick 27 -> 3278 LootItem 995 -> 2215 grown tree timer),
+  and the test doodad 1568 carries one of every kind. INFERRED rule (no capture): a player
+  caster whose func row has `NextPhase > 0` sets `ToNextPhase` and enters that group, like the
+  `OreMine` / `RockMine` / `Shear` port; rows with no next phase (`NULL`/`-1`/0) keep the old
+  behaviour (the `-1` despawn path is not entered), and a non-player caster does not advance.
+  No tool or labor gate is added: the interaction skill that opened the cast already pays its
+  own cost. UI / marker funcs (`Climb`, `OpenPaper`, `Bubble`, `Craft*`, `*Ui`, `Navi*`, ...)
+  stay log-only. `DoodadFuncEvidenceItemLoot`'s `Use` arm now logs at trace instead of warn
+  (its effect is the crime system's phase-func contribution).
+
 * systems::ai (2026-10-15): the optional compact patch
   `SQL/patches/compact/2026-10-14-fix-npc-ai-param-syntax.sql` repairs malformed Lua syntax
   in `npc_ai_params` 443, 835 and 1975 only when the original bytes match. It preserves authored
