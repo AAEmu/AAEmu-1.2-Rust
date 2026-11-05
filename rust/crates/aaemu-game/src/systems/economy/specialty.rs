@@ -508,7 +508,7 @@ impl CSListSpecialtyGoodsPacket {
     }
 
     fn run(self, _server: &GameServer, _conn: &mut GameConnection) {
-        tracing::warn!("ListSpecialtyGoods, ObjId: {}", self.obj_id);
+        tracing::debug!("ListSpecialtyGoods, ObjId: {}", self.obj_id);
     }
 }
 sync_client_packet!(CSListSpecialtyGoodsPacket);
@@ -529,7 +529,7 @@ impl CSSpecialtyRecordLoadPacket {
     }
 
     fn run(self, _server: &GameServer, _conn: &mut GameConnection) {
-        tracing::warn!(
+        tracing::debug!(
             "CSSpecialtyRecordLoadPacket, ZoneId: {}, Id: {}",
             self.zone_id,
             self.id
@@ -560,7 +560,7 @@ impl CSBuySpecialtyItemPacket {
     }
 
     fn run(self, _server: &GameServer, _conn: &mut GameConnection) {
-        tracing::warn!(
+        tracing::debug!(
             "BuySpecialtyItem, Id: {}, Currency: {}",
             self.id,
             self.currency

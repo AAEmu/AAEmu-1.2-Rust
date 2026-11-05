@@ -1415,3 +1415,35 @@ async fn auction_requires_an_auctioneer_in_range() {
     assert_eq!(f.len(), 1);
     assert_eq!(f[0].0, sc::SCErrorMsgPacket);
 }
+
+/// Posting, searching, buying and cancelling are the auction house's everyday traffic: they must
+/// not log at `WARN` (a rejected request still does).
+#[tokio::test]
+async fn auction_requests_are_not_logged_at_warn() {
+    use tracing::Level;
+    let (mut w, _log) = auction_world();
+    let (_, events) = crate::test_support::capture_events(|| {
+        let (_, lot) = post(&mut w, SWORD, 0, 1000, 2);
+        run::<CSAuctionSearchPacket>(&mut w, 1, &search_body(&AuctionSearch::default()));
+        // Bob pays the buyout price.
+        run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 1000));
+        let (_, mine) = post(&mut w, POTION, 1, 1000, 0);
+        run::<CSCancelAuctionPacket>(&mut w, 0, &cancel_body(mine.id));
+    });
+    assert!(w.server.systems.economy.auction.all_lots().is_empty());
+    let loud: Vec<_> = events.iter().filter(|(l, _)| *l <= Level::WARN).collect();
+    assert!(loud.is_empty(), "{loud:?}");
+    for what in [
+        "AuctionPost,",
+        "AuctionSearch,",
+        "AuctionBid,",
+        "AuctionCancel,",
+    ] {
+        assert!(
+            events
+                .iter()
+                .any(|(l, m)| *l == Level::DEBUG && m.starts_with(what)),
+            "{what}: {events:?}"
+        );
+    }
+}
