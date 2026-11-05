@@ -3253,10 +3253,85 @@ is the closest text.
   Guild kick: not in a guild `ONLY_EXPEDITION_MEMBER`, no Expel right or not a higher rank
   `FACTION_KICK_RIGHTS`, not a member `EXPEDITION_NO_TARGET` (a character "kicking" itself, as
   `Character.SetFaction` does, stays silent).
-- Not changed (silent as in the C#): the other guild management failures (`ChangeOwner`,
-  `ChangeMemberRole`, `ChangeExpeditionRolePolicy`, `Disband` only reports the two it always
-  did), the nation / dead-target checks of a guild invite, and the SetFaction removal described
-  under "C# bugs noticed".
+- Not changed here (silent as in the C#; fixed afterwards, see "Guild functions (2026-11-05)"):
+  the other guild management failures (`ChangeOwner`, `ChangeMemberRole`,
+  `ChangeExpeditionRolePolicy`, `Disband`), the nation / dead-target checks of a guild invite, and
+  the SetFaction removal described under "C# bugs noticed".
+
+## Guild functions (2026-11-05)
+
+The remaining guild (expedition) functions, found by comparing the C# with the 1.2 client's UI
+(`x2ui/expedition`, `dialoghandler`, the mirrored validators in `x2game12.c`). Error codes are
+`ErrorMessageType` values whose texts the client's `ui_texts` carry. Flow tests:
+`systems/social/guild_flow_tests.rs`; live suite `rust/verify/guild-funcs.vtest`.
+
+- **Rename (`CSRenameExpedition`, C#: logged only).** The C# never sent `SCExpeditionShowRenameUI`
+  and the data has no rename item, skill or cost, so the right is a server policy: the column
+  `expeditions.allow_change_name` (also sent as `SystemFaction.allow_change_name`, written as 0
+  before) says the leader may rename once. A GM grants it (`/allowguildrename <guild id | name>`):
+  the leader gets `SCExpeditionShowRenameUI` at once if online, else at its next login
+  (`prompt_rename_if_allowed` in `NotifyInGame`), and every client gets the faction record again
+  (`SCFactionList`). The leader sends `CSRenameExpedition {id, name, true}`: not in a guild 808,
+  not the leader of that guild 807, no pending right 32 (`FACTION_RIGHTS`; the nation variant
+  `is_expedition = false` gets 32 as well, there is no nation system), a name that breaks the
+  rules reopens the client's dialog with `SCFactionRetryRename(true, code, name)`. Success: name
+  saved, right cleared, `SCFactionRenamed(id, name, by_gm = false)` to every online player (the
+  client renames its faction record, clears its own flag and refreshes name plates) and the guild
+  chat channel is renamed. `/renameguild <guild id> <new name>` renames directly with
+  `by_gm = true` (the right stays). Both commands are access level 100 and apply the create
+  rules. The name rules are one function (`validate_name`) for create and rename, in the client's
+  order: UTF-16 length > 32 `EXPEDITION_NAME_LENGTH` 297, the configured regex
+  `EXPEDITION_NAME_CHARACTER` 296, the character-name block list (`blocked_texts.check_name`, as
+  the lobby applies it) `EXPEDITION_NAME_BADLIST` 298, a name another live guild uses
+  (case-insensitive; dismissed `$deleted-` guilds do not count) `EXPEDITION_NAME_EXIST` 299. The
+  C# only had the first, second and an exact-match duplicate check (dismissed guilds included).
+- **ChangeOwner (C#: silent).** Not a member 808; caller not the leader 32; to oneself 327
+  (`EXPEDITION_CHANGE_OWNER_SELF`); to somebody outside the guild 328; during a siege 568
+  (`EXPEDITION_OWNER_CANNOT_CHANGE_DURING_SIEGE`, the same siege test the dismissal uses).
+- **ChangeMemberRole (C#: silent).** Not a member 808; no Promote right, a target not strictly
+  below the caller, a new role not strictly below the caller, a new role without policy or the
+  leader's 255: 70 (`FACTION_CHANGE_MEMBER_ROLE_RIGHTS`); unknown target 309
+  (`EXPEDITION_NO_TARGET`).
+- **ChangeRolePolicy.** The C# let anybody with the Expel right edit any role's policy (a
+  Commander could edit the General's or its own). Now only the leader edits, and only roles below
+  255 that exist, a packet naming another guild is refused, all with 70; a role name that fails
+  the guild name regex / length 296. The 1.2 dialog edits the name and the invite / expel /
+  promote / siege-join flags only (`role_policy_tab_view.lua`), so the other flags keep the stored
+  value and the **stored** policy is what every member is sent (the packet's flags were
+  broadcast before).
+- **Invite.** A target of another alliance (`alliance_id` = `MotherId` of its faction, or the
+  faction itself when it has none, compared with the guild's) 304 `EXPEDITION_BAD_FACTION`; a dead
+  target 307 `EXPEDITION_BAD_STATUS`; a target in a battlefield (instant game) 783
+  `FACTION_INVITE_BATTLEFIELD`. The C# returned silently. (The battlefield check has no flow
+  test: there is no light fixture for an instant game.)
+- **Create.** The C# dropped `CSCreateExpedition.id` and used the owner's faction as the guild's
+  `MotherId`. Now the sponsor faction is honored: valid sponsors by the owner's alliance are Nuia
+  (148): 101, 102, 103, 105, 106, 107; Haranya (149): 108, 109, 110, 111, 113; outlaws (114):
+  161 (the dialog's list); another sponsor 321 (`EXPEDITION_CREATE_FACTION`, "wrong sponsor");
+  0 (a client that sends none, the bots) keeps the owner's faction as before. It becomes
+  `expeditions.mother`. The readers of the guild's `mother_id` still work for a sponsor of the
+  alliance: the fort owner faction (`dominion/fort.rs`) just takes the sponsor, and
+  `Character.SetFaction`'s test compares **alliances** now (it compared the exact faction, so a
+  change inside the alliance expelled from a guild founded under the old faction). A party member
+  of another alliance is 320 (`EXPEDITION_CREATE_MEMBER_FACTION`; the C# sent 321). Party members
+  that are offline are skipped, neither joining nor counting towards `PartyMemberCount` (the C#
+  added them as members marked online).
+- **Disband.** An owned territory is 301 (`EXPEDITION_OWNER_DISMISS`; was a chat line), a
+  registered / running siege 469 (`EXPEDITION_DISMISS_IN_SIEGE`), a non-leader 807 as before. The
+  dismissed guild still stays in the list as `$deleted-guild-N` (as in the C#), but
+  `faction_chunks()` (`SCFactionList` at login) skips it.
+- **Faction change (`Character.SetFaction`).** The C# called `Kick(p, p)` / `MemberRemoveFromTeam(p,
+  p, Kick)`, which need the Expel right and a higher rank / the party owner, so an ordinary member
+  was never removed. Now a forced leave without any right check (`expedition::leave_forced`;
+  `SCUnitExpeditionChanged` with `expel = false`, same broadcasts and saves as a voluntary
+  leave) and the party leaves through `LEAVE` instead of `KICK`. A leader of a guild with other
+  members first hands the guild to the highest-ranked remaining member (ties: the longest-standing
+  member, i.e. the first in the member list; the join date is not stored) and then leaves; a sole
+  member's guild is dismissed even if it owns territory or is in a siege (the dominion keeps a
+  dismissed guild as owner, which the fort code already treats as ownerless). The temporary
+  battlefield / duel factions (RPA-09) are untouched.
+- Not done (out of scope): the nation packets (0x015-0x019), the beginner expedition (CS 0x010 has
+  no opcode), guild chat `chat` flag enforcement, member memo, guild level / summon.
 
 ## Client skill cast authority (2026-10-20)
 
