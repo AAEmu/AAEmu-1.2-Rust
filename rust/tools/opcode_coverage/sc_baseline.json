@@ -1,8 +1,8 @@
 {
   "counts": {
     "sc_opcodes": 517,
-    "typeless": 76,
-    "never_sent": 52
+    "typeless": 75,
+    "never_sent": 53
   },
   "typeless": [
     "CSQuestAcceptConditionalPacket",
@@ -78,7 +78,6 @@
     "SCUnkPacket8",
     "SCWorldAABBPacket",
     "SCWorldAimPointPacket",
-    "SCWorldInteractionCanceledPacket",
     "SCWorldInteractionSkillListPacket",
     "SCWorldRayCastingResultPacket"
   ],
@@ -133,6 +132,7 @@
     "SCUnitOfflinePacket",
     "SCUnknownPacket",
     "SCUnlockCurrencySlotPacket",
+    "SCWorldInteractionCanceledPacket",
     "SCWorldMessagePacket",
     "SCWorldQueuePacket"
   ]
