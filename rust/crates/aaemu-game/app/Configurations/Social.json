@@ -1,0 +1,8 @@
+{
+	"Social": {
+		// Fill CSNaviOpenBounty with the wanted-player board instead of the empty list.
+		// Default false: a filled board broke the 1.2 client Lua in the C# server and the
+		// real-client check is still pending (PORTING.md, BOUNTY-board).
+		"BountyBoard": false
+	}
+}
