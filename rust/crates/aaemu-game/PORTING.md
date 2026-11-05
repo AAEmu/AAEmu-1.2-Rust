@@ -360,6 +360,39 @@ These `SpecialType` bodies were TODO stubs that only logged in the C# (`git show
 | `AccountAttributeEffect` + `SpecialEffects/AuctionPostAuthority` (special 117) | `systems/economy/account_attributes.rs`, `bridges.rs`, `world/session.rs` | added | Data: `account_attribute_effects` has 3 rows, all `kind_id = 1` (auction posting authority): item 8000027 `경매장 등록권` adds it account-wide (`is_add`, `count` 0, `time` 0, `bind_world` false) and two `is_add = false` rows remove it (VIP buff trigger, removal ticket item 8000058). Special 117 on buffs 7149 / 11034 / 8000012 grants kind 1 permanently. New `account_attributes` table (PK account/kind/world, nullable `end_time`, `world_id` 0 = not world bound), loaded on character select into `server.systems.economy.account_attributes` and persisted on every change. `is_add` upserts, otherwise every grant of the kind is deleted; `time == 0` is permanent, else `now + time` **seconds (unit inferred: all 1.2 values are 0)**. `has_account_attribute(account_id, kind)` is ready for gating; **the auction is deliberately not gated yet** (every character currently gets buff 8000012 from `UNIT_STATE_FORCED_BUFFS`, so a gate would need that decision first). |
 | `SpecialEffects/AddCharacterSlot` (special 91) | `systems/economy/character_slots.rs`, `db.rs`, `packets/c2g.rs`, `managers/character.rs` | added | Data: item 8000002 `캐릭터 슬롯확장 주문서` -> skill 8000002. Adds one `accounts.extra_character_slots` (`TINYINT UNSIGNED`, saturating at 255) for the caster's account, persists it and sends `SCGetSlotCountPacket` with the new value; `CSListCharacterPacket` sends that count instead of the old hard-coded 0. The character creation limit is the login-advertised base plus those purchased slots: aaemu-login sends `Login:MaxCharactersPerAccount` (default 6) in `ACJoinResponse`/`ACAuthResponse`, and `CharacterManager.Create` re-reads the account's slots inside the save lock and refuses with `CharacterCreateError::WorldLimit` (9) at `aaemu_commons::character_slots::character_slot_limit(base, extra)`; a MySQL error on that read falls back to the base alone. **Deviation (C#):** the C# `CharacterManager.Create` had no per-account character-count check and aaemu-login hard-coded 6 in both packets, so purchased slots could never be used. `Login:AdditionalCharactersPerServer` (the expandable limit) and `Login:PreSelectCharacterPeriod` (advertised in `ACJoinResponse.afs`) are Rust-only; the pre-select flag is accepted now and enables the lobby edit, and the game's `Characters:MaxPerAccount` / `Characters:PreSelectPeriod` must equal `Login:MaxCharactersPerAccount` / `Login:PreSelectCharacterPeriod` (documented pairs, no cross-process check; each server logs its effective values at startup). |
 
+#### Delayed `DisturbCasting` / `SCCastingDelayed` (2026-11-05)
+
+`systems::skills`: 1.2 packet `SCCastingDelayed` 0x0a6 (S->C, reader `FUN_397ca570`,
+`D:/aa-re/client12/out-x2game/x2game.dll.c`): `u16 skillId (0x40) ; u16 plotId (0x40) ; u32
+delay (0x3c)`. The client handler `FUN_391d5d70` calls `FUN_39395760(skillId, delay)` (adds the
+delay to the running cast of that skill id and rescales its animation) or
+`FUN_3938c520(plotId, delay)` (the same for a plot cast). Special effect 5 (`DisturbCasting`)
+has `value1` chance % and `value2` delay ms: 22 of its 24 rows have delay 0; the delayed rows
+are 997 (10 %, 1000), 11220 (100 %, 100) and 14687 (100 %, 10). Joining `skill_effects ->
+effects.actual_id -> special_effects`, only skill 12390 Low Kick reaches a delayed row (skill
+effect 5134 -> effects 5134 -> special 997).
+
+Rule now implemented: `delay > 0` and the victim runs a direct `Cast` task -> the task's
+pending wait (`SkillTaskSlot.extend_ms`) grows by the delay; the armed cast timer takes it
+under the slot lock and re-arms instead of completing, so the cast ends `delay` ms later.
+`SCCastingDelayed { skillId, 0, delay }` goes to the victim. `delay == 0` keeps the immediate
+interrupt. **Deviation from C#:** the C# `DisturbCasting` only cancelled the plot and never
+sent `SCCastingDelayed`; the delayed interrupt this replaces was Rust-only
+(`git show a2ab80abd^:AAEmu.Game/Models/Game/Skills/Effects/SpecialEffects/DisturbCasting.cs`).
+
+Capture-pending (WP-1): who besides the victim receives `SCCastingDelayed` (the 1.2 handler
+reads only the local cast, so viewers are not sent it; a player-controlled mount / pet cast has
+no connection of its own and is not told); how the real server delays a plot cast (the client
+uses plot id 0 for a direct cast, INFERRED from the two handler branches); and how a delayed
+disturb affects a channel or plot cast. Neither has a 1.2 delay packet, so both keep today's
+behaviour (the old delayed interrupt, with the liveness check), not an immediate interrupt and
+not an extension. A delayed disturb on a unit with no cast, channel or plot now does nothing
+instead of arming an interrupt that could hit a cast started during the delay.
+
+Tests: `systems::skills::tests::cast_delay_tests` (extension, `SCCastingDelayed` and completion
+at the new time, no-delay interrupt, cancelled-after-extension, delayed channel interrupt) and
+`systems::skills::packets::tests::casting_delayed_layout` (independent literal bytes).
+
 ### systems::npcs
 
 | Area (C#) | Rust | Status | Notes |

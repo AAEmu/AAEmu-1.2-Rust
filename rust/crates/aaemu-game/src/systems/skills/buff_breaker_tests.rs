@@ -319,6 +319,7 @@ fn channel(server: &GameServer, owner: &WorldObject, matching: bool) -> (SkillRe
             kind: SkillTaskKind::EndChanneling { channel_doodad: 0 },
             skill: skill.clone(),
             cancel: cancel.clone(),
+            extend_ms: 0,
         });
     });
     (skill, cancel)
@@ -614,6 +615,7 @@ async fn buff_breakers_cancel_only_the_corresponding_channel_without_reentering_
             kind: SkillTaskKind::EndChanneling { channel_doodad: 0 },
             skill: skill.clone(),
             cancel: cancel.clone(),
+            extend_ms: 0,
         });
     });
     let template = server.game_data.systems.skills.buff(GLIDER).unwrap();
