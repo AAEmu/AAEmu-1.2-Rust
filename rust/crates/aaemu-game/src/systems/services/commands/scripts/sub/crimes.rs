@@ -112,6 +112,45 @@ fn resolve_character(
     found
 }
 
+/// The `crime court jail` effect: put `target` in the court's holding cell with the
+/// `FORCIBLY_AWAITING_TRIAL` buff. Shared with the retail `/imprison` command so both use the
+/// same jail path (WP-SL6b).
+pub(crate) fn jail_court_room(
+    server: &GameServer,
+    target: &PlayerRef,
+    court_room: &crate::systems::social::trial::CourtRoom,
+) {
+    server
+        .systems
+        .social
+        .hooks
+        .get()
+        .force_dismount(server, target);
+    {
+        let mut c = target.data();
+        c.set_disabled_set_position(true);
+        if !c.unit.buffs.check_buff(buff::FORCIBLY_AWAITING_TRIAL) {
+            crime::add_own_buff(
+                server,
+                &mut c,
+                buff::FORCIBLY_AWAITING_TRIAL,
+                0,
+                crate::world::now_ms(),
+            );
+        }
+    }
+    crate::systems::dispatch_buff_events(server, &WorldObject::from(target));
+    let jail = &court_room.jail;
+    target.send(SCTeleportUnitPacket {
+        reason: 0,
+        error_message: 0,
+        x: jail.x,
+        y: jail.y,
+        z: jail.z,
+        z2: jail.yaw.to_radians(),
+    });
+}
+
 /// `WorldSpawnPosition.ToString()`.
 fn world_spawn_position_string(x: f32, y: f32, z: f32, roll: f32, pitch: f32, yaw: f32) -> String {
     let g = |v: f32| group_1(f64::from(v));
@@ -561,35 +600,7 @@ impl SubCommand for CrimeCourtSubCommand {
                         court_room.name
                     ),
                 );
-                server
-                    .systems
-                    .social
-                    .hooks
-                    .get()
-                    .force_dismount(server, &target);
-                {
-                    let mut c = target.data();
-                    c.set_disabled_set_position(true);
-                    if !c.unit.buffs.check_buff(buff::FORCIBLY_AWAITING_TRIAL) {
-                        crime::add_own_buff(
-                            server,
-                            &mut c,
-                            buff::FORCIBLY_AWAITING_TRIAL,
-                            0,
-                            crate::world::now_ms(),
-                        );
-                    }
-                }
-                crate::systems::dispatch_buff_events(server, &WorldObject::from(&target));
-                let jail = &court_room.jail;
-                target.send(SCTeleportUnitPacket {
-                    reason: 0,
-                    error_message: 0,
-                    x: jail.x,
-                    y: jail.y,
-                    z: jail.z,
-                    z2: jail.yaw.to_radians(),
-                });
+                jail_court_room(server, &target, &court_room);
             }
             _ => {}
         }
