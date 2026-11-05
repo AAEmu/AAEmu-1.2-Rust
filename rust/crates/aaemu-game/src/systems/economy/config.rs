@@ -1,4 +1,5 @@
-//! `Crafting` configuration (`Configurations/Crafting.json`).
+//! `Crafting` and `Loot` configuration (`Configurations/Crafting.json`,
+//! `Configurations/Loot.json`).
 
 use serde::Deserialize;
 
@@ -14,4 +15,19 @@ pub struct CraftingConfig {
         deserialize_with = "crate::config::lenient"
     )]
     pub require_learned_recipes: bool,
+}
+
+/// `Loot` (`Configurations/Loot.json`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct LootAnnounceConfig {
+    /// Send `SCItemAcquisitionPacket` (kind 1) to the other team members in loot range when a
+    /// character picks up loot. Default **false**: the kind-1 semantics and the loot sources are
+    /// INFERRED from the 1.2 client (WP-IT1), so the owner enables it after a live look at the
+    /// chat tab.
+    #[serde(
+        rename = "announcetoparty",
+        deserialize_with = "crate::config::lenient"
+    )]
+    pub announce_to_party: bool,
 }

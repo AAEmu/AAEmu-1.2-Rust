@@ -3,6 +3,8 @@
 
 use crate::packets::world::{SCChatMessagePacket, SCErrorMsgPacket};
 use crate::server::GameServer;
+use crate::systems::social::config::ChatConfig;
+use crate::systems::social::packets::chat::SCChatFailedPacket;
 use crate::world::{PlayerRef, WorldObject};
 
 /// `ErrorMessageType` values used by the social subsystem.
@@ -51,6 +53,35 @@ pub mod error {
 /// `Character.SendErrorMessage(type)` (`SCErrorMsgPacket(type, 0, true)`).
 pub fn send_error(p: &PlayerRef, error: i16) {
     p.send(SCErrorMsgPacket::new(error, 0, true));
+}
+
+/// A refused channel-bound chat action: the error id and the channel it belongs to (the
+/// `chname` of `SCChatFailedPacket`). The packet caps the name at 10 bytes when encoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatFailure {
+    pub error: i16,
+    pub channel: String,
+}
+
+impl ChatFailure {
+    pub fn new(error: i16, channel: impl Into<String>) -> Self {
+        Self {
+            error,
+            channel: channel.into(),
+        }
+    }
+}
+
+/// Answers a channel-bound chat failure with `SCChatFailedPacket(error, channel name)` when
+/// `Chat.ChatFailedPacket` is on, else with the `SCErrorMsgPacket` toast the server sent before
+/// the flag existed. Which failures retail answered with `SCChatFailed` is not captured
+/// (`CHAT-FAILED-1`, capture-pending), so the flag defaults to off.
+pub fn send_chat_failure(p: &PlayerRef, config: &ChatConfig, failure: ChatFailure) {
+    if config.chat_failed_packet {
+        p.send(SCChatFailedPacket::new(failure.error, &failure.channel));
+    } else {
+        send_error(p, failure.error);
+    }
 }
 
 /// `Character.SendMessage(type, message)` without a sender.

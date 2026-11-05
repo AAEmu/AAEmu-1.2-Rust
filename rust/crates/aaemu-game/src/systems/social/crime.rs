@@ -608,6 +608,19 @@ impl CrimeManager {
         self.st().victims.insert(id, info);
     }
 
+    /// Updates the prefetched offline-victim name cache (character rename). Crime rows store
+    /// ids only; the name is not persisted. Returns the number of changed caches.
+    pub fn rename_character(&self, character_id: u32, new_name: &str) -> usize {
+        let mut st = self.st();
+        match st.victims.get_mut(&character_id) {
+            Some(info) if info.name != new_name => {
+                info.name = new_name.to_string();
+                1
+            }
+            _ => 0,
+        }
+    }
+
     /// The values one `SCCrimeRecordsPacket` entry reads: the victim from the world
     /// (`GetCharacterById`) or the prefetched offline values, the reporter's name from the
     /// `NameManager`. Must be called without any player data lock held.

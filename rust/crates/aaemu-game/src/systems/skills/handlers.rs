@@ -508,6 +508,23 @@ pub fn start_skill(server: &GameServer, conn: &mut GameConnection, mut p: CSStar
             }
             return;
         };
+        // `siege_items` situations (WP-SD3): the 1.2 client pre-checks them and shows the
+        // row's USAGE text for 431; this is the server's defence in depth for a forged cast.
+        // The refusal runs before `skill::use_skill`, so the item is not consumed.
+        if crate::systems::housing::dominion::siege_items::refused(server, &player, template_id) {
+            tracing::info!(
+                character = %player.data().unit.name,
+                item_template_id = template_id,
+                "Client item cast refused: the siege item is not usable in this situation"
+            );
+            crate::systems::economy::inventory::send_error_message(
+                &player,
+                crate::systems::economy::error_message::CANNOT_USE_SIEGE_ITEM,
+                0,
+                true,
+            );
+            return;
+        }
         let Some(skill) = template_skill(server, skill_id) else {
             return;
         };

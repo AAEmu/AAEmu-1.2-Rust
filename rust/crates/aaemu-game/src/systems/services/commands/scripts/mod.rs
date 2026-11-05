@@ -77,6 +77,7 @@ pub mod premium_cmd;
 pub mod quest_cmd;
 pub mod reload_auction;
 pub mod reload_configs;
+pub mod rename;
 pub mod resend_house_tax_mail;
 pub mod reset_skill_cooldowns;
 pub mod retail;
@@ -528,6 +529,8 @@ pub fn all_commands(env: &ScriptEnv) -> Vec<(&'static [&'static str], Arc<dyn Co
         ),
         // Mail (Rust only: `/mail admin` system letter to an online or offline character)
         (&["mail"], Arc::new(mail::MailCommand::new(env))),
+        // Rename (Rust only: GM character rename, online or offline)
+        (&["rename"], Arc::new(rename::Rename::new(env))),
         // Retail GM commands (WP-SL6b: tax / crime / social command names the 1.2 client
         // knows; the C# server had no equivalents).
         (

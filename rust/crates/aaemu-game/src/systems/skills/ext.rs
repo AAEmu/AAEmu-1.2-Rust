@@ -227,8 +227,9 @@ pub trait NpcSkillHooks: Send + Sync {
         _zone_id: u32,
         _pos: PositionAndRotation,
         _delay_ms: i32,
-    ) {
+    ) -> Option<crate::world::DoodadRef> {
         not_ported("SpawnDoodad");
+        None
     }
 
     /// `npc.Template.PetItemId` (0 = none).

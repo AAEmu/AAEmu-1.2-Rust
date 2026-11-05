@@ -37,6 +37,7 @@ use crate::world::{NpcRef, PlayerRef, WorldObject};
 use super::error_message;
 use super::inventory::{self, Inv, ItemTxn};
 use super::item_handlers::{active, sync_client_packet};
+use super::item_notify_packets::SCItemAcquisitionPacket;
 use super::loot::{self, LootConfig, LootRng, PlayerLoot, SharedRandom};
 use super::loot_packets::{
     loot_owner_type, looting_rule_method, LootingRule, SCLootBagDataPacket, SCLootDiceNotifyPacket,
@@ -291,11 +292,29 @@ fn lock(c: &Mutex<LootingContainer>) -> Guard<'_> {
 struct Ctx<'t, 'a> {
     txn: &'t mut ItemTxn<'a>,
     rng: &'t mut dyn LootRng,
+    /// The loot granted by this operation, for the `SCItemAcquisitionPacket` announcement
+    /// (WP-IT1): the receiving character and the looted stack as it was in the container.
+    pickups: Vec<(PlayerRef, Item)>,
 }
 
 impl Ctx<'_, '_> {
     fn server(&self) -> &GameServer {
         self.txn.server
+    }
+
+    fn new<'t, 'a>(txn: &'t mut ItemTxn<'a>, rng: &'t mut dyn LootRng) -> Ctx<'t, 'a> {
+        Ctx {
+            txn,
+            rng,
+            pickups: Vec::new(),
+        }
+    }
+
+    /// Remembers a successful loot grant when the party announcement is enabled.
+    fn record_pickup(&mut self, receiver: &PlayerRef, item: Item) {
+        if self.server().config.loot.announce_to_party {
+            self.pickups.push((receiver.clone(), item));
+        }
     }
 
     fn send(&mut self, player_id: u32, p: impl crate::net::packet::ServerPacket + 'static) {
@@ -577,31 +596,31 @@ impl LootManager {
     pub fn make_loot_public(server: &GameServer, obj_id: u32) {
         let lm = &server.systems.economy.loot;
         let Some(c) = lm.get(obj_id) else { return };
-        let packet;
+        let mut packet = None;
+        let announcements;
         {
             let mut txn = ItemTxn::begin(server);
             let mut rng = SharedRandom;
-            let mut ctx = Ctx {
-                txn: &mut txn,
-                rng: &mut rng,
-            };
+            let mut ctx = Ctx::new(&mut txn, &mut rng);
             let mut g = lock(&c);
             force_loot_roll_to_finish(&mut ctx, &mut g);
-            if g.items.is_empty() {
-                return;
+            announcements = pickup_announcements(&mut ctx, &g);
+            if !g.items.is_empty() {
+                // Force full public looting for all non-claimed items
+                if let Some(r) = g.team_looting_rule.as_mut() {
+                    r.loot_method = looting_rule_method::PUBLIC;
+                    r.minimum_grade = 0;
+                    r.roll_for_bind_on_pickup = false;
+                }
+                packet = Some(SCLootableStatePacket {
+                    loot_owner_type: g.owner_type,
+                    loot_owner_obj_id: g.owner_obj_id,
+                    has_loot: true,
+                });
             }
-            // Force full public looting for all non-claimed items
-            if let Some(r) = g.team_looting_rule.as_mut() {
-                r.loot_method = looting_rule_method::PUBLIC;
-                r.minimum_grade = 0;
-                r.roll_for_bind_on_pickup = false;
-            }
-            packet = SCLootableStatePacket {
-                loot_owner_type: g.owner_type,
-                loot_owner_obj_id: g.owner_obj_id,
-                has_loot: true,
-            };
         }
+        send_pickup_announcements(announcements);
+        let Some(packet) = packet else { return };
         // LootOwner?.BroadcastPacket(packet, false)
         if let Some(obj) = server.world.object(obj_id) {
             if let Some(world) = server.world.world_of(&obj) {
@@ -624,7 +643,7 @@ impl LootManager {
     ) {
         let c = server.systems.economy.loot.container(owner_obj_id);
         let mut txn = ItemTxn::begin(server);
-        let mut ctx = Ctx { txn: &mut txn, rng };
+        let mut ctx = Ctx::new(&mut txn, rng);
         let mut g = lock(&c);
         if !g.opened_by.contains(&player.character_id) {
             g.opened_by.push(player.character_id);
@@ -647,6 +666,11 @@ impl LootManager {
                 );
             }
         }
+        let announcements = pickup_announcements(&mut ctx, &g);
+        drop(g);
+        drop(ctx);
+        drop(txn);
+        send_pickup_announcements(announcements);
     }
 
     /// `LootingContainer.TryTakeLoot(player, itemIndex, null, didLootAll)`.
@@ -677,9 +701,15 @@ impl LootManager {
     ) -> bool {
         let c = server.systems.economy.loot.container(owner_obj_id);
         let mut txn = ItemTxn::begin(server);
-        let mut ctx = Ctx { txn: &mut txn, rng };
+        let mut ctx = Ctx::new(&mut txn, rng);
         let mut g = lock(&c);
-        try_take_loot_locked(&mut ctx, &mut g, player, item_index, did_loot_all)
+        let taken = try_take_loot_locked(&mut ctx, &mut g, player, item_index, did_loot_all);
+        let announcements = pickup_announcements(&mut ctx, &g);
+        drop(g);
+        drop(ctx);
+        drop(txn);
+        send_pickup_announcements(announcements);
+        taken
     }
 
     /// `LootingContainer.CloseBag(player, ...)`.
@@ -699,7 +729,7 @@ impl LootManager {
     ) {
         let c = server.systems.economy.loot.container(owner_obj_id);
         let mut txn = ItemTxn::begin(server);
-        let mut ctx = Ctx { txn: &mut txn, rng };
+        let mut ctx = Ctx::new(&mut txn, rng);
         let mut g = lock(&c);
         let name = player.data().unit.name.clone();
         let Some(entry) = g.items.get_mut(&item_index) else {
@@ -738,6 +768,11 @@ impl LootManager {
         if done {
             finish_rolling(&mut ctx, &mut g, item_index);
         }
+        let announcements = pickup_announcements(&mut ctx, &g);
+        drop(g);
+        drop(ctx);
+        drop(txn);
+        send_pickup_announcements(announcements);
     }
 }
 
@@ -763,6 +798,99 @@ fn distance(server: &GameServer, a: &WorldObject, b: &WorldObject) -> f32 {
         return 0.0;
     }
     pa.distance_to(&pb, false).max(0.0)
+}
+
+/// `SCItemAcquisitionPacket` type field: the only value the 1.2 client acts on (party loot line).
+const ACQUISITION_KIND_PARTY_LOOT: u8 = 1;
+
+/// A party loot announcement ready to send: one packet per receiving character and the other
+/// team members in range of that character.
+type PickupAnnouncements = Vec<(SCItemAcquisitionPacket, Vec<PlayerRef>)>;
+
+/// Collects the pickup announcements of the current looting operation (WP-IT1).
+///
+/// Runs while the looting container is held: the recipient team comes from the container's
+/// `KillerTeam` (the team the loot was generated for, the same team `TryLoot` distributes to),
+/// and the range is [`MAX_LOOTING_RANGE`], the loot distribution range used by
+/// [`LootManager::generate_loot_with`]. The looter is never a recipient. The packets are sent
+/// by [`send_pickup_announcements`] once every lock is released.
+fn pickup_announcements(ctx: &mut Ctx<'_, '_>, g: &Guard<'_>) -> PickupAnnouncements {
+    if ctx.pickups.is_empty() {
+        return Vec::new();
+    }
+    let server = ctx.txn.server;
+    let team = g.killer_team.and_then(|team_id| {
+        server
+            .systems
+            .economy
+            .loot
+            .hooks
+            .teams
+            .get()
+            .and_then(|h| h.active_team(server, team_id))
+    });
+    let Some(team) = team else {
+        return Vec::new();
+    };
+    // One packet per receiver; the first pickups keep their order and the rest are dropped at
+    // the wire's `u8` item count (the 1.2 reader reads exactly that many records).
+    let mut groups: Vec<(u32, PlayerRef, Vec<Item>)> = Vec::new();
+    for (receiver, item) in ctx.pickups.drain(..) {
+        match groups
+            .iter_mut()
+            .find(|(id, _, _)| *id == receiver.character_id)
+        {
+            Some((_, _, items)) => items.push(item),
+            None => groups.push((receiver.character_id, receiver, vec![item])),
+        }
+    }
+    let mut out = Vec::new();
+    for (_, receiver, mut items) in groups {
+        // The announcement names a member of the loot's team; a public looter outside it does
+        // not announce to that team.
+        if !team
+            .members
+            .iter()
+            .any(|m| m.character_id == receiver.character_id)
+        {
+            continue;
+        }
+        items.truncate(usize::from(u8::MAX));
+        let looter = WorldObject::from(&receiver);
+        let recipients: Vec<PlayerRef> = team
+            .members
+            .iter()
+            .filter(|m| m.character_id != receiver.character_id)
+            .filter(|m| {
+                let member = WorldObject::from(*m);
+                server.world.world_of(&member).map(|w| w.id)
+                    == server.world.world_of(&looter).map(|w| w.id)
+                    && distance(server, &member, &looter) <= MAX_LOOTING_RANGE
+            })
+            .cloned()
+            .collect();
+        if recipients.is_empty() {
+            continue;
+        }
+        let packet = SCItemAcquisitionPacket {
+            kind: ACQUISITION_KIND_PARTY_LOOT,
+            char_name: receiver.data().unit.name.clone(),
+            items,
+        };
+        out.push((packet, recipients));
+    }
+    out
+}
+
+/// Sends the announcements collected by [`pickup_announcements`], after the looting container,
+/// the item transaction and every character lock have been released.
+fn send_pickup_announcements(announcements: PickupAnnouncements) {
+    for (packet, recipients) in announcements {
+        let mut out = crate::net::connection::Fanout::new(&packet);
+        for recipient in recipients {
+            out.send(&recipient.conn);
+        }
+    }
 }
 
 fn failed(ctx: &mut Ctx<'_, '_>, g: &Guard<'_>, to: u32, error: i16, idx: u16, template_id: u32) {
@@ -1061,6 +1189,8 @@ fn try_distribute(
     let Some(mut entry) = g.items.remove(&idx) else {
         return false;
     };
+    // The stack as it was in the loot, for the party acquisition announcement.
+    let acquired = entry.item.clone();
     let pid = player.character_id;
     let old_id = entry.item.id;
     let template_id = entry.item.template_id;
@@ -1173,6 +1303,7 @@ fn try_distribute(
         // The grant built its own item: the pre-allocated id was never used.
         server.ids.item.release_id(new_id);
     }
+    ctx.record_pickup(player, acquired);
     ctx.send(
         pid,
         SCLootItemTookPacket {

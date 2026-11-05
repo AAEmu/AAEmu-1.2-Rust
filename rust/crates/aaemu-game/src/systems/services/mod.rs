@@ -33,6 +33,7 @@ pub mod accounts;
 pub mod beauty_salon;
 pub mod character;
 pub mod character_packets;
+pub mod character_rename;
 pub mod commands;
 pub mod discord;
 pub mod expands;

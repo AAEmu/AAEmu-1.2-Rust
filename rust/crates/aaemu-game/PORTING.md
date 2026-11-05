@@ -574,7 +574,7 @@ wrote, from the 1.2 client readers only:
   reader `FUN_397c1f80` (`x2game.dll.c:1717976`); the item records use the standard reader
   `FUN_3961f500` (`x2game.dll.c:1301392`), the same record `SCItemTaskSuccessPacket` writes.
   The handler acts only for type 1 (an item link line naming `charName`), which is INFERRED to
-  be a party/raid member announcement.
+  be a party/raid member announcement. WP-IT1 now sends it (see below).
 * `SCItemDetailUpdatedPacket` 0x093: `u64 itemId, u8 x, u8 index, ItemDetail`, reader
   `FUN_397b3840` (`x2game.dll.c:1707583`); `ItemDetail` is the `FUN_3961edf0`
   (`x2game.dll.c:1301101`) `u8 detailType` plus its fixed body. The two zeroed bytes between the
@@ -584,13 +584,31 @@ wrote, from the 1.2 client readers only:
   (`x2game.dll.c:1707572`) followed by the `SCItemTaskSuccessPacket` reader `FUN_397d1d00`
   (`x2game.dll.c:1729938`).
 
-All four are **capture-pending** and deliberately never sent, because no 1.2 zone code or capture
-shows their triggers: **ITEM-NOTIFY-1** (craft unlock: the Rust server never locks craft
-materials), **ITEM-NOTIFY-2** (acquisition: which grades/sources announce is unknown),
+`SCCraftItemUnlockPacket`, `SCItemDetailUpdatedPacket` and `SCItemTaskNotifyPacket` are
+**capture-pending** and deliberately never sent, because no 1.2 zone code or capture shows their
+triggers: **ITEM-NOTIFY-1** (craft unlock: the Rust server never locks craft materials),
 **ITEM-NOTIFY-3** (detail update) and **ITEM-NOTIFY-4** (task notify: probably item tasks for an
-owner other than the viewer). Their byte layouts are test-locked in the module; the types are
-listed in `rust/tools/opcode_coverage/sc_baseline.json` as typed-but-never-sent, and a future
-trigger must remove them from that list.
+owner other than the viewer). Their byte layouts are test-locked in the module and they stay in
+`rust/tools/opcode_coverage/sc_baseline.json` as typed-but-never-sent; a future trigger must
+remove them from that list.
+
+#### Party loot announcement `SCItemAcquisitionPacket` (WP-IT1, 2026-11-06)
+
+`systems/economy/looting.rs` now sends one `SCItemAcquisitionPacket` per loot pickup to the
+other team members: corpse / loot-bag picks (`CSLootItemPacket`, `CSLootOpenBagPacket` loot-all)
+and party-distributed loot (rotate winner / dice / loot master, through `try_distribute`). The
+packet carries kind `1`, the receiving character's name and the looted stacks as they were in the
+container (the client filters which templates announce with `FUN_39695dc0`), capped at the wire's
+`u8` item count. Recipients come from the container's `KillerTeam` (`active_team`, the same team
+`TryLoot` distributes to): every member except the receiver, in the same world instance, within
+`MAX_LOOTING_RANGE` (200 m, `looting.rs:48`, the loot distribution range used by
+`generate_loot_with`). The recipients are collected while the looting container is locked; the
+packets are sent after the container, item-transaction and character locks are released. The
+whole feature is behind `Loot:AnnounceToParty` (`Configurations/Loot.json`, default **false**).
+
+INFERRED, not evidenced: kind `1` as the party-loot line (client handler `FUN_391d5760` acts only
+for 1 and the `ITEM_ACQUISITION_BY_LOOT` event text), the loot sources and the range. The C#
+never sent this packet (it only declared the opcode), so there is no C# behaviour to mirror.
 
 #### Item use gates from data (2026-11-04)
 
@@ -1341,6 +1359,47 @@ live acceptance remain pending.
 | `GameData/Framework` (`GameDataManager`, `IGameDataLoader`, `GameDataAttribute`) | `data/mod.rs`, `systems::SystemsData::load` | done (by design) | The reflection-driven loader list is the explicit `GameData::load` + per-subsystem `Data::load`; `Load` / `PostLoad` order is the call order there. |
 | `Models/Tasks/SaveTask/SaveTickStartTask` | `managers/save.rs` | done (by design) | The periodic save is a Tokio interval instead of a `TaskManager` task (not counted in `GetQueueCount`). |
 | `Utils/{MathUtil, NumericExtensions, Converters/*, DB/HoldablesSchemaCheck}` | `utils/` | done | `Utils/DB/SQLite*` = `data::sqlite`, `Utils/IdManager` = `managers::id`. `SphereCommandUtil` / `QuestCommandUtil`: `services::commands::scripts::{sphere, quest_cmd}`. |
+
+#### Character rename (`SCCharacterRenamed` 0x05a, WP-AC2)
+
+Rust only: the 1.2 client has no packet or UI that starts a character rename (the only client
+rename packet is `CSRenameExpedition`, guild / nation), so the trigger is the GM command
+`/rename <old> <new>` (`commands/scripts/rename.rs`) through
+`systems/services/character_rename.rs`. It works online and offline.
+
+* **Wire format (EVIDENCED).** `SCCharacterRenamedPacket` is `{ u32 charId, string oldName,
+  string newName }` (client serializer `FUN_397b7820`). The client handler `FUN_391df6e0`
+  updates the unit-name cache (`FUN_393c8520`), the chat / friend caches (`FUN_393de080`) and
+  the expedition / family member names (`FUN_392fb550`). It was defined but never sent.
+* **Recipients (INFERRED).** Viewers of the character (its world instance's
+  `players_around`), its online friends (owners that keep it in `friends`), its guild and
+  family members, and the character itself, one packet per recipient. The C# never sent the
+  packet, so there is no sender to copy; the set follows what the client handler updates.
+* **Rules.** The name goes through `NameManager::validate_character_name_with_blocks` (regex,
+  blocked texts, `allowed_name_chars` when loaded); the same name, a name held by another
+  character and a deleted / pending-deletion row are refused. `NameManager::rename_character`
+  swaps the id and name maps under one write lock (no reader sees neither or both) and refuses
+  to clobber another character's name. The check, the `characters.name` UPDATE and the cache
+  swap share `SaveManager::transaction_lock` with character create / the lobby edit, so a
+  concurrent create of the new name has exactly one winner.
+* **Persisted copies and their memory caches.** The **authoritative** `characters.name` and the
+  copies the server reads back are updated in the same database transaction:
+  `mails.sender_name` / `receiver_name`, `expedition_members.name`, `expeditions.owner_name`,
+  `family_members.name`, `nations.owner_name`, `shipyards.owner_name` (the completion / decay
+  path resolves the owner with `character_by_name`, so the live shipyard's `owner_name` and
+  unit name are updated too), `auction_house.client_name` / `bidder_name` and
+  `character_rank_scores.account` (the character name the client shows where the login account
+  is unknown). The managers that loaded these rows and save from memory are updated after the
+  commit while the save transaction lock is still held, so a later save cannot put the old
+  names back: `MailManager`, `NationManager`, `AuctionManager`, `RankingManager`, the guild /
+  family / shipyard caches, and the runtime-only `TrialManager` defendant name and
+  `CrimeManager` offline-victim cache (neither is persisted). `housings` stores only the owner
+  id and resolves the owner name from the name cache, so no house row changes. `friends` /
+  `blocked` store ids only; `mates.name` and `slaves.name` are pet / vehicle names, not
+  character names.
+* **Deviation from the C#.** The C# had the packet definition and the lobby edit's name change
+  but no world-rename path; the Rust adds the GM command, the broadcast and the copy updates.
+  There is no 1.2 client trigger to capture, so the recipients stay INFERRED.
 
 ### systems::ai
 
@@ -2468,6 +2527,24 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   delay at 0 (the previous C# behaviour, **capture-pending CHAT-SPAM-1**). To enable the limit,
   set `Chat.ChatGroupDelays[i]` (milliseconds) and optionally `Chat.ChatTypeGroups` in
   `Configurations/Chat.json`; the same values are sent to the client and enforced by the server.
+* systems::social: **`SCChatFailedPacket`.** The 1.2 reader `FUN_397c2950` is
+  `i16 ErrorMessage ; string chname (max 10)`; its handler `FUN_391d8de0` raises the client's
+  `CHAT_FAILED(error, chname)` event (the `chat_msg_event.alb` handler displays the error text).
+  With `Chat.ChatFailedPacket` on (`Configurations/Chat.json`, default `false`) the server
+  answers the channel-bound failures it already detects with this packet: the user-channel
+  join / leave / message errors `CHAT_NO_CHANNEL` 270, `CHAT_CHANNEL_ALREADY_EXISTS` 269,
+  `CHAT_ALREADY_JOINED_CHANNEL` 271, `CHAT_PRIVATE_CHANNEL` 272, `CHAT_WRONG_PASSWORD` 273 and
+  `CHAT_NOT_JOINED_CHANNEL` 467 carry the requested or stored channel name (capped at the
+  packet's 10 bytes), while the "not in" errors of party 267, raid 268, expedition 311 and
+  family 412 carry the labels "Party", "Raid", "Expedition" and "Family" (the 1.2
+  `chat_msg_event.alb` handler displays only the error, so these strings are informational and
+  retail's exact values are not captured). Every other chat
+  failure (whisper 265 / 437, the raid-owner check 496, the spam delay `0x108`) keeps
+  `SCErrorMsgPacket`. **Capture-pending (CHAT-FAILED-1):** which failures retail 1.2 sent as
+  `SCChatFailed` is unknown, so the flag defaults to off and the frames stay exactly as before.
+  Tests: `chat_failed_writes_i16_error_then_the_channel_name`,
+  `chat_failed_channel_name_is_capped_at_ten_bytes_on_a_char_boundary`,
+  `channel_bound_chat_failures_use_scc_chat_failed_only_when_enabled`.
 * systems::social: **Words.** `blocked_texts` is applied to character names only (`check_name`);
   the client's chat masking (`check_chat`, `ignore_texts`) happens in the 1.2 client before the
   message is sent (`FUN_393C76B0` / `FUN_393C78E0` / `FUN_393C7A10`), and `replace_chats` /
@@ -4459,6 +4536,108 @@ and in NPC wandering / buff remaining times.
   20:30..22:30 times never hit one); `view_at` returns None for the whole zone when its next
   rotation cycle cannot be built; and without WP-S2 (declaration) the calendar never enters
   warmup/siege on its own, so periods 3/4 exist only through an explicit GM schedule.
+* systems::housing / systems::social (WP-SD2a, 2026-11-06): the siege declaration is now
+  persistent state, and the weekly calendar hands it over to the explicit siege record at the
+  cycle's warmup start. `DominionState.declaration` holds the attacker expedition, the
+  accepted time, the cycle's `auction_start` and the camp position; at most one declaration
+  exists per zone and cycle (a second one is `DominionError::AlreadyDeclared` /
+  `DeclaredByOther`, mapped by the caller to client 442/443). It is persisted in the new
+  `dominions.declaration_attacker/at/cycle/hq_x/hq_y/hq_z` columns (the doodad obj id is
+  runtime-only and re-bound after a restart). The declaration is cleared by cancel, by a
+  capture or forced release, and when its cycle's warmup materialises it. The calendar reads
+  `Calendar::view_for_declaration`: a declaration of the running cycle keeps the authored
+  2 -> 3 -> 4 -> 5 walk (`FUN_392f7db0`); a declaration from another cycle changes nothing.
+  At warmup the record is created with the cycle's real `warmup/siege` start and siege end
+  (not `now + delay`), with the defender's authored `siege_settings` limits frozen in; the
+  announcement is `SCSiegeDeclared` (offense team) followed by the phase `SCSiegeState`. A
+  calendar-materialised record stays described by the calendar (the GM test clock walks its
+  periods; the authority tick uses the calendar clock for it, which equals the real clock in
+  production), while a GM `/dominion schedule` keeps its own timers and overrides. A
+  declaration whose expedition disbands, or that is still pending when warmup/siege/peace
+  passes, is dropped and announced with a zero offense team (`SCSiegeDeclared`), the
+  client's "nobody declared" state (INFERRED: the client's cancel path is the zero team,
+  `FUN_392f7cc0`; the disband/owner-change drop is INFERRED, low risk). On restart a
+  declaration older than one cycle (7 days) is discarded. **Assumption (capture-pending):**
+  the attacker `ni/nr/limit` in the declaration snapshot use the only evidenced cap, the
+  defender `siege_settings` row's `num_defenders + num_reinforcements` (siege.md 1.3 says
+  the attacker's values are UNKNOWN). The declaration route (camp use) is WP-SD2b; the
+  cancel trigger's UI and the defense HQ offset are WP-SD2b/SD2c. Tests:
+  `second_declaration_is_refused_for_self_and_other_expeditions`,
+  `cancel_clears_only_the_declaring_expedition`,
+  `materialisation_creates_exactly_one_siege_with_the_cycle_times`,
+  `a_declaration_requires_an_owned_territory_and_never_coexists_with_a_live_siege`,
+  `release_expedition_drops_a_declaration_it_attacked_or_accepted`,
+  `a_declaration_of_the_running_cycle_keeps_the_warmup_and_siege_walk`,
+  `calendar_snapshot_carries_a_matching_declaration_and_zero_team_after_cancel`,
+  `declaration_materialises_at_warmup_and_the_calendar_walks_periods_three_to_five`,
+  `dominion_declaration_round_trips_through_its_row` (MySQL),
+  `a_declaration_that_cannot_belong_to_a_running_cycle_is_discarded_on_restart`.
+* systems::housing / systems::skills (WP-SD2b, 2026-11-06): the Siege Camp item use now runs
+  the declaration. The `SpawnDoodad(4307)` effect of skill 16918 (the six
+  `siege_zones.declare_item_id` items) asks `dominion::declare::handle_camp_use` before it
+  spawns; the check runs under the housing operation lock and only while
+  `Housing.SiegeCalendar` is enabled (with the calendar off, the camp use keeps its old plain
+  spawn, so GM-scheduled sieges are untouched). Rules, in this server's order, with the
+  client's ids: zone has no owned dominion 342; the caster's expedition is the owner 343; the
+  camp item is not this zone's `declare_item_id` 344; not the declare period (2) 386;
+  horizontal distance to the live lodestone below `guard_tower_settings.radius_declare`
+  (250/450 m, the authored value, not the old `OFFENSE_HQ_MIN_DISTANCE` constant) 345; the
+  caster's expedition rank lacks the `SiegeMaster` policy 459; pirate expedition 444; the
+  expedition already has an unfinished siege 639; a declaration already exists 442/443
+  (`DominionError::AlreadyDeclared`/`DeclaredByOther`). On success the declaration is
+  recorded, the camp is spawned and its real obj id/position are bound into the declaration
+  (a second `SCSiegeDeclared`, then the phase `SCSiegeState`, carries the offense team); the
+  source item is consumed by the normal cast debit. Every refusal cancels the effect
+  (`effect_cancelled`), which makes the cast path refund the item — a refused declaration
+  keeps the camp. A spawn failure after acceptance also rolls the declaration back and
+  cancels the effect. Cancelling is `dominion undeclare [zone]` (the GM command), which clears
+  the declaration and broadcasts the zero offense team; the in-game trigger is UNKNOWN
+  (destroying/removing the camp is the candidate), so it is capture-pending.
+  **Capture-pending assumptions:** 459 is used for the missing policy although 581 is the
+  other candidate text; the placement thresholds behind 625 (resurrection point), 633
+  (house), 661 (another zone) and 741 (obstacle), and the "siege too imminent" window behind
+  760, are UNKNOWN and are NOT enforced (no refusal today); the cancellation trigger's UI is
+  UNKNOWN. The check order is this server's policy. Tests:
+  `camp_use_records_a_declaration_consumes_the_item_and_announces_the_team` (real
+  `CSStartSkillPacket` item cast, item consumed once, cancel zero team),
+  `camp_use_refusals_use_the_client_ids_and_keep_the_item` (342/343/344/386/345/459/444/639/
+  442/443, item kept each time).
+* systems::housing (WP-SD2c, 2026-11-06): the headquarters follow the declaration. The camp
+  doodad bound by SD2b is the offense HQ from acceptance: `Headquarters::bind_declaration`
+  stores it against the declaration (no siege record yet) and `bind_materialised` stamps it
+  with the siege when the calendar materialises the record, so the offense teleport (17046)
+  and the `SCSiegeState` team position use the real camp. A restart re-binds the retained
+  4307 nearest the persisted camp position (`restore_declarations`, five metres); the GM
+  bind of a retained doodad still exists for explicit schedules. The defender HQ (3410) is
+  spawned at the warmup at the lodestone plus `Housing.DefenseHqOffset` (three floats); the
+  retail spawn rule is UNKNOWN, so the default `[0, 0, 0]` disables the spawn and keeps the
+  existing GM-bound behaviour. The authored 10-minute camp lifetime stays owned by the WP-S3
+  phase chain, as before. Tests: `declaration_camp_becomes_the_offense_hq_and_survives_a_rebind`,
+  `a_materialised_declaration_keeps_the_offense_hq_and_the_teleport_works` (offense teleport
+  packet at the camp position after materialisation),
+  `defense_hq_spawns_only_with_a_configured_lodestone_offset`.
+* systems::housing / systems::skills (WP-SD3, 2026-11-06): the 13 `siege_items` rows gate item
+  casts in the one client item-cast branch (`skills/handlers.rs`, after the item template is
+  resolved from the owned stack and before `skill::use_skill`, so a refusal keeps the item and
+  answers only `SCErrorMsg` 431). The client loads the table and shows the row's `USAGE` text
+  for 431, so this is defence in depth for forged casts. The mapping is INFERRED from the row
+  shapes: a `true` flag means the situation allows the use; situations are the current period
+  (`period::current_period`: no dominion/declare/peace), `radius_siege` around the lodestone
+  (inside/outside the siege area) and `radius_offense_hq` around the registered side's bound
+  HQ (the defense radius is UNKNOWN and uses the offense value). Rows: 26397/26424/26428 are
+  allowed only inside the siege circle during the siege, 27300/27302 only inside the offense
+  HQ circle during the siege, and the escape/Eanad scrolls 34018/34021/34060-34065 everywhere
+  except the siege/HQ circles during warmup and siege. The gate is active only when
+  `Housing.SiegeCalendar` is on or the zone has an explicit siege; outside every dominion
+  zone the `outside_siege_zone` flag decides (a tank mine is unusable there, an escape scroll
+  is usable). Period 1 (auction) has no authored flag and is not gated. Unlisted items are
+  never refused. The table is loaded beside `SiegeZone` in `housing/data.rs` (a missing table
+  disables the gate); the decisions live in `dominion/siege_items.rs`. Tests:
+  `the_three_authored_classes_allow_exactly_their_situations`,
+  `siege_items_are_refused_outside_their_authored_situations_and_kept` (real item casts in
+  period 2 and 4, inside/outside the circle, item kept on refusal), the loader assertion in
+  `castle_references_preserve_stage_order_dates_and_zero_open_duration`, and the gated
+  `housing_real_compact_db` row-count check (13 rows).
 * systems::housing (siege result achievements, WP-SD6a, 2026-11-05): a finished siege credits
   `char_records` kinds 57/59 to the attacking roster and 58/60 to the defenders with
   `value1 = zone_group_id` (mapping EVIDENCED from the authored records and the Korean

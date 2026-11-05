@@ -343,6 +343,51 @@ impl Command for Dominion {
             }
             return Ok(());
         }
+        if args[0] == "undeclare" {
+            // Cancel an accepted siege declaration (WP-SD2b). The in-game cancel trigger is
+            // UNKNOWN, so this command is the shipped route; a zero offense team is
+            // broadcast. The zone defaults to the caller's territory.
+            let zone = match args.get(1).map(String::as_str) {
+                Some(value) => match try_parse::<u32>(value) {
+                    Some(zone) => zone,
+                    None => {
+                        CommandManager::send_default_help_text(self, out);
+                        return Ok(());
+                    }
+                },
+                None => {
+                    let player = ctx.player()?;
+                    let zone_id = player.data().unit.transform.zone_id;
+                    match server
+                        .game_data
+                        .zones
+                        .zone_by_key(zone_id)
+                        .map(|zone| zone.group_id)
+                    {
+                        Some(zone) => zone,
+                        None => {
+                            CommandManager::send_error_text(
+                                self,
+                                out,
+                                "You are not in a dominion zone",
+                            );
+                            return Ok(());
+                        }
+                    }
+                }
+            };
+            match crate::systems::housing::dominion::declare::cancel(server, zone) {
+                Ok(()) => CommandManager::send_normal_text(
+                    self,
+                    out,
+                    &format!("Zone {zone}: siege declaration cancelled"),
+                ),
+                Err(error) => {
+                    CommandManager::send_error_text(self, out, &error.to_string());
+                }
+            }
+            return Ok(());
+        }
         if args[0] == "clock" {
             // The test clock only drives the calendar; without the calendar it could only
             // make the persisted siege deadlines disagree with what the client shows.

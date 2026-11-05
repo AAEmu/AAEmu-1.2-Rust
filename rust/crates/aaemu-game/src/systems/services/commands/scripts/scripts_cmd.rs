@@ -238,7 +238,7 @@ mod tests {
         // tax / crime / social commands of WP-SL6b and the two auction GM keys.
         assert_eq!(
             server.systems.services.commands.get_command_keys().len(),
-            110
+            111
         );
         let (_, out) = harness::run(&server, &gm.p, "scripts what").await;
         assert_eq!(out, [harness::error("scripts", "Undefined action...")]);
