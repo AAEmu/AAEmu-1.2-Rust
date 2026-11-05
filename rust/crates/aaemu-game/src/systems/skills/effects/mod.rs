@@ -34,6 +34,9 @@ pub struct EffectSource {
     pub buff: Option<Arc<BuffTemplate>>,
     pub amount: i32,
     pub is_trigger: bool,
+    /// `buff_triggers.use_damage_amount`: the effect's fixed value is per-mille of the event's
+    /// damage amount instead of a flat value (1.2 `heal_effects`: 30 = 3%).
+    pub use_damage_amount: bool,
     /// The individual SkillEffect bypasses the cast's miss roll.
     pub always_hit: bool,
     /// The `Item` cast's source item as it was just before its debit. Effects that read the

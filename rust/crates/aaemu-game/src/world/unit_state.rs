@@ -176,7 +176,9 @@ fn write_unit_state(c: &mut Character, data: &GameData, now_ms: i64, s: &mut Pac
         i64::from(c.hostile_faction_kills),
     ]);
     // flags: bit3 = force attack (client chain 397c9480 -> 398a1f90 -> unit+0x3bbc, so late
-    // observers see Bloodlust); Invisible / IdleStatus are never set in this phase.
+    // observers see Bloodlust). Bit5 = invisible (`SCUnitStatePacket.cs:276` in the C#) is not
+    // set: the 1.2 client's reader of this `u16` was not located (STEALTH-C in PORTING.md), so
+    // a late observer only learns a GM's invisibility from `SCUnitInvisible`.
     s.write_u16(if c.unit.force_attack {
         FLAG_FORCE_ATTACK
     } else {

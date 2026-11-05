@@ -7,6 +7,8 @@
 //! ```text
 //! gm <command line>                  GM chat command (without the leading slash)
 //! tp <x> <y> <z>                     /move there, acknowledge the teleport, wait for the area
+//! moverel <dx> <dy> <dz>             /move to self + delta (e.g. leave an aura radius)
+//! gopeer [name]                      /move to the peer's position (no drain)
 //! pump <secs>                        just read packets
 //! units [<npc template>...]          NPCs in sight (all within 60 m when no template given)
 //! doodads [<doodad template>...]     doodads in sight (all within 40 m when none given)
@@ -14,6 +16,7 @@
 //! cq <quest> <npc template|0> [sel]  CSCompleteQuestContext at that NPC
 //! cqd <quest> <doodad obj id> [sel]  CSCompleteQuestContext at that doodad object
 //! target <npc template>              select the nearest NPC of that template
+//! targetself                         select our own unit (e.g. for `/buff` on self)
 //! kill <npc template>                walk next to the nearest NPC, target it, `/kill`
 //! cast <skill> <npc template>        CSStartSkill on the nearest NPC
 //! castraw <skill> <npc template>     walk next to the nearest NPC, target it, send CSStartSkill
@@ -48,11 +51,19 @@
 //! sync <token> [count]              suite barrier: wait until `count` bots (default: all) are here
 //! expectpkt <PacketName> [secs]     fail unless the packet arrives within `secs` (default 5)
 //! expectnopkt <PacketName> [secs]   fail if the packet arrives within `secs` (default 5)
+//! expectbuff <buff> [self|peer|player:NAME] [secs]
+//!                                   fail unless SCBuffCreated for that buff / owner arrives
+//! expectbuffremoved <buff> [self|peer|player:NAME] [secs]
+//!                                   fail unless SCBuffRemoved for a previously announced
+//!                                   SCBuffCreated of that buff / owner arrives
 //! expectlog <regex> [secs]          fail unless a new game-log line matches (AAEMU_VERIFY_GAME_LOG)
 //! expectdb "<sql>" <value> [secs]   fail unless the SQL's value equals `value`
 //!                                   (AAEMU_VERIFY_MYSQL; re-checked for `secs` when given)
 //! rezexpect inplace|temple ok|refused  CSResurrectCharacter, then fail unless SCCharacterResurrected
 //!                                    for our own unit did (ok) / did not (refused) arrive
+//! deathwait <wait_ms> <lost|*> <dur|*> [secs]
+//!                                    wait for our own SCUnitDeathPacket and check the resurrect
+//!                                    wait, lost exp (`>0` = any loss) and durability loss
 //! lootexpect took|failed [npc obj]  like `loot`, then fail unless SCLootItemTook (took) / SCLootItemFailed
 //!                                    (failed) was among the replies; `took` first walks to 2 m of
 //!                                    the corpse, as the real client does
@@ -78,17 +89,17 @@ fn dist(a: (f32, f32, f32), b: (f32, f32, f32)) -> f32 {
     ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) + (a.2 - b.2).powi(2)).sqrt()
 }
 
-/// `SCBuffCreatedPacket`: (owner obj id, buff template id).
-fn buff_created(p: &Packet) -> Option<(u32, u32)> {
+/// `SCBuffCreatedPacket`: (owner obj id, buff index, buff template id).
+fn buff_created(p: &Packet) -> Option<(u32, u32, u32)> {
     use aaemu_game::systems::skills::types::SkillCaster;
     let mut s = p.stream();
     let kind = s.read_u8().ok()?;
     SkillCaster::read(kind, &mut s).ok()?;
     s.read_u32().ok()?;
     let owner = s.read_bc().ok()?;
-    s.read_u32().ok()?;
+    let index = s.read_u32().ok()?;
     let buff = s.read_u32().ok()?;
-    Some((owner, buff))
+    Some((owner, index, buff))
 }
 
 fn show(packets: &[Packet]) {
@@ -104,7 +115,9 @@ fn show(packets: &[Packet]) {
             );
         } else if p.is_sc(sc::SCBuffCreatedPacket) {
             match buff_created(p) {
-                Some((owner, buff)) => println!("    SCBuffCreated owner {owner} buff {buff}"),
+                Some((owner, index, buff)) => {
+                    println!("    SCBuffCreated owner {owner} index {index} buff {buff}")
+                }
                 None => println!("    SCBuffCreated (unreadable)"),
             }
         } else if p.is_sc(sc::SCBuffRemovedPacket) {
@@ -319,6 +332,115 @@ pub(super) fn read_log_since(path: &std::path::Path, offset: &mut u64) -> anyhow
     Ok(String::from_utf8_lossy(&buf[..complete]).into_owned())
 }
 
+/// The object a buff expectation watches (`self`, `peer` or `player:NAME`).
+fn buff_target(game: &GameClient, spec: Option<&str>) -> anyhow::Result<u32> {
+    match spec.unwrap_or("self") {
+        "self" => Ok(game.state.self_obj),
+        "peer" => Ok(peer(game, None)?.obj_id),
+        other => match other.strip_prefix("player:") {
+            Some(name) => Ok(peer(game, Some(name))?.obj_id),
+            None => bail!("buff target must be self, peer or player:NAME (got '{other}')"),
+        },
+    }
+}
+
+/// `expectbuff <buff> [self|peer|player:NAME] [secs]`.
+async fn expect_buff(
+    game: &mut GameClient,
+    buff: u32,
+    spec: Option<&str>,
+    secs: u64,
+) -> anyhow::Result<()> {
+    let target = buff_target(game, spec)?;
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        // The state tracks every buff packet, including those an earlier command drained.
+        if let Some(indices) = game.state.buffs.get(&(target, buff)) {
+            let indices: Vec<u32> = indices.iter().copied().collect();
+            if !indices.is_empty() {
+                println!("    buff {buff} on {target} present (indices {indices:?})");
+                return Ok(());
+            }
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            bail!("expected buff {buff} on {target} within {secs} s; it did not arrive");
+        }
+        game.recv_within(left.min(Duration::from_millis(250)))
+            .await?;
+    }
+}
+
+/// `expectbuffremoved <buff> [self|peer|player:NAME] [secs]`.
+async fn expect_buff_removed(
+    game: &mut GameClient,
+    buff: u32,
+    spec: Option<&str>,
+    secs: u64,
+) -> anyhow::Result<()> {
+    let target = buff_target(game, spec)?;
+    anyhow::ensure!(
+        game.state
+            .buffs
+            .get(&(target, buff))
+            .is_some_and(|indices| !indices.is_empty()),
+        "expected buff {buff} on {target} to be present before waiting for its removal"
+    );
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        if game
+            .state
+            .buffs
+            .get(&(target, buff))
+            .is_none_or(|indices| indices.is_empty())
+        {
+            println!("    buff {buff} on {target} removed");
+            return Ok(());
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            bail!("expected buff {buff} on {target} to be removed within {secs} s; it was not");
+        }
+        game.recv_within(left.min(Duration::from_millis(250)))
+            .await?;
+    }
+}
+
+/// `/move` to `(x, y, z)`, acknowledge it and wait for the area around the new position.
+async fn teleport_to(
+    game: &mut GameClient,
+    clock: &mut u32,
+    x: f32,
+    y: f32,
+    z: f32,
+    drain: bool,
+) -> anyhow::Result<()> {
+    game.state.last_teleport = None;
+    game.chat(0, &format!("/move {x} {y} {z}")).await?;
+    game.wait_for("SCTeleportUnitPacket", |p| {
+        p.is_sc(sc::SCTeleportUnitPacket)
+    })
+    .await?;
+    let at = game.state.self_pos;
+    game.teleport_ended(at).await?;
+    *clock += 1500;
+    game.move_to(at, *clock).await?;
+    if !drain {
+        println!("    moved to {at:?}");
+        return Ok(());
+    }
+    let got = game
+        .drain(Duration::from_millis(1500), Duration::from_secs(8))
+        .await?;
+    println!(
+        "    teleported to {at:?}; {} units, {} doodads in sight",
+        game.state.units.len(),
+        game.state.doodads.len()
+    );
+    show(&got);
+    Ok(())
+}
+
 /// `expectpkt <PacketName> [secs]`.
 async fn expect_packet(game: &mut GameClient, want: &str, secs: u64) -> anyhow::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(secs);
@@ -445,6 +567,7 @@ async fn run_lines(
     let mut music = super::music::Music::default();
     let mut clock = 40_000u32;
     let mut last_npc = 0u32;
+    let mut last_death_seq = 0u64;
     let mut consumed: HashSet<usize> = HashSet::new();
     // `expectseen`: the `game.state.events` index the next search starts at.
     let mut errors_from = 0usize;
@@ -466,27 +589,24 @@ async fn run_lines(
             "tp" => {
                 let (x, y, z): (f32, f32, f32) =
                     (num(&parts, 0)?, num(&parts, 1)?, num(&parts, 2)?);
-                game.state.last_teleport = None;
-                game.chat(0, &format!("/move {x} {y} {z}")).await?;
-                game.wait_for("SCTeleportUnitPacket", |p| {
-                    p.is_sc(sc::SCTeleportUnitPacket)
-                })
-                .await?;
-                let at = game.state.self_pos;
-                game.teleport_ended(at).await?;
-                clock += 1500;
-                game.move_to(at, clock).await?;
-                let got = game
-                    .drain(Duration::from_millis(1500), Duration::from_secs(8))
-                    .await?;
-                println!(
-                    "    teleported to {at:?}; {} units, {} doodads in sight",
-                    game.state.units.len(),
-                    game.state.doodads.len()
-                );
-                show(&got);
+                teleport_to(game, &mut clock, x, y, z, true).await?;
+            }
+            "moverel" => {
+                let (dx, dy, dz): (f32, f32, f32) =
+                    (num(&parts, 0)?, num(&parts, 1)?, num(&parts, 2)?);
+                let (x, y, z) = game.state.self_pos;
+                // No drain: the caller asserts the buff enter / leave packets that follow.
+                teleport_to(game, &mut clock, x + dx, y + dy, z + dz, false).await?;
+            }
+            "gopeer" => {
+                let p = peer(game, parts.first().copied())?;
+                teleport_to(game, &mut clock, p.pos.0, p.pos.1, p.pos.2, false).await?;
             }
             "pump" => show(&pump(game, num(&parts, 0)?).await?),
+            "targetself" => {
+                game.change_target(game.state.self_obj).await?;
+                println!("    target self {}", game.state.self_obj);
+            }
             "units" => {
                 let tpls: Vec<u32> = parts.iter().filter_map(|p| p.parse().ok()).collect();
                 let me = game.state.self_pos;
@@ -1046,6 +1166,16 @@ async fn run_lines(
                 let secs: u64 = parts.get(1).and_then(|x| x.parse().ok()).unwrap_or(5);
                 expect_no_packet(game, name, secs).await?;
             }
+            "expectbuff" => {
+                let buff: u32 = num(&parts, 0)?;
+                let secs: u64 = parts.get(2).and_then(|x| x.parse().ok()).unwrap_or(10);
+                expect_buff(game, buff, parts.get(1).copied(), secs).await?;
+            }
+            "expectbuffremoved" => {
+                let buff: u32 = num(&parts, 0)?;
+                let secs: u64 = parts.get(2).and_then(|x| x.parse().ok()).unwrap_or(10);
+                expect_buff_removed(game, buff, parts.get(1).copied(), secs).await?;
+            }
             "expectlog" => {
                 let args = split_quoted(rest)?;
                 let pattern = args.first().context("expectlog <regex> [secs]")?;
@@ -1087,6 +1217,66 @@ async fn run_lines(
                     bail!("FAIL rezexpect: resurrected={revived}, expected {want_ok}");
                 }
                 println!("    rezexpect ok (resurrected={revived})");
+            }
+            "deathwait" => {
+                let wait_ms: i32 =
+                    num(&parts, 0).context("deathwait <wait_ms> <lost|*> <dur|*>")?;
+                let lost = parts.get(1).copied().unwrap_or("*");
+                let durability = parts.get(2).copied().unwrap_or("*");
+                let secs: u64 = parts.get(3).and_then(|x| x.parse().ok()).unwrap_or(30);
+                // A `gm` command drains its own packets, so a death that happened during the
+                // previous command is taken from the observed state; otherwise wait for the
+                // next one.
+                let reported = last_death_seq;
+                let mut death = if game.state.self_death_seq > reported {
+                    game.state.self_death
+                } else {
+                    None
+                };
+                let deadline = Instant::now() + Duration::from_secs(secs);
+                while death.is_none() && Instant::now() < deadline {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    game.recv_within(left.min(Duration::from_millis(500)))
+                        .await?;
+                    if game.state.self_death_seq > reported {
+                        death = game.state.self_death;
+                    }
+                }
+                last_death_seq = game.state.self_death_seq;
+                let Some((reason, got_wait, got_lost, got_dur)) = death else {
+                    bail!("FAIL deathwait: no SCUnitDeathPacket for self within {secs}s");
+                };
+                println!(
+                    "    deathwait: kill reason {reason}, wait {got_wait} ms, lost exp {got_lost}, \
+                     durability {got_dur}"
+                );
+                anyhow::ensure!(
+                    got_wait == wait_ms,
+                    "FAIL deathwait: resurrect_wait_time {got_wait}, expected {wait_ms}"
+                );
+                if lost != "*" {
+                    if let Some(want) = lost.strip_prefix('>') {
+                        let want: i32 = want.parse().context("deathwait lost exp >N")?;
+                        anyhow::ensure!(
+                            got_lost > want,
+                            "FAIL deathwait: lost exp {got_lost}, expected > {want}"
+                        );
+                    } else {
+                        let want: i32 = lost.parse().context("deathwait lost exp")?;
+                        anyhow::ensure!(
+                            got_lost == want,
+                            "FAIL deathwait: lost exp {got_lost}, expected {want}"
+                        );
+                    }
+                }
+                if durability != "*" {
+                    let want: u8 = durability.parse().context("deathwait durability")?;
+                    anyhow::ensure!(
+                        got_dur == want,
+                        "FAIL deathwait: durability {got_dur}, expected {want}"
+                    );
+                }
+                println!("    deathwait ok");
             }
             "lootexpect" => {
                 let want_took = match parts.first().copied() {
