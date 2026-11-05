@@ -579,7 +579,7 @@ impl TeamManager {
             .collect();
         let now = util::now_ms();
         let mut st = self.lock();
-        let canceled = prune_expired_invitations(&mut st, now);
+        let mut canceled = prune_expired_invitations(&mut st, now);
         st.area_invite_until.retain(|_, until| *until > now);
         if let Some(until) = st.area_invite_until.get(&owner.character_id) {
             let remaining = (*until - now).clamp(0, i64::from(u32::MAX)) as u32;
@@ -641,6 +641,9 @@ impl TeamManager {
             owner.character_id,
             invited
         );
+        // An expired invitee that was invited again in this loop already has a new popup;
+        // do not close it (the cancellation has no invitation id).
+        canceled.retain(|(target, _)| !st.invitations.contains_key(&target.character_id));
         drop(st);
         send_invitation_canceled(canceled);
         owner.send(SCTeamAreaInvitedPacket { r: 0, s: true });
@@ -664,7 +667,7 @@ impl TeamManager {
             },
         };
         let mut st = self.lock();
-        let canceled = prune_expired_invitations(&mut st, util::now_ms());
+        let mut canceled = prune_expired_invitations(&mut st, util::now_ms());
         // The invitation belongs to the inviter's current team; the client-sent team id is
         // ignored so a stale/crafted id cannot invite into someone else's team.
         let team = Self::team_id_by_unit(&st, owner.character_id)
@@ -687,6 +690,9 @@ impl TeamManager {
             &target,
             false,
         );
+        // The target may be the same character whose expired invitation was pruned above; a
+        // new popup is open, so the cancellation must not close it.
+        canceled.retain(|(target, _)| !st.invitations.contains_key(&target.character_id));
         drop(st);
         send_invitation_canceled(canceled);
     }

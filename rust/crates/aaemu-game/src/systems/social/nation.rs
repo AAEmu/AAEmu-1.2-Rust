@@ -2685,6 +2685,9 @@ pub fn invite_citizen(server: &GameServer, king: &PlayerRef, invitee_name: &str)
         return;
     }
     let now = now_ms();
+    // Close the popups of expired invites first: `add_invite` drops them silently and the
+    // sweep would no longer see them (the cancel also precedes the new invitation).
+    sweep_expired_invites(server, now);
     if server
         .systems
         .social
