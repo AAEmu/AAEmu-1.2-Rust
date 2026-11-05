@@ -1,7 +1,7 @@
 {
   "counts": {
     "sc_opcodes": 517,
-    "typeless": 73,
+    "typeless": 72,
     "never_sent": 51
   },
   "typeless": [
@@ -33,7 +33,6 @@
     "SCGmDumpNpcPacket",
     "SCGmDumpQuestsPacket",
     "SCHSRequestPacket",
-    "SCInvitationCanceledPacket",
     "SCIsUnitInFarmPacket",
     "SCMouldAskedPacket",
     "SCMouldListPacket",
