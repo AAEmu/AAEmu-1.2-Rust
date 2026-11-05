@@ -2,6 +2,7 @@
 //! `RepairSlaveEffect`, the shipyard branches of `CraftEffect`, and the backpack drop of a
 //! destroyed vehicle (`Slave.DestroyAttachedItems`).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use rand::Rng;
@@ -17,6 +18,11 @@ use crate::world::{DoodadRef, WorldInstance, WorldObject};
 
 use super::packets::{item_task_type, SCItemTaskSuccessPacket};
 use super::{error, shipyards};
+
+/// One-time reports for the slave `SpawnEffect` fields whose 1.2 meaning is UNKNOWN.
+static POS_DIR_LOGGED: AtomicBool = AtomicBool::new(false);
+static ORI_DIR_LOGGED: AtomicBool = AtomicBool::new(false);
+static MATE_STATE_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// Handles the effects of this subsystem; `false` = not ours.
 pub fn apply_effect(
@@ -79,25 +85,74 @@ fn spawn_effect_slave(
     let Some(world) = super::world_of(server, &me) else {
         return;
     };
-    // TODO (C#): Implement OriDirId, PosDirId and MateStateId
-    let w = world.world_pos_rot(&me);
+    if !MATE_STATE_LOGGED.swap(true, Ordering::Relaxed) {
+        tracing::debug!(
+            "SpawnEffect: MateStateId {} has no evidenced slave meaning; ignored",
+            t.mate_state_id
+        );
+    }
+    let caster_pos = world.world_pos_rot(&me);
+    let target = args.target.as_obj().cloned();
+    let target_pos = target.as_ref().map(|o| world.world_pos_rot(o));
+    // dir id 1 = relative to the effect target, 2 = relative to the caster. A position target
+    // has no object, so id 1 falls back to the caster as the NPC branch of `SpawnEffect` does.
+    // Every 1.2 slave row uses pos dir 1/2 and ori dir 1/2/3; the other dirs keep the C#
+    // caster-relative behaviour and are reported once.
+    if !matches!(t.pos_dir_id, 1 | 2) && !POS_DIR_LOGGED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            "SpawnEffect: Unhandled PosDirId {} for a slave; using the caster",
+            t.pos_dir_id
+        );
+    }
+    if !matches!(t.ori_dir_id, 1 | 2) && !ORI_DIR_LOGGED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            "SpawnEffect: Unhandled OriDirId {} for a slave; using the caster",
+            t.ori_dir_id
+        );
+    }
+    let rel = |id: u32| match id {
+        1 => target_pos.as_ref().unwrap_or(&caster_pos),
+        2 => &caster_pos,
+        _ => &caster_pos,
+    };
+    let p = *rel(t.pos_dir_id);
+    let o = *rel(t.ori_dir_id);
     let mut transform = crate::models::transform::Transform {
         instance_id: world.id,
         zone_id: player.data().unit.transform.zone_id,
         ..Default::default()
     };
-    transform.set_position(w.x, w.y, w.z, w.rot_x, w.rot_y, w.rot_z);
     // `if (PosDistance == 0) { PosDistance = 2; }` (stored back into the template in C#)
     let distance = if t.pos_distance == 0.0 {
         2.0
     } else {
         t.pos_distance
     };
-    super::slaves::add_distance_to_front(&mut transform, distance);
-    // `Rotate(Rotation with { Z = OriAngle.DegToRad() })` adds the vector to the rotation.
-    transform.rot_x += transform.rot_x;
-    transform.rot_y += transform.rot_y;
-    transform.rot_z += t.ori_angle * std::f32::consts::PI / 180.0;
+    if matches!(t.pos_dir_id, 1 | 2) {
+        // The position is relative to the relative unit's facing (`rel.rot_z + pos_angle`), as
+        // the C# slave branch moved along the caster's rotation; the NPC branch's absolute
+        // `PosAngle` does not apply to a slave spawn.
+        transform.set_position(
+            p.x,
+            p.y,
+            p.z,
+            o.rot_x + o.rot_x,
+            o.rot_y + o.rot_y,
+            o.rot_z + crate::systems::skills::effects::special::movement::deg_to_rad(t.pos_angle),
+        );
+        super::slaves::add_distance_to_front(&mut transform, distance);
+        // `Rotate(Rotation with { Z = OriAngle.DegToRad() })` adds the vector to the rotation,
+        // so the roll / pitch double as in the C#.
+        transform.rot_z =
+            o.rot_z + crate::systems::skills::effects::special::movement::deg_to_rad(t.ori_angle);
+    } else {
+        transform.set_position(p.x, p.y, p.z, o.rot_x, o.rot_y, o.rot_z);
+        super::slaves::add_distance_to_front(&mut transform, distance);
+        transform.rot_x += transform.rot_x;
+        transform.rot_y += transform.rot_y;
+        transform.rot_z +=
+            crate::systems::skills::effects::special::movement::deg_to_rad(t.ori_angle);
+    }
     let slave = super::slaves::create_core(
         server,
         &world,

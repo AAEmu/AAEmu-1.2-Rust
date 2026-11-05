@@ -492,9 +492,15 @@ impl NpcSkillHooks for NpcSkills {
         skill_item: &crate::systems::skills::types::SkillCaster,
         placement: Option<crate::systems::skills::ext::SummonPlacement>,
         max_range: f32,
+        client_spawn: Option<bool>,
     ) {
         crate::systems::vehicles::slaves::create_from_skill(
-            server, player, skill_item, placement, max_range,
+            server,
+            player,
+            skill_item,
+            placement,
+            max_range,
+            client_spawn,
         );
     }
 

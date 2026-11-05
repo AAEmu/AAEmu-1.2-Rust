@@ -288,7 +288,9 @@ pub trait NpcSkillHooks: Send + Sync {
 
     /// `SlaveManager.Create(owner, skillItem, positionOverride)` (`SpawnSlave`). `placement` is
     /// the `SummonPos` spot the client chose (`None` for a self-targeted summon item cast);
-    /// `max_range` is the skill template's `MaxRange` (`0` = unbounded).
+    /// `max_range` is the skill template's `MaxRange` (`0` = unbounded). `client_spawn` is
+    /// `Some(hide_spawn_effect)` when the cast was synthesized from `CSSpawnSlave` (0x02e): the
+    /// placement then keeps the client yaw and the packet's hide flag.
     fn spawn_slave(
         &self,
         _server: &GameServer,
@@ -296,6 +298,7 @@ pub trait NpcSkillHooks: Send + Sync {
         _skill_item: &SkillCaster,
         _placement: Option<SummonPlacement>,
         _max_range: f32,
+        _client_spawn: Option<bool>,
     ) {
         not_ported("SlaveManager.Create");
     }

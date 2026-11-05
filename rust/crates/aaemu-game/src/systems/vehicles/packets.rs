@@ -386,7 +386,11 @@ cs_packet!(
 );
 
 cs_packet!(
-    /// `CSSpawnSlavePacket` (log only in C#).
+    /// `CSSpawnSlavePacket` (0x02e). The 1.2 client sends it from its placement-preview click
+    /// handler (`FUN_393459b0` <- `FUN_394d31a0` <- `FUN_394d8c70` <- `FUN_39366480`, when the
+    /// previewed kind `+0x48` is 8); which item/UI enters that mode is UNKNOWN. The handler
+    /// maps the packet onto the item summon path and requires the named summon item, so the
+    /// unidentified entry point cannot spawn a slave the item path would refuse.
     CSSpawnSlavePacket {
         slave_id: u32,
         x: f32,
@@ -417,6 +421,21 @@ cs_packet!(
     }
     handle |self, server, conn| {
         tracing::debug!("SpawnSlave, SlaveId: {}", self.slave_id);
+        let p = active_char!(conn);
+        if let Some(cast) = slaves::client_spawn_cast(
+            server,
+            &p,
+            self.slave_id,
+            self.x,
+            self.y,
+            self.z,
+            self.z_rot,
+            self.item_id,
+            self.hide_spawn_effect,
+        ) {
+            // Same entry as a client item use: every cast gate, the cast time and the cooldown.
+            crate::systems::skills::handlers::start_skill(server, conn, cast);
+        }
         Ok(())
     }
 );
