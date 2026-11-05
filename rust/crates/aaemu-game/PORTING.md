@@ -185,14 +185,14 @@ systems::{skills, npcs, economy, social, quests}: Data (tables), System (manager
 | `IO` (ClientFileManager, AAPak) | `data/client_files.rs`, `data/pak.rs` | done | Read-only pak (types A/B/F) and directory sources, file listing semantics of both. |
 | `Core/Managers/World/ZoneManager`, `ZoneConflict`, `ZoneStateChangeTask` | `data/world_data.rs`, `systems/social/zone_conflict.rs` | done | zones, zone_groups, conflict_zones (+ return points / tower ids); the conflict runtime (`AddZoneKill`, `SetState`, `ForceNextState`, timers, `SCConflictZoneStatePacket` broadcasts) is `server.systems.social.conflicts`. |
 | `Core/Managers/World/FactionManager`, `LocalizationManager` | `data/world_data.rs`, `systems/services/localization.rs` | partial / done | system factions (+ localized names), relations, SendFactions / SendRelations (relation checks: `systems::social`). The complete `LocalizationManager` (all translations, item-name cache, `MatchItemName`) is `systems::services::localization`. |
-| `Core/Managers/ExpeditionManager`, `Models/Game/Expeditions` | `managers/expedition.rs` | partial | Load, GetExpedition, SendExpeditions, SendExpeditionInfo, member refresh / login / logout status packets. Guild management todo. |
-| `Core/Managers/FriendMananger` | `managers/friend.rs`, `db_character.rs` | partial | Load, SendStatusChange, GetFriendInfo, FormatFriend. Add/remove todo. |
-| `Core/Managers/PortalManager` | `data/world_data.rs` | partial | recalls.json + district_return_points (GetRecallBySubZoneId, GetDistrictReturnPoint). Teleports, world gates, respawns todo. |
-| `Core/Managers/ChatManager`, `Models/Game/Chat` | `managers/chat.rs`, `world/session.rs` | partial | Faction / nation / zone / guild / family channels, join/leave/send; CSSendChatMessage for every chat type (party/raid -> "not in party/raid" errors as there are no teams). Trial channels, commands todo. |
+| `Core/Managers/ExpeditionManager`, `Models/Game/Expeditions` | `systems/social/expedition.rs` (`managers::expedition` re-exports) | done | Load, GetExpedition, SendExpeditions, SendExpeditionInfo, member refresh / login / logout status packets, and guild management: create, invite / reply, leave, kick, member role, owner, role policy, disband, rename, per-change save and offline leave. See the `systems::social` table. |
+| `Core/Managers/FriendMananger` | `systems/social/friend.rs` (`managers::friend` re-exports), `db_character.rs` | done | Load, SendStatusChange, GetFriendInfo, FormatFriend, add / remove friends and block / unblock (online or by name), the client's failure feedback for every refusal (WP-SL2) and block-list enforcement on direct deliveries. See the `systems::social` table. |
+| `Core/Managers/PortalManager` | `systems/npcs/portal/`, `data/world_data.rs` | done | recalls.json + district_return_points, recalls / world gates by sub-zone and id, respawn points and `closest_return_portal`, the private portal book (add / delete / rename), `CSUsePortal` with the range and court checks, the NPC teleporter and the navi teleport / open-portal packets. See `systems::npcs` and the portal notes below. |
+| `Core/Managers/ChatManager`, `Models/Game/Chat` | `systems/social/chat.rs` (`managers::chat` re-exports), `world/session.rs`, `systems/social/session.rs` | done | Faction / nation / zone / guild / family / party / raid / court channels, join / leave / send, party / raid / raid-leader / judge routing (court / trial channels exist), per-channel spam delays with server enforcement, `LeaveAllChannels` and slash commands through `CommandManager` in `send_chat_message`. User channels are log-only as in C#. See the `systems::social` table. |
 | `Core/Managers/TimeManager` (+ `TimeOfDayObserver`) | `managers/time.rs` | done | `Get` / `Set` / `Stop` added (phase 4). Storm-ship time override (`ResolveClientTimeOfDayHours`) per observer (`subscribe_with`). |
 | `Core/Managers/SaveManager` | `managers/save.rs` | partial | Periodic + final save of items and online characters; the subsystems' rows through `systems::save_stage` (`BeforeItems`: houses, mails; `AfterItems`: auction, crimes; `AfterCharacters`: slaves). |
 | `Core/Managers/World/StreamManager` | `managers/stream.rs`, `stream/cells.rs` | done | AddToken/RemoveToken/Login (wrong account removes the token, as C#), RequestCell/ContinueCell incl. the C# `next - 1` copy off-by-one. |
-| `Core/Managers/Stream/UccManager`, `Models/Stream`, `Core/Managers/Id/UccIdManager` | `stream/ucc.rs`, `stream/models.rs` | partial | Load/Save (`uccs` table, data in the MEDIUMBLOB as the default C# build), upload (simple + custom), download, checks, id allocation. `CreateStamp`/`ApplyStamp` (item-side, used by skill effects) todo. **Crest printer (WP-U1, housing-farm-ucc#1):** `CTStartUploadEmblemStream.bc` must be a live doodad of the player's instance whose **current func group** has a `DoodadFuncStampMaker` row creating Crest Ink (`item_id` 17663: doodads 3038 / 1470, funcs 6314 / 11693 / 19145), the player must be in the func skill 14435 reach (the doodad `in_func_reach`: skill `max_range` + the 15 m allowance) and must hold the row's `consume_money` (and, for a custom image, the row's `consume_item_id` x `consume_count`, 1x 11127) — all checked **before** `add_default_ucc` / `start_upload`, so a refusal leaves no `upload_queue` / `complex_upload_parts` entry. The charge is the row's `consume_money` (50000 for 3038, 10000 for 1470; the old `UCC_PRICE` constant is gone); `confirm_default_ucc` re-checks money / reagent (the queue entry keeps the resolved row) and `charge_and_create_crest_ink` does the checked money debit, the reagent consume (`ItemTaskType.IMPRINT_UCC`) and the Crest Ink creation in one `ItemTxn` before the save. A refusal is a `warn!` and a drop (the 1.2 refusal reply is UNKNOWN, **CAP-UCC-1**) and the stream connection stays open. **CAP-UCC-1 (capture-pending):** whether a custom upload also costs money (the Lua info helper shows only the item) — the money charge is kept on that path as before. Live: no `aaemu-testclient` scenario speaks the stream protocol (join + `CTStartUploadEmblemStream`), so this is covered by flow tests only. |
+| `Core/Managers/Stream/UccManager`, `Models/Stream`, `Core/Managers/Id/UccIdManager` | `stream/ucc.rs`, `stream/models.rs` | done | Load/Save (`uccs` table, data in the MEDIUMBLOB as the default C# build), upload (simple + custom), download, checks, id allocation, `CreateStamp` / `ApplyStamp` (`economy/item_effects.rs`, the `GainItemWithEmblemImprint` effect and `economy/bridges.rs`). **Crest printer (WP-U1, housing-farm-ucc#1):** `CTStartUploadEmblemStream.bc` must be a live doodad of the player's instance whose **current func group** has a `DoodadFuncStampMaker` row creating Crest Ink (`item_id` 17663: doodads 3038 / 1470, funcs 6314 / 11693 / 19145), the player must be in the func skill 14435 reach (the doodad `in_func_reach`: skill `max_range` + the 15 m allowance) and must hold the row's `consume_money` (and, for a custom image, the row's `consume_item_id` x `consume_count`, 1x 11127) — all checked **before** `add_default_ucc` / `start_upload`, so a refusal leaves no `upload_queue` / `complex_upload_parts` entry. The charge is the row's `consume_money` (50000 for 3038, 10000 for 1470; the old `UCC_PRICE` constant is gone); `confirm_default_ucc` re-checks money / reagent (the queue entry keeps the resolved row) and `charge_and_create_crest_ink` does the checked money debit, the reagent consume (`ItemTaskType.IMPRINT_UCC`) and the Crest Ink creation in one `ItemTxn` before the save. A refusal is a `warn!` and a drop (the 1.2 refusal reply is UNKNOWN, **CAP-UCC-1**) and the stream connection stays open. **CAP-UCC-1 (capture-pending):** whether a custom upload also costs money (the Lua info helper shows only the item) — the money charge is kept on that path as before. Live: no `aaemu-testclient` scenario speaks the stream protocol (join + `CTStartUploadEmblemStream`), so this is covered by flow tests only. |
 | `Core/Managers/TimedRewardsManager` | `systems/services/timed_rewards.rs` | done | `TimedRewardsTask` every minute, daily login reward, offline labor. |
 | `Core/Managers/HousingManager`, `Models/Game/Housing` | `systems/housing/` | done | See "Phase 3 subsystems". |
 | `Core/Managers/CrimeManager` | `db_character.rs` | partial | CheckWantedThreshold thresholds only. |
@@ -1406,7 +1406,7 @@ rename packet is `CSRenameExpedition`, guild / nation), so the trigger is the GM
 | Area (C#) | Rust | Status | Notes |
 |---|---|---|---|
 | `NpcManager.LoadAiParams` (NLua), `Models/Game/AI/v2/Params/**`, `AiGameData` (commands, command sets, chat bubbles, events), `ModelManager` (actor models + game stances, ship models) | `systems/ai/{lua,params,data}.rs` | done | A Lua 5.4 subset evaluator with `System.Convert` semantics; all 2 489 `npc_ai_params` rows produce the same values as NLua (differential harness, gated test `real_compact_db_params_match_nlua`; rows 443 / 835 / 1975 fail to parse in both). |
-| `NpcAi` framework, `AiUtils.GetAiByType`, all `AiCharacters/**`, every `Behavior` (incl. Archer / BigMonster / Flytrap / WildBoar / AlmightyAttack / Talk / FollowPath / Return / Dead / Despawning / Spawning / Hold / Idle / Roaming / Alert / RunCommandSet / DoNothing) | `systems/ai/{framework,behaviors}.rs` | done | State machine, GoTo overrides, transitions, check intervals, skill queue / selection, aggression / alert / help, return, follow path, greetings (`SCNpcChatMessage` + `SCPlaySound`). **Deviation:** `UpdateAggroHelp` skips a linked NPC without an AI (one warning per NPC) and keeps helping the remaining NPCs; the C# `NullReferenceException` ended the whole loop. **Added (data-inferred, capture-pending AGGROLINK-1):** a member of an `aggro_links` group helps another member of the same group even when its template (`accept_aggro_link` / `aggression` / `aggro_link_special_rule_id`) would decline; the link path keeps the helper's `aggro_link_help_dist` and applies `aggro_link_sight_check` only when enabled, while non-members keep the template rules exactly (including the C# sight gate in the special-rule branch). |
+| `NpcAi` framework, `AiUtils.GetAiByType`, all `AiCharacters/**`, every `Behavior` (incl. Archer / BigMonster / Flytrap / WildBoar / AlmightyAttack / Talk / FollowPath / Return / Dead / Despawning / Spawning / Hold / Idle / Roaming / Alert / RunCommandSet / DoNothing) | `systems/ai/{framework,behaviors}.rs` | done | State machine, GoTo overrides, transitions, check intervals, skill queue / selection, aggression / alert / help, return, follow path, greetings (`SCNpcChatMessage` + `SCPlaySound`). **Deviation:** `UpdateAggroHelp` skips a linked NPC without an AI (one warning per NPC) and keeps helping the remaining NPCs; the C# `NullReferenceException` ended the whole loop. **Added (data-inferred, capture-pending AGGROLINK-1):** a member of an `aggro_links` group helps another member of the same group even when its template (`accept_aggro_link` / `aggression` / `aggro_link_special_rule_id`) would decline; the link path keeps the helper's `aggro_link_help_dist` and applies `aggro_link_sight_check` only when enabled, while non-members keep the template rules exactly (including the C# sight gate in the special-rule branch). AI 11 `siegeweapon_place` (61 placeholder / test / cutscene NPCs) and AI 12 `bomb` (NPC 376 and two flying-machine pilots) are no AI by design: the C# `AiUtils.GetAiByType` / `AiParams.CreateByType` return null and the 1.2 data has no `npc_ai_params` row for either type; `flow_tests::hooks_create_ai_by_file_type_and_detach_on_delete` pins it. |
 | `AIManager` (100 ms tick, `AddAi`, region activity) | `systems/ai/manager.rs` | done | Per-AI mutex + queued calls; activity-based candidate selection and bounded `World.AiWorkerThreads` chunk batches (see deviations). |
 | AI members of `Npc` / `Unit` (`MoveTowards`, `LookTowards`, `StopMovement`, `SetTarget`, `CurrentAggroTarget`, `CurrentGameStance`, `BaseMoveSpeed`, `OnDamageReceived`, `CheckIfEmptyAggroToReturn`, `ClearAllAggro`, `FindPath`), `NpcEvents` | `systems/ai/{npc,combat,skills,npc_events}.rs` | done | `SCOneUnitMovementPacket` movement, aggro tables through the skills API. |
 | `AiPathsManager` (`Data/Path`), `AiPathHandler`, `Units/Route/Simulation` | `systems/ai/{path_handler,simulation}.rs` | done | Every `Data/Path/*.path` file loads (test). Routes are generated from the 10.x client, see the 2026-10-16 note. |
@@ -2273,7 +2273,7 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   ignored like a non-matching `targetUnit` cast (superseded: vehicles, sticky parents, fall
   damage and the Sus analysis are ported); `LastPacketActivityTime` is `systems::services`.
 * `LeaveAllChannels` iterates channels in key order (C# `ConcurrentDictionary` order is
-  unspecified). Trial channels do not exist.
+  unspecified). Court (trial) channels exist and are included in the leave set.
 * The C# keeps `Connection.Characters[id]` and `ActiveChar` as the same object; Rust copies the
   active character back into the lobby list when `LeaveWorldTask` runs.
 * Combat / slave logout delays (x30, +10 min) are not applied (no combat state / slaves).
@@ -3675,10 +3675,18 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   and show it to arrival observers without a movement packet; `CSTeleportEnded` repaints from
   the arrival region without repeating observer deltas or zone changes. Outside an instance a
   gate whose zone exists only in instance worlds is treated as missing (never instance
-  coordinates in the main world). The `MainWorldPosition` fallback remains only for the Memory
-  Tome (`value1 == 0`) outside instances. Retail resolves a Return gate in the caster's own
-  world (instance worlds ship their own `return_point.g`) and never falls back to the main world.
-  The C# closed-zone check of world gates (`Skill.cs` `portal_zone_check`) is not ported.
+   coordinates in the main world). Outside an instance a destination that cannot be resolved
+   (the Memory Tome's recall, or a world gate whose zone is unusable) still falls back to
+   `MainWorldPosition`: this is the C# `Return.cs` TODO behaviour and the single recorded
+   deviation (retail's fallback rule is UNKNOWN). Retail resolves a Return gate in the caster's
+   own world (instance worlds ship their own `return_point.g`) and never falls back to the main
+   world.
+   The C# closed-zone check of `Return` / `OpenPortal` (`Skill.cs`, inline) is ported as
+   `portal_zone_check` (`systems/skills/skill.rs:928-1029`): for access level < 100 it resolves
+   the same destination the effect would use (world gate, district return point or private
+   portal, including the `MainWorldPosition` fallback) and refuses an inaccessible zone with
+   `NO_PERM` (an `OpenPortal` outside the main world with `INVALID_LOCATION`) from `use_skill_impl`
+   and again from `cast`, before the cast is committed.
 
 * systems::npcs (2026-10-15): `DoodadFuncClout` with `UseOriginSource` takes the first doodad
   within 4 m of the caster as the area trigger's owner, and the C# scheduled the
@@ -4515,6 +4523,13 @@ and in NPC wandering / buff remaining times.
   GM scheduling with player registration is the chosen server policy for actually running a
   siege; the camps can be posted as system lots with the GM `auction_post_siege_items` command
   (WP-SD1b), but automatic posting at the auction period (WP-SD1c) remains unimplemented.
+  The rest of the dominion / siege work from the round-2 research (`siege-social-2.md`) is
+  open: the declaration chain WP-SD2a-c (persistent declaration, Siege Camp use / validation /
+  cancel and the headquarters lifecycle; in progress, not landed), the `siege_items` use gate
+  WP-SD3 (in progress, not landed), the offense ticket purchase WP-SD5 (CAPTURE-BLOCKED:
+  `doodad_func_purchase_siege_tickets` has no rows), siege hostility WP-SD7 (decision-blocked:
+  no evidence shows how retail made the two sides attackable) and the siege-shop period / side
+  gate WP-SD4a (INFERRED from the pack names, not implemented).
   Known, not fixed:
   the calendar is rebuilt from the tables on every tick/snapshot (cache later); an authored
   time inside a DST gap makes that zone's view return None instead of shifting it (the shipped
@@ -6622,3 +6637,18 @@ changed; each one is a real behaviour difference, not a deliberate deviation.
   customizing styles (`slave_customizings` is client-loaded; one customizable slave), radar
   shipyards (no 1.2 shipyard list wire format) and glider tuning (`gliding_*`, `ag_stance`,
   gimmick collision: capture-pending / design-blocked).
+* **`conflict_zones.peace_protected_faction_id` / `peace_tower_def_id` are placeholders.**
+  All 16 rows carry faction id 5 and a NULL `peace_tower_def_id`; faction 5 does not exist in
+  `system_factions` (ids 1, 2, 3 and 101-179) and neither column is ever read
+  (`data/world_data.rs:214,293` keeps the faction id in the loaded row only). The used columns
+  are `num_kills_*` / `no_kill_min_*` / `conflict_min` / `war_min` / `peace_min`
+  (`systems/social/zone_conflict.rs`), `war_tower_def_id` (`systems/instances/tower_def.rs:934`)
+  and the two return-point ids (`systems/skills/resurrect.rs:112-113`). Nothing to implement.
+* **`world_groups` is client map data.** Its 6 rows (`id`, `name`, `target_id`, `image_map`,
+  `x` / `y` / `w` / `h`, `image_x` / `image_y` / `image_w` / `image_h`) describe the world-map
+  rectangles the client draws; the server never reads the table. Not a gap.
+* **`world_spec_configs` is not read; its one row matches the hard-coded specialty divisor.**
+  The only row (`world_01`) has `specialty_mod` 1000 and `specialty_adjust_ratio` 500.
+  `economy/specialty.rs:388` hard-codes the `ratio / 1000` divisor that `specialty_mod` mirrors;
+  no code reads the table, and `specialty_adjust_ratio` has no known consumer (retail use
+  UNKNOWN). No package.
