@@ -23,7 +23,9 @@ use crate::packets::world::{
 };
 use crate::server::GameServer;
 use crate::systems::social::packets::expedition::*;
-use crate::systems::social::packets::faction::{SCFactionRenamedPacket, SCFactionRetryRenamePacket};
+use crate::systems::social::packets::faction::{
+    SCFactionRenamedPacket, SCFactionRetryRenamePacket,
+};
 use crate::systems::social::util::{self, error, send_error};
 use crate::world::{broadcast, PlayerRef};
 
@@ -349,7 +351,9 @@ impl ExpeditionManager {
     /// The factions `SendExpeditions` writes, in chunks of 20.
     pub fn faction_chunks(&self) -> Vec<Vec<SystemFaction>> {
         let list = self.expeditions.read().expect("expeditions poisoned");
-        list.chunks(20)
+        // A dismissed guild stays in the list (as `$deleted-guild-N`) but is not announced.
+        let live: Vec<&Expedition> = list.iter().filter(|e| !is_deleted(e)).collect();
+        live.chunks(20)
             .map(|c| c.iter().map(|e| e.faction.clone()).collect())
             .collect()
     }
@@ -897,6 +901,28 @@ pub fn invite(server: &GameServer, inviter: &PlayerRef, invited_name: &str) {
         );
         return;
     }
+    // Deviation from the C# (see PORTING.md "Guild functions (2026-11-05)"): the client has a
+    // text for each of these, so the inviter is told.
+    if util::alliance_id(server, invited.data().unit.faction_id)
+        != util::alliance_id(server, e.faction.mother_id)
+    {
+        send_error(inviter, error::EXPEDITION_BAD_FACTION);
+        return;
+    }
+    if invited.data().unit.is_dead() {
+        send_error(inviter, error::EXPEDITION_BAD_STATUS);
+        return;
+    }
+    if server
+        .systems
+        .instances
+        .instant_games
+        .current(&invited)
+        .is_some()
+    {
+        send_error(inviter, error::FACTION_INVITE_BATTLEFIELD);
+        return;
+    }
     {
         let mut invitations = server
             .expeditions
@@ -1018,45 +1044,61 @@ pub async fn reply_invite(
 }
 
 /// `ExpeditionManager.ChangeExpeditionRolePolicy(connection, policy)`.
+///
+/// Deviation from the C# (see PORTING.md "Guild functions (2026-11-05)"): only the leader (role
+/// 255) edits policies, and only those of the roles below it (the C# let anybody with the Expel
+/// right edit any role, even its own), else `FACTION_CHANGE_MEMBER_ROLE_RIGHTS`; a role name the
+/// guild name rules refuse is `EXPEDITION_NAME_CHARACTER`. The 1.2 dialog edits the role name
+/// and the invite / expel / promote / siege-join flags only, so the other flags keep their
+/// stored value, and the stored policy (not the packet) is what every member is sent.
 pub async fn change_role_policy(server: &GameServer, p: &PlayerRef, policy: ExpeditionRolePolicy) {
-    let id = policy.expedition_id;
-    let Some(e) = server.expeditions.get(id) else {
-        tracing::error!("ChangeExpeditionRolePolicy: no expedition {id}");
+    let Some(e) = expedition_of(server, p) else {
+        send_error(p, error::ONLY_EXPEDITION_MEMBER);
         return;
     };
+    let id = e.id();
     let Some(member) = e.member(p.character_id) else {
+        send_error(p, error::ONLY_EXPEDITION_MEMBER);
         return;
     };
-    match e.policy_by_role(member.role) {
-        Some(x) if x.expel => {}
-        Some(_) => return,
-        None => {
-            tracing::error!("Expedition {id} has no policy for role {}", member.role);
-            return;
-        }
+    if policy.expedition_id != id
+        || member.role != LEADER_ROLE
+        || policy.role == LEADER_ROLE
+        || e.policy_by_role(policy.role).is_none()
+    {
+        send_error(p, error::FACTION_CHANGE_MEMBER_ROLE_RIGHTS);
+        return;
+    }
+    let name_ok = policy.name.encode_utf16().count() <= 32
+        && regex::Regex::new(&server.config.expedition.name_regex)
+            .map(|r| r.is_match(&policy.name))
+            .unwrap_or(false);
+    if !name_ok {
+        send_error(p, error::EXPEDITION_NAME_CHARACTER);
+        return;
     }
     let updated = server.expeditions.with_mut(id, |e| {
-        match e.policies.iter_mut().find(|x| x.role == policy.role) {
-            Some(cur) => {
+        let members = e.member_ids();
+        e.policies
+            .iter_mut()
+            .find(|x| x.role == policy.role)
+            .map(|cur| {
                 cur.name = policy.name.clone();
                 cur.invite = policy.invite;
                 cur.join_siege = policy.join_siege;
                 cur.promote = policy.promote;
                 cur.expel = policy.expel;
-                Some(e.member_ids())
-            }
-            None => None,
-        }
+                (cur.clone(), members)
+            })
     });
-    let Some(Some(members)) = updated else {
-        tracing::error!("Expedition {id} has no policy for role {}", policy.role);
+    let Some(Some((stored, members))) = updated else {
         return;
     };
     send_to_members(
         server,
         &members,
         &SCExpeditionRolePolicyChangedPacket {
-            policy,
+            policy: stored,
             success: true,
         },
     );
@@ -1087,6 +1129,12 @@ pub async fn leave(server: &GameServer, p: &PlayerRef) {
         send_error(p, error::EXPEDITION_OWNER_CANNOT_LEAVE);
         return;
     }
+    remove_member_and_announce(server, p, id).await;
+}
+
+/// The member `p` leaves the guild `id` of its own accord (or is made to): `SCUnitExpeditionChanged`
+/// with `expel = false` to the character's surroundings and the remaining members, then the save.
+async fn remove_member_and_announce(server: &GameServer, p: &PlayerRef, id: u32) {
     remove_member(server, id, p.character_id);
     let unit_name = p.data().unit.name.clone();
     let packet = SCUnitExpeditionChangedPacket {
@@ -1107,6 +1155,52 @@ pub async fn leave(server: &GameServer, p: &PlayerRef) {
         .unwrap_or_default();
     send_to_members(server, &members, &packet);
     save(server, id).await;
+}
+
+/// A character that has to leave its guild without any right check (`Character.SetFaction` into
+/// another alliance). The C# called `Kick(p, p)`, which needs the Expel right and a strictly
+/// higher rank, so an ordinary member never left (and a leader that did would have left the
+/// guild without one).
+///
+/// A leader of a guild with other members first hands the guild to the highest-ranked remaining
+/// member (ties: the one that has been in the guild longest, i.e. first in the member list) and
+/// then leaves; the guild of a sole member is dismissed (even with territory or a siege: the
+/// dominion then has no live owner). The leave is announced like a voluntary one.
+pub async fn leave_forced(server: &GameServer, p: &PlayerRef) {
+    let Some(e) = expedition_of(server, p) else {
+        return;
+    };
+    let id = e.id();
+    let Some(me) = e.member(p.character_id) else {
+        return;
+    };
+    if me.role == LEADER_ROLE || e.faction.owner_id == p.character_id {
+        let successor = e
+            .members
+            .iter()
+            .filter(|m| m.character_id != p.character_id)
+            .fold(None::<&ExpeditionMember>, |best, m| match best {
+                Some(b) if b.role >= m.role => Some(b),
+                _ => Some(m),
+            })
+            .map(|m| m.character_id);
+        match successor {
+            Some(new_id) => transfer_ownership(server, id, p.character_id, new_id).await,
+            None => {
+                let _housing_operation = server
+                    .systems
+                    .housing
+                    .operation_lock
+                    .lock()
+                    .expect("housing poisoned");
+                dismiss(server, &e);
+                drop(_housing_operation);
+                save(server, id).await;
+                return;
+            }
+        }
+    }
+    remove_member_and_announce(server, p, id).await;
 }
 
 /// `ExpeditionManager.Kick(connection, kickedId)`.
@@ -1179,32 +1273,49 @@ pub async fn kick(server: &GameServer, kicker: &PlayerRef, kicked_id: u32) {
 }
 
 /// `ExpeditionManager.ChangeMemberRole(connection, newRole, changedId)`.
+///
+/// Deviation from the C# (see PORTING.md "Guild functions (2026-11-05)"), which returned
+/// silently: the caller needs the Promote right and the target and the new role must both rank
+/// strictly below the caller, and the new role must exist and not be the leader's (else
+/// `FACTION_CHANGE_MEMBER_ROLE_RIGHTS`, the client's own check); an unknown target is
+/// `EXPEDITION_NO_TARGET`.
 pub async fn change_member_role(server: &GameServer, p: &PlayerRef, new_role: u8, changed_id: u32) {
     let Some(e) = expedition_of(server, p) else {
+        send_error(p, error::ONLY_EXPEDITION_MEMBER);
         return;
     };
     let id = e.id();
     let Some(changer) = e.member(p.character_id) else {
+        send_error(p, error::ONLY_EXPEDITION_MEMBER);
         return;
     };
-    if changer.role <= new_role {
-        return;
-    }
     match e.policy_by_role(changer.role) {
         Some(x) if x.promote => {}
-        Some(_) => return,
+        Some(_) => {
+            send_error(p, error::FACTION_CHANGE_MEMBER_ROLE_RIGHTS);
+            return;
+        }
         None => {
             tracing::error!("Expedition {id} has no policy for role {}", changer.role);
             return;
         }
     }
-    // Deviation from C#: the target must currently rank below the caller.
-    if e.member(changed_id).is_some_and(|t| t.role >= changer.role) {
+    let Some(target) = e.member(changed_id) else {
+        send_error(p, error::EXPEDITION_NO_TARGET);
+        return;
+    };
+    if target.role >= changer.role
+        || new_role >= changer.role
+        || new_role == LEADER_ROLE
+        || e.policy_by_role(new_role).is_none()
+    {
         tracing::warn!(
-            "ChangeMemberRole: member {} (role {}) tried to change {changed_id} of expedition {id}",
+            "ChangeMemberRole: member {} (role {}) tried to set role {new_role} on {changed_id} (role {}) of expedition {id}",
             p.character_id,
-            changer.role
+            changer.role,
+            target.role
         );
+        send_error(p, error::FACTION_CHANGE_MEMBER_ROLE_RIGHTS);
         return;
     }
     let changed = server.expeditions.with_mut(id, |e| {
@@ -1229,36 +1340,43 @@ pub async fn change_member_role(server: &GameServer, p: &PlayerRef, new_role: u8
     save(server, id).await;
 }
 
-/// `ExpeditionManager.ChangeOwner(connection, newOwnerId)`: keep the persistent owner id,
-/// name and roles consistent; transferring to oneself is a no-op.
-pub async fn change_owner(server: &GameServer, owner: &PlayerRef, new_owner_id: u32) {
-    if new_owner_id == owner.character_id {
-        return;
-    }
-    let Some(e) = expedition_of(server, owner) else {
-        return;
-    };
-    let id = e.id();
-    match e.member(owner.character_id) {
-        Some(m) if m.role == 255 => {}
-        _ => return,
-    }
-    if e.member(new_owner_id).is_none() {
-        return;
-    }
+/// Whether a (not finished) siege involves the guild.
+fn in_siege(server: &GameServer, id: u32) -> bool {
+    server.systems.housing.dominions.all().iter().any(|d| {
+        d.siege.as_ref().is_some_and(|siege| {
+            siege.status != crate::systems::housing::dominion::SiegeStatus::Finished
+                && (siege.attacker_expedition_id == id || siege.defender_expedition_id == id)
+        })
+    })
+}
+
+/// Whether the guild owns a dominion.
+fn owns_territory(server: &GameServer, id: u32) -> bool {
+    server
+        .systems
+        .housing
+        .dominions
+        .all()
+        .iter()
+        .any(|d| d.owner_expedition_id == id)
+}
+
+/// Hands the guild `id` from the member `old_id` to the member `new_id`: owner id and name,
+/// both roles, the three packets and the save. No checks.
+async fn transfer_ownership(server: &GameServer, id: u32, old_id: u32, new_id: u32) {
     let res = server.expeditions.with_mut(id, |e| {
         let members = e.member_ids();
-        let new = e.member_mut(new_owner_id).expect("checked");
-        new.role = 255;
+        let new = e.member_mut(new_id)?;
+        new.role = LEADER_ROLE;
         let new = (new.character_id, new.role, new.name.clone());
-        let old = e.member_mut(owner.character_id).expect("checked");
+        let old = e.member_mut(old_id)?;
         old.role = 0;
         let old = (old.character_id, old.role, old.name.clone());
-        e.faction.owner_id = new_owner_id;
+        e.faction.owner_id = new_id;
         e.faction.owner_name = new.2.clone();
-        (old, new, members)
+        Some((old, new, members))
     });
-    let Some((old, new, members)) = res else {
+    let Some(Some((old, new, members))) = res else {
         return;
     };
     send_to_members(
@@ -1291,8 +1409,69 @@ pub async fn change_owner(server: &GameServer, owner: &PlayerRef, new_owner_id: 
     save(server, id).await;
 }
 
+/// `ExpeditionManager.ChangeOwner(connection, newOwnerId)`: keeps the persistent owner id,
+/// name and roles consistent.
+///
+/// Deviation from the C# (see PORTING.md "Guild functions (2026-11-05)"), which returned
+/// silently: a caller that is not the leader `FACTION_RIGHTS`, handing it to oneself
+/// `EXPEDITION_CHANGE_OWNER_SELF`, to somebody outside the guild
+/// `EXPEDITION_CHANGE_OWNER_MY_EXPEDITION`, and during a siege
+/// `EXPEDITION_OWNER_CANNOT_CHANGE_DURING_SIEGE`.
+pub async fn change_owner(server: &GameServer, owner: &PlayerRef, new_owner_id: u32) {
+    let Some(e) = expedition_of(server, owner) else {
+        send_error(owner, error::ONLY_EXPEDITION_MEMBER);
+        return;
+    };
+    let id = e.id();
+    match e.member(owner.character_id) {
+        Some(m) if m.role == LEADER_ROLE => {}
+        _ => {
+            send_error(owner, error::FACTION_RIGHTS);
+            return;
+        }
+    }
+    if new_owner_id == owner.character_id {
+        send_error(owner, error::EXPEDITION_CHANGE_OWNER_SELF);
+        return;
+    }
+    if e.member(new_owner_id).is_none() {
+        send_error(owner, error::EXPEDITION_CHANGE_OWNER_MY_EXPEDITION);
+        return;
+    }
+    if in_siege(server, id) {
+        send_error(owner, error::EXPEDITION_OWNER_CANNOT_CHANGE_DURING_SIEGE);
+        return;
+    }
+    transfer_ownership(server, id, owner.character_id, new_owner_id).await;
+}
+
+/// Dismisses the guild: every member leaves (online ones are told), and the record stays in
+/// the list renamed `$deleted-guild-<id>` with owner 0, as in C#. No checks.
+fn dismiss(server: &GameServer, e: &Expedition) {
+    let id = e.id();
+    for m in e.members.iter().rev() {
+        if let Some(c) = server.world.character_by_id(m.character_id) {
+            let online = c.data().is_online;
+            if online {
+                c.send(SCExpeditionDismissedPacket { id, success: true });
+            }
+            c.data().unit.expedition_id = 0;
+        }
+        remove_member(server, id, m.character_id);
+    }
+    server.expeditions.with_mut(id, |e| {
+        e.faction.name = format!("$deleted-guild-{id}");
+        e.faction.owner_id = 0;
+        e.is_disbanded = true;
+    });
+}
+
 /// `ExpeditionManager.Disband(owner)`. The guild stays in the list (renamed
-/// `$deleted-guild-<id>`, owner 0) as in C#.
+/// `$deleted-guild-<id>`, owner 0) as in C#, but is no longer announced (`SCFactionList`).
+///
+/// Deviation from the C#: a guild that owns territory is refused with `EXPEDITION_OWNER_DISMISS`
+/// and one registered in a siege with `EXPEDITION_DISMISS_IN_SIEGE` (the 1.2 texts; this server
+/// answered with a chat line).
 pub async fn disband(server: &GameServer, owner: &PlayerRef) -> bool {
     let id = {
         let _housing_operation = server
@@ -1310,36 +1489,15 @@ pub async fn disband(server: &GameServer, owner: &PlayerRef) -> bool {
             return false;
         }
         let id = e.id();
-        if server.systems.housing.dominions.all().iter().any(|d| {
-            d.owner_expedition_id == id
-                || d.siege.as_ref().is_some_and(|siege| {
-                    siege.status != crate::systems::housing::dominion::SiegeStatus::Finished
-                        && (siege.attacker_expedition_id == id
-                            || siege.defender_expedition_id == id)
-                })
-        }) {
-            crate::world::session::send_message(
-                owner,
-                crate::systems::social::chat::chat_type::SYSTEM,
-                "An expedition that owns territory or is registered for a siege cannot disband.",
-            );
+        if owns_territory(server, id) {
+            send_error(owner, error::EXPEDITION_OWNER_DISMISS);
             return false;
         }
-        for m in e.members.iter().rev() {
-            if let Some(c) = server.world.character_by_id(m.character_id) {
-                let online = c.data().is_online;
-                if online {
-                    c.send(SCExpeditionDismissedPacket { id, success: true });
-                }
-                c.data().unit.expedition_id = 0;
-            }
-            remove_member(server, id, m.character_id);
+        if in_siege(server, id) {
+            send_error(owner, error::EXPEDITION_DISMISS_IN_SIEGE);
+            return false;
         }
-        server.expeditions.with_mut(id, |e| {
-            e.faction.name = format!("$deleted-guild-{id}");
-            e.faction.owner_id = 0;
-            e.is_disbanded = true;
-        });
+        dismiss(server, &e);
         id
     };
     save(server, id).await;
@@ -1392,13 +1550,7 @@ async fn apply_rename(server: &GameServer, id: u32, name: &str, by_gm: bool) {
 /// MEMBER`, not the leader of the named guild `ONLY_EXPEDITION_OWNER`, no pending right (or the
 /// nation variant, which this server has no nations for) `FACTION_RIGHTS`; a name that breaks
 /// the create rules reopens the dialog through `SCFactionRetryRename`.
-pub async fn rename(
-    server: &GameServer,
-    p: &PlayerRef,
-    id: u32,
-    name: &str,
-    is_expedition: bool,
-) {
+pub async fn rename(server: &GameServer, p: &PlayerRef, id: u32, name: &str, is_expedition: bool) {
     if !is_expedition {
         send_error(p, error::FACTION_RIGHTS);
         return;
@@ -1434,7 +1586,11 @@ pub async fn grant_rename(server: &GameServer, id: u32) -> Option<String> {
             return None;
         }
         e.faction.allow_change_name = 1;
-        Some((e.faction.name.clone(), e.faction.owner_id, e.faction.clone()))
+        Some((
+            e.faction.name.clone(),
+            e.faction.owner_id,
+            e.faction.clone(),
+        ))
     })??;
     // The client keeps the flag with its faction record.
     server.world.broadcast_to_server(&SCFactionListPacket {
@@ -1451,11 +1607,7 @@ pub async fn grant_rename(server: &GameServer, id: u32) -> Option<String> {
 
 /// GM: renames the guild `id` directly (`SCFactionRenamed` with `by_gm`), applying the create
 /// rules. Returns the `ErrorMessageType` of a refused name.
-pub async fn gm_rename(
-    server: &GameServer,
-    id: u32,
-    name: &str,
-) -> std::result::Result<(), i16> {
+pub async fn gm_rename(server: &GameServer, id: u32, name: &str) -> std::result::Result<(), i16> {
     match server.expeditions.get(id) {
         Some(e) if !is_deleted(&e) => {}
         _ => return Err(error::EXPEDITION_NO_TARGET),
