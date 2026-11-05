@@ -41,6 +41,7 @@ use super::packets::faction::{
     SCFactionIndependencePacket, SCFactionKickToOriginResultPacket, SCFactionOwnerChangedPacket,
     SCFactionRelationExpiredPacket, SCFactionSetRelationStatePacket,
 };
+use super::packets::misc::{invitation_canceled_kind, SCInvitationCanceledPacket};
 use super::util::{now_ms, send_error};
 
 /// Skill "국가 독립" (declare independence), 20 s cast, CASTLE_CLAIM backpack (equip slot 26).
@@ -497,6 +498,20 @@ impl NationManager {
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
             .any(|i| i.invitee_character_id == invitee_character_id && i.is_valid_at(now_ms))
+    }
+
+    /// Removes the invitations whose timeout passed and returns their invitee character ids.
+    /// The list holds at most one invitation per invitee (`add_invite` replaces), so no other
+    /// nation invitation (popup type 0x29) can still be pending for an expired invitee.
+    pub fn expire_invites(&self, now_ms: i64) -> Vec<u32> {
+        let mut invites = self.invites.lock().unwrap_or_else(PoisonError::into_inner);
+        let expired: Vec<u32> = invites
+            .iter()
+            .filter(|i| !i.is_valid_at(now_ms))
+            .map(|i| i.invitee_character_id)
+            .collect();
+        invites.retain(|i| i.is_valid_at(now_ms));
+        expired
     }
 
     /// The founding expedition handed its leadership to `character_id`: the nation's king
@@ -2148,6 +2163,17 @@ pub fn pay_friend_treaty(server: &GameServer, payer: &PlayerRef, mail_id: i64) -
 
 /// The periodic nation tick (subscribed to the existing `TickManager`, NATION-17): applies due
 /// relation expiries, persists them, and sends the treaty-request mails that became due.
+/// Closes the popups of the immigration invitations that timed out (kind 7).
+pub fn sweep_expired_invites(server: &GameServer, now_ms: i64) {
+    for invitee_id in server.systems.social.nations.expire_invites(now_ms) {
+        if let Some(invitee) = server.world.character_by_id(invitee_id) {
+            invitee.send(SCInvitationCanceledPacket {
+                kind: invitation_canceled_kind::NATION,
+            });
+        }
+    }
+}
+
 pub fn run_periodic(server: &GameServer) {
     let now = Utc::now().timestamp();
     let expiries = server.systems.social.nations.expire_relations(now);
@@ -2405,7 +2431,9 @@ pub(crate) async fn persist_expiries(
     Ok(())
 }
 
-/// Subscribes the nation periodic check to the shared `TickManager` (60 s; NATION-17).
+/// Subscribes the nation periodic check to the shared `TickManager` (60 s; NATION-17) and the
+/// immigration-invite expiry sweep (1 s; the invite timeout is 60 s and the list was otherwise
+/// pruned only when the invitee answered).
 pub fn start_tick(server: &std::sync::Arc<GameServer>) {
     let weak = std::sync::Arc::downgrade(server);
     server.systems.services.tick.on_tick.subscribe(
@@ -2417,6 +2445,17 @@ pub fn start_tick(server: &std::sync::Arc<GameServer>) {
         },
         std::time::Duration::from_secs(60),
         true,
+    );
+    let weak = std::sync::Arc::downgrade(server);
+    server.systems.services.tick.on_tick.subscribe(
+        move |_delta| {
+            let Some(server) = weak.upgrade() else {
+                return;
+            };
+            sweep_expired_invites(&server, now_ms());
+        },
+        std::time::Duration::from_secs(1),
+        false,
     );
 }
 
