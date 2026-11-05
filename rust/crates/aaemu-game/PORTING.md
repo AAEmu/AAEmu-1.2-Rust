@@ -4306,6 +4306,18 @@ and in NPC wandering / buff remaining times.
   20:30..22:30 times never hit one); `view_at` returns None for the whole zone when its next
   rotation cycle cannot be built; and without WP-S2 (declaration) the calendar never enters
   warmup/siege on its own, so periods 3/4 exist only through an explicit GM schedule.
+* systems::housing (siege result achievements, WP-SD6a, 2026-11-05): a finished siege credits
+  `char_records` kinds 57/59 to the attacking roster and 58/60 to the defenders with
+  `value1 = zone_group_id` (mapping EVIDENCED from the authored records and the Korean
+  achievement texts). `AttackerCaptured` credits 57/60 and `DefenderHeld` 59/58; a
+  `Cancelled` outcome credits nobody. The persisted `dominions.siege_outcome_credited` marker
+  is a check-and-set under the authority lock, so a repeated tick, a capture racing the tick or
+  a restart cannot credit one siege id twice; it is written with the dominion row and an online
+  participant's record values in the same character save transaction. An offline participant's
+  increment is written straight to `character_records` so the next entry snapshot evaluates it
+  (INFERRED: the counter is cumulative; the C# had no producer). That offline write is a
+  separate transaction from the dominion save, so a crash between the two can credit an offline
+  participant twice (undocumented retail policy; low risk).
 * systems::housing / systems::social (WP-S6 claim gating): the existing lodestone claim
   (`social/dominion.rs::declare_effect`) now applies the authored `siege_zones` claim window,
   the pirate refusal, the owned-dominion limit and the fresh-claim siege delay. The 1.2 client
