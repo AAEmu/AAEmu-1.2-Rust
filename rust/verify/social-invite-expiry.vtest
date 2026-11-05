@@ -1,0 +1,24 @@
+# Party invitation expiry (systems/social/team.rs): an invitation nobody answers is cancelled after
+# 60 s (the inviter gets 588 INVITATION_CANCELED_TIMEOUT) and no longer blocks the next invitation
+# of the same character (it blocked every later one until the target answered).
+#
+# Bots:
+#   leader    invites the idle bot, waits for the cancellation, invites it again
+#   idle      never answers; must receive both invitations
+
+suite social-invite-expiry
+bot leader
+bot idle
+
+[leader]
+waitpeer 120 ${idle}
+partyinvite ${idle}
+expectseen 588 90
+partyinvite ${idle}
+sync reinvited 2
+
+[idle]
+waitpeer 120 ${leader}
+await TeamAsk 30
+await TeamAsk 100
+sync reinvited 2

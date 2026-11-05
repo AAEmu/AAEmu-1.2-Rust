@@ -962,11 +962,28 @@ pub struct TowerDef {
     pub progs: Vec<u32>,
 }
 
+/// One member of an `npc_groups` group (`npc_group_members`), in table order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TowerDefGroupMember {
+    pub npc_id: u32,
+    pub is_leader: bool,
+    /// `formation_offset_x/y/z`, relative to the group's spawn position.
+    pub offset: [f32; 3],
+}
+
 /// `TowerDefGameData`.
 #[derive(Debug, Clone, Default)]
 pub struct TowerDefData {
     pub tower_defs: HashMap<u32, TowerDef>,
     pub progs: HashMap<u32, TowerDefProg>,
+    /// The `npc_groups` that tower defense spawner templates list as `NpcGroup` members, by
+    /// group id. The C# spawns such a member as the NPC *template* with the group's id
+    /// (`SpawnNpcGroup` is `SpawnNpc`); the event runtime spawns the group's members instead.
+    pub groups: HashMap<u32, Vec<TowerDefGroupMember>>,
+    /// Tower defense spawner template id -> its `NpcGroup` member group ids (row order).
+    pub spawner_groups: std::collections::BTreeMap<u32, Vec<u32>>,
+    /// The NPC templates of those groups ([`Self::group_member_npcs`]).
+    pub group_npcs: std::collections::HashSet<u32>,
 }
 
 impl TowerDefData {
@@ -1066,6 +1083,7 @@ impl TowerDefData {
                 Ok(())
             },
         )?;
+        d.load_groups(conn)?;
         if !orphans.is_empty() {
             // Genuine gap in the shipped data (the C# stopped reading at the first orphan).
             tracing::info!(
@@ -1080,6 +1098,85 @@ impl TowerDefData {
             d.progs.len()
         );
         Ok(d)
+    }
+
+    /// `npc_groups` of the tower defense spawner templates (`NpcGroup` members). Absent tables
+    /// (the unit tests' minimal databases) mean no groups.
+    fn load_groups(&mut self, conn: &Connection) -> Result<(), GameDataError> {
+        let ids = self.npc_spawner_ids();
+        let has = |table: &str| {
+            conn.query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |_| Ok(()),
+            )
+            .is_ok()
+        };
+        if !has("npc_spawner_npcs") || !has("npc_group_members") {
+            return Ok(());
+        }
+        let mut spawner_groups: std::collections::BTreeMap<u32, Vec<u32>> =
+            std::collections::BTreeMap::new();
+        for_each_row(
+            conn,
+            "SELECT npc_spawner_id, member_id FROM npc_spawner_npcs \
+             WHERE member_type = 'NpcGroup' ORDER BY id",
+            [],
+            |r| {
+                let spawner = r.u32("npc_spawner_id")?;
+                if ids.contains(&spawner) {
+                    spawner_groups
+                        .entry(spawner)
+                        .or_default()
+                        .push(r.u32("member_id")?);
+                }
+                Ok(())
+            },
+        )?;
+        let wanted: std::collections::HashSet<u32> =
+            spawner_groups.values().flatten().copied().collect();
+        let mut groups: HashMap<u32, Vec<TowerDefGroupMember>> = HashMap::new();
+        for_each_row(
+            conn,
+            "SELECT * FROM npc_group_members ORDER BY id",
+            [],
+            |r| {
+                let group = r.u32("npc_group_id")?;
+                if wanted.contains(&group) {
+                    groups.entry(group).or_default().push(TowerDefGroupMember {
+                        npc_id: r.u32("npc_id")?,
+                        is_leader: r.bool_str("is_leader")?,
+                        offset: [
+                            r.f32("formation_offset_x")?,
+                            r.f32("formation_offset_y")?,
+                            r.f32("formation_offset_z")?,
+                        ],
+                    });
+                }
+                Ok(())
+            },
+        )?;
+        // A group without member rows cannot spawn; drop it so the spawner stays unavailable.
+        for list in spawner_groups.values_mut() {
+            list.retain(|g| groups.contains_key(g));
+        }
+        spawner_groups.retain(|_, list| !list.is_empty());
+        self.groups = groups;
+        self.spawner_groups = spawner_groups;
+        self.group_npcs = self.group_member_npcs();
+        Ok(())
+    }
+
+    /// NPC templates that are members of a group of a tower defense spawner: the JSON entries
+    /// of these are the group's members at its spawn sites, not ordinary world spawns.
+    pub fn group_member_npcs(&self) -> std::collections::HashSet<u32> {
+        self.spawner_groups
+            .values()
+            .flatten()
+            .filter_map(|g| self.groups.get(g))
+            .flatten()
+            .map(|m| m.npc_id)
+            .collect()
     }
 
     /// Controller spawner templates used at event start and by its waves. These must not

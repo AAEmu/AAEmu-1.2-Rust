@@ -587,6 +587,91 @@ async fn ai_state_machine_events_and_go_tos() {
     assert_eq!(behavior(&server, NPC_OBJ), Some(B::Dead));
 }
 
+/// A tower defense controller casts its wave plot (`OnSpawn`: seconds of projectile steps) while
+/// its AI settles from Spawning into Idle / HoldPosition. Those behaviors interrupt the skills
+/// of every other NPC, but must not cancel the plot of the event's own controllers, or no wave
+/// ever appears.
+#[tokio::test]
+async fn event_controller_keeps_its_wave_plot_while_the_ai_settles() {
+    use crate::systems::instances::tower_def::{adopt_for_test, EventKey};
+    use crate::systems::skills::geometry::Target;
+    use crate::systems::skills::plots::PlotState;
+    use crate::systems::skills::skill::CastCtx;
+    use crate::systems::skills::state::{PlotStateRef, SkillRun};
+    use crate::systems::skills::types::{SkillCastTarget, SkillCaster, SkillObject};
+
+    let server = server();
+    let plot_of = |npc: &NpcRef| {
+        let skill = SkillRun::new(
+            Arc::new(SkillTemplate {
+                id: 15311,
+                ..SkillTemplate::default()
+            }),
+            1,
+        );
+        let caster = WorldObject::from(npc);
+        let plot = PlotState::new(
+            skill,
+            CastCtx {
+                caster: caster.clone(),
+                caster_caster: SkillCaster::Unit(npc.obj_id),
+                target: Target::Obj(caster),
+                target_caster: SkillCastTarget::Unit(npc.obj_id),
+                skill_object: SkillObject::None,
+            },
+        );
+        npc.data().unit.skill_state.active_plot = Some(PlotStateRef(plot.clone()));
+        plot
+    };
+    let ordinary = spawn_npc(
+        &server,
+        NPC_OBJ,
+        PASSIVE_TEMPLATE,
+        100.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    let controller = spawn_npc(
+        &server,
+        HELPER_OBJ,
+        HELPER_TEMPLATE,
+        120.0,
+        100.0,
+        AiKind::HoldPosition,
+    );
+    adopt_for_test(
+        &server,
+        EventKey {
+            world_id: 0,
+            id: 3,
+            zone_group_id: 5,
+        },
+        &controller,
+    );
+    let ordinary_plot = plot_of(&ordinary);
+    let controller_plot = plot_of(&controller);
+    for obj in [NPC_OBJ, HELPER_OBJ] {
+        post(&server, obj, |c| c.go_to_idle());
+    }
+    assert_eq!(behavior(&server, HELPER_OBJ), Some(B::Idle));
+    assert!(
+        ordinary_plot.cancellation_requested(),
+        "Idle interrupts the skills of an ordinary NPC"
+    );
+    assert!(
+        !controller_plot.cancellation_requested(),
+        "Idle must not cancel the wave plot of an event controller"
+    );
+    for obj in [NPC_OBJ, HELPER_OBJ] {
+        post(&server, obj, |c| c.go_to_default_behavior());
+    }
+    assert_eq!(behavior(&server, HELPER_OBJ), Some(B::HoldPosition));
+    assert!(
+        !controller_plot.cancellation_requested(),
+        "HoldPosition must not cancel the wave plot of an event controller"
+    );
+}
+
 #[tokio::test]
 async fn return_state_teleports_home_after_the_timeout() {
     let server = server();

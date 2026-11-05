@@ -9,6 +9,8 @@
 #include <atomic>
 #include <algorithm>
 #include "visuals.h"
+#include "skilltrace.h"
+#include "video.h"
 
 namespace visuals {
 typedef HRESULT (STDMETHODCALLTYPE *PresentFn)(IDXGISwapChain*, UINT, UINT);
@@ -129,7 +131,10 @@ static HRESULT STDMETHODCALLTYPE present(IDXGISwapChain* chain, UINT interval, U
         if (FAILED(chain->GetDesc(&desc)) || desc.BufferDesc.Width < 64 || desc.BufferDesc.Height < 64)
             return original(chain, interval, flags);
         clientWindow = desc.OutputWindow;
-        InterlockedIncrement(&frames);
+        LONG frame = InterlockedIncrement(&frames);
+        // Skill trace frame rows and video copies observe the frame about to be presented.
+        skilltrace::on_present((unsigned)frame);
+        video::on_present(chain, desc.BufferDesc.Width, desc.BufferDesc.Height);
         AcquireSRWLockExclusive(&lock);
         if (profiling) {
             LARGE_INTEGER now; QueryPerformanceCounter(&now);
@@ -212,6 +217,10 @@ std::string capture() {
     ReleaseSRWLockExclusive(&lock);
     return out;
 }
+
+unsigned frame_count() { return (unsigned)frames; }
+
+bool capture_ready() { return slot != NULL; }
 
 std::string info() {
     char out[128];

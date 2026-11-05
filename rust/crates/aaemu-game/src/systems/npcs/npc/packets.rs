@@ -310,7 +310,7 @@ impl ClientPacket for CSStartInteractionPacket {
         conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            tracing::warn!(
+            tracing::debug!(
                 "StartInteraction, NpcObjId: {}, objId: {}, extraInfo: {}, pickId: {}, mouse: {}, mods: {}",
                 self.npc_obj_id,
                 self.obj_id,
@@ -478,7 +478,7 @@ impl ClientPacket for CSSelectInteractionExPacket {
         _conn: &'a mut GameConnection,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            tracing::warn!(
+            tracing::debug!(
                 "SelectInteractionEx, TargetId: {}, InteractionEx: {}, Var1: {}",
                 self.target_id,
                 self.interaction_ex,

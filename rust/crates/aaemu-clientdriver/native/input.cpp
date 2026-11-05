@@ -5,6 +5,7 @@
 #include <vector>
 #include <sstream>
 #include "input.h"
+#include "skilltrace.h"
 
 namespace input {
 #ifdef AADRIVER_INPUT_TEST
@@ -22,7 +23,13 @@ static const Key keys[] = {{"w",16,0},{"a",29,0},{"s",30,0},{"d",31,0},{"f",32,0
     // r208022 keyboard constructors 335036BB..33503775: R through P -> IDs18..24.
     {"r",18,0},{"t",19,0},{"y",20,0},{"u",21,0},{"i",22,0},{"o",23,0},{"p",24,0},
     {"1",1,0},{"2",2,0},{"3",3,0},{"4",4,0},{"5",5,0},
-    {"6",6,0},{"7",7,0},{"8",8,0},{"9",9,0},{"0",10,0}};
+    {"6",6,0},{"7",7,0},{"8",8,0},{"9",9,0},{"0",10,0},
+    // CryInput.dll RVA 0x35C1..0x3604: "minus" is registered with ID 11 (VK 0xBD) and
+    // "equals" with ID 12 (VK 0xBB), right after "0" (ID 10): action bar slots 11 and 12.
+    {"-",11,0},{"=",12,0},
+    // CryInput.dll RVA 0x3EFB..0x3F27: "f11" is registered with ID 82 (VK 0x7A) and "f12" with ID 83
+    // (VK 0x7B). F12 is the screenshot mode (default_binding.g `f12 screenshotmode`): no UI.
+    {"f11",82,0},{"f12",83,0}};
 // Exact r208022 keyboard symbols (3350381A / 335039B9 / 33503B9E):
 // modifier flags include both sides of the native ctrl/shift/alt mask.
 static const Key modifiers[] = {{"lctrl",28,0x11},{"shift",41,0x22},{"alt",55,0x44}};
@@ -312,6 +319,8 @@ static std::string control_at(void* env,const std::string& command,ULONGLONG now
         return "2input unavailable";
     }
     held.push_back(Held{key,mask,now+duration});
+    // The skill trace records the injection itself (the key-down just accepted by CryInput).
+    skilltrace::on_press(key->name,mask);
     return "0pressed (automatic release scheduled)";
 }
 std::string control(void* env,const std::string& command) { return control_at(env,command,GetTickCount64()); }

@@ -967,6 +967,10 @@ pub struct WorldManager {
     pub is_snowing: AtomicBool,
     /// `ZoneManager._conflicts` runtime state (`ZoneConflict.CurrentZoneState`, timers).
     pub zone_conflicts: zone_conflicts::ZoneConflicts,
+    /// `GetWorld` misses by instance id (cleared when the id is created again). Only the first
+    /// miss of an id is logged; whatever keeps asking for a removed instance cannot flood the
+    /// log (a destroyed dungeon's tick once logged 17 errors a second for hours).
+    missing_lookups: DashMap<u32, u64>,
 }
 
 impl WorldManager {
@@ -981,6 +985,8 @@ impl WorldManager {
         }
         let w = Arc::new(WorldInstance::new(id, template));
         self.worlds.insert(id, w.clone());
+        // Instance ids are recycled: a new instance with this id may be missed (and logged) again.
+        self.missing_lookups.remove(&id);
         w
     }
 
@@ -1011,13 +1017,47 @@ impl WorldManager {
         }
     }
 
-    /// `GetWorld(instanceId)`.
+    /// `GetWorld(instanceId)`. A miss is counted ([`Self::missing_lookups`]) and logged once per
+    /// instance id, not on every call.
     pub fn world(&self, id: u32) -> Option<Arc<WorldInstance>> {
         let w = self.worlds.get(&id).map(|w| w.clone());
         if w.is_none() {
-            tracing::error!("GetWorld: No such World Instance {id}");
+            let misses = {
+                let mut n = self.missing_lookups.entry(id).or_insert(0);
+                *n += 1;
+                *n
+            };
+            if misses == 1 {
+                tracing::warn!(
+                    "GetWorld: No such World Instance {id} (further lookups of it are counted, not logged)"
+                );
+            }
         }
         w
+    }
+
+    /// `_worlds.TryGetValue(id)`: the instance if it exists, without the `GetWorld` miss
+    /// accounting. For the periodic walks over a per-instance registry, which have to tell a
+    /// removed instance from a live one without counting every pass as a miss.
+    pub fn world_if_exists(&self, id: u32) -> Option<Arc<WorldInstance>> {
+        self.worlds.get(&id).map(|w| w.clone())
+    }
+
+    /// How often `GetWorld` was asked for the non-existing instance `id` since it last existed
+    /// (tests: nothing may keep asking for a destroyed instance).
+    pub fn missing_lookups(&self, id: u32) -> u64 {
+        self.missing_lookups.get(&id).map_or(0, |n| *n)
+    }
+
+    /// Every instance id `GetWorld` missed, with its miss count (tests / diagnostics).
+    pub fn all_missing_lookups(&self) -> Vec<(u32, u64)> {
+        let mut v: Vec<_> = self
+            .missing_lookups
+            .iter()
+            .map(|e| (*e.key(), *e.value()))
+            .collect();
+        v.sort_unstable();
+        v
     }
 
     pub fn worlds(&self) -> Vec<Arc<WorldInstance>> {

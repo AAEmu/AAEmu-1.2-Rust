@@ -76,8 +76,8 @@ impl CSAuctionPostPacket {
     }
 
     fn run(self, server: &GameServer, conn: &mut GameConnection) {
-        tracing::warn!(
-            "AuctionMyBidList, auctioneerId: {}, auctioneerId2: {}, itemId: {}, startPrice: {}, buyoutPrice: {}, duration: {}",
+        tracing::debug!(
+            "AuctionPost, auctioneerId: {}, auctioneerId2: {}, itemId: {}, startPrice: {}, buyoutPrice: {}, duration: {}",
             self.auctioneer_id,
             self.auctioneer_id2,
             self.item_id,
@@ -119,7 +119,7 @@ impl CSAuctionSearchPacket {
     }
 
     fn run(self, server: &GameServer, conn: &mut GameConnection) {
-        tracing::warn!(
+        tracing::debug!(
             "AuctionSearch, auctioneerId: {}, auctioneerId: {}, Keyword: {}",
             self.auctioneer_id,
             self.auctioneer_id2,
@@ -158,7 +158,7 @@ impl CSBidAuctionPacket {
     }
 
     fn run(self, server: &GameServer, conn: &mut GameConnection) {
-        tracing::warn!(
+        tracing::debug!(
             "AuctionBid, auctioneerId: {}, auctioneerId2: {}, BidderName: {}, LotId: {}:{}, Money: {}",
             self.auctioneer_id,
             self.auctioneer_id2,
@@ -201,7 +201,7 @@ impl CSCancelAuctionPacket {
     }
 
     fn run(self, server: &GameServer, conn: &mut GameConnection) {
-        tracing::warn!(
+        tracing::debug!(
             "AuctionCancel, auctioneerId: {}, auctioneerId2: {}, ClientName: {}, LotId: {}",
             self.auctioneer_id,
             self.auctioneer_id2,
@@ -239,7 +239,7 @@ impl CSAuctionMyBidListPacket {
     }
 
     fn run(self, server: &GameServer, conn: &mut GameConnection) {
-        tracing::warn!(
+        tracing::debug!(
             "AuctionMyBidList, auctioneerId: {}, auctioneerId2: {}, Page: {}",
             self.auctioneer_id,
             self.auctioneer_id2,
@@ -278,7 +278,7 @@ impl CSAuctionLowestPricePacket {
     }
 
     fn run(self, server: &GameServer, conn: &mut GameConnection) {
-        tracing::warn!(
+        tracing::debug!(
             "AuctionLowestPrice, auctioneerId: {}, auctioneerId2: {}, TemplateId: {}, Grade: {}",
             self.auctioneer_id,
             self.auctioneer_id2,

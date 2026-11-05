@@ -345,6 +345,8 @@ while the client stays alive. Tools are `client_list`, `client_attach`, `client_
 `client_launch`, `client_lua`, `client_screenshot`, `client_window`, `client_pak` and `client_stop`.
 Vehicle and gameplay tests also have `client_input`, `client_action`, `client_inventory`, `client_mode_actions`,
 `client_unit_state`, `client_mode_input`, `client_loot`, `client_use_item`, `client_chat`, `client_vehicle`, `client_entities` and `client_perf`.
+`client_trace` and `client_video` record the original client's animation, particle and sound calls as JSONL and a
+constant-frame-rate mp4 for the skill-parity audit (section 13).
 Launch defaults to silent audio and fast hidden rendering with normal-priority CPU calibration and 64 KB pak
 read-ahead; pass `fast_start: false`, `smooth_start: false`, `fast_pak: false` or `hidden: false` to compare
 profiles. Pass `sound: true` to enable sound and music; normal launcher runs use `--sound`.
@@ -363,6 +365,7 @@ checks the module timestamp, image size and slot address. It releases keys after
 including when the MCP session disconnects, and `key: "release"` clears every test key.
 The native fixture tests cover key IDs, overlapping presses, deadlines, release and invalid
 commands. These inputs work while hidden and do not send keys to another desktop application.
+The keys `-` and `=` (CryInput IDs 11 and 12) press action bar slots 11 and 12.
 
 Number-row keys `"1"` through `"0"` also accept an optional `modifiers` array containing
 distinct `"ctrl"`, `"shift"`, and `"alt"` values. For example,
@@ -853,3 +856,170 @@ valid profile package, and received Windows sharing error 32; the installed
 manifest SHA stayed unchanged. Closing that client permits normal verified update
 application. Root-relative SHA filenames and receipt bounds reject arbitrary file
 paths. Receipts protect integrity/base identity, not publisher authenticity.
+
+## 13. Skill trace and video
+
+Two MCP tools, and the pipe operations behind them, record what the original client does while a
+skill is cast. They feed the skill-parity audit (`tools/skillparity/README.md` in the aa-client
+repository defines the row format, schema `skillparity/v1`, and the runner that lines this client up
+against aa-client). Both only observe: nothing they do changes game state.
+
+| tool | arguments | what it does |
+|---|---|---|
+| `client_trace` | `pid?`, `action`: `start` / `drain` / `stop` / `status`; `kinds?` (distinct values of `anim`, `fx`, `sound`, `press`, `frame`; only with `start`; default `anim`, `fx`, `sound`, `press`) | `start` checks the build and installs the hooks, `drain` returns the rows recorded since the last drain as JSONL text (`structuredContent` is `{rows, bytes}`), `stop` restores the vtable slots (unread rows stay available to one more `drain`; the next `start` clears them), `status` returns `{running, rows, dropped, buffered, kinds, hooks}` where `hooks` says per hook `ok`, `off` or `inert: <why>` |
+| `client_video` | `pid?`, `action`: `start` / `stop` / `status`; `path` (`.mp4`, `.mkv` or `.mov`; required for `start`, relative paths resolve against the MCP server's working directory and missing folders are created); `fps` (1..120, default 30); `ffmpeg?` (path to `ffmpeg.exe`, default `ffmpeg` on the client's `PATH`) | `start` waits for the first rendered frame (up to 10 s) and spawns ffmpeg, `stop` finishes the file and writes `<path>.json`, `status` reports the counters of a running recording |
+
+Pipe operations: `R` + `start [kinds]` / `drain` / `stop` / `status` (`native/skilltrace.cpp`) and `M`
++ `start<LF>fps<LF>ffmpeg<LF>path` / `stop` / `status` (`native/video.cpp`). `ping` reports
+`trace=0|1` and `video=0|1`. `client_input` also accepts `-` and `=` (CryInput key IDs 11 and 12, found in
+`cryinput.dll`'s key table), so action bar slots 11 and 12 can be pressed from tests.
+
+### Rows
+
+Every row has `src: "orig"`, `wall_us` (`GetSystemTimePreciseAsFileTime` as Unix microseconds), `frame` (the driver's
+`Present` counter) and `kind`. Names are lowercased (ASCII) as the schema
+requires and strings are valid JSON whatever bytes the game holds. Only the hooks' own results are recorded; fields the
+schema does not define are raw extras that the audit may ignore.
+
+| kind | fields |
+|---|---|
+| `anim` | `inst` (`0x` + hex of `*(void**)(skel + 1176)`, the `CCharInstance`), `skel` (the `CSkeletonAnim` pointer), `clip`, `layer`, `speed`, `blend` (the transition time), `loop`, `flags`, extras `key_time`, `weight`, `by` (`name` or `id`), `id` (by-id calls), `ok` (the function's boolean result) |
+| `fx` | `phase: "spawn"`: `name` (`library.group.effect`), `pos` `[x, y, z]`, `scale`, `rot` (quaternion `[x, y, z, w]`), `flags`, `emitter` (the returned emitter), `effect`. `phase: "find"`: `name` (as requested), `found`, `effect`, `resolved` (the found effect's own full name) |
+| `sound` | `phase: "create"`: `name`, `flags`, `sound` (the returned object, `0x00000000` when the sound system is off). `phase: "play"`: `sound`, `name` (the sound's own `GetName()`, vtable slot 29), `volume`, `force_active`, `set_ratio` |
+| `press` | `key`, `slot` (`1`..`9` as 1..9, `0` as 10, `-` as 11, `=` as 12; left out for other keys), `mods` (`ctrl`, `shift`, `alt` joined by `+`) |
+| `frame` | `dt_ms`, the time since the previous `Present` (the first `Present` after `start` writes no row) |
+
+`loop` is **derived**: `flags & 0x2` (`CA_LOOP_ANIMATION`); the game has no separate loop field. `role` is left out, the
+runner assigns it. `inst` is the `CCharInstance` pointer (the README describes it as the skeleton pointer); both identify the same
+character, and `skel` is logged too. A row is written when the hooked function returns but stamped with the
+time it was entered, except `sound` `play`, which is written before the call (`Play` may free a one-shot sound), so rows from
+nested calls can be a few microseconds out of order; sort by `wall_us`.
+
+The ring buffer holds 4 MiB of rows. When it is full the oldest rows are overwritten and counted in `dropped` (the same for a
+single row larger than the ring), so drain regularly during long runs. `status` and the `stop` reply also report `rows`
+(pushed since `start`) and `buffered` (waiting for a `drain`).
+
+### Hooks
+
+Six virtual functions are observed by replacing their vtable slot (`VirtualProtect` of the page holding the slot, an aligned
+`InterlockedCompareExchangePointer`, the old protection restored). `stop` and driver unload put the original back, but only if
+the slot still holds our hook. All addresses are RVAs from the module's runtime base (`GetModuleHandle`); the preferred bases
+are `cryanimation.dll` `0x31500000`, `cry3dengine.dll` `0x30000000` and `crysoundsystem.dll` `0x36000000`. The hook wrappers
+are `__fastcall(this, edx, ...)`, which has the same stack layout and callee clean-up as `__thiscall`; arguments go on to the
+original as raw 32-bit stack words (so a `bool`'s upper bytes survive) and the original's result is returned unchanged.
+
+| hook (id in `status`) | module | vtable RVA | slot (offset) | function RVA | `ret` | row |
+|---|---|---|---|---|---|---|
+| `CSkeletonAnim::StartAnimation(name, params)` (`anim_start`) | `cryanimation.dll` | `0x1779DC` | 12 (`+0x30`) | `0x59FD0` | `8` | `anim`, `by: "name"` |
+| `CSkeletonAnim::StartAnimationById(id, params)` (`anim_start_by_id`) | `cryanimation.dll` | `0x1779DC` | 14 (`+0x38`) | `0x5B350` | `8` | `anim`, `by: "id"` |
+| `CParticleEffect::Spawn(loc, flags)` (`fx_spawn`) | `cry3dengine.dll` | `0x259350` | 3 (`+0x0C`) | `0x6EED0` | `8` | `fx`, `spawn` |
+| `C3DEngine::FindParticleEffect(name, source, source2, load)` (`fx_find`) | `cry3dengine.dll` | `0x263718` | 82 (`+0x148`) | `0x1224E0` | `16` | `fx`, `find` |
+| `CSoundSystem::CreateSound(name, flags)` (`sound_create`) | `crysoundsystem.dll` | `0xA3A48` | 19 (`+0x4C`) | `0x4FE40` | `8` | `sound`, `create` |
+| `CSound::Play(volume, force_active, set_ratio, package)` (`sound_play`) | `crysoundsystem.dll` | `0xA1638` | 8 (`+0x20`) | `0x37AC0` | `16` | `sound`, `play` |
+
+`StartAnimation` calls `StartAnimationById` through the vtable, so a thread-local flag keeps that inner call from writing a
+second row: a by-name start is logged once, with `by: "name"`. `Play` has four stack arguments (`ret 16`): a float volume, two
+bools and the sound-package pointer. Its row takes the name from the sound's own vtable slot 29 (`+0x74`, RVA `0x35220`,
+`const char* GetName()`, `ret 0`), called only when that slot is that exact function.
+
+Evidence (r208022 binaries in `D:\AA1.2\bin32`, read with pefile and capstone; every vtable entry, read from the file at
+`vtable RVA + 4 * slot`, equals the preferred base plus the function RVA):
+
+| function | first bytes at the RVA | `ret` found |
+|---|---|---|
+| `StartAnimation` `0x59FD0` | `55 8B EC 56 8B 75 08 57 8B F9` | `ret 8` |
+| `StartAnimationById` `0x5B350` | `55 8B EC 6A FF 68 EE 81 66 31` (SEH frame) | `ret 8` at `0x5B97A` and `0x5B9A5` |
+| `CParticleEffect::Spawn` `0x6EED0` | `55 8B EC 8B 45 0C 50 6A 00 51` | `ret 8` |
+| `FindParticleEffect` `0x1224E0` | `55 8B EC 8B 0D 4C CD 2D 30 85` | `ret 0x10` |
+| `CreateSound` `0x4FE40` | `55 8B EC 56 8B F1 FF 15 C0 A4` | `ret 8` |
+| `CSound::Play` `0x37AC0` | `55 8B EC 64 A1 00 00 00 00 6A` | `ret 0x10` |
+| `CSound::GetName` `0x35220` | `55 8B EC 64 A1 00 00 00 00 6A` | `ret` |
+
+Layouts read by the rows (offsets in decimal):
+
+* `CryCharAnimationParams` head: `+0` blend (transition time), `+4` key time, `+8` speed, `+16` layer (the function rejects
+  layers of 16 and above), `+20` weight, `+24` flags. Speed has no direct read site in `StartAnimationById`; its place follows the
+  structure order.
+* Clip name by id: `animset = *(char**)(*(char**)(skel + 1176) + 384) + 1492`; `entries = *(char**)(animset + 36)` with the end
+  at `animset + 40`, 16 bytes per entry, name pointer first. Ids outside the table leave `clip` out.
+* `CParticleEffect::Spawn`: `loc` is a `QuatTS`: quaternion `x, y, z, w` at `+0`, position at `+16`, `+20`, `+24`, scale at `+28`.
+  The effect's name is the `char*` at `effect + 232`.
+* `CreateSound` is a plain `thiscall(name, flags)`. The `edi` input that IDA shows for it is an artefact of an internal call; the
+  slot is an ordinary cross-module virtual call.
+
+### Verification rule
+
+As with the smooth-start patch, nothing is patched blindly. For each hook `client_trace start` requires that the module is loaded
+with the r208022 `TimeDateStamp` and `SizeOfImage` (`cryanimation.dll` `0x543CB82F` / `0x001E8000`, `cry3dengine.dll`
+`0x543CB85C` / `0x0038A000`, `crysoundsystem.dll` `0x543CB770` / `0x000F6000`) **and** that the vtable slot currently holds exactly
+`module base + function RVA`. Otherwise that hook stays inert and `status` says why (`inert: ...`). If no hook at all can be installed
+`start` fails and lists the reasons; otherwise it runs with the hooks that passed. The slot swap is a compare-exchange against the
+verified value, so a slot that changed in between (another patch) is left alone. Every read of game memory (parameters, names, vtables)
+runs under SEH: a bad pointer costs a field or a row, never the process.
+
+### Video
+
+`client_video` copies the swap chain's back buffer inside the existing `Present` hook into one of four staging textures (an
+asynchronous GPU copy; MSAA is resolved first) and reads back the frame from two presents earlier with a `DO_NOT_WAIT` map. A frame the
+GPU has not finished is retried for one more present, then dropped and counted as `lost_gpu`. The pixels go into a pool of six buffers
+for a writer thread; when the pool is empty the frame is dropped (`lost_queue`), so the render thread never waits for the encoder
+or the pipe. The writer feeds ffmpeg through a pipe (`-f rawvideo -pix_fmt bgra -s WxH -r FPS -i - -c:v libx264 -preset ultrafast -crf 18
+-pix_fmt yuv420p`, with a pad filter when a side is odd). ffmpeg inherits only its stdin and its log file, and its messages go to
+`<path>.ffmpeg.log` (deleted when ffmpeg succeeded and logged nothing, or when it could not be started). RGBA back buffers are converted
+to BGRA by the writer.
+
+The file has a constant frame rate tied to wall time: output frame `k` shows the most recent game frame presented at or before
+`t0 + k / fps`, where `t0` is the wall time of the first captured frame. A game frame can be shown several times (`repeated` counts the
+output frames that repeat the previous one) or never (`dropped_cfr`, superseded within one output interval). `<path>.json` is
+`{t0_wall_us, fps, width, height, frames, repeated, dropped}` plus the breakdown `dropped_cfr`, `lost_queue`, `lost_gpu`, `late`
+(frames stamped before time that was already resolved, shown at the next output frame) and `ffmpeg_exit`; `dropped` is
+`dropped_cfr + lost_queue + lost_gpu`. The `stop` reply carries the same fields plus `path`, `pipe_failed` and `resized`. Line the video up with
+a trace through `wall_us`: frame `k` is wall time `t0_wall_us + k * 1000000 / fps`.
+
+### Limits
+
+* Only calls through the six hooked vtable slots are seen. Code that reaches the emitter creation, the animation start or the sound
+  functions without the virtual call is not traced; neither are particle children, attachments, or other sound creation paths.
+* Coordinates are seamless-local: `fx` `pos` is the client's local space (its origin
+  shifts as the player crosses sector boundaries), not the server's global position. `client_entities` reports the same local coordinates.
+* `role` is left out of every row; the runner assigns it from the sequence of clips after the first press.
+* `CreateSound` returns null when the sound system is off, which is the default of `client_launch` (`silent`): such a client records
+  `create` rows with `"sound": "0x00000000"` and no `play` rows. Launch with `sound: true` to get `play` rows.
+* `inst`, `skel`, `emitter`, `effect` and `sound` are pointers and can be reused after an object is destroyed.
+* `press` rows come from the driver's own input path (`client_input` and the key presses of `client_mode_input`), written when CryInput
+  accepts the key-down. Mouse clicks and physical keys are not recorded.
+* A running trace or recording is stopped by driver unload (`unload` finishes the video file first). A trace stays active
+  across `drain` calls, so the buffer only grows between drains; a full 4 MiB ring overwrites its oldest rows.
+* Video: one recording at a time; DX10 or DX11 swap chains with 8-bit RGBA/BGRA back buffers only; the size is fixed when `start` ran
+  (a resize drops frames, counts them as `lost_gpu` and sets `resized`); the last two or three frames in flight at `stop` are lost; the
+  client may override the window size (a `--hidden` 1280x720 request produced 1920x1080 here). The writer waits up to 60 s for ffmpeg to
+  finish after `stop`.
+* ffmpeg is not shipped. Pass `ffmpeg: "C:/path/to/ffmpeg.exe"` when it is not on the client's `PATH`; a failed start returns the reason.
+
+### Tests
+
+```powershell
+$env:AADRIVER_OUT = 'D:\aaemu-target\<lane>\aadriver'
+.\rust\crates\aaemu-clientdriver\native\build.bat   # builds the driver and runs every fixture test
+cd rust; cargo test -p aaemu-clientdriver           # tool schemas, argument validation, pipe payloads
+```
+
+`build.bat` runs three fixture executables for this feature. `skilltrace-test.exe` covers the ring buffer (eviction, wrap-around, four
+writer threads), the JSON row builder and escaping, kind parsing, the slot patch with its build check on a fake read-only vtable (wrong
+function, misaligned slot, foreign patch left alone, restore only when the slot is still ours), and the six hooks on fake module images
+(raw stack words and results passed through, nested by-name suppression, unreadable pointers, kinds, press slots, restore). `video-test.exe`
+checks the repeat/drop math against a brute-force reference with random frame cadences, stalls, late and backward timestamps and an hour of
+30 fps without drift, plus the ffmpeg command line and the sidecar text. `input-test.exe` covers the `-` and `=` keys and that a press row is
+reported exactly once per accepted key-down and never for refused or released input.
+
+Live check (2026-11-03, hidden client on a lane stack, silent audio, r208022): all six hooks reported `ok`. Two drains while walking and
+pressing a hotbar key held 1,554 rows over about 55 s: 271 `anim` (26 distinct clips such as `fist_ba_relaxed_idle`,
+`_normal_walk`, `fly_loop`, `landing`; layers 0 and 1, speed 1, blend 0.01..0.5), 9 `fx` finds (all found) and 8 spawns (for example
+`collisions.footsteps.water_shallow` at scale 1), 1,172 `sound` creates, 91 `frame` and 3 `press` rows. A 4 s recording at 30 fps came out
+as 1920x1080 with 119 frames (31 repeated, none dropped, `ffmpeg_exit` 0). Example rows:
+
+```json
+{"src":"orig","wall_us":1793742217966792,"frame":1695,"kind":"anim","inst":"0x43a7d134","skel":"0x4cdcb22c","clip":"fist_ba_relaxed_idle","layer":0,"speed":1,"blend":0.2,"loop":true,"flags":194,"key_time":0,"weight":1,"by":"name","ok":true}
+{"src":"orig","wall_us":1793742229704677,"frame":1958,"kind":"fx","phase":"spawn","name":"collisions.footsteps.water_shallow","pos":[4313.7593,4117.396,126.2457],"scale":0.99999994,"rot":[0.7071067,0,0,0.70710677],"flags":1048577,"emitter":"0x4f1b0ae4","effect":"0x2ec48e3c"}
+{"src":"orig","wall_us":1793742232026898,"frame":2010,"kind":"press","key":"1","slot":1}
+```

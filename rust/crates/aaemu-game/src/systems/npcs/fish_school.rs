@@ -151,6 +151,15 @@ impl FishSchoolManager {
             .collect()
     }
 
+    /// Forgets the fish schools of a removed instance (`false` = it had none).
+    pub fn remove_world(&self, world_id: u32) -> bool {
+        self.fish_schools
+            .lock()
+            .expect("fish schools poisoned")
+            .remove(&world_id)
+            .is_some()
+    }
+
     /// The fish schools of one world instance.
     pub fn fish_schools_of(&self, world_id: u32) -> Vec<DoodadRef> {
         self.fish_schools
