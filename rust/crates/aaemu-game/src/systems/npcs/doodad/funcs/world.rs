@@ -244,7 +244,22 @@ pub fn exit_indun(f: &DoodadFuncExitIndun, ctx: &DoodadCtx<'_>, caster: Option<&
     };
     let has_mwp = player.data().main_world_position.is_some();
     if f.return_point_id == 0 && has_mwp {
-        crate::systems::instances::indun::request_leave_instance(ctx.server, player);
+        if !crate::systems::instances::indun::request_leave_instance(ctx.server, player) {
+            // No instance lists the character, so nobody would ever move it out: bring it back
+            // to the main world (the C# did nothing and the door stayed dead).
+            tracing::warn!(
+                "DoodadFuncExitIndun, {} ({}) is in no instance's character list",
+                player.data().unit.name,
+                player.character_id
+            );
+            let in_instance = player.data().unit.transform.instance_id
+                != crate::models::character::DEFAULT_INSTANCE_ID;
+            if in_instance {
+                crate::systems::instances::worlds::return_to_main_world(ctx.server, player);
+            } else {
+                send_error(player, err::INVALID_RETURN_POS_INSTANCE);
+            }
+        }
         return;
     }
     // TODO (C#): in db not have a entries, but we can change this xD

@@ -324,13 +324,15 @@ pub fn queue_player(server: &GameServer, dungeon: &Arc<Dungeon>, p: &PlayerRef) 
         .lock()
         .expect("dungeon operations poisoned");
     let Some(world) = dungeon.world(server) else {
+        // Destroyed while the request was on its way: say so instead of ignoring the door.
+        send_error(p, err::TRY_LATER_INSTANCE, 0);
         return false;
     };
     if !sync_party_access(server, dungeon, p) {
         send_error(p, err::INSTANCE_LEAVE_PARTY, 0);
         return false;
     }
-    if worlds::has_character(&world, p.character_id) {
+    if worlds::has_character(&world, p.character_id) && rejoin_member(server, dungeon, &world, p) {
         return true;
     }
     if dungeon.is_queued(p) {
@@ -380,6 +382,65 @@ pub fn queue_player(server: &GameServer, dungeon: &Arc<Dungeon>, p: &PlayerRef) 
             zone_id: dungeon.zone_instance_id.zone_id as i32,
         });
     }
+    true
+}
+
+/// The world's character table already lists this character when it asks to enter (C#
+/// `Dungeon.AddPlayer` on a member: "Most likely an error in logic?" and the character is moved
+/// into the dungeon again). A table entry only counts when it is this very character standing in
+/// the instance; an entry left by an earlier session of the same character, or one the
+/// character's own transform no longer backs (a registration that outlived the move out of the
+/// dungeon), is dropped. `true`: the character really is inside and was put back at the spawn
+/// point (the client asked for the door, so it believes it stands outside); `false`: nothing was
+/// inside, the caller goes on with a normal admission.
+fn rejoin_member(
+    server: &GameServer,
+    dungeon: &Arc<Dungeon>,
+    world: &Arc<WorldInstance>,
+    p: &PlayerRef,
+) -> bool {
+    let mut inside = false;
+    for member in world.all_characters() {
+        if member.character_id != p.character_id {
+            continue;
+        }
+        if Arc::ptr_eq(&member, p) && p.data().unit.transform.instance_id == world.id {
+            inside = true;
+            continue;
+        }
+        tracing::warn!(
+            "[Dungeon] Dropping the stale registration of {} ({}) in dungeon {}, {} (the character stands in instance {})",
+            member.data().unit.name,
+            member.character_id,
+            dungeon.zone_instance_id.instance_id,
+            dungeon.zone_instance_id.zone_id,
+            p.data().unit.transform.instance_id
+        );
+        world.remove_object(member.obj_id);
+    }
+    if !inside {
+        return false;
+    }
+    tracing::info!(
+        "[Dungeon] Player {} already exists in dungeon {}, {}. Moving them to the dungeon again.",
+        p.data().unit.name,
+        dungeon.zone_instance_id.instance_id,
+        dungeon.zone_instance_id.zone_id
+    );
+    // `move_character` subscribes again: keep one subscription per event.
+    let events: &[CharEvent] = if dungeon.is_system {
+        &[CharEvent::DungeonLeave, CharEvent::Disconnect]
+    } else {
+        &[
+            CharEvent::TeamJoin,
+            CharEvent::TeamKick,
+            CharEvent::TeamLeave,
+            CharEvent::DungeonLeave,
+            CharEvent::Disconnect,
+        ]
+    };
+    unsubscribe(server, dungeon, p, events);
+    move_character(server, dungeon, world, p);
     true
 }
 

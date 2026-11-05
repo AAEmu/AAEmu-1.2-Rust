@@ -314,7 +314,10 @@ pub fn request_dungeon_instance(
         if d.world(server)
             .is_some_and(|w| worlds::has_character(&w, p.character_id))
         {
-            return true;
+            // The C# adds the member to the dungeon again (`AddPlayer`). Returning `true` here
+            // left a character whose registration in the dungeon outlived its move out of it
+            // (a death or disconnect leftover) pressing the door for ever without any answer.
+            return dungeon::queue_player(server, d, p);
         }
         if d.has_access(p.character_id) {
             if d.is_team_owned() && !dungeon::player_in_same_team(server, d, p) {

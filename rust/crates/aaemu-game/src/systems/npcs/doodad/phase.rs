@@ -254,6 +254,32 @@ pub fn doodad_has_matching_climate(ctx: &DoodadCtx<'_>) -> bool {
         .contains(&template.climate_id)
 }
 
+/// A use that meets another thread's phase reservation is dropped (the C# `Doodad.Use` waited on
+/// the doodad lock and then ran). A dropped use of an instance door left the player pressing it
+/// with no answer at all, so the player is told to try again.
+fn answer_busy_instance_door(ctx: &DoodadCtx<'_>, caster: Option<&WorldObject>) {
+    let Some(player) = caster.and_then(WorldObject::as_player) else {
+        return;
+    };
+    let group = ctx.doodad.data().func_group_id;
+    let is_door = ctx.data().funcs_for_group(group).iter().any(|f| {
+        matches!(
+            f.func_type.as_str(),
+            "DoodadFuncEnterInstance" | "DoodadFuncEnterSysInstance" | "DoodadFuncExitIndun"
+        )
+    });
+    if is_door {
+        tracing::debug!(
+            "Use refused: instance door {} is busy, {} must try again",
+            ctx.doodad.obj_id,
+            player.data().unit.name
+        );
+        player.send(error_msg(
+            crate::systems::instances::worlds::error_message::TRY_LATER_INSTANCE,
+        ));
+    }
+}
+
 /// `Doodad.Use(caster, startedSkillId, funcGroupId)`.
 pub fn use_doodad(
     ctx: &DoodadCtx<'_>,
@@ -262,6 +288,7 @@ pub fn use_doodad(
     func_group_id: i32,
 ) {
     let Some(_operation) = Operation::enter(&ctx.doodad) else {
+        answer_busy_instance_door(ctx, caster);
         return;
     };
     let server = ctx.server;

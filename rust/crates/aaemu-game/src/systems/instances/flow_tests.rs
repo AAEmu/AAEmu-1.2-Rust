@@ -1613,6 +1613,10 @@ fn error_frames(frames: &[(u16, Vec<u8>)]) -> Vec<(u16, Vec<u8>)> {
         .collect()
 }
 
+fn has_load_instance(frames: &[(u16, Vec<u8>)]) -> bool {
+    frames.iter().any(|(op, _)| *op == sc::SCLoadInstancePacket)
+}
+
 /// The entry limit (`enter_count` entries within 4 hours) answers with the 1.2 client's
 /// `INSTANCE_VISIT_LIMIT` (453, "you have entered this instance too often") and the exact bytes of
 /// the notification; the refused entry leaves no run and no extra entry behind.
@@ -1749,6 +1753,196 @@ async fn every_refused_dungeon_request_is_answered() {
         vec![error_frame(worlds::error_message::INSTANCE_QUOTA)]
     );
     dungeon::destroy_dungeon(&server, &d);
+}
+
+// ---------------------------------------------------------------------------------------------
+// A registration in the dungeon that the character no longer stands behind
+// ---------------------------------------------------------------------------------------------
+
+/// A character the dungeon's character table lists while its own transform stands in the main
+/// world (the registration outlived the move out of the dungeon) pressed the door for ever: the
+/// request found the member and returned `true` without sending a thing. The C# adds the member
+/// to the dungeon again; so does the port now, without charging a second entry.
+#[tokio::test]
+async fn a_stale_dungeon_registration_does_not_swallow_the_door() {
+    let server = dungeon_server();
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    use_enter_func(&server, &a.p, DUNGEON_ZONE);
+    let d = server.systems.instances.all_dungeons()[0].clone();
+    await_loader(&d).await;
+    let world_id = d.world_id().unwrap();
+    assert_eq!(a.instance(), world_id);
+    assert_eq!(
+        server.systems.instances.indun.entry_count(1, DUNGEON_GROUP),
+        1
+    );
+    // The leftover: the character is back in the main world for the client and the server's
+    // object, but the dungeon's table still lists it.
+    a.p.data().unit.transform.instance_id = 0;
+    let world = server.world.world(world_id).unwrap();
+    assert!(worlds::has_character(&world, 1));
+    a.frames();
+
+    use_enter_func(&server, &a.p, DUNGEON_ZONE);
+    assert_eq!(a.instance(), world_id, "the door moved the character again");
+    assert_eq!(world.all_characters().len(), 1);
+    let frames = a.frames();
+    assert!(has_load_instance(&frames));
+    assert!(error_frames(&frames).is_empty());
+    assert_eq!(
+        server.systems.instances.indun.entry_count(1, DUNGEON_GROUP),
+        1
+    );
+    dungeon::destroy_dungeon(&server, &d);
+}
+
+/// A character really standing in the dungeon whose client asks for the door (it believes it is
+/// outside) is put back at the entrance with one event subscription per event, not two.
+#[tokio::test]
+async fn a_member_inside_who_asks_for_the_door_is_moved_in_again_once() {
+    let server = dungeon_server();
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    use_enter_func(&server, &a.p, DUNGEON_ZONE);
+    let d = server.systems.instances.all_dungeons()[0].clone();
+    await_loader(&d).await;
+    a.frames();
+    use_enter_func(&server, &a.p, DUNGEON_ZONE);
+    let frames = a.frames();
+    let expected = load_instance(
+        d.world_id().unwrap(),
+        DUNGEON_ZONE,
+        DUNGEON_SPAWN.x,
+        DUNGEON_SPAWN.y,
+        DUNGEON_SPAWN.z,
+        (
+            worlds::deg_to_rad(DUNGEON_SPAWN.roll),
+            worlds::deg_to_rad(DUNGEON_SPAWN.pitch),
+            worlds::deg_to_rad(DUNGEON_SPAWN.yaw),
+        ),
+    );
+    assert!(frames.contains(&(sc::SCLoadInstancePacket, expected)));
+    let ev = &server.systems.instances.events.characters;
+    assert_eq!(ev.count(&a.p, CharEvent::Disconnect), 1);
+    assert_eq!(ev.count(&a.p, CharEvent::DungeonLeave), 1);
+    assert_eq!(ev.count(&a.p, CharEvent::TeamLeave), 1);
+    dungeon::destroy_dungeon(&server, &d);
+}
+
+/// The registration of an earlier session of the same character (a reconnect before the old
+/// session was cleaned up) is dropped; the live character enters like a returning member.
+#[tokio::test]
+async fn the_registration_of_an_earlier_session_does_not_block_the_new_one() {
+    let server = dungeon_server();
+    let old = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    use_enter_func(&server, &old.p, DUNGEON_ZONE);
+    let d = server.systems.instances.all_dungeons()[0].clone();
+    await_loader(&d).await;
+    let world_id = d.world_id().unwrap();
+    // The old session's connection is gone but its character is still listed in the dungeon.
+    let mut new = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    assert_ne!(old.p.obj_id, new.p.obj_id);
+    new.frames();
+    use_enter_func(&server, &new.p, DUNGEON_ZONE);
+    let world = server.world.world(world_id).unwrap();
+    let listed = world.all_characters();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].obj_id, new.p.obj_id);
+    assert_eq!(new.instance(), world_id);
+    assert!(has_load_instance(&new.frames()));
+    assert_eq!(
+        server.systems.instances.indun.entry_count(1, DUNGEON_GROUP),
+        1
+    );
+    dungeon::destroy_dungeon(&server, &d);
+}
+
+/// The exit door of a character no instance lists used to do nothing at all. A character whose
+/// transform stands in an instance is returned to the main world; one that does not gets the
+/// "invalid return position" error.
+#[tokio::test]
+async fn an_exit_door_answers_a_character_no_instance_lists() {
+    let server = dungeon_server();
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    use_enter_func(&server, &a.p, DUNGEON_ZONE);
+    let d = server.systems.instances.all_dungeons()[0].clone();
+    await_loader(&d).await;
+    let world_id = d.world_id().unwrap();
+    assert_eq!(a.instance(), world_id);
+    // The registration is gone while the transform still says "in the dungeon".
+    let world = server.world.world(world_id).unwrap();
+    world.remove_object(a.p.obj_id);
+    assert!(!worlds::has_character(&world, 1));
+    a.frames();
+    use_exit_func(&server, &a.p);
+    assert_eq!(a.instance(), 0);
+    assert!(has_load_instance(&a.frames()));
+    // Listed nowhere and standing in the main world, the door has nothing to leave: it says so.
+    server.world.world(0).unwrap().remove_object(a.p.obj_id);
+    a.frames();
+    use_exit_func(&server, &a.p);
+    assert_eq!(
+        a.frames(),
+        vec![error_frame(
+            worlds::error_message::INVALID_RETURN_POS_INSTANCE
+        )]
+    );
+    dungeon::destroy_dungeon(&server, &d);
+}
+
+/// A use of an instance door that meets another thread's phase reservation was dropped without a
+/// word (the C# waited for the lock). The player is told to try again; other doodads stay quiet.
+#[tokio::test]
+async fn a_busy_instance_door_tells_the_player_to_try_again() {
+    use crate::systems::npcs::doodad::templates::DoodadFunc;
+    let mut data = dungeon_data();
+    for (group, kind) in [(77, "DoodadFuncEnterInstance"), (78, "DoodadFuncFakeUse")] {
+        data.systems
+            .npcs
+            .doodad
+            .funcs_by_groups
+            .entry(group)
+            .or_default()
+            .push(DoodadFunc {
+                group_id: group,
+                func_key: group,
+                func_type: kind.into(),
+                skill_id: 18701,
+                ..DoodadFunc::default()
+            });
+    }
+    let server = dungeon_server_with(data);
+    let mut a = Pc::new(&server, 1, "Alpha", 100.0, 100.0);
+    a.frames();
+    let other_thread = std::thread::spawn(|| std::thread::current().id())
+        .join()
+        .unwrap();
+    for (group, answered) in [(77u32, true), (78u32, false)] {
+        let world = server.world.world(0).unwrap();
+        let doodad = Entity::new(0x9100 + group, Doodad::new(1));
+        {
+            let mut d = doodad.data();
+            d.func_group_id = group;
+            d.phase.operation_thread = Some(other_thread);
+        }
+        let ctx = DoodadCtx::new(&server, world, doodad);
+        crate::systems::npcs::doodad::phase::use_doodad(
+            &ctx,
+            Some(&WorldObject::from(&a.p)),
+            18701,
+            0,
+        );
+        let frames = a.frames();
+        if answered {
+            assert_eq!(
+                frames,
+                vec![error_frame(worlds::error_message::TRY_LATER_INSTANCE)]
+            );
+        } else {
+            assert!(frames.is_empty(), "{frames:?}");
+        }
+        // The reservation of the other thread is untouched.
+        assert_eq!(ctx.doodad.data().phase.operation_thread, Some(other_thread));
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
