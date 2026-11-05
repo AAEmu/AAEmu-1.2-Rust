@@ -40,6 +40,8 @@ pub struct Data {
     pub loot: super::loot_data::LootData,
     /// Item effect tables (fishing loot packs by zone group, repairable slaves).
     pub item_effects: super::item_effects::ItemEffectsData,
+    /// Mate equipment rules (`mate_equip_slot_packs`, `mate_equip_pack_*`).
+    pub mate_equipment: super::mate_equipment_data::MateEquipmentData,
 }
 
 impl Data {
@@ -69,6 +71,7 @@ impl Data {
         data.items = super::items_data::ItemsData::load(ctx.conn, ctx.language)?;
         data.loot = super::loot_data::LootData::load(ctx.conn)?;
         data.item_effects = super::item_effects::ItemEffectsData::load(ctx.conn)?;
+        data.mate_equipment = super::mate_equipment_data::MateEquipmentData::load(ctx.conn)?;
         Ok(data)
     }
 

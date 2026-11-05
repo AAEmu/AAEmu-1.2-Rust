@@ -64,6 +64,7 @@ pub mod mail_template;
 #[cfg(test)]
 mod mail_tests;
 pub mod mate_equipment;
+pub mod mate_equipment_data;
 mod operation_scope;
 #[cfg(test)]
 mod operation_scope_tests;
