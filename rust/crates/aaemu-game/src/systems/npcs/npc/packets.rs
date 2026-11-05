@@ -81,6 +81,44 @@ impl Marshal for SCNpcInteractionSkillListPacket {
     }
 }
 
+/// `SCNpcInteractionStatusChangedPacket(npcObjId, interactable)`: the NPC's cursor / talk marker
+/// turns off while an AI command set with `can_interact = 'f'` runs. Reader `FUN_397b4b00`
+/// (`bc objId`, then the bool field "interactable" at +0x78); the client handler `FUN_391d91a0`
+/// stores the flag with `FUN_393be250` (INFERRED use, see `PORTING.md` WP-5b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SCNpcInteractionStatusChangedPacket {
+    pub npc_obj_id: u32,
+    pub interactable: bool,
+}
+packet_def!(
+    SCNpcInteractionStatusChangedPacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCNpcInteractionStatusChangedPacket
+);
+impl Marshal for SCNpcInteractionStatusChangedPacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_bc(self.npc_obj_id).write_bool(self.interactable);
+    }
+}
+
+/// `SCNpcInteractionEndedByZonePacket(npcObjId)`: closes the interaction window a player still
+/// has open on the NPC. Reader `FUN_397b4aa0` (`bc objId`); the client handler `FUN_391d9000`
+/// closes the window when its NPC is this object id (INFERRED use, see `PORTING.md` WP-5b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SCNpcInteractionEndedByZonePacket {
+    pub npc_obj_id: u32,
+}
+packet_def!(
+    SCNpcInteractionEndedByZonePacket,
+    level = LEVEL_PLAIN,
+    opcode = sc::SCNpcInteractionEndedByZonePacket
+);
+impl Marshal for SCNpcInteractionEndedByZonePacket {
+    fn write(&self, s: &mut PacketStream) {
+        s.write_bc(self.npc_obj_id);
+    }
+}
+
 /// `SCAiAggroPacket` / `SCUnitDeathPacket`: the skills subsystem's definitions (one per opcode).
 pub use crate::systems::skills::packets::{SCAiAggroPacket, SCUnitDeathPacket};
 
@@ -341,7 +379,20 @@ impl ClientPacket for CSStartInteractionPacket {
             };
             // TODO (C#): Distance-check
             if let Some(npc) = world.npc(self.npc_obj_id) {
-                let template_id = npc.data().unit.template_id;
+                let (template_id, interactable) = {
+                    let n = npc.data();
+                    (n.unit.template_id, n.interactable)
+                };
+                // An NPC running an AI command set with `can_interact = 'f'` is not interactable
+                // (INFERRED, see PORTING.md WP-5b): the client hides its marker, and a click that
+                // still arrives is ignored silently (no evidenced error message).
+                if !interactable {
+                    tracing::debug!(
+                        "StartInteraction refused: npc {} is not interactable",
+                        self.npc_obj_id
+                    );
+                    return Ok(());
+                }
                 // `npc.Template` is never null for a created NPC.
                 let npcs = &server.game_data.systems.npcs.npc;
                 let skills = npcs
@@ -561,6 +612,30 @@ mod tests {
         ];
         assert_eq!(encode(&p), frame(0x07b, &body));
         assert_eq!(skills_enum::SLAVE_OCCUPY, 12076);
+    }
+
+    /// `FUN_397b4b00`: `bc objId`, then the one-byte "interactable" bool.
+    #[test]
+    fn interaction_status_changed_bytes() {
+        let off = SCNpcInteractionStatusChangedPacket {
+            npc_obj_id: 0x0A0B0C,
+            interactable: false,
+        };
+        assert_eq!(encode(&off), frame(0x080, &[0x0C, 0x0B, 0x0A, 0x00]));
+        let on = SCNpcInteractionStatusChangedPacket {
+            npc_obj_id: 0x0A0B0C,
+            interactable: true,
+        };
+        assert_eq!(encode(&on), frame(0x080, &[0x0C, 0x0B, 0x0A, 0x01]));
+    }
+
+    /// `FUN_397b4aa0`: `bc objId` only.
+    #[test]
+    fn interaction_ended_by_zone_bytes() {
+        let p = SCNpcInteractionEndedByZonePacket {
+            npc_obj_id: 0x0A0B0C,
+        };
+        assert_eq!(encode(&p), frame(0x07c, &[0x0C, 0x0B, 0x0A]));
     }
 
     #[test]
