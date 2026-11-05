@@ -1142,6 +1142,85 @@ async fn expiry_returns_unsold_and_delivers_won_lots() {
     );
 }
 
+/// Posts a system lot (`client_id = 0`) the way the GM command does, outside the fixtures'
+/// player-posted path.
+fn post_system(w: &mut World, template: u32, start: i32) -> AuctionLot {
+    let auction = &w.server.systems.economy.auction;
+    let _items = w.server.systems.economy.operation_scope();
+    let _op = auction.operation_lock();
+    let lot = AuctionManager::create_system_lot(
+        &w.server,
+        template,
+        start,
+        0,
+        auction_duration::HOURS_6,
+        Utc::now(),
+    )
+    .expect("system lot");
+    auction.add_auction_lot(lot.clone());
+    lot
+}
+
+/// A system lot (`client_id = 0`) sold at expiry: the buyer gets the item by the normal auction
+/// mail, the money is destroyed (there is no seller to pay or mail).
+#[tokio::test]
+async fn system_lot_expiry_mails_the_item_to_the_buyer_only() {
+    let (mut w, _log) = auction_world();
+    crate::systems::economy::wiring::install(&w.server);
+    let lot = post_system(&mut w, SIEGE_CAMP, 100);
+    let item_id = lot.item_id();
+    run::<CSBidAuctionPacket>(&mut w, 1, &bid_body(lot.id, 100));
+    assert_eq!(money(&w.pb), 100_000 - 100);
+    let ah = &w.server.systems.economy.auction;
+    let later = lot.end_time + Duration::seconds(1);
+    ah.update_auction_house(&w.server, later);
+
+    assert!(ah.lot(lot.id).is_none());
+    assert_eq!(ah.deleted_ids(), vec![lot.id]);
+    let buyer = mails_to(&w.server, 2);
+    assert_eq!(buyer.len(), 1, "the buyer's win mail");
+    assert_eq!(
+        buyer[0].mail_type,
+        crate::systems::economy::mail::mail_type::AUC_BID_WIN
+    );
+    assert_eq!(buyer[0].body.attachments, vec![item_id]);
+    assert_eq!(buyer[0].body.copper_coins, 0);
+    assert_eq!(
+        mails_to(&w.server, 1),
+        vec![],
+        "no seller 0 / Alice mail for a system lot"
+    );
+    assert_eq!(mails_to(&w.server, 0), Vec::new());
+    let item = w.server.items.item_by_id(item_id).expect("the camp item");
+    assert_eq!(
+        (item.owner_id, item.slot_type),
+        (2, slot_type::MAIL),
+        "the item is attached to the buyer's mail"
+    );
+}
+
+/// An unsold system lot is not returned to a seller (there is none): the item is deleted and
+/// both the lot row and the item row are queued for deletion, leaving no orphan.
+#[tokio::test]
+async fn system_lot_unbid_expiry_deletes_the_item_and_leaves_no_orphan() {
+    let (mut w, log) = auction_world();
+    let lot = post_system(&mut w, SIEGE_CAMP, 100);
+    let item_id = lot.item_id();
+    let ah = &w.server.systems.economy.auction;
+    let later = lot.end_time + Duration::seconds(1);
+    ah.update_auction_house(&w.server, later);
+
+    assert!(ah.lot(lot.id).is_none());
+    assert_eq!(ah.deleted_ids(), vec![lot.id]);
+    assert!(w.server.items.item_by_id(item_id).is_none());
+    assert!(
+        w.server.items.removed_items().contains(&item_id),
+        "the item row is queued for deletion"
+    );
+    assert!(log.take().is_empty(), "no return mail for a system lot");
+    assert!(mails_to(&w.server, 0).is_empty());
+}
+
 /// A failed sale mail must not drop the lot (the seller's money / buyer's item would be lost):
 /// it stays listed and the next auction tick retries the mails exactly once.
 #[tokio::test]

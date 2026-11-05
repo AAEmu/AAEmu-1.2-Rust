@@ -813,6 +813,21 @@ impl NationManager {
         rows.chunks(200).map(<[FactionRelation]>::to_vec).collect()
     }
 
+    /// Updates the cached owner name of a renamed king. Returns the number of changed nations.
+    /// The caller owns `SaveManager::transaction_lock`, so the periodic save cannot write the
+    /// old name back after this swap.
+    pub fn rename_character(&self, character_id: u32, new_name: &str) -> usize {
+        let mut nations = self.write();
+        let mut changed = 0;
+        for nation in nations.iter_mut() {
+            if nation.owner_character_id == character_id && nation.owner_name != new_name {
+                nation.owner_name = new_name.to_string();
+                changed += 1;
+            }
+        }
+        changed
+    }
+
     pub fn add(&self, nation: Nation) {
         let mut nations = self.write();
         match nations.iter_mut().find(|n| n.id == nation.id) {

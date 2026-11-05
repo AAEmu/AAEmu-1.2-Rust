@@ -635,14 +635,20 @@ cs_packet!(
 );
 
 cs_packet!(
-    /// `CSNaviOpenBountyPacket`: answers with an empty `SCBountyListPacket` (filled lists break
-    /// the client's lua, see the C# comment).
+    /// `CSNaviOpenBountyPacket`: answers with `SCBountyListPacket` of the characters that have
+    /// an unpaid bounty. The list is empty unless `Social.BountyBoard` is on (the default keeps
+    /// the C# empty list because a filled board broke the 1.2 client Lua, BOUNTY-board).
     CSNaviOpenBountyPacket { obj_id: u32 }
     read |s| { Ok(Self { obj_id: s.read_bc()? }) }
     handle |self, server, conn| {
-        tracing::warn!("NaviOpenBounty, ObjId: {}", self.obj_id);
+        tracing::trace!("NaviOpenBounty, ObjId: {}", self.obj_id);
         let p = active_char!(conn);
-        p.send(SCBountyListPacket { total: 0, count: 0, bounties: Vec::new() });
+        let board = server.systems.social.bounties.board(server).await;
+        p.send(SCBountyListPacket {
+            total: board.total,
+            count: board.rows.len() as u8,
+            bounties: board.rows,
+        });
         Ok(())
     }
 );

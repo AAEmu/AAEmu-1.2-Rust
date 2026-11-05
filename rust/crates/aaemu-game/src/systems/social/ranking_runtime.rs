@@ -185,6 +185,19 @@ impl RankingState {
         self.scores.values()
     }
 
+    /// Updates the cached holder name of every stored score (character rename). Returns the
+    /// number of changed scores.
+    pub fn rename_holder(&mut self, new_name: &str) -> usize {
+        let mut changed = 0;
+        for score in self.scores.values_mut() {
+            if score.account != new_name {
+                score.account = new_name.to_string();
+                changed += 1;
+            }
+        }
+        changed
+    }
+
     /// The stored scores of one board, earliest period first.
     pub fn scores_of(&self, rank_id: u32) -> impl Iterator<Item = &RankScore> {
         self.scores

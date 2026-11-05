@@ -17,7 +17,9 @@ use crate::net::packet::LEVEL_PLAIN;
 use crate::net::registry::ClientPacket;
 use crate::opcodes::sc;
 use crate::packets::packet_def;
+use crate::packets::world::SCErrorMsgPacket;
 use crate::server::GameServer;
+use crate::systems::economy::error_message;
 use crate::systems::skills::packets_special::SCToggleBeautyshopResponsePacket;
 use crate::systems::social::achievement::char_record_kind;
 use crate::systems::social::achievement_hooks::{AchievementInput, RecordMatch};
@@ -27,6 +29,41 @@ use crate::world::{broadcast, PlayerRef, WorldObject};
 pub const BUFF_IN_BEAUTY_SALON: u32 = 6117;
 /// `Item.SalonCertificate`.
 pub const SALON_CERTIFICATE: u32 = 30811;
+/// `EquipmentItemSlotType.Hair`.
+const SLOT_TYPE_HAIR: u32 = 24;
+
+/// A refused salon request. The salon-specific `ErrorMessageType` is UNKNOWN (no 1.2
+/// evidence); `FAILED_TO_CHANGE_ITEM_LOOK` is the generic look-change error.
+fn refuse(player: &PlayerRef) {
+    player.send(SCErrorMsgPacket::new(
+        error_message::FAILED_TO_CHANGE_ITEM_LOOK,
+        0,
+        false,
+    ));
+}
+
+/// Whether `hair_model` may be worn as hair by this character. The real data decides:
+/// an `item_body_parts` row in the hair slot, not `npc_only`, whose `model_id` is the
+/// character's own model from the `characters` template. `beautyshop_only` rows are
+/// allowed. A character without a template (or with model 0) does not restrict the model.
+fn is_valid_hair(server: &GameServer, player: &PlayerRef, hair_model: u32) -> bool {
+    let Some(part) = server.game_data.items.body_part(hair_model) else {
+        return false;
+    };
+    if part.slot_type_id != SLOT_TYPE_HAIR || part.npc_only {
+        return false;
+    }
+    let (race, gender) = {
+        let c = player.data();
+        (c.race, c.gender)
+    };
+    let model = server
+        .game_data
+        .characters
+        .template(race, gender)
+        .map_or(0, |t| t.model_id);
+    model == 0 || part.model_id == 0 || part.model_id == model
+}
 
 /// `SCCharacterGenderAndModelModifiedPacket(character)`.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,8 +98,15 @@ pub fn apply_beauty_salon(
         tracing::warn!("ApplyBeautySalon: item operations are not available (economy)");
         return;
     };
+    // A forged request must not put an arbitrary template (stats included) into the hair
+    // slot; only a body part the character's race/gender can wear is accepted.
+    if !is_valid_hair(server, player, hair_model) {
+        refuse(player);
+        return;
+    }
     // TODO (C#): Add support for future X-day Salon Certificate items
     if items.items_count(server, player, SALON_CERTIFICATE) <= 0 {
+        refuse(player);
         return;
     }
     let old_hair = hair_template(player).unwrap_or(0);
