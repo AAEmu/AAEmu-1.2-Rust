@@ -31,6 +31,7 @@ use crate::packets::proxy::ChangeStatePacket;
 use crate::packets::world::*;
 use crate::server::GameServer;
 use crate::systems::skills::packets::SCCooldownsPacket;
+use crate::systems::social::util::{send_chat_failure, ChatFailure};
 use crate::world::{broadcast, unit_state, Player, PlayerRef, WorldInstance, WorldObject};
 
 #[path = "zone_access.rs"]
@@ -1278,6 +1279,11 @@ pub async fn send_chat_message(
         language_type,
     };
     let error = |e: i16| me.send(SCErrorMsgPacket::new(e, 0, true));
+    // Channel-bound failures can use `SCChatFailedPacket(error, channel name)`; the flag is off
+    // by default because retail's choice is not captured (`CHAT-FAILED-1`).
+    let chat_failure = |e: i16, channel: &str| {
+        send_chat_failure(&me, &server.config.chat, ChatFailure::new(e, channel))
+    };
     match chat {
         chat_type::WHISPER => {
             let target = server.world.character_by_name(target_name);
@@ -1340,7 +1346,7 @@ pub async fn send_chat_message(
                             language_type,
                         );
                 }
-                None => error(error_message::CHAT_NOT_IN_EXPEDITION),
+                None => chat_failure(error_message::CHAT_NOT_IN_EXPEDITION, "Expedition"),
             }
         }
         chat_type::FAMILY => {
@@ -1357,7 +1363,7 @@ pub async fn send_chat_message(
                         language_type,
                     );
             } else {
-                error(error_message::CHAT_NOT_IN_FAMILY);
+                chat_failure(error_message::CHAT_NOT_IN_FAMILY, "Family");
             }
         }
         chat_type::REGION => {

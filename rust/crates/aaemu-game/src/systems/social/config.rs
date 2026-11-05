@@ -252,6 +252,13 @@ pub struct ChatConfig {
     /// `SCChatSpamDelayPacket.detectConfig` (retail contents unknown).
     #[serde(rename = "detectconfig")]
     pub detect_config: String,
+    /// Answer a channel-bound chat failure with `SCChatFailedPacket(error, channel name)`
+    /// instead of the `SCErrorMsgPacket` toast.
+    ///
+    /// Default `false`: which failures retail 1.2 answered with `SCChatFailed` is not captured
+    /// (`CHAT-FAILED-1`, capture-pending), so the default keeps the previous frames.
+    #[serde(rename = "chatfailedpacket", deserialize_with = "lenient")]
+    pub chat_failed_packet: bool,
 }
 
 impl Default for ChatConfig {
@@ -265,6 +272,7 @@ impl Default for ChatConfig {
             chat_group_delays_ms: vec![0; 15],
             apply_config: String::new(),
             detect_config: String::new(),
+            chat_failed_packet: false,
         }
     }
 }
@@ -370,6 +378,8 @@ mod tests {
         // The shipped limits are off: the retail delays are not evidenced (CHAT-SPAM-1).
         assert!(c.chat_group_delays_ms.iter().all(|&ms| ms == 0));
         assert!(c.packet_delays().iter().all(|&s| s == 0.0));
+        // Retail's SCChatFailed failures are not captured (CHAT-FAILED-1): the toast stays.
+        assert!(!c.chat_failed_packet);
         // The bounty board stays off until an original-client run passes (BOUNTY-board).
         assert!(!cfg.social.bounty_board);
     }

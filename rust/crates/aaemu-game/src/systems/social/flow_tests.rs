@@ -174,6 +174,17 @@ fn expect_chat_error(p: &mut Pc, error: i16) {
     );
 }
 
+fn expect_chat_failed(p: &mut Pc, error: i16, channel: &str) {
+    use crate::systems::social::packets::chat::SCChatFailedPacket;
+    assert_eq!(
+        p.frames(),
+        vec![(
+            sc::SCChatFailedPacket,
+            body(&SCChatFailedPacket::new(error, channel))
+        )]
+    );
+}
+
 /// The full expected `SCChatMessagePacket` body: literal identity bytes, then the sender block
 /// `(obj id, character id, language, race, faction, name)`, message and ability. Built from
 /// `PacketStream` primitives, never from the chat encoder.
@@ -534,9 +545,97 @@ async fn user_chat_create_join_password_message_and_leave_flow() {
 }
 
 #[tokio::test]
-async fn user_chat_requires_active_session_and_cleans_departing_members() {
+async fn channel_bound_chat_failures_use_scc_chat_failed_only_when_enabled() {
+    use crate::packets::world::error_message;
     use crate::systems::social::chat::user_channel_identity;
     use crate::systems::social::util::error;
+    let server = test_server();
+    let mut a = pc(&server, 1, "Al", 100.0, 100.0);
+    let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
+    settle(&mut [&mut a, &mut b]);
+
+    // Default (flag off): exactly the pre-flag toast.
+    a.send(
+        &server,
+        cs::CSSendChatMessagePacket,
+        chat(chat_type::PARTY, "x"),
+    )
+    .await;
+    expect_chat_error(&mut a, error::CHAT_NOT_IN_PARTY);
+
+    server.config.update(|c| c.chat.chat_failed_packet = true);
+
+    // Party / raid / expedition / family: the channel label travels with the error.
+    for (kind, code, channel) in [
+        (chat_type::PARTY, error::CHAT_NOT_IN_PARTY, "Party"),
+        (chat_type::RAID, error::CHAT_NOT_IN_RAID, "Raid"),
+        (chat_type::CLAN, error::CHAT_NOT_IN_EXPEDITION, "Expedition"),
+        (chat_type::FAMILY, error::CHAT_NOT_IN_FAMILY, "Family"),
+    ] {
+        a.send(&server, cs::CSSendChatMessagePacket, chat(kind, "x"))
+            .await;
+        expect_chat_failed(&mut a, code, channel);
+    }
+
+    // User channels: a non-member message and a leave answer with the channel's own name.
+    b.send(
+        &server,
+        cs::CSJoinUserChatChannelPacket,
+        user_join("Public", "", true),
+    )
+    .await;
+    assert_eq!(b.ops(), vec![sc::SCJoinedChatChannelPacket]);
+    let channel = server
+        .chat
+        .list_all_channels()
+        .into_iter()
+        .find(|c| c.chat_type == chat_type::USER)
+        .unwrap();
+    let identity = user_channel_identity(&channel);
+    a.send(
+        &server,
+        cs::CSSendChatMessagePacket,
+        user_chat(identity, "x"),
+    )
+    .await;
+    expect_chat_failed(&mut a, error::CHAT_NOT_JOINED_CHANNEL, "Public");
+    a.send(&server, cs::CSLeaveChatChannelPacket, user_leave(identity))
+        .await;
+    expect_chat_failed(&mut a, error::CHAT_NOT_JOINED_CHANNEL, "Public");
+    // A channel that does not exist has no name to show.
+    a.send(
+        &server,
+        cs::CSSendChatMessagePacket,
+        user_chat(identity | (1i64 << 16), "x"),
+    )
+    .await;
+    expect_chat_failed(&mut a, error::CHAT_NO_CHANNEL, "");
+    // Join failures answer with the requested name.
+    a.send(
+        &server,
+        cs::CSJoinUserChatChannelPacket,
+        user_join("Missing", "", false),
+    )
+    .await;
+    expect_chat_failed(&mut a, error::CHAT_NO_CHANNEL, "Missing");
+    a.send(
+        &server,
+        cs::CSJoinUserChatChannelPacket,
+        user_join("Public", "", true),
+    )
+    .await;
+    expect_chat_failed(&mut a, error::CHAT_CHANNEL_ALREADY_EXISTS, "Public");
+
+    // A whisper to a missing player is not channel-bound: the toast stays.
+    a.send(&server, cs::CSSendChatMessagePacket, whisper("Nobody", "x"))
+        .await;
+    expect_chat_error(&mut a, error_message::WHISPER_NO_TARGET);
+}
+
+#[tokio::test]
+async fn user_chat_requires_active_session_and_cleans_departing_members() {
+    use crate::systems::social::chat::user_channel_identity;
+    use crate::systems::social::util::{error, ChatFailure};
     let server = test_server();
     let mut a = pc(&server, 1, "Al", 100.0, 100.0);
     let mut b = pc(&server, 2, "Bob", 110.0, 100.0);
@@ -603,7 +702,7 @@ async fn user_chat_requires_active_session_and_cleans_departing_members() {
                 language_type: 0
             }
         ),
-        Err(error::CHAT_NOT_JOINED_CHANNEL)
+        Err(ChatFailure::new(error::CHAT_NOT_JOINED_CHANNEL, "Public"))
     );
     assert!(!channel.contains(&stale));
     // The disconnect edge must also clean an already-offline active character, for which

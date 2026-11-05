@@ -2527,6 +2527,24 @@ is no longer mirrored (see "Known deviations", dead NPC returned and healed).
   delay at 0 (the previous C# behaviour, **capture-pending CHAT-SPAM-1**). To enable the limit,
   set `Chat.ChatGroupDelays[i]` (milliseconds) and optionally `Chat.ChatTypeGroups` in
   `Configurations/Chat.json`; the same values are sent to the client and enforced by the server.
+* systems::social: **`SCChatFailedPacket`.** The 1.2 reader `FUN_397c2950` is
+  `i16 ErrorMessage ; string chname (max 10)`; its handler `FUN_391d8de0` raises the client's
+  `CHAT_FAILED(error, chname)` event (the `chat_msg_event.alb` handler displays the error text).
+  With `Chat.ChatFailedPacket` on (`Configurations/Chat.json`, default `false`) the server
+  answers the channel-bound failures it already detects with this packet: the user-channel
+  join / leave / message errors `CHAT_NO_CHANNEL` 270, `CHAT_CHANNEL_ALREADY_EXISTS` 269,
+  `CHAT_ALREADY_JOINED_CHANNEL` 271, `CHAT_PRIVATE_CHANNEL` 272, `CHAT_WRONG_PASSWORD` 273 and
+  `CHAT_NOT_JOINED_CHANNEL` 467 carry the requested or stored channel name (capped at the
+  packet's 10 bytes), while the "not in" errors of party 267, raid 268, expedition 311 and
+  family 412 carry the labels "Party", "Raid", "Expedition" and "Family" (the 1.2
+  `chat_msg_event.alb` handler displays only the error, so these strings are informational and
+  retail's exact values are not captured). Every other chat
+  failure (whisper 265 / 437, the raid-owner check 496, the spam delay `0x108`) keeps
+  `SCErrorMsgPacket`. **Capture-pending (CHAT-FAILED-1):** which failures retail 1.2 sent as
+  `SCChatFailed` is unknown, so the flag defaults to off and the frames stay exactly as before.
+  Tests: `chat_failed_writes_i16_error_then_the_channel_name`,
+  `chat_failed_channel_name_is_capped_at_ten_bytes_on_a_char_boundary`,
+  `channel_bound_chat_failures_use_scc_chat_failed_only_when_enabled`.
 * systems::social: **Words.** `blocked_texts` is applied to character names only (`check_name`);
   the client's chat masking (`check_chat`, `ignore_texts`) happens in the 1.2 client before the
   message is sent (`FUN_393C76B0` / `FUN_393C78E0` / `FUN_393C7A10`), and `replace_chats` /
