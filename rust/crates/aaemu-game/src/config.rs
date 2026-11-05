@@ -136,6 +136,9 @@ pub struct AppConfig {
     /// `Dungeons` (`systems::instances::config`).
     #[serde(rename = "dungeons")]
     pub dungeons: crate::systems::instances::config::DungeonsConfig,
+    /// `Interaction` (`systems::npcs::config`: NPC interaction reach).
+    #[serde(rename = "interaction")]
+    pub interaction: crate::systems::npcs::config::InteractionConfig,
     /// `HeightMapsEnable` (C# default false; the shipped Config.json sets it to true).
     #[serde(rename = "heightmapsenable", deserialize_with = "lenient")]
     pub heightmaps_enable: bool,
@@ -185,6 +188,7 @@ impl Default for AppConfig {
             justice: Default::default(),
             chat: Default::default(),
             dungeons: Default::default(),
+            interaction: Default::default(),
             heightmaps_enable: false,
             physics: Default::default(),
             app_path: PathBuf::from("."),
