@@ -1340,6 +1340,41 @@ live acceptance remain pending.
 | `Models/Tasks/SaveTask/SaveTickStartTask` | `managers/save.rs` | done (by design) | The periodic save is a Tokio interval instead of a `TaskManager` task (not counted in `GetQueueCount`). |
 | `Utils/{MathUtil, NumericExtensions, Converters/*, DB/HoldablesSchemaCheck}` | `utils/` | done | `Utils/DB/SQLite*` = `data::sqlite`, `Utils/IdManager` = `managers::id`. `SphereCommandUtil` / `QuestCommandUtil`: `services::commands::scripts::{sphere, quest_cmd}`. |
 
+#### Character rename (`SCCharacterRenamed` 0x05a, WP-AC2)
+
+Rust only: the 1.2 client has no packet or UI that starts a character rename (the only client
+rename packet is `CSRenameExpedition`, guild / nation), so the trigger is the GM command
+`/rename <old> <new>` (`commands/scripts/rename.rs`) through
+`systems/services/character_rename.rs`. It works online and offline.
+
+* **Wire format (EVIDENCED).** `SCCharacterRenamedPacket` is `{ u32 charId, string oldName,
+  string newName }` (client serializer `FUN_397b7820`). The client handler `FUN_391df6e0`
+  updates the unit-name cache (`FUN_393c8520`), the chat / friend caches (`FUN_393de080`) and
+  the expedition / family member names (`FUN_392fb550`). It was defined but never sent.
+* **Recipients (INFERRED).** Viewers of the character (its world instance's
+  `players_around`), its online friends (owners that keep it in `friends`), its guild and
+  family members, and the character itself, one packet per recipient. The C# never sent the
+  packet, so there is no sender to copy; the set follows what the client handler updates.
+* **Rules.** The name goes through `NameManager::validate_character_name_with_blocks` (regex,
+  blocked texts, `allowed_name_chars` when loaded); the same name, a name held by another
+  character and a deleted / pending-deletion row are refused. `NameManager::rename_character`
+  swaps the id and name maps under one write lock (no reader sees neither or both) and refuses
+  to clobber another character's name. The check, the `characters.name` UPDATE and the cache
+  swap share `SaveManager::transaction_lock` with character create / the lobby edit, so a
+  concurrent create of the new name has exactly one winner.
+* **Persisted copies.** The **authoritative** `characters.name` and the copies the server reads
+  back are updated in the same database transaction: `mails.sender_name` / `receiver_name`,
+  `expedition_members.name`, `expeditions.owner_name`, `family_members.name`,
+  `nations.owner_name`, `shipyards.owner_name` (the completion / decay path resolves the owner
+  with `character_by_name`, so the live shipyard's `owner_name` and unit name are updated too)
+  and `auction_house.client_name` / `bidder_name`. `housings` stores only the owner id and
+  resolves the owner name from the name cache, so no house row changes. `friends` / `blocked`
+  store ids only; `mates.name` and `slaves.name` are pet / vehicle names, not character names.
+  The in-memory guild / family / shipyard copies are updated as well.
+* **Deviation from the C#.** The C# had the packet definition and the lobby edit's name change
+  but no world-rename path; the Rust adds the GM command, the broadcast and the copy updates.
+  There is no 1.2 client trigger to capture, so the recipients stay INFERRED.
+
 ### systems::ai
 
 | Area (C#) | Rust | Status | Notes |

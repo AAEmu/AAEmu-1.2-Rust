@@ -73,6 +73,7 @@ pub mod premium_cmd;
 pub mod quest_cmd;
 pub mod reload_auction;
 pub mod reload_configs;
+pub mod rename;
 pub mod reset_skill_cooldowns;
 pub mod revive;
 pub mod rotate;
@@ -519,6 +520,8 @@ pub fn all_commands(env: &ScriptEnv) -> Vec<(&'static [&'static str], Arc<dyn Co
         ),
         // Mail (Rust only: `/mail admin` system letter to an online or offline character)
         (&["mail"], Arc::new(mail::MailCommand::new(env))),
+        // Rename (Rust only: GM character rename, online or offline)
+        (&["rename"], Arc::new(rename::Rename::new(env))),
         // WorldCmd.cs
         (&["world"], Arc::new(roots::world_cmd())),
     ]
