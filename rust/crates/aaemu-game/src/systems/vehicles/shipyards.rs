@@ -4,6 +4,8 @@
 
 use std::sync::Mutex;
 
+use rand::Rng;
+
 use crate::models::container::slot_type;
 use crate::models::shipyard::{Shipyard, ShipyardData};
 use crate::server::GameServer;
@@ -85,7 +87,7 @@ pub fn create(
     y: f32,
     z: f32,
     z_rot: f32,
-    _design_item: u64,
+    design_item: u64,
     step: i32,
 ) -> Option<ShipyardRef> {
     let template = server
@@ -95,6 +97,10 @@ pub fn create(
         .shipyard_templates
         .get(&template_id)?
         .clone();
+    // The client names the design item it placed (`designItem`, a bag item object id). The
+    // shipyard is built only from that item, and only when it maps to this shipyard; a refused
+    // create leaves the item in the bag.
+    let design_template_id = design_item_template(server, owner, &template, design_item)?;
     let (instance, zone, owner_name, owner_faction, owner_id) = {
         let c = owner.data();
         (
@@ -146,12 +152,65 @@ pub fn create(
     let shipyard = Entity::new(obj_id, sy);
 
     // we will make checks for the availability of money and items to create a shipyard
-    if !remove_required_items(server, owner, &template) {
+    if !remove_required_items(server, owner, &template, design_item, design_template_id) {
         error(owner, error::NOT_ENOUGH_ITEM);
         return None;
     }
     spawn_shipyard(server, ship_id, &shipyard);
     Some(shipyard)
+}
+
+/// The design item template of the bag item `design_item` the client named, when it builds
+/// `template`; `None` (and the refusal error) otherwise.
+///
+/// The item's template is mapped through `item_shipyards` (`item_id -> shipyard_id`, the table
+/// the 1.2 client loads with `FUN_396cd6e0`). Shipyards without a row (only 1 in the 1.2 data)
+/// keep the old `origin_item_id` path. The 10.x server (`aaemu-world-10x`
+/// `ShipyardManager.RemoveRequiredItems`) proves the packet field is the item *object* id: it
+/// looks the item up by it, checks `OwnerId` / `SlotType.Inventory` and passes it as the
+/// preferred item to `ConsumeItem`. No 1.2 decompile of the check itself was traced
+/// (capture-pending).
+fn design_item_template(
+    server: &GameServer,
+    owner: &PlayerRef,
+    template: &super::data::ShipyardTemplate,
+    design_item: u64,
+) -> Option<u32> {
+    let item = super::mates::owned_item(server, owner, design_item);
+    let Some(item) = item.filter(|i| {
+        i.owner_id == u64::from(owner.character_id) && i.slot_type == slot_type::INVENTORY
+    }) else {
+        error(owner, error::NOT_ENOUGH_ITEM);
+        tracing::warn!(
+            "Shipyard {}: design item {design_item} is not a bag item of character {}",
+            template.id,
+            owner.character_id
+        );
+        return None;
+    };
+    let mapped = server
+        .game_data
+        .systems
+        .vehicles
+        .item_shipyards
+        .get(&item.template_id)
+        .copied();
+    let builds_this = match mapped {
+        Some(shipyard_id) => shipyard_id == template.id,
+        None => template.origin_item_id != 0 && template.origin_item_id == item.template_id,
+    };
+    if !builds_this {
+        error(owner, error::NOT_ENOUGH_ITEM);
+        tracing::warn!(
+            "Shipyard {}: design item {design_item} (template {}) does not build it (item_shipyards {:?}, origin_item_id {})",
+            template.id,
+            item.template_id,
+            mapped,
+            template.origin_item_id
+        );
+        return None;
+    }
+    Some(item.template_id)
 }
 
 /// The `Shipyard` of `create`: transform, owner faction / name, the current step's model and the
@@ -199,14 +258,17 @@ pub(super) fn spawn_shipyard(server: &GameServer, ship_id: u32, shipyard: &Shipy
     }
 }
 
-/// `RemoveRequiredItems(shipyard)`.
+/// `RemoveRequiredItems(shipyard)`. `design_item` is the bag item object the client named and
+/// `design_template_id` its template (already mapped to this shipyard by [`design_item_template`]).
 fn remove_required_items(
     server: &GameServer,
     character: &PlayerRef,
     template: &super::data::ShipyardTemplate,
+    design_item: u64,
+    design_template_id: u32,
 ) -> bool {
     let items = server.systems.skills.ext.items();
-    let design_id = template.origin_item_id;
+    let design_id = design_template_id;
     let Some(&money_owed) = server
         .game_data
         .systems
@@ -221,11 +283,6 @@ fn remove_required_items(
         );
         return false;
     };
-    if items.item_count(server, character, design_id) < 1 {
-        error(character, error::NOT_ENOUGH_ITEM);
-        tracing::error!("Not enough item Id={design_id}");
-        return false;
-    }
     if character.data().money < i64::from(money_owed) {
         error(character, error::NOT_ENOUGH_MONEY);
         return false;
@@ -249,15 +306,45 @@ fn remove_required_items(
         if !enough {
             return false;
         }
-        for r in &reagents {
-            items.consume_bag_item(
-                server,
-                character,
-                item_task::SKILL_REAGENTS,
-                r.item_id,
-                i32::from(r.amount),
+    }
+    // Consume the named design item first, in one bag lock: a racing removal / slot change
+    // refuses the build before any reagent or money is spent, and the item is kept. The old
+    // code consumed `template.origin_item_id`, which let a client build any shipyard it held
+    // the matching origin item for and made 10 / 11 (origin 0) impossible.
+    match items.consume_bag_item_by_id(
+        server,
+        character,
+        item_task::SHIPYARD,
+        design_item,
+        design_id,
+        1,
+    ) {
+        Some(true) => {}
+        Some(false) => {
+            error(character, error::NOT_ENOUGH_ITEM);
+            tracing::warn!(
+                "Shipyard {}: design item {design_item} (template {design_id}) could not be consumed",
+                template.id
             );
+            return false;
         }
+        // Hooks that do not track items (unit tests): keep the old template consume.
+        None => {
+            if items.consume_bag_item(server, character, item_task::SHIPYARD, design_id, 1) < 1 {
+                error(character, error::NOT_ENOUGH_ITEM);
+                tracing::warn!("Shipyard {}: not enough item Id={design_id}", template.id);
+                return false;
+            }
+        }
+    }
+    for r in &reagents {
+        items.consume_bag_item(
+            server,
+            character,
+            item_task::SKILL_REAGENTS,
+            r.item_id,
+            i32::from(r.amount),
+        );
     }
     for p in &products {
         items.acquire_default_item(
@@ -268,7 +355,6 @@ fn remove_required_items(
             i32::from(p.amount),
         );
     }
-    items.consume_bag_item(server, character, item_task::SHIPYARD, design_id, 1);
     // SubtractMoney(SlotType.Inventory, moneyOwed, ItemTaskType.Shipyard)
     character.data().money -= i64::from(money_owed);
     character.send(
@@ -298,7 +384,8 @@ pub fn remove_shipyard(server: &GameServer, shipyard: &ShipyardRef) {
     }
 }
 
-/// `Shipyard.OnDeath` (`Events.OnDeath` subscription): `RemoveShipyard(this)`.
+/// `Shipyard.OnDeath` (`Events.OnDeath` subscription): the `shipyard_rewards` debris, then
+/// `RemoveShipyard(this)`.
 pub fn on_death(server: &GameServer, shipyard: &ShipyardRef) {
     {
         let d = shipyard.data();
@@ -309,7 +396,159 @@ pub fn on_death(server: &GameServer, shipyard: &ShipyardRef) {
             d.data.owner_name
         );
     }
+    // INFERRED trigger: `shipyard_rewards` describes wreckage around a destroyed shipyard
+    // (`doodad_id`, `on_water`, `radius`, `count`). Nothing in the 1.2 client strings or the
+    // code read says whether it fires on death or on completion; death is the schema's reading
+    // (debris). Goal: a capture of a real shipyard destruction. Do not spawn it on normal
+    // completion unless that capture shows it.
+    spawn_rewards(server, shipyard);
     remove_shipyard(server, shipyard);
+}
+
+/// Spawns the `shipyard_rewards` doodads around a shipyard. Called from [`on_death`] only (the
+/// trigger is INFERRED, see there).
+pub fn spawn_rewards(server: &GameServer, shipyard: &ShipyardRef) {
+    let (template_id, instance, x, y, z, rot_x, rot_y) = {
+        let s = shipyard.data();
+        (
+            s.data.template_id,
+            s.unit.transform.instance_id,
+            s.unit.transform.x,
+            s.unit.transform.y,
+            s.unit.transform.z,
+            s.unit.transform.rot_x,
+            s.unit.transform.rot_y,
+        )
+    };
+    let Some(rewards) = server
+        .game_data
+        .systems
+        .vehicles
+        .shipyard_rewards
+        .get(&template_id)
+    else {
+        return;
+    };
+    let Some(world) = server.world.world(instance) else {
+        return;
+    };
+    let mut rng = rand::thread_rng();
+    for reward in rewards {
+        let Some(tpl) = server
+            .game_data
+            .systems
+            .npcs
+            .doodad
+            .template(reward.doodad_id)
+        else {
+            tracing::warn!(
+                "Shipyard {template_id}: reward doodad {} is not in the game data",
+                reward.doodad_id
+            );
+            continue;
+        };
+        let lifetime = reward_lifetime_ms(&mut rng, tpl.min_time, tpl.max_time);
+        let points = reward_points(&mut rng, (x, y), reward.radius, reward.count);
+        tracing::debug!(
+            "Shipyard {template_id}: spawning {} reward doodads {} within {} m",
+            points.len(),
+            reward.doodad_id,
+            reward.radius
+        );
+        for (px, py) in points {
+            let pz = reward_ground(server, &world, reward.on_water, px, py, z);
+            let Some(doodad) = crate::systems::npcs::doodad::manager::create(
+                server,
+                &world,
+                0,
+                reward.doodad_id,
+                None,
+                true,
+            ) else {
+                continue;
+            };
+            {
+                let mut d = doodad.data();
+                d.transform.set_position(
+                    px,
+                    py,
+                    pz,
+                    rot_x,
+                    rot_y,
+                    rng.gen::<f32>() * std::f32::consts::TAU,
+                );
+                d.scale = 1.0;
+                d.faction_id = crate::data::world_data::factions::FRIENDLY;
+            }
+            crate::systems::npcs::doodad::manager::init_doodad(server, &world, &doodad);
+            crate::systems::npcs::doodad::manager::spawn(server, &world, &doodad);
+            // The doodad template's own lifetime (`doodad_almighties.min_time` / `max_time`,
+            // 1330: 600-700 s) bounds the debris; the reward row itself has no timer.
+            if let Some(lifetime) = lifetime {
+                crate::systems::npcs::doodad::tasks::start_func_task(
+                    server,
+                    &doodad,
+                    None,
+                    crate::systems::npcs::doodad::tasks::FuncTaskKind::Delete,
+                    std::time::Duration::from_millis(lifetime),
+                );
+            }
+        }
+    }
+}
+
+/// `count` random points uniformly inside the disc of `radius` around `center` (the reward
+/// area; a negative count / radius yields no points).
+pub(crate) fn reward_points(
+    rng: &mut impl rand::Rng,
+    center: (f32, f32),
+    radius: f32,
+    count: i32,
+) -> Vec<(f32, f32)> {
+    let radius = radius.max(0.0);
+    (0..count.max(0))
+        .map(|_| {
+            let angle = rng.gen::<f32>() * std::f32::consts::TAU;
+            let distance = radius * rng.gen::<f32>().sqrt();
+            (
+                center.0 + distance * angle.cos(),
+                center.1 + distance * angle.sin(),
+            )
+        })
+        .collect()
+}
+
+/// Random lifetime in `[min_time, max_time]` ms (`doodad_almighties`), `None` when the template
+/// has no lifetime.
+fn reward_lifetime_ms(rng: &mut impl rand::Rng, min_time: i32, max_time: i32) -> Option<u64> {
+    if max_time <= 0 {
+        return None;
+    }
+    let min = min_time.max(0).min(max_time);
+    let ms = if max_time > min {
+        rng.gen_range(min..=max_time)
+    } else {
+        min
+    };
+    Some(ms.max(1) as u64)
+}
+
+/// The reward point's height: the water surface for an `on_water` row that lands in water,
+/// otherwise the ground (the same collision / heightmap fallback the backpack drop uses).
+fn reward_ground(
+    server: &GameServer,
+    world: &std::sync::Arc<crate::world::WorldInstance>,
+    on_water: bool,
+    x: f32,
+    y: f32,
+    fallback_z: f32,
+) -> f32 {
+    if on_water && super::ship_physics::is_water(server, world, [x, y, fallback_z]) {
+        return super::ship_physics::water_surface(server, world, [x, y, fallback_z]);
+    }
+    crate::systems::ai::collision::ground_height_or(server, world.id, x, y, fallback_z, || {
+        crate::systems::npcs::heightmap::world_height(server, world, x, y).unwrap_or(fallback_z)
+    })
 }
 
 /// `BaseUnit.GetDistanceTo`: the shipyard part (`BuildRadius * Scale` instead of the model

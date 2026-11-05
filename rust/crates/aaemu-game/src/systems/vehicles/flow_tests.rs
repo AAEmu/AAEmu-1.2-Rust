@@ -48,6 +48,8 @@ const SLAVE_TEMPLATE: u32 = 68;
 const SLAVE_ITEM: u32 = 5001;
 /// Player obj ids outside the range the object id manager hands out in the tests.
 const PA: u32 = 0x00F0_0001;
+/// The design item object id the shipyard create tests name (`item_shipyards` 7000 -> 3).
+const DESIGN_ITEM: u64 = 0x0000_0000_0000_9100;
 const PB: u32 = 0x00F0_0002;
 
 #[path = "cinema_mate_tests.rs"]
@@ -4184,6 +4186,21 @@ impl ItemSkillHooks for ShipItems {
             .push((task_type, template_id, amount));
         amount
     }
+    fn consume_bag_item_by_id(
+        &self,
+        _server: &GameServer,
+        _player: &PlayerRef,
+        task_type: u8,
+        _item_id: u64,
+        expected_template_id: u32,
+        amount: i32,
+    ) -> Option<bool> {
+        self.consumed
+            .lock()
+            .unwrap()
+            .push((task_type, expected_template_id, amount));
+        Some(true)
+    }
     fn acquire_default_item(
         &self,
         _server: &GameServer,
@@ -4233,6 +4250,8 @@ async fn shipyard_build_steps_progress() {
         },
     );
     d.systems.vehicles.taxations.insert(2, 1000);
+    d.systems.vehicles.item_shipyards.insert(7000, 3);
+    d.items.templates.insert(7000, ItemTemplate::plain(7000, 1));
     let server = server_with(d);
     let hooks = Arc::new(ShipItems::default());
     server.systems.skills.ext.items.install(hooks.clone());
@@ -4241,10 +4260,12 @@ async fn shipyard_build_steps_progress() {
     let pa = spawn_player(&server, &a, test_character(1, "Owner", 100.0, 100.0), PA);
     spawn_player(&server, &b, test_character(2, "B", 110.0, 110.0), PB);
     pa.data().money = 5000;
+    give_item(&server, &pa, DESIGN_ITEM, 7000);
     a.drain();
     b.drain();
 
-    let sy = shipyards::create(&server, &pa, 3, 120.0, 120.0, 100.0, 0.5, 0, 0).expect("shipyard");
+    let sy = shipyards::create(&server, &pa, 3, 120.0, 120.0, 100.0, 0.5, DESIGN_ITEM, 0)
+        .expect("shipyard");
     assert_eq!(pa.data().money, 4000);
     assert_eq!(
         *hooks.consumed.lock().unwrap(),
@@ -4340,14 +4361,18 @@ async fn shipyard_row_round_trips_and_removal_queues_delete() {
         },
     );
     d.systems.vehicles.taxations.insert(2, 1000);
+    d.systems.vehicles.item_shipyards.insert(7000, 3);
+    d.items.templates.insert(7000, ItemTemplate::plain(7000, 1));
     let server = server_with(d);
     let hooks = Arc::new(ShipItems::default());
     server.systems.skills.ext.items.install(hooks.clone());
     let a = TestClient::new(&server, 1, 1);
     let pa = spawn_player(&server, &a, test_character(1, "Owner", 100.0, 100.0), PA);
     pa.data().money = 5000;
+    give_item(&server, &pa, DESIGN_ITEM, 7000);
 
-    let sy = shipyards::create(&server, &pa, 3, 120.0, 130.0, 100.0, 0.5, 0, 0).expect("shipyard");
+    let sy = shipyards::create(&server, &pa, 3, 120.0, 130.0, 100.0, 0.5, DESIGN_ITEM, 0)
+        .expect("shipyard");
     // Two actions finish step 0, one more is the first action of step 1.
     for _ in 0..3 {
         shipyards::add_build_action(&server, &sy);
@@ -4944,6 +4969,17 @@ fn real_compact_db_vehicle_tables() {
             .sum::<usize>(),
         85
     );
+    // `item_shipyards` maps the design items to their shipyards; 10 / 11 have no
+    // `origin_item_id` and exist only through these rows.
+    assert_eq!(d.item_shipyards.len(), 13);
+    assert_eq!(d.item_shipyards.get(&18124), Some(&10));
+    assert_eq!(d.item_shipyards.get(&18149), Some(&11));
+    assert_eq!(d.shipyard_rewards.values().map(Vec::len).sum::<usize>(), 9);
+    assert!(d
+        .shipyard_rewards
+        .values()
+        .flatten()
+        .all(|r| r.doodad_id == 1330 && r.on_water && r.count > 0));
     assert_eq!(d.taxations.len(), 11);
     // Bindings land on their templates.
     let bindings: usize = d
