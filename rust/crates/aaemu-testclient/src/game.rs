@@ -603,6 +603,9 @@ pub struct GameState {
     pub doodads: HashMap<u32, DoodadInfo>,
     /// `SCDoodadCompleteQuestPacket` (`0x14d`) in arrival order: `(doodad object id, quest id)`.
     pub doodad_complete_quests: Vec<(u32, u32)>,
+    /// `SCQuestUnitReqFailedPacket` (`0x148`) in arrival order: `(quest id, unit object id,
+    /// kind, message id, value)`, with the omitted flag-bag parts decoded as 0.
+    pub quest_unit_req_failed: Vec<(u32, u32, u8, u16, u32)>,
     /// First item of the bag (`SCCharacterInvenContentsPacket`, slot type 2): `(item id, slot)`.
     pub bag_items: Vec<(u64, u8, u32)>,
     pub bag_slots: u8,
@@ -808,6 +811,17 @@ impl GameState {
             let doodad_obj_id = s.read_bc()?;
             let quest_id = s.read_u32()?;
             st.doodad_complete_quests.push((doodad_obj_id, quest_id));
+        } else if p.is_sc(sc::SCQuestUnitReqFailedPacket) {
+            // Reader FUN_397b5d00 / bag FUN_397b1ef0: u32 quest, bc unit, flag byte, then
+            // only the set parts (kind u8, message id u16, value u32).
+            let quest_id = s.read_u32()?;
+            let unit_obj_id = s.read_bc()?;
+            let flags = s.read_u8()?;
+            let kind = if flags & 0x01 != 0 { s.read_u8()? } else { 0 };
+            let message_id = if flags & 0x02 != 0 { s.read_u16()? } else { 0 };
+            let value = if flags & 0x04 != 0 { s.read_u32()? } else { 0 };
+            st.quest_unit_req_failed
+                .push((quest_id, unit_obj_id, kind, message_id, value));
         } else if p.is_sc(sc::SCUnitsRemovedPacket) {
             let n = s.read_u16()?;
             for _ in 0..n {
@@ -1763,6 +1777,71 @@ mod doodad_complete_quest_tests {
             })
             .unwrap();
         assert_eq!(state.doodad_complete_quests, vec![(0x300, 2563)]);
+    }
+}
+
+#[cfg(test)]
+mod quest_unit_req_failed_tests {
+    use super::*;
+    use aaemu_commons::Marshal;
+    use aaemu_game::systems::quests::packets::SCQuestUnitReqFailedPacket;
+
+    fn observe(packet: SCQuestUnitReqFailedPacket, state: &mut GameState) {
+        let mut body = PacketStream::new();
+        packet.write(&mut body);
+        state
+            .observe(&Packet {
+                level: LEVEL_GAME,
+                opcode: sc::SCQuestUnitReqFailedPacket,
+                body: body.into_bytes(),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn observe_decodes_the_set_flag_bag_parts() {
+        let mut state = GameState::default();
+        observe(
+            SCQuestUnitReqFailedPacket {
+                quest_id: 2563,
+                unit_obj_id: 0x300,
+                kind: 1,
+                message_id: 0,
+                value: 10,
+            },
+            &mut state,
+        );
+        // The omitted message id decodes as 0, like the client bag does.
+        assert_eq!(state.quest_unit_req_failed, vec![(2563, 0x300, 1, 0, 10)]);
+    }
+
+    #[test]
+    fn observe_decodes_every_part_and_an_empty_bag() {
+        let mut state = GameState::default();
+        observe(
+            SCQuestUnitReqFailedPacket {
+                quest_id: 7,
+                unit_obj_id: 1,
+                kind: 0x16,
+                message_id: 0x1234,
+                value: 0xaabbccdd,
+            },
+            &mut state,
+        );
+        observe(
+            SCQuestUnitReqFailedPacket {
+                quest_id: 8,
+                unit_obj_id: 2,
+                kind: 0,
+                message_id: 0,
+                value: 0,
+            },
+            &mut state,
+        );
+        assert_eq!(
+            state.quest_unit_req_failed,
+            vec![(7, 1, 0x16, 0x1234, 0xaabbccdd), (8, 2, 0, 0, 0),]
+        );
     }
 }
 
