@@ -6,7 +6,8 @@
 //! `SCMailListEndPacket`, `SCMailBodyPacket`, `SCMailReceiverOpenedPacket`,
 //! `SCAttachmentTakenPacket`, `SCChargeMoneyPaidPacket`, `SCMailDeletedPacket`,
 //! `SCMailReturnedPacket`, `SCMailStatusUpdatedPacket`, `SCMailRemovedPacket`,
-//! `SCQuestRewardedByMailPacket` (`SCCountUnreadMailPacket` is the phase-2 one).
+//! `SCQuestRewardedByMailPacket` and the defined-but-never-sent `SCQuestMailSentPacket`
+//! (`SCCountUnreadMailPacket` is the phase-2 one).
 
 use aaemu_commons::{Marshal, PacketStream};
 
@@ -330,6 +331,9 @@ impl Marshal for SCMailRemovedPacket {
     }
 }
 
+/// `SCQuestMailSentPacket` (`0x150`, one `u32`, reader `FUN_397b5f00`). Defined for the quest
+/// mail feature; no server path sends it yet (trigger capture-pending, case `QUEST-MAIL-1`).
+pub use crate::systems::quests::packets::SCQuestMailSentPacket;
 /// `SCQuestRewardedByMailPacket`: one definition per opcode (`crate::systems::quests::packets::SCQuestRewardedByMailPacket`).
 pub use crate::systems::quests::packets::SCQuestRewardedByMailPacket;
 

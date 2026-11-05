@@ -33,9 +33,21 @@ sc_packet!(
 );
 
 sc_packet!(
-    /// `SCBotSuspectArrestedPacket(reporter, suspect)`.
-    SCBotSuspectArrestedPacket { reporter: String, suspect: String }
-    |self, s| { s.write_str(&self.reporter).write_str(&self.suspect); }
+    /// `SCBotSuspectArrestedPacket(sheriffId, suspectId, sheriffName, suspectName)`: the 1.2
+    /// client reader (`FUN_397b6d10`, dll.c:1710108-1710128) takes two `u32` ids before the two
+    /// names, each read into a 0x80-byte buffer. Still unsent (the bot flow is capture-pending).
+    SCBotSuspectArrestedPacket {
+        sheriff_id: u32,
+        suspect_id: u32,
+        sheriff_name: String,
+        suspect_name: String
+    }
+    |self, s| {
+        s.write_u32(self.sheriff_id)
+            .write_u32(self.suspect_id)
+            .write_str(&self.sheriff_name)
+            .write_str(&self.suspect_name);
+    }
 );
 
 /// The most entries the client's bounty list holds (its record array cap).
@@ -787,10 +799,17 @@ mod tests {
         );
         assert_eq!(
             body(&SCBotSuspectArrestedPacket {
-                reporter: "A".into(),
-                suspect: "Bc".into()
+                sheriff_id: 0x0102_0304,
+                suspect_id: 0x0A0B_0C0D,
+                sheriff_name: "Sheriff".into(),
+                suspect_name: "Suspect".into()
             }),
-            vec![1, 0, b'A', 2, 0, b'B', b'c']
+            vec![
+                0x04, 0x03, 0x02, 0x01, // sheriff id
+                0x0D, 0x0C, 0x0B, 0x0A, // suspect id
+                0x07, 0x00, b'S', b'h', b'e', b'r', b'i', b'f', b'f', // sheriff name
+                0x07, 0x00, b'S', b'u', b's', b'p', b'e', b'c', b't', // suspect name
+            ]
         );
         assert_eq!(
             body(&SCBotSuspectReportedPacket {
