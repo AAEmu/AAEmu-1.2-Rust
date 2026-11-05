@@ -63,6 +63,8 @@ const EQUAL_CHANNEL_BUFF: u32 = 62_003;
 
 /// NPC template of `npc_game_data` (level 10, KillExp 140).
 const VILLAGER: u32 = 200;
+/// A copy of `VILLAGER` whose template carries `no_penalty` (a guard / siege cannon).
+const NO_PENALTY_NPC: u32 = 201;
 const VILLAGER_KILL_EXP: i32 = 140;
 const DOODAD_TEMPLATE: u32 = 1000;
 /// `CrimeManager` small bloodstain evidence doodad.
@@ -145,8 +147,33 @@ fn game_data() -> GameData {
             .collect(),
     )
     .expect("experience table");
+    // The real 1.2 `item_configs` row (death durability loss ratio 2).
+    gd.items.config.death_durability_loss_ratio = 2;
 
     let s = &mut gd.systems.skills;
+    // The real `resurrection_waiting_times` rows: ten 1-based death steps.
+    for (id, waiting_time, siege_waiting_time) in [
+        (1, 0, 20),
+        (2, 5, 15),
+        (3, 45, 10),
+        (4, 90, 5),
+        (5, 180, 0),
+        (6, 180, 0),
+        (7, 180, 0),
+        (8, 180, 0),
+        (9, 180, 0),
+        (10, 180, 0),
+    ] {
+        s.resurrection_waiting_times.insert(
+            id,
+            crate::systems::skills::data::ResurrectionWaitingTime {
+                id,
+                penalty_duration: 600,
+                waiting_time,
+                siege_waiting_time,
+            },
+        );
+    }
     s.add_effect(
         EffectKind::DamageEffect,
         EffectTemplate::Damage(Box::new(damage_effect(1, 600))),
@@ -252,6 +279,15 @@ fn game_data() -> GameData {
         .push(skill_effect(8_100, EffectKind::BuffEffect, 8_100));
     s.add_skill(net);
 
+    {
+        let d = &mut gd.systems.npcs.npc;
+        let mut no_penalty = d.template(VILLAGER).expect("villager").clone();
+        no_penalty.id = NO_PENALTY_NPC;
+        no_penalty.name = "No-penalty guard".into();
+        no_penalty.no_penalty = true;
+        d.templates.insert(NO_PENALTY_NPC, no_penalty);
+    }
+
     let d = &mut gd.systems.npcs.doodad;
     for id in [DOODAD_TEMPLATE, SMALL_BLOODSTAIN, SMALL_BLOODSTAIN + 1] {
         d.templates.insert(
@@ -355,11 +391,8 @@ fn game_data() -> GameData {
 }
 
 /// A server with every subsystem's hooks installed (what `systems::start_all` installs).
-fn server_with(tag_share: bool) -> Arc<GameServer> {
-    let server = test_server_with(game_data());
-    server
-        .config
-        .update(|c| c.world.tag_share_enabled = tag_share);
+fn install_subsystems(data: GameData) -> Arc<GameServer> {
+    let server = test_server_with(data);
     let server = Arc::new(server);
     server.set_self();
     crate::systems::skills::bind(&server);
@@ -368,6 +401,15 @@ fn server_with(tag_share: bool) -> Arc<GameServer> {
     crate::systems::quests::install_hooks(&server);
     crate::systems::economy::wiring::install(&server);
     crate::systems::economy::bridges::install(&server);
+    server
+}
+
+/// A server with every subsystem's hooks installed (what `systems::start_all` installs).
+fn server_with(tag_share: bool) -> Arc<GameServer> {
+    let server = install_subsystems(game_data());
+    server
+        .config
+        .update(|c| c.world.tag_share_enabled = tag_share);
     server
 }
 
@@ -398,6 +440,22 @@ fn villager(server: &GameServer, obj_id: u32, hp: i32) -> NpcRef {
         n.unit.faction_id = 0;
         n.unit.hp = hp;
         n.unit.max_hp = hp;
+        n.unit.transform.set_xyz(105.0, 100.0, 100.0);
+    }
+    let world = server.world.world(0).expect("world");
+    world.spawn(&npc, &server.view_ctx());
+    npc
+}
+
+/// A guard-like NPC whose `NpcTemplate.no_penalty` is set.
+fn no_penalty_npc(server: &GameServer, obj_id: u32) -> NpcRef {
+    let npc =
+        crate::systems::npcs::npc::manager::create(server, obj_id, NO_PENALTY_NPC).expect("npc");
+    {
+        let mut n = npc.data();
+        n.unit.faction_id = 0;
+        n.unit.hp = 1_000;
+        n.unit.max_hp = 1_000;
         n.unit.transform.set_xyz(105.0, 100.0, 100.0);
     }
     let world = server.world.world(0).expect("world");
@@ -1146,12 +1204,83 @@ async fn character_death_loses_exp_into_recoverable_exp() {
     }
 }
 
+#[tokio::test]
+async fn killed_by_a_no_penalty_npc_skips_the_death_penalty() {
+    use crate::systems::skills::types::KillReason;
+    let server = server_with(false);
+    let mut a = pc(&server, 1, "Victim", 100.0);
+    let guard = no_penalty_npc(&server, 0x201);
+    {
+        let mut c = a.p.data();
+        c.unit.level = 10;
+        c.experience = 95_000; // level 10 + 5 000
+        c.recoverable_exp = 0;
+    }
+    a.client.drain();
+
+    crate::systems::skills::combat::do_die(
+        &server,
+        &WorldObject::from(&a.p),
+        Some(&WorldObject::from(&guard)),
+        KillReason::Damage,
+    );
+
+    // `no_penalty` = no exp loss, no recoverable exp and no death durability loss.
+    {
+        let c = a.p.data();
+        assert_eq!(c.experience, 95_000);
+        assert_eq!(c.recoverable_exp, 0);
+        // The respawn timer still runs (this is not "no death").
+        assert!(c.dead_time > 0);
+    }
+    let ops = a.client.drain_ops();
+    assert!(ops.contains(&sc::SCUnitDeathPacket), "{ops:x?}");
+    assert!(!ops.contains(&sc::SCRecoverableExpPacket), "{ops:x?}");
+    assert!(!ops.contains(&sc::SCExpChangedPacket), "{ops:x?}");
+}
+
+#[tokio::test]
+async fn killed_by_a_normal_npc_still_loses_exp() {
+    use crate::systems::skills::types::KillReason;
+    let server = server_with(false);
+    let mut a = pc(&server, 1, "Victim", 100.0);
+    let mob = villager(&server, 0x202, 1_000);
+    {
+        let mut c = a.p.data();
+        c.unit.level = 10;
+        c.experience = 95_000; // level 10 + 5 000
+        c.recoverable_exp = 0;
+    }
+    a.client.drain();
+
+    crate::systems::skills::combat::do_die(
+        &server,
+        &WorldObject::from(&a.p),
+        Some(&WorldObject::from(&mob)),
+        KillReason::Damage,
+    );
+
+    // GetExpLoss(10, 0.05) = 500, 80 % recoverable; the death durability loss is 2.
+    assert_eq!(a.p.data().experience, 94_500);
+    assert_eq!(a.p.data().recoverable_exp, 400);
+    let ops = a.client.drain_ops();
+    for op in [
+        sc::SCRecoverableExpPacket,
+        sc::SCExpChangedPacket,
+        sc::SCUnitDeathPacket,
+    ] {
+        assert!(ops.contains(&op), "missing {op:#x} in {ops:x?}");
+    }
+}
+
 // ------------------------------------------------------------------------------------------
 // PvP deaths, resurrection, sticky parents, underwater (CharacterCombat / CSResurrectCharacter
 // / CSHang / CSUnhang / Character.SetPosition)
 // ------------------------------------------------------------------------------------------
 
 const CONFLICT_GROUP: u16 = 14;
+/// Zone group of the active-siege respawn-wait test.
+const SIEGE_GROUP: u32 = 21;
 
 /// `server_with(false)` whose test zone belongs to a conflict zone group in `state`.
 fn conflict_server(state: u8, num_kills: [i32; 5]) -> Arc<GameServer> {
@@ -1180,15 +1309,7 @@ fn conflict_server(state: u8, num_kills: [i32; 5]) -> Arc<GameServer> {
             ..Default::default()
         });
     }
-    let server = test_server_with(gd);
-    let server = Arc::new(server);
-    server.set_self();
-    crate::systems::skills::bind(&server);
-    crate::systems::npcs::install_hooks(&server);
-    crate::systems::social::install_hooks(&server);
-    crate::systems::quests::install_hooks(&server);
-    crate::systems::economy::wiring::install(&server);
-    crate::systems::economy::bridges::install(&server);
+    let server = install_subsystems(gd);
     server.systems.social.conflicts.init(
         &[crate::data::world_data::ZoneConflict {
             zone_group_id: CONFLICT_GROUP,
@@ -1241,8 +1362,8 @@ async fn solo_pvp_kill_in_a_conflict_zone_awards_honor() {
         assert!(v.died_in_pvp);
         assert!(!v.died_in_pvp_war_zone);
         assert!(v.skill_char.pvp_damage_history.is_empty());
-        // ComputeDeathWaitTime: the first death waits 15 s.
-        assert_eq!(v.rez_wait_duration, 15_000);
+        // ComputeDeathWaitTime: the first `resurrection_waiting_times` step waits 0 s.
+        assert_eq!(v.rez_wait_duration, 0);
     }
     let ops = killer.client.drain_ops();
     assert_eq!(
@@ -1398,18 +1519,81 @@ async fn death_wait_time_escalates_and_resets() {
     let t0 = 1_000_000_000_000;
     let waits: Vec<i32> = (0..11)
         .map(|i| {
-            crate::systems::skills::combat::compute_death_wait_time(&p, t0 + i * 1000);
+            crate::systems::skills::combat::compute_death_wait_time(&server, &p, t0 + i * 1000);
             p.data().rez_wait_duration
         })
         .collect();
+    // `resurrection_waiting_times` `waiting_time` by 1-based death step: 0, 5, 45, 90, 180 s.
     assert_eq!(
         waits,
-        [15, 30, 60, 90, 120, 150, 180, 210, 240, 240, 240].map(|s| s * 1000)
+        [0, 5, 45, 90, 180, 180, 180, 180, 180, 180, 180].map(|s| s * 1000)
     );
     assert_eq!(p.data().dead_time, (t0 + 10_000) / 1000);
-    // 5 minutes without dying reset the counter.
-    crate::systems::skills::combat::compute_death_wait_time(&p, t0 + 10_000 + 300_000);
+    // 5 minutes without dying is still inside the row's 600 s `penalty_duration`.
+    crate::systems::skills::combat::compute_death_wait_time(&server, &p, t0 + 10_000 + 300_000);
+    assert_eq!(p.data().rez_wait_duration, 180_000);
+    // 10 minutes after that death the step resets to the first row.
+    crate::systems::skills::combat::compute_death_wait_time(&server, &p, t0 + 310_000 + 600_000);
+    assert_eq!(p.data().rez_wait_duration, 0);
+}
+
+#[tokio::test]
+async fn death_wait_time_uses_siege_waiting_time_in_an_active_siege() {
+    use crate::models::character::DEFAULT_INSTANCE_ID;
+    use crate::systems::housing::dominion::state::TowerIdentity;
+    let mut gd = game_data();
+    gd.zones.zones.insert(
+        crate::test_support::TEST_ZONE,
+        crate::data::world_data::Zone {
+            id: 1,
+            name: "siege".into(),
+            zone_key: crate::test_support::TEST_ZONE,
+            group_id: SIEGE_GROUP,
+            ..Default::default()
+        },
+    );
+    let server = install_subsystems(gd);
+    let now = chrono::Utc::now().timestamp();
+    server
+        .systems
+        .housing
+        .dominions
+        .declare_unowned_with(
+            SIEGE_GROUP,
+            TowerIdentity {
+                house_id: 1,
+                instance_id: DEFAULT_INSTANCE_ID,
+                guard_tower_setting_id: 1,
+            },
+            10,
+            now,
+            || true,
+        )
+        .expect("dominion");
+    server
+        .systems
+        .housing
+        .dominions
+        .schedule_siege(SIEGE_GROUP, 20, now, now + 600, now)
+        .expect("siege");
+    let client = TestClient::new(&server, 1, 1001);
+    let p = spawn_player(
+        &server,
+        &client,
+        test_character(1, "A", 100.0, 100.0),
+        0x101,
+    );
+    let t0 = now * 1000;
+    // The first step waits 20 s in a siege and 0 s outside one.
+    crate::systems::skills::combat::compute_death_wait_time(&server, &p, t0);
+    assert_eq!(p.data().rez_wait_duration, 20_000);
+    // The second step: 15 s in the siege, 5 s outside.
+    crate::systems::skills::combat::compute_death_wait_time(&server, &p, t0 + 1_000);
     assert_eq!(p.data().rez_wait_duration, 15_000);
+    // A zone without a dominion state uses `waiting_time`.
+    p.data().unit.transform.zone_id = crate::test_support::TEST_ZONE + 1;
+    crate::systems::skills::combat::compute_death_wait_time(&server, &p, t0 + 2_000);
+    assert_eq!(p.data().rez_wait_duration, 45_000);
 }
 
 fn buff_ids(p: &PlayerRef) -> Vec<u32> {

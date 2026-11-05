@@ -578,6 +578,8 @@ pub struct GameState {
     pub units: HashMap<u32, UnitInfo>,
     /// Doodads announced by `SCDoodad(s)CreatedPacket` and not removed since.
     pub doodads: HashMap<u32, DoodadInfo>,
+    /// `SCDoodadCompleteQuestPacket` (`0x14d`) in arrival order: `(doodad object id, quest id)`.
+    pub doodad_complete_quests: Vec<(u32, u32)>,
     /// First item of the bag (`SCCharacterInvenContentsPacket`, slot type 2): `(item id, slot)`.
     pub bag_items: Vec<(u64, u8, u32)>,
     pub bag_slots: u8,
@@ -585,6 +587,12 @@ pub struct GameState {
     pub unit_points: HashMap<u32, (i32, i32)>,
     /// Units announced dead by `SCUnitDeathPacket` (and not removed since).
     pub dead_units: HashSet<u32>,
+    /// Last `SCUnitDeathPacket` for our own unit: (kill reason, resurrect wait ms, lost exp,
+    /// durability loss rate); `self_death_seq` counts them.
+    pub self_death: Option<(u8, i32, i32, u8)>,
+    pub self_death_seq: u64,
+    /// Buff indices per `(owner obj id, buff template id)` from `SCBuffCreated` / `SCBuffRemoved`.
+    pub buffs: HashMap<(u32, u32), HashSet<u32>>,
     /// Last `SCMateSpawnedPacket`.
     pub mate_spawned: Option<MateSpawn>,
     /// Number of `SCMateSpawnedPacket`s seen so far.
@@ -650,6 +658,24 @@ impl GameState {
             let id = s.read_u32()?;
             let name = s.read_string()?;
             st.characters.push(CharInfo { id, name });
+        } else if p.is_sc(sc::SCBuffCreatedPacket) {
+            use aaemu_game::systems::skills::types::SkillCaster;
+            let kind = s.read_u8()?;
+            SkillCaster::read(kind, &mut s)?;
+            s.read_u32()?; // caster id
+            let owner = s.read_bc()?;
+            let index = s.read_u32()?;
+            let buff = s.read_u32()?;
+            st.buffs.entry((owner, buff)).or_default().insert(index);
+        } else if p.is_sc(sc::SCBuffRemovedPacket) {
+            let owner = s.read_bc()?;
+            let index = s.read_u32()?;
+            st.buffs.retain(|(o, _), indices| {
+                if *o == owner {
+                    indices.remove(&index);
+                }
+                !indices.is_empty()
+            });
         } else if p.is_sc(sc::SCUnitStatePacket) {
             let obj_id = s.read_bc()?;
             let name = s.read_string()?;
@@ -754,6 +780,10 @@ impl GameState {
             if let Some(d) = st.doodads.get_mut(&id) {
                 d.func_group_id = group;
             }
+        } else if p.is_sc(sc::SCDoodadCompleteQuestPacket) {
+            let doodad_obj_id = s.read_bc()?;
+            let quest_id = s.read_u32()?;
+            st.doodad_complete_quests.push((doodad_obj_id, quest_id));
         } else if p.is_sc(sc::SCUnitsRemovedPacket) {
             let n = s.read_u16()?;
             for _ in 0..n {
@@ -768,7 +798,16 @@ impl GameState {
             let mp = s.read_i32()? / 100;
             st.unit_points.insert(obj_id, (hp, mp));
         } else if p.is_sc(sc::SCUnitDeathPacket) {
-            st.dead_units.insert(s.read_bc()?);
+            let obj = s.read_bc()?;
+            let reason = s.read_u8()?;
+            let wait_ms = s.read_i32()?;
+            let lost_exp = s.read_i32()?;
+            let durability = s.read_u8()?;
+            if obj == st.self_obj {
+                st.self_death = Some((reason, wait_ms, lost_exp, durability));
+                st.self_death_seq += 1;
+            }
+            st.dead_units.insert(obj);
         } else if p.is_sc(sc::SCErrorMsgPacket) {
             st.events.push(GameEvent::ErrorMsg(s.read_i16()?));
         } else if p.is_sc(sc::SCItemTaskSuccessPacket) {
@@ -1650,6 +1689,32 @@ mod observed_position_tests {
         assert_eq!(state.observed_self_pos, Some((10.0, 20.0, 29.9995)));
         assert_eq!(state.self_pos, (900.0, 900.0, 900.0));
         assert_eq!(state.observation_seq, 1);
+    }
+}
+
+#[cfg(test)]
+mod doodad_complete_quest_tests {
+    use super::*;
+    use aaemu_commons::Marshal;
+    use aaemu_game::systems::quests::packets::SCDoodadCompleteQuestPacket;
+
+    #[test]
+    fn observe_records_the_doodad_object_id_and_quest_id() {
+        let mut state = GameState::default();
+        let mut body = PacketStream::new();
+        SCDoodadCompleteQuestPacket {
+            doodad_obj_id: 0x300,
+            quest_id: 2563,
+        }
+        .write(&mut body);
+        state
+            .observe(&Packet {
+                level: LEVEL_GAME,
+                opcode: sc::SCDoodadCompleteQuestPacket,
+                body: body.into_bytes(),
+            })
+            .unwrap();
+        assert_eq!(state.doodad_complete_quests, vec![(0x300, 2563)]);
     }
 }
 

@@ -1041,6 +1041,8 @@ const FRAGILE_BUFF: u32 = 50_003;
 
 fn rules_data() -> GameData {
     let mut data = data();
+    // The real 1.2 `item_configs` row.
+    data.items.config.death_durability_loss_ratio = 2;
     let s = &mut data.systems.skills;
     let mut cd = skill_template(COOLDOWN_SKILL);
     cd.cooldown_time = 5000;
@@ -1410,5 +1412,20 @@ async fn pvp_kill_advances_a_conflict_zone_that_returned_to_tension() {
     assert_eq!(killer.data().honor_gained_in_combat, 0);
 }
 
+/// A `no_penalty` killer (a guard / siege cannon) suppresses both the exp loss and the death
+/// durability loss; an ordinary killer still applies both.
+#[tokio::test]
+async fn no_penalty_kills_return_no_experience_or_durability_loss() {
+    let f = rules_fixture();
+    f.player.data().unit.level = 55;
+    let (lost, durability) = super::combat::character_death_losses(&f.server, &f.player, true);
+    assert_eq!((lost, durability), (0, 2));
+    let (lost, durability) = super::combat::character_death_losses(&f.server, &f.player, false);
+    assert_eq!((lost, durability), (0, 0));
+}
+
 #[path = "music_started_tests.rs"]
 mod music_started_tests;
+
+#[path = "stealth_tests.rs"]
+mod stealth_tests;

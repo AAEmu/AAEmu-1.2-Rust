@@ -770,6 +770,9 @@ pub struct UnitBase {
     // ---- phase 3 / npcs: add this subsystem's per-unit fields below ----
 
     // ---- phase 3 / economy: add this subsystem's per-unit fields below ----
+    /// The item procs of the unit's equipped items (`UnitProcs`, rebuilt by the gear-bonus
+    /// pass). The cooldowns survive re-equipping a proc in the session (not persisted).
+    pub item_procs: crate::systems::economy::procs::UnitProcs,
 
     // ---- phase 3 / social: add this subsystem's per-unit fields below ----
     /// The current faction is temporary (duel Red / Blue team or a battlefield corps): it is
@@ -835,7 +838,7 @@ impl Default for UnitBase {
             // ---- phase 3 / npcs ----
 
             // ---- phase 3 / economy ----
-
+            item_procs: Default::default(),
             // ---- phase 3 / social ----
             faction_temporary: false,
             // ---- phase 3 / quests ----

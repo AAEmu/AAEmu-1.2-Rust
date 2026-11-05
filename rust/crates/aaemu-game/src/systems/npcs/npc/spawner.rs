@@ -1360,7 +1360,15 @@ impl NpcSpawner {
     ) -> usize {
         match spawn_member(server, nsn, self, 0) {
             Ok(Some(spawned)) if !spawned.is_empty() => {
-                let keep = spawned.len().min(*remaining as usize);
+                // An `NpcGroup` is one authored encounter: every member spawns even when fewer
+                // population slots remain (the C# pass spawned every member of the list too).
+                // The batch consumes at most the remaining slots, so a group at a `max_population`
+                // of 1 still spawns whole; an ordinary `Npc` batch keeps the hard per-unit cap.
+                let keep = if nsn.member_type == "NpcGroup" {
+                    spawned.len()
+                } else {
+                    spawned.len().min(*remaining as usize)
+                };
                 for npc in spawned.iter().take(keep) {
                     let key = self
                         .npc_spawner(server, npc)
@@ -1377,7 +1385,7 @@ impl NpcSpawner {
                     server.ids.object.release_id(npc.obj_id);
                     spawn_manager::forget_object(server, npc.obj_id);
                 }
-                *remaining -= keep as i64;
+                *remaining = (*remaining - keep as i64).max(0);
                 keep
             }
             Ok(_) => {
@@ -1566,7 +1574,21 @@ impl NpcSpawner {
             );
             return None;
         };
-        if backend::npc_create(server, 0, nsn.member_id).is_none() {
+        // `NpcManager.Create` existence check (and its leaked probe NPC). A group row has no
+        // NPC template of its own, so probe its member list instead; creating `MemberId` (the
+        // group id) would make the wrong NPC whenever the ids collide.
+        let exists = if nsn.member_type == "NpcGroup" {
+            !server
+                .game_data
+                .systems
+                .npcs
+                .npc_groups
+                .members(nsn.member_id)
+                .is_empty()
+        } else {
+            backend::npc_create(server, 0, nsn.member_id).is_some()
+        };
+        if !exists {
             tracing::warn!(
                 "Failed to create NPC from template {}:{}",
                 nsn.npc_spawner_template_id,
@@ -1596,10 +1618,12 @@ impl NpcSpawner {
         let npc = spawned[0].clone();
         {
             let _lock = server.systems.npcs.spawns.spawn_lock();
-            let key = self
-                .npc_spawner(server, &npc)
-                .map_or(self.spawner_id, |s| s.spawner_id);
-            self.add_npc_to_spawned(key, npc.clone());
+            for spawned_npc in &spawned {
+                let key = self
+                    .npc_spawner(server, spawned_npc)
+                    .map_or(self.spawner_id, |s| s.spawner_id);
+                self.add_npc_to_spawned(key, spawned_npc.clone());
+            }
         }
         if let Some(world) = self.parent_world().and_then(|id| server.world.world(id)) {
             spawn_into_world(server, &world, &npc);
@@ -1930,13 +1954,80 @@ pub fn spawn_member(
     owner_id: u32,
 ) -> Result<Option<Vec<NpcRef>>, String> {
     match nsn.member_type.as_str() {
-        // SpawnNpcGroup is SpawnNpc.
-        "Npc" | "NpcGroup" => spawn_npc(server, nsn, spawner, owner_id),
+        "Npc" => spawn_npc(server, nsn, spawner, owner_id),
+        // The C# `SpawnNpcGroup` called `SpawnNpc` with `MemberId`, which for these rows is an
+        // `npc_groups.id`, not an NPC template id (see `spawn_npc_group`).
+        "NpcGroup" => spawn_npc_group(server, nsn, spawner, owner_id),
         _ => Err(format!(
             "Tried spawning an unsupported line from NpcSpawnerNpc - Id: {}",
             nsn.id
         )),
     }
+}
+
+/// `NpcSpawnerNpc.SpawnNpcGroup` (implemented here even though the C# body was `SpawnNpc`):
+/// spawns every NPC template of `nsn.member_id`'s `npc_groups` row at the spawner position plus
+/// the member's `formation_offset`.
+///
+/// The offsets are applied as authored (world axes). No 1.2 capture or client data shows that
+/// they are rotated by the spawner yaw (the client strings only expose runtime AI formations),
+/// so rotating them is capture-pending (see `PORTING.md`).
+fn spawn_npc_group(
+    server: &GameServer,
+    nsn: &NpcSpawnerNpc,
+    spawner: &Arc<NpcSpawner>,
+    owner_id: u32,
+) -> Result<Option<Vec<NpcRef>>, String> {
+    let groups = &server.game_data.systems.npcs.npc_groups;
+    let Some(group) = groups.group(nsn.member_id) else {
+        tracing::warn!(
+            "NpcGroup {}, from spawner Id {} not exist at db. Spawner Position: {:?}",
+            nsn.member_id,
+            spawner.id,
+            spawner.position()
+        );
+        return Ok(None);
+    };
+    let members = groups.members(group.id);
+    if members.is_empty() {
+        tracing::warn!(
+            "NpcGroup {} ({}) from spawner Id {} has no members. Spawner Position: {:?}",
+            group.id,
+            group.name,
+            spawner.id,
+            spawner.position()
+        );
+        return Ok(None);
+    }
+    if spawner
+        .parent_world()
+        .and_then(|id| server.world.world(id))
+        .is_none()
+    {
+        // Fail before creating anything: a partial group must not be spawned unregistered.
+        return Err(format!("spawner {} has no parent world", spawner.id));
+    }
+    let mut npcs = Vec::with_capacity(members.len());
+    for member in members {
+        let offset = (
+            member.formation_offset_x,
+            member.formation_offset_y,
+            member.formation_offset_z,
+        );
+        match spawn_npc_template(server, member.npc_id, spawner, owner_id, Some(offset))? {
+            Some(npc) => npcs.push(npc),
+            // A missing member template is skipped like a missing ordinary member; the rest of
+            // the group still spawns.
+            None => tracing::warn!(
+                "NpcGroup {} ({}) member npc {} from spawner Id {} does not exist at db",
+                group.id,
+                group.name,
+                member.npc_id,
+                spawner.id
+            ),
+        }
+    }
+    Ok((!npcs.is_empty()).then_some(npcs))
 }
 
 /// How far above a collision floor a spawn is still snapped onto it (m). The C# snapped only
@@ -2018,10 +2109,22 @@ fn spawn_npc(
     spawner: &Arc<NpcSpawner>,
     owner_id: u32,
 ) -> Result<Option<Vec<NpcRef>>, String> {
-    let Some(npc) = backend::npc_create(server, 0, nsn.member_id) else {
+    Ok(spawn_npc_template(server, nsn.member_id, spawner, owner_id, None)?.map(|npc| vec![npc]))
+}
+
+/// `NpcSpawnerNpc.SpawnNpc` for one concrete NPC template, at the spawner position plus
+/// `offset` (an `npc_group_members.formation_offset_*`, or `None` for an ordinary member).
+fn spawn_npc_template(
+    server: &GameServer,
+    template_id: u32,
+    spawner: &Arc<NpcSpawner>,
+    owner_id: u32,
+    offset: Option<(f32, f32, f32)>,
+) -> Result<Option<NpcRef>, String> {
+    let Some(npc) = backend::npc_create(server, 0, template_id) else {
         tracing::warn!(
             "Npc {}, from spawner Id {} not exist at db. Spawner Position: {:?}",
-            nsn.member_id,
+            template_id,
             spawner.id,
             spawner.position()
         );
@@ -2045,14 +2148,24 @@ fn spawn_npc(
         .ai
         .actor_model(model_id)
         .is_some_and(|m| m.underwater_creature);
+    let mut pos = spawner.position();
+    if let Some((dx, dy, dz)) = offset {
+        // Formation offsets are authored in the spawner's local frame; applied as world-axis
+        // deltas because yaw rotation is capture-pending (see `spawn_npc_group`).
+        pos.x += dx;
+        pos.y += dy;
+        pos.z += dz;
+    }
     if !can_fly && !underwater {
-        let mut p = spawner.position();
-        if let Some(z) = spawn_ground_z(server, &world, p.x, p.y, p.z) {
-            p.z = z;
-            spawner.set_position(p);
+        if let Some(z) = spawn_ground_z(server, &world, pos.x, pos.y, pos.z) {
+            pos.z = z;
+            // An ordinary member keeps the C# behaviour of snapping the shared spawner
+            // position; a group member must not move the whole group onto its own floor.
+            if offset.is_none() {
+                spawner.set_position(pos);
+            }
         }
     }
-    let pos = spawner.position();
     {
         let mut d = npc.data();
         d.unit.owner_id = owner_id;
@@ -2066,9 +2179,9 @@ fn spawn_npc(
     }
     tracing::trace!(
         "Spawn npc templateId {} objId {} from spawnerId {} at Position: {:?}",
-        nsn.member_id,
+        template_id,
         npc.obj_id,
-        nsn.npc_spawner_template_id,
+        spawner.spawner_id,
         pos
     );
     server
@@ -2091,7 +2204,7 @@ fn spawn_npc(
     if let Some(ai) = server.systems.hooks.ai.get() {
         ai.npc_spawned(server, &npc, &spawner.follow_path);
     }
-    Ok(Some(vec![npc]))
+    Ok(Some(npc))
 }
 
 #[cfg(test)]
@@ -2141,3 +2254,7 @@ mod spawner_population_tests;
 #[cfg(test)]
 #[path = "spawner_schedule_tests.rs"]
 mod spawner_schedule_tests;
+
+#[cfg(test)]
+#[path = "spawner_group_tests.rs"]
+mod spawner_group_tests;

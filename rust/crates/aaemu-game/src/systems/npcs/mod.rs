@@ -57,6 +57,8 @@ pub struct Data {
     pub npc: npc::data::NpcData,
     /// `NpcGameData` (spawner templates and members).
     pub npc_spawners: npc::spawner_data::NpcSpawnerData,
+    /// `NpcGroupGameData` (`npc_groups` / `npc_group_members`).
+    pub npc_groups: npc::group_data::NpcGroupData,
     /// `DoodadManager` templates, func groups, funcs, phase funcs and func templates.
     pub doodad: doodad::data::DoodadData,
     /// `GimmickGameData`.
@@ -84,9 +86,13 @@ pub struct Data {
 impl Data {
     /// Loads this subsystem's tables from `ctx` (a failing loader aborts startup).
     pub fn load(ctx: &DataLoadCtx<'_>) -> Result<Self, crate::data::GameDataError> {
+        let npc = npc::data::NpcData::load(ctx)?;
+        let npc_groups = npc::group_data::NpcGroupData::load(ctx)?;
+        let npc_spawners = npc::spawner_data::NpcSpawnerData::load(ctx)?;
         Ok(Self {
-            npc: npc::data::NpcData::load(ctx)?,
-            npc_spawners: npc::spawner_data::NpcSpawnerData::load(ctx)?,
+            npc,
+            npc_spawners,
+            npc_groups,
             doodad: doodad::data::DoodadData::load(ctx)?,
             gimmick: gimmick::GimmickData::load(ctx)?,
             area_trigger: area_trigger::AreaTriggerData::load(ctx)?,
