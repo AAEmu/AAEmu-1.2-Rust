@@ -533,6 +533,36 @@ Tests: `mate_equipment_riding_pack_allows_head_waist_and_feet`,
 `mate_equipment_unequip_swap_checks_the_bag_item` (both swap directions), the loader's in-memory
 tests and the `AAEMU_COMPACT_DB`-gated `real_compact_db_mate_equipment`.
 
+#### Mate equipment expiry (2026-11-05)
+
+`SCMateEquipmentExpiredPacket` (0x127) is now defined and sent. `ItemManager.UpdateItemTimers` also
+ticks every persistent `EQUIPMENT_MATE` container of an online owner (the C# only ticked equipment,
+bag and warehouse; it had the opcode constant but never sent the packet), and an expired item leaves
+the container through the same `remove_item_task` path as player equipment (release id + the
+container leave event, which updates the mate mirror and broadcasts `SCUnitEquipmentsChanged`) but
+with `ItemTaskType.Invalid`, so no bag / equipment item task is sent. The owner instead gets
+`SCMateEquipmentExpiredPacket(mate_tl, EQUIPMENT_MATE, slot)`, queued before the leave event.
+
+EVIDENCED from the 1.2 client: the reader `FUN_397b5530` (`dll.c:1708939`, vtable
+`PTR_LAB_399b390c`) transfers `u16` (stream slot 0x40), `u8` (0x44) and `u8` (0x44) with no padding
+bytes; `OnMateEquipmentExpired` `FUN_391db280` (`dll.c:368834`) calls `FUN_394e5a90`
+(`dll.c:1022714`), which acts only when the slot-type byte at struct `+1` is 0xFC
+(`slot_type::EQUIPMENT_MATE`), the packet's tl id equals the local player's current pet
+(`FUN_3933f5e0`) and the index at struct `+3` is below 0x1c (28).
+
+A mate that is not spawned still has its container (`MateEquipmentContainer` outlives the spawn,
+`CharacterMates.SpawnMount` only finds-or-creates it), so its gear ticks and expires too; no packet
+is sent in that case because the client has no current pet to apply it to. An offline owner is
+skipped, matching the bag rule. None of the 62 `mate_equip_pack_items` items has an expiry in the
+shipped data, so this only runs for cash / event gear or GM-set lifespans; whether retail also sends
+a lifespan sync for a mate-container item is UNKNOWN (the client path needs only the new packet).
+
+Tests: `mate_equipment_expired_layout` (independent literal bytes), the flow test
+`mate_equipment_expires_and_notifies_the_owner` (past end time removes the item, keeps an unexpired
+one and sends exactly the expired packet plus the leave broadcast),
+`mate_equipment_expiry_skips_the_packet_for_an_unspawned_mate` and
+`mate_equipment_timers_skip_an_offline_owner`.
+
 #### Limited-sale purchase limits (2026-11-03)
 
 `items.limited_sale_count` and `items.one_time_sale` are now read and enforced as per-character

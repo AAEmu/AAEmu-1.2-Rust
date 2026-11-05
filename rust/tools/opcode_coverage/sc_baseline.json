@@ -1,7 +1,7 @@
 {
   "counts": {
     "sc_opcodes": 517,
-    "typeless": 84,
+    "typeless": 83,
     "never_sent": 48
   },
   "typeless": [
@@ -36,7 +36,6 @@
     "SCHSRequestPacket",
     "SCInvitationCanceledPacket",
     "SCIsUnitInFarmPacket",
-    "SCMateEquipmentExpiredPacket",
     "SCMouldAskedPacket",
     "SCMouldListPacket",
     "SCMouldTakenPacket",

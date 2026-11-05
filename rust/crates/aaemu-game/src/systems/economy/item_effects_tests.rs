@@ -27,6 +27,7 @@ use crate::systems::economy::item_effects::*;
 use crate::systems::economy::item_packets::{
     SCItemTaskSuccessPacket, SCUnitEquipmentsChangedPacket,
 };
+use crate::systems::economy::item_timers;
 use crate::systems::economy::items_data::{ItemConversionProduct, ItemConversionReagent};
 use crate::systems::economy::loot::ScriptedRng;
 use crate::systems::economy::mate_equipment::*;
@@ -3435,6 +3436,169 @@ async fn mate_equipment_equip_unequip_and_refusal() {
     let mut body = mate_body(Some(&back), None, 7, equip_slot::CHEST as u8);
     body[4] = 0x99;
     run_mate(&mut w, &body);
+    assert!(w.a.drain().is_empty());
+}
+
+/// The shipped data has no timed mate item, so this gives an equipped one an end time in the
+/// past: `update_item_timers` removes it from the mate container, answers the owner with
+/// `SCMateEquipmentExpired` and keeps an unexpired item in the same container.
+#[tokio::test]
+async fn mate_equipment_expires_and_notifies_the_owner() {
+    let mut w = world_with_data(mate_pack_data());
+    let mate = spawn_mate(&mut w);
+    let id = give(&w, &w.pa.clone(), slot_type::INVENTORY, ARMOR, 1, 3);
+    let wire = item(&w, id).unwrap();
+    run_mate(
+        &mut w,
+        &mate_body(Some(&wire), None, 3, equip_slot::CHEST as u8),
+    );
+    w.a.drain();
+    w.b.drain();
+    let container = w
+        .server
+        .items
+        .find_container_for_character(w.pa.character_id, slot_type::EQUIPMENT_MATE, 77)
+        .expect("mate equipment container");
+    let kept = w
+        .server
+        .items
+        .create(
+            WAIST_ARMOR,
+            1,
+            0,
+            1,
+            &w.server.game_data.items,
+            &w.server.ids.item,
+            0,
+        )
+        .expect("item");
+    let kept_id = kept.id;
+    {
+        let mut c = container.lock().unwrap();
+        c.get_item_by_id_mut(id).unwrap().expiration_time = 1000;
+        assert!(c
+            .add_new_item(kept, equip_slot::WAIST, &w.server.game_data.items)
+            .is_ok());
+        c.get_item_by_id_mut(kept_id).unwrap().expiration_time = 3_000_000;
+    }
+
+    w.server.systems.economy.item_timers.reset(1_000_000);
+    assert_eq!(item_timers::update_item_timers(&w.server, 2_000_000), 1);
+
+    {
+        let c = container.lock().unwrap();
+        assert!(c.get_item_by_id(id).is_none());
+        assert_eq!(c.get_item_by_id(kept_id).map(|i| i.id), Some(kept_id));
+    }
+    assert!(w.server.items.item_by_id(id).is_none());
+    assert!(mate.data().equipment[equip_slot::CHEST as usize].is_none());
+    assert_eq!(
+        w.a.drain(),
+        vec![
+            (
+                sc::SCMateEquipmentExpiredPacket,
+                body(&SCMateEquipmentExpiredPacket {
+                    mate_tl_id: TL,
+                    slot_type: slot_type::EQUIPMENT_MATE,
+                    slot_index: equip_slot::CHEST as u8,
+                })
+            ),
+            (
+                sc::SCUnitEquipmentsChangedPacket,
+                body(&SCUnitEquipmentsChangedPacket {
+                    obj_id: mate.obj_id,
+                    items: vec![(equip_slot::CHEST as u8, None)],
+                })
+            ),
+        ]
+    );
+    assert_eq!(
+        w.b.drain(),
+        vec![(
+            sc::SCUnitEquipmentsChangedPacket,
+            body(&SCUnitEquipmentsChangedPacket {
+                obj_id: mate.obj_id,
+                items: vec![(equip_slot::CHEST as u8, None)],
+            })
+        )]
+    );
+}
+
+/// A mate that is not spawned keeps its persistent container, so its timed gear still expires;
+/// the packet is skipped because the client only acts on its current pet.
+#[tokio::test]
+async fn mate_equipment_expiry_skips_the_packet_for_an_unspawned_mate() {
+    let mut w = world();
+    let container = w.server.items.container_for_character(
+        w.pa.character_id,
+        slot_type::EQUIPMENT_MATE,
+        999,
+        &w.server.ids.container,
+    );
+    let item = w
+        .server
+        .items
+        .create(
+            ARMOR,
+            1,
+            0,
+            1,
+            &w.server.game_data.items,
+            &w.server.ids.item,
+            0,
+        )
+        .expect("item");
+    let id = item.id;
+    {
+        let mut c = container.lock().unwrap();
+        assert!(c
+            .add_new_item(item, equip_slot::CHEST, &w.server.game_data.items)
+            .is_ok());
+        c.get_item_by_id_mut(id).unwrap().expiration_time = 1000;
+    }
+    w.server.systems.economy.item_timers.reset(1_000_000);
+    assert_eq!(item_timers::update_item_timers(&w.server, 2_000_000), 1);
+    assert!(container.lock().unwrap().items.is_empty());
+    assert!(w.server.items.item_by_id(id).is_none());
+    assert!(w.a.drain().is_empty());
+    assert!(w.b.drain().is_empty());
+}
+
+/// The bag rule for offline owners applies to mate gear too.
+#[tokio::test]
+async fn mate_equipment_timers_skip_an_offline_owner() {
+    let mut w = world();
+    let container = w.server.items.container_for_character(
+        w.pa.character_id,
+        slot_type::EQUIPMENT_MATE,
+        999,
+        &w.server.ids.container,
+    );
+    let item = w
+        .server
+        .items
+        .create(
+            ARMOR,
+            1,
+            0,
+            1,
+            &w.server.game_data.items,
+            &w.server.ids.item,
+            0,
+        )
+        .expect("item");
+    let id = item.id;
+    {
+        let mut c = container.lock().unwrap();
+        assert!(c
+            .add_new_item(item, equip_slot::CHEST, &w.server.game_data.items)
+            .is_ok());
+        c.get_item_by_id_mut(id).unwrap().expiration_time = 1000;
+    }
+    assert!(w.server.world.try_remove_character(w.pa.obj_id));
+    w.server.systems.economy.item_timers.reset(1_000_000);
+    assert_eq!(item_timers::update_item_timers(&w.server, 2_000_000), 0);
+    assert_eq!(container.lock().unwrap().items.len(), 1);
     assert!(w.a.drain().is_empty());
 }
 
